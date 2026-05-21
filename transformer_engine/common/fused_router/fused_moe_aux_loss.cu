@@ -89,6 +89,7 @@ void fused_moe_aux_loss_forward_kernel_launcher(const DataType* probs,
                                                 cudaStream_t stream) {
   NVTE_CHECK(num_cols > 0, "num_cols must be positive, got ", num_cols);
   NVTE_CHECK(num_experts > 0, "num_experts must be positive, got ", num_experts);
+  // Sequence aux loss batches independent sequences along the expert dimension.
   NVTE_CHECK(num_cols % num_experts == 0, "Number of input columns (", num_cols,
              ") must be a multiple of number of experts (", num_experts, ").");
 
