@@ -135,16 +135,63 @@ def _inject_moe(request):
     if not request.node.get_closest_marker("triton"):
         yield
         return
+    import transformer_engine.jax as te
+    from transformer_engine.common import recipe as te_recipe
     from transformer_engine.jax.flax import _MoEBlock as MoEBlock
     from transformer_engine.jax.moe import PermutationBackend
     from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 
     mod = sys.modules[__name__]
+    mod.te = te
+    mod.te_recipe = te_recipe
     mod.MoEBlock = MoEBlock
     mod.PermutationBackend = PermutationBackend
     mod.MeshResource = MeshResource
     mod.global_shard_guard = global_shard_guard
     yield
+
+
+# ``recipe`` parametrize values used across all tests below. ``None``
+# = plain bf16; the named recipes route through TE's autocast and
+# exercise the FP8/MXFP8 quantization paths in _body_fwd/_body_bwd.
+# Only recipes that work on TE Blackwell are included; older GPUs
+# skip via the ``hardware_supports`` guard below.
+RECIPE_NAMES = ("bf16", "MXFP8BlockScaling")
+
+
+def _resolve_recipe(name):
+    """Return ``(use_fp8, recipe_instance)`` for the parametrize id."""
+    if name == "bf16":
+        return False, None
+    if name == "MXFP8BlockScaling":
+        return True, te_recipe.MXFP8BlockScaling()  # noqa: F821
+    raise ValueError(f"unknown recipe name: {name!r}")
+
+
+def _hardware_supports(recipe_name):
+    """Skip an FP8 recipe on GPUs that don't have the hw for it."""
+    if recipe_name == "bf16":
+        return True
+    from transformer_engine_jax import get_device_compute_capability
+
+    arch = get_device_compute_capability(0)
+    if recipe_name == "MXFP8BlockScaling":
+        return arch >= 100
+    return False
+
+
+def _autocast_ctx(recipe_name):
+    """Context manager that turns FP8 on for non-bf16 recipes."""
+    use_fp8, recipe_inst = _resolve_recipe(recipe_name)
+    return te.autocast(enabled=use_fp8, recipe=recipe_inst)  # noqa: F821
+
+
+def _tol_finite_grad(recipe_name):
+    """Per-recipe absolute tolerance for parity grad comparison."""
+    if recipe_name == "bf16":
+        return 5e-2
+    # MXFP8 grads carry block-scale quantization noise; loosen accordingly.
+    return 3e-1
 
 
 # -----------------------------------------------------------------------------
@@ -245,7 +292,10 @@ class TestMoeVjpMultiprocess:
     """
 
     @pytest.mark.parametrize("backend_name", ["pure_jax", "triton"])
-    def test_fwd_and_bwd(self, mesh, backend_name):
+    @pytest.mark.parametrize("recipe_name", RECIPE_NAMES)
+    def test_fwd_and_bwd(self, mesh, backend_name, recipe_name):
+        if not _hardware_supports(recipe_name):
+            pytest.skip(f"recipe {recipe_name} not supported on this GPU")
         backend = PermutationBackend(backend_name)  # noqa: F821
         block = _make_block(
             num_experts=NUM_EXPERTS,
@@ -258,20 +308,25 @@ class TestMoeVjpMultiprocess:
             (BATCH, SEQ, HIDDEN),
             dtype=jnp.bfloat16,
         )
-        variables, output, aux = _init_apply(block, mesh, x, jax.random.PRNGKey(1))
+        with _autocast_ctx(recipe_name):
+            variables, output, aux = _init_apply(block, mesh, x, jax.random.PRNGKey(1))
         # Local-shard checks (see _local_shard docstring for why).
         out_local = _local_shard(output)
         assert output.dtype == x.dtype
         assert np.all(np.isfinite(out_local)), "output has NaN/Inf"
         assert aux is None
-        grads = _grad_step(block, variables, mesh, x)
+        with _autocast_ctx(recipe_name):
+            grads = _grad_step(block, variables, mesh, x)
         for name in ("gate_kernel", "wi_0", "wi_1", "wo"):
             g_local = _local_shard(_unwrap(grads["params"][name]))
             assert np.all(np.isfinite(g_local)), f"{name} grad has NaN/Inf"
             assert np.any(g_local != 0.0), f"{name} grad is identically zero"
 
     @pytest.mark.parametrize("backend_name", ["pure_jax", "triton"])
-    def test_aux_loss(self, mesh, backend_name):
+    @pytest.mark.parametrize("recipe_name", RECIPE_NAMES)
+    def test_aux_loss(self, mesh, backend_name, recipe_name):
+        if not _hardware_supports(recipe_name):
+            pytest.skip(f"recipe {recipe_name} not supported on this GPU")
         backend = PermutationBackend(backend_name)  # noqa: F821
         block = _make_block(
             num_experts=NUM_EXPERTS,
@@ -285,18 +340,23 @@ class TestMoeVjpMultiprocess:
             (BATCH, SEQ, HIDDEN),
             dtype=jnp.bfloat16,
         )
-        variables, output, aux = _init_apply(block, mesh, x, jax.random.PRNGKey(5))
+        with _autocast_ctx(recipe_name):
+            variables, output, aux = _init_apply(block, mesh, x, jax.random.PRNGKey(5))
         out_local = _local_shard(output)
         assert np.all(np.isfinite(out_local)), "output has NaN/Inf under aux"
         assert aux is not None
         assert aux.shape == ()
         aux_local = _local_shard(aux)
         assert np.isfinite(aux_local), "aux is NaN/Inf"
-        grads = _grad_step(block, variables, mesh, x)
+        with _autocast_ctx(recipe_name):
+            grads = _grad_step(block, variables, mesh, x)
         g_gate_local = _local_shard(_unwrap(grads["params"]["gate_kernel"]))
         assert np.all(np.isfinite(g_gate_local)), "gate grad NaN/Inf under aux"
 
-    def test_pure_jax_triton_parity(self, mesh):
+    @pytest.mark.parametrize("recipe_name", RECIPE_NAMES)
+    def test_pure_jax_triton_parity(self, mesh, recipe_name):
+        if not _hardware_supports(recipe_name):
+            pytest.skip(f"recipe {recipe_name} not supported on this GPU")
         block_pj = _make_block(
             num_experts=NUM_EXPERTS,
             num_experts_per_tok=TOPK,
@@ -314,22 +374,25 @@ class TestMoeVjpMultiprocess:
             (BATCH, SEQ, HIDDEN),
             dtype=jnp.bfloat16,
         )
-        variables, out_pj, _ = _init_apply(block_pj, mesh, x, jax.random.PRNGKey(7))
-        with mesh, global_shard_guard(  # noqa: F821
-            MeshResource(ep_resource=EP_AXIS, fsdp_resource=FSDP_AXIS)  # noqa: F821
-        ), nn_partitioning.axis_rules(LOGICAL_AXIS_RULES):
-            x_sh = _shard_inputs(x, mesh)
-            out_tr, _ = jax.jit(block_tr.apply)(variables, x_sh)
+        tol = _tol_finite_grad(recipe_name)
+        with _autocast_ctx(recipe_name):
+            variables, out_pj, _ = _init_apply(block_pj, mesh, x, jax.random.PRNGKey(7))
+            with mesh, global_shard_guard(  # noqa: F821
+                MeshResource(ep_resource=EP_AXIS, fsdp_resource=FSDP_AXIS)  # noqa: F821
+            ), nn_partitioning.axis_rules(LOGICAL_AXIS_RULES):
+                x_sh = _shard_inputs(x, mesh)
+                out_tr, _ = jax.jit(block_tr.apply)(variables, x_sh)
 
         out_pj_local = _local_shard(out_pj)
         out_tr_local = _local_shard(out_tr)
         diff = float(np.max(np.abs(out_pj_local - out_tr_local)))
-        assert diff < 5e-2, f"forward parity breach: max_abs_diff={diff}"
+        assert diff < tol, f"forward parity breach: max_abs_diff={diff} (tol={tol})"
 
-        grads_pj = _grad_step(block_pj, variables, mesh, x)
-        grads_tr = _grad_step(block_tr, variables, mesh, x)
+        with _autocast_ctx(recipe_name):
+            grads_pj = _grad_step(block_pj, variables, mesh, x)
+            grads_tr = _grad_step(block_tr, variables, mesh, x)
         for name in ("gate_kernel", "wi_0", "wi_1", "wo"):
             g_pj = _local_shard(_unwrap(grads_pj["params"][name]))
             g_tr = _local_shard(_unwrap(grads_tr["params"][name]))
             d = float(np.max(np.abs(g_pj - g_tr)))
-            assert d < 5e-2, f"grad parity breach on {name}: max_abs_diff={d}"
+            assert d < tol, f"grad parity breach on {name}: max_abs_diff={d} (tol={tol})"
