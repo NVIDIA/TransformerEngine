@@ -23,6 +23,7 @@ from ..basic import GroupedLinear, ScaledClampedQGeGLU, ScaledSwiGLU
 from ..fuser import register_forward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
 from .._common import (
+    _cudnn_frontend_geglu_runtime_params,
     _cudnn_frontend_version_supported,
     fuse_grouped_mlp_ops,
     is_quantized_tensor,
@@ -97,9 +98,16 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             self.grouped_gemm_glu_kernel()  # Try triggering import error
             raise RuntimeError(f"{self.__class__.__name__} is not supported on this system.")
         validate_grouped_mlp_dims(fc1, swiglu, fc2)
-        # The cuDNN geglu implementation corresponds to ScaledClampedQGeGLU.
-        # The act_func string should be fixed on the cuDNN FE side.
-        self._cudnn_act_func: str = "geglu" if isinstance(swiglu, ScaledClampedQGeGLU) else "swiglu"
+        is_geglu = isinstance(swiglu, ScaledClampedQGeGLU)
+        self._cudnn_act_func: str = "geglu" if is_geglu else "swiglu"
+        self._pass_geglu_runtime_params: bool = (
+            is_geglu and _cudnn_frontend_geglu_runtime_params()
+        )
+        if self._pass_geglu_runtime_params:
+            self._cudnn_linear_offset: float = swiglu._clamped.glu_linear_offset
+            self._cudnn_geglu_alpha: float = swiglu._clamped.alpha
+            self._cudnn_glu_clamp_max: float = swiglu._clamped.limit
+            self._cudnn_glu_clamp_min: float = -swiglu._clamped.limit
 
     def fuser_forward(
         self,
@@ -305,6 +313,13 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             "act_func": self._cudnn_act_func,
             "use_dynamic_sched": True,
         }
+        if self._pass_geglu_runtime_params:
+            fc1_glu_kwargs.update(
+                linear_offset=self._cudnn_linear_offset,
+                geglu_alpha=self._cudnn_geglu_alpha,
+                glu_clamp_max=self._cudnn_glu_clamp_max,
+                glu_clamp_min=self._cudnn_glu_clamp_min,
+            )
 
         if fc1_op.single_grouped_weight:
             # Clone and swizzle scales for GEMM.

@@ -22,15 +22,33 @@ from ..utils import canonicalize_dtype
 
 
 @functools.lru_cache(maxsize=1)
+def _cudnn_frontend_version() -> Optional[PkgVersion]:
+    """Return the installed cuDNN-frontend version, or ``None``."""
+    try:
+        return PkgVersion(get_pkg_version("nvidia-cudnn-frontend"))
+    except PackageNotFoundError:
+        return None
+
+
+@functools.lru_cache(maxsize=1)
 def _cudnn_frontend_version_supported() -> bool:
     """Check cuDNN frontend is at least 1.23.0.
 
-    All grouped MLP fused-kernel features require cuDNN frontend 1.23.0.
+    All grouped MLP fused-kernel features require cuDNN frontend >= 1.23.0.
     """
-    try:
-        return PkgVersion(get_pkg_version("nvidia-cudnn-frontend")) >= PkgVersion("1.23.0")
-    except PackageNotFoundError:
-        return False
+    ver = _cudnn_frontend_version()
+    return ver is not None and ver >= PkgVersion("1.23.0")
+
+
+@functools.lru_cache(maxsize=1)
+def _cudnn_frontend_geglu_runtime_params() -> bool:
+    """Check cuDNN frontend is at least 1.24.0.
+
+    Runtime-configurable GeGLU parameters (linear_offset, geglu_alpha,
+    glu_clamp_max, glu_clamp_min) require cuDNN frontend >= 1.24.0.
+    """
+    ver = _cudnn_frontend_version()
+    return ver is not None and ver >= PkgVersion("1.24.0")
 
 
 def is_quantized_tensor(tensor: torch.Tensor | QuantizedTensorStorage) -> bool:
@@ -256,9 +274,14 @@ def fuse_grouped_mlp_ops(
             and isinstance(window[2], GroupedLinear)
         ):
             matches_pattern = False
-        elif isinstance(window[1], ScaledClampedQGeGLU) and (
-            abs(window[1]._clamped.alpha - 1.702) > 0.001
-            or abs(window[1]._clamped.glu_linear_offset - 1.0) > 0.001
+        elif (
+            isinstance(window[1], ScaledClampedQGeGLU)
+            and not _cudnn_frontend_geglu_runtime_params()
+            and (
+                abs(window[1]._clamped.alpha - 1.702) > 0.001
+                or abs(window[1]._clamped.glu_linear_offset - 1.0) > 0.001
+                or abs(window[1]._clamped.limit - 7.0) > 0.001
+            )
         ):
             matches_pattern = False
         elif window[0].num_groups != window[2].num_groups:

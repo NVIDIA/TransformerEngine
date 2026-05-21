@@ -3578,7 +3578,14 @@ class TestSequentialModules:
     @pytest.mark.parametrize("glu_interleave_size", (None, 32))
     @pytest.mark.parametrize("delay_wgrad_compute", (False, True))
     @pytest.mark.parametrize("hidden_size", (128, 256))
-    @pytest.mark.parametrize("activation", ("scaled_swiglu", "scaled_clamped_qgeglu"))
+    @pytest.mark.parametrize(
+        "activation",
+        (
+            "scaled_swiglu",
+            "scaled_clamped_qgeglu",
+            "scaled_clamped_qgeglu_custom",
+        ),
+    )
     def test_grouped_mlp(
         self,
         *,
@@ -3623,9 +3630,19 @@ class TestSequentialModules:
             pytest.skip("single_grouped_bias requires bias=True")
         if with_quantization and dtype not in (torch.bfloat16, torch.float16):
             pytest.skip("Quantized group GEMM is only supported with BF16/FP16")
-        if quantization == "nvfp4" and activation == "scaled_clamped_qgeglu" and bias:
+        if quantization == "nvfp4" and activation.startswith("scaled_clamped_qgeglu") and bias:
             # TODO: ksivaman: Need to debug numerics for this case.
             pytest.skip("Bias/dbias not yet supported in NVFP4 fused grouped MLP with GeGLU")
+
+        # Activation parameters for clamped QGeGLU variants
+        if activation == "scaled_clamped_qgeglu_custom":
+            geglu_limit = 5.0
+            geglu_alpha = 1.5
+            geglu_offset = 0.5
+        else:
+            geglu_limit = 7.0
+            geglu_alpha = 1.702
+            geglu_offset = 1.0
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
@@ -3717,11 +3734,10 @@ class TestSequentialModules:
             if activation == "scaled_swiglu":
                 x = torch.nn.functional.silu(x1) * x2
             else:
-                lim = torch.tensor(7.0, device=x1.device, dtype=x1.dtype)
-                geglu_alpha = 1.702
+                lim = torch.tensor(geglu_limit, device=x1.device, dtype=x1.dtype)
                 x1c = torch.minimum(x1, lim)
                 x2c = torch.clamp(x2, -lim, lim)
-                x = (x2c + 1) * (x1c * torch.sigmoid(geglu_alpha * x1c))
+                x = (x2c + geglu_offset) * (x1c * torch.sigmoid(geglu_alpha * x1c))
             x = x * probs[group_idx].unsqueeze(-1)
             x = torch.nn.functional.linear(x, fc2_ws_ref[group_idx])
             if bias:
@@ -3732,11 +3748,15 @@ class TestSequentialModules:
 
         # Construct operations
         recipe = make_recipe(quantization)
-        scaled_act = (
-            te_ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
-            if activation == "scaled_swiglu"
-            else te_ops.ScaledClampedQGeGLU(glu_interleave_size=glu_interleave_size)
-        )
+        if activation == "scaled_swiglu":
+            scaled_act = te_ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
+        else:
+            scaled_act = te_ops.ScaledClampedQGeGLU(
+                glu_interleave_size=glu_interleave_size,
+                limit=geglu_limit,
+                alpha=geglu_alpha,
+                glu_linear_offset=geglu_offset,
+            )
         with te.quantized_model_init(enabled=with_quantization, recipe=recipe):
             fc1 = te_ops.GroupedLinear(
                 group_size,
