@@ -589,14 +589,12 @@ __global__ void fused_topk_with_score_function_backward_kernel(
   DataType *grad_shmem_base = reinterpret_cast<DataType *>(shmem_ptr);
   RawAsyncLoader<DataType> grad_loader(grad_shmem_base, warp_id, num_experts, num_token_per_block,
                                        num_buffers);
-  shmem_ptr +=
-      RawAsyncLoader<DataType>::shmem_bytes(num_experts, num_token_per_block, num_buffers);
+  shmem_ptr += RawAsyncLoader<DataType>::shmem_bytes(num_experts, num_token_per_block, num_buffers);
 
   CompType *act_shmem_base = reinterpret_cast<CompType *>(shmem_ptr);
   RawAsyncLoader<CompType> act_loader(act_shmem_base, warp_id, num_experts, num_token_per_block,
                                       num_buffers);
-  shmem_ptr +=
-      RawAsyncLoader<CompType>::shmem_bytes(num_experts, num_token_per_block, num_buffers);
+  shmem_ptr += RawAsyncLoader<CompType>::shmem_bytes(num_experts, num_token_per_block, num_buffers);
 
   bool *mask_shmem_base = reinterpret_cast<bool *>(shmem_ptr);
   RawAsyncLoader<bool> mask_loader(mask_shmem_base, warp_id, num_experts, num_token_per_block,

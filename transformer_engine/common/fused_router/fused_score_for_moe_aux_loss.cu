@@ -375,8 +375,7 @@ __global__ void fused_score_for_moe_aux_loss_backward_kernel(const CompType *int
   CompType *grad_shmem_base = reinterpret_cast<CompType *>(shmem_ptr);
   RawAsyncLoader<CompType> grad_loader(grad_shmem_base, warp_id, num_experts, num_token_per_block,
                                        num_buffers);
-  shmem_ptr +=
-      RawAsyncLoader<CompType>::shmem_bytes(num_experts, num_token_per_block, num_buffers);
+  shmem_ptr += RawAsyncLoader<CompType>::shmem_bytes(num_experts, num_token_per_block, num_buffers);
 
   CompType *act_shmem_base = reinterpret_cast<CompType *>(shmem_ptr);
   RawAsyncLoader<CompType> act_loader(act_shmem_base, warp_id, num_experts, num_token_per_block,
