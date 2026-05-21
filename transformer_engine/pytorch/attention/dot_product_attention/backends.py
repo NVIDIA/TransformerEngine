@@ -2074,16 +2074,12 @@ class FusedAttention(torch.nn.Module):
                         )
 
         if context_parallel:
-            assert score_mod is None, "score_mod is not supported with context parallelism!"
             assert (
-                score_mod_bprop is None
-            ), "score_mod_bprop is not supported with context parallelism!"
-            assert (
-                score_mod_tensors is None
-            ), "score_mod_tensors is not supported with context parallelism!"
-            assert (
-                score_mod_bprop_tensors is None
-            ), "score_mod_bprop_tensors is not supported with context parallelism!"
+                score_mod is None
+                and score_mod_bprop is None
+                and score_mod_tensors is None
+                and score_mod_bprop_tensors is None
+            ), "(TE/cuDNN) Flex Attention is not supported with context parallelism!"
             assert (
                 fp8
                 or fused_attention_backend == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen

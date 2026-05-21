@@ -1104,7 +1104,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             allow_non_contiguous=True,
             allow_different_data_and_param_types=self.softmax_type != "vanilla",
         ) as query_layer:
-            user_supplied_seqlens = (
+            has_user_provided_cu_seqlens = (
                 cu_seqlens_q is not None
                 or cu_seqlens_kv is not None
                 or cu_seqlens_q_padded is not None
@@ -1499,18 +1499,20 @@ class DotProductAttention(TransformerEngineBaseModule):
                 is_training=self.training,
                 fp8=self.fp8,
                 fp8_meta=self.fp8_meta,
-                fp8_output=fp8_output,
                 inference_params=inference_params,
                 softmax_type=self.softmax_type,
                 return_max_logit=self.return_max_logit,
-                checkpoint_core_attention=checkpoint_core_attention,
                 cuda_graph=is_graph_capturing(),
                 num_splits=num_splits,
-                has_attention_mask=attention_mask is not None,
-                has_core_attention_bias=core_attention_bias is not None,
-                user_supplied_seqlens=user_supplied_seqlens,
-                has_score_mod=score_mod is not None,
-                has_score_mod_bprop=score_mod_bprop is not None,
+                runtime_flags=dpa_utils.AttentionRuntimeFlags(
+                    fp8_output=fp8_output,
+                    checkpoint_core_attention=checkpoint_core_attention,
+                    has_attention_mask=attention_mask is not None,
+                    has_core_attention_bias=core_attention_bias is not None,
+                    has_user_provided_cu_seqlens=has_user_provided_cu_seqlens,
+                    has_score_mod=score_mod is not None,
+                    has_score_mod_bprop=score_mod_bprop is not None,
+                ),
             )
             global _attention_backends
             if is_in_onnx_export_mode():
