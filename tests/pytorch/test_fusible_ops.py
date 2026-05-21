@@ -81,7 +81,7 @@ if nvfp4_available:
     _quantization_list.append("nvfp4_4over6")
 
 
-@pytest.fixture(autouse=True, scope="class")
+@pytest.fixture(autouse=True, scope="function")
 def _reset_rng_states_per_test():
     """Restore torch, CUDA, and Python ``random`` before each test in this module."""
     reset_rng_states()
