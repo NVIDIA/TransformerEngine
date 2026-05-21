@@ -41,10 +41,16 @@ Error_Type FusedTopkWithScoreFunctionForwardFFI(
       std::vector<size_t>{static_cast<size_t>(num_tokens), static_cast<size_t>(num_experts)};
   auto logits_tensor = TensorWrapper(logits, flat_shape, dtype);
   auto probs_tensor = TensorWrapper(probs, flat_shape, dtype);
-  // The routing_map TensorWrapper carries shape only for bookkeeping — the kernel
-  // indexes it directly using num_tokens / num_experts and the format flag.
-  auto routing_map_dims = routing_map_buf->dimensions();
-  auto routing_map_shape = std::vector<size_t>(routing_map_dims.begin(), routing_map_dims.end());
+  // Flatten the routing_map shape to match the kernel's 2D indexing. The trailing
+  // dim depends on the requested format: num_experts for BYTEMAP, ceil(num_experts/8)
+  // for BITMAP_U8. Keeping this 2D also lets the kernel's shape NVTE_CHECKs fire.
+  auto routing_map_format_nvte = static_cast<NVTERoutingMapFormat>(routing_map_format);
+  size_t routing_map_trailing =
+      (routing_map_format_nvte == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8)
+          ? static_cast<size_t>((num_experts + 7) / 8)
+          : static_cast<size_t>(num_experts);
+  auto routing_map_shape =
+      std::vector<size_t>{static_cast<size_t>(num_tokens), routing_map_trailing};
   auto routing_map_tensor = TensorWrapper(routing_map, routing_map_shape, DType::kByte);
   // intermediate is always float32 (CompType) regardless of logits dtype.
   auto intermediate_dtype = convert_ffi_datatype_to_te_dtype(intermediate_buf->element_type());
@@ -55,9 +61,8 @@ Error_Type FusedTopkWithScoreFunctionForwardFFI(
       ". Check FusedTopkWithScoreFunctionFwdPrimitive.abstract in cpp_extensions/router.py.");
   auto intermediate_tensor = TensorWrapper(intermediate, flat_shape, DType::kFloat32);
 
-  auto routing_map_format_nvte = static_cast<NVTERoutingMapFormat>(routing_map_format);
   if (compute_aux_scores) {
-    nvte_fused_score_for_moe_aux_loss_forward(
+    nvte_fused_score_for_moe_aux_loss_forward_v2(
         logits_tensor.data(), num_tokens, num_experts, static_cast<int>(topk),
         static_cast<int>(score_function), probs_tensor.data(), routing_map_tensor.data(),
         routing_map_format_nvte, intermediate_tensor.data(), stream);
@@ -69,7 +74,7 @@ Error_Type FusedTopkWithScoreFunctionForwardFFI(
                             convert_ffi_datatype_to_te_dtype(expert_bias_buf.element_type()))
             : TensorWrapper();
 
-    nvte_fused_topk_with_score_function_forward(
+    nvte_fused_topk_with_score_function_forward_v2(
         logits_tensor.data(), num_tokens, num_experts, static_cast<int>(topk),
         static_cast<int>(use_pre_softmax), static_cast<int>(num_groups),
         static_cast<int>(group_topk), static_cast<float>(scaling_factor),
@@ -138,17 +143,21 @@ Error_Type FusedTopkWithScoreFunctionBackwardFFI(
                                                static_cast<int>(score_function),
                                                grad_logits_tensor.data(), stream);
   } else {
-    auto routing_map_dims = routing_map_buf.dimensions();
-    auto routing_map_shape = std::vector<size_t>(routing_map_dims.begin(), routing_map_dims.end());
+    auto routing_map_format_nvte = static_cast<NVTERoutingMapFormat>(routing_map_format);
+    size_t routing_map_trailing =
+        (routing_map_format_nvte == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8)
+            ? static_cast<size_t>((num_experts + 7) / 8)
+            : static_cast<size_t>(num_experts);
+    auto routing_map_shape =
+        std::vector<size_t>{static_cast<size_t>(num_tokens), routing_map_trailing};
     auto routing_map_tensor =
         TensorWrapper(routing_map_buf.untyped_data(), routing_map_shape, DType::kByte);
 
-    nvte_fused_topk_with_score_function_backward(
-        routing_map_tensor.data(), static_cast<NVTERoutingMapFormat>(routing_map_format),
-        intermediate_tensor.data(), grad_probs_tensor.data(), num_tokens, num_experts,
-        static_cast<int>(topk), static_cast<int>(use_pre_softmax),
-        static_cast<float>(scaling_factor), static_cast<int>(score_function),
-        grad_logits_tensor.data(), stream);
+    nvte_fused_topk_with_score_function_backward_v2(
+        routing_map_tensor.data(), routing_map_format_nvte, intermediate_tensor.data(),
+        grad_probs_tensor.data(), num_tokens, num_experts, static_cast<int>(topk),
+        static_cast<int>(use_pre_softmax), static_cast<float>(scaling_factor),
+        static_cast<int>(score_function), grad_logits_tensor.data(), stream);
   }
 
   return ffi_with_cuda_error_check();

@@ -105,9 +105,14 @@ class FusedTopkScoreFunction(torch.autograd.Function):
             expert_bias,
             routing_map_format,
         )
-        # Restore the shape
-        probs = probs.view(tensor_shape)
+        # Save the flat 2D routing_map for backward (kernel indexes by
+        # num_tokens x trailing_dim), then restore the leading dims of the
+        # input on the returned outputs. The trailing dim of routing_map
+        # depends on the format: num_experts for BYTEMAP, ceil(num_experts/8)
+        # for BITMAP_U8.
         ctx.save_for_backward(routing_map, intermediate_output)
+        probs = probs.view(tensor_shape)
+        routing_map = routing_map.view(*tensor_shape[:-1], routing_map.shape[-1])
         ctx.num_tokens = num_tokens
         ctx.num_experts = num_experts
         ctx.use_pre_softmax = use_pre_softmax
@@ -185,10 +190,13 @@ def fused_topk_with_score_function(
     Returns
     -------
     probs : torch.Tensor in the same dtype as the "logits".
+        Same shape as ``logits``.
     routing_map : torch.Tensor
-        Shape/dtype depend on routing_map_format:
-        - BYTEMAP: bool[num_tokens, num_experts]
-        - BITMAP_U8: uint8[num_tokens, ceil(num_experts/8)] LSB-first bit-packed.
+        Same leading dims as ``logits``; trailing dim and dtype depend on
+        routing_map_format:
+        - BYTEMAP:   bool[*logits.shape[:-1], num_experts]
+        - BITMAP_U8: uint8[*logits.shape[:-1], ceil(num_experts/8)]
+          LSB-first bit-packed.
     """
     if logits.dtype == torch.float64:
         raise ValueError("Current TE does not support float64 router type.")
@@ -238,6 +246,11 @@ class FusedComputeScoresForMoEAuxLoss(torch.autograd.Function):
         ctx.num_tokens = num_tokens
         ctx.num_experts = num_experts
         ctx.logits_dtype = logits.dtype
+        # Restore the leading dims of the input on both outputs. The trailing
+        # dim of routing_map depends on the format: num_experts for BYTEMAP,
+        # ceil(num_experts/8) for BITMAP_U8.
+        scores = scores.view(tensor_shape)
+        routing_map = routing_map.view(*tensor_shape[:-1], routing_map.shape[-1])
         return routing_map, scores
 
     @staticmethod
@@ -285,9 +298,11 @@ def fused_compute_score_for_moe_aux_loss(
     Returns
     -------
     routing_map : torch.Tensor
-        Shape/dtype depend on routing_map_format (bool[T, E] for BYTEMAP,
-        uint8[T, ceil(E/8)] for BITMAP_U8).
+        Same leading dims as ``logits``; trailing dim and dtype depend on
+        routing_map_format (bool[..., num_experts] for BYTEMAP,
+        uint8[..., ceil(num_experts/8)] for BITMAP_U8).
     scores : torch.Tensor in fp32
+        Same shape as ``logits``.
     """
     routing_map_format = _validate_routing_map_format(routing_map_format)
     return FusedComputeScoresForMoEAuxLoss.apply(logits, topk, score_function, routing_map_format)

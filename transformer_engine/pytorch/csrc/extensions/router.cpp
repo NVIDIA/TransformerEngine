@@ -71,7 +71,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fw
     expert_bias_cu = makeTransformerEngineTensor(expert_bias.value());
   }
 
-  nvte_fused_topk_with_score_function_forward(
+  nvte_fused_topk_with_score_function_forward_v2(
       logits_cu.data(), num_tokens, num_experts, topk, use_pre_softmax, num_groups_value,
       group_topk_value, scaling_factor_value, score_function_map[score_function],
       expert_bias_cu.data(), probs_cu.data(), routing_map_cu.data(), routing_map_format,
@@ -95,7 +95,7 @@ void fused_topk_with_score_function_bwd(int num_tokens, int num_experts, at::Ten
   auto grad_probs_cu = makeTransformerEngineTensor(grad_probs);
   auto grad_logits_cu = makeTransformerEngineTensor(grad_logits);
 
-  nvte_fused_topk_with_score_function_backward(
+  nvte_fused_topk_with_score_function_backward_v2(
       routing_map_cu.data(), routing_map_format, intermediate_output_cu.data(),
       grad_probs_cu.data(), num_tokens, num_experts, topk, use_pre_softmax, scaling_factor_value,
       score_function_value, grad_logits_cu.data(), at::cuda::getCurrentCUDAStream());
@@ -127,7 +127,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_score_for_moe_aux_loss_fwd(
   auto routing_map_cu = makeTransformerEngineTensor(routing_map);
   auto intermediate_output_cu = makeTransformerEngineTensor(intermediate_output);
 
-  nvte_fused_score_for_moe_aux_loss_forward(
+  nvte_fused_score_for_moe_aux_loss_forward_v2(
       logits_cu.data(), num_tokens, num_experts, topk, score_function_value, scores_cu.data(),
       routing_map_cu.data(), routing_map_format, intermediate_output_cu.data(),
       at::cuda::getCurrentCUDAStream());

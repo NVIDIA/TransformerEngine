@@ -35,8 +35,7 @@ class RoutingMapFormat(IntEnum):
     BYTEMAP   — bool/uint8 tensor of shape [num_tokens, num_experts].
     BITMAP_U8 — uint8 tensor of shape [num_tokens, ceil(num_experts/8)]; bit
                 (e % 8) of byte (e / 8) of row t is 1 iff token t routes to
-                expert e (LSB-first packing along the expert axis). This is the
-                layout NCCL EP dispatch is planned to consume directly.
+                expert e (LSB-first packing along the expert axis).
     """
 
     BYTEMAP = int(JAXX_Routing_Map_Format.BYTEMAP)

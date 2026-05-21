@@ -49,7 +49,13 @@ def _validate_routing_map_format(
     if isinstance(routing_map_format, RoutingMapFormat):
         return routing_map_format
     if isinstance(routing_map_format, int):
-        return RoutingMapFormat(routing_map_format)
+        try:
+            return RoutingMapFormat(routing_map_format)
+        except ValueError:
+            raise ValueError(
+                "routing_map_format int must match a RoutingMapFormat value; "
+                f"got {routing_map_format!r}"
+            ) from None
     try:
         return RoutingMapFormat[routing_map_format.upper()]
     except (KeyError, AttributeError):
@@ -132,8 +138,7 @@ def fused_topk_with_score_function(
         Output layout for routing_map. "bytemap" / RoutingMapFormat.BYTEMAP (default)
         returns a bool[T, E] tensor; "bitmap_u8" / RoutingMapFormat.BITMAP_U8 returns a
         uint8[T, ceil(E/8)] tensor with bit (e % 8) of byte (e / 8) set when token t
-        routes to expert e (LSB-first along the expert axis). The bitmap layout
-        is what NCCL EP dispatch is planned to consume directly.
+        routes to expert e (LSB-first along the expert axis).
 
     Returns
     -------
