@@ -45,10 +45,9 @@ Error_Type FusedTopkWithScoreFunctionForwardFFI(
   // dim depends on the requested format: num_experts for BYTEMAP, ceil(num_experts/8)
   // for BITMAP_U8. Keeping this 2D also lets the kernel's shape NVTE_CHECKs fire.
   auto routing_map_format_nvte = static_cast<NVTERoutingMapFormat>(routing_map_format);
-  size_t routing_map_trailing =
-      (routing_map_format_nvte == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8)
-          ? static_cast<size_t>((num_experts + 7) / 8)
-          : static_cast<size_t>(num_experts);
+  size_t routing_map_trailing = (routing_map_format_nvte == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8)
+                                    ? static_cast<size_t>((num_experts + 7) / 8)
+                                    : static_cast<size_t>(num_experts);
   auto routing_map_shape =
       std::vector<size_t>{static_cast<size_t>(num_tokens), routing_map_trailing};
   auto routing_map_tensor = TensorWrapper(routing_map, routing_map_shape, DType::kByte);
@@ -144,10 +143,9 @@ Error_Type FusedTopkWithScoreFunctionBackwardFFI(
                                                grad_logits_tensor.data(), stream);
   } else {
     auto routing_map_format_nvte = static_cast<NVTERoutingMapFormat>(routing_map_format);
-    size_t routing_map_trailing =
-        (routing_map_format_nvte == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8)
-            ? static_cast<size_t>((num_experts + 7) / 8)
-            : static_cast<size_t>(num_experts);
+    size_t routing_map_trailing = (routing_map_format_nvte == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8)
+                                      ? static_cast<size_t>((num_experts + 7) / 8)
+                                      : static_cast<size_t>(num_experts);
     auto routing_map_shape =
         std::vector<size_t>{static_cast<size_t>(num_tokens), routing_map_trailing};
     auto routing_map_tensor =

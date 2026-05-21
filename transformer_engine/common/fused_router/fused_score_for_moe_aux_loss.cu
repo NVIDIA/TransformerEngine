@@ -18,9 +18,11 @@ namespace fused_router {
 
 template <typename DataType, NVTERoutingMapFormat RoutingMapFormat,
           TopkFuncType TopkFunc = TopkFuncType::Naive>
-__global__ void fused_score_for_moe_aux_loss_forward_kernel(
-    const DataType *logits, int num_tokens, int num_experts, int topk, int score_function,
-    float *scores, uint8_t *routing_map, CompType *intermediate_output) {
+__global__ void fused_score_for_moe_aux_loss_forward_kernel(const DataType *logits, int num_tokens,
+                                                            int num_experts, int topk,
+                                                            int score_function, float *scores,
+                                                            uint8_t *routing_map,
+                                                            CompType *intermediate_output) {
   constexpr bool kIsBitmap = (RoutingMapFormat == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8);
   /***
      * Section: Global Variables/Addresses init
@@ -192,19 +194,19 @@ void fused_score_for_moe_aux_loss_forward_kernel_launcher(
   // Radix selection is O(E), independent of K, but it needs 4 passes for 32-bit float;
   // switch at K=16 where naive O(K^2*E) starts to dominate
   if (topk < 16) {
-    NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-        fused_score_for_moe_aux_loss_forward_kernel<DataType, RoutingMapFormat,
-                                                    TopkFuncType::Naive>,
-        cudaFuncAttributeMaxDynamicSharedMemorySize, shared_memory_size));
+    NVTE_CHECK_CUDA(
+        cudaFuncSetAttribute(fused_score_for_moe_aux_loss_forward_kernel<DataType, RoutingMapFormat,
+                                                                         TopkFuncType::Naive>,
+                             cudaFuncAttributeMaxDynamicSharedMemorySize, shared_memory_size));
     fused_score_for_moe_aux_loss_forward_kernel<DataType, RoutingMapFormat, TopkFuncType::Naive>
         <<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
             logits, num_tokens, num_experts, topk, score_function, scores, routing_map,
             intermediate_output);
   } else {
-    NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-        fused_score_for_moe_aux_loss_forward_kernel<DataType, RoutingMapFormat,
-                                                    TopkFuncType::Radix>,
-        cudaFuncAttributeMaxDynamicSharedMemorySize, shared_memory_size));
+    NVTE_CHECK_CUDA(
+        cudaFuncSetAttribute(fused_score_for_moe_aux_loss_forward_kernel<DataType, RoutingMapFormat,
+                                                                         TopkFuncType::Radix>,
+                             cudaFuncAttributeMaxDynamicSharedMemorySize, shared_memory_size));
     fused_score_for_moe_aux_loss_forward_kernel<DataType, RoutingMapFormat, TopkFuncType::Radix>
         <<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
             logits, num_tokens, num_experts, topk, score_function, scores, routing_map,
@@ -245,17 +247,16 @@ void fused_score_for_moe_aux_loss_forward(const Tensor &logits, int num_tokens, 
              num_experts, "], got ", intermediate_output.data.shape);
   const auto routing_map_shape =
       expected_routing_map_shape(num_tokens, num_experts, routing_map_format);
-  NVTE_CHECK(routing_map.data.shape == routing_map_shape,
-             "routing_map shape mismatch for ",
+  NVTE_CHECK(routing_map.data.shape == routing_map_shape, "routing_map shape mismatch for ",
              (routing_map_format == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8 ? "BITMAP_U8" : "BYTEMAP"),
              "; expected ", routing_map_shape, ", got ", routing_map.data.shape);
-#define AUX_LOSS_FORWARD_DISPATCH(RoutingMapFormatVal)                                            \
-  TE_ROUTER_PROBS_TYPE_SWITCH_ALL(                                                                \
-      logits.data.dtype, DataType,                                                                \
-      fused_score_for_moe_aux_loss_forward_kernel_launcher<DataType, RoutingMapFormatVal>(        \
-          reinterpret_cast<DataType *>(logits.data.dptr), num_tokens, num_experts, topk,          \
-          score_function, reinterpret_cast<float *>(scores.data.dptr),                            \
-          reinterpret_cast<uint8_t *>(routing_map.data.dptr),                                     \
+#define AUX_LOSS_FORWARD_DISPATCH(RoutingMapFormatVal)                                     \
+  TE_ROUTER_PROBS_TYPE_SWITCH_ALL(                                                         \
+      logits.data.dtype, DataType,                                                         \
+      fused_score_for_moe_aux_loss_forward_kernel_launcher<DataType, RoutingMapFormatVal>( \
+          reinterpret_cast<DataType *>(logits.data.dptr), num_tokens, num_experts, topk,   \
+          score_function, reinterpret_cast<float *>(scores.data.dptr),                     \
+          reinterpret_cast<uint8_t *>(routing_map.data.dptr),                              \
           reinterpret_cast<CompType *>(intermediate_output.data.dptr), stream););
   if (routing_map_format == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8) {
     AUX_LOSS_FORWARD_DISPATCH(NVTE_ROUTING_MAP_FORMAT_BITMAP_U8)
@@ -449,10 +450,9 @@ void nvte_fused_score_for_moe_aux_loss_forward(const NVTETensor logits, int num_
                                                const NVTETensor intermediate_output,
                                                cudaStream_t stream) {
   NVTE_API_CALL(nvte_fused_score_for_moe_aux_loss_forward);
-  nvte_fused_score_for_moe_aux_loss_forward_v2(logits, num_tokens, num_experts, topk,
-                                               score_function, scores, routing_map,
-                                               NVTE_ROUTING_MAP_FORMAT_BYTEMAP,
-                                               intermediate_output, stream);
+  nvte_fused_score_for_moe_aux_loss_forward_v2(
+      logits, num_tokens, num_experts, topk, score_function, scores, routing_map,
+      NVTE_ROUTING_MAP_FORMAT_BYTEMAP, intermediate_output, stream);
 }
 
 void nvte_fused_score_for_moe_aux_loss_backward(const NVTETensor intermediate_output,
