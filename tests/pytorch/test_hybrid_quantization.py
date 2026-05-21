@@ -2752,15 +2752,9 @@ def _ensure_single_rank_dp_group():
 def _hybrid_recipe_fp8_current():
     """Same-format Float8CurrentScaling on both directions (supported)."""
     return _hybrid_custom_recipe(
-        row_factory=lambda: Float8CurrentScalingQuantizer(
-            tex.DType.kFloat8E4M3, device="cuda"
-        ),
-        col_factory=lambda: Float8CurrentScalingQuantizer(
-            tex.DType.kFloat8E4M3, device="cuda"
-        ),
-        grad_factory=lambda: Float8CurrentScalingQuantizer(
-            tex.DType.kFloat8E5M2, device="cuda"
-        ),
+        row_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
+        col_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
+        grad_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda"),
     )
 
 
@@ -2803,14 +2797,10 @@ def _hybrid_recipe_fp8_delayed_row_current_col():
     """
     return _hybrid_custom_recipe(
         row_factory=lambda: _make_delayed_quantizer(tex.DType.kFloat8E4M3),
-        col_factory=lambda: Float8CurrentScalingQuantizer(
-            tex.DType.kFloat8E4M3, device="cuda"
-        ),
+        col_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
         # grad_factory matches the columnwise direction so the wgrad GEMM's
         # grad_output sub-quantizer pairs with the input/weight col format.
-        grad_factory=lambda: Float8CurrentScalingQuantizer(
-            tex.DType.kFloat8E5M2, device="cuda"
-        ),
+        grad_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda"),
     )
 
 
@@ -2821,9 +2811,7 @@ def _hybrid_recipe_fp8_current_row_delayed_col():
     sub-storage -> current bucket, col sub-storage -> delayed bucket.
     """
     return _hybrid_custom_recipe(
-        row_factory=lambda: Float8CurrentScalingQuantizer(
-            tex.DType.kFloat8E4M3, device="cuda"
-        ),
+        row_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
         col_factory=lambda: _make_delayed_quantizer(tex.DType.kFloat8E4M3),
         grad_factory=lambda: _make_delayed_quantizer(tex.DType.kFloat8E5M2),
     )
@@ -2866,14 +2854,12 @@ def _build_hybrid_linear_weight(out_features, in_features, hybrid_recipe):
         recipe=hybrid_recipe,
         preserve_high_precision_init_val=True,
     ):
-        model = Linear(
-            in_features, out_features, bias=False, params_dtype=torch.bfloat16
-        ).cuda()
+        model = Linear(in_features, out_features, bias=False, params_dtype=torch.bfloat16).cuda()
 
     weight = model.weight
-    assert isinstance(weight, HybridQuantizedTensor), (
-        f"Expected HybridQuantizedTensor, got {type(weight).__name__}"
-    )
+    assert isinstance(
+        weight, HybridQuantizedTensor
+    ), f"Expected HybridQuantizedTensor, got {type(weight).__name__}"
     hp_init_cpu = weight.get_high_precision_init_val()
     assert hp_init_cpu is not None, "preserve_high_precision_init_val should populate the cpu val"
     hp_init = hp_init_cpu.to(weight.device).float()
@@ -2947,12 +2933,8 @@ class TestHybridQuantizeMasterWeights:
         dq_col = weight._columnwise_storage.dequantize(dtype=torch.float32)
         # FP8 E4M3 round-trip; matches the loose tolerance the equivalent
         # native-FP8-current test uses (e.g. test_dequantize_close_to_original).
-        torch.testing.assert_close(
-            dq_row.reshape(-1), master_flat, rtol=0.125, atol=0.1
-        )
-        torch.testing.assert_close(
-            dq_col.reshape(-1), master_flat, rtol=0.125, atol=0.1
-        )
+        torch.testing.assert_close(dq_row.reshape(-1), master_flat, rtol=0.125, atol=0.1)
+        torch.testing.assert_close(dq_col.reshape(-1), master_flat, rtol=0.125, atol=0.1)
 
     def test_fp8_current_nonzero_start_offset(self):
         """Mimic DP-sharded master: master covers logical elements
@@ -2982,12 +2964,8 @@ class TestHybridQuantizeMasterWeights:
         # the second amax all-reduce shifting the per-tensor scale).
         dq_row = weight._rowwise_storage.dequantize(dtype=torch.float32).view(-1)
         dq_col = weight._columnwise_storage.dequantize(dtype=torch.float32).view(-1)
-        torch.testing.assert_close(
-            dq_row[start_offset:], hp_master_shard, rtol=0.125, atol=0.1
-        )
-        torch.testing.assert_close(
-            dq_col[start_offset:], hp_master_shard, rtol=0.125, atol=0.1
-        )
+        torch.testing.assert_close(dq_row[start_offset:], hp_master_shard, rtol=0.125, atol=0.1)
+        torch.testing.assert_close(dq_col[start_offset:], hp_master_shard, rtol=0.125, atol=0.1)
 
     def test_fp8_delayed_same_format_full_master(self):
         """Same-format delayed scaling on both directions. Both sub-storages
@@ -3012,12 +2990,8 @@ class TestHybridQuantizeMasterWeights:
         assert weight._columnwise_storage is not None
         dq_row = weight._rowwise_storage.dequantize(dtype=torch.float32)
         dq_col = weight._columnwise_storage.dequantize(dtype=torch.float32)
-        torch.testing.assert_close(
-            dq_row.reshape(-1), master_flat, rtol=0.125, atol=0.1
-        )
-        torch.testing.assert_close(
-            dq_col.reshape(-1), master_flat, rtol=0.125, atol=0.1
-        )
+        torch.testing.assert_close(dq_row.reshape(-1), master_flat, rtol=0.125, atol=0.1)
+        torch.testing.assert_close(dq_col.reshape(-1), master_flat, rtol=0.125, atol=0.1)
 
     def test_fp8_delayed_row_current_col_full_master(self):
         """Cross-format per-tensor Float8: delayed row + current col.
@@ -3046,12 +3020,8 @@ class TestHybridQuantizeMasterWeights:
         assert isinstance(weight._columnwise_quantizer, Float8CurrentScalingQuantizer)
         dq_row = weight._rowwise_storage.dequantize(dtype=torch.float32)
         dq_col = weight._columnwise_storage.dequantize(dtype=torch.float32)
-        torch.testing.assert_close(
-            dq_row.reshape(-1), master_flat, rtol=0.125, atol=0.1
-        )
-        torch.testing.assert_close(
-            dq_col.reshape(-1), master_flat, rtol=0.125, atol=0.1
-        )
+        torch.testing.assert_close(dq_row.reshape(-1), master_flat, rtol=0.125, atol=0.1)
+        torch.testing.assert_close(dq_col.reshape(-1), master_flat, rtol=0.125, atol=0.1)
 
     def test_fp8_current_row_delayed_col_full_master(self):
         """Cross-format per-tensor Float8: current row + delayed col.
@@ -3079,12 +3049,8 @@ class TestHybridQuantizeMasterWeights:
         assert isinstance(weight._columnwise_quantizer, Float8Quantizer)
         dq_row = weight._rowwise_storage.dequantize(dtype=torch.float32)
         dq_col = weight._columnwise_storage.dequantize(dtype=torch.float32)
-        torch.testing.assert_close(
-            dq_row.reshape(-1), master_flat, rtol=0.125, atol=0.1
-        )
-        torch.testing.assert_close(
-            dq_col.reshape(-1), master_flat, rtol=0.125, atol=0.1
-        )
+        torch.testing.assert_close(dq_row.reshape(-1), master_flat, rtol=0.125, atol=0.1)
+        torch.testing.assert_close(dq_col.reshape(-1), master_flat, rtol=0.125, atol=0.1)
 
     # NOTE: Per-block sub-quantizers (MXFP8, NVFP4, Float8Blockwise) are not
     # supported as hybrid sub-quantizers by this initial integration, regardless
@@ -3133,9 +3099,7 @@ class TestHybridQuantizeMasterWeights:
 
         group = _ensure_single_rank_dp_group()
         hybrid_recipe = _hybrid_custom_recipe(
-            row_factory=lambda: Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E4M3, device="cuda"
-            ),
+            row_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
             col_factory=lambda: MXFP8Quantizer(tex.DType.kFloat8E4M3),
             grad_factory=lambda: Float8CurrentScalingQuantizer(
                 tex.DType.kFloat8E5M2, device="cuda"
@@ -3228,9 +3192,7 @@ class TestHybridQuantizeMasterWeights:
         assert weight._columnwise_storage is None
         # Rowwise is populated and dequantizes close to the master.
         dq_row = weight._rowwise_storage.dequantize(dtype=torch.float32)
-        torch.testing.assert_close(
-            dq_row.reshape(-1), master_flat, rtol=0.125, atol=0.1
-        )
+        torch.testing.assert_close(dq_row.reshape(-1), master_flat, rtol=0.125, atol=0.1)
 
     def test_columnwise_only_fp8_current_full_master(self):
         """Single-direction hybrid: rowwise dropped via update_usage.
@@ -3258,9 +3220,7 @@ class TestHybridQuantizeMasterWeights:
         assert weight._rowwise_storage is None
         # Columnwise is populated and dequantizes close to the master.
         dq_col = weight._columnwise_storage.dequantize(dtype=torch.float32)
-        torch.testing.assert_close(
-            dq_col.reshape(-1), master_flat, rtol=0.125, atol=0.1
-        )
+        torch.testing.assert_close(dq_col.reshape(-1), master_flat, rtol=0.125, atol=0.1)
 
     def test_both_sub_storages_none_raises(self):
         """Both sub-storages dropped via update_usage — nothing left to cast.
@@ -4913,9 +4873,9 @@ class TestHybridFloat8ColumnwiseOnlyHopperPath:
         src = torch.randn(64, 64, dtype=torch.bfloat16, device="cuda")
         out = q(src)
         # Columnwise-only Float8 on Hopper: _data is None, _transpose holds data
-        assert out._data is None, (
-            f"Test precondition failed: expected _data is None on Hopper, got {out._data}"
-        )
+        assert (
+            out._data is None
+        ), f"Test precondition failed: expected _data is None on Hopper, got {out._data}"
         assert out._transpose is not None, "Test precondition failed: _transpose is None"
         return out
 
@@ -5014,9 +4974,7 @@ class TestHybridFsdpPostAllGatherUpdateUsage:
             module=None,
             mp_policy=None,
         )
-        out2, _ = param.fsdp_post_all_gather(
-            sharded_tensors, metadata, param.dtype, out=out
-        )
+        out2, _ = param.fsdp_post_all_gather(sharded_tensors, metadata, param.dtype, out=out)
 
         # After fsdp_post_all_gather, the rowwise sub-quantizer is pinned
         # columnwise=False, so update_usage(rowwise=True, columnwise=False)

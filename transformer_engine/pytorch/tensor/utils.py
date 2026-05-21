@@ -1077,7 +1077,7 @@ def _route_hybrid_to_buckets(
             # fed in. See top-of-file TODO block for the unblocker (single-
             # direction variants of the two distopt kernels).
             raise NotImplementedError(
-                f"quantize_master_weights for HybridQuantizer with MXFP8Quantizer "
+                "quantize_master_weights for HybridQuantizer with MXFP8Quantizer "
                 f"{direction} sub-quantizer is not supported yet. See the TODO "
                 "block above _route_hybrid_to_buckets for the unblocker shape."
             )
@@ -1089,7 +1089,7 @@ def _route_hybrid_to_buckets(
             # `_create_columnwise()` not reaching hybrid's separate col
             # sub-storage. See top-of-file TODO block for details.
             raise NotImplementedError(
-                f"quantize_master_weights for HybridQuantizer with NVFP4Quantizer "
+                "quantize_master_weights for HybridQuantizer with NVFP4Quantizer "
                 f"{direction} sub-quantizer is not supported yet. See the TODO "
                 "block above _route_hybrid_to_buckets for details."
             )
@@ -1099,7 +1099,7 @@ def _route_hybrid_to_buckets(
             # blocker for Block FP8). Python-side post-AG fix. See top-of-file
             # TODO block for details.
             raise NotImplementedError(
-                f"quantize_master_weights for HybridQuantizer with Float8BlockQuantizer "
+                "quantize_master_weights for HybridQuantizer with Float8BlockQuantizer "
                 f"{direction} sub-quantizer is not supported yet. See the TODO "
                 "block above _route_hybrid_to_buckets for details."
             )
