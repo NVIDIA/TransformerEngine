@@ -24,6 +24,8 @@ jobs:
             const pr = context.payload.pull_request;
             const user = pr.user.login;
             const association = pr.author_association;
+            console.log("user", user);
+            console.log("association", association);
 
             const communityLabel = "community-contribution";
             const orgLabel = "org-contribution";
@@ -32,6 +34,7 @@ jobs:
 
             const isOrgMember =
               association === "MEMBER" || association === "OWNER";
+            console.log("isOrgMember:", isOrgMember);
 
             if (!isOrgMember) {
               targetLabel = communityLabel;
@@ -50,6 +53,7 @@ jobs:
               }
 
               const isCore = permission === "write" || permission === "admin";
+              console.log("isCore: ", isCore);
 
               if (!isCore) {
                 targetLabel = orgLabel;
