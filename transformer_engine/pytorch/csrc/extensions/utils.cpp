@@ -150,7 +150,8 @@ std::tuple<at::Tensor, std::optional<at::Tensor>> transform_and_load_data_ptrs_o
         set_param(inputs_nvte[i], kNVTEColumnwiseData, nullptr, data_dtype, data_shape);
         set_param(inputs_nvte[i], kNVTEColumnwiseScaleInv, in_scale_ptr, scale_dtype, scale_shape);
         set_param(outputs_nvte[i], kNVTEColumnwiseData, nullptr, data_dtype, data_shape);
-        set_param(outputs_nvte[i], kNVTEColumnwiseScaleInv, out_scale_ptr, scale_dtype, scale_shape);
+        set_param(outputs_nvte[i], kNVTEColumnwiseScaleInv, out_scale_ptr, scale_dtype,
+                  scale_shape);
       }
     }
 

@@ -38,7 +38,7 @@ void fused_amax_and_scale_update_after_reduction(const at::Tensor& amax_reductio
 
   // Helper to deallocate a batch of NVTETensors
   struct DestroyGuard {
-    NVTETensor *data;
+    NVTETensor* data;
     size_t n;
     ~DestroyGuard() { nvte_destroy_tensors(data, n); }
   };

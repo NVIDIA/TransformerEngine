@@ -1148,7 +1148,8 @@ size_t typeToSize(const DType type);
 size_t typeToNumBits(const DType type);
 
 void CheckNoopTensor(const Tensor &t, const std::string_view &name);
-void CheckInputTensor(const Tensor &t, const std::string_view &name, bool check_scale_inv_shapes = true);
+void CheckInputTensor(const Tensor &t, const std::string_view &name,
+                      bool check_scale_inv_shapes = true);
 void CheckOutputTensor(const Tensor &t, const std::string_view &name, bool allow_empty = false);
 
 /*! \brief Update a tensor's FP8 scale-inverse

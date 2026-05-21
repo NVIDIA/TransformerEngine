@@ -328,7 +328,8 @@ void CheckGroupedTensorShapeArrays(const GroupedTensor &t, const std::string_vie
 }
 
 // Helper function to check scale_inv for both input and output
-static void CheckGroupedScaleInv(const GroupedTensor &t, const std::string_view &name, bool is_output) {
+static void CheckGroupedScaleInv(const GroupedTensor &t, const std::string_view &name,
+                                 bool is_output) {
   const char *tensor_type = is_output ? "output" : "input";
 
   // Helper to check scale_inv for both rowwise and columnwise layouts
@@ -372,7 +373,8 @@ void CheckInputGroupedTensor(const GroupedTensor &t, const std::string_view &nam
   CheckGroupedTensorShapeArrays(t, name);
 }
 
-void CheckOutputGroupedTensor(const GroupedTensor &t, const std::string_view &name, bool allow_empty) {
+void CheckOutputGroupedTensor(const GroupedTensor &t, const std::string_view &name,
+                              bool allow_empty) {
   if (!allow_empty) {
     NVTE_CHECK(t.has_data() || t.has_columnwise_data(), "Output grouped tensor ", name,
                " not allocated");
