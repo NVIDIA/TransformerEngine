@@ -54,7 +54,7 @@ if(NOT arch_100_index EQUAL -1)
     list(APPEND NVTE_SPECIFIC_ARCHS "103a")
   endif()
   if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 13.3)
-    list(APPEND NVTE_SPECIFIC_ARCHS "107f")
+    list(APPEND NVTE_SPECIFIC_ARCHS "107a")
   endif()
 endif()
 
