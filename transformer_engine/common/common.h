@@ -156,7 +156,7 @@ class Shape {
   constexpr operator NVTEShape() const noexcept { return data_; }
 
   /*! Cast to std::vector */
-  operator std::vector<size_t>() const {
+  explicit operator std::vector<size_t>() const {
     return std::vector<size_t>(data_.data, data_.data + data_.ndim);
   }
 
