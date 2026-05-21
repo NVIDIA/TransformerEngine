@@ -1507,7 +1507,8 @@ inline void launch_grouped_gemm_setup(
   // NVFP4 alpha needs A's amax from either A_sel.amax (grouped) or amax_ptrs (discrete).
   const bool a_has_amax = (A_sel.amax != nullptr) ||
                           (A_sel.dptr == nullptr && a_multi_tensor_args.amax_ptrs[0] != nullptr);
-  const bool needs_nvfp4_alpha = a_has_amax && (B_sel.amax != nullptr);
+  const bool needs_nvfp4_alpha = transformer_engine::is_nvfp_scaling(A_sel.scaling_mode) &&
+                                 a_has_amax && (B_sel.amax != nullptr);
 
   setup_grouped_gemm_kernel<<<num_blocks, threads_per_block, 0, stream>>>(
       ws.A_ptrs, ws.B_ptrs, ws.C_ptrs, ws.D_ptrs, ws.a_rows, ws.a_cols, ws.b_rows, ws.b_cols,
