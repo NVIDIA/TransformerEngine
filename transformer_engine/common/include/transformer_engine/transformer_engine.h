@@ -131,6 +131,20 @@ typedef void *NVTETensor;
  */
 NVTETensor nvte_create_tensor(NVTEScalingMode scaling_mode);
 
+/*! \brief Create a batch of new TE tensors.
+ *
+ * Equivalent to calling nvte_create_tensor N times with the same
+ * scaling mode. Before use, each tensor's parameters need to be set.
+ * TE tensors are just wrappers on top of raw data and do not own
+ * memory.
+ *
+ *  \param[in]  scaling_mode  Scaling mode shared by all tensors.
+ *  \param[out] tensors       Caller-allocated array of length N to
+ *                            receive the new tensors.
+ *  \param[in]  N             Number of tensors to create.
+ */
+void nvte_create_tensors(NVTEScalingMode scaling_mode, NVTETensor *tensors, size_t N);
+
 /*! \brief Destroy a TE tensor.
  *
  * Since the TE tensor does not own memory, the underlying
@@ -139,6 +153,17 @@ NVTETensor nvte_create_tensor(NVTEScalingMode scaling_mode);
  *  \param[in] tensor Tensor to be destroyed.
  */
 void nvte_destroy_tensor(NVTETensor tensor);
+
+/*! \brief Destroy a batch of TE tensors.
+ *
+ * Equivalent to calling nvte_destroy_tensor N times. Since TE tensors
+ * do not own memory, the underlying data is not freed during this
+ * operation. Null entries are ignored.
+ *
+ *  \param[in] tensors  Array of tensors to be destroyed.
+ *  \param[in] N        Number of tensors in the array.
+ */
+void nvte_destroy_tensors(NVTETensor *tensors, size_t N);
 
 /*! \brief Get a raw pointer to the tensor's rowwise data.
  *

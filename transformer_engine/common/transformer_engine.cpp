@@ -433,6 +433,32 @@ class TensorAllocator {
                MAX_TENSOR_NUM, ". There is probably a memory leak in your application.");
   }
 
+  void Allocate(NVTEScalingMode mode, NVTETensor *out, size_t N) {
+    std::lock_guard<std::mutex> lock(mutex);
+    const size_t available = free_list.size() + (memory.capacity() - memory.size());
+    NVTE_CHECK(available >= N, "Cannot allocate ", N,
+               " new NVTETensors. Maximum number of tensors reached: ", MAX_TENSOR_NUM,
+               ". There is probably a memory leak in your application.");
+    for (size_t i = 0; i < N; ++i) {
+      uintptr_t index;
+      if (!free_list.empty()) {
+        index = free_list.back();
+        free_list.pop_back();
+      } else {
+        memory.emplace_back();
+        index = memory.size();
+        size = index;
+        memory[index - 1].nvte_tensor = reinterpret_cast<NVTETensor>(index);
+      }
+      memory[index - 1].scaling_mode = mode;
+      out[i] = reinterpret_cast<NVTETensor>(index);
+    }
+    if (debug) {
+      std::cout << "Allocated range of " << N << " tensors. Free list size: " << free_list.size()
+                << " and capacity " << free_list.capacity() << std::endl;
+    }
+  }
+
   void Free(NVTETensor t) {
     uintptr_t index = reinterpret_cast<uintptr_t>(t);
     if (index == 0) return;
@@ -593,6 +619,10 @@ GroupedTensor *convertNVTEGroupedTensorCheck(const NVTEGroupedTensor t) {
 NVTETensor nvte_create_tensor(NVTEScalingMode scaling_mode) {
   NVTETensor ret = transformer_engine::TensorAllocator::instance().Allocate(scaling_mode);
   return ret;
+}
+
+void nvte_create_tensors(NVTEScalingMode scaling_mode, NVTETensor *tensors, size_t N) {
+  transformer_engine::TensorAllocator::instance().Allocate(scaling_mode, tensors, N);
 }
 
 void nvte_destroy_tensor(NVTETensor tensor) {
@@ -943,10 +973,8 @@ NVTEScalingMode nvte_tensor_scaling_mode(const NVTETensor tensor) {
 }
 
 void nvte_tensor_pack_create(NVTETensorPack *pack) {
-  for (int i = 0; i < pack->MAX_SIZE; i++) {
-    pack->tensors[i] =
-        transformer_engine::TensorAllocator::instance().Allocate(NVTE_DELAYED_TENSOR_SCALING);
-  }
+  transformer_engine::TensorAllocator::instance().Allocate(NVTE_DELAYED_TENSOR_SCALING,
+                                                           pack->tensors, pack->MAX_SIZE);
 }
 
 void nvte_tensor_pack_destroy(NVTETensorPack *pack) {
