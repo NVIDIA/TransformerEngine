@@ -415,6 +415,12 @@ class _ScaledGLU(BasicOperation):
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
+        if self.activation_recompute:
+            raise RuntimeError(
+                f"{self.__class__.__name__}(activation_recompute=True) requires the "
+                "fused grouped MLP path."
+            )
+
         extra_input = basic_op_extra_inputs[0][0]
 
         # Determine compute dtype
@@ -471,6 +477,12 @@ class _ScaledGLU(BasicOperation):
         Iterable[Iterable[Optional[torch.Tensor]]],
         Iterable[Iterable[Optional[torch.Tensor]]],
     ]:
+        if self.activation_recompute:
+            raise RuntimeError(
+                f"{self.__class__.__name__}(activation_recompute=True) requires the "
+                "fused grouped MLP path."
+            )
+
         ctx = basic_op_ctxs[0]
         input_, scales = ctx.saved_tensors
         input_ = maybe_dequantize(input_, ctx.dtype)
