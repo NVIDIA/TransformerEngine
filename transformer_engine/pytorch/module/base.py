@@ -27,8 +27,11 @@ from ..quantization import (
     Float8CurrentScalingRecipeState,
     Float8BlockScalingRecipeState,
     NVFP4BlockScalingRecipeState,
+    CustomRecipeState,
     FP8GlobalStateManager,
+    QuantizerRole,
     RecipeState,
+    _has_delayed_scaling_state,
 )
 from ..distributed import (
     gather_along_first_dim,
@@ -80,18 +83,19 @@ class UserBufferQuantizationMode(Enum):
 
 def get_dummy_wgrad(shape: list, dtype: torch.dtype, zero=False) -> torch.Tensor:
     """Returns a dummy tensor of given shape."""
-    assert len(shape) == 2
+
+    key = (*shape, dtype)
     global _dummy_wgrads
-    if (shape[0], shape[1], dtype) not in _dummy_wgrads:
-        _dummy_wgrads[(shape[0], shape[1], dtype)] = torch.empty(
+    if key not in _dummy_wgrads:
+        _dummy_wgrads[key] = torch.empty(
             shape,
             dtype=dtype,
             device="cuda",
             requires_grad=False,
         )
     if zero:
-        _dummy_wgrads[(shape[0], shape[1], dtype)].fill_(0)
-    return _dummy_wgrads[(shape[0], shape[1], dtype)].detach()
+        _dummy_wgrads[key].fill_(0)
+    return _dummy_wgrads[key].detach()
 
 
 def initialize_ub(
@@ -156,10 +160,11 @@ def initialize_ub(
                         which also requires ``MPI_HOME=/path/to/mpi/root`` to be set at compile time.
     """
     if not tex.device_supports_multicast():
-        assert bool(int(os.getenv("UB_SKIPMC", "0"))), (
-            "CUDA device, driver and/or toolkit version does not support comm+GEMM overlap with "
-            + "CUDA Multicast. Launch app with UB_SKIPMC=1 to try CUDA IPC instead."
-        )
+        if not bool(int(os.getenv("UB_SKIPMC", "0"))):
+            raise RuntimeError(
+                "CUDA device, driver and/or toolkit version does not support comm+GEMM overlap "
+                "with CUDA Multicast. Launch app with UB_SKIPMC=1 to try CUDA IPC instead."
+            )
 
     if not quantization_modes:
         warnings.warn(
@@ -171,34 +176,48 @@ def initialize_ub(
             UserBufferQuantizationMode.FP8 if use_fp8 else UserBufferQuantizationMode.NONE
         ]
     else:
-        assert isinstance(quantization_modes, list), "quantization_modes must be a list"
-        assert all(
-            isinstance(mode, UserBufferQuantizationMode) for mode in quantization_modes
-        ), "quantization_modes must be a list of UserBufferQuantizationMode"
+        if not isinstance(quantization_modes, list):
+            raise TypeError(
+                f"quantization_modes must be a list, got {type(quantization_modes).__name__}"
+            )
+        invalid_modes = [
+            mode for mode in quantization_modes if not isinstance(mode, UserBufferQuantizationMode)
+        ]
+        if invalid_modes:
+            raise TypeError(
+                "quantization_modes must be a list of UserBufferQuantizationMode, "
+                f"got invalid entries: {invalid_modes}"
+            )
 
     if isinstance(ub_cfgs, dict) or ub_cfgs is None:
         ub_cfgs = [ub_cfgs] * len(quantization_modes)
     else:
-        assert len(ub_cfgs) == len(
-            quantization_modes
-        ), "Number of ub_cfgs settings must match number of quantization configurations"
+        if len(ub_cfgs) != len(quantization_modes):
+            raise ValueError(
+                f"Number of ub_cfgs settings ({len(ub_cfgs)}) must match number of "
+                f"quantization configurations ({len(quantization_modes)})"
+            )
 
     global _ub_communicators
-    assert _ub_communicators is None, "UB communicators are already initialized."
+    if _ub_communicators is not None:
+        raise RuntimeError("UB communicators are already initialized.")
     _ub_communicators = {}
 
     if tex.ubuf_built_with_mpi():
         # We're bootstrapping with direct calls to MPI in Userbuffers code so we need to force
         # an MPI_Init() here by creating a new MPI process group...
-        assert torch.distributed.is_mpi_available()
+        if not torch.distributed.is_mpi_available():
+            raise RuntimeError(
+                "MPI backend is not available in torch.distributed but is required "
+                "when Userbuffers is built with MPI support"
+            )
         _ = torch.distributed.new_group(backend="mpi")
         helper = tex.CommOverlapHelper()
     else:
         # Bootstrapping with torch.distributed API, so check backend and construct
         # intra/inter-node process groups...
-        assert (
-            torch.distributed.is_initialized()
-        ), "torch.distributed must be initialized before Userbuffers"
+        if not torch.distributed.is_initialized():
+            raise RuntimeError("torch.distributed must be initialized before using Userbuffers")
         if bootstrap_backend is None:
             bootstrap_backend = "nccl"
             if torch.distributed.is_mpi_available():
@@ -206,15 +225,16 @@ def initialize_ub(
             elif torch.distributed.is_gloo_available():
                 bootstrap_backend = "gloo"
         else:
-            assert bootstrap_backend in [
-                "gloo",
-                "mpi",
-                "nccl",
-            ], "Invalid torch.distributed backend for bootstrapping Userbuffers!"
-            assert torch.distributed.is_backend_available(bootstrap_backend), (
-                f"PyTorch must be compiled with '{bootstrap_backend}' support in order to "
-                f"bootstrap Userbuffers with '{bootstrap_backend}' collectives."
-            )
+            if bootstrap_backend not in ["gloo", "mpi", "nccl"]:
+                raise ValueError(
+                    f"Invalid torch.distributed backend '{bootstrap_backend}' for bootstrapping "
+                    "Userbuffers. Must be one of: 'gloo', 'mpi', 'nccl'"
+                )
+            if not torch.distributed.is_backend_available(bootstrap_backend):
+                raise RuntimeError(
+                    f"PyTorch must be compiled with '{bootstrap_backend}' support in order to "
+                    f"bootstrap Userbuffers with '{bootstrap_backend}' collectives."
+                )
 
         world_group = torch.distributed.new_group(backend=bootstrap_backend)
         world_rank = torch.distributed.get_rank(world_group)
@@ -333,9 +353,11 @@ def initialize_ub(
             warnings.warn(
                 "Atomic GEMM uses a beta API from cublas and is not tested for all use cases."
             )
-            assert (
-                quantization_mode == UserBufferQuantizationMode.FP8
-            ), "Atomic GEMM overlap supported only for FP8 GEMM."
+            if quantization_mode != UserBufferQuantizationMode.FP8:
+                raise ValueError(
+                    "Atomic GEMM overlap supported only for FP8 GEMM, "
+                    f"got quantization_mode={quantization_mode}"
+                )
             if method in ("bulk", "external"):
                 warnings.warn(
                     f"At {name}, atoimic GEMM not is supported for a bulk overlap."
@@ -360,20 +382,24 @@ def initialize_ub(
                 "for functionality."
             )
             if name in layers_atomic_ring_exchange:
-                assert atomic_gemm and method == "ring_exchange", assert_message
+                if not (atomic_gemm and method == "ring_exchange"):
+                    raise ValueError(assert_message)
             else:
                 if atomic_gemm and method == "ring_exchange":
-                    assert rs_ag_pairs[name] in layers_atomic_ring_exchange, assert_message
+                    if rs_ag_pairs[name] not in layers_atomic_ring_exchange:
+                        raise ValueError(assert_message)
 
         if name in external_gemm_to_overlap:
-            assert method == "external", (
-                f"At {name}, `external` overlap method is specified, but the selected method is"
-                f" {method}"
-            )
-            assert external_gemm_to_overlap[name] in methods["ring_exchange"], (
-                f"At {name}, `external` overlap method is specified, but the external gemm"
-                f" {external_gemm_to_overlap[name]} is not using `ring_exchange` overlap method"
-            )
+            if method != "external":
+                raise ValueError(
+                    f"At {name}, `external` overlap method is specified, but the selected method "
+                    f"is {method}"
+                )
+            if external_gemm_to_overlap[name] not in methods["ring_exchange"]:
+                raise ValueError(
+                    f"At {name}, `external` overlap method is specified, but the external gemm "
+                    f"{external_gemm_to_overlap[name]} is not using `ring_exchange` overlap method"
+                )
 
         buffer_dtype = (
             torch.uint8
@@ -424,7 +450,12 @@ def initialize_ub(
                     and user_ub_cfg[name]["method"] != "bulk"
                 ):
                     wgrad_name = name.replace("dgrad", "wgrad")
-                    assert wgrad_name not in user_ub_cfg
+                    if wgrad_name in user_ub_cfg:
+                        raise ValueError(
+                            f"Cannot specify user UB config for '{wgrad_name}' when its "
+                            f"corresponding dgrad '{name}' uses a non-bulk overlap method "
+                            f"('{user_ub_cfg[name]['method']}')"
+                        )
                     layers_reduce_scatter_overlap.remove(wgrad_name)
                     layers_all_gather_overlap.remove(name)
                     layers_reduce_scatter_overlap.append(name)
@@ -451,8 +482,10 @@ def get_ub(name: str, use_fp8: bool):
     # So favour simplicity until the correct design becomes clear.
     # This is mainly an internal API so we don't need to worry about future changes
     key = (name, UserBufferQuantizationMode.FP8 if use_fp8 else UserBufferQuantizationMode.NONE)
-    assert _ub_communicators is not None, "UB manager is not initialized."
-    assert key in _ub_communicators, f"UB for {name} with use_fp8={use_fp8} is not registered."
+    if _ub_communicators is None:
+        raise RuntimeError("UB manager is not initialized.")
+    if key not in _ub_communicators:
+        raise KeyError(f"UB for {name} with use_fp8={use_fp8} is not registered.")
     return _ub_communicators[key]
 
 
@@ -522,6 +555,7 @@ def fill_userbuffers_buffer_for_all_gather(
             data=global_tensor_data,
             fp8_scale_inv=local_tensor._scale_inv,
             fp8_dtype=local_tensor._fp8_dtype,
+            fake_dtype=local_tensor._dtype,
             quantizer=quantizer,
         )
         return global_tensor, local_tensor
@@ -596,6 +630,7 @@ def fill_userbuffers_buffer_for_all_gather(
             fp8_dtype=local_tensor._fp8_dtype,
             quantizer=quantizer,
             with_gemm_swizzled_scales=False,
+            fake_dtype=local_tensor._dtype,
         )
         return global_tensor, local_tensor
 
@@ -603,12 +638,138 @@ def fill_userbuffers_buffer_for_all_gather(
     raise ValueError(f"Unsupported quantizer for Userbuffers ({quantizer})")
 
 
+def _is_weight_workspace_valid(
+    workspace: QuantizedTensorStorage,
+    quantizer: Quantizer,
+) -> bool:
+    """Check if a cached weight workspace is compatible with the quantizer's current usage."""
+    if isinstance(workspace, Float8TensorStorage):
+        if (
+            not is_non_tn_fp8_gemm_supported()
+            and quantizer.columnwise_usage
+            and workspace._transpose is None
+        ):
+            return False
+    elif isinstance(workspace, MXFP8TensorStorage):
+        if quantizer.rowwise_usage and workspace._rowwise_data is None:
+            return False
+        if quantizer.columnwise_usage and workspace._columnwise_data is None:
+            return False
+    elif isinstance(workspace, NVFP4TensorStorage):
+        if quantizer.rowwise_usage and workspace._rowwise_data is None:
+            return False
+        if quantizer.columnwise_usage and workspace._columnwise_data is None:
+            return False
+    if isinstance(workspace, DebugQuantizedTensor) != isinstance(quantizer, DebugQuantizer):
+        return False
+    return True
+
+
+def quantize_weight(
+    *,
+    tensor: Optional[torch.Tensor] = None,
+    quantizer: Optional[Quantizer] = None,
+    workspace: Optional[QuantizedTensorStorage] = None,
+    update_workspace: bool = True,
+    skip_update_flag: Optional[torch.Tensor] = None,
+    fsdp_group: Optional["dist_group_type"] = None,
+    workspace_dtype: Optional[torch.dtype] = None,
+    cache: bool = False,
+) -> Tuple[QuantizedTensorStorage, Optional[QuantizedTensorStorage]]:
+    """Quantize a weight tensor, optionally reusing a cached workspace.
+
+    Parameters
+    ----------
+    tensor: torch.Tensor, optional
+        Weight tensor to quantize.
+    quantizer: Quantizer, optional
+        Quantizer for casting the weight.
+    workspace: QuantizedTensorStorage, optional
+        Previously cached workspace (from the module's ``_fp8_workspaces``).
+        ``None`` indicates a cache miss.
+    update_workspace: bool, default = True
+        Whether to update an existing workspace with fresh values.
+    skip_update_flag: torch.Tensor, optional
+        GPU flag to conditionally skip the update.
+    fsdp_group: dist_group_type, optional
+        FSDP process group the weights are distributed over.
+    workspace_dtype: torch.dtype, optional
+        High-precision dtype for debug quantization workspaces.
+    cache: bool, default = False
+        If ``True`` and a new workspace is created, it will be returned
+        as the second element so the caller can store it.
+
+    Returns
+    -------
+    (weightmat, new_workspace)
+        *weightmat*: quantized weight ready for GEMM.
+        *new_workspace*: non-``None`` only when a brand-new workspace was
+        created **and** ``cache=True``.  The caller should store it in
+        ``_fp8_workspaces``.
+    """
+
+    # Already-quantized weight (primary FP8 parameters)
+    if isinstance(tensor, QuantizedTensor):
+        update_rowwise = True if quantizer.rowwise_usage else None
+        update_columnwise = True if quantizer.columnwise_usage else None
+        tensor.update_usage(
+            rowwise_usage=update_rowwise,
+            columnwise_usage=update_columnwise,
+        )
+        if isinstance(quantizer, DebugQuantizer):
+            tensor = quantizer.wrap_quantized_tensor(tensor)
+        return tensor, None
+
+    # Validate workspace
+    if workspace is not None and quantizer is not None:
+        if not _is_weight_workspace_valid(workspace, quantizer):
+            workspace = None
+
+    # FSDP gather on cached workspace
+    if (
+        workspace is not None
+        and tensor is not None
+        and fsdp_group is not None
+        and workspace.data.shape != tensor.data.shape
+    ):
+        _fsdp_gather_tensors(fsdp_group, [tensor.data.shape], workspace)
+
+    # Cache hit — update in-place and return
+    if workspace is not None:
+        if skip_update_flag is not None:
+            update_workspace = True
+        if update_workspace:
+            if tensor is None:
+                raise ValueError("tensor kwarg must be provided to update FP8 workspace")
+            if hasattr(workspace, "quantize_"):
+                workspace.quantize_(tensor, noop_flag=skip_update_flag)
+            else:
+                tex.quantize(tensor, quantizer, workspace, skip_update_flag)
+        return workspace, None
+
+    # Cache miss — create new workspace
+    if tensor is None or quantizer is None:
+        raise ValueError("tensor and quantizer kwargs must be provided to construct FP8 workspace")
+    if cache:
+        # Ensure the tensor in the cache is an instance of torch.Tensor,
+        # as it persists beyond a single forward pass.
+        # Setting internal=True would cause the data to be removed in prepare_for_saving(...).
+        saved_internal = quantizer.internal
+        quantizer.internal = False
+    out = quantizer.quantize(tensor, dtype=workspace_dtype)
+    if cache:
+        quantizer.internal = saved_internal
+        return out, out
+    return out, None
+
+
 class TransformerEngineBaseModule(torch.nn.Module, ABC):
     """Base TE module."""
 
     def __init__(self, name: Optional[str] = None) -> None:
         super().__init__()
-        assert torch.cuda.is_available(), "TransformerEngine needs CUDA."
+        if not torch.cuda.is_available():
+            raise RuntimeError("TransformerEngine needs CUDA.")
         self.name = name
         self.next_iter_when_debug_should_be_run = 0
         self.fp8_initialized = False
@@ -618,7 +779,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fp8_meta["fp8_checkpoint"] = False
         self.fp8_meta["fp8_group"] = None
         self.fp8_meta_tensors_initialized = False
-        self.quantizers = {"scaling_fwd": {}, "scaling_bwd": {}}
+        self.quantizers = {"scaling_fwd": [], "scaling_bwd": []}
         self.tp_group = None
         self.tp_size = 1
         self.sequence_parallel = False
@@ -631,6 +792,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.activation_dtype: Optional[torch.dtype] = None
         self.wgrad_accumulation_and_reduce_hooks = []
         self.wgrad_store = None
+        self._output_quantizer_role: Optional[QuantizerRole] = None
+        self._grad_input_quantizer_role: Optional[QuantizerRole] = None
 
         if not TEDebugState.debug_enabled:
             TEDebugState.initialize()
@@ -650,6 +813,85 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         parameters and buffers.
         """
         super().__setattr__(name, value)
+
+    @property
+    def output_quantizer_role(self) -> Optional[QuantizerRole]:
+        """Caller-configurable :class:`QuantizerRole` for the forward output quantizer.
+
+        When set, overrides the default role used by :meth:`get_quantizer_roles`
+        for the forward-pass output quantizer slot.  Setting this after
+        quantizers have been created forces their recreation on the next
+        forward pass.
+
+        See also :attr:`grad_input_quantizer_role` for the backward-pass
+        counterpart.
+        """
+        return self._output_quantizer_role
+
+    @output_quantizer_role.setter
+    def output_quantizer_role(self, role: Optional[QuantizerRole]) -> None:
+        if role == self._output_quantizer_role:
+            return
+        self._output_quantizer_role = role
+        if self.fp8_meta_tensors_initialized:
+            self.fp8_meta_tensors_initialized = False
+
+    @property
+    def grad_input_quantizer_role(self) -> Optional[QuantizerRole]:
+        """Caller-configurable :class:`QuantizerRole` for the grad-input quantizer.
+
+        Backward-pass counterpart of :attr:`output_quantizer_role`.
+        """
+        return self._grad_input_quantizer_role
+
+    @grad_input_quantizer_role.setter
+    def grad_input_quantizer_role(self, role: Optional[QuantizerRole]) -> None:
+        if role == self._grad_input_quantizer_role:
+            return
+        self._grad_input_quantizer_role = role
+        if self.fp8_meta_tensors_initialized:
+            self.fp8_meta_tensors_initialized = False
+
+    def _warn_missing_output_quantizer_role(
+        self,
+        fp8_output: bool,
+        fp8_grad: bool,
+    ) -> None:
+        """Warn when quantized output is requested but no consumer role is set.
+
+        Only relevant for ``CustomRecipe`` where the ``qfactory`` dispatches
+        on roles.  Built-in recipes ignore role metadata.
+        """
+        recipe = FP8GlobalStateManager.get_fp8_recipe()
+        if not recipe.custom():
+            return
+        if fp8_output and self._output_quantizer_role is None:
+            warnings.warn(
+                f"{type(self).__name__}: fp8_output=True but "
+                "output_quantizer_role is not set.  The CustomRecipe qfactory "
+                "will receive None for the output quantizer role.",
+                stacklevel=3,
+            )
+        if fp8_grad and self._grad_input_quantizer_role is None:
+            warnings.warn(
+                f"{type(self).__name__}: fp8_grad=True but "
+                "grad_input_quantizer_role is not set.  The CustomRecipe "
+                "qfactory will receive None for the grad-input quantizer role.",
+                stacklevel=3,
+            )
+
+    @property
+    def is_fsdp2(self) -> bool:
+        """Whether this module is wrapped with FSDP2."""
+        if not hasattr(self, "_is_fsdp2"):
+            try:
+                from ..distributed import _get_module_fsdp_state
+
+                _get_module_fsdp_state(self)
+                self._is_fsdp2 = True
+            except (RuntimeError, ImportError):
+                self._is_fsdp2 = False
+        return self._is_fsdp2
 
     def adjust_amax_history_length(self, length: int, fwd: Optional[bool] = None) -> None:
         """
@@ -692,17 +934,21 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 fwd_pos, fwd_key, bwd_pos, bwd_key = self.fp8_meta[
                     FP8GlobalStateManager.get_buffer_info()
                 ]
+                qstate = FP8GlobalStateManager.quantization_state
                 for pos, buffer_key in zip((fwd_pos, bwd_pos), (fwd_key, bwd_key)):
-                    if buffer_key in FP8GlobalStateManager.global_amax_buffer:
-                        assert (
-                            buffer_key in FP8GlobalStateManager.global_amax_history_buffer
-                        ), "TE internal error during amax history change."
-                        FP8GlobalStateManager.global_amax_buffer[buffer_key][pos] = self.fp8_meta[
+                    if buffer_key in qstate.global_amax_buffer:
+                        if buffer_key not in qstate.global_amax_history_buffer:
+                            raise RuntimeError(
+                                "TE internal error during amax history change: "
+                                f"buffer_key '{buffer_key}' found in global_amax_buffer "
+                                "but missing from global_amax_history_buffer"
+                            )
+                        qstate.global_amax_history_buffer[buffer_key][pos] = self.fp8_meta[
+                            meta_key
+                        ].amax_history
+                        qstate.global_amax_buffer[buffer_key][pos] = self.fp8_meta[
                             meta_key
                         ].amax_history[0]
-                        FP8GlobalStateManager.global_amax_history_buffer[buffer_key][pos] = (
-                            self.fp8_meta[meta_key].amax_history
-                        )
 
     def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
         """Init scales and amaxes for fwd | bwd."""
@@ -726,29 +972,133 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 return
             if recipe.nvfp4() and isinstance(recipe_state, NVFP4BlockScalingRecipeState):
                 return
+            if recipe.custom() and isinstance(recipe_state, CustomRecipeState):
+                return
 
         # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
         # 2 (grad_output and grad_input) for bwd
         num_fp8_tensors = self.fp8_meta["num_gemms"] * 3 if fwd else self.fp8_meta["num_gemms"] * 2
 
         # Initialize recipe state and quantizers
-        recipe_state = RecipeState.create(
+        roles = self.get_quantizer_roles(  # pylint: disable=assignment-from-none
+            fwd=fwd, num_quantizers=num_fp8_tensors
+        )
+        if roles is not None:
+            assert (
+                len(roles) == num_fp8_tensors
+            ), f"Recipe roles must match number of quantizers ({len(roles)=} vs {num_fp8_tensors=})"
+        recipe_state = RecipeState.create(  # pylint: disable=assignment-from-none
             recipe,
             mode=("forward" if fwd else "backward"),
             num_quantizers=num_fp8_tensors,
+            roles=roles,
         )
+
+        # Reached the rebuild path because ``fp8_meta_tensors_initialized``
+        # was flipped to False after first init — most commonly because the
+        # ``output_quantizer_role`` / ``grad_input_quantizer_role`` setter
+        # invalidated state when a parent module (e.g. ``MultiheadAttention``)
+        # wired boundary roles. That setter is recipe-agnostic, so this code
+        # fires even for built-in recipes that don't consume role information
+        # in ``make_quantizers``.
+        #
+        # Rebuilding the recipe state must preserve persistent training
+        # buffers (delayed-scaling ``scale`` / ``amax_history``) so the new
+        # quantizer instances and the ``FP8GlobalStateManager`` reduction
+        # buffers end up viewing the SAME tensor objects, and so any
+        # checkpoint-loaded state isn't silently destroyed on the first
+        # forward after ``load_state_dict``.
+        old_state = self.fp8_meta.get(fp8_meta_tensor_key)
+        if old_state is not None:
+            recipe_state.inherit_state_from(old_state)
 
         self.fp8_meta[fp8_meta_tensor_key] = recipe_state
         self.quantizers[fp8_meta_tensor_key] = recipe_state.make_quantizers()
+
+    def get_quantizer_roles(
+        self,
+        *,
+        fwd: bool,  # pylint: disable=unused-argument
+        num_quantizers: int,  # pylint: disable=unused-argument
+    ) -> Optional[List[QuantizerRole]]:
+        """Return an ordered list of :class:`QuantizerRole` for quantizers.
+
+        Overview
+        --------
+        When using ``CustomRecipe``, the quantizer factory is called once
+        per quantizer slot.  Each call receives a ``QuantizerRole`` that
+        tells the factory *what* is being quantized so it can return the
+        right quantizer.
+
+        This method builds the role list.  Subclasses override it to
+        describe their internal GEMM layout.
+
+        Slot layout
+        -----------
+        Return one ``QuantizerRole`` per slot, in the same order as the
+        module's quantizer array.  For example, ``Linear`` uses 3
+        forward slots ``[input, weight, output]`` and 2 backward slots
+        ``[grad_output, grad_input]``.  Multi-GEMM modules like
+        ``LayerNormMLP`` repeat that pattern for each GEMM:
+        ``[fc1_input, fc1_weight, fc1_output, fc2_input, fc2_weight, fc2_output]``.
+
+        What to put in each slot
+        ------------------------
+        Create a ``QuantizerRole(module_type=..., tensor_type=...,
+        name=...)`` for each slot:
+
+        * **module_type** — the kind of module: ``"linear"``,
+          ``"grouped_linear"``, ``"dpa"``, etc.  The factory can dispatch
+          on this to use different quantization formats per module type.
+        * **tensor_type** — what tensor this slot holds, in the module's
+          own vocabulary.  For linears: ``"input"``, ``"weight"``,
+          ``"grad_output"``, etc.  For DPA: ``"qkv"``, ``"s"``,
+          ``"do"``, ``"dp"``, etc.
+        * **name** — the instance name (e.g. ``"encoder.layer0.fc1"``),
+          propagated from the ``name=`` constructor argument.  The factory
+          can dispatch on this to target specific layers.
+
+        Boundary slots
+        --------------
+        The last slot of a forward GEMM group (output) and the last slot
+        of a backward group (grad_input) are **boundary** slots — the
+        tensor leaves this module and enters an unknown consumer.  For
+        these slots, use ``self._output_quantizer_role`` (fwd) and
+        ``self._grad_input_quantizer_role`` (bwd), which default to
+        ``None``.  A parent module (e.g. ``MultiheadAttention``) can set
+        these attributes to fill in the consumer identity; see
+        ``MultiheadAttention._update_output_quantizer_roles`` for an
+        example.
+
+        Return value
+        ------------
+        * A list of ``QuantizerRole`` with length ``num_quantizers``.
+        * ``None`` to opt out of role-based dispatch.
+
+        Not implemented (default)
+        ~~~~~~~~~~~~~~~~~~~~~~~~~
+        The base implementation returns ``None``.  When ``None`` is
+        returned, ``CustomRecipeState`` emits a warning and falls back
+        to bare ``QuantizerRole()`` instances (all fields empty) for
+        every slot.  The factory still gets called once per slot, but
+        every call receives an identical empty role — it cannot
+        distinguish input from weight, forward from backward, or one
+        module from another.  What happens then depends entirely on the
+        factory: it may return the same quantizer for all slots (acting
+        as a uniform recipe), or it may raise an error if it requires
+        meaningful roles to dispatch on.
+        """
+        return None
 
     def _update_weight_quantizers(self) -> None:
         """Update the quantizers for the weight tensors."""
         weight_tensors = self._get_weight_tensors()
         weight_quantizers = self._get_weight_quantizers()
-        assert len(weight_tensors) == len(weight_quantizers), (
-            f"Number of weight tensors ({len(weight_tensors)}) and quantizers "
-            f"({len(weight_quantizers)}) must match"
-        )
+        if len(weight_tensors) != len(weight_quantizers):
+            raise ValueError(
+                f"Number of weight tensors ({len(weight_tensors)}) and quantizers "
+                f"({len(weight_quantizers)}) must match"
+            )
         for weight, quantizer in zip(weight_tensors, weight_quantizers):
             if quantizer is not None and isinstance(weight, QuantizedTensorStorage):
                 weight.update_quantizer(quantizer)
@@ -796,7 +1146,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                         torch.zeros_like(self.fp8_meta[key].amax_history)
                     )
                 else:
-                    assert key in fp8_meta_tensors, "Cannot reset fp8 tensors."
+                    if key not in fp8_meta_tensors:
+                        raise KeyError(
+                            f"Cannot reset fp8 tensors: key '{key}' not found in fp8_meta_tensors. "
+                            f"Available keys: {list(fp8_meta_tensors.keys())}"
+                        )
                     self.fp8_meta[key].scale.copy_(fp8_meta_tensors[key][0])
                     self.fp8_meta[key].amax_history.copy_(fp8_meta_tensors[key][1])
 
@@ -844,7 +1198,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # Copy tensors to CPU and store
         state = {}
         state["recipe"] = self.fp8_meta["recipe"]
-        if state["recipe"].delayed():
+        if _has_delayed_scaling_state(self.fp8_meta):
             state["scale_fwd"] = to_cpu(self.fp8_meta["scaling_fwd"].scale)
             state["amax_history_fwd"] = to_cpu(self.fp8_meta["scaling_fwd"].amax_history)
             state["scale_bwd"] = to_cpu(self.fp8_meta["scaling_bwd"].scale)
@@ -916,7 +1270,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             dst.copy_(src, non_blocking=True)
 
         # Load tensors
-        if self.fp8_meta["recipe"].delayed():
+        if _has_delayed_scaling_state(self.fp8_meta):
             copy_tensor(state["scale_fwd"], self.fp8_meta["scaling_fwd"].scale)
             copy_tensor(state["amax_history_fwd"], self.fp8_meta["scaling_fwd"].amax_history)
             copy_tensor(state["scale_bwd"], self.fp8_meta["scaling_bwd"].scale)
@@ -937,10 +1291,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if not self.allow_different_data_and_param_types:
             for name, param in self.named_parameters():
                 if param is not None:
-                    assert dtype == param.dtype, (
-                        "Data types for parameters must match when outside of autocasted region. "
-                        f" Found input dtype: {dtype} and {name!r} dtype: {param.dtype}"
-                    )
+                    if dtype != param.dtype:
+                        raise TypeError(
+                            "Data types for parameters must match when outside of autocasted "
+                            f"region. Found input dtype: {dtype} and {name!r} dtype: {param.dtype}"
+                        )
         self.fast_setattr("activation_dtype", dtype)
 
     def set_tensor_parallel_group(self, tp_group: Union[dist_group_type, None]) -> None:
@@ -1042,22 +1397,31 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         # Activation recomputation is used and this is the second forward phase.
         if self.fp8 and in_fp8_activation_recompute_phase():
-            delayed_scaling_recipe = self.fp8_meta["recipe"].delayed()
+            delayed_scaling_recipe = _has_delayed_scaling_state(self.fp8_meta)
             FP8GlobalStateManager.get_old_fp8_meta_tensors_for_recompute(self.fp8_meta)
         else:
-            assert inp.is_cuda, "TransformerEngine needs CUDA."
+            if not inp.is_cuda:
+                raise RuntimeError(
+                    f"TransformerEngine needs CUDA. Got input on device: {inp.device}"
+                )
 
             if self.tp_size > 1:
-                assert self.tp_group_initialized, "TP group not initialized."
+                if not self.tp_group_initialized:
+                    raise RuntimeError(
+                        "Tensor parallel group not initialized. Call "
+                        "set_tensor_parallel_group() before forward pass when tp_size > 1."
+                    )
 
             self.set_activation_dtype(inp)
             self.init_fp8_metadata(num_gemms=num_gemms)
             self._check_weight_tensor_recipe_correspondence()
 
-            delayed_scaling_recipe = self.fp8 and self.fp8_meta["recipe"].delayed()
+            delayed_scaling_recipe = self.fp8 and _has_delayed_scaling_state(self.fp8_meta)
             if delayed_scaling_recipe:
                 if self.sequence_parallel:
-                    assert self.fp8_meta["recipe"].reduce_amax, (
+                    assert (
+                        self.fp8_meta["recipe"].custom() or self.fp8_meta["recipe"].reduce_amax
+                    ), (
                         "Amax reduction across tensor parallel group is "
                         "necessary when using sequence parallelism with FP8."
                     )
@@ -1079,7 +1443,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         Required to be called at the end of the forward function to properly handle
         DelayedScaling metadata handling and the NVTX ranges.
         """
-        delayed_scaling_recipe = self.fp8 and self.fp8_meta["recipe"].delayed()
+        delayed_scaling_recipe = self.fp8 and _has_delayed_scaling_state(self.fp8_meta)
         if delayed_scaling_recipe and self.fp8 and in_fp8_activation_recompute_phase():
             FP8GlobalStateManager.restore_fp8_meta_tensors(self.fp8_meta)
         nvtx_range_pop()
@@ -1134,9 +1498,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         grad_output = grad_output.reshape((-1, grad_output.shape[-1]))
         grad_output = grad_output.contiguous()
         gather_grad_output = row_parallel_mode and ctx.sequence_parallel
+        use_fp8_bwd = ctx.fp8 and ctx.backward_override is None
 
         # Non-FP8 case: bgrad is fused with wgrad for this case.
-        if not ctx.fp8 and not ctx.debug:
+        if not use_fp8_bwd and not ctx.debug:
             if gather_grad_output:
                 if not ctx.ub_overlap_ag:  # Perform NCCL all-gather
                     grad_output, _ = gather_along_first_dim(grad_output, ctx.tp_group)
@@ -1328,10 +1693,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     if hasattr(self, "_high_precision_init_val"):
                         del self._high_precision_init_val
 
-                param._high_precision_init_val = high_precision_init_val
-                param.get_high_precision_init_val = MethodType(get, param)
-                param.clear_high_precision_init_val = MethodType(clear, param)
-                # Update the parameter based on its type
+                # DTensor.from_local() does not preserve object identity,
+                # so attach to the DTensor's local tensor when applicable.
+                target = dtensor_param._local_tensor if is_dtensor else param
+                target._high_precision_init_val = high_precision_init_val
+                target.get_high_precision_init_val = MethodType(get, target)
+                target.clear_high_precision_init_val = MethodType(clear, target)
 
             if not is_dtensor:
                 self.module_setattr(name, param)
@@ -1341,135 +1708,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     @abstractmethod
     def forward(self):
         """Needs override."""
-
-    def get_weight_workspace(
-        self,
-        *,
-        tensor: Optional[torch.Tensor] = None,
-        quantizer: Optional[Quantizer] = None,
-        cache_name: Optional[str] = None,
-        update_workspace: bool = True,
-        skip_update_flag: Optional[torch.Tensor] = None,
-        fsdp_group: Optional[dist_group_type] = None,
-        workspace_dtype: Optional[torch.dtype] = None,
-    ) -> QuantizedTensor:
-        """Get workspace buffer for weights and maybe update its values
-
-        The workspace buffer may be cached for future function calls.
-
-        Parameters
-        ----------
-        tensor : torch.Tensor, optional
-            Values to copy into workspace. Required if the workspace
-            is being constructed or updated.
-        quantizer: Quantizer, optional
-            Quantizer used to cast the weights. Required if the
-            workspace is being constructed or updated.
-        cache_name: str, optional
-            Key for caching.
-        update_workspace: bool, default = True
-            Update workspace with values from `tensor`.
-        skip_update_flag: torch.Tensor, optional
-            GPU flag to skip updating the workspace. Take precedence
-            over `update_workspace` if provided.
-        fsdp_group: bool, default = None
-            FSDP process group that the weights are distributed over.
-        workspace_dtype: torch.dtype, default = None
-            If weight workspace contains high-precision tensor - for example
-            for debug quantization, this is dtype of the tensor.
-        """
-
-        # Handle case where weights are already quantized
-        # Note: Make sure weights have required usages, but do not
-        # destroy unnecessary usages since they may be used later.
-        if isinstance(tensor, QuantizedTensor):
-            update_rowwise_usage = True if quantizer.rowwise_usage else None
-            update_columnwise_usage = True if quantizer.columnwise_usage else None
-            tensor.update_usage(
-                rowwise_usage=update_rowwise_usage,
-                columnwise_usage=update_columnwise_usage,
-            )
-
-            if isinstance(quantizer, DebugQuantizer):
-                tensor = quantizer.wrap_quantized_tensor(tensor)
-
-            return tensor
-
-        # Try getting workspace from cache
-        out = None
-        if cache_name is not None:
-            out = self._fp8_workspaces.get(cache_name, None)
-
-        # Reset cache if workspace is invalid
-        if out is not None and quantizer is not None:
-            reset_cache = False
-            if isinstance(out, Float8TensorStorage):
-                if (
-                    not is_non_tn_fp8_gemm_supported()
-                    and quantizer.columnwise_usage
-                    and out._transpose is None
-                ):
-                    reset_cache = True
-            elif isinstance(out, MXFP8TensorStorage):
-                if quantizer.rowwise_usage and out._rowwise_data is None:
-                    reset_cache = True
-                elif quantizer.columnwise_usage and out._columnwise_data is None:
-                    reset_cache = True
-            elif isinstance(out, NVFP4TensorStorage):
-                if quantizer.rowwise_usage and out._rowwise_data is None:
-                    reset_cache = True
-                elif quantizer.columnwise_usage and out._columnwise_data is None:
-                    reset_cache = True
-            if isinstance(out, DebugQuantizedTensor) != isinstance(quantizer, DebugQuantizer):
-                reset_cache = True
-            if reset_cache:
-                out = None
-                del self._fp8_workspaces[cache_name]
-
-        # Gather cached Fp8 workspace if it's distributed
-        # NOTE: FSDP sharding is supported only for Fp8 buffers and will not work
-        #       for models initialized with Fp8 primary weights.
-        if (
-            out is not None
-            and tensor is not None
-            and fsdp_group is not None
-            and out.data.shape != tensor.data.shape
-        ):
-            _fsdp_gather_tensors(fsdp_group, [tensor.data.shape], out)
-
-        # Construct workspace if needed
-        if out is None:
-            if tensor is None or quantizer is None:
-                raise ValueError(
-                    "tensor and quantizer kwargs must be provided to construct FP8 workspace"
-                )
-
-            if cache_name is not None:
-                # Ensure the tensor in the cache is an instance of torch.Tensor,
-                # as it persists beyond a single forward pass.
-                # Setting internal=True would cause the data to be removed in prepare_for_saving(...).
-                quantizer_internal = quantizer.internal
-                quantizer.internal = False
-            out = quantizer.quantize(tensor, dtype=workspace_dtype)
-            if cache_name is not None:
-                quantizer.internal = quantizer_internal
-
-            # Update cache
-            if cache_name is not None:
-                self._fp8_workspaces[cache_name] = out
-            return out
-
-        # Update workspace if needed
-        if skip_update_flag is not None:
-            update_workspace = True
-        if update_workspace:
-            if tensor is None:
-                raise ValueError("tensor kwarg must be provided to update FP8 workspace")
-            if hasattr(out, "quantize_"):
-                out.quantize_(tensor, noop_flag=skip_update_flag)
-            else:
-                tex.quantize(tensor, quantizer, out, skip_update_flag)
-        return out
 
     def _load_from_state_dict(
         self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs

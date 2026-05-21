@@ -91,18 +91,6 @@ __device__ __forceinline__ e8m0_t to_e8m0(IType amax) {
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }  // anonymous namespace
 
-inline bool is_cast_only_enabled() {
-  static bool enabled = []() {
-    const char *env = std::getenv("ENABLE_CAST_ONLY");
-    return env != nullptr && (env[0] == '1');
-  }();
-  return enabled;
-
-  //  // FIXME: when finish debugging, remove this
-  //  const char* env = std::getenv("ENABLE_CAST_ONLY");
-  //  return env != nullptr && (env[0] == '1');
-}
-
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename IType, typename OType>
 inline bool hasSpec() {
   return false;
@@ -112,19 +100,19 @@ inline bool hasSpec() {
 // OType could be [fp8e5m2, fp8e4m3]
 template <>
 inline bool hasSpec<false, false, false, fp16, fp8e5m2>() {
-  return is_cast_only_enabled();
+  return true;
 }
 template <>
 inline bool hasSpec<false, false, false, fp16, fp8e4m3>() {
-  return is_cast_only_enabled();
+  return true;
 }
 template <>
 inline bool hasSpec<false, false, false, bf16, fp8e5m2>() {
-  return is_cast_only_enabled();
+  return true;
 }
 template <>
 inline bool hasSpec<false, false, false, bf16, fp8e4m3>() {
-  return is_cast_only_enabled();
+  return true;
 }
 
 template <int32_t _M, int32_t _N>
@@ -289,7 +277,7 @@ __global__ void quantize_mxfp8_kernel_cast_only(typename CastTraits::IType *__re
                        coords.x / CastTraits::chunkElems] = biased_exponent;
       }
 
-      float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
+      float block_scale_inverse = ptx::exp2f_rcp<float>(biased_exponent);
       ptx::floatx2 block_scale_inverse_2x{block_scale_inverse, block_scale_inverse};
 
       outputUnitType rOutput[CastTraits::numOutUnitsPerChunk];
@@ -342,7 +330,7 @@ __global__ void quantize_mxfp8_kernel_cast_only(typename CastTraits::IType *__re
       }
 
       // scaling input
-      float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
+      float block_scale_inverse = ptx::exp2f_rcp<float>(biased_exponent);
       ptx::floatx2 block_scale_inverse_2x{block_scale_inverse, block_scale_inverse};
 
       outputUnitType rOutput[CastTraits::numOutUnitsPerChunk];
@@ -410,7 +398,7 @@ __global__ void quantize_mxfp8_kernel_cast_only(typename CastTraits::IType *__re
                        coords.x / CastTraits::chunkElems] = biased_exponent;
       }
 
-      float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
+      float block_scale_inverse = ptx::exp2f_rcp<float>(biased_exponent);
       ptx::floatx2 block_scale_inverse_2x{block_scale_inverse, block_scale_inverse};
 
       outputUnitType rOutput[CastTraits::numOutUnitsPerChunk];
@@ -463,7 +451,7 @@ __global__ void quantize_mxfp8_kernel_cast_only(typename CastTraits::IType *__re
       }
 
       // scaling input
-      float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
+      float block_scale_inverse = ptx::exp2f_rcp<float>(biased_exponent);
       ptx::floatx2 block_scale_inverse_2x{block_scale_inverse, block_scale_inverse};
 
       outputUnitType rOutput[CastTraits::numOutUnitsPerChunk];
@@ -949,7 +937,7 @@ __global__ void quantize_mxfp8_kernel_cast_only(
             {
               IType row_amax = ptx::get_amax(row_amax2.x, row_amax2.y);
               e8m0_t row_biased_exponent = to_e8m0<OType>(row_amax);
-              row_scale_inverse = ptx::exp2f_rcp(row_biased_exponent);
+              row_scale_inverse = ptx::exp2f_rcp<float>(row_biased_exponent);
               if constexpr (CastTraits::_cache_rowwise_scale_in_smem) {
                 int32_t rowwise_scale_offset =
                     rowwise_scale_smem_base_offset +
@@ -969,7 +957,7 @@ __global__ void quantize_mxfp8_kernel_cast_only(
               __syncwarp();
               float col_amax = sColwiseReduce[threadIdx.x];
               e8m0_t col_biased_exponent = to_e8m0<OType>(col_amax);
-              float col_scale_inverse = ptx::exp2f_rcp(col_biased_exponent);
+              float col_scale_inverse = ptx::exp2f_rcp<float>(col_biased_exponent);
               sColwiseReduce[threadIdx.x] = col_scale_inverse;
               size_t colwise_scale_offset =
                   colwise_scale_base_offset +
@@ -1396,7 +1384,7 @@ __global__ void quantize_mxfp8_kernel_cast_only(
           {
             IType row_amax = ptx::get_amax(row_amax2.x, row_amax2.y);
             e8m0_t row_biased_exponent = to_e8m0<OType>(row_amax);
-            row_scale_inverse = ptx::exp2f_rcp(row_biased_exponent);
+            row_scale_inverse = ptx::exp2f_rcp<float>(row_biased_exponent);
             if constexpr (CastTraits::_cache_rowwise_scale_in_smem) {
               int32_t rowwise_scale_offset =
                   rowwise_scale_smem_base_offset +
@@ -1416,7 +1404,7 @@ __global__ void quantize_mxfp8_kernel_cast_only(
             __syncwarp();
             float col_amax = sColwiseReduce[threadIdx.x];
             e8m0_t col_biased_exponent = to_e8m0<OType>(col_amax);
-            float col_scale_inverse = ptx::exp2f_rcp(col_biased_exponent);
+            float col_scale_inverse = ptx::exp2f_rcp<float>(col_biased_exponent);
             sColwiseReduce[threadIdx.x] = col_scale_inverse;
             size_t colwise_scale_offset =
                 colwise_scale_base_offset +

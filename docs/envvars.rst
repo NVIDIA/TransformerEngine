@@ -72,6 +72,12 @@ Build Configuration
    :Default: Not set
    :Description: Internal flag set to ``1`` during the build process to indicate that the project is being built. Not intended for external use.
 
+.. envvar:: NVTE_BUILD_NUM_PHILOX_ROUNDS
+
+   :Type: ``int`` (positive integer)
+   :Default: ``10``
+   :Description: Number of Philox4x32 rounds used by stochastic rounding kernels. Must be a positive integer.
+
 Optional Dependencies
 ^^^^^^^^^^^^^^^^^^^^^
 
@@ -136,9 +142,9 @@ Attention Backend Selection
 
 .. envvar:: NVTE_FUSED_ATTN_BACKEND
 
-   :Type: ``int`` (0, 1, or 2)
+   :Type: ``int`` (1 or 2)
    :Default: Auto-selected
-   :Description: Force a specific FusedAttention backend. ``0`` = F16_max512_seqlen (cuDNN, ≤512 seq len), ``1`` = F16_arbitrary_seqlen (cuDNN, any seq len), ``2`` = FP8 backend. If not set, the backend is automatically selected based on the input configuration.
+   :Description: Force a specific FusedAttention backend. ``1`` = F16_arbitrary_seqlen (cuDNN, any seq len), ``2`` = FP8 backend. If not set, the backend is automatically selected based on the input configuration.
 
 .. envvar:: NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT
 
@@ -274,6 +280,12 @@ Kernel Configuration
    :Type: ``int`` (0 or 1)
    :Default: ``0``
    :Description: Emit a warning when falling back from CUTLASS to cuBLAS for grouped GEMM operations.
+
+.. envvar:: NVTE_NVFP4_ROW_SCALED_ACTIVATION
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Enable row-scaled NVFP4 tensors for forward activation quantizers in the ``NVFP4BlockScaling`` recipe. When set to ``1`` (or when ``NVFP4BlockScaling(row_scaled_activation=True)`` is used), rowwise ``amax`` metadata is stored as one FP32 value per tensor row instead of a single scalar.
 
 Torch Compilation and Fusion
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -436,6 +448,21 @@ JAX-Specific Variables
    :Type: ``str``
    :Default: None
    :Description: Test level for JAX unit tests (``"L0"``, ``"L1"``, ``"L2"``). Used internally by the test suite.
+
+JAX Triton Extensions
+^^^^^^^^^^^^^^^^^^^^^
+
+.. envvar:: NVTE_USE_PYTORCH_TRITON
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Explicitly acknowledge using ``pytorch-triton`` for JAX Triton kernels. When both JAX and PyTorch are installed in the same environment, PyTorch's ``pytorch-triton`` package may be imported instead of the standard ``triton`` package from OpenAI. Setting this to ``1`` suppresses the compatibility warning emitted in that situation. ``pytorch-triton`` (the real package from PyTorch's package index, not the placeholder on PyPI) is compatible with JAX Triton kernels.
+
+.. envvar:: NVTE_JAX_ENFORCE_TRITON_AUTOTUNING
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Raise a ``RuntimeError`` when the installed JAX is too old to safely run ``TritonAutotunedKernelCall`` (`jax-ml/jax#35218 <https://github.com/jax-ml/jax/pull/35218>`_) instead of silently falling back to non-autotuned dispatch. Useful for CI or debugging to ensure Triton autotuning is active. When set to ``0`` (default), old JAX versions silently fall back to single-config (non-autotuned) kernel dispatch for compatibility.
 
 Examples
 --------

@@ -28,6 +28,11 @@ Environment Variables:
         pytorch-triton for JAX Triton kernels (suppresses warnings). This is
         useful when both JAX and PyTorch are installed in the same environment.
         Default is "0".
+    NVTE_JAX_ENFORCE_TRITON_AUTOTUNING: If set to "1", raise a RuntimeError when
+        the installed JAX is too old to safely run TritonAutotunedKernelCall
+        (jax-ml/jax#35218) instead of silently falling back to non-autotuned
+        dispatch. Useful for CI or debugging to ensure autotuning is active.
+        Default is "0" (silent compatibility fallback).
 """
 
 import hashlib
@@ -41,6 +46,13 @@ from packaging import version
 from jax import core
 import jax
 import jax.numpy as jnp
+
+from ..version_utils import (
+    TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION,
+    TRITON_EXTENSION_MIN_JAX_VERSION,
+    is_triton_autotuned_alias_safe,
+    is_triton_extension_supported,
+)
 
 
 # Placeholder package version on PyPI that should never be used
@@ -124,7 +136,13 @@ def _check_triton_compatibility():
             "If you don't need Triton, use transformer_engine.jax.cpp_extensions instead."
         )
 
-    use_pytorch_triton_explicit = bool(int(os.environ.get("NVTE_USE_PYTORCH_TRITON", "0")))
+    val = os.environ.get("NVTE_USE_PYTORCH_TRITON", "0")
+    try:
+        use_pytorch_triton_explicit = bool(int(val))
+    except ValueError as e:
+        raise ValueError(
+            f"NVTE_USE_PYTORCH_TRITON must be an integer (0 or 1), got: {val!r}"
+        ) from e
 
     if is_pytorch_triton:
         if use_pytorch_triton_explicit:
@@ -149,6 +167,21 @@ def _check_triton_compatibility():
 
 # Perform compatibility check and get triton info
 _TRITON_VERSION, _IS_PYTORCH_TRITON = _check_triton_compatibility()
+
+# Enforce minimum JAX version before importing gpu_triton.  The segfault on old
+# jaxlib occurs at Triton kernel dispatch time, not at import time, so gpu_triton
+# itself is safe to import on older jaxlib.  The guard is placed here (before the
+# import) as a belt-and-suspenders measure so that if the import behaviour ever
+# changes, we still fail fast with a clear error rather than a cryptic crash.
+if not is_triton_extension_supported():
+    raise RuntimeError(
+        f"JAX >= {TRITON_EXTENSION_MIN_JAX_VERSION} required for "
+        "transformer_engine.jax.triton_extensions. "
+        "Triton kernel dispatch segfaults with older jaxlib. "
+        f"Current jax version: {jax.__version__}. "
+        "Please upgrade: pip install --upgrade jax jaxlib. "
+        "If you don't need Triton, use transformer_engine.jax.cpp_extensions instead."
+    )
 
 try:
     from jax._src.lib import gpu_triton
@@ -187,7 +220,13 @@ def get_triton_info():
         if info['is_pytorch_triton']:
              print("Using pytorch-triton - compatible with both PyTorch and JAX")
     """
-    env_acknowledged = bool(int(os.environ.get("NVTE_USE_PYTORCH_TRITON", "0")))
+    val = os.environ.get("NVTE_USE_PYTORCH_TRITON", "0")
+    try:
+        env_acknowledged = bool(int(val))
+    except ValueError as e:
+        raise ValueError(
+            f"NVTE_USE_PYTORCH_TRITON must be an integer (0 or 1), got: {val!r}"
+        ) from e
 
     return {
         "version": _TRITON_VERSION,
@@ -351,7 +390,16 @@ def triton_call_lowering(
         ctx: MLIR lowering context
         kernel_fn: Triton kernel function
         *array_args: Input arrays (from ctx)
-        grid: Grid dimensions (int or tuple)
+        grid: Grid dimensions. May be either:
+            - an int or tuple (fixed grid for every config), or
+            - a callable ``meta -> int|tuple`` (evaluated per autotune config).
+
+            Use the callable form for autotuned kernels whose grid depends on
+            ``BLOCK_SIZE`` (or any other autotuned constexpr); otherwise the
+            launch grid will not match the autotuner-selected config and the
+            kernel will either over-launch (waste) or under-cover. ``meta`` is
+            the merged dict ``{**constexprs, **config.kwargs}`` for the chosen
+            config — the same convention as jax-triton's ``triton_call``.
         input_output_aliases: Mapping of input to output aliases
         constexprs: Compile-time constants for the kernel. This includes both
                     tl.constexpr arguments AND scalar runtime arguments (like
@@ -365,13 +413,12 @@ def triton_call_lowering(
         def lowering(ctx, x, *, block_size):
             from ..triton_extensions import triton_call_lowering
             n = ctx.avals_in[0].size
+
+            def grid(meta):
+                return (triton.cdiv(n, meta["BLOCK_SIZE"]),)
+
             return triton_call_lowering(
-                ctx, my_kernel, x,
-                grid=(triton.cdiv(n, block_size),),
-                constexprs={
-                    "n_elements": n,  # scalar arg (not tl.constexpr in kernel)
-                    "BLOCK_SIZE": block_size,  # tl.constexpr arg
-                },
+                ctx, my_kernel, x, grid=grid, constexprs={"n_elements": n},
             )
     """
     # Get compute capability using gpu_triton
@@ -392,27 +439,69 @@ def triton_call_lowering(
     tensor_arg_names = [n for n in arg_names if n not in constexpr_names]
     signature = {n: get_triton_dtype(a) for n, a in zip(tensor_arg_names, all_avals)}
 
-    # Normalize grid to 3D
-    if isinstance(grid, int):
-        grid_tuple = (grid, 1, 1)
-    elif len(grid) == 1:
-        grid_tuple = (grid[0], 1, 1)
-    elif len(grid) == 2:
-        grid_tuple = (grid[0], grid[1], 1)
-    else:
-        grid_tuple = grid[:3]
-
-    # Default values for the kernel
-    actual_kernel_fn = kernel_fn
-    num_warps = 32
-    num_stages = (
-        1  # TODO(Phuong): consider if it is beneficial to expose num_warps, num_stages, num_ctas
+    assert callable(grid) or isinstance(grid, tuple), (
+        "Argument 'grid' must be a tuple or a callable but received: "
+        f"type={type(grid)}, value={grid}"
     )
+
+    # Normalize grid to 3D. When `grid` is a callable, defer evaluation until
+    # we know the per-config meta (so each autotune config gets its own grid,
+    # matching jax-triton's behavior).
+    def _normalize_grid(grid_tuple):
+        if isinstance(grid_tuple, int):
+            return (grid_tuple, 1, 1)
+        if len(grid_tuple) == 1:
+            return (grid_tuple[0], 1, 1)
+        if len(grid_tuple) == 2:
+            return (grid_tuple[0], grid_tuple[1], 1)
+        return tuple(grid_tuple[:3])
+
+    grid_callable = grid if callable(grid) else None
+    if grid_callable is None:
+        grid_tuple = _normalize_grid(grid)
+    else:
+        grid_tuple = None  # evaluated per-config below
+
+    # Default kernel launch parameters. These apply to non-autotuned kernels
+    # and as a fallback when an autotuned config doesn't specify them. Values
+    # match Triton's own `triton.Config` defaults (num_warps=4, num_stages=3,
+    # num_ctas=1) and jax-triton's `get_or_create_triton_kernel`. Using a
+    # larger default (e.g. num_warps=32) over-provisions threads per block,
+    # which slashes SM occupancy on non-autotuned kernels — measured as an 8×
+    # slowdown on `_make_chunk_sort_map_kernel` vs jax-triton.
+    actual_kernel_fn = kernel_fn
+    num_warps = 4
+    num_stages = 3
     num_ctas = 1
     kernel_constexprs = constexprs if constexprs is not None else {}
 
-    # Handle autotuned kernels - compile all configs
+    # Handle autotuned kernels - compile all configs.
+    # On JAX < TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION the save/restore
+    # loop in TritonAutotunedKernelCall is buggy (jax-ml/jax#35218).  Fall back to a
+    # single non-autotuned dispatch for compatibility.  Set
+    # NVTE_JAX_ENFORCE_TRITON_AUTOTUNING=1 to raise an error instead, prompting the
+    # user to upgrade JAX for improved performance.
     is_autotuned = isinstance(kernel_fn, autotuner.Autotuner)
+    if is_autotuned and not is_triton_autotuned_alias_safe():
+        val = os.environ.get("NVTE_JAX_ENFORCE_TRITON_AUTOTUNING", "0")
+        try:
+            enforce = bool(int(val))
+        except ValueError as e:
+            raise ValueError(
+                f"NVTE_JAX_ENFORCE_TRITON_AUTOTUNING must be an integer (0 or 1), got: {val!r}"
+            ) from e
+        if enforce:
+            raise RuntimeError(
+                "NVTE_JAX_ENFORCE_TRITON_AUTOTUNING=1 requires JAX >= "
+                f"{TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION} (stable) or a "
+                "post-2026-03-17 nightly for safe Triton autotuning (jax-ml/jax#35218). "
+                f"Current JAX version: {jax.__version__}. "
+                "Upgrade: pip install --upgrade jax jaxlib"
+            )
+        # Compatibility fallback: disable autotuning on old JAX to avoid
+        # CUDA_ERROR_INVALID_VALUE from the unfixed save/restore loop.
+        is_autotuned = False
+
     if is_autotuned:
         # Compile all configs for runtime selection
         kernel_calls = []
@@ -424,8 +513,10 @@ def triton_call_lowering(
             config_num_stages = config.num_stages if config.num_stages is not None else num_stages
             config_num_ctas = config.num_ctas if config.num_ctas is not None else num_ctas
 
-            # Merge config kwargs with user constexprs
-            config_constexprs = {**config.kwargs, **(constexprs if constexprs else {})}
+            # Config kwargs (e.g. BLOCK_SIZE) take priority over caller constexprs so that
+            # each autotuning candidate actually compiles with its own BLOCK_SIZE rather than
+            # having the caller-supplied grid BLOCK_SIZE override every config.
+            config_constexprs = {**(constexprs if constexprs else {}), **config.kwargs}
 
             # Compile this config
             config_kernel = compile_triton(
@@ -444,37 +535,59 @@ def triton_call_lowering(
             for _ in list(ctx.avals_in) + list(ctx.avals_out):
                 config_params.append(gpu_triton.create_array_parameter(0, 16))
 
+            # Per-config grid: evaluate `grid(meta)` if grid is a callable so
+            # the launch shape matches this config's BLOCK_SIZE (etc.).
+            if grid_callable is not None:
+                config_grid = _normalize_grid(grid_callable(config_constexprs))
+            else:
+                config_grid = grid_tuple
+
             config_call = gpu_triton.TritonKernelCall(
                 config_kernel,
-                grid_tuple[0],
-                grid_tuple[1],
-                grid_tuple[2],
+                config_grid[0],
+                config_grid[1],
+                config_grid[2],
                 config_params,
             )
 
             kernel_calls.append((config_call, str(config)))
 
-        # IMPORTANT: We pass an empty tuple for input_output_aliases_with_sizes.
-        #
-        # Background:
-        # 1. jax.ffi.ffi_lowering(operand_output_aliases=...) is a HINT to XLA that an
-        #    output can reuse an input's buffer. XLA may or may not honor this.
-        # 2. TritonAutotunedKernelCall's input_output_aliases_with_sizes triggers
-        #    save/restore logic during autotuning (see jaxlib/gpu/triton_kernels.cc:630-701).
-        #
-        # The problem: The save phase (triton_kernels.cc:632) only saves if buffers[input_idx] == buffers[output_idx],
-        # but the restore phase (triton_kernels.cc:697-700) unconditionally iterates over all aliases and tries
-        # to access input_copies[input_idx]. If XLA didn't actually alias the buffers, input_copies[input_idx] doesn't exist, creating an empty vector whose .data() returns nullptr, causing CUDA_ERROR_INVALID_VALUE during the restore memcpy.
-        #
-        # WAR: Don't pass aliases to TritonAutotunedKernelCall.
+        input_output_aliases_with_sizes = ()
+        if input_output_aliases:
+            # JAX version is guaranteed >= TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION
+            # here — verified by the upfront check that set is_autotuned.
+            num_inputs = len(ctx.avals_in)
+            aliases = []
+            for input_idx, output_idx in input_output_aliases.items():
+                aval = ctx.avals_in[input_idx]
+                size_bytes = aval.size * jnp.dtype(aval.dtype).itemsize
+                # AutotunedKernelCall expects buffer indices (inputs + outputs).
+                buffer_output_idx = num_inputs + output_idx
+                aliases.append((input_idx, buffer_output_idx, size_bytes))
+            input_output_aliases_with_sizes = tuple(aliases)
+
         kernel_call = gpu_triton.TritonAutotunedKernelCall(
             f"{actual_kernel_fn.__name__}_autotuned",
             kernel_calls,
-            (),  # Empty to avoid buggy save/restore in jaxlib/gpu/triton_kernels.cc
+            input_output_aliases_with_sizes,
         )
 
     else:
-        # Regular kernel: compile single config
+        # Regular kernel: compile single config.
+        # If the kernel is an Autotuner but JAX is too old for safe autotuning, unwrap
+        # it and use the first config's kwargs (user constexprs take priority via dict merge).
+        if isinstance(kernel_fn, autotuner.Autotuner):
+            actual_kernel_fn = kernel_fn.fn
+            if kernel_fn.configs:
+                first_cfg = kernel_fn.configs[0]
+                # user constexprs override config kwargs (so stride / size scalars win)
+                kernel_constexprs = {**first_cfg.kwargs, **(constexprs or {})}
+                num_warps = first_cfg.num_warps if first_cfg.num_warps is not None else num_warps
+                num_stages = (
+                    first_cfg.num_stages if first_cfg.num_stages is not None else num_stages
+                )
+                num_ctas = first_cfg.num_ctas if first_cfg.num_ctas is not None else num_ctas
+
         kernel = compile_triton(
             actual_kernel_fn,
             signature,
@@ -490,11 +603,18 @@ def triton_call_lowering(
         for _ in list(ctx.avals_in) + list(ctx.avals_out):
             kernel_params.append(gpu_triton.create_array_parameter(0, 16))
 
+        # Non-autotuned dispatch: evaluate `grid(meta)` once with the merged
+        # constexprs (which already reflect the single config we'll launch).
+        if grid_callable is not None:
+            single_grid = _normalize_grid(grid_callable(kernel_constexprs))
+        else:
+            single_grid = grid_tuple
+
         kernel_call = gpu_triton.TritonKernelCall(
             kernel,
-            grid_tuple[0],
-            grid_tuple[1],
-            grid_tuple[2],
+            single_grid[0],
+            single_grid[1],
+            single_grid[2],
             kernel_params,
         )
 

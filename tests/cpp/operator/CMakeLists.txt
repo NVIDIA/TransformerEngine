@@ -15,6 +15,8 @@ add_executable(test_operator
                test_cast_nvfp4_transpose.cu
                test_cast_float8blockwise.cu
                test_dequantize_mxfp8.cu
+               test_dequantize_mxfp8_grouped.cu
+               test_dequantize_nvfp4.cu
                test_transpose.cu
                test_cast_transpose.cu
                test_cast_transpose_current_scaling.cu
@@ -25,11 +27,13 @@ add_executable(test_operator
                test_normalization.cu
                test_normalization_mxfp8.cu
                test_memset.cu
+               test_splits_to_offsets.cu
                test_multi_cast_transpose.cu
                test_multi_padding.cu
                test_multi_unpadding.cu
                test_causal_softmax.cu
                test_swizzle.cu
+               test_multi_swizzle.cu
                test_swap_first_dims.cu
                test_grouped_gemm.cu
                ../test_common.cu)

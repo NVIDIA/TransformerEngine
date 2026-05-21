@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """JAX related extensions."""
+
 import os
 from pathlib import Path
 from packaging import version
@@ -14,6 +15,7 @@ from .utils import (
     all_files_in_dir,
     debug_build_enabled,
     get_cuda_library_dirs,
+    setup_mpi_flags,
 )
 from typing import List
 
@@ -107,6 +109,8 @@ def setup_jax_extension(
         cxx_flags.append("-UNDEBUG")
     else:
         cxx_flags.append("-g0")
+
+    setup_mpi_flags(include_dirs, cxx_flags)
 
     # Define TE/JAX as a Pybind11Extension
     from pybind11.setup_helpers import Pybind11Extension

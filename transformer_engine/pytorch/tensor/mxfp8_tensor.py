@@ -96,70 +96,6 @@ class MXFP8Quantizer(Quantizer):
             return False
         return True
 
-    def make_empty(
-        self,
-        shape: Iterable[int],
-        *,
-        dtype: torch.dtype = torch.float32,
-        device: Optional[torch.device] = None,
-        requires_grad: bool = False,
-        pin_memory: bool = False,
-    ) -> MXFP8Tensor:
-
-        # Canonicalize tensor attributes
-        if device is None:
-            device = torch.device("cuda")
-
-        assert (
-            shape[-1] % MXFP8_BLOCK_SCALING_SIZE == 0
-            and math.prod(shape[:-1]) % MXFP8_BLOCK_SCALING_SIZE == 0
-        ), (
-            f"Incorrect shape {shape} for MXFP8. Tensor dims must be divisible by"
-            f" {MXFP8_BLOCK_SCALING_SIZE}"
-        )
-
-        # Allocate FP8 data
-        data = None
-        scale_inv = None
-        if self.rowwise_usage:
-            data = torch.empty(shape, dtype=torch.uint8, device=device, pin_memory=pin_memory)
-            scale_inv = torch.empty(
-                round_up_to_nearest_multiple(math.prod(shape[:-1]), 128),
-                round_up_to_nearest_multiple(shape[-1] // MXFP8_BLOCK_SCALING_SIZE, 4),
-                dtype=torch.uint8,
-                device=device,
-                pin_memory=pin_memory,
-            )
-
-        # Allocate FP8 data transpose if needed
-        columnwise_data = None
-        columnwise_scale_inv = None
-        if self.columnwise_usage:
-            columnwise_data = torch.empty(
-                shape, dtype=torch.uint8, device=device, pin_memory=pin_memory
-            )
-            columnwise_scale_inv = torch.empty(
-                round_up_to_nearest_multiple(math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE, 4),
-                round_up_to_nearest_multiple(shape[-1], 128),
-                dtype=torch.uint8,
-                device=device,
-                pin_memory=pin_memory,
-            )
-
-        # Construct FP8 tensor
-        return MXFP8Tensor(
-            shape=shape,
-            dtype=dtype,
-            fp8_dtype=self.dtype,
-            rowwise_data=data,
-            rowwise_scale_inv=scale_inv,
-            columnwise_data=columnwise_data,
-            columnwise_scale_inv=columnwise_scale_inv,
-            quantizer=self,
-            requires_grad=requires_grad,
-            with_gemm_swizzled_scales=self.optimize_for_gemm,
-        )
-
     def calibrate(self, tensor: torch.Tensor) -> None:
         # TODO(ksivamani): No calibration needed for mxfp8?
         pass
@@ -296,7 +232,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         )
 
     def __repr__(self, *, tensor_contents=None):
-        return f"MXFP8Tensor(fp8_dtype={self._fp8_dtype}, data={self.dequantize(dtype=self.dtype)})"
+        return f"MXFP8Tensor(fp8_dtype={self._fp8_dtype}, data={self.dequantize()})"
 
     def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """
@@ -634,7 +570,13 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
 
         # Get FSDP state
         fsdp_state = _get_module_fsdp_state(module)
-        reshard_after_forward = fsdp_state._fsdp_param_group._reshard_after_forward
+        param_group = fsdp_state._fsdp_param_group
+        if param_group is None:
+            raise RuntimeError(
+                "FSDP state for this module has no parameter group; "
+                "cannot determine reshard_after_forward."
+            )
+        reshard_after_forward = param_group._reshard_after_forward
 
         # Remove padding from scale inverses before allgather
         # Rowwise scale_inv should be divisible by [128,4], columnwise by [4, 128]
@@ -662,7 +604,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         # are used again in backward. And hence if we need the columnwise data/scale_inv,
         # we need to send them as well for allgather in forward pass itself.
         if reshard_after_forward:
-            training_state = fsdp_state._fsdp_param_group._training_state
+            training_state = param_group._training_state
             is_backward_pass = training_state == TrainingState.PRE_BACKWARD
             # Allgather only the necessary tensors based on forward/backward pass
             rowwise_usage = not is_backward_pass
@@ -878,7 +820,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             return self._rowwise_data.shape
         if self._columnwise_data is not None:
             return self._columnwise_data.shape
-        raise RuntimeError("MXFP8Tensor has no data!")
+        return torch.Tensor.size(self)
 
     @property
     def is_cuda(self):

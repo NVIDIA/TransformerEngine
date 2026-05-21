@@ -40,7 +40,7 @@ repos:
         files: ^transformer_engine.*\.(c|cc|cxx|cpp|cu|cuh|h|hpp)$
 
   - repo: https://github.com/netromdk/vermin
-    rev: c75aca72f4e85c6e47252139e8695f1c8b5f9ae3
+    rev: b70ff9611a01a2bf2f702aa537d14e71e330edba
     hooks:
       - id: vermin
         args: ['-t=3.10-', '--violations']

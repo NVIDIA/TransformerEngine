@@ -5,7 +5,6 @@
  ************************************************************************/
 
 #include <assert.h>
-#include <cooperative_groups.h>
 #include <cuda_runtime.h>
 #include <transformer_engine/fused_router.h>
 
@@ -21,187 +20,102 @@ namespace fused_router {
 template <typename DataType, typename IndexType>
 __global__ void fused_moe_aux_loss_forward_kernel(const DataType* probs,
                                                   const IndexType* tokens_per_expert,
-                                                  int total_num_tokens, int num_experts,
-                                                  int num_rows, int num_cols, int topk, float coeff,
-                                                  DataType* aux_loss, float* Const_buf) {
-#if __CUDA_ARCH__ >= 900
-  // Using cooperative_groups to manage the cluster
-  namespace cg = cooperative_groups;
-  cg::cluster_group cluster = cg::this_cluster();
-  int thread_id = cg::this_grid().thread_rank();
-  int lane_id = thread_id % kThreadsPerWarp;
-  int warp_id = thread_id / kThreadsPerWarp;
-  int warp_num = blockDim.x * gridDim.x / kThreadsPerWarp;
-  // Only 1 block in the cluster
-  int block_id = cluster.block_rank();
-  int block_num = cluster.dim_blocks().x;
-  int cluster_id = blockIdx.x / block_num;
-  if (cluster_id > 0) return;  // Only use the cluster 0
-
-  extern __shared__ float shmem_aux_loss[];
-  CompType* aggregated_probs_per_expert = reinterpret_cast<CompType*>(shmem_aux_loss);
-  // Clear the shmem
-  for (int i = threadIdx.x; i < num_cols; i += blockDim.x) {
-    aggregated_probs_per_expert[i] = CompType(0);
+                                                  int total_num_tokens, int num_rows, int num_cols,
+                                                  int topk, float coeff, float* Coeff_buf) {
+  // -----------------------------------------------------------------------
+  // 1) Write the CPU-computed coefficient into a device buffer to re-use in BWD
+  // -----------------------------------------------------------------------
+  if (threadIdx.x == 0 && blockIdx.x == 0) {
+    Coeff_buf[0] = coeff;
   }
+
+  // -----------------------------------------------------------------------
+  // 2) Each CTA computes a partial dot-product:
+  //    Sigma_col ( Sigma_row probs[row, col] ) * tokens_per_expert[col]
+  // -----------------------------------------------------------------------
+  CompType thread_sum = CompType(0);
+
+  // Grid-stride over rows so that every row is processed exactly once.
+  // Each thread processes a subset of columns.
+  for (int col = threadIdx.x; col < num_cols; col += blockDim.x) {
+    CompType col_sum = CompType(0);
+
+    // Accumulate probs over the rows assigned to this CTA (grid-stride).
+    for (int row = blockIdx.x; row < num_rows; row += gridDim.x) {
+      col_sum += CompType(probs[row * num_cols + col]);
+    }
+
+    // Multiply by the token count for this expert.
+    col_sum *= CompType(tokens_per_expert[col]);
+
+    // Accumulate the per-column contribution into the thread-local sum.
+    thread_sum += col_sum;
+  }
+
+  // -----------------------------------------------------------------------
+  // 3) Block-level reduction of thread_sum using warp_reduce_on_shmem
+  // -----------------------------------------------------------------------
+  extern __shared__ float shmem[];
+  CompType* shmem_block = reinterpret_cast<CompType*>(shmem);
+  shmem_block[threadIdx.x] = thread_sum;
   __syncthreads();
 
-  /**
-     * Section: Reduce the probs to the aggregated_probs_per_expert
-     * 1. reduce on the block
-     * 2. reduce on the cluster
-     */
-  // Loop: for all positions in each row
-  for (int i = lane_id; i < num_cols; i += kThreadsPerWarp) {
-    CompType tmp = CompType(0);
-    // Loop: for all rows that this warp is responsible for
-    for (int j = warp_id; j < num_rows; j += warp_num) {
-      tmp += CompType(probs[j * num_cols + i]);
-    }
-    atomicAdd(&aggregated_probs_per_expert[i], tmp);
-  }
-  cluster.sync();
-  // The block 0 will reduce the results of all blocks
-  if (block_id == 0) {
-    for (int i = 1; i < block_num; i++) {
-      // Map the shared memory of the block i to the current block
-      CompType* dst_smem = reinterpret_cast<CompType*>(cluster.map_shared_rank(shmem_aux_loss, i));
-      for (int j = threadIdx.x; j < num_cols; j += blockDim.x) {
-        atomicAdd(&aggregated_probs_per_expert[j], dst_smem[j]);
-      }
-    }
-  }
-  cluster.sync();
-
-  /**
-     * Section: aggregated_probs_per_expert * tokens_per_expert
-     * In-place update on shmem
-     */
-  if (block_id == 0) {
-    for (int i = threadIdx.x; i < num_cols; i += blockDim.x) {
-      aggregated_probs_per_expert[i] *= CompType(tokens_per_expert[i]);
-    }
-    __syncthreads();
-
-    if (warp_id == 0) {
-      /**
-             * Section: Reduce to get the sum of aggregated_probs_per_expert
-             */
-      CompType intermediate_result =
-          warp_reduce_on_shmem(aggregated_probs_per_expert, num_cols, ReduceFuncType::SUM, lane_id);
-      __syncwarp();
-
-      if (lane_id == 0) {
-        /**
-                    * Section: Compute the aux_loss
-                    */
-        float C_coeff = (num_experts * coeff) / topk / total_num_tokens / total_num_tokens;
-        aux_loss[0] = static_cast<DataType>(intermediate_result * C_coeff);
-        Const_buf[0] = C_coeff;
-      }
-    }
-  }
-#else
-  // Use Only 1 block/1024 threads to avoid the grid sync
-  if (blockIdx.x > 0) return;
-  int warp_num = blockDim.x / kThreadsPerWarp;
-  int warp_id = threadIdx.x / kThreadsPerWarp;
-  int lane_id = threadIdx.x % kThreadsPerWarp;
-  extern __shared__ float shmem_aux_loss[];
-  CompType* aggregated_probs_per_expert = reinterpret_cast<CompType*>(shmem_aux_loss);
-
-  // Clear the shmem
-  for (int i = threadIdx.x; i < num_cols; i += blockDim.x) {
-    aggregated_probs_per_expert[i] = CompType(0);
-  }
-  __syncthreads();
-
-  /**
-     * Section: Reduce the probs to the aggregated_probs_per_expert
-     */
-  // Loop: for all positions in each row
-  for (int i = lane_id; i < num_cols; i += kThreadsPerWarp) {
-    CompType tmp = CompType(0);
-    // Loop: for all rows that this warp is responsible for
-    for (int j = warp_id; j < num_rows; j += warp_num) {
-      tmp += CompType(probs[j * num_cols + i]);
-    }
-    atomicAdd(&aggregated_probs_per_expert[i], tmp);
-  }
-  __syncthreads();
-
-  /**
-     * Section: aggregated_probs_per_expert * tokens_per_expert
-     * In-place update on shmem
-     */
-  for (int i = threadIdx.x; i < num_cols; i += blockDim.x) {
-    aggregated_probs_per_expert[i] *= CompType(tokens_per_expert[i]);
-  }
-  __syncthreads();
-
+  const int warp_id = threadIdx.x / kThreadsPerWarp;
+  const int lane_id = threadIdx.x % kThreadsPerWarp;
   if (warp_id == 0) {
-    /**
-         * Section: Reduce to get the sum of aggregated_probs_per_expert
-         */
-    CompType intermediate_result =
-        warp_reduce_on_shmem(aggregated_probs_per_expert, num_cols, ReduceFuncType::SUM, lane_id);
-    __syncwarp();
-
+    CompType block_sum = warp_reduce_on_shmem(shmem_block, static_cast<int>(blockDim.x),
+                                              ReduceFuncType::SUM, lane_id);
     if (lane_id == 0) {
-      /**
-             * Section: Compute the aux_loss
-             */
-      float C_coeff = (num_experts * coeff) / topk / total_num_tokens / total_num_tokens;
-      aux_loss[0] = static_cast<DataType>(intermediate_result * C_coeff);
-      Const_buf[0] = C_coeff;
+      atomicAdd(&Coeff_buf[1], static_cast<float>(block_sum * coeff));
     }
   }
-#endif
 }
 
+// Small kernel to convert the float accumulator to the output DataType.
+template <typename DataType>
+__global__ void convert_accum_to_output(const float* Coeff_buf, DataType* aux_loss) {
+  aux_loss[0] = static_cast<DataType>(Coeff_buf[1]);
+}
+
+/* -------------------------------------------------------------------------
+ *  Kernel launcher -- simplified (no cluster launch).
+ * ------------------------------------------------------------------------- */
 template <typename DataType, typename IndexType>
 void fused_moe_aux_loss_forward_kernel_launcher(const DataType* probs,
                                                 const IndexType* tokens_per_expert,
                                                 int total_num_tokens, int num_experts, int num_rows,
                                                 int num_cols, int topk, float coeff,
-                                                DataType* aux_loss, float* Const_buf,
+                                                DataType* aux_loss, float* Coeff_buf,
                                                 cudaStream_t stream) {
-  if (cuda::sm_arch(cuda::current_device()) >= 90) {
-    cudaLaunchConfig_t config = {0};
-    int cluster_size = 8;
-    config.gridDim = cluster_size;
-    config.blockDim = 1024;
-    config.dynamicSmemBytes = sizeof(CompType) * num_cols;
-    config.stream = stream;
+  NVTE_CHECK(num_experts == num_cols, "Number of experts (", num_experts,
+             ") must be equal to number of input columns (", num_cols, ").");
 
-    // Update the max cluster size based on the device
-    NVTE_CHECK_CUDA(cudaOccupancyMaxPotentialClusterSize(
-        &cluster_size,
-        reinterpret_cast<void*>(fused_moe_aux_loss_forward_kernel<DataType, IndexType>), &config));
+  // Round up to a multiple of warp size for correct warp shuffles.
+  const int block_size = ((std::min(1024, num_cols) + static_cast<int>(kThreadsPerWarp) - 1) /
+                          static_cast<int>(kThreadsPerWarp)) *
+                         static_cast<int>(kThreadsPerWarp);
+  const int grid_size = cuda::sm_count() * 2;
 
-    cudaLaunchAttribute attribute[1];
-    attribute[0].id = cudaLaunchAttributeClusterDimension;
-    attribute[0].val.clusterDim.x = cluster_size;
-    attribute[0].val.clusterDim.y = 1;
-    attribute[0].val.clusterDim.z = 1;
-    config.numAttrs = 1;
-    config.attrs = attribute;
+  // One CompType per thread in shared memory.
+  const size_t smem_size = block_size * sizeof(CompType);
+  check_shared_memory_capacity_num_experts(smem_size, num_experts);
 
-    NVTE_CHECK_CUDA(cudaLaunchKernelEx(
-        &config, fused_moe_aux_loss_forward_kernel<DataType, IndexType>, probs, tokens_per_expert,
-        total_num_tokens, num_experts, num_rows, num_cols, topk, coeff, aux_loss, Const_buf));
-  } else {
-    size_t smem_size = sizeof(CompType) * num_cols;
-    fused_moe_aux_loss_forward_kernel<DataType, IndexType>
-        <<<1, 1024, smem_size, stream>>>(probs, tokens_per_expert, total_num_tokens, num_experts,
-                                         num_rows, num_cols, topk, coeff, aux_loss, Const_buf);
-    NVTE_CHECK_CUDA(cudaGetLastError());
-  }
+  // Compute final coefficient and zero the float accumulator (Coeff_buf[1]) before launch.
+  const float C_coeff = (num_experts * coeff) / topk / total_num_tokens / total_num_tokens;
+  NVTE_CHECK_CUDA(cudaMemsetAsync(Coeff_buf + 1, 0, sizeof(float), stream));
+  fused_moe_aux_loss_forward_kernel<DataType, IndexType>
+      <<<grid_size, block_size, smem_size, stream>>>(probs, tokens_per_expert, total_num_tokens,
+                                                     num_rows, num_cols, topk, C_coeff, Coeff_buf);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+
+  // Convert the float accumulator to the output DataType.
+  convert_accum_to_output<DataType><<<1, 1, 0, stream>>>(Coeff_buf, aux_loss);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 void fused_moe_aux_loss_forward(const Tensor& probs, const Tensor& tokens_per_expert,
                                 int total_num_tokens, int num_experts, int num_rows, int num_cols,
-                                int topk, float coeff, Tensor& aux_loss, Tensor& Const_buf,
+                                int topk, float coeff, Tensor& aux_loss, Tensor& Coeff_buf,
                                 cudaStream_t stream) {
   TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
       probs.data.dtype, DataType,
@@ -212,7 +126,7 @@ void fused_moe_aux_loss_forward(const Tensor& probs, const Tensor& tokens_per_ex
               reinterpret_cast<IndexType*>(tokens_per_expert.data.dptr), total_num_tokens,
               num_experts, num_rows, num_cols, topk, coeff,
               reinterpret_cast<DataType*>(aux_loss.data.dptr),
-              reinterpret_cast<float*>(Const_buf.data.dptr), stream);););
+              reinterpret_cast<float*>(Coeff_buf.data.dptr), stream);););
 }
 
 template <typename DataType, typename IndexType>
@@ -269,13 +183,13 @@ void fused_moe_aux_loss_backward(const Tensor& Const_buf, const Tensor& tokens_p
 void nvte_fused_moe_aux_loss_forward(const NVTETensor probs, const NVTETensor tokens_per_expert,
                                      int total_num_tokens, int num_experts, int num_rows,
                                      int num_cols, int topk, float coeff, NVTETensor aux_loss,
-                                     NVTETensor Const_buf, cudaStream_t stream) {
+                                     NVTETensor Coeff_buf, cudaStream_t stream) {
   NVTE_API_CALL(nvte_fused_moe_aux_loss_forward);
   using namespace transformer_engine;
   fused_router::fused_moe_aux_loss_forward(
       *convertNVTETensorCheck(probs), *convertNVTETensorCheck(tokens_per_expert), total_num_tokens,
       num_experts, num_rows, num_cols, topk, coeff, *convertNVTETensorCheck(aux_loss),
-      *convertNVTETensorCheck(Const_buf), stream);
+      *convertNVTETensorCheck(Coeff_buf), stream);
 }
 
 void nvte_fused_moe_aux_loss_backward(const NVTETensor Const_buf,

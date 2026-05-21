@@ -73,9 +73,7 @@ def token_dispatch(
         Routing mask of shape [batch, sequence, num_experts] or [num_tokens, num_experts].
         Values: 1 = routed, 0 = not routed.
     num_out_tokens : int
-        The number of output tokens after permutation (before padding). For the dropless
-        case, this should be equal to the sum of routing_map. Must be provided explicitly
-        for JIT compatibility since output shape must be known at compile time.
+        Number of output tokens (rows in the permuted buffer, before padding). Must be > 0, e.g. int(jnp.sum(routing_map)) or num_tokens * top_k. Must be a compile-time constant for JIT.
     probs : Optional[jnp.ndarray]
         Optional routing probabilities of shape [batch, sequence, num_experts] or
         [num_tokens, num_experts]. If provided, permuted_probs will be returned.
@@ -121,6 +119,8 @@ def token_dispatch(
     ((num_out_tokens + num_experts * (align_size - 1)) // align_size) * align_size
     This accounts for the maximum possible padding when each expert needs (align_size - 1)
     extra tokens to align, rounded down to align_size for buffer alignment.
+
+    Non-positive num_out_tokens (e.g. -1) raises AssertionError.
     """
     use_padding = align_size is not None
     num_experts = routing_map.shape[-1]
@@ -133,6 +133,11 @@ def token_dispatch(
         ) * align_size
     else:
         worst_case_out_tokens = num_out_tokens
+
+    assert num_out_tokens > 0, (
+        f"token_dispatch requires num_out_tokens > 0, got {num_out_tokens}. "
+        "Use int(jnp.sum(routing_map)) or num_tokens * top_k."
+    )
 
     return _token_dispatch(
         inp, routing_map, probs, num_out_tokens, worst_case_out_tokens, align_size, use_padding

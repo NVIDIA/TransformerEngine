@@ -53,6 +53,7 @@ class DebugQuantizer(Quantizer):
         tensor_name: str,
         parent_quantizer: Optional[Quantizer],
         tp_group: torch.distributed.ProcessGroup,
+        tp_size: int,
     ):
 
         super().__init__(rowwise=True, columnwise=True)
@@ -60,6 +61,7 @@ class DebugQuantizer(Quantizer):
         self.tensor_name = tensor_name
         self.parent_quantizer = parent_quantizer
         self.tp_group = tp_group  # used in inspect_tensor calls
+        self.tp_size = tp_size
         self.iteration = TEDebugState.get_iteration()
 
         # Configure parent quantizer
@@ -263,6 +265,7 @@ class DebugQuantizer(Quantizer):
             "tensor_name": self.tensor_name,
             "iteration": TEDebugState.get_iteration(),
             "tp_group": self.tp_group,
+            "tp_size": self.tp_size,
             "columnwise_quantized_tensor": columnwise_gemm_tensor,
             "rowwise_quantized_tensor": rowwise_gemm_tensor,
             "quantizer": self.parent_quantizer,
