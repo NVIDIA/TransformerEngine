@@ -624,8 +624,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
       if (data_row_idx % kFP4BlockScalingSize == 0) {
         CType amax_2d = 0.0;
         for (int i = 0; i < k2DBlockAmaxReduceDim; i++) {
-          amax_2d = fmaxf(amax_2d,
-                          amax_smem_red[data_row_idx / kFP4BlockScalingSize][tid_in_warp_x][i]);
+          amax_2d =
+              fmaxf(amax_2d, amax_smem_red[data_row_idx / kFP4BlockScalingSize][tid_in_warp_x][i]);
         }
         amax_smem[data_row_idx / kFP4BlockScalingSize][tid_in_warp_x] = amax_2d;
       }
