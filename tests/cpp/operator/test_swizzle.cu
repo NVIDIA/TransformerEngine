@@ -557,8 +557,10 @@ void performTestGroupedSwizzleMXFP8Variable(const std::vector<std::pair<size_t, 
     output_tensors.emplace_back(std::move(output));
   }
 
-  GroupedBuffers grouped_input = build_grouped_tensor(input_ptrs, NVTE_MXFP8_1D_SCALING);
-  GroupedBuffers grouped_output = build_grouped_tensor(output_ptrs, NVTE_MXFP8_1D_SCALING);
+  GroupedBuffers grouped_input = build_grouped_tensor(input_ptrs, NVTE_MXFP8_1D_SCALING,
+                                                      /*enforce_grouped_gemm_alignment=*/false);
+  GroupedBuffers grouped_output = build_grouped_tensor(output_ptrs, NVTE_MXFP8_1D_SCALING,
+                                                       /*enforce_grouped_gemm_alignment=*/false);
 
   const uint8_t input_swizzled = 0;
   nvte_set_grouped_tensor_param(grouped_input.get_handle(),
@@ -807,8 +809,10 @@ void performTestGroupedSwizzleMXFP8CompactInput(const int num_tensors, const siz
   // Build a per-tensor padded grouped output via the standard helper, and a
   // compact-scale grouped input by overriding the scale_inv buffers of a
   // padded grouped input with newly allocated compact buffers.
-  GroupedBuffers grouped_input = build_grouped_tensor(input_ptrs, NVTE_MXFP8_1D_SCALING);
-  GroupedBuffers grouped_output = build_grouped_tensor(output_ptrs, NVTE_MXFP8_1D_SCALING);
+  GroupedBuffers grouped_input = build_grouped_tensor(input_ptrs, NVTE_MXFP8_1D_SCALING,
+                                                      /*enforce_grouped_gemm_alignment=*/false);
+  GroupedBuffers grouped_output = build_grouped_tensor(output_ptrs, NVTE_MXFP8_1D_SCALING,
+                                                       /*enforce_grouped_gemm_alignment=*/false);
 
   CompactScaleBuffer compact_row =
       gather_compact_grouped_scale(input_tensors, M, K, /*rowwise=*/true);
