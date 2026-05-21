@@ -202,62 +202,6 @@ class Float8BlockQuantizer(Quantizer):
             return False
         return True
 
-    def make_empty(
-        self,
-        shape: Iterable[int],
-        *,
-        dtype: torch.dtype = torch.float32,
-        device: Optional[torch.device] = None,
-        requires_grad: bool = False,
-        pin_memory: bool = False,
-    ) -> Float8BlockwiseQTensor:
-        """Construct quantized tensor with uninitialized data"""
-
-        tensor_kwargs = {
-            "device": torch.device("cuda") if device is None else device,
-            "pin_memory": pin_memory,
-        }
-
-        # Allocate buffers for row-scaled data
-        rowwise_data = None
-        rowwise_scale_inv = None
-        if self.rowwise_usage:
-            rowwise_data = torch.empty(shape, dtype=torch.uint8, **tensor_kwargs)
-            rowwise_scale_inv = torch.empty(
-                self.get_scale_shape(shape, columnwise=False),
-                dtype=torch.float32,
-                **tensor_kwargs,
-            )
-
-        # Allocate buffers for column-scaled data
-        columnwise_data = None
-        columnwise_scale_inv = None
-        if self.columnwise_usage:
-            columnwise_data = torch.empty(
-                self.get_columnwise_shape(shape),
-                dtype=torch.uint8,
-                **tensor_kwargs,
-            )
-            columnwise_scale_inv = torch.empty(
-                self.get_scale_shape(shape, columnwise=True),
-                dtype=torch.float32,
-                **tensor_kwargs,
-            )
-
-        # Construct FP8 tensor
-        return Float8BlockwiseQTensor(
-            shape=shape,
-            dtype=dtype,
-            fp8_dtype=self.dtype,
-            rowwise_data=rowwise_data,
-            rowwise_scale_inv=rowwise_scale_inv,
-            columnwise_data=columnwise_data,
-            columnwise_scale_inv=columnwise_scale_inv,
-            quantizer=self,
-            is_2D_scaled=self.block_scaling_dim == 2,
-            requires_grad=requires_grad,
-        )
-
     def calibrate(self, tensor: torch.Tensor) -> None:
         # NOTE: This interface is specific to requirements like delayed scaling
         # where state from an estimator influences distribution parameters.
