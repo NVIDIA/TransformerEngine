@@ -92,6 +92,7 @@ def _reset_between_cases() -> None:
     # instead of reusing the previous case's resolved backend.
     try:
         from transformer_engine.pytorch.attention.dot_product_attention import dot_product_attention
+
         dot_product_attention._attention_backends["backend_selection_requires_update"] = True
     except (ImportError, AttributeError, KeyError):
         pass
