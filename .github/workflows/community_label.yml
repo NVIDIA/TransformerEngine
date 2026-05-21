@@ -53,7 +53,7 @@ jobs:
               targetLabel = orgLabel;
             }
 
-            if (targetLabel && !isCore) {
+            if (!isCore) {
               await github.rest.issues.addLabels({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
