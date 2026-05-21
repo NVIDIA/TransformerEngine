@@ -217,7 +217,9 @@ struct GroupedGemmSetupWorkspace {
 
   static size_t required_setup_size(size_t num_tensors, size_t alignment) {
     const size_t raw = from_buffers(nullptr, num_tensors).total_bytes;
-    return ((raw + alignment - 1) / alignment) * alignment;
+    // Additional alignment bytes is to take care of the case where the buffer
+    // is not already aligned. 
+    return raw + alignment;
   }
 };
 
