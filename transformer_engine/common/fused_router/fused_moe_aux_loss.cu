@@ -87,8 +87,10 @@ void fused_moe_aux_loss_forward_kernel_launcher(const DataType* probs,
                                                 int num_cols, int topk, float coeff,
                                                 DataType* aux_loss, float* Coeff_buf,
                                                 cudaStream_t stream) {
-  NVTE_CHECK(num_experts == num_cols, "Number of experts (", num_experts,
-             ") must be equal to number of input columns (", num_cols, ").");
+  NVTE_CHECK(num_cols > 0, "num_cols must be positive, got ", num_cols);
+  NVTE_CHECK(num_experts > 0, "num_experts must be positive, got ", num_experts);
+  NVTE_CHECK(num_cols % num_experts == 0, "Number of input columns (", num_cols,
+             ") must be a multiple of number of experts (", num_experts, ").");
 
   // Round up to a multiple of warp size for correct warp shuffles.
   const int block_size = ((std::min(1024, num_cols) + static_cast<int>(kThreadsPerWarp) - 1) /
@@ -98,7 +100,7 @@ void fused_moe_aux_loss_forward_kernel_launcher(const DataType* probs,
 
   // One CompType per thread in shared memory.
   const size_t smem_size = block_size * sizeof(CompType);
-  check_shared_memory_capacity_num_experts(smem_size, num_experts);
+  check_shared_memory_capacity_num_experts(smem_size, num_cols);
 
   // Compute final coefficient and zero the float accumulator (Coeff_buf[1]) before launch.
   const float C_coeff = (num_experts * coeff) / topk / total_num_tokens / total_num_tokens;
