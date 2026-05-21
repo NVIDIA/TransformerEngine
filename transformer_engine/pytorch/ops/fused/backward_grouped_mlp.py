@@ -24,6 +24,7 @@ from ..fuser import register_backward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
 from .._common import (
     _cudnn_frontend_version_supported,
+    _cudnn_frontend_supports_grouped_gemm_srelu,
     fuse_grouped_mlp_ops,
     get_accumulate_flag_in_param,
     get_dummy_wgrads_for_params,
@@ -786,6 +787,12 @@ class BackwardGroupedMLP_CuTeGEMMDGLU_MXFP8(_BackwardGroupedMLP_CuTeGEMMDBase_MX
 
 class BackwardGroupedMLP_CuTeGEMMDUnary_MXFP8(_BackwardGroupedMLP_CuTeGEMMDBase_MXFP8):
     """Fused backward op for GroupedLinear + scaled unary activation + GroupedLinear."""
+
+    @classmethod
+    @functools.lru_cache(maxsize=None)
+    def is_supported(cls) -> bool:
+        """Whether the SReLU fused backward operation is supported on the current system."""
+        return _cudnn_frontend_supports_grouped_gemm_srelu() and super().is_supported()
 
     @classmethod
     @functools.lru_cache(maxsize=None)

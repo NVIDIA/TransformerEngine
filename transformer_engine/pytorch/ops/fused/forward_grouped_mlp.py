@@ -24,6 +24,7 @@ from ..fuser import register_forward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
 from .._common import (
     _cudnn_frontend_version_supported,
+    _cudnn_frontend_supports_grouped_gemm_srelu,
     _nvidia_cudnn_frontend_supports_wgrad,
     fuse_grouped_mlp_ops,
     is_glu_activation,
@@ -54,6 +55,8 @@ def _grouped_gemm_dsrelu_backward_supported() -> bool:
         return False
     if get_device_compute_capability()[0] != 10:
         return False
+    if not _cudnn_frontend_supports_grouped_gemm_srelu():
+        return False
     try:
         from cudnn import (
             grouped_gemm_dsrelu_wrapper_sm100,
@@ -61,11 +64,6 @@ def _grouped_gemm_dsrelu_backward_supported() -> bool:
     except ImportError:
         return False
     return grouped_gemm_dsrelu_wrapper_sm100 is not None
-
-
-def _srelu_fc2_input_recompute_enabled() -> bool:
-    """Whether SReLU backward should regenerate the FC2 input instead of saving it."""
-    return int(os.environ.get("NVTE_CUTEDSL_FUSED_GROUPED_MLP_SRELU_RECOMPUTE", "1")) > 0
 
 
 class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
@@ -323,11 +321,7 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
             "alpha_tensor": alpha_tensor,
             "bias_tensor": fc1_bias_packed,
             "norm_const_tensor": norm_const_tensor,
-            "prob_tensor": (
-                scales.detach().to(dtype=dtype).reshape(-1, 1, 1)
-                if scales is not None
-                else torch.ones((in_shape[0], 1, 1), dtype=torch.float32, device=device)
-            ),
+            "prob_tensor": scales.detach().to(dtype=dtype).reshape(-1, 1, 1),
             "acc_dtype": torch.float32,
             "c_dtype": torch.bfloat16,
             "d_dtype": torch.float8_e4m3fn,
@@ -487,10 +481,11 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
             mark_grouped_tensor(grouped_fc1_x, activation_in, scales, grouped_fc2_x)
             activation_op = self.basic_ops[1]
             activation_is_srelu = isinstance(activation_op, ScaledSReLU)
+            activation_recompute = bool(getattr(activation_op, "activation_recompute", False))
             recompute_srelu_fc2_x = (
                 activation_is_srelu
+                and activation_recompute
                 and weight_requires_grad
-                and _srelu_fc2_input_recompute_enabled()
                 and _grouped_gemm_dsrelu_backward_supported()
                 and _nvidia_cudnn_frontend_supports_wgrad()
             )
@@ -579,6 +574,12 @@ class ForwardGroupedMLP_CuTeGEMMGLU_MXFP8(_ForwardGroupedMLP_CuTeGEMMBase_MXFP8)
 
 class ForwardGroupedMLP_CuTeGEMMUnary_MXFP8(_ForwardGroupedMLP_CuTeGEMMBase_MXFP8):
     """Fused op for MXFP8 GroupedLinear + scaled unary activation + GroupedLinear."""
+
+    @classmethod
+    @functools.lru_cache(maxsize=None)
+    def is_supported(cls) -> bool:
+        """Whether the SReLU fused operation is supported on the current system."""
+        return _cudnn_frontend_supports_grouped_gemm_srelu() and super().is_supported()
 
     @classmethod
     @functools.lru_cache(maxsize=None)

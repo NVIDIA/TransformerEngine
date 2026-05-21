@@ -21,16 +21,26 @@ from ..quantized_tensor import QuantizedTensorStorage
 from ..utils import canonicalize_dtype
 
 
-@functools.lru_cache(maxsize=1)
+@functools.lru_cache(maxsize=None)
+def _cudnn_frontend_version_at_least(min_version: str) -> bool:
+    """Check cuDNN frontend package version."""
+    try:
+        return PkgVersion(get_pkg_version("nvidia-cudnn-frontend")) >= PkgVersion(min_version)
+    except PackageNotFoundError:
+        return False
+
+
 def _cudnn_frontend_version_supported() -> bool:
     """Check cuDNN frontend is at least 1.23.0.
 
     All grouped MLP fused-kernel features require cuDNN frontend 1.23.0.
     """
-    try:
-        return PkgVersion(get_pkg_version("nvidia-cudnn-frontend")) >= PkgVersion("1.23.0")
-    except PackageNotFoundError:
-        return False
+    return _cudnn_frontend_version_at_least("1.23.0")
+
+
+def _cudnn_frontend_supports_grouped_gemm_srelu() -> bool:
+    """Check cuDNN frontend min version for grouped GEMM SReLU kernels."""
+    return _cudnn_frontend_version_at_least("1.24.0")
 
 
 def _nvidia_cudnn_frontend_supports_wgrad() -> bool:

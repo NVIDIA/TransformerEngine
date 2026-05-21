@@ -2543,6 +2543,15 @@ class TestBasicOps:
             scales_requires_grad=True,
         )
 
+    @pytest.mark.parametrize(
+        "op_cls",
+        (te_ops.ScaledSwiGLU, te_ops.ScaledSReLU, te_ops.ScaledClampedQGeGLU),
+    )
+    def test_scaled_activation_recompute_config(self, op_cls) -> None:
+        """Scaled activations expose a per-op recompute knob."""
+        assert op_cls().activation_recompute is False
+        assert op_cls(activation_recompute=True).activation_recompute is True
+
     @pytest.mark.parametrize("in_shape", ((71, 192), (5, 7, 128)))
     @pytest.mark.parametrize("input_requires_grad", (False, True))
     @pytest.mark.parametrize("scales_requires_grad", (False, True))

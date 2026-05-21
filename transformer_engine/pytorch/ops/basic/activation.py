@@ -352,9 +352,19 @@ class ScaledSReLU(BasicOperation):
 
     If the SReLU output has shape ``(d_1, ..., d_n)``, it is multiplied
     with an extra input tensor of shape ``(d_1, ..., d_{n-1})``.
+
+    Parameters
+    ----------
+    activation_recompute : bool, default = ``False``
+        Enable fused grouped MLP kernels to recompute activation outputs
+        during backward when supported instead of saving them.
     """
 
     num_extra_inputs: int = 1
+
+    def __init__(self, *, activation_recompute: bool = False) -> None:
+        super().__init__()
+        self.activation_recompute: bool = activation_recompute
 
     def op_forward(self, *args, **kwargs) -> None:
         raise RuntimeError(
