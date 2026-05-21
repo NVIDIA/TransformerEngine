@@ -5,6 +5,7 @@
 import json
 import os
 import select
+import signal
 import subprocess
 import sys
 import threading
@@ -122,6 +123,10 @@ class PoolWorker:
             text=True,
             bufsize=1,
             env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            # Own process group so _kill can killpg all ranks in one shot;
+            # without this, terminating the launcher PID leaves rank workers
+            # as orphans holding CUDA/NCCL state.
+            start_new_session=True,
         )
         self._stderr_buf.clear()
         threading.Thread(target=self._drain_stderr, daemon=True).start()
@@ -145,13 +150,20 @@ class PoolWorker:
         if self.proc is None or self.proc.poll() is not None:
             self._spawn()
 
+    def _killpg(self, sig: int) -> None:
+        try:
+            os.killpg(self.proc.pid, sig)
+        except ProcessLookupError:
+            pass
+
     def _kill(self) -> None:
+        # Kill the whole process group so rank workers don't survive as orphans.
         if self.proc and self.proc.poll() is None:
-            self.proc.terminate()
+            self._killpg(signal.SIGTERM)
             try:
                 self.proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                self.proc.kill()
+                self._killpg(signal.SIGKILL)
                 self.proc.wait()
         self.proc = None
 
@@ -222,10 +234,21 @@ class PoolWorker:
             self._kill()
             raise AssertionError(msg)
 
-        resp = json.loads(line)
+        # A stray non-JSON line from rank 0 would desynchronize the protocol;
+        # turn it into a clear test failure rather than a raw JSONDecodeError.
+        try:
+            resp = json.loads(line)
+        except json.JSONDecodeError as e:
+            self._kill()
+            raise AssertionError(
+                self._diag(f"pool worker JSON protocol broke: {e!r}; line={line!r}")
+            )
+
         if not resp["ok"]:
-            # gather_object already carries the full per-rank traceback in
-            # resp["error"]; no need to also attach stderr (would duplicate).
+            # Discard the pool so half-aborted CUDA/NCCL/FP8 state from the
+            # failed case doesn't leak into the next. resp["error"] already
+            # carries the per-rank traceback via gather_object.
+            self._kill()
             raise AssertionError(resp["error"])
 
     def shutdown(self) -> None:

@@ -87,6 +87,14 @@ def _reset_between_cases() -> None:
     torch.cuda.manual_seed(1234)
     FP8GlobalStateManager.reset()
     torch.cuda.empty_cache()
+    # Invalidate DPA's module-level backend cache so the per-case
+    # NVTE_FLASH_ATTN/NVTE_FUSED_ATTN env-var toggle actually takes effect
+    # instead of reusing the previous case's resolved backend.
+    try:
+        from transformer_engine.pytorch.attention.dot_product_attention import dot_product_attention
+        dot_product_attention._attention_backends["backend_selection_requires_update"] = True
+    except (ImportError, AttributeError, KeyError):
+        pass
 
 
 _case_counter = 0
@@ -186,6 +194,9 @@ def main() -> None:
                 else:
                     first_err = next(m for o, m in gathered if not o)
                     _send_response(rank, {"ok": False, "error": first_err})
+            # Release the allocator cache so this pool doesn't squat on
+            # GPUs that an overlapping different-world-size pool needs.
+            torch.cuda.empty_cache()
     finally:
         # Tear down pool-shared CP groups before the main PG (NCCL requires
         # sub-groups to be destroyed first). Each destroy is independently
