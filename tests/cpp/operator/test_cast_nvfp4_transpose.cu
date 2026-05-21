@@ -4,6 +4,15 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <algorithm>
+#include <array>
+#include <fstream>
+#include <iostream>
+#include <memory>
+#include <string>
+#include <tuple>
+#include <vector>
+
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #include <cuda_fp4.h>
@@ -14,7 +23,6 @@
 #include <transformer_engine/activation.h>
 #include "../test_common.h"
 #include "transformer_engine/transformer_engine.h"
-#include <fstream>
 
 using namespace transformer_engine;
 using namespace test;
@@ -114,16 +122,14 @@ void quantize_nvfp4_1d(float (*OP)(const float),
                 block_amax = std::max(block_amax, std::abs(elt));
             }
 
-            // 2. Compute E4M3 scaling factor
-            // Compute per-block encoding/decoding scaling factor
-            const float S_dec_b = block_amax / 6.0f;
-
-            // Scale & Store per-block decoding scaling factor
-            const fp8e4m3 S_dec_b_fp8 = static_cast<fp8e4m3>(S_dec_b * S_enc);
+            // Compute and store the per-block FP8 decode scale
+            const float S_dec_b = block_amax * (S_enc * (1.0f / 6.0f));
+            const fp8e4m3 S_dec_b_fp8 = static_cast<fp8e4m3>(fminf(S_dec_b, Numeric_Traits<float>::maxNorm));
             const float S_dec_b_fp32 = static_cast<float>(S_dec_b_fp8);
 
             // Compute "correct" per-block encoding scaling factor
-            const float S_enc_b_fp8 = S_dec_b_fp32 == 0.f ? 0.f : S_enc / S_dec_b_fp32;
+            const float S_enc_b_fp8 = S_dec_b_fp32 == 0.f ? 0.f :
+                fminf(1.0f / (S_dec_b_fp32 * (1.0f / S_enc)), Numeric_Traits<float>::maxNorm);
 
             const size_t scale_idx = i * scales_stride + block_X;
             scales[scale_idx] = S_dec_b_fp8;
@@ -311,20 +317,24 @@ void compute_ref(float (*OP)(const float),
                  fp4e2m1x2* output_t,
                  fp8e4m3* scales,
                  fp8e4m3* scales_t,
-                 const float global_amax,
+                 const float* amax,
                  const size_t rows,
                  const size_t cols,
                  const size_t scales_stride,
                  const size_t scales_stride_t,
                  const bool use_fast_math,
-                 const bool use_2d_quantization = false)
+                 const bool use_2d_quantization = false,
+                 const bool row_scaled_nvfp4 = false)
 {
     std::vector<InputType> input_t = create_transpose(input, rows, cols);
+    NVTE_CHECK(!(use_2d_quantization && row_scaled_nvfp4),
+               "2D quantization and row-scaling are not supported together.");
 
+    // Ref impl for 2D quantization
     if (use_2d_quantization) {
         // Step 1: Compute mathematical 8×8 scaling factors
         std::vector<std::vector<fp8e4m3>> math_scales;
-        compute_2d_mathematical_scales(OP, input, rows, cols, global_amax, math_scales, use_fast_math);
+        compute_2d_mathematical_scales(OP, input, rows, cols, *amax, math_scales, use_fast_math);
 
         constexpr size_t block_size_Y = 16;
         constexpr size_t block_size_X = 16;
@@ -351,17 +361,36 @@ void compute_ref(float (*OP)(const float),
 
         // Step 4: Process quantized outputs using the same algorithm as quantize_nvfp4_2d
         // (This part processes the actual FP4 data using the mathematical scaling factors)
-        quantize_nvfp4_2d(OP, input, output, nullptr, rows, cols, scales_stride, global_amax,
+        quantize_nvfp4_2d(OP, input, output, nullptr, rows, cols, scales_stride, *amax,
                           use_fast_math); // scales already filled
-        quantize_nvfp4_2d(OP, input_t.data(), output_t, nullptr, cols, rows, scales_stride_t, global_amax,
+        quantize_nvfp4_2d(OP, input_t.data(), output_t, nullptr, cols, rows, scales_stride_t, *amax,
                           use_fast_math); // scales_t already filled
 
-    } else {
-        quantize_nvfp4(OP, input, output, scales, rows, cols, scales_stride, global_amax,
-                       use_fast_math, use_2d_quantization);
-        quantize_nvfp4(OP, input_t.data(), output_t, scales_t, cols, rows, scales_stride_t, global_amax,
-                       use_fast_math, use_2d_quantization);
+        return;
     }
+
+    // Ref impl for row-scaling
+    if (row_scaled_nvfp4) {
+        for (size_t row = 0; row < rows; ++row) {
+            quantize_nvfp4(OP,
+                           input + row * cols,
+                           output + row * (cols / 2),
+                           scales + row * scales_stride,
+                           1,
+                           cols,
+                           scales_stride,
+                           amax[row],
+                           use_fast_math,
+                           use_2d_quantization);
+        }
+        return;
+    }
+
+    // Ref impl for basic NVFP4
+    quantize_nvfp4(OP, input, output, scales, rows, cols, scales_stride, *amax,
+                   use_fast_math, use_2d_quantization);
+    quantize_nvfp4(OP, input_t.data(), output_t, scales_t, cols, rows, scales_stride_t, *amax,
+                   use_fast_math, use_2d_quantization);
 }
 
 void compare_nvfp4_tensors(const std::string& name,
@@ -461,79 +490,53 @@ void dump_nvfp4_tensor_data(const std::string& prefix,
     }
 }
 
-void print_detailed_tensor_comparison(const std::string& name,
-                                     const fp4e2m1 *test_data, const fp4e2m1 *ref_data,
-                                     const int rows, const int cols) {
-    printf("\n=== DETAILED COMPARISON for %s (%d×%d = %d elements) ===\n",
-           name.c_str(), rows, cols, rows * cols);
-
-    const int total_elements = rows * cols;
-    const int check_count = 128;
-
-    printf("--- FIRST %d ELEMENTS ---\n", check_count);
-    printf("Index | Test_Value    | Ref_Value     | Match\n");
-    printf("------|---------------|---------------|-------\n");
-    for (int i = 0; i < std::min(check_count, total_elements); ++i) {
-        double2 test_pair = cvt_fp4x2_to_double2(*reinterpret_cast<const fp4e2m1x2*>(&test_data[i/2]));
-        double2 ref_pair = cvt_fp4x2_to_double2(*reinterpret_cast<const fp4e2m1x2*>(&ref_data[i/2]));
-
-        double t = (i % 2 == 0) ? test_pair.x : test_pair.y;
-        double r = (i % 2 == 0) ? ref_pair.x : ref_pair.y;
-        bool match = (fabs(t - r) < 1e-6);
-
-        printf("%5d | %13.6f | %13.6f | %s\n", i, t, r, match ? "✓" : "✗");
-    }
-
-    if (total_elements > 2 * check_count) {
-        printf("\n--- LAST %d ELEMENTS ---\n", check_count);
-        printf("Index | Test_Value    | Ref_Value     | Match\n");
-        printf("------|---------------|---------------|-------\n");
-        for (int i = total_elements - check_count; i < total_elements; ++i) {
-            double2 test_pair = cvt_fp4x2_to_double2(*reinterpret_cast<const fp4e2m1x2*>(&test_data[i/2]));
-            double2 ref_pair = cvt_fp4x2_to_double2(*reinterpret_cast<const fp4e2m1x2*>(&ref_data[i/2]));
-
-            double t = (i % 2 == 0) ? test_pair.x : test_pair.y;
-            double r = (i % 2 == 0) ? ref_pair.x : ref_pair.y;
-            bool match = (fabs(t - r) < 1e-6);
-
-            printf("%5d | %13.6f | %13.6f | %s\n", i, t, r, match ? "✓" : "✗");
-        }
-    }
-    printf("==================================\n");
-}
-
-void compareResults_nvfp4(const Tensor &test,
+void compareResults_nvfp4(Tensor &test,
                           const void *ref, const void *ref_t, const int rows, const int cols,
-                          double atol = 1e-5, double rtol = 1e-8, bool if_on_gpus = true, bool dump_data = false) {
+                          double atol = 1e-5, double rtol = 1e-8, bool if_on_gpus = true,
+                          bool dump_data = false, bool compare_columnwise = true) {
     if (if_on_gpus) test.to_cpu();
 
     const fp4e2m1 *test_data = test.rowwise_cpu_dptr<fp4e2m1>();
-    const fp4e2m1 *test_data_t = test.columnwise_cpu_dptr<fp4e2m1>();
     const fp4e2m1 *ref_data = reinterpret_cast<const fp4e2m1*>(ref);
-    const fp4e2m1 *ref_data_t = reinterpret_cast<const fp4e2m1*>(ref_t);
-
-    // Print detailed element-by-element comparison
-    // print_detailed_tensor_comparison("output", test_data, ref_data, rows, cols);
-    // print_detailed_tensor_comparison("output_t", test_data_t, ref_data_t, cols, rows);
 
     // Optionally dump tensor data to files for detailed analysis
     if (dump_data) {
         dump_nvfp4_tensor_data("output", test_data, ref_data, rows, cols);
-        dump_nvfp4_tensor_data("output_t", test_data_t, ref_data_t, cols, rows);
     }
 
     compare_nvfp4_tensors("output", test_data, ref_data, rows, cols, atol, rtol);
-    compare_nvfp4_tensors("output_t", test_data_t, ref_data_t, cols, rows, atol, rtol);
+    if (compare_columnwise) {
+        const fp4e2m1 *test_data_t = test.columnwise_cpu_dptr<fp4e2m1>();
+        const fp4e2m1 *ref_data_t = reinterpret_cast<const fp4e2m1*>(ref_t);
+        if (dump_data) {
+            dump_nvfp4_tensor_data("output_t", test_data_t, ref_data_t, cols, rows);
+        }
+        compare_nvfp4_tensors("output_t", test_data_t, ref_data_t, cols, rows, atol, rtol);
+    }
+}
+
+void compare_rowwise_amax(Tensor &output, const std::vector<float> &ref_amax) {
+    ASSERT_EQ(output.rowwise_amax_size(), ref_amax.size());
+    const auto *amax_ptr = output.cpu_rowwise_amax_ptr<float>();
+    const std::vector<float> test_amax_data(amax_ptr, amax_ptr + ref_amax.size());
+    for (size_t row = 0; row < ref_amax.size(); ++row) {
+        ASSERT_EQ(test_amax_data[row], ref_amax[row])
+            << "Row-scaled amax mismatch at row " << row;
+    }
 }
 
 template <typename InputType>
 void performTest(float (*OP)(const float),
                  const std::vector<size_t>& shape,
-                 const bool use_fast_math) {
+                 const bool use_fast_math,
+                 const bool row_scaled_nvfp4 = false) {
     using namespace test;
 
     DType itype = TypeInfo<InputType>::dtype;
     DType otype = DType::kFloat4E2M1;
+
+    const bool rowwise = true;
+    const bool columnwise = !row_scaled_nvfp4;
 
     const size_t rows = first_dimension(shape);
     const size_t cols = last_dimension(shape);
@@ -556,7 +559,7 @@ void performTest(float (*OP)(const float),
     const size_t scales_stride_t = blocks_X_t;
 
     Tensor input("input", shape, itype);
-    Tensor output("output", shape, otype, true, true, NVTE_NVFP4_1D_SCALING);
+    Tensor output("output", shape, otype, rowwise, columnwise, NVTE_NVFP4_1D_SCALING);
 
     std::unique_ptr<fp4e2m1x2[]> ref_output   = std::make_unique<fp4e2m1x2[]>(rows * (cols / 2));
     std::unique_ptr<fp4e2m1x2[]> ref_output_t = std::make_unique<fp4e2m1x2[]>(cols * (rows / 2));
@@ -565,40 +568,65 @@ void performTest(float (*OP)(const float),
 
     fillCase<fp32>(&input, InputsFillCase::uniform);
 
-    // Golden value of amax chosen to make the 2nd-stage scaling mantissa zero and avoid rounding issues
-    const float amax = 448.0f * 6.0f * 8.0f;
+    // Compute 2nd stage NVFP4 scaling factor
+    std::vector<float> ref_amax;
+    if (row_scaled_nvfp4) {
+        // Compute per-row amaxes
+        const auto *input_vals = input.rowwise_cpu_dptr<InputType>();
+        for (size_t row = 0; row < rows; ++row){
+            float row_amax = 0.0f;
+            for (size_t col = 0; col < cols; ++col) {
+                row_amax = fmaxf(row_amax, fabsf(static_cast<float>(input_vals[row * cols + col])));
+            }
+            ref_amax.push_back(row_amax);
+        }
 
-    // Set 2nd stage NVFP4 scaling factor
-    output.set_tensor_amax(amax);
-    output.set_tensor_amax_columnwise(amax);
+        // Update tensor
+        // Note: No need to update amax like standard NVFP4, amaxes
+        // are computed during quantization.
+        output.set_row_scaled_nvfp4(row_scaled_nvfp4);
+    } else {
+        // Golden value of amax chosen to make the 2nd-stage scaling mantissa zero and avoid rounding issues
+        ref_amax.assign(1, 448.0f * 6.0f * 8.0f);
 
+        // Update tensor
+        if (rowwise) {
+            std::copy(ref_amax.begin(), ref_amax.end(), output.cpu_rowwise_amax_ptr<float>());
+        }
+        if (columnwise) {
+            std::copy(ref_amax.begin(), ref_amax.end(), output.cpu_columnwise_amax_ptr<float>());
+        }
+        output.from_cpu();
+    }
+
+    // Reference implementation
     bool use_2d_quantization = false;
-
     compute_ref<InputType>(OP,
                            input.rowwise_cpu_dptr<InputType>(),
                            ref_output.get(),
                            ref_output_t.get(),
                            ref_scales.get(),
                            ref_scales_t.get(),
-                           amax,
+                           ref_amax.data(),
                            rows,
                            cols,
                            scales_stride,
                            scales_stride_t,
                            use_fast_math,
-                           use_2d_quantization);
+                           use_2d_quantization,
+                           row_scaled_nvfp4);
+
     // Initialize stochastic rounding
     Tensor rng_state("rng_state", std::vector<size_t>{2}, DType::kInt64);
     rng_state.rowwise_cpu_dptr<int64_t>()[0] = 123;  // rng_seed
     rng_state.rowwise_cpu_dptr<int64_t>()[1] = 321;  // rng_sequence
     rng_state.from_cpu();
 
+    // Quantization options
     QuantizationConfigWrapper quant_config;
     quant_config.set_use_fast_math(use_fast_math);
     quant_config.set_stochastic_rounding(false);
     quant_config.set_rng_state(rng_state.data());
-
-    // Set 2D quantization based on compile-time flag
     quant_config.set_nvfp4_2d_quantization(use_2d_quantization);
 
     // Call appropriate function based on operation type
@@ -629,12 +657,8 @@ void performTest(float (*OP)(const float),
     const double rtol = 1.0E-6;
 
     // Set dump_data=true to enable dumping tensor data to files for analysis
-    compareResults_nvfp4(output, ref_output.get(), ref_output_t.get(), rows, cols, atol, rtol, true, false);
-
-    const fp8e4m3* kernel_scales = output.rowwise_cpu_scale_inv_ptr<fp8e4m3>();
-    const fp8e4m3* ref_scales_ptr = ref_scales.get();
-    const fp8e4m3* kernel_scales_t = output.columnwise_cpu_scale_inv_ptr<fp8e4m3>();
-    const fp8e4m3* ref_scales_t_ptr = ref_scales_t.get();
+    compareResults_nvfp4(output, ref_output.get(), ref_output_t.get(), rows, cols, atol, rtol, true,
+                         false, !row_scaled_nvfp4);
 
     size_t scale_mismatches_num = 0;
     compare_scaling_factors<fp8e4m3>("scales", output.rowwise_cpu_scale_inv_ptr<fp8e4m3>(),
@@ -642,10 +666,14 @@ void performTest(float (*OP)(const float),
                                       unpadded_blocks_Y, unpadded_blocks_X, scales_stride,
                                       scale_mismatches_num);
 
-    compare_scaling_factors<fp8e4m3>("scales_t", output.columnwise_cpu_scale_inv_ptr<fp8e4m3>(),
-                                      ref_scales_t.get(),
-                                      unpadded_blocks_Y_t, unpadded_blocks_X_t, scales_stride_t,
-                                      scale_mismatches_num);
+    if (!row_scaled_nvfp4) {
+        compare_scaling_factors<fp8e4m3>("scales_t", output.columnwise_cpu_scale_inv_ptr<fp8e4m3>(),
+                                          ref_scales_t.get(),
+                                          unpadded_blocks_Y_t, unpadded_blocks_X_t, scales_stride_t,
+                                          scale_mismatches_num);
+    }
+
+    compare_rowwise_amax(output, ref_amax);
 }
 
 std::vector<std::vector<size_t>> tensor_dims = {
@@ -678,6 +706,7 @@ class FusedCastTransposeNVFP4TestSuite : public ::testing::TestWithParam
     <std::tuple<ActivationType,
                 std::vector<size_t>,
                 transformer_engine::DType,
+                bool,
                 bool>> {};
 
 TEST_P(FusedCastTransposeNVFP4TestSuite, TestFusedCastTransposeNVFP4) {
@@ -693,6 +722,7 @@ TEST_P(FusedCastTransposeNVFP4TestSuite, TestFusedCastTransposeNVFP4) {
     const auto tensor_dims = std::get<1>(GetParam());
     const DType input_type = std::get<2>(GetParam());
     const bool use_fast_math = std::get<3>(GetParam());
+    const bool row_scaled_nvfp4 = std::get<4>(GetParam());
 
     // Skip tests if the input tensor is 1D
     if (tensor_dims.size() < 2) {
@@ -710,7 +740,7 @@ TEST_P(FusedCastTransposeNVFP4TestSuite, TestFusedCastTransposeNVFP4) {
     }
 
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(input_type, InputType,
-        performTest<InputType>(OP, tensor_dims, use_fast_math);
+        performTest<InputType>(OP, tensor_dims, use_fast_math, row_scaled_nvfp4);
     );
 }
 
@@ -733,6 +763,7 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::ValuesIn(Activation_types),
         ::testing::ValuesIn(tensor_dims),
         ::testing::Values(DType::kBFloat16),
+        ::testing::Values(false),
         ::testing::Values(false)),
     [](const testing::TestParamInfo<FusedCastTransposeNVFP4TestSuite::ParamType>& info) {
         std::string name = to_string(std::get<0>(info.param));
@@ -744,5 +775,30 @@ INSTANTIATE_TEST_SUITE_P(
       if (std::get<3>(info.param)) {
         name += "X_FAST_SCALING";
       }
+        return name;
+    });
+
+INSTANTIATE_TEST_SUITE_P(
+    OperatorTestRowScaled,
+    FusedCastTransposeNVFP4TestSuite,
+    ::testing::Combine(
+        ::testing::Values(ActivationType::Identity),
+        ::testing::Values(tensor_dims[4], tensor_dims[9], tensor_dims[12]),
+        ::testing::Values(DType::kBFloat16, DType::kFloat32),
+        ::testing::Values(false),
+        ::testing::Values(true)),
+    [](const testing::TestParamInfo<FusedCastTransposeNVFP4TestSuite::ParamType>& info) {
+        std::string name = to_string(std::get<0>(info.param));
+        const auto& shape = std::get<1>(info.param);
+        for (const auto& s: shape) {
+            name += "X" + std::to_string(s);
+        }
+        name += "X" + test::typeName(std::get<2>(info.param));
+        if (std::get<3>(info.param)) {
+            name += "X_FAST_SCALING";
+        }
+        if (std::get<4>(info.param)) {
+            name += "XROW_SCALED";
+        }
         return name;
     });

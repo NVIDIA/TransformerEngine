@@ -43,6 +43,9 @@ wait
 # >=4 visible GPUs.
 TE_PATH=$TE_PATH bash $TE_PATH/tests/jax/run_multiprocess_moe_vjp.sh \
     || test_fail "test_multiprocess_moe_vjp.py"
+# Exercise the multi-GPU tutorial in docs/examples/jax (needs >= 4 GPUs;
+# auto-skips otherwise).
+CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_docs_examples_jax_distributed.xml -k multi_gpu $TE_PATH/docs/examples/jax/ || test_fail "docs/examples/jax (multi-GPU)"
 wait
 
 if [ $RET -ne 0 ]; then

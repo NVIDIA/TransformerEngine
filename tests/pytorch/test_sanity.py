@@ -38,12 +38,13 @@ from transformer_engine.common import recipe
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.cpp_extensions import general_gemm
 from transformer_engine.pytorch.tensor.utils import replace_raw_data
-from utils import ModelConfig, skip_unsupported_backward_override
+from utils import ModelConfig, recipe_id, skip_unsupported_backward_override
 
 # Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 fp8_block_scaling_available, _ = te.is_fp8_block_scaling_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
+nvfp4_available, _ = te.is_nvfp4_available(return_reason=True)
 
 # Record initial RNG state from script run.
 seed = 1234
@@ -93,9 +94,18 @@ def nvfp4_vanilla():
     return nvfp4_recipe
 
 
+def nvfp4_row_scaled():
+    nvfp4_recipe = recipe.NVFP4BlockScaling(row_scaled_activation=True)
+    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
+    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
+    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
+    return nvfp4_recipe
+
+
 fp8_recipes = []
 if mxfp8_available:
     fp8_recipes.append(recipe.MXFP8BlockScaling())
+if nvfp4_available:
     fp8_recipes.append(nvfp4_vanilla())  # TODO: fix check for this
 if fp8_block_scaling_available:
     fp8_recipes.append(recipe.Float8BlockScaling())
@@ -103,6 +113,9 @@ if fp8_available:
     fp8_recipes.append(recipe.Float8CurrentScaling())
     fp8_recipes.append(recipe.DelayedScaling())
 fp8_recipes.append(None)
+fp8_recipes_with_row_scaled = fp8_recipes.copy()
+if nvfp4_available:
+    fp8_recipes_with_row_scaled.insert(-1, nvfp4_row_scaled())
 
 param_types = [torch.float32, torch.float16]
 if is_bf16_available():  # bf16 requires sm_80 or higher
@@ -402,7 +415,7 @@ def test_sanity_normalization_amp(dtype, model, skip_wgrad, skip_dgrad, normaliz
 
 
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes_with_row_scaled, ids=recipe_id)
 @pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
 @pytest.mark.parametrize("model", ["small", "weird"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
@@ -450,7 +463,7 @@ def test_sanity_layernorm_linear(
 
 
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes_with_row_scaled, ids=recipe_id)
 @pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
 @pytest.mark.parametrize("model", ["small", "weird"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
@@ -488,7 +501,7 @@ def test_sanity_linear(
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes_with_zero)
 @pytest.mark.parametrize("model", ["small", "weird"])
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes_with_row_scaled, ids=recipe_id)
 @pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("use_bias", all_boolean)
@@ -529,7 +542,7 @@ def test_sanity_linear_with_zero_tokens(
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes_with_zero)
 @pytest.mark.parametrize("model", ["small", "weird"])
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes_with_row_scaled, ids=recipe_id)
 @pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("use_bias", all_boolean)
@@ -563,7 +576,12 @@ def test_sanity_grouped_linear(
         if not is_fp8_supported(config):
             pytest.skip("Model config does not support FP8")
         if fp8_recipe.nvfp4():
-            pytest.skip("NVFP4 not supported for grouped linear")
+            if not getattr(fp8_recipe, "row_scaled_activation", False):
+                pytest.skip("NVFP4 not supported for grouped linear")
+            if single_param:
+                pytest.skip("Row-scaled NVFP4 does not support GroupedTensor grouped linear")
+            if dtype == torch.float16:
+                pytest.skip("FP16 output for NVFP4 not supported")
 
     use_fp8 = fp8_recipe is not None
     with quantized_model_init(enabled=use_fp8 and fp8_model_params, recipe=fp8_recipe):
