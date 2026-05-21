@@ -6,9 +6,8 @@ import os
 import pytest
 import jax
 import jax.numpy as jnp
-import numpy as np
 from jax import random
-from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from jax.sharding import NamedSharding, PartitionSpec
 from distributed_test_base import (
     generate_configs,
     generate_context_parallel_configs_for_attn,
@@ -320,18 +319,38 @@ class TestDistributedScoreModSelfAttn:
             if num_heads % tp_size != 0:
                 pytest.skip(f"{num_heads=} must be divisible by {tp_size=}")
 
-        devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
-        mesh = Mesh(devices, mesh_axes)
-        qkv_sharding = NamedSharding(mesh, PartitionSpec(dp_axis, None, tp_axis, None))
+        runner = FusedAttnRunner(
+            batch,
+            seqlen,
+            seqlen,
+            num_heads,
+            num_heads,
+            head_dim,
+            head_dim,
+            AttnBiasType.NO_BIAS,
+            AttnMaskType.NO_MASK,
+            AttnSoftmaxType.VANILLA_SOFTMAX,
+            0.0,
+            dtype,
+            True,
+            QKVLayout.BSHD_BSHD_BSHD,
+            None,
+            None,
+            SeqDescFormat.Mask,
+            number_of_devices=device_count,
+            mesh_shape=mesh_shape,
+            mesh_axes=mesh_axes,
+            mesh_resource=mesh_resource,
+        )
+        runner._setup_inputs()
 
-        key = random.PRNGKey(2025)
-        q_key, k_key, v_key, dout_key = random.split(key, 4)
-        query = (0.125 * random.normal(q_key, data_shape, dtype=dtype)).astype(dtype)
-        key_tensor = (0.125 * random.normal(k_key, data_shape, dtype=dtype)).astype(dtype)
-        value = (0.125 * random.normal(v_key, data_shape, dtype=dtype)).astype(dtype)
-        doutput = random.normal(dout_key, data_shape, dtype=dtype)
+        qkv_sharding = NamedSharding(runner.mesh, PartitionSpec(dp_axis, None, tp_axis, None))
+        query = (0.125 * runner.q).astype(dtype)
+        key_tensor = (0.125 * runner.k).astype(dtype)
+        value = (0.125 * runner.v).astype(dtype)
+        doutput = random.normal(random.PRNGKey(2025), data_shape, dtype=dtype)
 
-        scaling_factor = head_dim**-0.5
+        scaling_factor = runner.scaling_factor
         softcap = 0.8
         softcap_score_mod = _ScoreModSoftcap()
 
@@ -382,7 +401,7 @@ class TestDistributedScoreModSelfAttn:
             jax.device_put(value, qkv_sharding),
             jax.device_put(doutput, qkv_sharding),
         )
-        with mesh, autocast(mesh_resource=mesh_resource):
+        with runner.mesh, autocast(mesh_resource=mesh_resource):
             (score_mod_value, score_mod_out), score_mod_grads = jitted_score_mod(*sharded_args)
         (ref_value, ref_out), ref_grads = jitted_ref(query, key_tensor, value, doutput)
 

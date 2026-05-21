@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 from jax import value_and_grad
 
-import transformer_engine.jax.cpp_extensions.attention as tex_attention
+import transformer_engine.jax.cpp_extensions.flex_attention as tex_attention
 from transformer_engine.jax.attention import (
     AttnBiasType,
     AttnMaskType,

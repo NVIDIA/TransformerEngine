@@ -725,6 +725,7 @@ struct ScoreModGraphCacheKeyHash {
   size_t operator()(const ScoreModGraphCacheKey &key) const {
     size_t seed = std::hash<int>{}(key.device_id);
     auto combine = [&seed](int64_t value) {
+      // 64-bit golden ratio constant from boost::hash_combine to spread mixed keys.
       seed ^= std::hash<int64_t>{}(value) + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
     };
     combine(key.hash0);

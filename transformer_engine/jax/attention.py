@@ -1444,70 +1444,6 @@ def _fused_attn_score_mod_bwd_rule(config, context_checkpoint_name, ctx, dz):
 _fused_attn_score_mod.defvjp(_fused_attn_score_mod_fwd_rule, _fused_attn_score_mod_bwd_rule)
 
 
-def _validate_fused_attn_score_mod(
-    qkv: Tuple[jnp.ndarray, ...],
-    bias: Optional[jnp.ndarray],
-    sequence_descriptor: Optional[SequenceDescriptor],
-    seed: Optional[jnp.ndarray],
-    attn_bias_type: AttnBiasType,
-    attn_mask_type: AttnMaskType,
-    qkv_layout: QKVLayout,
-    softmax_type: AttnSoftmaxType,
-    dropout_probability: float,
-    max_segments_per_seq: int,
-    window_size: Optional[Tuple[int, int]],
-    context_parallel_strategy: CPStrategy,
-    context_parallel_causal_load_balanced: bool,
-    context_parallel_axis: str,
-    softmax_offset: Optional[jnp.ndarray],
-    stripe_size: int | None,
-):
-    """Validate arguments for the cuDNN frontend score_mod path."""
-    header = "score_mod fused_attn"
-    if qkv_layout is not QKVLayout.BSHD_BSHD_BSHD:
-        raise ValueError(f"{header} currently only supports QKVLayout.BSHD_BSHD_BSHD.")
-    if len(qkv) != 3:
-        raise ValueError(f"{header} requires separate query, key and value tensors.")
-    if any(tensor.ndim != 4 for tensor in qkv):
-        raise ValueError(f"{header} requires rank-4 BSHD query/key/value tensors.")
-    q, k, v = qkv
-    if q.dtype != k.dtype or q.dtype != v.dtype:
-        raise ValueError(f"{header} requires query, key and value to have the same dtype.")
-    if q.dtype not in (jnp.float16, jnp.bfloat16):
-        raise ValueError(f"{header} only supports FP16/BF16 query, key and value tensors.")
-    if q.shape[0] != k.shape[0] or q.shape[0] != v.shape[0]:
-        raise ValueError(f"{header} requires matching batch dimensions.")
-    if k.shape[1] != v.shape[1]:
-        raise ValueError(f"{header} requires key and value sequence lengths to match.")
-    if k.shape[2] != v.shape[2]:
-        raise ValueError(f"{header} requires key and value head counts to match.")
-    if q.shape[3] != k.shape[3]:
-        raise ValueError(f"{header} requires query/key head dimensions to match.")
-
-    if bias is not None or attn_bias_type is not AttnBiasType.NO_BIAS:
-        raise ValueError(f"{header} is mutually exclusive with attention bias.")
-    if sequence_descriptor is not None:
-        raise ValueError(f"{header} is mutually exclusive with padding/sequence descriptors.")
-    if seed is not None:
-        raise ValueError(f"{header} is mutually exclusive with dropout seed.")
-    if attn_mask_type is not AttnMaskType.NO_MASK:
-        raise ValueError(f"{header} is mutually exclusive with attention masks.")
-    if softmax_type is not AttnSoftmaxType.VANILLA_SOFTMAX or softmax_offset is not None:
-        raise ValueError(f"{header} only supports vanilla softmax without softmax_offset.")
-    if dropout_probability != 0.0:
-        raise ValueError(f"{header} is mutually exclusive with dropout.")
-    if max_segments_per_seq != 1:
-        raise ValueError(f"{header} is mutually exclusive with packed/ragged sequence metadata.")
-    if window_size not in (None, (-1, -1)):
-        raise ValueError(f"{header} is mutually exclusive with sliding-window attention.")
-    if context_parallel_strategy is not CPStrategy.DEFAULT:
-        raise ValueError(f"{header} is mutually exclusive with context parallelism.")
-    if context_parallel_causal_load_balanced or context_parallel_axis:
-        raise ValueError(f"{header} is mutually exclusive with context parallelism.")
-    if stripe_size is not None:
-        raise ValueError(f"{header} is mutually exclusive with striped context parallelism.")
-
-
 def fused_attn(
     qkv: Tuple[jnp.ndarray, ...],
     bias: Optional[jnp.ndarray],
@@ -1621,14 +1557,19 @@ def fused_attn(
                              QKVLayout.T3HD, 0.125, 0, True, 3)
     """
     if score_mod is None:
-        if score_mod_bprop is not None:
-            raise ValueError("score_mod_bprop requires score_mod to be provided.")
-        if score_mod_tensors is not None:
-            raise ValueError("score_mod_tensors requires score_mod to be provided.")
-        if score_mod_bprop_tensors is not None:
-            raise ValueError("score_mod_bprop_tensors requires score_mod to be provided.")
+        score_mod_only_args = [
+            name
+            for name, value in (
+                ("score_mod_bprop", score_mod_bprop),
+                ("score_mod_tensors", score_mod_tensors),
+                ("score_mod_bprop_tensors", score_mod_bprop_tensors),
+            )
+            if value is not None
+        ]
+        if score_mod_only_args:
+            raise ValueError(f"{', '.join(score_mod_only_args)} require score_mod to be provided.")
     else:
-        _validate_fused_attn_score_mod(
+        tex.validate_fused_attn_score_mod(
             qkv,
             bias,
             sequence_descriptor,
