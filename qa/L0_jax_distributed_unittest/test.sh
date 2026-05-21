@@ -37,6 +37,14 @@ wait
 TE_PATH=$TE_PATH bash $TE_PATH/examples/jax/collective_gemm/run_test_cgemm.sh || test_fail "run_test_cgemm.sh"
 wait
 
+# MoE custom_vjp distributed suite. Runs one Python process per GPU
+# via tests/jax/run_multiprocess_moe_vjp.sh (mirrors the pattern in
+# examples/jax/encoder/run_test_multiprocessing_encoder.sh). Requires
+# >=4 visible GPUs.
+TE_PATH=$TE_PATH bash $TE_PATH/tests/jax/run_multiprocess_moe_vjp.sh \
+    || test_fail "test_multiprocess_moe_vjp.py"
+wait
+
 if [ $RET -ne 0 ]; then
     echo "Error: some sub-tests failed: $FAILED_CASES"
     exit 1
