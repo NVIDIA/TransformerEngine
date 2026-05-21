@@ -33,6 +33,7 @@ static_assert(NVTE_BUILD_NUM_PHILOX_ROUNDS > 0,
 #include <initializer_list>
 #include <limits>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -1146,9 +1147,9 @@ inline bool is_aligned_tensor_data(const Tensor &t, size_t alignment) {
 size_t typeToSize(const DType type);
 size_t typeToNumBits(const DType type);
 
-void CheckNoopTensor(const Tensor &t, const std::string &name);
-void CheckInputTensor(const Tensor &t, const std::string &name, bool check_scale_inv_shapes = true);
-void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empty = false);
+void CheckNoopTensor(const Tensor &t, const std::string_view &name);
+void CheckInputTensor(const Tensor &t, const std::string_view &name, bool check_scale_inv_shapes = true);
+void CheckOutputTensor(const Tensor &t, const std::string_view &name, bool allow_empty = false);
 
 /*! \brief Update a tensor's FP8 scale-inverse
  *
@@ -1183,9 +1184,9 @@ GroupedTensor *convertNVTEGroupedTensor(const NVTEGroupedTensor tensor);
 GroupedTensor *convertNVTEGroupedTensorCheck(const NVTEGroupedTensor tensor);
 
 // Helper functions for GroupedTensor validation
-void CheckGroupedTensorShapeArrays(const GroupedTensor &t, const std::string &name);
-void CheckInputGroupedTensor(const GroupedTensor &t, const std::string &name);
-void CheckOutputGroupedTensor(const GroupedTensor &t, const std::string &name,
+void CheckGroupedTensorShapeArrays(const GroupedTensor &t, const std::string_view &name);
+void CheckInputGroupedTensor(const GroupedTensor &t, const std::string_view &name);
+void CheckOutputGroupedTensor(const GroupedTensor &t, const std::string_view &name,
                               bool allow_empty = false);
 
 }  // namespace transformer_engine
