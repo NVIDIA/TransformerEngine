@@ -92,7 +92,7 @@ int stringCmp(const void *a, const void *b) { return strcmp((const char *)a, (co
   } while (0);
 
 bool has_mnnvl_fabric(int device_id) {
-#if CUDA_VERSION < 12040
+#if !defined(nvmlGpuFabricInfo_v2)
   if (getenv("NVTE_UBDEBUG")) {
     printf(
         "TransformerEngine does not support multi-node NVLINK "
