@@ -414,17 +414,20 @@ def test_fused_scores_for_aux_loss(dtype, num_tokens, num_experts, topk, score_f
 @pytest.mark.parametrize("num_tokens", [2048, 7168, 14234])
 @pytest.mark.parametrize("num_experts", [1024, 256, 128, 32])
 @pytest.mark.parametrize("topk", [4, 32])
-def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk):
+@pytest.mark.parametrize("expert_multiplier", [1, 2])
+def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk, expert_multiplier):
     if topk >= num_experts:
         pytest.skip(f"topk ({topk}) >= num_experts ({num_experts})")
+    # Sequence aux loss batches independent sequences along the expert dimension.
+    num_cols = num_experts * expert_multiplier
     # Construct the special probs to avoid inf in the sigmoid function
     offset = torch.arange(-num_tokens // 2, num_tokens // 2, dtype=dtype, device="cuda") * 1e-4
-    probs = torch.arange(-num_experts // 2, num_experts // 2, device="cuda", dtype=dtype) * 1e-2
+    probs = torch.arange(-num_cols // 2, num_cols // 2, device="cuda", dtype=dtype) * 1e-2
     probs = probs.unsqueeze(0).repeat(num_tokens, 1) + offset.unsqueeze(1)
-    probs = probs.view(num_tokens, num_experts)
+    probs = probs.view(num_tokens, num_cols)
     probs.requires_grad = True
 
-    tokens_per_expert = torch.randint(1, 1000, (num_experts,), device="cuda", dtype=torch.int32)
+    tokens_per_expert = torch.randint(1, 1000, (num_cols,), device="cuda", dtype=torch.int32)
     coeff = 0.01
 
     probs_clone = deepcopy(probs)
