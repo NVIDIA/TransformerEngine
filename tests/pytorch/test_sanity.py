@@ -566,8 +566,8 @@ def test_sanity_grouped_linear(
     # Small batch size used to catch bug from https://github.com/NVIDIA/TransformerEngine/pull/1527.
     bs = bs * 16
     # The "all" empty_split exercises the path where every local expert
-    # receives zero tokens, e.g. a Megatron-LM MoE rank that didn't receive
-    # any locally-routed tokens for a microbatch. In that case num_tokens
+    # receives zero tokens (e.g. a Megatron-LM MoE rank that didn't receive
+    # any locally-routed tokens for a microbatch). In that case num_tokens
     # is 0; for the other empty_split values exactly one of num_gemms splits
     # is empty so num_tokens covers the remaining (num_gemms - 1) groups.
     if empty_split == "all":
