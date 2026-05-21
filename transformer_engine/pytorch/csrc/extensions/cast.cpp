@@ -1394,10 +1394,8 @@ void split_quantize_nvfp4_impl_helper(const TensorWrapper &input,
 // buffer the same shape/dtype as the slot, swizzle out-of-place into the scratch, then
 // memcpy the swizzled bytes back into the original slot. Used to honor optimize_for_gemm
 // on SM120 where the NVFP4 split-quantize cast kernels only emit compact-layout scales.
-void swizzle_per_split_scale_slot_in_place(TensorWrapper &out, bool rowwise,
-                                           cudaStream_t stream) {
-  const auto scales =
-      rowwise ? out.get_rowwise_scale_inv() : out.get_columnwise_scale_inv();
+void swizzle_per_split_scale_slot_in_place(TensorWrapper &out, bool rowwise, cudaStream_t stream) {
+  const auto scales = rowwise ? out.get_rowwise_scale_inv() : out.get_columnwise_scale_inv();
   if (scales.data_ptr == nullptr) {
     return;
   }
@@ -1427,14 +1425,13 @@ void swizzle_per_split_scale_slot_in_place(TensorWrapper &out, bool rowwise,
   }
   output_nvte.set_with_gemm_swizzled_scales(true);
 
-  NVTE_SCOPED_GIL_RELEASE({
-    nvte_swizzle_scaling_factors(input_nvte.data(), output_nvte.data(), stream);
-  });
+  NVTE_SCOPED_GIL_RELEASE(
+      { nvte_swizzle_scaling_factors(input_nvte.data(), output_nvte.data(), stream); });
 
   const size_t nbytes =
       static_cast<size_t>(scratch.numel()) * static_cast<size_t>(scratch.element_size());
-  NVTE_CHECK_CUDA(cudaMemcpyAsync(scales.data_ptr, scratch_ptr, nbytes,
-                                  cudaMemcpyDeviceToDevice, stream));
+  NVTE_CHECK_CUDA(
+      cudaMemcpyAsync(scales.data_ptr, scratch_ptr, nbytes, cudaMemcpyDeviceToDevice, stream));
 }
 
 void split_quantize_nvfp4_impl(const TensorWrapper &input,
