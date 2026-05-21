@@ -451,7 +451,7 @@ def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk, expert_multipl
         coeff=coeff,
     )
 
-    atol, rtol = _get_tolerances(dtype, num_experts)
+    atol, rtol = _get_tolerances(dtype, num_cols)
     torch.testing.assert_close(aux_loss, aux_loss_fused, atol=atol, rtol=rtol)
 
     # Backward
