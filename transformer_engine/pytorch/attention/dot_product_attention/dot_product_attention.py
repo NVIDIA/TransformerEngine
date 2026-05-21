@@ -1461,6 +1461,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                         for k, v in score_mod_tensors.items()
                     ), "score_mod_tensors must map string names to torch.Tensor instances!"
                 if score_mod_bprop_tensors is not None:
+                    assert (
+                        score_mod_bprop is not None
+                    ), "score_mod_bprop_tensors requires score_mod_bprop!"
                     assert isinstance(
                         score_mod_bprop_tensors, dict
                     ), "score_mod_bprop_tensors must be a dict!"

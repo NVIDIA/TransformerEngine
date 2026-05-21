@@ -478,6 +478,30 @@ def test_score_mod_tensors_are_version_checked_for_backward(monkeypatch):
         out.sum().backward()
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required.")
+def test_score_mod_bprop_tensors_require_score_mod_bprop():
+    """score_mod_bprop_tensors should not be silently ignored."""
+
+    q, k, v, _, _ = (tensor.cuda() for tensor in _score_mod_cache_cpu_inputs())
+    attention = DotProductAttention(
+        num_attention_heads=3,
+        kv_channels=8,
+        qkv_format="bshd",
+        attn_mask_type="no_mask",
+    ).cuda()
+
+    with pytest.raises(AssertionError, match="score_mod_bprop_tensors requires score_mod_bprop"):
+        attention(
+            q,
+            k,
+            v,
+            qkv_format="bshd",
+            attn_mask_type="no_mask",
+            score_mod=_score_mod_causal,
+            score_mod_bprop_tensors={"zero": torch.zeros((1, 1, 1, 1), device="cuda")},
+        )
+
+
 def _post_scale_bias(config, dtype):
     """Materialize score + (q_idx - kv_idx) as post-scale attention bias."""
     q_idx = torch.arange(config.max_seqlen_q, dtype=torch.float32, device="cuda").view(1, 1, -1, 1)
