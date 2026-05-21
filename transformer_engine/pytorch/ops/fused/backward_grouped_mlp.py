@@ -7,7 +7,6 @@
 from __future__ import annotations
 from collections.abc import Callable
 import functools
-import inspect
 import os
 from typing import Optional
 
@@ -133,21 +132,6 @@ def _cudnn_compute_wgrad(
             accumulate_on_output=accumulate,
             current_stream=current_stream,
         )
-
-
-@functools.lru_cache(maxsize=None)
-def _dsrelu_wrapper_has_reuse_arg() -> bool:
-    """True if cuDNN FE SM100 dSReLU wrapper accepts ``use_dsrelu_reuse``."""
-    try:
-        import cudnn  # pylint: disable=import-outside-toplevel
-    except ImportError:
-        return False
-    try:
-        wrapper = getattr(cudnn, "grouped_gemm_dsrelu_wrapper_sm100")
-        params = inspect.signature(wrapper).parameters
-    except (AttributeError, TypeError, ValueError):
-        return False
-    return "use_dsrelu_reuse" in params
 
 
 def _compute_grad_params(
@@ -498,7 +482,7 @@ class _BackwardGroupedMLP_CuTeGEMMDBase_MXFP8(FusedOperation):
         if self._cudnn_dact_func is not None:
             fc2_dactivation_kwargs["beta_tensor"] = alpha_tensor
             fc2_dactivation_kwargs["act_func"] = self._cudnn_dact_func
-        elif _dsrelu_wrapper_has_reuse_arg():
+        elif _cudnn_frontend_supports_grouped_gemm_srelu():
             fc2_dactivation_kwargs["use_dsrelu_reuse"] = (
                 os.environ.get("NVTE_CUTEDSL_FUSED_GROUPED_MLP_DSRELU_REUSE", "0") == "1"
             )
