@@ -20,6 +20,7 @@
 #include "common.h"
 #include "common/util/system.h"
 #include "pybind.h"
+#include "transformer_engine/swizzle.h"
 #include "transformer_engine/transformer_engine.h"
 
 namespace transformer_engine {
@@ -256,14 +257,11 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
       // NVFP4 grouped quantization
       NVFP4Quantizer *nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());
       const bool enable_sm120_grouped_nvfp4_fallback = is_sm120_device() && first_dims.has_value();
-      // SM120 fallback does not support GEMM-swizzled NVFP4 scale layouts in this path.
       if (enable_sm120_grouped_nvfp4_fallback) {
-        // Use a local quantizer copy so fallback behavior does not mutate shared quantizer state.
-        NVFP4Quantizer fallback_quantizer = *nvfp4_quantizer_cpp;
-        fallback_quantizer.optimize_for_gemm = false;
-
-        // As SM120 does not support GEMM-swizzled NVFP4 scale layouts in this path,
-        // we need to split the input tensor into per-group sub-tensors and quantize them separately.
+        // SM120 fallback: the fused grouped NVFP4 kernel does not run here, so we cast
+        // per split with the unfused split-quantize path. split_quantize_nvfp4_impl owns
+        // the SM120-specific bookkeeping for optimize_for_gemm (compact-only cast +
+        // post-cast in-place swizzle), so the public contract holds at every layer.
         auto split_sections = get_split_sections(first_dims, num_tensors);
         std::vector<TensorWrapper> input_list;
         input_list.reserve(num_tensors);
@@ -284,9 +282,8 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
               makeTransformerEngineTensor(split_dptr, split_shape, input_dtype));
           dim0_offset += split_sections[i];
         }
-        // Get the quantized output tensors from the Python GroupedTensor.
         auto output_list = get_grouped_outputs(grouped_output_py, num_tensors);
-        std::vector<NVFP4Quantizer *> quantizers(num_tensors, &fallback_quantizer);
+        std::vector<NVFP4Quantizer *> quantizers(num_tensors, nvfp4_quantizer_cpp);
         auto input_tensor_cpp = makeTransformerEngineTensor(input_contiguous);
         split_quantize_nvfp4_impl(input_tensor_cpp, input_list, output_list, split_sections,
                                   quantizers);
@@ -1392,6 +1389,54 @@ void split_quantize_nvfp4_impl_helper(const TensorWrapper &input,
   }
 }
 
+// Swizzle the rowwise or columnwise scale slot of a single per-split NVFP4 output in
+// place. nvte_swizzle_scaling_factors is not in-place safe, so we allocate a scratch
+// buffer the same shape/dtype as the slot, swizzle out-of-place into the scratch, then
+// memcpy the swizzled bytes back into the original slot. Used to honor optimize_for_gemm
+// on SM120 where the NVFP4 split-quantize cast kernels only emit compact-layout scales.
+void swizzle_per_split_scale_slot_in_place(TensorWrapper &out, bool rowwise,
+                                           cudaStream_t stream) {
+  const auto scales =
+      rowwise ? out.get_rowwise_scale_inv() : out.get_columnwise_scale_inv();
+  if (scales.data_ptr == nullptr) {
+    return;
+  }
+  const auto data = rowwise ? out.get_rowwise_data() : out.get_columnwise_data();
+  if (data.data_ptr == nullptr) {
+    return;
+  }
+  const auto scaling_mode = out.scaling_mode();
+  const auto scales_dtype = static_cast<DType>(scales.dtype);
+  const auto data_dtype = static_cast<DType>(data.dtype);
+
+  auto scratch = allocateSpace(scales.shape, scales_dtype, /*init_to_zeros=*/false);
+  void *scratch_ptr = getDataPtr(scratch);
+
+  TensorWrapper input_nvte(scaling_mode);
+  TensorWrapper output_nvte(scaling_mode);
+  if (rowwise) {
+    input_nvte.set_rowwise_data(nullptr, data_dtype, data.shape);
+    input_nvte.set_rowwise_scale_inv(scales.data_ptr, scales_dtype, scales.shape);
+    output_nvte.set_rowwise_data(nullptr, data_dtype, data.shape);
+    output_nvte.set_rowwise_scale_inv(scratch_ptr, scales_dtype, scales.shape);
+  } else {
+    input_nvte.set_columnwise_data(nullptr, data_dtype, data.shape);
+    input_nvte.set_columnwise_scale_inv(scales.data_ptr, scales_dtype, scales.shape);
+    output_nvte.set_columnwise_data(nullptr, data_dtype, data.shape);
+    output_nvte.set_columnwise_scale_inv(scratch_ptr, scales_dtype, scales.shape);
+  }
+  output_nvte.set_with_gemm_swizzled_scales(true);
+
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_swizzle_scaling_factors(input_nvte.data(), output_nvte.data(), stream);
+  });
+
+  const size_t nbytes =
+      static_cast<size_t>(scratch.numel()) * static_cast<size_t>(scratch.element_size());
+  NVTE_CHECK_CUDA(cudaMemcpyAsync(scales.data_ptr, scratch_ptr, nbytes,
+                                  cudaMemcpyDeviceToDevice, stream));
+}
+
 void split_quantize_nvfp4_impl(const TensorWrapper &input,
                                const std::vector<TensorWrapper> &input_list,
                                std::vector<TensorWrapper> &output_list,
@@ -1445,6 +1490,30 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
   // CUDA stream
   auto stream = at::cuda::getCurrentCUDAStream();
 
+  // SM120 only emits scales in the compact (unswizzled) layout from the NVFP4 split-
+  // quantize cast kernels. To honor optimize_for_gemm at this boundary, we:
+  //   1. Note which per-split outputs were requested with swizzled scales
+  //   2. Override their C++ with_gemm_swizzled_scales flag to false so the cast
+  //      kernels' compact-only assertion passes
+  //   3. Run the cast
+  //   4. Post-cast, swizzle each requested per-split scale slot in place so the
+  //      data matches the (already-true) Python _with_gemm_swizzled_scales metadata.
+  // This makes both call sites of split_quantize_nvfp4_impl (group_quantize SM120
+  // fallback and standalone split_quantize) honor the public optimize_for_gemm
+  // contract uniformly.
+  const bool sm120 = is_sm120_device();
+  std::vector<bool> wanted_swizzled;
+  if (sm120) {
+    wanted_swizzled.reserve(num_tensors);
+    for (size_t i = 0; i < num_tensors; ++i) {
+      const bool want = quantizers[i]->optimize_for_gemm;
+      wanted_swizzled.push_back(want);
+      if (want) {
+        output_list[i].set_with_gemm_swizzled_scales(false);
+      }
+    }
+  }
+
   // Perform multi-tensor quantization
   NVTE_SCOPED_GIL_RELEASE({
     if (quantizer.with_rht) {  // Quantize row-wise data, RHT+quantize column-wise data
@@ -1459,6 +1528,19 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
                                        stream);
     }
   });
+
+  // Post-cast swizzle on SM120 for outputs that requested optimize_for_gemm=true.
+  // Each call swizzles one scale direction (rowwise or columnwise) in place; the
+  // helper itself handles GIL release for the underlying CUDA work.
+  if (sm120) {
+    for (size_t i = 0; i < num_tensors; ++i) {
+      if (!wanted_swizzled[i] || input_list[i].numel() == 0) {
+        continue;
+      }
+      swizzle_per_split_scale_slot_in_place(output_list[i], /*rowwise=*/true, stream);
+      swizzle_per_split_scale_slot_in_place(output_list[i], /*rowwise=*/false, stream);
+    }
+  }
 }
 
 }  // namespace
