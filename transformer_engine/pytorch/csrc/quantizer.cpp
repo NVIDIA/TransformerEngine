@@ -2009,12 +2009,11 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
                                getTensorShape(*tensor_offsets));
   }
 
-  const bool enable_sm120_grouped_nvfp4_fallback = first_dims.has_value() && is_sm120_device();
-  // Keep grouped metadata aligned with runtime behavior:
-  // - default: follow optimize_for_gemm
-  // - SM120 fallback path: force unswizzled layout
-  const bool with_gemm_swizzled_scales =
-      this->optimize_for_gemm && !enable_sm120_grouped_nvfp4_fallback;
+  // The grouped tensor metadata always follows the quantizer's optimize_for_gemm.
+  // Architecture-specific cast paths (e.g. the SM120 grouped NVFP4 fallback in
+  // pytorch/csrc/extensions/cast.cpp) are responsible for producing scales that
+  // match this metadata at the API boundary.
+  const bool with_gemm_swizzled_scales = this->optimize_for_gemm;
   out_cpp.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
 
   py::handle GroupedTensorClass = grouped_tensor_python_class(this->internal);
