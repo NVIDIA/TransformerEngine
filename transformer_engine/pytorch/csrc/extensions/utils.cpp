@@ -117,41 +117,45 @@ std::tuple<at::Tensor, std::optional<at::Tensor>> transform_and_load_data_ptrs_o
                                      at::TensorOptions().dtype(at::kByte).device(device));
     uint8_t *swizzled_scales_dptr = reinterpret_cast<uint8_t *>(swizzled_scales.data_ptr());
 
-    // Build TensorWrapper input/output pairs with scales
-    std::vector<transformer_engine::TensorWrapper> inputs_nvte, outputs_nvte;
-    inputs_nvte.reserve(num_tensors);
-    outputs_nvte.reserve(num_tensors);
+    // Allocate input/output NVTETensors as a single batch. The first
+    // num_tensors entries are inputs; the next num_tensors are outputs.
+    std::vector<NVTETensor> nvte_tensors(2 * num_tensors);
+    nvte_create_tensors(scaling_mode, nvte_tensors.data(), nvte_tensors.size());
+    struct DestroyGuard {
+      NVTETensor *data;
+      size_t n;
+      ~DestroyGuard() { nvte_destroy_tensors(data, n); }
+    } destroy_guard{nvte_tensors.data(), nvte_tensors.size()};
+    NVTETensor *inputs_nvte = nvte_tensors.data();
+    NVTETensor *outputs_nvte = nvte_tensors.data() + num_tensors;
+
+    auto set_param = [](NVTETensor t, NVTETensorParam param, void *dptr,
+                        transformer_engine::DType dtype, const NVTEShape &shape) {
+      NVTEBasicTensor data{dptr, static_cast<NVTEDType>(dtype), shape};
+      nvte_set_tensor_param_v2(t, param, &data, sizeof(data));
+    };
+
     for (size_t i = 0; i < num_tensors; ++i) {
-      inputs_nvte.emplace_back(scaling_mode);
-      outputs_nvte.emplace_back(scaling_mode);
-      auto &input_nvte = inputs_nvte.back();
-      auto &output_nvte = outputs_nvte.back();
-      output_nvte.set_with_gemm_swizzled_scales(true);
+      const uint8_t swizzled_flag = 1;
+      nvte_set_tensor_param_v2(outputs_nvte[i], kNVTEWithGEMMSwizzledScales, &swizzled_flag,
+                               sizeof(swizzled_flag));
       void *in_scale_ptr = tensors[i].data_ptr();
       void *out_scale_ptr = swizzled_scales_dptr + i * swizzled_scales_stride;
       if (uniform_mxfp8_rowwise_swizzle || uniform_nvfp4_swizzle) {
-        input_nvte.set_rowwise_data(nullptr, data_dtype, data_shape);
-        input_nvte.set_rowwise_scale_inv(in_scale_ptr, scale_dtype, scale_shape);
-        output_nvte.set_rowwise_data(nullptr, data_dtype, data_shape);
-        output_nvte.set_rowwise_scale_inv(out_scale_ptr, scale_dtype, scale_shape);
+        set_param(inputs_nvte[i], kNVTERowwiseData, nullptr, data_dtype, data_shape);
+        set_param(inputs_nvte[i], kNVTERowwiseScaleInv, in_scale_ptr, scale_dtype, scale_shape);
+        set_param(outputs_nvte[i], kNVTERowwiseData, nullptr, data_dtype, data_shape);
+        set_param(outputs_nvte[i], kNVTERowwiseScaleInv, out_scale_ptr, scale_dtype, scale_shape);
       } else if (uniform_mxfp8_colwise_swizzle) {
-        input_nvte.set_columnwise_data(nullptr, data_dtype, data_shape);
-        input_nvte.set_columnwise_scale_inv(in_scale_ptr, scale_dtype, scale_shape);
-        output_nvte.set_columnwise_data(nullptr, data_dtype, data_shape);
-        output_nvte.set_columnwise_scale_inv(out_scale_ptr, scale_dtype, scale_shape);
+        set_param(inputs_nvte[i], kNVTEColumnwiseData, nullptr, data_dtype, data_shape);
+        set_param(inputs_nvte[i], kNVTEColumnwiseScaleInv, in_scale_ptr, scale_dtype, scale_shape);
+        set_param(outputs_nvte[i], kNVTEColumnwiseData, nullptr, data_dtype, data_shape);
+        set_param(outputs_nvte[i], kNVTEColumnwiseScaleInv, out_scale_ptr, scale_dtype, scale_shape);
       }
     }
 
-    // Pack raw NVTETensors into vectors
-    std::vector<NVTETensor> inputs_nvte_raw, outputs_nvte_raw;
-    inputs_nvte_raw.reserve(num_tensors);
-    outputs_nvte_raw.reserve(num_tensors);
-    for (auto &t : inputs_nvte) inputs_nvte_raw.push_back(t.data());
-    for (auto &t : outputs_nvte) outputs_nvte_raw.push_back(t.data());
-
     // Launch kernel
-    nvte_multi_tensor_swizzle_scaling_factors(inputs_nvte_raw.data(), outputs_nvte_raw.data(),
-                                              inputs_nvte_raw.size(), stream);
+    nvte_multi_tensor_swizzle_scaling_factors(inputs_nvte, outputs_nvte, num_tensors, stream);
 
     // Collect data pointers
     std::vector<uint64_t> ptrs_host;
