@@ -1235,7 +1235,9 @@ def _body_bwd(
         casted_d_up_proj_out.get_tensor(usage=TensorUsage.RHS),
         contracting_dims=((0,), (0,)),
     )
-    d_wi_1_bias = tex.grouped_dbias(d_up_proj_out, ctx["local_group_sizes"]) if has_wi_bias else None
+    d_wi_1_bias = (
+        tex.grouped_dbias(d_up_proj_out, ctx["local_group_sizes"]) if has_wi_bias else None
+    )
 
     # ---------------- FFN bwd: GEMM 1 (wi_0) ----------------
     casted_d_gate_proj_out = tex.grouped_quantize(
@@ -1251,7 +1253,9 @@ def _body_bwd(
         casted_d_gate_proj_out.get_tensor(usage=TensorUsage.RHS),
         contracting_dims=((0,), (0,)),
     )
-    d_wi_0_bias = tex.grouped_dbias(d_gate_proj_out, ctx["local_group_sizes"]) if has_wi_bias else None
+    d_wi_0_bias = (
+        tex.grouped_dbias(d_gate_proj_out, ctx["local_group_sizes"]) if has_wi_bias else None
+    )
 
     d_sorted_x = d_sorted_x_from_w0 + d_sorted_x_from_w1
 
