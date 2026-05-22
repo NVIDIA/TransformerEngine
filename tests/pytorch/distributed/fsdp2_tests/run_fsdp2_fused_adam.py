@@ -228,13 +228,6 @@ def test_fused_adam_fp8_master_weights_no_meta(recipe_name):
     """
     recipe = get_recipe_from_string(recipe_name)
 
-    if recipe_name in ("MXFP8BlockScaling", "Float8BlockScaling", "NVFP4BlockScaling"):
-        pytest.xfail(
-            f"{recipe_name}: FSDP2 all-gather hooks for block-scaling QuantizedTensor "
-            "subclasses fail when parameters are initialized on CUDA. "
-            "Use device='meta' + reset_parameters() after sharding."
-        )
-
     world_size, device = _get_dist_info()
 
     model = _build_model(fp8_init=True, recipe=recipe, use_meta_device=False)
@@ -604,12 +597,6 @@ def test_safetensors_fp32_export(recipe_name):
     - Saved tensor shapes match expected (unsharded) shapes
     """
     recipe = get_recipe_from_string(recipe_name)
-    if recipe_name == "MXFP8BlockScaling":
-        pytest.xfail(
-            "MXFP8BlockScaling: FusedAdam CUDA kernel does not support "
-            "MXFP8 quantized tensors, causing illegal memory access. "
-            "Fixed by https://github.com/NVIDIA/TransformerEngine/pull/2789."
-        )
 
     from safetensors.torch import load_file, save_file
     from torch.distributed.checkpoint.state_dict import (
@@ -692,39 +679,13 @@ def test_dcp_output_parity(recipe_name, async_save):
     """
     recipe = get_recipe_from_string(recipe_name)
 
-    if recipe_name == "MXFP8BlockScaling":
-        pytest.xfail(
-            "MXFP8BlockScaling: FusedAdam CUDA kernel does not support "
-            "MXFP8 quantized tensors, causing illegal memory access: "
-            "/transformer_engine/common/multi_tensor/multi_tensor_apply.cuh:92 in function "
-            "multi_tensor_apply: CUDA Error: an illegal memory access was encountered. "
-            "Fixed by https://github.com/NVIDIA/TransformerEngine/pull/2789."
-        )
-
-    if recipe_name == "NVFP4BlockScaling":
-        pytest.xfail(
-            "NVFP4BlockScaling: DCP load_state_dict triggers reset_sharded_param() "
-            "which calls data_ptr() on NVFP4Tensor wrapper subclass with invalid storage"
-        )
-
-    if (
-        recipe_name == "Float8BlockScaling"
-        and not async_save
-        and torch.cuda.get_device_capability()[0] == 12
-    ):
+    if recipe_name == "Float8BlockScaling" and torch.cuda.get_device_capability()[0] == 12:
         pytest.xfail(
             "Float8BlockScaling is failing on SM120 with RuntimeError: "
             "transformer_engine/common/transpose/quantize_transpose_vector_blockwise.cu:534 "
             "in function quantize_transpose_vector_blockwise: Assertion failed: pow2_scale. On "
             "Blackwell and newer, the FP8 block scaling recipe is emulated with MXFP8, which "
             "requires using power of two scaling factors."
-        )
-    if recipe_name == "Float8BlockScaling" and async_save:
-        pytest.xfail(
-            "Float8BlockScaling: async DCP save/load round-trip produces different model "
-            "outputs — quantization metadata (scales) is not correctly persisted through "
-            "async distributed checkpointing. On SM120, additionally fails with pow2_scale "
-            "assertion in quantize_transpose_vector_blockwise."
         )
 
     import torch.distributed.checkpoint as dcp
