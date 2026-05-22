@@ -2025,7 +2025,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.ub_bulk_dgrad = (
             ub_bulk_dgrad and self.sequence_parallel and not self.ub_overlap_rs_dgrad
         )
-        
+
         if any(
             self.ub_overlap_ag,
             self.ub_overlap_rs,
@@ -2034,7 +2034,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             self.ub_bulk_wgrad,
         ):
             assert _ub_initialized, "initialize_ub() must be called before layer construction."
-            
+
         if using_cublasmp_backend():
             if self.ub_bulk_dgrad:
                 warnings.warn(
