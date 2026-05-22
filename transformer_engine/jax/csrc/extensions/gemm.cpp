@@ -247,9 +247,10 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(CollectiveGemmInitHandler, CollectiveGemmInitFFI,
                                   .Attr<JAXX_Collective_Op>("collective_op")
 #ifndef NVTE_WITH_CUBLASMP
                               // enable CUDA graphs only when cuBLASMp is NOT enabled
-                              , FFI_CudaGraph_Traits 
+                              ,
+                              FFI_CudaGraph_Traits
 #endif
-                              );
+);
 
 Error_Type GemmV2FFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_inv,
                      Buffer_Type rhs, Buffer_Type rhs_scale_inv, Buffer_Type bias,

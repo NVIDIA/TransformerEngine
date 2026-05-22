@@ -268,7 +268,9 @@ void cublasmp_capture_warmup(te::CommOverlapCore *core, int tp_size, te::CommOve
   const size_t b_bytes = b_shape[0] * b_shape[1] * bf16_bytes;
   const size_t d_bytes = d_shape[0] * d_shape[1] * bf16_bytes;
 
-  void *a_ptr = nullptr; void *b_ptr = nullptr; void *d_ptr = nullptr;
+  void *a_ptr = nullptr;
+  void *b_ptr = nullptr;
+  void *d_ptr = nullptr;
   NVTE_CHECK_CUDA(cudaMalloc(&a_ptr, a_bytes));
   NVTE_CHECK_CUDA(cudaMalloc(&b_ptr, b_bytes));
   NVTE_CHECK_CUDA(cudaMalloc(&d_ptr, d_bytes));

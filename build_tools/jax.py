@@ -102,7 +102,7 @@ def setup_jax_extension(
         cxx_flags.append("-g0")
 
     setup_mpi_flags(include_dirs, cxx_flags)
-    
+
     if bool(int(os.getenv("NVTE_WITH_CUBLASMP", 0))):
         cxx_flags.append("-DNVTE_WITH_CUBLASMP")
 
