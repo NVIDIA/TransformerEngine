@@ -1531,21 +1531,19 @@ class Linear(TransformerEngineBaseModule):
         self.ub_overlap_rs_dgrad = (
             self.parallel_mode == "column" and self.sequence_parallel and ub_overlap_rs_dgrad
         )
-        # Bulk overlaps require the Userbuffers backend; the cuBLASMp backend
-        # falls back to async NCCL ops via torch.distributed.
+        # Bulk overlaps require the Userbuffers backend; the cuBLASMp backend falls back on
+        # DGRAD+RS overlap with no bulk overlap for WGRAD
         self.ub_bulk_dgrad = (
             self.parallel_mode == "column"
             and self.sequence_parallel
             and ub_bulk_dgrad
             and not self.ub_overlap_rs_dgrad
-            and using_cublasmp_backend()
         )
         self.ub_bulk_wgrad = (
             self.parallel_mode == "column"
             and self.sequence_parallel
             and ub_bulk_wgrad
             and not self.ub_overlap_rs_dgrad
-            and using_cublasmp_backend()
         )
 
         # Row parallel TP overlap options
@@ -1568,6 +1566,18 @@ class Linear(TransformerEngineBaseModule):
         ):
             assert ub_name is not None, f"Comm+GEMM overlap layer '{ub_name}' is not initialized."
         self.ub_name = ub_name
+        
+        if using_cublasmp_backend():
+            if self.ub_bulk_dgrad:
+                warnings.warn(
+                    f"cuBLASMp backend does not support bulk overlaps for '{self.ub_name}_dgrad' "
+                    f"and '{self.ub_name}_wgrad' GEMMs. Falling back on DGRAD+RS overlap for "
+                    f"'{self.ub_name}_dgrad' GEMM with no bulk overlap for '{self.ub_name}_wgrad' "
+                    "GEMM. In order to enable bulk overlaps for these GEMMs, set "
+                    "`with_cublasmp=False` when calling `initialize_ub()`.")
+            self.ub_overlap_rs_dgrad = self.ub_overlap_rs_dgrad or self.ub_bulk_dgrad
+            self.ub_bulk_dgrad = False
+            self.ub_bulk_wgrad = False
 
         if self.symmetric_ar_type is not None:
             assert torch_version() >= (

@@ -285,9 +285,11 @@ def _parse_args(argv=None, namespace=None):
     )
     args = parser.parse_args(argv, namespace)
 
-    if args.use_cuda_graphs and args.layer_type in [te.MultiheadAttention, te.TransformerLayer]:
-        warnings.warn(f"{args.layer_type.__name__} does not support CUDA Graphs!")
-        args.use_cuda_graphs = False
+    if args.layer_type in [te.MultiheadAttention, te.TransformerLayer]:
+        os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "0"
+        if args.use_cuda_graphs:
+            warnings.warn(f"{args.layer_type.__name__} does not support CUDA Graphs!")
+            args.use_cuda_graphs = False
 
     if not args.first_last_layers_bf16 and (
         args.num_layers_at_start_in_bf16 > 0 or args.num_layers_at_end_in_bf16 > 0
@@ -497,12 +499,7 @@ def _train(opts):
     elif opts.quantization == "mxfp8":
         fp8_recipe = MXFP8BlockScaling()
 
-    # cuBLASMp's matmul descriptor API does not expose control over the split-accumulator
-    # configuration on its internal cuBLASLt calls, and it always uses split accumulation for FP8
-    # fprop. To ensure a fair numerics comparison between the reference and test models, we need to
-    # align the standalone cuBLASLt calls in TE's reference path with cuBLASMp's behavior by
-    # enabling split accumulation for FP8 fprop in the recipe.
-    if opts.use_cublasmp and opts.fp8:
+    if opts.fp8:
         fp8_recipe.fp8_gemm_fprop = MMParams(use_split_accumulator=True)
         fp8_recipe.fp8_gemm_dgrad = MMParams(use_split_accumulator=True)
         fp8_recipe.fp8_gemm_wgrad = MMParams(use_split_accumulator=True)

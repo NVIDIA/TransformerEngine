@@ -73,6 +73,7 @@ _2X_ACC_DGRAD = True
 _2X_ACC_WGRAD = True
 _dummy_wgrads = {}
 _ub_communicators = None
+_ub_initialized = False
 _ub_with_cublasmp = False
 _MIN_STREAM_PRIORITY, _MAX_STREAM_PRIORITY = None, None
 layers_atomic_ring_exchange = []
@@ -80,8 +81,7 @@ layers_atomic_ring_exchange = []
 
 def using_cublasmp_backend() -> bool:
     """Whether the active comm+GEMM overlap backend is cuBLASMp."""
-    assert _ub_communicators is not None, "initialize_ub() must be called before checking backend."
-    return _ub_with_cublasmp
+    return _ub_initialized and _ub_with_cublasmp
 
 
 class UserBufferQuantizationMode(Enum):
@@ -301,6 +301,7 @@ def initialize_ub(
     ]
     layers_reduce_scatter_overlap = ["proj_fprop", "fc2_fprop", "qkv_wgrad", "fc1_wgrad"]
     dgrad_reduce_scatter_overlap = ["qkv_dgrad", "fc1_dgrad"]
+    
     # Default overlap methods for layers
     methods = {
         "ring_exchange": [
@@ -367,6 +368,11 @@ def initialize_ub(
         gemm_priority: int = 0,
         pipeline_rs_overlap_first_gemm: bool = False,
     ) -> None:
+        if with_cublasmp and method in ("bulk", "external"):
+            raise ValueError(
+                f"At {name}, cuBLASMp does not support `{method}` overlap method. "
+                "Please select a different method or set with_cublasmp=False."
+            )
         if atomic_gemm:
             warnings.warn(
                 "Atomic GEMM uses a beta API from cublas and is not tested for all use cases."
@@ -378,7 +384,7 @@ def initialize_ub(
                 )
             if method in ("bulk", "external"):
                 warnings.warn(
-                    f"At {name}, atoimic GEMM not is supported for a bulk overlap."
+                    f"At {name}, atomic GEMM not is supported for a bulk overlap."
                     "Defaulting to `atomic_gemm=False`."
                 )
                 atomic_gemm = 0
@@ -449,7 +455,7 @@ def initialize_ub(
                 buffer_dtype,  # Communication buffer data type
                 helper,  # Helper for torch.distributed callbacks during bootstrapping
                 tp_size,  # Tensor-parallel group size (may differ from local_size)
-                use_cublasmp=with_cublasmp and method != "bulk",
+                use_cublasmp=with_cublasmp,
                 comm_type=comm_type,
                 num_splits=num_splits,
                 num_max_streams=_NUM_MAX_UB_STREAMS,
@@ -484,15 +490,29 @@ def initialize_ub(
                     methods["bulk"].remove(name)
                     new_method = user_ub_cfg[name]["method"]
                     methods[new_method].append(name)
-
-        # cuBLASMp does not implement bulk or external overlaps, and its
-        # multicast AG path is not supported. Skip those methods so the
-        # layers fall back to async NCCL comms via torch.distributed.
+                    
+        # Adjust defaults to account for the fact that cuBLASMp does not support
+        # bulk or external overlaps
         if with_cublasmp:
-            configured_methods = ["ring_exchange", "pipeline"]
-        else:
-            configured_methods = ["ring_exchange", "pipeline", "bulk", "external"]
+            warnings.warn(
+                "cuBLASMp does not support bulk or external overlaps. "
+                "'qkv_dgrad' and 'fc1_dgrad' GEMMs will be configured with 'ring_exchange'"
+                "overlap unless user configuration specifies otherwise. Bulk overlaps for the "
+                "corresponding 'qkv_wgrad' and 'fc1_wgrad' GEMMs will be disabled.")
+            methods["bulk"] = []
+            methods["external"] = []
+            external_gemm_to_overlap.clear()
+            
+            for name in dgrad_reduce_scatter_overlap:
+                wgrad_name = name.replace("dgrad", "wgrad")
+                if name not in layers_reduce_scatter_overlap:
+                    layers_reduce_scatter_overlap.append(name)
+                if wgrad_name in layers_reduce_scatter_overlap:
+                    layers_reduce_scatter_overlap.remove(wgrad_name)
+                if name not in methods["ring_exchange"] and name not in methods["pipeline"]:
+                    methods["ring_exchange"].append(name)
 
+        configured_methods = ["ring_exchange", "pipeline", "bulk", "external"]
         for name in (m for k in configured_methods for m in methods[k]):
             ub_cfg = get_default_config(name)
             if user_ub_cfg is not None and name in user_ub_cfg:
@@ -502,6 +522,9 @@ def initialize_ub(
                 ub_cfg.update(user_ub_cfg[name])
                 ub_cfg["fp8_buf"] = fp8_buf
             add_ub(name, quantization_mode, **ub_cfg)
+    
+    global _ub_initialized
+    _ub_initialized = True
 
 
 def get_ub(name: str, use_fp8: bool):
@@ -510,7 +533,7 @@ def get_ub(name: str, use_fp8: bool):
     # So favour simplicity until the correct design becomes clear.
     # This is mainly an internal API so we don't need to worry about future changes
     key = (name, UserBufferQuantizationMode.FP8 if use_fp8 else UserBufferQuantizationMode.NONE)
-    if _ub_communicators is None:
+    if not _ub_initialized or _ub_communicators is None:
         raise RuntimeError("UB manager is not initialized.")
     if key not in _ub_communicators:
         raise KeyError(f"UB for {name} with use_fp8={use_fp8} is not registered.")
@@ -519,9 +542,10 @@ def get_ub(name: str, use_fp8: bool):
 
 def destroy_ub():
     """Destroy all allocated userbuffer communicators."""
-    global _ub_communicators, _ub_with_cublasmp
+    global _ub_communicators, _ub_with_cublasmp, _ub_initialized
     _ub_communicators = None
     _ub_with_cublasmp = False
+    _ub_initialized = False
     global layers_atomic_ring_exchange
     layers_atomic_ring_exchange = []
 
