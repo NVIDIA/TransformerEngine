@@ -33,30 +33,27 @@ jobs:
             const isOrgMember =
               association === "MEMBER" || association === "OWNER";
 
+            let permission = "none";
+
+            try {
+              const res = await github.rest.repos.getCollaboratorPermissionLevel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                username: user,
+              });
+              permission = res.data.permission;
+            } catch (e) {
+              if (e.status !== 404) throw e;
+            }
+
+            const isCore = permission === "write" || permission === "admin";
             if (!isOrgMember) {
               targetLabel = communityLabel;
             } else {
-              let permission = "none";
-
-              try {
-                const res = await github.rest.repos.getCollaboratorPermissionLevel({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  username: user,
-                });
-                permission = res.data.permission;
-              } catch (e) {
-                if (e.status !== 404) throw e;
-              }
-
-              const isCore = permission === "write" || permission === "admin";
-
-              if (!isCore) {
-                targetLabel = orgLabel;
-              }
+              targetLabel = orgLabel;
             }
 
-            if (targetLabel) {
+            if (!isCore) {
               await github.rest.issues.addLabels({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
