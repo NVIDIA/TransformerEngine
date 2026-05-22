@@ -3277,6 +3277,12 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                     elif o_format == "sbhd":
                         out_f16[i - 1].copy_(out_per_step[i - 1])
                 if return_max_logit:
+                    # max_logit_per_step[i-1] was written on flash_attn_streams[i-1]
+                    # (cp_stream for i-1=1). The torch.maximum below runs on the
+                    # default stream, so without this wait the read can race with
+                    # the write. The post-loop wait_stream(cp_stream) is too late.
+                    # No-op when flash_attn_streams[i-1] is current_stream().
+                    torch.cuda.current_stream().wait_stream(flash_attn_streams[i - 1])
                     max_logit = torch.maximum(max_logit, max_logit_per_step[i - 1])
 
         torch.cuda.current_stream().wait_stream(cp_stream)
