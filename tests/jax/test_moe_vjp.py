@@ -38,14 +38,32 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from transformer_engine_jax import get_device_compute_capability
 
-# Lazy import (mirrors the gating in the old test file): the underlying
-# kernels require triton + the fused-router CUDA kernel.
+# The MoE custom_vjp uses grouped GEMM, which is currently
+# Blackwell-only (sm_100+). Skip the whole file on older arches.
+if get_device_compute_capability(0) < 100:
+    pytest.skip(
+        "MoE custom_vjp tests require Blackwell (sm_100+) for grouped GEMM",
+        allow_module_level=True,
+    )
+
+# Parametrize values for the dispatch / combine backend. Only the
+# ``triton`` variant is gated by the ``triton`` marker (so the
+# ``pure_jax`` variant still runs on environments without Triton).
+BACKEND_PARAMS = [
+    pytest.param("pure_jax", id="pure_jax"),
+    pytest.param("triton", id="triton", marks=pytest.mark.triton),
+]
+
+
 @pytest.fixture(autouse=True, scope="function")
 def _inject_moe(request):
-    if not request.node.get_closest_marker("triton"):
-        yield
-        return
+    """Inject MoEBlock / PermutationBackend / moe symbols into the test
+    module namespace. Done as a fixture rather than a top-level import so
+    a stray ``pytest tests/jax/`` collection on a build without the TE
+    JAX bits still produces a clean skip via the module-level guards
+    above rather than an ImportError at collection time."""
     import sys
     from transformer_engine.jax.flax import _MoEBlock as MoEBlock
     from transformer_engine.jax.moe import PermutationBackend, moe
@@ -256,11 +274,10 @@ def _grad_te_aux_only(params, x, *, permutation_backend):
 # -----------------------------------------------------------------------------
 
 
-@pytest.mark.triton
 class TestMoeVjpForward:
     """Forward shape / finiteness / parity vs pure-JAX reference."""
 
-    @pytest.mark.parametrize("backend_name", ["pure_jax", "triton"])
+    @pytest.mark.parametrize("backend_name", BACKEND_PARAMS)
     def test_forward_shape_and_finite(self, backend_name):
         backend = PermutationBackend(backend_name)  # noqa: F821
         key = jax.random.PRNGKey(0)
@@ -273,7 +290,7 @@ class TestMoeVjpForward:
         assert jnp.all(jnp.isfinite(out))
         assert aux is None
 
-    @pytest.mark.parametrize("backend_name", ["pure_jax", "triton"])
+    @pytest.mark.parametrize("backend_name", BACKEND_PARAMS)
     def test_forward_parity_vs_pure_jax_reference(self, backend_name):
         backend = PermutationBackend(backend_name)  # noqa: F821
         key = jax.random.PRNGKey(1)
@@ -304,12 +321,11 @@ class TestMoeVjpForward:
         np.testing.assert_allclose(np.array(out_pj), np.array(out_tr), atol=2e-5, rtol=2e-5)
 
 
-@pytest.mark.triton
 class TestMoeVjpBackward:
     """Backward parity vs pure-JAX reference (which uses ``jax.vjp`` over
     plain JAX ops, giving us the canonical pullback)."""
 
-    @pytest.mark.parametrize("backend_name", ["pure_jax", "triton"])
+    @pytest.mark.parametrize("backend_name", BACKEND_PARAMS)
     def test_grads_finite_and_nonzero(self, backend_name):
         backend = PermutationBackend(backend_name)  # noqa: F821
         key = jax.random.PRNGKey(3)
@@ -322,7 +338,7 @@ class TestMoeVjpBackward:
             assert jnp.all(jnp.isfinite(g)), f"{name} grad has NaN/Inf"
             assert jnp.any(g != 0.0), f"{name} grad is identically zero"
 
-    @pytest.mark.parametrize("backend_name", ["pure_jax", "triton"])
+    @pytest.mark.parametrize("backend_name", BACKEND_PARAMS)
     def test_grads_match_pure_jax_reference(self, backend_name):
         backend = PermutationBackend(backend_name)  # noqa: F821
         key = jax.random.PRNGKey(4)
@@ -361,11 +377,10 @@ class TestMoeVjpBackward:
         )
 
 
-@pytest.mark.triton
 class TestMoeVjpAuxLoss:
     """Aux-loss path: forward + grad parity."""
 
-    @pytest.mark.parametrize("backend_name", ["pure_jax", "triton"])
+    @pytest.mark.parametrize("backend_name", BACKEND_PARAMS)
     def test_aux_loss_returned_and_finite(self, backend_name):
         backend = PermutationBackend(backend_name)  # noqa: F821
         key = jax.random.PRNGKey(5)
@@ -378,7 +393,7 @@ class TestMoeVjpAuxLoss:
         assert jnp.isfinite(aux)
         assert jnp.abs(aux) < 1e2
 
-    @pytest.mark.parametrize("backend_name", ["pure_jax", "triton"])
+    @pytest.mark.parametrize("backend_name", BACKEND_PARAMS)
     def test_aux_loss_parity_vs_reference(self, backend_name):
         backend = PermutationBackend(backend_name)  # noqa: F821
         key = jax.random.PRNGKey(6)
@@ -395,7 +410,7 @@ class TestMoeVjpAuxLoss:
         )
         np.testing.assert_allclose(float(aux_te), float(aux_ref), atol=1e-5, rtol=1e-5)
 
-    @pytest.mark.parametrize("backend_name", ["pure_jax", "triton"])
+    @pytest.mark.parametrize("backend_name", BACKEND_PARAMS)
     def test_aux_loss_grads_propagate_to_logits(self, backend_name):
         """The aux-loss bwd path must produce non-zero gate-kernel grads
         when only the aux-loss scalar is differentiated (no main-output
@@ -417,7 +432,6 @@ class TestMoeVjpAuxLoss:
 # -----------------------------------------------------------------------------
 
 
-@pytest.mark.triton
 class TestMoEBlockFlaxWrapper:
     """Sanity-check the thin Flax wrapper: forward + grad on init."""
 

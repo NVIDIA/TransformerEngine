@@ -1018,9 +1018,7 @@ def pure_jax_token_combine(
 # which is why every slice into ``all_shards_tokens_per_expert`` uses
 # :func:`jax.lax.dynamic_slice`.
 #
-# These functions are pure JAX (no MaxText / TE dependencies) and equivalent
-# to :func:`maxtext.layers.te_permutation.compute_ragged_all_to_all_params`
-# / :func:`compute_reverse_ragged_all_to_all_params`.
+# These functions are pure JAX (no TE-internal dependencies).
 
 
 def compute_ragged_all_to_all_params(

@@ -104,6 +104,24 @@ if not _MP_ACTIVE:
         allow_module_level=True,
     )
 
+from transformer_engine_jax import get_device_compute_capability
+
+# Grouped GEMM in the MoE custom_vjp currently requires Blackwell
+# (sm_100+). Skip the whole file on older arches.
+if get_device_compute_capability(0) < 100:
+    pytest.skip(
+        "MoE custom_vjp tests require Blackwell (sm_100+) for grouped GEMM",
+        allow_module_level=True,
+    )
+
+# Parametrize values for the dispatch / combine backend. Only the
+# ``triton`` variant carries the ``triton`` marker, so the
+# ``pure_jax`` variant still runs on environments without Triton.
+BACKEND_PARAMS = [
+    pytest.param("pure_jax", id="pure_jax"),
+    pytest.param("triton", id="triton", marks=pytest.mark.triton),
+]
+
 
 NUM_DEVICES_REQUIRED = 4
 EP_AXIS = "ep"
@@ -132,9 +150,11 @@ def mesh():
 
 @pytest.fixture(autouse=True, scope="function")
 def _inject_moe(request):
-    if not request.node.get_closest_marker("triton"):
-        yield
-        return
+    """Inject TE / MoEBlock symbols into the test module namespace.
+    Done lazily so a stray ``pytest tests/jax/`` collection on a build
+    without the TE JAX bits still produces a clean skip via the
+    module-level guards above rather than an ImportError at collection
+    time."""
     import transformer_engine.jax as te
     from transformer_engine.common import recipe as te_recipe
     from transformer_engine.jax.flax import _MoEBlock as MoEBlock
@@ -285,13 +305,12 @@ NUM_EXPERTS = 8
 TOPK = 2
 
 
-@pytest.mark.triton
 class TestMoeVjpMultiprocess:
     """Multiprocess (one-GPU-per-process) correctness checks for the
     unified MoE custom_vjp.
     """
 
-    @pytest.mark.parametrize("backend_name", ["pure_jax", "triton"])
+    @pytest.mark.parametrize("backend_name", BACKEND_PARAMS)
     @pytest.mark.parametrize("recipe_name", RECIPE_NAMES)
     def test_fwd_and_bwd(self, mesh, backend_name, recipe_name):
         if not _hardware_supports(recipe_name):
@@ -322,7 +341,7 @@ class TestMoeVjpMultiprocess:
             assert np.all(np.isfinite(g_local)), f"{name} grad has NaN/Inf"
             assert np.any(g_local != 0.0), f"{name} grad is identically zero"
 
-    @pytest.mark.parametrize("backend_name", ["pure_jax", "triton"])
+    @pytest.mark.parametrize("backend_name", BACKEND_PARAMS)
     @pytest.mark.parametrize("recipe_name", RECIPE_NAMES)
     def test_aux_loss(self, mesh, backend_name, recipe_name):
         if not _hardware_supports(recipe_name):

@@ -48,6 +48,7 @@ Implementation conventions
   bwd rule. None of these helpers form a custom_vjp boundary.
 """
 
+import math
 from enum import Enum
 from functools import partial
 from typing import Any, Callable, NewType, Optional, Tuple, Union
@@ -104,10 +105,11 @@ __all__ = ["moe", "PermutationBackend"]
 class PermutationBackend(Enum):
     """Token-dispatch / combine backend used by :func:`moe`.
 
-    * ``PURE_JAX``: ``jnp.argsort`` + gather paths compiled as plain XLA;
-      typically faster than ``TRITON`` in current testing because XLA can
-      fuse the ops with surrounding work.
-    * ``TRITON``: TE's fused Triton kernels.
+    * ``TRITON``: TE's fused Triton kernels. Faster than ``PURE_JAX``
+      on current hardware and the recommended default.
+    * ``PURE_JAX``: ``jnp.argsort`` + gather paths compiled as plain
+      XLA; useful as a numerical reference and on builds without
+      Triton available.
     """
 
     PURE_JAX = "pure_jax"
@@ -167,8 +169,8 @@ class PermutationBackend(Enum):
 #     "casted_sorted_x_lhs_trans"   ScaledTensor or ndarray
 #     "casted_wi_0_rhs_trans"   ScaledTensor or ndarray
 #     "casted_wi_1_rhs_trans"   ScaledTensor or ndarray
-#     "layer_w0"                ndarray  (pre-activation)
-#     "layer_w1"                ndarray
+#     "gate_proj_out"                ndarray  (pre-activation)
+#     "up_proj_out"                ndarray
 #     "casted_intermediate_lhs_trans" ScaledTensor or ndarray
 #     "casted_wo_rhs_trans"     ScaledTensor or ndarray
 #     "expert_outputs"          ndarray  (FFN output, needed for TRITON
@@ -249,8 +251,6 @@ def _compute_static_shape_info(
         ``(recv_buffer_rows, hidden)`` when EP is active, ``None``
         otherwise.
     """
-    import math
-
     if ep_active and not batch_is_per_shard:
         dp_size = math.prod(fsdp_sizes) if fsdp_sizes else 1
         per_shard_batch = batch_size // (num_ep * dp_size)
@@ -976,12 +976,12 @@ def _body_fwd(
     if q_set_wo == noop_quantizer_set:
         wo = wo.astype(sorted_x.dtype)
 
-    # GEMM 1: layer_w0 = sorted_x @ wi_0
+    # GEMM 1: gate_proj_out = sorted_x @ wi_0
     casted_sorted_x_w0 = tex.grouped_quantize(
         sorted_x, q_set_w0.x, local_group_sizes, flatten_axis=-1
     )
     casted_wi_0 = tex.grouped_quantize(wi_0, q_set_w0.kernel, flatten_axis=-1)
-    layer_w0 = tex.grouped_gemm(
+    gate_proj_out = tex.grouped_gemm(
         casted_sorted_x_w0.get_tensor(usage=TensorUsage.LHS),
         casted_wi_0.get_tensor(usage=TensorUsage.RHS),
         contracting_dims=((1,), (1,)),
@@ -994,12 +994,12 @@ def _body_fwd(
     if isinstance(casted_wi_0_rhs_trans, ScaledTensor):
         casted_wi_0_rhs_trans = casted_wi_0_rhs_trans.checkpoint(q_set_w0.kernel)
 
-    # GEMM 2: layer_w1 = sorted_x @ wi_1
+    # GEMM 2: up_proj_out = sorted_x @ wi_1
     casted_sorted_x_w1 = tex.grouped_quantize(
         sorted_x, q_set_w1.x, local_group_sizes, flatten_axis=-1
     )
     casted_wi_1 = tex.grouped_quantize(wi_1, q_set_w1.kernel, flatten_axis=-1)
-    layer_w1 = tex.grouped_gemm(
+    up_proj_out = tex.grouped_gemm(
         casted_sorted_x_w1.get_tensor(usage=TensorUsage.LHS),
         casted_wi_1.get_tensor(usage=TensorUsage.RHS),
         contracting_dims=((1,), (1,)),
@@ -1009,9 +1009,9 @@ def _body_fwd(
     if isinstance(casted_wi_1_rhs_trans, ScaledTensor):
         casted_wi_1_rhs_trans = casted_wi_1_rhs_trans.checkpoint(q_set_w1.kernel)
 
-    # Activation: intermediate = act(layer_w0) * layer_w1
+    # Activation: intermediate = act(gate_proj_out) * up_proj_out
     act_fn = _convert_to_activation_function(activation_type)
-    intermediate = act_fn(layer_w0) * layer_w1
+    intermediate = act_fn(gate_proj_out) * up_proj_out
 
     # GEMM 3: expert_outputs = intermediate @ wo
     casted_intermediate = tex.grouped_quantize(
@@ -1076,8 +1076,8 @@ def _body_fwd(
         "casted_sorted_x_lhs_trans": casted_sorted_x_lhs_trans,
         "casted_wi_0_rhs_trans": casted_wi_0_rhs_trans,
         "casted_wi_1_rhs_trans": casted_wi_1_rhs_trans,
-        "layer_w0": layer_w0,
-        "layer_w1": layer_w1,
+        "gate_proj_out": gate_proj_out,
+        "up_proj_out": up_proj_out,
         "casted_intermediate_lhs_trans": casted_intermediate_lhs_trans,
         "casted_wo_rhs_trans": casted_wo_rhs_trans,
         "expert_outputs": expert_outputs,
@@ -1168,9 +1168,7 @@ def _body_bwd(
     # must use the per-shard shape rather than the captured global
     # ``x_shape``.
     if ep_active:
-        import math as _math  # local import keeps the no-EP path zero-overhead.
-
-        dp_size = _math.prod(fsdp_sizes) if fsdp_sizes else 1
+        dp_size = math.prod(fsdp_sizes) if fsdp_sizes else 1
         per_shard_batch = batch_size // (num_ep * dp_size)
         per_shard_x_shape: Tuple[int, ...] = (per_shard_batch, sequence_length, hidden)
     else:
@@ -1215,45 +1213,45 @@ def _body_bwd(
     )
 
     # ---------------- Activation bwd ----------------
-    # intermediate = act(layer_w0) * layer_w1
-    # d(layer_w0) = vjp(act, layer_w0)(d_intermediate * layer_w1)
-    # d(layer_w1) = d_intermediate * act(layer_w0)
+    # intermediate = act(gate_proj_out) * up_proj_out
+    # d(gate_proj_out) = vjp(act, gate_proj_out)(d_intermediate * up_proj_out)
+    # d(up_proj_out) = d_intermediate * act(gate_proj_out)
     act_fn = _convert_to_activation_function(activation_type)
-    act_w0, dact_w0_pullback = jax.vjp(act_fn, ctx["layer_w0"])
-    d_layer_w1 = d_intermediate * act_w0
-    (d_layer_w0,) = dact_w0_pullback(d_intermediate * ctx["layer_w1"])
+    act_gate_proj_out, dact_gate_proj_pullback = jax.vjp(act_fn, ctx["gate_proj_out"])
+    d_up_proj_out = d_intermediate * act_gate_proj_out
+    (d_gate_proj_out,) = dact_gate_proj_pullback(d_intermediate * ctx["up_proj_out"])
 
     # ---------------- FFN bwd: GEMM 2 (wi_1) ----------------
-    casted_d_layer_w1 = tex.grouped_quantize(
-        d_layer_w1, q_set_w1.dgrad, ctx["local_group_sizes"], flatten_axis=-1
+    casted_d_up_proj_out = tex.grouped_quantize(
+        d_up_proj_out, q_set_w1.dgrad, ctx["local_group_sizes"], flatten_axis=-1
     )
     d_sorted_x_from_w1 = tex.grouped_gemm(
-        casted_d_layer_w1.get_tensor(usage=TensorUsage.LHS),
+        casted_d_up_proj_out.get_tensor(usage=TensorUsage.LHS),
         ctx["casted_wi_1_rhs_trans"],
         contracting_dims=((1,), (2,)),
     )
     d_wi_1 = tex.grouped_gemm(
         ctx["casted_sorted_x_lhs_trans"],
-        casted_d_layer_w1.get_tensor(usage=TensorUsage.RHS),
+        casted_d_up_proj_out.get_tensor(usage=TensorUsage.RHS),
         contracting_dims=((0,), (0,)),
     )
-    d_wi_1_bias = tex.grouped_dbias(d_layer_w1, ctx["local_group_sizes"]) if has_wi_bias else None
+    d_wi_1_bias = tex.grouped_dbias(d_up_proj_out, ctx["local_group_sizes"]) if has_wi_bias else None
 
     # ---------------- FFN bwd: GEMM 1 (wi_0) ----------------
-    casted_d_layer_w0 = tex.grouped_quantize(
-        d_layer_w0, q_set_w0.dgrad, ctx["local_group_sizes"], flatten_axis=-1
+    casted_d_gate_proj_out = tex.grouped_quantize(
+        d_gate_proj_out, q_set_w0.dgrad, ctx["local_group_sizes"], flatten_axis=-1
     )
     d_sorted_x_from_w0 = tex.grouped_gemm(
-        casted_d_layer_w0.get_tensor(usage=TensorUsage.LHS),
+        casted_d_gate_proj_out.get_tensor(usage=TensorUsage.LHS),
         ctx["casted_wi_0_rhs_trans"],
         contracting_dims=((1,), (2,)),
     )
     d_wi_0 = tex.grouped_gemm(
         ctx["casted_sorted_x_lhs_trans"],
-        casted_d_layer_w0.get_tensor(usage=TensorUsage.RHS),
+        casted_d_gate_proj_out.get_tensor(usage=TensorUsage.RHS),
         contracting_dims=((0,), (0,)),
     )
-    d_wi_0_bias = tex.grouped_dbias(d_layer_w0, ctx["local_group_sizes"]) if has_wi_bias else None
+    d_wi_0_bias = tex.grouped_dbias(d_gate_proj_out, ctx["local_group_sizes"]) if has_wi_bias else None
 
     d_sorted_x = d_sorted_x_from_w0 + d_sorted_x_from_w1
 
@@ -1495,8 +1493,8 @@ def _build_ctx_specs(
         "casted_sorted_x_lhs_trans": P(),
         "casted_wi_0_rhs_trans": P(ep_axis, None, None),
         "casted_wi_1_rhs_trans": P(ep_axis, None, None),
-        "layer_w0": P(),
-        "layer_w1": P(),
+        "gate_proj_out": P(),
+        "up_proj_out": P(),
         "casted_intermediate_lhs_trans": P(),
         "casted_wo_rhs_trans": P(ep_axis, None, None),
         "expert_outputs": P(),
@@ -1534,20 +1532,8 @@ def _build_grads_specs(
 
 
 def _moe_fwd_rule(
-    # IMPORTANT — calling convention for jax.custom_vjp fwd rule.
-    #
-    # JAX uses ``_argnums_partial`` (jax/_src/api_util.py) when wiring up
-    # the fwd rule. That helper preserves the ORIGINAL positional order
-    # of the decorated function: dyn (= diff) args sit at their original
-    # positions and static (= nondiff) args fill the remaining slots in
-    # nondiff_argnums order. So the fwd rule MUST take args in the
-    # SAME positional order as ``_moe`` -- diff first (positions 0..8),
-    # then nondiff (positions 9..28), all POSITIONAL (no ``*,`` -- they
-    # arrive as positional, not as kwargs).
-    #
-    # NOTE: this is the OPPOSITE convention from ``_moe_bwd_rule``, which
-    # uses ``prepend_static_args`` -- there the static args come FIRST,
-    # followed by ``ctx`` and ``dy_pair``.
+    # Args MUST match the positional order of ``_moe`` (diff first,
+    # then nondiff). See ``_moe_bwd_rule`` for the opposite convention.
     x,
     gate_kernel,
     wi_0,
@@ -1646,6 +1632,24 @@ def _moe_fwd_rule(
     if num_experts % num_ep != 0:
         raise ValueError(f"num_experts={num_experts} must be divisible by EP size={num_ep}")
     num_experts_local = num_experts // num_ep
+
+    # Reject overlapping EP / FSDP axes. Listing ep_axis in
+    # data_parallelism_axes would produce a duplicate-axis PartitionSpec
+    # ((ep, ep, ...)) which JAX rejects, and would also double-count
+    # num_ep in dp_size (under-sizing recv_buffer_rows by a factor of
+    # num_ep). Catch it up front with a clear error.
+    for ax in data_parallelism_axes:
+        if ax not in mesh.shape:
+            raise ValueError(
+                f"data_parallelism_axes contains {ax!r} but mesh has"
+                f" axes {tuple(mesh.shape.keys())}"
+            )
+        if ax == ep_axis:
+            raise ValueError(
+                f"data_parallelism_axes={data_parallelism_axes!r} contains the EP"
+                f" axis {ep_axis!r}; EP is implicit in the batch sharding and must"
+                " not also be listed as a data-parallel axis."
+            )
 
     if not data_parallelism_axes:
         batch_pspec_axis: Any = ep_axis
