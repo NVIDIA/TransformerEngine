@@ -623,6 +623,56 @@ class TestQuantizedTensor:
         torch.testing.assert_close(dx_test, dx_ref, **tols)
 
     @pytest.mark.parametrize("quantization", _quantization_list)
+    def test_cpu_dequantize(
+        self,
+        *,
+        quantization: str,
+        shape: Iterable[int] = (128, 128),
+        dtype: torch.dtype = torch.bfloat16,
+    ) -> None:
+        """Dequantize on a CPU-resident QuantizedTensor."""
+
+        # Construct a quantized tensor on CUDA.
+        _, x_cuda = make_reference_and_test_tensors(
+            shape=shape,
+            quantization=quantization,
+            test_dtype=dtype,
+            requires_grad=False,
+        )
+        assert isinstance(x_cuda, QuantizedTensor)
+        assert x_cuda.device.type == "cuda"
+
+        # Reference: dequantize on CUDA, then move the dense result to CPU.
+        ref_cpu = x_cuda.dequantize().to(device="cpu")
+
+        # Move the QuantizedTensor itself to CPU and dequantize there.
+        # ``.cpu()`` routes through ``aten._to_copy.default`` so all inner
+        # buffers (data, scales, amax) are moved to CPU.
+        x_cpu = x_cuda.cpu()
+        assert isinstance(x_cpu, QuantizedTensor)
+        assert x_cpu.device.type == "cpu"
+        for attr in (
+            "_data",
+            "_rowwise_data",
+            "_columnwise_data",
+            "_rowwise_scale_inv",
+            "_columnwise_scale_inv",
+            "_amax_rowwise",
+            "_amax_columnwise",
+        ):
+            buf = getattr(x_cpu, attr, None)
+            if buf is not None:
+                assert buf.device.type == "cpu", f"{attr} did not move to CPU"
+
+        # Dequantize the CPU tensor. Implementation may bounce through CUDA
+        # internally, but must return a CPU tensor.
+        y_cpu = x_cpu.dequantize()
+        assert y_cpu.device.type == "cpu"
+        assert y_cpu.dtype == ref_cpu.dtype
+        assert y_cpu.shape == ref_cpu.shape
+        torch.testing.assert_close(y_cpu, ref_cpu, rtol=0, atol=0)
+
+    @pytest.mark.parametrize("quantization", _quantization_list)
     @pytest.mark.parametrize("dim", [0, 1])
     def test_chunk(
         self,
