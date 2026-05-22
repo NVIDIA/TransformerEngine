@@ -285,11 +285,9 @@ def _parse_args(argv=None, namespace=None):
     )
     args = parser.parse_args(argv, namespace)
 
-    if args.layer_type in [te.MultiheadAttention, te.TransformerLayer]:
-        os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "0"
-        if args.use_cuda_graphs:
-            warnings.warn(f"{args.layer_type.__name__} does not support CUDA Graphs!")
-            args.use_cuda_graphs = False
+    if args.use_cuda_graphs and args.layer_type in [te.MultiheadAttention, te.TransformerLayer]:
+        warnings.warn(f"{args.layer_type.__name__} does not support CUDA Graphs!")
+        args.use_cuda_graphs = False
 
     if not args.first_last_layers_bf16 and (
         args.num_layers_at_start_in_bf16 > 0 or args.num_layers_at_end_in_bf16 > 0

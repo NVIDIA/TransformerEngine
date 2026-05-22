@@ -82,6 +82,8 @@ def _run_gemm_with_overlap(
         if aggregate:
             test_cmd.append("--aggregate")
         if use_cublasmp:
+            if not tex.nvte_built_with_cublasmp():
+                pytest.skip("Transformer Engine not built with cuBLASMp (NVTE_WITH_CUBLASMP=0).")
             if quantization == "mxfp8":
                 pytest.skip(
                     "cuBLASMp comm+GEMM overlap does not yet support MXFP8 (block scaling)."
@@ -136,6 +138,8 @@ def _run_layer_with_overlap(
         test_cmd.append(f"--quantization={quantization}")
 
     if use_cublasmp:
+        if not tex.nvte_built_with_cublasmp():
+            pytest.skip("Transformer Engine not built with cuBLASMp (NVTE_WITH_CUBLASMP=0).")
         if quantization == "mxfp8":
             pytest.skip("cuBLASMp comm+GEMM overlap does not yet support MXFP8 (block scaling).")
         test_cmd.append("--use-cublasmp")
