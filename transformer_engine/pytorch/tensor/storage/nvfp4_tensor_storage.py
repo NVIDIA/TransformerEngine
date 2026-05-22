@@ -47,13 +47,18 @@ class _FromNVFP4Func(torch.autograd.Function):
         if tensor._columnwise_data is not None and tensor._columnwise_data.numel() == 0:
             return torch.empty(tensor.size(), dtype=dtype, device=tensor.device)
 
-        # Dequantize row-wise data
-        if tensor._rowwise_data is not None:
-            return tex.dequantize(tensor, torch_to_transformer_engine_dtype[dtype])
-
-        if tensor._columnwise_data is not None:
+        if tensor._rowwise_data is None and tensor._columnwise_data is None:
+            raise ValueError("Attempted to dequantize NVFP4 tensor with no data")
+        if tensor._rowwise_data is None and tensor._columnwise_data is not None:
             raise NotImplementedError("Dequantizing column-wise NVFP4 data is not implemented yet!")
-        raise ValueError("Attempted to dequantize NVFP4 tensor with no data")
+
+        # ``tex.dequantize`` requires CUDA-resident buffers. If the tensor has
+        src_device = tensor.device
+        if src_device.type != "cuda":
+            cuda_tensor = tensor.to(device=torch.device("cuda"))
+            result = tex.dequantize(cuda_tensor, torch_to_transformer_engine_dtype[dtype])
+            return result.to(device=src_device)
+        return tex.dequantize(tensor, torch_to_transformer_engine_dtype[dtype])
 
     @staticmethod
     def backward(
