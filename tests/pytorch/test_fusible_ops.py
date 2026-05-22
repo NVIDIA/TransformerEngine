@@ -3564,7 +3564,7 @@ class TestSequentialModules:
             (ffn_hidden_size, hidden_size),
             quantization=quantization,
             min=0,
-            max=1/64,
+            max=1 / 64,
             test_dtype=dtype,
             test_device=device,
             quantizer_role=QuantizerRole(tensor_type="weight"),
@@ -3572,7 +3572,7 @@ class TestSequentialModules:
         w2_ref, w2_test = make_reference_and_test_tensors(
             (hidden_size, ffn_hidden_size // 2),
             min=0,
-            max=1/64,
+            max=1 / 64,
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
