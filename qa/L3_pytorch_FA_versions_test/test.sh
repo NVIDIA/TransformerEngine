@@ -54,8 +54,8 @@ do
     pip3 install flash-attn-4==${fa_version} nvidia-cutlass-dsl[cu13]==4.4.2 --no-build-isolation
   else
     # FA3 source build (~20 min). Skip if already pre-installed in the base image
-    # via Dockerfile.base INSTALL_FA3=1 (auto-set when RUN_L3_TESTS=1).
-    if python3 -c "import flash_attn_interface" 2>/dev/null; then
+    # via Dockerfile.base INSTALL_FA3=1.
+    if python3 -c "import flash_attn_3" 2>/dev/null; then
       echo "FA3 already installed (from base image); skipping source build"
     else
       git clone https://github.com/Dao-AILab/flash-attention.git
