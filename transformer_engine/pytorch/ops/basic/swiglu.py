@@ -369,9 +369,15 @@ class _ScaledGLU(BasicOperation):
 
     num_extra_inputs: int = 1
 
-    def __init__(self, glu_interleave_size: Optional[int] = None) -> None:
+    def __init__(
+        self,
+        glu_interleave_size: Optional[int] = None,
+        *,
+        activation_recompute_in_mlp: bool = False,
+    ) -> None:
         super().__init__()
         self.glu_interleave_size: Optional[int] = glu_interleave_size
+        self.activation_recompute_in_mlp: bool = activation_recompute_in_mlp
 
     def _glu_forward(self, swiglu_in: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
@@ -409,6 +415,12 @@ class _ScaledGLU(BasicOperation):
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
+        if self.activation_recompute_in_mlp:
+            raise RuntimeError(
+                f"{self.__class__.__name__}(activation_recompute_in_mlp=True) requires the "
+                "fused grouped MLP path."
+            )
+
         extra_input = basic_op_extra_inputs[0][0]
 
         # Determine compute dtype
@@ -465,6 +477,12 @@ class _ScaledGLU(BasicOperation):
         Iterable[Iterable[Optional[torch.Tensor]]],
         Iterable[Iterable[Optional[torch.Tensor]]],
     ]:
+        if self.activation_recompute_in_mlp:
+            raise RuntimeError(
+                f"{self.__class__.__name__}(activation_recompute_in_mlp=True) requires the "
+                "fused grouped MLP path."
+            )
+
         ctx = basic_op_ctxs[0]
         input_, scales = ctx.saved_tensors
         input_ = maybe_dequantize(input_, ctx.dtype)
@@ -526,6 +544,9 @@ class ScaledSwiGLU(_ScaledGLU):
         When set, the GLU activations will use an experimental block
         interleaved format. See the corresponding option in the SwiGLU
         operation for more details.
+    activation_recompute_in_mlp : bool, default = ``False``
+        Enable fused grouped MLP kernels to recompute activation outputs
+        during backward when supported instead of saving them.
 
     """
 
@@ -553,6 +574,9 @@ class ScaledClampedQGeGLU(_ScaledGLU):
     glu_interleave_size : int, optional
         When set, the GLU activations will use an experimental block
         interleaved format. See :class:`ClampedSwiGLU`.
+    activation_recompute_in_mlp : bool, default = ``False``
+        Enable fused grouped MLP kernels to recompute activation outputs
+        during backward when supported instead of saving them.
     limit : float, default ``7.0``
         Clamp limit (see :class:`ClampedSwiGLU`).
     alpha : float, default ``1.702``
@@ -564,10 +588,14 @@ class ScaledClampedQGeGLU(_ScaledGLU):
         self,
         glu_interleave_size: Optional[int] = None,
         *,
+        activation_recompute_in_mlp: bool = False,
         limit: float = 7.0,
         alpha: float = 1.702,
     ) -> None:
-        super().__init__(glu_interleave_size)
+        super().__init__(
+            glu_interleave_size,
+            activation_recompute_in_mlp=activation_recompute_in_mlp,
+        )
         self._clamped: ClampedSwiGLU = ClampedSwiGLU(
             limit=limit,
             alpha=alpha,

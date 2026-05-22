@@ -4,6 +4,7 @@
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import time
 
 from typing import Callable, Any, Dict, Optional, Tuple
@@ -99,3 +100,54 @@ def _split_step_rngs(
         new_rngs[name] = new_key
         step_rngs[name] = step_key
     return new_rngs, step_rngs
+
+
+def compare_fwd_bwd(
+    ref_apply_fn: Callable,
+    ref_variables: Any,
+    test_apply_fn: Callable,
+    test_variables: Any,
+    *,
+    input: jnp.ndarray,
+    output_grad: jnp.ndarray,
+    rtol: float = 1e-5,
+    atol: float = 1e-8,
+    rtol_dW: Optional[float] = None,
+    atol_dW: Optional[float] = None,
+) -> None:
+    """Compare forward outputs and VJP gradients between two models.
+
+    Runs ``y, vjp_fn = jax.vjp(apply_fn, variables, input)`` for each model,
+    then applies ``vjp_fn(output_grad)`` to get gradients wrt both the
+    parameters (``dW``) and the input (``dx``). Calls
+    ``numpy.testing.assert_allclose`` on each tensor (``y``, ``dx``, and every
+    leaf of ``dW``). ``rtol_dW`` / ``atol_dW`` override ``rtol`` / ``atol``
+    for the params-grad comparison.
+    """
+    rtol_dW = rtol if rtol_dW is None else rtol_dW
+    atol_dW = atol if atol_dW is None else atol_dW
+
+    def _run(apply_fn: Callable) -> Callable:
+        @jax.jit
+        def go(variables, inp, dy):
+            y, vjp_fn = jax.vjp(apply_fn, variables, inp)
+            dvars, dx = vjp_fn(dy.astype(y.dtype))
+            return y, dvars["params"], dx
+
+        return go
+
+    y_ref, dW_ref, dx_ref = _run(ref_apply_fn)(ref_variables, input, output_grad)
+    y_test, dW_test, dx_test = _run(test_apply_fn)(test_variables, input, output_grad)
+
+    np.testing.assert_allclose(
+        y_test, y_ref, rtol=rtol, atol=atol, err_msg="forward output (y) mismatch"
+    )
+    np.testing.assert_allclose(
+        dx_test, dx_ref, rtol=rtol, atol=atol, err_msg="input grad (dx) mismatch"
+    )
+    for ref_leaf, test_leaf in zip(
+        jax.tree_util.tree_leaves(dW_ref), jax.tree_util.tree_leaves(dW_test)
+    ):
+        np.testing.assert_allclose(
+            test_leaf, ref_leaf, rtol=rtol_dW, atol=atol_dW, err_msg="params grad (dW) mismatch"
+        )
