@@ -53,6 +53,7 @@ from transformer_engine.pytorch.cpp_extensions import (
 )
 from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
 from transformer_engine.common import recipe
+from transformer_engine.pytorch.constants import TE_DType
 import transformer_engine_torch as tex
 from utils import ModelConfig, reset_rng_states
 
@@ -3063,7 +3064,7 @@ def test_grouped_gemm_grouped_tensor_zero_work(layout, accumulate, quant_type) -
             else:
                 rowwise, columnwise = not transb, transb
             quantizer = MXFP8Quantizer(
-                fp8_dtype=tex.DType.kFloat8E4M3,
+                fp8_dtype=TE_DType.kFloat8E4M3,
                 rowwise=rowwise,
                 columnwise=columnwise,
             )
@@ -3159,7 +3160,7 @@ def _make_grouped_tensor_quantized_mxfp8(
     if not tensors:
         raise ValueError("Expected non-empty tensor list for grouped quantization.")
     quantizer = MXFP8Quantizer(
-        fp8_dtype=tex.DType.kFloat8E4M3,
+        fp8_dtype=TE_DType.kFloat8E4M3,
         rowwise=rowwise,
         columnwise=columnwise,
     )
@@ -3182,7 +3183,7 @@ def _per_tensor_quantize_mxfp8(
     Used to build reference discrete inputs for grouped GEMM.
     """
     quantizer = MXFP8Quantizer(
-        fp8_dtype=tex.DType.kFloat8E4M3,
+        fp8_dtype=TE_DType.kFloat8E4M3,
         rowwise=rowwise,
         columnwise=columnwise,
     )
@@ -3299,17 +3300,17 @@ def test_grouped_gemm_grouped_tensor_mxfp8(
 @pytest.mark.parametrize(
     "input_quantizer",
     [
-        Float8CurrentScalingQuantizer(fp8_dtype=tex.DType.kFloat8E4M3, device="cuda"),
-        MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
+        Float8CurrentScalingQuantizer(fp8_dtype=TE_DType.kFloat8E4M3, device="cuda"),
+        MXFP8Quantizer(fp8_dtype=TE_DType.kFloat8E4M3),
     ],
 )
 @pytest.mark.parametrize(
     "out_quantizer",
     [
-        Float8CurrentScalingQuantizer(fp8_dtype=tex.DType.kFloat8E4M3, device="cuda"),
-        MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
+        Float8CurrentScalingQuantizer(fp8_dtype=TE_DType.kFloat8E4M3, device="cuda"),
+        MXFP8Quantizer(fp8_dtype=TE_DType.kFloat8E4M3),
         Float8Quantizer(
-            torch.ones(1).cuda().squeeze(), torch.ones(1).cuda().squeeze(), tex.DType.kFloat8E4M3
+            torch.ones(1).cuda().squeeze(), torch.ones(1).cuda().squeeze(), TE_DType.kFloat8E4M3
         ),
     ],
 )
@@ -3389,7 +3390,7 @@ def test_fp8_grouped_gemm(shape, accumulate):
         Float8Quantizer(
             scale.clone(),
             amax.clone(),
-            tex.DType.kFloat8E4M3,
+            TE_DType.kFloat8E4M3,
         )
         for _ in range(z)
     ]
@@ -3397,7 +3398,7 @@ def test_fp8_grouped_gemm(shape, accumulate):
         Float8Quantizer(
             scale.clone(),
             amax.clone(),
-            tex.DType.kFloat8E4M3,
+            TE_DType.kFloat8E4M3,
         )
         for _ in range(z)
     ]

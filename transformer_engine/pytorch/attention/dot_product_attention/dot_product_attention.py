@@ -38,6 +38,7 @@ from transformer_engine.pytorch.export import is_in_onnx_export_mode
 from transformer_engine.pytorch.constants import (
     AttnMaskTypes,
     AttnTypes,
+    TE_DType,
     dist_group_type,
 )
 from transformer_engine.pytorch.distributed import (
@@ -1232,11 +1233,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                 forward_dtype = get_fp8_te_dtype(self.fp8_meta["recipe"], fprop_tensor=True)
                 backward_dtype = get_fp8_te_dtype(self.fp8_meta["recipe"], fprop_tensor=False)
                 assert forward_dtype in [
-                    tex.DType.kFloat8E4M3,
-                    tex.DType.kFloat8E5M2,
+                    TE_DType.kFloat8E4M3,
+                    TE_DType.kFloat8E5M2,
                 ] and backward_dtype in [
-                    tex.DType.kFloat8E4M3,
-                    tex.DType.kFloat8E5M2,
+                    TE_DType.kFloat8E4M3,
+                    TE_DType.kFloat8E5M2,
                 ], """DotProductAttention only supports "E4M3" and "E5M2" FP8 data types."""
             else:
                 fp8_output = False

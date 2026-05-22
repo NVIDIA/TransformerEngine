@@ -45,7 +45,7 @@ def check_group_quantization_nvfp4_versus_reference(
     with_random_sign_mask: bool = True,
 ) -> None:
 
-    te_dtype = tex.DType.kFloat4E2M1
+    te_dtype = TE_DType.kFloat4E2M1
 
     # Setup device and random seed
     device = "cuda"

@@ -12,10 +12,9 @@ import warnings
 import torch
 from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
 import transformer_engine_torch as tex
-from transformer_engine_torch import DType as TE_DType
 
 from transformer_engine.common.recipe import MXFP8BlockScaling, Recipe
-from ..constants import MXFP8_BLOCK_SCALING_SIZE
+from ..constants import MXFP8_BLOCK_SCALING_SIZE, TE_DType
 from ..utils import devices_match, round_up_to_nearest_multiple
 from .storage.mxfp8_tensor_storage import MXFP8TensorStorage, _FromMXFP8Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
@@ -148,7 +147,7 @@ class MXFP8Quantizer(Quantizer):
         data: torch.Tensor,
         scale_inv: torch.Tensor,
         fake_dtype: torch.dtype,
-        fp8_dtype: TE_DType = tex.DType.kFloat8E4M3,
+        fp8_dtype: TE_DType = TE_DType.kFloat8E4M3,
     ) -> MXFP8Tensor:
         """Create a new MXFP8Tensor from data and scale_inv."""
         return MXFP8Tensor(

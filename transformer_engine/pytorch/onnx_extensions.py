@@ -30,7 +30,7 @@ import transformer_engine_torch as tex
 
 from .tensor.float8_tensor import Float8Quantizer
 from .tensor.mxfp8_tensor import MXFP8Quantizer
-from .constants import MXFP8_BLOCK_SCALING_SIZE
+from .constants import MXFP8_BLOCK_SCALING_SIZE, TE_DType
 from .utils import round_up_to_nearest_multiple
 from .export import is_in_onnx_export_mode
 
@@ -85,7 +85,7 @@ def onnx_quantize_fp8_op(tensor: torch.Tensor, scale: float) -> torch.Tensor:
     """Quantize to Float8Tensor used for inference."""
     scale_tensor = torch.tensor(scale, dtype=torch.float32, device=tensor.device)
     amax_tensor = torch.tensor([1], dtype=torch.float32, device=tensor.device)
-    quantizer = Float8Quantizer(scale_tensor, amax_tensor, tex.DType.kFloat8E4M3)
+    quantizer = Float8Quantizer(scale_tensor, amax_tensor, TE_DType.kFloat8E4M3)
     return quantizer.quantize(tensor)._data
 
 
@@ -131,7 +131,7 @@ TRT_FP8QuantizeLinear = onnxscript.values.Op(
 def onnx_dequantize_fp8_op(tensor: torch.Tensor, scale_inv: torch.Tensor) -> torch.Tensor:
     """Dequantize from Float8Tensor used for inference."""
     quantizer = Float8Quantizer(
-        1 / scale_inv, torch.zeros(1).to(tensor.device), tex.DType.kFloat8E4M3
+        1 / scale_inv, torch.zeros(1).to(tensor.device), TE_DType.kFloat8E4M3
     )
     quantizer_tensor = quantizer.create_tensor_from_data(tensor, fake_dtype=torch.float32)
     return quantizer_tensor.dequantize()
@@ -212,7 +212,7 @@ def onnx_quantize_fp8_cs_symbolic(
 @torch.library.custom_op("tex::mxfp8_quantize", mutates_args=[])
 def onnx_quantize_mxfp8_op(tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """Quantize to MXFP8Tensor used for inference."""
-    quantizer = MXFP8Quantizer(tex.DType.kFloat8E4M3)
+    quantizer = MXFP8Quantizer(TE_DType.kFloat8E4M3)
     quantized_tensor = quantizer(tensor)
     return quantized_tensor._rowwise_data, quantized_tensor._rowwise_scale_inv
 
@@ -264,7 +264,7 @@ TRT_MXFP8DynamicQuantize = onnxscript.values.Op(
 @torch.library.custom_op("tex::mxfp8_dequantize", mutates_args=[])
 def onnx_dequantize_mxfp8_op(tensor: torch.Tensor, scale_inv: torch.Tensor) -> torch.Tensor:
     """Dequantize from MXFP8Tensor used for inference."""
-    quantizer = MXFP8Quantizer(tex.DType.kFloat8E4M3)
+    quantizer = MXFP8Quantizer(TE_DType.kFloat8E4M3)
     quantizer_tensor = quantizer.create_tensor_from_data(
         tensor, scale_inv, fake_dtype=torch.float32
     )

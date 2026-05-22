@@ -22,6 +22,7 @@ import transformer_engine
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.cpp_extensions as tex
 import transformer_engine.pytorch.ops as te_ops
+from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch.ops.fused import (
     UserbuffersBackwardLinear,
     UserbuffersForwardLinear,
@@ -156,17 +157,17 @@ def make_reference_and_test_tensors(
         quantizer = Float8Quantizer(
             scale=torch.ones(1, dtype=torch.float32, device=test_device).squeeze(),
             amax=torch.zeros(1, dtype=torch.float32, device=test_device),
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=TE_DType.kFloat8E4M3,
         )
         test = quantizer(test)
     elif quantization == "fp8_current_scaling":
         quantizer = Float8CurrentScalingQuantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=TE_DType.kFloat8E4M3,
             device=test_device,
         )
         test = quantizer(test)
     elif quantization == "mxfp8":
-        test = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)(test)
+        test = MXFP8Quantizer(fp8_dtype=TE_DType.kFloat8E4M3)(test)
     else:
         raise ValueError(f"Unsupported quantization scheme ({quantization})")
     if isinstance(test, QuantizedTensor) and not test_is_quantized:
@@ -372,7 +373,7 @@ def _test_linear(
         tols = dtype_tols(
             model[0].weight._fp8_dtype
             if isinstance(model[0].weight, Float8Tensor)
-            else tex.DType.kFloat8E4M3
+            else TE_DType.kFloat8E4M3
         )
 
     # Check results

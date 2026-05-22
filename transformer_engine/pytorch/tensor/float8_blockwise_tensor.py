@@ -11,11 +11,11 @@ from typing import Any, Optional, Tuple, Union
 
 import torch
 import transformer_engine_torch as tex
-from transformer_engine_torch import DType as TE_DType
 from transformer_engine.common.recipe import Float8BlockScaling, Recipe
 from .storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ._quantization_helpers import _IdentityFunc
+from ..constants import TE_DType
 from ..utils import devices_match, round_up_to_nearest_multiple
 
 aten = torch.ops.aten

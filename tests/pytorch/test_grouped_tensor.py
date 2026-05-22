@@ -17,7 +17,7 @@ from transformer_engine.pytorch import (
     MXFP8Quantizer,
     NVFP4Quantizer,
 )
-from transformer_engine.pytorch.constants import TE_DType_To_Torch
+from transformer_engine.pytorch.constants import TE_DType, TE_DType_To_Torch
 import transformer_engine_torch as tex
 
 # Check available recipes
@@ -61,17 +61,17 @@ def make_quantizer(quantization: str, num_tensors: int, shape: List[Tuple[int, i
         quantizer = Float8Quantizer(
             scale=torch.ones(1, dtype=torch.float32, device="cuda"),
             amax=torch.zeros(1, dtype=torch.float32, device="cuda"),
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=TE_DType.kFloat8E4M3,
         )
     elif quantization == "fp8_current_scaling":
         quantizer = Float8CurrentScalingQuantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=TE_DType.kFloat8E4M3,
             device="cuda",
         )
         quantizer.set_usage(rowwise=True, columnwise=False)
     elif quantization == "fp8_blockwise":
         quantizer = Float8BlockQuantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=TE_DType.kFloat8E4M3,
             rowwise=True,
             columnwise=False,
             force_pow_2_scales=True,
@@ -79,7 +79,7 @@ def make_quantizer(quantization: str, num_tensors: int, shape: List[Tuple[int, i
             block_scaling_dim=1,
         )
     elif quantization == "mxfp8":
-        quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        quantizer = MXFP8Quantizer(fp8_dtype=TE_DType.kFloat8E4M3)
     elif quantization == "nvfp4":
         quantizer = NVFP4Quantizer(
             with_rht=False,
@@ -369,7 +369,7 @@ class TestGroupedTensor:
         grouped_input = torch.cat(input_tensors, dim=0)
 
         # Create MXFP8 output grouped tensor (rowwise only for easier validation)
-        quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        quantizer = MXFP8Quantizer(fp8_dtype=TE_DType.kFloat8E4M3)
         quantizer.set_usage(rowwise=True, columnwise=False)
         first_dims = torch.tensor(
             [shape[0][0] for _ in range(num_tensors)],
@@ -417,7 +417,7 @@ class TestGroupedTensor:
         last_dim = 1024
         grouped_input = torch.empty(0, last_dim, dtype=torch.bfloat16, device="cuda")
 
-        quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        quantizer = MXFP8Quantizer(fp8_dtype=TE_DType.kFloat8E4M3)
         quantizer.set_usage(rowwise=True, columnwise=False)
         first_dims = torch.zeros(num_tensors, dtype=torch.int64, device="cuda")
 
@@ -440,7 +440,7 @@ class TestGroupedTensor:
         input_tensors = [torch.randn(s, dtype=torch.bfloat16, device="cuda") for s in shape]
         grouped_input = torch.cat(input_tensors, dim=0)
 
-        quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        quantizer = MXFP8Quantizer(fp8_dtype=TE_DType.kFloat8E4M3)
         quantizer.set_usage(rowwise=True, columnwise=False)
         first_dims = torch.tensor(
             [shape[0][0] for _ in range(num_tensors)],
@@ -513,7 +513,7 @@ class TestGroupedTensor:
         input_tensors = [torch.randn(s, dtype=torch.bfloat16, device="cuda") for s in shape]
         grouped_input = torch.cat(input_tensors, dim=0)
 
-        quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        quantizer = MXFP8Quantizer(fp8_dtype=TE_DType.kFloat8E4M3)
         quantizer.set_usage(rowwise=True, columnwise=False)
         first_dims = torch.tensor([s[0] for s in shape], dtype=torch.int64, device="cuda")
 
@@ -521,7 +521,7 @@ class TestGroupedTensor:
         quantized = tex.group_quantize(grouped_input, quantizer, num_tensors, first_dims)
 
         # Dequantize.
-        dequantized = tex.group_dequantize(quantized, tex.DType.kBFloat16)
+        dequantized = tex.group_dequantize(quantized, TE_DType.kBFloat16)
 
         # Verify output metadata.
         assert dequantized.num_tensors == num_tensors
@@ -543,7 +543,7 @@ class TestGroupedTensor:
         input_tensors = [torch.randn(s, dtype=torch.bfloat16, device="cuda") for s in shape]
         grouped_input = torch.cat(input_tensors, dim=0)
 
-        quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        quantizer = MXFP8Quantizer(fp8_dtype=TE_DType.kFloat8E4M3)
         quantizer.set_usage(rowwise=True, columnwise=False)
         first_dims = torch.tensor(
             [shape[0][0] for _ in range(num_tensors)],
@@ -556,12 +556,12 @@ class TestGroupedTensor:
 
         # Warmup dequantize.
         torch.cuda.synchronize()
-        _ = tex.group_dequantize(quantized, tex.DType.kBFloat16)
+        _ = tex.group_dequantize(quantized, TE_DType.kBFloat16)
         torch.cuda.synchronize()
 
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
-            static_output = tex.group_dequantize(quantized, tex.DType.kBFloat16)
+            static_output = tex.group_dequantize(quantized, TE_DType.kBFloat16)
 
         # Replay with different input data.
         fresh_input = torch.cat(
@@ -575,7 +575,7 @@ class TestGroupedTensor:
         graph.replay()
         torch.cuda.synchronize()
 
-        expected = tex.group_dequantize(quantized, tex.DType.kBFloat16)
+        expected = tex.group_dequantize(quantized, TE_DType.kBFloat16)
         expected_tensors = expected.split_into_quantized_tensors()
         static_tensors = static_output.split_into_quantized_tensors()
         for exp, got in zip(expected_tensors, static_tensors):

@@ -10,11 +10,10 @@ from typing import Optional, Dict, Any, Tuple
 import torch
 
 import transformer_engine_torch as tex
-from transformer_engine_torch import DType as TE_DType
 
 from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 
-from ...constants import TE_DType_To_Torch
+from ...constants import TE_DType, TE_DType_To_Torch
 
 from ...utils import _empty_tensor
 

@@ -9,7 +9,6 @@ import warnings
 import torch
 from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
 import transformer_engine_torch as tex
-from transformer_engine_torch import DType as TE_DType
 
 from transformer_engine.common.recipe import (
     DelayedScaling,
@@ -20,7 +19,7 @@ from ..utils import canonicalize_process_group, devices_match
 from .storage.float8_tensor_storage import Float8TensorStorage, _FromFloat8Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ._quantization_helpers import _IdentityFunc
-from ..constants import dist_group_type
+from ..constants import dist_group_type, TE_DType
 
 aten = torch.ops.aten
 

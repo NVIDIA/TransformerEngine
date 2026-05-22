@@ -46,7 +46,10 @@ from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8
 from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 
 from transformer_engine.pytorch.quantization import get_fp8_te_dtype
-from transformer_engine.pytorch.constants import TE_DType, MXFP8_BLOCK_SCALING_SIZE
+from transformer_engine.pytorch.constants import (
+    TE_DType,
+    MXFP8_BLOCK_SCALING_SIZE,
+)
 
 
 from transformer_engine.pytorch.utils import (
@@ -1220,6 +1223,8 @@ def get_attention_backend(
     # Filter: cuDNN support
     fused_attention_backend = None
     if use_fused_attention:
+        # ``TE_DType`` is implicitly convertible to ``transformer_engine::DType``
+        # on the C++ side, so pass it straight to the pybind function.
         q_type = TE_DType[qkv_dtype]
         kv_type = q_type
         if fp8 and fp8_meta["recipe"].fp8_dpa:

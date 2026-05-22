@@ -50,7 +50,7 @@ def check_quantization_nvfp4_versus_reference(
         row_scaled_nvfp4, return_transpose, with_2d_quantization
     )
 
-    te_dtype = tex.DType.kFloat4E2M1
+    te_dtype = TE_DType.kFloat4E2M1
 
     # Setup device and random seed
     device = "cuda"
@@ -226,7 +226,7 @@ def test_nvfp4_quantization_extrema_versus_reference(
 ):
     maybe_skip_row_scaled_unsupported_quantization(row_scaled_nvfp4, return_transpose)
 
-    te_dtype = tex.DType.kFloat4E2M1
+    te_dtype = TE_DType.kFloat4E2M1
 
     device = "cuda"
     seed = 0
@@ -337,7 +337,7 @@ def test_nvfp4_quantization_boundary_values(
     """
     maybe_skip_row_scaled_unsupported_quantization(row_scaled_nvfp4, return_transpose)
 
-    te_dtype = tex.DType.kFloat4E2M1
+    te_dtype = TE_DType.kFloat4E2M1
 
     device = "cuda"
     seed = 123
@@ -452,7 +452,7 @@ def test_nvfp4_quantization_noncontiguous_inputs(
 ):
     maybe_skip_row_scaled_unsupported_quantization(row_scaled_nvfp4, return_transpose)
 
-    te_dtype = tex.DType.kFloat4E2M1
+    te_dtype = TE_DType.kFloat4E2M1
 
     device = "cuda"
     seed = 17

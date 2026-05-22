@@ -29,7 +29,7 @@ def check_nvfp4_gemm_versus_reference(
     w_columnwise: bool = False,
     row_scaled_nvfp4: bool = False,
 ):
-    te_dtype = tex.DType.kFloat4E2M1
+    te_dtype = TE_DType.kFloat4E2M1
 
     # Setup device and random seed
     device = "cuda"
@@ -233,7 +233,7 @@ def check_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
     use_bias: bool,
     single_output: bool,
 ):
-    te_dtype = tex.DType.kFloat4E2M1
+    te_dtype = TE_DType.kFloat4E2M1
     device = "cuda"
     torch.manual_seed(23)
     torch.cuda.manual_seed(23)
@@ -322,7 +322,7 @@ def check_nvfp4_row_scaled_gemm_matches_emulated(
     K: int,
     N: int,
 ):
-    te_dtype = tex.DType.kFloat4E2M1
+    te_dtype = TE_DType.kFloat4E2M1
     device = "cuda"
     torch.manual_seed(37)
     torch.cuda.manual_seed(37)

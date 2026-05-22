@@ -12,10 +12,9 @@ import functools
 
 import torch
 import transformer_engine_torch as tex
-from transformer_engine_torch import DType as TE_DType
 
 from transformer_engine.common.recipe import NVFP4BlockScaling, Recipe
-from ..constants import NVFP4_BLOCK_SCALING_SIZE, dist_group_type
+from ..constants import NVFP4_BLOCK_SCALING_SIZE, TE_DType, dist_group_type
 from ..utils import (
     canonicalize_process_group,
     devices_match,
@@ -137,7 +136,7 @@ class NVFP4Quantizer(Quantizer):
 
     def __init__(
         self,
-        fp4_dtype: TE_DType = tex.DType.kFloat4E2M1,
+        fp4_dtype: TE_DType = TE_DType.kFloat4E2M1,
         rowwise: bool = True,
         columnwise: bool = True,
         with_amax_reduction: bool = False,

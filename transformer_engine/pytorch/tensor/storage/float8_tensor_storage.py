@@ -10,11 +10,13 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 
 import transformer_engine_torch as tex
-from transformer_engine_torch import DType as TE_DType
 
 from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 
-from ...constants import TE_DType as torch_to_transformer_engine_dtype, TE_DType_To_Torch
+from ...constants import (
+    TE_DType,
+    TE_DType_To_Torch,
+)
 
 from ...utils import is_non_tn_fp8_gemm_supported, _empty_tensor
 
@@ -29,7 +31,7 @@ class _FromFloat8Func(torch.autograd.Function):
         dtype: torch.dtype,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
-        te_dtype = torch_to_transformer_engine_dtype[dtype]
+        te_dtype = TE_DType[dtype]
 
         # Make sure FP8 data is in expected format
         if tensor._data is not None:
@@ -42,7 +44,9 @@ class _FromFloat8Func(torch.autograd.Function):
                     tensor._data.view(fp8_torch_dtype).float()
                     * tensor._scale_inv.to(tensor._data.device)
                 ).to(dtype)
-            # Cast from FP8
+            # Cast from FP8. ``TE_DType`` is implicitly convertible to
+            # ``transformer_engine::DType`` on the C++ side, so pass it
+            # directly to ``tex.dequantize``.
             return tex.dequantize(tensor, te_dtype)
 
         raise NotImplementedError("Casting back from the transpose not implemented yet!")

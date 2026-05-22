@@ -14,6 +14,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.context_parallel
 )
 from transformer_engine.pytorch.attention.dot_product_attention.utils import combine_and_quantize
 import transformer_engine_torch as tex
+from transformer_engine.pytorch.constants import TE_DType
 from test_attention_with_cp import model_configs_flash_attn, model_configs_fused_attn
 from transformer_engine.pytorch import (
     autocast,
@@ -323,34 +324,34 @@ def run_dpa_with_cp(
     ).cuda()
     if scaling_mode == "delayed":
         qkv_quantizer = Float8Quantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=TE_DType.kFloat8E4M3,
             scale=torch.tensor([1], dtype=torch.float32).cuda(),
             amax=torch.tensor([0], dtype=torch.float32).cuda(),
         )
         dout_quantizer = Float8Quantizer(
-            fp8_dtype=tex.DType.kFloat8E5M2,
+            fp8_dtype=TE_DType.kFloat8E5M2,
             scale=torch.tensor([1], dtype=torch.float32).cuda(),
             amax=torch.tensor([0], dtype=torch.float32).cuda(),
         )
     if scaling_mode == "current":
         qkv_quantizer = Float8CurrentScalingQuantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=TE_DType.kFloat8E4M3,
             device="cuda",
         )
         dout_quantizer = Float8CurrentScalingQuantizer(
-            fp8_dtype=tex.DType.kFloat8E5M2,
+            fp8_dtype=TE_DType.kFloat8E5M2,
             device="cuda",
         )
     if scaling_mode == "mxfp8":
         qkv_quantizer = MXFP8Quantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=TE_DType.kFloat8E4M3,
             rowwise=True,
             columnwise=True,
         )
         qkv_quantizer.optimize_for_gemm = True
         qkv_quantizer.internal = False
         dout_quantizer = MXFP8Quantizer(
-            fp8_dtype=tex.DType.kFloat8E5M2,
+            fp8_dtype=TE_DType.kFloat8E5M2,
             rowwise=True,
             columnwise=True,
         )

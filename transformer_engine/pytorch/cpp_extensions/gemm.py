@@ -288,7 +288,7 @@ def general_grouped_gemm(
     bias: Optional[List[torch.Tensor]] = None,
     use_bias: bool = False,
     use_split_accumulator: bool = False,
-    D_dtype: Optional[tex.DType] = None,
+    D_dtype: Optional[TE_DType] = None,
     single_output=False,
 ) -> Tuple[List[torch.Tensor], ...]:
     """
@@ -317,7 +317,11 @@ def general_grouped_gemm(
         grad_bias = empty_tensors
     bias = bias if use_bias else empty_tensors
     if use_bias:
-        bias_dtype = TE_DType[grad_bias[0].dtype] if grad else TE_DType[bias[0].dtype]
+        bias_dtype = (
+            TE_DType[grad_bias[0].dtype]
+            if grad
+            else TE_DType[bias[0].dtype]
+        )
     else:
         bias_dtype = TE_DType[torch.bfloat16]
 

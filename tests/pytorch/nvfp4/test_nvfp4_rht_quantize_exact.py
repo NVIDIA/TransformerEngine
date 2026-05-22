@@ -46,7 +46,7 @@ def check_quantization_nvfp4_versus_reference(
 ) -> None:
     assert with_rht and with_post_rht_amax, "RHT and post-RHT amax reduction must be enabled."
 
-    te_dtype = tex.DType.kFloat4E2M1
+    te_dtype = TE_DType.kFloat4E2M1
 
     # Setup device and random seed
     device = "cuda"
