@@ -49,6 +49,7 @@ Implementation conventions
 """
 
 import math
+from dataclasses import dataclass, field
 from enum import Enum
 from functools import partial
 from typing import Any, Callable, NewType, Optional, Tuple, Union
@@ -75,17 +76,48 @@ from .quantize import (
 )
 from .router import ScoreFunction, _validate_score_function
 from .sharding import _get_mesh
-from .triton_extensions.permutation import (
-    make_chunk_sort_map,
-    make_row_id_map,
-    permute_with_mask_map,
-    permute_with_mask_map_and_pad,
-    sort_chunks_by_map,
-    unpermute_bwd_with_merging_probs,
-    unpermute_bwd_with_merging_probs_and_unpad,
-    unpermute_with_mask_map,
-    unpermute_with_mask_map_and_unpad,
-)
+
+# Triton-backed primitives are imported lazily: callers on the PURE_JAX
+# permutation backend should not need ``triton`` installed. The TRITON
+# branches in this module call ``_require_triton()`` first to raise a
+# clear error if the import failed.
+try:
+    from .triton_extensions.permutation import (
+        make_chunk_sort_map,
+        make_row_id_map,
+        permute_with_mask_map,
+        permute_with_mask_map_and_pad,
+        sort_chunks_by_map,
+        unpermute_bwd_with_merging_probs,
+        unpermute_bwd_with_merging_probs_and_unpad,
+        unpermute_with_mask_map,
+        unpermute_with_mask_map_and_unpad,
+    )
+
+    _TRITON_AVAILABLE = True
+except ImportError:
+    _TRITON_AVAILABLE = False
+    make_chunk_sort_map = None
+    make_row_id_map = None
+    permute_with_mask_map = None
+    permute_with_mask_map_and_pad = None
+    sort_chunks_by_map = None
+    unpermute_bwd_with_merging_probs = None
+    unpermute_bwd_with_merging_probs_and_unpad = None
+    unpermute_with_mask_map = None
+    unpermute_with_mask_map_and_unpad = None
+
+
+def _require_triton():
+    """Raise a clear error if Triton permutation kernels are unavailable."""
+    if not _TRITON_AVAILABLE:
+        raise ImportError(
+            "PermutationBackend.TRITON requires"
+            " ``transformer_engine.jax.triton_extensions`` (and ``triton``)."
+            " Install Triton or pass PermutationBackend.PURE_JAX."
+        )
+
+
 from .flax.module import _convert_to_activation_function
 
 PRNGKey = Any
@@ -206,6 +238,36 @@ class PermutationBackend(Enum):
 # code in the bwd (e.g. ``if padding > 0`` and ``jnp.zeros(shape)``).
 
 
+@dataclass(frozen=True)
+class _StaticShapeInfo:
+    """Per-shard compile-time-constant shape info used by dispatch /
+    combine fwd and bwd. Fields are Python ints / int tuples (NOT jnp
+    arrays) so they can be passed as ordinary static keyword args.
+
+    Attributes
+    ----------
+    num_real_tokens : int
+        Per-shard count of real (non-padding) permuted tokens,
+        i.e. ``per_shard_num_tokens * num_experts_per_tok``.
+    padding_size : int
+        Per-shard number of alignment-padding tokens appended to the
+        sort buffer (``num_experts * (align_size - 1)`` when
+        ``align_size > 0``, else ``0``).
+    pre_a2a_buffer_shape : tuple[int, int]
+        ``(num_real_tokens + padding_size, hidden)`` -- the per-shard
+        shape of the sorted-inputs buffer sent over the EP
+        ragged_all_to_all in the fwd direction.
+    post_a2a_buffer_shape : Optional[tuple[int, int]]
+        ``(recv_buffer_rows, hidden)`` when EP is active, ``None``
+        otherwise.
+    """
+
+    num_real_tokens: int
+    padding_size: int
+    pre_a2a_buffer_shape: Tuple[int, int]
+    post_a2a_buffer_shape: Optional[Tuple[int, int]]
+
+
 def _compute_static_shape_info(
     *,
     batch_size: int,
@@ -219,37 +281,14 @@ def _compute_static_shape_info(
     fsdp_sizes: Tuple[int, ...] = (),
     recv_buffer_rows: int = 0,
     batch_is_per_shard: bool = True,
-) -> dict:
-    """Compute per-shard compile-time-constant shape info used by both
-    dispatch/combine fwd and dispatch/combine bwd.
-
-    Returned dict has Python ints / int tuples (NOT jnp arrays) so the
-    caller can pass them as ordinary static keyword args. See the
-    module-level comment above for why this matters.
+) -> _StaticShapeInfo:
+    """Build a :class:`_StaticShapeInfo` for the current rank.
 
     ``batch_is_per_shard`` controls whether ``batch_size`` is already
     sharded (True -- e.g. when this is called from inside a shard_map
     body, where ``x.shape[0]`` reports the per-shard batch size) or
     global (False -- e.g. when computing from x.shape outside the
     shard_map body).
-
-    Keys
-    ----
-    num_real_tokens : int
-        Per-shard count of real (non-padding) permuted tokens, i.e.
-        ``per_shard_num_tokens * num_experts_per_tok``.
-    padding_size : int
-        Per-shard number of alignment-padding tokens appended to the
-        sort buffer (``num_experts * (align_size - 1)`` when
-        ``align_size > 0``, else ``0``). Matches the convention used
-        by ``pure_jax_token_dispatch``.
-    pre_a2a_buffer_shape : tuple[int, int]
-        ``(num_real_tokens + padding_size, hidden)`` -- the per-shard
-        shape of the sorted-inputs buffer that is sent over the EP
-        ragged_all_to_all in the fwd direction.
-    post_a2a_buffer_shape : Optional[tuple[int, int]]
-        ``(recv_buffer_rows, hidden)`` when EP is active, ``None``
-        otherwise.
     """
     if ep_active and not batch_is_per_shard:
         dp_size = math.prod(fsdp_sizes) if fsdp_sizes else 1
@@ -261,7 +300,7 @@ def _compute_static_shape_info(
     padding_size = num_experts * (align_size - 1) if align_size > 0 else 0
     pre_a2a_buffer_shape = (num_real_tokens + padding_size, hidden)
     post_a2a_buffer_shape = (recv_buffer_rows, hidden) if ep_active else None
-    return dict(
+    return _StaticShapeInfo(
         num_real_tokens=num_real_tokens,
         padding_size=padding_size,
         pre_a2a_buffer_shape=pre_a2a_buffer_shape,
@@ -1057,9 +1096,9 @@ def _body_fwd(
         sequence_length=sequence_length,
         dtype=dtype,
         num_experts_per_tok=num_experts_per_tok,
-        num_real_tokens=_static_shape["num_real_tokens"],
-        padding_size=_static_shape["padding_size"],
-        pre_a2a_buffer_shape=_static_shape["pre_a2a_buffer_shape"],
+        num_real_tokens=_static_shape.num_real_tokens,
+        padding_size=_static_shape.padding_size,
+        pre_a2a_buffer_shape=_static_shape.pre_a2a_buffer_shape,
         ep_axis=ep_axis,
         shard_id=shard_id,
         num_ep=num_ep,
@@ -1186,9 +1225,9 @@ def _body_bwd(
         dtype=dtype,
         num_experts=num_experts,
         num_experts_per_tok=num_experts_per_tok,
-        num_real_tokens=_static_shape["num_real_tokens"],
-        padding_size=_static_shape["padding_size"],
-        post_a2a_buffer_shape=_static_shape["post_a2a_buffer_shape"],
+        num_real_tokens=_static_shape.num_real_tokens,
+        padding_size=_static_shape.padding_size,
+        post_a2a_buffer_shape=_static_shape.post_a2a_buffer_shape,
         ep_axis=ep_axis,
         shard_id=shard_id,
         num_ep=num_ep,
@@ -1269,9 +1308,9 @@ def _body_bwd(
         ep_active=ep_active,
         num_experts=num_experts,
         num_experts_per_tok=num_experts_per_tok,
-        num_real_tokens=_static_shape["num_real_tokens"],
-        padding_size=_static_shape["padding_size"],
-        pre_a2a_buffer_shape=_static_shape["pre_a2a_buffer_shape"],
+        num_real_tokens=_static_shape.num_real_tokens,
+        padding_size=_static_shape.padding_size,
+        pre_a2a_buffer_shape=_static_shape.pre_a2a_buffer_shape,
         ep_axis=ep_axis,
         shard_id=shard_id,
         num_ep=num_ep,
@@ -1984,6 +2023,8 @@ def moe(
         raise TypeError(
             f"permutation_backend must be a PermutationBackend, got {permutation_backend!r}"
         )
+    if permutation_backend is PermutationBackend.TRITON:
+        _require_triton()
     # Normalize string score_function ("softmax" / "sigmoid") to the
     # ScoreFunction enum once here. The underlying primitive
     # ``tex.fused_topk_with_score_function_fwd`` expects an int-coercible

@@ -114,6 +114,12 @@ if get_device_compute_capability(0) < 100:
         allow_module_level=True,
     )
 
+import transformer_engine.jax as te
+from transformer_engine.common import recipe as te_recipe
+from transformer_engine.jax.flax import _MoEBlock as MoEBlock
+from transformer_engine.jax.moe import PermutationBackend
+from transformer_engine.jax.sharding import MeshResource, global_shard_guard
+
 # Parametrize values for the dispatch / combine backend. Only the
 # ``triton`` variant carries the ``triton`` marker, so the
 # ``pure_jax`` variant still runs on environments without Triton.
@@ -148,29 +154,6 @@ def mesh():
     return Mesh(devices, axis_names=(EP_AXIS, FSDP_AXIS))
 
 
-@pytest.fixture(autouse=True, scope="function")
-def _inject_moe(request):
-    """Inject TE / MoEBlock symbols into the test module namespace.
-    Done lazily so a stray ``pytest tests/jax/`` collection on a build
-    without the TE JAX bits still produces a clean skip via the
-    module-level guards above rather than an ImportError at collection
-    time."""
-    import transformer_engine.jax as te
-    from transformer_engine.common import recipe as te_recipe
-    from transformer_engine.jax.flax import _MoEBlock as MoEBlock
-    from transformer_engine.jax.moe import PermutationBackend
-    from transformer_engine.jax.sharding import MeshResource, global_shard_guard
-
-    mod = sys.modules[__name__]
-    mod.te = te
-    mod.te_recipe = te_recipe
-    mod.MoEBlock = MoEBlock
-    mod.PermutationBackend = PermutationBackend
-    mod.MeshResource = MeshResource
-    mod.global_shard_guard = global_shard_guard
-    yield
-
-
 # ``recipe`` parametrize values used across all tests below. ``None``
 # = plain bf16; the named recipes route through TE's autocast and
 # exercise the FP8/MXFP8 quantization paths in _body_fwd/_body_bwd.
@@ -184,7 +167,7 @@ def _resolve_recipe(name):
     if name == "bf16":
         return False, None
     if name == "MXFP8BlockScaling":
-        return True, te_recipe.MXFP8BlockScaling()  # noqa: F821
+        return True, te_recipe.MXFP8BlockScaling()
     raise ValueError(f"unknown recipe name: {name!r}")
 
 
@@ -203,7 +186,7 @@ def _hardware_supports(recipe_name):
 def _autocast_ctx(recipe_name):
     """Context manager that turns FP8 on for non-bf16 recipes."""
     use_fp8, recipe_inst = _resolve_recipe(recipe_name)
-    return te.autocast(enabled=use_fp8, recipe=recipe_inst)  # noqa: F821
+    return te.autocast(enabled=use_fp8, recipe=recipe_inst)
 
 
 def _tol_finite_grad(recipe_name):
@@ -229,7 +212,7 @@ def _make_block(
     dtype=jnp.bfloat16,
     align_size=0,
 ):
-    return MoEBlock(  # noqa: F821
+    return MoEBlock(
         num_experts=num_experts,
         num_experts_per_tok=num_experts_per_tok,
         intermediate_size=intermediate_size,
@@ -248,8 +231,8 @@ def _shard_inputs(x, mesh):
 
 
 def _init_apply(block, mesh, x, key):
-    with mesh, global_shard_guard(  # noqa: F821
-        MeshResource(ep_resource=EP_AXIS, fsdp_resource=FSDP_AXIS)  # noqa: F821
+    with mesh, global_shard_guard(
+        MeshResource(ep_resource=EP_AXIS, fsdp_resource=FSDP_AXIS)
     ), nn_partitioning.axis_rules(LOGICAL_AXIS_RULES):
         x = _shard_inputs(x, mesh)
         variables = jax.jit(block.init)(key, x)
@@ -260,8 +243,8 @@ def _init_apply(block, mesh, x, key):
 
 
 def _grad_step(block, variables, mesh, x):
-    with mesh, global_shard_guard(  # noqa: F821
-        MeshResource(ep_resource=EP_AXIS, fsdp_resource=FSDP_AXIS)  # noqa: F821
+    with mesh, global_shard_guard(
+        MeshResource(ep_resource=EP_AXIS, fsdp_resource=FSDP_AXIS)
     ), nn_partitioning.axis_rules(LOGICAL_AXIS_RULES):
         x = _shard_inputs(x, mesh)
 
@@ -315,7 +298,7 @@ class TestMoeVjpMultiprocess:
     def test_fwd_and_bwd(self, mesh, backend_name, recipe_name):
         if not _hardware_supports(recipe_name):
             pytest.skip(f"recipe {recipe_name} not supported on this GPU")
-        backend = PermutationBackend(backend_name)  # noqa: F821
+        backend = PermutationBackend(backend_name)
         block = _make_block(
             num_experts=NUM_EXPERTS,
             num_experts_per_tok=TOPK,
@@ -346,7 +329,7 @@ class TestMoeVjpMultiprocess:
     def test_aux_loss(self, mesh, backend_name, recipe_name):
         if not _hardware_supports(recipe_name):
             pytest.skip(f"recipe {recipe_name} not supported on this GPU")
-        backend = PermutationBackend(backend_name)  # noqa: F821
+        backend = PermutationBackend(backend_name)
         block = _make_block(
             num_experts=NUM_EXPERTS,
             num_experts_per_tok=TOPK,
@@ -380,13 +363,13 @@ class TestMoeVjpMultiprocess:
             num_experts=NUM_EXPERTS,
             num_experts_per_tok=TOPK,
             intermediate_size=INTER,
-            permutation_backend=PermutationBackend.PURE_JAX,  # noqa: F821
+            permutation_backend=PermutationBackend.PURE_JAX,
         )
         block_tr = _make_block(
             num_experts=NUM_EXPERTS,
             num_experts_per_tok=TOPK,
             intermediate_size=INTER,
-            permutation_backend=PermutationBackend.TRITON,  # noqa: F821
+            permutation_backend=PermutationBackend.TRITON,
         )
         x = jax.random.normal(
             jax.random.PRNGKey(6),
@@ -396,8 +379,8 @@ class TestMoeVjpMultiprocess:
         tol = _tol_finite_grad(recipe_name)
         with _autocast_ctx(recipe_name):
             variables, out_pj, _ = _init_apply(block_pj, mesh, x, jax.random.PRNGKey(7))
-            with mesh, global_shard_guard(  # noqa: F821
-                MeshResource(ep_resource=EP_AXIS, fsdp_resource=FSDP_AXIS)  # noqa: F821
+            with mesh, global_shard_guard(
+                MeshResource(ep_resource=EP_AXIS, fsdp_resource=FSDP_AXIS)
             ), nn_partitioning.axis_rules(LOGICAL_AXIS_RULES):
                 x_sh = _shard_inputs(x, mesh)
                 out_tr, _ = jax.jit(block_tr.apply)(variables, x_sh)

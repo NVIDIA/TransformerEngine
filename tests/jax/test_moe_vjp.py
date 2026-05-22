@@ -39,6 +39,8 @@ import numpy as np
 import pytest
 
 from transformer_engine_jax import get_device_compute_capability
+from transformer_engine.jax.flax import _MoEBlock as MoEBlock
+from transformer_engine.jax.moe import PermutationBackend, moe
 
 # The MoE custom_vjp uses grouped GEMM, which is currently
 # Blackwell-only (sm_100+). Skip the whole file on older arches.
@@ -55,24 +57,6 @@ BACKEND_PARAMS = [
     pytest.param("pure_jax", id="pure_jax"),
     pytest.param("triton", id="triton", marks=pytest.mark.triton),
 ]
-
-
-@pytest.fixture(autouse=True, scope="function")
-def _inject_moe(request):
-    """Inject MoEBlock / PermutationBackend / moe symbols into the test
-    module namespace. Done as a fixture rather than a top-level import so
-    a stray ``pytest tests/jax/`` collection on a build without the TE
-    JAX bits still produces a clean skip via the module-level guards
-    above rather than an ImportError at collection time."""
-    import sys
-    from transformer_engine.jax.flax import _MoEBlock as MoEBlock
-    from transformer_engine.jax.moe import PermutationBackend, moe
-
-    mod = sys.modules[__name__]
-    mod.MoEBlock = MoEBlock
-    mod.PermutationBackend = PermutationBackend
-    mod.moe = moe
-    yield
 
 
 # -----------------------------------------------------------------------------
@@ -207,7 +191,7 @@ def _run_te_moe(
     permutation_backend,
     aux_loss_coeff: float = 0.0,
 ) -> Tuple[jnp.ndarray, Optional[jnp.ndarray]]:
-    return moe(  # noqa: F821 -- injected by fixture
+    return moe(
         x,
         params["gate_kernel"],
         params["wi_0"],
@@ -279,7 +263,7 @@ class TestMoeVjpForward:
 
     @pytest.mark.parametrize("backend_name", BACKEND_PARAMS)
     def test_forward_shape_and_finite(self, backend_name):
-        backend = PermutationBackend(backend_name)  # noqa: F821
+        backend = PermutationBackend(backend_name)
         key = jax.random.PRNGKey(0)
         kp, kx = jax.random.split(key)
         params = _init_params(kp)
@@ -292,7 +276,7 @@ class TestMoeVjpForward:
 
     @pytest.mark.parametrize("backend_name", BACKEND_PARAMS)
     def test_forward_parity_vs_pure_jax_reference(self, backend_name):
-        backend = PermutationBackend(backend_name)  # noqa: F821
+        backend = PermutationBackend(backend_name)
         key = jax.random.PRNGKey(1)
         kp, kx = jax.random.split(key)
         params = _init_params(kp)
@@ -313,10 +297,10 @@ class TestMoeVjpForward:
         params = _init_params(kp)
         x = _make_inputs(kx)
         out_pj, _ = _run_te_moe(
-            x, params, permutation_backend=PermutationBackend.PURE_JAX  # noqa: F821
+            x, params, permutation_backend=PermutationBackend.PURE_JAX
         )
         out_tr, _ = _run_te_moe(
-            x, params, permutation_backend=PermutationBackend.TRITON  # noqa: F821
+            x, params, permutation_backend=PermutationBackend.TRITON
         )
         np.testing.assert_allclose(np.array(out_pj), np.array(out_tr), atol=2e-5, rtol=2e-5)
 
@@ -327,7 +311,7 @@ class TestMoeVjpBackward:
 
     @pytest.mark.parametrize("backend_name", BACKEND_PARAMS)
     def test_grads_finite_and_nonzero(self, backend_name):
-        backend = PermutationBackend(backend_name)  # noqa: F821
+        backend = PermutationBackend(backend_name)
         key = jax.random.PRNGKey(3)
         kp, kx = jax.random.split(key)
         params = _init_params(kp)
@@ -340,7 +324,7 @@ class TestMoeVjpBackward:
 
     @pytest.mark.parametrize("backend_name", BACKEND_PARAMS)
     def test_grads_match_pure_jax_reference(self, backend_name):
-        backend = PermutationBackend(backend_name)  # noqa: F821
+        backend = PermutationBackend(backend_name)
         key = jax.random.PRNGKey(4)
         kp, kx = jax.random.split(key)
         params = _init_params(kp)
@@ -382,7 +366,7 @@ class TestMoeVjpAuxLoss:
 
     @pytest.mark.parametrize("backend_name", BACKEND_PARAMS)
     def test_aux_loss_returned_and_finite(self, backend_name):
-        backend = PermutationBackend(backend_name)  # noqa: F821
+        backend = PermutationBackend(backend_name)
         key = jax.random.PRNGKey(5)
         kp, kx = jax.random.split(key)
         params = _init_params(kp)
@@ -395,7 +379,7 @@ class TestMoeVjpAuxLoss:
 
     @pytest.mark.parametrize("backend_name", BACKEND_PARAMS)
     def test_aux_loss_parity_vs_reference(self, backend_name):
-        backend = PermutationBackend(backend_name)  # noqa: F821
+        backend = PermutationBackend(backend_name)
         key = jax.random.PRNGKey(6)
         kp, kx = jax.random.split(key)
         params = _init_params(kp)
@@ -415,7 +399,7 @@ class TestMoeVjpAuxLoss:
         """The aux-loss bwd path must produce non-zero gate-kernel grads
         when only the aux-loss scalar is differentiated (no main-output
         contribution)."""
-        backend = PermutationBackend(backend_name)  # noqa: F821
+        backend = PermutationBackend(backend_name)
         key = jax.random.PRNGKey(7)
         kp, kx = jax.random.split(key)
         params = _init_params(kp)
@@ -436,11 +420,11 @@ class TestMoEBlockFlaxWrapper:
     """Sanity-check the thin Flax wrapper: forward + grad on init."""
 
     def test_init_and_apply(self):
-        block = MoEBlock(  # noqa: F821
+        block = MoEBlock(
             num_experts=NUM_EXPERTS,
             num_experts_per_tok=NUM_EXPERTS_PER_TOK,
             intermediate_size=INTERMEDIATE_SIZE,
-            permutation_backend=PermutationBackend.PURE_JAX,  # noqa: F821
+            permutation_backend=PermutationBackend.PURE_JAX,
             dtype=DTYPE,
         )
         key = jax.random.PRNGKey(8)

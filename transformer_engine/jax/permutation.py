@@ -35,17 +35,53 @@ from typing import NamedTuple, Optional, Tuple
 import jax
 import jax.numpy as jnp
 
-from transformer_engine.jax.triton_extensions.permutation import (
-    make_row_id_map,
-    permute_with_mask_map,
-    permute_with_mask_map_and_pad,
-    unpermute_with_mask_map,
-    unpermute_with_mask_map_and_unpad,
-    unpermute_bwd_with_merging_probs,
-    unpermute_bwd_with_merging_probs_and_unpad,
-    make_chunk_sort_map,
-    sort_chunks_by_map,
-)
+# Triton-backed primitives are imported lazily: they require ``triton``
+# which we do not want as a hard install dependency for the pure-JAX
+# permutation backend. Anything that touches one of these symbols must
+# either be guarded by a TRITON-backend check or live inside a function
+# that is only reachable from the TRITON path.
+try:
+    from transformer_engine.jax.triton_extensions.permutation import (
+        make_row_id_map,
+        permute_with_mask_map,
+        permute_with_mask_map_and_pad,
+        unpermute_with_mask_map,
+        unpermute_with_mask_map_and_unpad,
+        unpermute_bwd_with_merging_probs,
+        unpermute_bwd_with_merging_probs_and_unpad,
+        make_chunk_sort_map,
+        sort_chunks_by_map,
+    )
+
+    _TRITON_PERMUTATION_AVAILABLE = True
+except ImportError:
+    _TRITON_PERMUTATION_AVAILABLE = False
+    make_row_id_map = None
+    permute_with_mask_map = None
+    permute_with_mask_map_and_pad = None
+    unpermute_with_mask_map = None
+    unpermute_with_mask_map_and_unpad = None
+    unpermute_bwd_with_merging_probs = None
+    unpermute_bwd_with_merging_probs_and_unpad = None
+    make_chunk_sort_map = None
+    sort_chunks_by_map = None
+
+
+def _require_triton_permutation():
+    """Raise a clear error if Triton permutation kernels are unavailable.
+
+    Callers in the TRITON branch must invoke this before touching any of
+    the names imported above; on a Triton-less install those names are
+    ``None`` and would otherwise produce a confusing ``TypeError`` deep
+    in the call stack.
+    """
+    if not _TRITON_PERMUTATION_AVAILABLE:
+        raise ImportError(
+            "TRITON permutation backend requires"
+            " ``transformer_engine.jax.triton_extensions.permutation`` (which"
+            " in turn requires ``triton``). Either install Triton or use"
+            " PermutationBackend.PURE_JAX."
+        )
 
 __all__ = [
     "token_dispatch",
