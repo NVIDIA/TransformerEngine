@@ -1566,7 +1566,7 @@ class Linear(TransformerEngineBaseModule):
         ):
             assert ub_name is not None, f"Comm+GEMM overlap layer '{ub_name}' is not initialized."
         self.ub_name = ub_name
-        
+
         if using_cublasmp_backend():
             if self.ub_bulk_dgrad:
                 warnings.warn(
@@ -1574,7 +1574,8 @@ class Linear(TransformerEngineBaseModule):
                     f"and '{self.ub_name}_wgrad' GEMMs. Falling back on DGRAD+RS overlap for "
                     f"'{self.ub_name}_dgrad' GEMM with no bulk overlap for '{self.ub_name}_wgrad' "
                     "GEMM. In order to enable bulk overlaps for these GEMMs, set "
-                    "`with_cublasmp=False` when calling `initialize_ub()`.")
+                    "`with_cublasmp=False` when calling `initialize_ub()`."
+                )
             self.ub_overlap_rs_dgrad = self.ub_overlap_rs_dgrad or self.ub_bulk_dgrad
             self.ub_bulk_dgrad = False
             self.ub_bulk_wgrad = False

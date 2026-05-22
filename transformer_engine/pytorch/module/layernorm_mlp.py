@@ -2021,14 +2021,10 @@ class LayerNormMLP(TransformerEngineBaseModule):
         # Bulk overlaps require the Userbuffers backend; the cuBLASMp backend
         # falls back to async NCCL ops via torch.distributed.
         self.ub_bulk_wgrad = (
-            ub_bulk_wgrad
-            and self.sequence_parallel
-            and not self.ub_overlap_rs_dgrad
+            ub_bulk_wgrad and self.sequence_parallel and not self.ub_overlap_rs_dgrad
         )
         self.ub_bulk_dgrad = (
-            ub_bulk_dgrad
-            and self.sequence_parallel
-            and not self.ub_overlap_rs_dgrad
+            ub_bulk_dgrad and self.sequence_parallel and not self.ub_overlap_rs_dgrad
         )
         if using_cublasmp_backend():
             if self.ub_bulk_dgrad:
@@ -2036,7 +2032,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
                     "cuBLASMp backend does not support bulk overlaps for 'fc1_dgrad' and "
                     "'fc1_wgrad' GEMMs. Falling back on DGRAD+RS overlap for 'fc1_dgrad' GEMM with "
                     "no bulk overlap for 'fc1_wgrad' GEMM. In order to enable bulk overlaps for "
-                    "these GEMMs, set `with_cublasmp=False` when calling `initialize_ub()`.")
+                    "these GEMMs, set `with_cublasmp=False` when calling `initialize_ub()`."
+                )
             self.ub_overlap_rs_dgrad = self.ub_overlap_rs_dgrad or self.ub_bulk_dgrad
             self.ub_bulk_dgrad = False
             self.ub_bulk_wgrad = False
