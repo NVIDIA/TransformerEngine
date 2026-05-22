@@ -639,16 +639,22 @@ def test_cp_with_fused_attention(
         pytest.skip("Deterministic mode does not support non-vanilla softmax with FusedAttention")
     if _deterministic and config.attn_bias_type == "post_scale_bias" and is_training:
         pytest.skip("Deterministic mode does not support post_scale_bias with requires_grad")
+    # Det FusedAttention backward with THD on sm90 OOMs because cuDNN reserves
+    # workspace proportional to b*H*S*S. Gate on that product, not num_heads,
+    # so the skip stays correct if a new config has small b/S but H >= 20.
     if (
         _deterministic
         and qkv_format == "thd"
-        and config.num_heads >= 20
         and get_device_compute_capability() == (9, 0)
+        and config.batch_size
+        * config.num_heads
+        * config.max_seqlen_q
+        * config.max_seqlen_kv
+        >= 1_000_000_000
     ):
         pytest.skip(
             "Deterministic FusedAttention backward with THD format OOMs on sm90"
-            " for this particular test config since cuDNN reserves memory"
-            " proportional to bHSS (known cuDNN issue)."
+            " for large bHSS configs (known cuDNN issue)."
         )
 
     _submit(
