@@ -330,8 +330,7 @@ class _BackwardGroupedMLP_CuTeGEMMDBase_MXFP8(FusedOperation):
         # cuDNN-frontend >= 1.24.0 exposes runtime-configurable GeGLU
         # parameters; pass them through when available.
         self._pass_geglu_runtime_params: bool = (
-            isinstance(activation, ScaledClampedQGeGLU)
-            and _cudnn_frontend_geglu_runtime_params()
+            isinstance(activation, ScaledClampedQGeGLU) and _cudnn_frontend_geglu_runtime_params()
         )
         if self._pass_geglu_runtime_params:
             self._cudnn_linear_offset: float = activation._clamped.glu_linear_offset

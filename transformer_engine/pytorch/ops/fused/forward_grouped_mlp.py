@@ -133,8 +133,7 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
         # parameters; pass them through when the activation carries
         # non-default values (or always, if available).
         self._pass_geglu_runtime_params: bool = (
-            isinstance(activation, ScaledClampedQGeGLU)
-            and _cudnn_frontend_geglu_runtime_params()
+            isinstance(activation, ScaledClampedQGeGLU) and _cudnn_frontend_geglu_runtime_params()
         )
         if self._pass_geglu_runtime_params:
             self._cudnn_linear_offset: float = activation._clamped.glu_linear_offset
