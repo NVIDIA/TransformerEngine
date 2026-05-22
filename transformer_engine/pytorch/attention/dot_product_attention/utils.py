@@ -12,7 +12,7 @@ import warnings
 import logging
 import functools
 
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field as dataclass_field, fields
 import numpy as np
 from packaging.version import Version as PkgVersion
 
@@ -328,7 +328,7 @@ class AttentionParams:
     return_max_logit: bool = False
     cuda_graph: bool = False
     num_splits: int = 1
-    runtime_flags: AttentionRuntimeFlags = field(default_factory=AttentionRuntimeFlags)
+    runtime_flags: AttentionRuntimeFlags = dataclass_field(default_factory=AttentionRuntimeFlags)
 
     def __eq__(self, other):
         """
