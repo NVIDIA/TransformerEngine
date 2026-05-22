@@ -646,10 +646,7 @@ def test_cp_with_fused_attention(
         _deterministic
         and qkv_format == "thd"
         and get_device_compute_capability() == (9, 0)
-        and config.batch_size
-        * config.num_heads
-        * config.max_seqlen_q
-        * config.max_seqlen_kv
+        and config.batch_size * config.num_heads * config.max_seqlen_q * config.max_seqlen_kv
         >= 1_000_000_000
     ):
         pytest.skip(
