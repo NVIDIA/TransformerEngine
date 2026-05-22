@@ -55,9 +55,14 @@ target_include_directories(test_comm_gemm PRIVATE ${test_comm_gemm_INCLUDES})
 find_package(CUDAToolkit REQUIRED)
 find_package(OpenMP REQUIRED)
 find_package(MPI REQUIRED)
+
+# ── NCCL library ──────────────────────────────────────────────────────────────
+# Search order: NCCL_HOME env → 3rdparty/nccl submodule build → system paths.
+set(NCCL_SUBMODULE_BUILD "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/nccl/build")
 find_library(NCCL_LIB
              NAMES nccl libnccl
-             PATH_SUFFIXES lib
+             HINTS $ENV{NCCL_HOME}/lib ${NCCL_SUBMODULE_BUILD}/lib
+             PATH_SUFFIXES lib lib64
              REQUIRED)
 list(APPEND test_comm_gemm_LINKER_LIBS
      CUDA::cuda_driver
@@ -72,5 +77,87 @@ target_link_libraries(test_comm_gemm PUBLIC ${test_comm_gemm_LINKER_LIBS})
 
 target_compile_options(test_comm_gemm PRIVATE -O2 -fopenmp)
 
+# NCCL headers: prefer submodule build output (has the handle_init API),
+# then submodule src, then system (CUDA toolkit).
+set(NCCL_SUBMODULE_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/nccl/build/include")
+set(NCCL_SUBMODULE_SRC_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/nccl/src/include")
+if(EXISTS "${NCCL_SUBMODULE_INCLUDE}/nccl.h")
+  set(NCCL_INCLUDE_DIR "${NCCL_SUBMODULE_INCLUDE}")
+elseif(EXISTS "${NCCL_SUBMODULE_SRC_INCLUDE}/nccl.h")
+  set(NCCL_INCLUDE_DIR "${NCCL_SUBMODULE_SRC_INCLUDE}")
+elseif(DEFINED ENV{NCCL_HOME})
+  set(NCCL_INCLUDE_DIR "$ENV{NCCL_HOME}/include")
+endif()
+
 include(GoogleTest)
 gtest_discover_tests(test_comm_gemm DISCOVERY_TIMEOUT 600)
+
+# ── EP distributed tests (HT mode) ─────────────────────────────────────────
+# No MPI dependency — processes are spawned by run_test_ep.sh with
+# --rank / --nranks flags.  ncclUniqueId exchange uses a
+# shared temp file (see test_ep_common.h for details).
+# Headers + libs come from the in-tree 3rdparty/nccl submodule build.
+set(NCCL_EP_SUBMODULE_ROOT
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/nccl")
+find_library(NCCL_EP_LIB
+             NAMES nccl_ep libnccl_ep
+             HINTS ${NCCL_EP_SUBMODULE_ROOT}/build/lib
+             NO_DEFAULT_PATH
+             REQUIRED)
+
+set(NCCL_EP_INCLUDE_DIR "${NCCL_EP_SUBMODULE_ROOT}/contrib/nccl_ep/include")
+if(NOT EXISTS "${NCCL_EP_INCLUDE_DIR}/nccl_ep.h")
+  message(FATAL_ERROR
+    "NCCL EP header not found at ${NCCL_EP_INCLUDE_DIR}/nccl_ep.h. "
+    "Run `git submodule update --init --recursive` to checkout 3rdparty/nccl.")
+endif()
+message(STATUS "EP test: NCCL EP headers: ${NCCL_EP_INCLUDE_DIR}")
+
+# Collect NCCL include dirs shared by all EP test targets (nccl_ep.h + nccl.h).
+set(EP_TEST_NCCL_INCLUDES ${NCCL_EP_INCLUDE_DIR})
+if(DEFINED NCCL_INCLUDE_DIR)
+  list(APPEND EP_TEST_NCCL_INCLUDES ${NCCL_INCLUDE_DIR})
+  message(STATUS "EP test: NCCL headers: ${NCCL_INCLUDE_DIR}")
+endif()
+
+set(EP_TEST_COMMON_INCLUDES
+    ${EP_TEST_NCCL_INCLUDES}
+    ../../transformer_engine/common/include
+    ../../transformer_engine/common
+    ${CMAKE_CURRENT_SOURCE_DIR})
+
+set(EP_TEST_COMMON_LIBS
+    CUDA::cuda_driver
+    CUDA::cudart
+    CUDA::nvrtc
+    GTest::gtest
+    ${TE_LIB}
+    ${NCCL_LIB}
+    ${NCCL_EP_LIB})
+
+# nvrtc symbols are referenced from libtransformer_engine.so but not in its
+# DT_NEEDED list (loaded via dlopen in Python).  For cpp tests we link nvrtc
+# explicitly with --no-as-needed so the linker keeps the dependency.
+set(EP_TEST_LINK_OPTS "LINKER:--no-as-needed")
+
+# ── EP init tests (InitPath, HandleMemSizeQuery) ─────────────────────────────
+add_executable(test_ep_init test_ep_init.cu)
+target_include_directories(test_ep_init PRIVATE ${EP_TEST_COMMON_INCLUDES})
+target_link_libraries(test_ep_init PUBLIC ${EP_TEST_COMMON_LIBS})
+target_link_options(test_ep_init PUBLIC ${EP_TEST_LINK_OPTS})
+
+# ── EP pipeline tests (dispatch, combine, bwd, integrated) ───────────────────
+add_executable(test_ep_pipeline test_ep_pipeline.cu)
+target_include_directories(test_ep_pipeline PRIVATE ${EP_TEST_COMMON_INCLUDES})
+target_link_libraries(test_ep_pipeline PUBLIC ${EP_TEST_COMMON_LIBS})
+target_link_options(test_ep_pipeline PUBLIC ${EP_TEST_LINK_OPTS})
+
+# ── EP coverage tests (multi-handle, top_k=1, empty experts, negatives, threading) ──
+add_executable(test_ep_coverage test_ep_coverage.cu)
+target_include_directories(test_ep_coverage PRIVATE ${EP_TEST_COMMON_INCLUDES})
+target_link_libraries(test_ep_coverage PUBLIC ${EP_TEST_COMMON_LIBS})
+target_link_options(test_ep_coverage PUBLIC ${EP_TEST_LINK_OPTS})
+
+# Do NOT use gtest_discover_tests — these binaries require multi-process
+# launch via run_test_ep.sh, not direct single-process execution.
+message(STATUS "EP distributed tests enabled: ${NCCL_EP_LIB}")
