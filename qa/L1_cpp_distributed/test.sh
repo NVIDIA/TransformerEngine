@@ -14,4 +14,7 @@ if [[ $(nvidia-smi --list-gpus | wc -l) -ge 4 ]]; then
 	cmake -GNinja -S. -Bbuild
 	cmake --build build
 	mpirun --allow-run-as-root --np 4 --oversubscribe ./build/test_comm_gemm
+
+	# EP suites; runner self-skips on pre-Hopper GPUs.
+	bash ./run_test_ep.sh 4 ./build
 fi
