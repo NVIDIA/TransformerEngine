@@ -535,6 +535,10 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     te_pre_gelu_out_wrappers.emplace_back(std::move(te_pre_gelu_out));
   }
 
+  if (te_A_wrappers.empty()) {
+    return bias;
+  }
+
   // Keep the swizzled scaling factor tensors alive during the GEMM.
   std::vector<std::optional<at::Tensor>> swizzled_scale_inverses_list;
 
