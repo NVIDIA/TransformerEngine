@@ -2130,9 +2130,9 @@ class FusedAttention(torch.nn.Module):
             assert not fp8_output, "score_mod is not supported with fp8_output!"
             assert not self.return_max_logit, "score_mod is not supported with return_max_logit!"
             assert (
-                type(query_layer) is torch.Tensor
-                and type(key_layer) is torch.Tensor
-                and type(value_layer) is torch.Tensor
+                type(query_layer) is torch.Tensor  # pylint: disable=unidiomatic-typecheck
+                and type(key_layer) is torch.Tensor  # pylint: disable=unidiomatic-typecheck
+                and type(value_layer) is torch.Tensor  # pylint: disable=unidiomatic-typecheck
             ), "score_mod only supports unquantized torch.Tensor Q, K and V inputs!"
             assert (
                 fused_attention_backend == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen

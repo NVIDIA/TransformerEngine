@@ -1450,9 +1450,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                     key_layer.dtype == query_layer.dtype and value_layer.dtype == query_layer.dtype
                 ), "score_mod requires Q, K and V tensors to have the same dtype!"
                 assert (
-                    type(query_layer) is torch.Tensor
-                    and type(key_layer) is torch.Tensor
-                    and type(value_layer) is torch.Tensor
+                    type(query_layer) is torch.Tensor  # pylint: disable=unidiomatic-typecheck
+                    and type(key_layer) is torch.Tensor  # pylint: disable=unidiomatic-typecheck
+                    and type(value_layer) is torch.Tensor  # pylint: disable=unidiomatic-typecheck
                 ), "score_mod only supports unquantized torch.Tensor Q, K and V inputs!"
                 if score_mod_tensors is not None:
                     assert isinstance(score_mod_tensors, dict), "score_mod_tensors must be a dict!"
