@@ -301,7 +301,7 @@ def initialize_ub(
     ]
     layers_reduce_scatter_overlap = ["proj_fprop", "fc2_fprop", "qkv_wgrad", "fc1_wgrad"]
     dgrad_reduce_scatter_overlap = ["qkv_dgrad", "fc1_dgrad"]
-    
+
     # Default overlap methods for layers
     methods = {
         "ring_exchange": [
@@ -490,7 +490,7 @@ def initialize_ub(
                     methods["bulk"].remove(name)
                     new_method = user_ub_cfg[name]["method"]
                     methods[new_method].append(name)
-                    
+
         # Adjust defaults to account for the fact that cuBLASMp does not support
         # bulk or external overlaps
         if with_cublasmp:
@@ -498,11 +498,12 @@ def initialize_ub(
                 "cuBLASMp does not support bulk or external overlaps. "
                 "'qkv_dgrad' and 'fc1_dgrad' GEMMs will be configured with 'ring_exchange'"
                 "overlap unless user configuration specifies otherwise. Bulk overlaps for the "
-                "corresponding 'qkv_wgrad' and 'fc1_wgrad' GEMMs will be disabled.")
+                "corresponding 'qkv_wgrad' and 'fc1_wgrad' GEMMs will be disabled."
+            )
             methods["bulk"] = []
             methods["external"] = []
             external_gemm_to_overlap.clear()
-            
+
             for name in dgrad_reduce_scatter_overlap:
                 wgrad_name = name.replace("dgrad", "wgrad")
                 if name not in layers_reduce_scatter_overlap:
@@ -522,7 +523,7 @@ def initialize_ub(
                 ub_cfg.update(user_ub_cfg[name])
                 ub_cfg["fp8_buf"] = fp8_buf
             add_ub(name, quantization_mode, **ub_cfg)
-    
+
     global _ub_initialized
     _ub_initialized = True
 
