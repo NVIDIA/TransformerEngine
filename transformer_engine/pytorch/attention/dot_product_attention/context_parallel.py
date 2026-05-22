@@ -3122,6 +3122,12 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             assert padding, f"THD format requires padding mask type, got {attn_mask_type}!"
         else:
             assert not padding, f"{attn_mask_type} mask type is not supported!"
+        # Upgrade causal -> causal_bottom_right (and padding_causal ->
+        # padding_causal_bottom_right) for AG CP. This applies to all qkv_format
+        # values including "thd": after AG the per-step Q chunk is shorter than
+        # the visible KV slice, so Q[0] must align with KV[kv_len - q_len] rather
+        # than KV[0]. The bottom_right variant encodes that alignment for both
+        # bshd/sbhd (slice-based) and THD (cu_seqlens/seqused_k-based) paths.
         if use_fused_attention and causal and "bottom_right" not in attn_mask_type:
             attn_mask_type = attn_mask_type + "_bottom_right"
         assert attn_bias_type == "no_bias", f"{attn_bias_type} bias type is not supported!"
@@ -3362,6 +3368,15 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
 
             # Per-step KV cu_seqlens (non-padded): how many actual KV tokens are
             # visible for each sequence.
+            #
+            # Non-causal default: the kernel sees every actual KV token across
+            # the whole sequence, so we initialise to ``cu_seqlens_kv_original``
+            # (unpadded). This deliberately does NOT encode CP padding
+            # boundaries — those are conveyed to the kernel via
+            # ``cu_seqlens_kv_padded_`` (passed separately, see below), which
+            # describes the tensor layout. The kernel uses cu_seqlens_kv for
+            # visibility and cu_seqlens_kv_padded for offsets; conflating the
+            # two would incorrectly mask actual tokens.
             actual_seqlens_kv = cu_seqlens_kv_original[1:] - cu_seqlens_kv_original[:-1]
             padded_chunk_sizes_kv = (cu_seqlens_kv_padded[1:] - cu_seqlens_kv_padded[:-1]) // (
                 2 * cp_size
