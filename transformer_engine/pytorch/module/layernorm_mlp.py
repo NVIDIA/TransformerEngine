@@ -23,7 +23,7 @@ from .base import (
     fill_userbuffers_buffer_for_all_gather,
     _ub_communicators,
     get_ub,
-    _ub_initialized,
+    is_ub_initialized,
     using_cublasmp_backend,
     quantize_weight,
     TransformerEngineBaseModule,
@@ -2027,13 +2027,15 @@ class LayerNormMLP(TransformerEngineBaseModule):
         )
 
         if any(
-            self.ub_overlap_ag,
-            self.ub_overlap_rs,
-            self.ub_overlap_rs_dgrad,
-            self.ub_bulk_dgrad,
-            self.ub_bulk_wgrad,
+            [
+                self.ub_overlap_ag,
+                self.ub_overlap_rs,
+                self.ub_overlap_rs_dgrad,
+                self.ub_bulk_dgrad,
+                self.ub_bulk_wgrad,
+            ]
         ):
-            assert _ub_initialized, "initialize_ub() must be called before layer construction."
+            assert is_ub_initialized(), "initialize_ub() must be called before layer construction."
 
         if using_cublasmp_backend():
             if self.ub_bulk_dgrad:

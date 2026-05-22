@@ -21,7 +21,7 @@ from .base import (
     fill_userbuffers_buffer_for_all_gather,
     get_dummy_wgrad,
     get_ub,
-    _ub_initialized,
+    is_ub_initialized,
     using_cublasmp_backend,
     quantize_weight,
     TransformerEngineBaseModule,
@@ -1565,7 +1565,7 @@ class Linear(TransformerEngineBaseModule):
                 self.ub_bulk_wgrad,
             ]
         ):
-            assert _ub_initialized, "initialize_ub() must be called before layer construction."
+            assert is_ub_initialized(), "initialize_ub() must be called before layer construction."
             assert ub_name is not None, f"Comm+GEMM overlap layer '{ub_name}' is not initialized."
         self.ub_name = ub_name
 

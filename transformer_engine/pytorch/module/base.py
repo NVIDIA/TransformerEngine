@@ -64,6 +64,7 @@ from ...debug.pytorch.utils import next_iter_when_debug_should_be_run, any_featu
 __all__ = [
     "initialize_ub",
     "destroy_ub",
+    "is_ub_initialized",
     "using_cublasmp_backend",
     "UserBufferQuantizationMode",
 ]
@@ -77,6 +78,11 @@ _ub_initialized = False
 _ub_with_cublasmp = False
 _MIN_STREAM_PRIORITY, _MAX_STREAM_PRIORITY = None, None
 layers_atomic_ring_exchange = []
+
+
+def is_ub_initialized() -> bool:
+    """Whether the Userbuffers communicators have been initialized."""
+    return _ub_initialized
 
 
 def using_cublasmp_backend() -> bool:
