@@ -21,6 +21,7 @@ from transformer_engine.pytorch.tensor.utils import clear_columnwise_cache, is_c
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
     get_ub,
+    _ub_initialized,
     using_cublasmp_backend,
     quantize_weight,
     TransformerEngineBaseModule,
@@ -1369,6 +1370,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.ub_overlap_ag_dgrad,
             ]
         ):
+            assert _ub_initialized, "initialize_ub() must be called before layer construction."
             assert ub_name is not None, "Userbuffer name [string] is not set."
         self.ub_name = ub_name
 
