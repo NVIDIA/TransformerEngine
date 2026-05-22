@@ -101,6 +101,15 @@ pybind11::dict Registrations() {
   dict["te_fused_moe_aux_loss_forward_ffi"] = EncapsulateFFI(FusedMoEAuxLossForwardHandler);
   dict["te_fused_moe_aux_loss_backward_ffi"] = EncapsulateFFI(FusedMoEAuxLossBackwardHandler);
 
+#ifdef NVTE_WITH_NCCL_EP
+  // Expert Parallelism
+  dict["te_ep_prepare_ffi"] = EncapsulateFFI(EpPrepareHandler);
+  dict["te_ep_dispatch_ffi"] = EncapsulateFFI(EpDispatchHandler);
+  dict["te_ep_combine_ffi"] = EncapsulateFFI(EpCombineHandler);
+  dict["te_ep_dispatch_bwd_ffi"] = EncapsulateFFI(EpDispatchBwdHandler);
+  dict["te_ep_combine_bwd_ffi"] = EncapsulateFFI(EpCombineBwdHandler);
+#endif  // NVTE_WITH_NCCL_EP
+
   // TopK
   dict["te_topk_ffi"] = EncapsulateFFI(TopkHandler);
 
@@ -127,6 +136,15 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("initialize_cgemm_communicator", &InitializeCgemmCommunicator);
   m.def("get_cgemm_num_max_streams", &GetCgemmNumMaxStreams);
   m.def("get_grouped_gemm_setup_workspace_size", &nvte_get_grouped_gemm_setup_workspace_size);
+#ifdef NVTE_WITH_NCCL_EP
+  m.def("initialize_ep_communicator", &EpInitialize, pybind11::arg("unique_id_bytes"),
+        pybind11::arg("ep_size"), pybind11::arg("rank_within_group"), pybind11::arg("num_experts"),
+        pybind11::arg("max_tokens_per_rank"), pybind11::arg("max_recv_tokens_per_rank"),
+        pybind11::arg("hidden_dim"), pybind11::arg("max_num_sms") = 0);
+  m.def("shutdown_ep_communicator", &EpShutdown);
+  m.def("ep_register_layer", &EpRegisterLayer, pybind11::arg("top_k"),
+        pybind11::arg("dispatch_output_per_expert_alignment") = 0);
+#endif  // NVTE_WITH_NCCL_EP
 
   pybind11::enum_<DType>(m, "DType", pybind11::module_local())
       .value("kByte", DType::kByte)

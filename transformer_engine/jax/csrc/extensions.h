@@ -200,6 +200,25 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionBackwardHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedMoEAuxLossForwardHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedMoEAuxLossBackwardHandler);
 
+// EP bootstrap (called once per process)
+void EpInitialize(pybind11::bytes unique_id_bytes, int ep_size, int rank_within_group,
+                  int num_experts, int max_tokens_per_rank, int max_recv_tokens_per_rank,
+                  int hidden_dim, int max_num_sms);
+// EP shutdown — registered as a Python atexit hook so it runs before
+// C++ static destructors of the JAX extension and libtransformer_engine.so.
+void EpShutdown();
+// Host-only: register an EP layer. Returns (handle_id, handle_mem_size) where
+// handle_id is baked into each FFI op as a static int64 attribute (no D2H sync
+// per op) and handle_mem_size sizes the caller's handle_mem buffer.
+pybind11::tuple EpRegisterLayer(int top_k, size_t dispatch_output_per_expert_alignment);
+
+// EP FFI handlers
+XLA_FFI_DECLARE_HANDLER_SYMBOL(EpPrepareHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(EpDispatchHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(EpCombineHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(EpDispatchBwdHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(EpCombineBwdHandler);
+
 // TopK
 XLA_FFI_DECLARE_HANDLER_SYMBOL(TopkHandler);
 pybind11::tuple GetTopkWorkspaceSizes(int batch_size, int seq_len, int k);
