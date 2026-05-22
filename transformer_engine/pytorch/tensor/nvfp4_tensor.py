@@ -130,6 +130,12 @@ class NVFP4Quantizer(Quantizer):
 
     """Whether emitted NVFP4 tensors store one FP32 amax per row."""
     row_scaled_nvfp4: bool
+    """Whether to use NVFP4 4over6 map-to-4/map-to-6 block selection."""
+    nvfp4_use_4over6: bool
+    """Global E4M3 scale bound used by emitted NVFP4 tensors."""
+    nvfp4_e4m3_max: int
+    """NVFP4 4over6 candidate-selection error mode."""
+    nvfp4_4over6_err_mode: str
 
     """RHT matrix random sign mask"""
     rht_matrix_random_sign_mask_t: int
@@ -147,6 +153,9 @@ class NVFP4Quantizer(Quantizer):
         with_2d_quantization: bool = False,
         stochastic_rounding: bool = False,
         row_scaled_nvfp4: bool = False,
+        nvfp4_use_4over6: bool = False,
+        nvfp4_e4m3_max: int = 448,
+        nvfp4_4over6_err_mode: str = "MAE",
         with_random_sign_mask: bool = True,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
@@ -158,6 +167,13 @@ class NVFP4Quantizer(Quantizer):
         self.with_2d_quantization = with_2d_quantization
         self.stochastic_rounding = stochastic_rounding
         self.row_scaled_nvfp4 = row_scaled_nvfp4
+        self.nvfp4_use_4over6 = nvfp4_use_4over6
+        self.nvfp4_e4m3_max = nvfp4_e4m3_max if nvfp4_use_4over6 else 448
+        if self.nvfp4_e4m3_max not in (448, 256):
+            raise ValueError("nvfp4_e4m3_max must be 448 or 256.")
+        self.nvfp4_4over6_err_mode = nvfp4_4over6_err_mode.upper()
+        if self.nvfp4_4over6_err_mode not in ("MAE", "MSE"):
+            raise ValueError("nvfp4_4over6_err_mode must be 'MAE' or 'MSE'.")
         self.rht_matrix_random_sign_mask_t = get_random_sign_mask_for_rht(
             with_random_sign_mask, torch.cuda.current_device()
         )
@@ -204,6 +220,9 @@ class NVFP4Quantizer(Quantizer):
             with_2d_quantization=self.with_2d_quantization,
             stochastic_rounding=self.stochastic_rounding,
             row_scaled_nvfp4=self.row_scaled_nvfp4,
+            nvfp4_use_4over6=self.nvfp4_use_4over6,
+            nvfp4_e4m3_max=self.nvfp4_e4m3_max,
+            nvfp4_4over6_err_mode=self.nvfp4_4over6_err_mode,
         )
         quantizer.internal = self.internal
         quantizer.optimize_for_gemm = self.optimize_for_gemm
@@ -356,6 +375,8 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         quantizer: Quantizer,
         with_gemm_swizzled_scales: bool,
         row_scaled_nvfp4: bool = False,
+        nvfp4_use_4over6: bool = False,
+        nvfp4_e4m3_max: int = 448,
         **kwargs,
     ):
         instance = super().__new__(
@@ -371,6 +392,8 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
             with_gemm_swizzled_scales,
             *args,
             row_scaled_nvfp4=row_scaled_nvfp4,
+            nvfp4_use_4over6=nvfp4_use_4over6,
+            nvfp4_e4m3_max=nvfp4_e4m3_max,
             **kwargs,
         )
         return instance
@@ -528,6 +551,9 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
             columnwise_usage,
             self._amax_rowwise,
             self._amax_columnwise,
+            self._row_scaled_nvfp4,
+            self._nvfp4_use_4over6,
+            self._nvfp4_e4m3_max,
             self.shape[-1],
         )
         return sharded_tensors, metadata
@@ -546,7 +572,16 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         all-gathered rowwise data. Columnwise data is derived locally
         via _create_columnwise() instead of being all-gathered.
         """
-        fp4_dtype, columnwise_usage, amax_rowwise, amax_columnwise, K = metadata
+        (
+            fp4_dtype,
+            columnwise_usage,
+            amax_rowwise,
+            amax_columnwise,
+            row_scaled_nvfp4,
+            nvfp4_use_4over6,
+            nvfp4_e4m3_max,
+            K,
+        ) = metadata
 
         # Only rowwise data+scales were all-gathered
         rowwise_data, rowwise_scale_inv = all_gather_outputs[:2]
@@ -569,6 +604,9 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
             out._rowwise_scale_inv = rowwise_scale_inv
             out._amax_rowwise = amax_rowwise
             out._amax_columnwise = amax_columnwise
+            out._row_scaled_nvfp4 = row_scaled_nvfp4
+            out._nvfp4_use_4over6 = nvfp4_use_4over6
+            out._nvfp4_e4m3_max = nvfp4_e4m3_max
         else:
             # Construct new tensor (first iteration)
             out = NVFP4Tensor(
@@ -585,6 +623,9 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
                 requires_grad=False,
                 with_gemm_swizzled_scales=False,
                 device=rowwise_data.device,
+                row_scaled_nvfp4=row_scaled_nvfp4,
+                nvfp4_use_4over6=nvfp4_use_4over6,
+                nvfp4_e4m3_max=nvfp4_e4m3_max,
             )
 
         # Derive columnwise data locally via transpose instead of all-gathering it
@@ -724,6 +765,9 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
                 requires_grad=tensor.requires_grad,
                 with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
                 device=tensor.device,
+                row_scaled_nvfp4=tensor._row_scaled_nvfp4,
+                nvfp4_use_4over6=tensor._nvfp4_use_4over6,
+                nvfp4_e4m3_max=tensor._nvfp4_e4m3_max,
             )
 
         # Default case
@@ -745,6 +789,9 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
                 self.dtype,
                 self._quantizer,
                 self._with_gemm_swizzled_scales,
+                self._row_scaled_nvfp4,
+                self._nvfp4_use_4over6,
+                self._nvfp4_e4m3_max,
             ),
         )
 
@@ -837,6 +884,9 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
             self._amax_rowwise = tensor._amax_rowwise
             self._amax_columnwise = tensor._amax_columnwise
             self._with_gemm_swizzled_scales = tensor._with_gemm_swizzled_scales
+            self._row_scaled_nvfp4 = tensor._row_scaled_nvfp4
+            self._nvfp4_use_4over6 = tensor._nvfp4_use_4over6
+            self._nvfp4_e4m3_max = tensor._nvfp4_e4m3_max
             return
 
         # Quantize to FP8
@@ -889,7 +939,10 @@ def _make_nvfp4_tensor_in_reduce_ex(
     fp4_dtype: TE_DType,
     dtype: torch.dtype,
     quantizer: Quantizer,
-    with_gemm_swizzled_scales: bool = False,
+    with_gemm_swizzled_scales: bool,
+    row_scaled_nvfp4: bool = False,
+    nvfp4_use_4over6: bool = False,
+    nvfp4_e4m3_max: int = 448,
 ) -> NVFP4Tensor:
     """Reconstruct an ``NVFP4Tensor`` from its ``__reduce_ex__`` payload."""
     # Infer device from whichever inner buffer is populated so the wrapper
@@ -914,6 +967,9 @@ def _make_nvfp4_tensor_in_reduce_ex(
         requires_grad=False,
         with_gemm_swizzled_scales=with_gemm_swizzled_scales,
         device=device,
+        row_scaled_nvfp4=row_scaled_nvfp4,
+        nvfp4_use_4over6=nvfp4_use_4over6,
+        nvfp4_e4m3_max=nvfp4_e4m3_max,
     )
 
 
@@ -997,6 +1053,9 @@ class _ViewFunc(torch.autograd.Function):
             requires_grad=tensor.requires_grad,
             with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
             device=tensor.device,
+            row_scaled_nvfp4=tensor._row_scaled_nvfp4,
+            nvfp4_use_4over6=tensor._nvfp4_use_4over6,
+            nvfp4_e4m3_max=tensor._nvfp4_e4m3_max,
         )
 
     @staticmethod
@@ -1040,6 +1099,9 @@ class _ViewFunc(torch.autograd.Function):
                 requires_grad=grad.requires_grad,
                 with_gemm_swizzled_scales=grad._with_gemm_swizzled_scales,
                 device=grad.device,
+                row_scaled_nvfp4=grad._row_scaled_nvfp4,
+                nvfp4_use_4over6=grad._nvfp4_use_4over6,
+                nvfp4_e4m3_max=grad._nvfp4_e4m3_max,
             )
             return dgrad, None
         return grad.view(ctx.shape), None
@@ -1125,6 +1187,9 @@ class _ReshapeFunc(torch.autograd.Function):
             requires_grad=tensor.requires_grad,
             with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
             device=tensor.device,
+            row_scaled_nvfp4=tensor._row_scaled_nvfp4,
+            nvfp4_use_4over6=tensor._nvfp4_use_4over6,
+            nvfp4_e4m3_max=tensor._nvfp4_e4m3_max,
         )
 
     @staticmethod
@@ -1168,6 +1233,9 @@ class _ReshapeFunc(torch.autograd.Function):
                 requires_grad=grad.requires_grad,
                 with_gemm_swizzled_scales=grad._with_gemm_swizzled_scales,
                 device=grad.device,
+                row_scaled_nvfp4=grad._row_scaled_nvfp4,
+                nvfp4_use_4over6=grad._nvfp4_use_4over6,
+                nvfp4_e4m3_max=grad._nvfp4_e4m3_max,
             )
             return dgrad, None
         return grad.view(ctx.shape), None
