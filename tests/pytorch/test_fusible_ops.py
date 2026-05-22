@@ -158,8 +158,6 @@ def make_reference_and_test_tensors(
 
     If a quantization scheme is provided, the tensor values are
     quantized so that they are representable.
-    NVFP4 4over6 follows recipe role dispatch: activation-like tensors
-    use 1D quantization and weight tensors use the 2D weight path.
 
     """
 
@@ -3550,23 +3548,31 @@ class TestSequentialModules:
         )
         norm_w_ref, norm_w_test = make_reference_and_test_tensors(
             hidden_size,
+            min=-0.5,
+            max=0.5,
             test_dtype=dtype,
             test_device=device,
         )
         norm_b_ref, norm_b_test = make_reference_and_test_tensors(
             hidden_size,
+            min=-0.5,
+            max=0.5,
             test_dtype=dtype,
             test_device=device,
         )
         w1_ref, w1_test = make_reference_and_test_tensors(
             (ffn_hidden_size, hidden_size),
             quantization=quantization,
+            min=0,
+            max=1/64,
             test_dtype=dtype,
             test_device=device,
             quantizer_role=QuantizerRole(tensor_type="weight"),
         )
         w2_ref, w2_test = make_reference_and_test_tensors(
             (hidden_size, ffn_hidden_size // 2),
+            min=0,
+            max=1/64,
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
@@ -3576,32 +3582,28 @@ class TestSequentialModules:
         if bias:
             b1_ref, b1_test = make_reference_and_test_tensors(
                 ffn_hidden_size,
+                min=-0.5,
+                max=0.5,
                 test_dtype=dtype,
                 test_device=device,
             )
             b2_ref, b2_test = make_reference_and_test_tensors(
                 hidden_size,
+                min=-0.5,
+                max=0.5,
                 test_dtype=dtype,
                 test_device=device,
             )
         dy_ref, dy_test = make_reference_and_test_tensors(
             in_shape,
+            min=-0.5,
+            max=0.5,
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
             quantizer_role=QuantizerRole(tensor_type="grad_output"),
             requires_grad=False,
         )
-        with torch.no_grad():
-            for t in (norm_w_ref, norm_w_test, norm_b_ref, norm_b_test):
-                t -= 0.5
-            for t in (w1_ref, w1_test, w2_ref, w2_test):
-                t *= 1 / 64
-            if bias:
-                for t in (b1_ref, b1_test, b2_ref, b2_test):
-                    t -= 0.5
-            for t in (dy_ref, dy_test):
-                t -= 0.5
 
         # Reference implementation
         x = x_ref
@@ -3663,8 +3665,6 @@ class TestSequentialModules:
 
         # Check values
         tols = {"rtol": 0.25, "atol": 0.5}  # Loose tols for sanity checking
-        if quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
-            tols = {"rtol": 0.25, "atol": 0.75}
         assert_close(y_test, y_ref, **tols)
         assert_close(x_test.grad, x_ref.grad, **tols)
         assert_close_grads(norm.weight, norm_w_ref, **tols)
