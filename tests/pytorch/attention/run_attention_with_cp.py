@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 
+import copy
 import os
 import sys
 import logging
@@ -28,6 +29,15 @@ from transformer_engine.common.recipe import (
     Format,
 )
 from utils import ModelConfig, compare_and_assert
+
+# Pool mode (NVTE_CP_POOL_PG=1) only: shared CP collective groups, created once
+# per pool by run_attention_with_cp_pool.main() and reused across every case in
+# that pool. world_size and the rank set don't change per case, so re-creating
+# these per call would be wasted NCCL setup (~50-100 ms each). Single-shot
+# subprocess mode leaves these None / [] and run_dpa_with_cp creates/destroys
+# its own groups inline.
+_pool_cp_comm_group = None
+_pool_cp_comm_sub_groups: list = []
 
 dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
 
@@ -214,10 +224,13 @@ def run_dpa_with_cp(
     os.environ["NVTE_FUSED_ATTN"] = "0"
     if kernel_backend == "FlashAttention":
         os.environ["NVTE_FLASH_ATTN"] = "1"
-        config = model_configs_flash_attn[model]
+        # Deep-copy: the module-level dict is shared across pool cases; the
+        # THD branch below rewrites attn_mask_type in place, which would
+        # otherwise leak into subsequent cases reusing the same model key.
+        config = copy.deepcopy(model_configs_flash_attn[model])
     if kernel_backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
-        config = model_configs_fused_attn[model]
+        config = copy.deepcopy(model_configs_fused_attn[model])
     assert config.attn_mask_type in [
         "causal",
         "no_mask",
@@ -231,6 +244,9 @@ def run_dpa_with_cp(
     # set up distributed group
     rank = int(os.getenv("RANK", "0"))
     world_size = int(os.getenv("WORLD_SIZE", "1"))
+    # When NVTE_CP_POOL_PG=1, the pool runner owns the lifecycle of the main
+    # process group across many cases; here we only reuse it.
+    _pool_managed_pg = os.getenv("NVTE_CP_POOL_PG", "0") == "1"
     if dist.is_initialized():
         world_size = dist.get_world_size()
         rank = dist.get_rank()
@@ -239,25 +255,35 @@ def run_dpa_with_cp(
         device = rank % device_count
         torch.cuda.set_device(device)
     logging.info(f"[Rank {rank}] Setup: world_size {world_size}")
-    dist.init_process_group(backend="nccl", world_size=world_size, rank=rank)
+    if not _pool_managed_pg:
+        dist.init_process_group(backend="nccl", world_size=world_size, rank=rank)
 
-    # set up communication group for CP
+    # Set up communication group for CP. In pool mode, the pool worker has
+    # already pre-created world-scoped and a2a+p2p sub-groups once and stashed
+    # them in module-level pointers; we reuse those and the pool destroys them
+    # at shutdown. In single-shot mode we create them per call and destroy in
+    # the finally below.
     cp_comm_ranks = range(world_size)
     assert rank in cp_comm_ranks
-    cp_comm_group = dist.new_group(cp_comm_ranks, backend="nccl")
-    if cp_comm_type == "a2a+p2p":
-        assert world_size % 2 == 0, (
-            "{cp_comm_type=} requires world_size % 2 = 0 as it assumes the a2a level has cp_size"
-            " = 2."
-        )
-        cp_comm_sub_ranks = [range(i * 2, (i + 1) * 2) for i in range(world_size // 2)]
-        cp_comm_sub_ranks += [range(i, world_size, 2) for i in range(2)]
-        cp_comm_sub_groups = []
-        for sub_ranks in cp_comm_sub_ranks:
-            sub_group = dist.new_group(sub_ranks, backend="nccl")
-            if rank in sub_ranks:
-                cp_comm_sub_groups.append(sub_group)
-
+    _reusing_pool_groups = _pool_managed_pg and _pool_cp_comm_group is not None
+    cp_comm_group = None
+    cp_comm_sub_groups: list = []
+    if _reusing_pool_groups:
+        cp_comm_group = _pool_cp_comm_group
+        cp_comm_sub_groups = _pool_cp_comm_sub_groups if cp_comm_type == "a2a+p2p" else []
+    else:
+        cp_comm_group = dist.new_group(cp_comm_ranks, backend="nccl")
+        if cp_comm_type == "a2a+p2p":
+            assert world_size % 2 == 0, (
+                "{cp_comm_type=} requires world_size % 2 = 0 as it assumes the a2a level has"
+                " cp_size = 2."
+            )
+            cp_comm_sub_ranks = [range(i * 2, (i + 1) * 2) for i in range(world_size // 2)]
+            cp_comm_sub_ranks += [range(i, world_size, 2) for i in range(2)]
+            for sub_ranks in cp_comm_sub_ranks:
+                sub_group = dist.new_group(sub_ranks, backend="nccl")
+                if rank in sub_ranks:
+                    cp_comm_sub_groups.append(sub_group)
     if dtype == "fp8":
         if scaling_mode == "delayed":
             fp8_recipe = DelayedScaling(fp8_dpa=fp8_dpa, fp8_mha=fp8_mha)
@@ -569,7 +595,10 @@ def run_dpa_with_cp(
                 seq_kv_size = dbias.shape[-1]
                 # Reshape to split seq_q dimension
                 dbias = dbias.view(
-                    *shape_before_seq, 2 * world_size, seq_q_size // (2 * world_size), seq_kv_size
+                    *shape_before_seq,
+                    2 * world_size,
+                    seq_q_size // (2 * world_size),
+                    seq_kv_size,
                 )
                 # Index select on the newly created dimension (now at position seq_q_dim)
                 dbias = dbias.index_select(seq_q_dim, seq_idx)
@@ -770,7 +799,14 @@ def run_dpa_with_cp(
                         )
                 elif qkv_format == "thd":
                     compare_and_assert(
-                        t, tensors_cp[i], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol, is_fp8
+                        t,
+                        tensors_cp[i],
+                        names_no_cp[i],
+                        names_cp[i],
+                        atol,
+                        rtol,
+                        rmse_tol,
+                        is_fp8,
                     )
             else:
                 compare_and_assert(
@@ -778,8 +814,28 @@ def run_dpa_with_cp(
                 )
             logging.info(f"[Rank {rank}] CP vs no-CP: {names[i]} matches")
 
-    # destroy distribution group
-    dist.destroy_process_group()
+    # Teardown on the success path. Pool mode: cp_comm_group / cp_comm_sub_groups
+    # point at pool-shared groups owned by the pool runner (which destroys them
+    # at pool shutdown), and the main PG is also pool-owned — both branches
+    # below are no-ops. Single-shot mode: destroy what we created here. If the
+    # body above raises, we skip this — the subprocess dies at function return
+    # and NCCL releases the communicators with the process.
+    if not _reusing_pool_groups:
+        if cp_comm_group is not None:
+            try:
+                dist.destroy_process_group(cp_comm_group)
+            except Exception:
+                pass
+        for g in cp_comm_sub_groups:
+            try:
+                dist.destroy_process_group(g)
+            except Exception:
+                pass
+    if not _pool_managed_pg:
+        try:
+            dist.destroy_process_group()
+        except Exception:
+            pass
 
 
 def main(**kwargs):
