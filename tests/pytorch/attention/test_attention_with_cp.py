@@ -307,9 +307,7 @@ if test_essential:
 @pytest.mark.parametrize("qkv_format", qkv_formats)
 @pytest.mark.parametrize("cp_comm_type", cp_comm_types)
 @pytest.mark.parametrize("pad_between_seqs", [False, True])
-def test_cp_with_flash_attention(
-    cp_pool, dtype, model, qkv_format, cp_comm_type, pad_between_seqs
-):
+def test_cp_with_flash_attention(cp_pool, dtype, model, qkv_format, cp_comm_type, pad_between_seqs):
     num_gpus = 4 if cp_comm_type == "a2a+p2p" else 2
     pool = cp_pool(num_gpus)
 
