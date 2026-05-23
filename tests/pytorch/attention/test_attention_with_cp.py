@@ -639,10 +639,11 @@ def test_cp_with_fused_attention(
         pytest.skip("Deterministic mode does not support non-vanilla softmax with FusedAttention")
     if _deterministic and config.attn_bias_type == "post_scale_bias" and is_training:
         pytest.skip("Deterministic mode does not support post_scale_bias with requires_grad")
-    # cuDNN det THD backward workspace on sm90 is ~128 * bHSS bytes; at 1<<30
-    # that's 128 GiB, won't fit on H100's 80 GB. Exact at b=2 + power-of-2 S;
-    # for b>=3 cuDNN rounds batch up internally so workspace grows super-linearly
-    # (e.g. b=4 wants 4x b=2's workspace, not 2x) — revisit if a config uses b>2.
+    # Observed: cuDNN det THD backward asks for ~128 * bHSS bytes of workspace
+    # on sm90; at 1<<30 that's 128 GiB, won't fit on H100's 80 GB. Held exactly
+    # at b=2 + power-of-2 S in our sweep; for b>=3 the workspace was observed to
+    # grow super-linearly (b=4 took ~4x the b=2 amount, not 2x) — revisit if a
+    # config uses b>2.
     SM90_DET_FUSED_THD_BWD_MAX_BHSS = 1 << 30
     if (
         _deterministic
