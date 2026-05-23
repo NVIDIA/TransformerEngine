@@ -98,6 +98,10 @@ class EPBackend {
     size_t handle_mem_size;
     size_t alignment;
     int top_k;
+    // Persistent ncclEpHandle bound to cached_handle_mem. Lazily opened on first
+    // op; reused while handle_mem ptr is unchanged. Destroyed in shutdown().
+    ncclEpHandle_t cached_handle{nullptr};
+    void* cached_handle_mem{nullptr};
   };
   std::unordered_map<uint64_t, HandleEntry> handles_;
   std::atomic<uint64_t> next_handle_id_{1};  // 0 reserved as "no id"
@@ -106,6 +110,10 @@ class EPBackend {
   // Caller must hold mutex_. Throws on cap overflow.
   uint64_t insert_new_entry(size_t handle_mem_size, int top_k, size_t alignment);
   HandleEntry& lookup_config(uint64_t handle_id);
+  // Caller must hold mutex_. Returns the cached handle if handle_mem matches.
+  // On mismatch: if group_config_.allow_handle_mem_reloc != 0, destroys the
+  // stale handle and opens a fresh one; otherwise throws.
+  ncclEpHandle_t get_or_open_handle(HandleEntry& cfg, void* handle_mem);
 };
 
 }  // namespace ep

@@ -369,6 +369,189 @@ TEST_F(NegativeTests, NullHandleMemThrows) {
   CHECK_CUDA(cudaStreamDestroy(stream));
 }
 
+// =============================================================================
+// HandleCacheTest: persistent ncclEpHandle is reused across ops on the same
+// handle_mem ptr; relocation triggers throw by default and rebuild when
+// NVTEEpGroupConfig.allow_handle_mem_reloc=1.
+// =============================================================================
+
+class HandleCacheTest : public EpCoverageBase {};
+
+// Run prepare → dispatch → combine on bundle b. handle_mem_data overrides the
+// device ptr used for handle_mem (must be the buffer owned by b unless
+// reloc-allowed mode is active). Templated on Bundle because EpCoverageBase::
+// Bundle is declared in a protected section.
+template <typename B>
+static void run_round_trip(B& b, void* handle_mem_data,
+                           int num_tokens, int top_k, int num_local_experts,
+                           int hidden_dim, size_t alignment,
+                           cudaStream_t stream) {
+  auto topk_idx_t     = make_nvte_tensor(b.topk_idx.get(),
+                            {(size_t)num_tokens, (size_t)top_k}, kNVTEInt64);
+  auto topk_weights_t = make_nvte_tensor(b.topk_weights.get(),
+                            {(size_t)num_tokens, (size_t)top_k}, kNVTEFloat32);
+  auto token_counts_t = make_nvte_tensor(b.token_counts.get(),
+                            {(size_t)num_local_experts}, kNVTEInt32);
+  auto handle_mem_t   = make_nvte_tensor(handle_mem_data,
+                            {b.handle_mem_size}, kNVTEByte);
+  auto tokens_t       = make_nvte_tensor(b.tokens.get(),
+                            {(size_t)num_tokens, (size_t)hidden_dim}, kNVTEBFloat16);
+  auto recv_tokens_t  = make_nvte_tensor(b.recv_tokens.get(),
+                            {b.recv_capacity, (size_t)hidden_dim}, kNVTEBFloat16);
+  auto recv_w_t       = make_nvte_tensor(b.recv_topk_weights.get(),
+                            {b.recv_capacity}, kNVTEFloat32);
+  auto result_t       = make_nvte_tensor(b.result.get(),
+                            {(size_t)num_tokens, (size_t)hidden_dim}, kNVTEBFloat16);
+
+  NVTEEpHandle h{b.handle_id, handle_mem_t.tensor};
+  nvte_ep_prepare(h, topk_idx_t.tensor, token_counts_t.tensor, alignment, stream);
+  nvte_ep_dispatch(h, topk_idx_t.tensor, tokens_t.tensor, NVTECommWindow{},
+                   topk_weights_t.tensor, NVTECommWindow{},
+                   recv_tokens_t.tensor, NVTECommWindow{},
+                   recv_w_t.tensor, NVTECommWindow{}, stream);
+  nvte_ep_combine(h, recv_tokens_t.tensor, NVTECommWindow{}, result_t.tensor, stream);
+}
+
+// Re-bootstrap EP backend with a different allow_handle_mem_reloc setting.
+// Reuses the existing g_ep_comm; caller is responsible for restoring defaults.
+static void reinit_ep_with_reloc(int allow_reloc) {
+  nvte_ep_shutdown();
+  NVTEEpGroupConfig cfg{};
+  cfg.ep_size                  = g_ep_size;
+  cfg.num_experts              = g_num_experts;
+  cfg.max_tokens_per_rank      = g_max_tokens_per_rank;
+  cfg.max_recv_tokens_per_rank = g_ep_size * g_max_tokens_per_rank * 2;
+  cfg.hidden_dim               = g_hidden_dim;
+  cfg.allow_handle_mem_reloc   = allow_reloc;
+  nvte_ep_initialize(static_cast<void*>(g_ep_comm), cfg);
+}
+
+TEST_F(HandleCacheTest, ReuseSameMemSucceeds) {
+  const int num_tokens = 16, top_k = 2;
+  Bundle b = make_bundle(num_tokens, top_k, num_local_experts_, /*alignment=*/0);
+
+  auto h_idx = routing_balanced(g_process_id, num_tokens, top_k,
+                                num_experts_, num_local_experts_);
+  std::vector<float> h_w(num_tokens * top_k, 1.0f / top_k);
+  auto h_tok = tokens_constant(num_tokens, hidden_dim_, 0.5f);
+  CHECK_CUDA(cudaMemcpy(b.topk_idx.get(),     h_idx.data(),
+                        h_idx.size() * sizeof(int64_t),     cudaMemcpyHostToDevice));
+  CHECK_CUDA(cudaMemcpy(b.topk_weights.get(), h_w.data(),
+                        h_w.size()   * sizeof(float),       cudaMemcpyHostToDevice));
+  CHECK_CUDA(cudaMemcpy(b.tokens.get(),       h_tok.data(),
+                        h_tok.size() * sizeof(nv_bfloat16), cudaMemcpyHostToDevice));
+
+  cudaStream_t stream;
+  CHECK_CUDA(cudaStreamCreate(&stream));
+
+  // Two consecutive round-trips on the same handle_mem ptr: first opens the
+  // cached handle, second hits the cache. Both must succeed and be correct.
+  for (int iter = 0; iter < 2; ++iter) {
+    ASSERT_NO_THROW(run_round_trip(b, b.handle_mem.get(), num_tokens, top_k,
+                                   num_local_experts_, hidden_dim_,
+                                   /*alignment=*/0, stream));
+  }
+  CHECK_CUDA(cudaStreamSynchronize(stream));
+
+  std::vector<nv_bfloat16> h_res(num_tokens * hidden_dim_);
+  CHECK_CUDA(cudaMemcpy(h_res.data(), b.result.get(),
+                        h_res.size() * sizeof(nv_bfloat16), cudaMemcpyDeviceToHost));
+  const int probes[3] = {0, hidden_dim_ / 2, hidden_dim_ - 1};
+  for (int t = 0; t < num_tokens; ++t)
+    for (int p : probes)
+      EXPECT_NEAR(__bfloat162float(h_res[t * hidden_dim_ + p]),
+                  static_cast<float>(top_k) * 0.5f, 1e-2f);
+
+  CHECK_CUDA(cudaStreamDestroy(stream));
+}
+
+TEST_F(HandleCacheTest, RelocDefaultThrows) {
+  // Default bootstrap has allow_handle_mem_reloc=0: a second prepare call on
+  // the same handle_id with a different handle_mem ptr must throw.
+  const int num_tokens = 8, top_k = 2;
+  Bundle b = make_bundle(num_tokens, top_k, num_local_experts_, /*alignment=*/0);
+  DevBuf<uint8_t> second_hm(b.handle_mem_size);  // distinct device buffer
+  ASSERT_NE(b.handle_mem.get(), second_hm.get());
+
+  auto h_idx = routing_balanced(g_process_id, num_tokens, top_k,
+                                num_experts_, num_local_experts_);
+  CHECK_CUDA(cudaMemcpy(b.topk_idx.get(), h_idx.data(),
+                        h_idx.size() * sizeof(int64_t), cudaMemcpyHostToDevice));
+
+  auto topk_idx_t     = make_nvte_tensor(b.topk_idx.get(),
+                            {(size_t)num_tokens, (size_t)top_k}, kNVTEInt64);
+  auto token_counts_t = make_nvte_tensor(b.token_counts.get(),
+                            {(size_t)num_local_experts_}, kNVTEInt32);
+  auto hm1_t          = make_nvte_tensor(b.handle_mem.get(),
+                            {b.handle_mem_size}, kNVTEByte);
+  auto hm2_t          = make_nvte_tensor(second_hm.get(),
+                            {b.handle_mem_size}, kNVTEByte);
+
+  cudaStream_t stream;
+  CHECK_CUDA(cudaStreamCreate(&stream));
+
+  // First prepare seeds the cache.
+  NVTEEpHandle h1{b.handle_id, hm1_t.tensor};
+  ASSERT_NO_THROW(nvte_ep_prepare(h1, topk_idx_t.tensor, token_counts_t.tensor,
+                                  /*alignment=*/0, stream));
+  CHECK_CUDA(cudaStreamSynchronize(stream));
+  // Same handle_id with a different handle_mem ptr must throw.
+  NVTEEpHandle h2{b.handle_id, hm2_t.tensor};
+  EXPECT_THROW(nvte_ep_prepare(h2, topk_idx_t.tensor, token_counts_t.tensor,
+                               /*alignment=*/0, stream),
+               std::exception);
+  CHECK_CUDA(cudaStreamDestroy(stream));
+}
+
+TEST_F(HandleCacheTest, RelocAllowedRebuilds) {
+  // Re-init EP backend with allow_handle_mem_reloc=1, run two round-trips with
+  // distinct handle_mem buffers, verify both succeed numerically, restore.
+  reinit_ep_with_reloc(/*allow_reloc=*/1);
+
+  struct Restore { ~Restore() { reinit_ep_with_reloc(/*allow_reloc=*/0); } } restore;
+
+  const int num_tokens = 16, top_k = 2;
+  Bundle b = make_bundle(num_tokens, top_k, num_local_experts_, /*alignment=*/0);
+  DevBuf<uint8_t> alt_hm(b.handle_mem_size);
+  ASSERT_NE(b.handle_mem.get(), alt_hm.get());
+
+  auto h_idx = routing_balanced(g_process_id, num_tokens, top_k,
+                                num_experts_, num_local_experts_);
+  std::vector<float> h_w(num_tokens * top_k, 1.0f / top_k);
+  auto h_tok = tokens_constant(num_tokens, hidden_dim_, 0.5f);
+  CHECK_CUDA(cudaMemcpy(b.topk_idx.get(),     h_idx.data(),
+                        h_idx.size() * sizeof(int64_t),     cudaMemcpyHostToDevice));
+  CHECK_CUDA(cudaMemcpy(b.topk_weights.get(), h_w.data(),
+                        h_w.size()   * sizeof(float),       cudaMemcpyHostToDevice));
+  CHECK_CUDA(cudaMemcpy(b.tokens.get(),       h_tok.data(),
+                        h_tok.size() * sizeof(nv_bfloat16), cudaMemcpyHostToDevice));
+
+  cudaStream_t stream;
+  CHECK_CUDA(cudaStreamCreate(&stream));
+
+  // First on the original handle_mem.
+  ASSERT_NO_THROW(run_round_trip(b, b.handle_mem.get(), num_tokens, top_k,
+                                 num_local_experts_, hidden_dim_,
+                                 /*alignment=*/0, stream));
+  CHECK_CUDA(cudaStreamSynchronize(stream));
+  // Then on the relocated handle_mem — must trigger silent rebuild, not throw.
+  ASSERT_NO_THROW(run_round_trip(b, alt_hm.get(), num_tokens, top_k,
+                                 num_local_experts_, hidden_dim_,
+                                 /*alignment=*/0, stream));
+  CHECK_CUDA(cudaStreamSynchronize(stream));
+
+  std::vector<nv_bfloat16> h_res(num_tokens * hidden_dim_);
+  CHECK_CUDA(cudaMemcpy(h_res.data(), b.result.get(),
+                        h_res.size() * sizeof(nv_bfloat16), cudaMemcpyDeviceToHost));
+  const int probes[3] = {0, hidden_dim_ / 2, hidden_dim_ - 1};
+  for (int t = 0; t < num_tokens; ++t)
+    for (int p : probes)
+      EXPECT_NEAR(__bfloat162float(h_res[t * hidden_dim_ + p]),
+                  static_cast<float>(top_k) * 0.5f, 1e-2f);
+
+  CHECK_CUDA(cudaStreamDestroy(stream));
+}
+
 // ── main ──────────────────────────────────────────────────────────────────────
 
 int main(int argc, char* argv[]) {
