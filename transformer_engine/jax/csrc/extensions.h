@@ -203,7 +203,7 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedMoEAuxLossBackwardHandler);
 // Bootstrap EP (eager NCCL comm init); anchor released by ReleaseEpResources.
 void SetEpBootstrapParams(pybind11::bytes unique_id_bytes, int ep_size, int rank_within_group,
                           int num_experts, int max_tokens_per_rank, int max_recv_tokens_per_rank,
-                          int hidden_dim, int max_num_sms);
+                          int hidden_dim, int max_num_sms, int allow_handle_mem_reloc);
 void ReleaseEpResources();
 // Register an EP layer; returns (handle_id, handle_mem_size).
 pybind11::tuple EpRegisterLayer(int top_k, size_t dispatch_output_per_expert_alignment);

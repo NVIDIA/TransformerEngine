@@ -42,10 +42,16 @@ def ep_bootstrap(
     recv_capacity_per_rank,
     hidden_dim,
     max_num_sms=0,
+    allow_handle_mem_reloc=False,
 ):
     """Initialize the EP communicator. Call once per process before any EP op.
 
     max_num_sms caps the SMs allotted to EP kernels (0 = auto).
+
+    Set ``allow_handle_mem_reloc=True`` only if the caller cannot guarantee a
+    stable ``handle_mem`` device pointer across calls (e.g. XLA-managed
+    buffers reallocated between JIT executables). Default raises on
+    relocation so callers detect handle-aliasing bugs.
     """
     if world_size < 2:
         raise ValueError(
@@ -110,6 +116,7 @@ def ep_bootstrap(
         recv_capacity_per_rank,
         hidden_dim,
         max_num_sms=int(max_num_sms),
+        allow_handle_mem_reloc=int(bool(allow_handle_mem_reloc)),
     )
 
     # Release the C++ anchor at interpreter shutdown so RAII can tear down NCCL.

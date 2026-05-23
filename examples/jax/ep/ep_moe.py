@@ -288,6 +288,8 @@ def main():
             max_tokens_per_rank=args.num_tokens,
             recv_capacity_per_rank=args.recv_capacity_per_rank,
             hidden_dim=args.hidden,
+            # XLA reallocates handle_mem between JIT executables.
+            allow_handle_mem_reloc=True,
         )
 
         (
