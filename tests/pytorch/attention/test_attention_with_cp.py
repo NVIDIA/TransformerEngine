@@ -306,9 +306,18 @@ if test_essential:
 @pytest.mark.parametrize("model", model_configs_flash_attn.keys())
 @pytest.mark.parametrize("qkv_format", qkv_formats)
 @pytest.mark.parametrize("cp_comm_type", cp_comm_types)
-def test_cp_with_flash_attention(cp_pool, dtype, model, qkv_format, cp_comm_type):
+@pytest.mark.parametrize("pad_between_seqs", [False, True])
+def test_cp_with_flash_attention(cp_pool, dtype, model, qkv_format, cp_comm_type, pad_between_seqs):
     num_gpus = 4 if cp_comm_type == "a2a+p2p" else 2
     pool = cp_pool(num_gpus)
+
+    if pad_between_seqs:
+        if qkv_format != "thd":
+            pytest.skip("pad_between_seqs only applies to THD format!")
+        if not FlashAttentionUtils.v3_is_installed or get_device_compute_capability() > (9, 0):
+            pytest.skip("pad_between_seqs with CP requires Flash Attention v3 on Hopper (sm90)!")
+        if cp_comm_type == "a2a+p2p":
+            pytest.skip("pad_between_seqs is not yet supported with A2A+P2P CP comm type!")
 
     config = model_configs_flash_attn[model]
     config.context_parallel = True
@@ -361,6 +370,7 @@ def test_cp_with_flash_attention(cp_pool, dtype, model, qkv_format, cp_comm_type
         qkv_format=qkv_format,
         kernel_backend="FlashAttention",
         cp_comm_type=cp_comm_type,
+        fa_pad_between_seqs=pad_between_seqs,
         log_level=pytest_logging_level,
     )
 
@@ -606,6 +616,7 @@ def test_cp_with_fused_attention(
         is_training=is_training,
         deterministic=_deterministic,
     )
+
     _, fused_attn_supported, _ = available_backends
     if fused_attn_supported and config.attn_mask_type in ["causal", "padding_causal"]:
         config_copy = copy.deepcopy(config)
@@ -628,6 +639,23 @@ def test_cp_with_fused_attention(
         pytest.skip("Deterministic mode does not support non-vanilla softmax with FusedAttention")
     if _deterministic and config.attn_bias_type == "post_scale_bias" and is_training:
         pytest.skip("Deterministic mode does not support post_scale_bias with requires_grad")
+    # Observed: cuDNN det THD backward asks for ~128 * bHSS bytes of workspace
+    # on sm90; at 1<<30 that's 128 GiB, won't fit on H100's 80 GB. Held exactly
+    # at b=2 + power-of-2 S in our sweep; for b>=3 the workspace was observed to
+    # grow super-linearly (b=4 took ~4x the b=2 amount, not 2x) — revisit if a
+    # config uses b>2.
+    SM90_DET_FUSED_THD_BWD_MAX_BHSS = 1 << 30
+    if (
+        _deterministic
+        and qkv_format == "thd"
+        and get_device_compute_capability() == (9, 0)
+        and config.batch_size * config.num_heads * config.max_seqlen_q * config.max_seqlen_kv
+        >= SM90_DET_FUSED_THD_BWD_MAX_BHSS
+    ):
+        pytest.skip(
+            "Deterministic FusedAttention backward with THD format OOMs on sm90"
+            " for large bHSS configs (known cuDNN issue)."
+        )
 
     _submit(
         pool,

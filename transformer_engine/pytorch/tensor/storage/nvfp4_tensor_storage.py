@@ -104,6 +104,10 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
     _with_gemm_swizzled_scales: bool
     # Whether this NVFP4 tensor uses row-scaled amax metadata
     _row_scaled_nvfp4: bool
+    # Whether this NVFP4 tensor uses 4over6 map-to-4/map-to-6 block selection
+    _nvfp4_use_4over6: bool
+    # Global E4M3 scale bound used by this NVFP4 tensor
+    _nvfp4_e4m3_max: int
 
     def __new__(
         cls,
@@ -119,6 +123,8 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         *args,
         fake_dtype: Optional[torch.dtype] = None,
         row_scaled_nvfp4: bool = False,
+        nvfp4_use_4over6: bool = False,
+        nvfp4_e4m3_max: int = 448,
         **kwargs,
     ):
         if cls is NVFP4TensorStorage:
@@ -137,6 +143,8 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         instance._amax_columnwise = amax_columnwise
         instance._with_gemm_swizzled_scales = with_gemm_swizzled_scales
         instance._row_scaled_nvfp4 = row_scaled_nvfp4
+        instance._nvfp4_use_4over6 = nvfp4_use_4over6
+        instance._nvfp4_e4m3_max = nvfp4_e4m3_max if nvfp4_use_4over6 else 448
 
         return instance
 
@@ -163,6 +171,10 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             raise RuntimeError("Scale layout mismatch in copy_from_storage")
         if self._row_scaled_nvfp4 != src._row_scaled_nvfp4:
             raise RuntimeError("Rowwise amax scaling mode mismatch in copy_from_storage")
+        if self._nvfp4_use_4over6 != src._nvfp4_use_4over6:
+            raise RuntimeError("NVFP4 4over6 mode mismatch in copy_from_storage")
+        if self._nvfp4_e4m3_max != src._nvfp4_e4m3_max:
+            raise RuntimeError("NVFP4 4over6 E4M3 scale bound mismatch in copy_from_storage")
 
         def _copy_optional(dst: Optional[torch.Tensor], src_tensor: Optional[torch.Tensor]):
             if dst is not None and src_tensor is not None:
@@ -188,6 +200,8 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             "quantizer": self._quantizer,
             "with_gemm_swizzled_scales": self._with_gemm_swizzled_scales,
             "row_scaled_nvfp4": self._row_scaled_nvfp4,
+            "nvfp4_use_4over6": self._nvfp4_use_4over6,
+            "nvfp4_e4m3_max": self._nvfp4_e4m3_max,
             "fake_dtype": self._dtype,
         }
 
@@ -321,6 +335,8 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             fp4_dtype=self._fp4_dtype,
             with_gemm_swizzled_scales=self._with_gemm_swizzled_scales,
             row_scaled_nvfp4=self._row_scaled_nvfp4,
+            nvfp4_use_4over6=self._nvfp4_use_4over6,
+            nvfp4_e4m3_max=self._nvfp4_e4m3_max,
             fake_dtype=self._dtype,
         )
 

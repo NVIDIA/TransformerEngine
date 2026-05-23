@@ -13,6 +13,8 @@ from pydantic.dataclasses import dataclass
 
 
 _BACKWARD_OVERRIDES = (None, "high_precision", "dequantized")
+_NVFP4_4OVER6_SCOPES = ("none", "weights", "activations", "all")
+_NVFP4_4OVER6_ERR_MODES = ("MAE", "MSE")
 
 
 class _FormatHelper(NamedTuple):
@@ -522,6 +524,19 @@ class NVFP4BlockScaling(Recipe):
              If set to `True`, forward activation quantizers emit row-scaled
              NVFP4 tensors. In this mode, rowwise ``amax`` metadata is stored
              as a vector with one FP32 value per tensor row.
+    nvfp4_4over6 : {'none', 'weights', 'activations', 'all'}, default = 'none'
+             Enable 4over6 adaptive NVFP4 block scaling for selected tensor
+             scopes. For each selected FP4 block, quantization compares
+             map-to-4 and map-to-6 candidates and stores the candidate with
+             lower configured error. Current 4over6 support targets RL and
+             post-training scenarios; pre-training paths that combine 4over6
+             with RHT are not yet implemented.
+    nvfp4_4over6_e4m3_use_256 : {'none', 'weights', 'activations', 'all'}, default = 'all'
+             Select 4over6 tensors that use 256 as the global E4M3 scale
+             bound. By default, all 4over6 tensors use 256. Use ``'none'``
+             to keep the standard NVFP4 448 bound for 4over6 tensors.
+    nvfp4_4over6_err_mode : {'MAE', 'MSE'}, default = 'MAE'
+             Error metric used by NVFP4 4over6 candidate selection.
     backward_override : {None, 'high_precision', 'dequantized'}, default = None
             Backward precision mode. None does not modify backward behavior,
             `high_precision` keeps original high-precision operands for backward,
@@ -536,6 +551,9 @@ class NVFP4BlockScaling(Recipe):
     )
     disable_2d_quantization: bool = os.getenv("NVTE_NVFP4_DISABLE_2D_QUANTIZATION", "0") == "1"
     row_scaled_activation: bool = os.getenv("NVTE_NVFP4_ROW_SCALED_ACTIVATION", "0") == "1"
+    nvfp4_4over6: str = os.getenv("NVTE_NVFP4_4OVER6", "none")
+    nvfp4_4over6_e4m3_use_256: str = os.getenv("NVTE_NVFP4_4OVER6_E4M3_USE_256", "all")
+    nvfp4_4over6_err_mode: str = os.getenv("NVTE_NVFP4_4OVER6_ERR_MODE", "MAE").upper()
 
     fp4_format: Format = Format.E2M1
     fp8_format: Format = Format.E4M3
@@ -551,6 +569,15 @@ class NVFP4BlockScaling(Recipe):
         assert (
             self.backward_override in _BACKWARD_OVERRIDES
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
+        assert (
+            self.nvfp4_4over6 in _NVFP4_4OVER6_SCOPES
+        ), "NVTE_NVFP4_4OVER6 must be one of: 'none', 'weights', 'activations', 'all'."
+        assert (
+            self.nvfp4_4over6_e4m3_use_256 in _NVFP4_4OVER6_SCOPES
+        ), "NVTE_NVFP4_4OVER6_E4M3_USE_256 must be one of: 'none', 'weights', 'activations', 'all'."
+        assert (
+            self.nvfp4_4over6_err_mode in _NVFP4_4OVER6_ERR_MODES
+        ), "NVTE_NVFP4_4OVER6_ERR_MODE must be one of: 'MAE', 'MSE'."
 
         # Quantization params
         # Note: RHT is currently only applied to column-wise usage so that
@@ -580,6 +607,9 @@ class NVFP4BlockScaling(Recipe):
             f"fp8_mha={self.fp8_mha}, "
             f"backward_override={self.backward_override}, "
             f"row_scaled_activation={self.row_scaled_activation}, "
+            f"nvfp4_4over6={self.nvfp4_4over6}, "
+            f"nvfp4_4over6_e4m3_use_256={self.nvfp4_4over6_e4m3_use_256}, "
+            f"nvfp4_4over6_err_mode={self.nvfp4_4over6_err_mode}, "
             f"fp4_quant_fwd_inp={self.fp4_quant_fwd_inp}, "
             f"fp4_quant_fwd_weight={self.fp4_quant_fwd_weight}, "
             f"fp4_quant_bwd_grad={self.fp4_quant_bwd_grad}, "
