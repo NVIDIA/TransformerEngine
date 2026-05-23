@@ -324,8 +324,8 @@ void EPBackend::prepare(uint64_t handle_id, const NVTETensor topk_idx, NVTETenso
   std::lock_guard<std::mutex> lock(mutex_);
   HandleEntry& cfg = lookup_config(handle_id);
   NVTE_CHECK(cfg.alignment == dispatch_output_per_expert_alignment,
-             "ep_prepare: alignment mismatch for handle_id=", handle_id,
-             " (cached=", cfg.alignment, ", got=", dispatch_output_per_expert_alignment, ")");
+             "ep_prepare: alignment mismatch for handle_id=", handle_id, " (cached=", cfg.alignment,
+             ", got=", dispatch_output_per_expert_alignment, ")");
   ncclEpHandle_t h = get_or_open_handle(cfg, handle_mem);
   NVTE_CHECK_NCCL(ncclEpUpdateHandle(h, &nccl_topk_idx, &layout_info, stream));
 }
