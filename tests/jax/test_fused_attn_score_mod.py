@@ -20,6 +20,7 @@ from transformer_engine.jax.attention import (
 )
 from transformer_engine.jax.cpp_extensions import make_fused_attn_score_mod_config
 from transformer_engine.jax.flax import transformer as flax_transformer
+from transformer_engine_jax import get_device_compute_capability
 from utils import assert_allclose
 
 
@@ -616,6 +617,10 @@ def test_fused_attn_score_mod_causal_with_bprop():
 
 
 @pytest.mark.skipif(not _has_cudnn_frontend_python(), reason="cuDNN Python frontend is required")
+@pytest.mark.skipif(
+    get_device_compute_capability(0) < 90,
+    reason="Softcap score_mod tests require sm90+",
+)
 def test_fused_attn_score_mod_softcap_with_bprop():
     _require_cudnn_frontend_score_mod()
 
