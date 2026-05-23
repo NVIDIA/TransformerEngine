@@ -12,7 +12,7 @@ import torch
 from transformer_engine.pytorch import DotProductAttention, is_bf16_available
 from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
 import transformer_engine.pytorch.attention.dot_product_attention.flex_attention as flex_attention
-from transformer_engine.pytorch.utils import get_cudnn_version
+from transformer_engine.pytorch.utils import get_cudnn_version, get_device_compute_capability
 
 _current_file = pathlib.Path(__file__).resolve()
 sys.path = [str(_current_file.parent.parent)] + sys.path
@@ -556,6 +556,8 @@ def test_dot_product_attention_score_mod(dtype, qkv_format, score_mod_case, scal
         flex_attention._import_cudnn_frontend()
     except ImportError:
         pytest.skip("cuDNN Python frontend is required for score_mod attention.")
+    if score_mod_case == "softcap" and get_device_compute_capability() < (9, 0):
+        pytest.skip("Softcap score_mod tests require sm90+.")
 
     reset_rng_states()
 
