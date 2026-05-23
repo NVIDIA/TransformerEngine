@@ -57,32 +57,6 @@ inline ncclEpTensor_t make_payload_tensor(const NVTETensor t, const NVTECommWind
   return desc;
 }
 
-// RAII guard for ncclEpHandle_t — destroys on scope exit, leak-free on throw.
-class ScopedEpHandle {
- public:
-  ScopedEpHandle() = default;
-  explicit ScopedEpHandle(ncclEpHandle_t h) : h_(h) {}
-  ~ScopedEpHandle() {
-    if (h_ != nullptr) ncclEpHandleDestroy(h_);
-  }
-  ScopedEpHandle(const ScopedEpHandle&) = delete;
-  ScopedEpHandle& operator=(const ScopedEpHandle&) = delete;
-  ScopedEpHandle(ScopedEpHandle&& other) noexcept : h_(other.h_) { other.h_ = nullptr; }
-  ScopedEpHandle& operator=(ScopedEpHandle&& other) noexcept {
-    if (this != &other) {
-      if (h_ != nullptr) ncclEpHandleDestroy(h_);
-      h_ = other.h_;
-      other.h_ = nullptr;
-    }
-    return *this;
-  }
-  operator ncclEpHandle_t() const { return h_; }
-  ncclEpHandle_t get() const { return h_; }
-
- private:
-  ncclEpHandle_t h_ = nullptr;
-};
-
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -158,6 +132,13 @@ void EPBackend::shutdown() {
   EPBackend& inst = instance();
   std::lock_guard<std::mutex> lock(inst.mutex_);
   if (!inst.initialized_) return;
+  for (auto& kv : inst.handles_) {
+    if (kv.second.cached_handle != nullptr) {
+      ncclEpHandleDestroy(kv.second.cached_handle);
+      kv.second.cached_handle = nullptr;
+      kv.second.cached_handle_mem = nullptr;
+    }
+  }
   inst.handles_.clear();
   // ncclEpGroupDestroy reads from ep_comm_; destroy group while comm is still alive.
   if (inst.ep_group_ != nullptr) {
@@ -196,7 +177,7 @@ ncclDataType_t EPBackend::nvte_dtype_to_nccl(NVTEDType dtype) {
   return ncclFloat32;  // unreachable
 }
 
-// Open a transient ncclEpHandle over handle_mem. Caller owns the result.
+// Open a fresh ncclEpHandle over handle_mem. Caller (or cache) owns the result.
 ncclEpHandle_t EPBackend::open_handle(void* handle_mem, size_t handle_mem_size, int num_topk,
                                       size_t dispatch_output_per_expert_alignment) {
   size_t hm_sizes[1] = {handle_mem_size};
@@ -273,6 +254,26 @@ EPBackend::HandleEntry& EPBackend::lookup_config(uint64_t handle_id) {
   return it->second;
 }
 
+ncclEpHandle_t EPBackend::get_or_open_handle(HandleEntry& cfg, void* handle_mem) {
+  if (cfg.cached_handle != nullptr && cfg.cached_handle_mem == handle_mem) {
+    return cfg.cached_handle;
+  }
+  if (cfg.cached_handle != nullptr) {
+    NVTE_CHECK(group_config_.allow_handle_mem_reloc != 0,
+               "EP handle_mem relocated for cached handle (old=",
+               reinterpret_cast<uintptr_t>(cfg.cached_handle_mem),
+               ", new=", reinterpret_cast<uintptr_t>(handle_mem),
+               "). Set NVTEEpGroupConfig.allow_handle_mem_reloc=1 to allow rebuild.");
+    ncclEpHandleDestroy(cfg.cached_handle);
+    cfg.cached_handle = nullptr;
+    cfg.cached_handle_mem = nullptr;
+  }
+  ncclEpHandle_t h = open_handle(handle_mem, cfg.handle_mem_size, cfg.top_k, cfg.alignment);
+  cfg.cached_handle = h;
+  cfg.cached_handle_mem = handle_mem;
+  return h;
+}
+
 // ---------------------------------------------------------------------------
 // Per-step operations
 // ---------------------------------------------------------------------------
@@ -320,17 +321,13 @@ void EPBackend::prepare(uint64_t handle_id, const NVTETensor topk_idx, NVTETenso
   ncclEpLayoutInfo_t layout_info = NCCL_EP_LAYOUT_INFO_INIT;
   layout_info.expert_counters = (token_counts_data != nullptr) ? &token_counts_desc : nullptr;
 
-  ScopedEpHandle transient;
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    HandleEntry& cfg = lookup_config(handle_id);
-    NVTE_CHECK(cfg.alignment == dispatch_output_per_expert_alignment,
-               "ep_prepare: alignment mismatch for handle_id=", handle_id,
-               " (cached=", cfg.alignment, ", got=", dispatch_output_per_expert_alignment, ")");
-    transient =
-        ScopedEpHandle(open_handle(handle_mem, cfg.handle_mem_size, cfg.top_k, cfg.alignment));
-  }
-  NVTE_CHECK_NCCL(ncclEpUpdateHandle(transient, &nccl_topk_idx, &layout_info, stream));
+  std::lock_guard<std::mutex> lock(mutex_);
+  HandleEntry& cfg = lookup_config(handle_id);
+  NVTE_CHECK(cfg.alignment == dispatch_output_per_expert_alignment,
+             "ep_prepare: alignment mismatch for handle_id=", handle_id,
+             " (cached=", cfg.alignment, ", got=", dispatch_output_per_expert_alignment, ")");
+  ncclEpHandle_t h = get_or_open_handle(cfg, handle_mem);
+  NVTE_CHECK_NCCL(ncclEpUpdateHandle(h, &nccl_topk_idx, &layout_info, stream));
 }
 
 void EPBackend::dispatch(uint64_t handle_id, void* handle_mem, const NVTETensor topk_idx,
@@ -397,14 +394,10 @@ void EPBackend::dispatch(uint64_t handle_id, void* handle_mem, const NVTETensor 
   ncclEpDispatchConfig_t dispatch_cfg = NCCL_EP_DISPATCH_CONFIG_INIT;
   dispatch_cfg.pass_direction = is_forward ? NCCL_EP_FWD_PASS : NCCL_EP_BWD_PASS;
 
-  ScopedEpHandle transient;
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    HandleEntry& cfg = lookup_config(handle_id);
-    transient =
-        ScopedEpHandle(open_handle(handle_mem, cfg.handle_mem_size, cfg.top_k, cfg.alignment));
-  }
-  NVTE_CHECK_NCCL(ncclEpDispatch(transient, &in_struct, &out_struct,
+  std::lock_guard<std::mutex> lock(mutex_);
+  HandleEntry& cfg = lookup_config(handle_id);
+  ncclEpHandle_t h = get_or_open_handle(cfg, handle_mem);
+  NVTE_CHECK_NCCL(ncclEpDispatch(h, &in_struct, &out_struct,
                                  /*layout_info=*/nullptr, &dispatch_cfg, stream));
 }
 
@@ -436,14 +429,10 @@ void EPBackend::combine(uint64_t handle_id, void* handle_mem, const NVTETensor e
   ncclEpCombineOutputs_t out_struct = NCCL_EP_COMBINE_OUTPUTS_INIT;
   out_struct.tokens = &nccl_result_out;
 
-  ScopedEpHandle transient;
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    HandleEntry& cfg = lookup_config(handle_id);
-    transient =
-        ScopedEpHandle(open_handle(handle_mem, cfg.handle_mem_size, cfg.top_k, cfg.alignment));
-  }
-  NVTE_CHECK_NCCL(ncclEpCombine(transient, &in_struct, &out_struct, /*config=*/nullptr, stream));
+  std::lock_guard<std::mutex> lock(mutex_);
+  HandleEntry& cfg = lookup_config(handle_id);
+  ncclEpHandle_t h = get_or_open_handle(cfg, handle_mem);
+  NVTE_CHECK_NCCL(ncclEpCombine(h, &in_struct, &out_struct, /*config=*/nullptr, stream));
 }
 
 void EPBackend::dispatch_bwd(uint64_t handle_id, void* handle_mem, const NVTETensor grad,
@@ -491,14 +480,10 @@ void EPBackend::dispatch_bwd(uint64_t handle_id, void* handle_mem, const NVTETen
   ncclEpCombineConfig_t cfg = NCCL_EP_COMBINE_CONFIG_INIT;
   cfg.pass_direction = NCCL_EP_BWD_PASS;
 
-  ScopedEpHandle transient;
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    HandleEntry& entry = lookup_config(handle_id);
-    transient = ScopedEpHandle(
-        open_handle(handle_mem, entry.handle_mem_size, entry.top_k, entry.alignment));
-  }
-  NVTE_CHECK_NCCL(ncclEpCombine(transient, &in_struct, &out_struct, &cfg, stream));
+  std::lock_guard<std::mutex> lock(mutex_);
+  HandleEntry& entry = lookup_config(handle_id);
+  ncclEpHandle_t h = get_or_open_handle(entry, handle_mem);
+  NVTE_CHECK_NCCL(ncclEpCombine(h, &in_struct, &out_struct, &cfg, stream));
 }
 
 void EPBackend::combine_bwd(uint64_t handle_id, void* handle_mem, const NVTETensor grad,
