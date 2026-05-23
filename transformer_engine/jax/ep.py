@@ -100,7 +100,8 @@ def ep_bootstrap(
             f" '{ep_resource}' size ({mesh_ep_size})."
         )
 
-    transformer_engine_jax.initialize_ep_communicator(
+    # Eager NCCL init while ranks are barrier-synced by the UID broadcast above.
+    transformer_engine_jax.set_ep_bootstrap_params(
         uid_bytes,
         ep_size,
         rank_within_group,
@@ -111,18 +112,10 @@ def ep_bootstrap(
         max_num_sms=int(max_num_sms),
     )
 
-    # Shutdown ordering:
-    #  - Python atexit is LIFO. ep_bootstrap runs jmu.process_allgather first,
-    #    which assumes jax.distributed.initialize() ran earlier, so JAX's
-    #    distributed atexit hooks are already registered before this one. Ours
-    #    therefore fires first at exit — fine, because EpShutdown only touches
-    #    NCCL (ncclEpGroupDestroy + ncclCommDestroy) and does not depend on
-    #    JAX's coordination service. Do not add JAX calls to EpShutdown.
-    #  - Running before C++ static destructors avoids the cudartUnloading
-    #    hazard; the C++ destructors are intentionally no-ops.
+    # Release the C++ anchor at interpreter shutdown so RAII can tear down NCCL.
     global _atexit_registered
     if not _atexit_registered:
-        atexit.register(transformer_engine_jax.shutdown_ep_communicator)
+        atexit.register(transformer_engine_jax.release_ep_resources)
         _atexit_registered = True
 
     tex.ep.set_ep_config(

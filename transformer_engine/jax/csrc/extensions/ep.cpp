@@ -10,8 +10,10 @@
 
 #include <nccl.h>
 
+#include <array>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <mutex>
 
 #include "../extensions.h"
@@ -21,51 +23,84 @@
 namespace transformer_engine {
 namespace jax {
 
-namespace {
+// NCCL comm + EPBackend lifetime tracks live JAX executables via XLA stateful FFI.
 
-// Process-lifetime owner of the EP ncclComm_t. Created from a broadcast
-// ncclUniqueId during EpInitialize; destroyed by EpShutdown (registered as a
-// Python atexit hook from ep.py so it runs before C++ static destructors).
-class EpCommManager {
+struct EpBootstrapParams {
+  std::array<uint8_t, 128> uid_bytes{};
+  int ep_size = 0;
+  int rank_within_group = 0;
+  int num_experts = 0;
+  int max_tokens_per_rank = 0;
+  int max_recv_tokens_per_rank = 0;
+  int hidden_dim = 0;
+  int max_num_sms = 0;
+};
+
+class EpResources {
  public:
-  static EpCommManager& get() {
-    static EpCommManager inst;
-    return inst;
+  explicit EpResources(const EpBootstrapParams& p) {
+    ncclUniqueId uid;
+    std::memcpy(&uid, p.uid_bytes.data(), sizeof(uid));
+    NVTE_CHECK_NCCL(ncclCommInitRank(&comm_, p.ep_size, uid, p.rank_within_group));
+    NVTEEpGroupConfig cfg{.ep_size = p.ep_size,
+                          .num_experts = p.num_experts,
+                          .max_tokens_per_rank = p.max_tokens_per_rank,
+                          .max_recv_tokens_per_rank = p.max_recv_tokens_per_rank,
+                          .hidden_dim = p.hidden_dim,
+                          .max_num_sms = p.max_num_sms};
+    try {
+      nvte_ep_initialize(static_cast<void*>(comm_), cfg);
+    } catch (...) {
+      ncclCommDestroy(comm_);
+      comm_ = nullptr;
+      throw;
+    }
   }
 
-  void init_from_uid(const uint8_t* uid_bytes, int ep_size, int rank_within_group) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    NVTE_CHECK(comm_ == nullptr, "EP comm already initialized for this process");
-    ncclUniqueId uid;
-    std::memcpy(&uid, uid_bytes, sizeof(uid));
-    NVTE_CHECK_NCCL(ncclCommInitRank(&comm_, ep_size, uid, rank_within_group));
+  ~EpResources() {
+    if (comm_ == nullptr) return;
+    nvte_ep_shutdown();
+    ncclCommDestroy(comm_);
   }
+
+  EpResources(const EpResources&) = delete;
+  EpResources& operator=(const EpResources&) = delete;
 
   ncclComm_t comm() const { return comm_; }
 
-  void shutdown() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (comm_ == nullptr) return;
-    ncclCommDestroy(comm_);
-    comm_ = nullptr;
-  }
-
  private:
-  EpCommManager() = default;
-  // Intentionally no NCCL teardown in the destructor: this runs at static-dtor
-  // time, after Python has finalized and possibly after the CUDA driver
-  // detaches the context. Calling ncclCommDestroy there has been observed to
-  // hang or report cudartUnloading. Normal teardown goes through the Python
-  // atexit hook (shutdown_ep_communicator) registered from ep.py; any path
-  // that skips that (os._exit, fatal signal) leaks the comm, which the OS
-  // reaps on process exit.
-  ~EpCommManager() = default;
-  EpCommManager(const EpCommManager&) = delete;
-  EpCommManager& operator=(const EpCommManager&) = delete;
-
-  std::mutex mutex_;
   ncclComm_t comm_{nullptr};
 };
+
+struct EpInstanceState {
+  static ::xla::ffi::TypeId id;
+  static ::xla::ffi::TypeInfo info;
+  std::shared_ptr<EpResources> resources;
+};
+
+::xla::ffi::TypeId EpInstanceState::id = {};
+::xla::ffi::TypeInfo EpInstanceState::info = ::xla::ffi::MakeTypeInfo<EpInstanceState>();
+
+namespace {
+
+std::mutex g_ep_mu;
+EpBootstrapParams g_ep_params;
+bool g_ep_params_set = false;
+std::weak_ptr<EpResources> g_ep_resources_weak;
+// Python-held anchor so trace-time ep_register_layer finds EPBackend ready.
+std::shared_ptr<EpResources> g_ep_resources_anchor;
+
+std::shared_ptr<EpResources> AcquireEpResources() {
+  std::lock_guard<std::mutex> lock(g_ep_mu);
+  NVTE_CHECK(g_ep_params_set,
+             "EP bootstrap params not set; call transformer_engine_jax."
+             "set_ep_bootstrap_params() (typically via ep_bootstrap) first.");
+  auto sp = g_ep_resources_weak.lock();
+  if (sp) return sp;
+  sp = std::make_shared<EpResources>(g_ep_params);
+  g_ep_resources_weak = sp;
+  return sp;
+}
 
 }  // namespace
 
@@ -98,36 +133,44 @@ struct EpCombineBwdConfig {
 
 // ── Bootstrap helpers ─────────────────────────────────────────────────────────
 
-void EpInitialize(pybind11::bytes unique_id_bytes_obj, int ep_size, int rank_within_group,
-                  int num_experts, int max_tokens_per_rank, int max_recv_tokens_per_rank,
-                  int hidden_dim, int max_num_sms) {
+// Caches uid + group config and eagerly creates the NCCL comm (ranks
+// synchronize via the UID broadcast).
+void SetEpBootstrapParams(pybind11::bytes unique_id_bytes_obj, int ep_size, int rank_within_group,
+                          int num_experts, int max_tokens_per_rank, int max_recv_tokens_per_rank,
+                          int hidden_dim, int max_num_sms) {
   std::string uid_str = unique_id_bytes_obj;
   NVTE_CHECK(static_cast<int>(uid_str.size()) >= 128,
              "unique_id_bytes must be at least 128 bytes (ncclUniqueId size).");
-  EpCommManager::get().init_from_uid(reinterpret_cast<const uint8_t*>(uid_str.data()), ep_size,
-                                     rank_within_group);
-  NVTEEpGroupConfig cfg{.ep_size = ep_size,
-                        .num_experts = num_experts,
-                        .max_tokens_per_rank = max_tokens_per_rank,
-                        .max_recv_tokens_per_rank = max_recv_tokens_per_rank,
-                        .hidden_dim = hidden_dim,
-                        .max_num_sms = max_num_sms};
-  // If common rejects the config (validate_config / ncclEpCreateGroup), roll
-  // the comm back so the two singletons don't end up in inconsistent states
-  // and the comm doesn't strand until process exit.
-  try {
-    nvte_ep_initialize(static_cast<void*>(EpCommManager::get().comm()), cfg);
-  } catch (...) {
-    EpCommManager::get().shutdown();
-    throw;
+  std::shared_ptr<EpResources> anchor;
+  {
+    std::lock_guard<std::mutex> lock(g_ep_mu);
+    NVTE_CHECK(!g_ep_resources_anchor,
+               "EP bootstrap already initialized; call release_ep_resources() before re-init.");
+    std::memcpy(g_ep_params.uid_bytes.data(), uid_str.data(), 128);
+    g_ep_params.ep_size = ep_size;
+    g_ep_params.rank_within_group = rank_within_group;
+    g_ep_params.num_experts = num_experts;
+    g_ep_params.max_tokens_per_rank = max_tokens_per_rank;
+    g_ep_params.max_recv_tokens_per_rank = max_recv_tokens_per_rank;
+    g_ep_params.hidden_dim = hidden_dim;
+    g_ep_params.max_num_sms = max_num_sms;
+    g_ep_params_set = true;
   }
+  // Acquire outside the lock: EpResources ctor runs ncclCommInitRank which is
+  // a collective and may block on peer ranks.
+  anchor = AcquireEpResources();
+  std::lock_guard<std::mutex> lock(g_ep_mu);
+  g_ep_resources_anchor = std::move(anchor);
 }
 
-void EpShutdown() {
-  // Order matters: ep_group_ in common reads from the comm, so tear it down
-  // first, then destroy the comm.
-  nvte_ep_shutdown();
-  EpCommManager::get().shutdown();
+// Drops the anchor; comm tears down once the last executable also releases.
+void ReleaseEpResources() {
+  std::shared_ptr<EpResources> to_drop;
+  {
+    std::lock_guard<std::mutex> lock(g_ep_mu);
+    to_drop = std::move(g_ep_resources_anchor);
+  }
+  // to_drop dtor runs outside the lock.
 }
 
 pybind11::tuple EpRegisterLayer(int top_k, size_t dispatch_output_per_expert_alignment) {
@@ -137,10 +180,35 @@ pybind11::tuple EpRegisterLayer(int top_k, size_t dispatch_output_per_expert_ali
   return pybind11::make_tuple(handle_id, handle_mem_size);
 }
 
+pybind11::capsule GetEpInstanceStateTypeIdCapsule() {
+  return pybind11::capsule(static_cast<void*>(&EpInstanceState::id), "xla.ffi.type_id");
+}
+
+pybind11::capsule GetEpInstanceStateTypeInfoCapsule() {
+  return pybind11::capsule(static_cast<void*>(&EpInstanceState::info), "xla.ffi.type_info");
+}
+
+// ── Instantiate handler ─────────────────────────────────────────────────────
+
+static ::xla::ffi::ErrorOr<std::unique_ptr<EpInstanceState>> EpInstantiateImpl() {
+  auto state = std::make_unique<EpInstanceState>();
+  try {
+    state->resources = AcquireEpResources();
+  } catch (const std::exception& e) {
+    return ::xla::ffi::Unexpected(
+        ::xla::ffi::Error::Internal(std::string("EP instantiate failed: ") + e.what()));
+  }
+  return state;
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(EpInstantiateHandler, EpInstantiateImpl, FFI::BindInstantiate());
+
 // ── ep_prepare ────────────────────────────────────────────────────────────────
 
-Error_Type EpPrepareFFI(cudaStream_t stream, Buffer_Type topk_idx, Result_Type token_counts,
-                        Result_Type handle_mem, Result_Type workspace, EpPrepareConfig config) {
+Error_Type EpPrepareFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_Type topk_idx,
+                        Result_Type token_counts, Result_Type handle_mem, Result_Type workspace,
+                        EpPrepareConfig config) {
+  (void)ep_state;  // lifetime only.
   auto topk_dims = topk_idx.dimensions();
   NVTE_CHECK(topk_dims.size() >= 2,
              "topk_idx must be at least 2D [..., top_k], got ndim=", topk_dims.size());
@@ -178,20 +246,22 @@ Error_Type EpPrepareFFI(cudaStream_t stream, Buffer_Type topk_idx, Result_Type t
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(EpPrepareHandler, EpPrepareFFI,
                               FFI::Bind()
-                                  .Ctx<FFI_Stream_Type>()  // stream
-                                  .Arg<Buffer_Type>()      // topk_idx
-                                  .Ret<Buffer_Type>()      // token_counts
-                                  .Ret<Buffer_Type>()      // handle_mem
-                                  .Ret<Buffer_Type>()      // workspace (FFI scratch)
+                                  .Ctx<FFI_Stream_Type>()                     // stream
+                                  .Ctx<::xla::ffi::State<EpInstanceState>>()  // EP state
+                                  .Arg<Buffer_Type>()                         // topk_idx
+                                  .Ret<Buffer_Type>()                         // token_counts
+                                  .Ret<Buffer_Type>()                         // handle_mem
+                                  .Ret<Buffer_Type>()  // workspace (FFI scratch)
                                   .Attrs<EpPrepareConfig>(),
                               FFI_CudaGraph_Traits);
 
 // ── ep_dispatch ───────────────────────────────────────────────────────────────
 
-Error_Type EpDispatchFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_Type topk_idx,
-                         Buffer_Type tokens, Buffer_Type topk_weights, Result_Type recv_tokens,
-                         Result_Type recv_topk_weights, Result_Type workspace,
-                         EpDispatchConfig config) {
+Error_Type EpDispatchFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_Type handle_mem,
+                         Buffer_Type topk_idx, Buffer_Type tokens, Buffer_Type topk_weights,
+                         Result_Type recv_tokens, Result_Type recv_topk_weights,
+                         Result_Type workspace, EpDispatchConfig config) {
+  (void)ep_state;
   auto token_dims = tokens.dimensions();
   NVTE_CHECK(token_dims.size() >= 2,
              "tokens must be at least 2D [..., H], got ndim=", token_dims.size());
@@ -264,21 +334,23 @@ Error_Type EpDispatchFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_Typ
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(EpDispatchHandler, EpDispatchFFI,
                               FFI::Bind()
-                                  .Ctx<FFI_Stream_Type>()  // stream
-                                  .Arg<Buffer_Type>()      // handle_mem
-                                  .Arg<Buffer_Type>()      // topk_idx
-                                  .Arg<Buffer_Type>()      // tokens
-                                  .Arg<Buffer_Type>()      // topk_weights
-                                  .Ret<Buffer_Type>()      // recv_tokens
-                                  .Ret<Buffer_Type>()      // recv_topk_weights
-                                  .Ret<Buffer_Type>()      // workspace (FFI scratch)
+                                  .Ctx<FFI_Stream_Type>()                     // stream
+                                  .Ctx<::xla::ffi::State<EpInstanceState>>()  // EP state
+                                  .Arg<Buffer_Type>()                         // handle_mem
+                                  .Arg<Buffer_Type>()                         // topk_idx
+                                  .Arg<Buffer_Type>()                         // tokens
+                                  .Arg<Buffer_Type>()                         // topk_weights
+                                  .Ret<Buffer_Type>()                         // recv_tokens
+                                  .Ret<Buffer_Type>()                         // recv_topk_weights
+                                  .Ret<Buffer_Type>()  // workspace (FFI scratch)
                                   .Attrs<EpDispatchConfig>(),
                               FFI_CudaGraph_Traits);
 
 // ── ep_combine ────────────────────────────────────────────────────────────────
 
-Error_Type EpCombineFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_Type expert_out,
-                        Result_Type result, EpCombineConfig config) {
+Error_Type EpCombineFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_Type handle_mem,
+                        Buffer_Type expert_out, Result_Type result, EpCombineConfig config) {
+  (void)ep_state;
   auto eo_dims = expert_out.dimensions();
   NVTE_CHECK(eo_dims.size() >= 2,
              "expert_out must be at least 2D [..., recv_pr, H]; got ndim=", eo_dims.size());
@@ -311,18 +383,21 @@ Error_Type EpCombineFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_Type
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(EpCombineHandler, EpCombineFFI,
                               FFI::Bind()
-                                  .Ctx<FFI_Stream_Type>()  // stream
-                                  .Arg<Buffer_Type>()      // handle_mem
-                                  .Arg<Buffer_Type>()      // expert_out
-                                  .Ret<Buffer_Type>()      // result
+                                  .Ctx<FFI_Stream_Type>()                     // stream
+                                  .Ctx<::xla::ffi::State<EpInstanceState>>()  // EP state
+                                  .Arg<Buffer_Type>()                         // handle_mem
+                                  .Arg<Buffer_Type>()                         // expert_out
+                                  .Ret<Buffer_Type>()                         // result
                                   .Attrs<EpCombineConfig>(),
                               FFI_CudaGraph_Traits);
 
 // ── ep_dispatch_bwd ───────────────────────────────────────────────────────────
 
-Error_Type EpDispatchBwdFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_Type grad,
-                            Buffer_Type g_recv_topk_weights, Result_Type grad_tokens,
-                            Result_Type grad_topk_weights, EpDispatchBwdConfig config) {
+Error_Type EpDispatchBwdFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_Type handle_mem,
+                            Buffer_Type grad, Buffer_Type g_recv_topk_weights,
+                            Result_Type grad_tokens, Result_Type grad_topk_weights,
+                            EpDispatchBwdConfig config) {
+  (void)ep_state;
   auto grad_dims = grad.dimensions();
   NVTE_CHECK(grad_dims.size() >= 2,
              "grad must be at least 2D [..., recv_pr, H]; got ndim=", grad_dims.size());
@@ -380,19 +455,22 @@ Error_Type EpDispatchBwdFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(EpDispatchBwdHandler, EpDispatchBwdFFI,
                               FFI::Bind()
-                                  .Ctx<FFI_Stream_Type>()  // stream
-                                  .Arg<Buffer_Type>()      // handle_mem
-                                  .Arg<Buffer_Type>()      // grad (w.r.t. recv_tokens)
-                                  .Arg<Buffer_Type>()      // g_recv_topk_weights
-                                  .Ret<Buffer_Type>()      // grad_tokens
-                                  .Ret<Buffer_Type>()      // grad_topk_weights
+                                  .Ctx<FFI_Stream_Type>()                     // stream
+                                  .Ctx<::xla::ffi::State<EpInstanceState>>()  // EP state
+                                  .Arg<Buffer_Type>()                         // handle_mem
+                                  .Arg<Buffer_Type>()  // grad (w.r.t. recv_tokens)
+                                  .Arg<Buffer_Type>()  // g_recv_topk_weights
+                                  .Ret<Buffer_Type>()  // grad_tokens
+                                  .Ret<Buffer_Type>()  // grad_topk_weights
                                   .Attrs<EpDispatchBwdConfig>(),
                               FFI_CudaGraph_Traits);
 
 // ── ep_combine_bwd ────────────────────────────────────────────────────────────
 
-Error_Type EpCombineBwdFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_Type grad,
-                           Result_Type grad_expert_out, EpCombineBwdConfig config) {
+Error_Type EpCombineBwdFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_Type handle_mem,
+                           Buffer_Type grad, Result_Type grad_expert_out,
+                           EpCombineBwdConfig config) {
+  (void)ep_state;
   auto grad_dims = grad.dimensions();
   NVTE_CHECK(grad_dims.size() >= 2,
              "grad must be at least 2D [..., H], got ndim=", grad_dims.size());
@@ -424,10 +502,11 @@ Error_Type EpCombineBwdFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_T
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(EpCombineBwdHandler, EpCombineBwdFFI,
                               FFI::Bind()
-                                  .Ctx<FFI_Stream_Type>()  // stream
-                                  .Arg<Buffer_Type>()      // handle_mem
-                                  .Arg<Buffer_Type>()      // grad (w.r.t. result)
-                                  .Ret<Buffer_Type>()      // grad_expert_out
+                                  .Ctx<FFI_Stream_Type>()                     // stream
+                                  .Ctx<::xla::ffi::State<EpInstanceState>>()  // EP state
+                                  .Arg<Buffer_Type>()                         // handle_mem
+                                  .Arg<Buffer_Type>()  // grad (w.r.t. result)
+                                  .Ret<Buffer_Type>()  // grad_expert_out
                                   .Attrs<EpCombineBwdConfig>(),
                               FFI_CudaGraph_Traits);
 
