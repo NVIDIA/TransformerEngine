@@ -118,7 +118,7 @@ def quantization_tols(name: str) -> dict[str, float]:
         "mxfp8_block_scaling",
     ):
         return dtype_tols(tex.DType.kFloat8E4M3)
-    if name in ("nvfp4", "nvfp4_row_scaled"):
+    if name in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
         return dtype_tols(tex.DType.kFloat4E2M1)
     raise ValueError(f"Unsupported quantization scheme ({name})")
 
@@ -145,21 +145,17 @@ def make_recipe(name: Optional[str], **recipe_kwargs: Any) -> Optional[Recipe]:
         )
     if name == "fp8_block_scaling":
         return transformer_engine.common.recipe.Float8BlockScaling(**recipe_kwargs)
-    if name == "nvfp4":
-        return transformer_engine.common.recipe.NVFP4BlockScaling(
-            disable_rht=True,
-            disable_stochastic_rounding=True,
-            disable_2d_quantization=True,
-            **recipe_kwargs,
-        )
-    if name == "nvfp4_row_scaled":
-        return transformer_engine.common.recipe.NVFP4BlockScaling(
-            disable_rht=True,
-            disable_stochastic_rounding=True,
-            disable_2d_quantization=True,
-            row_scaled_activation=True,
-            **recipe_kwargs,
-        )
+    if name in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
+        use_4over6 = name == "nvfp4_4over6"
+        kwargs = {
+            "disable_rht": True,
+            "disable_stochastic_rounding": True,
+            "disable_2d_quantization": not use_4over6,
+            "row_scaled_activation": name == "nvfp4_row_scaled",
+            "nvfp4_4over6": "all" if use_4over6 else "none",
+        }
+        kwargs.update(recipe_kwargs)
+        return transformer_engine.common.recipe.NVFP4BlockScaling(**kwargs)
     raise ValueError(f"Unsupported quantization scheme ({name})")
 
 
@@ -167,6 +163,10 @@ def recipe_id(recipe: Optional[Recipe]) -> str:
     """Readable pytest id for a quantization recipe."""
     if not isinstance(recipe, Recipe):
         return "None"
+    if recipe.nvfp4() and recipe.row_scaled_activation and recipe.nvfp4_4over6 != "none":
+        return "NVFP4RowScaled4Over6BlockScaling"
+    if recipe.nvfp4() and recipe.nvfp4_4over6 != "none":
+        return "NVFP44Over6BlockScaling"
     if recipe.nvfp4() and recipe.row_scaled_activation:
         return "NVFP4RowScaledBlockScaling"
     return type(recipe).__name__
@@ -185,6 +185,13 @@ def skip_unsupported_backward_override(
         and backward_override is None
     ):
         pytest.skip("Row-scaled NVFP4 does not support default quantized backward.")
+    if (
+        quant_recipe is not None
+        and quant_recipe.nvfp4()
+        and quant_recipe.nvfp4_4over6 != "none"
+        and layer_type == "grouped_linear"
+    ):
+        pytest.skip("NVFP4 4over6 currently does not support grouped quantization.")
     if backward_override is None:
         return
     if quant_recipe is None and backward_override is not None:
