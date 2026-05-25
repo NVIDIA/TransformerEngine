@@ -595,7 +595,7 @@ inline MultiTensorGroupGemmOutputArgs build_grouped_gemm_multi_out_args(
 // passed to the grouped GEMM kernel. Use-case: A --> List of Expert weights
 inline MultiTensorGroupGemmInputArgs build_grouped_gemm_multi_inputA_args(
     const NVTETensor *tensor_list, size_t list_size, bool use_rowwise, bool storage_transposed,
-    bool requires_scale_inv, int64_t *avg_first_dim, int64_t *avg_last_dim, const char *name) {
+    int64_t *avg_first_dim, int64_t *avg_last_dim, const char *name) {
   using namespace transformer_engine;
   MultiTensorGroupGemmInputArgs args{};
   *avg_first_dim = 0;
@@ -626,7 +626,9 @@ inline MultiTensorGroupGemmInputArgs build_grouped_gemm_multi_inputA_args(
     *avg_first_dim += static_cast<int64_t>(first_dim);
     *avg_last_dim += static_cast<int64_t>(last_dim);
 
-    if (requires_scale_inv) {
+    const bool scale_inv_needed = is_fp8_dtype(t->dtype()) || is_nvfp_scaling(t->scaling_mode) ||
+                                  is_fp8_block_scaling(t->scaling_mode);
+    if (scale_inv_needed) {
       NVTE_CHECK(scale_inv.has_data(), "Grouped GEMM: ", name, "_list tensor ", i,
                  " requires scale_inv.");
       args.scale_inv_ptrs[i] = scale_inv.dptr;
@@ -1707,8 +1709,6 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
       transformer_engine::is_nvfp_scaling(A_list_info.scaling_mode)) {
     NVTE_CHECK(A_list_info.with_gemm_swizzled_scales,
                "Grouped GEMM: A scales must be swizzled for GEMM (MXFP8/NVFP4).");
-    NVTE_CHECK(inputB->with_gemm_swizzled_scales,
-               "Grouped GEMM: B scales must be swizzled for GEMM (MXFP8/NVFP4).");
   }
 
   validate_grouped_gemm_outputs(num_tensors, a_rep_dtype, inputB->dtype(), {inputC_raw, outputD});
@@ -1751,10 +1751,9 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
     NVTE_CHECK(A_list_info.all_col, "Grouped GEMM: A_list is missing column-wise data");
     A_sel.dtype = A_list_info.col_dtype;
   }
-  const bool requires_a_scale_inv = is_fp8 || nvfp4 || fp8_block;
   a_multi_tensor_args = build_grouped_gemm_multi_inputA_args(
-      A_list, num_a_tensors, choice.use_rowwise, choice.storage_transposed, requires_a_scale_inv,
-      &avg_first_dim, &avg_last_dim, "A");
+      A_list, num_a_tensors, choice.use_rowwise, choice.storage_transposed, &avg_first_dim,
+      &avg_last_dim, "A");
 
   // Discrete A_list: per-tensor pointers come from `a_multi_tensor_args` (data/scale/amax).
   A_sel.scale_inv = nullptr;
