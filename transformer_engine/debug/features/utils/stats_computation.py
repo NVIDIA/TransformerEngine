@@ -348,6 +348,16 @@ def add_scale_inv_stats(recipe_name: str, columnwise: bool = False):
             return getattr(quantized_tensor, "_columnwise_scale_inv")
         return getattr(quantized_tensor, "_rowwise_scale_inv")
 
+    def nonzero_min(scale_inv):
+        # MXFP8/NVFP4 scale_inv is padded to a multiple of [128, 4] (or [4, 128]
+        # for columnwise) with zeros, so a plain .min() always returns 0. Mask
+        # those padding zeros out; if everything is zero (degenerate case) fall
+        # back to 0 so the buffer aggregation stays well-defined.
+        nz = scale_inv[scale_inv != 0]
+        if nz.numel() == 0:
+            return scale_inv.new_zeros(())
+        return nz.min()
+
     columnwise_suffix = "_columnwise" if columnwise else ""
     # Prepare stat names.
     stat_name_min = (
@@ -363,7 +373,7 @@ def add_scale_inv_stats(recipe_name: str, columnwise: bool = False):
 
     # Capture the attribute name inside lambdas via default args to avoid late binding.
     STATS[stat_name_min] = (
-        lambda x, aux_dict, _col=columnwise: get_scale_inv(aux_dict[recipe_name], _col).min(),
+        lambda x, aux_dict, _col=columnwise: nonzero_min(get_scale_inv(aux_dict[recipe_name], _col)),
         lambda buffers, _sn=stat_name_min: min(_get(buffers, _sn)),
     )
     STATS[stat_name_max] = (
