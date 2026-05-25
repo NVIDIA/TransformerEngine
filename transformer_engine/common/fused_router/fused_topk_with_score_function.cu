@@ -463,6 +463,8 @@ void fused_topk_with_score_function_forward_kernel_launcher(
   NVTE_CHECK(static_cast<int64_t>(num_tokens) * num_experts <= INT_MAX,
              "num_tokens * num_experts exceeds INT_MAX (kernel uses int offsets), got ",
              static_cast<int64_t>(num_tokens) * num_experts);
+  NVTE_CHECK(score_function >= 0 && score_function <= 2,
+             "Unsupported score_function: ", score_function);
   if (group_topk > 0) {
     NVTE_CHECK(topk % group_topk == 0, "topk must be divisible by group_topk, got topk=", topk,
                " group_topk=", group_topk);
@@ -496,11 +498,11 @@ void fused_topk_with_score_function_forward_kernel_launcher(
     NVTE_CHECK_CUDA(cudaGetLastError());
   };
 
-  // Dispatch: small topk uses the simple kernel (no async loader overhead);
-  // large topk uses the optimized kernel with radix selection + persistent grid.
-  // Threshold configurable via NVTE_RADIX_TOPK_THRESHOLD (default 8).
-  if (topk < get_radix_topk_threshold()) {
-    // Simple path: no async loader, no persistent grid — lower overhead for small K.
+  // Dispatch: use radix only when it is profitable and supported. Otherwise use the
+  // naive path, which handles very large expert counts without the radix histogram limit.
+  const bool use_radix = topk >= get_radix_topk_threshold() && num_experts <= kMaxExpertsRadixTopk;
+  if (!use_radix) {
+    // Simple path: no async loader, no persistent grid.
     // Uses the exact upstream kernel structure with runtime score_function dispatch.
     check_shared_memory_capacity_num_experts(other_shmem, num_experts);
 
@@ -516,9 +518,6 @@ void fused_topk_with_score_function_forward_kernel_launcher(
     launch_simple(fused_topk_forward_simple_kernel<DataType, BiasType, TopkFuncType::Naive>);
   } else {
     // Optimized path: async loader + persistent grid + radix topk.
-    NVTE_CHECK(num_experts <= kMaxExpertsRadixTopk,
-               "Radix topk requires num_experts <= ", kMaxExpertsRadixTopk,
-               " (packed 8-bit histogram), got ", num_experts, ".");
     switch (score_function) {
       case 0:
         launch(fused_topk_with_score_function_forward_kernel<DataType, BiasType,
