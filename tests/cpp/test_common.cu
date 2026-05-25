@@ -1052,8 +1052,7 @@ std::array<size_t, 4> get_scale_tensor_dims(const size_t rows,
 }
 
 GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
-                                    const NVTEScalingMode scaling_mode,
-                                    bool enforce_grouped_gemm_alignment) {
+                                    const NVTEScalingMode scaling_mode) {
   NVTE_CHECK(!tensors.empty(), "No tensors provided for grouped tensor build.");
 
   // Check which data layouts are available (all tensors must have the same)
@@ -1270,22 +1269,6 @@ GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
     nvte_set_grouped_tensor_param(h, kNVTEGroupedColumnwiseScaleInv, &scale_tensor,
                                   sizeof(scale_tensor));
   } else if (scaling_mode == NVTE_MXFP8_1D_SCALING) {
-    // The grouped GEMM setup kernel now computes per-tensor scale offsets via
-    // compute_grouped_scale_inv_offset + padded_mxfp8_scale_inv_bytes, which sums
-    // the padded (roundup(., 128) x roundup(./32, 4)) scale tile sizes — so dims
-    // only need to satisfy the MXFP8 block alignment of 32, not 128. (Previously
-    // this assertion enforced /128 alignment because the old setup kernel computed
-    // offsets as data_offset / 32, which silently mismatched for unaligned dims.)
-    if (enforce_grouped_gemm_alignment) {
-      for (size_t i = 0; i < num_tensors; ++i) {
-        NVTE_CHECK(first_dims[i] % 32 == 0,
-                   "MXFP8 grouped GEMM test: first_dim must be divisible by 32, got ",
-                   first_dims[i]);
-        NVTE_CHECK(last_dims[i] % 32 == 0,
-                   "MXFP8 grouped GEMM test: last_dim must be divisible by 32, got ",
-                   last_dims[i]);
-      }
-    }
     // MXFP8: E8M0 scale_inv per block of 32 elements (1 byte per scale element).
     if (has_rowwise) {
       auto [row_buffer, row_total] = gather_scale_inv(
@@ -1312,9 +1295,6 @@ GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
                                   sizeof(swizzled));
   } else if (scaling_mode == NVTE_BLOCK_SCALING_1D || scaling_mode == NVTE_BLOCK_SCALING_2D) {
     // FP8 block scaling: float32 scale_inv per block of 128 elements.
-    // Unlike MXFP8/NVFP4, dims are not required to be multiples of the block size — the
-    // quantizer and padded_block_{1d,2d}_scale_inv_floats both use ceildiv, so the
-    // `enforce_grouped_gemm_alignment` flag intentionally has no effect here.
     if (has_rowwise) {
       auto [row_buffer, row_total] = gather_scale_inv(
           /*bytes_per_elem=*/sizeof(float),
@@ -1336,19 +1316,6 @@ GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
       nvte_set_grouped_tensor_param(h, kNVTEGroupedColumnwiseScaleInv, &col_tensor, sizeof(col_tensor));
     }
   } else if (scaling_mode == NVTE_NVFP4_1D_SCALING) {
-    // NVFP4 quantize (optimized BF16 path) requires dims % 32 for TMA 16B alignment.
-    if (enforce_grouped_gemm_alignment) {
-      for (size_t i = 0; i < num_tensors; ++i) {
-        NVTE_CHECK(first_dims[i] % 32 == 0,
-                   "NVFP4 grouped GEMM test: first_dim must be divisible by 32 "
-                   "(NVFP4 quantize TMA alignment), got ",
-                   first_dims[i]);
-        NVTE_CHECK(last_dims[i] % 32 == 0,
-                   "NVFP4 grouped GEMM test: last_dim must be divisible by 32 "
-                   "(NVFP4 quantize TMA alignment), got ",
-                   last_dims[i]);
-      }
-    }
     // NVFP4: E4M3 scale_inv per block of 16 elements (swizzled for GEMM, 1 byte per scale).
     if (has_rowwise) {
       auto [row_buffer, row_total] = gather_scale_inv(

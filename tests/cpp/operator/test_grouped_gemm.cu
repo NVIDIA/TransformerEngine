@@ -82,9 +82,9 @@ inline NVTEScalingMode b_scaling_mode(InputRecipe recipe) {
   }
 }
 
-// Mul128 cases use dims that are multiples of 128 — full functionality across all recipes.
-// kAllSameMul32 uses dims that are multiples of 32 but not 128, so each expert's scale_inv
-// is padded.
+// Mul128 cases use dims that are multiples of 128 - full functionality across all recipes.
+// kAllSameMul32 uses dims that are multiples of 32 but not 128; for recipes with padded
+// grouped scale_inv storage, it exercises per-expert scale_inv offsets.
 enum class ShapeCase {
   kAllSameMul128,
   kSameFirstMul128,
@@ -234,6 +234,7 @@ std::vector<std::tuple<size_t, size_t, size_t>> make_shapes(ShapeCase scase) {
 
 constexpr size_t kCublasGroupedGemmVersion = 130300;        // Blackwell-only grouped GEMM
 constexpr size_t kCublasGroupedGemmHopperVersion = 130400;  // adds Hopper support
+constexpr size_t kCublasWorkspaceBytes = 32ull * 1024 * 1024;
 
 inline std::string grouped_gemm_skip_reason(const TestParams& params) {
   const size_t cublas_ver = transformer_engine::cuda::cublas_version();
@@ -344,14 +345,13 @@ inline GroupedGemmRefSetup make_grouped_gemm_ref(const TestParams& params) {
   std::vector<NVTETensor> A_ptrs(s.num_gemms), B_ptrs(s.num_gemms), D_ptrs(s.num_gemms);
   std::vector<NVTETensor> workspace_ptrs(s.num_gemms, nullptr);
   std::vector<NVTETensor> bias_ptrs(s.num_gemms, nullptr), gelu_ptrs(s.num_gemms, nullptr);
-  constexpr size_t cublas_ws_bytes = 32ull * 1024 * 1024;
   s.workspaces.reserve(s.num_gemms);
   for (size_t i = 0; i < s.num_gemms; ++i) {
     A_ptrs[i] = s.A_tensors[i].data();
     B_ptrs[i] = s.B_tensors[i].data();
     D_ptrs[i] = s.D_multi[i].data();
     s.workspaces.emplace_back(Tensor("workspace" + std::to_string(i),
-                                     std::vector<size_t>{cublas_ws_bytes}, DType::kByte));
+                                     std::vector<size_t>{kCublasWorkspaceBytes}, DType::kByte));
     workspace_ptrs[i] = s.workspaces.back().data();
   }
   nvte_multi_tensor_gemm(A_ptrs.data(), B_ptrs.data(), D_ptrs.data(), bias_ptrs.data(),
@@ -472,10 +472,9 @@ void run_grouped_gemm_case(const TestParams& params) {
 
   AlphaBetaTensors ab = make_alpha_beta(num_gemms);
 
-  constexpr size_t cublas_ws_bytes = 32ull * 1024 * 1024;
   const size_t setup_ws_bytes = nvte_get_grouped_gemm_setup_workspace_size(num_gemms);
   Tensor setup_ws("setup_ws", std::vector<size_t>{setup_ws_bytes}, DType::kByte);
-  Tensor cublas_ws("cublas_ws", std::vector<size_t>{cublas_ws_bytes}, DType::kByte);
+  Tensor cublas_ws("cublas_ws", std::vector<size_t>{kCublasWorkspaceBytes}, DType::kByte);
 
   GroupedMatmulConfigWrapper grouped_config;
   if (ref.use_split_accum) {
@@ -543,10 +542,9 @@ void run_grouped_gemm_discrete_out_case(const TestParams& params) {
 
   AlphaBetaTensors ab = make_alpha_beta(num_gemms);
 
-  constexpr size_t cublas_ws_bytes = 32ull * 1024 * 1024;
   const size_t setup_ws_bytes = nvte_get_grouped_gemm_setup_workspace_size(num_gemms);
   Tensor setup_ws("setup_ws", std::vector<size_t>{setup_ws_bytes}, DType::kByte);
-  Tensor cublas_ws("cublas_ws", std::vector<size_t>{cublas_ws_bytes}, DType::kByte);
+  Tensor cublas_ws("cublas_ws", std::vector<size_t>{kCublasWorkspaceBytes}, DType::kByte);
 
   GroupedMatmulConfigWrapper grouped_config;
   if (ref.use_split_accum) {
@@ -629,10 +627,9 @@ void run_grouped_gemm_discrete_in_case(const TestParams& params) {
 
   AlphaBetaTensors ab = make_alpha_beta(num_gemms);
 
-  constexpr size_t cublas_ws_bytes = 32ull * 1024 * 1024;
   const size_t setup_ws_bytes = nvte_get_grouped_gemm_setup_workspace_size(num_gemms);
   Tensor setup_ws("setup_ws", std::vector<size_t>{setup_ws_bytes}, DType::kByte);
-  Tensor cublas_ws("cublas_ws", std::vector<size_t>{cublas_ws_bytes}, DType::kByte);
+  Tensor cublas_ws("cublas_ws", std::vector<size_t>{kCublasWorkspaceBytes}, DType::kByte);
 
   std::vector<NVTETensor> A_list_ptrs;
   A_list_ptrs.reserve(num_gemms);
@@ -731,7 +728,8 @@ const std::vector<TestParams> kTestParams = {
     {InputRecipe::kFP8BlockScaling1D1D, false, false, ShapeCase::kAllSameMul128, false},
     // FP8 Block Scaling with NULL C
     {InputRecipe::kFP8BlockScaling1D1D, true, false, ShapeCase::kAllSameMul128, true},
-    // Dims multiples of 32 but not 128 — exercises scale_inv padding offsets.
+    // Dims multiples of 32 but not 128 exercise padded scale_inv offsets for recipes that use
+    // padded grouped scale_inv storage.
     {InputRecipe::kMXFP8, true, false, ShapeCase::kAllSameMul32, false},
     {InputRecipe::kMXFP8, false, true, ShapeCase::kAllSameMul32, false},
     {InputRecipe::kMXFP8, false, false, ShapeCase::kAllSameMul32, false},

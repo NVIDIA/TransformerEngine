@@ -152,7 +152,8 @@ struct GroupedGemmSetupWorkspace {
   void **D_ptrs = nullptr;
   float **alpha_ptrs = nullptr;
   float **beta_ptrs = nullptr;
-  // Per-tensor scale_inv pointers (float* for tensor scaling, E8M0* for MXFP8, E4M3* for NVFP4)
+  // Per-tensor scale_inv pointers (float* for tensor/FP8 block scaling, E8M0* for MXFP8,
+  // E4M3* for NVFP4)
   void **a_scale_inv_ptrs = nullptr;
   void **b_scale_inv_ptrs = nullptr;
   // Storage dimensions for cuBLAS matrix layouts
@@ -203,6 +204,10 @@ struct GroupedGemmSetupWorkspace {
     place(ws.a_scale_inv_ptrs, ptr_size);
     align_ptr();
     place(ws.b_scale_inv_ptrs, ptr_size);
+    // Int/float arrays follow without extra align_ptr(): cuBLAS only requires 16-byte
+    // alignment for the pointer arrays above; int and float need just their natural
+    // 4-byte alignment. The offset is 16-byte aligned after the last align_ptr() and
+    // each subsequent place() adds N*4 bytes, so it stays a multiple of 4.
     place(ws.a_rows, int_size);
     place(ws.a_cols, int_size);
     place(ws.b_rows, int_size);
@@ -406,6 +411,26 @@ inline bool is_compatible_grouped_scaling_mode(NVTEScalingMode a_mode, NVTEScali
            !(a_mode == NVTE_BLOCK_SCALING_2D && b_mode == NVTE_BLOCK_SCALING_2D);
   }
   return a_mode == b_mode;
+}
+
+// Validates A/B scaling-mode pairing and Hopper-only FP8 block scaling support.
+// Call from every grouped GEMM entry point after operand scaling modes are known.
+inline void validate_grouped_gemm_scaling_modes(NVTEScalingMode a_mode, NVTEScalingMode b_mode,
+                                                int sm, const char *api_name) {
+  if (a_mode == NVTE_BLOCK_SCALING_2D && b_mode == NVTE_BLOCK_SCALING_2D) {
+    NVTE_CHECK(false, api_name,
+               ": Only 1D by 1D, 1D by 2D, and 2D by 1D FP8 block scaling grouped GEMM is "
+               "supported, but got 2D by 2D.");
+  }
+  NVTE_CHECK(is_compatible_grouped_scaling_mode(a_mode, b_mode), api_name,
+             ": incompatible A/B scaling modes.");
+  if (transformer_engine::is_fp8_block_scaling(a_mode) ||
+      transformer_engine::is_fp8_block_scaling(b_mode)) {
+    NVTE_CHECK(sm >= 90 && sm < 100, api_name,
+               ": FP8 block scaling grouped GEMM is only supported on Hopper (SM90-SM99), "
+               "not SM",
+               sm, ".");
+  }
 }
 
 struct GroupedGemmConfig {
@@ -896,9 +921,8 @@ inline void set_fp8_block_scaling_scale_pointers(cublasLtMatmulDescOpaque_t &mat
       "FP8 block scaling grouped GEMM requires cuBLAS 13.4+, but run-time cuBLAS version is ",
       transformer_engine::cuda::cublas_version());
 
-  // 2D by 2D is not supported
   NVTE_CHECK(!(a_scaling_mode == NVTE_BLOCK_SCALING_2D && b_scaling_mode == NVTE_BLOCK_SCALING_2D),
-             "Only 1D by 1D, 1D by 2D, and 2D by 1D block scaling GEMM is supported, "
+             "Only 1D by 1D, 1D by 2D, and 2D by 1D block scaling grouped GEMM is supported, "
              "but got 2D by 2D");
 
   const cublasLtMatmulMatrixScale_t scale_mode_a =
@@ -1575,6 +1599,8 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
   // mirror the non-grouped GEMM logic for FP8 layout constraints.
   auto A_sel = select_grouped_operand(inputA, static_cast<bool>(transa), /*is_A=*/true);
   auto B_sel = select_grouped_operand(inputB, static_cast<bool>(transb), /*is_A=*/false);
+  validate_grouped_gemm_scaling_modes(A_sel.scaling_mode, B_sel.scaling_mode, sm,
+                                      "nvte_grouped_gemm");
   validate_nvfp4_grouped_gemm_support(A_sel, B_sel, use_per_group_alpha_beta);
   validate_fp8_block_grouped_gemm_support(A_sel, B_sel, sm);
 
@@ -1675,8 +1701,8 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
   NVTE_CHECK(a_is_fp8 == b_is_fp8, "Grouped GEMM: A and B must both be FP8 or both be non-FP8.");
   NVTE_CHECK(a_is_fp4 == b_is_fp4,
              "Grouped GEMM: A and B must both be NVFP4 or both be non-NVFP4.");
-  NVTE_CHECK(is_compatible_grouped_scaling_mode(A_list_info.scaling_mode, inputB->scaling_mode),
-             "Grouped GEMM: incompatible A/B scaling modes.");
+  validate_grouped_gemm_scaling_modes(A_list_info.scaling_mode, inputB->scaling_mode, sm,
+                                      "nvte_grouped_gemm_with_discrete_inputA");
   if (transformer_engine::is_mxfp_scaling(A_list_info.scaling_mode) ||
       transformer_engine::is_nvfp_scaling(A_list_info.scaling_mode)) {
     NVTE_CHECK(A_list_info.with_gemm_swizzled_scales,
@@ -1817,6 +1843,8 @@ void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
   // mirror the non-grouped GEMM logic for FP8 layout constraints.
   auto A_sel = select_grouped_operand(inputA, static_cast<bool>(transa), /*is_A=*/true);
   auto B_sel = select_grouped_operand(inputB, static_cast<bool>(transb), /*is_A=*/false);
+  validate_grouped_gemm_scaling_modes(A_sel.scaling_mode, B_sel.scaling_mode, sm,
+                                      "nvte_grouped_gemm_with_discrete_out");
   validate_nvfp4_grouped_gemm_support(A_sel, B_sel, use_per_group_alpha_beta);
   validate_fp8_block_grouped_gemm_support(A_sel, B_sel, sm);
 
