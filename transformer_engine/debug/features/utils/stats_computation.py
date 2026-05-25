@@ -373,7 +373,9 @@ def add_scale_inv_stats(recipe_name: str, columnwise: bool = False):
 
     # Capture the attribute name inside lambdas via default args to avoid late binding.
     STATS[stat_name_min] = (
-        lambda x, aux_dict, _col=columnwise: nonzero_min(get_scale_inv(aux_dict[recipe_name], _col)),
+        lambda x, aux_dict, _col=columnwise: nonzero_min(
+            get_scale_inv(aux_dict[recipe_name], _col)
+        ),
         lambda buffers, _sn=stat_name_min: min(_get(buffers, _sn)),
     )
     STATS[stat_name_max] = (
