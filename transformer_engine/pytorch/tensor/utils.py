@@ -436,14 +436,33 @@ def _cast_master_weights_to_fp8_blockwise_scaling(
         max_fp8 = 57344.0
     else:
         raise ValueError(f"Unsupported FP8 dtype: {fp8_dtype}")
-    multi_tensor_applier(
-        multi_tensor_compute_scale_and_scale_inv,
-        dummy_overflow_buf,
-        [amaxes, scales, scale_invs],
-        max_fp8,
-        force_pow_2_scales,
-        amax_epsilon,
-    )
+    if device.type == "musa":
+        finfo_max = torch.finfo(torch.float32).max
+        for amax, scale, scale_inv in zip(amaxes, scales, scale_invs):
+            amax_for_scale = torch.where(
+                amax < amax_epsilon, torch.full_like(amax, amax_epsilon), amax
+            )
+            invalid_amax = torch.isinf(amax_for_scale) | (amax_for_scale == 0) | torch.isnan(
+                amax_for_scale
+            )
+            scale_value = max_fp8 / amax_for_scale
+            scale_value = torch.where(
+                torch.isinf(scale_value), torch.full_like(scale_value, finfo_max), scale_value
+            )
+            if force_pow_2_scales:
+                scale_value = torch.pow(2.0, torch.floor(torch.log2(scale_value)))
+            scale_value = torch.where(invalid_amax, torch.ones_like(scale_value), scale_value)
+            scale.copy_(scale_value)
+            scale_inv.copy_(torch.reciprocal(scale_value))
+    else:
+        multi_tensor_applier(
+            multi_tensor_compute_scale_and_scale_inv,
+            dummy_overflow_buf,
+            [amaxes, scales, scale_invs],
+            max_fp8,
+            force_pow_2_scales,
+            amax_epsilon,
+        )
 
     # ---------------------------------------------------------------------------------------------
     # Step 4: Cast master weights to FP8.

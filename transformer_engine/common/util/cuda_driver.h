@@ -57,15 +57,20 @@ void ensure_context_exists();
     const CUresult status_NVTE_CHECK_CUDA_DRIVER = (expr);                                       \
     if (status_NVTE_CHECK_CUDA_DRIVER != CUDA_SUCCESS) {                                         \
       const char *desc_NVTE_CHECK_CUDA_DRIVER;                                                   \
-      ::transformer_engine::cuda_driver::call("cuGetErrorString", status_NVTE_CHECK_CUDA_DRIVER, \
+      ::transformer_engine::cuda_driver::call(NVTE_STRINGIFY(cuGetErrorString),                    \
+                                              status_NVTE_CHECK_CUDA_DRIVER,                       \
                                               &desc_NVTE_CHECK_CUDA_DRIVER);                     \
       NVTE_ERROR("CUDA Error: ", desc_NVTE_CHECK_CUDA_DRIVER);                                   \
     }                                                                                            \
   } while (false)
 
-#define NVTE_CALL_CHECK_CUDA_DRIVER(symbol, ...)                                           \
-  do {                                                                                     \
-    NVTE_CHECK_CUDA_DRIVER(::transformer_engine::cuda_driver::call(#symbol, __VA_ARGS__)); \
+#define NVTE_STRINGIFY_IMPL(symbol) #symbol
+#define NVTE_STRINGIFY(symbol) NVTE_STRINGIFY_IMPL(symbol)
+
+#define NVTE_CALL_CHECK_CUDA_DRIVER(symbol, ...)                                            \
+  do {                                                                                      \
+    NVTE_CHECK_CUDA_DRIVER(                                                                 \
+        ::transformer_engine::cuda_driver::call(NVTE_STRINGIFY(symbol), __VA_ARGS__));      \
   } while (false)
 
 #endif  // TRANSFORMER_ENGINE_COMMON_UTIL_CUDA_DRIVER_H_

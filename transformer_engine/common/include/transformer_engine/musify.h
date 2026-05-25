@@ -53,6 +53,14 @@
 #define cuMemUnmap muMemUnmap
 #define cuPointerGetAttribute muPointerGetAttribute
 #define cuCtxGetCurrent muCtxGetCurrent
+#define cuStreamGetCtx muStreamGetCtx
+#define cuDevicePrimaryCtxRetain muDevicePrimaryCtxRetain
+#define cuCtxSetCurrent muCtxSetCurrent
+#define cuDevicePrimaryCtxRelease muDevicePrimaryCtxRelease
+#define cuModuleUnload muModuleUnload
+#define cuModuleLoadDataEx muModuleLoadDataEx
+#define cuModuleGetFunction muModuleGetFunction
+#define cuFuncSetCacheConfig muFuncSetCacheConfig
 
 #define CUDA_SUCCESS MUSA_SUCCESS
 #define CUDA_ERROR_NOT_PERMITTED MUSA_ERROR_NOT_PERMITTED

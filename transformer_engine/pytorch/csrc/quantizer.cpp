@@ -588,7 +588,11 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
                                  std::vector<size_t>{sinv0, sinv1});
   }
 
+#if NVTE_USE_MUSA
+  if (columnwise_usage && block_scaling_dim != 2) {
+#else
   if (columnwise_usage) {
+#endif
     std::vector<int64_t> torch_columnwise_shape;
     std::vector<size_t> columnwise_shape;
     NVTE_CHECK(torch_shape.size() == shape.size(), "Shape expected to match torch shape. Shape ",
@@ -606,11 +610,19 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     auto scale_shape = get_scale_shape(shape, true);
     size_t sinv0 = scale_shape[0];
     size_t sinv1 = scale_shape[1];
+#if NVTE_USE_MUSA
+    data_colwise = at::empty(torch_shape, opts);
+#else
     data_colwise = at::empty(torch_columnwise_shape, opts);
+#endif
     scale_inv_colwise =
         at::empty({static_cast<int64_t>(sinv0), static_cast<int64_t>(sinv1)}, scale_opts);
 
+#if NVTE_USE_MUSA
+    tensor.set_columnwise_data(data_colwise.data_ptr(), this->dtype, shape);
+#else
     tensor.set_columnwise_data(data_colwise.data_ptr(), this->dtype, columnwise_shape);
+#endif
     tensor.set_columnwise_scale_inv(scale_inv_colwise.data_ptr(), DType::kFloat32,
                                     std::vector<size_t>{sinv0, sinv1});
   }
@@ -669,6 +681,9 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::convert_and_update_te
       return std::vector<size_t>();
     }
     std::vector<size_t> shape = getTensorShape(*columnwise_data);
+#if NVTE_USE_MUSA
+    return shape;
+#else
     std::vector<size_t> shape_transposed(shape.size());
     for (size_t i = 0; i + 1 < shape.size(); ++i) {
       shape_transposed[i] = shape[i + 1];
@@ -677,6 +692,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::convert_and_update_te
       shape_transposed[shape.size() - 1] = shape[0];
     }
     return shape_transposed;
+#endif
   };
   std::vector<size_t> shape;
   if (rowwise_data) {
@@ -720,7 +736,11 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::convert_and_update_te
   }
 
   // Coerce column-wise data
+#if NVTE_USE_MUSA
+  if (columnwise_usage && !is_2D_scaled) {
+#else
   if (columnwise_usage) {
+#endif
     std::vector<size_t> columnwise_shape;
     std::vector<int64_t> torch_columnwise_shape;
     if (torch_shape.size() > 0) {
@@ -734,7 +754,11 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::convert_and_update_te
       }
     }
     if (!columnwise_data) {
+#if NVTE_USE_MUSA
+      columnwise_data = at::empty(torch_shape, opts);
+#else
       columnwise_data = at::empty(torch_columnwise_shape, opts);
+#endif
       tensor.attr("_columnwise_data") = *columnwise_data;
     }
     if (!columnwise_scale_inv) {
@@ -767,7 +791,11 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::convert_and_update_te
     const auto scale_inv_rowwise_shape = getTensorShape(scale_inv_rowwise);
     ret.set_rowwise_scale_inv(scale_inv_rowwise_dptr, DType::kFloat32, scale_inv_rowwise_shape);
   }
+#if NVTE_USE_MUSA
+  if (columnwise_usage && !is_2D_scaled) {
+#else
   if (columnwise_usage) {
+#endif
     const at::Tensor& data_colwise = tensor.attr("_columnwise_data").cast<at::Tensor>();
     const at::Tensor& scale_inv_colwise = tensor.attr("_columnwise_scale_inv").cast<at::Tensor>();
     void* scale_inv_colwise_dptr = scale_inv_colwise.data_ptr();
@@ -818,11 +846,20 @@ std::vector<size_t> Float8BlockQuantizer::get_scale_shape(const std::vector<size
     size_t sinv1 = 0;
     if (block_scaling_dim == 2) {
       sinv0 = ceildiv(m_dim, kBlockLen);
+#if NVTE_USE_MUSA
+      sinv1 = ceildiv(k_dim, kBlockLen);
+#else
       sinv1 = roundup(ceildiv(k_dim, kBlockLen), 4);
+#endif
     } else if (block_scaling_dim == 1) {
       // default rowwise scaling factor shape already transpose the scaling factor so it's GEMM_READY
+#if NVTE_USE_MUSA
+      sinv0 = m_dim;
+      sinv1 = ceildiv(k_dim, kBlockLen);
+#else
       sinv0 = ceildiv(k_dim, kBlockLen);
       sinv1 = roundup(m_dim, 4);
+#endif
     } else {
       NVTE_ERROR(
           "Unsupported block_scaling_dim in create_tensor rowwise."
@@ -835,11 +872,21 @@ std::vector<size_t> Float8BlockQuantizer::get_scale_shape(const std::vector<size
     size_t sinv0 = 0;
     size_t sinv1 = 0;
     if (block_scaling_dim == 2) {
+#if NVTE_USE_MUSA
+      // not needed for MUSA gemm
+      sinv0 = 0;
+      sinv1 = 0;
+#else
       sinv0 = ceildiv(k_dim, kBlockLen);
       sinv1 = roundup(ceildiv(m_dim, kBlockLen), 4);
+#endif
     } else if (block_scaling_dim == 1) {
       sinv0 = ceildiv(m_dim, kBlockLen);
+#if NVTE_USE_MUSA
+      sinv1 = k_dim;
+#else
       sinv1 = roundup(k_dim, 4);
+#endif
     } else {
       NVTE_ERROR(
           "Unsupported block_scaling_dim in create_tensor columnwise."
@@ -1524,7 +1571,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
       return at::from_blob(
           data_ptr, std::vector<int64_t>{1},
           [](void*) {},  // deleter doing nothing since it doesn't own the data
-          at::device(at::kCUDA).dtype(torch::kFloat32));
+          at::device(at::kMUSA).dtype(torch::kFloat32));
     };
     if (rowwise_usage) {
       amax_tensors.push_back(make_amax_tensor(out.get_amax().data_ptr));

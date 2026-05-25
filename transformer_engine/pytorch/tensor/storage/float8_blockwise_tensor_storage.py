@@ -17,6 +17,7 @@ from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 from ...constants import TE_DType_To_Torch
 
 from ...utils import _empty_tensor
+from ... import USE_MUSA
 
 
 class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
@@ -283,6 +284,8 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         # pylint: disable=missing-function-docstring
         if self._rowwise_data is not None:
             return self._rowwise_data.size(*args, **kwargs)
+        if USE_MUSA:
+            return self._columnwise_data.size(*args, **kwargs)
         dims = list(self._columnwise_data.size(*args, **kwargs))
         reordered = []
         for i in range(1, len(dims)):
@@ -295,6 +298,11 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         Update columnwise data and columnwise scale inv. Can only be used when using 2D scaling.
         """
         assert self._is_2D_scaled, "Cannot create columnwise data when not using 2D scaling."
+
+        if USE_MUSA and self._is_2D_scaled:
+            self._columnwise_data = None
+            self._columnwise_scale_inv = None
+            return
 
         rowwise_data = self._rowwise_data
         if not rowwise_data.is_contiguous():
@@ -378,6 +386,10 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
                 assert (
                     self._rowwise_data is not None and self._rowwise_scale_inv is not None
                 ), "Cannot update to rowwise and columnwise usage because rowwise data is None."
+                if USE_MUSA:
+                    self._columnwise_data = None
+                    self._columnwise_scale_inv = None
+                    return
                 if self._columnwise_data is None or self._columnwise_scale_inv is None:
                     self._create_columnwise()
             return

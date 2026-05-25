@@ -14,9 +14,11 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include "../../common.h"
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
 #include "../fp8/dequantize_fp8.cuh"
 #include "../mxfp8/dequantize_mxfp8.cuh"
 #include "../nvfp4/dequantize_nvfp4.cuh"
+#endif
 
 namespace transformer_engine {
 namespace dispatch {
@@ -30,19 +32,25 @@ inline void dequantize_helper(const Tensor &input, Tensor *output, cudaStream_t 
       NVTE_CHECK(is_fp8_dtype(input.dtype()), "Input must have FP8 type.");
       NVTE_CHECK(!is_fp8_dtype(output->dtype()), "Output must be in higher precision.");
       NVTE_CHECK(output->shape() == input.shape(), "Input and output shapes need to match.");
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
       fp8::dequantize(input, output, stream);
+#endif
       break;
     }
     case NVTE_MXFP8_1D_SCALING: {
       if (is_supported_by_CC_100()) {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
         mxfp8::dequantize(input, output, stream);
+#endif
       } else {
         NVTE_ERROR("MXFP8 Dequantization is NOT supported by architectures < 10.0");
       }
       break;
     }
     case NVTE_NVFP4_1D_SCALING: {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
       nvfp4::dequantize(input, output, stream);
+#endif
       break;
     }
     default:

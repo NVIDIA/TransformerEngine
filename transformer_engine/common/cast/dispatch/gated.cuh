@@ -16,8 +16,10 @@
 #include "../../common.h"
 #include "../../transpose/transpose.h"
 #include "../../utils.cuh"
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
 #include "../fp8/gated_fp8.cuh"
 #include "../mxfp8/gated_mxfp8.cuh"
+#endif
 
 namespace transformer_engine {
 namespace dispatch {
@@ -49,10 +51,14 @@ void quantize_gated_fwd_helper(const NVTETensor nvte_input, NVTETensor nvte_outp
       const bool use_tma_kernels = (cols % 32 == 0) && is_supported_by_CC_100();
       if (use_tma_kernels) {
         Tensor dummy_grad_tensor;
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
         fp8::cast_gated_tma</*IS_BWD=*/false, ParamOP, ActOP, nullptr>(input, dummy_grad_tensor,
                                                                        output, p, stream);
+#endif
       } else {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
         fp8::cast_gated_fwd<ParamOP, ActOP>(input, output, p, stream);
+#endif
       }
       if (is_fp8_dtype(output->dtype()) && output->has_columnwise_data()) {
         // FP8 kernel only populates row-wise data, so perform
@@ -86,8 +92,10 @@ void quantize_gated_fwd_helper(const NVTETensor nvte_input, NVTETensor nvte_outp
       NVTE_CHECK(is_supported_by_CC_100(),
                  "Gated FWD NVTE_MXFP8_1D_SCALING is only supported on SM 10.0+");
       Tensor dummy_grad_tensor;
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
       mxfp8::quantize_gated</*IS_BWD=*/false, ParamOP, ActOP, nullptr>(input, dummy_grad_tensor,
                                                                        output, p, stream);
+#endif
       break;
     }
     default:
@@ -139,10 +147,14 @@ void quantize_gated_bwd_helper(const NVTETensor nvte_grad, const NVTETensor nvte
     case NVTE_DELAYED_TENSOR_SCALING: {
       const bool use_tma_kernels = (cols % 32 == 0) && is_supported_by_CC_100();
       if (use_tma_kernels) {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
         fp8::cast_gated_tma</*IS_BWD=*/true, ParamOP, ActOP, DActOP>(gated_input, grad, output, p,
                                                                      stream);
+#endif
       } else {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
         fp8::cast_gated_bwd<ParamOP, ActOP, DActOP>(gated_input, grad, output, p, stream);
+#endif
       }
       if (is_fp8_dtype(output->dtype()) && output->has_columnwise_data()) {
         // FP8 kernel only populates row-wise data, so perform
@@ -176,8 +188,10 @@ void quantize_gated_bwd_helper(const NVTETensor nvte_grad, const NVTETensor nvte
       NVTE_CHECK(is_supported_by_CC_100(),
                  "Gated BWD NVTE_MXFP8_1D_SCALING is only supported on SM 10.0+");
 
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
       mxfp8::quantize_gated</*IS_BWD=*/true, ParamOP, ActOP, DActOP>(gated_input, grad, output, p,
                                                                      stream);
+#endif
       break;
     }
     default:

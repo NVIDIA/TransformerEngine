@@ -9,6 +9,8 @@ import math
 
 import torch
 
+USE_MUSA = hasattr(torch, "musa")
+
 from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 
 from ..mxfp8_tensor import MXFP8Tensor
@@ -541,7 +543,7 @@ class GroupedTensor:
                         scale_inv_offsets.append(total_scale_elements)
                 scale_inv = torch.empty(total_scale_elements, dtype=torch.float32, device=device)
 
-            if columnwise_usage:
+            if columnwise_usage and not (USE_MUSA and quantizer.block_scaling_dim == 2):
                 # Allocate columnwise data buffer (1D flattened, uint8)
                 columnwise_data = torch.empty(total_elements, dtype=torch.uint8, device=device)
                 # Columnwise scale inverse

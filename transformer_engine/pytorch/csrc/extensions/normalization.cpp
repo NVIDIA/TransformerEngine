@@ -10,7 +10,9 @@
 
 #include <torch_musa/csrc/core/MUSAGuard.h>
 #include <ATen/ops/torch__fused_rmsnorm_backward_native.h>
+#ifdef NVTE_SKIP_MUSA_UNCOMPATIBLE
 #include <torch_musa/csrc/aten/ops/RMSNorm.h>
+#endif
 
 namespace transformer_engine::pytorch {
 
@@ -415,6 +417,22 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
     }
   }
 
+#ifdef NVTE_SKIP_MUSA_UNCOMPATIBLE
+  const at::Tensor &th_input = input.cast<at::Tensor>();
+  const at::Tensor &th_weight = weight.cast<at::Tensor>();
+  at::Tensor rsigma_musa;
+
+  if (impl == Impl::UNFUSED || impl == Impl::FUSED_NORM_AMAX_FP8 ||
+      impl == Impl::FUSED_NORM_AMAX_NVFP4) {
+    at::Tensor th_out = unquantized_out.cast<at::Tensor>();
+    std::tie(th_out, rsigma_musa) = at::musa::FusedRMSNormForwardOut(
+        th_input, th_out, {th_input.size(-1)}, eps, th_weight);
+  } else {
+    at::Tensor th_out = out.cast<at::Tensor>();
+    std::tie(th_out, rsigma_musa) = at::musa::FusedRMSNormForwardOut(
+        th_input, th_out, {th_input.size(-1)}, eps, th_weight);
+  }
+#else
   // Query workspace size
   TensorWrapper workspace;
   NVTE_SCOPED_GIL_RELEASE({
@@ -436,6 +454,7 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
                      at::musa::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
                      zero_centered_gamma, at::musa::getCurrentCUDAStream());
   });
+#endif
 
   // Quantize output if needed
   switch (impl) {
@@ -454,6 +473,9 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
     }
   }
 
+#ifdef NVTE_SKIP_MUSA_UNCOMPATIBLE
+  return {out, py::none(), py::cast(rsigma_musa)};
+#endif
   return {out, py::none(), py::cast(rsigma_py)};
 }
 

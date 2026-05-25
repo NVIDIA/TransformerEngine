@@ -43,12 +43,12 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fw
 
   // Construct the output tensor
   at::Tensor probs =
-      at::empty({num_tokens, num_experts}, at::dtype(logits.scalar_type()).device(at::kCUDA));
+      at::empty({num_tokens, num_experts}, at::dtype(logits.scalar_type()).device(at::kMUSA));
   at::Tensor routing_map =
-      at::empty({num_tokens, num_experts}, at::dtype(at::kBool).device(at::kCUDA));
+      at::empty({num_tokens, num_experts}, at::dtype(at::kBool).device(at::kMUSA));
   // Intermediate output is used to store the output of the softmax/sigmoid function
   at::Tensor intermediate_output =
-      at::empty({num_tokens, num_experts}, at::dtype(at::kFloat).device(at::kCUDA));
+      at::empty({num_tokens, num_experts}, at::dtype(at::kFloat).device(at::kMUSA));
 
   auto logits_cu = makeTransformerEngineTensor(logits);
   auto probs_cu = makeTransformerEngineTensor(probs);
@@ -103,11 +103,11 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_score_for_moe_aux_loss_fwd(
   int score_function_value = score_function_map[score_function];
 
   // Construct the output tensor
-  at::Tensor scores = at::empty({num_tokens, num_experts}, at::dtype(at::kFloat).device(at::kCUDA));
+  at::Tensor scores = at::empty({num_tokens, num_experts}, at::dtype(at::kFloat).device(at::kMUSA));
   at::Tensor routing_map =
-      at::empty({num_tokens, num_experts}, at::dtype(at::kBool).device(at::kCUDA));
+      at::empty({num_tokens, num_experts}, at::dtype(at::kBool).device(at::kMUSA));
   at::Tensor intermediate_output =
-      at::empty({num_tokens, num_experts}, at::dtype(at::kFloat).device(at::kCUDA));
+      at::empty({num_tokens, num_experts}, at::dtype(at::kFloat).device(at::kMUSA));
 
   auto logits_cu = makeTransformerEngineTensor(logits);
   auto scores_cu = makeTransformerEngineTensor(scores);
@@ -147,8 +147,8 @@ std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd(at::Tensor probs,
   TORCH_CHECK(num_experts > 0, "num_experts must be greater than 0");
 
   // Create the output tensor
-  at::Tensor aux_loss = at::empty({}, at::dtype(probs.scalar_type()).device(at::kCUDA));
-  at::Tensor Const_buf = at::empty({}, at::dtype(at::kFloat).device(at::kCUDA));
+  at::Tensor aux_loss = at::empty({}, at::dtype(probs.scalar_type()).device(at::kMUSA));
+  at::Tensor Const_buf = at::empty({}, at::dtype(at::kFloat).device(at::kMUSA));
 
   auto probs_cu = makeTransformerEngineTensor(probs);
   auto tokens_per_expert_cu = makeTransformerEngineTensor(tokens_per_expert);
@@ -166,7 +166,7 @@ at::Tensor fused_moe_aux_loss_bwd(at::Tensor Const_buf, at::Tensor tokens_per_ex
                                   int num_cols, at::Tensor grad_aux_loss) {
   // Create the output tensor
   at::Tensor grad_probs =
-      at::empty({num_rows, num_cols}, at::dtype(grad_aux_loss.scalar_type()).device(at::kCUDA));
+      at::empty({num_rows, num_cols}, at::dtype(grad_aux_loss.scalar_type()).device(at::kMUSA));
 
   auto Const_buf_cu = makeTransformerEngineTensor(Const_buf);
   auto tokens_per_expert_cu = makeTransformerEngineTensor(tokens_per_expert);

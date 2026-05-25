@@ -10,6 +10,8 @@ from typing import Any, Optional, Tuple, Union
 
 import torch
 
+USE_MUSA = hasattr(torch, "musa")
+
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 from transformer_engine.common.recipe import Float8BlockScaling, Recipe
@@ -150,6 +152,18 @@ class Float8BlockQuantizer(Quantizer):
                 f"but got block_scaling_dim={self.block_scaling_dim}"
             )
 
+        if USE_MUSA:
+            if self.block_scaling_dim == 2:
+                scale_dim0 = (dim0 + self.block_len - 1) // self.block_len
+                scale_dim1 = (dim1 + self.block_len - 1) // self.block_len
+                if columnwise:
+                    return (0, 0)
+                return (scale_dim0, scale_dim1)
+
+            if columnwise:
+                return ((dim0 + self.block_len - 1) // self.block_len, dim1)
+            return (dim0, (dim1 + self.block_len - 1) // self.block_len)
+
         # 128x128 block scaling
         if self.block_scaling_dim == 2:
             scale_dim0 = (dim0 + self.block_len - 1) // self.block_len
@@ -185,6 +199,9 @@ class Float8BlockQuantizer(Quantizer):
         Tuple[int, ...]
             Column-wise data shape.
         """
+        if USE_MUSA:
+            return tuple(shape)
+
         colwise_shape = []
         if shape:
             colwise_shape.append(shape[-1])
@@ -232,7 +249,7 @@ class Float8BlockQuantizer(Quantizer):
         # Allocate buffers for column-scaled data
         columnwise_data = None
         columnwise_scale_inv = None
-        if self.columnwise_usage:
+        if self.columnwise_usage and not (USE_MUSA and self.block_scaling_dim == 2):
             columnwise_data = torch.empty(
                 self.get_columnwise_shape(shape),
                 dtype=torch.uint8,

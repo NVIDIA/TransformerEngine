@@ -90,7 +90,7 @@ void nvshmem_wait_on_current_stream(torch::Tensor signal, const std::string &wai
 torch::Tensor create_nvshmem_tensor(const std::vector<int64_t> &shape, c10::ScalarType dtype) {
 #ifdef NVTE_ENABLE_NVSHMEM
   auto option_gpu =
-      at::TensorOptions().dtype(dtype).device(at::kCUDA).device_index(c10::cuda::current_device());
+      at::TensorOptions().dtype(dtype).device(at::kMUSA).device_index(c10::cuda::current_device());
   auto size = torch::elementSize(dtype) *
               std::accumulate(shape.begin(), shape.end(), 1, std::multiplies<>());
   return at::from_blob(

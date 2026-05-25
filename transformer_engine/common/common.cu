@@ -123,7 +123,7 @@ void checkCuDriverContext(CUstream stream) {
   cuda_driver::ensure_context_exists();
 
   CUcontext ctx;
-  const CUresult driver_status = cuda_driver::call("cuStreamGetCtx", stream, &ctx);
+  const CUresult driver_status = cuda_driver::call(NVTE_STRINGIFY(cuStreamGetCtx), stream, &ctx);
   switch (driver_status) {
     case CUDA_SUCCESS:
       break;
@@ -137,7 +137,7 @@ void checkCuDriverContext(CUstream stream) {
 
     default:
       const char *desc_NVTE_CHECK_CUDA_DRIVER;
-      cuda_driver::call("cuGetErrorString", driver_status, &desc_NVTE_CHECK_CUDA_DRIVER);
+      cuda_driver::call(NVTE_STRINGIFY(cuGetErrorString), driver_status, &desc_NVTE_CHECK_CUDA_DRIVER);
       NVTE_ERROR("CUDA Error: ", desc_NVTE_CHECK_CUDA_DRIVER);
   }
 }

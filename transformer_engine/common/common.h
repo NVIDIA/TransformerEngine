@@ -226,6 +226,11 @@ struct Tensor {
         // Row-wise data shape matches tensor logical shape,
         // column-wise data shape is transpose of logical shape
         if (!has_data() && has_columnwise_data()) {
+#if NVTE_USE_MUSA
+          if (scaling_mode == NVTE_BLOCK_SCALING_1D || scaling_mode == NVTE_BLOCK_SCALING_2D) {
+            return columnwise_data.shape;
+          }
+#endif
           std::vector<size_t> ret;
           if (!columnwise_data.shape.empty()) {
             ret.reserve(columnwise_data.shape.size());

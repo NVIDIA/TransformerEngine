@@ -227,12 +227,12 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
     std::vector<int64_t> shape_int64(shape.begin(), shape.end());
     bool is_empty_shape = product(shape) == 0;
     if (buffer->data_ptr<uint8_t>() == nullptr || is_empty_shape) {
-      return at::empty(shape_int64, at::device(at::kCUDA).dtype(dtype));
+      return at::empty(shape_int64, at::device(at::kMUSA).dtype(dtype));
     }
     return at::from_blob(
         buffer->data_ptr<uint8_t>() + offset, shape_int64,
         [buffer](void *) {},  // deleter holds shared_ptr
-        at::device(at::kCUDA).dtype(dtype));
+        at::device(at::kMUSA).dtype(dtype));
   };
 
   // Allocate row-wise data
@@ -262,7 +262,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
 
     // Allocate full buffer
     auto buffer = std::make_shared<at::Tensor>(
-        at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
+        at::empty({(int64_t)buffer_size}, at::device(at::kMUSA).dtype(torch::kUInt8)));
 
     // Construct tensor views
     for (size_t i = 0; i < num_tensors; ++i) {
@@ -276,15 +276,23 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
   // Allocate column-wise data
   std::vector<at::Tensor> columnwise_data_list, columnwise_scale_list;
   std::vector<std::vector<size_t>> columnwise_data_shapes, columnwise_scale_shapes;
+#if NVTE_USE_MUSA
+  if (columnwise_usage && !is_2D_scaled) {
+#else
   if (columnwise_usage) {
+#endif
     // Tensor sizes
     for (size_t i = 0; i < num_tensors; ++i) {
+#if NVTE_USE_MUSA
+      columnwise_data_shapes.emplace_back(shape_list[i]);
+#else
       columnwise_data_shapes.emplace_back();
       auto &shape = columnwise_data_shapes.back();
       shape.push_back(shape_list[i].back());
       for (size_t j = 0; j < shape_list[i].size() - 1; ++j) {
         shape.push_back(shape_list[i][j]);
       }
+#endif
       columnwise_scale_shapes.emplace_back(
           quantizer_cpp_list[i]->get_scale_shape(shape_list[i], true));
     }
@@ -305,7 +313,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
 
     // Allocate full buffer
     auto buffer = std::make_shared<at::Tensor>(
-        at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
+        at::empty({(int64_t)buffer_size}, at::device(at::kMUSA).dtype(torch::kUInt8)));
 
     // Construct tensor views
     for (size_t i = 0; i < num_tensors; ++i) {
@@ -324,9 +332,17 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
     py::object rowwise_data = rowwise_usage ? py::cast(rowwise_data_list[i]) : py::none();
     py::object rowwise_scale = rowwise_usage ? py::cast(rowwise_scale_list[i]) : py::none();
     py::object columnwise_data =
+#if NVTE_USE_MUSA
+        ((columnwise_usage && !is_2D_scaled) ? py::cast(columnwise_data_list[i]) : py::none());
+#else
         (columnwise_usage ? py::cast(columnwise_data_list[i]) : py::none());
+#endif
     py::object columnwise_scale =
+#if NVTE_USE_MUSA
+        ((columnwise_usage && !is_2D_scaled) ? py::cast(columnwise_scale_list[i]) : py::none());
+#else
         (columnwise_usage ? py::cast(columnwise_scale_list[i]) : py::none());
+#endif
 
     // Construct Python tensor
     tensor_py_list.emplace_back(
@@ -334,6 +350,18 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
                                     fp8_dtype, quantizer_py_list[i], is_2D_scaled));
 
     // Construct C++ tensor
+#if NVTE_USE_MUSA
+    tensor_cpp_list.emplace_back(makeTransformerEngineTensor(
+        rowwise_usage ? rowwise_data_list[i].data_ptr() : nullptr,
+        (columnwise_usage && !is_2D_scaled) ? columnwise_data_list[i].data_ptr() : nullptr,
+        rowwise_usage ? rowwise_data_shapes[i] : std::vector<size_t>{0},
+        (columnwise_usage && !is_2D_scaled) ? columnwise_data_shapes[i] : std::vector<size_t>{0},
+        fp8_dtype, nullptr, nullptr, rowwise_usage ? rowwise_scale_list[i].data_ptr() : nullptr,
+        (columnwise_usage && !is_2D_scaled) ? columnwise_scale_list[i].data_ptr() : nullptr,
+        rowwise_usage ? rowwise_scale_shapes[i] : std::vector<size_t>{0},
+        (columnwise_usage && !is_2D_scaled) ? columnwise_scale_shapes[i] : std::vector<size_t>{0},
+        scaling_mode));
+#else
     tensor_cpp_list.emplace_back(makeTransformerEngineTensor(
         rowwise_usage ? rowwise_data_list[i].data_ptr() : nullptr,
         columnwise_usage ? columnwise_data_list[i].data_ptr() : nullptr,
@@ -343,6 +371,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
         columnwise_usage ? columnwise_scale_list[i].data_ptr() : nullptr,
         rowwise_usage ? rowwise_scale_shapes[i] : std::vector<size_t>{0},
         columnwise_usage ? columnwise_scale_shapes[i] : std::vector<size_t>{0}, scaling_mode));
+#endif
   }
 
   return retval;
@@ -380,12 +409,12 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
     std::vector<int64_t> shape_int64(shape.begin(), shape.end());
     bool is_empty_shape = product(shape) == 0;
     if (buffer->data_ptr<uint8_t>() == nullptr || is_empty_shape) {
-      return at::empty(shape_int64, at::device(at::kCUDA).dtype(dtype));
+      return at::empty(shape_int64, at::device(at::kMUSA).dtype(dtype));
     }
     return at::from_blob(
         buffer->data_ptr<uint8_t>() + offset, shape_int64,
         [buffer](void *) {},  // deleter holds shared_ptr
-        at::device(at::kCUDA).dtype(dtype));
+        at::device(at::kMUSA).dtype(dtype));
   };
 
   // Allocate row-wise data
@@ -415,7 +444,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
 
     // Allocate full buffer
     auto buffer = std::make_shared<at::Tensor>(
-        at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
+        at::empty({(int64_t)buffer_size}, at::device(at::kMUSA).dtype(torch::kUInt8)));
 
     // Construct tensor views
     for (size_t i = 0; i < num_tensors; ++i) {
@@ -455,7 +484,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
 
     // Allocate full buffer
     auto buffer = std::make_shared<at::Tensor>(
-        at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
+        at::empty({(int64_t)buffer_size}, at::device(at::kMUSA).dtype(torch::kUInt8)));
 
     // Construct tensor views
     for (size_t i = 0; i < num_tensors; ++i) {
@@ -533,12 +562,12 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
     std::vector<int64_t> shape_int64(shape.begin(), shape.end());
     bool is_empty_shape = product(shape) == 0;
     if (buffer->data_ptr<uint8_t>() == nullptr || is_empty_shape) {
-      return at::empty(shape_int64, at::device(at::kCUDA).dtype(dtype));
+      return at::empty(shape_int64, at::device(at::kMUSA).dtype(dtype));
     }
     return at::from_blob(
         buffer->data_ptr<uint8_t>() + offset, shape_int64,
         [buffer](void *) {},  // deleter holds shared_ptr
-        at::device(at::kCUDA).dtype(dtype));
+        at::device(at::kMUSA).dtype(dtype));
   };
 
   // Lambda function for converting std::vector<size_t> shape to NVFP4 shape (last dim divided by 2)
@@ -592,7 +621,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
 
     // Allocate full buffer
     auto buffer = std::make_shared<at::Tensor>(
-        at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
+        at::empty({(int64_t)buffer_size}, at::device(at::kMUSA).dtype(torch::kUInt8)));
 
     // Construct tensor views
     for (size_t i = 0; i < num_tensors; ++i) {
@@ -654,7 +683,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
 
     // Allocate full buffer
     auto buffer = std::make_shared<at::Tensor>(
-        at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
+        at::empty({(int64_t)buffer_size}, at::device(at::kMUSA).dtype(torch::kUInt8)));
 
     // Construct tensor views
     for (size_t i = 0; i < num_tensors; ++i) {
@@ -885,7 +914,7 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
   if (all_aligned_token_dim) {
     // allocate a tile scheduler workspace
     auto tile_scheduler_workspace_torch =
-        at::empty({1}, at::device(at::kCUDA).dtype(torch::kInt32));
+        at::empty({1}, at::device(at::kMUSA).dtype(torch::kInt32));
     auto nvte_tile_scheduler_workspace =
         makeTransformerEngineTensor(tile_scheduler_workspace_torch);
     // call the fully-fused grouped kernel for rowwise quantization & colwise RHT quantization transpose

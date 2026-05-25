@@ -135,6 +135,7 @@ list(APPEND transformer_engine_cuda_sources
      transpose/transpose_fusion.cu
      transpose/multi_cast_transpose.cu
     #  transpose/quantize_transpose_vector_blockwise.cu
+     transpose/quantize_transpose_vector_blockwise.mu
      transpose/swap_first_dims.cu
     #  dropout/dropout.cu
      fused_attn/flash_attn.cu
@@ -188,6 +189,7 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
     #  multi_tensor/compute_scale.cu
     #  recipe/mxfp8_scaling.cu
     #  transpose/quantize_transpose_square_blockwise.cu
+      transpose/quantize_transpose_square_blockwise.mu
     #  transpose/quantize_transpose_vector_blockwise_fp4.cu
   )
 

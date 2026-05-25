@@ -72,17 +72,17 @@ Kernel::~Kernel() {
     if (modules_[device_id] != null_module) {
       CUdevice device;
       CUcontext context;
-      if (cuda_driver::call("cuDeviceGet", &device, device_id) != CUDA_SUCCESS) {
+      if (cuda_driver::call(NVTE_STRINGIFY(cuDeviceGet), &device, device_id) != CUDA_SUCCESS) {
         continue;
       }
-      if (cuda_driver::call("cuDevicePrimaryCtxRetain", &context, device) != CUDA_SUCCESS) {
+      if (cuda_driver::call(NVTE_STRINGIFY(cuDevicePrimaryCtxRetain), &context, device) != CUDA_SUCCESS) {
         continue;
       }
-      if (cuda_driver::call("cuCtxSetCurrent", context) != CUDA_SUCCESS) {
+      if (cuda_driver::call(NVTE_STRINGIFY(cuCtxSetCurrent), context) != CUDA_SUCCESS) {
         continue;
       }
-      cuda_driver::call("cuModuleUnload", modules_[device_id]);
-      cuda_driver::call("cuDevicePrimaryCtxRelease", device);
+      cuda_driver::call(NVTE_STRINGIFY(cuModuleUnload), modules_[device_id]);
+      cuda_driver::call(NVTE_STRINGIFY(cuDevicePrimaryCtxRelease), device);
     }
   }
 }

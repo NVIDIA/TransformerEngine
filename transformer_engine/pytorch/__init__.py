@@ -15,6 +15,8 @@ from transformer_engine.pytorch.torch_version import torch_version
 
 assert torch_version() >= (2, 1), f"Minimum torch version 2.1 required. Found {torch_version()}."
 
+USE_MUSA = hasattr(torch, "musa")
+
 load_framework_extension("torch")
 from transformer_engine.pytorch.module import LayerNormLinear
 from transformer_engine.pytorch.module import Linear

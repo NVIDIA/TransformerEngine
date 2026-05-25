@@ -17,12 +17,14 @@
 #include "../../transpose/cast_transpose.h"
 #include "../../util/vectorized_pointwise.h"
 #include "../core/common.cuh"
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
 #include "../fp8/quantize_fp8.cuh"
 #include "../mxfp8/group_quantize_mxfp8.cuh"
 #include "../mxfp8/quantize_mxfp8.cuh"
 #include "../nvfp4/group_quantize_transpose_nvfp4.cuh"
 #include "../nvfp4/quantize_nvfp4.cuh"
 #include "../nvfp4/quantize_transpose_nvfp4.cuh"
+#endif
 
 namespace transformer_engine {
 namespace dispatch {
@@ -74,9 +76,11 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
               dummy_workspace_tensor, stream);
         }
       } else if (output_tensor->has_data()) {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
         fp8::quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
             *input_tensor, dummy_input_tensor, noop_tensor, output_tensor, dummy_dbias_tensor,
             dummy_workspace_tensor, stream);
+#endif
       }
       break;
     }
@@ -84,9 +88,11 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       const Tensor *dummy_input_tensor = nullptr;
       Tensor *dummy_dbias_tensor = nullptr;
       Tensor *dummy_workspace_tensor = nullptr;
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
       mxfp8::quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
           *input_tensor, dummy_input_tensor, noop_tensor, output_tensor, dummy_dbias_tensor,
           dummy_workspace_tensor, stream);
+#endif
       break;
     }
     case NVTE_NVFP4_1D_SCALING: {
@@ -107,15 +113,20 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       // Launch NVFP4 quantize kernel
       if (use_optimized_kernel) {
         if (quant_config_cpp.nvfp4_2d_quantization) {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
           nvfp4::quantize_transpose</*use_2d_quantization=*/true>(
               *input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
+#endif
         } else {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
           nvfp4::quantize_transpose</*use_2d_quantization*/ false>(
               *input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
+#endif
         }
       } else {
         auto &global_amax = (output_tensor->amax.dptr != nullptr) ? output_tensor->amax
                                                                   : output_tensor->columnwise_amax;
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
         quantize_transpose_vector_blockwise_fp4(
             /*input=*/input_tensor->data, /*global_amax=*/global_amax,
             /*scale_inv=*/output_tensor->scale_inv,
@@ -128,6 +139,7 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
             /*rng_state=*/quant_config_cpp.rng_state,
             /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,
             /*noop_tensor=*/noop_tensor->data, /*stream=*/stream);
+#endif
       }
       break;
     }
@@ -215,16 +227,20 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
               *grad_tensor, input_tensor, output_tensor, dbias_tensor, workspace_tensor, stream);
         }
       } else if (output_tensor->has_data()) {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
         fp8::quantize<IS_DBIAS, IS_DACT, /*IS_ACT=*/false, ParamOP, OP>(
             *grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor, workspace_tensor,
             stream);
+#endif
       }
       break;
     }
     case NVTE_MXFP8_1D_SCALING: {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
       mxfp8::quantize<IS_DBIAS, IS_DACT, /*IS_ACT=*/false, ParamOP, OP>(
           *grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor, workspace_tensor,
           stream);
+#endif
       break;
     }
     case NVTE_NVFP4_1D_SCALING: {
@@ -246,15 +262,20 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
       // Launch NVFP4 quantize kernel
       if (use_optimized_kernel) {
         if (quant_config_cpp.nvfp4_2d_quantization) {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
           nvfp4::quantize_transpose</*use_2d_quantization=*/true>(
               *grad_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
+#endif
         } else {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
           nvfp4::quantize_transpose</*use_2d_quantization*/ false>(
               *grad_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
+#endif
         }
       } else {
         auto &global_amax = (output_tensor->amax.dptr != nullptr) ? output_tensor->amax
                                                                   : output_tensor->columnwise_amax;
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
         quantize_transpose_vector_blockwise_fp4(
             /*input=*/grad_tensor->data, /*global_amax=*/global_amax,
             /*scale_inv=*/output_tensor->scale_inv,
@@ -267,6 +288,7 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
             /*rng_state=*/quant_config_cpp.rng_state,
             /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,
             /*noop_tensor=*/noop_tensor->data, /*stream=*/stream);
+#endif
       }
       break;
     }
@@ -362,9 +384,11 @@ void group_quantize_fwd_helper(const NVTETensor input, NVTETensor *outputs,
                  "2D quantization is not supported for group quantize.");
 
       // Launch NVFP4 group quantize kernel
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
       nvfp4::group_quantize_transpose</*use_2d_quantization*/ false>(
           *input_tensor, noop_tensor, output_tensors, split_sections, num_tensors,
           &quant_config_cpp, stream);
+#endif
       break;
     }
     default:
@@ -405,9 +429,11 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
   // Dispatch to quantization kernel depending on data format
   switch (scaling_mode) {
     case NVTE_MXFP8_1D_SCALING: {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
       mxfp8::group_quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
           input_tensor, activations_tensor, noop_tensor, output_tensor, dbias_tensor,
           workspace_tensor, stream);
+#endif
       break;
     }
     default:
@@ -445,9 +471,11 @@ void group_quantize_bwd_helper(const NVTEGroupedTensor grad, const NVTEGroupedTe
   // Dispatch to quantization kernel depending on data format
   switch (scaling_mode) {
     case NVTE_MXFP8_1D_SCALING: {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
       mxfp8::group_quantize<IS_DBIAS, IS_DACT, /*IS_ACT=*/false, ParamOP, OP>(
           grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor, workspace_tensor,
           stream);
+#endif
       break;
     }
     default:

@@ -75,6 +75,9 @@ def setup_pytorch_extension(
     cxx_flags.append("-DNVTE_SKIP_MUSA_UNCOMPATIBLE")
     mcc_flags.append("-DNVTE_SKIP_MUSA_UNCOMPATIBLE")
 
+    cxx_flags.append("-DNVTE_USE_MUSA=1")
+    mcc_flags.append("-DNVTE_USE_MUSA=1")
+
     # Construct PyTorch CUDA extension
     sources = [str(path) for path in sources]
     include_dirs = [str(path) for path in include_dirs]

@@ -61,8 +61,14 @@ GEMM_INFO get_gemm_info(
     bool trans_a,
     const Tensor* b,
     bool trans_b) {
-  NVTE_CHECK(a->scaling_mode == b->scaling_mode,
-             "Inputs A and B to GEMM need to have the same scaling mode!");
+  NVTE_CHECK(a->scaling_mode == b->scaling_mode ||
+                 (a->scaling_mode == NVTE_BLOCK_SCALING_1D &&
+                  b->scaling_mode == NVTE_BLOCK_SCALING_2D) ||
+                 (a->scaling_mode == NVTE_BLOCK_SCALING_2D &&
+                  b->scaling_mode == NVTE_BLOCK_SCALING_1D),
+             "Inputs A and B to GEMM need to have compatible scaling modes! ",
+             "A scaling mode: ", to_string(a->scaling_mode),
+             ", B scaling mode: ", to_string(b->scaling_mode));
   NVTE_CHECK(a->has_data() || a->has_columnwise_data(), "Input A does not hold any data!");
   NVTE_CHECK(b->has_data() || b->has_columnwise_data(), "Input B does not hold any data!");
 

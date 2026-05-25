@@ -1126,6 +1126,7 @@ void nvte_destroy_quantization_config(NVTEQuantizationConfig config) {
 }
 
 int nvte_is_non_tn_fp8_gemm_supported() {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   int num_devices = transformer_engine::cuda::num_devices();
   static std::vector<int> cache(num_devices, -1);
   static std::vector<std::once_flag> flags(num_devices);
@@ -1138,6 +1139,9 @@ int nvte_is_non_tn_fp8_gemm_supported() {
                        deviceComputeCapability >= 130;
   });
   return cache[device_id];
+#else
+  return false;
+#endif
 }
 
 // Grouped Tensor C API implementations

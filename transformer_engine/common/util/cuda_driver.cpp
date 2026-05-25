@@ -5,7 +5,14 @@
  ************************************************************************/
 
  #include <dlfcn.h>
+#if !(defined(_WIN32) || defined(_WIN64) || defined(__WINDOWS__))
+#include <execinfo.h>
+#include <unistd.h>
+#endif
+#include <cstdio>
 #include <filesystem>
+
+#include "transformer_engine/musify.h"
 
 #include "../common.h"
 #include "../util/cuda_runtime.h"
@@ -60,8 +67,11 @@ class Library {
 #else
     void *ptr = dlsym(handle_, symbol);
     if (ptr == nullptr) {
-      std::printf("Could not find symbol: %s\n", symbol);
-      std::fflush(stdout);
+      std::fprintf(stderr, "Could not find symbol: %s\n", symbol);
+      void *callstack[64];
+      const int frames = backtrace(callstack, 64);
+      backtrace_symbols_fd(callstack, frames, STDERR_FILENO);
+      std::fflush(stderr);
     }
     NVTE_CHECK(ptr != nullptr, "Could not find symbol in lazily-initialized library");
     return ptr;

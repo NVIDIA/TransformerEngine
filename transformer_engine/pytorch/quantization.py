@@ -79,6 +79,7 @@ def check_nvfp4_support() -> Tuple[bool, str]:
 @functools.lru_cache(maxsize=None)
 def check_fp8_block_scaling_support() -> Tuple[bool, str]:
     """Return if fp8 block scaling support is available"""
+    return True, ""  # MUSA support block scaling
     if get_device_compute_capability() >= (9, 0) and float(torch.version.cuda) >= 12.9:
         return True, ""
     return (
