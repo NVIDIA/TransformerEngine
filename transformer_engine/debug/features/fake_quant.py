@@ -82,9 +82,7 @@ def _check_blockwise_shape(tensor: torch.Tensor, block_size: int, fp8_format: st
         )
 
 
-def _pad_for_blockwise(
-    tensor: torch.Tensor, block_size: int
-) -> Tuple[torch.Tensor, Optional[int]]:
+def _pad_for_blockwise(tensor: torch.Tensor, block_size: int) -> Tuple[torch.Tensor, Optional[int]]:
     """Pad leading dim up to a multiple of ``block_size``.
 
     Returns ``(padded_tensor, original_leading)``. ``original_leading`` is
@@ -117,8 +115,8 @@ def _pad_for_blockwise(
 #                   block_size: Optional[int] for shape validation, None for per-tensor formats)
 _FORMAT_DISPATCH = {
     # Per-tensor current scaling FP8
-    "FP8E4M3":  (_build_per_tensor_fp8_quantizer, tex.DType.kFloat8E4M3, {}, None),
-    "FP8E5M2":  (_build_per_tensor_fp8_quantizer, tex.DType.kFloat8E5M2, {}, None),
+    "FP8E4M3": (_build_per_tensor_fp8_quantizer, tex.DType.kFloat8E4M3, {}, None),
+    "FP8E5M2": (_build_per_tensor_fp8_quantizer, tex.DType.kFloat8E5M2, {}, None),
     # MXFP8 (1x32 block scaling)
     "MXFP8E4M3": (_build_mxfp8_quantizer, tex.DType.kFloat8E4M3, {}, MXFP8_BLOCK_SCALING_SIZE),
     "MXFP8E5M2": (_build_mxfp8_quantizer, tex.DType.kFloat8E5M2, {}, MXFP8_BLOCK_SCALING_SIZE),

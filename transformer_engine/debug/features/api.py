@@ -472,10 +472,9 @@ class TransformerEngineAPI(BaseNamespaceAPI):
             # (FakeQuant, PerTensorScaling, ...) configured on the `weight`
             # tensor crashes here when get_weight_workspace updates the cache.
             if kwargs.get("out", None) is not None:
-                assert ret is None, (
-                    "modify_tensor with out != None must return None "
-                    f"(got {type(ret)})."
-                )
+                assert (
+                    ret is None
+                ), f"modify_tensor with out != None must return None (got {type(ret)})."
                 return
             assert type(ret) in get_all_tensor_types()
             if (
