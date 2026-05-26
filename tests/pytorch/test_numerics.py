@@ -2121,18 +2121,6 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
         )
 
 
-@pytest.mark.parametrize(
-    "shape",
-    [
-        (1, 127, 128, 512),
-        (8, 15, 128, 512),
-        (8, 1027, 128, 512),
-        (16, 10027, 128, 512),
-    ],
-)
-@pytest.mark.parametrize("dtype", param_types, ids=str)
-@pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
-@pytest.mark.parametrize("accumulate", [False, True])
 @pytest.mark.parametrize("N", [32])
 @pytest.mark.parametrize("datatype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize(
@@ -2198,14 +2186,6 @@ def test_fp8gemm_with_unfused_quantization(N, datatype, input_quantizer, out_qua
     torch.testing.assert_close(expected_quantized_out.dequantize(), quantized_out.dequantize())
 
 
-@pytest.mark.parametrize(
-    "shape",
-    [
-        (1, 128, 128, 512),
-        (8, 1024, 128, 512),
-        (16, 4096, 128, 512),
-    ],
-)
 def test_noncontiguous():
     def _create2modules(m, params):
         mod1 = m(*params)
