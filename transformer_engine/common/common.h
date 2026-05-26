@@ -178,6 +178,12 @@ struct Tensor {
    *  Only meaningful for NVFP4 tensors.
    */
   bool row_scaled_nvfp4 = false;
+  /*! \brief Global E4M3 scale bound used by NVFP4.
+   *
+   *  Standard NVFP4 uses 448. Some 4over6 tensors use 256 to leave room for
+   *  map-to-4 local scale expansion.
+   */
+  int nvfp4_e4m3_max = 448;
 
   /*! Map from NVTETensorParam to parameter sizes */
   static constexpr size_t attr_sizes[] = {
@@ -189,7 +195,8 @@ struct Tensor {
       sizeof(NVTEBasicTensor),  // kNVTEColumnwiseScaleInv
       sizeof(NVTEBasicTensor),  // kNVTEColumnwiseAmax
       sizeof(uint8_t),          // kNVTEWithGEMMSwizzledScales
-      sizeof(uint8_t)           // kNVTERowScaledNVFP4
+      sizeof(uint8_t),          // kNVTERowScaledNVFP4
+      sizeof(int)               // kNVTENVFP4E4M3Max
   };
 
   Tensor() : scaling_mode{NVTE_DELAYED_TENSOR_SCALING}, nvte_tensor{0} {}
@@ -206,6 +213,7 @@ struct Tensor {
     scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
     with_gemm_swizzled_scales = false;
     row_scaled_nvfp4 = false;
+    nvfp4_e4m3_max = 448;
   }
 
   explicit operator NVTETensor() const noexcept { return nvte_tensor; }
@@ -477,6 +485,8 @@ struct QuantizationConfig {
   bool nvfp4_2d_quantization = false;
   bool stochastic_rounding = false;
   bool use_fast_math = false;
+  NVTENVFP44Over6Mode nvfp4_4over6_mode = kNVTENVFP44Over6Disabled;
+  bool nvfp4_4over6_err_use_fast_math = false;
 
   static constexpr size_t attr_sizes[] = {
       sizeof(uint8_t),                       // force_pow_2_scales
@@ -486,7 +496,9 @@ struct QuantizationConfig {
       sizeof(NVTETensor),                    // rng_seed and offset
       sizeof(uint8_t),                       // nvfp4_2d_quantization
       sizeof(uint8_t),                       // stochastic_rounding
-      sizeof(uint8_t)                        // use_fast_math
+      sizeof(uint8_t),                       // use_fast_math
+      sizeof(uint8_t),                       // nvfp4_4over6_mode
+      sizeof(uint8_t)                        // nvfp4_4over6_err_use_fast_math
   };
 };
 
