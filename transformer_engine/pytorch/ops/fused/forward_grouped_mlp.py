@@ -23,6 +23,7 @@ from ..basic import GroupedLinear, ScaledSReLU, ScaledClampedQGeGLU
 from ..fuser import register_forward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
 from .._common import (
+    _cudnn_frontend_geglu_runtime_params,
     _cudnn_frontend_version_supported,
     _cudnn_frontend_supports_grouped_gemm_srelu,
     _nvidia_cudnn_frontend_supports_wgrad,
@@ -127,6 +128,18 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
             self._cudnn_act_func = (
                 "geglu" if isinstance(activation, ScaledClampedQGeGLU) else "swiglu"
             )
+
+        # cuDNN-frontend >= 1.24.0 exposes runtime-configurable GeGLU
+        # parameters; pass them through when the activation carries
+        # non-default values (or always, if available).
+        self._pass_geglu_runtime_params: bool = (
+            isinstance(activation, ScaledClampedQGeGLU) and _cudnn_frontend_geglu_runtime_params()
+        )
+        if self._pass_geglu_runtime_params:
+            self._cudnn_linear_offset: float = activation._clamped.glu_linear_offset
+            self._cudnn_geglu_alpha: float = activation._clamped.alpha
+            self._cudnn_glu_clamp_max: float = activation._clamped.limit
+            self._cudnn_glu_clamp_min: float = -activation._clamped.limit
 
     def fuser_forward(
         self,
@@ -333,6 +346,13 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
         }
         if self._cudnn_act_func is not None:
             fc1_activation_kwargs["act_func"] = self._cudnn_act_func
+        if self._pass_geglu_runtime_params:
+            fc1_activation_kwargs.update(
+                linear_offset=self._cudnn_linear_offset,
+                geglu_alpha=self._cudnn_geglu_alpha,
+                glu_clamp_max=self._cudnn_glu_clamp_max,
+                glu_clamp_min=self._cudnn_glu_clamp_min,
+            )
 
         if fc1_op.single_grouped_weight:
             # Clone and swizzle scales for GEMM.

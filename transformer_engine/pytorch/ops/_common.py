@@ -33,9 +33,18 @@ def _cudnn_frontend_version_at_least(min_version: str) -> bool:
 def _cudnn_frontend_version_supported() -> bool:
     """Check cuDNN frontend is at least 1.23.0.
 
-    All grouped MLP fused-kernel features require cuDNN frontend 1.23.0.
+    All grouped MLP fused-kernel features require cuDNN frontend >= 1.23.0.
     """
     return _cudnn_frontend_version_at_least("1.23.0")
+
+
+def _cudnn_frontend_geglu_runtime_params() -> bool:
+    """Check cuDNN frontend is at least 1.24.0.
+
+    Runtime-configurable GeGLU parameters (linear_offset, geglu_alpha,
+    glu_clamp_max, glu_clamp_min) require cuDNN frontend >= 1.24.0.
+    """
+    return _cudnn_frontend_version_at_least("1.24.0")
 
 
 def _cudnn_frontend_supports_grouped_gemm_srelu() -> bool:
@@ -292,8 +301,14 @@ def fuse_grouped_mlp_ops(
             and isinstance(window[2], GroupedLinear)
         ):
             matches_pattern = False
-        elif isinstance(window[1], ScaledClampedQGeGLU) and (
-            abs(window[1]._clamped.alpha - 1.702) > 0.001
+        elif (
+            isinstance(window[1], ScaledClampedQGeGLU)
+            and not _cudnn_frontend_geglu_runtime_params()
+            and (
+                abs(window[1]._clamped.alpha - 1.702) > 0.001
+                or abs(window[1]._clamped.glu_linear_offset - 1.0) > 0.001
+                or abs(window[1]._clamped.limit - 7.0) > 0.001
+            )
         ):
             matches_pattern = False
         else:
