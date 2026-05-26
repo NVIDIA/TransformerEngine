@@ -31,12 +31,11 @@ namespace dispatch {
 namespace nvfp4 {
 namespace dequantize_kernel {
 #if FP4_TYPE_SUPPORTED
-template <typename OType, bool WITH_GEMM_SWIZZLED_SCALES>
+template <typename OType, bool WITH_GEMM_SWIZZLED_SCALES, bool ROW_SCALED_NVFP4, int E4M3_MAX = 448>
 __global__ void __launch_bounds__(512)
     dequantize_fp4_kernel(const void *const input, OType *output, const fp8e4m3 *const scales,
-                          const float *const tensor_amax, const bool row_scaled_nvfp4,
-                          const size_t N, const size_t M, const size_t scale_stride,
-                          const size_t num_scale_tiles_X) {
+                          const float *const tensor_amax, const size_t N, const size_t M,
+                          const size_t scale_stride, const size_t num_scale_tiles_X) {
   const size_t thread_idx = blockIdx.x * blockDim.x + threadIdx.x;
   const size_t x = thread_idx % M;
   const size_t y = thread_idx / M;
@@ -64,8 +63,9 @@ __global__ void __launch_bounds__(512)
   fp4vec value;
   value.vec = input_vectorized[my_index];
   fp8e4m3 scale = scales[my_scale_index];
-  float amax = row_scaled_nvfp4 ? tensor_amax[y] : tensor_amax[0];
-  constexpr float factor_inv = 1.0 / (6.0 * 448.0);
+  float amax = ROW_SCALED_NVFP4 ? tensor_amax[y] : tensor_amax[0];
+  static_assert(E4M3_MAX == 448 || E4M3_MAX == 256, "Unsupported NVFP4 E4M3 max.");
+  constexpr float factor_inv = 1.0f / (6.0f * static_cast<float>(E4M3_MAX));
   float final_scale = static_cast<float>(scale) * amax * factor_inv;
 #pragma unroll
   for (int i = 0; i < 4; i++) {
@@ -92,6 +92,7 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
 
   const bool with_gemm_swizzled_scales = input.with_gemm_swizzled_scales;
   const bool row_scaled_nvfp4 = input.row_scaled_nvfp4;
+  const int e4m3_max = input.nvfp4_e4m3_max;
 
   constexpr int FP4_BLOCK_SIZE = 16;
   const auto [N, M] = input.flat_2d_dims();
@@ -111,14 +112,25 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
       output->data.dtype, OType,
       TRANSFORMER_ENGINE_SWITCH_CONDITION(
           with_gemm_swizzled_scales, WITH_GEMM_SWIZZLED_SCALES,
-
-          dequantize_fp4_kernel<OType, WITH_GEMM_SWIZZLED_SCALES><<<blocks, threads, 0, stream>>>(
-              input.data.dptr, reinterpret_cast<OType *>(output->data.dptr),
-              reinterpret_cast<fp8e4m3 *>(input.scale_inv.dptr),
-              reinterpret_cast<float *>(input.amax.dptr), row_scaled_nvfp4, N, Mread,
-              input.scale_inv.shape.back(),
-              num_scale_tiles_X););  // NOLINT(*)
-  );                                 // NOLINT(*)
+          TRANSFORMER_ENGINE_SWITCH_CONDITION(
+              row_scaled_nvfp4, ROW_SCALED_NVFP4,
+              if (e4m3_max == 256) {
+                dequantize_fp4_kernel<OType, WITH_GEMM_SWIZZLED_SCALES, ROW_SCALED_NVFP4, 256>
+                    <<<blocks, threads, 0, stream>>>(
+                        input.data.dptr, reinterpret_cast<OType *>(output->data.dptr),
+                        reinterpret_cast<fp8e4m3 *>(input.scale_inv.dptr),
+                        reinterpret_cast<float *>(input.amax.dptr), N, Mread,
+                        input.scale_inv.shape.back(), num_scale_tiles_X);
+              } else {
+                NVTE_CHECK(e4m3_max == 448, "Unsupported NVFP4 E4M3 max (got ", e4m3_max, ")");
+                dequantize_fp4_kernel<OType, WITH_GEMM_SWIZZLED_SCALES, ROW_SCALED_NVFP4, 448>
+                    <<<blocks, threads, 0, stream>>>(
+                        input.data.dptr, reinterpret_cast<OType *>(output->data.dptr),
+                        reinterpret_cast<fp8e4m3 *>(input.scale_inv.dptr),
+                        reinterpret_cast<float *>(input.amax.dptr), N, Mread,
+                        input.scale_inv.shape.back(), num_scale_tiles_X);
+              }););  // NOLINT(*)
+  );                 // NOLINT(*)
   NVTE_CHECK_CUDA(cudaGetLastError());
 #else
   NVTE_ERROR("CUDA 12.8 or higher is needed for FP4 calculation!");
