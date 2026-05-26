@@ -206,9 +206,7 @@ class LogNvfp4TensorStats(BaseLogTensorStats):
         end_step = config.get("end_step", None)
         start_end_list = config.get("start_end_list", None)
         if start_end_list is not None:
-            start_end_list = tuple(
-                tuple(int(x) for x in interval) for interval in start_end_list
-            )
+            start_end_list = tuple(tuple(int(x) for x in interval) for interval in start_end_list)
 
         options = (
             start_step,
@@ -217,8 +215,8 @@ class LogNvfp4TensorStats(BaseLogTensorStats):
             "nvfp4",
         )
 
-        skip_reduction, reduction_group, reduce_within_microbatch = (
-            get_reduction_params(tensor_name, tp_group, tp_size)
+        skip_reduction, reduction_group, reduce_within_microbatch = get_reduction_params(
+            tensor_name, tp_group, tp_size
         )
 
         # Add nvfp4_ prefix to all stats for internal use

@@ -187,9 +187,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
         columnwise = stat.endswith("_columnwise")
         if columnwise:
             stat = stat[: -len("_columnwise")]
-        recipe_from_stat, _ = self.get_recipe_from_stat(
-            stat, default_recipe=current_recipe
-        )
+        recipe_from_stat, _ = self.get_recipe_from_stat(stat, default_recipe=current_recipe)
         stat_without_recipe = stat.replace(recipe_from_stat + "_", "")
 
         need_high_precision_tensor_stats = ["underflows%", "overflows%", "mse"]
@@ -209,32 +207,21 @@ class LogFp8TensorStats(BaseLogTensorStats):
             )
 
         if recipe_from_stat != "" and recipe_from_stat not in ALL_RECIPE_NAMES:
-            raise ValueError(
-                f"Stat {stat} contains an unsupported recipe name: {recipe_from_stat}"
-            )
+            raise ValueError(f"Stat {stat} contains an unsupported recipe name: {recipe_from_stat}")
 
         # NVFP4-resolved stats are filtered out before this point in inspect_tensor().
         assert recipe_from_stat != "nvfp4"
 
-        if (
-            recipe_from_stat in ["fp8_delayed_scaling", "fp8_current_scaling"]
-            and columnwise
-        ):
+        if recipe_from_stat in ["fp8_delayed_scaling", "fp8_current_scaling"] and columnwise:
             raise ValueError(
                 f"Stat {stat} is not supported. Columnwise tensor statistics are not supported for"
                 " fp8_delayed_scaling and fp8_current_scaling."
             )
 
-        if (
-            recipe_from_stat == "fp8_delayed_scaling"
-            and stat_without_recipe == "overflows%"
-        ):
+        if recipe_from_stat == "fp8_delayed_scaling" and stat_without_recipe == "overflows%":
             return True
 
-        if (
-            recipe_from_stat in ["fp8_block_scaling"]
-            and torch.cuda.get_device_capability()[0] < 9
-        ):
+        if recipe_from_stat in ["fp8_block_scaling"] and torch.cuda.get_device_capability()[0] < 9:
             raise ValueError(f"Stat {stat} needs Hopper or later GPU.")
 
         if recipe_from_stat == "mxfp8" and torch.cuda.get_device_capability()[0] < 10:
@@ -404,9 +391,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
         end_step = config.get("end_step", None)
         start_end_list = config.get("start_end_list", None)
         if start_end_list is not None:
-            start_end_list = tuple(
-                tuple(int(x) for x in interval) for interval in start_end_list
-            )
+            start_end_list = tuple(tuple(int(x) for x in interval) for interval in start_end_list)
 
         options = (
             start_step,
@@ -415,8 +400,8 @@ class LogFp8TensorStats(BaseLogTensorStats):
             "fp8",
         )
 
-        skip_reduction, reduction_group, reduce_within_microbatch = (
-            get_reduction_params(tensor_name, tp_group, tp_size)
+        skip_reduction, reduction_group, reduce_within_microbatch = get_reduction_params(
+            tensor_name, tp_group, tp_size
         )
 
         STATS_BUFFERS.try_add_buffer(
@@ -429,8 +414,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
         )
 
         recipes_in_stats = [
-            self.get_recipe_from_stat(stat, default_recipe=recipe_name)
-            for stat in config["stats"]
+            self.get_recipe_from_stat(stat, default_recipe=recipe_name) for stat in config["stats"]
         ]
 
         with self.update_aux_dict(

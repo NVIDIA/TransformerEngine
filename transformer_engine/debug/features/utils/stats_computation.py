@@ -16,9 +16,7 @@ from transformer_engine.common.recipe import Format
 
 
 class BlockwiseDynamicRangeStat(
-    namedtuple(
-        "BlockwiseDynamicRangeStat", ["block_size", "dims", "max_over_orientations"]
-    )
+    namedtuple("BlockwiseDynamicRangeStat", ["block_size", "dims", "max_over_orientations"])
 ):
     """Named tuple representing a blockwise dynamic range statistic configuration."""
 
@@ -101,9 +99,7 @@ def compute_max_blockwise_dynamic_range(tensor, stat_config):
                 .reshape(-1, block_size, block_size)
             )
             per_block_amax = tensor.amax(dim=(1, 2))
-            per_block_amin = tensor.masked_fill(tensor == 0, float("inf")).amin(
-                dim=(1, 2)
-            )
+            per_block_amin = tensor.masked_fill(tensor == 0, float("inf")).amin(dim=(1, 2))
 
         # Identify blocks that contain any non-zero element
         nonzero_blocks = per_block_amax != 0
@@ -119,9 +115,7 @@ def compute_max_blockwise_dynamic_range(tensor, stat_config):
     if max_over_orientations:
         return max(
             _compute_for_one_orientation(tensor_2d),  # Rowwise orientation
-            _compute_for_one_orientation(
-                tensor_2d.transpose(-2, -1)
-            ),  # Columnwise orientation
+            _compute_for_one_orientation(tensor_2d.transpose(-2, -1)),  # Columnwise orientation
         )
     return _compute_for_one_orientation(tensor_2d)
 
@@ -131,9 +125,7 @@ def compute_variance(variances, numels, sums):
     """Welford algorithm is used for numerically stable distributed variance computation."""
     mean = torch.sum(sums) / torch.sum(numels)
     means = sums / numels
-    var = torch.sum(numels * (variances - torch.pow((means - mean), 2))) / torch.sum(
-        numels
-    )
+    var = torch.sum(numels * (variances - torch.pow((means - mean), 2))) / torch.sum(numels)
     return var
 
 
@@ -232,9 +224,7 @@ STATS = {
         lambda buffers: sum(_get(buffers, "sum")) / sum(_get(buffers, "numel")),
     ),
     "numel": (
-        lambda x, aux_dict: (
-            x.numel() if hasattr(x, "numel") else x.get_data_tensors()[0].numel()
-        ),
+        lambda x, aux_dict: (x.numel() if hasattr(x, "numel") else x.get_data_tensors()[0].numel()),
         lambda buffers: sum(_get(buffers, "numel")),
     ),
     "l1_norm": (
@@ -274,8 +264,7 @@ STATS = {
         ),
     ),
     "dynamic_range": (
-        lambda x, aux_dict: _compute_dynamic_range_top(x)
-        - _compute_dynamic_range_bottom(x),
+        lambda x, aux_dict: _compute_dynamic_range_top(x) - _compute_dynamic_range_bottom(x),
         lambda buffers: max(_get(buffers, "dynamic_range_top"))
         - min(_get(buffers, "dynamic_range_bottom")),
     ),
@@ -303,9 +292,7 @@ STATS = {
         lambda x, aux_dict: compute_fp8_delayed_scaling_overflows_num(x, aux_dict[""])
         / x.numel()
         * 100,
-        lambda buffers: 100
-        * sum(_get(buffers, "overflows_num"))
-        / sum(_get(buffers, "numel")),
+        lambda buffers: 100 * sum(_get(buffers, "overflows_num")) / sum(_get(buffers, "numel")),
     ),
 }
 
@@ -315,9 +302,7 @@ FP8_NEGATIVE_ZERO = 128  # represnts -0.0 in fp8
 def count_nonzero_fp8(fp8_data: torch.Tensor) -> torch.Tensor:
     """Count the number of non-zero elements in the fp8 data."""
     fp8_data = fp8_data.view(dtype=torch.uint8)
-    zero_vals = torch.tensor(
-        [0, FP8_NEGATIVE_ZERO], device=fp8_data.device, dtype=torch.uint8
-    )
+    zero_vals = torch.tensor([0, FP8_NEGATIVE_ZERO], device=fp8_data.device, dtype=torch.uint8)
     return fp8_data.numel() - torch.isin(fp8_data, zero_vals).sum()
 
 
@@ -327,9 +312,7 @@ def add_underflows_stats(recipe_name: str, columnwise: bool = False):
 
     # Stat names
     stat_num = f"{recipe_name}{'_' if recipe_name != '' else ''}underflows_num{columnwise_suffix}"
-    stat_pct = (
-        f"{recipe_name}{'_' if recipe_name != '' else ''}underflows%{columnwise_suffix}"
-    )
+    stat_pct = f"{recipe_name}{'_' if recipe_name != '' else ''}underflows%{columnwise_suffix}"
 
     stats_to_num[stat_num] = len(stats_to_num)
     stats_to_num[stat_pct] = len(stats_to_num)
@@ -403,15 +386,11 @@ def add_scale_inv_stats(recipe_name: str, columnwise: bool = False):
 
     # Capture the attribute name inside lambdas via default args to avoid late binding.
     STATS[stat_name_min] = (
-        lambda x, aux_dict, _col=columnwise: get_scale_inv(
-            aux_dict[recipe_name], _col
-        ).min(),
+        lambda x, aux_dict, _col=columnwise: get_scale_inv(aux_dict[recipe_name], _col).min(),
         lambda buffers, _sn=stat_name_min: min(_get(buffers, _sn)),
     )
     STATS[stat_name_max] = (
-        lambda x, aux_dict, _col=columnwise: get_scale_inv(
-            aux_dict[recipe_name], _col
-        ).max(),
+        lambda x, aux_dict, _col=columnwise: get_scale_inv(aux_dict[recipe_name], _col).max(),
         lambda buffers, _sn=stat_name_max: max(_get(buffers, _sn)),
     )
     STATS[stat_name_var] = (
@@ -423,9 +402,7 @@ def add_scale_inv_stats(recipe_name: str, columnwise: bool = False):
         ),
     )
     STATS[stat_name_numel] = (
-        lambda x, aux_dict, _col=columnwise: get_scale_inv(
-            aux_dict[recipe_name], _col
-        ).numel(),
+        lambda x, aux_dict, _col=columnwise: get_scale_inv(aux_dict[recipe_name], _col).numel(),
         lambda buffers, _sn=stat_name_numel: sum(_get(buffers, _sn)),
     )
     STATS[stat_name_sum] = (
@@ -456,22 +433,20 @@ def add_mse_stats(recipe_name: str, columnwise: bool = False):
     columnwise_suffix = "_columnwise" if columnwise else ""
 
     stat_mse = f"{recipe_name}{'_' if recipe_name != '' else ''}mse{columnwise_suffix}"
-    stat_err = f"{recipe_name}{'_' if recipe_name != '' else ''}total_square_error{columnwise_suffix}"
+    stat_err = (
+        f"{recipe_name}{'_' if recipe_name != '' else ''}total_square_error{columnwise_suffix}"
+    )
 
     stats_to_num[stat_mse] = len(stats_to_num)
     stats_to_num[stat_err] = len(stats_to_num)
 
     STATS[stat_mse] = (
-        lambda x, aux_dict: F.mse_loss(
-            x, aux_dict[recipe_name].dequantize(), reduction="mean"
-        ),
+        lambda x, aux_dict: F.mse_loss(x, aux_dict[recipe_name].dequantize(), reduction="mean"),
         lambda buffers, _sn_err=stat_err: torch.sum(_get(buffers, _sn_err))
         / sum(_get(buffers, "numel")),
     )
     STATS[stat_err] = (
-        lambda x, aux_dict: F.mse_loss(
-            x, aux_dict[recipe_name].dequantize(), reduction="sum"
-        ),
+        lambda x, aux_dict: F.mse_loss(x, aux_dict[recipe_name].dequantize(), reduction="sum"),
         lambda buffers, _sn_err=stat_err: torch.sum(_get(buffers, _sn_err)),
     )
 
@@ -503,9 +478,7 @@ def add_max_blockwise_dynamic_range_stats(
     DEPENDENCIES[stat_key] = {stat_key}
 
     STATS[stat_key] = (
-        lambda x, aux_dict, _stat_key=stat_key: compute_max_blockwise_dynamic_range(
-            x, _stat_key
-        ),
+        lambda x, aux_dict, _stat_key=stat_key: compute_max_blockwise_dynamic_range(x, _stat_key),
         lambda buffers, _stat_key=stat_key: max(_get(buffers, _stat_key)),
     )
 
