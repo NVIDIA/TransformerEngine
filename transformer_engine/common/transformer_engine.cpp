@@ -52,7 +52,7 @@ std::string to_string(const NVTEScalingMode &mode) {
   return "Invalid Scaling";
 }
 
-void CheckNoopTensor(const Tensor &t, const std::string_view &name) {
+void CheckNoopTensor(const Tensor &t, std::string_view name) {
   if (t.data.has_data()) {
     NVTE_CHECK(t.numel() == 1, "Expected 1 element for ", name, " noop, but found ", t.numel(),
                ".");
@@ -61,7 +61,7 @@ void CheckNoopTensor(const Tensor &t, const std::string_view &name) {
   }
 }
 
-void CheckScaleTensorShape(const Tensor &t, const std::string_view &name) {
+void CheckScaleTensorShape(const Tensor &t, std::string_view name) {
   NVTE_CHECK(t.scaling_mode != NVTE_INVALID_SCALING, "Invalid scaling mode!");
   if (is_tensor_scaling(t.scaling_mode)) {
     if (is_fp8_dtype(t.dtype())) {
@@ -140,7 +140,7 @@ void CheckScaleTensorShape(const Tensor &t, const std::string_view &name) {
   }
 }
 
-void CheckInputTensor(const Tensor &t, const std::string_view &name, bool check_scale_inv_shapes) {
+void CheckInputTensor(const Tensor &t, std::string_view name, bool check_scale_inv_shapes) {
   const DType type = t.dtype();
   if (is_fp8_dtype(type)) {
     // FP8 input needs to have scale_inv
@@ -196,7 +196,7 @@ void CheckInputTensor(const Tensor &t, const std::string_view &name, bool check_
   }
 }
 
-void CheckOutputTensor(const Tensor &t, const std::string_view &name, bool allow_empty) {
+void CheckOutputTensor(const Tensor &t, std::string_view name, bool allow_empty) {
   const DType type = t.dtype();
   if (is_fp8_dtype(type)) {
     // FP8 output needs to have scale, scale_inv and (if delayed scaling) amax
@@ -258,7 +258,7 @@ void CheckOutputTensor(const Tensor &t, const std::string_view &name, bool allow
   CheckScaleTensorShape(t, name);
 }
 
-void CheckGroupedTensorShapeArrays(const GroupedTensor &t, const std::string_view &name) {
+void CheckGroupedTensorShapeArrays(const GroupedTensor &t, std::string_view name) {
   NVTE_CHECK(t.num_tensors > 0, "Grouped tensor ", name, " has no tensors!");
 
   // Helper lambda to validate shape arrays
@@ -328,8 +328,7 @@ void CheckGroupedTensorShapeArrays(const GroupedTensor &t, const std::string_vie
 }
 
 // Helper function to check scale_inv for both input and output
-static void CheckGroupedScaleInv(const GroupedTensor &t, const std::string_view &name,
-                                 bool is_output) {
+static void CheckGroupedScaleInv(const GroupedTensor &t, std::string_view name, bool is_output) {
   const char *tensor_type = is_output ? "output" : "input";
 
   // Helper to check scale_inv for both rowwise and columnwise layouts
@@ -366,15 +365,14 @@ static void CheckGroupedScaleInv(const GroupedTensor &t, const std::string_view 
   }
 }
 
-void CheckInputGroupedTensor(const GroupedTensor &t, const std::string_view &name) {
+void CheckInputGroupedTensor(const GroupedTensor &t, std::string_view name) {
   NVTE_CHECK(t.has_data() || t.has_columnwise_data(), "Input grouped tensor ", name,
              " not allocated");
   CheckGroupedScaleInv(t, name, false);
   CheckGroupedTensorShapeArrays(t, name);
 }
 
-void CheckOutputGroupedTensor(const GroupedTensor &t, const std::string_view &name,
-                              bool allow_empty) {
+void CheckOutputGroupedTensor(const GroupedTensor &t, std::string_view name, bool allow_empty) {
   if (!allow_empty) {
     NVTE_CHECK(t.has_data() || t.has_columnwise_data(), "Output grouped tensor ", name,
                " not allocated");
