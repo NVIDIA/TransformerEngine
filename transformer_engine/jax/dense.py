@@ -14,9 +14,11 @@ from functools import partial
 import warnings
 import jax
 import jax.numpy as jnp
+from jax.sharding import PartitionSpec
 
 from . import cpp_extensions as tex
 from .cpp_extensions.amax import AmaxScope
+from .sharding import global_mesh_resource, with_sharding_constraint
 from .quantize import (
     ScaledTensor,
     QuantizerSet,
@@ -52,6 +54,10 @@ def _psum_scatter_kernel(kernel, scattered_kernel_shape, mesh_axis, axis_idx):
     kernel = jax.lax.psum_scatter(kernel, mesh_axis, scatter_dimension=axis_idx)
     kernel = kernel.reshape(scattered_kernel_shape)
     return kernel
+
+
+def _is_manual_mesh_axis(mesh_axis):
+    return mesh_axis is not None and mesh_axis in jax.sharding.get_abstract_mesh().manual_axes
 
 
 def dense(
@@ -349,6 +355,18 @@ def grouped_dense(
     Returns:
         A jnp.ndarray containing the result of the grouped linear operation
     """
+    x_contracting_dims, kernel_contracting_dims = contracting_dims
+    x_contracting_dims = tex.sanitize_dims(x.ndim, x_contracting_dims)
+    kernel_contracting_dims = tex.sanitize_dims(kernel.ndim, kernel_contracting_dims)
+    contracting_dims = (x_contracting_dims, kernel_contracting_dims)
+
+    restore_leading_ep_axis = False
+    if x.ndim == 3 and x.shape[0] == 1:
+        if x_contracting_dims == (x.ndim - 1,):
+            restore_leading_ep_axis = True
+            x = x.reshape(*x.shape[1:])
+            contracting_dims = ((x.ndim - 1,), kernel_contracting_dims)
+
     output = _grouped_dense(
         x,
         kernel,
@@ -361,6 +379,8 @@ def grouped_dense(
         quantizer_set,
         kernel_fsdp_info,
     )
+    if restore_leading_ep_axis:
+        output = output.reshape(1, *output.shape)
     return output
 
 
@@ -406,10 +426,7 @@ def _grouped_dense_fwd_rule(
 ):
     use_bias = bias is not None
 
-    kernel_fsdp_mesh_axis, kernel_fsdp_axis_idx = kernel_fsdp_info
-    kernel_fsdp_enabled = kernel_fsdp_mesh_axis is not None
-    assert not kernel_fsdp_enabled, "FSDP sharding for grouped_dense is not supported yet."
-    del kernel_fsdp_mesh_axis, kernel_fsdp_axis_idx, kernel_fsdp_info, kernel_fsdp_enabled
+    del kernel_fsdp_info
 
     x_contracting_dims, k_contracting_dims = contracting_dims
     flatten_axis_x = -len(x_contracting_dims)
@@ -478,9 +495,7 @@ def _grouped_dense_fwd_rule(
 def _grouped_dense_bwd_rule(
     contracting_dims, precision, preferred_element_type, group_offset, kernel_fsdp_info, ctx, grad
 ):
-    kernel_fsdp_mesh_axis, _ = kernel_fsdp_info
-    kernel_fsdp_enabled = kernel_fsdp_mesh_axis is not None
-    assert not kernel_fsdp_enabled, "FSDP sharding for grouped_dense is not supported yet."
+    kernel_fsdp_mesh_axis, kernel_fsdp_axis_idx = kernel_fsdp_info
 
     fwd_x_contracting_dims, fwd_k_contracting_dims = contracting_dims
 
@@ -530,6 +545,14 @@ def _grouped_dense_bwd_rule(
         preferred_element_type=preferred_element_type,
         group_offset=group_offset,
     )
+    if _is_manual_mesh_axis(kernel_fsdp_mesh_axis):
+        if kernel_fsdp_axis_idx in fwd_k_contracting_dims:
+            dgrad_axis_idx = fwd_x_contracting_dims[
+                fwd_k_contracting_dims.index(kernel_fsdp_axis_idx)
+            ]
+            dgrad = _all_gather_kernel(dgrad, kernel_fsdp_mesh_axis, dgrad_axis_idx)
+        else:
+            dgrad = jax.lax.psum(dgrad, kernel_fsdp_mesh_axis)
 
     wgrad = tex.grouped_gemm(
         wgrad_x_T,
@@ -539,6 +562,25 @@ def _grouped_dense_bwd_rule(
         preferred_element_type=preferred_element_type,
         group_offset=group_offset,
     )
+    if _is_manual_mesh_axis(kernel_fsdp_mesh_axis):
+        if kernel_fsdp_axis_idx in fwd_k_contracting_dims:
+            wgrad = _psum_scatter_kernel(
+                wgrad, kernel_shape, kernel_fsdp_mesh_axis, kernel_fsdp_axis_idx
+            )
+        else:
+            wgrad = jax.lax.psum(wgrad, kernel_fsdp_mesh_axis)
+    if kernel_fsdp_mesh_axis is not None:
+        wgrad_spec = [None] * len(kernel_shape)
+        ep_resource = None
+        try:
+            ep_resource = global_mesh_resource().ep_resource
+        except AssertionError:
+            pass
+        if len(wgrad_spec) > 0:
+            wgrad_spec[0] = ep_resource
+        if 0 <= kernel_fsdp_axis_idx < len(wgrad_spec):
+            wgrad_spec[kernel_fsdp_axis_idx] = kernel_fsdp_mesh_axis
+        wgrad = with_sharding_constraint(wgrad, PartitionSpec(*wgrad_spec))
 
     group_sizes_grad = None
     dbias = tex.grouped_dbias(grad, group_sizes) if use_bias else None

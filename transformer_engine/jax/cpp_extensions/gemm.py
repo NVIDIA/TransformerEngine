@@ -211,6 +211,115 @@ def _get_nvfp4_tensor_scale_inv(amax):
     return amax / (DATA_DTYPE_MAX * SCALE_DTYPE_MAX)
 
 
+def _axis_spec_contains(axis_spec, axis):
+    if axis is None or axis_spec is None:
+        return False
+    if isinstance(axis_spec, tuple):
+        return axis in axis_spec
+    return axis_spec == axis
+
+
+def _spec_contains_axis(spec, axis):
+    return any(_axis_spec_contains(axis_spec, axis) for axis_spec in spec)
+
+
+def _strip_axis_from_axis_spec(axis_spec, axis):
+    if axis is None or axis_spec is None:
+        return axis_spec
+    if isinstance(axis_spec, tuple):
+        stripped = tuple(a for a in axis_spec if a != axis)
+        if len(stripped) == 0:
+            return None
+        return stripped[0] if len(stripped) == 1 else stripped
+    return None if axis_spec == axis else axis_spec
+
+
+def _strip_axis_from_spec(spec, axis):
+    return tuple(_strip_axis_from_axis_spec(axis_spec, axis) for axis_spec in spec)
+
+
+def _common_axis(spec_a, spec_b):
+    axes = []
+    for spec in (spec_a, spec_b):
+        for axis_spec in spec:
+            if axis_spec is None:
+                continue
+            axis_tuple = axis_spec if isinstance(axis_spec, tuple) else (axis_spec,)
+            for axis in axis_tuple:
+                if axis is not None and axis not in axes:
+                    axes.append(axis)
+    for axis in axes:
+        if _spec_contains_axis(spec_a, axis) and _spec_contains_axis(spec_b, axis):
+            return axis
+    return None
+
+
+def _merge_axis_spec(axis_spec_a, axis_spec_b):
+    axes = []
+    for axis_spec in (axis_spec_a, axis_spec_b):
+        if axis_spec is None:
+            continue
+        axis_tuple = axis_spec if isinstance(axis_spec, tuple) else (axis_spec,)
+        for axis in axis_tuple:
+            if axis is not None and axis not in axes:
+                axes.append(axis)
+    if len(axes) == 0:
+        return None
+    return axes[0] if len(axes) == 1 else tuple(axes)
+
+
+def _partition_spec_from_result(mesh, result_info, fallback_spec):
+    if result_info is not None and result_info.sharding is not None:
+        return result_info.sharding
+    return NamedSharding(mesh, PartitionSpec(*fallback_spec))
+
+
+def _local_shape_from_spec(global_shape, spec, mesh):
+    local_shape = []
+    for dim, axis_spec in zip(global_shape, spec):
+        axis_size = _axis_spec_size(axis_spec, mesh)
+        local_shape.append(dim // axis_size)
+    return tuple(local_shape)
+
+
+def _axis_spec_size(axis_spec, mesh):
+    axis_tuple = axis_spec if isinstance(axis_spec, tuple) else (axis_spec,)
+    axis_size = 1
+    for axis in axis_tuple:
+        if axis is not None:
+            axis_size *= mesh.shape[axis]
+    return axis_size
+
+
+def _spec_size(spec, mesh):
+    axis_size = 1
+    for axis_spec in spec:
+        axis_size *= _axis_spec_size(axis_spec, mesh)
+    return axis_size
+
+
+def _local_2d_sizes_from_spec(shape, spec, axis_boundary, left_size, right_size, mesh):
+    if len(shape) == len(spec) and len(shape) > 1:
+        local_shape = _local_shape_from_spec(shape, spec, mesh)
+        return (
+            math.prod(local_shape[:axis_boundary]),
+            math.prod(local_shape[axis_boundary:]),
+        )
+
+    spec_size = _spec_size(spec, mesh)
+    if spec_size == 1:
+        return left_size, right_size
+    if left_size % spec_size == 0:
+        return left_size // spec_size, right_size
+    if right_size % spec_size == 0:
+        return left_size, right_size // spec_size
+    raise ValueError(
+        "Cannot derive local grouped GEMM 2D sizes from sharding spec. "
+        f"shape={shape}, spec={spec}, axis_boundary={axis_boundary}, "
+        f"left_size={left_size}, right_size={right_size}, spec_size={spec_size}"
+    )
+
+
 def collective_gemm_bootstrap(
     num_total_devices,
     num_devices_per_process,
@@ -1737,6 +1846,289 @@ class GroupedGemmPrimitive(BasePrimitive):
             rhs_right_size=rhs_right_size,
         )
         return (out,)
+
+    @staticmethod
+    def _parse_partition_specs(
+        mesh,
+        arg_infos,
+        result_infos,
+        out_shape=None,
+        lhs_is_trans=None,
+        lhs_axis_boundary=None,
+    ):
+        del mesh
+        gsr = global_mesh_resource()
+        fsdp_axis = gsr.fsdp_resource
+
+        lhs_data_spec = get_padded_spec(arg_infos[0])
+        lhs_scale_spec = get_padded_spec(arg_infos[1])
+        rhs_data_spec = get_padded_spec(arg_infos[2])
+        rhs_scale_spec = get_padded_spec(arg_infos[3])
+        bias_spec = get_padded_spec(arg_infos[4])
+
+        lhs_first_dims_spec = get_padded_spec(arg_infos[5])
+        lhs_last_dims_spec = get_padded_spec(arg_infos[6])
+        rhs_first_dims_spec = get_padded_spec(arg_infos[7])
+        rhs_last_dims_spec = get_padded_spec(arg_infos[8])
+        out_first_dims_spec = get_padded_spec(arg_infos[9])
+        out_last_dims_spec = get_padded_spec(arg_infos[10])
+        additional_arg_0_spec = get_padded_spec(arg_infos[11])
+        additional_arg_1_spec = get_padded_spec(arg_infos[12])
+
+        grouped_dim_specs = (
+            lhs_first_dims_spec,
+            lhs_last_dims_spec,
+            rhs_first_dims_spec,
+            rhs_last_dims_spec,
+            out_first_dims_spec,
+            out_last_dims_spec,
+        )
+        grouped_dim_infos = arg_infos[5:11]
+        active_group_spec = next(
+            (spec for spec, info in zip(grouped_dim_specs, grouped_dim_infos) if info.size > 0),
+            (None,),
+        )
+        if arg_infos[11].size > 1:
+            additional_arg_0_spec = active_group_spec
+        if arg_infos[12].size > 1:
+            additional_arg_1_spec = active_group_spec
+
+        rhs_is_ragged = arg_infos[7].size > 0 or arg_infos[8].size > 0
+        ep_axis = gsr.ep_resource
+        if ep_axis is not None and not rhs_is_ragged and _spec_contains_axis(active_group_spec, ep_axis):
+            if len(rhs_data_spec) > 0 and not _spec_contains_axis(rhs_data_spec, ep_axis):
+                rhs_data_spec = (
+                    _merge_axis_spec(rhs_data_spec[0], ep_axis),
+                    *rhs_data_spec[1:],
+                )
+            if len(rhs_scale_spec) > 0 and not _spec_contains_axis(rhs_scale_spec, ep_axis):
+                rhs_scale_spec = (
+                    _merge_axis_spec(rhs_scale_spec[0], ep_axis),
+                    *rhs_scale_spec[1:],
+                )
+            if len(bias_spec) > 0 and not _spec_contains_axis(bias_spec, ep_axis):
+                bias_spec = (_merge_axis_spec(bias_spec[0], ep_axis), *bias_spec[1:])
+
+        gather_rhs_fsdp = (
+            fsdp_axis is not None
+            and not rhs_is_ragged
+            and (
+                _spec_contains_axis(rhs_data_spec, fsdp_axis)
+                or _spec_contains_axis(rhs_scale_spec, fsdp_axis)
+                or _spec_contains_axis(bias_spec, fsdp_axis)
+            )
+        )
+
+        if gather_rhs_fsdp:
+            rhs_data_spec = _strip_axis_from_spec(rhs_data_spec, fsdp_axis)
+            rhs_scale_spec = _strip_axis_from_spec(rhs_scale_spec, fsdp_axis)
+            bias_spec = _strip_axis_from_spec(bias_spec, fsdp_axis)
+
+        reduce_axis = _common_axis(lhs_data_spec, rhs_data_spec)
+        if reduce_axis not in (gsr.dp_resource, gsr.fsdp_resource):
+            reduce_axis = None
+        if reduce_axis is not None and gather_rhs_fsdp:
+            reduce_axis = None
+
+        if result_infos:
+            out_spec = get_padded_spec(result_infos[0])
+        else:
+            out_spec = (None,) * (len(out_shape) if out_shape is not None else 1)
+
+        if rhs_is_ragged and lhs_is_trans is not None and lhs_axis_boundary is not None:
+            lhs_non_contracting_dims = (
+                range(lhs_axis_boundary, len(lhs_data_spec))
+                if lhs_is_trans
+                else range(0, lhs_axis_boundary)
+            )
+            lhs_data_spec = list(lhs_data_spec)
+            for out_idx, lhs_dim in enumerate(lhs_non_contracting_dims, start=1):
+                if out_idx < len(out_spec):
+                    lhs_data_spec[lhs_dim] = _merge_axis_spec(
+                        lhs_data_spec[lhs_dim], out_spec[out_idx]
+                    )
+            lhs_data_spec = tuple(lhs_data_spec)
+
+        return (
+            (
+                lhs_data_spec,
+                lhs_scale_spec,
+                rhs_data_spec,
+                rhs_scale_spec,
+                bias_spec,
+                lhs_first_dims_spec,
+                lhs_last_dims_spec,
+                rhs_first_dims_spec,
+                rhs_last_dims_spec,
+                out_first_dims_spec,
+                out_last_dims_spec,
+                additional_arg_0_spec,
+                additional_arg_1_spec,
+            ),
+            out_spec,
+            reduce_axis,
+        )
+
+    @staticmethod
+    def partition(
+        lhs_is_trans,
+        rhs_is_trans,
+        scaling_mode,
+        out_dtype,
+        has_bias,
+        use_async_d2h_group_sizes,
+        use_v2_ffi,
+        lhs_axis_boundary,
+        rhs_axis_boundary,
+        out_shape,
+        lhs_left_size,
+        lhs_right_size,
+        rhs_left_size,
+        rhs_right_size,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
+        arg_specs, out_spec, reduce_axis = GroupedGemmPrimitive._parse_partition_specs(
+            mesh,
+            arg_infos,
+            result_infos,
+            out_shape,
+            lhs_is_trans=lhs_is_trans,
+            lhs_axis_boundary=lhs_axis_boundary,
+        )
+        arg_shardings = tuple(NamedSharding(mesh, PartitionSpec(*spec)) for spec in arg_specs)
+        result_info = result_infos[0] if result_infos else None
+        out_sharding = (_partition_spec_from_result(mesh, result_info, out_spec),)
+        local_out_shape = _local_shape_from_spec(out_shape, out_spec, mesh)
+        local_lhs_left_size, local_lhs_right_size = _local_2d_sizes_from_spec(
+            arg_infos[0].shape,
+            arg_specs[0],
+            lhs_axis_boundary,
+            lhs_left_size,
+            lhs_right_size,
+            mesh,
+        )
+        local_rhs_left_size, local_rhs_right_size = _local_2d_sizes_from_spec(
+            arg_infos[2].shape,
+            arg_specs[2],
+            rhs_axis_boundary,
+            rhs_left_size,
+            rhs_right_size,
+            mesh,
+        )
+
+        def sharded_impl(
+            lhs_data,
+            lhs_scale_inv,
+            rhs_data,
+            rhs_scale_inv,
+            bias,
+            lhs_first_dims,
+            lhs_last_dims,
+            rhs_first_dims,
+            rhs_last_dims,
+            out_first_dims,
+            out_last_dims,
+            additional_arg_0,
+            additional_arg_1,
+        ):
+            (out,) = GroupedGemmPrimitive.impl(
+                lhs_data,
+                lhs_scale_inv,
+                rhs_data,
+                rhs_scale_inv,
+                bias,
+                lhs_first_dims,
+                lhs_last_dims,
+                rhs_first_dims,
+                rhs_last_dims,
+                out_first_dims,
+                out_last_dims,
+                additional_arg_0,
+                additional_arg_1,
+                lhs_is_trans=lhs_is_trans,
+                rhs_is_trans=rhs_is_trans,
+                scaling_mode=scaling_mode,
+                out_dtype=out_dtype,
+                has_bias=has_bias,
+                use_async_d2h_group_sizes=use_async_d2h_group_sizes,
+                use_v2_ffi=use_v2_ffi,
+                lhs_axis_boundary=lhs_axis_boundary,
+                rhs_axis_boundary=rhs_axis_boundary,
+                out_shape=local_out_shape,
+                lhs_left_size=local_lhs_left_size,
+                lhs_right_size=local_lhs_right_size,
+                rhs_left_size=local_rhs_left_size,
+                rhs_right_size=local_rhs_right_size,
+            )
+
+            if reduce_axis is not None:
+                if is_all_reduce_in_float32():
+                    out = jax.lax.psum(out.astype(jnp.float32), reduce_axis).astype(out_dtype)
+                else:
+                    out = jax.lax.psum(out, reduce_axis)
+            return (out,)
+
+        return mesh, sharded_impl, out_sharding, arg_shardings
+
+    @staticmethod
+    def shardy_sharding_rule(
+        lhs_is_trans,
+        rhs_is_trans,
+        scaling_mode,
+        out_dtype,
+        has_bias,
+        use_async_d2h_group_sizes,
+        use_v2_ffi,
+        lhs_axis_boundary,
+        rhs_axis_boundary,
+        out_shape,
+        lhs_left_size,
+        lhs_right_size,
+        rhs_left_size,
+        rhs_right_size,
+        mesh,
+        operand_types,
+        result_types,
+    ):
+        del (
+            lhs_is_trans,
+            rhs_is_trans,
+            scaling_mode,
+            out_dtype,
+            has_bias,
+            use_async_d2h_group_sizes,
+            use_v2_ffi,
+            lhs_axis_boundary,
+            rhs_axis_boundary,
+            out_shape,
+            lhs_left_size,
+            lhs_right_size,
+            rhs_left_size,
+            rhs_right_size,
+            mesh,
+        )
+
+        prefix = "GroupedGemm"
+
+        def spec_for(name, rank):
+            if rank == 0:
+                return ()
+            return tuple(f"{prefix}_{name}_{i}" for i in range(rank))
+
+        operand_mappings = tuple(
+            spec_for(f"arg{i}", len(operand_type.shape))
+            for i, operand_type in enumerate(operand_types)
+        )
+        result_mappings = tuple(
+            spec_for(f"out{i}", len(result_type.shape))
+            for i, result_type in enumerate(result_types)
+        )
+        return SdyShardingRule(
+            operand_mappings=operand_mappings,
+            result_mappings=result_mappings,
+        )
 
 
 register_primitive(GroupedGemmPrimitive)

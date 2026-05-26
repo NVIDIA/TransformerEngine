@@ -7,18 +7,34 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 import jax.experimental.multihost_utils as jem
+import numpy as np
+from jax.experimental import shard_map
+from jax.sharding import NamedSharding, PartitionSpec
 
 from transformer_engine.jax.dense import grouped_dense as te_grouped_dense
 from transformer_engine.jax.quantize import (
     QuantizerFactory,
     ScalingMode,
 )
+from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 
 from utils import assert_allclose, dtype_tols
 
 
 N_GROUP = 8
-MESH_AXIS_NAME = "fsdp"
+EP_AXIS_NAME = "ep"
+FSDP_AXIS_NAME = "fsdp"
+MESH_AXIS_NAME = FSDP_AXIS_NAME
+
+
+def _mxfp8_grouped_quantizer_set(n_groups):
+    return QuantizerFactory.create_set(
+        scaling_mode=ScalingMode.MXFP8_1D_SCALING,
+        fwd_dtype=jnp.float8_e4m3fn,
+        bwd_dtype=jnp.float8_e4m3fn,
+        is_2x2x=True,
+        n_groups=n_groups,
+    )
 
 
 def test_grouped_gemm_fp8_allgather(data_shapes, kernel_fsdp_axis):
@@ -36,13 +52,18 @@ def test_grouped_gemm_fp8_allgather(data_shapes, kernel_fsdp_axis):
     def init_data():
         x_key = jax.random.PRNGKey(0)
         w_key = jax.random.PRNGKey(1)
-        x = jax.random.normal(x_key, shape=(N_GROUP, *x_shape), dtype=jnp.bfloat16)
-        w = jax.random.normal(w_key, shape=(N_GROUP, *w_shape), dtype=jnp.bfloat16)
-        w_amax = jnp.max(jnp.abs(w), axis=range(1, w.ndim))
-        return x, w, w, w_amax
+        x = (
+            jax.random.normal(x_key, shape=(N_GROUP, *x_shape), dtype=jnp.bfloat16)
+            * jnp.asarray(0.01, dtype=jnp.bfloat16)
+        )
+        w = (
+            jax.random.normal(w_key, shape=(N_GROUP, *w_shape), dtype=jnp.bfloat16)
+            * jnp.asarray(0.01, dtype=jnp.bfloat16)
+        )
+        return x, w, w
 
-    def test_func(outter_x, outter_w, outter_w_amax):
-        in_specs = (x_sharding.spec, w_sharding.spec, None)
+    def test_func(outter_x, outter_w):
+        in_specs = (x_sharding.spec, w_sharding.spec)
         out_specs = x_sharding.spec
 
         @partial(
@@ -52,36 +73,29 @@ def test_grouped_gemm_fp8_allgather(data_shapes, kernel_fsdp_axis):
             out_specs=out_specs,
             check_rep=False,
         )
-        def sharded_group_gemm(x, w, w_amax):
+        def sharded_group_gemm(x, w):
             group_size = x.shape[0]
             x_reshaped = x.reshape(-1, x.shape[-1])
             n_groups = jnp.full(group_size, x_reshaped.shape[0] // group_size)
 
-            quantizer_set = QuantizerFactory.create_set(
-                scaling_mode=ScalingMode.CURRENT_TENSOR_SCALING,
-                fwd_dtype=jnp.float8_e4m3fn,
-                bwd_dtype=jnp.float8_e5m2,
-                is_2x2x=True,
-                n_groups=group_size,
-            )
+            quantizer_set = _mxfp8_grouped_quantizer_set(group_size)
 
             output = te_grouped_dense(
                 x_reshaped,
                 w,
                 n_groups,
-                kernel_amax=w_amax,
                 quantizer_set=quantizer_set,
                 kernel_fsdp_info=(MESH_AXIS_NAME, kernel_fsdp_axis),
             )
             output = output.reshape(*x.shape[:-1], -1)
             return output
 
-        def run(x, w, w_amax):
-            output = sharded_group_gemm(x, w, w_amax)
+        def run(x, w):
+            output = sharded_group_gemm(x, w)
             return output
 
-        output, vjp_fn = jax.vjp(run, outter_x, outter_w, outter_w_amax)
-        dx, dw, _ = vjp_fn(output)
+        output, vjp_fn = jax.vjp(run, outter_x, outter_w)
+        dx, dw = vjp_fn(output)
         return output, dx, dw
 
     def ref_func(outter_x, outter_w):
@@ -101,13 +115,7 @@ def test_grouped_gemm_fp8_allgather(data_shapes, kernel_fsdp_axis):
             x_reshaped = x.reshape(-1, x.shape[-1])
             n_groups = jnp.full(group_size, x_reshaped.shape[0] // group_size)
 
-            quantizer_set = QuantizerFactory.create_set(
-                scaling_mode=ScalingMode.CURRENT_TENSOR_SCALING,
-                fwd_dtype=jnp.float8_e4m3fn,
-                bwd_dtype=jnp.float8_e5m2,
-                is_2x2x=True,
-                n_groups=group_size,
-            )
+            quantizer_set = _mxfp8_grouped_quantizer_set(group_size)
             output = te_grouped_dense(x_reshaped, w, n_groups, quantizer_set=quantizer_set)
             output = output.reshape(*x.shape[:-1], -1)
             return output
@@ -120,13 +128,13 @@ def test_grouped_gemm_fp8_allgather(data_shapes, kernel_fsdp_axis):
         dx, dw = vjp_fn(output)
         return output, dx, dw
 
-    init_func = jax.jit(init_data, out_shardings=(x_sharding, w_sharding, w_no_sharding, None))
-    x, w, w_global, w_amax = init_func()
+    init_func = jax.jit(init_data, out_shardings=(x_sharding, w_sharding, w_no_sharding))
+    x, w, w_global = init_func()
 
     o_sharding = x_sharding
     test_func_jitted = jax.jit(
         test_func,
-        in_shardings=(x_sharding, w_sharding, None),
+        in_shardings=(x_sharding, w_sharding),
         out_shardings=(o_sharding, x_sharding, w_sharding),
     )
     ref_func_jitted = jax.jit(
@@ -135,24 +143,76 @@ def test_grouped_gemm_fp8_allgather(data_shapes, kernel_fsdp_axis):
         out_shardings=(o_sharding, x_sharding, w_no_sharding),
     )
 
-    out, dx, dw = test_func_jitted(x, w, w_amax)
+    out, dx, dw = test_func_jitted(x, w)
     ref_out, ref_dx, ref_dw = ref_func_jitted(x, w_global)
 
     e4m3_tols = dtype_tols(jnp.float8_e4m3fn)
-    e5m2_tols = dtype_tols(jnp.float8_e5m2)
 
-    out, ref_out = jem.process_allgather((out, ref_out))
-    dx, ref_dx = jem.process_allgather((dx, ref_dx))
-    dw, ref_dw = jem.process_allgather((dw, ref_dw))
+    out, ref_out = jem.process_allgather((out, ref_out), tiled=True)
+    dx, ref_dx = jem.process_allgather((dx, ref_dx), tiled=True)
+    dw, ref_dw = jem.process_allgather((dw, ref_dw), tiled=True)
 
-    jnp.allclose(out, ref_out, **e4m3_tols)
-    jnp.allclose(dx, ref_dx, **e5m2_tols)
-    jnp.allclose(dw, ref_dw, **e5m2_tols)
+    assert_allclose(out, ref_out, **e4m3_tols)
+    assert_allclose(dx, ref_dx, **e4m3_tols)
+    assert_allclose(dw, ref_dw, **e4m3_tols)
+
+
+def run_grouped_dense_mxfp8_ep_fsdp_outside_shard_map():
+    n_groups = 4
+    group_tokens = 128
+    hidden = 256
+    out_hidden = 128
+    x_shape = (n_groups * group_tokens, hidden)
+    w_shape = (n_groups, hidden, out_hidden)
+    quantizer_set = _mxfp8_grouped_quantizer_set(n_groups)
+
+    x_sharding = NamedSharding(mesh, PartitionSpec(EP_AXIS_NAME, None))
+    w_sharding = NamedSharding(mesh, PartitionSpec(EP_AXIS_NAME, FSDP_AXIS_NAME, None))
+    group_sharding = NamedSharding(mesh, PartitionSpec(EP_AXIS_NAME))
+    out_sharding = NamedSharding(mesh, PartitionSpec(EP_AXIS_NAME, None))
+
+    with mesh, global_shard_guard(
+        MeshResource(ep_resource=EP_AXIS_NAME, fsdp_resource=FSDP_AXIS_NAME)
+    ):
+        x = jax.device_put(
+            jax.random.normal(jax.random.PRNGKey(20), x_shape, dtype=jnp.bfloat16)
+            * jnp.asarray(0.01, dtype=jnp.bfloat16),
+            x_sharding,
+        )
+        w = jax.device_put(
+            jax.random.normal(jax.random.PRNGKey(21), w_shape, dtype=jnp.bfloat16)
+            * jnp.asarray(0.01, dtype=jnp.bfloat16),
+            w_sharding,
+        )
+        group_sizes = jax.device_put(
+            jnp.full((n_groups,), group_tokens, dtype=jnp.int32),
+            group_sharding,
+        )
+
+        def apply(x, w, group_sizes):
+            return te_grouped_dense(
+                x,
+                w,
+                group_sizes,
+                contracting_dims=((1,), (1,)),
+                quantizer_set=quantizer_set,
+                kernel_fsdp_info=(FSDP_AXIS_NAME, 1),
+            )
+
+        out = jax.jit(
+            apply,
+            in_shardings=(x_sharding, w_sharding, group_sharding),
+            out_shardings=out_sharding,
+        )(x, w, group_sizes)
+        jax.block_until_ready(out)
+
+    local_out = np.asarray(jax.device_get(out.addressable_data(0)))
+    assert tuple(out.sharding.spec) == (EP_AXIS_NAME, None)
+    assert np.all(np.isfinite(local_out))
+    assert np.any(local_out != 0.0)
 
 
 if __name__ == "__main__":
-    from jax.sharding import NamedSharding, PartitionSpec
-    from jax.experimental import shard_map
     import sys
 
     coord_addr = sys.argv[1]
@@ -163,10 +223,14 @@ if __name__ == "__main__":
         coordinator_address=coord_addr, num_processes=num_procs, process_id=proc_id
     )
 
-    mesh = jax.make_mesh((num_procs,), (MESH_AXIS_NAME,))
+    mesh = jax.make_mesh((num_procs,), (FSDP_AXIS_NAME,))
 
     with mesh:
         data_shapes = [((4, 16, 128, 7168), (7168, 2048))]
         for data_shape in data_shapes:
             for kernel_fsdp_axis in [1, 2]:
                 test_grouped_gemm_fp8_allgather(data_shape, kernel_fsdp_axis)
+
+    if num_procs == 4:
+        mesh = jax.make_mesh((2, 2), (EP_AXIS_NAME, FSDP_AXIS_NAME))
+        run_grouped_dense_mxfp8_ep_fsdp_outside_shard_map()

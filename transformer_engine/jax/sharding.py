@@ -330,6 +330,7 @@ class MeshResource:
         tp_resource: Axis name for tensor parallelism (hidden dimension sharding), default is None
         tpsp_resource: Axis name for tensor sequence parallelism (hidden and sequence sharding), default is None
         fsdp_resource: Axis name for full-sharded data parallelism, default is None
+        ep_resource: Axis name for expert parallelism (expert sharding), default is None
         pp_resource: Axis name for pipeline parallelism (layer sharding), default is None
         cp_resource: Axis name for context parallelism (sequence sharding), default is None
     """
@@ -338,6 +339,7 @@ class MeshResource:
     tp_resource: str = None
     tpsp_resource: str = None
     fsdp_resource: str = None
+    ep_resource: str = None
     pp_resource: str = None
     cp_resource: str = None
 

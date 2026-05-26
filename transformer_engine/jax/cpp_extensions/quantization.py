@@ -32,6 +32,8 @@ from ..sharding import (
     all_reduce_max_along_all_axes_except_PP,
     all_reduce_sum_along_dp_fsdp,
     get_num_devices_in_mesh,
+    global_mesh_resource,
+    lax_paral_op,
 )
 from ..quantize import (
     ScaledTensor2x,
@@ -50,6 +52,59 @@ from ..quantize import (
 
 
 __all__ = ["quantize", "quantize_dbias", "grouped_quantize", "grouped_dbias"]
+
+
+def _merge_axis_specs(axis_specs):
+    axes = []
+    for axis_spec in axis_specs:
+        if axis_spec is None:
+            continue
+        axis_tuple = axis_spec if isinstance(axis_spec, tuple) else (axis_spec,)
+        for axis in axis_tuple:
+            if axis is not None and axis not in axes:
+                axes.append(axis)
+    if len(axes) == 0:
+        return None
+    return axes[0] if len(axes) == 1 else tuple(axes)
+
+
+def _flat_data_spec(input_spec):
+    return (_merge_axis_specs(input_spec),)
+
+
+def _axis_spec_size(axis_spec, mesh):
+    axis_tuple = axis_spec if isinstance(axis_spec, tuple) else (axis_spec,)
+    axis_size = 1
+    for axis in axis_tuple:
+        if axis is not None:
+            axis_size *= mesh.shape[axis]
+    return axis_size
+
+
+def _local_shape_from_spec(global_shape, spec, mesh):
+    local_shape = []
+    for dim, axis_spec in zip(global_shape, spec):
+        local_shape.append(dim // _axis_spec_size(axis_spec, mesh))
+    return tuple(local_shape)
+
+
+def _pad_or_slice_to_shape(x, target_shape):
+    if target_shape is None or x.shape == target_shape:
+        return x
+    target_size = math.prod(target_shape)
+    current_size = math.prod(x.shape)
+    x = x.reshape(-1)
+    if current_size > target_size:
+        return x[:target_size].reshape(target_shape)
+    return jnp.pad(x, (0, target_size - current_size)).reshape(target_shape)
+
+
+def _all_reduce_grouped_amax_along_dp_fsdp(amax, mesh):
+    gsr = global_mesh_resource()
+    for axis in (gsr.dp_resource, gsr.fsdp_resource):
+        if axis is not None and axis in mesh.axis_names:
+            amax = lax_paral_op(amax, jax.lax.pmax, axis, mesh)
+    return amax
 
 
 class BaseDBiasQuantizePrimitive(BasePrimitive):
@@ -1235,6 +1290,143 @@ class GroupedQuantizePrimitive(BasePrimitive):
             scale_dtype=scale_dtype,
         )
         return rowwise_out, colwise_out, rowwise_scale_inv, colwise_scale_inv, updated_amax
+
+    @staticmethod
+    def _parse_partition_specs(scaling_mode, q_layout, mesh, arg_infos):
+        del mesh
+        x_spec = get_padded_spec(arg_infos[0])
+        group_spec = get_padded_spec(arg_infos[2])
+        if group_spec == (None,) and len(x_spec) > 0:
+            group_spec = (x_spec[0],)
+        flat_spec = _flat_data_spec(x_spec)
+        replicated_spec = (None,)
+
+        rowwise_out_spec = flat_spec if q_layout.has_rowwise else replicated_spec
+        colwise_out_spec = flat_spec if q_layout.has_colwise else replicated_spec
+
+        rowwise_scale_inv_spec = replicated_spec
+        colwise_scale_inv_spec = replicated_spec
+        if ScalingMode(scaling_mode).is_block_scaling:
+            rowwise_scale_inv_spec = flat_spec if q_layout.has_rowwise else replicated_spec
+            colwise_scale_inv_spec = flat_spec if q_layout.has_colwise else replicated_spec
+        elif ScalingMode(scaling_mode).is_tensor_scaling():
+            rowwise_scale_inv_spec = group_spec if q_layout.has_rowwise else replicated_spec
+            colwise_scale_inv_spec = group_spec if q_layout.has_colwise else replicated_spec
+
+        updated_amax_spec = group_spec
+        return (
+            x_spec,
+            group_spec,
+            (
+                rowwise_out_spec,
+                colwise_out_spec,
+                rowwise_scale_inv_spec,
+                colwise_scale_inv_spec,
+                updated_amax_spec,
+            ),
+        )
+
+    @staticmethod
+    def partition(
+        out_dtype,
+        scaling_mode,
+        q_layout,
+        flatten_axis,
+        scale_dtype,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
+        x_spec, group_spec, out_specs = GroupedQuantizePrimitive._parse_partition_specs(
+            scaling_mode, q_layout, mesh, arg_infos
+        )
+        local_out_shapes = (
+            tuple(_local_shape_from_spec(info.shape, spec, mesh) for info, spec in zip(result_infos, out_specs))
+            if result_infos
+            else (None,) * len(out_specs)
+        )
+
+        arg_shardings = (
+            NamedSharding(mesh, PartitionSpec(*x_spec)),
+            NamedSharding(mesh, PartitionSpec(*group_spec)),
+            NamedSharding(mesh, PartitionSpec(*group_spec)),
+        )
+        out_shardings = tuple(NamedSharding(mesh, PartitionSpec(*spec)) for spec in out_specs)
+
+        def sharded_impl(x, scale, group_sizes):
+            (
+                rowwise_out,
+                colwise_out,
+                rowwise_scale_inv,
+                colwise_scale_inv,
+                updated_amax,
+            ) = GroupedQuantizePrimitive.impl(
+                x,
+                scale,
+                group_sizes,
+                out_dtype=out_dtype,
+                scaling_mode=scaling_mode,
+                q_layout=q_layout,
+                flatten_axis=flatten_axis,
+                scale_dtype=scale_dtype,
+            )
+            if ScalingMode(scaling_mode).is_block_scaling:
+                rowwise_scale_inv = _pad_or_slice_to_shape(rowwise_scale_inv, local_out_shapes[2])
+                colwise_scale_inv = _pad_or_slice_to_shape(colwise_scale_inv, local_out_shapes[3])
+            if ScalingMode(scaling_mode).is_tensor_scaling():
+                updated_amax = _all_reduce_grouped_amax_along_dp_fsdp(updated_amax, mesh)
+            return (
+                rowwise_out,
+                colwise_out,
+                rowwise_scale_inv,
+                colwise_scale_inv,
+                updated_amax,
+            )
+
+        return mesh, sharded_impl, out_shardings, arg_shardings
+
+    @staticmethod
+    def shardy_sharding_rule(
+        out_dtype,
+        scaling_mode,
+        q_layout,
+        flatten_axis,
+        scale_dtype,
+        mesh,
+        value_types,
+        result_types,
+    ):
+        del out_dtype, scale_dtype, mesh, result_types, flatten_axis
+
+        prefix = "GroupedQuantize"
+        input_spec = tuple(f"{prefix}_x_{i}" for i in range(len(value_types[0].shape)))
+        flat_spec = (f"{prefix}_flat",)
+        group_spec = (BATCHING + f"{prefix}_group",)
+        scalar_spec = (BATCHING + f"{prefix}_scalar",)
+
+        rowwise_out_spec = flat_spec if q_layout.has_rowwise else scalar_spec
+        colwise_out_spec = flat_spec if q_layout.has_colwise else scalar_spec
+
+        if ScalingMode(scaling_mode).is_block_scaling:
+            rowwise_scale_spec = flat_spec if q_layout.has_rowwise else scalar_spec
+            colwise_scale_spec = flat_spec if q_layout.has_colwise else scalar_spec
+        elif ScalingMode(scaling_mode).is_tensor_scaling():
+            rowwise_scale_spec = group_spec if q_layout.has_rowwise else scalar_spec
+            colwise_scale_spec = group_spec if q_layout.has_colwise else scalar_spec
+        else:
+            rowwise_scale_spec = scalar_spec
+            colwise_scale_spec = scalar_spec
+
+        return SdyShardingRule(
+            operand_mappings=(input_spec, group_spec, group_spec),
+            result_mappings=(
+                rowwise_out_spec,
+                colwise_out_spec,
+                rowwise_scale_spec,
+                colwise_scale_spec,
+                group_spec,
+            ),
+        )
 
 
 register_primitive(GroupedQuantizePrimitive)
