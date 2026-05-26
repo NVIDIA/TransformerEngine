@@ -189,27 +189,35 @@ def run_grouped_dense_mxfp8_ep_fsdp_outside_shard_map():
             group_sharding,
         )
 
-        def apply(x, w, group_sizes):
-            return te_grouped_dense(
-                x,
-                w,
-                group_sizes,
-                contracting_dims=((1,), (1,)),
-                quantizer_set=quantizer_set,
-                kernel_fsdp_info=(FSDP_AXIS_NAME, 1),
-            )
+        def apply_with_vjp(x, w, group_sizes):
+            def apply(x, w):
+                return te_grouped_dense(
+                    x,
+                    w,
+                    group_sizes,
+                    contracting_dims=((1,), (1,)),
+                    quantizer_set=quantizer_set,
+                    kernel_fsdp_info=(FSDP_AXIS_NAME, 1),
+                )
 
-        out = jax.jit(
-            apply,
+            out, vjp_fn = jax.vjp(apply, x, w)
+            dx, dw = vjp_fn(out)
+            return out, dx, dw
+
+        out, dx, dw = jax.jit(
+            apply_with_vjp,
             in_shardings=(x_sharding, w_sharding, group_sharding),
-            out_shardings=out_sharding,
+            out_shardings=(out_sharding, x_sharding, w_sharding),
         )(x, w, group_sizes)
-        jax.block_until_ready(out)
+        out, dx, dw = jax.block_until_ready((out, dx, dw))
 
-    local_out = np.asarray(jax.device_get(out.addressable_data(0)))
     assert tuple(out.sharding.spec) == (EP_AXIS_NAME, None)
-    assert np.all(np.isfinite(local_out))
-    assert np.any(local_out != 0.0)
+    assert tuple(dx.sharding.spec) == (EP_AXIS_NAME, None)
+    assert tuple(dw.sharding.spec) == (EP_AXIS_NAME, FSDP_AXIS_NAME, None)
+    for value in (out, dx, dw):
+        local_value = np.asarray(jax.device_get(value.addressable_data(0)))
+        assert np.all(np.isfinite(local_value))
+        assert np.any(local_value != 0.0)
 
 
 if __name__ == "__main__":
