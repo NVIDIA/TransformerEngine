@@ -34,12 +34,18 @@ dist.init_process_group(backend="nccl")
 tp_group = dist.group.WORLD
 tp_size = dist.get_world_size(tp_group)
 
+num_heads = 16
+head_dim = 128
+seq_length = 2048
+micro_batch_size = 4
+
 hidden_size = num_heads * head_dim
-batched_size = seq_length * batch_size
+batched_size = seq_length * micro_batch_size
 
 te.module.base.initialize_ub(
     [batched_size, hidden_size],
     tp_size,
+    quantization_modes=[te.module.base.UserBufferQuantizationMode.NONE],
     dtype=torch.bfloat16,
     bootstrap_backend="nccl",
 )
