@@ -407,6 +407,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("compute_amax", &transformer_engine::pytorch::compute_amax,
         "Compute absolute max value in tensor", py::arg("input"), py::arg("amax"),
         py::call_guard<py::gil_scoped_release>());
+  m.def("hadamard_transform_amax", &transformer_engine::pytorch::hadamard_transform_amax,
+        "K1 of the NVFP4Quantizer RHT+post_rht_amax path: rowwise (pre-RHT) + "
+        "columnwise (RHT(input.T)) amax in one launch. Bench-only entry.",
+        py::arg("input"), py::arg("rowwise_amax"), py::arg("columnwise_amax"),
+        py::arg("rht_matrix_random_sign_mask"), py::call_guard<py::gil_scoped_release>());
   m.def("fused_amax_and_scale_update_after_reduction",
         &transformer_engine::pytorch::fused_amax_and_scale_update_after_reduction,
         "Update amax history and FP8 scale/scale_inv after reduction",
@@ -455,6 +460,55 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("output_rowwise"), py::arg("output_colwise"), py::arg("scale_inv_rowwise"),
         py::arg("scale_inv_colwise"), py::arg("rows"), py::arg("cols"), py::arg("start_offset"),
         py::call_guard<py::gil_scoped_release>());
+  m.def("nvfp4_per_token_quantize", &transformer_engine::pytorch::nvfp4_per_token_quantize,
+        "NVFP4 per-token cast (composite K1 amax + K2 encode). Same FP4 + 1x16 "
+        "e4m3 SF layout as per-tensor, but outer amax is per-row/per-col. "
+        "Requires bf16 input, M % 128 == 0, K % 128 == 0.",
+        py::arg("input"), py::arg("q_row"), py::arg("s_dec_row"), py::arg("row_amax"),
+        py::arg("q_col"), py::arg("s_dec_col"), py::arg("col_amax"), py::arg("rowwise"),
+        py::arg("columnwise"));
+  m.def("nvfp4_per_token_amax", &transformer_engine::pytorch::nvfp4_per_token_amax,
+        "K1-only: per-row/per-col outer amax via TMA + atomicMax. Bench/diagnostic.",
+        py::arg("input"), py::arg("row_amax"), py::arg("col_amax"), py::arg("rowwise"),
+        py::arg("columnwise"));
+  m.def("nvfp4_per_token_encode", &transformer_engine::pytorch::nvfp4_per_token_encode,
+        "K2-only: FP4 + e4m3 SF encode given pre-filled amax buffers. Bench/diagnostic.",
+        py::arg("input"), py::arg("q_row"), py::arg("s_dec_row"), py::arg("row_amax"),
+        py::arg("q_col"), py::arg("s_dec_col"), py::arg("col_amax"), py::arg("rowwise"),
+        py::arg("columnwise"));
+  m.def("nvfp4_per_token_post_scale", &transformer_engine::pytorch::nvfp4_per_token_post_scale,
+        "Apply d[i,j] *= row_amax_a[i] * row_amax_b[j] in-place on bf16 D.", py::arg("d"),
+        py::arg("row_amax_a"), py::arg("row_amax_b"));
+  m.def("nvfp4_per_token_gemm", &transformer_engine::pytorch::nvfp4_per_token_gemm,
+        "End-to-end NVFP4 per-token GEMM: swizzle compact SFs, cuBLAS LT NVFP4 "
+        "GEMM, then row*col post-scale to recover C = A @ B^T. beta must be 0.",
+        py::arg("a_data"), py::arg("b_data"), py::arg("a_sf"), py::arg("b_sf"),
+        py::arg("a_row_amax"), py::arg("b_row_amax"), py::arg("d"), py::arg("workspace"),
+        py::arg("m"), py::arg("n"), py::arg("k"), py::arg("alpha"), py::arg("beta"));
+  m.def("nvfp4_per_tensor_gemm", &transformer_engine::pytorch::nvfp4_per_tensor_gemm,
+        "Skinny prod NVFP4 GEMM twin of nvfp4_per_token_gemm: per-tensor amaxes "
+        "folded into cuBLAS alpha, no trailing post-scale. Bench-only.",
+        py::arg("a_data"), py::arg("b_data"), py::arg("a_sf"), py::arg("b_sf"), py::arg("a_amax"),
+        py::arg("b_amax"), py::arg("d"), py::arg("workspace"), py::arg("m"), py::arg("n"),
+        py::arg("k"), py::arg("alpha"), py::arg("beta"));
+  m.def("nvfp4_per_token_group_quantize",
+        &transformer_engine::pytorch::nvfp4_per_token_group_quantize,
+        "Grouped (multi-tensor) NVFP4 per-token cast: K1 + K2 across <= 64 splits "
+        "of a single (sum_M, K) input. Byte-equal to a for-loop of single-tensor.",
+        py::arg("input"), py::arg("split_sections"), py::arg("q_row_list"),
+        py::arg("s_dec_row_list"), py::arg("row_amax_list"), py::arg("q_col_list"),
+        py::arg("s_dec_col_list"), py::arg("col_amax_list"), py::arg("rowwise"),
+        py::arg("columnwise"));
+  m.def("nvfp4_per_token_group_amax", &transformer_engine::pytorch::nvfp4_per_token_group_amax,
+        "K1-only variant of nvfp4_per_token_group_quantize: only fills amax slots.",
+        py::arg("input"), py::arg("split_sections"), py::arg("row_amax_list"),
+        py::arg("col_amax_list"), py::arg("rowwise"), py::arg("columnwise"));
+  m.def("nvfp4_per_token_group_quantize_bulk",
+        &transformer_engine::pytorch::nvfp4_per_token_group_quantize_bulk,
+        "Bulk grouped quantize: allocates per-split buffers + view-slices inside "
+        "the binding (one pybind hop instead of 1 + 6N), then dispatches the K1+K2 "
+        "kernel. Returns 6 per-split tensor lists; empty for disabled directions.",
+        py::arg("input"), py::arg("split_sections"), py::arg("rowwise"), py::arg("columnwise"));
   m.def("fused_multi_row_padding", &transformer_engine::pytorch::fused_multi_row_padding,
         "Fused Multi-tensor padding", py::call_guard<py::gil_scoped_release>());
   m.def("fused_multi_row_unpadding", &transformer_engine::pytorch::fused_multi_row_unpadding,

@@ -434,6 +434,9 @@ at::Tensor scaled_aligned_causal_masked_softmax_backward(at::Tensor output_grads
 
 void compute_amax(const at::Tensor &tensor, at::Tensor &amax);
 
+void hadamard_transform_amax(const at::Tensor &tensor, at::Tensor &rowwise_amax,
+                             at::Tensor &columnwise_amax, int64_t rht_matrix_random_sign_mask);
+
 void fused_amax_and_scale_update_after_reduction(const at::Tensor &amax_reduction_buffer,
                                                  std::vector<at::Tensor> amax_histories,
                                                  std::vector<at::Tensor> scales,
@@ -470,6 +473,56 @@ void mxfp8_scaling_partial_cast(const at::Tensor &input, at::Tensor output_rowwi
                                 at::Tensor output_colwise, const at::Tensor &scale_inv_rowwise,
                                 const at::Tensor &scale_inv_colwise, int rows, int cols,
                                 size_t start_offset);
+
+void nvfp4_per_token_quantize(const at::Tensor &input, at::Tensor q_row, at::Tensor s_dec_row,
+                              at::Tensor row_amax, at::Tensor q_col, at::Tensor s_dec_col,
+                              at::Tensor col_amax, bool rowwise, bool columnwise);
+
+void nvfp4_per_token_amax(const at::Tensor &input, at::Tensor row_amax, at::Tensor col_amax,
+                          bool rowwise, bool columnwise);
+
+void nvfp4_per_token_encode(const at::Tensor &input, at::Tensor q_row, at::Tensor s_dec_row,
+                            at::Tensor row_amax, at::Tensor q_col, at::Tensor s_dec_col,
+                            at::Tensor col_amax, bool rowwise, bool columnwise);
+
+void nvfp4_per_token_post_scale(at::Tensor d, const at::Tensor &row_amax_a,
+                                const at::Tensor &row_amax_b);
+
+void nvfp4_per_token_gemm(const at::Tensor &a_data, const at::Tensor &b_data,
+                          const at::Tensor &a_sf, const at::Tensor &b_sf,
+                          const at::Tensor &a_row_amax, const at::Tensor &b_row_amax, at::Tensor d,
+                          const at::Tensor &workspace, int64_t m, int64_t n, int64_t k,
+                          double alpha, double beta);
+
+// Bench-only per-tensor twin of nvfp4_per_token_gemm: scalar amaxes folded
+// into cuBLAS LT alpha via the amax slot; no trailing post-scale.
+void nvfp4_per_tensor_gemm(const at::Tensor &a_data, const at::Tensor &b_data,
+                           const at::Tensor &a_sf, const at::Tensor &b_sf, const at::Tensor &a_amax,
+                           const at::Tensor &b_amax, at::Tensor d, const at::Tensor &workspace,
+                           int64_t m, int64_t n, int64_t k, double alpha, double beta);
+
+void nvfp4_per_token_group_quantize(
+    const at::Tensor &input, const std::vector<int64_t> &split_sections,
+    std::vector<at::Tensor> q_row_list, std::vector<at::Tensor> s_dec_row_list,
+    std::vector<at::Tensor> row_amax_list, std::vector<at::Tensor> q_col_list,
+    std::vector<at::Tensor> s_dec_col_list, std::vector<at::Tensor> col_amax_list, bool rowwise,
+    bool columnwise);
+
+// Amax-only variant of the grouped quantize. Useful for multi-rank training
+// where amax is allReduced before the cast pass.
+void nvfp4_per_token_group_amax(const at::Tensor &input, const std::vector<int64_t> &split_sections,
+                                std::vector<at::Tensor> row_amax_list,
+                                std::vector<at::Tensor> col_amax_list, bool rowwise,
+                                bool columnwise);
+
+// Bulk grouped quantize: allocate-view-dispatch all in one pybind hop.
+// Returns 6 per-split vectors (q_row, s_dec_row_fp8, row_amax, q_col,
+// s_dec_col_fp8, col_amax); disabled directions return empty vectors.
+std::tuple<std::vector<at::Tensor>, std::vector<at::Tensor>, std::vector<at::Tensor>,
+           std::vector<at::Tensor>, std::vector<at::Tensor>, std::vector<at::Tensor>>
+nvfp4_per_token_group_quantize_bulk(const at::Tensor &input,
+                                    const std::vector<int64_t> &split_sections, bool rowwise,
+                                    bool columnwise);
 
 /***************************************************************************************************
  * Rotary positional embedding
