@@ -11,14 +11,21 @@ import warnings
 import torch
 import nvdlfw_inspect.api as debug_api
 
-from nvdlfw_inspect.debug_features.log_tensor_stats import LogTensorStats as BaseLogTensorStats
+from nvdlfw_inspect.debug_features.log_tensor_stats import (
+    LogTensorStats as BaseLogTensorStats,
+)
 from nvdlfw_inspect.registry import Registry, api_method
 
 from transformer_engine.debug.features.utils.stats_buffer import STATS_BUFFERS
 from transformer_engine.pytorch.tensor import Quantizer, QuantizedTensor
 from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
-from transformer_engine.debug.features.utils import get_reduction_params, next_enabled_iter
-from transformer_engine.pytorch.tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
+from transformer_engine.debug.features.utils import (
+    get_reduction_params,
+    next_enabled_iter,
+)
+from transformer_engine.pytorch.tensor.storage.nvfp4_tensor_storage import (
+    NVFP4TensorStorage,
+)
 
 
 @Registry.register_feature(namespace="transformer_engine")
@@ -45,6 +52,10 @@ class LogNvfp4TensorStats(BaseLogTensorStats):
             List of statistics to collect. Available stats:
                 - underflows% - percentage of non-zero elements clipped to 0 (from packed FP4 data)
                 - mse - mean squared error = sum((quantized_tensor - original_tensor)**2) / num_elements
+                - scale_inv_min - minimum of the inverse of the scaling factors
+                - scale_inv_max - maximum of the inverse of the scaling factors
+                - scale_inv_std - population standard deviation of the inverse of the scaling factors;
+                  useful for spotting clipping that min/max alone can miss
 
         tensors/tensors_struct: List[str]
             list of tensors to log
@@ -85,13 +96,18 @@ class LogNvfp4TensorStats(BaseLogTensorStats):
 
     def check_if_stat_is_supported(self, stat: str):
         """Returns True if stat is supported, raises ValueError otherwise."""
+        bare = stat[: -len("_columnwise")] if stat.endswith("_columnwise") else stat
         supported_stats = [
             "underflows%",
             "mse",
+            "scale_inv_min",
+            "scale_inv_max",
+            "scale_inv_std",
         ]
-        if stat not in supported_stats:
+        if bare not in supported_stats:
             raise ValueError(
                 f"Stat {stat} is not supported for NVFP4. Supported stats: {supported_stats}"
+                " (any of these may take an optional '_columnwise' suffix)"
             )
         return True
 
@@ -190,7 +206,9 @@ class LogNvfp4TensorStats(BaseLogTensorStats):
         end_step = config.get("end_step", None)
         start_end_list = config.get("start_end_list", None)
         if start_end_list is not None:
-            start_end_list = tuple(tuple(int(x) for x in interval) for interval in start_end_list)
+            start_end_list = tuple(
+                tuple(int(x) for x in interval) for interval in start_end_list
+            )
 
         options = (
             start_step,
@@ -199,8 +217,8 @@ class LogNvfp4TensorStats(BaseLogTensorStats):
             "nvfp4",
         )
 
-        skip_reduction, reduction_group, reduce_within_microbatch = get_reduction_params(
-            tensor_name, tp_group, tp_size
+        skip_reduction, reduction_group, reduce_within_microbatch = (
+            get_reduction_params(tensor_name, tp_group, tp_size)
         )
 
         # Add nvfp4_ prefix to all stats for internal use

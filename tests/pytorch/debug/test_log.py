@@ -28,8 +28,8 @@ import math
 
 fp8_available, reason_for_no_fp8 = is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = is_mxfp8_available(return_reason=True)
-fp8_block_scaling_available, reason_for_no_fp8_block_scaling = is_fp8_block_scaling_available(
-    return_reason=True
+fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
+    is_fp8_block_scaling_available(return_reason=True)
 )
 nvfp4_available, reason_for_no_nvfp4 = is_nvfp4_available(return_reason=True)
 
@@ -61,6 +61,7 @@ bare_stats = [
     "underflows%",
     "scale_inv_min",
     "scale_inv_max",
+    "scale_inv_std",
     "mse",
 ]
 
@@ -87,7 +88,9 @@ for r in recipes:
 
             all_stats.append(f"{r}_{stat}{columnwise_postfix}")
 
-all_stats.append("fp8_delayed_scaling_overflows%")  # only delayed-scaling supports overflows%
+all_stats.append(
+    "fp8_delayed_scaling_overflows%"
+)  # only delayed-scaling supports overflows%
 
 
 @contextlib.contextmanager
@@ -221,7 +224,9 @@ def test_log_quantized_stats_numerics(fp8_recipe, feature_dirs):
     if not fp8_block_scaling_available and fp8_recipe == recipe.Float8BlockScaling():
         pytest.skip(reason_for_no_fp8_block_scaling)
 
-    log_only_bare_stats_config = LOG_QUANTIZED_CONFIG_BASE.format(stats=", ".join(bare_stats))
+    log_only_bare_stats_config = LOG_QUANTIZED_CONFIG_BASE.format(
+        stats=", ".join(bare_stats)
+    )
 
     with debug_session(log_only_bare_stats_config, feature_dirs) as log_dir:
         recipe_state = RecipeState.create(
@@ -248,25 +253,50 @@ def test_log_quantized_stats_numerics(fp8_recipe, feature_dirs):
         debug_api.step()
 
         dequantized_tensor = quantized_tensor.dequantize()
+        if hasattr(quantized_tensor, "_scale_inv"):
+            scale_inv_rowwise = quantized_tensor._scale_inv.float()
+        else:
+            scale_inv_rowwise = quantized_tensor._rowwise_scale_inv.float()
         output = read_log(log_dir)
 
     for line in output.splitlines():
         if "underflows%" in line:
             underflows = float(line.split("value=")[1])
             expected = (
-                ((dequantized_tensor == 0).sum() - (tensor == 0).sum()) / tensor.numel() * 100
+                ((dequantized_tensor == 0).sum() - (tensor == 0).sum())
+                / tensor.numel()
+                * 100
             )
             assert underflows == pytest.approx(expected.cpu(), abs=1e-4)
         if "mse" in line:
             mse = float(line.split("value=")[1])
-            expected = torch.nn.functional.mse_loss(dequantized_tensor, tensor, reduction="mean")
+            expected = torch.nn.functional.mse_loss(
+                dequantized_tensor, tensor, reduction="mean"
+            )
             assert mse == pytest.approx(expected.cpu(), abs=1e-4)
         if "overflows%" in line:
             overflows = float(line.split("value=")[1])
             expected = (
-                (abs(dequantized_tensor) > abs(tensor)).sum() / dequantized_tensor.numel() * 100
+                (abs(dequantized_tensor) > abs(tensor)).sum()
+                / dequantized_tensor.numel()
+                * 100
             )
             assert overflows == pytest.approx(expected.cpu(), abs=1e-4)
+        # Rowwise scale_inv stats only; logger formats with {:.4f} so abs<1e-4.
+        if "scale_inv_min" in line and "_columnwise" not in line:
+            value = float(line.split("value=")[1])
+            assert value == pytest.approx(
+                scale_inv_rowwise.min().cpu().item(), abs=1e-4
+            )
+        if "scale_inv_max" in line and "_columnwise" not in line:
+            value = float(line.split("value=")[1])
+            assert value == pytest.approx(
+                scale_inv_rowwise.max().cpu().item(), abs=1e-4
+            )
+        if "scale_inv_std" in line and "_columnwise" not in line:
+            value = float(line.split("value=")[1])
+            expected = torch.std(scale_inv_rowwise, unbiased=False).cpu().item()
+            assert value == pytest.approx(expected, abs=1e-4)
 
 
 LOG_HIGH_PRECISION_CONFIG = """
@@ -328,7 +358,9 @@ def test_log_stats_numerics(feature_dirs, tensor_name):
         output = read_log(log_dir)
 
     max_over_orientations = tensor_name in ["activation", "weight"]
-    max_over_orientations_suffix = "_max_over_orientations" if max_over_orientations else ""
+    max_over_orientations_suffix = (
+        "_max_over_orientations" if max_over_orientations else ""
+    )
 
     # Track which stats were found to ensure all are present
     found_dims_1 = False
@@ -336,8 +368,13 @@ def test_log_stats_numerics(feature_dirs, tensor_name):
     found_dynamic_range = False
 
     for line in output.splitlines():
-        if f"max_blockwise_dynamic_range_block_size_4_dims_1{max_over_orientations_suffix}" in line:
-            max_blockwise_dynamic_range_block_size_4_dims_1 = float(line.split("value=")[1])
+        if (
+            f"max_blockwise_dynamic_range_block_size_4_dims_1{max_over_orientations_suffix}"
+            in line
+        ):
+            max_blockwise_dynamic_range_block_size_4_dims_1 = float(
+                line.split("value=")[1]
+            )
             if max_over_orientations:
                 # Columnwise blocks have mixed values [A, B, B, B] -> dynamic_range = log2(A/B)
                 expected = math.log2(A) - math.log2(B)
@@ -349,9 +386,12 @@ def test_log_stats_numerics(feature_dirs, tensor_name):
             )
             found_dims_1 = True
         elif (
-            f"max_blockwise_dynamic_range_block_size_4_dims_2{max_over_orientations_suffix}" in line
+            f"max_blockwise_dynamic_range_block_size_4_dims_2{max_over_orientations_suffix}"
+            in line
         ):
-            max_blockwise_dynamic_range_block_size_4_dims_2 = float(line.split("value=")[1])
+            max_blockwise_dynamic_range_block_size_4_dims_2 = float(
+                line.split("value=")[1]
+            )
             # For 2D blocks (4x4 tiles), blocks always contain mixed values from different rows
             expected = math.log2(A) - math.log2(B)
             assert max_blockwise_dynamic_range_block_size_4_dims_2 == pytest.approx(
@@ -403,7 +443,8 @@ def test_log_every_3_or_5_layers(layer, configs_dir, feature_dirs):
 
         with open(
             os.path.join(
-                temp_dir, "nvdlfw_inspect_statistics_logs/nvdlfw_inspect_globalrank-0.log"
+                temp_dir,
+                "nvdlfw_inspect_statistics_logs/nvdlfw_inspect_globalrank-0.log",
             ),
             "r",
         ) as f:
@@ -539,7 +580,9 @@ def test_log_grouped_gemm(feature_dirs):
 
     log_all_stats_config = LOG_QUANTIZED_CONFIG_BASE.format(stats=", ".join(all_stats))
     with debug_session(log_all_stats_config, feature_dirs) as log_dir:
-        model = te.GroupedLinear(3, 128, 128, name="linear1", params_dtype=torch.bfloat16)
+        model = te.GroupedLinear(
+            3, 128, 128, name="linear1", params_dtype=torch.bfloat16
+        )
         inp = torch.randn((1, 128, 128), dtype=torch.bfloat16).cuda()
         m_splits = [64, 32, 32]
         with te.fp8_autocast(fp8_recipe=recipe.DelayedScaling()):
@@ -572,7 +615,9 @@ def test_compute_max_blockwise_dynamic_range_direct():
 
     # Test 1: dims=1, max_over_orientations=False (rowwise only)
     # Rowwise blocks have uniform values -> dynamic_range should be 0
-    stat_config = BlockwiseDynamicRangeStat(block_size=4, dims=1, max_over_orientations=False)
+    stat_config = BlockwiseDynamicRangeStat(
+        block_size=4, dims=1, max_over_orientations=False
+    )
     result = compute_max_blockwise_dynamic_range(tensor, stat_config)
     assert result.item() == pytest.approx(
         0.0, abs=1e-4
@@ -580,7 +625,9 @@ def test_compute_max_blockwise_dynamic_range_direct():
 
     # Test 2: dims=1, max_over_orientations=True (max of rowwise and columnwise)
     # Columnwise blocks have mixed values [A, B, B, B] -> dynamic_range = log2(A/B)
-    stat_config = BlockwiseDynamicRangeStat(block_size=4, dims=1, max_over_orientations=True)
+    stat_config = BlockwiseDynamicRangeStat(
+        block_size=4, dims=1, max_over_orientations=True
+    )
     result = compute_max_blockwise_dynamic_range(tensor, stat_config)
     expected = math.log2(A) - math.log2(B)
     assert result.item() == pytest.approx(expected, abs=1e-4), (
@@ -590,7 +637,9 @@ def test_compute_max_blockwise_dynamic_range_direct():
 
     # Test 3: dims=2, block_size=4 (4x4 tiles)
     # 2D blocks span multiple rows -> always have mixed values
-    stat_config = BlockwiseDynamicRangeStat(block_size=4, dims=2, max_over_orientations=False)
+    stat_config = BlockwiseDynamicRangeStat(
+        block_size=4, dims=2, max_over_orientations=False
+    )
     result = compute_max_blockwise_dynamic_range(tensor, stat_config)
     expected = math.log2(A) - math.log2(B)
     assert result.item() == pytest.approx(expected, abs=1e-4), (
@@ -601,7 +650,9 @@ def test_compute_max_blockwise_dynamic_range_direct():
     # Test 4: Different block size
     # With block_size=8, columnwise blocks contain [A, B, B, B, epsilon, epsilon, epsilon, epsilon]
     # So max=A, min=epsilon (not B anymore)
-    stat_config = BlockwiseDynamicRangeStat(block_size=8, dims=1, max_over_orientations=True)
+    stat_config = BlockwiseDynamicRangeStat(
+        block_size=8, dims=1, max_over_orientations=True
+    )
     result = compute_max_blockwise_dynamic_range(tensor, stat_config)
     expected = math.log2(A) - math.log2(epsilon)  # min is epsilon, not B
     assert result.item() == pytest.approx(
@@ -610,7 +661,9 @@ def test_compute_max_blockwise_dynamic_range_direct():
 
     # Test 5: Tensor with all uniform values -> dynamic_range should be 0
     uniform_tensor = torch.ones(64, 64).cuda() * 42.0
-    stat_config = BlockwiseDynamicRangeStat(block_size=4, dims=1, max_over_orientations=True)
+    stat_config = BlockwiseDynamicRangeStat(
+        block_size=4, dims=1, max_over_orientations=True
+    )
     result = compute_max_blockwise_dynamic_range(uniform_tensor, stat_config)
     assert result.item() == pytest.approx(
         0.0, abs=1e-4
@@ -629,7 +682,9 @@ def test_compute_max_blockwise_dynamic_range_direct():
     ).cuda()
 
     # Compute on 2D tensor: 4 blocks of 2x2, max range is log2(1000/100)
-    stat_config = BlockwiseDynamicRangeStat(block_size=2, dims=2, max_over_orientations=False)
+    stat_config = BlockwiseDynamicRangeStat(
+        block_size=2, dims=2, max_over_orientations=False
+    )
     result_2d = compute_max_blockwise_dynamic_range(tensor_2d, stat_config)
 
     # Reshape to 3D [2, 2, 4] and compute - should give same result if flattening is correct
@@ -715,7 +770,9 @@ def test_dump_tensors_sanity(feature_dirs):
         ), f"Expected QuantizedTensor, got {type(data['quantized'])}"
 
         # Verify tensor shapes and values match
-        assert data["high_precision"].shape == tensor.shape, "high_precision shape mismatch"
+        assert (
+            data["high_precision"].shape == tensor.shape
+        ), "high_precision shape mismatch"
         assert torch.equal(
             data["high_precision"], tensor
         ), "high_precision tensor values do not match original tensor"
