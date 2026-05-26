@@ -1373,7 +1373,7 @@ void group_hadamard_transform_cast_fusion(const Tensor &input_, std::vector<Tens
     const Tensor &rng_state_tensor = *convertNVTETensorCheck(quant_config.rng_state);
     NVTE_CHECK(rng_state_tensor.dtype() == DType::kInt64,
                "RNG state should contain 2 64-bit values.");
-    NVTE_CHECK(rng_state_tensor.data.shape == std::vector<size_t>{2},
+    NVTE_CHECK(rng_state_tensor.data.shape == Shape{2},
                "Shape of the RNG state should be [2], but got ", rng_state_tensor.data.shape);
     rng_state = reinterpret_cast<const size_t *>(rng_state_tensor.data.dptr);
   }
@@ -1402,9 +1402,9 @@ void group_hadamard_transform_cast_fusion(const Tensor &input_, std::vector<Tens
              to_string(hadamard_matrix_.dtype()), ".");
   const SimpleTensor &hadamard_matrix = hadamard_matrix_.data;
   NVTE_CHECK(
-      (hadamard_matrix_.shape() == std::vector<size_t>{kHadamardDimension, kHadamardDimension}),
+      (hadamard_matrix_.shape() == Shape{kHadamardDimension, kHadamardDimension}),
       "Hadamard matrix must have shape=",
-      std::vector<size_t>{kHadamardDimension, kHadamardDimension},
+      Shape{kHadamardDimension, kHadamardDimension},
       ", but got shape=", hadamard_matrix_.shape(), ".");
   const size_t hadamard_dimension = hadamard_matrix.shape[0];
 

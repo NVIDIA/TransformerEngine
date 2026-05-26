@@ -405,7 +405,7 @@ void quantize_2D(const Tensor &input, const Tensor *act_input, Tensor *output, T
 
   if constexpr (IS_DBIAS) {
     NVTE_CHECK(dbias->data.dtype == input.data.dtype, "DBias must have the same type as input.");
-    NVTE_CHECK(dbias->data.shape == std::vector<size_t>{cols}, "Wrong shape of DBias.");
+    NVTE_CHECK(dbias->data.shape == Shape{cols}, "Wrong shape of DBias.");
     NVTE_CHECK(workspace != nullptr, "Workspace must be a tensor.");
 
     if (workspace->data.dptr == nullptr) {

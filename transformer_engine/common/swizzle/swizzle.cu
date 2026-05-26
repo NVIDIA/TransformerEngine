@@ -24,16 +24,19 @@ namespace {
 constexpr int MXFP8_BLOCK_SIZE = 32;
 constexpr int NVFP4_BLOCK_SIZE = 16;
 
-int get_max_dynamic_smem() {
-  auto query_max_smem = []() -> int {
-    int device{0}, max_smem{0};
-    NVTE_CHECK_CUDA(cudaGetDevice(&device));
+int get_max_dynamic_smem(int device_id = -1) {
+  static std::vector<int> cache(cuda::num_devices(), -1);
+  static std::vector<std::once_flag> flags(cuda::num_devices());
+  if (device_id < 0) {
+    device_id = cuda::current_device();
+  }
+  auto init = [&]() {
     NVTE_CHECK_CUDA(
-        cudaDeviceGetAttribute(&max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
-    return max_smem;
+        cudaDeviceGetAttribute(&cache[device_id], cudaDevAttrMaxSharedMemoryPerBlockOptin,
+                               device_id));
   };
-  static int cached_val = query_max_smem();
-  return cached_val;
+  std::call_once(flags[device_id], init);
+  return cache[device_id];
 }
 
 constexpr __device__ __host__ int TB_DIM = 32;

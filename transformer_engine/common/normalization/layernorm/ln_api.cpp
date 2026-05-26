@@ -11,7 +11,6 @@
 #include <cstdlib>
 #include <iostream>
 #include <numeric>
-#include <vector>
 
 #include "../../common.h"
 #include "../common.h"
@@ -48,11 +47,11 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
 
   NVTE_CHECK(z->data.shape == x.data.shape, "Output tensor must have the same shape as x.");
 
-  NVTE_CHECK(mu->data.shape == std::vector<size_t>{x.data.shape[0]},
+  NVTE_CHECK(mu->data.shape == Shape{x.data.shape[0]},
              "Mu must be 1D tensor with shape (x.shape[0],).");
   NVTE_CHECK(mu->data.dtype == DType::kFloat32, "Mu must be a float32 tensor.");
 
-  NVTE_CHECK(rsigma->data.shape == std::vector<size_t>{x.data.shape[0]},
+  NVTE_CHECK(rsigma->data.shape == Shape{x.data.shape[0]},
              "RSigma must be 1D tensor with shape (x.shape[0],).");
   NVTE_CHECK(rsigma->data.dtype == DType::kFloat32, "RSigma must be a float32 tensor.");
 
@@ -100,7 +99,7 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
       gamma_in_weight_dtype);
 
   if (workspace->data.numel() == 0) {
-    workspace->data.shape = Shape(plan->getWorkspaceShape());
+    workspace->data.shape = plan->getWorkspaceShape();
     workspace->data.dtype = DType::kByte;
     return;
   }
@@ -185,7 +184,7 @@ void layernorm_bwd(const Tensor& dz, const Tensor& x, const Tensor& mu, const Te
       gamma_in_weight_dtype);
 
   if (workspace->data.numel() == 0) {
-    workspace->data.shape = Shape(plan->getWorkspaceShape());
+    workspace->data.shape = plan->getWorkspaceShape();
     workspace->data.dtype = DType::kByte;
     return;
   } else {

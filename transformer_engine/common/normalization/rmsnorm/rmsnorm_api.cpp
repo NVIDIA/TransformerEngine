@@ -8,7 +8,6 @@
 #include <cstdlib>
 #include <iostream>
 #include <numeric>
-#include <vector>
 
 #include "../../common.h"
 #include "../common.h"
@@ -40,7 +39,7 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
 
   NVTE_CHECK(z->data.shape == x.data.shape, "Output tensor must have the same shape as x.");
 
-  NVTE_CHECK(rsigma->data.shape == std::vector<size_t>{x.data.shape[0]},
+  NVTE_CHECK(rsigma->data.shape == Shape{x.data.shape[0]},
              "RSigma must be 1D tensor with shape (x.shape[0],).");
   NVTE_CHECK(rsigma->data.dtype == DType::kFloat32, "RSigma must be a float32 tensor.");
 
@@ -85,7 +84,7 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
       gamma_in_weight_dtype);
 
   if (workspace->data.numel() == 0) {
-    workspace->data.shape = Shape(plan->getWorkspaceShape());
+    workspace->data.shape = plan->getWorkspaceShape();
     workspace->data.dtype = DType::kByte;
     return;
   }
@@ -162,7 +161,7 @@ void rmsnorm_bwd(const Tensor &dz, const Tensor &x, const Tensor &rsigma, const 
       gamma_in_weight_dtype);
 
   if (workspace->data.numel() == 0) {
-    workspace->data.shape = Shape(plan->getWorkspaceShape());
+    workspace->data.shape = plan->getWorkspaceShape();
     workspace->data.dtype = DType::kByte;
     return;
   } else {
@@ -233,7 +232,7 @@ void rmsnorm_bwd_add(const Tensor &dz, const Tensor &x, const Tensor &add, const
       gamma_in_weight_dtype);
 
   if (workspace->data.numel() == 0) {
-    workspace->data.shape = Shape(plan->getWorkspaceShape());
+    workspace->data.shape = plan->getWorkspaceShape();
     workspace->data.dtype = DType::kByte;
     return;
   } else {

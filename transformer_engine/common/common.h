@@ -200,6 +200,9 @@ class Shape {
   void resize(size_type count) {
     NVTE_CHECK(count <= max_ndim, "Too many dimensions (requested ", count, ", max is ", max_ndim,
                ").");
+    if (count > data_.ndim) {
+      std::fill(&data_.data[data_.ndim], &data_.data[count], 0);
+    }
     data_.ndim = count;
   }
 
@@ -336,13 +339,7 @@ struct Tensor {
   explicit operator NVTETensor() const noexcept { return nvte_tensor; }
 
   /*! Number of tensor elements. */
-  size_t numel() const {
-    size_t ret = 1;
-    for (const size_t dim : shape()) {
-      ret *= dim;
-    }
-    return ret;
-  }
+  size_t numel() const { return product(shape()); }
 
   /*! Whether the tensor data buffer is not uninitialized.
    *

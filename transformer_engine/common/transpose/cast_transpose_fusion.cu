@@ -548,7 +548,7 @@ void cast_transpose_fused(const Tensor &input, const Tensor *act_input, Tensor *
 
   if constexpr (IS_DBIAS) {
     NVTE_CHECK(dbias->data.dtype == input.data.dtype, "DBias must have the same type as input.");
-    NVTE_CHECK(dbias->data.shape == std::vector<size_t>{row_length}, "Wrong shape of DBias.");
+    NVTE_CHECK(dbias->data.shape == Shape{row_length}, "Wrong shape of DBias.");
   }
   if constexpr (IS_DACT) {
     NVTE_CHECK(input.dtype() == act_input->dtype(), "Types of both inputs must match.");
