@@ -1846,6 +1846,7 @@ class TestBasicOps:
     @pytest.mark.parametrize("quantization", _quantization_list)
     @pytest.mark.parametrize("quantize_forward", (False, True))
     @pytest.mark.parametrize("quantize_backward", (False, True))
+    @pytest.mark.parametrize("glu_linear_offset", (1.0, 0.0))
     def test_clamped_swiglu(
         self,
         *,
@@ -1856,6 +1857,7 @@ class TestBasicOps:
         quantization: Optional[str],
         quantize_forward: bool,
         quantize_backward: bool,
+        glu_linear_offset: float,
         limit: float = 0.75,
         alpha: float = 1.702,
     ):
@@ -1898,7 +1900,7 @@ class TestBasicOps:
         x_glu = x_glu.clamp(min=None, max=limit)
         x_linear = x_linear.clamp(min=-limit, max=limit)
         out_glu = x_glu * torch.sigmoid(alpha * x_glu)
-        y_ref = out_glu * (x_linear + 1)
+        y_ref = out_glu * (x_linear + glu_linear_offset)
         y_ref.backward(dy_ref)
 
         # Implementation with fusible operation
@@ -1909,6 +1911,7 @@ class TestBasicOps:
             te_ops.ClampedSwiGLU(
                 limit=limit,
                 alpha=alpha,
+                glu_linear_offset=glu_linear_offset,
                 glu_interleave_size=glu_interleave_size,
             ),
             te_ops.Quantize(forward=quantize_forward, backward=False),
@@ -1938,6 +1941,7 @@ class TestBasicOps:
             quantize_forward=False,
             quantize_backward=False,
             glu_interleave_size=32,
+            glu_linear_offset=1.0,
         )
 
     @pytest.mark.parametrize("scale", (1, 0, -2.5, 3.5))
@@ -2594,6 +2598,7 @@ class TestBasicOps:
     @pytest.mark.parametrize("in_shape", ((71, 192), (5, 7, 128)))
     @pytest.mark.parametrize("input_requires_grad", (False, True))
     @pytest.mark.parametrize("scales_requires_grad", (False, True))
+    @pytest.mark.parametrize("glu_linear_offset", (1.0, 0.0))
     def test_scaled_clamped_qgeglu(
         self,
         *,
@@ -2603,6 +2608,7 @@ class TestBasicOps:
         device: torch.device = "cuda",
         input_requires_grad: bool,
         scales_requires_grad: bool,
+        glu_linear_offset: float,
         limit: float = 7.0,
         alpha: float = 1.702,
     ) -> None:
@@ -2647,7 +2653,7 @@ class TestBasicOps:
         x_glu = x_glu.clamp(min=None, max=limit)
         x_linear = x_linear.clamp(min=-limit, max=limit)
         out_glu = x_glu * torch.sigmoid(alpha * x_glu)
-        y = out_glu * (x_linear + 1)
+        y = out_glu * (x_linear + glu_linear_offset)
         y_ref = scales_ref.unsqueeze(-1) * y
         if input_requires_grad or scales_requires_grad:
             y_ref.backward(dy_ref)
@@ -2656,6 +2662,7 @@ class TestBasicOps:
             glu_interleave_size=glu_interleave_size,
             limit=limit,
             alpha=alpha,
+            glu_linear_offset=glu_linear_offset,
         )
         y_test = op(x_test, scales_test)
         if input_requires_grad or scales_requires_grad:
@@ -2674,6 +2681,7 @@ class TestBasicOps:
             glu_interleave_size=32,
             input_requires_grad=True,
             scales_requires_grad=True,
+            glu_linear_offset=1.0,
         )
 
 
@@ -3685,7 +3693,13 @@ class TestSequentialModules:
     @pytest.mark.parametrize("delay_wgrad_compute", (False, True))
     @pytest.mark.parametrize("hidden_size", (128, 256))
     @pytest.mark.parametrize(
-        "activation", ("scaled_swiglu", "scaled_clamped_qgeglu", "scaled_srelu")
+        "activation",
+        (
+            "scaled_swiglu",
+            "scaled_clamped_qgeglu",
+            "scaled_clamped_qgeglu_custom",
+            "scaled_srelu",
+        ),
     )
     def test_grouped_mlp(
         self,
@@ -3719,7 +3733,7 @@ class TestSequentialModules:
         with_quantization = quantization is not None
         if activation == "scaled_swiglu":
             scaled_act = te_ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
-        elif activation == "scaled_clamped_qgeglu":
+        elif activation.startswith("scaled_clamped_qgeglu"):
             scaled_act = te_ops.ScaledClampedQGeGLU(glu_interleave_size=glu_interleave_size)
         elif activation == "scaled_srelu":
             scaled_act = te_ops.ScaledSReLU()
@@ -3742,12 +3756,22 @@ class TestSequentialModules:
         if (
             with_quantization
             and quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6")
-            and activation == "scaled_clamped_qgeglu"
+            and activation.startswith("scaled_clamped_qgeglu")
             and bias
         ):
             # TODO: ksivaman: Need to debug numerics for this case.
             pytest.skip("Bias/dbias not yet supported in NVFP4 fused grouped MLP with GeGLU")
         fc1_out_features = 2 * hidden_size if activation_is_glu else hidden_size
+
+        # Activation parameters for clamped QGeGLU variants
+        if activation == "scaled_clamped_qgeglu_custom":
+            geglu_limit = 5.0
+            geglu_alpha = 1.5
+            geglu_offset = 0.5
+        else:
+            geglu_limit = 7.0
+            geglu_alpha = 1.702
+            geglu_offset = 1.0
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
@@ -3840,13 +3864,12 @@ class TestSequentialModules:
             if activation == "scaled_swiglu":
                 x1, x2 = x.chunk(2, dim=-1)
                 x = torch.nn.functional.silu(x1) * x2
-            elif activation == "scaled_clamped_qgeglu":
+            elif activation.startswith("scaled_clamped_qgeglu"):
                 x1, x2 = x.chunk(2, dim=-1)
-                lim = torch.tensor(7.0, device=x1.device, dtype=x1.dtype)
-                geglu_alpha = 1.702
+                lim = torch.tensor(geglu_limit, device=x1.device, dtype=x1.dtype)
                 x1c = torch.minimum(x1, lim)
                 x2c = torch.clamp(x2, -lim, lim)
-                x = (x2c + 1) * (x1c * torch.sigmoid(geglu_alpha * x1c))
+                x = (x2c + geglu_offset) * (x1c * torch.sigmoid(geglu_alpha * x1c))
             elif activation == "scaled_srelu":
                 x = torch.nn.functional.relu(x).square()
             else:
@@ -3861,6 +3884,13 @@ class TestSequentialModules:
 
         # Construct operations
         recipe = make_recipe(quantization)
+        if activation == "scaled_clamped_qgeglu_custom":
+            scaled_act = te_ops.ScaledClampedQGeGLU(
+                glu_interleave_size=glu_interleave_size,
+                limit=geglu_limit,
+                alpha=geglu_alpha,
+                glu_linear_offset=geglu_offset,
+            )
         with te.quantized_model_init(enabled=with_quantization, recipe=recipe):
             fc1 = te_ops.GroupedLinear(
                 group_size,
