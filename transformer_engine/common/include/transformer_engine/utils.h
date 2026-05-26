@@ -20,21 +20,20 @@
 extern "C" {
 #endif
 
-/*! \brief Copy a small host buffer into device memory.
+/*! \brief Copy a small host buffer into device memory via kernel arguments.
  *
- *  The data is copied into kernel arguments, so the host buffer may
- *  be freed immediately after this call returns. This is compatible
- *  with CUDA Graphs.
+ *  The host buffer may be modified or freed after this call returns.
+ *  This is compatible with CUDA Graphs.
  *
  *  \param[in]     host_ptr     Source in host memory.
  *  \param[out]    device_ptr   Destination in device memory.
  *  \param[in]     num_bytes    Size of the value in bytes.
  *  \param[in]     stream       CUDA stream for the operation.
  */
-void nvte_load_value_on_device(const void *host_ptr, void *device_ptr, size_t num_bytes,
-                               cudaStream_t stream);
+void nvte_copy_host_to_device_via_kernel(const void *host_ptr, void *device_ptr, size_t num_bytes,
+                                         cudaStream_t stream);
 
-/*! \deprecated Use nvte_load_value_on_device instead.
+/*! \deprecated Use nvte_copy_host_to_device_via_kernel instead.
  *
  *  \brief Copy an array of device pointers (held on host) into a device tensor.
  */

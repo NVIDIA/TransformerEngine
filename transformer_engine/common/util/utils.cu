@@ -14,7 +14,7 @@
 #include "../util/logging.h"
 
 namespace transformer_engine {
-namespace load_value_on_device {
+namespace copy_host_to_device_via_kernel {
 namespace {
 
 union Payload {
@@ -34,19 +34,19 @@ __global__ void __launch_bounds__(block_size) kernel(Payload payload, size_t num
     reinterpret_cast<uint32_t *>(out)[tid] = payload.vectors[tid];
   } else {
     for (size_t i = Payload::kVectorSize * tid; i < num_bytes; ++i) {
-      static_cast<uint8_t *>(out)[i] = payload.bytes[i];
+      reinterpret_cast<uint8_t *>(out)[i] = payload.bytes[i];
     }
   }
 }
 
 }  // namespace
-}  // namespace load_value_on_device
+}  // namespace copy_host_to_device_via_kernel
 }  // namespace transformer_engine
 
-void nvte_load_value_on_device(const void *host_ptr, void *device_ptr, size_t num_bytes,
-                               cudaStream_t stream) {
-  NVTE_API_CALL(nvte_load_value_on_device);
-  using namespace transformer_engine::load_value_on_device;
+void nvte_copy_host_to_device_via_kernel(const void *host_ptr, void *device_ptr, size_t num_bytes,
+                                         cudaStream_t stream) {
+  NVTE_API_CALL(nvte_copy_host_to_device_via_kernel);
+  using namespace transformer_engine::copy_host_to_device_via_kernel;
 
   // Nothing to be done if size is zero
   if (num_bytes == 0) {
@@ -77,6 +77,6 @@ void nvte_convert_pointers_to_tensor(const uint64_t *host_ptrs, NVTETensor outpu
   NVTE_API_CALL(nvte_convert_pointers_to_tensor);
   using namespace transformer_engine;
   Tensor *out_tensor = convertNVTETensorCheck(output);
-  nvte_load_value_on_device(host_ptrs, out_tensor->data.dptr,
-                            static_cast<size_t>(count) * sizeof(uint64_t), stream);
+  nvte_copy_host_to_device_via_kernel(host_ptrs, out_tensor->data.dptr,
+                                      static_cast<size_t>(count) * sizeof(uint64_t), stream);
 }

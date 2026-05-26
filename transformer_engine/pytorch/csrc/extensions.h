@@ -487,10 +487,10 @@ size_t get_cudnn_version();
 
 at::Tensor splits_to_offsets(const at::Tensor &first_dims, int64_t logical_last_dim);
 
-at::Tensor load_data_ptrs_on_device(const std::vector<at::Tensor> &tensors,
+at::Tensor copy_data_ptrs_to_device(const std::vector<at::Tensor> &tensors,
                                     const c10::Device &device);
 
-std::tuple<at::Tensor, std::optional<at::Tensor>> transform_and_load_data_ptrs_on_device(
+std::tuple<at::Tensor, std::optional<at::Tensor>> transform_and_copy_data_ptrs_to_device(
     const std::string &transform_type, const std::vector<at::Tensor> &tensors,
     const c10::Device &device);
 

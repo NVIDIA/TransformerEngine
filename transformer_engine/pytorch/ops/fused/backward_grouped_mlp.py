@@ -118,7 +118,7 @@ def _cudnn_compute_wgrad(
         )
     else:
         # Discrete mode: per-expert wgrad device pointers
-        wgrad_ptrs = tex.load_data_ptrs_on_device(wgrad_output, wgrad_output[0].device)
+        wgrad_ptrs = tex.copy_data_ptrs_to_device(wgrad_output, wgrad_output[0].device)
         wgrad_kernel_fn(
             a_tensor=a_tensor,
             b_tensor=b_tensor,
@@ -529,11 +529,11 @@ class _BackwardGroupedMLP_CuTeGEMMDBase_MXFP8(FusedOperation):
             fc2_dactivation_kwargs["b_tensor"] = fc2_w_data
             fc2_dactivation_kwargs["sfb_tensor"] = fc2_w_scales
         else:
-            fc2_b_ptrs = tex.load_data_ptrs_on_device(
+            fc2_b_ptrs = tex.copy_data_ptrs_to_device(
                 [w._columnwise_data for w in grouped_fc2_weight],
                 device,
             )
-            fc2_sfb_ptrs, _fc2_sfb_buffer = tex.transform_and_load_data_ptrs_on_device(
+            fc2_sfb_ptrs, _fc2_sfb_buffer = tex.transform_and_copy_data_ptrs_to_device(
                 "uniform_mxfp8_columnwise_swizzle",
                 [w._columnwise_scale_inv for w in grouped_fc2_weight],
                 device,
@@ -720,11 +720,11 @@ class _BackwardGroupedMLP_CuTeGEMMDBase_MXFP8(FusedOperation):
                 fc1_dgrad_kwargs["b_tensor"] = fc1_w_data
                 fc1_dgrad_kwargs["sfb_tensor"] = fc1_w_scales
             else:
-                fc1_b_ptrs = tex.load_data_ptrs_on_device(
+                fc1_b_ptrs = tex.copy_data_ptrs_to_device(
                     [w._columnwise_data for w in grouped_fc1_weight],
                     device,
                 )
-                fc1_sfb_ptrs, _fc1_sfb_buffer = tex.transform_and_load_data_ptrs_on_device(
+                fc1_sfb_ptrs, _fc1_sfb_buffer = tex.transform_and_copy_data_ptrs_to_device(
                     "uniform_mxfp8_columnwise_swizzle",
                     [w._columnwise_scale_inv for w in grouped_fc1_weight],
                     device,

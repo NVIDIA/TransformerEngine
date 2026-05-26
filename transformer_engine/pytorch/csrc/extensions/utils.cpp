@@ -17,7 +17,7 @@
 
 namespace transformer_engine::pytorch {
 
-at::Tensor load_data_ptrs_on_device(const std::vector<at::Tensor> &tensors,
+at::Tensor copy_data_ptrs_to_device(const std::vector<at::Tensor> &tensors,
                                     const c10::Device &device) {
   // Collect data pointers
   std::vector<uint64_t> ptrs_host;
@@ -31,13 +31,14 @@ at::Tensor load_data_ptrs_on_device(const std::vector<at::Tensor> &tensors,
                                at::TensorOptions().dtype(at::kLong).device(device));
 
   // Load pointers on device
-  nvte_load_value_on_device(ptrs_host.data(), ptrs_device.data_ptr(),
-                            tensors.size() * sizeof(uint64_t), at::cuda::getCurrentCUDAStream());
+  nvte_copy_host_to_device_via_kernel(ptrs_host.data(), ptrs_device.data_ptr(),
+                                      tensors.size() * sizeof(uint64_t),
+                                      at::cuda::getCurrentCUDAStream());
 
   return ptrs_device;
 }
 
-std::tuple<at::Tensor, std::optional<at::Tensor>> transform_and_load_data_ptrs_on_device(
+std::tuple<at::Tensor, std::optional<at::Tensor>> transform_and_copy_data_ptrs_to_device(
     const std::string &transform_type, const std::vector<at::Tensor> &tensors,
     const c10::Device &device) {
   const size_t num_tensors = tensors.size();
@@ -45,7 +46,7 @@ std::tuple<at::Tensor, std::optional<at::Tensor>> transform_and_load_data_ptrs_o
   // Trivial cases
   if (transform_type.empty()) {
     // No transform, just load pointers on device
-    return {load_data_ptrs_on_device(tensors, device), std::nullopt};
+    return {copy_data_ptrs_to_device(tensors, device), std::nullopt};
   }
   if (num_tensors == 0) {
     // No input tensors, return tensor with no elements
@@ -169,8 +170,8 @@ std::tuple<at::Tensor, std::optional<at::Tensor>> transform_and_load_data_ptrs_o
     // Load pointers on device
     auto ptrs_device = at::empty({static_cast<int64_t>(num_tensors)},
                                  at::TensorOptions().dtype(at::kLong).device(device));
-    nvte_load_value_on_device(ptrs_host.data(), ptrs_device.data_ptr(),
-                              num_tensors * sizeof(uint64_t), stream);
+    nvte_copy_host_to_device_via_kernel(ptrs_host.data(), ptrs_device.data_ptr(),
+                                        num_tensors * sizeof(uint64_t), stream);
 
     return {std::move(ptrs_device), std::move(swizzled_scales)};
   }
