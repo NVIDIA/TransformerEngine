@@ -258,6 +258,13 @@ def check_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
     torch.cuda.manual_seed(23)
 
     num_gemms = len(m_splits)
+    uses_cudnn_grouped_path = (
+        out_dtype in (torch.bfloat16, torch.float16)
+        and not use_4over6
+        and all(m % 256 == 0 for m in m_splits)
+        and k % 128 == 0
+        and n % 128 == 0
+    )
 
     x_quantizer = NVFP4Quantizer(
         fp4_dtype=te_dtype,
@@ -301,49 +308,56 @@ def check_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
             )
         )
         bias.append(torch.randn(n, dtype=torch.bfloat16, device=device) if use_bias else None)
-        expected.append(
-            general_gemm(
-                w_nvfp4[-1],
-                x_nvfp4[-1],
-                out_dtype=out_dtype,
-                layout="TN",
-                bias=bias[-1],
-            )[0]
-        )
+        if uses_cudnn_grouped_path:
+            expected.append(
+                general_gemm(
+                    w_nvfp4[-1],
+                    x_nvfp4[-1],
+                    out_dtype=out_dtype,
+                    layout="TN",
+                    bias=bias[-1],
+                )[0]
+            )
 
     if single_output:
         out = [torch.empty((sum(m_splits), n), dtype=out_dtype, device=device)]
     else:
         out = [torch.empty((m, n), dtype=out_dtype, device=device) for m in m_splits]
 
-    grouped_out, _, _ = general_grouped_gemm(
+    grouped_gemm_args = (
         w_nvfp4,
         x_nvfp4,
         out,
-        quantization_params=[None] * num_gemms,
-        out_dtype=out_dtype,
-        layout="TN",
-        m_splits=m_splits,
-        bias=bias,
-        use_bias=use_bias,
-        single_output=single_output,
     )
+    grouped_gemm_kwargs = {
+        "quantization_params": [None] * num_gemms,
+        "out_dtype": out_dtype,
+        "layout": "TN",
+        "m_splits": m_splits,
+        "bias": bias,
+        "use_bias": use_bias,
+        "single_output": single_output,
+    }
+    if not uses_cudnn_grouped_path:
+        with pytest.raises((NotImplementedError, ValueError)):
+            general_grouped_gemm(*grouped_gemm_args, **grouped_gemm_kwargs)
+        return
+
+    try:
+        import cudnn
+    except ImportError as exc:
+        pytest.skip(f"cudnn frontend unavailable: {exc}")
+    if not hasattr(cudnn, "grouped_gemm_quant_wrapper_sm100"):
+        pytest.skip("grouped_gemm_quant_wrapper_sm100 unavailable")
+
+    grouped_out, _, _ = general_grouped_gemm(*grouped_gemm_args, **grouped_gemm_kwargs)
 
     if single_output:
         grouped_slices = torch.split(grouped_out, m_splits, dim=0)
     else:
         grouped_slices = grouped_out
-    uses_cudnn_grouped_path = (
-        out_dtype in (torch.bfloat16, torch.float16)
-        and not use_4over6
-        and all(m % 256 == 0 for m in m_splits)
-        and k % 128 == 0
-        and n % 128 == 0
-    )
-    atol = 0.5 if uses_cudnn_grouped_path else 0.0
-    rtol = 0.25 if uses_cudnn_grouped_path else 0.0
     for grouped, ref in zip(grouped_slices, expected):
-        torch.testing.assert_close(grouped, ref, atol=atol, rtol=rtol)
+        torch.testing.assert_close(grouped, ref, atol=0.5, rtol=0.25)
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
