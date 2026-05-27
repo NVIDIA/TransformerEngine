@@ -167,11 +167,13 @@ def _discover_nccl_home() -> str:
             f"'{env_home}/include/nccl.h' was not found; falling back to system probes."
         )
 
+    lib_names = ("libnccl.so", "libnccl.so.2")
+    # Include Debian/Ubuntu multiarch subdirs (e.g. lib/aarch64-linux-gnu).
+    lib_subdirs = ("lib", "lib64", "lib/aarch64-linux-gnu", "lib/x86_64-linux-gnu")
     for cand in ("/opt/nvidia/nccl", "/usr/local/nccl", "/usr"):
         p = Path(cand)
         if (p / "include" / "nccl.h").exists() and any(
-            (p / "lib" / name).exists() or (p / "lib64" / name).exists()
-            for name in ("libnccl.so", "libnccl.so.2")
+            (p / sub / name).exists() for sub in lib_subdirs for name in lib_names
         ):
             return str(p)
 
@@ -180,9 +182,11 @@ def _discover_nccl_home() -> str:
         for line in out.splitlines():
             if "libnccl.so" in line and "=>" in line:
                 lib_path = Path(line.split("=>")[-1].strip())
-                root = lib_path.parent.parent
-                if (root / "include" / "nccl.h").exists():
-                    return str(root)
+                # Walk upward so multiarch layouts (.../lib/<triplet>/libnccl.so)
+                # resolve to the prefix that contains include/nccl.h.
+                for root in (lib_path.parent.parent, lib_path.parent.parent.parent):
+                    if (root / "include" / "nccl.h").exists():
+                        return str(root)
     except (subprocess.CalledProcessError, FileNotFoundError):
         pass
 
