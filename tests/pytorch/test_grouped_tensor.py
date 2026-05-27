@@ -864,10 +864,8 @@ class TestGroupedTensor:
         assert grouped_tensor.logical_shape == (0, 0)
 
     def test_grouped_linear_load_state_dict_multi_to_single_param(
-        self, tmp_path, monkeypatch
-    ) -> None:
+        self, tmp_path) -> None:
         """Load per-GEMM checkpoint from disk into single grouped parameter format."""
-        monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
         num_gemms = 3
         in_features = 64
         out_features = 32
@@ -922,10 +920,8 @@ class TestGroupedTensor:
             assert torch.equal(loaded_bias.reshape(-1), expected_bias.reshape(-1))
 
     def test_grouped_linear_load_state_dict_single_to_multi_param(
-        self, tmp_path, monkeypatch
-    ) -> None:
+        self, tmp_path) -> None:
         """Load grouped-parameter checkpoint from disk into per-GEMM parameter format."""
-        monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
         num_gemms = 3
         in_features = 64
         out_features = 32
