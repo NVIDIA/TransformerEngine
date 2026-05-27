@@ -274,10 +274,11 @@ py::object swiglu(const at::Tensor &input, py::handle quantizer);
 
 py::object dswiglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
 
-py::object clamped_swiglu(const at::Tensor &input, py::handle quantizer, float limit, float alpha);
+py::object clamped_swiglu(const at::Tensor &input, py::handle quantizer, float limit, float alpha,
+                          float glu_linear_offset);
 
 py::object clamped_dswiglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer,
-                           float limit, float alpha);
+                           float limit, float alpha, float glu_linear_offset);
 /***************************************************************************************************
  * LayerNorm
  **************************************************************************************************/
