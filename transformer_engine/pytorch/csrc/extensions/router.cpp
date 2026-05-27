@@ -69,10 +69,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fw
   // match logits exactly; routing_map's trailing dim depends on format).
   // No caller-side .view() needed.
   at::Tensor probs = at::empty(sizes, at::dtype(logits.scalar_type()).device(at::kCUDA));
-  at::Tensor routing_map = allocate_routing_map(sizes.slice(0, sizes.size() - 1), num_experts,
-                                                routing_map_format);
-  at::Tensor intermediate_output =
-      at::empty(sizes, at::dtype(at::kFloat).device(at::kCUDA));
+  at::Tensor routing_map =
+      allocate_routing_map(sizes.slice(0, sizes.size() - 1), num_experts, routing_map_format);
+  at::Tensor intermediate_output = at::empty(sizes, at::dtype(at::kFloat).device(at::kCUDA));
 
   // Wrap with explicit 2D shape for the kernel — the common-layer NVTE_CHECKs
   // expect {num_tokens, num_experts} (or {num_tokens, ceil(num_experts/8)} for
@@ -90,10 +89,10 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fw
 
   auto logits_cu = makeTransformerEngineTensor(logits.data_ptr(), shape_2d, logits_dtype);
   auto probs_cu = makeTransformerEngineTensor(probs.data_ptr(), shape_2d, logits_dtype);
-  auto routing_map_cu = makeTransformerEngineTensor(
-      routing_map.data_ptr(), routing_map_shape_2d, routing_map_dtype);
-  auto intermediate_output_cu = makeTransformerEngineTensor(
-      intermediate_output.data_ptr(), shape_2d, DType::kFloat32);
+  auto routing_map_cu =
+      makeTransformerEngineTensor(routing_map.data_ptr(), routing_map_shape_2d, routing_map_dtype);
+  auto intermediate_output_cu =
+      makeTransformerEngineTensor(intermediate_output.data_ptr(), shape_2d, DType::kFloat32);
   auto expert_bias_cu = TensorWrapper();  // empty expert_bias_cu tensor
   if (expert_bias.has_value()) {
     expert_bias_cu = makeTransformerEngineTensor(expert_bias.value());
@@ -111,8 +110,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fw
 
 void fused_topk_with_score_function_bwd(at::Tensor routing_map, at::Tensor intermediate_output,
                                         at::Tensor grad_probs, at::Tensor grad_logits, int topk,
-                                        bool use_pre_softmax,
-                                        std::optional<float> scaling_factor,
+                                        bool use_pre_softmax, std::optional<float> scaling_factor,
                                         std::string score_function, int routing_map_format) {
   // grad_probs / grad_logits are N-D matching the caller's logits shape; the
   // kernel sees a 2D {num_tokens, num_experts} view.
@@ -137,8 +135,8 @@ void fused_topk_with_score_function_bwd(at::Tensor routing_map, at::Tensor inter
   auto grad_dtype = GetTransformerEngineDType(grad_probs.scalar_type());
   auto routing_map_dtype = GetTransformerEngineDType(routing_map.scalar_type());
 
-  auto routing_map_cu = makeTransformerEngineTensor(routing_map.data_ptr(),
-                                                    routing_map_shape_2d, routing_map_dtype);
+  auto routing_map_cu =
+      makeTransformerEngineTensor(routing_map.data_ptr(), routing_map_shape_2d, routing_map_dtype);
   auto intermediate_output_cu =
       makeTransformerEngineTensor(intermediate_output.data_ptr(), shape_2d, DType::kFloat32);
   auto grad_probs_cu = makeTransformerEngineTensor(grad_probs.data_ptr(), shape_2d, grad_dtype);
@@ -169,10 +167,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_score_for_moe_aux_loss_fwd(
 
   // N-D allocations matching logits shape (except routing_map trailing dim).
   at::Tensor scores = at::empty(sizes, at::dtype(at::kFloat).device(at::kCUDA));
-  at::Tensor routing_map = allocate_routing_map(sizes.slice(0, sizes.size() - 1), num_experts,
-                                                routing_map_format);
-  at::Tensor intermediate_output =
-      at::empty(sizes, at::dtype(at::kFloat).device(at::kCUDA));
+  at::Tensor routing_map =
+      allocate_routing_map(sizes.slice(0, sizes.size() - 1), num_experts, routing_map_format);
+  at::Tensor intermediate_output = at::empty(sizes, at::dtype(at::kFloat).device(at::kCUDA));
 
   const std::vector<size_t> shape_2d = {static_cast<size_t>(num_tokens),
                                         static_cast<size_t>(num_experts)};
@@ -186,10 +183,10 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_score_for_moe_aux_loss_fwd(
 
   auto logits_cu = makeTransformerEngineTensor(logits.data_ptr(), shape_2d, logits_dtype);
   auto scores_cu = makeTransformerEngineTensor(scores.data_ptr(), shape_2d, DType::kFloat32);
-  auto routing_map_cu = makeTransformerEngineTensor(
-      routing_map.data_ptr(), routing_map_shape_2d, routing_map_dtype);
-  auto intermediate_output_cu = makeTransformerEngineTensor(
-      intermediate_output.data_ptr(), shape_2d, DType::kFloat32);
+  auto routing_map_cu =
+      makeTransformerEngineTensor(routing_map.data_ptr(), routing_map_shape_2d, routing_map_dtype);
+  auto intermediate_output_cu =
+      makeTransformerEngineTensor(intermediate_output.data_ptr(), shape_2d, DType::kFloat32);
 
   nvte_fused_score_for_moe_aux_loss_forward_v2(
       logits_cu.data(), static_cast<int>(num_tokens), static_cast<int>(num_experts), topk,

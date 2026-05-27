@@ -47,8 +47,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_score_for_moe_aux_loss_fwd(
     int routing_map_format = static_cast<int>(NVTE_ROUTING_MAP_FORMAT_BYTEMAP));
 
 void fused_score_for_moe_aux_loss_bwd(at::Tensor intermediate_output, at::Tensor grad_scores,
-                                      at::Tensor grad_logits, int topk,
-                                      std::string score_function);
+                                      at::Tensor grad_logits, int topk, std::string score_function);
 
 std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd(at::Tensor probs,
                                                           at::Tensor tokens_per_expert,
