@@ -543,8 +543,8 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
                     use_split_accumulator=False,
                 )
                 if fc2_bias_packed is not None:
-                    token_bias = fc2_bias_packed.transpose(0, 1).contiguous().expand(
-                        in_shape[0], -1
+                    token_bias = (
+                        fc2_bias_packed.transpose(0, 1).contiguous().expand(in_shape[0], -1)
                     )
                     if fc2_scales is not None:
                         fc2_out_buf = fc2_out_buf + token_bias * fc2_scales.view(-1, 1)
