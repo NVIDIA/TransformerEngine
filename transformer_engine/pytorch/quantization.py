@@ -162,6 +162,8 @@ def _compute_fp8_support() -> Tuple[bool, str]:
 def _compute_mxfp8_support() -> Tuple[bool, str]:
     """Return if fp8 support is available"""
     if get_device_compute_capability() >= (12, 0):
+        if os.getenv("NVTE_ENABLE_MXFP8_SM120", "0") == "1":
+            return True, ""
         return False, "MXFP8 (for all gemm layouts) is not supported on 12.0+ architectures yet."
     if get_device_compute_capability() >= (10, 0):  # blackwell and above
         return True, ""
