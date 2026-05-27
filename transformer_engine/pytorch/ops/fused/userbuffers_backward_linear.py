@@ -433,8 +433,8 @@ class UserbuffersBackwardLinear(FusedOperation):
                 extra_output=dx_local if with_dgrad_reduce_scatter_dx else None,
                 bulk_overlap=with_bulk_overlap,
             )
-            
-            # cuBLASMp's GEMM+RS writes the reduce-scattered output directly into the GEMM output 
+
+            # cuBLASMp's GEMM+RS writes the reduce-scattered output directly into the GEMM output
             # tensor; the extra-output buffer is only used with Userbuffers.
             if is_cublasmp or not (with_dgrad_reduce_scatter_dx or with_wgrad_reduce_scatter_dx):
                 dx_local = dx
@@ -445,7 +445,7 @@ class UserbuffersBackwardLinear(FusedOperation):
 
             # Initialize grad output
             if is_cublasmp and tensor_parallel_mode == "row":
-                # cuBLASMp's AG+GEMM DGRAD does not preserve the gathered dy ensor. Re-gather 
+                # cuBLASMp's AG+GEMM DGRAD does not preserve the gathered dy ensor. Re-gather
                 # dy_local for wgrad with the appropriate quantization direction for each recipe.
                 if grad_output_quantizer is not None:
                     if isinstance(grad_output_quantizer, MXFP8Quantizer):

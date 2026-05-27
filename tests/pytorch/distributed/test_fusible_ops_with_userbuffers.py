@@ -378,7 +378,7 @@ def _test_linear(
         # cuBLASMp's GEMM+RS kernel runs a slightly different GEMM algo than Userbuffers
         # (e.g. split-accumulator is always enabled) so it very narrowly violates the default
         # bf16 rtol. This is not a regression, just a quirk of how the algorithms line up at the
-        # precision floor. So we relax rtol only (atol stays same) to allow for this without 
+        # precision floor. So we relax rtol only (atol stays same) to allow for this without
         # masking real regressions.
         tols = {**tols, "rtol": max(tols.get("rtol", 0.0), 3.0e-2)}
 
