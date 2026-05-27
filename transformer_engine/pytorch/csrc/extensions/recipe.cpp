@@ -36,36 +36,29 @@ void fused_amax_and_scale_update_after_reduction(const at::Tensor& amax_reductio
                                                  DType fp8_dtype, float margin) {
   size_t num_tensors = amax_histories.size();
 
-  // Helper to deallocate a batch of NVTETensors
-  struct DestroyGuard {
-    NVTETensor* data;
-    size_t n;
-    ~DestroyGuard() { nvte_destroy_tensors(data, n); }
-  };
-
   // Allocate amax history and scale NVTETensors as batches
-  std::vector<NVTETensor> te_amax_histories(num_tensors);
-  nvte_create_tensors(NVTE_DELAYED_TENSOR_SCALING, te_amax_histories.data(), num_tensors);
-  DestroyGuard amax_guard{te_amax_histories.data(), num_tensors};
-  std::vector<NVTETensor> te_scales(num_tensors);
-  nvte_create_tensors(NVTE_DELAYED_TENSOR_SCALING, te_scales.data(), num_tensors);
-  DestroyGuard scale_guard{te_scales.data(), num_tensors};
+  MultiTensorWrapper te_amax_histories(num_tensors, NVTE_DELAYED_TENSOR_SCALING);
+  MultiTensorWrapper te_scales(num_tensors, NVTE_DELAYED_TENSOR_SCALING);
 
   for (size_t i = 0; i < num_tensors; i++) {
     NVTEShape amax_shape = convertTorchShape(amax_histories[i].sizes());
     NVTEBasicTensor amax_history_data = {amax_histories[i].data_ptr(),
                                          static_cast<NVTEDType>(DType::kFloat32), amax_shape};
-    nvte_set_tensor_param(&te_amax_histories[i], kNVTERowwiseData, &amax_history_data);
+    nvte_set_tensor_param_v2(te_amax_histories[i], kNVTERowwiseData, &amax_history_data,
+                             sizeof(amax_history_data));
 
     NVTEShape scale_shape = convertTorchShape(scales[i].sizes());
     NVTEBasicTensor scale_data = {scales[i].data_ptr(), static_cast<NVTEDType>(DType::kFloat32),
                                   scale_shape};
-    nvte_set_tensor_param(&te_scales[i], kNVTERowwiseData, &scale_data);
+    nvte_set_tensor_param_v2(te_scales[i], kNVTERowwiseData, &scale_data, sizeof(scale_data));
   }
+  // The recipe function takes std::vector<NVTETensor> by value, so
+  // construct fresh vectors from the batches.
   nvte_delayed_scaling_recipe_amax_and_scale_update_after_reduction(
-      makeTransformerEngineTensor(amax_reduction_buffer).data(), te_amax_histories, te_scales,
-      amax_compute_algo.c_str(), static_cast<NVTEDType>(fp8_dtype), margin,
-      at::cuda::getCurrentCUDAStream());
+      makeTransformerEngineTensor(amax_reduction_buffer).data(),
+      std::vector<NVTETensor>(te_amax_histories.begin(), te_amax_histories.end()),
+      std::vector<NVTETensor>(te_scales.begin(), te_scales.end()), amax_compute_algo.c_str(),
+      static_cast<NVTEDType>(fp8_dtype), margin, at::cuda::getCurrentCUDAStream());
 }
 
 }  // namespace transformer_engine::pytorch

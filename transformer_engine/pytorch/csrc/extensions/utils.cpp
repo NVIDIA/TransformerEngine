@@ -120,13 +120,7 @@ std::tuple<at::Tensor, std::optional<at::Tensor>> transform_and_copy_data_ptrs_t
 
     // Allocate input/output NVTETensors as a single batch. The first
     // num_tensors entries are inputs; the next num_tensors are outputs.
-    std::vector<NVTETensor> nvte_tensors(2 * num_tensors);
-    nvte_create_tensors(scaling_mode, nvte_tensors.data(), nvte_tensors.size());
-    struct DestroyGuard {
-      NVTETensor *data;
-      size_t n;
-      ~DestroyGuard() { nvte_destroy_tensors(data, n); }
-    } destroy_guard{nvte_tensors.data(), nvte_tensors.size()};
+    MultiTensorWrapper nvte_tensors(2 * num_tensors, scaling_mode);
     NVTETensor *inputs_nvte = nvte_tensors.data();
     NVTETensor *outputs_nvte = nvte_tensors.data() + num_tensors;
 

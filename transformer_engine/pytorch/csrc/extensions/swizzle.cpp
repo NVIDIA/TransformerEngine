@@ -207,13 +207,7 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm_impl(
   // Allocate input/output NVTETensors as a single batch. The first
   // n_swizzle entries are inputs; the next n_swizzle are outputs.
   const size_t n_swizzle = tensors_needing_swizzle.size();
-  std::vector<NVTETensor> nvte_tensors(2 * n_swizzle);
-  nvte_create_tensors(scaling_mode, nvte_tensors.data(), nvte_tensors.size());
-  struct DestroyGuard {
-    NVTETensor *data;
-    size_t n;
-    ~DestroyGuard() { nvte_destroy_tensors(data, n); }
-  } destroy_guard{nvte_tensors.data(), nvte_tensors.size()};
+  MultiTensorWrapper nvte_tensors(2 * n_swizzle, scaling_mode);
   NVTETensor *inputs_nvte = nvte_tensors.data();
   NVTETensor *outputs_nvte = nvte_tensors.data() + n_swizzle;
 

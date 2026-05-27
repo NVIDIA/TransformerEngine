@@ -627,6 +627,7 @@ NVTEShape nvte_get_grouped_tensor_logical_shape(const NVTEGroupedTensor tensor);
 #ifdef __cplusplus
 }  // extern "C"
 
+#include <utility>
 #include <vector>
 
 /*! \namespace transformer_engine
@@ -1066,6 +1067,73 @@ class TensorWrapper {
 
   /*! \brief Wrapped NVTETensor. */
   NVTETensor tensor_ = nullptr;
+};
+
+/*! \struct MultiTensorWrapper
+ *  \brief C++ wrapper for a batch of NVTETensors allocated together.
+ */
+class MultiTensorWrapper {
+ public:
+  /*! \brief Constructs an empty batch. */
+  MultiTensorWrapper() = default;
+
+  /*! \brief Allocates a batch of NVTETensors.
+   *
+   *  \param[in] num_tensors   Number of tensors to allocate.
+   *  \param[in] scaling_mode  Scaling mode shared by all tensors.
+   */
+  explicit MultiTensorWrapper(size_t num_tensors,
+                              NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING)
+      : tensors_(num_tensors) {
+    if (!tensors_.empty()) {
+      nvte_create_tensors(scaling_mode, tensors_.data(), tensors_.size());
+    }
+  }
+
+  ~MultiTensorWrapper() {
+    if (!tensors_.empty()) {
+      nvte_destroy_tensors(tensors_.data(), tensors_.size());
+    }
+  }
+
+  MultiTensorWrapper(const MultiTensorWrapper&) = delete;
+  MultiTensorWrapper& operator=(const MultiTensorWrapper&) = delete;
+
+  MultiTensorWrapper(MultiTensorWrapper&&) noexcept = default;
+
+  MultiTensorWrapper& operator=(MultiTensorWrapper&& other) noexcept {
+    if (this == &other) return *this;
+    if (!tensors_.empty()) {
+      nvte_destroy_tensors(tensors_.data(), tensors_.size());
+    }
+    tensors_ = std::move(other.tensors_);
+    return *this;
+  }
+
+  /*! \brief Number of tensors in the batch. */
+  size_t size() const noexcept { return tensors_.size(); }
+
+  /*! \brief Whether the batch is empty. */
+  bool empty() const noexcept { return tensors_.empty(); }
+
+  /*! \brief Access an NVTETensor by index. */
+  NVTETensor operator[](size_t i) const noexcept { return tensors_[i]; }
+
+  /*! \brief Pointer to the underlying NVTETensor array. */
+  NVTETensor* data() noexcept { return tensors_.data(); }
+  const NVTETensor* data() const noexcept { return tensors_.data(); }
+
+  /*! \brief Implicit conversion for multi-tensor C API calls. */
+  operator NVTETensor*() noexcept { return tensors_.data(); }
+
+  /*! \brief Iteration over the underlying NVTETensors. */
+  auto begin() noexcept { return tensors_.begin(); }
+  auto end() noexcept { return tensors_.end(); }
+  auto begin() const noexcept { return tensors_.begin(); }
+  auto end() const noexcept { return tensors_.end(); }
+
+ private:
+  std::vector<NVTETensor> tensors_;
 };
 
 /*! \struct GroupedTensorWrapper
