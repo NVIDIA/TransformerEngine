@@ -154,7 +154,21 @@ float fp8_max_for_dtype(const DType dtype) {
   return 0.0f;
 }
 
-void prepare_grouped_fp8_current_scaling_metadata(
+// Computes per-group amax and scale/scale_inv for grouped FP8 current scaling.
+//
+// 1) nvte_group_compute_amax_with_config: per-group amax over the input tensor
+//    (current scaling -> amax is computed from this batch's inputs, never from
+//    history).
+// 2) Optional NCCL allreduce on the amax buffer (when DP/TP amax sync is on).
+// 3) nvte_multi_tensor_compute_scale_and_scale_inv_cuda: pure math kernel that
+//    derives scale = max_fp8 / amax and scale_inv = 1/scale per group. This
+//    kernel is recipe-agnostic (it pre-existed for FP8 delayed scaling but the
+//    math is identical for current scaling); we reuse it here so we get one
+//    bulk launch instead of N per-group kernels.
+//
+// After this returns, the per-group `scale` / `scale_inv` buffers are
+// populated and the actual cast/transpose is performed by `nvte_group_quantize`.
+void compute_grouped_fp8_current_scaling_amax_and_scale(
     const GroupedTensorWrapper &grouped_input_tensor,
     const GroupedTensorWrapper &grouped_output_tensor, const py::object &grouped_output_py,
     Float8CurrentScalingQuantizer *quantizer_cpp) {
@@ -192,6 +206,14 @@ void prepare_grouped_fp8_current_scaling_metadata(
     });
   }
 
+  // FP8 current scaling has one scale per tensor regardless of direction, so
+  // Float8CurrentScalingQuantizer::create_grouped_tensor allocates a single
+  // scale_inv buffer aliased by both rowwise_scale_inv and columnwise_scale_inv.
+  // Pick whichever is set; the other (if set) shares the same allocation.
+  NVTE_CHECK(!rowwise_scale_inv.has_value() || !columnwise_scale_inv.has_value() ||
+                 rowwise_scale_inv->data_ptr() == columnwise_scale_inv->data_ptr(),
+             "Grouped FP8 current scaling expects rowwise_scale_inv and "
+             "columnwise_scale_inv to alias the same allocation.");
   at::Tensor &scale_inv_target =
       rowwise_scale_inv.has_value() ? *rowwise_scale_inv : *columnwise_scale_inv;
   auto scale_tensor_lists = makeTransformerEngineTensorList({{amax}, {scale}, {scale_inv_target}});
@@ -205,10 +227,6 @@ void prepare_grouped_fp8_current_scaling_metadata(
         fp8_max_for_dtype(quantizer_cpp->dtype), quantizer_cpp->force_pow_2_scales,
         quantizer_cpp->amax_epsilon, stream);
   });
-  if (rowwise_scale_inv.has_value() && columnwise_scale_inv.has_value() &&
-      rowwise_scale_inv->data_ptr() != columnwise_scale_inv->data_ptr()) {
-    columnwise_scale_inv->copy_(*rowwise_scale_inv);
-  }
 }
 
 }  // namespace
@@ -321,7 +339,7 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
     case GroupedQuantizationMode::FP8_CURRENT_SCALING_GROUPED_QUANTIZE: {
       auto *fp8_quantizer_cpp =
           static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
-      prepare_grouped_fp8_current_scaling_metadata(
+      compute_grouped_fp8_current_scaling_amax_and_scale(
           grouped_input_tensor, *grouped_output_tensor_cpp, grouped_output_py, fp8_quantizer_cpp);
       QuantizationConfigWrapper quant_config_cpp;
       NVTE_SCOPED_GIL_RELEASE({

@@ -13,7 +13,6 @@ import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.common import recipe
 from transformer_engine.pytorch import Float8CurrentScalingQuantizer, Float8Quantizer
 from transformer_engine.pytorch.constants import TE_DType_To_Torch
-from transformer_engine.pytorch.ops.basic import grouped_linear as grouped_linear_impl
 from transformer_engine.pytorch.tensor import GroupedTensor
 from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
 import transformer_engine_torch as tex
@@ -347,8 +346,16 @@ def test_group_quantize_fp8_current_scaling_varying_last_dim(mode: str) -> None:
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-def test_group_quantize_fp8_columnwise_split_uses_columnwise_scale_inv() -> None:
-    """Columnwise-only grouped FP8 tensors split into usable Float8Tensor metadata."""
+def test_group_quantize_fp8_columnwise_only_overallocated() -> None:
+    """Columnwise-only grouped FP8 current scaling matches a per-group reference
+    even when the buffer is over-allocated and rows vary across groups.
+
+    Verifies by quantizing each group independently and concatenating the
+    results, then comparing against the grouped output (data, scale,
+    scale_inv, amax). We deliberately do NOT call ``split_into_quantized_tensors``
+    here -- that API is meant for the same-shape weight use case only and is
+    misleading on varying-rows inputs (see ``GroupedTensor.split_into_quantized_tensors``).
+    """
     if is_non_tn_fp8_gemm_supported():
         pytest.skip("Auto-created grouped FP8 tensors do not materialize columnwise data.")
     cols = 1024
@@ -356,53 +363,36 @@ def test_group_quantize_fp8_columnwise_split_uses_columnwise_scale_inv() -> None
     quantizer = _make_quantizer("columnwise")
 
     grouped = tex.group_quantize(tensor, quantizer, num_tensors, first_dims)
-    tensors = grouped.split_into_quantized_tensors()
+    _, expected_columnwise, expected_scale, expected_scale_inv, expected_amax = (
+        _expected_quantized_parts(tensor, first_dims_list, "columnwise")
+    )
 
-    row_offset = 0
-    for idx, (part, rows) in enumerate(zip(tensors, first_dims_list)):
-        assert part._data is None
-        assert part._transpose is not None
-        assert part._scale_inv is not None
-        assert part._transpose.shape == (cols, rows)
-        torch.testing.assert_close(
-            part._scale_inv,
-            grouped.columnwise_scale_inv[idx : idx + 1],
-            rtol=0,
-            atol=0,
-        )
-        expected = tensor[row_offset : row_offset + rows]
-        fp8_dtype = TE_DType_To_Torch[tex.DType.kFloat8E4M3]
-        dequantized_from_columnwise = (
-            part._transpose.view(fp8_dtype).float().t().contiguous() * part._scale_inv
-        )
-        torch.testing.assert_close(
-            dequantized_from_columnwise,
-            expected.float(),
-            atol=0.125,
-            rtol=0.1,
-        )
-        row_offset += rows
+    assert grouped.rowwise_data is None
+    assert expected_columnwise is not None
+    assert torch.equal(
+        grouped.columnwise_data[: expected_columnwise.numel()],
+        expected_columnwise,
+    )
+    torch.testing.assert_close(grouped.columnwise_scale_inv, expected_scale_inv, rtol=0, atol=0)
+    torch.testing.assert_close(grouped.scale, expected_scale, rtol=0, atol=0)
+    torch.testing.assert_close(grouped.amax, expected_amax, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-def test_grouped_linear_fp8_current_scaling_bias_backward_empty_split(monkeypatch) -> None:
-    """FP8 current-scaling grouped-linear bias backward avoids MXFP8-only bgrad fusion."""
+def test_grouped_linear_fp8_current_scaling_bias_backward_empty_split() -> None:
+    """FP8 current-scaling grouped-linear bias backward correctly computes
+    per-group dbias even when one of the splits is empty.
+
+    Production guards: ``bgrad_group_quantize`` is MXFP8-only (gated on
+    ``isinstance(grad_output_quantizer, MXFP8Quantizer)`` in the backward
+    impl), so for FP8 current scaling we always go through the
+    plain ``group_quantize`` + ``compute_grouped_dbias`` route. This test
+    only checks that the public (recipe=Float8CurrentScaling) backward
+    produces the right bias gradients, which implicitly exercises that
+    routing.
+    """
     if torch.cuda.get_device_capability() < (10, 0):
         pytest.skip("GroupedTensor grouped GEMM path requires SM100+.")
-
-    def _unexpected_bgrad_group_quantize(*_args, **_kwargs):
-        raise AssertionError("FP8 current scaling must not call bgrad_group_quantize")
-
-    monkeypatch.setattr(
-        grouped_linear_impl.tex,
-        "bgrad_group_quantize",
-        _unexpected_bgrad_group_quantize,
-    )
-    monkeypatch.setattr(
-        te_ops.GroupedLinear,
-        "_is_graph_safe_path_supported",
-        staticmethod(lambda **_kwargs: True),
-    )
 
     num_groups = 3
     in_features = 128

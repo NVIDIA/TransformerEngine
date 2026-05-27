@@ -715,13 +715,22 @@ std::pair<GroupedTensorWrapper, py::object> Float8CurrentScalingQuantizer::creat
   const bool with_rowwise_data = rowwise_usage || is_non_tn_fp8_gemm_supported;
   const bool with_columnwise_data = columnwise_usage && !is_non_tn_fp8_gemm_supported;
 
+  // FP8 current scaling has a single per-tensor scale (no per-direction scaling), so
+  // rowwise_scale_inv and columnwise_scale_inv hold identical values. Allocate one
+  // shared buffer and alias both views to it (mirrors the non-grouped path in
+  // Float8CurrentScalingQuantizer::create_tensor). This avoids an unnecessary D2D
+  // copy after the per-group scale-from-amax kernel.
+  std::optional<at::Tensor> shared_scale_inv;
+  if (with_rowwise_data || with_columnwise_data) {
+    shared_scale_inv = at::empty({static_cast<int64_t>(num_tensors)}, float_opts);
+  }
   if (with_rowwise_data) {
     rowwise_data = at::empty({total_elements}, uint8_opts);
-    rowwise_scale_inv = at::empty({static_cast<int64_t>(num_tensors)}, float_opts);
+    rowwise_scale_inv = shared_scale_inv;
   }
   if (with_columnwise_data) {
     columnwise_data = at::empty({total_elements}, uint8_opts);
-    columnwise_scale_inv = at::empty({static_cast<int64_t>(num_tensors)}, float_opts);
+    columnwise_scale_inv = shared_scale_inv;
   }
 
   GroupedTensorWrapper out_cpp(num_tensors, logical_shape, this->get_scaling_mode());

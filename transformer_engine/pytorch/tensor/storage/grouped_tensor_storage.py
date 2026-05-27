@@ -809,20 +809,25 @@ class GroupedTensorStorage:
                     total_columnwise_scale_elements, dtype=torch.float32, device=device
                 )
         elif compatible_recipe.float8_current_scaling():
-            # Current scaling - per-tensor scaling computed on the fly
+            # Current scaling - per-tensor scaling computed on the fly.
+            # FP8 current scaling has a single per-tensor scale (no per-direction
+            # scaling), so rowwise/columnwise scale_inv hold identical values.
+            # Allocate one shared buffer and alias both views to it (mirrors the
+            # non-grouped path in Float8CurrentScalingQuantizer::create_tensor).
+            shared_scale_inv = None
+            if fp8_rowwise_usage or fp8_columnwise_usage:
+                shared_scale_inv = torch.empty(num_tensors, dtype=torch.float32, device=device)
             if fp8_rowwise_usage:
                 # Allocate rowwise data buffer (1D flattened, uint8)
                 data = torch.empty(total_elements, dtype=torch.uint8, device=device)
-                # Scale inverse - one per tensor
-                scale_inv = torch.empty(num_tensors, dtype=torch.float32, device=device)
+                scale_inv = shared_scale_inv
                 # One scale per tensor, so offsets are simply 0, 1, 2, ..., num_tensors
                 scale_inv_offsets = list(range(num_tensors + 1))
 
             if fp8_columnwise_usage:
                 # Allocate columnwise data buffer (1D flattened, uint8)
                 columnwise_data = torch.empty(total_elements, dtype=torch.uint8, device=device)
-                # Columnwise scale inverse - one per tensor
-                columnwise_scale_inv = torch.empty(num_tensors, dtype=torch.float32, device=device)
+                columnwise_scale_inv = shared_scale_inv
                 # One scale per tensor, so offsets are simply 0, 1, 2, ..., num_tensors
                 columnwise_scale_inv_offsets = list(range(num_tensors + 1))
 
@@ -898,16 +903,19 @@ class GroupedTensorStorage:
 
         # if self.tensor_shapes is None, then trigger D2H copy and get the shape (not graph safe)
         if self.tensor_shapes is None:
-            common_first_dim = (
-                self.logical_shape[0] // self.num_tensors
-                if self.first_dims is None and self.last_dims is None
-                else self.logical_shape[0]
-            )
-            first_dims_list = (
-                [common_first_dim] * self.num_tensors
-                if self.first_dims is None
-                else self.first_dims.tolist()
-            )
+            # Default per-tensor first dim: depends on whether last_dims varies.
+            #   * same-shape          (first/last both None): logical_shape[0] // num_tensors
+            #   * varying-last-dim   (first None, last given): logical_shape[0] (every tensor
+            #                                                  shares the full row count)
+            # When self.first_dims is set we use it directly below, so no default is needed.
+            if self.first_dims is None:
+                if self.last_dims is None:
+                    default_first_dim = self.logical_shape[0] // self.num_tensors
+                else:
+                    default_first_dim = self.logical_shape[0]
+                first_dims_list = [default_first_dim] * self.num_tensors
+            else:
+                first_dims_list = self.first_dims.tolist()
             last_dims_list = (
                 [self.logical_shape[1]] * self.num_tensors
                 if self.last_dims is None

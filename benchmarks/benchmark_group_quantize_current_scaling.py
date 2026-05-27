@@ -6,12 +6,14 @@
 """End-to-end benchmark for grouped FP8 *current scaling* quantization.
 
 Times the full Float8CurrentScalingQuantizer.group_quantize path
-(amax kernel + scale-from-amax kernel + cast/transpose kernels), unlike the
-pre-existing `benchmark_grouped_fp8_quantize.py`, which sneaks the amax cost
-out by precomputing the scale and timing only `Float8Quantizer`.
+(amax kernel + scale-from-amax kernel + cast/transpose kernels).
 
 Default shape mirrors the production use case:
-    sum(first_dims) = 98304, hidden = 2880, num_groups = 16
+    sum(first_dims) = 98304, hidden = 2880
+
+By default the benchmark sweeps both num_groups=16 and num_groups=64 so that
+we can see how kernel performance scales with group count for the same total
+work. Override with --num-groups 16 (or 64, or 16 64 ...) to restrict.
 """
 
 from __future__ import annotations
@@ -222,7 +224,7 @@ def run_case(shape_case: str, mode: str, *, actual_rows: int, allocated_rows: in
         relevant_bytes=relevant, bw_actual_TBps=bw_actual, bw_alloc_TBps=bw_alloc,
     )
     if verbose:
-        print(f"  {shape_case:30s} mode={mode:10s} "
+        print(f"  {shape_case:30s} groups={num_groups:3d} mode={mode:10s} "
               f"loop={mode_loop:5s} "
               f"per_iter={res.per_iter_us:7.2f}us "
               f"BW_actual={res.bw_actual_TBps:5.2f} TB/s "
@@ -236,7 +238,8 @@ def main():
     parser.add_argument("--allocated-rows", type=int, default=None,
                         help="For varying-first-overalloc; default 2 * actual-rows")
     parser.add_argument("--hidden", type=int, default=2880)
-    parser.add_argument("--num-groups", type=int, default=16)
+    parser.add_argument("--num-groups", type=int, nargs="+", default=[16, 64],
+                        help="Sweep one or more group counts (default: 16 64).")
     parser.add_argument("--num-buffers", type=int, default=4)
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--iters", type=int, default=200)
@@ -250,34 +253,44 @@ def main():
     if args.allocated_rows is None:
         args.allocated_rows = 2 * args.actual_rows
 
+    # Validate that actual_rows is divisible by every requested group count so
+    # the equal-first-dims helper produces well-defined splits.
+    for ng in args.num_groups:
+        if args.actual_rows % ng != 0:
+            raise SystemExit(
+                f"--actual-rows={args.actual_rows} not divisible by num_groups={ng}"
+            )
+
     print(f"GPU: {torch.cuda.get_device_name(0)}")
     print(f"Config: actual_rows={args.actual_rows}, allocated_rows={args.allocated_rows}, "
-          f"hidden={args.hidden}, num_groups={args.num_groups}, "
+          f"hidden={args.hidden}, num_groups_sweep={args.num_groups}, "
           f"iters={args.iters}, warmup={args.warmup}")
     print()
 
     loop_modes = ("eager", "graph") if args.loop == "both" else (args.loop,)
 
     results: List[CaseResult] = []
-    for shape_case in args.shape_cases:
-        if shape_case not in SHAPE_CASES:
-            raise SystemExit(f"unknown shape_case={shape_case}")
-        print(f"== {shape_case} ==")
-        for mode in args.modes:
-            if mode not in MODES:
-                raise SystemExit(f"unknown mode={mode}")
-            for loop in loop_modes:
-                results.append(run_case(
-                    shape_case, mode,
-                    actual_rows=args.actual_rows,
-                    allocated_rows=args.allocated_rows,
-                    hidden=args.hidden,
-                    num_groups=args.num_groups,
-                    num_buffers=args.num_buffers,
-                    warmup=args.warmup, iters=args.iters,
-                    mode_loop=loop,
-                ))
-        print()
+    for num_groups in args.num_groups:
+        print(f"#### num_groups={num_groups} ####")
+        for shape_case in args.shape_cases:
+            if shape_case not in SHAPE_CASES:
+                raise SystemExit(f"unknown shape_case={shape_case}")
+            print(f"== {shape_case} ==")
+            for mode in args.modes:
+                if mode not in MODES:
+                    raise SystemExit(f"unknown mode={mode}")
+                for loop in loop_modes:
+                    results.append(run_case(
+                        shape_case, mode,
+                        actual_rows=args.actual_rows,
+                        allocated_rows=args.allocated_rows,
+                        hidden=args.hidden,
+                        num_groups=num_groups,
+                        num_buffers=args.num_buffers,
+                        warmup=args.warmup, iters=args.iters,
+                        mode_loop=loop,
+                    ))
+            print()
 
     if args.json_out:
         with open(args.json_out, "w") as f:
