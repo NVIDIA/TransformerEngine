@@ -213,8 +213,7 @@ class _BodyCtx:
     routing_map: Any
     dispatch: Any  # _DispatchState
     casted_sorted_x_lhs_trans: Any
-    casted_wi_0_rhs_trans: Any
-    casted_wi_1_rhs_trans: Any
+    casted_wi_rhs_trans: Any  # combined [E, H, 2M] residual for fused wi_0|wi_1 bwd
     gate_proj_out: Any
     up_proj_out: Any
     casted_intermediate_lhs_trans: Any
@@ -1103,38 +1102,39 @@ def _body_fwd(
     if q_set_wo == noop_quantizer_set:
         wo = wo.astype(sorted_x.dtype)
 
-    # GEMM 1: gate_proj_out = sorted_x @ wi_0
-    casted_sorted_x_w0 = tex.grouped_quantize(
-        sorted_x, q_set_w0.x, local_group_sizes, flatten_axis=-1
+    # GEMM 1+2 (fused): up_proj_combined = sorted_x @ wi  where
+    #   wi := concat([wi_0, wi_1], axis=-1)  -> shape [E, H, 2M]
+    #   combined_out := sorted_x @ wi        -> shape [T, 2M]
+    # Splitting the output back into ``gate_proj_out`` / ``up_proj_out``
+    # is free (it's a slicing reshape). This collapses two grouped
+    # GEMMs and two grouped quantizes of ``sorted_x`` (one per kernel)
+    # into one of each. Bias is concatenated the same way.
+    #
+    # FP8/MXFP8 caveat: per-expert amax is now computed over [H, 2M]
+    # rather than [H, M] for each of wi_0 / wi_1 separately, so the
+    # representable range for one of the two halves may shift slightly
+    # vs. the pre-fusion code. Numerics tests cover this.
+    inter_M = wi_0.shape[-1]
+    wi_combined = jnp.concatenate([wi_0, wi_1], axis=-1)
+    wi_combined_bias = (
+        jnp.concatenate([wi_0_bias, wi_1_bias], axis=-1) if wi_0_bias is not None else None
     )
-    casted_wi_0 = tex.grouped_quantize(wi_0, q_set_w0.kernel, flatten_axis=-1)
-    gate_proj_out = tex.grouped_gemm(
-        casted_sorted_x_w0.get_tensor(usage=TensorUsage.LHS),
-        casted_wi_0.get_tensor(usage=TensorUsage.RHS),
+    casted_sorted_x = tex.grouped_quantize(sorted_x, q_set_w0.x, local_group_sizes, flatten_axis=-1)
+    casted_wi = tex.grouped_quantize(wi_combined, q_set_w0.kernel, flatten_axis=-1)
+    combined_out = tex.grouped_gemm(
+        casted_sorted_x.get_tensor(usage=TensorUsage.LHS),
+        casted_wi.get_tensor(usage=TensorUsage.RHS),
         contracting_dims=((1,), (1,)),
-        bias=wi_0_bias,
+        bias=wi_combined_bias,
     )
-    casted_sorted_x_lhs_trans = casted_sorted_x_w0.get_tensor(usage=TensorUsage.LHS_TRANS)
-    casted_wi_0_rhs_trans = casted_wi_0.get_tensor(usage=TensorUsage.RHS_TRANS)
+    gate_proj_out = combined_out[..., :inter_M]
+    up_proj_out = combined_out[..., inter_M:]
+    casted_sorted_x_lhs_trans = casted_sorted_x.get_tensor(usage=TensorUsage.LHS_TRANS)
+    casted_wi_rhs_trans = casted_wi.get_tensor(usage=TensorUsage.RHS_TRANS)
     if isinstance(casted_sorted_x_lhs_trans, ScaledTensor):
         casted_sorted_x_lhs_trans = casted_sorted_x_lhs_trans.checkpoint(q_set_w0.x)
-    if isinstance(casted_wi_0_rhs_trans, ScaledTensor):
-        casted_wi_0_rhs_trans = casted_wi_0_rhs_trans.checkpoint(q_set_w0.kernel)
-
-    # GEMM 2: up_proj_out = sorted_x @ wi_1
-    casted_sorted_x_w1 = tex.grouped_quantize(
-        sorted_x, q_set_w1.x, local_group_sizes, flatten_axis=-1
-    )
-    casted_wi_1 = tex.grouped_quantize(wi_1, q_set_w1.kernel, flatten_axis=-1)
-    up_proj_out = tex.grouped_gemm(
-        casted_sorted_x_w1.get_tensor(usage=TensorUsage.LHS),
-        casted_wi_1.get_tensor(usage=TensorUsage.RHS),
-        contracting_dims=((1,), (1,)),
-        bias=wi_1_bias,
-    )
-    casted_wi_1_rhs_trans = casted_wi_1.get_tensor(usage=TensorUsage.RHS_TRANS)
-    if isinstance(casted_wi_1_rhs_trans, ScaledTensor):
-        casted_wi_1_rhs_trans = casted_wi_1_rhs_trans.checkpoint(q_set_w1.kernel)
+    if isinstance(casted_wi_rhs_trans, ScaledTensor):
+        casted_wi_rhs_trans = casted_wi_rhs_trans.checkpoint(q_set_w0.kernel)
 
     # Activation: intermediate = act(gate_proj_out) * up_proj_out
     act_fn = _convert_to_activation_function(activation_type)
@@ -1207,8 +1207,7 @@ def _body_fwd(
         routing_map=routing_map,
         dispatch=dispatch_state,
         casted_sorted_x_lhs_trans=casted_sorted_x_lhs_trans,
-        casted_wi_0_rhs_trans=casted_wi_0_rhs_trans,
-        casted_wi_1_rhs_trans=casted_wi_1_rhs_trans,
+        casted_wi_rhs_trans=casted_wi_rhs_trans,
         gate_proj_out=gate_proj_out,
         up_proj_out=up_proj_out,
         casted_intermediate_lhs_trans=casted_intermediate_lhs_trans,
@@ -1346,39 +1345,37 @@ def _body_bwd(
     d_up_proj_out = d_intermediate * act_gate_proj_out
     (d_gate_proj_out,) = dact_gate_proj_pullback(d_intermediate * ctx.up_proj_out)
 
-    # ---------------- FFN bwd: GEMM 2 (wi_1) ----------------
-    casted_d_up_proj_out = tex.grouped_quantize(
-        d_up_proj_out, q_set_w1.dgrad, ctx.local_group_sizes, flatten_axis=-1
+    # ---------------- FFN bwd: GEMM 1+2 fused (wi_0 | wi_1) ----------------
+    # Concat the two upstream grads along the output (M) axis, do one
+    # grouped quantize + one dgrad GEMM + one wgrad GEMM, then split.
+    # ``ctx.casted_wi_rhs_trans`` has shape [E, H, 2M] from the fwd
+    # fused quantize, so the dgrad math is:
+    #   d_sorted_x = [d_gate | d_up] @ wi_rhs_trans
+    #              = d_gate @ wi_0^T + d_up @ wi_1^T
+    inter_M = d_gate_proj_out.shape[-1]
+    d_combined = jnp.concatenate([d_gate_proj_out, d_up_proj_out], axis=-1)
+    casted_d_combined = tex.grouped_quantize(
+        d_combined, q_set_w0.dgrad, ctx.local_group_sizes, flatten_axis=-1
     )
-    d_sorted_x_from_w1 = tex.grouped_gemm(
-        casted_d_up_proj_out.get_tensor(usage=TensorUsage.LHS),
-        ctx.casted_wi_1_rhs_trans,
+    d_sorted_x = tex.grouped_gemm(
+        casted_d_combined.get_tensor(usage=TensorUsage.LHS),
+        ctx.casted_wi_rhs_trans,
         contracting_dims=((1,), (2,)),
     )
-    d_wi_1 = tex.grouped_gemm(
+    d_wi_combined = tex.grouped_gemm(
         ctx.casted_sorted_x_lhs_trans,
-        casted_d_up_proj_out.get_tensor(usage=TensorUsage.RHS),
+        casted_d_combined.get_tensor(usage=TensorUsage.RHS),
         contracting_dims=((0,), (0,)),
     )
-    d_wi_1_bias = tex.grouped_dbias(d_up_proj_out, ctx.local_group_sizes) if has_wi_bias else None
-
-    # ---------------- FFN bwd: GEMM 1 (wi_0) ----------------
-    casted_d_gate_proj_out = tex.grouped_quantize(
-        d_gate_proj_out, q_set_w0.dgrad, ctx.local_group_sizes, flatten_axis=-1
-    )
-    d_sorted_x_from_w0 = tex.grouped_gemm(
-        casted_d_gate_proj_out.get_tensor(usage=TensorUsage.LHS),
-        ctx.casted_wi_0_rhs_trans,
-        contracting_dims=((1,), (2,)),
-    )
-    d_wi_0 = tex.grouped_gemm(
-        ctx.casted_sorted_x_lhs_trans,
-        casted_d_gate_proj_out.get_tensor(usage=TensorUsage.RHS),
-        contracting_dims=((0,), (0,)),
-    )
-    d_wi_0_bias = tex.grouped_dbias(d_gate_proj_out, ctx.local_group_sizes) if has_wi_bias else None
-
-    d_sorted_x = d_sorted_x_from_w0 + d_sorted_x_from_w1
+    d_wi_0 = d_wi_combined[..., :inter_M]
+    d_wi_1 = d_wi_combined[..., inter_M:]
+    if has_wi_bias:
+        d_wi_combined_bias = tex.grouped_dbias(d_combined, ctx.local_group_sizes)
+        d_wi_0_bias = d_wi_combined_bias[..., :inter_M]
+        d_wi_1_bias = d_wi_combined_bias[..., inter_M:]
+    else:
+        d_wi_0_bias = None
+        d_wi_1_bias = None
 
     # ---------------- Dispatch bwd ----------------
     inputs_2d_shape = (per_shard_x_shape[0] * per_shard_x_shape[1], hidden)
@@ -1632,8 +1629,7 @@ def _build_ctx_specs(
         # or a ScaledTensor (shard_map applies the spec leaf-wise to
         # the registered ScaledTensor pytree).
         casted_sorted_x_lhs_trans=P(),
-        casted_wi_0_rhs_trans=P(ep_axis, None, None),
-        casted_wi_1_rhs_trans=P(ep_axis, None, None),
+        casted_wi_rhs_trans=P(ep_axis, None, None),
         gate_proj_out=P(),
         up_proj_out=P(),
         casted_intermediate_lhs_trans=P(),
