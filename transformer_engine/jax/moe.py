@@ -52,10 +52,11 @@ import math
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import partial
-from typing import Any, Callable, NamedTuple, NewType, Optional, Tuple, Union
+from typing import Any, Callable, NewType, Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
+from flax import struct as flax_struct
 from jax.sharding import PartitionSpec as P
 
 from . import cpp_extensions as tex
@@ -161,8 +162,15 @@ class PermutationBackend(Enum):
 # coerced into JitTracers.
 
 
-class _PureJaxDispatchState(NamedTuple):
-    """Residuals saved by :func:`_dispatch` on the PURE_JAX path."""
+@flax_struct.dataclass
+class _PureJaxDispatchState:
+    """Residuals saved by :func:`_dispatch` on the PURE_JAX path.
+
+    Registered as a JAX pytree via ``flax.struct.dataclass``: each
+    annotated field is a leaf, ``None`` is a non-leaf sentinel. The
+    matching spec built by :func:`_build_dispatch_specs` mirrors this
+    layout so shard_map's value and spec trees line up.
+    """
 
     group_sizes: jnp.ndarray
     sorted_indices: jnp.ndarray
@@ -172,7 +180,8 @@ class _PureJaxDispatchState(NamedTuple):
     local_perm_row_id_map: Optional[jnp.ndarray] = None
 
 
-class _TritonDispatchState(NamedTuple):
+@flax_struct.dataclass
+class _TritonDispatchState:
     """Residuals saved by :func:`_dispatch` on the TRITON path."""
 
     group_sizes: jnp.ndarray
@@ -187,7 +196,8 @@ class _TritonDispatchState(NamedTuple):
 _DispatchState = Union[_PureJaxDispatchState, _TritonDispatchState]
 
 
-class _BodyCtx(NamedTuple):
+@flax_struct.dataclass
+class _BodyCtx:
     """Residuals carried fwd_rule -> bwd_rule by :func:`_body_fwd`.
 
     Optional fields (``expert_bias``, ``aux_*``) are ``None`` when the
