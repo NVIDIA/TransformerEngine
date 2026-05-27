@@ -140,7 +140,7 @@ def _run_layer_with_overlap(
     if use_cublasmp:
         if not tex.nvte_built_with_cublasmp():
             pytest.skip("Transformer Engine not built with cuBLASMp (NVTE_WITH_CUBLASMP=0).")
-        if quantization == "mxfp8":
+        if fp8 and quantization == "mxfp8":
             pytest.skip("cuBLASMp comm+GEMM overlap does not yet support MXFP8 (block scaling).")
         test_cmd.append("--use-cublasmp")
 
@@ -152,6 +152,10 @@ def _run_layer_with_overlap(
         # backward when running with Userbuffers on A100s. This does
         # not show up in more recent GPUs.
         os.environ["NVTE_FLASH_ATTN"] = "0"
+    elif fp8:
+        # Fused attention is causing non-deterministic FP8 failures on H100s even with
+        # NVTE_ALLOW_NONDETERMINISTIC_ALGO=0, so disable it entirely for this test.
+        os.environ["NVTE_FUSED_ATTN"] = "0"
 
     result = subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)
 
@@ -159,7 +163,8 @@ def _run_layer_with_overlap(
     os.unsetenv("NVTE_TORCH_COMPILE")
     os.unsetenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO")
     os.unsetenv("NVTE_FLASH_ATTN")
-
+    os.unsetenv("NVTE_FUSED_ATTN")
+    
     if (
         result.returncode != 0
         or "NUMERICAL CHECK FAILED" in result.stderr.decode()
