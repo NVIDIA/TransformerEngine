@@ -26,6 +26,7 @@ import torch
 
 __all__ = [
     "OpaqueSimpleMetadata",
+    "_DispatchTrigger",
     "_te_register_custom_op",
 ]
 
@@ -57,6 +58,354 @@ def _decode_none(t: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
     if t.numel() == 0 and t.dtype == _NONE_SENTINEL_DTYPE:
         return None
     return t
+
+
+# --------------------------------------------------------------------------- #
+# Output layout helpers
+# --------------------------------------------------------------------------- #
+#
+# A user output of a TE custom op can be one of:
+#   * ``None``                              -> 1 sentinel slot.
+#   * plain :class:`torch.Tensor`           -> 1 slot.
+#   * wrapper-subclass tensor with
+#     ``__tensor_flatten__`` (e.g.
+#     :class:`Float8Tensor`)                -> ``len(inner_names)`` slots.
+#   * pure-Python class with
+#     ``_torch_compile_flatten`` (e.g.
+#     :class:`Float8TensorStorage`)         -> ``len(tensors)`` slots.
+#
+# At op-execution time, :func:`_format_fwd_result` splits each output via
+# its flatten protocol and concatenates the inner plain tensors into the
+# op's ``Tensor[]`` return.
+#
+# At call-site time (in :func:`forward_fn`), the layout for each user
+# output is learned from a fake run of the user fwd impl (driven by
+# :func:`_run_fake_for_proto` -- ``@torch._dynamo.disable``'d so the
+# fake call doesn't pollute the surrounding FX graph). The layout
+# carries the static (class, inner_names, metadata, shape, stride)
+# tuple needed to reassemble the user-facing object from its real
+# inner tensors emitted by the op.
+
+
+def _extract_layout(proto_value: Any) -> Tuple[Any, ...]:
+    """Extract layout info from a fake proto output value.
+
+    Returned tuple starts with a ``kind`` string: ``"none"``, ``"plain"``,
+    ``"subclass"``, or ``"storage"``; followed by kind-specific fields
+    consumed by :func:`forward_fn` and the autograd ``setup_context``.
+
+    Used only on the legacy ``fwd_fake_impl``-driven path (see
+    :func:`_run_fake_for_proto`). The recommended path supplies an
+    explicit ``output_info_fn`` to :func:`_te_register_custom_op`,
+    which returns the same shape tuples directly without ever
+    materialising a fake prototype tensor.
+    """
+    if proto_value is None:
+        return ("none",)
+    if isinstance(proto_value, torch.Tensor):
+        if type(proto_value) is not torch.Tensor and hasattr(
+            proto_value, "__tensor_flatten__"
+        ):
+            inner_names, meta = proto_value.__tensor_flatten__()
+            return (
+                "subclass",
+                type(proto_value),
+                tuple(inner_names),
+                meta,
+                tuple(proto_value.shape),
+                tuple(proto_value.stride()),
+            )
+        return ("plain",)
+    if hasattr(proto_value, "_torch_compile_flatten"):
+        meta, pg, tensors = proto_value._torch_compile_flatten()
+        return ("storage", type(proto_value), meta, pg, len(tensors))
+    raise TypeError(
+        f"unsupported output type {type(proto_value).__name__}; expected "
+        "None / torch.Tensor / tensor subclass with __tensor_flatten__ / "
+        "class with _torch_compile_flatten."
+    )
+
+
+def _spec_slot_count(spec: Tuple[Any, ...]) -> int:
+    """Number of flat ``Tensor[]`` slots this output spec consumes.
+
+    Accepts both legacy "layout" tuples (from :func:`_extract_layout`)
+    and the new ``output_info_fn`` spec tuples; the kind-indexed
+    structure is identical on the slot-count fields.
+    """
+    kind = spec[0]
+    if kind == "subclass":
+        return len(spec[2])  # inner_names tuple
+    if kind == "storage":
+        return spec[4]  # tensor_count
+    # "none" / "plain": 1 slot
+    return 1
+
+
+# Kept as an alias for the small set of internal helpers that still
+# spell the old name (e.g. legacy ``_run_fake_for_proto`` paths).
+_layout_slot_count = _spec_slot_count
+
+
+def _reassemble_from_spec(spec: Tuple[Any, ...], chunk: List[Any]) -> Any:
+    """Reconstruct one user-facing output / saved object from its
+    flat-tensor chunk.
+
+    ``chunk`` is the post-:func:`_decode_none` view of the op's
+    contribution to this output. Direct ``__tensor_unflatten__`` /
+    ``_torch_compile_do_unflatten`` is used here (rather than going
+    through :class:`_ToSubclassFn`); callers that need to interpose an
+    ``autograd.Function`` between the op output and the user-side
+    forward fn use :class:`_ToSubclassFn` explicitly.
+    """
+    kind = spec[0]
+    if kind == "none":
+        return None
+    if kind == "plain":
+        return chunk[0]
+    if kind == "subclass":
+        _, cls, inner_names, meta, shape, stride = spec
+        inner_dict = dict(zip(inner_names, chunk))
+        return cls.__tensor_unflatten__(inner_dict, meta, shape, stride)
+    # kind == "storage"
+    _, cls, meta, pg, _ = spec
+    real_tensors = [t for t in chunk if t is not None]
+    return cls._torch_compile_do_unflatten(meta, pg, real_tensors)
+
+
+# --------------------------------------------------------------------------- #
+# Fake-impl synthesis from ``output_info_fn`` allocation specs.
+# --------------------------------------------------------------------------- #
+#
+# The recommended path for TE custom ops is to expose ``output_info_fn`` /
+# ``bwd_output_info_fn`` -- pure-Python descriptors of the op's output layout.
+# When such a descriptor returns alloc specs alongside the layout / saved
+# bookkeeping, ``_te_register_custom_op`` auto-synthesizes a fake-impl from
+# them: callers no longer need to maintain a separate
+# ``fwd_fake_impl`` / ``backward_fake_impl`` that duplicates the same
+# branching logic. The alloc-spec format is intentionally minimal:
+#
+# * ``None``                                  -> ``None`` (no slot allocated).
+# * ``("plain", shape, dtype, device)``       -> ``torch.empty(...)``.
+# * ``("quantized", quantizer, shape, dtype, device)``
+#                                             -> ``quantizer.make_empty(...)``;
+#                                                returns either a tensor
+#                                                subclass or a
+#                                                ``QuantizedTensorStorage``
+#                                                depending on the quantizer.
+def _alloc_from_fake_spec(spec: Optional[Tuple[Any, ...]]) -> Any:
+    """Allocate one fake value from an alloc spec.
+
+    See module-level commentary for the supported spec kinds. ``None``
+    /-``("none",)`` is a sentinel meaning "no allocation"; the returned
+    value is ``None`` and the caller should skip the slot.
+    """
+    if spec is None or spec[0] == "none":
+        return None
+    kind = spec[0]
+    if kind == "plain":
+        _, shape, dtype, device = spec
+        return torch.empty(tuple(shape), dtype=dtype, device=device)
+    if kind == "quantized":
+        _, quantizer, shape, dtype, device = spec
+        return quantizer.make_empty(tuple(shape), dtype=dtype, device=device)
+    raise ValueError(f"unsupported alloc-spec kind: {kind!r}")
+
+
+def _make_fake_impl_from_output_info(
+    output_info_fn: Callable[[Any], Any],
+    num_outputs: int,
+) -> Callable[[Any], Tuple[Any, ...]]:
+    """Build a forward fake-impl from an ``output_info_fn``.
+
+    The synthesized fake-impl returns
+    ``(*user_outputs, tensors_to_save, tensor_objects, ctx_attrs)`` --
+    the same shape :func:`_setup_context` expects from a hand-written
+    ``fwd_fake_impl``. ``user_outputs`` come from
+    ``fake_specs["user_outputs"]`` (one alloc spec per output), the
+    saved tuple from ``fake_specs["saved_tensors"]`` (``None`` if the
+    op did not save anything, e.g. ``is_grad_enabled=False``), and
+    ``tensor_objects`` / ``ctx_attrs`` are propagated verbatim from
+    the descriptor.
+
+    The descriptor must return a 4-tuple
+    ``(user_specs, tensor_objects, ctx_attrs, fake_specs)``.
+    ``user_specs`` is unused here -- the synthesized fake-impl
+    delegates layout introspection to :func:`_setup_context`, which
+    re-invokes ``output_info_fn`` -- but having a single function
+    return both reassembly specs and alloc specs avoids duplicating
+    the branching logic.
+    """
+    del num_outputs  # informational only; layout comes from fake_specs.
+
+    def _fake(args: Any) -> Tuple[Any, ...]:
+        _user_specs, tensor_objects, ctx_attrs, fake_specs = output_info_fn(args)
+        user_outputs = [
+            _alloc_from_fake_spec(s) for s in fake_specs["user_outputs"]
+        ]
+        saved_specs = fake_specs.get("saved_tensors")
+        if saved_specs is None:
+            tensors_to_save: Any = None
+        else:
+            tensors_to_save = tuple(_alloc_from_fake_spec(s) for s in saved_specs)
+        return (*user_outputs, tensors_to_save, tensor_objects, ctx_attrs)
+
+    return _fake
+
+
+def _make_fake_impl_from_bwd_output_info(
+    bwd_output_info_fn: Callable[[Any], List[Optional[Tuple[Any, ...]]]],
+) -> Callable[[Any], Tuple[Any, ...]]:
+    """Build a backward fake-impl from a ``bwd_output_info_fn``.
+
+    The descriptor returns a flat list of alloc specs (or ``None``)
+    per gradient output, in the same order as ``backward_impl``'s
+    return tuple. The synthesized fake-impl just allocates one fake
+    per slot.
+    """
+
+    def _fake(bwd_args: Any) -> Tuple[Any, ...]:
+        specs = bwd_output_info_fn(bwd_args)
+        return tuple(_alloc_from_fake_spec(s) for s in specs)
+
+    return _fake
+
+
+class _ToSubclassFn(torch.autograd.Function):
+    """Construct a wrapper-subclass tensor from its inner plain tensors,
+    preserving autograd flow through ``__tensor_unflatten__``.
+
+    Non-tensor args (``cls``, ``inner_names``, ``meta``, ``outer_shape``,
+    ``outer_stride``) are static constants. Dynamo / AOT capture them as
+    constants on the autograd.Function node; the variadic ``inner_tensors``
+    are real / fake graph tensors emitted by the underlying custom op.
+    """
+
+    @staticmethod
+    def forward(ctx, cls, inner_names, meta, outer_shape, outer_stride, *inner_tensors):
+        """Reassemble ``cls`` from ``inner_tensors`` via ``__tensor_unflatten__``."""
+        ctx.inner_names = inner_names
+        ctx.num_inner = len(inner_tensors)
+        inner_dict = dict(zip(inner_names, inner_tensors))
+        return cls.__tensor_unflatten__(inner_dict, meta, outer_shape, outer_stride)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        """Route ``grad_output`` back to its per-inner-name slots."""
+        # Under AOTAutograd, ``grad_output`` typically arrives flattened
+        # via the subclass machinery; under eager it may be the subclass
+        # itself. Both paths support ``__tensor_flatten__``-driven routing.
+        if grad_output is not None and hasattr(grad_output, "__tensor_flatten__"):
+            names_in_grad, _ = grad_output.__tensor_flatten__()
+            grad_by_name = {n: getattr(grad_output, n) for n in names_in_grad}
+            grads = tuple(grad_by_name.get(n) for n in ctx.inner_names)
+        else:
+            # Fallback: route the lone grad to the first inner slot; the
+            # remaining slots (typically derived quantities like scale)
+            # get ``None``.
+            grads = (grad_output,) + (None,) * (ctx.num_inner - 1)
+        # First five returns correspond to the five leading non-tensor args
+        # to ``forward`` (``cls``, ``inner_names``, ``meta``, ``shape``,
+        # ``stride``); none of them carries a gradient.
+        return (None, None, None, None, None) + grads
+
+
+# --------------------------------------------------------------------------- #
+# Dispatch trigger
+# --------------------------------------------------------------------------- #
+#
+# ``register_torch_dispatch(op, subclass, rule)`` only fires when at least
+# one argument of the call is an instance of ``subclass``. To get the rule
+# to fire *unconditionally* (so the user-facing wrapping logic -- output
+# rewrapping into ``Float8Tensor`` etc. -- always runs in the same place
+# regardless of whether the caller passed any "real" subclass instances),
+# we add an internal ``_DispatchTrigger`` tensor as the last positional
+# argument of every subclass-aware custom op. The trigger is a 0-element
+# wrapper subclass; the schema slot is plain ``Tensor``, so the call is
+# transparent to torch autograd / opcheck and the trigger never appears
+# in user code.
+
+class _DispatchTrigger(torch.Tensor):
+    """Empty wrapper-subclass tensor used solely to force a
+    ``register_torch_dispatch`` rule to fire on every call to a
+    subclass-aware custom op.
+
+    Designed to be installed as an ``nn.Module`` buffer (typically on
+    :class:`TransformerEngineBaseModule`) and threaded through the
+    custom op's argument dataclass as a regular ``torch.Tensor``
+    field. Dynamo lifts ``nn.Module`` buffers as graph inputs, so the
+    trigger reaches the FX graph as a regular FakeTensor instead of a
+    Python-side constant -- this is what made every other "always-on
+    trigger" approach (module-level globals, fresh-per-call
+    constructors, ...) trip ``FakeTensorMode`` under
+    ``torch.compile``.
+
+    ``__torch_dispatch__`` is a transparent passthrough: any op
+    accidentally invoked on a trigger falls back to the underlying op
+    with the trigger replaced by a plain empty tensor. The
+    ``register_torch_dispatch(outer_op, _DispatchTrigger, ...)``
+    bindings installed by :func:`_te_register_custom_op` shadow this
+    for the specific ops we care about.
+    """
+
+    @staticmethod
+    def __new__(cls, _inner: Optional[torch.Tensor] = None) -> "_DispatchTrigger":
+        instance = torch.Tensor._make_wrapper_subclass(  # pylint: disable=no-member
+            cls, (0,), dtype=_NONE_SENTINEL_DTYPE, device="cpu",
+        )
+        # Attach a regular inner tensor so the subclass has something
+        # for Dynamo / FakeTensorMode to fake out via the standard
+        # subclass-flattening protocol. Without an inner tensor,
+        # Dynamo can't reproduce the subclass instance in the fake
+        # graph and the call to a ``torch.compile``'d module trips
+        # ``InternalTorchDynamoError: Wrapped Tensor must be this
+        # graph's fake``.
+        instance._inner = (
+            _inner if _inner is not None
+            else torch.empty(0, dtype=_NONE_SENTINEL_DTYPE)
+        )
+        return instance
+
+    def __init__(self, _inner: Optional[torch.Tensor] = None) -> None:
+        # All work is done in ``__new__``; the optional ``_inner``
+        # parameter is consumed there. The signature is mirrored here
+        # so direct ``__init__`` calls (e.g. via ``__tensor_unflatten__``
+        # paths inside Dynamo) don't trip ``TypeError`` on the extra
+        # positional.
+        del _inner
+
+    def __tensor_flatten__(self) -> Tuple[List[str], Dict[str, Any]]:
+        return ["_inner"], {}
+
+    @staticmethod
+    def __tensor_unflatten__(
+        inner_tensors: Dict[str, torch.Tensor],
+        meta: Dict[str, Any],
+        outer_size,
+        outer_stride,
+    ) -> "_DispatchTrigger":
+        del meta, outer_size, outer_stride
+        return _DispatchTrigger(_inner=inner_tensors["_inner"])
+
+    @classmethod
+    def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
+        kwargs = kwargs or {}
+
+        def _strip(value: Any) -> Any:
+            if isinstance(value, _DispatchTrigger):
+                return torch.empty(0, dtype=_NONE_SENTINEL_DTYPE)
+            return value
+
+        new_args = [_strip(a) for a in args]
+        new_kwargs = {k: _strip(v) for k, v in kwargs.items()}
+        return func(*new_args, **new_kwargs)
+
+    def _stable_hash_for_caching(self) -> str:
+        # Required by AOT autograd's subclass cache. The trigger
+        # carries no semantically-relevant state, so a constant string
+        # is sufficient and ensures different trigger instances cache
+        # to the same compiled artifact.
+        return "te.dynamo._DispatchTrigger"
 
 
 # --------------------------------------------------------------------------- #
@@ -1052,17 +1401,118 @@ def _restore_from_saved(tensor_objects: Any, saved_tensors: List[Any]) -> Any:
     return restore_from_saved(tensor_objects, saved_tensors)
 
 
-def _format_fwd_result(result: Any, num_outputs: int) -> List[torch.Tensor]:
+# --------------------------------------------------------------------------- #
+# Forward-result packing
+# --------------------------------------------------------------------------- #
+#
+# The custom-op schema is fixed at ``-> Tensor[]``: a single flat list of
+# plain tensors. To return values that are *not* plain tensors (a
+# :class:`Float8Tensor` wrapper subclass, a ``QuantizedTensorStorage``
+# workspace, ``None``...), :func:`_format_fwd_result` runs each user
+# output through the relevant flatten protocol and concatenates the
+# resulting inner tensors -- one variable-length chunk per output --
+# into the op's flat return. Saved-for-backward tensors follow in
+# declaration order.
+#
+# At call-site time (:func:`forward_fn` and :func:`_setup_context`),
+# the per-call output structure is learned from a fake run of the user
+# fwd impl driven by :func:`_run_fake_for_proto` (see
+# :func:`_extract_layout` and :func:`_layout_slot_count` near the top
+# of this file). The static (class, inner-names, metadata, shape,
+# stride) captured by each layout is enough to reassemble the
+# user-facing object from its real inner tensors emitted by the op;
+# subclass reconstruction goes through :class:`_ToSubclassFn` so the
+# wrap is recorded on the autograd graph.
+
+
+def _format_fwd_result(
+    result: Any,
+    num_outputs: int,
+) -> List[torch.Tensor]:
     """Pack a fwd-impl return tuple into the op's ``Tensor[]`` payload.
 
-    The op concatenates ``[*output_tensors, *tensors_to_save]`` into a
-    single non-nullable list; ``None`` entries are smuggled through the
-    :func:`_encode_none` sentinel so ``register_autograd`` still
-    attaches a ``grad_fn`` to the result.
+    Each user output is decomposed into a deterministic number of inner
+    plain tensors (see :func:`_extract_layout`):
+
+    * ``None``           -> 1 sentinel slot.
+    * plain Tensor       -> 1 slot.
+    * subclass with
+      ``__tensor_flatten__`` -> ``len(inner_names)`` slots, in the order
+      declared by the class.
+    * storage with
+      ``_torch_compile_flatten`` -> ``len(tensors)`` slots.
+
+    Saved-for-backward tensors follow in declaration order. ``None``
+    entries on either side are smuggled through :func:`_encode_none`
+    so the schema stays non-nullable and ``register_autograd`` still
+    attaches a ``grad_fn`` to the op's outputs.
+
+    The slot layout produced here must match exactly what
+    :func:`_extract_layout` predicts from a proto fake run, since the
+    call-site reassembly in :func:`forward_fn` uses the proto-derived
+    layout to slice this flat list back into user-facing objects.
     """
     outputs = list(result[:num_outputs])
+    flat: List[torch.Tensor] = []
+    # Flatten user outputs *before* ``_prepare_for_saving`` -- the
+    # latter mutates storage instances in place (clears ``_data`` /
+    # ``_transpose`` / ``_scale_inv``), and the same object can be
+    # both a user output and a saved-for-backward entry. Doing the
+    # flatten first observes the original tensor state.
+    for value in outputs:
+        if value is None:
+            flat.append(_encode_none(None))
+        elif isinstance(value, torch.Tensor):
+            if type(value) is not torch.Tensor and hasattr(value, "__tensor_flatten__"):
+                inner_names, _ = value.__tensor_flatten__()
+                flat.extend(_encode_none(getattr(value, n)) for n in inner_names)
+            else:
+                flat.append(_encode_none(value))
+        elif hasattr(value, "_torch_compile_flatten"):
+            _, _, tensors = value._torch_compile_flatten()
+            flat.extend(_encode_none(t) for t in tensors)
+        else:
+            raise TypeError(
+                f"unsupported output type {type(value).__name__}; expected "
+                "None / torch.Tensor / tensor subclass with __tensor_flatten__ / "
+                "class with _torch_compile_flatten."
+            )
     tensors_to_save, _ = _prepare_for_saving(result[num_outputs])
-    return [_encode_none(t) for t in outputs + tensors_to_save]
+    flat.extend(_encode_none(t) for t in tensors_to_save)
+    return flat
+
+
+@torch._dynamo.allow_in_graph
+def _run_fake_for_proto(
+    fwd_fake_impl: Callable[[Any], Any],
+    fwd_obj: Any,
+    num_outputs: int,
+) -> List[Any]:
+    """Execute ``fwd_fake_impl(fwd_obj)`` in isolation and return its
+    user-facing outputs to be used as prototypes for output layout
+    extraction.
+
+    Isolated from any ambient ``FakeTensorMode`` (Dynamo / AOT's own
+    mode included) by stacking ``_disable_current_modes`` plus a
+    fresh ``FakeTensorMode``. None of the fake allocations performed
+    inside ``fwd_fake_impl`` pollute the surrounding FX graph; the
+    proto outputs leave the function as Python objects whose
+    metadata (class, ``__tensor_flatten__`` names, shape, ...) is
+    extracted into static layout tuples on the call site.
+
+    Decorated with :func:`torch._dynamo.allow_in_graph` so that
+    Dynamo encodes the entire call as a single opaque FX node
+    instead of trying to trace the fake-allocation body. Unlike
+    ``@torch._dynamo.disable`` this does not graph-break under
+    ``fullgraph=True``.
+    """
+    from torch._subclasses.fake_tensor import FakeTensorMode
+    from torch.utils._python_dispatch import _disable_current_modes
+
+    with _disable_current_modes():
+        with FakeTensorMode(allow_non_fake_inputs=True):
+            result = fwd_fake_impl(fwd_obj)
+    return list(result[:num_outputs])
 
 
 def _format_bwd_result(
@@ -1235,6 +1685,7 @@ def _register_autograd_for_op(
     fwd_impl: Callable[[Any], Any],
     setup_context_user: Callable[..., None],
     backward_obj_type: type,
+    output_info_fn: Optional[Callable[[Any], Tuple[List[Tuple[Any, ...]], List[Tuple[Any, ...]], Any]]] = None,
 ) -> None:
     """Wire ``register_autograd`` on a forward op so its backward calls
     ``bwd_op_name``.
@@ -1245,6 +1696,19 @@ def _register_autograd_for_op(
     registration is handled separately (by :func:`_register_kernel`
     for the inner tier and :func:`_register_outer_forwarder` for the
     outer tier).
+
+    The op's ``Tensor[]`` return holds the flat layout produced by
+    :func:`_format_fwd_result` -- one chunk per user output / saved
+    tensor, sliced via:
+
+    * ``output_info_fn(fwd_obj)`` -- the recommended path: a pure
+      Python function that returns the static
+      ``(user_specs, saved_specs, ctx_attrs)`` tuple. Traceable by
+      Dynamo / AOT, no fake tensor allocation involved.
+    * legacy ``fwd_fake_impl(fwd_obj)`` -- runs the user fake impl
+      and extracts layouts via :func:`_extract_layout`. Kept for
+      backwards compatibility with callers that haven't migrated to
+      ``output_info_fn`` yet.
     """
     fwd_qualname = f"{_TE_OP_NAMESPACE}::{fwd_op_name}"
 
@@ -1256,16 +1720,53 @@ def _register_autograd_for_op(
         }
         kwargs = dict(zip(fwd_arg_names, inputs))
         fwd_obj = _unpack(fwd_arg_type, kwargs, fwd_buckets)
-        fake_result = fake_for_setup(fwd_obj)
-        _, tensor_objects = _prepare_for_saving(fake_result[num_outputs])
-        ctx_attrs = fake_result[num_outputs + 2]
 
-        user_outputs = [_decode_none(t) for t in output[:num_outputs]]
-        op_saved_tensors = [_decode_none(t) for t in output[num_outputs:]]
-        tensors_to_save_from_forward = _restore_from_saved(
-            tensor_objects,
-            op_saved_tensors,
-        )
+        if output_info_fn is not None:
+            user_specs, tensor_objects, ctx_attrs, _fake_specs = output_info_fn(fwd_obj)
+            cursor = 0
+            user_outputs: List[Any] = []
+            for spec in user_specs:
+                n = _spec_slot_count(spec)
+                chunk = [_decode_none(t) for t in output[cursor:cursor + n]]
+                cursor += n
+                user_outputs.append(_reassemble_from_spec(spec, chunk))
+
+            # ``tensor_objects`` is the same shape :func:`prepare_for_saving`
+            # would produce: a list with one entry per element of
+            # ``tensors_to_save_from_forward`` -- ``None`` for plain
+            # tensors, a storage shell (with ``_data`` / ``_scale_inv``
+            # / ... set to ``None``) for quantized storages. The shells
+            # are constructed inside ``output_info_fn`` via simple
+            # ``object.__new__`` + attribute writes so Dynamo can carry
+            # them as ``UserDefinedObjectVariable``s across the trace
+            # boundary. :func:`_restore_from_saved` reads each shell's
+            # ``restore_from_saved`` to consume the right number of
+            # slots from ``op_saved_tensors``.
+            op_saved_tensors = [_decode_none(t) for t in output[cursor:]]
+            tensors_to_save_from_forward = _restore_from_saved(
+                tensor_objects,
+                op_saved_tensors,
+            )
+        else:
+            fake_result = fake_for_setup(fwd_obj)
+            # Learn output layouts from the fake result.
+            layouts = [_extract_layout(p) for p in fake_result[:num_outputs]]
+
+            cursor = 0
+            user_outputs = []
+            for layout in layouts:
+                n = _spec_slot_count(layout)
+                chunk = [_decode_none(t) for t in output[cursor:cursor + n]]
+                cursor += n
+                user_outputs.append(_reassemble_from_spec(layout, chunk))
+
+            op_saved_tensors = [_decode_none(t) for t in output[cursor:]]
+            _, tensor_objects = _prepare_for_saving(fake_result[num_outputs])
+            ctx_attrs = fake_result[num_outputs + 2]
+            tensors_to_save_from_forward = _restore_from_saved(
+                tensor_objects,
+                op_saved_tensors,
+            )
 
         bwd_obj = backward_obj_type()
         tensors_to_save_from_setup = setup_context_user(
@@ -1293,6 +1794,15 @@ def _register_autograd_for_op(
         grads = [_decode_none(g) for g in bwd_op(*bwd_args_flat)]
         out: List[Any] = list(fwd_slot_defaults)
         tensor_list_lengths = getattr(ctx, "_te_fwd_tensor_list_lengths", {})
+        # Pad every ``Tensor[]`` slot with ``None`` entries matching the
+        # corresponding forward input length. AOT's pytree check on the
+        # backward return rejects an empty list where the forward input
+        # was a non-empty list -- the list structure must match
+        # element-for-element. Grad-target slots below overwrite the
+        # first entry with the actual gradient.
+        for pos, length in tensor_list_lengths.items():
+            if isinstance(out[pos], list):
+                out[pos] = [None] * length
         for (pos, as_list), g in zip(grad_targets, grads):
             if as_list:
                 length = tensor_list_lengths.get(pos, 1)
@@ -1313,31 +1823,46 @@ def _register_outer_forwarder(
     *,
     outer_op_name: str,
     inner_op_name: str,
-    arg_names: List[str],
+    buckets: Optional[List[_Bucket]] = None,
+    subclass_list: Optional[List[type]] = None,
 ) -> None:
-    """Register the outer op's default kernel + fake as a thin
-    forwarder into the inner op.
+    """Register the outer op's default kernel + fake.
 
-    The outer op must remain opaque to compilation (so
-    ``register_torch_dispatch`` rules installed on it actually fire);
-    we register the kernel against ``CompositeExplicitAutograd`` and
-    additionally register a fake impl that simply re-invokes the
-    inner op. For the subclass path the dispatch rule rewrites the
-    call into an inner call *before* this kernel/fake ever runs; the
-    forwarder is only consulted when no rule matches (i.e. the inputs
-    are plain tensors and / or plain ``QuantizedTensorStorage`` flat
-    slots that already match the inner schema directly).
+    Both kernel and fake forward to the inner op, optionally with an
+    in-place input flatten step for any registered subclass arg (so the
+    inner op's plain-tensor schema is satisfied). Outputs travel
+    untouched in their flat ``Tensor[]`` shape -- the user-facing
+    wrapping back into subclasses / storage happens in
+    :func:`forward_fn` via :class:`_ToSubclassFn`.
     """
     inner_op = getattr(getattr(torch.ops, _TE_OP_NAMESPACE), inner_op_name)
 
-    def _outer_kernel(*flat: Any) -> List[torch.Tensor]:
-        return inner_op(*flat)
+    input_flatten_enabled = bool(subclass_list) and buckets is not None
+
+    if input_flatten_enabled:
+        slot_offsets = _collect_universal_slot_offsets(buckets)
+
+        def _flatten_all(new_args: List[Any]) -> None:
+            for sub in subclass_list:
+                _flatten_subclass_into_slots(new_args, slot_offsets, sub)
+
+        def _outer_kernel(*flat: Any) -> List[torch.Tensor]:
+            new_args = list(flat)
+            _flatten_all(new_args)
+            return inner_op(*new_args)
+
+        def _outer_fake(*flat: Any) -> List[torch.Tensor]:
+            new_args = list(flat)
+            _flatten_all(new_args)
+            return inner_op(*new_args)
+    else:
+        def _outer_kernel(*flat: Any) -> List[torch.Tensor]:
+            return inner_op(*flat)
+
+        def _outer_fake(*flat: Any) -> List[torch.Tensor]:
+            return inner_op(*flat)
 
     _TE_LIB.impl(outer_op_name, _outer_kernel, "CompositeExplicitAutograd")
-
-    def _outer_fake(*flat: Any) -> List[torch.Tensor]:
-        return inner_op(*flat)
-
     torch.library.register_fake(
         f"{_TE_OP_NAMESPACE}::{outer_op_name}", _outer_fake, lib=_TE_LIB
     )
@@ -1346,7 +1871,8 @@ def _register_outer_forwarder(
 def _te_register_custom_op(
     *,
     op_name: str,
-    num_outputs: int,
+    num_outputs: Optional[int] = None,
+    output_annotations: Optional[Sequence[Any]] = None,
     input_tensors_for_grad: List[str],
     fwd_arg_type: type,
     fwd_impl: Callable[[Any], Any],
@@ -1357,6 +1883,15 @@ def _te_register_custom_op(
     backward_impl: Callable[[Any], Any],
     backward_fake_impl: Optional[Callable[[Any], Any]] = None,
     subclasses: Optional[Sequence[type]] = None,
+    output_info_fn: Optional[
+        Callable[
+            [Any],
+            Tuple[List[Tuple[Any, ...]], List[Any], Any, Dict[str, Any]],
+        ]
+    ] = None,
+    bwd_output_info_fn: Optional[
+        Callable[[Any], List[Optional[Tuple[Any, ...]]]]
+    ] = None,
 ) -> Callable[..., Any]:
     """Register a TE module's forward + backward as a single torch custom op.
 
@@ -1366,10 +1901,19 @@ def _te_register_custom_op(
         Op name used when registering with ``torch.library``. The
         namespace is fixed at module level (:data:`_TE_OP_NAMESPACE`).
     num_outputs
-        Number of user-facing tensor outputs returned by ``fwd_impl``.
-        The op concatenates ``[*output_tensors, *tensors_to_save]`` into
-        a single ``Tensor[]`` return; the wrapper uses ``num_outputs`` to
-        split the two halves on the way back out.
+        Number of user-facing outputs returned by ``fwd_impl``. May be
+        inferred from ``output_annotations`` if the latter is provided.
+    output_annotations
+        Optional per-output type annotation, e.g.
+        ``[Union[torch.Tensor, Float8Tensor],
+           Optional[Union[torch.Tensor, Float8TensorStorage]]]``. Kept
+        for documentation / backward compatibility. The runtime layout
+        of each output (plain / subclass / storage / ``None``) is
+        learned dynamically from a fake run of ``fwd_fake_impl``
+        executed under ``_disable_current_modes`` and a fresh
+        ``FakeTensorMode``, so the annotation does not constrain the
+        flat ``Tensor[]`` payload anymore. If both are passed,
+        ``num_outputs`` must equal ``len(output_annotations)``.
     input_tensors_for_grad
         Names of forward-arg-type fields for which ``backward_impl``
         returns gradients, in the same order. The wrapper uses this to
@@ -1428,6 +1972,70 @@ def _te_register_custom_op(
         Optional fake counterpart of ``backward_impl``. Returns the same
         gradient tuple as ``backward_impl``, with fake tensors in place
         of the real gradients.
+    output_info_fn
+        Optional pure-Python layout descriptor for the op's outputs:
+        ``fn(fwd_obj) -> (user_specs, tensor_objects, ctx_attrs, fake_specs)``.
+
+        * ``user_specs`` is a list, one entry per user output, where
+          each entry is:
+
+          - ``("plain",)`` -- plain :class:`torch.Tensor` (or ``None``
+            smuggled via :func:`_encode_none`).
+          - ``("none",)`` -- explicit ``None`` (single sentinel slot).
+          - ``("subclass", cls, inner_names, meta, shape, stride)`` --
+            tensor subclass, reassembled via
+            ``cls.__tensor_unflatten__``.
+          - ``("storage", cls, meta, pg, tensor_count)`` -- non-tensor
+            storage, reassembled via ``cls._torch_compile_do_unflatten``.
+
+        * ``tensor_objects`` is the structured descriptor that
+          :func:`prepare_for_saving` would produce on the user's
+          ``tensors_to_save_from_forward`` tuple: a Python list with
+          one entry per saved object, ``None`` for plain tensors and a
+          storage *shell* (typically built via
+          :meth:`Quantizer.create_save_shell` -- ``object.__new__`` +
+          attribute writes, no constructor logic) for quantized
+          storages. :func:`_restore_from_saved` uses these shells to
+          reconstruct the saved tuple from the flat ``op_saved_tensors``
+          payload.
+
+        * ``ctx_attrs`` is the non-tensor state attached to the
+          autograd context (passed through to ``setup_context``).
+
+        * ``fake_specs`` is a dict with the alloc info needed to
+          synthesize a fake-impl when ``fwd_fake_impl`` is not
+          supplied (see :func:`_alloc_from_fake_spec`). Keys:
+
+          - ``"user_outputs"`` -- list of alloc specs (one per user
+            output) used to materialise the fake tensors / subclasses
+            / storages returned by the synthesized fake-impl.
+          - ``"saved_tensors"`` -- ``None`` (no saved tensors, e.g.
+            ``is_grad_enabled=False``) or a list of alloc specs (one
+            per saved slot) used to build the synthesized
+            ``tensors_to_save`` tuple.
+
+        When supplied, :func:`forward_fn` and the autograd
+        ``setup_context`` use this function instead of running
+        ``fwd_fake_impl`` to learn output layouts -- which is the only
+        way to keep the layout-extraction step traceable by Dynamo
+        under ``fullgraph=True`` (fake-impl execution typically tries
+        to construct subclasses with UDF arguments such as live
+        quantizers / pybind enums, graph-breaking the trace).
+
+        Required to support tensor-subclass outputs (e.g.
+        :class:`Float8Tensor`) under ``torch.compile``. Optional for
+        plain-tensor ops, where the fake-impl path is still cheap.
+    bwd_output_info_fn
+        Optional pure-Python alloc descriptor for the backward op:
+        ``fn(bwd_obj) -> [alloc_spec_per_grad_output]``. Each entry is
+        either ``None`` (slot is ``None``), ``("plain", shape, dtype,
+        device)``, or ``("quantized", quantizer, shape, dtype,
+        device)``. When supplied (and ``backward_fake_impl`` is not),
+        :func:`_te_register_custom_op` synthesizes the backward
+        fake-impl by allocating one fake per spec via
+        :func:`_alloc_from_fake_spec`. Useful so the backward fake no
+        longer has to duplicate the gradient-shape derivation that
+        lives in the eager impl / its layout descriptor.
 
     Returns
     -------
@@ -1442,6 +2050,21 @@ def _te_register_custom_op(
     outer_fwd_name = op_name
     outer_bwd_name = f"{op_name}_backward"
     subclass_list = list(subclasses or ())
+
+    if output_annotations is not None:
+        annotated_count = len(list(output_annotations))
+        if num_outputs is not None and num_outputs != annotated_count:
+            raise ValueError(
+                "_te_register_custom_op: num_outputs="
+                f"{num_outputs} does not match len(output_annotations)="
+                f"{annotated_count}"
+            )
+        num_outputs = annotated_count
+    if num_outputs is None:
+        raise ValueError(
+            "_te_register_custom_op requires either ``num_outputs`` or "
+            "``output_annotations``"
+        )
 
     # Precompute the bucket list once per arg type and capture it in
     # the registered closures. Re-deriving the bucket list inside a
@@ -1500,6 +2123,25 @@ def _te_register_custom_op(
     # the inner bwd op.
     inner_fwd_qualname = f"{_TE_OP_NAMESPACE}::{inner_fwd_name}"
     inner_bwd_qualname = f"{_TE_OP_NAMESPACE}::{inner_bwd_name}"
+
+    # Auto-synthesize the forward / backward fake impls from the
+    # alloc-spec descriptors when the caller did not hand-write them.
+    # The synthesized impls share branching with their layout
+    # counterparts (``output_info_fn`` / ``bwd_output_info_fn``) so
+    # there's exactly one place where every per-precision / per-mode
+    # condition lives. Hand-written fake impls still take precedence
+    # when supplied, so callers can stage the migration op-by-op.
+    effective_fwd_fake_impl = fwd_fake_impl
+    if effective_fwd_fake_impl is None and output_info_fn is not None:
+        effective_fwd_fake_impl = _make_fake_impl_from_output_info(
+            output_info_fn, num_outputs
+        )
+    effective_bwd_fake_impl = backward_fake_impl
+    if effective_bwd_fake_impl is None and bwd_output_info_fn is not None:
+        effective_bwd_fake_impl = _make_fake_impl_from_bwd_output_info(
+            bwd_output_info_fn
+        )
+
     _register_kernel(
         op_name=inner_fwd_name,
         op_qualname=inner_fwd_qualname,
@@ -1507,7 +2149,7 @@ def _te_register_custom_op(
         arg_names=fwd_arg_names,
         buckets=fwd_buckets,
         impl=fwd_impl,
-        fake_impl=fwd_fake_impl,
+        fake_impl=effective_fwd_fake_impl,
         format_result=lambda r: _format_fwd_result(r, num_outputs),
     )
     _register_kernel(
@@ -1517,7 +2159,7 @@ def _te_register_custom_op(
         arg_names=bwd_arg_names,
         buckets=bwd_buckets,
         impl=backward_impl,
-        fake_impl=backward_fake_impl,
+        fake_impl=effective_bwd_fake_impl,
         format_result=lambda g: _format_bwd_result(g, num_grad_inputs, inner_bwd_qualname),
     )
     _register_autograd_for_op(
@@ -1531,10 +2173,11 @@ def _te_register_custom_op(
         num_outputs=num_outputs,
         fwd_slot_defaults=fwd_slot_defaults,
         grad_targets=grad_targets,
-        fwd_fake_impl=fwd_fake_impl,
+        fwd_fake_impl=effective_fwd_fake_impl,
         fwd_impl=fwd_impl,
         setup_context_user=setup_context,
         backward_obj_type=backward_obj,
+        output_info_fn=output_info_fn,
     )
 
     if subclass_list:
@@ -1558,12 +2201,12 @@ def _te_register_custom_op(
         _register_outer_forwarder(
             outer_op_name=outer_fwd_name,
             inner_op_name=inner_fwd_name,
-            arg_names=fwd_arg_names,
+            buckets=fwd_buckets,
+            subclass_list=list(subclass_list),
         )
         _register_outer_forwarder(
             outer_op_name=outer_bwd_name,
             inner_op_name=inner_bwd_name,
-            arg_names=bwd_arg_names,
         )
         _register_autograd_for_op(
             fwd_op_name=outer_fwd_name,
@@ -1576,22 +2219,21 @@ def _te_register_custom_op(
             num_outputs=num_outputs,
             fwd_slot_defaults=fwd_slot_defaults,
             grad_targets=grad_targets,
-            fwd_fake_impl=fwd_fake_impl,
+            fwd_fake_impl=effective_fwd_fake_impl,
             fwd_impl=fwd_impl,
             setup_context_user=setup_context,
             backward_obj_type=backward_obj,
+            output_info_fn=output_info_fn,
         )
 
-        # Register ``torch_dispatch`` rules per subclass on both the
-        # outer fwd and the outer bwd op. The rule replaces the outer
-        # call entirely: it flattens every ``_UniversalTensorBucket``
-        # slot whose ``name`` value is an instance of the registered
-        # subclass into ``(None, [inner tensors], process_group,
-        # opaque_meta)`` and invokes the inner op on the rewritten
-        # args. After the rewrite no subclass tensor remains in the
-        # call's arg list, and the autograd entry that ends up on the
-        # output graph is the inner op's (not the outer's), so the
-        # backward path goes through the inner pair only.
+        # Register per-subclass ``torch_dispatch`` rules. Each rule
+        # flattens every registered subclass arg into the
+        # ``_UniversalTensorBucket`` storage layout (so the inner op
+        # only ever sees plain tensors + opaque metadata) and forwards
+        # to the inner op. The flat ``Tensor[]`` output travels back
+        # untouched -- user-facing wrapping into subclasses / storage
+        # happens in :func:`forward_fn` via :class:`_ToSubclassFn`,
+        # outside the dispatcher.
         fwd_slot_offsets = _collect_universal_slot_offsets(fwd_buckets)
         bwd_slot_offsets = _collect_universal_slot_offsets(bwd_buckets)
         inner_fwd_op = getattr(getattr(torch.ops, _TE_OP_NAMESPACE), inner_fwd_name)
@@ -1600,43 +2242,130 @@ def _te_register_custom_op(
         outer_bwd_op = getattr(getattr(torch.ops, _TE_OP_NAMESPACE), outer_bwd_name)
         outer_fwd_qualname = f"{_TE_OP_NAMESPACE}::{outer_fwd_name}"
         outer_bwd_qualname = f"{_TE_OP_NAMESPACE}::{outer_bwd_name}"
-        for subclass in subclass_list:
-            def _fwd_rule(mode, func, types, args, kwargs, subclass=subclass):
-                new_args = list(args)
-                _flatten_subclass_into_slots(new_args, fwd_slot_offsets, subclass)
-                return inner_fwd_op(*new_args)
 
-            def _bwd_rule(mode, func, types, args, kwargs, subclass=subclass):
-                new_args = list(args)
-                _flatten_subclass_into_slots(new_args, bwd_slot_offsets, subclass)
-                return inner_bwd_op(*new_args)
+        def _flatten_all_subclasses(new_args: List[Any], slot_offsets: List[int]) -> None:
+            for sub in subclass_list:
+                _flatten_subclass_into_slots(new_args, slot_offsets, sub)
 
+        def _fwd_rule(mode, func, types, args, kwargs):
+            del mode, func, types, kwargs
+            new_args = list(args)
+            _flatten_all_subclasses(new_args, fwd_slot_offsets)
+            return inner_fwd_op(*new_args)
+
+        def _bwd_rule(mode, func, types, args, kwargs):
+            del mode, func, types, kwargs
+            new_args = list(args)
+            _flatten_all_subclasses(new_args, bwd_slot_offsets)
+            return inner_bwd_op(*new_args)
+
+        # EXPERIMENT: temporarily disable trigger-based dispatch rules.
+        # torch.library.register_torch_dispatch(
+        #     outer_fwd_qualname, _DispatchTrigger, _fwd_rule, lib=_TE_LIB
+        # )
+        # torch.library.register_torch_dispatch(
+        #     outer_bwd_qualname, _DispatchTrigger, _bwd_rule, lib=_TE_LIB
+        # )
+
+        # Also register per-subclass dispatch rules. The trigger
+        # rule above only fires when the dispatcher actually
+        # consults ``register_torch_dispatch`` (e.g. eager-mode calls
+        # where the trigger is the only subclass), which doesn't
+        # cover the case where Dynamo lifts a real wrapper-subclass
+        # parameter (such as a ``Float8Tensor`` weight) into the FX
+        # graph: in that case Dynamo invokes the registered fake
+        # impl instead, so we additionally bind the same rule body
+        # for every concrete subclass class so the eager dispatcher
+        # still picks it up alongside the fake impl handling the
+        # tracing path.
+        for sub in subclass_list:
             torch.library.register_torch_dispatch(
-                outer_fwd_qualname, subclass, _fwd_rule, lib=_TE_LIB
+                outer_fwd_qualname, sub, _fwd_rule, lib=_TE_LIB
             )
             torch.library.register_torch_dispatch(
-                outer_bwd_qualname, subclass, _bwd_rule, lib=_TE_LIB
+                outer_bwd_qualname, sub, _bwd_rule, lib=_TE_LIB
             )
 
         # ``QuantizedTensor.__torch_dispatch__`` falls back to
         # dequantizing all subclass args for any op it does not
         # recognise, which would defeat our
-        # ``register_torch_dispatch`` rules. Marking both outer ops
-        # as passthroughs makes QuantizedTensor delegate straight to
-        # ``super().__torch_dispatch__`` for them, where the
-        # registered dispatch rules are honoured.
+        # ``register_torch_dispatch`` rules and would also crash on
+        # FakeTensors (``tex.dequantize`` needs ``data_ptr``). Mark
+        # every op we register through this helper -- both tiers and
+        # both directions -- as passthroughs so QuantizedTensor
+        # delegates straight to ``super().__torch_dispatch__``.
         from transformer_engine.pytorch.quantized_tensor import (
             _quantized_tensor_passthrough_ops,
         )
         _quantized_tensor_passthrough_ops.add(outer_fwd_op.default)
+        _quantized_tensor_passthrough_ops.add(outer_bwd_op.default)
+        _quantized_tensor_passthrough_ops.add(inner_fwd_op.default)
+        _quantized_tensor_passthrough_ops.add(inner_bwd_op.default)
 
     fwd_op = getattr(getattr(torch.ops, _TE_OP_NAMESPACE), outer_fwd_name)
+    # Use the auto-synthesized fake-impl when available so the proto
+    # path stays in sync with the kernel registration above. Falls back
+    # to ``fwd_impl`` when there is no fake-impl at all (legacy
+    # plain-tensor ops).
+    proto_fn = (
+        effective_fwd_fake_impl if effective_fwd_fake_impl is not None else fwd_impl
+    )
 
     def forward_fn(fwd_args):
+        # 1) Learn user-output layouts.
+        # ``output_info_fn`` is the recommended path: a pure Python
+        # function that returns the static spec tuples without ever
+        # materialising a fake prototype tensor. Traceable by Dynamo
+        # under ``fullgraph=True``. Fallback: legacy fake-impl run
+        # via ``_run_fake_for_proto`` (``@torch._dynamo.allow_in_graph``
+        # so it stays opaque to Dynamo).
+        if output_info_fn is not None:
+            (
+                user_specs,
+                _tensor_objects,
+                _ctx_attrs,
+                _fake_specs,
+            ) = output_info_fn(fwd_args)
+        else:
+            proto_outputs = _run_fake_for_proto(proto_fn, fwd_args, num_outputs)
+            user_specs = [_extract_layout(p) for p in proto_outputs]
+
+        # 2) Invoke the op (graph node). Result is the flat ``Tensor[]``
+        # payload produced by :func:`_format_fwd_result`.
         kwargs = _pack(fwd_args, fwd_buckets)
-        flat = [kwargs[name] for name in fwd_arg_names]
-        result = fwd_op(*flat)
-        outputs = [_decode_none(t) for t in result[:num_outputs]]
+        flat_in = [kwargs[name] for name in fwd_arg_names]
+        result = fwd_op(*flat_in)
+
+        # 3) Slice the flat result by spec and reassemble each user
+        # output. Tensor subclasses go through :class:`_ToSubclassFn`
+        # so the construction is recorded on the autograd graph and
+        # Dynamo lifts it as an ``autograd.Function`` call;
+        # ``QuantizedTensorStorage``-style objects (no autograd of
+        # their own) are reconstructed directly.
+        cursor = 0
+        outputs: List[Any] = []
+        for spec in user_specs:
+            n = _spec_slot_count(spec)
+            chunk_raw = result[cursor:cursor + n]
+            cursor += n
+            chunk = [_decode_none(t) for t in chunk_raw]
+            kind = spec[0]
+            if kind == "none":
+                outputs.append(None)
+            elif kind == "plain":
+                outputs.append(chunk[0])
+            elif kind == "subclass":
+                _, cls, inner_names, meta, shape, stride = spec
+                outputs.append(
+                    _ToSubclassFn.apply(
+                        cls, inner_names, meta, shape, stride, *chunk
+                    )
+                )
+            else:  # "storage"
+                _, cls, meta, pg, _slot_count = spec
+                real_tensors = [t for t in chunk if t is not None]
+                outputs.append(cls._torch_compile_do_unflatten(meta, pg, real_tensors))
+
         if num_outputs == 1:
             return outputs[0]
         return tuple(outputs)

@@ -86,6 +86,14 @@ class Float8TensorStorage(QuantizedTensorStorage):
     _transpose: Optional[torch.Tensor]
     _transpose_invalid: bool
 
+    # Upper bound on the number of inner tensors produced by
+    # :meth:`_torch_compile_flatten`. Used by the wide-output layout in
+    # :mod:`transformer_engine.pytorch.dynamo` to reserve enough slots in
+    # the custom-op ``Tensor[]`` return for any storage-shaped output:
+    # 3 data tensors (data / transpose / scale_inv) + up to 2 quantizer
+    # tensors (Float8Quantizer carries scale / amax).
+    _TORCH_COMPILE_MAX_INNER_TENSORS = 5
+
     def __new__(
         cls,
         *args,
@@ -172,6 +180,19 @@ class Float8TensorStorage(QuantizedTensorStorage):
         self._data = tensors[0]
         self._transpose = tensors[1]
         self._scale_inv = tensors[2]
+        # Re-derive ``_transpose_invalid`` from the restored buffer:
+        # the saved transpose, if present, was valid at save time
+        # (``prepare_for_saving`` never resets this flag, and forward
+        # producers don't save stale transposes). Tying the flag to
+        # ``self._transpose`` here makes restoration independent of
+        # whichever shell carried the storage across the trace
+        # boundary -- in particular ``torch.compile``'s save/restore
+        # round-trip, which builds a fresh wrapper shell for backward
+        # whose pre-restore ``_transpose_invalid`` would otherwise
+        # come from :meth:`Float8TensorStorage.__new__` (``True``
+        # whenever it sees ``data_transpose=None``) and trip
+        # :meth:`update_usage` downstream.
+        self._transpose_invalid = self._transpose is None
         return tensors[3:]
 
     def get_data_tensors(self, rowwise_data: bool = True, columnwise_data: bool = True):
@@ -316,7 +337,18 @@ class Float8TensorStorage(QuantizedTensorStorage):
                 }
             )
         out = cls(**kwargs)
-        out._transpose_invalid = meta["transpose_invalid"]
+        # ``__new__`` already sets ``_transpose_invalid = (data_transpose
+        # is None)``, which is exactly the post-restoration semantic we
+        # want under :mod:`torch.compile`: a transpose buffer that the
+        # producer chose to ship through the trace was valid at flatten
+        # time (forward never emits stale transposes onto saved
+        # tensors), so the unflattened storage must treat it as valid.
+        # Trusting ``meta["transpose_invalid"]`` instead would re-pin the
+        # stale ``True`` that Dynamo embeds into the metadata constant
+        # because it cannot follow the in-place
+        # :meth:`restore_from_saved` write through ``ctx.tensor_objects``
+        # and would then fail the :meth:`update_usage`
+        # ``not has_data_transpose`` guard in backward.
         return out
 
     def _create_transpose(self):

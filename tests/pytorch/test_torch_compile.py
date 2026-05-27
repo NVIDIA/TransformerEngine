@@ -402,3 +402,50 @@ def test_te_linear_compile_with_quantized_fp8_weight():
         f"Float8Tensor weight.grad shape {tuple(model.weight.grad.shape)} != "
         f"weight shape {tuple(model.weight.shape)}"
     )
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_te_linear_compile_with_fp8_output():
+    """torch.compile of ``te.Linear(..., fp8_output=True)``: forward returns
+    a :class:`Float8Tensor`.
+
+    Exercises the output-rewrap path in
+    :mod:`transformer_engine.pytorch.dynamo`: the first user output is
+    declared ``Union[torch.Tensor, Float8Tensor]`` in ``output_annotations``,
+    and when an output quantizer is active the eager + fake paths must
+    rewrap the inner data tensors back into a ``Float8Tensor`` for the
+    user-facing slot.
+
+    Backward through a subclass return value is a known PyTorch
+    ``torch.compile`` limitation (Dynamo / AOT autograd drop the
+    ``grad_fn`` on wrapper-subclass outputs of custom ops, so
+    ``out.sum().backward()`` errors with "element 0 of tensors does
+    not require grad and does not have a grad_fn"). The forward shape
+    + type assertions below are sufficient to exercise the rewrap;
+    grad-routing on FP8 outputs under compile is left as future work.
+    """
+    dtype = torch.bfloat16
+    device = "cuda"
+    fp8_recipe = recipe.Float8CurrentScaling()
+
+    model = te.Linear(64, 32, params_dtype=dtype, device=device)
+    inp = torch.randn(32, 64, dtype=dtype, device=device, requires_grad=True)
+
+    def fn(inp):
+        with te.autocast(recipe=fp8_recipe):
+            return model(inp, fp8_output=True)
+
+    torch._dynamo.reset()
+    compiled = torch.compile(fn, fullgraph=True)
+
+    out = compiled(inp)
+    assert isinstance(out, te.Float8Tensor), (
+        f"expected Float8Tensor output, got {type(out).__name__}"
+    )
+    assert out.shape == (32, 32)
+    # Dequantising outside the compiled region exercises the
+    # ``Float8Tensor`` machinery (scale + data + dtype all wired up
+    # by the rewrap) on the value returned from the compiled fn.
+    deq = out.dequantize()
+    assert deq.shape == (32, 32)
+    assert deq.dtype == dtype

@@ -4,7 +4,7 @@
 
 """Tensor class with FP8 data"""
 from __future__ import annotations
-from typing import Any, Optional, Tuple, Iterable, Union
+from typing import Any, List, Optional, Tuple, Iterable, Union
 import warnings
 import torch
 from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
@@ -26,6 +26,7 @@ from ..quantized_tensor import (
 )
 from ._quantization_helpers import _IdentityFunc
 from ..constants import canonicalize_te_dtype, dist_group_type
+from ..fp8_dtype import FP8DType, from_tex, to_tex
 
 aten = torch.ops.aten
 
@@ -41,6 +42,182 @@ _ops_to_preserve_subclass_in_fsdp2 = {
     torch.ops.aten.split.Tensor,
     torch.ops.aten.clone.default,
 }
+
+
+# --------------------------------------------------------------------------- #
+# torch.compile output-layout metadata helpers
+# --------------------------------------------------------------------------- #
+#
+# These helpers produce the static (inner-names + meta-dict) and
+# storage-meta layouts that the dynamo integration layer needs to
+# reassemble a :class:`Float8Tensor` / :class:`Float8TensorStorage`
+# from the flat ``Tensor[]`` return of a TE custom op, without
+# allocating a fake prototype tensor inside a traced region.
+#
+# Shared between :class:`Float8Quantizer` and
+# :class:`Float8CurrentScalingQuantizer` because both produce identical
+# ``Float8Tensor`` / ``Float8TensorStorage`` layouts (rowwise / columnwise /
+# scale-inv inner tensors); the per-quantizer ``create_metadata`` /
+# ``create_storage_metadata`` methods delegate here.
+
+
+def _float8_create_subclass_metadata(
+    quantizer: "Quantizer",
+    *,
+    fake_dtype: torch.dtype,
+    requires_grad: bool = False,
+) -> Tuple[Tuple[str, ...], dict]:
+    """Return ``(inner_names, meta)`` for :meth:`Float8Tensor.__tensor_unflatten__`.
+
+    ``inner_names`` reflects the rowwise / columnwise usage flags of the
+    quantizer (``_data`` and/or ``_transpose``, plus always ``_scale_inv``).
+    ``meta`` carries the static, Dynamo-friendly attributes
+    :class:`Float8Tensor`'s constructor needs:
+
+    * ``_fp8_dtype`` -- :class:`FP8DType` (an :class:`IntEnum`,
+      proxies as a constant for Dynamo; bridges back to ``tex.DType``
+      via :func:`to_tex` on the kernel side).
+    * ``_fake_dtype`` -- caller-supplied torch dtype.
+    * ``_quantizer_snapshot`` -- always ``None`` on this path. Re-using
+      the snapshot reconstruction (which builds a fresh quantizer
+      inside :meth:`Float8Tensor.__tensor_unflatten__`) would force
+      Dynamo to trace a quantizer constructor call, which routinely
+      trips ``UserDefinedObjectVariable(Float8...Quantizer)``.
+      ``quantizer=None`` keeps the wrapper construction within Dynamo's
+      proxyable surface; user code that needs the live quantizer
+      sources it from outside the compiled region.
+    * ``_requires_grad`` -- caller-supplied flag.
+    """
+    inner_names: List[str] = []
+    if quantizer.rowwise_usage:
+        inner_names.append("_data")
+    inner_names.append("_scale_inv")
+    if quantizer.columnwise_usage:
+        inner_names.append("_transpose")
+    meta = {
+        "_fp8_dtype": from_tex(quantizer.dtype),
+        "_fake_dtype": fake_dtype,
+        "_quantizer_snapshot": None,
+        "_requires_grad": requires_grad,
+    }
+    return tuple(inner_names), meta
+
+
+def _float8_create_storage_metadata(
+    quantizer: "Quantizer",
+    *,
+    shape: Iterable[int],
+    fake_dtype: torch.dtype,
+    device: Optional[torch.device] = None,
+    requires_grad: bool = False,
+    as_tensor: bool = False,
+):
+    """Return ``(cls, meta, process_group, tensor_count)`` suitable
+    for use as the ``("storage", ...)`` payload of a Dynamo output
+    spec; the dynamo layer hands the trailing
+    ``(meta, process_group, tensors[: tensor_count])`` triple to
+    :meth:`Float8TensorStorage._torch_compile_do_unflatten` for
+    reconstruction.
+
+    Companion of :func:`_float8_create_subclass_metadata` for the
+    pure-storage layout (used today for the FP8 weight workspace
+    returned alongside ``Linear`` 's primary output). ``meta`` is an
+    :class:`OpaqueSimpleMetadata` carrying:
+
+    * the storage layout flags (``has_data``, ``has_transpose``,
+      ``has_scale_inv``) derived from the quantizer's rowwise /
+      columnwise usage,
+    * ``fp8_dtype`` (raw ``tex.DType`` -- the storage path does not
+      cross a Dynamo subclass-constructor boundary, so we can keep
+      the native enum here),
+    * ``fake_dtype`` / ``shape`` / ``device`` / ``requires_grad``
+      describing the higher-precision view of the storage,
+    * ``quantizer_meta`` -- ``None`` for the same reason as in
+      :func:`_float8_create_subclass_metadata`.
+
+    ``tensor_count`` is the number of flat inner tensors the storage
+    will consume from the op's ``Tensor[]`` return (``_data``,
+    ``_transpose``, ``_scale_inv``, in that order, only those whose
+    ``has_*`` flag is ``True``). The dynamo layer uses it to slice the
+    flat return; the storage's :meth:`_torch_compile_do_unflatten`
+    reassembles them via the same ``has_*`` flags.
+    """
+    if device is None:
+        device = torch.device("cuda")
+    shape = torch.Size(shape)
+    has_data = bool(quantizer.rowwise_usage)
+    has_transpose = bool(quantizer.columnwise_usage)
+    has_scale_inv = True
+    tensor_count = int(has_data) + int(has_transpose) + int(has_scale_inv)
+    from ..dynamo import OpaqueSimpleMetadata  # pylint: disable=import-outside-toplevel
+
+    meta = OpaqueSimpleMetadata(
+        {
+            "_qstorage_cls": "Float8TensorStorage",
+            "is_tensor": as_tensor,
+            "shape": shape if as_tensor else None,
+            "requires_grad": requires_grad if as_tensor else False,
+            "device": device if as_tensor else None,
+            "fp8_dtype": quantizer.dtype,
+            "fake_dtype": fake_dtype,
+            # ``Float8TensorStorage._torch_compile_do_unflatten`` skips
+            # the transpose-validity check when reconstructing; we
+            # publish ``False`` (valid transpose) here since a
+            # freshly-quantized storage with the configured usage
+            # always has up-to-date inner buffers.
+            "transpose_invalid": not has_transpose,
+            "has_data": has_data,
+            "has_transpose": has_transpose,
+            "has_scale_inv": has_scale_inv,
+            "quantizer_meta": None,
+        }
+    )
+    return Float8TensorStorage, meta, None, tensor_count
+
+
+def _float8_create_save_shell(
+    quantizer: "Quantizer",
+    *,
+    fake_dtype: torch.dtype,
+) -> "Float8TensorStorage":
+    """Return a tensor-free :class:`Float8TensorStorage` shell suitable
+    for use as a ``tensor_objects`` entry in
+    :func:`transformer_engine.pytorch.quantized_tensor.restore_from_saved`.
+
+    The shell is built via ``object.__new__`` + direct attribute writes
+    rather than the regular constructor: that avoids tripping Dynamo
+    on the UDF args (live quantizer instance, ``tex.DType``) that
+    :meth:`Float8TensorStorage.__new__` would otherwise see when this
+    function is called from a Dynamo-traced region (e.g. from
+    ``_linear_forward_output_info``).
+
+    The shell holds no inner tensors -- ``restore_from_saved`` fills
+    them in from the flat saved-tensor list emitted by the op return,
+    matching the fixed three-slot layout (``_data``, ``_transpose``,
+    ``_scale_inv``) of :meth:`Float8TensorStorage.prepare_for_saving`.
+    The ``_quantizer`` slot is intentionally left ``None``; user code
+    inside the compiled region must source the live quantizer from
+    outside.
+    """
+    shell = object.__new__(Float8TensorStorage)
+    shell._dtype = fake_dtype
+    shell._data = None
+    shell._transpose = None
+    shell._scale_inv = None
+    shell._fp8_dtype = quantizer.dtype
+    shell._quantizer = None
+    # ``_transpose_invalid`` flags a transpose buffer that exists but
+    # whose contents are stale. Saved-for-backward storages always
+    # come from the forward after the quantizer has filled in the
+    # transpose (when it was requested), so the saved transpose -- if
+    # present at all -- is valid. Initialising to ``False`` keeps
+    # ``has_data_transpose`` true whenever ``_transpose`` ends up
+    # non-``None`` after :meth:`restore_from_saved` (which itself only
+    # writes ``_transpose`` and leaves this flag alone). The
+    # transpose-None case is unaffected since ``has_data_transpose``
+    # ANDs in the ``_transpose is not None`` check.
+    shell._transpose_invalid = False
+    return shell
 
 
 class Float8Quantizer(Quantizer):
@@ -245,6 +422,46 @@ class Float8Quantizer(Quantizer):
         """
         return True
 
+    def create_metadata(
+        self,
+        *,
+        fake_dtype: torch.dtype,
+        requires_grad: bool = False,
+    ) -> Tuple[Tuple[str, ...], dict]:
+        # pylint: disable=missing-function-docstring
+        return _float8_create_subclass_metadata(
+            self,
+            fake_dtype=fake_dtype,
+            requires_grad=requires_grad,
+        )
+
+    def create_storage_metadata(
+        self,
+        *,
+        shape: Iterable[int],
+        fake_dtype: torch.dtype,
+        device: Optional[torch.device] = None,
+        requires_grad: bool = False,
+        as_tensor: bool = False,
+    ):
+        # pylint: disable=missing-function-docstring
+        return _float8_create_storage_metadata(
+            self,
+            shape=shape,
+            fake_dtype=fake_dtype,
+            device=device,
+            requires_grad=requires_grad,
+            as_tensor=as_tensor,
+        )
+
+    def create_save_shell(
+        self,
+        *,
+        fake_dtype: torch.dtype,
+    ) -> Float8TensorStorage:
+        # pylint: disable=missing-function-docstring
+        return _float8_create_save_shell(self, fake_dtype=fake_dtype)
+
     def _flatten(self):
         from ..dynamo import OpaqueSimpleMetadata
 
@@ -420,7 +637,6 @@ class Float8CurrentScalingQuantizer(Quantizer):
             )
         scale_inv = torch.empty(1, dtype=torch.float32, device=device, pin_memory=pin_memory)
 
-        # See ``Float8Quantizer.make_empty`` for the rationale.
         if self.internal:
             return Float8TensorStorage(
                 data=data,
@@ -525,6 +741,46 @@ class Float8CurrentScalingQuantizer(Quantizer):
         """
         return True
 
+    def create_metadata(
+        self,
+        *,
+        fake_dtype: torch.dtype,
+        requires_grad: bool = False,
+    ) -> Tuple[Tuple[str, ...], dict]:
+        # pylint: disable=missing-function-docstring
+        return _float8_create_subclass_metadata(
+            self,
+            fake_dtype=fake_dtype,
+            requires_grad=requires_grad,
+        )
+
+    def create_storage_metadata(
+        self,
+        *,
+        shape: Iterable[int],
+        fake_dtype: torch.dtype,
+        device: Optional[torch.device] = None,
+        requires_grad: bool = False,
+        as_tensor: bool = False,
+    ):
+        # pylint: disable=missing-function-docstring
+        return _float8_create_storage_metadata(
+            self,
+            shape=shape,
+            fake_dtype=fake_dtype,
+            device=device,
+            requires_grad=requires_grad,
+            as_tensor=as_tensor,
+        )
+
+    def create_save_shell(
+        self,
+        *,
+        fake_dtype: torch.dtype,
+    ) -> Float8TensorStorage:
+        # pylint: disable=missing-function-docstring
+        return _float8_create_save_shell(self, fake_dtype=fake_dtype)
+
     def _flatten(self):
         from ..dynamo import OpaqueSimpleMetadata
 
@@ -592,6 +848,13 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
 
     """
 
+    # Upper bound on the number of inner tensors produced by
+    # :meth:`__tensor_flatten__`. Used by the wide-output layout in
+    # :mod:`transformer_engine.pytorch.dynamo` to reserve enough slots in
+    # the custom-op ``Tensor[]`` return for any subclass-shaped output:
+    # data, scale_inv, transpose.
+    _TORCH_COMPILE_MAX_INNER_TENSORS = 3
+
     def __repr__(self, *, tensor_contents=None):
         # ``__repr__`` is on hot diagnostic paths (Dynamo's
         # ``Dynamo failed to run FX node`` formatter, autograd
@@ -658,12 +921,22 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         inner_tensors: dict, meta: dict, outer_size, outer_stride
     ) -> "Float8Tensor":
         quantizer = _quantizer_from_subclass_snapshot(meta.get("_quantizer_snapshot"))
+        fp8_dtype = meta["_fp8_dtype"]
+        if isinstance(fp8_dtype, FP8DType):
+            # ``meta`` produced by :func:`_float8_create_subclass_metadata`
+            # carries the Dynamo-friendly :class:`FP8DType` enum (an
+            # ``IntEnum`` so it proxies as a constant during tracing).
+            # Pybind-bound TE kernels (e.g. ``tex.dequantize``) accept only
+            # the native ``transformer_engine_torch.DType``, so bridge back
+            # here. The eager ``__tensor_flatten__`` path stores the native
+            # enum directly and skips this conversion.
+            fp8_dtype = to_tex(fp8_dtype)
         return Float8Tensor(
             shape=outer_size,
             dtype=meta["_fake_dtype"],
             data=inner_tensors.get("_data"),
             fp8_scale_inv=inner_tensors.get("_scale_inv"),
-            fp8_dtype=meta["_fp8_dtype"],
+            fp8_dtype=fp8_dtype,
             data_transpose=inner_tensors.get("_transpose"),
             quantizer=quantizer,
             requires_grad=meta.get("_requires_grad", False),

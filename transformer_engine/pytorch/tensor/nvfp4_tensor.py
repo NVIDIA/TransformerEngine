@@ -415,6 +415,91 @@ class NVFP4Quantizer(Quantizer):
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         return NVFP4BlockScaling
 
+    def create_storage_metadata(
+        self,
+        *,
+        shape: Iterable[int],
+        fake_dtype: torch.dtype,
+        device: Optional[torch.device] = None,
+        requires_grad: bool = False,
+        as_tensor: bool = False,
+    ):
+        """Return ``(cls, meta, process_group, tensor_count)``
+        suitable as the ``("storage", ...)`` payload of a Dynamo
+        output spec; the dynamo layer hands the trailing
+        ``(meta, process_group, tensors[: tensor_count])`` triple to
+        :meth:`NVFP4TensorStorage._torch_compile_do_unflatten` for
+        reconstruction.
+
+        See :meth:`Float8Quantizer.create_storage_metadata` for the
+        general contract. This variant adds the FP4-specific
+        ``with_gemm_swizzled_scales`` / ``row_scaled_nvfp4`` flags,
+        and the two amax-row/columnwise inner tensors that come with
+        the NVFP4 storage layout.
+        """
+        if device is None:
+            device = torch.device("cuda")
+        shape = torch.Size(shape)
+        has_rowwise = bool(self.rowwise_usage)
+        has_columnwise = bool(self.columnwise_usage)
+        # Counts: rowwise contributes data + scale_inv + amax; same for
+        # columnwise. Each pair toggles on its respective usage flag.
+        tensor_count = (
+            int(has_rowwise) * 3 + int(has_columnwise) * 3
+        )
+        from ..dynamo import OpaqueSimpleMetadata  # pylint: disable=import-outside-toplevel
+
+        meta = OpaqueSimpleMetadata(
+            {
+                "_qstorage_cls": "NVFP4TensorStorage",
+                "is_tensor": as_tensor,
+                "shape": shape if as_tensor else None,
+                "requires_grad": requires_grad if as_tensor else False,
+                "device": device if as_tensor else None,
+                "fp4_dtype": self.dtype,
+                "fake_dtype": fake_dtype,
+                "with_gemm_swizzled_scales": self.optimize_for_gemm,
+                "row_scaled_nvfp4": self.row_scaled_nvfp4,
+                "has_rowwise_data": has_rowwise,
+                "has_rowwise_scale_inv": has_rowwise,
+                "has_columnwise_data": has_columnwise,
+                "has_columnwise_scale_inv": has_columnwise,
+                "has_amax_rowwise": has_rowwise,
+                "has_amax_columnwise": has_columnwise,
+                "quantizer_meta": None,
+            }
+        )
+        return NVFP4TensorStorage, meta, None, tensor_count
+
+    def create_save_shell(
+        self,
+        *,
+        fake_dtype: torch.dtype,
+    ) -> NVFP4TensorStorage:
+        """Return a tensor-free :class:`NVFP4TensorStorage` shell for
+        use as a ``tensor_objects`` entry in
+        :func:`transformer_engine.pytorch.quantized_tensor.restore_from_saved`.
+
+        Built via ``object.__new__`` + direct attribute writes for
+        Dynamo traceability. Restores from the fixed six-slot layout
+        emitted by :meth:`NVFP4TensorStorage.prepare_for_saving`
+        (rowwise_data, columnwise_data, rowwise_scale_inv,
+        columnwise_scale_inv, amax_rowwise, amax_columnwise).
+        """
+        shell = object.__new__(NVFP4TensorStorage)
+        shell._dtype = fake_dtype
+        shell._rowwise_data = None
+        shell._columnwise_data = None
+        shell._rowwise_scale_inv = None
+        shell._columnwise_scale_inv = None
+        shell._amax_rowwise = None
+        shell._amax_columnwise = None
+        shell._fp4_dtype = self.dtype
+        shell._quantizer = None
+        shell._with_gemm_swizzled_scales = self.optimize_for_gemm
+        shell._row_scaled_nvfp4 = self.row_scaled_nvfp4
+        return shell
+
     def _flatten(self):
         from ..dynamo import OpaqueSimpleMetadata
 

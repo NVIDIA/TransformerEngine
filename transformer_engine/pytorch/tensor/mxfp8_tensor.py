@@ -255,6 +255,95 @@ class MXFP8Quantizer(Quantizer):
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         return MXFP8BlockScaling
 
+    def create_storage_metadata(
+        self,
+        *,
+        shape: Iterable[int],
+        fake_dtype: torch.dtype,
+        device: Optional[torch.device] = None,
+        requires_grad: bool = False,
+        as_tensor: bool = False,
+    ):
+        """Return ``(cls, meta, process_group, tensor_count)``
+        suitable as the ``("storage", ...)`` payload of a Dynamo
+        output spec; the dynamo layer hands the trailing
+        ``(meta, process_group, tensors[: tensor_count])`` triple to
+        :meth:`MXFP8TensorStorage._torch_compile_do_unflatten` for
+        reconstruction.
+
+        Mirrors what
+        :meth:`MXFP8TensorStorage._torch_compile_flatten` would emit
+        for a freshly-quantized storage configured with this
+        quantizer's rowwise / columnwise usage. ``tensor_count`` is
+        the variable-length count of present inner tensors
+        (rowwise_data, rowwise_scale_inv, columnwise_data,
+        columnwise_scale_inv, only those whose ``has_*`` flag is
+        true). The dynamo layer uses it to slice the op's flat
+        ``Tensor[]`` return; the storage's
+        :meth:`_torch_compile_do_unflatten` reassembles them via the
+        same ``has_*`` flags.
+
+        ``quantizer_meta`` is set to ``None`` so the reconstructed
+        storage has ``_quantizer=None`` -- keeping the constructor
+        traceable by Dynamo, mirroring the behaviour of
+        :class:`Float8Quantizer.create_storage_metadata`.
+        """
+        if device is None:
+            device = torch.device("cuda")
+        shape = torch.Size(shape)
+        has_rowwise = bool(self.rowwise_usage)
+        has_columnwise = bool(self.columnwise_usage)
+        tensor_count = (
+            int(has_rowwise) * 2  # rowwise_data + rowwise_scale_inv
+            + int(has_columnwise) * 2  # columnwise_data + columnwise_scale_inv
+        )
+        from ..dynamo import OpaqueSimpleMetadata  # pylint: disable=import-outside-toplevel
+
+        meta = OpaqueSimpleMetadata(
+            {
+                "_qstorage_cls": "MXFP8TensorStorage",
+                "is_tensor": as_tensor,
+                "shape": shape if as_tensor else None,
+                "requires_grad": requires_grad if as_tensor else False,
+                "device": device if as_tensor else None,
+                "fp8_dtype": self.dtype,
+                "fake_dtype": fake_dtype,
+                "with_gemm_swizzled_scales": self.optimize_for_gemm,
+                "has_rowwise_data": has_rowwise,
+                "has_rowwise_scale_inv": has_rowwise,
+                "has_columnwise_data": has_columnwise,
+                "has_columnwise_scale_inv": has_columnwise,
+                "quantizer_meta": None,
+            }
+        )
+        return MXFP8TensorStorage, meta, None, tensor_count
+
+    def create_save_shell(
+        self,
+        *,
+        fake_dtype: torch.dtype,
+    ) -> MXFP8TensorStorage:
+        """Return a tensor-free :class:`MXFP8TensorStorage` shell for
+        use as a ``tensor_objects`` entry in
+        :func:`transformer_engine.pytorch.quantized_tensor.restore_from_saved`.
+
+        Built via ``object.__new__`` + direct attribute writes for
+        Dynamo traceability. Mirrors
+        :meth:`Float8Quantizer.create_save_shell` -- see its docstring
+        for rationale. Restores from the fixed four-slot layout
+        emitted by :meth:`MXFP8TensorStorage.prepare_for_saving`.
+        """
+        shell = object.__new__(MXFP8TensorStorage)
+        shell._dtype = fake_dtype
+        shell._rowwise_data = None
+        shell._columnwise_data = None
+        shell._rowwise_scale_inv = None
+        shell._columnwise_scale_inv = None
+        shell._fp8_dtype = self.dtype
+        shell._quantizer = None
+        shell._with_gemm_swizzled_scales = self.optimize_for_gemm
+        return shell
+
     def _flatten(self):
         from ..dynamo import OpaqueSimpleMetadata
 

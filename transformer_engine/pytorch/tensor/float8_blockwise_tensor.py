@@ -281,6 +281,80 @@ class Float8BlockQuantizer(Quantizer):
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         return Float8BlockScaling
 
+    def create_storage_metadata(
+        self,
+        *,
+        shape: Iterable[int],
+        fake_dtype: torch.dtype,
+        device: Optional[torch.device] = None,
+        requires_grad: bool = False,
+        as_tensor: bool = False,
+    ):
+        """Return ``(cls, meta, process_group, tensor_count)``
+        suitable as the ``("storage", ...)`` payload of a Dynamo
+        output spec; the dynamo layer hands the trailing
+        ``(meta, process_group, tensors[: tensor_count])`` triple to
+        :meth:`Float8BlockwiseQTensorStorage._torch_compile_do_unflatten`
+        for reconstruction.
+
+        Same contract as :meth:`Float8Quantizer.create_storage_metadata`
+        / :meth:`MXFP8Quantizer.create_storage_metadata` -- see those
+        docstrings for the broader rationale; this variant carries the
+        extra ``is_2D_scaled`` flag that the blockwise storage needs
+        on reconstruction.
+        """
+        if device is None:
+            device = torch.device("cuda")
+        shape = torch.Size(shape)
+        has_rowwise = bool(self.rowwise_usage)
+        has_columnwise = bool(self.columnwise_usage)
+        tensor_count = int(has_rowwise) * 2 + int(has_columnwise) * 2
+        from ..dynamo import OpaqueSimpleMetadata  # pylint: disable=import-outside-toplevel
+
+        meta = OpaqueSimpleMetadata(
+            {
+                "_qstorage_cls": "Float8BlockwiseQTensorStorage",
+                "is_tensor": as_tensor,
+                "shape": shape if as_tensor else None,
+                "requires_grad": requires_grad if as_tensor else False,
+                "device": device if as_tensor else None,
+                "fp8_dtype": self.dtype,
+                "fake_dtype": fake_dtype,
+                "is_2D_scaled": self.block_scaling_dim == 2,
+                "has_rowwise_data": has_rowwise,
+                "has_rowwise_scale_inv": has_rowwise,
+                "has_columnwise_data": has_columnwise,
+                "has_columnwise_scale_inv": has_columnwise,
+                "quantizer_meta": None,
+            }
+        )
+        return Float8BlockwiseQTensorStorage, meta, None, tensor_count
+
+    def create_save_shell(
+        self,
+        *,
+        fake_dtype: torch.dtype,
+    ) -> Float8BlockwiseQTensorStorage:
+        """Return a tensor-free :class:`Float8BlockwiseQTensorStorage`
+        shell suitable for use as a ``tensor_objects`` entry in
+        :func:`transformer_engine.pytorch.quantized_tensor.restore_from_saved`.
+
+        Built via ``object.__new__`` + direct attribute writes for
+        Dynamo traceability. Mirrors
+        :meth:`Float8Quantizer.create_save_shell` -- see its docstring
+        for rationale.
+        """
+        shell = object.__new__(Float8BlockwiseQTensorStorage)
+        shell._dtype = fake_dtype
+        shell._rowwise_data = None
+        shell._columnwise_data = None
+        shell._rowwise_scale_inv = None
+        shell._columnwise_scale_inv = None
+        shell._fp8_dtype = self.dtype
+        shell._quantizer = None
+        shell._is_2D_scaled = self.block_scaling_dim == 2
+        return shell
+
     def _flatten(self):
         from ..dynamo import OpaqueSimpleMetadata
 
