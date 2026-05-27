@@ -52,7 +52,7 @@ import math
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import partial
-from typing import Any, Callable, NewType, Optional, Tuple, Union
+from typing import Any, Callable, NamedTuple, NewType, Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -146,6 +146,45 @@ class PermutationBackend(Enum):
 
     PURE_JAX = "pure_jax"
     TRITON = "triton"
+
+
+# =============================================================================
+# Dispatch-state records (carried _dispatch -> _combine / *_bwd)
+# =============================================================================
+#
+# Two NamedTuples (one per permutation backend) so we get type
+# discrimination at the consumer side via ``isinstance``. The backend-
+# specific residuals are required fields; the EP-only residuals are
+# Optional and are populated only when the run is EP-active. Each field
+# is either an ``ndarray`` or ``None`` -- nothing static, since these
+# values cross the shard_map pytree boundary and would otherwise be
+# coerced into JitTracers.
+
+
+class _PureJaxDispatchState(NamedTuple):
+    """Residuals saved by :func:`_dispatch` on the PURE_JAX path."""
+
+    group_sizes: jnp.ndarray
+    sorted_indices: jnp.ndarray
+    routing_weights: jnp.ndarray
+    # EP-only:
+    all_shards_tokens_per_expert: Optional[jnp.ndarray] = None
+    local_perm_row_id_map: Optional[jnp.ndarray] = None
+
+
+class _TritonDispatchState(NamedTuple):
+    """Residuals saved by :func:`_dispatch` on the TRITON path."""
+
+    group_sizes: jnp.ndarray
+    row_id_map: jnp.ndarray
+    pad_offsets: Optional[jnp.ndarray]  # populated only when align_size > 0
+    merging_probs: jnp.ndarray
+    # EP-only:
+    all_shards_tokens_per_expert: Optional[jnp.ndarray] = None
+    local_perm_row_id_map: Optional[jnp.ndarray] = None
+
+
+_DispatchState = Union[_PureJaxDispatchState, _TritonDispatchState]
 
 
 # =============================================================================
@@ -346,7 +385,14 @@ def _dispatch(
     """
     num_tokens, hidden = inputs_2d.shape
     topk = num_experts_per_tok
-    state: dict = {}
+
+    # Backend-specific residuals collected here, then packaged into the
+    # appropriate _*DispatchState below.
+    sorted_indices = None
+    routing_weights_kept = None
+    row_id_map = None
+    pad_offsets = None
+    merging_probs = None
 
     # ------------------------------------------------------------------
     # Step 1: global permute (every shard routes its own tokens over the
@@ -364,13 +410,13 @@ def _dispatch(
             align_size=align_size,
         )
         # NOTE: ``perm_state.num_real_tokens`` and ``perm_state.padding_size``
-        # are compile-time Python ints; intentionally NOT stored in
-        # ``state`` (would be coerced to JitTracer 0-d arrays under
+        # are compile-time Python ints; intentionally NOT stored in the
+        # returned state (would be coerced to JitTracer 0-d arrays under
         # the EP shard_map's pytree flatten). Recompute via
         # ``_compute_static_shape_info`` in the bwd / EP-combine
         # call sites that need them.
-        state["sorted_indices"] = perm_state.sorted_indices
-        state["routing_weights"] = routing_weights
+        sorted_indices = perm_state.sorted_indices
+        routing_weights_kept = routing_weights
     else:
         # TRITON backend -- inline the underlying primitive sequence
         # (mirrors ``_token_dispatch_fwd_rule`` but exposes the residuals
@@ -412,14 +458,28 @@ def _dispatch(
             )
             pad_offsets = None
             group_sizes = tokens_per_expert
-        state["row_id_map"] = row_id_map
-        state["pad_offsets"] = pad_offsets
-        state["merging_probs"] = sparse_probs
+        merging_probs = sparse_probs
 
-    state["group_sizes"] = group_sizes
+    def _build_state(group_sizes_val, ep_all=None, ep_local=None):
+        if backend is PermutationBackend.PURE_JAX:
+            return _PureJaxDispatchState(
+                group_sizes=group_sizes_val,
+                sorted_indices=sorted_indices,
+                routing_weights=routing_weights_kept,
+                all_shards_tokens_per_expert=ep_all,
+                local_perm_row_id_map=ep_local,
+            )
+        return _TritonDispatchState(
+            group_sizes=group_sizes_val,
+            row_id_map=row_id_map,
+            pad_offsets=pad_offsets,
+            merging_probs=merging_probs,
+            all_shards_tokens_per_expert=ep_all,
+            local_perm_row_id_map=ep_local,
+        )
 
     if not ep_active:
-        return sorted_inputs, state
+        return sorted_inputs, _build_state(group_sizes)
 
     # ------------------------------------------------------------------
     # Step 2 (EP only): all_gather per-expert counts so every shard knows
@@ -480,25 +540,25 @@ def _dispatch(
     )
     local_group_sizes = jnp.sum(local_expert_columns, axis=0)
 
-    state["all_shards_tokens_per_expert"] = all_shards_tokens_per_expert
-    state["local_perm_row_id_map"] = local_perm_row_id_map
     # NOTE: pre_a2a_buffer_shape and post_a2a_buffer_shape are compile-
-    # time int tuples; intentionally NOT stored in ``state`` (would be
-    # coerced to JitTracer 0-d arrays under the EP shard_map's pytree
-    # flatten). Recompute via ``_compute_static_shape_info`` in the
-    # bwd call sites that need them.
-    # For EP, we override ``group_sizes`` to be the per-local-expert
-    # counts (the FFN runs over E_local groups, not E). The original
-    # global ``group_sizes`` lives inside ``all_shards_tokens_per_expert``
-    # if anyone needs it for diagnostics.
-    state["group_sizes"] = local_group_sizes
-
-    return sorted_x, state
+    # time int tuples; intentionally NOT stored in the returned state
+    # (would be coerced to JitTracer 0-d arrays under the EP shard_map's
+    # pytree flatten). Recompute via ``_compute_static_shape_info`` in
+    # the bwd call sites that need them. For EP, ``group_sizes`` here is
+    # the per-local-expert count (the FFN runs over E_local groups, not
+    # E). The global ``group_sizes`` lives inside
+    # ``all_shards_tokens_per_expert`` if anyone needs it for
+    # diagnostics.
+    return sorted_x, _build_state(
+        local_group_sizes,
+        ep_all=all_shards_tokens_per_expert,
+        ep_local=local_perm_row_id_map,
+    )
 
 
 def _combine(
     expert_outputs: jnp.ndarray,
-    state: dict,
+    state: _DispatchState,
     *,
     backend: PermutationBackend,
     ep_active: bool,
@@ -526,7 +586,7 @@ def _combine(
         recv_buffer_rows, hidden = expert_outputs.shape
         x_send_back, _ = sort_chunks_by_map(
             expert_outputs,
-            state["local_perm_row_id_map"],
+            state.local_perm_row_id_map,
             None,
             recv_buffer_rows,
             hidden,
@@ -534,7 +594,7 @@ def _combine(
         )
         # Step 2 (EP): reverse ragged_all_to_all.
         in_off_r, send_sz_r, out_off_r, recv_sz_r = compute_reverse_ragged_all_to_all_params(
-            state["all_shards_tokens_per_expert"], shard_id, num_ep
+            state.all_shards_tokens_per_expert, shard_id, num_ep
         )
         send_back_buf = jnp.zeros(pre_a2a_buffer_shape, dtype=expert_outputs.dtype)
         expert_outputs = jax.lax.ragged_all_to_all(
@@ -552,29 +612,29 @@ def _combine(
         # Reuse the reference pure-jax implementation; it has no
         # custom_vjp on its outer surface so we can call it freely.
         perm_state = PureJaxPermState(
-            sorted_indices=state["sorted_indices"],
+            sorted_indices=state.sorted_indices,
             num_real_tokens=num_real_tokens,
             padding_size=padding_size,
         )
         return pure_jax_token_combine(
             expert_outputs,
             perm_state,
-            state["routing_weights"],
+            state.routing_weights,
             num_experts_per_tok=num_experts_per_tok,
             batch_size=batch_size,
             sequence_length=sequence_length,
         )
     # TRITON
-    num_tokens = state["row_id_map"].shape[0]
-    num_experts = (state["row_id_map"].shape[1] - 1) // 2
+    num_tokens = state.row_id_map.shape[0]
+    num_experts = (state.row_id_map.shape[1] - 1) // 2
     hidden = expert_outputs.shape[-1]
-    if state["pad_offsets"] is not None:
+    if state.pad_offsets is not None:
         out_2d, _ = unpermute_with_mask_map_and_unpad(
             expert_outputs,
-            state["row_id_map"],
-            state["merging_probs"],
+            state.row_id_map,
+            state.merging_probs,
             None,
-            state["pad_offsets"],
+            state.pad_offsets,
             num_tokens,
             num_experts,
             hidden,
@@ -582,8 +642,8 @@ def _combine(
     else:
         out_2d, _ = unpermute_with_mask_map(
             expert_outputs,
-            state["row_id_map"],
-            state["merging_probs"],
+            state.row_id_map,
+            state.merging_probs,
             None,
             num_tokens,
             num_experts,
@@ -594,7 +654,7 @@ def _combine(
 
 def _combine_bwd(
     d_output: jnp.ndarray,
-    state: dict,
+    state: _DispatchState,
     expert_outputs: jnp.ndarray,
     *,
     backend: PermutationBackend,
@@ -632,7 +692,7 @@ def _combine_bwd(
         #   if pad: unsort = unsort[:num_real]
         #   reshape -> einsum BKE,BK -> BE -> reshape to BSE
         # Hand-derive the bwd in plain JAX (no custom_vjp involved):
-        unsort_indices = jnp.argsort(state["sorted_indices"])
+        unsort_indices = jnp.argsort(state.sorted_indices)
         topk = num_experts_per_tok
         num_real = num_real_tokens
         padding = padding_size
@@ -646,14 +706,14 @@ def _combine_bwd(
         # output[B, E] = sum_K intermediate[B, K, E] * weights[B, K]
         # d_intermediate[B, K, E] = d_output[B, E] * weights[B, K]
         # d_weights[B, K]         = sum_E d_output[B, E] * intermediate[B, K, E]
-        rw = state["routing_weights"].reshape(-1, topk)
+        rw = state.routing_weights.reshape(-1, topk)
         intermediate_3d = unsort_intermediate.reshape(rw.shape[0], topk, -1)
         rw_cast = rw.astype(intermediate_3d.dtype)
         d_intermediate_3d = jnp.einsum("BE,BK -> BKE", d_output_2d, rw_cast)
         d_routing_weights = jnp.einsum("BE,BKE -> BK", d_output_2d, intermediate_3d).astype(
-            state["routing_weights"].dtype
+            state.routing_weights.dtype
         )
-        d_routing_weights = d_routing_weights.reshape(state["routing_weights"].shape)
+        d_routing_weights = d_routing_weights.reshape(state.routing_weights.shape)
         d_unsort_intermediate = d_intermediate_3d.reshape(num_real, -1)
         # Pad back with zeros if the fwd stripped padding.
         if padding > 0:
@@ -672,20 +732,20 @@ def _combine_bwd(
         #   d_sorted = scatter d_unsort via argsort(sorted_indices)
         #            = d_unsort[sorted_indices]  (gather by original sorted_indices,
         #              which is the inverse of argsort(sorted_indices)).
-        d_expert_outputs_global = d_unsort_intermediate[state["sorted_indices"]]
+        d_expert_outputs_global = d_unsort_intermediate[state.sorted_indices]
     else:
         # TRITON combine bwd: requires fwd_input (expert_outputs).
-        num_tokens = state["row_id_map"].shape[0]
-        n_experts = (state["row_id_map"].shape[1] - 1) // 2
+        num_tokens = state.row_id_map.shape[0]
+        n_experts = (state.row_id_map.shape[1] - 1) // 2
         hidden = d_output_2d.shape[-1]
         num_out_tokens = expert_outputs.shape[0]
-        if state["pad_offsets"] is not None:
+        if state.pad_offsets is not None:
             d_expert_outputs_global, d_merging_probs = unpermute_bwd_with_merging_probs_and_unpad(
                 d_output_2d,
-                state["row_id_map"],
+                state.row_id_map,
                 expert_outputs,
-                state["merging_probs"],
-                state["pad_offsets"],
+                state.merging_probs,
+                state.pad_offsets,
                 num_tokens,
                 n_experts,
                 num_out_tokens,
@@ -700,9 +760,9 @@ def _combine_bwd(
         else:
             d_expert_outputs_global, d_merging_probs = unpermute_bwd_with_merging_probs(
                 d_output_2d,
-                state["row_id_map"],
+                state.row_id_map,
                 expert_outputs,
-                state["merging_probs"],
+                state.merging_probs,
                 num_tokens,
                 n_experts,
                 num_out_tokens,
@@ -717,7 +777,7 @@ def _combine_bwd(
     # ragged_all_to_all using the SAME forward parameters (sender /
     # receiver roles swap from the reverse direction back to forward).
     in_off_f, send_sz_f, out_off_f, recv_sz_f = compute_ragged_all_to_all_params(
-        state["all_shards_tokens_per_expert"], shard_id, num_ep
+        state.all_shards_tokens_per_expert, shard_id, num_ep
     )
     recv_buf_for_bwd = jnp.zeros(post_a2a_buffer_shape, dtype=d_expert_outputs_global.dtype)
     d_x_send_back = jax.lax.ragged_all_to_all(
@@ -734,7 +794,7 @@ def _combine_bwd(
     recv_buffer_rows, hidden = d_x_send_back.shape
     d_expert_outputs, _ = sort_chunks_by_map(
         d_x_send_back,
-        state["local_perm_row_id_map"],
+        state.local_perm_row_id_map,
         None,
         recv_buffer_rows,
         hidden,
@@ -745,7 +805,7 @@ def _combine_bwd(
 
 def _dispatch_bwd(
     d_sorted_x: jnp.ndarray,
-    state: dict,
+    state: _DispatchState,
     inputs_2d_shape: Tuple[int, ...],
     *,
     backend: PermutationBackend,
@@ -777,7 +837,7 @@ def _dispatch_bwd(
         recv_buffer_rows, hidden = d_sorted_x.shape
         d_x_recv, _ = sort_chunks_by_map(
             d_sorted_x,
-            state["local_perm_row_id_map"],
+            state.local_perm_row_id_map,
             None,
             recv_buffer_rows,
             hidden,
@@ -786,7 +846,7 @@ def _dispatch_bwd(
         # Step 3 inverse: bwd of forward ragged_a2a is the reverse-direction
         # ragged_a2a using the SAME params with sender/receiver swapped.
         in_off_r, send_sz_r, out_off_r, recv_sz_r = compute_reverse_ragged_all_to_all_params(
-            state["all_shards_tokens_per_expert"], shard_id, num_ep
+            state.all_shards_tokens_per_expert, shard_id, num_ep
         )
         recv_buf_pre = jnp.zeros(pre_a2a_buffer_shape, dtype=d_x_recv.dtype)
         d_sorted_x = jax.lax.ragged_all_to_all(
@@ -808,7 +868,7 @@ def _dispatch_bwd(
         #                   = d_sorted[argsort(sorted_indices)]
         #          d_replicated = d_padded[:num_real]
         #          d_inputs_2d  = d_replicated.reshape(T, topk, H).sum(axis=1)
-        sorted_indices = state["sorted_indices"]
+        sorted_indices = state.sorted_indices
         num_real = num_real_tokens
         padding = padding_size
         topk = num_experts_per_tok
@@ -826,13 +886,13 @@ def _dispatch_bwd(
     # TRITON: bwd is unpermute_with_mask_map[_and_unpad].
     num_tokens = inputs_2d_shape[0]
     hidden = inputs_2d_shape[-1]
-    if state["pad_offsets"] is not None:
+    if state.pad_offsets is not None:
         d_inputs_2d, _ = unpermute_with_mask_map_and_unpad(
             d_sorted_x,
-            state["row_id_map"],
+            state.row_id_map,
             None,
             None,
-            state["pad_offsets"],
+            state.pad_offsets,
             num_tokens,
             num_experts,
             hidden,
@@ -840,7 +900,7 @@ def _dispatch_bwd(
     else:
         d_inputs_2d, _ = unpermute_with_mask_map(
             d_sorted_x,
-            state["row_id_map"],
+            state.row_id_map,
             None,
             None,
             num_tokens,
@@ -1004,7 +1064,7 @@ def _body_fwd(
         recv_buffer_rows=recv_buffer_rows,
         shard_id=shard_id,
     )
-    local_group_sizes = dispatch_state["group_sizes"]
+    local_group_sizes = dispatch_state.group_sizes
 
     # ---------------- Stage 4: per-expert FFN (inlined) ----------------
     q_set_w0, q_set_w1, q_set_wo = quantizer_sets
@@ -1487,25 +1547,35 @@ def _build_dispatch_specs(
     *,
     backend: PermutationBackend,
     ep_active: bool,
-) -> dict:
-    """Build the spec dict for a DispatchState dict returned by
-    :func:`_dispatch` from inside a shard_map. Keys must match what
-    :func:`_dispatch` actually populates for the given (backend, ep_active)."""
-    specs: dict = {"group_sizes": P()}
+    align_size: int,
+) -> _DispatchState:
+    """Build the shard_map ``out_specs`` for the dispatch state.
+
+    Returns a :data:`_DispatchState` (either :class:`_PureJaxDispatchState`
+    or :class:`_TritonDispatchState`) whose fields are
+    :class:`PartitionSpec` placeholders. Optional fields are set to
+    ``P()`` when populated by :func:`_dispatch` and to ``None`` when
+    intentionally omitted, so the spec's pytree structure mirrors the
+    value's structure leaf-for-leaf.
+    """
+    ep_all = P() if ep_active else None
+    ep_local = P() if ep_active else None
     if backend is PermutationBackend.PURE_JAX:
-        specs["sorted_indices"] = P()
-        specs["routing_weights"] = P()
-    else:
-        specs["row_id_map"] = P()
-        specs["pad_offsets"] = P()
-        specs["merging_probs"] = P()
-    if ep_active:
-        specs["all_shards_tokens_per_expert"] = P()
-        specs["local_perm_row_id_map"] = P()
-    # NOTE: per-shard compile-time-constant shape info
-    # (num_real_tokens, padding_size, pre/post_a2a_buffer_shape)
-    # is intentionally NOT in the state dict; see _compute_static_shape_info.
-    return specs
+        return _PureJaxDispatchState(
+            group_sizes=P(),
+            sorted_indices=P(),
+            routing_weights=P(),
+            all_shards_tokens_per_expert=ep_all,
+            local_perm_row_id_map=ep_local,
+        )
+    return _TritonDispatchState(
+        group_sizes=P(),
+        row_id_map=P(),
+        pad_offsets=P() if align_size > 0 else None,
+        merging_probs=P(),
+        all_shards_tokens_per_expert=ep_all,
+        local_perm_row_id_map=ep_local,
+    )
 
 
 def _build_ctx_specs(
@@ -1517,6 +1587,7 @@ def _build_ctx_specs(
     has_bias: bool,
     has_expert_bias: bool,
     aux_loss_enabled: bool,
+    align_size: int,
 ) -> dict:
     """Build the spec dict for the ``ctx`` returned by :func:`_body_fwd`."""
     specs: dict = {
@@ -1526,7 +1597,9 @@ def _build_ctx_specs(
         "logits_2d": P(batch_pspec_axis, None),
         "saved_scores": P(batch_pspec_axis, None),
         "routing_map": P(batch_pspec_axis, None),
-        "dispatch": _build_dispatch_specs(ep_axis, backend=backend, ep_active=ep_active),
+        "dispatch": _build_dispatch_specs(
+            ep_axis, backend=backend, ep_active=ep_active, align_size=align_size
+        ),
         # FFN residuals: the LHS_TRANS / RHS_TRANS variants of
         # grouped_quantize have leading "rows"/"experts" dims that are
         # already shard-local (post-dispatch). Use P(ep_axis,...) on
@@ -1726,6 +1799,7 @@ def _moe_fwd_rule(
         has_bias=has_bias,
         has_expert_bias=has_expert_bias,
         aux_loss_enabled=(aux_loss_coeff > 0.0),
+        align_size=align_size,
     )
 
     _fsdp_sizes: Tuple[int, ...] = tuple(mesh.shape[ax] for ax in data_parallelism_axes)
@@ -1849,6 +1923,7 @@ def _moe_bwd_rule(
         has_bias=has_wi_bias,
         has_expert_bias=has_expert_bias,
         aux_loss_enabled=(aux_loss_coeff > 0.0),
+        align_size=align_size,
     )
     dy_specs = (P(batch_pspec_axis, None, None), P())
     grads_spec = _build_grads_specs(
