@@ -167,8 +167,10 @@ else:
     from flash_attn.cute.interface import (  # pylint: disable=ungrouped-imports,no-name-in-module
         flash_attn_func as flash_attn_func_v4,
         flash_attn_varlen_func as flash_attn_varlen_func_v4,
+        _validate_head_dims as _fa4_validate_head_dims,
     )
 
+    fa_utils.v4_validate_head_dims = _fa4_validate_head_dims
     fa_utils.set_flash_attention_4_params()
 
 # Float8CurrentScaling: fused_attn_bwd takes O in FP8 by default, this flag allows it in F16

@@ -344,12 +344,36 @@ model_configs_fa4_base = {
 @pytest.mark.skipif(
     not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
 )
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_fa4_base])
 @pytest.mark.parametrize("model", model_configs_fa4_base.keys())
 def test_dpa_fa4_base(dtype, model_configs, model):
-    """Test DotProductAttention with FA4: base configs, extended head dims, GQA, num_splits"""
+    """Test DotProductAttention with FA4: base configs, GQA, num_splits"""
+    test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False)
+
+
+# head_dim=256 is supported only on SM100 via FA4's dedicated kernel
+# (flash_attn/cute/sm100_hd256_2cta_fmha_*.py), available in flash-attn-4 > 4.0.0b10.
+# On other architectures, _validate_head_dims rejects (256, 256), FA4 is disabled, and
+# the test would silently fall back to another backend — defeating the purpose. Gate
+# explicitly so the CI signal is unambiguous.
+model_configs_fa4_hdim256 = {
+    "fa4_hdim256": ModelConfig(2, 1024, 8, 256, attn_mask_type="causal"),
+}
+
+
+@pytest.mark.skipif(
+    not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
+)
+@pytest.mark.skipif(
+    device_compute_capability not in ((10, 0), (10, 3)),
+    reason="FA4 head_dim=256 dedicated kernel is SM100/103-only.",
+)
+@pytest.mark.parametrize("dtype", param_types_lean)
+@pytest.mark.parametrize("model_configs", [model_configs_fa4_hdim256])
+@pytest.mark.parametrize("model", model_configs_fa4_hdim256.keys())
+def test_dpa_fa4_hdim256(dtype, model_configs, model):
+    """Test DotProductAttention with FA4: head_dim=256 dedicated kernel on SM100"""
     test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False)
 
 
@@ -369,7 +393,6 @@ model_configs_fa4_mla = {
 @pytest.mark.skipif(
     not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
 )
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_fa4_mla])
 @pytest.mark.parametrize("model", model_configs_fa4_mla.keys())
@@ -396,7 +419,6 @@ model_configs_fa4_swa = {
 @pytest.mark.skipif(
     not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
 )
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_fa4_swa])
 @pytest.mark.parametrize("model", model_configs_fa4_swa.keys())
@@ -420,7 +442,6 @@ model_configs_fa4_varlen = {
 @pytest.mark.skipif(
     not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
 )
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_fa4_varlen])
 @pytest.mark.parametrize("model", model_configs_fa4_varlen.keys())
@@ -446,7 +467,6 @@ model_configs_fa4_mask = {
 @pytest.mark.skipif(
     not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
 )
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_fa4_mask])
 @pytest.mark.parametrize("model", model_configs_fa4_mask.keys())

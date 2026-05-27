@@ -177,6 +177,8 @@ class Tensor {
 
   NVTEShape columnwise_shape() const noexcept { return tensor_.get_columnwise_data().shape; }
 
+  NVTEShape shape() const noexcept { return tensor_.shape(); }
+
   NVTEShape rowwise_scale_inv_shape() const {
     NVTE_CHECK(rowwise_, "Tensor does not have rowwise data!");
     return tensor_.get_rowwise_scale_inv().shape;
@@ -596,6 +598,8 @@ struct GroupedBuffers {
   CudaPtr<int64_t> last_dims_dev;
   CudaPtr<int64_t> offsets_dev;
   CudaPtr<> columnwise_data;
+  CudaPtr<> amax_dev;              // Per-tensor amax for NVFP4 grouped GEMM
+  CudaPtr<> columnwise_amax_dev;   // Per-tensor columnwise amax for NVFP4 grouped GEMM
   NVTEShape logical_shape{};
   std::vector<int64_t> offsets_host;
   std::vector<size_t> tensor_bytes;
