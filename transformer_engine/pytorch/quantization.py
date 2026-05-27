@@ -160,11 +160,15 @@ def _compute_fp8_support() -> Tuple[bool, str]:
 
 
 def _compute_mxfp8_support() -> Tuple[bool, str]:
-    """Return if fp8 support is available"""
+    """Return if MXFP8 support is available."""
     if get_device_compute_capability() >= (12, 0):
-        if os.getenv("NVTE_ENABLE_MXFP8_SM120", "0") == "1":
+        cublaslt_version = tex.get_cublasLt_version()
+        if cublaslt_version >= 130600:
             return True, ""
-        return False, "MXFP8 (for all gemm layouts) is not supported on 12.0+ architectures yet."
+        return False, (
+            "MXFP8 on sm_120 requires cuBLASLt >= 13.6.0.2 for NN/NT GEMM "
+            f"support (loaded cuBLASLt={cublaslt_version})."
+        )
     if get_device_compute_capability() >= (10, 0):  # blackwell and above
         return True, ""
     return False, "Device compute capability 10.0 or higher required for MXFP8 execution."
