@@ -591,8 +591,17 @@ def _combine(
     ep_axis: Optional[str],
     shard_id: Optional[jnp.ndarray] = None,
     num_ep: int = 1,
-) -> jnp.ndarray:
-    """Inverse of :func:`_dispatch`. Returns ``[B, S, H]``."""
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Inverse of :func:`_dispatch`.
+
+    Returns ``(output, expert_outputs_post_ep)``. ``output`` is the
+    ``[B, S, H]`` combined activations. ``expert_outputs_post_ep`` is
+    the FFN-output tensor in the shape that Step 3 of the combine
+    actually consumed (i.e. after the reverse ragged_all_to_all on EP
+    runs, or the original input on non-EP). The caller stashes this as
+    the bwd residual so that ``_combine_bwd``'s Step-3 inverse sees
+    the same tensor the forward Step 3 used.
+    """
     if ep_active:
         # Step 1 (EP): inverse local permute. Reuse the SAME row_id_map
         # built in _dispatch by setting is_forward=False (this is the
@@ -622,7 +631,10 @@ def _combine(
             axis_name=ep_axis,
         )
 
-    # Step 3: global combine.
+    # Step 3: global combine. ``expert_outputs`` here is the post-A2A
+    # tensor under EP, or the original input under non-EP -- whichever
+    # value Step 3 actually consumes. Returned as the second tuple
+    # element so the caller can stash it as the bwd residual.
     if backend is PermutationBackend.PURE_JAX:
         # Reuse the reference pure-jax implementation; it has no
         # custom_vjp on its outer surface so we can call it freely.
@@ -631,7 +643,7 @@ def _combine(
             num_real_tokens=num_real_tokens,
             padding_size=padding_size,
         )
-        return pure_jax_token_combine(
+        output = pure_jax_token_combine(
             expert_outputs,
             perm_state,
             state.routing_weights,
@@ -639,6 +651,7 @@ def _combine(
             batch_size=batch_size,
             sequence_length=sequence_length,
         )
+        return output, expert_outputs
     # TRITON
     num_tokens = state.row_id_map.shape[0]
     num_experts = (state.row_id_map.shape[1] - 1) // 2
@@ -664,7 +677,7 @@ def _combine(
             num_experts,
             hidden,
         )
-    return out_2d.reshape(batch_size, sequence_length, hidden).astype(dtype)
+    return out_2d.reshape(batch_size, sequence_length, hidden).astype(dtype), expert_outputs
 
 
 def _combine_bwd(
@@ -1162,7 +1175,12 @@ def _body_fwd(
         fsdp_sizes=fsdp_sizes,
         recv_buffer_rows=recv_buffer_rows,
     )
-    output = _combine(
+    # ``expert_outputs_residual`` is the post-A2A FFN-output tensor that
+    # Step 3 of the combine actually consumed. Saving this (rather than
+    # the pre-A2A shard-local FFN output) is what makes
+    # ``_combine_bwd``'s Step-3 inverse see the same value the forward
+    # Step 3 saw -- otherwise EP + TRITON yields wrong d_expert_outputs.
+    output, expert_outputs_residual = _combine(
         expert_outputs,
         dispatch_state,
         backend=permutation_backend,
@@ -1195,7 +1213,7 @@ def _body_fwd(
         up_proj_out=up_proj_out,
         casted_intermediate_lhs_trans=casted_intermediate_lhs_trans,
         casted_wo_rhs_trans=casted_wo_rhs_trans,
-        expert_outputs=expert_outputs,
+        expert_outputs=expert_outputs_residual,
         local_group_sizes=local_group_sizes,
         expert_bias=expert_bias if expert_bias is not None else None,
         aux_const_buf=aux_const_buf if aux_enabled else None,
