@@ -44,12 +44,14 @@ def _validate_routing_map_format(routing_map_format: Union[str, RoutingMapFormat
     enum's values, or the canonical lowercase strings ``"bytemap"`` /
     ``"bitmap_u8"``. Other casings/types raise.
     """
-    # pybind11 enum members inherit from int, so this branch handles both
-    # plain ints and RoutingMapFormat values. We normalize to a plain int so
-    # downstream (autograd Function, tex.*) never sees an enum.
+    # The pybind11 enum NVTERoutingMapFormat is its own type (not a subclass
+    # of int); check it explicitly and convert via int() for normalization.
+    if isinstance(routing_map_format, RoutingMapFormat):
+        return int(routing_map_format)
+    # Plain int path (covers e.g. `0`, `1`).
     if isinstance(routing_map_format, int):
         if routing_map_format in _VALID_ROUTING_MAP_FORMAT_INTS:
-            return int(routing_map_format)
+            return routing_map_format
         raise ValueError(
             f"routing_map_format int must be one of {sorted(_VALID_ROUTING_MAP_FORMAT_INTS)}; "
             f"got {routing_map_format!r}"
