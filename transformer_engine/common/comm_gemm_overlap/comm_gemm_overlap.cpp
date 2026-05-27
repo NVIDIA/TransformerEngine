@@ -93,17 +93,22 @@ CommOverlapCore::CommOverlapCore(ncclComm_t nccl_comm_ptr, int tp_rank, int tp_s
   _num_comm_sm = num_comm_sm;
   _is_p2p = is_p2p;
   _atomic_gemm = atomic_gemm;
-  if (_is_p2p) {
-    if (_atomic_gemm) {
-      _algo_type = kNVTECommGemmAlgoAtomicP2P;
-    } else {
-      _algo_type = kNVTECommGemmAlgoSplitP2P;
-    }
+  if (transformer_engine::getenv<bool>("UB_SKIPMC")
+      || !transformer_engine::cuda::supports_multicast()) {
+    _algo_type = kNVTECommGemmAlgoDefault;  // default algo includes fallback to non-multicast
   } else {
-    if (_atomic_gemm) {
-      _algo_type = kNVTECommGemmAlgoAtomicMulticast;
+    if (_is_p2p) {
+      if (_atomic_gemm) {
+        _algo_type = kNVTECommGemmAlgoAtomicP2P;
+      } else {
+        _algo_type = kNVTECommGemmAlgoSplitP2P;
+      }
     } else {
-      _algo_type = kNVTECommGemmAlgoSplitMulticast;
+      if (_atomic_gemm) {
+        _algo_type = kNVTECommGemmAlgoAtomicMulticast;
+      } else {
+        _algo_type = kNVTECommGemmAlgoSplitMulticast;
+      }
     }
   }
 }

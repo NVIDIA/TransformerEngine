@@ -375,12 +375,11 @@ def _test_linear(
             else tex.DType.kFloat8E4M3
         )
     if te.module.base.using_cublasmp_backend() and not quantized_compute:
-        # cuBLASMp's fused AG/RS+GEMM kernels run cuBLAS with different algorithm
-        # selection than the PyTorch reference's separate AG/RS + standalone GEMM,
-        # so a handful of bf16 elements (~0.3% at 4-way TP) end up just past the
-        # standard bf16 rtol — the worst case observed is ~0.024 vs. the default
-        # 0.016, a ~1.5x overshoot at the precision floor. Bump rtol just enough
-        # to absorb this without masking real regressions.
+        # cuBLASMp's GEMM+RS kernel runs a slightly different GEMM algo than Userbuffers
+        # (e.g. split-accumulator is always enabled) so it very narrowly violates the default
+        # bf16 rtol. This is not a regression, just a quirk of how the algorithms line up at the
+        # precision floor. So we relax rtol only (atol stays same) to allow for this without 
+        # masking real regressions.
         tols = {**tols, "rtol": max(tols.get("rtol", 0.0), 3.0e-2)}
 
     # Check results
@@ -464,8 +463,6 @@ def test_fuser_ops_with_userbuffers(
     # Environment
     env = dict(os.environ)
     if not tex.device_supports_multicast():
-        if te.module.base.using_cublasmp_backend():
-            pytest.skip("cuBLASMp backend requires multicast support")
         env["UB_SKIPMC"] = "1"
     env["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
     env["PYTORCH_JIT"] = "0"

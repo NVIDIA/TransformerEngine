@@ -344,8 +344,8 @@ class UserbuffersBackwardLinear(FusedOperation):
             else:
                 x_local = maybe_dequantize(x_local, dtype)
 
-        # cuBLASMp's RS+GEMM dgrad does not all-gather x. Start an async
-        # gather of x_local now so it overlaps with the dgrad GEMM below.
+        # cuBLASMp does not support bulk overlap so we start an async gather of x_local here
+        # to overlap with the dgrad GEMM+RS in the column-parallel case.
         x_total = None
         x_total_work = None
         if cublasmp_column_tp:
@@ -433,8 +433,9 @@ class UserbuffersBackwardLinear(FusedOperation):
                 extra_output=dx_local if with_dgrad_reduce_scatter_dx else None,
                 bulk_overlap=with_bulk_overlap,
             )
-            # cuBLASMp's RS+GEMM writes the reduce-scattered output directly
-            # into the GEMM output tensor; the extra-output buffer is unused.
+            
+            # cuBLASMp's GEMM+RS writes the reduce-scattered output directly into the GEMM output 
+            # tensor; the extra-output buffer is only used with Userbuffers.
             if is_cublasmp or not (with_dgrad_reduce_scatter_dx or with_wgrad_reduce_scatter_dx):
                 dx_local = dx
 
@@ -444,9 +445,8 @@ class UserbuffersBackwardLinear(FusedOperation):
 
             # Initialize grad output
             if is_cublasmp and tensor_parallel_mode == "row":
-                # cuBLASMp's AG+GEMM consumed dy inline and did not preserve the
-                # gathered tensor. Re-gather dy_local for wgrad with the
-                # appropriate quantization direction for each recipe.
+                # cuBLASMp's AG+GEMM DGRAD does not preserve the gathered dy ensor. Re-gather 
+                # dy_local for wgrad with the appropriate quantization direction for each recipe.
                 if grad_output_quantizer is not None:
                     if isinstance(grad_output_quantizer, MXFP8Quantizer):
                         # MXFP8 can't convert rowwise to columnwise, so gather
