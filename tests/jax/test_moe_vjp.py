@@ -296,12 +296,8 @@ class TestMoeVjpForward:
         kp, kx = jax.random.split(key)
         params = _init_params(kp)
         x = _make_inputs(kx)
-        out_pj, _ = _run_te_moe(
-            x, params, permutation_backend=PermutationBackend.PURE_JAX
-        )
-        out_tr, _ = _run_te_moe(
-            x, params, permutation_backend=PermutationBackend.TRITON
-        )
+        out_pj, _ = _run_te_moe(x, params, permutation_backend=PermutationBackend.PURE_JAX)
+        out_tr, _ = _run_te_moe(x, params, permutation_backend=PermutationBackend.TRITON)
         np.testing.assert_allclose(np.array(out_pj), np.array(out_tr), atol=2e-5, rtol=2e-5)
 
 

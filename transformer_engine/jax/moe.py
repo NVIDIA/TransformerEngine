@@ -187,6 +187,38 @@ class _TritonDispatchState(NamedTuple):
 _DispatchState = Union[_PureJaxDispatchState, _TritonDispatchState]
 
 
+class _BodyCtx(NamedTuple):
+    """Residuals carried fwd_rule -> bwd_rule by :func:`_body_fwd`.
+
+    Optional fields (``expert_bias``, ``aux_*``) are ``None`` when the
+    matching feature is disabled. :func:`_build_ctx_specs` mirrors that
+    layout so the shard_map spec and value trees match leaf-for-leaf.
+    """
+
+    # Always present.
+    x: Any
+    gate_kernel: Any
+    logits_2d: Any
+    saved_scores: Any
+    routing_map: Any
+    dispatch: Any  # _DispatchState
+    casted_sorted_x_lhs_trans: Any
+    casted_wi_0_rhs_trans: Any
+    casted_wi_1_rhs_trans: Any
+    gate_proj_out: Any
+    up_proj_out: Any
+    casted_intermediate_lhs_trans: Any
+    casted_wo_rhs_trans: Any
+    expert_outputs: Any
+    local_group_sizes: Any
+    # Feature-gated.
+    expert_bias: Any = None
+    aux_const_buf: Any = None
+    aux_tokens_per_expert: Any = None
+    aux_logits_for_score: Any = None
+    aux_saved_scores: Any = None
+
+
 # =============================================================================
 # ctx / dispatch-state key conventions
 # =============================================================================
@@ -229,37 +261,10 @@ _DispatchState = Union[_PureJaxDispatchState, _TritonDispatchState]
 # into JitTracer 0-d arrays, which breaks Python-level control flow
 # (e.g. ``if padding > 0``) and ``jnp.zeros(shape)`` in the bwd.
 #
-# MoECtx (dict): values are jnp.ndarray / ScaledTensor unless noted
-#   Always present:
-#     "x"                       [B, S, H]
-#     "gate_kernel"             [H, E] (only meaningful when gate_inside_vjp=True)
-#     "logits_2d"               [T, E]   T = local-batch * S
-#     "saved_scores"            [T, E]   from fused_topk fwd primitive
-#     "routing_map"             [T, E]
-#     "dispatch"                DispatchState dict
-#     "casted_sorted_x_lhs_trans"   ScaledTensor or ndarray
-#     "casted_wi_0_rhs_trans"   ScaledTensor or ndarray
-#     "casted_wi_1_rhs_trans"   ScaledTensor or ndarray
-#     "gate_proj_out"                ndarray  (pre-activation)
-#     "up_proj_out"                ndarray
-#     "casted_intermediate_lhs_trans" ScaledTensor or ndarray
-#     "casted_wo_rhs_trans"     ScaledTensor or ndarray
-#     "expert_outputs"          ndarray  (FFN output, needed for TRITON
-#                                         combine_bwd's
-#                                         unpermute_bwd_with_merging_probs)
-#     "local_group_sizes"       [n_groups] -- mirrors dispatch.group_sizes
-#                                              but kept here for FFN bwd
-#                                              convenience
-#   Optional:
-#     "expert_bias"             [E]   only when expert_bias was provided
-#     "wi_0_bias_shape"         tuple -- only when bias is used (carried
-#                                        non-diff via static side; here
-#                                        only if needed)
-#     "aux_const_buf"           ndarray  -- only when aux_loss_coeff > 0
-#     "aux_tokens_per_expert"   [E]      -- ditto
-#     "aux_logits_for_score"    [global_T, E] -- ditto, may be the
-#                                                gathered global logits
-#                                                or the local logits
+# See :class:`_BodyCtx` (NamedTuple) for the ctx layout and field
+# documentation. :func:`_build_ctx_specs` returns a matching ``_BodyCtx``
+# of ``P(...)`` specs so shard_map's value/spec trees line up
+# leaf-for-leaf.
 
 
 # =============================================================================
@@ -1164,41 +1169,36 @@ def _body_fwd(
         num_ep=num_ep,
     )
 
-    # ---------------- Build ctx dict ----------------
-    ctx: dict = {
-        "x": x,
-        "gate_kernel": gate_kernel,
-        "logits_2d": logits_2d,
-        "saved_scores": saved_scores,
-        "routing_map": routing_map,
-        "dispatch": dispatch_state,
-        "casted_sorted_x_lhs_trans": casted_sorted_x_lhs_trans,
-        "casted_wi_0_rhs_trans": casted_wi_0_rhs_trans,
-        "casted_wi_1_rhs_trans": casted_wi_1_rhs_trans,
-        "gate_proj_out": gate_proj_out,
-        "up_proj_out": up_proj_out,
-        "casted_intermediate_lhs_trans": casted_intermediate_lhs_trans,
-        "casted_wo_rhs_trans": casted_wo_rhs_trans,
-        "expert_outputs": expert_outputs,
-        "local_group_sizes": local_group_sizes,
-    }
-    if expert_bias is not None:
-        ctx["expert_bias"] = expert_bias
-    if wi_0_bias is not None:
-        ctx["has_wi_bias"] = True  # NOTE: this is python bool; we DON'T store it
-        # (we only store array leaves in ctx; structural flags travel via statics).
-        del ctx["has_wi_bias"]
-    if aux_loss_coeff > 0.0:
-        ctx["aux_const_buf"] = aux_const_buf
-        ctx["aux_tokens_per_expert"] = aux_tokens_per_expert
-        ctx["aux_logits_for_score"] = aux_logits_for_score
-        ctx["aux_saved_scores"] = aux_saved_scores
+    # ---------------- Build ctx ----------------
+    aux_enabled = aux_loss_coeff > 0.0
+    ctx = _BodyCtx(
+        x=x,
+        gate_kernel=gate_kernel,
+        logits_2d=logits_2d,
+        saved_scores=saved_scores,
+        routing_map=routing_map,
+        dispatch=dispatch_state,
+        casted_sorted_x_lhs_trans=casted_sorted_x_lhs_trans,
+        casted_wi_0_rhs_trans=casted_wi_0_rhs_trans,
+        casted_wi_1_rhs_trans=casted_wi_1_rhs_trans,
+        gate_proj_out=gate_proj_out,
+        up_proj_out=up_proj_out,
+        casted_intermediate_lhs_trans=casted_intermediate_lhs_trans,
+        casted_wo_rhs_trans=casted_wo_rhs_trans,
+        expert_outputs=expert_outputs,
+        local_group_sizes=local_group_sizes,
+        expert_bias=expert_bias if expert_bias is not None else None,
+        aux_const_buf=aux_const_buf if aux_enabled else None,
+        aux_tokens_per_expert=aux_tokens_per_expert if aux_enabled else None,
+        aux_logits_for_score=aux_logits_for_score if aux_enabled else None,
+        aux_saved_scores=aux_saved_scores if aux_enabled else None,
+    )
 
     return output, aux_loss, ctx
 
 
 def _body_bwd(
-    ctx: dict,
+    ctx: _BodyCtx,
     dy_pair: Tuple[jnp.ndarray, jnp.ndarray],
     *,
     num_experts: int,
@@ -1276,8 +1276,8 @@ def _body_bwd(
     # ---------------- Combine bwd ----------------
     d_expert_outputs, d_routing_weights = _combine_bwd(
         d_output,
-        ctx["dispatch"],
-        ctx["expert_outputs"],
+        ctx.dispatch,
+        ctx.expert_outputs,
         backend=permutation_backend,
         ep_active=ep_active,
         batch_size=batch_size,
@@ -1295,66 +1295,60 @@ def _body_bwd(
 
     # ---------------- FFN bwd: GEMM 3 (wo) ----------------
     casted_d_eo = tex.grouped_quantize(
-        d_expert_outputs, q_set_wo.dgrad, ctx["local_group_sizes"], flatten_axis=-1
+        d_expert_outputs, q_set_wo.dgrad, ctx.local_group_sizes, flatten_axis=-1
     )
     d_intermediate = tex.grouped_gemm(
         casted_d_eo.get_tensor(usage=TensorUsage.LHS),
-        ctx["casted_wo_rhs_trans"],
+        ctx.casted_wo_rhs_trans,
         contracting_dims=((1,), (2,)),
     )
     d_wo = tex.grouped_gemm(
-        ctx["casted_intermediate_lhs_trans"],
+        ctx.casted_intermediate_lhs_trans,
         casted_d_eo.get_tensor(usage=TensorUsage.RHS),
         contracting_dims=((0,), (0,)),
     )
-    d_wo_bias = (
-        tex.grouped_dbias(d_expert_outputs, ctx["local_group_sizes"]) if has_wo_bias else None
-    )
+    d_wo_bias = tex.grouped_dbias(d_expert_outputs, ctx.local_group_sizes) if has_wo_bias else None
 
     # ---------------- Activation bwd ----------------
     # intermediate = act(gate_proj_out) * up_proj_out
     # d(gate_proj_out) = vjp(act, gate_proj_out)(d_intermediate * up_proj_out)
     # d(up_proj_out) = d_intermediate * act(gate_proj_out)
     act_fn = _convert_to_activation_function(activation_type)
-    act_gate_proj_out, dact_gate_proj_pullback = jax.vjp(act_fn, ctx["gate_proj_out"])
+    act_gate_proj_out, dact_gate_proj_pullback = jax.vjp(act_fn, ctx.gate_proj_out)
     d_up_proj_out = d_intermediate * act_gate_proj_out
-    (d_gate_proj_out,) = dact_gate_proj_pullback(d_intermediate * ctx["up_proj_out"])
+    (d_gate_proj_out,) = dact_gate_proj_pullback(d_intermediate * ctx.up_proj_out)
 
     # ---------------- FFN bwd: GEMM 2 (wi_1) ----------------
     casted_d_up_proj_out = tex.grouped_quantize(
-        d_up_proj_out, q_set_w1.dgrad, ctx["local_group_sizes"], flatten_axis=-1
+        d_up_proj_out, q_set_w1.dgrad, ctx.local_group_sizes, flatten_axis=-1
     )
     d_sorted_x_from_w1 = tex.grouped_gemm(
         casted_d_up_proj_out.get_tensor(usage=TensorUsage.LHS),
-        ctx["casted_wi_1_rhs_trans"],
+        ctx.casted_wi_1_rhs_trans,
         contracting_dims=((1,), (2,)),
     )
     d_wi_1 = tex.grouped_gemm(
-        ctx["casted_sorted_x_lhs_trans"],
+        ctx.casted_sorted_x_lhs_trans,
         casted_d_up_proj_out.get_tensor(usage=TensorUsage.RHS),
         contracting_dims=((0,), (0,)),
     )
-    d_wi_1_bias = (
-        tex.grouped_dbias(d_up_proj_out, ctx["local_group_sizes"]) if has_wi_bias else None
-    )
+    d_wi_1_bias = tex.grouped_dbias(d_up_proj_out, ctx.local_group_sizes) if has_wi_bias else None
 
     # ---------------- FFN bwd: GEMM 1 (wi_0) ----------------
     casted_d_gate_proj_out = tex.grouped_quantize(
-        d_gate_proj_out, q_set_w0.dgrad, ctx["local_group_sizes"], flatten_axis=-1
+        d_gate_proj_out, q_set_w0.dgrad, ctx.local_group_sizes, flatten_axis=-1
     )
     d_sorted_x_from_w0 = tex.grouped_gemm(
         casted_d_gate_proj_out.get_tensor(usage=TensorUsage.LHS),
-        ctx["casted_wi_0_rhs_trans"],
+        ctx.casted_wi_0_rhs_trans,
         contracting_dims=((1,), (2,)),
     )
     d_wi_0 = tex.grouped_gemm(
-        ctx["casted_sorted_x_lhs_trans"],
+        ctx.casted_sorted_x_lhs_trans,
         casted_d_gate_proj_out.get_tensor(usage=TensorUsage.RHS),
         contracting_dims=((0,), (0,)),
     )
-    d_wi_0_bias = (
-        tex.grouped_dbias(d_gate_proj_out, ctx["local_group_sizes"]) if has_wi_bias else None
-    )
+    d_wi_0_bias = tex.grouped_dbias(d_gate_proj_out, ctx.local_group_sizes) if has_wi_bias else None
 
     d_sorted_x = d_sorted_x_from_w0 + d_sorted_x_from_w1
 
@@ -1362,7 +1356,7 @@ def _body_bwd(
     inputs_2d_shape = (per_shard_x_shape[0] * per_shard_x_shape[1], hidden)
     d_inputs_2d = _dispatch_bwd(
         d_sorted_x,
-        ctx["dispatch"],
+        ctx.dispatch,
         inputs_2d_shape=inputs_2d_shape,
         backend=permutation_backend,
         ep_active=ep_active,
@@ -1390,24 +1384,24 @@ def _body_bwd(
             # routing_map is bool (non-diff); the gradient of weights
             # w.r.t. sparse_probs is a scatter-into-zero along the
             # selected_experts indices.
-            selected_experts = jnp.argsort(ctx["routing_map"], axis=-1)[..., -num_experts_per_tok:]
-            d_sparse_probs = jnp.zeros_like(ctx["saved_scores"]).astype(d_routing_weights.dtype)
+            selected_experts = jnp.argsort(ctx.routing_map, axis=-1)[..., -num_experts_per_tok:]
+            d_sparse_probs = jnp.zeros_like(ctx.saved_scores).astype(d_routing_weights.dtype)
             d_sparse_probs = jnp.take_along_axis(d_sparse_probs, selected_experts, axis=-1)
             # Actually scatter: build via jnp.zeros + .at[].set
-            d_sparse_probs = jnp.zeros(ctx["routing_map"].shape, dtype=d_routing_weights.dtype)
+            d_sparse_probs = jnp.zeros(ctx.routing_map.shape, dtype=d_routing_weights.dtype)
             d_sparse_probs = d_sparse_probs.at[
-                jnp.arange(ctx["routing_map"].shape[0])[:, None], selected_experts
+                jnp.arange(ctx.routing_map.shape[0])[:, None], selected_experts
             ].set(d_routing_weights)
         else:
             d_sparse_probs = d_routing_weights.astype(jnp.float32)
     else:
-        d_sparse_probs = jnp.zeros(ctx["routing_map"].shape, dtype=jnp.float32)
+        d_sparse_probs = jnp.zeros(ctx.routing_map.shape, dtype=jnp.float32)
 
     # Topk bwd primitive: returns d_logits (no d_expert_bias).
     d_logits_2d_main = tex.fused_topk_with_score_function_bwd(
-        ctx["routing_map"],
-        ctx["saved_scores"],
-        d_sparse_probs.astype(ctx["saved_scores"].dtype),
+        ctx.routing_map,
+        ctx.saved_scores,
+        d_sparse_probs.astype(ctx.saved_scores.dtype),
         topk=num_experts_per_tok,
         use_pre_softmax=use_pre_softmax,
         scaling_factor=scaling_factor,
@@ -1418,10 +1412,10 @@ def _body_bwd(
     # ---------------- Aux loss bwd ----------------
     if aux_loss_coeff > 0.0:
         # Step 1: aux_loss bwd -> d_aux_probs
-        aux_num_tokens = ctx["aux_logits_for_score"].shape[0]
+        aux_num_tokens = ctx.aux_logits_for_score.shape[0]
         d_aux_probs = tex.fused_moe_aux_loss_bwd(
-            ctx["aux_const_buf"],
-            ctx["aux_tokens_per_expert"].astype(jnp.int32),
+            ctx.aux_const_buf,
+            ctx.aux_tokens_per_expert.astype(jnp.int32),
             d_aux_loss.reshape(()),
             num_tokens=aux_num_tokens,
         )
@@ -1429,9 +1423,9 @@ def _body_bwd(
         # The routing_map argument is ignored in this branch (the kernel
         # uses saved_scores); pass any shape-correct integer tensor.
         d_aux_logits = tex.fused_topk_with_score_function_bwd(
-            jnp.zeros(ctx["aux_logits_for_score"].shape, dtype=jnp.bool_),
-            ctx["aux_saved_scores"],
-            d_aux_probs.astype(ctx["aux_saved_scores"].dtype),
+            jnp.zeros(ctx.aux_logits_for_score.shape, dtype=jnp.bool_),
+            ctx.aux_saved_scores,
+            d_aux_probs.astype(ctx.aux_saved_scores.dtype),
             topk=num_experts_per_tok,
             use_pre_softmax=False,
             scaling_factor=1.0,
@@ -1451,12 +1445,12 @@ def _body_bwd(
         #    + local_T)``. We invert that by computing the same flat
         # index here and slicing.
         if ep_active:
-            local_T_aux = ctx["logits_2d"].shape[0]
+            local_T_aux = ctx.logits_2d.shape[0]
             flat_shard = shard_id  # ep is the outermost axis in the gather tuple
             for ax, sz in zip(data_parallelism_axes, fsdp_sizes):
                 flat_shard = flat_shard * sz + jax.lax.axis_index(ax)
             d_aux_logits_local = jax.lax.dynamic_slice(
-                d_aux_logits.astype(ctx["logits_2d"].dtype),
+                d_aux_logits.astype(ctx.logits_2d.dtype),
                 start_indices=(flat_shard * local_T_aux, 0),
                 slice_sizes=(local_T_aux, num_experts),
             )
@@ -1468,11 +1462,9 @@ def _body_bwd(
 
     # ---------------- Gate bwd ----------------
     d_gate_logits = d_logits_2d.reshape(per_shard_x_shape[0], per_shard_x_shape[1], num_experts)
-    gate_kernel_cast = ctx["gate_kernel"].astype(ctx["x"].dtype)
+    gate_kernel_cast = ctx.gate_kernel.astype(ctx.x.dtype)
     d_x_from_gate = jnp.einsum("bse,he->bsh", d_gate_logits, gate_kernel_cast)
-    d_gate_kernel = jnp.einsum("bsh,bse->he", ctx["x"], d_gate_logits).astype(
-        ctx["gate_kernel"].dtype
-    )
+    d_gate_kernel = jnp.einsum("bsh,bse->he", ctx.x, d_gate_logits).astype(ctx.gate_kernel.dtype)
     d_x = d_x_from_gate + d_x_from_dispatch
 
     # Reduce per-rank partial contributions to match the out_specs
@@ -1510,7 +1502,7 @@ def _body_bwd(
         # expert_bias has no gradient through topk (the topk bwd returns
         # None for it). Emit a structural zero so the outer rule has
         # something to package.
-        grads["expert_bias"] = jnp.zeros_like(ctx["expert_bias"])
+        grads["expert_bias"] = jnp.zeros_like(ctx.expert_bias)
     return grads
 
 
@@ -1588,16 +1580,21 @@ def _build_ctx_specs(
     has_expert_bias: bool,
     aux_loss_enabled: bool,
     align_size: int,
-) -> dict:
-    """Build the spec dict for the ``ctx`` returned by :func:`_body_fwd`."""
-    specs: dict = {
+) -> _BodyCtx:
+    """Build the spec :class:`_BodyCtx` mirroring :func:`_body_fwd`'s ctx.
+
+    Fields gated off by the static config (``expert_bias``, ``aux_*``)
+    are ``None`` here so the spec pytree matches the value pytree
+    leaf-for-leaf.
+    """
+    return _BodyCtx(
         # Per-shard local activations along the batch axis.
-        "x": P(batch_pspec_axis, None, None),
-        "gate_kernel": P(),
-        "logits_2d": P(batch_pspec_axis, None),
-        "saved_scores": P(batch_pspec_axis, None),
-        "routing_map": P(batch_pspec_axis, None),
-        "dispatch": _build_dispatch_specs(
+        x=P(batch_pspec_axis, None, None),
+        gate_kernel=P(),
+        logits_2d=P(batch_pspec_axis, None),
+        saved_scores=P(batch_pspec_axis, None),
+        routing_map=P(batch_pspec_axis, None),
+        dispatch=_build_dispatch_specs(
             ep_axis, backend=backend, ep_active=ep_active, align_size=align_size
         ),
         # FFN residuals: the LHS_TRANS / RHS_TRANS variants of
@@ -1606,24 +1603,21 @@ def _build_ctx_specs(
         # leading dim; that works whether the leaf is a plain ndarray
         # or a ScaledTensor (shard_map applies the spec leaf-wise to
         # the registered ScaledTensor pytree).
-        "casted_sorted_x_lhs_trans": P(),
-        "casted_wi_0_rhs_trans": P(ep_axis, None, None),
-        "casted_wi_1_rhs_trans": P(ep_axis, None, None),
-        "gate_proj_out": P(),
-        "up_proj_out": P(),
-        "casted_intermediate_lhs_trans": P(),
-        "casted_wo_rhs_trans": P(ep_axis, None, None),
-        "expert_outputs": P(),
-        "local_group_sizes": P(),
-    }
-    if has_expert_bias:
-        specs["expert_bias"] = P(ep_axis)
-    if aux_loss_enabled:
-        specs["aux_const_buf"] = P()
-        specs["aux_tokens_per_expert"] = P()
-        specs["aux_logits_for_score"] = P()
-        specs["aux_saved_scores"] = P()
-    return specs
+        casted_sorted_x_lhs_trans=P(),
+        casted_wi_0_rhs_trans=P(ep_axis, None, None),
+        casted_wi_1_rhs_trans=P(ep_axis, None, None),
+        gate_proj_out=P(),
+        up_proj_out=P(),
+        casted_intermediate_lhs_trans=P(),
+        casted_wo_rhs_trans=P(ep_axis, None, None),
+        expert_outputs=P(),
+        local_group_sizes=P(),
+        expert_bias=P(ep_axis) if has_expert_bias else None,
+        aux_const_buf=P() if aux_loss_enabled else None,
+        aux_tokens_per_expert=P() if aux_loss_enabled else None,
+        aux_logits_for_score=P() if aux_loss_enabled else None,
+        aux_saved_scores=P() if aux_loss_enabled else None,
+    )
 
 
 def _build_grads_specs(
@@ -1726,17 +1720,20 @@ def _moe_fwd_rule(
             num_experts_local=num_experts,
             recv_buffer_rows=0,
         )
-        # Carry static side info into ctx for the bwd rule (as Python
-        # objects on the dict; not part of the tree pytree leaves).
-        ctx["__static__"] = dict(
-            has_wi_bias=has_bias,
-            has_wo_bias=has_bias,
-            has_expert_bias=has_expert_bias,
-            x_shape=x.shape,
-            num_experts_local=num_experts,
-            recv_buffer_rows=0,
-        )
-        return (output, aux_loss), ctx
+        # Carry static side info to the bwd rule alongside ctx. These
+        # are Python ints/bools/tuples (NOT pytree leaves), so we
+        # bundle them as a plain dict rather than putting them on the
+        # ``_BodyCtx`` NamedTuple where shard_map would try to flatten
+        # them into JitTracers.
+        static = {
+            "has_wi_bias": has_bias,
+            "has_wo_bias": has_bias,
+            "has_expert_bias": has_expert_bias,
+            "x_shape": x.shape,
+            "num_experts_local": num_experts,
+            "recv_buffer_rows": 0,
+        }
+        return (output, aux_loss), (ctx, static)
 
     # ---------------- EP path ----------------
     from jax.experimental.shard_map import shard_map
@@ -1822,15 +1819,15 @@ def _moe_fwd_rule(
         out_specs=(output_spec, aux_spec, ctx_spec),
         check_rep=False,
     )(captured)
-    ctx["__static__"] = dict(
-        has_wi_bias=has_bias,
-        has_wo_bias=has_bias,
-        has_expert_bias=has_expert_bias,
-        x_shape=x.shape,
-        num_experts_local=num_experts_local,
-        recv_buffer_rows=recv_buffer_rows,
-    )
-    return (output, aux_loss), ctx
+    static = {
+        "has_wi_bias": has_bias,
+        "has_wo_bias": has_bias,
+        "has_expert_bias": has_expert_bias,
+        "x_shape": x.shape,
+        "num_experts_local": num_experts_local,
+        "recv_buffer_rows": recv_buffer_rows,
+    }
+    return (output, aux_loss), (ctx, static)
 
 
 def _moe_bwd_rule(
@@ -1857,7 +1854,7 @@ def _moe_bwd_rule(
     ctx,
     dy_pair,
 ):
-    static = ctx.pop("__static__")
+    ctx, static = ctx  # split tensor residuals from static side info
     has_wi_bias = static["has_wi_bias"]
     has_wo_bias = static["has_wo_bias"]
     has_expert_bias = static["has_expert_bias"]

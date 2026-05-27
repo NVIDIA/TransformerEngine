@@ -83,6 +83,7 @@ def _require_triton_permutation():
             " PermutationBackend.PURE_JAX."
         )
 
+
 __all__ = [
     "token_dispatch",
     "token_combine",
