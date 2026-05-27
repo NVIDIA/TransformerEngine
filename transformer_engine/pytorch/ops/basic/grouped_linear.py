@@ -1059,9 +1059,6 @@ class GroupedLinear(BasicOperation):
         num_groups = self.num_groups
         has_bias = self.has_bias
 
-        # Need CPU split sizes for split_quantize / general_grouped_gemm.
-        split_sizes_int = [int(s) for s in split_sizes.tolist()]
-
         # Extract params
         if self.single_grouped_weight:
             weights = self.weight.quantized_tensors
@@ -1083,6 +1080,12 @@ class GroupedLinear(BasicOperation):
 
         # Split input tensor and convert dtypes if needed
         x = maybe_dequantize(input_, dtype)
+        if num_groups == 1:
+            # Avoid CUDA->CPU sync from split_sizes.tolist() during CUDA graph capture.
+            split_sizes_int = [x.numel() // x.size(-1)]
+        else:
+            # Need CPU split sizes for split_quantize / general_grouped_gemm.
+            split_sizes_int = [int(s) for s in split_sizes.tolist()]
         xs = None
         if with_quantized_compute:
             for quantizer in input_quantizers:
@@ -1329,8 +1332,12 @@ class GroupedLinear(BasicOperation):
         ws, saved_tensors = saved_tensors[:num_groups], saved_tensors[num_groups:]
 
         # Split grad output tensor and convert dtypes if needed
-        split_sizes_int = [int(s) for s in split_sizes.tolist()]
         dy = maybe_dequantize(grad_output, ctx.dtype)
+        if num_groups == 1:
+            # Avoid CUDA->CPU sync from split_sizes.tolist() during CUDA graph capture.
+            split_sizes_int = [dy.numel() // dy.size(-1)]
+        else:
+            split_sizes_int = [int(s) for s in split_sizes.tolist()]
         dys = None
         grad_biases = [None] * num_groups
         grad_scales = None

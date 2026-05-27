@@ -8,15 +8,18 @@ from __future__ import annotations
 import functools
 import math
 from importlib.metadata import PackageNotFoundError, version as get_pkg_version
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 from packaging.version import Version as PkgVersion
 
+import transformer_engine_torch as tex
 from transformer_engine_torch import FP8TensorMeta
 from ..torch_version import torch_version
 from ..quantization import FP8GlobalStateManager
+from ..tensor import NVFP4Quantizer, NVFP4Tensor, Quantizer
 from ..tensor.float8_tensor import Float8Tensor
+from ..tensor.grouped_tensor import GroupedTensor
 from ..quantized_tensor import QuantizedTensorStorage
 from ..utils import canonicalize_dtype
 
@@ -55,6 +58,168 @@ def _cudnn_frontend_supports_grouped_gemm_srelu() -> bool:
 def _nvidia_cudnn_frontend_supports_wgrad() -> bool:
     """Check cuDNN FE min version for grouped GEMM wgrad kernel."""
     return _cudnn_frontend_version_supported()
+
+
+def _pack_nvfp4_amax_list(tensors: list) -> None:
+    """Ensure discrete NVFP4 weight list uses contiguous per-group amax buffers."""
+    if not tensors:
+        return
+    row_amaxes = [getattr(tensor, "_amax_rowwise", None) for tensor in tensors]
+    if all(amax is not None for amax in row_amaxes):
+        packed_row_amax = torch.cat([amax.view(-1) for amax in row_amaxes], dim=0).contiguous()
+        for idx, tensor in enumerate(tensors):
+            tensor._amax_rowwise = packed_row_amax[idx : idx + 1]
+    col_amaxes = [getattr(tensor, "_amax_columnwise", None) for tensor in tensors]
+    if all(amax is not None for amax in col_amaxes):
+        packed_col_amax = torch.cat([amax.view(-1) for amax in col_amaxes], dim=0).contiguous()
+        for idx, tensor in enumerate(tensors):
+            tensor._amax_columnwise = packed_col_amax[idx : idx + 1]
+
+
+def _enable_nvfp4_rht_for_group_quantize(quantizer: Quantizer) -> None:
+    """Use the graph-safe NVFP4 grouped quantization path."""
+    if isinstance(quantizer, NVFP4Quantizer):
+        quantizer.with_rht = True
+        quantizer.with_post_rht_amax = True
+
+
+def _group_quantize_for_grouped_mlp(
+    tensor: torch.Tensor,
+    quantizer: Quantizer,
+    num_groups: int,
+    split_sizes: Optional[torch.Tensor],
+    *,
+    tensor_offsets: Optional[torch.Tensor] = None,
+) -> GroupedTensor:
+    """Quantize into grouped storage, using regular quantize for one-group NVFP4."""
+    if num_groups != 1 or not isinstance(quantizer, NVFP4Quantizer):
+        return tex.group_quantize(tensor, quantizer, num_groups, split_sizes)
+
+    quantized = tex.quantize(tensor, quantizer)
+    with_gemm_swizzled_scales = getattr(quantized, "_with_gemm_swizzled_scales", False)
+    if getattr(quantizer, "optimize_for_gemm", False):
+        tex.swizzle_scales_for_gemm_(quantized)
+        with_gemm_swizzled_scales = True
+
+    rowwise_data = getattr(quantized, "_rowwise_data", None)
+    rowwise_scale = getattr(quantized, "_rowwise_scale_inv", None)
+    columnwise_data = getattr(quantized, "_columnwise_data", None)
+    columnwise_scale = getattr(quantized, "_columnwise_scale_inv", None)
+    amax = getattr(quantized, "_amax_rowwise", None)
+    columnwise_amax = getattr(quantized, "_amax_columnwise", None)
+
+    if split_sizes is None:
+        split_sizes = torch.full((1,), tensor.shape[0], dtype=torch.int64, device=tensor.device)
+    else:
+        split_sizes = split_sizes.to(dtype=torch.int64, device=tensor.device)
+
+    m_dim = tensor.shape[0]
+    if rowwise_data is not None:
+        k_dim = rowwise_data.shape[-1] * 2
+    elif columnwise_data is not None:
+        k_dim = columnwise_data.shape[0]
+    else:
+        k_dim = tensor.shape[-1]
+
+    if tensor_offsets is None:
+        tensor_offsets = torch.cat(
+            [
+                torch.zeros(1, dtype=torch.int64, device=tensor.device),
+                torch.cumsum(split_sizes * k_dim, dim=0),
+            ],
+        )
+
+    return GroupedTensor(
+        shape=(m_dim, k_dim),
+        dtype=tensor.dtype,
+        quantizer=quantizer,
+        num_tensors=1,
+        data=rowwise_data.reshape(-1) if rowwise_data is not None else None,
+        columnwise_data=columnwise_data.reshape(-1) if columnwise_data is not None else None,
+        scale_inv=rowwise_scale.reshape(-1) if rowwise_scale is not None else None,
+        columnwise_scale_inv=columnwise_scale.reshape(-1) if columnwise_scale is not None else None,
+        amax=amax,
+        columnwise_amax=columnwise_amax,
+        first_dims=split_sizes,
+        tensor_offsets=tensor_offsets,
+        with_gemm_swizzled_scales=with_gemm_swizzled_scales,
+    )
+
+
+def _nvfp4_logical_data_view(data: torch.Tensor) -> torch.Tensor:
+    """View packed NVFP4 data with its logical K dimension for scale swizzling."""
+    return data.as_strided((data.shape[0], data.shape[1] * 2), (data.stride(0), 0))
+
+
+def _nvfp4_amax(tensors: Any, *, columnwise: bool) -> torch.Tensor:
+    """Get one NVFP4 amax value per group."""
+    grouped_attr = "columnwise_amax" if columnwise else "amax"
+    tensor_attr = "_amax_columnwise" if columnwise else "_amax_rowwise"
+
+    if hasattr(tensors, grouped_attr):
+        amax = getattr(tensors, grouped_attr)
+        if amax is None:
+            raise RuntimeError(f"NVFP4 GroupedTensor is missing {grouped_attr}.")
+        return amax.view(-1)
+
+    amaxes = [getattr(tensor, tensor_attr, None) for tensor in tensors]
+    if any(amax is None for amax in amaxes):
+        raise RuntimeError(f"NVFP4 tensor list is missing {tensor_attr}.")
+    return torch.cat([amax.view(-1) for amax in amaxes], dim=0)
+
+
+def _nvfp4_single_tensor_from_grouped(
+    grouped: GroupedTensor,
+    quantizer: Optional[NVFP4Quantizer] = None,
+    *,
+    fp4_dtype: Optional[torch.dtype] = None,
+) -> NVFP4Tensor:
+    """Build a single NVFP4Tensor view over a one-member grouped storage."""
+    if quantizer is None:
+        quantizer = grouped.quantizer
+    if not isinstance(quantizer, NVFP4Quantizer):
+        raise TypeError("Expected an NVFP4 GroupedTensor.")
+
+    shape = tuple(grouped.logical_shape)
+    rowwise_data = None
+    if grouped.rowwise_data is not None:
+        rowwise_data = grouped.rowwise_data.view(quantizer.convert_shape_for_fp4(shape))
+
+    rowwise_scale_inv = None
+    if grouped.scale_inv is not None:
+        rowwise_scale_inv = grouped.scale_inv.view(quantizer.get_scale_shape(shape, False))
+
+    columnwise_data = None
+    if grouped.columnwise_data is not None:
+        columnwise_shape = quantizer.get_columnwise_shape(shape)
+        columnwise_data = grouped.columnwise_data.view(
+            quantizer.convert_shape_for_fp4(columnwise_shape)
+        )
+
+    columnwise_scale_inv = None
+    if grouped.columnwise_scale_inv is not None:
+        columnwise_scale_inv = grouped.columnwise_scale_inv.view(
+            quantizer.get_scale_shape(shape, True)
+        )
+
+    return NVFP4Tensor(
+        shape=shape,
+        dtype=grouped.get_dtype(),
+        rowwise_data=rowwise_data,
+        rowwise_scale_inv=rowwise_scale_inv,
+        columnwise_data=columnwise_data,
+        columnwise_scale_inv=columnwise_scale_inv,
+        amax_rowwise=grouped.amax,
+        amax_columnwise=grouped.columnwise_amax,
+        fp4_dtype=fp4_dtype or quantizer.dtype,
+        quantizer=quantizer,
+        requires_grad=False,
+        with_gemm_swizzled_scales=getattr(
+            grouped,
+            "_with_gemm_swizzled_scales",
+            getattr(grouped, "with_gemm_swizzled_scales", quantizer.optimize_for_gemm),
+        ),
+    )
 
 
 def is_quantized_tensor(tensor: torch.Tensor | QuantizedTensorStorage) -> bool:
@@ -285,7 +450,7 @@ def fuse_grouped_mlp_ops(
 
     if not fused_op_cls.is_supported():
         return ops
-    if recipe is None or not recipe.mxfp8():
+    if recipe is None or not (recipe.mxfp8() or recipe.nvfp4()):
         return ops
     if activation_op_types is None:
         activation_op_types = (ScaledSwiGLU, ScaledClampedQGeGLU)
