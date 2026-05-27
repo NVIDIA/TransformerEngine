@@ -20,6 +20,12 @@ namespace {
 
 constexpr int amax_kernel_threads = 512;
 constexpr int grouped_amax_kernel_threads = 256;
+// Target block-per-tensor multiplier so that, even with few groups, we cover
+// enough SMs on H100/GB200-class GPUs (132 SMs) to be HBM-bandwidth bound.
+// blocks_per_tensor is bounded by both work and a hard cap to avoid launching
+// far more blocks than there is work for.
+constexpr int grouped_amax_blocks_per_tensor_cap = 64;
+constexpr size_t grouped_amax_min_elts_per_block = 8 * 1024;  // ~16KB of bf16
 
 __launch_bounds__(1) __global__ void zero_amax_kernel(float *amax_ptr, const float *noop_ptr) {
   if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) {
@@ -114,87 +120,204 @@ void launch_amax_kernel(const InputType *input, float *amax, const size_t N, con
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
-template <typename InputType>
+// Zero per-tensor amax buffer so the main kernel can use atomicMax updates.
 __launch_bounds__(grouped_amax_kernel_threads) __global__
-    void grouped_amax_kernel(const InputType *input, float *amax, const size_t num_tensors,
-                             const size_t first_logical_dim, const size_t last_logical_dim,
-                             const ShapeRepresentation shape_rep,
-                             const int64_t *__restrict__ offsets_ptr,
-                             const int64_t *__restrict__ first_dims_ptr,
-                             const int64_t *__restrict__ last_dims_ptr,
-                             const float *noop_ptr) {
+    void grouped_amax_zero_kernel(float *amax_ptr, const size_t num_tensors,
+                                  const float *noop_ptr) {
+  if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) {
+    return;
+  }
+  const size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (tid < num_tensors) {
+    amax_ptr[tid] = 0.0f;
+  }
+}
+
+// Vectorized per-tensor amax kernel.
+//
+// Grid: (blocks_per_tensor, num_tensors).
+// Each block scans a stride of vectors within its tensor and atomicMaxFloat's
+// the result into amax[tensor_id]. Uses 16-byte vector loads, warp-shuffle
+// reduction, and (in the SAME_BOTH_DIMS / static-offset paths) avoids any
+// per-tensor metadata lookups.
+//
+// For varying shapes, we use offsets_ptr[i+1] - offsets_ptr[i] as the strict
+// upper bound on this tensor's element count. This matches the layout that
+// build_grouped_tensor_offsets uses (the "logical" element span for the
+// tensor) and means we never read overallocated tail rows/cols.
+template <int NVEC, typename InputType, ShapeRepresentation SHAPE_REP>
+__launch_bounds__(grouped_amax_kernel_threads) __global__
+    void grouped_amax_kernel_v2(const InputType *__restrict__ input, float *__restrict__ amax,
+                                const size_t num_tensors, const size_t first_logical_dim,
+                                const size_t last_logical_dim,
+                                const int64_t *__restrict__ offsets_ptr,
+                                const float *__restrict__ noop_ptr) {
   if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) {
     return;
   }
 
-  const size_t tensor_id = blockIdx.x;
+  const size_t tensor_id = blockIdx.y;
   if (tensor_id >= num_tensors) {
     return;
   }
 
-  size_t rows = 0;
-  size_t cols = 0;
   size_t tensor_base = 0;
-  switch (shape_rep) {
-    case ShapeRepresentation::SAME_BOTH_DIMS:
-      rows = first_logical_dim / num_tensors;
-      cols = last_logical_dim;
-      tensor_base = tensor_id * rows * cols;
-      break;
-    case ShapeRepresentation::VARYING_FIRST_DIM:
-      rows = static_cast<size_t>(first_dims_ptr[tensor_id]);
-      cols = last_logical_dim;
-      tensor_base = static_cast<size_t>(offsets_ptr[tensor_id]);
-      break;
-    case ShapeRepresentation::VARYING_LAST_DIM:
-      rows = first_logical_dim;
-      cols = static_cast<size_t>(last_dims_ptr[tensor_id]);
-      tensor_base = static_cast<size_t>(offsets_ptr[tensor_id]);
-      break;
-    case ShapeRepresentation::VARYING_BOTH_DIMS:
-      rows = static_cast<size_t>(first_dims_ptr[tensor_id]);
-      cols = static_cast<size_t>(last_dims_ptr[tensor_id]);
-      tensor_base = static_cast<size_t>(offsets_ptr[tensor_id]);
-      break;
+  size_t numel = 0;
+  if constexpr (SHAPE_REP == ShapeRepresentation::SAME_BOTH_DIMS) {
+    const size_t rows = first_logical_dim / num_tensors;
+    numel = rows * last_logical_dim;
+    tensor_base = tensor_id * numel;
+  } else {
+    // Varying first / last / both: strictly use the logical offsets so that
+    // we never scan unused tail rows.
+    tensor_base = static_cast<size_t>(offsets_ptr[tensor_id]);
+    const size_t tensor_end = static_cast<size_t>(offsets_ptr[tensor_id + 1]);
+    numel = tensor_end > tensor_base ? tensor_end - tensor_base : 0;
   }
+  if (numel == 0) {
+    return;
+  }
+
+  using IVecT = Vec<InputType, NVEC>;
+  const InputType *base = input + tensor_base;
+  const size_t total_vecs = numel / NVEC;
+  const size_t tail_start = total_vecs * NVEC;
+
+  const size_t tid = threadIdx.x;
+  const size_t bid = blockIdx.x;
+  const size_t threads_per_grid = blockDim.x * gridDim.x;
 
   float thread_amax = 0.0f;
-  const size_t numel = rows * cols;
-  for (size_t offset = threadIdx.x; offset < numel; offset += blockDim.x) {
-    thread_amax = fmaxf(thread_amax, fabsf(static_cast<float>(input[tensor_base + offset])));
+
+  // Vectorized 16B-load grid-stride loop.
+  const bool aligned = (reinterpret_cast<uintptr_t>(base) % IVecT::BYTES) == 0;
+  const size_t start_v = bid * blockDim.x + tid;
+  if (aligned) {
+    for (size_t v = start_v; v < total_vecs; v += threads_per_grid) {
+      IVecT vec;
+      vec.load_from(base + v * NVEC);
+#pragma unroll
+      for (int i = 0; i < NVEC; ++i) {
+        thread_amax = fmaxf(thread_amax, fabsf(static_cast<float>(vec.data.elt[i])));
+      }
+    }
+  } else {
+    for (size_t v = start_v; v < total_vecs; v += threads_per_grid) {
+      const InputType *p = base + v * NVEC;
+#pragma unroll
+      for (int i = 0; i < NVEC; ++i) {
+        thread_amax = fmaxf(thread_amax, fabsf(static_cast<float>(p[i])));
+      }
+    }
   }
 
-  __shared__ float block_amax[grouped_amax_kernel_threads];
-  block_amax[threadIdx.x] = thread_amax;
+  // Tail: at most NVEC-1 elements, handled only by block 0.
+  if (bid == 0) {
+    for (size_t i = tail_start + tid; i < numel; i += blockDim.x) {
+      thread_amax = fmaxf(thread_amax, fabsf(static_cast<float>(base[i])));
+    }
+  }
+
+  // Warp-shuffle reduce.
+#pragma unroll
+  for (int s = THREADS_PER_WARP / 2; s > 0; s >>= 1) {
+    thread_amax = fmaxf(thread_amax, __shfl_xor_sync(0xFFFFFFFFu, thread_amax, s));
+  }
+  constexpr int kWarps = grouped_amax_kernel_threads / THREADS_PER_WARP;
+  __shared__ float warp_amax[kWarps];
+  const int warp_id = tid / THREADS_PER_WARP;
+  const int lane = tid % THREADS_PER_WARP;
+  if (lane == 0) {
+    warp_amax[warp_id] = thread_amax;
+  }
   __syncthreads();
 
-  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-    if (threadIdx.x < stride) {
-      block_amax[threadIdx.x] = fmaxf(block_amax[threadIdx.x], block_amax[threadIdx.x + stride]);
+  if (warp_id == 0) {
+    float v = lane < kWarps ? warp_amax[lane] : 0.0f;
+#pragma unroll
+    for (int s = kWarps / 2; s > 0; s >>= 1) {
+      v = fmaxf(v, __shfl_xor_sync(0xFFFFFFFFu, v, s));
     }
-    __syncthreads();
+    if (lane == 0) {
+      atomicMaxFloat(&amax[tensor_id], v);
+    }
   }
+}
 
-  if (threadIdx.x == 0) {
-    amax[tensor_id] = block_amax[0];
+// Pick blocks-per-tensor so each block has at least ~grouped_amax_min_elts_per_block elements
+// of work. Capped at grouped_amax_blocks_per_tensor_cap to avoid launching way more blocks
+// than the GPU can resident.
+inline size_t choose_grouped_amax_blocks_per_tensor(size_t max_elts_per_tensor) {
+  if (max_elts_per_tensor == 0) return 1;
+  size_t blocks = (max_elts_per_tensor + grouped_amax_min_elts_per_block - 1) /
+                  grouped_amax_min_elts_per_block;
+  if (blocks > static_cast<size_t>(grouped_amax_blocks_per_tensor_cap)) {
+    blocks = grouped_amax_blocks_per_tensor_cap;
   }
+  if (blocks == 0) blocks = 1;
+  return blocks;
 }
 
 template <typename InputType>
 void launch_grouped_amax_kernel(const InputType *input, float *amax, const size_t num_tensors,
-                                const size_t first_logical_dim,
-                                const size_t last_logical_dim,
-                                const ShapeRepresentation shape_rep,
-                                const int64_t *offsets_ptr,
-                                const int64_t *first_dims_ptr,
-                                const int64_t *last_dims_ptr, const float *noop_ptr,
-                                cudaStream_t stream) {
+                                const size_t first_logical_dim, const size_t last_logical_dim,
+                                const ShapeRepresentation shape_rep, const int64_t *offsets_ptr,
+                                const int64_t *first_dims_ptr, const int64_t *last_dims_ptr,
+                                const float *noop_ptr, cudaStream_t stream) {
   if (num_tensors == 0) {
     return;
   }
-  grouped_amax_kernel<InputType><<<num_tensors, grouped_amax_kernel_threads, 0, stream>>>(
-      input, amax, num_tensors, first_logical_dim, last_logical_dim, shape_rep, offsets_ptr,
-      first_dims_ptr, last_dims_ptr, noop_ptr);
+  (void)first_dims_ptr;
+  (void)last_dims_ptr;
+
+  // Estimate the maximum per-tensor element count without a D2H copy:
+  //  - SAME_BOTH_DIMS:    first_logical_dim/num_tensors * last_logical_dim
+  //  - others:            an over-estimate first_logical_dim*last_logical_dim
+  // This is only used to size the launch (blocks-per-tensor).
+  size_t max_elts_per_tensor = 0;
+  if (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS) {
+    max_elts_per_tensor = (first_logical_dim / num_tensors) * last_logical_dim;
+  } else {
+    max_elts_per_tensor = first_logical_dim * last_logical_dim;
+  }
+
+  // Zero out the per-tensor amax buffer so atomicMaxFloat works.
+  const size_t zero_blocks =
+      (num_tensors + grouped_amax_kernel_threads - 1) / grouped_amax_kernel_threads;
+  grouped_amax_zero_kernel<<<zero_blocks, grouped_amax_kernel_threads, 0, stream>>>(
+      amax, num_tensors, noop_ptr);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+
+  constexpr int kVecBytes = 16;
+  constexpr int kNvec = kVecBytes / sizeof(InputType);
+  static_assert(kNvec >= 1, "Vector width must be at least 1");
+
+  const size_t blocks_per_tensor = choose_grouped_amax_blocks_per_tensor(max_elts_per_tensor);
+  const dim3 grid(blocks_per_tensor, num_tensors);
+  const dim3 block(grouped_amax_kernel_threads);
+
+  switch (shape_rep) {
+    case ShapeRepresentation::SAME_BOTH_DIMS:
+      grouped_amax_kernel_v2<kNvec, InputType, ShapeRepresentation::SAME_BOTH_DIMS>
+          <<<grid, block, 0, stream>>>(input, amax, num_tensors, first_logical_dim,
+                                       last_logical_dim, offsets_ptr, noop_ptr);
+      break;
+    case ShapeRepresentation::VARYING_FIRST_DIM:
+      grouped_amax_kernel_v2<kNvec, InputType, ShapeRepresentation::VARYING_FIRST_DIM>
+          <<<grid, block, 0, stream>>>(input, amax, num_tensors, first_logical_dim,
+                                       last_logical_dim, offsets_ptr, noop_ptr);
+      break;
+    case ShapeRepresentation::VARYING_LAST_DIM:
+      grouped_amax_kernel_v2<kNvec, InputType, ShapeRepresentation::VARYING_LAST_DIM>
+          <<<grid, block, 0, stream>>>(input, amax, num_tensors, first_logical_dim,
+                                       last_logical_dim, offsets_ptr, noop_ptr);
+      break;
+    case ShapeRepresentation::VARYING_BOTH_DIMS:
+      grouped_amax_kernel_v2<kNvec, InputType, ShapeRepresentation::VARYING_BOTH_DIMS>
+          <<<grid, block, 0, stream>>>(input, amax, num_tensors, first_logical_dim,
+                                       last_logical_dim, offsets_ptr, noop_ptr);
+      break;
+  }
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 

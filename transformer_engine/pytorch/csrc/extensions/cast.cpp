@@ -276,8 +276,13 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
   }
 
   // dispatch to scaling methods
+  //
+  // NOTE: Float8Quantizer (delayed / pre-computed scaling) is intentionally
+  // *not* a supported quantizer for group_quantize. Grouped FP8 quantization
+  // is current-scaling only: we always compute amax + scale within the call.
+  // The `tex.quantize` API is the right entry point if you have a precomputed
+  // FP8 scale.
   enum class GroupedQuantizationMode {
-    FP8_PRECOMPUTED_GROUPED_QUANTIZE,
     FP8_CURRENT_SCALING_GROUPED_QUANTIZE,
     MXFP8_GROUPED_QUANTIZE,
     NVFP4_GROUPED_QUANTIZE,
@@ -292,7 +297,10 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
   } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
     grouped_quantization_mode = GroupedQuantizationMode::FP8_CURRENT_SCALING_GROUPED_QUANTIZE;
   } else if (detail::IsFloat8Quantizers(quantizer.ptr())) {
-    grouped_quantization_mode = GroupedQuantizationMode::FP8_PRECOMPUTED_GROUPED_QUANTIZE;
+    NVTE_ERROR(
+        "group_quantize: Float8Quantizer (delayed / precomputed scaling) is not "
+        "supported. Use Float8CurrentScalingQuantizer for FP8 grouped quantization, "
+        "or call tex.quantize() if you have a precomputed scale.");
   }
 
   if (empty_input_buffer) {
@@ -322,14 +330,6 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
       });
       break;
     }
-    case GroupedQuantizationMode::FP8_PRECOMPUTED_GROUPED_QUANTIZE: {
-      QuantizationConfigWrapper quant_config_cpp;
-      NVTE_SCOPED_GIL_RELEASE({
-        nvte_group_quantize(grouped_input_tensor.data(), grouped_output_tensor_cpp->data(),
-                            quant_config_cpp, at::cuda::getCurrentCUDAStream());
-      });
-      break;
-    }
     case GroupedQuantizationMode::MXFP8_GROUPED_QUANTIZE: {
       QuantizationConfigWrapper quant_config_cpp;
       NVTE_SCOPED_GIL_RELEASE({
@@ -340,7 +340,8 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
     }
     case GroupedQuantizationMode::INVALID_FOR_GROUPED_QUANTIZE:
     default:
-      NVTE_ERROR("group_quantize: only supports FP8, NVFP4, or MXFP8 quantizer.");
+      NVTE_ERROR("group_quantize: only supports MXFP8, NVFP4, or "
+                 "Float8CurrentScalingQuantizer.");
       break;
   }
 

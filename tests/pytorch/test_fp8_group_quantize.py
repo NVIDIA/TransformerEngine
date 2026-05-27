@@ -280,125 +280,24 @@ def test_group_quantize_fp8_current_scaling_cuda_graph_varying_dims(
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-@pytest.mark.parametrize("mode", ["rowwise", "columnwise", "both"])
-@pytest.mark.parametrize("shape_case", ["varying-first", "varying-last"])
-def test_group_quantize_fp8_precomputed_cuda_graph_varying_dims(
-    mode: str, shape_case: str
-) -> None:
-    """Grouped FP8 precomputed-scale quantization is graph capturable with varying dims."""
-    tensor, num_tensors, first_dims, last_dims = _graph_input(shape_case)
-    static_input = tensor.clone()
-    current_quantizer = _make_quantizer(mode)
-    prepared = tex.group_quantize(
-        static_input, current_quantizer, num_tensors, first_dims, last_dims=last_dims
-    )
+def test_group_quantize_fp8_rejects_precomputed_quantizer() -> None:
+    """group_quantize must reject Float8Quantizer (precomputed/delayed scaling).
+
+    Grouped FP8 quantization is current-scaling only: amax + scale are always
+    computed inside the call. Use Float8CurrentScalingQuantizer instead.
+    """
+    tensor = torch.randn(64, 128, dtype=torch.bfloat16, device="cuda")
+    scale = torch.ones(1, dtype=torch.float32, device="cuda")
+    amax = torch.zeros(1, dtype=torch.float32, device="cuda")
     delayed_quantizer = Float8Quantizer(
-        scale=prepared.scale,
-        amax=prepared.amax,
+        scale=scale,
+        amax=amax,
         fp8_dtype=tex.DType.kFloat8E4M3,
-        rowwise=mode in ("rowwise", "both"),
-        columnwise=mode in ("columnwise", "both"),
+        rowwise=True,
+        columnwise=False,
     )
-    static_output = tex.group_quantize(
-        static_input, delayed_quantizer, num_tensors, first_dims, last_dims=last_dims
-    )
-    torch.cuda.synchronize()
-
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        static_output = tex.group_quantize(
-            static_input,
-            delayed_quantizer,
-            num_tensors,
-            first_dims,
-            output=static_output,
-            last_dims=last_dims,
-        )
-
-    fresh_input = tensor + torch.randn_like(tensor) * 0.01
-    static_input.copy_(fresh_input)
-    graph.replay()
-    torch.cuda.synchronize()
-
-    expected = tex.group_quantize(
-        static_input, delayed_quantizer, num_tensors, first_dims, last_dims=last_dims
-    )
-    _assert_grouped_outputs_equal(static_output, expected)
-
-
-@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-@pytest.mark.parametrize("mode", ["columnwise", "both"])
-@pytest.mark.parametrize("shape_case", ["varying-first", "varying-last"])
-def test_group_quantize_fp8_explicit_columnwise_output_varying_dims(
-    mode: str, shape_case: str
-) -> None:
-    """An explicit columnwise grouped FP8 output is materialized on every architecture."""
-    tensor, num_tensors, first_dims, last_dims, input_tensors = _graph_input_with_members(
-        shape_case
-    )
-    current_quantizer = _make_quantizer(mode)
-    prepared = tex.group_quantize(
-        tensor, current_quantizer, num_tensors, first_dims, last_dims=last_dims
-    )
-    delayed_quantizer = Float8Quantizer(
-        scale=prepared.scale,
-        amax=prepared.amax,
-        fp8_dtype=tex.DType.kFloat8E4M3,
-        rowwise=mode == "both",
-        columnwise=True,
-    )
-    rowwise_data = (
-        torch.empty(tensor.numel(), dtype=torch.uint8, device="cuda")
-        if mode == "both"
-        else None
-    )
-    columnwise_data = torch.empty(tensor.numel(), dtype=torch.uint8, device="cuda")
-    scale_inv = (
-        prepared.scale_inv
-        if prepared.scale_inv is not None
-        else prepared.columnwise_scale_inv
-    )
-    tensor_offsets = _tensor_offsets(
-        first_dims, last_dims, tensor.shape[0], tensor.shape[1]
-    )
-    output = GroupedTensor(
-        tuple(tensor.shape),
-        TE_DType_To_Torch[tex.DType.kFloat8E4M3],
-        num_tensors=num_tensors,
-        shapes=None,
-        quantizer=delayed_quantizer,
-        data=rowwise_data,
-        columnwise_data=columnwise_data,
-        scale_inv=scale_inv if rowwise_data is not None else None,
-        columnwise_scale_inv=scale_inv,
-        amax=prepared.amax,
-        scale=prepared.scale,
-        first_dims=first_dims,
-        last_dims=last_dims,
-        tensor_offsets=tensor_offsets,
-    )
-
-    grouped = tex.group_quantize(
-        tensor,
-        delayed_quantizer,
-        num_tensors,
-        first_dims,
-        output=output,
-        last_dims=last_dims,
-    )
-    expected_rowwise, expected_columnwise, _, _, _ = _expected_quantized_members(
-        input_tensors, mode
-    )
-
-    if expected_rowwise is not None:
-        assert torch.equal(grouped.rowwise_data[: expected_rowwise.numel()], expected_rowwise)
-    else:
-        assert grouped.rowwise_data is None
-    assert grouped.columnwise_data is not None
-    assert torch.equal(
-        grouped.columnwise_data[: expected_columnwise.numel()],
-        expected_columnwise,
-    )
+    with pytest.raises(RuntimeError, match="Float8Quantizer"):
+        tex.group_quantize(tensor, delayed_quantizer, 4, None)
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
