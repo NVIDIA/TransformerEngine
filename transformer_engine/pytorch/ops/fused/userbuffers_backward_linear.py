@@ -461,7 +461,9 @@ class UserbuffersBackwardLinear(FusedOperation):
                     tensor_parallel_group,
                     quantizer=grad_output_quantizer,
                 )
-            elif tensor_parallel_mode == "row" and isinstance(grad_output_quantizer, MXFP8Quantizer):
+            elif tensor_parallel_mode == "row" and isinstance(
+                grad_output_quantizer, MXFP8Quantizer
+            ):
                 # UB does not support pipelined overlapping grad output
                 # all-gather with wgrad GEMM. Also, we can't
                 # convert row-scaled MXFP8 to column-scaled, so we
