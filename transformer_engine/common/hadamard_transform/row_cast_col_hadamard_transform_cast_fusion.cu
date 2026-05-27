@@ -1296,11 +1296,9 @@ void hadamard_transform_cast_fusion(const Tensor &input_, Tensor &output_,
              "Hadamard matrix must be BF16 tensor, but dtype is ",
              to_string(hadamard_matrix_.dtype()), ".");
   const SimpleTensor &hadamard_matrix = hadamard_matrix_.data;
-  NVTE_CHECK(
-      (hadamard_matrix_.shape() == Shape{kHadamardDimension, kHadamardDimension}),
-      "Hadamard matrix must have shape=",
-      Shape{kHadamardDimension, kHadamardDimension},
-      ", but got shape=", hadamard_matrix_.shape(), ".");
+  NVTE_CHECK((hadamard_matrix_.shape() == Shape{kHadamardDimension, kHadamardDimension}),
+             "Hadamard matrix must have shape=", Shape{kHadamardDimension, kHadamardDimension},
+             ", but got shape=", hadamard_matrix_.shape(), ".");
   const size_t hadamard_dimension = hadamard_matrix.shape[0];
 
   const size_t ndim = input.shape.size();

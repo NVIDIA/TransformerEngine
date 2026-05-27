@@ -1096,12 +1096,12 @@ class MultiTensorWrapper {
     }
   }
 
-  MultiTensorWrapper(const MultiTensorWrapper&) = delete;
-  MultiTensorWrapper& operator=(const MultiTensorWrapper&) = delete;
+  MultiTensorWrapper(const MultiTensorWrapper &) = delete;
+  MultiTensorWrapper &operator=(const MultiTensorWrapper &) = delete;
 
-  MultiTensorWrapper(MultiTensorWrapper&&) noexcept = default;
+  MultiTensorWrapper(MultiTensorWrapper &&) noexcept = default;
 
-  MultiTensorWrapper& operator=(MultiTensorWrapper&& other) noexcept {
+  MultiTensorWrapper &operator=(MultiTensorWrapper &&other) noexcept {
     if (this == &other) return *this;
     if (!tensors_.empty()) {
       nvte_destroy_tensors(tensors_.data(), tensors_.size());
@@ -1120,11 +1120,11 @@ class MultiTensorWrapper {
   NVTETensor operator[](size_t i) const noexcept { return tensors_[i]; }
 
   /*! \brief Pointer to the underlying NVTETensor array. */
-  NVTETensor* data() noexcept { return tensors_.data(); }
-  const NVTETensor* data() const noexcept { return tensors_.data(); }
+  NVTETensor *data() noexcept { return tensors_.data(); }
+  const NVTETensor *data() const noexcept { return tensors_.data(); }
 
   /*! \brief Implicit conversion for multi-tensor C API calls. */
-  operator NVTETensor*() noexcept { return tensors_.data(); }
+  operator NVTETensor *() noexcept { return tensors_.data(); }
 
   /*! \brief Iteration over the underlying NVTETensors. */
   auto begin() noexcept { return tensors_.begin(); }

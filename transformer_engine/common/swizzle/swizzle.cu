@@ -31,9 +31,8 @@ int get_max_dynamic_smem(int device_id = -1) {
     device_id = cuda::current_device();
   }
   auto init = [&]() {
-    NVTE_CHECK_CUDA(
-        cudaDeviceGetAttribute(&cache[device_id], cudaDevAttrMaxSharedMemoryPerBlockOptin,
-                               device_id));
+    NVTE_CHECK_CUDA(cudaDeviceGetAttribute(&cache[device_id],
+                                           cudaDevAttrMaxSharedMemoryPerBlockOptin, device_id));
   };
   std::call_once(flags[device_id], init);
   return cache[device_id];
