@@ -17,17 +17,18 @@ This test drives the underlying ``general_gemm`` call directly for each layout
 with MXFP8-quantized operands, and compares the cuBLAS output to a
 dequantized-operand reference matmul.
 
-Background: With cuBLAS 13.5.1.27 on sm_120, MXFP8 GEMM is only supported in
-the TN layout; NN and NT return ``CUBLAS_STATUS_NOT_SUPPORTED`` from
-``cublasLtMatmulAlgoGetHeuristic``. See ``Testing/cublas_logs/README.md`` and
+Background: With cuBLAS 13.5.1.27 on sm_120, MXFP8 GEMM was only supported in
+the TN layout; NN and NT returned ``CUBLAS_STATUS_NOT_SUPPORTED`` from
+``cublasLtMatmulAlgoGetHeuristic``. cuBLAS 13.6.0.2 adds NN/NT support on
+sm_120; both layouts then run end-to-end and match the dequantized reference
+within MXFP8 tolerance. See ``Testing/cublas_logs/README.md`` and
 ``Testing/repro_mxfp8_layouts.cu`` in this repo for a layout-by-layout cuBLAS
-reproducer. The cases for NN/NT are marked ``strict=True`` xfail on sm_120 so
-that the test suite automatically flags an XPASS when cuBLAS adds support.
+reproducer. NN/NT are marked ``strict=True`` xfail only when the loaded
+cuBLASLt is below the version that adds support, so the suite automatically
+flags an XPASS once cuBLAS is upgraded in-place.
 """
 
 from __future__ import annotations
-
-import os
 
 import pytest
 import torch
@@ -40,6 +41,9 @@ from transformer_engine.pytorch.cpp_extensions.gemm import general_gemm
 
 _MXFP8_AVAILABLE, _MXFP8_SKIP_REASON = te.is_mxfp8_available(return_reason=True)
 
+CUBLASLT_MXFP8_FULL_LAYOUTS_SM120 = 130600
+_CUBLASLT_VERSION = tex.get_cublasLt_version()
+
 
 def _is_sm120() -> bool:
     if not torch.cuda.is_available():
@@ -47,13 +51,19 @@ def _is_sm120() -> bool:
     return torch.cuda.get_device_capability(0) == (12, 0)
 
 
+def _needs_sm120_non_tn_xfail() -> bool:
+    """NN/NT MXFP8 is unsupported by cuBLAS on sm_120 below cuBLASLt 13.6.0.2."""
+    return _is_sm120() and _CUBLASLT_VERSION < CUBLASLT_MXFP8_FULL_LAYOUTS_SM120
+
+
 _SM120_NON_TN_XFAIL = pytest.mark.xfail(
-    _is_sm120(),
+    _needs_sm120_non_tn_xfail(),
     strict=True,
     reason=(
-        "MXFP8 NN/NT GEMM is not supported by cuBLAS on sm_120 (cublasLt 13.5.x"
-        " returns CUBLAS_STATUS_NOT_SUPPORTED from cublasLtMatmulAlgoGetHeuristic)."
-        " Remove this xfail when cuBLAS adds support."
+        f"MXFP8 NN/NT GEMM is not supported by cuBLAS on sm_120 below cuBLASLt"
+        f" {CUBLASLT_MXFP8_FULL_LAYOUTS_SM120} (loaded={_CUBLASLT_VERSION});"
+        " cublasLtMatmulAlgoGetHeuristic returns CUBLAS_STATUS_NOT_SUPPORTED."
+        " Upgrade cuBLAS to ≥ 13.6.0.2 to unblock these layouts."
     ),
 )
 
