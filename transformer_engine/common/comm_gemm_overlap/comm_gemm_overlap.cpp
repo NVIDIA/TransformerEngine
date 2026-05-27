@@ -93,8 +93,8 @@ CommOverlapCore::CommOverlapCore(ncclComm_t nccl_comm_ptr, int tp_rank, int tp_s
   _num_comm_sm = num_comm_sm;
   _is_p2p = is_p2p;
   _atomic_gemm = atomic_gemm;
-  if (transformer_engine::getenv<bool>("UB_SKIPMC")
-      || !transformer_engine::cuda::supports_multicast()) {
+  if (transformer_engine::getenv<bool>("UB_SKIPMC") ||
+      !transformer_engine::cuda::supports_multicast()) {
     _algo_type = kNVTECommGemmAlgoDefault;  // default algo includes fallback to non-multicast
   } else {
     if (_is_p2p) {
