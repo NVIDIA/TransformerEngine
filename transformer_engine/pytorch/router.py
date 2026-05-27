@@ -28,43 +28,43 @@ import transformer_engine_torch as tex
 RoutingMapFormat = tex.NVTERoutingMapFormat
 
 
+# Canonical-case-only string -> int map. No .lower()/.upper() in the hot path.
 _ROUTING_MAP_FORMAT_FROM_STRING = {
-    "bytemap": RoutingMapFormat.BYTEMAP,
-    "bitmap_u8": RoutingMapFormat.BITMAP_U8,
+    "bytemap": int(RoutingMapFormat.BYTEMAP),
+    "bitmap_u8": int(RoutingMapFormat.BITMAP_U8),
 }
+_VALID_ROUTING_MAP_FORMAT_INTS = frozenset(_ROUTING_MAP_FORMAT_FROM_STRING.values())
 
 
-def _validate_routing_map_format(
-    routing_map_format: Union[str, "RoutingMapFormat", int],
-) -> "RoutingMapFormat":
-    """Coerce user-supplied routing_map_format into the NVTERoutingMapFormat enum.
+def _validate_routing_map_format(routing_map_format: Union[str, RoutingMapFormat, int]) -> int:
+    """Coerce user-supplied routing_map_format into a plain int (0 or 1).
 
-    Accepts an enum value, an int with one of the enum's values, or one of the
-    case-insensitive strings ``"bytemap"`` / ``"bitmap_u8"``. String parsing is
-    only supported at this outer API boundary; the rest of the stack uses the
-    enum directly.
+    The autograd Function and tex.* bindings only ever see ints — no enum
+    construction in the hot path. Accepts the enum, an int matching one of the
+    enum's values, or the canonical lowercase strings ``"bytemap"`` /
+    ``"bitmap_u8"``. Other casings/types raise.
     """
-    if isinstance(routing_map_format, RoutingMapFormat):
-        return routing_map_format
-    if isinstance(routing_map_format, str):
-        try:
-            return _ROUTING_MAP_FORMAT_FROM_STRING[routing_map_format.lower()]
-        except KeyError:
-            raise ValueError(
-                "routing_map_format string must be 'bytemap' or 'bitmap_u8'; "
-                f"got {routing_map_format!r}"
-            ) from None
+    # pybind11 enum members inherit from int, so this branch handles both
+    # plain ints and RoutingMapFormat values. We normalize to a plain int so
+    # downstream (autograd Function, tex.*) never sees an enum.
     if isinstance(routing_map_format, int):
-        try:
-            return RoutingMapFormat(routing_map_format)
-        except ValueError:
-            raise ValueError(
-                "routing_map_format int must match a RoutingMapFormat value; "
-                f"got {routing_map_format!r}"
-            ) from None
+        if routing_map_format in _VALID_ROUTING_MAP_FORMAT_INTS:
+            return int(routing_map_format)
+        raise ValueError(
+            f"routing_map_format int must be one of {sorted(_VALID_ROUTING_MAP_FORMAT_INTS)}; "
+            f"got {routing_map_format!r}"
+        )
+    if isinstance(routing_map_format, str):
+        val = _ROUTING_MAP_FORMAT_FROM_STRING.get(routing_map_format)
+        if val is not None:
+            return val
+        raise ValueError(
+            "routing_map_format string must be 'bytemap' or 'bitmap_u8' (lowercase); "
+            f"got {routing_map_format!r}"
+        )
     raise TypeError(
-        "routing_map_format must be a RoutingMapFormat enum, an int matching one "
-        f"of its values, or 'bytemap' / 'bitmap_u8'; got {routing_map_format!r}"
+        "routing_map_format must be an int, a RoutingMapFormat enum, or 'bytemap' / "
+        f"'bitmap_u8'; got {routing_map_format!r}"
     )
 
 
@@ -85,15 +85,14 @@ class FusedTopkScoreFunction(torch.autograd.Function):
         scaling_factor: Optional[float],
         score_function: str,
         expert_bias: Optional[torch.Tensor],
-        routing_map_format: "RoutingMapFormat",
+        routing_map_format: int,
     ):
         # pylint: disable=missing-function-docstring
-        # Save the shape of the logits
-        tensor_shape = logits.shape
-        logits = logits.view(-1, tensor_shape[-1])
-        # Get the metadata of the viewed logits
-        num_tokens = logits.size(0)
-        num_experts = logits.size(1)
+        # The C++ extension handles N-D logits directly: it computes
+        # num_tokens = product of leading dims and num_experts = last dim,
+        # allocates probs / routing_map / intermediate_output at full N-D
+        # shape, and wraps tensors with an explicit 2D view *only* for the
+        # kernel call. No .view() is needed on either side of the FFI here.
         probs, routing_map, intermediate_output = tex.fused_topk_with_score_function_fwd(
             logits,
             topk,
@@ -105,38 +104,26 @@ class FusedTopkScoreFunction(torch.autograd.Function):
             expert_bias,
             routing_map_format,
         )
-        # Save the flat 2D routing_map for backward (kernel indexes by
-        # num_tokens x trailing_dim), then restore the leading dims of the
-        # input on the returned outputs. The trailing dim of routing_map
-        # depends on the format: num_experts for BYTEMAP, ceil(num_experts/8)
-        # for BITMAP_U8.
         ctx.save_for_backward(routing_map, intermediate_output)
-        probs = probs.view(tensor_shape)
-        routing_map = routing_map.view(*tensor_shape[:-1], routing_map.shape[-1])
-        ctx.num_tokens = num_tokens
-        ctx.num_experts = num_experts
         ctx.use_pre_softmax = use_pre_softmax
         ctx.topk = topk
         ctx.scaling_factor = scaling_factor
         ctx.score_function = score_function
         ctx.routing_map_format = routing_map_format
-        ctx.logits_dtype = logits.dtype
         return probs, routing_map
 
     @staticmethod
     def backward(ctx, grad_probs, _):
         # pylint: disable=missing-function-docstring
         routing_map, intermediate_output = ctx.saved_tensors
-        # Save the shape of the grad_probs
-        tensor_shape = grad_probs.shape
-        # Adjust the shape of the grad_probs to 2D shape
-        grad_probs = grad_probs.contiguous().view(-1, tensor_shape[-1])
-        grad_logits = torch.empty(
-            (ctx.num_tokens, ctx.num_experts), dtype=ctx.logits_dtype, device=grad_probs.device
-        )
+        # grad_probs is N-D matching the original logits shape. Allocate
+        # grad_logits with the same shape so no .view() is needed on either
+        # side; the C++ extension wraps with an explicit 2D shape for the
+        # kernel call.
+        if not grad_probs.is_contiguous():
+            grad_probs = grad_probs.contiguous()
+        grad_logits = torch.empty_like(grad_probs)
         tex.fused_topk_with_score_function_bwd(
-            ctx.num_tokens,
-            ctx.num_experts,
             routing_map,
             intermediate_output,
             grad_probs,
@@ -147,8 +134,6 @@ class FusedTopkScoreFunction(torch.autograd.Function):
             ctx.score_function,
             ctx.routing_map_format,
         )
-        # Restore the shape
-        grad_logits = grad_logits.view(tensor_shape)
         return grad_logits, None, None, None, None, None, None, None, None
 
 
@@ -225,15 +210,10 @@ class FusedComputeScoresForMoEAuxLoss(torch.autograd.Function):
         logits: torch.Tensor,
         topk: int,
         score_function: str,
-        routing_map_format: "RoutingMapFormat",
+        routing_map_format: int,
     ):
         # pylint: disable=missing-function-docstring
-        # Save the shape of the logits
-        tensor_shape = logits.shape
-        logits = logits.view(-1, tensor_shape[-1])
-        # Get the metadata of the viewed logits
-        num_tokens = logits.size(0)
-        num_experts = logits.size(1)
+        # C++ extension handles N-D logits directly (see FusedTopkScoreFunction.forward).
         scores, routing_map, intermediate_output = tex.fused_score_for_moe_aux_loss_fwd(
             logits=logits,
             topk=topk,
@@ -243,38 +223,30 @@ class FusedComputeScoresForMoEAuxLoss(torch.autograd.Function):
         ctx.save_for_backward(intermediate_output)
         ctx.topk = topk
         ctx.score_function = score_function
-        ctx.num_tokens = num_tokens
-        ctx.num_experts = num_experts
+        # scores is always FP32 (see module precision notes) but logits/grad_logits
+        # may be bf16/fp16. Remember the input dtype so backward can allocate
+        # grad_logits in the correct dtype.
         ctx.logits_dtype = logits.dtype
-        # Restore the leading dims of the input on both outputs. The trailing
-        # dim of routing_map depends on the format: num_experts for BYTEMAP,
-        # ceil(num_experts/8) for BITMAP_U8.
-        scores = scores.view(tensor_shape)
-        routing_map = routing_map.view(*tensor_shape[:-1], routing_map.shape[-1])
         return routing_map, scores
 
     @staticmethod
     def backward(ctx, _, grad_scores):
         # pylint: disable=missing-function-docstring
         intermediate_output = ctx.saved_tensors[0]
-        # Save the shape of the grad_scores
-        tensor_shape = grad_scores.shape
-        # Adjust the shape of the grad_scores to 2D shape
-        grad_scores = grad_scores.contiguous().view(-1, tensor_shape[-1])
+        if not grad_scores.is_contiguous():
+            grad_scores = grad_scores.contiguous()
+        # grad_logits has the same shape as grad_scores (N-D) but the logits dtype
+        # (gradient must match the input dtype, not the FP32 scores dtype).
         grad_logits = torch.empty(
-            (ctx.num_tokens, ctx.num_experts), dtype=ctx.logits_dtype, device=grad_scores.device
+            grad_scores.shape, dtype=ctx.logits_dtype, device=grad_scores.device
         )
         tex.fused_score_for_moe_aux_loss_bwd(
-            num_tokens=ctx.num_tokens,
-            num_experts=ctx.num_experts,
             intermediate_output=intermediate_output,
             grad_scores=grad_scores,
             grad_logits=grad_logits,
             topk=ctx.topk,
             score_function=ctx.score_function,
         )
-        # Restore the shape
-        grad_logits = grad_logits.view(tensor_shape)
         return grad_logits, None, None, None
 
 

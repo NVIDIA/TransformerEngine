@@ -136,24 +136,27 @@ void init_router_bindings(pybind11::module &m) {
   pybind11::enum_<NVTERoutingMapFormat>(m, "NVTERoutingMapFormat", pybind11::module_local())
       .value("BYTEMAP", NVTE_ROUTING_MAP_FORMAT_BYTEMAP)
       .value("BITMAP_U8", NVTE_ROUTING_MAP_FORMAT_BITMAP_U8);
+  // routing_map_format is passed as int (not the enum) on the PyTorch hot
+  // path; see CLAUDE.md "CPU overhead in PyTorch wrappers".
   m.def("fused_topk_with_score_function_fwd", &fused_topk_with_score_function_fwd,
         py::arg("logits"), py::arg("topk"), py::arg("use_pre_softmax"), py::arg("num_groups"),
         py::arg("group_topk"), py::arg("scaling_factor"), py::arg("score_function"),
-        py::arg("expert_bias"), py::arg("routing_map_format") = NVTE_ROUTING_MAP_FORMAT_BYTEMAP,
+        py::arg("expert_bias"),
+        py::arg("routing_map_format") = static_cast<int>(NVTE_ROUTING_MAP_FORMAT_BYTEMAP),
         "Fused topk with score function fwd");
   m.def("fused_topk_with_score_function_bwd", &fused_topk_with_score_function_bwd,
-        py::arg("num_tokens"), py::arg("num_experts"), py::arg("routing_map"),
-        py::arg("intermediate_output"), py::arg("grad_probs"), py::arg("grad_logits"),
-        py::arg("topk"), py::arg("use_pre_softmax"), py::arg("scaling_factor"),
-        py::arg("score_function"), py::arg("routing_map_format") = NVTE_ROUTING_MAP_FORMAT_BYTEMAP,
+        py::arg("routing_map"), py::arg("intermediate_output"), py::arg("grad_probs"),
+        py::arg("grad_logits"), py::arg("topk"), py::arg("use_pre_softmax"),
+        py::arg("scaling_factor"), py::arg("score_function"),
+        py::arg("routing_map_format") = static_cast<int>(NVTE_ROUTING_MAP_FORMAT_BYTEMAP),
         "Fused topk with score function bwd");
   m.def("fused_score_for_moe_aux_loss_fwd", &fused_score_for_moe_aux_loss_fwd, py::arg("logits"),
         py::arg("topk"), py::arg("score_function"),
-        py::arg("routing_map_format") = NVTE_ROUTING_MAP_FORMAT_BYTEMAP,
+        py::arg("routing_map_format") = static_cast<int>(NVTE_ROUTING_MAP_FORMAT_BYTEMAP),
         "Fused aux loss with score function fwd");
   m.def("fused_score_for_moe_aux_loss_bwd", &fused_score_for_moe_aux_loss_bwd,
-        py::arg("num_tokens"), py::arg("num_experts"), py::arg("intermediate_output"),
-        py::arg("grad_scores"), py::arg("grad_logits"), py::arg("topk"), py::arg("score_function"),
+        py::arg("intermediate_output"), py::arg("grad_scores"), py::arg("grad_logits"),
+        py::arg("topk"), py::arg("score_function"),
         "Fused aux loss with score function bwd");
   m.def("fused_moe_aux_loss_fwd", &fused_moe_aux_loss_fwd, py::arg("probs"),
         py::arg("tokens_per_expert"), py::arg("total_num_tokens"), py::arg("num_experts"),
