@@ -4,7 +4,7 @@
 
 """Tests for GroupedTensor class"""
 
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 import pytest
 import torch
 import transformer_engine.pytorch as te
@@ -432,88 +432,197 @@ class TestGroupedTensor:
         assert dbias.shape == (num_tensors, last_dim)
         assert torch.all(dbias == 0)
 
+    @pytest.mark.parametrize(
+        "quantization",
+        [
+            pytest.param(
+                "fp8_current_scaling",
+                marks=pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8),
+            ),
+            pytest.param(
+                "mxfp8",
+                marks=pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8),
+            ),
+        ],
+    )
     @pytest.mark.parametrize("output_dbias", [False, True])
-    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
-    def test_group_quantize_cudagraph_capturable(self, output_dbias: bool) -> None:
+    @pytest.mark.parametrize("shape_case", ["all_same_first", "varying_first", "varying_last"])
+    def test_group_quantize_cudagraph_capturable(
+        self, quantization: str, output_dbias: bool, shape_case: str
+    ) -> None:
         """Ensure group_quantize is CUDA graph capturable."""
-        num_tensors = 2
-        shape = [(512, 1024) for _ in range(num_tensors)]
-        input_tensors = [torch.randn(s, dtype=torch.bfloat16, device="cuda") for s in shape]
-        grouped_input = torch.cat(input_tensors, dim=0)
+        if output_dbias and quantization != "mxfp8":
+            pytest.skip("bgrad_group_quantize only supports MXFP8")
+        if output_dbias and shape_case == "varying_last":
+            pytest.skip("bgrad_group_quantize does not accept last_dims")
 
-        quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        if shape_case == "varying_last":
+            rows = 128
+            last_dims_host = [256, 128, 384]
+            num_tensors = len(last_dims_host)
+            total_cols = sum(last_dims_host)
+            flat_input = torch.empty(rows * total_cols, dtype=torch.bfloat16, device="cuda")
+            offset = 0
+            for cols in last_dims_host:
+                member = torch.randn(rows, cols, dtype=torch.bfloat16, device="cuda")
+                flat_input[offset : offset + member.numel()].copy_(member.reshape(-1))
+                offset += member.numel()
+            grouped_input = flat_input.view(rows, total_cols)
+            first_dims = None
+            last_dims = torch.tensor(last_dims_host, dtype=torch.int64, device="cuda")
+        else:
+            if shape_case == "varying_first":
+                first_dims_host = [256, 128, 384]
+            else:
+                first_dims_host = [512, 512]
+            num_tensors = len(first_dims_host)
+            hidden = 1024
+            shape = [(r, hidden) for r in first_dims_host]
+            input_tensors = [
+                torch.randn(s, dtype=torch.bfloat16, device="cuda") for s in shape
+            ]
+            grouped_input = torch.cat(input_tensors, dim=0)
+            first_dims = torch.tensor(first_dims_host, dtype=torch.int64, device="cuda")
+            last_dims = None
+
+        if quantization == "mxfp8":
+            quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        else:
+            quantizer = Float8CurrentScalingQuantizer(
+                fp8_dtype=tex.DType.kFloat8E4M3,
+                device="cuda",
+                force_pow_2_scales=False,
+                amax_epsilon=0.0,
+            )
         quantizer.set_usage(rowwise=True, columnwise=False)
-        first_dims = torch.tensor(
-            [shape[0][0] for _ in range(num_tensors)],
-            dtype=torch.int64,
-            device="cuda",
-        )
 
         torch.cuda.synchronize()
         static_input = grouped_input.clone()
-        static_first_dims = first_dims.clone()
+        static_first_dims = first_dims.clone() if first_dims is not None else None
+        static_last_dims = last_dims.clone() if last_dims is not None else None
+
+        def _run_group_quantize(input_tensor):
+            """Return (output, dbias) where dbias is None when output_dbias is False."""
+            if output_dbias:
+                out, dbias = tex.bgrad_group_quantize(
+                    input_tensor, quantizer, num_tensors, static_first_dims
+                )
+                return out, dbias
+            out = tex.group_quantize(
+                input_tensor,
+                quantizer,
+                num_tensors,
+                static_first_dims,
+                last_dims=static_last_dims,
+            )
+            return out, None
 
         # Warmup to initialize kernels and allocator state
-        if output_dbias:
-            _ = tex.bgrad_group_quantize(static_input, quantizer, num_tensors, static_first_dims)
-        else:
-            _ = tex.group_quantize(static_input, quantizer, num_tensors, static_first_dims)
+        _ = _run_group_quantize(static_input)
         torch.cuda.synchronize()
 
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
-            if output_dbias:
-                static_output, static_dbias = tex.bgrad_group_quantize(
-                    static_input,
-                    quantizer,
-                    num_tensors,
-                    static_first_dims,
-                )
-            else:
-                static_output = tex.group_quantize(
-                    static_input,
-                    quantizer,
-                    num_tensors,
-                    static_first_dims,
-                )
+            static_output, static_dbias = _run_group_quantize(static_input)
 
-        fresh_input = torch.cat(
-            [torch.randn(s, dtype=torch.bfloat16, device="cuda") for s in shape],
-            dim=0,
-        )
+        fresh_input = torch.randn_like(grouped_input)
         static_input.copy_(fresh_input)
         graph.replay()
         torch.cuda.synchronize()
 
-        if output_dbias:
-            expected_out, expected_dbias = tex.bgrad_group_quantize(
-                static_input,
-                quantizer,
-                num_tensors,
-                static_first_dims,
-            )
-        else:
-            expected_out = tex.group_quantize(
-                static_input, quantizer, num_tensors, static_first_dims
-            )
+        expected_out, expected_dbias = _run_group_quantize(static_input)
         assert torch.equal(static_output.rowwise_data, expected_out.rowwise_data)
         assert torch.equal(static_output.scale_inv, expected_out.scale_inv)
         if output_dbias:
             assert torch.allclose(static_dbias, expected_dbias)
 
     @pytest.mark.parametrize("mode", ["rowwise", "columnwise", "both"])
-    @pytest.mark.parametrize("first_dims_host", [[96, 96, 96], [64, 128, 96]])
+    @pytest.mark.parametrize(
+        "shape_case",
+        ["uniform", "varying_first", "empty_split", "varying_last"],
+    )
+    @pytest.mark.parametrize("overallocated", [False, True])
     @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-    def test_group_quantize_fp8_current_scaling_overallocated_modes(
+    def test_group_quantize_fp8_current_scaling(
         self,
         mode: str,
-        first_dims_host: List[int],
+        shape_case: str,
+        overallocated: bool,
     ) -> None:
-        """Test grouped FP8 current scaling modes ignore overallocated tail storage."""
-        num_tensors = 3
-        hidden_size = 256
-        actual_rows = sum(first_dims_host)
-        allocated_rows = actual_rows * 2
+        """Test grouped FP8 current scaling matches per-tensor current scaling
+        across shape topologies:
+
+        - ``uniform``: no ``first_dims``/``last_dims`` (kernel partitions implicitly).
+        - ``varying_first``: ``first_dims`` set, values vary.
+        - ``empty_split``: ``first_dims`` set with one zero entry.
+        - ``varying_last``: ``last_dims`` set, values vary.
+
+        When ``overallocated`` is True the flat buffer is sized for twice the actual
+        data and the unused tail must be left untouched by the kernel. Overallocation
+        is skipped for ``uniform``
+        """
+        if overallocated and shape_case in ("uniform", "varying_last"):
+            pytest.skip(
+                "Overallocation is not meaningful for this shape_case "
+                "(implicit partitioning / varying-last semantics)."
+            )
+
+        # Per-tensor shapes for each shape_case.
+        if shape_case == "uniform":
+            per_tensor_shapes = [(128, 256)] * 3
+            first_dims_host = None
+            last_dims_host = None
+        elif shape_case == "varying_first":
+            first_dims_host = [64, 128, 96]
+            last_dims_host = None
+            per_tensor_shapes = [(r, 256) for r in first_dims_host]
+        elif shape_case == "empty_split":
+            first_dims_host = [128, 0, 96]
+            last_dims_host = None
+            per_tensor_shapes = [(r, 256) for r in first_dims_host]
+        elif shape_case == "varying_last":
+            first_dims_host = None
+            last_dims_host = [513, 1027, 259]
+            per_tensor_shapes = [(256, c) for c in last_dims_host]
+        else:
+            raise ValueError(f"Unknown shape_case: {shape_case}")
+
+        num_tensors = len(per_tensor_shapes)
+        first_dims = (
+            torch.tensor(first_dims_host, dtype=torch.int64, device="cuda")
+            if first_dims_host is not None
+            else None
+        )
+        last_dims = (
+            torch.tensor(last_dims_host, dtype=torch.int64, device="cuda")
+            if last_dims_host is not None
+            else None
+        )
+
+        # Per-tensor data + flat buffer (tensor i occupies a contiguous chunk).
+        input_tensors = [
+            torch.randn(s, dtype=torch.bfloat16, device="cuda") for s in per_tensor_shapes
+        ]
+        actual_numel = sum(t.numel() for t in input_tensors)
+        allocated_numel = actual_numel * 2 if overallocated else actual_numel
+        flat_buffer = torch.empty(allocated_numel, dtype=torch.bfloat16, device="cuda")
+        offset = 0
+        for t in input_tensors:
+            flat_buffer[offset : offset + t.numel()].copy_(t.reshape(-1))
+            offset += t.numel()
+        if overallocated:
+            flat_buffer[actual_numel:].fill_(10000.0)
+
+        # View flat buffer as the 2D shape expected by group_quantize.
+        if shape_case == "varying_last":
+            common_first = per_tensor_shapes[0][0]
+            total_last = sum(last_dims_host)
+            grouped_input = flat_buffer.view(common_first, total_last)
+        else:
+            common_last = per_tensor_shapes[0][1]
+            allocated_first = allocated_numel // common_last
+            grouped_input = flat_buffer.view(allocated_first, common_last)
+
         requested_rowwise = mode in ("rowwise", "both")
         requested_columnwise = mode in ("columnwise", "both")
         rowwise = requested_rowwise or (
@@ -521,22 +630,6 @@ class TestGroupedTensor:
         )
         columnwise = requested_columnwise and not is_non_tn_fp8_gemm_supported()
 
-        grouped_input = torch.empty(
-            allocated_rows,
-            hidden_size,
-            dtype=torch.bfloat16,
-            device="cuda",
-        )
-        input_tensors = []
-        row_offset = 0
-        for rows in first_dims_host:
-            tensor = torch.randn(rows, hidden_size, dtype=torch.bfloat16, device="cuda")
-            grouped_input[row_offset : row_offset + rows].copy_(tensor)
-            input_tensors.append(tensor)
-            row_offset += rows
-        grouped_input[actual_rows:].fill_(10000.0)
-
-        first_dims = torch.tensor(first_dims_host, dtype=torch.int64, device="cuda")
         quantizer = Float8CurrentScalingQuantizer(
             fp8_dtype=tex.DType.kFloat8E4M3,
             device="cuda",
@@ -545,23 +638,71 @@ class TestGroupedTensor:
         )
         quantizer.set_usage(rowwise=requested_rowwise, columnwise=requested_columnwise)
 
-        grouped_output = tex.group_quantize(grouped_input, quantizer, num_tensors, first_dims)
-        tail_start = actual_rows * hidden_size
-        tail_sentinel = 0xA5
-        if rowwise:
-            grouped_output.rowwise_data[tail_start:].fill_(tail_sentinel)
-        if columnwise:
-            grouped_output.columnwise_data[tail_start:].fill_(tail_sentinel)
-
         grouped_output = tex.group_quantize(
-            grouped_input,
-            quantizer,
-            num_tensors,
-            first_dims,
-            output=grouped_output,
+            grouped_input, quantizer, num_tensors, first_dims, last_dims=last_dims
         )
 
-        expected_amax = torch.stack([tensor.abs().max().float() for tensor in input_tensors])
+        # Optional overallocation tail-untouched check: paint sentinel into the
+        # tail and re-run with the same output buffer; the kernel must leave the
+        # sentinel intact.
+        tail_sentinel = 0xA5
+        tail_start: Optional[int] = None
+        if overallocated:
+            tail_start = actual_numel
+            if rowwise:
+                grouped_output.rowwise_data[tail_start:].fill_(tail_sentinel)
+            if columnwise:
+                grouped_output.columnwise_data[tail_start:].fill_(tail_sentinel)
+            grouped_output = tex.group_quantize(
+                grouped_input,
+                quantizer,
+                num_tensors,
+                first_dims,
+                output=grouped_output,
+                last_dims=last_dims,
+            )
+
+        # Metadata validation for the varying-last code path.
+        if shape_case == "varying_last":
+            assert grouped_output.first_dims is None
+            assert torch.equal(grouped_output.last_dims, last_dims)
+
+        self._assert_fp8_cs_group_quantize_matches_reference(
+            grouped_output=grouped_output,
+            input_tensors=input_tensors,
+            rowwise=rowwise,
+            columnwise=columnwise,
+            tail_start=tail_start,
+            tail_sentinel=tail_sentinel,
+        )
+
+    @staticmethod
+    def _assert_fp8_cs_group_quantize_matches_reference(
+        *,
+        grouped_output,
+        input_tensors: List[torch.Tensor],
+        rowwise: bool,
+        columnwise: bool,
+        tail_start: Optional[int],
+        tail_sentinel: int,
+    ) -> None:
+        """Validate amax/scale/scale_inv/per-tensor data of an FP8 current-scaling
+        grouped output against per-tensor Float8CurrentScalingQuantizer references.
+
+        When ``tail_start`` is not None, also assert that bytes past ``tail_start``
+        in rowwise/columnwise data buffers equal ``tail_sentinel`` (overallocation
+        tail-untouched check).
+        """
+        expected_amax = torch.stack(
+            [
+                (
+                    tensor.abs().max().float()
+                    if tensor.numel() > 0
+                    else torch.zeros((), dtype=torch.float32, device="cuda")
+                )
+                for tensor in input_tensors
+            ]
+        )
         torch.testing.assert_close(grouped_output.amax, expected_amax, rtol=0.0, atol=0.0)
 
         scale_inv = grouped_output.scale_inv
@@ -583,13 +724,16 @@ class TestGroupedTensor:
 
         expected_rowwise = []
         expected_columnwise = []
-        for tensor_id, tensor in enumerate(input_tensors):
-            ref_quantizer = Float8Quantizer(
-                scale=grouped_output.scale[tensor_id : tensor_id + 1],
-                amax=grouped_output.amax[tensor_id : tensor_id + 1],
+        for tensor in input_tensors:
+            if tensor.numel() == 0:
+                continue
+            ref_quantizer = Float8CurrentScalingQuantizer(
                 fp8_dtype=tex.DType.kFloat8E4M3,
+                device="cuda",
                 rowwise=True,
                 columnwise=False,
+                force_pow_2_scales=False,
+                amax_epsilon=0.0,
             )
             ref = ref_quantizer(tensor)
             ref_rowwise_data = ref._data.reshape(tensor.shape)
@@ -598,20 +742,22 @@ class TestGroupedTensor:
             if columnwise:
                 expected_columnwise.append(ref_rowwise_data.T.contiguous().reshape(-1))
 
-        if rowwise:
+        if rowwise and expected_rowwise:
             expected = torch.cat(expected_rowwise)
             assert torch.equal(grouped_output.rowwise_data[: expected.numel()], expected)
-            assert torch.equal(
-                grouped_output.rowwise_data[tail_start:],
-                torch.full_like(grouped_output.rowwise_data[tail_start:], tail_sentinel),
-            )
-        if columnwise:
+            if tail_start is not None:
+                assert torch.equal(
+                    grouped_output.rowwise_data[tail_start:],
+                    torch.full_like(grouped_output.rowwise_data[tail_start:], tail_sentinel),
+                )
+        if columnwise and expected_columnwise:
             expected = torch.cat(expected_columnwise)
             assert torch.equal(grouped_output.columnwise_data[: expected.numel()], expected)
-            assert torch.equal(
-                grouped_output.columnwise_data[tail_start:],
-                torch.full_like(grouped_output.columnwise_data[tail_start:], tail_sentinel),
-            )
+            if tail_start is not None:
+                assert torch.equal(
+                    grouped_output.columnwise_data[tail_start:],
+                    torch.full_like(grouped_output.columnwise_data[tail_start:], tail_sentinel),
+                )
 
     @pytest.mark.parametrize(
         "shape",
