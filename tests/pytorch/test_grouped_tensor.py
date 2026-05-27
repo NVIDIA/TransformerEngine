@@ -863,8 +863,7 @@ class TestGroupedTensor:
         assert grouped_tensor.rowwise_data is None
         assert grouped_tensor.logical_shape == (0, 0)
 
-    def test_grouped_linear_load_state_dict_multi_to_single_param(
-        self, tmp_path) -> None:
+    def test_grouped_linear_load_state_dict_multi_to_single_param(self, tmp_path) -> None:
         """Load per-GEMM checkpoint from disk into single grouped parameter format."""
         num_gemms = 3
         in_features = 64
@@ -919,8 +918,7 @@ class TestGroupedTensor:
         for loaded_bias, expected_bias in zip(loaded_biases, expected_biases):
             assert torch.equal(loaded_bias.reshape(-1), expected_bias.reshape(-1))
 
-    def test_grouped_linear_load_state_dict_single_to_multi_param(
-        self, tmp_path) -> None:
+    def test_grouped_linear_load_state_dict_single_to_multi_param(self, tmp_path) -> None:
         """Load grouped-parameter checkpoint from disk into per-GEMM parameter format."""
         num_gemms = 3
         in_features = 64
