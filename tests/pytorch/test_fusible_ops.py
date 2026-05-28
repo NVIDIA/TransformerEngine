@@ -80,6 +80,9 @@ if mxfp8_available:
 if nvfp4_available:
     _quantization_list.append("nvfp4")
     _quantization_list.append("nvfp4_4over6")
+_grouped_mlp_quantization_list = list(_quantization_list)
+if nvfp4_available:
+    _grouped_mlp_quantization_list.append("nvfp4_rht")
 
 
 @pytest.fixture(autouse=True, scope="function")
@@ -109,7 +112,10 @@ def maybe_skip_quantization(
         pytest.skip(reason_for_no_fp8)
     if quantization == "mxfp8" and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-    if quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6") and not nvfp4_available:
+    if (
+        quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht")
+        and not nvfp4_available
+    ):
         pytest.skip(reason_for_no_nvfp4)
 
     # Check dims
@@ -122,14 +128,14 @@ def maybe_skip_quantization(
         elif quantization == "mxfp8":
             if math.prod(dims[:-1]) % 32 != 0 or dims[-1] % 32 != 0:
                 pytest.skip("MXFP8 GEMMs require dims that are divisible by 32")
-        elif quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
+        elif quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht"):
             if math.prod(dims[:-1]) % 16 != 0 or dims[-1] % 16 != 0:
                 pytest.skip("NVFP4 GEMMs require dims that are divisible by 16")
 
     # Check dtype
     if dtype is not None:
         if (
-            quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6")
+            quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht")
             and dtype != torch.bfloat16
         ):
             pytest.skip("NVFP4 quantization is only supported with BF16 data")
@@ -187,10 +193,11 @@ def make_reference_and_test_tensors(
         test = quantizer(test)
     elif quantization == "mxfp8":
         test = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)(test)
-    elif quantization in ("nvfp4", "nvfp4_row_scaled"):
+    elif quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_rht"):
+        with_rht = quantization == "nvfp4_rht"
         test = NVFP4Quantizer(
-            with_rht=False,
-            with_post_rht_amax=False,
+            with_rht=with_rht,
+            with_post_rht_amax=with_rht,
             with_2d_quantization=False,
             stochastic_rounding=False,
             with_random_sign_mask=False,
@@ -3685,7 +3692,7 @@ class TestSequentialModules:
 
     @pytest.mark.parametrize("bias", (False, True))
     @pytest.mark.parametrize("dtype", _dtypes)
-    @pytest.mark.parametrize("quantization", _quantization_list)
+    @pytest.mark.parametrize("quantization", _grouped_mlp_quantization_list)
     @pytest.mark.parametrize("single_grouped_weight", (False, True))
     @pytest.mark.parametrize("single_grouped_bias", (False, True))
     @pytest.mark.parametrize("accumulate_into_main_grad", (False, True))
@@ -3755,22 +3762,14 @@ class TestSequentialModules:
             pytest.skip("NVFP4 4over6 grouped quantization is not supported")
         if (
             with_quantization
-            and quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6")
+            and quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht")
             and activation.startswith("scaled_clamped_qgeglu")
             and bias
         ):
             # TODO: ksivaman: Need to debug numerics for this case.
             pytest.skip("Bias/dbias not yet supported in NVFP4 fused grouped MLP with GeGLU")
         fc1_out_features = 2 * hidden_size if activation_is_glu else hidden_size
-        use_nvfp4_rht_recipe = (
-            quantization == "nvfp4"
-            and activation_is_glu
-            and glu_interleave_size == 32
-            and dtype in (torch.bfloat16, torch.float16)
-            and te_ops.fused.ForwardGroupedMLP_CuTeGEMMGLU_MXFP8.is_supported()
-            and te_ops.fused.BackwardGroupedMLP_CuTeGEMMDGLU_MXFP8.is_supported()
-        )
-
+        use_nvfp4_rht_recipe = quantization == "nvfp4_rht"
         # Activation parameters for clamped QGeGLU variants
         if activation == "scaled_clamped_qgeglu_custom":
             geglu_limit = 5.0
@@ -3891,75 +3890,89 @@ class TestSequentialModules:
         y_ref.backward(dy_ref)
 
         # Construct operations
-        recipe_kwargs = {}
-        if use_nvfp4_rht_recipe:
-            recipe_kwargs["disable_rht"] = False
-        recipe = make_recipe(quantization, **recipe_kwargs)
-        if activation == "scaled_clamped_qgeglu_custom":
-            scaled_act = te_ops.ScaledClampedQGeGLU(
-                glu_interleave_size=glu_interleave_size,
-                limit=geglu_limit,
-                alpha=geglu_alpha,
-                glu_linear_offset=geglu_offset,
-            )
-        with te.quantized_model_init(enabled=with_quantization, recipe=recipe):
-            fc1 = te_ops.GroupedLinear(
-                group_size,
-                hidden_size,
-                fc1_out_features,
-                bias=bias,
-                device=device,
-                dtype=dtype,
-                single_grouped_weight=single_grouped_weight,
-                single_grouped_bias=single_grouped_bias,
-                accumulate_into_main_grad=accumulate_into_main_grad,
-                delay_wgrad_compute=delay_wgrad_compute,
-            )
+        recipe = make_recipe(quantization)
 
-            fc2 = te_ops.GroupedLinear(
-                group_size,
-                hidden_size,
-                hidden_size,
-                bias=bias,
-                device=device,
-                dtype=dtype,
-                single_grouped_weight=single_grouped_weight,
-                single_grouped_bias=single_grouped_bias,
-                accumulate_into_main_grad=accumulate_into_main_grad,
-                delay_wgrad_compute=delay_wgrad_compute,
-                scale_bias=bias,
-            )
-            module = te_ops.Sequential(
-                fc1,
-                scaled_act,
-                fc2,
-            )
+        def _make_scaled_act():
+            if activation == "scaled_swiglu":
+                return te_ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
+            if activation == "scaled_clamped_qgeglu_custom":
+                return te_ops.ScaledClampedQGeGLU(
+                    glu_interleave_size=glu_interleave_size,
+                    limit=geglu_limit,
+                    alpha=geglu_alpha,
+                    glu_linear_offset=geglu_offset,
+                )
+            if activation.startswith("scaled_clamped_qgeglu"):
+                return te_ops.ScaledClampedQGeGLU(glu_interleave_size=glu_interleave_size)
+            if activation == "scaled_srelu":
+                return te_ops.ScaledSReLU()
+            raise ValueError(f"Unexpected grouped MLP activation ({activation})")
+
+        def _make_module():
+            with te.quantized_model_init(enabled=with_quantization, recipe=recipe):
+                fc1_op = te_ops.GroupedLinear(
+                    group_size,
+                    hidden_size,
+                    fc1_out_features,
+                    bias=bias,
+                    device=device,
+                    dtype=dtype,
+                    single_grouped_weight=single_grouped_weight,
+                    single_grouped_bias=single_grouped_bias,
+                    accumulate_into_main_grad=accumulate_into_main_grad,
+                    delay_wgrad_compute=delay_wgrad_compute,
+                )
+
+                fc2_op = te_ops.GroupedLinear(
+                    group_size,
+                    hidden_size,
+                    hidden_size,
+                    bias=bias,
+                    device=device,
+                    dtype=dtype,
+                    single_grouped_weight=single_grouped_weight,
+                    single_grouped_bias=single_grouped_bias,
+                    accumulate_into_main_grad=accumulate_into_main_grad,
+                    delay_wgrad_compute=delay_wgrad_compute,
+                    scale_bias=bias,
+                )
+                return te_ops.Sequential(fc1_op, _make_scaled_act(), fc2_op), fc1_op, fc2_op
+
+        module, fc1, fc2 = _make_module()
+        if use_nvfp4_rht_recipe:
+            module_ref, fc1_ref, fc2_ref = _make_module()
+        else:
+            module_ref, fc1_ref, fc2_ref = None, None, None
 
         # Copy weights
         with torch.no_grad():
-            if single_grouped_weight:
-                fc1_weights = fc1.weight.quantized_tensors
-                if fc1_weights is None:
-                    fc1_weights = fc1.weight.split_into_quantized_tensors()
-                fc2_weights = fc2.weight.quantized_tensors
-                if fc2_weights is None:
-                    fc2_weights = fc2.weight.split_into_quantized_tensors()
-            for group_idx in range(group_size):
+            target_modules = [(fc1, fc2)]
+            if use_nvfp4_rht_recipe:
+                target_modules.append((fc1_ref, fc2_ref))
+            for fc1_target, fc2_target in target_modules:
                 if single_grouped_weight:
-                    fc1_weights[group_idx].copy_(fc1_ws_test[group_idx])
-                    fc2_weights[group_idx].copy_(fc2_ws_test[group_idx])
-                else:
-                    getattr(fc1, f"weight{group_idx}").copy_(fc1_ws_test[group_idx])
-                    getattr(fc2, f"weight{group_idx}").copy_(fc2_ws_test[group_idx])
-                if bias:
-                    if single_grouped_bias:
-                        fc1_bparts = fc1.bias.split_into_quantized_tensors()
-                        fc2_bparts = fc2.bias.split_into_quantized_tensors()
-                        fc1_bparts[group_idx].reshape(-1).copy_(fc1_bs_test[group_idx])
-                        fc2_bparts[group_idx].reshape(-1).copy_(fc2_bs_test[group_idx])
+                    fc1_weights = fc1_target.weight.quantized_tensors
+                    if fc1_weights is None:
+                        fc1_weights = fc1_target.weight.split_into_quantized_tensors()
+                    fc2_weights = fc2_target.weight.quantized_tensors
+                    if fc2_weights is None:
+                        fc2_weights = fc2_target.weight.split_into_quantized_tensors()
+                for group_idx in range(group_size):
+                    if single_grouped_weight:
+                        fc1_weights[group_idx].copy_(fc1_ws_test[group_idx])
+                        fc2_weights[group_idx].copy_(fc2_ws_test[group_idx])
                     else:
-                        getattr(fc1, f"bias{group_idx}").copy_(fc1_bs_test[group_idx])
-                        getattr(fc2, f"bias{group_idx}").copy_(fc2_bs_test[group_idx])
+                        getattr(fc1_target, f"weight{group_idx}").copy_(fc1_ws_test[group_idx])
+                        getattr(fc2_target, f"weight{group_idx}").copy_(fc2_ws_test[group_idx])
+                    if bias:
+                        if single_grouped_bias:
+                            fc1_bparts = fc1_target.bias.split_into_quantized_tensors()
+                            fc2_bparts = fc2_target.bias.split_into_quantized_tensors()
+                            fc1_bparts[group_idx].reshape(-1).copy_(fc1_bs_test[group_idx])
+                            fc2_bparts[group_idx].reshape(-1).copy_(fc2_bs_test[group_idx])
+                        else:
+                            getattr(fc1_target, f"bias{group_idx}").copy_(fc1_bs_test[group_idx])
+                            getattr(fc2_target, f"bias{group_idx}").copy_(fc2_bs_test[group_idx])
             if accumulate_into_main_grad:
                 # 0.5 sentinel lets us reconstruct ``expected = ref_grad + 0.5``
                 # below and detect a missed accumulation.
@@ -3975,7 +3988,62 @@ class TestSequentialModules:
                     fill_value=main_grad_sentinel,
                     overwrite_main_grad=False,
                 )
+                if use_nvfp4_rht_recipe:
+                    fc1_ref, fc2_ref = module_ref[0], module_ref[2]
+                    if single_grouped_weight:
+                        ref_weight_params_for_main_grad = [fc1_ref.weight, fc2_ref.weight]
+                    else:
+                        ref_weight_params_for_main_grad = [
+                            getattr(fc, f"weight{i}")
+                            for fc in (fc1_ref, fc2_ref)
+                            for i in range(group_size)
+                        ]
+                    MegatronTrainingHelper.init_main_grad_buffers(
+                        ref_weight_params_for_main_grad,
+                        fill_value=main_grad_sentinel,
+                        overwrite_main_grad=False,
+                    )
         del fc1_ws_test, fc1_bs_test, fc2_ws_test, fc2_bs_test
+
+        y_ref_te = None
+        x_ref_te = None
+        probs_ref_te = None
+        if use_nvfp4_rht_recipe:
+            x_ref_te = x_test.detach().clone().requires_grad_(x_test.requires_grad)
+            probs_ref_te = probs_test.detach().clone().requires_grad_(probs_test.requires_grad)
+            dy_ref_te = dy_test.detach().clone()
+
+            def _clear_grouped_mlp_support_caches() -> None:
+                for cls in (
+                    te_ops.fused.ForwardGroupedMLP_CuTeGEMMGLU_MXFP8,
+                    te_ops.fused.BackwardGroupedMLP_CuTeGEMMDGLU_MXFP8,
+                ):
+                    cache_clear = getattr(cls.is_supported, "cache_clear", None)
+                    if cache_clear is not None:
+                        cache_clear()
+
+            old_fused_grouped_mlp = os.environ.get("NVTE_CUTEDSL_FUSED_GROUPED_MLP")
+            try:
+                os.environ["NVTE_CUTEDSL_FUSED_GROUPED_MLP"] = "0"
+                _clear_grouped_mlp_support_caches()
+                with te.autocast(enabled=with_quantization, recipe=recipe):
+                    fc2_extra_ref = (split_sizes, probs_ref_te) if bias else (split_sizes,)
+                    y_ref_te = module_ref(
+                        x_ref_te,
+                        split_sizes,
+                        probs_ref_te,
+                        *fc2_extra_ref,
+                    )
+                y_ref_te.backward(dy_ref_te)
+                if delay_wgrad_compute:
+                    module_ref[0].backward_dw()
+                    module_ref[2].backward_dw()
+            finally:
+                if old_fused_grouped_mlp is None:
+                    os.environ.pop("NVTE_CUTEDSL_FUSED_GROUPED_MLP", None)
+                else:
+                    os.environ["NVTE_CUTEDSL_FUSED_GROUPED_MLP"] = old_fused_grouped_mlp
+                _clear_grouped_mlp_support_caches()
 
         # Fuse ops and perform forward and backward pass
         with te.autocast(enabled=with_quantization, recipe=recipe):
@@ -3987,9 +4055,7 @@ class TestSequentialModules:
             fc2.backward_dw()
 
         # Check for expected fusions
-        if use_nvfp4_rht_recipe:
-            return
-        if (
+        expected_grouped_mlp_fusion = (
             quantization == "mxfp8"
             and dtype in (torch.bfloat16, torch.float16)
             and (
@@ -3997,7 +4063,8 @@ class TestSequentialModules:
                 or (activation_is_glu and glu_interleave_size == 32)
             )
             and _cudnn_frontend_version_supported()
-        ):
+        )
+        if expected_grouped_mlp_fusion:
             if activation_is_glu:
                 forward_cls = te_ops.fused.ForwardGroupedMLP_CuTeGEMMGLU_MXFP8
                 backward_cls = te_ops.fused.BackwardGroupedMLP_CuTeGEMMDGLU_MXFP8
@@ -4021,8 +4088,62 @@ class TestSequentialModules:
 
         # Loose tols for sanity checking
         tols = {"rtol": 0.125, "atol": 0.25}
-        if quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
+        if quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht"):
             tols = {"rtol": 0.25, "atol": 0.5}
+
+        if use_nvfp4_rht_recipe:
+            fc1_ref, fc2_ref = module_ref[0], module_ref[2]
+            assert_close(y_test, y_ref_te, **tols)
+            assert_close_grads(x_test, x_ref_te, **tols)
+            assert_close_grads(probs_test, probs_ref_te, **tols)
+            for group_idx in range(group_size):
+                if bias:
+                    if single_grouped_bias:
+                        assert_close(
+                            fc2.bias.grad[group_idx],
+                            fc2_ref.bias.grad[group_idx],
+                            **tols,
+                        )
+                        assert_close(
+                            fc1.bias.grad[group_idx],
+                            fc1_ref.bias.grad[group_idx],
+                            **tols,
+                        )
+                    else:
+                        assert_close_grads(
+                            getattr(fc2, f"bias{group_idx}"),
+                            getattr(fc2_ref, f"bias{group_idx}"),
+                            **tols,
+                        )
+                        assert_close_grads(
+                            getattr(fc1, f"bias{group_idx}"),
+                            getattr(fc1_ref, f"bias{group_idx}"),
+                            **tols,
+                        )
+                if not single_grouped_weight and not accumulate_into_main_grad:
+                    assert_close_grads(
+                        getattr(fc2, f"weight{group_idx}"),
+                        getattr(fc2_ref, f"weight{group_idx}"),
+                        **tols,
+                    )
+                    assert_close_grads(
+                        getattr(fc1, f"weight{group_idx}"),
+                        getattr(fc1_ref, f"weight{group_idx}"),
+                        **tols,
+                    )
+            if accumulate_into_main_grad:
+                expected_main_grads = [
+                    ref_weight.main_grad for ref_weight in ref_weight_params_for_main_grad
+                ]
+                MegatronTrainingHelper.verify_main_grad_accumulation(
+                    weight_params_for_main_grad,
+                    expected_main_grads=expected_main_grads,
+                    **tols,
+                )
+            elif single_grouped_weight:
+                assert_close(fc1.weight.grad, fc1_ref.weight.grad, **tols)
+                assert_close(fc2.weight.grad, fc2_ref.weight.grad, **tols)
+            return
 
         # Check values
         assert_close(y_test, y_ref, **tols)

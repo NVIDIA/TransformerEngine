@@ -424,6 +424,9 @@ def fuse_grouped_mlp_ops(
         return ops
     if recipe is None or not (recipe.mxfp8() or recipe.nvfp4()):
         return ops
+    # NVFP4 fused grouped MLP uses graph-safe grouped quantize, which currently requires RHT.
+    if recipe.nvfp4() and recipe.disable_rht:
+        return ops
     if activation_op_types is None:
         activation_op_types = (ScaledSwiGLU, ScaledClampedQGeGLU)
 
