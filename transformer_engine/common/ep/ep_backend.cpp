@@ -82,11 +82,11 @@ void EPBackend::validate_config(const NVTEEpGroupConfig& config) {
   NVTE_CHECK(config.max_recv_tokens_per_rank > 0, "max_recv_tokens_per_rank must be positive, got ",
              config.max_recv_tokens_per_rank);
   NVTE_CHECK(config.hidden_dim > 0, "hidden_dim must be positive, got ", config.hidden_dim);
-  NVTE_CHECK(config.token_dtype >= 0 && config.token_dtype < kNVTENumTypes,
-             "token_dtype out of range, got ", static_cast<int>(config.token_dtype));
-  const size_t elem_bytes = typeToSize(static_cast<DType>(config.token_dtype));
+  NVTE_CHECK(config.max_token_dtype >= 0 && config.max_token_dtype < kNVTENumTypes,
+             "max_token_dtype out of range, got ", static_cast<int>(config.max_token_dtype));
+  const size_t elem_bytes = typeToSize(static_cast<DType>(config.max_token_dtype));
   NVTE_CHECK(config.hidden_dim * elem_bytes >= 16,
-             "hidden_dim * sizeof(token_dtype) must be >= 16 (NCCL EP 16B row alignment); "
+             "hidden_dim * sizeof(max_token_dtype) must be >= 16 (NCCL EP 16B row alignment); "
              "got hidden_dim=",
              config.hidden_dim, ", element_bytes=", elem_bytes);
   NVTE_CHECK(config.num_experts % config.ep_size == 0, "num_experts (", config.num_experts,
@@ -218,7 +218,7 @@ void EPBackend::init(ncclComm_t ep_comm, NVTEEpGroupConfig group_config) {
   cfg.algorithm = NCCL_EP_ALGO_HIGH_THROUGHPUT;
   cfg.num_experts = static_cast<unsigned int>(group_config.num_experts);
   cfg.max_dispatch_tokens_per_rank = static_cast<unsigned int>(group_config.max_tokens_per_rank);
-  const size_t elem_bytes = typeToSize(static_cast<DType>(group_config.token_dtype));
+  const size_t elem_bytes = typeToSize(static_cast<DType>(group_config.max_token_dtype));
   cfg.max_token_bytes = static_cast<unsigned int>(group_config.hidden_dim * elem_bytes);
   cfg.rdma_buffer_size = NCCL_EP_AUTO;
   cfg.num_qp_per_rank = NCCL_EP_AUTO;
@@ -346,10 +346,10 @@ void EPBackend::dispatch(uint64_t handle_id, void* handle_mem, const NVTETensor 
 
   NVTEShape tok_shape = nvte_tensor_shape(tokens);
   NVTEDType tok_dtype = nvte_tensor_type(tokens);
-  NVTE_CHECK(tok_dtype == group_config_.token_dtype,
-             "tokens dtype (", static_cast<int>(tok_dtype),
-             ") does not match group token_dtype (",
-             static_cast<int>(group_config_.token_dtype), ")");
+  NVTE_CHECK(typeToSize(static_cast<DType>(tok_dtype)) <=
+                 typeToSize(static_cast<DType>(group_config_.max_token_dtype)),
+             "tokens dtype (", static_cast<int>(tok_dtype), ") wider than group max_token_dtype (",
+             static_cast<int>(group_config_.max_token_dtype), ")");
 
   const size_t num_tokens = tok_shape.data[0];
   const size_t hidden_dim = tok_shape.data[1];
@@ -376,10 +376,11 @@ void EPBackend::dispatch(uint64_t handle_id, void* handle_mem, const NVTETensor 
 
   NVTEShape recv_shape = nvte_tensor_shape(recv_tokens);
   NVTEDType recv_dtype = nvte_tensor_type(recv_tokens);
-  NVTE_CHECK(recv_dtype == group_config_.token_dtype,
+  NVTE_CHECK(typeToSize(static_cast<DType>(recv_dtype)) <=
+                 typeToSize(static_cast<DType>(group_config_.max_token_dtype)),
              "recv_tokens dtype (", static_cast<int>(recv_dtype),
-             ") does not match group token_dtype (",
-             static_cast<int>(group_config_.token_dtype), ")");
+             ") wider than group max_token_dtype (",
+             static_cast<int>(group_config_.max_token_dtype), ")");
 
   size_t recv_sizes[2] = {recv_shape.data[0], recv_shape.data[1]};
   ncclEpTensor_t nccl_tokens_out = make_payload_tensor(recv_tokens, recv_tokens_win, 2,

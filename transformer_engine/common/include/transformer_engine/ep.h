@@ -23,6 +23,8 @@ extern "C" {
 #endif
 
 /* ── Config structs ─────────────────────────────────────────────────────── */
+/* TODO: add a struct_size/version field to these configs (and align with other
+ *       TE public structs) once a TE-wide convention for ABI versioning lands. */
 
 /*! \brief Group-level EP configuration (fixed for the EP group lifetime). */
 typedef struct {
@@ -35,9 +37,10 @@ typedef struct {
   int max_num_sms; /*!< Max SMs for EP kernels. 0 = auto. */
   /*! 0 (default): throw on relocated handle_mem for a cached handle_id. 1: silently rebuild. */
   int allow_handle_mem_reloc;
-  /*! Token dtype for this EP group. Sizes NCCL EP staging buffers at group
-   *  create and is enforced against tensors passed to nvte_ep_dispatch. */
-  NVTEDType token_dtype;
+  /*! Widest token dtype the group will dispatch. Sizes NCCL EP staging buffers
+   *  at group create. Tensors passed to nvte_ep_dispatch may use any dtype whose
+   *  element size is <= sizeof(max_token_dtype). */
+  NVTEDType max_token_dtype;
 } NVTEEpGroupConfig;
 
 /*! \brief Per-layer EP configuration. */
@@ -58,8 +61,8 @@ typedef struct {
  *  nvte_ep_shutdown() returns; destroying it earlier is undefined behavior.
  *  Re-init after shutdown is allowed; double-init throws.
  *
- *  v0.1 scope: one EP group per process, bound to the current CUDA device at
- *  initialize time. Multiple GPUs per process are not supported.
+ *  One EP group per process, bound to the current CUDA device at initialize
+ *  time. Multiple GPUs per process are not supported.
  *
  *  \param[in] ep_comm      Opaque ncclComm_t for the EP sub-group.
  *  \param[in] group_config Group-level EP configuration.
