@@ -43,20 +43,19 @@ _ops_to_preserve_subclass_in_fsdp2 = {
 
 
 # --------------------------------------------------------------------------- #
-# torch.compile output-layout metadata helpers
+# torch.compile output-layout metadata helper
 # --------------------------------------------------------------------------- #
 #
-# These helpers produce the static (inner-names + meta-dict) and
-# storage-meta layouts that the dynamo integration layer needs to
-# reassemble a :class:`Float8Tensor` / :class:`Float8TensorStorage`
-# from the flat ``Tensor[]`` return of a TE custom op, without
-# allocating a fake prototype tensor inside a traced region.
+# Produces the static (inner-names + meta-dict) layout that the dynamo
+# integration layer needs to reassemble a :class:`Float8Tensor` from
+# the flat ``Tensor[]`` return of a TE custom op, without allocating a
+# fake prototype tensor inside a traced region.
 #
 # Shared between :class:`Float8Quantizer` and
 # :class:`Float8CurrentScalingQuantizer` because both produce identical
-# ``Float8Tensor`` / ``Float8TensorStorage`` layouts (rowwise / columnwise /
-# scale-inv inner tensors); the per-quantizer ``create_metadata`` /
-# ``create_storage_metadata`` methods delegate here.
+# ``Float8Tensor`` layouts (rowwise / columnwise / scale-inv inner
+# tensors); the per-quantizer ``create_metadata`` methods delegate
+# here.
 
 
 def _float8_create_subclass_metadata(
@@ -70,8 +69,7 @@ def _float8_create_subclass_metadata(
     ``inner_names`` reflects the rowwise / columnwise usage flags of the
     quantizer (``_data`` and/or ``_transpose``, plus always ``_scale_inv``).
     ``meta`` carries the static, Dynamo-friendly attributes
-    :class:`Float8Tensor`'s constructor needs (matching the schema produced
-    by :meth:`Float8Tensor._generic_tensor_flatten`):
+    :class:`Float8Tensor`'s constructor needs:
 
     * ``fp8_dtype`` -- :class:`FP8DType` (an :class:`IntEnum`,
       proxies as a constant for Dynamo; bridges back to ``tex.DType``

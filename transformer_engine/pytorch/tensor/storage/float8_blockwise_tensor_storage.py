@@ -170,10 +170,6 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         self._columnwise_scale_inv = tensors[3]
         return tensors[4:]
 
-    # ``_torch_compile_flatten`` / ``_torch_compile_do_unflatten`` are
-    # the generic implementations on :class:`QuantizedTensorStorage`,
-    # driven by the ``_FLATTEN_*`` declarations above.
-
     def get_data_tensors(self, rowwise_data: bool = True, columnwise_data: bool = True):
         """Get this Tensor's data."""
         if rowwise_data and columnwise_data:

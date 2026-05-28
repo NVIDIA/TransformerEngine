@@ -132,8 +132,6 @@ class TensorSpec:
     each method plays in the forward / fake / setup-context pipelines.
     """
 
-    KIND: str = ""
-
     def slot_count(self) -> int:
         raise NotImplementedError(
             f"{type(self).__name__}.slot_count() not implemented"
@@ -168,8 +166,6 @@ class NoneSpec(TensorSpec):
     end-to-end.
     """
 
-    KIND = "none"
-
     def slot_count(self) -> int:
         return 1
 
@@ -194,8 +190,6 @@ class AliasedSpec(TensorSpec):
     ``ctx_attrs["saved_tensor_aliases"]``.
     """
 
-    KIND = "aliased"
-
     def __init__(self, alias: str) -> None:
         self.alias = alias
 
@@ -215,8 +209,6 @@ class PlainTensorSpec(TensorSpec):
     Carries ``shape`` / ``dtype`` / ``device`` for allocation; reassembly
     is just the lone slot value.
     """
-
-    KIND = "plain"
 
     def __init__(
         self,
@@ -260,8 +252,6 @@ class SubclassTensorSpec(TensorSpec):
       to autograd -- so the layout-aware methods are intentionally
       undefined.
     """
-
-    KIND = "subclass"
 
     def __init__(
         self,
@@ -367,8 +357,6 @@ class StorageSpec(TensorSpec):
     Reassembled via ``cls._torch_compile_do_unflatten``; allocated via
     ``alloc_quantizer.make_empty(shape, ...)``.
     """
-
-    KIND = "storage"
 
     def __init__(
         self,

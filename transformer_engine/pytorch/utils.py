@@ -502,21 +502,6 @@ def cast_if_needed(tensor: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
         return tensor.to(dtype=dtype)
 
 
-def fake_cast_if_needed(tensor: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
-    """Fake counterpart of :func:`cast_if_needed` for shape inference.
-
-    Returns the same tensor if no cast would happen, otherwise an empty
-    tensor of the requested dtype with matching shape and device. Used by
-    torch custom-op fake registrations so the FX graph can reason about
-    output shapes without actually performing the cast.
-    """
-    if tensor is None:
-        return None
-    if tensor.dtype == dtype:
-        return tensor
-    return torch.empty_like(tensor, dtype=dtype)
-
-
 def check_dim_for_fp8_exec(tensor: torch.Tensor) -> bool:
     """Check if tensor dimensions are supported for FP8 TN GEMM"""
     return tensor.dim() == 2 and tensor.size(0) % 8 == 0 and tensor.size(1) % 16 == 0

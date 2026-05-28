@@ -1291,16 +1291,14 @@ def _linear_backward_output_info(
     Returns a list of three :class:`TensorSpec` -- one per gradient
     output ``(wgrad, dgrad, grad_bias)`` -- consumed by the
     auto-synthesized backward fake-impl in
-    :func:`_make_fake_impl_from_bwd_output_info`. Replaces the
-    previously hand-written ``_linear_backward_fake_impl``: gradient
-    shapes / dtypes are deterministic, so the descriptor just encodes
-    each slot through :func:`tensor_spec` (passing ``shape=None`` for
-    absent grads and a ``quantizer`` for quantized ones -- backward
-    grads use alloc-only ``SubclassTensorSpec`` because they go
-    straight to autograd, never through the op's flat ``Tensor[]``).
-    ``set_usage`` on ``grad_input_quantizer`` is preserved because it
-    influences ``dgrad``'s downstream ``make_empty``. Manual TE FSDP
-    is unsupported; FSDP2 / MCore FSDP go through the standard path.
+    :func:`_make_fake_impl_from_bwd_output_info`. Each slot is encoded
+    through :func:`tensor_spec` (``shape=None`` for absent grads,
+    ``quantizer`` for quantized ones -- backward grads use alloc-only
+    ``SubclassTensorSpec`` because they go straight to autograd and
+    never through the op's flat ``Tensor[]``). ``set_usage`` on
+    ``grad_input_quantizer`` is preserved because it influences
+    ``dgrad``'s downstream ``make_empty``. Manual TE FSDP is
+    unsupported; FSDP2 / MCore FSDP go through the standard path.
     """
 
     if args.fsdp_group is not None:
@@ -1353,9 +1351,9 @@ def _linear_forward_output_info(
     """Output-layout descriptor for the linear forward.
 
     Returns ``(user_specs, saved_slots, ctx_attrs)`` -- Dynamo-traceable
-    layout + alloc info for the op's outputs and saved tensors. Replaces
-    a hand-written fake-impl: :func:`_te_register_custom_op` synthesizes
-    one by calling :meth:`TensorSpec.alloc` on each entry.
+    layout + alloc info for the op's outputs and saved tensors.
+    :func:`_te_register_custom_op` synthesizes the fake-impl by calling
+    :meth:`TensorSpec.alloc` on each entry.
 
     All ``set_usage`` side effects on the live quantizers happen here
     and are observed by both the real fwd impl and backward.

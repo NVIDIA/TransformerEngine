@@ -277,15 +277,12 @@ class Float8TensorStorage(QuantizedTensorStorage):
             ")"
         )
 
-    # ``_torch_compile_flatten`` / ``_torch_compile_do_unflatten`` are
-    # the generic implementations on :class:`QuantizedTensorStorage`,
-    # driven by the ``_FLATTEN_*`` declarations above. ``__new__``
-    # re-derives ``_transpose_invalid`` from the restored ``_transpose``
-    # buffer, so we deliberately do not round-trip the flag through
-    # ``_FLATTEN_META_ATTRS``: a producer that ships a transpose through
-    # the trace had it valid, and trusting a stale ``True`` from a
-    # Dynamo-embedded meta constant would trip
-    # :meth:`update_usage`'s ``not has_data_transpose`` guard in backward.
+    # ``__new__`` re-derives ``_transpose_invalid`` from the restored
+    # ``_transpose`` buffer, so the flag is deliberately not round-tripped
+    # through ``_FLATTEN_META_ATTRS``: a producer that ships a transpose
+    # through the trace had it valid, and trusting a stale ``True`` from
+    # a Dynamo-embedded meta constant would trip :meth:`update_usage`'s
+    # ``not has_data_transpose`` guard in backward.
 
     def _create_transpose(self):
         """Update FP8 transpose cache"""

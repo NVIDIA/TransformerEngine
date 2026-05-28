@@ -296,8 +296,8 @@ class QuantizedTensorStorage:
         tensors: List[torch.Tensor] = []
         meta_dict: Dict[str, Any] = {"_qstorage_cls": type(self).__qualname__}
         # Tensor-wrapper fields are only relevant when ``self`` is a live
-        # ``torch.Tensor`` (e.g. ``Float8Tensor`` rewritten in-place to a
-        # storage payload by ``_rewrite_subclass_to_storage``); a bare
+        # ``torch.Tensor`` (e.g. ``Float8Tensor`` flattened directly into a
+        # storage payload by ``_flatten_subclass_into_slots``); a bare
         # storage shell has no outer shape / requires_grad / device.
         if isinstance(self, torch.Tensor):
             meta_dict.update(

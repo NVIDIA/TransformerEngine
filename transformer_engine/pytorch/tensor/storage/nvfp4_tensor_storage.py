@@ -100,7 +100,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
     # column-scaled FP4 data)
     _amax_columnwise: torch.Tensor
 
-    # Builder class for casting to MXFP8
+    # Builder class for casting to NVFP4
     _quantizer: Optional[Quantizer]
     # FP4 data type
     _fp4_dtype: TE_DType
