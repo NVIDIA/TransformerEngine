@@ -7,7 +7,7 @@ from enum import Enum, auto
 from dataclasses import dataclass, field
 from functools import partial
 from math import sqrt
-from typing import Tuple, Optional, Dict
+from typing import Any, Callable, Mapping, Tuple, Optional, Dict
 import random
 
 import jax
@@ -136,6 +136,30 @@ def general_dot_product_attention(
     context_shape = query.shape[:-1] + (value.shape[-1],)
     context = jnp.reshape(context, context_shape)
     return context
+
+
+def score_mod_reference_dot_product_attention(
+    query: ArrayLike,
+    key: ArrayLike,
+    value: ArrayLike,
+    score_mod_reference: Callable[[Array], Array],
+    scale_factor: float,
+    dtype: DTypeLike,
+) -> Array:
+    """Reference DPA path for cuDNN score_mod tests."""
+    query, key, value = promote_dtype(query, key, value, dtype=dtype)
+    input_dtype = query.dtype
+    b, s_q, h_q, d = query.shape
+    _, s_kv, h_kv, _ = key.shape
+    assert (h_q % h_kv == 0) and (h_q >= h_kv)
+    num_groups = h_q // h_kv
+    grouped_query = jnp.reshape(query, (b, s_q, h_kv, num_groups, d))
+    logits = scale_factor * jnp.einsum("...qhgd,...khd->...hgqk", grouped_query, key)
+    logits = score_mod_reference(logits.astype(jnp.float32))
+    softmax_out = jax.nn.softmax(logits, axis=-1).astype(input_dtype)
+    context = jnp.einsum("...hgqk,...khd->...qhgd", softmax_out, value)
+    context_shape = query.shape[:-1] + (value.shape[-1],)
+    return jnp.reshape(context, context_shape)
 
 
 @jax.jit
@@ -267,6 +291,30 @@ def jax_dpa(query, key, value, bias, softmax_offset, mask, dropout_rng, **kwargs
     """
     JAX native dot product attention implementation
     """
+    score_mod_reference = kwargs.get("score_mod_reference")
+    if score_mod_reference is not None:
+        if (
+            bias is not None
+            or softmax_offset is not None
+            or mask is not None
+            or dropout_rng is not None
+        ):
+            raise ValueError(
+                "score_mod reference path expects no bias, mask, softmax offset, or dropout."
+            )
+        if kwargs["qkv_layout"] != QKVLayout.BSHD_BSHD_BSHD:
+            raise ValueError(
+                "score_mod reference path expects separate BSHD query/key/value tensors."
+            )
+        return score_mod_reference_dot_product_attention(
+            query,
+            key,
+            value,
+            score_mod_reference,
+            kwargs["scaling_factor"],
+            jnp.float32,
+        ).astype(query.dtype)
+
     output = general_dot_product_attention(
         query,
         key,
@@ -371,6 +419,17 @@ class FusedAttnRunner:
 
     # dictionary of expected collective comm bytes
     coll_count_ref: Optional[Dict[str, int]] = None
+
+    # Optional score_mod test hooks.
+    score_mod: Optional[Callable] = None
+    score_mod_bprop: Optional[Callable] = None
+    score_mod_tensors: Optional[Mapping[str, Any]] = None
+    score_mod_bprop_tensors: Optional[Mapping[str, Any]] = None
+    score_mod_reference: Optional[Callable[[Array], Array]] = None
+    input_scale: float = 1.0
+    doutput_seed: Optional[int] = None
+    rtol: Optional[float] = None
+    atol: Optional[float] = None
 
     def __post_init__(self):
         # Reset defaults for num_segments_per_seq if not explicitly passed
@@ -516,6 +575,22 @@ class FusedAttnRunner:
         self.q = jax.random.uniform(q_key, q_shape, self.dtype, -1.0)
         self.k = jax.random.uniform(k_key, k_shape, self.dtype, -1.0)
         self.v = jax.random.uniform(v_key, v_shape, self.dtype, -1.0)
+        if self.input_scale != 1.0:
+            self.q = (self.input_scale * self.q).astype(self.dtype)
+            self.k = (self.input_scale * self.k).astype(self.dtype)
+            self.v = (self.input_scale * self.v).astype(self.dtype)
+        if self.doutput_seed is None:
+            self.doutput = None
+        else:
+            output_shape = (
+                self.batch_size,
+                self.max_seqlen_q,
+                self.num_heads_q,
+                self.head_dim_v,
+            )
+            self.doutput = jax.random.normal(
+                jax.random.PRNGKey(self.doutput_seed), output_shape, dtype=self.dtype
+            )
 
         if self.attn_bias_type != AttnBiasType.NO_BIAS:
             if self.bias_shape == BiasShape._1HSS:
@@ -837,7 +912,12 @@ class FusedAttnRunner:
             "context_parallel_strategy": self.cp_strategy,
             "context_parallel_causal_load_balanced": self.cp_load_balanced,
             "stripe_size": self.stripe_size,
+            "score_mod": self.score_mod,
+            "score_mod_bprop": self.score_mod_bprop,
+            "score_mod_tensors": self.score_mod_tensors,
+            "score_mod_bprop_tensors": self.score_mod_bprop_tensors,
         }
+        reference_kwargs = {**kwargs, "score_mod_reference": self.score_mod_reference}
 
         customcall_fused_dpa_jit = jit(
             partial(customcall_fused_dpa, **kwargs),
@@ -857,7 +937,7 @@ class FusedAttnRunner:
             primitive_out = customcall_fused_dpa_jit(*customcall_args)
             primitive_out = self.cp_inverse_reorder_fn(primitive_out)
 
-        reference_out = jax_dpa(*args, **kwargs)
+        reference_out = jax_dpa(*args, **reference_kwargs)
 
         if self.is_training and self.dropout_prob > 0.0:
             return
@@ -866,8 +946,20 @@ class FusedAttnRunner:
             _split_valid_and_invalid(primitive_out, reference_out, self.pad_q)
         )
 
-        assert_allclose(primitive_invalid, jnp.zeros_like(primitive_invalid), dtype=self.dtype)
-        assert_allclose(primitive_valid, reference_valid, dtype=self.dtype)
+        assert_allclose(
+            primitive_invalid,
+            jnp.zeros_like(primitive_invalid),
+            rtol=self.rtol,
+            atol=self.atol,
+            dtype=self.dtype,
+        )
+        assert_allclose(
+            primitive_valid,
+            reference_valid,
+            rtol=self.rtol,
+            atol=self.atol,
+            dtype=self.dtype,
+        )
 
         if self.coll_count_ref is not None:
             with self.mesh, autocast(mesh_resource=self.mesh_resource):
@@ -886,26 +978,35 @@ class FusedAttnRunner:
 
         self._setup_inputs()
 
-        def grad_func(func, *args, cp_reverse_out=False, **kwargs):
+        def grad_func(
+            func,
+            q,
+            k,
+            v,
+            bias,
+            softmax_offset,
+            sequence_descriptor,
+            dropout_rng,
+            doutput=None,
+            cp_reverse_out=False,
+            **kwargs,
+        ):
             # Gradient is small, use a gradient multiplier to amplify the gradient
             gradient_multiplier = self.max_seqlen_q * self.num_heads_q
             if self.attn_mask_type.is_causal():
                 gradient_multiplier /= 10
+            output = func(q, k, v, bias, softmax_offset, sequence_descriptor, dropout_rng, **kwargs)
+            if cp_reverse_out:
+                output = self.cp_inverse_reorder_fn(output)
             # Keep only valid result for the gradient
-            if not cp_reverse_out:
-                ret_valid = jnp.where(
-                    self.pad_q[..., jnp.newaxis, jnp.newaxis],
-                    0,
-                    func(*args, **kwargs),
-                )
-            else:
-                ret_valid = jnp.where(
-                    self.pad_q[..., jnp.newaxis, jnp.newaxis],
-                    0,
-                    self.cp_inverse_reorder_fn(func(*args, **kwargs)),
+            ret_valid = jnp.where(self.pad_q[..., jnp.newaxis, jnp.newaxis], 0, output)
+            if doutput is not None:
+                return jnp.sum(ret_valid.astype(jnp.float32) * doutput.astype(jnp.float32)).astype(
+                    self.dtype
                 )
             return (
-                jnp.mean(ret_valid.astype(jnp.float32), dtype=jnp.float32) * gradient_multiplier
+                jnp.mean(ret_valid.astype(jnp.float32), dtype=jnp.float32)
+                * gradient_multiplier
             ).astype(self.dtype)
 
         args = [self.q, self.k, self.v, self.bias, self.softmax_offset, self.mask, self.dropout_rng]
@@ -920,6 +1021,19 @@ class FusedAttnRunner:
             jax.device_put(self.sequence_desciptor, self.seq_desc_sharding),
             jax.device_put(self.dropout_rng, self.dropout_rng_sharding),
         ]
+        input_shardings = [
+            self.qkvo_sharding,
+            self.qkvo_sharding,
+            self.qkvo_sharding,
+            self.bias_sharding,
+            self.softmax_offset_sharding,
+            self.seq_desc_sharding,
+            self.dropout_rng_sharding,
+        ]
+        if self.doutput is not None:
+            args.append(self.doutput)
+            customcall_args.append(jax.device_put(self.doutput, self.qkvo_sharding))
+            input_shardings.append(self.qkvo_sharding)
         kwargs = {
             "attn_bias_type": self.attn_bias_type,
             "attn_mask_type": self.attn_mask_type,
@@ -933,7 +1047,12 @@ class FusedAttnRunner:
             "context_parallel_strategy": self.cp_strategy,
             "context_parallel_causal_load_balanced": self.cp_load_balanced,
             "stripe_size": self.stripe_size,
+            "score_mod": self.score_mod,
+            "score_mod_bprop": self.score_mod_bprop,
+            "score_mod_tensors": self.score_mod_tensors,
+            "score_mod_bprop_tensors": self.score_mod_bprop_tensors,
         }
+        reference_kwargs = {**kwargs, "score_mod_reference": self.score_mod_reference}
 
         # We can compute dBias only for the [1, h, s, s] layout
         if self.bias_shape == BiasShape._1HSS:
@@ -964,21 +1083,13 @@ class FusedAttnRunner:
                 ),
                 arg_nums,
             ),
-            in_shardings=(
-                self.qkvo_sharding,
-                self.qkvo_sharding,
-                self.qkvo_sharding,
-                self.bias_sharding,
-                self.softmax_offset_sharding,
-                self.seq_desc_sharding,
-                self.dropout_rng_sharding,
-            ),
+            in_shardings=tuple(input_shardings),
             out_shardings=(None, grad_shardings),
         )
         jitted_reference = jit(
             value_and_grad(
                 lambda q, k, v, bias, softmax_offset, *args: grad_func(
-                    jax_dpa, q, k, v, bias, softmax_offset, *args, **kwargs
+                    jax_dpa, q, k, v, bias, softmax_offset, *args, **reference_kwargs
                 ),
                 arg_nums,
             )
@@ -996,7 +1107,13 @@ class FusedAttnRunner:
         print_debug_tensor_stats(f"primitive_out", primitive_out)
         print_debug_tensor_stats(f"reference_grad_valid", reference_out)
         print_debug_tensor_stats(f"diff_grad", jnp.abs(primitive_out - reference_out))
-        assert_allclose(primitive_out, reference_out, dtype=self.dtype)
+        assert_allclose(
+            primitive_out,
+            reference_out,
+            rtol=self.rtol,
+            atol=self.atol,
+            dtype=self.dtype,
+        )
 
         def check_dqkv(primitive, reference, pad, idx):
             primitive_valid, primitive_invalid, reference_valid, reference_invalid = (
@@ -1009,9 +1126,27 @@ class FusedAttnRunner:
                 f"diff_grad[{idx}]", jnp.abs(primitive_valid[idx] - reference_valid[idx])
             )
 
-            assert_allclose(primitive_invalid, jnp.zeros_like(primitive_invalid), dtype=self.dtype)
-            assert_allclose(primitive_invalid, reference_invalid, dtype=self.dtype)
-            assert_allclose(primitive_valid, reference_valid, dtype=self.dtype)
+            assert_allclose(
+                primitive_invalid,
+                jnp.zeros_like(primitive_invalid),
+                rtol=self.rtol,
+                atol=self.atol,
+                dtype=self.dtype,
+            )
+            assert_allclose(
+                primitive_invalid,
+                reference_invalid,
+                rtol=self.rtol,
+                atol=self.atol,
+                dtype=self.dtype,
+            )
+            assert_allclose(
+                primitive_valid,
+                reference_valid,
+                rtol=self.rtol,
+                atol=self.atol,
+                dtype=self.dtype,
+            )
 
         primitive_dq, primitive_dk, primitive_dv = primitive_dgrad[:3]
         reference_dq, reference_dk, reference_dv = reference_dgrad[:3]
@@ -1037,6 +1172,8 @@ class FusedAttnRunner:
             assert_allclose(
                 jnp.where(bias_mask, primitive_dbias, 0),
                 jnp.zeros_like(primitive_dbias),
+                rtol=self.rtol,
+                atol=self.atol,
                 dtype=self.dtype,
             )
 
@@ -1044,6 +1181,8 @@ class FusedAttnRunner:
             assert_allclose(
                 jnp.where(bias_mask, primitive_dbias, 0),
                 jnp.where(bias_mask, reference_dbias, 0),
+                rtol=self.rtol,
+                atol=self.atol,
                 dtype=self.dtype,
             )
 
@@ -1051,6 +1190,8 @@ class FusedAttnRunner:
             assert_allclose(
                 jnp.where(bias_mask, 0, primitive_dbias),
                 jnp.where(bias_mask, 0, reference_dbias),
+                rtol=self.rtol,
+                atol=self.atol,
                 dtype=self.dtype,
             )
 

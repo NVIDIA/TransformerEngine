@@ -307,6 +307,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
     softmax_type: AttnSoftmaxType = AttnSoftmaxType.VANILLA_SOFTMAX
     score_mod: Optional[Callable] = None
     score_mod_bprop: Optional[Callable] = None
+    score_mod_requested: bool = False
 
     @nn.compact
     def __call__(
@@ -344,12 +345,6 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
                 jnp.float32,
             )
 
-        score_mod_requested = (
-            self.score_mod is not None
-            or self.score_mod_bprop is not None
-            or score_mod_tensors is not None
-            or score_mod_bprop_tensors is not None
-        )
         fused_attn_kwargs = {
             "attn_mask_type": self.attn_mask_type,
             "attn_bias_type": self.attn_bias_type,
@@ -379,7 +374,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
             qkv_packed = query
             if self.transpose_batch_sequence:
                 qkv_packed = qkv_packed.transpose([1, 0, 2, 3, 4])
-            if score_mod_requested:
+            if self.score_mod_requested:
                 query, key, value = jnp.split(qkv_packed, [1, 2], axis=-3)
                 query, key, value = map(
                     functools.partial(jnp.squeeze, axis=-3), [query, key, value]
@@ -407,7 +402,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
             if self.transpose_batch_sequence:
                 query = query.transpose([1, 0, 2, 3])
                 kv_packed = kv_packed.transpose([1, 0, 2, 3, 4])
-            if score_mod_requested:
+            if self.score_mod_requested:
                 key, value = jnp.split(kv_packed, [1], axis=-3)
                 key, value = map(functools.partial(jnp.squeeze, axis=-3), [key, value])
                 qkv_layout = self.qkv_layout.to_separate()
@@ -799,26 +794,31 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         if score_mod_requested:
             if not enable_fused_attn:
                 raise ValueError("score_mod requires fused attention, but NVTE_FUSED_ATTN=0.")
-            has_fused_attn_kernel = True
-        else:
-            has_fused_attn_kernel = is_fused_attn_kernel_available(
-                # This needs to be fixed: TE-Jax has historically correlated training mode with deterministic mode.
-                not deterministic,
-                input_dtype,
-                # self._assert_dtypes enforces Q, K, V, bias to have the same dtype so using input_dtype as kv dtype is sufficient
-                input_dtype,
-                qkv_layout,
-                attn_bias_type,
-                attn_mask_type,
-                softmax_type,
-                self.attention_dropout,
-                self.num_attention_heads,
-                self.num_gqa_groups,
-                seqlen_q,
-                seqlen_kv,
-                head_dim_qk,
-                head_dim_v,
-                self.window_size,
+        kernel_qkv_layout = qkv_layout.to_separate() if score_mod_requested else qkv_layout
+        has_fused_attn_kernel = is_fused_attn_kernel_available(
+            # This needs to be fixed: TE-Jax has historically correlated training mode
+            # with deterministic mode.
+            not deterministic,
+            input_dtype,
+            # self._assert_dtypes enforces Q, K, V, bias to have the same dtype, so
+            # using input_dtype as kv dtype is sufficient.
+            input_dtype,
+            kernel_qkv_layout,
+            attn_bias_type,
+            attn_mask_type,
+            softmax_type,
+            self.attention_dropout,
+            self.num_attention_heads,
+            self.num_gqa_groups,
+            seqlen_q,
+            seqlen_kv,
+            head_dim_qk,
+            head_dim_v,
+            self.window_size,
+        )
+        if score_mod_requested and not has_fused_attn_kernel:
+            raise ValueError(
+                "score_mod requires fused attention, but no fused attention kernel is available."
             )
 
         use_fused_attn = enable_fused_attn and has_fused_attn_kernel
@@ -915,6 +915,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 softmax_type=softmax_type,
                 score_mod=self.score_mod,
                 score_mod_bprop=self.score_mod_bprop,
+                score_mod_requested=score_mod_requested,
             )(
                 query,
                 key,

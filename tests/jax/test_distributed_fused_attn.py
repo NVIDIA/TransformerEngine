@@ -7,7 +7,6 @@ import pytest
 import jax
 import jax.numpy as jnp
 from jax import random
-from jax.sharding import NamedSharding, PartitionSpec
 from distributed_test_base import (
     generate_configs,
     generate_context_parallel_configs_for_attn,
@@ -17,16 +16,13 @@ from test_fused_attn import (
     FusedAttnRunner,
     BiasShape,
     SeqDescFormat,
-    customcall_fused_dpa,
 )
 from test_fused_attn_score_mod import (
-    _ScoreModSoftcap,
+    ScoreModFusedAttnRunner,
     _has_cudnn_frontend_python,
-    _reference_attention,
     _require_cudnn_frontend_score_mod,
 )
-from utils import assert_allclose, pytest_parametrize_wrapper
-from transformer_engine.jax import autocast
+from utils import pytest_parametrize_wrapper
 from transformer_engine.jax.attention import (
     is_fused_attn_kernel_available,
     AttnBiasType,
@@ -319,100 +315,18 @@ class TestDistributedScoreModSelfAttn:
             if num_heads % tp_size != 0:
                 pytest.skip(f"{num_heads=} must be divisible by {tp_size=}")
 
-        runner = FusedAttnRunner(
+        runner = ScoreModFusedAttnRunner.softcap(
             batch,
             seqlen,
-            seqlen,
-            num_heads,
             num_heads,
             head_dim,
-            head_dim,
-            AttnBiasType.NO_BIAS,
-            AttnMaskType.NO_MASK,
-            AttnSoftmaxType.VANILLA_SOFTMAX,
-            0.0,
             dtype,
-            True,
-            QKVLayout.BSHD_BSHD_BSHD,
-            None,
-            None,
-            SeqDescFormat.Mask,
             number_of_devices=device_count,
             mesh_shape=mesh_shape,
             mesh_axes=mesh_axes,
             mesh_resource=mesh_resource,
         )
-        runner._setup_inputs()
-
-        qkv_sharding = NamedSharding(runner.mesh, PartitionSpec(dp_axis, None, tp_axis, None))
-        query = (0.125 * runner.q).astype(dtype)
-        key_tensor = (0.125 * runner.k).astype(dtype)
-        value = (0.125 * runner.v).astype(dtype)
-        doutput = random.normal(random.PRNGKey(2025), data_shape, dtype=dtype)
-
-        scaling_factor = runner.scaling_factor
-        softcap = 0.8
-        softcap_score_mod = _ScoreModSoftcap()
-
-        def score_mod_loss(q, k, v, dout):
-            out = customcall_fused_dpa(
-                q,
-                k,
-                v,
-                None,
-                None,
-                None,
-                None,
-                attn_bias_type=AttnBiasType.NO_BIAS,
-                attn_mask_type=AttnMaskType.NO_MASK,
-                qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
-                softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
-                scaling_factor=scaling_factor,
-                dropout_probability=0.0,
-                is_training=True,
-                score_mod=softcap_score_mod.forward,
-                score_mod_bprop=softcap_score_mod.backward,
-                score_mod_tensors={"softcap": softcap},
-                score_mod_bprop_tensors={"softcap": softcap},
-            )
-            loss = jnp.sum(out.astype(jnp.float32) * dout.astype(jnp.float32))
-            return loss, out
-
-        def ref_loss(q, k, v, dout):
-            out = _reference_attention(q, k, v, scaling_factor, softcap=softcap)
-            loss = jnp.sum(out.astype(jnp.float32) * dout.astype(jnp.float32))
-            return loss, out
-
-        jitted_score_mod = jax.jit(
-            jax.value_and_grad(score_mod_loss, argnums=(0, 1, 2), has_aux=True),
-            in_shardings=(
-                qkv_sharding,
-                qkv_sharding,
-                qkv_sharding,
-                qkv_sharding,
-            ),
-            out_shardings=((None, qkv_sharding), (qkv_sharding, qkv_sharding, qkv_sharding)),
-        )
-        jitted_ref = jax.jit(jax.value_and_grad(ref_loss, argnums=(0, 1, 2), has_aux=True))
-
-        sharded_args = (
-            jax.device_put(query, qkv_sharding),
-            jax.device_put(key_tensor, qkv_sharding),
-            jax.device_put(value, qkv_sharding),
-            jax.device_put(doutput, qkv_sharding),
-        )
-        with runner.mesh, autocast(mesh_resource=mesh_resource):
-            (score_mod_value, score_mod_out), score_mod_grads = jitted_score_mod(*sharded_args)
-        (ref_value, ref_out), ref_grads = jitted_ref(query, key_tensor, value, doutput)
-
-        assert score_mod_out.sharding == qkv_sharding
-        for grad in score_mod_grads:
-            assert grad.sharding == qkv_sharding
-
-        assert_allclose(score_mod_out, ref_out, rtol=7e-2, atol=7e-2)
-        assert_allclose(score_mod_value, ref_value, rtol=7e-2, atol=7e-2)
-        for grad, ref_grad in zip(score_mod_grads, ref_grads):
-            assert_allclose(grad, ref_grad, rtol=7e-2, atol=7e-2)
+        runner.test_backward()
 
 
 DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS = [
