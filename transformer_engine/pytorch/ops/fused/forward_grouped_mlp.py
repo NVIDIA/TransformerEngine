@@ -346,7 +346,7 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
         if use_nvfp4 and with_gemm_swizzled_scales:
             fc1_x_scales = fc1_x_scales.view(
                 1,
-                in_shape[0] // 128,
+                (in_shape[0] + 127) // 128,
                 data_in_k // k_sf_divisor,
                 32,
                 4,
@@ -356,7 +356,7 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
         elif use_nvfp4:
             fc1_x_scales = fc1_x_scales.view(
                 1,
-                in_shape[0] // 128,
+                (in_shape[0] + 127) // 128,
                 4,
                 32,
                 data_in_k // k_sf_divisor,
