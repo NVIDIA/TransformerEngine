@@ -35,6 +35,9 @@ typedef struct {
   int max_num_sms; /*!< Max SMs for EP kernels. 0 = auto. */
   /*! 0 (default): throw on relocated handle_mem for a cached handle_id. 1: silently rebuild. */
   int allow_handle_mem_reloc;
+  /*! Token dtype for this EP group. Sizes NCCL EP staging buffers at group
+   *  create and is enforced against tensors passed to nvte_ep_dispatch. */
+  NVTEDType token_dtype;
 } NVTEEpGroupConfig;
 
 /*! \brief Per-layer EP configuration. */
