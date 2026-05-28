@@ -192,8 +192,8 @@ def _kernel_bytes_per_call(bucket: str, actual_rows: int, hidden: int, mode: str
         # Writes ``num_tensors`` floats to zero the amax buffer.
         return num_tensors * 4
     if bucket == "amax":
-        # Reads the full input (over actual rows; the kernel uses tensor_offsets
-        # to skip overallocated tails) and atomicMaxes into the per-group amax
+        # Reads the full input over the active region (the kernel uses tensor_offsets
+        # to skip rows past sum(first_dims)) and atomicMaxes into the per-group amax
         # slots. Output traffic is negligible vs the input scan.
         return input_bytes + num_tensors * 4
     if bucket == "compute_scale":

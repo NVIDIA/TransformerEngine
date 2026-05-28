@@ -270,7 +270,7 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
     grouped_output_py = std::move(created.second);
   } else {
     grouped_output_tensor_cpp.emplace(
-        detail::GroupedTensorFromPyTorchGroupedTensor(output, std::nullopt, false));
+        detail::GroupedTensorFromPyTorchGroupedTensor(output));
     grouped_output_py = py::reinterpret_borrow<py::object>(output);
   }
 

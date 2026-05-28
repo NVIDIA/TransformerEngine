@@ -969,10 +969,12 @@ void group_quantize(const GroupedTensor *input, const Tensor *noop, GroupedTenso
              "Grouped FP8 tensor-scaling output first dimension must not exceed input first "
              "dimension.");
 
-  // FP8 grouped outputs may carry an active logical shape while their backing buffers remain
-  // overallocated. Size the launch from the output shape so metadata-backed groups do not launch
-  // over unused tail rows. When host-side active offsets are unavailable, the output shape remains
-  // the allocated fallback shape.
+  // For varying-dim grouped tensors, logical_shape may be larger than the active region
+  // (sum of first_dims for varying-first, sum of last_dims for varying-last). The backing
+  // buffer is sized to logical_shape, but the kernel must only touch the active rows/cols;
+  // metadata (first_dims/last_dims/tensor_offsets) is consulted on device to skip the unused
+  // tail. We size the grid from logical_shape so the launch covers every potential payload
+  // row, and rely on per-block bounds checks to drop blocks past the active region.
   const size_t first_logical_dim = output->logical_shape.data[0];
   const size_t last_logical_dim = output->logical_shape.data[1];
   const size_t num_tensors = input->num_tensors;

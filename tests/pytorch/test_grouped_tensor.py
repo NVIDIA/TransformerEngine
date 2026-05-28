@@ -557,9 +557,12 @@ class TestGroupedTensor:
         - ``empty_split``: ``first_dims`` set with one zero entry.
         - ``varying_last``: ``last_dims`` set, values vary.
 
-        When ``overallocated`` is True the flat buffer is sized for twice the actual
-        data and the unused tail must be left untouched by the kernel. Overallocation
-        is skipped for ``uniform``
+        When ``overallocated`` is True the input is reshaped to a logical_shape whose
+        first dim is twice ``sum(first_dims)``, so the kernel sees an active region
+        (rows covered by ``first_dims``) followed by an unused tail. The backing
+        buffer always matches logical_shape exactly; the kernel must leave the tail
+        (rows >= sum(first_dims)) untouched. Overallocation is skipped for ``uniform``
+        and ``varying_last`` because they don't have a varying-first tail to test.
         """
         if overallocated and shape_case in ("uniform", "varying_last"):
             pytest.skip(

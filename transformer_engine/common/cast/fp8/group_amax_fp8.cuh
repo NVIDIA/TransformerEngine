@@ -65,7 +65,8 @@ __launch_bounds__(GROUPED_AMAX_KERNEL_THREADS) __global__
 // For varying shapes, we use offsets_ptr[i+1] - offsets_ptr[i] as the strict
 // upper bound on this tensor's element count. This matches the layout that
 // build_grouped_tensor_offsets uses (the "logical" element span for the
-// tensor) and means we never read overallocated tail rows/cols.
+// tensor) and means we never read past the active region into the unused
+// tail of logical_shape (where logical_first_dim >= sum(first_dims)).
 template <int NVEC, typename InputType, ShapeRepresentation SHAPE_REP>
 __launch_bounds__(GROUPED_AMAX_KERNEL_THREADS) __global__
     void grouped_amax_kernel(const InputType *__restrict__ input, float *__restrict__ amax,

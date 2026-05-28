@@ -15,9 +15,6 @@
 #include <pybind11/pybind11.h>
 #include <torch/torch.h>
 
-#include <optional>
-#include <vector>
-
 #include "common.h"
 #include "transformer_engine/transformer_engine.h"
 
@@ -100,10 +97,7 @@ TensorWrapper NVTETensorFromFloat8BlockwiseQTensor(py::handle tensor,
 
 TensorWrapper NVTETensorFromNVFP4Tensor(py::handle tensor, Quantizer *quantizer);
 
-GroupedTensorWrapper GroupedTensorFromPyTorchGroupedTensor(
-    py::handle tensor,
-    const std::optional<std::vector<size_t>> &logical_shape_override = std::nullopt,
-    bool skip_shape_metadata = false);
+GroupedTensorWrapper GroupedTensorFromPyTorchGroupedTensor(py::handle tensor);
 
 inline bool IsFloatingPointType(at::ScalarType type) {
   return type == at::kFloat || type == at::kHalf || type == at::kBFloat16;
