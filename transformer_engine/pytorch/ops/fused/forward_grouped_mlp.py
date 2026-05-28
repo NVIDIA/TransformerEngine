@@ -27,11 +27,9 @@ from .._common import (
     _cudnn_frontend_geglu_runtime_params,
     _cudnn_frontend_version_supported,
     _cudnn_frontend_supports_grouped_gemm_srelu,
-    _enable_nvfp4_rht_for_group_quantize,
     _group_quantize_for_grouped_mlp,
     _nvidia_cudnn_frontend_supports_wgrad,
     _nvfp4_amax,
-    _nvfp4_logical_data_view,
     _nvfp4_single_tensor_from_grouped,
     fuse_grouped_mlp_ops,
     is_glu_activation,
@@ -73,8 +71,8 @@ def _grouped_gemm_dsrelu_backward_supported() -> bool:
     return grouped_gemm_dsrelu_wrapper_sm100 is not None
 
 
-class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
-    """Base fused op for MXFP8 GroupedLinear + activation + GroupedLinear.
+class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
+    """Base fused op for block-scaled GroupedLinear + activation + GroupedLinear.
 
     Uses experimental CuTe DSL kernel from cuDNN front-end.
 
@@ -295,7 +293,6 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
         # Group-quantize input tensor and convert dtypes if needed
         fc1_input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
         fc1_input_quantizer.optimize_for_gemm = True
-        _enable_nvfp4_rht_for_group_quantize(fc1_input_quantizer)
         input_quantizer = getattr(input_, "quantizer", None)
         if isinstance(input_, GroupedTensor) and (
             isinstance(fc1_input_quantizer, MXFP8Quantizer)
@@ -452,10 +449,6 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
         else:
             # Discrete-weight kernel: per-expert data/scale pointers
             fc1_weight_data_for_ptrs = [w._rowwise_data for w in grouped_fc1_weight]
-            if use_nvfp4:
-                fc1_weight_data_for_ptrs = [
-                    _nvfp4_logical_data_view(data) for data in fc1_weight_data_for_ptrs
-                ]
             fc1_b_ptrs, fc1_sfb_ptrs, _fc1_sw = tex.get_device_pointer_for_data_and_scales(
                 fc1_weight_data_for_ptrs,
                 [w._rowwise_scale_inv for w in grouped_fc1_weight],
@@ -505,7 +498,6 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
             fc2_in = fc2_in.view(in_shape[0], fc2_weight_shape[1]).contiguous()
             fc2_input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
             fc2_input_quantizer.optimize_for_gemm = True
-            _enable_nvfp4_rht_for_group_quantize(fc2_input_quantizer)
             grouped_fc2_x = _group_quantize_for_grouped_mlp(
                 fc2_in,
                 fc2_input_quantizer,
@@ -738,7 +730,7 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
         return fc2_out, [(), (), ()]
 
 
-class ForwardGroupedMLP_CuTeGEMMGLU_MXFP8(_ForwardGroupedMLP_CuTeGEMMBase_MXFP8):
+class ForwardGroupedMLP_CuTeGEMMGLU_MXFP8(_ForwardGroupedMLP_CuTeGEMMBase):
     """Fused op for MXFP8 GroupedLinear + scaled GLU + GroupedLinear."""
 
     @classmethod
@@ -750,7 +742,7 @@ class ForwardGroupedMLP_CuTeGEMMGLU_MXFP8(_ForwardGroupedMLP_CuTeGEMMBase_MXFP8)
         return grouped_gemm_glu_wrapper_sm100
 
 
-class ForwardGroupedMLP_CuTeGEMMUnary_MXFP8(_ForwardGroupedMLP_CuTeGEMMBase_MXFP8):
+class ForwardGroupedMLP_CuTeGEMMUnary_MXFP8(_ForwardGroupedMLP_CuTeGEMMBase):
     """Fused op for MXFP8 GroupedLinear + scaled unary activation + GroupedLinear."""
 
     @classmethod

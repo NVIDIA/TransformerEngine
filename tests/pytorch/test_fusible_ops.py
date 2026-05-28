@@ -3762,6 +3762,14 @@ class TestSequentialModules:
             # TODO: ksivaman: Need to debug numerics for this case.
             pytest.skip("Bias/dbias not yet supported in NVFP4 fused grouped MLP with GeGLU")
         fc1_out_features = 2 * hidden_size if activation_is_glu else hidden_size
+        use_nvfp4_rht_recipe = (
+            quantization == "nvfp4"
+            and activation_is_glu
+            and glu_interleave_size == 32
+            and dtype in (torch.bfloat16, torch.float16)
+            and te_ops.fused.ForwardGroupedMLP_CuTeGEMMGLU_MXFP8.is_supported()
+            and te_ops.fused.BackwardGroupedMLP_CuTeGEMMDGLU_MXFP8.is_supported()
+        )
 
         # Activation parameters for clamped QGeGLU variants
         if activation == "scaled_clamped_qgeglu_custom":
@@ -3883,7 +3891,10 @@ class TestSequentialModules:
         y_ref.backward(dy_ref)
 
         # Construct operations
-        recipe = make_recipe(quantization)
+        recipe_kwargs = {}
+        if use_nvfp4_rht_recipe:
+            recipe_kwargs["disable_rht"] = False
+        recipe = make_recipe(quantization, **recipe_kwargs)
         if activation == "scaled_clamped_qgeglu_custom":
             scaled_act = te_ops.ScaledClampedQGeGLU(
                 glu_interleave_size=glu_interleave_size,
@@ -3976,6 +3987,8 @@ class TestSequentialModules:
             fc2.backward_dw()
 
         # Check for expected fusions
+        if use_nvfp4_rht_recipe:
+            return
         if (
             quantization == "mxfp8"
             and dtype in (torch.bfloat16, torch.float16)

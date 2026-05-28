@@ -26,10 +26,8 @@ from .._common import (
     _cudnn_frontend_geglu_runtime_params,
     _cudnn_frontend_version_supported,
     _cudnn_frontend_supports_grouped_gemm_srelu,
-    _enable_nvfp4_rht_for_group_quantize,
     _group_quantize_for_grouped_mlp,
     _nvfp4_amax,
-    _nvfp4_logical_data_view,
     _nvfp4_single_tensor_from_grouped,
     fuse_grouped_mlp_ops,
     get_accumulate_flag_in_param,
@@ -299,8 +297,8 @@ def _compute_grad_params(
     return w_list + bias_list
 
 
-class _BackwardGroupedMLP_CuTeGEMMDBase_MXFP8(FusedOperation):
-    """Base fused backward op for MXFP8 GroupedLinear + activation + GroupedLinear.
+class _BackwardGroupedMLP_CuTeGEMMDBase(FusedOperation):
+    """Base fused backward op for block-scaled GroupedLinear + activation + GroupedLinear.
 
     Uses experimental CuTe DSL kernel from cuDNN front-end.
 
@@ -465,7 +463,6 @@ class _BackwardGroupedMLP_CuTeGEMMDBase_MXFP8(FusedOperation):
         fc2_grad_output_quantizer = fc2_ctx.grad_output_quantizers[0]
         fc2_grad_output_quantizer.set_usage(rowwise=True, columnwise=fc2_ctx.weight_requires_grad)
         fc2_grad_output_quantizer.optimize_for_gemm = True
-        _enable_nvfp4_rht_for_group_quantize(fc2_grad_output_quantizer)
         output_fc2_dbias = fc2_op.has_bias
         fc2_dbias_packed = None
         fc2_dy = None
@@ -650,10 +647,6 @@ class _BackwardGroupedMLP_CuTeGEMMDBase_MXFP8(FusedOperation):
             fc2_dactivation_kwargs["sfb_tensor"] = fc2_w_scales
         else:
             fc2_weight_data_for_ptrs = [w._columnwise_data for w in grouped_fc2_weight]
-            if use_nvfp4:
-                fc2_weight_data_for_ptrs = [
-                    _nvfp4_logical_data_view(data) for data in fc2_weight_data_for_ptrs
-                ]
             fc2_b_ptrs, fc2_sfb_ptrs, _fc2_sw = tex.get_device_pointer_for_data_and_scales(
                 fc2_weight_data_for_ptrs,
                 [w._columnwise_scale_inv for w in grouped_fc2_weight],
@@ -774,7 +767,6 @@ class _BackwardGroupedMLP_CuTeGEMMDBase_MXFP8(FusedOperation):
                 columnwise=fc1_ctx.weight_requires_grad,
             )
             fc1_grad_output_quantizer.optimize_for_gemm = True
-            _enable_nvfp4_rht_for_group_quantize(fc1_grad_output_quantizer)
             grouped_fc1_dy = _group_quantize_for_grouped_mlp(
                 fc1_dy_bf16,
                 fc1_grad_output_quantizer,
@@ -972,7 +964,7 @@ class _BackwardGroupedMLP_CuTeGEMMDBase_MXFP8(FusedOperation):
         )
 
 
-class BackwardGroupedMLP_CuTeGEMMDGLU_MXFP8(_BackwardGroupedMLP_CuTeGEMMDBase_MXFP8):
+class BackwardGroupedMLP_CuTeGEMMDGLU_MXFP8(_BackwardGroupedMLP_CuTeGEMMDBase):
     """Fused backward op for GroupedLinear + scaled GLU + GroupedLinear."""
 
     @classmethod
@@ -984,7 +976,7 @@ class BackwardGroupedMLP_CuTeGEMMDGLU_MXFP8(_BackwardGroupedMLP_CuTeGEMMDBase_MX
         return grouped_gemm_dglu_wrapper_sm100
 
 
-class BackwardGroupedMLP_CuTeGEMMDUnary_MXFP8(_BackwardGroupedMLP_CuTeGEMMDBase_MXFP8):
+class BackwardGroupedMLP_CuTeGEMMDUnary_MXFP8(_BackwardGroupedMLP_CuTeGEMMDBase):
     """Fused backward op for GroupedLinear + scaled unary activation + GroupedLinear."""
 
     @classmethod

@@ -60,13 +60,6 @@ def _nvidia_cudnn_frontend_supports_wgrad() -> bool:
     return _cudnn_frontend_version_supported()
 
 
-def _enable_nvfp4_rht_for_group_quantize(quantizer: Quantizer) -> None:
-    """Use the graph-safe NVFP4 grouped quantization path."""
-    if isinstance(quantizer, NVFP4Quantizer):
-        quantizer.with_rht = True
-        quantizer.with_post_rht_amax = True
-
-
 def _group_quantize_for_grouped_mlp(
     tensor: torch.Tensor,
     quantizer: Quantizer,
@@ -128,11 +121,6 @@ def _group_quantize_for_grouped_mlp(
         tensor_offsets=tensor_offsets,
         with_gemm_swizzled_scales=with_gemm_swizzled_scales,
     )
-
-
-def _nvfp4_logical_data_view(data: torch.Tensor) -> torch.Tensor:
-    """View packed NVFP4 data with its logical K dimension for scale swizzling."""
-    return data.as_strided((data.shape[0], data.shape[1] * 2), (data.stride(0), 0))
 
 
 def _nvfp4_amax(tensors: Any, *, columnwise: bool) -> torch.Tensor:

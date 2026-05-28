@@ -66,6 +66,11 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> get_device_pointer_for_data_and_s
   data_shape.ndim = 2;
   data_shape.data[0] = static_cast<size_t>(data_tensors[0].size(0));
   data_shape.data[1] = static_cast<size_t>(data_tensors[0].size(1));
+  if (is_fp4_dtype(data_dtype)) {
+    // FP4 tensors are packed with two logical values per byte.  The data pointers still refer to
+    // the packed physical storage, but TensorWrapper needs the logical shape for scale swizzling.
+    data_shape.data[1] *= 2;
+  }
 
   // Collect data device pointers
   std::vector<uint64_t> data_host_ptrs(num_tensors);
