@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 from transformer_engine.jax.cpp_extensions.gemm import GroupedGemmPrimitive
@@ -18,7 +19,10 @@ from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 
 
 def _mesh():
-    return Mesh(np.asarray(jax.devices()[:1]).reshape(1, 1), ("expert", "fsdp"))
+    devices = jax.devices()
+    if len(devices) < 4:
+        pytest.skip("Grouped GEMM partitioning tests require at least 4 visible GPUs.")
+    return Mesh(np.asarray(devices[:4]).reshape(2, 2), ("expert", "fsdp"))
 
 
 def _arg_info(mesh, shape, spec):
@@ -187,9 +191,9 @@ def test_grouped_partitioning_shardy_rules_smoke():
 
 def test_grouped_dense_mxfp8_ep_fsdp_outside_shard_map_single_process():
     mesh = _mesh()
-    n_groups = 2
+    n_groups = 4
     group_tokens = 128
-    hidden = 128
+    hidden = 256
     out_hidden = 128
     x_shape = (n_groups * group_tokens, hidden)
     w_shape = (n_groups, hidden, out_hidden)
