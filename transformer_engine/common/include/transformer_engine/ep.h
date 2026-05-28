@@ -54,7 +54,12 @@ typedef struct {
 /*! \brief Bootstrap from an existing NCCL EP sub-communicator. Requires SM>=90.
  *
  *  ep_comm is borrowed and must span exactly group_config.ep_size ranks.
+ *  The caller retains ownership and must keep ep_comm alive until
+ *  nvte_ep_shutdown() returns; destroying it earlier is undefined behavior.
  *  Re-init after shutdown is allowed; double-init throws.
+ *
+ *  v0.1 scope: one EP group per process, bound to the current CUDA device at
+ *  initialize time. Multiple GPUs per process are not supported.
  *
  *  \param[in] ep_comm      Opaque ncclComm_t for the EP sub-group.
  *  \param[in] group_config Group-level EP configuration.
@@ -68,6 +73,11 @@ void nvte_ep_shutdown(void);
 
 /*! \brief Reserve a handle_id for a layer config and report the handle_mem buffer
  *         size the caller must allocate. Host-only.
+ *
+ *  Registration is intended to be static (once per layer at model init). There is
+ *  no per-layer unregister API; all registrations are released by nvte_ep_shutdown.
+ *  Re-registering the same layer config each step is not supported and will
+ *  eventually exhaust the handle cache (NVTE_EP_HANDLE_CACHE_SIZE, default 8192).
  *
  *  \param[in]  layer_config     Per-layer EP configuration.
  *  \param[out] handle_mem_size  Bytes the caller must allocate for handle_mem.
