@@ -854,22 +854,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self._output_quantizer_role: Optional[QuantizerRole] = None
         self._grad_input_quantizer_role: Optional[QuantizerRole] = None
 
-        # Empty wrapper-subclass tensor threaded through every TE
-        # custom op as a regular ``Tensor`` argument. Its sole purpose
-        # is to make ``register_torch_dispatch`` rules
-        # (registered in :func:`transformer_engine.pytorch.dynamo._te_register_custom_op`
-        # against ``_DispatchTrigger``) fire on every call to a
-        # subclass-aware op, even when no other argument is a
-        # registered subclass. Routed via ``register_buffer`` so that
-        # Dynamo lifts it as a regular graph input under
-        # ``torch.compile`` instead of internalising it as a
-        # Python-side constant (which would then trip
-        # ``FakeTensorMode``).
-        from transformer_engine.pytorch.dynamo import _DispatchTrigger
-        self.register_buffer(
-            "_te_dispatch_trigger", _DispatchTrigger(), persistent=False
-        )
-
         if not TEDebugState.debug_enabled:
             TEDebugState.initialize()
         self._validate_name()

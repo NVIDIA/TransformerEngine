@@ -161,13 +161,6 @@ class LinearFwdArgs:
     cpu_offloading: bool
     is_grad_enabled: bool
 
-    # Always set to ``self._te_dispatch_trigger`` of the calling
-    # module: a tiny ``_DispatchTrigger`` wrapper-subclass tensor that
-    # exists only to make ``register_torch_dispatch`` rules fire on
-    # every call to the outer custom op, so output rewrapping can run
-    # in a single place. See :class:`transformer_engine.pytorch.dynamo._DispatchTrigger`.
-    _te_dispatch_trigger: Optional[torch.Tensor] = None
-
 
 @dataclass(slots=True)
 class LinearBwdArgs:
@@ -236,12 +229,6 @@ class LinearBwdArgs:
     # --- Misc ---
     cpu_offloading: bool = False
     owns_input: bool = False
-
-    # See :class:`LinearFwdArgs._te_dispatch_trigger`. Set in
-    # ``_linear_setup_ctx`` from the corresponding forward-args field
-    # so the backward op carries the same trigger and its always-on
-    # ``register_torch_dispatch`` rule fires too.
-    _te_dispatch_trigger: Optional[torch.Tensor] = None
 
     # --- Per-backward scratch state (populated inside _linear_backward) ---
     ub_obj_gradout: Optional[Any] = None
@@ -725,7 +712,6 @@ def _linear_setup_ctx(
 
     # Misc
     bwd_args.cpu_offloading = fwd_args.cpu_offloading
-    bwd_args._te_dispatch_trigger = fwd_args._te_dispatch_trigger
 
     if backward_override is not None:
         bwd_args.fp8 = False
@@ -2280,8 +2266,6 @@ class Linear(TransformerEngineBaseModule):
                 # misc
                 cpu_offloading=is_cpu_offload_enabled(),
                 is_grad_enabled=is_grad_enabled,
-                # always-on torch_dispatch trigger
-                _te_dispatch_trigger=self._te_dispatch_trigger,
             )
             if use_compiled_op:
                 out, new_weight_workspace = _linear_compiled_op(fwd_args)
