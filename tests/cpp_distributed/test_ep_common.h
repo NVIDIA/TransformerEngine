@@ -74,6 +74,7 @@ static int         g_ep_size             = -1;
 static int         g_num_experts         = -1;
 static int         g_hidden_dim          = 256;
 static int         g_max_tokens_per_rank = 64;
+static NVTEDType   g_token_dtype         = kNVTEBFloat16;
 static bool        g_ep_initialized      = false;
 static ncclComm_t  g_ep_comm             = nullptr;  // owned by harness, destroyed in ep_teardown
 
@@ -224,6 +225,8 @@ static void ep_parse_args(int argc, char* argv[]) {
     else if (a.rfind("--num-processes=",0)==0)  g_num_processes = std::stoi(a.substr(16));
     else if (a.rfind("--nranks=",      0) == 0) g_num_processes = std::stoi(a.substr(9));
     else if (a.rfind("--uid-file=",    0) == 0) g_uid_file      = a.substr(11);
+    else if (a.rfind("--token-dtype=", 0) == 0)
+      g_token_dtype = static_cast<NVTEDType>(std::stoi(a.substr(14)));
   }
 
   if (g_process_id < 0 || g_num_processes <= 0) {
@@ -279,6 +282,7 @@ static bool ep_bootstrap(int argc, char* argv[]) {
   // Worst-case for top_k fan-out: ep_size * max_tokens_per_rank * 2.
   group_config.max_recv_tokens_per_rank = g_ep_size * g_max_tokens_per_rank * 2;
   group_config.hidden_dim               = g_hidden_dim;
+  group_config.token_dtype              = g_token_dtype;
 
   ASSERT_NCCL_OK(ncclCommInitRank(&g_ep_comm, g_num_processes, uid, g_process_id));
   nvte_ep_initialize(static_cast<void*>(g_ep_comm), group_config);
