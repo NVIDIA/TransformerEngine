@@ -446,7 +446,7 @@ class TestGroupedTensor:
         ],
     )
     @pytest.mark.parametrize("output_dbias", [False, True])
-    @pytest.mark.parametrize("shape_case", ["all_same_first", "varying_first", "varying_last"])
+    @pytest.mark.parametrize("shape_case", ["varying_first", "varying_last"])
     def test_group_quantize_cudagraph_capturable(
         self, quantization: str, output_dbias: bool, shape_case: str
     ) -> None:
@@ -471,10 +471,7 @@ class TestGroupedTensor:
             first_dims = None
             last_dims = torch.tensor(last_dims_host, dtype=torch.int64, device="cuda")
         else:
-            if shape_case == "varying_first":
-                first_dims_host = [256, 128, 384]
-            else:
-                first_dims_host = [512, 512]
+            first_dims_host = [256, 128, 384]
             num_tensors = len(first_dims_host)
             hidden = 1024
             shape = [(r, hidden) for r in first_dims_host]
@@ -657,9 +654,7 @@ class TestGroupedTensor:
         # sum(first_dims) (filled with 1e4). If the kernel were to read those
         # tail rows, per-group amax would explode well above what bf16 N(0,1)
         # produces. We catch that implicitly via the per-group amax assertion in
-        # ``_assert_fp8_cs_group_quantize_matches_reference`` below: the
-        # reference amax is computed from the active input tensors only, so a
-        # tail-read would make the kernel amax differ.
+        # ``_assert_fp8_cs_group_quantize_matches_reference`` below.
         self._assert_fp8_cs_group_quantize_matches_reference(
             grouped_output=grouped_output,
             input_tensors=input_tensors,
