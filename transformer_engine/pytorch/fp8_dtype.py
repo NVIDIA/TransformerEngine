@@ -65,3 +65,29 @@ def from_tex(d: tex.DType) -> FP8DType:
     if isinstance(d, tex.DType):
         return _TEX_TO_FP8DTYPE_BY_TEX[d]
     return _TEX_TO_FP8DTYPE[int(d)]
+
+
+# Register ``tex.DType`` as a torch.compile value-opaque type so it
+# can flow through Dynamo as a constant inside ``__tensor_flatten__``
+# meta dicts and other traced metadata payloads. Without this,
+# Dynamo trips on ``UserDefinedObjectVariable(DType)`` because the
+# pybind11 enum carries a custom ``__hash__``. ``__fx_repr__`` is
+# injected once here so the FX codegen can serialize literal values
+# as ``TE_DType(<int>)``. Gated by a try/except so importing this
+# module remains safe on older PyTorch versions that lack the
+# private ``opaque_object`` API.
+try:
+    from torch._library.opaque_object import (
+        is_opaque_value_type as _is_opaque_value_type,
+        register_opaque_type as _register_opaque_type,
+    )
+
+    if not hasattr(tex.DType, "__fx_repr__"):
+        tex.DType.__fx_repr__ = lambda self: (
+            f"TE_DType({int(self)})",
+            {"TE_DType": tex.DType},
+        )
+    if not _is_opaque_value_type(tex.DType):
+        _register_opaque_type(tex.DType, typ="value", members={})
+except Exception:  # pragma: no cover - older torch / partial init
+    pass

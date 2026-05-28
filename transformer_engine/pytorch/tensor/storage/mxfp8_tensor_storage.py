@@ -19,16 +19,6 @@ from ...constants import TE_DType as torch_to_transformer_engine_dtype
 
 from ...utils import _empty_tensor
 
-try:
-    from torch._library.opaque_object import is_opaque_value_type, register_opaque_type
-
-    if not hasattr(TE_DType, "__fx_repr__"):
-        TE_DType.__fx_repr__ = lambda self: (f"TE_DType({int(self)})", {"TE_DType": TE_DType})
-    if not is_opaque_value_type(TE_DType):
-        register_opaque_type(TE_DType, typ="value", members={})
-except Exception:  # pragma: no cover - older torch / partial init
-    pass
-
 
 class _FromMXFP8Func(torch.autograd.Function):
     """Cast from MXFP8 to other dtype"""

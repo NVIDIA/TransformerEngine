@@ -784,12 +784,16 @@ class Quantizer(abc.ABC):
             "QuantizedTensorStorage."
         )
 
-    # Scalar keys in :meth:`_storage_scalars` whose values are pybind
-    # enums (currently ``transformer_engine_torch.DType``) and must be
-    # converted to a Dynamo-traceable Python proxy
-    # (:class:`FP8DType`) before being embedded in the subclass-spec
-    # ``meta`` dict. The reverse conversion happens in the tensor
-    # subclass's :meth:`_flatten_meta_overrides`.
+    # Keys in :meth:`_storage_scalars` whose values are pybind enums
+    # (``transformer_engine_torch.DType``) and must be converted to the
+    # Python ``FP8DType`` proxy for :meth:`create_metadata`. The opaque
+    # registration in :mod:`fp8_dtype` is enough to flow ``tex.DType``
+    # through Dynamo as an FX constant, but
+    # :meth:`autograd.Function.apply` -- used by
+    # :func:`_ToSubclassFn.reassemble_with_autograd` -- still rejects
+    # opaque values via its proxy-conversion check. The reverse
+    # conversion lives in the tensor subclass's
+    # :meth:`_flatten_meta_overrides`.
     _SUBCLASS_META_TEX_KEYS: Tuple[str, ...] = ("fp8_dtype",)
 
     def create_metadata(
@@ -812,8 +816,7 @@ class Quantizer(abc.ABC):
         rebuilding a live :class:`Quantizer` inside
         ``__tensor_unflatten__`` would force Dynamo to trace the
         constructor, which routinely trips
-        ``UserDefinedObjectVariable(...Quantizer)``. Code that needs
-        the live quantizer sources it from outside the compiled region.
+        ``UserDefinedObjectVariable(...Quantizer)``.
         """
         storage_cls = type(self)._storage_cls
         usage_flag = {
