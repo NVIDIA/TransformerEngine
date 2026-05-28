@@ -297,6 +297,12 @@ class MXFP8Quantizer(Quantizer):
             int(has_rowwise) * 2  # rowwise_data + rowwise_scale_inv
             + int(has_columnwise) * 2  # columnwise_data + columnwise_scale_inv
         )
+        # Storage's :meth:`_torch_compile_flatten` also emits the live
+        # quantizer's flatten tensors (see
+        # :meth:`Float8Quantizer.create_storage_metadata` for
+        # rationale); keep the count + meta in sync.
+        quantizer_meta, _, quantizer_tensors = self._flatten()
+        tensor_count += len(quantizer_tensors)
         from ..dynamo import OpaqueSimpleMetadata  # pylint: disable=import-outside-toplevel
 
         meta = OpaqueSimpleMetadata(
@@ -313,36 +319,10 @@ class MXFP8Quantizer(Quantizer):
                 "has_rowwise_scale_inv": has_rowwise,
                 "has_columnwise_data": has_columnwise,
                 "has_columnwise_scale_inv": has_columnwise,
-                "quantizer_meta": None,
+                "quantizer_meta": quantizer_meta,
             }
         )
         return MXFP8TensorStorage, meta, None, tensor_count
-
-    def create_save_shell(
-        self,
-        *,
-        fake_dtype: torch.dtype,
-    ) -> MXFP8TensorStorage:
-        """Return a tensor-free :class:`MXFP8TensorStorage` shell for
-        use as a ``tensor_objects`` entry in
-        :func:`transformer_engine.pytorch.quantized_tensor.restore_from_saved`.
-
-        Built via ``object.__new__`` + direct attribute writes for
-        Dynamo traceability. Mirrors
-        :meth:`Float8Quantizer.create_save_shell` -- see its docstring
-        for rationale. Restores from the fixed four-slot layout
-        emitted by :meth:`MXFP8TensorStorage.prepare_for_saving`.
-        """
-        shell = object.__new__(MXFP8TensorStorage)
-        shell._dtype = fake_dtype
-        shell._rowwise_data = None
-        shell._columnwise_data = None
-        shell._rowwise_scale_inv = None
-        shell._columnwise_scale_inv = None
-        shell._fp8_dtype = self.dtype
-        shell._quantizer = None
-        shell._with_gemm_swizzled_scales = self.optimize_for_gemm
-        return shell
 
     def _flatten(self):
         from ..dynamo import OpaqueSimpleMetadata

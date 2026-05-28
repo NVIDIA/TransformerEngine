@@ -149,6 +149,14 @@ def _float8_create_storage_metadata(
     has_transpose = bool(quantizer.columnwise_usage)
     has_scale_inv = True
     tensor_count = int(has_data) + int(has_transpose) + int(has_scale_inv)
+    # Storage's :meth:`_torch_compile_flatten` also emits the live
+    # quantizer's flatten tensors when ``self._quantizer is not None``
+    # (the impl-produced storage always carries one). Pull
+    # ``quantizer._flatten()`` to learn the count + meta so the
+    # metadata we publish here stays in lock-step with the slot count
+    # produced at flatten time.
+    quantizer_meta, _, quantizer_tensors = quantizer._flatten()
+    tensor_count += len(quantizer_tensors)
     from ..dynamo import OpaqueSimpleMetadata  # pylint: disable=import-outside-toplevel
 
     meta = OpaqueSimpleMetadata(
@@ -169,55 +177,10 @@ def _float8_create_storage_metadata(
             "has_data": has_data,
             "has_transpose": has_transpose,
             "has_scale_inv": has_scale_inv,
-            "quantizer_meta": None,
+            "quantizer_meta": quantizer_meta,
         }
     )
     return Float8TensorStorage, meta, None, tensor_count
-
-
-def _float8_create_save_shell(
-    quantizer: "Quantizer",
-    *,
-    fake_dtype: torch.dtype,
-) -> "Float8TensorStorage":
-    """Return a tensor-free :class:`Float8TensorStorage` shell suitable
-    for use as a ``tensor_objects`` entry in
-    :func:`transformer_engine.pytorch.quantized_tensor.restore_from_saved`.
-
-    The shell is built via ``object.__new__`` + direct attribute writes
-    rather than the regular constructor: that avoids tripping Dynamo
-    on the UDF args (live quantizer instance, ``tex.DType``) that
-    :meth:`Float8TensorStorage.__new__` would otherwise see when this
-    function is called from a Dynamo-traced region (e.g. from
-    ``_linear_forward_output_info``).
-
-    The shell holds no inner tensors -- ``restore_from_saved`` fills
-    them in from the flat saved-tensor list emitted by the op return,
-    matching the fixed three-slot layout (``_data``, ``_transpose``,
-    ``_scale_inv``) of :meth:`Float8TensorStorage.prepare_for_saving`.
-    The ``_quantizer`` slot is intentionally left ``None``; user code
-    inside the compiled region must source the live quantizer from
-    outside.
-    """
-    shell = object.__new__(Float8TensorStorage)
-    shell._dtype = fake_dtype
-    shell._data = None
-    shell._transpose = None
-    shell._scale_inv = None
-    shell._fp8_dtype = quantizer.dtype
-    shell._quantizer = None
-    # ``_transpose_invalid`` flags a transpose buffer that exists but
-    # whose contents are stale. Saved-for-backward storages always
-    # come from the forward after the quantizer has filled in the
-    # transpose (when it was requested), so the saved transpose -- if
-    # present at all -- is valid. Initialising to ``False`` keeps
-    # ``has_data_transpose`` true whenever ``_transpose`` ends up
-    # non-``None`` after :meth:`restore_from_saved` (which itself only
-    # writes ``_transpose`` and leaves this flag alone). The
-    # transpose-None case is unaffected since ``has_data_transpose``
-    # ANDs in the ``_transpose is not None`` check.
-    shell._transpose_invalid = False
-    return shell
 
 
 class Float8Quantizer(Quantizer):
@@ -453,14 +416,6 @@ class Float8Quantizer(Quantizer):
             requires_grad=requires_grad,
             as_tensor=as_tensor,
         )
-
-    def create_save_shell(
-        self,
-        *,
-        fake_dtype: torch.dtype,
-    ) -> Float8TensorStorage:
-        # pylint: disable=missing-function-docstring
-        return _float8_create_save_shell(self, fake_dtype=fake_dtype)
 
     def _flatten(self):
         from ..dynamo import OpaqueSimpleMetadata
@@ -772,14 +727,6 @@ class Float8CurrentScalingQuantizer(Quantizer):
             requires_grad=requires_grad,
             as_tensor=as_tensor,
         )
-
-    def create_save_shell(
-        self,
-        *,
-        fake_dtype: torch.dtype,
-    ) -> Float8TensorStorage:
-        # pylint: disable=missing-function-docstring
-        return _float8_create_save_shell(self, fake_dtype=fake_dtype)
 
     def _flatten(self):
         from ..dynamo import OpaqueSimpleMetadata
