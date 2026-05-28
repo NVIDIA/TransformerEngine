@@ -48,7 +48,6 @@ class CaseResult:
     per_iter_us: float
     relevant_bytes: int
     bw_actual_TBps: float
-    bw_alloc_TBps: float
 
 
 def _make_quantizer(mode: str) -> Float8CurrentScalingQuantizer:
@@ -179,9 +178,101 @@ def _bytes_per_call(actual_rows: int, hidden: int, mode: str) -> int:
     return in_bytes + out_bytes
 
 
+def _kernel_bytes_per_call(bucket: str, actual_rows: int, hidden: int, mode: str,
+                           num_tensors: int) -> int:
+    """Bytes that one launch of the kernel(s) in ``bucket`` actually moves.
+
+    Counts both reads and writes. Tiny kernels (amax_zero, compute_scale) move
+    only ``num_tensors``-sized metadata buffers so their reported BW will look
+    low; that's expected -- they're launch-overhead dominated, not bandwidth
+    bound.
+    """
+    input_bytes = actual_rows * hidden * 2  # bf16 input
+    if bucket == "amax_zero":
+        # Writes ``num_tensors`` floats to zero the amax buffer.
+        return num_tensors * 4
+    if bucket == "amax":
+        # Reads the full input (over actual rows; the kernel uses tensor_offsets
+        # to skip overallocated tails) and atomicMaxes into the per-group amax
+        # slots. Output traffic is negligible vs the input scan.
+        return input_bytes + num_tensors * 4
+    if bucket == "compute_scale":
+        # Reads ``num_tensors`` amax floats, writes ``num_tensors`` of (scale,
+        # scale_inv) -- ~3 floats per group.
+        return num_tensors * 4 * 3
+    if bucket == "cast":
+        # Reads bf16 input, writes fp8 rowwise and/or columnwise (1 byte per
+        # element per direction). Mirrors the eager BW_actual byte count.
+        return _bytes_per_call(actual_rows, hidden, mode)
+    return 0
+
+
+# Substring patterns used to bucket CUDA kernels in --profile mode. Order matters:
+# the first matching bucket wins. Anything that doesn't match falls into "cast".
+# Patterns are matched against the kernel name AFTER lowercasing -- both the
+# kernel name and the pattern strings are lowercased before substring match,
+# so patterns here must already be lowercase. Camelcased identifiers like
+# ``ComputeScaleAndScaleInvFunctor`` flatten to ``computescaleandscaleinvfunctor``.
+_KERNEL_BUCKETS = (
+    # Split amax into the trivial zero-init kernel and the real reduction kernel,
+    # otherwise the bucket average misleadingly suggests the zero kernel is slow.
+    ("amax_zero",     ("grouped_amax_zero",)),
+    ("amax",          ("grouped_amax",)),
+    # The compute-scale kernel is launched via the multi_tensor_apply framework
+    # as ``multi_tensor_apply_kernel<...ComputeScaleAndScaleInvFunctor>``; match
+    # on the functor name after lowercasing.
+    ("compute_scale", ("computescale",)),
+)
+
+
+def _bucket_for_kernel(name: str) -> str:
+    lname = name.lower()
+    for bucket, patterns in _KERNEL_BUCKETS:
+        if any(p in lname for p in patterns):
+            return bucket
+    return "cast"
+
+
+def _profile_breakdown(quantizer, inputs, first_dims, num_groups: int, outputs,
+                       iters: int) -> dict:
+    """Run ``iters`` group_quantize calls under torch.profiler and aggregate CUDA
+    kernel time into {amax, compute_scale, cast} buckets.
+
+    Returns dict: bucket -> {"us_total": float, "calls": int}, plus a "_total_us"
+    key holding the summed GPU time across all kernels (not wall-clock).
+    """
+    from torch.profiler import profile, ProfilerActivity
+
+    torch.cuda.synchronize()
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+        for it in range(iters):
+            i = it % len(inputs)
+            tex.group_quantize(inputs[i], quantizer, num_groups, first_dims,
+                               output=outputs[i])
+        torch.cuda.synchronize()
+
+    agg = {b: {"us_total": 0.0, "calls": 0} for b, _ in _KERNEL_BUCKETS}
+    agg["cast"] = {"us_total": 0.0, "calls": 0}
+    total_us = 0.0
+    for evt in prof.key_averages():
+        # CPU events have cuda_time_total == 0; kernel events have device time.
+        if evt.device_type.name != "CUDA":
+            continue
+        us = float(evt.self_device_time_total)
+        if us <= 0:
+            continue
+        bucket = _bucket_for_kernel(evt.key)
+        agg[bucket]["us_total"] += us
+        agg[bucket]["calls"] += evt.count
+        total_us += us
+    agg["_total_us"] = total_us
+    return agg
+
+
 def run_case(shape_case: str, mode: str, *, actual_rows: int, allocated_rows: int,
              hidden: int, num_groups: int, num_buffers: int, warmup: int,
-             iters: int, mode_loop: str = "eager", verbose: bool = True) -> CaseResult:
+             iters: int, mode_loop: str = "eager", verbose: bool = True,
+             profile_breakdown: bool = False) -> CaseResult:
     inputs, first_dims, _ = _make_inputs(shape_case, actual_rows, allocated_rows,
                                           hidden, num_groups, num_buffers)
     quantizer = _make_quantizer(mode)
@@ -211,24 +302,53 @@ def run_case(shape_case: str, mode: str, *, actual_rows: int, allocated_rows: in
 
     relevant = _bytes_per_call(actual_rows, hidden, mode)
     total_bytes_actual = relevant * actual_iters
-    total_bytes_alloc = _bytes_per_call(allocated_rows, hidden, mode) * actual_iters
     elapsed_s = elapsed_ms / 1000.0
     bw_actual = total_bytes_actual / elapsed_s / 1.0e12
-    bw_alloc = total_bytes_alloc / elapsed_s / 1.0e12
     res = CaseResult(
         shape_case=shape_case, mode=mode,
         actual_rows=actual_rows, allocated_rows=allocated_rows,
         hidden=hidden, num_groups=num_groups, iters=actual_iters,
         elapsed_ms_total=elapsed_ms,
         per_iter_us=elapsed_ms * 1000.0 / actual_iters,
-        relevant_bytes=relevant, bw_actual_TBps=bw_actual, bw_alloc_TBps=bw_alloc,
+        relevant_bytes=relevant, bw_actual_TBps=bw_actual,
     )
     if verbose:
         print(f"  {shape_case:30s} groups={num_groups:3d} mode={mode:10s} "
               f"loop={mode_loop:5s} "
               f"per_iter={res.per_iter_us:7.2f}us "
-              f"BW_actual={res.bw_actual_TBps:5.2f} TB/s "
-              f"BW_alloc={res.bw_alloc_TBps:5.2f} TB/s")
+              f"BW_actual={res.bw_actual_TBps:5.2f} TB/s")
+
+    if profile_breakdown:
+        profile_iters = min(iters, 50)
+        agg = _profile_breakdown(quantizer, inputs, first_dims, num_groups, outputs,
+                                 iters=profile_iters)
+        total = agg["_total_us"] if agg["_total_us"] > 0 else 1.0
+        per_iter_total = total / profile_iters
+        print(f"      kernel breakdown over {profile_iters} iters "
+              f"(per-iter sum={per_iter_total:6.2f}us):")
+        print(f"        {'bucket':14s} {'per_iter_us':>12s} {'(%)':>7s} "
+              f"{'launches/iter':>14s} {'per_launch_us':>15s} "
+              f"{'bytes/launch':>14s} {'BW_TBps':>9s}")
+        for bucket in ("amax_zero", "amax", "compute_scale", "cast"):
+            entry = agg[bucket]
+            pct = 100.0 * entry["us_total"] / total
+            per_iter_us = entry["us_total"] / profile_iters
+            launches_per_iter = entry["calls"] / profile_iters
+            per_launch_us = (
+                entry["us_total"] / entry["calls"] if entry["calls"] else 0.0
+            )
+            bytes_per_launch = _kernel_bytes_per_call(
+                bucket, actual_rows, hidden, mode, num_groups
+            )
+            # bytes_per_launch / (per_launch_us * 1e-6) / 1e12 = TB/s
+            bw_tbps = (
+                bytes_per_launch / (per_launch_us * 1.0e-6) / 1.0e12
+                if per_launch_us > 0
+                else 0.0
+            )
+            print(f"        {bucket:14s} {per_iter_us:12.2f} {pct:7.1f} "
+                  f"{launches_per_iter:14.2f} {per_launch_us:15.2f} "
+                  f"{bytes_per_launch:14d} {bw_tbps:9.2f}")
     return res
 
 
@@ -247,6 +367,10 @@ def main():
     parser.add_argument("--modes", nargs="+", default=list(MODES))
     parser.add_argument("--loop", choices=("eager", "graph", "both"), default="both",
                         help="eager Python loop, captured CUDA graph, or both")
+    parser.add_argument("--profile", action="store_true",
+                        help="After each timed case, also run a torch.profiler pass "
+                             "and break down CUDA kernel time into "
+                             "{amax, compute_scale, cast} buckets. Adds overhead.")
     parser.add_argument("--json-out", default=None)
     args = parser.parse_args()
 
@@ -280,6 +404,11 @@ def main():
                 if mode not in MODES:
                     raise SystemExit(f"unknown mode={mode}")
                 for loop in loop_modes:
+                    # Only profile-breakdown the eager loop -- profiling a captured
+                    # CUDA graph aggregates everything into the graph launch event,
+                    # which hides per-kernel time. Eager mode gives true per-kernel
+                    # device time.
+                    do_profile = args.profile and loop == "eager"
                     results.append(run_case(
                         shape_case, mode,
                         actual_rows=args.actual_rows,
@@ -289,6 +418,7 @@ def main():
                         num_buffers=args.num_buffers,
                         warmup=args.warmup, iters=args.iters,
                         mode_loop=loop,
+                        profile_breakdown=do_profile,
                     ))
             print()
 
