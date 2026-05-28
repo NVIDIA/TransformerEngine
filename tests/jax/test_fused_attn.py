@@ -1695,6 +1695,21 @@ class TestFusedAttn:
             QKVLayout.THD_THD_THD,
             id="2-1024-2048-12-6-128-64-BF16-CROSS-GQA-RAGGED_SEPARATE",
         ),
+        # D=256 deterministic backward on the SM100 dedicated SDPA bprop kernel
+        # (cuDNN FE 1.24 / BE 9.23+). Unsupported configs (e.g. dBias, non-256 head dims)
+        # are skipped by FusedAttnRunner._check_configs.
+        pytest.param(
+            4,
+            128,
+            128,
+            16,
+            16,
+            256,
+            256,
+            jnp.float16,
+            QKVLayout.BSHD_BS2HD,
+            id="4-128-128-16-16-256-256-FP16-SELF-KV_PACKED",
+        ),
     ],
 )
 @pytest.mark.parametrize(
@@ -1807,113 +1822,6 @@ class TestFusedAttnWithDeterminism:
     ):
         """
         Test backward with parameterized configs
-        """
-        TestFusedAttn.test_backward(
-            b,
-            s_q,
-            s_kv,
-            h_q,
-            h_kv,
-            d_qk,
-            d_v,
-            attn_bias_type,
-            attn_mask_type,
-            softmax_type,
-            dropout_prob,
-            dtype,
-            qkv_layout,
-            bias_shape,
-            swa,
-            seq_desc_format,
-        )
-
-
-@pytest.mark.parametrize(
-    "attn_mask_type",
-    [
-        pytest.param(AttnMaskType.NO_MASK, id="NO_MASK"),
-        pytest.param(AttnMaskType.PADDING_MASK, id="PADDING"),
-        pytest.param(AttnMaskType.CAUSAL_MASK, id="CAUSAL"),
-        pytest.param(AttnMaskType.PADDING_CAUSAL_MASK, id="PADDING_CAUSAL"),
-        pytest.param(
-            AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK, id="PADDING_CAUSAL_BOTTOM_RIGHT"
-        ),
-    ],
-)
-@pytest.mark.parametrize(
-    "softmax_type",
-    [
-        pytest.param(AttnSoftmaxType.VANILLA_SOFTMAX, id="VANILLA_SOFTMAX"),
-    ],
-)
-@pytest.mark.parametrize(
-    "dropout_prob",
-    [
-        pytest.param(0.0, id="DROP_0.0"),
-    ],
-)
-@pytest.mark.parametrize(
-    "swa",
-    [
-        pytest.param(False, id="NO_SWA"),
-    ],
-)
-@pytest.mark.parametrize(
-    "seq_desc_format",
-    [
-        pytest.param(SeqDescFormat.Seqlens, id="Seqlens"),
-    ],
-)
-@pytest.mark.skipif(not _deterministic, reason="Test determinism only")
-class TestFusedAttnD256WithDeterminism:
-    """
-    Fused attention D=256 deterministic backward tester.
-    """
-
-    @staticmethod
-    @pytest.mark.parametrize(
-        "b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype, qkv_layout",
-        [
-            pytest.param(
-                4,
-                128,
-                128,
-                16,
-                16,
-                256,
-                256,
-                jnp.float16,
-                QKVLayout.BSHD_BS2HD,
-                id="4-128-128-16-16-256-256-FP16-SELF-KV_PACKED",
-            ),
-        ],
-    )
-    @pytest.mark.parametrize(
-        "attn_bias_type, bias_shape",
-        [
-            pytest.param(AttnBiasType.NO_BIAS, None, id="NO_BIAS"),
-        ],
-    )
-    def test_backward(
-        b,
-        s_q,
-        s_kv,
-        h_q,
-        h_kv,
-        d_qk,
-        d_v,
-        attn_bias_type,
-        attn_mask_type,
-        softmax_type,
-        dropout_prob,
-        dtype,
-        qkv_layout,
-        bias_shape,
-        swa,
-        seq_desc_format,
-    ):
-        """
-        Test D=256 backward with the supported deterministic SM100 bprop configuration.
         """
         TestFusedAttn.test_backward(
             b,
