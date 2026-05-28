@@ -98,6 +98,14 @@
     }                                                                            \
   } while (false)
 
+#define NVTE_CHECK_NCCL(expr)                                                 \
+  do {                                                                        \
+    const ncclResult_t status_NVTE_CHECK_NCCL = (expr);                       \
+    if (status_NVTE_CHECK_NCCL != ncclSuccess) {                              \
+      NVTE_ERROR("NCCL Error: ", ncclGetErrorString(status_NVTE_CHECK_NCCL)); \
+    }                                                                         \
+  } while (false)
+
 #ifdef NVTE_WITH_CUBLASMP
 
 #define NVTE_CHECK_CUBLASMP(expr)                                      \
