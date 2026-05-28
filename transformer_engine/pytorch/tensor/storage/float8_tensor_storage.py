@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 import math
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 import torch
 
 import transformer_engine_torch as tex
@@ -86,13 +86,18 @@ class Float8TensorStorage(QuantizedTensorStorage):
     _transpose: Optional[torch.Tensor]
     _transpose_invalid: bool
 
-    # Upper bound on the number of inner tensors produced by
-    # :meth:`_torch_compile_flatten`. Used by the wide-output layout in
-    # :mod:`transformer_engine.pytorch.dynamo` to reserve enough slots in
-    # the custom-op ``Tensor[]`` return for any storage-shaped output:
-    # 3 data tensors (data / transpose / scale_inv) + up to 2 quantizer
-    # tensors (Float8Quantizer carries scale / amax).
-    _TORCH_COMPILE_MAX_INNER_TENSORS = 5
+    # Declarative schema consumed by the generic
+    # :meth:`QuantizedTensorStorage._torch_compile_flatten` /
+    # :meth:`_torch_compile_do_unflatten` implementations in the base.
+    _FLATTEN_TENSOR_ATTRS = ("_data", "_transpose", "_scale_inv")
+    _FLATTEN_META_ATTRS = ("_fp8_dtype", "_dtype")
+    _FLATTEN_CTOR_KWARG = {
+        "_data": "data",
+        "_transpose": "data_transpose",
+        "_scale_inv": "fp8_scale_inv",
+        "_fp8_dtype": "fp8_dtype",
+        "_dtype": "fake_dtype",
+    }
 
     def __new__(
         cls,
@@ -267,89 +272,15 @@ class Float8TensorStorage(QuantizedTensorStorage):
             ")"
         )
 
-    def _torch_compile_flatten(self) -> Tuple[Any, Any, List[torch.Tensor]]:
-        from transformer_engine.pytorch.dynamo import OpaqueSimpleMetadata
-
-        tensors: List[torch.Tensor] = []
-
-        def _append_if_present(tensor: Optional[torch.Tensor]) -> bool:
-            if tensor is None:
-                return False
-            tensors.append(tensor)
-            return True
-
-        quantizer_meta = None
-        process_group = None
-        quantizer_tensors: List[torch.Tensor] = []
-        if self._quantizer is not None:
-            quantizer_meta, process_group, quantizer_tensors = self._quantizer._flatten()
-
-        meta = OpaqueSimpleMetadata(
-            {
-                "_qstorage_cls": type(self).__qualname__,
-                "is_tensor": isinstance(self, torch.Tensor),
-                "shape": torch.Size(self.shape) if isinstance(self, torch.Tensor) else None,
-                "requires_grad": self.requires_grad if isinstance(self, torch.Tensor) else False,
-                "device": self.device if isinstance(self, torch.Tensor) else None,
-                "fp8_dtype": self._fp8_dtype,
-                "fake_dtype": self._dtype,
-                "transpose_invalid": self._transpose_invalid,
-                "has_data": _append_if_present(self._data),
-                "has_transpose": _append_if_present(self._transpose),
-                "has_scale_inv": _append_if_present(self._scale_inv),
-                "quantizer_meta": quantizer_meta,
-            }
-        )
-        tensors.extend(quantizer_tensors)
-        return meta, process_group, tensors
-
-    @classmethod
-    def _torch_compile_do_unflatten(
-        cls,
-        meta: Any,
-        process_group: Any,
-        tensors: List[torch.Tensor],
-    ) -> "Float8TensorStorage":
-        tensor_iter = iter(tensors)
-        data = next(tensor_iter) if meta["has_data"] else None
-        transpose = next(tensor_iter) if meta["has_transpose"] else None
-        scale_inv = next(tensor_iter) if meta["has_scale_inv"] else None
-        quantizer = None
-        if meta["quantizer_meta"] is not None:
-            quantizer = Quantizer._unflatten(
-                meta["quantizer_meta"], process_group, list(tensor_iter)
-            )
-        kwargs = {
-            "data": data,
-            "fp8_scale_inv": scale_inv,
-            "fp8_dtype": meta["fp8_dtype"],
-            "data_transpose": transpose,
-            "quantizer": quantizer,
-            "fake_dtype": meta["fake_dtype"],
-        }
-        if meta["is_tensor"]:
-            kwargs.update(
-                {
-                    "shape": meta["shape"],
-                    "dtype": meta["fake_dtype"],
-                    "requires_grad": meta["requires_grad"],
-                    "device": meta["device"],
-                }
-            )
-        out = cls(**kwargs)
-        # ``__new__`` already sets ``_transpose_invalid = (data_transpose
-        # is None)``, which is exactly the post-restoration semantic we
-        # want under :mod:`torch.compile`: a transpose buffer that the
-        # producer chose to ship through the trace was valid at flatten
-        # time (forward never emits stale transposes onto saved
-        # tensors), so the unflattened storage must treat it as valid.
-        # Trusting ``meta["transpose_invalid"]`` instead would re-pin the
-        # stale ``True`` that Dynamo embeds into the metadata constant
-        # because it cannot follow the in-place
-        # :meth:`restore_from_saved` write through ``ctx.tensor_objects``
-        # and would then fail the :meth:`update_usage`
-        # ``not has_data_transpose`` guard in backward.
-        return out
+    # ``_torch_compile_flatten`` / ``_torch_compile_do_unflatten`` are
+    # the generic implementations on :class:`QuantizedTensorStorage`,
+    # driven by the ``_FLATTEN_*`` declarations above. ``__new__``
+    # re-derives ``_transpose_invalid`` from the restored ``_transpose``
+    # buffer, so we deliberately do not round-trip the flag through
+    # ``_FLATTEN_META_ATTRS``: a producer that ships a transpose through
+    # the trace had it valid, and trusting a stale ``True`` from a
+    # Dynamo-embedded meta constant would trip
+    # :meth:`update_usage`'s ``not has_data_transpose`` guard in backward.
 
     def _create_transpose(self):
         """Update FP8 transpose cache"""

@@ -21,8 +21,6 @@ from .storage.float8_tensor_storage import Float8TensorStorage, _FromFloat8Func
 from ..quantized_tensor import (
     QuantizedTensor,
     Quantizer,
-    _quantizer_from_subclass_snapshot,
-    _quantizer_subclass_snapshot,
 )
 from ._quantization_helpers import _IdentityFunc
 from ..constants import canonicalize_te_dtype, dist_group_type
@@ -72,13 +70,15 @@ def _float8_create_subclass_metadata(
     ``inner_names`` reflects the rowwise / columnwise usage flags of the
     quantizer (``_data`` and/or ``_transpose``, plus always ``_scale_inv``).
     ``meta`` carries the static, Dynamo-friendly attributes
-    :class:`Float8Tensor`'s constructor needs:
+    :class:`Float8Tensor`'s constructor needs (matching the schema produced
+    by :meth:`Float8Tensor._generic_tensor_flatten`):
 
-    * ``_fp8_dtype`` -- :class:`FP8DType` (an :class:`IntEnum`,
+    * ``fp8_dtype`` -- :class:`FP8DType` (an :class:`IntEnum`,
       proxies as a constant for Dynamo; bridges back to ``tex.DType``
-      via :func:`to_tex` on the kernel side).
-    * ``_fake_dtype`` -- caller-supplied torch dtype.
-    * ``_quantizer_snapshot`` -- always ``None`` on this path. Re-using
+      via :meth:`Float8Tensor._flatten_meta_overrides` inside
+      ``__tensor_unflatten__``).
+    * ``fake_dtype`` -- caller-supplied torch dtype.
+    * ``quantizer_snapshot`` -- always ``None`` on this path. Re-using
       the snapshot reconstruction (which builds a fresh quantizer
       inside :meth:`Float8Tensor.__tensor_unflatten__`) would force
       Dynamo to trace a quantizer constructor call, which routinely
@@ -86,7 +86,7 @@ def _float8_create_subclass_metadata(
       ``quantizer=None`` keeps the wrapper construction within Dynamo's
       proxyable surface; user code that needs the live quantizer
       sources it from outside the compiled region.
-    * ``_requires_grad`` -- caller-supplied flag.
+    * ``requires_grad`` -- caller-supplied flag.
     """
     inner_names: List[str] = []
     if quantizer.rowwise_usage:
@@ -95,10 +95,10 @@ def _float8_create_subclass_metadata(
     if quantizer.columnwise_usage:
         inner_names.append("_transpose")
     meta = {
-        "_fp8_dtype": from_tex(quantizer.dtype),
-        "_fake_dtype": fake_dtype,
-        "_quantizer_snapshot": None,
-        "_requires_grad": requires_grad,
+        "fp8_dtype": from_tex(quantizer.dtype),
+        "fake_dtype": fake_dtype,
+        "quantizer_snapshot": None,
+        "requires_grad": requires_grad,
     }
     return tuple(inner_names), meta
 
@@ -795,13 +795,6 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
 
     """
 
-    # Upper bound on the number of inner tensors produced by
-    # :meth:`__tensor_flatten__`. Used by the wide-output layout in
-    # :mod:`transformer_engine.pytorch.dynamo` to reserve enough slots in
-    # the custom-op ``Tensor[]`` return for any subclass-shaped output:
-    # data, scale_inv, transpose.
-    _TORCH_COMPILE_MAX_INNER_TENSORS = 3
-
     def __repr__(self, *, tensor_contents=None):
         # ``__repr__`` is on hot diagnostic paths (Dynamo's
         # ``Dynamo failed to run FX node`` formatter, autograd
@@ -820,74 +813,18 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             ")"
         )
 
-    def __tensor_flatten__(self) -> Tuple[list, dict]:
-        """torch.compile / tensor-subclass flatten protocol.
-
-        Returns ``(inner_tensor_names, meta)`` so that PyTorch's
-        wrapper-subclass machinery and :func:`register_torch_dispatch`
-        rules on custom ops can decompose a ``Float8Tensor`` into
-        plain tensors plus a static metadata dict at trace time.
-
-        The metadata dict must contain only values supporting stable
-        ``==`` comparison (Dynamo's tensor-subclass metadata guard
-        re-evaluates it via dict equality on every entry into the
-        compiled region). Mutable / runtime-only state such as the
-        ``_transpose_invalid`` flag deliberately does *not* end up
-        here; it would flip between calls and trip the "Guard failed
-        on the same frame" assertion.
-
-        ``_quantizer_snapshot`` carries a tensor-free snapshot of
-        the live ``Quantizer`` so :meth:`__tensor_unflatten__` can
-        rebuild a structurally-equivalent quantizer on the unflatten
-        side. Quantizers that carry tensors in their state (e.g.
-        :class:`Float8Quantizer` keeps ``scale`` / ``amax``) cannot
-        be snapshotted into a guard-stable dict and produce a
-        ``None`` snapshot; in that case the reconstructed
-        ``Float8Tensor`` will have ``_quantizer = None`` and any
-        downstream code that needs the quantizer must source it from
-        elsewhere (typically the bucket-level opaque metadata on the
-        inner op call).
+    @classmethod
+    def _flatten_meta_overrides(cls, meta: dict) -> dict:
+        """Bridge :class:`FP8DType` (carried by the subclass output spec
+        via :func:`_float8_create_subclass_metadata`) back to the native
+        ``tex.DType`` accepted by pybind-bound TE kernels. The eager
+        :meth:`__tensor_flatten__` path stores ``tex.DType`` directly and
+        is a no-op here.
         """
-        inner: list = []
-        if self._data is not None:
-            inner.append("_data")
-        if self._scale_inv is not None:
-            inner.append("_scale_inv")
-        if self._transpose is not None:
-            inner.append("_transpose")
-        meta = {
-            "_fp8_dtype": self._fp8_dtype,
-            "_fake_dtype": self._dtype,
-            "_quantizer_snapshot": _quantizer_subclass_snapshot(self._quantizer),
-            "_requires_grad": self.requires_grad,
-        }
-        return inner, meta
-
-    @staticmethod
-    def __tensor_unflatten__(
-        inner_tensors: dict, meta: dict, outer_size, outer_stride
-    ) -> "Float8Tensor":
-        quantizer = _quantizer_from_subclass_snapshot(meta.get("_quantizer_snapshot"))
-        fp8_dtype = meta["_fp8_dtype"]
+        fp8_dtype = meta.get("fp8_dtype")
         if isinstance(fp8_dtype, FP8DType):
-            # ``meta`` produced by :func:`_float8_create_subclass_metadata`
-            # carries the Dynamo-friendly :class:`FP8DType` enum (an
-            # ``IntEnum`` so it proxies as a constant during tracing).
-            # Pybind-bound TE kernels (e.g. ``tex.dequantize``) accept only
-            # the native ``transformer_engine_torch.DType``, so bridge back
-            # here. The eager ``__tensor_flatten__`` path stores the native
-            # enum directly and skips this conversion.
-            fp8_dtype = to_tex(fp8_dtype)
-        return Float8Tensor(
-            shape=outer_size,
-            dtype=meta["_fake_dtype"],
-            data=inner_tensors.get("_data"),
-            fp8_scale_inv=inner_tensors.get("_scale_inv"),
-            fp8_dtype=fp8_dtype,
-            data_transpose=inner_tensors.get("_transpose"),
-            quantizer=quantizer,
-            requires_grad=meta.get("_requires_grad", False),
-        )
+            meta = {**meta, "fp8_dtype": to_tex(fp8_dtype)}
+        return meta
 
     def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """
