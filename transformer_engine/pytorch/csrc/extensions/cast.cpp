@@ -242,7 +242,7 @@ void compute_grouped_fp8_current_scaling_amax_and_scale(
 }  // namespace
 
 py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const size_t num_tensors,
-                          std::optional<at::Tensor> first_dims, const py::object &output,
+                          std::optional<at::Tensor> first_dims,
                           std::optional<at::Tensor> last_dims) {
   using namespace transformer_engine::pytorch::detail;
   init_extension();
@@ -268,25 +268,15 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
       tensor.data_ptr(), GetTransformerEngineDType(tensor.scalar_type()),
       std::vector<size_t>{static_cast<size_t>(tensor.numel())});
 
-  // Create or reuse output GroupedTensor.
-  std::optional<GroupedTensorWrapper> grouped_output_tensor_cpp;
-  py::object grouped_output_py;
-  if (output.is_none()) {
-    auto created = quantizer_cpp->create_grouped_tensor(
-        num_tensors, logical_shape, GetTransformerEngineDType(tensor.scalar_type()),
-        py::reinterpret_borrow<py::object>(quantizer), first_dims, last_dims, logical_first_dim,
-        logical_last_dim);
-    grouped_output_tensor_cpp.emplace(std::move(created.first));
-    grouped_output_py = std::move(created.second);
-  } else {
-    grouped_output_tensor_cpp.emplace(
-        detail::GroupedTensorFromPyTorchGroupedTensor(output));
-    grouped_output_py = py::reinterpret_borrow<py::object>(output);
-  }
+  // Create output GroupedTensor.
+  auto [grouped_output_tensor_cpp, grouped_output_py] = quantizer_cpp->create_grouped_tensor(
+      num_tensors, logical_shape, GetTransformerEngineDType(tensor.scalar_type()),
+      py::reinterpret_borrow<py::object>(quantizer), first_dims, last_dims, logical_first_dim,
+      logical_last_dim);
 
-  const auto first_dims_meta = grouped_output_tensor_cpp->get_first_dims();
-  const auto last_dims_meta = grouped_output_tensor_cpp->get_last_dims();
-  const auto offsets_meta = grouped_output_tensor_cpp->get_tensor_offsets();
+  const auto first_dims_meta = grouped_output_tensor_cpp.get_first_dims();
+  const auto last_dims_meta = grouped_output_tensor_cpp.get_last_dims();
+  const auto offsets_meta = grouped_output_tensor_cpp.get_tensor_offsets();
   if (first_dims_meta.data_ptr != nullptr) {
     grouped_input_tensor.set_first_dims(first_dims_meta.data_ptr,
                                         static_cast<DType>(first_dims_meta.dtype),
@@ -342,7 +332,7 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
     case GroupedQuantizationMode::NVFP4_GROUPED_QUANTIZE: {
       // NVFP4 grouped quantization
       NVFP4Quantizer *nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());
-      group_quantize_nvfp4_impl(grouped_input_tensor, *grouped_output_tensor_cpp,
+      group_quantize_nvfp4_impl(grouped_input_tensor, grouped_output_tensor_cpp,
                                 nvfp4_quantizer_cpp, at::cuda::getCurrentCUDAStream());
       break;
     }
@@ -350,10 +340,10 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
       auto *fp8_quantizer_cpp =
           static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
       compute_grouped_fp8_current_scaling_amax_and_scale(
-          grouped_input_tensor, *grouped_output_tensor_cpp, grouped_output_py, fp8_quantizer_cpp);
+          grouped_input_tensor, grouped_output_tensor_cpp, grouped_output_py, fp8_quantizer_cpp);
       QuantizationConfigWrapper quant_config_cpp;
       NVTE_SCOPED_GIL_RELEASE({
-        nvte_group_quantize(grouped_input_tensor.data(), grouped_output_tensor_cpp->data(),
+        nvte_group_quantize(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(),
                             quant_config_cpp, at::cuda::getCurrentCUDAStream());
       });
       break;
@@ -361,7 +351,7 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
     case GroupedQuantizationMode::MXFP8_GROUPED_QUANTIZE: {
       QuantizationConfigWrapper quant_config_cpp;
       NVTE_SCOPED_GIL_RELEASE({
-        nvte_group_quantize(grouped_input_tensor.data(), grouped_output_tensor_cpp->data(),
+        nvte_group_quantize(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(),
                             quant_config_cpp, at::cuda::getCurrentCUDAStream());
       });
       break;

@@ -118,43 +118,41 @@ def _verify_no_tail_read(quantizer, inp: torch.Tensor, first_dims, num_groups: i
     return out
 
 
-def _timed_eager(quantizer, inputs, first_dims, num_groups: int, outputs, iters: int) -> float:
+def _timed_eager(quantizer, inputs, first_dims, num_groups: int, iters: int) -> float:
     torch.cuda.synchronize()
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
     start.record()
     for it in range(iters):
         i = it % len(inputs)
-        tex.group_quantize(inputs[i], quantizer, num_groups, first_dims,
-                           output=outputs[i])
+        tex.group_quantize(inputs[i], quantizer, num_groups, first_dims)
     end.record()
     end.synchronize()
     return start.elapsed_time(end)  # ms
 
 
-def _timed_cuda_graph(quantizer, inputs, first_dims, num_groups: int, outputs,
+def _timed_cuda_graph(quantizer, inputs, first_dims, num_groups: int,
                       iters: int, calls_per_replay: int = 32) -> float:
     """Capture `calls_per_replay` group_quantize calls into one CUDA graph and
     replay it `iters / calls_per_replay` times. Effectively eliminates Python /
-    cudaLaunchKernel overhead."""
+    cudaLaunchKernel overhead. The output tensor is allocated inside each call
+    by ``group_quantize``; under CUDA-graph capture this routes through the
+    graph allocator pool."""
     static_input = inputs[0]
-    static_output = outputs[0]
 
     # Warmup must happen on a side stream before capture (per torch docs)
     s = torch.cuda.Stream()
     s.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(s):
         for _ in range(3):
-            tex.group_quantize(static_input, quantizer, num_groups, first_dims,
-                               output=static_output)
+            tex.group_quantize(static_input, quantizer, num_groups, first_dims)
     torch.cuda.current_stream().wait_stream(s)
     torch.cuda.synchronize()
 
     g = torch.cuda.CUDAGraph()
     with torch.cuda.graph(g):
         for _ in range(calls_per_replay):
-            tex.group_quantize(static_input, quantizer, num_groups, first_dims,
-                               output=static_output)
+            tex.group_quantize(static_input, quantizer, num_groups, first_dims)
 
     replays = max(1, iters // calls_per_replay)
     torch.cuda.synchronize()
@@ -233,7 +231,7 @@ def _bucket_for_kernel(name: str) -> str:
     return "cast"
 
 
-def _profile_breakdown(quantizer, inputs, first_dims, num_groups: int, outputs,
+def _profile_breakdown(quantizer, inputs, first_dims, num_groups: int,
                        iters: int) -> dict:
     """Run ``iters`` group_quantize calls under torch.profiler and aggregate CUDA
     kernel time into {amax, compute_scale, cast} buckets.
@@ -247,8 +245,7 @@ def _profile_breakdown(quantizer, inputs, first_dims, num_groups: int, outputs,
     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
         for it in range(iters):
             i = it % len(inputs)
-            tex.group_quantize(inputs[i], quantizer, num_groups, first_dims,
-                               output=outputs[i])
+            tex.group_quantize(inputs[i], quantizer, num_groups, first_dims)
         torch.cuda.synchronize()
 
     agg = {b: {"us_total": 0.0, "calls": 0} for b, _ in _KERNEL_BUCKETS}
@@ -277,27 +274,22 @@ def run_case(shape_case: str, mode: str, *, actual_rows: int, allocated_rows: in
                                           hidden, num_groups, num_buffers)
     quantizer = _make_quantizer(mode)
 
-    # Run once to verify correctness and to allocate output tensors.
-    outputs = []
-    for inp in inputs:
-        out = tex.group_quantize(inp, quantizer, num_groups, first_dims)
-        outputs.append(out)
+    # Run once for correctness sanity check (no tail-read leak).
     if shape_case == "varying-first-overalloc":
         _verify_no_tail_read(quantizer, inputs[0], first_dims, num_groups, actual_rows)
 
     # Warmup so GPU clocks are at boost.
     for it in range(warmup):
         i = it % len(inputs)
-        tex.group_quantize(inputs[i], quantizer, num_groups, first_dims,
-                           output=outputs[i])
+        tex.group_quantize(inputs[i], quantizer, num_groups, first_dims)
     torch.cuda.synchronize()
 
     if mode_loop == "graph":
         elapsed_ms, actual_iters = _timed_cuda_graph(
-            quantizer, inputs, first_dims, num_groups, outputs, iters)
+            quantizer, inputs, first_dims, num_groups, iters)
     else:
         elapsed_ms = _timed_eager(
-            quantizer, inputs, first_dims, num_groups, outputs, iters)
+            quantizer, inputs, first_dims, num_groups, iters)
         actual_iters = iters
 
     relevant = _bytes_per_call(actual_rows, hidden, mode)
@@ -320,7 +312,7 @@ def run_case(shape_case: str, mode: str, *, actual_rows: int, allocated_rows: in
 
     if profile_breakdown:
         profile_iters = min(iters, 50)
-        agg = _profile_breakdown(quantizer, inputs, first_dims, num_groups, outputs,
+        agg = _profile_breakdown(quantizer, inputs, first_dims, num_groups,
                                  iters=profile_iters)
         total = agg["_total_us"] if agg["_total_us"] > 0 else 1.0
         per_iter_total = total / profile_iters
