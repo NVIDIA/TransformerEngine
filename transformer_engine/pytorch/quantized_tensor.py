@@ -132,6 +132,14 @@ class QuantizedTensorStorage:
     # remapping through :attr:`_FLATTEN_CTOR_KWARG`).
     _FLATTEN_TENSOR_ATTRS: Tuple[str, ...] = ()
 
+    # Maps each entry in :attr:`_FLATTEN_TENSOR_ATTRS` to one of
+    # ``"rowwise"`` / ``"columnwise"`` / ``"always"``. Consumed by
+    # :meth:`Quantizer.create_storage_metadata` to translate a live
+    # quantizer's ``rowwise_usage`` / ``columnwise_usage`` flags into
+    # per-attribute presence (``has_*``) flags at output-spec time.
+    # Unmapped attributes default to ``"always"``.
+    _FLATTEN_TENSOR_USAGE: Dict[str, str] = {}
+
     # Names of value-stable scalar / enum attributes needed to round-trip
     # the instance. Same naming / kwarg conventions as
     # :attr:`_FLATTEN_TENSOR_ATTRS`.
@@ -286,14 +294,20 @@ class QuantizedTensorStorage:
         )
 
         tensors: List[torch.Tensor] = []
-        is_tensor = isinstance(self, torch.Tensor)
-        meta_dict: Dict[str, Any] = {
-            "_qstorage_cls": type(self).__qualname__,
-            "is_tensor": is_tensor,
-            "shape": torch.Size(self.shape) if is_tensor else None,
-            "requires_grad": self.requires_grad if is_tensor else False,
-            "device": self.device if is_tensor else None,
-        }
+        meta_dict: Dict[str, Any] = {"_qstorage_cls": type(self).__qualname__}
+        # Tensor-wrapper fields are only relevant when ``self`` is a live
+        # ``torch.Tensor`` (e.g. ``Float8Tensor`` rewritten in-place to a
+        # storage payload by ``_rewrite_subclass_to_storage``); a bare
+        # storage shell has no outer shape / requires_grad / device.
+        if isinstance(self, torch.Tensor):
+            meta_dict.update(
+                {
+                    "is_tensor": True,
+                    "shape": torch.Size(self.shape),
+                    "requires_grad": self.requires_grad,
+                    "device": self.device,
+                }
+            )
         for attr in self._FLATTEN_META_ATTRS:
             meta_dict[self._flatten_ctor_kw(attr)] = getattr(self, attr)
         for attr in self._FLATTEN_TENSOR_ATTRS:
@@ -336,7 +350,7 @@ class QuantizedTensorStorage:
             kw = cls._flatten_ctor_kw(attr)
             kwargs[kw] = meta[kw]
         kwargs["quantizer"] = quantizer
-        if meta["is_tensor"]:
+        if meta.get("is_tensor", False):
             kwargs.update(
                 {
                     "shape": meta["shape"],
@@ -455,6 +469,13 @@ class Quantizer(abc.ABC):
 
     """
     rowwise_usage: bool
+
+    # The :class:`QuantizedTensorStorage` subclass produced by this
+    # quantizer's quantize / make_empty path. Consumed by
+    # :meth:`create_storage_metadata` to declare a ``("storage", ...)``
+    # output payload that round-trips through the generic
+    # :meth:`QuantizedTensorStorage._torch_compile_do_unflatten`.
+    _storage_cls: type["QuantizedTensorStorage"]
 
     """Whether to construct quantized tensors with "column-wise usage"
 
@@ -684,6 +705,78 @@ class Quantizer(abc.ABC):
                 f"known: {sorted(_QUANTIZER_REGISTRY)}"
             )
         return target._do_unflatten(meta, process_group, tensors)
+
+    def _storage_scalars(self) -> Dict[str, Any]:
+        """Per-quantizer scalar fields for the storage's ``_FLATTEN_META_ATTRS``.
+
+        Keys are constructor kwarg names (matching the values of
+        :attr:`QuantizedTensorStorage._FLATTEN_CTOR_KWARG`). ``fake_dtype``
+        is supplied separately by :meth:`create_storage_metadata`; subclasses
+        only need to return their quantizer-specific scalars (e.g.
+        ``fp8_dtype``, ``with_gemm_swizzled_scales``).
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} class does not implement _storage_scalars; "
+            "required for torch.compile output specs that emit a "
+            "QuantizedTensorStorage."
+        )
+
+    def create_storage_metadata(
+        self,
+        *,
+        shape: Iterable[int],
+        fake_dtype: torch.dtype,
+        device: Optional[torch.device] = None,
+    ) -> Tuple[type["QuantizedTensorStorage"], Any, Optional[Any], int]:
+        """Return ``(cls, meta, process_group, tensor_count)`` describing
+        the ``("storage", ...)`` payload of a Dynamo output spec.
+
+        The Dynamo layer hands the trailing
+        ``(meta, process_group, tensors[: tensor_count])`` triple to
+        :meth:`QuantizedTensorStorage._torch_compile_do_unflatten` to
+        reconstruct the freshly-quantized storage on the consumer side.
+
+        Driven entirely by the storage's ``_FLATTEN_*`` schema plus a
+        per-quantizer :meth:`_storage_scalars` hook; ``has_*`` flags are
+        derived from ``rowwise_usage`` / ``columnwise_usage`` and the
+        storage's :attr:`QuantizedTensorStorage._FLATTEN_TENSOR_USAGE`
+        map. Quantizers with tensor state (e.g. :class:`Float8Quantizer`'s
+        ``scale`` / ``amax``) append those tensors after the storage's own
+        slots; :meth:`Quantizer._flatten` provides both the count and the
+        ``quantizer_meta`` payload needed to rebuild the quantizer.
+        """
+        from .dynamo import OpaqueSimpleMetadata  # pylint: disable=import-outside-toplevel
+
+        if device is None:
+            device = torch.device("cuda")
+        del device, shape  # storage-only path: no outer tensor view
+        storage_cls = type(self)._storage_cls
+        usage_flag = {
+            "rowwise": self.rowwise_usage,
+            "columnwise": self.columnwise_usage,
+            "always": True,
+        }
+        has_flags: Dict[str, bool] = {}
+        tensor_count = 0
+        for attr in storage_cls._FLATTEN_TENSOR_ATTRS:
+            usage = storage_cls._FLATTEN_TENSOR_USAGE.get(attr, "always")
+            flag = usage_flag[usage]
+            has_flags[storage_cls._flatten_presence_key(attr)] = flag
+            if flag:
+                tensor_count += 1
+        quantizer_meta, _, quantizer_tensors = self._flatten()
+        tensor_count += len(quantizer_tensors)
+        scalars = self._storage_scalars()
+        scalars["fake_dtype"] = fake_dtype
+        meta = OpaqueSimpleMetadata(
+            {
+                "_qstorage_cls": storage_cls.__qualname__,
+                **scalars,
+                **has_flags,
+                "quantizer_meta": quantizer_meta,
+            }
+        )
+        return storage_cls, meta, None, tensor_count
 
 
 class QuantizedTensor(torch.Tensor):

@@ -37,6 +37,8 @@ class Float8BlockQuantizer(Quantizer):
     force_pow_2_scales: bool
     block_scaling_dim: int
 
+    _storage_cls = Float8BlockwiseQTensorStorage
+
     def __init__(
         self,
         fp8_dtype: TE_DType,
@@ -281,60 +283,11 @@ class Float8BlockQuantizer(Quantizer):
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         return Float8BlockScaling
 
-    def create_storage_metadata(
-        self,
-        *,
-        shape: Iterable[int],
-        fake_dtype: torch.dtype,
-        device: Optional[torch.device] = None,
-        requires_grad: bool = False,
-        as_tensor: bool = False,
-    ):
-        """Return ``(cls, meta, process_group, tensor_count)``
-        suitable as the ``("storage", ...)`` payload of a Dynamo
-        output spec; the dynamo layer hands the trailing
-        ``(meta, process_group, tensors[: tensor_count])`` triple to
-        :meth:`Float8BlockwiseQTensorStorage._torch_compile_do_unflatten`
-        for reconstruction.
-
-        Same contract as :meth:`Float8Quantizer.create_storage_metadata`
-        / :meth:`MXFP8Quantizer.create_storage_metadata` -- see those
-        docstrings for the broader rationale; this variant carries the
-        extra ``is_2D_scaled`` flag that the blockwise storage needs
-        on reconstruction.
-        """
-        if device is None:
-            device = torch.device("cuda")
-        shape = torch.Size(shape)
-        has_rowwise = bool(self.rowwise_usage)
-        has_columnwise = bool(self.columnwise_usage)
-        tensor_count = int(has_rowwise) * 2 + int(has_columnwise) * 2
-        # Storage's :meth:`_torch_compile_flatten` also emits the live
-        # quantizer's flatten tensors (see
-        # :meth:`Float8Quantizer.create_storage_metadata` for
-        # rationale); keep the count + meta in sync.
-        quantizer_meta, _, quantizer_tensors = self._flatten()
-        tensor_count += len(quantizer_tensors)
-        from ..dynamo import OpaqueSimpleMetadata  # pylint: disable=import-outside-toplevel
-
-        meta = OpaqueSimpleMetadata(
-            {
-                "_qstorage_cls": "Float8BlockwiseQTensorStorage",
-                "is_tensor": as_tensor,
-                "shape": shape if as_tensor else None,
-                "requires_grad": requires_grad if as_tensor else False,
-                "device": device if as_tensor else None,
-                "fp8_dtype": self.dtype,
-                "fake_dtype": fake_dtype,
-                "is_2D_scaled": self.block_scaling_dim == 2,
-                "has_rowwise_data": has_rowwise,
-                "has_rowwise_scale_inv": has_rowwise,
-                "has_columnwise_data": has_columnwise,
-                "has_columnwise_scale_inv": has_columnwise,
-                "quantizer_meta": quantizer_meta,
-            }
-        )
-        return Float8BlockwiseQTensorStorage, meta, None, tensor_count
+    def _storage_scalars(self) -> dict:
+        return {
+            "fp8_dtype": self.dtype,
+            "is_2D_scaled": self.block_scaling_dim == 2,
+        }
 
     def _flatten(self):
         from ..dynamo import OpaqueSimpleMetadata

@@ -90,6 +90,11 @@ class Float8TensorStorage(QuantizedTensorStorage):
     # :meth:`QuantizedTensorStorage._torch_compile_flatten` /
     # :meth:`_torch_compile_do_unflatten` implementations in the base.
     _FLATTEN_TENSOR_ATTRS = ("_data", "_transpose", "_scale_inv")
+    _FLATTEN_TENSOR_USAGE = {
+        "_data": "rowwise",
+        "_transpose": "columnwise",
+        "_scale_inv": "always",
+    }
     _FLATTEN_META_ATTRS = ("_fp8_dtype", "_dtype")
     _FLATTEN_CTOR_KWARG = {
         "_data": "data",

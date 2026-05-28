@@ -98,6 +98,12 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
         "_columnwise_data",
         "_columnwise_scale_inv",
     )
+    _FLATTEN_TENSOR_USAGE = {
+        "_rowwise_data": "rowwise",
+        "_rowwise_scale_inv": "rowwise",
+        "_columnwise_data": "columnwise",
+        "_columnwise_scale_inv": "columnwise",
+    }
     _FLATTEN_META_ATTRS = ("_fp8_dtype", "_dtype", "_with_gemm_swizzled_scales")
     _FLATTEN_CTOR_KWARG = {
         "_rowwise_data": "rowwise_data",

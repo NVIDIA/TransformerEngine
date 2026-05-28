@@ -121,6 +121,14 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         "_amax_rowwise",
         "_amax_columnwise",
     )
+    _FLATTEN_TENSOR_USAGE = {
+        "_rowwise_data": "rowwise",
+        "_rowwise_scale_inv": "rowwise",
+        "_columnwise_data": "columnwise",
+        "_columnwise_scale_inv": "columnwise",
+        "_amax_rowwise": "rowwise",
+        "_amax_columnwise": "columnwise",
+    }
     _FLATTEN_META_ATTRS = (
         "_fp4_dtype",
         "_dtype",
