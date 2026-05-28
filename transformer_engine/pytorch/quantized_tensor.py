@@ -14,6 +14,7 @@ import torch
 from torch.utils._pytree import tree_map
 
 from transformer_engine.common.recipe import Recipe
+from transformer_engine.pytorch.fp8_dtype import from_tex
 from transformer_engine.pytorch.tensor._quantization_helpers import (
     _QuantizeFunc,
     _IdentityFunc,
@@ -782,6 +783,60 @@ class Quantizer(abc.ABC):
             "required for torch.compile output specs that emit a "
             "QuantizedTensorStorage."
         )
+
+    # Scalar keys in :meth:`_storage_scalars` whose values are pybind
+    # enums (currently ``transformer_engine_torch.DType``) and must be
+    # converted to a Dynamo-traceable Python proxy
+    # (:class:`FP8DType`) before being embedded in the subclass-spec
+    # ``meta`` dict. The reverse conversion happens in the tensor
+    # subclass's :meth:`_flatten_meta_overrides`.
+    _SUBCLASS_META_TEX_KEYS: Tuple[str, ...] = ("fp8_dtype",)
+
+    def create_metadata(
+        self,
+        *,
+        fake_dtype: torch.dtype,
+        requires_grad: bool = False,
+    ) -> Tuple[Tuple[str, ...], Dict[str, Any]]:
+        """Return ``(inner_names, meta)`` for :meth:`QuantizedTensor.__tensor_unflatten__`.
+
+        Generic implementation driven by the storage class's
+        :attr:`QuantizedTensorStorage._FLATTEN_TENSOR_ATTRS` /
+        :attr:`QuantizedTensorStorage._FLATTEN_TENSOR_USAGE` plus this
+        quantizer's :meth:`_storage_scalars`. ``inner_names`` follows the
+        declaration order of ``_FLATTEN_TENSOR_ATTRS`` so it matches the
+        slot order produced by :meth:`QuantizedTensor.__tensor_flatten__`
+        in :func:`dynamo._flatten_value_into`.
+
+        ``quantizer_snapshot`` is forced to ``None`` on this path:
+        rebuilding a live :class:`Quantizer` inside
+        ``__tensor_unflatten__`` would force Dynamo to trace the
+        constructor, which routinely trips
+        ``UserDefinedObjectVariable(...Quantizer)``. Code that needs
+        the live quantizer sources it from outside the compiled region.
+        """
+        storage_cls = type(self)._storage_cls
+        usage_flag = {
+            "rowwise": self.rowwise_usage,
+            "columnwise": self.columnwise_usage,
+            "always": True,
+        }
+        inner_names = tuple(
+            attr
+            for attr in storage_cls._FLATTEN_TENSOR_ATTRS
+            if usage_flag[storage_cls._FLATTEN_TENSOR_USAGE.get(attr, "always")]
+        )
+        scalars = self._storage_scalars()
+        for key in self._SUBCLASS_META_TEX_KEYS:
+            if key in scalars:
+                scalars[key] = from_tex(scalars[key])
+        meta: Dict[str, Any] = {
+            **scalars,
+            "fake_dtype": fake_dtype,
+            "quantizer_snapshot": None,
+            "requires_grad": requires_grad,
+        }
+        return inner_names, meta
 
     def create_storage_metadata(
         self,
