@@ -356,6 +356,8 @@ static void CheckGroupedScaleInv(const GroupedTensor &t, const std::string &name
   // Determine expected dtype based on data type and scaling mode
   if (is_fp8_dtype(t.dtype()) && is_tensor_scaling(t.scaling_mode)) {
     check_scales(DType::kFloat32);
+  } else if (is_fp8_block_scaling(t.scaling_mode)) {
+    check_scales(DType::kFloat32);
   } else if (is_mxfp8_scaling(t.scaling_mode)) {
     check_scales(DType::kFloat8E8M0);
   } else if (is_nvfp4_scaling(t.scaling_mode)) {
@@ -855,6 +857,11 @@ void nvte_set_tensor_param_v2(NVTETensor tensor, NVTETensorParam param, const vo
     case kNVTERowScaledNVFP4:
       t.row_scaled_nvfp4 = static_cast<bool>(*reinterpret_cast<const uint8_t *>(buf));
       break;
+    case kNVTENVFP4E4M3Max:
+      std::memcpy(&t.nvfp4_e4m3_max, buf, attr_size);
+      NVTE_CHECK(t.nvfp4_e4m3_max == 448 || t.nvfp4_e4m3_max == 256,
+                 "Unsupported NVFP4 E4M3 max (got ", t.nvfp4_e4m3_max, ")");
+      break;
     default:
       NVTE_ERROR("Unsupported tensor parameter (", static_cast<int>(param), ")");
   }
@@ -937,6 +944,9 @@ void nvte_get_tensor_param_v2(const NVTETensor tensor, NVTETensorParam param, vo
       break;
     case kNVTERowScaledNVFP4:
       *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->row_scaled_nvfp4);
+      break;
+    case kNVTENVFP4E4M3Max:
+      std::memcpy(buf, &t->nvfp4_e4m3_max, attr_size);
       break;
     default:
       NVTE_ERROR("Unsupported tensor parameter (", static_cast<int>(param), ")");
@@ -1049,6 +1059,14 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigUseFastMath:
       bool_to_uint8(config_.use_fast_math, buf);
       break;
+    case kNVTEQuantizationConfigNVFP44Over6Mode: {
+      const auto val = static_cast<uint8_t>(config_.nvfp4_4over6_mode);
+      std::memcpy(buf, &val, attr_size);
+      break;
+    }
+    case kNVTEQuantizationConfigNVFP44Over6ErrUseFastMath:
+      bool_to_uint8(config_.nvfp4_4over6_err_use_fast_math, buf);
+      break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
   }
@@ -1103,6 +1121,18 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
       break;
     case kNVTEQuantizationConfigUseFastMath:
       uint8_to_bool(buf, config_.use_fast_math);
+      break;
+    case kNVTEQuantizationConfigNVFP44Over6Mode: {
+      const auto val = *reinterpret_cast<const uint8_t *>(buf);
+      NVTE_CHECK(val == static_cast<uint8_t>(kNVTENVFP44Over6Disabled) ||
+                     val == static_cast<uint8_t>(kNVTENVFP44Over6MinMAE) ||
+                     val == static_cast<uint8_t>(kNVTENVFP44Over6MinMSE),
+                 "Invalid NVFP4 4over6 mode (got ", static_cast<int>(val), ")");
+      config_.nvfp4_4over6_mode = static_cast<NVTENVFP44Over6Mode>(val);
+      break;
+    }
+    case kNVTEQuantizationConfigNVFP44Over6ErrUseFastMath:
+      uint8_to_bool(buf, config_.nvfp4_4over6_err_use_fast_math);
       break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");

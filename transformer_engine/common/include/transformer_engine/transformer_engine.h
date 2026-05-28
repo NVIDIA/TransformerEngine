@@ -83,6 +83,13 @@ enum NVTETensorParam {
    *  its values are populated during quantization.
    */
   kNVTERowScaledNVFP4 = 8,
+  /*! Global E4M3 scale bound used by an NVFP4 tensor.
+   *
+   *  This is part of the tensor data contract. Downstream dequantization and
+   *  GEMM scale consumers must use the same bound used during quantization.
+   *  Standard NVFP4 uses 448; 4over6 may use 256 for map-to-4 headroom.
+   */
+  kNVTENVFP4E4M3Max = 9,
   kNVTENumTensorParams
 };
 
@@ -109,6 +116,15 @@ enum NVTEScalingMode {
    * rowwise or columnwise direction */
   NVTE_NVFP4_1D_SCALING = 4,
   NVTE_INVALID_SCALING = 100
+};
+
+/*! \enum NVTENVFP44Over6Mode
+ * \brief Method for NVFP4 4over6 quantization.
+ */
+enum NVTENVFP44Over6Mode {
+  kNVTENVFP44Over6Disabled = 0, /*!< 4over6 is not applied */
+  kNVTENVFP44Over6MinMAE = 1,   /*!< Select the candidate with lower mean absolute error */
+  kNVTENVFP44Over6MinMSE = 2,   /*!< Select the candidate with lower mean squared error */
 };
 
 /*! \brief TE Tensor type
@@ -282,7 +298,7 @@ void nvte_zero_tensor(const NVTETensor tensor, cudaStream_t stream);
  *
  *  \warning Deprecated in favor of nvte_set_tensor_param_v2.
  *
- *  \param[in/out] tensor Tensor.
+ *  \param[in,out] tensor Tensor.
  *  \param[in] param_name The parameter to be set.
  *  \param[in] param The value to be set.
  */
@@ -300,7 +316,7 @@ NVTEBasicTensor nvte_get_tensor_param(const NVTETensor tensor, NVTETensorParam p
 
 /*! \brief Set a tensor parameter.
  *
- *  \param[in/out] tensor        Tensor.
+ *  \param[in,out] tensor        Tensor.
  *  \param[in]     param         Tensor parameter type.
  *  \param[in]     buf           Memory address to read parameter value.
  *  \param[in]     size_in_bytes Size of buf.
@@ -381,6 +397,20 @@ enum NVTEQuantizationConfigAttribute {
    *  inconsistently between kernels.
    */
   kNVTEQuantizationConfigUseFastMath = 7,
+  /*! Method for NVFP4 4over6 block scale selection.
+   *
+   *  Non-disabled modes evaluate map-to-4 and map-to-6 candidates for each
+   *  1x16 block and store the lower-error candidate. The value is an
+   *  NVTENVFP44Over6Mode encoded as uint8_t.
+   */
+  kNVTEQuantizationConfigNVFP44Over6Mode = 8,
+  /*! Whether the NVFP4 4over6 candidate error computation may use fast math.
+   *
+   *  This is intentionally separate from kNVTEQuantizationConfigUseFastMath so
+   *  callers can keep candidate selection bitwise deterministic independent
+   *  of ordinary NVFP4 fast-math settings.
+   */
+  kNVTEQuantizationConfigNVFP44Over6ErrUseFastMath = 9,
   kNVTEQuantizationConfigNumAttributes
 };
 
@@ -406,7 +436,7 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
 
 /*! \brief Set an option in quantization config.
  *
- *  \param[in/out] config        Quantization config.
+ *  \param[in,out] config        Quantization config.
  *  \param[in]     attr          Option type.
  *  \param[in]     buf           Memory address to read option value.
  *  \param[in]     size_in_bytes Size of buf.
@@ -510,7 +540,7 @@ void nvte_destroy_grouped_tensor(NVTEGroupedTensor tensor);
 /* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
 /*! \brief Set a grouped tensor parameter.
  *
- *  \param[in/out] tensor        Grouped tensor.
+ *  \param[in,out] tensor        Grouped tensor.
  *  \param[in]     param         Grouped tensor parameter type.
  *  \param[in]     buf           Memory address to read parameter value.
  *  \param[in]     size_in_bytes Size of buf.
@@ -781,6 +811,11 @@ class TensorWrapper {
     nvte_set_tensor_param_v2(tensor_, kNVTERowScaledNVFP4, &val, sizeof(val));
   }
 
+  void set_nvfp4_e4m3_max(int nvfp4_e4m3_max) {
+    const auto val = nvfp4_e4m3_max;
+    nvte_set_tensor_param_v2(tensor_, kNVTENVFP4E4M3Max, &val, sizeof(val));
+  }
+
   // Parameter getters
 
   NVTEBasicTensor get_parameter(const NVTETensorParam param) const noexcept {
@@ -821,6 +856,12 @@ class TensorWrapper {
     uint8_t val = 0;
     nvte_get_tensor_param_v2(tensor_, kNVTERowScaledNVFP4, &val, sizeof(val), nullptr);
     return static_cast<bool>(val);
+  }
+
+  int get_nvfp4_e4m3_max() const {
+    int val = 448;
+    nvte_get_tensor_param_v2(tensor_, kNVTENVFP4E4M3Max, &val, sizeof(val), nullptr);
+    return val;
   }
 
   /*! \brief Get an underlying NVTETensor.
@@ -1316,6 +1357,20 @@ class QuantizationConfigWrapper {
     const auto val = static_cast<uint8_t>(use_fast_math);
     nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigUseFastMath, &val,
                                            sizeof(val));
+  }
+
+  /*! \brief Set NVFP4 4over6 candidate-selection mode */
+  void set_nvfp4_4over6_mode(NVTENVFP44Over6Mode mode) {
+    const auto val = static_cast<uint8_t>(mode);
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigNVFP44Over6Mode, &val,
+                                           sizeof(val));
+  }
+
+  /*! \brief Set whether NVFP4 4over6 candidate error computation uses fast math */
+  void set_nvfp4_4over6_err_use_fast_math(bool use_fast_math) {
+    const auto val = static_cast<uint8_t>(use_fast_math);
+    nvte_set_quantization_config_attribute(
+        config_, kNVTEQuantizationConfigNVFP44Over6ErrUseFastMath, &val, sizeof(val));
   }
 
  private:
