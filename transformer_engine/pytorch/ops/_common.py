@@ -60,22 +60,6 @@ def _nvidia_cudnn_frontend_supports_wgrad() -> bool:
     return _cudnn_frontend_version_supported()
 
 
-def _pack_nvfp4_amax_list(tensors: list) -> None:
-    """Ensure discrete NVFP4 weight list uses contiguous per-group amax buffers."""
-    if not tensors:
-        return
-    row_amaxes = [getattr(tensor, "_amax_rowwise", None) for tensor in tensors]
-    if all(amax is not None for amax in row_amaxes):
-        packed_row_amax = torch.cat([amax.view(-1) for amax in row_amaxes], dim=0).contiguous()
-        for idx, tensor in enumerate(tensors):
-            tensor._amax_rowwise = packed_row_amax[idx : idx + 1]
-    col_amaxes = [getattr(tensor, "_amax_columnwise", None) for tensor in tensors]
-    if all(amax is not None for amax in col_amaxes):
-        packed_col_amax = torch.cat([amax.view(-1) for amax in col_amaxes], dim=0).contiguous()
-        for idx, tensor in enumerate(tensors):
-            tensor._amax_columnwise = packed_col_amax[idx : idx + 1]
-
-
 def _enable_nvfp4_rht_for_group_quantize(quantizer: Quantizer) -> None:
     """Use the graph-safe NVFP4 grouped quantization path."""
     if isinstance(quantizer, NVFP4Quantizer):

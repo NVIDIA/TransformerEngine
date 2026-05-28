@@ -33,7 +33,6 @@ from .._common import (
     _nvfp4_amax,
     _nvfp4_logical_data_view,
     _nvfp4_single_tensor_from_grouped,
-    _pack_nvfp4_amax_list,
     fuse_grouped_mlp_ops,
     is_glu_activation,
     is_quantized_tensor,
@@ -249,8 +248,6 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
                 else:
                     quantized_fc1_weights.append(weight)
             grouped_fc1_weight = quantized_fc1_weights
-            if isinstance(fc1_input_quantizer, NVFP4Quantizer):
-                _pack_nvfp4_amax_list(grouped_fc1_weight)
 
         # Prepare FC2 grouped weight tensor for fused kernels.
         if fc2_op.single_grouped_weight:
@@ -284,8 +281,6 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
                 else:
                     quantized_fc2_weights.append(weight)
             grouped_fc2_weight = quantized_fc2_weights
-            if isinstance(fc2_input_quantizer, NVFP4Quantizer):
-                _pack_nvfp4_amax_list(grouped_fc2_weight)
 
         # Some wrapper-copy paths may drop grouped storage metadata; enforce defaults.
         if getattr(grouped_fc1_weight, "_with_gemm_swizzled_scales", None) is None and isinstance(

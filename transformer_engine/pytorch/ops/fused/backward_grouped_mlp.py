@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections.abc import Callable
 import functools
 import os
-from typing import Any, Optional
+from typing import Optional
 
 import torch
 
@@ -46,16 +46,6 @@ from ...cpp_extensions import (
 )
 from ...module.base import _2X_ACC_WGRAD
 from ...triton.grouped_dbias_dscales import compute_grouped_dbias_dscales
-
-
-def _mark_with_gemm_swizzled_scales(tensors: Any) -> None:
-    """Mark tensors whose scale buffers are already in GEMM-swizzled layout."""
-    if tensors is None:
-        return
-    if hasattr(tensors, "with_gemm_swizzled_scales"):
-        tensors.with_gemm_swizzled_scales = True
-    if hasattr(tensors, "_with_gemm_swizzled_scales"):
-        tensors._with_gemm_swizzled_scales = True
 
 
 def _nvfp4_single_group_wgrad_gemm(
@@ -792,7 +782,6 @@ class _BackwardGroupedMLP_CuTeGEMMDBase_MXFP8(FusedOperation):
                 split_sizes,
                 tensor_offsets=fc1_dy_tensor_offsets,
             )
-            _mark_with_gemm_swizzled_scales(grouped_fc1_dy)
         else:
             grouped_fc1_dy = GroupedTensor(
                 shape=(out_shape[0], fc1_weight_shape[0]),
@@ -845,8 +834,6 @@ class _BackwardGroupedMLP_CuTeGEMMDBase_MXFP8(FusedOperation):
             in_shape = out_shape[:-1] + [fc1_weight_shape[1]]
 
             if use_nvfp4:
-                _mark_with_gemm_swizzled_scales(grouped_fc1_weight)
-                _mark_with_gemm_swizzled_scales(grouped_fc1_dy)
                 grad_input = torch.empty(in_shape, dtype=dtype, device=device)
                 if num_groups == 1:
                     if fc1_op.single_grouped_weight:
