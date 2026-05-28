@@ -54,10 +54,10 @@ Example: 5B Model on B300 (Blackwell)
          without quantization overhead.
 
 For a 5B-parameter model (hidden=4096, intermediate=16384, 24 layers), MXFP8 delivers
-~1.42x and NVFP4 delivers ~1.98x over BF16 in autocast mode. FP8 DelayedScaling
-reaches 1.64x, outperforming both FP8 CurrentScaling (1.39x) and MXFP8 on Blackwell.
+~1.44x and NVFP4 delivers ~2.03x over BF16 in autocast mode. FP8 DelayedScaling
+reaches 1.61x, outperforming both FP8 CurrentScaling (1.41x) and MXFP8 on Blackwell.
 
-In pre-quantized mode the gap widens: NVFP4 reaches 3.48x over BF16, nearly double its
+In pre-quantized mode the gap widens: NVFP4 reaches 3.55x over BF16, nearly double its
 autocast speedup. The difference is the per-step quantization cost, which the
 pre-quantized number excludes.
 
@@ -88,10 +88,10 @@ Example: 5B Model on H200 (Hopper)
 
 For the same 5B-parameter model on H200 (Hopper), the available precisions are BF16,
 FP8 CurrentScaling, FP8 DelayedScaling, and FP8 Block Scaling. FP8 DelayedScaling
-delivers ~1.69x over BF16, followed by FP8 CurrentScaling at ~1.58x and FP8 Block
-Scaling at ~1.40x. FP8 Block Scaling runs natively on Hopper and is the only
+delivers ~1.69x over BF16, followed by FP8 CurrentScaling at ~1.57x and FP8 Block
+Scaling at ~1.41x. FP8 Block Scaling runs natively on Hopper and is the only
 block-scaled FP8 recipe available on this device. In pre-quantized mode, raw FP8
-reaches 1.90x over BF16.
+reaches 1.92x over BF16.
 
 
 Speedup Is Shape-Dependent
