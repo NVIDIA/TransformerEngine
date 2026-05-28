@@ -26,10 +26,6 @@ namespace transformer_engine::pytorch {
  * Router fusion
  **************************************************************************************************/
 
-// PyTorch-extension boundary uses int for routing_map_format (not the enum) to
-// keep the Python hot path free of pybind11 enum construction. The int is
-// cast to NVTERoutingMapFormat once inside each function. See CLAUDE.md
-// "CPU overhead in PyTorch wrappers".
 std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fwd(
     at::Tensor logits, int topk, bool use_pre_softmax, std::optional<int> num_groups,
     std::optional<int> group_topk, std::optional<float> scaling_factor, std::string score_function,

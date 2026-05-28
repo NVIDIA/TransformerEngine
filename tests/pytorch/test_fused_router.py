@@ -459,12 +459,6 @@ def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk):
     torch.testing.assert_close(probs.grad, probs_clone.grad, atol=atol, rtol=rtol)
 
 
-# =============================================================================
-# Test: routing_map BITMAP_U8 vs BYTEMAP parity (fwd + bwd)
-# Mirrors tests/jax/test_fused_router.py::test_topk_bitmap_vs_bytemap.
-# =============================================================================
-
-
 def _bytemap_to_bitmap_u8(bytemap: torch.Tensor) -> torch.Tensor:
     """Reference packer: bool[T, E] -> uint8[T, ceil(E/8)] LSB-first.
 
