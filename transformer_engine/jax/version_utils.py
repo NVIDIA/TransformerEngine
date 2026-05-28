@@ -26,7 +26,7 @@ def jax_version_meet_requirement(version: str):
 TRITON_EXTENSION_MIN_JAX_VERSION = "0.8.0"
 
 # Minimum JAX version for non-legacy Triton kernel FFI (supports CUDA graph capture).
-TRITON_EXTENSION_CUDA_GRAPH_MIN_JAX_VERSION = "0.10.1.dev0"
+TRITON_EXTENSION_CUDA_GRAPH_MIN_JAX_VERSION = "0.10.1"
 
 # Nightly and stable floors for safe input_output_aliases in TritonAutotunedKernelCall.
 # jaxlib/gpu/triton_kernels.cc had a bug in the autotuning save/restore loop:
