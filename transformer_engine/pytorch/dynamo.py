@@ -918,8 +918,8 @@ class _MetaPGTensorsBucket(_Bucket):
     Used by every field whose value must be carried as the triple
     ``(OpaqueSimpleMetadata, ProcessGroup?, Tensor[])`` -- today this
     covers ``Tensor | QuantizedTensorStorage`` unions (see
-    :class:`_UniversalTensorBucket`) and ``Quantizer`` / ``Recipe``
-    instances (see :class:`_FlattenableBucket`). Concrete subclasses
+    :class:`_UniversalTensorBucket`) and ``Quantizer`` instances
+    (see :class:`_FlattenableBucket`). Concrete subclasses
     implement :meth:`_pack_value` / :meth:`_unpack_value` for their
     flatten/unflatten protocol; the rest of the bucket contract is
     identical and lives here.
@@ -1209,7 +1209,6 @@ class _ProcessGroupBucket(_Bucket):
 # different dataclass registrations.
 _QTS_REF: Optional[type] = None
 _QUANTIZER_REF: Optional[type] = None
-_RECIPE_REF: Optional[type] = None
 
 
 def _quantized_tensor_storage_cls() -> Optional[type]:
@@ -1240,19 +1239,6 @@ def _quantizer_cls() -> Optional[type]:
     return _QUANTIZER_REF
 
 
-def _recipe_cls() -> Optional[type]:
-    """Lazy-resolve :class:`Recipe`; ``None`` if unavailable."""
-    global _RECIPE_REF
-    if _RECIPE_REF is None:
-        try:
-            from transformer_engine.common.recipe import Recipe
-
-            _RECIPE_REF = Recipe
-        except Exception:  # pragma: no cover - partial init
-            return None
-    return _RECIPE_REF
-
-
 def _flattenable_bases() -> Tuple[type, ...]:
     """Return the list of base classes whose subclasses are routed
     through :class:`_FlattenableBucket`.
@@ -1265,7 +1251,7 @@ def _flattenable_bases() -> Tuple[type, ...]:
     """
     return tuple(
         cls
-        for cls in (_quantizer_cls(), _quantized_tensor_storage_cls(), _recipe_cls())
+        for cls in (_quantizer_cls(), _quantized_tensor_storage_cls())
         if cls is not None
     )
 
@@ -1274,7 +1260,7 @@ class _FlattenableBucket(_MetaPGTensorsBucket):
     """Field whose type implements the ``_flatten`` / ``_unflatten``
     protocol (see :func:`_flattenable_bases`). Used today for
     :class:`~transformer_engine.pytorch.quantized_tensor.Quantizer` and
-    :class:`~transformer_engine.common.recipe.Recipe`.
+    :class:`~transformer_engine.pytorch.quantized_tensor.QuantizedTensorStorage`.
     """
 
     # Stored under ``_qcls`` in the metadata bundle to encode ``None``

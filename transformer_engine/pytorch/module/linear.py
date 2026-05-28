@@ -189,7 +189,8 @@ class LinearBwdArgs:
     # --- Numerical / dtype config ---
     activation_dtype: Optional[torch.dtype] = None
     fp8: bool = False
-    fp8_recipe: Optional[Recipe] = None
+    use_split_accumulator_dgrad: bool = _2X_ACC_DGRAD
+    use_split_accumulator_wgrad: bool = _2X_ACC_WGRAD
     backward_override: Optional[str] = None
     is_weight_param_quantized: bool = False
     custom: bool = False
@@ -672,7 +673,12 @@ def _linear_setup_ctx(
     # Numerical / dtype config
     bwd_args.activation_dtype = fwd_args.activation_dtype
     bwd_args.fp8 = fp8
-    bwd_args.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
+    if fp8:
+        _bwd_recipe = FP8GlobalStateManager.get_fp8_recipe()
+        if hasattr(_bwd_recipe, "fp8_gemm_dgrad"):
+            bwd_args.use_split_accumulator_dgrad = _bwd_recipe.fp8_gemm_dgrad.use_split_accumulator
+        if hasattr(_bwd_recipe, "fp8_gemm_wgrad"):
+            bwd_args.use_split_accumulator_wgrad = _bwd_recipe.fp8_gemm_wgrad.use_split_accumulator
     bwd_args.backward_override = backward_override
     bwd_args.is_weight_param_quantized = isinstance(weight, QuantizedTensorStorage)
     bwd_args.custom = fwd_args.custom
@@ -973,12 +979,7 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
             ):
                 weight_fp8.update_usage(columnwise_usage=True)
 
-            # Choose whether to use GEMM kernel with split accumulator
-            use_split_accumulator = _2X_ACC_DGRAD
-            if bwd_args.fp8:
-                recipe = bwd_args.fp8_recipe
-                if hasattr(recipe, "fp8_gemm_dgrad"):
-                    use_split_accumulator = recipe.fp8_gemm_dgrad.use_split_accumulator
+            use_split_accumulator = bwd_args.use_split_accumulator_dgrad
 
             # Update grad input quantizer
             if grad_input_quantizer is not None:
@@ -1121,12 +1122,7 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
                     grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
                     grad_output = grad_output_quantizer(grad_output)
 
-            # Figure out whether to use split accumulator
-            use_split_accumulator = _2X_ACC_WGRAD
-            if bwd_args.fp8:
-                recipe = bwd_args.fp8_recipe
-                if hasattr(recipe, "fp8_gemm_wgrad"):
-                    use_split_accumulator = recipe.fp8_gemm_wgrad.use_split_accumulator
+            use_split_accumulator = bwd_args.use_split_accumulator_wgrad
 
             # Figure out whether to output wgrad GEMM directly into main grad
             if bwd_args.is_first_microbatch is not None:

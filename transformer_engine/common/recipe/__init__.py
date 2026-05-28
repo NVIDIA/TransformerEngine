@@ -166,88 +166,6 @@ class Recipe:
         """Whether the given recipe is custom."""
         return issubclass(cls, CustomRecipe)
 
-    # ------------------------------------------------------------------ #
-    # torch.compile flatten / unflatten protocol
-    # ------------------------------------------------------------------ #
-    # The flattenable bucket in
-    # :mod:`transformer_engine.pytorch.dynamo` ships ``Recipe`` instances
-    # through TE custom ops by calling :meth:`_flatten` (instance method
-    # on each concrete subclass) and :meth:`_unflatten` (classmethod on
-    # this base, which dispatches by ``_rcls`` stamped into the
-    # metadata bundle). The default implementation reads
-    # :func:`dataclasses.fields` and flattens nested ``@dataclass``
-    # fields with ``"<field>.<subfield>"`` keys; reconstruction
-    # instantiates the target class with default args and writes the
-    # flattened values back. Subclasses can override either method when
-    # their structure is too irregular for the generic round-trip.
-
-    def _flatten(self):  # noqa: D401 -- short name preferred
-        """Return ``(OpaqueSimpleMetadata, None, [])``."""
-        # Lazy imports keep ``common`` independent of pytorch.
-        from dataclasses import fields, is_dataclass
-        from transformer_engine.pytorch.dynamo import OpaqueSimpleMetadata
-
-        payload: dict = {"_rcls": type(self).__qualname__}
-        for f in fields(self):
-            v = getattr(self, f.name)
-            if is_dataclass(v) and not isinstance(v, type):
-                for sf in fields(v):
-                    payload[f"{f.name}.{sf.name}"] = getattr(v, sf.name)
-            else:
-                payload[f.name] = v
-        return OpaqueSimpleMetadata(payload), None, []
-
-    @classmethod
-    def _unflatten(cls, meta, _ref, _tensors):
-        """Dispatch to the concrete subclass identified by
-        ``meta['_rcls']`` and rehydrate fields (including nested
-        ``@dataclass`` fields written under ``"<field>.<subfield>"``
-        keys by :meth:`_flatten`)."""
-        from dataclasses import fields, is_dataclass
-
-        target_name = meta["_rcls"]
-        target_cls = _RECIPE_REGISTRY.get(target_name)
-        if target_cls is None:
-            raise KeyError(
-                f"Unknown recipe class {target_name!r} during unflatten; "
-                "is the subclass imported in transformer_engine.common.recipe?"
-            )
-
-        out = target_cls()
-        nested: dict = {}
-        for k, v in meta.items():
-            if k == "_rcls":
-                continue
-            if "." in k:
-                parent, child = k.split(".", 1)
-                nested.setdefault(parent, {})[child] = v
-            else:
-                setattr(out, k, v)
-        for parent, children in nested.items():
-            target = getattr(out, parent, None)
-            if target is None or not is_dataclass(target):
-                continue
-            # Nested dataclasses (e.g. ``MMParams``) may be frozen, so
-            # rebuild the instance with merged kwargs and reassign.
-            cur_kwargs = {f.name: getattr(target, f.name) for f in fields(target)}
-            cur_kwargs.update(children)
-            setattr(out, parent, type(target)(**cur_kwargs))
-        return out
-
-
-# Lazily populated by :meth:`Recipe.__init_subclass__` so that
-# :meth:`Recipe._unflatten` can dispatch by ``__qualname__``.
-_RECIPE_REGISTRY: dict = {}
-
-
-def _register_recipe_subclass(cls) -> None:
-    _RECIPE_REGISTRY[cls.__qualname__] = cls
-
-
-# Recipe uses pydantic.dataclasses which can interfere with hooking
-# ``__init_subclass__``; register subclasses explicitly at the bottom of
-# this module instead.
-
 
 @dataclass(repr=False)
 class DelayedScaling(Recipe):
@@ -738,13 +656,3 @@ class CustomRecipe(Recipe):
         )
 
 
-# Populate the dispatch registry consumed by :meth:`Recipe._unflatten`.
-for _R in (
-    DelayedScaling,
-    Float8CurrentScaling,
-    MXFP8BlockScaling,
-    Float8BlockScaling,
-    NVFP4BlockScaling,
-    CustomRecipe,
-):
-    _register_recipe_subclass(_R)
