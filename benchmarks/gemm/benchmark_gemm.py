@@ -993,7 +993,11 @@ def run_benchmarks(
 
     has_blackwell = is_blackwell_available()
     run_fp8_current = include_fp8_current and TE_AVAILABLE
-    run_fp8_delayed = include_fp8_delayed and TE_AVAILABLE
+    # DelayedScaling has no pre-quantized variant: the recipe differs from CurrentScaling
+    # only in how the scaling factor is computed each step (via amax history), which is
+    # exactly the work pre-quantized mode skips. Enabling it here would silently fall back
+    # to the autocast path and plot a misleading bar, so omit it when pre-quantizing.
+    run_fp8_delayed = include_fp8_delayed and TE_AVAILABLE and not pre_quantize
     run_fp8 = include_fp8 and TE_AVAILABLE
     run_fp8_block = include_fp8_block and TE_AVAILABLE
     run_fp4 = include_fp4 and TE_AVAILABLE and has_blackwell
@@ -1266,7 +1270,11 @@ def run_model_config_benchmarks(
     """
     has_blackwell = is_blackwell_available()
     run_fp8_current = include_fp8_current and TE_AVAILABLE
-    run_fp8_delayed = include_fp8_delayed and TE_AVAILABLE
+    # DelayedScaling has no pre-quantized variant: the recipe differs from CurrentScaling
+    # only in how the scaling factor is computed each step (via amax history), which is
+    # exactly the work pre-quantized mode skips. Enabling it here would silently fall back
+    # to the autocast path and plot a misleading bar, so omit it when pre-quantizing.
+    run_fp8_delayed = include_fp8_delayed and TE_AVAILABLE and not pre_quantize
     run_fp8 = include_fp8 and TE_AVAILABLE
     run_fp8_block = include_fp8_block and TE_AVAILABLE
     run_fp4 = include_fp4 and TE_AVAILABLE and has_blackwell
