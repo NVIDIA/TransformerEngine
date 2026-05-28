@@ -324,7 +324,6 @@ class SubclassTensorSpec(TensorSpec):
         dtype: "torch.dtype",
         device: "torch.device",
         wrapper_cls: Optional[type] = None,
-        requires_grad: bool = False,
     ) -> "SubclassTensorSpec":
         """Build a :class:`SubclassTensorSpec` from a live quantizer.
 
@@ -349,10 +348,7 @@ class SubclassTensorSpec(TensorSpec):
                 alloc_dtype=dtype,
                 alloc_device=device,
             )
-        inner_names, meta = quantizer.create_metadata(
-            fake_dtype=dtype,
-            requires_grad=requires_grad,
-        )
+        inner_names, meta = quantizer.create_metadata(fake_dtype=dtype)
         return cls(
             cls=wrapper_cls,
             inner_names=inner_names,
@@ -419,8 +415,6 @@ class StorageSpec(TensorSpec):
         shape: Sequence[int],
         dtype: "torch.dtype",
         device: "torch.device",
-        requires_grad: bool = False,
-        as_tensor: bool = False,
     ) -> "StorageSpec":
         """Build a :class:`StorageSpec` from a live quantizer.
 
@@ -434,8 +428,6 @@ class StorageSpec(TensorSpec):
             shape=shape,
             fake_dtype=dtype,
             device=device,
-            requires_grad=requires_grad,
-            as_tensor=as_tensor,
         )
         return cls(
             cls=storage_cls,
@@ -540,18 +532,17 @@ def _make_fake_impl_from_output_info(
     """Build a forward fake-impl from an ``output_info_fn``.
 
     The synthesized fake-impl returns
-    ``(*user_outputs, tensors_to_save, tensor_objects, ctx_attrs)``:
+    ``(*user_outputs, tensors_to_save, None, None)``:
 
     * ``user_outputs``    comes from ``[s.alloc() for s in user_specs]``.
     * ``tensors_to_save`` comes from ``tuple(s.alloc() for s in saved_slots)``,
                           or ``None`` if ``saved_slots`` is empty
                           (e.g. ``is_grad_enabled=False``).
-    * ``tensor_objects``  is a vestigial slot kept for tuple-shape
-                          symmetry; the compile path does not consume
-                          it.
-    * ``ctx_attrs``       is augmented with ``saved_tensor_aliases``
-                          derived from ``saved_slots`` so the user's
-                          ``setup_context`` sees the same contract.
+    * The trailing ``tensor_objects`` / ``ctx_attrs`` slots are
+      ``None`` placeholders -- the eager fwd_impl contract requires
+      them in the tuple (via ``_FWD_TRAILING_SLOTS``) but
+      :func:`_format_fwd_result` only reads user outputs + saved
+      tensors off a fake-impl return.
 
     ``output_info_fn`` must return a 3-tuple
     ``(user_specs: List[TensorSpec], saved_slots: List[TensorSpec],
@@ -559,14 +550,16 @@ def _make_fake_impl_from_output_info(
     """
 
     def _fake(args: Any) -> Tuple[Any, ...]:
-        user_specs, saved_slots, ctx_attrs = output_info_fn(args)
+        user_specs, saved_slots, _ = output_info_fn(args)
         user_outputs = [s.alloc() for s in user_specs]
-        if not saved_slots:
-            tensors_to_save: Any = None
-        else:
-            tensors_to_save = tuple(s.alloc() for s in saved_slots)
-        ctx_attrs = _inject_saved_aliases(ctx_attrs, saved_slots)
-        return (*user_outputs, tensors_to_save, None, ctx_attrs)
+        tensors_to_save = (
+            None if not saved_slots else tuple(s.alloc() for s in saved_slots)
+        )
+        # Trailing ``tensor_objects`` / ``ctx_attrs`` slots are required
+        # by the eager fwd_impl contract (``_FWD_TRAILING_SLOTS``) but
+        # are never read off a fake-impl return -- ``_format_fwd_result``
+        # only slices user outputs + tensors_to_save out of the tuple.
+        return (*user_outputs, tensors_to_save, None, None)
 
     return _fake
 
@@ -1747,11 +1740,10 @@ def _register_kernel(
     arg_names: List[str],
     buckets: List[_Bucket],
     impl: Callable[[Any], Any],
-    fake_impl: Optional[Callable[[Any], Any]],
+    fake_impl: Callable[[Any], Any],
     format_result: Callable[[Any], List[torch.Tensor]],
 ) -> None:
-    """Wire ``impl`` (and optionally ``fake_impl``) into :data:`_TE_LIB`
-    under ``op_name``.
+    """Wire ``impl`` + ``fake_impl`` into :data:`_TE_LIB` under ``op_name``.
 
     The wrapper unpacks the flat positional args using
     ``arg_names`` / ``buckets``, calls the user kernel with the rebuilt
@@ -1764,16 +1756,13 @@ def _register_kernel(
         obj = _unpack(arg_type, kwargs, buckets)
         return format_result(impl(obj))
 
+    def _fake(*flat: Any) -> List[torch.Tensor]:
+        kwargs = dict(zip(arg_names, flat))
+        obj = _unpack(arg_type, kwargs, buckets)
+        return format_result(fake_impl(obj))
+
     _TE_LIB.impl(op_name, _eager, "CompositeExplicitAutograd")
-
-    if fake_impl is not None:
-
-        def _fake(*flat: Any) -> List[torch.Tensor]:
-            kwargs = dict(zip(arg_names, flat))
-            obj = _unpack(arg_type, kwargs, buckets)
-            return format_result(fake_impl(obj))
-
-        torch.library.register_fake(op_qualname, _fake, lib=_TE_LIB)
+    torch.library.register_fake(op_qualname, _fake, lib=_TE_LIB)
 
 
 def _collect_universal_slot_offsets(buckets: List[_Bucket]) -> List[int]:
@@ -2028,12 +2017,6 @@ def _te_register_custom_op(
     bwd_output_info_fn: Callable[[Any], List["TensorSpec"]],
 ) -> Callable[..., Any]:
     """Register a TE module's forward + backward as a single torch custom op.
-
-    The user-output count is derived dynamically at call time from
-    the impl return shape: ``num_outputs = len(result) -
-    _FWD_TRAILING_SLOTS`` (the impl tail is always
-    ``tensors_to_save, tensor_objects, ctx_attrs``). No explicit
-    ``num_outputs`` argument is required.
 
     Parameters
     ----------
