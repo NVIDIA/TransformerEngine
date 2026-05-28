@@ -49,10 +49,10 @@ Implementation conventions
 """
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from functools import partial
-from typing import Any, Callable, NewType, Optional, Tuple, Union
+from typing import Any, NewType, Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -75,6 +75,7 @@ from .quantize import (
     noop_quantizer_set,
     with_sharding_constraint_by_logical_axes,
 )
+from .flax.module import _convert_to_activation_function
 from .router import ScoreFunction, _validate_score_function
 from .sharding import _get_mesh
 
@@ -118,8 +119,6 @@ def _require_triton():
             " Install Triton or pass PermutationBackend.PURE_JAX."
         )
 
-
-from .flax.module import _convert_to_activation_function
 
 PRNGKey = Any
 Shape = Tuple[int, ...]
@@ -512,7 +511,6 @@ def _dispatch(
     in_off, send_sz, out_off, recv_sz = compute_ragged_all_to_all_params(
         all_shards_tokens_per_expert, shard_id, num_ep
     )
-    pre_a2a_buffer_shape = sorted_inputs.shape
     post_a2a_buffer_shape = (recv_buffer_rows, hidden)
     recv_buf = jnp.zeros(post_a2a_buffer_shape, dtype=sorted_inputs.dtype)
     x_recv = jax.lax.ragged_all_to_all(
@@ -679,7 +677,7 @@ def _combine(
     return out_2d.reshape(batch_size, sequence_length, hidden).astype(dtype), expert_outputs
 
 
-def _combine_bwd(
+def _combine_bwd(  # pylint: disable=unused-argument
     d_output: jnp.ndarray,
     state: _DispatchState,
     expert_outputs: jnp.ndarray,
@@ -942,7 +940,7 @@ def _dispatch_bwd(
 # =============================================================================
 
 
-def _body_fwd(
+def _body_fwd(  # pylint: disable=unused-argument
     captured: dict,
     *,
     # Statics
@@ -1224,7 +1222,7 @@ def _body_fwd(
     return output, aux_loss, ctx
 
 
-def _body_bwd(
+def _body_bwd(  # pylint: disable=unused-argument
     ctx: _BodyCtx,
     dy_pair: Tuple[jnp.ndarray, jnp.ndarray],
     *,
@@ -1262,7 +1260,10 @@ def _body_bwd(
         raise NotImplementedError("gate_inside_vjp=False is deferred to a follow-up PR.")
 
     d_output, d_aux_loss = dy_pair
-    q_set_w0, q_set_w1, q_set_wo = quantizer_sets
+    # The fused FFN bwd quantizes via ``q_set_w0`` only (one quantize for
+    # the [E, H, 2M] fused wi tensor and one for the [T, 2M] fused dgrad),
+    # so ``q_set_w1`` is intentionally unused here.
+    q_set_w0, _q_set_w1, q_set_wo = quantizer_sets
     batch_size, sequence_length, hidden = x_shape
     shard_id = jax.lax.axis_index(ep_axis) if ep_active else None
 
@@ -1559,7 +1560,7 @@ def _build_in_specs(
     return specs
 
 
-def _build_dispatch_specs(
+def _build_dispatch_specs(  # pylint: disable=unused-argument
     ep_axis: str,
     *,
     backend: PermutationBackend,
@@ -1595,7 +1596,7 @@ def _build_dispatch_specs(
     )
 
 
-def _build_ctx_specs(
+def _build_ctx_specs(  # pylint: disable=unused-argument
     ep_axis: str,
     batch_pspec_axis: Any,
     *,
@@ -1665,7 +1666,7 @@ def _build_grads_specs(
 # =============================================================================
 
 
-def _moe_fwd_rule(
+def _moe_fwd_rule(  # pylint: disable=unused-argument
     # Args MUST match the positional order of ``_moe`` (diff first,
     # then nondiff). See ``_moe_bwd_rule`` for the opposite convention.
     x,
@@ -1700,24 +1701,24 @@ def _moe_fwd_rule(
 ):
     x = with_sharding_constraint_by_logical_axes(x, input_axes)
     ep_active = ep_axis is not None
-    body_kwargs = dict(
-        num_experts=num_experts,
-        num_experts_per_tok=num_experts_per_tok,
-        activation_type=activation_type,
-        score_function=score_function,
-        use_pre_softmax=use_pre_softmax,
-        num_groups=num_groups,
-        group_topk=group_topk,
-        scaling_factor=scaling_factor,
-        aux_loss_coeff=aux_loss_coeff,
-        permutation_backend=permutation_backend,
-        align_size=align_size,
-        gate_inside_vjp=gate_inside_vjp,
-        quantizer_sets=quantizer_sets,
-        dtype=dtype,
-        ep_axis=ep_axis,
-        data_parallelism_axes=data_parallelism_axes,
-    )
+    body_kwargs = {
+        "num_experts": num_experts,
+        "num_experts_per_tok": num_experts_per_tok,
+        "activation_type": activation_type,
+        "score_function": score_function,
+        "use_pre_softmax": use_pre_softmax,
+        "num_groups": num_groups,
+        "group_topk": group_topk,
+        "scaling_factor": scaling_factor,
+        "aux_loss_coeff": aux_loss_coeff,
+        "permutation_backend": permutation_backend,
+        "align_size": align_size,
+        "gate_inside_vjp": gate_inside_vjp,
+        "quantizer_sets": quantizer_sets,
+        "dtype": dtype,
+        "ep_axis": ep_axis,
+        "data_parallelism_axes": data_parallelism_axes,
+    }
     captured: dict = {
         "inputs": x,
         "gate_kernel": gate_kernel,
@@ -1891,32 +1892,32 @@ def _moe_bwd_rule(
     fsdp_sizes: Tuple[int, ...] = (
         tuple(mesh.shape[ax] for ax in data_parallelism_axes) if ep_active else ()
     )
-    body_kwargs = dict(
-        num_experts=num_experts,
-        num_experts_per_tok=num_experts_per_tok,
-        activation_type=activation_type,
-        score_function=score_function,
-        use_pre_softmax=use_pre_softmax,
-        num_groups=num_groups,
-        group_topk=group_topk,
-        scaling_factor=scaling_factor,
-        aux_loss_coeff=aux_loss_coeff,
-        permutation_backend=permutation_backend,
-        align_size=align_size,
-        gate_inside_vjp=gate_inside_vjp,
-        quantizer_sets=quantizer_sets,
-        dtype=dtype,
-        ep_axis=ep_axis,
-        data_parallelism_axes=data_parallelism_axes,
-        fsdp_sizes=fsdp_sizes,
-        num_ep=1 if not ep_active else mesh.shape[ep_axis],
-        num_experts_local=num_experts_local,
-        recv_buffer_rows=recv_buffer_rows,
-        has_wi_bias=has_wi_bias,
-        has_wo_bias=has_wo_bias,
-        has_expert_bias=has_expert_bias,
-        x_shape=x_shape,
-    )
+    body_kwargs = {
+        "num_experts": num_experts,
+        "num_experts_per_tok": num_experts_per_tok,
+        "activation_type": activation_type,
+        "score_function": score_function,
+        "use_pre_softmax": use_pre_softmax,
+        "num_groups": num_groups,
+        "group_topk": group_topk,
+        "scaling_factor": scaling_factor,
+        "aux_loss_coeff": aux_loss_coeff,
+        "permutation_backend": permutation_backend,
+        "align_size": align_size,
+        "gate_inside_vjp": gate_inside_vjp,
+        "quantizer_sets": quantizer_sets,
+        "dtype": dtype,
+        "ep_axis": ep_axis,
+        "data_parallelism_axes": data_parallelism_axes,
+        "fsdp_sizes": fsdp_sizes,
+        "num_ep": 1 if not ep_active else mesh.shape[ep_axis],
+        "num_experts_local": num_experts_local,
+        "recv_buffer_rows": recv_buffer_rows,
+        "has_wi_bias": has_wi_bias,
+        "has_wo_bias": has_wo_bias,
+        "has_expert_bias": has_expert_bias,
+        "x_shape": x_shape,
+    }
 
     if not ep_active:
         grads = _body_bwd(ctx, dy_pair, ep_active=False, **body_kwargs)

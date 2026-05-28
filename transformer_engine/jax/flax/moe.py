@@ -30,10 +30,12 @@ following the 2.16 code freeze).
 
 from typing import Any, Callable, NewType, Optional, Tuple, Union
 
-import jax
 import jax.numpy as jnp
 from flax import linen as nn
-from jax.sharding import PartitionSpec as P  # noqa: F401  (re-exported for convenience)
+
+# Re-exported so downstream users can ``from transformer_engine.jax.flax.moe
+# import P`` without a second jax.sharding import.
+from jax.sharding import PartitionSpec as P  # noqa: F401  # pylint: disable=unused-import
 
 from ..moe import PermutationBackend, moe
 from ..quantize import noop_quantizer_set
