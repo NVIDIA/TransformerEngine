@@ -105,10 +105,12 @@ done
 # Final pass/fail. Any non-zero in any process fails the suite, but
 # we tolerate non-zero on the non-zero processes only if proc 0
 # reports PASS (this matches the encoder launcher's logic). Simplest
-# strict rule: any non-zero is a failure.
+# Treat exit 0 (pass) and exit 5 (pytest "no tests collected", which
+# the file emits via ``pytest.skip(allow_module_level=True)`` on
+# pre-Blackwell GPUs) as success. Anything else is a failure.
 FAILED=0
 for e in "${EXITS[@]}"; do
-    if [ "$e" != "0" ]; then
+    if [ "$e" != "0" ] && [ "$e" != "5" ]; then
         FAILED=1
         break
     fi

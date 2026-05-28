@@ -129,11 +129,17 @@ BACKEND_PARAMS = [
 ]
 
 
-NUM_DEVICES_REQUIRED = 4
 EP_AXIS = "ep"
 FSDP_AXIS = "fsdp"
 EP_SIZE = 2
-FSDP_SIZE = 2
+# FSDP_SIZE adapts to whatever the launcher gave us: dlcluster GB200
+# gives 4 GPUs (FSDP=2), CI B200 gives 8 GPUs (FSDP=4). Both stay
+# 128-aligned for MXFP8 and divide num_experts/topk cleanly.
+assert (
+    jax.device_count() % EP_SIZE == 0
+), f"device_count {jax.device_count()} must be divisible by EP_SIZE={EP_SIZE}"
+FSDP_SIZE = jax.device_count() // EP_SIZE
+NUM_DEVICES_REQUIRED = EP_SIZE * FSDP_SIZE
 
 LOGICAL_AXIS_RULES = (
     ("exp", EP_AXIS),
@@ -280,7 +286,7 @@ def _local_shard(x):
 # 4-way data-parallel shard of a Mixtral-8 block).
 # -----------------------------------------------------------------------------
 
-BATCH = EP_SIZE * FSDP_SIZE * 4  # 16
+BATCH = EP_SIZE * FSDP_SIZE * 4  # 16 on 4-GPU, 32 on 8-GPU
 SEQ = 2048
 HIDDEN = 1024
 INTER = 4096
