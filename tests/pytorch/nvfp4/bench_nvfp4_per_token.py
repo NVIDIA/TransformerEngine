@@ -4,8 +4,15 @@
 
 """Bench NVFP4 per-token K1+K2 quant vs per-tensor RHT+SR baseline.
 
-Quant-only (no GEMM). Both sides time the K1 (amax) + K2 (cast) composite on
-activation A, rowwise+columnwise. Requires bf16 input, M % 128 == 0, K % 128 == 0.
+Quant-only (no GEMM). bf16, M % 128 == 0, K % 128 == 0.
+
+Modes:
+  * default: 2-way composite (per-token vs per-tensor). Ratio = pt / pten.
+  * ``--rht``: 3-way composite (adds per-token + col-wise 16-pt RHT). Ratio =
+    per-token (+rht) / per-tensor.
+  * ``--k1-only``: K1 in isolation. Without ``--rht``: pt_K1 vs prod_K1.
+    With ``--rht``: (A) pt_K1 vs pt_K1+RHT (apples-to-apples) and
+    (B) pt_K1+RHT vs prod_K1 (NOT apples-to-apples; output shapes differ).
 """
 
 from __future__ import annotations
@@ -102,21 +109,44 @@ def _has_sm100() -> bool:
 class ShapeBench:
     M: int
     K: int
-    t_pt: float  # per-token full K1+K2 (eager pybind, ms)
-    t_pten: float  # per-tensor full K1+K2 (eager pybind, ms)
+    t_pt: float  # per-token full K1+K2, no RHT (Eager pybind, ms)
+    t_pt_rht: float  # per-token full K1+K2, +RHT col-wise (Eager pybind, ms)
+    t_pten: float  # per-tensor full K1+K2 with RHT+SR (Eager pybind, ms)
     t_pt_g: float  # per-token under CUDA Graphs replay (ms)
+    t_pt_rht_g: float  # per-token+RHT under CUDA Graphs replay (ms)
     t_pten_g: float  # per-tensor under CUDA Graphs replay (ms)
 
 
-def _bench_shape(M: int, K: int, *, device: torch.device) -> ShapeBench:
-    """Time per-tensor vs per-token K1+K2 quant at one (M, K) shape."""
+@dataclass
+class K1ShapeBench:
+    M: int
+    K: int
+    # K1-only timings: 3 paths x 2 modes (Eager + CUDA Graphs).
+    t_pt: float  # per-token K1, no RHT  (rowwise+columnwise amax vectors)
+    t_pt_rht: float  # per-token K1, +RHT on col direction
+    t_prod: float  # prod K1 hadamard_transform_amax (per-tensor scalar amax)
+    t_pt_g: float
+    t_pt_rht_g: float
+    t_prod_g: float
+
+
+# Default mask seed; matches prod's `te-nvfp4-build-overrides.mdc` convention.
+_RHT_MASK_DEFAULT: int = 0xACE1
+
+
+def _bench_shape(
+    M: int, K: int, *, device: torch.device, with_rht: bool = False, mask_t: int = _RHT_MASK_DEFAULT
+) -> ShapeBench:
+    """Composite K1+K2 timing at one (M, K) shape.
+    pt = per-token (no RHT), pt_rht = per-token + col-wise 16-pt RHT
+    (NaN unless with_rht=True), pten = per-tensor + RHT + SR (prod baseline).
+    """
     a = torch.randn((M, K), dtype=torch.bfloat16, device=device)
 
-    # Per-tensor quantizer + A output tensor.
     quantizer = _make_baseline_quantizer()
     dst_a = quantizer.make_empty(a.shape, dtype=torch.bfloat16, device=device)
 
-    # Per-token A-side buffers: BLOCK_K=16 (1x16 e4m3 inner SF).
+    # Per-token A-side buffers reused across no-RHT and +RHT paths.
     BLOCK_K = 16
     ra_a = torch.empty((M,), dtype=torch.float32, device=device)
     ca_a = torch.empty((K,), dtype=torch.float32, device=device)
@@ -139,6 +169,8 @@ def _bench_shape(M: int, K: int, *, device: torch.device) -> ShapeBench:
             ca_a,
             True,
             True,
+            with_rht=False,
+            random_sign_mask_t=0,
         )
 
     t_pten = cuda_time_ms(_baseline_quant_fn)
@@ -146,7 +178,109 @@ def _bench_shape(M: int, K: int, *, device: torch.device) -> ShapeBench:
     t_pten_g = cuda_graph_time_ms(_baseline_quant_fn)
     t_pt_g = cuda_graph_time_ms(_pt_full_quant_fn)
 
-    return ShapeBench(M=M, K=K, t_pt=t_pt, t_pten=t_pten, t_pt_g=t_pt_g, t_pten_g=t_pten_g)
+    if with_rht:
+
+        def _pt_full_quant_rht_fn():
+            tex.nvfp4_per_token_quantize(
+                a,
+                q_row_a,
+                s_dec_row_a,
+                ra_a,
+                q_col_a,
+                s_dec_col_a,
+                ca_a,
+                True,
+                True,
+                with_rht=True,
+                random_sign_mask_t=mask_t,
+            )
+
+        t_pt_rht = cuda_time_ms(_pt_full_quant_rht_fn)
+        t_pt_rht_g = cuda_graph_time_ms(_pt_full_quant_rht_fn)
+    else:
+        t_pt_rht = float("nan")
+        t_pt_rht_g = float("nan")
+
+    return ShapeBench(
+        M=M,
+        K=K,
+        t_pt=t_pt,
+        t_pt_rht=t_pt_rht,
+        t_pten=t_pten,
+        t_pt_g=t_pt_g,
+        t_pt_rht_g=t_pt_rht_g,
+        t_pten_g=t_pten_g,
+    )
+
+
+def _bench_shape_k1_only(
+    M: int, K: int, *, device: torch.device, with_rht: bool = False, mask_t: int = _RHT_MASK_DEFAULT
+) -> K1ShapeBench:
+    """K1-only timing. pt = per-token (no RHT), pt_rht = per-token + col RHT
+    (NaN unless with_rht=True), prod = hadamard_transform_amax (scalar amax;
+    NOT apples-to-apples but the closest prod K1 reference).
+    """
+    a = torch.randn((M, K), dtype=torch.bfloat16, device=device)
+
+    # Per-token K1 amax buffers (vectors).
+    ra_pt = torch.empty((M,), dtype=torch.float32, device=device)
+    ca_pt = torch.empty((K,), dtype=torch.float32, device=device)
+
+    # prod K1 amax buffers (scalars).
+    ra_prod = torch.empty((1,), dtype=torch.float32, device=device)
+    ca_prod = torch.empty((1,), dtype=torch.float32, device=device)
+
+    def _pt_k1_fn():
+        tex.nvfp4_per_token_amax(
+            a,
+            ra_pt,
+            ca_pt,
+            True,
+            True,
+            with_rht=False,
+            random_sign_mask_t=0,
+        )
+
+    def _prod_k1_fn():
+        # row pre-RHT + col post-RHT scalar amax; both numel=1 buffers.
+        tex.hadamard_transform_amax(a, ra_prod, ca_prod, mask_t)
+
+    t_pt = cuda_time_ms(_pt_k1_fn)
+    t_prod = cuda_time_ms(_prod_k1_fn)
+    t_pt_g = cuda_graph_time_ms(_pt_k1_fn)
+    t_prod_g = cuda_graph_time_ms(_prod_k1_fn)
+
+    if with_rht:
+        ra_pt_rht = torch.empty((M,), dtype=torch.float32, device=device)
+        ca_pt_rht = torch.empty((K,), dtype=torch.float32, device=device)
+
+        def _pt_k1_rht_fn():
+            tex.nvfp4_per_token_amax(
+                a,
+                ra_pt_rht,
+                ca_pt_rht,
+                True,
+                True,
+                with_rht=True,
+                random_sign_mask_t=mask_t,
+            )
+
+        t_pt_rht = cuda_time_ms(_pt_k1_rht_fn)
+        t_pt_rht_g = cuda_graph_time_ms(_pt_k1_rht_fn)
+    else:
+        t_pt_rht = float("nan")
+        t_pt_rht_g = float("nan")
+
+    return K1ShapeBench(
+        M=M,
+        K=K,
+        t_pt=t_pt,
+        t_pt_rht=t_pt_rht,
+        t_prod=t_prod,
+        t_pt_g=t_pt_g,
+        t_pt_rht_g=t_pt_rht_g,
+        t_prod_g=t_prod_g,
+    )
 
 
 # 6x3 sweep matching bench_nvfp4_per_token_group.py: M in {1024..32768}, K in {2048,4096,8192}.
@@ -168,6 +302,225 @@ def _ratio(num: float, den: float) -> float:
     return num / den
 
 
+def _print_composite_table_2way(records: List[ShapeBench]) -> None:
+    """2-way composite (no RHT). ratio = per-token / per-tensor (< 1.0 wins)."""
+    w_pt, w_pten, w_ratio = 14, 15, 8
+    block_w = w_pt + 1 + w_pten + 1 + w_ratio
+    header1 = f"{'':>7} {'':>6} |{'Eager, unit (ms)':^{block_w}} |{'Graph, unit (ms)':^{block_w}}"
+    header2 = (
+        f"{'M':>7} {'K':>6}"
+        " |"
+        f"{'per-token':>{w_pt}} {'per-tensor':>{w_pten}} {'ratio':>{w_ratio}}"
+        " |"
+        f"{'per-token':>{w_pt}} {'per-tensor':>{w_pten}} {'ratio':>{w_ratio}}"
+    )
+    print(header1)
+    print(header2)
+    print("-" * len(header2))
+    prev_M = None
+    for rec in records:
+        if prev_M is not None and rec.M != prev_M:
+            print()
+        prev_M = rec.M
+        ratio = _ratio(rec.t_pt, rec.t_pten)
+        ratio_g = _ratio(rec.t_pt_g, rec.t_pten_g)
+
+        def _fmt(r: float) -> str:
+            return "nan" if math.isnan(r) else f"{r:.2f}x"
+
+        print(
+            f"{rec.M:>7} {rec.K:>6}"
+            " |"
+            f"{rec.t_pt:>{w_pt}.4f} {rec.t_pten:>{w_pten}.4f} {_fmt(ratio):>{w_ratio}}"
+            " |"
+            f"{rec.t_pt_g:>{w_pt}.4f} {rec.t_pten_g:>{w_pten}.4f} {_fmt(ratio_g):>{w_ratio}}"
+        )
+
+
+def _print_composite_table(records: List[ShapeBench]) -> None:
+    """3-way composite (--rht). ratio = per-token (+rht) / per-tensor."""
+    w_pt, w_pt_rht, w_pten, w_ratio = 12, 12, 13, 8
+    block_w = w_pt + 1 + w_pt_rht + 1 + w_pten + 1 + w_ratio
+    header1 = f"{'':>7} {'':>6} |{'Eager, unit (ms)':^{block_w}} |{'Graph, unit (ms)':^{block_w}}"
+    header2 = (
+        f"{'M':>7} {'K':>6}"
+        " |"
+        f"{'per-token':>{w_pt}} {'per-token':>{w_pt_rht}}"
+        f" {'per-tensor':>{w_pten}} {'ratio':>{w_ratio}}"
+        " |"
+        f"{'per-token':>{w_pt}} {'per-token':>{w_pt_rht}}"
+        f" {'per-tensor':>{w_pten}} {'ratio':>{w_ratio}}"
+    )
+    header3 = (
+        f"{'':>7} {'':>6}"
+        " |"
+        f"{'':>{w_pt}} {'(+rht)':>{w_pt_rht}}"
+        f" {'':>{w_pten}} {'':>{w_ratio}}"
+        " |"
+        f"{'':>{w_pt}} {'(+rht)':>{w_pt_rht}}"
+        f" {'':>{w_pten}} {'':>{w_ratio}}"
+    )
+    print(header1)
+    print(header2)
+    print(header3)
+    print("-" * len(header2))
+    prev_M = None
+    for rec in records:
+        if prev_M is not None and rec.M != prev_M:
+            print()
+        prev_M = rec.M
+        ratio = _ratio(rec.t_pt_rht, rec.t_pten)
+        ratio_g = _ratio(rec.t_pt_rht_g, rec.t_pten_g)
+
+        def _fmt(r: float) -> str:
+            return "nan" if math.isnan(r) else f"{r:.2f}x"
+
+        print(
+            f"{rec.M:>7} {rec.K:>6}"
+            " |"
+            f"{rec.t_pt:>{w_pt}.4f} {rec.t_pt_rht:>{w_pt_rht}.4f}"
+            f" {rec.t_pten:>{w_pten}.4f} {_fmt(ratio):>{w_ratio}}"
+            " |"
+            f"{rec.t_pt_g:>{w_pt}.4f} {rec.t_pt_rht_g:>{w_pt_rht}.4f}"
+            f" {rec.t_pten_g:>{w_pten}.4f} {_fmt(ratio_g):>{w_ratio}}"
+        )
+
+
+def _print_k1_2way_table(records: List[K1ShapeBench]) -> None:
+    """2-way K1 (default --k1-only). pt_K1 vs prod_K1; NOT apples-to-apples
+    (per-token K1 outputs M+K floats, prod outputs 2 scalars).
+    """
+    print("K1-only: pt vs prod (NOT apples-to-apples; output shapes differ).")
+    header = (
+        f"{'M':>7} {'K':>6}"
+        " |"
+        f"{'pt_K1':>9} {'prod_K1':>9} {'ratio':>8}"
+        " |"
+        f"{'pt_K1(Graph)':>14} {'prod_K1(Graph)':>16} {'ratio(Graph)':>13}"
+    )
+    print(header)
+    print("-" * len(header))
+    prev_M = None
+    for rec in records:
+        if prev_M is not None and rec.M != prev_M:
+            print()
+        prev_M = rec.M
+        ratio = _ratio(rec.t_pt, rec.t_prod)
+        ratio_g = _ratio(rec.t_pt_g, rec.t_prod_g)
+        ratio_s = "nan" if math.isnan(ratio) else f"{ratio:.2f}x"
+        ratio_g_s = "nan" if math.isnan(ratio_g) else f"{ratio_g:.2f}x"
+        print(
+            f"{rec.M:>7} {rec.K:>6}"
+            " |"
+            f"{rec.t_pt:>9.4f} {rec.t_prod:>9.4f} {ratio_s:>8}"
+            " |"
+            f"{rec.t_pt_g:>14.4f} {rec.t_prod_g:>16.4f} {ratio_g_s:>13}"
+        )
+
+
+def _print_k1_rht_cost_table(records: List[K1ShapeBench]) -> None:
+    """Table A: pt_K1 vs pt_K1+RHT (apples-to-apples; same output shapes)."""
+    print("Table A -- K1-only RHT cost (pt = per-token, +RHT = col-wise FHT).")
+    header = (
+        f"{'M':>7} {'K':>6}"
+        " |"
+        f"{'pt_K1':>9} {'pt_K1+RHT':>11} {'ratio':>8}"
+        " |"
+        f"{'pt_K1(Graph)':>14} {'pt_K1+RHT(Graph)':>18} {'ratio(Graph)':>13}"
+    )
+    print(header)
+    print("-" * len(header))
+    prev_M = None
+    for rec in records:
+        if prev_M is not None and rec.M != prev_M:
+            print()
+        prev_M = rec.M
+        ratio = _ratio(rec.t_pt_rht, rec.t_pt)
+        ratio_g = _ratio(rec.t_pt_rht_g, rec.t_pt_g)
+        ratio_s = "nan" if math.isnan(ratio) else f"{ratio:.2f}x"
+        ratio_g_s = "nan" if math.isnan(ratio_g) else f"{ratio_g:.2f}x"
+        print(
+            f"{rec.M:>7} {rec.K:>6}"
+            " |"
+            f"{rec.t_pt:>9.4f} {rec.t_pt_rht:>11.4f} {ratio_s:>8}"
+            " |"
+            f"{rec.t_pt_g:>14.4f} {rec.t_pt_rht_g:>18.4f} {ratio_g_s:>13}"
+        )
+
+
+def _print_k1_vs_prod_table(records: List[K1ShapeBench]) -> None:
+    """Table B: pt_K1+RHT vs prod_K1 (NOT apples-to-apples; output shapes
+    differ -- 2 scalars vs M+K floats). Fast-floor reference only.
+    """
+    print("Table B -- K1-only vs prod (NOT apples-to-apples; output shapes differ).")
+    header = (
+        f"{'M':>7} {'K':>6}"
+        " |"
+        f"{'pt_K1+RHT':>11} {'prod_K1':>9} {'ratio':>8}"
+        " |"
+        f"{'pt_K1+RHT(Graph)':>18} {'prod_K1(Graph)':>16} {'ratio(Graph)':>13}"
+    )
+    print(header)
+    print("-" * len(header))
+    prev_M = None
+    for rec in records:
+        if prev_M is not None and rec.M != prev_M:
+            print()
+        prev_M = rec.M
+        ratio = _ratio(rec.t_pt_rht, rec.t_prod)
+        ratio_g = _ratio(rec.t_pt_rht_g, rec.t_prod_g)
+        ratio_s = "nan" if math.isnan(ratio) else f"{ratio:.2f}x"
+        ratio_g_s = "nan" if math.isnan(ratio_g) else f"{ratio_g:.2f}x"
+        print(
+            f"{rec.M:>7} {rec.K:>6}"
+            " |"
+            f"{rec.t_pt_rht:>11.4f} {rec.t_prod:>9.4f} {ratio_s:>8}"
+            " |"
+            f"{rec.t_pt_rht_g:>18.4f} {rec.t_prod_g:>16.4f} {ratio_g_s:>13}"
+        )
+
+
+def _print_composite_legend(*, with_rht: bool, rht_mask: int) -> None:
+    """Prose legend mapping table labels to their C++ entry points."""
+    print()
+    print("Legend:")
+    if with_rht:
+        print("  per-token (ms)         = tex.nvfp4_per_token_quantize(a, ..., rowwise+colwise,")
+        print("                           with_rht=False)")
+        print("                           = K1 fused amax + K2 fused cast (2 launches), no RHT.")
+        print(
+            "  per-token (+rht) (ms)  = same, but with_rht=True +"
+            f" random_sign_mask_t=0x{rht_mask:04X}."
+        )
+        print("                           Applies a 16-point RHT along the columnwise direction in")
+        print("                           BOTH K1 amax and K2 cast; rowwise stays raw. Length-16")
+        print("                           matches the 1x16 inner-SF block of NVFP4, so each scale")
+        print("                           window is decorrelated.")
+        print("  per-tensor (ms)        = tex.quantize(a, NVFP4Quantizer(rht+sr), ...)")
+        print("                           = nvte_quantize_with_hadamard_transform")
+        print(
+            "                           (1 fused launch: rowwise quant + col-wise RHT + col quant,"
+        )
+        print("                           prod baseline).")
+        print("  ratio                  = per-token (+rht) / per-tensor")
+        print("                           ** < 1.0 = this PR wins vs prod baseline **")
+    else:
+        print(
+            "  per-token (ms)  = tex.nvfp4_per_token_quantize(a, ..., rowwise+colwise,"
+            " with_rht=False)"
+        )
+        print("                    = K1 fused amax + K2 fused cast (2 launches), no RHT.")
+        print("  per-tensor (ms) = tex.quantize(a, NVFP4Quantizer(rht+sr), ...)")
+        print("                    = nvte_quantize_with_hadamard_transform")
+        print("                    (1 fused launch: rowwise quant + col-wise RHT + col quant,")
+        print("                    prod baseline).")
+        print(
+            "  ratio           = per-token / per-tensor   ** < 1.0 = per-token wins vs prod"
+            " baseline **"
+        )
+    print("  (Graph) suffix    = same under CUDA Graphs replay (Python + alloc elided).")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Benchmark NVFP4 per-token K1+K2 quant vs per-tensor production NVFP4."
@@ -182,6 +535,35 @@ def main() -> int:
             "Default: an internally-chosen production-shape sweep."
         ),
     )
+    parser.add_argument(
+        "--rht",
+        action="store_true",
+        help=(
+            "Also time the per-token + RHT path (col-wise 16-pt RHT in K1 + K2). "
+            "Default OFF: prints a 2-way table (per-token vs per-tensor). With "
+            "--rht: prints a 3-way table with one ratio "
+            "(per-token (+rht) / per-tensor)."
+        ),
+    )
+    parser.add_argument(
+        "--k1-only",
+        action="store_true",
+        help=(
+            "K1-only mode (no K2 cast). Without --rht: 2-way table (pt_K1 "
+            "vs prod_K1). With --rht: two tables back-to-back -- (A) RHT cost "
+            "pt_K1 vs pt_K1+RHT (apples-to-apples) and (B) pt_K1+RHT vs prod_K1 "
+            "(context only; output shapes differ)."
+        ),
+    )
+    parser.add_argument(
+        "--rht-mask",
+        type=lambda s: int(s, 0),
+        default=_RHT_MASK_DEFAULT,
+        help=(
+            "16-bit random sign mask for the RHT path (only matters with --rht). "
+            f"Default 0x{_RHT_MASK_DEFAULT:04X}; accepts hex (0x...) or decimal."
+        ),
+    )
     args = parser.parse_args()
 
     if not _has_sm100():
@@ -190,34 +572,28 @@ def main() -> int:
 
     device = torch.device("cuda")
     shapes = list(args.shapes) if args.shapes else list(_DEFAULT_SHAPES)
+    mask = args.rht_mask & 0xFFFF
 
-    records: List[ShapeBench] = [_bench_shape(M, K, device=device) for (M, K) in shapes]
-
-    header = (
-        f"{'M':>7} {'K':>6}"
-        " |"
-        f"{'per-token':>10} {'per-tensor':>11} {'ratio':>8}"
-        " |"
-        f"{'per-token(Graph)':>17} {'per-tensor(Graph)':>18} {'ratio(Graph)':>13}"
-    )
-    print(header)
-    print("-" * len(header))
-    prev_M = None
-    for rec in records:
-        if prev_M is not None and rec.M != prev_M:
+    if args.k1_only:
+        records_k1: List[K1ShapeBench] = [
+            _bench_shape_k1_only(M, K, device=device, with_rht=args.rht, mask_t=mask)
+            for (M, K) in shapes
+        ]
+        if args.rht:
+            _print_k1_rht_cost_table(records_k1)
             print()
-        prev_M = rec.M
-        ratio = _ratio(rec.t_pt, rec.t_pten)
-        ratio_g = _ratio(rec.t_pt_g, rec.t_pten_g)
-        ratio_s = "nan" if math.isnan(ratio) else f"{ratio:.2f}x"
-        ratio_g_s = "nan" if math.isnan(ratio_g) else f"{ratio_g:.2f}x"
-        print(
-            f"{rec.M:>7} {rec.K:>6}"
-            " |"
-            f"{rec.t_pt:>10.4f} {rec.t_pten:>11.4f} {ratio_s:>8}"
-            " |"
-            f"{rec.t_pt_g:>17.4f} {rec.t_pten_g:>18.4f} {ratio_g_s:>13}"
-        )
+            _print_k1_vs_prod_table(records_k1)
+        else:
+            _print_k1_2way_table(records_k1)
+    else:
+        records: List[ShapeBench] = [
+            _bench_shape(M, K, device=device, with_rht=args.rht, mask_t=mask) for (M, K) in shapes
+        ]
+        if args.rht:
+            _print_composite_table(records)
+        else:
+            _print_composite_table_2way(records)
+        _print_composite_legend(with_rht=args.rht, rht_mask=mask)
 
     return 0
 

@@ -110,40 +110,52 @@ void assemble_per_token_tensors(const at::Tensor& input, at::Tensor q_row, at::T
 
 }  // namespace
 
-// Production composite (K1 + K2 back-to-back).
+// Production composite (K1 + K2 back-to-back). with_rht=true enables the
+// 16-pt col-wise RHT in BOTH K1 and K2 so outer + inner SFs stay consistent.
 void nvfp4_per_token_quantize(const at::Tensor& input, at::Tensor q_row, at::Tensor s_dec_row,
                               at::Tensor row_amax, at::Tensor q_col, at::Tensor s_dec_col,
-                              at::Tensor col_amax, bool rowwise, bool columnwise) {
+                              at::Tensor col_amax, bool rowwise, bool columnwise, bool with_rht,
+                              int64_t random_sign_mask_t) {
   TensorWrapper in_te;
   TensorWrapper out_te(NVTE_NVFP4_1D_SCALING);
   assemble_per_token_tensors(input, q_row, s_dec_row, row_amax, q_col, s_dec_col, col_amax, rowwise,
                              columnwise, /*mode=*/0, in_te, out_te);
   const auto stream = at::cuda::getCurrentCUDAStream();
-  nvte_nvfp4_per_token_quantize(in_te.data(), nullptr, out_te.data(), stream);
+  nvte_nvfp4_per_token_quantize(in_te.data(), nullptr, out_te.data(), with_rht ? 1 : 0,
+                                static_cast<int>(random_sign_mask_t & 0xFFFF), stream);
 }
 
-// K1-only (diagnostic / bench): populates only amax buffers.
+// K1-only (diagnostic / bench): populates only amax buffers. with_rht=true
+// applies the 16-pt col-wise RHT before amax (rowwise unaffected);
+// random_sign_mask_t low 16 bits = sign-flip pattern.
 void nvfp4_per_token_amax(const at::Tensor& input, at::Tensor row_amax, at::Tensor col_amax,
-                          bool rowwise, bool columnwise) {
+                          bool rowwise, bool columnwise, bool with_rht,
+                          int64_t random_sign_mask_t) {
   at::Tensor empty_u8;  // not consumed by K1
   TensorWrapper in_te;
   TensorWrapper out_te(NVTE_NVFP4_1D_SCALING);
   assemble_per_token_tensors(input, empty_u8, empty_u8, row_amax, empty_u8, empty_u8, col_amax,
                              rowwise, columnwise, /*mode=*/1, in_te, out_te);
   const auto stream = at::cuda::getCurrentCUDAStream();
-  nvte_nvfp4_per_token_amax(in_te.data(), nullptr, out_te.data(), stream);
+  // C-API matches prod's `int` convention; only low 16 bits are consumed.
+  nvte_nvfp4_per_token_amax(in_te.data(), nullptr, out_te.data(), with_rht ? 1 : 0,
+                            static_cast<int>(random_sign_mask_t & 0xFFFF), stream);
 }
 
 // K2-only (diagnostic / bench): reads pre-filled amax buffers, emits FP4 + SFs.
+// with_rht=true requires col_amax to have been produced by an earlier K1
+// amax call with the SAME mask, else inner SFs are miscalibrated.
 void nvfp4_per_token_encode(const at::Tensor& input, at::Tensor q_row, at::Tensor s_dec_row,
                             at::Tensor row_amax, at::Tensor q_col, at::Tensor s_dec_col,
-                            at::Tensor col_amax, bool rowwise, bool columnwise) {
+                            at::Tensor col_amax, bool rowwise, bool columnwise, bool with_rht,
+                            int64_t random_sign_mask_t) {
   TensorWrapper in_te;
   TensorWrapper out_te(NVTE_NVFP4_1D_SCALING);
   assemble_per_token_tensors(input, q_row, s_dec_row, row_amax, q_col, s_dec_col, col_amax, rowwise,
                              columnwise, /*mode=*/2, in_te, out_te);
   const auto stream = at::cuda::getCurrentCUDAStream();
-  nvte_nvfp4_per_token_encode(in_te.data(), nullptr, out_te.data(), stream);
+  nvte_nvfp4_per_token_encode(in_te.data(), nullptr, out_te.data(), with_rht ? 1 : 0,
+                              static_cast<int>(random_sign_mask_t & 0xFFFF), stream);
 }
 
 // Apply per-token post-scale to a GEMM output (see nvfp4_per_token.h for math).
@@ -500,7 +512,7 @@ void nvfp4_per_token_group_quantize(
     std::vector<at::Tensor> q_row_list, std::vector<at::Tensor> s_dec_row_list,
     std::vector<at::Tensor> row_amax_list, std::vector<at::Tensor> q_col_list,
     std::vector<at::Tensor> s_dec_col_list, std::vector<at::Tensor> col_amax_list, bool rowwise,
-    bool columnwise) {
+    bool columnwise, bool with_rht, int64_t random_sign_mask_t) {
   TORCH_CHECK(rowwise || columnwise, "At least one of rowwise/columnwise must be True.");
   TORCH_CHECK(input.is_cuda() && input.is_contiguous(), "input must be a contiguous CUDA tensor");
   TORCH_CHECK(input.dim() == 2, "input must be 2D");
@@ -562,14 +574,15 @@ void nvfp4_per_token_group_quantize(
   }
 
   nvte_group_nvfp4_per_token_quantize(in_te.data(), handles.data(), split_sections_sz.data(),
-                                      num_tensors, rowwise, columnwise, stream);
+                                      num_tensors, rowwise, columnwise, static_cast<int>(with_rht),
+                                      static_cast<int>(random_sign_mask_t), stream);
 }
 
 // Amax-only grouped variant (K1 only); for allReduce-before-cast flows.
 void nvfp4_per_token_group_amax(const at::Tensor& input, const std::vector<int64_t>& split_sections,
                                 std::vector<at::Tensor> row_amax_list,
                                 std::vector<at::Tensor> col_amax_list, bool rowwise,
-                                bool columnwise) {
+                                bool columnwise, bool with_rht, int64_t random_sign_mask_t) {
   TORCH_CHECK(rowwise || columnwise, "At least one of rowwise/columnwise must be True.");
   TORCH_CHECK(input.is_cuda() && input.is_contiguous(), "input must be a contiguous CUDA tensor");
   TORCH_CHECK(input.dim() == 2, "input must be 2D");
@@ -625,7 +638,8 @@ void nvfp4_per_token_group_amax(const at::Tensor& input, const std::vector<int64
   }
 
   nvte_group_nvfp4_per_token_amax(in_te.data(), handles.data(), split_sections_sz.data(),
-                                  num_tensors, rowwise, columnwise, stream);
+                                  num_tensors, rowwise, columnwise, static_cast<int>(with_rht),
+                                  static_cast<int>(random_sign_mask_t), stream);
 }
 
 // BULK grouped per-token quantize: alloc + view + dispatch in ONE C++ call.
@@ -635,7 +649,7 @@ std::tuple<std::vector<at::Tensor>, std::vector<at::Tensor>, std::vector<at::Ten
            std::vector<at::Tensor>, std::vector<at::Tensor>, std::vector<at::Tensor>>
 nvfp4_per_token_group_quantize_bulk(const at::Tensor& input,
                                     const std::vector<int64_t>& split_sections, bool rowwise,
-                                    bool columnwise) {
+                                    bool columnwise, bool with_rht, int64_t random_sign_mask_t) {
   // Validation mirrors _validate_per_token_group_input in Python.
   TORCH_CHECK(rowwise || columnwise, "At least one of rowwise/columnwise must be True.");
   TORCH_CHECK(input.is_cuda(), "input must be a CUDA tensor");
@@ -750,7 +764,8 @@ nvfp4_per_token_group_quantize_bulk(const at::Tensor& input,
   }
 
   nvte_group_nvfp4_per_token_quantize(in_te.data(), handles.data(), split_sections_sz.data(),
-                                      num_tensors, rowwise, columnwise, stream);
+                                      num_tensors, rowwise, columnwise, static_cast<int>(with_rht),
+                                      static_cast<int>(random_sign_mask_t), stream);
 
   return std::make_tuple(std::move(q_row_list), std::move(s_dec_row_fp8_list),
                          std::move(row_amax_list), std::move(q_col_list),

@@ -88,6 +88,42 @@ using FusedIType = bf16;
 using FusedIType2 = ptx::FPx2<FusedIType>;
 using FusedIType3D = FusedIType[BUFFS_NUM][BUFF_IN_DIM_Y][BUFF_IN_DIM_X];
 
+// Randomized Hadamard Transform helpers (per-thread, 16-wide). Direct copy
+// of the single-tensor helpers in quantize_nvfp4_per_token.cu; K1 and K2
+// must consume identical output for FP4 + outer SF to be self-consistent.
+// TODO: hoist into a shared core header.
+__device__ __forceinline__ void apply_signed_fht16_inplace(float r[16], uint32_t random_sign_mask) {
+#pragma unroll
+  for (int i = 0; i < 16; ++i) {
+    const uint32_t bits = __float_as_uint(r[i]);
+    const uint32_t flip = ((random_sign_mask >> i) & 1u) << 31;
+    r[i] = __uint_as_float(bits ^ flip);
+  }
+#pragma unroll
+  for (int stride = 1; stride < 16; stride <<= 1) {
+#pragma unroll
+    for (int g = 0; g < 16; g += stride << 1) {
+#pragma unroll
+      for (int j = 0; j < stride; ++j) {
+        const float a = r[g + j];
+        const float b = r[g + j + stride];
+        r[g + j] = a + b;
+        r[g + j + stride] = a - b;
+      }
+    }
+  }
+}
+
+__device__ __forceinline__ float amax_16_abs(const float r[16]) {
+  float m = 0.f;
+#pragma unroll
+  for (int i = 0; i < 16; ++i) m = fmaxf(m, fabsf(r[i]));
+  return m;
+}
+
+// 1/sqrt(16) Hadamard normalization, folded once per 1x16 block.
+constexpr float k16HadamardNorm = 0.25f;
+
 // Pre-zero amax buffers (identity for atomicMax).
 template <bool DO_ROW, bool DO_COL>
 __global__ void group_per_token_fused_zero_amax_kernel(NVFP4PerTokenMultiArgs args, int K) {
@@ -113,11 +149,14 @@ __global__ void group_per_token_fused_zero_amax_kernel(NVFP4PerTokenMultiArgs ar
   }
 }
 
-template <bool DO_ROW, bool DO_COL>
+// kWithRht=true: col-wise amax over RHT-rotated 16-row strips. Row direction
+// never sees RHT.
+template <bool DO_ROW, bool DO_COL, bool kWithRht>
 __global__ void __launch_bounds__(THREADS_NUM)
     group_per_token_fused_amax_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
                                       const __grid_constant__ NVFP4PerTokenMultiArgs args,
-                                      const float* noop, const size_t rows, const size_t cols) {
+                                      const float* noop, const size_t rows, const size_t cols,
+                                      const uint32_t random_sign_mask_t) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   if (noop != nullptr && noop[0] == 1.0f) {
     return;
@@ -236,13 +275,28 @@ __global__ void __launch_bounds__(THREADS_NUM)
 
     // Col partial: 1 thread per column scans down 64 rows of the sub-tile.
     if (DO_COL && stage_X == my_col_stage_X) {
-      float local_max = col_partial;
+      if constexpr (kWithRht) {
+        // 4 contiguous 16-row blocks per sub-tile, one FHT per block; 0.25
+        // is folded post-amax (exact, since 0.25 = 2^-2).
 #pragma unroll
-      for (int e = 0; e < TILE_DIM_Y; ++e) {
-        const FusedIType v = sIn[buff_in][e][my_col_in_subtile];
-        local_max = fmaxf(local_max, fabsf(static_cast<float>(v)));
+        for (int blk = 0; blk < TILE_DIM_Y / 16; ++blk) {
+          float r[16];
+#pragma unroll
+          for (int i = 0; i < 16; ++i) {
+            r[i] = static_cast<float>(sIn[buff_in][blk * 16 + i][my_col_in_subtile]);
+          }
+          apply_signed_fht16_inplace(r, random_sign_mask_t);
+          col_partial = fmaxf(col_partial, amax_16_abs(r) * k16HadamardNorm);
+        }
+      } else {
+        float local_max = col_partial;
+#pragma unroll
+        for (int e = 0; e < TILE_DIM_Y; ++e) {
+          const FusedIType v = sIn[buff_in][e][my_col_in_subtile];
+          local_max = fmaxf(local_max, fabsf(static_cast<float>(v)));
+        }
+        col_partial = local_max;
       }
-      col_partial = local_max;
     }
 
     __syncthreads();
@@ -269,6 +323,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
   (void)noop;
   (void)rows;
   (void)cols;
+  (void)random_sign_mask_t;
   NVTE_DEVICE_ERROR("Fused grouped per-token amax kernel requires SM 10.0+ (Blackwell).");
 #endif  // __CUDA_ARCH__ >= 1000
 }
@@ -287,10 +342,6 @@ constexpr int THREADS_X_ROWWISE = TILE_DIM_X / ELTS_PER_THREAD;         // 4
 constexpr int THREADS_Y_ROWWISE = THREADS_NUM / THREADS_X_ROWWISE;      // 32
 constexpr int THREADS_PER_SCALE_ROWWISE = SCALE_DIM / ELTS_PER_THREAD;  // 1
 constexpr int ITERATIONS_NORMAL = TILE_DIM_Y / THREADS_Y_ROWWISE;       // 2
-
-// Colwise pass: tid.X = col-pair, warp = M-block (32 x 4).
-constexpr int THREADS_X_TR = TILE_DIM_X / 2;              // 32
-constexpr int THREADS_Y_TR = THREADS_NUM / THREADS_X_TR;  // 4
 
 // Output / SF SMEM buffer dims (sub-tile sized, double-buffered for ping-pong).
 constexpr int BUFF_OUT_DIM_Y = TILE_DIM_Y;
@@ -392,11 +443,15 @@ __device__ __forceinline__ void rowwise_scaling_per_token(
   }
 }
 
-// Colwise encode helper. Byte-equal to the single-tensor version.
+// Colwise encode helper. kWithRht=true rotates each thread's 16-row strip
+// via the FHT before block_amax + cast; K1 amax must have used the same
+// mask so the per-col outer amax matches.
+template <bool kWithRht = false>
 __device__ __forceinline__ void colwise_scaling_per_token(
     const IType* __restrict__ sIn_ptr, fp4e2m1x2* __restrict__ sOut_tr_ptr,
     nvfp4_scale_t* __restrict__ sSFcolwise_ptr, const float* __restrict__ sColAmax,
-    const int stage_Y, const int stage_X, const int buff_in, const int buff_out_tr) {
+    const int stage_Y, const int stage_X, const int buff_in, const int buff_out_tr,
+    const uint32_t random_sign_mask_t = 0u) {
   const auto& sIn2x = *reinterpret_cast<const IType2x3D*>(sIn_ptr);
   auto& sOut_tr = *reinterpret_cast<OType2xt3D*>(sOut_tr_ptr);
   auto& sSFcolwise = *reinterpret_cast<ScalesTypeTr2D*>(sSFcolwise_ptr);
@@ -420,6 +475,9 @@ __device__ __forceinline__ void colwise_scaling_per_token(
   const int scale_tr_offset_X = (stage_Y * SCALES_PER_TILE_Y) + tid_Y_colwise;
 
   __align__(8) IType rIn[2][SCALE_DIM];
+  // RHT staging in fp32 (DCE'd in the non-RHT instantiation).
+  float rRht[2][SCALE_DIM];
+
   IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
 #pragma unroll
   for (int i = 0; i < SCALE_DIM; ++i) {
@@ -427,10 +485,33 @@ __device__ __forceinline__ void colwise_scaling_per_token(
         ptx::ld_shared_b32(&sIn2x[buff_in][in_thread_offset_Y + i][in_thread_offset_X]);
     rIn[0][i] = elt_pair.x;
     rIn[1][i] = elt_pair.y;
-    ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, elt_pair);
+    if constexpr (!kWithRht) {
+      ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, elt_pair);
+    }
   }
-  const float block_amax[2] = {static_cast<float>(__habs(thread_amax_2x.x)),
-                               static_cast<float>(__habs(thread_amax_2x.y))};
+
+  float block_amax[2];
+  if constexpr (kWithRht) {
+#pragma unroll
+    for (int w = 0; w < 2; ++w) {
+#pragma unroll
+      for (int i = 0; i < SCALE_DIM; ++i) {
+        rRht[w][i] = static_cast<float>(rIn[w][i]);
+      }
+      apply_signed_fht16_inplace(rRht[w], random_sign_mask_t);
+      float local_max = 0.f;
+#pragma unroll
+      for (int i = 0; i < SCALE_DIM; ++i) {
+        local_max = fmaxf(local_max, fabsf(rRht[w][i]));
+      }
+      // amax(|r * 0.25|) == amax(|r|) * 0.25; 0.25 also folded into
+      // block_scale_rht below (bit-exact: 0.25 = 2^-2).
+      block_amax[w] = local_max * k16HadamardNorm;
+    }
+  } else {
+    block_amax[0] = static_cast<float>(__habs(thread_amax_2x.x));
+    block_amax[1] = static_cast<float>(__habs(thread_amax_2x.y));
+  }
 
 #pragma unroll
   for (int w = 0; w < 2; ++w) {
@@ -445,11 +526,22 @@ __device__ __forceinline__ void colwise_scaling_per_token(
     sSFcolwise[scale_tr_offset_Y + w][scale_tr_offset_X] = s_dec;
 
     fp4e2m1x4 qu[4];
+    if constexpr (kWithRht) {
+      // ptx::floatx2 keeps mul_cvt_4x's input fp32 (no bf16 round-trip).
+      const float block_scale_rht = block_scale * k16HadamardNorm;
 #pragma unroll
-    for (int e = 0; e < 4; ++e) {
-      IType2 in01{rIn[w][4 * e + 0], rIn[w][4 * e + 1]};
-      IType2 in23{rIn[w][4 * e + 2], rIn[w][4 * e + 3]};
-      ptx::mul_cvt_4x(qu[e], in01, in23, block_scale);
+      for (int e = 0; e < 4; ++e) {
+        const ptx::floatx2 in01{rRht[w][4 * e + 0], rRht[w][4 * e + 1]};
+        const ptx::floatx2 in23{rRht[w][4 * e + 2], rRht[w][4 * e + 3]};
+        ptx::mul_cvt_4x(qu[e], in01, in23, block_scale_rht);
+      }
+    } else {
+#pragma unroll
+      for (int e = 0; e < 4; ++e) {
+        IType2 in01{rIn[w][4 * e + 0], rIn[w][4 * e + 1]};
+        IType2 in23{rIn[w][4 * e + 2], rIn[w][4 * e + 3]};
+        ptx::mul_cvt_4x(qu[e], in01, in23, block_scale);
+      }
     }
 
     uint64_t out_pack_16x = (static_cast<uint64_t>(*reinterpret_cast<uint16_t*>(&qu[0])) << 0) |
@@ -463,11 +555,14 @@ __device__ __forceinline__ void colwise_scaling_per_token(
 
 // Fused K2: TMA-loads input, runs cooperative row+col encode helpers, scatters
 // FP4 + SFs to per-tensor outputs via st.global (multi-dest, no TMA store).
-template <bool DO_ROW, bool DO_COL>
+// kWithRht=true (and DO_COL=true): col-wise FHT with random_sign_mask_t,
+// matching the K1 amax launch. Row direction never sees RHT.
+template <bool DO_ROW, bool DO_COL, bool kWithRht>
 __global__ void __launch_bounds__(THREADS_NUM)
     group_per_token_fused_cast_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
                                       const __grid_constant__ NVFP4PerTokenMultiArgs args,
-                                      const float* noop, const size_t rows, const size_t cols) {
+                                      const float* noop, const size_t rows, const size_t cols,
+                                      const uint32_t random_sign_mask_t) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   if (noop != nullptr && noop[0] == 1.0f) {
     return;
@@ -619,8 +714,8 @@ __global__ void __launch_bounds__(THREADS_NUM)
                                 buff_in, buff_out);
     }
     if (DO_COL) {
-      colwise_scaling_per_token(sIn_ptr, sOut_tr_ptr, sSFcolwise_ptr, sColAmax, stage_Y, stage_X,
-                                buff_in, buff_out_tr);
+      colwise_scaling_per_token<kWithRht>(sIn_ptr, sOut_tr_ptr, sSFcolwise_ptr, sColAmax, stage_Y,
+                                          stage_X, buff_in, buff_out_tr, random_sign_mask_t);
     }
 
     // Make helper SMEM writes visible before the scatter epilogue.
@@ -697,14 +792,19 @@ __global__ void __launch_bounds__(THREADS_NUM)
   (void)noop;
   (void)rows;
   (void)cols;
+  (void)random_sign_mask_t;
   NVTE_DEVICE_ERROR("Fused grouped per-token cast kernel requires SM 10.0+ (Blackwell).");
 #endif  // __CUDA_ARCH__ >= 1000
 }
 
 // Host launcher for the fused K2 path. bf16-only.
+// with_rht=true applies a 16-pt RHT on the col direction; K1 amax must have
+// used the same flag + mask, else inner SF + FP4 saturate against mismatched
+// data.
 inline void launch_grouped_fused_cast_bf16(const NVFP4PerTokenMultiArgs& args,
                                            const SimpleTensor& input_data, int sum_M, int K,
-                                           bool do_row, bool do_col, const float* noop,
+                                           bool do_row, bool do_col, bool with_rht,
+                                           uint32_t random_sign_mask_t, const float* noop,
                                            cudaStream_t stream) {
   if (!do_row && !do_col) return;
 
@@ -717,37 +817,45 @@ inline void launch_grouped_fused_cast_bf16(const NVFP4PerTokenMultiArgs& args,
   dim3 grid(static_cast<unsigned>(K / CHUNK_DIM_X), static_cast<unsigned>(sum_M / CHUNK_DIM_Y), 1);
   dim3 block(THREADS_NUM, 1, 1);
 
+  // Collapse to kWithRht=false when no colwise output is requested.
+  const bool with_rht_effective = with_rht && do_col;
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
-      do_row, DO_ROW, TRANSFORMER_ENGINE_SWITCH_CONDITION(do_col, DO_COL, {
-        constexpr int sz_in =
-            DIVUP_TO_MULTIPLE(BUFFS_NUM * BUFF_IN_SIZE * sizeof(FusedIType), TMA_SHMEM_ALIGNMENT);
-        constexpr int sz_out_r =
-            DO_ROW ? DIVUP_TO_MULTIPLE(BUFFS_NUM_OUT * BUFF_OUT_SIZE, TMA_SHMEM_ALIGNMENT) : 0;
-        constexpr int sz_out_c =
-            DO_COL ? DIVUP_TO_MULTIPLE(BUFFS_NUM_OUT_TR * BUFF_OUT_TR_SIZE, TMA_SHMEM_ALIGNMENT)
-                   : 0;
-        constexpr int sz_sf_r =
-            DO_ROW ? DIVUP_TO_MULTIPLE(CHUNK_DIM_Y * SCALES_PER_CHUNK_X * sizeof(nvfp4_scale_t),
-                                       TMA_SHMEM_ALIGNMENT)
-                   : 0;
-        constexpr int sz_sf_c =
-            DO_COL ? DIVUP_TO_MULTIPLE(CHUNK_DIM_X * SCALES_PER_CHUNK_Y * sizeof(nvfp4_scale_t),
-                                       TMA_SHMEM_ALIGNMENT)
-                   : 0;
-        constexpr int dshmem_size =
-            sz_in + sz_out_r + sz_out_c + sz_sf_r + sz_sf_c + TMA_SHMEM_ALIGNMENT;
-        auto kernel = group_per_token_fused_cast_kernel<DO_ROW, DO_COL>;
-        cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
-        kernel<<<grid, block, dshmem_size, stream>>>(
-            tmap_in, args, noop, static_cast<size_t>(sum_M), static_cast<size_t>(K));
-      }););
+      do_row, DO_ROW,
+      TRANSFORMER_ENGINE_SWITCH_CONDITION(
+          do_col, DO_COL, TRANSFORMER_ENGINE_SWITCH_CONDITION(with_rht_effective, kWithRht, {
+            constexpr int sz_in = DIVUP_TO_MULTIPLE(BUFFS_NUM * BUFF_IN_SIZE * sizeof(FusedIType),
+                                                    TMA_SHMEM_ALIGNMENT);
+            constexpr int sz_out_r =
+                DO_ROW ? DIVUP_TO_MULTIPLE(BUFFS_NUM_OUT * BUFF_OUT_SIZE, TMA_SHMEM_ALIGNMENT) : 0;
+            constexpr int sz_out_c =
+                DO_COL ? DIVUP_TO_MULTIPLE(BUFFS_NUM_OUT_TR * BUFF_OUT_TR_SIZE, TMA_SHMEM_ALIGNMENT)
+                       : 0;
+            constexpr int sz_sf_r =
+                DO_ROW ? DIVUP_TO_MULTIPLE(CHUNK_DIM_Y * SCALES_PER_CHUNK_X * sizeof(nvfp4_scale_t),
+                                           TMA_SHMEM_ALIGNMENT)
+                       : 0;
+            constexpr int sz_sf_c =
+                DO_COL ? DIVUP_TO_MULTIPLE(CHUNK_DIM_X * SCALES_PER_CHUNK_Y * sizeof(nvfp4_scale_t),
+                                           TMA_SHMEM_ALIGNMENT)
+                       : 0;
+            constexpr int dshmem_size =
+                sz_in + sz_out_r + sz_out_c + sz_sf_r + sz_sf_c + TMA_SHMEM_ALIGNMENT;
+            auto kernel = group_per_token_fused_cast_kernel<DO_ROW, DO_COL, kWithRht>;
+            cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
+            kernel<<<grid, block, dshmem_size, stream>>>(
+                tmap_in, args, noop, static_cast<size_t>(sum_M), static_cast<size_t>(K),
+                random_sign_mask_t);
+          })););
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 // Host launcher for the fused K1 path. bf16-only.
+// with_rht=true applies a 16-pt RHT on the col amax (rowwise raw). The
+// downstream K2 cast MUST use the same flag + mask.
 inline void launch_grouped_fused_amax_bf16(const NVFP4PerTokenMultiArgs& args,
                                            const SimpleTensor& input_data, int sum_M, int K,
-                                           bool do_row, bool do_col, const float* noop,
+                                           bool do_row, bool do_col, bool with_rht,
+                                           uint32_t random_sign_mask_t, const float* noop,
                                            cudaStream_t stream) {
   if (!do_row && !do_col) return;
 
@@ -782,13 +890,18 @@ inline void launch_grouped_fused_amax_bf16(const NVFP4PerTokenMultiArgs& args,
   dim3 grid(static_cast<unsigned>(K / CHUNK_DIM_X), static_cast<unsigned>(sum_M / CHUNK_DIM_Y), 1);
   dim3 block(THREADS_NUM, 1, 1);
 
+  // Collapse to kWithRht=false when no colwise amax is requested.
+  const bool with_rht_effective = with_rht && do_col;
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
-      do_row, DO_ROW, TRANSFORMER_ENGINE_SWITCH_CONDITION(do_col, DO_COL, {
-        auto kernel = group_per_token_fused_amax_kernel<DO_ROW, DO_COL>;
-        cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
-        kernel<<<grid, block, dshmem_size, stream>>>(
-            tmap_in, args, noop, static_cast<size_t>(sum_M), static_cast<size_t>(K));
-      }););
+      do_row, DO_ROW,
+      TRANSFORMER_ENGINE_SWITCH_CONDITION(
+          do_col, DO_COL, TRANSFORMER_ENGINE_SWITCH_CONDITION(with_rht_effective, kWithRht, {
+            auto kernel = group_per_token_fused_amax_kernel<DO_ROW, DO_COL, kWithRht>;
+            cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
+            kernel<<<grid, block, dshmem_size, stream>>>(
+                tmap_in, args, noop, static_cast<size_t>(sum_M), static_cast<size_t>(K),
+                random_sign_mask_t);
+          })););
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -848,9 +961,12 @@ void populate_args(NVFP4PerTokenMultiArgs* args, std::vector<Tensor*>& outputs,
 }
 
 // Host entry. do_amax / do_cast select K1 / K2 phases (composite = both).
+// with_rht / mask are threaded into BOTH K1 and K2; the caller must use the
+// same flag/mask if they invoke amax + cast separately.
 void quantize_per_token_grouped(const Tensor& input, std::vector<Tensor*>& outputs,
                                 const size_t* split_sections, size_t num_tensors, bool rowwise,
-                                bool columnwise, bool do_amax, bool do_cast, cudaStream_t stream) {
+                                bool columnwise, bool do_amax, bool do_cast, bool with_rht,
+                                uint32_t random_sign_mask_t, cudaStream_t stream) {
   NVTE_CHECK(num_tensors > 0, "NVFP4 per-token grouped: num_tensors must be > 0");
   NVTE_CHECK(num_tensors <= static_cast<size_t>(kMaxTensorsPerKernel),
              "NVFP4 per-token grouped: num_tensors (", num_tensors,
@@ -881,12 +997,16 @@ void quantize_per_token_grouped(const Tensor& input, std::vector<Tensor*>& outpu
     fused::launch_grouped_fused_amax_bf16(args, input.data, sum_M, K,
                                           /*do_row=*/rowwise,
                                           /*do_col=*/columnwise,
+                                          /*with_rht=*/with_rht,
+                                          /*random_sign_mask_t=*/random_sign_mask_t,
                                           /*noop=*/nullptr, stream);
   }
   if (do_cast) {
     fused::launch_grouped_fused_cast_bf16(args, input.data, sum_M, K,
                                           /*do_row=*/rowwise,
                                           /*do_col=*/columnwise,
+                                          /*with_rht=*/with_rht,
+                                          /*random_sign_mask_t=*/random_sign_mask_t,
                                           /*noop=*/nullptr, stream);
   }
 }
@@ -912,16 +1032,22 @@ std::vector<transformer_engine::Tensor*> collect_outputs(NVTETensor* outputs, si
 
 void nvte_group_nvfp4_per_token_amax(const NVTETensor input, NVTETensor* outputs,
                                      const size_t* split_sections, size_t num_tensors, bool rowwise,
-                                     bool columnwise, cudaStream_t stream) {
+                                     bool columnwise, int with_rht, int random_sign_mask_t,
+                                     cudaStream_t stream) {
 #if FP4_TYPE_SUPPORTED
   NVTE_API_CALL(nvte_group_nvfp4_per_token_amax);
   using namespace transformer_engine;
   if (num_tensors == 0) return;
   const Tensor* in = convertNVTETensorCheck(input);
   std::vector<Tensor*> outs = collect_outputs(outputs, num_tensors);
-  nvfp4_per_token_group::quantize_per_token_grouped(*in, outs, split_sections, num_tensors, rowwise,
-                                                    columnwise,
-                                                    /*do_amax=*/true, /*do_cast=*/false, stream);
+  // C-API mirrors nvte_nvfp4_per_token_amax: `int` for cross-language ABI
+  // safety; internal kernel arg is uint32_t with only the low 16 bits used.
+  nvfp4_per_token_group::quantize_per_token_grouped(
+      *in, outs, split_sections, num_tensors, rowwise, columnwise,
+      /*do_amax=*/true, /*do_cast=*/false,
+      /*with_rht=*/with_rht != 0,
+      /*random_sign_mask_t=*/
+      static_cast<uint32_t>(random_sign_mask_t) & 0xFFFFu, stream);
 #else
   (void)input;
   (void)outputs;
@@ -929,6 +1055,8 @@ void nvte_group_nvfp4_per_token_amax(const NVTETensor input, NVTETensor* outputs
   (void)num_tensors;
   (void)rowwise;
   (void)columnwise;
+  (void)with_rht;
+  (void)random_sign_mask_t;
   (void)stream;
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif
@@ -936,16 +1064,20 @@ void nvte_group_nvfp4_per_token_amax(const NVTETensor input, NVTETensor* outputs
 
 void nvte_group_nvfp4_per_token_cast(const NVTETensor input, NVTETensor* outputs,
                                      const size_t* split_sections, size_t num_tensors, bool rowwise,
-                                     bool columnwise, cudaStream_t stream) {
+                                     bool columnwise, int with_rht, int random_sign_mask_t,
+                                     cudaStream_t stream) {
 #if FP4_TYPE_SUPPORTED
   NVTE_API_CALL(nvte_group_nvfp4_per_token_cast);
   using namespace transformer_engine;
   if (num_tensors == 0) return;
   const Tensor* in = convertNVTETensorCheck(input);
   std::vector<Tensor*> outs = collect_outputs(outputs, num_tensors);
-  nvfp4_per_token_group::quantize_per_token_grouped(*in, outs, split_sections, num_tensors, rowwise,
-                                                    columnwise,
-                                                    /*do_amax=*/false, /*do_cast=*/true, stream);
+  nvfp4_per_token_group::quantize_per_token_grouped(
+      *in, outs, split_sections, num_tensors, rowwise, columnwise,
+      /*do_amax=*/false, /*do_cast=*/true,
+      /*with_rht=*/with_rht != 0,
+      /*random_sign_mask_t=*/
+      static_cast<uint32_t>(random_sign_mask_t) & 0xFFFFu, stream);
 #else
   (void)input;
   (void)outputs;
@@ -953,6 +1085,8 @@ void nvte_group_nvfp4_per_token_cast(const NVTETensor input, NVTETensor* outputs
   (void)num_tensors;
   (void)rowwise;
   (void)columnwise;
+  (void)with_rht;
+  (void)random_sign_mask_t;
   (void)stream;
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif
@@ -960,16 +1094,20 @@ void nvte_group_nvfp4_per_token_cast(const NVTETensor input, NVTETensor* outputs
 
 void nvte_group_nvfp4_per_token_quantize(const NVTETensor input, NVTETensor* outputs,
                                          const size_t* split_sections, size_t num_tensors,
-                                         bool rowwise, bool columnwise, cudaStream_t stream) {
+                                         bool rowwise, bool columnwise, int with_rht,
+                                         int random_sign_mask_t, cudaStream_t stream) {
 #if FP4_TYPE_SUPPORTED
   NVTE_API_CALL(nvte_group_nvfp4_per_token_quantize);
   using namespace transformer_engine;
   if (num_tensors == 0) return;
   const Tensor* in = convertNVTETensorCheck(input);
   std::vector<Tensor*> outs = collect_outputs(outputs, num_tensors);
-  nvfp4_per_token_group::quantize_per_token_grouped(*in, outs, split_sections, num_tensors, rowwise,
-                                                    columnwise,
-                                                    /*do_amax=*/true, /*do_cast=*/true, stream);
+  nvfp4_per_token_group::quantize_per_token_grouped(
+      *in, outs, split_sections, num_tensors, rowwise, columnwise,
+      /*do_amax=*/true, /*do_cast=*/true,
+      /*with_rht=*/with_rht != 0,
+      /*random_sign_mask_t=*/
+      static_cast<uint32_t>(random_sign_mask_t) & 0xFFFFu, stream);
 #else
   (void)input;
   (void)outputs;
@@ -977,6 +1115,8 @@ void nvte_group_nvfp4_per_token_quantize(const NVTETensor input, NVTETensor* out
   (void)num_tensors;
   (void)rowwise;
   (void)columnwise;
+  (void)with_rht;
+  (void)random_sign_mask_t;
   (void)stream;
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif

@@ -208,7 +208,12 @@ def _validate_per_token_input(x: torch.Tensor) -> Tuple[int, int]:
 
 
 def nvfp4_per_token_quantize(
-    x: torch.Tensor, *, rowwise: bool = True, columnwise: bool = False
+    x: torch.Tensor,
+    *,
+    rowwise: bool = True,
+    columnwise: bool = False,
+    with_rht: bool = False,
+    random_sign_mask_t: int = 0xACE1,
 ) -> RefNVFP4TensorPerToken:
     """Production NVFP4 per-token cast through ``tex.nvfp4_per_token_quantize``.
 
@@ -225,6 +230,10 @@ def nvfp4_per_token_quantize(
     For cuBLAS LT consumption, the caller must swizzle the inner SF
     before forwarding to the GEMM; ``gemm_nvfp4_per_token`` handles
     this automatically.
+
+    ``with_rht=True`` applies a 16-pt col-wise RHT in BOTH K1 and K2 so
+    outer + inner SF stay self-consistent (rowwise never sees RHT).
+    ``random_sign_mask_t`` low 16 bits = sign pattern (default ``0xACE1``).
 
     Raises ``ValueError`` on non-bf16 input or non-128-aligned shapes.
     """
@@ -257,7 +266,17 @@ def nvfp4_per_token_quantize(
         q_col, s_dec_col, col_amax = empty, empty, empty_f32
 
     tex.nvfp4_per_token_quantize(
-        x, q_row, s_dec_row, row_amax, q_col, s_dec_col, col_amax, rowwise, columnwise
+        x,
+        q_row,
+        s_dec_row,
+        row_amax,
+        q_col,
+        s_dec_col,
+        col_amax,
+        rowwise,
+        columnwise,
+        with_rht=with_rht,
+        random_sign_mask_t=int(random_sign_mask_t) & 0xFFFF,
     )
 
     out = RefNVFP4TensorPerToken()
@@ -287,6 +306,8 @@ def nvfp4_per_token_amax(
     *,
     rowwise: bool = True,
     columnwise: bool = True,
+    with_rht: bool = False,
+    random_sign_mask_t: int = 0xACE1,
 ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
     """Kernel 1 in isolation: per-row + per-col amax via TMA + atomicMax.
     Returns ``(row_amax, col_amax)``; either may be ``None`` if the
@@ -295,6 +316,10 @@ def nvfp4_per_token_amax(
     Lets the benchmark compare K1 wall-time against the production
     ``HadamardAmaxTmaKernel``. Production callers should use the
     composite ``nvfp4_per_token_quantize`` instead.
+
+    ``with_rht=True`` applies a 16-pt col-wise RHT before amax; rowwise
+    never sees RHT. ``random_sign_mask_t`` low 16 bits = sign pattern
+    (default ``0xACE1``).
 
     Raises ``ValueError`` on non-bf16 input or non-128-aligned shapes.
     """
@@ -316,7 +341,15 @@ def nvfp4_per_token_amax(
         else torch.empty(0, dtype=torch.float32, device=device)
     )
 
-    tex.nvfp4_per_token_amax(x, row_amax, col_amax, rowwise, columnwise)
+    tex.nvfp4_per_token_amax(
+        x,
+        row_amax,
+        col_amax,
+        rowwise,
+        columnwise,
+        with_rht=with_rht,
+        random_sign_mask_t=int(random_sign_mask_t) & 0xFFFF,
+    )
 
     return (row_amax if rowwise else None, col_amax if columnwise else None)
 
@@ -328,6 +361,8 @@ def nvfp4_per_token_encode(
     col_amax: Optional[torch.Tensor] = None,
     rowwise: bool = True,
     columnwise: bool = True,
+    with_rht: bool = False,
+    random_sign_mask_t: int = 0xACE1,
 ) -> RefNVFP4TensorPerToken:
     """Kernel 2 in isolation: FP4 + e4m3 SF encode given pre-filled
     amax buffer(s).
@@ -340,6 +375,9 @@ def nvfp4_per_token_encode(
     Lets the benchmark compare K2 wall-time against the production
     per-tensor cast pass. Production callers should use the composite
     ``nvfp4_per_token_quantize`` instead.
+
+    ``with_rht=True`` requires ``col_amax`` produced by a prior K1 call
+    with the SAME mask, else inner SF / FP4 saturate.
 
     Raises ``ValueError`` on non-bf16 input, non-128-aligned shapes, or
     missing / mis-shaped amax buffers.
@@ -381,6 +419,8 @@ def nvfp4_per_token_encode(
         col_amax_t,
         rowwise,
         columnwise,
+        with_rht=with_rht,
+        random_sign_mask_t=int(random_sign_mask_t) & 0xFFFF,
     )
 
     out = RefNVFP4TensorPerToken()

@@ -55,14 +55,29 @@ def _validate_per_token_group_input(
     return sum_M, K
 
 
+# Default RHT sign-flip mask seed; matches the single-tensor wrapper.
+_RHT_MASK_DEFAULT: int = 0xACE1
+
+
 def nvfp4_per_token_group_quantize(
     x_concat: torch.Tensor,
     split_sections: Sequence[int],
     *,
     rowwise: bool = True,
     columnwise: bool = False,
+    with_rht: bool = False,
+    random_sign_mask_t: int = _RHT_MASK_DEFAULT,
 ) -> List[RefNVFP4TensorPerToken]:
     """Grouped NVFP4 per-token cast; returns N RefNVFP4TensorPerToken splits.
+
+    Args:
+        x_concat: (sum_M, K) bf16, row-major contiguous.
+        split_sections: per-split row counts (each a multiple of 128).
+        rowwise / columnwise: which directions to emit.
+        with_rht: True -> apply a 16-pt col-wise RHT in BOTH K1 and K2;
+            downstream GEMM must consume RHT-rotated weights to stay
+            unbiased. Rowwise never sees RHT.
+        random_sign_mask_t: low 16 bits = sign pattern shared by K1+K2.
 
     Raises ``ValueError`` on shape / dtype / split-size violations.
     """
@@ -83,7 +98,14 @@ def nvfp4_per_token_group_quantize(
         q_col_list,
         s_dec_col_list,
         col_amax_list,
-    ) = tex.nvfp4_per_token_group_quantize_bulk(x_concat, split_sections_list, rowwise, columnwise)
+    ) = tex.nvfp4_per_token_group_quantize_bulk(
+        x_concat,
+        split_sections_list,
+        rowwise,
+        columnwise,
+        with_rht=bool(with_rht),
+        random_sign_mask_t=int(random_sign_mask_t) & 0xFFFF,
+    )
 
     outs: List[RefNVFP4TensorPerToken] = []
     for i in range(N):

@@ -1,12 +1,13 @@
 """Correctness tests for grouped (multi-tensor) NVFP4 per-token cast.
 
 The grouped kernel must be byte-equal to a for-loop of single-tensor
-calls. Covers composite K1+K2, K1-only, single-split, and many-split.
+calls. Covers composite K1+K2, K1-only, single-split, many-split, and
+optional RHT (random Hadamard transform) on the column direction.
 """
 
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import pytest
 import torch
@@ -20,6 +21,9 @@ from transformer_engine.pytorch.custom_recipes.quantization_nvfp4_per_token impo
     BLOCK_K,
     RefNVFP4TensorPerToken,
     nvfp4_per_token_quantize,
+)
+from transformer_engine.pytorch.custom_recipes.quantization_nvfp4_per_token_group import (
+    nvfp4_per_token_group_quantize,
 )
 
 
@@ -356,3 +360,232 @@ def test_group_many_splits_byte_equal(n_splits: int) -> None:
             sut[i].columnwise_data, oracle[i].columnwise_data, atol=0.0, rtol=0.0
         )
         torch.testing.assert_close(sut[i].col_amax, oracle[i].col_amax, atol=0.0, rtol=0.0)
+
+
+# =============================================================================
+# (5) RHT correctness: grouped K1+K2 with optional col-wise RHT.
+# Contract: each split's 6 outputs MUST byte-equal single-tensor with the
+# same mask. Row direction never sees RHT.
+# =============================================================================
+
+_RHT_GROUP_SHAPES: List[Tuple[List[int], int]] = [
+    ([128, 128], 128),  # 2 splits, smallest legal shape
+    ([128, 256, 128], 256),  # 3 splits, mixed sizes
+    ([256, 256, 256, 256], 512),  # 4 equal splits, larger K
+    ([128, 384], 128),  # 2 splits, very asymmetric
+]
+
+
+def _rht_pt_buffers(M: int, K: int, device: torch.device):
+    """Match the layout that ``tex.nvfp4_per_token_quantize`` writes."""
+    return {
+        "q_row": torch.empty((M, K // 2), dtype=torch.uint8, device=device),
+        "s_row": torch.empty((M, K // BLOCK_K), dtype=torch.uint8, device=device),
+        "ra": torch.empty((M,), dtype=torch.float32, device=device),
+        "q_col": torch.empty((K, M // 2), dtype=torch.uint8, device=device),
+        "s_col": torch.empty((K, M // BLOCK_K), dtype=torch.uint8, device=device),
+        "ca": torch.empty((K,), dtype=torch.float32, device=device),
+    }
+
+
+def _split_views(x_concat: torch.Tensor, splits: Sequence[int]) -> List[torch.Tensor]:
+    out, off = [], 0
+    for s in splits:
+        out.append(x_concat[off : off + s].contiguous())
+        off += int(s)
+    return out
+
+
+@_GATED_FP4
+@pytest.mark.parametrize("splits,K", _RHT_GROUP_SHAPES)
+def test_group_with_rht_false_byte_equal_to_default(
+    splits: List[int],
+    K: int,
+) -> None:
+    """Regression: with_rht=False grouped byte-equals the default (no-kwargs) path."""
+    torch.manual_seed(0xCAFE * (sum(splits) + 1) + K + len(splits))
+    device = torch.device("cuda")
+    sum_M = sum(splits)
+    x = torch.randn((sum_M, K), dtype=torch.bfloat16, device=device).contiguous()
+
+    outs_default = nvfp4_per_token_group_quantize(
+        x,
+        splits,
+        rowwise=True,
+        columnwise=True,
+    )
+    outs_explicit_false = nvfp4_per_token_group_quantize(
+        x,
+        splits,
+        rowwise=True,
+        columnwise=True,
+        with_rht=False,
+        random_sign_mask_t=0xACE1,
+    )
+
+    assert len(outs_default) == len(outs_explicit_false) == len(splits)
+    for i, (a, b) in enumerate(zip(outs_default, outs_explicit_false)):
+        for attr in (
+            "data",
+            "scale",
+            "row_amax",
+            "columnwise_data",
+            "columnwise_scale",
+            "col_amax",
+        ):
+            ta, tb = getattr(a, attr), getattr(b, attr)
+            assert torch.equal(ta, tb), (
+                f"split[{i}].{attr} differs between default and explicit "
+                f"with_rht=False at K={K}, splits={splits}"
+            )
+
+
+@_GATED_FP4
+@pytest.mark.parametrize("splits,K", _RHT_GROUP_SHAPES)
+def test_group_rowwise_unchanged_under_rht(
+    splits: List[int],
+    K: int,
+) -> None:
+    """Rowwise outputs byte-equal across with_rht=False / True."""
+    torch.manual_seed(0xBEEF * (sum(splits) + 3) + K)
+    device = torch.device("cuda")
+    sum_M = sum(splits)
+    x = torch.randn((sum_M, K), dtype=torch.bfloat16, device=device).contiguous()
+
+    outs_no_rht = nvfp4_per_token_group_quantize(
+        x,
+        splits,
+        rowwise=True,
+        columnwise=True,
+        with_rht=False,
+        random_sign_mask_t=0,
+    )
+    outs_with_rht = nvfp4_per_token_group_quantize(
+        x,
+        splits,
+        rowwise=True,
+        columnwise=True,
+        with_rht=True,
+        random_sign_mask_t=0xACE1,
+    )
+
+    for i, (a, b) in enumerate(zip(outs_no_rht, outs_with_rht)):
+        for attr in ("data", "scale", "row_amax"):
+            ta, tb = getattr(a, attr), getattr(b, attr)
+            assert torch.equal(ta, tb), (
+                f"split[{i}].{attr} differs between with_rht=False and =True "
+                f"on the ROW direction at K={K}, splits={splits} -- "
+                "rowwise should never see RHT."
+            )
+
+
+@_GATED_FP4
+@pytest.mark.parametrize("splits,K", _RHT_GROUP_SHAPES)
+@pytest.mark.parametrize("mask", [0x0000, 0xACE1, 0xFFFF])
+def test_group_with_rht_equals_single_tensor_per_split(
+    splits: List[int],
+    K: int,
+    mask: int,
+) -> None:
+    """Each split's 6 outputs byte-equal single-tensor with the same mask."""
+    torch.manual_seed(0xDADA * (sum(splits) + 11) + K + mask)
+    device = torch.device("cuda")
+    sum_M = sum(splits)
+    x = torch.randn((sum_M, K), dtype=torch.bfloat16, device=device).contiguous()
+
+    outs_grouped = nvfp4_per_token_group_quantize(
+        x,
+        splits,
+        rowwise=True,
+        columnwise=True,
+        with_rht=True,
+        random_sign_mask_t=mask,
+    )
+
+    x_splits = _split_views(x, splits)
+    for i, (x_i, out_g) in enumerate(zip(x_splits, outs_grouped)):
+        M_i = x_i.size(0)
+        bufs = _rht_pt_buffers(M_i, K, device)
+        tex.nvfp4_per_token_quantize(
+            x_i,
+            bufs["q_row"],
+            bufs["s_row"],
+            bufs["ra"],
+            bufs["q_col"],
+            bufs["s_col"],
+            bufs["ca"],
+            True,
+            True,
+            with_rht=True,
+            random_sign_mask_t=mask,
+        )
+
+        mapping = {
+            "data": ("q_row", out_g.data),
+            "scale": ("s_row", out_g.scale.view(torch.uint8)),
+            "row_amax": ("ra", out_g.row_amax),
+            "columnwise_data": ("q_col", out_g.columnwise_data),
+            "columnwise_scale": ("s_col", out_g.columnwise_scale.view(torch.uint8)),
+            "col_amax": ("ca", out_g.col_amax),
+        }
+        for attr, (single_key, grouped_t) in mapping.items():
+            single_t = bufs[single_key]
+            assert single_t.shape == grouped_t.shape, (
+                f"split[{i}].{attr} shape mismatch: grouped={grouped_t.shape}, "
+                f"single-tensor={single_t.shape} at K={K}, splits={splits}, mask=0x{mask:04X}"
+            )
+            assert torch.equal(grouped_t, single_t), (
+                f"split[{i}].{attr} grouped result differs from single-tensor "
+                f"reference at K={K}, splits={splits}, mask=0x{mask:04X}"
+            )
+
+
+@_GATED_FP4
+@pytest.mark.parametrize("splits,K", _RHT_GROUP_SHAPES[:2])
+def test_group_k1_amax_matches_single_tensor_per_split_under_rht(
+    splits: List[int],
+    K: int,
+) -> None:
+    """Grouped K1 amax byte-equals single-tensor K1 per split. Isolates K1
+    via the lighter nvfp4_per_token_group_amax binding to catch K1-vs-K2
+    divergences earlier than the full composite check.
+    """
+    torch.manual_seed(0x1234 * (sum(splits) + 7) + K)
+    device = torch.device("cuda")
+    sum_M = sum(splits)
+    x = torch.randn((sum_M, K), dtype=torch.bfloat16, device=device).contiguous()
+    mask = 0xACE1
+
+    row_amax_list = [torch.empty((int(s),), dtype=torch.float32, device=device) for s in splits]
+    col_amax_list = [torch.empty((K,), dtype=torch.float32, device=device) for _ in splits]
+    tex.nvfp4_per_token_group_amax(
+        x,
+        [int(s) for s in splits],
+        row_amax_list,
+        col_amax_list,
+        True,
+        True,
+        with_rht=True,
+        random_sign_mask_t=mask,
+    )
+
+    x_splits = _split_views(x, splits)
+    for i, (x_i, ra_g, ca_g) in enumerate(zip(x_splits, row_amax_list, col_amax_list)):
+        M_i = x_i.size(0)
+        ra_s = torch.empty((M_i,), dtype=torch.float32, device=device)
+        ca_s = torch.empty((K,), dtype=torch.float32, device=device)
+        tex.nvfp4_per_token_amax(
+            x_i,
+            ra_s,
+            ca_s,
+            True,
+            True,
+            with_rht=True,
+            random_sign_mask_t=mask,
+        )
+        torch.testing.assert_close(
+            ra_g, ra_s, rtol=0.0, atol=0.0, msg=f"split[{i}] row_amax mismatch (K1 only)"
+        )
+        torch.testing.assert_close(
+            ca_g, ca_s, rtol=0.0, atol=0.0, msg=f"split[{i}] col_amax mismatch (K1 only)"
+        )
