@@ -885,7 +885,18 @@ class FusedAttnRunner:
         """
         self._setup_inputs()
 
-        args = [self.q, self.k, self.v, self.bias, self.softmax_offset, self.mask, self.dropout_rng]
+        reference_sequence_descriptor = (
+            self.sequence_desciptor if self.score_mod_reference is not None else self.mask
+        )
+        args = [
+            self.q,
+            self.k,
+            self.v,
+            self.bias,
+            self.softmax_offset,
+            reference_sequence_descriptor,
+            self.dropout_rng,
+        ]
 
         customcall_args = [
             # Put test data onto each GPU for distributed.
@@ -1009,7 +1020,18 @@ class FusedAttnRunner:
                 * gradient_multiplier
             ).astype(self.dtype)
 
-        args = [self.q, self.k, self.v, self.bias, self.softmax_offset, self.mask, self.dropout_rng]
+        reference_sequence_descriptor = (
+            self.sequence_desciptor if self.score_mod_reference is not None else self.mask
+        )
+        args = [
+            self.q,
+            self.k,
+            self.v,
+            self.bias,
+            self.softmax_offset,
+            reference_sequence_descriptor,
+            self.dropout_rng,
+        ]
         customcall_args = [
             # TODO(mgoldfarb-nvidia): We will need to add reordering for bias, mas and
             # THD params once we support those features on CP.

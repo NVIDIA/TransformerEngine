@@ -25,9 +25,8 @@ from test_fused_attn import FusedAttnRunner, SeqDescFormat, jax_dpa
 from utils import assert_allclose
 
 
-_SCORE_MOD_CONFIG_SCALE = 0.125
-# Keep score_mod reference comparisons out of fp16/bf16 saturation-prone ranges.
-_STABLE_SCORE_MOD_INPUT_SCALE = 0.125
+_CONFIG_TEST_HEAD_DIM = 128
+_CONFIG_TEST_SCALING_FACTOR = 1.0 / sqrt(_CONFIG_TEST_HEAD_DIM)
 
 
 def _has_cudnn_frontend_python():
@@ -195,6 +194,12 @@ def _reference_score_mod_attention(query, key, value, scale, score_mod_reference
         scaling_factor=scale,
         score_mod_reference=score_mod_reference,
     )
+
+
+def _stable_score_mod_input(key, shape, dtype):
+    """Create low-magnitude inputs for fp16/bf16 score_mod reference comparisons."""
+    input_scale = 1.0 / sqrt(shape[-1])
+    return (input_scale * jax.random.normal(key, shape, dtype=dtype)).astype(dtype)
 
 
 class ScoreModFusedAttnRunner(FusedAttnRunner):
@@ -535,7 +540,7 @@ def test_fused_attn_score_mod_config_splits_tensors_and_pass_by_value_scalars():
         None,
         {"tensor": tensor, "neg_inf": -1e9},
         None,
-        _SCORE_MOD_CONFIG_SCALE,
+        _CONFIG_TEST_SCALING_FACTOR,
         True,
     )
 
@@ -584,7 +589,7 @@ def test_fused_attn_score_mod_config_stabilizes_bound_method_cache_keys():
         first_backward,
         {"softcap": 0.8},
         {"softcap": 0.8},
-        _SCORE_MOD_CONFIG_SCALE,
+        _CONFIG_TEST_SCALING_FACTOR,
         True,
     )
     config_2, _, _ = make_fused_attn_score_mod_config(
@@ -592,7 +597,7 @@ def test_fused_attn_score_mod_config_stabilizes_bound_method_cache_keys():
         second_backward,
         {"softcap": 0.8},
         {"softcap": 0.8},
-        _SCORE_MOD_CONFIG_SCALE,
+        _CONFIG_TEST_SCALING_FACTOR,
         True,
     )
     other_softcap_score_mod = _ScoreModSoftcap()
@@ -601,7 +606,7 @@ def test_fused_attn_score_mod_config_stabilizes_bound_method_cache_keys():
         other_softcap_score_mod.backward,
         {"softcap": 0.8},
         {"softcap": 0.8},
-        _SCORE_MOD_CONFIG_SCALE,
+        _CONFIG_TEST_SCALING_FACTOR,
         True,
     )
 
@@ -617,10 +622,10 @@ def test_fused_attn_score_mod_config_leaves_unkeyed_bound_methods_uncached():
 
     score_mod = UnkeyedScoreMod()
     config_1, _, _ = make_fused_attn_score_mod_config(
-        score_mod.forward, None, None, None, _SCORE_MOD_CONFIG_SCALE, True
+        score_mod.forward, None, None, None, _CONFIG_TEST_SCALING_FACTOR, True
     )
     config_2, _, _ = make_fused_attn_score_mod_config(
-        score_mod.forward, None, None, None, _SCORE_MOD_CONFIG_SCALE, True
+        score_mod.forward, None, None, None, _CONFIG_TEST_SCALING_FACTOR, True
     )
 
     assert config_1 != config_2
@@ -633,18 +638,10 @@ def test_fused_attn_score_mod_post_scale_bias_optional_bprop():
 
     key = jax.random.key(0)
     q_key, k_key, v_key = jax.random.split(key, 3)
-    q = (
-        _STABLE_SCORE_MOD_INPUT_SCALE
-        * jax.random.normal(q_key, (1, 64, 2, 128), dtype=jnp.float16)
-    ).astype(jnp.float16)
-    k = (
-        _STABLE_SCORE_MOD_INPUT_SCALE
-        * jax.random.normal(k_key, (1, 64, 2, 128), dtype=jnp.float16)
-    ).astype(jnp.float16)
-    v = (
-        _STABLE_SCORE_MOD_INPUT_SCALE
-        * jax.random.normal(v_key, (1, 64, 2, 128), dtype=jnp.float16)
-    ).astype(jnp.float16)
+    input_shape = (1, 64, 2, 128)
+    q = _stable_score_mod_input(q_key, input_shape, jnp.float16)
+    k = _stable_score_mod_input(k_key, input_shape, jnp.float16)
+    v = _stable_score_mod_input(v_key, input_shape, jnp.float16)
     scale = 1.0 / sqrt(q.shape[-1])
 
     def score_mod_loss(query, key_, value):
@@ -689,18 +686,10 @@ def test_fused_attn_score_mod_causal_with_bprop():
 
     key = jax.random.key(1)
     q_key, k_key, v_key = jax.random.split(key, 3)
-    q = (
-        _STABLE_SCORE_MOD_INPUT_SCALE
-        * jax.random.normal(q_key, (1, 64, 2, 128), dtype=jnp.float16)
-    ).astype(jnp.float16)
-    k = (
-        _STABLE_SCORE_MOD_INPUT_SCALE
-        * jax.random.normal(k_key, (1, 64, 2, 128), dtype=jnp.float16)
-    ).astype(jnp.float16)
-    v = (
-        _STABLE_SCORE_MOD_INPUT_SCALE
-        * jax.random.normal(v_key, (1, 64, 2, 128), dtype=jnp.float16)
-    ).astype(jnp.float16)
+    input_shape = (1, 64, 2, 128)
+    q = _stable_score_mod_input(q_key, input_shape, jnp.float16)
+    k = _stable_score_mod_input(k_key, input_shape, jnp.float16)
+    v = _stable_score_mod_input(v_key, input_shape, jnp.float16)
     scale = 1.0 / sqrt(q.shape[-1])
 
     def score_mod_loss(query, key_, value):
