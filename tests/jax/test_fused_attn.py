@@ -1016,8 +1016,7 @@ class FusedAttnRunner:
                     self.dtype
                 )
             return (
-                jnp.mean(ret_valid.astype(jnp.float32), dtype=jnp.float32)
-                * gradient_multiplier
+                jnp.mean(ret_valid.astype(jnp.float32), dtype=jnp.float32) * gradient_multiplier
             ).astype(self.dtype)
 
         reference_sequence_descriptor = (
