@@ -393,7 +393,9 @@ model_configs_fused_hdim256 = {
         2, 1024, 16, 256, attn_mask_type="causal", window_size=(128, 0)
     ),
     # GQA variant (num_gqa_groups < num_heads).
-    "fused_hd256_padding_causal_gqa": ModelConfig(2, 1024, 16, 256, num_gqa_groups=4, attn_mask_type="padding_causal"),
+    "fused_hd256_padding_causal_gqa": ModelConfig(
+        2, 1024, 16, 256, num_gqa_groups=4, attn_mask_type="padding_causal"
+    ),
 }
 
 
