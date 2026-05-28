@@ -274,25 +274,6 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
       py::reinterpret_borrow<py::object>(quantizer), first_dims, last_dims, logical_first_dim,
       logical_last_dim);
 
-  const auto first_dims_meta = grouped_output_tensor_cpp.get_first_dims();
-  const auto last_dims_meta = grouped_output_tensor_cpp.get_last_dims();
-  const auto offsets_meta = grouped_output_tensor_cpp.get_tensor_offsets();
-  if (first_dims_meta.data_ptr != nullptr) {
-    grouped_input_tensor.set_first_dims(first_dims_meta.data_ptr,
-                                        static_cast<DType>(first_dims_meta.dtype),
-                                        first_dims_meta.shape);
-  }
-  if (last_dims_meta.data_ptr != nullptr) {
-    grouped_input_tensor.set_last_dims(last_dims_meta.data_ptr,
-                                       static_cast<DType>(last_dims_meta.dtype),
-                                       last_dims_meta.shape);
-  }
-  if (offsets_meta.data_ptr != nullptr) {
-    grouped_input_tensor.set_tensor_offsets(offsets_meta.data_ptr,
-                                            static_cast<DType>(offsets_meta.dtype),
-                                            offsets_meta.shape);
-  }
-
   // dispatch to scaling methods
   //
   // NOTE: Float8Quantizer (delayed / pre-computed scaling) is intentionally
@@ -314,11 +295,6 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
     grouped_quantization_mode = GroupedQuantizationMode::NVFP4_GROUPED_QUANTIZE;
   } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
     grouped_quantization_mode = GroupedQuantizationMode::FP8_CURRENT_SCALING_GROUPED_QUANTIZE;
-  } else if (detail::IsFloat8Quantizers(quantizer.ptr())) {
-    NVTE_ERROR(
-        "group_quantize: Float8Quantizer (delayed / precomputed scaling) is not "
-        "supported. Use Float8CurrentScalingQuantizer for FP8 grouped quantization, "
-        "or call tex.quantize() if you have a precomputed scale.");
   }
 
   if (empty_input_buffer) {
