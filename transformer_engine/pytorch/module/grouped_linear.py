@@ -497,7 +497,8 @@ class _GroupedLinear(torch.autograd.Function):
                     wgrad_list = main_grads
                 else:
                     wgrad_packed = torch.empty(
-                        ctx.num_gemms, *weights[0].size(),
+                        ctx.num_gemms,
+                        *weights[0].size(),
                         dtype=ctx.activation_dtype,
                         device=ctx.device,
                     )

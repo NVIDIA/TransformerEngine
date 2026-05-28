@@ -198,7 +198,8 @@ def _compute_grad_params(
                 accumulate_into_main_grad = get_accumulate_flag_in_param(weights[0])
             else:
                 wgrad_packed = torch.empty(
-                    num_groups, *weight_shape,
+                    num_groups,
+                    *weight_shape,
                     dtype=dtype,
                     device=device,
                 )
