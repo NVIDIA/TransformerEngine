@@ -74,6 +74,8 @@ class GroupedTensorStorage:
         stride: Optional[List[int]] = None,
         with_gemm_swizzled_scales: bool = False,
         row_scaled_nvfp4: bool = False,
+        nvfp4_use_4over6: bool = False,
+        nvfp4_e4m3_max: int = 448,
     ) -> None:
         """
         Initialize a GroupedTensor.
@@ -150,6 +152,8 @@ class GroupedTensorStorage:
         instance.quantized_tensors = None
         instance._with_gemm_swizzled_scales = with_gemm_swizzled_scales
         instance.row_scaled_nvfp4 = row_scaled_nvfp4
+        instance.nvfp4_use_4over6 = nvfp4_use_4over6
+        instance.nvfp4_e4m3_max = nvfp4_e4m3_max if nvfp4_use_4over6 else 448
 
     def __new__(
         cls,
@@ -176,6 +180,8 @@ class GroupedTensorStorage:
         stride: Optional[List[int]] = None,
         with_gemm_swizzled_scales: bool = False,
         row_scaled_nvfp4: bool = False,
+        nvfp4_use_4over6: bool = False,
+        nvfp4_e4m3_max: int = 448,
     ):
         instance = object.__new__(cls)
         cls._initialize_storage_fields(
@@ -202,6 +208,8 @@ class GroupedTensorStorage:
             stride=stride,
             with_gemm_swizzled_scales=with_gemm_swizzled_scales,
             row_scaled_nvfp4=row_scaled_nvfp4,
+            nvfp4_use_4over6=nvfp4_use_4over6,
+            nvfp4_e4m3_max=nvfp4_e4m3_max,
         )
         return instance
 
@@ -308,6 +316,33 @@ class GroupedTensorStorage:
 
         return self.fake_dtype
 
+    @property
+    def row_scaled_nvfp4(self) -> bool:
+        """Whether grouped NVFP4 tensors use row-scaled amax metadata."""
+        return self._row_scaled_nvfp4
+
+    @row_scaled_nvfp4.setter
+    def row_scaled_nvfp4(self, row_scaled_nvfp4: bool) -> None:
+        self._row_scaled_nvfp4 = row_scaled_nvfp4
+
+    @property
+    def nvfp4_use_4over6(self) -> bool:
+        """Whether grouped NVFP4 tensors carry 4over6 metadata."""
+        return self._nvfp4_use_4over6
+
+    @nvfp4_use_4over6.setter
+    def nvfp4_use_4over6(self, nvfp4_use_4over6: bool) -> None:
+        self._nvfp4_use_4over6 = nvfp4_use_4over6
+
+    @property
+    def nvfp4_e4m3_max(self) -> int:
+        """Global E4M3 scale bound used by grouped NVFP4 tensors."""
+        return self._nvfp4_e4m3_max
+
+    @nvfp4_e4m3_max.setter
+    def nvfp4_e4m3_max(self, nvfp4_e4m3_max: int) -> None:
+        self._nvfp4_e4m3_max = nvfp4_e4m3_max
+
     def prepare_for_saving(
         self,
     ) -> Tuple[list[Optional[torch.Tensor]], "GroupedTensorStorage"]:
@@ -377,6 +412,8 @@ class GroupedTensorStorage:
         self.tensor_shapes = []
         self.fake_dtype = torch.float32
         self.row_scaled_nvfp4 = False
+        self.nvfp4_use_4over6 = False
+        self.nvfp4_e4m3_max = 448
 
     def __repr__(self) -> str:
         """String representation of the GroupedTensorStorage."""
@@ -557,6 +594,8 @@ class GroupedTensorStorage:
             columnwise_scale_inv_offsets=self.columnwise_scale_inv_offsets,
             with_gemm_swizzled_scales=self._with_gemm_swizzled_scales,
             row_scaled_nvfp4=self.row_scaled_nvfp4,
+            nvfp4_use_4over6=self.nvfp4_use_4over6,
+            nvfp4_e4m3_max=self.nvfp4_e4m3_max,
         )
 
     @staticmethod
@@ -679,6 +718,8 @@ class GroupedTensorStorage:
         scale_inv_offsets = None
         columnwise_scale_inv_offsets = None
         row_scaled_nvfp4 = False
+        nvfp4_use_4over6 = False
+        nvfp4_e4m3_max = 448
         if no_quantization:
             assert dtype is not None, "dtype must be provided for unquantized GroupedTensor"
             if rowwise_usage:
@@ -738,6 +779,8 @@ class GroupedTensorStorage:
             amax = torch.empty(num_tensors, dtype=torch.float32, device=device)
         elif compatible_recipe.nvfp4():
             row_scaled_nvfp4 = quantizer.row_scaled_nvfp4
+            nvfp4_use_4over6 = quantizer.nvfp4_use_4over6
+            nvfp4_e4m3_max = quantizer.nvfp4_e4m3_max
             if row_scaled_nvfp4:
                 if not rowwise_usage:
                     raise ValueError(
@@ -871,6 +914,8 @@ class GroupedTensorStorage:
                 quantizer.optimize_for_gemm if quantizer is not None else False
             ),
             row_scaled_nvfp4=row_scaled_nvfp4,
+            nvfp4_use_4over6=nvfp4_use_4over6,
+            nvfp4_e4m3_max=nvfp4_e4m3_max,
         )
         grouped_tensor.quantized_tensors = (
             grouped_tensor.split_into_quantized_tensors()
@@ -997,6 +1042,8 @@ class GroupedTensorStorage:
                 self.columnwise_scale_inv_offsets = columnwise_scale_inv_offsets
         nvfp4_rowwise_amax_offsets = None
         row_scaled_nvfp4 = self.row_scaled_nvfp4
+        nvfp4_use_4over6 = self.nvfp4_use_4over6
+        nvfp4_e4m3_max = self.nvfp4_e4m3_max
         if recipe.nvfp4() and row_scaled_nvfp4:
             cum = 0
             nvfp4_rowwise_amax_offsets = [0]
@@ -1226,6 +1273,8 @@ class GroupedTensorStorage:
                     quantizer=quantizer,
                     with_gemm_swizzled_scales=quantizer.optimize_for_gemm,
                     row_scaled_nvfp4=row_scaled_nvfp4,
+                    nvfp4_use_4over6=nvfp4_use_4over6,
+                    nvfp4_e4m3_max=nvfp4_e4m3_max,
                 )
                 result.append(tensor)
 

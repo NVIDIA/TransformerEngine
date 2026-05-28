@@ -83,6 +83,11 @@ _quantized_numerics_recipe_list = [
         marks=pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4),
         id="NVFP4RowScaledBlockScaling",
     ),
+    pytest.param(
+        "nvfp4_4over6",
+        marks=pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4),
+        id="NVFP44Over6BlockScaling",
+    ),
 ]
 
 
@@ -170,7 +175,7 @@ def _maybe_skip_recipe_dtype(
 ) -> None:
     if dtype == torch.bfloat16 and not bf16_available:
         pytest.skip(reason_for_no_bf16)
-    if recipe_name in ("nvfp4", "nvfp4_row_scaled"):
+    if recipe_name in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
         if module_type in ("linear", "layernorm_linear") and dtype not in (
             torch.bfloat16,
             torch.float32,
@@ -185,6 +190,8 @@ def _maybe_skip_unsupported_recipe_module_combo(recipe_name: str, module_type: s
         pytest.skip("Fusible ops (te_ops.Linear) do not support Float8BlockScaling recipe")
     if module_type == "ops_linear" and recipe_name == "nvfp4_row_scaled":
         pytest.skip("Row-scaled NVFP4 currently does not support fused te_ops paths.")
+    if module_type == "grouped_linear" and recipe_name == "nvfp4_4over6":
+        pytest.skip("NVFP4 4over6 currently does not support grouped quantization.")
 
 
 def _make_quantized_forward_reference_recipe(recipe_name: str) -> recipe.Recipe:
@@ -208,7 +215,7 @@ def _maybe_skip_unsupported_recipe_shape(
                 " by 32."
             )
             return
-        if recipe_name in ("nvfp4", "nvfp4_row_scaled") and (
+        if recipe_name in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6") and (
             flat_first_dim % 16 != 0 or last_dim % 16 != 0
         ):
             pytest.skip(
@@ -235,7 +242,7 @@ def _maybe_skip_unsupported_recipe_shape(
             pytest.skip(
                 "te_ops.Linear + MXFP8 requires prod(shape[:-1]) and shape[-1] divisible by 32."
             )
-        if recipe_name in ("nvfp4", "nvfp4_row_scaled") and (
+        if recipe_name in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6") and (
             flat_first_dim % 16 != 0 or last_dim % 16 != 0
         ):
             pytest.skip(
@@ -256,9 +263,13 @@ def _maybe_skip_unsupported_grouped_splits(recipe_name: str, m_splits: list[int]
         )
     if recipe_name == "mxfp8" and any(m % 32 != 0 for m in non_empty_splits):
         pytest.skip("GroupedLinear + MXFP8 requires each non-empty m_split divisible by 32.")
-    if recipe_name in ("nvfp4", "nvfp4_row_scaled") and any(m % 16 != 0 for m in non_empty_splits):
+    if recipe_name in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6") and any(
+        m % 16 != 0 for m in non_empty_splits
+    ):
         pytest.skip("GroupedLinear + NVFP4 requires each non-empty m_split divisible by 16.")
-    if recipe_name in ("nvfp4", "nvfp4_row_scaled") and any(m % 64 != 0 for m in non_empty_splits):
+    if recipe_name in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6") and any(
+        m % 64 != 0 for m in non_empty_splits
+    ):
         pytest.skip(
             "GroupedLinear + NVFP4 grouped split_quantize currently requires each non-empty "
             "m_split divisible by 64 due to grouped amax kernel constraints."
@@ -400,23 +411,26 @@ def _snapshot_backward_ctx_state(
 ) -> tuple[str, bool, object, bool]:
     if output.grad_fn is None:
         raise RuntimeError("Output tensor has no grad_fn; cannot inspect backward context state.")
+    # ``Linear`` packs backward state into ``grad_fn.backward_objects``
+    # (``LinearBwdArgs``); other linear-like modules still set the attributes
+    # directly on the autograd ctx.
+    state_holder = getattr(output.grad_fn, "backward_objects", output.grad_fn)
     required_attrs = (
         "backward_override",
         "fp8",
         "grad_output_quantizer",
         "reduce_and_update_bwd_fp8_tensors",
     )
-    missing_attrs = [attr for attr in required_attrs if not hasattr(output.grad_fn, attr)]
+    missing_attrs = [attr for attr in required_attrs if not hasattr(state_holder, attr)]
     if missing_attrs:
         raise RuntimeError(
-            "grad_fn does not expose required backward context attributes: "
-            f"{', '.join(missing_attrs)}."
+            f"Backward context does not expose required attributes: {', '.join(missing_attrs)}."
         )
     return (
-        getattr(output.grad_fn, "backward_override"),
-        bool(getattr(output.grad_fn, "fp8")),
-        getattr(output.grad_fn, "grad_output_quantizer"),
-        bool(getattr(output.grad_fn, "reduce_and_update_bwd_fp8_tensors")),
+        getattr(state_holder, "backward_override"),
+        bool(getattr(state_holder, "fp8")),
+        getattr(state_holder, "grad_output_quantizer"),
+        bool(getattr(state_holder, "reduce_and_update_bwd_fp8_tensors")),
     )
 
 

@@ -13,7 +13,8 @@ struct Empty {};
 
 struct ClampedSwiGLUParam {
   float limit;
-  float alpha = 1.702f;  // Default value for QuickGELU
+  float alpha = 1.702f;            // Default value for QuickGELU
+  float glu_linear_offset = 1.0f;  // Offset added to the linear (gate) component after clamping
 };
 
 template <typename OType, typename IType>

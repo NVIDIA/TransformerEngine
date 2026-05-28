@@ -7,7 +7,7 @@ import torch
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.pytorch import NVFP4Quantizer
-from transformer_engine.pytorch.custom_recipes.quantization_nvfp4 import NVFP4QuantizerRef
+from transformer_engine.pytorch.custom_recipes.quantization_ref_nvfp4 import NVFP4QuantizerRef
 from transformer_engine.pytorch.custom_recipes import utils
 from transformer_engine.common.recipe import NVFP4BlockScaling
 from transformer_engine.pytorch.constants import TE_DType
@@ -20,7 +20,14 @@ def maybe_skip_row_scaled_unsupported_quantization(
     row_scaled_nvfp4: bool,
     return_transpose: bool,
     with_2d_quantization: bool = False,
+    use_4over6: bool = False,
+    x_dtype: torch.dtype | None = None,
+    M: int | None = None,
+    N: int | None = None,
 ) -> None:
+    if use_4over6 and with_2d_quantization:
+        if x_dtype != torch.bfloat16 or M is None or N is None or M % 32 != 0 or N % 32 != 0:
+            pytest.skip("NVFP4 2D 4over6 exact tests require the optimized BF16 kernel path")
     if not row_scaled_nvfp4:
         return
     if return_transpose:
@@ -45,9 +52,14 @@ def check_quantization_nvfp4_versus_reference(
     use_cpp_allocator: bool,
     with_2d_quantization: bool,
     row_scaled_nvfp4: bool = False,
+    use_4over6: bool = False,
+    nvfp4_e4m3_max: int = 448,
+    nvfp4_4over6_err_mode: str = "MAE",
 ) -> None:
+    if nvfp4_e4m3_max != 448 and not use_4over6:
+        pytest.skip("E4M3 max 256 is only meaningful for 4over6")
     maybe_skip_row_scaled_unsupported_quantization(
-        row_scaled_nvfp4, return_transpose, with_2d_quantization
+        row_scaled_nvfp4, return_transpose, with_2d_quantization, use_4over6, x_dtype, M, N
     )
 
     te_dtype = tex.DType.kFloat4E2M1
@@ -71,6 +83,9 @@ def check_quantization_nvfp4_versus_reference(
         with_post_rht_amax=False,
         with_2d_quantization=with_2d_quantization,
         row_scaled_nvfp4=row_scaled_nvfp4,
+        nvfp4_use_4over6=use_4over6,
+        nvfp4_e4m3_max=nvfp4_e4m3_max,
+        nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
     if use_cpp_allocator:
         x_nvfp4_sut = nvfp4_quantizer(x)
@@ -104,6 +119,9 @@ def check_quantization_nvfp4_versus_reference(
         eps=0.0,
         quant_tile_shape=quant_tile_shape,
         row_scaled_nvfp4=row_scaled_nvfp4,
+        nvfp4_use_4over6=use_4over6,
+        nvfp4_e4m3_max=nvfp4_e4m3_max,
+        nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
     x_nvfp4_ref = ref_quantizer.quantize(x)
 
@@ -179,6 +197,9 @@ def check_quantization_nvfp4_versus_reference(
     "with_2d_quantization", [True, False], ids=["2d_quantization", "1d_quantization"]
 )
 @pytest.mark.parametrize("row_scaled_nvfp4", [False, True], ids=["nvfp4", "nvfp4_row_scaled"])
+@pytest.mark.parametrize("use_4over6", [False, True], ids=["default", "4over6"])
+@pytest.mark.parametrize("nvfp4_e4m3_max", [448, 256], ids=["e4m3_448", "e4m3_256"])
+@pytest.mark.parametrize("nvfp4_4over6_err_mode", ["MAE", "MSE"], ids=["mae_err", "mse_err"])
 def test_quantization_block_tiling_versus_reference(
     x_dtype: torch.dtype,
     M: int,
@@ -188,6 +209,9 @@ def test_quantization_block_tiling_versus_reference(
     use_cpp_allocator: bool,
     with_2d_quantization: bool,
     row_scaled_nvfp4: bool,
+    use_4over6: bool,
+    nvfp4_e4m3_max: int,
+    nvfp4_4over6_err_mode: str,
 ) -> None:
     check_quantization_nvfp4_versus_reference(
         x_dtype=x_dtype,
@@ -198,6 +222,9 @@ def test_quantization_block_tiling_versus_reference(
         use_cpp_allocator=use_cpp_allocator,
         with_2d_quantization=with_2d_quantization,
         row_scaled_nvfp4=row_scaled_nvfp4,
+        use_4over6=use_4over6,
+        nvfp4_e4m3_max=nvfp4_e4m3_max,
+        nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
 
 
@@ -215,6 +242,8 @@ def test_quantization_block_tiling_versus_reference(
     "use_cpp_allocator", [True, False], ids=["cpp_allocator", "python_allocator"]
 )
 @pytest.mark.parametrize("row_scaled_nvfp4", [False, True], ids=["nvfp4", "nvfp4_row_scaled"])
+@pytest.mark.parametrize("use_4over6", [False, True], ids=["default", "4over6"])
+@pytest.mark.parametrize("nvfp4_4over6_err_mode", ["MAE", "MSE"], ids=["mae_err", "mse_err"])
 def test_nvfp4_quantization_extrema_versus_reference(
     x_dtype: torch.dtype,
     M: int,
@@ -223,8 +252,12 @@ def test_nvfp4_quantization_extrema_versus_reference(
     return_transpose: bool,
     use_cpp_allocator: bool,
     row_scaled_nvfp4: bool,
+    use_4over6: bool,
+    nvfp4_4over6_err_mode: str,
 ):
-    maybe_skip_row_scaled_unsupported_quantization(row_scaled_nvfp4, return_transpose)
+    maybe_skip_row_scaled_unsupported_quantization(
+        row_scaled_nvfp4, return_transpose, use_4over6=use_4over6
+    )
 
     te_dtype = tex.DType.kFloat4E2M1
 
@@ -247,6 +280,8 @@ def test_nvfp4_quantization_extrema_versus_reference(
         with_rht=False,
         with_post_rht_amax=False,
         row_scaled_nvfp4=row_scaled_nvfp4,
+        nvfp4_use_4over6=use_4over6,
+        nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
 
     if use_cpp_allocator:
@@ -278,6 +313,8 @@ def test_nvfp4_quantization_extrema_versus_reference(
         eps=0.0,
         quant_tile_shape=(1, 16),
         row_scaled_nvfp4=row_scaled_nvfp4,
+        nvfp4_use_4over6=use_4over6,
+        nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
     x_nvfp4_ref = ref_quantizer.quantize(x)
 
@@ -322,6 +359,8 @@ def test_nvfp4_quantization_extrema_versus_reference(
     "use_cpp_allocator", [True, False], ids=["cpp_allocator", "python_allocator"]
 )
 @pytest.mark.parametrize("row_scaled_nvfp4", [False, True], ids=["nvfp4", "nvfp4_row_scaled"])
+@pytest.mark.parametrize("use_4over6", [False, True], ids=["default", "4over6"])
+@pytest.mark.parametrize("nvfp4_4over6_err_mode", ["MAE", "MSE"], ids=["mae_err", "mse_err"])
 def test_nvfp4_quantization_boundary_values(
     x_dtype: torch.dtype,
     M: int,
@@ -329,13 +368,17 @@ def test_nvfp4_quantization_boundary_values(
     return_transpose: bool,
     use_cpp_allocator: bool,
     row_scaled_nvfp4: bool,
+    use_4over6: bool,
+    nvfp4_4over6_err_mode: str,
 ):
     """
     Stress rounding/threshold behavior by placing values just below/above
     many potential bin edges within each 16-element microblock.
     Validates native vs reference byte-for-byte and scale parity.
     """
-    maybe_skip_row_scaled_unsupported_quantization(row_scaled_nvfp4, return_transpose)
+    maybe_skip_row_scaled_unsupported_quantization(
+        row_scaled_nvfp4, return_transpose, use_4over6=use_4over6
+    )
 
     te_dtype = tex.DType.kFloat4E2M1
 
@@ -367,6 +410,8 @@ def test_nvfp4_quantization_boundary_values(
         with_rht=False,
         with_post_rht_amax=False,
         row_scaled_nvfp4=row_scaled_nvfp4,
+        nvfp4_use_4over6=use_4over6,
+        nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
 
     if use_cpp_allocator:
@@ -398,6 +443,8 @@ def test_nvfp4_quantization_boundary_values(
         eps=0.0,
         quant_tile_shape=(1, 16),
         row_scaled_nvfp4=row_scaled_nvfp4,
+        nvfp4_use_4over6=use_4over6,
+        nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
     x_nvfp4_ref = ref_quantizer.quantize(x)
 
@@ -442,6 +489,8 @@ def test_nvfp4_quantization_boundary_values(
     "use_cpp_allocator", [True, False], ids=["cpp_allocator", "python_allocator"]
 )
 @pytest.mark.parametrize("row_scaled_nvfp4", [False, True], ids=["nvfp4", "nvfp4_row_scaled"])
+@pytest.mark.parametrize("use_4over6", [False, True], ids=["default", "4over6"])
+@pytest.mark.parametrize("nvfp4_4over6_err_mode", ["MAE", "MSE"], ids=["mae_err", "mse_err"])
 def test_nvfp4_quantization_noncontiguous_inputs(
     x_dtype: torch.dtype,
     M: int,
@@ -449,8 +498,12 @@ def test_nvfp4_quantization_noncontiguous_inputs(
     return_transpose: bool,
     use_cpp_allocator: bool,
     row_scaled_nvfp4: bool,
+    use_4over6: bool,
+    nvfp4_4over6_err_mode: str,
 ):
-    maybe_skip_row_scaled_unsupported_quantization(row_scaled_nvfp4, return_transpose)
+    maybe_skip_row_scaled_unsupported_quantization(
+        row_scaled_nvfp4, return_transpose, use_4over6=use_4over6
+    )
 
     te_dtype = tex.DType.kFloat4E2M1
 
@@ -473,6 +526,8 @@ def test_nvfp4_quantization_noncontiguous_inputs(
         with_rht=False,
         with_post_rht_amax=False,
         row_scaled_nvfp4=row_scaled_nvfp4,
+        nvfp4_use_4over6=use_4over6,
+        nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
 
     if use_cpp_allocator:
@@ -504,6 +559,8 @@ def test_nvfp4_quantization_noncontiguous_inputs(
         eps=0.0,
         quant_tile_shape=(1, 16),
         row_scaled_nvfp4=row_scaled_nvfp4,
+        nvfp4_use_4over6=use_4over6,
+        nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
     x_nvfp4_ref = ref_quantizer.quantize(x_nc)
 

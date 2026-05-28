@@ -29,7 +29,7 @@ from .base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
-from ..quantization import FP8GlobalStateManager
+from ..quantization import FP8GlobalStateManager, QuantizerRole
 from ..jit import (
     bias_gelu_fused,
     bgrad_dgelu_fused,
@@ -1798,7 +1798,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
     activation_params : dict, default = None
                         Additional parameters for the activation function.
                         At the moment, only used for ``'clamped_swiglu'`` activation which
-                        supports ``'limit'`` and ``'alpha'`` parameters.
+                        supports ``'limit'``, ``'alpha'``, and ``'glu_linear_offset'`` parameters.
     init_method : Callable, default = None
                  used for initializing FC1 weights in the following way: ``init_method(weight)``.
                  When set to ``None``, defaults to ``torch.nn.init.normal_(mean=0.0, std=0.023)``.
@@ -2104,6 +2104,53 @@ class LayerNormMLP(TransformerEngineBaseModule):
         elif recipe.nvfp4():
             self._customize_quantizers_nvfp4(fwd, recipe)
 
+    def get_quantizer_roles(
+        self,
+        *,
+        fwd: bool,
+        num_quantizers: int,
+    ) -> Optional[List[QuantizerRole]]:
+        """QuantizerRole list for quantizers used by ``LayerNormMLP``.
+
+        Each internal GEMM (fc1, fc2) gets a distinct name suffix so that
+        custom-recipe factories can target them individually.
+
+        The module's final output (fc2 fwd) and final grad (fc1 bwd)
+        slots default to ``None`` (unknown consumer).  Set
+        :attr:`output_quantizer_role` / :attr:`grad_input_quantizer_role`
+        to provide consumer identity.  Internal boundaries use fixed
+        roles with known consumer identity.
+        """
+        base_name = self.name or ""
+        fc1_name = f"{base_name}.fc1" if base_name else "fc1"
+        fc2_name = f"{base_name}.fc2" if base_name else "fc2"
+        # Roles use the *consumer's* identity: internal boundary tensors are
+        # labeled with the downstream module that will consume them.
+        #
+        # Forward:  fc1_input -> fc1 GEMM -> [act] -> fc2_input -> fc2 GEMM -> output
+        # Backward: grad_input <- fc1 GEMM <- [act'] <- fc2 GEMM <- grad_output
+        if fwd:
+            base = [
+                QuantizerRole(module_type="linear", tensor_type="input", name=fc1_name),
+                QuantizerRole(module_type="linear", tensor_type="weight", name=fc1_name),
+                # fc1 output — consumed by fc2 (via activation), so labeled as fc2 input
+                QuantizerRole(module_type="linear", tensor_type="input", name=fc2_name),
+                QuantizerRole(module_type="linear", tensor_type="input", name=fc2_name),
+                QuantizerRole(module_type="linear", tensor_type="weight", name=fc2_name),
+                # fc2 output — boundary, consumer unknown
+                self._output_quantizer_role,
+            ]
+        else:
+            base = [
+                QuantizerRole(module_type="linear", tensor_type="grad_output", name=fc1_name),
+                # fc1 grad_input — boundary, consumer unknown
+                self._grad_input_quantizer_role,
+                QuantizerRole(module_type="linear", tensor_type="grad_output", name=fc2_name),
+                # fc2 grad_input — consumed by fc1 (via activation'), so labeled as fc1 grad_output
+                QuantizerRole(module_type="linear", tensor_type="grad_output", name=fc1_name),
+            ]
+        return [base[i % len(base)] for i in range(num_quantizers)]
+
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
         warnings.warn(
@@ -2336,6 +2383,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
         return out
 
     def _get_quantizers(self, fp8_output, is_grad_enabled):
+        if self.fp8:
+            self._warn_missing_output_quantizer_role(fp8_output, False)
+
         (
             fc1_input_quantizer,
             fc1_output_quantizer,
@@ -2451,17 +2501,16 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
         fc1_out = fc1_out.to(torch.float32)  # activation is computed in fp32
         act_params = self.activation_params or {}
-        # Default params for clamped_swiglu in Transformer Engine
-        clamped_swiglu_limit, clamped_swiglu_alpha = act_params.get("limit", 7.0), act_params.get(
-            "alpha", 1.702
-        )
+        clamped_swiglu_limit = act_params.get("limit", 7.0)
+        clamped_swiglu_alpha = act_params.get("alpha", 1.702)
+        clamped_swiglu_offset = act_params.get("glu_linear_offset", 1.0)
 
-        def _clamped_swiglu(x, limit, alpha):
+        def _clamped_swiglu(x, limit, alpha, offset):
             x_glu, x_linear = x.chunk(2, dim=-1)
             x_glu = x_glu.clamp(min=None, max=limit)
             x_linear = x_linear.clamp(min=-limit, max=limit)
             out_glu = x_glu * torch.sigmoid(alpha * x_glu)
-            y = out_glu * (x_linear + 1)
+            y = out_glu * (x_linear + offset)
             return y
 
         activation_map = {
@@ -2479,7 +2528,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             "silu": torch.nn.functional.silu,
             "swiglu": lambda x: torch.nn.functional.silu(x.chunk(2, -1)[0]) * x.chunk(2, -1)[1],
             "clamped_swiglu": lambda x: _clamped_swiglu(
-                x, clamped_swiglu_limit, clamped_swiglu_alpha
+                x, clamped_swiglu_limit, clamped_swiglu_alpha, clamped_swiglu_offset
             ),
         }
         if self.activation not in activation_map:
