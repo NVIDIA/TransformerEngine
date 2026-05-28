@@ -21,9 +21,7 @@ def _overlapping_grad(output: Union[List[torch.Tensor], torch.Tensor]) -> torch.
 
 
 # Gradient is a full tensor
-def _non_overlapping_grad(
-    output: Union[List[torch.Tensor], torch.Tensor]
-) -> torch.Tensor:
+def _non_overlapping_grad(output: Union[List[torch.Tensor], torch.Tensor]) -> torch.Tensor:
     if isinstance(output, List):
         return sum(torch.sum(t * torch.ones_like(t)) for t in output)
     else:
@@ -81,9 +79,7 @@ def test_fused_rope(
         t = t.transpose(*transpose).contiguous().transpose(*transpose)
     t.requires_grad = True
 
-    rotary_pos_emb = RotaryPositionEmbedding(
-        hidden_size, rotary_percent, interleaved=interleaved
-    )
+    rotary_pos_emb = RotaryPositionEmbedding(hidden_size, rotary_percent, interleaved=interleaved)
     emb = rotary_pos_emb(seq_length * cp_size)
     assert emb.is_contiguous()
 
@@ -154,9 +150,7 @@ def test_fused_rope_thd(
 
     # Get arbitrary offsets to be used with RoPE for all the sequences
     start_positions = (
-        torch.randint(
-            0, margin, (len(cu_seqlens) - 1,), dtype=torch.int32, device=device
-        )
+        torch.randint(0, margin, (len(cu_seqlens) - 1,), dtype=torch.int32, device=device)
         if start_positions
         else None
     )
@@ -166,8 +160,7 @@ def test_fused_rope_thd(
         for i in range(1, len(cu_seqlens)):
             cu_seqlens_padded.append(
                 cu_seqlens_padded[i - 1]
-                + math.ceil((cu_seqlens[i] - cu_seqlens[i - 1]) / (cp_size * 2))
-                * (cp_size * 2)
+                + math.ceil((cu_seqlens[i] - cu_seqlens[i - 1]) / (cp_size * 2)) * (cp_size * 2)
             )
     else:
         cu_seqlens_padded = cu_seqlens
@@ -185,9 +178,7 @@ def test_fused_rope_thd(
         t = t.transpose(*transpose).contiguous().transpose(*transpose)
     t.requires_grad = True
 
-    rotary_pos_emb = RotaryPositionEmbedding(
-        hidden_size, rotary_percent, interleaved=interleaved
-    )
+    rotary_pos_emb = RotaryPositionEmbedding(hidden_size, rotary_percent, interleaved=interleaved)
     emb = rotary_pos_emb(cu_seqlens_padded[-1])
     assert emb.is_contiguous()
 
@@ -261,9 +252,9 @@ def test_unfused_rope_thd_vs_bshd(
     # that causes unexpected issues.
     seq_lens = torch.tensor([seqlen for _ in range(batch_size)], dtype=torch.int32)
 
-    cu_seqlens = torch.cumsum(
-        torch.cat([torch.zeros(1, dtype=torch.int32), seq_lens]), dim=0
-    ).to(device=device, dtype=torch.int32)
+    cu_seqlens = torch.cumsum(torch.cat([torch.zeros(1, dtype=torch.int32), seq_lens]), dim=0).to(
+        device=device, dtype=torch.int32
+    )
 
     # Create a tensor in THD format
     thd = torch.rand(
@@ -283,9 +274,7 @@ def test_unfused_rope_thd_vs_bshd(
     sbhd = sbhd.to(dtype=dtype, device=device)
     sbhd.requires_grad = True
 
-    rotary_pos_emb = RotaryPositionEmbedding(
-        hidden_size, rotary_percent, interleaved=interleaved
-    )
+    rotary_pos_emb = RotaryPositionEmbedding(hidden_size, rotary_percent, interleaved=interleaved)
     emb = rotary_pos_emb(max_seqlen)
     assert emb.is_contiguous()
 
@@ -419,13 +408,9 @@ def test_fused_qkv_rope(
         t = t.transpose(0, 1).contiguous()
     t.requires_grad = True
 
-    rotary_pos_emb_q = RotaryPositionEmbedding(
-        hidden_size, rotary_percent, interleaved=interleaved
-    )
+    rotary_pos_emb_q = RotaryPositionEmbedding(hidden_size, rotary_percent, interleaved=interleaved)
     emb_q = rotary_pos_emb_q(seq_length * cp_size)
-    rotary_pos_emb_k = RotaryPositionEmbedding(
-        hidden_size, rotary_percent, interleaved=interleaved
-    )
+    rotary_pos_emb_k = RotaryPositionEmbedding(hidden_size, rotary_percent, interleaved=interleaved)
     emb_k = rotary_pos_emb_k(seq_length * cp_size)
 
     for cp_rank in range(cp_size):
@@ -605,14 +590,10 @@ def test_fused_rope_thd_token_linear_parity(
         else None
     )
 
-    t = torch.rand(
-        (total_local, head_num, hidden_size), dtype=dtype, device=device, generator=None
-    )
+    t = torch.rand((total_local, head_num, hidden_size), dtype=dtype, device=device, generator=None)
     t.requires_grad = True
 
-    rotary_pos_emb = RotaryPositionEmbedding(
-        hidden_size, rotary_percent, interleaved=interleaved
-    )
+    rotary_pos_emb = RotaryPositionEmbedding(hidden_size, rotary_percent, interleaved=interleaved)
     # `freqs` must cover (max span length per CP rank + start_positions offset +
     # CP dual-chunk offset). Use the global cu_seqlens[-1] length as an upper
     # bound, matching how callers size the freqs tensor in practice.

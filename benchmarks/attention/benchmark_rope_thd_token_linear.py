@@ -120,14 +120,10 @@ def main(argv: Iterable[str] | None = None) -> None:
     if not torch.cuda.is_available():
         raise SystemExit("CUDA is required to run this benchmark")
 
-    dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[
-        args.dtype
-    ]
+    dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[args.dtype]
     device = torch.device("cuda:0")
 
-    rotary = RotaryPositionEmbedding(
-        args.hidden, args.rotary_percent, interleaved=args.interleaved
-    )
+    rotary = RotaryPositionEmbedding(args.hidden, args.rotary_percent, interleaved=args.interleaved)
     freqs = rotary(args.freqs_len).to(device)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -153,9 +149,7 @@ def main(argv: Iterable[str] | None = None) -> None:
     by_nseq_old: dict[int, float] = {}
 
     for n_seqs in args.n_seqs:
-        cu = build_cu_seqlens(args.total_tokens, n_seqs, cp_size=args.cp_size).to(
-            device
-        )
+        cu = build_cu_seqlens(args.total_tokens, n_seqs, cp_size=args.cp_size).to(device)
         actual_total = int(cu[-1].item())
         t = torch.rand(
             (actual_total // args.cp_size, args.head_num, args.hidden),
@@ -184,9 +178,7 @@ def main(argv: Iterable[str] | None = None) -> None:
 
         for regime, value in [("old", "0"), ("new", "1"), ("heuristic", None)]:
             with env("NVTE_FUSED_ROPE_THD_TOKEN_LINEAR", value):
-                fwd_ms, full_ms = time_fwd_bwd(
-                    runner, iters=args.iters, warmup=args.warmup
-                )
+                fwd_ms, full_ms = time_fwd_bwd(runner, iters=args.iters, warmup=args.warmup)
             bwd_ms = full_ms - fwd_ms
             if regime == "old":
                 by_nseq_old[n_seqs] = full_ms

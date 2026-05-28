@@ -51,9 +51,7 @@ def build_cu_seqlens(total_tokens: int, n_seqs: int) -> tuple[torch.Tensor, int]
     """Build balanced packed THD cu_seqlens with an exact total token count."""
     per = total_tokens // n_seqs
     if per <= 0:
-        raise ValueError(
-            f"n_seqs={n_seqs} is too large for total_tokens={total_tokens}"
-        )
+        raise ValueError(f"n_seqs={n_seqs} is too large for total_tokens={total_tokens}")
     rem = total_tokens - per * n_seqs
     lengths = [per + (1 if i < rem else 0) for i in range(n_seqs)]
     cu = [0]
@@ -72,9 +70,7 @@ def zero_grads(params: Iterable[torch.Tensor], x: torch.Tensor) -> None:
             p.grad = None
 
 
-def time_fwd_bwd(
-    fn: Callable[[], torch.Tensor], warmup: int, iters: int
-) -> tuple[float, float]:
+def time_fwd_bwd(fn: Callable[[], torch.Tensor], warmup: int, iters: int) -> tuple[float, float]:
     torch.cuda.synchronize()
     for _ in range(warmup):
         out = fn()
@@ -154,9 +150,7 @@ def main(argv: Iterable[str] | None = None) -> None:
     # execution failure unrelated to RoPE on the tested H100 stack. The high-span
     # cases below are the issue-relevant regime where RoPE launch waste dominates.
     parser.add_argument("--n-seqs", type=int, nargs="+", default=[128, 512, 1024, 2401])
-    parser.add_argument(
-        "--out-dir", type=Path, default=Path("rope_thd_full_layer_bench")
-    )
+    parser.add_argument("--out-dir", type=Path, default=Path("rope_thd_full_layer_bench"))
     args = parser.parse_args(argv)
 
     if not torch.cuda.is_available():
@@ -165,9 +159,7 @@ def main(argv: Iterable[str] | None = None) -> None:
         raise SystemExit("--hidden-size must be divisible by --num-heads")
     args.head_dim = args.hidden_size // args.num_heads
     if args.freqs_len < args.total_tokens:
-        raise SystemExit(
-            "--freqs-len should be >= --total-tokens for this long-context benchmark"
-        )
+        raise SystemExit("--freqs-len should be >= --total-tokens for this long-context benchmark")
 
     torch.manual_seed(1234)
     dtype = {"bf16": torch.bfloat16, "fp16": torch.float16}[args.dtype]
@@ -270,9 +262,7 @@ def main(argv: Iterable[str] | None = None) -> None:
                     return q_out + k_out
 
                 layer_fwd, layer_full = time_fwd_bwd(layer_fn, args.warmup, args.iters)
-                rope_fwd, rope_full = time_fwd_bwd(
-                    rope_pair_fn, args.warmup, args.iters
-                )
+                rope_fwd, rope_full = time_fwd_bwd(rope_pair_fn, args.warmup, args.iters)
 
             if regime == "old":
                 layer_old = layer_full
@@ -325,9 +315,7 @@ def main(argv: Iterable[str] | None = None) -> None:
     pct_by_regime = {regime: [] for regime in ("old", "new", "heuristic")}
     for n in nseqs:
         for regime in by_regime:
-            row = next(
-                r for r in rows if int(r["n_seqs"]) == n and r["regime"] == regime
-            )
+            row = next(r for r in rows if int(r["n_seqs"]) == n and r["regime"] == regime)
             by_regime[regime].append(float(row["layer_fwd_bwd_ms"]))
             pct_by_regime[regime].append(float(row["rope_pair_pct_layer"]))
 
