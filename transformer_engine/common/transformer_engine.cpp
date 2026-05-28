@@ -319,15 +319,15 @@ void CheckGroupedTensorShapeArrays(const GroupedTensor &t, const std::string &na
   }
 
   // Validate data size matches logical_shape
-  const size_t expected_numel = t.logical_shape.data[0] * t.logical_shape.data[1];
+  size_t expected_numel = t.logical_shape.data[0] * t.logical_shape.data[1];
   if (t.has_data()) {
     NVTE_CHECK(t.data.numel() == expected_numel, "Grouped tensor ", name, " data size (",
-               t.data.numel(), ") must equal logical_shape size (", expected_numel, ")");
+               t.data.numel(), ") must match logical_shape size (", expected_numel, ")");
   }
   if (t.has_columnwise_data()) {
     NVTE_CHECK(t.columnwise_data.numel() == expected_numel, "Grouped tensor ", name,
                " columnwise_data size (", t.columnwise_data.numel(),
-               ") must equal logical_shape size (", expected_numel, ")");
+               ") must match logical_shape size (", expected_numel, ")");
   }
 }
 
