@@ -38,8 +38,8 @@ __global__ void fused_score_for_moe_aux_loss_forward_kernel(const DataType *logi
   CompType *topk_logits_buf =
       reinterpret_cast<CompType *>(logits_buf + num_experts * num_token_per_block);
   int *topk_indices_buf = reinterpret_cast<int *>(topk_logits_buf + topk * num_token_per_block);
-  // Per-warp bitmap accumulator (only used in BITMAP_U8 mode). See the matching
-  // comment in fused_topk_with_score_function.cu for the uint32 vs uint8 layout note.
+  // Per-warp bitmap accumulator (BITMAP_U8 only). uint32 packing is bit-for-bit
+  // equivalent to uint8 LSB-first on little-endian devices (CUDA is always LE).
   const int bitmap_words_per_warp = (num_experts + 31) / 32;
   const int bitmap_row_bytes = (num_experts + 7) / 8;
   uint32_t *bitmap_words_buf = nullptr;

@@ -44,10 +44,8 @@ __global__ void fused_topk_with_score_function_forward_kernel(
   } else {
     topk_indices_buf = reinterpret_cast<int *>(topk_scores_buf + topk * num_token_per_block);
   }
-  // Per-warp bitmap accumulator (only used in BITMAP_U8 mode). One uint32 per 32
-  // experts; final per-token row is copied byte-by-byte to the global uint8 bitmap.
-  // uint32 packing is bit-for-bit equivalent to uint8 LSB-first packing on
-  // little-endian devices, which CUDA always is.
+  // Per-warp bitmap accumulator (BITMAP_U8 only). uint32 packing is bit-for-bit
+  // equivalent to uint8 LSB-first on little-endian devices (CUDA is always LE).
   const int bitmap_words_per_warp = (num_experts + 31) / 32;
   const int bitmap_row_bytes = (num_experts + 7) / 8;
   uint32_t *bitmap_words_buf = nullptr;
@@ -80,9 +78,8 @@ __global__ void fused_topk_with_score_function_forward_kernel(
          * - Load the logits to shmem
          */
     int pos_offset = token_offset_cur_warp * num_experts;
-    // Clear the probs (num_experts). In BYTEMAP mode the routing_map row is also
-    // cleared here; in BITMAP_U8 mode the row is accumulated in shmem and written
-    // wholesale at the end, so no global clear is required.
+    // BITMAP_U8 accumulates the row in shmem and writes it wholesale at the end
+    // of the loop; only BYTEMAP needs a global clear here.
     for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
       probs[pos_offset + i] = 0.0;
       if (score_function == 1) {
@@ -259,9 +256,7 @@ __global__ void fused_topk_with_score_function_forward_kernel(
         probs[pos_offset + topk_indices[i]] = scaling_factor * topk_scores[i];
       }
     } else {
-      // BITMAP_U8: OR the selected-expert bit into the per-warp uint32 accumulator
-      // (shmem atomicOr handles same-word collisions across the topk lanes), then
-      // copy the bytemap-equivalent bytes out to the global uint8 bitmap row.
+      // shmem atomicOr handles same-word collisions across the topk lanes.
       for (int i = lane_id; i < topk; i += kThreadsPerWarp) {
         int e = topk_indices[i];
         atomicOr(&local_bitmap_words[e / 32], 1u << (e % 32));

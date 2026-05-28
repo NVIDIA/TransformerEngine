@@ -14,12 +14,9 @@ namespace transformer_engine::pytorch {
 static std::map<std::string, int> score_function_map = {
     {"sigmoid", 0}, {"softmax", 1}, {"sqrtsoftplus", 2}};
 
-// Allocate a routing_map output tensor with the layout that matches the
-// requested NVTERoutingMapFormat. Shape is N-D matching the input's leading
-// dims, with the trailing dim depending on format:
+// Allocate a routing_map output tensor:
 //   BYTEMAP   -> bool [*leading_dims, num_experts]
-//   BITMAP_U8 -> uint8[*leading_dims, ceil(num_experts/8)] (LSB-first along
-//                the expert axis)
+//   BITMAP_U8 -> uint8[*leading_dims, ceil(num_experts/8)], LSB-first
 static at::Tensor allocate_routing_map(c10::IntArrayRef leading_dims, int64_t num_experts,
                                        int routing_map_format) {
   std::vector<int64_t> shape(leading_dims.begin(), leading_dims.end());
@@ -35,8 +32,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fw
     at::Tensor logits, int topk, bool use_pre_softmax, std::optional<int> num_groups,
     std::optional<int> group_topk, std::optional<float> scaling_factor, std::string score_function,
     std::optional<at::Tensor> expert_bias, int routing_map_format) {
-  // logits may be N-D — flatten conceptually but keep the original shape for
-  // the returned outputs. The kernel sees a {num_tokens, num_experts} view.
   TORCH_CHECK(logits.dim() >= 1, "logits must have at least 1 dim");
   TORCH_CHECK(logits.is_contiguous(), "logits must be contiguous");
   auto sizes = logits.sizes();
@@ -65,18 +60,12 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fw
   int num_groups_value = num_groups.has_value() ? num_groups.value() : -1;
   float scaling_factor_value = scaling_factor.has_value() ? scaling_factor.value() : 1.0f;
 
-  // Allocate outputs at the user-facing N-D shape (probs / intermediate_output
-  // match logits exactly; routing_map's trailing dim depends on format).
-  // No caller-side .view() needed.
   at::Tensor probs = at::empty(sizes, at::dtype(logits.scalar_type()).device(at::kCUDA));
   at::Tensor routing_map =
       allocate_routing_map(sizes.slice(0, sizes.size() - 1), num_experts, routing_map_format);
   at::Tensor intermediate_output = at::empty(sizes, at::dtype(at::kFloat).device(at::kCUDA));
 
-  // Wrap with explicit 2D shape for the kernel — the common-layer NVTE_CHECKs
-  // expect {num_tokens, num_experts} (or {num_tokens, ceil(num_experts/8)} for
-  // the bitmap routing_map). This is ~100ns of std::vector + TensorWrapper
-  // construction vs ~1.5us per .view() in Python.
+  // 2D shape for the kernel (common-layer NVTE_CHECKs require {num_tokens, trailing_dim}).
   const std::vector<size_t> shape_2d = {static_cast<size_t>(num_tokens),
                                         static_cast<size_t>(num_experts)};
   const std::vector<size_t> routing_map_shape_2d = {
@@ -112,8 +101,6 @@ void fused_topk_with_score_function_bwd(at::Tensor routing_map, at::Tensor inter
                                         at::Tensor grad_probs, at::Tensor grad_logits, int topk,
                                         bool use_pre_softmax, std::optional<float> scaling_factor,
                                         std::string score_function, int routing_map_format) {
-  // grad_probs / grad_logits are N-D matching the caller's logits shape; the
-  // kernel sees a 2D {num_tokens, num_experts} view.
   TORCH_CHECK(grad_probs.dim() >= 1, "grad_probs must have at least 1 dim");
   TORCH_CHECK(grad_probs.is_contiguous(), "grad_probs must be contiguous");
   TORCH_CHECK(grad_logits.is_contiguous(), "grad_logits must be contiguous");
@@ -165,7 +152,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_score_for_moe_aux_loss_fwd(
               "score_function must be softmax, sigmoid or sqrtsoftplus for router fusion");
   int score_function_value = score_function_map[score_function];
 
-  // N-D allocations matching logits shape (except routing_map trailing dim).
   at::Tensor scores = at::empty(sizes, at::dtype(at::kFloat).device(at::kCUDA));
   at::Tensor routing_map =
       allocate_routing_map(sizes.slice(0, sizes.size() - 1), num_experts, routing_map_format);

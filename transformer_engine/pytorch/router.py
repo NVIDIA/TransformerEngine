@@ -28,7 +28,6 @@ import transformer_engine_torch as tex
 RoutingMapFormat = tex.NVTERoutingMapFormat
 
 
-# Canonical-case-only string -> int map. No .lower()/.upper() in the hot path.
 _ROUTING_MAP_FORMAT_FROM_STRING = {
     "bytemap": int(RoutingMapFormat.BYTEMAP),
     "bitmap_u8": int(RoutingMapFormat.BITMAP_U8),
@@ -39,16 +38,12 @@ _VALID_ROUTING_MAP_FORMAT_INTS = frozenset(_ROUTING_MAP_FORMAT_FROM_STRING.value
 def _validate_routing_map_format(routing_map_format: Union[str, RoutingMapFormat, int]) -> int:
     """Coerce user-supplied routing_map_format into a plain int (0 or 1).
 
-    The autograd Function and tex.* bindings only ever see ints — no enum
-    construction in the hot path. Accepts the enum, an int matching one of the
-    enum's values, or the canonical lowercase strings ``"bytemap"`` /
-    ``"bitmap_u8"``. Other casings/types raise.
+    Accepts the enum, an int matching one of the enum's values, or the
+    canonical lowercase strings ``"bytemap"`` / ``"bitmap_u8"``.
     """
-    # The pybind11 enum NVTERoutingMapFormat is its own type (not a subclass
-    # of int); check it explicitly and convert via int() for normalization.
+    # NVTERoutingMapFormat is a standalone pybind11 enum, not a subclass of int.
     if isinstance(routing_map_format, RoutingMapFormat):
         return int(routing_map_format)
-    # Plain int path (covers e.g. `0`, `1`).
     if isinstance(routing_map_format, int):
         if routing_map_format in _VALID_ROUTING_MAP_FORMAT_INTS:
             return routing_map_format
@@ -90,11 +85,6 @@ class FusedTopkScoreFunction(torch.autograd.Function):
         routing_map_format: int,
     ):
         # pylint: disable=missing-function-docstring
-        # The C++ extension handles N-D logits directly: it computes
-        # num_tokens = product of leading dims and num_experts = last dim,
-        # allocates probs / routing_map / intermediate_output at full N-D
-        # shape, and wraps tensors with an explicit 2D view *only* for the
-        # kernel call. No .view() is needed on either side of the FFI here.
         probs, routing_map, intermediate_output = tex.fused_topk_with_score_function_fwd(
             logits,
             topk,
@@ -118,10 +108,6 @@ class FusedTopkScoreFunction(torch.autograd.Function):
     def backward(ctx, grad_probs, _):
         # pylint: disable=missing-function-docstring
         routing_map, intermediate_output = ctx.saved_tensors
-        # grad_probs is N-D matching the original logits shape. Allocate
-        # grad_logits with the same shape so no .view() is needed on either
-        # side; the C++ extension wraps with an explicit 2D shape for the
-        # kernel call.
         if not grad_probs.is_contiguous():
             grad_probs = grad_probs.contiguous()
         grad_logits = torch.empty_like(grad_probs)
@@ -215,7 +201,6 @@ class FusedComputeScoresForMoEAuxLoss(torch.autograd.Function):
         routing_map_format: int,
     ):
         # pylint: disable=missing-function-docstring
-        # C++ extension handles N-D logits directly (see FusedTopkScoreFunction.forward).
         scores, routing_map, intermediate_output = tex.fused_score_for_moe_aux_loss_fwd(
             logits=logits,
             topk=topk,
@@ -225,9 +210,8 @@ class FusedComputeScoresForMoEAuxLoss(torch.autograd.Function):
         ctx.save_for_backward(intermediate_output)
         ctx.topk = topk
         ctx.score_function = score_function
-        # scores is always FP32 (see module precision notes) but logits/grad_logits
-        # may be bf16/fp16. Remember the input dtype so backward can allocate
-        # grad_logits in the correct dtype.
+        # scores is FP32 but logits/grad_logits may be bf16/fp16 — remember the
+        # input dtype for the backward allocation.
         ctx.logits_dtype = logits.dtype
         return routing_map, scores
 
@@ -237,8 +221,6 @@ class FusedComputeScoresForMoEAuxLoss(torch.autograd.Function):
         intermediate_output = ctx.saved_tensors[0]
         if not grad_scores.is_contiguous():
             grad_scores = grad_scores.contiguous()
-        # grad_logits has the same shape as grad_scores (N-D) but the logits dtype
-        # (gradient must match the input dtype, not the FP32 scores dtype).
         grad_logits = torch.empty(
             grad_scores.shape, dtype=ctx.logits_dtype, device=grad_scores.device
         )

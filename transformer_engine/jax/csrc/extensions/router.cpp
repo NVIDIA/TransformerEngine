@@ -41,9 +41,8 @@ Error_Type FusedTopkWithScoreFunctionForwardFFI(
       std::vector<size_t>{static_cast<size_t>(num_tokens), static_cast<size_t>(num_experts)};
   auto logits_tensor = TensorWrapper(logits, flat_shape, dtype);
   auto probs_tensor = TensorWrapper(probs, flat_shape, dtype);
-  // Flatten the routing_map shape to match the kernel's 2D indexing. The trailing
-  // dim depends on the requested format: num_experts for BYTEMAP, ceil(num_experts/8)
-  // for BITMAP_U8. Keeping this 2D also lets the kernel's shape NVTE_CHECKs fire.
+  // 2D shape for the kernel: trailing dim = num_experts for BYTEMAP,
+  // ceil(num_experts/8) for BITMAP_U8.
   auto routing_map_format_nvte = static_cast<NVTERoutingMapFormat>(routing_map_format);
   size_t routing_map_trailing = (routing_map_format_nvte == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8)
                                     ? static_cast<size_t>((num_experts + 7) / 8)
