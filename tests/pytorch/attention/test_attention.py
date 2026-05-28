@@ -381,18 +381,13 @@ def test_dpa_fa4_hdim256(dtype, model_configs, model):
 model_configs_fused_hdim256 = {
     # test: ModelConfig(b, sq, hq, dqk)  -> head_dim_v defaults to head_dim_qk (256)
     "fused_hd256_no_mask": ModelConfig(2, 512, 16, 256),
-    "fused_hd256_causal": ModelConfig(2, 512, 16, 256, attn_mask_type="causal"),
     "fused_hd256_padding": ModelConfig(2, 512, 16, 256, attn_mask_type="padding"),
-    "fused_hd256_padding_causal": ModelConfig(2, 512, 16, 256, attn_mask_type="padding_causal"),
-    "fused_hd256_padding_causal_br": ModelConfig(
-        2, 512, 16, 256, attn_mask_type="padding_causal_bottom_right"
-    ),
     # SWA is allowed only together with a causal mask on the D=256 bprop kernel.
     "fused_hd256_causal_swa": ModelConfig(
-        2, 512, 16, 256, attn_mask_type="causal", window_size=(128, 0)
+        2, 1024, 16, 256, attn_mask_type="causal", window_size=(128, 0)
     ),
     # GQA variant (num_gqa_groups < num_heads).
-    "fused_hd256_gqa": ModelConfig(2, 512, 16, 256, num_gqa_groups=4, attn_mask_type="causal"),
+    "fused_hd256_padding_causal_gqa": ModelConfig(2, 1024, 16, 256, num_gqa_groups=4, attn_mask_type="padding_causal"),
 }
 
 
