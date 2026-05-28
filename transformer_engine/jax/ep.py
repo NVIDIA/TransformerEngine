@@ -30,6 +30,35 @@ __all__ = [
 _atexit_registered = False
 
 
+def _allgather_uid(uid_arr, world_size, uid_size):
+    """Allgather UID bytes across all processes.
+
+    Tries ``jax.experimental.multihost_utils.process_allgather`` first;
+    falls back to an XLA collective (process-local sharded global array
+    replicated via ``jax.jit``) when the multihost helper returns a
+    short buffer, which has been observed under some launchers.
+    """
+    try:
+        gathered = jmu.process_allgather(uid_arr, tiled=True)
+        if gathered.size == world_size * uid_size:
+            return np.asarray(gathered).reshape(world_size, uid_size)
+    except Exception:  # pylint: disable=broad-except
+        pass
+    devices = np.asarray(jax.devices())
+    if devices.size != world_size:
+        raise RuntimeError(
+            f"_allgather_uid fallback expected {world_size} global devices,"
+            f" got {devices.size}."
+        )
+    mesh = jax.sharding.Mesh(devices, ("_uid_all",))
+    sharded = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("_uid_all", None))
+    replicated = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+    local = np.asarray(uid_arr).reshape(1, uid_size)
+    g_in = jax.make_array_from_process_local_data(sharded, local, (world_size, uid_size))
+    g_out = jax.jit(lambda x: x, out_shardings=replicated)(g_in)
+    return np.asarray(g_out).reshape(world_size, uid_size)
+
+
 # ── Bootstrap ────────────────────────────────────────────────────────────────
 
 
@@ -90,7 +119,7 @@ def ep_bootstrap(
         uid_bytes = bytes(UID_SIZE)
 
     uid_arr = jnp.frombuffer(uid_bytes, dtype=jnp.uint8)
-    all_uids = jmu.process_allgather(uid_arr).reshape(world_size, UID_SIZE)
+    all_uids = _allgather_uid(uid_arr, world_size, UID_SIZE)
     uid_bytes = bytes(np.asarray(all_uids[dp_color * ep_size]).tolist())
 
     ep_resource = global_mesh_resource().ep_resource
