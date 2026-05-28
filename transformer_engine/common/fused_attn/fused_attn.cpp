@@ -315,6 +315,25 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
           (head_dim_qk <= 256 && head_dim_v <= 256 &&
            ((!is_training && sm_arch_ == 90 && cudnn_runtime_version >= 90100) ||
             (is_training && sm_arch_ == 90 && cudnn_runtime_version >= 90500))) ||
+          // 9.23: d_qk = d_v = 256 + SM10.x + bprop + non-paged
+          // cuDNN's dedicated SM10.x D=256 SDPA backward kernel (cuDNN FE 1.24 /
+          // BE 9.23+) only supports d_qk == d_v == 256.
+          (head_dim_qk == 256 && head_dim_v == 256 && is_training &&
+           sm_arch_ >= 100 && sm_arch_ < 110 && cudnn_runtime_version >= 92300 &&
+           layout_group != NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD &&
+           // The FE forces this path onto deterministic bprop, which then rejects alibi and
+           // dropout, and only supports vanilla softmax.
+           bias_type != NVTE_Bias_Type::NVTE_ALIBI && dropout == 0.0 &&
+           softmax_type == NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX &&
+           // Non-causal D=256 supports only full-window attention; SWA is allowed only for causal masks.
+           // NOTE: SWA support for non causal would be available when cuDNN decides to redirect 
+           // D=256 support to a CUDA backend instead of a Python OSS kernel 
+           ((window_size_left == -1 && window_size_right == -1) ||
+            ((attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+              attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
+              attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK ||
+              attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK) &&
+             (window_size_right == -1 || window_size_right == 0)))) ||
           // 9.9: any head_dim + Blackwell + fprop + non_paged + sq > 1
           (!is_training && sm_arch_ >= 100 && cudnn_runtime_version >= 90900 && max_seqlen_q > 1 &&
            layout_group != NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD) ||
