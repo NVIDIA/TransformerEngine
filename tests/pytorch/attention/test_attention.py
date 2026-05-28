@@ -377,6 +377,44 @@ def test_dpa_fa4_hdim256(dtype, model_configs, model):
     test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False)
 
 
+# cuDNN FusedAttention head_dim=256 backward is supported on Blackwell server GPUs
+# (SM100/SM103) from cuDNN 9.23 (FE 1.24), via the dedicated deterministic SDPA bprop
+# kernel. It requires d_qk == d_v == 256, vanilla softmax, no dropout, no ALiBi, and
+# (for non-causal masks) full-window attention. See nvte_get_fused_attn_backend in
+# transformer_engine/common/fused_attn/fused_attn.cpp. These configs use d_qk == d_v == 256
+# with s_q == s_kv > 1 so the training (forward + backward) FusedAttention route is exercised
+# and compared against the reference backends.
+model_configs_fused_hdim256 = {
+    # test: ModelConfig(b, sq, hq, dqk)  -> head_dim_v defaults to head_dim_qk (256)
+    "fused_hd256_no_mask": ModelConfig(2, 512, 16, 256),
+    "fused_hd256_causal": ModelConfig(2, 512, 16, 256, attn_mask_type="causal"),
+    "fused_hd256_padding": ModelConfig(2, 512, 16, 256, attn_mask_type="padding"),
+    "fused_hd256_padding_causal": ModelConfig(2, 512, 16, 256, attn_mask_type="padding_causal"),
+    "fused_hd256_padding_causal_br": ModelConfig(
+        2, 512, 16, 256, attn_mask_type="padding_causal_bottom_right"
+    ),
+    # SWA is allowed only together with a causal mask on the D=256 bprop kernel.
+    "fused_hd256_causal_swa": ModelConfig(
+        2, 512, 16, 256, attn_mask_type="causal", window_size=(128, 0)
+    ),
+    # GQA variant (num_gqa_groups < num_heads).
+    "fused_hd256_gqa": ModelConfig(2, 512, 16, 256, num_gqa_groups=4, attn_mask_type="causal"),
+}
+
+
+@pytest.mark.skipif(get_cudnn_version() < (9, 23, 0), reason="cuDNN 9.23+ is required.")
+@pytest.mark.skipif(
+    device_compute_capability not in ((10, 0), (10, 3)),
+    reason="cuDNN FusedAttention head_dim=256 backward is Blackwell server (SM100/SM103) only.",
+)
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("model_configs", [model_configs_fused_hdim256])
+@pytest.mark.parametrize("model", model_configs_fused_hdim256.keys())
+def test_dpa_fused_attn_hdim256(dtype, model_configs, model):
+    """Test DotProductAttention with cuDNN FusedAttention: head_dim=256 backward on Blackwell"""
+    test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False)
+
+
 model_configs_fa4_mla = {
     # test: ModelConfig(b, sq, hq, dqk, head_dim_v=dv)
     "fa4_mla_1": ModelConfig(4, 128, 16, 128, head_dim_v=64),
