@@ -263,33 +263,6 @@ class MXFP8Quantizer(Quantizer):
             "with_gemm_swizzled_scales": self.optimize_for_gemm,
         }
 
-    def _flatten(self):
-        from ..dynamo import OpaqueSimpleMetadata
-
-        meta = OpaqueSimpleMetadata(
-            {
-                "_qcls": type(self).__qualname__,
-                "dtype": self.dtype,
-                "rowwise_usage": self.rowwise_usage,
-                "columnwise_usage": self.columnwise_usage,
-                "internal": self.internal,
-                "optimize_for_gemm": self.optimize_for_gemm,
-            }
-        )
-        return meta, None, []
-
-    @classmethod
-    def _do_unflatten(cls, meta, process_group, tensors):
-        del process_group, tensors
-        q = cls(
-            fp8_dtype=meta["dtype"],
-            rowwise=meta["rowwise_usage"],
-            columnwise=meta["columnwise_usage"],
-        )
-        q.internal = meta["internal"]
-        q.optimize_for_gemm = meta["optimize_for_gemm"]
-        return q
-
 
 class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
     """Experimental tensor class with FP8 data

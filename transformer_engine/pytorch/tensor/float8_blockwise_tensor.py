@@ -38,6 +38,8 @@ class Float8BlockQuantizer(Quantizer):
     block_scaling_dim: int
 
     _storage_cls = Float8BlockwiseQTensorStorage
+    _INIT_META_ATTRS = ("amax_epsilon", "force_pow_2_scales", "block_scaling_dim")
+    _POST_INIT_META_ATTRS = ("block_len",)
 
     def __init__(
         self,
@@ -288,41 +290,6 @@ class Float8BlockQuantizer(Quantizer):
             "fp8_dtype": self.dtype,
             "is_2D_scaled": self.block_scaling_dim == 2,
         }
-
-    def _flatten(self):
-        from ..dynamo import OpaqueSimpleMetadata
-
-        meta = OpaqueSimpleMetadata(
-            {
-                "_qcls": type(self).__qualname__,
-                "dtype": self.dtype,
-                "rowwise_usage": self.rowwise_usage,
-                "columnwise_usage": self.columnwise_usage,
-                "internal": self.internal,
-                "optimize_for_gemm": self.optimize_for_gemm,
-                "block_len": self.block_len,
-                "amax_epsilon": self.amax_epsilon,
-                "force_pow_2_scales": self.force_pow_2_scales,
-                "block_scaling_dim": self.block_scaling_dim,
-            }
-        )
-        return meta, None, []
-
-    @classmethod
-    def _do_unflatten(cls, meta, process_group, tensors):
-        del process_group, tensors
-        q = cls(
-            fp8_dtype=meta["dtype"],
-            rowwise=meta["rowwise_usage"],
-            columnwise=meta["columnwise_usage"],
-            amax_epsilon=meta["amax_epsilon"],
-            force_pow_2_scales=meta["force_pow_2_scales"],
-            block_scaling_dim=meta["block_scaling_dim"],
-        )
-        q.block_len = meta["block_len"]
-        q.internal = meta["internal"]
-        q.optimize_for_gemm = meta["optimize_for_gemm"]
-        return q
 
 
 class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):

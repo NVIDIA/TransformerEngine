@@ -136,6 +136,19 @@ class NVFP4Quantizer(Quantizer):
     rht_matrix: torch.Tensor
 
     _storage_cls = NVFP4TensorStorage
+    _DTYPE_INIT_KWARG = "fp4_dtype"
+    _INIT_META_ATTRS = (
+        "with_amax_reduction",
+        "with_rht",
+        "with_post_rht_amax",
+        "with_2d_quantization",
+        "stochastic_rounding",
+        "row_scaled_nvfp4",
+    )
+    _POST_INIT_META_ATTRS = ("rht_matrix_random_sign_mask_t",)
+    _POST_INIT_TENSOR_ATTRS = ("rht_matrix",)
+    _PG_ATTR = "amax_reduction_group"
+    _PG_INIT_KWARG = "amax_reduction_group"
 
     def __init__(
         self,
@@ -423,52 +436,6 @@ class NVFP4Quantizer(Quantizer):
             "with_gemm_swizzled_scales": self.optimize_for_gemm,
             "row_scaled_nvfp4": self.row_scaled_nvfp4,
         }
-
-    def _flatten(self):
-        from ..dynamo import OpaqueSimpleMetadata
-
-        meta = OpaqueSimpleMetadata(
-            {
-                "_qcls": type(self).__qualname__,
-                "dtype": self.dtype,
-                "rowwise_usage": self.rowwise_usage,
-                "columnwise_usage": self.columnwise_usage,
-                "internal": self.internal,
-                "optimize_for_gemm": self.optimize_for_gemm,
-                "with_rht": self.with_rht,
-                "with_post_rht_amax": self.with_post_rht_amax,
-                "with_amax_reduction": self.with_amax_reduction,
-                "with_2d_quantization": self.with_2d_quantization,
-                "stochastic_rounding": self.stochastic_rounding,
-                "row_scaled_nvfp4": self.row_scaled_nvfp4,
-                "rht_matrix_random_sign_mask_t": self.rht_matrix_random_sign_mask_t,
-            }
-        )
-        return meta, self.amax_reduction_group, [self.rht_matrix]
-
-    @classmethod
-    def _do_unflatten(cls, meta, process_group, tensors):
-        (rht_matrix,) = tensors
-        # Construct with default RHT mask, then overwrite the computed
-        # ``rht_matrix_random_sign_mask_t`` / ``rht_matrix`` with the
-        # restored values so we don't depend on cuda helpers / device state.
-        q = cls(
-            fp4_dtype=meta["dtype"],
-            rowwise=meta["rowwise_usage"],
-            columnwise=meta["columnwise_usage"],
-            with_amax_reduction=meta["with_amax_reduction"],
-            amax_reduction_group=process_group,
-            with_rht=meta["with_rht"],
-            with_post_rht_amax=meta["with_post_rht_amax"],
-            with_2d_quantization=meta["with_2d_quantization"],
-            stochastic_rounding=meta["stochastic_rounding"],
-            row_scaled_nvfp4=meta["row_scaled_nvfp4"],
-        )
-        q.rht_matrix_random_sign_mask_t = meta["rht_matrix_random_sign_mask_t"]
-        q.rht_matrix = rht_matrix
-        q.internal = meta["internal"]
-        q.optimize_for_gemm = meta["optimize_for_gemm"]
-        return q
 
 
 class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):

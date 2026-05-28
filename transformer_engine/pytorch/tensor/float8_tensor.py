@@ -122,6 +122,7 @@ class Float8Quantizer(Quantizer):
     dtype: TE_DType
 
     _storage_cls = Float8TensorStorage
+    _INIT_TENSOR_ATTRS = ("scale", "amax")
 
     def __init__(
         self,
@@ -323,36 +324,6 @@ class Float8Quantizer(Quantizer):
     def _storage_scalars(self) -> Dict[str, Any]:
         return {"fp8_dtype": self.dtype}
 
-    def _flatten(self):
-        from ..dynamo import OpaqueSimpleMetadata
-
-        meta = OpaqueSimpleMetadata(
-            {
-                "_qcls": type(self).__qualname__,
-                "dtype": self.dtype,
-                "rowwise_usage": self.rowwise_usage,
-                "columnwise_usage": self.columnwise_usage,
-                "internal": self.internal,
-                "optimize_for_gemm": self.optimize_for_gemm,
-            }
-        )
-        return meta, None, [self.scale, self.amax]
-
-    @classmethod
-    def _do_unflatten(cls, meta, process_group, tensors):
-        del process_group
-        scale, amax = tensors
-        q = cls(
-            scale=scale,
-            amax=amax,
-            fp8_dtype=meta["dtype"],
-            rowwise=meta["rowwise_usage"],
-            columnwise=meta["columnwise_usage"],
-        )
-        q.internal = meta["internal"]
-        q.optimize_for_gemm = meta["optimize_for_gemm"]
-        return q
-
 
 class Float8CurrentScalingQuantizer(Quantizer):
     """Builder class for FP8 tensors with per-tensor current scaling
@@ -386,6 +357,10 @@ class Float8CurrentScalingQuantizer(Quantizer):
     amax_epsilon: float
 
     _storage_cls = Float8TensorStorage
+    _INIT_META_ATTRS = ("with_amax_reduction", "force_pow_2_scales", "amax_epsilon")
+    _PG_ATTR = "amax_reduction_group"
+    _PG_INIT_KWARG = "amax_reduction_group"
+    _FIXED_INIT_KWARGS = {"device": torch.device("cuda")}
 
     def __init__(
         self,
@@ -619,41 +594,6 @@ class Float8CurrentScalingQuantizer(Quantizer):
 
     def _storage_scalars(self) -> Dict[str, Any]:
         return {"fp8_dtype": self.dtype}
-
-    def _flatten(self):
-        from ..dynamo import OpaqueSimpleMetadata
-
-        meta = OpaqueSimpleMetadata(
-            {
-                "_qcls": type(self).__qualname__,
-                "dtype": self.dtype,
-                "rowwise_usage": self.rowwise_usage,
-                "columnwise_usage": self.columnwise_usage,
-                "internal": self.internal,
-                "optimize_for_gemm": self.optimize_for_gemm,
-                "with_amax_reduction": self.with_amax_reduction,
-                "force_pow_2_scales": self.force_pow_2_scales,
-                "amax_epsilon": self.amax_epsilon,
-            }
-        )
-        return meta, self.amax_reduction_group, []
-
-    @classmethod
-    def _do_unflatten(cls, meta, process_group, tensors):
-        del tensors
-        q = cls(
-            fp8_dtype=meta["dtype"],
-            device=torch.device("cuda"),
-            rowwise=meta["rowwise_usage"],
-            columnwise=meta["columnwise_usage"],
-            with_amax_reduction=meta["with_amax_reduction"],
-            amax_reduction_group=process_group,
-            force_pow_2_scales=meta["force_pow_2_scales"],
-            amax_epsilon=meta["amax_epsilon"],
-        )
-        q.internal = meta["internal"]
-        q.optimize_for_gemm = meta["optimize_for_gemm"]
-        return q
 
 
 class Float8Tensor(Float8TensorStorage, QuantizedTensor):

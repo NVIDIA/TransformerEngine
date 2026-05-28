@@ -647,6 +647,40 @@ class Quantizer(abc.ABC):
         # dispatch back to it by ``__qualname__``.
         _QUANTIZER_REGISTRY[cls.__qualname__] = cls
 
+    # ---- Declarative schema for the generic :meth:`_flatten` / ---- #
+    # ---- :meth:`_do_unflatten` implementations below.            ---- #
+
+    # ``__init__`` kwarg name for ``self.dtype`` (e.g. ``"fp8_dtype"``,
+    # ``"fp4_dtype"``).
+    _DTYPE_INIT_KWARG: str = "fp8_dtype"
+
+    # Scalar attribute names (besides ``dtype`` / ``rowwise_usage`` /
+    # ``columnwise_usage``) threaded through ``__init__``. The kwarg name
+    # is assumed to match the attribute name.
+    _INIT_META_ATTRS: Tuple[str, ...] = ()
+
+    # Scalar attribute names (besides ``internal`` / ``optimize_for_gemm``)
+    # set on the instance after ``__init__``.
+    _POST_INIT_META_ATTRS: Tuple[str, ...] = ()
+
+    # Tensor attribute names threaded through ``__init__``, in flatten
+    # order.
+    _INIT_TENSOR_ATTRS: Tuple[str, ...] = ()
+
+    # Tensor attribute names set on the instance after ``__init__``.
+    _POST_INIT_TENSOR_ATTRS: Tuple[str, ...] = ()
+
+    # Attribute name on ``self`` holding the (optional) ``ProcessGroup``,
+    # or ``None`` if the quantizer has no PG.
+    _PG_ATTR: Optional[str] = None
+    # ``__init__`` kwarg name to thread the PG through. ``None`` means
+    # set ``_PG_ATTR`` directly after ``__init__``.
+    _PG_INIT_KWARG: Optional[str] = None
+
+    # Hardcoded ``__init__`` kwargs not derived from meta (e.g.
+    # ``device=torch.device("cuda")`` for ``Float8CurrentScalingQuantizer``).
+    _FIXED_INIT_KWARGS: Dict[str, Any] = {}
+
     def _flatten(
         self,
     ) -> Tuple[Any, Optional["torch.distributed.ProcessGroup"], List[torch.Tensor]]:
@@ -654,23 +688,31 @@ class Quantizer(abc.ABC):
         ``(meta, process_group, tensors)`` triplet expected by the
         flattenable bucket in :mod:`transformer_engine.pytorch.dynamo`.
 
-        * ``meta`` -- :class:`OpaqueSimpleMetadata` of all simple state.
-          Subclasses **must** include their own ``cls.__qualname__`` under
-          the ``"_qcls"`` key so :meth:`_unflatten` can dispatch back to
-          ``_do_unflatten`` on the correct subclass. Common base state
-          (``rowwise_usage``, ``columnwise_usage``, ``internal``,
-          ``optimize_for_gemm``) is the subclass's responsibility too.
-        * ``process_group`` -- the (single) :class:`torch.distributed.ProcessGroup`
-          this quantizer participates in, or ``None``. Quantizers without a
-          process group return ``None``.
-        * ``tensors`` -- the live tensor state the op needs to receive
-          (e.g. ``scale``, ``amax``, RHT matrix). Order is
-          quantizer-defined and matches what ``_do_unflatten`` expects.
+        Generic implementation driven by the declarative schema attrs above.
+        Subclasses only declare which scalars / tensors go through
+        ``__init__`` vs. are set post-init; the base class round-trips
+        ``dtype`` / ``rowwise_usage`` / ``columnwise_usage`` and
+        ``internal`` / ``optimize_for_gemm`` on every quantizer.
         """
-        raise NotImplementedError(
-            f"{type(self).__name__} class does not implement _flatten; "
-            "required for torch.compile support of TE custom ops."
-        )
+        from .dynamo import OpaqueSimpleMetadata  # pylint: disable=import-outside-toplevel
+
+        cls = type(self)
+        meta_dict: Dict[str, Any] = {
+            "_qcls": cls.__qualname__,
+            "dtype": self.dtype,
+            "rowwise_usage": self.rowwise_usage,
+            "columnwise_usage": self.columnwise_usage,
+            "internal": self.internal,
+            "optimize_for_gemm": self.optimize_for_gemm,
+        }
+        for attr in (*cls._INIT_META_ATTRS, *cls._POST_INIT_META_ATTRS):
+            meta_dict[attr] = getattr(self, attr)
+        tensors = [
+            getattr(self, attr)
+            for attr in (*cls._INIT_TENSOR_ATTRS, *cls._POST_INIT_TENSOR_ATTRS)
+        ]
+        pg = getattr(self, cls._PG_ATTR) if cls._PG_ATTR else None
+        return OpaqueSimpleMetadata(meta_dict), pg, tensors
 
     @classmethod
     def _do_unflatten(
@@ -680,12 +722,32 @@ class Quantizer(abc.ABC):
         tensors: List[torch.Tensor],
     ) -> "Quantizer":
         """Reconstruct an instance of ``cls`` from the triplet returned by a
-        previous :meth:`_flatten` on the same subclass. Subclasses override.
+        previous :meth:`_flatten` on the same subclass. Generic; driven
+        by the declarative schema attrs.
         """
-        raise NotImplementedError(
-            f"{cls.__name__} class does not implement _do_unflatten; "
-            "required for torch.compile support of TE custom ops."
-        )
+        init_kwargs: Dict[str, Any] = {
+            cls._DTYPE_INIT_KWARG: meta["dtype"],
+            "rowwise": meta["rowwise_usage"],
+            "columnwise": meta["columnwise_usage"],
+        }
+        for attr in cls._INIT_META_ATTRS:
+            init_kwargs[attr] = meta[attr]
+        if cls._PG_INIT_KWARG is not None:
+            init_kwargs[cls._PG_INIT_KWARG] = process_group
+        init_kwargs.update(cls._FIXED_INIT_KWARGS)
+        tensor_iter = iter(tensors)
+        for attr in cls._INIT_TENSOR_ATTRS:
+            init_kwargs[attr] = next(tensor_iter)
+        q = cls(**init_kwargs)
+        q.internal = meta["internal"]
+        q.optimize_for_gemm = meta["optimize_for_gemm"]
+        for attr in cls._POST_INIT_META_ATTRS:
+            setattr(q, attr, meta[attr])
+        for attr in cls._POST_INIT_TENSOR_ATTRS:
+            setattr(q, attr, next(tensor_iter))
+        if cls._PG_ATTR is not None and cls._PG_INIT_KWARG is None:
+            setattr(q, cls._PG_ATTR, process_group)
+        return q
 
     @classmethod
     def _unflatten(
