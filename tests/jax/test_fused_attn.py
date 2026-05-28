@@ -544,10 +544,7 @@ class FusedAttnRunner:
             unsupported = None
             if self.attn_bias_type == AttnBiasType.PRE_SCALE_BIAS:
                 unsupported = "pre-scale bias"
-            elif (
-                self.attn_bias_type != AttnBiasType.NO_BIAS
-                and self.bias_shape == BiasShape._1HSS
-            ):
+            elif self.attn_bias_type != AttnBiasType.NO_BIAS and self.bias_shape == BiasShape._1HSS:
                 unsupported = (
                     "bias gradients (dBias); frozen/non-learnable bias inputs"
                     " (i.e. non-1HSS bias shapes) are supported"
