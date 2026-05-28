@@ -19,6 +19,7 @@ from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
 from jax import dtypes, ffi
+from jax.experimental.compute_on import compute_on
 from jax.sharding import NamedSharding, PartitionSpec
 import jax.tree_util as jtu
 
@@ -876,6 +877,7 @@ register_primitive(EpCombineBwdPrimitive)
 _HANDLE_ID_CALLSITE_CACHE = {}
 
 
+@compute_on("gpu_stream:collective")
 def ep_prepare(topk_idx, dispatch_output_per_expert_alignment=0):
     """Exchange routing metadata; return ``(token_counts, EpHandle)``."""
     import sys as _sys
@@ -900,6 +902,7 @@ def ep_prepare(topk_idx, dispatch_output_per_expert_alignment=0):
     return token_counts, EpHandle(handle_mem, handle_id)
 
 
+@compute_on("gpu_stream:collective")
 def ep_dispatch_fwd(handle, topk_idx, tokens, topk_weights, recv_capacity_per_rank):
     """Scatter tokens and weights to expert ranks; returns (recv_tokens, recv_topk_weights, handle)."""
     top_k = int(topk_weights.shape[-1])
@@ -916,6 +919,7 @@ def ep_dispatch_fwd(handle, topk_idx, tokens, topk_weights, recv_capacity_per_ra
     return recv_tokens, recv_topk_weights, handle
 
 
+@compute_on("gpu_stream:collective")
 def ep_combine_fwd(handle, expert_out, num_local_tokens, out_partition_spec=None):
     """Gather expert outputs back to home ranks. expert_out is pre-weighted."""
     out_leading = _normalize_leading_shape(num_local_tokens)
@@ -928,6 +932,7 @@ def ep_combine_fwd(handle, expert_out, num_local_tokens, out_partition_spec=None
     )
 
 
+@compute_on("gpu_stream:collective")
 def ep_dispatch_bwd(
     handle, grad, g_recv_topk_weights, top_k, num_local_tokens, out_partition_spec=None
 ):
@@ -944,6 +949,7 @@ def ep_dispatch_bwd(
     )
 
 
+@compute_on("gpu_stream:collective")
 def ep_combine_bwd(handle, grad, recv_capacity_per_rank):
     """Backward of combine; returns grad_expert_out [num_procs, recv_capacity_per_rank, H]."""
     return EpCombineBwdPrimitive.outer_primitive.bind(
