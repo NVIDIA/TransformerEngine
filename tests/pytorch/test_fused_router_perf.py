@@ -15,10 +15,13 @@ from transformer_engine.pytorch.router import (
 )
 
 
-seed = 42
-torch.manual_seed(seed)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed(seed)
+SEED = 42
+
+
+def _set_seed() -> None:
+    torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(SEED)
 
 
 pytestmark = pytest.mark.skipif(
@@ -194,6 +197,8 @@ def _print_perf_result(case_name: str, torch_ms: float, fused_ms: float) -> None
 def test_fused_topk_router_perf_against_torch(
     score_function, use_pre_softmax, enable_bias, record_property
 ):
+    _set_seed()
+
     dtype = torch.float32
     num_tokens = 4096
     num_experts = 192
@@ -262,6 +267,8 @@ def test_fused_topk_router_perf_against_torch(
 
 @pytest.mark.parametrize("score_function", ["softmax", "sigmoid"])
 def test_fused_scores_for_aux_loss_perf_against_torch(score_function, record_property):
+    _set_seed()
+
     dtype = torch.float32
     num_tokens = 8192
     num_experts = 128
@@ -304,6 +311,8 @@ def test_fused_scores_for_aux_loss_perf_against_torch(score_function, record_pro
 
 
 def test_fused_moe_aux_loss_perf_against_torch(record_property):
+    _set_seed()
+
     dtype = torch.float32
     num_tokens = 8192
     num_experts = 128

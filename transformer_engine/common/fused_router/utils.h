@@ -54,6 +54,8 @@ enum ReduceFuncType {
 };
 
 __device__ inline float warp_reduce_sum_float(float val) {
+  // __shfl_down_sync accumulates the total only in lane 0;
+  // the broadcast below is required so every lane sees the final sum.
   for (int offset = kThreadsPerWarp / 2; offset > 0; offset /= 2) {
     val += __shfl_down_sync(0xffffffff, val, offset);
   }
@@ -450,7 +452,7 @@ __device__ inline void naive_topk_and_mask_smallk(CompType *scores, int data_siz
 #pragma unroll
   for (int k = 0; k < K; ++k) {
     CompType val = -std::numeric_limits<CompType>::infinity();
-    int index = (lane_id < data_size) ? lane_id : 0;
+    int index = (lane_id < data_size) ? lane_id : -1;
     for (int i = lane_id; i < data_size; i += kThreadsPerWarp) {
       bool masked = false;
 #pragma unroll
