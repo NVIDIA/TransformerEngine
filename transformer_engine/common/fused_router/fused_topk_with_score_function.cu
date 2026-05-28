@@ -359,24 +359,34 @@ void fused_topk_with_score_function_forward(const Tensor logits, int num_tokens,
   NVTE_CHECK(routing_map.data.shape == routing_map_shape, "routing_map shape mismatch for ",
              (routing_map_format == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8 ? "BITMAP_U8" : "BYTEMAP"),
              "; expected ", routing_map_shape, ", got ", routing_map.data.shape);
-  if (expert_bias.data.dptr != nullptr) {
+  if (expert_bias.has_data()) {
     NVTE_CHECK(expert_bias.data.shape == std::vector<size_t>{static_cast<size_t>(num_experts)},
                "expert_bias shape must be [num_experts]=[", num_experts, "], got ",
                expert_bias.data.shape);
   }
-#define ROUTER_FORWARD_DISPATCH(RoutingMapFormatVal)                                         \
-  TE_ROUTER_PROBS_TYPE_SWITCH_ALL(                                                           \
-      logits.data.dtype, DataType,                                                           \
-      TE_ROUTER_PROBS_TYPE_SWITCH_ALL(                                                       \
-          expert_bias.data.dtype, BiasType,                                                  \
-          fused_topk_with_score_function_forward_kernel_launcher<DataType, BiasType,         \
-                                                                 RoutingMapFormatVal>(       \
-              reinterpret_cast<DataType *>(logits.data.dptr), num_tokens, num_experts, topk, \
-              use_pre_softmax, num_groups, group_topk, scaling_factor, score_function,       \
-              reinterpret_cast<BiasType *>(expert_bias.data.dptr),                           \
-              reinterpret_cast<DataType *>(probs.data.dptr),                                 \
-              reinterpret_cast<uint8_t *>(routing_map.data.dptr),                            \
-              reinterpret_cast<CompType *>(intermediate_output.data.dptr), stream);););
+#define ROUTER_FORWARD_DISPATCH(RoutingMapFormatVal)                                              \
+  TE_ROUTER_PROBS_TYPE_SWITCH_ALL(                                                                \
+      logits.data.dtype, DataType,                                                                \
+      if (expert_bias.has_data()) {                                                               \
+        TE_ROUTER_PROBS_TYPE_SWITCH_ALL(                                                          \
+            expert_bias.data.dtype, BiasType,                                                     \
+            fused_topk_with_score_function_forward_kernel_launcher<DataType, BiasType,            \
+                                                                   RoutingMapFormatVal>(          \
+                reinterpret_cast<DataType *>(logits.data.dptr), num_tokens, num_experts, topk,    \
+                use_pre_softmax, num_groups, group_topk, scaling_factor, score_function,          \
+                reinterpret_cast<BiasType *>(expert_bias.data.dptr),                              \
+                reinterpret_cast<DataType *>(probs.data.dptr),                                    \
+                reinterpret_cast<uint8_t *>(routing_map.data.dptr),                               \
+                reinterpret_cast<CompType *>(intermediate_output.data.dptr), stream););           \
+      } else {                                                                                    \
+        fused_topk_with_score_function_forward_kernel_launcher<DataType, DataType,                \
+                                                               RoutingMapFormatVal>(              \
+            reinterpret_cast<DataType *>(logits.data.dptr), num_tokens, num_experts, topk,        \
+            use_pre_softmax, num_groups, group_topk, scaling_factor, score_function, nullptr,     \
+            reinterpret_cast<DataType *>(probs.data.dptr),                                        \
+            reinterpret_cast<uint8_t *>(routing_map.data.dptr),                                   \
+            reinterpret_cast<CompType *>(intermediate_output.data.dptr), stream);                 \
+      });
   if (routing_map_format == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8) {
     ROUTER_FORWARD_DISPATCH(NVTE_ROUTING_MAP_FORMAT_BITMAP_U8)
   } else {
@@ -498,11 +508,7 @@ __global__ void fused_topk_with_score_function_backward_kernel(
           local_sum_Output_x_Grad += local_grad[i] * act_output[i];
         }
       }
-      // Warp reduce the sum
-      for (int s = 16; s > 0; s /= 2) {
-        local_sum_Output_x_Grad += __shfl_xor_sync(0xffffffff, local_sum_Output_x_Grad, s);
-      }
-      CompType sum_Output_x_Grad = local_sum_Output_x_Grad;
+      CompType sum_Output_x_Grad = warp_reduce_sum_float(local_sum_Output_x_Grad);
       // In-place update
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
         if (local_routing_map[i]) {

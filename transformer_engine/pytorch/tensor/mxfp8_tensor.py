@@ -161,6 +161,7 @@ class MXFP8Quantizer(Quantizer):
             fp8_dtype=fp8_dtype,
             quantizer=self,
             with_gemm_swizzled_scales=False,
+            device=data.device,
         )
 
     def onnx_quantize(self, tensor: torch.Tensor) -> QuantizedTensor:
@@ -346,6 +347,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 requires_grad=False,
                 fp8_dtype=tensor._fp8_dtype,
                 with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
+                device=tensor.device,
             )
 
         if func == torch.ops.aten.copy_.default:
@@ -452,6 +454,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                     requires_grad=False,
                     fp8_dtype=tensor._fp8_dtype,
                     with_gemm_swizzled_scales=False,
+                    device=tensor.device,
                 )
                 for splitted_tensor_data in zip(*out_data)
             ]
@@ -541,6 +544,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 requires_grad=False,
                 fp8_dtype=tensor._fp8_dtype,
                 with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
+                device=tensor.device,
             )
 
         # Default case
@@ -692,45 +696,17 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 shape=(rowwise_data.shape if rowwise_data is not None else columnwise_data.shape),
                 quantizer=self._quantizer,
                 with_gemm_swizzled_scales=False,
+                device=(
+                    rowwise_data.device if rowwise_data is not None else columnwise_data.device
+                ),
             )
         out._quantizer.set_usage(rowwise=rowwise_usage, columnwise=columnwise_usage)
         return out, all_gather_outputs
 
-    @classmethod
-    def _make_in_reduce_ex(
-        cls,
-        rowwise_data: torch.Tensor,
-        rowwise_scale_inv: torch.Tensor,
-        columnwise_data: torch.Tensor,
-        columnwise_scale_inv: torch.Tensor,
-        fp8_dtype: TE_DType,
-        dtype: torch.dtype,
-        shape: torch.shape,
-        quantizer: Optional[Quantizer] = None,
-        with_gemm_swizzled_scales: bool = False,
-    ) -> MXFP8Tensor:
-        """Build MXFP8Tensor, for use in __reduce__
-
-        __reduce_ex__ assumes object constructor has positional
-        arguments.
-
-        """
-        return MXFP8Tensor(
-            rowwise_data=rowwise_data,
-            rowwise_scale_inv=rowwise_scale_inv,
-            fp8_dtype=fp8_dtype,
-            columnwise_data=columnwise_data,
-            columnwise_scale_inv=columnwise_scale_inv,
-            dtype=dtype,
-            shape=shape,
-            quantizer=quantizer,
-            with_gemm_swizzled_scales=with_gemm_swizzled_scales,
-        )
-
     def __reduce_ex__(self, protocol: int) -> tuple:
         """Custom pickling"""
         return (
-            MXFP8Tensor._make_in_reduce_ex,
+            _make_mxfp8_tensor_in_reduce_ex,
             (
                 self._rowwise_data,
                 self._rowwise_scale_inv,
@@ -742,6 +718,42 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 self._quantizer,
                 self._with_gemm_swizzled_scales,
             ),
+        )
+
+    @classmethod
+    def _make_in_reduce_ex(
+        cls,
+        rowwise_data: torch.Tensor,
+        rowwise_scale_inv: torch.Tensor,
+        columnwise_data: torch.Tensor,
+        columnwise_scale_inv: torch.Tensor,
+        fp8_dtype: TE_DType,
+        dtype: torch.dtype,
+        shape: torch.Size,
+        quantizer: Optional[Quantizer] = None,
+        with_gemm_swizzled_scales: bool = False,
+    ) -> MXFP8Tensor:
+        """This classmethod is kept for backward compatibility only.
+        ``__reduce_ex__`` used to point at this classmethod, but bound
+        classmethods pickle as ``(getattr, (cls, name))`` which adds an
+        extra reduction step to the pickle stream. The current
+        ``__reduce_ex__`` references the module-level
+        ``_make_mxfp8_tensor_in_reduce_ex`` instead so the pickle stream
+        uses a single ``GLOBAL`` opcode. This classmethod is retained so
+        that previously pickled ``MXFP8Tensor`` payloads (which still
+        reference ``MXFP8Tensor._make_in_reduce_ex``) can still be
+        unpickled.
+        """
+        return _make_mxfp8_tensor_in_reduce_ex(
+            rowwise_data,
+            rowwise_scale_inv,
+            columnwise_data,
+            columnwise_scale_inv,
+            fp8_dtype,
+            dtype,
+            shape,
+            quantizer,
+            with_gemm_swizzled_scales,
         )
 
     def _get_data(self) -> MXFP8Tensor:
@@ -832,6 +844,40 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         raise RuntimeError("MXFP8Tensor has no data!")
 
 
+def _make_mxfp8_tensor_in_reduce_ex(
+    rowwise_data: torch.Tensor,
+    rowwise_scale_inv: torch.Tensor,
+    columnwise_data: torch.Tensor,
+    columnwise_scale_inv: torch.Tensor,
+    fp8_dtype: TE_DType,
+    dtype: torch.dtype,
+    shape: torch.Size,
+    quantizer: Optional[Quantizer] = None,
+    with_gemm_swizzled_scales: bool = False,
+) -> MXFP8Tensor:
+    """Reconstruct an ``MXFP8Tensor`` from its ``__reduce_ex__`` payload."""
+    # Infer device from inner buffers so the wrapper subclass stays
+    # consistent with its data (CPU after DCP staging deserialize,
+    # CUDA after the usual quantize path).
+    device = None
+    if rowwise_data is not None:
+        device = rowwise_data.device
+    elif columnwise_data is not None:
+        device = columnwise_data.device
+    return MXFP8Tensor(
+        rowwise_data=rowwise_data,
+        rowwise_scale_inv=rowwise_scale_inv,
+        fp8_dtype=fp8_dtype,
+        columnwise_data=columnwise_data,
+        columnwise_scale_inv=columnwise_scale_inv,
+        dtype=dtype,
+        shape=shape,
+        quantizer=quantizer,
+        with_gemm_swizzled_scales=with_gemm_swizzled_scales,
+        device=device,
+    )
+
+
 class _ViewFunc(torch.autograd.Function):
     """View function
 
@@ -891,6 +937,7 @@ class _ViewFunc(torch.autograd.Function):
             fp8_dtype=tensor._fp8_dtype,
             quantizer=tensor._quantizer,
             with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
+            device=tensor.device,
         )
 
     @staticmethod
@@ -918,6 +965,7 @@ class _ViewFunc(torch.autograd.Function):
                 fp8_dtype=grad._fp8_dtype,
                 quantizer=grad._quantizer,
                 with_gemm_swizzled_scales=grad._with_gemm_swizzled_scales,
+                device=grad.device,
             )
             return dgrad, None
         return grad.view(ctx.shape), None
@@ -979,6 +1027,7 @@ class _ReshapeFunc(torch.autograd.Function):
             fp8_dtype=tensor._fp8_dtype,
             quantizer=tensor._quantizer,
             with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
+            device=tensor.device,
         )
 
     @staticmethod
@@ -1004,6 +1053,7 @@ class _ReshapeFunc(torch.autograd.Function):
                 columnwise_scale_inv=grad._columnwise_scale_inv,
                 fp8_dtype=grad._fp8_dtype,
                 quantizer=grad._quantizer,
+                device=grad.device,
                 with_gemm_swizzled_scales=grad._with_gemm_swizzled_scales,
             )
             return dgrad, None

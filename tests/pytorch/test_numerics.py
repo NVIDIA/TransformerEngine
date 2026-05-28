@@ -54,7 +54,7 @@ from transformer_engine.pytorch.cpp_extensions import (
 from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
 from transformer_engine.common import recipe
 import transformer_engine_torch as tex
-from utils import ModelConfig, reset_rng_states
+from utils import ModelConfig, recipe_id, reset_rng_states, skip_unsupported_backward_override
 
 
 # Only run FP8 tests on supported devices.
@@ -138,6 +138,32 @@ def nvfp4_rht_and_2d_quantization():
     return nvfp4_recipe
 
 
+def nvfp4_row_scaled():
+    nvfp4_recipe = recipe.NVFP4BlockScaling(
+        disable_rht=True,
+        disable_stochastic_rounding=True,
+        disable_2d_quantization=True,
+        row_scaled_activation=True,
+        backward_override="high_precision",
+    )
+    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
+    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
+    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
+    return nvfp4_recipe
+
+
+def nvfp4_4over6():
+    nvfp4_recipe = recipe.NVFP4BlockScaling(
+        disable_rht=True,
+        disable_stochastic_rounding=True,
+        nvfp4_4over6="all",
+    )
+    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
+    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams(fp4_2d_quantization=True)
+    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
+    return nvfp4_recipe
+
+
 def check_rht_usage(recipe: recipe.Recipe) -> bool:
     # if using RHT, we can only support bf16
     # check fp4_quant_fwd_inp, fp4_quant_fwd_weight, fp4_quant_bwd_grad
@@ -171,6 +197,8 @@ if fp8_available:
     fp8_recipes.append(recipe.DelayedScaling())
 if nvfp4_available:
     fp8_recipes.append(nvfp4_rht_and_2d_quantization())
+    fp8_recipes.append(nvfp4_4over6())
+    fp8_recipes.append(nvfp4_row_scaled())
 
 use_cutlass_grouped_gemm = [False]
 # Only enable cutlass grouped gemm on Hopper
@@ -627,11 +655,15 @@ def _test_e2e_selective_recompute(
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["126m"])
 @pytest.mark.parametrize("fp8", all_boolean)
-@pytest.mark.parametrize("recipe", fp8_recipes)
+@pytest.mark.parametrize("recipe", fp8_recipes, ids=recipe_id)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 def test_gpt_selective_activation_recompute(dtype, bs, model, fp8, recipe, fp8_model_params):
     if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
+    if fp8 or fp8_model_params:
+        skip_unsupported_backward_override(
+            "transformer_layer", recipe, getattr(recipe, "backward_override", None)
+        )
     if fp8 and recipe.nvfp4():
         if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
             pytest.skip(
@@ -739,7 +771,7 @@ def _test_e2e_full_recompute(
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["126m"])
 @pytest.mark.parametrize("fp8", all_boolean)
-@pytest.mark.parametrize("recipe", fp8_recipes)
+@pytest.mark.parametrize("recipe", fp8_recipes, ids=recipe_id)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("use_reentrant", all_boolean)
 def test_gpt_full_activation_recompute(
@@ -747,6 +779,10 @@ def test_gpt_full_activation_recompute(
 ):
     if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
+    if fp8 or fp8_model_params:
+        skip_unsupported_backward_override(
+            "transformer_layer", recipe, getattr(recipe, "backward_override", None)
+        )
     if fp8 and recipe.nvfp4():
         if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
             pytest.skip(
@@ -1324,7 +1360,7 @@ def test_linear_accuracy_delay_wgrad_compute(dtype, bs, model, bias, fuse_wgrad_
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model", ["small"])
-@pytest.mark.parametrize("recipe", fp8_recipes + [None])
+@pytest.mark.parametrize("recipe", fp8_recipes + [None], ids=recipe_id)
 def test_linear_accuracy_save_original_input(dtype, model, recipe):
     bs = 1
     fuse_wgrad_accumulation = True
@@ -1333,6 +1369,7 @@ def test_linear_accuracy_save_original_input(dtype, model, recipe):
 
     if fp8 and recipe.delayed():
         pytest.skip("DelayedScaling recipe is not supported with save_original_input")
+    skip_unsupported_backward_override("linear", recipe, getattr(recipe, "backward_override", None))
 
     config = model_configs[model]
     if config.max_seqlen_q % 16 != 0 and fp8:
@@ -1894,7 +1931,7 @@ def _test_grouped_linear_accuracy(
 @pytest.mark.parametrize("num_gemms", [3, 6])
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["126m"])
-@pytest.mark.parametrize("recipe", fp8_recipes + [None])
+@pytest.mark.parametrize("recipe", fp8_recipes + [None], ids=recipe_id)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
 @pytest.mark.parametrize("bias", all_boolean)
@@ -1917,6 +1954,9 @@ def test_grouped_linear_accuracy(
         pytest.skip("FP8 parameters are not supported in debug mode.")
     if NVTE_TEST_NVINSPECT_ENABLED and delay_wgrad_compute:
         pytest.skip("Delayed wgrad compute is not supported in debug mode.")
+    skip_unsupported_backward_override(
+        "grouped_linear", recipe, getattr(recipe, "backward_override", None)
+    )
 
     config = model_configs[model]
     if config.max_seqlen_q % 16 != 0 and fp8:
@@ -2037,7 +2077,7 @@ def test_grouped_linear_accuracy_cutlass(
 @pytest.mark.parametrize("num_gemms", [3])
 @pytest.mark.parametrize("bs", [1])
 @pytest.mark.parametrize("model", ["126m"])
-@pytest.mark.parametrize("recipe", fp8_recipes + [None])
+@pytest.mark.parametrize("recipe", fp8_recipes + [None], ids=recipe_id)
 @pytest.mark.parametrize("fp8_model_params", [False])
 @pytest.mark.parametrize("fuse_wgrad_accumulation", [True])
 @pytest.mark.parametrize("bias", [False])
@@ -2061,6 +2101,9 @@ def test_grouped_linear_accuracy_save_original_input(
         pytest.skip("DelayedScaling recipe is not supported with save_original_input")
     if NVTE_TEST_NVINSPECT_ENABLED and delay_wgrad_compute:
         pytest.skip("Delayed wgrad compute is not supported in debug mode.")
+    skip_unsupported_backward_override(
+        "grouped_linear", recipe, getattr(recipe, "backward_override", None)
+    )
 
     config = model_configs[model]
     if config.max_seqlen_q % 16 != 0 and fp8:
@@ -2139,7 +2182,7 @@ def test_grouped_linear_accuracy_save_original_input(
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("recipe", fp8_recipes + [None])
+@pytest.mark.parametrize("recipe", fp8_recipes + [None], ids=recipe_id)
 def test_grouped_linear_accuracy_single_gemm(recipe):
     """Split the tests to save CI time"""
     test_grouped_linear_accuracy(
@@ -2253,7 +2296,7 @@ def _test_padding_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, r
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["126m"])
 @pytest.mark.parametrize("fp8", [True])
-@pytest.mark.parametrize("recipe", fp8_recipes)
+@pytest.mark.parametrize("recipe", fp8_recipes, ids=recipe_id)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 def test_padding_grouped_linear_accuracy(
     dtype,
@@ -2267,6 +2310,9 @@ def test_padding_grouped_linear_accuracy(
 ):
     if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
+    skip_unsupported_backward_override(
+        "grouped_linear", recipe, getattr(recipe, "backward_override", None)
+    )
 
     config = model_configs[model]
     if config.max_seqlen_q % 16 != 0 and fp8:
@@ -2328,7 +2374,7 @@ def test_padding_grouped_linear_accuracy(
 @pytest.mark.parametrize("bs", [1])
 @pytest.mark.parametrize("model", ["126m"])
 @pytest.mark.parametrize("fp8", [True])
-@pytest.mark.parametrize("recipe", fp8_recipes)
+@pytest.mark.parametrize("recipe", fp8_recipes, ids=recipe_id)
 @pytest.mark.parametrize("fp8_model_params", [False])
 def test_padding_grouped_linear_accuracy_save_original_input(
     dtype,
@@ -2344,6 +2390,9 @@ def test_padding_grouped_linear_accuracy_save_original_input(
         pytest.skip("FP8 parameters are not supported in debug mode.")
     if fp8 and recipe.delayed():
         pytest.skip("DelayedScaling recipe is not supported with save_original_input")
+    skip_unsupported_backward_override(
+        "grouped_linear", recipe, getattr(recipe, "backward_override", None)
+    )
 
     config = model_configs[model]
     if config.max_seqlen_q % 16 != 0 and fp8:
@@ -2559,10 +2608,13 @@ def _test_gpt_fp8_parameters(bs, dtype, config, fp8_model_params, recipe):
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["126m"])
-@pytest.mark.parametrize("recipe", fp8_recipes)
+@pytest.mark.parametrize("recipe", fp8_recipes, ids=recipe_id)
 def test_gpt_fp8_parameters(dtype, bs, model, recipe):
     if NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
+    skip_unsupported_backward_override(
+        "transformer_layer", recipe, getattr(recipe, "backward_override", None)
+    )
 
     if recipe.nvfp4():
         if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
@@ -2883,10 +2935,13 @@ def _apply_grouped_bias_ref(
 @pytest.mark.parametrize("accumulate", [False, True])
 @pytest.mark.parametrize("use_bias_scale", [False, True])
 def test_grouped_gemm_grouped_tensor(z, m, n, k, case, layout, accumulate, use_bias_scale) -> None:
+    if torch.cuda.get_device_capability() < (9, 0):
+        pytest.skip("Grouped GEMM requires Hopper (SM90) or newer.")
+    if torch.cuda.get_device_capability() < (10, 0):
+        if tex.get_cublasLt_version() < 130400:
+            pytest.skip("Grouped GEMM on Hopper requires cuBLAS 13.4+.")
     if tex.get_cublasLt_version() < 130300:
         pytest.skip("Grouped GEMM requires cuBLAS 13.3+.")
-    if torch.cuda.get_device_capability() < (10, 0):
-        pytest.skip("Grouped GEMM requires Blackwell (SM100) or newer.")
     if not is_bf16_available():
         pytest.skip("bfloat16 is required for grouped GEMM test.")
 
