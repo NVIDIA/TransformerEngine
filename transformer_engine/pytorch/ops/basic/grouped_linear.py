@@ -941,13 +941,6 @@ class GroupedLinear(BasicOperation):
             input_quantizers=input_quantizers,
             dtype=dtype,
         )
-        if use_grouped_tensor_path and with_quantized_compute:
-            # Keep this as a hard guard in addition to _is_graph_safe_path_supported:
-            # the grouped-tensor GEMM path only supports MXFP8 quantized compute.
-            # FP8 tensor-scaling recipes still use the legacy split-quantize flow.
-            use_grouped_tensor_path = all(
-                isinstance(quantizer, MXFP8Quantizer) for quantizer in input_quantizers
-            )
 
         if use_grouped_tensor_path:
             out, tensors_to_save = self._fuser_forward_grouped_tensor(
@@ -1400,10 +1393,12 @@ class GroupedLinear(BasicOperation):
                     ]
                     accumulate_into_main_grad = get_accumulate_flag_in_param(weights[0])
                 else:
-                    grad_weights = [
-                        torch.empty(weight_shape, dtype=ctx.dtype, device=device)
-                        for _ in range(num_groups)
-                    ]
+                    grad_weights = tex.bulk_allocate(
+                        [weight_shape] * num_groups,
+                        [ctx.dtype] * num_groups,
+                        device,
+                        [256] * num_groups,  # alignment
+                    )
                 final_weight_grads = list(grad_weights)
 
         # Perform dgrad GEMMs
@@ -1531,8 +1526,7 @@ class GroupedLinear(BasicOperation):
         total_tokens = dy_2d.size(0)
 
         # Build the grad_output GroupedTensor.
-        # bgrad_group_quantize is currently MXFP8-only. Other quantizers use
-        # grouped quantization plus the grouped dbias helper below.
+        # Optionally get dbias is fusion available with bgrad_group_quantize
         dbias_packed = None
         if with_quantized_compute:
             grad_output_quantizer = ctx.grad_output_quantizers[0]
@@ -1541,11 +1535,7 @@ class GroupedLinear(BasicOperation):
             )
             grad_output_quantizer.optimize_for_gemm = True
 
-            if (
-                has_bias
-                and not self._scale_bias
-                and isinstance(grad_output_quantizer, MXFP8Quantizer)
-            ):
+            if has_bias and not self._scale_bias:
                 grouped_dy, dbias_packed = tex.bgrad_group_quantize(
                     dy_2d, grad_output_quantizer, num_groups, split_sizes
                 )

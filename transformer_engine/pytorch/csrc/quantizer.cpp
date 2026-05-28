@@ -369,55 +369,36 @@ std::pair<GroupedTensorWrapper, py::object> Float8Quantizer::create_grouped_tens
       static_cast<int64_t>(logical_first_dim) * static_cast<int64_t>(logical_last_dim);
 
   const auto uint8_opts = at::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
+  const auto float_opts = at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
 
   std::optional<at::Tensor> rowwise_data;
   std::optional<at::Tensor> columnwise_data;
   std::optional<at::Tensor> rowwise_scale_inv;
   std::optional<at::Tensor> columnwise_scale_inv;
-  at::Tensor grouped_scale;
-  at::Tensor grouped_amax;
-  if (scale.numel() == 1) {
-    grouped_scale = scale.expand({static_cast<int64_t>(num_tensors)}).contiguous();
-  } else {
-    NVTE_CHECK(static_cast<size_t>(scale.numel()) == num_tensors,
-               "Grouped Float8Quantizer scale must be scalar or have one entry per tensor.");
-    grouped_scale = scale.contiguous();
-  }
-  if (amax.numel() == 1) {
-    grouped_amax = amax.expand({static_cast<int64_t>(num_tensors)}).contiguous();
-  } else {
-    NVTE_CHECK(static_cast<size_t>(amax.numel()) == num_tensors,
-               "Grouped Float8Quantizer amax must be scalar or have one entry per tensor.");
-    grouped_amax = amax.contiguous();
-  }
-  at::Tensor grouped_scale_inv = at::reciprocal(grouped_scale);
-  const bool is_non_tn_fp8_gemm_supported = nvte_is_non_tn_fp8_gemm_supported();
-  const bool with_rowwise_data = rowwise_usage || is_non_tn_fp8_gemm_supported;
-  const bool with_columnwise_data = columnwise_usage && !is_non_tn_fp8_gemm_supported;
+  at::Tensor amax = at::empty({static_cast<int64_t>(num_tensors)}, float_opts);
 
-  if (with_rowwise_data) {
+  if (rowwise_usage) {
     rowwise_data = at::empty({total_elements}, uint8_opts);
-    rowwise_scale_inv = grouped_scale_inv;
+    rowwise_scale_inv = at::empty({static_cast<int64_t>(num_tensors)}, float_opts);
   }
-  if (with_columnwise_data) {
+  if (columnwise_usage) {
     columnwise_data = at::empty({total_elements}, uint8_opts);
-    columnwise_scale_inv = grouped_scale_inv;
+    columnwise_scale_inv = at::empty({static_cast<int64_t>(num_tensors)}, float_opts);
   }
 
   GroupedTensorWrapper out_cpp(num_tensors, logical_shape, this->get_scaling_mode());
-  if (with_rowwise_data) {
+  if (rowwise_usage) {
     out_cpp.set_rowwise_data(rowwise_data->data_ptr(), this->dtype, getTensorShape(*rowwise_data));
     out_cpp.set_rowwise_scale_inv(rowwise_scale_inv->data_ptr(), DType::kFloat32,
                                   getTensorShape(*rowwise_scale_inv));
   }
-  if (with_columnwise_data) {
+  if (columnwise_usage) {
     out_cpp.set_columnwise_data(columnwise_data->data_ptr(), this->dtype,
                                 getTensorShape(*columnwise_data));
     out_cpp.set_columnwise_scale_inv(columnwise_scale_inv->data_ptr(), DType::kFloat32,
-                                     getTensorShape(*columnwise_scale_inv));
+                                      getTensorShape(*columnwise_scale_inv));
   }
-  out_cpp.set_amax(grouped_amax.data_ptr(), DType::kFloat32, getTensorShape(grouped_amax));
-  out_cpp.set_scale(grouped_scale.data_ptr(), DType::kFloat32, getTensorShape(grouped_scale));
+  out_cpp.set_amax(amax.data_ptr(), DType::kFloat32, getTensorShape(amax));
   if (first_dims.has_value()) {
     out_cpp.set_first_dims(first_dims->data_ptr(), DType::kInt64, getTensorShape(*first_dims));
   }
@@ -426,7 +407,7 @@ std::pair<GroupedTensorWrapper, py::object> Float8Quantizer::create_grouped_tens
   }
   if (tensor_offsets.has_value()) {
     out_cpp.set_tensor_offsets(tensor_offsets->data_ptr(), DType::kInt64,
-                               getTensorShape(*tensor_offsets));
+                                getTensorShape(*tensor_offsets));
   }
 
   py::handle GroupedTensorClass = grouped_tensor_python_class(this->internal);
@@ -444,13 +425,12 @@ std::pair<GroupedTensorWrapper, py::object> Float8Quantizer::create_grouped_tens
   kwargs["columnwise_data"] = maybe_tensor_to_py(columnwise_data);
   kwargs["scale_inv"] = maybe_tensor_to_py(rowwise_scale_inv);
   kwargs["columnwise_scale_inv"] = maybe_tensor_to_py(columnwise_scale_inv);
-  kwargs["amax"] = grouped_amax;
+  kwargs["amax"] = amax;
   kwargs["columnwise_amax"] = py::none();
-  kwargs["scale"] = grouped_scale;
+  kwargs["scale"] = py::none();
   kwargs["first_dims"] = first_dims.has_value() ? py::cast(*first_dims) : py::none();
   kwargs["last_dims"] = last_dims.has_value() ? py::cast(*last_dims) : py::none();
   kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
-  kwargs["offsets"] = py::none();
   kwargs["with_gemm_swizzled_scales"] = py::cast(false);
   PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
   if (result == nullptr) {
@@ -715,22 +695,18 @@ std::pair<GroupedTensorWrapper, py::object> Float8CurrentScalingQuantizer::creat
   const bool with_rowwise_data = rowwise_usage || is_non_tn_fp8_gemm_supported;
   const bool with_columnwise_data = columnwise_usage && !is_non_tn_fp8_gemm_supported;
 
-  // FP8 current scaling has a single per-tensor scale (no per-direction scaling), so
-  // rowwise_scale_inv and columnwise_scale_inv hold identical values. Allocate one
-  // shared buffer and alias both views to it (mirrors the non-grouped path in
-  // Float8CurrentScalingQuantizer::create_tensor). This avoids an unnecessary D2D
-  // copy after the per-group scale-from-amax kernel.
-  std::optional<at::Tensor> shared_scale_inv;
+  // FP8 current scaling has a single per-tensor scale 
+  std::optional<at::Tensor> scale_inv;
   if (with_rowwise_data || with_columnwise_data) {
-    shared_scale_inv = at::empty({static_cast<int64_t>(num_tensors)}, float_opts);
+    scale_inv = at::empty({static_cast<int64_t>(num_tensors)}, float_opts);
   }
   if (with_rowwise_data) {
     rowwise_data = at::empty({total_elements}, uint8_opts);
-    rowwise_scale_inv = shared_scale_inv;
+    rowwise_scale_inv = scale_inv;
   }
   if (with_columnwise_data) {
     columnwise_data = at::empty({total_elements}, uint8_opts);
-    columnwise_scale_inv = shared_scale_inv;
+    columnwise_scale_inv = scale_inv;
   }
 
   GroupedTensorWrapper out_cpp(num_tensors, logical_shape, this->get_scaling_mode());
