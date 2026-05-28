@@ -92,10 +92,8 @@ endif()
 include(GoogleTest)
 gtest_discover_tests(test_comm_gemm DISCOVERY_TIMEOUT 600)
 
-# ── EP distributed tests (HT mode) ─────────────────────────────────────────
-# No MPI dependency — processes are spawned by run_test_ep.sh with
-# --rank / --nranks flags.  ncclUniqueId exchange uses a
-# shared temp file (see test_ep_common.h for details).
+# ── EP distributed tests ──────────────────────────────────────────────────────
+# Launched via mpirun; ncclUniqueId exchange uses MPI_Bcast (see test_ep_common.h).
 # Headers + libs come from the in-tree 3rdparty/nccl submodule build.
 set(NCCL_EP_SUBMODULE_ROOT
     "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/nccl")
@@ -122,41 +120,28 @@ endif()
 
 set(EP_TEST_COMMON_INCLUDES
     ${EP_TEST_NCCL_INCLUDES}
+    ${MPI_CXX_INCLUDE_PATH}
     ../../transformer_engine/common/include
     ../../transformer_engine/common
     ${CMAKE_CURRENT_SOURCE_DIR})
 
+# nvrtc must follow TE_LIB so symbols referenced from libtransformer_engine.so
+# (loaded via dlopen in Python; not in its DT_NEEDED) resolve through nvrtc.
 set(EP_TEST_COMMON_LIBS
     CUDA::cuda_driver
     CUDA::cudart
-    CUDA::nvrtc
     GTest::gtest
     ${TE_LIB}
+    CUDA::nvrtc
     ${NCCL_LIB}
-    ${NCCL_EP_LIB})
+    ${NCCL_EP_LIB}
+    MPI::MPI_CXX
+    OpenMP::OpenMP_CXX)
 
-# nvrtc symbols are referenced from libtransformer_engine.so but not in its
-# DT_NEEDED list (loaded via dlopen in Python).  For cpp tests we link nvrtc
-# explicitly with --no-as-needed so the linker keeps the dependency.
-set(EP_TEST_LINK_OPTS "LINKER:--no-as-needed")
-
-# ── EP init tests (InitPath, HandleMemSizeQuery) ─────────────────────────────
-add_executable(test_ep_init test_ep_init.cu)
-target_include_directories(test_ep_init PRIVATE ${EP_TEST_COMMON_INCLUDES})
-target_link_libraries(test_ep_init PUBLIC ${EP_TEST_COMMON_LIBS})
-target_link_options(test_ep_init PUBLIC ${EP_TEST_LINK_OPTS})
-
-# ── EP pipeline tests (dispatch, combine, bwd, integrated) ───────────────────
-add_executable(test_ep_pipeline test_ep_pipeline.cu)
-target_include_directories(test_ep_pipeline PRIVATE ${EP_TEST_COMMON_INCLUDES})
-target_link_libraries(test_ep_pipeline PUBLIC ${EP_TEST_COMMON_LIBS})
-target_link_options(test_ep_pipeline PUBLIC ${EP_TEST_LINK_OPTS})
-
-# ── EP coverage tests (multi-handle, top_k=1, empty experts, negatives, threading) ──
-add_executable(test_ep_coverage test_ep_coverage.cu)
-target_include_directories(test_ep_coverage PRIVATE ${EP_TEST_COMMON_INCLUDES})
-target_link_libraries(test_ep_coverage PUBLIC ${EP_TEST_COMMON_LIBS})
-target_link_options(test_ep_coverage PUBLIC ${EP_TEST_LINK_OPTS})
+# ── EP distributed tests (per-op + full pipeline + zero-copy symm) ───────────
+add_executable(test_ep test_ep.cu ../cpp/test_common.cu)
+target_include_directories(test_ep PRIVATE ${EP_TEST_COMMON_INCLUDES})
+target_link_libraries(test_ep PUBLIC ${EP_TEST_COMMON_LIBS})
 
 # Do NOT use gtest_discover_tests — these binaries require multi-process
 # launch via run_test_ep.sh, not direct single-process execution.
