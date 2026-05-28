@@ -364,28 +364,28 @@ void fused_topk_with_score_function_forward(const Tensor logits, int num_tokens,
                "expert_bias shape must be [num_experts]=[", num_experts, "], got ",
                expert_bias.data.shape);
   }
-#define ROUTER_FORWARD_DISPATCH(RoutingMapFormatVal)                                              \
-  TE_ROUTER_PROBS_TYPE_SWITCH_ALL(                                                                \
-      logits.data.dtype, DataType,                                                                \
-      if (expert_bias.has_data()) {                                                               \
-        TE_ROUTER_PROBS_TYPE_SWITCH_ALL(                                                          \
-            expert_bias.data.dtype, BiasType,                                                     \
-            fused_topk_with_score_function_forward_kernel_launcher<DataType, BiasType,            \
-                                                                   RoutingMapFormatVal>(          \
-                reinterpret_cast<DataType *>(logits.data.dptr), num_tokens, num_experts, topk,    \
-                use_pre_softmax, num_groups, group_topk, scaling_factor, score_function,          \
-                reinterpret_cast<BiasType *>(expert_bias.data.dptr),                              \
-                reinterpret_cast<DataType *>(probs.data.dptr),                                    \
-                reinterpret_cast<uint8_t *>(routing_map.data.dptr),                               \
-                reinterpret_cast<CompType *>(intermediate_output.data.dptr), stream););           \
-      } else {                                                                                    \
-        fused_topk_with_score_function_forward_kernel_launcher<DataType, DataType,                \
-                                                               RoutingMapFormatVal>(              \
-            reinterpret_cast<DataType *>(logits.data.dptr), num_tokens, num_experts, topk,        \
-            use_pre_softmax, num_groups, group_topk, scaling_factor, score_function, nullptr,     \
-            reinterpret_cast<DataType *>(probs.data.dptr),                                        \
-            reinterpret_cast<uint8_t *>(routing_map.data.dptr),                                   \
-            reinterpret_cast<CompType *>(intermediate_output.data.dptr), stream);                 \
+#define ROUTER_FORWARD_DISPATCH(RoutingMapFormatVal)                                           \
+  TE_ROUTER_PROBS_TYPE_SWITCH_ALL(                                                             \
+      logits.data.dtype, DataType,                                                             \
+      if (expert_bias.has_data()) {                                                            \
+        TE_ROUTER_PROBS_TYPE_SWITCH_ALL(                                                       \
+            expert_bias.data.dtype, BiasType,                                                  \
+            fused_topk_with_score_function_forward_kernel_launcher<DataType, BiasType,         \
+                                                                   RoutingMapFormatVal>(       \
+                reinterpret_cast<DataType *>(logits.data.dptr), num_tokens, num_experts, topk, \
+                use_pre_softmax, num_groups, group_topk, scaling_factor, score_function,       \
+                reinterpret_cast<BiasType *>(expert_bias.data.dptr),                           \
+                reinterpret_cast<DataType *>(probs.data.dptr),                                 \
+                reinterpret_cast<uint8_t *>(routing_map.data.dptr),                            \
+                reinterpret_cast<CompType *>(intermediate_output.data.dptr), stream););        \
+      } else {                                                                                 \
+        fused_topk_with_score_function_forward_kernel_launcher<DataType, DataType,             \
+                                                               RoutingMapFormatVal>(           \
+            reinterpret_cast<DataType *>(logits.data.dptr), num_tokens, num_experts, topk,     \
+            use_pre_softmax, num_groups, group_topk, scaling_factor, score_function, nullptr,  \
+            reinterpret_cast<DataType *>(probs.data.dptr),                                     \
+            reinterpret_cast<uint8_t *>(routing_map.data.dptr),                                \
+            reinterpret_cast<CompType *>(intermediate_output.data.dptr), stream);              \
       });
   if (routing_map_format == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8) {
     ROUTER_FORWARD_DISPATCH(NVTE_ROUTING_MAP_FORMAT_BITMAP_U8)
