@@ -599,10 +599,7 @@ def test_sanity_grouped_linear(
     bs = bs * 16
     num_tokens = bs * config.max_seqlen_q * (num_gemms - 1)
     if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM") == "0" and single_param:
-        pytest.skip(
-            "single parameter grouped linear requires"
-            " NVTE_GROUPED_LINEAR_SINGLE_PARAM=1"
-        )
+        pytest.skip("single parameter grouped linear requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
     skip_unsupported_backward_override("grouped_linear", fp8_recipe, backward_override)
     if fp8_recipe is not None:
         fp8_recipe = copy.deepcopy(fp8_recipe)
