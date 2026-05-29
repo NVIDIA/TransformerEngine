@@ -61,8 +61,8 @@ from utils import (
 # Check for supported quantization schemes
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
-mxfp8_grouped_gemm_available, reason_for_no_mxfp8_grouped_gemm = (
-    te.is_mxfp8_grouped_gemm_available(return_reason=True)
+mxfp8_grouped_gemm_available, reason_for_no_mxfp8_grouped_gemm = te.is_mxfp8_grouped_gemm_available(
+    return_reason=True
 )
 nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
 

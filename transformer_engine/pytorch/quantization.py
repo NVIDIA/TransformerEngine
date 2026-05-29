@@ -171,9 +171,12 @@ def _compute_mxfp8_support() -> Tuple[bool, str]:
         cublaslt_version = tex.get_cublasLt_version()
         if cublaslt_version >= 130600:
             return True, ""
-        return False, (
-            "MXFP8 on sm_120 / sm_121 requires cuBLASLt >= 13.6.0.2 for NN/NT GEMM "
-            f"support (loaded cuBLASLt={cublaslt_version})."
+        return (
+            False,
+            (
+                "MXFP8 on sm_120 / sm_121 requires cuBLASLt >= 13.6.0.2 for NN/NT GEMM "
+                f"support (loaded cuBLASLt={cublaslt_version})."
+            ),
         )
     if get_device_compute_capability() >= (10, 0):  # blackwell and above
         return True, ""
@@ -195,11 +198,14 @@ def _compute_mxfp8_grouped_gemm_support() -> Tuple[bool, str]:
         return False, base_reason
     if get_device_compute_capability() in ((12, 0), (12, 1)):
         cublaslt_version = tex.get_cublasLt_version()
-        return False, (
-            "MXFP8 grouped GEMM is not yet supported on sm_120 / sm_121 by the loaded "
-            f"cuBLASLt={cublaslt_version} (single-GEMM MXFP8 is supported with "
-            "cuBLASLt >= 13.6.0.2). Use a non-grouped module or switch to a "
-            "non-MXFP8 recipe (e.g. Float8CurrentScaling) for grouped-GEMM workloads."
+        return (
+            False,
+            (
+                "MXFP8 grouped GEMM is not yet supported on sm_120 / sm_121 by the loaded "
+                f"cuBLASLt={cublaslt_version} (single-GEMM MXFP8 is supported with "
+                "cuBLASLt >= 13.6.0.2). Use a non-grouped module or switch to a "
+                "non-MXFP8 recipe (e.g. Float8CurrentScaling) for grouped-GEMM workloads."
+            ),
         )
     return True, ""
 

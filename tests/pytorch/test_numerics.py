@@ -61,8 +61,8 @@ from utils import ModelConfig, recipe_id, reset_rng_states, skip_unsupported_bac
 # Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = is_mxfp8_available(return_reason=True)
-mxfp8_grouped_gemm_available, reason_for_no_mxfp8_grouped_gemm = (
-    is_mxfp8_grouped_gemm_available(return_reason=True)
+mxfp8_grouped_gemm_available, reason_for_no_mxfp8_grouped_gemm = is_mxfp8_grouped_gemm_available(
+    return_reason=True
 )
 fp8_block_scaling_available = is_fp8_block_scaling_available()
 nvfp4_available = is_nvfp4_available()
