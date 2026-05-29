@@ -95,8 +95,7 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
   const int e4m3_max = input.nvfp4_e4m3_max;
 
   constexpr int FP4_BLOCK_SIZE = 16;
-  const size_t N = input.flat_first_dim();
-  const size_t M = input.flat_last_dim();
+  const auto [N, M] = input.flat_2d_dims();
 
   NVTE_CHECK(M % FP4_BLOCK_SIZE == 0, "Last dimension of FP4 tensors needs to be divisible by ",
              FP4_BLOCK_SIZE, ", but got ", input.data.shape, ".");

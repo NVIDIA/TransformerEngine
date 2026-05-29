@@ -492,15 +492,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Get cublasLt version", py::call_guard<py::gil_scoped_release>());
   m.def("get_cudnn_version", &transformer_engine::pytorch::get_cudnn_version, "Get cuDNN version",
         py::call_guard<py::gil_scoped_release>());
-  m.def("convert_host_pointers_to_tensor",
-        &transformer_engine::pytorch::convert_host_pointers_to_tensor,
-        "Copy host-side device pointers into device tensors", py::arg("tensor_lists"),
+  m.def("copy_data_ptrs_to_device", &transformer_engine::pytorch::copy_data_ptrs_to_device,
+        py::arg("tensors"), py::arg("device"), py::call_guard<py::gil_scoped_release>());
+  m.def("transform_and_copy_data_ptrs_to_device",
+        &transformer_engine::pytorch::transform_and_copy_data_ptrs_to_device,
+        py::arg("transform_type"), py::arg("tensors"), py::arg("device"),
         py::call_guard<py::gil_scoped_release>());
-  m.def("get_device_pointer_for_data_and_scales",
-        &transformer_engine::pytorch::get_device_pointer_for_data_and_scales,
-        "Swizzle scales and collect data/scale device pointers into device tensors",
-        py::arg("data_tensors"), py::arg("scale_tensors"), py::arg("swizzle") = false,
-        py::arg("rowwise"), py::arg("data_dtype"), py::call_guard<py::gil_scoped_release>());
   m.def("splits_to_offsets", &transformer_engine::pytorch::splits_to_offsets,
         "Compute grouped tensor offsets from split sizes", py::arg("first_dims"),
         py::arg("logical_last_dim"), py::call_guard<py::gil_scoped_release>());

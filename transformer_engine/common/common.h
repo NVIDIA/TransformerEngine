@@ -16,6 +16,7 @@
 static_assert(NVTE_BUILD_NUM_PHILOX_ROUNDS > 0,
               "NVTE_BUILD_NUM_PHILOX_ROUNDS must be a positive integer.");
 
+#include <cuda.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
@@ -26,13 +27,16 @@ static_assert(NVTE_BUILD_NUM_PHILOX_ROUNDS > 0,
 #include <cuda_runtime_api.h>
 #include <transformer_engine/transformer_engine.h>
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
-#include <functional>
-#include <stdexcept>
+#include <initializer_list>
+#include <limits>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <type_traits>
-#include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "./nvtx.h"
@@ -105,7 +109,9 @@ inline size_t product(const std::vector<size_t> &shape, const size_t begin, cons
   return ret;
 }
 
-inline size_t product(const std::vector<size_t> &shape) {
+template <typename Container,
+          typename = std::enable_if_t<std::is_integral<typename Container::value_type>::value>>
+inline size_t product(const Container &shape) {
   size_t ret = 1;
   for (const auto &elem : shape) {
     ret *= elem;
@@ -117,24 +123,138 @@ size_t get_buffer_size_bytes(const size_t N, const DType buffer_dtype);
 size_t get_buffer_size_bytes(const size_t dim_first, const size_t dim_last,
                              const DType buffer_dtype);
 
+/*! \brief Tensor shape
+ *
+ *  Wraps NVTEShape with an interface similar to std::vector<size_t>.
+ */
+class Shape {
+ public:
+  using value_type = size_t;
+  using size_type = size_t;
+  using iterator = size_t *;
+  using const_iterator = const size_t *;
+
+  /*! Maximum number of dimensions this shape can hold. */
+  static constexpr size_type max_ndim = std::extent_v<decltype(NVTEShape::data)>;
+
+  constexpr Shape() noexcept = default;
+
+  explicit constexpr Shape(const NVTEShape &shape) noexcept : data_{shape} {}
+
+  Shape(std::initializer_list<size_t> shape) {
+    NVTE_CHECK(shape.size() <= max_ndim, "Too many dimensions (requested ", shape.size(),
+               ", max is ", max_ndim, ").");
+    data_.ndim = shape.size();
+    std::copy(shape.begin(), shape.end(), data_.data);
+  }
+
+  // Construct from any container of integers
+  template <typename Container,
+            typename = std::enable_if_t<std::is_integral<typename Container::value_type>::value>>
+  explicit Shape(const Container &shape) {
+    NVTE_CHECK(shape.size() <= max_ndim, "Too many dimensions (requested ", shape.size(),
+               ", max is ", max_ndim, ").");
+    data_.ndim = shape.size();
+    std::copy(shape.begin(), shape.end(), data_.data);
+  }
+
+  constexpr operator NVTEShape() const noexcept { return data_; }
+
+  /*! Cast to std::vector */
+  explicit operator std::vector<size_t>() const {
+    return std::vector<size_t>(data_.data, data_.data + data_.ndim);
+  }
+
+  constexpr size_type size() const noexcept { return data_.ndim; }
+  constexpr bool empty() const noexcept { return data_.ndim == 0; }
+  static constexpr size_type capacity() noexcept { return max_ndim; }
+
+  value_type *data() noexcept { return data_.data; }
+  constexpr const value_type *data() const noexcept { return data_.data; }
+
+  iterator begin() noexcept { return data_.data; }
+  constexpr const_iterator begin() const noexcept { return data_.data; }
+  constexpr const_iterator cbegin() const noexcept { return data_.data; }
+  iterator end() noexcept { return data_.data + data_.ndim; }
+  constexpr const_iterator end() const noexcept { return data_.data + data_.ndim; }
+  constexpr const_iterator cend() const noexcept { return data_.data + data_.ndim; }
+
+  const value_type &at(size_type i) const {
+    NVTE_CHECK(i < data_.ndim, "Attempted to access out-of-bounds entry (requested ", i,
+               ", size is ", data_.ndim, ").");
+    return data_.data[i];
+  }
+  value_type &at(size_type i) { return const_cast<value_type &>(std::as_const(*this).at(i)); }
+
+  value_type &operator[](size_type i) noexcept { return data_.data[i]; }
+  constexpr const value_type &operator[](size_type i) const noexcept { return data_.data[i]; }
+
+  value_type &front() noexcept { return data_.data[0]; }
+  constexpr const value_type &front() const noexcept { return data_.data[0]; }
+
+  value_type &back() noexcept { return data_.data[data_.ndim - 1]; }
+  constexpr const value_type &back() const noexcept { return data_.data[data_.ndim - 1]; }
+
+  void push_back(size_type value) {
+    NVTE_CHECK(data_.ndim < max_ndim, "Cannot add dimension: shape is at maximum capacity (",
+               max_ndim, ").");
+    data_.data[data_.ndim++] = value;
+  }
+
+  void resize(size_type count) {
+    NVTE_CHECK(count <= max_ndim, "Too many dimensions (requested ", count, ", max is ", max_ndim,
+               ").");
+    if (count > data_.ndim) {
+      std::fill(&data_.data[data_.ndim], &data_.data[count], 0);
+    }
+    data_.ndim = count;
+  }
+
+  void clear() noexcept { data_.ndim = 0; }
+
+  friend bool operator==(const Shape &lhs, const Shape &rhs) noexcept {
+    return lhs.data_.ndim == rhs.data_.ndim &&
+           std::equal(lhs.data_.data, lhs.data_.data + lhs.data_.ndim, rhs.data_.data);
+  }
+  friend bool operator!=(const Shape &lhs, const Shape &rhs) noexcept { return !(lhs == rhs); }
+
+  template <typename Container,
+            typename = std::enable_if_t<std::is_integral<typename Container::value_type>::value>>
+  friend bool operator==(const Shape &lhs, const Container &rhs) {
+    return lhs == Shape(rhs);
+  }
+  template <typename T>
+  friend bool operator==(const T &lhs, const Shape &rhs) {
+    return rhs == lhs;
+  }
+  template <typename T>
+  friend bool operator!=(const Shape &lhs, const T &rhs) {
+    return !(lhs == rhs);
+  }
+  template <typename T>
+  friend bool operator!=(const T &lhs, const Shape &rhs) {
+    return !(rhs == lhs);
+  }
+
+ private:
+  NVTEShape data_{};
+};
+
 struct SimpleTensor {
   void *dptr;
-  std::vector<size_t> shape;
+  Shape shape;
   DType dtype;
 
   SimpleTensor(void *dptr, std::vector<size_t> shape, DType dtype)
-      : dptr{dptr}, shape{std::move(shape)}, dtype{dtype} {}
+      : dptr{dptr}, shape(shape), dtype{dtype} {}
+
+  SimpleTensor() : SimpleTensor(nullptr, {0}, DType::kFloat32) {}
 
   SimpleTensor(const NVTEBasicTensor &tensor)  // NOLINT
-      : dptr(tensor.data_ptr),
-        shape(tensor.shape.data, tensor.shape.data + tensor.shape.ndim),
-        dtype(static_cast<DType>(tensor.dtype)) {}
-
-  SimpleTensor() : SimpleTensor(nullptr, std::vector<size_t>{0}, DType::kFloat32) {}
+      : dptr(tensor.data_ptr), shape(tensor.shape), dtype(static_cast<DType>(tensor.dtype)) {}
 
   operator NVTEBasicTensor() const {
-    return {dptr, static_cast<NVTEDType>(dtype),
-            nvte_make_shape(this->shape.data(), this->shape.size())};
+    return {dptr, static_cast<NVTEDType>(dtype), static_cast<NVTEShape>(shape)};
   }
 
   /*! Number of tensor elements. */
@@ -223,12 +343,7 @@ struct Tensor {
   explicit operator NVTETensor() const noexcept { return nvte_tensor; }
 
   /*! Number of tensor elements. */
-  size_t numel() const {
-    if (!has_data() && has_columnwise_data()) {
-      return product(columnwise_data.shape);
-    }
-    return product(data.shape);
-  }
+  size_t numel() const { return product(shape()); }
 
   /*! Whether the tensor data buffer is not uninitialized.
    *
@@ -268,7 +383,7 @@ struct Tensor {
    *  different shape, e.g. the column-wise data for some tensor
    *  formats are transposed.
    */
-  std::vector<size_t> shape() const {
+  Shape shape() const {
     // Each tensor format interprets its data differently
     switch (scaling_mode) {
       case NVTE_DELAYED_TENSOR_SCALING:
@@ -278,9 +393,8 @@ struct Tensor {
         // Row-wise data shape matches tensor logical shape,
         // column-wise data shape is transpose of logical shape
         if (!has_data() && has_columnwise_data()) {
-          std::vector<size_t> ret;
+          Shape ret;
           if (!columnwise_data.shape.empty()) {
-            ret.reserve(columnwise_data.shape.size());
             for (size_t i = 1; i < columnwise_data.shape.size(); i++) {
               ret.push_back(columnwise_data.shape[i]);
             }
@@ -303,35 +417,36 @@ struct Tensor {
     }
   }
 
+  /*! Matrix dimensions after flattening tensor to 2D.
+   *
+   * If a tensor has dimensions (D1, D2, ..., Dn), it is reinterpreted
+   * as a (D1*D2*...*D(n-1), Dn) matrix.
+   */
+  std::array<size_t, 2> flat_2d_dims() const {
+    const auto s = shape();
+    if (s.empty()) {
+      return {1, 1};
+    }
+    size_t first_dim = 1;
+    for (size_t i = 0; i + 1 < s.size(); ++i) {
+      first_dim *= s[i];
+    }
+    return {first_dim, s.back()};
+  }
+
   /*! Matrix height after tensor is flattened to 2D
    *
    * If a tensor has dimensions (D1, D2, ..., Dn), it is reinterpreted
    * as a (D1*D2*...*D(n-1), Dn) matrix.
    */
-  size_t flat_first_dim() const {
-    const auto &full_shape = shape();
-    size_t ret = 1;
-    if (!full_shape.empty()) {
-      for (size_t i = 0; i < full_shape.size() - 1; i++) {
-        ret *= full_shape[i];
-      }
-    }
-    return ret;
-  }
+  size_t flat_first_dim() const { return flat_2d_dims()[0]; }
 
   /*! Matrix width after tensor is flattened to 2D
    *
    * If a tensor has dimensions (D1, D2, ..., Dn), it is reinterpreted
    * as a (D1*D2*...*D(n-1), Dn) matrix.
    */
-  size_t flat_last_dim() const {
-    const auto &full_shape = shape();
-    if (full_shape.empty()) {
-      return 1;
-    } else {
-      return full_shape.back();
-    }
-  }
+  size_t flat_last_dim() const { return flat_2d_dims()[1]; }
 };
 
 struct GroupedTensor {
@@ -1045,9 +1160,9 @@ inline bool is_aligned_tensor_data(const Tensor &t, size_t alignment) {
 size_t typeToSize(const DType type);
 size_t typeToNumBits(const DType type);
 
-void CheckNoopTensor(const Tensor &t, const std::string &name);
-void CheckInputTensor(const Tensor &t, const std::string &name, bool check_scale_inv_shapes = true);
-void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empty = false);
+void CheckNoopTensor(const Tensor &t, std::string_view name);
+void CheckInputTensor(const Tensor &t, std::string_view name, bool check_scale_inv_shapes = true);
+void CheckOutputTensor(const Tensor &t, std::string_view name, bool allow_empty = false);
 
 /*! \brief Update a tensor's FP8 scale-inverse
  *
@@ -1082,9 +1197,9 @@ GroupedTensor *convertNVTEGroupedTensor(const NVTEGroupedTensor tensor);
 GroupedTensor *convertNVTEGroupedTensorCheck(const NVTEGroupedTensor tensor);
 
 // Helper functions for GroupedTensor validation
-void CheckGroupedTensorShapeArrays(const GroupedTensor &t, const std::string &name);
-void CheckInputGroupedTensor(const GroupedTensor &t, const std::string &name);
-void CheckOutputGroupedTensor(const GroupedTensor &t, const std::string &name,
+void CheckGroupedTensorShapeArrays(const GroupedTensor &t, std::string_view name);
+void CheckInputGroupedTensor(const GroupedTensor &t, std::string_view name);
+void CheckOutputGroupedTensor(const GroupedTensor &t, std::string_view name,
                               bool allow_empty = false);
 
 }  // namespace transformer_engine
