@@ -125,7 +125,7 @@ def compute_variance(variances, numels, sums):
     """Welford algorithm is used for numerically stable distributed variance computation."""
     mean = torch.sum(sums) / torch.sum(numels)
     means = sums / numels
-    var = torch.sum(numels * (variances - torch.pow((means - mean), 2))) / torch.sum(numels)
+    var = torch.sum(numels * (variances + torch.pow((means - mean), 2))) / torch.sum(numels)
     return var
 
 
