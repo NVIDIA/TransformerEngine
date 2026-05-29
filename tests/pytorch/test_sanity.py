@@ -44,6 +44,9 @@ from utils import ModelConfig, recipe_id, skip_unsupported_backward_override
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 fp8_block_scaling_available, _ = te.is_fp8_block_scaling_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
+mxfp8_grouped_gemm_available, reason_for_no_mxfp8_grouped_gemm = (
+    te.is_mxfp8_grouped_gemm_available(return_reason=True)
+)
 nvfp4_available, _ = te.is_nvfp4_available(return_reason=True)
 
 # Record initial RNG state from script run.
@@ -607,6 +610,8 @@ def test_sanity_grouped_linear(
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
             pytest.skip("Model config does not support FP8")
+        if fp8_recipe.mxfp8() and not mxfp8_grouped_gemm_available:
+            pytest.skip(reason_for_no_mxfp8_grouped_gemm)
         if fp8_recipe.nvfp4():
             if not getattr(fp8_recipe, "row_scaled_activation", False):
                 pytest.skip("NVFP4 not supported for grouped linear")
