@@ -3880,73 +3880,23 @@ class TestSequentialModules:
                 return torch.nn.functional.relu(x).square()
             raise ValueError(f"Unexpected grouped MLP activation ({activation})")
 
-        def _apply_nvfp4_wgrad_rht(x: torch.Tensor) -> torch.Tensor:
-            if x.numel() == 0:
-                return x
-            rht_dim = 16
-            if x.size(-1) % rht_dim != 0:
-                raise ValueError(
-                    "NVFP4 RHT reference expects the wgrad K dimension to be 16-aligned"
-                )
-            h = torch.ones((1, 1), device=x.device, dtype=x.dtype)
-            while h.size(0) < rht_dim:
-                h = torch.cat(
-                    (
-                        torch.cat((h, h), dim=1),
-                        torch.cat((h, -h), dim=1),
-                    ),
-                    dim=0,
-                )
-            signs = torch.tensor(
-                [1, 1, 1, -1, 1, -1, -1, -1, -1, -1, -1, 1, -1, 1, -1, -1],
-                device=x.device,
-                dtype=x.dtype,
-            )
-            rht = (signs[:, None] * h) * (1 / math.sqrt(rht_dim))
-            return (x.contiguous().view(-1, rht_dim) @ rht).view_as(x)
-
-        def _nvfp4_rht_wgrad(x: torch.Tensor, dy: torch.Tensor) -> torch.Tensor:
-            x_t = _apply_nvfp4_wgrad_rht(x.transpose(0, 1).contiguous())
-            dy_t = _apply_nvfp4_wgrad_rht(dy.transpose(0, 1).contiguous())
-            return dy_t @ x_t.transpose(0, 1)
-
         # Reference implementation
         xs = torch.split(x_ref, split_sizes.tolist())
-        dys = torch.split(dy_ref, split_sizes.tolist())
         probs = torch.split(probs_ref, split_sizes.tolist())
         ys = []
-        fc1_inputs = []
-        fc1_outputs = []
-        fc2_inputs = []
         for group_idx in range(group_size):
             x = xs[group_idx]
             fc1_out = torch.nn.functional.linear(
                 x, fc1_ws_ref[group_idx], bias=fc1_bs_ref[group_idx]
             )
-            if quantization == "nvfp4_rht":
-                fc1_out.retain_grad()
-                fc1_inputs.append(x)
-                fc1_outputs.append(fc1_out)
             fc2_in = _apply_activation(fc1_out)
             fc2_in = fc2_in * probs[group_idx].unsqueeze(-1)
-            if quantization == "nvfp4_rht":
-                fc2_inputs.append(fc2_in)
             y = torch.nn.functional.linear(fc2_in, fc2_ws_ref[group_idx])
             if bias:
                 y = y + fc2_bs_ref[group_idx] * probs[group_idx].unsqueeze(-1)
             ys.append(y)
         y_ref = torch.cat(ys)
         y_ref.backward(dy_ref)
-        if quantization == "nvfp4_rht":
-            for group_idx in range(group_size):
-                fc1_dy = fc1_outputs[group_idx].grad
-                if fc1_dy is None:
-                    fc1_dy = torch.zeros_like(fc1_outputs[group_idx])
-                fc1_ws_ref[group_idx].grad = _nvfp4_rht_wgrad(fc1_inputs[group_idx], fc1_dy)
-                fc2_ws_ref[group_idx].grad = _nvfp4_rht_wgrad(
-                    fc2_inputs[group_idx],
-                    dys[group_idx],
-                )
 
         # Construct operations
         recipe = make_recipe(quantization)
