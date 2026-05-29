@@ -23,7 +23,7 @@ The benchmark reports two numbers for each precision:
   GEMM and the per-step quantization work: converting the input tensors to the
   low-precision format and computing their scaling factors.
 - **Pre-quantized** -- the raw GEMM kernel throughput with inputs already in the target
-  format, excluding per-step quantization. This is the hardware upper bound. Because the
+  format, excluding per-step quantization. Because the
   inputs are already quantized, recipes that differ only in how scaling factors are
   computed (e.g. DelayedScaling vs CurrentScaling) collapse to the same kernel here.
 
