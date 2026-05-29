@@ -191,8 +191,8 @@ class Float8BlockQuantizer(Quantizer):
         colwise_shape.extend(shape[:-1])
         return tuple(colwise_shape)
 
-    def is_quantizable(self, inp: torch.Tensor) -> bool:
-        """Returns whether or not given inp can be quantized"""
+    def supports_quantized_allgather(self, inp: torch.Tensor) -> bool:
+        """Whether tensor shape supports quantized all-gather."""
         shape = inp.size()
         if len(shape) < 2:
             return False

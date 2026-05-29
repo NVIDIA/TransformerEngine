@@ -35,7 +35,6 @@ from ..utils import (
     divide,
     init_method_constant,
     needs_quantized_gemm,
-    assert_dim_for_fp8_exec,
     nvtx_range_pop,
     nvtx_range_push,
     get_nvtx_range_context,
@@ -319,7 +318,6 @@ def _linear_forward_impl(
     inputmat_total = None  # Input tensor to pass to GEMM (gathered)
     own_quantized_input = False
     if fp8:
-        assert_dim_for_fp8_exec(inputmat, weight)
         if save_original_input:
             assert not isinstance(
                 input_quantizer, Float8Quantizer
