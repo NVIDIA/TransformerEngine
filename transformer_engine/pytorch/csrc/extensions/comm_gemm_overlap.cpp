@@ -196,9 +196,6 @@ CommOverlapHelper::NcclCommSharedPtr CommOverlapHelper::get_nccl_comm(std::strin
 #ifdef NVTE_WITH_CUBLASMP
   NVTE_CHECK(initialized, "Internal TE error: tex.CommOverlapHelper() is not initialized ",
              "with valid process groups!");
-  NVTE_CHECK(backend_is_nccl,
-             "Internal TE error: tex.CommOverlapHelper() was not initialized with an NCCL backend, "
-             "so no NCCL communicators are available!");
   auto it = nccl_comms.find(comm_name);
   if (it != nccl_comms.end()) {
     return it->second;
