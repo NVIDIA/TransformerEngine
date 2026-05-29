@@ -362,10 +362,10 @@ __device__ __forceinline__ void colwise_scaling_per_token(
 
 // =============================================================================
 // Kernel 2: per-token encode (rowwise + optional colwise transpose).
-// kWithRht=true: col-wise FP4 cast over RHT-rotated strips, matching K1's
-// RHT-rotated columnwise_amax. Row direction never sees RHT.
+// kWithRht=true: col-wise FP4 cast over RHT-rotated strips (row never sees RHT).
+// kWithSwizzle=true: rowwise SF emitted directly in cuBLAS LT 128x4 tile layout.
 // =============================================================================
-template <bool DO_ROW, bool DO_COL, bool kWithRht>
+template <bool DO_ROW, bool DO_COL, bool kWithRht, bool kWithSwizzle>
 __global__ void __launch_bounds__(THREADS_NUM)
     per_token_encode_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
                             const __grid_constant__ CUtensorMap tensor_map_output,
@@ -565,20 +565,47 @@ __global__ void __launch_bounds__(THREADS_NUM)
     buff_out_tr = (buff_out_tr + 1) % BUFFS_NUM_OUT_TR;
   }  // end of stages
 
-  // Vectorized SF scatter to global (chunk-end batch). Mirrors the
-  // production tuned 1D scale-store epilogue.
+  // Vectorized SF scatter. kWithSwizzle=false: compact M-major (downstream
+  // nvte_swizzle_scaling_factors re-permutes). kWithSwizzle=true: emit cuBLAS
+  // LT 128Mx4K tile layout directly; thread mapping below is perf-critical.
   if (DO_ROW) {
     auto& sSFrowwise = *reinterpret_cast<ScalesType2D*>(sSFrowwise_ptr);
-    using ScalesVec = Vec<nvfp4_scale_t, SCALES_PER_CHUNK_X>;
-    const int chunk_cols = static_cast<int>(cols) - block_offset_X;
-    const int count = min(SCALES_PER_CHUNK_X, chunk_cols / SCALE_DIM);
+    if constexpr (kWithSwizzle) {
+      // uint64_t SMEM load below assumes each sSFrowwise row is exactly 8 bytes
+      // (= 2 K-tiles of 4 K-bytes each); any other geometry needs a different
+      // pack/store split.
+      static_assert(SCALES_PER_CHUNK_X == 8,
+                    "fused-swizzle rowwise scatter assumes SCALES_PER_CHUNK_X == 8");
+      const int tid = threadIdx.x;
+      const int b = tid & 3;       // M-stripe [0, 4), fast axis -> coalesced gmem
+      const int ty = tid >> 2;     // slot index within K-tile [0, 32)
+      const int lm = b * 32 + ty;  // [0, 128)
+      const size_t M_tile_idx = ctaid_Y;
+      const size_t K_tile_global_base = ctaid_X * (SCALES_PER_CHUNK_X / 4);  // 2
 
-    for (size_t row = threadIdx.x; row < CHUNK_DIM_Y; row += THREADS_NUM) {
-      const size_t row_global = scales_block_offset_Y_rowwise + row;
-      if (row_global < rows) {
-        ScalesVec& scales_vec = *reinterpret_cast<ScalesVec*>(sSFrowwise[row]);
-        const size_t scale_idx_global = row_global * scale_stride + scales_block_offset_X_rowwise;
-        scales_vec.store_to_elts(&scales_ptr[scale_idx_global], 0, count);
+      // Single 8-byte SMEM load (vs 2 x 4-byte) halves the SMEM access count
+      // and degrades the bank conflict from 4-way to 2-way (each lane touches
+      // 2 adjacent banks at the same lm row instead of 1 bank twice).
+      const uint64_t packed_all = *reinterpret_cast<const uint64_t*>(&sSFrowwise[lm][0]);
+      const uint32_t packed_lo = static_cast<uint32_t>(packed_all);
+      const uint32_t packed_hi = static_cast<uint32_t>(packed_all >> 32);
+
+      const size_t base_byte = M_tile_idx * CHUNK_DIM_Y * scale_stride + K_tile_global_base * 512 +
+                               static_cast<size_t>(ty) * 16 + static_cast<size_t>(b) * 4;
+      *reinterpret_cast<uint32_t*>(&scales_ptr[base_byte]) = packed_lo;
+      *reinterpret_cast<uint32_t*>(&scales_ptr[base_byte + 512]) = packed_hi;
+    } else {
+      using ScalesVec = Vec<nvfp4_scale_t, SCALES_PER_CHUNK_X>;
+      const int chunk_cols = static_cast<int>(cols) - block_offset_X;
+      const int count = min(SCALES_PER_CHUNK_X, chunk_cols / SCALE_DIM);
+
+      for (size_t row = threadIdx.x; row < CHUNK_DIM_Y; row += THREADS_NUM) {
+        const size_t row_global = scales_block_offset_Y_rowwise + row;
+        if (row_global < rows) {
+          ScalesVec& scales_vec = *reinterpret_cast<ScalesVec*>(sSFrowwise[row]);
+          const size_t scale_idx_global = row_global * scale_stride + scales_block_offset_X_rowwise;
+          scales_vec.store_to_elts(&scales_ptr[scale_idx_global], 0, count);
+        }
       }
     }
   }
@@ -877,14 +904,12 @@ inline void launch_amax(const Tensor& input, Tensor* output, const Tensor& noop,
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
-// Launch Kernel 2 (encode). Requires output->amax / columnwise_amax to be pre-filled
-// (by a prior launch_amax call or by an external caller); writes
-// output->data / scale_inv / columnwise_data / columnwise_scale_inv.
-// with_rht=true requires K1 amax to have been launched with the SAME mask;
-// the composite per_token_quantize path threads this automatically.
+// Launch K2 encode. Requires pre-filled amax/columnwise_amax; writes data +
+// scale_inv (both directions). with_rht requires K1 to have run with the
+// SAME mask. with_swizzle: rowwise SF in cuBLAS LT layout (rowwise-only).
 inline void launch_encode(const Tensor& input, Tensor* output, const Tensor& noop,
                           const bool with_rht, const uint32_t random_sign_mask_t,
-                          cudaStream_t stream) {
+                          const bool with_swizzle, cudaStream_t stream) {
   const size_t M = input.flat_first_dim();
   const size_t K = input.flat_last_dim();
 
@@ -957,19 +982,25 @@ inline void launch_encode(const Tensor& input, Tensor* output, const Tensor& noo
   const float* col_amax_in =
       do_col ? reinterpret_cast<const float*>(output->columnwise_amax.dptr) : nullptr;
 
-  // RHT only matters when colwise FP4 is produced; collapse to the
-  // kWithRht=false instantiation for rowwise-only callers.
+  // RHT only matters with colwise FP4 -> collapse to kWithRht=false for
+  // rowwise-only callers; swizzle only matters with rowwise FP4 ->
+  // collapse to kWithSwizzle=false for colwise-only callers.
   const bool with_rht_effective = with_rht && do_col;
+  const bool with_swizzle_effective = with_swizzle && do_row;
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
       do_row, DO_ROW,
       TRANSFORMER_ENGINE_SWITCH_CONDITION(
-          do_col, DO_COL, TRANSFORMER_ENGINE_SWITCH_CONDITION(with_rht_effective, kWithRht, {
-            auto kernel = per_token_encode_kernel<DO_ROW, DO_COL, kWithRht>;
-            cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
-            kernel<<<grid, block, dshmem_size, stream>>>(
-                tmap_in, tmap_out, tmap_out_t, scales_ptr, scales_t_ptr, row_amax_in, col_amax_in,
-                noop_ptr, M, K, scale_stride, scale_stride_t, random_sign_mask_t);
-          })));
+          do_col, DO_COL,
+          TRANSFORMER_ENGINE_SWITCH_CONDITION(
+              with_rht_effective, kWithRht,
+              TRANSFORMER_ENGINE_SWITCH_CONDITION(with_swizzle_effective, kWithSwizzle, {
+                auto kernel = per_token_encode_kernel<DO_ROW, DO_COL, kWithRht, kWithSwizzle>;
+                cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                     dshmem_size);
+                kernel<<<grid, block, dshmem_size, stream>>>(
+                    tmap_in, tmap_out, tmap_out_t, scales_ptr, scales_t_ptr, row_amax_in,
+                    col_amax_in, noop_ptr, M, K, scale_stride, scale_stride_t, random_sign_mask_t);
+              }))));
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 #endif  // FP4_TYPE_SUPPORTED
@@ -1002,13 +1033,17 @@ inline void validate_amax_output(const Tensor* output) {
              "must be allocated.");
 }
 
-// K2 (encode) and composite require at least one FP4 output buffer allocated.
-inline void validate_encode_output(const Tensor* output) {
+// K2 / composite require >=1 FP4 output buffer. with_swizzle=true: rowwise
+// SF emitted in cuBLAS LT swizzled layout (caller sets with_gemm_swizzled_scales).
+inline void validate_encode_output(const Tensor* output, const bool with_swizzle) {
   NVTE_CHECK(output->has_data() || output->has_columnwise_data(),
              "Per-token K2 (encode): at least one of rowwise/columnwise FP4 output "
              "must be allocated.");
-  NVTE_CHECK(!output->with_gemm_swizzled_scales,
-             "Per-token cast emits compact (non-swizzled) inner SF.");
+  if (!with_swizzle) {
+    NVTE_CHECK(!output->with_gemm_swizzled_scales,
+               "Per-token cast emits compact (non-swizzled) inner SF unless "
+               "with_swizzle=true is passed.");
+  }
 }
 
 // K1 amax with optional col-wise RHT. with_rht=false is byte-equal to the
@@ -1022,28 +1057,28 @@ void per_token_amax_blocked_impl(const Tensor& input, const Tensor& noop, Tensor
   launch_amax(input, output, noop, with_rht, random_sign_mask_t, stream);
 }
 
-// K2 encode with optional col-wise RHT. Caller must have filled
-// output->columnwise_amax via K1 amax with the SAME with_rht/mask, else the
-// inner SF + FP4 codes are calibrated against mismatched data and saturate.
+// K2 encode with optional col-wise RHT + fused rowwise swizzle. with_rht
+// requires K1 amax to have been launched with the SAME mask, else the inner
+// SF + FP4 codes are calibrated against mismatched data and saturate.
 void per_token_encode_blocked_impl(const Tensor& input, const Tensor& noop, Tensor* output,
                                    const bool with_rht, const uint32_t random_sign_mask_t,
-                                   cudaStream_t stream) {
+                                   const bool with_swizzle, cudaStream_t stream) {
   validate_input_shape(input);
-  validate_encode_output(output);
+  validate_encode_output(output, with_swizzle);
   if (input.flat_first_dim() == 0 || input.flat_last_dim() == 0) return;
-  launch_encode(input, output, noop, with_rht, random_sign_mask_t, stream);
+  launch_encode(input, output, noop, with_rht, random_sign_mask_t, with_swizzle, stream);
 }
 
 // Composite K1+K2. Both launches receive the same with_rht / mask so the
 // colwise amax and FP4 cast see byte-identical data.
 void per_token_quantize_blocked_impl(const Tensor& input, const Tensor& noop, Tensor* output,
                                      const bool with_rht, const uint32_t random_sign_mask_t,
-                                     cudaStream_t stream) {
+                                     const bool with_swizzle, cudaStream_t stream) {
   validate_input_shape(input);
-  validate_encode_output(output);
+  validate_encode_output(output, with_swizzle);
   if (input.flat_first_dim() == 0 || input.flat_last_dim() == 0) return;
   launch_amax(input, output, noop, with_rht, random_sign_mask_t, stream);
-  launch_encode(input, output, noop, with_rht, random_sign_mask_t, stream);
+  launch_encode(input, output, noop, with_rht, random_sign_mask_t, with_swizzle, stream);
 }
 
 bool can_use_per_token(size_t M, size_t K, DType dtype) {
@@ -1054,11 +1089,11 @@ void per_token_amax_blocked_impl(const Tensor&, const Tensor&, Tensor*, bool, ui
                                  cudaStream_t) {
   NVTE_ERROR("NVFP4 requires SM100 (Blackwell); build with sm_100a/sm_100f.");
 }
-void per_token_encode_blocked_impl(const Tensor&, const Tensor&, Tensor*, bool, uint32_t,
+void per_token_encode_blocked_impl(const Tensor&, const Tensor&, Tensor*, bool, uint32_t, bool,
                                    cudaStream_t) {
   NVTE_ERROR("NVFP4 requires SM100 (Blackwell); build with sm_100a/sm_100f.");
 }
-void per_token_quantize_blocked_impl(const Tensor&, const Tensor&, Tensor*, bool, uint32_t,
+void per_token_quantize_blocked_impl(const Tensor&, const Tensor&, Tensor*, bool, uint32_t, bool,
                                      cudaStream_t) {
   NVTE_ERROR("NVFP4 requires SM100 (Blackwell); build with sm_100a/sm_100f.");
 }
@@ -1100,7 +1135,7 @@ void nvte_nvfp4_per_token_amax(const NVTETensor input, const NVTETensor noop, NV
 
 void nvte_nvfp4_per_token_encode(const NVTETensor input, const NVTETensor noop, NVTETensor output,
                                  const int with_rht, const int random_sign_mask_t,
-                                 cudaStream_t stream) {
+                                 const int with_swizzle, cudaStream_t stream) {
 #if FP4_TYPE_SUPPORTED
   NVTE_API_CALL(nvte_nvfp4_per_token_encode);
   using namespace transformer_engine;
@@ -1112,13 +1147,14 @@ void nvte_nvfp4_per_token_encode(const NVTETensor input, const NVTETensor noop, 
   // safety, internal kernel arg is uint32_t with only the low 16 bits used.
   nvfp4_per_token::per_token_encode_blocked_impl(
       *input_tensor, *noop_tensor, output_tensor, with_rht != 0,
-      static_cast<uint32_t>(random_sign_mask_t) & 0xFFFFu, stream);
+      static_cast<uint32_t>(random_sign_mask_t) & 0xFFFFu, with_swizzle != 0, stream);
 #else
   (void)input;
   (void)noop;
   (void)output;
   (void)with_rht;
   (void)random_sign_mask_t;
+  (void)with_swizzle;
   (void)stream;
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif
@@ -1126,7 +1162,7 @@ void nvte_nvfp4_per_token_encode(const NVTETensor input, const NVTETensor noop, 
 
 void nvte_nvfp4_per_token_quantize(const NVTETensor input, const NVTETensor noop, NVTETensor output,
                                    const int with_rht, const int random_sign_mask_t,
-                                   cudaStream_t stream) {
+                                   const int with_swizzle, cudaStream_t stream) {
 #if FP4_TYPE_SUPPORTED
   NVTE_API_CALL(nvte_nvfp4_per_token_quantize);
   using namespace transformer_engine;
@@ -1136,13 +1172,14 @@ void nvte_nvfp4_per_token_quantize(const NVTETensor input, const NVTETensor noop
   const Tensor* noop_tensor = (noop != nullptr) ? convertNVTETensorCheck(noop) : &dummy_noop;
   nvfp4_per_token::per_token_quantize_blocked_impl(
       *input_tensor, *noop_tensor, output_tensor, with_rht != 0,
-      static_cast<uint32_t>(random_sign_mask_t) & 0xFFFFu, stream);
+      static_cast<uint32_t>(random_sign_mask_t) & 0xFFFFu, with_swizzle != 0, stream);
 #else
   (void)input;
   (void)noop;
   (void)output;
   (void)with_rht;
   (void)random_sign_mask_t;
+  (void)with_swizzle;
   (void)stream;
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif

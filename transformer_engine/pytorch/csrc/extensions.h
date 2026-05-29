@@ -474,10 +474,13 @@ void mxfp8_scaling_partial_cast(const at::Tensor &input, at::Tensor output_rowwi
                                 const at::Tensor &scale_inv_colwise, int rows, int cols,
                                 size_t start_offset);
 
+// with_swizzle=true makes K2 write rowwise scale_inv in the cuBLAS LT
+// swizzled tile layout (skips the standalone nvte_swizzle_scaling_factors).
+// Has no effect on colwise scale_inv (rowwise-only for now).
 void nvfp4_per_token_quantize(const at::Tensor &input, at::Tensor q_row, at::Tensor s_dec_row,
                               at::Tensor row_amax, at::Tensor q_col, at::Tensor s_dec_col,
                               at::Tensor col_amax, bool rowwise, bool columnwise, bool with_rht,
-                              int64_t random_sign_mask_t);
+                              int64_t random_sign_mask_t, bool with_swizzle);
 
 void nvfp4_per_token_amax(const at::Tensor &input, at::Tensor row_amax, at::Tensor col_amax,
                           bool rowwise, bool columnwise, bool with_rht, int64_t random_sign_mask_t);
@@ -485,16 +488,21 @@ void nvfp4_per_token_amax(const at::Tensor &input, at::Tensor row_amax, at::Tens
 void nvfp4_per_token_encode(const at::Tensor &input, at::Tensor q_row, at::Tensor s_dec_row,
                             at::Tensor row_amax, at::Tensor q_col, at::Tensor s_dec_col,
                             at::Tensor col_amax, bool rowwise, bool columnwise, bool with_rht,
-                            int64_t random_sign_mask_t);
+                            int64_t random_sign_mask_t, bool with_swizzle);
 
 void nvfp4_per_token_post_scale(at::Tensor d, const at::Tensor &row_amax_a,
                                 const at::Tensor &row_amax_b);
+
+// Standalone rowwise-SF swizzle for one NVFP4 operand. One launch per call,
+// mirrors prod NVFP4 GEMM's per-operand swizzle. Used by --qs bench mode.
+void nvfp4_per_token_swizzle_rowwise_sf(const at::Tensor &data, const at::Tensor &sf_in,
+                                        at::Tensor sf_out);
 
 void nvfp4_per_token_gemm(const at::Tensor &a_data, const at::Tensor &b_data,
                           const at::Tensor &a_sf, const at::Tensor &b_sf,
                           const at::Tensor &a_row_amax, const at::Tensor &b_row_amax, at::Tensor d,
                           const at::Tensor &workspace, int64_t m, int64_t n, int64_t k,
-                          double alpha, double beta);
+                          double alpha, double beta, bool a_sf_swizzled, bool b_sf_swizzled);
 
 // Bench-only per-tensor twin of nvfp4_per_token_gemm: scalar amaxes folded
 // into cuBLAS LT alpha via the amax slot; no trailing post-scale.

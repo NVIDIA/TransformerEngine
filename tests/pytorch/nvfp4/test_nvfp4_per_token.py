@@ -834,3 +834,134 @@ def test_per_token_composite_with_rht_col_amax_matches_k1(
     torch.testing.assert_close(
         bufs["ra"], ra_k1, rtol=0.0, atol=0.0, msg=f"composite ra != K1-only ra at ({M}, {K})"
     )
+
+
+# =============================================================================
+# (6) Fused-swizzle correctness: K2 with_swizzle=True emits rowwise SF in
+# cuBLAS LT layout. Tests cover byte-equal vs Python reference, other-outputs
+# identical to with_swizzle=False, and GEMM fast-path numerical equivalence.
+# =============================================================================
+
+_SWIZZLE_SHAPES = [
+    (128, 128),
+    (256, 256),
+    (512, 512),
+    (256, 1024),
+    (1024, 256),
+]
+
+
+def _swizzle_sf_reference(sf_m_major: torch.Tensor) -> torch.Tensor:
+    """Reference M-major (M, K_SF) e4m3 -> cuBLAS LT swizzled flat bytes
+    (128Mx4K tile, 16-byte slot = 4 M-stripes x 4 K-bytes stripe-major)."""
+    M, K_SF = sf_m_major.shape
+    assert M % 128 == 0
+    assert K_SF % 4 == 0
+    device = sf_m_major.device
+    sf_u8 = sf_m_major.contiguous().view(torch.uint8)
+    out = torch.empty(M * K_SF, dtype=torch.uint8, device=device)
+
+    m_idx = torch.arange(M, device=device, dtype=torch.int64).view(M, 1).expand(M, K_SF)
+    k_idx = torch.arange(K_SF, device=device, dtype=torch.int64).view(1, K_SF).expand(M, K_SF)
+    m_tile = m_idx // 128
+    k_tile = k_idx // 4
+    out_idx = (
+        m_tile * 128 * K_SF
+        + k_tile * 512
+        + (m_idx % 32) * 16
+        + ((m_idx % 128) // 32) * 4
+        + (k_idx % 4)
+    )
+    out[out_idx.reshape(-1)] = sf_u8.reshape(-1)
+    return out
+
+
+@_GATED_SM100
+@pytest.mark.parametrize("M,K", _SWIZZLE_SHAPES)
+def test_per_token_with_swizzle_sf_byte_equal_to_reference(M: int, K: int) -> None:
+    """Fused-swizzle rowwise scale_inv matches the Python byte-permutation
+    reference of the M-major SF (covers both rowwise-only and rowwise+colwise).
+    """
+    device = torch.device("cuda")
+    torch.manual_seed(0)
+    x = torch.randn((M, K), dtype=torch.bfloat16, device=device)
+
+    out_plain = nvfp4_per_token_quantize(x, rowwise=True, columnwise=True, with_swizzle=False)
+    out_swz = nvfp4_per_token_quantize(x, rowwise=True, columnwise=True, with_swizzle=True)
+
+    ref_swz_sf = _swizzle_sf_reference(out_plain.scale.view(torch.uint8))
+    got_swz_sf = out_swz.scale.view(torch.uint8).reshape(-1)
+
+    torch.testing.assert_close(
+        got_swz_sf,
+        ref_swz_sf,
+        rtol=0,
+        atol=0,
+        msg=f"fused-swizzle rowwise SF mismatch at ({M}, {K})",
+    )
+
+
+@_GATED_SM100
+@pytest.mark.parametrize("M,K", _SWIZZLE_SHAPES)
+def test_per_token_with_swizzle_other_outputs_unchanged(M: int, K: int) -> None:
+    """Only the rowwise scale_inv layout differs: FP4 data, row_amax, colwise
+    data / scale_inv / col_amax must be byte-identical between with_swizzle
+    True and False.
+    """
+    device = torch.device("cuda")
+    torch.manual_seed(0)
+    x = torch.randn((M, K), dtype=torch.bfloat16, device=device)
+
+    out_plain = nvfp4_per_token_quantize(x, rowwise=True, columnwise=True, with_swizzle=False)
+    out_swz = nvfp4_per_token_quantize(x, rowwise=True, columnwise=True, with_swizzle=True)
+
+    torch.testing.assert_close(out_swz.data, out_plain.data, rtol=0, atol=0)
+    torch.testing.assert_close(out_swz.row_amax, out_plain.row_amax, rtol=0, atol=0)
+    torch.testing.assert_close(out_swz.columnwise_data, out_plain.columnwise_data, rtol=0, atol=0)
+    torch.testing.assert_close(out_swz.columnwise_scale, out_plain.columnwise_scale, rtol=0, atol=0)
+    torch.testing.assert_close(out_swz.col_amax, out_plain.col_amax, rtol=0, atol=0)
+
+
+@_GATED_SM100
+@pytest.mark.parametrize("M,K", [(256, 256), (512, 1024), (1024, 512)])
+def test_per_token_gemm_with_fused_swizzle_matches_unswizzled(M: int, K: int) -> None:
+    """E2E GEMM two paths: (A) with_swizzle=False + ext swizzle (sf_swizzled=False)
+    vs (B) with_swizzle=True + sf_swizzled=True. Same SF bytes to cuBLAS LT,
+    so C outputs must be byte-equal."""
+    device = torch.device("cuda")
+    torch.manual_seed(0)
+    N = M  # square; GEMM is TN with M, N free
+    A = torch.randn((M, K), dtype=torch.bfloat16, device=device)
+    B = torch.randn((N, K), dtype=torch.bfloat16, device=device)
+
+    a_plain = nvfp4_per_token_quantize(A, rowwise=True, columnwise=False, with_swizzle=False)
+    b_plain = nvfp4_per_token_quantize(B, rowwise=True, columnwise=False, with_swizzle=False)
+    c_unswz = nvfp4_per_token_gemm(
+        a_plain.data,
+        a_plain.scale,
+        a_plain.row_amax,
+        b_plain.data,
+        b_plain.scale,
+        b_plain.row_amax,
+    )
+
+    a_swz = nvfp4_per_token_quantize(A, rowwise=True, columnwise=False, with_swizzle=True)
+    b_swz = nvfp4_per_token_quantize(B, rowwise=True, columnwise=False, with_swizzle=True)
+    c_swz = nvfp4_per_token_gemm(
+        a_swz.data,
+        a_swz.scale,
+        a_swz.row_amax,
+        b_swz.data,
+        b_swz.scale,
+        b_swz.row_amax,
+        a_sf_swizzled=True,
+        b_sf_swizzled=True,
+    )
+
+    torch.testing.assert_close(
+        c_swz,
+        c_unswz,
+        rtol=0,
+        atol=0,
+        msg=f"fused-swizzle GEMM output != unswizzled-input GEMM at ({M}, {K})",
+    )

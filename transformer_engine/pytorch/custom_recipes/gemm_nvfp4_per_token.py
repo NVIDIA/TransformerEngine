@@ -123,12 +123,18 @@ def nvfp4_per_token_gemm(
     alpha: float = 1.0,
     beta: float = 0.0,
     out_dtype: torch.dtype = torch.bfloat16,
+    a_sf_swizzled: bool = False,
+    b_sf_swizzled: bool = False,
 ) -> torch.Tensor:
     """Production C = alpha * (A @ B^T) via cuBLAS LT NVFP4 + per-token post-scale.
 
     Binding swizzles compact SFs in-flight, runs cuBLAS LT NVFP4 with operand
     amaxes pinned to 1.0, then applies the row_amax_A * row_amax_B post-scale.
     Output is bf16 (cuBLAS LT NVFP4 locks D to bf16/fp32); beta != 0 unsupported.
+
+    ``a_sf_swizzled`` / ``b_sf_swizzled = True`` skips the in-binding swizzle
+    for that operand (caller's SF is already in the cuBLAS LT swizzled layout
+    e.g. from ``nvfp4_per_token_quantize(..., with_swizzle=True)``).
     """
     import transformer_engine_torch as tex  # type: ignore
 
@@ -204,6 +210,8 @@ def nvfp4_per_token_gemm(
         K,
         float(alpha),
         float(beta),
+        a_sf_swizzled=a_sf_swizzled,
+        b_sf_swizzled=b_sf_swizzled,
     )
 
     return out_bf16 if out_dtype is torch.bfloat16 else out_bf16.to(out_dtype)

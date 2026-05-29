@@ -25,9 +25,13 @@ extern "C" {
  *                       to the pre-RHT path.
  *  \param[in] random_sign_mask_t  low 16 bits = sign-flip pattern shared by
  *                       K1 and K2. Ignored when with_rht == 0.
+ *  \param[in] with_swizzle  non-zero -> K2 emits rowwise scale_inv directly
+ *                       in the cuBLAS LT swizzled tile layout (rowwise only;
+ *                       colwise stays compact M-major).
  */
 void nvte_nvfp4_per_token_quantize(const NVTETensor input, const NVTETensor noop, NVTETensor output,
-                                   int with_rht, int random_sign_mask_t, cudaStream_t stream);
+                                   int with_rht, int random_sign_mask_t, int with_swizzle,
+                                   cudaStream_t stream);
 
 /*! \brief Kernel 1 in isolation: per-row + per-col amax via TMA + atomicMax.
  *         Pre-zeroes the amax buffers and merges per-CTA partials into
@@ -54,9 +58,13 @@ void nvte_nvfp4_per_token_amax(const NVTETensor input, const NVTETensor noop, NV
  *                       to thread the same flag + mask through K1 and K2).
  *  \param[in] random_sign_mask_t  low 16 bits = sign-flip pattern; ignored
  *                       when with_rht == 0.
+ *  \param[in] with_swizzle  non-zero -> write rowwise scale_inv directly in
+ *                       the cuBLAS LT swizzled tile layout (rowwise only;
+ *                       colwise stays compact M-major).
  */
 void nvte_nvfp4_per_token_encode(const NVTETensor input, const NVTETensor noop, NVTETensor output,
-                                 int with_rht, int random_sign_mask_t, cudaStream_t stream);
+                                 int with_rht, int random_sign_mask_t, int with_swizzle,
+                                 cudaStream_t stream);
 
 /*! \brief Returns 1 iff the per-token kernels accept ``(M, K, dtype)``.
  *

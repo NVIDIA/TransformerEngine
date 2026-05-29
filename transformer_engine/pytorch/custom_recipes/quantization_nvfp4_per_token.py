@@ -214,26 +214,17 @@ def nvfp4_per_token_quantize(
     columnwise: bool = False,
     with_rht: bool = False,
     random_sign_mask_t: int = 0xACE1,
+    with_swizzle: bool = False,
 ) -> RefNVFP4TensorPerToken:
     """Production NVFP4 per-token cast through ``tex.nvfp4_per_token_quantize``.
 
-    Backed by the TMA + mbarrier + 64x64 sub-tile pipeline
-    (``common/cast/nvfp4/quantize_nvfp4_per_token.cu``). The C-API
-    runs K1 (per-row + per-col amax) and K2 (FP4 + e4m3 SF encode) back-
-    to-back on the same stream.
-
-    Returns a ``RefNVFP4TensorPerToken`` populated with the kernel
-    output (compact, non-swizzled scales). The Python-level container is
-    the same as the reference for symmetry; only the source of the
-    values differs.
-
-    For cuBLAS LT consumption, the caller must swizzle the inner SF
-    before forwarding to the GEMM; ``gemm_nvfp4_per_token`` handles
-    this automatically.
-
-    ``with_rht=True`` applies a 16-pt col-wise RHT in BOTH K1 and K2 so
-    outer + inner SF stay self-consistent (rowwise never sees RHT).
+    Composite K1 (per-row/per-col amax) + K2 (FP4 + e4m3 SF) on the same
+    stream. ``with_rht``: 16-pt col-wise RHT in K1+K2 (rowwise unaffected);
     ``random_sign_mask_t`` low 16 bits = sign pattern (default ``0xACE1``).
+
+    ``with_swizzle=True``: rowwise ``scale_inv`` in cuBLAS LT layout
+    (colwise stays compact). Downstream ``nvfp4_per_token_gemm`` must
+    use ``sf_swizzled=True`` to skip its built-in swizzle.
 
     Raises ``ValueError`` on non-bf16 input or non-128-aligned shapes.
     """
@@ -277,6 +268,7 @@ def nvfp4_per_token_quantize(
         columnwise,
         with_rht=with_rht,
         random_sign_mask_t=int(random_sign_mask_t) & 0xFFFF,
+        with_swizzle=with_swizzle,
     )
 
     out = RefNVFP4TensorPerToken()
@@ -363,21 +355,15 @@ def nvfp4_per_token_encode(
     columnwise: bool = True,
     with_rht: bool = False,
     random_sign_mask_t: int = 0xACE1,
+    with_swizzle: bool = False,
 ) -> RefNVFP4TensorPerToken:
-    """Kernel 2 in isolation: FP4 + e4m3 SF encode given pre-filled
-    amax buffer(s).
+    """K2 in isolation: FP4 + e4m3 SF given pre-filled amax buffer(s)
+    (``row_amax`` ``(M,)`` and/or ``col_amax`` ``(K,)`` from a prior
+    ``nvfp4_per_token_amax`` call).
 
-    ``row_amax`` of shape ``(M,)`` is required when ``rowwise=True``; same
-    for ``col_amax`` of shape ``(K,)`` when ``columnwise=True``. The
-    buffers are typically produced by a prior
-    ``nvfp4_per_token_amax`` call.
-
-    Lets the benchmark compare K2 wall-time against the production
-    per-tensor cast pass. Production callers should use the composite
-    ``nvfp4_per_token_quantize`` instead.
-
-    ``with_rht=True`` requires ``col_amax`` produced by a prior K1 call
-    with the SAME mask, else inner SF / FP4 saturate.
+    ``with_rht=True`` requires ``col_amax`` from a K1 call with the SAME
+    mask. ``with_swizzle=True`` emits rowwise ``scale_inv`` in cuBLAS LT
+    swizzled layout (skips a downstream swizzle launch).
 
     Raises ``ValueError`` on non-bf16 input, non-128-aligned shapes, or
     missing / mis-shaped amax buffers.
@@ -421,6 +407,7 @@ def nvfp4_per_token_encode(
         columnwise,
         with_rht=with_rht,
         random_sign_mask_t=int(random_sign_mask_t) & 0xFFFF,
+        with_swizzle=with_swizzle,
     )
 
     out = RefNVFP4TensorPerToken()

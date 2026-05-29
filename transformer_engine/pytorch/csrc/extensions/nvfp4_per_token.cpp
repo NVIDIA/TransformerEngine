@@ -110,19 +110,22 @@ void assemble_per_token_tensors(const at::Tensor& input, at::Tensor q_row, at::T
 
 }  // namespace
 
-// Production composite (K1 + K2 back-to-back). with_rht=true enables the
-// 16-pt col-wise RHT in BOTH K1 and K2 so outer + inner SFs stay consistent.
+// Composite K1 + K2 (back-to-back). with_rht: 16-pt col-wise RHT in both
+// (keeps outer + inner SFs consistent). with_swizzle: K2 emits rowwise
+// scale_inv in cuBLAS LT swizzled layout (skips downstream swizzle).
 void nvfp4_per_token_quantize(const at::Tensor& input, at::Tensor q_row, at::Tensor s_dec_row,
                               at::Tensor row_amax, at::Tensor q_col, at::Tensor s_dec_col,
                               at::Tensor col_amax, bool rowwise, bool columnwise, bool with_rht,
-                              int64_t random_sign_mask_t) {
+                              int64_t random_sign_mask_t, bool with_swizzle) {
   TensorWrapper in_te;
   TensorWrapper out_te(NVTE_NVFP4_1D_SCALING);
   assemble_per_token_tensors(input, q_row, s_dec_row, row_amax, q_col, s_dec_col, col_amax, rowwise,
                              columnwise, /*mode=*/0, in_te, out_te);
+  if (with_swizzle) out_te.set_with_gemm_swizzled_scales(true);
   const auto stream = at::cuda::getCurrentCUDAStream();
   nvte_nvfp4_per_token_quantize(in_te.data(), nullptr, out_te.data(), with_rht ? 1 : 0,
-                                static_cast<int>(random_sign_mask_t & 0xFFFF), stream);
+                                static_cast<int>(random_sign_mask_t & 0xFFFF), with_swizzle ? 1 : 0,
+                                stream);
 }
 
 // K1-only (diagnostic / bench): populates only amax buffers. with_rht=true
@@ -142,20 +145,22 @@ void nvfp4_per_token_amax(const at::Tensor& input, at::Tensor row_amax, at::Tens
                             static_cast<int>(random_sign_mask_t & 0xFFFF), stream);
 }
 
-// K2-only (diagnostic / bench): reads pre-filled amax buffers, emits FP4 + SFs.
-// with_rht=true requires col_amax to have been produced by an earlier K1
-// amax call with the SAME mask, else inner SFs are miscalibrated.
+// K2-only (bench): reads pre-filled amax, emits FP4 + SFs. with_rht needs
+// col_amax from K1 with the SAME mask (else inner SFs miscalibrate).
+// with_swizzle: rowwise scale_inv in cuBLAS LT swizzled layout.
 void nvfp4_per_token_encode(const at::Tensor& input, at::Tensor q_row, at::Tensor s_dec_row,
                             at::Tensor row_amax, at::Tensor q_col, at::Tensor s_dec_col,
                             at::Tensor col_amax, bool rowwise, bool columnwise, bool with_rht,
-                            int64_t random_sign_mask_t) {
+                            int64_t random_sign_mask_t, bool with_swizzle) {
   TensorWrapper in_te;
   TensorWrapper out_te(NVTE_NVFP4_1D_SCALING);
   assemble_per_token_tensors(input, q_row, s_dec_row, row_amax, q_col, s_dec_col, col_amax, rowwise,
                              columnwise, /*mode=*/2, in_te, out_te);
+  if (with_swizzle) out_te.set_with_gemm_swizzled_scales(true);
   const auto stream = at::cuda::getCurrentCUDAStream();
   nvte_nvfp4_per_token_encode(in_te.data(), nullptr, out_te.data(), with_rht ? 1 : 0,
-                              static_cast<int>(random_sign_mask_t & 0xFFFF), stream);
+                              static_cast<int>(random_sign_mask_t & 0xFFFF), with_swizzle ? 1 : 0,
+                              stream);
 }
 
 // Apply per-token post-scale to a GEMM output (see nvfp4_per_token.h for math).
@@ -191,14 +196,52 @@ void nvfp4_per_token_post_scale(at::Tensor d, const at::Tensor& row_amax_a,
   nvte_nvfp4_per_token_post_scale(d_te.data(), ra_te.data(), rb_te.data(), stream);
 }
 
-// End-to-end NVFP4 per-token GEMM: swizzle compact SFs -> cuBLAS LT NVFP4
-// GEMM (operand amax pinned to 1.0 to cancel the 2688^2 inner-SF factor) ->
-// per-row post-scale. beta must be 0.0. Math in nvfp4_per_token.h.
+// Standalone rowwise-SF swizzle for one NVFP4 operand: 1 launch ==
+// 1 nvte_swizzle_scaling_factors, mirrors prod's per-operand swizzle.
+// Bench-only (--qs); sf_in M-major (M, K/16) -> sf_out swizzled.
+void nvfp4_per_token_swizzle_rowwise_sf(const at::Tensor& data, const at::Tensor& sf_in,
+                                        at::Tensor sf_out) {
+  TORCH_CHECK(data.is_cuda() && sf_in.is_cuda() && sf_out.is_cuda(),
+              "All tensors must be CUDA tensors");
+  TORCH_CHECK(data.is_contiguous() && sf_in.is_contiguous() && sf_out.is_contiguous(),
+              "All tensors must be contiguous");
+  TORCH_CHECK(data.scalar_type() == at::ScalarType::Byte, "data must be uint8 (FP4 packed)");
+  TORCH_CHECK(sf_in.scalar_type() == at::ScalarType::Byte, "sf_in must be uint8 (FP8 e4m3)");
+  TORCH_CHECK(sf_out.scalar_type() == at::ScalarType::Byte, "sf_out must be uint8 (FP8 e4m3)");
+  TORCH_CHECK(data.dim() == 2, "data must be 2D (M, K/2)");
+  TORCH_CHECK(sf_in.numel() == sf_out.numel(), "sf_in/sf_out numel mismatch: ", sf_in.numel(),
+              " vs ", sf_out.numel());
+
+  const int64_t m = data.size(0);
+  const int64_t k = data.size(1) * 2;  // FP4 packed
+  TORCH_CHECK(k % 16 == 0, "k must be a multiple of 16 (NVFP4 inner SFVecSize), got ", k);
+  TORCH_CHECK(sf_in.numel() == m * k / 16, "sf_in numel mismatch: expected m*k/16=", m * k / 16,
+              ", got ", sf_in.numel());
+
+  const std::vector<size_t> data_shape = {static_cast<size_t>(m), static_cast<size_t>(k)};
+  const std::vector<size_t> sf_shape = {static_cast<size_t>(m), static_cast<size_t>(k / 16)};
+
+  TensorWrapper in_nvte(NVTE_NVFP4_1D_SCALING);
+  in_nvte.set_rowwise_data(data.data_ptr(), DType::kFloat4E2M1, data_shape);
+  in_nvte.set_rowwise_scale_inv(sf_in.data_ptr(), DType::kFloat8E4M3, sf_shape);
+
+  TensorWrapper out_nvte(NVTE_NVFP4_1D_SCALING);
+  out_nvte.set_rowwise_data(data.data_ptr(), DType::kFloat4E2M1, data_shape);
+  out_nvte.set_rowwise_scale_inv(sf_out.data_ptr(), DType::kFloat8E4M3, sf_shape);
+  out_nvte.set_with_gemm_swizzled_scales(true);
+
+  const auto stream = at::cuda::getCurrentCUDAStream();
+  nvte_swizzle_scaling_factors(in_nvte.data(), out_nvte.data(), stream);
+}
+
+// E2E NVFP4 per-token GEMM: swizzle SFs -> cuBLAS LT (amax pinned to 1.0
+// to cancel 2688^2 inner-SF) -> per-row post-scale. beta must be 0.
+// a_sf_swizzled/b_sf_swizzled=true skips the in-binding swizzle for that operand.
 void nvfp4_per_token_gemm(const at::Tensor& a_data, const at::Tensor& b_data,
                           const at::Tensor& a_sf, const at::Tensor& b_sf,
                           const at::Tensor& a_row_amax, const at::Tensor& b_row_amax, at::Tensor d,
                           const at::Tensor& workspace, int64_t m, int64_t n, int64_t k,
-                          double alpha, double beta) {
+                          double alpha, double beta, bool a_sf_swizzled, bool b_sf_swizzled) {
   TORCH_CHECK(a_data.is_cuda() && b_data.is_cuda() && a_sf.is_cuda() && b_sf.is_cuda() &&
                   a_row_amax.is_cuda() && b_row_amax.is_cuda() && d.is_cuda() &&
                   workspace.is_cuda(),
@@ -247,31 +290,37 @@ void nvfp4_per_token_gemm(const at::Tensor& a_data, const at::Tensor& b_data,
   const std::vector<size_t> a_sf_shape = {static_cast<size_t>(m), static_cast<size_t>(k / 16)};
   const std::vector<size_t> b_sf_shape = {static_cast<size_t>(n), static_cast<size_t>(k / 16)};
 
-  // Swizzled SF buffers (cuBLAS LT requires swizzled layout).
+  // SF buffers for cuBLAS LT: reuse caller's buffer if already swizzled,
+  // else allocate a swizzled copy. 0/1/2 swizzle launches total.
   auto byte_opts = a_sf.options().dtype(at::kByte);
-  at::Tensor a_sf_swizzled = at::empty({a_sf.numel()}, byte_opts);
-  at::Tensor b_sf_swizzled = at::empty({b_sf.numel()}, byte_opts);
-
-  {
+  at::Tensor a_sf_buf;
+  at::Tensor b_sf_buf;
+  if (a_sf_swizzled) {
+    a_sf_buf = a_sf;
+  } else {
+    a_sf_buf = at::empty({a_sf.numel()}, byte_opts);
     TensorWrapper in_nvte(NVTE_NVFP4_1D_SCALING);
     in_nvte.set_rowwise_data(a_data.data_ptr(), DType::kFloat4E2M1, a_data_shape);
     in_nvte.set_rowwise_scale_inv(a_sf.data_ptr(), DType::kFloat8E4M3, a_sf_shape);
 
     TensorWrapper out_nvte(NVTE_NVFP4_1D_SCALING);
     out_nvte.set_rowwise_data(a_data.data_ptr(), DType::kFloat4E2M1, a_data_shape);
-    out_nvte.set_rowwise_scale_inv(a_sf_swizzled.data_ptr(), DType::kFloat8E4M3, a_sf_shape);
+    out_nvte.set_rowwise_scale_inv(a_sf_buf.data_ptr(), DType::kFloat8E4M3, a_sf_shape);
     out_nvte.set_with_gemm_swizzled_scales(true);
 
     nvte_swizzle_scaling_factors(in_nvte.data(), out_nvte.data(), stream);
   }
-  {
+  if (b_sf_swizzled) {
+    b_sf_buf = b_sf;
+  } else {
+    b_sf_buf = at::empty({b_sf.numel()}, byte_opts);
     TensorWrapper in_nvte(NVTE_NVFP4_1D_SCALING);
     in_nvte.set_rowwise_data(b_data.data_ptr(), DType::kFloat4E2M1, b_data_shape);
     in_nvte.set_rowwise_scale_inv(b_sf.data_ptr(), DType::kFloat8E4M3, b_sf_shape);
 
     TensorWrapper out_nvte(NVTE_NVFP4_1D_SCALING);
     out_nvte.set_rowwise_data(b_data.data_ptr(), DType::kFloat4E2M1, b_data_shape);
-    out_nvte.set_rowwise_scale_inv(b_sf_swizzled.data_ptr(), DType::kFloat8E4M3, b_sf_shape);
+    out_nvte.set_rowwise_scale_inv(b_sf_buf.data_ptr(), DType::kFloat8E4M3, b_sf_shape);
     out_nvte.set_with_gemm_swizzled_scales(true);
 
     nvte_swizzle_scaling_factors(in_nvte.data(), out_nvte.data(), stream);
@@ -294,13 +343,13 @@ void nvfp4_per_token_gemm(const at::Tensor& a_data, const at::Tensor& b_data,
   // Assemble A's NVTE tensor: NVFP4_1D_SCALING + swizzled SF + amax=1.0.
   TensorWrapper a_te(NVTE_NVFP4_1D_SCALING);
   a_te.set_rowwise_data(a_data.data_ptr(), DType::kFloat4E2M1, a_data_shape);
-  a_te.set_rowwise_scale_inv(a_sf_swizzled.data_ptr(), DType::kFloat8E4M3, a_sf_shape);
+  a_te.set_rowwise_scale_inv(a_sf_buf.data_ptr(), DType::kFloat8E4M3, a_sf_shape);
   a_te.set_amax(amax_one.data_ptr(), DType::kFloat32, std::vector<size_t>{1});
   a_te.set_with_gemm_swizzled_scales(true);
 
   TensorWrapper b_te(NVTE_NVFP4_1D_SCALING);
   b_te.set_rowwise_data(b_data.data_ptr(), DType::kFloat4E2M1, b_data_shape);
-  b_te.set_rowwise_scale_inv(b_sf_swizzled.data_ptr(), DType::kFloat8E4M3, b_sf_shape);
+  b_te.set_rowwise_scale_inv(b_sf_buf.data_ptr(), DType::kFloat8E4M3, b_sf_shape);
   b_te.set_amax(amax_one.data_ptr(), DType::kFloat32, std::vector<size_t>{1});
   b_te.set_with_gemm_swizzled_scales(true);
 
