@@ -259,8 +259,6 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
   bool empty_input_buffer = logical_first_dim == 0 || logical_last_dim == 0;
 
   auto quantizer_cpp = convert_quantizer(quantizer);
-  NVTE_CHECK(!(first_dims.has_value() && last_dims.has_value()),
-             "group_quantize does not support varying both first_dims and last_dims.");
 
   // Create input GroupedTensor.
   auto grouped_input_tensor = GroupedTensorWrapper(num_tensors, logical_shape);
@@ -275,12 +273,6 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
       logical_last_dim);
 
   // dispatch to scaling methods
-  //
-  // NOTE: Float8Quantizer (delayed / pre-computed scaling) is intentionally
-  // *not* a supported quantizer for group_quantize. Grouped FP8 quantization
-  // is current-scaling only: we always compute amax + scale within the call.
-  // The `tex.quantize` API is the right entry point if you have a precomputed
-  // FP8 scale.
   enum class GroupedQuantizationMode {
     FP8_CURRENT_SCALING_GROUPED_QUANTIZE,
     MXFP8_GROUPED_QUANTIZE,
@@ -343,11 +335,15 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
 }
 
 py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
-                                const size_t num_tensors, std::optional<at::Tensor> first_dims) {
+                                const size_t num_tensors, std::optional<at::Tensor> first_dims,
+                                std::optional<at::Tensor> last_dims) {
   using namespace transformer_engine::pytorch::detail;
   init_extension();
 
   NVTE_CHECK(tensor.dim() == 2, "Tensor must be 2D");
+  NVTE_CHECK(!last_dims.has_value(),
+             "bgrad_group_quantize: varying last dim is not supported because the underlying "
+             "MXFP8 dbias kernel requires a constant last dimension across grouped tensors.");
 
   std::vector<size_t> logical_shape;
   for (const auto &d : tensor.sizes()) {

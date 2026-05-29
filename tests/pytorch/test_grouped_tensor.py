@@ -354,46 +354,81 @@ class TestGroupedTensor:
             cumulative_numel += tensor_shape[0] * tensor_shape[1]
 
     @pytest.mark.parametrize(
-        "shape",
-        [[(256, 512), (512, 512), (768, 512)], [(512, 512), (512, 512), (512, 512)]],
+        "shape_case",
+        ["varying_first", "varying_last", "varying_both"],
     )
     @pytest.mark.parametrize("output_dbias", [False, True])
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
-    def test_quantize_grouped_mxfp8(self, shape: List[Tuple[int, int]], output_dbias: bool) -> None:
-        """Test grouped quantization for MXFP8 against per-tensor quantization."""
-        # Test wont pass until the grouped quantization PR from Oleg is merged.
-        num_tensors = 2
-        shape = [(512, 1024) for _ in range(num_tensors)]
+    def test_quantize_grouped_mxfp8(self, shape_case: str, output_dbias: bool) -> None:
+        """Test grouped MXFP8 quantization against per-tensor quantization for
+        varying first/last/both dimensions."""
+        if output_dbias and shape_case != "varying_first":
+            pytest.skip("bgrad_group_quantize requires constant last dimension")
 
-        # Create BF16 input tensors and pack into a 2D tensor
-        input_tensors = [torch.randn(s, dtype=torch.bfloat16, device="cuda") for s in shape]
-        grouped_input = torch.cat(input_tensors, dim=0)
+        # Per-tensor shapes are chosen to satisfy MXFP8 alignment requirements:
+        #   - rowwise scale block size 32 -> last dim must be a multiple of 32
+        #   - kernel chunk size 128 along the first dim -> first dim must be a
+        #     multiple of 128 (per-tensor for VARYING_BOTH_DIMS, otherwise the
+        #     logical first dim).
+        if shape_case == "varying_first":
+            per_tensor_shapes = [(128, 512), (256, 512), (384, 512)]
+        elif shape_case == "varying_last":
+            per_tensor_shapes = [(512, 128), (512, 256), (512, 384)]
+        else:  # varying_both
+            per_tensor_shapes = [(128, 256), (256, 512), (384, 384)]
 
-        # Create MXFP8 output grouped tensor (rowwise only for easier validation)
-        quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
-        quantizer.set_usage(rowwise=True, columnwise=False)
-        first_dims = torch.tensor(
-            [shape[0][0] for _ in range(num_tensors)],
-            dtype=torch.int64,
-            device="cuda",
+        num_tensors = len(per_tensor_shapes)
+
+        # Each tensor occupies a contiguous chunk of a flat buffer; the kernel
+        # locates each chunk via tensor_offsets, so the 2D view below only needs
+        # to encode the correct total number of elements.
+        input_tensors = [
+            torch.randn(s, dtype=torch.bfloat16, device="cuda") for s in per_tensor_shapes
+        ]
+        flat_buffer = torch.cat([t.reshape(-1) for t in input_tensors])
+
+        first_dims_host: Optional[List[int]]
+        last_dims_host: Optional[List[int]]
+        if shape_case == "varying_first":
+            first_dims_host = [s[0] for s in per_tensor_shapes]
+            last_dims_host = None
+            common_last = per_tensor_shapes[0][1]
+            grouped_input = flat_buffer.view(sum(first_dims_host), common_last)
+        elif shape_case == "varying_last":
+            first_dims_host = None
+            last_dims_host = [s[1] for s in per_tensor_shapes]
+            common_first = per_tensor_shapes[0][0]
+            grouped_input = flat_buffer.view(common_first, sum(last_dims_host))
+        else:  # varying_both
+            first_dims_host = [s[0] for s in per_tensor_shapes]
+            last_dims_host = [s[1] for s in per_tensor_shapes]
+            grouped_input = flat_buffer.view(1, -1)
+
+        first_dims = (
+            torch.tensor(first_dims_host, dtype=torch.int64, device="cuda")
+            if first_dims_host is not None
+            else None
+        )
+        last_dims = (
+            torch.tensor(last_dims_host, dtype=torch.int64, device="cuda")
+            if last_dims_host is not None
+            else None
         )
 
-        # Quantize using grouped API
+        quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        quantizer.set_usage(rowwise=True, columnwise=False)
+
         if output_dbias:
             grouped_output, dbias = tex.bgrad_group_quantize(
-                grouped_input,
-                quantizer,
-                num_tensors,
-                first_dims,
+                grouped_input, quantizer, num_tensors, first_dims, last_dims
             )
         else:
             grouped_output = tex.group_quantize(
-                grouped_input,
-                quantizer,
-                num_tensors,
-                first_dims,
+                grouped_input, quantizer, num_tensors, first_dims, last_dims
             )
-        # Build expected output by quantizing each tensor independently
+
+        # Reference: quantize each tensor independently and concatenate the
+        # rowwise data / scale_inv buffers in tensor order.
         expected_data = []
         expected_scale_inv = []
         for tensor in input_tensors:

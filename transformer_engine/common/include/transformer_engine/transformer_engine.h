@@ -470,18 +470,41 @@ void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream
 
 /*! \brief Compute scaled prefix-sum offsets for grouped tensors.
  *
- *  Computes:
- *    output[0] = 0
- *    output[i + 1] = sum_{j=0..i}(first_dims[j] * logical_last_dim)
- *  for i in [0, num_tensors - 1].
+ *  Given per-tensor "first" dimensions and/or per-tensor "last" dimensions,
+ *  compute the cumulative element offsets:
  *
- *  \param[in] first_dims Pointer to device int64 array of size num_tensors.
- *  \param[out] output Pointer to device int64 array of size num_tensors + 1.
- *  \param[in] num_tensors Number of entries in first_dims.
- *  \param[in] logical_last_dim Scale factor applied to each first_dims entry.
- *  \param[in] stream CUDA stream to use for the operation.
+ *    output[0] = 0
+ *    output[i] = sum_{j < i} f(j) * l(j)            for i in [1, num_tensors]
+ *
+ *  where:
+ *    * f(j) = first_dims[j]      if first_dims != nullptr,
+ *           = logical_first_dim  otherwise.
+ *    * l(j) = last_dims[j]       if last_dims  != nullptr,
+ *           = logical_last_dim   otherwise.
+ *
+ *  At least one of first_dims / last_dims must be non-null. The non-null
+ *  array is the "varying" dimension; the other side is broadcast from its
+ *  scalar fallback. Both arrays may be non-null, in which case each member
+ *  tensor's element count is `first_dims[j] * last_dims[j]` (both-varying
+ *  grouped tensors).
+ *
+ *  \param[in] first_dims        Per-tensor first dim (device int64 array of
+ *                               size num_tensors), or nullptr to broadcast
+ *                               `logical_first_dim`.
+ *  \param[in] last_dims         Per-tensor last dim (device int64 array of
+ *                               size num_tensors), or nullptr to broadcast
+ *                               `logical_last_dim`.
+ *  \param[out] output           Pointer to device int64 array of size
+ *                               num_tensors + 1.
+ *  \param[in] num_tensors       Number of entries in first_dims / last_dims.
+ *  \param[in] logical_first_dim Scalar fallback used when first_dims == nullptr.
+ *                               Must be > 0 in that case; ignored otherwise.
+ *  \param[in] logical_last_dim  Scalar fallback used when last_dims == nullptr.
+ *                               Must be > 0 in that case; ignored otherwise.
+ *  \param[in] stream            CUDA stream to use for the operation.
  */
-void nvte_splits_to_offsets(const int64_t *first_dims, int64_t *output, size_t num_tensors,
+void nvte_splits_to_offsets(const int64_t *first_dims, const int64_t *last_dims, int64_t *output,
+                            size_t num_tensors, int64_t logical_first_dim,
                             int64_t logical_last_dim, cudaStream_t stream);
 
 /*! \brief TE Grouped Tensor type

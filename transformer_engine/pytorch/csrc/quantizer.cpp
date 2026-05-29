@@ -86,32 +86,41 @@ std::vector<T> convert_shape_for_fp4(const std::vector<T>& shape) {
   return ret;
 }
 
-std::optional<at::Tensor> build_grouped_tensor_offsets(
-    const size_t num_tensors, const std::optional<at::Tensor>& first_dims,
-    const std::optional<at::Tensor>& last_dims, const size_t logical_first_dim,
-    const size_t logical_last_dim) {
-  NVTE_CHECK(!(first_dims.has_value() && last_dims.has_value()),
-             "Grouped tensor creation does not support varying both first and last dimensions.");
-  const std::optional<at::Tensor>& varying_dim = first_dims.has_value() ? first_dims : last_dims;
-  if (!varying_dim.has_value()) {
-    return std::nullopt;
-  }
-
-  const auto& dims_tensor = varying_dim.value();
-  const char *dims_name = first_dims.has_value() ? "first_dims" : "last_dims";
+/*! @brief Validate optional first_dims / last_dims tensors */
+void check_grouped_dims_tensor(const at::Tensor& dims_tensor, const char* dims_name,
+                               const size_t num_tensors) {
   NVTE_CHECK(dims_tensor.is_cuda(), dims_name, " must be on CUDA.");
   NVTE_CHECK(dims_tensor.scalar_type() == at::kLong, dims_name, " must have dtype int64.");
   NVTE_CHECK(dims_tensor.is_contiguous(), dims_name, " must be contiguous.");
   NVTE_CHECK(static_cast<size_t>(dims_tensor.numel()) == num_tensors, dims_name,
              " must have length ", num_tensors, ".");
+}
 
-  const int64_t common_dim =
-      static_cast<int64_t>(first_dims.has_value() ? logical_last_dim : logical_first_dim);
-  auto tensor_offsets = at::empty({static_cast<int64_t>(num_tensors) + 1}, dims_tensor.options());
+std::optional<at::Tensor> build_grouped_tensor_offsets(
+    const size_t num_tensors, const std::optional<at::Tensor>& first_dims,
+    const std::optional<at::Tensor>& last_dims, const size_t logical_first_dim,
+    const size_t logical_last_dim) {
+  if (!first_dims.has_value() && !last_dims.has_value()) {
+    return std::nullopt;
+  }
+
+  if (first_dims.has_value()) {
+    check_grouped_dims_tensor(*first_dims, "first_dims", num_tensors);
+  }
+  if (last_dims.has_value()) {
+    check_grouped_dims_tensor(*last_dims, "last_dims", num_tensors);
+  }
+
+  const at::TensorOptions options =
+      first_dims.has_value() ? first_dims->options() : last_dims->options();
+  auto tensor_offsets = at::empty({static_cast<int64_t>(num_tensors) + 1}, options);
   NVTE_SCOPED_GIL_RELEASE({
-    nvte_splits_to_offsets(static_cast<const int64_t*>(dims_tensor.data_ptr()),
-                           static_cast<int64_t*>(tensor_offsets.data_ptr()), num_tensors,
-                           common_dim, at::cuda::getCurrentCUDAStream());
+    nvte_splits_to_offsets(
+        first_dims.has_value() ? static_cast<const int64_t*>(first_dims->data_ptr()) : nullptr,
+        last_dims.has_value() ? static_cast<const int64_t*>(last_dims->data_ptr()) : nullptr,
+        static_cast<int64_t*>(tensor_offsets.data_ptr()), num_tensors,
+        static_cast<int64_t>(logical_first_dim), static_cast<int64_t>(logical_last_dim),
+        at::cuda::getCurrentCUDAStream());
   });
   return tensor_offsets;
 }
@@ -707,6 +716,11 @@ std::pair<GroupedTensorWrapper, py::object> Float8CurrentScalingQuantizer::creat
     const std::optional<at::Tensor>& last_dims, const size_t logical_first_dim,
     const size_t logical_last_dim) const {
   using namespace pybind11::literals;
+
+  // Group Quantize is not implemented for varying both dims yet.
+  NVTE_CHECK(!(first_dims.has_value() && last_dims.has_value()),
+             "FP8 current-scaling grouped quantization does not support varying both "
+             "first and last dimensions.");
 
   const auto tensor_offsets =
       build_grouped_tensor_offsets(num_tensors, first_dims, last_dims, logical_first_dim,
@@ -1538,17 +1552,32 @@ std::pair<GroupedTensorWrapper, py::object> MXFP8Quantizer::create_grouped_tenso
   std::optional<at::Tensor> columnwise_scale_inv;
   const std::vector<size_t> logical_shape_vec = {logical_first_dim, logical_last_dim};
 
+  // For VARYING_BOTH_DIMS each tensor in groupe should have
+  // first dim/last_dim must be a multiple of 128
+  // so scale_inv_numel = data_numel / 128
+  const bool is_varying_both = first_dims.has_value() && last_dims.has_value();
+
   if (rowwise_usage) {
     rowwise_data = at::empty({total_elements}, uint8_opts);
-    const auto scale_shape = get_scale_shape(logical_shape_vec, false);
-    const int64_t total_scale_elements = static_cast<int64_t>(product(scale_shape));
+    int64_t total_scale_elements;
+    if (is_varying_both) {
+      total_scale_elements = total_elements / static_cast<int64_t>(MXFP8_BLOCK_SIZE);
+    } else {
+      const auto scale_shape = get_scale_shape(logical_shape_vec, false);
+      total_scale_elements = static_cast<int64_t>(product(scale_shape));
+    }
     rowwise_scale_inv = at::empty({total_scale_elements}, uint8_opts);
   }
 
   if (columnwise_usage) {
     columnwise_data = at::empty({total_elements}, uint8_opts);
-    const auto scale_shape = get_scale_shape(logical_shape_vec, true);
-    const int64_t total_scale_elements = static_cast<int64_t>(product(scale_shape));
+    int64_t total_scale_elements;
+    if (is_varying_both) {
+      total_scale_elements = total_elements / static_cast<int64_t>(MXFP8_BLOCK_SIZE);
+    } else {
+      const auto scale_shape = get_scale_shape(logical_shape_vec, true);
+      total_scale_elements = static_cast<int64_t>(product(scale_shape));
+    }
     columnwise_scale_inv = at::empty({total_scale_elements}, uint8_opts);
   }
 

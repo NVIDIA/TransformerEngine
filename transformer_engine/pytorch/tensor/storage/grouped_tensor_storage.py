@@ -463,14 +463,18 @@ class GroupedTensorStorage:
         else:
             last_dims = torch.tensor([s[1] for s in shapes], dtype=torch.int64, device=device)
         if first_dims is not None and last_dims is not None:
-            raise ValueError("GroupedTensor does not support varying both first and last dims")
-
-        logical_first_dim = (
-            first_dim_list[0]
-            if uniform_first_dim and not uniform_last_dim
-            else sum(first_dim_list)
-        )
-        logical_last_dim = sum(last_dim_list) if not uniform_last_dim else last_dim_list[0]
+            total_elements = sum(f * l for f, l in zip(first_dim_list, last_dim_list))
+            logical_first_dim = 1
+            logical_last_dim = total_elements
+        else:
+            logical_first_dim = (
+                first_dim_list[0]
+                if uniform_first_dim and not uniform_last_dim
+                else sum(first_dim_list)
+            )
+            logical_last_dim = (
+                sum(last_dim_list) if not uniform_last_dim else last_dim_list[0]
+            )
 
         return GroupedTensorStorage.make_grouped_tensor(
             num_tensors=num_tensors,
@@ -645,8 +649,6 @@ class GroupedTensorStorage:
         all_same_first = first_dims is None
         all_same_last = last_dims is None
 
-        if not all_same_first and not all_same_last:
-            raise ValueError("GroupedTensor does not support varying both first and last dims")
         assert logical_first_dim >= 0, "Logical first dim must be non-negative for GroupedTensor"
         assert logical_last_dim > 0, "Logical last dim must be positive for GroupedTensor"
 
@@ -659,24 +661,16 @@ class GroupedTensorStorage:
         tensor_offsets = None
         offsets = None
         shape = []
-        if not all_same_first:
+        if not all_same_first and not all_same_last:
+            tensor_offsets = GroupedTensorStorage.make_tensor_offsets(
+                first_dims * last_dims, 1
+            )
+        elif not all_same_first:
             # Need explicit offsets for non-uniform shapes
             # Offsets are based on number of elements and not pointers.
             # Kernels need to calculate precise pointers based on size of elements.
+            # TODO(ksivaman): Single kernel + remove the host offset calculation.
             tensor_offsets = GroupedTensorStorage.make_tensor_offsets(first_dims, logical_last_dim)
-            if (
-                first_dims.device.type == "cuda"
-                and torch.cuda.is_available()
-                and torch.cuda.is_current_stream_capturing()
-            ):
-                # Avoid host sync during CUDA graph capture.
-                offsets = None
-                shape = None
-            else:
-                offsets = tensor_offsets.tolist()
-                first_dims_list = first_dims.tolist()
-                for i in range(num_tensors):
-                    shape.append((first_dims_list[i], logical_last_dim))
         elif not all_same_last:
             tensor_offsets = GroupedTensorStorage.make_tensor_offsets(last_dims, logical_first_dim)
         else:
@@ -695,22 +689,25 @@ class GroupedTensorStorage:
         columnwise_usage = quantizer.columnwise_usage if not no_quantization else False
         compatible_recipe = None if no_quantization else quantizer._get_compatible_recipe()
 
-        # BlockScaling needs scale_inv sizes to be calculated which requires shape information on host.
-        is_block_scaling = compatible_recipe is not None and\
-            (compatible_recipe.float8_block_scaling() or compatible_recipe.mxfp8() or\
-            compatible_recipe.nvfp4())
-        if shape is None and is_block_scaling:
+        if not shape:
             if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
                 raise ValueError(
                     "Varying-dimension grouped tensor construction is not graph-safe for block-scaling quantizers"
                 )
-            offsets = tensor_offsets.tolist()
-            if first_dims is not None:
-                first_dims_list = first_dims.tolist()
-                shape = [(rows, logical_last_dim) for rows in first_dims_list]
             else:
-                last_dims_list = last_dims.tolist()
-                shape = [(logical_first_dim, cols) for cols in last_dims_list]
+                offsets = tensor_offsets.tolist()
+                if first_dims is not None and last_dims is not None:
+                    first_dims_list = first_dims.tolist()
+                    last_dims_list = last_dims.tolist()
+                    shape = [
+                        (first_dims_list[i], last_dims_list[i]) for i in range(num_tensors)
+                    ]
+                elif first_dims is not None:
+                    first_dims_list = first_dims.tolist()
+                    shape = [(rows, logical_last_dim) for rows in first_dims_list]
+                else:
+                    last_dims_list = last_dims.tolist()
+                    shape = [(logical_first_dim, cols) for cols in last_dims_list]
 
         # Calculate total elements across all tensors
         total_elements = logical_first_dim * logical_last_dim

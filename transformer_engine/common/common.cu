@@ -88,8 +88,10 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 }
 
 __global__ void __launch_bounds__(kThreadsPerBlock)
-    splits_to_offsets_kernel(const int64_t *__restrict__ first_dims, int64_t *__restrict__ output,
-                             size_t num_tensors, int64_t logical_last_dim) {
+    splits_to_offsets_kernel(const int64_t *__restrict__ first_dims,
+                             const int64_t *__restrict__ last_dims, int64_t *__restrict__ output,
+                             size_t num_tensors, int64_t logical_first_dim,
+                             int64_t logical_last_dim) {
   __shared__ int64_t block_scan[kThreadsPerBlock];
   __shared__ int64_t chunk_prefix;
 
@@ -104,7 +106,10 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     const size_t idx = chunk_start + tid;
     int64_t value = 0;
     if (idx < num_tensors) {
-      value = first_dims[idx] * logical_last_dim;
+      const int64_t first =
+          first_dims != nullptr ? first_dims[idx] : logical_first_dim;
+      const int64_t last = last_dims != nullptr ? last_dims[idx] : logical_last_dim;
+      value = first * last;
     }
     block_scan[tid] = value;
     __syncthreads();
@@ -159,16 +164,25 @@ void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream
   MEMSET_VECTORIZED_KERNEL_DISPATCH(ptr, size_in_bytes, value, uint8_t, stream);
 }
 
-void nvte_splits_to_offsets(const int64_t *first_dims, int64_t *output, size_t num_tensors,
+void nvte_splits_to_offsets(const int64_t *first_dims, const int64_t *last_dims, int64_t *output,
+                            size_t num_tensors, int64_t logical_first_dim,
                             int64_t logical_last_dim, cudaStream_t stream) {
   NVTE_API_CALL(nvte_splits_to_offsets);
   NVTE_CHECK(output != nullptr, "Output pointer must be allocated.");
   NVTE_CHECK(num_tensors > 0, "num_tensors must be greater than 0.");
-  NVTE_CHECK(first_dims != nullptr, "first_dims pointer must be allocated.");
-  NVTE_CHECK(logical_last_dim > 0, "logical_last_dim must be greater than 0.");
+  NVTE_CHECK(first_dims != nullptr || last_dims != nullptr,
+             "At least one of first_dims / last_dims must be non-null.");
+  if (first_dims == nullptr) {
+    NVTE_CHECK(logical_first_dim > 0,
+               "logical_first_dim must be greater than 0 when first_dims is null.");
+  }
+  if (last_dims == nullptr) {
+    NVTE_CHECK(logical_last_dim > 0,
+               "logical_last_dim must be greater than 0 when last_dims is null.");
+  }
 
-  splits_to_offsets_kernel<<<1, kThreadsPerBlock, 0, stream>>>(first_dims, output, num_tensors,
-                                                               logical_last_dim);
+  splits_to_offsets_kernel<<<1, kThreadsPerBlock, 0, stream>>>(
+      first_dims, last_dims, output, num_tensors, logical_first_dim, logical_last_dim);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 }  // extern "C"
