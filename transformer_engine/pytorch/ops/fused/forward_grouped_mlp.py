@@ -286,12 +286,12 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
             grouped_fc2_weight = quantized_fc2_weights
 
         # Some wrapper-copy paths may drop grouped storage metadata; enforce defaults.
-        if getattr(grouped_fc1_weight, "_with_gemm_swizzled_scales", None) is None and isinstance(
-            grouped_fc1_weight, GroupedTensor
+        if isinstance(grouped_fc1_weight, GroupedTensor) and not hasattr(
+            grouped_fc1_weight, "_with_gemm_swizzled_scales"
         ):
             grouped_fc1_weight._with_gemm_swizzled_scales = False
-        if getattr(grouped_fc2_weight, "_with_gemm_swizzled_scales", None) is None and isinstance(
-            grouped_fc2_weight, GroupedTensor
+        if isinstance(grouped_fc2_weight, GroupedTensor) and not hasattr(
+            grouped_fc2_weight, "_with_gemm_swizzled_scales"
         ):
             grouped_fc2_weight._with_gemm_swizzled_scales = False
 
@@ -340,11 +340,7 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
         fc1_x_data = fc1_x_data.unsqueeze(0).permute(1, 2, 0)
         fc1_x_scales = grouped_fc1_x.scale_inv
         fc1_x_scales = fc1_x_scales.view(dtype=scale_view_dtype)
-        with_gemm_swizzled_scales = getattr(
-            grouped_fc1_x,
-            "_with_gemm_swizzled_scales",
-            getattr(grouped_fc1_x, "with_gemm_swizzled_scales", False),
-        )
+        with_gemm_swizzled_scales = grouped_fc1_x._with_gemm_swizzled_scales
         if use_nvfp4 and with_gemm_swizzled_scales:
             fc1_x_scales = fc1_x_scales.view(
                 1,
@@ -522,7 +518,7 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc2_x_single = _nvfp4_single_tensor_from_grouped(
                     grouped_fc2_x,
                     fc2_input_quantizer,
-                    fp4_dtype=getattr(fc2_w_single, "_fp4_dtype", fc2_input_quantizer.dtype),
+                    fp4_dtype=fc2_w_single._fp4_dtype,
                 )
                 general_gemm(
                     fc2_w_single,

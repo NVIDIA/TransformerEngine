@@ -264,8 +264,8 @@ def _compute_grad_params(
             num_groups == 1
             and isinstance(grouped_x, GroupedTensor)
             and isinstance(grouped_dy, GroupedTensor)
-            and isinstance(getattr(grouped_x, "quantizer", None), NVFP4Quantizer)
-            and isinstance(getattr(grouped_dy, "quantizer", None), NVFP4Quantizer)
+            and isinstance(grouped_x.quantizer, NVFP4Quantizer)
+            and isinstance(grouped_dy.quantizer, NVFP4Quantizer)
         ):
             gemm_fn = functools.partial(
                 _nvfp4_single_group_wgrad_gemm,
@@ -531,11 +531,7 @@ class _BackwardGroupedMLP_CuTeGEMMDBase(FusedOperation):
         fc2_dy_data = fc2_dy_data.unsqueeze(0).permute(1, 2, 0)
         fc2_dy_scales = grouped_fc2_dy.scale_inv
         fc2_dy_scales = fc2_dy_scales.view(dtype=scale_view_dtype)
-        with_gemm_swizzled_scales = getattr(
-            grouped_fc2_dy,
-            "_with_gemm_swizzled_scales",
-            getattr(grouped_fc2_dy, "with_gemm_swizzled_scales", False),
-        )
+        with_gemm_swizzled_scales = grouped_fc2_dy._with_gemm_swizzled_scales
         if use_nvfp4 and with_gemm_swizzled_scales:
             fc2_dy_scales = fc2_dy_scales.view(
                 1,

@@ -5,6 +5,7 @@
 """Helper functions used in fusible operations."""
 
 from __future__ import annotations
+from collections.abc import Iterable
 import functools
 import math
 from importlib.metadata import PackageNotFoundError, version as get_pkg_version
@@ -17,7 +18,7 @@ import transformer_engine_torch as tex
 from transformer_engine_torch import FP8TensorMeta
 from ..torch_version import torch_version
 from ..quantization import FP8GlobalStateManager
-from ..tensor import NVFP4Quantizer, NVFP4Tensor, Quantizer
+from ..tensor import NVFP4Quantizer, NVFP4Tensor, NVFP4TensorStorage, Quantizer
 from ..tensor.float8_tensor import Float8Tensor
 from ..tensor.grouped_tensor import GroupedTensor
 from ..quantized_tensor import QuantizedTensorStorage
@@ -68,22 +69,28 @@ def _group_quantize_for_grouped_mlp(
     *,
     tensor_offsets: Optional[torch.Tensor] = None,
 ) -> GroupedTensor:
-    """Quantize into grouped storage, using regular quantize for one-group NVFP4."""
+    """Quantize into grouped storage."""
+
+    # Typical case: group-quantize
     if num_groups != 1 or not isinstance(quantizer, NVFP4Quantizer):
         return tex.group_quantize(tensor, quantizer, num_groups, split_sizes)
 
+    # --------------------------------------------------
+    # Special case: single-tensor NVFP4 quantize
+    # --------------------------------------------------
+
     quantized = tex.quantize(tensor, quantizer)
-    with_gemm_swizzled_scales = getattr(quantized, "_with_gemm_swizzled_scales", False)
-    if getattr(quantizer, "optimize_for_gemm", False):
+    with_gemm_swizzled_scales = quantized._with_gemm_swizzled_scales
+    if quantizer.optimize_for_gemm:
         tex.swizzle_scales_for_gemm_(quantized)
         with_gemm_swizzled_scales = True
 
-    rowwise_data = getattr(quantized, "_rowwise_data", None)
-    rowwise_scale = getattr(quantized, "_rowwise_scale_inv", None)
-    columnwise_data = getattr(quantized, "_columnwise_data", None)
-    columnwise_scale = getattr(quantized, "_columnwise_scale_inv", None)
-    amax = getattr(quantized, "_amax_rowwise", None)
-    columnwise_amax = getattr(quantized, "_amax_columnwise", None)
+    rowwise_data = quantized._rowwise_data
+    rowwise_scale = quantized._rowwise_scale_inv
+    columnwise_data = quantized._columnwise_data
+    columnwise_scale = quantized._columnwise_scale_inv
+    amax = quantized._amax_rowwise
+    columnwise_amax = quantized._amax_columnwise
 
     if split_sizes is None:
         split_sizes = torch.full((1,), tensor.shape[0], dtype=torch.int64, device=tensor.device)
@@ -123,7 +130,11 @@ def _group_quantize_for_grouped_mlp(
     )
 
 
-def _nvfp4_amax(tensors: Any, *, columnwise: bool) -> torch.Tensor:
+def _nvfp4_amax(
+    tensors: GroupedTensor | Iterable[NVFP4TensorStorage],
+    *,
+    columnwise: bool,
+) -> torch.Tensor:
     """Get one NVFP4 amax value per group."""
     grouped_attr = "columnwise_amax" if columnwise else "amax"
     tensor_attr = "_amax_columnwise" if columnwise else "_amax_rowwise"
@@ -134,7 +145,7 @@ def _nvfp4_amax(tensors: Any, *, columnwise: bool) -> torch.Tensor:
             raise RuntimeError(f"NVFP4 GroupedTensor is missing {grouped_attr}.")
         return amax.view(-1)
 
-    amaxes = [getattr(tensor, tensor_attr, None) for tensor in tensors]
+    amaxes = [getattr(tensor, tensor_attr) for tensor in tensors]
     if any(amax is None for amax in amaxes):
         raise RuntimeError(f"NVFP4 tensor list is missing {tensor_attr}.")
     return torch.cat([amax.view(-1) for amax in amaxes], dim=0)
@@ -186,11 +197,7 @@ def _nvfp4_single_tensor_from_grouped(
         fp4_dtype=fp4_dtype or quantizer.dtype,
         quantizer=quantizer,
         requires_grad=False,
-        with_gemm_swizzled_scales=getattr(
-            grouped,
-            "_with_gemm_swizzled_scales",
-            getattr(grouped, "with_gemm_swizzled_scales", quantizer.optimize_for_gemm),
-        ),
+        with_gemm_swizzled_scales=grouped._with_gemm_swizzled_scales,
     )
 
 
