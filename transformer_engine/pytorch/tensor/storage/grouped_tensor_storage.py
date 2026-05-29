@@ -664,10 +664,21 @@ class GroupedTensorStorage:
             # Offsets are based on number of elements and not pointers.
             # Kernels need to calculate precise pointers based on size of elements.
             tensor_offsets = GroupedTensorStorage.make_tensor_offsets(first_dims, logical_last_dim)
-            shape = None
+            if (
+                first_dims.device.type == "cuda"
+                and torch.cuda.is_available()
+                and torch.cuda.is_current_stream_capturing()
+            ):
+                # Avoid host sync during CUDA graph capture.
+                offsets = None
+                shape = None
+            else:
+                offsets = tensor_offsets.tolist()
+                first_dims_list = first_dims.tolist()
+                for i in range(num_tensors):
+                    shape.append((first_dims_list[i], logical_last_dim))
         elif not all_same_last:
             tensor_offsets = GroupedTensorStorage.make_tensor_offsets(last_dims, logical_first_dim)
-            shape = None
         else:
             offsets = [
                 i * logical_first_dim * logical_last_dim // num_tensors
@@ -680,22 +691,18 @@ class GroupedTensorStorage:
         logical_shape = (logical_first_dim, logical_last_dim)
 
         no_quantization = quantizer is None
-
         rowwise_usage = quantizer.rowwise_usage if not no_quantization else True
         columnwise_usage = quantizer.columnwise_usage if not no_quantization else False
         compatible_recipe = None if no_quantization else quantizer._get_compatible_recipe()
-        fp8_tensor_scaling = (
-            compatible_recipe is not None
-            and (compatible_recipe.delayed() or compatible_recipe.float8_current_scaling())
-        )
-        non_tn_fp8_gemm_supported = fp8_tensor_scaling and is_non_tn_fp8_gemm_supported()
-        fp8_rowwise_usage = rowwise_usage or non_tn_fp8_gemm_supported
-        fp8_columnwise_usage = columnwise_usage and not non_tn_fp8_gemm_supported
-        if shape is None and compatible_recipe is not None and not fp8_tensor_scaling:
+
+        # BlockScaling needs scale_inv sizes to be calculated which requires shape information on host.
+        is_block_scaling = compatible_recipe is not None and\
+            (compatible_recipe.float8_block_scaling() or compatible_recipe.mxfp8() or\
+            compatible_recipe.nvfp4())
+        if shape is None and is_block_scaling:
             if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
                 raise ValueError(
-                    "Varying-dimension grouped tensor construction is graph-safe only for FP8 "
-                    "tensor-scaling quantizers"
+                    "Varying-dimension grouped tensor construction is not graph-safe for block-scaling quantizers"
                 )
             offsets = tensor_offsets.tolist()
             if first_dims is not None:
@@ -759,7 +766,7 @@ class GroupedTensorStorage:
                     total_columnwise_scale_elements, dtype=torch.uint8, device=device
                 )
         elif compatible_recipe.delayed():
-            if fp8_rowwise_usage:
+            if rowwise_usage:
                 # Allocate rowwise data buffer (1D flattened, uint8)
                 data = torch.empty(total_elements, dtype=torch.uint8, device=device)
                 # Scale inverse - one per tensor
@@ -767,7 +774,7 @@ class GroupedTensorStorage:
                 # One scale per tensor, so offsets are simply 0, 1, 2, ..., num_tensors
                 scale_inv_offsets = list(range(num_tensors + 1))
 
-            if fp8_columnwise_usage:
+            if columnwise_usage:
                 # Allocate columnwise data buffer (1D flattened, uint8)
                 columnwise_data = torch.empty(total_elements, dtype=torch.uint8, device=device)
                 # Columnwise scale inverse - one per tensor
@@ -857,6 +864,9 @@ class GroupedTensorStorage:
             # scaling), so rowwise/columnwise scale_inv hold identical values.
             # Allocate one shared buffer and alias both views to it (mirrors the
             # non-grouped path in Float8CurrentScalingQuantizer::create_tensor).
+            non_tn_fp8_gemm_supported = is_non_tn_fp8_gemm_supported()
+            fp8_rowwise_usage = rowwise_usage or non_tn_fp8_gemm_supported
+            fp8_columnwise_usage = columnwise_usage and not non_tn_fp8_gemm_supported
             shared_scale_inv = None
             if fp8_rowwise_usage or fp8_columnwise_usage:
                 shared_scale_inv = torch.empty(num_tensors, dtype=torch.float32, device=device)
@@ -917,11 +927,7 @@ class GroupedTensorStorage:
             nvfp4_use_4over6=nvfp4_use_4over6,
             nvfp4_e4m3_max=nvfp4_e4m3_max,
         )
-        grouped_tensor.quantized_tensors = (
-            grouped_tensor.split_into_quantized_tensors()
-            if grouped_tensor.tensor_shapes is not None
-            else None
-        )
+        grouped_tensor.quantized_tensors = grouped_tensor.split_into_quantized_tensors()
         return grouped_tensor
 
     def split_into_quantized_tensors(
