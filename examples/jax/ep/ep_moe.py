@@ -14,7 +14,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
-from transformer_engine.jax.ep import ep_bootstrap, ep_dispatch, ep_combine
+from transformer_engine.jax.ep import ep_bootstrap, ep_make_handle, ep_dispatch, ep_combine
 from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 
 
@@ -199,6 +199,7 @@ def _moe_step(args, topk_idx, tokens, topk_w, kernels):
     kernel_spec = PartitionSpec("ep", None, None, None)
 
     kernels = kernels.reshape(ep_size, NLE, *kernels.shape[1:])
+    ep_handle = ep_make_handle(args.top_k, dispatch_output_per_expert_alignment=16)
 
     @jax.jit
     def step(topk_idx, tokens, topk_w, local_kernels):
@@ -208,20 +209,16 @@ def _moe_step(args, topk_idx, tokens, topk_w, kernels):
         local_kernels = jax.lax.with_sharding_constraint(
             local_kernels, NamedSharding(mesh, kernel_spec)
         )
-        slots_per_expert = args.recv_capacity_per_rank // NLE
-        recv_tokens, recv_topk_w, handle, _tc = ep_dispatch(
-            topk_idx,
-            tokens,
-            topk_w,
-            args.recv_capacity_per_rank,
-            dispatch_output_per_expert_alignment=slots_per_expert,
+        recv_tokens, recv_topk_w, handle_mem, _tc = ep_dispatch(
+            ep_handle, topk_idx, tokens, topk_w, args.recv_capacity_per_rank
         )
         recv_tokens = jax.lax.with_sharding_constraint(recv_tokens, NamedSharding(mesh, ep3))
         recv_topk_w = jax.lax.with_sharding_constraint(recv_topk_w, NamedSharding(mesh, ep2))
         expert_out = _batched_expert_linear(recv_tokens, local_kernels, NLE, dp_size, ep_size)
         expert_out = jax.lax.with_sharding_constraint(expert_out, NamedSharding(mesh, ep3))
         return ep_combine(
-            handle,
+            ep_handle,
+            handle_mem,
             _tc,
             expert_out,
             recv_topk_w,

@@ -8,7 +8,7 @@ Sharding model:
     Sharded compound ``(dp_resource, ep_resource)`` when DP is set, else
     ``ep_resource`` alone.
   - EpDispatch inputs are 2D ``[T, H]`` or 3D ``[B, S, H]``; only the first
-    dim may be sharded, with axis ∈ {ep, (dp, ep), dp, None}. Trailing dims
+    dim may be sharded, with axis in {ep, (dp, ep), dp, None}. Trailing dims
     must be replicated. ``dp`` alone gets ``ep`` folded in locally.
   - EpCombine output sharding comes from ``out_sharding`` or defaults to the
     compound ``(dp, ep)`` axis on the leading dim.
@@ -21,7 +21,6 @@ import jax.numpy as jnp
 from jax import dtypes, ffi
 from jax.experimental.compute_on import compute_on
 from jax.sharding import NamedSharding, PartitionSpec
-import jax.tree_util as jtu
 
 import transformer_engine_jax
 from .base import BasePrimitive, register_primitive
@@ -34,30 +33,13 @@ __all__ = [
     "get_ep_config",
     "get_ep_num_local_experts",
     "ep_allocate_handle_id",
+    "ep_make_handle",
     "ep_prepare",
     "ep_dispatch_fwd",
     "ep_combine_fwd",
     "ep_dispatch_bwd",
     "ep_combine_bwd",
 ]
-
-
-# Routing-state container threaded through dispatch/combine/*_bwd.
-@jtu.register_pytree_node_class
-class EpHandle:
-    def __init__(self, handle_mem, handle_id):
-        self.handle_mem = handle_mem
-        self.handle_id = int(handle_id)
-
-    def tree_flatten(self):
-        return (self.handle_mem,), (self.handle_id,)
-
-    @classmethod
-    def tree_unflatten(cls, aux, children):
-        return cls(children[0], aux[0])
-
-    def __repr__(self):
-        return f"EpHandle(handle_id={self.handle_id})"
 
 
 # ── Module-level EP config ──────────────────────────────────────────────────
@@ -101,17 +83,43 @@ _HANDLE_MEM_SIZE_BY_ID: dict = {}
 
 
 def ep_allocate_handle_id(top_k: int, dispatch_output_per_expert_alignment: int = 0) -> int:
-    """Reserve a fresh handle_id for an EP layer.
-
-    Distinct logical layers must each call this — sharing a handle_id across
-    layers corrupts the routing state, even when (top_k, alignment) match.
-    """
+    """Low-level: reserve a fresh handle_id. Prefer ``ep_make_handle``."""
     handle_id, handle_mem_size = transformer_engine_jax.ep_register_layer(
         int(top_k), int(dispatch_output_per_expert_alignment)
     )
     handle_id = int(handle_id)
     _HANDLE_MEM_SIZE_BY_ID[handle_id] = int(handle_mem_size)
     return handle_id
+
+
+@dataclass(frozen=True)
+class EpHandle:
+    """Per-layer EP config + routing-slot identity.
+
+    Carries static layer config and a ``handle_id`` that pins the C++ routing
+    slot across re-traces. Allocate via ``ep_make_handle``; distinct layers
+    must hold distinct handles.
+    """
+
+    handle_id: int
+    top_k: int
+    dispatch_output_per_expert_alignment: int = 0
+
+
+def ep_make_handle(top_k: int, dispatch_output_per_expert_alignment: int = 0) -> EpHandle:
+    """Allocate a per-layer EP handle.
+
+    Call once per logical MoE layer at model init (outside ``jax.jit``), then
+    pass the same handle into every ``ep_dispatch`` / ``ep_combine`` for that
+    layer. The handle's ``handle_id`` survives re-traces, ``jax.checkpoint``
+    rematerialization, and separate inference/training compilations.
+    """
+    handle_id = ep_allocate_handle_id(top_k, dispatch_output_per_expert_alignment)
+    return EpHandle(
+        handle_id=handle_id,
+        top_k=int(top_k),
+        dispatch_output_per_expert_alignment=int(dispatch_output_per_expert_alignment),
+    )
 
 
 def _ep_handle_mem_size(handle_id: int) -> int:
@@ -874,40 +882,23 @@ register_primitive(EpCombineBwdPrimitive)
 # ── Public-ish helpers (used by jax/ep.py) ──────────────────────────────────
 
 
-_HANDLE_ID_CALLSITE_CACHE = {}
-
-
 @compute_on("gpu_stream:collective")
-def ep_prepare(topk_idx, dispatch_output_per_expert_alignment=0):
-    """Exchange routing metadata; return ``(token_counts, EpHandle)``."""
-    import sys as _sys
-
-    top_k = int(topk_idx.shape[-1])
-    alignment = int(dispatch_output_per_expert_alignment)
-    # Cache handle_id by caller (file:lineno, top_k, alignment): JAX re-traces
-    # the same call site (e.g. custom_vjp fwd vs primal) and the resulting
-    # EpHandles must share the same id to compare equal in pytree aux.
-    f = _sys._getframe(1)
-    cache_key = (f.f_code.co_filename, f.f_lineno, top_k, alignment)
-    handle_id = _HANDLE_ID_CALLSITE_CACHE.get(cache_key)
-    if handle_id is None:
-        handle_id = ep_allocate_handle_id(top_k, alignment)
-        _HANDLE_ID_CALLSITE_CACHE[cache_key] = handle_id
-    token_counts, handle_mem = EpPreparePrimitive.outer_primitive.bind(
+def ep_prepare(topk_idx, handle):
+    """Exchange routing metadata for ``handle``; return ``(token_counts, handle_mem)``."""
+    return EpPreparePrimitive.outer_primitive.bind(
         topk_idx,
-        handle_id=handle_id,
-        dispatch_output_per_expert_alignment=alignment,
+        handle_id=handle.handle_id,
+        dispatch_output_per_expert_alignment=handle.dispatch_output_per_expert_alignment,
         is_outer=True,
     )
-    return token_counts, EpHandle(handle_mem, handle_id)
 
 
 @compute_on("gpu_stream:collective")
-def ep_dispatch_fwd(handle, topk_idx, tokens, topk_weights, recv_capacity_per_rank):
-    """Scatter tokens and weights to expert ranks; returns (recv_tokens, recv_topk_weights, handle)."""
+def ep_dispatch_fwd(handle, handle_mem, topk_idx, tokens, topk_weights, recv_capacity_per_rank):
+    """Scatter tokens and weights to expert ranks; returns (recv_tokens, recv_topk_weights)."""
     top_k = int(topk_weights.shape[-1])
-    recv_tokens, recv_topk_weights = EpDispatchPrimitive.outer_primitive.bind(
-        handle.handle_mem,
+    return EpDispatchPrimitive.outer_primitive.bind(
+        handle_mem,
         topk_idx,
         tokens,
         topk_weights,
@@ -916,15 +907,14 @@ def ep_dispatch_fwd(handle, topk_idx, tokens, topk_weights, recv_capacity_per_ra
         top_k=top_k,
         is_outer=True,
     )
-    return recv_tokens, recv_topk_weights, handle
 
 
 @compute_on("gpu_stream:collective")
-def ep_combine_fwd(handle, expert_out, num_local_tokens, out_partition_spec=None):
+def ep_combine_fwd(handle, handle_mem, expert_out, num_local_tokens, out_partition_spec=None):
     """Gather expert outputs back to home ranks. expert_out is pre-weighted."""
     out_leading = _normalize_leading_shape(num_local_tokens)
     return EpCombinePrimitive.outer_primitive.bind(
-        handle.handle_mem,
+        handle_mem,
         expert_out,
         handle_id=handle.handle_id,
         out_leading_shape=out_leading,
@@ -934,12 +924,13 @@ def ep_combine_fwd(handle, expert_out, num_local_tokens, out_partition_spec=None
 
 @compute_on("gpu_stream:collective")
 def ep_dispatch_bwd(
-    handle, grad, g_recv_topk_weights, top_k, num_local_tokens, out_partition_spec=None
+    handle, handle_mem, grad, g_recv_topk_weights, top_k, num_local_tokens,
+    out_partition_spec=None,
 ):
     """Backward of dispatch; returns (grad_tokens, grad_topk_weights)."""
     out_leading = _normalize_leading_shape(num_local_tokens)
     return EpDispatchBwdPrimitive.outer_primitive.bind(
-        handle.handle_mem,
+        handle_mem,
         grad,
         g_recv_topk_weights,
         handle_id=handle.handle_id,
@@ -950,10 +941,10 @@ def ep_dispatch_bwd(
 
 
 @compute_on("gpu_stream:collective")
-def ep_combine_bwd(handle, grad, recv_capacity_per_rank):
+def ep_combine_bwd(handle, handle_mem, grad, recv_capacity_per_rank):
     """Backward of combine; returns grad_expert_out [num_procs, recv_capacity_per_rank, H]."""
     return EpCombineBwdPrimitive.outer_primitive.bind(
-        handle.handle_mem,
+        handle_mem,
         grad,
         handle_id=handle.handle_id,
         recv_capacity_per_rank=recv_capacity_per_rank,

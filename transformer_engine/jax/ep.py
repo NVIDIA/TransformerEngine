@@ -14,14 +14,16 @@ import numpy as np
 
 import transformer_engine_jax
 import transformer_engine.jax.cpp_extensions as tex
-from transformer_engine.jax.cpp_extensions.ep import EpHandle
 from transformer_engine.jax.sharding import global_mesh_resource, get_mesh_axis_size
 
 ep_prepare = tex.ep_prepare
+ep_make_handle = tex.ep_make_handle
+EpHandle = tex.EpHandle
 
 __all__ = [
     "EpHandle",
     "ep_bootstrap",
+    "ep_make_handle",
     "ep_prepare",
     "ep_dispatch",
     "ep_combine",
@@ -171,64 +173,34 @@ def ep_bootstrap(
 # ── ep_dispatch (custom_vjp) ─────────────────────────────────────────────────
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(3, 4))
-def ep_dispatch(
-    topk_idx,
-    tokens,
-    topk_weights,
-    recv_capacity_per_rank,
-    dispatch_output_per_expert_alignment=0,
-):
+@partial(jax.custom_vjp, nondiff_argnums=(0, 4))
+def ep_dispatch(handle, topk_idx, tokens, topk_weights, recv_capacity_per_rank):
     """Scatter tokens and weights to expert ranks.
 
-    Inputs are 2D ``[T, H]`` or 3D ``[B, S, H]``. Only the leading dim may
-    be sharded — axis ∈ {ep, (dp, ep), dp, None}; trailing dims replicated.
-
-    Args:
-        topk_idx:               ``[..., top_k]`` int32/int64 routing indices.
-        tokens:                 ``[..., H]`` activations (matching leading dims).
-        topk_weights:           ``[..., top_k]`` float32 routing weights.
-        recv_capacity_per_rank: STATIC int. Per-rank recv slot count.
-        dispatch_output_per_expert_alignment: STATIC int. Per-expert slot
-                                alignment; 0 disables.
-
-    Returns:
-        ``(recv_tokens, recv_topk_weights, handle, token_counts)`` where
-        ``recv_tokens`` is 3D ``[num_procs, recv_capacity_per_rank, H]``
-        sharded ``(("dp","ep"), None, None)`` (or ``("ep", None, None)`` if
-        DP is unset), and ``recv_topk_weights`` is 2D
-        ``[num_procs, recv_capacity_per_rank]`` similarly sharded. Pass
-        ``handle`` to the matching ``ep_combine``.
+    ``handle`` is a per-layer ``EpHandle`` from ``ep_make_handle``; distinct
+    layers must hold distinct handles. Inputs are 2D ``[T, H]`` or 3D
+    ``[B, S, H]`` with only the leading dim sharded
+    (axis in {ep, (dp, ep), dp, None}). Returns
+    ``(recv_tokens, recv_topk_weights, handle_mem, token_counts)``; pass
+    ``handle_mem`` and ``token_counts`` to the matching ``ep_combine``.
     """
-    return _dispatch_fwd(
-        topk_idx,
-        tokens,
-        topk_weights,
-        recv_capacity_per_rank,
-        dispatch_output_per_expert_alignment,
-    )[0]
+    return _dispatch_fwd(handle, topk_idx, tokens, topk_weights, recv_capacity_per_rank)[0]
 
 
-def _dispatch_fwd(
-    topk_idx,
-    tokens,
-    topk_weights,
-    recv_capacity_per_rank,
-    dispatch_output_per_expert_alignment,
-):
+def _dispatch_fwd(handle, topk_idx, tokens, topk_weights, recv_capacity_per_rank):
     top_k = int(topk_weights.shape[-1])
-    token_counts, handle = tex.ep_prepare(topk_idx, dispatch_output_per_expert_alignment)
-    recv_tokens, recv_topk_weights, handle = tex.ep_dispatch_fwd(
-        handle, topk_idx, tokens, topk_weights, recv_capacity_per_rank
+    token_counts, handle_mem = tex.ep_prepare(topk_idx, handle)
+    recv_tokens, recv_topk_weights = tex.ep_dispatch_fwd(
+        handle, handle_mem, topk_idx, tokens, topk_weights, recv_capacity_per_rank
     )
     out_leading = tuple(tokens.shape[:-1])
-    primal = (recv_tokens, recv_topk_weights, handle, token_counts)
-    return primal, (handle, out_leading, top_k)
+    primal = (recv_tokens, recv_topk_weights, handle_mem, token_counts)
+    return primal, (handle_mem, out_leading, top_k)
 
 
-def _dispatch_bwd(recv_capacity_per_rank, dispatch_output_per_expert_alignment, res, g_outputs):
-    del recv_capacity_per_rank, dispatch_output_per_expert_alignment
-    handle, out_leading, top_k = res
+def _dispatch_bwd(handle, recv_capacity_per_rank, res, g_outputs):
+    del recv_capacity_per_rank
+    handle_mem, out_leading, top_k = res
     # Re-pin cotangent sharding: XLA transpose can drop the EP axis on a
     # single-fwd-output cotangent, landing a global tensor in the FFI.
     gsr = global_mesh_resource()
@@ -242,7 +214,7 @@ def _dispatch_bwd(recv_capacity_per_rank, dispatch_output_per_expert_alignment, 
         g_outputs[1], jax.sharding.PartitionSpec(leading, None)
     )
     grad_tokens, grad_topk_weights = tex.ep_dispatch_bwd(
-        handle, g_recv_tokens, g_recv_topk_weights, top_k, out_leading
+        handle, handle_mem, g_recv_tokens, g_recv_topk_weights, top_k, out_leading
     )
     return (None, grad_tokens, grad_topk_weights)
 
@@ -253,31 +225,33 @@ ep_dispatch.defvjp(_dispatch_fwd, _dispatch_bwd)
 # ── ep_combine (custom_vjp) ──────────────────────────────────────────────────
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(4, 5))
+@partial(jax.custom_vjp, nondiff_argnums=(0, 5, 6))
 def ep_combine(
-    handle, token_counts, expert_out, recv_topk_weights, num_local_tokens, out_sharding=None
+    handle, handle_mem, token_counts, expert_out, recv_topk_weights,
+    num_local_tokens, out_sharding=None,
 ):
     """Reduce weighted expert outputs back to source ranks.
 
     Args:
-        handle:            ``EpHandle`` from a matching ``ep_dispatch`` call.
+        handle:            ``EpHandle`` matching the ``ep_dispatch`` call.
+        handle_mem:        Routing-state buffer returned by ``ep_dispatch``.
         token_counts:      ``[num_procs, num_local_experts]`` int32 (passed through).
         expert_out:        ``[num_procs, recv_capacity_per_rank, H]`` post-FFN activations.
         recv_topk_weights: ``[num_procs, recv_capacity_per_rank]`` float32 weights
                            returned by ``ep_dispatch``.
-        num_local_tokens:  STATIC int or tuple. int → 2D output ``[T, H]``;
-                           tuple → N-D output ``[*tuple, H]``.
+        num_local_tokens:  STATIC int or tuple. int -> 2D output ``[T, H]``;
+                           tuple -> N-D output ``[*tuple, H]``.
         out_sharding:      STATIC optional ``PartitionSpec`` tuple for the
                            output. Defaults to ``(("dp","ep"), *None)`` when
-                           DP is set, else ``("ep", *None)``. Pass a custom
-                           spec to override; only the leading dim may be
-                           sharded.
+                           DP is set, else ``("ep", *None)``. Only the leading
+                           dim may be sharded.
 
     Returns:
         ``[..., H]`` combined output shaped per ``num_local_tokens``.
     """
     return _combine_fwd(
-        handle, token_counts, expert_out, recv_topk_weights, num_local_tokens, out_sharding
+        handle, handle_mem, token_counts, expert_out, recv_topk_weights,
+        num_local_tokens, out_sharding,
     )[0]
 
 
@@ -287,18 +261,21 @@ def _make_valid_mask(recv_topk_weights, dtype):
 
 
 def _combine_fwd(
-    handle, token_counts, expert_out, recv_topk_weights, num_local_tokens, out_sharding
+    handle, handle_mem, token_counts, expert_out, recv_topk_weights,
+    num_local_tokens, out_sharding,
 ):
     del token_counts
     w = recv_topk_weights[..., None]
     mask = _make_valid_mask(recv_topk_weights, jnp.float32)
     weighted = (expert_out.astype(jnp.float32) * w * mask).astype(expert_out.dtype)
-    result = tex.ep_combine_fwd(handle, weighted, num_local_tokens, out_partition_spec=out_sharding)
-    return result, (handle, recv_topk_weights, expert_out)
+    result = tex.ep_combine_fwd(
+        handle, handle_mem, weighted, num_local_tokens, out_partition_spec=out_sharding
+    )
+    return result, (handle_mem, recv_topk_weights, expert_out)
 
 
-def _combine_bwd(_num_local_tokens, _out_sharding, res, g_result):
-    handle, recv_topk_weights, expert_out = res
+def _combine_bwd(handle, _num_local_tokens, _out_sharding, res, g_result):
+    handle_mem, recv_topk_weights, expert_out = res
     # expert_out is [..., recv_pr, H]; pull recv_pr from the second-to-last dim.
     recv_capacity_per_rank = expert_out.shape[-2]
     # Re-pin cotangent sharding: same XLA-transpose workaround as _dispatch_bwd.
@@ -316,7 +293,7 @@ def _combine_bwd(_num_local_tokens, _out_sharding, res, g_result):
         )
     if spec is not None:
         g_result = jax.lax.with_sharding_constraint(g_result, spec)
-    grad_weighted = tex.ep_combine_bwd(handle, g_result, recv_capacity_per_rank)
+    grad_weighted = tex.ep_combine_bwd(handle, handle_mem, g_result, recv_capacity_per_rank)
     w = recv_topk_weights[..., None]
     mask = _make_valid_mask(recv_topk_weights, jnp.float32)
     grad_weighted_f32 = grad_weighted.astype(jnp.float32)
