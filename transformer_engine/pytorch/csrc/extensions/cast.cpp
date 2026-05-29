@@ -7,6 +7,7 @@
 #include "transformer_engine/cast.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -182,19 +183,19 @@ void compute_grouped_fp8_current_scaling_amax_and_scale(
     const GroupedTensorWrapper &grouped_input_tensor,
     const GroupedTensorWrapper &grouped_output_tensor, const py::object &grouped_output_py,
     Float8CurrentScalingQuantizer *quantizer_cpp) {
-  auto amax = grouped_output_py.attr("amax").cast<at::Tensor>();
-  auto scale = grouped_output_py.attr("scale").cast<at::Tensor>();
-  auto rowwise_scale_inv_py = grouped_output_py.attr("scale_inv");
-  auto columnwise_scale_inv_py = grouped_output_py.attr("columnwise_scale_inv");
-  std::optional<at::Tensor> rowwise_scale_inv;
-  std::optional<at::Tensor> columnwise_scale_inv;
-  if (!rowwise_scale_inv_py.is_none()) {
-    rowwise_scale_inv = rowwise_scale_inv_py.cast<at::Tensor>();
+  // The amax / scale / scale_inv buffers were allocated by create_grouped_tensor
+  // and their pointers are stored directly in the C++ grouped tensor, so we read
+  // them back from there instead of going through the Python object's attributes.
+  const NVTEBasicTensor amax_bt = grouped_output_tensor.get_amax();
+  const NVTEBasicTensor scale_bt = grouped_output_tensor.get_scale();
+  // FP8 current scaling has one scale per tensor regardless of direction, so
+  // create_grouped_tensor allocates a single scale_inv buffer aliased by both
+  // rowwise_scale_inv and columnwise_scale_inv. Pick whichever is set.
+  NVTEBasicTensor scale_inv_bt = grouped_output_tensor.get_rowwise_scale_inv();
+  if (scale_inv_bt.data_ptr == nullptr) {
+    scale_inv_bt = grouped_output_tensor.get_columnwise_scale_inv();
   }
-  if (!columnwise_scale_inv_py.is_none()) {
-    columnwise_scale_inv = columnwise_scale_inv_py.cast<at::Tensor>();
-  }
-  NVTE_CHECK(rowwise_scale_inv.has_value() || columnwise_scale_inv.has_value(),
+  NVTE_CHECK(scale_inv_bt.data_ptr != nullptr,
              "Grouped FP8 current-scaling output must have at least one scale_inv buffer.");
 
   QuantizationConfigWrapper quant_config;
@@ -208,6 +209,9 @@ void compute_grouped_fp8_current_scaling_amax_and_scale(
   });
 
   if (quantizer_cpp->with_amax_reduction) {
+    // NCCL collectives require an at::Tensor; the amax buffer lives on the Python
+    // object (same allocation as amax_bt above), so fetch it only on this path.
+    auto amax = grouped_output_py.attr("amax").cast<at::Tensor>();
     c10d::AllreduceOptions opts;
     opts.reduceOp = c10d::ReduceOp::MAX;
     std::vector<at::Tensor> tensors = {amax};
@@ -216,26 +220,26 @@ void compute_grouped_fp8_current_scaling_amax_and_scale(
     });
   }
 
-  // FP8 current scaling has one scale per tensor regardless of direction, so
-  // Float8CurrentScalingQuantizer::create_grouped_tensor allocates a single
-  // scale_inv buffer aliased by both rowwise_scale_inv and columnwise_scale_inv.
-  // Pick whichever is set; the other (if set) shares the same allocation.
-  NVTE_CHECK(!rowwise_scale_inv.has_value() || !columnwise_scale_inv.has_value() ||
-                 rowwise_scale_inv->data_ptr() == columnwise_scale_inv->data_ptr(),
-             "Grouped FP8 current scaling expects rowwise_scale_inv and "
-             "columnwise_scale_inv to alias the same allocation.");
-  at::Tensor &scale_inv_target =
-      rowwise_scale_inv.has_value() ? *rowwise_scale_inv : *columnwise_scale_inv;
-  auto scale_tensor_lists = makeTransformerEngineTensorList({{amax}, {scale}, {scale_inv_target}});
-  auto &tensor_lists_ptr = std::get<2>(scale_tensor_lists);
-  const size_t num_lists = std::get<3>(scale_tensor_lists);
-  const size_t num_tensors = std::get<4>(scale_tensor_lists);
+  // Build single-element TE tensor lists ({{amax}, {scale}, {scale_inv}}
+  // for the multi_tensor_compute_scale_and_scale_inv_cuda kernel.
+  TensorWrapper amax_cpp =
+      makeTransformerEngineTensor(amax_bt.data_ptr, amax_bt.shape, static_cast<DType>(amax_bt.dtype));
+  TensorWrapper scale_cpp = makeTransformerEngineTensor(scale_bt.data_ptr, scale_bt.shape,
+                                                        static_cast<DType>(scale_bt.dtype));
+  TensorWrapper scale_inv_cpp = makeTransformerEngineTensor(
+      scale_inv_bt.data_ptr, scale_inv_bt.shape, static_cast<DType>(scale_inv_bt.dtype));
+  std::array<NVTETensor, 1> amax_list = {amax_cpp.data()};
+  std::array<NVTETensor, 1> scale_list = {scale_cpp.data()};
+  std::array<NVTETensor, 1> scale_inv_list = {scale_inv_cpp.data()};
+  std::array<NVTETensor *, 3> tensor_lists_ptr = {amax_list.data(), scale_list.data(),
+                                                  scale_inv_list.data()};
+
   TensorWrapper noop_flag_cpp;
   NVTE_SCOPED_GIL_RELEASE({
     nvte_multi_tensor_compute_scale_and_scale_inv_cuda(
-        2048 * 32, noop_flag_cpp.data(), tensor_lists_ptr.data(), num_lists, num_tensors,
-        fp8_max_for_dtype(quantizer_cpp->dtype), quantizer_cpp->force_pow_2_scales,
-        quantizer_cpp->amax_epsilon, stream);
+        2048 * 32, noop_flag_cpp.data(), tensor_lists_ptr.data(), tensor_lists_ptr.size(),
+        /*num_tensors_per_list=*/1, fp8_max_for_dtype(quantizer_cpp->dtype),
+        quantizer_cpp->force_pow_2_scales, quantizer_cpp->amax_epsilon, stream);
   });
 }
 

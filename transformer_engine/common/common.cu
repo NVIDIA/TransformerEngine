@@ -7,6 +7,7 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include <bit>
+#include <type_traits>
 
 #include "./common.h"
 #include "./utils.cuh"
@@ -87,6 +88,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   reinterpret_cast<TVectorized *>(ptr)[idx] = data.value;
 }
 
+template <bool kHasFirstDims, bool kHasLastDims>
 __global__ void __launch_bounds__(kThreadsPerBlock)
     splits_to_offsets_kernel(const int64_t *__restrict__ first_dims,
                              const int64_t *__restrict__ last_dims, int64_t *__restrict__ output,
@@ -106,9 +108,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     const size_t idx = chunk_start + tid;
     int64_t value = 0;
     if (idx < num_tensors) {
-      const int64_t first =
-          first_dims != nullptr ? first_dims[idx] : logical_first_dim;
-      const int64_t last = last_dims != nullptr ? last_dims[idx] : logical_last_dim;
+      const int64_t first = kHasFirstDims ? first_dims[idx] : logical_first_dim;
+      const int64_t last = kHasLastDims ? last_dims[idx] : logical_last_dim;
       value = first * last;
     }
     block_scan[tid] = value;
@@ -181,8 +182,20 @@ void nvte_splits_to_offsets(const int64_t *first_dims, const int64_t *last_dims,
                "logical_last_dim must be greater than 0 when last_dims is null.");
   }
 
-  splits_to_offsets_kernel<<<1, kThreadsPerBlock, 0, stream>>>(
-      first_dims, last_dims, output, num_tensors, logical_first_dim, logical_last_dim);
+  const bool has_first_dims = first_dims != nullptr;
+  const bool has_last_dims = last_dims != nullptr;
+  auto launch = [&](auto has_first, auto has_last) {
+    splits_to_offsets_kernel<decltype(has_first)::value, decltype(has_last)::value>
+        <<<1, kThreadsPerBlock, 0, stream>>>(first_dims, last_dims, output, num_tensors,
+                                             logical_first_dim, logical_last_dim);
+  };
+  if (has_first_dims && has_last_dims) {
+    launch(std::true_type{}, std::true_type{});
+  } else if (has_first_dims) {
+    launch(std::true_type{}, std::false_type{});
+  } else {
+    launch(std::false_type{}, std::true_type{});
+  }
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 }  // extern "C"

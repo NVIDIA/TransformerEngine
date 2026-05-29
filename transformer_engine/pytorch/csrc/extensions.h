@@ -334,7 +334,7 @@ py::object dequantize(const py::handle &input, DType otype);
 
 py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const size_t num_tensors,
                           std::optional<at::Tensor> first_dims,
-                          std::optional<at::Tensor> last_dims = std::nullopt);
+                          std::optional<at::Tensor> last_dims);
 
 py::object group_dequantize(const py::handle &input, DType otype);
 
