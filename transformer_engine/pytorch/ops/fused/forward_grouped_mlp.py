@@ -733,8 +733,8 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
         return fc2_out, [(), (), ()]
 
 
-class ForwardGroupedMLP_CuTeGEMMGLU_MXFP8(_ForwardGroupedMLP_CuTeGEMMBase):
-    """Fused op for MXFP8 GroupedLinear + scaled GLU + GroupedLinear."""
+class ForwardGroupedMLP_CuTeGEMMGLU(_ForwardGroupedMLP_CuTeGEMMBase):
+    """Fused op for block-scaled GroupedLinear + scaled GLU + GroupedLinear."""
 
     @classmethod
     @functools.lru_cache(maxsize=None)
@@ -745,8 +745,8 @@ class ForwardGroupedMLP_CuTeGEMMGLU_MXFP8(_ForwardGroupedMLP_CuTeGEMMBase):
         return grouped_gemm_glu_wrapper_sm100
 
 
-class ForwardGroupedMLP_CuTeGEMMUnary_MXFP8(_ForwardGroupedMLP_CuTeGEMMBase):
-    """Fused op for MXFP8 GroupedLinear + scaled unary activation + GroupedLinear."""
+class ForwardGroupedMLP_CuTeGEMMUnary(_ForwardGroupedMLP_CuTeGEMMBase):
+    """Fused op for block-scaled GroupedLinear + scaled unary activation + GroupedLinear."""
 
     @classmethod
     @functools.lru_cache(maxsize=None)
@@ -788,7 +788,7 @@ def fuse_forward_ops(
     return fuse_grouped_mlp_ops(
         ops,
         recipe=recipe,
-        fused_op_cls=ForwardGroupedMLP_CuTeGEMMGLU_MXFP8,
+        fused_op_cls=ForwardGroupedMLP_CuTeGEMMGLU,
     )
 
 
@@ -805,13 +805,13 @@ def fuse_forward_srelu_ops(
     return fuse_grouped_mlp_ops(
         ops,
         recipe=recipe,
-        fused_op_cls=ForwardGroupedMLP_CuTeGEMMUnary_MXFP8,
+        fused_op_cls=ForwardGroupedMLP_CuTeGEMMUnary,
         activation_op_types=(ScaledSReLU,),
     )
 
 
 # Register fusion if available
-if ForwardGroupedMLP_CuTeGEMMGLU_MXFP8.is_supported():
+if ForwardGroupedMLP_CuTeGEMMGLU.is_supported():
     register_forward_fusion(fuse_forward_ops, prepend=True)
-if ForwardGroupedMLP_CuTeGEMMUnary_MXFP8.is_supported():
+if ForwardGroupedMLP_CuTeGEMMUnary.is_supported():
     register_forward_fusion(fuse_forward_srelu_ops, prepend=True)

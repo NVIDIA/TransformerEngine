@@ -970,8 +970,8 @@ class _BackwardGroupedMLP_CuTeGEMMDBase(FusedOperation):
         )
 
 
-class BackwardGroupedMLP_CuTeGEMMDGLU_MXFP8(_BackwardGroupedMLP_CuTeGEMMDBase):
-    """Fused backward op for GroupedLinear + scaled GLU + GroupedLinear."""
+class BackwardGroupedMLP_CuTeGEMMDGLU(_BackwardGroupedMLP_CuTeGEMMDBase):
+    """Fused backward op for block-scaled GroupedLinear + scaled GLU + GroupedLinear."""
 
     @classmethod
     @functools.lru_cache(maxsize=None)
@@ -982,8 +982,8 @@ class BackwardGroupedMLP_CuTeGEMMDGLU_MXFP8(_BackwardGroupedMLP_CuTeGEMMDBase):
         return grouped_gemm_dglu_wrapper_sm100
 
 
-class BackwardGroupedMLP_CuTeGEMMDUnary_MXFP8(_BackwardGroupedMLP_CuTeGEMMDBase):
-    """Fused backward op for GroupedLinear + scaled unary activation + GroupedLinear."""
+class BackwardGroupedMLP_CuTeGEMMDUnary(_BackwardGroupedMLP_CuTeGEMMDBase):
+    """Fused backward op for block-scaled GroupedLinear + scaled unary activation + GroupedLinear."""
 
     @classmethod
     @functools.lru_cache(maxsize=None)
@@ -1025,7 +1025,7 @@ def fuse_backward_ops(
     return fuse_grouped_mlp_ops(
         ops,
         recipe=recipe,
-        fused_op_cls=BackwardGroupedMLP_CuTeGEMMDGLU_MXFP8,
+        fused_op_cls=BackwardGroupedMLP_CuTeGEMMDGLU,
     )
 
 
@@ -1042,13 +1042,13 @@ def fuse_backward_srelu_ops(
     return fuse_grouped_mlp_ops(
         ops,
         recipe=recipe,
-        fused_op_cls=BackwardGroupedMLP_CuTeGEMMDUnary_MXFP8,
+        fused_op_cls=BackwardGroupedMLP_CuTeGEMMDUnary,
         activation_op_types=(ScaledSReLU,),
     )
 
 
 # Register fusion if available
-if BackwardGroupedMLP_CuTeGEMMDGLU_MXFP8.is_supported():
+if BackwardGroupedMLP_CuTeGEMMDGLU.is_supported():
     register_backward_fusion(fuse_backward_ops, prepend=True)
-if BackwardGroupedMLP_CuTeGEMMDUnary_MXFP8.is_supported():
+if BackwardGroupedMLP_CuTeGEMMDUnary.is_supported():
     register_backward_fusion(fuse_backward_srelu_ops, prepend=True)
