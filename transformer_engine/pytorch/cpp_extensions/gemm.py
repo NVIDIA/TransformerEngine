@@ -13,9 +13,11 @@ import transformer_engine_torch as tex
 from ..constants import TE_DType
 from ..utils import get_sm_count, _empty_tensor
 
+from ..quantization import check_mxfp8_grouped_gemm_support
 from ..quantized_tensor import Quantizer
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from ..tensor.storage.grouped_tensor_storage import GroupedTensorStorage
+from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from ..tensor.utils import is_custom
 from ..custom_recipes.gemm import custom_gemm
@@ -74,6 +76,44 @@ def validate_gemm_scale(scale: Optional[float], required: bool) -> float:
 def _is_nvfp4_row_scaled_tensor(tensor: torch.Tensor) -> bool:
     """Whether tensor carries row-scaled NVFP4 global amax metadata."""
     return isinstance(tensor, NVFP4TensorStorage) and tensor._row_scaled_nvfp4
+
+
+def _is_mxfp8_storage(tensor) -> bool:
+    """Whether ``tensor`` is MXFP8-quantized storage (per-tensor or grouped)."""
+    if tensor is None:
+        return False
+    if isinstance(tensor, MXFP8TensorStorage):
+        return True
+    if isinstance(tensor, GroupedTensorStorage):
+        quantizer = getattr(tensor, "quantizer", None)
+        if quantizer is not None:
+            try:
+                recipe = quantizer._get_compatible_recipe()
+            except (AttributeError, NotImplementedError):
+                return False
+            return bool(recipe.mxfp8())
+    return False
+
+
+def _check_mxfp8_grouped_gemm_inputs(*tensor_iterables) -> None:
+    """Raise ``NotImplementedError`` if MXFP8 grouped GEMM is requested but
+    not supported on the current device / cuBLASLt combination.
+
+    Accepts one or more iterables of tensors (e.g. ``A``, ``B`` from
+    :func:`general_grouped_gemm`) so callers don't have to flatten lists.
+    """
+    for tensors in tensor_iterables:
+        if tensors is None:
+            continue
+        if isinstance(tensors, (list, tuple)):
+            has_mxfp8 = any(_is_mxfp8_storage(t) for t in tensors)
+        else:
+            has_mxfp8 = _is_mxfp8_storage(tensors)
+        if has_mxfp8:
+            supported, reason = check_mxfp8_grouped_gemm_support()
+            if not supported:
+                raise NotImplementedError(reason)
+            return
 
 
 def _nvfp4_row_scaled_gemm_inputs(
@@ -294,6 +334,8 @@ def general_grouped_gemm(
     """
     TN layout Grouped GEMM with fp8 inputs.
     """
+    _check_mxfp8_grouped_gemm_inputs(A, B)
+
     num_gemms = len(A)
 
     transa = layout[0] == "T"
@@ -470,6 +512,8 @@ def general_grouped_gemm_for_grouped_tensor(
     The caller must ensure that GroupedTensor metadata is already compatible with the
     underlying GEMM implementation (e.g., aligned offsets and output metadata layout).
     """
+    _check_mxfp8_grouped_gemm_inputs(A, B)
+
     assert layout in ("TN", "NN", "NT"), f"GEMM layout {layout} not supported."
     if grad:
         raise NotImplementedError("grad is not supported for grouped_tensor GEMM yet.")
