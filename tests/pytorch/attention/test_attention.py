@@ -377,13 +377,10 @@ def test_dpa_fa4_hdim256(dtype, model_configs, model):
     test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False)
 
 
-# cuDNN FusedAttention head_dim=256 backward is supported on Blackwell server GPUs
-# (SM100/SM103) from cuDNN 9.23 (FE 1.24), via the dedicated deterministic SDPA bprop
-# kernel. It requires d_qk == d_v == 256, vanilla softmax, no dropout, no ALiBi, and
-# (for non-causal masks) full-window attention. See nvte_get_fused_attn_backend in
-# transformer_engine/common/fused_attn/fused_attn.cpp. These configs use d_qk == d_v == 256
-# with s_q == s_kv > 1 so the training (forward + backward) FusedAttention route is exercised
-# and compared against the reference backends.
+# cuDNN FusedAttention D=256 bprop is supported on sm10x from cuDNN 9.23 (FE 1.24),
+# via the dedicated deterministic SDPA bprop kernel, which supports d_qk == d_v == 256 only, 
+# vanilla type of softmax only, no dropout, no ALiBi, and (for non-causal masks) full-window attention only.
+# (for non-causal masks) full-window attention.
 model_configs_fused_hdim256 = {
     # test: ModelConfig(b, sq, hq, dqk)  -> head_dim_v defaults to head_dim_qk (256)
     "fused_hd256_no_mask": ModelConfig(2, 512, 16, 256),
