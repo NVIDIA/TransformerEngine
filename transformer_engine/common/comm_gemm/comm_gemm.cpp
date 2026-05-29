@@ -130,12 +130,9 @@ int64_t block_size(NVTECommGemmCtx* ctx, int64_t global_size) {
 void AgGemmInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n, int64_t k,
                         const Tensor* a, const Tensor* b, const Tensor* d, bool transa,
                         bool transb) {
-  const auto a0 = a->flat_first_dim();
-  const auto a1 = a->flat_last_dim();
-  const auto b0 = b->flat_first_dim();
-  const auto b1 = b->flat_last_dim();
-  const auto d0 = d->flat_first_dim();
-  const auto d1 = d->flat_last_dim();
+  const auto [a0, a1] = a->flat_2d_dims();
+  const auto [b0, b1] = b->flat_2d_dims();
+  const auto [d0, d1] = d->flat_2d_dims();
 
   if (transa) {
     NVTE_CHECK(a1 == k, "Unsupported tensor dimension in A: expected ", k, ", got ", a1);
@@ -169,12 +166,9 @@ void AgGemmInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n
 void GemmRsInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n, int64_t k,
                         const Tensor* a, const Tensor* b, const Tensor* d, bool transa,
                         bool transb) {
-  const auto a0 = a->flat_first_dim();
-  const auto a1 = a->flat_last_dim();
-  const auto b0 = b->flat_first_dim();
-  const auto b1 = b->flat_last_dim();
-  const auto d0 = d->flat_first_dim();
-  const auto d1 = d->flat_last_dim();
+  const auto [a0, a1] = a->flat_2d_dims();
+  const auto [b0, b1] = b->flat_2d_dims();
+  const auto [d0, d1] = d->flat_2d_dims();
 
   if (transa) {
     NVTE_CHECK(a0 == m, "Unsupported tensor dimension in A: expected ", m, ", got ", a0);
@@ -214,12 +208,9 @@ void GemmRsInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n
 void GemmArInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n, int64_t k,
                         const Tensor* a, const Tensor* b, const Tensor* d, bool transa,
                         bool transb) {
-  const auto a0 = a->flat_first_dim();
-  const auto a1 = a->flat_last_dim();
-  const auto b0 = b->flat_first_dim();
-  const auto b1 = b->flat_last_dim();
-  const auto d0 = d->flat_first_dim();
-  const auto d1 = d->flat_last_dim();
+  const auto [a0, a1] = a->flat_2d_dims();
+  const auto [b0, b1] = b->flat_2d_dims();
+  const auto [d0, d1] = d->flat_2d_dims();
 
   if (transa) {
     NVTE_CHECK(a0 == m, "Unsupported tensor dimension in A: expected ", m, ", got ", a0);

@@ -44,14 +44,17 @@ import zlib
 from packaging import version
 
 from jax import core
+from jaxlib.mlir import ir
 import jax
 import jax.numpy as jnp
 
 from ..version_utils import (
     TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION,
+    TRITON_EXTENSION_CUDA_GRAPH_MIN_JAX_VERSION,
     TRITON_EXTENSION_MIN_JAX_VERSION,
     is_triton_autotuned_alias_safe,
     is_triton_extension_supported,
+    jax_version_meet_requirement,
 )
 
 
@@ -626,12 +629,19 @@ def triton_call_lowering(
     else:
         ffi_operand_output_aliases = None
 
-    # Use JAX FFI lowering with compressed protobuf
-    rule = jax.ffi.ffi_lowering(
-        "triton_kernel_call",  # Custom call target registered in gpu_triton.py
-        api_version=2,
-        backend_config=zlib.compress(call_proto),
-        operand_output_aliases=ffi_operand_output_aliases,
-    )
+    compressed_call_proto = zlib.compress(call_proto)
+    if jax_version_meet_requirement(TRITON_EXTENSION_CUDA_GRAPH_MIN_JAX_VERSION):
+        rule = jax.ffi.ffi_lowering(
+            "triton_kernel_call_ffi",
+            backend_config={"opaque": ir.StringAttr.get(compressed_call_proto)},
+            operand_output_aliases=ffi_operand_output_aliases,
+        )
+    else:
+        rule = jax.ffi.ffi_lowering(
+            "triton_kernel_call",  # Custom call target registered in gpu_triton.py
+            api_version=2,
+            backend_config=compressed_call_proto,
+            operand_output_aliases=ffi_operand_output_aliases,
+        )
 
     return rule(ctx, *array_args)
