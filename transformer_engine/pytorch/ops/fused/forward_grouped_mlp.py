@@ -23,6 +23,7 @@ from ..basic import GroupedLinear, ScaledSReLU, ScaledClampedQGeGLU
 from ..fuser import register_forward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
 from .._common import (
+    _cudnn_frontend_geglu_runtime_params,
     _cudnn_frontend_version_supported,
     _cudnn_frontend_supports_grouped_gemm_srelu,
     _nvidia_cudnn_frontend_supports_wgrad,
@@ -127,6 +128,18 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
             self._cudnn_act_func = (
                 "geglu" if isinstance(activation, ScaledClampedQGeGLU) else "swiglu"
             )
+
+        # cuDNN-frontend >= 1.24.0 exposes runtime-configurable GeGLU
+        # parameters; pass them through when the activation carries
+        # non-default values (or always, if available).
+        self._pass_geglu_runtime_params: bool = (
+            isinstance(activation, ScaledClampedQGeGLU) and _cudnn_frontend_geglu_runtime_params()
+        )
+        if self._pass_geglu_runtime_params:
+            self._cudnn_linear_offset: float = activation._clamped.glu_linear_offset
+            self._cudnn_geglu_alpha: float = activation._clamped.alpha
+            self._cudnn_glu_clamp_max: float = activation._clamped.limit
+            self._cudnn_glu_clamp_min: float = -activation._clamped.limit
 
     def fuser_forward(
         self,
@@ -333,6 +346,13 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
         }
         if self._cudnn_act_func is not None:
             fc1_activation_kwargs["act_func"] = self._cudnn_act_func
+        if self._pass_geglu_runtime_params:
+            fc1_activation_kwargs.update(
+                linear_offset=self._cudnn_linear_offset,
+                geglu_alpha=self._cudnn_geglu_alpha,
+                glu_clamp_max=self._cudnn_glu_clamp_max,
+                glu_clamp_min=self._cudnn_glu_clamp_min,
+            )
 
         if fc1_op.single_grouped_weight:
             # Clone and swizzle scales for GEMM.
@@ -361,12 +381,14 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
             fc1_activation_kwargs["sfb_tensor"] = fc1_w_scales
         else:
             # Discrete-weight kernel: per-expert data/scale pointers
-            fc1_b_ptrs, fc1_sfb_ptrs, _fc1_sw = tex.get_device_pointer_for_data_and_scales(
+            fc1_b_ptrs = tex.copy_data_ptrs_to_device(
                 [w._rowwise_data for w in grouped_fc1_weight],
+                device,
+            )
+            fc1_sfb_ptrs, _fc1_sfb_buffer = tex.transform_and_copy_data_ptrs_to_device(
+                "uniform_mxfp8_rowwise_swizzle",
                 [w._rowwise_scale_inv for w in grouped_fc1_weight],
-                swizzle=True,
-                rowwise=True,
-                data_dtype=grouped_fc1_weight[0]._fp8_dtype,
+                device,
             )
             fc1_activation_kwargs["b_ptrs"] = fc1_b_ptrs
             fc1_activation_kwargs["sfb_ptrs"] = fc1_sfb_ptrs
@@ -460,12 +482,14 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
             fc2_quant_kwargs["b_tensor"] = fc2_w_data
             fc2_quant_kwargs["sfb_tensor"] = fc2_w_scales
         else:
-            fc2_b_ptrs, fc2_sfb_ptrs, _ = tex.get_device_pointer_for_data_and_scales(
+            fc2_b_ptrs = tex.copy_data_ptrs_to_device(
                 [w._rowwise_data for w in grouped_fc2_weight],
+                device,
+            )
+            fc2_sfb_ptrs, _fc2_sfb_buffer = tex.transform_and_copy_data_ptrs_to_device(
+                "uniform_mxfp8_rowwise_swizzle",
                 [w._rowwise_scale_inv for w in grouped_fc2_weight],
-                swizzle=True,
-                rowwise=True,
-                data_dtype=grouped_fc2_weight[0]._fp8_dtype,
+                device,
             )
             fc2_quant_kwargs["b_ptrs"] = fc2_b_ptrs
             fc2_quant_kwargs["sfb_ptrs"] = fc2_sfb_ptrs
