@@ -17,7 +17,13 @@ from ...quantization import Recipe
 from ...tensor import NVFP4Quantizer, NVFP4Tensor
 from ...tensor.grouped_tensor import GroupedTensor
 from ...tensor.mxfp8_tensor import MXFP8Quantizer
-from ...utils import clear_tensor_data, get_cached_ones_tensor, get_device_compute_capability
+from ...utils import (
+    ceil_div,
+    clear_tensor_data,
+    get_cached_ones_tensor,
+    get_device_compute_capability,
+    round_up_to_nearest_multiple,
+)
 from ...constants import MXFP8_BLOCK_SCALING_SIZE, NVFP4_BLOCK_SCALING_SIZE
 from ..basic import GroupedLinear, ScaledSReLU, ScaledClampedQGeGLU
 from ..fuser import register_backward_fusion
@@ -96,8 +102,8 @@ def _cudnn_compute_wgrad(
 
     fp8_dtype = torch.float8_e4m3fn
 
-    sfa_leading_dim = ((out_features + 127) // 128) * 128
-    sfb_leading_dim = ((in_features + 127) // 128) * 128
+    sfa_leading_dim = round_up_to_nearest_multiple(out_features, 128)
+    sfb_leading_dim = round_up_to_nearest_multiple(in_features, 128)
 
     if total_tokens == 0:
         # A workaround for the case with zero-token experts.
@@ -533,8 +539,8 @@ class _BackwardGroupedMLP_CuTeGEMMDBase(FusedOperation):
         if use_nvfp4 and with_gemm_swizzled_scales:
             fc2_dy_scales = fc2_dy_scales.view(
                 1,
-                (out_shape[0] + 127) // 128,
-                data_k // k_sf_divisor,
+                ceil_div(out_shape[0], 128),
+                ceil_div(data_k, k_sf_divisor),
                 32,
                 4,
                 4,
@@ -543,18 +549,18 @@ class _BackwardGroupedMLP_CuTeGEMMDBase(FusedOperation):
         elif use_nvfp4:
             fc2_dy_scales = fc2_dy_scales.view(
                 1,
-                (out_shape[0] + 127) // 128,
+                ceil_div(out_shape[0], 128),
                 4,
                 32,
-                data_k // k_sf_divisor,
+                ceil_div(data_k, k_sf_divisor),
                 4,
             )
             fc2_dy_scales = fc2_dy_scales.permute(3, 2, 1, 5, 4, 0)
         else:
             fc2_dy_scales = fc2_dy_scales.view(
                 1,
-                (out_shape[0] + 127) // 128,
-                (out_shape[1] + k_sf_divisor - 1) // k_sf_divisor,
+                ceil_div(out_shape[0], 128),
+                ceil_div(out_shape[1], k_sf_divisor),
                 32,
                 4,
                 4,
@@ -632,8 +638,8 @@ class _BackwardGroupedMLP_CuTeGEMMDBase(FusedOperation):
             fc2_w_scales = fc2_weight_for_gemm.columnwise_scale_inv.view(dtype=scale_view_dtype)
             fc2_w_scales = fc2_w_scales.view(
                 num_groups,
-                (fc2_weight_shape[1] + k_sf_divisor - 1) // k_sf_divisor,
-                (fc2_weight_shape[0] + 127) // 128,
+                ceil_div(fc2_weight_shape[1], k_sf_divisor),
+                ceil_div(fc2_weight_shape[0], 128),
                 32,
                 4,
                 4,
@@ -898,8 +904,8 @@ class _BackwardGroupedMLP_CuTeGEMMDBase(FusedOperation):
                     )
                     fc1_w_scales = fc1_w_scales.view(
                         num_groups,
-                        (fc1_weight_shape[1] + 127) // 128,
-                        (fc1_weight_shape[0] + 127) // 128,
+                        ceil_div(fc1_weight_shape[1], 128),
+                        ceil_div(fc1_weight_shape[0], 128),
                         MXFP8_BLOCK_SCALING_SIZE,
                         4,
                         4,

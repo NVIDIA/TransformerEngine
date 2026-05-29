@@ -16,7 +16,12 @@ import transformer_engine_torch as tex
 from ...cpp_extensions import general_gemm, general_grouped_gemm_for_grouped_tensor
 from ...quantization import Recipe
 from ...tensor import NVFP4Quantizer, NVFP4Tensor, Quantizer
-from ...utils import get_cached_ones_tensor, get_device_compute_capability, mark_grouped_tensor
+from ...utils import (
+    ceil_div,
+    get_cached_ones_tensor,
+    get_device_compute_capability,
+    mark_grouped_tensor,
+)
 from ...tensor.grouped_tensor import GroupedTensor
 from ...tensor.mxfp8_tensor import MXFP8Quantizer
 from ...constants import MXFP8_BLOCK_SCALING_SIZE, NVFP4_BLOCK_SCALING_SIZE
@@ -343,8 +348,8 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
         if use_nvfp4 and with_gemm_swizzled_scales:
             fc1_x_scales = fc1_x_scales.view(
                 1,
-                (in_shape[0] + 127) // 128,
-                data_in_k // k_sf_divisor,
+                ceil_div(in_shape[0], 128),
+                ceil_div(data_in_k, k_sf_divisor),
                 32,
                 4,
                 4,
@@ -353,18 +358,18 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
         elif use_nvfp4:
             fc1_x_scales = fc1_x_scales.view(
                 1,
-                (in_shape[0] + 127) // 128,
+                ceil_div(in_shape[0], 128),
                 4,
                 32,
-                data_in_k // k_sf_divisor,
+                ceil_div(data_in_k, k_sf_divisor),
                 4,
             )
             fc1_x_scales = fc1_x_scales.permute(3, 2, 1, 5, 4, 0)
         else:
             fc1_x_scales = fc1_x_scales.view(
                 1,
-                (in_shape[0] + 127) // 128,
-                (in_shape[1] + k_sf_divisor - 1) // k_sf_divisor,
+                ceil_div(in_shape[0], 128),
+                ceil_div(in_shape[1], k_sf_divisor),
                 32,
                 4,
                 4,
@@ -436,8 +441,8 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
             fc1_w_scales = fc1_weight_for_gemm.scale_inv.view(dtype=scale_view_dtype)
             fc1_w_scales = fc1_w_scales.view(
                 num_groups,
-                (fc1_weight_shape[0] + 127) // 128,
-                (fc1_weight_shape[1] + k_sf_divisor - 1) // k_sf_divisor,
+                ceil_div(fc1_weight_shape[0], 128),
+                ceil_div(fc1_weight_shape[1], k_sf_divisor),
                 32,
                 4,
                 4,
@@ -614,8 +619,8 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc2_w_scales = fc2_weight_for_gemm.scale_inv.view(dtype=torch.float8_e8m0fnu)
                 fc2_w_scales = fc2_w_scales.view(
                     num_groups,
-                    (fc2_weight_shape[0] + 127) // 128,
-                    (fc2_weight_shape[1] + 127) // 128,
+                    ceil_div(fc2_weight_shape[0], 128),
+                    ceil_div(fc2_weight_shape[1], 128),
                     MXFP8_BLOCK_SCALING_SIZE,
                     4,
                     4,
