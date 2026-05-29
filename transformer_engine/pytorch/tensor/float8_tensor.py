@@ -28,6 +28,56 @@ from ..fp8_dtype import FP8DType, to_tex
 
 aten = torch.ops.aten
 
+
+def _float8_make_fake_empty(
+    quantizer: "Quantizer",
+    shape: Iterable[int],
+    *,
+    dtype: torch.dtype = torch.float32,
+    device: Optional[torch.device] = None,
+) -> "Float8Tensor":
+    """Dynamo-safe ``Float8Tensor`` allocation shared by the FP8 quantizers.
+
+    Mirrors the inner-tensor layout of ``make_empty`` (rowwise ``_data`` /
+    columnwise ``_transpose`` / ``_scale_inv``) but assembles the wrapper
+    through :meth:`QuantizedTensor.__tensor_unflatten__` -- which takes a
+    snapshot-free ``meta`` dict (``quantizer_snapshot=None``, ``FP8DType``)
+    rather than the live ``Quantizer`` / ``tex.DType`` constructor args that
+    Dynamo cannot proxy inside a traced frame.
+    """
+    from ..dynamo import _contiguous_stride  # pylint: disable=import-outside-toplevel
+
+    if device is None:
+        device = torch.device("cuda")
+    shape = list(shape)
+
+    alloc: Dict[str, torch.Tensor] = {}
+    if quantizer.rowwise_usage:
+        alloc["_data"] = torch.empty(shape, dtype=torch.uint8, device=device)
+    if quantizer.columnwise_usage:
+        transpose_shape = [shape[-1]] + list(shape[:-1])
+        alloc["_transpose"] = torch.empty(transpose_shape, dtype=torch.uint8, device=device)
+    alloc["_scale_inv"] = torch.empty(1, dtype=torch.float32, device=device)
+
+    inner_names, meta = quantizer.create_metadata(fake_dtype=dtype)
+    inner_dict = {name: alloc[name] for name in inner_names}
+    out = Float8Tensor.__tensor_unflatten__(
+        inner_dict, meta, tuple(shape), _contiguous_stride(shape)
+    )
+    # Stamp the reassembly plan so the dynamo reassembly helper
+    # (:func:`transformer_engine.pytorch.dynamo._template_reassemble`)
+    # can rebuild this subclass from the op's flat ``Tensor[]`` payload
+    # by reading an attribute (Dynamo-safe) rather than calling
+    # ``__tensor_flatten__`` in-trace.
+    out._te_compile_unflatten_plan = (tuple(inner_names), meta)
+    # Stash the live quantizer on the template so the reassembly helper can
+    # restore it on the real output (``__tensor_unflatten__`` rebuilds with
+    # ``quantizer=None`` because the snapshot can't carry a live
+    # ``ProcessGroup`` / scale-amax tensors through Dynamo guards).
+    out._te_compile_quantizer = quantizer
+    return out
+
+
 _ops_to_preserve_subclass_in_fsdp2 = {
     torch.ops.aten.empty_like.default,
     torch.ops.aten.new_zeros.default,
@@ -178,6 +228,24 @@ class Float8Quantizer(Quantizer):
             quantizer=self,
             device=device,
         )
+
+    def make_fake_empty(
+        self,
+        shape: Iterable[int],
+        *,
+        dtype: torch.dtype = torch.float32,
+        device: Optional[torch.device] = None,
+    ) -> Float8Tensor:
+        """Dynamo-safe analogue of :meth:`make_empty`.
+
+        Builds the :class:`Float8Tensor` via
+        :meth:`QuantizedTensor.__tensor_unflatten__` (snapshot-free meta,
+        :class:`FP8DType`) instead of the live-quantizer constructor, so it
+        traces under ``torch.compile(fullgraph=True)`` -- where
+        :meth:`make_empty` trips on ``UserDefinedObjectVariable(Quantizer)``
+        / ``UserDefinedObjectVariable(DType)``.
+        """
+        return _float8_make_fake_empty(self, shape, dtype=dtype, device=device)
 
     def calibrate(self, tensor: torch.Tensor) -> None:
         amin, amax = tensor.aminmax()
@@ -422,6 +490,17 @@ class Float8CurrentScalingQuantizer(Quantizer):
             quantizer=self,
             device=device,
         )
+
+    def make_fake_empty(
+        self,
+        shape: Iterable[int],
+        *,
+        dtype: torch.dtype = torch.float32,
+        device: Optional[torch.device] = None,
+    ) -> Float8Tensor:
+        """Dynamo-safe analogue of :meth:`make_empty` (see
+        :func:`_float8_make_fake_empty`)."""
+        return _float8_make_fake_empty(self, shape, dtype=dtype, device=device)
 
     def calibrate(self, tensor: torch.Tensor) -> None:
         # current scaling don't need to calibrate

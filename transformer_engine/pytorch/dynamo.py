@@ -26,8 +26,6 @@ import torch
 
 __all__ = [
     "OpaqueSimpleMetadata",
-    "TensorSpec",
-    "tensor_spec",
     "_te_register_custom_op",
 ]
 
@@ -79,21 +77,18 @@ def _decode_none(t: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
 # its flatten protocol and concatenates the inner plain tensors into the
 # op's ``Tensor[]`` return.
 #
-# At call-site time (in :func:`forward_fn`), the layout for each user
-# output is described by the user-supplied ``output_info_fn``: a pure
-# Python function that returns a list of :class:`TensorSpec`, each
-# carrying the static (class, inner_names, metadata, shape, stride)
-# tuple needed to reassemble the user-facing object from its real
-# inner tensors emitted by the op.
+# At call-site time (in :func:`forward_fn` / ``setup_context``), the layout
+# for each output is read straight off the forward ``fake_impl``'s fake
+# values, which double as reassembly templates (:func:`_template_slot_count`
+# / :func:`_template_reassemble`).
 
 
 def _contiguous_stride(shape: Sequence[int]) -> Tuple[int, ...]:
     """Row-major contiguous stride for ``shape``.
 
-    Used by :meth:`SubclassTensorSpec.from_quantizer` to fill in the
-    ``stride`` field expected by ``__tensor_unflatten__``; user code
-    that builds :class:`SubclassTensorSpec` directly typically does
-    not need to touch this.
+    Used to fill in the ``stride`` field expected by
+    ``__tensor_unflatten__`` when rebuilding a wrapper subclass from a
+    fake template (:func:`_template_reassemble`).
     """
     stride: List[int] = [1] * len(shape)
     for i in range(len(shape) - 2, -1, -1):
@@ -102,474 +97,205 @@ def _contiguous_stride(shape: Sequence[int]) -> Tuple[int, ...]:
 
 
 # --------------------------------------------------------------------------- #
-# TensorSpec -- unified per-slot descriptor
+# Reassembly: rebuild user-facing objects from the op's flat ``Tensor[]``.
 # --------------------------------------------------------------------------- #
 #
-# ``TensorSpec`` is the single source of truth for one user output / one
-# backward grad / one fake saved-slot value. Each instance encodes:
-#
-# * ``slot_count()``       -- how many entries of the op's flat ``Tensor[]``
-#                             payload this output consumes;
-# * ``reassemble(chunk)``  -- how to turn those entries back into the
-#                             user-facing object (plain tensor, tensor
-#                             subclass, ``QuantizedTensorStorage``, ...);
-# * ``reassemble_with_autograd(chunk)``
-#                          -- variant used by :func:`forward_fn` that
-#                             interposes :class:`_ToSubclassFn` for
-#                             subclass paths so the construction stays
-#                             on the autograd graph;
-# * ``alloc()``            -- build an empty fake version of the value
-#                             for shape inference under
-#                             :class:`torch._subclasses.FakeTensorMode`.
+# The forward ``fake_impl`` returns the op's outputs / saved tensors as fake
+# values (``make_fake_empty`` wrappers / ``make_empty`` storages /
+# ``torch.empty`` plains / aliased forward args / ``None``). Each fake value is
+# itself a complete reassembly *template*: it says how many flat slots the real
+# value occupies and how to rebuild it. :func:`_flatten_value_into` packs a
+# value into slots; the two helpers below are its inverse (slot count +
+# rebuild), reading straight off the fake template -- no separate descriptor
+# object is materialised.
 
 
-class TensorSpec:
-    """Per-output / per-saved-slot layout + (optional) allocation descriptor.
+def _template_slot_count(template: Any, *, aliased: bool = False) -> int:
+    """Flat ``Tensor[]`` slots the real value for ``template`` occupies.
 
-    Concrete subclasses (:class:`NoneSpec`, :class:`PlainTensorSpec`,
-    :class:`SubclassTensorSpec`, :class:`StorageSpec`) implement the
-    methods listed below. See module-level commentary for the role
-    each method plays in the forward / fake / setup-context pipelines.
+    ``aliased`` arg / ``None`` -> 1 (an :func:`_encode_none` sentinel); a
+    plain tensor -> 1; a ``make_fake_empty`` subclass -> ``len(inner_names)``
+    (from its stamped plan); a storage -> ``len(_torch_compile_flatten())``.
     """
-
-    def slot_count(self) -> int:
-        raise NotImplementedError(
-            f"{type(self).__name__}.slot_count() not implemented"
-        )
-
-    def reassemble(self, chunk: List[Any]) -> Any:
-        raise NotImplementedError(
-            f"{type(self).__name__}.reassemble() not implemented"
-        )
-
-    def reassemble_with_autograd(self, chunk: List[Any]) -> Any:
-        """Reassemble while keeping the autograd graph intact.
-
-        Default to :meth:`reassemble`; only :class:`SubclassTensorSpec`
-        overrides this to route subclass construction through
-        :class:`_ToSubclassFn` (so AOTAutograd records the wrap).
-        """
-        return self.reassemble(chunk)
-
-    def alloc(self) -> Any:
-        raise NotImplementedError(
-            f"{type(self).__name__}.alloc() not implemented"
-        )
-
-
-class NoneSpec(TensorSpec):
-    """Output / save slot whose value is ``None``.
-
-    Consumes one ``Tensor[]`` slot via the :func:`_encode_none` /
-    :func:`_decode_none` sentinel pair so that the op's schema (which
-    is non-nullable ``Tensor[]``) can still carry a ``None`` value
-    end-to-end.
-    """
-
-    def slot_count(self) -> int:
+    if aliased or template is None:
         return 1
-
-    def reassemble(self, chunk: List[Any]) -> Any:
-        return None
-
-    def alloc(self) -> Any:
-        return None
-
-
-class AliasedSpec(TensorSpec):
-    """Saved-tensor slot whose value is identical to a forward arg.
-
-    The forward impl writes ``None`` into the slot (so no extra storage
-    moves through the op return) and tags the slot's ``alias`` name in
-    ``ctx_attrs["saved_tensor_aliases"]``; the user's ``setup_context``
-    resolves the alias back to the actual forward arg.
-
-    Behaves like :class:`NoneSpec` on the schema side (1 sentinel slot,
-    ``reassemble -> None``, ``alloc -> None``); the only difference is
-    that :func:`_inject_saved_aliases` reads ``self.alias`` to populate
-    ``ctx_attrs["saved_tensor_aliases"]``.
-    """
-
-    def __init__(self, alias: str) -> None:
-        self.alias = alias
-
-    def slot_count(self) -> int:
+    if isinstance(template, torch.Tensor):
+        plan = getattr(template, _TE_COMPILE_UNFLATTEN_PLAN, None)
+        if plan is not None:
+            inner_names, _ = plan
+            return len(inner_names)
         return 1
-
-    def reassemble(self, chunk: List[Any]) -> Any:
-        return None
-
-    def alloc(self) -> Any:
-        return None
-
-
-class PlainTensorSpec(TensorSpec):
-    """Plain :class:`torch.Tensor` output / save slot.
-
-    Carries ``shape`` / ``dtype`` / ``device`` for allocation; reassembly
-    is just the lone slot value.
-    """
-
-    def __init__(
-        self,
-        shape: Optional[Sequence[int]] = None,
-        dtype: Optional["torch.dtype"] = None,
-        device: Optional["torch.device"] = None,
-    ) -> None:
-        self.shape = tuple(shape) if shape is not None else None
-        self.dtype = dtype
-        self.device = device
-
-    def slot_count(self) -> int:
-        return 1
-
-    def reassemble(self, chunk: List[Any]) -> Any:
-        return chunk[0]
-
-    def alloc(self) -> Any:
-        if self.shape is None or self.dtype is None or self.device is None:
-            return TensorSpec.alloc(self)
-        return torch.empty(self.shape, dtype=self.dtype, device=self.device)
+    flatten = getattr(template, "_torch_compile_flatten", None)
+    if flatten is not None:
+        _, _, tensors = flatten()
+        return len(tensors)
+    raise TypeError(
+        f"fake_impl produced an unsupported value of type {type(template).__name__}; "
+        "expected None / torch.Tensor (plain or make_fake_empty subclass) / "
+        "a storage exposing _torch_compile_flatten()."
+    )
 
 
-class SubclassTensorSpec(TensorSpec):
-    """Tensor-subclass output / save slot (e.g. :class:`Float8Tensor`).
-
-    Two modes, picked at construction time via :meth:`from_quantizer`:
-
-    * **Full mode** (``wrapper_cls`` supplied): the spec knows the
-      subclass identity, ``inner_names`` and ``meta`` for
-      ``__tensor_unflatten__``, so it can both :meth:`alloc` (under
-      :class:`FakeTensorMode`) and :meth:`reassemble` slot chunks from
-      the op's flat ``Tensor[]`` payload back into a user-facing
-      subclass instance. Used for forward outputs that flow through
-      the custom op and need to be re-wrapped on the other side.
-    * **Alloc-only mode** (no ``wrapper_cls``): the spec only carries
-      enough info to :meth:`alloc` an empty instance via
-      ``quantizer.make_empty(shape, dtype, device)``. Used for
-      backward gradient outputs, which never round-trip through the
-      flat ``Tensor[]`` -- ``_format_bwd_result`` hands them straight
-      to autograd -- so the layout-aware methods are intentionally
-      undefined.
-    """
-
-    def __init__(
-        self,
-        *,
-        shape: Sequence[int],
-        alloc_quantizer: Any,
-        alloc_dtype: "torch.dtype",
-        alloc_device: "torch.device",
-        cls: Optional[type] = None,
-        inner_names: Optional[Sequence[str]] = None,
-        meta: Any = None,
-        stride: Optional[Sequence[int]] = None,
-    ) -> None:
-        self.cls = cls
-        self.inner_names = tuple(inner_names) if inner_names is not None else None
-        self.meta = meta
-        self.shape = tuple(shape)
-        self.stride = tuple(stride) if stride is not None else None
-        self.alloc_quantizer = alloc_quantizer
-        self.alloc_dtype = alloc_dtype
-        self.alloc_device = alloc_device
-
-    def _require_full_mode(self, method_name: str) -> None:
-        if self.cls is None:
-            raise RuntimeError(
-                f"SubclassTensorSpec.{method_name} is only available in "
-                "full mode (built with ``wrapper_cls=``). Alloc-only specs "
-                "(used for backward grad outputs) don't participate in the "
-                "flat ``Tensor[]`` payload, so they have no slot layout."
-            )
-
-    def slot_count(self) -> int:
-        self._require_full_mode("slot_count")
-        return len(self.inner_names)
-
-    def reassemble(self, chunk: List[Any]) -> Any:
-        self._require_full_mode("reassemble")
-        inner_dict = dict(zip(self.inner_names, chunk))
-        return self.cls.__tensor_unflatten__(
-            inner_dict, self.meta, self.shape, self.stride
-        )
-
-    def reassemble_with_autograd(self, chunk: List[Any]) -> Any:
-        self._require_full_mode("reassemble_with_autograd")
-        return _ToSubclassFn.apply(
-            self.cls, self.inner_names, self.meta, self.shape, self.stride, *chunk
-        )
-
-    def alloc(self) -> Any:
-        return self.alloc_quantizer.make_empty(
-            self.shape, dtype=self.alloc_dtype, device=self.alloc_device
-        )
-
-    @classmethod
-    def from_quantizer(
-        cls,
-        quantizer: Any,
-        *,
-        shape: Sequence[int],
-        dtype: "torch.dtype",
-        device: "torch.device",
-        wrapper_cls: Optional[type] = None,
-    ) -> "SubclassTensorSpec":
-        """Build a :class:`SubclassTensorSpec` from a live quantizer.
-
-        Hides the ``create_metadata`` / inner-name / stride bookkeeping
-        behind a single call: callers in ``output_info_fn`` /
-        ``bwd_output_info_fn`` only specify the user-facing identity
-        (shape, dtype, device, quantizer) -- and, for forward outputs
-        that need flat-slot reassembly, the ``wrapper_cls`` they
-        unflatten into.
-
-        Omitting ``wrapper_cls`` yields an alloc-only spec suitable
-        for backward grad outputs: the quantizer-specific fake
-        allocation still works (``quantizer.make_empty(...)``), but
-        :meth:`slot_count` / :meth:`reassemble` are intentionally
-        disabled because gradients never round-trip through the op's
-        flat ``Tensor[]`` payload.
-        """
-        if wrapper_cls is None:
-            return cls(
-                shape=tuple(shape),
-                alloc_quantizer=quantizer,
-                alloc_dtype=dtype,
-                alloc_device=device,
-            )
-        inner_names, meta = quantizer.create_metadata(fake_dtype=dtype)
-        return cls(
-            cls=wrapper_cls,
-            inner_names=inner_names,
-            meta=meta,
-            shape=tuple(shape),
-            stride=_contiguous_stride(shape),
-            alloc_quantizer=quantizer,
-            alloc_dtype=dtype,
-            alloc_device=device,
-        )
-
-
-class StorageSpec(TensorSpec):
-    """Non-tensor storage output / save slot (e.g. :class:`Float8TensorStorage`).
-
-    Reassembled via ``cls._torch_compile_do_unflatten``; allocated via
-    ``alloc_quantizer.make_empty(shape, ...)``.
-    """
-
-    def __init__(
-        self,
-        cls: type,
-        meta: Any,
-        pg: Any,
-        tensor_count: int,
-        *,
-        alloc_quantizer: Any = None,
-        alloc_shape: Optional[Sequence[int]] = None,
-        alloc_dtype: Optional["torch.dtype"] = None,
-        alloc_device: Optional["torch.device"] = None,
-    ) -> None:
-        self.cls = cls
-        self.meta = meta
-        self.pg = pg
-        self.tensor_count = tensor_count
-        self.alloc_quantizer = alloc_quantizer
-        self.alloc_shape = (
-            tuple(alloc_shape) if alloc_shape is not None else None
-        )
-        self.alloc_dtype = alloc_dtype
-        self.alloc_device = alloc_device
-
-    def slot_count(self) -> int:
-        return self.tensor_count
-
-    def reassemble(self, chunk: List[Any]) -> Any:
-        real_tensors = [t for t in chunk if t is not None]
-        return self.cls._torch_compile_do_unflatten(self.meta, self.pg, real_tensors)
-
-    def alloc(self) -> Any:
-        if self.alloc_quantizer is None or self.alloc_shape is None:
-            return TensorSpec.alloc(self)
-        return self.alloc_quantizer.make_empty(
-            self.alloc_shape, dtype=self.alloc_dtype, device=self.alloc_device
-        )
-
-    @classmethod
-    def from_quantizer(
-        cls,
-        quantizer: Any,
-        *,
-        shape: Sequence[int],
-        dtype: "torch.dtype",
-        device: "torch.device",
-    ) -> "StorageSpec":
-        """Build a :class:`StorageSpec` from a live quantizer.
-
-        Hides the ``create_storage_metadata`` four-tuple
-        ``(cls, meta, process_group, tensor_count)`` behind a single
-        call: callers in ``output_info_fn`` only need to specify the
-        quantizer that drives the layout plus the higher-precision
-        view (shape / dtype / device) the storage represents.
-        """
-        storage_cls, meta, pg, count = quantizer.create_storage_metadata(
-            shape=shape,
-            fake_dtype=dtype,
-            device=device,
-        )
-        return cls(
-            cls=storage_cls,
-            meta=meta,
-            pg=pg,
-            tensor_count=count,
-            alloc_quantizer=quantizer,
-            alloc_shape=tuple(shape),
-            alloc_dtype=dtype,
-            alloc_device=device,
-        )
-
-
-def tensor_spec(
+def _template_reassemble(
+    template: Any,
+    chunk: List[Any],
     *,
-    shape: Optional[Sequence[int]] = None,
-    dtype: Optional["torch.dtype"] = None,
-    device: Optional["torch.device"] = None,
-    quantizer: Optional[Any] = None,
-    wrapper_cls: Optional[type] = None,
-    storage: bool = False,
-    alias: Optional[str] = None,
-) -> TensorSpec:
-    """One-stop factory for declaring an op output / saved slot / grad spec.
+    with_autograd: bool = False,
+    aliased: bool = False,
+) -> Any:
+    """Rebuild the user-facing value for ``template`` from real slots ``chunk``.
 
-    Single entry point that authors of ``output_info_fn`` /
-    ``bwd_output_info_fn`` use to describe every slot the op
-    produces, regardless of whether the slot is a plain tensor, a
-    quantized wrapper, a non-tensor storage, an aliased save, an
-    absent output, or a grad-only alloc target. Internally dispatches
-    to the appropriate :class:`TensorSpec` subclass based on which
-    keyword arguments are supplied (first match wins):
-
-    * ``alias`` set       -> :class:`AliasedSpec` (saved slot that
-                             reuses a forward arg; no payload moves
-                             through the op).
-    * ``shape is None``   -> :class:`NoneSpec` (absent output / save).
-    * ``quantizer is None`` -> :class:`PlainTensorSpec`.
-    * ``storage=True``    -> :class:`StorageSpec` via
-                             :meth:`StorageSpec.from_quantizer` (used
-                             for quantized saved storages).
-    * otherwise           -> :class:`SubclassTensorSpec` via
-                             :meth:`SubclassTensorSpec.from_quantizer`.
-                             ``wrapper_cls`` picks between *full mode*
-                             (forward outputs that re-wrap from the
-                             flat ``Tensor[]`` payload) and
-                             *alloc-only mode* (backward grad outputs
-                             that never round-trip through the op).
-
-    All quantized paths use ``dtype`` / ``device`` for fake allocation
-    (``quantizer.make_empty(shape, dtype, device)``); the plain path
-    requires both as well, since it falls back to ``torch.empty``.
+    Inverse of :func:`_flatten_value_into`, driven by the fake template: an
+    ``aliased`` arg / ``None`` -> ``None`` (aliases are resolved by the
+    caller's ``setup_context`` from the alias name); a plain tensor ->
+    ``chunk[0]``; a ``make_fake_empty`` subclass -> ``__tensor_unflatten__``
+    (routed through :class:`_ToSubclassFn` when ``with_autograd`` so the wrap
+    stays on the autograd graph); a storage -> ``_torch_compile_do_unflatten``.
     """
-    if alias is not None:
-        return AliasedSpec(alias)
-    if shape is None:
-        return NoneSpec()
-    if quantizer is None:
-        return PlainTensorSpec(shape=shape, dtype=dtype, device=device)
-    if storage:
-        return StorageSpec.from_quantizer(
-            quantizer, shape=shape, dtype=dtype, device=device
-        )
-    return SubclassTensorSpec.from_quantizer(
-        quantizer,
-        shape=shape,
-        dtype=dtype,
-        device=device,
-        wrapper_cls=wrapper_cls,
+    if aliased or template is None:
+        return None
+    if isinstance(template, torch.Tensor):
+        plan = getattr(template, _TE_COMPILE_UNFLATTEN_PLAN, None)
+        if plan is not None:
+            inner_names, meta = plan
+            shape = tuple(template.shape)
+            stride = _contiguous_stride(shape)
+            if with_autograd:
+                result = _ToSubclassFn.apply(
+                    type(template), inner_names, meta, shape, stride, *chunk
+                )
+            else:
+                inner_dict = dict(zip(inner_names, chunk))
+                result = type(template).__tensor_unflatten__(
+                    inner_dict, meta, shape, stride
+                )
+            # ``__tensor_unflatten__`` rebuilds with ``quantizer=None`` (the
+            # snapshot can't carry a live ``ProcessGroup``); restore the live
+            # quantizer the fake template stashed so the output keeps its
+            # amax-reduction group.
+            quantizer = getattr(template, "_te_compile_quantizer", None)
+            if quantizer is not None:
+                result._quantizer = quantizer
+            return result
+        return chunk[0]
+    flatten = getattr(template, "_torch_compile_flatten", None)
+    if flatten is not None:
+        meta, pg, _ = flatten()
+        real_tensors = [t for t in chunk if t is not None]
+        return type(template)._torch_compile_do_unflatten(meta, pg, real_tensors)
+    raise TypeError(
+        f"fake_impl produced an unsupported value of type {type(template).__name__}; "
+        "expected None / torch.Tensor (plain or make_fake_empty subclass) / "
+        "a storage exposing _torch_compile_flatten()."
     )
 
 
-# --------------------------------------------------------------------------- #
-# Fake-impl synthesis from ``output_info_fn`` / ``bwd_output_info_fn``.
-# --------------------------------------------------------------------------- #
+def _split_fwd_fake_result(
+    result: Tuple[Any, ...],
+) -> Tuple[List[Any], List[Any], Dict[str, Any]]:
+    """Slice a forward ``fake_impl`` return into ``(user_fakes, saved_fakes, ctx_attrs)``.
 
-
-def _inject_saved_aliases(
-    ctx_attrs: Dict[str, Any], saved_slots: Sequence[TensorSpec]
-) -> Dict[str, Any]:
-    """Inject ``saved_tensor_aliases`` derived from ``saved_slots``.
-
-    The user's ``setup_context`` callback reads aliases off
-    ``ctx_attrs["saved_tensor_aliases"]`` to resolve aliased saved
-    slots back to their forward arg. Only :class:`AliasedSpec`
-    contributes a non-``None`` alias entry; every other spec maps to
-    ``None`` (no alias, the real value is carried through the op
-    payload). We expose the tuple on every code path (real op output,
-    output-info path, auto-synthesized fake) so the callback's
-    contract stays identical.
+    ``result`` has the eager-impl tuple shape ``(*user_outputs,
+    tensors_to_save, tensor_objects, ctx_attrs)``; the fake values double as
+    reassembly templates for :func:`_template_slot_count` /
+    :func:`_template_reassemble`.
     """
-    out = dict(ctx_attrs) if ctx_attrs else {}
-    out["saved_tensor_aliases"] = tuple(
-        s.alias if isinstance(s, AliasedSpec) else None for s in saved_slots
-    )
-    return out
+    num_outputs = len(result) - _FWD_TRAILING_SLOTS
+    saved = result[num_outputs]
+    ctx_attrs = result[num_outputs + 2]
+    user_fakes = list(result[:num_outputs])
+    saved_fakes = list(saved) if saved is not None else []
+    ctx_attrs = dict(ctx_attrs) if ctx_attrs else {}
+    return user_fakes, saved_fakes, ctx_attrs
 
 
-def _make_fake_impl_from_output_info(
-    output_info_fn: Callable[[Any], Any],
+# --------------------------------------------------------------------------- #
+# ``fake_impl`` consumers.
+#
+# A module describes its forward op outputs directly as a ``fwd_fake_impl``
+# that returns the same ``(*user_outputs, tensors_to_save, tensor_objects,
+# ctx_attrs)`` tuple as the eager ``fwd_impl``, but built out of *fake*
+# values:
+#   * ``quantizer.make_fake_empty(...)`` -- Dynamo-safe quantized wrapper.
+#   * ``quantizer.make_empty(...)``      -- quantized storage.
+#   * ``torch.empty(...)``               -- plain tensor.
+#   * the actual forward-arg tensor      -- an aliased saved slot.
+#   * ``None``                           -- absent output / saved slot.
+# These fake values are the single source of truth for the op's layout:
+#   * ``forward_fn`` / ``setup_context`` reassemble the real flat ``Tensor[]``
+#     using the fakes as templates (:func:`_template_slot_count` /
+#     :func:`_template_reassemble`), resolving aliased saved slots via
+#     :func:`_alias_name_for`.
+#   * :func:`_fwd_register_fake_from_fake_impl` wires the same callable as the
+#     op's ``register_fake`` (aliased saved slots nulled so the fake flat
+#     ``Tensor[]`` layout matches the eager impl, which writes ``None`` for
+#     aliases).
+# The backward ``bwd_fake_impl`` is used directly as the backward
+# ``register_fake`` -- backward grads never round-trip through the op
+# payload, so no reassembly is needed.
+# --------------------------------------------------------------------------- #
+
+# Attribute stamped on ``make_fake_empty`` outputs carrying the
+# ``(inner_names, meta)`` plan needed to rebuild the subclass via
+# ``__tensor_unflatten__``. The adapter reads it back (as a Dynamo
+# constant) instead of calling ``value.__tensor_flatten__()`` in-trace:
+# a tensor method returning non-tensors graph-breaks under fullgraph,
+# whereas a plain attribute read is inlined.
+_TE_COMPILE_UNFLATTEN_PLAN = "_te_compile_unflatten_plan"
+
+
+def _fwd_arg_alias_pairs(fwd_obj: Any, field_names: Sequence[str]) -> List[Tuple[torch.Tensor, str]]:
+    """Collect ``(tensor field value, field name)`` for a fwd-arg object.
+
+    ``field_names`` is precomputed outside the trace (reading
+    ``dataclasses.fields`` in-trace would graph-break on the class
+    ``mappingproxy``); attribute access by name is inlined. Used to
+    detect saved slots that alias a forward arg by identity (``is``).
+    """
+    pairs: List[Tuple[torch.Tensor, str]] = []
+    for name in field_names:
+        value = getattr(fwd_obj, name, None)
+        if isinstance(value, torch.Tensor):
+            pairs.append((value, name))
+    return pairs
+
+
+def _alias_name_for(value: Any, pairs: List[Tuple[torch.Tensor, str]]) -> Optional[str]:
+    """Return the forward-arg name ``value`` aliases (by ``is``), else ``None``."""
+    for tensor, name in pairs:
+        if value is tensor:
+            return name
+    return None
+
+
+def _fwd_register_fake_from_fake_impl(
+    fwd_fake_impl: Callable[[Any], Tuple[Any, ...]],
+    field_names: Sequence[str],
 ) -> Callable[[Any], Tuple[Any, ...]]:
-    """Build a forward fake-impl from an ``output_info_fn``.
+    """Adapt a forward ``fake_impl`` into a ``register_fake`` kernel.
 
-    The synthesized fake-impl returns
-    ``(*user_outputs, tensors_to_save, None, None)``:
-
-    * ``user_outputs``    comes from ``[s.alloc() for s in user_specs]``.
-    * ``tensors_to_save`` comes from ``tuple(s.alloc() for s in saved_slots)``,
-                          or ``None`` if ``saved_slots`` is empty
-                          (e.g. ``is_grad_enabled=False``).
-    * The trailing ``tensor_objects`` / ``ctx_attrs`` slots are
-      ``None`` placeholders -- the eager fwd_impl contract requires
-      them in the tuple (via ``_FWD_TRAILING_SLOTS``) but
-      :func:`_format_fwd_result` only reads user outputs + saved
-      tensors off a fake-impl return.
-
-    ``output_info_fn`` must return a 3-tuple
-    ``(user_specs: List[TensorSpec], saved_slots: List[TensorSpec],
-       ctx_attrs: Dict[str, Any])``.
+    The user's ``fake_impl`` returns the *actual* forward-arg tensor for
+    aliased saved slots; the eager impl instead writes ``None`` there
+    (the value rides along as a ctx alias, not through the op payload).
+    Aliased saved slots are nulled here so the fake flat ``Tensor[]``
+    layout stays identical to the eager impl.
     """
 
-    def _fake(args: Any) -> Tuple[Any, ...]:
-        user_specs, saved_slots, _ = output_info_fn(args)
-        user_outputs = [s.alloc() for s in user_specs]
-        tensors_to_save = (
-            None if not saved_slots else tuple(s.alloc() for s in saved_slots)
-        )
-        # Trailing ``tensor_objects`` / ``ctx_attrs`` slots are required
-        # by the eager fwd_impl contract (``_FWD_TRAILING_SLOTS``) but
-        # are never read off a fake-impl return -- ``_format_fwd_result``
-        # only slices user outputs + tensors_to_save out of the tuple.
+    def fwd_fake(fwd_obj: Any) -> Tuple[Any, ...]:
+        result = fwd_fake_impl(fwd_obj)
+        num_outputs = len(result) - _FWD_TRAILING_SLOTS
+        user_outputs = result[:num_outputs]
+        saved = result[num_outputs]
+        if saved is None:
+            tensors_to_save: Any = None
+        else:
+            pairs = _fwd_arg_alias_pairs(fwd_obj, field_names)
+            tensors_to_save = tuple(
+                None if _alias_name_for(v, pairs) is not None else v for v in saved
+            )
         return (*user_outputs, tensors_to_save, None, None)
 
-    return _fake
-
-
-def _make_fake_impl_from_bwd_output_info(
-    bwd_output_info_fn: Callable[[Any], List[TensorSpec]],
-) -> Callable[[Any], Tuple[Any, ...]]:
-    """Build a backward fake-impl from a ``bwd_output_info_fn``.
-
-    The descriptor returns a flat list of :class:`TensorSpec`
-    (typically :class:`NoneSpec` / :class:`PlainTensorSpec` /
-    alloc-only :class:`SubclassTensorSpec` for quantized grads), one
-    per gradient output in the same order as ``backward_impl``'s
-    return tuple. The synthesized fake-impl just calls
-    :meth:`TensorSpec.alloc` on each.
-    """
-
-    def _fake(bwd_args: Any) -> Tuple[Any, ...]:
-        specs = bwd_output_info_fn(bwd_args)
-        return tuple(s.alloc() for s in specs)
-
-    return _fake
+    return fwd_fake
 
 
 class _ToSubclassFn(torch.autograd.Function):
@@ -1544,7 +1270,7 @@ def _prepare_for_saving(tensors: Any) -> Tuple[List[Optional[torch.Tensor]], Any
     Used only to flatten the user's setup-context return into a
     ``(flat_tensors, tensor_objects)`` pair stashed on ``ctx`` for the
     backward; the forward output and saved-tensor restoration on the
-    compile-path now go through :class:`TensorSpec` instead. Lazy-imports
+    compile-path go through :func:`_template_reassemble` instead. Lazy-imports
     avoid the dynamo<->quantized_tensor circular import that
     ``transformer_engine.pytorch`` would otherwise trigger at module
     import time.
@@ -1568,7 +1294,8 @@ def _prepare_for_saving(tensors: Any) -> Tuple[List[Optional[torch.Tensor]], Any
 def _flatten_value_into(flat: List[torch.Tensor], value: Any) -> None:
     """Append the ``Tensor[]`` slots produced by ``value`` to ``flat``.
 
-    The dispatch matches the four spec kinds in :class:`TensorSpec`:
+    The inverse of :func:`_template_reassemble`; the slot counts match
+    :func:`_template_slot_count`:
 
     * ``None``           -> 1 sentinel slot (via :func:`_encode_none`).
     * plain Tensor       -> 1 slot.
@@ -1609,10 +1336,10 @@ def _format_fwd_result(result: Any) -> List[torch.Tensor]:
     User outputs come first, then the saved-for-backward tensors in
     declaration order. Both groups go through the same per-value
     :func:`_flatten_value_into` dispatch -- the slot layout produced
-    here must match exactly what :meth:`TensorSpec.slot_count` reports
-    for the corresponding spec, since the call-site reassembly in
+    here must match exactly what :func:`_template_slot_count` reports
+    for the corresponding fake template, since the call-site reassembly in
     :func:`forward_fn` / :func:`_setup_context` slices this flat list
-    back into user-facing objects using those per-spec counts.
+    back into user-facing objects using those per-template counts.
 
     ``None`` entries on either side are smuggled through
     :func:`_encode_none` so the schema stays non-nullable and
@@ -1797,7 +1524,8 @@ def _register_autograd_for_op(
     grad_targets: List[Tuple[int, bool]],
     setup_context_user: Callable[..., None],
     backward_obj_type: type,
-    output_info_fn: Callable[[Any], Tuple[List["TensorSpec"], List["TensorSpec"], Any]],
+    fwd_fake_impl: Callable[[Any], Tuple[Any, ...]],
+    fwd_field_names: Sequence[str],
 ) -> None:
     """Wire ``register_autograd`` on a forward op so its backward calls
     ``bwd_op_name``.
@@ -1811,13 +1539,12 @@ def _register_autograd_for_op(
 
     The op's ``Tensor[]`` return holds the flat layout produced by
     :func:`_format_fwd_result` -- one chunk per user output / saved
-    tensor, sliced according to the user-supplied ``output_info_fn``:
-    a pure Python function returning
-    ``(user_specs: List[TensorSpec], saved_slots: List[TensorSpec],
-    ctx_attrs)``. Traceable by Dynamo / AOT, no fake tensor allocation
-    involved. :class:`AliasedSpec` entries on the saved side carry the
-    forward-arg name the slot aliases, surfaced to the user's
-    ``setup_context`` via ``ctx_attrs["saved_tensor_aliases"]``.
+    tensor. ``setup_context`` re-runs ``fwd_fake_impl`` to recover the
+    fake output / saved templates, then reassembles each chunk via
+    :func:`_template_reassemble`. Saved slots that alias a forward arg
+    (the fake returns the actual arg) are detected by identity and
+    surfaced to the user's ``setup_context`` via
+    ``ctx_attrs["saved_tensor_aliases"]``.
     """
     fwd_qualname = f"{_TE_OP_NAMESPACE}::{fwd_op_name}"
 
@@ -1828,30 +1555,36 @@ def _register_autograd_for_op(
         kwargs = dict(zip(fwd_arg_names, inputs))
         fwd_obj = _unpack(fwd_arg_type, kwargs, fwd_buckets)
 
-        user_specs, saved_slots, ctx_attrs = output_info_fn(fwd_obj)
-        ctx_attrs = _inject_saved_aliases(ctx_attrs, saved_slots)
+        user_fakes, saved_fakes, ctx_attrs = _split_fwd_fake_result(fwd_fake_impl(fwd_obj))
+        pairs = _fwd_arg_alias_pairs(fwd_obj, fwd_field_names)
+        saved_aliases = tuple(_alias_name_for(t, pairs) for t in saved_fakes)
+        ctx_attrs = dict(ctx_attrs)
+        ctx_attrs["saved_tensor_aliases"] = saved_aliases
 
         cursor = 0
         user_outputs: List[Any] = []
-        for spec in user_specs:
-            n = spec.slot_count()
+        for template in user_fakes:
+            n = _template_slot_count(template)
             chunk = [_decode_none(t) for t in output[cursor:cursor + n]]
             cursor += n
-            user_outputs.append(spec.reassemble(chunk))
+            user_outputs.append(_template_reassemble(template, chunk))
 
         tensors_to_save_from_forward_list: List[Any] = []
-        for spec in saved_slots:
-            n = spec.slot_count()
+        for template, alias in zip(saved_fakes, saved_aliases):
+            aliased = alias is not None
+            n = _template_slot_count(template, aliased=aliased)
             chunk = [_decode_none(t) for t in output[cursor:cursor + n]]
             cursor += n
-            tensors_to_save_from_forward_list.append(spec.reassemble(chunk))
+            tensors_to_save_from_forward_list.append(
+                _template_reassemble(template, chunk, aliased=aliased)
+            )
         tensors_to_save_from_forward = tuple(tensors_to_save_from_forward_list)
 
         bwd_obj = backward_obj_type()
         tensors_to_save_from_setup = setup_context_user(
             bwd_obj,
             fwd_obj,
-            user_outputs[0] if len(user_specs) == 1 else tuple(user_outputs),
+            user_outputs[0] if len(user_fakes) == 1 else tuple(user_outputs),
             ctx_attrs,
             tensors_to_save_from_forward,
         )
@@ -1984,11 +1717,8 @@ def _te_register_custom_op(
     backward_arg_type: type,
     backward_obj: type,
     backward_impl: Callable[[Any], Any],
-    output_info_fn: Callable[
-        [Any],
-        Tuple[List["TensorSpec"], List["TensorSpec"], Dict[str, Any]],
-    ],
-    bwd_output_info_fn: Callable[[Any], List["TensorSpec"]],
+    fwd_fake_impl: Callable[[Any], Tuple[Any, ...]],
+    bwd_fake_impl: Callable[[Any], Tuple[Any, ...]],
 ) -> Callable[..., Any]:
     """Register a TE module's forward + backward as a single torch custom op.
 
@@ -2039,57 +1769,38 @@ def _te_register_custom_op(
     backward_impl
         Eager backward implementation. Receives a single argument of type
         ``backward_arg_type`` and returns the gradient tuple.
-    output_info_fn
-        Pure-Python layout descriptor for the op's outputs:
-        ``fn(fwd_obj) -> (user_specs, saved_slots, ctx_attrs)``.
+    fwd_fake_impl
+        Forward fake implementation: ``fn(fwd_obj) -> (*user_outputs,
+        tensors_to_save, tensor_objects, ctx_attrs)`` -- the same tuple
+        shape as ``fwd_impl``, but built from *fake* values instead of
+        running the real kernel. Each slot is one of:
 
-        * ``user_specs`` is a list, one :class:`TensorSpec` per user
-          output. Each spec encodes everything dynamo needs about
-          that slot: ``slot_count()`` for flat-``Tensor[]`` slicing,
-          ``reassemble(chunk)`` / ``reassemble_with_autograd(chunk)``
-          for rebuilding the user-facing object from the op's flat
-          output, and ``alloc()`` for the auto-synthesized fake-impl.
-          The four concrete subclasses -- :class:`NoneSpec`,
-          :class:`PlainTensorSpec`, :class:`SubclassTensorSpec`,
-          :class:`StorageSpec` -- cover every output shape TE
-          currently produces.
+        * ``quantizer.make_fake_empty(shape, dtype, device)`` -- a
+          Dynamo-safe quantized wrapper (assembled via
+          ``__tensor_unflatten__`` with a snapshot-free meta).
+        * ``quantizer.make_empty(shape, dtype, device)`` -- a quantized
+          storage (e.g. an FP8 weight workspace).
+        * ``torch.empty(shape, dtype, device)`` -- a plain tensor.
+        * the actual forward-arg tensor -- for a saved slot that aliases
+          a forward input (detected by identity).
+        * ``None`` -- an absent output / saved slot.
 
-        * ``saved_slots`` is a list of :class:`TensorSpec`, one per
-          saved-for-backward slot, mirroring ``user_specs`` but for
-          the saved-tensor section of the op payload. Use
-          :class:`AliasedSpec(name)` for slots that the forward impl
-          leaves as ``None`` because the value is identical to a
-          forward arg (the alias name is surfaced to
-          ``setup_context`` via
-          ``ctx_attrs["saved_tensor_aliases"]``, injected by dynamo).
-          Use :class:`NoneSpec` / :class:`PlainTensorSpec` /
-          :class:`StorageSpec` / :class:`SubclassTensorSpec` for the
-          rest, exactly as for user outputs.
-
-        * ``ctx_attrs`` is the non-tensor state attached to the
-          autograd context (passed through to ``setup_context``).
-          Dynamo augments it with ``"saved_tensor_aliases"`` before
-          the callback runs.
-
-        :func:`forward_fn` and the autograd ``setup_context`` use
-        this descriptor to learn output layouts without ever
-        materialising a fake prototype tensor -- the only way to
-        keep layout extraction traceable by Dynamo under
-        ``fullgraph=True``. The forward fake-impl
-        (:func:`torch.library.register_fake`) is auto-synthesized
-        from the same specs via :func:`_make_fake_impl_from_output_info`.
-    bwd_output_info_fn
-        Pure-Python alloc descriptor for the backward op:
-        ``fn(bwd_obj) -> List[TensorSpec]``, one entry per gradient
-        output in the same order as ``backward_impl``'s return tuple.
-        Typically :class:`NoneSpec` for missing grads,
-        :class:`PlainTensorSpec` for plain tensors, and an alloc-only
-        :class:`SubclassTensorSpec` (built via
-        :meth:`SubclassTensorSpec.from_quantizer` without a
-        ``wrapper_cls``) for quantized ones. The backward fake-impl
-        is synthesized from these specs via
-        :func:`_make_fake_impl_from_bwd_output_info`, so the
-        gradient-shape derivation lives entirely in the descriptor.
+        This single callable drives both consumers: ``forward_fn`` /
+        ``setup_context`` use its fake values directly as reassembly
+        templates (:func:`_template_slot_count` /
+        :func:`_template_reassemble`), and
+        :func:`_fwd_register_fake_from_fake_impl` wires it (with aliased
+        saved slots nulled) as the op's
+        :func:`torch.library.register_fake`. The whole callable must be
+        Dynamo-traceable under ``fullgraph=True``.
+    bwd_fake_impl
+        Backward fake implementation: ``fn(bwd_obj) -> grad_tuple``, one
+        fake grad per gradient output in the same order as
+        ``backward_impl``'s return tuple (``None`` for missing grads,
+        ``torch.empty`` for plain, ``quantizer.make_empty`` for
+        quantized). Wired directly as the backward op's
+        ``register_fake`` -- backward grads never round-trip through the
+        op payload, so no layout adapter is needed.
 
     Returns
     -------
@@ -2171,13 +1882,16 @@ def _te_register_custom_op(
     inner_fwd_qualname = f"{_TE_OP_NAMESPACE}::{inner_fwd_name}"
     inner_bwd_qualname = f"{_TE_OP_NAMESPACE}::{inner_bwd_name}"
 
-    # Auto-synthesize the forward / backward fake impls from the
-    # alloc-spec descriptors. The synthesized impls share branching
-    # with their layout counterparts (``output_info_fn`` /
-    # ``bwd_output_info_fn``) so there's exactly one place where every
-    # per-precision / per-mode condition lives.
-    fwd_fake_impl = _make_fake_impl_from_output_info(output_info_fn)
-    bwd_fake_impl = _make_fake_impl_from_bwd_output_info(bwd_output_info_fn)
+    # The module supplies its output layout as a forward ``fake_impl``
+    # (fake values in the eager-impl tuple shape). ``forward_fn`` /
+    # ``setup_context`` consume it directly as reassembly templates; the
+    # forward ``register_fake`` kernel wraps it to null aliased saved slots
+    # (so the fake flat ``Tensor[]`` matches the eager impl). The backward
+    # ``fake_impl`` is the backward ``register_fake`` directly. ``field
+    # names`` are precomputed here (reading ``dataclasses.fields`` in-trace
+    # would graph-break) for the alias-by-identity detection.
+    fwd_field_names = [f.name for f in dataclasses.fields(fwd_arg_type)]
+    fwd_register_fake = _fwd_register_fake_from_fake_impl(fwd_fake_impl, fwd_field_names)
 
     _register_kernel(
         op_name=inner_fwd_name,
@@ -2186,7 +1900,7 @@ def _te_register_custom_op(
         arg_names=fwd_arg_names,
         buckets=fwd_buckets,
         impl=fwd_impl,
-        fake_impl=fwd_fake_impl,
+        fake_impl=fwd_register_fake,
         format_result=_format_fwd_result,
     )
     _register_kernel(
@@ -2211,7 +1925,8 @@ def _te_register_custom_op(
         grad_targets=grad_targets,
         setup_context_user=setup_context,
         backward_obj_type=backward_obj,
-        output_info_fn=output_info_fn,
+        fwd_fake_impl=fwd_fake_impl,
+        fwd_field_names=fwd_field_names,
     )
 
     if subclass_list:
@@ -2243,7 +1958,8 @@ def _te_register_custom_op(
             grad_targets=grad_targets,
             setup_context_user=setup_context,
             backward_obj_type=backward_obj,
-            output_info_fn=output_info_fn,
+            fwd_fake_impl=fwd_fake_impl,
+            fwd_field_names=fwd_field_names,
         )
 
         fwd_slot_offsets = _collect_universal_slot_offsets(fwd_buckets)
@@ -2303,21 +2019,24 @@ def _te_register_custom_op(
     fwd_op = getattr(getattr(torch.ops, _TE_OP_NAMESPACE), outer_fwd_name)
 
     def forward_fn(fwd_args):
-        user_specs, _saved_slots, _ctx_attrs = output_info_fn(fwd_args)
+        user_fakes, _saved_fakes, _ctx_attrs = _split_fwd_fake_result(
+            fwd_fake_impl(fwd_args)
+        )
         kwargs = _pack(fwd_args, fwd_buckets)
         flat_in = [kwargs[name] for name in fwd_arg_names]
         result = fwd_op(*flat_in)
 
-        # Slice the flat result by spec. Subclass specs route through
-        # :class:`_ToSubclassFn` to keep the wrap on the autograd graph;
-        # plain tensors / storage classes are reconstructed directly.
+        # Slice the flat result using the fake outputs as templates. Subclass
+        # templates route through :class:`_ToSubclassFn` to keep the wrap on
+        # the autograd graph; plain tensors / storage classes are
+        # reconstructed directly. User outputs never alias a forward arg.
         cursor = 0
         outputs: List[Any] = []
-        for spec in user_specs:
-            n = spec.slot_count()
+        for template in user_fakes:
+            n = _template_slot_count(template)
             chunk = [_decode_none(t) for t in result[cursor:cursor + n]]
             cursor += n
-            outputs.append(spec.reassemble_with_autograd(chunk))
+            outputs.append(_template_reassemble(template, chunk, with_autograd=True))
 
         if len(outputs) == 1:
             return outputs[0]

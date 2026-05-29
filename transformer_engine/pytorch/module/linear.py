@@ -58,9 +58,7 @@ from ..cpp_extensions import (
 )
 from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx, GemmParallelModes, dist_group_type
 from ..dynamo import (
-    TensorSpec,
     _te_register_custom_op,
-    tensor_spec,
 )
 from ..graph import is_graph_capturing
 from ..quantized_tensor import (
@@ -74,9 +72,7 @@ from ..quantized_tensor import (
 from ..tensor.float8_tensor import (
     Float8CurrentScalingQuantizer,
     Float8Quantizer,
-    Float8Tensor,
 )
-from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.utils import clear_columnwise_cache, is_custom
 from ..export import is_in_onnx_export_mode, assert_warmed_up
@@ -1273,28 +1269,26 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
 
 
 # ----------------------------------------------------------------------------
-# Compile-tier wrappers: ``output_info_fn`` descriptors + ``_te_register_custom_op``
+# Compile-tier wrappers: forward / backward ``fake_impl`` + ``_te_register_custom_op``
 # registration. The custom op lets ``torch.compile`` trace through linear
 # forward + backward as a single graph node without entering the eager
 # ``_Linear`` autograd.Function machinery. Selected by :meth:`Linear.forward`
 # when ``torch.compiler.is_compiling()`` is true.
 # ----------------------------------------------------------------------------
-def _linear_backward_output_info(
+def _linear_backward_fake_impl(
     args: LinearBwdArgs,
-) -> List[TensorSpec]:
-    """Pure-Python alloc-spec descriptor for :func:`_linear_backward`.
+) -> Tuple[Any, Any, Any]:
+    """Backward fake-impl for :func:`_linear_backward`.
 
-    Returns a list of three :class:`TensorSpec` -- one per gradient
-    output ``(wgrad, dgrad, grad_bias)`` -- consumed by the
-    auto-synthesized backward fake-impl in
-    :func:`_make_fake_impl_from_bwd_output_info`. Each slot is encoded
-    through :func:`tensor_spec` (``shape=None`` for absent grads,
-    ``quantizer`` for quantized ones -- backward grads use alloc-only
-    ``SubclassTensorSpec`` because they go straight to autograd and
-    never through the op's flat ``Tensor[]``). ``set_usage`` on
+    Returns the ``(wgrad, dgrad, grad_bias)`` gradient triple built from
+    *fake* values (``None`` for absent grads, ``torch.empty`` for plain,
+    ``quantizer.make_empty`` for quantized ones), in the same order as
+    :func:`_linear_backward`'s return tuple. Wired directly as the
+    backward op's ``register_fake`` -- it runs under fake-prop (not the
+    Dynamo trace), so ``make_empty`` is fine here. ``set_usage`` on
     ``grad_input_quantizer`` is preserved because it influences
-    ``dgrad``'s downstream ``make_empty``. Manual TE FSDP is
-    unsupported; FSDP2 / MCore FSDP go through the standard path.
+    ``dgrad``'s allocation. Manual TE FSDP is unsupported; FSDP2 / MCore
+    FSDP go through the standard path.
     """
 
     if args.fsdp_group is not None:
@@ -1312,44 +1306,37 @@ def _linear_backward_output_info(
     activation_dtype = args.activation_dtype
     device = args.grad_output.device
 
-    wgrad_shape = (
-        (out_features, in_features)
+    def grad(shape, quantizer):
+        if shape is None:
+            return None
+        if quantizer is not None:
+            return quantizer.make_empty(list(shape), dtype=activation_dtype, device=device)
+        return torch.empty(tuple(shape), dtype=activation_dtype, device=device)
+
+    wgrad = (
+        grad((out_features, in_features), args.grad_weight_quantizer)
         if args.requires_wgrad and not args.fuse_wgrad_accumulation
         else None
     )
-    dgrad_shape = tuple(args.inp_shape) if args.requires_dgrad else None
-    grad_bias_shape = (out_features,) if args.use_bias and args.requires_wgrad else None
+    dgrad = grad(args.inp_shape, args.grad_input_quantizer) if args.requires_dgrad else None
+    grad_bias = grad((out_features,), None) if args.use_bias and args.requires_wgrad else None
 
-    return [
-        tensor_spec(
-            shape=wgrad_shape,
-            dtype=activation_dtype,
-            device=device,
-            quantizer=args.grad_weight_quantizer,
-        ),
-        tensor_spec(
-            shape=dgrad_shape,
-            dtype=activation_dtype,
-            device=device,
-            quantizer=args.grad_input_quantizer,
-        ),
-        tensor_spec(
-            shape=grad_bias_shape,
-            dtype=activation_dtype,
-            device=device,
-        ),
-    ]
+    return wgrad, dgrad, grad_bias
 
 
-def _linear_forward_output_info(
+def _linear_forward_fake_impl(
     args: LinearFwdArgs,
-) -> Tuple[List[TensorSpec], List[TensorSpec], Dict[str, Any]]:
-    """Output-layout descriptor for the linear forward.
+) -> Tuple[Any, Any, Any, Any, Dict[str, Any]]:
+    """Forward fake-impl for :func:`_linear_forward_impl`.
 
-    Returns ``(user_specs, saved_slots, ctx_attrs)`` -- Dynamo-traceable
-    layout + alloc info for the op's outputs and saved tensors.
-    :func:`_te_register_custom_op` synthesizes the fake-impl by calling
-    :meth:`TensorSpec.alloc` on each entry.
+    Returns ``(out, new_weight_workspace, tensors_to_save, None,
+    ctx_attrs)`` -- the same tuple shape as the eager impl, but built
+    from *fake* values (``make_fake_empty`` wrappers / ``make_empty``
+    storages / ``torch.empty`` plains / aliased forward args / ``None``).
+    The ``fake_impl`` -> layout adapter in
+    :mod:`transformer_engine.pytorch.dynamo` reads the slot layout off
+    these fake values (and nulls aliased saved slots for the
+    ``register_fake`` kernel).
 
     All ``set_usage`` side effects on the live quantizers happen here
     and are observed by both the real fwd impl and backward.
@@ -1441,9 +1428,9 @@ def _linear_forward_output_info(
         inputmat_is_storage = False
 
     # Weight pipeline -- mirror ``quantize_weight`` / ``cast_if_needed``.
-    # ``new_weight_workspace_spec`` is non-``NoneSpec`` only on the
-    # cache-miss + ``cache_weight`` combination.
-    new_weight_workspace_spec: TensorSpec = tensor_spec()
+    # ``new_weight_workspace`` is a fresh fake storage only on the
+    # cache-miss + ``cache_weight`` combination, else ``None``.
+    new_weight_workspace: Any = None
     weightmat_is_storage = False
     weightmat_aliases_weight = False
     if fp8_or_debug:
@@ -1476,12 +1463,10 @@ def _linear_forward_output_info(
             ):
                 workspace = None
             if workspace is None and args.cache_weight:
-                new_weight_workspace_spec = tensor_spec(
-                    shape=weight.shape,
-                    dtype=activation_dtype,
-                    device=weight.device,
-                    quantizer=weight_quantizer,
-                    storage=True,
+                # Fresh FP8 weight workspace -- a ``*TensorStorage``
+                # (``weight_quantizer`` is ``internal``).
+                new_weight_workspace = weight_quantizer.make_empty(
+                    list(weight.shape), dtype=activation_dtype, device=weight.device
                 )
     else:
         weightmat_aliases_weight = weight.dtype == activation_dtype
@@ -1504,18 +1489,17 @@ def _linear_forward_output_info(
     # User-output [0] -- the GEMM result. ``Float8Tensor`` is the only
     # quantized wrapper this op produces directly; other quantizer
     # families flow their workspace through ``new_weight_workspace``
-    # instead.
-    out_spec = tensor_spec(
-        shape=tuple(out_shape),
-        dtype=activation_dtype,
-        device=inp.device,
-        quantizer=output_quantizer,
-        wrapper_cls=Float8Tensor if output_quantizer is not None else None,
-    )
+    # instead. The quantized output uses ``make_fake_empty`` -- the
+    # Dynamo-safe wrapper allocator (``make_empty`` cannot build a
+    # wrapper in-trace because it proxies the live quantizer).
+    if output_quantizer is not None:
+        out = output_quantizer.make_fake_empty(
+            tuple(out_shape), dtype=activation_dtype, device=inp.device
+        )
+    else:
+        out = torch.empty(tuple(out_shape), dtype=activation_dtype, device=inp.device)
 
-    user_specs: List[TensorSpec] = [out_spec, new_weight_workspace_spec]
-
-    saved_slots: List[TensorSpec] = []
+    saved_values: List[Any] = []
 
     if args.is_grad_enabled:
         # Post-forward ``set_usage`` -- mirrors ``_linear_forward_impl``
@@ -1539,19 +1523,21 @@ def _linear_forward_output_info(
 
         # Slot 0 -- ``saved_inputmat``: absent / aliased to ``inp`` /
         # fresh quantized storage / plain cast (mutually exclusive).
+        # An aliased slot returns the actual forward arg ``inp``; the
+        # adapter detects the identity and nulls it in the payload.
         if not backward_needs_input:
-            saved_slots.append(tensor_spec())
+            saved_values.append(None)
         elif inputmat_aliases_inp:
-            saved_slots.append(tensor_spec(alias="inp"))
-        else:
-            saved_slots.append(
-                tensor_spec(
-                    shape=tuple(inp.shape),
-                    dtype=activation_dtype,
-                    device=inp.device,
-                    quantizer=input_quantizer if inputmat_is_storage else None,
-                    storage=inputmat_is_storage,
+            saved_values.append(inp)
+        elif inputmat_is_storage:
+            saved_values.append(
+                input_quantizer.make_empty(
+                    list(inp.shape), dtype=activation_dtype, device=inp.device
                 )
+            )
+        else:
+            saved_values.append(
+                torch.empty(tuple(inp.shape), dtype=activation_dtype, device=inp.device)
             )
 
         # Slot 1 -- ``wt_save``. The saved storage's quantizer must
@@ -1565,24 +1551,24 @@ def _linear_forward_output_info(
             else args.weight_quantizer
         )
         if weightmat_aliases_weight:
-            saved_slots.append(tensor_spec(alias="weight"))
+            saved_values.append(weight)
         elif args.is_fsdp2:
-            saved_slots.append(tensor_spec())
-        else:
-            saved_slots.append(
-                tensor_spec(
-                    shape=tuple(weight.shape),
-                    dtype=activation_dtype,
-                    device=weight.device,
-                    quantizer=weight_quantizer_for_save if weightmat_is_storage else None,
-                    storage=weightmat_is_storage,
+            saved_values.append(None)
+        elif weightmat_is_storage:
+            saved_values.append(
+                weight_quantizer_for_save.make_empty(
+                    list(weight.shape), dtype=activation_dtype, device=weight.device
                 )
             )
+        else:
+            saved_values.append(
+                torch.empty(tuple(weight.shape), dtype=activation_dtype, device=weight.device)
+            )
 
-        # Slot 2 -- ``saved_weight`` (always aliased). Slot 3 --
-        # ``saved_bias`` (aliased or absent).
-        saved_slots.append(tensor_spec(alias="weight"))
-        saved_slots.append(tensor_spec(alias="bias") if bias is not None else tensor_spec())
+        # Slot 2 -- ``saved_weight`` (always aliased to ``weight``).
+        # Slot 3 -- ``saved_bias`` (aliased to ``bias`` or absent).
+        saved_values.append(weight)
+        saved_values.append(bias if bias is not None else None)
 
     if args.fsdp_group is not None and args.is_grad_enabled:
         raise NotImplementedError(
@@ -1592,7 +1578,8 @@ def _linear_forward_output_info(
 
     ctx_attrs: Dict[str, Any] = {"fsdp_shapes": []}
 
-    return user_specs, saved_slots, ctx_attrs
+    tensors_to_save = tuple(saved_values) if args.is_grad_enabled else None
+    return out, new_weight_workspace, tensors_to_save, None, ctx_attrs
 
 
 _linear_compiled_op = _te_register_custom_op(
@@ -1600,12 +1587,12 @@ _linear_compiled_op = _te_register_custom_op(
     input_tensors_for_grad=["weight", "inp", "bias"],
     fwd_arg_type=LinearFwdArgs,
     fwd_impl=_linear_forward_impl,
-    output_info_fn=_linear_forward_output_info,
+    fwd_fake_impl=_linear_forward_fake_impl,
     setup_context=_linear_setup_ctx,
     backward_arg_type=LinearBwdArgs,
     backward_obj=LinearBwdArgs,
     backward_impl=_linear_backward,
-    bwd_output_info_fn=_linear_backward_output_info,
+    bwd_fake_impl=_linear_backward_fake_impl,
 )
 
 
