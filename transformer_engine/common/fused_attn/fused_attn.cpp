@@ -321,9 +321,12 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
           (head_dim_qk == 256 && head_dim_v == 256 && is_training && sm_arch_ >= 100 &&
            sm_arch_ < 110 && cudnn_runtime_version >= 92300 &&
            layout_group != NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD &&
-           // The FE forces this path onto deterministic bprop, which then rejects alibi and
-           // dropout, and only supports vanilla softmax.
-           bias_type != NVTE_Bias_Type::NVTE_ALIBI && dropout == 0.0 &&
+           // The FE forces this path onto the deterministic bprop algorithm, which on
+           // Blackwell rejects dBias, dropout, and ALiBi (and supports vanilla softmax only).
+           // Require NO_BIAS: a learnable pre/post-scale bias would request dBias in the bprop
+           // graph and fail validation. The selector has no visibility into the bias shape, so
+           // gate on the bias type to avoid over-selecting this backend.
+           bias_type == NVTE_Bias_Type::NVTE_NO_BIAS && dropout == 0.0 &&
            softmax_type == NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX &&
            // Non-causal D=256 supports only full-window attention; SWA is allowed only for causal masks.
            // NOTE: SWA support for non causal would be available when cuDNN decides to redirect
