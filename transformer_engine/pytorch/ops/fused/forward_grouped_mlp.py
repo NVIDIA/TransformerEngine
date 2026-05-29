@@ -452,11 +452,7 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
                 [w._rowwise_data for w in grouped_fc1_weight],
                 device,
             )
-            swizzle_type = (
-                "uniform_nvfp4_swizzle"
-                if use_nvfp4
-                else "uniform_mxfp8_rowwise_swizzle"
-            )
+            swizzle_type = "uniform_nvfp4_swizzle" if use_nvfp4 else "uniform_mxfp8_rowwise_swizzle"
             fc1_sfb_ptrs, _fc1_sfb_buffer = tex.transform_and_copy_data_ptrs_to_device(
                 swizzle_type,
                 [w._rowwise_scale_inv for w in grouped_fc1_weight],
@@ -633,9 +629,7 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
                     device,
                 )
                 swizzle_type = (
-                    "uniform_nvfp4_swizzle"
-                    if use_nvfp4
-                    else "uniform_mxfp8_rowwise_swizzle"
+                    "uniform_nvfp4_swizzle" if use_nvfp4 else "uniform_mxfp8_rowwise_swizzle"
                 )
                 fc2_sfb_ptrs, _fc2_sfb_buffer = tex.transform_and_copy_data_ptrs_to_device(
                     swizzle_type,

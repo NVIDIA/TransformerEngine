@@ -652,9 +652,7 @@ class _BackwardGroupedMLP_CuTeGEMMDBase(FusedOperation):
                 device,
             )
             swizzle_type = (
-                "uniform_nvfp4_swizzle"
-                if use_nvfp4
-                else "uniform_mxfp8_columnwise_swizzle"
+                "uniform_nvfp4_swizzle" if use_nvfp4 else "uniform_mxfp8_columnwise_swizzle"
             )
             fc2_sfb_ptrs, _fc2_sfb_buffer = tex.transform_and_copy_data_ptrs_to_device(
                 swizzle_type,
@@ -916,9 +914,7 @@ class _BackwardGroupedMLP_CuTeGEMMDBase(FusedOperation):
                         device,
                     )
                     swizzle_type = (
-                        "uniform_nvfp4_swizzle"
-                        if use_nvfp4
-                        else "uniform_mxfp8_columnwise_swizzle"
+                        "uniform_nvfp4_swizzle" if use_nvfp4 else "uniform_mxfp8_columnwise_swizzle"
                     )
                     fc1_sfb_ptrs, _fc1_sfb_buffer = tex.transform_and_copy_data_ptrs_to_device(
                         swizzle_type,
