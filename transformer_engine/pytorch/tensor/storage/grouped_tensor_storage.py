@@ -856,11 +856,7 @@ class GroupedTensorStorage:
                     total_columnwise_scale_elements, dtype=torch.float32, device=device
                 )
         elif compatible_recipe.float8_current_scaling():
-            # Current scaling - per-tensor scaling computed on the fly.
-            # FP8 current scaling has a single per-tensor scale (no per-direction
-            # scaling), so rowwise/columnwise scale_inv hold identical values.
-            # Allocate one shared buffer and alias both views to it (mirrors the
-            # non-grouped path in Float8CurrentScalingQuantizer::create_tensor).
+            # only rowwise would be be needed for Blackwell FP8 GEMM
             non_tn_fp8_gemm_supported = is_non_tn_fp8_gemm_supported()
             fp8_rowwise_usage = rowwise_usage or non_tn_fp8_gemm_supported
             fp8_columnwise_usage = columnwise_usage and not non_tn_fp8_gemm_supported
