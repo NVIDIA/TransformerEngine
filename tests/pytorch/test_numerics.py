@@ -41,6 +41,7 @@ from transformer_engine.pytorch import (
     get_device_compute_capability,
     is_fp8_available,
     is_mxfp8_available,
+    is_mxfp8_grouped_gemm_available,
     is_fp8_block_scaling_available,
     is_bf16_available,
     is_nvfp4_available,
@@ -60,6 +61,9 @@ from utils import ModelConfig, recipe_id, reset_rng_states, skip_unsupported_bac
 # Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = is_mxfp8_available(return_reason=True)
+mxfp8_grouped_gemm_available, reason_for_no_mxfp8_grouped_gemm = is_mxfp8_grouped_gemm_available(
+    return_reason=True
+)
 fp8_block_scaling_available = is_fp8_block_scaling_available()
 nvfp4_available = is_nvfp4_available()
 
@@ -1954,6 +1958,8 @@ def test_grouped_linear_accuracy(
         pytest.skip("FP8 parameters are not supported in debug mode.")
     if NVTE_TEST_NVINSPECT_ENABLED and delay_wgrad_compute:
         pytest.skip("Delayed wgrad compute is not supported in debug mode.")
+    if fp8 and recipe.mxfp8() and not mxfp8_grouped_gemm_available:
+        pytest.skip(reason_for_no_mxfp8_grouped_gemm)
     skip_unsupported_backward_override(
         "grouped_linear", recipe, getattr(recipe, "backward_override", None)
     )
@@ -2101,6 +2107,8 @@ def test_grouped_linear_accuracy_save_original_input(
         pytest.skip("DelayedScaling recipe is not supported with save_original_input")
     if NVTE_TEST_NVINSPECT_ENABLED and delay_wgrad_compute:
         pytest.skip("Delayed wgrad compute is not supported in debug mode.")
+    if fp8 and recipe.mxfp8() and not mxfp8_grouped_gemm_available:
+        pytest.skip(reason_for_no_mxfp8_grouped_gemm)
     skip_unsupported_backward_override(
         "grouped_linear", recipe, getattr(recipe, "backward_override", None)
     )
@@ -2310,6 +2318,8 @@ def test_padding_grouped_linear_accuracy(
 ):
     if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
+    if fp8 and recipe.mxfp8() and not mxfp8_grouped_gemm_available:
+        pytest.skip(reason_for_no_mxfp8_grouped_gemm)
     skip_unsupported_backward_override(
         "grouped_linear", recipe, getattr(recipe, "backward_override", None)
     )
@@ -2390,6 +2400,8 @@ def test_padding_grouped_linear_accuracy_save_original_input(
         pytest.skip("FP8 parameters are not supported in debug mode.")
     if fp8 and recipe.delayed():
         pytest.skip("DelayedScaling recipe is not supported with save_original_input")
+    if fp8 and recipe.mxfp8() and not mxfp8_grouped_gemm_available:
+        pytest.skip(reason_for_no_mxfp8_grouped_gemm)
     skip_unsupported_backward_override(
         "grouped_linear", recipe, getattr(recipe, "backward_override", None)
     )
@@ -3098,6 +3110,8 @@ def test_grouped_gemm_grouped_tensor_zero_work(layout, accumulate, quant_type) -
         pytest.skip("bfloat16 is required for grouped GEMM test.")
     if quant_type == "mxfp8" and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
+    if quant_type == "mxfp8" and not mxfp8_grouped_gemm_available:
+        pytest.skip(reason_for_no_mxfp8_grouped_gemm)
 
     z = 4
     k, n = 256, 256
@@ -3266,6 +3280,8 @@ def test_grouped_gemm_grouped_tensor_mxfp8(
         pytest.skip("Grouped GEMM requires Blackwell (SM100) or newer.")
     if dtype == torch.bfloat16 and not is_bf16_available():
         pytest.skip("bfloat16 is required for grouped GEMM test.")
+    if not mxfp8_grouped_gemm_available:
+        pytest.skip(reason_for_no_mxfp8_grouped_gemm)
 
     torch.manual_seed(0)
     z, m, k, n = shape

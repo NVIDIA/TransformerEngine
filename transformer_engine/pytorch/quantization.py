@@ -37,6 +37,7 @@ __all__ = [
     "quantized_model_init",
     "is_fp8_available",
     "is_mxfp8_available",
+    "is_mxfp8_grouped_gemm_available",
     "is_fp8_block_scaling_available",
     "is_nvfp4_available",
     "get_default_recipe",
@@ -49,6 +50,7 @@ __all__ = [
 
 _FP8_SUPPORT: Optional[Tuple[bool, str]] = None
 _MXFP8_SUPPORT: Optional[Tuple[bool, str]] = None
+_MXFP8_GROUPED_GEMM_SUPPORT: Optional[Tuple[bool, str]] = None
 _NVFP4_SUPPORT: Optional[Tuple[bool, str]] = None
 _FP8_BLOCK_SCALING_SUPPORT: Optional[Tuple[bool, str]] = None
 
@@ -160,12 +162,52 @@ def _compute_fp8_support() -> Tuple[bool, str]:
 
 
 def _compute_mxfp8_support() -> Tuple[bool, str]:
-    """Return if fp8 support is available"""
-    if get_device_compute_capability() >= (12, 0):
-        return False, "MXFP8 (for all gemm layouts) is not supported on 12.0+ architectures yet."
+    """Return if MXFP8 single-GEMM support is available.
+
+    On sm_120 / sm_121 this covers the single-GEMM TN/NN/NT paths via cuBLASLt >= 13.6.0.2;
+    grouped MXFP8 GEMM is gated separately by :func:`_compute_mxfp8_grouped_gemm_support`.
+    """
+    if get_device_compute_capability() in ((12, 0), (12, 1)):
+        cublaslt_version = tex.get_cublasLt_version()
+        if cublaslt_version >= 130600:
+            return True, ""
+        return (
+            False,
+            (
+                "MXFP8 on sm_120 / sm_121 requires cuBLASLt >= 13.6.0.2 for NN/NT GEMM "
+                f"support (loaded cuBLASLt={cublaslt_version})."
+            ),
+        )
     if get_device_compute_capability() >= (10, 0):  # blackwell and above
         return True, ""
     return False, "Device compute capability 10.0 or higher required for MXFP8 execution."
+
+
+def _compute_mxfp8_grouped_gemm_support() -> Tuple[bool, str]:
+    """Return if MXFP8 *grouped*-GEMM support is available.
+
+    This is strictly a subset of single-GEMM MXFP8 support: it inherits the
+    requirements of :func:`_compute_mxfp8_support` and then additionally
+    requires that the loaded cuBLASLt implements grouped MXFP8 GEMM on the
+    current device. On sm_120 / sm_121 the cuBLASLt 13.6.0.2 release supports
+    single MXFP8 GEMM (TN/NN/NT) but does NOT yet implement grouped MXFP8 GEMM;
+    callers should treat that case as unsupported until a future cuBLAS adds it.
+    """
+    base_ok, base_reason = _compute_mxfp8_support()
+    if not base_ok:
+        return False, base_reason
+    if get_device_compute_capability() in ((12, 0), (12, 1)):
+        cublaslt_version = tex.get_cublasLt_version()
+        return (
+            False,
+            (
+                "MXFP8 grouped GEMM is not yet supported on sm_120 / sm_121 by the loaded "
+                f"cuBLASLt={cublaslt_version} (single-GEMM MXFP8 is supported with "
+                "cuBLASLt >= 13.6.0.2). Use a non-grouped module or switch to a "
+                "non-MXFP8 recipe (e.g. Float8CurrentScaling) for grouped-GEMM workloads."
+            ),
+        )
+    return True, ""
 
 
 def _compute_nvfp4_support() -> Tuple[bool, str]:
@@ -196,11 +238,20 @@ def check_fp8_support() -> Tuple[bool, str]:
 
 @torch.compiler.assume_constant_result
 def check_mxfp8_support() -> Tuple[bool, str]:
-    """Return if MXFP8 support is available."""
+    """Return if MXFP8 single-GEMM support is available."""
     global _MXFP8_SUPPORT
     if _MXFP8_SUPPORT is None:
         _MXFP8_SUPPORT = _compute_mxfp8_support()
     return _MXFP8_SUPPORT
+
+
+@torch.compiler.assume_constant_result
+def check_mxfp8_grouped_gemm_support() -> Tuple[bool, str]:
+    """Return if MXFP8 grouped-GEMM support is available."""
+    global _MXFP8_GROUPED_GEMM_SUPPORT
+    if _MXFP8_GROUPED_GEMM_SUPPORT is None:
+        _MXFP8_GROUPED_GEMM_SUPPORT = _compute_mxfp8_grouped_gemm_support()
+    return _MXFP8_GROUPED_GEMM_SUPPORT
 
 
 @torch.compiler.assume_constant_result
@@ -323,7 +374,15 @@ def is_fp8_available(return_reason: bool = False) -> Union[bool, Tuple[bool, str
 
 def is_mxfp8_available(return_reason: bool = False) -> Union[bool, Tuple[bool, str]]:
     """
-    Determine if support is available for the MXFP8 recipe.
+    Determine if support is available for the MXFP8 recipe (single GEMM).
+
+    This reports support for the single-GEMM MXFP8 dispatch (the common TN/NN/NT
+    fwd/dgrad/wgrad path used by ``te.Linear`` / ``te.LayerNormLinear`` /
+    ``te.LayerNormMLP`` / ``te.TransformerLayer``). Grouped MXFP8 GEMM
+    (e.g. ``te.GroupedLinear``, ``general_grouped_gemm``,
+    ``general_grouped_gemm_for_grouped_tensor``) is gated separately by
+    :func:`is_mxfp8_grouped_gemm_available` because it may be unsupported on
+    some device + cuBLASLt combinations even when single-GEMM MXFP8 is supported.
 
     Parameters
     ----------
@@ -337,6 +396,34 @@ def is_mxfp8_available(return_reason: bool = False) -> Union[bool, Tuple[bool, s
     if return_reason:
         return check_mxfp8_support()
     return check_mxfp8_support()[0]
+
+
+def is_mxfp8_grouped_gemm_available(
+    return_reason: bool = False,
+) -> Union[bool, Tuple[bool, str]]:
+    """
+    Determine if support is available for MXFP8 grouped GEMM.
+
+    MXFP8 grouped GEMM is a strict superset of single-GEMM MXFP8 in terms of
+    requirements: the underlying cuBLASLt must implement the grouped MXFP8
+    GEMM heuristic for the current device. Use this check to gate
+    ``te.GroupedLinear`` / ``general_grouped_gemm`` /
+    ``general_grouped_gemm_for_grouped_tensor`` dispatch and to skip
+    MXFP8 grouped-GEMM tests on devices where the underlying cuBLASLt
+    does not (yet) implement that path.
+
+    Parameters
+    ----------
+    return_reason : bool, optional
+        If ``False`` (default), return only a boolean indicating availability.
+        If ``True``, return a tuple ``(is_available, reason)`` where ``reason`` provides
+        a human-readable explanation when required support is not available. The reason
+        will be an empty string if support is available.
+
+    """
+    if return_reason:
+        return check_mxfp8_grouped_gemm_support()
+    return check_mxfp8_grouped_gemm_support()[0]
 
 
 def is_fp8_block_scaling_available(return_reason: bool = False) -> Union[bool, Tuple[bool, str]]:
@@ -423,6 +510,11 @@ class FP8GlobalStateManager:
     def is_mxfp8_available(cls) -> Tuple[bool, str]:
         """Return if MXFP8/current scaling support is available."""
         return check_mxfp8_support()
+
+    @classmethod
+    def is_mxfp8_grouped_gemm_available(cls) -> Tuple[bool, str]:
+        """Return if MXFP8 grouped-GEMM support is available."""
+        return check_mxfp8_grouped_gemm_support()
 
     @classmethod
     def is_fp8_block_scaling_available(cls) -> Tuple[bool, str]:

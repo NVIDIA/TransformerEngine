@@ -61,6 +61,9 @@ from utils import (
 # Check for supported quantization schemes
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
+mxfp8_grouped_gemm_available, reason_for_no_mxfp8_grouped_gemm = te.is_mxfp8_grouped_gemm_available(
+    return_reason=True
+)
 nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
 
 # Supported data types
@@ -87,6 +90,17 @@ def _reset_rng_states_per_test():
     """Restore torch, CUDA, and Python ``random`` before each test in this module."""
     reset_rng_states()
     yield
+
+
+def maybe_skip_quantization_for_grouped_gemm(quantization: Optional[str]) -> None:
+    """Skip MXFP8 grouped-GEMM cases on devices where they're not yet supported.
+
+    cuBLASLt 13.6.0.2 supports single-GEMM MXFP8 on sm_120 but not grouped
+    MXFP8 GEMM; the grouped-MXFP8 dispatch in ``general_grouped_gemm`` /
+    ``general_grouped_gemm_for_grouped_tensor`` will refuse those inputs.
+    """
+    if quantization == "mxfp8" and not mxfp8_grouped_gemm_available:
+        pytest.skip(reason_for_no_mxfp8_grouped_gemm)
 
 
 def maybe_skip_quantization(
@@ -2111,6 +2125,7 @@ class TestBasicOps:
         # Skip invalid configurations
         maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         maybe_skip_quantization(quantization, dims=out_shape)
+        maybe_skip_quantization_for_grouped_gemm(quantization)
         if quantization is None and (quantized_compute or quantized_weight):
             pytest.skip("Quantization scheme is not specified")
         if quantization is not None and not (quantized_compute or quantized_weight):
@@ -2316,6 +2331,7 @@ class TestBasicOps:
             pytest.skip("quantized_weight requires a quantization recipe")
         if single_grouped_bias and not bias:
             pytest.skip("single_grouped_bias requires bias=True")
+        maybe_skip_quantization_for_grouped_gemm(quantization)
 
         # Split sizes (statically pinned for graph capture)
         split_sizes = [split_alignment * (i + 1) for i in range(group_size)]
@@ -3741,6 +3757,7 @@ class TestSequentialModules:
             raise ValueError(f"Unexpected grouped MLP activation ({activation})")
         activation_is_glu = is_glu_activation(scaled_act)
         maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
+        maybe_skip_quantization_for_grouped_gemm(quantization)
         if single_grouped_weight and quantization != "mxfp8":
             pytest.skip("single_grouped_weight is only supported for MXFP8 quantization")
         if single_grouped_bias and not bias:
