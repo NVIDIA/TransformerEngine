@@ -96,7 +96,13 @@ class _GroupedLinear(torch.autograd.Function):
         output_quantizers: List[Optional[Quantizer]],
         grad_output_quantizers: List[Optional[Quantizer]],
     ) -> bool:
-        """Whether to use cublasLt grouped GEMM through GroupedTensor metadata."""
+        """Whether to use cublasLt grouped GEMM through GroupedTensor metadata.
+
+        There are no checks whether split sizes are supported. Splits
+        may be in a CUDA tensor, so checking would hurt performance
+        and be incompatible with CUDA Graphs.
+
+        """
         if not bool(int(os.getenv("NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM", "0"))):
             return False
         if (
@@ -111,9 +117,6 @@ class _GroupedLinear(torch.autograd.Function):
             return False
         if any(q is not None for q in output_quantizers):
             return False
-        # Graph-safe callers may provide m_splits as a CUDA tensor. Avoid Python
-        # value checks here; split validity and MXFP8 alignment are left to the
-        # grouped quantize/GEMM kernels and their metadata validation.
         if fp8:
             return (
                 activation_dtype in (torch.bfloat16, torch.float16)
@@ -209,7 +212,7 @@ class _GroupedLinear(torch.autograd.Function):
         ctx,
         *,
         inp: torch.Tensor,
-        m_splits: Union[List[int], torch.Tensor],
+        m_splits: torch.Tensor,
         use_bias: bool,
         is_first_microbatch: Optional[bool],
         fp8: bool,
@@ -235,7 +238,7 @@ class _GroupedLinear(torch.autograd.Function):
         out_features = weights[0].size(0)
         weight_requires_grad = weights[0].requires_grad
 
-        split_sizes = torch.as_tensor(m_splits, dtype=torch.int64, device=device)
+        split_sizes = m_splits.to(device=device)
         base_split_offsets = tex.splits_to_offsets(split_sizes, 1)
 
         inp_view = inp.reshape(-1, in_features)
@@ -347,7 +350,7 @@ class _GroupedLinear(torch.autograd.Function):
                         lambda j=i: weights[j].main_grad for i in range(num_gemms)
                     ]
             ctx.device = device
-            ctx.m_splits = m_splits
+            ctx.m_splits = None
             ctx.num_gemms = num_gemms
             ctx.activation_dtype = activation_dtype
             ctx.fp8 = fp8
@@ -377,6 +380,7 @@ class _GroupedLinear(torch.autograd.Function):
     def forward(
         ctx,
         inp: torch.Tensor,
+        m_splits: torch.Tensor,
         non_tensor_args: Tuple,
         *weights_and_biases,
     ) -> Tuple[torch.Tensor, list]:
@@ -385,7 +389,6 @@ class _GroupedLinear(torch.autograd.Function):
         # Reduce number of arguments to autograd function in order
         # to reduce CPU overhead due to pytorch arg checking.
         (
-            m_splits,
             use_bias,
             is_first_microbatch,
             fp8,
@@ -511,6 +514,9 @@ class _GroupedLinear(torch.autograd.Function):
                 weights=weights,
                 biases=biases,
             )
+
+        # Convert splits to list of ints for compatibility with split functions
+        m_splits = m_splits.tolist()
 
         inp_view = inp.reshape(-1, in_features)
         inputmats: list
@@ -816,13 +822,12 @@ class _GroupedLinear(torch.autograd.Function):
             if ctx.fuse_wgrad_accumulation:
                 wgrad_list = main_grads
             else:
-                weight_shape = [ctx.weights_shape_0, ctx.weights_shape_1]
-                wgrad_list = tex.bulk_allocate(
-                    [weight_shape] * N,
-                    [ctx.activation_dtype] * N,
-                    ctx.device,
-                    [256] * N,
+                wgrad_packed = torch.empty(
+                    N, ctx.weights_shape_0, ctx.weights_shape_1,
+                    dtype=ctx.activation_dtype,
+                    device=ctx.device,
                 )
+                wgrad_list = [wgrad_packed[i] for i in range(N)]
 
             accumulate = (
                 accumulate_wgrad_into_param_main_grad
@@ -881,7 +886,8 @@ class _GroupedLinear(torch.autograd.Function):
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
         return (
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
-            None,
+            None,  # m_splits
+            None,  # non_tensor_args
             *wgrad_list,
             *grad_biases,
         )
@@ -892,7 +898,7 @@ class _GroupedLinear(torch.autograd.Function):
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         # pylint: disable=missing-function-docstring
         with get_nvtx_range_context("_GroupedLinear_backward"):
-            if getattr(ctx, "use_grouped_tensor_path", False):
+            if ctx.use_grouped_tensor_path:
                 return _GroupedLinear._backward_grouped_tensor(ctx, grad_output)
 
             saved_tensors = restore_from_func_ctx(ctx)
@@ -1153,7 +1159,8 @@ class _GroupedLinear(torch.autograd.Function):
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
         return (
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
-            None,
+            None,  # m_splits
+            None,  # non_tensor_args
             *wgrad_list,
             *grad_biases,
         )
@@ -1645,7 +1652,7 @@ class GroupedLinear(TransformerEngineBaseModule):
     def forward(
         self,
         inp: torch.Tensor,
-        m_splits: Union[List[int], torch.Tensor],
+        m_splits: torch.Tensor,
         is_first_microbatch: Optional[bool] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
@@ -1655,9 +1662,8 @@ class GroupedLinear(TransformerEngineBaseModule):
         ----------
         inp : torch.Tensor
              Input tensor.
-        m_splits : Union[List[int], torch.Tensor]
-                 Split sizes for the input tensor. The grouped tensor path accepts
-                 a CUDA tensor here to avoid Python value checks during graph capture.
+        m_splits : torch.Tensor
+                 Split sizes for the input tensor.
         is_first_microbatch : {True, False, None}, default = None
                              During training using either gradient accumulation or
                              pipeline parallelism a minibatch of data is further split
@@ -1673,18 +1679,26 @@ class GroupedLinear(TransformerEngineBaseModule):
                                produced)
         """
         debug = self.is_debug_iter()
+        is_grad_enabled = torch.is_grad_enabled()
+        num_gemms = self.num_gemms
 
-        if isinstance(inp, QuantizedTensorStorage):
-            raise TypeError("GroupedLinear doesn't support input tensor in FP8.")
-        if len(m_splits) != self.num_gemms:
+        # Make sure splits are in expected format
+        if not isinstance(m_splits, torch.Tensor):
+            # Convert list of ints to tensor for backward compatibility
+            m_splits = torch.tensor(m_splits, dtype=torch.int64, device="cpu")
+        elif m_splits.dtype != torch.int64:
+            m_splits = m_splits.to(dtype=torch.int64)
+        if m_splits.size() != (num_gemms,):
             raise ValueError(
-                f"Number of splits ({len(m_splits)}) should match number of"
-                f" GEMMs ({self.num_gemms})."
+                f"Shape of splits tensor ({tuple(m_splits.size())}) "
+                f"does not match number of GEMMs ({num_gemms})."
             )
 
-        is_grad_enabled = torch.is_grad_enabled()
-
+        # Preprocess input tensor
+        if isinstance(inp, QuantizedTensorStorage):
+            raise TypeError("GroupedLinear doesn't support input tensor in FP8.")
         inp = self.prepare_forward(inp, num_gemms=self.num_gemms)
+
         try:
             weight_tensors = self._get_weight_tensors()
             bias_tensors = self._get_bias_tensors()
@@ -1712,7 +1726,6 @@ class GroupedLinear(TransformerEngineBaseModule):
                 linear_fn = _GroupedLinear.forward
                 autograd_ctx = [None]
 
-            num_gemms = len(m_splits)
             cache_weight = is_first_microbatch is not None
             weight_workspaces = (
                 [self._fp8_workspaces.get(f"weight{i}") for i in range(num_gemms)]
@@ -1721,7 +1734,6 @@ class GroupedLinear(TransformerEngineBaseModule):
             )
 
             non_tensor_args = (
-                m_splits,
                 self.apply_bias,
                 is_first_microbatch,
                 self.fp8,
@@ -1745,7 +1757,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 debug,
             )
             out, new_workspaces = linear_fn(
-                *autograd_ctx, inp, non_tensor_args, *weight_tensors, *bias_tensors
+                *autograd_ctx, inp, m_splits, non_tensor_args, *weight_tensors, *bias_tensors
             )
 
             if cache_weight:
