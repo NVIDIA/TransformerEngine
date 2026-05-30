@@ -9,7 +9,7 @@ from collections.abc import Iterable
 import functools
 import math
 from importlib.metadata import PackageNotFoundError, version as get_pkg_version
-from typing import Any, Optional
+from typing import Optional
 
 import torch
 from packaging.version import Version as PkgVersion
