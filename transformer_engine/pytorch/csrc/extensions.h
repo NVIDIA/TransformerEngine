@@ -521,6 +521,9 @@ at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_t
 at::Tensor thd_reorder(const at::Tensor &inp, const at::Tensor &cu_seqlens, int cp_size,
                        bool scatter, int total_tokens);
 
+void thd_valid_copy(at::Tensor out, const at::Tensor &inp, const at::Tensor &cu_seqlens_padded,
+                    const at::Tensor &cu_seqlens);
+
 /***************************************************************************************************
  * multi_tensor_* kernels
  **************************************************************************************************/

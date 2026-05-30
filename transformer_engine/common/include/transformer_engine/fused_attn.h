@@ -550,6 +550,24 @@ void nvte_cp_thd_get_partitioned_indices(const NVTETensor &cu_seqlens, NVTETenso
 void nvte_cp_thd_reorder(const NVTETensor &inp, const NVTETensor &cu_seqlens, NVTETensor out,
                          int world_size, int scatter, int total_tokens, cudaStream_t stream);
 
+/*!  \brief Copy valid token rows of a per-step THD output/grad into an accumulator (CP AllGather).
+ *
+ * Sync-free replacement for the per-batch `.item()` slice-copy loops in the AllGather CP THD
+ * fwd/bwd. For each segment, copies rows [cu_seqlens_padded[b], cu_seqlens_padded[b]+valid_len_b)
+ * from inp to out at identical indices, leaving padded tails of out untouched. Row size must be a
+ * multiple of 16 bytes.
+ *
+ *  \param[in]     inp                 Per-step THD source tensor [total_tokens, ...].
+ *  \param[in]     cu_seqlens_padded   Padded cumulative sequence lengths, [batch_size + 1], int32.
+ *  \param[in]     cu_seqlens          Valid cumulative sequence lengths, [batch_size + 1], int32.
+ *  \param[in,out] out                 Destination accumulator, same shape/dtype as inp.
+ *  \param[in]     total_tokens        Total padded tokens (= inp.shape[0]).
+ *  \param[in]     stream              CUDA stream used for this operation.
+ */
+void nvte_cp_thd_valid_copy(const NVTETensor &inp, const NVTETensor &cu_seqlens_padded,
+                            const NVTETensor &cu_seqlens, NVTETensor out, int total_tokens,
+                            cudaStream_t stream);
+
 /*!  \brief Convert tensor from THD to BSHD format.
  *
  * \warning   This API is **experimental** and subject to change.

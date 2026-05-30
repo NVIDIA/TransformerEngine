@@ -149,6 +149,48 @@ __global__ void thd_reorder_kernel(void *out, void *inp, int *cu_seqlens, int ba
 }
 
 /***************************************************************************************************
+ * Support THD format for Context Parallel: copy the VALID token rows of a per-step output/grad
+ * into the destination accumulator, leaving padded tails untouched. Sync-free replacement for the
+ * per-batch `.item()` slice-copy loops in the AllGather CP THD fwd/bwd. cu_seqlens_padded gives a
+ * token's segment + local offset in the padded layout; cu_seqlens gives each segment's valid
+ * length. Warp-per-token, float4 vectorized, modeled on thd_reorder_kernel.
+ **************************************************************************************************/
+__global__ void thd_valid_copy_kernel(void *out, void *inp, int *cu_seqlens_padded,
+                                      int *cu_seqlens, int batch, int total_tokens,
+                                      int hidden_size_in_bytes) {
+  extern __shared__ int padded_s[];        // [0..batch] padded boundaries
+  int *valid_s = padded_s + (batch + 1);   // [0..batch] valid boundaries
+  for (int i = threadIdx.x; i <= batch; i += blockDim.x) {
+    padded_s[i] = cu_seqlens_padded[i];
+    valid_s[i] = cu_seqlens[i];
+  }
+  __syncthreads();
+
+  int warpid = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
+  int laneid = threadIdx.x % 32;
+  int num_warps = (blockDim.x * gridDim.x) / 32;
+  int num_float4s_per_token = hidden_size_in_bytes / sizeof(float4);
+
+  for (int token_id = warpid; token_id < total_tokens; token_id += num_warps) {
+    int seq_id = binary_search(token_id, padded_s, batch + 1);
+    int local = token_id - padded_s[seq_id];
+    int valid_len = valid_s[seq_id + 1] - valid_s[seq_id];
+    // local can be negative when a segment's padded start is shifted past earlier tokens (e.g.
+    // step-1 chunks: cu_seqlens_padded[:-1] += chunk_size). Those tokens are outside any valid
+    // run, so skip them -- otherwise the first chunk's already-written rows get clobbered.
+    if (local >= 0 && local < valid_len) {
+      float4 *src_tok = reinterpret_cast<float4 *>(reinterpret_cast<char *>(inp) +
+                                                   static_cast<size_t>(token_id) *
+                                                       hidden_size_in_bytes);
+      float4 *dst_tok = reinterpret_cast<float4 *>(reinterpret_cast<char *>(out) +
+                                                   static_cast<size_t>(token_id) *
+                                                       hidden_size_in_bytes);
+      for (int idx = laneid; idx < num_float4s_per_token; idx += 32) dst_tok[idx] = src_tok[idx];
+    }
+  }
+}
+
+/***************************************************************************************************
  * Support THD format for Context Parallel: Read the half of a THD tensor
  **************************************************************************************************/
 
@@ -746,6 +788,32 @@ void thd_reorder(const Tensor &inp, const Tensor &cu_seqlens, Tensor &out, int w
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
+void thd_valid_copy(const Tensor &inp, const Tensor &cu_seqlens_padded, const Tensor &cu_seqlens,
+                    Tensor &out, int total_tokens, cudaStream_t stream) {
+  using namespace transformer_engine;
+  NVTE_CHECK(cu_seqlens.dtype() == DType::kInt32);
+  NVTE_CHECK(cu_seqlens_padded.dtype() == DType::kInt32);
+  NVTE_CHECK(cu_seqlens.dim() == 1 && cu_seqlens_padded.dim() == 1);
+  auto cu_seqlens_shape = cu_seqlens.shape();
+  NVTE_CHECK(cu_seqlens_shape[0] >= 2);
+  NVTE_CHECK(cu_seqlens_padded.shape()[0] == cu_seqlens_shape[0]);
+  NVTE_CHECK(total_tokens > 0);
+
+  auto inp_shape = inp.shape();
+  size_t row_elems = 1;
+  for (int i = 1; i < inp.dim(); i++) row_elems *= inp_shape[i];
+  int hidden_size_in_bytes = (row_elems * typeToNumBits(inp.dtype())) / 8;
+  NVTE_CHECK(hidden_size_in_bytes % 16 == 0);  // 128-bit load/store
+
+  int batch = cu_seqlens_shape[0] - 1;
+  constexpr unsigned int block = 256;
+  unsigned int grid = (static_cast<unsigned int>(total_tokens) * 32 + block - 1) / block;
+  thd_valid_copy_kernel<<<grid, block, sizeof(int) * 2 * (batch + 1), stream>>>(
+      out.data.dptr, inp.data.dptr, reinterpret_cast<int *>(cu_seqlens_padded.data.dptr),
+      reinterpret_cast<int *>(cu_seqlens.data.dptr), batch, total_tokens, hidden_size_in_bytes);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
+
 }  // namespace context_parallel
 }  // namespace transformer_engine
 
@@ -827,4 +895,15 @@ void nvte_cp_thd_reorder(const NVTETensor &inp, const NVTETensor &cu_seqlens, NV
   context_parallel::thd_reorder(*convertNVTETensorCheck(inp), *convertNVTETensorCheck(cu_seqlens),
                                 *convertNVTETensorCheck(out), world_size, scatter != 0,
                                 total_tokens, stream);
+}
+
+void nvte_cp_thd_valid_copy(const NVTETensor &inp, const NVTETensor &cu_seqlens_padded,
+                            const NVTETensor &cu_seqlens, NVTETensor out, int total_tokens,
+                            cudaStream_t stream) {
+  NVTE_API_CALL(nvte_cp_thd_valid_copy);
+  using namespace transformer_engine;
+
+  context_parallel::thd_valid_copy(
+      *convertNVTETensorCheck(inp), *convertNVTETensorCheck(cu_seqlens_padded),
+      *convertNVTETensorCheck(cu_seqlens), *convertNVTETensorCheck(out), total_tokens, stream);
 }

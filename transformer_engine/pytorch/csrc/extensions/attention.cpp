@@ -997,6 +997,26 @@ at::Tensor thd_reorder(const at::Tensor &inp, const at::Tensor &cu_seqlens, int 
   return out;
 }
 
+void thd_valid_copy(at::Tensor out, const at::Tensor &inp, const at::Tensor &cu_seqlens_padded,
+                    const at::Tensor &cu_seqlens) {
+  NVTE_CHECK(cu_seqlens.scalar_type() == at::ScalarType::Int);
+  NVTE_CHECK(cu_seqlens_padded.scalar_type() == at::ScalarType::Int);
+  NVTE_CHECK(cu_seqlens.dim() == 1 && cu_seqlens_padded.dim() == 1);
+  NVTE_CHECK(cu_seqlens.size(0) >= 2);
+  NVTE_CHECK(cu_seqlens_padded.size(0) == cu_seqlens.size(0));
+  NVTE_CHECK(inp.dim() >= 1);
+  NVTE_CHECK(out.sizes() == inp.sizes() && out.scalar_type() == inp.scalar_type());
+
+  int total_tokens = inp.size(0);
+  auto te_inp = makeTransformerEngineTensor(inp);
+  auto te_cu_seqlens_padded = makeTransformerEngineTensor(cu_seqlens_padded);
+  auto te_cu_seqlens = makeTransformerEngineTensor(cu_seqlens);
+  auto te_out = makeTransformerEngineTensor(out);
+
+  nvte_cp_thd_valid_copy(te_inp.data(), te_cu_seqlens_padded.data(), te_cu_seqlens.data(),
+                         te_out.data(), total_tokens, at::cuda::getCurrentCUDAStream());
+}
+
 /***************************************************************************************************
  * KV Cache: Convert a tensor from qkv_format = thd to qkv_format = bshd
  **************************************************************************************************/

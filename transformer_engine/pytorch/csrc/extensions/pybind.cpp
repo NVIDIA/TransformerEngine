@@ -526,6 +526,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("thd_reorder", &transformer_engine::pytorch::thd_reorder,
         "Fused dual-chunk THD reorder for context parallel (gather/scatter), inline index",
         py::call_guard<py::gil_scoped_release>());
+  m.def("thd_valid_copy", &transformer_engine::pytorch::thd_valid_copy,
+        "Sync-free copy of valid THD token rows into an accumulator (CP AllGather fwd/bwd)",
+        py::call_guard<py::gil_scoped_release>());
 
   // nvshmem functions
   m.def("init_nvshmem_backend", &transformer_engine::pytorch::init_nvshmem_backend,

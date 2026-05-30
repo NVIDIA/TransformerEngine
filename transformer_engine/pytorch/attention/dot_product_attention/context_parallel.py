@@ -3694,14 +3694,14 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                     elif qkv_format == "thd":
                         # Copy valid token ranges from this step's output.
                         # Each step writes at different positions (no overlap, no correction needed).
-                        step_padded = thd_cu_seqlens_q_padded_per_step[i - 1]
-                        step_valid = thd_cu_seqlens_q_per_step[i - 1]
-                        batch_size = step_valid.shape[0] - 1
-                        for b in range(batch_size):
-                            s = step_padded[b].item()
-                            sz = (step_valid[b + 1] - step_valid[b]).item()
-                            if sz > 0:
-                                out[s : s + sz].copy_(out_per_step[i - 1][s : s + sz])
+                        # Sync-free fused copy of every segment's valid rows in one launch (replaces
+                        # a per-batch .item() slice-copy loop that stalled comm/compute overlap).
+                        tex.thd_valid_copy(
+                            out,
+                            out_per_step[i - 1],
+                            thd_cu_seqlens_q_padded_per_step[i - 1],
+                            thd_cu_seqlens_q_per_step[i - 1],
+                        )
 
                 if return_max_logit:
                     # max_logit_per_step[i-1] was written on flash_attn_streams[i-1]
@@ -4241,15 +4241,14 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                 # dq/dk/dv, dq_per_step/dk_per_step/dv_per_step: ctx.fwd_nominal_dtype
                 with torch.cuda.stream(flash_attn_streams[i - 1]):
                     if ctx.qkv_format == "thd":
-                        # dQ: copy valid token ranges from this step's dQ
-                        step_padded = thd_cu_seqlens_q_padded_per_step[i - 1]
-                        step_valid = thd_cu_seqlens_q_per_step[i - 1]
-                        batch_size = step_valid.shape[0] - 1
-                        for b in range(batch_size):
-                            s = step_padded[b].item()
-                            sz = (step_valid[b + 1] - step_valid[b]).item()
-                            if sz > 0:
-                                dq[s : s + sz].copy_(dq_per_step[i - 1][s : s + sz])
+                        # dQ: copy valid token ranges from this step's dQ (sync-free fused copy;
+                        # replaces a per-batch .item() slice-copy loop that broke comm/compute overlap).
+                        tex.thd_valid_copy(
+                            dq,
+                            dq_per_step[i - 1],
+                            thd_cu_seqlens_q_padded_per_step[i - 1],
+                            thd_cu_seqlens_q_per_step[i - 1],
+                        )
                         # dK/dV: add full tensor (kernel zeros non-valid positions)
                         if i > 1:
                             flash_attn_streams[i - 1].wait_event(dkv_update_done)
