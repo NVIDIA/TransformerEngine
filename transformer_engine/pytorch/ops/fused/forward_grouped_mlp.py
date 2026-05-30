@@ -381,12 +381,14 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
             fc1_activation_kwargs["sfb_tensor"] = fc1_w_scales
         else:
             # Discrete-weight kernel: per-expert data/scale pointers
-            fc1_b_ptrs, fc1_sfb_ptrs, _fc1_sw = tex.get_device_pointer_for_data_and_scales(
+            fc1_b_ptrs = tex.copy_data_ptrs_to_device(
                 [w._rowwise_data for w in grouped_fc1_weight],
+                device,
+            )
+            fc1_sfb_ptrs, _fc1_sfb_buffer = tex.transform_and_copy_data_ptrs_to_device(
+                "uniform_mxfp8_rowwise_swizzle",
                 [w._rowwise_scale_inv for w in grouped_fc1_weight],
-                swizzle=True,
-                rowwise=True,
-                data_dtype=grouped_fc1_weight[0]._fp8_dtype,
+                device,
             )
             fc1_activation_kwargs["b_ptrs"] = fc1_b_ptrs
             fc1_activation_kwargs["sfb_ptrs"] = fc1_sfb_ptrs
@@ -480,12 +482,14 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
             fc2_quant_kwargs["b_tensor"] = fc2_w_data
             fc2_quant_kwargs["sfb_tensor"] = fc2_w_scales
         else:
-            fc2_b_ptrs, fc2_sfb_ptrs, _ = tex.get_device_pointer_for_data_and_scales(
+            fc2_b_ptrs = tex.copy_data_ptrs_to_device(
                 [w._rowwise_data for w in grouped_fc2_weight],
+                device,
+            )
+            fc2_sfb_ptrs, _fc2_sfb_buffer = tex.transform_and_copy_data_ptrs_to_device(
+                "uniform_mxfp8_rowwise_swizzle",
                 [w._rowwise_scale_inv for w in grouped_fc2_weight],
-                swizzle=True,
-                rowwise=True,
-                data_dtype=grouped_fc2_weight[0]._fp8_dtype,
+                device,
             )
             fc2_quant_kwargs["b_ptrs"] = fc2_b_ptrs
             fc2_quant_kwargs["sfb_ptrs"] = fc2_sfb_ptrs

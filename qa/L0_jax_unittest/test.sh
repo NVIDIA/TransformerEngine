@@ -45,7 +45,7 @@ NVTE_JAX_CUSTOM_CALLS="false" python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini
 # Exercise the docs/examples/jax tutorials. The multi-GPU tests are
 # skipped at runtime when fewer than 4 devices are visible, so this is safe on
 # single-GPU runners.
-python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_docs_examples_jax.xml $TE_PATH/docs/examples/jax/ || test_fail "docs/examples/jax"
+CUDA_VISIBLE_DEVICES=0 python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_docs_examples_jax.xml $TE_PATH/docs/examples/jax/ || test_fail "docs/examples/jax"
 
 if [ $RET -ne 0 ]; then
     echo "Error: some sub-tests failed: $FAILED_CASES"

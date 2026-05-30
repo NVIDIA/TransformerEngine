@@ -322,10 +322,8 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
              "cuBLAS GEMM does not support row-scaled NVFP4 inputs.");
 
   // Tensor dims in row-major order
-  const int A0 = inputA->flat_first_dim();
-  const int A1 = inputA->flat_last_dim();
-  const int B0 = inputB->flat_first_dim();
-  const int B1 = inputB->flat_last_dim();
+  const auto [A0, A1] = inputA->flat_2d_dims();
+  const auto [B0, B1] = inputB->flat_2d_dims();
 
   // GEMM dims in column-major order
   const int m = transa == CUBLAS_OP_T ? A0 : A1;
