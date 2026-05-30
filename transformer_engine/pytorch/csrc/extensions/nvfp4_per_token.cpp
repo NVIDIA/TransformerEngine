@@ -241,7 +241,8 @@ void nvfp4_per_token_gemm(const at::Tensor& a_data, const at::Tensor& b_data,
                           const at::Tensor& a_sf, const at::Tensor& b_sf,
                           const at::Tensor& a_row_amax, const at::Tensor& b_row_amax, at::Tensor d,
                           const at::Tensor& workspace, int64_t m, int64_t n, int64_t k,
-                          double alpha, double beta, bool a_sf_swizzled, bool b_sf_swizzled) {
+                          double alpha, double beta, bool a_sf_swizzled, bool b_sf_swizzled,
+                          bool skip_post_scale) {
   TORCH_CHECK(a_data.is_cuda() && b_data.is_cuda() && a_sf.is_cuda() && b_sf.is_cuda() &&
                   a_row_amax.is_cuda() && b_row_amax.is_cuda() && d.is_cuda() &&
                   workspace.is_cuda(),
@@ -373,20 +374,26 @@ void nvfp4_per_token_gemm(const at::Tensor& a_data, const at::Tensor& b_data,
                       /*config=*/nullptr, stream);
 
   // Per-row * per-col post-scale to recover C_true from D_cublas.
-  TensorWrapper ra_te = makeTransformerEngineTensor(
-      a_row_amax.data_ptr(), std::vector<size_t>{static_cast<size_t>(m)}, DType::kFloat32);
-  TensorWrapper rb_te = makeTransformerEngineTensor(
-      b_row_amax.data_ptr(), std::vector<size_t>{static_cast<size_t>(n)}, DType::kFloat32);
+  // skip_post_scale=true is bench-only: isolates the cuBLAS LT GEMM cost
+  // from the trailing M*N bf16 epilogue (D will hold raw cuBLAS output).
+  if (!skip_post_scale) {
+    TensorWrapper ra_te = makeTransformerEngineTensor(
+        a_row_amax.data_ptr(), std::vector<size_t>{static_cast<size_t>(m)}, DType::kFloat32);
+    TensorWrapper rb_te = makeTransformerEngineTensor(
+        b_row_amax.data_ptr(), std::vector<size_t>{static_cast<size_t>(n)}, DType::kFloat32);
 
-  nvte_nvfp4_per_token_post_scale(d_te.data(), ra_te.data(), rb_te.data(), stream);
+    nvte_nvfp4_per_token_post_scale(d_te.data(), ra_te.data(), rb_te.data(), stream);
+  }
 }
 
 // Per-tensor twin of nvfp4_per_token_gemm: scalar amax goes through cuBLAS's
-// own amax slot (no post-scale). Bench-only apples-to-apples baseline.
+// own amax slot (no post-scale). a_sf_swizzled/b_sf_swizzled=true skips the
+// in-binding swizzle (mirrors nvfp4_per_token_gemm). Bench-only baseline.
 void nvfp4_per_tensor_gemm(const at::Tensor& a_data, const at::Tensor& b_data,
                            const at::Tensor& a_sf, const at::Tensor& b_sf, const at::Tensor& a_amax,
                            const at::Tensor& b_amax, at::Tensor d, const at::Tensor& workspace,
-                           int64_t m, int64_t n, int64_t k, double alpha, double beta) {
+                           int64_t m, int64_t n, int64_t k, double alpha, double beta,
+                           bool a_sf_swizzled, bool b_sf_swizzled) {
   TORCH_CHECK(a_data.is_cuda() && b_data.is_cuda() && a_sf.is_cuda() && b_sf.is_cuda() &&
                   a_amax.is_cuda() && b_amax.is_cuda() && d.is_cuda() && workspace.is_cuda(),
               "All tensors must be CUDA tensors");
@@ -431,30 +438,37 @@ void nvfp4_per_tensor_gemm(const at::Tensor& a_data, const at::Tensor& b_data,
   const std::vector<size_t> a_sf_shape = {static_cast<size_t>(m), static_cast<size_t>(k / 16)};
   const std::vector<size_t> b_sf_shape = {static_cast<size_t>(n), static_cast<size_t>(k / 16)};
 
+  // SF buffers for cuBLAS LT: reuse caller's buffer if already swizzled,
+  // else allocate a swizzled copy. 0/1/2 swizzle launches total.
   auto byte_opts = a_sf.options().dtype(at::kByte);
-  at::Tensor a_sf_swizzled = at::empty({a_sf.numel()}, byte_opts);
-  at::Tensor b_sf_swizzled = at::empty({b_sf.numel()}, byte_opts);
-
-  {
+  at::Tensor a_sf_buf;
+  at::Tensor b_sf_buf;
+  if (a_sf_swizzled) {
+    a_sf_buf = a_sf;
+  } else {
+    a_sf_buf = at::empty({a_sf.numel()}, byte_opts);
     TensorWrapper in_nvte(NVTE_NVFP4_1D_SCALING);
     in_nvte.set_rowwise_data(a_data.data_ptr(), DType::kFloat4E2M1, a_data_shape);
     in_nvte.set_rowwise_scale_inv(a_sf.data_ptr(), DType::kFloat8E4M3, a_sf_shape);
 
     TensorWrapper out_nvte(NVTE_NVFP4_1D_SCALING);
     out_nvte.set_rowwise_data(a_data.data_ptr(), DType::kFloat4E2M1, a_data_shape);
-    out_nvte.set_rowwise_scale_inv(a_sf_swizzled.data_ptr(), DType::kFloat8E4M3, a_sf_shape);
+    out_nvte.set_rowwise_scale_inv(a_sf_buf.data_ptr(), DType::kFloat8E4M3, a_sf_shape);
     out_nvte.set_with_gemm_swizzled_scales(true);
 
     nvte_swizzle_scaling_factors(in_nvte.data(), out_nvte.data(), stream);
   }
-  {
+  if (b_sf_swizzled) {
+    b_sf_buf = b_sf;
+  } else {
+    b_sf_buf = at::empty({b_sf.numel()}, byte_opts);
     TensorWrapper in_nvte(NVTE_NVFP4_1D_SCALING);
     in_nvte.set_rowwise_data(b_data.data_ptr(), DType::kFloat4E2M1, b_data_shape);
     in_nvte.set_rowwise_scale_inv(b_sf.data_ptr(), DType::kFloat8E4M3, b_sf_shape);
 
     TensorWrapper out_nvte(NVTE_NVFP4_1D_SCALING);
     out_nvte.set_rowwise_data(b_data.data_ptr(), DType::kFloat4E2M1, b_data_shape);
-    out_nvte.set_rowwise_scale_inv(b_sf_swizzled.data_ptr(), DType::kFloat8E4M3, b_sf_shape);
+    out_nvte.set_rowwise_scale_inv(b_sf_buf.data_ptr(), DType::kFloat8E4M3, b_sf_shape);
     out_nvte.set_with_gemm_swizzled_scales(true);
 
     nvte_swizzle_scaling_factors(in_nvte.data(), out_nvte.data(), stream);
@@ -463,13 +477,13 @@ void nvfp4_per_tensor_gemm(const at::Tensor& a_data, const at::Tensor& b_data,
   // Per-tensor amaxes go in the amax slot; cuBLAS LT folds them into alpha.
   TensorWrapper a_te(NVTE_NVFP4_1D_SCALING);
   a_te.set_rowwise_data(a_data.data_ptr(), DType::kFloat4E2M1, a_data_shape);
-  a_te.set_rowwise_scale_inv(a_sf_swizzled.data_ptr(), DType::kFloat8E4M3, a_sf_shape);
+  a_te.set_rowwise_scale_inv(a_sf_buf.data_ptr(), DType::kFloat8E4M3, a_sf_shape);
   a_te.set_amax(a_amax.data_ptr(), DType::kFloat32, std::vector<size_t>{1});
   a_te.set_with_gemm_swizzled_scales(true);
 
   TensorWrapper b_te(NVTE_NVFP4_1D_SCALING);
   b_te.set_rowwise_data(b_data.data_ptr(), DType::kFloat4E2M1, b_data_shape);
-  b_te.set_rowwise_scale_inv(b_sf_swizzled.data_ptr(), DType::kFloat8E4M3, b_sf_shape);
+  b_te.set_rowwise_scale_inv(b_sf_buf.data_ptr(), DType::kFloat8E4M3, b_sf_shape);
   b_te.set_amax(b_amax.data_ptr(), DType::kFloat32, std::vector<size_t>{1});
   b_te.set_with_gemm_swizzled_scales(true);
 

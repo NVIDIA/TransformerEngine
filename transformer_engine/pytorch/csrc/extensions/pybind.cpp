@@ -484,6 +484,24 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("columnwise"), py::arg("with_rht") = false,
         py::arg("random_sign_mask_t") = static_cast<int64_t>(0xACE1),
         py::arg("with_swizzle") = false);
+  m.def("nvfp4_cutlass_gemm", &transformer_engine::pytorch::nvfp4_cutlass_gemm,
+        "Stage-1 forked CUTLASS NVFP4 x NVFP4 -> BF16 GEMM with scalar (alpha, "
+        "beta) epilogue. Drop-in replacement for cuBLAS LT NVFP4. Pair with "
+        "nvfp4_per_token_post_scale to get a CUTLASS-based per-token GEMM. "
+        "a_sf_swizzled / b_sf_swizzled = true skip the internal swizzle for "
+        "bench parity with the cuBLAS LT path.",
+        py::arg("a_data"), py::arg("b_data"), py::arg("a_sf"), py::arg("b_sf"), py::arg("d"),
+        py::arg("m"), py::arg("n"), py::arg("k"), py::arg("alpha"), py::arg("beta"),
+        py::arg("a_sf_swizzled") = false, py::arg("b_sf_swizzled") = false);
+  m.def("nvfp4_cutlass_per_token_gemm", &transformer_engine::pytorch::nvfp4_cutlass_per_token_gemm,
+        "Forked CUTLASS NVFP4 GEMM with per-token rescale fused into the "
+        "epilogue: D = bf16(alpha_a[i] * alpha_b[j] * (A @ B^T)[i, j]). One "
+        "launch, no separate post-scale kernel. alpha_a (M,) and alpha_b (N,) "
+        "are fp32 outer-scale vectors. a_sf_swizzled / b_sf_swizzled = true "
+        "skip the internal swizzle for bench parity.",
+        py::arg("a_data"), py::arg("b_data"), py::arg("a_sf"), py::arg("b_sf"), py::arg("alpha_a"),
+        py::arg("alpha_b"), py::arg("d"), py::arg("m"), py::arg("n"), py::arg("k"),
+        py::arg("a_sf_swizzled") = false, py::arg("b_sf_swizzled") = false);
   m.def("nvfp4_per_token_post_scale", &transformer_engine::pytorch::nvfp4_per_token_post_scale,
         "Apply d[i,j] *= row_amax_a[i] * row_amax_b[j] in-place on bf16 D.", py::arg("d"),
         py::arg("row_amax_a"), py::arg("row_amax_b"));
@@ -494,17 +512,21 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("data"), py::arg("sf_in"), py::arg("sf_out"));
   m.def("nvfp4_per_token_gemm", &transformer_engine::pytorch::nvfp4_per_token_gemm,
         "E2E NVFP4 per-token GEMM: swizzle SFs -> cuBLAS LT -> row*col post-scale. "
-        "beta must be 0. a_sf_swizzled/b_sf_swizzled=True skips that operand's swizzle.",
+        "beta must be 0. a_sf_swizzled/b_sf_swizzled=True skips that operand's swizzle. "
+        "skip_post_scale=True is bench-only (isolates cuBLAS LT GEMM cost).",
         py::arg("a_data"), py::arg("b_data"), py::arg("a_sf"), py::arg("b_sf"),
         py::arg("a_row_amax"), py::arg("b_row_amax"), py::arg("d"), py::arg("workspace"),
         py::arg("m"), py::arg("n"), py::arg("k"), py::arg("alpha"), py::arg("beta"),
-        py::arg("a_sf_swizzled") = false, py::arg("b_sf_swizzled") = false);
+        py::arg("a_sf_swizzled") = false, py::arg("b_sf_swizzled") = false,
+        py::arg("skip_post_scale") = false);
   m.def("nvfp4_per_tensor_gemm", &transformer_engine::pytorch::nvfp4_per_tensor_gemm,
         "Skinny prod NVFP4 GEMM twin of nvfp4_per_token_gemm: per-tensor amaxes "
-        "folded into cuBLAS alpha, no trailing post-scale. Bench-only.",
+        "folded into cuBLAS alpha, no trailing post-scale. Bench-only. "
+        "a_sf_swizzled/b_sf_swizzled=True skips that operand's swizzle.",
         py::arg("a_data"), py::arg("b_data"), py::arg("a_sf"), py::arg("b_sf"), py::arg("a_amax"),
         py::arg("b_amax"), py::arg("d"), py::arg("workspace"), py::arg("m"), py::arg("n"),
-        py::arg("k"), py::arg("alpha"), py::arg("beta"));
+        py::arg("k"), py::arg("alpha"), py::arg("beta"), py::arg("a_sf_swizzled") = false,
+        py::arg("b_sf_swizzled") = false);
   m.def("nvfp4_per_token_group_quantize",
         &transformer_engine::pytorch::nvfp4_per_token_group_quantize,
         "Grouped (multi-tensor) NVFP4 per-token cast: K1 + K2 across <= 64 splits "

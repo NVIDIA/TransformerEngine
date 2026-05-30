@@ -12,6 +12,12 @@ Modes:
   * ``--swizzle``: 3-way END-TO-END (quant + swizzle + cuBLAS LT NVFP4 GEMM).
     Compares per-token (separate swizzle launch) vs per-token (fused
     swizzle in K2) vs per-tensor. Ratio = per-token (+swizzle) / per-tensor.
+  * ``--gemm-only``: 2-way cuBLAS LT NVFP4 GEMM in isolation.
+      Inputs are pre-quantized + pre-swizzled before timing, so the loop
+      only times ``nvfp4_per_token_gemm(sf_swizzled=True)`` vs
+      ``nvfp4_per_tensor_gemm(sf_swizzled=True)``. Ratio = pt / pten
+      exposes the per-call cost of the per-token post-scale kernel
+      (both paths run the same cuBLAS LT call + alpha-fold kernel).
   * ``--qs``: 2-way K1+K2 + standalone rowwise swizzle. NO GEMM.
       - default (solo, 1 tensor): K1+K2(A) + swizzle(A); apples-to-apples
         with --composite (which is also 1-tensor) -- the delta vs --composite
@@ -156,6 +162,32 @@ class E2EShapeBench:
     t_pt_g: float
     t_pt_swz_g: float
     t_pten_g: float
+
+
+@dataclass
+class GemmOnlyShapeBench:
+    """NVFP4 GEMM in isolation. Inputs pre-quantized + pre-swizzled outside the
+    timed window; only the GEMM kernel call is timed. N = K.
+
+    The single comparison that matters for shipping fused-EVT NVFP4 against
+    the current prod NVFP4 path:
+      ct_fused  = forked CUTLASS NVFP4 GEMM with per-row * per-col rescale
+                  fused into the EVT epilogue (single launch). This is what
+                  WOULD ship for per-token NVFP4.
+      pten_gemm = cuBLAS LT NVFP4 + alpha-fold (single launch, no post-scale).
+                  This is the CURRENT prod per-tensor NVFP4 GEMM.
+
+    Ratio cf/pten = ct_fused / pten_gemm. < 1.0 ⇒ shippable (per-token at
+    least matches prod per-tensor wall-clock).
+    """
+
+    M: int
+    K: int
+    N: int
+    t_pten: float  # nvfp4_per_tensor_gemm: cuBLAS LT + alpha-fold (prod baseline)
+    t_clf: float  # nvfp4_cutlass_per_token_gemm: per-row * per-col fused EVT
+    t_pten_g: float
+    t_clf_g: float
 
 
 @dataclass
@@ -392,6 +424,144 @@ def _bench_shape_e2e_swizzle(
         t_pt_g=t_pt_g,
         t_pt_swz_g=t_pt_swz_g,
         t_pten_g=t_pten_g,
+    )
+
+
+def _bench_shape_gemm_only(
+    M: int,
+    K: int,
+    *,
+    device: torch.device,
+    with_rht: bool = False,
+    mask_t: int = _RHT_MASK_DEFAULT,
+) -> GemmOnlyShapeBench:
+    """NVFP4 GEMM in isolation (N = K). Quant + swizzle run once before timing;
+    only the GEMM kernel call is timed.
+
+    Two paths timed:
+      - pten_gemm: cuBLAS LT NVFP4 per-tensor (current prod NVFP4 GEMM).
+      - ct_fused : forked CUTLASS NVFP4 GEMM with per-row * per-col rescale
+                   fused into the EVT epilogue (per-token, single launch).
+    """
+    from transformer_engine.pytorch.cpp_extensions.gemm import get_cublas_workspace
+
+    N = K
+    a = torch.randn((M, K), dtype=torch.bfloat16, device=device)
+    b = torch.randn((N, K), dtype=torch.bfloat16, device=device)
+    d = torch.empty((M, N), dtype=torch.bfloat16, device=device)
+    workspace = get_cublas_workspace(a.device.index, ub=False, grouped_gemm=False)
+
+    BLOCK_K = 16
+
+    # Per-token rowwise quant for the fused CUTLASS path. Pre-swizzled SF so
+    # the timed window only covers the GEMM kernel (no swizzle launch).
+    a_qr = torch.empty((M, K // 2), dtype=torch.uint8, device=device)
+    a_sr = torch.empty((M, K // BLOCK_K), dtype=torch.uint8, device=device)
+    a_ra = torch.empty((M,), dtype=torch.float32, device=device)
+    b_qr = torch.empty((N, K // 2), dtype=torch.uint8, device=device)
+    b_sr = torch.empty((N, K // BLOCK_K), dtype=torch.uint8, device=device)
+    b_ra = torch.empty((N,), dtype=torch.float32, device=device)
+    empty_u8 = torch.empty(0, dtype=torch.uint8, device=device)
+    empty_f32 = torch.empty(0, dtype=torch.float32, device=device)
+    tex.nvfp4_per_token_quantize(
+        a,
+        a_qr,
+        a_sr,
+        a_ra,
+        empty_u8,
+        empty_u8,
+        empty_f32,
+        True,
+        False,
+        with_rht=with_rht,
+        random_sign_mask_t=mask_t if with_rht else 0,
+        with_swizzle=True,
+    )
+    tex.nvfp4_per_token_quantize(
+        b,
+        b_qr,
+        b_sr,
+        b_ra,
+        empty_u8,
+        empty_u8,
+        empty_f32,
+        True,
+        False,
+        with_rht=with_rht,
+        random_sign_mask_t=mask_t if with_rht else 0,
+        with_swizzle=True,
+    )
+    a_sr_flat = a_sr.reshape(-1)
+    b_sr_flat = b_sr.reshape(-1)
+
+    # Per-tensor: NVFP4Quantizer (RHT+SR) -> pre-swizzle SF once so prod GEMM
+    # call doesn't pay 2 swizzle launches inside the timed window either.
+    quantizer = _make_baseline_quantizer()
+    dst_a = quantizer.make_empty(a.shape, dtype=torch.bfloat16, device=device)
+    dst_b = quantizer.make_empty(b.shape, dtype=torch.bfloat16, device=device)
+    tex.quantize(a, quantizer, dst_a, None)
+    tex.quantize(b, quantizer, dst_b, None)
+
+    pten_a_sr_flat = dst_a._rowwise_scale_inv.reshape(-1)
+    pten_b_sr_flat = dst_b._rowwise_scale_inv.reshape(-1)
+    pten_a_sr_swz = torch.empty(pten_a_sr_flat.numel(), dtype=torch.uint8, device=device)
+    pten_b_sr_swz = torch.empty(pten_b_sr_flat.numel(), dtype=torch.uint8, device=device)
+    tex.nvfp4_per_token_swizzle_rowwise_sf(dst_a._rowwise_data, pten_a_sr_flat, pten_a_sr_swz)
+    tex.nvfp4_per_token_swizzle_rowwise_sf(dst_b._rowwise_data, pten_b_sr_flat, pten_b_sr_swz)
+
+    def _pten_gemm():
+        tex.nvfp4_per_tensor_gemm(
+            dst_a._rowwise_data,
+            dst_b._rowwise_data,
+            pten_a_sr_swz,
+            pten_b_sr_swz,
+            dst_a._amax_rowwise,
+            dst_b._amax_rowwise,
+            d,
+            workspace,
+            M,
+            N,
+            K,
+            1.0,
+            0.0,
+            a_sf_swizzled=True,
+            b_sf_swizzled=True,
+        )
+
+    # Forked CUTLASS NVFP4 GEMM with per-row * per-col rescale fused INTO the
+    # epilogue (EVT). Single launch; the M*N output never round-trips through
+    # HBM. This is the kernel that should beat pten_gemm at training shapes.
+    d_clf = torch.empty_like(d)
+
+    def _cutlass_fused():
+        tex.nvfp4_cutlass_per_token_gemm(
+            a_qr,
+            b_qr,
+            a_sr_flat,
+            b_sr_flat,
+            a_ra,
+            b_ra,
+            d_clf,
+            M,
+            N,
+            K,
+            a_sf_swizzled=True,
+            b_sf_swizzled=True,
+        )
+
+    t_pten = cuda_time_ms(_pten_gemm)
+    t_clf = cuda_time_ms(_cutlass_fused)
+    t_pten_g = cuda_graph_time_ms(_pten_gemm)
+    t_clf_g = cuda_graph_time_ms(_cutlass_fused)
+
+    return GemmOnlyShapeBench(
+        M=M,
+        K=K,
+        N=N,
+        t_pten=t_pten,
+        t_clf=t_clf,
+        t_pten_g=t_pten_g,
+        t_clf_g=t_clf_g,
     )
 
 
@@ -761,6 +931,60 @@ def _print_e2e_swizzle_legend(*, with_rht: bool, rht_mask: int) -> None:
     print("  (Graph) suffix            = same under CUDA Graphs replay (Python + alloc elided).")
 
 
+def _print_gemm_only_table(records: List[GemmOnlyShapeBench]) -> None:
+    """GEMM-only (--gemm-only) timings:
+      pten_gemm = cuBLAS LT per-tensor NVFP4 GEMM (current PROD baseline).
+      ct_fused  = forked CUTLASS per-token NVFP4 GEMM with per-row * per-col
+                  rescale fused into the EVT epilogue (1 launch).
+
+    Ratio:
+      cf/pten = ct_fused / pten_gemm
+                ** < 1.0 = per-token fused CUTLASS matches/beats prod per-tensor **
+    """
+    w_pten, w_clf, w_ratio = 11, 11, 8
+    block_w = w_pten + 1 + w_clf + 1 + w_ratio
+    header1 = f"{'':>7} {'':>6} {'':>6} |{'Eager':^{block_w}} |{'Graph':^{block_w}}"
+    body = f"{'pten_gemm':>{w_pten}} {'ct_fused':>{w_clf}} {'cf/pten':>{w_ratio}}"
+    header2 = f"{'M':>7} {'K':>6} {'N':>6} |{body}|{body}"
+    print(header1)
+    print(header2)
+    print("-" * len(header2))
+
+    def _fmt(r: float) -> str:
+        return "nan" if math.isnan(r) else f"{r:.2f}x"
+
+    prev_M = None
+    for rec in records:
+        if prev_M is not None and rec.M != prev_M:
+            print()
+        prev_M = rec.M
+        r_cf = _ratio(rec.t_clf, rec.t_pten)
+        r_cf_g = _ratio(rec.t_clf_g, rec.t_pten_g)
+        print(
+            f"{rec.M:>7} {rec.K:>6} {rec.N:>6}"
+            " |"
+            f"{rec.t_pten:>{w_pten}.4f} {rec.t_clf:>{w_clf}.4f}"
+            f" {_fmt(r_cf):>{w_ratio}}"
+            "|"
+            f"{rec.t_pten_g:>{w_pten}.4f} {rec.t_clf_g:>{w_clf}.4f}"
+            f" {_fmt(r_cf_g):>{w_ratio}}"
+        )
+
+
+def _print_gemm_only_legend() -> None:
+    print()
+    print("Legend (GEMM-only; inputs pre-quantized + pre-swizzled, N = K):")
+    print("  pten_gemm (ms) = nvfp4_per_tensor_gemm(sf_swizzled=True)")
+    print("                   -> cuBLAS LT NVFP4 + alpha-fold (current PROD per-tensor GEMM).")
+    print("  ct_fused  (ms) = nvfp4_cutlass_per_token_gemm(sf_swizzled=True)")
+    print("                   -> forked CUTLASS NVFP4 GEMM with per-row * per-col rescale")
+    print("                      FUSED into the EVT epilogue (1 launch, no post-scale).")
+    print("                      D = bf16(alpha_a[i] * alpha_b[j] * (A @ B^T)[i, j]).")
+    print("  cf/pten        = ct_fused / pten_gemm")
+    print("                   ** < 1.0 = per-token fused CUTLASS matches/beats prod per-tensor **")
+    print("  (Graph) suffix = same under CUDA Graphs replay (Python + alloc elided).")
+
+
 def _bench_shape_k1_only(
     M: int, K: int, *, device: torch.device, with_rht: bool = False, mask_t: int = _RHT_MASK_DEFAULT
 ) -> K1ShapeBench:
@@ -1122,6 +1346,18 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--gemm-only",
+        action="store_true",
+        help=(
+            "GEMM-only mode (square N=M): inputs are pre-quantized + pre-swizzled "
+            "outside the timed window, so only the cuBLAS LT NVFP4 GEMM call is "
+            "timed. 2-way table: pt_gemm (per-token GEMM + per-row post-scale) "
+            "vs pten_gemm (per-tensor GEMM, alpha-folded). ratio = pt / pten "
+            "exposes the per-call cost of the per-token post-scale kernel. "
+            "--rht composes (RHT applied only to the per-token quant setup)."
+        ),
+    )
+    parser.add_argument(
         "--pair",
         action="store_true",
         help=(
@@ -1175,9 +1411,12 @@ def main() -> int:
         )
         args.qs = True
 
-    exclusive = sum(int(x) for x in (args.k1_only, args.swizzle, args.qs))
+    exclusive = sum(int(x) for x in (args.k1_only, args.swizzle, args.qs, args.gemm_only))
     if exclusive > 1:
-        print("ERROR: --k1-only, --swizzle, and --qs are mutually exclusive.", file=sys.stderr)
+        print(
+            "ERROR: --k1-only, --swizzle, --qs, and --gemm-only are mutually exclusive.",
+            file=sys.stderr,
+        )
         return 2
 
     if args.k1_only:
@@ -1213,6 +1452,13 @@ def main() -> int:
         ]
         _print_qs_table(records_qs, fuse=args.fuse)
         _print_qs_legend(with_rht=args.rht, rht_mask=mask, pair=args.pair, fuse=args.fuse)
+    elif args.gemm_only:
+        records_go: List[GemmOnlyShapeBench] = [
+            _bench_shape_gemm_only(M, K, device=device, with_rht=args.rht, mask_t=mask)
+            for (M, K) in shapes
+        ]
+        _print_gemm_only_table(records_go)
+        _print_gemm_only_legend()
     else:
         records: List[ShapeBench] = [
             _bench_shape(M, K, device=device, with_rht=args.rht, mask_t=mask) for (M, K) in shapes
