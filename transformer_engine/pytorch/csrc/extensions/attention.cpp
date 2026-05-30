@@ -975,6 +975,28 @@ at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_t
   return output;
 }
 
+at::Tensor thd_reorder(const at::Tensor &inp, const at::Tensor &cu_seqlens, int cp_size,
+                       bool scatter, int total_tokens) {
+  NVTE_CHECK(cu_seqlens.scalar_type() == at::ScalarType::Int);
+  NVTE_CHECK(cu_seqlens.dim() == 1);
+  NVTE_CHECK(cu_seqlens.size(0) >= 2);
+  NVTE_CHECK(cp_size > 0);
+  NVTE_CHECK(total_tokens > 0 && total_tokens % (cp_size * 2) == 0);
+  NVTE_CHECK(inp.dim() >= 1 && inp.size(0) == total_tokens);
+
+  auto inp_c = inp.contiguous();
+  at::Tensor out = at::empty_like(inp_c);
+
+  auto te_inp = makeTransformerEngineTensor(inp_c);
+  auto te_cu_seqlens = makeTransformerEngineTensor(cu_seqlens);
+  auto te_out = makeTransformerEngineTensor(out);
+
+  nvte_cp_thd_reorder(te_inp.data(), te_cu_seqlens.data(), te_out.data(), cp_size,
+                      scatter ? 1 : 0, total_tokens, at::cuda::getCurrentCUDAStream());
+
+  return out;
+}
+
 /***************************************************************************************************
  * KV Cache: Convert a tensor from qkv_format = thd to qkv_format = bshd
  **************************************************************************************************/

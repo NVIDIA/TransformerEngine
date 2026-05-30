@@ -523,6 +523,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("thd_get_partitioned_indices", &transformer_engine::pytorch::thd_get_partitioned_indices,
         "Generate partitioned indices for inputs in THD format",
         py::call_guard<py::gil_scoped_release>());
+  m.def("thd_reorder", &transformer_engine::pytorch::thd_reorder,
+        "Fused dual-chunk THD reorder for context parallel (gather/scatter), inline index",
+        py::call_guard<py::gil_scoped_release>());
 
   // nvshmem functions
   m.def("init_nvshmem_backend", &transformer_engine::pytorch::init_nvshmem_backend,

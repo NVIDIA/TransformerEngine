@@ -77,6 +77,18 @@ __forceinline__ __device__ int binary_search(int target, int *array, int len) {
   return left - 1;
 }
 
+// Dual-chunk source index for THD CP partitioning. cu_seqlens_s must already be divided by
+// world_size. Single source of truth shared by thd_partition_indices_kernel and
+// thd_reorder_kernel so the two never diverge.
+__forceinline__ __device__ int thd_partition_src_index(int token_id, int *cu_seqlens_s, int batch,
+                                                       int world_size, int rank) {
+  int seq_id = binary_search(token_id, cu_seqlens_s, batch + 1);
+  int seq_len = cu_seqlens_s[seq_id + 1] - cu_seqlens_s[seq_id];
+  int index = token_id - cu_seqlens_s[seq_id];
+  int offset = index < seq_len / 2 ? rank : (world_size - 1) * 2 - rank;
+  return index + cu_seqlens_s[seq_id] * world_size + seq_len / 2 * offset;
+}
+
 /***************************************************************************************************
  * Support THD format for Context Parallel: Generate partitioned indices for input tokens
  **************************************************************************************************/
@@ -96,12 +108,43 @@ __global__ void thd_partition_indices_kernel(int *output, int *cu_seqlens, int b
   int num_threads = blockDim.x * gridDim.x;
 
   for (int token_id = tid; token_id < total_tokens / world_size; token_id += num_threads) {
-    int seq_id = binary_search(token_id, cu_seqlens_s, batch + 1);
-    int seq_len = cu_seqlens_s[seq_id + 1] - cu_seqlens_s[seq_id];
-    int index = token_id - cu_seqlens_s[seq_id];
-    int offset = index < seq_len / 2 ? rank : (world_size - 1) * 2 - rank;
-    index += cu_seqlens_s[seq_id] * world_size + seq_len / 2 * offset;
-    output[token_id] = index;
+    output[token_id] = thd_partition_src_index(token_id, cu_seqlens_s, batch, world_size, rank);
+  }
+}
+
+/***************************************************************************************************
+ * Support THD format for Context Parallel: fused dual-chunk reorder (gather/scatter)
+ * out[gi] = inp[src(gi)] (gather, to_rank_sharded) or out[src(gi)] = inp[gi] (scatter,
+ * to_contiguous). src is computed inline (no materialized index tensor). Modeled on
+ * thd_read_half_tensor_kernel: warp-per-token, cu_seqlens_s in shared, float4 vectorized copy.
+ * hidden_size_in_bytes must be a multiple of 16 (same assumption as thd_read_half_tensor).
+ **************************************************************************************************/
+__global__ void thd_reorder_kernel(void *out, void *inp, int *cu_seqlens, int batch,
+                                   int total_tokens, int world_size, int hidden_size_in_bytes,
+                                   bool scatter) {
+  extern __shared__ int cu_seqlens_s[];
+  for (int i = threadIdx.x; i <= batch; i += blockDim.x) {
+    cu_seqlens_s[i] = cu_seqlens[i] / world_size;
+  }
+  __syncthreads();
+
+  int warpid = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
+  int laneid = threadIdx.x % 32;
+  int num_warps = (blockDim.x * gridDim.x) / 32;
+  int tpr = total_tokens / world_size;
+  int num_float4s_per_token = hidden_size_in_bytes / sizeof(float4);
+
+  for (int gi = warpid; gi < total_tokens; gi += num_warps) {
+    int rank = gi / tpr;
+    int token_id = gi % tpr;
+    int src = thd_partition_src_index(token_id, cu_seqlens_s, batch, world_size, rank);
+    int rd = scatter ? gi : src;
+    int wr = scatter ? src : gi;
+    float4 *src_tok = reinterpret_cast<float4 *>(reinterpret_cast<char *>(inp) +
+                                                 static_cast<size_t>(rd) * hidden_size_in_bytes);
+    float4 *dst_tok = reinterpret_cast<float4 *>(reinterpret_cast<char *>(out) +
+                                                 static_cast<size_t>(wr) * hidden_size_in_bytes);
+    for (int idx = laneid; idx < num_float4s_per_token; idx += 32) dst_tok[idx] = src_tok[idx];
   }
 }
 
@@ -678,6 +721,31 @@ void thd_get_partitioned_indices(const Tensor &cu_seqlens, Tensor output, int to
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
+void thd_reorder(const Tensor &inp, const Tensor &cu_seqlens, Tensor &out, int world_size,
+                 bool scatter, int total_tokens, cudaStream_t stream) {
+  using namespace transformer_engine;
+  NVTE_CHECK(cu_seqlens.dtype() == DType::kInt32);
+  NVTE_CHECK(cu_seqlens.dim() == 1);
+  auto cu_seqlens_shape = cu_seqlens.shape();
+  NVTE_CHECK(cu_seqlens_shape[0] >= 2);
+  NVTE_CHECK(world_size > 0);
+  NVTE_CHECK(total_tokens > 0 && total_tokens % (world_size * 2) == 0);
+
+  auto inp_shape = inp.shape();
+  size_t row_elems = 1;
+  for (int i = 1; i < inp.dim(); i++) row_elems *= inp_shape[i];
+  int hidden_size_in_bytes = (row_elems * typeToNumBits(inp.dtype())) / 8;
+  NVTE_CHECK(hidden_size_in_bytes % 16 == 0);  // 128-bit load/store
+
+  int batch = cu_seqlens_shape[0] - 1;
+  constexpr unsigned int block = 256;
+  unsigned int grid = (static_cast<unsigned int>(total_tokens) * 32 + block - 1) / block;
+  thd_reorder_kernel<<<grid, block, sizeof(int) * (batch + 1), stream>>>(
+      out.data.dptr, inp.data.dptr, reinterpret_cast<int *>(cu_seqlens.data.dptr), batch,
+      total_tokens, world_size, hidden_size_in_bytes, scatter);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
+
 }  // namespace context_parallel
 }  // namespace transformer_engine
 
@@ -749,4 +817,14 @@ void nvte_cp_thd_get_partitioned_indices(const NVTETensor &cu_seqlens, NVTETenso
   context_parallel::thd_get_partitioned_indices(*convertNVTETensorCheck(cu_seqlens),
                                                 *convertNVTETensorCheck(output), total_tokens,
                                                 world_size, rank, stream);
+}
+
+void nvte_cp_thd_reorder(const NVTETensor &inp, const NVTETensor &cu_seqlens, NVTETensor out,
+                         int world_size, int scatter, int total_tokens, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_cp_thd_reorder);
+  using namespace transformer_engine;
+
+  context_parallel::thd_reorder(*convertNVTETensorCheck(inp), *convertNVTETensorCheck(cu_seqlens),
+                                *convertNVTETensorCheck(out), world_size, scatter != 0,
+                                total_tokens, stream);
 }

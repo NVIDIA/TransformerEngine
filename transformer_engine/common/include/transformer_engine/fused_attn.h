@@ -533,6 +533,23 @@ void nvte_cp_thd_get_partitioned_indices(const NVTETensor &cu_seqlens, NVTETenso
                                          int total_tokens, int world_size, int rank,
                                          cudaStream_t stream);
 
+/*!  \brief Fused dual-chunk THD reorder for Context Parallel (gather or scatter).
+ *
+ * Computes the dual-chunk source index inline (no materialized index tensor) and copies each
+ * token row. scatter=0: out[gi]=inp[src(gi)] (contiguous->rank-sharded); scatter=1:
+ * out[src(gi)]=inp[gi] (rank-sharded->contiguous). Row size must be a multiple of 16 bytes.
+ *
+ *  \param[in]     inp           Input THD tensor [total_tokens, ...].
+ *  \param[in]     cu_seqlens    Padded cumulative sequence lengths, [batch_size + 1], int32.
+ *  \param[out]    out           Output tensor, same shape/dtype as inp.
+ *  \param[in]     world_size    Context-parallel size.
+ *  \param[in]     scatter       0 = gather (rank-sharded), 1 = scatter (contiguous).
+ *  \param[in]     total_tokens  Total padded tokens (= inp.shape[0]).
+ *  \param[in]     stream        CUDA stream used for this operation.
+ */
+void nvte_cp_thd_reorder(const NVTETensor &inp, const NVTETensor &cu_seqlens, NVTETensor out,
+                         int world_size, int scatter, int total_tokens, cudaStream_t stream);
+
 /*!  \brief Convert tensor from THD to BSHD format.
  *
  * \warning   This API is **experimental** and subject to change.

@@ -518,6 +518,9 @@ void thd_grad_correction(at::Tensor grad, const at::Tensor &grad_per_step,
 at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_tokens,
                                        int world_size, int rank);
 
+at::Tensor thd_reorder(const at::Tensor &inp, const at::Tensor &cu_seqlens, int cp_size,
+                       bool scatter, int total_tokens);
+
 /***************************************************************************************************
  * multi_tensor_* kernels
  **************************************************************************************************/
