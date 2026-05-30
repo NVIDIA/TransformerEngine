@@ -991,8 +991,8 @@ at::Tensor thd_reorder(const at::Tensor &inp, const at::Tensor &cu_seqlens, int 
   auto te_cu_seqlens = makeTransformerEngineTensor(cu_seqlens);
   auto te_out = makeTransformerEngineTensor(out);
 
-  nvte_cp_thd_reorder(te_inp.data(), te_cu_seqlens.data(), te_out.data(), cp_size,
-                      scatter ? 1 : 0, total_tokens, at::cuda::getCurrentCUDAStream());
+  nvte_cp_thd_reorder(te_inp.data(), te_cu_seqlens.data(), te_out.data(), cp_size, scatter ? 1 : 0,
+                      total_tokens, at::cuda::getCurrentCUDAStream());
 
   return out;
 }

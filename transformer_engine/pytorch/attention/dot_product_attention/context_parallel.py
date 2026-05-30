@@ -3486,9 +3486,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             ]
 
             sliding_window_attn = (
-                window_size is not None
-                and window_size != (-1, 0)
-                and window_size != (-1, -1)
+                window_size is not None and window_size != (-1, 0) and window_size != (-1, -1)
             )
             if causal or sliding_window_attn:
                 # Visible KV covers chunks 0..chunk_id. For causal this is the
@@ -3573,15 +3571,13 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         v_part = v_ag
                         new_qkv_layout = qkv_layout
                         qkv_scale_inv_format = None
-                        kv_range, window_size_per_step[i] = (
-                            get_kv_seq_info_after_all_gather(
-                                local_seq_chunk_ids[i],
-                                cp_size,
-                                max_seqlen_q,
-                                max_seqlen_kv,
-                                window_size,
-                                causal,
-                            )
+                        kv_range, window_size_per_step[i] = get_kv_seq_info_after_all_gather(
+                            local_seq_chunk_ids[i],
+                            cp_size,
+                            max_seqlen_q,
+                            max_seqlen_kv,
+                            window_size,
+                            causal,
                         )
                         max_seqlen_kv_ = kv_range[1]
                         cu_seqlens_kv_per_step[i] = thd_cu_seqlens_kv_per_step[i]
@@ -3637,19 +3633,15 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         seqused_q = None
                         seqused_k = None
                         fa_cu_seqlens_q = (
-                            thd_cu_seqlens_q_per_step[i]
-                            if qkv_format == "thd"
-                            else cu_seqlens_q
+                            thd_cu_seqlens_q_per_step[i] if qkv_format == "thd" else cu_seqlens_q
                         )
                         fa_cu_seqlens_kv = cu_seqlens_kv_per_step[i]
                         if use_flash_attn_3 and qkv_format == "thd":
                             seqused_q = (
-                                thd_cu_seqlens_q_per_step[i][1:]
-                                - thd_cu_seqlens_q_per_step[i][:-1]
+                                thd_cu_seqlens_q_per_step[i][1:] - thd_cu_seqlens_q_per_step[i][:-1]
                             )
                             seqused_k = (
-                                cu_seqlens_kv_per_step[i][1:]
-                                - cu_seqlens_kv_per_step[i][:-1]
+                                cu_seqlens_kv_per_step[i][1:] - cu_seqlens_kv_per_step[i][:-1]
                             )
                             fa_cu_seqlens_q = thd_cu_seqlens_q_padded_per_step[i]
                             fa_cu_seqlens_kv = cu_seqlens_kv_padded
@@ -4200,17 +4192,12 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             else cu_seqlens_q
                         )
                         fa_cu_seqlens_kv = cu_seqlens_kv_per_step[i]
-                        if (
-                            ctx.use_flash_attn_3
-                            and ctx.qkv_format == "thd"
-                        ):
+                        if ctx.use_flash_attn_3 and ctx.qkv_format == "thd":
                             seqused_q = (
-                                thd_cu_seqlens_q_per_step[i][1:]
-                                - thd_cu_seqlens_q_per_step[i][:-1]
+                                thd_cu_seqlens_q_per_step[i][1:] - thd_cu_seqlens_q_per_step[i][:-1]
                             )
                             seqused_k = (
-                                cu_seqlens_kv_per_step[i][1:]
-                                - cu_seqlens_kv_per_step[i][:-1]
+                                cu_seqlens_kv_per_step[i][1:] - cu_seqlens_kv_per_step[i][:-1]
                             )
                             fa_cu_seqlens_q = thd_cu_seqlens_q_padded_per_step[i]
                             fa_cu_seqlens_kv = cu_seqlens_kv_padded
