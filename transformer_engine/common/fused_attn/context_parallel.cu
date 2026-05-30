@@ -155,11 +155,10 @@ __global__ void thd_reorder_kernel(void *out, void *inp, int *cu_seqlens, int ba
  * token's segment + local offset in the padded layout; cu_seqlens gives each segment's valid
  * length. Warp-per-token, float4 vectorized, modeled on thd_reorder_kernel.
  **************************************************************************************************/
-__global__ void thd_valid_copy_kernel(void *out, void *inp, int *cu_seqlens_padded,
-                                      int *cu_seqlens, int batch, int total_tokens,
-                                      int hidden_size_in_bytes) {
-  extern __shared__ int padded_s[];        // [0..batch] padded boundaries
-  int *valid_s = padded_s + (batch + 1);   // [0..batch] valid boundaries
+__global__ void thd_valid_copy_kernel(void *out, void *inp, int *cu_seqlens_padded, int *cu_seqlens,
+                                      int batch, int total_tokens, int hidden_size_in_bytes) {
+  extern __shared__ int padded_s[];       // [0..batch] padded boundaries
+  int *valid_s = padded_s + (batch + 1);  // [0..batch] valid boundaries
   for (int i = threadIdx.x; i <= batch; i += blockDim.x) {
     padded_s[i] = cu_seqlens_padded[i];
     valid_s[i] = cu_seqlens[i];
@@ -179,12 +178,10 @@ __global__ void thd_valid_copy_kernel(void *out, void *inp, int *cu_seqlens_padd
     // step-1 chunks: cu_seqlens_padded[:-1] += chunk_size). Those tokens are outside any valid
     // run, so skip them -- otherwise the first chunk's already-written rows get clobbered.
     if (local >= 0 && local < valid_len) {
-      float4 *src_tok = reinterpret_cast<float4 *>(reinterpret_cast<char *>(inp) +
-                                                   static_cast<size_t>(token_id) *
-                                                       hidden_size_in_bytes);
-      float4 *dst_tok = reinterpret_cast<float4 *>(reinterpret_cast<char *>(out) +
-                                                   static_cast<size_t>(token_id) *
-                                                       hidden_size_in_bytes);
+      float4 *src_tok = reinterpret_cast<float4 *>(
+          reinterpret_cast<char *>(inp) + static_cast<size_t>(token_id) * hidden_size_in_bytes);
+      float4 *dst_tok = reinterpret_cast<float4 *>(
+          reinterpret_cast<char *>(out) + static_cast<size_t>(token_id) * hidden_size_in_bytes);
       for (int idx = laneid; idx < num_float4s_per_token; idx += 32) dst_tok[idx] = src_tok[idx];
     }
   }
