@@ -86,16 +86,6 @@ transformer_engine::DType getTransformerEngineFP8Type(bool e4m3_if_hybrid,
   return transformer_engine::DType::kFloat8E5M2;
 }
 
-pybind11::object MakeTEDType(transformer_engine::DType dtype) {
-  // Cache the Python ``DType`` class object on first call so subsequent
-  // invocations avoid re-importing the module. ``static`` initialization is
-  // thread-safe under C++11. We are always inside a pybind11-invoked function
-  // when this runs, so the GIL is held and Python imports are legal.
-  static pybind11::object te_dtype_cls =
-      pybind11::module_::import("transformer_engine.pytorch.constants").attr("DType");
-  return te_dtype_cls(static_cast<int>(dtype));
-}
-
 TensorWrapper makeTransformerEngineTensor(py::handle tensor, py::handle quantizer) {
   NVTE_CHECK(!tensor.is_none(), "Tensor is not allocated!");
   std::unique_ptr<Quantizer> my_quantizer = convert_quantizer(quantizer);

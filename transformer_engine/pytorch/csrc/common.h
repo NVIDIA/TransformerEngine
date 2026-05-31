@@ -388,24 +388,6 @@ std::vector<size_t> getTensorShape(const at::Tensor& t);
 transformer_engine::DType getTransformerEngineFP8Type(bool e4m3_if_hybrid,
                                                       const std::string& fp8_recipe);
 
-/*! @brief Wrap a C++ ``transformer_engine::DType`` as the Python
- *         ``transformer_engine.pytorch.constants.DType`` ``IntEnum`` member.
- *
- * pybind11's default ``py::cast`` of a C++ enum produces an instance
- * of the pybind11-bound enum class (``tex.DType``), which does not
- * compare equal to a ``DType`` member of the same int value (cross-
- * type equality is not implemented). To keep tensor attributes like
- * ``_fp8_dtype`` typed consistently as ``DType`` regardless of
- * whether the tensor was constructed from Python or from C++, all C++
- * sites that set such attributes should go through this helper.
- *
- * The Python class object is imported once and cached in a function-
- * local ``static`` (initialization is thread-safe under C++11), so the
- * runtime cost per call is one ``IntEnum.__call__`` (a dict lookup in
- * ``_value2member_map_``).
- */
-pybind11::object MakeTEDType(transformer_engine::DType dtype);
-
 inline size_t typeToNumBits(transformer_engine::DType t) {
   switch (t) {
     case transformer_engine::DType::kInt64:

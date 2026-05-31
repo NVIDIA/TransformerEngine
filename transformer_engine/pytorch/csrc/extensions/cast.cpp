@@ -573,12 +573,13 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
     py::object columnwise_scale =
         (columnwise_usage ? py::cast(columnwise_scale_list[i]) : py::none());
 
-    // Construct Python tensor (wrap C++ DType so ``_fp8_dtype`` on the
-    // Python tensor is the Python ``DType`` IntEnum, matching the
-    // contract documented in ``common.h``::MakeTEDType).
+    // Construct Python tensor. The C++ ``DType`` is passed as the pybind
+    // ``tex.DType`` enum; the Python constructor normalizes it to the
+    // ``constants.DType`` IntEnum via ``DType.cast``, so ``_fp8_dtype`` ends
+    // up as that IntEnum.
     tensor_py_list.emplace_back(
         Float8BlockwiseQTensorClass(rowwise_data, rowwise_scale, columnwise_data, columnwise_scale,
-                                    MakeTEDType(fp8_dtype), quantizer_py_list[i], is_2D_scaled));
+                                    py::cast(fp8_dtype), quantizer_py_list[i], is_2D_scaled));
 
     // Construct C++ tensor
     tensor_cpp_list.emplace_back(makeTransformerEngineTensor(
@@ -681,11 +682,12 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
     py::object columnwise_scale =
         (columnwise_usage ? py::cast(columnwise_scale_list[i]) : py::none());
 
-    // Construct Python tensor (wrap C++ DType so ``_fp8_dtype`` on the
-    // Python tensor is the Python ``DType`` IntEnum, matching the
-    // contract documented in ``common.h``::MakeTEDType).
+    // Construct Python tensor. The C++ ``DType`` is passed as the pybind
+    // ``tex.DType`` enum; the Python constructor normalizes it to the
+    // ``constants.DType`` IntEnum via ``DType.cast``, so ``_fp8_dtype`` ends
+    // up as that IntEnum.
     tensor_py_list.emplace_back(MXFP8TensorClass(rowwise_data, rowwise_scale, columnwise_data,
-                                                 columnwise_scale, MakeTEDType(fp8_dtype),
+                                                 columnwise_scale, py::cast(fp8_dtype),
                                                  quantizer_py_list[i], with_gemm_swizzled_scales));
 
     // Construct C++ tensor
@@ -869,12 +871,13 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
     py::object amax_rowwise = rowwise_usage ? py::cast(amax_rowwise_list[i]) : py::none();
     py::object amax_columnwise = columnwise_usage ? py::cast(amax_columnwise_list[i]) : py::none();
 
-    // Construct Python tensor (wrap C++ DType so ``_fp4_dtype`` on the
-    // Python tensor is the Python ``DType`` IntEnum, matching the
-    // contract documented in ``common.h``::MakeTEDType).
+    // Construct Python tensor. The C++ ``DType`` is passed as the pybind
+    // ``tex.DType`` enum; the Python constructor normalizes it to the
+    // ``constants.DType`` IntEnum via ``DType.cast``, so ``_fp4_dtype`` ends
+    // up as that IntEnum.
     tensor_py_list.emplace_back(NVFP4TensorClass(rowwise_data, rowwise_scale, columnwise_data,
                                                  columnwise_scale, amax_rowwise, amax_columnwise,
-                                                 MakeTEDType(fp4_dtype), quantizer_py_list[i],
+                                                 py::cast(fp4_dtype), quantizer_py_list[i],
                                                  with_gemm_swizzled_scales, row_scaled_nvfp4));
 
     // Construct C++ tensor

@@ -137,7 +137,7 @@ class NVFP4Quantizer(Quantizer):
 
     def __init__(
         self,
-        fp4_dtype: constants.DType = constants.DType.kFloat4E2M1,
+        fp4_dtype: constants.DTypeLike = constants.DType.kFloat4E2M1,
         rowwise: bool = True,
         columnwise: bool = True,
         with_amax_reduction: bool = False,
@@ -150,7 +150,7 @@ class NVFP4Quantizer(Quantizer):
         with_random_sign_mask: bool = True,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
-        self.dtype = fp4_dtype
+        self.dtype = constants.DType.cast(fp4_dtype)
         self.with_rht = with_rht
         self.with_post_rht_amax = with_post_rht_amax
         self.with_amax_reduction = with_amax_reduction

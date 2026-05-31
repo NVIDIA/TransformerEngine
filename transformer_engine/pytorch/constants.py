@@ -5,6 +5,7 @@
 """Enums for e2e transformer"""
 import enum
 from types import SimpleNamespace
+from typing import Union
 import torch
 import torch.distributed
 import transformer_engine_torch as tex
@@ -30,6 +31,21 @@ class DType(enum.IntEnum):
     kFloat8E5M2 = int(tex.DType.kFloat8E5M2)
     kFloat4E2M1 = int(tex.DType.kFloat4E2M1)
 
+    @classmethod
+    def cast(cls, dtype: "DTypeLike") -> "DType":
+        """Cast a dtype tag to the canonical ``DType`` ``IntEnum``.
+
+        ``DType`` is the dtype tag used internally throughout
+        ``transformer_engine.pytorch``. For backward compatibility, the public
+        ``Quantizer`` / ``QuantizedTensor`` constructors also accept the pybind
+        ``transformer_engine_torch.DType`` enum that external callers used
+        historically; this converts it (or an existing ``DType``) to the
+        matching ``DType`` member so stored attributes are always ``DType``.
+        """
+        if isinstance(dtype, cls):
+            return dtype
+        return cls(int(dtype))
+
 
 # Fail fast at import time if a new enumerator is added
 # on the C++ side without being mirrored above.
@@ -37,6 +53,12 @@ assert {m.name for m in DType} == set(tex.DType.__members__), (
     "DType is out of sync with transformer_engine_torch.DType; "
     "add the new pybind enumerator to DType in constants.py."
 )
+
+
+# Anything accepted by ``DType.cast`` as a stand-in for a ``DType`` member.
+# ``DType`` is canonical internally; the pybind ``tex.DType`` enum is accepted
+# at API boundaries for backward compatibility.
+DTypeLike = Union[DType, tex.DType]
 
 
 # One-to-one mapping ``torch.dtype -> DType`` (mirrors the enum order in

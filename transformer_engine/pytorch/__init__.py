@@ -16,6 +16,7 @@ from transformer_engine.pytorch.torch_version import torch_version
 assert torch_version() >= (2, 1), f"Minimum torch version 2.1 required. Found {torch_version()}."
 
 load_framework_extension("torch")
+import transformer_engine_torch as tex
 from transformer_engine.pytorch import constants
 from transformer_engine.pytorch.module import LayerNormLinear
 from transformer_engine.pytorch.module import Linear
@@ -109,7 +110,11 @@ except AttributeError:
     pass  # error_on_nested_jit_trace was added in PyTorch 2.2.0
 
 # To allow for safe unpickling of QuantizedTensors when using DCP
-# checkpointing with FSDP2.
+# checkpointing with FSDP2. ``tex.DType`` (the pybind11 enum) has its
+# ``__reduce_ex__`` / ``__reduce__`` overridden in the C++ binding (see
+# ``transformer_engine/common/util/pybind_helper.h``) so its pickle
+# stream encodes as ``(tex.DType, (int,))`` and only the class itself
+# needs to be allow-listed below.
 try:
     from torch.serialization import add_safe_globals
 
@@ -128,8 +133,10 @@ try:
             MXFP8Quantizer,
             NVFP4Quantizer,
             Float8BlockQuantizer,
-            # Python IntEnum used as Quantizer.dtype
             constants.DType,
+            # Python IntEnum used as Quantizer.dtype.
+            # Kept for backward compatibility.
+            tex.DType,
             # __reduce_ex__ reconstructors (module-level functions).
             _make_float8_tensor_in_reduce_ex,
             _make_mxfp8_tensor_in_reduce_ex,

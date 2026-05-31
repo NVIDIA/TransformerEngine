@@ -38,7 +38,7 @@ class Float8BlockQuantizer(Quantizer):
 
     def __init__(
         self,
-        fp8_dtype: constants.DType,
+        fp8_dtype: constants.DTypeLike,
         *,
         rowwise: bool,
         columnwise: bool,
@@ -47,7 +47,7 @@ class Float8BlockQuantizer(Quantizer):
         block_scaling_dim: int = 2,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
-        self.dtype = fp8_dtype
+        self.dtype = constants.DType.cast(fp8_dtype)
         self.block_len = 128
         self.force_pow_2_scales = force_pow_2_scales
         self.amax_epsilon = amax_epsilon

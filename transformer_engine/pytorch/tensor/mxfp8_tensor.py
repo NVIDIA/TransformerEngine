@@ -37,13 +37,13 @@ class MXFP8Quantizer(Quantizer):
 
     def __init__(
         self,
-        fp8_dtype: constants.DType,
+        fp8_dtype: constants.DTypeLike,
         *,
         rowwise: bool = True,
         columnwise: bool = True,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
-        self.dtype = fp8_dtype
+        self.dtype = constants.DType.cast(fp8_dtype)
 
     def copy(self) -> MXFP8Quantizer:
         """Create shallow copy"""

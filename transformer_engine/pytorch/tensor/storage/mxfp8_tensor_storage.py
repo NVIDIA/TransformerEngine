@@ -89,7 +89,7 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
         rowwise_scale_inv: Optional[torch.Tensor],
         columnwise_data: Optional[torch.Tensor],
         columnwise_scale_inv: Optional[torch.Tensor],
-        fp8_dtype: constants.DType,
+        fp8_dtype: constants.DTypeLike,
         quantizer: Optional[Quantizer],
         with_gemm_swizzled_scales: bool,
         *args,
@@ -106,7 +106,7 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
         instance._rowwise_scale_inv = rowwise_scale_inv
         instance._columnwise_scale_inv = columnwise_scale_inv
         instance._quantizer = quantizer.copy() if quantizer is not None else None
-        instance._fp8_dtype = fp8_dtype
+        instance._fp8_dtype = constants.DType.cast(fp8_dtype)
         instance._with_gemm_swizzled_scales = with_gemm_swizzled_scales
 
         return instance

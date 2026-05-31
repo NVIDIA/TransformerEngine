@@ -60,7 +60,7 @@ class Float8Quantizer(Quantizer):
         self,
         scale: torch.Tensor,
         amax: torch.Tensor,
-        fp8_dtype: constants.DType,
+        fp8_dtype: constants.DTypeLike,
         *,
         rowwise: bool = True,
         columnwise: bool = True,
@@ -68,7 +68,7 @@ class Float8Quantizer(Quantizer):
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.scale = scale
         self.amax = amax
-        self.dtype = fp8_dtype
+        self.dtype = constants.DType.cast(fp8_dtype)
 
     def copy(self) -> Float8Quantizer:
         """Create shallow copy"""
@@ -215,7 +215,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
 
     def __init__(
         self,
-        fp8_dtype: constants.DType,
+        fp8_dtype: constants.DTypeLike,
         device: torch.device,
         *,
         rowwise: bool = True,
@@ -237,7 +237,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
                 stacklevel=2,
             )
         del device, use_existing_amax, scale, amax  # Kept for backward compatibility
-        self.dtype = fp8_dtype
+        self.dtype = constants.DType.cast(fp8_dtype)
         self.with_amax_reduction = with_amax_reduction
         self.amax_reduction_group = amax_reduction_group
         self.force_pow_2_scales = force_pow_2_scales

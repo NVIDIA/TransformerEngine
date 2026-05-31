@@ -42,9 +42,7 @@ class _FromFloat8Func(torch.autograd.Function):
                     tensor._data.view(fp8_torch_dtype).float()
                     * tensor._scale_inv.to(tensor._data.device)
                 ).to(dtype)
-            # Cast from FP8. ``constants.DType`` is implicitly convertible to
-            # ``transformer_engine::DType`` on the C++ side, so pass it
-            # directly to ``tex.dequantize``.
+            # Cast from FP8
             return tex.dequantize(tensor, te_dtype)
 
         raise NotImplementedError("Casting back from the transpose not implemented yet!")
@@ -83,7 +81,7 @@ class Float8TensorStorage(QuantizedTensorStorage):
         *args,
         data: Optional[torch.Tensor],
         fp8_scale_inv: torch.Tensor,
-        fp8_dtype: constants.DType,
+        fp8_dtype: constants.DTypeLike,
         fake_dtype: Optional[torch.dtype] = None,
         data_transpose: Optional[torch.Tensor] = None,
         quantizer: Optional[Quantizer] = None,
@@ -96,7 +94,7 @@ class Float8TensorStorage(QuantizedTensorStorage):
             instance = super().__new__(cls, *args, fake_dtype=fake_dtype, **kwargs)
         instance._data = data
         instance._quantizer = quantizer.copy() if quantizer is not None else None
-        instance._fp8_dtype = fp8_dtype
+        instance._fp8_dtype = constants.DType.cast(fp8_dtype)
         instance._scale_inv = fp8_scale_inv
         instance._transpose = data_transpose
         instance._transpose_invalid = instance._transpose is None
