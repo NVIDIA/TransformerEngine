@@ -17,7 +17,7 @@ import transformer_engine_torch as tex
 
 from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 
-from ...constants import TE_DType
+from ...constants import TE_DType as torch_to_transformer_engine_dtype
 from ... import constants
 from ...utils import _empty_tensor
 
@@ -56,9 +56,9 @@ class _FromNVFP4Func(torch.autograd.Function):
         src_device = tensor.device
         if src_device.type != "cuda":
             cuda_tensor = tensor.to(device=torch.device("cuda"))
-            result = tex.dequantize(cuda_tensor, TE_DType[dtype])
+            result = tex.dequantize(cuda_tensor, torch_to_transformer_engine_dtype[dtype])
             return result.to(device=src_device)
-        return tex.dequantize(tensor, TE_DType[dtype])
+        return tex.dequantize(tensor, torch_to_transformer_engine_dtype[dtype])
 
     @staticmethod
     def backward(

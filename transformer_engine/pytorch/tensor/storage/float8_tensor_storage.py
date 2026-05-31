@@ -13,7 +13,7 @@ import transformer_engine_torch as tex
 
 from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 
-from ...constants import TE_DType, TE_DType_To_Torch
+from ...constants import TE_DType as torch_to_transformer_engine_dtype, TE_DType_To_Torch
 from ... import constants
 
 from ...utils import is_non_tn_fp8_gemm_supported, _empty_tensor
@@ -29,7 +29,7 @@ class _FromFloat8Func(torch.autograd.Function):
         dtype: torch.dtype,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
-        te_dtype = TE_DType[dtype]
+        te_dtype = torch_to_transformer_engine_dtype[dtype]
 
         # Make sure FP8 data is in expected format
         if tensor._data is not None:
