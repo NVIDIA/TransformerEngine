@@ -230,7 +230,11 @@ class TestFloat8BlockwiseTensor:
     @pytest.mark.parametrize("fp8_dtype", _fp8_dtypes)
     @pytest.mark.parametrize("dq_columnwise", [True, False])
     def test_quantize_dequantize_dims_cpp_allocate_output(
-        self, dims: DimsType, block_scaling_dim: int, fp8_dtype: constants.DType, dq_columnwise: bool
+        self,
+        dims: DimsType,
+        block_scaling_dim: int,
+        fp8_dtype: constants.DType,
+        dq_columnwise: bool,
     ) -> None:
         atol = _tols[fp8_dtype]["atol"]
         rtol = _tols[fp8_dtype]["rtol"]
@@ -420,7 +424,9 @@ class TestFloat8BlockwiseTensor:
         with pytest.raises(AssertionError):
             torch.testing.assert_close(x_view.dequantize(), -x_hp, **_tols[fp8_dtype])
 
-    @pytest.mark.parametrize("fp8_dtype", [constants.DType.kFloat8E4M3, constants.DType.kFloat8E5M2], ids=str)
+    @pytest.mark.parametrize(
+        "fp8_dtype", [constants.DType.kFloat8E4M3, constants.DType.kFloat8E5M2], ids=str
+    )
     @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32], ids=str)
     @pytest.mark.parametrize(
         "dims", [[16, 16, 512], [16, 16, 512, 16], [12, 7, 11], [13, 14, 16], [2, 3, 5]]
@@ -473,7 +479,9 @@ class TestFloat8BlockwiseTensor:
         assert is_bitwise_equal(x_fp8_reshape._rowwise_data, x_fp8._rowwise_data)
         assert is_bitwise_equal(x_fp8_reshape._rowwise_scale_inv, x_fp8._rowwise_scale_inv)
 
-    @pytest.mark.parametrize("fp8_dtype", [constants.DType.kFloat8E4M3, constants.DType.kFloat8E5M2], ids=str)
+    @pytest.mark.parametrize(
+        "fp8_dtype", [constants.DType.kFloat8E4M3, constants.DType.kFloat8E5M2], ids=str
+    )
     @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32], ids=str)
     @pytest.mark.parametrize("dims", [[16, 16, 512, 16], [2, 512, 512, 128], [3, 13, 14, 16]])
     def test_view_and_reshape_2D(
