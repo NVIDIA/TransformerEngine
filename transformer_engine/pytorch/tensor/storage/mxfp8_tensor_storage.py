@@ -14,7 +14,7 @@ import transformer_engine_torch as tex
 
 from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 
-from ...constants import TE_DType
+from ...constants import TE_DType as torch_to_transformer_engine_dtype
 from ... import constants
 
 from ...utils import _empty_tensor
@@ -37,10 +37,8 @@ class _FromMXFP8Func(torch.autograd.Function):
 
         if tensor._rowwise_data is None and tensor._columnwise_data is None:
             raise ValueError("Cannot dequantize MXFP8 tensor with no data")
-        # ``tex.dequantize`` requires CUDA-resident buffers. ``constants.DType``
-        # is implicitly convertible to ``transformer_engine::DType`` on
-        # the C++ side (see ``pybind_helper.h``), so pass it directly.
-        te_dtype = TE_DType[dtype]
+        te_dtype = torch_to_transformer_engine_dtype[dtype]
+        # ``tex.dequantize`` requires CUDA-resident buffers.
         src_device = tensor.device
         if src_device.type != "cuda":
             cuda_tensor = tensor.to(device=torch.device("cuda"))
