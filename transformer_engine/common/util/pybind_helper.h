@@ -24,7 +24,7 @@
       .value("kFloat8E4M3", transformer_engine::DType::kFloat8E4M3)                                \
       .value("kFloat8E5M2", transformer_engine::DType::kFloat8E5M2)                                \
       .value("kFloat4E2M1", transformer_engine::DType::kFloat4E2M1);                               \
-  /* Allow Python int (and IntEnum subclasses like transformer_engine.pytorch.TE_DType) to be   */ \
+  /* Allow Python int (and IntEnum subclasses like transformer_engine.pytorch.constants.DType) to be */ \
   /* passed wherever a pybind-bound ``transformer_engine::DType`` argument is expected.         */ \
   pybind11::implicitly_convertible<int, transformer_engine::DType>();                              \
   pybind11::enum_<NVTE_Bias_Type>(m, "NVTE_Bias_Type", pybind11::module_local())                   \

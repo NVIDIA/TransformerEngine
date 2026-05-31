@@ -13,10 +13,8 @@ import transformer_engine_torch as tex
 
 from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 
-from ...constants import (
-    TE_DType,
-    TE_DType_To_Torch,
-)
+from ...constants import TE_DType, TE_DType_To_Torch
+from ... import constants
 
 from ...utils import is_non_tn_fp8_gemm_supported, _empty_tensor
 
@@ -44,7 +42,7 @@ class _FromFloat8Func(torch.autograd.Function):
                     tensor._data.view(fp8_torch_dtype).float()
                     * tensor._scale_inv.to(tensor._data.device)
                 ).to(dtype)
-            # Cast from FP8. ``TE_DType`` is implicitly convertible to
+            # Cast from FP8. ``constants.DType`` is implicitly convertible to
             # ``transformer_engine::DType`` on the C++ side, so pass it
             # directly to ``tex.dequantize``.
             return tex.dequantize(tensor, te_dtype)
@@ -73,7 +71,7 @@ class Float8TensorStorage(QuantizedTensorStorage):
 
     _data: Optional[torch.Tensor]
     _quantizer: Optional[Quantizer]
-    _fp8_dtype: TE_DType
+    _fp8_dtype: constants.DType
     _scale_inv: torch.Tensor
 
     # FP8 transpose cache
@@ -85,7 +83,7 @@ class Float8TensorStorage(QuantizedTensorStorage):
         *args,
         data: Optional[torch.Tensor],
         fp8_scale_inv: torch.Tensor,
-        fp8_dtype: TE_DType,
+        fp8_dtype: constants.DType,
         fake_dtype: Optional[torch.dtype] = None,
         data_transpose: Optional[torch.Tensor] = None,
         quantizer: Optional[Quantizer] = None,

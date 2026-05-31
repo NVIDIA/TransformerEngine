@@ -10,14 +10,14 @@ import torch.utils.benchmark as benchmark
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.cpp_extensions as ext
 
-from transformer_engine.pytorch.constants import TE_DType
+from transformer_engine.pytorch import constants
 from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 
 scale_padding_to = 1
 permute_scale = False
 
 TORCH_TO_TE_FLOAT_MAP = {
-    torch.bfloat16: TE_DType.kBFloat16,
+    torch.bfloat16: constants.DType.kBFloat16,
 }
 
 
@@ -31,7 +31,7 @@ def run_kernel(shape, stochastic_rounding: bool, input_dtype=torch.bfloat16):
 
     # Quantize
     nvfp4_quantizer = NVFP4Quantizer(
-        fp4_dtype=TE_DType.kFloat4E2M1,
+        fp4_dtype=constants.DType.kFloat4E2M1,
         rowwise=True,
         columnwise=True,
         with_amax_reduction=False,

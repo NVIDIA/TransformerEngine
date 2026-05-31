@@ -574,7 +574,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
         (columnwise_usage ? py::cast(columnwise_scale_list[i]) : py::none());
 
     // Construct Python tensor (wrap C++ DType so ``_fp8_dtype`` on the
-    // Python tensor is the Python ``TE_DType`` IntEnum, matching the
+    // Python tensor is the Python ``DType`` IntEnum, matching the
     // contract documented in ``common.h``::MakeTEDType).
     tensor_py_list.emplace_back(
         Float8BlockwiseQTensorClass(rowwise_data, rowwise_scale, columnwise_data, columnwise_scale,
@@ -682,7 +682,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
         (columnwise_usage ? py::cast(columnwise_scale_list[i]) : py::none());
 
     // Construct Python tensor (wrap C++ DType so ``_fp8_dtype`` on the
-    // Python tensor is the Python ``TE_DType`` IntEnum, matching the
+    // Python tensor is the Python ``DType`` IntEnum, matching the
     // contract documented in ``common.h``::MakeTEDType).
     tensor_py_list.emplace_back(MXFP8TensorClass(rowwise_data, rowwise_scale, columnwise_data,
                                                  columnwise_scale, MakeTEDType(fp8_dtype),
@@ -870,7 +870,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
     py::object amax_columnwise = columnwise_usage ? py::cast(amax_columnwise_list[i]) : py::none();
 
     // Construct Python tensor (wrap C++ DType so ``_fp4_dtype`` on the
-    // Python tensor is the Python ``TE_DType`` IntEnum, matching the
+    // Python tensor is the Python ``DType`` IntEnum, matching the
     // contract documented in ``common.h``::MakeTEDType).
     tensor_py_list.emplace_back(NVFP4TensorClass(rowwise_data, rowwise_scale, columnwise_data,
                                                  columnwise_scale, amax_rowwise, amax_columnwise,

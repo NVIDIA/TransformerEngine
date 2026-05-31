@@ -26,7 +26,8 @@ from transformer_engine.common.recipe import (
     NVFP4BlockScaling,
     CustomRecipe,
 )
-from .constants import dist_group_type, TE_DType
+from .constants import dist_group_type
+from . import constants
 
 from .utils import get_device_compute_capability
 from .jit import jit_fuser
@@ -277,23 +278,23 @@ def get_fp8_torch_dtype(fp8_recipe: Recipe, fprop_tensor: bool = True) -> torch.
     return torch.float8_e5m2
 
 
-def get_fp8_te_dtype(fp8_recipe: Recipe, fprop_tensor: bool = True) -> TE_DType:
+def get_fp8_te_dtype(fp8_recipe: Recipe, fprop_tensor: bool = True) -> constants.DType:
     """Get fp8 data type according to recipe and tensor"""
     if fp8_recipe.fp8_format == Format.E4M3 or (
         fp8_recipe.fp8_format == Format.HYBRID and fprop_tensor
     ):
-        return TE_DType.kFloat8E4M3
-    return TE_DType.kFloat8E5M2
+        return constants.DType.kFloat8E4M3
+    return constants.DType.kFloat8E5M2
 
 
-def get_fp4_te_dtype(fp4_recipe: Recipe) -> TE_DType:
+def get_fp4_te_dtype(fp4_recipe: Recipe) -> constants.DType:
     """Get fp4 data type according to recipe and tensor"""
     if fp4_recipe.fp4_format == Format.E2M1:
-        return TE_DType.kFloat4E2M1
+        return constants.DType.kFloat4E2M1
     raise ValueError(f"Unsupported FP4 format: {fp4_recipe.fp4_format}")
 
 
-def get_fp8_max(fp8_recipe: Recipe, fprop_tensor: bool = True) -> TE_DType:
+def get_fp8_max(fp8_recipe: Recipe, fprop_tensor: bool = True) -> constants.DType:
     """Get max representible FP8 value."""
     if fp8_recipe.fp8_format == Format.E4M3 or (
         fp8_recipe.fp8_format == Format.HYBRID and fprop_tensor
@@ -1382,7 +1383,7 @@ class DelayedScalingRecipeState(RecipeState):
 
     recipe: DelayedScaling
     mode: str
-    dtype: TE_DType
+    dtype: constants.DType
     scale: torch.Tensor
     amax_history: torch.Tensor
 
@@ -1436,7 +1437,7 @@ class Float8CurrentScalingRecipeState(RecipeState):
 
     recipe: Float8CurrentScaling
     mode: str
-    dtype: TE_DType
+    dtype: constants.DType
     device: torch.device
 
     def __init__(
@@ -1480,7 +1481,7 @@ class MXFP8BlockScalingRecipeState(RecipeState):
 
     recipe: MXFP8BlockScaling
     mode: str
-    dtype: TE_DType
+    dtype: constants.DType
 
     def __init__(
         self,
@@ -1518,9 +1519,9 @@ class Float8BlockScalingRecipeState(RecipeState):
 
     recipe: Float8BlockScaling
     mode: str
-    qx_dtype: TE_DType
-    qw_dtype: TE_DType
-    qgrad_dtype: TE_DType
+    qx_dtype: constants.DType
+    qw_dtype: constants.DType
+    qgrad_dtype: constants.DType
 
     def __init__(
         self,
@@ -1605,7 +1606,7 @@ class NVFP4BlockScalingRecipeState(RecipeState):
 
     recipe: NVFP4BlockScaling
     mode: str
-    dtype: TE_DType
+    dtype: constants.DType
 
     def __init__(
         self,

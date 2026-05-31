@@ -14,7 +14,7 @@ import transformer_engine_torch as tex
 from transformer_engine.pytorch import NVFP4Quantizer
 from transformer_engine.pytorch.custom_recipes.quantization_ref_nvfp4 import NVFP4QuantizerRef
 from transformer_engine.pytorch.custom_recipes import utils
-from transformer_engine.pytorch.constants import TE_DType
+from transformer_engine.pytorch import constants
 from transformer_engine.common.recipe import NVFP4BlockScaling
 
 import pytest
@@ -46,7 +46,7 @@ def check_quantization_nvfp4_versus_reference(
 ) -> None:
     assert with_rht and with_post_rht_amax, "RHT and post-RHT amax reduction must be enabled."
 
-    te_dtype = TE_DType.kFloat4E2M1
+    te_dtype = constants.DType.kFloat4E2M1
 
     # Setup device and random seed
     device = "cuda"

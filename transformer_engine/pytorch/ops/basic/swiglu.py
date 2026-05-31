@@ -11,7 +11,7 @@ from typing import Any, Optional
 import torch
 
 import transformer_engine_torch as tex
-from ...constants import TE_DType
+from ... import constants
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...tensor import Float8CurrentScalingQuantizer, Quantizer
 from ...utils import clear_tensor_data
@@ -119,7 +119,7 @@ class SwiGLU(BasicOperation):
         # Quantize input to FP8 before caching if needed
         if self.cache_quantized_input:
             input_quantizer = Float8CurrentScalingQuantizer(
-                TE_DType.kFloat8E4M3,
+                constants.DType.kFloat8E4M3,
                 input_.device,
             )
             input_quantizer.set_usage(rowwise=True, columnwise=False)
@@ -298,7 +298,7 @@ class ClampedSwiGLU(BasicOperation):
 
         # Quantize input to FP8 before caching if needed
         if self.cache_quantized_input:
-            input_quantizer = Float8CurrentScalingQuantizer(TE_DType.kFloat8E4M3, x.device)
+            input_quantizer = Float8CurrentScalingQuantizer(constants.DType.kFloat8E4M3, x.device)
             input_quantizer.set_usage(rowwise=True, columnwise=False)
             x = input_quantizer(x)
 

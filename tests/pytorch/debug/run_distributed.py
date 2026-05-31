@@ -13,7 +13,7 @@ import re
 import torch
 import torch.distributed as dist
 import transformer_engine
-from transformer_engine.pytorch.constants import TE_DType
+from transformer_engine.pytorch import constants
 import nvdlfw_inspect.api as debug_api
 from transformer_engine.debug import set_weight_tensor_tp_group_reduce
 from transformer_engine.pytorch import is_fp8_available
@@ -683,7 +683,7 @@ if __name__ == "__main__":
         )
 
         # test_fake_quant_fp8
-        dtype_options = [TE_DType.kFloat8E4M3, TE_DType.kFloat8E5M2, None]
+        dtype_options = [constants.DType.kFloat8E4M3, constants.DType.kFloat8E5M2, None]
         _run_test_with_combinations(
             test_fake_quant_fp8,
             dtype_options,

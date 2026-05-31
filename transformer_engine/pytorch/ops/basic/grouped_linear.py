@@ -14,7 +14,7 @@ from typing import Any, Optional
 import torch
 
 import transformer_engine_torch as tex
-from ...constants import TE_DType
+from ... import constants
 from ...cpp_extensions import general_grouped_gemm, general_grouped_gemm_for_grouped_tensor
 from ...distributed import CudaRNGStatesTracker
 from ...module._common import WeightGradStore
@@ -519,7 +519,7 @@ class GroupedLinear(BasicOperation):
                 weight = MXFP8Tensor(
                     shape=unpacked_shape,
                     dtype=dtype,
-                    fp8_dtype=TE_DType.kFloat8E4M3,
+                    fp8_dtype=constants.DType.kFloat8E4M3,
                     rowwise_data=rowwise_data[group_idx],
                     rowwise_scale_inv=rowwise_scales[group_idx],
                     columnwise_data=columnwise_data[group_idx],

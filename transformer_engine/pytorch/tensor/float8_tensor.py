@@ -19,7 +19,8 @@ from ..utils import canonicalize_process_group, devices_match
 from .storage.float8_tensor_storage import Float8TensorStorage, _FromFloat8Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ._quantization_helpers import _IdentityFunc
-from ..constants import dist_group_type, TE_DType
+from ..constants import dist_group_type
+from .. import constants
 
 aten = torch.ops.aten
 
@@ -53,13 +54,13 @@ class Float8Quantizer(Quantizer):
     """Max-abs value from last FP8 cast"""
     amax: torch.Tensor
     """FP8 datatype"""
-    dtype: TE_DType
+    dtype: constants.DType
 
     def __init__(
         self,
         scale: torch.Tensor,
         amax: torch.Tensor,
-        fp8_dtype: TE_DType,
+        fp8_dtype: constants.DType,
         *,
         rowwise: bool = True,
         columnwise: bool = True,
@@ -204,7 +205,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
     """
 
     """FP8 datatype"""
-    dtype: TE_DType
+    dtype: constants.DType
     """amax reduction options"""
     with_amax_reduction: bool
     amax_reduction_group: Optional[dist_group_type]
@@ -214,7 +215,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
 
     def __init__(
         self,
-        fp8_dtype: TE_DType,
+        fp8_dtype: constants.DType,
         device: torch.device,
         *,
         rowwise: bool = True,
@@ -921,7 +922,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
     def _make_in_reduce_ex(
         cls,
         data: torch.Tensor,
-        fp8_dtype: TE_DType,
+        fp8_dtype: constants.DType,
         fp8_scale_inv: torch.Tensor,
         dtype: torch.dtype,
         shape: torch.Size,
@@ -1004,7 +1005,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
 
 def _make_float8_tensor_in_reduce_ex(
     data: torch.Tensor,
-    fp8_dtype: TE_DType,
+    fp8_dtype: constants.DType,
     fp8_scale_inv: torch.Tensor,
     dtype: torch.dtype,
     shape: torch.Size,

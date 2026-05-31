@@ -23,7 +23,7 @@ from transformer_engine.pytorch import (
 )
 
 import transformer_engine_torch as tex
-from transformer_engine.pytorch.constants import TE_DType
+from transformer_engine.pytorch import constants
 from transformer_engine.pytorch.quantization import (
     FP8GlobalStateManager,
     NVFP4BlockScalingRecipeState,
@@ -297,14 +297,14 @@ class TestFP8Recipe:
     @pytest.mark.parametrize("amax_case", ["zero", "tiny", "normal", "inf", "nan"])
     @pytest.mark.parametrize("fused_update", [True, False], ids=["fused", "non-fused"])
     @pytest.mark.parametrize(
-        "fp8_dtype", [TE_DType.kFloat8E4M3, TE_DType.kFloat8E5M2], ids=["E4M3", "E5M2"]
+        "fp8_dtype", [constants.DType.kFloat8E4M3, constants.DType.kFloat8E5M2], ids=["E4M3", "E5M2"]
     )
     def test_scale_update_numeric_scenarios(self, amax_case, fused_update, fp8_dtype):
 
-        if fp8_dtype == TE_DType.kFloat8E4M3:
+        if fp8_dtype == constants.DType.kFloat8E4M3:
             fp8_format = transformer_engine.common.recipe.Format.E4M3
             fp8_max = fp8_format.value.max_fwd
-        elif fp8_dtype == TE_DType.kFloat8E5M2:
+        elif fp8_dtype == constants.DType.kFloat8E5M2:
             fp8_format = transformer_engine.common.recipe.Format.HYBRID
             fp8_max = fp8_format.value.max_bwd
         else:

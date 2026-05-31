@@ -87,12 +87,12 @@ transformer_engine::DType getTransformerEngineFP8Type(bool e4m3_if_hybrid,
 }
 
 pybind11::object MakeTEDType(transformer_engine::DType dtype) {
-  // Cache the Python ``TE_DType`` class object on first call so subsequent
+  // Cache the Python ``DType`` class object on first call so subsequent
   // invocations avoid re-importing the module. ``static`` initialization is
   // thread-safe under C++11. We are always inside a pybind11-invoked function
   // when this runs, so the GIL is held and Python imports are legal.
   static pybind11::object te_dtype_cls =
-      pybind11::module_::import("transformer_engine.pytorch.constants").attr("TE_DType");
+      pybind11::module_::import("transformer_engine.pytorch.constants").attr("DType");
   return te_dtype_cls(static_cast<int>(dtype));
 }
 

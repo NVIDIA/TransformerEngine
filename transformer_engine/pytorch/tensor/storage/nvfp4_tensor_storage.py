@@ -18,6 +18,7 @@ import transformer_engine_torch as tex
 from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 
 from ...constants import TE_DType
+from ... import constants
 from ...utils import _empty_tensor
 
 
@@ -97,7 +98,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
     # Builder class for casting to MXFP8
     _quantizer: Optional[Quantizer]
     # FP4 data type
-    _fp4_dtype: TE_DType
+    _fp4_dtype: constants.DType
     # Whether scaling factors are in the swizzled format expected by
     # GEMM
     _with_gemm_swizzled_scales: bool
@@ -112,7 +113,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         columnwise_scale_inv: torch.Tensor,
         amax_rowwise: torch.Tensor,
         amax_columnwise: torch.Tensor,
-        fp4_dtype: TE_DType,
+        fp4_dtype: constants.DType,
         quantizer: Optional[Quantizer],
         with_gemm_swizzled_scales: bool,
         *args,

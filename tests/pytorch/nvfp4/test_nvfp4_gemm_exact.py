@@ -7,6 +7,7 @@ import torch
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.constants import TE_DType
+from transformer_engine.pytorch import constants
 from transformer_engine.pytorch import NVFP4Quantizer
 from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grouped_gemm
 from transformer_engine.pytorch.custom_recipes.quantization_ref_nvfp4 import NVFP4QuantizerRef
@@ -29,7 +30,7 @@ def check_nvfp4_gemm_versus_reference(
     w_columnwise: bool = False,
     row_scaled_nvfp4: bool = False,
 ):
-    te_dtype = TE_DType.kFloat4E2M1
+    te_dtype = constants.DType.kFloat4E2M1
 
     # Setup device and random seed
     device = "cuda"
@@ -233,7 +234,7 @@ def check_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
     use_bias: bool,
     single_output: bool,
 ):
-    te_dtype = TE_DType.kFloat4E2M1
+    te_dtype = constants.DType.kFloat4E2M1
     device = "cuda"
     torch.manual_seed(23)
     torch.cuda.manual_seed(23)
@@ -322,7 +323,7 @@ def check_nvfp4_row_scaled_gemm_matches_emulated(
     K: int,
     N: int,
 ):
-    te_dtype = TE_DType.kFloat4E2M1
+    te_dtype = constants.DType.kFloat4E2M1
     device = "cuda"
     torch.manual_seed(37)
     torch.cuda.manual_seed(37)

@@ -4,7 +4,7 @@
 
 import torch
 from transformer_engine.pytorch import Float8Tensor, Float8Quantizer
-from transformer_engine.pytorch.constants import TE_DType
+from transformer_engine.pytorch import constants
 
 import nvdlfw_inspect.api as debug_api
 
@@ -128,12 +128,12 @@ def test_per_tensor_scaling(configs_dir, feature_dirs):
         default_quantizer1 = Float8Quantizer(
             scale=torch.tensor([1]).cuda(),
             amax=torch.tensor([0]).cuda(),
-            fp8_dtype=TE_DType.kFloat8E4M3,
+            fp8_dtype=constants.DType.kFloat8E4M3,
         )
         default_quantizer2 = Float8Quantizer(
             scale=torch.tensor([1]).cuda(),
             amax=torch.tensor([0]).cuda(),
-            fp8_dtype=TE_DType.kFloat8E5M2,
+            fp8_dtype=constants.DType.kFloat8E5M2,
         )
 
         output1 = debug_api.transformer_engine.modify_tensor(
@@ -145,7 +145,7 @@ def test_per_tensor_scaling(configs_dir, feature_dirs):
             tensor=tensor,
         )
         assert type(output1) == Float8Tensor
-        assert output1._fp8_dtype == TE_DType.kFloat8E4M3
+        assert output1._fp8_dtype == constants.DType.kFloat8E4M3
 
         output2 = debug_api.transformer_engine.modify_tensor(
             "decoder.1.mlp.fc1",
@@ -156,7 +156,7 @@ def test_per_tensor_scaling(configs_dir, feature_dirs):
             iteration=0,
         )
         assert type(output2) == Float8Tensor
-        assert output2._fp8_dtype == TE_DType.kFloat8E5M2
+        assert output2._fp8_dtype == constants.DType.kFloat8E5M2
 
         assert not debug_api.transformer_engine.modify_tensor_enabled(
             "decoder.1.mlp.fc1",
@@ -234,7 +234,7 @@ def test_statistics_collection(configs_dir, feature_dirs):
         quantizer = Float8Quantizer(
             scale=torch.full([1], 1.0).cuda(),
             amax=torch.full([1], 1.0).cuda(),
-            fp8_dtype=TE_DType.kFloat8E4M3,
+            fp8_dtype=constants.DType.kFloat8E4M3,
         )
         tensor_fp8 = quantizer(tensor)
 
@@ -372,7 +372,7 @@ def test_statistics_multi_run(configs_dir, feature_dirs):
         quantizer = Float8Quantizer(
             scale=torch.full([1], 1.0).cuda(),
             amax=torch.full([1], 1.0).cuda(),
-            fp8_dtype=TE_DType.kFloat8E4M3,
+            fp8_dtype=constants.DType.kFloat8E4M3,
         )
 
         def fp8_tensor(t):
