@@ -12,12 +12,22 @@ Modes:
   * ``--swizzle``: 3-way END-TO-END (quant + swizzle + cuBLAS LT NVFP4 GEMM).
     Compares per-token (separate swizzle launch) vs per-token (fused
     swizzle in K2) vs per-tensor. Ratio = per-token (+swizzle) / per-tensor.
-  * ``--gemm-only``: 2-way cuBLAS LT NVFP4 GEMM in isolation.
-      Inputs are pre-quantized + pre-swizzled before timing, so the loop
-      only times ``nvfp4_per_token_gemm(sf_swizzled=True)`` vs
-      ``nvfp4_per_tensor_gemm(sf_swizzled=True)``. Ratio = pt / pten
-      exposes the per-call cost of the per-token post-scale kernel
-      (both paths run the same cuBLAS LT call + alpha-fold kernel).
+  * ``--gemm-only``: 3-way NVFP4 GEMM in isolation. Inputs are pre-quantized
+    + pre-swizzled before timing. Compares per-token Route 1
+    (``nvfp4_per_token_gemm`` = cuBLASLt + bf16 post-scale, 2 launches) vs
+    Route 2 (``nvfp4_cutlass_per_token_gemm`` = fused-EVT CUTLASS, 1 launch)
+    vs prod (``nvfp4_per_tensor_gemm`` = cuBLASLt + alpha-fold). Headline
+    ratio ``lp/cf`` selects the per-token dispatcher's winning route.
+  * ``--e2e-fwd``: 2-way E2E forward (quant + GEMM in the timing loop, N=K).
+    Compares per-token quant (with_swizzle=True) + fused-EVT CUTLASS GEMM
+    vs NVFP4Quantizer (RHT+SR) + prod ``nvfp4_per_tensor_gemm``.
+  * ``--e2e-bwd``: 2-way E2E backward, real prod bwd lifecycle (N=K).
+    Timing loop = 1 x dY quant + dgrad GEMM + wgrad GEMM. X, W are
+    pre-quantized OUTSIDE the loop (mirrors prod's reuse of fwd-saved
+    QuantizedTensorStorage; bwd never re-quantizes W or X). Compares
+    per-token (dY dual K1+K2 + fused-EVT dgrad/wgrad) vs REAL-SHIP grad
+    quantizer (RHT cols + SR) + general_gemm NN/NT. cf/pten is the
+    actual per-step bwd cost in real training.
   * ``--qs``: 2-way K1+K2 + standalone rowwise swizzle. NO GEMM.
       - default (solo, 1 tensor): K1+K2(A) + swizzle(A); apples-to-apples
         with --composite (which is also 1-tensor) -- the delta vs --composite
@@ -169,25 +179,66 @@ class GemmOnlyShapeBench:
     """NVFP4 GEMM in isolation. Inputs pre-quantized + pre-swizzled outside the
     timed window; only the GEMM kernel call is timed. N = K.
 
-    The single comparison that matters for shipping fused-EVT NVFP4 against
-    the current prod NVFP4 path:
+    Three NVFP4 GEMM paths timed side-by-side, exposing the per-token
+    dispatcher's Route 1 vs Route 2 crossover and the absolute gap to prod:
+      pten_gemm = cuBLAS LT NVFP4 + alpha-fold (1 launch, no post-scale).
+                  CURRENT prod per-tensor baseline.
+      lt_post   = cuBLAS LT NVFP4 (alpha=1 / amax pinned to 1) + standalone
+                  bf16 per-row*per-col post-scale kernel. 2 launches; D round-
+                  trips through HBM once. "Route 1" per-token path.
       ct_fused  = forked CUTLASS NVFP4 GEMM with per-row * per-col rescale
-                  fused into the EVT epilogue (single launch). This is what
-                  WOULD ship for per-token NVFP4.
-      pten_gemm = cuBLAS LT NVFP4 + alpha-fold (single launch, no post-scale).
-                  This is the CURRENT prod per-tensor NVFP4 GEMM.
+                  fused into the EVT epilogue. 1 launch; D never round-trips.
+                  "Route 2" per-token path (current ship target).
 
-    Ratio cf/pten = ct_fused / pten_gemm. < 1.0 ⇒ shippable (per-token at
-    least matches prod per-tensor wall-clock).
+    Headline ratio for the dispatcher decision:
+      lp/cf = lt_post / ct_fused.  < 1.0 ⇒ Route 1 wins this shape (use
+      cuBLASLt + post_scale); > 1.0 ⇒ Route 2 wins (use CUTLASS-fused).
     """
 
     M: int
     K: int
     N: int
     t_pten: float  # nvfp4_per_tensor_gemm: cuBLAS LT + alpha-fold (prod baseline)
-    t_clf: float  # nvfp4_cutlass_per_token_gemm: per-row * per-col fused EVT
+    t_lp: float  # nvfp4_per_token_gemm: cuBLAS LT + per-row*per-col post-scale (Route 1)
+    t_clf: float  # nvfp4_cutlass_per_token_gemm: per-row*per-col fused EVT (Route 2)
     t_pten_g: float
+    t_lp_g: float
     t_clf_g: float
+
+
+@dataclass
+class E2EForwardShapeBench:
+    """E2E forward (quant + GEMM): per-token CUTLASS fused-EVT vs prod per-tensor
+    cuBLASLt. N = K. Ratio cf/pten < 1.0 = shippable (per-token wins E2E).
+    """
+
+    M: int
+    K: int
+    N: int
+    t_pten: float  # NVFP4Quantizer (RHT+SR) + nvfp4_per_tensor_gemm
+    t_cf: float  # nvfp4_per_token_quantize(with_swizzle=True) + nvfp4_cutlass_per_token_gemm
+    t_pten_g: float
+    t_cf_g: float
+
+
+@dataclass
+class E2EBackwardShapeBench:
+    """E2E backward, real prod nn.Linear.bwd lifecycle (N = K).
+    Timing loop = 1 x dY quant + dgrad GEMM + wgrad GEMM. X, W are
+    pre-quantized OUTSIDE the loop (mirrors prod's reuse of fwd-saved
+    QuantizedTensorStorage; bwd flips usage flags only, never re-quantizes).
+    cf/pten < 1.0 = per-token bwd faster than real-ship prod per-tensor.
+    Prod path uses real NVFP4BlockScaling defaults (grad RHT+SR for dY);
+    per-token currently has no RHT/SR.
+    """
+
+    M: int
+    K: int
+    N: int
+    t_pten: float  # dY quant (grad_q, RHT+SR) + general_gemm NN dgrad + NT wgrad
+    t_cf: float  # dY quant (per-token dual) + fused-EVT dgrad + wgrad
+    t_pten_g: float
+    t_cf_g: float
 
 
 @dataclass
@@ -438,10 +489,15 @@ def _bench_shape_gemm_only(
     """NVFP4 GEMM in isolation (N = K). Quant + swizzle run once before timing;
     only the GEMM kernel call is timed.
 
-    Two paths timed:
-      - pten_gemm: cuBLAS LT NVFP4 per-tensor (current prod NVFP4 GEMM).
+    Three paths timed (per-token Route 1 vs Route 2 vs prod per-tensor):
+      - pten_gemm: cuBLAS LT NVFP4 per-tensor (current prod NVFP4 GEMM,
+                   alpha-folded, no post-scale).
+      - lt_post  : cuBLAS LT NVFP4 (amax pinned to 1.0) + standalone bf16
+                   per-row * per-col post-scale kernel. Per-token Route 1
+                   (2 launches, D round-trips HBM once).
       - ct_fused : forked CUTLASS NVFP4 GEMM with per-row * per-col rescale
-                   fused into the EVT epilogue (per-token, single launch).
+                   fused into the EVT epilogue. Per-token Route 2 (1 launch,
+                   D never round-trips).
     """
     from transformer_engine.pytorch.cpp_extensions.gemm import get_cublas_workspace
 
@@ -528,9 +584,37 @@ def _bench_shape_gemm_only(
             b_sf_swizzled=True,
         )
 
-    # Forked CUTLASS NVFP4 GEMM with per-row * per-col rescale fused INTO the
-    # epilogue (EVT). Single launch; the M*N output never round-trips through
-    # HBM. This is the kernel that should beat pten_gemm at training shapes.
+    # Route 1 per-token: cuBLAS LT NVFP4 (operand amaxes pinned to 1.0) + a
+    # standalone bf16 per-row * per-col post-scale kernel. 2 launches; D
+    # round-trips through HBM once (post-scale is HBM-bound elementwise).
+    # Reuses the per-token-quantized A/B above (same a_ra/b_ra); pre-swizzled
+    # SF skips the in-binding swizzle so the timed window is exactly
+    # GEMM + post_scale.
+    d_lp = torch.empty_like(d)
+
+    def _lt_post():
+        tex.nvfp4_per_token_gemm(
+            a_qr,
+            b_qr,
+            a_sr_flat,
+            b_sr_flat,
+            a_ra,
+            b_ra,
+            d_lp,
+            workspace,
+            M,
+            N,
+            K,
+            1.0,
+            0.0,
+            a_sf_swizzled=True,
+            b_sf_swizzled=True,
+            skip_post_scale=False,
+        )
+
+    # Route 2 per-token: forked CUTLASS NVFP4 GEMM with per-row * per-col
+    # rescale fused INTO the epilogue (EVT). Single launch; the M*N output
+    # never round-trips through HBM.
     d_clf = torch.empty_like(d)
 
     def _cutlass_fused():
@@ -550,8 +634,10 @@ def _bench_shape_gemm_only(
         )
 
     t_pten = cuda_time_ms(_pten_gemm)
+    t_lp = cuda_time_ms(_lt_post)
     t_clf = cuda_time_ms(_cutlass_fused)
     t_pten_g = cuda_graph_time_ms(_pten_gemm)
+    t_lp_g = cuda_graph_time_ms(_lt_post)
     t_clf_g = cuda_graph_time_ms(_cutlass_fused)
 
     return GemmOnlyShapeBench(
@@ -559,9 +645,444 @@ def _bench_shape_gemm_only(
         K=K,
         N=N,
         t_pten=t_pten,
+        t_lp=t_lp,
         t_clf=t_clf,
         t_pten_g=t_pten_g,
+        t_lp_g=t_lp_g,
         t_clf_g=t_clf_g,
+    )
+
+
+def _bench_shape_e2e_fwd(
+    M: int,
+    K: int,
+    *,
+    device: torch.device,
+) -> E2EForwardShapeBench:
+    """E2E forward (quant + GEMM in the timing loop, N = K). Two paths:
+      - pten: NVFP4Quantizer (input RHT 1D / weight no-RHT 2D) + general_gemm
+              (the real prod nn.Linear fwd dispatch).
+      - cf:   nvfp4_per_token_quantize(with_swizzle=True) + fused-EVT GEMM.
+
+    Kernel pipeline per fwd call (Y = X @ W^T):
+
+      pten (prod NVFP4BlockScaling defaults):
+        X bf16 ─→ tex.quantize(input_q  RHT-cols 1D no-SR)    ~4 launches
+                   (K1 row amax | K2 row cast | K1 col amax+RHT | K2 col cast)
+        W bf16 ─→ tex.quantize(weight_q 2D no-RHT no-SR)      ~2 launches
+                   (2D fused cast | amax)
+        X_q, W_q ─→ general_gemm(W_q, X_q, layout="NN")
+                    (swizzle X SF | swizzle W SF | compute_α 1×1 | cuBLASLt GEMM)
+                                                              4 launches
+                                                          ──────────────
+                                                          ~10 launches
+        Y = bf16(α · X @ W^T)
+            α = per-tensor scalar (one fp32) -- FREE in cuBLASLt epilogue.
+
+      cf (per-token):
+        X bf16 ─→ tex.nvfp4_per_token_quantize(with_swizzle=True)
+                   (K1 amax row+col | K2 encode + swizzle fused)
+                                                              2 launches
+        W bf16 ─→ tex.nvfp4_per_token_quantize(with_swizzle=True)
+                                                              2 launches
+        X_q, W_q ─→ nvfp4_cutlass_per_token_gemm
+                    (single CUTLASS NVFP4 GEMM with EVT epilogue)
+                                                              1 launch
+                                                          ──────────────
+                                                          5 launches
+        Y[i,j] = bf16(a_ra[i] · b_ra[j] · (X @ W^T)[i,j])
+                 α = per-row × per-col vector, fused into CUTLASS EVT
+                 (zero extra HBM traffic; D never round-trips).
+    """
+    N = K
+    a = torch.randn((M, K), dtype=torch.bfloat16, device=device)
+    b = torch.randn((N, K), dtype=torch.bfloat16, device=device)
+
+    BLOCK_K = 16
+
+    # Per-token: produce BOTH rowwise (consumed by the fwd CUTLASS GEMM) AND
+    # columnwise (kept for downstream dgrad/wgrad). Matches prod fwd quant
+    # workload -- NVFP4Quantizer(rowwise=True, columnwise=True) also produces
+    # both in K2. with_swizzle=True only affects rowwise SF layout (it
+    # collapses to kWithSwizzle=False for colwise SF inside the encode kernel),
+    # so col SF stays in plain layout (will be swizzled separately in dgrad).
+    a_qr = torch.empty((M, K // 2), dtype=torch.uint8, device=device)
+    a_sr = torch.empty((M, K // BLOCK_K), dtype=torch.uint8, device=device)
+    a_ra = torch.empty((M,), dtype=torch.float32, device=device)
+    a_qc = torch.empty((K, M // 2), dtype=torch.uint8, device=device)
+    a_sc = torch.empty((K, M // BLOCK_K), dtype=torch.uint8, device=device)
+    a_ca = torch.empty((K,), dtype=torch.float32, device=device)
+    b_qr = torch.empty((N, K // 2), dtype=torch.uint8, device=device)
+    b_sr = torch.empty((N, K // BLOCK_K), dtype=torch.uint8, device=device)
+    b_ra = torch.empty((N,), dtype=torch.float32, device=device)
+    b_qc = torch.empty((K, N // 2), dtype=torch.uint8, device=device)
+    b_sc = torch.empty((K, N // BLOCK_K), dtype=torch.uint8, device=device)
+    b_ca = torch.empty((K,), dtype=torch.float32, device=device)
+    d_cf = torch.empty((M, N), dtype=torch.bfloat16, device=device)
+    a_sr_flat = a_sr.reshape(-1)
+    b_sr_flat = b_sr.reshape(-1)
+
+    def _cf_e2e():
+        tex.nvfp4_per_token_quantize(
+            a,
+            a_qr,
+            a_sr,
+            a_ra,
+            a_qc,
+            a_sc,
+            a_ca,
+            True,
+            True,
+            with_rht=False,
+            random_sign_mask_t=0,
+            with_swizzle=True,
+        )
+        tex.nvfp4_per_token_quantize(
+            b,
+            b_qr,
+            b_sr,
+            b_ra,
+            b_qc,
+            b_sc,
+            b_ca,
+            True,
+            True,
+            with_rht=False,
+            random_sign_mask_t=0,
+            with_swizzle=True,
+        )
+        tex.nvfp4_cutlass_per_token_gemm(
+            a_qr,
+            b_qr,
+            a_sr_flat,
+            b_sr_flat,
+            a_ra,
+            b_ra,
+            d_cf,
+            M,
+            N,
+            K,
+            a_sf_swizzled=True,
+            b_sf_swizzled=True,
+        )
+
+    # Prod per-tensor baseline (NVFP4BlockScaling defaults, prod fwd) via
+    # general_gemm -- the real production GEMM dispatch used by nn.Linear fwd.
+    #   A (input)  -- input quantizer  -- RHT, 1D, no SR
+    #   B (weight) -- weight quantizer -- no RHT, 2D, no SR
+    # Both write rowwise + columnwise (col side kept for dgrad/wgrad parity).
+    from transformer_engine.pytorch.cpp_extensions import general_gemm
+
+    input_q = NVFP4Quantizer(
+        fp4_dtype=tex.DType.kFloat4E2M1,
+        rowwise=True,
+        columnwise=True,
+        with_amax_reduction=False,
+        amax_reduction_group=None,
+        with_rht=True,
+        with_post_rht_amax=True,
+        with_2d_quantization=False,
+        stochastic_rounding=False,
+        with_random_sign_mask=True,
+    )
+    weight_q = NVFP4Quantizer(
+        fp4_dtype=tex.DType.kFloat4E2M1,
+        rowwise=True,
+        columnwise=True,
+        with_amax_reduction=False,
+        amax_reduction_group=None,
+        with_rht=False,
+        with_post_rht_amax=False,
+        with_2d_quantization=True,
+        stochastic_rounding=False,
+        with_random_sign_mask=True,
+    )
+    dst_a = input_q.make_empty(a.shape, dtype=torch.bfloat16, device=device)
+    dst_b = weight_q.make_empty(b.shape, dtype=torch.bfloat16, device=device)
+    d_pten = torch.empty((M, N), dtype=torch.bfloat16, device=device)
+
+    def _pten_e2e():
+        tex.quantize(a, input_q, dst_a, None)
+        tex.quantize(b, weight_q, dst_b, None)
+        # general_gemm(weight, input, ...) matches linear.py prod fwd.
+        general_gemm(dst_b, dst_a, out=d_pten, out_dtype=torch.bfloat16)
+
+    t_pten = cuda_time_ms(_pten_e2e)
+    t_cf = cuda_time_ms(_cf_e2e)
+    t_pten_g = cuda_graph_time_ms(_pten_e2e)
+    t_cf_g = cuda_graph_time_ms(_cf_e2e)
+
+    return E2EForwardShapeBench(
+        M=M,
+        K=K,
+        N=N,
+        t_pten=t_pten,
+        t_cf=t_cf,
+        t_pten_g=t_pten_g,
+        t_cf_g=t_cf_g,
+    )
+
+
+def _bench_shape_e2e_bwd(
+    M: int,
+    K: int,
+    *,
+    device: torch.device,
+) -> E2EBackwardShapeBench:
+    """E2E backward, mirroring REAL prod nn.Linear.bwd lifecycle (N = K).
+
+    In prod, fwd produces quantized X (saved_inputmat) and W (wt_save) with
+    rowwise + columnwise data, both kept in ctx. bwd reads them back as
+    QuantizedTensorStorage and only flips usage flags via update_usage --
+    NO re-quantization of W or X. Only dY is freshly quantized in bwd.
+
+    Therefore the timing loop only contains:
+        1 x dY quant  +  1 x dgrad GEMM  +  1 x wgrad GEMM
+
+    Both paths follow the same lifecycle:
+      - pten: dY via grad quantizer (RHT cols, SR per NVFP4BlockScaling
+              default for fp4_quant_bwd_grad). X and W are pre-quantized
+              ONCE outside the loop using input/weight quantizers (real-ship
+              recipe defaults). Then general_gemm NN dgrad + NT wgrad,
+              byte-equivalent to linear.py prod bwd dispatch.
+      - cf:   dY via nvfp4_per_token_quantize(rowwise+columnwise, no RHT,
+              no swizzle). X and W also pre-quantized ONCE outside the loop
+              with the same kernel. Then fused-EVT dgrad (M,K,N) + wgrad
+              (N,K,M).
+
+    cf/pten now reflects the actual per-step bwd cost in real training.
+
+    Kernel pipeline per bwd step (X_q, W_q reused from fwd; NOT re-quantized):
+
+      pten (real-ship NVFP4BlockScaling bwd defaults):
+        dY bf16 ─→ tex.quantize(grad_q  RHT-cols + SR 1D)     ~4 launches
+                   (K1 row amax | K2 row cast | K1 col amax+RHT |
+                    K2 col cast + SR)
+        dgrad: dX = dY @ W ─→ general_gemm(W_q, dY_q, layout="NN")
+                              (swizzle W col SF | swizzle dY row SF |
+                               compute_α 1×1 | cuBLASLt NVFP4 GEMM)
+                                                              4 launches
+        wgrad: dW = dY^T @ X ─→ general_gemm(X_q, dY_q, layout="NT")
+                                (swizzle X col SF | swizzle dY col SF |
+                                 compute_α 1×1 | cuBLASLt NVFP4 GEMM)
+                                                              4 launches
+                                                          ──────────────
+                                                          ~12 launches
+        α = per-tensor scalar -- FREE in cuBLASLt epilogue.
+
+      cf (per-token):
+        dY bf16 ─→ tex.nvfp4_per_token_quantize(no RHT, no swizzle)
+                   (K1 amax row+col | K2 encode rowwise + colwise SF)
+                                                              2 launches
+        dgrad: dX = dY @ W ─→ nvfp4_cutlass_per_token_gemm
+                              (dY_row · W_col, fused EVT)     1 launch
+        wgrad: dW = dY^T @ X ─→ nvfp4_cutlass_per_token_gemm
+                                (dY_col · X_col, fused EVT)   1 launch
+                                                          ──────────────
+                                                          4 launches
+        α = per-row × per-col vector, fused into CUTLASS EVT epilogue.
+        Per-step launch budget is ~3× lighter than prod, but each
+        CUTLASS GEMM is ~26% slower than the cuBLASLt counterpart at
+        large M*K -- net win is shape-dependent.
+    """
+    N = K
+    dy = torch.randn((M, N), dtype=torch.bfloat16, device=device)
+    w = torch.randn((N, K), dtype=torch.bfloat16, device=device)
+    x = torch.randn((M, K), dtype=torch.bfloat16, device=device)
+
+    BLOCK_K = 16
+
+    # --- per-token side: dual-direction quant buffers for dY, W, X.
+    def _alloc_pt(R: int, C: int):
+        # Allocate full row+col buffers. For input shape (R, C):
+        #   rowwise: data (R, C/2), sf (R, C/16), amax (R,)
+        #   columnwise: data (C, R/2), sf (C, R/16), amax (C,)
+        return (
+            torch.empty((R, C // 2), dtype=torch.uint8, device=device),
+            torch.empty((R, C // BLOCK_K), dtype=torch.uint8, device=device),
+            torch.empty((R,), dtype=torch.float32, device=device),
+            torch.empty((C, R // 2), dtype=torch.uint8, device=device),
+            torch.empty((C, R // BLOCK_K), dtype=torch.uint8, device=device),
+            torch.empty((C,), dtype=torch.float32, device=device),
+        )
+
+    dy_qr, dy_sr, dy_ra, dy_qc, dy_sc, dy_ca = _alloc_pt(M, N)
+    w_qr, w_sr, w_ra, w_qc, w_sc, w_ca = _alloc_pt(N, K)
+    x_qr, x_sr, x_ra, x_qc, x_sc, x_ca = _alloc_pt(M, K)
+    dy_sr_flat = dy_sr.reshape(-1)
+    dy_sc_flat = dy_sc.reshape(-1)
+    w_sc_flat = w_sc.reshape(-1)
+    x_sc_flat = x_sc.reshape(-1)
+    d_dgrad = torch.empty((M, K), dtype=torch.bfloat16, device=device)
+    d_wgrad = torch.empty((N, K), dtype=torch.bfloat16, device=device)
+
+    # Pre-quantize X and W ONCE (mirrors fwd-saved tensors that bwd reads
+    # back from ctx). These calls are NOT in the timing loop.
+    tex.nvfp4_per_token_quantize(
+        w,
+        w_qr,
+        w_sr,
+        w_ra,
+        w_qc,
+        w_sc,
+        w_ca,
+        True,
+        True,
+        with_rht=False,
+        random_sign_mask_t=0,
+        with_swizzle=False,
+    )
+    tex.nvfp4_per_token_quantize(
+        x,
+        x_qr,
+        x_sr,
+        x_ra,
+        x_qc,
+        x_sc,
+        x_ca,
+        True,
+        True,
+        with_rht=False,
+        random_sign_mask_t=0,
+        with_swizzle=False,
+    )
+
+    def _cf_e2e():
+        # Real bwd: only dY is freshly quantized. W, X reused from fwd.
+        tex.nvfp4_per_token_quantize(
+            dy,
+            dy_qr,
+            dy_sr,
+            dy_ra,
+            dy_qc,
+            dy_sc,
+            dy_ca,
+            True,
+            True,
+            with_rht=False,
+            random_sign_mask_t=0,
+            with_swizzle=False,
+        )
+        # dgrad: dX = dY @ W (M, N) @ (N, K) = (M, K).
+        tex.nvfp4_cutlass_per_token_gemm(
+            dy_qr,
+            w_qc,
+            dy_sr_flat,
+            w_sc_flat,
+            dy_ra,
+            w_ca,
+            d_dgrad,
+            M,
+            K,
+            N,
+            a_sf_swizzled=False,
+            b_sf_swizzled=False,
+        )
+        # wgrad: dW = dY^T @ X (N, M) @ (M, K) = (N, K).
+        tex.nvfp4_cutlass_per_token_gemm(
+            dy_qc,
+            x_qc,
+            dy_sc_flat,
+            x_sc_flat,
+            dy_ca,
+            x_ca,
+            d_wgrad,
+            N,
+            K,
+            M,
+            a_sf_swizzled=False,
+            b_sf_swizzled=False,
+        )
+
+    # --- prod per-tensor side: real-ship NVFP4BlockScaling defaults.
+    #   X (input)  -- input quantizer  -- RHT(cols), no SR, 1D
+    #   W (weight) -- weight quantizer -- no RHT, no SR, 2D
+    #   dY (grad)  -- grad quantizer   -- RHT(cols), SR, 1D
+    # Real prod path = the actual ship config; cf/pten reflects ship delta.
+    from transformer_engine.pytorch.cpp_extensions import general_gemm
+
+    input_q = NVFP4Quantizer(
+        fp4_dtype=tex.DType.kFloat4E2M1,
+        rowwise=True,
+        columnwise=True,
+        with_amax_reduction=False,
+        amax_reduction_group=None,
+        with_rht=True,
+        with_post_rht_amax=True,
+        with_2d_quantization=False,
+        stochastic_rounding=False,
+        with_random_sign_mask=True,
+    )
+    weight_q = NVFP4Quantizer(
+        fp4_dtype=tex.DType.kFloat4E2M1,
+        rowwise=True,
+        columnwise=True,
+        with_amax_reduction=False,
+        amax_reduction_group=None,
+        with_rht=False,
+        with_post_rht_amax=False,
+        with_2d_quantization=True,
+        stochastic_rounding=False,
+        with_random_sign_mask=True,
+    )
+    grad_q = NVFP4Quantizer(
+        fp4_dtype=tex.DType.kFloat4E2M1,
+        rowwise=True,
+        columnwise=True,
+        with_amax_reduction=False,
+        amax_reduction_group=None,
+        with_rht=True,
+        with_post_rht_amax=True,
+        with_2d_quantization=False,
+        stochastic_rounding=True,
+        with_random_sign_mask=True,
+    )
+    dst_dy = grad_q.make_empty(dy.shape, dtype=torch.bfloat16, device=device)
+    dst_w = weight_q.make_empty(w.shape, dtype=torch.bfloat16, device=device)
+    dst_x = input_q.make_empty(x.shape, dtype=torch.bfloat16, device=device)
+    d_pten_dgrad = torch.empty((M, K), dtype=torch.bfloat16, device=device)
+    d_pten_wgrad = torch.empty((N, K), dtype=torch.bfloat16, device=device)
+
+    # Pre-quantize X and W ONCE (mirrors fwd-saved NVFP4Tensors that
+    # prod bwd reuses without re-quantization). NOT in timing loop.
+    tex.quantize(w, weight_q, dst_w, None)
+    tex.quantize(x, input_q, dst_x, None)
+
+    def _pten_e2e():
+        # Real bwd: only dY is freshly quantized. W, X reused from fwd.
+        tex.quantize(dy, grad_q, dst_dy, None)
+        # dgrad: general_gemm(W, dY, layout='NN') -> (M, K)
+        general_gemm(
+            dst_w,
+            dst_dy,
+            layout="NN",
+            grad=True,
+            out=d_pten_dgrad,
+            out_dtype=torch.bfloat16,
+        )
+        # wgrad: general_gemm(X, dY, layout='NT') -> (N, K)
+        general_gemm(
+            dst_x,
+            dst_dy,
+            layout="NT",
+            grad=True,
+            out=d_pten_wgrad,
+            out_dtype=torch.bfloat16,
+        )
+
+    t_pten = cuda_time_ms(_pten_e2e)
+    t_cf = cuda_time_ms(_cf_e2e)
+    t_pten_g = cuda_graph_time_ms(_pten_e2e)
+    t_cf_g = cuda_graph_time_ms(_cf_e2e)
+
+    return E2EBackwardShapeBench(
+        M=M,
+        K=K,
+        N=N,
+        t_pten=t_pten,
+        t_cf=t_cf,
+        t_pten_g=t_pten_g,
+        t_cf_g=t_cf_g,
     )
 
 
@@ -932,19 +1453,22 @@ def _print_e2e_swizzle_legend(*, with_rht: bool, rht_mask: int) -> None:
 
 
 def _print_gemm_only_table(records: List[GemmOnlyShapeBench]) -> None:
-    """GEMM-only (--gemm-only) timings:
-      pten_gemm = cuBLAS LT per-tensor NVFP4 GEMM (current PROD baseline).
-      ct_fused  = forked CUTLASS per-token NVFP4 GEMM with per-row * per-col
-                  rescale fused into the EVT epilogue (1 launch).
+    """GEMM-only (--gemm-only) timings (3-way per-token Route 1 vs Route 2 vs prod):
+      pten_gemm = cuBLAS LT NVFP4 per-tensor + alpha-fold (PROD baseline, 1 launch).
+      lt_post   = cuBLAS LT NVFP4 (amax=1) + bf16 per-row*per-col post-scale
+                  (per-token Route 1, 2 launches, D round-trips HBM).
+      ct_fused  = forked CUTLASS NVFP4 + per-row*per-col rescale fused EVT
+                  (per-token Route 2, 1 launch, no D round-trip).
 
-    Ratio:
-      cf/pten = ct_fused / pten_gemm
-                ** < 1.0 = per-token fused CUTLASS matches/beats prod per-tensor **
+    Headline ratio for the dispatcher decision:
+      lp/cf = lt_post / ct_fused
+              < 1.0 ⇒ Route 1 wins this shape  (cuBLASLt + post_scale)
+              > 1.0 ⇒ Route 2 wins this shape  (CUTLASS-fused EVT)
     """
-    w_pten, w_clf, w_ratio = 11, 11, 8
-    block_w = w_pten + 1 + w_clf + 1 + w_ratio
+    w_pten, w_lp, w_clf, w_ratio = 11, 11, 11, 8
+    block_w = w_pten + 1 + w_lp + 1 + w_clf + 1 + w_ratio
     header1 = f"{'':>7} {'':>6} {'':>6} |{'Eager':^{block_w}} |{'Graph':^{block_w}}"
-    body = f"{'pten_gemm':>{w_pten}} {'ct_fused':>{w_clf}} {'cf/pten':>{w_ratio}}"
+    body = f"{'pten_gemm':>{w_pten}} {'lt_post':>{w_lp}} {'ct_fused':>{w_clf}} {'lp/cf':>{w_ratio}}"
     header2 = f"{'M':>7} {'K':>6} {'N':>6} |{body}|{body}"
     print(header1)
     print(header2)
@@ -958,16 +1482,16 @@ def _print_gemm_only_table(records: List[GemmOnlyShapeBench]) -> None:
         if prev_M is not None and rec.M != prev_M:
             print()
         prev_M = rec.M
-        r_cf = _ratio(rec.t_clf, rec.t_pten)
-        r_cf_g = _ratio(rec.t_clf_g, rec.t_pten_g)
+        r_lpcf = _ratio(rec.t_lp, rec.t_clf)
+        r_lpcf_g = _ratio(rec.t_lp_g, rec.t_clf_g)
         print(
             f"{rec.M:>7} {rec.K:>6} {rec.N:>6}"
             " |"
-            f"{rec.t_pten:>{w_pten}.4f} {rec.t_clf:>{w_clf}.4f}"
-            f" {_fmt(r_cf):>{w_ratio}}"
+            f"{rec.t_pten:>{w_pten}.4f} {rec.t_lp:>{w_lp}.4f}"
+            f" {rec.t_clf:>{w_clf}.4f} {_fmt(r_lpcf):>{w_ratio}}"
             "|"
-            f"{rec.t_pten_g:>{w_pten}.4f} {rec.t_clf_g:>{w_clf}.4f}"
-            f" {_fmt(r_cf_g):>{w_ratio}}"
+            f"{rec.t_pten_g:>{w_pten}.4f} {rec.t_lp_g:>{w_lp}.4f}"
+            f" {rec.t_clf_g:>{w_clf}.4f} {_fmt(r_lpcf_g):>{w_ratio}}"
         )
 
 
@@ -976,12 +1500,139 @@ def _print_gemm_only_legend() -> None:
     print("Legend (GEMM-only; inputs pre-quantized + pre-swizzled, N = K):")
     print("  pten_gemm (ms) = nvfp4_per_tensor_gemm(sf_swizzled=True)")
     print("                   -> cuBLAS LT NVFP4 + alpha-fold (current PROD per-tensor GEMM).")
+    print("                      1 launch, no post-scale; per-tensor scalar amax folded into")
+    print("                      cuBLAS-internal alpha (free).")
+    print("  lt_post   (ms) = nvfp4_per_token_gemm(sf_swizzled=True, skip_post_scale=False)")
+    print("                   -> cuBLAS LT NVFP4 (operand amaxes pinned to 1.0)")
+    print("                      + standalone bf16 per-row*per-col post-scale kernel.")
+    print("                      Per-token Route 1: 2 launches; D round-trips HBM once.")
+    print("                      Inherits cuBLASLt's tuned NVFP4 GEMM kernel.")
     print("  ct_fused  (ms) = nvfp4_cutlass_per_token_gemm(sf_swizzled=True)")
     print("                   -> forked CUTLASS NVFP4 GEMM with per-row * per-col rescale")
     print("                      FUSED into the EVT epilogue (1 launch, no post-scale).")
     print("                      D = bf16(alpha_a[i] * alpha_b[j] * (A @ B^T)[i, j]).")
-    print("  cf/pten        = ct_fused / pten_gemm")
-    print("                   ** < 1.0 = per-token fused CUTLASS matches/beats prod per-tensor **")
+    print("                      Per-token Route 2: 1 launch; D never round-trips.")
+    print("  lp/cf          = lt_post / ct_fused  (DISPATCHER DECISION)")
+    print("                   ** < 1.0 = Route 1 (cuBLASLt + post_scale) wins this shape **")
+    print("                   ** > 1.0 = Route 2 (CUTLASS fused EVT)    wins this shape **")
+    print("                   crossover threshold: lp/cf = 1.0; pick the faster route at runtime.")
+    print("  (Graph) suffix = same under CUDA Graphs replay (Python + alloc elided).")
+    print()
+    print("Reading the absolute gap to prod (for context):")
+    print("  cf/pten = ct_fused / pten_gemm     (Route 2 vs prod)")
+    print("  lp/pten = lt_post  / pten_gemm     (Route 1 vs prod)")
+    print("  Per-token fundamentally pays a per-row*per-col scaling tax that prod does not")
+    print("  (prod uses per-tensor scalar -> free in cuBLASLt epilogue). Both routes lose")
+    print("  to prod at large M*K; the dispatcher just picks whichever route loses LESS.")
+
+
+def _print_e2e_fwd_table(records: List[E2EForwardShapeBench]) -> None:
+    """E2E forward (--e2e-fwd): quant + GEMM inside the timing loop.
+    pten_e2e = NVFP4Quantizer (RHT+SR) + nvfp4_per_tensor_gemm (prod baseline).
+    ct_fused = nvfp4_per_token_quantize(with_swizzle=True) + fused-EVT GEMM.
+    """
+    w_pten, w_cf, w_ratio = 11, 11, 8
+    block_w = w_pten + 1 + w_cf + 1 + w_ratio
+    header1 = f"{'':>7} {'':>6} {'':>6} |{'Eager':^{block_w}} |{'Graph':^{block_w}}"
+    body = f"{'pten_e2e':>{w_pten}} {'ct_fused':>{w_cf}} {'cf/pten':>{w_ratio}}"
+    header2 = f"{'M':>7} {'K':>6} {'N':>6} |{body}|{body}"
+    print(header1)
+    print(header2)
+    print("-" * len(header2))
+
+    def _fmt(r: float) -> str:
+        return "nan" if math.isnan(r) else f"{r:.2f}x"
+
+    prev_M = None
+    for rec in records:
+        if prev_M is not None and rec.M != prev_M:
+            print()
+        prev_M = rec.M
+        r_cf = _ratio(rec.t_cf, rec.t_pten)
+        r_cf_g = _ratio(rec.t_cf_g, rec.t_pten_g)
+        print(
+            f"{rec.M:>7} {rec.K:>6} {rec.N:>6}"
+            " |"
+            f"{rec.t_pten:>{w_pten}.4f} {rec.t_cf:>{w_cf}.4f}"
+            f" {_fmt(r_cf):>{w_ratio}}"
+            "|"
+            f"{rec.t_pten_g:>{w_pten}.4f} {rec.t_cf_g:>{w_cf}.4f}"
+            f" {_fmt(r_cf_g):>{w_ratio}}"
+        )
+
+
+def _print_e2e_fwd_legend() -> None:
+    print()
+    print("Legend (E2E forward; quant + GEMM inside the timing loop; N = K):")
+    print("  pten_e2e (ms) = tex.quantize(NVFP4Quantizer; RHT+SR) +")
+    print("                  nvfp4_per_tensor_gemm  (PROD per-tensor pipeline).")
+    print("  ct_fused (ms) = nvfp4_per_token_quantize(with_rht=False, with_swizzle=True) +")
+    print("                  nvfp4_cutlass_per_token_gemm(sf_swizzled=True).")
+    print("                  K2 emits SF in swizzled layout -> 1 quant launch per operand.")
+    print("  cf/pten       = ct_fused / pten_e2e")
+    print("                  ** < 1.0 = per-token fused E2E beats prod per-tensor E2E **")
+    print("  (Graph) suffix = same under CUDA Graphs replay (Python + alloc elided).")
+
+
+def _print_e2e_bwd_table(records: List[E2EBackwardShapeBench]) -> None:
+    """E2E backward (--e2e-bwd): real prod bwd lifecycle. Timing loop =
+    1 x dY quant + dgrad GEMM + wgrad GEMM (X, W pre-quantized outside loop).
+      pten_bwd  = REAL-SHIP grad quantizer (RHT cols + SR) + general_gemm
+                  dgrad (NN) + wgrad (NT). Byte-equivalent to prod nn.Linear bwd.
+      ct_fused  = nvfp4_per_token_quantize (dual, no RHT/SR) + fused-EVT dgrad + wgrad.
+    """
+    w_pten, w_cf, w_ratio = 11, 11, 8
+    block_w = w_pten + 1 + w_cf + 1 + w_ratio
+    header1 = f"{'':>7} {'':>6} {'':>6} |{'Eager':^{block_w}} |{'Graph':^{block_w}}"
+    body = f"{'pten_bwd':>{w_pten}} {'ct_fused':>{w_cf}} {'cf/pten':>{w_ratio}}"
+    header2 = f"{'M':>7} {'K':>6} {'N':>6} |{body}|{body}"
+    print(header1)
+    print(header2)
+    print("-" * len(header2))
+
+    def _fmt(r: float) -> str:
+        return "nan" if math.isnan(r) else f"{r:.2f}x"
+
+    prev_M = None
+    for rec in records:
+        if prev_M is not None and rec.M != prev_M:
+            print()
+        prev_M = rec.M
+        r_cf = _ratio(rec.t_cf, rec.t_pten)
+        r_cf_g = _ratio(rec.t_cf_g, rec.t_pten_g)
+        print(
+            f"{rec.M:>7} {rec.K:>6} {rec.N:>6}"
+            " |"
+            f"{rec.t_pten:>{w_pten}.4f} {rec.t_cf:>{w_cf}.4f}"
+            f" {_fmt(r_cf):>{w_ratio}}"
+            "|"
+            f"{rec.t_pten_g:>{w_pten}.4f} {rec.t_cf_g:>{w_cf}.4f}"
+            f" {_fmt(r_cf_g):>{w_ratio}}"
+        )
+
+
+def _print_e2e_bwd_legend() -> None:
+    print()
+    print("Legend (E2E backward; N = K; real prod nn.Linear.bwd lifecycle):")
+    print("  Timing loop = 1 x dY quant + dgrad GEMM + wgrad GEMM.")
+    print("  X and W are PRE-QUANTIZED ONCE outside the loop. This mirrors")
+    print("  real prod: fwd's quantized X (saved_inputmat) and W (wt_save)")
+    print("  are read back from ctx in bwd; bwd only flips usage flags via")
+    print("  update_usage(), never re-quantizes them. Only dY is freshly")
+    print("  quantized per backward step.")
+    print()
+    print("  pten_bwd (ms) = dY quant via grad quantizer (RHT cols, SR, 1D, real-ship")
+    print("                  fp4_quant_bwd_grad default) + general_gemm dgrad")
+    print("                  (layout='NN', dX = dY @ W) + general_gemm wgrad")
+    print("                  (layout='NT', dW = dY^T @ X). X/W pre-quantized via")
+    print("                  input/weight quantizers (RHT cols / 2D respectively).")
+    print("  ct_fused (ms) = dY quant via nvfp4_per_token_quantize (dual, no RHT/SR,")
+    print("                  no swizzle) + fused-EVT dgrad (M,K,N) + wgrad (N,K,M).")
+    print("                  X/W pre-quantized via the same kernel.")
+    print("                  Per-token currently has NO RHT/SR (kernel TODO).")
+    print("  cf/pten       = ct_fused / pten_bwd")
+    print("                  ** < 1.0 = per-token bwd beats real-ship prod bwd **")
+    print("                  Reflects actual per-step bwd cost in real training.")
     print("  (Graph) suffix = same under CUDA Graphs replay (Python + alloc elided).")
 
 
@@ -1358,6 +2009,29 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--e2e-fwd",
+        action="store_true",
+        help=(
+            "E2E forward mode (N = K): per-token NVFP4 quant (with_swizzle=True "
+            "fused in K2) + fused-EVT CUTLASS GEMM vs prod per-tensor cuBLASLt "
+            "(NVFP4Quantizer RHT+SR + nvfp4_per_tensor_gemm). 2-way table; "
+            "cf/pten < 1.0 = per-token E2E beats prod."
+        ),
+    )
+    parser.add_argument(
+        "--e2e-bwd",
+        action="store_true",
+        help=(
+            "E2E backward mode (N = K), real prod nn.Linear.bwd lifecycle. "
+            "Timing loop = 1 x dY quant + dgrad GEMM + wgrad GEMM (X, W "
+            "pre-quantized outside loop, mirroring prod's reuse of fwd-saved "
+            "QuantizedTensorStorage). Per-token (dY dual K1+K2 + fused-EVT "
+            "dgrad/wgrad) vs REAL-SHIP grad quantizer (RHT cols + SR) + "
+            "general_gemm NN/NT. 2-way table; cf/pten < 1.0 = per-token bwd "
+            "beats real-ship prod."
+        ),
+    )
+    parser.add_argument(
         "--pair",
         action="store_true",
         help=(
@@ -1411,10 +2085,21 @@ def main() -> int:
         )
         args.qs = True
 
-    exclusive = sum(int(x) for x in (args.k1_only, args.swizzle, args.qs, args.gemm_only))
+    exclusive = sum(
+        int(x)
+        for x in (
+            args.k1_only,
+            args.swizzle,
+            args.qs,
+            args.gemm_only,
+            args.e2e_fwd,
+            args.e2e_bwd,
+        )
+    )
     if exclusive > 1:
         print(
-            "ERROR: --k1-only, --swizzle, --qs, and --gemm-only are mutually exclusive.",
+            "ERROR: --k1-only, --swizzle, --qs, --gemm-only, --e2e-fwd, --e2e-bwd "
+            "are mutually exclusive.",
             file=sys.stderr,
         )
         return 2
@@ -1459,6 +2144,18 @@ def main() -> int:
         ]
         _print_gemm_only_table(records_go)
         _print_gemm_only_legend()
+    elif args.e2e_fwd:
+        records_e2ef: List[E2EForwardShapeBench] = [
+            _bench_shape_e2e_fwd(M, K, device=device) for (M, K) in shapes
+        ]
+        _print_e2e_fwd_table(records_e2ef)
+        _print_e2e_fwd_legend()
+    elif args.e2e_bwd:
+        records_e2eb: List[E2EBackwardShapeBench] = [
+            _bench_shape_e2e_bwd(M, K, device=device) for (M, K) in shapes
+        ]
+        _print_e2e_bwd_table(records_e2eb)
+        _print_e2e_bwd_legend()
     else:
         records: List[ShapeBench] = [
             _bench_shape(M, K, device=device, with_rht=args.rht, mask_t=mask) for (M, K) in shapes
