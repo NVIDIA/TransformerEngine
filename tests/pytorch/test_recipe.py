@@ -298,7 +298,9 @@ class TestFP8Recipe:
     @pytest.mark.parametrize("amax_case", ["zero", "tiny", "normal", "inf", "nan"])
     @pytest.mark.parametrize("fused_update", [True, False], ids=["fused", "non-fused"])
     @pytest.mark.parametrize(
-        "fp8_dtype", [constants.DType.kFloat8E4M3, constants.DType.kFloat8E5M2], ids=["E4M3", "E5M2"]
+        "fp8_dtype",
+        [constants.DType.kFloat8E4M3, constants.DType.kFloat8E5M2],
+        ids=["E4M3", "E5M2"],
     )
     def test_scale_update_numeric_scenarios(self, amax_case, fused_update, fp8_dtype):
 

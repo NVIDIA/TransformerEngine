@@ -2137,7 +2137,9 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
         Float8CurrentScalingQuantizer(fp8_dtype=constants.DType.kFloat8E4M3, device="cuda"),
         MXFP8Quantizer(fp8_dtype=constants.DType.kFloat8E4M3),
         Float8Quantizer(
-            torch.ones(1).cuda().squeeze(), torch.ones(1).cuda().squeeze(), constants.DType.kFloat8E4M3
+            torch.ones(1).cuda().squeeze(),
+            torch.ones(1).cuda().squeeze(),
+            constants.DType.kFloat8E4M3,
         ),
     ],
 )

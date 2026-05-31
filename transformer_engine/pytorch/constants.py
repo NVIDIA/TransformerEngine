@@ -64,7 +64,7 @@ DTypeLike = Union[DType, tex.DType]
 # One-to-one mapping ``torch.dtype -> DType`` (mirrors the enum order in
 # ``transformer_engine.h``). Use the bracket syntax ``TE_DType[torch_dtype]``
 # to resolve a ``torch.dtype`` to its matching ``DType`` member.
-# Used for passing dtypes into cuda extension. 
+# Used for passing dtypes into cuda extension.
 TE_DType = {
     torch.uint8: DType.kByte,
     torch.float8_e4m3fn: DType.kFloat8E4M3,
