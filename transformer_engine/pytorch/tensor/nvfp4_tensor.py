@@ -327,6 +327,64 @@ class NVFP4Quantizer(Quantizer):
         return NVFP4BlockScaling
 
 
+def quantize_nvfp4(
+    tensor: torch.Tensor,
+    *,
+    fp4_dtype: TE_DType = tex.DType.kFloat4E2M1,
+    rowwise: bool = True,
+    columnwise: bool = False,
+    with_amax_reduction: bool = False,
+    amax_reduction_group: Optional[dist_group_type] = None,
+    with_rht: bool = False,
+    with_post_rht_amax: bool = False,
+    with_2d_quantization: bool = False,
+    stochastic_rounding: bool = False,
+    row_scaled_nvfp4: bool = False,
+    nvfp4_use_4over6: bool = False,
+    nvfp4_e4m3_max: int = 448,
+    nvfp4_4over6_err_mode: str = "MAE",
+    with_random_sign_mask: bool = False,
+) -> NVFP4Tensor:
+    """Quantize a PyTorch tensor into an ``NVFP4Tensor``.
+
+    This is a public convenience wrapper around :class:`NVFP4Quantizer`
+    for callers that want TE's production NVFP4 kernels without
+    constructing a quantizer object directly. The tensor amax is computed
+    internally by the quantizer. Unlike :class:`NVFP4Quantizer`, this
+    function defaults to ``columnwise=False``.
+
+    The ``nvfp4_e4m3_max`` argument only applies when
+    ``nvfp4_use_4over6=True``. Non-4over6 tensors use the standard NVFP4
+    E4M3 bound of 448.
+
+    Recipe configuration environment variables, e.g.
+    ``NVTE_NVFP4_4OVER6``, ``NVTE_NVFP4_ROW_SCALED_ACTIVATION``, and
+    ``NVTE_NVFP4_4OVER6_ERR_MODE``, are not read by this direct API.
+    Configure those options with the explicit keyword arguments instead.
+    Kernel-level environment variables still apply: ``NVTE_USE_FAST_MATH``
+    controls the standard NVFP4 fast-math path, while
+    ``NVTE_NVFP4_4OVER6_ERR_USE_FAST_MATH`` controls the 4over6 candidate
+    error-comparison fast-math path.
+    """
+    quantizer = NVFP4Quantizer(
+        fp4_dtype=fp4_dtype,
+        rowwise=rowwise,
+        columnwise=columnwise,
+        with_amax_reduction=with_amax_reduction,
+        amax_reduction_group=amax_reduction_group,
+        with_rht=with_rht,
+        with_post_rht_amax=with_post_rht_amax,
+        with_2d_quantization=with_2d_quantization,
+        stochastic_rounding=stochastic_rounding,
+        row_scaled_nvfp4=row_scaled_nvfp4,
+        nvfp4_use_4over6=nvfp4_use_4over6,
+        nvfp4_e4m3_max=nvfp4_e4m3_max,
+        nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
+        with_random_sign_mask=with_random_sign_mask,
+    )
+    return quantizer(tensor)
+
+
 class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
     """Quantized tensor class with FP4 data
 

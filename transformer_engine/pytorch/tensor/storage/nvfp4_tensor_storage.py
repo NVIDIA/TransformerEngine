@@ -205,6 +205,88 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             "fake_dtype": self._dtype,
         }
 
+    @property
+    def rowwise_data(self) -> Optional[torch.Tensor]:
+        """Raw packed FP4 data in rowwise layout.
+
+        This exposes internal tensor storage; callers must not mutate the
+        returned tensor in place.
+        """
+        return self._rowwise_data
+
+    @property
+    def rowwise_scale_inv(self) -> Optional[torch.Tensor]:
+        """Rowwise block scale inverses.
+
+        This exposes internal tensor storage; callers must not mutate the
+        returned tensor in place.
+        """
+        return self._rowwise_scale_inv
+
+    @property
+    def columnwise_data(self) -> Optional[torch.Tensor]:
+        """Raw packed FP4 data in columnwise layout.
+
+        This exposes internal tensor storage; callers must not mutate the
+        returned tensor in place.
+        """
+        return self._columnwise_data
+
+    @property
+    def columnwise_scale_inv(self) -> Optional[torch.Tensor]:
+        """Columnwise block scale inverses.
+
+        This exposes internal tensor storage; callers must not mutate the
+        returned tensor in place.
+        """
+        return self._columnwise_scale_inv
+
+    @property
+    def amax_rowwise(self) -> Optional[torch.Tensor]:
+        """Amax tensor used for rowwise global NVFP4 scaling.
+
+        This exposes internal tensor storage; callers must not mutate the
+        returned tensor in place.
+        """
+        return self._amax_rowwise
+
+    @property
+    def amax_columnwise(self) -> Optional[torch.Tensor]:
+        """Amax tensor used for columnwise global NVFP4 scaling.
+
+        This exposes internal tensor storage; callers must not mutate the
+        returned tensor in place.
+        """
+        return self._amax_columnwise
+
+    @property
+    def fp4_dtype(self) -> TE_DType:
+        """FP4 data type used by this tensor."""
+        return self._fp4_dtype
+
+    @property
+    def with_gemm_swizzled_scales(self) -> bool:
+        """Whether scale tensors are in the GEMM swizzled layout."""
+        return self._with_gemm_swizzled_scales
+
+    @property
+    def row_scaled_nvfp4(self) -> bool:
+        """Whether this tensor uses one NVFP4 global scale per row."""
+        return self._row_scaled_nvfp4
+
+    @property
+    def nvfp4_use_4over6(self) -> bool:
+        """Whether this tensor was quantized with NVFP4 4over6 selection."""
+        return self._nvfp4_use_4over6
+
+    @property
+    def nvfp4_e4m3_max(self) -> int:
+        """Global E4M3 scale bound used by this tensor.
+
+        Non-4over6 tensors report the standard NVFP4 E4M3 bound of 448.
+        """
+        return self._nvfp4_e4m3_max
+
     def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], NVFP4TensorStorage]:
         """Prepare the tensor base for saving for backward"""
         tensors = [
