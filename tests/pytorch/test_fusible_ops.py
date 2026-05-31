@@ -40,6 +40,7 @@ from transformer_engine.pytorch import (
     Float8Quantizer,
     MXFP8Quantizer,
     NVFP4Quantizer,
+    QuantizerRole,
     is_bf16_available,
 )
 from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
@@ -79,9 +80,10 @@ if mxfp8_available:
     _quantization_list.append("mxfp8")
 if nvfp4_available:
     _quantization_list.append("nvfp4")
+    _quantization_list.append("nvfp4_4over6")
 
 
-@pytest.fixture(autouse=True, scope="class")
+@pytest.fixture(autouse=True, scope="function")
 def _reset_rng_states_per_test():
     """Restore torch, CUDA, and Python ``random`` before each test in this module."""
     reset_rng_states()
@@ -108,7 +110,7 @@ def maybe_skip_quantization(
         pytest.skip(reason_for_no_fp8)
     if quantization == "mxfp8" and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-    if quantization == "nvfp4" and not nvfp4_available:
+    if quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6") and not nvfp4_available:
         pytest.skip(reason_for_no_nvfp4)
 
     # Check dims
@@ -121,13 +123,16 @@ def maybe_skip_quantization(
         elif quantization == "mxfp8":
             if math.prod(dims[:-1]) % 32 != 0 or dims[-1] % 32 != 0:
                 pytest.skip("MXFP8 GEMMs require dims that are divisible by 32")
-        elif quantization == "nvfp4":
+        elif quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
             if math.prod(dims[:-1]) % 16 != 0 or dims[-1] % 16 != 0:
                 pytest.skip("NVFP4 GEMMs require dims that are divisible by 16")
 
     # Check dtype
     if dtype is not None:
-        if quantization == "nvfp4" and dtype != torch.bfloat16:
+        if (
+            quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6")
+            and dtype != torch.bfloat16
+        ):
             pytest.skip("NVFP4 quantization is only supported with BF16 data")
 
 
@@ -143,6 +148,7 @@ def make_reference_and_test_tensors(
     test_dtype: torch.dtype = torch.float32,
     test_device: torch.device = "cuda",
     test_is_quantized: bool = False,
+    quantizer_role: Optional[QuantizerRole] = None,
     requires_grad: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Construct tensors with the same values
@@ -182,13 +188,36 @@ def make_reference_and_test_tensors(
         test = quantizer(test)
     elif quantization == "mxfp8":
         test = MXFP8Quantizer(fp8_dtype=constants.DType.kFloat8E4M3)(test)
-    elif quantization == "nvfp4":
+    elif quantization in ("nvfp4", "nvfp4_row_scaled"):
         test = NVFP4Quantizer(
             with_rht=False,
             with_post_rht_amax=False,
             with_2d_quantization=False,
             stochastic_rounding=False,
             with_random_sign_mask=False,
+        )(test)
+    elif quantization == "nvfp4_4over6":
+        tensor_type = "input"
+        if quantizer_role is not None:
+            tensor_type = quantizer_role.tensor_type
+
+        nvfp4_use_4over6 = False
+        with_2d_quantization = False
+        nvfp4_e4m3_max = 448
+        if tensor_type not in ("grad_output", "grad_input"):
+            nvfp4_use_4over6 = True
+            nvfp4_e4m3_max = 256
+            if tensor_type == "weight":
+                with_2d_quantization = True
+
+        test = NVFP4Quantizer(
+            with_rht=False,
+            with_post_rht_amax=False,
+            with_2d_quantization=with_2d_quantization,
+            stochastic_rounding=False,
+            with_random_sign_mask=False,
+            nvfp4_use_4over6=nvfp4_use_4over6,
+            nvfp4_e4m3_max=nvfp4_e4m3_max,
         )(test)
     else:
         raise ValueError(f"Unsupported quantization scheme ({quantization})")
@@ -505,6 +534,7 @@ class TestFuser:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            quantizer_role=QuantizerRole(tensor_type="weight"),
         )
 
         # Construct operation
@@ -819,9 +849,13 @@ class TestBasicOps:
             test_device=device,
             requires_grad=True,
         )
+        grad_quantization = quantization
+        if quantization == "nvfp4_4over6" and cast_backward:
+            # 4over6 is not applied to gradient quantizers.
+            grad_quantization = "nvfp4"
         dy_ref, dy_test = make_reference_and_test_tensors(
             in_shape,
-            quantization=quantization,
+            quantization=grad_quantization,
             test_dtype=dtype,
             test_device=device,
             requires_grad=False,
@@ -912,6 +946,7 @@ class TestBasicOps:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            quantizer_role=QuantizerRole(tensor_type="weight"),
         )
         dy_ref, dy_test = make_reference_and_test_tensors(
             out_shape,
@@ -1084,6 +1119,7 @@ class TestBasicOps:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            quantizer_role=QuantizerRole(tensor_type="weight"),
         )
         b_ref, b_test = None, None
         if bias:
@@ -1514,7 +1550,7 @@ class TestBasicOps:
         if in_place:
             if quantization in ("fp8_delayed_scaling", "fp8_current_scaling", "mxfp8"):
                 tols = dtype_tols(x1_test._fp8_dtype)
-            elif quantization == "nvfp4":
+            elif quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
                 tols = dtype_tols(x1_test._fp4_dtype)
         y_test = y_test.to(dtype=torch.float64, device="cpu")
         dx1_test = x1_test.grad.to(dtype=torch.float64, device="cpu")
@@ -1811,6 +1847,7 @@ class TestBasicOps:
     @pytest.mark.parametrize("quantization", _quantization_list)
     @pytest.mark.parametrize("quantize_forward", (False, True))
     @pytest.mark.parametrize("quantize_backward", (False, True))
+    @pytest.mark.parametrize("glu_linear_offset", (1.0, 0.0))
     def test_clamped_swiglu(
         self,
         *,
@@ -1821,6 +1858,7 @@ class TestBasicOps:
         quantization: Optional[str],
         quantize_forward: bool,
         quantize_backward: bool,
+        glu_linear_offset: float,
         limit: float = 0.75,
         alpha: float = 1.702,
     ):
@@ -1863,7 +1901,7 @@ class TestBasicOps:
         x_glu = x_glu.clamp(min=None, max=limit)
         x_linear = x_linear.clamp(min=-limit, max=limit)
         out_glu = x_glu * torch.sigmoid(alpha * x_glu)
-        y_ref = out_glu * (x_linear + 1)
+        y_ref = out_glu * (x_linear + glu_linear_offset)
         y_ref.backward(dy_ref)
 
         # Implementation with fusible operation
@@ -1874,6 +1912,7 @@ class TestBasicOps:
             te_ops.ClampedSwiGLU(
                 limit=limit,
                 alpha=alpha,
+                glu_linear_offset=glu_linear_offset,
                 glu_interleave_size=glu_interleave_size,
             ),
             te_ops.Quantize(forward=quantize_forward, backward=False),
@@ -1885,7 +1924,7 @@ class TestBasicOps:
 
         # Expected numerical error
         tols = dtype_tols(dtype)
-        if quantized_compute and quantization == "nvfp4":
+        if quantized_compute and quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
             tols = dtype_tols(constants.DType.kFloat4E2M1)
         elif quantized_compute:
             tols = dtype_tols(constants.DType.kFloat8E4M3)
@@ -1903,6 +1942,7 @@ class TestBasicOps:
             quantize_forward=False,
             quantize_backward=False,
             glu_interleave_size=32,
+            glu_linear_offset=1.0,
         )
 
     @pytest.mark.parametrize("scale", (1, 0, -2.5, 3.5))
@@ -2078,6 +2118,8 @@ class TestBasicOps:
             pytest.skip("Quantization scheme is not used")
         if quantization is not None and dtype not in (torch.bfloat16, torch.float16):
             pytest.skip("Quantized group GEMM is only supported with BF16/FP16")
+        if quantization == "nvfp4_4over6":
+            pytest.skip("NVFP4 4over6 grouped quantization is not supported")
 
         if single_grouped_bias and not bias:
             pytest.skip("single_grouped_bias requires bias=True")
@@ -2114,6 +2156,7 @@ class TestBasicOps:
                 quantization=quantization,
                 test_dtype=dtype,
                 test_device=device,
+                quantizer_role=QuantizerRole(tensor_type="weight"),
                 requires_grad=weight_requires_grad,
             )
             b_ref, b_test = None, None
@@ -2556,6 +2599,7 @@ class TestBasicOps:
     @pytest.mark.parametrize("in_shape", ((71, 192), (5, 7, 128)))
     @pytest.mark.parametrize("input_requires_grad", (False, True))
     @pytest.mark.parametrize("scales_requires_grad", (False, True))
+    @pytest.mark.parametrize("glu_linear_offset", (1.0, 0.0))
     def test_scaled_clamped_qgeglu(
         self,
         *,
@@ -2565,6 +2609,7 @@ class TestBasicOps:
         device: torch.device = "cuda",
         input_requires_grad: bool,
         scales_requires_grad: bool,
+        glu_linear_offset: float,
         limit: float = 7.0,
         alpha: float = 1.702,
     ) -> None:
@@ -2609,7 +2654,7 @@ class TestBasicOps:
         x_glu = x_glu.clamp(min=None, max=limit)
         x_linear = x_linear.clamp(min=-limit, max=limit)
         out_glu = x_glu * torch.sigmoid(alpha * x_glu)
-        y = out_glu * (x_linear + 1)
+        y = out_glu * (x_linear + glu_linear_offset)
         y_ref = scales_ref.unsqueeze(-1) * y
         if input_requires_grad or scales_requires_grad:
             y_ref.backward(dy_ref)
@@ -2618,6 +2663,7 @@ class TestBasicOps:
             glu_interleave_size=glu_interleave_size,
             limit=limit,
             alpha=alpha,
+            glu_linear_offset=glu_linear_offset,
         )
         y_test = op(x_test, scales_test)
         if input_requires_grad or scales_requires_grad:
@@ -2636,6 +2682,7 @@ class TestBasicOps:
             glu_interleave_size=32,
             input_requires_grad=True,
             scales_requires_grad=True,
+            glu_linear_offset=1.0,
         )
 
 
@@ -2686,6 +2733,7 @@ class TestFusedOps:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            quantizer_role=QuantizerRole(tensor_type="weight"),
         )
         b_ref, b_test = None, None
         if bias:
@@ -2791,6 +2839,7 @@ class TestFusedOps:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            quantizer_role=QuantizerRole(tensor_type="weight"),
         )
         b_ref, b_test = None, None
         if bias:
@@ -2904,6 +2953,7 @@ class TestFusedOps:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            quantizer_role=QuantizerRole(tensor_type="weight"),
         )
         x2_ref, x2_test = make_reference_and_test_tensors(
             out_shape,
@@ -3186,6 +3236,7 @@ class TestFusedOps:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            quantizer_role=QuantizerRole(tensor_type="weight"),
         )
         dy1_ref, dy1_test = make_reference_and_test_tensors(
             out_shape,
@@ -3289,6 +3340,7 @@ class TestFusedOps:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            quantizer_role=QuantizerRole(tensor_type="weight"),
         )
         dy_ref, dy_test = make_reference_and_test_tensors(
             out_shape,
@@ -3505,55 +3557,62 @@ class TestSequentialModules:
         )
         norm_w_ref, norm_w_test = make_reference_and_test_tensors(
             hidden_size,
+            min=-0.5,
+            max=0.5,
             test_dtype=dtype,
             test_device=device,
         )
         norm_b_ref, norm_b_test = make_reference_and_test_tensors(
             hidden_size,
+            min=-0.5,
+            max=0.5,
             test_dtype=dtype,
             test_device=device,
         )
         w1_ref, w1_test = make_reference_and_test_tensors(
             (ffn_hidden_size, hidden_size),
             quantization=quantization,
+            min=0,
+            max=1 / 64,
             test_dtype=dtype,
             test_device=device,
+            quantizer_role=QuantizerRole(tensor_type="weight"),
         )
         w2_ref, w2_test = make_reference_and_test_tensors(
             (hidden_size, ffn_hidden_size // 2),
+            min=0,
+            max=1 / 64,
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            quantizer_role=QuantizerRole(tensor_type="weight"),
         )
         b1_ref, b1_test, b2_ref, b2_test = None, None, None, None
         if bias:
             b1_ref, b1_test = make_reference_and_test_tensors(
                 ffn_hidden_size,
+                min=-0.5,
+                max=0.5,
                 test_dtype=dtype,
                 test_device=device,
             )
             b2_ref, b2_test = make_reference_and_test_tensors(
                 hidden_size,
+                min=-0.5,
+                max=0.5,
                 test_dtype=dtype,
                 test_device=device,
             )
         dy_ref, dy_test = make_reference_and_test_tensors(
             in_shape,
+            min=-0.5,
+            max=0.5,
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            quantizer_role=QuantizerRole(tensor_type="grad_output"),
             requires_grad=False,
         )
-        with torch.no_grad():
-            for t in (norm_w_ref, norm_w_test, norm_b_ref, norm_b_test):
-                t -= 0.5
-            for t in (w1_ref, w1_test, w2_ref, w2_test):
-                t *= 1 / 64
-            if bias:
-                for t in (b1_ref, b1_test, b2_ref, b2_test):
-                    t -= 0.5
-            for t in (dy_ref, dy_test):
-                t -= 0.5
 
         # Reference implementation
         x = x_ref
@@ -3635,7 +3694,13 @@ class TestSequentialModules:
     @pytest.mark.parametrize("delay_wgrad_compute", (False, True))
     @pytest.mark.parametrize("hidden_size", (128, 256))
     @pytest.mark.parametrize(
-        "activation", ("scaled_swiglu", "scaled_clamped_qgeglu", "scaled_srelu")
+        "activation",
+        (
+            "scaled_swiglu",
+            "scaled_clamped_qgeglu",
+            "scaled_clamped_qgeglu_custom",
+            "scaled_srelu",
+        ),
     )
     def test_grouped_mlp(
         self,
@@ -3669,7 +3734,7 @@ class TestSequentialModules:
         with_quantization = quantization is not None
         if activation == "scaled_swiglu":
             scaled_act = te_ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
-        elif activation == "scaled_clamped_qgeglu":
+        elif activation.startswith("scaled_clamped_qgeglu"):
             scaled_act = te_ops.ScaledClampedQGeGLU(glu_interleave_size=glu_interleave_size)
         elif activation == "scaled_srelu":
             scaled_act = te_ops.ScaledSReLU()
@@ -3687,10 +3752,27 @@ class TestSequentialModules:
             pytest.skip("Scaled unary grouped MLP fusion is only supported with MXFP8")
         if not activation_is_glu and glu_interleave_size is not None:
             pytest.skip("Unary activations do not use GLU interleaving")
-        if quantization == "nvfp4" and activation == "scaled_clamped_qgeglu" and bias:
+        if quantization == "nvfp4_4over6":
+            pytest.skip("NVFP4 4over6 grouped quantization is not supported")
+        if (
+            with_quantization
+            and quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6")
+            and activation.startswith("scaled_clamped_qgeglu")
+            and bias
+        ):
             # TODO: ksivaman: Need to debug numerics for this case.
             pytest.skip("Bias/dbias not yet supported in NVFP4 fused grouped MLP with GeGLU")
         fc1_out_features = 2 * hidden_size if activation_is_glu else hidden_size
+
+        # Activation parameters for clamped QGeGLU variants
+        if activation == "scaled_clamped_qgeglu_custom":
+            geglu_limit = 5.0
+            geglu_alpha = 1.5
+            geglu_offset = 0.5
+        else:
+            geglu_limit = 7.0
+            geglu_alpha = 1.702
+            geglu_offset = 1.0
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
@@ -3727,6 +3809,7 @@ class TestSequentialModules:
                 quantization=quantization,
                 test_dtype=dtype,
                 test_device=device,
+                quantizer_role=QuantizerRole(tensor_type="weight"),
             )
             fc2_w_ref, fc2_w_test = make_reference_and_test_tensors(
                 (hidden_size, hidden_size),
@@ -3735,6 +3818,7 @@ class TestSequentialModules:
                 quantization=quantization,
                 test_dtype=dtype,
                 test_device=device,
+                quantizer_role=QuantizerRole(tensor_type="weight"),
             )
             fc1_b_ref, fc1_b_test = None, None
             fc2_b_ref, fc2_b_test = None, None
@@ -3781,13 +3865,12 @@ class TestSequentialModules:
             if activation == "scaled_swiglu":
                 x1, x2 = x.chunk(2, dim=-1)
                 x = torch.nn.functional.silu(x1) * x2
-            elif activation == "scaled_clamped_qgeglu":
+            elif activation.startswith("scaled_clamped_qgeglu"):
                 x1, x2 = x.chunk(2, dim=-1)
-                lim = torch.tensor(7.0, device=x1.device, dtype=x1.dtype)
-                geglu_alpha = 1.702
+                lim = torch.tensor(geglu_limit, device=x1.device, dtype=x1.dtype)
                 x1c = torch.minimum(x1, lim)
                 x2c = torch.clamp(x2, -lim, lim)
-                x = (x2c + 1) * (x1c * torch.sigmoid(geglu_alpha * x1c))
+                x = (x2c + geglu_offset) * (x1c * torch.sigmoid(geglu_alpha * x1c))
             elif activation == "scaled_srelu":
                 x = torch.nn.functional.relu(x).square()
             else:
@@ -3802,6 +3885,13 @@ class TestSequentialModules:
 
         # Construct operations
         recipe = make_recipe(quantization)
+        if activation == "scaled_clamped_qgeglu_custom":
+            scaled_act = te_ops.ScaledClampedQGeGLU(
+                glu_interleave_size=glu_interleave_size,
+                limit=geglu_limit,
+                alpha=geglu_alpha,
+                glu_linear_offset=geglu_offset,
+            )
         with te.quantized_model_init(enabled=with_quantization, recipe=recipe):
             fc1 = te_ops.GroupedLinear(
                 group_size,
@@ -3919,7 +4009,7 @@ class TestSequentialModules:
 
         # Loose tols for sanity checking
         tols = {"rtol": 0.125, "atol": 0.25}
-        if quantization == "nvfp4":
+        if quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
             tols = {"rtol": 0.25, "atol": 0.5}
 
         # Check values

@@ -28,7 +28,7 @@ from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
 from transformer_engine.pytorch import constants
 
 from references.ref_per_tensor_cs import ref_per_tensor_cs_cast
-from utils import assert_close, quantization_tols
+from utils import assert_close
 
 # PyTorch tensor dtypes
 _dtypes: List[torch.dtype] = [torch.float32, torch.float16, torch.bfloat16]
@@ -69,6 +69,8 @@ if mxfp8_available:
     _quantization_list.append("mxfp8")
 if nvfp4_available:
     _quantization_list.append("nvfp4")
+    _quantization_list.append("nvfp4_row_scaled")
+    _quantization_list.append("nvfp4_4over6")
 
 
 # delayed scaling
@@ -163,13 +165,17 @@ def make_reference_and_test_tensors(
         test = quantizer(test)
     elif quantization == "mxfp8":
         test = MXFP8Quantizer(fp8_dtype=constants.DType.kFloat8E4M3)(test)
-    elif quantization == "nvfp4":
+    elif quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
+        row_scaled_nvfp4 = quantization == "nvfp4_row_scaled"
         test = NVFP4Quantizer(
+            columnwise=not row_scaled_nvfp4,
             with_rht=False,
             with_post_rht_amax=False,
             with_2d_quantization=False,
             stochastic_rounding=False,
+            row_scaled_nvfp4=row_scaled_nvfp4,
             with_random_sign_mask=False,
+            nvfp4_use_4over6=(quantization == "nvfp4_4over6"),
         )(test)
     else:
         raise ValueError(f"Unsupported quantization scheme ({quantization})")
@@ -784,14 +790,22 @@ class TestQuantizedTensor:
                 block_scaling_dim=1,
             )
         elif quantization == "mxfp8":
+<<<<<<< HEAD
             quantizer = MXFP8Quantizer(fp8_dtype=constants.DType.kFloat8E4M3)
         elif quantization in ("nvfp4", "nvfp4_2d"):
+=======
+            quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        elif quantization in ("nvfp4", "nvfp4_2d", "nvfp4_row_scaled", "nvfp4_4over6"):
+            row_scaled_nvfp4 = quantization == "nvfp4_row_scaled"
+>>>>>>> temp_main
             quantizer = NVFP4Quantizer(
                 rowwise=True,
-                columnwise=True,
+                columnwise=not row_scaled_nvfp4,
                 with_rht=False,
                 with_post_rht_amax=False,
                 with_2d_quantization=(quantization == "nvfp4_2d"),
+                row_scaled_nvfp4=row_scaled_nvfp4,
+                nvfp4_use_4over6=(quantization == "nvfp4_4over6"),
             )
             quantization = "nvfp4"
         else:
@@ -806,9 +820,9 @@ class TestQuantizedTensor:
         q_x.copy_(x_new)
 
         # Check results
+        q_ref = quantizer(x_new)
         assert q_x.shape == torch.Size(shape)
-        tols = quantization_tols(quantization)
-        assert_close(q_x, x_new, **tols)
+        assert_close(q_x, q_ref, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
