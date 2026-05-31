@@ -790,14 +790,9 @@ class TestQuantizedTensor:
                 block_scaling_dim=1,
             )
         elif quantization == "mxfp8":
-<<<<<<< HEAD
             quantizer = MXFP8Quantizer(fp8_dtype=constants.DType.kFloat8E4M3)
-        elif quantization in ("nvfp4", "nvfp4_2d"):
-=======
-            quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
         elif quantization in ("nvfp4", "nvfp4_2d", "nvfp4_row_scaled", "nvfp4_4over6"):
             row_scaled_nvfp4 = quantization == "nvfp4_row_scaled"
->>>>>>> temp_main
             quantizer = NVFP4Quantizer(
                 rowwise=True,
                 columnwise=not row_scaled_nvfp4,

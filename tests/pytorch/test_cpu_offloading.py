@@ -19,7 +19,7 @@ from transformer_engine.pytorch.cpu_offload import (
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
-from utils import ModelConfig, skip_unsupported_backward_override
+from utils import ModelConfig, recipe_id, skip_unsupported_backward_override
 from transformer_engine.pytorch import constants
 
 # Check supported quantization schemes
