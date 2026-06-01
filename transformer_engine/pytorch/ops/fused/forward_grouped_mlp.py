@@ -77,6 +77,12 @@ def _grouped_gemm_dsrelu_backward_supported() -> bool:
     return grouped_gemm_dsrelu_wrapper_sm100 is not None
 
 
+@functools.lru_cache(maxsize=1)
+def _use_tmem_post_rht_amax() -> bool:
+    """Whether the FC1 GLU+RHT+amax kernel should use TMEM post-RHT amax."""
+    return os.environ.get("NVTE_CUTEDSL_FUSED_GROUPED_MLP_FC1_GLU_RHT_AMAX_TMEM", "0") == "1"
+
+
 class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
     """Base fused op for block-scaled GroupedLinear + activation + GroupedLinear.
 
@@ -411,26 +417,18 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
         else:
             fc1_alpha_tensor = alpha_tensor
 
-        enable_fc1_glu_hadamard_env = (
-            os.environ.get("NVTE_CUTEDSL_FUSED_GROUPED_MLP_FC1_GLU_RHT_AMAX", "0") == "1"
+        use_tmem_post_rht_amax = _use_tmem_post_rht_amax()
+        use_fc1_glu_hadamard = False
+        use_nvfp4_rht_amax = (
+            use_nvfp4
+            and isinstance(fc2_input_quantizer, NVFP4Quantizer)
+            and fc2_input_quantizer.with_rht
+            and fc2_input_quantizer.with_post_rht_amax
         )
-        use_tmem_post_rht_amax = (
-            os.environ.get("NVTE_CUTEDSL_FUSED_GROUPED_MLP_FC1_GLU_RHT_AMAX_TMEM", "0") == "1"
-        )
-        enable_fc1_glu_hadamard = (
-            use_nvfp4 and self._cudnn_act_func == "swiglu" and enable_fc1_glu_hadamard_env
-        )
-        fc1_glu_hadamard_kernel = None
-        if enable_fc1_glu_hadamard:
+        if use_nvfp4_rht_amax and self._cudnn_act_func == "swiglu":
             kernel_getter = getattr(self, "grouped_gemm_glu_hadamard_kernel", None)
             if kernel_getter is not None:
-                fc1_glu_hadamard_kernel = kernel_getter()
-        has_precomputed_amax_quantize = (
-            hasattr(tex, "quantize_with_amax")
-            if num_groups == 1
-            else hasattr(tex, "group_quantize_with_amax")
-        )
-        use_fc1_glu_hadamard = fc1_glu_hadamard_kernel is not None and has_precomputed_amax_quantize
+                use_fc1_glu_hadamard = kernel_getter() is not None
 
         fc1_activation_kwargs = {
             "a_tensor": fc1_x_data,
@@ -504,7 +502,7 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
             fc1_activation_kwargs["b_major"] = "k"
 
         if use_fc1_glu_hadamard:
-            fc1_kernel_out = fc1_glu_hadamard_kernel(**fc1_activation_kwargs)
+            fc1_kernel_out = self.grouped_gemm_glu_hadamard_kernel()(**fc1_activation_kwargs)
         else:
             fc1_kernel_out = self.grouped_gemm_activation_kernel()(**fc1_activation_kwargs)
 
