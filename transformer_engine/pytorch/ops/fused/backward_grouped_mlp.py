@@ -170,27 +170,25 @@ def _cudnn_compute_wgrad(
             dtype=scale_view_dtype
         )
 
-    global_scale_a = None
-    global_scale_b = None
-    if use_nvfp4:
-        global_scale_denom = 448.0 * 6.0
-        global_scale_a = grouped_dy.columnwise_amax.view(-1).to(torch.float32) / global_scale_denom
-        global_scale_b = grouped_x.columnwise_amax.view(-1).to(torch.float32) / global_scale_denom
-
     common_wgrad_kwargs = {
         "a_tensor": a_tensor,
         "b_tensor": b_tensor,
         "sfa_tensor": sfa_tensor,
         "sfb_tensor": sfb_tensor,
         "offsets_tensor": offsets,
-        "global_scale_a": global_scale_a,
-        "global_scale_b": global_scale_b,
         "acc_dtype": torch.float32,
         "sf_vec_size": sf_vec_size,
         "accumulate_on_output": accumulate,
         "current_stream": current_stream,
     }
     if use_nvfp4:
+        global_scale_denom = 448.0 * 6.0
+        common_wgrad_kwargs["global_scale_a"] = (
+            grouped_dy.columnwise_amax.view(-1).to(torch.float32) / global_scale_denom
+        )
+        common_wgrad_kwargs["global_scale_b"] = (
+            grouped_x.columnwise_amax.view(-1).to(torch.float32) / global_scale_denom
+        )
         common_wgrad_kwargs["input_order"] = "tensor_ragged"
 
     # Prepare wgrad output
@@ -840,12 +838,7 @@ class _BackwardGroupedMLP_CuTeGEMMDBase(FusedOperation):
             )
 
         # FC2 wgrad GEMM
-        enable_nvfp4_wgrad = (
-            os.environ.get("NVTE_CUTEDSL_FUSED_GROUPED_MLP_NVFP4_WGRAD", "0") == "1"
-        )
-        wgrad_kernel_fn = (
-            self.grouped_gemm_wgrad_kernel() if (not use_nvfp4 or enable_nvfp4_wgrad) else None
-        )
+        wgrad_kernel_fn = self.grouped_gemm_wgrad_kernel()
         fc2_grad_params = _compute_grad_params(
             fc_op=fc2_op,
             ctx=fc2_ctx,
