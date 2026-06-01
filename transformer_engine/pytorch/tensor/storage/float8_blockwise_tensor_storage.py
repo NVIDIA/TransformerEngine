@@ -42,7 +42,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         rowwise_scale_inv: Optional[torch.Tensor],
         columnwise_data: Optional[torch.Tensor],
         columnwise_scale_inv: Optional[torch.Tensor],
-        fp8_dtype: constants.DTypeLike,
+        fp8_dtype: constants.DTypeSupported,
         quantizer: Quantizer,
         is_2D_scaled: bool,
         *args,

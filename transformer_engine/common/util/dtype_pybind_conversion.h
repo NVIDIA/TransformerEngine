@@ -29,7 +29,8 @@ cached_dtype_objects() {
  * into a cached ``transformer_engine_torch.DType`` enum object.
  * This conversion function is needed since tex pybind functions generally accept
  * transformer_engine_torch.DType. This implicit conversion allows user to pass
- * constants.DType from python.
+ * constants.DType from python and C++ functions will implicitly convert to
+ * transformer_engine_torch.DType.
  */
 inline PyObject *cached_int_to_dtype(PyObject *src, PyTypeObject *type) {
   // Only plain ints / IntEnum subclasses are handled here (matches the

@@ -81,7 +81,7 @@ class Float8TensorStorage(QuantizedTensorStorage):
         *args,
         data: Optional[torch.Tensor],
         fp8_scale_inv: torch.Tensor,
-        fp8_dtype: constants.DTypeLike,
+        fp8_dtype: constants.DTypeSupported,
         fake_dtype: Optional[torch.dtype] = None,
         data_transpose: Optional[torch.Tensor] = None,
         quantizer: Optional[Quantizer] = None,

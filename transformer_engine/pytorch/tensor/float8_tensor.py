@@ -60,7 +60,7 @@ class Float8Quantizer(Quantizer):
         self,
         scale: torch.Tensor,
         amax: torch.Tensor,
-        fp8_dtype: constants.DTypeLike,
+        fp8_dtype: constants.DTypeSupported,
         *,
         rowwise: bool = True,
         columnwise: bool = True,
@@ -215,7 +215,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
 
     def __init__(
         self,
-        fp8_dtype: constants.DTypeLike,
+        fp8_dtype: constants.DTypeSupported,
         device: torch.device,
         *,
         rowwise: bool = True,

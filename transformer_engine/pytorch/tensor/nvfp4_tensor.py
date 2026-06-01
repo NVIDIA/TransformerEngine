@@ -143,7 +143,7 @@ class NVFP4Quantizer(Quantizer):
 
     def __init__(
         self,
-        fp4_dtype: constants.DTypeLike = constants.DType.kFloat4E2M1,
+        fp4_dtype: constants.DTypeSupported = constants.DType.kFloat4E2M1,
         rowwise: bool = True,
         columnwise: bool = True,
         with_amax_reduction: bool = False,

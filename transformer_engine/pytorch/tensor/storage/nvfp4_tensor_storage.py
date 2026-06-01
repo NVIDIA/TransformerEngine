@@ -117,7 +117,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         columnwise_scale_inv: torch.Tensor,
         amax_rowwise: torch.Tensor,
         amax_columnwise: torch.Tensor,
-        fp4_dtype: constants.DTypeLike,
+        fp4_dtype: constants.DTypeSupported,
         quantizer: Optional[Quantizer],
         with_gemm_swizzled_scales: bool,
         *args,

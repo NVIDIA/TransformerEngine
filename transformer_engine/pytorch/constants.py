@@ -13,13 +13,9 @@ import transformer_engine_torch as tex
 
 class DType(enum.IntEnum):
     """Python mirror of ``transformer_engine_torch.DType`` (pybind11 enum).
-
     Members are constructed manually from the underlying pybind enum so
     that this class is the single source of truth for dtype tags used
-    across ``transformer_engine.pytorch``. Using a Python ``IntEnum``
-    avoids the per-access cost of looking up attributes on the pybind11
-    enum class (which traverses C++ ``tp_getattro``) and reduces
-    comparisons to plain ``int.__eq__``.
+    across ``transformer_engine.pytorch``.
     """
 
     kByte = int(tex.DType.kByte)
@@ -32,15 +28,13 @@ class DType(enum.IntEnum):
     kFloat4E2M1 = int(tex.DType.kFloat4E2M1)
 
     @classmethod
-    def cast(cls, dtype: "DTypeLike") -> "DType":
-        """Cast a dtype tag to the canonical ``DType`` ``IntEnum``.
-
-        ``DType`` is the dtype tag used internally throughout
-        ``transformer_engine.pytorch``. For backward compatibility, the public
-        ``Quantizer`` / ``QuantizedTensor`` constructors also accept the pybind
-        ``transformer_engine_torch.DType`` enum that external callers used
-        historically; this converts it (or an existing ``DType``) to the
-        matching ``DType`` member so stored attributes are always ``DType``.
+    def cast(cls, dtype: "DTypeSupported") -> "DType":
+        """Normalize any ``DTypeSupported`` value to the canonical ``DType`` ``IntEnum``.
+        ``DType`` is the canonical dtype tag used internally throughout
+        ``transformer_engine.pytorch``, and is what this function always outputs.
+        The pybind ``transformer_engine_torch.DType`` enum is an additional type
+        accepted as input (for backward compatibility), which this function maps
+        to the matching ``DType`` member so stored attributes are always ``DType``.
         """
         if isinstance(dtype, cls):
             return dtype
@@ -55,10 +49,9 @@ assert {m.name for m in DType} == set(tex.DType.__members__), (
 )
 
 
-# Anything accepted by ``DType.cast`` as a stand-in for a ``DType`` member.
-# ``DType`` is canonical internally; the pybind ``tex.DType`` enum is accepted
-# at API boundaries for backward compatibility.
-DTypeLike = Union[DType, tex.DType]
+# tex.DType is the pybind enum kept for backward compatibility.
+# in the constructors for QuantizedTensors and Quantizers.
+DTypeSupported = Union[DType, tex.DType]
 
 
 # One-to-one mapping ``torch.dtype -> DType`` (mirrors the enum order in

@@ -38,7 +38,7 @@ class Float8BlockQuantizer(Quantizer):
 
     def __init__(
         self,
-        fp8_dtype: constants.DTypeLike,
+        fp8_dtype: constants.DTypeSupported,
         *,
         rowwise: bool,
         columnwise: bool,
