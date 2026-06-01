@@ -688,11 +688,13 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedQuantizeV2Handler, GroupedQuantizeV2FFI,
                                   .Attr<int64_t>("flatten_axis"),
                               FFI_CudaGraph_Traits);
 
-Error_Type GroupedQuantizeV2InitializeFFI(
-    cudaStream_t stream, Buffer_Type inputs, Buffer_Type scale_unused, Buffer_Type group_sizes,
-    Result_Type rowwise_out, Result_Type colwise_out, Result_Type rowwise_sinv,
-    Result_Type colwise_sinv, Result_Type updated_amaxs, Result_Type int64_workspace,
-    JAXX_Quantize_Layout quantize_layout, int64_t flatten_axis) {
+Error_Type GroupedQuantizeV2InitializeFFI(cudaStream_t stream, Buffer_Type inputs,
+                                          Buffer_Type scale_unused, Buffer_Type group_sizes,
+                                          Result_Type rowwise_out, Result_Type colwise_out,
+                                          Result_Type rowwise_sinv, Result_Type colwise_sinv,
+                                          Result_Type updated_amaxs, Result_Type int64_workspace,
+                                          JAXX_Quantize_Layout quantize_layout,
+                                          int64_t flatten_axis) {
   return wrapInStreamCapture(std::function(GroupedQuantizeV2FFI), stream, inputs, scale_unused,
                              group_sizes, rowwise_out, colwise_out, rowwise_sinv, colwise_sinv,
                              updated_amaxs, int64_workspace, quantize_layout, flatten_axis);

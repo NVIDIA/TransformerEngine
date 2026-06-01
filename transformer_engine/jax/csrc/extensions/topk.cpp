@@ -79,8 +79,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(TopkHandler, TopkFFI,
 Error_Type TopkInitializeFFI(cudaStream_t stream, Buffer_Type keys_in_buf, Buffer_Type lengths_buf,
                              Result_Type keys_out_buf, Result_Type indices_out_buf,
                              Result_Type workspace_buf, int64_t k_value) {
-  return wrapInStreamCapture(std::function(TopkFFI), stream, keys_in_buf, lengths_buf,
-                             keys_out_buf, indices_out_buf, workspace_buf, k_value);
+  return wrapInStreamCapture(std::function(TopkFFI), stream, keys_in_buf, lengths_buf, keys_out_buf,
+                             indices_out_buf, workspace_buf, k_value);
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(TopkInitializeHandler, TopkInitializeFFI,
