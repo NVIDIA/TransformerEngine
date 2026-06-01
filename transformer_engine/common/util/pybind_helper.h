@@ -110,9 +110,9 @@ inline void register_cached_dtype_implicit_conversion() {
                                     pybind11::make_tuple(static_cast<int>(self)));                              \
       }); /* Allow Python int (and IntEnum subclasses like transformer_engine.pytorch.constants.DType) to be */ \
   /* passed wherever a pybind-bound ``transformer_engine::DType`` argument is expected. Uses a    */            \
-  /* cached converter (returns a singleton per value) instead of the per-call allocation that     */           \
+  /* cached converter (returns a singleton per value) instead of the per-call allocation that     */            \
   /* ``pybind11::implicitly_convertible<int, transformer_engine::DType>()`` would incur.           */           \
-  transformer_engine::pybind_detail::register_cached_dtype_implicit_conversion();                              \
+  transformer_engine::pybind_detail::register_cached_dtype_implicit_conversion();                               \
   pybind11::enum_<NVTE_Bias_Type>(m, "NVTE_Bias_Type", pybind11::module_local())                                \
       .value("NVTE_NO_BIAS", NVTE_Bias_Type::NVTE_NO_BIAS)                                                      \
       .value("NVTE_PRE_SCALE_BIAS", NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS)                                        \
