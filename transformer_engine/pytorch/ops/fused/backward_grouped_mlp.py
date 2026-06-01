@@ -580,8 +580,8 @@ class _BackwardGroupedMLP_CuTeGEMMDBase(FusedOperation):
             fc2_dy_amax = _nvfp4_amax(grouped_fc2_dy, columnwise=False)
             fc2_weight_col_amax = _nvfp4_amax(grouped_fc2_weight, columnwise=True)
             if activation_is_srelu:
-                # cuDNN's SReLU kernel expects alpha in the final squared-output
-                # scale domain and indexes one alpha value per expert.
+                # DGLU squares alpha internally, but DSReLU applies it linearly,
+                # so pass the full NVFP4 global-scale product per expert.
                 fc2_alpha_tensor = (
                     (fc2_dy_amax * fc2_weight_col_amax / (nvfp4_fp4_max**2 * nvfp4_fp8_max**2))
                     .to(torch.float32)
