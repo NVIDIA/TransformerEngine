@@ -3384,6 +3384,17 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             v_ag = reorder_thd_sequences_to_contiguous(
                 v_ag, cu_seqlens_kv_padded, chunk_ids_for_kv_ag, cp_size
             )
+            # Correctness fix for the fused tex.thd_reorder (PR 2829): the raw reorder kernel
+            # runs on the main stream and its buffers are not allocator/stream-tracked the way
+            # the index_select it replaced was. The host then runs ahead into the per-step loop
+            # (step 1 on cp_stream) and the caching allocator can recycle a block the reorder is
+            # still using -> cudaErrorIllegalAddress under comm/compute overlap (FA3 + large
+            # packs; reproduces serially, masked by CUDA_LAUNCH_BLOCKING and
+            # PYTORCH_NO_CUDA_MEMORY_CACHING). Syncing the main stream here drains gather+reorder
+            # before the loop allocates; cp_stream already waits on main, so the per-step overlap
+            # is preserved. Conservative fix -- a finer-grained allocator/event fix can replace it.
+            if int(os.getenv("AG_REORDER_SYNC", "1")):
+                torch.cuda.current_stream().synchronize()
         else:
             # [cp, s, b, h, d] -> [cp*2, s//2, b, h, d]
             k_ag = k_ag.view(2 * cp_size, k.shape[0] // 2, *k.shape[1:])
