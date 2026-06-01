@@ -5,9 +5,13 @@
 """Helper functions used in fusible operations."""
 
 from __future__ import annotations
+import functools
+import math
+from importlib.metadata import PackageNotFoundError, version as get_pkg_version
 from typing import Optional
 
 import torch
+from packaging.version import Version as PkgVersion
 
 from transformer_engine_torch import FP8TensorMeta
 from ..torch_version import torch_version
@@ -15,6 +19,42 @@ from ..quantization import FP8GlobalStateManager
 from ..tensor.float8_tensor import Float8Tensor
 from ..quantized_tensor import QuantizedTensorStorage
 from ..utils import canonicalize_dtype
+
+
+@functools.lru_cache(maxsize=None)
+def _cudnn_frontend_version_at_least(min_version: str) -> bool:
+    """Check cuDNN frontend package version."""
+    try:
+        return PkgVersion(get_pkg_version("nvidia-cudnn-frontend")) >= PkgVersion(min_version)
+    except PackageNotFoundError:
+        return False
+
+
+def _cudnn_frontend_version_supported() -> bool:
+    """Check cuDNN frontend is at least 1.23.0.
+
+    All grouped MLP fused-kernel features require cuDNN frontend >= 1.23.0.
+    """
+    return _cudnn_frontend_version_at_least("1.23.0")
+
+
+def _cudnn_frontend_geglu_runtime_params() -> bool:
+    """Check cuDNN frontend is at least 1.24.0.
+
+    Runtime-configurable GeGLU parameters (linear_offset, geglu_alpha,
+    glu_clamp_max, glu_clamp_min) require cuDNN frontend >= 1.24.0.
+    """
+    return _cudnn_frontend_version_at_least("1.24.0")
+
+
+def _cudnn_frontend_supports_grouped_gemm_srelu() -> bool:
+    """Check cuDNN frontend min version for grouped GEMM SReLU kernels."""
+    return _cudnn_frontend_version_at_least("1.24.0")
+
+
+def _nvidia_cudnn_frontend_supports_wgrad() -> bool:
+    """Check cuDNN FE min version for grouped GEMM wgrad kernel."""
+    return _cudnn_frontend_version_supported()
 
 
 def is_quantized_tensor(tensor: torch.Tensor | QuantizedTensorStorage) -> bool:
@@ -73,30 +113,143 @@ def get_fp8_meta_from_fp8_tensor(tensor: Float8Tensor) -> tuple[FP8TensorMeta, i
     return fp8_meta, 0
 
 
-def validate_grouped_mlp_dims(fc1, swiglu, fc2) -> None:
-    """Validate FC1/SwiGLU/FC2 dimensions and interleave size for fused grouped MLP."""
+def get_main_grad_from_param(
+    weight_param: torch.nn.Parameter,
+    *,
+    op_label: str = "",
+) -> torch.Tensor:
+    """Refresh ``main_grad`` from FSDP (if applicable) and return it.
+    Used by Megatron-LM-style wgrad fusion paths
+    (``accumulate_into_main_grad=True``) to obtain the buffer the wgrad GEMM
+    will write into.
+    Raises if the parameter does not have a ``main_grad`` attribute or if it
+    is ``None``.
+    """
+    if hasattr(weight_param, "__fsdp_param__"):
+        weight_param.main_grad = weight_param.get_main_grad()
+    if not hasattr(weight_param, "main_grad") or weight_param.main_grad is None:
+        prefix = f"{op_label} " if op_label else ""
+        raise RuntimeError(
+            f"{prefix}operation is configured with accumulate_into_main_grad=True, "
+            "but weight parameter does not have a valid main_grad attribute"
+        )
+    return weight_param.main_grad
 
-    if fc1.in_features % 256 != 0 or fc1.out_features % 256 != 0:
+
+def get_accumulate_flag_in_param(weight_param: torch.nn.Parameter) -> bool:
+    """Return whether the wgrad GEMM should accumulate into ``main_grad``.
+
+    Returns ``False`` (i.e. overwrite) when the parameter has
+    ``overwrite_main_grad=True`` (used in Megatron-FSDP), and ``True``
+    otherwise.
+    """
+    return not getattr(weight_param, "overwrite_main_grad", False)
+
+
+def view_main_grad_as_grouped_buffer(
+    main_grad: torch.Tensor,
+    num_groups: int,
+    weight_shape: tuple[int, ...],
+    *,
+    label: str = "",
+) -> torch.Tensor:
+    """Return ``main_grad`` viewed as ``(num_groups, *weight_shape)`` without copy.
+    Raises if the numel doesn't match or if the existing stride pattern does
+    not allow a zero-copy view to the grouped layout.
+    """
+    grouped_shape = (num_groups, *weight_shape)
+    if tuple(main_grad.shape) == grouped_shape:
+        return main_grad
+    prefix = f"{label} " if label else "Grouped weight "
+    if main_grad.numel() != math.prod(grouped_shape):
+        raise RuntimeError(
+            f"{prefix}main_grad expected shape {grouped_shape} or matching numel, "
+            f"but got shape {tuple(main_grad.shape)}"
+        )
+    try:
+        return main_grad.view(grouped_shape)
+    except RuntimeError as e:
+        raise RuntimeError(
+            f"{prefix}main_grad must be viewable as {grouped_shape} without copy, "
+            f"but got shape {tuple(main_grad.shape)} and stride "
+            f"{tuple(main_grad.stride())}"
+        ) from e
+
+
+def get_dummy_wgrads_for_params(
+    weight_params: list[torch.nn.Parameter],
+) -> list[Optional[torch.Tensor]]:
+    """Build dummy ``.grad`` placeholders for Megatron-LM wgrad-fusion params.
+
+    For each parameter that exposes ``grad_added_to_main_grad``, set the flag
+    to ``True`` and return a dummy wgrad tensor (zeroed if
+    ``zero_out_wgrad`` is also set on the parameter). For parameters without
+    the flag, the corresponding entry is ``None``.
+
+    The returned list has the same length and order as ``weight_params``.
+    """
+    from ..module.base import get_dummy_wgrad  # pylint: disable=import-outside-toplevel
+
+    out: list[Optional[torch.Tensor]] = []
+    for wp in weight_params:
+        if hasattr(wp, "grad_added_to_main_grad"):
+            wp.grad_added_to_main_grad = True
+            out.append(
+                get_dummy_wgrad(
+                    list(wp.size()),
+                    wp.dtype,
+                    zero=getattr(wp, "zero_out_wgrad", False),
+                )
+            )
+        else:
+            out.append(None)
+    return out
+
+
+def is_glu_activation(activation_op) -> bool:
+    """Whether an activation consumes a GLU-style doubled input."""
+    from .basic import (  # pylint: disable=import-outside-toplevel
+        ScaledClampedQGeGLU,
+        ScaledSwiGLU,
+    )
+
+    return isinstance(activation_op, (ScaledSwiGLU, ScaledClampedQGeGLU))
+
+
+def validate_grouped_mlp_dims(fc1, activation_op, fc2) -> None:
+    """Validate FC1 / activation / FC2 dimensions for fused grouped MLP."""
+    from .basic import (  # pylint: disable=import-outside-toplevel
+        ScaledSReLU,
+    )
+
+    if fc1.in_features % 64 != 0 or fc1.out_features % 64 != 0:
         raise ValueError(
             f"Unsupported dims for FC1 (num_groups={fc1.num_groups}, "
             f"in_features={fc1.in_features}, out_features={fc1.out_features})."
         )
-    if fc2.in_features % 256 != 0 or fc2.out_features % 256 != 0:
+    if fc2.in_features % 64 != 0 or fc2.out_features % 64 != 0:
         raise ValueError(
             f"Unsupported dims for FC2 (num_groups={fc2.num_groups}, "
             f"in_features={fc2.in_features}, out_features={fc2.out_features})."
         )
-    if fc1.out_features != 2 * fc2.in_features or fc1.num_groups != fc2.num_groups:
+    if is_glu_activation(activation_op):
+        expected_fc1_out_features = 2 * fc2.in_features
+    elif isinstance(activation_op, ScaledSReLU):
+        expected_fc1_out_features = fc2.in_features
+    else:
+        raise TypeError(f"Unsupported grouped MLP activation ({activation_op.__class__.__name__}).")
+
+    if fc1.out_features != expected_fc1_out_features or fc1.num_groups != fc2.num_groups:
         raise ValueError(
             f"FC1 (num_groups={fc1.num_groups}, in_features={fc1.in_features}, "
             f"out_features={fc1.out_features}) "
             f"and FC2 (num_groups={fc2.num_groups}, in_features={fc2.in_features}, "
             f"out_features={fc2.out_features}) do not match."
         )
-    if swiglu.glu_interleave_size != 32:
+    if is_glu_activation(activation_op) and activation_op.glu_interleave_size != 32:
         raise ValueError(
             "Fused kernel requires 32-wide GLU interleaving, "
-            f"but got glu_interleave_size={swiglu.glu_interleave_size}."
+            f"but got glu_interleave_size={activation_op.glu_interleave_size}."
         )
 
 
@@ -105,8 +258,9 @@ def fuse_grouped_mlp_ops(
     *,
     recipe,
     fused_op_cls,
+    activation_op_types=None,
 ):
-    """Sliding-window fusion for GroupedLinear + ScaledSwiGLU + GroupedLinear.
+    """Sliding-window fusion for GroupedLinear + activation + GroupedLinear.
 
     Parameters
     ----------
@@ -116,28 +270,25 @@ def fuse_grouped_mlp_ops(
         Quantization recipe.
     fused_op_cls : type
         Fused operation class with ``is_supported()`` classmethod and
-        constructor accepting ``fc1``, ``swiglu``, ``fc2`` keyword args.
-        May also expose ``is_fc1_bias_supported()`` and/or
-        ``is_fc2_bias_supported()`` classmethods for bias eligibility.
+        constructor accepting ``fc1``, ``activation``, and ``fc2`` keyword args.
 
     Returns
     -------
     list of FusibleOperation
         Updated operations with matched triples replaced by fused ops.
     """
-    from .basic import GroupedLinear, ScaledSwiGLU  # pylint: disable=import-outside-toplevel
+    from .basic import (  # pylint: disable=import-outside-toplevel
+        GroupedLinear,
+        ScaledClampedQGeGLU,
+        ScaledSwiGLU,
+    )
 
     if not fused_op_cls.is_supported():
         return ops
     if recipe is None or not recipe.mxfp8():
         return ops
-
-    fc1_bias_ok = (
-        not hasattr(fused_op_cls, "is_fc1_bias_supported") or fused_op_cls.is_fc1_bias_supported()
-    )
-    fc2_bias_ok = (
-        not hasattr(fused_op_cls, "is_fc2_bias_supported") or fused_op_cls.is_fc2_bias_supported()
-    )
+    if activation_op_types is None:
+        activation_op_types = (ScaledSwiGLU, ScaledClampedQGeGLU)
 
     out = []
     window, ops = ops[:3], ops[3:]
@@ -146,30 +297,30 @@ def fuse_grouped_mlp_ops(
         matches_pattern = True
         if not (
             isinstance(window[0], GroupedLinear)
-            and isinstance(window[1], ScaledSwiGLU)
+            and isinstance(window[1], activation_op_types)
             and isinstance(window[2], GroupedLinear)
         ):
             matches_pattern = False
-        elif window[0].num_groups != window[2].num_groups:
-            matches_pattern = False
         elif (
-            window[0].in_features % 256 != 0
-            or window[0].out_features % 256 != 0
-            or window[2].in_features % 256 != 0
-            or window[2].out_features % 256 != 0
+            isinstance(window[1], ScaledClampedQGeGLU)
+            and not _cudnn_frontend_geglu_runtime_params()
+            and (
+                abs(window[1]._clamped.alpha - 1.702) > 0.001
+                or abs(window[1]._clamped.glu_linear_offset - 1.0) > 0.001
+                or abs(window[1]._clamped.limit - 7.0) > 0.001
+            )
         ):
             matches_pattern = False
-        elif window[1].glu_interleave_size != 32:
-            matches_pattern = False
-        elif window[0].has_bias and not fc1_bias_ok:
-            matches_pattern = False
-        elif window[2].has_bias and not fc2_bias_ok:
-            matches_pattern = False
+        else:
+            try:
+                validate_grouped_mlp_dims(window[0], window[1], window[2])
+            except (TypeError, ValueError):
+                matches_pattern = False
 
         if matches_pattern:
             op = fused_op_cls(
                 fc1=window[0],
-                swiglu=window[1],
+                activation=window[1],
                 fc2=window[2],
             )
             window = [op]

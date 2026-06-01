@@ -38,7 +38,7 @@ PyTorch
   :members: reset, get_states, set_states, add, fork
 
 
-.. autoapifunction:: transformer_engine.pytorch.autocast
+.. autoapiclass:: transformer_engine.pytorch.autocast(enabled=True, calibrating=False, recipe=None, amax_reduction_group=None)
 
 .. autoapifunction:: transformer_engine.pytorch.quantized_model_init
 
@@ -221,11 +221,23 @@ Operation fuser
 
 .. autoapiclass:: transformer_engine.pytorch.ops.SReLU
 
+.. autoapiclass:: transformer_engine.pytorch.ops.ScaledClampedQGeGLU
+
 .. autoapiclass:: transformer_engine.pytorch.ops.ScaledSwiGLU
 
 .. autoapiclass:: transformer_engine.pytorch.ops.SiLU
 
 .. autoapiclass:: transformer_engine.pytorch.ops.SwiGLU
+
+.. autoapifunction:: transformer_engine.pytorch.triton.mhc.mhc_fused_sinkhorn
+
+.. autoapifunction:: transformer_engine.pytorch.triton.mhc.mhc_fused_scale
+
+.. autoapifunction:: transformer_engine.pytorch.triton.mhc.mhc_fused_aggregate
+
+.. autoapifunction:: transformer_engine.pytorch.triton.mhc.mhc_fused_expand_combine
+
+.. autoapifunction:: transformer_engine.pytorch.triton.mhc.mhc_fused_projection
 
 Deprecated functions
 --------------------

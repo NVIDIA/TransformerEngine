@@ -261,14 +261,11 @@ class activation_recompute_forward(AbstractContextManager, ContextDecorator):
         )
         _FP8_ACTIVATION_RECOMPUTE_PHASE = self.recompute_phase
 
+        qstate = FP8GlobalStateManager.quantization_state
         if self.activation_recompute and not self.recompute_phase:
-            activation_recompute_forward._is_first_fp8_module.append(
-                FP8GlobalStateManager.IS_FIRST_FP8_MODULE
-            )
+            activation_recompute_forward._is_first_fp8_module.append(qstate.is_first_fp8_module)
         if self.activation_recompute and self.recompute_phase:
-            FP8GlobalStateManager.IS_FIRST_FP8_MODULE = (
-                activation_recompute_forward._is_first_fp8_module.pop(0)
-            )
+            qstate.is_first_fp8_module = activation_recompute_forward._is_first_fp8_module.pop(0)
 
     def __exit__(self, *exc_details):
         global _FP8_ACTIVATION_RECOMPUTE_ENABLED, _FP8_ACTIVATION_RECOMPUTE_PHASE
@@ -616,18 +613,21 @@ def get_activation_recompute_contexts():
     return forward_ctx, recompute_ctx
 
 
-def has_te_modules(network):
+@lru_cache
+def get_te_classes():
     """
-    Check if there are any Transformer Engine modules in the network.
+    Return all Transformer Engine modules.
     """
     from .module import LayerNorm, RMSNorm
     from .module.base import TransformerEngineBaseModule
+    from .attention.dot_product_attention.dot_product_attention import (
+        DotProductAttention,
+    )
     from .attention.dot_product_attention.backends import UnfusedDotProductAttention
-    from .attention.dot_product_attention.dot_product_attention import DotProductAttention
     from .attention.multi_head_attention import MultiheadAttention
     from .transformer import TransformerLayer
 
-    te_classes_list = [
+    return (
         LayerNorm,
         RMSNorm,
         TransformerEngineBaseModule,
@@ -635,12 +635,17 @@ def has_te_modules(network):
         DotProductAttention,
         MultiheadAttention,
         TransformerLayer,
-    ]
+    )
 
+
+def has_te_modules(network):
+    """
+    Check if there are any Transformer Engine modules in the network.
+    """
+    te_classes = get_te_classes()
     if isinstance(network, torch.nn.Module):
-        for module in network.modules():
-            if any(isinstance(module, te_class) for te_class in te_classes_list):
-                return True
+        if any(isinstance(module, te_classes) for module in network.modules()):
+            return True
         return False
 
     # Cannot check for TE modules inside a custom class/callable that's not a torch.nn.Module,
@@ -2043,28 +2048,8 @@ def _is_te_module(module):
     Check if given module is a Transformer Engine module that requires the TE checkpoint
     implementation for activation recompute.
     """
-    from .module import LayerNorm, RMSNorm
-    from .module.base import TransformerEngineBaseModule
-    from .attention.dot_product_attention.dot_product_attention import DotProductAttention
-    from .attention.dot_product_attention.backends import UnfusedDotProductAttention
-    from .attention.multi_head_attention import MultiheadAttention
-    from .transformer import TransformerLayer
-
-    te_classes_list = [
-        LayerNorm,
-        RMSNorm,
-        TransformerEngineBaseModule,
-        UnfusedDotProductAttention,
-        DotProductAttention,
-        MultiheadAttention,
-        TransformerLayer,
-    ]
-    is_te_module = False
-    for te_class in te_classes_list:
-        if isinstance(module, te_class):
-            is_te_module = True
-            break
-    return is_te_module
+    te_classes = get_te_classes()
+    return isinstance(module, te_classes)
 
 
 def prepare_te_modules_for_fsdp(fsdp_root: torch.nn.Module) -> None:

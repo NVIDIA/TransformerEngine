@@ -14,6 +14,7 @@ Run a single test standalone (for debugging):
 
 Available --test values:
   fused_adam_fp8_master_weights, fused_adam_fp8_master_weights_no_meta,
+  fused_adam_fp8_high_precision_init,
   fused_adam_bf16, fused_adam_fp8_no_master, fused_adam_bf16_store_param_remainders,
   fuse_wgrad_accumulation, dcp_output_parity, dcp_output_parity_async,
   dcp_resharding_save, dcp_resharding_load, safetensors_fp32_export
@@ -58,23 +59,32 @@ BATCH_PER_RANK = 2
 NUM_STEPS = 3
 
 
-def _build_model(fp8_init, fuse_wgrad_accumulation=False, recipe=None, use_meta_device=True):
+def _build_model(
+    fp8_init,
+    fuse_wgrad_accumulation=False,
+    recipe=None,
+    use_meta_device=True,
+    preserve_high_precision_init_val=False,
+    params_dtype=torch.bfloat16,
+):
     """Build a Sequential of TransformerLayers, optionally with FP8 init.
 
     When fp8_init=True and use_meta_device=True (the default), the model is
-    created on the meta device to avoid FSDP2 incompatibility with
-    QuantizedTensor wrapper subclasses (e.g. MXFP8Tensor) whose storage is
-    inaccessible via data_ptr().  Parameters are materialized after FSDP2
-    sharding via reset_parameters() in _shard_model().
+    created on the meta device so parameters are materialized after FSDP2
+    sharding via reset_parameters() in _shard_model().  This ensures the
+    sharded parameter format is compatible with the FSDP2 all-gather hooks.
 
     When use_meta_device=False, the model is created directly on CUDA.
-    This is the legacy path that does NOT work for block-scaling quantized
-    tensors (MXFP8, Float8Blockwise, NVFP4) because FSDP2's
-    reset_sharded_param() crashes on wrapper subclass tensors with
-    data_ptr() == 0.
+    This only works for per-tensor FP8 (DelayedScaling, Float8CurrentScaling).
+    Block-scaling types (MXFP8, Float8Blockwise, NVFP4) fail because their
+    FSDP2 all-gather hooks do not support CUDA-initialized parameters.
     """
     if fp8_init:
-        ctx = te.quantized_model_init(enabled=True, recipe=recipe)
+        ctx = te.quantized_model_init(
+            enabled=True,
+            recipe=recipe,
+            preserve_high_precision_init_val=preserve_high_precision_init_val,
+        )
     else:
         from contextlib import nullcontext
 
@@ -82,7 +92,7 @@ def _build_model(fp8_init, fuse_wgrad_accumulation=False, recipe=None, use_meta_
     kwargs = dict(
         fuse_wgrad_accumulation=fuse_wgrad_accumulation,
         fuse_qkv_params=True,
-        params_dtype=torch.bfloat16,
+        params_dtype=params_dtype,
         hidden_dropout=0.0,
         attention_dropout=0.0,
     )
@@ -148,12 +158,6 @@ def test_fused_adam_fp8_master_weights(recipe_name):
     """
     recipe = get_recipe_from_string(recipe_name)
 
-    if recipe_name == "NVFP4BlockScaling":
-        pytest.xfail(
-            f"{recipe_name}: quantized_model_init and FSDP2 is not currently supported, since the "
-            "block tensor is dequantized before we flatten it for FSDP2."
-        )
-
     world_size, device = _get_dist_info()
 
     model = _build_model(fp8_init=True, recipe=recipe)
@@ -214,20 +218,15 @@ def test_fused_adam_fp8_master_weights_no_meta(recipe_name):
     """FusedAdam with master_weights + FSDP2 + quantized_model_init WITHOUT meta device.
 
     This is the legacy path that creates quantized params directly on CUDA.
-    FSDP2's reset_sharded_param() crashes on block-scaling QuantizedTensor
-    wrapper subclasses (data_ptr() == 0). This test documents that failure.
+    FSDP2's forward-time all-gather hooks for block-scaling QuantizedTensor
+    subclasses fail when parameters are initialized directly on CUDA rather
+    than on the meta device. NVFP4Tensor does not implement the FSDP all-gather
+    hooks at all.
 
-    For per-tensor FP8 (DelayedScaling, Float8CurrentScaling) this works
-    because Float8Tensor's storage is accessible via data_ptr().
+    For per-tensor FP8 (DelayedScaling, Float8CurrentScaling) the all-gather
+    hooks handle CUDA-initialized Float8Tensor parameters correctly.
     """
     recipe = get_recipe_from_string(recipe_name)
-
-    if recipe_name in ("MXFP8BlockScaling", "Float8BlockScaling", "NVFP4BlockScaling"):
-        pytest.xfail(
-            f"{recipe_name}: FSDP2 without meta-device init crashes on block-scaling "
-            "QuantizedTensor wrapper subclasses (data_ptr() == 0). "
-            "Use device='meta' + reset_parameters() after sharding."
-        )
 
     world_size, device = _get_dist_info()
 
@@ -251,6 +250,131 @@ def test_fused_adam_fp8_master_weights_no_meta(recipe_name):
         loss = F.mse_loss(output, target)
         loss.backward()
         optimizer.step()
+
+
+def test_fused_adam_fp8_high_precision_init(recipe_name):
+    """FusedAdam with master_weights seeded from high-precision init values.
+
+    Tests the preserve_high_precision_init_val=True path demonstrated in the
+    fully_shard.py example:
+    1. Model is created with preserve_high_precision_init_val=True on meta device
+    2. After FSDP2 sharding + materialization, each QuantizedTensor param has
+       a high-precision init value accessible via get_high_precision_init_val()
+    3. These values seed the optimizer's FP32 master weights (avoiding FP8
+       round-trip precision loss)
+    4. Training completes successfully with correct optimizer state dtypes
+    """
+    recipe = get_recipe_from_string(recipe_name)
+
+    if recipe_name == "NVFP4BlockScaling":
+        pytest.xfail(
+            f"{recipe_name}: quantized_model_init and FSDP2 is not currently supported, since the "
+            "block tensor is dequantized before we flatten it for FSDP2."
+        )
+
+    world_size, device = _get_dist_info()
+
+    model = _build_model(
+        fp8_init=True,
+        recipe=recipe,
+        preserve_high_precision_init_val=True,
+        params_dtype=torch.float32,
+    )
+    model = _shard_model(model, world_size)
+
+    # Verify params are DTensors with QuantizedTensor local shards
+    for name, param in model.named_parameters():
+        assert isinstance(param, DTensor), f"{name} is not DTensor"
+    qt_count = sum(
+        1
+        for _, p in model.named_parameters()
+        if isinstance(p, DTensor) and isinstance(p._local_tensor, QuantizedTensor)
+    )
+    assert qt_count > 0, "No QuantizedTensor local tensors after sharding"
+
+    # Verify high-precision init values exist for all QuantizedTensor params
+    hp_val_count = 0
+    for name, param in model.named_parameters():
+        local = param._local_tensor if isinstance(param, DTensor) else param
+        if isinstance(local, QuantizedTensor):
+            hp_val = getattr(local, "get_high_precision_init_val", lambda: None)()
+            assert (
+                hp_val is not None
+            ), f"{name}: QuantizedTensor param missing high-precision init value"
+            assert (
+                hp_val.dtype == torch.float32
+            ), f"{name}: HP init val dtype {hp_val.dtype}, expected float32"
+            hp_val_count += 1
+    assert hp_val_count > 0, "No high-precision init values found"
+
+    # Create optimizer and seed master weights from high-precision init values
+    optimizer = te.optimizers.FusedAdam(
+        model.parameters(),
+        lr=1e-3,
+        master_weights=True,
+        master_weight_dtype=torch.float32,
+    )
+
+    for name, param in model.named_parameters():
+        optimizer.initialize_state(param, store_param_remainders=False)
+        local = param._local_tensor if isinstance(param, DTensor) else param
+        hp_val = getattr(local, "get_high_precision_init_val", lambda: None)()
+        if hp_val is not None:
+            optimizer.set_scaled_state(
+                param, "master_param", hp_val.to(device=device, dtype=torch.float32)
+            )
+            local.clear_high_precision_init_val()
+
+    # Verify high-precision init values are cleared after seeding
+    for name, param in model.named_parameters():
+        local = param._local_tensor if isinstance(param, DTensor) else param
+        if isinstance(local, QuantizedTensor):
+            hp_val = getattr(local, "get_high_precision_init_val", lambda: None)()
+            assert (
+                hp_val is None
+            ), f"{name}: high-precision init value not cleared after seeding optimizer"
+
+    # Verify optimizer master weights are float32
+    for param in model.parameters():
+        state = optimizer.state[param]
+        if "master_param" in state:
+            assert (
+                state["master_param"].dtype == torch.float32
+            ), f"master_param dtype {state['master_param'].dtype}, expected float32"
+
+    # Training loop
+    x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.float32, device=device)
+    target = torch.randn_like(x)
+
+    for step in range(NUM_STEPS):
+        optimizer.zero_grad(set_to_none=True)
+        with te.autocast(enabled=True, recipe=recipe):
+            output = model(x)
+        loss = F.mse_loss(output, target)
+        loss.backward()
+        optimizer.step()
+
+    # Verify optimizer states after training
+    for param in model.parameters():
+        state = optimizer.state[param]
+        assert (
+            state["exp_avg"].dtype == torch.float32
+        ), f"exp_avg dtype {state['exp_avg'].dtype}, expected float32"
+        assert (
+            state["exp_avg_sq"].dtype == torch.float32
+        ), f"exp_avg_sq dtype {state['exp_avg_sq'].dtype}, expected float32"
+        if "master_param" in state:
+            assert (
+                state["master_param"].dtype == torch.float32
+            ), f"master_param dtype {state['master_param'].dtype}, expected float32"
+
+    # Verify FP8 params preserved after training
+    qt_count = sum(
+        1
+        for _, p in model.named_parameters()
+        if isinstance(p, DTensor) and isinstance(p._local_tensor, QuantizedTensor)
+    )
+    assert qt_count > 0, "No QuantizedTensor local tensors after training"
 
 
 def test_fused_adam_bf16(recipe_name):
@@ -302,10 +426,15 @@ def test_fused_adam_fp8_no_master(recipe_name):
     """
     recipe = get_recipe_from_string(recipe_name)
 
-    if recipe_name in ("MXFP8BlockScaling", "Float8BlockScaling", "NVFP4BlockScaling"):
+    if recipe_name in (
+        "MXFP8BlockScaling",
+        "Float8BlockScaling",
+        "NVFP4BlockScaling",
+        "Float8CurrentScaling",
+    ):
         pytest.xfail(
             f"{recipe_name}: FusedAdam without master_weights does not support "
-            "block-scaling quantized tensors. Use master_weights=True."
+            "this quantized tensor type. Use master_weights=True."
         )
 
     world_size, device = _get_dist_info()
@@ -468,12 +597,6 @@ def test_safetensors_fp32_export(recipe_name):
     - Saved tensor shapes match expected (unsharded) shapes
     """
     recipe = get_recipe_from_string(recipe_name)
-    if recipe_name == "MXFP8BlockScaling":
-        pytest.xfail(
-            "MXFP8BlockScaling: FusedAdam CUDA kernel does not support "
-            "MXFP8 quantized tensors, causing illegal memory access. "
-            "Fixed by https://github.com/NVIDIA/TransformerEngine/pull/2789."
-        )
 
     from safetensors.torch import load_file, save_file
     from torch.distributed.checkpoint.state_dict import (
@@ -556,39 +679,13 @@ def test_dcp_output_parity(recipe_name, async_save):
     """
     recipe = get_recipe_from_string(recipe_name)
 
-    if recipe_name == "MXFP8BlockScaling":
-        pytest.xfail(
-            "MXFP8BlockScaling: FusedAdam CUDA kernel does not support "
-            "MXFP8 quantized tensors, causing illegal memory access: "
-            "/transformer_engine/common/multi_tensor/multi_tensor_apply.cuh:92 in function "
-            "multi_tensor_apply: CUDA Error: an illegal memory access was encountered. "
-            "Fixed by https://github.com/NVIDIA/TransformerEngine/pull/2789."
-        )
-
-    if recipe_name == "NVFP4BlockScaling":
-        pytest.xfail(
-            "NVFP4BlockScaling: DCP load_state_dict triggers reset_sharded_param() "
-            "which calls data_ptr() on NVFP4Tensor wrapper subclass with invalid storage"
-        )
-
-    if (
-        recipe_name == "Float8BlockScaling"
-        and not async_save
-        and torch.cuda.get_device_capability()[0] == 12
-    ):
+    if recipe_name == "Float8BlockScaling" and torch.cuda.get_device_capability()[0] == 12:
         pytest.xfail(
             "Float8BlockScaling is failing on SM120 with RuntimeError: "
             "transformer_engine/common/transpose/quantize_transpose_vector_blockwise.cu:534 "
             "in function quantize_transpose_vector_blockwise: Assertion failed: pow2_scale. On "
             "Blackwell and newer, the FP8 block scaling recipe is emulated with MXFP8, which "
             "requires using power of two scaling factors."
-        )
-    if recipe_name == "Float8BlockScaling" and async_save:
-        pytest.xfail(
-            "Float8BlockScaling: async DCP save/load round-trip produces different model "
-            "outputs — quantization metadata (scales) is not correctly persisted through "
-            "async distributed checkpointing. On SM120, additionally fails with pow2_scale "
-            "assertion in quantize_transpose_vector_blockwise."
         )
 
     import torch.distributed.checkpoint as dcp
@@ -694,11 +791,21 @@ def test_dcp_output_parity(recipe_name, async_save):
             with te.autocast(enabled=True, recipe=recipe):
                 loaded_output = model2(x)
 
-        if isinstance(recipe, transformer_engine.common.recipe.DelayedScaling):
-            # DelayedScaling stores amax history and scaling factors in _extra_state,
-            # which cannot be saved via DCP due to non-deterministic pickle sizes
-            # across ranks. The fresh model therefore uses default scaling factors,
-            # producing small numerical differences from FP8 re-quantization.
+        # DelayedScaling: amax history and scaling factors live in _extra_state,
+        # which cannot be saved via DCP due to non-deterministic pickle sizes
+        # across ranks; the fresh model uses default scaling factors, producing
+        # small numerical differences from FP8 re-quantization.
+        # Float8CurrentScaling: Float8Tensor._scale_inv is passed via
+        # fsdp_pre_all_gather metadata rather than as a sharded tensor, so DCP
+        # saves it cast to the model's param_dtype (bf16) instead of fp32; the
+        # precision loss in the reloaded scale_inv prevents bitwise parity.
+        if isinstance(
+            recipe,
+            (
+                transformer_engine.common.recipe.DelayedScaling,
+                transformer_engine.common.recipe.Float8CurrentScaling,
+            ),
+        ):
             torch.testing.assert_close(
                 loaded_output,
                 ref_output,
@@ -730,7 +837,13 @@ def test_dcp_output_parity(recipe_name, async_save):
         loss2.backward()
         optimizer2.step()
 
-        if isinstance(recipe, transformer_engine.common.recipe.DelayedScaling):
+        if isinstance(
+            recipe,
+            (
+                transformer_engine.common.recipe.DelayedScaling,
+                transformer_engine.common.recipe.Float8CurrentScaling,
+            ),
+        ):
             torch.testing.assert_close(
                 out2,
                 out1,
@@ -818,7 +931,8 @@ def test_dcp_resharding_save(recipe_name):
         model_state = model.state_dict()
 
     dcp.save(
-        {"model": model_state, "optimizer": optimizer.state_dict()}, checkpoint_id=checkpoint_dir
+        {"model": model_state, "optimizer": optimizer.state_dict()},
+        checkpoint_id=checkpoint_dir,
     )
     dist.barrier()
 
@@ -891,7 +1005,18 @@ def test_dcp_resharding_load(recipe_name):
         if rank == 0:
             ref_output = torch.load(ref_output_path, weights_only=True)
 
-            if isinstance(recipe, transformer_engine.common.recipe.DelayedScaling):
+            # DelayedScaling and Float8CurrentScaling use loose tolerance because
+            # Float8Tensor._scale_inv is passed via fsdp_pre_all_gather metadata
+            # rather than as a sharded tensor, so DCP saves it cast to the model's
+            # param_dtype (bf16) instead of fp32. The resulting precision loss in
+            # the reloaded scale_inv prevents bitwise-identical output parity.
+            if isinstance(
+                recipe,
+                (
+                    transformer_engine.common.recipe.DelayedScaling,
+                    transformer_engine.common.recipe.Float8CurrentScaling,
+                ),
+            ):
                 torch.testing.assert_close(
                     loaded_output,
                     ref_output,
@@ -918,6 +1043,7 @@ def test_dcp_resharding_load(recipe_name):
 TESTS = {
     "fused_adam_fp8_master_weights": test_fused_adam_fp8_master_weights,
     "fused_adam_fp8_master_weights_no_meta": test_fused_adam_fp8_master_weights_no_meta,
+    "fused_adam_fp8_high_precision_init": test_fused_adam_fp8_high_precision_init,
     "fused_adam_bf16": test_fused_adam_bf16,
     "fused_adam_fp8_no_master": test_fused_adam_fp8_no_master,
     "fused_adam_bf16_store_param_remainders": test_fused_adam_bf16_store_param_remainders,

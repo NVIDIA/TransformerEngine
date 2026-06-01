@@ -222,6 +222,18 @@ TensorWrapper CommOverlapCore::get_tensor_chunk(const TensorWrapper &source, siz
   TensorWrapper chunk(scaling_mode);
   for (int param_id = 0; param_id < NVTETensorParam::kNVTENumTensorParams; param_id++) {
     auto param_type = static_cast<NVTETensorParam>(param_id);
+    if (param_type == NVTETensorParam::kNVTEWithGEMMSwizzledScales) {
+      chunk.set_with_gemm_swizzled_scales(source.get_with_gemm_swizzled_scales());
+      continue;
+    }
+    if (param_type == NVTETensorParam::kNVTERowScaledNVFP4) {
+      chunk.set_row_scaled_nvfp4(source.get_row_scaled_nvfp4());
+      continue;
+    }
+    if (param_type == NVTETensorParam::kNVTENVFP4E4M3Max) {
+      chunk.set_nvfp4_e4m3_max(source.get_nvfp4_e4m3_max());
+      continue;
+    }
     auto param = source.get_parameter(param_type);
     auto param_dptr = reinterpret_cast<char *>(param.data_ptr);
     auto param_dtype = static_cast<DType>(param.dtype);
@@ -1157,6 +1169,10 @@ void CommOverlapP2PBase::split_overlap_rs(const TensorWrapper &A, bool transa,
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_compute[i], _start_compute, 0));
   }
 
+  // Launch the tiny delay kernel
+  userbuffers_tiny_delay(_stream_send[0]);
+  NVTE_CHECK_CUDA(cudaEventRecord(_start_compute, _stream_send[0]));
+
   // GEMM and send/recv chunks
   for (int i = 0; i < _tp_size; i++) {
     // GEMM chunk
@@ -1169,6 +1185,13 @@ void CommOverlapP2PBase::split_overlap_rs(const TensorWrapper &A, bool transa,
     auto workspace_chunk =
         get_tensor_chunk(workspace, stream_id * workspace_size_chunk, {workspace_size_chunk});
 
+    if (i == 1) {
+      NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_compute[stream_id], _start_compute));
+    } else if (i > 1) {
+      NVTE_CHECK_CUDA(
+          cudaEventRecord(_start_compute, _stream_compute[(i - 2) % _stream_compute.size()]));
+      NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_compute[stream_id], _start_compute));
+    }
     nvte_cublas_gemm(A.data(), input_b_chunk.data(), output_chunk.data(), bias.data(),
                      pre_gelu_out.data(), transa, transb, grad, workspace_chunk.data(), accumulate,
                      use_split_accumulator, _math_sms, _stream_compute[stream_id]);

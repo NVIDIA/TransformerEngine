@@ -35,6 +35,9 @@ pybind11::dict Registrations() {
       pybind11::dict(pybind11::arg("initialize") = EncapsulateFFI(DBiasQuantizeInitializeHandler),
                      pybind11::arg("execute") = EncapsulateFFI(DBiasQuantizeHandler));
   dict["te_grouped_quantize_ffi"] = EncapsulateFFI(GroupedQuantizeHandler);
+  dict["te_grouped_quantize_v2_ffi"] = pybind11::dict(
+      pybind11::arg("initialize") = EncapsulateFFI(GroupedQuantizeV2InitializeHandler),
+      pybind11::arg("execute") = EncapsulateFFI(GroupedQuantizeV2Handler));
   dict["te_dequantize_ffi"] =
       pybind11::dict(pybind11::arg("initialize") = EncapsulateFFI(DequantizeInitializeHandler),
                      pybind11::arg("execute") = EncapsulateFFI(DequantizeHandler));
@@ -128,6 +131,11 @@ pybind11::dict Registrations() {
       pybind11::arg("initialize") = EncapsulateFFI(FusedMoEAuxLossBackwardInitializeHandler),
       pybind11::arg("execute") = EncapsulateFFI(FusedMoEAuxLossBackwardHandler));
 
+  // TopK
+  dict["te_topk_ffi"] =
+      pybind11::dict(pybind11::arg("initialize") = EncapsulateFFI(TopkInitializeHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(TopkHandler));
+
   return dict;
 }
 
@@ -145,6 +153,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("get_norm_bwd_workspace_sizes", &GetNormBackwardWorkspaceSizes);
   m.def("get_fused_attn_fwd_workspace_sizes", &GetFusedAttnForwardWorkspaceSizes);
   m.def("get_fused_attn_bwd_workspace_sizes", &GetFusedAttnBackwardWorkspaceSizes);
+  m.def("get_topk_workspace_sizes", &GetTopkWorkspaceSizes);
   m.def("nvte_get_qkv_format", &nvte_get_qkv_format);
   m.def("is_non_nt_fp8_gemm_supported", &nvte_is_non_tn_fp8_gemm_supported);
   m.def("initialize_cgemm_communicator", &InitializeCgemmCommunicator);
@@ -212,7 +221,6 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
 
   pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend", pybind11::module_local())
       .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend)
-      .value("NVTE_F16_max512_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen)
       .value("NVTE_F16_arbitrary_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen)
       .value("NVTE_FP8", NVTE_Fused_Attn_Backend::NVTE_FP8);
 
