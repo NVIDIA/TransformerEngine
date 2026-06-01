@@ -31,7 +31,8 @@ static at::Tensor allocate_routing_map(c10::IntArrayRef leading_dims, int64_t nu
 std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fwd(
     at::Tensor logits, int topk, bool use_pre_softmax, std::optional<int> num_groups,
     std::optional<int> group_topk, std::optional<float> scaling_factor, std::string score_function,
-    std::optional<at::Tensor> expert_bias, int routing_map_format) {
+    std::optional<at::Tensor> expert_bias, std::optional<at::Tensor> topk_indices,
+    int routing_map_format) {
   TORCH_CHECK(logits.dim() >= 1, "logits must have at least 1 dim");
   TORCH_CHECK(logits.is_contiguous(), "logits must be contiguous");
   auto sizes = logits.sizes();
@@ -62,17 +63,22 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fw
 
   at::Tensor probs = at::empty(sizes, at::dtype(logits.scalar_type()).device(at::kCUDA));
   at::Tensor routing_map =
-      allocate_routing_map(sizes.slice(0, sizes.size() - 1), num_experts, routing_map_format);
+      topk_indices.has_value()
+          ? topk_indices.value()
+          : allocate_routing_map(sizes.slice(0, sizes.size() - 1), num_experts, routing_map_format);
   at::Tensor intermediate_output = at::empty(sizes, at::dtype(at::kFloat).device(at::kCUDA));
 
   // 2D shape for the kernel (common-layer NVTE_CHECKs require {num_tokens, trailing_dim}).
   const std::vector<size_t> shape_2d = {static_cast<size_t>(num_tokens),
                                         static_cast<size_t>(num_experts)};
-  const std::vector<size_t> routing_map_shape_2d = {
-      static_cast<size_t>(num_tokens),
-      static_cast<size_t>(routing_map_format == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8
-                              ? (num_experts + 7) / 8
-                              : num_experts)};
+  const std::vector<size_t> routing_map_shape_2d =
+      topk_indices.has_value()
+          ? std::vector<size_t>{static_cast<size_t>(num_tokens), static_cast<size_t>(topk)}
+          : std::vector<size_t>{
+                static_cast<size_t>(num_tokens),
+                static_cast<size_t>(routing_map_format == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8
+                                        ? (num_experts + 7) / 8
+                                        : num_experts)};
   auto logits_dtype = GetTransformerEngineDType(logits.scalar_type());
   auto routing_map_dtype = GetTransformerEngineDType(routing_map.scalar_type());
 
@@ -87,12 +93,20 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fw
     expert_bias_cu = makeTransformerEngineTensor(expert_bias.value());
   }
 
-  nvte_fused_topk_with_score_function_forward_v2(
-      logits_cu.data(), static_cast<int>(num_tokens), static_cast<int>(num_experts), topk,
-      use_pre_softmax, num_groups_value, group_topk_value, scaling_factor_value,
-      score_function_map[score_function], expert_bias_cu.data(), probs_cu.data(),
-      routing_map_cu.data(), static_cast<NVTERoutingMapFormat>(routing_map_format),
-      intermediate_output_cu.data(), at::cuda::getCurrentCUDAStream());
+  if (topk_indices.has_value()) {
+    nvte_fused_topk_with_score_function_forward_with_indices(
+        logits_cu.data(), static_cast<int>(num_tokens), static_cast<int>(num_experts), topk,
+        use_pre_softmax, num_groups_value, group_topk_value, scaling_factor_value,
+        score_function_map[score_function], expert_bias_cu.data(), probs_cu.data(),
+        routing_map_cu.data(), intermediate_output_cu.data(), at::cuda::getCurrentCUDAStream());
+  } else {
+    nvte_fused_topk_with_score_function_forward_v2(
+        logits_cu.data(), static_cast<int>(num_tokens), static_cast<int>(num_experts), topk,
+        use_pre_softmax, num_groups_value, group_topk_value, scaling_factor_value,
+        score_function_map[score_function], expert_bias_cu.data(), probs_cu.data(),
+        routing_map_cu.data(), static_cast<NVTERoutingMapFormat>(routing_map_format),
+        intermediate_output_cu.data(), at::cuda::getCurrentCUDAStream());
+  }
 
   return std::make_tuple(probs, routing_map, intermediate_output);
 }
@@ -100,7 +114,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fw
 void fused_topk_with_score_function_bwd(at::Tensor routing_map, at::Tensor intermediate_output,
                                         at::Tensor grad_probs, at::Tensor grad_logits, int topk,
                                         bool use_pre_softmax, std::optional<float> scaling_factor,
-                                        std::string score_function, int routing_map_format) {
+                                        std::string score_function, bool use_dense_indices,
+                                        int routing_map_format) {
   TORCH_CHECK(grad_probs.dim() >= 1, "grad_probs must have at least 1 dim");
   TORCH_CHECK(grad_probs.is_contiguous(), "grad_probs must be contiguous");
   TORCH_CHECK(grad_logits.is_contiguous(), "grad_logits must be contiguous");
@@ -116,9 +131,11 @@ void fused_topk_with_score_function_bwd(at::Tensor routing_map, at::Tensor inter
                                         static_cast<size_t>(num_experts)};
   const std::vector<size_t> routing_map_shape_2d = {
       static_cast<size_t>(num_tokens),
-      static_cast<size_t>(routing_map_format == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8
-                              ? (num_experts + 7) / 8
-                              : num_experts)};
+      static_cast<size_t>(use_dense_indices
+                              ? topk
+                              : (routing_map_format == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8
+                                     ? (num_experts + 7) / 8
+                                     : num_experts))};
   auto grad_dtype = GetTransformerEngineDType(grad_probs.scalar_type());
   auto routing_map_dtype = GetTransformerEngineDType(routing_map.scalar_type());
 
@@ -129,11 +146,19 @@ void fused_topk_with_score_function_bwd(at::Tensor routing_map, at::Tensor inter
   auto grad_probs_cu = makeTransformerEngineTensor(grad_probs.data_ptr(), shape_2d, grad_dtype);
   auto grad_logits_cu = makeTransformerEngineTensor(grad_logits.data_ptr(), shape_2d, grad_dtype);
 
-  nvte_fused_topk_with_score_function_backward_v2(
-      routing_map_cu.data(), static_cast<NVTERoutingMapFormat>(routing_map_format),
-      intermediate_output_cu.data(), grad_probs_cu.data(), static_cast<int>(num_tokens),
-      static_cast<int>(num_experts), topk, use_pre_softmax, scaling_factor_value,
-      score_function_value, grad_logits_cu.data(), at::cuda::getCurrentCUDAStream());
+  if (use_dense_indices) {
+    nvte_fused_topk_with_score_function_backward_with_indices(
+        routing_map_cu.data(), intermediate_output_cu.data(), grad_probs_cu.data(),
+        static_cast<int>(num_tokens), static_cast<int>(num_experts), topk, use_pre_softmax,
+        scaling_factor_value, score_function_value, grad_logits_cu.data(),
+        at::cuda::getCurrentCUDAStream());
+  } else {
+    nvte_fused_topk_with_score_function_backward_v2(
+        routing_map_cu.data(), static_cast<NVTERoutingMapFormat>(routing_map_format),
+        intermediate_output_cu.data(), grad_probs_cu.data(), static_cast<int>(num_tokens),
+        static_cast<int>(num_experts), topk, use_pre_softmax, scaling_factor_value,
+        score_function_value, grad_logits_cu.data(), at::cuda::getCurrentCUDAStream());
+  }
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_score_for_moe_aux_loss_fwd(

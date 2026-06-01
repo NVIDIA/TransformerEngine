@@ -139,13 +139,13 @@ void init_router_bindings(pybind11::module &m) {
   m.def("fused_topk_with_score_function_fwd", &fused_topk_with_score_function_fwd,
         py::arg("logits"), py::arg("topk"), py::arg("use_pre_softmax"), py::arg("num_groups"),
         py::arg("group_topk"), py::arg("scaling_factor"), py::arg("score_function"),
-        py::arg("expert_bias"),
+        py::arg("expert_bias"), py::arg("topk_indices") = std::nullopt,
         py::arg("routing_map_format") = static_cast<int>(NVTE_ROUTING_MAP_FORMAT_BYTEMAP),
         "Fused topk with score function fwd");
   m.def("fused_topk_with_score_function_bwd", &fused_topk_with_score_function_bwd,
         py::arg("routing_map"), py::arg("intermediate_output"), py::arg("grad_probs"),
         py::arg("grad_logits"), py::arg("topk"), py::arg("use_pre_softmax"),
-        py::arg("scaling_factor"), py::arg("score_function"),
+        py::arg("scaling_factor"), py::arg("score_function"), py::arg("use_dense_indices") = false,
         py::arg("routing_map_format") = static_cast<int>(NVTE_ROUTING_MAP_FORMAT_BYTEMAP),
         "Fused topk with score function bwd");
   m.def("fused_score_for_moe_aux_loss_fwd", &fused_score_for_moe_aux_loss_fwd, py::arg("logits"),

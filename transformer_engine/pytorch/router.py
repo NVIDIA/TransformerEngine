@@ -83,9 +83,14 @@ class FusedTopkScoreFunction(torch.autograd.Function):
         score_function: str,
         expert_bias: Optional[torch.Tensor],
         routing_map_format: int,
+        topk_indices: Optional[torch.Tensor],
     ):
         # pylint: disable=missing-function-docstring
-        probs, routing_map, intermediate_output = tex.fused_topk_with_score_function_fwd(
+        tensor_shape = logits.shape
+        logits = logits.view(-1, tensor_shape[-1])
+        num_tokens = logits.size(0)
+        num_experts = logits.size(1)
+        probs, routing_output, intermediate_output = tex.fused_topk_with_score_function_fwd(
             logits,
             topk,
             use_pre_softmax,
@@ -94,23 +99,35 @@ class FusedTopkScoreFunction(torch.autograd.Function):
             scaling_factor,
             score_function,
             expert_bias,
+            topk_indices,
             routing_map_format,
         )
-        ctx.save_for_backward(routing_map, intermediate_output)
+        if topk_indices is not None:
+            routing_output = topk_indices
+        probs = probs.view(tensor_shape)
+        if topk_indices is not None:
+            ctx.mark_dirty(topk_indices)
+        ctx.save_for_backward(routing_output, intermediate_output)
+        ctx.num_tokens = num_tokens
+        ctx.num_experts = num_experts
+        ctx.tensor_shape = tensor_shape
         ctx.use_pre_softmax = use_pre_softmax
         ctx.topk = topk
         ctx.scaling_factor = scaling_factor
         ctx.score_function = score_function
         ctx.routing_map_format = routing_map_format
-        return probs, routing_map
+        ctx.logits_dtype = logits.dtype
+        ctx.use_dense_indices = topk_indices is not None
+        return probs, routing_output
 
     @staticmethod
     def backward(ctx, grad_probs, _):
         # pylint: disable=missing-function-docstring
         routing_map, intermediate_output = ctx.saved_tensors
-        if not grad_probs.is_contiguous():
-            grad_probs = grad_probs.contiguous()
-        grad_logits = torch.empty_like(grad_probs)
+        grad_probs = grad_probs.contiguous().view(-1, ctx.tensor_shape[-1])
+        grad_logits = torch.empty(
+            (ctx.num_tokens, ctx.num_experts), dtype=ctx.logits_dtype, device=grad_probs.device
+        )
         tex.fused_topk_with_score_function_bwd(
             routing_map,
             intermediate_output,
@@ -120,9 +137,11 @@ class FusedTopkScoreFunction(torch.autograd.Function):
             ctx.use_pre_softmax,
             ctx.scaling_factor,
             ctx.score_function,
+            ctx.use_dense_indices,
             ctx.routing_map_format,
         )
-        return grad_logits, None, None, None, None, None, None, None, None
+        grad_logits = grad_logits.view(ctx.tensor_shape)
+        return grad_logits, None, None, None, None, None, None, None, None, None
 
 
 def fused_topk_with_score_function(
@@ -135,6 +154,7 @@ def fused_topk_with_score_function(
     score_function: str,
     expert_bias: Optional[torch.Tensor],
     routing_map_format: Union[str, RoutingMapFormat, int] = RoutingMapFormat.BYTEMAP,
+    topk_indices: Optional[torch.Tensor] = None,
 ):
     """
     Fused topk with score function router.
@@ -159,6 +179,9 @@ def fused_topk_with_score_function(
         ``RoutingMapFormat.BITMAP_U8`` returns a uint8[T, ceil(E/8)] tensor with
         bit ``(e % 8)`` of byte ``(e / 8)`` set when token ``t`` routes to expert
         ``e`` (LSB-first / little-endian packing along the expert axis).
+    topk_indices : torch.Tensor, optional
+        Optional output buffer with shape [num_tokens, topk]. When provided, its dtype
+        controls the dense index output dtype and the routing map is not materialized.
 
     Returns
     -------
@@ -166,7 +189,7 @@ def fused_topk_with_score_function(
         Same shape as ``logits``.
     routing_map : torch.Tensor
         Same leading dims as ``logits``; trailing dim and dtype depend on
-        routing_map_format:
+        routing_map_format, or dense top-k indices when topk_indices is provided:
         - BYTEMAP:   bool[*logits.shape[:-1], num_experts]
         - BITMAP_U8: uint8[*logits.shape[:-1], ceil(num_experts/8)]
           LSB-first bit-packed.
@@ -184,6 +207,7 @@ def fused_topk_with_score_function(
         score_function,
         expert_bias,
         routing_map_format,
+        topk_indices,
     )
 
 

@@ -569,6 +569,10 @@ __device__ __forceinline__ void topk_and_mask(CompType *scores, int data_size, i
 #define TE_ROUTER_INDEX_TYPE_SWITCH_ALL(dtype, type, ...)                                 \
   switch (dtype) {                                                                        \
     using namespace transformer_engine;                                                   \
+    case DType::kInt16: {                                                                 \
+      using type = int16_t;                                                               \
+      { __VA_ARGS__ }                                                                     \
+    } break;                                                                              \
     case DType::kInt32: {                                                                 \
       using type = int32_t;                                                               \
       { __VA_ARGS__ }                                                                     \
@@ -587,7 +591,7 @@ __device__ __forceinline__ void topk_and_mask(CompType *scores, int data_size, i
     } break;                                                                              \
     default:                                                                              \
       NVTE_ERROR("Unsupported router index dtype ", to_string(static_cast<DType>(dtype)), \
-                 ". Expected one of: Int32, Int64, BFloat16, "                            \
+                 ". Expected one of: Int16, Int32, Int64, BFloat16, "                     \
                  "Float32.");                                                             \
   }
 }  // namespace fused_router
