@@ -8,9 +8,9 @@ import pandas as pd
 import torch.utils.benchmark as benchmark
 
 import transformer_engine.pytorch as te
+from transformer_engine.pytorch import constants
 import transformer_engine.pytorch.cpp_extensions as ext
 
-from transformer_engine.pytorch import constants
 from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 
 scale_padding_to = 1

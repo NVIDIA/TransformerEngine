@@ -133,8 +133,9 @@ try:
             MXFP8Quantizer,
             NVFP4Quantizer,
             Float8BlockQuantizer,
-            constants.DType,
             # Python IntEnum used as Quantizer.dtype.
+            constants.DType,
+            # pybind11 enum used as Quantizer.dtype.
             # Kept for backward compatibility.
             tex.DType,
             # __reduce_ex__ reconstructors (module-level functions).

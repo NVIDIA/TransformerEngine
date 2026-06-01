@@ -16,11 +16,29 @@
 namespace transformer_engine {
 namespace pybind_detail {
 
-/*! @brief Per-value cache of ``tex.DType`` enum objects keyed by enum value. */
+/*! @brief Per-value cache of ``tex.DType`` enum PyObject* objects keyed by enum value. */
 inline std::array<PyObject *, static_cast<size_t>(transformer_engine::DType::kNumTypes)> &
 cached_dtype_objects() {
   static std::array<PyObject *, static_cast<size_t>(transformer_engine::DType::kNumTypes)> cache{};
   return cache;
+}
+
+/*! @brief Construct a ``transformer_engine_torch.DType(value)`` object once.
+ * Returns a new strong reference, or ``nullptr`` (with the Python error cleared)
+ * on failure.
+ */
+inline PyObject *construct_dtype_object(long value, PyTypeObject *type) {
+  PyObject *arg = PyLong_FromLong(value);
+  if (arg == nullptr) {
+    PyErr_Clear();
+    return nullptr;
+  }
+  PyObject *obj = PyObject_CallFunctionObjArgs(reinterpret_cast<PyObject *>(type), arg, nullptr);
+  Py_DECREF(arg);
+  if (obj == nullptr) {
+    PyErr_Clear();
+  }
+  return obj;
 }
 
 /*! @brief Implicit-conversion function registered on the pybind ``DType`` enum.
@@ -33,12 +51,13 @@ cached_dtype_objects() {
  * transformer_engine_torch.DType.
  */
 inline PyObject *cached_int_to_dtype(PyObject *src, PyTypeObject *type) {
-  // Only plain ints / IntEnum subclasses are handled here (matches the
-  // behavior of pybind's ``int`` caster used by the original converter).
+  // Only plain ints / IntEnum subclasses are handled here.
+  // src --> constants.DType IntEnum object from transformer_engine.pytorch
+  // type --> transformer_engine_torch.DType PyTypeObject*
   if (!PyLong_Check(src)) {
     return nullptr;
   }
-  const long value = PyLong_AsLong(src);  // NOLINT(runtime/int)
+  const long value = PyLong_AsLong(src);
   if (value == -1 && PyErr_Occurred()) {
     PyErr_Clear();
     return nullptr;
@@ -46,26 +65,16 @@ inline PyObject *cached_int_to_dtype(PyObject *src, PyTypeObject *type) {
   if (value < 0 || value >= static_cast<long>(transformer_engine::DType::kNumTypes)) {
     return nullptr;
   }
-  auto &cache = cached_dtype_objects();
-  PyObject *cached = cache[static_cast<size_t>(value)];
-  if (cached == nullptr) {
-    // First use of this value: construct ``DType(value)`` once and keep a
-    // strong reference for the lifetime of the process.
-    PyObject *arg = PyLong_FromLong(value);
-    if (arg == nullptr) {
-      PyErr_Clear();
+  // cached_dtype_object --> transformer_engine_torch.DType(value) PyObject*
+  PyObject *&cached_dtype_object = cached_dtype_objects()[static_cast<size_t>(value)];
+  if (cached_dtype_object == nullptr) {
+    cached_dtype_object = construct_dtype_object(value, type);
+    if (cached_dtype_object == nullptr) {
       return nullptr;
     }
-    cached = PyObject_CallFunctionObjArgs(reinterpret_cast<PyObject *>(type), arg, nullptr);
-    Py_DECREF(arg);
-    if (cached == nullptr) {
-      PyErr_Clear();
-      return nullptr;
-    }
-    cache[static_cast<size_t>(value)] = cached;
   }
-  Py_INCREF(cached);
-  return cached;
+  Py_INCREF(cached_dtype_object);
+  return cached_dtype_object;
 }
 
 /*! @brief Register the Python -> C++ ``DType`` implicit conversion.
