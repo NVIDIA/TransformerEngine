@@ -581,14 +581,11 @@ class _BackwardGroupedMLP_CuTeGEMMDBase(FusedOperation):
             fc2_weight_col_amax = _nvfp4_amax(grouped_fc2_weight, columnwise=True)
             if activation_is_srelu:
                 fc2_alpha_tensor = (
-                    fc2_dy_amax
-                    * fc2_weight_col_amax
-                    / (nvfp4_fp4_max**2 * nvfp4_fp8_max**2)
+                    fc2_dy_amax * fc2_weight_col_amax / (nvfp4_fp4_max**2 * nvfp4_fp8_max**2)
                 ).to(torch.float32)
             else:
                 fc2_alpha_tensor = (
-                    torch.sqrt(fc2_dy_amax * fc2_weight_col_amax)
-                    / (nvfp4_fp8_max * nvfp4_fp4_max)
+                    torch.sqrt(fc2_dy_amax * fc2_weight_col_amax) / (nvfp4_fp8_max * nvfp4_fp4_max)
                 ).expand(num_groups)
             fc2_beta_tensor = get_cached_ones_tensor(num_groups, torch.float32, device)
             fc2_norm_const_tensor = None
@@ -708,9 +705,7 @@ class _BackwardGroupedMLP_CuTeGEMMDBase(FusedOperation):
                 )
 
             if use_nvfp4:
-                fc2_x_bf16 = d_srelu_tensor.view(
-                    out_shape[0], fc2_weight_shape[1]
-                ).contiguous()
+                fc2_x_bf16 = d_srelu_tensor.view(out_shape[0], fc2_weight_shape[1]).contiguous()
                 fc2_input_quantizer = fc2_ctx.input_quantizers[0]
                 fc2_input_quantizer.set_usage(rowwise=True, columnwise=True)
                 fc2_input_quantizer.optimize_for_gemm = True
