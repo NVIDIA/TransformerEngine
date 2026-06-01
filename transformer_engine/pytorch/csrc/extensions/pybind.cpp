@@ -603,17 +603,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>(), py::arg("allgather_communicator"),
         py::arg("send_stream"), py::arg("recv_stream"));
 
-  // Helpers for experimental fused grouped MLP
-  //
-  // These are intended for compatibility with cuDNN CuTe DSL grouped
-  // GEMM kernels. Since those are unstable and under active
-  // development, these helpers should also be considered unstable.
+  // Experimental fused grouped MLP
   auto grouped_mlp_experimental = m.def_submodule(
       "grouped_mlp_experimental",
       "Experimental helpers for the fused grouped MLP (unstable, may change or disappear).");
-  grouped_mlp_experimental.def("transform_and_copy_data_ptrs_to_device",
-                               &transformer_engine::pytorch::transform_and_copy_data_ptrs_to_device,
-                               py::arg("transform_type"), py::arg("tensors"), py::arg("device"),
+  grouped_mlp_experimental.def("swizzle_scales_and_pack_ptrs_for_discrete_weights",
+                               &transformer_engine::pytorch::swizzle_scales_and_pack_ptrs_for_discrete_weights,
+                               py::arg("data_tensors"), py::arg("scale_tensors"),
+                               py::arg("format"), py::arg("device"),
                                py::call_guard<py::gil_scoped_release>());
 
   // Data structures
