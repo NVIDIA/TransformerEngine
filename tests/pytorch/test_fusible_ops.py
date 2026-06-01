@@ -21,6 +21,7 @@ import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch.ops._common import (
+    _cudnn_frontend_supports_grouped_gemm_srelu,
     _cudnn_frontend_version_supported,
     is_glu_activation,
 )
@@ -4004,7 +4005,12 @@ class TestSequentialModules:
             fc2.backward_dw()
 
         # Check for expected fusions
-        expected_grouped_mlp_fusion = _cudnn_frontend_version_supported() and (
+        cudnn_frontend_supports_grouped_mlp = (
+            _cudnn_frontend_supports_grouped_gemm_srelu()
+            if activation == "scaled_srelu"
+            else _cudnn_frontend_version_supported()
+        )
+        expected_grouped_mlp_fusion = cudnn_frontend_supports_grouped_mlp and (
             (
                 quantization == "mxfp8"
                 and dtype in (torch.bfloat16, torch.float16)
