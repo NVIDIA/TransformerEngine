@@ -32,11 +32,39 @@ from transformer_engine.pytorch import (
     is_fp8_block_scaling_available,
     is_nvfp4_available,
 )
+from utils import recipe_id
 
 fp8_available, reason_for_no_fp8 = is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = is_mxfp8_available(return_reason=True)
 fp8_block_scaling_available = is_fp8_block_scaling_available()
 nvfp4_available = is_nvfp4_available()
+
+
+def nvfp4_row_scaled():
+    nvfp4_recipe = recipe.NVFP4BlockScaling(
+        disable_rht=True,
+        disable_stochastic_rounding=True,
+        disable_2d_quantization=True,
+        row_scaled_activation=True,
+        backward_override="dequantized",
+    )
+    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
+    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
+    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
+    return nvfp4_recipe
+
+
+def nvfp4_4over6():
+    nvfp4_recipe = recipe.NVFP4BlockScaling(
+        disable_rht=True,
+        disable_stochastic_rounding=True,
+        nvfp4_4over6="all",
+    )
+    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
+    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams(fp4_2d_quantization=True)
+    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
+    return nvfp4_recipe
+
 
 _all_recipes: list = []
 if fp8_available:
@@ -47,6 +75,8 @@ if mxfp8_available:
     _all_recipes.append(recipe.MXFP8BlockScaling())
 if nvfp4_available:
     _all_recipes.append(recipe.NVFP4BlockScaling())
+    _all_recipes.append(nvfp4_4over6())
+    _all_recipes.append(nvfp4_row_scaled())
 
 
 # ---------------------------------------------------------------------------
@@ -95,8 +125,19 @@ if _opaque_available:
     def _make_qfactory(tag: str):
         """Return a qfactory that produces ToyQuantizer instances tagged with *tag*."""
 
+        quantizers = {
+            role: ToyQuantizer(tag=f"{tag}:{role}")
+            for role in (
+                "linear_input",
+                "linear_weight",
+                "linear_output",
+                "linear_grad_output",
+                "linear_grad_input",
+            )
+        }
+
         def qfactory(role: str):
-            return ToyQuantizer(tag=f"{tag}:{role}")
+            return quantizers[role]
 
         return qfactory
 
@@ -303,7 +344,7 @@ def test_autocast_nested_custom():
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-@pytest.mark.parametrize("fp8_recipe", _all_recipes, ids=lambda r: type(r).__name__)
+@pytest.mark.parametrize("fp8_recipe", _all_recipes, ids=recipe_id)
 def test_autocast_sanity(fp8_recipe):
     """Smoke test: torch.nn.Linear inside a single te.autocast with each
     built-in recipe. Forward + backward under torch.compile(fullgraph=True)."""

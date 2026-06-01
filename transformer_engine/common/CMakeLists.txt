@@ -159,6 +159,7 @@ list(APPEND transformer_engine_cpp_sources
      util/cuda_runtime.cpp
      util/multi_stream.cpp
      util/rtc.cpp
+     comm_gemm/comm_gemm.cpp
      comm_gemm_overlap/userbuffers/ipcsocket.cc
      comm_gemm_overlap/userbuffers/userbuffers-host.cpp
      comm_gemm_overlap/comm_gemm_overlap.cpp
@@ -181,7 +182,6 @@ list(APPEND transformer_engine_cuda_sources
      dropout/dropout.cu
      fused_attn/context_parallel.cu
      fused_attn/kv_cache.cu
-     fused_attn/fused_attn_f16_max512_seqlen.cu
      fused_attn/fused_attn_f16_arbitrary_seqlen.cu
      fused_attn/fused_attn_fp8.cu
      fused_attn/utils.cu
@@ -212,10 +212,22 @@ list(APPEND transformer_engine_cuda_sources
 list(APPEND transformer_engine_cuda_arch_specific_sources
      fused_attn/flash_attn.cu
      activation/gelu.cu
+     activation/gelu_dbias.cu
+     activation/gelu_grouped.cu
+     activation/gelu_grouped_dbias.cu
      activation/glu.cu
      activation/relu.cu
+     activation/relu_dbias.cu
+     activation/relu_grouped.cu
+     activation/relu_grouped_dbias.cu
      activation/swiglu.cu
+     activation/swiglu_dbias.cu
+     activation/swiglu_grouped.cu
+     activation/swiglu_grouped_dbias.cu
      cast/cast.cu
+     cast/cast_dbias.cu
+     cast/cast_grouped.cu
+     cast/cast_grouped_dbias.cu
      gemm/cutlass_grouped_gemm.cu
      hadamard_transform/group_hadamard_transform.cu
      hadamard_transform/graph_safe_group_hadamard_transform.cu
@@ -279,11 +291,6 @@ foreach(cuda_source IN LISTS transformer_engine_cuda_arch_specific_sources)
     )
   endif()
 endforeach()
-
-if (NVTE_WITH_CUBLASMP)
-list(APPEND transformer_engine_SOURCES
-     comm_gemm/comm_gemm.cpp)
-endif()
 
 add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 # Disable CMake's automatic architecture flag injection.
@@ -452,9 +459,18 @@ list(APPEND nvte_sources_with_fast_math fused_softmax/scaled_masked_softmax.cu
 option(NVTE_BUILD_ACTIVATION_WITH_FAST_MATH "Compile activation kernels with --use_fast_math option" OFF)
 if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
   list(APPEND nvte_sources_with_fast_math activation/gelu.cu
+                                          activation/gelu_dbias.cu
+                                          activation/gelu_grouped.cu
+                                          activation/gelu_grouped_dbias.cu
                                           activation/glu.cu
                                           activation/relu.cu
-                                          activation/swiglu.cu)
+                                          activation/relu_dbias.cu
+                                          activation/relu_grouped.cu
+                                          activation/relu_grouped_dbias.cu
+                                          activation/swiglu.cu
+                                          activation/swiglu_dbias.cu
+                                          activation/swiglu_grouped.cu
+                                          activation/swiglu_grouped_dbias.cu)
 endif()
 
 foreach(cuda_source IN LISTS nvte_sources_with_fast_math)

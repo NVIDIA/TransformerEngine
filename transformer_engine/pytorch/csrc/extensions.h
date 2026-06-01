@@ -274,10 +274,11 @@ py::object swiglu(const at::Tensor &input, py::handle quantizer);
 
 py::object dswiglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
 
-py::object clamped_swiglu(const at::Tensor &input, py::handle quantizer, float limit, float alpha);
+py::object clamped_swiglu(const at::Tensor &input, py::handle quantizer, float limit, float alpha,
+                          float glu_linear_offset);
 
 py::object clamped_dswiglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer,
-                           float limit, float alpha);
+                           float limit, float alpha, float glu_linear_offset);
 /***************************************************************************************************
  * LayerNorm
  **************************************************************************************************/
@@ -310,8 +311,21 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
                                     const int sm_margin, const bool zero_centered_gamma);
 
 /***************************************************************************************************
- * Cast
+ * Memory allocation
  **************************************************************************************************/
+
+// Allocates tensors all backed by a single contiguous buffer.
+std::vector<at::Tensor> bulk_allocate(const std::vector<std::vector<size_t>> &shapes,
+                                      const std::vector<at::ScalarType> &dtypes,
+                                      std::optional<c10::Device> device = std::nullopt,
+                                      std::optional<std::vector<size_t>> alignments = std::nullopt);
+
+/***************************************************************************************************
+ * Quantize
+ **************************************************************************************************/
+
+py::object create_empty_quantized_tensor(py::handle quantizer, const std::vector<size_t> &shape,
+                                         at::ScalarType dtype, at::Device device, bool pin_memory);
 
 py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::object &output,
                     std::optional<at::Tensor> noop_flag);
@@ -471,13 +485,14 @@ size_t get_cublasLt_version();
 
 size_t get_cudnn_version();
 
-std::vector<at::Tensor> convert_host_pointers_to_tensor(
-    std::vector<std::vector<at::Tensor>> tensor_lists);
-
-std::tuple<at::Tensor, at::Tensor, at::Tensor> get_device_pointer_for_data_and_scales(
-    std::vector<at::Tensor> data_tensors, std::vector<at::Tensor> scale_tensors, bool swizzle,
-    bool rowwise, transformer_engine::DType data_dtype);
 at::Tensor splits_to_offsets(const at::Tensor &first_dims, int64_t logical_last_dim);
+
+at::Tensor copy_data_ptrs_to_device(const std::vector<at::Tensor> &tensors,
+                                    const c10::Device &device);
+
+std::tuple<at::Tensor, std::optional<at::Tensor>> transform_and_copy_data_ptrs_to_device(
+    const std::string &transform_type, const std::vector<at::Tensor> &tensors,
+    const c10::Device &device);
 
 /***************************************************************************************************
  * Support THD format for Context Parallel

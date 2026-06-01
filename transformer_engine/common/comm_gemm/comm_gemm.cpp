@@ -6,7 +6,6 @@
 
 #include "transformer_engine/comm_gemm.h"
 
-#include <cublasmp.h>
 #include <cuda_runtime.h>
 
 #include <map>
@@ -20,6 +19,10 @@
 
 #include "../common.h"
 #include "../util/logging.h"
+
+#ifdef NVTE_WITH_CUBLASMP
+
+#include <cublasmp.h>
 
 using namespace transformer_engine;
 
@@ -127,12 +130,9 @@ int64_t block_size(NVTECommGemmCtx* ctx, int64_t global_size) {
 void AgGemmInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n, int64_t k,
                         const Tensor* a, const Tensor* b, const Tensor* d, bool transa,
                         bool transb) {
-  const auto a0 = a->flat_first_dim();
-  const auto a1 = a->flat_last_dim();
-  const auto b0 = b->flat_first_dim();
-  const auto b1 = b->flat_last_dim();
-  const auto d0 = d->flat_first_dim();
-  const auto d1 = d->flat_last_dim();
+  const auto [a0, a1] = a->flat_2d_dims();
+  const auto [b0, b1] = b->flat_2d_dims();
+  const auto [d0, d1] = d->flat_2d_dims();
 
   if (transa) {
     NVTE_CHECK(a1 == k, "Unsupported tensor dimension in A: expected ", k, ", got ", a1);
@@ -166,12 +166,9 @@ void AgGemmInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n
 void GemmRsInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n, int64_t k,
                         const Tensor* a, const Tensor* b, const Tensor* d, bool transa,
                         bool transb) {
-  const auto a0 = a->flat_first_dim();
-  const auto a1 = a->flat_last_dim();
-  const auto b0 = b->flat_first_dim();
-  const auto b1 = b->flat_last_dim();
-  const auto d0 = d->flat_first_dim();
-  const auto d1 = d->flat_last_dim();
+  const auto [a0, a1] = a->flat_2d_dims();
+  const auto [b0, b1] = b->flat_2d_dims();
+  const auto [d0, d1] = d->flat_2d_dims();
 
   if (transa) {
     NVTE_CHECK(a0 == m, "Unsupported tensor dimension in A: expected ", m, ", got ", a0);
@@ -210,12 +207,9 @@ void GemmRsInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n
 void GemmArInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n, int64_t k,
                         const Tensor* a, const Tensor* b, const Tensor* d, bool transa,
                         bool transb) {
-  const auto a0 = a->flat_first_dim();
-  const auto a1 = a->flat_last_dim();
-  const auto b0 = b->flat_first_dim();
-  const auto b1 = b->flat_last_dim();
-  const auto d0 = d->flat_first_dim();
-  const auto d1 = d->flat_last_dim();
+  const auto [a0, a1] = a->flat_2d_dims();
+  const auto [b0, b1] = b->flat_2d_dims();
+  const auto [d0, d1] = d->flat_2d_dims();
 
   if (transa) {
     NVTE_CHECK(a0 == m, "Unsupported tensor dimension in A: expected ", m, ", got ", a0);
@@ -530,3 +524,45 @@ int64_t nvte_comm_gemm_numroc(NVTECommGemmCtx* ctx, int64_t global_size) {
   NVTE_API_CALL(nvte_comm_gemm_numroc);
   return cublasMpNumroc(global_size, block_size(ctx, global_size), ctx->rank, 0, ctx->nranks);
 }
+
+#else  // NVTE_WITH_CUBLASMP
+
+struct NVTECommGemmCtx {};
+
+NVTECommGemmCtx* nvte_comm_gemm_ctx_create(ncclComm_t comm, int nranks, int rank) {
+  NVTE_ERROR("Transformer Engine has not been built with cuBLASMp support.");
+}
+
+void nvte_comm_gemm_ctx_destroy(NVTECommGemmCtx* ctx) {
+  NVTE_ERROR("Transformer Engine has not been built with cuBLASMp support.");
+}
+
+void nvte_all_gather_gemm(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const NVTETensor a,
+                          const NVTETensor b, const NVTETensor d, const NVTETensor bias,
+                          const NVTETensor pre_act_out, bool transa, bool transb, bool grad,
+                          bool accumulate, int comm_sm_count, cudaStream_t main_stream,
+                          NVTECommGemmAlgoType algo) {
+  NVTE_ERROR("Transformer Engine has not been built with cuBLASMp support.");
+}
+
+void nvte_gemm_reduce_scatter(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k,
+                              const NVTETensor a, const NVTETensor b, const NVTETensor d,
+                              const NVTETensor bias, const NVTETensor pre_act_out, bool transa,
+                              bool transb, bool grad, bool accumulate, int comm_sm_count,
+                              cudaStream_t main_stream, NVTECommGemmAlgoType algo) {
+  NVTE_ERROR("Transformer Engine has not been built with cuBLASMp support.");
+}
+
+void nvte_gemm_all_reduce(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const NVTETensor a,
+                          const NVTETensor b, const NVTETensor d, const NVTETensor bias,
+                          const NVTETensor pre_act_out, bool transa, bool transb, bool grad,
+                          bool accumulate, int comm_sm_count, cudaStream_t main_stream,
+                          NVTECommGemmAlgoType algo) {
+  NVTE_ERROR("Transformer Engine has not been built with cuBLASMp support.");
+}
+
+int64_t nvte_comm_gemm_numroc(NVTECommGemmCtx* ctx, int64_t global_size) {
+  NVTE_ERROR("Transformer Engine has not been built with cuBLASMp support.");
+}
+
+#endif  // NVTE_WITH_CUBLASMP
