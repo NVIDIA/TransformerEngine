@@ -20,6 +20,30 @@ from mxfp8_utils import swizzle_mxfp8_scale, get_mxfp8_scale_shape_no_padding
 recipe_available, reason_for_no_recipe = te.is_mxfp8_available(return_reason=True)
 
 
+def poison_mxfp8_scale_padding_with_nan(
+    scale: torch.Tensor,
+    valid_shape: Tuple[int, int],
+) -> torch.Tensor:
+    """Fill only the padded part of a compact MXFP8 scale tensor with NaNs."""
+    scale = scale.clone()
+    scale_e8m0 = scale.view(dtype=torch.float8_e8m0fnu)
+    scale_e8m0[valid_shape[0] :, :] = float("nan")
+    scale_e8m0[:, valid_shape[1] :] = float("nan")
+    return scale
+
+
+def zero_mxfp8_scale_padding(
+    scale: torch.Tensor,
+    valid_shape: Tuple[int, int],
+) -> torch.Tensor:
+    """Zero only the padded part of a compact MXFP8 scale tensor."""
+    scale = scale.clone()
+    scale_uint8 = scale.view(dtype=torch.uint8)
+    scale_uint8[valid_shape[0] :, :] = 0
+    scale_uint8[:, valid_shape[1] :] = 0
+    return scale
+
+
 def unpack_quantized_tensor(
     quantized_tensor: MXFP8TensorStorage,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -130,3 +154,57 @@ def test_mxfp8_quantize_swizzle_fusion(
         return_rowwise=return_rowwise,
         return_transpose=return_transpose,
     )
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("columnwise", [False, True])
+def test_mxfp8_pointer_swizzle_uses_unpadded_data_shape(columnwise: bool) -> None:
+    # This shape has valid MXFP8 blocks, but its scale tensor needs padding:
+    # rowwise scale is padded from (160, 3) to (256, 4), columnwise from
+    # (5, 96) to (8, 128).
+    M, N = 160, 96
+    x = torch.randn((M, N), dtype=torch.bfloat16, device="cuda")
+    quantizer = MXFP8Quantizer(
+        fp8_dtype=tex.DType.kFloat8E4M3,
+        rowwise=not columnwise,
+        columnwise=columnwise,
+    )
+    quantized = quantizer(x)
+    valid_scale_shape = get_mxfp8_scale_shape_no_padding(x.shape, columnwise)
+
+    if columnwise:
+        scale = quantized._columnwise_scale_inv
+        transform_type = "uniform_mxfp8_columnwise_swizzle"
+        inferred_padded_shape = (scale.shape[0] * 32, scale.shape[1])
+    else:
+        scale = quantized._rowwise_scale_inv
+        transform_type = "uniform_mxfp8_rowwise_swizzle"
+        inferred_padded_shape = (scale.shape[0], scale.shape[1] * 32)
+
+    # Poison padded scale values with E8M0 NaNs. If swizzle reconstructs the
+    # data shape from the padded scale shape, these values are considered real
+    # and survive.
+    scale = poison_mxfp8_scale_padding_with_nan(scale, valid_scale_shape)
+
+    # With the actual data shape, swizzle should treat the poisoned bytes as
+    # padding. Build the expected output by zeroing that padding before the
+    # Python reference swizzle.
+    expected_compact_scale = zero_mxfp8_scale_padding(scale, valid_scale_shape)
+    padded_M, padded_N = inferred_padded_shape
+    expected = swizzle_mxfp8_scale(
+        padded_M,
+        padded_N,
+        expected_compact_scale,
+        columnwise=columnwise,
+    )
+
+    _, swizzled_buffer = tex.transform_and_copy_data_ptrs_to_device(
+        transform_type,
+        [scale],
+        x.device,
+        x.shape,
+    )
+    torch.cuda.synchronize()
+    actual = swizzled_buffer[: scale.numel()].view(dtype=expected.dtype).view_as(expected)
+
+    torch.testing.assert_close(actual, expected, atol=0.0, rtol=0.0)

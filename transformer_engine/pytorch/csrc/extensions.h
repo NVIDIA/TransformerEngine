@@ -492,7 +492,7 @@ at::Tensor copy_data_ptrs_to_device(const std::vector<at::Tensor> &tensors,
 
 std::tuple<at::Tensor, std::optional<at::Tensor>> transform_and_copy_data_ptrs_to_device(
     const std::string &transform_type, const std::vector<at::Tensor> &tensors,
-    const c10::Device &device);
+    const c10::Device &device, const std::vector<int64_t> &actual_data_shape = {});
 
 /***************************************************************************************************
  * Support THD format for Context Parallel

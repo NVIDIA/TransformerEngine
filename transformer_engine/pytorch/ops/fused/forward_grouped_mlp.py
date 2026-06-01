@@ -389,6 +389,7 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
                 "uniform_mxfp8_rowwise_swizzle",
                 [w._rowwise_scale_inv for w in grouped_fc1_weight],
                 device,
+                fc1_weight_shape,
             )
             fc1_activation_kwargs["b_ptrs"] = fc1_b_ptrs
             fc1_activation_kwargs["sfb_ptrs"] = fc1_sfb_ptrs
@@ -490,6 +491,7 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
                 "uniform_mxfp8_rowwise_swizzle",
                 [w._rowwise_scale_inv for w in grouped_fc2_weight],
                 device,
+                fc2_weight_shape,
             )
             fc2_quant_kwargs["b_ptrs"] = fc2_b_ptrs
             fc2_quant_kwargs["sfb_ptrs"] = fc2_sfb_ptrs

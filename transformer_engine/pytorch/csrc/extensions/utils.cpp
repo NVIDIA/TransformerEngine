@@ -40,7 +40,7 @@ at::Tensor copy_data_ptrs_to_device(const std::vector<at::Tensor> &tensors,
 
 std::tuple<at::Tensor, std::optional<at::Tensor>> transform_and_copy_data_ptrs_to_device(
     const std::string &transform_type, const std::vector<at::Tensor> &tensors,
-    const c10::Device &device) {
+    const c10::Device &device, const std::vector<int64_t> &actual_data_shape) {
   const size_t num_tensors = tensors.size();
 
   // Trivial cases
@@ -93,12 +93,15 @@ std::tuple<at::Tensor, std::optional<at::Tensor>> transform_and_copy_data_ptrs_t
     const size_t scale_dtype_bits = transformer_engine::pytorch::typeToNumBits(scale_dtype);
     const size_t scale_bytes = ceildiv(scale_numel * scale_dtype_bits, 8);
 
-    // Expected data shape
-    // Note: May not match actual data shape since the scales are padded.
-    // This is fine since we're not actually touching the data.
+    // Swizzle uses data shape to mask padded scale blocks.
     NVTEShape data_shape;
     data_shape.ndim = 2;
-    if (uniform_mxfp8_rowwise_swizzle) {
+    if (!actual_data_shape.empty()) {
+      NVTE_CHECK(actual_data_shape.size() == 2, "Expected 2D data shape, but got ",
+                 actual_data_shape.size(), " dimensions.");
+      data_shape.data[0] = static_cast<size_t>(actual_data_shape[0]);
+      data_shape.data[1] = static_cast<size_t>(actual_data_shape[1]);
+    } else if (uniform_mxfp8_rowwise_swizzle) {
       data_shape.data[0] = scale_shape.data[0];
       data_shape.data[1] = scale_shape.data[1] * 32;
     } else if (uniform_mxfp8_colwise_swizzle) {

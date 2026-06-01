@@ -497,6 +497,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("transform_and_copy_data_ptrs_to_device",
         &transformer_engine::pytorch::transform_and_copy_data_ptrs_to_device,
         py::arg("transform_type"), py::arg("tensors"), py::arg("device"),
+        py::arg("actual_data_shape") = std::vector<int64_t>{},
         py::call_guard<py::gil_scoped_release>());
   m.def("splits_to_offsets", &transformer_engine::pytorch::splits_to_offsets,
         "Compute grouped tensor offsets from split sizes", py::arg("first_dims"),
