@@ -184,10 +184,10 @@ def _cudnn_compute_wgrad(
     if use_nvfp4:
         global_scale_denom = 448.0 * 6.0
         common_wgrad_kwargs["global_scale_a"] = (
-            grouped_dy.columnwise_amax.view(-1).to(torch.float32) / global_scale_denom
+            _nvfp4_amax(grouped_dy, columnwise=True).to(torch.float32) / global_scale_denom
         )
         common_wgrad_kwargs["global_scale_b"] = (
-            grouped_x.columnwise_amax.view(-1).to(torch.float32) / global_scale_denom
+            _nvfp4_amax(grouped_x, columnwise=True).to(torch.float32) / global_scale_denom
         )
         common_wgrad_kwargs["input_order"] = "tensor_ragged"
 
