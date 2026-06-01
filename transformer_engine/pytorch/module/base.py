@@ -44,6 +44,7 @@ from ..cpp_extensions.gemm import _NUM_MAX_UB_STREAMS
 from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantizer
 from ..tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
+from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.hybrid_tensor import HybridQuantizer
 from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
@@ -1652,7 +1653,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     raise RuntimeError("Weight quantizer has not been initialized")
                 quantizer.set_usage(rowwise=True, columnwise=torch.is_grad_enabled())
                 quantizer.internal = False
-                if is_dtensor and isinstance(quantizer, Float8CurrentScalingQuantizer):
+                if is_dtensor and isinstance(
+                    quantizer, (Float8CurrentScalingQuantizer, NVFP4Quantizer)
+                ):
                     device_mesh = dtensor_param.device_mesh
                     amax_reduction_group = (
                         device_mesh.get_group(mesh_dim="shard")

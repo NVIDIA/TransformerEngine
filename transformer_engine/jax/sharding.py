@@ -332,6 +332,7 @@ class MeshResource:
         fsdp_resource: Axis name for full-sharded data parallelism, default is None
         pp_resource: Axis name for pipeline parallelism (layer sharding), default is None
         cp_resource: Axis name for context parallelism (sequence sharding), default is None
+        ep_resource: Axis name for expert parallelism (MoE expert sharding), default is None
     """
 
     dp_resource: str = None
@@ -340,6 +341,7 @@ class MeshResource:
     fsdp_resource: str = None
     pp_resource: str = None
     cp_resource: str = None
+    ep_resource: str = None
 
 
 _GLOBAL_MESH_RESOURCE = None
@@ -377,6 +379,38 @@ def global_mesh_resource() -> MeshResource:
     )
     _validate_mesh_resource_configuration(_GLOBAL_MESH_RESOURCE)
     return _GLOBAL_MESH_RESOURCE
+
+
+def get_active_resource_axis(resource_name: str) -> Optional[str]:
+    """Resolve a :class:`MeshResource` attribute to its mesh axis name,
+    or return ``None`` if that resource is not active.
+
+    "Active" means all three are true:
+
+    * a physical mesh is set (``is_mesh_available()``),
+    * the ``MeshResource`` attribute is non-``None``,
+    * the corresponding mesh axis has more than 1 device.
+
+    Mirrors the three-step ``is_X_enabled`` idiom in
+    :func:`get_sharding_map_logic_axis_to_mesh_axis` but returns the
+    axis name itself (or ``None``) so callers can use it directly in
+    collectives / ``shard_map`` specs.
+
+    Args:
+        resource_name: Attribute name on :class:`MeshResource`, e.g.
+            ``"fsdp_resource"`` or ``"ep_resource"``.
+
+    Returns:
+        The mesh axis name when active, else ``None``.
+    """
+    if not is_mesh_available():
+        return None
+    if _GLOBAL_MESH_RESOURCE is None:
+        return None
+    axis = getattr(_GLOBAL_MESH_RESOURCE, resource_name)
+    if axis is None or get_mesh_axis_size(axis) <= 1:
+        return None
+    return axis
 
 
 def all_reduce_sum_along_dp_fsdp(x: jnp.array, mesh: jax.sharding.Mesh):

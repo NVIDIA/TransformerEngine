@@ -92,8 +92,66 @@ from transformer_engine.pytorch.tensor import NVFP4Tensor
 from transformer_engine.pytorch.tensor import HybridQuantizer
 from transformer_engine.pytorch.tensor import HybridQuantizedTensorStorage
 from transformer_engine.pytorch.tensor import HybridQuantizedTensor
+from transformer_engine.pytorch.tensor.float8_tensor import (
+    _make_float8_tensor_in_reduce_ex,
+)
+from transformer_engine.pytorch.tensor.mxfp8_tensor import (
+    _make_mxfp8_tensor_in_reduce_ex,
+)
+from transformer_engine.pytorch.tensor.nvfp4_tensor import (
+    _make_nvfp4_tensor_in_reduce_ex,
+)
+from transformer_engine.pytorch.tensor.float8_blockwise_tensor import (
+    _make_float8_blockwise_tensor_in_reduce_ex,
+)
 
 try:
     torch._dynamo.config.error_on_nested_jit_trace = False
 except AttributeError:
     pass  # error_on_nested_jit_trace was added in PyTorch 2.2.0
+
+# To allow for safe unpickling of QuantizedTensors when using DCP
+# checkpointing with FSDP2. ``tex.DType`` (the pybind11 enum) has its
+# ``__reduce_ex__`` / ``__reduce__`` overridden in the C++ binding (see
+# ``transformer_engine/common/util/pybind_helper.h``) so its pickle
+# stream encodes as ``(tex.DType, (int,))`` and only the class itself
+# needs to be allow-listed below.
+try:
+    from torch.serialization import add_safe_globals
+    import transformer_engine_torch as tex
+
+    add_safe_globals(
+        [
+            # Storage mixins (used during pickling of internal-only tensors)
+            QuantizedTensorStorage,
+            Float8TensorStorage,
+            MXFP8TensorStorage,
+            NVFP4TensorStorage,
+            Float8BlockwiseQTensorStorage,
+            # Quantizer types embedded in metadata
+            Quantizer,
+            Float8Quantizer,
+            Float8CurrentScalingQuantizer,
+            MXFP8Quantizer,
+            NVFP4Quantizer,
+            Float8BlockQuantizer,
+            # pybind11 enum used as Quantizer.dtype
+            tex.DType,
+            # __reduce_ex__ reconstructors (module-level functions).
+            _make_float8_tensor_in_reduce_ex,
+            _make_mxfp8_tensor_in_reduce_ex,
+            _make_nvfp4_tensor_in_reduce_ex,
+            _make_float8_blockwise_tensor_in_reduce_ex,
+        ]
+    )
+except (ImportError, AttributeError):
+    import warnings as _warnings
+
+    _warnings.warn(
+        "transformer_engine: torch.serialization.add_safe_globals is "
+        "unavailable on this PyTorch version (added in 2.4). DCP "
+        "checkpointing of QuantizedTensor weights with FSDP2 will not "
+        "work; upgrade to PyTorch >= 2.4 to enable it.",
+        RuntimeWarning,
+        stacklevel=2,
+    )

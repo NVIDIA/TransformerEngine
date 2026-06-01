@@ -42,6 +42,11 @@ python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/py
 export XLA_FLAGS="${XLA_FLAGS} --xla_gpu_deterministic_ops"
 NVTE_JAX_CUSTOM_CALLS="false" python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_test_single_gpu_encoder_without_custom_call.xml $TE_PATH/examples/jax/encoder/test_single_gpu_encoder.py || test_fail "test_single_gpu_encoder.py without custom calls"
 
+# Exercise the docs/examples/jax tutorials. The multi-GPU tests are
+# skipped at runtime when fewer than 4 devices are visible, so this is safe on
+# single-GPU runners.
+CUDA_VISIBLE_DEVICES=0 python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_docs_examples_jax.xml $TE_PATH/docs/examples/jax/ || test_fail "docs/examples/jax"
+
 if [ $RET -ne 0 ]; then
     echo "Error: some sub-tests failed: $FAILED_CASES"
     exit 1
