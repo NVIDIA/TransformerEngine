@@ -573,9 +573,9 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
     }
   }
 
-  // Step 2.5: 2D-amax-only pass for columnwise-only mode.
+  // Step 2b: 2D-amax-only pass for columnwise-only mode.
   // When only the transposed output is requested but 2D block scaling is enabled, the columnwise
-  // reads in Step 3 (line ~660 below) still need amax_smem populated. Re-run the load + local-amax
+  // reads in Step 3 below still need amax_smem populated. Re-run the load + local-amax
   // + 2D warp/smem reduction from Step 2 (steps 2.1-2.3), skipping the rowwise scale/quantize/store
   // writes that Step 2 normally does. Same amax_smem values as the rowwise-enabled path, so the
   // dgrad/wgrad columnwise output of (rowwise=False, columnwise=True, 2D) is bitwise identical to

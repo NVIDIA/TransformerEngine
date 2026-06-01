@@ -1348,10 +1348,9 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   CheckOutputTensor(*output, "output", false);
 
   NVTE_CHECK(input.has_data(), "Cannot quantize tensor without rowwise data.");
-  NVTE_CHECK(return_rowwise || return_transpose,
-             "At least one of rowwise/columnwise NVFP4 output must be allocated.");
-  NVTE_CHECK(return_rowwise || use_2d_quantization,
-             "Columnwise-only NVFP4 requires 2D quantization on the optimized path.");
+  NVTE_CHECK(return_rowwise || (return_transpose && use_2d_quantization),
+             "NVFP4 optimized kernel supports rowwise output (1D or 2D), or columnwise-only output "
+             "with 2D quantization.");
   if (return_rowwise) {
     NVTE_CHECK(is_fp4_dtype(output->data.dtype), "Output must have FP4 type.");
     NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated");
