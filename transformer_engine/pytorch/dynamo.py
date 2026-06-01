@@ -166,9 +166,7 @@ def _template_reassemble(
                 )
             else:
                 inner_dict = dict(zip(inner_names, chunk))
-                result = type(template).__tensor_unflatten__(
-                    inner_dict, meta, shape, stride
-                )
+                result = type(template).__tensor_unflatten__(inner_dict, meta, shape, stride)
             # ``__tensor_unflatten__`` rebuilds with ``quantizer=None`` (the
             # snapshot can't carry a live ``ProcessGroup``); restore the live
             # quantizer the fake template stashed so the output keeps its
@@ -244,7 +242,9 @@ def _split_fwd_fake_result(
 _TE_COMPILE_UNFLATTEN_PLAN = "_te_compile_unflatten_plan"
 
 
-def _fwd_arg_alias_pairs(fwd_obj: Any, field_names: Sequence[str]) -> List[Tuple[torch.Tensor, str]]:
+def _fwd_arg_alias_pairs(
+    fwd_obj: Any, field_names: Sequence[str]
+) -> List[Tuple[torch.Tensor, str]]:
     """Collect ``(tensor field value, field name)`` for a fwd-arg object.
 
     ``field_names`` is precomputed outside the trace (reading
@@ -341,6 +341,7 @@ class _ToSubclassFn(torch.autograd.Function):
 # OpaqueSimpleMetadata
 # --------------------------------------------------------------------------- #
 
+
 class OpaqueSimpleMetadata:
     """Opaque value-type bundle of simple Python values.
 
@@ -371,8 +372,7 @@ class OpaqueSimpleMetadata:
 
     @classmethod
     def _is_opaque_value(cls, value: Any) -> bool:
-        """Whether ``value``'s class is registered as a value-opaque type.
-        """
+        """Whether ``value``'s class is registered as a value-opaque type."""
         return _is_opaque_value_type(type(value))
 
     @classmethod
@@ -438,8 +438,8 @@ class OpaqueSimpleMetadata:
                     f"OpaqueSimpleMetadata field '{k}' has unsupported "
                     f"type {type(v).__name__}; only simple primitives "
                     f"({', '.join(t.__name__ for t in cls.PRIMITIVE_TYPES)}, "
-                    f"Enum, torch.Size, registered torch.compile value-"
-                    f"opaque types) and tuples/lists thereof are allowed."
+                    "Enum, torch.Size, registered torch.compile value-"
+                    "opaque types) and tuples/lists thereof are allowed."
                 )
         self._data: Dict[str, Any] = data
         self._frozen: Tuple[Tuple[str, Any], ...] = tuple(
@@ -485,9 +485,7 @@ class OpaqueSimpleMetadata:
 
     def __fx_repr__(self) -> Tuple[str, Dict[str, Any]]:
         cls = type(self)
-        items = ", ".join(
-            f"{k!r}: {cls._fmt_simple(v)}" for k, v in self._data.items()
-        )
+        items = ", ".join(f"{k!r}: {cls._fmt_simple(v)}" for k, v in self._data.items())
         # Collect every type referenced by a nested opaque-value's
         # ``__fx_repr__`` so the FX codegen can resolve those names.
         globals_: Dict[str, Any] = {
@@ -554,9 +552,7 @@ try:
     )
 
     register_opaque_type(OpaqueSimpleMetadata, typ="value")
-    _OPAQUE_SIMPLE_META_TYPE_NAME: Optional[str] = get_opaque_type_name(
-        OpaqueSimpleMetadata
-    )
+    _OPAQUE_SIMPLE_META_TYPE_NAME: Optional[str] = get_opaque_type_name(OpaqueSimpleMetadata)
 
     _PROCESS_GROUP_TYPE_NAME: Optional[str] = None
     try:
@@ -697,15 +693,11 @@ class _MetaPGTensorsBucket(_Bucket):
             args[self._slot_tensors()],
         )
 
-    def _pack_value(
-        self, value: Any
-    ) -> Tuple[Any, Any, List[torch.Tensor]]:
+    def _pack_value(self, value: Any) -> Tuple[Any, Any, List[torch.Tensor]]:
         """Flatten one field value into ``(meta, pg, tensors)``."""
         raise NotImplementedError
 
-    def _unpack_value(
-        self, meta: Any, pg: Any, tensors: List[torch.Tensor]
-    ) -> Any:
+    def _unpack_value(self, meta: Any, pg: Any, tensors: List[torch.Tensor]) -> Any:
         """Inverse of :meth:`_pack_value`."""
         raise NotImplementedError
 
@@ -797,10 +789,7 @@ class _UniversalTensorBucket(_Bucket):
         qts = _quantized_tensor_storage_cls()
         if qts is None:
             return False
-        return any(
-            isinstance(member, type) and issubclass(member, qts)
-            for member in members
-        )
+        return any(isinstance(member, type) and issubclass(member, qts) for member in members)
 
     @classmethod
     def try_build(cls, name: str, annot: Any) -> Optional["_UniversalTensorBucket"]:
@@ -976,9 +965,7 @@ def _flattenable_bases() -> Tuple[type, ...]:
       identifier stamped into ``meta``).
     """
     return tuple(
-        cls
-        for cls in (_quantizer_cls(), _quantized_tensor_storage_cls())
-        if cls is not None
+        cls for cls in (_quantizer_cls(), _quantized_tensor_storage_cls()) if cls is not None
     )
 
 
@@ -1019,9 +1006,7 @@ class _FlattenableBucket(_MetaPGTensorsBucket):
             return value._flatten()
         return value._torch_compile_flatten()
 
-    def _unpack_value(
-        self, meta: Any, pg: Any, tensors: List[torch.Tensor]
-    ) -> Any:
+    def _unpack_value(self, meta: Any, pg: Any, tensors: List[torch.Tensor]) -> Any:
         if meta.get(self.NONE_MARKER_KEY) == self.NONE_MARKER_VAL:
             return None
         if hasattr(self.base_cls, "_unflatten"):
@@ -1161,8 +1146,7 @@ def _resolved_field_annotations(cls: type) -> List[Tuple[str, Any]]:
     """Return ``[(field_name, resolved_type), ...]`` for a dataclass."""
     if not dataclasses.is_dataclass(cls):
         raise TypeError(
-            f"{cls.__name__} must be a @dataclass to be used as a TE "
-            f"custom-op argument container."
+            f"{cls.__name__} must be a @dataclass to be used as a TE custom-op argument container."
         )
     # ``get_type_hints`` resolves forward references and PEP 563
     # ``from __future__ import annotations`` strings.
@@ -1361,9 +1345,7 @@ def _format_fwd_result(result: Any) -> List[torch.Tensor]:
     return flat
 
 
-def _format_bwd_result(
-    grads: Any, num_grad_inputs: int, op_qualname: str
-) -> List[torch.Tensor]:
+def _format_bwd_result(grads: Any, num_grad_inputs: int, op_qualname: str) -> List[torch.Tensor]:
     """Pack a backward-impl return tuple into the op's ``Tensor[]`` payload.
 
     Validates that the user kernel returned exactly one grad per
@@ -1426,7 +1408,7 @@ def _resolve_grad_targets(
     unknown = [n for n in input_tensors_for_grad if n not in fwd_grad_targets]
     if unknown:
         raise ValueError(
-            f"input_tensors_for_grad contains names not present in "
+            "input_tensors_for_grad contains names not present in "
             f"{fwd_arg_type.__name__} schema: {unknown}"
         )
     grad_targets = [fwd_grad_targets[n] for n in input_tensors_for_grad]
@@ -1565,7 +1547,7 @@ def _register_autograd_for_op(
         user_outputs: List[Any] = []
         for template in user_fakes:
             n = _template_slot_count(template)
-            chunk = [_decode_none(t) for t in output[cursor:cursor + n]]
+            chunk = [_decode_none(t) for t in output[cursor : cursor + n]]
             cursor += n
             user_outputs.append(_template_reassemble(template, chunk))
 
@@ -1573,7 +1555,7 @@ def _register_autograd_for_op(
         for template, alias in zip(saved_fakes, saved_aliases):
             aliased = alias is not None
             n = _template_slot_count(template, aliased=aliased)
-            chunk = [_decode_none(t) for t in output[cursor:cursor + n]]
+            chunk = [_decode_none(t) for t in output[cursor : cursor + n]]
             cursor += n
             tensors_to_save_from_forward_list.append(
                 _template_reassemble(template, chunk, aliased=aliased)
@@ -1667,7 +1649,9 @@ def _register_outer_forwarder(
             new_args = list(flat)
             _flatten_all(new_args)
             return inner_op(*new_args)
+
     else:
+
         def _outer_kernel(*flat: Any) -> List[torch.Tensor]:
             return inner_op(*flat)
 
@@ -1675,9 +1659,7 @@ def _register_outer_forwarder(
             return inner_op(*flat)
 
     _TE_LIB.impl(outer_op_name, _outer_kernel, "CompositeExplicitAutograd")
-    torch.library.register_fake(
-        f"{_TE_OP_NAMESPACE}::{outer_op_name}", _outer_fake, lib=_TE_LIB
-    )
+    torch.library.register_fake(f"{_TE_OP_NAMESPACE}::{outer_op_name}", _outer_fake, lib=_TE_LIB)
 
 
 def _all_quantized_tensor_subclasses() -> List[type]:
@@ -1993,12 +1975,8 @@ def _te_register_custom_op(
         # into its storage layout before forwarding to the inner op,
         # which only ever sees plain tensors.
         for sub in subclass_list:
-            torch.library.register_torch_dispatch(
-                outer_fwd_qualname, sub, _fwd_rule, lib=_TE_LIB
-            )
-            torch.library.register_torch_dispatch(
-                outer_bwd_qualname, sub, _bwd_rule, lib=_TE_LIB
-            )
+            torch.library.register_torch_dispatch(outer_fwd_qualname, sub, _fwd_rule, lib=_TE_LIB)
+            torch.library.register_torch_dispatch(outer_bwd_qualname, sub, _bwd_rule, lib=_TE_LIB)
 
         # ``QuantizedTensor.__torch_dispatch__`` falls back to
         # dequantizing all subclass args for any op it does not
@@ -2011,6 +1989,7 @@ def _te_register_custom_op(
         from transformer_engine.pytorch.quantized_tensor import (
             _quantized_tensor_passthrough_ops,
         )
+
         _quantized_tensor_passthrough_ops.add(outer_fwd_op.default)
         _quantized_tensor_passthrough_ops.add(outer_bwd_op.default)
         _quantized_tensor_passthrough_ops.add(inner_fwd_op.default)
@@ -2019,9 +1998,7 @@ def _te_register_custom_op(
     fwd_op = getattr(getattr(torch.ops, _TE_OP_NAMESPACE), outer_fwd_name)
 
     def forward_fn(fwd_args):
-        user_fakes, _saved_fakes, _ctx_attrs = _split_fwd_fake_result(
-            fwd_fake_impl(fwd_args)
-        )
+        user_fakes, _saved_fakes, _ctx_attrs = _split_fwd_fake_result(fwd_fake_impl(fwd_args))
         kwargs = _pack(fwd_args, fwd_buckets)
         flat_in = [kwargs[name] for name in fwd_arg_names]
         result = fwd_op(*flat_in)
@@ -2034,7 +2011,7 @@ def _te_register_custom_op(
         outputs: List[Any] = []
         for template in user_fakes:
             n = _template_slot_count(template)
-            chunk = [_decode_none(t) for t in result[cursor:cursor + n]]
+            chunk = [_decode_none(t) for t in result[cursor : cursor + n]]
             cursor += n
             outputs.append(_template_reassemble(template, chunk, with_autograd=True))
 

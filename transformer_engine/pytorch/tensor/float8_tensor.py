@@ -631,12 +631,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             shape = tuple(self.shape)
         except BaseException:  # pylint: disable=broad-except
             shape = "<unknown>"
-        return (
-            "Float8Tensor("
-            f"fp8_dtype={self._fp8_dtype}, "
-            f"shape={shape}"
-            ")"
-        )
+        return f"Float8Tensor(fp8_dtype={self._fp8_dtype}, shape={shape})"
 
     @classmethod
     def _flatten_meta_overrides(cls, meta: dict) -> dict:

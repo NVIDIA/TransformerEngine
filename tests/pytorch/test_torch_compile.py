@@ -469,9 +469,9 @@ def test_te_linear_compile_with_fp8_output():
     compiled = torch.compile(fn, fullgraph=True)
 
     out = compiled(inp)
-    assert isinstance(out, te.Float8Tensor), (
-        f"expected Float8Tensor output, got {type(out).__name__}"
-    )
+    assert isinstance(
+        out, te.Float8Tensor
+    ), f"expected Float8Tensor output, got {type(out).__name__}"
     assert out.shape == (32, 32)
     # The compile-path reassembly rebuilds the wrapper via
     # ``__tensor_unflatten__``, whose snapshot-free ``meta`` forces
@@ -480,10 +480,9 @@ def test_te_linear_compile_with_fp8_output():
     # quantizer on the fake template and the reassembly helper restores it,
     # so the output must keep a (non-``None``) quantizer rather than losing
     # its amax-reduction group.
-    assert out._quantizer is not None, (
-        "FP8 output lost its quantizer (and thus its amax-reduction group) "
-        "on the torch.compile path"
-    )
+    assert (
+        out._quantizer is not None
+    ), "FP8 output lost its quantizer (and thus its amax-reduction group) on the torch.compile path"
     # Dequantising outside the compiled region exercises the
     # ``Float8Tensor`` machinery (scale + data + dtype all wired up
     # by the rewrap) on the value returned from the compiled fn.

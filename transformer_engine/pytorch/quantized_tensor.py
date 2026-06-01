@@ -92,6 +92,7 @@ def _quantizer_from_subclass_snapshot(
     meta_dict = dict(snapshot)
     return Quantizer._unflatten(meta_dict, None, [])
 
+
 # Same idea for lightweight QuantizedTensorStorage shells. Populated via
 # :meth:`QuantizedTensorStorage.__init_subclass__` and consumed by
 # :meth:`QuantizedTensorStorage._torch_compile_unflatten`.
@@ -377,11 +378,10 @@ class QuantizedTensorStorage:
         target = _STORAGE_REGISTRY.get(storage_cls)
         if target is None:
             raise ValueError(
-                f"No QuantizedTensorStorage subclass registered under "
+                "No QuantizedTensorStorage subclass registered under "
                 f"qualname {storage_cls!r}; known: {sorted(_STORAGE_REGISTRY)}"
             )
         return target._torch_compile_do_unflatten(meta, process_group, tensors)
-
 
 
 TensorOrQuantized = Union[torch.Tensor, QuantizedTensorStorage]
@@ -774,8 +774,7 @@ class Quantizer(abc.ABC):
         for attr in (*cls._INIT_META_ATTRS, *cls._POST_INIT_META_ATTRS):
             meta_dict[attr] = getattr(self, attr)
         tensors = [
-            getattr(self, attr)
-            for attr in (*cls._INIT_TENSOR_ATTRS, *cls._POST_INIT_TENSOR_ATTRS)
+            getattr(self, attr) for attr in (*cls._INIT_TENSOR_ATTRS, *cls._POST_INIT_TENSOR_ATTRS)
         ]
         pg = getattr(self, cls._PG_ATTR) if cls._PG_ATTR else None
         return OpaqueSimpleMetadata(meta_dict), pg, tensors

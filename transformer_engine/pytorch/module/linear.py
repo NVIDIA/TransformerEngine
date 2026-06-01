@@ -1365,9 +1365,7 @@ def _linear_forward_fake_impl(
     tp_world_size = get_distributed_world_size(args.tp_group)
     backward_needs_input = args.is_grad_enabled and args.weight_requires_grad
     with_input_all_gather_nccl = (
-        args.parallel_mode == "column"
-        and args.sequence_parallel
-        and not args.ub_overlap_ag_fprop
+        args.parallel_mode == "column" and args.sequence_parallel and not args.ub_overlap_ag_fprop
     )
 
     # Input pipeline -- mirror ``_linear_forward_impl``'s ``set_usage``
@@ -1388,9 +1386,7 @@ def _linear_forward_fake_impl(
                     rowwise=True,
                     columnwise=backward_needs_input and args.backward_override is None,
                 )
-                if isinstance(
-                    input_quantizer, (Float8CurrentScalingQuantizer, Float8Quantizer)
-                ):
+                if isinstance(input_quantizer, (Float8CurrentScalingQuantizer, Float8Quantizer)):
                     input_quantizer.set_usage(columnwise=False)
                 if save_original_input:
                     input_quantizer.set_usage(columnwise=False)
@@ -1437,9 +1433,7 @@ def _linear_forward_fake_impl(
     weightmat_is_storage = False
     weightmat_aliases_weight = False
     if fp8_or_debug:
-        if weight_quantizer is not None and (
-            not isinstance(weight, QuantizedTensor) or debug
-        ):
+        if weight_quantizer is not None and (not isinstance(weight, QuantizedTensor) or debug):
             columnwise_usage = (
                 args.is_grad_enabled and args.input_requires_grad and not args.is_fsdp2
             )
@@ -1552,9 +1546,7 @@ def _linear_forward_fake_impl(
         # re-quantizes from the all-gathered weight on backward, so
         # the slot is absent in that case.
         weight_quantizer_for_save = (
-            weight._quantizer
-            if isinstance(weight, QuantizedTensor)
-            else args.weight_quantizer
+            weight._quantizer if isinstance(weight, QuantizedTensor) else args.weight_quantizer
         )
         if weightmat_aliases_weight:
             saved_values.append(weight)

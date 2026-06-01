@@ -684,5 +684,3 @@ class CustomRecipe(Recipe):
             f"qfactory={self.qfactory}, "
             f"backward_override={self.backward_override}"
         )
-
-
