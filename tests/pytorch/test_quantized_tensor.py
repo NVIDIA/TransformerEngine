@@ -28,7 +28,7 @@ from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
 import transformer_engine_torch as tex
 
 from references.ref_per_tensor_cs import ref_per_tensor_cs_cast
-from utils import assert_close, quantization_tols
+from utils import assert_close
 
 # PyTorch tensor dtypes
 _dtypes: List[torch.dtype] = [torch.float32, torch.float16, torch.bfloat16]
@@ -69,6 +69,8 @@ if mxfp8_available:
     _quantization_list.append("mxfp8")
 if nvfp4_available:
     _quantization_list.append("nvfp4")
+    _quantization_list.append("nvfp4_row_scaled")
+    _quantization_list.append("nvfp4_4over6")
 
 
 # delayed scaling
@@ -163,13 +165,17 @@ def make_reference_and_test_tensors(
         test = quantizer(test)
     elif quantization == "mxfp8":
         test = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)(test)
-    elif quantization == "nvfp4":
+    elif quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
+        row_scaled_nvfp4 = quantization == "nvfp4_row_scaled"
         test = NVFP4Quantizer(
+            columnwise=not row_scaled_nvfp4,
             with_rht=False,
             with_post_rht_amax=False,
             with_2d_quantization=False,
             stochastic_rounding=False,
+            row_scaled_nvfp4=row_scaled_nvfp4,
             with_random_sign_mask=False,
+            nvfp4_use_4over6=(quantization == "nvfp4_4over6"),
         )(test)
     else:
         raise ValueError(f"Unsupported quantization scheme ({quantization})")
@@ -617,6 +623,56 @@ class TestQuantizedTensor:
         torch.testing.assert_close(dx_test, dx_ref, **tols)
 
     @pytest.mark.parametrize("quantization", _quantization_list)
+    def test_cpu_dequantize(
+        self,
+        *,
+        quantization: str,
+        shape: Iterable[int] = (128, 128),
+        dtype: torch.dtype = torch.bfloat16,
+    ) -> None:
+        """Dequantize on a CPU-resident QuantizedTensor."""
+
+        # Construct a quantized tensor on CUDA.
+        _, x_cuda = make_reference_and_test_tensors(
+            shape=shape,
+            quantization=quantization,
+            test_dtype=dtype,
+            requires_grad=False,
+        )
+        assert isinstance(x_cuda, QuantizedTensor)
+        assert x_cuda.device.type == "cuda"
+
+        # Reference: dequantize on CUDA, then move the dense result to CPU.
+        ref_cpu = x_cuda.dequantize().to(device="cpu")
+
+        # Move the QuantizedTensor itself to CPU and dequantize there.
+        # ``.cpu()`` routes through ``aten._to_copy.default`` so all inner
+        # buffers (data, scales, amax) are moved to CPU.
+        x_cpu = x_cuda.cpu()
+        assert isinstance(x_cpu, QuantizedTensor)
+        assert x_cpu.device.type == "cpu"
+        for attr in (
+            "_data",
+            "_rowwise_data",
+            "_columnwise_data",
+            "_rowwise_scale_inv",
+            "_columnwise_scale_inv",
+            "_amax_rowwise",
+            "_amax_columnwise",
+        ):
+            buf = getattr(x_cpu, attr, None)
+            if buf is not None:
+                assert buf.device.type == "cpu", f"{attr} did not move to CPU"
+
+        # Dequantize the CPU tensor. Implementation may bounce through CUDA
+        # internally, but must return a CPU tensor.
+        y_cpu = x_cpu.dequantize()
+        assert y_cpu.device.type == "cpu"
+        assert y_cpu.dtype == ref_cpu.dtype
+        assert y_cpu.shape == ref_cpu.shape
+        torch.testing.assert_close(y_cpu, ref_cpu, rtol=0, atol=0)
+
+    @pytest.mark.parametrize("quantization", _quantization_list)
     @pytest.mark.parametrize("dim", [0, 1])
     def test_chunk(
         self,
@@ -735,13 +791,16 @@ class TestQuantizedTensor:
             )
         elif quantization == "mxfp8":
             quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
-        elif quantization in ("nvfp4", "nvfp4_2d"):
+        elif quantization in ("nvfp4", "nvfp4_2d", "nvfp4_row_scaled", "nvfp4_4over6"):
+            row_scaled_nvfp4 = quantization == "nvfp4_row_scaled"
             quantizer = NVFP4Quantizer(
                 rowwise=True,
-                columnwise=True,
+                columnwise=not row_scaled_nvfp4,
                 with_rht=False,
                 with_post_rht_amax=False,
                 with_2d_quantization=(quantization == "nvfp4_2d"),
+                row_scaled_nvfp4=row_scaled_nvfp4,
+                nvfp4_use_4over6=(quantization == "nvfp4_4over6"),
             )
             quantization = "nvfp4"
         else:
@@ -756,9 +815,9 @@ class TestQuantizedTensor:
         q_x.copy_(x_new)
 
         # Check results
+        q_ref = quantizer(x_new)
         assert q_x.shape == torch.Size(shape)
-        tols = quantization_tols(quantization)
-        assert_close(q_x, x_new, **tols)
+        assert_close(q_x, q_ref, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
