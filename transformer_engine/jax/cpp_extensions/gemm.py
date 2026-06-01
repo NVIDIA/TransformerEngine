@@ -238,7 +238,30 @@ def _strip_axis_from_spec(spec, axis):
     return tuple(_strip_axis_from_axis_spec(axis_spec, axis) for axis_spec in spec)
 
 
-def _common_axis(spec_a, spec_b):
+def _filter_axis_spec(axis_spec, allowed_axes):
+    if axis_spec is None:
+        return None
+    axis_tuple = axis_spec if isinstance(axis_spec, tuple) else (axis_spec,)
+    axes = tuple(axis for axis in axis_tuple if axis in allowed_axes)
+    if len(axes) == 0:
+        return None
+    return axes[0] if len(axes) == 1 else axes
+
+
+def _filter_spec_axes(spec, allowed_axes):
+    return tuple(_filter_axis_spec(axis_spec, allowed_axes) for axis_spec in spec)
+
+
+def _supported_grouped_gemm_axes(mesh):
+    gsr = global_mesh_resource(validate=False)
+    return {
+        axis
+        for axis in (gsr.ep_resource, gsr.dp_resource, gsr.fsdp_resource)
+        if axis is not None and axis in mesh.axis_names
+    }
+
+
+def _common_axis(spec_a, spec_b, allowed_axes=None):
     axes = []
     for spec in (spec_a, spec_b):
         for axis_spec in spec:
@@ -249,6 +272,8 @@ def _common_axis(spec_a, spec_b):
                 if axis is not None and axis not in axes:
                     axes.append(axis)
     for axis in axes:
+        if allowed_axes is not None and axis not in allowed_axes:
+            continue
         if _spec_contains_axis(spec_a, axis) and _spec_contains_axis(spec_b, axis):
             return axis
     return None
@@ -1856,24 +1881,24 @@ class GroupedGemmPrimitive(BasePrimitive):
         lhs_is_trans=None,
         lhs_axis_boundary=None,
     ):
-        del mesh
-        gsr = global_mesh_resource()
+        gsr = global_mesh_resource(validate=False)
         fsdp_axis = gsr.fsdp_resource
+        allowed_axes = _supported_grouped_gemm_axes(mesh)
 
-        lhs_data_spec = get_padded_spec(arg_infos[0])
-        lhs_scale_spec = get_padded_spec(arg_infos[1])
-        rhs_data_spec = get_padded_spec(arg_infos[2])
-        rhs_scale_spec = get_padded_spec(arg_infos[3])
-        bias_spec = get_padded_spec(arg_infos[4])
+        lhs_data_spec = _filter_spec_axes(get_padded_spec(arg_infos[0]), allowed_axes)
+        lhs_scale_spec = _filter_spec_axes(get_padded_spec(arg_infos[1]), allowed_axes)
+        rhs_data_spec = _filter_spec_axes(get_padded_spec(arg_infos[2]), allowed_axes)
+        rhs_scale_spec = _filter_spec_axes(get_padded_spec(arg_infos[3]), allowed_axes)
+        bias_spec = _filter_spec_axes(get_padded_spec(arg_infos[4]), allowed_axes)
 
-        lhs_first_dims_spec = get_padded_spec(arg_infos[5])
-        lhs_last_dims_spec = get_padded_spec(arg_infos[6])
-        rhs_first_dims_spec = get_padded_spec(arg_infos[7])
-        rhs_last_dims_spec = get_padded_spec(arg_infos[8])
-        out_first_dims_spec = get_padded_spec(arg_infos[9])
-        out_last_dims_spec = get_padded_spec(arg_infos[10])
-        additional_arg_0_spec = get_padded_spec(arg_infos[11])
-        additional_arg_1_spec = get_padded_spec(arg_infos[12])
+        lhs_first_dims_spec = _filter_spec_axes(get_padded_spec(arg_infos[5]), allowed_axes)
+        lhs_last_dims_spec = _filter_spec_axes(get_padded_spec(arg_infos[6]), allowed_axes)
+        rhs_first_dims_spec = _filter_spec_axes(get_padded_spec(arg_infos[7]), allowed_axes)
+        rhs_last_dims_spec = _filter_spec_axes(get_padded_spec(arg_infos[8]), allowed_axes)
+        out_first_dims_spec = _filter_spec_axes(get_padded_spec(arg_infos[9]), allowed_axes)
+        out_last_dims_spec = _filter_spec_axes(get_padded_spec(arg_infos[10]), allowed_axes)
+        additional_arg_0_spec = _filter_spec_axes(get_padded_spec(arg_infos[11]), allowed_axes)
+        additional_arg_1_spec = _filter_spec_axes(get_padded_spec(arg_infos[12]), allowed_axes)
 
         grouped_dim_specs = (
             lhs_first_dims_spec,
@@ -1924,14 +1949,15 @@ class GroupedGemmPrimitive(BasePrimitive):
             rhs_scale_spec = _strip_axis_from_spec(rhs_scale_spec, fsdp_axis)
             bias_spec = _strip_axis_from_spec(bias_spec, fsdp_axis)
 
-        reduce_axis = _common_axis(lhs_data_spec, rhs_data_spec)
-        if reduce_axis not in (gsr.dp_resource, gsr.fsdp_resource):
-            reduce_axis = None
+        reducible_axes = tuple(
+            axis for axis in (gsr.dp_resource, gsr.fsdp_resource) if axis is not None
+        )
+        reduce_axis = _common_axis(lhs_data_spec, rhs_data_spec, reducible_axes)
         if reduce_axis is not None and gather_rhs_fsdp:
             reduce_axis = None
 
         if result_infos:
-            out_spec = get_padded_spec(result_infos[0])
+            out_spec = _filter_spec_axes(get_padded_spec(result_infos[0]), allowed_axes)
         else:
             out_spec = (None,) * (len(out_shape) if out_shape is not None else 1)
 
@@ -1998,8 +2024,7 @@ class GroupedGemmPrimitive(BasePrimitive):
             lhs_axis_boundary=lhs_axis_boundary,
         )
         arg_shardings = tuple(NamedSharding(mesh, PartitionSpec(*spec)) for spec in arg_specs)
-        result_info = result_infos[0] if result_infos else None
-        out_sharding = (_partition_spec_from_result(mesh, result_info, out_spec),)
+        out_sharding = (NamedSharding(mesh, PartitionSpec(*out_spec)),)
         local_out_shape = _local_shape_from_spec(out_shape, out_spec, mesh)
         local_lhs_left_size, local_lhs_right_size = _local_2d_sizes_from_spec(
             arg_infos[0].shape,

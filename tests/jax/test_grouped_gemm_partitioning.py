@@ -25,6 +25,23 @@ def _mesh():
     return Mesh(np.asarray(devices[:4]).reshape(2, 2), ("expert", "fsdp"))
 
 
+def _mesh_with_dp_tp():
+    devices = jax.devices()
+    if len(devices) < 4:
+        pytest.skip("Grouped GEMM partitioning tests require at least 4 visible GPUs.")
+    return Mesh(np.asarray(devices[:4]).reshape(2, 1, 2, 1), ("expert", "dp", "fsdp", "tp"))
+
+
+def _mesh_with_arbitrary_axis():
+    devices = jax.devices()
+    if len(devices) < 4:
+        pytest.skip("Grouped GEMM partitioning tests require at least 4 visible GPUs.")
+    return Mesh(
+        np.asarray(devices[:4]).reshape(2, 1, 2, 1),
+        ("expert", "dp", "fsdp", "myaxis123"),
+    )
+
+
 def _arg_info(mesh, shape, spec):
     return SimpleNamespace(
         shape=shape,
@@ -40,6 +57,14 @@ def _normalize_spec(spec):
     return spec
 
 
+def _spec_contains_axis(spec, axis):
+    for axis_spec in spec:
+        axis_tuple = axis_spec if isinstance(axis_spec, tuple) else (axis_spec,)
+        if axis in axis_tuple:
+            return True
+    return False
+
+
 def _mxfp8_grouped_quantizer_set(n_groups):
     return QuantizerFactory.create_set(
         scaling_mode=ScalingMode.MXFP8_1D_SCALING,
@@ -50,10 +75,10 @@ def _mxfp8_grouped_quantizer_set(n_groups):
     )
 
 
-def test_grouped_quantize_specs_preserve_ep_and_fsdp_for_block_scales():
+def test_grouped_quantize_gathers_hidden_axis_for_block_scales():
     mesh = _mesh()
     with global_shard_guard(MeshResource(fsdp_resource="fsdp", ep_resource="expert")):
-        _, _, out_shardings, _ = GroupedQuantizePrimitive.partition(
+        _, _, out_shardings, arg_shardings = GroupedQuantizePrimitive.partition(
             jnp.float8_e4m3fn,
             ScalingMode.MXFP8_1D_SCALING.value,
             QuantizeLayout.ROWWISE,
@@ -68,16 +93,17 @@ def test_grouped_quantize_specs_preserve_ep_and_fsdp_for_block_scales():
             (),
         )
 
+    assert tuple(arg_shardings[0].spec) == ("expert", None, None)
     specs = tuple(tuple(sharding.spec) for sharding in out_shardings)
-    assert _normalize_spec(specs[0]) == (("expert", "fsdp"),)
-    assert _normalize_spec(specs[2]) == (("expert", "fsdp"),)
+    assert _normalize_spec(specs[0]) == ("expert",)
+    assert _normalize_spec(specs[2]) == ("expert",)
     assert _normalize_spec(specs[4]) == ("expert",)
 
 
-def test_grouped_quantize_mxfp8_colwise_specs_preserve_ep_and_fsdp():
+def test_grouped_quantize_mxfp8_colwise_specs_gather_hidden_axis():
     mesh = _mesh()
     with global_shard_guard(MeshResource(fsdp_resource="fsdp", ep_resource="expert")):
-        _, _, out_shardings, _ = GroupedQuantizePrimitive.partition(
+        _, _, out_shardings, arg_shardings = GroupedQuantizePrimitive.partition(
             jnp.float8_e4m3fn,
             ScalingMode.MXFP8_1D_SCALING.value,
             QuantizeLayout.ROWWISE_COLWISE,
@@ -92,12 +118,45 @@ def test_grouped_quantize_mxfp8_colwise_specs_preserve_ep_and_fsdp():
             (),
         )
 
+    assert tuple(arg_shardings[0].spec) == ("expert", None, None)
     specs = tuple(tuple(sharding.spec) for sharding in out_shardings)
-    assert _normalize_spec(specs[0]) == (("expert", "fsdp"),)
-    assert _normalize_spec(specs[1]) == (("expert", "fsdp"),)
-    assert _normalize_spec(specs[2]) == (("expert", "fsdp"),)
-    assert _normalize_spec(specs[3]) == (("expert", "fsdp"),)
+    assert _normalize_spec(specs[0]) == ("expert",)
+    assert _normalize_spec(specs[1]) == ("expert",)
+    assert _normalize_spec(specs[2]) == ("expert",)
+    assert _normalize_spec(specs[3]) == ("expert",)
     assert _normalize_spec(specs[4]) == ("expert",)
+
+
+def test_grouped_quantize_strips_unsupported_axes_and_gathers_hidden_axes():
+    mesh = _mesh_with_dp_tp()
+    with jax.set_mesh(mesh), global_shard_guard(
+        MeshResource(dp_resource="dp", tp_resource="tp", fsdp_resource="fsdp", ep_resource="expert")
+    ):
+        _, _, out_shardings, arg_shardings = GroupedQuantizePrimitive.partition(
+            jnp.float8_e4m3fn,
+            ScalingMode.MXFP8_1D_SCALING.value,
+            QuantizeLayout.ROWWISE,
+            -1,
+            jnp.float8_e8m0fnu,
+            mesh,
+            (
+                _arg_info(mesh, (8, 128, 128), ("expert", "dp", ("fsdp", "tp"))),
+                _arg_info(mesh, (8,), (("expert", "tp"),)),
+                _arg_info(mesh, (8,), (("expert", "tp"),)),
+            ),
+            (),
+        )
+
+    assert tuple(arg_shardings[0].spec) == ("expert", None, None)
+    assert tuple(arg_shardings[1].spec) == ("expert",)
+    assert tuple(arg_shardings[2].spec) == ("expert",)
+
+    out_specs = tuple(tuple(sharding.spec) for sharding in out_shardings)
+    assert _normalize_spec(out_specs[0]) == ("expert",)
+    assert _normalize_spec(out_specs[2]) == ("expert",)
+    assert _normalize_spec(out_specs[4]) == ("expert",)
+    for spec in (*out_specs, *(tuple(sharding.spec) for sharding in arg_shardings)):
+        assert not _spec_contains_axis(spec, "tp")
 
 
 def test_grouped_gemm_rhs_weight_specs_gather_fsdp_but_preserve_ep():
@@ -141,6 +200,169 @@ def test_grouped_gemm_rhs_weight_specs_gather_fsdp_but_preserve_ep():
     assert tuple(arg_shardings[2].spec) == ("expert",)
     assert tuple(arg_shardings[3].spec) == ("expert",)
     assert tuple(out_sharding[0].spec) == (None, None, None)
+
+
+def test_grouped_gemm_strips_unsupported_axes_preserves_dp_and_gathers_rhs_fsdp():
+    mesh = _mesh_with_dp_tp()
+    arg_infos = (
+        _arg_info(mesh, (8192,), (("dp", "tp"),)),
+        _arg_info(mesh, (0,), (("tp",),)),
+        _arg_info(mesh, (65536,), (("expert", "fsdp", "tp"),)),
+        _arg_info(mesh, (2048,), (("expert", "fsdp", "tp"),)),
+        _arg_info(mesh, (0,), (("fsdp", "tp"),)),
+        _arg_info(mesh, (8,), (("expert", "tp"),)),
+        _arg_info(mesh, (0,), (("tp",),)),
+        _arg_info(mesh, (0,), (("tp",),)),
+        _arg_info(mesh, (0,), (("tp",),)),
+        _arg_info(mesh, (8,), (("expert", "tp"),)),
+        _arg_info(mesh, (0,), (("tp",),)),
+        _arg_info(mesh, (1,), (("tp",),)),
+        _arg_info(mesh, (0,), (("tp",),)),
+    )
+    result_infos = (_arg_info(mesh, (1, 128, 64), ("expert", "tp", None)),)
+    with jax.set_mesh(mesh), global_shard_guard(
+        MeshResource(dp_resource="dp", tp_resource="tp", fsdp_resource="fsdp", ep_resource="expert")
+    ):
+        _, _, out_sharding, arg_shardings = GroupedGemmPrimitive.partition(
+            False,
+            False,
+            ScalingMode.NO_SCALING.value,
+            jnp.bfloat16,
+            False,
+            False,
+            False,
+            1,
+            1,
+            (1, 128, 64),
+            128,
+            64,
+            128,
+            64,
+            mesh,
+            arg_infos,
+            result_infos,
+        )
+
+    assert tuple(arg_shardings[0].spec) == ("dp",)
+    assert tuple(arg_shardings[2].spec) == ("expert",)
+    assert tuple(arg_shardings[3].spec) == ("expert",)
+    assert tuple(arg_shardings[5].spec) == ("expert",)
+    assert tuple(out_sharding[0].spec) == ("expert", None, None)
+    for spec in (
+        *(tuple(sharding.spec) for sharding in arg_shardings),
+        tuple(out_sharding[0].spec),
+    ):
+        assert not _spec_contains_axis(spec, "tp")
+
+
+def test_grouped_gemm_reduce_axis_skips_ep_and_uses_dp():
+    mesh = _mesh_with_dp_tp()
+    arg_infos = (
+        _arg_info(mesh, (8192,), (("expert", "dp"),)),
+        _arg_info(mesh, (0,), (None,)),
+        _arg_info(mesh, (8192,), (("expert", "dp"),)),
+        _arg_info(mesh, (0,), (None,)),
+        _arg_info(mesh, (0,), (None,)),
+        _arg_info(mesh, (8,), ("expert",)),
+        _arg_info(mesh, (0,), (None,)),
+        _arg_info(mesh, (8,), ("expert",)),
+        _arg_info(mesh, (0,), (None,)),
+        _arg_info(mesh, (8,), ("expert",)),
+        _arg_info(mesh, (0,), (None,)),
+        _arg_info(mesh, (1,), (None,)),
+        _arg_info(mesh, (0,), (None,)),
+    )
+
+    with jax.set_mesh(mesh), global_shard_guard(
+        MeshResource(dp_resource="dp", fsdp_resource="fsdp", ep_resource="expert")
+    ):
+        _, _, reduce_axis = GroupedGemmPrimitive._parse_partition_specs(
+            mesh,
+            arg_infos,
+            (),
+            out_shape=(1, 128, 64),
+            lhs_is_trans=False,
+            lhs_axis_boundary=1,
+        )
+
+    assert reduce_axis == "dp"
+
+
+def test_grouped_partitioning_strips_arbitrary_unsupported_axis():
+    mesh = _mesh_with_arbitrary_axis()
+    mesh_resource = MeshResource(dp_resource="dp", fsdp_resource="fsdp", ep_resource="expert")
+
+    with jax.set_mesh(mesh), global_shard_guard(mesh_resource):
+        _, _, quantize_out_shardings, quantize_arg_shardings = GroupedQuantizePrimitive.partition(
+            jnp.float8_e4m3fn,
+            ScalingMode.MXFP8_1D_SCALING.value,
+            QuantizeLayout.ROWWISE,
+            -1,
+            jnp.float8_e8m0fnu,
+            mesh,
+            (
+                _arg_info(mesh, (8, 128, 128), ("expert", "myaxis123", ("dp", "fsdp"))),
+                _arg_info(mesh, (8,), (("expert", "myaxis123"),)),
+                _arg_info(mesh, (8,), (("expert", "myaxis123"),)),
+            ),
+            (),
+        )
+
+        gemm_arg_infos = (
+            _arg_info(mesh, (8192,), (("dp", "myaxis123"),)),
+            _arg_info(mesh, (0,), (("myaxis123",),)),
+            _arg_info(mesh, (65536,), (("expert", "fsdp", "myaxis123"),)),
+            _arg_info(mesh, (2048,), (("expert", "fsdp", "myaxis123"),)),
+            _arg_info(mesh, (0,), (("fsdp", "myaxis123"),)),
+            _arg_info(mesh, (8,), (("expert", "myaxis123"),)),
+            _arg_info(mesh, (0,), (("myaxis123",),)),
+            _arg_info(mesh, (0,), (("myaxis123",),)),
+            _arg_info(mesh, (0,), (("myaxis123",),)),
+            _arg_info(mesh, (8,), (("expert", "myaxis123"),)),
+            _arg_info(mesh, (0,), (("myaxis123",),)),
+            _arg_info(mesh, (1,), (("myaxis123",),)),
+            _arg_info(mesh, (0,), (("myaxis123",),)),
+        )
+        gemm_result_infos = (_arg_info(mesh, (1, 128, 64), ("expert", "myaxis123", None)),)
+        _, _, gemm_out_sharding, gemm_arg_shardings = GroupedGemmPrimitive.partition(
+            False,
+            False,
+            ScalingMode.NO_SCALING.value,
+            jnp.bfloat16,
+            False,
+            False,
+            False,
+            1,
+            1,
+            (1, 128, 64),
+            128,
+            64,
+            128,
+            64,
+            mesh,
+            gemm_arg_infos,
+            gemm_result_infos,
+        )
+
+    assert tuple(quantize_arg_shardings[0].spec) == ("expert", None, None)
+    assert tuple(quantize_arg_shardings[1].spec) == ("expert",)
+    quantize_out_specs = tuple(tuple(sharding.spec) for sharding in quantize_out_shardings)
+    assert _normalize_spec(quantize_out_specs[0]) == ("expert",)
+    assert _normalize_spec(quantize_out_specs[2]) == ("expert",)
+
+    assert tuple(gemm_arg_shardings[0].spec) == ("dp",)
+    assert tuple(gemm_arg_shardings[2].spec) == ("expert",)
+    assert tuple(gemm_arg_shardings[3].spec) == ("expert",)
+    assert tuple(gemm_out_sharding[0].spec) == ("expert", None, None)
+
+    all_specs = (
+        *quantize_out_specs,
+        *(tuple(sharding.spec) for sharding in quantize_arg_shardings),
+        *(tuple(sharding.spec) for sharding in gemm_arg_shardings),
+        tuple(gemm_out_sharding[0].spec),
+    )
+    for spec in all_specs:
+        assert not _spec_contains_axis(spec, "myaxis123")
 
 
 def test_grouped_partitioning_shardy_rules_smoke():

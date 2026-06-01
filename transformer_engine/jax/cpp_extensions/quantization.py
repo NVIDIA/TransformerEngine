@@ -72,6 +72,40 @@ def _flat_data_spec(input_spec):
     return (_merge_axis_specs(input_spec),)
 
 
+def _normalize_flatten_axis(flatten_axis, ndim):
+    return flatten_axis + ndim if flatten_axis < 0 else flatten_axis
+
+
+def _contiguous_flat_input_spec(input_spec, flatten_axis):
+    flatten_axis = _normalize_flatten_axis(flatten_axis, len(input_spec))
+    if flatten_axis <= 0 or len(input_spec) == 0:
+        return (None,) * len(input_spec)
+    return (input_spec[0], *((None,) * (len(input_spec) - 1)))
+
+
+def _filter_axis_spec(axis_spec, allowed_axes):
+    if axis_spec is None:
+        return None
+    axis_tuple = axis_spec if isinstance(axis_spec, tuple) else (axis_spec,)
+    axes = tuple(axis for axis in axis_tuple if axis in allowed_axes)
+    if len(axes) == 0:
+        return None
+    return axes[0] if len(axes) == 1 else axes
+
+
+def _filter_spec_axes(spec, allowed_axes):
+    return tuple(_filter_axis_spec(axis_spec, allowed_axes) for axis_spec in spec)
+
+
+def _supported_grouped_quantize_axes(mesh):
+    gsr = global_mesh_resource(validate=False)
+    return {
+        axis
+        for axis in (gsr.ep_resource, gsr.dp_resource, gsr.fsdp_resource)
+        if axis is not None and axis in mesh.axis_names
+    }
+
+
 def _axis_spec_size(axis_spec, mesh):
     axis_tuple = axis_spec if isinstance(axis_spec, tuple) else (axis_spec,)
     axis_size = 1
@@ -1292,10 +1326,11 @@ class GroupedQuantizePrimitive(BasePrimitive):
         return rowwise_out, colwise_out, rowwise_scale_inv, colwise_scale_inv, updated_amax
 
     @staticmethod
-    def _parse_partition_specs(scaling_mode, q_layout, mesh, arg_infos):
-        del mesh
-        x_spec = get_padded_spec(arg_infos[0])
-        group_spec = get_padded_spec(arg_infos[2])
+    def _parse_partition_specs(scaling_mode, q_layout, flatten_axis, mesh, arg_infos):
+        allowed_axes = _supported_grouped_quantize_axes(mesh)
+        x_spec = _filter_spec_axes(get_padded_spec(arg_infos[0]), allowed_axes)
+        x_spec = _contiguous_flat_input_spec(x_spec, flatten_axis)
+        group_spec = _filter_spec_axes(get_padded_spec(arg_infos[2]), allowed_axes)
         if group_spec == (None,) and len(x_spec) > 0:
             group_spec = (x_spec[0],)
         flat_spec = _flat_data_spec(x_spec)
@@ -1338,7 +1373,7 @@ class GroupedQuantizePrimitive(BasePrimitive):
         result_infos,
     ):
         x_spec, group_spec, out_specs = GroupedQuantizePrimitive._parse_partition_specs(
-            scaling_mode, q_layout, mesh, arg_infos
+            scaling_mode, q_layout, flatten_axis, mesh, arg_infos
         )
         local_out_shapes = (
             tuple(_local_shape_from_spec(info.shape, spec, mesh) for info, spec in zip(result_infos, out_specs))

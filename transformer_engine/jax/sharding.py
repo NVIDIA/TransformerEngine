@@ -133,8 +133,8 @@ def with_sharding_constraint(x: jnp.array, pspec: PartitionSpec):
     """
     A wrapper function to jax.lax.with_sharding_constraint
         1. Does nothing if mesh is empty.
-        2. If all mesh axes are manual axes, replaces pspec with all Nones.
-        3. Otherwise, strips only the manual axes.
+        2. Keeps only auto axes in pspec.
+        3. Returns x unchanged if no auto axes remain.
     """
     if pspec is None:
         return x
@@ -143,22 +143,21 @@ def with_sharding_constraint(x: jnp.array, pspec: PartitionSpec):
     if mesh.empty:
         return x
 
-    # We want to exclude the axes that already used by shard_map and shard_map
-    # only sets those in the abstract_mesh, not the physical one
-    manual_axis_names = get_abstract_mesh().manual_axes
+    # with_sharding_constraint can only refer to auto axes. Explicit axes are
+    # already fixed by the active mesh, and manual axes are managed by shard_map.
+    abstract_mesh = get_abstract_mesh()
+    auto_axis_names = set(abstract_mesh.auto_axes)
 
     # Multiple mesh axes can be mapped to a single shape axis, so we need to unpack and process tuples here too
-    def filter_manual_axes(name_or_tuple):
+    def filter_non_auto_axes(name_or_tuple):
         if isinstance(name_or_tuple, tuple):
-            out = tuple(n for n in name_or_tuple if n not in manual_axis_names)
+            out = tuple(n for n in name_or_tuple if n in auto_axis_names)
             if len(out) == 0:
                 return None
             return out
-        if name_or_tuple in manual_axis_names:
-            return None
-        return name_or_tuple
+        return name_or_tuple if name_or_tuple in auto_axis_names else None
 
-    cleaned_axis_names = tuple(filter_manual_axes(name_or_tuple) for name_or_tuple in pspec)
+    cleaned_axis_names = tuple(filter_non_auto_axes(name_or_tuple) for name_or_tuple in pspec)
 
     if cleaned_axis_names == (None,) * len(cleaned_axis_names):
         return x
@@ -366,7 +365,7 @@ def global_shard_guard(resource: MeshResource):
         _GLOBAL_MESH_RESOURCE = old_resources
 
 
-def global_mesh_resource() -> MeshResource:
+def global_mesh_resource(validate: bool = True) -> MeshResource:
     """Get the current global mesh resource configuration.
 
     Returns:
@@ -377,7 +376,8 @@ def global_mesh_resource() -> MeshResource:
         " context. If you are not using multiple GPUs, you can use an empty MeshResource by"
         " wrapping your program in 'with global_shard_guard(MeshResource()):'"
     )
-    _validate_mesh_resource_configuration(_GLOBAL_MESH_RESOURCE)
+    if validate:
+        _validate_mesh_resource_configuration(_GLOBAL_MESH_RESOURCE)
     return _GLOBAL_MESH_RESOURCE
 
 
