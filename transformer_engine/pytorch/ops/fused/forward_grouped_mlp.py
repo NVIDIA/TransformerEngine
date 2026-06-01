@@ -165,6 +165,20 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
         num_groups = fc1_op.num_groups
         fc1_weight_param = fc1_op.weight if fc1_op.single_grouped_weight else fc1_op.weight0
         fc2_weight_param = fc2_op.weight if fc2_op.single_grouped_weight else fc2_op.weight0
+
+        # EGTP: expert weights are sharded 1/N along out_features; the fused kernels read
+        # the full shape, so all-gather the full weight first. gtp_size==1 is a no-op.
+        fc1_gtp_size = getattr(fc1_weight_param, "gtp_size", 1)
+        fc2_gtp_size = getattr(fc2_weight_param, "gtp_size", 1)
+        assert fc1_gtp_size == fc2_gtp_size, "FC1/FC2 must share one EGTP group."
+        if fc1_gtp_size > 1:
+            assert not fc1_op.single_grouped_weight and not fc2_op.single_grouped_weight, (
+                "EGTP + cuteDSL fused grouped-MLP only supports the discrete "
+                "(single_grouped_weight=False) expert-weight layout."
+            )
+            assert fc1_op.weight0.is_routed_expert and fc1_op.weight0.weight_list is not None
+            assert fc2_op.weight0.is_routed_expert and fc2_op.weight0.weight_list is not None
+
         device = fc1_weight_param.device
         if torch.is_autocast_enabled():
             dtype = torch.get_autocast_dtype("cuda")
@@ -231,7 +245,22 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
                     None,
                 )
         else:
-            fc1_weights = [getattr(fc1_op, f"weight{idx}") for idx in range(num_groups)]
+            if fc1_gtp_size > 1:
+                # Init per-shard quantizers once (quantize-then-gather).
+                if fc1_op.weight0._quantizer is None:
+                    fc1_op.weight0.setup(
+                        weight_quantizer=[
+                            fc1_op.get_quantizer("forward", 2 * idx + 1)
+                            for idx in range(num_groups)
+                        ]
+                    )
+                # All-gather the full per-expert weights (returns a list of N full tensors).
+                # TODO: pass in is_first_microbatch flag to skip redundant quantization after the first microbatch in each training step.
+                fc1_weights = fc1_op.weight0.batched_all_gather_and_prefetch(
+                    fwd=True, skip_weight_cast=False, cast_noop_flag=None
+                )
+            else:
+                fc1_weights = [getattr(fc1_op, f"weight{idx}") for idx in range(num_groups)]
             quantized_fc1_weights = []
             for idx, weight in enumerate(fc1_weights):
                 quantizer = fc1_op.get_quantizer("forward", 2 * idx + 1)
@@ -242,48 +271,11 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
                     quantized_fc1_weights.append(weight)
             grouped_fc1_weight = quantized_fc1_weights
 
-        # Prepare FC2 grouped weight tensor for fused kernels.
-        if fc2_op.single_grouped_weight:
-            if not isinstance(fc2_op.weight, GroupedTensor):
-                raise RuntimeError(
-                    "FC2 expected GroupedTensor weight with single_grouped_weight=True."
-                )
-            if fc2_op.weight.quantizer is not None:
-                fc2_weight_quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
-                fc2_op.weight.quantizer = fc2_weight_quantizer
-                grouped_fc2_weight = fc2_op.weight
-            else:
-                if fc2_op.weight.rowwise_data is None:
-                    raise RuntimeError("FC2 grouped weight has no rowwise_data to quantize.")
-                fc2_weight_quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
-                grouped_fc2_weight = tex.group_quantize(
-                    fc2_op.weight.rowwise_data.view(fc2_op.weight.logical_shape),
-                    fc2_weight_quantizer,
-                    num_groups,
-                    None,
-                )
-        else:
-            fc2_weights = [getattr(fc2_op, f"weight{idx}") for idx in range(num_groups)]
-            quantized_fc2_weights = []
-            for idx, weight in enumerate(fc2_weights):
-                quantizer = fc2_op.get_quantizer("forward", 2 * idx + 1)
-                quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
-                if not is_quantized_tensor(weight):
-                    quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
-                    quantized_fc2_weights.append(quantizer(weight))
-                else:
-                    quantized_fc2_weights.append(weight)
-            grouped_fc2_weight = quantized_fc2_weights
-
         # Some wrapper-copy paths may drop grouped storage metadata; enforce defaults.
         if getattr(grouped_fc1_weight, "_with_gemm_swizzled_scales", None) is None and isinstance(
             grouped_fc1_weight, GroupedTensor
         ):
             grouped_fc1_weight._with_gemm_swizzled_scales = False
-        if getattr(grouped_fc2_weight, "_with_gemm_swizzled_scales", None) is None and isinstance(
-            grouped_fc2_weight, GroupedTensor
-        ):
-            grouped_fc2_weight._with_gemm_swizzled_scales = False
 
         # Group-quantize input tensor and convert dtypes if needed
         fc1_input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
@@ -397,6 +389,59 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
             fc1_activation_kwargs["b_major"] = "k"
 
         fc1_kernel_out = self.grouped_gemm_activation_kernel()(**fc1_activation_kwargs)
+
+        # Prepare FC2 grouped weight, deferred to after the FC1 GEMM launch so the EGTP
+        # FC2 all-gather prefetch overlaps it (perf-neutral for non-EGTP).
+        if fc2_op.single_grouped_weight:
+            if not isinstance(fc2_op.weight, GroupedTensor):
+                raise RuntimeError(
+                    "FC2 expected GroupedTensor weight with single_grouped_weight=True."
+                )
+            if fc2_op.weight.quantizer is not None:
+                fc2_weight_quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
+                fc2_op.weight.quantizer = fc2_weight_quantizer
+                grouped_fc2_weight = fc2_op.weight
+            else:
+                if fc2_op.weight.rowwise_data is None:
+                    raise RuntimeError("FC2 grouped weight has no rowwise_data to quantize.")
+                fc2_weight_quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
+                grouped_fc2_weight = tex.group_quantize(
+                    fc2_op.weight.rowwise_data.view(fc2_op.weight.logical_shape),
+                    fc2_weight_quantizer,
+                    num_groups,
+                    None,
+                )
+        else:
+            if fc2_gtp_size > 1:
+                # Init per-shard quantizers once (quantize-then-gather); gated so the
+                # quantizer list isn't rebuilt every forward.
+                if fc2_op.weight0._quantizer is None:
+                    fc2_op.weight0.setup(
+                        weight_quantizer=[
+                            fc2_op.get_quantizer("forward", 2 * idx + 1)
+                            for idx in range(num_groups)
+                        ]
+                    )
+                # All-gather the full per-expert weights (returns a list of N full tensors).
+                fc2_weights = fc2_op.weight0.batched_all_gather_and_prefetch(
+                    fwd=True, skip_weight_cast=False, cast_noop_flag=None
+                )
+            else:
+                fc2_weights = [getattr(fc2_op, f"weight{idx}") for idx in range(num_groups)]
+            quantized_fc2_weights = []
+            for idx, weight in enumerate(fc2_weights):
+                quantizer = fc2_op.get_quantizer("forward", 2 * idx + 1)
+                quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
+                if not is_quantized_tensor(weight):
+                    quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
+                    quantized_fc2_weights.append(quantizer(weight))
+                else:
+                    quantized_fc2_weights.append(weight)
+            grouped_fc2_weight = quantized_fc2_weights
+        if getattr(grouped_fc2_weight, "_with_gemm_swizzled_scales", None) is None and isinstance(
+            grouped_fc2_weight, GroupedTensor
+        ):
+            grouped_fc2_weight._with_gemm_swizzled_scales = False
 
         # Unpack kernel outputs
         # Note: Fused kernel outputs tensors with non-contiguous
@@ -526,9 +571,13 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
             # FC1 saved-tensor layout.
             #   [split_sizes, base_split_offsets, split_points,
             #    grouped_fc1_x, *fc1_weight_tensors]
-            fc1_weight_tensors = (
-                [grouped_fc1_weight] if fc1_op.single_grouped_weight else grouped_fc1_weight
-            )
+            # EGTP: save the small sharded params; backward col-AGs the layout it needs.
+            if fc1_gtp_size > 1:
+                fc1_weight_tensors = [getattr(fc1_op, f"weight{idx}") for idx in range(num_groups)]
+            else:
+                fc1_weight_tensors = (
+                    [grouped_fc1_weight] if fc1_op.single_grouped_weight else grouped_fc1_weight
+                )
             fc1_ctx.save_for_backward(
                 split_sizes,
                 base_split_offsets,
@@ -545,6 +594,7 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
             fc1_ctx.dtype = dtype
             fc1_ctx.input_requires_grad = input_requires_grad
             fc1_ctx.weight_requires_grad = weight_requires_grad
+            fc1_ctx.gtp_size = fc1_gtp_size
 
             # Activation
             activation_ctx.save_for_backward(activation_in, scales)
@@ -559,9 +609,12 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
             #   [split_sizes, base_split_offsets, split_points,
             #    (fc2_scales if _scale_bias),
             #    grouped_fc2_x, *fc2_weight_tensors]
-            fc2_weight_tensors = (
-                [grouped_fc2_weight] if fc2_op.single_grouped_weight else grouped_fc2_weight
-            )
+            if fc2_gtp_size > 1:
+                fc2_weight_tensors = [getattr(fc2_op, f"weight{idx}") for idx in range(num_groups)]
+            else:
+                fc2_weight_tensors = (
+                    [grouped_fc2_weight] if fc2_op.single_grouped_weight else grouped_fc2_weight
+                )
             fc2_saved: list[Optional[torch.Tensor]] = [
                 split_sizes,
                 base_split_offsets,
@@ -581,6 +634,7 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
             fc2_ctx.dtype = dtype
             fc2_ctx.input_requires_grad = input_requires_grad
             fc2_ctx.weight_requires_grad = weight_requires_grad
+            fc2_ctx.gtp_size = fc2_gtp_size
             fc2_ctx.recompute_input_from_dsrelu = recompute_srelu_fc2_x
 
         return fc2_out, [(), (), ()]

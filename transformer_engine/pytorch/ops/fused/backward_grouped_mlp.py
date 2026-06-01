@@ -161,6 +161,7 @@ def _compute_grad_params(
     wgrad_output = None
     op_label = f"Grouped MLP fused backward ({label})" if label else "Grouped MLP fused backward"
     weights = fc_op._get_weight_tensors()
+    gtp_size = getattr(ctx, "gtp_size", 1)
     if fc_op.single_grouped_weight:
         w_list = [None]
         if ctx.weight_requires_grad:
@@ -193,7 +194,9 @@ def _compute_grad_params(
     else:
         w_list = [None] * num_groups
         if ctx.weight_requires_grad:
-            if fc_op._accumulate_into_main_grad:
+            # EGTP: the GEMM produces full-sized wgrads but main_grad is sharded, so use a
+            # full-sized scratch buffer (the reduce-scatter below lands it in main_grad).
+            if fc_op._accumulate_into_main_grad and gtp_size == 1:
                 w_list = [get_main_grad_from_param(w, op_label=op_label) for w in weights]
                 accumulate_into_main_grad = get_accumulate_flag_in_param(weights[0])
             else:
@@ -209,6 +212,12 @@ def _compute_grad_params(
     if ctx.weight_requires_grad:
         # Launch or defer the GEMM
         delay_wgrad = fc_op.wgrad_store is not None and fc_op.wgrad_store.delay_wgrad_compute()
+        if gtp_size > 1 and delay_wgrad:
+            raise RuntimeError(
+                "EGTP + cuteDSL fused grouped-MLP does not support delay_wgrad / "
+                "overlap_dispatch_backward_with_experts_wgrad yet; set "
+                "delay_wgrad_compute=False."
+            )
         if cudnn_wgrad_kernel_fn is not None:
             offsets = offsets if offsets.dtype == torch.int32 else offsets.to(dtype=torch.int32)
             gemm_fn = functools.partial(
@@ -232,9 +241,14 @@ def _compute_grad_params(
             fc_op.wgrad_store.put([grouped_x, grouped_dy, wgrad_output], gemm_fn)
         else:
             gemm_fn(grouped_x, grouped_dy, wgrad_output)
+            # EGTP: reduce-scatter the full per-rank wgrads into each sharded main_grad
+            # (also fires the Megatron grad-accum hook).
+            if gtp_size > 1:
+                weights[0].batched_wgrad_reduce_scatter(w_list)
 
-        # Need to return dummy wgrads for Megatron-LM wgrad fusion if grad is already added
-        if fc_op._accumulate_into_main_grad:
+        # Return dummy wgrads when grad is already in main_grad (wgrad fusion, or the EGTP
+        # reduce-scatter above) so Megatron-LM's wgrad fusion doesn't double-add.
+        if fc_op._accumulate_into_main_grad or gtp_size > 1:
             w_list = get_dummy_wgrads_for_params(weights)
         elif delay_wgrad:
             w_list = [None] if fc_op.single_grouped_weight else [None] * num_groups
@@ -505,6 +519,11 @@ class _BackwardGroupedMLP_CuTeGEMMDBase_MXFP8(FusedOperation):
                 glu_clamp_min=self._cudnn_glu_clamp_min,
             )
 
+        # EGTP: forward gathered rowwise; col-AG the columnwise layout the dgrad needs,
+        # right before use (one weight live at a time).
+        if getattr(fc2_ctx, "gtp_size", 1) > 1:
+            grouped_fc2_weight = fc2_op.weight0.batched_all_gather_and_prefetch_bwd()
+
         if fc2_op.single_grouped_weight:
             # Clone and swizzle scales for GEMM
             fc2_weight_for_gemm = grouped_fc2_weight.copy()
@@ -695,6 +714,10 @@ class _BackwardGroupedMLP_CuTeGEMMDBase_MXFP8(FusedOperation):
                 "discrete_col_sfd": True,
                 "use_dynamic_sched": True,
             }
+
+            # EGTP: col-AG the columnwise layout for the FC1 dgrad (only when dgrad runs).
+            if getattr(fc1_ctx, "gtp_size", 1) > 1:
+                grouped_fc1_weight = fc1_op.weight0.batched_all_gather_and_prefetch_bwd()
 
             if fc1_op.single_grouped_weight:
                 # Clone and swizzle scales for GEMM
