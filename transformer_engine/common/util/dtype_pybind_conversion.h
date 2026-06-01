@@ -70,7 +70,7 @@ inline PyObject *cached_int_to_dtype(PyObject *src, PyTypeObject *type) {
 /*! @brief Register the Python -> C++ ``DType`` implicit conversion.
  * Allows a Python object of type ``transformer_engine.pytorch.constants.DType``
  * to be passed wherever a pybind-bound ``transformer_engine::DType`` argument is expected.
- * pybind-bound ``transformer_engine::DType`` argument is expected. 
+ * pybind-bound ``transformer_engine::DType`` argument is expected.
  * Must be called after the pybind ``DType`` enum has been registered.
  */
 inline void register_dtype_implicit_conversion() {
