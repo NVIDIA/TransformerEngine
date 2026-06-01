@@ -359,8 +359,10 @@ class NVFP4QuantizerRef(Quantizer):
         with_random_sign_mask: bool = True,
     ):
         nvfp4_4over6_err_mode = nvfp4_4over6_err_mode.upper()
-        if nvfp4_4over6_err_mode not in ("MAE", "MSE"):
-            raise ValueError("nvfp4_4over6_err_mode must be 'MAE' or 'MSE'.")
+        if nvfp4_4over6_err_mode not in ("MAE", "MSE", "MAE_FP16", "MSE_FP16"):
+            raise ValueError(
+                "nvfp4_4over6_err_mode must be one of: 'MAE', 'MSE', 'MAE_FP16', 'MSE_FP16'."
+            )
         if row_scaled_nvfp4:
             if not rowwise:
                 raise ValueError("Row-scaled NVFP4 reference quantization requires rowwise usage.")
@@ -465,6 +467,63 @@ class NVFP4QuantizerRef(Quantizer):
         return result[:m, :scale_n]
 
     @staticmethod
+    def _ref_nvfp4_4over6_fp16_candidate(q: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+        """Decode E2M1 x E4M3 with the kernel's FP16 product semantics."""
+        q_float = q.to(torch.float32)
+        q_sign = (q_float < 0).to(torch.int32)
+        q_sig = (torch.abs(q_float) * 2).to(torch.int32)
+
+        scale_code = scale.contiguous().view(torch.uint8).to(torch.int32)
+        scale_sign = scale_code >> 7
+        scale_exp_field = (scale_code >> 3) & 0xF
+        scale_mantissa = scale_code & 0x7
+        scale_sig = torch.where(scale_exp_field == 0, scale_mantissa, scale_mantissa + 8)
+        scale_exp2 = torch.where(scale_exp_field == 0, scale_exp_field - 9, scale_exp_field - 10)
+
+        product_sign = q_sign ^ scale_sign
+        product_sig = q_sig * scale_sig
+        product_exp2 = scale_exp2 - 1
+
+        log2_sig = torch.zeros_like(product_sig)
+        for threshold in (2, 4, 8, 16, 32, 64, 128, 256):
+            log2_sig = log2_sig + (product_sig >= threshold).to(torch.int32)
+
+        floor_exp = log2_sig + product_exp2
+        normal_bits = ((floor_exp + 15) << 10) | (
+            torch.bitwise_left_shift(product_sig, 10 - log2_sig) - 1024
+        )
+        subnormal_bits = torch.bitwise_left_shift(product_sig, product_exp2 + 24)
+        magnitude_bits = torch.where(floor_exp < -14, subnormal_bits, normal_bits)
+        prod_bits = (product_sign << 15) | magnitude_bits
+        prod_bits = torch.where(product_sig == 0, product_sign << 15, prod_bits)
+        prod_bits = torch.where(
+            (scale_code & 0x7F) == 0x7F,
+            torch.full_like(prod_bits, 0x7E00),
+            prod_bits,
+        )
+
+        sign_f32 = torch.where(
+            (prod_bits & 0x8000) != 0,
+            torch.tensor(-1.0, device=prod_bits.device, dtype=torch.float32),
+            torch.tensor(1.0, device=prod_bits.device, dtype=torch.float32),
+        )
+        fp16_exp = (prod_bits >> 10) & 0x1F
+        fp16_frac = prod_bits & 0x3FF
+        normal_f32 = torch.ldexp((fp16_frac + 1024).to(torch.float32), fp16_exp - 25)
+        subnormal_f32 = torch.ldexp(fp16_frac.to(torch.float32), fp16_exp - 24)
+        return sign_f32 * torch.where(fp16_exp == 0, subnormal_f32, normal_f32)
+
+    @staticmethod
+    def _sum_4over6_2d_error(err: torch.Tensor, tile_len_y: int) -> torch.Tensor:
+        """Reduce 16 row errors in the same tree order as the CUDA warp reduction."""
+        rows = err.view(err.shape[0] // tile_len_y, tile_len_y, err.shape[1], 1)
+        rows = rows.squeeze(-1)
+        rows = rows[:, 0:8, :] + rows[:, 8:16, :]
+        rows = rows[:, 0:4, :] + rows[:, 4:8, :]
+        rows = rows[:, 0:2, :] + rows[:, 2:4, :]
+        return (rows[:, 0, :] + rows[:, 1, :]).unsqueeze(-1)
+
+    @staticmethod
     def _quantize_blockwise_4over6_reference(
         x: torch.Tensor,
         vec_max: torch.Tensor,
@@ -527,41 +586,59 @@ class NVFP4QuantizerRef(Quantizer):
         qx_map4 = cast_to_fp4x2(clipped_x_map4)
         qx_map6 = cast_to_fp4x2(clipped_x_map6)
 
-        fp4_map4 = cast_from_fp4x2(qx_map4, torch.float32).view(m, num_blocks, tile_len_x)
-        fp4_map6 = cast_from_fp4x2(qx_map6, torch.float32).view(m, num_blocks, tile_len_x)
-        denom = FLOAT4_E2M1_MAX * GLOBAL_SCALE_E4M3_MAX
-        sf_map4 = decode_scale_map4.to(torch.float32).squeeze(-1)
-        sf_map6 = decode_scale_map6.to(torch.float32).squeeze(-1)
-        if row_scaled_nvfp4:
-            error_global_amax = global_amax.squeeze(-1)
-        else:
-            error_global_amax = global_amax
-        x_float = x.to(torch.float32)
         err_map4 = torch.zeros_like(vec_max)
         err_map6 = torch.zeros_like(vec_max)
-        for idx in range(tile_len_x):
-            val_map4 = fp4_map4[:, :, idx] * sf_map4
-            val_map4 = val_map4 * error_global_amax
-            val_map4 = val_map4 / denom
-            diff_map4 = val_map4 - x_float[:, :, idx]
-            if nvfp4_4over6_err_mode == "MSE":
-                err_map4 = err_map4 + (diff_map4 * diff_map4).unsqueeze(-1)
+        fp4_map4 = cast_from_fp4x2(qx_map4, torch.float32).view(m, num_blocks, tile_len_x)
+        fp4_map6 = cast_from_fp4x2(qx_map6, torch.float32).view(m, num_blocks, tile_len_x)
+        x_float = x.to(torch.float32)
+        if nvfp4_4over6_err_mode in ("MAE_FP16", "MSE_FP16"):
+            original_scaled = x_float * global_encode_scale
+            candidate_map4 = NVFP4QuantizerRef._ref_nvfp4_4over6_fp16_candidate(
+                fp4_map4, decode_scale_map4
+            )
+            candidate_map6 = NVFP4QuantizerRef._ref_nvfp4_4over6_fp16_candidate(
+                fp4_map6, decode_scale_map6
+            )
+            for idx in range(tile_len_x):
+                diff_map4 = candidate_map4[:, :, idx] - original_scaled[:, :, idx]
+                diff_map6 = candidate_map6[:, :, idx] - original_scaled[:, :, idx]
+                if nvfp4_4over6_err_mode == "MSE_FP16":
+                    err_map4 = err_map4 + (diff_map4 * diff_map4).unsqueeze(-1)
+                    err_map6 = err_map6 + (diff_map6 * diff_map6).unsqueeze(-1)
+                else:
+                    err_map4 = err_map4 + torch.abs(diff_map4).unsqueeze(-1)
+                    err_map6 = err_map6 + torch.abs(diff_map6).unsqueeze(-1)
+        else:
+            denom = FLOAT4_E2M1_MAX * GLOBAL_SCALE_E4M3_MAX
+            sf_map4 = decode_scale_map4.to(torch.float32).squeeze(-1)
+            sf_map6 = decode_scale_map6.to(torch.float32).squeeze(-1)
+            if row_scaled_nvfp4:
+                error_global_amax = global_amax.squeeze(-1)
             else:
-                err_map4 = err_map4 + torch.abs(diff_map4).unsqueeze(-1)
+                error_global_amax = global_amax
+            for idx in range(tile_len_x):
+                val_map4 = fp4_map4[:, :, idx] * sf_map4
+                val_map4 = val_map4 * error_global_amax
+                val_map4 = val_map4 / denom
+                diff_map4 = val_map4 - x_float[:, :, idx]
+                if nvfp4_4over6_err_mode == "MSE":
+                    err_map4 = err_map4 + (diff_map4 * diff_map4).unsqueeze(-1)
+                else:
+                    err_map4 = err_map4 + torch.abs(diff_map4).unsqueeze(-1)
 
-            val_map6 = fp4_map6[:, :, idx] * sf_map6
-            val_map6 = val_map6 * error_global_amax
-            val_map6 = val_map6 / denom
-            diff_map6 = val_map6 - x_float[:, :, idx]
-            if nvfp4_4over6_err_mode == "MSE":
-                err_map6 = err_map6 + (diff_map6 * diff_map6).unsqueeze(-1)
-            else:
-                err_map6 = err_map6 + torch.abs(diff_map6).unsqueeze(-1)
+                val_map6 = fp4_map6[:, :, idx] * sf_map6
+                val_map6 = val_map6 * error_global_amax
+                val_map6 = val_map6 / denom
+                diff_map6 = val_map6 - x_float[:, :, idx]
+                if nvfp4_4over6_err_mode == "MSE":
+                    err_map6 = err_map6 + (diff_map6 * diff_map6).unsqueeze(-1)
+                else:
+                    err_map6 = err_map6 + torch.abs(diff_map6).unsqueeze(-1)
         if tile_len_y == 1:
             pick_map4 = err_map4 < err_map6
         else:
-            err_map4_blocks = err_map4.view(m // tile_len_y, tile_len_y, num_blocks, 1).sum(dim=1)
-            err_map6_blocks = err_map6.view(m // tile_len_y, tile_len_y, num_blocks, 1).sum(dim=1)
+            err_map4_blocks = NVFP4QuantizerRef._sum_4over6_2d_error(err_map4, tile_len_y)
+            err_map6_blocks = NVFP4QuantizerRef._sum_4over6_2d_error(err_map6, tile_len_y)
             pick_map4 = (err_map4_blocks < err_map6_blocks).repeat_interleave(tile_len_y, dim=0)
         qx = torch.where(
             pick_map4.expand(-1, -1, tile_len_x // 2),

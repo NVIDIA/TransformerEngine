@@ -1740,6 +1740,10 @@ NVFP4Quantizer::NVFP4Quantizer(const py::handle& quantizer) : Quantizer(quantize
     this->nvfp4_4over6_mode = kNVTENVFP44Over6MinMAE;
   } else if (nvfp4_4over6_err_mode == "MSE") {
     this->nvfp4_4over6_mode = kNVTENVFP44Over6MinMSE;
+  } else if (nvfp4_4over6_err_mode == "MAE_FP16") {
+    this->nvfp4_4over6_mode = kNVTENVFP44Over6MinMAEFP16;
+  } else if (nvfp4_4over6_err_mode == "MSE_FP16") {
+    this->nvfp4_4over6_mode = kNVTENVFP44Over6MinMSEFP16;
   } else {
     NVTE_ERROR("Unsupported NVFP4 4over6 error mode: ", nvfp4_4over6_err_mode);
   }

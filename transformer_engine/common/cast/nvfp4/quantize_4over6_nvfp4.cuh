@@ -39,19 +39,27 @@ namespace nvfp4 {
 
 #if FP4_TYPE_SUPPORTED
 
-#define TRANSFORMER_ENGINE_NVFP4_4OVER6_MODE_SWITCH(MODE, MODE_CONST, ...) \
-  switch (MODE) {                                                          \
-    case kNVTENVFP44Over6MinMAE: {                                         \
-      constexpr NVTENVFP44Over6Mode MODE_CONST = kNVTENVFP44Over6MinMAE;   \
-      { __VA_ARGS__ }                                                      \
-    } break;                                                               \
-    case kNVTENVFP44Over6MinMSE: {                                         \
-      constexpr NVTENVFP44Over6Mode MODE_CONST = kNVTENVFP44Over6MinMSE;   \
-      { __VA_ARGS__ }                                                      \
-    } break;                                                               \
-    default: {                                                             \
-      NVTE_ERROR("Unsupported NVFP4 4over6 mode.");                        \
-    }                                                                      \
+#define TRANSFORMER_ENGINE_NVFP4_4OVER6_MODE_SWITCH(MODE, MODE_CONST, ...)   \
+  switch (MODE) {                                                            \
+    case kNVTENVFP44Over6MinMAE: {                                           \
+      constexpr NVTENVFP44Over6Mode MODE_CONST = kNVTENVFP44Over6MinMAE;     \
+      { __VA_ARGS__ }                                                        \
+    } break;                                                                 \
+    case kNVTENVFP44Over6MinMSE: {                                           \
+      constexpr NVTENVFP44Over6Mode MODE_CONST = kNVTENVFP44Over6MinMSE;     \
+      { __VA_ARGS__ }                                                        \
+    } break;                                                                 \
+    case kNVTENVFP44Over6MinMAEFP16: {                                       \
+      constexpr NVTENVFP44Over6Mode MODE_CONST = kNVTENVFP44Over6MinMAEFP16; \
+      { __VA_ARGS__ }                                                        \
+    } break;                                                                 \
+    case kNVTENVFP44Over6MinMSEFP16: {                                       \
+      constexpr NVTENVFP44Over6Mode MODE_CONST = kNVTENVFP44Over6MinMSEFP16; \
+      { __VA_ARGS__ }                                                        \
+    } break;                                                                 \
+    default: {                                                               \
+      NVTE_ERROR("Unsupported NVFP4 4over6 mode.");                          \
+    }                                                                        \
   }
 
 #define TRANSFORMER_ENGINE_NVFP4_4OVER6_E4M3_MAX_SWITCH(E4M3_MAX_VALUE, E4M3_MAX_CONST, ...) \
@@ -85,6 +93,8 @@ template <NVTENVFP44Over6Mode kMode, bool kErrUseFastMath>
 struct Config {
   static constexpr NVTENVFP44Over6Mode mode = kMode;
   static constexpr bool err_use_fast_math = kErrUseFastMath;
+  static constexpr bool fp16_error =
+      kMode == kNVTENVFP44Over6MinMAEFP16 || kMode == kNVTENVFP44Over6MinMSEFP16;
 };
 
 struct Candidate {
@@ -102,13 +112,14 @@ struct ScalePair {
   nvfp4_scale_t map6;
   float inv_map4;
   float inv_map6;
+  float global_encode_scale;
 };
 
 template <NVTENVFP44Over6Mode kMode>
 __device__ __forceinline__ float compute_error_rn(const float diff) {
-  if constexpr (kMode == kNVTENVFP44Over6MinMSE) {
+  if constexpr (kMode == kNVTENVFP44Over6MinMSE || kMode == kNVTENVFP44Over6MinMSEFP16) {
     return __fmul_rn(diff, diff);
-  } else if constexpr (kMode == kNVTENVFP44Over6MinMAE) {
+  } else if constexpr (kMode == kNVTENVFP44Over6MinMAE || kMode == kNVTENVFP44Over6MinMAEFP16) {
     return fabsf(diff);
   } else {
     NVTE_DEVICE_ERROR("Unsupported NVFP4 4over6 mode.");
@@ -118,9 +129,9 @@ __device__ __forceinline__ float compute_error_rn(const float diff) {
 
 template <NVTENVFP44Over6Mode kMode>
 __device__ __forceinline__ float compute_error(const float diff) {
-  if constexpr (kMode == kNVTENVFP44Over6MinMSE) {
+  if constexpr (kMode == kNVTENVFP44Over6MinMSE || kMode == kNVTENVFP44Over6MinMSEFP16) {
     return diff * diff;
-  } else if constexpr (kMode == kNVTENVFP44Over6MinMAE) {
+  } else if constexpr (kMode == kNVTENVFP44Over6MinMAE || kMode == kNVTENVFP44Over6MinMAEFP16) {
     return fabsf(diff);
   } else {
     NVTE_DEVICE_ERROR("Unsupported NVFP4 4over6 mode.");
@@ -147,6 +158,7 @@ __device__ __forceinline__ ScalePair compute_scale_pair(const float block_amax,
       fminf(1.0f / (static_cast<float>(scales.map4) * S_dec), detail::TypeExtrema<float>::max);
   scales.inv_map6 =
       fminf(1.0f / (static_cast<float>(scales.map6) * S_dec), detail::TypeExtrema<float>::max);
+  scales.global_encode_scale = S_enc;
   return scales;
 }
 
@@ -214,12 +226,67 @@ __device__ __forceinline__ void accumulate_dequant_error(const uint32_t dequant_
   }
 }
 
-template <typename Cfg, int E4M3_MAX>
-__device__ __forceinline__ uint32_t cvt_fp32_to_fp4_8x_with_error(const float (&x)[8],
-                                                                  const float block_scale_inverse,
+__device__ __forceinline__ uint8_t fp8_bits(const nvfp4_scale_t sf) {
+  return *reinterpret_cast<const uint8_t *>(&sf);
+}
+
+__device__ __forceinline__ float2 e2m1x2_scaled_e4m3_to_float2(const uint32_t e2m1_byte,
+                                                               const nvfp4_scale_t sf) {
+  float2 result;
+  const uint32_t sf_byte = static_cast<uint32_t>(fp8_bits(sf));
+  asm volatile(
+      "{\n"
+      ".reg .b8 byte0, byte1, byte2, byte3;\n"
+      ".reg .b16 fp8_pair;\n"
+      ".reg .b16 scale_h, unused_h;\n"
+      ".reg .b16 lo, hi;\n"
+      ".reg .b32 q_h2;\n"
+      ".reg .b32 scale_h2;\n"
+      ".reg .b32 prod_h2;\n"
+      "mov.b32 {byte0, byte1, byte2, byte3}, %2;\n"
+      "cvt.rn.f16x2.e2m1x2 q_h2, byte0;\n"
+      "cvt.u16.u32 fp8_pair, %3;\n"
+      "cvt.rn.f16x2.e4m3x2 scale_h2, fp8_pair;\n"
+      "mov.b32 {scale_h, unused_h}, scale_h2;\n"
+      "mov.b32 scale_h2, {scale_h, scale_h};\n"
+      "mul.rn.f16x2 prod_h2, q_h2, scale_h2;\n"
+      "mov.b32 {lo, hi}, prod_h2;\n"
+      "cvt.f32.f16 %0, lo;\n"
+      "cvt.f32.f16 %1, hi;\n"
+      "}"
+      : "=f"(result.x), "=f"(result.y)
+      : "r"(e2m1_byte), "r"(sf_byte));
+  return result;
+}
+
+template <typename Cfg>
+__device__ __forceinline__ void accumulate_fp16_scaled_error_pair(const uint32_t e2m1_byte,
+                                                                  const float x0, const float x1,
                                                                   const nvfp4_scale_t sf,
-                                                                  const float global_amax,
+                                                                  const float global_encode_scale,
                                                                   float *err) {
+  const float2 candidate = e2m1x2_scaled_e4m3_to_float2(e2m1_byte, sf);
+  if constexpr (Cfg::err_use_fast_math) {
+    const float original0 = x0 * global_encode_scale;
+    const float original1 = x1 * global_encode_scale;
+    const float diff0 = candidate.x - original0;
+    const float diff1 = candidate.y - original1;
+    *err += compute_error<Cfg::mode>(diff0);
+    *err += compute_error<Cfg::mode>(diff1);
+  } else {
+    const float original0 = __fmul_rn(x0, global_encode_scale);
+    const float original1 = __fmul_rn(x1, global_encode_scale);
+    const float diff0 = __fsub_rn(candidate.x, original0);
+    const float diff1 = __fsub_rn(candidate.y, original1);
+    *err = __fadd_rn(*err, compute_error_rn<Cfg::mode>(diff0));
+    *err = __fadd_rn(*err, compute_error_rn<Cfg::mode>(diff1));
+  }
+}
+
+template <typename Cfg, int E4M3_MAX>
+__device__ __forceinline__ uint32_t cvt_fp32_to_fp4_8x_with_error(
+    const float (&x)[8], const float block_scale_inverse, const nvfp4_scale_t sf,
+    const float global_amax, const float global_encode_scale, float *err) {
   uint32_t out = 0;
   uint32_t out_dequant_1 = 0;
   uint32_t out_dequant_2 = 0;
@@ -253,15 +320,25 @@ __device__ __forceinline__ uint32_t cvt_fp32_to_fp4_8x_with_error(const float (&
         "Try recompiling with sm_XXXa instead of sm_XXX.");
   }
 
-  const float sf_float = static_cast<float>(sf);
-  accumulate_dequant_error<Cfg, E4M3_MAX, 0>(out_dequant_1, x[0], sf_float, global_amax, err);
-  accumulate_dequant_error<Cfg, E4M3_MAX, 16>(out_dequant_1, x[1], sf_float, global_amax, err);
-  accumulate_dequant_error<Cfg, E4M3_MAX, 0>(out_dequant_2, x[2], sf_float, global_amax, err);
-  accumulate_dequant_error<Cfg, E4M3_MAX, 16>(out_dequant_2, x[3], sf_float, global_amax, err);
-  accumulate_dequant_error<Cfg, E4M3_MAX, 0>(out_dequant_3, x[4], sf_float, global_amax, err);
-  accumulate_dequant_error<Cfg, E4M3_MAX, 16>(out_dequant_3, x[5], sf_float, global_amax, err);
-  accumulate_dequant_error<Cfg, E4M3_MAX, 0>(out_dequant_4, x[6], sf_float, global_amax, err);
-  accumulate_dequant_error<Cfg, E4M3_MAX, 16>(out_dequant_4, x[7], sf_float, global_amax, err);
+  if constexpr (Cfg::fp16_error) {
+    accumulate_fp16_scaled_error_pair<Cfg>(out & 0xFFu, x[0], x[1], sf, global_encode_scale, err);
+    accumulate_fp16_scaled_error_pair<Cfg>((out >> 8) & 0xFFu, x[2], x[3], sf, global_encode_scale,
+                                           err);
+    accumulate_fp16_scaled_error_pair<Cfg>((out >> 16) & 0xFFu, x[4], x[5], sf, global_encode_scale,
+                                           err);
+    accumulate_fp16_scaled_error_pair<Cfg>((out >> 24) & 0xFFu, x[6], x[7], sf, global_encode_scale,
+                                           err);
+  } else {
+    const float sf_float = static_cast<float>(sf);
+    accumulate_dequant_error<Cfg, E4M3_MAX, 0>(out_dequant_1, x[0], sf_float, global_amax, err);
+    accumulate_dequant_error<Cfg, E4M3_MAX, 16>(out_dequant_1, x[1], sf_float, global_amax, err);
+    accumulate_dequant_error<Cfg, E4M3_MAX, 0>(out_dequant_2, x[2], sf_float, global_amax, err);
+    accumulate_dequant_error<Cfg, E4M3_MAX, 16>(out_dequant_2, x[3], sf_float, global_amax, err);
+    accumulate_dequant_error<Cfg, E4M3_MAX, 0>(out_dequant_3, x[4], sf_float, global_amax, err);
+    accumulate_dequant_error<Cfg, E4M3_MAX, 16>(out_dequant_3, x[5], sf_float, global_amax, err);
+    accumulate_dequant_error<Cfg, E4M3_MAX, 0>(out_dequant_4, x[6], sf_float, global_amax, err);
+    accumulate_dequant_error<Cfg, E4M3_MAX, 16>(out_dequant_4, x[7], sf_float, global_amax, err);
+  }
   return out;
 }
 
@@ -273,13 +350,17 @@ __device__ __forceinline__ CandidatePair make_candidates(const float (&x0)[8], c
   candidates.map4.err = 0.0f;
   candidates.map6.err = 0.0f;
   candidates.map4.packed[0] = cvt_fp32_to_fp4_8x_with_error<Cfg, E4M3_MAX>(
-      x0, scales.inv_map4, scales.map4, global_amax, &candidates.map4.err);
+      x0, scales.inv_map4, scales.map4, global_amax, scales.global_encode_scale,
+      &candidates.map4.err);
   candidates.map6.packed[0] = cvt_fp32_to_fp4_8x_with_error<Cfg, E4M3_MAX>(
-      x0, scales.inv_map6, scales.map6, global_amax, &candidates.map6.err);
+      x0, scales.inv_map6, scales.map6, global_amax, scales.global_encode_scale,
+      &candidates.map6.err);
   candidates.map4.packed[1] = cvt_fp32_to_fp4_8x_with_error<Cfg, E4M3_MAX>(
-      x1, scales.inv_map4, scales.map4, global_amax, &candidates.map4.err);
+      x1, scales.inv_map4, scales.map4, global_amax, scales.global_encode_scale,
+      &candidates.map4.err);
   candidates.map6.packed[1] = cvt_fp32_to_fp4_8x_with_error<Cfg, E4M3_MAX>(
-      x1, scales.inv_map6, scales.map6, global_amax, &candidates.map6.err);
+      x1, scales.inv_map6, scales.map6, global_amax, scales.global_encode_scale,
+      &candidates.map6.err);
   return candidates;
 }
 

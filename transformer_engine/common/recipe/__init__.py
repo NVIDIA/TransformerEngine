@@ -14,7 +14,7 @@ from pydantic.dataclasses import dataclass
 
 _BACKWARD_OVERRIDES = (None, "high_precision", "dequantized")
 _NVFP4_4OVER6_SCOPES = ("none", "weights", "activations", "all")
-_NVFP4_4OVER6_ERR_MODES = ("MAE", "MSE")
+_NVFP4_4OVER6_ERR_MODES = ("MAE", "MSE", "MAE_FP16", "MSE_FP16")
 
 
 class _FormatHelper(NamedTuple):
@@ -535,7 +535,7 @@ class NVFP4BlockScaling(Recipe):
              Select 4over6 tensors that use 256 as the global E4M3 scale
              bound. By default, all 4over6 tensors use 256. Use ``'none'``
              to keep the standard NVFP4 448 bound for 4over6 tensors.
-    nvfp4_4over6_err_mode : {'MAE', 'MSE'}, default = 'MAE'
+    nvfp4_4over6_err_mode : {'MAE', 'MSE', 'MAE_FP16', 'MSE_FP16'}, default = 'MAE'
              Error metric used by NVFP4 4over6 candidate selection.
     backward_override : {None, 'high_precision', 'dequantized'}, default = None
             Backward precision mode. None does not modify backward behavior,
@@ -577,7 +577,7 @@ class NVFP4BlockScaling(Recipe):
         ), "NVTE_NVFP4_4OVER6_E4M3_USE_256 must be one of: 'none', 'weights', 'activations', 'all'."
         assert (
             self.nvfp4_4over6_err_mode in _NVFP4_4OVER6_ERR_MODES
-        ), "NVTE_NVFP4_4OVER6_ERR_MODE must be one of: 'MAE', 'MSE'."
+        ), "NVTE_NVFP4_4OVER6_ERR_MODE must be one of: 'MAE', 'MSE', 'MAE_FP16', 'MSE_FP16'."
 
         # Quantization params
         # Note: RHT is currently only applied to column-wise usage so that

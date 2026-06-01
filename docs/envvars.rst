@@ -301,9 +301,9 @@ Kernel Configuration
 
 .. envvar:: NVTE_NVFP4_4OVER6_ERR_MODE
 
-   :Type: ``str`` (``MAE`` or ``MSE``)
+   :Type: ``str`` (``MAE``, ``MSE``, ``MAE_FP16``, or ``MSE_FP16``)
    :Default: ``MAE``
-   :Description: Select the input-domain error metric used by NVFP4 4over6 map-to-4 versus map-to-6 candidate selection in the ``NVFP4BlockScaling`` recipe.
+   :Description: Select the error metric used by NVFP4 4over6 map-to-4 versus map-to-6 candidate selection in the ``NVFP4BlockScaling`` recipe. ``MAE`` and ``MSE`` compare dequantized candidates in the original input domain. ``MAE_FP16`` and ``MSE_FP16`` compare candidates in the E4M3-scaled domain after the E2M1 x E4M3 product is rounded to FP16.
 
 .. envvar:: NVTE_NVFP4_4OVER6_ERR_USE_FAST_MATH
 

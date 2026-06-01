@@ -199,7 +199,11 @@ def check_quantization_nvfp4_versus_reference(
 @pytest.mark.parametrize("row_scaled_nvfp4", [False, True], ids=["nvfp4", "nvfp4_row_scaled"])
 @pytest.mark.parametrize("use_4over6", [False, True], ids=["default", "4over6"])
 @pytest.mark.parametrize("nvfp4_e4m3_max", [448, 256], ids=["e4m3_448", "e4m3_256"])
-@pytest.mark.parametrize("nvfp4_4over6_err_mode", ["MAE", "MSE"], ids=["mae_err", "mse_err"])
+@pytest.mark.parametrize(
+    "nvfp4_4over6_err_mode",
+    ["MAE", "MSE", "MAE_FP16", "MSE_FP16"],
+    ids=["mae_err", "mse_err", "mae_fp16_err", "mse_fp16_err"],
+)
 def test_quantization_block_tiling_versus_reference(
     x_dtype: torch.dtype,
     M: int,
@@ -243,7 +247,11 @@ def test_quantization_block_tiling_versus_reference(
 )
 @pytest.mark.parametrize("row_scaled_nvfp4", [False, True], ids=["nvfp4", "nvfp4_row_scaled"])
 @pytest.mark.parametrize("use_4over6", [False, True], ids=["default", "4over6"])
-@pytest.mark.parametrize("nvfp4_4over6_err_mode", ["MAE", "MSE"], ids=["mae_err", "mse_err"])
+@pytest.mark.parametrize(
+    "nvfp4_4over6_err_mode",
+    ["MAE", "MSE", "MAE_FP16", "MSE_FP16"],
+    ids=["mae_err", "mse_err", "mae_fp16_err", "mse_fp16_err"],
+)
 def test_nvfp4_quantization_extrema_versus_reference(
     x_dtype: torch.dtype,
     M: int,
@@ -360,7 +368,11 @@ def test_nvfp4_quantization_extrema_versus_reference(
 )
 @pytest.mark.parametrize("row_scaled_nvfp4", [False, True], ids=["nvfp4", "nvfp4_row_scaled"])
 @pytest.mark.parametrize("use_4over6", [False, True], ids=["default", "4over6"])
-@pytest.mark.parametrize("nvfp4_4over6_err_mode", ["MAE", "MSE"], ids=["mae_err", "mse_err"])
+@pytest.mark.parametrize(
+    "nvfp4_4over6_err_mode",
+    ["MAE", "MSE", "MAE_FP16", "MSE_FP16"],
+    ids=["mae_err", "mse_err", "mae_fp16_err", "mse_fp16_err"],
+)
 def test_nvfp4_quantization_boundary_values(
     x_dtype: torch.dtype,
     M: int,
@@ -490,7 +502,11 @@ def test_nvfp4_quantization_boundary_values(
 )
 @pytest.mark.parametrize("row_scaled_nvfp4", [False, True], ids=["nvfp4", "nvfp4_row_scaled"])
 @pytest.mark.parametrize("use_4over6", [False, True], ids=["default", "4over6"])
-@pytest.mark.parametrize("nvfp4_4over6_err_mode", ["MAE", "MSE"], ids=["mae_err", "mse_err"])
+@pytest.mark.parametrize(
+    "nvfp4_4over6_err_mode",
+    ["MAE", "MSE", "MAE_FP16", "MSE_FP16"],
+    ids=["mae_err", "mse_err", "mae_fp16_err", "mse_fp16_err"],
+)
 def test_nvfp4_quantization_noncontiguous_inputs(
     x_dtype: torch.dtype,
     M: int,

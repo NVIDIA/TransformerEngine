@@ -1165,6 +1165,10 @@ std::string test_name(const FusedCastTransposeNVFP4TestSuite::ParamType& param) 
             name += "XMSE";
         } else if (config.mode == kNVTENVFP44Over6MinMAE) {
             name += "XMAE";
+        } else if (config.mode == kNVTENVFP44Over6MinMSEFP16) {
+            name += "XMSE_FP16";
+        } else if (config.mode == kNVTENVFP44Over6MinMAEFP16) {
+            name += "XMAE_FP16";
         } else {
             name += "XINVALID_MODE";
         }
@@ -1219,10 +1223,18 @@ INSTANTIATE_TEST_SUITE_P(
             NVFP4FourOverSixTestConfig{kNVTENVFP44Over6MinMAE, 448, true},
             NVFP4FourOverSixTestConfig{kNVTENVFP44Over6MinMSE, 448, false},
             NVFP4FourOverSixTestConfig{kNVTENVFP44Over6MinMSE, 448, true},
+            NVFP4FourOverSixTestConfig{kNVTENVFP44Over6MinMAEFP16, 448, false},
+            NVFP4FourOverSixTestConfig{kNVTENVFP44Over6MinMAEFP16, 448, true},
+            NVFP4FourOverSixTestConfig{kNVTENVFP44Over6MinMSEFP16, 448, false},
+            NVFP4FourOverSixTestConfig{kNVTENVFP44Over6MinMSEFP16, 448, true},
             NVFP4FourOverSixTestConfig{kNVTENVFP44Over6MinMAE, 256, false},
             NVFP4FourOverSixTestConfig{kNVTENVFP44Over6MinMAE, 256, true},
             NVFP4FourOverSixTestConfig{kNVTENVFP44Over6MinMSE, 256, false},
-            NVFP4FourOverSixTestConfig{kNVTENVFP44Over6MinMSE, 256, true})), // four_over_six_config
+            NVFP4FourOverSixTestConfig{kNVTENVFP44Over6MinMSE, 256, true},
+            NVFP4FourOverSixTestConfig{kNVTENVFP44Over6MinMAEFP16, 256, false},
+            NVFP4FourOverSixTestConfig{kNVTENVFP44Over6MinMAEFP16, 256, true},
+            NVFP4FourOverSixTestConfig{kNVTENVFP44Over6MinMSEFP16, 256, false},
+            NVFP4FourOverSixTestConfig{kNVTENVFP44Over6MinMSEFP16, 256, true})), // four_over_six_config
     [](const testing::TestParamInfo<FusedCastTransposeNVFP4TestSuite::ParamType>& info) {
         return test_name(info.param);
     });
