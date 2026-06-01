@@ -175,12 +175,14 @@ Error_Type GemmInitV2FFI(Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type
       cudaStream_t prepare_stream = cudaStreamPerThread;
       if (config.collective_op == JAXX_Collective_Op::ALL_GATHER) {
         executor->split_overlap_ag(rhs_, config.rhs_transposed, lhs_, config.lhs_transposed, d_,
-                                   bias_, pre_gelu_out_, dummy, false /*grad*/, false /*accumulate*/,
-                                   false /*use_split_accumulator*/, dummy, prepare_stream);
+                                   bias_, pre_gelu_out_, dummy, false /*grad*/,
+                                   false /*accumulate*/, false /*use_split_accumulator*/, dummy,
+                                   prepare_stream);
       } else if (config.collective_op == JAXX_Collective_Op::REDUCE_SCATTER) {
         executor->split_overlap_rs(rhs_, config.rhs_transposed, lhs_, config.lhs_transposed, d_,
-                                   bias_, pre_gelu_out_, dummy, false /*grad*/, false /*accumulate*/,
-                                   false /*use_split_accumulator*/, dummy, prepare_stream);
+                                   bias_, pre_gelu_out_, dummy, false /*grad*/,
+                                   false /*accumulate*/, false /*use_split_accumulator*/, dummy,
+                                   prepare_stream);
       }
       NVTE_CHECK_CUDA(cudaStreamSynchronize(prepare_stream));
     }
