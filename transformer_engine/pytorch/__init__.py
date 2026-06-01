@@ -117,6 +117,7 @@ except AttributeError:
 try:
     from torch.serialization import add_safe_globals
     import transformer_engine_torch as tex
+
     add_safe_globals(
         [
             # Storage mixins (used during pickling of internal-only tensors)
