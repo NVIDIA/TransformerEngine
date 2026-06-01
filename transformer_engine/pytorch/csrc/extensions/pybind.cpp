@@ -494,10 +494,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
   m.def("copy_data_ptrs_to_device", &transformer_engine::pytorch::copy_data_ptrs_to_device,
         py::arg("tensors"), py::arg("device"), py::call_guard<py::gil_scoped_release>());
-  m.def("transform_and_copy_data_ptrs_to_device",
-        &transformer_engine::pytorch::transform_and_copy_data_ptrs_to_device,
-        py::arg("transform_type"), py::arg("tensors"), py::arg("device"),
-        py::call_guard<py::gil_scoped_release>());
   m.def("splits_to_offsets", &transformer_engine::pytorch::splits_to_offsets,
         "Compute grouped tensor offsets from split sizes", py::arg("first_dims"),
         py::arg("logical_last_dim"), py::call_guard<py::gil_scoped_release>());
@@ -606,6 +602,19 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Bulk overlap All-Gather with a GEMM operation launched by another communicator",
         py::call_guard<py::gil_scoped_release>(), py::arg("allgather_communicator"),
         py::arg("send_stream"), py::arg("recv_stream"));
+
+  // Helpers for experimental fused grouped MLP
+  //
+  // These are intended for compatibility with cuDNN CuTe DSL grouped
+  // GEMM kernels. Since those are unstable and under active
+  // development, these helpers should also be considered unstable.
+  auto grouped_mlp_experimental = m.def_submodule(
+      "grouped_mlp_experimental",
+      "Experimental helpers for the fused grouped MLP (unstable, may change or disappear).");
+  grouped_mlp_experimental.def("transform_and_copy_data_ptrs_to_device",
+                               &transformer_engine::pytorch::transform_and_copy_data_ptrs_to_device,
+                               py::arg("transform_type"), py::arg("tensors"), py::arg("device"),
+                               py::call_guard<py::gil_scoped_release>());
 
   // Data structures
   py::class_<transformer_engine::pytorch::FP8TensorMeta>(m, "FP8TensorMeta")

@@ -656,10 +656,12 @@ class _BackwardGroupedMLP_CuTeGEMMDBase(FusedOperation):
             swizzle_type = (
                 "uniform_nvfp4_swizzle" if use_nvfp4 else "uniform_mxfp8_columnwise_swizzle"
             )
-            fc2_sfb_ptrs, _fc2_sfb_buffer = tex.transform_and_copy_data_ptrs_to_device(
-                swizzle_type,
-                [w._columnwise_scale_inv for w in grouped_fc2_weight],
-                device,
+            fc2_sfb_ptrs, _fc2_sfb_buffer = (
+                tex.grouped_mlp_experimental.transform_and_copy_data_ptrs_to_device(
+                    swizzle_type,
+                    [w._columnwise_scale_inv for w in grouped_fc2_weight],
+                    device,
+                )
             )
             fc2_dactivation_kwargs["b_ptrs"] = fc2_b_ptrs
             fc2_dactivation_kwargs["sfb_ptrs"] = fc2_sfb_ptrs
@@ -918,10 +920,12 @@ class _BackwardGroupedMLP_CuTeGEMMDBase(FusedOperation):
                     swizzle_type = (
                         "uniform_nvfp4_swizzle" if use_nvfp4 else "uniform_mxfp8_columnwise_swizzle"
                     )
-                    fc1_sfb_ptrs, _fc1_sfb_buffer = tex.transform_and_copy_data_ptrs_to_device(
-                        swizzle_type,
-                        [w._columnwise_scale_inv for w in grouped_fc1_weight],
-                        device,
+                    fc1_sfb_ptrs, _fc1_sfb_buffer = (
+                        tex.grouped_mlp_experimental.transform_and_copy_data_ptrs_to_device(
+                            swizzle_type,
+                            [w._columnwise_scale_inv for w in grouped_fc1_weight],
+                            device,
+                        )
                     )
 
                     fc1_dgrad_kwargs["b_ptrs"] = fc1_b_ptrs
