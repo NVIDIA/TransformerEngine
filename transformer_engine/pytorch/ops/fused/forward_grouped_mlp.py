@@ -430,9 +430,7 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
             if num_groups == 1
             else hasattr(tex, "group_quantize_with_amax")
         )
-        use_fc1_glu_hadamard = (
-            fc1_glu_hadamard_kernel is not None and has_precomputed_amax_quantize
-        )
+        use_fc1_glu_hadamard = fc1_glu_hadamard_kernel is not None and has_precomputed_amax_quantize
 
         fc1_activation_kwargs = {
             "a_tensor": fc1_x_data,

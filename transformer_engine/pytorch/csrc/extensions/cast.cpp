@@ -92,9 +92,9 @@ py::object nvfp4_quantize_with_amax(const at::Tensor &tensor, py::handle quantiz
   NVTE_CHECK(tensor.dim() >= 2, "Tensor must be at least 2D");
   NVTE_CHECK(rowwise_amax.is_cuda() && columnwise_amax.is_cuda(),
              "Precomputed amax tensors must be CUDA tensors.");
-  NVTE_CHECK(rowwise_amax.scalar_type() == at::kFloat &&
-                 columnwise_amax.scalar_type() == at::kFloat,
-             "Precomputed amax tensors must be float32.");
+  NVTE_CHECK(
+      rowwise_amax.scalar_type() == at::kFloat && columnwise_amax.scalar_type() == at::kFloat,
+      "Precomputed amax tensors must be float32.");
   NVTE_CHECK(rowwise_amax.numel() == 1 && columnwise_amax.numel() == 1,
              "nvfp4_quantize_with_amax expects scalar rowwise and columnwise amaxes.");
 
@@ -294,9 +294,9 @@ py::object nvfp4_group_quantize_with_amax(const at::Tensor &tensor, py::handle q
   NVTE_CHECK(tensor.dim() == 2, "Tensor must be 2D");
   NVTE_CHECK(rowwise_amax.is_cuda() && columnwise_amax.is_cuda(),
              "Precomputed amax tensors must be CUDA tensors.");
-  NVTE_CHECK(rowwise_amax.scalar_type() == at::kFloat &&
-                 columnwise_amax.scalar_type() == at::kFloat,
-             "Precomputed amax tensors must be float32.");
+  NVTE_CHECK(
+      rowwise_amax.scalar_type() == at::kFloat && columnwise_amax.scalar_type() == at::kFloat,
+      "Precomputed amax tensors must be float32.");
   NVTE_CHECK(rowwise_amax.numel() == static_cast<int64_t>(num_tensors),
              "Rowwise amax must contain one value per group.");
   NVTE_CHECK(columnwise_amax.numel() == static_cast<int64_t>(num_tensors),
