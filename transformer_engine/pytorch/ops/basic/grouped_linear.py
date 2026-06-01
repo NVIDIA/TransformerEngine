@@ -1393,10 +1393,12 @@ class GroupedLinear(BasicOperation):
                     ]
                     accumulate_into_main_grad = get_accumulate_flag_in_param(weights[0])
                 else:
-                    grad_weights = [
-                        torch.empty(weight_shape, dtype=ctx.dtype, device=device)
-                        for _ in range(num_groups)
-                    ]
+                    grad_weights_packed = torch.empty(
+                        grouped_shape,
+                        dtype=ctx.dtype,
+                        device=device,
+                    )
+                    grad_weights = [grad_weights_packed[i] for i in range(num_groups)]
                 final_weight_grads = list(grad_weights)
 
         # Perform dgrad GEMMs

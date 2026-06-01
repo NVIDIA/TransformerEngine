@@ -35,12 +35,16 @@ class _FromMXFP8Func(torch.autograd.Function):
         if tensor._columnwise_data is not None and tensor._columnwise_data.numel() == 0:
             return torch.empty(tensor.size(), dtype=dtype, device=tensor.device)
 
-        dtype = torch_to_transformer_engine_dtype[dtype]
-
-        # Make sure FP8 data is in expected format
-        if tensor._rowwise_data is not None or tensor._columnwise_data is not None:
-            return tex.dequantize(tensor, dtype)
-        raise ValueError("Cannot dequantize MXFP8 tensor with no data")
+        if tensor._rowwise_data is None and tensor._columnwise_data is None:
+            raise ValueError("Cannot dequantize MXFP8 tensor with no data")
+        te_dtype = torch_to_transformer_engine_dtype[dtype]
+        # ``tex.dequantize`` requires CUDA-resident buffers.
+        src_device = tensor.device
+        if src_device.type != "cuda":
+            cuda_tensor = tensor.to(device=torch.device("cuda"))
+            result = tex.dequantize(cuda_tensor, te_dtype)
+            return result.to(device=src_device)
+        return tex.dequantize(tensor, te_dtype)
 
     @staticmethod
     def backward(

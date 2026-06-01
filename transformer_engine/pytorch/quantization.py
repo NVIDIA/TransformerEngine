@@ -1662,7 +1662,11 @@ class NVFP4BlockScalingRecipeState(RecipeState):
         * Forward, ``"weight"`` -> ``recipe.fp4_quant_fwd_weight``.
         * Forward, ``"input"`` / ``"output"`` (and any unknown forward type) ->
           ``recipe.fp4_quant_fwd_inp``.
-        * Backward, any slot -> ``recipe.fp4_quant_bwd_grad``.
+        * ``"grad_output"`` / ``"grad_input"`` -> ``recipe.fp4_quant_bwd_grad``.
+        * NVFP4 4over6 is applied to non-gradient slots selected by
+          ``recipe.nvfp4_4over6``. Gradient slots always use standard NVFP4,
+          which lets gradient RHT and stochastic rounding follow the base
+          recipe.
 
         When the owning module/op provides a role list via
         ``get_quantizer_roles``, the per-slot ``tensor_type`` drives dispatch.
@@ -1674,7 +1678,7 @@ class NVFP4BlockScalingRecipeState(RecipeState):
         from .tensor.nvfp4_tensor import NVFP4Quantizer
 
         def _qparams(tensor_type: str):
-            if self.mode == "backward":
+            if tensor_type in ("grad_output", "grad_input"):
                 return self.recipe.fp4_quant_bwd_grad
             if tensor_type == "weight":
                 return self.recipe.fp4_quant_fwd_weight
@@ -1682,6 +1686,34 @@ class NVFP4BlockScalingRecipeState(RecipeState):
 
         def _make(tensor_type: str) -> NVFP4Quantizer:
             qparams = _qparams(tensor_type)
+            nvfp4_use_4over6 = False
+            if tensor_type not in ("grad_output", "grad_input"):
+                if self.recipe.nvfp4_4over6 == "all":
+                    nvfp4_use_4over6 = True
+                elif self.recipe.nvfp4_4over6 == "weights":
+                    nvfp4_use_4over6 = tensor_type == "weight"
+                elif self.recipe.nvfp4_4over6 == "activations":
+                    nvfp4_use_4over6 = tensor_type != "weight"
+            nvfp4_e4m3_max = 448
+            if nvfp4_use_4over6:
+                # Current 4over6 kernels target RL and post-training quantization paths.
+                # Pre-training usage still needs a fused RHT + 4over6 quantization kernel.
+                if qparams.random_hadamard_transform:
+                    raise ValueError("NVFP4 4over6 quantization does not support RHT.")
+                if qparams.stochastic_rounding:
+                    raise ValueError(
+                        "NVFP4 4over6 quantization does not support stochastic rounding."
+                    )
+                if self.recipe.nvfp4_4over6_e4m3_use_256 == "all":
+                    nvfp4_e4m3_max = 256
+                elif self.recipe.nvfp4_4over6_e4m3_use_256 == "weights":
+                    if tensor_type == "weight":
+                        nvfp4_e4m3_max = 256
+                elif self.recipe.nvfp4_4over6_e4m3_use_256 == "activations":
+                    if tensor_type != "weight":
+                        nvfp4_e4m3_max = 256
+                elif self.recipe.nvfp4_4over6_e4m3_use_256 == "none":
+                    nvfp4_e4m3_max = 448
             return NVFP4Quantizer(
                 fp4_dtype=self.dtype,
                 rowwise=True,
@@ -1695,6 +1727,9 @@ class NVFP4BlockScalingRecipeState(RecipeState):
                     and tensor_type != "weight"
                     and self.recipe.row_scaled_activation
                 ),
+                nvfp4_use_4over6=nvfp4_use_4over6,
+                nvfp4_e4m3_max=nvfp4_e4m3_max,
+                nvfp4_4over6_err_mode=self.recipe.nvfp4_4over6_err_mode,
             )
 
         if self.mode not in ("forward", "backward"):

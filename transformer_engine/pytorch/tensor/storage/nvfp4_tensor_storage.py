@@ -47,13 +47,18 @@ class _FromNVFP4Func(torch.autograd.Function):
         if tensor._columnwise_data is not None and tensor._columnwise_data.numel() == 0:
             return torch.empty(tensor.size(), dtype=dtype, device=tensor.device)
 
-        # Dequantize row-wise data
-        if tensor._rowwise_data is not None:
-            return tex.dequantize(tensor, torch_to_transformer_engine_dtype[dtype])
-
-        if tensor._columnwise_data is not None:
+        if tensor._rowwise_data is None and tensor._columnwise_data is None:
+            raise ValueError("Attempted to dequantize NVFP4 tensor with no data")
+        if tensor._rowwise_data is None and tensor._columnwise_data is not None:
             raise NotImplementedError("Dequantizing column-wise NVFP4 data is not implemented yet!")
-        raise ValueError("Attempted to dequantize NVFP4 tensor with no data")
+
+        # ``tex.dequantize`` requires CUDA-resident buffers. If the tensor has
+        src_device = tensor.device
+        if src_device.type != "cuda":
+            cuda_tensor = tensor.to(device=torch.device("cuda"))
+            result = tex.dequantize(cuda_tensor, torch_to_transformer_engine_dtype[dtype])
+            return result.to(device=src_device)
+        return tex.dequantize(tensor, torch_to_transformer_engine_dtype[dtype])
 
     @staticmethod
     def backward(
@@ -99,6 +104,10 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
     _with_gemm_swizzled_scales: bool
     # Whether this NVFP4 tensor uses row-scaled amax metadata
     _row_scaled_nvfp4: bool
+    # Whether this NVFP4 tensor uses 4over6 map-to-4/map-to-6 block selection
+    _nvfp4_use_4over6: bool
+    # Global E4M3 scale bound used by this NVFP4 tensor
+    _nvfp4_e4m3_max: int
 
     # Declarative schema consumed by the generic
     # :meth:`QuantizedTensorStorage._torch_compile_flatten` /
@@ -152,6 +161,8 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         *args,
         fake_dtype: Optional[torch.dtype] = None,
         row_scaled_nvfp4: bool = False,
+        nvfp4_use_4over6: bool = False,
+        nvfp4_e4m3_max: int = 448,
         **kwargs,
     ):
         if cls is NVFP4TensorStorage:
@@ -170,6 +181,8 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         instance._amax_columnwise = amax_columnwise
         instance._with_gemm_swizzled_scales = with_gemm_swizzled_scales
         instance._row_scaled_nvfp4 = row_scaled_nvfp4
+        instance._nvfp4_use_4over6 = nvfp4_use_4over6
+        instance._nvfp4_e4m3_max = nvfp4_e4m3_max if nvfp4_use_4over6 else 448
 
         return instance
 
@@ -196,6 +209,10 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             raise RuntimeError("Scale layout mismatch in copy_from_storage")
         if self._row_scaled_nvfp4 != src._row_scaled_nvfp4:
             raise RuntimeError("Rowwise amax scaling mode mismatch in copy_from_storage")
+        if self._nvfp4_use_4over6 != src._nvfp4_use_4over6:
+            raise RuntimeError("NVFP4 4over6 mode mismatch in copy_from_storage")
+        if self._nvfp4_e4m3_max != src._nvfp4_e4m3_max:
+            raise RuntimeError("NVFP4 4over6 E4M3 scale bound mismatch in copy_from_storage")
 
         def _copy_optional(dst: Optional[torch.Tensor], src_tensor: Optional[torch.Tensor]):
             if dst is not None and src_tensor is not None:
@@ -221,6 +238,8 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             "quantizer": self._quantizer,
             "with_gemm_swizzled_scales": self._with_gemm_swizzled_scales,
             "row_scaled_nvfp4": self._row_scaled_nvfp4,
+            "nvfp4_use_4over6": self._nvfp4_use_4over6,
+            "nvfp4_e4m3_max": self._nvfp4_e4m3_max,
             "fake_dtype": self._dtype,
         }
 
@@ -358,6 +377,8 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             fp4_dtype=self._fp4_dtype,
             with_gemm_swizzled_scales=self._with_gemm_swizzled_scales,
             row_scaled_nvfp4=self._row_scaled_nvfp4,
+            nvfp4_use_4over6=self._nvfp4_use_4over6,
+            nvfp4_e4m3_max=self._nvfp4_e4m3_max,
             fake_dtype=self._dtype,
         )
 
