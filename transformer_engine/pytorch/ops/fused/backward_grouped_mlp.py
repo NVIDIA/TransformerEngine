@@ -144,10 +144,14 @@ def _cudnn_compute_wgrad(
             out_features,
             total_tokens // 2,
         )
-        b_tensor = grouped_x.columnwise_data.view(dtype=data_dtype).view(
-            in_features,
-            total_tokens // 2,
-        ).T
+        b_tensor = (
+            grouped_x.columnwise_data.view(dtype=data_dtype)
+            .view(
+                in_features,
+                total_tokens // 2,
+            )
+            .T
+        )
         sfa_tensor = grouped_dy.columnwise_scale_inv.view(sfa_leading_dim, -1).view(
             dtype=scale_view_dtype
         )
@@ -170,12 +174,8 @@ def _cudnn_compute_wgrad(
     global_scale_b = None
     if use_nvfp4:
         global_scale_denom = 448.0 * 6.0
-        global_scale_a = (
-            grouped_dy.columnwise_amax.view(-1).to(torch.float32) / global_scale_denom
-        )
-        global_scale_b = (
-            grouped_x.columnwise_amax.view(-1).to(torch.float32) / global_scale_denom
-        )
+        global_scale_a = grouped_dy.columnwise_amax.view(-1).to(torch.float32) / global_scale_denom
+        global_scale_b = grouped_x.columnwise_amax.view(-1).to(torch.float32) / global_scale_denom
 
     common_wgrad_kwargs = {
         "a_tensor": a_tensor,
@@ -844,9 +844,7 @@ class _BackwardGroupedMLP_CuTeGEMMDBase(FusedOperation):
             os.environ.get("NVTE_CUTEDSL_FUSED_GROUPED_MLP_NVFP4_WGRAD", "0") == "1"
         )
         wgrad_kernel_fn = (
-            self.grouped_gemm_wgrad_kernel()
-            if (not use_nvfp4 or enable_nvfp4_wgrad)
-            else None
+            self.grouped_gemm_wgrad_kernel() if (not use_nvfp4 or enable_nvfp4_wgrad) else None
         )
         fc2_grad_params = _compute_grad_params(
             fc_op=fc2_op,
