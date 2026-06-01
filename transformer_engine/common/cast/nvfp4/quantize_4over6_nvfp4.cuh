@@ -93,8 +93,6 @@ template <NVTENVFP44Over6Mode kMode, bool kErrUseFastMath>
 struct Config {
   static constexpr NVTENVFP44Over6Mode mode = kMode;
   static constexpr bool err_use_fast_math = kErrUseFastMath;
-  static constexpr bool fp16_error =
-      kMode == kNVTENVFP44Over6MinMAEFP16 || kMode == kNVTENVFP44Over6MinMSEFP16;
 };
 
 struct Candidate {
@@ -320,7 +318,8 @@ __device__ __forceinline__ uint32_t cvt_fp32_to_fp4_8x_with_error(
         "Try recompiling with sm_XXXa instead of sm_XXX.");
   }
 
-  if constexpr (Cfg::fp16_error) {
+  if constexpr (Cfg::mode == kNVTENVFP44Over6MinMAEFP16 ||
+                Cfg::mode == kNVTENVFP44Over6MinMSEFP16) {
     accumulate_fp16_scaled_error_pair<Cfg>(out & 0xFFu, x[0], x[1], sf, global_encode_scale, err);
     accumulate_fp16_scaled_error_pair<Cfg>((out >> 8) & 0xFFu, x[2], x[3], sf, global_encode_scale,
                                            err);
