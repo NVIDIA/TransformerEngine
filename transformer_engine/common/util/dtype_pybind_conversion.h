@@ -27,7 +27,7 @@ cached_dtype_objects() {
  * Returns a new strong reference, or ``nullptr`` (with the Python error cleared)
  * on failure.
  */
-inline PyObject *construct_dtype_object(long value, PyTypeObject *type) {
+inline PyObject *construct_dtype_object(long value, PyTypeObject *type) {  // NOLINT(runtime/int)
   PyObject *arg = PyLong_FromLong(value);
   if (arg == nullptr) {
     PyErr_Clear();
@@ -57,12 +57,13 @@ inline PyObject *cached_int_to_dtype(PyObject *src, PyTypeObject *type) {
   if (!PyLong_Check(src)) {
     return nullptr;
   }
-  const long value = PyLong_AsLong(src);
+  const long value = PyLong_AsLong(src);  // NOLINT(runtime/int)
   if (value == -1 && PyErr_Occurred()) {
     PyErr_Clear();
     return nullptr;
   }
-  if (value < 0 || value >= static_cast<long>(transformer_engine::DType::kNumTypes)) {
+  if (value < 0 ||
+      static_cast<size_t>(value) >= static_cast<size_t>(transformer_engine::DType::kNumTypes)) {
     return nullptr;
   }
   // cached_dtype_object --> transformer_engine_torch.DType(value) PyObject*

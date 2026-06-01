@@ -13,7 +13,6 @@ import logging
 import torch
 from torch.nn.parameter import Parameter
 
-import transformer_engine_torch as tex
 from transformer_engine.common.recipe import (
     Format,
     Recipe,

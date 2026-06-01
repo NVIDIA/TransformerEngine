@@ -16,7 +16,6 @@ from transformer_engine.pytorch.torch_version import torch_version
 assert torch_version() >= (2, 1), f"Minimum torch version 2.1 required. Found {torch_version()}."
 
 load_framework_extension("torch")
-import transformer_engine_torch as tex
 from transformer_engine.pytorch import constants
 from transformer_engine.pytorch.module import LayerNormLinear
 from transformer_engine.pytorch.module import Linear
@@ -117,7 +116,7 @@ except AttributeError:
 # needs to be allow-listed below.
 try:
     from torch.serialization import add_safe_globals
-
+    import transformer_engine_torch as tex
     add_safe_globals(
         [
             # Storage mixins (used during pickling of internal-only tensors)

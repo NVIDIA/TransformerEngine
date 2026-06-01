@@ -47,7 +47,6 @@ from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8
 
 from transformer_engine.pytorch.quantization import get_fp8_te_dtype
 from transformer_engine.pytorch.constants import TE_DType, MXFP8_BLOCK_SCALING_SIZE
-from transformer_engine.pytorch import constants
 
 
 from transformer_engine.pytorch.utils import (
