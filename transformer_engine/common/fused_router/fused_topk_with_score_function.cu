@@ -545,15 +545,24 @@ void fused_topk_with_score_function_forward(const Tensor logits, int num_tokens,
                                             Tensor intermediate_output, cudaStream_t stream) {
   TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
       logits.data.dtype, DataType,
-      TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
-          expert_bias.data.dtype, BiasType,
-          fused_topk_with_score_function_forward_kernel_launcher<DataType, BiasType>(
-              reinterpret_cast<DataType *>(logits.data.dptr), num_tokens, num_experts, topk,
-              use_pre_softmax, num_groups, group_topk, scaling_factor, score_function,
-              reinterpret_cast<BiasType *>(expert_bias.data.dptr),
-              reinterpret_cast<DataType *>(probs.data.dptr),
-              reinterpret_cast<bool *>(routing_map.data.dptr),
-              reinterpret_cast<CompType *>(intermediate_output.data.dptr), stream);););
+      if (expert_bias.has_data()) {
+        TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
+            expert_bias.data.dtype, BiasType,
+            fused_topk_with_score_function_forward_kernel_launcher<DataType, BiasType>(
+                reinterpret_cast<DataType *>(logits.data.dptr), num_tokens, num_experts, topk,
+                use_pre_softmax, num_groups, group_topk, scaling_factor, score_function,
+                reinterpret_cast<BiasType *>(expert_bias.data.dptr),
+                reinterpret_cast<DataType *>(probs.data.dptr),
+                reinterpret_cast<bool *>(routing_map.data.dptr),
+                reinterpret_cast<CompType *>(intermediate_output.data.dptr), stream););
+      } else {
+        fused_topk_with_score_function_forward_kernel_launcher<DataType, DataType>(
+            reinterpret_cast<DataType *>(logits.data.dptr), num_tokens, num_experts, topk,
+            use_pre_softmax, num_groups, group_topk, scaling_factor, score_function, nullptr,
+            reinterpret_cast<DataType *>(probs.data.dptr),
+            reinterpret_cast<bool *>(routing_map.data.dptr),
+            reinterpret_cast<CompType *>(intermediate_output.data.dptr), stream);
+      });
 }
 
 // Backward: grad_probs + intermediate_output + routing_map → grad_logits.
