@@ -1449,10 +1449,9 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
           TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
             // The 1D kernel always produces rowwise output (no RETURN_ROWWISE); the dispatch only
             // routes columnwise-only requests here when use_2d_quantization is true.
-            auto kernel =
-                quantize_transpose_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
-                                                USE_STOCHASTIC_ROUNDING, RETURN_TRANSPOSE,
-                                                ROW_SCALED_NVFP4>;
+            auto kernel = quantize_transpose_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
+                                                          USE_STOCHASTIC_ROUNDING, RETURN_TRANSPOSE,
+                                                          ROW_SCALED_NVFP4>;
 
             if constexpr (use_2d_quantization) {
               kernel = quantize_transpose_nvfp4_2D_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
