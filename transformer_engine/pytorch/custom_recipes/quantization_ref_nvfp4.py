@@ -516,6 +516,7 @@ class NVFP4QuantizerRef(Quantizer):
     @staticmethod
     def _sum_4over6_2d_error(err: torch.Tensor, tile_len_y: int) -> torch.Tensor:
         """Reduce 16 row errors in the same tree order as the CUDA warp reduction."""
+        assert tile_len_y == 16, "NVFP4 4over6 2D error reduction expects 16 rows."
         rows = err.view(err.shape[0] // tile_len_y, tile_len_y, err.shape[1], 1)
         rows = rows.squeeze(-1)
         rows = rows[:, 0:8, :] + rows[:, 8:16, :]
@@ -538,8 +539,9 @@ class NVFP4QuantizerRef(Quantizer):
         """Quantize NVFP4 with 4over6 candidate selection.
 
         This mirrors the CUDA path: map-to-4 uses a 1.5x expanded E4M3 block scale,
-        the configured error is computed in the original input domain with the
-        selected global E4M3 denominator, and ties choose map-to-6.
+        MAE/MSE compute error in the original input domain, MAE_FP16/MSE_FP16
+        compute error in the E4M3-scaled FP16 product domain, and ties choose
+        map-to-6.
         """
         m, num_blocks, tile_len_x = x.shape
         n = num_blocks * tile_len_x
@@ -730,7 +732,7 @@ class NVFP4QuantizerRef(Quantizer):
             global_decode_scale = torch.div(1.0, global_encode_scale)
             if nvfp4_use_4over6:
                 # FourOverSix compares map-to-4 and map-to-6 candidates using
-                # the configured original input-domain error, while keeping TE-style FP4
+                # the configured error mode, while keeping TE-style FP4
                 # quantization for each candidate.
                 return cls._quantize_blockwise_4over6_reference(
                     x,
