@@ -170,16 +170,17 @@ Error_Type GemmInitV2FFI(Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type
                                std::vector<size_t>{static_cast<size_t>(bias.element_count())});
       }
       TensorWrapper pre_gelu_out_(get_nvte_scaling_mode(JAXX_Scaling_Mode::NO_SCALING));
+      TensorWrapper dummy;
       // Match GemmV2FFI's operand swap: rhs becomes A, lhs becomes B.
       cudaStream_t prepare_stream = cudaStreamPerThread;
       if (config.collective_op == JAXX_Collective_Op::ALL_GATHER) {
-        executor->cublasmp_ag_gemm(rhs_, config.rhs_transposed, lhs_, config.lhs_transposed, d_,
-                                   bias_, pre_gelu_out_, false /*grad*/, false /*accumulate*/,
-                                   prepare_stream);
+        executor->split_overlap_ag(rhs_, config.rhs_transposed, lhs_, config.lhs_transposed, d_,
+                                   bias_, pre_gelu_out_, dummy, false /*grad*/, false /*accumulate*/,
+                                   false /*use_split_accumulator*/, dummy, prepare_stream);
       } else if (config.collective_op == JAXX_Collective_Op::REDUCE_SCATTER) {
-        executor->cublasmp_gemm_rs(rhs_, config.rhs_transposed, lhs_, config.lhs_transposed, d_,
-                                   bias_, pre_gelu_out_, false /*grad*/, false /*accumulate*/,
-                                   prepare_stream);
+        executor->split_overlap_rs(rhs_, config.rhs_transposed, lhs_, config.lhs_transposed, d_,
+                                   bias_, pre_gelu_out_, dummy, false /*grad*/, false /*accumulate*/,
+                                   false /*use_split_accumulator*/, dummy, prepare_stream);
       }
       NVTE_CHECK_CUDA(cudaStreamSynchronize(prepare_stream));
     }

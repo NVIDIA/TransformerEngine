@@ -386,49 +386,7 @@ CublasMpDims compute_rs_dims(const TensorWrapper &A, bool transa, const TensorWr
   return {m, n, k};
 }
 
-CublasMpDims compute_ar_dims(const TensorWrapper &A, bool transa, const TensorWrapper &B,
-                             bool transb, int tp_size) {
-  // AR shares the same m/n/k semantics as RS at descriptor level.
-  return compute_rs_dims(A, transa, B, transb, tp_size);
-}
-
 }  // namespace
-
-void CommOverlapCore::cublasmp_ag_gemm(const TensorWrapper &A, bool transa, const TensorWrapper &B,
-                                       bool transb, TensorWrapper &D, TensorWrapper &bias,
-                                       TensorWrapper &pre_gelu_out, bool grad, bool accumulate,
-                                       cudaStream_t stream_main) {
-  auto [m, n, k] = compute_ag_dims(A, transa, B, transb, _tp_size);
-  // col-major GEMM compute overlapped with all-gather on input B
-  // (M/P, K) x [(K, N/P) -(AG)-> (K, N)] = (M/P, N)
-  nvte_all_gather_gemm(_cublasmp_ctx, m, n, k, A.data(), B.data(), D.data(), bias.data(),
-                       pre_gelu_out.data(), transa, transb, grad, accumulate, _num_comm_sm,
-                       stream_main, _algo_type);
-}
-
-void CommOverlapCore::cublasmp_gemm_rs(const TensorWrapper &A, bool transa, const TensorWrapper &B,
-                                       bool transb, TensorWrapper &D, TensorWrapper &bias,
-                                       TensorWrapper &pre_gelu_out, bool grad, bool accumulate,
-                                       cudaStream_t stream_main) {
-  auto [m, n, k] = compute_rs_dims(A, transa, B, transb, _tp_size);
-  // col-major GEMM compute overlapped with reduce-scatter on the output
-  // (M, K/P) x (K/P, N) = (M, N) -(RS)-> (M, N/P)
-  nvte_gemm_reduce_scatter(_cublasmp_ctx, m, n, k, A.data(), B.data(), D.data(), bias.data(),
-                           pre_gelu_out.data(), transa, transb, grad, accumulate, _num_comm_sm,
-                           stream_main, _algo_type);
-}
-
-void CommOverlapCore::cublasmp_gemm_ar(const TensorWrapper &A, bool transa, const TensorWrapper &B,
-                                       bool transb, TensorWrapper &D, TensorWrapper &bias,
-                                       TensorWrapper &pre_gelu_out, bool grad, bool accumulate,
-                                       cudaStream_t stream_main) {
-  auto [m, n, k] = compute_ar_dims(A, transa, B, transb, _tp_size);
-  // col-major GEMM compute overlapped with all-reduce on the output
-  // (M, K/P) x (K/P, N) = (M, N) -(AR)-> (M, N)
-  nvte_gemm_all_reduce(_cublasmp_ctx, m, n, k, A.data(), B.data(), D.data(), bias.data(),
-                       pre_gelu_out.data(), transa, transb, grad, accumulate, _num_comm_sm,
-                       stream_main, _algo_type);
-}
 
 /***************************************************************************************************
  * Comm+GEMM Overlap Base (Pipelined / Collective)
@@ -549,8 +507,13 @@ void CommOverlapBase::atomic_gemm_overlap_rs(const TensorWrapper &A, bool transa
                                              bool use_split_accumulator, TensorWrapper &rs_output,
                                              cudaStream_t stream_main) {
   if (_with_cublasmp) {
-    return cublasmp_gemm_rs(A, transa, B, transb, D, bias, pre_gelu_out, grad, accumulate,
-                            stream_main);
+    auto [m, n, k] = compute_rs_dims(A, transa, B, transb, _tp_size);
+    // col-major GEMM compute overlapped with reduce-scatter on the output
+    // (M, K/P) x (K/P, N) = (M, N) -(RS)-> (M, N/P)
+    nvte_gemm_reduce_scatter(_cublasmp_ctx, m, n, k, A.data(), B.data(), D.data(), bias.data(),
+                            pre_gelu_out.data(), transa, transb, grad, accumulate, _num_comm_sm,
+                            stream_main, _algo_type);
+    return;
   }
 
   int ori_sms = _ub_comm->sms;
@@ -651,8 +614,13 @@ void CommOverlapBase::split_overlap_rs(const TensorWrapper &A, bool transa, cons
                                        bool grad, bool accumulate, bool use_split_accumulator,
                                        TensorWrapper &rs_output, cudaStream_t stream_main) {
   if (_with_cublasmp) {
-    return cublasmp_gemm_rs(A, transa, B, transb, D, bias, pre_gelu_out, grad, accumulate,
-                            stream_main);
+    auto [m, n, k] = compute_rs_dims(A, transa, B, transb, _tp_size);
+    // col-major GEMM compute overlapped with reduce-scatter on the output
+    // (M, K/P) x (K/P, N) = (M, N) -(RS)-> (M, N/P)
+    nvte_gemm_reduce_scatter(_cublasmp_ctx, m, n, k, A.data(), B.data(), D.data(), bias.data(),
+                            pre_gelu_out.data(), transa, transb, grad, accumulate, _num_comm_sm,
+                            stream_main, _algo_type);
+    return;
   }
 
   // Get GEMM dimensions
@@ -968,8 +936,13 @@ void CommOverlapP2PBase::atomic_gemm_overlap_ag(
     TensorWrapper &bias, TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
     bool accumulate, bool use_split_accumulator, TensorWrapper &B_copy, cudaStream_t stream_main) {
   if (_with_cublasmp) {
-    return cublasmp_ag_gemm(A, transa, B, transb, D, bias, pre_gelu_out, grad, accumulate,
-                            stream_main);
+    auto [m, n, k] = compute_ag_dims(A, transa, B, transb, _tp_size);
+    // col-major GEMM compute overlapped with all-gather on input B
+    // (M/P, K) x [(K, N/P) -(AG)-> (K, N)] = (M/P, N)
+    nvte_all_gather_gemm(_cublasmp_ctx, m, n, k, A.data(), B.data(), D.data(), bias.data(),
+                        pre_gelu_out.data(), transa, transb, grad, accumulate, _num_comm_sm,
+                        stream_main, _algo_type);
+    return;
   }
 
   int ori_sms = _ub_comm->sms;
@@ -1075,8 +1048,13 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
                                           bool use_split_accumulator, TensorWrapper &B_copy,
                                           cudaStream_t stream_main) {
   if (_with_cublasmp) {
-    return cublasmp_ag_gemm(A, transa, B, transb, D, bias, pre_gelu_out, grad, accumulate,
-                            stream_main);
+    auto [m, n, k] = compute_ag_dims(A, transa, B, transb, _tp_size);
+    // col-major GEMM compute overlapped with all-gather on input B
+    // (M/P, K) x [(K, N/P) -(AG)-> (K, N)] = (M/P, N)
+    nvte_all_gather_gemm(_cublasmp_ctx, m, n, k, A.data(), B.data(), D.data(), bias.data(),
+                        pre_gelu_out.data(), transa, transb, grad, accumulate, _num_comm_sm,
+                        stream_main, _algo_type);
+    return;
   }
 
   int ori_sms = _ub_comm->sms;
@@ -1247,8 +1225,13 @@ void CommOverlapP2PBase::atomic_gemm_overlap_rs(
     bool accumulate, bool use_split_accumulator, TensorWrapper &rs_output,
     cudaStream_t stream_main) {
   if (_with_cublasmp) {
-    return cublasmp_gemm_rs(A, transa, B, transb, D, bias, pre_gelu_out, grad, accumulate,
-                            stream_main);
+    auto [m, n, k] = compute_rs_dims(A, transa, B, transb, _tp_size);
+    // col-major GEMM compute overlapped with reduce-scatter on the output
+    // (M, K/P) x (K/P, N) = (M, N) -(RS)-> (M, N/P)
+    nvte_gemm_reduce_scatter(_cublasmp_ctx, m, n, k, A.data(), B.data(), D.data(), bias.data(),
+                            pre_gelu_out.data(), transa, transb, grad, accumulate, _num_comm_sm,
+                            stream_main, _algo_type);
+    return;
   }
 
   int ori_sms = _ub_comm->sms;
@@ -1316,8 +1299,13 @@ void CommOverlapP2PBase::split_overlap_rs(const TensorWrapper &A, bool transa,
                                           bool use_split_accumulator, TensorWrapper &rs_output,
                                           cudaStream_t stream_main) {
   if (_with_cublasmp) {
-    return cublasmp_gemm_rs(A, transa, B, transb, D, bias, pre_gelu_out, grad, accumulate,
-                            stream_main);
+    auto [m, n, k] = compute_rs_dims(A, transa, B, transb, _tp_size);
+    // col-major GEMM compute overlapped with reduce-scatter on the output
+    // (M, K/P) x (K/P, N) = (M, N) -(RS)-> (M, N/P)
+    nvte_gemm_reduce_scatter(_cublasmp_ctx, m, n, k, A.data(), B.data(), D.data(), bias.data(),
+                            pre_gelu_out.data(), transa, transb, grad, accumulate, _num_comm_sm,
+                            stream_main, _algo_type);
+    return;
   }
 
   int ori_sms = _ub_comm->sms;

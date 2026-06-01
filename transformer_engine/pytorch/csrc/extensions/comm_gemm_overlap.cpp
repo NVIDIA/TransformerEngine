@@ -274,18 +274,32 @@ void cublasmp_capture_warmup(te::CommOverlapCore *core, int tp_size, te::CommOve
   NVTE_CHECK_CUDA(cudaMemset(a_ptr, 0, a_bytes));
   NVTE_CHECK_CUDA(cudaMemset(b_ptr, 0, b_bytes));
 
-  te::TensorWrapper A_tw, B_tw, D_tw, bias_tw, pre_gelu_tw;
+  te::TensorWrapper A_tw, B_tw, D_tw, bias_tw, pre_gelu_tw, dummy;
   A_tw.set_rowwise_data(a_ptr, te::DType::kBFloat16, a_shape);
   B_tw.set_rowwise_data(b_ptr, te::DType::kBFloat16, b_shape);
   D_tw.set_rowwise_data(d_ptr, te::DType::kBFloat16, d_shape);
 
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   if (comm_type == te::CommOverlapType::AG) {
-    core->cublasmp_ag_gemm(A_tw, /*transa=*/true, B_tw, /*transb=*/false, D_tw, bias_tw,
-                           pre_gelu_tw, /*grad=*/false, /*accumulate=*/false, stream);
+    if (core->is_atomic_gemm()) {
+      core->atomic_gemm_overlap_ag(
+          A_tw, /*transa=*/true, B_tw, /*transb=*/false, D_tw, bias_tw, pre_gelu_tw, dummy,
+          /*grad=*/false, /*accumulate=*/false, /*use_split_accumulator=*/false, dummy, stream);
+    } else {
+      core->split_overlap_ag(
+          A_tw, /*transa=*/true, B_tw, /*transb=*/false, D_tw, bias_tw, pre_gelu_tw, dummy,
+          /*grad=*/false, /*accumulate=*/false, /*use_split_accumulator=*/false, dummy, stream);
+    }
   } else {
-    core->cublasmp_gemm_rs(A_tw, /*transa=*/true, B_tw, /*transb=*/false, D_tw, bias_tw,
-                           pre_gelu_tw, /*grad=*/false, /*accumulate=*/false, stream);
+    if (core->is_atomic_gemm()) {
+      core->atomic_gemm_overlap_rs(
+          A_tw, /*transa=*/true, B_tw, /*transb=*/false, D_tw, bias_tw, pre_gelu_tw, dummy,
+          /*grad=*/false, /*accumulate=*/false, /*use_split_accumulator=*/false, dummy, stream);
+    } else {
+      core->split_overlap_rs(
+          A_tw, /*transa=*/true, B_tw, /*transb=*/false, D_tw, bias_tw, pre_gelu_tw, dummy,
+          /*grad=*/false, /*accumulate=*/false, /*use_split_accumulator=*/false, dummy, stream);
+    }
   }
   NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
   cudaFree(a_ptr);
