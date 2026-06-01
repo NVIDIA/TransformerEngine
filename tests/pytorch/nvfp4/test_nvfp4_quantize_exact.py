@@ -560,10 +560,13 @@ def test_nvfp4_2d_columnwise_only_matches_both_directions(
     """Bitwise check: 2D NVFP4 with columnwise-only must produce the same
     columnwise data/scales as the columnwise half of (rowwise + columnwise) 2D.
 
-    Exercises the columnwise-only path through the 2D-amax-only pass added to
-    ``quantize_transpose_vector_blockwise_fp4.cu``. Before that change, this
-    configuration was rejected by
-    ``NVTE_CHECK(return_identity || !use_2d_quantization)``.
+    Covers both kernels depending on the (dtype, shape) routing:
+    - bf16 with rows % 32 == 0 and cols % 32 == 0 routes to the optimized
+      ``quantize_transpose_nvfp4_2D_kernel`` (instantiated with RETURN_ROWWISE=false),
+      validating that gating the rowwise pass/store leaves the shared
+      ``block_amax_matrix`` and columnwise output bitwise-identical to both-directions.
+    - non-bf16, or cols % 32 != 0, falls back to the columnwise-only 2D-amax-only
+      pass in ``quantize_transpose_vector_blockwise_fp4.cu``.
     """
     te_dtype = tex.DType.kFloat4E2M1
     device = "cuda"

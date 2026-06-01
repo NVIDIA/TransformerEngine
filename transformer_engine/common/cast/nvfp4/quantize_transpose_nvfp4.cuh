@@ -779,7 +779,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
 }
 
 template <bool COMPUTE_ACTIVATIONS, typename ParamOP, float (*OP)(float, const ParamOP &),
-          typename IType, bool USE_STOCHASTIC_ROUNDING, bool RETURN_TRANSPOSE>
+          typename IType, bool USE_STOCHASTIC_ROUNDING, bool RETURN_ROWWISE, bool RETURN_TRANSPOSE>
 __global__ void __launch_bounds__(THREADS_NUM)
     quantize_transpose_nvfp4_2D_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
                                        const __grid_constant__ CUtensorMap tensor_map_output,
@@ -1128,7 +1128,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
     }
 
     // ROWWISE scaling
-    {
+    if constexpr (RETURN_ROWWISE) {
       const size_t stage_rowwise_scales_offset_Y = stage * BUFF_DIM_Y;
 #pragma unroll
       for (size_t it = 0; it < ITERATIONS_NORMAL; ++it) {
@@ -1271,9 +1271,11 @@ __global__ void __launch_bounds__(THREADS_NUM)
       const size_t global_offset_Y_t = block_offset_Y_t;
       const size_t global_offset_X_t = block_offset_X_t + stage_offset_Y;
 
-      ptx::cp_async_bulk_tensor_2d_shared_to_global(
-          reinterpret_cast<const uint64_t *>(&tensor_map_output), global_offset_X, global_offset_Y,
-          reinterpret_cast<uint64_t *>(&out_data_sh[buff_offset_out]));
+      if constexpr (RETURN_ROWWISE) {
+        ptx::cp_async_bulk_tensor_2d_shared_to_global(
+            reinterpret_cast<const uint64_t *>(&tensor_map_output), global_offset_X,
+            global_offset_Y, reinterpret_cast<uint64_t *>(&out_data_sh[buff_offset_out]));
+      }
 
       if constexpr (RETURN_TRANSPOSE) {
         ptx::cp_async_bulk_tensor_2d_shared_to_global(
@@ -1327,6 +1329,9 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   // return the transposed data.
   // TODO(Frank): Is there a better way to do this?
   bool return_transpose = output->has_columnwise_data();
+  // Columnwise-only (no rowwise output) is supported on the optimized 2D path; the rowwise pass
+  // and its store are gated out via the RETURN_ROWWISE template bool.
+  const bool return_rowwise = output->has_data();
 
   if (!use_2d_quantization && (input.dtype() == DType::kBFloat16)) {
     quantize_transpose_tuned_1D(input, noop, output, quant_config, stream);
@@ -1343,9 +1348,14 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   CheckOutputTensor(*output, "output", false);
 
   NVTE_CHECK(input.has_data(), "Cannot quantize tensor without rowwise data.");
-  NVTE_CHECK(output->has_data(), "NVFP4 output tensor must be allocated.");
-  NVTE_CHECK(is_fp4_dtype(output->data.dtype), "Output must have FP4 type.");
-  NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated");
+  NVTE_CHECK(return_rowwise || return_transpose,
+             "At least one of rowwise/columnwise NVFP4 output must be allocated.");
+  NVTE_CHECK(return_rowwise || use_2d_quantization,
+             "Columnwise-only NVFP4 requires 2D quantization on the optimized path.");
+  if (return_rowwise) {
+    NVTE_CHECK(is_fp4_dtype(output->data.dtype), "Output must have FP4 type.");
+    NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated");
+  }
   NVTE_CHECK(!row_scaled_nvfp4 || output->amax.dptr != nullptr,
              "Row-scaled NVFP4 quantization requires rowwise amax.");
   NVTE_CHECK(!row_scaled_nvfp4 || !output->has_columnwise_data(),
@@ -1372,7 +1382,7 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   const dim3 grid(blocks_X, blocks_Y);
   const size_t block_size = THREADS_NUM;
 
-  const size_t scale_stride = output->scale_inv.shape[1];
+  const size_t scale_stride = return_rowwise ? output->scale_inv.shape[1] : 0;
   const size_t scale_stride_transpose =
       return_transpose ? output->columnwise_scale_inv.shape[1] : 0;
 
@@ -1405,8 +1415,10 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   create_2D_tensor_map(tensor_map_input, input.data, rows, cols, BUFF_DIM_Y, BUFF_DIM_X, cols, 0,
                        sizeof(IType) * 8);
 
-  create_2D_tensor_map(tensor_map_output, output->data, rows, cols, BUFF_DIM_Y, BUFF_DIM_X, cols, 0,
-                       4);
+  if (return_rowwise) {
+    create_2D_tensor_map(tensor_map_output, output->data, rows, cols, BUFF_DIM_Y, BUFF_DIM_X, cols,
+                         0, 4);
+  }
   if (return_transpose) {
     create_2D_tensor_map(tensor_map_output_transpose, output->columnwise_data, cols, rows,
                          BUFF_DIM_X, BUFF_DIM_Y, rows, 0, 4);
@@ -1433,21 +1445,27 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
       use_stochastic_rounding, USE_STOCHASTIC_ROUNDING,
 
       TRANSFORMER_ENGINE_SWITCH_CONDITION(row_scaled_nvfp4, ROW_SCALED_NVFP4, {
-        TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
-          auto kernel = quantize_transpose_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
-                                                        USE_STOCHASTIC_ROUNDING, RETURN_TRANSPOSE,
-                                                        ROW_SCALED_NVFP4>;
+        TRANSFORMER_ENGINE_SWITCH_CONDITION(return_rowwise, RETURN_ROWWISE, {
+          TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
+            // The 1D kernel always produces rowwise output (no RETURN_ROWWISE); the dispatch only
+            // routes columnwise-only requests here when use_2d_quantization is true.
+            auto kernel =
+                quantize_transpose_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
+                                                USE_STOCHASTIC_ROUNDING, RETURN_TRANSPOSE,
+                                                ROW_SCALED_NVFP4>;
 
-          if constexpr (use_2d_quantization) {
-            kernel = quantize_transpose_nvfp4_2D_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
-                                                        USE_STOCHASTIC_ROUNDING, RETURN_TRANSPOSE>;
-          }
+            if constexpr (use_2d_quantization) {
+              kernel = quantize_transpose_nvfp4_2D_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
+                                                          USE_STOCHASTIC_ROUNDING, RETURN_ROWWISE,
+                                                          RETURN_TRANSPOSE>;
+            }
 
-          cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
-          kernel<<<grid, block_size, dshmem_size, stream>>>(
-              tensor_map_input, tensor_map_output, tensor_map_output_transpose, scales_ptr,
-              scales_transpose_ptr, noop_ptr, amax_rowwise_ptr, amax_colwise_ptr, rows, cols,
-              scale_stride, scale_stride_transpose, rng_state);
+            cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
+            kernel<<<grid, block_size, dshmem_size, stream>>>(
+                tensor_map_input, tensor_map_output, tensor_map_output_transpose, scales_ptr,
+                scales_transpose_ptr, noop_ptr, amax_rowwise_ptr, amax_colwise_ptr, rows, cols,
+                scale_stride, scale_stride_transpose, rng_state);
+          });
         });
       }););
 #else
