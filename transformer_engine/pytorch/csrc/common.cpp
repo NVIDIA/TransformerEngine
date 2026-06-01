@@ -86,6 +86,25 @@ transformer_engine::DType getTransformerEngineFP8Type(bool e4m3_if_hybrid,
   return transformer_engine::DType::kFloat8E5M2;
 }
 
+pybind11::object MakePythonDType(transformer_engine::DType dtype) {
+  constexpr size_t num_dtypes = static_cast<size_t>(transformer_engine::DType::kNumTypes);
+  const size_t idx = static_cast<size_t>(dtype);
+  NVTE_CHECK(idx < num_dtypes, "Invalid DType (", idx, ").");
+
+  // Cache the Python ``constants.DType`` class object on first call. ``static``
+  // initialization is thread-safe under C++11 and we always hold the GIL here.
+  static pybind11::object te_dtype_cls =
+      pybind11::module_::import("transformer_engine.pytorch.constants").attr("DType");
+
+  // Per-value cache of constructed ``constants.DType`` members. Filled lazily;
+  // each slot holds a strong reference for the lifetime of the process.
+  static std::array<pybind11::object, num_dtypes> cache{};
+  if (!cache[idx]) {
+    cache[idx] = te_dtype_cls(static_cast<int>(dtype));
+  }
+  return cache[idx];
+}
+
 TensorWrapper makeTransformerEngineTensor(py::handle tensor, py::handle quantizer) {
   NVTE_CHECK(!tensor.is_none(), "Tensor is not allocated!");
   std::unique_ptr<Quantizer> my_quantizer = convert_quantizer(quantizer);

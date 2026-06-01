@@ -12,7 +12,83 @@
 #include <transformer_engine/fused_attn.h>
 #include <transformer_engine/transformer_engine.h>
 
+#include <array>
+#include <typeinfo>
+
 #include "cuda_runtime.h"
+
+namespace transformer_engine {
+namespace pybind_detail {
+
+/*! @brief Per-value cache of ``tex.DType`` enum objects keyed by enum value. */
+inline std::array<PyObject *, static_cast<size_t>(transformer_engine::DType::kNumTypes)> &
+cached_dtype_objects() {
+  static std::array<PyObject *, static_cast<size_t>(transformer_engine::DType::kNumTypes)> cache{};
+  return cache;
+}
+
+/*! @brief Implicit-conversion function registered on the pybind ``DType`` enum.
+ *
+ * Converts a Python ``int`` (including ``IntEnum`` subclasses such as
+ * ``transformer_engine.pytorch.constants.DType``) into a cached
+ * ``transformer_engine_torch.DType`` enum object. This is a drop-in,
+ * behavior-preserving replacement for the converter registered by
+ * ``pybind11::implicitly_convertible<int, transformer_engine::DType>()``,
+ * except that it returns a cached singleton per value instead of allocating
+ * a fresh ``DType(value)`` object on every call.
+ *
+ * ``tex.DType`` arguments never reach this path: they match the registered
+ * enum type directly and skip implicit conversion entirely.
+ */
+inline PyObject *cached_int_to_dtype(PyObject *src, PyTypeObject *type) {
+  // Only plain ints / IntEnum subclasses are handled here (matches the
+  // behavior of pybind's ``int`` caster used by the original converter).
+  if (!PyLong_Check(src)) {
+    return nullptr;
+  }
+  const long value = PyLong_AsLong(src);  // NOLINT(runtime/int)
+  if (value == -1 && PyErr_Occurred()) {
+    PyErr_Clear();
+    return nullptr;
+  }
+  if (value < 0 || value >= static_cast<long>(transformer_engine::DType::kNumTypes)) {
+    return nullptr;
+  }
+  auto &cache = cached_dtype_objects();
+  PyObject *cached = cache[static_cast<size_t>(value)];
+  if (cached == nullptr) {
+    // First use of this value: construct ``DType(value)`` once and keep a
+    // strong reference for the lifetime of the process.
+    PyObject *arg = PyLong_FromLong(value);
+    if (arg == nullptr) {
+      PyErr_Clear();
+      return nullptr;
+    }
+    cached = PyObject_CallFunctionObjArgs(reinterpret_cast<PyObject *>(type), arg, nullptr);
+    Py_DECREF(arg);
+    if (cached == nullptr) {
+      PyErr_Clear();
+      return nullptr;
+    }
+    cache[static_cast<size_t>(value)] = cached;
+  }
+  Py_INCREF(cached);
+  return cached;
+}
+
+/*! @brief Register the cached int -> ``DType`` implicit conversion.
+ *
+ * Must be called after the pybind ``DType`` enum has been registered.
+ */
+inline void register_cached_dtype_implicit_conversion() {
+  auto *tinfo = pybind11::detail::get_type_info(typeid(transformer_engine::DType));
+  if (tinfo != nullptr) {
+    tinfo->implicit_conversions.push_back(&cached_int_to_dtype);
+  }
+}
+
+}  // namespace pybind_detail
+}  // namespace transformer_engine
 
 #define NVTE_DECLARE_COMMON_PYBIND11_HANDLES(m)                                                                 \
   pybind11::enum_<transformer_engine::DType>(m, "DType", pybind11::module_local())                              \
@@ -33,8 +109,10 @@
         return pybind11::make_tuple(pybind11::type::of(pybind11::cast(self)),                                   \
                                     pybind11::make_tuple(static_cast<int>(self)));                              \
       }); /* Allow Python int (and IntEnum subclasses like transformer_engine.pytorch.constants.DType) to be */ \
-  /* passed wherever a pybind-bound ``transformer_engine::DType`` argument is expected.         */              \
-  pybind11::implicitly_convertible<int, transformer_engine::DType>();                                           \
+  /* passed wherever a pybind-bound ``transformer_engine::DType`` argument is expected. Uses a    */            \
+  /* cached converter (returns a singleton per value) instead of the per-call allocation that     */           \
+  /* ``pybind11::implicitly_convertible<int, transformer_engine::DType>()`` would incur.           */           \
+  transformer_engine::pybind_detail::register_cached_dtype_implicit_conversion();                              \
   pybind11::enum_<NVTE_Bias_Type>(m, "NVTE_Bias_Type", pybind11::module_local())                                \
       .value("NVTE_NO_BIAS", NVTE_Bias_Type::NVTE_NO_BIAS)                                                      \
       .value("NVTE_PRE_SCALE_BIAS", NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS)                                        \

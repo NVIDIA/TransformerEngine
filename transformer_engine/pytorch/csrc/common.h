@@ -392,6 +392,21 @@ std::vector<size_t> getTensorShape(const at::Tensor& t);
 transformer_engine::DType getTransformerEngineFP8Type(bool e4m3_if_hybrid,
                                                       const std::string& fp8_recipe);
 
+/*! @brief Wrap a C++ ``transformer_engine::DType`` as the canonical Python
+ *         ``transformer_engine.pytorch.constants.DType`` ``IntEnum`` member.
+ *
+ * The returned object is cached per enum value (one ``py::object`` per
+ * ``DType``), so repeated calls avoid both re-importing the module and
+ * re-running ``IntEnum.__call__``. C++ sites that set tensor/quantizer dtype
+ * attributes (``_fp8_dtype``, the ``fp8_dtype`` / ``fp4_dtype`` kwargs, etc.)
+ * should go through this helper instead of ``py::cast(dtype)``: ``py::cast``
+ * produces a fresh ``tex.DType`` pybind enum object on every call, which the
+ * Python constructors then have to normalize via ``DType.cast``.
+ *
+ * Must be called with the GIL held (always true inside pybind-invoked code).
+ */
+pybind11::object MakePythonDType(transformer_engine::DType dtype);
+
 inline size_t typeToNumBits(transformer_engine::DType t) {
   switch (t) {
     case transformer_engine::DType::kInt64:
