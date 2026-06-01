@@ -583,8 +583,10 @@ class _BackwardGroupedMLP_CuTeGEMMDBase(FusedOperation):
                 # cuDNN's SReLU kernel expects alpha in the final squared-output
                 # scale domain and indexes one alpha value per expert.
                 fc2_alpha_tensor = (
-                    fc2_dy_amax * fc2_weight_col_amax / (nvfp4_fp4_max**2 * nvfp4_fp8_max**2)
-                ).to(torch.float32).expand(num_groups)
+                    (fc2_dy_amax * fc2_weight_col_amax / (nvfp4_fp4_max**2 * nvfp4_fp8_max**2))
+                    .to(torch.float32)
+                    .expand(num_groups)
+                )
             else:
                 fc2_alpha_tensor = (
                     torch.sqrt(fc2_dy_amax * fc2_weight_col_amax) / (nvfp4_fp8_max * nvfp4_fp4_max)
