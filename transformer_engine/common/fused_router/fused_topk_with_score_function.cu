@@ -686,6 +686,7 @@ void fused_topk_with_score_function_forward_with_indices_kernel_launcher(
 
   const bool use_radix = topk >= get_radix_topk_threshold() && num_experts <= kMaxExpertsRadixTopk;
   if (!use_radix) {
+    // Simple path: no async loader, no persistent grid.
     check_shared_memory_capacity_num_experts(other_shmem, num_experts);
 
     auto launch_simple = [&](auto kernel) {
