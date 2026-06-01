@@ -125,19 +125,10 @@ if _opaque_available:
     def _make_qfactory(tag: str):
         """Return a qfactory that produces ToyQuantizer instances tagged with *tag*."""
 
-        quantizers = {
-            role: ToyQuantizer(tag=f"{tag}:{role}")
-            for role in (
-                "linear_input",
-                "linear_weight",
-                "linear_output",
-                "linear_grad_output",
-                "linear_grad_input",
-            )
-        }
-
-        def qfactory(role: str):
-            return quantizers[role]
+        def qfactory(role):
+            # ``role`` is a QuantizerRole; tag each slot with its tensor_type so
+            # the produced ToyQuantizers are distinguishable per tensor.
+            return ToyQuantizer(tag=f"{tag}:{role.tensor_type}")
 
         return qfactory
 

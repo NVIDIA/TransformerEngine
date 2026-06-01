@@ -98,6 +98,82 @@ class MXFP8Quantizer(Quantizer):
             return False
         return True
 
+    def _make_empty_pythonic(
+        self,
+        shape: Iterable[int],
+        *,
+        dtype: torch.dtype = torch.float32,
+        device: Optional[torch.device] = None,
+        requires_grad: bool = False,
+        pin_memory: bool = False,
+    ) -> MXFP8Tensor:
+
+        # Canonicalize tensor attributes
+        if device is None:
+            device = torch.device("cuda")
+
+        assert (
+            shape[-1] % MXFP8_BLOCK_SCALING_SIZE == 0
+            and math.prod(shape[:-1]) % MXFP8_BLOCK_SCALING_SIZE == 0
+        ), (
+            f"Incorrect shape {shape} for MXFP8. Tensor dims must be divisible by"
+            f" {MXFP8_BLOCK_SCALING_SIZE}"
+        )
+
+        # Allocate FP8 data
+        data = None
+        scale_inv = None
+        if self.rowwise_usage:
+            data = torch.empty(shape, dtype=torch.uint8, device=device, pin_memory=pin_memory)
+            scale_inv = torch.empty(
+                round_up_to_nearest_multiple(math.prod(shape[:-1]), 128),
+                round_up_to_nearest_multiple(shape[-1] // MXFP8_BLOCK_SCALING_SIZE, 4),
+                dtype=torch.uint8,
+                device=device,
+                pin_memory=pin_memory,
+            )
+
+        # Allocate FP8 data transpose if needed
+        columnwise_data = None
+        columnwise_scale_inv = None
+        if self.columnwise_usage:
+            columnwise_data = torch.empty(
+                shape, dtype=torch.uint8, device=device, pin_memory=pin_memory
+            )
+            columnwise_scale_inv = torch.empty(
+                round_up_to_nearest_multiple(math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE, 4),
+                round_up_to_nearest_multiple(shape[-1], 128),
+                dtype=torch.uint8,
+                device=device,
+                pin_memory=pin_memory,
+            )
+
+        # See ``Float8Quantizer._make_empty_pythonic`` for the rationale.
+        if self.internal:
+            return MXFP8TensorStorage(
+                data,
+                scale_inv,
+                columnwise_data,
+                columnwise_scale_inv,
+                self.dtype,
+                self,
+                self.optimize_for_gemm,
+                fake_dtype=dtype,
+            )
+
+        return MXFP8Tensor(
+            shape=shape,
+            dtype=dtype,
+            fp8_dtype=self.dtype,
+            rowwise_data=data,
+            rowwise_scale_inv=scale_inv,
+            columnwise_data=columnwise_data,
+            columnwise_scale_inv=columnwise_scale_inv,
+            quantizer=self,
+            requires_grad=requires_grad,
+            with_gemm_swizzled_scales=self.optimize_for_gemm,
+        )
+
     def calibrate(self, tensor: torch.Tensor) -> None:
         # TODO(ksivamani): No calibration needed for mxfp8?
         pass

@@ -577,8 +577,27 @@ class Quantizer(abc.ABC):
         device: Optional[Union[torch.device, str]] = None,
         requires_grad: bool = False,
         pin_memory: bool = False,
+        pythonic: bool = False,
     ) -> QuantizedTensor:
-        """Construct quantized tensor with uninitialized data"""
+        """Construct quantized tensor with uninitialized data.
+
+        When ``pythonic=True`` the tensor is allocated entirely in Python
+        (``torch.empty`` plus the subclass constructor) via
+        :meth:`_make_empty_pythonic`, instead of the C++
+        ``create_empty_quantized_tensor`` builtin. The pure-Python path is
+        traceable by ``torch.compile`` / Dynamo (the pybind C++ builtin is
+        not), so it is used on the fake path of compiled modules. The default
+        (``pythonic=False``) keeps the lower-overhead C++ allocation for eager
+        execution.
+        """
+        if pythonic:
+            return self._make_empty_pythonic(
+                shape,
+                dtype=dtype,
+                device=device,
+                requires_grad=requires_grad,
+                pin_memory=pin_memory,
+            )
 
         # Guard for custom quantizers that don't have a registered C++ converter.
         # Without this, they would hit an opaque C++ NVTE_ERROR.
@@ -602,6 +621,28 @@ class Quantizer(abc.ABC):
         if requires_grad:
             result.requires_grad_(True)
         return result
+
+    def _make_empty_pythonic(
+        self,
+        shape: Iterable[int],
+        *,
+        dtype: torch.dtype = torch.float32,
+        device: Optional[Union[torch.device, str]] = None,
+        requires_grad: bool = False,
+        pin_memory: bool = False,
+    ) -> QuantizedTensor:
+        """Pure-Python (Dynamo-traceable) allocation of an uninitialized
+        quantized tensor, used by ``make_empty(..., pythonic=True)``.
+
+        Subclasses that support ``torch.compile`` override this with the same
+        allocation logic the C++ ``create_empty_quantized_tensor`` builtin
+        performs, expressed in plain ``torch.empty`` + subclass-constructor
+        calls so it can be traced.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement a pure-Python make_empty "
+            "(pythonic=True), required on the torch.compile fake path."
+        )
 
     def calibrate(self, tensor: torch.Tensor) -> None:
         """Calibrate quantizer state

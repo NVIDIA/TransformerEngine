@@ -1282,10 +1282,11 @@ def _linear_backward_fake_impl(
 
     Returns the ``(wgrad, dgrad, grad_bias)`` gradient triple built from
     *fake* values (``None`` for absent grads, ``torch.empty`` for plain,
-    ``quantizer.make_empty`` for quantized ones), in the same order as
-    :func:`_linear_backward`'s return tuple. Wired directly as the
-    backward op's ``register_fake`` -- it runs under fake-prop (not the
-    Dynamo trace), so ``make_empty`` is fine here. ``set_usage`` on
+    ``quantizer.make_empty(..., pythonic=True)`` for quantized ones), in the
+    same order as :func:`_linear_backward`'s return tuple. Wired directly as
+    the backward op's ``register_fake``. The ``pythonic=True`` allocation
+    keeps the pure-Python (Dynamo-traceable) path instead of the C++
+    ``create_empty_quantized_tensor`` builtin. ``set_usage`` on
     ``grad_input_quantizer`` is preserved because it influences
     ``dgrad``'s allocation. Manual TE FSDP is unsupported; FSDP2 / MCore
     FSDP go through the standard path.
@@ -1310,7 +1311,9 @@ def _linear_backward_fake_impl(
         if shape is None:
             return None
         if quantizer is not None:
-            return quantizer.make_empty(list(shape), dtype=activation_dtype, device=device)
+            return quantizer.make_empty(
+                list(shape), dtype=activation_dtype, device=device, pythonic=True
+            )
         return torch.empty(tuple(shape), dtype=activation_dtype, device=device)
 
     wgrad = (
@@ -1466,7 +1469,10 @@ def _linear_forward_fake_impl(
                 # Fresh FP8 weight workspace -- a ``*TensorStorage``
                 # (``weight_quantizer`` is ``internal``).
                 new_weight_workspace = weight_quantizer.make_empty(
-                    list(weight.shape), dtype=activation_dtype, device=weight.device
+                    list(weight.shape),
+                    dtype=activation_dtype,
+                    device=weight.device,
+                    pythonic=True,
                 )
     else:
         weightmat_aliases_weight = weight.dtype == activation_dtype
@@ -1532,7 +1538,7 @@ def _linear_forward_fake_impl(
         elif inputmat_is_storage:
             saved_values.append(
                 input_quantizer.make_empty(
-                    list(inp.shape), dtype=activation_dtype, device=inp.device
+                    list(inp.shape), dtype=activation_dtype, device=inp.device, pythonic=True
                 )
             )
         else:
@@ -1557,7 +1563,7 @@ def _linear_forward_fake_impl(
         elif weightmat_is_storage:
             saved_values.append(
                 weight_quantizer_for_save.make_empty(
-                    list(weight.shape), dtype=activation_dtype, device=weight.device
+                    list(weight.shape), dtype=activation_dtype, device=weight.device, pythonic=True
                 )
             )
         else:

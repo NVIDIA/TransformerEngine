@@ -169,6 +169,65 @@ class Float8Quantizer(Quantizer):
         """Quantize tensor implementation"""
         return tex.quantize(tensor, self)
 
+    def _make_empty_pythonic(
+        self,
+        shape: Iterable[int],
+        *,
+        dtype: torch.dtype = torch.float32,
+        device: Optional[torch.device] = None,
+        requires_grad: bool = False,
+        pin_memory: bool = False,
+    ) -> Float8Tensor:
+        # Canonicalize tensor attributes
+        if device is None:
+            device = torch.device("cuda")
+
+        # Allocate FP8 data
+        data = None
+        if self.rowwise_usage:
+            data = torch.empty(shape, dtype=torch.uint8, device=device, pin_memory=pin_memory)
+
+        # Allocate FP8 data transpose if needed
+        data_transpose = None
+        if self.columnwise_usage:
+            transpose_shape = [shape[-1]] + list(shape[:-1])
+            data_transpose = torch.empty(
+                transpose_shape,
+                dtype=torch.uint8,
+                device=device,
+                pin_memory=pin_memory,
+            )
+
+        scale_inv = torch.empty(1, dtype=torch.float32, device=device, pin_memory=pin_memory)
+
+        # Honor ``internal``: tex.quantize() returns a bare
+        # Float8TensorStorage when the quantizer is marked internal
+        # (lower CPU overhead, no autograd-aware subclass) and so should
+        # make_empty in order to stay shape/type-equivalent on every
+        # path that touches it (eager fast-path, fake-impl under
+        # torch.compile, etc.).
+        if self.internal:
+            return Float8TensorStorage(
+                data=data,
+                fp8_scale_inv=scale_inv,
+                fp8_dtype=self.dtype,
+                fake_dtype=dtype,
+                data_transpose=data_transpose,
+                quantizer=self,
+            )
+
+        return Float8Tensor(
+            shape=shape,
+            dtype=dtype,
+            data=data,
+            fp8_scale_inv=scale_inv,
+            fp8_dtype=self.dtype,
+            requires_grad=requires_grad,
+            data_transpose=data_transpose,
+            quantizer=self,
+            device=device,
+        )
+
     def make_fake_empty(
         self,
         shape: Iterable[int],
@@ -378,6 +437,58 @@ class Float8CurrentScalingQuantizer(Quantizer):
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Quantize tensor implementation"""
         return tex.quantize(tensor, self)
+
+    def _make_empty_pythonic(
+        self,
+        shape: Iterable[int],
+        *,
+        dtype: torch.dtype = torch.float32,
+        device: Optional[torch.device] = None,
+        requires_grad: bool = False,
+        pin_memory: bool = False,
+    ) -> Float8Tensor:
+        # Canonicalize tensor attributes
+        if device is None:
+            device = torch.device("cuda")
+
+        # Allocate FP8 data
+        data = None
+        if self.rowwise_usage:
+            data = torch.empty(shape, dtype=torch.uint8, device=device, pin_memory=pin_memory)
+
+        # Allocate FP8 data transpose if needed
+        data_transpose = None
+        if self.columnwise_usage:
+            transpose_shape = [shape[-1]] + list(shape[:-1])
+            data_transpose = torch.empty(
+                transpose_shape,
+                dtype=torch.uint8,
+                device=device,
+                pin_memory=pin_memory,
+            )
+        scale_inv = torch.empty(1, dtype=torch.float32, device=device, pin_memory=pin_memory)
+
+        if self.internal:
+            return Float8TensorStorage(
+                data=data,
+                fp8_scale_inv=scale_inv,
+                fp8_dtype=self.dtype,
+                fake_dtype=dtype,
+                data_transpose=data_transpose,
+                quantizer=self,
+            )
+
+        return Float8Tensor(
+            shape=shape,
+            dtype=dtype,
+            data=data,
+            fp8_scale_inv=scale_inv,
+            fp8_dtype=self.dtype,
+            requires_grad=requires_grad,
+            data_transpose=data_transpose,
+            quantizer=self,
+            device=device,
+        )
 
     def make_fake_empty(
         self,
