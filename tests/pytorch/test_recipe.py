@@ -527,8 +527,8 @@ class TestFP8Recipe:
 )
 @pytest.mark.parametrize(
     "nvfp4_4over6_err_mode",
-    ["MAE", "MSE", "MAE_FP16", "MSE_FP16"],
-    ids=["mae_err", "mse_err", "mae_fp16_err", "mse_fp16_err"],
+    ["MAE", "MSE"],
+    ids=["mae_err", "mse_err"],
 )
 def test_nvfp4_row_scaled_quantizer_roles(
     nvfp4_4over6, nvfp4_4over6_e4m3_use_256, nvfp4_4over6_err_mode

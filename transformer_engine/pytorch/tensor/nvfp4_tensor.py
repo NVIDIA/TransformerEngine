@@ -172,10 +172,8 @@ class NVFP4Quantizer(Quantizer):
         if self.nvfp4_e4m3_max not in (448, 256):
             raise ValueError("nvfp4_e4m3_max must be 448 or 256.")
         self.nvfp4_4over6_err_mode = nvfp4_4over6_err_mode.upper()
-        if self.nvfp4_4over6_err_mode not in ("MAE", "MSE", "MAE_FP16", "MSE_FP16"):
-            raise ValueError(
-                "nvfp4_4over6_err_mode must be one of: 'MAE', 'MSE', 'MAE_FP16', 'MSE_FP16'."
-            )
+        if self.nvfp4_4over6_err_mode not in ("MAE", "MSE"):
+            raise ValueError("nvfp4_4over6_err_mode must be one of: 'MAE', 'MSE'.")
         self.rht_matrix_random_sign_mask_t = get_random_sign_mask_for_rht(
             with_random_sign_mask, torch.cuda.current_device()
         )

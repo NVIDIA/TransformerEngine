@@ -122,11 +122,9 @@ enum NVTEScalingMode {
  * \brief Method for NVFP4 4over6 quantization.
  */
 enum NVTENVFP44Over6Mode {
-  kNVTENVFP44Over6Disabled = 0,   /*!< 4over6 is not applied */
-  kNVTENVFP44Over6MinMAE = 1,     /*!< Select the candidate with lower mean absolute error */
-  kNVTENVFP44Over6MinMSE = 2,     /*!< Select the candidate with lower mean squared error */
-  kNVTENVFP44Over6MinMAEFP16 = 3, /*!< Select with lower absolute error in FP16 domain */
-  kNVTENVFP44Over6MinMSEFP16 = 4, /*!< Select with lower squared error in FP16 domain */
+  kNVTENVFP44Over6Disabled = 0, /*!< 4over6 is not applied */
+  kNVTENVFP44Over6MinMAE = 1,   /*!< Select the candidate with lower mean absolute error */
+  kNVTENVFP44Over6MinMSE = 2,   /*!< Select the candidate with lower mean squared error */
 };
 
 /*! \brief TE Tensor type

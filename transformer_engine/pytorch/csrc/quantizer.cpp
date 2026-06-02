@@ -1740,10 +1740,6 @@ NVFP4Quantizer::NVFP4Quantizer(const py::handle& quantizer) : Quantizer(quantize
     this->nvfp4_4over6_mode = kNVTENVFP44Over6MinMAE;
   } else if (nvfp4_4over6_err_mode == "MSE") {
     this->nvfp4_4over6_mode = kNVTENVFP44Over6MinMSE;
-  } else if (nvfp4_4over6_err_mode == "MAE_FP16") {
-    this->nvfp4_4over6_mode = kNVTENVFP44Over6MinMAEFP16;
-  } else if (nvfp4_4over6_err_mode == "MSE_FP16") {
-    this->nvfp4_4over6_mode = kNVTENVFP44Over6MinMSEFP16;
   } else {
     NVTE_ERROR("Unsupported NVFP4 4over6 error mode: ", nvfp4_4over6_err_mode);
   }
@@ -2467,8 +2463,8 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
   // 1. replace 1 / x by reciprocal_approximate_ftz(x)
   // 2. when RHT cast fusion is available, fusion allows cast to be performed on FP32 data,
   //    this will essentially remove a round trip between FP32 to BF16 then FP32
-  // NVFP4 4over6 candidate error math is controlled separately by
-  // NVTE_NVFP4_4OVER6_ERR_USE_FAST_MATH.
+  // NVTE_NVFP4_4OVER6_ERR_USE_FAST_MATH selects the NVFP4 4over6
+  // FP16 product-domain candidate error path.
   const auto use_fast_math = transformer_engine::getenv<bool>("NVTE_USE_FAST_MATH");
   if (use_fast_math && this->nvfp4_4over6_mode == kNVTENVFP44Over6Disabled) {
     quant_config.set_use_fast_math(true);

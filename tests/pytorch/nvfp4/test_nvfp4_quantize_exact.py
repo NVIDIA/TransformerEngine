@@ -2,6 +2,9 @@
 #
 # See LICENSE for license information.
 
+import os
+from contextlib import contextmanager
+
 import pytest
 import torch
 import transformer_engine.pytorch as te
@@ -14,6 +17,19 @@ from transformer_engine.pytorch.constants import TE_DType
 
 
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
+
+
+@contextmanager
+def nvfp4_4over6_err_fast_math(enabled: bool):
+    old_value = os.environ.get("NVTE_NVFP4_4OVER6_ERR_USE_FAST_MATH")
+    os.environ["NVTE_NVFP4_4OVER6_ERR_USE_FAST_MATH"] = "1" if enabled else "0"
+    try:
+        yield
+    finally:
+        if old_value is None:
+            os.environ.pop("NVTE_NVFP4_4OVER6_ERR_USE_FAST_MATH", None)
+        else:
+            os.environ["NVTE_NVFP4_4OVER6_ERR_USE_FAST_MATH"] = old_value
 
 
 def maybe_skip_row_scaled_unsupported_quantization(
@@ -55,6 +71,7 @@ def check_quantization_nvfp4_versus_reference(
     use_4over6: bool = False,
     nvfp4_e4m3_max: int = 448,
     nvfp4_4over6_err_mode: str = "MAE",
+    nvfp4_4over6_err_use_fast_math: bool = False,
 ) -> None:
     if nvfp4_e4m3_max != 448 and not use_4over6:
         pytest.skip("E4M3 max 256 is only meaningful for 4over6")
@@ -73,27 +90,28 @@ def check_quantization_nvfp4_versus_reference(
     x = torch.randn((M, N), dtype=x_dtype, device=device)
 
     # Quantize
-    nvfp4_quantizer = NVFP4Quantizer(
-        fp4_dtype=te_dtype,
-        rowwise=True,
-        columnwise=return_transpose,
-        with_amax_reduction=False,
-        amax_reduction_group=None,
-        with_rht=False,
-        with_post_rht_amax=False,
-        with_2d_quantization=with_2d_quantization,
-        row_scaled_nvfp4=row_scaled_nvfp4,
-        nvfp4_use_4over6=use_4over6,
-        nvfp4_e4m3_max=nvfp4_e4m3_max,
-        nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
-    )
-    if use_cpp_allocator:
-        x_nvfp4_sut = nvfp4_quantizer(x)
-    else:
-        x_nvfp4_sut = nvfp4_quantizer.make_empty(
-            (M, N), dtype=x_dtype, device=device, requires_grad=False
+    with nvfp4_4over6_err_fast_math(nvfp4_4over6_err_use_fast_math):
+        nvfp4_quantizer = NVFP4Quantizer(
+            fp4_dtype=te_dtype,
+            rowwise=True,
+            columnwise=return_transpose,
+            with_amax_reduction=False,
+            amax_reduction_group=None,
+            with_rht=False,
+            with_post_rht_amax=False,
+            with_2d_quantization=with_2d_quantization,
+            row_scaled_nvfp4=row_scaled_nvfp4,
+            nvfp4_use_4over6=use_4over6,
+            nvfp4_e4m3_max=nvfp4_e4m3_max,
+            nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
         )
-        x_nvfp4_sut = nvfp4_quantizer.update_quantized(x, x_nvfp4_sut)
+        if use_cpp_allocator:
+            x_nvfp4_sut = nvfp4_quantizer(x)
+        else:
+            x_nvfp4_sut = nvfp4_quantizer.make_empty(
+                (M, N), dtype=x_dtype, device=device, requires_grad=False
+            )
+            x_nvfp4_sut = nvfp4_quantizer.update_quantized(x, x_nvfp4_sut)
 
     # Extract data from NVFP4Tensor
     assert x_nvfp4_sut._rowwise_data is not None
@@ -122,6 +140,7 @@ def check_quantization_nvfp4_versus_reference(
         nvfp4_use_4over6=use_4over6,
         nvfp4_e4m3_max=nvfp4_e4m3_max,
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
+        nvfp4_4over6_err_use_fast_math=nvfp4_4over6_err_use_fast_math,
     )
     x_nvfp4_ref = ref_quantizer.quantize(x)
 
@@ -201,8 +220,8 @@ def check_quantization_nvfp4_versus_reference(
 @pytest.mark.parametrize("nvfp4_e4m3_max", [448, 256], ids=["e4m3_448", "e4m3_256"])
 @pytest.mark.parametrize(
     "nvfp4_4over6_err_mode",
-    ["MAE", "MSE", "MAE_FP16", "MSE_FP16"],
-    ids=["mae_err", "mse_err", "mae_fp16_err", "mse_fp16_err"],
+    ["MAE", "MSE"],
+    ids=["mae_err", "mse_err"],
 )
 def test_quantization_block_tiling_versus_reference(
     x_dtype: torch.dtype,
@@ -233,6 +252,46 @@ def test_quantization_block_tiling_versus_reference(
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("M, N", [(128, 128), (256, 256)])
+@pytest.mark.parametrize("x_dtype", [torch.float32, torch.bfloat16], ids=str)
+@pytest.mark.parametrize("return_transpose", [True, False], ids=["both_directions", "rowwise_only"])
+@pytest.mark.parametrize(
+    "use_cpp_allocator", [True, False], ids=["cpp_allocator", "python_allocator"]
+)
+@pytest.mark.parametrize("row_scaled_nvfp4", [False, True], ids=["nvfp4", "nvfp4_row_scaled"])
+@pytest.mark.parametrize("nvfp4_e4m3_max", [448, 256], ids=["e4m3_448", "e4m3_256"])
+@pytest.mark.parametrize(
+    "nvfp4_4over6_err_mode",
+    ["MAE", "MSE"],
+    ids=["mae_err", "mse_err"],
+)
+def test_nvfp4_4over6_fp16_error_scoring_versus_reference(
+    x_dtype: torch.dtype,
+    M: int,
+    N: int,
+    return_transpose: bool,
+    use_cpp_allocator: bool,
+    row_scaled_nvfp4: bool,
+    nvfp4_e4m3_max: int,
+    nvfp4_4over6_err_mode: str,
+) -> None:
+    check_quantization_nvfp4_versus_reference(
+        x_dtype=x_dtype,
+        M=M,
+        N=N,
+        return_transpose=return_transpose,
+        swizzled_scale=False,
+        use_cpp_allocator=use_cpp_allocator,
+        with_2d_quantization=False,
+        row_scaled_nvfp4=row_scaled_nvfp4,
+        use_4over6=True,
+        nvfp4_e4m3_max=nvfp4_e4m3_max,
+        nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
+        nvfp4_4over6_err_use_fast_math=True,
+    )
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.parametrize(
     "M, N",
     [
@@ -249,8 +308,8 @@ def test_quantization_block_tiling_versus_reference(
 @pytest.mark.parametrize("use_4over6", [False, True], ids=["default", "4over6"])
 @pytest.mark.parametrize(
     "nvfp4_4over6_err_mode",
-    ["MAE", "MSE", "MAE_FP16", "MSE_FP16"],
-    ids=["mae_err", "mse_err", "mae_fp16_err", "mse_fp16_err"],
+    ["MAE", "MSE"],
+    ids=["mae_err", "mse_err"],
 )
 def test_nvfp4_quantization_extrema_versus_reference(
     x_dtype: torch.dtype,
@@ -292,13 +351,14 @@ def test_nvfp4_quantization_extrema_versus_reference(
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
 
-    if use_cpp_allocator:
-        x_nvfp4_sut = nvfp4_quantizer(x)
-    else:
-        x_nvfp4_sut = nvfp4_quantizer.make_empty(
-            (M, N), dtype=x_dtype, device=device, requires_grad=False
-        )
-        x_nvfp4_sut = nvfp4_quantizer.update_quantized(x, x_nvfp4_sut)
+    with nvfp4_4over6_err_fast_math(False):
+        if use_cpp_allocator:
+            x_nvfp4_sut = nvfp4_quantizer(x)
+        else:
+            x_nvfp4_sut = nvfp4_quantizer.make_empty(
+                (M, N), dtype=x_dtype, device=device, requires_grad=False
+            )
+            x_nvfp4_sut = nvfp4_quantizer.update_quantized(x, x_nvfp4_sut)
 
     assert x_nvfp4_sut._rowwise_data is not None
     qx = x_nvfp4_sut._rowwise_data.view(dtype=torch.uint8)
@@ -370,8 +430,8 @@ def test_nvfp4_quantization_extrema_versus_reference(
 @pytest.mark.parametrize("use_4over6", [False, True], ids=["default", "4over6"])
 @pytest.mark.parametrize(
     "nvfp4_4over6_err_mode",
-    ["MAE", "MSE", "MAE_FP16", "MSE_FP16"],
-    ids=["mae_err", "mse_err", "mae_fp16_err", "mse_fp16_err"],
+    ["MAE", "MSE"],
+    ids=["mae_err", "mse_err"],
 )
 def test_nvfp4_quantization_boundary_values(
     x_dtype: torch.dtype,
@@ -426,13 +486,14 @@ def test_nvfp4_quantization_boundary_values(
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
 
-    if use_cpp_allocator:
-        x_nvfp4_sut = nvfp4_quantizer(x)
-    else:
-        x_nvfp4_sut = nvfp4_quantizer.make_empty(
-            (M, N), dtype=x_dtype, device=device, requires_grad=False
-        )
-        x_nvfp4_sut = nvfp4_quantizer.update_quantized(x, x_nvfp4_sut)
+    with nvfp4_4over6_err_fast_math(False):
+        if use_cpp_allocator:
+            x_nvfp4_sut = nvfp4_quantizer(x)
+        else:
+            x_nvfp4_sut = nvfp4_quantizer.make_empty(
+                (M, N), dtype=x_dtype, device=device, requires_grad=False
+            )
+            x_nvfp4_sut = nvfp4_quantizer.update_quantized(x, x_nvfp4_sut)
 
     assert x_nvfp4_sut._rowwise_data is not None
     qx = x_nvfp4_sut._rowwise_data.view(dtype=torch.uint8)
@@ -504,8 +565,8 @@ def test_nvfp4_quantization_boundary_values(
 @pytest.mark.parametrize("use_4over6", [False, True], ids=["default", "4over6"])
 @pytest.mark.parametrize(
     "nvfp4_4over6_err_mode",
-    ["MAE", "MSE", "MAE_FP16", "MSE_FP16"],
-    ids=["mae_err", "mse_err", "mae_fp16_err", "mse_fp16_err"],
+    ["MAE", "MSE"],
+    ids=["mae_err", "mse_err"],
 )
 def test_nvfp4_quantization_noncontiguous_inputs(
     x_dtype: torch.dtype,
@@ -546,13 +607,14 @@ def test_nvfp4_quantization_noncontiguous_inputs(
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
 
-    if use_cpp_allocator:
-        x_nvfp4_sut = nvfp4_quantizer(x_nc)
-    else:
-        x_nvfp4_sut = nvfp4_quantizer.make_empty(
-            x_nc.shape, dtype=x_dtype, device=device, requires_grad=False
-        )
-        x_nvfp4_sut = nvfp4_quantizer.update_quantized(x_nc, x_nvfp4_sut)
+    with nvfp4_4over6_err_fast_math(False):
+        if use_cpp_allocator:
+            x_nvfp4_sut = nvfp4_quantizer(x_nc)
+        else:
+            x_nvfp4_sut = nvfp4_quantizer.make_empty(
+                x_nc.shape, dtype=x_dtype, device=device, requires_grad=False
+            )
+            x_nvfp4_sut = nvfp4_quantizer.update_quantized(x_nc, x_nvfp4_sut)
 
     assert x_nvfp4_sut._rowwise_data is not None
     qx = x_nvfp4_sut._rowwise_data.view(dtype=torch.uint8)

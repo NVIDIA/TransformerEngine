@@ -355,14 +355,13 @@ class NVFP4QuantizerRef(Quantizer):
         nvfp4_use_4over6: bool = False,
         nvfp4_e4m3_max: int = 448,
         nvfp4_4over6_err_mode: str = "MAE",
+        nvfp4_4over6_err_use_fast_math: bool = False,
         with_rht: bool = False,
         with_random_sign_mask: bool = True,
     ):
         nvfp4_4over6_err_mode = nvfp4_4over6_err_mode.upper()
-        if nvfp4_4over6_err_mode not in ("MAE", "MSE", "MAE_FP16", "MSE_FP16"):
-            raise ValueError(
-                "nvfp4_4over6_err_mode must be one of: 'MAE', 'MSE', 'MAE_FP16', 'MSE_FP16'."
-            )
+        if nvfp4_4over6_err_mode not in ("MAE", "MSE"):
+            raise ValueError("nvfp4_4over6_err_mode must be one of: 'MAE', 'MSE'.")
         if row_scaled_nvfp4:
             if not rowwise:
                 raise ValueError("Row-scaled NVFP4 reference quantization requires rowwise usage.")
@@ -388,6 +387,7 @@ class NVFP4QuantizerRef(Quantizer):
         if self.nvfp4_e4m3_max not in (448, 256):
             raise ValueError("nvfp4_e4m3_max must be 448 or 256.")
         self.nvfp4_4over6_err_mode = nvfp4_4over6_err_mode
+        self.nvfp4_4over6_err_use_fast_math = nvfp4_4over6_err_use_fast_math
         self.with_rht = with_rht
         self.with_random_sign_mask = with_random_sign_mask
 
@@ -534,14 +534,15 @@ class NVFP4QuantizerRef(Quantizer):
         row_scaled_nvfp4: bool,
         tile_len_y: int,
         nvfp4_4over6_err_mode: str,
+        nvfp4_4over6_err_use_fast_math: bool,
         nvfp4_e4m3_max: int,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Quantize NVFP4 with 4over6 candidate selection.
 
         This mirrors the CUDA path: map-to-4 uses a 1.5x expanded E4M3 block scale,
-        MAE/MSE compute error in the original input domain, MAE_FP16/MSE_FP16
-        compute error in the E4M3-scaled FP16 product domain, and ties choose
-        map-to-6.
+        MAE/MSE compute error in the original input domain by default, the
+        fast-math error path computes error in the E4M3-scaled FP16 product
+        domain, and ties choose map-to-6.
         """
         m, num_blocks, tile_len_x = x.shape
         n = num_blocks * tile_len_x
@@ -593,7 +594,7 @@ class NVFP4QuantizerRef(Quantizer):
         fp4_map4 = cast_from_fp4x2(qx_map4, torch.float32).view(m, num_blocks, tile_len_x)
         fp4_map6 = cast_from_fp4x2(qx_map6, torch.float32).view(m, num_blocks, tile_len_x)
         x_float = x.to(torch.float32)
-        if nvfp4_4over6_err_mode in ("MAE_FP16", "MSE_FP16"):
+        if nvfp4_4over6_err_use_fast_math:
             original_scaled = x_float * global_encode_scale
             candidate_map4 = NVFP4QuantizerRef._ref_nvfp4_4over6_fp16_candidate(
                 fp4_map4, decode_scale_map4
@@ -604,7 +605,7 @@ class NVFP4QuantizerRef(Quantizer):
             for idx in range(tile_len_x):
                 diff_map4 = candidate_map4[:, :, idx] - original_scaled[:, :, idx]
                 diff_map6 = candidate_map6[:, :, idx] - original_scaled[:, :, idx]
-                if nvfp4_4over6_err_mode == "MSE_FP16":
+                if nvfp4_4over6_err_mode == "MSE":
                     err_map4 = err_map4 + (diff_map4 * diff_map4).unsqueeze(-1)
                     err_map6 = err_map6 + (diff_map6 * diff_map6).unsqueeze(-1)
                 else:
@@ -663,6 +664,7 @@ class NVFP4QuantizerRef(Quantizer):
         nvfp4_use_4over6: bool = False,
         nvfp4_e4m3_max: int = 448,
         nvfp4_4over6_err_mode: str = "MAE",
+        nvfp4_4over6_err_use_fast_math: bool = False,
         eps: float,  # pylint: disable=unused-argument
     ) -> Tuple[torch.Tensor, torch.Tensor]:
 
@@ -743,6 +745,7 @@ class NVFP4QuantizerRef(Quantizer):
                     row_scaled_nvfp4,
                     tile_len_y,
                     nvfp4_4over6_err_mode,
+                    nvfp4_4over6_err_use_fast_math,
                     nvfp4_e4m3_max,
                 )
 
@@ -909,6 +912,7 @@ class NVFP4QuantizerRef(Quantizer):
                 nvfp4_use_4over6=self.nvfp4_use_4over6,
                 nvfp4_e4m3_max=self.nvfp4_e4m3_max,
                 nvfp4_4over6_err_mode=self.nvfp4_4over6_err_mode,
+                nvfp4_4over6_err_use_fast_math=self.nvfp4_4over6_err_use_fast_math,
                 eps=self.eps,
             )
             if transpose_scales:
@@ -935,6 +939,7 @@ class NVFP4QuantizerRef(Quantizer):
                 nvfp4_use_4over6=self.nvfp4_use_4over6,
                 nvfp4_e4m3_max=self.nvfp4_e4m3_max,
                 nvfp4_4over6_err_mode=self.nvfp4_4over6_err_mode,
+                nvfp4_4over6_err_use_fast_math=self.nvfp4_4over6_err_use_fast_math,
                 eps=self.eps,
             )
 

@@ -1109,9 +1109,7 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
       const auto val = *reinterpret_cast<const uint8_t *>(buf);
       NVTE_CHECK(val == static_cast<uint8_t>(kNVTENVFP44Over6Disabled) ||
                      val == static_cast<uint8_t>(kNVTENVFP44Over6MinMAE) ||
-                     val == static_cast<uint8_t>(kNVTENVFP44Over6MinMSE) ||
-                     val == static_cast<uint8_t>(kNVTENVFP44Over6MinMAEFP16) ||
-                     val == static_cast<uint8_t>(kNVTENVFP44Over6MinMSEFP16),
+                     val == static_cast<uint8_t>(kNVTENVFP44Over6MinMSE),
                  "Invalid NVFP4 4over6 mode (got ", static_cast<int>(val), ")");
       config_.nvfp4_4over6_mode = static_cast<NVTENVFP44Over6Mode>(val);
       break;

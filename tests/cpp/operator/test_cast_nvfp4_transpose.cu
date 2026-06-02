@@ -785,7 +785,7 @@ void performTest(float (*OP)(const float),
     if (use_4over6 && use_fast_math) {
         std::cout << "WARNING: Plain NVFP4 fast math is ignored for 4over6. "
                      "Use use_4over6_err_use_fast_math to test the 4over6 candidate "
-                     "error fast-math path."
+                     "FP16 product-domain error path."
                   << std::endl;
     }
 
