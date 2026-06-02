@@ -1445,7 +1445,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                 assert score_mod_bprop is None or callable(
                     score_mod_bprop
                 ), "score_mod_bprop must be callable when provided!"
-                assert not is_in_onnx_export_mode(), "Flex Attention is not supported with ONNX export!"
+                assert (
+                    not is_in_onnx_export_mode()
+                ), "Flex Attention is not supported with ONNX export!"
                 if score_mod_tensors is not None:
                     assert isinstance(score_mod_tensors, dict), "score_mod_tensors must be a dict!"
                     assert all(
