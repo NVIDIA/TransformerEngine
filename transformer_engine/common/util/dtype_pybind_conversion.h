@@ -43,16 +43,16 @@ inline PyObject *construct_dtype_object(long value, PyTypeObject *type) {  // NO
 
 /*! @brief Implicit-conversion function registered on the pybind ``DType`` enum.
  *
- * Converts a Python ``transformer_engine.pytorch.constants.DType`` object
+ * Converts a Python ``transformer_engine.pytorch.DType`` object
  * into a cached ``transformer_engine_torch.DType`` enum object.
  * This conversion function is needed since tex pybind functions generally accept
  * transformer_engine_torch.DType. This implicit conversion allows user to pass
- * constants.DType from python and C++ functions will implicitly convert to
+ * transformer_engine.pytorch.DType from python and C++ functions will implicitly convert to
  * transformer_engine_torch.DType.
  */
 inline PyObject *cached_int_to_dtype(PyObject *src, PyTypeObject *type) {
   // Only plain ints / IntEnum subclasses are handled here.
-  // src --> constants.DType IntEnum object from transformer_engine.pytorch
+  // src --> transformer_engine.pytorch.DType IntEnum object
   // type --> transformer_engine_torch.DType PyTypeObject*
   if (!PyLong_Check(src)) {
     return nullptr;
@@ -79,7 +79,7 @@ inline PyObject *cached_int_to_dtype(PyObject *src, PyTypeObject *type) {
 }
 
 /*! @brief Register the Python -> C++ ``DType`` implicit conversion.
- * Allows a Python object of type ``transformer_engine.pytorch.constants.DType``
+ * Allows a Python object of type ``transformer_engine.pytorch.DType``
  * to be passed wherever a pybind-bound ``transformer_engine::DType`` argument is expected.
  * pybind-bound ``transformer_engine::DType`` argument is expected.
  * Must be called after the pybind ``DType`` enum has been registered.

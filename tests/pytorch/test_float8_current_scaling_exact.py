@@ -13,7 +13,6 @@ import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Float8CurrentScaling
 from transformer_engine.pytorch.quantization import autocast, get_fp8_torch_dtype
 from transformer_engine.pytorch.constants import TE_DType
-from transformer_engine.pytorch import constants
 from transformer_engine.pytorch.custom_recipes.quantization import MMParams
 from transformer_engine.pytorch.custom_recipes.quantization_ref_current_scaling import (
     CurrentScalingQuantizerRef,
@@ -762,7 +761,7 @@ class TestFP8CurrentScalingNativeVsRef:
     def _make_quantizers(rowwise=True, columnwise=True):
         # TE native FP8 current scaling quantizer
         te_quant = te.Float8CurrentScalingQuantizer(
-            fp8_dtype=constants.DType.kFloat8E4M3,
+            fp8_dtype=te.DType.kFloat8E4M3,
             device=torch.device("cuda"),
             rowwise=rowwise,
             columnwise=columnwise,

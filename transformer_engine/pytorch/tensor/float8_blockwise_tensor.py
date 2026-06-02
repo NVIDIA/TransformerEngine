@@ -16,6 +16,7 @@ from .storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStora
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ._quantization_helpers import _IdentityFunc
 from .. import constants
+from transformer_engine.pytorch import DType
 from ..utils import devices_match, round_up_to_nearest_multiple
 
 aten = torch.ops.aten
@@ -30,7 +31,7 @@ class Float8BlockQuantizer(Quantizer):
 
     """
 
-    dtype: constants.DType
+    dtype: DType
     block_len: int
     amax_epsilon: float
     force_pow_2_scales: bool
@@ -47,7 +48,7 @@ class Float8BlockQuantizer(Quantizer):
         block_scaling_dim: int = 2,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
-        self.dtype = constants.DType.cast(fp8_dtype)
+        self.dtype = DType.cast(fp8_dtype)
         self.block_len = 128
         self.force_pow_2_scales = force_pow_2_scales
         self.amax_epsilon = amax_epsilon
@@ -245,7 +246,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
         rowwise_scale_inv: Optional[torch.Tensor],
         columnwise_data: Optional[torch.Tensor],
         columnwise_scale_inv: Optional[torch.Tensor],
-        fp8_dtype: constants.DType,
+        fp8_dtype: DType,
         quantizer: Quantizer,
         is_2D_scaled: bool,
         **kwargs,
@@ -443,7 +444,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
         rowwise_scale_inv: torch.Tensor,
         columnwise_data: torch.Tensor,
         columnwise_scale_inv: torch.Tensor,
-        fp8_dtype: constants.DType,
+        fp8_dtype: DType,
         dtype: torch.dtype,
         quantizer: Quantizer,
         is_2D_scaled: bool,
@@ -667,7 +668,7 @@ def _make_float8_blockwise_tensor_in_reduce_ex(
     rowwise_scale_inv: torch.Tensor,
     columnwise_data: torch.Tensor,
     columnwise_scale_inv: torch.Tensor,
-    fp8_dtype: constants.DType,
+    fp8_dtype: DType,
     dtype: torch.dtype,
     quantizer: Quantizer,
     is_2D_scaled: bool,

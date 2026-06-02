@@ -91,12 +91,13 @@ pybind11::object MakePythonDType(transformer_engine::DType dtype) {
   const size_t idx = static_cast<size_t>(dtype);
   NVTE_CHECK(idx < num_dtypes, "Invalid DType (", idx, ").");
 
-  // Cache the Python ``constants.DType`` class object on first call. ``static``
-  // initialization is thread-safe under C++11 and we always hold the GIL here.
+  // Cache the Python ``transformer_engine.pytorch.DType`` class object on first
+  // call. ``static`` initialization is thread-safe under C++11 and we always
+  // hold the GIL here.
   static pybind11::object te_dtype_cls =
-      pybind11::module_::import("transformer_engine.pytorch.constants").attr("DType");
+      pybind11::module_::import("transformer_engine.pytorch").attr("DType");
 
-  // Per-value cache of constructed ``constants.DType`` members. Filled lazily;
+  // Per-value cache of constructed ``transformer_engine.pytorch.DType`` members. Filled lazily;
   // each slot holds a strong reference for the lifetime of the process.
   static std::array<pybind11::object, num_dtypes> cache{};
   if (!cache[idx]) {

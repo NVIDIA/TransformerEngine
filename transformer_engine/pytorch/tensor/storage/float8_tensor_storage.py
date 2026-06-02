@@ -14,6 +14,7 @@ import transformer_engine_torch as tex
 from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 
 from ...constants import TE_DType as torch_to_transformer_engine_dtype, TE_DType_To_Torch
+from transformer_engine.pytorch import DType
 from ... import constants
 
 from ...utils import is_non_tn_fp8_gemm_supported, _empty_tensor
@@ -69,7 +70,7 @@ class Float8TensorStorage(QuantizedTensorStorage):
 
     _data: Optional[torch.Tensor]
     _quantizer: Optional[Quantizer]
-    _fp8_dtype: constants.DType
+    _fp8_dtype: DType
     _scale_inv: torch.Tensor
 
     # FP8 transpose cache
@@ -94,7 +95,7 @@ class Float8TensorStorage(QuantizedTensorStorage):
             instance = super().__new__(cls, *args, fake_dtype=fake_dtype, **kwargs)
         instance._data = data
         instance._quantizer = quantizer.copy() if quantizer is not None else None
-        instance._fp8_dtype = constants.DType.cast(fp8_dtype)
+        instance._fp8_dtype = DType.cast(fp8_dtype)
         instance._scale_inv = fp8_scale_inv
         instance._transpose = data_transpose
         instance._transpose_invalid = instance._transpose is None

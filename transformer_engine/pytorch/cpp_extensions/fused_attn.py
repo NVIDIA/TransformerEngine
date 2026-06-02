@@ -17,7 +17,7 @@ from transformer_engine_torch import (
 )
 from ..quantized_tensor import Quantizer
 from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx
-from .. import constants
+from transformer_engine.pytorch import DType
 
 
 __all__ = [
@@ -27,12 +27,12 @@ __all__ = [
 
 
 TORCH_DType = {
-    constants.DType.kFloat8E4M3: torch.uint8,
-    constants.DType.kFloat8E5M2: torch.uint8,
-    constants.DType.kFloat16: torch.half,
-    constants.DType.kBFloat16: torch.bfloat16,
-    constants.DType.kFloat32: torch.float32,
-    constants.DType.kInt32: torch.int32,
+    DType.kFloat8E4M3: torch.uint8,
+    DType.kFloat8E5M2: torch.uint8,
+    DType.kFloat16: torch.half,
+    DType.kBFloat16: torch.bfloat16,
+    DType.kFloat32: torch.float32,
+    DType.kInt32: torch.int32,
 }
 
 QKVFormat = {
@@ -174,7 +174,7 @@ def fused_attn_fwd(
                 input tensor K; shape sbhd, bshd or thd (see `qkv_layout` for details)
     v : torch.Tensor
                 input tensor V; shape sbhd, bshd or thd (see `qkv_layout` for details)
-    fake_dtype : constants.DType
+    fake_dtype : DType
                 data type of Q, K and V - in case of high precision, fake dtype in case of FP8;
                 in torch.dtype
     fused_attention_backend : tex.NVTE_Fused_Attn_Backend
@@ -456,7 +456,7 @@ def fused_attn_bwd(
     d_o : torch.Tensor
                 input tensor dO (gradient of O); same data type as Q, K and V;
                 same shape as Q
-    fake_dtype : constants.DType
+    fake_dtype : DType
                 data type of Q, K and V - in case of high precision, fake dtype in case of FP8;
                 in torch.dtype
     aux_ctx_tensors : List[torch.Tensor]

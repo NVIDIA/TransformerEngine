@@ -25,7 +25,6 @@ from transformer_engine.pytorch import (
 )
 import transformer_engine.pytorch.cpp_extensions as tex
 from transformer_engine.pytorch.cpp_extensions.gemm import get_cublas_workspace_size_bytes
-from transformer_engine.pytorch import constants
 from transformer_engine.pytorch.module.base import fill_userbuffers_buffer_for_all_gather
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -474,7 +473,7 @@ def _main(opts):
     if opts.quantization == "fp8":
         # Structure to maintain amax and scale/scale_inv information for the kernel and input
         num_gemms = 6 if ub_obj2 is not None else 3
-        fp8_dtype = constants.DType.kFloat8E4M3
+        fp8_dtype = te.DType.kFloat8E4M3
         fp8_scales = torch.ones(num_gemms, dtype=torch.float, device="cuda")
         fp8_amaxes = torch.zeros(num_gemms, dtype=torch.float, device="cuda")
 
@@ -517,7 +516,7 @@ def _main(opts):
                     fp8_scales[5].clone(), fp8_amaxes[5].clone(), fp8_dtype
                 )
     elif opts.quantization == "mxfp8":
-        fp8_dtype = constants.DType.kFloat8E4M3
+        fp8_dtype = te.DType.kFloat8E4M3
         inp_quantizer = MXFP8Quantizer(fp8_dtype, columnwise=False)
         ker_quantizer = MXFP8Quantizer(fp8_dtype)
         if opts.bulk_overlap and opts.comm_type == tex.CommOverlapType.RS:

@@ -575,9 +575,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
     py::object columnwise_scale =
         (columnwise_usage ? py::cast(columnwise_scale_list[i]) : py::none());
 
-    // Construct Python tensor. ``MakePythonDType`` returns the cached
-    // ``constants.DType`` IntEnum member, so ``_fp8_dtype`` ends up as that
-    // IntEnum without a per-call ``DType.cast`` normalization.
+    // Construct Python tensor.
     tensor_py_list.emplace_back(Float8BlockwiseQTensorClass(
         rowwise_data, rowwise_scale, columnwise_data, columnwise_scale, MakePythonDType(fp8_dtype),
         quantizer_py_list[i], is_2D_scaled));
@@ -683,9 +681,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
     py::object columnwise_scale =
         (columnwise_usage ? py::cast(columnwise_scale_list[i]) : py::none());
 
-    // Construct Python tensor. ``MakePythonDType`` returns the cached
-    // ``constants.DType`` IntEnum member, so ``_fp8_dtype`` ends up as that
-    // IntEnum without a per-call ``DType.cast`` normalization.
+    // Construct Python tensor.
     tensor_py_list.emplace_back(MXFP8TensorClass(rowwise_data, rowwise_scale, columnwise_data,
                                                  columnwise_scale, MakePythonDType(fp8_dtype),
                                                  quantizer_py_list[i], with_gemm_swizzled_scales));
@@ -874,8 +870,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
     py::object amax_rowwise = rowwise_usage ? py::cast(amax_rowwise_list[i]) : py::none();
     py::object amax_columnwise = columnwise_usage ? py::cast(amax_columnwise_list[i]) : py::none();
 
-    // Construct Python tensor. ``MakePythonDType`` returns the cached
-    // ``constants.DType`` IntEnum member.
+    // Construct Python tensor.
     tensor_py_list.emplace_back(NVFP4TensorClass(
         rowwise_data, rowwise_scale, columnwise_data, columnwise_scale, amax_rowwise,
         amax_columnwise, MakePythonDType(fp4_dtype), quantizer_py_list[i],

@@ -5,7 +5,6 @@
 
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch import MXFP8Quantizer
-from transformer_engine.pytorch import constants
 from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 
 import pytest
@@ -43,7 +42,7 @@ def check_mxfp8_quantize_swizzle_fusion(
     return_transpose: bool,
 ) -> None:
 
-    te_dtype = constants.DType.kFloat8E4M3
+    te_dtype = te.DType.kFloat8E4M3
 
     # Setup device and random seed
     device = "cuda"

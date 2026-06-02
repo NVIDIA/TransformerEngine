@@ -9,7 +9,6 @@ import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.constants import FP8BwdTensorIdx, FP8FwdTensorIdx
-from transformer_engine.pytorch import constants
 from transformer_engine.pytorch import (
     autocast,
     Linear,
@@ -101,10 +100,10 @@ def test_custom_recipe_sanity(module_type):
     # Single factory: map roles to quantizers
     def quantizer_factory(role):
         if role is None:
-            return Float8CurrentScalingQuantizer(constants.DType.kFloat8E4M3, device="cuda")
+            return Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda")
         if role.tensor_type == "grad_output":
-            return Float8CurrentScalingQuantizer(constants.DType.kFloat8E5M2, device="cuda")
-        return Float8CurrentScalingQuantizer(constants.DType.kFloat8E4M3, device="cuda")
+            return Float8CurrentScalingQuantizer(te.DType.kFloat8E5M2, device="cuda")
+        return Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda")
 
     custom_recipe = recipe.CustomRecipe(qfactory=quantizer_factory)
 
@@ -138,10 +137,10 @@ def test_custom_recipe_grouped_linear_sanity():
 
     def quantizer_factory(role):
         if role is None:
-            return Float8CurrentScalingQuantizer(constants.DType.kFloat8E4M3, device="cuda")
+            return Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda")
         if role.tensor_type == "grad_output":
-            return Float8CurrentScalingQuantizer(constants.DType.kFloat8E5M2, device="cuda")
-        return Float8CurrentScalingQuantizer(constants.DType.kFloat8E4M3, device="cuda")
+            return Float8CurrentScalingQuantizer(te.DType.kFloat8E5M2, device="cuda")
+        return Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda")
 
     custom_recipe = recipe.CustomRecipe(qfactory=quantizer_factory)
 
@@ -184,11 +183,11 @@ def test_custom_recipe_matches_current_scaling():
     ref_fwd_out = model_ref.quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM1_OUTPUT]
     ref_bwd_go = model_ref.quantizers["scaling_bwd"][FP8BwdTensorIdx.GRAD_OUTPUT1]
     ref_bwd_gi = model_ref.quantizers["scaling_bwd"][FP8BwdTensorIdx.GRAD_INPUT1]
-    assert ref_fwd_in.dtype == constants.DType.kFloat8E4M3
-    assert ref_fwd_w.dtype == constants.DType.kFloat8E4M3
-    assert ref_fwd_out.dtype == constants.DType.kFloat8E4M3
-    assert ref_bwd_go.dtype == constants.DType.kFloat8E5M2
-    assert ref_bwd_gi.dtype == constants.DType.kFloat8E5M2
+    assert ref_fwd_in.dtype == te.DType.kFloat8E4M3
+    assert ref_fwd_w.dtype == te.DType.kFloat8E4M3
+    assert ref_fwd_out.dtype == te.DType.kFloat8E4M3
+    assert ref_bwd_go.dtype == te.DType.kFloat8E5M2
+    assert ref_bwd_gi.dtype == te.DType.kFloat8E5M2
 
     # Stress dynamic range in grad_output
     scale = torch.ones(out_features, device="cuda", dtype=torch.float32)
@@ -200,10 +199,10 @@ def test_custom_recipe_matches_current_scaling():
     # Custom: single factory returning quantizers per role to match Float8CurrentScaling
     def quantizer_factory(role):
         if role is None:
-            return Float8CurrentScalingQuantizer(constants.DType.kFloat8E4M3, device="cuda")
+            return Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda")
         if role.tensor_type == "grad_output":
-            return Float8CurrentScalingQuantizer(constants.DType.kFloat8E5M2, device="cuda")
-        return Float8CurrentScalingQuantizer(constants.DType.kFloat8E4M3, device="cuda")
+            return Float8CurrentScalingQuantizer(te.DType.kFloat8E5M2, device="cuda")
+        return Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda")
 
     custom_recipe = recipe.CustomRecipe(qfactory=quantizer_factory)
 
@@ -215,11 +214,11 @@ def test_custom_recipe_matches_current_scaling():
     cus_fwd_out = model_custom.quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM1_OUTPUT]
     cus_bwd_go = model_custom.quantizers["scaling_bwd"][FP8BwdTensorIdx.GRAD_OUTPUT1]
     cus_bwd_gi = model_custom.quantizers["scaling_bwd"][FP8BwdTensorIdx.GRAD_INPUT1]
-    assert cus_fwd_in.dtype == constants.DType.kFloat8E4M3
-    assert cus_fwd_w.dtype == constants.DType.kFloat8E4M3
-    assert cus_fwd_out.dtype == constants.DType.kFloat8E4M3
-    assert cus_bwd_go.dtype == constants.DType.kFloat8E5M2
-    assert cus_bwd_gi.dtype == constants.DType.kFloat8E4M3  # role=None fallback
+    assert cus_fwd_in.dtype == te.DType.kFloat8E4M3
+    assert cus_fwd_w.dtype == te.DType.kFloat8E4M3
+    assert cus_fwd_out.dtype == te.DType.kFloat8E4M3
+    assert cus_bwd_go.dtype == te.DType.kFloat8E5M2
+    assert cus_bwd_gi.dtype == te.DType.kFloat8E4M3  # role=None fallback
 
     loss_custom = (out_custom.float() * scale.view(1, -1)).sum()
     loss_custom.backward()
@@ -257,10 +256,10 @@ def test_custom_recipe_ops_linear_2_1_layout():
 
     def quantizer_factory(role):
         if role is None:
-            return Float8CurrentScalingQuantizer(constants.DType.kFloat8E4M3, device="cuda")
+            return Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda")
         if role.tensor_type == "grad_output":
-            return Float8CurrentScalingQuantizer(constants.DType.kFloat8E5M2, device="cuda")
-        return Float8CurrentScalingQuantizer(constants.DType.kFloat8E4M3, device="cuda")
+            return Float8CurrentScalingQuantizer(te.DType.kFloat8E5M2, device="cuda")
+        return Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda")
 
     custom = recipe.CustomRecipe(qfactory=quantizer_factory)
 
@@ -302,7 +301,7 @@ def test_custom_recipe_factory_invocation_counts_and_cycling():
         if role is None:
             counts[None] += 1
             return Float8CurrentScalingQuantizer(
-                constants.DType.kFloat8E4M3, device=torch.device("cuda")
+                te.DType.kFloat8E4M3, device=torch.device("cuda")
             )
         assert isinstance(role, QuantizerRole), f"Expected QuantizerRole, got {type(role)}"
         assert role.module_type == "linear"
@@ -310,10 +309,10 @@ def test_custom_recipe_factory_invocation_counts_and_cycling():
             counts[role.tensor_type] += 1
         if role.tensor_type == "grad_output":
             return Float8CurrentScalingQuantizer(
-                constants.DType.kFloat8E5M2, device=torch.device("cuda")
+                te.DType.kFloat8E5M2, device=torch.device("cuda")
             )
         return Float8CurrentScalingQuantizer(
-            constants.DType.kFloat8E4M3, device=torch.device("cuda")
+            te.DType.kFloat8E4M3, device=torch.device("cuda")
         )
 
     custom = recipe.CustomRecipe(qfactory=quantizer_factory)
@@ -343,7 +342,7 @@ def test_factories_return_distinct_instances_and_buffers():
     def factory():
         scale = torch.ones(1, dtype=torch.float32, device="cuda")
         amax = torch.zeros(1, dtype=torch.float32, device="cuda")
-        return Float8Quantizer(scale=scale, amax=amax, fp8_dtype=constants.DType.kFloat8E4M3)
+        return Float8Quantizer(scale=scale, amax=amax, fp8_dtype=te.DType.kFloat8E4M3)
 
     q1 = factory()
     q2 = factory()
@@ -730,7 +729,7 @@ def test_grouped_linear_module_type_dispatch():
 
     def recording_factory(role):
         recorded_roles.append(role)
-        return Float8CurrentScalingQuantizer(constants.DType.kFloat8E4M3, device="cuda")
+        return Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda")
 
     custom_recipe = recipe.CustomRecipe(qfactory=recording_factory)
 
@@ -832,7 +831,7 @@ def test_custom_recipe_mixed_ds_and_stateless():
         # Only weight gets delayed scaling, rest get current scaling
         if role is not None and role.tensor_type == "weight":
             return DelayedScalingRequest(fp8_format=Format.HYBRID)
-        return Float8CurrentScalingQuantizer(constants.DType.kFloat8E4M3, device="cuda")
+        return Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda")
 
     custom_recipe = recipe.CustomRecipe(qfactory=mixed_factory)
 

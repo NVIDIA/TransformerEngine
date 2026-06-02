@@ -15,6 +15,7 @@ import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import MXFP8BlockScaling, Recipe
 from ..constants import MXFP8_BLOCK_SCALING_SIZE
+from transformer_engine.pytorch import DType
 from .. import constants
 from ..utils import devices_match, round_up_to_nearest_multiple
 from .storage.mxfp8_tensor_storage import MXFP8TensorStorage, _FromMXFP8Func
@@ -33,7 +34,7 @@ class MXFP8Quantizer(Quantizer):
 
     """
 
-    dtype: constants.DType
+    dtype: DType
 
     def __init__(
         self,
@@ -43,7 +44,7 @@ class MXFP8Quantizer(Quantizer):
         columnwise: bool = True,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
-        self.dtype = constants.DType.cast(fp8_dtype)
+        self.dtype = DType.cast(fp8_dtype)
 
     def copy(self) -> MXFP8Quantizer:
         """Create shallow copy"""
@@ -148,7 +149,7 @@ class MXFP8Quantizer(Quantizer):
         data: torch.Tensor,
         scale_inv: torch.Tensor,
         fake_dtype: torch.dtype,
-        fp8_dtype: constants.DType = constants.DType.kFloat8E4M3,
+        fp8_dtype: DType = DType.kFloat8E4M3,
     ) -> MXFP8Tensor:
         """Create a new MXFP8Tensor from data and scale_inv."""
         return MXFP8Tensor(
@@ -214,7 +215,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         rowwise_scale_inv: Optional[torch.Tensor],
         columnwise_data: Optional[torch.Tensor],
         columnwise_scale_inv: Optional[torch.Tensor],
-        fp8_dtype: constants.DType,
+        fp8_dtype: DType,
         quantizer: Optional[Quantizer],
         with_gemm_swizzled_scales: bool,
         **kwargs,
@@ -727,7 +728,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         rowwise_scale_inv: torch.Tensor,
         columnwise_data: torch.Tensor,
         columnwise_scale_inv: torch.Tensor,
-        fp8_dtype: constants.DType,
+        fp8_dtype: DType,
         dtype: torch.dtype,
         shape: torch.Size,
         quantizer: Optional[Quantizer] = None,
@@ -849,7 +850,7 @@ def _make_mxfp8_tensor_in_reduce_ex(
     rowwise_scale_inv: torch.Tensor,
     columnwise_data: torch.Tensor,
     columnwise_scale_inv: torch.Tensor,
-    fp8_dtype: constants.DType,
+    fp8_dtype: DType,
     dtype: torch.dtype,
     shape: torch.Size,
     quantizer: Optional[Quantizer] = None,

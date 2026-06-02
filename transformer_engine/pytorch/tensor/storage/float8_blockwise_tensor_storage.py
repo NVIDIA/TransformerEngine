@@ -14,6 +14,7 @@ import transformer_engine_torch as tex
 from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 
 from ...constants import TE_DType_To_Torch
+from transformer_engine.pytorch import DType
 from ... import constants
 
 from ...utils import _empty_tensor
@@ -31,7 +32,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
     _rowwise_data: Optional[torch.Tensor]
     _columnwise_data: Optional[torch.Tensor]
     _quantizer: Quantizer
-    _fp8_dtype: constants.DType
+    _fp8_dtype: DType
     _rowwise_scale_inv: Optional[torch.Tensor]
     _columnwise_scale_inv: Optional[torch.Tensor]
     _is_2D_scaled: bool
@@ -57,7 +58,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         instance._rowwise_data = rowwise_data
         instance._columnwise_data = columnwise_data
         instance._quantizer = quantizer.copy() if quantizer is not None else None
-        instance._fp8_dtype = constants.DType.cast(fp8_dtype)
+        instance._fp8_dtype = DType.cast(fp8_dtype)
         instance._rowwise_scale_inv = rowwise_scale_inv
         instance._columnwise_scale_inv = columnwise_scale_inv
         instance._is_2D_scaled = is_2D_scaled

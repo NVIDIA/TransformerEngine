@@ -15,7 +15,7 @@ from nvdlfw_inspect.utils import append_parent_docstring
 
 from transformer_engine.debug.features.api import TEConfigAPIMapper
 from transformer_engine.common.recipe import Format
-from transformer_engine.pytorch import constants
+from transformer_engine.pytorch import DType
 from transformer_engine.pytorch.tensor import Quantizer
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
@@ -43,10 +43,10 @@ def fake_quantize(tensor: torch.Tensor, fp8_format: str, out=None):
     if fp8_format in ["FP8E4M3", "FP8E5M2"]:
         if fp8_format == "FP8E4M3":
             fp8_max = Format.E4M3.value.max_fwd
-            fp8_dtype = constants.DType.kFloat8E4M3
+            fp8_dtype = DType.kFloat8E4M3
         else:
             fp8_max = Format.E5M2.value.max_fwd
-            fp8_dtype = constants.DType.kFloat8E5M2
+            fp8_dtype = DType.kFloat8E5M2
         amax = tensor.abs().max().float()
         one = torch.ones(1, device=tensor.device)
         scale = _default_sf_compute(amax, one, fp8_max, 0)

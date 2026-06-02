@@ -23,7 +23,6 @@ import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.constants import FP8FwdTensorIdx, FP8BwdTensorIdx
-from transformer_engine.pytorch import constants
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.ops.basic.basic_linear import BasicLinear
 from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer
@@ -95,7 +94,7 @@ if _opaque_available:
         opaque value type so torch.compile can treat it as a baked-in constant."""
 
         def __init__(self, tag: str):
-            super().__init__(fp8_dtype=constants.DType.kFloat8E4M3, device=torch.device("cuda"))
+            super().__init__(fp8_dtype=te.DType.kFloat8E4M3, device=torch.device("cuda"))
             self.tag = tag
 
         def __eq__(self, other):

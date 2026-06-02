@@ -20,7 +20,6 @@ from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
 from utils import ModelConfig, recipe_id, skip_unsupported_backward_override
-from transformer_engine.pytorch import constants
 
 # Check supported quantization schemes
 fp8_available, _ = FP8GlobalStateManager.is_fp8_available()
@@ -186,23 +185,23 @@ class Utils:
             return tensor
         elif recipe.delayed():
             quantizer = te.tensor.float8_tensor.Float8Quantizer(
-                fp8_dtype=constants.DType.kFloat8E4M3,
+                fp8_dtype=te.DType.kFloat8E4M3,
                 scale=torch.tensor([1.0], device="cuda"),
                 amax=torch.tensor([1.0], device="cuda"),
             )
             return quantizer(tensor)
         elif recipe.float8_current_scaling():
             quantizer = te.tensor.float8_tensor.Float8CurrentScalingQuantizer(
-                fp8_dtype=constants.DType.kFloat8E4M3, device="cuda"
+                fp8_dtype=te.DType.kFloat8E4M3, device="cuda"
             )
             return quantizer(tensor)
         elif recipe.float8_block_scaling():
             quantizer = te.tensor.float8_blockwise_tensor.Float8BlockQuantizer(
-                fp8_dtype=constants.DType.kFloat8E4M3, rowwise=True, columnwise=True
+                fp8_dtype=te.DType.kFloat8E4M3, rowwise=True, columnwise=True
             )
             return quantizer(tensor)
         elif recipe.mxfp8():
-            quantizer = te.tensor.mxfp8_tensor.MXFP8Quantizer(fp8_dtype=constants.DType.kFloat8E4M3)
+            quantizer = te.tensor.mxfp8_tensor.MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)
             return quantizer(tensor)
         elif recipe.nvfp4():
             qparams = recipe.fp4_quant_fwd_inp

@@ -6,7 +6,6 @@
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.pytorch import MXFP8Quantizer
-from transformer_engine.pytorch import constants
 
 import pytest
 import torch
@@ -140,7 +139,7 @@ def check_grouped_tensor_mxfp8_versus_reference(
     optimize_for_gemm: bool = False,
 ) -> None:
 
-    te_dtype = constants.DType.kFloat8E4M3
+    te_dtype = te.DType.kFloat8E4M3
 
     split_section_tensor = torch.tensor(split_sections, dtype=torch.int64, device="cuda")
 
@@ -237,7 +236,7 @@ def check_grouped_tensor_mxfp8_with_paged_stashing(
     optimize_for_gemm: bool = False,
 ) -> None:
 
-    te_dtype = constants.DType.kFloat8E4M3
+    te_dtype = te.DType.kFloat8E4M3
 
     assert valid_M is not None, "valid_M must be provided when with_paged_stashing is True"
     assert valid_M < M, "valid_M must be less than M when with_paged_stashing is True"

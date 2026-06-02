@@ -35,7 +35,7 @@ from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import Floa
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
 from transformer_engine.pytorch.constants import AttnMaskTypes, AttnTypes, dist_group_type
-from transformer_engine.pytorch import constants
+from transformer_engine.pytorch import DType
 from transformer_engine.pytorch.distributed import (
     get_distributed_world_size,
     checkpoint,
@@ -1228,11 +1228,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                 forward_dtype = get_fp8_te_dtype(self.fp8_meta["recipe"], fprop_tensor=True)
                 backward_dtype = get_fp8_te_dtype(self.fp8_meta["recipe"], fprop_tensor=False)
                 assert forward_dtype in [
-                    constants.DType.kFloat8E4M3,
-                    constants.DType.kFloat8E5M2,
+                    DType.kFloat8E4M3,
+                    DType.kFloat8E5M2,
                 ] and backward_dtype in [
-                    constants.DType.kFloat8E4M3,
-                    constants.DType.kFloat8E5M2,
+                    DType.kFloat8E4M3,
+                    DType.kFloat8E5M2,
                 ], """DotProductAttention only supports "E4M3" and "E5M2" FP8 data types."""
             else:
                 fp8_output = False

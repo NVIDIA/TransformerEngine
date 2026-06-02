@@ -17,6 +17,7 @@ assert torch_version() >= (2, 1), f"Minimum torch version 2.1 required. Found {t
 
 load_framework_extension("torch")
 from transformer_engine.pytorch import constants
+from transformer_engine.pytorch.constants import DType
 from transformer_engine.pytorch.module import LayerNormLinear
 from transformer_engine.pytorch.module import Linear
 from transformer_engine.pytorch.module import LayerNormMLP
@@ -134,7 +135,7 @@ try:
             NVFP4Quantizer,
             Float8BlockQuantizer,
             # Python IntEnum used as Quantizer.dtype.
-            constants.DType,
+            DType,
             # pybind11 enum used as Quantizer.dtype.
             # Kept for backward compatibility.
             tex.DType,

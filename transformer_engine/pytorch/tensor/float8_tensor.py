@@ -20,6 +20,7 @@ from .storage.float8_tensor_storage import Float8TensorStorage, _FromFloat8Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ._quantization_helpers import _IdentityFunc
 from ..constants import dist_group_type
+from transformer_engine.pytorch import DType
 from .. import constants
 
 aten = torch.ops.aten
@@ -54,7 +55,7 @@ class Float8Quantizer(Quantizer):
     """Max-abs value from last FP8 cast"""
     amax: torch.Tensor
     """FP8 datatype"""
-    dtype: constants.DType
+    dtype: DType
 
     def __init__(
         self,
@@ -68,7 +69,7 @@ class Float8Quantizer(Quantizer):
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.scale = scale
         self.amax = amax
-        self.dtype = constants.DType.cast(fp8_dtype)
+        self.dtype = DType.cast(fp8_dtype)
 
     def copy(self) -> Float8Quantizer:
         """Create shallow copy"""
@@ -205,7 +206,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
     """
 
     """FP8 datatype"""
-    dtype: constants.DType
+    dtype: DType
     """amax reduction options"""
     with_amax_reduction: bool
     amax_reduction_group: Optional[dist_group_type]
@@ -237,7 +238,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
                 stacklevel=2,
             )
         del device, use_existing_amax, scale, amax  # Kept for backward compatibility
-        self.dtype = constants.DType.cast(fp8_dtype)
+        self.dtype = DType.cast(fp8_dtype)
         self.with_amax_reduction = with_amax_reduction
         self.amax_reduction_group = amax_reduction_group
         self.force_pow_2_scales = force_pow_2_scales
@@ -922,7 +923,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
     def _make_in_reduce_ex(
         cls,
         data: torch.Tensor,
-        fp8_dtype: constants.DType,
+        fp8_dtype: DType,
         fp8_scale_inv: torch.Tensor,
         dtype: torch.dtype,
         shape: torch.Size,
@@ -1005,7 +1006,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
 
 def _make_float8_tensor_in_reduce_ex(
     data: torch.Tensor,
-    fp8_dtype: constants.DType,
+    fp8_dtype: DType,
     fp8_scale_inv: torch.Tensor,
     dtype: torch.dtype,
     shape: torch.Size,

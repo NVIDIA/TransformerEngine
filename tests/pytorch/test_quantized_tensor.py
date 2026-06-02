@@ -25,7 +25,6 @@ from transformer_engine.pytorch import (
 )
 
 from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
-from transformer_engine.pytorch import constants
 
 from references.ref_per_tensor_cs import ref_per_tensor_cs_cast
 from utils import assert_close
@@ -33,12 +32,12 @@ from utils import assert_close
 # PyTorch tensor dtypes
 _dtypes: List[torch.dtype] = [torch.float32, torch.float16, torch.bfloat16]
 # TE FP8 dtypes
-_fp8_dtypes: List[constants.DType] = [constants.DType.kFloat8E4M3, constants.DType.kFloat8E5M2]
+_fp8_dtypes: List[te.DType] = [te.DType.kFloat8E4M3, te.DType.kFloat8E5M2]
 
 # Numerical tolerances with FP8 types
-_tols: Dict[constants.DType, Dict[str, float]] = {
-    constants.DType.kFloat8E4M3: dict(rtol=0.125, atol=0.0675),  # epsilon = 0.0625
-    constants.DType.kFloat8E5M2: dict(rtol=0.25, atol=0.125),  # epsilon = 0.125
+_tols: Dict[te.DType, Dict[str, float]] = {
+    te.DType.kFloat8E4M3: dict(rtol=0.125, atol=0.0675),  # epsilon = 0.0625
+    te.DType.kFloat8E5M2: dict(rtol=0.25, atol=0.125),  # epsilon = 0.125
 }
 
 
@@ -76,7 +75,7 @@ if nvfp4_available:
 # delayed scaling
 def to_float8(
     tensor: torch.Tensor,
-    fp8_dtype: constants.DType = constants.DType.kFloat8E4M3,
+    fp8_dtype: te.DType = te.DType.kFloat8E4M3,
     scale: float = 1.0,
 ) -> Float8Tensor:
     """Cast tensor to FP8"""
@@ -91,7 +90,7 @@ def to_float8(
 # current scaling
 def to_float8_CS(
     tensor: torch.Tensor,
-    fp8_dtype: constants.DType = constants.DType.kFloat8E4M3,
+    fp8_dtype: te.DType = te.DType.kFloat8E4M3,
     return_transpose: bool = False,
     force_pow_2_scales: bool = False,
     amax_epsilon: float = 0.0,
@@ -144,18 +143,18 @@ def make_reference_and_test_tensors(
         quantizer = Float8Quantizer(
             scale=torch.ones(1, dtype=torch.float32, device=test_device).squeeze(),
             amax=torch.zeros(1, dtype=torch.float32, device=test_device),
-            fp8_dtype=constants.DType.kFloat8E4M3,
+            fp8_dtype=te.DType.kFloat8E4M3,
         )
         test = quantizer(test)
     elif quantization == "fp8_current_scaling":
         quantizer = Float8CurrentScalingQuantizer(
-            fp8_dtype=constants.DType.kFloat8E4M3,
+            fp8_dtype=te.DType.kFloat8E4M3,
             device=test_device,
         )
         test = quantizer(test)
     elif quantization == "fp8_blockwise":
         quantizer = Float8BlockQuantizer(
-            fp8_dtype=constants.DType.kFloat8E4M3,
+            fp8_dtype=te.DType.kFloat8E4M3,
             rowwise=True,
             columnwise=True,
             force_pow_2_scales=True,
@@ -164,7 +163,7 @@ def make_reference_and_test_tensors(
         )
         test = quantizer(test)
     elif quantization == "mxfp8":
-        test = MXFP8Quantizer(fp8_dtype=constants.DType.kFloat8E4M3)(test)
+        test = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)(test)
     elif quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
         row_scaled_nvfp4 = quantization == "nvfp4_row_scaled"
         test = NVFP4Quantizer(
@@ -201,7 +200,7 @@ class TestFloat8Tensor:
     def test_constructor(
         self,
         dims: DimsType = 1,
-        fp8_dtype: constants.DType = constants.DType.kFloat8E4M3,
+        fp8_dtype: te.DType = te.DType.kFloat8E4M3,
         scale_inv: float = 0.375,
         dtype: torch.dtype = torch.float32,
     ) -> None:
@@ -220,7 +219,7 @@ class TestFloat8Tensor:
 
     def _test_quantize_dequantize(
         self,
-        fp8_dtype: constants.DType = constants.DType.kFloat8E4M3,
+        fp8_dtype: te.DType = te.DType.kFloat8E4M3,
         scale: float = 3.5,
         dtype: torch.dtype = torch.float32,
         dims: DimsType = 23,
@@ -245,7 +244,7 @@ class TestFloat8Tensor:
     @pytest.mark.parametrize("dtype", _dtypes)
     def test_quantize_dequantize_dtypes(
         self,
-        fp8_dtype: constants.DType,
+        fp8_dtype: te.DType,
         dtype: torch.dtype,
     ) -> None:
         self._test_quantize_dequantize(fp8_dtype=fp8_dtype, dtype=dtype)
@@ -262,7 +261,7 @@ class TestFloat8Tensor:
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("noop", [True, False])
     def test_quantize_dequantize_noop(
-        self, fp8_dtype: constants.DType, dtype: torch.dtype, noop: bool
+        self, fp8_dtype: te.DType, dtype: torch.dtype, noop: bool
     ) -> None:
         noop_tensor = torch.zeros(1, dtype=torch.float32, device="cuda")
         if noop:
@@ -287,7 +286,7 @@ class TestFloat8Tensor:
     def test_basic_ops(
         self,
         dims: DimsType = 23,
-        fp8_dtype: constants.DType = constants.DType.kFloat8E4M3,
+        fp8_dtype: te.DType = te.DType.kFloat8E4M3,
         scale: float = 3.5,
         dtype: torch.dtype = torch.float32,
     ) -> None:
@@ -323,7 +322,7 @@ class TestFloat8Tensor:
     def test_chunk_op(
         self,
         dims: DimsType,
-        fp8_dtype: constants.DType = constants.DType.kFloat8E4M3,
+        fp8_dtype: te.DType = te.DType.kFloat8E4M3,
         scale: float = 3.5,
         dtype: torch.dtype = torch.float32,
     ) -> None:
@@ -352,7 +351,7 @@ class TestFloat8Tensor:
     def test_inplace_ops(
         self,
         dims: DimsType = 23,
-        fp8_dtype: constants.DType = constants.DType.kFloat8E4M3,
+        fp8_dtype: te.DType = te.DType.kFloat8E4M3,
         scale: float = 3.5,
         dtype: torch.dtype = torch.float32,
     ) -> None:
@@ -390,7 +389,7 @@ class TestFloat8Tensor:
     def test_serialization(
         self,
         dims: DimsType = [2, 3, 5],
-        fp8_dtype: constants.DType = constants.DType.kFloat8E4M3,
+        fp8_dtype: te.DType = te.DType.kFloat8E4M3,
         scale: float = 0.5,
         dtype: torch.dtype = torch.float32,
     ):
@@ -490,7 +489,7 @@ class TestCurrentScalingFloat8Tensor:
     @pytest.mark.parametrize("amax_epsilon", [0.0, 1e-6], ids=str)
     def test_quantize(
         self,
-        fp8_dtype: constants.DType,
+        fp8_dtype: te.DType,
         dtype: torch.dtype,
         dims: DimsType,
         return_transpose: bool,
@@ -532,11 +531,11 @@ class TestCurrentScalingFloat8Tensor:
                 x_fp8._transpose, x_fp8_t_ref.view(torch.uint8), atol=0.0, rtol=0.0
             )
 
-    @pytest.mark.parametrize("fp8_dtype", [constants.DType.kFloat8E4M3], ids=str)
+    @pytest.mark.parametrize("fp8_dtype", [te.DType.kFloat8E4M3], ids=str)
     @pytest.mark.parametrize("dtype", [torch.bfloat16], ids=str)
     @pytest.mark.parametrize("dims", [[], 1, 311, [7, 11], [7, 5, 3], [2, 3, 5, 3]])
     def test_quantize_dequantize(
-        self, fp8_dtype: constants.DType, dtype: torch.dtype, dims: DimsType
+        self, fp8_dtype: te.DType, dtype: torch.dtype, dims: DimsType
     ) -> None:
         """Check numerical error when casting to FP8 and back"""
 
@@ -778,11 +777,11 @@ class TestQuantizedTensor:
             quantizer = Float8Quantizer(
                 scale=torch.ones(1, dtype=torch.float32, device=device).squeeze(),
                 amax=torch.zeros(1, dtype=torch.float32, device=device),
-                fp8_dtype=constants.DType.kFloat8E4M3,
+                fp8_dtype=te.DType.kFloat8E4M3,
             )
         elif quantization == "fp8_blockwise":
             quantizer = Float8BlockQuantizer(
-                fp8_dtype=constants.DType.kFloat8E4M3,
+                fp8_dtype=te.DType.kFloat8E4M3,
                 rowwise=True,
                 columnwise=True,
                 force_pow_2_scales=True,
@@ -790,7 +789,7 @@ class TestQuantizedTensor:
                 block_scaling_dim=1,
             )
         elif quantization == "mxfp8":
-            quantizer = MXFP8Quantizer(fp8_dtype=constants.DType.kFloat8E4M3)
+            quantizer = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)
         elif quantization in ("nvfp4", "nvfp4_2d", "nvfp4_row_scaled", "nvfp4_4over6"):
             row_scaled_nvfp4 = quantization == "nvfp4_row_scaled"
             quantizer = NVFP4Quantizer(
@@ -835,7 +834,7 @@ class TestMXFP8Tensor:
     @pytest.mark.parametrize("dims", [[128, 128], [256, 256], [128, 256]])
     def test_mxfp8_dequantize_columnwise_only(
         self,
-        fp8_dtype: constants.DType,
+        fp8_dtype: te.DType,
         dtype: torch.dtype,
         dims: DimsType,
     ) -> None:
@@ -876,7 +875,7 @@ class TestMXFP8Tensor:
     @pytest.mark.parametrize("dims", [[128, 128], [256, 256]])
     def test_mxfp8_dequantize_columnwise_only_quantized_separately(
         self,
-        fp8_dtype: constants.DType,
+        fp8_dtype: te.DType,
         dims: DimsType,
     ) -> None:
         """Check dequantization of MXFP8 tensor quantized with columnwise only"""

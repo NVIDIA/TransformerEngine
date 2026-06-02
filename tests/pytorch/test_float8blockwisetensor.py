@@ -17,17 +17,17 @@ from transformer_engine.pytorch import (
     get_device_compute_capability,
 )
 import transformer_engine_torch as tex
-from transformer_engine.pytorch import constants
+from transformer_engine.pytorch import DType
 
 # PyTorch tensor dtypes
 _dtypes: List[torch.dtype] = [torch.float32, torch.float16, torch.bfloat16]
 # TE FP8 dtypes
-_fp8_dtypes: List[constants.DType] = [constants.DType.kFloat8E4M3, constants.DType.kFloat8E5M2]
+_fp8_dtypes: List[DType] = [DType.kFloat8E4M3, DType.kFloat8E5M2]
 
 # Numerical tolerances with FP8 types
-_tols: Dict[constants.DType, Dict[str, float]] = {
-    constants.DType.kFloat8E4M3: dict(rtol=0.125, atol=0.08),
-    constants.DType.kFloat8E5M2: dict(rtol=0.25, atol=0.125),
+_tols: Dict[DType, Dict[str, float]] = {
+    DType.kFloat8E4M3: dict(rtol=0.125, atol=0.08),
+    DType.kFloat8E5M2: dict(rtol=0.25, atol=0.125),
 }
 
 
@@ -60,7 +60,7 @@ class TestFloat8BlockwiseTensor:
     def test_constructor(
         self,
         dims: DimsType = 1,
-        fp8_dtype: constants.DType = constants.DType.kFloat8E4M3,
+        fp8_dtype: DType = DType.kFloat8E4M3,
         dtype: torch.dtype = torch.float32,
         is_2D_scaled: bool = True,
     ) -> None:
@@ -141,7 +141,7 @@ class TestFloat8BlockwiseTensor:
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("block_scaling_dim", [1, 2])
     def test_quantize_dequantize_dtypes(
-        self, fp8_dtype: constants.DType, dtype: torch.dtype, block_scaling_dim: int
+        self, fp8_dtype: DType, dtype: torch.dtype, block_scaling_dim: int
     ) -> None:
         atol = _tols[fp8_dtype]["atol"]
         rtol = _tols[fp8_dtype]["rtol"]
@@ -157,7 +157,7 @@ class TestFloat8BlockwiseTensor:
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("block_scaling_dim", [1])
     def test_quantize_dequantize_columnwise_only(
-        self, fp8_dtype: constants.DType, dtype: torch.dtype, block_scaling_dim: int
+        self, fp8_dtype: DType, dtype: torch.dtype, block_scaling_dim: int
     ) -> None:
         atol = _tols[fp8_dtype]["atol"]
         rtol = _tols[fp8_dtype]["rtol"]
@@ -182,10 +182,10 @@ class TestFloat8BlockwiseTensor:
         block_scaling_dim: int,
         dq_columnwise: bool,
     ) -> None:
-        atol = _tols[constants.DType.kFloat8E4M3]["atol"]
-        rtol = _tols[constants.DType.kFloat8E4M3]["rtol"]
+        atol = _tols[DType.kFloat8E4M3]["atol"]
+        rtol = _tols[DType.kFloat8E4M3]["rtol"]
         quantizer = Float8BlockQuantizer(
-            fp8_dtype=constants.DType.kFloat8E4M3,
+            fp8_dtype=DType.kFloat8E4M3,
             rowwise=True,
             columnwise=dq_columnwise,
             block_scaling_dim=block_scaling_dim,
@@ -207,10 +207,10 @@ class TestFloat8BlockwiseTensor:
     def test_quantize_dequantize_compact_format(
         self, dims: DimsType, block_scaling_dim: int, dq_columnwise: bool
     ) -> None:
-        atol = _tols[constants.DType.kFloat8E4M3]["atol"]
-        rtol = _tols[constants.DType.kFloat8E4M3]["rtol"]
+        atol = _tols[DType.kFloat8E4M3]["atol"]
+        rtol = _tols[DType.kFloat8E4M3]["rtol"]
         quantizer = Float8BlockQuantizer(
-            fp8_dtype=constants.DType.kFloat8E4M3,
+            fp8_dtype=DType.kFloat8E4M3,
             rowwise=True,
             columnwise=dq_columnwise,
             block_scaling_dim=block_scaling_dim,
@@ -233,7 +233,7 @@ class TestFloat8BlockwiseTensor:
         self,
         dims: DimsType,
         block_scaling_dim: int,
-        fp8_dtype: constants.DType,
+        fp8_dtype: DType,
         dq_columnwise: bool,
     ) -> None:
         atol = _tols[fp8_dtype]["atol"]
@@ -262,7 +262,7 @@ class TestFloat8BlockwiseTensor:
         x_hp = torch.rand(_to_list(dims), dtype=dtype, device=device)
         y_hp = torch.rand(_to_list(dims), dtype=dtype, device=device)
 
-        fp8_dtype = constants.DType.kFloat8E4M3
+        fp8_dtype = DType.kFloat8E4M3
         quantizer = Float8BlockQuantizer(
             fp8_dtype=fp8_dtype,
             rowwise=True,
@@ -288,7 +288,7 @@ class TestFloat8BlockwiseTensor:
         dtype = torch.bfloat16
         x_hp = torch.rand(_to_list(dims), dtype=dtype, device=device)
         quantizer = Float8BlockQuantizer(
-            fp8_dtype=constants.DType.kFloat8E5M2,
+            fp8_dtype=DType.kFloat8E5M2,
             rowwise=True,
             columnwise=True,
             block_scaling_dim=block_scaling_dim,
@@ -321,12 +321,12 @@ class TestFloat8BlockwiseTensor:
         x_fp8_loaded_dequant = x_fp8_loaded.dequantize()
         torch.testing.assert_close(x_fp8_loaded_dequant, x_fp8_dequant)
 
-    @pytest.mark.parametrize("fp8_dtype", [constants.DType.kFloat8E4M3], ids=str)
+    @pytest.mark.parametrize("fp8_dtype", [DType.kFloat8E4M3], ids=str)
     @pytest.mark.parametrize("dtype", [torch.bfloat16], ids=str)
     @pytest.mark.parametrize("dims", [[256, 512], [250, 500]])
     @pytest.mark.parametrize("block_scaling_dim", [1, 2])
     def test_inplace_ops(
-        self, fp8_dtype: constants.DType, dtype: torch.dtype, dims: DimsType, block_scaling_dim: int
+        self, fp8_dtype: DType, dtype: torch.dtype, dims: DimsType, block_scaling_dim: int
     ) -> None:
         """Test in-place operations"""
         device = "cuda"
@@ -358,12 +358,12 @@ class TestFloat8BlockwiseTensor:
         x_fp8.mul_(y_fp8)
         torch.testing.assert_close(x_fp8.dequantize(), x_hp * y_hp, **_tols[fp8_dtype])
 
-    @pytest.mark.parametrize("fp8_dtype", [constants.DType.kFloat8E4M3], ids=str)
+    @pytest.mark.parametrize("fp8_dtype", [DType.kFloat8E4M3], ids=str)
     @pytest.mark.parametrize("dtype", [torch.bfloat16], ids=str)
     @pytest.mark.parametrize("dims", [[256, 512], [250, 500]])
     @pytest.mark.parametrize("block_scaling_dim", [1, 2])
     def test_out_of_place_ops(
-        self, fp8_dtype: constants.DType, dtype: torch.dtype, dims: DimsType, block_scaling_dim: int
+        self, fp8_dtype: DType, dtype: torch.dtype, dims: DimsType, block_scaling_dim: int
     ) -> None:
         """Test out-of-place operations"""
         device = "cuda"
@@ -394,12 +394,12 @@ class TestFloat8BlockwiseTensor:
         with pytest.raises(AssertionError):
             torch.testing.assert_close(x_fp8 + y_fp8, x_hp - y_hp, **_tols[fp8_dtype])
 
-    @pytest.mark.parametrize("fp8_dtype", [constants.DType.kFloat8E4M3], ids=str)
+    @pytest.mark.parametrize("fp8_dtype", [DType.kFloat8E4M3], ids=str)
     @pytest.mark.parametrize("dtype", [torch.bfloat16], ids=str)
     @pytest.mark.parametrize("dims", [[256, 512], [250, 500]])
     @pytest.mark.parametrize("block_scaling_dim", [1, 2])
     def test_view_same_shape(
-        self, fp8_dtype: constants.DType, dtype: torch.dtype, dims: DimsType, block_scaling_dim: int
+        self, fp8_dtype: DType, dtype: torch.dtype, dims: DimsType, block_scaling_dim: int
     ) -> None:
         """Test view operations that preserve tensor shape"""
         device = "cuda"
@@ -425,14 +425,14 @@ class TestFloat8BlockwiseTensor:
             torch.testing.assert_close(x_view.dequantize(), -x_hp, **_tols[fp8_dtype])
 
     @pytest.mark.parametrize(
-        "fp8_dtype", [constants.DType.kFloat8E4M3, constants.DType.kFloat8E5M2], ids=str
+        "fp8_dtype", [DType.kFloat8E4M3, DType.kFloat8E5M2], ids=str
     )
     @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32], ids=str)
     @pytest.mark.parametrize(
         "dims", [[16, 16, 512], [16, 16, 512, 16], [12, 7, 11], [13, 14, 16], [2, 3, 5]]
     )
     def test_view_and_reshape_1D(
-        self, fp8_dtype: constants.DType, dtype: torch.dtype, dims: List[int]
+        self, fp8_dtype: DType, dtype: torch.dtype, dims: List[int]
     ) -> None:
         """Test view operations that preserve tensor shape"""
         device = "cuda"
@@ -480,12 +480,12 @@ class TestFloat8BlockwiseTensor:
         assert is_bitwise_equal(x_fp8_reshape._rowwise_scale_inv, x_fp8._rowwise_scale_inv)
 
     @pytest.mark.parametrize(
-        "fp8_dtype", [constants.DType.kFloat8E4M3, constants.DType.kFloat8E5M2], ids=str
+        "fp8_dtype", [DType.kFloat8E4M3, DType.kFloat8E5M2], ids=str
     )
     @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32], ids=str)
     @pytest.mark.parametrize("dims", [[16, 16, 512, 16], [2, 512, 512, 128], [3, 13, 14, 16]])
     def test_view_and_reshape_2D(
-        self, fp8_dtype: constants.DType, dtype: torch.dtype, dims: List[int]
+        self, fp8_dtype: DType, dtype: torch.dtype, dims: List[int]
     ) -> None:
         """Test view operations that preserve tensor shape"""
         device = "cuda"
@@ -532,12 +532,12 @@ class TestFloat8BlockwiseTensor:
         assert is_bitwise_equal(x_fp8_reshape._rowwise_data, x_fp8._rowwise_data)
         assert is_bitwise_equal(x_fp8_reshape._rowwise_scale_inv, x_fp8._rowwise_scale_inv)
 
-    @pytest.mark.parametrize("fp8_dtype", [constants.DType.kFloat8E4M3], ids=str)
+    @pytest.mark.parametrize("fp8_dtype", [DType.kFloat8E4M3], ids=str)
     @pytest.mark.parametrize("dtype", [torch.bfloat16], ids=str)
     @pytest.mark.parametrize("dims", [[256, 512], [250, 500]])
     @pytest.mark.parametrize("block_scaling_dim", [1, 2])
     def test_reshape_same_shape(
-        self, fp8_dtype: constants.DType, dtype: torch.dtype, dims: DimsType, block_scaling_dim: int
+        self, fp8_dtype: DType, dtype: torch.dtype, dims: DimsType, block_scaling_dim: int
     ) -> None:
         """Test reshape operations that preserve tensor shape"""
         device = "cuda"
@@ -568,12 +568,12 @@ class TestFloat8BlockwiseTensor:
         with pytest.raises(AssertionError):
             torch.testing.assert_close(x_reshape.dequantize(), -x_hp, **_tols[fp8_dtype])
 
-    @pytest.mark.parametrize("fp8_dtype", [constants.DType.kFloat8E4M3], ids=str)
+    @pytest.mark.parametrize("fp8_dtype", [DType.kFloat8E4M3], ids=str)
     @pytest.mark.parametrize("dtype", [torch.bfloat16], ids=str)
     @pytest.mark.parametrize("dims", [[256, 512], [250, 500]])
     @pytest.mark.parametrize("block_scaling_dim", [1, 2])
     def test_clone_detach(
-        self, fp8_dtype: constants.DType, dtype: torch.dtype, dims: DimsType, block_scaling_dim: int
+        self, fp8_dtype: DType, dtype: torch.dtype, dims: DimsType, block_scaling_dim: int
     ) -> None:
         """Test clone and detach operations"""
         device = "cuda"

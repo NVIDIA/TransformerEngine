@@ -12,7 +12,7 @@ from collections import namedtuple
 import torch
 import torch.nn.functional as F
 from transformer_engine.common.recipe import Format
-from transformer_engine.pytorch import constants
+from transformer_engine.pytorch import DType
 
 
 class BlockwiseDynamicRangeStat(
@@ -142,8 +142,8 @@ def compute_fp8_delayed_scaling_overflows_num(tensor, quantized_tensor):
 
     # Map each supported FP8 dtype to its corresponding max forward value.
     dtype_to_max = {
-        constants.DType.kFloat8E4M3: Format.E4M3.value.max_fwd,
-        constants.DType.kFloat8E5M2: Format.E5M2.value.max_fwd,
+        DType.kFloat8E4M3: Format.E4M3.value.max_fwd,
+        DType.kFloat8E5M2: Format.E5M2.value.max_fwd,
     }
 
     if dtype not in dtype_to_max:

@@ -393,7 +393,7 @@ transformer_engine::DType getTransformerEngineFP8Type(bool e4m3_if_hybrid,
                                                       const std::string& fp8_recipe);
 
 /*! @brief Wrap a C++ ``transformer_engine::DType`` as the canonical Python
- *         ``transformer_engine.pytorch.constants.DType`` ``IntEnum`` member.
+ *         ``transformer_engine.pytorch.DType`` ``IntEnum`` member.
  *
  * The returned object is cached per enum value (one ``py::object`` per
  * ``DType``), so repeated calls avoid both re-importing the module and

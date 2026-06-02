@@ -19,7 +19,7 @@ import torch
 import transformer_engine
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch import InferenceParams, QuantizedTensor
-from transformer_engine.pytorch import constants
+from transformer_engine.pytorch import DType
 from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     get_attention_backend,
@@ -70,7 +70,7 @@ def str_to_dtype(dtype: str | torch.dtype) -> torch.dtype:
     return dtype
 
 
-def dtype_tols(dtype: torch.dtype | constants.DType) -> dict[str, float]:
+def dtype_tols(dtype: torch.dtype | DType) -> dict[str, float]:
     """Estimated numerical error for a datatype
 
     Based on tolerances for torch.testing.assert_close.
@@ -78,17 +78,17 @@ def dtype_tols(dtype: torch.dtype | constants.DType) -> dict[str, float]:
     """
 
     # Transformer Engine dtypes
-    if isinstance(dtype, constants.DType):
-        if dtype == constants.DType.kFloat4E2M1:
+    if isinstance(dtype, DType):
+        if dtype == DType.kFloat4E2M1:
             return dict(rtol=0.25, atol=0.125)  # epsilon = 0.25
         dtype = {
-            constants.DType.kByte: torch.uint8,
-            constants.DType.kInt32: torch.int32,
-            constants.DType.kFloat32: torch.float32,
-            constants.DType.kFloat16: torch.half,
-            constants.DType.kBFloat16: torch.bfloat16,
-            constants.DType.kFloat8E4M3: torch.float8_e4m3fn,
-            constants.DType.kFloat8E5M2: torch.float8_e5m2,
+            DType.kByte: torch.uint8,
+            DType.kInt32: torch.int32,
+            DType.kFloat32: torch.float32,
+            DType.kFloat16: torch.half,
+            DType.kBFloat16: torch.bfloat16,
+            DType.kFloat8E4M3: torch.float8_e4m3fn,
+            DType.kFloat8E5M2: torch.float8_e5m2,
         }[dtype]
 
     # PyTorch dtypes
@@ -117,9 +117,9 @@ def quantization_tols(name: str) -> dict[str, float]:
         "mxfp8",
         "mxfp8_block_scaling",
     ):
-        return dtype_tols(constants.DType.kFloat8E4M3)
+        return dtype_tols(DType.kFloat8E4M3)
     if name in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
-        return dtype_tols(constants.DType.kFloat4E2M1)
+        return dtype_tols(DType.kFloat4E2M1)
     raise ValueError(f"Unsupported quantization scheme ({name})")
 
 

@@ -1260,7 +1260,7 @@ def get_attention_backend(
     # Filter: cuDNN support
     fused_attention_backend = None
     if use_fused_attention:
-        # ``constants.DType`` is implicitly convertible to ``transformer_engine::DType``
+        # ``DType`` is implicitly convertible to ``transformer_engine::DType``
         # on the C++ side, so pass it straight to the pybind function.
         q_type = TE_DType[qkv_dtype]
         kv_type = q_type
