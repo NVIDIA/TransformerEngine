@@ -63,8 +63,8 @@ class DType(enum.IntEnum):
 # Fail fast at import time if a new enumerator is added
 # on the C++ side without being mirrored above.
 assert {m.name for m in DType} == set(tex.DType.__members__), (
-    "DType is out of sync with transformer_engine_torch.DType; "
-    "add the new pybind enumerator to DType in constants.py."
+    "DType in python is out of sync with transformer_engine_torch.DType; "
+    "defined in C++ side. Please make sure TE C++ and python are in sync."
 )
 
 
@@ -85,15 +85,7 @@ TE_DType = {
 
 # Map ``DType -> torch.dtype`` for resolving cuda extension types to
 # torch.
-TE_DType_To_Torch = {
-    DType.kByte: torch.uint8,
-    DType.kFloat8E4M3: torch.float8_e4m3fn,
-    DType.kFloat8E5M2: torch.float8_e5m2,
-    DType.kInt32: torch.int32,
-    DType.kFloat32: torch.float32,
-    DType.kFloat16: torch.half,
-    DType.kBFloat16: torch.bfloat16,
-}
+TE_DType_To_Torch = {value: key for key, value in TE_DType.items()}
 
 # Cache enum -> int conversions to avoid repeated PyObject lookups.
 FP8FwdTensorIdx = SimpleNamespace(
