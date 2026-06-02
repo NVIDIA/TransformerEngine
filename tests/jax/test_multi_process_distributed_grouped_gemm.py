@@ -97,7 +97,6 @@ def test_grouped_gemm_fp8_allgather(data_shapes, kernel_fsdp_axis):
                 n_groups,
                 bias=b,
                 quantizer_set=quantizer_set,
-                kernel_fsdp_info=(MESH_AXIS_NAME, kernel_fsdp_axis),
             )
             output = output.reshape(*x.shape[:-1], -1)
             return output
@@ -221,7 +220,6 @@ def run_grouped_dense_mxfp8_ep_fsdp_outside_shard_map():
                     group_sizes,
                     contracting_dims=((1,), (1,)),
                     quantizer_set=quantizer_set,
-                    kernel_fsdp_info=(FSDP_AXIS_NAME, 1),
                 )
 
             out, vjp_fn = jax.vjp(apply, x, w)

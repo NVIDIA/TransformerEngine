@@ -14,11 +14,9 @@ from functools import partial
 import warnings
 import jax
 import jax.numpy as jnp
-from jax.sharding import PartitionSpec
 
 from . import cpp_extensions as tex
 from .cpp_extensions.amax import AmaxScope
-from .sharding import global_mesh_resource, get_mesh_axis_size, with_sharding_constraint
 from .quantize import (
     ScaledTensor,
     QuantizerSet,
@@ -26,48 +24,6 @@ from .quantize import (
     with_sharding_constraint_by_logical_axes,
     TensorUsage,
 )
-
-
-def _all_gather_kernel(kernel, mesh_axis, axis_idx):
-    assert mesh_axis is not None
-    assert 0 < axis_idx < len(kernel.shape)
-
-    # TODO(Ming Hunag): Add a condition branch for with/without shmap.
-    kernel_shape = kernel.shape
-    kernel_whole_shape = (*kernel_shape[:axis_idx], -1, *kernel_shape[axis_idx + 1 :])
-    global_kernel = jax.lax.all_gather(kernel, mesh_axis, axis=axis_idx)
-    global_kernel = global_kernel.reshape(*kernel_whole_shape)
-    return global_kernel
-
-
-def _psum_scatter_kernel(kernel, scattered_kernel_shape, mesh_axis, axis_idx):
-    assert mesh_axis is not None
-    assert 0 < axis_idx < len(scattered_kernel_shape)
-
-    # TODO(Ming Hunag): Add a condition branch for with/without shmap.
-    kernel = kernel.reshape(
-        *scattered_kernel_shape[:axis_idx],
-        -1,
-        scattered_kernel_shape[axis_idx],
-        *scattered_kernel_shape[axis_idx + 1 :],
-    )
-    kernel = jax.lax.psum_scatter(kernel, mesh_axis, scatter_dimension=axis_idx)
-    kernel = kernel.reshape(scattered_kernel_shape)
-    return kernel
-
-
-def _is_manual_mesh_axis(mesh_axis):
-    return mesh_axis is not None and mesh_axis in jax.sharding.get_abstract_mesh().manual_axes
-
-
-def _kernel_non_contracting_axis_to_bias_axis(kernel_axis_idx, kernel_contracting_dims):
-    if kernel_axis_idx in kernel_contracting_dims:
-        return None
-    bias_axis_idx = 1
-    for dim in range(1, kernel_axis_idx):
-        if dim not in kernel_contracting_dims:
-            bias_axis_idx += 1
-    return bias_axis_idx
 
 
 def dense(
@@ -341,7 +297,6 @@ def grouped_dense(
     preferred_element_type: jnp.dtype = None,
     group_offset: jnp.array = None,
     quantizer_set: QuantizerSet = noop_quantizer_set,
-    kernel_fsdp_info: Tuple[str, int] = (None, -1),
 ):
     """
     Perform grouped dense (linear) layer transformation with optional quantization.
@@ -357,10 +312,6 @@ def grouped_dense(
         preferred_element_type: Preferred data type for the output tensor
         group_offset: 1D array containing offsets for each group (not yet implemented)
         quantizer_set: Set of quantizers for FP8 quantization of the input and output
-        kernel_fsdp_info: A tuple containing FSDP-related information for a weight matrix
-                          represented in the format (str, int). The first element is the
-                          FSDP mesh axis, and the second element is the dimension along
-                          which the weight is sharded.
 
     Returns:
         A jnp.ndarray containing the result of the grouped linear operation
@@ -387,14 +338,13 @@ def grouped_dense(
         preferred_element_type,
         group_offset,
         quantizer_set,
-        kernel_fsdp_info,
     )
     if restore_leading_ep_axis:
         output = output.reshape(1, *output.shape)
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(3, 5, 6, 7, 9))
+@partial(jax.custom_vjp, nondiff_argnums=(3, 5, 6, 7))
 def _grouped_dense(
     x,
     kernel,
@@ -405,7 +355,6 @@ def _grouped_dense(
     preferred_element_type,
     group_offset,
     quantizer_set,
-    kernel_fsdp_info,
 ):
     output, _ = _grouped_dense_fwd_rule(
         x,
@@ -417,7 +366,6 @@ def _grouped_dense(
         preferred_element_type,
         group_offset,
         quantizer_set,
-        kernel_fsdp_info,
     )
     return output
 
@@ -432,39 +380,10 @@ def _grouped_dense_fwd_rule(
     preferred_element_type,
     group_offset,
     quantizer_set,
-    kernel_fsdp_info,
 ):
     use_bias = bias is not None
 
     x_contracting_dims, k_contracting_dims = contracting_dims
-    local_kernel_shape = kernel.shape
-    kernel_was_gathered = False
-    bias_shape = bias.shape if use_bias else None
-    bias_fsdp_axis_idx = -1
-    bias_was_gathered = False
-
-    kernel_fsdp_mesh_axis, kernel_fsdp_axis_idx = kernel_fsdp_info
-    if (
-        _is_manual_mesh_axis(kernel_fsdp_mesh_axis)
-        and 0 < kernel_fsdp_axis_idx < kernel.ndim
-    ):
-        kernel = _all_gather_kernel(kernel, kernel_fsdp_mesh_axis, kernel_fsdp_axis_idx)
-        kernel_was_gathered = True
-
-        if use_bias and kernel_fsdp_axis_idx not in k_contracting_dims:
-            bias_fsdp_axis_idx = _kernel_non_contracting_axis_to_bias_axis(
-                kernel_fsdp_axis_idx, k_contracting_dims
-            )
-            mesh_axis_size = get_mesh_axis_size(kernel_fsdp_mesh_axis)
-            if (
-                bias_fsdp_axis_idx is not None
-                and 0 < bias_fsdp_axis_idx < bias.ndim
-                and mesh_axis_size > 1
-                and bias.shape[bias_fsdp_axis_idx] * mesh_axis_size
-                == kernel.shape[kernel_fsdp_axis_idx]
-            ):
-                bias = _all_gather_kernel(bias, kernel_fsdp_mesh_axis, bias_fsdp_axis_idx)
-                bias_was_gathered = True
 
     flatten_axis_x = -len(x_contracting_dims)
     flatten_axis_k = len(k_contracting_dims) - len(kernel.shape) + 1  # +1 for G axis
@@ -521,23 +440,17 @@ def _grouped_dense_fwd_rule(
             else ctx_kernel
         ),
         x.shape,
-        local_kernel_shape,
+        kernel.shape,
         use_bias,
         quantizer_set,
         flatten_axis_k,
-        kernel_was_gathered,
-        bias_shape,
-        bias_fsdp_axis_idx,
-        bias_was_gathered,
     )
     return output, ctx
 
 
 def _grouped_dense_bwd_rule(
-    contracting_dims, precision, preferred_element_type, group_offset, kernel_fsdp_info, ctx, grad
+    contracting_dims, precision, preferred_element_type, group_offset, ctx, grad
 ):
-    kernel_fsdp_mesh_axis, kernel_fsdp_axis_idx = kernel_fsdp_info
-
     fwd_x_contracting_dims, fwd_k_contracting_dims = contracting_dims
 
     (
@@ -549,10 +462,6 @@ def _grouped_dense_bwd_rule(
         use_bias,
         quantizer_set,
         flatten_axis_k,
-        kernel_was_gathered,
-        bias_shape,
-        bias_fsdp_axis_idx,
-        bias_was_gathered,
     ) = ctx
 
     # The 1 in range is for excluding the group dimension (shall we use the hardcoded results below?)
@@ -590,14 +499,6 @@ def _grouped_dense_bwd_rule(
         preferred_element_type=preferred_element_type,
         group_offset=group_offset,
     )
-    if _is_manual_mesh_axis(kernel_fsdp_mesh_axis) and not kernel_was_gathered:
-        if kernel_fsdp_axis_idx in fwd_k_contracting_dims:
-            dgrad_axis_idx = fwd_x_contracting_dims[
-                fwd_k_contracting_dims.index(kernel_fsdp_axis_idx)
-            ]
-            dgrad = _all_gather_kernel(dgrad, kernel_fsdp_mesh_axis, dgrad_axis_idx)
-        else:
-            dgrad = jax.lax.psum(dgrad, kernel_fsdp_mesh_axis)
 
     wgrad = tex.grouped_gemm(
         wgrad_x_T,
@@ -607,40 +508,9 @@ def _grouped_dense_bwd_rule(
         preferred_element_type=preferred_element_type,
         group_offset=group_offset,
     )
-    if _is_manual_mesh_axis(kernel_fsdp_mesh_axis):
-        if kernel_was_gathered:
-            wgrad = _psum_scatter_kernel(
-                wgrad, kernel_shape, kernel_fsdp_mesh_axis, kernel_fsdp_axis_idx
-            )
-        elif kernel_fsdp_axis_idx in fwd_k_contracting_dims:
-            wgrad = _psum_scatter_kernel(
-                wgrad, kernel_shape, kernel_fsdp_mesh_axis, kernel_fsdp_axis_idx
-            )
-        else:
-            wgrad = jax.lax.psum(wgrad, kernel_fsdp_mesh_axis)
-    if kernel_fsdp_mesh_axis is not None:
-        wgrad_spec = [None] * len(kernel_shape)
-        ep_resource = None
-        try:
-            ep_resource = global_mesh_resource().ep_resource
-        except AssertionError:
-            pass
-        if len(wgrad_spec) > 0:
-            wgrad_spec[0] = ep_resource
-        if 0 <= kernel_fsdp_axis_idx < len(wgrad_spec):
-            wgrad_spec[kernel_fsdp_axis_idx] = kernel_fsdp_mesh_axis
-        wgrad = with_sharding_constraint(wgrad, PartitionSpec(*wgrad_spec))
 
     group_sizes_grad = None
     dbias = tex.grouped_dbias(grad, group_sizes) if use_bias else None
-    if (
-        dbias is not None
-        and _is_manual_mesh_axis(kernel_fsdp_mesh_axis)
-        and bias_was_gathered
-    ):
-        dbias = _psum_scatter_kernel(
-            dbias, bias_shape, kernel_fsdp_mesh_axis, bias_fsdp_axis_idx
-        )
 
     return dgrad, wgrad, group_sizes_grad, dbias, quantizer_set
 

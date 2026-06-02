@@ -81,7 +81,7 @@ def _contiguous_flat_input_spec(input_spec, flatten_axis):
     flatten_axis = _normalize_flatten_axis(flatten_axis, len(input_spec))
     if flatten_axis <= 0 or len(input_spec) == 0:
         return (None,) * len(input_spec)
-    return (input_spec[0], *((None,) * (len(input_spec) - 1)))
+    return (*input_spec[:flatten_axis], *((None,) * (len(input_spec) - flatten_axis)))
 
 
 def _filter_axis_spec(axis_spec, allowed_axes):

@@ -127,6 +127,30 @@ def test_grouped_quantize_mxfp8_colwise_specs_gather_hidden_axis():
     assert _normalize_spec(specs[4]) == ("expert",)
 
 
+def test_grouped_quantize_preserves_row_side_fsdp_for_kernel():
+    mesh = _mesh()
+    with global_shard_guard(MeshResource(fsdp_resource="fsdp", ep_resource="expert")):
+        _, _, out_shardings, arg_shardings = GroupedQuantizePrimitive.partition(
+            jnp.float8_e4m3fn,
+            ScalingMode.MXFP8_1D_SCALING.value,
+            QuantizeLayout.ROWWISE,
+            -1,
+            jnp.float8_e8m0fnu,
+            mesh,
+            (
+                _arg_info(mesh, (8, 128, 64), ("expert", "fsdp", None)),
+                _arg_info(mesh, (8,), ("expert",)),
+                _arg_info(mesh, (8,), ("expert",)),
+            ),
+            (),
+        )
+
+    assert tuple(arg_shardings[0].spec) == ("expert", "fsdp", None)
+    specs = tuple(tuple(sharding.spec) for sharding in out_shardings)
+    assert _normalize_spec(specs[0]) == (("expert", "fsdp"),)
+    assert _normalize_spec(specs[2]) == (("expert", "fsdp"),)
+
+
 def test_grouped_quantize_strips_unsupported_axes_and_gathers_hidden_axes():
     mesh = _mesh_with_dp_tp()
     with jax.set_mesh(mesh), global_shard_guard(
@@ -148,13 +172,13 @@ def test_grouped_quantize_strips_unsupported_axes_and_gathers_hidden_axes():
                 (),
             )
 
-    assert tuple(arg_shardings[0].spec) == ("expert", None, None)
+    assert tuple(arg_shardings[0].spec) == ("expert", "dp", None)
     assert tuple(arg_shardings[1].spec) == ("expert",)
     assert tuple(arg_shardings[2].spec) == ("expert",)
 
     out_specs = tuple(tuple(sharding.spec) for sharding in out_shardings)
-    assert _normalize_spec(out_specs[0]) == ("expert",)
-    assert _normalize_spec(out_specs[2]) == ("expert",)
+    assert _normalize_spec(out_specs[0]) == (("expert", "dp"),)
+    assert _normalize_spec(out_specs[2]) == (("expert", "dp"),)
     assert _normalize_spec(out_specs[4]) == ("expert",)
     for spec in (*out_specs, *(tuple(sharding.spec) for sharding in arg_shardings)):
         assert not _spec_contains_axis(spec, "tp")
@@ -455,7 +479,6 @@ def test_grouped_dense_mxfp8_ep_fsdp_outside_shard_map_single_process():
                     group_sizes,
                     contracting_dims=((1,), (1,)),
                     quantizer_set=quantizer_set,
-                    kernel_fsdp_info=("fsdp", 1),
                 )
 
             out, vjp_fn = jax.vjp(apply, x, w)
