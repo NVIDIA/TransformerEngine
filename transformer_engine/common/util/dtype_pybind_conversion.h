@@ -11,87 +11,93 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include <array>
-#include <typeinfo>
+#include <cstddef>
 
-namespace transformer_engine {
-namespace pybind_detail {
+namespace pybind11 {
+namespace detail {
 
-/*! @brief Per-value cache of ``tex.DType`` enum PyObject* objects keyed by enum value. */
-inline std::array<PyObject *, static_cast<size_t>(transformer_engine::DType::kNumTypes)> &
-cached_dtype_objects() {
-  static std::array<PyObject *, static_cast<size_t>(transformer_engine::DType::kNumTypes)> cache{};
-  return cache;
-}
-
-/*! @brief Construct a ``transformer_engine_torch.DType(value)`` object once.
- * Returns a new strong reference, or ``nullptr`` (with the Python error cleared)
- * on failure.
- */
-inline PyObject *construct_dtype_object(long value, PyTypeObject *type) {  // NOLINT(runtime/int)
-  PyObject *arg = PyLong_FromLong(value);
-  if (arg == nullptr) {
-    PyErr_Clear();
-    return nullptr;
-  }
-  PyObject *obj = PyObject_CallFunctionObjArgs(reinterpret_cast<PyObject *>(type), arg, nullptr);
-  Py_DECREF(arg);
-  if (obj == nullptr) {
-    PyErr_Clear();
-  }
-  return obj;
-}
-
-/*! @brief Implicit-conversion function registered on the pybind ``DType`` enum.
+/*! @brief Custom type caster for ``transformer_engine::DType``.
  *
- * Converts a Python ``transformer_engine.pytorch.DType`` object
- * into a cached ``transformer_engine_torch.DType`` enum object.
- * This conversion function is needed since tex pybind functions generally accept
- * transformer_engine_torch.DType. This implicit conversion allows user to pass
- * transformer_engine.pytorch.DType from python and C++ functions will implicitly convert to
- * transformer_engine_torch.DType.
+ * pybind exposes ``transformer_engine::DType`` as the ``transformer_engine_torch.DType``
+ * enum. C++ functions take ``transformer_engine::DType`` arguments, and from Python a
+ * caller may pass any of the following, all of which carry the same integer dtype tag:
+ *   - a ``transformer_engine_torch.DType`` (the pybind enum), or
+ *   - a ``transformer_engine.pytorch.DType`` (an ``IntEnum``; the canonical Python type), or
+ *   - a plain ``int``.
+ *
+ *
+ * NOTE: As a compile-time specialization this must be visible in every translation unit
+ * that converts ``transformer_engine::DType`` (it is pulled in via the PyTorch extension's
+ * ``common.h``). Otherwise different TUs would instantiate different casters for the same
+ * type, which is an ODR violation.
  */
-inline PyObject *cached_int_to_dtype(PyObject *src, PyTypeObject *type) {
-  // Only plain ints / IntEnum subclasses are handled here.
-  // src --> transformer_engine.pytorch.DType IntEnum object
-  // type --> transformer_engine_torch.DType PyTypeObject*
-  if (!PyLong_Check(src)) {
-    return nullptr;
-  }
-  const long value = PyLong_AsLong(src);  // NOLINT(runtime/int)
-  if (value == -1 && PyErr_Occurred()) {
-    PyErr_Clear();
-    return nullptr;
-  }
-  if (value < 0 ||
-      static_cast<size_t>(value) >= static_cast<size_t>(transformer_engine::DType::kNumTypes)) {
-    return nullptr;
-  }
-  // cached_dtype_object --> transformer_engine_torch.DType(value) PyObject*
-  PyObject *&cached_dtype_object = cached_dtype_objects()[static_cast<size_t>(value)];
-  if (cached_dtype_object == nullptr) {
-    cached_dtype_object = construct_dtype_object(value, type);
-    if (cached_dtype_object == nullptr) {
-      return nullptr;
+template <>
+struct type_caster<transformer_engine::DType> {
+ public:
+  PYBIND11_TYPE_CASTER(transformer_engine::DType, const_name("DType"));
+
+  bool load(handle src, bool convert) {
+    if (!src) {
+      return false;
     }
-  }
-  Py_INCREF(cached_dtype_object);
-  return cached_dtype_object;
-}
 
-/*! @brief Register the Python -> C++ ``DType`` implicit conversion.
- * Allows a Python object of type ``transformer_engine.pytorch.DType``
- * to be passed wherever a pybind-bound ``transformer_engine::DType`` argument is expected.
- * pybind-bound ``transformer_engine::DType`` argument is expected.
- * Must be called after the pybind ``DType`` enum has been registered.
- */
-inline void register_dtype_implicit_conversion() {
-  auto *tinfo = pybind11::detail::get_type_info(typeid(transformer_engine::DType));
-  if (tinfo != nullptr) {
-    tinfo->implicit_conversions.push_back(&cached_int_to_dtype);
-  }
-}
+    // plain ``int`` / ``IntEnum`` (including ``transformer_engine.pytorch.DType``,
+    // the canonical Python type). Cast it to the C++ enum value.
+    if (PyLong_Check(src.ptr())) {
+      const long tag = PyLong_AsLong(src.ptr());  // NOLINT(runtime/int)
+      if (tag == -1 && PyErr_Occurred()) {
+        PyErr_Clear();
+        return false;
+      }
+      if (tag < 0 ||
+          static_cast<size_t>(tag) >= static_cast<size_t>(transformer_engine::DType::kNumTypes)) {
+        return false;
+      }
+      value = static_cast<transformer_engine::DType>(tag);
+      return true;
+    }
 
-}  // namespace pybind_detail
-}  // namespace transformer_engine
+    // Actual ``transformer_engine_torch.DType`` enum instances (and anything else): defer to
+    // the standard caster, which reads the value out of the instance with no Python round-trip.
+    type_caster_base<transformer_engine::DType> base;
+    if (base.load(src, convert)) {
+      value = *static_cast<transformer_engine::DType *>(base);
+      return true;
+    }
+
+    return false;
+  }
+
+  static handle cast(transformer_engine::DType src, return_value_policy policy, handle parent) {
+    constexpr size_t num_dtypes = static_cast<size_t>(transformer_engine::DType::kNumTypes);
+    const size_t idx = static_cast<size_t>(src);
+    if (idx >= num_dtypes) {
+      // Out of range: let the standard caster raise the appropriate error.
+      return type_caster_base<transformer_engine::DType>::cast(src, policy, parent);
+    }
+
+    // Per-value cache of ``tex.DType`` objects. Enum values are immutable, so a single shared
+    // object per value is safe to hand back repeatedly.
+    static const std::array<PyObject *, num_dtypes> cache = [] {
+      std::array<PyObject *, num_dtypes> objects{};
+      for (size_t i = 0; i < num_dtypes; ++i) {
+        objects[i] = type_caster_base<transformer_engine::DType>::cast(
+                         static_cast<transformer_engine::DType>(i), return_value_policy::copy,
+                         handle())
+                         .ptr();
+      }
+      return objects;
+    }();
+    PyObject *cached = cache[idx];
+    if (cached == nullptr) {
+      return handle();
+    }
+    Py_INCREF(cached);
+    return handle(cached);
+  }
+};
+
+}  // namespace detail
+}  // namespace pybind11
 
 #endif  // TRANSFORMER_ENGINE_COMMON_UTIL_DTYPE_PYBIND_CONVERSION_H_

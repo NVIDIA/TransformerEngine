@@ -91,18 +91,20 @@ pybind11::object MakePythonDType(transformer_engine::DType dtype) {
   const size_t idx = static_cast<size_t>(dtype);
   NVTE_CHECK(idx < num_dtypes, "Invalid DType (", idx, ").");
 
-  // Cache the Python ``transformer_engine.pytorch.DType`` class object on first
-  // call. ``static`` initialization is thread-safe under C++11 and we always
-  // hold the GIL here.
-  static pybind11::object te_dtype_cls =
-      pybind11::module_::import("transformer_engine.pytorch").attr("DType");
-
-  // Per-value cache of constructed ``transformer_engine.pytorch.DType`` members. Filled lazily;
-  // each slot holds a strong reference for the lifetime of the process.
-  static std::array<pybind11::object, num_dtypes> cache{};
-  if (!cache[idx]) {
-    cache[idx] = te_dtype_cls(static_cast<int>(dtype));
-  }
+  // Cache one ``transformer_engine.pytorch.DType`` member per value, built once in a
+  // thread-safe C++11 "magic static" initializer.
+  static const std::array<pybind11::object, num_dtypes> cache = [] {
+    pybind11::object dtype_cls =
+        pybind11::module_::import("transformer_engine.pytorch").attr("DType");
+    std::array<pybind11::object, num_dtypes> members;
+    for (pybind11::handle member : dtype_cls) {
+      const size_t value = member.attr("value").cast<size_t>();
+      if (value < num_dtypes) {
+        members[value] = pybind11::reinterpret_borrow<pybind11::object>(member);
+      }
+    }
+    return members;
+  }();
   return cache[idx];
 }
 

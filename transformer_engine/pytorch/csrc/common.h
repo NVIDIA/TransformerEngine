@@ -54,6 +54,7 @@
 #include <vector>
 
 #include "c10/util/ArrayRef.h"
+#include "common/util/dtype_pybind_conversion.h"
 #include "common/util/logging.h"
 
 namespace transformer_engine::pytorch {

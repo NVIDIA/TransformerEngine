@@ -13,7 +13,6 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include "cuda_runtime.h"
-#include "dtype_pybind_conversion.h"
 
 #define NVTE_DECLARE_COMMON_PYBIND11_HANDLES(m)                                                    \
   pybind11::enum_<transformer_engine::DType>(m, "DType", pybind11::module_local())                 \
@@ -34,7 +33,6 @@
         return pybind11::make_tuple(pybind11::type::of(pybind11::cast(self)),                      \
                                     pybind11::make_tuple(static_cast<int>(self)));                 \
       });                                                                                          \
-  transformer_engine::pybind_detail::register_dtype_implicit_conversion();                         \
   pybind11::enum_<NVTE_Bias_Type>(m, "NVTE_Bias_Type", pybind11::module_local())                   \
       .value("NVTE_NO_BIAS", NVTE_Bias_Type::NVTE_NO_BIAS)                                         \
       .value("NVTE_PRE_SCALE_BIAS", NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS)                           \
