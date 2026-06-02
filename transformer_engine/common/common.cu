@@ -61,6 +61,41 @@ void update_tensor_scale_inv(Tensor *t, cudaStream_t stream) {
 namespace {
 
 constexpr size_t kThreadsPerBlock = 256;
+// Fixed small host-side launch arg capacity. Keep this private to common.cu so
+// callers pass normal pointer arrays and only the common implementation owns the
+// kernel packing constraint.
+enum { NVTE_MAX_MULTI_SPLITS_TO_OFFSETS = 8 };
+
+struct MultiSplitsToOffsetsArgs {
+  // Unused entries must stay null/zero because the struct is passed by value
+  // into the CUDA kernel with a fixed-capacity array.
+  const void *split_sizes = nullptr;
+  DType split_sizes_dtype = DType::kNumTypes;
+  void *split_sizes_cumsum = nullptr;
+  DType split_sizes_cumsum_dtype = DType::kNumTypes;
+  int64_t strides[NVTE_MAX_MULTI_SPLITS_TO_OFFSETS] = {};
+  void *split_offsets[NVTE_MAX_MULTI_SPLITS_TO_OFFSETS] = {};
+  DType split_offsets_dtype[NVTE_MAX_MULTI_SPLITS_TO_OFFSETS] = {};
+  size_t list_size = 0;
+};
+
+__device__ __forceinline__ int64_t load_split_size(const void *__restrict__ split_sizes,
+                                                   DType dtype, size_t idx) {
+  if (dtype == DType::kInt32) {
+    return static_cast<int64_t>(static_cast<const int32_t *>(split_sizes)[idx]);
+  }
+  return static_cast<const int64_t *>(split_sizes)[idx];
+}
+
+__device__ __forceinline__ void store_split_offset(void *__restrict__ split_offsets, DType dtype,
+                                                   size_t idx, int64_t value) {
+  if (dtype == DType::kInt32) {
+    static_cast<int32_t *>(split_offsets)[idx] = static_cast<int32_t>(value);
+    return;
+  }
+  static_cast<int64_t *>(split_offsets)[idx] = value;
+}
+
 template <typename TVectorized>
 __global__ void __launch_bounds__(kThreadsPerBlock)
     memset_kernel(void *__restrict__ ptr, int value, size_t size_in_bytes) {
@@ -129,6 +164,55 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   }
 }
 
+__global__ void __launch_bounds__(kThreadsPerBlock)
+    multi_splits_to_offsets_kernel(MultiSplitsToOffsetsArgs args, size_t num_tensors) {
+  __shared__ int64_t block_scan[kThreadsPerBlock];
+  __shared__ int64_t chunk_prefix;
+
+  const size_t tid = threadIdx.x;
+
+  if (tid == 0) {
+    chunk_prefix = 0;
+    for (size_t list_idx = 0; list_idx < args.list_size; ++list_idx) {
+      store_split_offset(args.split_offsets[list_idx], args.split_offsets_dtype[list_idx], 0, 0);
+    }
+  }
+  __syncthreads();
+
+  for (size_t chunk_start = 0; chunk_start < num_tensors; chunk_start += kThreadsPerBlock) {
+    const size_t idx = chunk_start + tid;
+
+    block_scan[tid] = 0;
+    if (idx < num_tensors) {
+      block_scan[tid] = load_split_size(args.split_sizes, args.split_sizes_dtype, idx);
+    }
+    __syncthreads();
+
+    // Inclusive scan in shared memory.
+    for (size_t offset = 1; offset < kThreadsPerBlock; offset <<= 1) {
+      const int64_t addend = (tid >= offset) ? block_scan[tid - offset] : 0;
+      __syncthreads();
+      block_scan[tid] += addend;
+      __syncthreads();
+    }
+
+    if (idx < num_tensors) {
+      const int64_t prefix = chunk_prefix + block_scan[tid];
+      store_split_offset(args.split_sizes_cumsum, args.split_sizes_cumsum_dtype, idx, prefix);
+      for (size_t list_idx = 0; list_idx < args.list_size; ++list_idx) {
+        store_split_offset(args.split_offsets[list_idx], args.split_offsets_dtype[list_idx],
+                           idx + 1, prefix * args.strides[list_idx]);
+      }
+    }
+    __syncthreads();
+
+    if (tid == kThreadsPerBlock - 1) {
+      chunk_prefix += block_scan[tid];
+    }
+    __syncthreads();
+  }
+}
+
 }  // namespace
 
 #define MEMSET_VECTORIZED_KERNEL_DISPATCH(ptr, size_in_bytes, value, vectorizedType, stream) \
@@ -141,6 +225,59 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     NVTE_CHECK_CUDA(cudaGetLastError());                                                     \
     return;                                                                                  \
   }
+
+void nvte_multi_splits_to_offsets_impl(NVTETensor split_sizes, const int64_t *stride_list,
+                                       NVTETensor split_sizes_cumsum,
+                                       NVTETensor *split_offsets_list, size_t list_size,
+                                       cudaStream_t stream) {
+  NVTE_CHECK(list_size > 0 && list_size < NVTE_MAX_MULTI_SPLITS_TO_OFFSETS,
+             "list_size must be in [1, ", NVTE_MAX_MULTI_SPLITS_TO_OFFSETS, ").");
+  NVTE_CHECK(stride_list != nullptr, "stride_list must not be null.");
+  NVTE_CHECK(split_offsets_list != nullptr, "split_offsets_list must not be null.");
+
+  const auto *split_sizes_tensor = convertNVTETensorCheck(split_sizes);
+  const auto *split_sizes_cumsum_tensor = convertNVTETensorCheck(split_sizes_cumsum);
+  const auto split_sizes_dtype = split_sizes_tensor->dtype();
+  const auto split_sizes_cumsum_dtype = split_sizes_cumsum_tensor->dtype();
+  const auto num_tensors = split_sizes_tensor->numel();
+  const auto offsets_numel = num_tensors + 1;
+  const auto is_integer_dtype = [](DType dtype) {
+    return dtype == DType::kInt32 || dtype == DType::kInt64;
+  };
+  const auto is_tensor = [](const Tensor *tensor, DType dtype, size_t numel) {
+    return tensor->dim() == 1 && tensor->dtype() == dtype && tensor->numel() == numel;
+  };
+
+  NVTE_CHECK(
+      num_tensors > 0 && split_sizes_tensor->dim() == 1 && is_integer_dtype(split_sizes_dtype),
+      "split_sizes must be a non-empty 1D int32/int64 tensor.");
+  NVTE_CHECK(is_tensor(split_sizes_cumsum_tensor, split_sizes_cumsum_dtype, num_tensors) &&
+                 is_integer_dtype(split_sizes_cumsum_dtype),
+             "split_sizes_cumsum must be a 1D int32/int64 tensor with the same length as "
+             "split_sizes.");
+
+  MultiSplitsToOffsetsArgs args = {};
+  args.split_sizes = split_sizes_tensor->data.dptr;
+  args.split_sizes_dtype = split_sizes_dtype;
+  args.split_sizes_cumsum = split_sizes_cumsum_tensor->data.dptr;
+  args.split_sizes_cumsum_dtype = split_sizes_cumsum_dtype;
+  args.list_size = list_size;
+  for (size_t i = 0; i < list_size; ++i) {
+    const auto *split_offsets_tensor = convertNVTETensorCheck(split_offsets_list[i]);
+    const auto split_offsets_dtype = split_offsets_tensor->dtype();
+    NVTE_CHECK(stride_list[i] >= 0, "stride_list[", i, "] must be non-negative.");
+    NVTE_CHECK(is_tensor(split_offsets_tensor, split_offsets_dtype, offsets_numel) &&
+                   is_integer_dtype(split_offsets_dtype),
+               "split_offsets_list[", i,
+               "] must be a 1D int32/int64 tensor with length split_sizes.numel() + 1.");
+    args.strides[i] = stride_list[i];
+    args.split_offsets[i] = split_offsets_tensor->data.dptr;
+    args.split_offsets_dtype[i] = split_offsets_dtype;
+  }
+
+  multi_splits_to_offsets_kernel<<<1, kThreadsPerBlock, 0, stream>>>(args, num_tensors);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
 
 extern "C" {
 void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream) {
@@ -170,6 +307,14 @@ void nvte_splits_to_offsets(const int64_t *first_dims, int64_t *output, size_t n
   splits_to_offsets_kernel<<<1, kThreadsPerBlock, 0, stream>>>(first_dims, output, num_tensors,
                                                                logical_last_dim);
   NVTE_CHECK_CUDA(cudaGetLastError());
+}
+
+void nvte_multi_splits_to_offsets(NVTETensor split_sizes, const int64_t *stride_list,
+                                  NVTETensor split_sizes_cumsum, NVTETensor *split_offsets_list,
+                                  size_t list_size, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_multi_splits_to_offsets);
+  nvte_multi_splits_to_offsets_impl(split_sizes, stride_list, split_sizes_cumsum,
+                                    split_offsets_list, list_size, stream);
 }
 }  // extern "C"
 
