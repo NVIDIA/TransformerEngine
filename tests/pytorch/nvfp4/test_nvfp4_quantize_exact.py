@@ -130,23 +130,24 @@ def check_quantization_nvfp4_versus_reference(
     # Input
     x = torch.randn((M, N), dtype=x_dtype, device=device)
 
+    nvfp4_quantizer = NVFP4Quantizer(
+        fp4_dtype=te_dtype,
+        rowwise=True,
+        columnwise=return_transpose,
+        with_amax_reduction=False,
+        amax_reduction_group=None,
+        with_rht=False,
+        with_post_rht_amax=False,
+        with_2d_quantization=with_2d_quantization,
+        row_scaled_nvfp4=row_scaled_nvfp4,
+        nvfp4_use_4over6=use_4over6,
+        nvfp4_e4m3_max=nvfp4_e4m3_max,
+        nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
+    )
+
     # Quantize
     if use_4over6:
         with nvfp4_4over6_err_fast_math(nvfp4_4over6_err_use_fast_math):
-            nvfp4_quantizer = NVFP4Quantizer(
-                fp4_dtype=te_dtype,
-                rowwise=True,
-                columnwise=return_transpose,
-                with_amax_reduction=False,
-                amax_reduction_group=None,
-                with_rht=False,
-                with_post_rht_amax=False,
-                with_2d_quantization=with_2d_quantization,
-                row_scaled_nvfp4=row_scaled_nvfp4,
-                nvfp4_use_4over6=use_4over6,
-                nvfp4_e4m3_max=nvfp4_e4m3_max,
-                nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
-            )
             if use_cpp_allocator:
                 x_nvfp4_sut = nvfp4_quantizer(x)
             else:
@@ -155,20 +156,6 @@ def check_quantization_nvfp4_versus_reference(
                 )
                 x_nvfp4_sut = nvfp4_quantizer.update_quantized(x, x_nvfp4_sut)
     else:
-        nvfp4_quantizer = NVFP4Quantizer(
-            fp4_dtype=te_dtype,
-            rowwise=True,
-            columnwise=return_transpose,
-            with_amax_reduction=False,
-            amax_reduction_group=None,
-            with_rht=False,
-            with_post_rht_amax=False,
-            with_2d_quantization=with_2d_quantization,
-            row_scaled_nvfp4=row_scaled_nvfp4,
-            nvfp4_use_4over6=use_4over6,
-            nvfp4_e4m3_max=nvfp4_e4m3_max,
-            nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
-        )
         if use_cpp_allocator:
             x_nvfp4_sut = nvfp4_quantizer(x)
         else:
