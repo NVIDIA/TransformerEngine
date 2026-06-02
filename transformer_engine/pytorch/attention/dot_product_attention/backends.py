@@ -2126,24 +2126,24 @@ class FusedAttention(torch.nn.Module):
                     return_max_logit=self.return_max_logit,
                 )
         elif score_mod is not None:
-            assert not fp8, "score_mod is not supported with FP8 FusedAttention!"
-            assert not fp8_output, "score_mod is not supported with fp8_output!"
-            assert not self.return_max_logit, "score_mod is not supported with return_max_logit!"
+            assert not fp8, "Flex Attention is not supported with FP8 FusedAttention!"
+            assert not fp8_output, "Flex Attention is not supported with fp8_output!"
+            assert not self.return_max_logit, "Flex Attention is not supported with return_max_logit!"
             assert (
                 type(query_layer) is torch.Tensor  # pylint: disable=unidiomatic-typecheck
                 and type(key_layer) is torch.Tensor  # pylint: disable=unidiomatic-typecheck
                 and type(value_layer) is torch.Tensor  # pylint: disable=unidiomatic-typecheck
-            ), "score_mod only supports unquantized torch.Tensor Q, K and V inputs!"
+            ), "Flex Attention only supports unquantized torch.Tensor Q, K and V inputs!"
             assert (
                 fused_attention_backend == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
-            ), "score_mod requires the F16/BF16 cuDNN fused attention backend!"
+            ), "Flex Attention requires the F16/BF16 cuDNN fused attention backend!"
             assert (
                 attn_mask_type == "no_mask"
                 and core_attention_bias_type == "no_bias"
                 and core_attention_bias is None
                 and self.softmax_type == "vanilla"
                 and self.attention_dropout == 0.0
-            ), "score_mod is mutually exclusive with masks, bias, sink attention and dropout!"
+            ), "Flex Attention is mutually exclusive with masks, bias, sink attention and dropout!"
             output = FusedAttentionWithScoreModFunc.apply(
                 self.training,
                 query_layer,

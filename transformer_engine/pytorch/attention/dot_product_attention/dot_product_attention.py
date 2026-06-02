@@ -985,6 +985,12 @@ class DotProductAttention(TransformerEngineBaseModule):
               :attr:`max_seqlen_q`, :attr:`max_seqlen_kv`}, and for cuDNN >= 9.6, {"t" dimension of
               :attr:`query_layer`, "t" dimension of :attr:`key_layer`}.
 
+        .. note::
+
+            :attr:`score_mod`, :attr:`score_mod_bprop`, :attr:`score_mod_tensors`, and
+            :attr:`score_mod_bprop_tensors` are experimental cuDNN frontend Flex Attention
+            APIs. Their callback signatures and supported configurations may change.
+
         Parameters
         ----------
         query_layer : torch.Tensor
@@ -1093,9 +1099,11 @@ class DotProductAttention(TransformerEngineBaseModule):
             Optional cuDNN frontend callback for the backward pass of score_mod. The callback
             signature is ``score_mod_bprop(graph, dP, tensors) -> dP``.
         score_mod_tensors: Optional[Dict[str, torch.Tensor]], default = None
-            Runtime tensors exposed to score_mod as cuDNN graph tensors.
+            Runtime tensors exposed to score_mod as cuDNN graph tensors. Keys are
+            user-defined string names consumed by the callback through ``tensors[name]``.
         score_mod_bprop_tensors: Optional[Dict[str, torch.Tensor]], default = None
-            Runtime tensors exposed to score_mod_bprop as cuDNN graph tensors.
+            Runtime tensors exposed to score_mod_bprop as cuDNN graph tensors. Keys are
+            user-defined string names consumed by the callback through ``tensors[name]``.
         """
 
         with self.prepare_forward_ctx(
@@ -1104,13 +1112,6 @@ class DotProductAttention(TransformerEngineBaseModule):
             allow_non_contiguous=True,
             allow_different_data_and_param_types=self.softmax_type != "vanilla",
         ) as query_layer:
-            has_user_provided_cu_seqlens = (
-                cu_seqlens_q is not None
-                or cu_seqlens_kv is not None
-                or cu_seqlens_q_padded is not None
-                or cu_seqlens_kv_padded is not None
-            )
-
             # checks for RNG
             if self.rng_states_tracker is not None and is_graph_capturing():
                 assert isinstance(
@@ -1248,9 +1249,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                     else:
                         seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
                     max_seqlen_kv = int((seqlens_kv.max().item() + 63) // 64 * 64)
-
-            if score_mod is not None:
-                assert inference_params is None, "score_mod is not supported with KV caching!"
 
             # update KV cache and retrieve saved tokens from cache for inference
             if inference_params is not None:
@@ -1445,15 +1443,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 assert score_mod_bprop is None or callable(
                     score_mod_bprop
                 ), "score_mod_bprop must be callable when provided!"
-                assert not is_in_onnx_export_mode(), "score_mod is not supported with ONNX export!"
-                assert (
-                    key_layer.dtype == query_layer.dtype and value_layer.dtype == query_layer.dtype
-                ), "score_mod requires Q, K and V tensors to have the same dtype!"
-                assert (
-                    type(query_layer) is torch.Tensor  # pylint: disable=unidiomatic-typecheck
-                    and type(key_layer) is torch.Tensor  # pylint: disable=unidiomatic-typecheck
-                    and type(value_layer) is torch.Tensor  # pylint: disable=unidiomatic-typecheck
-                ), "score_mod only supports unquantized torch.Tensor Q, K and V inputs!"
+                assert not is_in_onnx_export_mode(), "Flex Attention is not supported with ONNX export!"
                 if score_mod_tensors is not None:
                     assert isinstance(score_mod_tensors, dict), "score_mod_tensors must be a dict!"
                     assert all(
@@ -1507,15 +1497,12 @@ class DotProductAttention(TransformerEngineBaseModule):
                 return_max_logit=self.return_max_logit,
                 cuda_graph=is_graph_capturing(),
                 num_splits=num_splits,
-                runtime_flags=dpa_utils.AttentionRuntimeFlags(
-                    fp8_output=fp8_output,
-                    checkpoint_core_attention=checkpoint_core_attention,
-                    has_attention_mask=attention_mask is not None,
-                    has_core_attention_bias=core_attention_bias is not None,
-                    has_user_provided_cu_seqlens=has_user_provided_cu_seqlens,
-                    has_score_mod=score_mod is not None,
-                    has_score_mod_bprop=score_mod_bprop is not None,
-                ),
+                fp8_output=fp8_output,
+                checkpoint_core_attention=checkpoint_core_attention,
+                has_attention_mask=attention_mask is not None,
+                has_core_attention_bias=core_attention_bias is not None,
+                has_score_mod=score_mod is not None,
+                has_score_mod_bprop=score_mod_bprop is not None,
             )
             global _attention_backends
             if is_in_onnx_export_mode():

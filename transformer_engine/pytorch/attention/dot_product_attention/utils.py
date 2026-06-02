@@ -12,7 +12,7 @@ import warnings
 import logging
 import functools
 
-from dataclasses import dataclass, field as dataclass_field, fields
+from dataclasses import dataclass, fields
 import numpy as np
 from packaging.version import Version as PkgVersion
 
@@ -185,42 +185,6 @@ pip install flash-attn-4==4.0.0b8 nvidia-cutlass-dsl[cu13]"""
 
 
 @dataclass(eq=True)
-class AttentionRuntimeFlags:
-    """
-    Runtime-only flags used for backend selection.
-
-    These values are derived from inputs that are not otherwise represented in
-    `AttentionParams`, and keeping them grouped avoids expanding the core
-    attention-configuration surface for each feature-specific boolean.
-
-    Parameters
-    ----------
-    fp8_output : bool, default = False
-        Whether output is requested in FP8.
-    checkpoint_core_attention : bool, default = False
-        Whether core attention is recomputed during backward.
-    has_attention_mask : bool, default = False
-        Whether an explicit attention mask tensor was provided.
-    has_core_attention_bias : bool, default = False
-        Whether an explicit core attention bias tensor was provided.
-    has_user_provided_cu_seqlens : bool, default = False
-        Whether explicit cu_seqlens metadata was provided by the caller.
-    has_score_mod : bool, default = False
-        Whether a score_mod callback was provided.
-    has_score_mod_bprop : bool, default = False
-        Whether a score_mod bprop callback was provided.
-    """
-
-    fp8_output: bool = False
-    checkpoint_core_attention: bool = False
-    has_attention_mask: bool = False
-    has_core_attention_bias: bool = False
-    has_user_provided_cu_seqlens: bool = False
-    has_score_mod: bool = False
-    has_score_mod_bprop: bool = False
-
-
-@dataclass(eq=True)
 class AttentionParams:
     """
     Attention parameters used to determine which backend to be used.
@@ -292,9 +256,18 @@ class AttentionParams:
         Whether support for cuda graph capture is needed or not.
     num_splits : int, default = 1
         The number of kernels to split attention to.
-    runtime_flags : AttentionRuntimeFlags, default = AttentionRuntimeFlags()
-        Runtime-only backend-selection flags that cannot be represented by
-        layout, shape, dtype, or enum metadata alone.
+    fp8_output : bool, default = False
+        Whether output is requested in FP8.
+    checkpoint_core_attention : bool, default = False
+        Whether core attention is recomputed during backward.
+    has_attention_mask : bool, default = False
+        Whether an explicit attention mask tensor was provided.
+    has_core_attention_bias : bool, default = False
+        Whether an explicit core attention bias tensor was provided.
+    has_score_mod : bool, default = False
+        Whether a score_mod callback was provided.
+    has_score_mod_bprop : bool, default = False
+        Whether a score_mod bprop callback was provided.
     """
 
     qkv_type: Union[torch.Tensor, Float8Tensor] = torch.Tensor
@@ -328,7 +301,12 @@ class AttentionParams:
     return_max_logit: bool = False
     cuda_graph: bool = False
     num_splits: int = 1
-    runtime_flags: AttentionRuntimeFlags = dataclass_field(default_factory=AttentionRuntimeFlags)
+    fp8_output: bool = False
+    checkpoint_core_attention: bool = False
+    has_attention_mask: bool = False
+    has_core_attention_bias: bool = False
+    has_score_mod: bool = False
+    has_score_mod_bprop: bool = False
 
     def __eq__(self, other):
         """
@@ -407,14 +385,12 @@ def get_attention_backend(
     return_max_logit = attention_params.return_max_logit
     cuda_graph = attention_params.cuda_graph
     num_splits = attention_params.num_splits
-    runtime_flags = attention_params.runtime_flags
-    fp8_output = runtime_flags.fp8_output
-    checkpoint_core_attention = runtime_flags.checkpoint_core_attention
-    has_attention_mask = runtime_flags.has_attention_mask
-    has_core_attention_bias = runtime_flags.has_core_attention_bias
-    has_user_provided_cu_seqlens = runtime_flags.has_user_provided_cu_seqlens
-    has_score_mod = runtime_flags.has_score_mod
-    has_score_mod_bprop = runtime_flags.has_score_mod_bprop
+    fp8_output = attention_params.fp8_output
+    checkpoint_core_attention = attention_params.checkpoint_core_attention
+    has_attention_mask = attention_params.has_attention_mask
+    has_core_attention_bias = attention_params.has_core_attention_bias
+    has_score_mod = attention_params.has_score_mod
+    has_score_mod_bprop = attention_params.has_score_mod_bprop
 
     # Run config
     logger = logging.getLogger("DotProductAttention")
@@ -448,12 +424,7 @@ def get_attention_backend(
     attention_params_dict = {
         field.name: getattr(attention_params, field.name) for field in fields(attention_params)
     }
-    attention_params_dict.pop("runtime_flags", None)
     run_config.update(attention_params_dict)
-    runtime_flags_dict = {
-        field.name: getattr(runtime_flags, field.name) for field in fields(runtime_flags)
-    }
-    run_config.update(runtime_flags_dict)
     # Add FP8 environment variables to config
     if fp8:
         # all FP8 recipes: 1: (FP8 fwd, FP8 bwd), 0: (FP8 fwd, F16 bwd)
@@ -761,8 +732,6 @@ def get_attention_backend(
             score_mod_unsupported_reasons.append(
                 f"unsupported QKV format: q_format = {q_format}, kv_format = {kv_format}"
             )
-        if has_user_provided_cu_seqlens:
-            score_mod_unsupported_reasons.append("explicit sequence length metadata was provided")
         if pad_between_seqs:
             score_mod_unsupported_reasons.append("pad_between_seqs is enabled")
         if has_attention_mask:

@@ -24,7 +24,6 @@ from transformer_engine.pytorch.attention.dot_product_attention import _attentio
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     get_attention_backend,
     AttentionParams,
-    AttentionRuntimeFlags,
     AttentionLogging,
     check_set_window_size,
 )
@@ -393,10 +392,8 @@ def get_available_attention_backends(
             inference_params=inference_params,
             softmax_type=config.softmax_type,
             return_max_logit=config.return_max_logit,
-            runtime_flags=AttentionRuntimeFlags(
-                has_score_mod=score_mod,
-                has_score_mod_bprop=score_mod_bprop,
-            ),
+            has_score_mod=score_mod,
+            has_score_mod_bprop=score_mod_bprop,
             # allow all backends to pass so they can be used for testing;
             # check for FA3 availability later
             num_splits=1,
