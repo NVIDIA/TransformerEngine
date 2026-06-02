@@ -355,12 +355,10 @@ def fused_attn_fwd(
             if max_tensor.ndim == 4:
                 # For THD on cuDNN <= 9.6 or THD on sm120, Max tensor can be [b, h, sq, 1]
                 # with padded sequence positions. Exclude those padded positions when computing max_logit.
-                seqlens_q = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).to(
-                    device=max_tensor.device
+                seqlens_q = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).to(device=max_tensor.device)
+                sq_idx = torch.arange(max_tensor.shape[2], device=max_tensor.device).view(
+                    1, 1, -1, 1
                 )
-                sq_idx = torch.arange(
-                    max_tensor.shape[2], device=max_tensor.device
-                ).view(1, 1, -1, 1)
                 valid = sq_idx < seqlens_q.view(-1, 1, 1, 1)
                 max_tensor = max_tensor.masked_fill(~valid, float("-inf"))
             elif max_tensor.ndim == 3:
@@ -373,25 +371,17 @@ def fused_attn_fwd(
                         device=max_tensor.device
                     )
                     tq = max_tensor.shape[0]
-                    starts = cu_seqlens_q_padded[:-1].to(
-                        device=max_tensor.device, dtype=torch.long
-                    )
+                    starts = cu_seqlens_q_padded[:-1].to(device=max_tensor.device, dtype=torch.long)
                     ends = (starts + actual_seqlens.to(dtype=torch.long)).clamp(max=tq)
-                    delta = torch.zeros(
-                        tq + 1, dtype=torch.int32, device=max_tensor.device
-                    )
+                    delta = torch.zeros(tq + 1, dtype=torch.int32, device=max_tensor.device)
                     updates = torch.ones_like(starts, dtype=torch.int32)
                     delta.scatter_add_(0, starts.clamp(max=tq), updates)
                     delta.scatter_add_(0, ends, -updates)
                     valid = delta[:-1].cumsum(0) > 0
-                    max_tensor = max_tensor.masked_fill(
-                        ~valid.view(-1, 1, 1), float("-inf")
-                    )
+                    max_tensor = max_tensor.masked_fill(~valid.view(-1, 1, 1), float("-inf"))
 
         # Max -> max_logit [h]
-        max_logit = torch.amax(max_tensor, dim=amax_dims).to(
-            dtype=output_tensors[0].dtype
-        )
+        max_logit = torch.amax(max_tensor, dim=amax_dims).to(dtype=output_tensors[0].dtype)
         return output_tensors[0], aux_ctx_tensors, max_logit
 
     # out, aux_ctx_tensors
