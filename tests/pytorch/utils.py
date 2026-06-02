@@ -118,7 +118,7 @@ def quantization_tols(name: str) -> dict[str, float]:
         "mxfp8_block_scaling",
     ):
         return dtype_tols(DType.kFloat8E4M3)
-    if name in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
+    if name in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht"):
         return dtype_tols(DType.kFloat4E2M1)
     raise ValueError(f"Unsupported quantization scheme ({name})")
 
@@ -145,10 +145,10 @@ def make_recipe(name: Optional[str], **recipe_kwargs: Any) -> Optional[Recipe]:
         )
     if name == "fp8_block_scaling":
         return transformer_engine.common.recipe.Float8BlockScaling(**recipe_kwargs)
-    if name in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
+    if name in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht"):
         use_4over6 = name == "nvfp4_4over6"
         kwargs = {
-            "disable_rht": True,
+            "disable_rht": name != "nvfp4_rht",
             "disable_stochastic_rounding": True,
             "disable_2d_quantization": not use_4over6,
             "row_scaled_activation": name == "nvfp4_row_scaled",
@@ -163,12 +163,16 @@ def recipe_id(recipe: Optional[Recipe]) -> str:
     """Readable pytest id for a quantization recipe."""
     if not isinstance(recipe, Recipe):
         return "None"
-    if recipe.nvfp4() and recipe.row_scaled_activation and recipe.nvfp4_4over6 != "none":
-        return "NVFP4RowScaled4Over6BlockScaling"
-    if recipe.nvfp4() and recipe.nvfp4_4over6 != "none":
-        return "NVFP44Over6BlockScaling"
-    if recipe.nvfp4() and recipe.row_scaled_activation:
-        return "NVFP4RowScaledBlockScaling"
+    if recipe.nvfp4():
+        nvfp4_features = []
+        if recipe.row_scaled_activation:
+            nvfp4_features.append("RowScaled")
+        if recipe.nvfp4_4over6 != "none":
+            nvfp4_features.append("4Over6")
+        if not recipe.disable_rht:
+            nvfp4_features.append("RHT")
+        if nvfp4_features:
+            return f"NVFP4{''.join(nvfp4_features)}BlockScaling"
     return type(recipe).__name__
 
 
