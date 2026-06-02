@@ -555,7 +555,7 @@ def test_dot_product_attention_score_mod(dtype, qkv_format, score_mod_case, scal
     try:
         flex_attention._import_cudnn_frontend()
     except ImportError:
-        pytest.skip("cuDNN Python frontend is required for score_mod attention.")
+        pytest.skip("cuDNN frontend Python package is required for score_mod attention.")
     if score_mod_case == "softcap" and get_device_compute_capability() < (9, 0):
         pytest.skip("Softcap score_mod tests require sm90+.")
 

@@ -1432,7 +1432,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 else:
                     pad_between_seqs = False
 
-            # Validate experimental flex attention API inputs that backend selection
+            # Validate experimental Flex Attention API inputs that backend selection
             # cannot represent.
             if score_mod is None:
                 assert score_mod_bprop is None, "score_mod_bprop requires score_mod!"

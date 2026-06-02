@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""cuDNN-backed flex attention helpers."""
+"""cuDNN-backed Flex Attention helpers."""
 
 from dataclasses import dataclass
 import importlib
@@ -35,7 +35,7 @@ def _import_cudnn_frontend():
         return importlib.import_module("cudnn")
 
     raise ImportError(
-        "cuDNN Frontend Python package not found. "
+        "cuDNN frontend Python package not found. "
         "Install it with: pip install nvidia-cudnn-frontend"
     )
 
@@ -193,7 +193,7 @@ def _make_cudnn_graph_tensor_dict(graph, tensors: Optional[Dict[str, torch.Tenso
     return {name: graph.tensor_like(tensor) for name, tensor in tensors.items()}
 
 
-# score_mod cuDNN frontend graph helpers.
+# cuDNN frontend score_mod graph helpers.
 def _wrap_score_mod(score_mod: Optional[Callable], graph_tensors: Dict[str, Any]):
     """Adapt TE's score_mod signature to cuDNN frontend's two-argument callback."""
     if score_mod is None:
@@ -654,7 +654,7 @@ def _get_cudnn_score_mod_bwd_graph(
 
 
 class FusedAttentionWithScoreModFunc(torch.autograd.Function):
-    """cuDNN frontend Python SDPA path with score_mod callback support."""
+    """cuDNN frontend Python SDPA path with Flex Attention score_mod support."""
 
     @staticmethod
     def forward(
