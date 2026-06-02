@@ -192,14 +192,15 @@ void group_quantize_nvfp4_impl(const GroupedTensorWrapper &grouped_input_tensor,
     });
   }
 
+  // RHT cast fusion
   auto tile_scheduler_workspace_torch = at::empty({1}, at::device(at::kCUDA).dtype(torch::kInt32));
   auto nvte_tile_scheduler_workspace = makeTransformerEngineTensor(tile_scheduler_workspace_torch);
 
   auto rht_matrix_nvte = makeTransformerEngineTensor(nvfp4_quantizer_cpp->rht_matrix);
   NVTE_SCOPED_GIL_RELEASE({
-    nvte_group_hadamard_transform_cast_fusion_graph_safe(
-        grouped_input_tensor.data(), grouped_output_tensor.data(), rht_matrix_nvte.data(),
-        quant_config_cpp, nvte_tile_scheduler_workspace.data(), stream);
+      nvte_group_hadamard_transform_cast_fusion_graph_safe(
+          grouped_input_tensor.data(), grouped_output_tensor.data(), rht_matrix_nvte.data(),
+          quant_config_cpp, nvte_tile_scheduler_workspace.data(), stream);
   });
 }
 
