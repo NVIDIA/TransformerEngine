@@ -1768,8 +1768,8 @@ def test_swizzle_scales_and_pack_ptrs_for_discrete_weights(
     if swizzle_type in ("mxfp8_rowwise", "mxfp8_columnwise"):
         quantizer = MXFP8Quantizer(
             fp8_dtype=tex.DType.kFloat8E4M3,
-            rowwise=True,
-            columnwise=True,
+            rowwise=swizzle_type=="mxfp8_rowwise",
+            columnwise=swizzle_type=="mxfp8_columnwise",
         )
     elif swizzle_type == "nvfp4":
         quantizer = NVFP4Quantizer(
