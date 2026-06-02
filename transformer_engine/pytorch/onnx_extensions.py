@@ -131,9 +131,7 @@ TRT_FP8QuantizeLinear = onnxscript.values.Op(
 @torch.library.custom_op("tex::fp8_dequantize", mutates_args=[])
 def onnx_dequantize_fp8_op(tensor: torch.Tensor, scale_inv: torch.Tensor) -> torch.Tensor:
     """Dequantize from Float8Tensor used for inference."""
-    quantizer = Float8Quantizer(
-        1 / scale_inv, torch.zeros(1).to(tensor.device), DType.kFloat8E4M3
-    )
+    quantizer = Float8Quantizer(1 / scale_inv, torch.zeros(1).to(tensor.device), DType.kFloat8E4M3)
     quantizer_tensor = quantizer.create_tensor_from_data(tensor, fake_dtype=torch.float32)
     return quantizer_tensor.dequantize()
 
