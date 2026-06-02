@@ -2075,12 +2075,6 @@ class FusedAttention(torch.nn.Module):
 
         if context_parallel:
             assert (
-                score_mod is None
-                and score_mod_bprop is None
-                and score_mod_tensors is None
-                and score_mod_bprop_tensors is None
-            ), "(TE/cuDNN) Flex Attention is not supported with context parallelism!"
-            assert (
                 fp8
                 or fused_attention_backend == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
             ), f"{fused_attention_backend} does not work with context parallelism!"
@@ -2126,24 +2120,6 @@ class FusedAttention(torch.nn.Module):
                     return_max_logit=self.return_max_logit,
                 )
         elif score_mod is not None:
-            assert not fp8, "Flex Attention is not supported with FP8 FusedAttention!"
-            assert not fp8_output, "Flex Attention is not supported with fp8_output!"
-            assert not self.return_max_logit, "Flex Attention is not supported with return_max_logit!"
-            assert (
-                type(query_layer) is torch.Tensor  # pylint: disable=unidiomatic-typecheck
-                and type(key_layer) is torch.Tensor  # pylint: disable=unidiomatic-typecheck
-                and type(value_layer) is torch.Tensor  # pylint: disable=unidiomatic-typecheck
-            ), "Flex Attention only supports unquantized torch.Tensor Q, K and V inputs!"
-            assert (
-                fused_attention_backend == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
-            ), "Flex Attention requires the F16/BF16 cuDNN fused attention backend!"
-            assert (
-                attn_mask_type == "no_mask"
-                and core_attention_bias_type == "no_bias"
-                and core_attention_bias is None
-                and self.softmax_type == "vanilla"
-                and self.attention_dropout == 0.0
-            ), "Flex Attention is mutually exclusive with masks, bias, sink attention and dropout!"
             output = FusedAttentionWithScoreModFunc.apply(
                 self.training,
                 query_layer,
