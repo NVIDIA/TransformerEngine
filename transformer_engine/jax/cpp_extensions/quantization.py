@@ -32,9 +32,14 @@ from .misc import (
 from ..sharding import (
     all_reduce_max_along_all_axes_except_PP,
     all_reduce_sum_along_dp_fsdp,
+    filter_spec_axes,
     get_num_devices_in_mesh,
     global_mesh_resource,
     lax_paral_op,
+    local_shape_from_spec,
+    merge_axis_specs,
+    spec_axes,
+    supported_grouped_partition_axes,
 )
 from ..quantize import (
     ScaledTensor2x,
@@ -55,22 +60,8 @@ from ..quantize import (
 __all__ = ["quantize", "quantize_dbias", "grouped_quantize", "grouped_dbias"]
 
 
-def _merge_axis_specs(axis_specs):
-    axes = []
-    for axis_spec in axis_specs:
-        if axis_spec is None:
-            continue
-        axis_tuple = axis_spec if isinstance(axis_spec, tuple) else (axis_spec,)
-        for axis in axis_tuple:
-            if axis is not None and axis not in axes:
-                axes.append(axis)
-    if len(axes) == 0:
-        return None
-    return axes[0] if len(axes) == 1 else tuple(axes)
-
-
 def _flat_data_spec(input_spec):
-    return (_merge_axis_specs(input_spec),)
+    return (merge_axis_specs(*input_spec),)
 
 
 def _normalize_flatten_axis(flatten_axis, ndim):
@@ -84,35 +75,9 @@ def _contiguous_flat_input_spec(input_spec, flatten_axis):
     return (*input_spec[:flatten_axis], *((None,) * (len(input_spec) - flatten_axis)))
 
 
-def _filter_axis_spec(axis_spec, allowed_axes):
-    if axis_spec is None:
-        return None
-    axis_tuple = axis_spec if isinstance(axis_spec, tuple) else (axis_spec,)
-    axes = tuple(axis for axis in axis_tuple if axis in allowed_axes)
-    if len(axes) == 0:
-        return None
-    return axes[0] if len(axes) == 1 else axes
-
-
-def _filter_spec_axes(spec, allowed_axes):
-    return tuple(_filter_axis_spec(axis_spec, allowed_axes) for axis_spec in spec)
-
-
-def _spec_axes(spec):
-    axes = []
-    for axis_spec in spec:
-        if axis_spec is None:
-            continue
-        axis_tuple = axis_spec if isinstance(axis_spec, tuple) else (axis_spec,)
-        for axis in axis_tuple:
-            if axis is not None and axis not in axes:
-                axes.append(axis)
-    return axes
-
-
 def _warn_if_axes_ignored(arg_name, original_spec, partition_spec):
     ignored_axes = tuple(
-        axis for axis in _spec_axes(original_spec) if axis not in _spec_axes(partition_spec)
+        axis for axis in spec_axes(original_spec) if axis not in spec_axes(partition_spec)
     )
     if ignored_axes:
         warnings.warn(
@@ -122,31 +87,6 @@ def _warn_if_axes_ignored(arg_name, original_spec, partition_spec):
             RuntimeWarning,
             stacklevel=3,
         )
-
-
-def _supported_grouped_quantize_axes(mesh):
-    gsr = global_mesh_resource(validate=False)
-    return {
-        axis
-        for axis in (gsr.ep_resource, gsr.dp_resource, gsr.fsdp_resource)
-        if axis is not None and axis in mesh.axis_names
-    }
-
-
-def _axis_spec_size(axis_spec, mesh):
-    axis_tuple = axis_spec if isinstance(axis_spec, tuple) else (axis_spec,)
-    axis_size = 1
-    for axis in axis_tuple:
-        if axis is not None:
-            axis_size *= mesh.shape[axis]
-    return axis_size
-
-
-def _local_shape_from_spec(global_shape, spec, mesh):
-    local_shape = []
-    for dim, axis_spec in zip(global_shape, spec):
-        local_shape.append(dim // _axis_spec_size(axis_spec, mesh))
-    return tuple(local_shape)
 
 
 def _pad_or_slice_to_shape(x, target_shape):
@@ -1354,14 +1294,14 @@ class GroupedQuantizePrimitive(BasePrimitive):
 
     @staticmethod
     def _parse_partition_specs(scaling_mode, q_layout, flatten_axis, mesh, arg_infos):
-        allowed_axes = _supported_grouped_quantize_axes(mesh)
+        allowed_axes = supported_grouped_partition_axes(mesh)
         original_x_spec = get_padded_spec(arg_infos[0])
-        x_spec = _filter_spec_axes(original_x_spec, allowed_axes)
+        x_spec = filter_spec_axes(original_x_spec, allowed_axes)
         x_spec = _contiguous_flat_input_spec(x_spec, flatten_axis)
         _warn_if_axes_ignored("x", original_x_spec, x_spec)
 
         original_group_spec = get_padded_spec(arg_infos[2])
-        group_spec = _filter_spec_axes(original_group_spec, allowed_axes)
+        group_spec = filter_spec_axes(original_group_spec, allowed_axes)
         if group_spec == (None,) and len(x_spec) > 0:
             group_spec = (x_spec[0],)
         _warn_if_axes_ignored("group_sizes", original_group_spec, group_spec)
@@ -1409,7 +1349,7 @@ class GroupedQuantizePrimitive(BasePrimitive):
         )
         local_out_shapes = (
             tuple(
-                _local_shape_from_spec(info.shape, spec, mesh)
+                local_shape_from_spec(info.shape, spec, mesh)
                 for info, spec in zip(result_infos, out_specs)
             )
             if result_infos
