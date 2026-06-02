@@ -369,6 +369,7 @@ if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE
     _, _CUDNN_LIB_CTYPES = _load_cuda_library("cudnn")
     system_nvrtc, _NVRTC_LIB_CTYPES = _load_cuda_library("nvrtc")
     system_curand, _CURAND_LIB_CTYPES = _load_cuda_library("curand")
+    _, _CUSOLVERMP_LIB_CTYPES = _load_cuda_library_from_python("cusolverMp", strict=False)
 
     # This additional step is necessary to be able to install TE wheels
     # and import TE (without any guards) in an environment where the cuda

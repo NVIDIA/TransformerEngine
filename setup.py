@@ -20,6 +20,7 @@ from build_tools.te_version import te_version
 from build_tools.utils import (
     cuda_archs,
     cuda_version,
+    cusolvermp_pypi_package_name,
     get_frameworks,
     remove_dups,
     min_python_version_str,
@@ -111,6 +112,9 @@ def setup_requirements() -> Tuple[List[str], List[str]]:
         "packaging",
     ]
     test_reqs: List[str] = ["pytest>=8.2.1"]
+
+    if bool(int(os.getenv("NVTE_WITH_CUSOLVERMP", "0"))):
+        install_reqs.append(cusolvermp_pypi_package_name())
 
     # Framework-specific requirements
     if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
