@@ -321,13 +321,6 @@ def grouped_dense(
     kernel_contracting_dims = tex.sanitize_dims(kernel.ndim, kernel_contracting_dims)
     contracting_dims = (x_contracting_dims, kernel_contracting_dims)
 
-    restore_leading_ep_axis = False
-    if x.ndim == 3 and x.shape[0] == 1:
-        if x_contracting_dims == (x.ndim - 1,):
-            restore_leading_ep_axis = True
-            x = x.reshape(*x.shape[1:])
-            contracting_dims = ((x.ndim - 1,), kernel_contracting_dims)
-
     output = _grouped_dense(
         x,
         kernel,
@@ -339,8 +332,6 @@ def grouped_dense(
         group_offset,
         quantizer_set,
     )
-    if restore_leading_ep_axis:
-        output = output.reshape(1, *output.shape)
     return output
 
 
