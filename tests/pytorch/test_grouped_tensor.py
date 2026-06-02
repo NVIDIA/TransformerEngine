@@ -517,6 +517,62 @@ class TestGroupedTensor:
             expected_dbias = torch.stack([t.sum(dim=0) for t in input_tensors])
             assert torch.allclose(dbias, expected_dbias)
 
+    @pytest.mark.parametrize("output_dbias", [False, True])
+    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    def test_group_quantize_precomputed_offsets(self, output_dbias: bool) -> None:
+        """Test grouped quantization can reuse caller-provided tensor offsets."""
+        num_tensors = 2
+        last_dim = 1024
+        split_sizes_list = [512, 512]
+        input_tensors = [
+            torch.randn(split, last_dim, dtype=torch.bfloat16, device="cuda")
+            for split in split_sizes_list
+        ]
+        grouped_input = torch.cat(input_tensors, dim=0)
+
+        quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        quantizer.set_usage(rowwise=True, columnwise=False)
+        split_sizes = torch.tensor(split_sizes_list, dtype=torch.int64, device="cuda")
+        split_sizes, _, _, tensor_offsets = tex.prepare_grouped_splits(
+            split_sizes,
+            num_tensors,
+            [1, last_dim],
+        )
+
+        if output_dbias:
+            grouped_output, dbias = tex.bgrad_group_quantize(
+                grouped_input,
+                quantizer,
+                num_tensors,
+                split_sizes,
+                tensor_offsets=tensor_offsets,
+            )
+            expected_output, expected_dbias = tex.bgrad_group_quantize(
+                grouped_input,
+                quantizer,
+                num_tensors,
+                split_sizes,
+            )
+            assert torch.allclose(dbias, expected_dbias)
+        else:
+            grouped_output = tex.group_quantize(
+                grouped_input,
+                quantizer,
+                num_tensors,
+                split_sizes,
+                tensor_offsets=tensor_offsets,
+            )
+            expected_output = tex.group_quantize(
+                grouped_input,
+                quantizer,
+                num_tensors,
+                split_sizes,
+            )
+
+        assert grouped_output.tensor_offsets.data_ptr() == tensor_offsets.data_ptr()
+        assert torch.equal(grouped_output.rowwise_data, expected_output.rowwise_data)
+        assert torch.equal(grouped_output.scale_inv, expected_output.scale_inv)
+
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     def test_bgrad_group_quantize_zero_size_tensor(self) -> None:
         """Test bgrad_group_quantize handles zero-row input without error."""
