@@ -12,10 +12,28 @@ import transformer_engine_torch as tex
 
 
 class DType(enum.IntEnum):
-    """Python mirror of ``transformer_engine_torch.DType`` (pybind11 enum).
-    Members are constructed manually from the underlying pybind enum so
-    that this class is the single source of truth for dtype tags used
-    across ``transformer_engine.pytorch``.
+    """Transformer Engine data types used to tag tensors passed to the
+    Transformer Engine backend.
+    This is the canonical dtype enum for ``transformer_engine.pytorch`` and
+    is used throughout the library (for example, to specify the precision of
+    quantized tensors and quantizers). Each member corresponds to a data type
+    supported by the Transformer Engine backend:
+
+    * ``kByte`` -- 8-bit unsigned integer (``torch.uint8``).
+    * ``kInt32`` -- 32-bit signed integer (``torch.int32``).
+    * ``kFloat32`` -- 32-bit floating point (``torch.float32``).
+    * ``kFloat16`` -- 16-bit floating point (``torch.float16``).
+    * ``kBFloat16`` -- 16-bit brain floating point (``torch.bfloat16``).
+    * ``kFloat8E4M3`` -- 8-bit floating point with 4 exponent and 3 mantissa
+      bits (``torch.float8_e4m3fn``).
+    * ``kFloat8E5M2`` -- 8-bit floating point with 5 exponent and 2 mantissa
+      bits (``torch.float8_e5m2``).
+    * ``kFloat4E2M1`` -- 4-bit floating point with 2 exponent and 1 mantissa
+      bits.
+
+    The enum mirrors the backend ``transformer_engine_torch.DType`` (pybind11)
+    enum value-for-value, and instances of the two enums compare equal when
+    they share the same integer value.
     """
 
     kByte = int(tex.DType.kByte)

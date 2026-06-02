@@ -55,6 +55,12 @@ PyTorch
 
 .. autoapifunction:: transformer_engine.pytorch.parallel_cross_entropy
 
+Data types
+----------
+
+.. autoapiclass:: transformer_engine.pytorch.DType()
+  :members: kByte, kInt32, kFloat32, kFloat16, kBFloat16, kFloat8E4M3, kFloat8E5M2, kFloat4E2M1
+
 Recipe availability
 -------------------
 
