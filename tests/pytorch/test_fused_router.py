@@ -465,8 +465,7 @@ def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk, expert_multipl
 def _bytemap_to_bitmap_u8(bytemap: torch.Tensor) -> torch.Tensor:
     """Reference packer: bool[T, E] -> uint8[T, ceil(E/8)] LSB-first.
 
-    Matches numpy.packbits(..., bitorder='little'), which is what the JAX-side
-    parity test uses.
+    Matches numpy.packbits(..., bitorder='little')
     """
     flat = bytemap.to(torch.uint8).cpu().numpy()
     import numpy as np
