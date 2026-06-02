@@ -577,19 +577,22 @@ class _BackwardGroupedMLP_CuTeGEMMDBase(FusedOperation):
         if use_nvfp4:
             nvfp4_fp4_max = 6.0
             nvfp4_fp8_max = 448.0
+            nvfp4_global_scale_denom = nvfp4_fp4_max * nvfp4_fp8_max
             fc2_dy_amax = _nvfp4_amax(grouped_fc2_dy, columnwise=False)
             fc2_weight_col_amax = _nvfp4_amax(grouped_fc2_weight, columnwise=True)
             if activation_is_srelu:
-                # DGLU squares alpha internally, but DSReLU applies it linearly,
-                # so pass the full NVFP4 global-scale product per expert.
+                # DSReLU applies alpha once, so pass the full product of the
+                # two operand global scales.
                 fc2_alpha_tensor = (
-                    (fc2_dy_amax * fc2_weight_col_amax / (nvfp4_fp4_max**2 * nvfp4_fp8_max**2))
+                    (fc2_dy_amax * fc2_weight_col_amax / (nvfp4_global_scale_denom**2))
                     .to(torch.float32)
                     .expand(num_groups)
                 )
             else:
+                # DGLU applies alpha to both gate branches, so the wrapper
+                # expects sqrt(product) to recover the same global-scale factor.
                 fc2_alpha_tensor = (
-                    torch.sqrt(fc2_dy_amax * fc2_weight_col_amax) / (nvfp4_fp8_max * nvfp4_fp4_max)
+                    torch.sqrt(fc2_dy_amax * fc2_weight_col_amax) / nvfp4_global_scale_denom
                 ).expand(num_groups)
             fc2_beta_tensor = get_cached_ones_tensor(num_groups, torch.float32, device)
             fc2_norm_const_tensor = None
@@ -709,6 +712,9 @@ class _BackwardGroupedMLP_CuTeGEMMDBase(FusedOperation):
                 )
 
             if use_nvfp4:
+                # cuDNN's grouped dSReLU FP4 path recomputes FC2 input in BF16.
+                # Re-quantize to produce the columnwise FP4 data, scales, and
+                # dSReLU-specific amax needed by the NVFP4 wgrad GEMM.
                 fc2_x_bf16 = d_srelu_tensor.view(out_shape[0], fc2_weight_shape[1]).contiguous()
                 fc2_input_quantizer = fc2_ctx.input_quantizers[0]
                 fc2_input_quantizer.set_usage(rowwise=False, columnwise=True)
