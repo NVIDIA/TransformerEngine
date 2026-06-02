@@ -2431,10 +2431,12 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
       // We need:
       // 1. Rowwise amax = amax for input
       // 2. Columnwise amax = amax for RHT(input.t)
-      NVTE_SCOPED_GIL_RELEASE({
-        nvte_hadamard_transform_amax(input.data(), out.data(), 0,
-                                     this->rht_matrix_random_sign_mask_t, stream);
-      });
+      if (compute_amax) {
+        NVTE_SCOPED_GIL_RELEASE({
+          nvte_hadamard_transform_amax(input.data(), out.data(), 0,
+                                       this->rht_matrix_random_sign_mask_t, stream);
+        });
+      }
     } else {
       // raise error since it's not supported yet
       NVTE_ERROR(

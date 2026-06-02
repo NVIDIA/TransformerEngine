@@ -379,6 +379,8 @@ class NVFP4Quantizer : public Quantizer {
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
                 const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
+  void quantize_impl(const TensorWrapper& input, TensorWrapper& out,
+                     const std::optional<TensorWrapper>& noop_flag, bool compute_amax);
 
   /*! @brief Quantize to NVFP4, skipping local amax computation
    *
@@ -391,8 +393,6 @@ class NVFP4Quantizer : public Quantizer {
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
 
  private:
-  void quantize_impl(const TensorWrapper& input, TensorWrapper& out,
-                     const std::optional<TensorWrapper>& noop_flag, bool compute_amax);
   void quantize_with_rht_unfused_helper(const TensorWrapper& input, TensorWrapper& out,
                                         TensorWrapper& rht_output_t_cpp,
                                         QuantizationConfigWrapper& quant_config,
