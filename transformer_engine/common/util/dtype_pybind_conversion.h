@@ -81,10 +81,10 @@ struct type_caster<transformer_engine::DType> {
     static const std::array<PyObject *, num_dtypes> cache = [] {
       std::array<PyObject *, num_dtypes> objects{};
       for (size_t i = 0; i < num_dtypes; ++i) {
-        objects[i] = type_caster_base<transformer_engine::DType>::cast(
-                         static_cast<transformer_engine::DType>(i), return_value_policy::copy,
-                         handle())
-                         .ptr();
+        objects[i] =
+            type_caster_base<transformer_engine::DType>::cast(
+                static_cast<transformer_engine::DType>(i), return_value_policy::copy, handle())
+                .ptr();
       }
       return objects;
     }();
