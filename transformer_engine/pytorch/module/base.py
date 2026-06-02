@@ -183,7 +183,10 @@ def initialize_ub(
                     be compiled with `NVTE_WITH_CUBLASMP=1` for this option to work.
 
     """
-    if not tex.device_supports_multicast():
+    # The cuBLASMp backend falls back to a non-multicast algorithm in C++ when multicast is
+    # unsupported or disabled (via UB_SKIPMC), so only enforce the multicast requirement for
+    # the Userbuffers backend.
+    if not tex.device_supports_multicast() and not with_cublasmp:
         if not bool(int(os.getenv("UB_SKIPMC", "0"))):
             raise RuntimeError(
                 "CUDA device, driver and/or toolkit version does not support comm+GEMM overlap "
@@ -228,7 +231,7 @@ def initialize_ub(
     _ub_communicators = {}
     _ub_with_cublasmp = with_cublasmp
 
-    if tex.ubuf_built_with_mpi():
+    if tex.ubuf_built_with_mpi() and not with_cublasmp:
         # We're bootstrapping with direct calls to MPI in Userbuffers code so we need to force
         # an MPI_Init() here by creating a new MPI process group...
         if not torch.distributed.is_mpi_available():
@@ -240,7 +243,10 @@ def initialize_ub(
         helper = tex.CommOverlapHelper()
     else:
         # Bootstrapping with torch.distributed API, so check backend and construct
-        # intra/inter-node process groups...
+        # intra/inter-node process groups. The cuBLASMp backend always takes this path
+        # (even when Userbuffers is built with MPI) because it derives its NCCL
+        # communicators from the helper's PyTorch process groups, which the dummy
+        # MPI-bootstrap helper does not provide.
         if not torch.distributed.is_initialized():
             raise RuntimeError("torch.distributed must be initialized before using Userbuffers")
         if bootstrap_backend is None:
@@ -576,8 +582,14 @@ def fill_userbuffers_buffer_for_all_gather(
     tensor's metadata, e.g. scaling factors.
 
     """
-    # cuBlasMp already handles its own buffer filling and quantization factors
+    # cuBlasMp handles its own buffer filling and gather, but its fused all-gather + GEMM
+    # still needs an already-quantized local tensor for FP8 GEMMs. The standard FP8 paths
+    # pre-quantize before this call and the quantized-norm path produces an already-quantized
+    # tensor, but custom-recipe paths pass an unquantized tensor and rely on this helper to
+    # quantize it. The callers configure the quantizer usage (rowwise) expected by cuBLASMp.
     if comm.with_cublasmp():
+        if quantizer is not None and not isinstance(local_tensor, QuantizedTensorStorage):
+            local_tensor = quantizer(local_tensor)
         return local_tensor, local_tensor
 
     # Tensor dimensions
