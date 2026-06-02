@@ -21,6 +21,7 @@ import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch.ops._common import (
+    _cudnn_frontend_supports_grouped_gemm_srelu,
     _cudnn_frontend_version_supported,
     is_glu_activation,
 )
@@ -3756,16 +3757,19 @@ class TestSequentialModules:
             pytest.skip("single_grouped_bias requires bias=True")
         if with_quantization and dtype not in (torch.bfloat16, torch.float16):
             pytest.skip("Quantized group GEMM is only supported with BF16/FP16")
-        if not activation_is_glu and quantization != "mxfp8":
-            pytest.skip("Scaled unary grouped MLP fusion is only supported with MXFP8")
+        if not activation_is_glu and quantization not in ("mxfp8", "nvfp4", "nvfp4_rht"):
+            pytest.skip("Scaled unary grouped MLP is only supported with MXFP8 or NVFP4")
         if not activation_is_glu and glu_interleave_size is not None:
             pytest.skip("Unary activations do not use GLU interleaving")
         if quantization == "nvfp4_4over6":
             pytest.skip("NVFP4 4over6 grouped quantization is not supported")
-        if quantization == "nvfp4_rht" and (
-            activation != "scaled_swiglu" or bias or glu_interleave_size != 32
-        ):
-            pytest.skip("NVFP4 RHT grouped MLP coverage is limited to fused no-bias SwiGLU")
+        if activation == "scaled_srelu" and quantization in ("nvfp4", "nvfp4_rht") and bias:
+            pytest.skip("NVFP4 SReLU grouped MLP coverage is limited to no-bias")
+        if quantization == "nvfp4_rht":
+            if activation == "scaled_swiglu" and (bias or glu_interleave_size != 32):
+                pytest.skip("NVFP4 RHT SwiGLU grouped MLP coverage is limited to no-bias")
+            if activation not in ("scaled_swiglu", "scaled_srelu"):
+                pytest.skip("NVFP4 RHT grouped MLP coverage is limited to SwiGLU and SReLU")
         if (
             with_quantization
             and quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht")
@@ -4001,14 +4005,26 @@ class TestSequentialModules:
             fc2.backward_dw()
 
         # Check for expected fusions
-        expected_grouped_mlp_fusion = (
-            quantization == "mxfp8"
-            and dtype in (torch.bfloat16, torch.float16)
-            and (
-                (not activation_is_glu and glu_interleave_size is None)
-                or (activation_is_glu and glu_interleave_size == 32)
+        cudnn_frontend_supports_grouped_mlp = (
+            _cudnn_frontend_supports_grouped_gemm_srelu()
+            if activation == "scaled_srelu"
+            else _cudnn_frontend_version_supported()
+        )
+        expected_grouped_mlp_fusion = cudnn_frontend_supports_grouped_mlp and (
+            (
+                quantization == "mxfp8"
+                and dtype in (torch.bfloat16, torch.float16)
+                and (
+                    (not activation_is_glu and glu_interleave_size is None)
+                    or (activation_is_glu and glu_interleave_size == 32)
+                )
             )
-            and _cudnn_frontend_version_supported()
+            or (
+                quantization == "nvfp4_rht"
+                and dtype == torch.bfloat16
+                and activation == "scaled_srelu"
+                and glu_interleave_size is None
+            )
         )
         if expected_grouped_mlp_fusion:
             if activation_is_glu:

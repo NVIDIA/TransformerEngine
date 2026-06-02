@@ -387,10 +387,14 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
         if use_nvfp4:
             nvfp4_fp4_max = 6.0
             nvfp4_fp8_max = 448.0
+            nvfp4_global_scale_denom = nvfp4_fp4_max * nvfp4_fp8_max
+            # cuDNN receives NVFP4 block-scaled inputs without TE's per-group
+            # global scale factors, so alpha supplies the product of the two
+            # operand global scales.
             fc1_alpha_tensor = (
                 _nvfp4_amax(grouped_fc1_x, columnwise=False)
                 * _nvfp4_amax(grouped_fc1_weight, columnwise=False)
-                / (nvfp4_fp4_max**2 * nvfp4_fp8_max**2)
+                / (nvfp4_global_scale_denom**2)
             ).to(torch.float32)
         else:
             fc1_alpha_tensor = alpha_tensor
@@ -801,8 +805,6 @@ def fuse_forward_srelu_ops(
 ) -> list[FusibleOperation]:
     """Apply GroupedLinear + ScaledSReLU + GroupedLinear fusion for forward pass."""
 
-    if recipe is None or not recipe.mxfp8():
-        return ops
     return fuse_grouped_mlp_ops(
         ops,
         recipe=recipe,

@@ -403,7 +403,8 @@ class _BackwardGroupedMLP_CuTeGEMMDBase(FusedOperation):
     ]:
 
         # Get basic operations
-        fc1_op, _, fc2_op = self.basic_ops
+        fc1_op, activation_op, fc2_op = self.basic_ops
+        activation_is_srelu = isinstance(activation_op, ScaledSReLU)
         fc1_ctx, activation_ctx, fc2_ctx = basic_op_ctxs
 
         # Tensor properties
@@ -576,13 +577,23 @@ class _BackwardGroupedMLP_CuTeGEMMDBase(FusedOperation):
         if use_nvfp4:
             nvfp4_fp4_max = 6.0
             nvfp4_fp8_max = 448.0
-            fc2_alpha_tensor = (
-                torch.sqrt(
-                    _nvfp4_amax(grouped_fc2_dy, columnwise=False)
-                    * _nvfp4_amax(grouped_fc2_weight, columnwise=True)
+            nvfp4_global_scale_denom = nvfp4_fp4_max * nvfp4_fp8_max
+            fc2_dy_amax = _nvfp4_amax(grouped_fc2_dy, columnwise=False)
+            fc2_weight_col_amax = _nvfp4_amax(grouped_fc2_weight, columnwise=True)
+            if activation_is_srelu:
+                # DSReLU applies alpha once, so pass the full product of the
+                # two operand global scales.
+                fc2_alpha_tensor = (
+                    (fc2_dy_amax * fc2_weight_col_amax / (nvfp4_global_scale_denom**2))
+                    .to(torch.float32)
+                    .expand(num_groups)
                 )
-                / (nvfp4_fp8_max * nvfp4_fp4_max)
-            ).expand(num_groups)
+            else:
+                # DGLU applies alpha to both gate branches, so the wrapper
+                # expects sqrt(product) to recover the same global-scale factor.
+                fc2_alpha_tensor = (
+                    torch.sqrt(fc2_dy_amax * fc2_weight_col_amax) / nvfp4_global_scale_denom
+                ).expand(num_groups)
             fc2_beta_tensor = get_cached_ones_tensor(num_groups, torch.float32, device)
             fc2_norm_const_tensor = None
         else:
@@ -700,28 +711,44 @@ class _BackwardGroupedMLP_CuTeGEMMDBase(FusedOperation):
                     "the recomputed FC2 input tensor."
                 )
 
-            sfd_col_d_srelu_tensor = fc2_dgrad_kernel_out.get("sfd_col_d_srelu_tensor")
-            if sfd_col_d_srelu_tensor is None:
-                raise RuntimeError(
-                    "SReLU recompute is enabled, but the DSReLU kernel did not return "
-                    "the recomputed FC2 input column scale tensor."
+            if use_nvfp4:
+                # cuDNN's grouped dSReLU FP4 path recomputes FC2 input in BF16.
+                # Re-quantize to produce the columnwise FP4 data, scales, and
+                # dSReLU-specific amax needed by the NVFP4 wgrad GEMM.
+                fc2_x_bf16 = d_srelu_tensor.view(out_shape[0], fc2_weight_shape[1]).contiguous()
+                fc2_input_quantizer = fc2_ctx.input_quantizers[0]
+                fc2_input_quantizer.set_usage(rowwise=False, columnwise=True)
+                fc2_input_quantizer.optimize_for_gemm = True
+                grouped_fc2_x = _group_quantize_for_grouped_mlp(
+                    fc2_x_bf16,
+                    fc2_input_quantizer,
+                    num_groups,
+                    split_sizes,
+                    tensor_offsets=base_split_offsets * fc2_weight_shape[1],
                 )
+            else:
+                sfd_col_d_srelu_tensor = fc2_dgrad_kernel_out.get("sfd_col_d_srelu_tensor")
+                if sfd_col_d_srelu_tensor is None:
+                    raise RuntimeError(
+                        "SReLU recompute is enabled, but the DSReLU kernel did not return "
+                        "the recomputed FC2 input column scale tensor."
+                    )
 
-            fc2_x_col_data = d_srelu_tensor.view(out_shape[0], fc2_weight_shape[1])
-            fc2_x_col_scale = sfd_col_d_srelu_tensor.permute(5, 2, 4, 0, 1, 3)
-            grouped_fc2_x = GroupedTensor(
-                shape=(out_shape[0], fc2_weight_shape[1]),
-                dtype=dtype,
-                num_tensors=num_groups,
-                quantizer=fc2_ctx.input_quantizers[0],
-                data=None,
-                columnwise_data=fc2_x_col_data.reshape(-1),
-                scale_inv=None,
-                columnwise_scale_inv=fc2_x_col_scale.reshape(-1),
-                first_dims=split_sizes,
-                tensor_offsets=base_split_offsets * fc2_weight_shape[1],
-                with_gemm_swizzled_scales=True,
-            )
+                fc2_x_col_data = d_srelu_tensor.view(out_shape[0], fc2_weight_shape[1])
+                fc2_x_col_scale = sfd_col_d_srelu_tensor.permute(5, 2, 4, 0, 1, 3)
+                grouped_fc2_x = GroupedTensor(
+                    shape=(out_shape[0], fc2_weight_shape[1]),
+                    dtype=dtype,
+                    num_tensors=num_groups,
+                    quantizer=fc2_ctx.input_quantizers[0],
+                    data=None,
+                    columnwise_data=fc2_x_col_data.reshape(-1),
+                    scale_inv=None,
+                    columnwise_scale_inv=fc2_x_col_scale.reshape(-1),
+                    first_dims=split_sizes,
+                    tensor_offsets=base_split_offsets * fc2_weight_shape[1],
+                    with_gemm_swizzled_scales=True,
+                )
 
         fc2_bias_grads: Optional[list[Optional[torch.Tensor]]] = None
         fc2_bias_grad_packed: Optional[torch.Tensor] = None
@@ -1039,8 +1066,6 @@ def fuse_backward_srelu_ops(
 ) -> list[FusibleOperation]:
     """Apply GroupedLinear + ScaledSReLU + GroupedLinear fusion for backward pass."""
 
-    if recipe is None or not recipe.mxfp8():
-        return ops
     return fuse_grouped_mlp_ops(
         ops,
         recipe=recipe,
