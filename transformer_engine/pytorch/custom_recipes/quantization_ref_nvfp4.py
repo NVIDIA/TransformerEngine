@@ -360,8 +360,6 @@ class NVFP4QuantizerRef(Quantizer):
         with_random_sign_mask: bool = True,
     ):
         nvfp4_4over6_err_mode = nvfp4_4over6_err_mode.upper()
-        if nvfp4_4over6_err_mode not in ("MAE", "MSE"):
-            raise ValueError("nvfp4_4over6_err_mode must be one of: 'MAE', 'MSE'.")
         if row_scaled_nvfp4:
             if not rowwise:
                 raise ValueError("Row-scaled NVFP4 reference quantization requires rowwise usage.")
@@ -370,6 +368,8 @@ class NVFP4QuantizerRef(Quantizer):
                     "Row-scaled NVFP4 reference quantization does not support columnwise usage."
                 )
         if nvfp4_use_4over6:
+            if nvfp4_4over6_err_mode not in ("MAE", "MSE"):
+                raise ValueError(f"Unsupported NVFP4 4over6 error mode: {nvfp4_4over6_err_mode}.")
             if pow_2_scales:
                 raise ValueError("4over6 is only supported for NVFP4 (non-pow2) mode.")
             if quant_tile_shape not in ((1, 16), (16, 16)):
