@@ -192,8 +192,9 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
     ----------
     data : torch.Tensor
           Raw FP8 data in a uint8 tensor
-    fp8_dtype : transformer_engine_torch.DType, default = kFloat8E4M3
-               FP8 format.
+    fp8_dtype : transformer_engine.pytorch.DType or transformer_engine_torch.DType,
+                optional, default = kFloat8E4M3 FP8 format. transformer_engine_torch.DType
+                is accepted for backward compatibility.
     fp8_scale_inv : torch.Tensor
                    Reciprocal of the scaling factor applied when
                    casting to FP8, i.e. the scaling factor that must

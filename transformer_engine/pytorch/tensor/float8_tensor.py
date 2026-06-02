@@ -401,8 +401,9 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         Reciprocal of the scaling factor applied when casting to FP8,
         i.e. the scaling factor that must be applied when casting from
         FP8 to higher precision.
-    fp8_dtype : transformer_engine_torch.DType
-        FP8 format.
+    fp8_dtype : transformer_engine.pytorch.DType or transformer_engine_torch.DType
+        optional, default = kFloat8E4M3 FP8 format. transformer_engine_torch.DType
+        is accepted for backward compatibility.
     data_transpose : torch.Tensor, optional
         FP8 transpose data in a uint8 tensor
     quantizer : Float8Quantizer, Float8CurrentScalingQuantizer, optional
