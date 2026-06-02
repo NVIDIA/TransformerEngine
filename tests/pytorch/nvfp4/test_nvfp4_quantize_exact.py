@@ -130,6 +130,7 @@ def check_quantization_nvfp4_versus_reference(
     # Input
     x = torch.randn((M, N), dtype=x_dtype, device=device)
 
+    # Quantize
     nvfp4_quantizer = NVFP4Quantizer(
         fp4_dtype=te_dtype,
         rowwise=True,
@@ -145,7 +146,6 @@ def check_quantization_nvfp4_versus_reference(
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
 
-    # Quantize
     if use_4over6:
         with nvfp4_4over6_err_fast_math(nvfp4_4over6_err_use_fast_math):
             if use_cpp_allocator:
