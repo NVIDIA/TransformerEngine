@@ -27,6 +27,7 @@ M, N, K % 256 == 0 (kernel + per-token quant alignment).
 
 from __future__ import annotations
 
+import os
 from typing import Dict, Tuple
 
 import pytest
@@ -36,6 +37,23 @@ import torch
 import transformer_engine.pytorch as te  # noqa: F401
 import transformer_engine_torch as tex  # type: ignore
 from transformer_engine.pytorch import NVFP4Quantizer
+
+
+# --- Prod-feature isolation switches (default OFF = real prod config) --------
+# These let the side-by-side SNR tests answer "is per-token's win from per-row
+# amax, or just from skipping prod's RHT/SR?". Toy training (bare vs bare, up to
+# 1000x per-row outliers) showed per-row amax gives NO measurable accuracy edge
+# -- the 1x16 e4m3 block micro-scale absorbs per-row dynamic range up to ~1e5x.
+# So per-token's apparent SNR win is suspected to come from skipping RHT/SR.
+# Set these to strip the prod quantizers down to the same bare path per-token
+# uses; if cf/pten -> ~1.0 once stripped, the win was RHT/SR, not per-row amax.
+#
+#   NVFP4_SNR_DISABLE_RHT=1  -> prod input/grad quantizers drop RHT
+#   NVFP4_SNR_DISABLE_SR=1   -> prod grad quantizer drops stochastic rounding
+#   NVFP4_SNR_DISABLE_2D=1   -> prod weight quantizer drops 2D block scaling
+_SNR_DISABLE_RHT = os.getenv("NVFP4_SNR_DISABLE_RHT", "0") == "1"
+_SNR_DISABLE_SR = os.getenv("NVFP4_SNR_DISABLE_SR", "0") == "1"
+_SNR_DISABLE_2D = os.getenv("NVFP4_SNR_DISABLE_2D", "0") == "1"
 
 
 def _has_sm100() -> bool:
@@ -152,9 +170,19 @@ def _run_fused(
     return d
 
 
-# Shapes obey the kernel contract (M, N, K all multiples of 256).
+# Shapes obey the kernel contract: M, N, K all multiples of 128 under 1-CTA
+# MmaTile (128, 128, 256). K_tile = 256 is the mainloop step, NOT a K alignment
+# requirement — CUTLASS predicates the K-residue tile so K can be < K_tile.
+# See nvfp4_cutlass_gemm.cu:414 for the full derivation.
 _SHAPES = [
-    (256, 256, 256),  # smallest legal shape
+    # %128 stress shapes (newly legal after relaxing the entry-point check —
+    # these directly verify K-residue predication and 1-CTA M/N alignment).
+    (128, 128, 128),  # absolute smallest legal shape
+    (256, 256, 128),  # K-only at minimum; only one (partial) K-tile total
+    (128, 256, 256),  # M-only at minimum
+    (256, 128, 256),  # N-only at minimum
+    # Original %256-aligned shapes (regression-guard the pre-relax path).
+    (256, 256, 256),
     (512, 256, 256),
     (256, 512, 256),
     (256, 256, 512),
@@ -290,15 +318,17 @@ def _bf16_gemm_ground_truth(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 def _make_input_quantizer() -> NVFP4Quantizer:
     """Prod fwd INPUT quantizer (A operand). Matches NVFP4BlockScaling defaults:
     fp4_quant_fwd_inp = QParams(RHT=True, SR=False, 2D=False) in recipe/__init__.py.
+    RHT is droppable via NVFP4_SNR_DISABLE_RHT for the isolation experiment.
     """
+    use_rht = not _SNR_DISABLE_RHT
     return NVFP4Quantizer(
         fp4_dtype=tex.DType.kFloat4E2M1,
         rowwise=True,
         columnwise=True,
         with_amax_reduction=False,
         amax_reduction_group=None,
-        with_rht=True,
-        with_post_rht_amax=True,
+        with_rht=use_rht,
+        with_post_rht_amax=use_rht,
         with_2d_quantization=False,
         stochastic_rounding=False,
         with_random_sign_mask=True,
@@ -309,6 +339,7 @@ def _make_weight_quantizer() -> NVFP4Quantizer:
     """Prod fwd WEIGHT quantizer (B operand). Matches NVFP4BlockScaling defaults:
     fp4_quant_fwd_weight = QParams(RHT=False, SR=False, 2D=True). Weight does
     not need RHT (static, infrequent quant) but uses 2D block scaling.
+    2D is droppable via NVFP4_SNR_DISABLE_2D for the isolation experiment.
     """
     return NVFP4Quantizer(
         fp4_dtype=tex.DType.kFloat4E2M1,
@@ -318,7 +349,7 @@ def _make_weight_quantizer() -> NVFP4Quantizer:
         amax_reduction_group=None,
         with_rht=False,
         with_post_rht_amax=False,
-        with_2d_quantization=True,
+        with_2d_quantization=not _SNR_DISABLE_2D,
         stochastic_rounding=False,
         with_random_sign_mask=True,
     )
@@ -596,18 +627,20 @@ def _make_grad_quantizer() -> NVFP4Quantizer:
     fp4_quant_bwd_grad = QParams(RHT=True, SR=True, 2D=False) in
     recipe/__init__.py. RHT lives on the columnwise side (consumed by
     wgrad GEMM); SR is applied during the FP4 round step on grad to avoid
-    systematic bias.
+    systematic bias. RHT/SR are droppable via NVFP4_SNR_DISABLE_RHT /
+    NVFP4_SNR_DISABLE_SR for the isolation experiment.
     """
+    use_rht = not _SNR_DISABLE_RHT
     return NVFP4Quantizer(
         fp4_dtype=tex.DType.kFloat4E2M1,
         rowwise=True,
         columnwise=True,
         with_amax_reduction=False,
         amax_reduction_group=None,
-        with_rht=True,
-        with_post_rht_amax=True,
+        with_rht=use_rht,
+        with_post_rht_amax=use_rht,
         with_2d_quantization=False,
-        stochastic_rounding=True,
+        stochastic_rounding=not _SNR_DISABLE_SR,
         with_random_sign_mask=True,
     )
 

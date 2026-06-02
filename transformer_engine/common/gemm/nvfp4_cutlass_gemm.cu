@@ -411,8 +411,21 @@ void nvte_nvfp4_cutlass_per_token_gemm(const NVTETensor a_data, const NVTETensor
              ab_numel);
 
   NVTE_CHECK(M > 0 && N > 0 && K > 0, "M, N, K must be positive");
-  NVTE_CHECK(M % 256 == 0 && N % 256 == 0 && K % 256 == 0,
-             "CUTLASS NVFP4 per-token fused GEMM requires M, N, K to be multiples of 256, got M=",
+  // Real alignment requirements under 1-CTA MmaTileShape = (128, 128, 256),
+  // ClusterShape = (1, 1, 1):
+  //   - M % 128 — one MmaTile in M (cuBLAS LT swizzled SF is a 128-row tile).
+  //   - N % 128 — one MmaTile in N.
+  //   - K % 128 — one TMA SF box in K. CUTLASS mainloop predicates the last
+  //     K-residue tile, so K_tile = 256 is *not* a hard K constraint. K % 16
+  //     would be the absolute minimum (NVFP4 inner SF block is 1×16) but the
+  //     128 alignment matches the cast kernel's `nvte_nvfp4_per_token_quantize`
+  //     contract exactly, so any tensor that survives the cast is valid here.
+  // The previous M%256 / N%256 / K%256 check was copy-pasted from the Stage 1
+  // standard-GEMM boilerplate and was tighter than the kernel actually needed.
+  // Switching to a 2-CTA cluster (path B) would tighten M to %256.
+  NVTE_CHECK(M % 128 == 0 && N % 128 == 0 && K % 128 == 0,
+             "CUTLASS NVFP4 per-token fused GEMM requires M % 128 == 0, N % 128 == 0, "
+             "K % 128 == 0 (1-CTA MmaTile = (128, 128, 256), K-residue is predicated), got M=",
              M, " N=", N, " K=", K, ".");
 
 #if defined(CUTLASS_ARCH_MMA_SM100_SUPPORTED)

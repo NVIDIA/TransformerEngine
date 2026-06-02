@@ -1701,22 +1701,56 @@ class NVFP4BlockScalingRecipeState(RecipeState):
                         nvfp4_e4m3_max = 256
                 elif self.recipe.nvfp4_4over6_e4m3_use_256 == "none":
                     nvfp4_e4m3_max = 448
+            # Per-token recipe drives the new nvte_nvfp4_per_token_quantize
+            # cast for BOTH forward and backward quantizer slots:
+            #
+            #   forward:  input / output / weight  -> per-token cast
+            #   backward: grad_output / grad_input -> per-token cast
+            #
+            # Per-token bwd uses the same cast kernel as fwd (per-row + per-
+            # col vector amaxes) and dispatches dgrad/wgrad through the same
+            # nvte_nvfp4_cutlass_per_token_gemm by selecting rowwise vs
+            # columnwise quantized data + amax at the GEMM call site (see
+            # _nvfp4_per_token_gemm in cpp_extensions/gemm.py for the NN/NT
+            # layout dispatch table).
+            #
+            # SR is intentionally NOT enabled for the per-token bwd path:
+            # the per-token kernel does not implement SR yet, and the
+            # per-row outer-amax granularity already mitigates the
+            # bias-cancellation case SR was added for in the prod NVFP4
+            # path. SR can be wired in later as a pure-additive change
+            # without touching this dispatch (the recipe's __post_init__
+            # already force-disables SR so users can't request it).
+            #
+            # The recipe's __post_init__ forced 2D / 4over6 / row_scaled off
+            # for per-token; RHT is opt-in via recipe.per_token_rht (the
+            # per-token cast kernel supports it), so with_rht below is gated on
+            # that flag rather than hard-forced off.
+            per_token = self.recipe.nvfp4_per_token() and (
+                (self.mode == "forward" and tensor_type in ("input", "output", "weight"))
+                or (self.mode == "backward" and tensor_type in ("grad_output", "grad_input"))
+            )
+
             return NVFP4Quantizer(
                 fp4_dtype=self.dtype,
                 rowwise=True,
                 columnwise=True,
-                with_rht=qparams.random_hadamard_transform,
-                with_post_rht_amax=qparams.random_hadamard_transform,
-                with_2d_quantization=qparams.fp4_2d_quantization,
-                stochastic_rounding=qparams.stochastic_rounding,
+                with_rht=qparams.random_hadamard_transform
+                and (not per_token or self.recipe.per_token_rht),
+                with_post_rht_amax=qparams.random_hadamard_transform
+                and (not per_token or self.recipe.per_token_rht),
+                with_2d_quantization=qparams.fp4_2d_quantization and not per_token,
+                stochastic_rounding=qparams.stochastic_rounding and not per_token,
                 row_scaled_nvfp4=(
-                    self.mode == "forward"
+                    not per_token
+                    and self.mode == "forward"
                     and tensor_type != "weight"
                     and self.recipe.row_scaled_activation
                 ),
-                nvfp4_use_4over6=nvfp4_use_4over6,
+                nvfp4_use_4over6=nvfp4_use_4over6 and not per_token,
                 nvfp4_e4m3_max=nvfp4_e4m3_max,
                 nvfp4_4over6_err_mode=self.recipe.nvfp4_4over6_err_mode,
+                per_token=per_token,
             )
 
         if self.mode not in ("forward", "backward"):

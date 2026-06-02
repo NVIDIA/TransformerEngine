@@ -22,6 +22,7 @@
 #include "common/util/system.h"
 #include "pybind.h"
 #include "transformer_engine/multi_tensor.h"
+#include "transformer_engine/nvfp4_per_token.h"
 #include "transformer_engine/recipe.h"
 #include "transformer_engine/transformer_engine.h"
 
@@ -964,6 +965,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
   const bool nvfp4_use_4over6 =
       quantizer_cpp_list[0]->nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
   const int nvfp4_e4m3_max = quantizer_cpp_list[0]->nvfp4_e4m3_max;
+  const bool per_token = quantizer_cpp_list[0]->per_token;
   const auto columnwise_usage = quantizer_cpp_list[0]->columnwise_usage;
   if (row_scaled_nvfp4) {
     NVTE_CHECK(rowwise_usage, "Row-scaled NVFP4 bulk allocation requires rowwise usage.");
@@ -1015,10 +1017,15 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
     return out;
   };
 
-  // Helper function to get size of amax buffer
-  auto amax_shape = [](const std::vector<size_t> &shape,
-                       bool row_scaled = false) -> std::vector<size_t> {
-    if (row_scaled) {
+  // Helper function to get size of amax buffer.
+  // - row_scaled (rowwise): (M,) per-row vector
+  // - per-token: callers pass the data shape so first-dim is M (rowwise)
+  //   or K (columnwise; shape is already transposed), giving the right
+  //   per-row / per-col vector length without extra plumbing.
+  // - default (prod scalar): (1,)
+  auto amax_shape = [per_token](const std::vector<size_t> &shape,
+                                bool row_scaled = false) -> std::vector<size_t> {
+    if (row_scaled || per_token) {
       const auto [rows, _] = get_2d_dims(shape);
       return {rows};
     }
@@ -1145,7 +1152,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
         amax_columnwise, MakePythonDType(fp4_dtype), quantizer_py_list[i],
         with_gemm_swizzled_scales, py::arg("row_scaled_nvfp4") = row_scaled_nvfp4,
         py::arg("nvfp4_use_4over6") = nvfp4_use_4over6,
-        py::arg("nvfp4_e4m3_max") = nvfp4_e4m3_max));
+        py::arg("nvfp4_e4m3_max") = nvfp4_e4m3_max, py::arg("per_token") = per_token));
 
     // Construct C++ tensor
     // Use a TensorWrapper variable to hold the output of makeTransformerEngineTensor,
@@ -1171,8 +1178,9 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
                                 getTensorShape(amax_rowwise_list[i]));
       }
       if (columnwise_usage) {
+        // Per-token: vector of length K. Otherwise: scalar (length 1).
         tensor_wrapper.set_columnwise_amax(amax_columnwise_list[i].data_ptr(), DType::kFloat32,
-                                           std::vector<size_t>{1});
+                                           getTensorShape(amax_columnwise_list[i]));
       }
 
       tensor_cpp_list.emplace_back(std::move(tensor_wrapper));
@@ -1589,6 +1597,18 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
                "NVFP4 4over6 quantization does not support stochastic rounding.");
   }
 
+  // Sanity-check per-token-vs-prod homogeneity across all splits. We don't
+  // support a mixed batch (some quantizers per-token, some prod) -- that
+  // would require either two grouped kernel launches or a hybrid kernel,
+  // neither of which is implemented yet.
+  const bool per_token = quantizer.per_token;
+  for (const auto *q : quantizers) {
+    NVTE_CHECK(q->per_token == per_token,
+               "NVFP4 split-quantize: all per-split quantizers must agree on "
+               "per_token mode (mixing per-token + prod in one batch is not "
+               "supported).");
+  }
+
   // Check input tensor shape
   const size_t input_last_dim = input.ndim() > 0 ? input.size(input.ndim() - 1) : 1;
   NVTE_CHECK(input_last_dim % 128 == 0,
@@ -1596,6 +1616,27 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
 
   // CUDA stream
   auto stream = at::cuda::getCurrentCUDAStream();
+
+  // Per-token grouped path replaces prod 2A (split_quantize with RHT-cast
+  // fusion). Calls the existing K1+K2 grouped kernel. Constraints (M_i % 64,
+  // K % 128, bf16-only) are enforced inside the C-API.
+  if (per_token) {
+    NVTE_CHECK(input.dtype() == DType::kBFloat16, "NVFP4 per-token split-quantize is bf16-only.");
+
+    const size_t num_tensors = output_list.size();
+    std::vector<NVTETensor> handles;
+    handles.reserve(num_tensors);
+    for (auto &out : output_list) {
+      handles.push_back(out.data());
+    }
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_group_nvfp4_per_token_quantize(input.data(), handles.data(), split_sections.data(),
+                                          num_tensors, quantizer.rowwise_usage,
+                                          quantizer.columnwise_usage, quantizer.with_rht ? 1 : 0,
+                                          quantizer.rht_matrix_random_sign_mask_t, stream);
+    });
+    return;
+  }
 
   // Perform multi-tensor quantization
   NVTE_SCOPED_GIL_RELEASE({
