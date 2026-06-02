@@ -866,6 +866,53 @@ def test_grouped_gemm(shape, dtype, layout, accumulate, use_cutlass, monkeypatch
             torch.testing.assert_close(o, o_ref, rtol=1.5e-2, atol=1.5e-2)
 
 
+@pytest.mark.skipif(
+    torch.cuda.get_device_capability() != (9, 0),
+    reason="Only enable CUTLASS grouped gemm on Hopper",
+)
+@pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
+def test_grouped_gemm_cutlass_empty_groups(layout, monkeypatch):
+    dtype = torch.bfloat16
+    z, k, n = 1, 2048, 1536
+    m_splits = [0] * z
+
+    if layout == "TN":
+        A = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # weight
+        B = [torch.empty(0, k, dtype=dtype, device="cuda") for _ in range(z)]  # input
+        out = [torch.empty(0, n, dtype=dtype, device="cuda")]  # output
+        grad = False
+        single_output = True
+    elif layout == "NN":
+        A = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # weight
+        B = [torch.empty(0, n, dtype=dtype, device="cuda") for _ in range(z)]  # grad_output
+        out = [torch.empty(0, k, dtype=dtype, device="cuda")]  # dgrad
+        grad = True
+        single_output = True
+    else:  # layout == "NT"
+        A = [torch.empty(0, k, dtype=dtype, device="cuda") for _ in range(z)]  # input
+        B = [torch.empty(0, n, dtype=dtype, device="cuda") for _ in range(z)]  # grad_output
+        out = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # wgrad
+        grad = True
+        single_output = False
+
+    monkeypatch.setenv("NVTE_USE_CUTLASS_GROUPED_GEMM", "1")
+    general_grouped_gemm(
+        A,
+        B,
+        out,
+        [None] * z,
+        dtype,
+        m_splits=m_splits,
+        grad=grad,
+        layout=layout,
+        single_output=single_output,
+    )
+    torch.cuda.synchronize()
+
+    for tensor in out:
+        torch.testing.assert_close(tensor, torch.zeros_like(tensor), rtol=0, atol=0)
+
+
 def _pack_grouped_tensor(grouped_tensor: GroupedTensor, tensors: List[torch.Tensor]) -> None:
     data = grouped_tensor.rowwise_data
     if data is None:
