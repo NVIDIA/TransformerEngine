@@ -16,8 +16,7 @@ from transformer_engine_torch import (
     NVTE_Fused_Attn_Backend,
 )
 from ..quantized_tensor import Quantizer
-from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx
-from transformer_engine.pytorch import DType
+from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx, DType
 
 
 __all__ = [

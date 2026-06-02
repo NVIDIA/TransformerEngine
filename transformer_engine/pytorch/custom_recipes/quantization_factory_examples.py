@@ -38,7 +38,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from transformer_engine.pytorch import DType
+from ..constants import DType
 from transformer_engine.pytorch.quantization import QuantizerRole
 
 

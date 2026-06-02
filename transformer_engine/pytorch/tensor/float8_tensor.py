@@ -19,8 +19,7 @@ from ..utils import canonicalize_process_group, devices_match
 from .storage.float8_tensor_storage import Float8TensorStorage, _FromFloat8Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ._quantization_helpers import _IdentityFunc
-from ..constants import dist_group_type
-from transformer_engine.pytorch import DType
+from ..constants import dist_group_type, DType
 
 aten = torch.ops.aten
 

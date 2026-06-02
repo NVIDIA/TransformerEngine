@@ -13,8 +13,7 @@ import transformer_engine_torch as tex
 
 from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 
-from ...constants import TE_DType as torch_to_transformer_engine_dtype, TE_DType_To_Torch
-from transformer_engine.pytorch import DType
+from ...constants import TE_DType as torch_to_transformer_engine_dtype, TE_DType_To_Torch, DType
 
 from ...utils import is_non_tn_fp8_gemm_supported, _empty_tensor
 

@@ -34,8 +34,7 @@ from transformer_engine.pytorch.quantization import (
 from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import Float8TensorStorage
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
-from transformer_engine.pytorch.constants import AttnMaskTypes, AttnTypes, dist_group_type
-from transformer_engine.pytorch import DType
+from transformer_engine.pytorch.constants import AttnMaskTypes, AttnTypes, dist_group_type, DType
 from transformer_engine.pytorch.distributed import (
     get_distributed_world_size,
     checkpoint,

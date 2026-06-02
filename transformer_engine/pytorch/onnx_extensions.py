@@ -30,8 +30,7 @@ import transformer_engine_torch as tex
 
 from .tensor.float8_tensor import Float8Quantizer
 from .tensor.mxfp8_tensor import MXFP8Quantizer
-from .constants import MXFP8_BLOCK_SCALING_SIZE
-from transformer_engine.pytorch import DType
+from .constants import MXFP8_BLOCK_SCALING_SIZE, DType
 from .utils import round_up_to_nearest_multiple
 from .export import is_in_onnx_export_mode
 

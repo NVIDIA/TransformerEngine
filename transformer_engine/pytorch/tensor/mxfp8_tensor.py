@@ -14,8 +14,7 @@ from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
 import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import MXFP8BlockScaling, Recipe
-from ..constants import MXFP8_BLOCK_SCALING_SIZE
-from transformer_engine.pytorch import DType
+from ..constants import MXFP8_BLOCK_SCALING_SIZE, DType
 from ..utils import devices_match, round_up_to_nearest_multiple
 from .storage.mxfp8_tensor_storage import MXFP8TensorStorage, _FromMXFP8Func
 from ..quantized_tensor import QuantizedTensor, Quantizer

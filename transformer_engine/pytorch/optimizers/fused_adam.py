@@ -13,7 +13,7 @@ import warnings
 import torch
 from torch.distributed._tensor import DTensor
 import transformer_engine_torch as tex
-from transformer_engine.pytorch import DType
+from ..constants import DType
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8Quantizer
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensor
 from .multi_tensor_apply import multi_tensor_applier

@@ -17,8 +17,7 @@ import transformer_engine_torch as tex
 
 from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 
-from ...constants import TE_DType as torch_to_transformer_engine_dtype
-from transformer_engine.pytorch import DType
+from ...constants import TE_DType as torch_to_transformer_engine_dtype, DType
 from ...utils import _empty_tensor
 
 

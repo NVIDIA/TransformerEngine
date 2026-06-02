@@ -21,8 +21,7 @@ from .mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
 from .float8_blockwise_tensor import Float8BlockwiseQTensor, Float8BlockQuantizer
 from ..optimizers.multi_tensor_apply import multi_tensor_applier
 from ..utils import is_non_tn_fp8_gemm_supported
-from ..constants import NVFP4_BLOCK_SCALING_SIZE
-from transformer_engine.pytorch import DType
+from ..constants import NVFP4_BLOCK_SCALING_SIZE, DType
 
 
 def replace_raw_data(tensor: QuantizedTensor, new_raw_data: torch.Tensor):

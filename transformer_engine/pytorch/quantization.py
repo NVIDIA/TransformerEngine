@@ -26,8 +26,7 @@ from transformer_engine.common.recipe import (
     NVFP4BlockScaling,
     CustomRecipe,
 )
-from .constants import dist_group_type
-from transformer_engine.pytorch import DType
+from .constants import dist_group_type, DType
 
 from .utils import get_device_compute_capability
 from .jit import jit_fuser

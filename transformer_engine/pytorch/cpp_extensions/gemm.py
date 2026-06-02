@@ -9,8 +9,7 @@ import os
 import functools
 import torch
 import transformer_engine_torch as tex
-from ..constants import TE_DType
-from transformer_engine.pytorch import DType
+from ..constants import TE_DType, DType
 from ..utils import get_sm_count, _empty_tensor
 
 from ..quantized_tensor import Quantizer

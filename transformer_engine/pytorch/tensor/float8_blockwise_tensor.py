@@ -15,7 +15,7 @@ from transformer_engine.common.recipe import Float8BlockScaling, Recipe
 from .storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ._quantization_helpers import _IdentityFunc
-from transformer_engine.pytorch import DType
+from ..constants import DType
 from ..utils import devices_match, round_up_to_nearest_multiple
 
 aten = torch.ops.aten
