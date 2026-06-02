@@ -143,11 +143,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         &transformer_engine::pytorch::create_empty_quantized_tensor,
         "Create an empty quantized tensor", py::arg("quantizer"), py::arg("shape"),
         py::arg("dtype"), py::arg("device"), py::arg("pin_memory"));
+  // tensor_offsets is optional. Grouped MLP can pass precomputed offsets from
+  // prepare_grouped_splits to avoid rebuilding grouped metadata in quantize.
   m.def("group_quantize", transformer_engine::pytorch::group_quantize, py::arg("tensor"),
         py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
         py::arg("tensor_offsets") = py::none());
   m.def("group_dequantize", transformer_engine::pytorch::group_dequantize,
         "Dequantize group tensor", py::arg("input"), py::arg("otype"));
+  // Keep the same optional-offset contract for dbias+grouped-quantize so the
+  // backward grouped MLP path can reuse offsets when they are already known.
   m.def("bgrad_group_quantize", transformer_engine::pytorch::bgrad_group_quantize,
         py::arg("tensor"), py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
         py::arg("tensor_offsets") = py::none());
@@ -503,6 +507,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("splits_to_offsets", &transformer_engine::pytorch::splits_to_offsets,
         "Compute grouped tensor offsets from split sizes", py::arg("first_dims"),
         py::arg("logical_last_dim"), py::call_guard<py::gil_scoped_release>());
+  // Returns split_points plus one int64 offsets tensor per logical_last_dims
+  // entry. Passing logical_last_dim=1 gives the unscaled base offsets.
   m.def("prepare_grouped_splits",
         py::overload_cast<const at::Tensor &, int64_t, const std::vector<int64_t> &>(
             &transformer_engine::pytorch::prepare_grouped_splits),
