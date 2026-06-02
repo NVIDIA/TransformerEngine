@@ -465,6 +465,17 @@ class TransformerEngineAPI(BaseNamespaceAPI):
         if api_name in ["inspect_tensor", "inspect_tensor_postquantize"]:
             assert ret is None
         if api_name == "modify_tensor":
+            # Per TEDefaultFeatures.modify_tensor spec: if `out` is provided
+            # the implementation must write into it and return None. This path
+            # is exercised by DebugQuantizer.update_quantized() (weight cache
+            # write-back). Without this branch, any modify_tensor feature
+            # (FakeQuant, PerTensorScaling, ...) configured on the `weight`
+            # tensor crashes here when get_weight_workspace updates the cache.
+            if kwargs.get("out", None) is not None:
+                assert (
+                    ret is None
+                ), f"modify_tensor with out != None must return None (got {type(ret)})."
+                return
             assert type(ret) in get_all_tensor_types()
             if (
                 type(ret) == torch.Tensor  # pylint: disable=unidiomatic-typecheck
