@@ -2331,8 +2331,40 @@ void NVFP4Quantizer::quantize_with_rht_unfused_helper(
 void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& out,
                                    const std::optional<TensorWrapper>& noop_flag,
                                    bool compute_amax) {
+  auto reduce_amaxes = [&]() {
+    if (!this->with_amax_reduction) {
+      return;
+    }
+
+    std::vector<at::Tensor> amax_tensors;
+    auto make_amax_tensor = [](void* data_ptr) {
+      NVTE_CHECK(data_ptr != nullptr, "Could not find amax pointer for NVFP4 amax reduction.");
+      return at::from_blob(
+          data_ptr, std::vector<int64_t>{1},
+          [](void*) {},  // deleter doing nothing since it doesn't own the data
+          at::device(at::kCUDA).dtype(torch::kFloat32));
+    };
+    if (rowwise_usage) {
+      amax_tensors.push_back(make_amax_tensor(out.get_amax().data_ptr));
+    }
+    if (columnwise_usage) {
+      amax_tensors.push_back(make_amax_tensor(out.get_columnwise_amax().data_ptr));
+    }
+    if (amax_tensors.empty()) {
+      return;
+    }
+
+    c10d::AllreduceCoalescedOptions opts;
+    opts.reduceOp = c10d::ReduceOp::MAX;
+    NVTE_SCOPED_GIL_RELEASE(
+        { this->amax_reduction_group->allreduce_coalesced(amax_tensors, opts)->wait(); });
+  };
+
   // Nothing to be done if input is empty
   if (input.numel() == 0) {
+    if (!compute_amax) {
+      reduce_amaxes();
+    }
     return;
   }
 
@@ -2469,27 +2501,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
     }
   }
 
-  // amax reduction
-  if (this->with_amax_reduction) {
-    std::vector<at::Tensor> amax_tensors;
-    // push amax tensors inside if they need to be reduced
-    auto make_amax_tensor = [](void* data_ptr) {
-      return at::from_blob(
-          data_ptr, std::vector<int64_t>{1},
-          [](void*) {},  // deleter doing nothing since it doesn't own the data
-          at::device(at::kCUDA).dtype(torch::kFloat32));
-    };
-    if (rowwise_usage) {
-      amax_tensors.push_back(make_amax_tensor(out.get_amax().data_ptr));
-    }
-    if (columnwise_usage) {
-      amax_tensors.push_back(make_amax_tensor(out.get_columnwise_amax().data_ptr));
-    }
-    c10d::AllreduceCoalescedOptions opts;
-    opts.reduceOp = c10d::ReduceOp::MAX;
-    NVTE_SCOPED_GIL_RELEASE(
-        { this->amax_reduction_group->allreduce_coalesced(amax_tensors, opts)->wait(); });
-  }
+  reduce_amaxes();
 
   // Fast math toggle: RHT transform can be accelerated
   // What math is accelerated? Only the high precision math, so numerical impact is minimal
