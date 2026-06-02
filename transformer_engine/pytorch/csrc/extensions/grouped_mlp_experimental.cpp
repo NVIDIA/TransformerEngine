@@ -20,21 +20,25 @@ namespace transformer_engine::pytorch {
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> swizzle_scales_and_pack_ptrs_for_discrete_weights(
     const std::vector<at::Tensor> &data_tensors,
-    const std::vector<at::Tensor> &scale_tensors, const std::string &format,
+    const std::vector<at::Tensor> &scale_tensors, const std::string &format_str,
     const c10::Device &device) {
   const size_t num_tensors = data_tensors.size();
   NVTE_CHECK(scale_tensors.size() == num_tensors,
              "Expected data_tensors and scale_tensors to have matching sizes, but got ",
              num_tensors, " and ", scale_tensors.size(), ".");
 
-  // Decode format
-  const bool is_mxfp8_rowwise = format == "mxfp8_rowwise";
-  const bool is_mxfp8_columnwise = format == "mxfp8_columnwise";
-  const bool is_nvfp4 = format == "nvfp4";
-  NVTE_CHECK(is_mxfp8_rowwise || is_mxfp8_columnwise || is_nvfp4, "Unsupported format (", format,
-             "). Expected one of: mxfp8_rowwise, mxfp8_columnwise, nvfp4.");
+  // Parse tensor format
+  enum class TensorFormat { Invalid, MXFP8Rowwise, MXFP8Columnwise, NVFP4 };
+  TensorFormat format = TensorFormat::Invalid;
+  if (format_str == "mxfp8_rowwise") { format = TensorFormat::MXFP8Rowwise; }
+  else if (format_str == "mxfp8_columnwise") { format = TensorFormat::MXFP8Columnwise; }
+  else if (format_str == "nvfp4") { format = TensorFormat::NVFP4; }
+  else {
+    NVTE_ERROR("Unsupported format (", format_str,
+               "). Expected one of: mxfp8_rowwise, mxfp8_columnwise, nvfp4.");
+  }
 
-  // Trivial case: no tensors. Return three empty tensors.
+  // Trivial case: no tensors. Return empty tensors.
   if (num_tensors == 0) {
     auto empty_ptrs = at::empty({0}, at::TensorOptions().dtype(at::kLong).device(device));
     auto empty_scales = at::empty({0}, at::TensorOptions().dtype(at::kByte).device(device));
@@ -44,12 +48,43 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> swizzle_scales_and_pack_ptrs_for_
   // CUDA stream
   auto stream = at::cuda::getCurrentCUDAStream();
 
-  // Tensor format
-  const NVTEScalingMode scaling_mode = is_nvfp4 ? NVTE_NVFP4_1D_SCALING : NVTE_MXFP8_1D_SCALING;
-  const transformer_engine::DType data_dtype =
-      is_nvfp4 ? transformer_engine::DType::kFloat4E2M1 : transformer_engine::DType::kFloat8E4M3;
-  const transformer_engine::DType scale_dtype =
-      is_nvfp4 ? transformer_engine::DType::kFloat8E4M3 : transformer_engine::DType::kFloat8E8M0;
+  // Tensor properties
+  NVTEScalingMode scaling_mode;
+  transformer_engine::DType data_dtype, scale_dtype;
+  NVTETensorParam data_param_name, scale_param_name;
+  switch (format) {
+  case TensorFormat::MXFP8Rowwise:
+  case TensorFormat::MXFP8Columnwise:
+    scaling_mode = NVTE_MXFP8_1D_SCALING;
+    data_dtype = transformer_engine::DType::kFloat8E4M3;
+    scale_dtype = transformer_engine::DType::kFloat8E8M0;
+    if (format == TensorFormat::MXFP8Rowwise) {
+      data_param_name = kNVTERowwiseData;
+      scale_param_name = kNVTERowwiseScaleInv;
+    } else {
+      data_param_name = kNVTEColumnwiseData;
+      scale_param_name = kNVTEColumnwiseScaleInv;
+    }
+    break;
+  case TensorFormat::NVFP4:
+    scaling_mode = NVTE_NVFP4_1D_SCALING;
+    data_dtype = transformer_engine::DType::kFloat4E2M1;
+    scale_dtype = transformer_engine::DType::kFloat8E4M3;
+    data_param_name = kNVTERowwiseData;
+    scale_param_name = kNVTERowwiseScaleInv;
+    break;
+  default:
+    NVTE_ERROR("Unsupported format (", static_cast<int>(format), ").");
+  }
+
+  // Data shape
+  NVTEShape data_shape = convertTorchShape(data_tensors[0].sizes());
+  if (format == TensorFormat::NVFP4) {
+    // NVFP4 packs two 4-bit values per byte
+    NVTE_CHECK(data_shape.ndim > 0,
+               "Invalid shape for NVFP4 data tensor (", getTensorShape(data_tensors[0]), ").");
+    data_shape.data[data_shape.ndim - 1] *= 2;
+  }
 
   // Scale shape
   const NVTEShape scale_shape = convertTorchShape(scale_tensors[0].sizes());
@@ -58,22 +93,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> swizzle_scales_and_pack_ptrs_for_
   const size_t scale_numel = scale_shape.data[0] * scale_shape.data[1];
   const size_t scale_dtype_bits = transformer_engine::pytorch::typeToNumBits(scale_dtype);
   const size_t scale_bytes = ceildiv(scale_numel * scale_dtype_bits, 8);
-
-  // Expected data shape.
-  // Note: May not match actual data shape since the scales are padded.
-  // This is fine since the swizzle kernel does not touch the data.
-  NVTEShape data_shape;
-  data_shape.ndim = 2;
-  if (is_mxfp8_rowwise) {
-    data_shape.data[0] = scale_shape.data[0];
-    data_shape.data[1] = scale_shape.data[1] * 32;
-  } else if (is_mxfp8_columnwise) {
-    data_shape.data[0] = scale_shape.data[0] * 32;
-    data_shape.data[1] = scale_shape.data[1];
-  } else {  // nvfp4
-    data_shape.data[0] = scale_shape.data[0];
-    data_shape.data[1] = scale_shape.data[1] * 16;
-  }
 
   // Allocate single buffer for swizzled scales. Uses a uniform stride since
   // all tensors share the same scale shape.
@@ -94,22 +113,17 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> swizzle_scales_and_pack_ptrs_for_
     nvte_set_tensor_param_v2(t, param, &data, sizeof(data));
   };
 
-  // MXFP8 columnwise tags its data/scale params on the columnwise side; the
-  // other two formats (mxfp8_rowwise, nvfp4) tag on the rowwise side.
-  const NVTETensorParam data_param = is_mxfp8_columnwise ? kNVTEColumnwiseData : kNVTERowwiseData;
-  const NVTETensorParam scale_param =
-      is_mxfp8_columnwise ? kNVTEColumnwiseScaleInv : kNVTERowwiseScaleInv;
-
+  // Configure NVTETensors
   for (size_t i = 0; i < num_tensors; ++i) {
     const uint8_t swizzled_flag = 1;
     nvte_set_tensor_param_v2(outputs_nvte[i], kNVTEWithGEMMSwizzledScales, &swizzled_flag,
                              sizeof(swizzled_flag));
     void *in_scale_ptr = scale_tensors[i].data_ptr();
     void *out_scale_ptr = swizzled_scales_dptr + i * swizzled_scales_stride;
-    set_param(inputs_nvte[i], data_param, nullptr, data_dtype, data_shape);
-    set_param(inputs_nvte[i], scale_param, in_scale_ptr, scale_dtype, scale_shape);
-    set_param(outputs_nvte[i], data_param, nullptr, data_dtype, data_shape);
-    set_param(outputs_nvte[i], scale_param, out_scale_ptr, scale_dtype, scale_shape);
+    set_param(inputs_nvte[i], data_param_name, nullptr, data_dtype, data_shape);
+    set_param(inputs_nvte[i], scale_param_name, in_scale_ptr, scale_dtype, scale_shape);
+    set_param(outputs_nvte[i], data_param_name, nullptr, data_dtype, data_shape);
+    set_param(outputs_nvte[i], scale_param_name, out_scale_ptr, scale_dtype, scale_shape);
   }
 
   // Launch swizzle kernel
