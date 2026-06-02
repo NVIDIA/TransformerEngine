@@ -33,10 +33,13 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> swizzle_scales_and_pack_ptrs_for_
   // Parse swizzle type
   enum class SwizzleType { Invalid, MXFP8Rowwise, MXFP8Columnwise, NVFP4 };
   SwizzleType swizzle_type = SwizzleType::Invalid;
-  if (swizzle_type_str == "mxfp8_rowwise") { swizzle_type = SwizzleType::MXFP8Rowwise; }
-  else if (swizzle_type_str == "mxfp8_columnwise") { swizzle_type = SwizzleType::MXFP8Columnwise; }
-  else if (swizzle_type_str == "nvfp4") { swizzle_type = SwizzleType::NVFP4; }
-  else {
+  if (swizzle_type_str == "mxfp8_rowwise") {
+    swizzle_type = SwizzleType::MXFP8Rowwise;
+  } else if (swizzle_type_str == "mxfp8_columnwise") {
+    swizzle_type = SwizzleType::MXFP8Columnwise;
+  } else if (swizzle_type_str == "nvfp4") {
+    swizzle_type = SwizzleType::NVFP4;
+  } else {
     NVTE_ERROR("Unsupported swizzle type (", swizzle_type_str,
                "). Expected one of: mxfp8_rowwise, mxfp8_columnwise, nvfp4.");
   }
