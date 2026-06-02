@@ -28,10 +28,15 @@ extern "C" {
  *  \param[in] with_swizzle  non-zero -> K2 emits rowwise scale_inv directly
  *                       in the cuBLAS LT swizzled tile layout (rowwise only;
  *                       colwise stays compact M-major).
+ *  \param[in] with_sr   non-zero -> the K2 FP4 cast uses stochastic rounding
+ *                       (per-element Philox dither). K1 amax stays
+ *                       deterministic. Zero is byte-equal to the RN path.
+ *  \param[in] rng_state int64 device tensor of shape [2] = {seed, offset}
+ *                       (host-unpacked Philox). May be NULL iff with_sr == 0.
  */
 void nvte_nvfp4_per_token_quantize(const NVTETensor input, const NVTETensor noop, NVTETensor output,
                                    int with_rht, int random_sign_mask_t, int with_swizzle,
-                                   cudaStream_t stream);
+                                   int with_sr, const NVTETensor rng_state, cudaStream_t stream);
 
 /*! \brief Kernel 1 in isolation: per-row + per-col amax via TMA + atomicMax.
  *         Pre-zeroes the amax buffers and merges per-CTA partials into
@@ -61,10 +66,14 @@ void nvte_nvfp4_per_token_amax(const NVTETensor input, const NVTETensor noop, NV
  *  \param[in] with_swizzle  non-zero -> write rowwise scale_inv directly in
  *                       the cuBLAS LT swizzled tile layout (rowwise only;
  *                       colwise stays compact M-major).
+ *  \param[in] with_sr   non-zero -> stochastic-rounding FP4 cast (per-element
+ *                       Philox dither). Zero is byte-equal to the RN path.
+ *  \param[in] rng_state int64 device tensor of shape [2] = {seed, offset}.
+ *                       May be NULL iff with_sr == 0.
  */
 void nvte_nvfp4_per_token_encode(const NVTETensor input, const NVTETensor noop, NVTETensor output,
                                  int with_rht, int random_sign_mask_t, int with_swizzle,
-                                 cudaStream_t stream);
+                                 int with_sr, const NVTETensor rng_state, cudaStream_t stream);
 
 /*! \brief Returns 1 iff the per-token kernels accept ``(M, K, dtype)``.
  *

@@ -1714,18 +1714,13 @@ class NVFP4BlockScalingRecipeState(RecipeState):
             # _nvfp4_per_token_gemm in cpp_extensions/gemm.py for the NN/NT
             # layout dispatch table).
             #
-            # SR is intentionally NOT enabled for the per-token bwd path:
-            # the per-token kernel does not implement SR yet, and the
-            # per-row outer-amax granularity already mitigates the
-            # bias-cancellation case SR was added for in the prod NVFP4
-            # path. SR can be wired in later as a pure-additive change
-            # without touching this dispatch (the recipe's __post_init__
-            # already force-disables SR so users can't request it).
-            #
             # The recipe's __post_init__ forced 2D / 4over6 / row_scaled off
-            # for per-token; RHT is opt-in via recipe.per_token_rht (the
-            # per-token cast kernel supports it), so with_rht below is gated on
-            # that flag rather than hard-forced off.
+            # for per-token; RHT and SR are opt-in via recipe.per_token_rht /
+            # recipe.per_token_sr (both per-token kernels support them), so
+            # with_rht / stochastic_rounding below are gated on those flags
+            # rather than hard-forced off. SR, when enabled, lands on the
+            # bwd-grad quantizer only (the recipe sets qparams.stochastic_rounding
+            # on fp4_quant_bwd_grad alone, mirroring prod).
             per_token = self.recipe.nvfp4_per_token() and (
                 (self.mode == "forward" and tensor_type in ("input", "output", "weight"))
                 or (self.mode == "backward" and tensor_type in ("grad_output", "grad_input"))
@@ -1740,7 +1735,8 @@ class NVFP4BlockScalingRecipeState(RecipeState):
                 with_post_rht_amax=qparams.random_hadamard_transform
                 and (not per_token or self.recipe.per_token_rht),
                 with_2d_quantization=qparams.fp4_2d_quantization and not per_token,
-                stochastic_rounding=qparams.stochastic_rounding and not per_token,
+                stochastic_rounding=qparams.stochastic_rounding
+                and (not per_token or self.recipe.per_token_sr),
                 row_scaled_nvfp4=(
                     not per_token
                     and self.mode == "forward"

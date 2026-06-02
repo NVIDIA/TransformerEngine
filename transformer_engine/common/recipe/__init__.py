@@ -565,6 +565,12 @@ class NVFP4BlockScaling(Recipe):
     # flag (NOT env-driven) so it can be flipped per-recipe, e.g. from a
     # --enable-rht CLI switch. No effect on the non-per-token (prod) path.
     per_token_rht: bool = False
+    # Per-token only: opt INTO stochastic rounding. Per-token otherwise
+    # force-disables SR, but the per-token K2 encode kernel DOES implement SR
+    # (Philox-dithered FP4 cast), so this flag re-enables it on the bwd-grad
+    # quantizer (mirrors prod, which only applies SR to fp4_quant_bwd_grad).
+    # Plain constructor flag (NOT env-driven). No effect on the prod path.
+    per_token_sr: bool = False
     row_scaled_activation: bool = os.getenv("NVTE_NVFP4_ROW_SCALED_ACTIVATION", "0") == "1"
     nvfp4_4over6: str = os.getenv("NVTE_NVFP4_4OVER6", "none")
     nvfp4_4over6_e4m3_use_256: str = os.getenv("NVTE_NVFP4_4OVER6_E4M3_USE_256", "all")
@@ -611,11 +617,11 @@ class NVFP4BlockScaling(Recipe):
         QParams construction so the forced values propagate into the
         ``fp4_quant_*`` QParams below.
         """
-        # RHT is opt-in for per-token (the cast kernel supports it); SR / 2D /
+        # RHT and SR are opt-in for per-token (both kernels support them); 2D /
         # row_scaled / 4over6 stay hard-disabled (their per-token kernels are
         # not implemented yet -- see NVFP4Quantizer ctor mutex).
         object.__setattr__(self, "disable_rht", not self.per_token_rht)
-        object.__setattr__(self, "disable_stochastic_rounding", True)
+        object.__setattr__(self, "disable_stochastic_rounding", not self.per_token_sr)
         object.__setattr__(self, "disable_2d_quantization", True)
         object.__setattr__(self, "row_scaled_activation", False)
         object.__setattr__(self, "nvfp4_4over6", "none")
@@ -710,11 +716,12 @@ class NVFP4PerTokenBlockScaling(NVFP4BlockScaling):
         ``NVFP4Quantizer`` ctor does NOT mutex it (only requires
         ``with_post_rht_amax=True``, which the quantizer factory sets
         alongside ``with_rht``).
-      - ``disable_stochastic_rounding`` is forced True. The per-token
-        kernels round-to-nearest-even (RNE) only. Per-row outer scale
-        already greatly reduces the bias-cancellation pressure SR is
-        normally added to address; SR can be wired in later as a
-        pure-additive change without touching the dispatch path.
+      - ``disable_stochastic_rounding`` defaults True, but SR is OPT-IN:
+        set ``per_token_sr=True`` to re-enable it. The per-token K2 encode
+        kernel implements SR (Philox-dithered FP4 cast); when enabled it is
+        applied to the bwd-grad quantizer only (mirrors prod, which only
+        sets SR on ``fp4_quant_bwd_grad``). The C++ ``NVFP4Quantizer`` ctor
+        does NOT mutex it.
       - ``disable_2d_quantization`` is forced True (2D quant is mutex
         with per-token amax allocation).
       - ``row_scaled_activation`` is forced False (the row-scaled

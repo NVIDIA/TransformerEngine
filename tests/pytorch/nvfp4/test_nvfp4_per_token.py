@@ -5,9 +5,10 @@
 """Correctness tests for NVFP4 per-token cast + cuBLAS LT NVFP4 GEMM.
 
 Covers byte-equal kernel-vs-reference quantize parity, K1/K2 split-vs-composite
-parity, dequant + fp32 reference, optional RHT (K1 amax + K2 cast), and a
-cuBLAS LT NVFP4 GEMM smoke. Requires bf16 input, M % 128 == 0, K % 128 == 0;
-GEMM and RHT tests gated by SM100.
+parity, dequant + fp32 reference, optional RHT (K1 amax + K2 cast), fused SF
+swizzle, stochastic rounding (unbiasedness + RN-determinism), and a cuBLAS LT
+NVFP4 GEMM smoke. Requires bf16 input, M % 128 == 0, K % 128 == 0; GEMM, RHT,
+swizzle, and SR tests gated by SM100.
 """
 
 from __future__ import annotations
@@ -965,3 +966,107 @@ def test_per_token_gemm_with_fused_swizzle_matches_unswizzled(M: int, K: int) ->
         atol=0,
         msg=f"fused-swizzle GEMM output != unswizzled-input GEMM at ({M}, {K})",
     )
+
+
+# =============================================================================
+# (7) Stochastic rounding: tex.nvfp4_per_token_quantize(with_sr=True,
+# rng_state=...). Mirrors the per-tensor SR test but drives the per-token
+# K1+K2 kernel. Two properties:
+#   * Unbiasedness: averaging the dequantized output over many independent SR
+#     draws has STRICTLY lower RMSE-vs-input than the single round-to-nearest
+#     (RN) result -- the defining SR property (trades per-sample error for zero
+#     bias), same assertion the prod per-tensor test makes.
+#   * Non-determinism / RN-determinism: two SR draws with different rng_state
+#     differ; two RN casts (with_sr=False) are byte-identical.
+# The per-token outer scale is a per-row amax, so dequant reuses
+# _dequant_fp4_with_outer_amax (the kernel's own arithmetic).
+# =============================================================================
+
+
+def _rng_state(seed: int, offset: int = 0, device: str = "cuda") -> torch.Tensor:
+    return torch.tensor([seed, offset], dtype=torch.int64, device=device)
+
+
+def _quantize_per_token_rowwise_sr(
+    x: torch.Tensor,
+    *,
+    with_sr: bool,
+    rng_state: torch.Tensor | None = None,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """(M, K) bf16 -> (q (M, K/2), s (M, K/16), row_amax (M,)) via the SR path."""
+    assert x.dim() == 2 and x.dtype == torch.bfloat16
+    M, K = x.shape
+    q_row = torch.empty((M, K // 2), dtype=torch.uint8, device=x.device)
+    s_row = torch.empty((M, K // BLOCK_K), dtype=torch.uint8, device=x.device)
+    a_row = torch.empty((M,), dtype=torch.float32, device=x.device)
+    empty = torch.empty(0, dtype=torch.uint8, device=x.device)
+    empty_f = torch.empty(0, dtype=torch.float32, device=x.device)
+    tex.nvfp4_per_token_quantize(
+        x,
+        q_row,
+        s_row,
+        a_row,
+        empty,
+        empty,
+        empty_f,
+        rowwise=True,
+        columnwise=False,
+        with_rht=False,
+        random_sign_mask_t=int(0xACE1),
+        with_swizzle=False,
+        with_sr=with_sr,
+        rng_state=rng_state,
+    )
+    return q_row, s_row, a_row
+
+
+@_GATED_SM100
+@pytest.mark.parametrize("M, K", [(256, 512), (512, 1024)])
+def test_per_token_sr_unbiased(M: int, K: int) -> None:
+    """Averaging many SR draws beats RN (the SR unbiasedness contract)."""
+    torch.manual_seed(2024)
+    device = torch.device("cuda")
+    n_iters = 64
+    x = (torch.randn((M, K), dtype=torch.bfloat16, device=device) * 2 - 1).contiguous()
+
+    # Round-to-nearest reference.
+    q_rn, s_rn, a_rn = _quantize_per_token_rowwise_sr(x, with_sr=False)
+    dq_rn = _dequant_fp4_with_outer_amax(q_rn, s_rn, a_rn)
+    rmse_rn = torch.sqrt(((dq_rn - x.float()) ** 2).mean())
+
+    # Mean over independent SR draws (different rng_state each iter). Dequant
+    # uses the RN outer amax so only the rounding differs across draws.
+    acc = torch.zeros((M, K), dtype=torch.float32, device=device)
+    for i in range(n_iters):
+        q_sr, s_sr, _ = _quantize_per_token_rowwise_sr(x, with_sr=True, rng_state=_rng_state(i + 1))
+        acc += _dequant_fp4_with_outer_amax(q_sr, s_sr, a_rn)
+    dq_sr = acc / n_iters
+    rmse_sr = torch.sqrt(((dq_sr - x.float()) ** 2).mean())
+
+    print(f"[per-token SR] M={M} K={K}  RMSE SR(mean of {n_iters})={rmse_sr:.3e}  RN={rmse_rn:.3e}")
+    assert (
+        rmse_sr < rmse_rn
+    ), f"per-token SR not unbiased: mean-SR RMSE {rmse_sr:.3e} >= RN RMSE {rmse_rn:.3e}"
+
+
+@_GATED_SM100
+def test_per_token_sr_nondeterministic_rn_deterministic() -> None:
+    """SR draws with different seeds differ; RN is byte-identical."""
+    torch.manual_seed(7)
+    device = torch.device("cuda")
+    M, K = 256, 512
+    x = (torch.randn((M, K), dtype=torch.bfloat16, device=device) * 2 - 1).contiguous()
+
+    # RN is deterministic.
+    q_rn0, _, _ = _quantize_per_token_rowwise_sr(x, with_sr=False)
+    q_rn1, _, _ = _quantize_per_token_rowwise_sr(x, with_sr=False)
+    assert torch.equal(q_rn0, q_rn1), "RN per-token cast must be deterministic."
+
+    # SR with different rng_state must differ somewhere (overwhelmingly likely).
+    q_sr0, _, _ = _quantize_per_token_rowwise_sr(x, with_sr=True, rng_state=_rng_state(1))
+    q_sr1, _, _ = _quantize_per_token_rowwise_sr(x, with_sr=True, rng_state=_rng_state(2))
+    assert not torch.equal(q_sr0, q_sr1), "SR draws with different seeds should differ."
+
+    # And SR should still be close to RN (only the residual bits are dithered).
+    frac_diff = (q_sr0 != q_rn0).float().mean().item()
+    assert frac_diff < 0.6, f"SR changed too many codes vs RN ({frac_diff:.2%}); suspicious."

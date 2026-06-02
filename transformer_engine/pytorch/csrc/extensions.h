@@ -500,7 +500,8 @@ void nvfp4_cutlass_per_token_gemm(const at::Tensor &a_data, const at::Tensor &b_
 void nvfp4_per_token_quantize(const at::Tensor &input, at::Tensor q_row, at::Tensor s_dec_row,
                               at::Tensor row_amax, at::Tensor q_col, at::Tensor s_dec_col,
                               at::Tensor col_amax, bool rowwise, bool columnwise, bool with_rht,
-                              int64_t random_sign_mask_t, bool with_swizzle);
+                              int64_t random_sign_mask_t, bool with_swizzle, bool with_sr,
+                              std::optional<at::Tensor> rng_state);
 
 void nvfp4_per_token_amax(const at::Tensor &input, at::Tensor row_amax, at::Tensor col_amax,
                           bool rowwise, bool columnwise, bool with_rht, int64_t random_sign_mask_t);
@@ -508,7 +509,8 @@ void nvfp4_per_token_amax(const at::Tensor &input, at::Tensor row_amax, at::Tens
 void nvfp4_per_token_encode(const at::Tensor &input, at::Tensor q_row, at::Tensor s_dec_row,
                             at::Tensor row_amax, at::Tensor q_col, at::Tensor s_dec_col,
                             at::Tensor col_amax, bool rowwise, bool columnwise, bool with_rht,
-                            int64_t random_sign_mask_t, bool with_swizzle);
+                            int64_t random_sign_mask_t, bool with_swizzle, bool with_sr,
+                            std::optional<at::Tensor> rng_state);
 
 void nvfp4_per_token_post_scale(at::Tensor d, const at::Tensor &row_amax_a,
                                 const at::Tensor &row_amax_b);

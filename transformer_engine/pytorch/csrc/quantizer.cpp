@@ -1884,9 +1884,8 @@ NVFP4Quantizer::NVFP4Quantizer(const py::handle& quantizer) : Quantizer(quantize
                "row_scaled_nvfp4 must be False.");
     NVTE_CHECK(this->nvfp4_4over6_mode == kNVTENVFP44Over6Disabled,
                "NVFP4 per-token does not support 4over6.");
-    NVTE_CHECK(!this->stochastic_rounding,
-               "NVFP4 per-token does not yet support stochastic rounding "
-               "(TODO: SR kernel).");
+    // Stochastic rounding IS supported for per-token (K2 encode dithers the
+    // FP4 cast; opt in via NVFP4PerTokenBlockScaling(per_token_sr=True)).
     NVTE_CHECK(!this->with_amax_reduction,
                "NVFP4 per-token does not yet support amax reduction "
                "(TODO: per-row/per-col vector allreduce).");
@@ -2538,10 +2537,29 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
     NVTE_CHECK(this->with_post_rht_amax || !this->with_rht,
                "NVFP4 per-token RHT requires with_post_rht_amax=True "
                "(K1 col_amax must be post-RHT).");
+    // Build a Philox rng_state for the optional SR cast (mirrors the
+    // per-tensor SR path below). The per-token K2 kernel reads {seed, offset}
+    // from it; nullptr => round-to-nearest. `rng_state_at` must outlive the
+    // launch, so it is declared in this scope.
+    TensorWrapper te_rng_state;
+    NVTETensor rng_state_nvte = nullptr;
+    at::Tensor rng_state_at;
+    if (this->stochastic_rounding) {
+      const size_t rng_elts_per_thread = 1024;
+      auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
+          std::nullopt, at::cuda::detail::getDefaultCUDAGenerator());
+      auto opts = at::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
+      at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
+      rng_state_at = torch::empty({2}, opts);
+      philox_unpack(philox_args, static_cast<int64_t*>(rng_state_at.data_ptr()));
+      te_rng_state = makeTransformerEngineTensor(rng_state_at);
+      rng_state_nvte = te_rng_state.data();
+    }
     NVTE_SCOPED_GIL_RELEASE({
       nvte_nvfp4_per_token_quantize(input.data(), nullptr, out.data(), this->with_rht ? 1 : 0,
                                     this->rht_matrix_random_sign_mask_t,
-                                    /*with_swizzle=*/0, stream);
+                                    /*with_swizzle=*/0, this->stochastic_rounding ? 1 : 0,
+                                    rng_state_nvte, stream);
     });
     return;
   }

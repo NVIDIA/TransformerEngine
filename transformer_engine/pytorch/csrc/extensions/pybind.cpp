@@ -468,7 +468,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("q_col"), py::arg("s_dec_col"), py::arg("col_amax"), py::arg("rowwise"),
         py::arg("columnwise"), py::arg("with_rht") = false,
         py::arg("random_sign_mask_t") = static_cast<int64_t>(0xACE1),
-        py::arg("with_swizzle") = false);
+        py::arg("with_swizzle") = false, py::arg("with_sr") = false,
+        py::arg("rng_state") = std::nullopt);
   m.def("nvfp4_per_token_amax", &transformer_engine::pytorch::nvfp4_per_token_amax,
         "K1-only: per-row/per-col outer amax via TMA + atomicMax. Bench/diagnostic. "
         "with_rht=True applies a 16-pt col-wise RHT before amax.",
@@ -483,7 +484,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("q_col"), py::arg("s_dec_col"), py::arg("col_amax"), py::arg("rowwise"),
         py::arg("columnwise"), py::arg("with_rht") = false,
         py::arg("random_sign_mask_t") = static_cast<int64_t>(0xACE1),
-        py::arg("with_swizzle") = false);
+        py::arg("with_swizzle") = false, py::arg("with_sr") = false,
+        py::arg("rng_state") = std::nullopt);
   m.def("nvfp4_cutlass_gemm", &transformer_engine::pytorch::nvfp4_cutlass_gemm,
         "Stage-1 forked CUTLASS NVFP4 x NVFP4 -> BF16 GEMM with scalar (alpha, "
         "beta) epilogue. Drop-in replacement for cuBLAS LT NVFP4. Pair with "

@@ -116,16 +116,23 @@ void assemble_per_token_tensors(const at::Tensor& input, at::Tensor q_row, at::T
 void nvfp4_per_token_quantize(const at::Tensor& input, at::Tensor q_row, at::Tensor s_dec_row,
                               at::Tensor row_amax, at::Tensor q_col, at::Tensor s_dec_col,
                               at::Tensor col_amax, bool rowwise, bool columnwise, bool with_rht,
-                              int64_t random_sign_mask_t, bool with_swizzle) {
+                              int64_t random_sign_mask_t, bool with_swizzle, bool with_sr,
+                              std::optional<at::Tensor> rng_state) {
   TensorWrapper in_te;
   TensorWrapper out_te(NVTE_NVFP4_1D_SCALING);
   assemble_per_token_tensors(input, q_row, s_dec_row, row_amax, q_col, s_dec_col, col_amax, rowwise,
                              columnwise, /*mode=*/0, in_te, out_te);
   if (with_swizzle) out_te.set_with_gemm_swizzled_scales(true);
+  TensorWrapper rng_te;
+  NVTETensor rng_nvte = nullptr;
+  if (with_sr && rng_state.has_value()) {
+    rng_te = makeTransformerEngineTensor(*rng_state);
+    rng_nvte = rng_te.data();
+  }
   const auto stream = at::cuda::getCurrentCUDAStream();
   nvte_nvfp4_per_token_quantize(in_te.data(), nullptr, out_te.data(), with_rht ? 1 : 0,
                                 static_cast<int>(random_sign_mask_t & 0xFFFF), with_swizzle ? 1 : 0,
-                                stream);
+                                with_sr ? 1 : 0, rng_nvte, stream);
 }
 
 // K1-only (diagnostic / bench): populates only amax buffers. with_rht=true
@@ -151,16 +158,23 @@ void nvfp4_per_token_amax(const at::Tensor& input, at::Tensor row_amax, at::Tens
 void nvfp4_per_token_encode(const at::Tensor& input, at::Tensor q_row, at::Tensor s_dec_row,
                             at::Tensor row_amax, at::Tensor q_col, at::Tensor s_dec_col,
                             at::Tensor col_amax, bool rowwise, bool columnwise, bool with_rht,
-                            int64_t random_sign_mask_t, bool with_swizzle) {
+                            int64_t random_sign_mask_t, bool with_swizzle, bool with_sr,
+                            std::optional<at::Tensor> rng_state) {
   TensorWrapper in_te;
   TensorWrapper out_te(NVTE_NVFP4_1D_SCALING);
   assemble_per_token_tensors(input, q_row, s_dec_row, row_amax, q_col, s_dec_col, col_amax, rowwise,
                              columnwise, /*mode=*/2, in_te, out_te);
   if (with_swizzle) out_te.set_with_gemm_swizzled_scales(true);
+  TensorWrapper rng_te;
+  NVTETensor rng_nvte = nullptr;
+  if (with_sr && rng_state.has_value()) {
+    rng_te = makeTransformerEngineTensor(*rng_state);
+    rng_nvte = rng_te.data();
+  }
   const auto stream = at::cuda::getCurrentCUDAStream();
   nvte_nvfp4_per_token_encode(in_te.data(), nullptr, out_te.data(), with_rht ? 1 : 0,
                               static_cast<int>(random_sign_mask_t & 0xFFFF), with_swizzle ? 1 : 0,
-                              stream);
+                              with_sr ? 1 : 0, rng_nvte, stream);
 }
 
 // Apply per-token post-scale to a GEMM output (see nvfp4_per_token.h for math).

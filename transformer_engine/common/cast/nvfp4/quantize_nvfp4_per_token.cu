@@ -43,7 +43,14 @@ namespace nvfp4_per_token {
 using dispatch::common::align_smem_ptr_per_TMA_requirements;
 using dispatch::nvfp4::nvfp4_scale_t;
 using dispatch::nvfp4::core::compute_global_encode_scaling_factor_FP4;
+using dispatch::nvfp4::core::get_rbits;
 using dispatch::nvfp4::quantization_SF::compute_decoding_scaling_factor;
+
+// Philox RNG state used by the optional stochastic-rounding (SR) FP4 cast in
+// K2 encode. Same type / round-count as the prod per-tensor SR path
+// (quantize_transpose_nvfp4.cuh) so the two share the curanddx generator.
+using PhiloxState =
+    transformer_engine::curanddx::detail::philox4x32_native_state<NVTE_BUILD_NUM_PHILOX_ROUNDS>;
 
 constexpr int CHUNK_DIM_Y = 128;                // CTA covers this many rows of input
 constexpr int CHUNK_DIM_X = 128;                // CTA covers this many cols of input
@@ -102,11 +109,13 @@ using ScalesTypeTr2D = nvfp4_scale_t[CHUNK_DIM_X][SCALES_PER_CHUNK_Y];
 
 // Compute the per-block (1x16) byte-equal arithmetic and emit FP4 codes into
 // SMEM rowwise output buffer + e4m3 scale into SMEM rowwise scale buffer.
+template <bool kWithSr = false>
 __device__ __forceinline__ void rowwise_scaling_per_token(
     const IType* __restrict__ sIn_ptr, fp4e2m1x2* __restrict__ sOut_ptr,
     nvfp4_scale_t* __restrict__ sSFrowwise_ptr,
     const float* __restrict__ sRowAmax,  // [CHUNK_DIM_Y], indexed by chunk-local row
-    const int stage_Y, const int stage_X, const int buff_in, const int buff_out) {
+    const int stage_Y, const int stage_X, const int buff_in, const int buff_out, PhiloxState& rng,
+    uint4& random_uint4, int& rnd_idx) {
   const auto& sIn = *reinterpret_cast<const IType3D*>(sIn_ptr);
   auto& sOut = *reinterpret_cast<OType2x3D*>(sOut_ptr);
   auto& sSFrowwise = *reinterpret_cast<ScalesType2D*>(sSFrowwise_ptr);
@@ -181,10 +190,21 @@ __device__ __forceinline__ void rowwise_scaling_per_token(
 
       // 4 fp4 quads from 8 bf16 elements (in PACK_SIZE=8 waves):
       //   rIn[w][0..3] = 4 IType2 pairs = 8 elements.
-      //   Each mul_cvt_4x packs 4 elements; we need 2 calls per wave.
+      //   Each cast packs 4 elements; we need 2 calls per wave.
       fp4e2m1x4 qu0{}, qu1{};
-      ptx::mul_cvt_4x(qu0, rIn[w][0], rIn[w][1], block_scale);
-      ptx::mul_cvt_4x(qu1, rIn[w][2], rIn[w][3], block_scale);
+      if constexpr (kWithSr) {
+        // Stochastic rounding: same input*block_scale as the RN path, but the
+        // FP4 truncation is dithered by a fresh 32-bit Philox draw per quad
+        // (hardware .rs). block_scale broadcast to both lanes of the float2.
+        const float2 bs2 = make_float2(block_scale, block_scale);
+        const uint64_t e01 = *reinterpret_cast<const uint64_t*>(&rIn[w][0]);  // rIn[w][0..1]
+        const uint64_t e23 = *reinterpret_cast<const uint64_t*>(&rIn[w][2]);  // rIn[w][2..3]
+        qu0 = ptx::mul_cvt_bf16_to_fp4_4x<true>(e01, bs2, get_rbits(rng, random_uint4, rnd_idx));
+        qu1 = ptx::mul_cvt_bf16_to_fp4_4x<true>(e23, bs2, get_rbits(rng, random_uint4, rnd_idx));
+      } else {
+        ptx::mul_cvt_4x(qu0, rIn[w][0], rIn[w][1], block_scale);
+        ptx::mul_cvt_4x(qu1, rIn[w][2], rIn[w][3], block_scale);
+      }
 
       // Pack into a 32-bit word and store to SMEM out (b32 store)
       uint32_t out_x8 = (static_cast<uint32_t>(*reinterpret_cast<uint16_t*>(&qu0))) |
@@ -240,13 +260,13 @@ constexpr float k16HadamardNorm = 0.25f;
 // e4m3 SF to SMEM. When kWithRht=true, each thread's 16-row strip is rotated
 // through the FHT with random_sign_mask_t; K1 amax must use the same mask so
 // sColAmax already reflects the rotated columns.
-template <bool kWithRht = false>
+template <bool kWithRht = false, bool kWithSr = false>
 __device__ __forceinline__ void colwise_scaling_per_token(
     const IType* __restrict__ sIn_ptr, fp4e2m1x2* __restrict__ sOut_tr_ptr,
     nvfp4_scale_t* __restrict__ sSFcolwise_ptr,
     const float* __restrict__ sColAmax,  // [CHUNK_DIM_X], indexed by chunk-local col
     const int stage_Y, const int stage_X, const int buff_in, const int buff_out_tr,
-    const uint32_t random_sign_mask_t = 0u) {
+    const uint32_t random_sign_mask_t, PhiloxState& rng, uint4& random_uint4, int& rnd_idx) {
   const auto& sIn2x = *reinterpret_cast<const IType2x3D*>(sIn_ptr);
   auto& sOut_tr = *reinterpret_cast<OType2xt3D*>(sOut_tr_ptr);
   auto& sSFcolwise = *reinterpret_cast<ScalesTypeTr2D*>(sSFcolwise_ptr);
@@ -337,16 +357,33 @@ __device__ __forceinline__ void colwise_scaling_per_token(
       const float block_scale_rht = block_scale * k16HadamardNorm;
 #pragma unroll
       for (int e = 0; e < 4; ++e) {
-        const ptx::floatx2 in01{rRht[w][4 * e + 0], rRht[w][4 * e + 1]};
-        const ptx::floatx2 in23{rRht[w][4 * e + 2], rRht[w][4 * e + 3]};
-        ptx::mul_cvt_4x(qu[e], in01, in23, block_scale_rht);
+        if constexpr (kWithSr) {
+          // RHT staging is already fp32; dither via the fp32 SR cast.
+          const float2 in01 = make_float2(rRht[w][4 * e + 0], rRht[w][4 * e + 1]);
+          const float2 in23 = make_float2(rRht[w][4 * e + 2], rRht[w][4 * e + 3]);
+          const float2 bs2 = make_float2(block_scale_rht, block_scale_rht);
+          qu[e] = ptx::mul_cvt_fp32_to_fp4_4x<true>(in01, in23, bs2,
+                                                    get_rbits(rng, random_uint4, rnd_idx));
+        } else {
+          const ptx::floatx2 in01{rRht[w][4 * e + 0], rRht[w][4 * e + 1]};
+          const ptx::floatx2 in23{rRht[w][4 * e + 2], rRht[w][4 * e + 3]};
+          ptx::mul_cvt_4x(qu[e], in01, in23, block_scale_rht);
+        }
       }
     } else {
 #pragma unroll
       for (int e = 0; e < 4; ++e) {
-        IType2 in01{rIn[w][4 * e + 0], rIn[w][4 * e + 1]};
-        IType2 in23{rIn[w][4 * e + 2], rIn[w][4 * e + 3]};
-        ptx::mul_cvt_4x(qu[e], in01, in23, block_scale);
+        if constexpr (kWithSr) {
+          // 4 contiguous bf16 per quad -> uint64; dither via the bf16 SR cast.
+          const float2 bs2 = make_float2(block_scale, block_scale);
+          const uint64_t elts = *reinterpret_cast<const uint64_t*>(&rIn[w][4 * e]);
+          qu[e] =
+              ptx::mul_cvt_bf16_to_fp4_4x<true>(elts, bs2, get_rbits(rng, random_uint4, rnd_idx));
+        } else {
+          IType2 in01{rIn[w][4 * e + 0], rIn[w][4 * e + 1]};
+          IType2 in23{rIn[w][4 * e + 2], rIn[w][4 * e + 3]};
+          ptx::mul_cvt_4x(qu[e], in01, in23, block_scale);
+        }
       }
     }
 
@@ -365,7 +402,7 @@ __device__ __forceinline__ void colwise_scaling_per_token(
 // kWithRht=true: col-wise FP4 cast over RHT-rotated strips (row never sees RHT).
 // kWithSwizzle=true: rowwise SF emitted directly in cuBLAS LT 128x4 tile layout.
 // =============================================================================
-template <bool DO_ROW, bool DO_COL, bool kWithRht, bool kWithSwizzle>
+template <bool DO_ROW, bool DO_COL, bool kWithRht, bool kWithSwizzle, bool kWithSr>
 __global__ void __launch_bounds__(THREADS_NUM)
     per_token_encode_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
                             const __grid_constant__ CUtensorMap tensor_map_output,
@@ -374,13 +411,27 @@ __global__ void __launch_bounds__(THREADS_NUM)
                             const float* const row_amax_in, const float* const col_amax_in,
                             const float* noop, const size_t rows, const size_t cols,
                             const size_t scale_stride, const size_t scale_stride_t,
-                            const uint32_t random_sign_mask_t) {
+                            const uint32_t random_sign_mask_t, const size_t* rng_state) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   if (noop != nullptr && noop[0] == 1.0f) {
     return;
   }
 
   const bool leading_thread = (threadIdx.x == 0);
+
+  // Stochastic-rounding RNG (per-thread Philox). Sequence is the global thread
+  // id so every FP4 element gets an independent dither stream; seed/offset come
+  // from the host-unpacked rng_state[2] = {seed, offset}. Inert when !kWithSr
+  // (random_uint4 stays zero and get_rbits is never called), so the non-SR
+  // instantiation keeps its byte-equal RN behavior.
+  const size_t rng_sequence =
+      threadIdx.x + blockIdx.x * THREADS_NUM + blockIdx.y * gridDim.x * THREADS_NUM;
+  const size_t rng_seed = (kWithSr && rng_state != nullptr) ? rng_state[0] : 0;
+  const size_t rng_offset = (kWithSr && rng_state != nullptr) ? rng_state[1] : 0;
+  PhiloxState rng;
+  rng.init(rng_seed, rng_sequence, rng_offset);
+  uint4 random_uint4 = kWithSr ? rng.generate4() : uint4{0, 0, 0, 0};
+  int rnd_idx = 0;
 
   // -------------------------------------------------------------------------
   // Dynamic SMEM layout
@@ -526,12 +577,13 @@ __global__ void __launch_bounds__(THREADS_NUM)
 
     // ----- Compute: rowwise + colwise from the same SMEM tile -----
     if (DO_ROW) {
-      rowwise_scaling_per_token(sIn_ptr, sOut_ptr, sSFrowwise_ptr, sRowAmax, stage_Y, stage_X,
-                                buff_in, buff_out);
+      rowwise_scaling_per_token<kWithSr>(sIn_ptr, sOut_ptr, sSFrowwise_ptr, sRowAmax, stage_Y,
+                                         stage_X, buff_in, buff_out, rng, random_uint4, rnd_idx);
     }
     if (DO_COL) {
-      colwise_scaling_per_token<kWithRht>(sIn_ptr, sOut_tr_ptr, sSFcolwise_ptr, sColAmax, stage_Y,
-                                          stage_X, buff_in, buff_out_tr, random_sign_mask_t);
+      colwise_scaling_per_token<kWithRht, kWithSr>(sIn_ptr, sOut_tr_ptr, sSFcolwise_ptr, sColAmax,
+                                                   stage_Y, stage_X, buff_in, buff_out_tr,
+                                                   random_sign_mask_t, rng, random_uint4, rnd_idx);
     }
 
     // Fence + sync so all threads' SMEM writes are visible to TMA store.
@@ -907,9 +959,12 @@ inline void launch_amax(const Tensor& input, Tensor* output, const Tensor& noop,
 // Launch K2 encode. Requires pre-filled amax/columnwise_amax; writes data +
 // scale_inv (both directions). with_rht requires K1 to have run with the
 // SAME mask. with_swizzle: rowwise SF in cuBLAS LT layout (rowwise-only).
+// with_sr: dither the FP4 truncation stochastically using rng_state[2] =
+// {seed, offset} (host-unpacked Philox); rng_state may be nullptr iff !with_sr.
 inline void launch_encode(const Tensor& input, Tensor* output, const Tensor& noop,
                           const bool with_rht, const uint32_t random_sign_mask_t,
-                          const bool with_swizzle, cudaStream_t stream) {
+                          const bool with_swizzle, const bool with_sr, const size_t* rng_state,
+                          cudaStream_t stream) {
   const size_t M = input.flat_first_dim();
   const size_t K = input.flat_last_dim();
 
@@ -993,14 +1048,18 @@ inline void launch_encode(const Tensor& input, Tensor* output, const Tensor& noo
           do_col, DO_COL,
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
               with_rht_effective, kWithRht,
-              TRANSFORMER_ENGINE_SWITCH_CONDITION(with_swizzle_effective, kWithSwizzle, {
-                auto kernel = per_token_encode_kernel<DO_ROW, DO_COL, kWithRht, kWithSwizzle>;
-                cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                     dshmem_size);
-                kernel<<<grid, block, dshmem_size, stream>>>(
-                    tmap_in, tmap_out, tmap_out_t, scales_ptr, scales_t_ptr, row_amax_in,
-                    col_amax_in, noop_ptr, M, K, scale_stride, scale_stride_t, random_sign_mask_t);
-              }))));
+              TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                  with_swizzle_effective, kWithSwizzle,
+                  TRANSFORMER_ENGINE_SWITCH_CONDITION(with_sr, kWithSr, {
+                    auto kernel =
+                        per_token_encode_kernel<DO_ROW, DO_COL, kWithRht, kWithSwizzle, kWithSr>;
+                    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                         dshmem_size);
+                    kernel<<<grid, block, dshmem_size, stream>>>(
+                        tmap_in, tmap_out, tmap_out_t, scales_ptr, scales_t_ptr, row_amax_in,
+                        col_amax_in, noop_ptr, M, K, scale_stride, scale_stride_t,
+                        random_sign_mask_t, rng_state);
+                  })))));
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 #endif  // FP4_TYPE_SUPPORTED
@@ -1060,25 +1119,33 @@ void per_token_amax_blocked_impl(const Tensor& input, const Tensor& noop, Tensor
 // K2 encode with optional col-wise RHT + fused rowwise swizzle. with_rht
 // requires K1 amax to have been launched with the SAME mask, else the inner
 // SF + FP4 codes are calibrated against mismatched data and saturate.
+// with_sr dithers the FP4 truncation; rng_state is the host-unpacked Philox
+// {seed, offset} pair (may be nullptr iff !with_sr). SR only touches K2 (the
+// amax pass is deterministic), so it is not plumbed into launch_amax.
 void per_token_encode_blocked_impl(const Tensor& input, const Tensor& noop, Tensor* output,
                                    const bool with_rht, const uint32_t random_sign_mask_t,
-                                   const bool with_swizzle, cudaStream_t stream) {
+                                   const bool with_swizzle, const bool with_sr,
+                                   const size_t* rng_state, cudaStream_t stream) {
   validate_input_shape(input);
   validate_encode_output(output, with_swizzle);
   if (input.flat_first_dim() == 0 || input.flat_last_dim() == 0) return;
-  launch_encode(input, output, noop, with_rht, random_sign_mask_t, with_swizzle, stream);
+  launch_encode(input, output, noop, with_rht, random_sign_mask_t, with_swizzle, with_sr, rng_state,
+                stream);
 }
 
 // Composite K1+K2. Both launches receive the same with_rht / mask so the
-// colwise amax and FP4 cast see byte-identical data.
+// colwise amax and FP4 cast see byte-identical data. with_sr / rng_state are
+// forwarded to K2 only.
 void per_token_quantize_blocked_impl(const Tensor& input, const Tensor& noop, Tensor* output,
                                      const bool with_rht, const uint32_t random_sign_mask_t,
-                                     const bool with_swizzle, cudaStream_t stream) {
+                                     const bool with_swizzle, const bool with_sr,
+                                     const size_t* rng_state, cudaStream_t stream) {
   validate_input_shape(input);
   validate_encode_output(output, with_swizzle);
   if (input.flat_first_dim() == 0 || input.flat_last_dim() == 0) return;
   launch_amax(input, output, noop, with_rht, random_sign_mask_t, stream);
-  launch_encode(input, output, noop, with_rht, random_sign_mask_t, with_swizzle, stream);
+  launch_encode(input, output, noop, with_rht, random_sign_mask_t, with_swizzle, with_sr, rng_state,
+                stream);
 }
 
 bool can_use_per_token(size_t M, size_t K, DType dtype) {
@@ -1090,11 +1157,11 @@ void per_token_amax_blocked_impl(const Tensor&, const Tensor&, Tensor*, bool, ui
   NVTE_ERROR("NVFP4 requires SM100 (Blackwell); build with sm_100a/sm_100f.");
 }
 void per_token_encode_blocked_impl(const Tensor&, const Tensor&, Tensor*, bool, uint32_t, bool,
-                                   cudaStream_t) {
+                                   bool, const size_t*, cudaStream_t) {
   NVTE_ERROR("NVFP4 requires SM100 (Blackwell); build with sm_100a/sm_100f.");
 }
 void per_token_quantize_blocked_impl(const Tensor&, const Tensor&, Tensor*, bool, uint32_t, bool,
-                                     cudaStream_t) {
+                                     bool, const size_t*, cudaStream_t) {
   NVTE_ERROR("NVFP4 requires SM100 (Blackwell); build with sm_100a/sm_100f.");
 }
 bool can_use_per_token(size_t, size_t, DType) { return false; }
@@ -1106,6 +1173,24 @@ bool can_use_per_token(size_t, size_t, DType) { return false; }
 // =============================================================================
 // C-API entry points
 // =============================================================================
+
+#if FP4_TYPE_SUPPORTED
+namespace {
+// Extract the device {seed, offset} pair from an rng_state NVTETensor for the
+// SR path. Returns nullptr when SR is off or no state was passed (the kernel
+// then runs round-to-nearest). Mirrors the per-tensor launcher's rng_state
+// unpack in quantize_transpose_nvfp4.cuh.
+const size_t* per_token_rng_state_ptr(const int with_sr, const NVTETensor rng_state) {
+  using namespace transformer_engine;
+  if (with_sr == 0 || rng_state == nullptr) return nullptr;
+  const Tensor* rng = convertNVTETensorCheck(rng_state);
+  NVTE_CHECK(rng->dtype() == DType::kInt64, "Per-token SR rng_state must be int64.");
+  NVTE_CHECK(rng->data.shape == std::vector<size_t>{2},
+             "Per-token SR rng_state must have shape [2] = {seed, offset}, got ", rng->data.shape);
+  return reinterpret_cast<const size_t*>(rng->data.dptr);
+}
+}  // namespace
+#endif
 
 void nvte_nvfp4_per_token_amax(const NVTETensor input, const NVTETensor noop, NVTETensor output,
                                const int with_rht, const int random_sign_mask_t,
@@ -1135,7 +1220,8 @@ void nvte_nvfp4_per_token_amax(const NVTETensor input, const NVTETensor noop, NV
 
 void nvte_nvfp4_per_token_encode(const NVTETensor input, const NVTETensor noop, NVTETensor output,
                                  const int with_rht, const int random_sign_mask_t,
-                                 const int with_swizzle, cudaStream_t stream) {
+                                 const int with_swizzle, const int with_sr,
+                                 const NVTETensor rng_state, cudaStream_t stream) {
 #if FP4_TYPE_SUPPORTED
   NVTE_API_CALL(nvte_nvfp4_per_token_encode);
   using namespace transformer_engine;
@@ -1145,9 +1231,11 @@ void nvte_nvfp4_per_token_encode(const NVTETensor input, const NVTETensor noop, 
   const Tensor* noop_tensor = (noop != nullptr) ? convertNVTETensorCheck(noop) : &dummy_noop;
   // C-API mirrors nvte_nvfp4_per_token_amax: `int` for cross-language ABI
   // safety, internal kernel arg is uint32_t with only the low 16 bits used.
+  const size_t* rng_state_ptr = per_token_rng_state_ptr(with_sr, rng_state);
   nvfp4_per_token::per_token_encode_blocked_impl(
       *input_tensor, *noop_tensor, output_tensor, with_rht != 0,
-      static_cast<uint32_t>(random_sign_mask_t) & 0xFFFFu, with_swizzle != 0, stream);
+      static_cast<uint32_t>(random_sign_mask_t) & 0xFFFFu, with_swizzle != 0, with_sr != 0,
+      rng_state_ptr, stream);
 #else
   (void)input;
   (void)noop;
@@ -1155,6 +1243,8 @@ void nvte_nvfp4_per_token_encode(const NVTETensor input, const NVTETensor noop, 
   (void)with_rht;
   (void)random_sign_mask_t;
   (void)with_swizzle;
+  (void)with_sr;
+  (void)rng_state;
   (void)stream;
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif
@@ -1162,7 +1252,8 @@ void nvte_nvfp4_per_token_encode(const NVTETensor input, const NVTETensor noop, 
 
 void nvte_nvfp4_per_token_quantize(const NVTETensor input, const NVTETensor noop, NVTETensor output,
                                    const int with_rht, const int random_sign_mask_t,
-                                   const int with_swizzle, cudaStream_t stream) {
+                                   const int with_swizzle, const int with_sr,
+                                   const NVTETensor rng_state, cudaStream_t stream) {
 #if FP4_TYPE_SUPPORTED
   NVTE_API_CALL(nvte_nvfp4_per_token_quantize);
   using namespace transformer_engine;
@@ -1170,9 +1261,11 @@ void nvte_nvfp4_per_token_quantize(const NVTETensor input, const NVTETensor noop
   Tensor* output_tensor = convertNVTETensorCheck(output);
   Tensor dummy_noop;
   const Tensor* noop_tensor = (noop != nullptr) ? convertNVTETensorCheck(noop) : &dummy_noop;
+  const size_t* rng_state_ptr = per_token_rng_state_ptr(with_sr, rng_state);
   nvfp4_per_token::per_token_quantize_blocked_impl(
       *input_tensor, *noop_tensor, output_tensor, with_rht != 0,
-      static_cast<uint32_t>(random_sign_mask_t) & 0xFFFFu, with_swizzle != 0, stream);
+      static_cast<uint32_t>(random_sign_mask_t) & 0xFFFFu, with_swizzle != 0, with_sr != 0,
+      rng_state_ptr, stream);
 #else
   (void)input;
   (void)noop;
@@ -1180,6 +1273,8 @@ void nvte_nvfp4_per_token_quantize(const NVTETensor input, const NVTETensor noop
   (void)with_rht;
   (void)random_sign_mask_t;
   (void)with_swizzle;
+  (void)with_sr;
+  (void)rng_state;
   (void)stream;
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif
