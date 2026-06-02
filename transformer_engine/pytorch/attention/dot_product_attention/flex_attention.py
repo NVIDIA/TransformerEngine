@@ -598,7 +598,7 @@ def _get_cudnn_score_mod_bwd_graph(
     deterministic: bool,
 ) -> _CudnnScoreModBwdGraphEntry:
     """Return a cached cuDNN frontend graph for score_mod bprop."""
-    key = _cudnn_score_mod_bwd_cache_key(
+    build_args = (
         query_layer,
         key_layer,
         value_layer,
@@ -614,41 +614,12 @@ def _get_cudnn_score_mod_bwd_graph(
         score_mod_bprop_tensors,
         deterministic,
     )
+    key = _cudnn_score_mod_bwd_cache_key(*build_args)
     if key is None:
-        return _build_cudnn_score_mod_bwd_graph(
-            query_layer,
-            key_layer,
-            value_layer,
-            output_layer,
-            d_out,
-            stats,
-            q_format,
-            kv_format,
-            attn_scale,
-            score_mod,
-            score_mod_bprop,
-            score_mod_tensors,
-            score_mod_bprop_tensors,
-            deterministic,
-        )
+        return _build_cudnn_score_mod_bwd_graph(*build_args)
     entry = _cudnn_score_mod_graph_cache.get(key)
     if entry is None:
-        entry = _build_cudnn_score_mod_bwd_graph(
-            query_layer,
-            key_layer,
-            value_layer,
-            output_layer,
-            d_out,
-            stats,
-            q_format,
-            kv_format,
-            attn_scale,
-            score_mod,
-            score_mod_bprop,
-            score_mod_tensors,
-            score_mod_bprop_tensors,
-            deterministic,
-        )
+        entry = _build_cudnn_score_mod_bwd_graph(*build_args)
         _cudnn_score_mod_graph_cache[key] = entry
     return entry
 
