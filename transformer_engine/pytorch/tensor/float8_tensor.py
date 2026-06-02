@@ -21,7 +21,6 @@ from ..quantized_tensor import QuantizedTensor, Quantizer
 from ._quantization_helpers import _IdentityFunc
 from ..constants import dist_group_type
 from transformer_engine.pytorch import DType
-from .. import constants
 
 aten = torch.ops.aten
 
@@ -61,7 +60,7 @@ class Float8Quantizer(Quantizer):
         self,
         scale: torch.Tensor,
         amax: torch.Tensor,
-        fp8_dtype: constants.DTypeSupported,
+        fp8_dtype: Union[DType, tex.DType],
         *,
         rowwise: bool = True,
         columnwise: bool = True,
@@ -216,7 +215,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
 
     def __init__(
         self,
-        fp8_dtype: constants.DTypeSupported,
+        fp8_dtype: Union[DType, tex.DType],
         device: torch.device,
         *,
         rowwise: bool = True,

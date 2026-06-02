@@ -15,7 +15,6 @@ from transformer_engine.common.recipe import Float8BlockScaling, Recipe
 from .storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ._quantization_helpers import _IdentityFunc
-from .. import constants
 from transformer_engine.pytorch import DType
 from ..utils import devices_match, round_up_to_nearest_multiple
 
@@ -39,7 +38,7 @@ class Float8BlockQuantizer(Quantizer):
 
     def __init__(
         self,
-        fp8_dtype: constants.DTypeSupported,
+        fp8_dtype: Union[DType, tex.DType],
         *,
         rowwise: bool,
         columnwise: bool,

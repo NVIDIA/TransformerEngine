@@ -19,7 +19,6 @@ from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 
 from ...constants import TE_DType as torch_to_transformer_engine_dtype
 from transformer_engine.pytorch import DType
-from ... import constants
 from ...utils import _empty_tensor
 
 
@@ -118,7 +117,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         columnwise_scale_inv: torch.Tensor,
         amax_rowwise: torch.Tensor,
         amax_columnwise: torch.Tensor,
-        fp4_dtype: constants.DTypeSupported,
+        fp4_dtype: Union[DType, tex.DType],
         quantizer: Optional[Quantizer],
         with_gemm_swizzled_scales: bool,
         *args,

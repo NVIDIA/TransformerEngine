@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 import math
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Union
 import torch
 
 import transformer_engine_torch as tex
@@ -15,7 +15,6 @@ from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 
 from ...constants import TE_DType as torch_to_transformer_engine_dtype, TE_DType_To_Torch
 from transformer_engine.pytorch import DType
-from ... import constants
 
 from ...utils import is_non_tn_fp8_gemm_supported, _empty_tensor
 
@@ -82,7 +81,7 @@ class Float8TensorStorage(QuantizedTensorStorage):
         *args,
         data: Optional[torch.Tensor],
         fp8_scale_inv: torch.Tensor,
-        fp8_dtype: constants.DTypeSupported,
+        fp8_dtype: Union[DType, tex.DType],
         fake_dtype: Optional[torch.dtype] = None,
         data_transpose: Optional[torch.Tensor] = None,
         quantizer: Optional[Quantizer] = None,

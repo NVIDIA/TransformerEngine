@@ -5,7 +5,7 @@
 """Mixin class holding data specific for MXFP8Tensor"""
 
 from __future__ import annotations
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, Union
 from collections.abc import Iterable
 import math
 import torch
@@ -16,7 +16,6 @@ from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 
 from ...constants import TE_DType as torch_to_transformer_engine_dtype
 from transformer_engine.pytorch import DType
-from ... import constants
 
 from ...utils import _empty_tensor
 
@@ -90,7 +89,7 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
         rowwise_scale_inv: Optional[torch.Tensor],
         columnwise_data: Optional[torch.Tensor],
         columnwise_scale_inv: Optional[torch.Tensor],
-        fp8_dtype: constants.DTypeSupported,
+        fp8_dtype: Union[DType, tex.DType],
         quantizer: Optional[Quantizer],
         with_gemm_swizzled_scales: bool,
         *args,

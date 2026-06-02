@@ -28,8 +28,8 @@ class DType(enum.IntEnum):
     kFloat4E2M1 = int(tex.DType.kFloat4E2M1)
 
     @classmethod
-    def cast(cls, dtype: "DTypeSupported") -> "DType":
-        """Normalize any ``DTypeSupported`` value to the canonical ``DType`` ``IntEnum``.
+    def cast(cls, dtype: "Union[DType, tex.DType]") -> "DType":
+        """Normalize a supported dtype value to the canonical ``DType`` ``IntEnum``.
         ``DType`` is the canonical dtype tag used internally throughout
         ``transformer_engine.pytorch``, and is what this function always outputs.
         The pybind ``transformer_engine_torch.DType`` enum is an additional type
@@ -47,11 +47,6 @@ assert {m.name for m in DType} == set(tex.DType.__members__), (
     "DType is out of sync with transformer_engine_torch.DType; "
     "add the new pybind enumerator to DType in constants.py."
 )
-
-
-# tex.DType is the pybind enum kept for backward compatibility.
-# in the constructors for QuantizedTensors and Quantizers.
-DTypeSupported = Union[DType, tex.DType]
 
 
 # One-to-one mapping ``torch.dtype -> DType`` (mirrors the enum order in
