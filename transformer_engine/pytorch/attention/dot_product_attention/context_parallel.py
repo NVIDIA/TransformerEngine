@@ -3384,17 +3384,6 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             v_ag = reorder_thd_sequences_to_contiguous(
                 v_ag, cu_seqlens_kv_padded, chunk_ids_for_kv_ag, cp_size
             )
-            # Correctness fix for the fused tex.thd_reorder (PR 2829): the raw reorder kernel
-            # runs on the main stream and its buffers are not allocator/stream-tracked the way
-            # the index_select it replaced was. The host then runs ahead into the per-step loop
-            # (step 1 on cp_stream) and the caching allocator can recycle a block the reorder is
-            # still using -> cudaErrorIllegalAddress under comm/compute overlap (FA3 + large
-            # packs; reproduces serially, masked by CUDA_LAUNCH_BLOCKING and
-            # PYTORCH_NO_CUDA_MEMORY_CACHING). Syncing the main stream here drains gather+reorder
-            # before the loop allocates; cp_stream already waits on main, so the per-step overlap
-            # is preserved. Conservative fix -- a finer-grained allocator/event fix can replace it.
-            if int(os.getenv("AG_REORDER_SYNC", "1")):
-                torch.cuda.current_stream().synchronize()
         else:
             # [cp, s, b, h, d] -> [cp*2, s//2, b, h, d]
             k_ag = k_ag.view(2 * cp_size, k.shape[0] // 2, *k.shape[1:])
@@ -3525,6 +3514,19 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
 
         for i in range(len(local_seq_chunk_ids) + 1):
             if i < len(local_seq_chunk_ids):
+                # FA3 (hopper) forward allocates an internal persistent-scheduler workspace
+                # (tile_count_semaphore) per call and frees it on return; the caching allocator
+                # records that free only against the stream it was allocated on. With per-step
+                # calls overlapping across streams, the allocator can hand step i's FA3 the block
+                # step i-1's FA3 just freed while step i-1's scheduler kernel is still atomically
+                # incrementing it -> shared semaphore -> out-of-range tiles -> illegal memory access
+                # (FA3-only, only under overlap; root cause in mb_runs/FA3_AG_RECORDSTREAM_RACE.md
+                # -> flash-attention hopper/flash_api.cpp tile_count_semaphore). Serialize
+                # consecutive FA3 calls on the GPU (a stream wait, NO host sync) so their internal
+                # workspace lifetimes don't overlap. FusedAttention manages its own workspace and is
+                # unaffected, so keep its per-step overlap.
+                if i > 0 and use_flash_attn_3:
+                    flash_attn_streams[i].wait_stream(flash_attn_streams[i - 1])
                 with torch.cuda.stream(flash_attn_streams[i]):
                     if qkv_format in ["bshd", "sbhd"]:
                         # [b, 2, s//2, h, d] -> [b, s//2, h, d]
@@ -4041,6 +4043,12 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         local_seq_chunk_ids = [rank, 2 * cp_size - rank - 1]
         for i in range(len(local_seq_chunk_ids) + 1):
             if i < len(local_seq_chunk_ids):
+                # Same FA3 cross-stream workspace race as the forward (here dq/dk/dv_semaphore in
+                # mha_bwd): serialize consecutive per-step FA3 backward calls on the GPU so their
+                # internal-workspace lifetimes don't overlap. FA3-only; FusedAttention keeps overlap.
+                # See mb_runs/FA3_AG_RECORDSTREAM_RACE.md.
+                if i > 0 and ctx.use_flash_attn_3:
+                    flash_attn_streams[i].wait_stream(flash_attn_streams[i - 1])
                 with torch.cuda.stream(flash_attn_streams[i]):
                     if ctx.qkv_format == "thd":
                         # THD: pass full Q/dout with per-step cu_seqlens_q_padded.
