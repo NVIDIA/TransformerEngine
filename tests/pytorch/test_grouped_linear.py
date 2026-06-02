@@ -1816,7 +1816,9 @@ def test_swizzle_scales_and_pack_ptrs_for_discrete_weights(
 
     # Check data pointer values
     expected_data_ptrs = torch.tensor(
-        [t.data_ptr() for t in data_tensors], dtype=torch.int64, device="cpu",
+        [t.data_ptr() for t in data_tensors],
+        dtype=torch.int64,
+        device="cpu",
     )
     assert_close(data_ptrs, expected_data_ptrs)
 
@@ -1832,9 +1834,7 @@ def test_swizzle_scales_and_pack_ptrs_for_discrete_weights(
     # Check swizzled scale values
     swizzled_scales_buffer = swizzled_scales_buffer.view(torch.uint8)
     expected_swizzled_scales_buffer = (
-        torch.cat(ref_scale_tensors)
-        .view(torch.uint8)
-        .view_as(swizzled_scales_buffer)
+        torch.cat(ref_scale_tensors).view(torch.uint8).view_as(swizzled_scales_buffer)
     )
     assert_close(
         swizzled_scales_buffer,
@@ -1849,8 +1849,8 @@ def test_swizzle_scales_and_pack_ptrs_for_discrete_weights(
     elif swizzle_type == "nvfp4":
         unpadded_scale_shape = (shape[0], shape[1] // 16)
     for scale in scale_tensors:
-        scale[unpadded_scale_shape[0]:, :].view(torch.uint8).fill_(-1)
-        scale[:, unpadded_scale_shape[1]:].view(torch.uint8).fill_(-1)
+        scale[unpadded_scale_shape[0] :, :].view(torch.uint8).fill_(-1)
+        scale[:, unpadded_scale_shape[1] :].view(torch.uint8).fill_(-1)
 
     # Check that swizzling removes poisoned pad scales
     _, _, swizzled_scales_buffer = (

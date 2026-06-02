@@ -608,7 +608,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       "grouped_mlp_experimental",
       "Experimental helpers for the fused grouped MLP (unstable, may change or disappear).");
   grouped_mlp_experimental.def("swizzle_scales_and_pack_ptrs_for_discrete_weights",
-                               &transformer_engine::pytorch::grouped_mlp_experimental::swizzle_scales_and_pack_ptrs_for_discrete_weights,
+                               &transformer_engine::pytorch::grouped_mlp_experimental::
+                                   swizzle_scales_and_pack_ptrs_for_discrete_weights,
                                py::arg("data_tensors"), py::arg("scale_tensors"),
                                py::arg("swizzle_type"), py::arg("device"),
                                py::call_guard<py::gil_scoped_release>());

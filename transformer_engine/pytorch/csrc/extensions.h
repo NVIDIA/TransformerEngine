@@ -506,9 +506,8 @@ namespace grouped_mlp_experimental {
 // must be one of "mxfp8_rowwise", "mxfp8_columnwise", or "nvfp4".
 // Returns {data_ptrs_device, scale_ptrs_device, swizzled_scales_buffer}.
 std::tuple<at::Tensor, at::Tensor, at::Tensor> swizzle_scales_and_pack_ptrs_for_discrete_weights(
-    const std::vector<at::Tensor> &data_tensors,
-    const std::vector<at::Tensor> &scale_tensors, const std::string &swizzle_type,
-    const c10::Device &device);
+    const std::vector<at::Tensor> &data_tensors, const std::vector<at::Tensor> &scale_tensors,
+    const std::string &swizzle_type, const c10::Device &device);
 
 }  // namespace grouped_mlp_experimental
 

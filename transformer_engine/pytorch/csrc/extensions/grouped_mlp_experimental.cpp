@@ -21,10 +21,8 @@ namespace pytorch {
 namespace grouped_mlp_experimental {
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> swizzle_scales_and_pack_ptrs_for_discrete_weights(
-    const std::vector<at::Tensor> &data_tensors,
-    const std::vector<at::Tensor> &scale_tensors,
-    const std::string &swizzle_type_str,
-    const c10::Device &device) {
+    const std::vector<at::Tensor> &data_tensors, const std::vector<at::Tensor> &scale_tensors,
+    const std::string &swizzle_type_str, const c10::Device &device) {
   const size_t num_tensors = data_tensors.size();
   NVTE_CHECK(scale_tensors.size() == num_tensors,
              "Expected data_tensors and scale_tensors to have matching sizes, but got ",
@@ -59,36 +57,36 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> swizzle_scales_and_pack_ptrs_for_
   transformer_engine::DType data_dtype, scale_dtype;
   NVTETensorParam data_param_name, scale_param_name;
   switch (swizzle_type) {
-  case SwizzleType::MXFP8Rowwise:
-  case SwizzleType::MXFP8Columnwise:
-    scaling_mode = NVTE_MXFP8_1D_SCALING;
-    data_dtype = transformer_engine::DType::kFloat8E4M3;
-    scale_dtype = transformer_engine::DType::kFloat8E8M0;
-    if (swizzle_type == SwizzleType::MXFP8Rowwise) {
+    case SwizzleType::MXFP8Rowwise:
+    case SwizzleType::MXFP8Columnwise:
+      scaling_mode = NVTE_MXFP8_1D_SCALING;
+      data_dtype = transformer_engine::DType::kFloat8E4M3;
+      scale_dtype = transformer_engine::DType::kFloat8E8M0;
+      if (swizzle_type == SwizzleType::MXFP8Rowwise) {
+        data_param_name = kNVTERowwiseData;
+        scale_param_name = kNVTERowwiseScaleInv;
+      } else {
+        data_param_name = kNVTEColumnwiseData;
+        scale_param_name = kNVTEColumnwiseScaleInv;
+      }
+      break;
+    case SwizzleType::NVFP4:
+      scaling_mode = NVTE_NVFP4_1D_SCALING;
+      data_dtype = transformer_engine::DType::kFloat4E2M1;
+      scale_dtype = transformer_engine::DType::kFloat8E4M3;
       data_param_name = kNVTERowwiseData;
       scale_param_name = kNVTERowwiseScaleInv;
-    } else {
-      data_param_name = kNVTEColumnwiseData;
-      scale_param_name = kNVTEColumnwiseScaleInv;
-    }
-    break;
-  case SwizzleType::NVFP4:
-    scaling_mode = NVTE_NVFP4_1D_SCALING;
-    data_dtype = transformer_engine::DType::kFloat4E2M1;
-    scale_dtype = transformer_engine::DType::kFloat8E4M3;
-    data_param_name = kNVTERowwiseData;
-    scale_param_name = kNVTERowwiseScaleInv;
-    break;
-  default:
-    NVTE_ERROR("Unsupported swizzle type (", static_cast<int>(swizzle_type), ").");
+      break;
+    default:
+      NVTE_ERROR("Unsupported swizzle type (", static_cast<int>(swizzle_type), ").");
   }
 
   // Data shape
   NVTEShape data_shape = convertTorchShape(data_tensors[0].sizes());
   if (swizzle_type == SwizzleType::NVFP4) {
     // NVFP4 packs two 4-bit values per byte
-    NVTE_CHECK(data_shape.ndim > 0,
-               "Invalid shape for NVFP4 data tensor (", getTensorShape(data_tensors[0]), ").");
+    NVTE_CHECK(data_shape.ndim > 0, "Invalid shape for NVFP4 data tensor (",
+               getTensorShape(data_tensors[0]), ").");
     data_shape.data[data_shape.ndim - 1] *= 2;
   }
 

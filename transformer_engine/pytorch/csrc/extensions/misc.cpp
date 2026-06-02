@@ -8,8 +8,8 @@
 
 #include <vector>
 
-#include "common/common.h"
 #include "../extensions.h"
+#include "common/common.h"
 
 namespace transformer_engine::pytorch {
 
