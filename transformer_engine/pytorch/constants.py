@@ -40,6 +40,25 @@ class DType(enum.IntEnum):
             return dtype
         return cls(int(dtype))
 
+    def __eq__(self, other: object) -> bool:
+        # ``DType`` is an ``IntEnum`` while ``tex.DType`` is a pybind11 enum.
+        # ``int.__eq__`` returns ``NotImplemented`` for a pybind enum, so without
+        # this override a comparison such as ``quantizer.dtype == tex.DType.kX``
+        # would silently be ``False``. Compare by integer value so the two enums
+        # stay equivalent (the pybind ``DType.__eq__`` handles the reverse order).
+        if isinstance(other, tex.DType):
+            return int(self) == int(other)
+        return int.__eq__(self, other)
+
+    def __ne__(self, other: object) -> bool:
+        result = self.__eq__(other)
+        if result is NotImplemented:
+            return result
+        return not result
+
+    def __hash__(self) -> int:
+        return int.__hash__(self)
+
 
 # Fail fast at import time if a new enumerator is added
 # on the C++ side without being mirrored above.

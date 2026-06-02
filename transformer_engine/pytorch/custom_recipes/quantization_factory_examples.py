@@ -38,8 +38,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from ..constants import DType
 from transformer_engine.pytorch.quantization import QuantizerRole
+from ..constants import DType
 
 
 def nvfp4_linear_mxfp8_grouped_linear_factory(
