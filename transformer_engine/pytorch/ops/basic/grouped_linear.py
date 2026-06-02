@@ -22,7 +22,7 @@ from ...module.base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
-from ...quantization import FP8GlobalStateManager, Recipe
+from ...quantization import FP8GlobalStateManager, QuantizerRole, Recipe
 from ...quantized_tensor import QuantizedTensorStorage
 from ...tensor import MXFP8Quantizer, MXFP8Tensor, Quantizer
 from ...utils import (
@@ -290,6 +290,25 @@ class GroupedLinear(BasicOperation):
         if mode == "backward":
             return self.num_groups
         return 0
+
+    def get_quantizer_roles(self, mode: str) -> Optional[list[QuantizerRole]]:
+        name = getattr(self, "name", "") or ""
+        if mode == "forward":
+            roles = []
+            for _ in range(self.num_groups):
+                roles.extend(
+                    [
+                        QuantizerRole(module_type="linear", tensor_type="input", name=name),
+                        QuantizerRole(module_type="linear", tensor_type="weight", name=name),
+                    ]
+                )
+            return roles
+        if mode == "backward":
+            return [
+                QuantizerRole(module_type="linear", tensor_type="grad_output", name=name)
+                for _ in range(self.num_groups)
+            ]
+        return None
 
     @property
     def has_bias(self) -> bool:

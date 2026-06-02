@@ -14,10 +14,17 @@ import torch
 
 import transformer_engine_torch as tex
 from ...quantization import Recipe
+from ...tensor import NVFP4Quantizer, NVFP4Tensor
 from ...tensor.grouped_tensor import GroupedTensor
 from ...tensor.mxfp8_tensor import MXFP8Quantizer
-from ...utils import clear_tensor_data, get_cached_ones_tensor, get_device_compute_capability
-from ...constants import MXFP8_BLOCK_SCALING_SIZE
+from ...utils import (
+    ceil_div,
+    clear_tensor_data,
+    get_cached_ones_tensor,
+    get_device_compute_capability,
+    round_up_to_nearest_multiple,
+)
+from ...constants import MXFP8_BLOCK_SCALING_SIZE, NVFP4_BLOCK_SCALING_SIZE
 from ..basic import GroupedLinear, ScaledSReLU, ScaledClampedQGeGLU
 from ..fuser import register_backward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
@@ -25,6 +32,9 @@ from .._common import (
     _cudnn_frontend_geglu_runtime_params,
     _cudnn_frontend_version_supported,
     _cudnn_frontend_supports_grouped_gemm_srelu,
+    _group_quantize_for_grouped_mlp,
+    _nvfp4_amax,
+    _nvfp4_single_tensor_from_grouped,
     fuse_grouped_mlp_ops,
     get_accumulate_flag_in_param,
     get_dummy_wgrads_for_params,
@@ -34,9 +44,39 @@ from .._common import (
     view_main_grad_as_grouped_buffer,
     validate_grouped_mlp_dims,
 )
-from ...cpp_extensions import general_grouped_gemm_for_grouped_tensor
+from ...cpp_extensions import (
+    general_gemm,
+    general_grouped_gemm_for_grouped_tensor,
+)
 from ...module.base import _2X_ACC_WGRAD
 from ...triton.grouped_dbias_dscales import compute_grouped_dbias_dscales
+
+
+def _nvfp4_single_group_wgrad_gemm(
+    grouped_x: GroupedTensor,
+    grouped_dy: GroupedTensor,
+    wgrad_output,
+    *,
+    weight_shape: tuple[int, int],
+    accumulate: bool,
+) -> None:
+    """Run one-group NVFP4 wgrad with regular GEMM instead of grouped GEMM."""
+    x_single = _nvfp4_single_tensor_from_grouped(grouped_x)
+    dy_single = _nvfp4_single_tensor_from_grouped(grouped_dy)
+    if isinstance(wgrad_output, GroupedTensor):
+        out = wgrad_output.rowwise_data.view(1, *weight_shape)[0]
+    else:
+        out = wgrad_output[0]
+
+    general_gemm(
+        x_single,
+        dy_single,
+        out_dtype=out.dtype,
+        out=out,
+        layout="NT",
+        accumulate=accumulate,
+        use_split_accumulator=_2X_ACC_WGRAD,
+    )
 
 
 def _cudnn_compute_wgrad(
@@ -62,8 +102,8 @@ def _cudnn_compute_wgrad(
 
     fp8_dtype = torch.float8_e4m3fn
 
-    sfa_leading_dim = ((out_features + 127) // 128) * 128
-    sfb_leading_dim = ((in_features + 127) // 128) * 128
+    sfa_leading_dim = round_up_to_nearest_multiple(out_features, 128)
+    sfb_leading_dim = round_up_to_nearest_multiple(in_features, 128)
 
     if total_tokens == 0:
         # A workaround for the case with zero-token experts.
@@ -220,6 +260,18 @@ def _compute_grad_params(
                 single_grouped_weight=fc_op.single_grouped_weight,
                 current_stream=torch.cuda.current_stream().cuda_stream,
             )
+        elif (
+            num_groups == 1
+            and isinstance(grouped_x, GroupedTensor)
+            and isinstance(grouped_dy, GroupedTensor)
+            and isinstance(grouped_x.quantizer, NVFP4Quantizer)
+            and isinstance(grouped_dy.quantizer, NVFP4Quantizer)
+        ):
+            gemm_fn = functools.partial(
+                _nvfp4_single_group_wgrad_gemm,
+                weight_shape=weight_shape,
+                accumulate=accumulate_into_main_grad,
+            )
         else:
             gemm_fn = functools.partial(
                 general_grouped_gemm_for_grouped_tensor,
@@ -252,8 +304,8 @@ def _compute_grad_params(
     return w_list + bias_list
 
 
-class _BackwardGroupedMLP_CuTeGEMMDBase_MXFP8(FusedOperation):
-    """Base fused backward op for MXFP8 GroupedLinear + activation + GroupedLinear.
+class _BackwardGroupedMLP_CuTeGEMMDBase(FusedOperation):
+    """Base fused backward op for block-scaled GroupedLinear + activation + GroupedLinear.
 
     Uses experimental CuTe DSL kernel from cuDNN front-end.
 
@@ -360,7 +412,9 @@ class _BackwardGroupedMLP_CuTeGEMMDBase_MXFP8(FusedOperation):
         grad_output = grad_output.reshape(-1, fc2_weight_shape[0])
         out_shape = list(grad_output.size())
         num_groups = fc1_op.num_groups
-        device = fc1_op._get_weight_tensors()[0].device
+        fc1_weight_param = fc1_op.weight if fc1_op.single_grouped_weight else fc1_op.weight0
+        fc2_weight_param = fc2_op.weight if fc2_op.single_grouped_weight else fc2_op.weight0
+        device = fc1_weight_param.device
         dtype = fc1_ctx.dtype
 
         # Saved tensors from FC1 forward.
@@ -419,10 +473,18 @@ class _BackwardGroupedMLP_CuTeGEMMDBase_MXFP8(FusedOperation):
         output_fc2_dbias = fc2_op.has_bias
         fc2_dbias_packed = None
         fc2_dy = None
+        grad_output_quantizer = getattr(grad_output, "quantizer", None)
+        fc2_grad_output_quantizer_matches = (
+            isinstance(fc2_grad_output_quantizer, MXFP8Quantizer)
+            and isinstance(grad_output_quantizer, MXFP8Quantizer)
+        ) or (
+            isinstance(fc2_grad_output_quantizer, NVFP4Quantizer)
+            and isinstance(grad_output_quantizer, NVFP4Quantizer)
+        )
         if (
             not output_fc2_dbias
             and isinstance(grad_output, GroupedTensor)
-            and isinstance(getattr(grad_output, "quantizer", None), MXFP8Quantizer)
+            and fc2_grad_output_quantizer_matches
         ):
             grouped_fc2_dy = grad_output
         else:
@@ -435,12 +497,25 @@ class _BackwardGroupedMLP_CuTeGEMMDBase_MXFP8(FusedOperation):
                     split_sizes,
                 )
             else:
-                grouped_fc2_dy = tex.group_quantize(
+                grouped_fc2_dy = _group_quantize_for_grouped_mlp(
                     fc2_dy,
                     fc2_grad_output_quantizer,
                     num_groups,
                     split_sizes,
+                    tensor_offsets=base_split_offsets * fc2_weight_shape[0],
                 )
+
+        use_nvfp4 = (
+            isinstance(fc2_grad_output_quantizer, NVFP4Quantizer)
+            or isinstance(fc1_weight_param, NVFP4Tensor)
+            or isinstance(fc2_weight_param, NVFP4Tensor)
+        )
+        data_dtype = torch.float4_e2m1fn_x2 if use_nvfp4 else torch.float8_e4m3fn
+        scale_view_dtype = torch.float8_e4m3fn if use_nvfp4 else torch.float8_e8m0fnu
+        sf_vec_size = NVFP4_BLOCK_SCALING_SIZE if use_nvfp4 else MXFP8_BLOCK_SCALING_SIZE
+        data_k = out_shape[1] // 2 if use_nvfp4 else out_shape[1]
+        fc2_weight_k = fc2_weight_shape[1] // 2 if use_nvfp4 else fc2_weight_shape[1]
+        k_sf_divisor = 2 * sf_vec_size if use_nvfp4 else 4 * sf_vec_size
 
         # Pack data tensors
         # Note: Fused kernel expects tensor with non-contiguous
@@ -451,20 +526,42 @@ class _BackwardGroupedMLP_CuTeGEMMDBase_MXFP8(FusedOperation):
         # Data logical shape: (sum(m), k, 1)
         # Scale logical shape: (32 (block row), 4 (block row),
         #   sum(m)/128, 4 (block col), k/128, 1)
-        fc2_dy_data = grouped_fc2_dy.rowwise_data.view(out_shape[0], out_shape[1])
-        fc2_dy_data = fc2_dy_data.view(dtype=torch.float8_e4m3fn)
+        fc2_dy_data = grouped_fc2_dy.rowwise_data.view(dtype=data_dtype)
+        fc2_dy_data = fc2_dy_data.view(out_shape[0], data_k)
         fc2_dy_data = fc2_dy_data.unsqueeze(0).permute(1, 2, 0)
         fc2_dy_scales = grouped_fc2_dy.scale_inv
-        fc2_dy_scales = fc2_dy_scales.view(dtype=torch.float8_e8m0fnu)
-        fc2_dy_scales = fc2_dy_scales.view(
-            1,
-            (out_shape[0] + 127) // 128,
-            (out_shape[1] + 127) // 128,
-            MXFP8_BLOCK_SCALING_SIZE,
-            4,
-            4,
-        )
-        fc2_dy_scales = fc2_dy_scales.permute(3, 4, 1, 5, 2, 0)
+        fc2_dy_scales = fc2_dy_scales.view(dtype=scale_view_dtype)
+        with_gemm_swizzled_scales = grouped_fc2_dy._with_gemm_swizzled_scales
+        if use_nvfp4 and with_gemm_swizzled_scales:
+            fc2_dy_scales = fc2_dy_scales.view(
+                1,
+                ceil_div(out_shape[0], 128),
+                ceil_div(data_k, k_sf_divisor),
+                32,
+                4,
+                4,
+            )
+            fc2_dy_scales = fc2_dy_scales.permute(3, 4, 1, 5, 2, 0)
+        elif use_nvfp4:
+            fc2_dy_scales = fc2_dy_scales.view(
+                1,
+                ceil_div(out_shape[0], 128),
+                4,
+                32,
+                ceil_div(data_k, k_sf_divisor),
+                4,
+            )
+            fc2_dy_scales = fc2_dy_scales.permute(3, 2, 1, 5, 4, 0)
+        else:
+            fc2_dy_scales = fc2_dy_scales.view(
+                1,
+                ceil_div(out_shape[0], 128),
+                ceil_div(out_shape[1], k_sf_divisor),
+                32,
+                4,
+                4,
+            )
+            fc2_dy_scales = fc2_dy_scales.permute(3, 4, 1, 5, 2, 0)
 
         # Kernel scaling factors
         alpha_tensor = get_cached_ones_tensor(num_groups, dtype, device)
@@ -475,25 +572,43 @@ class _BackwardGroupedMLP_CuTeGEMMDBase_MXFP8(FusedOperation):
         scales_tensor = scales_f32.reshape(-1, 1, 1)
         dscales_tensor = torch.zeros_like(scales_tensor)
 
+        fc2_d_dtype = torch.bfloat16 if use_nvfp4 else torch.float8_e4m3fn
+        if use_nvfp4:
+            nvfp4_fp4_max = 6.0
+            nvfp4_fp8_max = 448.0
+            fc2_alpha_tensor = (
+                torch.sqrt(
+                    _nvfp4_amax(grouped_fc2_dy, columnwise=False)
+                    * _nvfp4_amax(grouped_fc2_weight, columnwise=True)
+                )
+                / (nvfp4_fp8_max * nvfp4_fp4_max)
+            ).expand(num_groups)
+            fc2_beta_tensor = get_cached_ones_tensor(num_groups, torch.float32, device)
+            fc2_norm_const_tensor = None
+        else:
+            fc2_alpha_tensor = alpha_tensor
+            fc2_beta_tensor = alpha_tensor
+            fc2_norm_const_tensor = norm_const_tensor
+
         fc2_dactivation_kwargs = {
             "a_tensor": fc2_dy_data,
             "c_tensor": activation_in.unsqueeze(0).permute(1, 2, 0),
             "sfa_tensor": fc2_dy_scales,
             "padded_offsets": split_points,
-            "alpha_tensor": alpha_tensor,
+            "alpha_tensor": fc2_alpha_tensor,
             "prob_tensor": scales_tensor,
             "dprob_tensor": dscales_tensor,
             "generate_dbias": fc1_op.has_bias,
-            "norm_const_tensor": norm_const_tensor,
-            "d_dtype": torch.float8_e4m3fn,
+            "norm_const_tensor": fc2_norm_const_tensor,
+            "d_dtype": fc2_d_dtype,
             "cd_major": "n",
-            "sf_vec_size": MXFP8_BLOCK_SCALING_SIZE,
+            "sf_vec_size": sf_vec_size,
             "current_stream": current_stream,
-            "discrete_col_sfd": True,
+            "discrete_col_sfd": not use_nvfp4,
             "use_dynamic_sched": True,
         }
         if self._cudnn_dact_func is not None:
-            fc2_dactivation_kwargs["beta_tensor"] = alpha_tensor
+            fc2_dactivation_kwargs["beta_tensor"] = fc2_beta_tensor
             fc2_dactivation_kwargs["act_func"] = self._cudnn_dact_func
         else:
             fc2_dactivation_kwargs["use_dsrelu_reuse"] = recompute_fc2_x_from_dsrelu
@@ -513,19 +628,23 @@ class _BackwardGroupedMLP_CuTeGEMMDBase_MXFP8(FusedOperation):
             # Data actual shape: (num_groups, k, n)
             # Data logical shape: (n, k, num_groups)
             fc2_w_data = fc2_weight_for_gemm.columnwise_data
-            fc2_w_data = fc2_w_data.view(dtype=torch.float8_e4m3fn)
-            fc2_w_data = fc2_w_data.view(num_groups, fc2_weight_shape[0], fc2_weight_shape[1])
-            fc2_w_data = fc2_w_data.permute(2, 1, 0)
-            fc2_w_scales = fc2_weight_for_gemm.columnwise_scale_inv.view(dtype=torch.float8_e8m0fnu)
+            fc2_w_data = fc2_w_data.view(dtype=data_dtype)
+            fc2_w_data = fc2_w_data.view(num_groups, fc2_weight_shape[0], fc2_weight_k)
+            fc2_w_data = fc2_w_data.permute(1, 2, 0) if use_nvfp4 else fc2_w_data.permute(2, 1, 0)
+            fc2_w_scales = fc2_weight_for_gemm.columnwise_scale_inv.view(dtype=scale_view_dtype)
             fc2_w_scales = fc2_w_scales.view(
                 num_groups,
-                (fc2_weight_shape[1] + 127) // 128,
-                (fc2_weight_shape[0] + 127) // 128,
-                MXFP8_BLOCK_SCALING_SIZE,
+                ceil_div(fc2_weight_shape[1], k_sf_divisor),
+                ceil_div(fc2_weight_shape[0], 128),
+                32,
                 4,
                 4,
             )
-            fc2_w_scales = fc2_w_scales.permute(3, 4, 1, 5, 2, 0)
+            fc2_w_scales = (
+                fc2_w_scales.permute(3, 4, 2, 5, 1, 0)
+                if use_nvfp4
+                else fc2_w_scales.permute(3, 4, 1, 5, 2, 0)
+            )
 
             fc2_dactivation_kwargs["b_tensor"] = fc2_w_data
             fc2_dactivation_kwargs["sfb_tensor"] = fc2_w_scales
@@ -534,27 +653,43 @@ class _BackwardGroupedMLP_CuTeGEMMDBase_MXFP8(FusedOperation):
                 [w._columnwise_data for w in grouped_fc2_weight],
                 device,
             )
+            swizzle_type = (
+                "uniform_nvfp4_swizzle" if use_nvfp4 else "uniform_mxfp8_columnwise_swizzle"
+            )
             fc2_sfb_ptrs, _fc2_sfb_buffer = tex.transform_and_copy_data_ptrs_to_device(
-                "uniform_mxfp8_columnwise_swizzle",
+                swizzle_type,
                 [w._columnwise_scale_inv for w in grouped_fc2_weight],
                 device,
             )
             fc2_dactivation_kwargs["b_ptrs"] = fc2_b_ptrs
             fc2_dactivation_kwargs["sfb_ptrs"] = fc2_sfb_ptrs
             fc2_dactivation_kwargs["n"] = fc2_weight_shape[1]
-            fc2_dactivation_kwargs["b_dtype"] = torch.float8_e4m3fn
-            fc2_dactivation_kwargs["b_major"] = "n"
+            fc2_dactivation_kwargs["b_dtype"] = data_dtype
+            fc2_dactivation_kwargs["b_major"] = "k" if use_nvfp4 else "n"
 
         fc2_dgrad_kernel_out = self.grouped_gemm_dactivation_kernel()(**fc2_dactivation_kwargs)
 
-        fc1_dy_row_data = fc2_dgrad_kernel_out["d_row_tensor"]
-        fc1_dy_row_data = fc1_dy_row_data.view(out_shape[0], fc1_weight_shape[0])
-        # View scale in their actual swizzled shape
-        fc1_dy_row_scale = fc2_dgrad_kernel_out["sfd_row_tensor"].permute(5, 2, 4, 0, 1, 3).view(-1)
-        fc1_dy_col_data = fc2_dgrad_kernel_out["d_col_tensor"]
-        fc1_dy_col_data = fc1_dy_col_data.view(out_shape[0], fc1_weight_shape[0])
-        # View scale in their actual swizzled shape
-        fc1_dy_col_scale = fc2_dgrad_kernel_out["sfd_col_tensor"].permute(5, 2, 4, 0, 1, 3).view(-1)
+        if use_nvfp4:
+            fc1_dy_bf16 = fc2_dgrad_kernel_out["d_row_tensor"]
+            fc1_dy_bf16 = fc1_dy_bf16.view(out_shape[0], fc1_weight_shape[0]).contiguous()
+            fc1_dy_row_data = None
+            fc1_dy_row_scale = None
+            fc1_dy_col_data = None
+            fc1_dy_col_scale = None
+        else:
+            fc1_dy_bf16 = None
+            fc1_dy_row_data = fc2_dgrad_kernel_out["d_row_tensor"]
+            fc1_dy_row_data = fc1_dy_row_data.view(out_shape[0], fc1_weight_shape[0])
+            # View scale in their actual swizzled shape
+            fc1_dy_row_scale = (
+                fc2_dgrad_kernel_out["sfd_row_tensor"].permute(5, 2, 4, 0, 1, 3).view(-1)
+            )
+            fc1_dy_col_data = fc2_dgrad_kernel_out["d_col_tensor"]
+            fc1_dy_col_data = fc1_dy_col_data.view(out_shape[0], fc1_weight_shape[0])
+            # View scale in their actual swizzled shape
+            fc1_dy_col_scale = (
+                fc2_dgrad_kernel_out["sfd_col_tensor"].permute(5, 2, 4, 0, 1, 3).view(-1)
+            )
         grad_scales = fc2_dgrad_kernel_out["dprob_tensor"].view(-1)
 
         if recompute_fc2_x_from_dsrelu:
@@ -628,21 +763,37 @@ class _BackwardGroupedMLP_CuTeGEMMDBase_MXFP8(FusedOperation):
 
         # FC1 grad output for dgrad and wgrad GEMMs
         fc1_dy_tensor_offsets = base_split_offsets * fc1_weight_shape[0]
-        grouped_fc1_dy = GroupedTensor(
-            shape=(out_shape[0], fc1_weight_shape[0]),
-            dtype=dtype,
-            num_tensors=num_groups,
-            quantizer=fc1_ctx.grad_output_quantizers[0],
-            data=fc1_dy_row_data,
-            columnwise_data=fc1_dy_col_data,
-            scale_inv=fc1_dy_row_scale,
-            columnwise_scale_inv=fc1_dy_col_scale,
-            first_dims=split_sizes,
-            tensor_offsets=fc1_dy_tensor_offsets,
-            with_gemm_swizzled_scales=True,
-        )
+        fc1_grad_output_quantizer = fc1_ctx.grad_output_quantizers[0]
+        if use_nvfp4:
+            fc1_grad_output_quantizer.set_usage(
+                rowwise=True,
+                columnwise=fc1_ctx.weight_requires_grad,
+            )
+            fc1_grad_output_quantizer.optimize_for_gemm = True
+            grouped_fc1_dy = _group_quantize_for_grouped_mlp(
+                fc1_dy_bf16,
+                fc1_grad_output_quantizer,
+                num_groups,
+                split_sizes,
+                tensor_offsets=fc1_dy_tensor_offsets,
+            )
+        else:
+            grouped_fc1_dy = GroupedTensor(
+                shape=(out_shape[0], fc1_weight_shape[0]),
+                dtype=dtype,
+                num_tensors=num_groups,
+                quantizer=fc1_grad_output_quantizer,
+                data=fc1_dy_row_data,
+                columnwise_data=fc1_dy_col_data,
+                scale_inv=fc1_dy_row_scale,
+                columnwise_scale_inv=fc1_dy_col_scale,
+                first_dims=split_sizes,
+                tensor_offsets=fc1_dy_tensor_offsets,
+                with_gemm_swizzled_scales=True,
+            )
 
         # FC2 wgrad GEMM
+        wgrad_kernel_fn = None if use_nvfp4 else self.grouped_gemm_wgrad_kernel()
         fc2_grad_params = _compute_grad_params(
             fc_op=fc2_op,
             ctx=fc2_ctx,
@@ -655,7 +806,7 @@ class _BackwardGroupedMLP_CuTeGEMMDBase_MXFP8(FusedOperation):
             bias_grads=fc2_bias_grads,
             bias_grad_packed=fc2_bias_grad_packed,
             label="FC2",
-            cudnn_wgrad_kernel_fn=self.grouped_gemm_wgrad_kernel(),
+            cudnn_wgrad_kernel_fn=wgrad_kernel_fn,
             offsets=split_points,
         )
 
@@ -677,67 +828,110 @@ class _BackwardGroupedMLP_CuTeGEMMDBase_MXFP8(FusedOperation):
         if fc1_ctx.input_requires_grad:
             in_shape = out_shape[:-1] + [fc1_weight_shape[1]]
 
-            fc1_dgrad_a_data = fc2_dgrad_kernel_out["d_row_tensor"]
-            fc1_dgrad_a_scales = fc2_dgrad_kernel_out["sfd_row_tensor"]
-
-            fc1_dgrad_kwargs = {
-                "a_tensor": fc1_dgrad_a_data,
-                "sfa_tensor": fc1_dgrad_a_scales,
-                "padded_offsets": split_points,
-                "alpha_tensor": alpha_tensor,
-                "norm_const_tensor": None,
-                "prob_tensor": torch.ones((out_shape[0], 1, 1), dtype=torch.float32, device=device),
-                "acc_dtype": torch.float32,
-                "d_dtype": dtype,
-                "cd_major": "n",
-                "sf_vec_size": MXFP8_BLOCK_SCALING_SIZE,
-                "current_stream": current_stream,
-                "discrete_col_sfd": True,
-                "use_dynamic_sched": True,
-            }
-
-            if fc1_op.single_grouped_weight:
-                # Clone and swizzle scales for GEMM
-                fc1_weight_for_gemm = grouped_fc1_weight.copy()
-                tex.grouped_swizzle_for_gemm(fc1_weight_for_gemm, rowwise=False, columnwise=True)
-
-                fc1_w_data = fc1_weight_for_gemm.columnwise_data
-                fc1_w_data = fc1_w_data.view(dtype=torch.float8_e4m3fn)
-                fc1_w_data = fc1_w_data.view(num_groups, fc1_weight_shape[0], fc1_weight_shape[1])
-                fc1_w_data = fc1_w_data.permute(2, 1, 0)
-                fc1_w_scales = fc1_weight_for_gemm.columnwise_scale_inv.view(
-                    dtype=torch.float8_e8m0fnu
-                )
-                fc1_w_scales = fc1_w_scales.view(
-                    num_groups,
-                    (fc1_weight_shape[1] + 127) // 128,
-                    (fc1_weight_shape[0] + 127) // 128,
-                    MXFP8_BLOCK_SCALING_SIZE,
-                    4,
-                    4,
-                )
-                fc1_w_scales = fc1_w_scales.permute(3, 4, 1, 5, 2, 0)
-
-                fc1_dgrad_kwargs["b_tensor"] = fc1_w_data
-                fc1_dgrad_kwargs["sfb_tensor"] = fc1_w_scales
+            if use_nvfp4:
+                grad_input = torch.empty(in_shape, dtype=dtype, device=device)
+                if num_groups == 1:
+                    if fc1_op.single_grouped_weight:
+                        fc1_w_single = grouped_fc1_weight.split_into_quantized_tensors()[0]
+                    else:
+                        fc1_w_single = grouped_fc1_weight[0]
+                    fc1_dy_single = _nvfp4_single_tensor_from_grouped(grouped_fc1_dy)
+                    general_gemm(
+                        fc1_w_single,
+                        fc1_dy_single,
+                        out_dtype=dtype,
+                        out=grad_input,
+                        layout="NN",
+                    )
+                else:
+                    fc1_x_tensor_offsets = base_split_offsets * fc1_weight_shape[1]
+                    grouped_grad_input = GroupedTensor(
+                        shape=(out_shape[0], fc1_weight_shape[1]),
+                        dtype=dtype,
+                        num_tensors=num_groups,
+                        quantizer=None,
+                        data=grad_input.view(-1),
+                        first_dims=split_sizes,
+                        tensor_offsets=fc1_x_tensor_offsets,
+                    )
+                    general_grouped_gemm_for_grouped_tensor(
+                        grouped_fc1_weight,
+                        grouped_fc1_dy,
+                        grouped_grad_input,
+                        layout="NN",
+                    )
             else:
-                fc1_b_ptrs = tex.copy_data_ptrs_to_device(
-                    [w._columnwise_data for w in grouped_fc1_weight],
-                    device,
-                )
-                fc1_sfb_ptrs, _fc1_sfb_buffer = tex.transform_and_copy_data_ptrs_to_device(
-                    "uniform_mxfp8_columnwise_swizzle",
-                    [w._columnwise_scale_inv for w in grouped_fc1_weight],
-                    device,
-                )
-                fc1_dgrad_kwargs["b_ptrs"] = fc1_b_ptrs
-                fc1_dgrad_kwargs["sfb_ptrs"] = fc1_sfb_ptrs
-                fc1_dgrad_kwargs["n"] = fc1_weight_shape[1]
-                fc1_dgrad_kwargs["b_dtype"] = torch.float8_e4m3fn
-                fc1_dgrad_kwargs["b_major"] = "n"
+                fc1_dgrad_a_data = fc2_dgrad_kernel_out["d_row_tensor"]
+                fc1_dgrad_a_scales = fc2_dgrad_kernel_out["sfd_row_tensor"]
 
-            fc1_dgrad_kernel_out = self.grouped_gemm_quant_kernel()(**fc1_dgrad_kwargs)
-            grad_input = fc1_dgrad_kernel_out["d_tensor"].view(in_shape)
+                fc1_dgrad_kwargs = {
+                    "a_tensor": fc1_dgrad_a_data,
+                    "sfa_tensor": fc1_dgrad_a_scales,
+                    "padded_offsets": split_points,
+                    "alpha_tensor": alpha_tensor,
+                    "norm_const_tensor": None,
+                    "prob_tensor": torch.ones(
+                        (out_shape[0], 1, 1), dtype=torch.float32, device=device
+                    ),
+                    "acc_dtype": torch.float32,
+                    "d_dtype": dtype,
+                    "cd_major": "n",
+                    "sf_vec_size": MXFP8_BLOCK_SCALING_SIZE,
+                    "current_stream": current_stream,
+                    "discrete_col_sfd": True,
+                    "use_dynamic_sched": True,
+                }
+
+                if fc1_op.single_grouped_weight:
+                    # Clone and swizzle scales for GEMM
+                    fc1_weight_for_gemm = grouped_fc1_weight.copy()
+                    tex.grouped_swizzle_for_gemm(
+                        fc1_weight_for_gemm, rowwise=False, columnwise=True
+                    )
+
+                    fc1_w_data = fc1_weight_for_gemm.columnwise_data
+                    fc1_w_data = fc1_w_data.view(dtype=torch.float8_e4m3fn)
+                    fc1_w_data = fc1_w_data.view(
+                        num_groups, fc1_weight_shape[0], fc1_weight_shape[1]
+                    )
+                    fc1_w_data = fc1_w_data.permute(2, 1, 0)
+                    fc1_w_scales = fc1_weight_for_gemm.columnwise_scale_inv.view(
+                        dtype=torch.float8_e8m0fnu
+                    )
+                    fc1_w_scales = fc1_w_scales.view(
+                        num_groups,
+                        ceil_div(fc1_weight_shape[1], 128),
+                        ceil_div(fc1_weight_shape[0], 128),
+                        MXFP8_BLOCK_SCALING_SIZE,
+                        4,
+                        4,
+                    )
+                    fc1_w_scales = fc1_w_scales.permute(3, 4, 1, 5, 2, 0)
+
+                    fc1_dgrad_kwargs["b_tensor"] = fc1_w_data
+                    fc1_dgrad_kwargs["sfb_tensor"] = fc1_w_scales
+                else:
+                    fc1_b_ptrs = tex.copy_data_ptrs_to_device(
+                        [w._columnwise_data for w in grouped_fc1_weight],
+                        device,
+                    )
+                    swizzle_type = (
+                        "uniform_nvfp4_swizzle" if use_nvfp4 else "uniform_mxfp8_columnwise_swizzle"
+                    )
+                    fc1_sfb_ptrs, _fc1_sfb_buffer = tex.transform_and_copy_data_ptrs_to_device(
+                        swizzle_type,
+                        [w._columnwise_scale_inv for w in grouped_fc1_weight],
+                        device,
+                    )
+
+                    fc1_dgrad_kwargs["b_ptrs"] = fc1_b_ptrs
+                    fc1_dgrad_kwargs["sfb_ptrs"] = fc1_sfb_ptrs
+                    fc1_dgrad_kwargs["n"] = fc1_weight_shape[1]
+                    fc1_dgrad_kwargs["b_dtype"] = torch.float8_e4m3fn
+                    fc1_dgrad_kwargs["b_major"] = "n"
+
+                fc1_dgrad_kernel_out = self.grouped_gemm_quant_kernel()(**fc1_dgrad_kwargs)
+                grad_input = fc1_dgrad_kernel_out["d_tensor"].view(in_shape)
 
         # FC1 wgrad GEMM
         fc1_grad_params = _compute_grad_params(
@@ -752,7 +946,7 @@ class _BackwardGroupedMLP_CuTeGEMMDBase_MXFP8(FusedOperation):
             bias_grads=fc1_bias_grads,
             bias_grad_packed=fc1_bias_grad_packed,
             label="FC1",
-            cudnn_wgrad_kernel_fn=self.grouped_gemm_wgrad_kernel(),
+            cudnn_wgrad_kernel_fn=wgrad_kernel_fn,
             offsets=split_points,
         )
 
@@ -778,8 +972,8 @@ class _BackwardGroupedMLP_CuTeGEMMDBase_MXFP8(FusedOperation):
         )
 
 
-class BackwardGroupedMLP_CuTeGEMMDGLU_MXFP8(_BackwardGroupedMLP_CuTeGEMMDBase_MXFP8):
-    """Fused backward op for GroupedLinear + scaled GLU + GroupedLinear."""
+class BackwardGroupedMLP_CuTeGEMMDGLU(_BackwardGroupedMLP_CuTeGEMMDBase):
+    """Fused backward op for block-scaled GroupedLinear + scaled GLU + GroupedLinear."""
 
     @classmethod
     @functools.lru_cache(maxsize=None)
@@ -790,8 +984,8 @@ class BackwardGroupedMLP_CuTeGEMMDGLU_MXFP8(_BackwardGroupedMLP_CuTeGEMMDBase_MX
         return grouped_gemm_dglu_wrapper_sm100
 
 
-class BackwardGroupedMLP_CuTeGEMMDUnary_MXFP8(_BackwardGroupedMLP_CuTeGEMMDBase_MXFP8):
-    """Fused backward op for GroupedLinear + scaled unary activation + GroupedLinear."""
+class BackwardGroupedMLP_CuTeGEMMDUnary(_BackwardGroupedMLP_CuTeGEMMDBase):
+    """Fused backward op for block-scaled GroupedLinear + scaled unary activation + GroupedLinear."""
 
     @classmethod
     @functools.lru_cache(maxsize=None)
@@ -833,7 +1027,7 @@ def fuse_backward_ops(
     return fuse_grouped_mlp_ops(
         ops,
         recipe=recipe,
-        fused_op_cls=BackwardGroupedMLP_CuTeGEMMDGLU_MXFP8,
+        fused_op_cls=BackwardGroupedMLP_CuTeGEMMDGLU,
     )
 
 
@@ -845,16 +1039,18 @@ def fuse_backward_srelu_ops(
 ) -> list[FusibleOperation]:
     """Apply GroupedLinear + ScaledSReLU + GroupedLinear fusion for backward pass."""
 
+    if recipe is None or not recipe.mxfp8():
+        return ops
     return fuse_grouped_mlp_ops(
         ops,
         recipe=recipe,
-        fused_op_cls=BackwardGroupedMLP_CuTeGEMMDUnary_MXFP8,
+        fused_op_cls=BackwardGroupedMLP_CuTeGEMMDUnary,
         activation_op_types=(ScaledSReLU,),
     )
 
 
 # Register fusion if available
-if BackwardGroupedMLP_CuTeGEMMDGLU_MXFP8.is_supported():
+if BackwardGroupedMLP_CuTeGEMMDGLU.is_supported():
     register_backward_fusion(fuse_backward_ops, prepend=True)
-if BackwardGroupedMLP_CuTeGEMMDUnary_MXFP8.is_supported():
+if BackwardGroupedMLP_CuTeGEMMDUnary.is_supported():
     register_backward_fusion(fuse_backward_srelu_ops, prepend=True)
