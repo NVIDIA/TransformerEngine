@@ -231,7 +231,8 @@ void nvte_multi_splits_to_offsets_impl(NVTETensor split_sizes, const int64_t *st
                                        NVTETensor *split_offsets_list, size_t list_size,
                                        cudaStream_t stream) {
   NVTE_CHECK(list_size > 0 && list_size < NVTE_MAX_MULTI_SPLITS_TO_OFFSETS,
-             "list_size must be in [1, ", NVTE_MAX_MULTI_SPLITS_TO_OFFSETS, ").");
+             "list_size must be in [1, ", static_cast<int>(NVTE_MAX_MULTI_SPLITS_TO_OFFSETS),
+             ").");
   NVTE_CHECK(stride_list != nullptr, "stride_list must not be null.");
   NVTE_CHECK(split_offsets_list != nullptr, "split_offsets_list must not be null.");
 
