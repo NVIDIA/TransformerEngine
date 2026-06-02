@@ -632,9 +632,8 @@ def triton_call_lowering(
         ffi_operand_output_aliases = None
 
     compressed_call_proto = zlib.compress(call_proto)
-    if (
-        not used_autotuned_launch
-        and jax_version_meet_requirement(TRITON_EXTENSION_CUDA_GRAPH_MIN_JAX_VERSION)
+    if not used_autotuned_launch and jax_version_meet_requirement(
+        TRITON_EXTENSION_CUDA_GRAPH_MIN_JAX_VERSION
     ):
         rule = jax.ffi.ffi_lowering(
             "triton_kernel_call_ffi",
