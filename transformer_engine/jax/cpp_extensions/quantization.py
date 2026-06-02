@@ -6,6 +6,7 @@ import operator
 from functools import reduce
 from typing import Tuple, Optional, Union
 import math
+import warnings
 
 
 import jax
@@ -95,6 +96,30 @@ def _filter_axis_spec(axis_spec, allowed_axes):
 
 def _filter_spec_axes(spec, allowed_axes):
     return tuple(_filter_axis_spec(axis_spec, allowed_axes) for axis_spec in spec)
+
+
+def _spec_axes(spec):
+    axes = []
+    for axis_spec in spec:
+        if axis_spec is None:
+            continue
+        axis_tuple = axis_spec if isinstance(axis_spec, tuple) else (axis_spec,)
+        for axis in axis_tuple:
+            if axis is not None and axis not in axes:
+                axes.append(axis)
+    return axes
+
+
+def _warn_if_axes_ignored(arg_name, original_spec, partition_spec):
+    ignored_axes = tuple(axis for axis in _spec_axes(original_spec) if axis not in _spec_axes(partition_spec))
+    if ignored_axes:
+        warnings.warn(
+            "Grouped quantize custom partitioning will ignore/replicate sharding "
+            f"axes {ignored_axes} from {arg_name}; only supported packed grouped "
+            "data axes are preserved.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
 
 
 def _supported_grouped_quantize_axes(mesh):
@@ -1328,11 +1353,16 @@ class GroupedQuantizePrimitive(BasePrimitive):
     @staticmethod
     def _parse_partition_specs(scaling_mode, q_layout, flatten_axis, mesh, arg_infos):
         allowed_axes = _supported_grouped_quantize_axes(mesh)
-        x_spec = _filter_spec_axes(get_padded_spec(arg_infos[0]), allowed_axes)
+        original_x_spec = get_padded_spec(arg_infos[0])
+        x_spec = _filter_spec_axes(original_x_spec, allowed_axes)
         x_spec = _contiguous_flat_input_spec(x_spec, flatten_axis)
-        group_spec = _filter_spec_axes(get_padded_spec(arg_infos[2]), allowed_axes)
+        _warn_if_axes_ignored("x", original_x_spec, x_spec)
+
+        original_group_spec = get_padded_spec(arg_infos[2])
+        group_spec = _filter_spec_axes(original_group_spec, allowed_axes)
         if group_spec == (None,) and len(x_spec) > 0:
             group_spec = (x_spec[0],)
+        _warn_if_axes_ignored("group_sizes", original_group_spec, group_spec)
         flat_spec = _flat_data_spec(x_spec)
         replicated_spec = (None,)
 

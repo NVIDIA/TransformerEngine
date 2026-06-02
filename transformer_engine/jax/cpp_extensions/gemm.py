@@ -252,6 +252,30 @@ def _filter_spec_axes(spec, allowed_axes):
     return tuple(_filter_axis_spec(axis_spec, allowed_axes) for axis_spec in spec)
 
 
+def _spec_axes(spec):
+    axes = []
+    for axis_spec in spec:
+        if axis_spec is None:
+            continue
+        axis_tuple = axis_spec if isinstance(axis_spec, tuple) else (axis_spec,)
+        for axis in axis_tuple:
+            if axis is not None and axis not in axes:
+                axes.append(axis)
+    return axes
+
+
+def _warn_if_axes_ignored(arg_name, original_spec, partition_spec):
+    ignored_axes = tuple(axis for axis in _spec_axes(original_spec) if axis not in _spec_axes(partition_spec))
+    if ignored_axes:
+        warnings.warn(
+            "Grouped GEMM custom partitioning will ignore/replicate sharding "
+            f"axes {ignored_axes} from {arg_name}; only DP/FSDP/EP grouped "
+            "partitioning axes are preserved.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+
+
 def _supported_grouped_gemm_axes(mesh):
     gsr = global_mesh_resource(validate=False)
     return {
@@ -1885,20 +1909,21 @@ class GroupedGemmPrimitive(BasePrimitive):
         fsdp_axis = gsr.fsdp_resource
         allowed_axes = _supported_grouped_gemm_axes(mesh)
 
-        lhs_data_spec = _filter_spec_axes(get_padded_spec(arg_infos[0]), allowed_axes)
-        lhs_scale_spec = _filter_spec_axes(get_padded_spec(arg_infos[1]), allowed_axes)
-        rhs_data_spec = _filter_spec_axes(get_padded_spec(arg_infos[2]), allowed_axes)
-        rhs_scale_spec = _filter_spec_axes(get_padded_spec(arg_infos[3]), allowed_axes)
-        bias_spec = _filter_spec_axes(get_padded_spec(arg_infos[4]), allowed_axes)
+        original_arg_specs = tuple(get_padded_spec(arg_info) for arg_info in arg_infos)
+        lhs_data_spec = _filter_spec_axes(original_arg_specs[0], allowed_axes)
+        lhs_scale_spec = _filter_spec_axes(original_arg_specs[1], allowed_axes)
+        rhs_data_spec = _filter_spec_axes(original_arg_specs[2], allowed_axes)
+        rhs_scale_spec = _filter_spec_axes(original_arg_specs[3], allowed_axes)
+        bias_spec = _filter_spec_axes(original_arg_specs[4], allowed_axes)
 
-        lhs_first_dims_spec = _filter_spec_axes(get_padded_spec(arg_infos[5]), allowed_axes)
-        lhs_last_dims_spec = _filter_spec_axes(get_padded_spec(arg_infos[6]), allowed_axes)
-        rhs_first_dims_spec = _filter_spec_axes(get_padded_spec(arg_infos[7]), allowed_axes)
-        rhs_last_dims_spec = _filter_spec_axes(get_padded_spec(arg_infos[8]), allowed_axes)
-        out_first_dims_spec = _filter_spec_axes(get_padded_spec(arg_infos[9]), allowed_axes)
-        out_last_dims_spec = _filter_spec_axes(get_padded_spec(arg_infos[10]), allowed_axes)
-        additional_arg_0_spec = _filter_spec_axes(get_padded_spec(arg_infos[11]), allowed_axes)
-        additional_arg_1_spec = _filter_spec_axes(get_padded_spec(arg_infos[12]), allowed_axes)
+        lhs_first_dims_spec = _filter_spec_axes(original_arg_specs[5], allowed_axes)
+        lhs_last_dims_spec = _filter_spec_axes(original_arg_specs[6], allowed_axes)
+        rhs_first_dims_spec = _filter_spec_axes(original_arg_specs[7], allowed_axes)
+        rhs_last_dims_spec = _filter_spec_axes(original_arg_specs[8], allowed_axes)
+        out_first_dims_spec = _filter_spec_axes(original_arg_specs[9], allowed_axes)
+        out_last_dims_spec = _filter_spec_axes(original_arg_specs[10], allowed_axes)
+        additional_arg_0_spec = _filter_spec_axes(original_arg_specs[11], allowed_axes)
+        additional_arg_1_spec = _filter_spec_axes(original_arg_specs[12], allowed_axes)
 
         grouped_dim_specs = (
             lhs_first_dims_spec,
@@ -1957,8 +1982,10 @@ class GroupedGemmPrimitive(BasePrimitive):
             reduce_axis = None
 
         if result_infos:
-            out_spec = _filter_spec_axes(get_padded_spec(result_infos[0]), allowed_axes)
+            original_out_spec = get_padded_spec(result_infos[0])
+            out_spec = _filter_spec_axes(original_out_spec, allowed_axes)
         else:
+            original_out_spec = None
             out_spec = (None,) * (len(out_shape) if out_shape is not None else 1)
 
         if rhs_is_ragged and lhs_is_trans is not None and lhs_axis_boundary is not None:
@@ -1975,22 +2002,46 @@ class GroupedGemmPrimitive(BasePrimitive):
                     )
             lhs_data_spec = tuple(lhs_data_spec)
 
-        return (
+        final_arg_specs = (
+            lhs_data_spec,
+            lhs_scale_spec,
+            rhs_data_spec,
+            rhs_scale_spec,
+            bias_spec,
+            lhs_first_dims_spec,
+            lhs_last_dims_spec,
+            rhs_first_dims_spec,
+            rhs_last_dims_spec,
+            out_first_dims_spec,
+            out_last_dims_spec,
+            additional_arg_0_spec,
+            additional_arg_1_spec,
+        )
+        for arg_name, original_spec, partition_spec in zip(
             (
-                lhs_data_spec,
-                lhs_scale_spec,
-                rhs_data_spec,
-                rhs_scale_spec,
-                bias_spec,
-                lhs_first_dims_spec,
-                lhs_last_dims_spec,
-                rhs_first_dims_spec,
-                rhs_last_dims_spec,
-                out_first_dims_spec,
-                out_last_dims_spec,
-                additional_arg_0_spec,
-                additional_arg_1_spec,
+                "lhs_data",
+                "lhs_scale_inv",
+                "rhs_data",
+                "rhs_scale_inv",
+                "bias",
+                "lhs_first_dims",
+                "lhs_last_dims",
+                "rhs_first_dims",
+                "rhs_last_dims",
+                "out_first_dims",
+                "out_last_dims",
+                "additional_arg_0",
+                "additional_arg_1",
             ),
+            original_arg_specs,
+            final_arg_specs,
+        ):
+            _warn_if_axes_ignored(arg_name, original_spec, partition_spec)
+        if original_out_spec is not None:
+            _warn_if_axes_ignored("output", original_out_spec, out_spec)
+
+        return (
+            final_arg_specs,
             out_spec,
             reduce_axis,
         )

@@ -132,20 +132,21 @@ def test_grouped_quantize_strips_unsupported_axes_and_gathers_hidden_axes():
     with jax.set_mesh(mesh), global_shard_guard(
         MeshResource(dp_resource="dp", tp_resource="tp", fsdp_resource="fsdp", ep_resource="expert")
     ):
-        _, _, out_shardings, arg_shardings = GroupedQuantizePrimitive.partition(
-            jnp.float8_e4m3fn,
-            ScalingMode.MXFP8_1D_SCALING.value,
-            QuantizeLayout.ROWWISE,
-            -1,
-            jnp.float8_e8m0fnu,
-            mesh,
-            (
-                _arg_info(mesh, (8, 128, 128), ("expert", "dp", ("fsdp", "tp"))),
-                _arg_info(mesh, (8,), (("expert", "tp"),)),
-                _arg_info(mesh, (8,), (("expert", "tp"),)),
-            ),
-            (),
-        )
+        with pytest.warns(RuntimeWarning, match="Grouped quantize.*tp"):
+            _, _, out_shardings, arg_shardings = GroupedQuantizePrimitive.partition(
+                jnp.float8_e4m3fn,
+                ScalingMode.MXFP8_1D_SCALING.value,
+                QuantizeLayout.ROWWISE,
+                -1,
+                jnp.float8_e8m0fnu,
+                mesh,
+                (
+                    _arg_info(mesh, (8, 128, 128), ("expert", "dp", ("fsdp", "tp"))),
+                    _arg_info(mesh, (8,), (("expert", "tp"),)),
+                    _arg_info(mesh, (8,), (("expert", "tp"),)),
+                ),
+                (),
+            )
 
     assert tuple(arg_shardings[0].spec) == ("expert", None, None)
     assert tuple(arg_shardings[1].spec) == ("expert",)
@@ -223,25 +224,26 @@ def test_grouped_gemm_strips_unsupported_axes_preserves_dp_and_gathers_rhs_fsdp(
     with jax.set_mesh(mesh), global_shard_guard(
         MeshResource(dp_resource="dp", tp_resource="tp", fsdp_resource="fsdp", ep_resource="expert")
     ):
-        _, _, out_sharding, arg_shardings = GroupedGemmPrimitive.partition(
-            False,
-            False,
-            ScalingMode.NO_SCALING.value,
-            jnp.bfloat16,
-            False,
-            False,
-            False,
-            1,
-            1,
-            (1, 128, 64),
-            128,
-            64,
-            128,
-            64,
-            mesh,
-            arg_infos,
-            result_infos,
-        )
+        with pytest.warns(RuntimeWarning, match="Grouped GEMM.*tp"):
+            _, _, out_sharding, arg_shardings = GroupedGemmPrimitive.partition(
+                False,
+                False,
+                ScalingMode.NO_SCALING.value,
+                jnp.bfloat16,
+                False,
+                False,
+                False,
+                1,
+                1,
+                (1, 128, 64),
+                128,
+                64,
+                128,
+                64,
+                mesh,
+                arg_infos,
+                result_infos,
+            )
 
     assert tuple(arg_shardings[0].spec) == ("dp",)
     assert tuple(arg_shardings[2].spec) == ("expert",)
@@ -293,20 +295,21 @@ def test_grouped_partitioning_strips_arbitrary_unsupported_axis():
     mesh_resource = MeshResource(dp_resource="dp", fsdp_resource="fsdp", ep_resource="expert")
 
     with jax.set_mesh(mesh), global_shard_guard(mesh_resource):
-        _, _, quantize_out_shardings, quantize_arg_shardings = GroupedQuantizePrimitive.partition(
-            jnp.float8_e4m3fn,
-            ScalingMode.MXFP8_1D_SCALING.value,
-            QuantizeLayout.ROWWISE,
-            -1,
-            jnp.float8_e8m0fnu,
-            mesh,
-            (
-                _arg_info(mesh, (8, 128, 128), ("expert", "myaxis123", ("dp", "fsdp"))),
-                _arg_info(mesh, (8,), (("expert", "myaxis123"),)),
-                _arg_info(mesh, (8,), (("expert", "myaxis123"),)),
-            ),
-            (),
-        )
+        with pytest.warns(RuntimeWarning, match="Grouped quantize.*myaxis123"):
+            _, _, quantize_out_shardings, quantize_arg_shardings = GroupedQuantizePrimitive.partition(
+                jnp.float8_e4m3fn,
+                ScalingMode.MXFP8_1D_SCALING.value,
+                QuantizeLayout.ROWWISE,
+                -1,
+                jnp.float8_e8m0fnu,
+                mesh,
+                (
+                    _arg_info(mesh, (8, 128, 128), ("expert", "myaxis123", ("dp", "fsdp"))),
+                    _arg_info(mesh, (8,), (("expert", "myaxis123"),)),
+                    _arg_info(mesh, (8,), (("expert", "myaxis123"),)),
+                ),
+                (),
+            )
 
         gemm_arg_infos = (
             _arg_info(mesh, (8192,), (("dp", "myaxis123"),)),
@@ -324,25 +327,26 @@ def test_grouped_partitioning_strips_arbitrary_unsupported_axis():
             _arg_info(mesh, (0,), (("myaxis123",),)),
         )
         gemm_result_infos = (_arg_info(mesh, (1, 128, 64), ("expert", "myaxis123", None)),)
-        _, _, gemm_out_sharding, gemm_arg_shardings = GroupedGemmPrimitive.partition(
-            False,
-            False,
-            ScalingMode.NO_SCALING.value,
-            jnp.bfloat16,
-            False,
-            False,
-            False,
-            1,
-            1,
-            (1, 128, 64),
-            128,
-            64,
-            128,
-            64,
-            mesh,
-            gemm_arg_infos,
-            gemm_result_infos,
-        )
+        with pytest.warns(RuntimeWarning, match="Grouped GEMM.*myaxis123"):
+            _, _, gemm_out_sharding, gemm_arg_shardings = GroupedGemmPrimitive.partition(
+                False,
+                False,
+                ScalingMode.NO_SCALING.value,
+                jnp.bfloat16,
+                False,
+                False,
+                False,
+                1,
+                1,
+                (1, 128, 64),
+                128,
+                64,
+                128,
+                64,
+                mesh,
+                gemm_arg_infos,
+                gemm_result_infos,
+            )
 
     assert tuple(quantize_arg_shardings[0].spec) == ("expert", None, None)
     assert tuple(quantize_arg_shardings[1].spec) == ("expert",)
