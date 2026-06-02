@@ -1100,10 +1100,12 @@ class DotProductAttention(TransformerEngineBaseModule):
             signature is ``score_mod_bprop(graph, dP, tensors) -> dP``.
         score_mod_tensors: Optional[Dict[str, torch.Tensor]], default = None
             Runtime tensors exposed to score_mod as cuDNN graph tensors. Keys are
-            user-defined string names consumed by the callback through ``tensors[name]``.
+            user-defined string names consumed by the callback through ``tensors[name]``;
+            there is no predefined set of accepted keys.
         score_mod_bprop_tensors: Optional[Dict[str, torch.Tensor]], default = None
             Runtime tensors exposed to score_mod_bprop as cuDNN graph tensors. Keys are
-            user-defined string names consumed by the callback through ``tensors[name]``.
+            user-defined string names consumed by the callback through ``tensors[name]``;
+            there is no predefined set of accepted keys.
         """
 
         with self.prepare_forward_ctx(
