@@ -22,7 +22,7 @@ from ...module.base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
-from ...quantization import FP8GlobalStateManager, Recipe
+from ...quantization import FP8GlobalStateManager, QuantizerRole, Recipe
 from ...quantized_tensor import QuantizedTensorStorage
 from ...tensor import MXFP8Quantizer, MXFP8Tensor, Quantizer
 from ...utils import (
@@ -290,6 +290,25 @@ class GroupedLinear(BasicOperation):
         if mode == "backward":
             return self.num_groups
         return 0
+
+    def get_quantizer_roles(self, mode: str) -> Optional[list[QuantizerRole]]:
+        name = getattr(self, "name", "") or ""
+        if mode == "forward":
+            roles = []
+            for _ in range(self.num_groups):
+                roles.extend(
+                    [
+                        QuantizerRole(module_type="linear", tensor_type="input", name=name),
+                        QuantizerRole(module_type="linear", tensor_type="weight", name=name),
+                    ]
+                )
+            return roles
+        if mode == "backward":
+            return [
+                QuantizerRole(module_type="linear", tensor_type="grad_output", name=name)
+                for _ in range(self.num_groups)
+            ]
+        return None
 
     @property
     def has_bias(self) -> bool:
@@ -1393,12 +1412,12 @@ class GroupedLinear(BasicOperation):
                     ]
                     accumulate_into_main_grad = get_accumulate_flag_in_param(weights[0])
                 else:
-                    grad_weights = tex.bulk_allocate(
-                        [weight_shape] * num_groups,
-                        [ctx.dtype] * num_groups,
-                        device,
-                        [256] * num_groups,  # alignment
+                    grad_weights_packed = torch.empty(
+                        grouped_shape,
+                        dtype=ctx.dtype,
+                        device=device,
                     )
+                    grad_weights = [grad_weights_packed[i] for i in range(num_groups)]
                 final_weight_grads = list(grad_weights)
 
         # Perform dgrad GEMMs
