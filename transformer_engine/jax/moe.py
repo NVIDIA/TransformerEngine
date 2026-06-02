@@ -53,11 +53,12 @@ from dataclasses import dataclass
 from enum import Enum
 from functools import partial
 from typing import Any, NewType, Optional, Tuple, Union
+import warnings
 
 import jax
 import jax.numpy as jnp
 from flax import struct as flax_struct
-from jax.sharding import PartitionSpec as P
+from jax.sharding import NamedSharding, PartitionSpec as P
 
 from . import cpp_extensions as tex
 from .permutation import (
@@ -212,7 +213,7 @@ class _BodyCtx:
     routing_map: Any
     dispatch: Any  # _DispatchState
     casted_sorted_x_lhs_trans: Any
-    casted_wi_rhs_trans: Any  # combined [E, H, 2M] residual for fused wi_0|wi_1 bwd
+    casted_wi_rhs_trans: Any  # stacked [E, H, 2, M] residual for fused wi_0|wi_1 bwd
     gate_proj_out: Any
     up_proj_out: Any
     casted_intermediate_lhs_trans: Any
@@ -966,12 +967,20 @@ def _body_fwd(  # pylint: disable=unused-argument
     num_ep: int,
     num_experts_local: int,
     recv_buffer_rows: int,
+    apply_topk_weights_early: bool = False,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, dict]:
     """Per-shard forward body. Returns ``(output, aux_loss, ctx_dict)``.
 
     ``aux_loss`` is always materialized (zeros scalar when disabled) so
     the ``shard_map``'s ``out_specs`` has a static structure.
     """
+    if apply_topk_weights_early:
+        # Requires row-aligned per-token weights at the FFN intermediate;
+        # only available on the TE EP (tex.ep_dispatch) path.
+        raise NotImplementedError(
+            "apply_topk_weights_early=True is supported only with the TE EP "
+            "(tex.ep_dispatch / tex.ep_combine) backend."
+        )
     if not gate_inside_vjp:
         raise NotImplementedError(
             "gate_inside_vjp=False is deferred to a follow-up PR; for now"
@@ -992,7 +1001,8 @@ def _body_fwd(  # pylint: disable=unused-argument
 
     # ---------------- Stage 1: gate ----------------
     gate_kernel_cast = gate_kernel.astype(x.dtype)
-    gate_logits = jnp.einsum("bsh,he->bse", x, gate_kernel_cast)
+    gate_logits = jnp.einsum("bsh,he->bse", x, gate_kernel_cast)  # [B, S, E]
+    # tex.fused_topk_with_score_function_* requires rank-2 input.
     logits_2d = gate_logits.reshape(-1, num_experts)
     inputs_2d = x.reshape(-1, hidden)
 
@@ -1025,7 +1035,9 @@ def _body_fwd(  # pylint: disable=unused-argument
     if aux_loss_coeff > 0.0:
         if ep_active:
             collective_axes: Any = (
-                ep_axis if not data_parallelism_axes else (ep_axis, *data_parallelism_axes)
+                ep_axis
+                if not data_parallelism_axes
+                else (*data_parallelism_axes, ep_axis)
             )
             global_logits_2d = jax.lax.all_gather(
                 logits_2d, axis_name=collective_axes, axis=0, tiled=True
@@ -1100,22 +1112,17 @@ def _body_fwd(  # pylint: disable=unused-argument
     if q_set_wo == noop_quantizer_set:
         wo = wo.astype(sorted_x.dtype)
 
-    # GEMM 1+2 (fused): up_proj_combined = sorted_x @ wi  where
-    #   wi := concat([wi_0, wi_1], axis=-1)  -> shape [E, H, 2M]
-    #   combined_out := sorted_x @ wi        -> shape [T, 2M]
-    # Splitting the output back into ``gate_proj_out`` / ``up_proj_out``
-    # is free (it's a slicing reshape). This collapses two grouped
-    # GEMMs and two grouped quantizes of ``sorted_x`` (one per kernel)
-    # into one of each. Bias is concatenated the same way.
+    # Fused gate+up projection: stack wi_0 / wi_1 on a new axis-(-2) so the
+    # downstream split is a slice on the (unsharded) stack axis. concat on
+    # axis=-1 would cross the M axis and force a reshard when M is TP-sharded.
     #
-    # FP8/MXFP8 caveat: per-expert amax is now computed over [H, 2M]
-    # rather than [H, M] for each of wi_0 / wi_1 separately, so the
-    # representable range for one of the two halves may shift slightly
-    # vs. the pre-fusion code. Numerics tests cover this.
+    # FP8/MXFP8 caveat: per-expert amax is computed over [H, 2, M] rather than
+    # [H, M] for each of wi_0 / wi_1 separately, so the representable range for
+    # one half may shift slightly vs. an unfused pair of casts.
     inter_M = wi_0.shape[-1]
-    wi_combined = jnp.concatenate([wi_0, wi_1], axis=-1)
+    wi_combined = jnp.stack([wi_0, wi_1], axis=-2)
     wi_combined_bias = (
-        jnp.concatenate([wi_0_bias, wi_1_bias], axis=-1) if wi_0_bias is not None else None
+        jnp.stack([wi_0_bias, wi_1_bias], axis=-2) if wi_0_bias is not None else None
     )
     casted_sorted_x = tex.grouped_quantize(sorted_x, q_set_w0.x, local_group_sizes, flatten_axis=-1)
     casted_wi = tex.grouped_quantize(wi_combined, q_set_w0.kernel, flatten_axis=-1)
@@ -1125,8 +1132,8 @@ def _body_fwd(  # pylint: disable=unused-argument
         contracting_dims=((1,), (1,)),
         bias=wi_combined_bias,
     )
-    gate_proj_out = combined_out[..., :inter_M]
-    up_proj_out = combined_out[..., inter_M:]
+    gate_proj_out = combined_out[..., 0, :]
+    up_proj_out = combined_out[..., 1, :]
     casted_sorted_x_lhs_trans = casted_sorted_x.get_tensor(usage=TensorUsage.LHS_TRANS)
     casted_wi_rhs_trans = casted_wi.get_tensor(usage=TensorUsage.RHS_TRANS)
     if isinstance(casted_sorted_x_lhs_trans, ScaledTensor):
@@ -1253,15 +1260,21 @@ def _body_bwd(  # pylint: disable=unused-argument
     has_wo_bias: bool,
     has_expert_bias: bool,
     x_shape: Tuple[int, ...],
+    apply_topk_weights_early: bool = False,
 ) -> dict:
     """Per-shard backward body. Returns a dict of grads keyed identically
     to the ``captured`` dict consumed by :func:`_body_fwd`."""
+    if apply_topk_weights_early:
+        raise NotImplementedError(
+            "apply_topk_weights_early=True is supported only with the TE EP "
+            "(tex.ep_dispatch / tex.ep_combine) backend."
+        )
     if not gate_inside_vjp:
         raise NotImplementedError("gate_inside_vjp=False is deferred to a follow-up PR.")
 
     d_output, d_aux_loss = dy_pair
     # The fused FFN bwd quantizes via ``q_set_w0`` only (one quantize for
-    # the [E, H, 2M] fused wi tensor and one for the [T, 2M] fused dgrad),
+    # the [E, H, 2, M] stacked wi tensor and one for the [T, 2, M] stacked dgrad),
     # so ``q_set_w1`` is intentionally unused here.
     q_set_w0, _q_set_w1, q_set_wo = quantizer_sets
     batch_size, sequence_length, hidden = x_shape
@@ -1347,33 +1360,37 @@ def _body_bwd(  # pylint: disable=unused-argument
     (d_gate_proj_out,) = dact_gate_proj_pullback(d_intermediate * ctx.up_proj_out)
 
     # ---------------- FFN bwd: GEMM 1+2 fused (wi_0 | wi_1) ----------------
-    # Concat the two upstream grads along the output (M) axis, do one
-    # grouped quantize + one dgrad GEMM + one wgrad GEMM, then split.
-    # ``ctx.casted_wi_rhs_trans`` has shape [E, H, 2M] from the fwd
-    # fused quantize, so the dgrad math is:
+    # Mirror of the fwd stack: combine d_gate / d_up on a new axis=-2,
+    # run one dgrad + one wgrad GEMM, then split on axis=-2.
     #   d_sorted_x = [d_gate | d_up] @ wi_rhs_trans
     #              = d_gate @ wi_0^T + d_up @ wi_1^T
     inter_M = d_gate_proj_out.shape[-1]
-    d_combined = jnp.concatenate([d_gate_proj_out, d_up_proj_out], axis=-1)
+    d_combined = jnp.stack([d_gate_proj_out, d_up_proj_out], axis=-2)
     casted_d_combined = tex.grouped_quantize(
         d_combined, q_set_w0.dgrad, ctx.local_group_sizes, flatten_axis=-1
     )
     d_sorted_x = tex.grouped_gemm(
         casted_d_combined.get_tensor(usage=TensorUsage.LHS),
         ctx.casted_wi_rhs_trans,
-        contracting_dims=((1,), (2,)),
+        contracting_dims=((1, 2), (2, 3)),
     )
     d_wi_combined = tex.grouped_gemm(
         ctx.casted_sorted_x_lhs_trans,
         casted_d_combined.get_tensor(usage=TensorUsage.RHS),
         contracting_dims=((0,), (0,)),
     )
-    d_wi_0 = d_wi_combined[..., :inter_M]
-    d_wi_1 = d_wi_combined[..., inter_M:]
+    d_wi_0 = d_wi_combined[..., 0, :]
+    d_wi_1 = d_wi_combined[..., 1, :]
     if has_wi_bias:
-        d_wi_combined_bias = tex.grouped_dbias(d_combined, ctx.local_group_sizes)
-        d_wi_0_bias = d_wi_combined_bias[..., :inter_M]
-        d_wi_1_bias = d_wi_combined_bias[..., inter_M:]
+        # grouped_dbias requires rank-2 input; reshape around the call.
+        # M is not TP-sharded on the bias path, so the reshape is free.
+        d_combined_2d = d_combined.reshape(d_combined.shape[0], -1)
+        d_wi_combined_bias_2d = tex.grouped_dbias(d_combined_2d, ctx.local_group_sizes)
+        d_wi_combined_bias = d_wi_combined_bias_2d.reshape(
+            *d_wi_combined_bias_2d.shape[:-1], 2, inter_M
+        )
+        d_wi_0_bias = d_wi_combined_bias[..., 0, :]
+        d_wi_1_bias = d_wi_combined_bias[..., 1, :]
     else:
         d_wi_0_bias = None
         d_wi_1_bias = None
@@ -1458,23 +1475,18 @@ def _body_bwd(  # pylint: disable=unused-argument
             score_function=score_function,
             compute_aux_scores=True,
         )
-        # Step 3: under EP the aux logits were all_gathered along
-        # ``(ep_axis, *data_parallelism_axes)`` (the latter being FSDP
-        # axes that shard the batch). The bwd is the inverse of that
-        # multi-axis tiled all_gather: ``dynamic_slice`` to pick out
-        # this shard's local rows from the global cotangent.
-        #
-        # JAX's convention for tiled ``all_gather(axis_name=(a, b, ...))``
-        # is row-major over the tuple: the shard at mesh position
-        # ``(i_a, i_b, ...)`` writes to rows
-        # ``[(i_a * size_b * ... + i_b * ... + ...) * local_T :
-        #    + local_T)``. We invert that by computing the same flat
-        # index here and slicing.
+        # Inverse of the fwd tiled all_gather along
+        # ``(*data_parallelism_axes, ep_axis)``: pick out this shard's
+        # local rows from the global cotangent. JAX's tiled all_gather
+        # is row-major over the axis-name tuple, so the shard at mesh
+        # position (i_a, i_b, ...) writes to a contiguous row block
+        # starting at flat_index * local_T.
         if ep_active:
             local_T_aux = ctx.logits_2d.shape[0]
-            flat_shard = shard_id  # ep is the outermost axis in the gather tuple
+            flat_shard = 0
             for ax, sz in zip(data_parallelism_axes, fsdp_sizes):
                 flat_shard = flat_shard * sz + jax.lax.axis_index(ax)
+            flat_shard = flat_shard * num_ep + shard_id
             d_aux_logits_local = jax.lax.dynamic_slice(
                 d_aux_logits.astype(ctx.logits_2d.dtype),
                 start_indices=(flat_shard * local_T_aux, 0),
@@ -1698,6 +1710,7 @@ def _moe_fwd_rule(  # pylint: disable=unused-argument
     wo_kernel_axes,
     quantizer_sets,
     dtype,
+    apply_topk_weights_early,
 ):
     x = with_sharding_constraint_by_logical_axes(x, input_axes)
     ep_active = ep_axis is not None
@@ -1718,6 +1731,7 @@ def _moe_fwd_rule(  # pylint: disable=unused-argument
         "dtype": dtype,
         "ep_axis": ep_axis,
         "data_parallelism_axes": data_parallelism_axes,
+        "apply_topk_weights_early": apply_topk_weights_early,
     }
     captured: dict = {
         "inputs": x,
@@ -1792,7 +1806,10 @@ def _moe_fwd_rule(  # pylint: disable=unused-argument
     if not data_parallelism_axes:
         batch_pspec_axis: Any = ep_axis
     else:
-        batch_pspec_axis = (ep_axis, *data_parallelism_axes)
+        # ep must be innermost: ep_bootstrap forms NCCL EP comms from
+        # consecutive global ranks (dp_color = rank // ep_size), so the
+        # comm only stays within one model replica under (outer_dp, ep).
+        batch_pspec_axis = (*data_parallelism_axes, ep_axis)
     dp_size = 1
     for ax in data_parallelism_axes:
         dp_size *= mesh.shape[ax]
@@ -1876,6 +1893,7 @@ def _moe_bwd_rule(
     wo_kernel_axes,
     quantizer_sets,
     dtype,
+    apply_topk_weights_early,
     ctx,
     dy_pair,
 ):
@@ -1917,6 +1935,7 @@ def _moe_bwd_rule(
         "has_wo_bias": has_wo_bias,
         "has_expert_bias": has_expert_bias,
         "x_shape": x_shape,
+        "apply_topk_weights_early": apply_topk_weights_early,
     }
 
     if not ep_active:
@@ -1936,7 +1955,10 @@ def _moe_bwd_rule(
     if not data_parallelism_axes:
         batch_pspec_axis: Any = ep_axis
     else:
-        batch_pspec_axis = (ep_axis, *data_parallelism_axes)
+        # ep must be innermost: ep_bootstrap forms NCCL EP comms from
+        # consecutive global ranks (dp_color = rank // ep_size), so the
+        # comm only stays within one model replica under (outer_dp, ep).
+        batch_pspec_axis = (*data_parallelism_axes, ep_axis)
     ctx_spec = _build_ctx_specs(
         ep_axis,
         batch_pspec_axis,
@@ -1995,7 +2017,7 @@ def _grads_dict_to_tuple(
 # =============================================================================
 
 
-@partial(jax.custom_vjp, nondiff_argnums=tuple(range(9, 29)))
+@partial(jax.custom_vjp, nondiff_argnums=tuple(range(9, 30)))
 def _moe(
     x,
     gate_kernel,
@@ -2026,6 +2048,7 @@ def _moe(
     wo_kernel_axes,
     quantizer_sets,
     dtype,
+    apply_topk_weights_early,
 ):
     # Call in `_moe`'s own signature order to match what JAX will pass
     # the fwd rule via ``_argnums_partial``. See the comment block at
@@ -2061,6 +2084,7 @@ def _moe(
         wo_kernel_axes,
         quantizer_sets,
         dtype,
+        apply_topk_weights_early,
     )
     return output_pair
 
@@ -2093,8 +2117,14 @@ def moe(
     # Permutation
     permutation_backend: PermutationBackend = PermutationBackend.PURE_JAX,
     align_size: int = 0,
-    # Gate placement (Phuong: "perhaps as an option")
+    # Gate placement
     gate_inside_vjp: bool = True,
+    # When True, fold per-token top-k weights into the FFN intermediate
+    # (next to act(gate)*up) instead of into the post-down-projection
+    # combine. Both placements are mathematically equivalent (down-proj is
+    # linear); the early placement gives XLA a chance to fuse the multiply
+    # with the activation. Off by default.
+    apply_topk_weights_early: bool = False,
     # Parallelism (resolved by caller from MeshResource)
     ep_axis: Optional[str] = None,
     data_parallelism_axes: Tuple[str, ...] = (),
@@ -2129,6 +2159,29 @@ def moe(
     # we bypass also normalizes here.
     score_function = _validate_score_function(score_function)
 
+    # Enforce ((outer_dp..., ep), None, None) on inbound activations. The
+    # EP comm groups consecutive global ranks (dp_color = rank // ep_size),
+    # so ep MUST be innermost in the partition spec. Soft re-pin: free if
+    # upstream already matches, single reshard otherwise.
+    if ep_axis is not None:
+        mesh = _get_mesh()
+        if mesh is None or mesh.empty:
+            raise ValueError("moe(...) requires an active jax.sharding.Mesh when ep_axis is set.")
+        expected_leading: Any = (
+            (*data_parallelism_axes, ep_axis) if data_parallelism_axes else ep_axis
+        )
+        expected_spec = P(expected_leading, None, None)
+        actual_spec = getattr(getattr(x, "sharding", None), "spec", None)
+        if actual_spec is not None and tuple(actual_spec) != tuple(expected_spec):
+            warnings.warn(
+                f"moe(...): inbound x sharding {actual_spec} does not match expected "
+                f"{expected_spec}; inserting a reshard. Apply "
+                "jax.lax.with_sharding_constraint upstream to avoid this overhead.",
+                UserWarning,
+                stacklevel=2,
+            )
+        x = jax.lax.with_sharding_constraint(x, NamedSharding(mesh, expected_spec))
+
     output, aux_loss = _moe(
         x,
         gate_kernel,
@@ -2159,6 +2212,7 @@ def moe(
         wo_kernel_axes=wo_kernel_axes,
         quantizer_sets=quantizer_sets,
         dtype=dtype,
+        apply_topk_weights_early=apply_topk_weights_early,
     )
     if aux_loss_coeff <= 0.0:
         aux_loss = None

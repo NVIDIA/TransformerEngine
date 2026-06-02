@@ -147,6 +147,8 @@ class _MoEBlock(TransformerEngineBase):
     permutation_backend: PermutationBackend = PermutationBackend.PURE_JAX
     _align_size: int = 0
 
+    apply_topk_weights_early: bool = False
+
     # Dtypes / init / misc
     dtype: DType = jnp.float32
     kernel_init: Optional[Initializer] = None
@@ -273,6 +275,7 @@ class _MoEBlock(TransformerEngineBase):
             permutation_backend=self.permutation_backend,
             align_size=self._align_size,
             gate_inside_vjp=True,
+            apply_topk_weights_early=self.apply_topk_weights_early,
             ep_axis=ep_axis,
             data_parallelism_axes=self.data_parallelism_axes,
             input_axes=self.input_axes,
