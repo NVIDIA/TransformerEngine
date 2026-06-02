@@ -240,7 +240,7 @@ def _build_cudnn_pygraph(dtype: torch.dtype, device: torch.device):
         compute_data_type=cudnn.data_type.FLOAT,
         handle=_get_cudnn_current_stream_handle(cudnn, device),
     )
-    return cudnn, graph
+    return graph
 
 
 @dataclass
@@ -403,7 +403,7 @@ def _build_cudnn_score_mod_fwd_graph(
     """Build a cached cuDNN frontend graph for score_mod fprop."""
     cudnn = _import_cudnn_frontend()
 
-    _, graph = _build_cudnn_pygraph(query_layer.dtype, query_layer.device)
+    graph = _build_cudnn_pygraph(query_layer.dtype, query_layer.device)
     q = _bhsd_graph_tensor(graph, query_layer, q_format)
     k = _bhsd_graph_tensor(graph, key_layer, kv_format)
     v = _bhsd_graph_tensor(graph, value_layer, kv_format)
@@ -522,7 +522,7 @@ def _build_cudnn_score_mod_bwd_graph(
     deterministic: bool,
 ) -> _CudnnScoreModBwdGraphEntry:
     """Build a cached cuDNN frontend graph for score_mod bprop."""
-    _, graph = _build_cudnn_pygraph(query_layer.dtype, query_layer.device)
+    graph = _build_cudnn_pygraph(query_layer.dtype, query_layer.device)
     q = _bhsd_graph_tensor(graph, query_layer, q_format)
     k = _bhsd_graph_tensor(graph, key_layer, kv_format)
     v = _bhsd_graph_tensor(graph, value_layer, kv_format)
