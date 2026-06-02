@@ -487,13 +487,7 @@ def get_attention_backend(
 
     def _disable_all_flash_attention() -> None:
         nonlocal use_flash_attention
-        nonlocal use_flash_attention_2
-        nonlocal use_flash_attention_3
-        nonlocal use_flash_attention_4
         use_flash_attention = False
-        use_flash_attention_2 = False
-        use_flash_attention_3 = False
-        use_flash_attention_4 = False
 
     # Filter: Compute capability
     if device_compute_capability < (8, 0):
@@ -720,15 +714,7 @@ def get_attention_backend(
             score_mod_unsupported_reasons.append("KV caching is enabled")
         if context_parallel:
             score_mod_unsupported_reasons.append("context parallelism is enabled")
-        if (
-            qkv_format == "thd"
-            or q_format not in ["sbhd", "bshd"]
-            or kv_format
-            not in [
-                "sbhd",
-                "bshd",
-            ]
-        ):
+        if "thd" in (qkv_format, q_format, kv_format):
             score_mod_unsupported_reasons.append(
                 f"unsupported QKV format: q_format = {q_format}, kv_format = {kv_format}"
             )
