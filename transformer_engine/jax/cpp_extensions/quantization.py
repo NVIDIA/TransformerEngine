@@ -111,7 +111,9 @@ def _spec_axes(spec):
 
 
 def _warn_if_axes_ignored(arg_name, original_spec, partition_spec):
-    ignored_axes = tuple(axis for axis in _spec_axes(original_spec) if axis not in _spec_axes(partition_spec))
+    ignored_axes = tuple(
+        axis for axis in _spec_axes(original_spec) if axis not in _spec_axes(partition_spec)
+    )
     if ignored_axes:
         warnings.warn(
             "Grouped quantize custom partitioning will ignore/replicate sharding "
@@ -1406,7 +1408,10 @@ class GroupedQuantizePrimitive(BasePrimitive):
             scaling_mode, q_layout, flatten_axis, mesh, arg_infos
         )
         local_out_shapes = (
-            tuple(_local_shape_from_spec(info.shape, spec, mesh) for info, spec in zip(result_infos, out_specs))
+            tuple(
+                _local_shape_from_spec(info.shape, spec, mesh)
+                for info, spec in zip(result_infos, out_specs)
+            )
             if result_infos
             else (None,) * len(out_specs)
         )

@@ -320,19 +320,21 @@ def test_grouped_partitioning_strips_arbitrary_unsupported_axis():
 
     with jax.set_mesh(mesh), global_shard_guard(mesh_resource):
         with pytest.warns(RuntimeWarning, match="Grouped quantize.*myaxis123"):
-            _, _, quantize_out_shardings, quantize_arg_shardings = GroupedQuantizePrimitive.partition(
-                jnp.float8_e4m3fn,
-                ScalingMode.MXFP8_1D_SCALING.value,
-                QuantizeLayout.ROWWISE,
-                -1,
-                jnp.float8_e8m0fnu,
-                mesh,
-                (
-                    _arg_info(mesh, (8, 128, 128), ("expert", "myaxis123", ("dp", "fsdp"))),
-                    _arg_info(mesh, (8,), (("expert", "myaxis123"),)),
-                    _arg_info(mesh, (8,), (("expert", "myaxis123"),)),
-                ),
-                (),
+            _, _, quantize_out_shardings, quantize_arg_shardings = (
+                GroupedQuantizePrimitive.partition(
+                    jnp.float8_e4m3fn,
+                    ScalingMode.MXFP8_1D_SCALING.value,
+                    QuantizeLayout.ROWWISE,
+                    -1,
+                    jnp.float8_e8m0fnu,
+                    mesh,
+                    (
+                        _arg_info(mesh, (8, 128, 128), ("expert", "myaxis123", ("dp", "fsdp"))),
+                        _arg_info(mesh, (8,), (("expert", "myaxis123"),)),
+                        _arg_info(mesh, (8,), (("expert", "myaxis123"),)),
+                    ),
+                    (),
+                )
             )
 
         gemm_arg_infos = (

@@ -59,18 +59,15 @@ def test_grouped_gemm_fp8_allgather(data_shapes, kernel_fsdp_axis):
         x_key = jax.random.PRNGKey(0)
         w_key = jax.random.PRNGKey(1)
         b_key = jax.random.PRNGKey(2)
-        x = (
-            jax.random.normal(x_key, shape=(N_GROUP, *x_shape), dtype=jnp.bfloat16)
-            * jnp.asarray(0.01, dtype=jnp.bfloat16)
+        x = jax.random.normal(x_key, shape=(N_GROUP, *x_shape), dtype=jnp.bfloat16) * jnp.asarray(
+            0.01, dtype=jnp.bfloat16
         )
-        w = (
-            jax.random.normal(w_key, shape=(N_GROUP, *w_shape), dtype=jnp.bfloat16)
-            * jnp.asarray(0.01, dtype=jnp.bfloat16)
+        w = jax.random.normal(w_key, shape=(N_GROUP, *w_shape), dtype=jnp.bfloat16) * jnp.asarray(
+            0.01, dtype=jnp.bfloat16
         )
-        b = (
-            jax.random.normal(b_key, shape=(N_GROUP, w_shape[-1]), dtype=jnp.bfloat16)
-            * jnp.asarray(0.01, dtype=jnp.bfloat16)
-        )
+        b = jax.random.normal(
+            b_key, shape=(N_GROUP, w_shape[-1]), dtype=jnp.bfloat16
+        ) * jnp.asarray(0.01, dtype=jnp.bfloat16)
         return x, w, w, b, b
 
     def test_func(outter_x, outter_w, outter_b):

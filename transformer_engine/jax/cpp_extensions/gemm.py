@@ -265,7 +265,9 @@ def _spec_axes(spec):
 
 
 def _warn_if_axes_ignored(arg_name, original_spec, partition_spec):
-    ignored_axes = tuple(axis for axis in _spec_axes(original_spec) if axis not in _spec_axes(partition_spec))
+    ignored_axes = tuple(
+        axis for axis in _spec_axes(original_spec) if axis not in _spec_axes(partition_spec)
+    )
     if ignored_axes:
         warnings.warn(
             "Grouped GEMM custom partitioning will ignore/replicate sharding "
@@ -1945,7 +1947,11 @@ class GroupedGemmPrimitive(BasePrimitive):
 
         rhs_is_ragged = arg_infos[7].size > 0 or arg_infos[8].size > 0
         ep_axis = gsr.ep_resource
-        if ep_axis is not None and not rhs_is_ragged and _spec_contains_axis(active_group_spec, ep_axis):
+        if (
+            ep_axis is not None
+            and not rhs_is_ragged
+            and _spec_contains_axis(active_group_spec, ep_axis)
+        ):
             if len(rhs_data_spec) > 0 and not _spec_contains_axis(rhs_data_spec, ep_axis):
                 rhs_data_spec = (
                     _merge_axis_spec(rhs_data_spec[0], ep_axis),
