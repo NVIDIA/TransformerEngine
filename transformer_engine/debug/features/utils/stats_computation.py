@@ -128,7 +128,9 @@ def compute_variance(variances, numels, sums, unbiased=True):
     True -> sample (divide by N-1), False -> population (divide by N). The combine
     is done on M2 (sum of squared deviations), which is convention-agnostic, so
     both biased and unbiased inputs combine exactly across groups with different
-    means.
+    means. The stored per-group variances must use the same `unbiased` convention
+    as this call - M2 is reconstructed as variance * (n-1) when unbiased else
+    variance * n, so mixing conventions silently corrupts the result.
     """
     total = torch.sum(numels)
     mean = torch.sum(sums) / total
