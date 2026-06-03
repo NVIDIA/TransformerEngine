@@ -139,8 +139,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // Register __eq__/__ne__ on the pybind ``DType`` enum so it compares by integer.
   py::object dtype_class = m.attr("DType");
   dtype_class.attr("__eq__") = py::cpp_function(
-      [](transformer_engine::DType self, py::object other) -> py::object {
-        if (py::isinstance(other, py::type::of(py::cast(self)))) {
+      [dtype_class](transformer_engine::DType self, py::object other) -> py::object {
+        if (py::isinstance(other, dtype_class)) {
           return py::cast(self == other.cast<transformer_engine::DType>());
         }
         if (py::isinstance<py::int_>(other)) {
@@ -150,8 +150,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       },
       py::is_method(dtype_class));
   dtype_class.attr("__ne__") = py::cpp_function(
-      [](transformer_engine::DType self, py::object other) -> py::object {
-        if (py::isinstance(other, py::type::of(py::cast(self)))) {
+      [dtype_class](transformer_engine::DType self, py::object other) -> py::object {
+        if (py::isinstance(other, dtype_class)) {
           return py::cast(self != other.cast<transformer_engine::DType>());
         }
         if (py::isinstance<py::int_>(other)) {

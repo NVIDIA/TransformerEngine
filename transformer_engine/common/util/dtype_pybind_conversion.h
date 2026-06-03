@@ -69,31 +69,7 @@ struct type_caster<transformer_engine::DType> {
   }
 
   static handle cast(transformer_engine::DType src, return_value_policy policy, handle parent) {
-    constexpr size_t num_dtypes = static_cast<size_t>(transformer_engine::DType::kNumTypes);
-    const size_t idx = static_cast<size_t>(src);
-    if (idx >= num_dtypes) {
-      // Out of range: let the standard caster raise the appropriate error.
-      return type_caster_base<transformer_engine::DType>::cast(src, policy, parent);
-    }
-
-    // Per-value cache of ``tex.DType`` objects. Enum values are immutable, so a single shared
-    // object per value is safe to hand back repeatedly.
-    static const std::array<PyObject *, num_dtypes> cache = [] {
-      std::array<PyObject *, num_dtypes> objects{};
-      for (size_t i = 0; i < num_dtypes; ++i) {
-        objects[i] =
-            type_caster_base<transformer_engine::DType>::cast(
-                static_cast<transformer_engine::DType>(i), return_value_policy::copy, handle())
-                .ptr();
-      }
-      return objects;
-    }();
-    PyObject *cached = cache[idx];
-    if (cached == nullptr) {
-      return handle();
-    }
-    Py_INCREF(cached);
-    return handle(cached);
+    return type_caster_base<transformer_engine::DType>::cast(src, policy, parent);
   }
 };
 
