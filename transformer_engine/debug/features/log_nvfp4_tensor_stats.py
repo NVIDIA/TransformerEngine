@@ -11,21 +11,14 @@ import warnings
 import torch
 import nvdlfw_inspect.api as debug_api
 
-from nvdlfw_inspect.debug_features.log_tensor_stats import (
-    LogTensorStats as BaseLogTensorStats,
-)
+from nvdlfw_inspect.debug_features.log_tensor_stats import LogTensorStats as BaseLogTensorStats
 from nvdlfw_inspect.registry import Registry, api_method
 
 from transformer_engine.debug.features.utils.stats_buffer import STATS_BUFFERS
 from transformer_engine.pytorch.tensor import Quantizer, QuantizedTensor
 from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
-from transformer_engine.debug.features.utils import (
-    get_reduction_params,
-    next_enabled_iter,
-)
-from transformer_engine.pytorch.tensor.storage.nvfp4_tensor_storage import (
-    NVFP4TensorStorage,
-)
+from transformer_engine.debug.features.utils import get_reduction_params, next_enabled_iter
+from transformer_engine.pytorch.tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 
 
 @Registry.register_feature(namespace="transformer_engine")

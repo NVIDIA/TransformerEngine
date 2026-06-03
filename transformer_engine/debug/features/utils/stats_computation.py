@@ -218,24 +218,15 @@ DEPENDENCIES = {
 }
 
 STATS = {
-    "min": (
-        lambda x, aux_dict: torch.min(x),
-        lambda buffers: min(_get(buffers, "min")),
-    ),
-    "max": (
-        lambda x, aux_dict: torch.max(x),
-        lambda buffers: max(_get(buffers, "max")),
-    ),
-    "sum": (
-        lambda x, aux_dict: torch.sum(x),
-        lambda buffers: sum(_get(buffers, "sum")),
-    ),
+    "min": (lambda x, aux_dict: torch.min(x), lambda buffers: min(_get(buffers, "min"))),
+    "max": (lambda x, aux_dict: torch.max(x), lambda buffers: max(_get(buffers, "max"))),
+    "sum": (lambda x, aux_dict: torch.sum(x), lambda buffers: sum(_get(buffers, "sum"))),
     "mean": (
         lambda x, aux_dict: torch.mean(x),
         lambda buffers: sum(_get(buffers, "sum")) / sum(_get(buffers, "numel")),
     ),
     "numel": (
-        lambda x, aux_dict: (x.numel() if hasattr(x, "numel") else x.get_data_tensors()[0].numel()),
+        lambda x, aux_dict: x.numel() if hasattr(x, "numel") else x.get_data_tensors()[0].numel(),
         lambda buffers: sum(_get(buffers, "numel")),
     ),
     "l1_norm": (
@@ -256,10 +247,7 @@ STATS = {
             _get(buffers, "variance"), _get(buffers, "numel"), _get(buffers, "sum")
         ),
     ),
-    "cur_amax": (
-        lambda x, aux_dict: x.abs().max(),
-        lambda buffers: max(_get(buffers, "cur_amax")),
-    ),
+    "cur_amax": (lambda x, aux_dict: x.abs().max(), lambda buffers: max(_get(buffers, "cur_amax"))),
     "dynamic_range_top": (
         lambda x, aux_dict: _compute_dynamic_range_top(x),
         lambda buffers: max(_get(buffers, "dynamic_range_top")),

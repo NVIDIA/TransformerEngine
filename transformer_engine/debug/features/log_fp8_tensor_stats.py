@@ -10,26 +10,19 @@ import warnings
 
 import torch
 import nvdlfw_inspect.api as debug_api
-from nvdlfw_inspect.debug_features.log_tensor_stats import (
-    LogTensorStats as BaseLogTensorStats,
-)
+from nvdlfw_inspect.debug_features.log_tensor_stats import LogTensorStats as BaseLogTensorStats
 from nvdlfw_inspect.registry import Registry, api_method
 import transformer_engine_torch as tex
 
 from transformer_engine.debug.features.utils.stats_buffer import STATS_BUFFERS
-from transformer_engine.debug.features.utils import (
-    get_reduction_params,
-    next_enabled_iter,
-)
+from transformer_engine.debug.features.utils import get_reduction_params, next_enabled_iter
 from transformer_engine.pytorch.tensor import Quantizer, QuantizedTensor
 from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
 )
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
-from transformer_engine.pytorch.tensor.float8_blockwise_tensor import (
-    Float8BlockQuantizer,
-)
+from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
 
 try:
     from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
@@ -40,12 +33,7 @@ except ImportError:
     NVFP4Quantizer = None
 
 
-ALL_RECIPE_NAMES = [
-    "fp8_delayed_scaling",
-    "fp8_current_scaling",
-    "mxfp8",
-    "fp8_block_scaling",
-]
+ALL_RECIPE_NAMES = ["fp8_delayed_scaling", "fp8_current_scaling", "mxfp8", "fp8_block_scaling"]
 
 
 def _get_recipe_name(quantizer: Optional[Quantizer]):
@@ -69,10 +57,7 @@ def _get_new_quantizer(recipe_name, fp8_dtype):
         return Float8BlockQuantizer(fp8_dtype=fp8_dtype, rowwise=True, columnwise=True)
     if recipe_name == "fp8_current_scaling":
         return Float8CurrentScalingQuantizer(
-            fp8_dtype=fp8_dtype,
-            device=torch.device("cuda"),
-            rowwise=True,
-            columnwise=True,
+            fp8_dtype=fp8_dtype, device=torch.device("cuda"), rowwise=True, columnwise=True
         )
     if recipe_name == "mxfp8":
         return MXFP8Quantizer(fp8_dtype=fp8_dtype, rowwise=True, columnwise=True)
@@ -227,13 +212,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
         if recipe_from_stat == "mxfp8" and torch.cuda.get_device_capability()[0] < 10:
             raise ValueError(f"Stat {stat} needs Blackwell or later GPU.")
 
-        supported_stats = [
-            "underflows%",
-            "scale_inv_min",
-            "scale_inv_max",
-            "scale_inv_std",
-            "mse",
-        ]
+        supported_stats = ["underflows%", "scale_inv_min", "scale_inv_max", "scale_inv_std", "mse"]
         if stat_without_recipe not in supported_stats:
             raise ValueError(
                 f"Stat {stat} contains an unsupported stat name: {stat_without_recipe}"
@@ -269,14 +248,9 @@ class LogFp8TensorStats(BaseLogTensorStats):
         Needs to clean after usage, because it possibly change the usage of the quantized tensor.
         """
         fp8_dtype = tex.DType.kFloat8E4M3
-        if recipe_name in [
-            "fp8_delayed_scaling",
-            "fp8_current_scaling",
-            "fp8_block_scaling",
-        ]:
+        if recipe_name in ["fp8_delayed_scaling", "fp8_current_scaling", "fp8_block_scaling"]:
             assert isinstance(
-                quantizer,
-                (Float8Quantizer, Float8CurrentScalingQuantizer, Float8BlockQuantizer),
+                quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer, Float8BlockQuantizer)
             )
             fp8_dtype = quantizer.dtype
 
@@ -302,8 +276,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
         finally:
             if isinstance(quantized_tensor, QuantizedTensor):
                 quantized_tensor.update_usage(
-                    rowwise_usage=old_rowwise_usage,
-                    columnwise_usage=old_columnwise_usage,
+                    rowwise_usage=old_rowwise_usage, columnwise_usage=old_columnwise_usage
                 )
 
     @api_method
