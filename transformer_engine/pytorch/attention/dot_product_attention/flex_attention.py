@@ -54,7 +54,7 @@ def _bhsd_dim_stride(
             (tensor.shape[0], tensor.shape[2], tensor.shape[1], tensor.shape[3]),
             (tensor.stride(0), tensor.stride(2), tensor.stride(1), tensor.stride(3)),
         )
-    raise ValueError(f"score_mod only supports SBHD/BSHD tensor formats, got {tensor_format}.")
+    raise ValueError(f"Flex Attention only supports SBHD/BSHD tensor formats, got {tensor_format}.")
 
 
 def _bhsd_graph_tensor(graph, tensor: torch.Tensor, tensor_format: str):
@@ -208,7 +208,7 @@ def _wrap_score_mod(score_mod: Optional[Callable], graph_tensors: Dict[str, Any]
 def _get_cudnn_current_stream_handle(cudnn, device: torch.device):
     """Return a cuDNN handle for device, bound to PyTorch's current stream."""
     if device.type != "cuda":
-        raise ValueError(f"score_mod only supports CUDA tensors, got device {device}.")
+        raise ValueError(f"Flex Attention only supports CUDA tensors, got device {device}.")
     if device.index is None:
         device = torch.device("cuda", torch.cuda.current_device())
 
@@ -232,7 +232,7 @@ def _build_cudnn_pygraph(dtype: torch.dtype, device: torch.device):
     elif dtype == torch.bfloat16:
         io_data_type = cudnn.data_type.BFLOAT16
     else:
-        raise ValueError(f"score_mod only supports FP16/BF16 tensors, got {dtype}.")
+        raise ValueError(f"Flex Attention only supports FP16/BF16 tensors, got {dtype}.")
 
     graph = cudnn.pygraph(
         io_data_type=io_data_type,
@@ -286,7 +286,7 @@ def _finalize_cudnn_graph(graph) -> int:
         graph.create_execution_plans([cudnn.heur_mode.A, cudnn.heur_mode.FALLBACK])
         graph.check_support()
     except cudnn.cudnnGraphNotSupportedError as exc:
-        raise RuntimeError(f"cuDNN score_mod SDPA graph is not supported: {exc}") from exc
+        raise RuntimeError(f"cuDNN Flex Attention SDPA graph is not supported: {exc}") from exc
     graph.build_plans(cudnn.build_plan_policy.HEURISTICS_CHOICE)
     return max(graph.get_workspace_size(), 1)
 
