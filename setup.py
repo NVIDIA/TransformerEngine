@@ -110,11 +110,9 @@ def setup_requirements() -> Tuple[List[str], List[str]]:
         "pydantic",
         "importlib-metadata>=1.0",
         "packaging",
+        cusolvermp_pypi_package_name(),
     ]
     test_reqs: List[str] = ["pytest>=8.2.1"]
-
-    if bool(int(os.getenv("NVTE_WITH_CUSOLVERMP", "0"))):
-        install_reqs.append(cusolvermp_pypi_package_name())
 
     # Framework-specific requirements
     if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
