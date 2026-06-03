@@ -20,7 +20,6 @@ from test_fused_attn import (
 from test_fused_attn_score_mod import (
     ScoreModFusedAttnRunner,
     _has_cudnn_frontend_python,
-    _require_cudnn_frontend_score_mod,
 )
 from utils import pytest_parametrize_wrapper
 from transformer_engine.jax.attention import (
@@ -301,7 +300,7 @@ class TestDistributedScoreModSelfAttn:
         data_shape,
         dtype,
     ):
-        _require_cudnn_frontend_score_mod()
+        ScoreModFusedAttnRunner.require_cudnn_frontend()
         batch, seqlen, num_heads, head_dim = data_shape
         dp_axis = mesh_resource.dp_resource
         tp_axis = mesh_resource.tpsp_resource
