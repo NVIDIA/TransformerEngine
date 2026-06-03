@@ -2103,7 +2103,8 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
     NVTE_CHECK(!columnwise_usage,
                "Row-scaled NVFP4 quantization does not support columnwise usage.");
   }
-  tensor.attr("_row_scaled_nvfp4") = py::cast(row_scaled_nvfp4);
+  tensor.attr("_row_scaled_nvfp4") = row_scaled_nvfp4;
+  tensor.attr("_with_gemm_swizzled_scales") = with_gemm_swizzled_scales;
 
   // Coerce row-wise data
   if (rowwise_usage) {
