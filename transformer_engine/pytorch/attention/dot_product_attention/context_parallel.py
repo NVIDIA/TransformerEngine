@@ -3215,9 +3215,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             f" {q.shape[seq_dim_qkv]}, seq_len_kv = {k.shape[seq_dim_qkv]}."
         )
 
-        assert not (
-            qkv_format == "thd" and not use_fused_attention and not use_flash_attn_3
-        ), (
+        assert not (qkv_format == "thd" and not use_fused_attention and not use_flash_attn_3), (
             "cp_comm_type='all_gather' with qkv_format='thd' requires FlashAttention v3"
             " (seqused_k) or FusedAttention. The reordered KV buffer uses padded sequence"
             " boundaries, and FA2 cannot separate tensor offsets from visibility limits."
