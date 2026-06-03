@@ -130,7 +130,8 @@ if get_device_compute_capability(0) < 100:
     )
 
 from transformer_engine.jax.flax import _MoEBlock as MoEBlock
-from transformer_engine.jax.moe import moe
+from transformer_engine.jax.moe import moe, record_ep_bootstrap_signature_for_moe
+from transformer_engine.jax.ep import ep_bootstrap
 from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 
 
@@ -191,6 +192,23 @@ AUX_RTOL = 1e-3
 # -----------------------------------------------------------------------------
 
 
+def _compute_worst_case_recv_pr():
+    """Worst-case per-rank recv buffer across every config in _CONFIGS.
+
+    Bootstrap reserves NCCL EP buffers; per-call recv_pr <= bootstrap
+    recv_pr is fine. We size with the largest align_size in _CONFIGS so
+    the align128 config still fits the same singleton bootstrap.
+    """
+    num_procs = jax.device_count()
+    dp_size = num_procs // EP_SIZE
+    num_local_experts = NUM_EXPERTS // EP_SIZE
+    natural_recv_pr = (BATCH // dp_size) * SEQ * TOPK
+    natural_spe = (natural_recv_pr + num_local_experts - 1) // num_local_experts
+    worst_align = 128
+    worst_spe = ((natural_spe + worst_align - 1) // worst_align) * worst_align
+    return num_local_experts * worst_spe
+
+
 @pytest.fixture(scope="module")
 def mesh():
     if jax.device_count() < NUM_DEVICES_REQUIRED:
@@ -202,7 +220,36 @@ def mesh():
     # from consecutive global ranks via ``dp_color = rank // ep_size``, so
     # only an (outer_fsdp, inner_ep) device layout groups ranks correctly.
     devices = mesh_utils.create_device_mesh((FSDP_SIZE, EP_SIZE))
-    return Mesh(devices, axis_names=(FSDP_AXIS, EP_AXIS))
+    mesh_obj = Mesh(devices, axis_names=(FSDP_AXIS, EP_AXIS))
+
+    num_procs = jax.process_count()
+    max_tokens_per_rank = (BATCH // num_procs) * SEQ
+    recv_capacity_per_rank = _compute_worst_case_recv_pr()
+
+    # Eager bootstrap: ep_bootstrap does a host-side NCCL UID allgather
+    # and cannot run from inside jax.jit. Sized to the worst-case recv_pr
+    # across _CONFIGS so every parametrized config is bootstrap-compatible.
+    with mesh_obj, global_shard_guard(
+        MeshResource(ep_resource=EP_AXIS, fsdp_resource=FSDP_AXIS)
+    ):
+        ep_bootstrap(
+            world_size=num_procs,
+            rank=jax.process_index(),
+            ep_size=EP_SIZE,
+            num_experts=NUM_EXPERTS,
+            max_tokens_per_rank=max_tokens_per_rank,
+            recv_capacity_per_rank=recv_capacity_per_rank,
+            hidden_dim=HIDDEN,
+            allow_handle_mem_reloc=True,
+        )
+    record_ep_bootstrap_signature_for_moe(
+        num_experts=NUM_EXPERTS,
+        max_tokens_per_rank=max_tokens_per_rank,
+        recv_capacity_per_rank=recv_capacity_per_rank,
+        hidden_dim=HIDDEN,
+        ep_size=EP_SIZE,
+    )
+    return mesh_obj
 
 
 # -----------------------------------------------------------------------------

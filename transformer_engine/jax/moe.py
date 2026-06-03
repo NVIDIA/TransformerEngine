@@ -58,49 +58,75 @@ __all__ = ["moe"]
 
 
 # =============================================================================
-# Process-level NCCL EP bootstrap
+# Process-level NCCL EP bootstrap (must run eagerly, outside jax.jit)
 # =============================================================================
 #
-# ``tex.ep_bootstrap`` initialises the NCCL EP communicator exactly once per
-# process and stashes its state in a C++ singleton. Subsequent calls with the
-# same signature are a no-op; calls with a different signature raise.
+# ``tex.ep_bootstrap`` does a NCCL UID allgather over the JAX runtime, which
+# cannot run from inside a jit-traced function. The caller must bootstrap
+# eagerly once per process before any jitted MoE call, then record the
+# bootstrap signature via ``record_ep_bootstrap_signature_for_moe``. The
+# per-call check below verifies the recorded signature is wide enough for
+# the current MoE invocation (smaller per-call usage is fine since the C++
+# backend reserves worst-case buffers at bootstrap time).
 
 _te_ep_bootstrap_signature: Optional[Tuple[int, int, int, int, int]] = None
 
 
-def _te_ep_bootstrap_if_needed(
+def record_ep_bootstrap_signature_for_moe(
     num_experts: int,
     max_tokens_per_rank: int,
     recv_capacity_per_rank: int,
     hidden_dim: int,
     ep_size: int,
 ) -> None:
-    """Bootstrap the NCCL EP communicator on first use within a process."""
+    """Record the params passed to ``ep_bootstrap`` so the per-call check
+    in ``_moe_fwd_rule`` can verify compatibility. Call this once per
+    process immediately after ``ep_bootstrap``.
+    """
     global _te_ep_bootstrap_signature
-    sig = (num_experts, max_tokens_per_rank, recv_capacity_per_rank, hidden_dim, ep_size)
-    if _te_ep_bootstrap_signature == sig:
-        return
-    if _te_ep_bootstrap_signature is not None:
-        raise ValueError(
-            "TE EP was already bootstrapped with signature "
-            f"{_te_ep_bootstrap_signature}; got {sig}. Re-bootstrap with"
-            " different params is not supported within a single process."
-        )
-    from transformer_engine.jax.ep import ep_bootstrap  # local: avoids import cycle
-
-    ep_bootstrap(
-        world_size=jax.process_count(),
-        rank=jax.process_index(),
-        ep_size=ep_size,
-        num_experts=num_experts,
-        max_tokens_per_rank=max_tokens_per_rank,
-        recv_capacity_per_rank=recv_capacity_per_rank,
-        hidden_dim=hidden_dim,
-        # XLA may relocate the C++ handle buffer between JIT executables;
-        # allow it rather than asserting on handle aliasing.
-        allow_handle_mem_reloc=True,
+    _te_ep_bootstrap_signature = (
+        num_experts,
+        max_tokens_per_rank,
+        recv_capacity_per_rank,
+        hidden_dim,
+        ep_size,
     )
-    _te_ep_bootstrap_signature = sig
+
+
+def _te_ep_assert_compatible_bootstrap(
+    num_experts: int,
+    max_tokens_per_rank: int,
+    recv_capacity_per_rank: int,
+    hidden_dim: int,
+    ep_size: int,
+) -> None:
+    """Verify a prior eager ``ep_bootstrap`` is wide enough for this call."""
+    if _te_ep_bootstrap_signature is None:
+        raise RuntimeError(
+            "TE EP was not bootstrapped. Call"
+            " transformer_engine.jax.ep.ep_bootstrap(...) eagerly (outside"
+            " any jax.jit) once per process, then"
+            " transformer_engine.jax.moe.record_ep_bootstrap_signature_for_moe(...)"
+            " with the same params, before invoking moe()."
+        )
+    b_num_experts, b_max_tpr, b_recv_pr, b_hidden, b_ep_size = _te_ep_bootstrap_signature
+    if (
+        num_experts != b_num_experts
+        or hidden_dim != b_hidden
+        or ep_size != b_ep_size
+        or max_tokens_per_rank > b_max_tpr
+        or recv_capacity_per_rank > b_recv_pr
+    ):
+        raise ValueError(
+            "TE EP was already bootstrapped with signature"
+            f" (num_experts={b_num_experts}, max_tokens_per_rank={b_max_tpr},"
+            f" recv_capacity_per_rank={b_recv_pr}, hidden_dim={b_hidden},"
+            f" ep_size={b_ep_size}); this moe() call needs"
+            f" (num_experts={num_experts}, max_tokens_per_rank={max_tokens_per_rank},"
+            f" recv_capacity_per_rank={recv_capacity_per_rank}, hidden_dim={hidden_dim},"
+            f" ep_size={ep_size}). Re-bootstrap with wider params (or matching exact"
+            " sizes) is required."
+        )
 
 
 # =============================================================================
@@ -413,7 +439,7 @@ def _moe_fwd_rule(
     # per-rank receive buffer.
     max_tokens_per_rank = (B // num_procs) * S
 
-    _te_ep_bootstrap_if_needed(
+    _te_ep_assert_compatible_bootstrap(
         num_experts=num_experts,
         max_tokens_per_rank=max_tokens_per_rank,
         recv_capacity_per_rank=recv_pr,
