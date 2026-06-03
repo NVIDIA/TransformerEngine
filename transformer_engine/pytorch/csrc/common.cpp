@@ -106,9 +106,8 @@ pybind11::object MakePythonDType(transformer_engine::DType dtype) {
     return members;
   }();
   const pybind11::object& member = cache[idx];
-  NVTE_CHECK(static_cast<bool>(member),
-             "No transformer_engine.pytorch.DType member for DType (", idx,
-             "); the Python DType enum is out of sync with the C++ enum.");
+  NVTE_CHECK(static_cast<bool>(member), "No transformer_engine.pytorch.DType member for DType (",
+             idx, "); the Python DType enum is out of sync with the C++ enum.");
   return member;
 }
 
