@@ -4,7 +4,7 @@
 
 import os
 import random
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 import pytest
 import torch
@@ -20,6 +20,7 @@ from transformer_engine.pytorch import (
     GroupedLinear,
     Linear,
     MXFP8Quantizer,
+    NVFP4Quantizer,
     autocast,
     is_bf16_available,
     quantized_model_init,
@@ -35,13 +36,19 @@ from transformer_engine.pytorch.quantization import (
 )
 from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
 import transformer_engine_torch as tex
-from utils import ModelConfig, recipe_id, reset_rng_states, skip_unsupported_backward_override
+from utils import (
+    ModelConfig,
+    assert_close,
+    recipe_id,
+    reset_rng_states,
+    skip_unsupported_backward_override,
+)
 
 # Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 fp8_block_scaling_available, _ = te.is_fp8_block_scaling_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
-nvfp4_available, _ = te.is_nvfp4_available(return_reason=True)
+nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
 
 seed = 1234
 reset_rng_states()
@@ -1740,3 +1747,121 @@ def test_grouped_linear_fused_path_cuda_graph_safe(fp8_recipe, bias, monkeypatch
     for graph_grad, param in zip(graph_param_grads, grouped_linear.parameters()):
         assert param.grad is not None
         torch.testing.assert_close(graph_grad.float(), param.grad.float(), **tols)
+
+
+@pytest.mark.parametrize("swizzle_type", ["mxfp8_rowwise", "mxfp8_columnwise", "nvfp4"])
+def test_swizzle_scales_and_pack_ptrs_for_discrete_weights(
+    swizzle_type: str,
+    num_tensors: int = 4,
+    shape: Sequence[int] = (160, 96),
+):
+    """Helper function for preparing discrete weights for cuDNN group GEMM kernel"""
+
+    # Skip unsupported configurations
+    if not mxfp8_available and swizzle_type in ("mxfp8_rowwise", "mxfp8_columnwise"):
+        pytest.skip(reason_for_no_mxfp8)
+    if not nvfp4_available and swizzle_type == "nvfp4":
+        pytest.skip(reason_for_no_nvfp4)
+
+    # Construct quantizer
+    quantizer = None
+    if swizzle_type in ("mxfp8_rowwise", "mxfp8_columnwise"):
+        quantizer = MXFP8Quantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            rowwise=swizzle_type == "mxfp8_rowwise",
+            columnwise=swizzle_type == "mxfp8_columnwise",
+        )
+    elif swizzle_type == "nvfp4":
+        quantizer = NVFP4Quantizer(
+            columnwise=False,
+            with_rht=False,
+            with_post_rht_amax=False,
+            with_2d_quantization=False,
+            stochastic_rounding=False,
+            with_random_sign_mask=False,
+        )
+
+    # Per-expert tensors: unquantized, quantized with compact scales,
+    # quantized with swizzled scales
+    device = torch.device("cuda")
+    unquantized_tensors = [
+        torch.randn(shape, dtype=torch.bfloat16, device=device) for _ in range(num_tensors)
+    ]
+    quantizer.optimize_for_gemm = False
+    tensors_with_compact_scales = [quantizer(t) for t in unquantized_tensors]
+    quantizer.optimize_for_gemm = True
+    tensors_with_swizzled_scales = [quantizer(t) for t in unquantized_tensors]
+
+    # Extract data and scale buffers
+    if swizzle_type in ("mxfp8_rowwise", "nvfp4"):
+        data_tensors = [qx._rowwise_data for qx in tensors_with_compact_scales]
+        scale_tensors = [qx._rowwise_scale_inv for qx in tensors_with_compact_scales]
+        ref_scale_tensors = [qx._rowwise_scale_inv for qx in tensors_with_swizzled_scales]
+    elif swizzle_type == "mxfp8_columnwise":
+        data_tensors = [qx._columnwise_data for qx in tensors_with_compact_scales]
+        scale_tensors = [qx._columnwise_scale_inv for qx in tensors_with_compact_scales]
+        ref_scale_tensors = [qx._columnwise_scale_inv for qx in tensors_with_swizzled_scales]
+    else:
+        raise ValueError("Unrecogized swizzle type")
+
+    # Call the helper function
+    data_ptrs, scale_ptrs, swizzled_scales_buffer = (
+        tex.grouped_mlp_experimental.swizzle_scales_and_pack_ptrs_for_discrete_weights(
+            data_tensors,
+            scale_tensors,
+            swizzle_type,
+            device,
+        )
+    )
+
+    # Check data pointer values
+    expected_data_ptrs = torch.tensor(
+        [t.data_ptr() for t in data_tensors],
+        dtype=torch.int64,
+        device="cpu",
+    )
+    assert_close(data_ptrs, expected_data_ptrs)
+
+    # Check scale pointer values
+    scale_bytes = scale_tensors[0].numel() * scale_tensors[0].element_size()
+    expected_scale_ptrs = torch.tensor(
+        [swizzled_scales_buffer.data_ptr() + i * scale_bytes for i in range(num_tensors)],
+        dtype=torch.int64,
+        device="cpu",
+    )
+    assert_close(scale_ptrs, expected_scale_ptrs)
+
+    # Check swizzled scale values
+    swizzled_scales_buffer = swizzled_scales_buffer.view(torch.uint8)
+    expected_swizzled_scales_buffer = (
+        torch.cat(ref_scale_tensors).view(torch.uint8).view_as(swizzled_scales_buffer)
+    )
+    assert_close(
+        swizzled_scales_buffer,
+        expected_swizzled_scales_buffer,
+    )
+
+    # Poison the padded compact scales
+    if swizzle_type == "mxfp8_rowwise":
+        unpadded_scale_shape = (shape[0], shape[1] // 32)
+    elif swizzle_type == "mxfp8_columnwise":
+        unpadded_scale_shape = (shape[0] // 32, shape[1])
+    elif swizzle_type == "nvfp4":
+        unpadded_scale_shape = (shape[0], shape[1] // 16)
+    for scale in scale_tensors:
+        scale[unpadded_scale_shape[0] :, :].view(torch.uint8).fill_(-1)
+        scale[:, unpadded_scale_shape[1] :].view(torch.uint8).fill_(-1)
+
+    # Check that swizzling removes poisoned pad scales
+    _, _, swizzled_scales_buffer = (
+        tex.grouped_mlp_experimental.swizzle_scales_and_pack_ptrs_for_discrete_weights(
+            data_tensors,
+            scale_tensors,
+            swizzle_type,
+            device,
+        )
+    )
+    assert_close(
+        swizzled_scales_buffer,
+        expected_swizzled_scales_buffer,
+    )
