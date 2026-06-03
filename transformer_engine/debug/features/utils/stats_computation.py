@@ -121,18 +121,29 @@ def compute_max_blockwise_dynamic_range(tensor, stat_config):
 
 
 @torch.compile
-def compute_variance(variances, numels, sums):
-    """Welford algorithm is used for numerically stable distributed variance computation."""
-    mean = torch.sum(sums) / torch.sum(numels)
+def compute_variance(variances, numels, sums, unbiased=True):
+    """Parallel (Chan/Welford) combination of per-group variances.
+
+    `unbiased` describes both the stored per-group variances and the result:
+    True -> sample (divide by N-1), False -> population (divide by N). The combine
+    is done on M2 (sum of squared deviations), which is convention-agnostic, so
+    both biased and unbiased inputs combine exactly across groups with different
+    means. Passing sample variances into a population combine (or vice versa)
+    silently corrupts the result, hence the explicit flag.
+    """
+    total = torch.sum(numels)
+    mean = torch.sum(sums) / total
     means = sums / numels
-    var = torch.sum(numels * (variances + torch.pow((means - mean), 2))) / torch.sum(numels)
-    return var
+    # Reconstruct each group's M2, recombine, then re-divide once at the end.
+    per_group_div = (numels - 1) if unbiased else numels
+    m2 = torch.sum(variances * per_group_div + numels * torch.pow(means - mean, 2))
+    return m2 / ((total - 1) if unbiased else total)
 
 
 @torch.compile
-def compute_std(variances, numels, sums):
-    """Computates standard deviation."""
-    return torch.sqrt(compute_variance(variances, numels, sums))
+def compute_std(variances, numels, sums, unbiased=True):
+    """Computes standard deviation; see `compute_variance` for `unbiased`."""
+    return torch.sqrt(compute_variance(variances, numels, sums, unbiased=unbiased))
 
 
 def compute_fp8_delayed_scaling_overflows_num(tensor, quantized_tensor):
@@ -398,7 +409,7 @@ def add_scale_inv_stats(recipe_name: str, columnwise: bool = False):
             get_scale_inv(aux_dict[recipe_name], _col).float(), unbiased=False
         ),
         lambda buffers, _sv=stat_name_var, _sn=stat_name_numel, _ss=stat_name_sum: compute_variance(
-            _get(buffers, _sv), _get(buffers, _sn), _get(buffers, _ss)
+            _get(buffers, _sv), _get(buffers, _sn), _get(buffers, _ss), unbiased=False
         ),
     )
     STATS[stat_name_numel] = (
@@ -416,7 +427,7 @@ def add_scale_inv_stats(recipe_name: str, columnwise: bool = False):
             get_scale_inv(aux_dict[recipe_name], _col).float(), unbiased=False
         ),
         lambda buffers, _sv=stat_name_var, _sn=stat_name_numel, _ss=stat_name_sum: compute_std(
-            _get(buffers, _sv), _get(buffers, _sn), _get(buffers, _ss)
+            _get(buffers, _sv), _get(buffers, _sn), _get(buffers, _ss), unbiased=False
         ),
     )
 

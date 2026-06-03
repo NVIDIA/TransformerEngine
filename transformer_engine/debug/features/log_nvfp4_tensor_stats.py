@@ -96,18 +96,23 @@ class LogNvfp4TensorStats(BaseLogTensorStats):
 
     def check_if_stat_is_supported(self, stat: str):
         """Returns True if stat is supported, raises ValueError otherwise."""
-        bare = stat[: -len("_columnwise")] if stat.endswith("_columnwise") else stat
-        supported_stats = [
-            "underflows%",
-            "mse",
-            "scale_inv_min",
-            "scale_inv_max",
-            "scale_inv_std",
-        ]
-        if bare not in supported_stats:
+        # Only scale_inv_* stats have a columnwise variant (separate rowwise/columnwise
+        # scale_inv); underflows%/mse are computed from the single quantized tensor and
+        # have no '_columnwise' form, so they must not accept the suffix.
+        columnwise_stats = ["scale_inv_min", "scale_inv_max", "scale_inv_std"]
+        supported_stats = ["underflows%", "mse"] + columnwise_stats
+
+        if stat.endswith("_columnwise"):
+            bare = stat[: -len("_columnwise")]
+            if bare not in columnwise_stats:
+                raise ValueError(
+                    f"Stat {stat} is not supported for NVFP4. The '_columnwise' suffix is only"
+                    f" valid for {columnwise_stats}."
+                )
+        elif stat not in supported_stats:
             raise ValueError(
                 f"Stat {stat} is not supported for NVFP4. Supported stats: {supported_stats}"
-                " (any of these may take an optional '_columnwise' suffix)"
+                " (scale_inv_* may take an optional '_columnwise' suffix)."
             )
         return True
 

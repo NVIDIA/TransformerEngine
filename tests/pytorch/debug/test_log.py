@@ -23,6 +23,8 @@ from transformer_engine.debug.pytorch.debug_state import TEDebugState
 from transformer_engine.debug.features.utils.stats_computation import (
     compute_max_blockwise_dynamic_range,
     BlockwiseDynamicRangeStat,
+    STATS,
+    stats_to_num,
 )
 import math
 
@@ -384,6 +386,56 @@ def test_log_stats_numerics(feature_dirs, tensor_name):
     assert found_dims_1, "max_blockwise_dynamic_range (dims=1) not found in output"
     assert found_dims_2, "max_blockwise_dynamic_range (dims=2) not found in output"
     assert found_dynamic_range, "dynamic_range not found in output"
+
+
+def test_stats_computation_microbatch_reduction():
+    """Reducing per-microbatch stats must equal computing them over the concatenation.
+
+    Iterates the stats_computation registry itself: for every aux-free (high
+    precision) stat, both the per-tensor compute fn STATS[s][0] and the
+    cross-buffer combinator STATS[s][1] are taken straight from the registry - no
+    per-stat formulas are duplicated here, and ground truth is just the same
+    compute fn applied to the concatenation. The microbatches have DIFFERENT means
+    and unequal sizes, which is what stresses the parallel variance combine
+    (compute_variance/compute_std) and exactly what existing ~N(0,1) tests miss
+    (means ≈ 0 hides the (mean_i - mean)^2 term). Sweeping the whole registry means
+    a newly added high-precision stat is covered automatically.
+    """
+    torch.manual_seed(0)
+    microbatches = [
+        0.5 * torch.randn(4, 4).cuda() + 0.0,
+        0.5 * torch.randn(8, 4).cuda() + 8.0,
+        0.5 * torch.randn(6, 4).cuda() - 6.0,
+    ]
+    full = torch.cat([mb.flatten() for mb in microbatches])
+
+    # Aux-free stats compute from the tensor alone; the rest need aux_dict
+    # (quantized tensors) and raise on {}, so they are out of scope here.
+    def is_aux_free(stat):
+        if isinstance(stat, BlockwiseDynamicRangeStat):
+            return False  # parametrized stat, covered by its own direct test
+        try:
+            STATS[stat][0](full, {})
+            return True
+        except Exception:  # pylint: disable=broad-except
+            return False
+
+    aux_free = [stat for stat in stats_to_num if is_aux_free(stat)]
+    assert {"variance", "std"} <= set(aux_free)  # sanity: the buggy combine is in scope
+
+    # Fill a [num_microbatches, num_stats] buffer exactly like _Buffer would, then
+    # check every combinator against its own compute fn over the concatenation.
+    buffers = torch.zeros(len(microbatches), len(stats_to_num)).cuda()
+    for i, mb in enumerate(microbatches):
+        for stat in aux_free:
+            buffers[i, stats_to_num[stat]] = float(STATS[stat][0](mb, {}))
+
+    for stat in aux_free:
+        reduced = float(STATS[stat][1](buffers))
+        expected = float(STATS[stat][0](full, {}))
+        assert reduced == pytest.approx(
+            expected, rel=1e-4, abs=1e-4
+        ), f"{stat}: reduced {reduced}, expected {expected}"
 
 
 @pytest.mark.parametrize("layer", ["linear", "transformer"])
