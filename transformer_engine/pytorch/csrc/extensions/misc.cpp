@@ -36,8 +36,6 @@ std::vector<at::Tensor> prepare_grouped_splits_impl(const at::Tensor &split_size
                device.index(), ", but got CUDA device ", split_sizes.device().index(), ".");
     split_sizes_for_kernel = split_sizes;
   } else {
-    // Preserve the legacy eager path: host m_splits are copied to the target
-    // CUDA device here, then all derived metadata is produced by one CUDA kernel.
     split_sizes_for_kernel =
         split_sizes.to(at::TensorOptions().dtype(split_sizes.scalar_type()).device(device),
                        /*non_blocking=*/true);
@@ -49,63 +47,68 @@ std::vector<at::Tensor> prepare_grouped_splits_impl(const at::Tensor &split_size
                              : split_sizes_for_kernel.to(at::kLong);
 
   // Return order is part of the Python contract:
-  //   0. split_sizes_i64: int64[num_groups], canonical TE GroupedTensor first dims.
-  //   1. split_points: int32[num_groups], cumsum(split_sizes) without the leading 0
-  //      for cuDNN grouped GEMM padded offsets.  This is intentionally int32
-  //      even though TE grouped tensor metadata uses int64 below.
-  //   2..: tensor_offsets[i]: int64[num_groups + 1],
-  //      [0, cumsum(split_sizes)] * logical_last_dims[i].  Callers that need
-  //      base_offsets request logical_last_dim=1 and name that output locally.
+  //   0. split_sizes_i64: int64[num_groups]   - canonical TE GroupedTensor first dims.
+  //   1. split_points:    int32[num_groups]   - inclusive scan of split_sizes,
+  //                                             no leading zero. Consumed by cuDNN
+  //                                             CuTe-DSL grouped GEMM as
+  //                                             padded_offsets (requires 16-byte align).
+  //   2..: tensor_offsets[i]: int64[num_groups + 1] - inclusive scan with leading
+  //                                                   zero, scaled by logical_last_dims[i].
   //
-  // ``logical_last_dims`` is the complete offset stride list passed to the
-  // common kernel.  Each element produces one returned offset vector.
-  //
-  // Force 16-byte alignment on every output so ``split_points`` (consumed by
-  // cuDNN CuTe-DSL grouped GEMM as ``padded_offsets``, which requires 16-byte
-  // alignment) lands on a 16-byte boundary inside the bulk buffer.
-  // Allocation order mirrors the return order after ``split_sizes_i64``:
-  //   split_points, offsets for each requested logical_last_dim...
-  std::vector<std::vector<size_t>> shapes = {{static_cast<size_t>(num_groups)}};
-  std::vector<at::ScalarType> dtypes = {at::kInt};
-  std::vector<size_t> alignments = {16};
-  shapes.reserve(1 + list_size);
-  dtypes.reserve(1 + list_size);
-  alignments.reserve(1 + list_size);
+  // 16-byte alignment is forced on every output so split_points (cuDNN's
+  // padded_offsets) lands on a 16-byte boundary inside the bulk-allocated buffer.
+  const size_t num_outputs = 1 + list_size;
+  std::vector<std::vector<size_t>> shapes;
+  std::vector<at::ScalarType> dtypes;
+  std::vector<size_t> alignments(num_outputs, 16);
+  shapes.reserve(num_outputs);
+  dtypes.reserve(num_outputs);
+  shapes.emplace_back(std::vector<size_t>{static_cast<size_t>(num_groups)});
+  dtypes.emplace_back(at::kInt);
   for (size_t i = 0; i < list_size; ++i) {
     shapes.emplace_back(std::vector<size_t>{static_cast<size_t>(offsets_length)});
     dtypes.emplace_back(at::kLong);
-    alignments.emplace_back(16);
   }
   auto outputs = bulk_allocate(shapes, dtypes, device, alignments);
-  auto split_points = outputs[0];
 
-  std::vector<int64_t> stride_list(list_size, 0);
-  std::vector<NVTETensor> split_offsets_list(list_size, nullptr);
-  std::vector<TensorWrapper> split_offsets_nvte;
-  split_offsets_nvte.reserve(list_size);
-  auto split_sizes_nvte = makeTransformerEngineTensor(split_sizes_for_kernel);
-  auto split_points_nvte = makeTransformerEngineTensor(split_points);
-  for (size_t list_idx = 0; list_idx < list_size; ++list_idx) {
-    stride_list[list_idx] = logical_last_dims[list_idx];
-    split_offsets_nvte.emplace_back(makeTransformerEngineTensor(outputs[1 + list_idx]));
-    split_offsets_list[list_idx] = split_offsets_nvte.back().data();
+  // Pack output NVTETensors as a single batch so the kernel sees all metadata
+  // from one nvte_create_tensors call rather than num_outputs separate calls.
+  MultiTensorWrapper output_tensors_nvte(num_outputs);
+  std::vector<NVTETensor> nvte_outputs(num_outputs);
+  std::vector<int64_t> strides(num_outputs);
+  std::vector<int> include_leading_zero(num_outputs);
+
+  const size_t num_groups_sz = static_cast<size_t>(num_groups);
+  const size_t offsets_length_sz = static_cast<size_t>(offsets_length);
+  const auto set_output = [&](size_t out_idx, at::Tensor &tensor, DType dtype, size_t numel,
+                              int64_t stride, int with_leading_zero) {
+    NVTEShape shape = nvte_make_shape(&numel, 1);
+    NVTEBasicTensor data = {tensor.data_ptr(), static_cast<NVTEDType>(dtype), shape};
+    nvte_set_tensor_param_v2(output_tensors_nvte[out_idx], kNVTERowwiseData, &data, sizeof(data));
+    nvte_outputs[out_idx] = output_tensors_nvte[out_idx];
+    strides[out_idx] = stride;
+    include_leading_zero[out_idx] = with_leading_zero;
+  };
+
+  set_output(0, outputs[0], DType::kInt32, num_groups_sz, /*stride=*/1,
+             /*with_leading_zero=*/0);
+  for (size_t i = 0; i < list_size; ++i) {
+    set_output(1 + i, outputs[1 + i], DType::kInt64, offsets_length_sz,
+               /*stride=*/logical_last_dims[i], /*with_leading_zero=*/1);
   }
-  NVTE_CHECK(
-      stride_list.size() == list_size && split_offsets_list.size() == list_size,
-      "Internal error: stride_list and split_offsets_list must both have list_size entries.");
 
+  auto split_sizes_nvte = makeTransformerEngineTensor(split_sizes_for_kernel);
   NVTE_SCOPED_GIL_RELEASE({
-    nvte_multi_splits_to_offsets(split_sizes_nvte.data(), stride_list.data(),
-                                 split_points_nvte.data(), split_offsets_list.data(), list_size,
+    nvte_splits_to_offsets_multi(split_sizes_nvte.data(), nvte_outputs.data(), strides.data(),
+                                 include_leading_zero.data(), num_outputs,
                                  at::cuda::getCurrentCUDAStream());
   });
 
   std::vector<at::Tensor> ret;
-  ret.reserve(2 + list_size);
+  ret.reserve(1 + num_outputs);
   ret.emplace_back(split_sizes_i64);
-  ret.emplace_back(split_points);
-  for (size_t i = 0; i < list_size; ++i) {
-    ret.emplace_back(outputs[1 + i]);
+  for (size_t i = 0; i < num_outputs; ++i) {
+    ret.emplace_back(outputs[i]);
   }
   return ret;
 }

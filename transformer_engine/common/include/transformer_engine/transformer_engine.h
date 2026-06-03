@@ -509,28 +509,36 @@ void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream
 void nvte_splits_to_offsets(const int64_t *first_dims, int64_t *output, size_t num_tensors,
                             int64_t logical_last_dim, cudaStream_t stream);
 
-/*! \brief Compute several scaled prefix-sum offset vectors.
+/*! \brief Compute multiple scaled inclusive scans of an integer split-size vector.
  *
- *  This is the batched form of nvte_splits_to_offsets for a single split-size
- *  array. It scans split_sizes once and writes:
- *    split_sizes_cumsum[j] = sum_{k=0..j}(split_sizes[k])
- *    split_offsets_list[i][0] = 0
- *    split_offsets_list[i][j + 1] = split_sizes_cumsum[j] * stride_list[i]
+ *  Let s[k] = sum_{j=0..k}(split_sizes[j]) be the inclusive scan of split_sizes
+ *  with length N = split_sizes.numel(). For each output i in [0, num_outputs)
+ *  this function writes:
  *
- *  split_sizes, split_sizes_cumsum, and each split_offsets_list entry carry
- *  their own dtype in NVTETensor metadata. Supported integer dtypes are int32
- *  and int64.
+ *    If include_leading_zero[i] == 0, outputs[i] has length N and:
+ *      outputs[i][k] = s[k] * strides[i]            for k in [0, N).
+ *
+ *    If include_leading_zero[i] != 0, outputs[i] has length N + 1 and:
+ *      outputs[i][0]     = 0
+ *      outputs[i][k + 1] = s[k] * strides[i]        for k in [0, N).
+ *
+ *  split_sizes and each outputs[i] are NVTETensors with int32 or int64 dtype;
+ *  inputs and outputs can mix dtypes freely. The implementation expects small
+ *  integer split-size vectors (~1k entries or fewer); large inputs are correct
+ *  but underperform.
  *
  *  \param[in] split_sizes Device int32/int64 split sizes with shape [N].
- *  \param[in] stride_list Scale factor for each split array.
- *  \param[out] split_sizes_cumsum Device int32/int64 cumsum output with shape [N].
- *  \param[out] split_offsets_list Device int32/int64 offset tensors, each with shape [N + 1].
- *  \param[in] list_size Number of tensors in split_offsets_list.
+ *  \param[out] outputs Array of int32/int64 1D output tensors, one per scan.
+ *  \param[in] strides Scale factor for each output. Length num_outputs.
+ *  \param[in] include_leading_zero Per-output flag: 0 if outputs[i] has length N
+ *             (inclusive scan), nonzero if outputs[i] has length N + 1 (inclusive
+ *             scan prepended with zero). Length num_outputs.
+ *  \param[in] num_outputs Number of output tensors.
  *  \param[in] stream CUDA stream to use for the operation.
  */
-void nvte_multi_splits_to_offsets(NVTETensor split_sizes, const int64_t *stride_list,
-                                  NVTETensor split_sizes_cumsum, NVTETensor *split_offsets_list,
-                                  size_t list_size, cudaStream_t stream);
+void nvte_splits_to_offsets_multi(NVTETensor split_sizes, NVTETensor *outputs,
+                                  const int64_t *strides, const int *include_leading_zero,
+                                  size_t num_outputs, cudaStream_t stream);
 
 /*! \brief TE Grouped Tensor type
  *
