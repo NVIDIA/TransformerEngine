@@ -241,6 +241,7 @@ def mesh():
             recv_capacity_per_rank=recv_capacity_per_rank,
             hidden_dim=HIDDEN,
             allow_handle_mem_reloc=True,
+            max_token_dtype=DTYPE,
         )
     record_ep_bootstrap_signature_for_moe(
         num_experts=NUM_EXPERTS,
