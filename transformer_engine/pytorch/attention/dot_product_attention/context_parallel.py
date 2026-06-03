@@ -53,94 +53,6 @@ _seq_chunk_ids_cache_for_reordering_before_attn = {}
 _seq_chunk_ids_cache_for_reordering_after_attn = {}
 _softmax_offset_chunk_ids_cache = {}
 
-# ---- coarse CP region profiler (env-gated: NVTE_CP_PROFILE=1) ----
-# Times major phases of the a2a CP attention path with CUDA events so we can see
-# where THD spends more time than BSHD. Off by default (zero overhead).
-_CP_PROFILE = os.getenv("NVTE_CP_PROFILE", "0") == "1"
-_cp_prof_pending = {}
-_cp_prof_times = {}
-_cp_prof_counts = {}
-
-
-def _cp_prof_start(name):
-    if not _CP_PROFILE:
-        return
-    ev = torch.cuda.Event(enable_timing=True)
-    ev.record()
-    _cp_prof_pending[name] = ev
-
-
-def _cp_prof_stop(name):
-    if not _CP_PROFILE:
-        return
-    start = _cp_prof_pending.pop(name, None)
-    if start is None:
-        return
-    end = torch.cuda.Event(enable_timing=True)
-    end.record()
-    torch.cuda.synchronize()
-    _cp_prof_times[name] = _cp_prof_times.get(name, 0.0) + start.elapsed_time(end)
-    _cp_prof_counts[name] = _cp_prof_counts.get(name, 0) + 1
-
-
-def cp_prof_dump_and_reset(tag=""):
-    """Print accumulated per-region GPU time (rank 0) and reset. Derived:
-    attn_fwd = FWD.total - a2a:q,k,v - a2a:out ; attn_bwd = BWD.total - a2a:dout - a2a:dq,dk,dv."""
-    import torch.distributed as _dist
-
-    rank = _dist.get_rank() if _dist.is_available() and _dist.is_initialized() else 0
-    if rank == 0 and _cp_prof_times:
-        t = {k: total / max(_cp_prof_counts[k], 1) for k, total in _cp_prof_times.items()}
-        print(f"[CP_PROFILE {tag}] per-region GPU ms/call:")
-        for k in sorted(t, key=lambda x: -t[x]):
-            print(f"   {k:18s}: {t[k]:8.4f} ms  (x{_cp_prof_counts[k]})")
-        fwd_attn = t.get("FWD.total", 0) - t.get("a2a:q,k,v", 0) - t.get("a2a:out", 0)
-        bwd_attn = t.get("BWD.total", 0) - t.get("a2a:dout", 0) - t.get("a2a:dq,dk,dv", 0)
-        print(f"   {'~attn(fwd) derived':18s}: {fwd_attn:8.4f} ms")
-        print(f"   {'~attn(bwd) derived':18s}: {bwd_attn:8.4f} ms")
-    _cp_prof_pending.clear()
-    _cp_prof_times.clear()
-    _cp_prof_counts.clear()
-
-
-# ---- sync-free NVTX ranges for nsys (env-gated: NVTE_CP_NVTX=1) ----
-# Unlike the CUDA-event timers above (which synchronize), NVTX ranges are pure
-# annotations: no sync, comm/compute overlap preserved. Read NVTE_CP_NVTX at
-# import so decorators are applied (or not) at function-definition time.
-_CP_NVTX = os.getenv("NVTE_CP_NVTX", "0") == "1"
-
-
-def _cp_nvtx_push(name):
-    if _CP_NVTX:
-        torch.cuda.nvtx.range_push(name)
-
-
-def _cp_nvtx_pop():
-    if _CP_NVTX:
-        torch.cuda.nvtx.range_pop()
-
-
-def _cp_nvtx_wrap(name):
-    """Decorator wrapping a function body in a sync-free NVTX range (nsys only).
-    Returns fn unchanged when NVTE_CP_NVTX is off (zero overhead)."""
-
-    def _deco(fn):
-        if not _CP_NVTX:
-            return fn
-        import functools
-
-        @functools.wraps(fn)
-        def _w(*a, **k):
-            torch.cuda.nvtx.range_push(name)
-            try:
-                return fn(*a, **k)
-            finally:
-                torch.cuda.nvtx.range_pop()
-
-        return _w
-
-    return _deco
-
 
 # Float8CurrentScaling: fused_attn_bwd takes O in FP8 by default, this flag allows it in F16
 _dpa_fp8_cs_o_in_f16 = os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1") == "1"
@@ -383,7 +295,6 @@ def reorder_seq_chunks_for_a2a_after_attn(x, chunk_ids_for_a2a, seq_dim, cp_size
     return x
 
 
-@_cp_nvtx_wrap("reorder_thd_to_rank_sharded")
 def reorder_thd_sequences_to_rank_sharded(x, cu_seqlens, cp_size, seq_dim=0):
     """
     Reorder THD sequences from contiguous to rank sharded according to sharding
@@ -426,7 +337,6 @@ def reorder_thd_sequences_to_rank_sharded(x, cu_seqlens, cp_size, seq_dim=0):
     return tex.thd_reorder(x, cu_seqlens, cp_size, False, x.shape[seq_dim])
 
 
-@_cp_nvtx_wrap("reorder_thd_to_contiguous")
 def reorder_thd_sequences_to_contiguous(x, cu_seqlens, cp_size, seq_dim=0):
     """
     Reorder THD sequences from rank sharded according to sharding strategy
@@ -494,8 +404,6 @@ def flash_attn_a2a_communicate(
         ["dout"],
         ["dq", "dk", "dv"],
     ], "a2a_input_names must be one of ['q', 'k', 'v'], ['out'], ['dout'], ['dq', 'dk', 'dv']!"
-    _cp_prof_start("a2a:" + ",".join(a2a_input_names))
-    _cp_nvtx_push("a2a:" + ",".join(a2a_input_names))
     if a2a_input_names in [["out"], ["dout"]]:
         assert qkv_format != "thd" or cu_seqlens_q_padded is not None, (
             f"flash_attn_a2a_communicate requires cu_seqlens_q_padded for {a2a_input_names} with"
@@ -625,8 +533,6 @@ def flash_attn_a2a_communicate(
                     # [t, cp, h//cp, d] -> [t, h, d]
                     a2a_outputs[i - 2] = x.view(-1, x.shape[-3] * x.shape[-2], x.shape[-1])
     torch.cuda.current_stream().wait_stream(cp_stream)
-    _cp_nvtx_pop()
-    _cp_prof_stop("a2a:" + ",".join(a2a_input_names))
     return a2a_outputs[0] if len(a2a_inputs) == 1 else a2a_outputs
 
 
@@ -4370,7 +4276,6 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
     ):
         # pylint: disable=missing-function-docstring
         nvtx_range_push("transformer_engine.AttnFuncWithCPAndQKVOA2A.forward")
-        _cp_prof_start("FWD.total")
 
         cp_size = get_distributed_world_size(cp_group)
         qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
@@ -4773,7 +4678,6 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 ctx.S_quantizer.scale = S_quantizer.scale.clone()
 
         nvtx_range_pop("transformer_engine.AttnFuncWithCPAndQKVOA2A.forward")
-        _cp_prof_stop("FWD.total")
         if return_max_logit:
             return out_ret, max_logit
         return out_ret
@@ -4782,7 +4686,6 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
     def backward(ctx, dout, *_args):
         # pylint: disable=missing-function-docstring
         nvtx_range_push("transformer_engine.AttnFuncWithCPAndQKVOA2A.backward")
-        _cp_prof_start("BWD.total")
         cp_size = get_distributed_world_size(ctx.cp_group)
 
         (
@@ -5050,7 +4953,6 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                     )
 
         nvtx_range_pop("transformer_engine.AttnFuncWithCPAndQKVOA2A.backward")
-        _cp_prof_stop("BWD.total")
         return (
             None,
             dq,

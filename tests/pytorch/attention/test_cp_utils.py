@@ -3,6 +3,8 @@
 # See LICENSE for license information.
 
 """Unit tests for context parallel utils."""
+
+import itertools
 import torch
 import unittest
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
@@ -11,9 +13,16 @@ from transformer_engine.pytorch.attention.dot_product_attention.context_parallel
     generate_positional_ids_for_cp,
 )
 
+try:
+    import transformer_engine_torch as tex
+except ImportError:
+    tex = None
+
 
 class TestSequencePadding(unittest.TestCase):
-    def test_padding_with_custom_padding_values_sequences_shorter_than_divisibility_factor(self):
+    def test_padding_with_custom_padding_values_sequences_shorter_than_divisibility_factor(
+        self,
+    ):
         """Test with custom padding values for all tensors."""
         # Setup
 
@@ -467,7 +476,36 @@ class TestSequencePadding(unittest.TestCase):
         )
 
         expected_positional_ids = torch.tensor(
-            [0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0, 1, 2, 3, 4, 5, 6, 7]
+            [
+                0,
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+                0,
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+                8,
+                9,
+                10,
+                11,
+                0,
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+            ]
         )
 
         expected_cu_seqlens_padded = torch.tensor([0, 8, 20, 28])
@@ -511,9 +549,13 @@ class TestContextParallelUtils(unittest.TestCase):
         # Rank 0 gets slices [0,1] and [6,7] (first and last)
         # Rank 1 gets slices [2,3] and [4,5] (second and second-to-last)
 
-        input_ids = torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8]])  # Shape: (1, 8) - batch first
+        input_ids = torch.tensor(
+            [[1, 2, 3, 4, 5, 6, 7, 8]]
+        )  # Shape: (1, 8) - batch first
         labels = torch.tensor([[10, 20, 30, 40, 50, 60, 70, 80]])
-        position_ids = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])  # Shape: (8,) - 1D as expected
+        position_ids = torch.tensor(
+            [0, 1, 2, 3, 4, 5, 6, 7]
+        )  # Shape: (8,) - 1D as expected
         cu_seqlens = torch.tensor([0, 8])
 
         # Test rank 0
@@ -551,7 +593,9 @@ class TestContextParallelUtils(unittest.TestCase):
         # Setup: Two sequences of length 8 each, CP size = 2
         # Total sequence length = 16, cu_seqlens = [0, 8, 16]
 
-        input_ids = torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 13, 14, 15, 16, 17, 18]])
+        input_ids = torch.tensor(
+            [[1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 13, 14, 15, 16, 17, 18]]
+        )
         labels = torch.tensor(
             [[10, 20, 30, 40, 50, 60, 70, 80, 110, 120, 130, 140, 150, 160, 170, 180]]
         )
@@ -629,7 +673,9 @@ class TestContextParallelUtils(unittest.TestCase):
 
         input_ids = torch.tensor([1, 2, 3, 4, 5, 6, 7, 8])  # Shape: (8,) - 1D
         labels = torch.tensor([10, 20, 30, 40, 50, 60, 70, 80])  # Shape: (8,) - 1D
-        position_ids = torch.tensor([[0, 1, 2, 3, 4, 5, 6, 7]])  # Shape: (1, 8) - 2D with batch
+        position_ids = torch.tensor(
+            [[0, 1, 2, 3, 4, 5, 6, 7]]
+        )  # Shape: (1, 8) - 2D with batch
         cu_seqlens = torch.tensor([0, 8])
 
         # Test rank 0
@@ -641,7 +687,9 @@ class TestContextParallelUtils(unittest.TestCase):
         # Rank 0 should get indices [0,1] and [6,7]
         expected_input_ids_r0 = torch.tensor([1, 2, 7, 8])  # 1D result
         expected_labels_r0 = torch.tensor([10, 20, 70, 80])  # 1D result
-        expected_pos_ids_r0 = torch.tensor([[0, 1, 6, 7]])  # 2D result (preserves batch dim)
+        expected_pos_ids_r0 = torch.tensor(
+            [[0, 1, 6, 7]]
+        )  # 2D result (preserves batch dim)
 
         self.assertTrue(torch.equal(input_ids_r0, expected_input_ids_r0))
         self.assertTrue(torch.equal(labels_r0, expected_labels_r0))
@@ -656,7 +704,9 @@ class TestContextParallelUtils(unittest.TestCase):
         # Rank 1 should get indices [2,3] and [4,5]
         expected_input_ids_r1 = torch.tensor([3, 4, 5, 6])  # 1D result
         expected_labels_r1 = torch.tensor([30, 40, 50, 60])  # 1D result
-        expected_pos_ids_r1 = torch.tensor([[2, 3, 4, 5]])  # 2D result (preserves batch dim)
+        expected_pos_ids_r1 = torch.tensor(
+            [[2, 3, 4, 5]]
+        )  # 2D result (preserves batch dim)
 
         self.assertTrue(torch.equal(input_ids_r1, expected_input_ids_r1))
         self.assertTrue(torch.equal(labels_r1, expected_labels_r1))
@@ -708,6 +758,167 @@ class TestContextParallelUtils(unittest.TestCase):
         expected_input_ids_r0 = torch.tensor([[1, 0, 2, 0]])
 
         self.assertTrue(torch.equal(input_ids_r0, expected_input_ids_r0))
+
+
+def _legacy_reorder_thd_to_rank_sharded(x, cu_seqlens, cp_size, seq_dim=0):
+    total_slices_of_any_sequence = 2 * cp_size
+    slice_sizes = (cu_seqlens[1:] - cu_seqlens[:-1]) // total_slices_of_any_sequence
+
+    indices = [
+        (
+            torch.arange(
+                seq_start + (cp_rank * slice_size),
+                seq_start + ((cp_rank + 1) * slice_size),
+                device=cu_seqlens.device,
+            ),
+            torch.arange(
+                seq_start + ((total_slices_of_any_sequence - cp_rank - 1) * slice_size),
+                seq_start + ((total_slices_of_any_sequence - cp_rank) * slice_size),
+                device=cu_seqlens.device,
+            ),
+        )
+        for cp_rank in range(cp_size)
+        for slice_size, seq_start in zip(slice_sizes, cu_seqlens[:-1])
+    ]
+
+    indices = list(itertools.chain(*indices))
+    indices = torch.cat(indices)
+    return x.index_select(seq_dim, indices)
+
+
+def _legacy_reorder_thd_to_contiguous(x, cu_seqlens, seq_chunk_ids, cp_size, seq_dim=0):
+    max_cum_seqlen_per_cp_rank = cu_seqlens[-1] // cp_size
+    cu_seqlens_on_any_cp_rank = cu_seqlens // cp_size
+
+    indices = [
+        torch.arange(
+            (
+                start + max_cum_seqlen_per_cp_rank * (chunk_id // 2)
+                if loc < cp_size
+                else (start + end) // 2 + max_cum_seqlen_per_cp_rank * (chunk_id // 2)
+            ),
+            (
+                (start + end) // 2 + max_cum_seqlen_per_cp_rank * (chunk_id // 2)
+                if loc < cp_size
+                else end + max_cum_seqlen_per_cp_rank * (chunk_id // 2)
+            ),
+            device=cu_seqlens.device,
+        )
+        for start, end in zip(
+            cu_seqlens_on_any_cp_rank[:-1], cu_seqlens_on_any_cp_rank[1:]
+        )
+        for loc, chunk_id in enumerate(seq_chunk_ids)
+    ]
+
+    indices = torch.cat(indices)
+    return x.index_select(seq_dim, indices)
+
+
+def _legacy_valid_copy(out, inp, cu_seqlens_padded, cu_seqlens):
+    batch_size = cu_seqlens.shape[0] - 1
+    for b in range(batch_size):
+        s = cu_seqlens_padded[b].item()
+        sz = (cu_seqlens[b + 1] - cu_seqlens[b]).item()
+        if sz > 0:
+            out[s : s + sz].copy_(inp[s : s + sz])
+
+
+@unittest.skipIf(
+    not torch.cuda.is_available() or tex is None,
+    "THD kernel tests require CUDA and transformer_engine_torch",
+)
+class TestTHDKernels(unittest.TestCase):
+    def test_thd_reorder_matches_legacy_python_reorder(self):
+        cp_size = 4
+        cu_seqlens = torch.tensor([0, 8, 24, 40], dtype=torch.int32, device="cuda")
+        x = torch.arange(40 * 2 * 4, dtype=torch.float16, device="cuda").view(40, 2, 4)
+
+        rank_sharded = tex.thd_reorder(x, cu_seqlens, cp_size, False, x.shape[0])
+        ref_rank_sharded = _legacy_reorder_thd_to_rank_sharded(x, cu_seqlens, cp_size)
+        self.assertTrue(torch.equal(rank_sharded, ref_rank_sharded))
+
+        seq_chunk_ids = torch.empty(2 * cp_size, dtype=torch.int32, device="cuda")
+        for rank in range(cp_size):
+            seq_chunk_ids[rank] = 2 * rank
+            seq_chunk_ids[rank + cp_size] = 2 * cp_size - 2 * rank - 1
+        contiguous = tex.thd_reorder(
+            rank_sharded, cu_seqlens, cp_size, True, rank_sharded.shape[0]
+        )
+        ref_contiguous = _legacy_reorder_thd_to_contiguous(
+            rank_sharded, cu_seqlens, seq_chunk_ids, cp_size
+        )
+        self.assertTrue(torch.equal(contiguous, ref_contiguous))
+        self.assertTrue(torch.equal(contiguous, x))
+
+    def test_thd_get_partitioned_indices_matches_dual_chunk_expected_indices(self):
+        cu_seqlens = torch.tensor([0, 8, 16], dtype=torch.int32, device="cuda")
+
+        rank0 = tex.thd_get_partitioned_indices(cu_seqlens, 16, 2, 0)
+        rank1 = tex.thd_get_partitioned_indices(cu_seqlens, 16, 2, 1)
+
+        expected_rank0 = torch.tensor(
+            [0, 1, 6, 7, 8, 9, 14, 15], dtype=torch.int32, device="cuda"
+        )
+        expected_rank1 = torch.tensor(
+            [2, 3, 4, 5, 10, 11, 12, 13], dtype=torch.int32, device="cuda"
+        )
+        self.assertTrue(torch.equal(rank0, expected_rank0))
+        self.assertTrue(torch.equal(rank1, expected_rank1))
+
+    def test_thd_valid_copy_matches_legacy_slice_copy_loop(self):
+        cu_seqlens_padded = torch.tensor([2, 6, 12], dtype=torch.int32, device="cuda")
+        cu_seqlens = torch.tensor([0, 3, 7], dtype=torch.int32, device="cuda")
+        inp = torch.arange(12 * 2 * 4, dtype=torch.float16, device="cuda").view(
+            12, 2, 4
+        )
+        out = torch.full_like(inp, -1)
+        expected = torch.full_like(inp, -1)
+
+        _legacy_valid_copy(expected, inp, cu_seqlens_padded, cu_seqlens)
+        tex.thd_valid_copy(out, inp, cu_seqlens_padded, cu_seqlens)
+        self.assertTrue(torch.equal(out, expected))
+
+    def test_thd_read_half_tensor_reads_each_sequence_half(self):
+        cu_seqlens = torch.tensor([0, 8, 16], dtype=torch.int32, device="cuda")
+        q = torch.arange(16 * 2 * 4, dtype=torch.float16, device="cuda").view(16, 2, 4)
+        kv = torch.arange(2 * 16 * 2 * 4, dtype=torch.float16, device="cuda").view(
+            2, 16, 2, 4
+        )
+
+        q_first = tex.thd_read_half_tensor(q, cu_seqlens, 0)
+        q_second = tex.thd_read_half_tensor(q, cu_seqlens, 1)
+        kv_first = tex.thd_read_half_tensor(kv, cu_seqlens, 0)
+        kv_second = tex.thd_read_half_tensor(kv, cu_seqlens, 1)
+
+        expected_first = torch.cat([q[0:4], q[8:12]], dim=0)
+        expected_second = torch.cat([q[4:8], q[12:16]], dim=0)
+        self.assertTrue(torch.equal(q_first, expected_first))
+        self.assertTrue(torch.equal(q_second, expected_second))
+        self.assertTrue(
+            torch.equal(kv_first, torch.stack([expected_first, expected_first + 128]))
+        )
+        self.assertTrue(
+            torch.equal(
+                kv_second, torch.stack([expected_second, expected_second + 128])
+            )
+        )
+
+    def test_thd_read_second_half_lse_handles_packed_and_batch_major_lse(self):
+        cu_seqlens = torch.tensor([0, 8, 16], dtype=torch.int32, device="cuda")
+        lse = torch.arange(2 * 2 * 8, dtype=torch.float32, device="cuda").view(2, 2, 8)
+        packed_lse = torch.arange(2 * 16, dtype=torch.float32, device="cuda").view(
+            2, 16
+        )
+
+        second_half_lse = tex.thd_read_second_half_lse(lse, cu_seqlens, False, 4)
+        packed_second_half_lse = tex.thd_read_second_half_lse(
+            packed_lse, cu_seqlens, True, 8
+        )
+
+        expected = lse[:, :, 4:8]
+        expected_packed = torch.cat([packed_lse[:, 4:8], packed_lse[:, 12:16]], dim=1)
+        self.assertTrue(torch.equal(second_half_lse, expected))
+        self.assertTrue(torch.equal(packed_second_half_lse, expected_packed))
 
 
 if __name__ == "__main__":
