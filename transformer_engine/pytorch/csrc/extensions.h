@@ -29,19 +29,20 @@ namespace transformer_engine::pytorch {
 std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fwd(
     at::Tensor logits, int topk, bool use_pre_softmax, std::optional<int> num_groups,
     std::optional<int> group_topk, std::optional<float> scaling_factor, std::string score_function,
-    std::optional<at::Tensor> expert_bias);
+    std::optional<at::Tensor> expert_bias,
+    int routing_map_format = static_cast<int>(NVTE_ROUTING_MAP_FORMAT_BYTEMAP));
 
-void fused_topk_with_score_function_bwd(int num_tokens, int num_experts, at::Tensor routing_map,
-                                        at::Tensor intermediate_output, at::Tensor grad_probs,
-                                        at::Tensor grad_logits, int topk, bool use_pre_softmax,
-                                        std::optional<float> scaling_factor,
-                                        std::string score_function);
+void fused_topk_with_score_function_bwd(
+    at::Tensor routing_map, at::Tensor intermediate_output, at::Tensor grad_probs,
+    at::Tensor grad_logits, int topk, bool use_pre_softmax, std::optional<float> scaling_factor,
+    std::string score_function,
+    int routing_map_format = static_cast<int>(NVTE_ROUTING_MAP_FORMAT_BYTEMAP));
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_score_for_moe_aux_loss_fwd(
-    at::Tensor logits, int topk, std::string score_function);
+    at::Tensor logits, int topk, std::string score_function,
+    int routing_map_format = static_cast<int>(NVTE_ROUTING_MAP_FORMAT_BYTEMAP));
 
-void fused_score_for_moe_aux_loss_bwd(int num_tokens, int num_experts,
-                                      at::Tensor intermediate_output, at::Tensor grad_probs,
+void fused_score_for_moe_aux_loss_bwd(at::Tensor intermediate_output, at::Tensor grad_scores,
                                       at::Tensor grad_logits, int topk, std::string score_function);
 
 std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd(at::Tensor probs,
@@ -274,10 +275,11 @@ py::object swiglu(const at::Tensor &input, py::handle quantizer);
 
 py::object dswiglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
 
-py::object clamped_swiglu(const at::Tensor &input, py::handle quantizer, float limit, float alpha);
+py::object clamped_swiglu(const at::Tensor &input, py::handle quantizer, float limit, float alpha,
+                          float glu_linear_offset);
 
 py::object clamped_dswiglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer,
-                           float limit, float alpha);
+                           float limit, float alpha, float glu_linear_offset);
 /***************************************************************************************************
  * LayerNorm
  **************************************************************************************************/
@@ -484,13 +486,31 @@ size_t get_cublasLt_version();
 
 size_t get_cudnn_version();
 
-std::vector<at::Tensor> convert_host_pointers_to_tensor(
-    std::vector<std::vector<at::Tensor>> tensor_lists);
-
-std::tuple<at::Tensor, at::Tensor, at::Tensor> get_device_pointer_for_data_and_scales(
-    std::vector<at::Tensor> data_tensors, std::vector<at::Tensor> scale_tensors, bool swizzle,
-    bool rowwise, transformer_engine::DType data_dtype);
 at::Tensor splits_to_offsets(const at::Tensor &first_dims, int64_t logical_last_dim);
+
+at::Tensor copy_data_ptrs_to_device(const std::vector<at::Tensor> &tensors,
+                                    const c10::Device &device);
+
+/***************************************************************************************************
+ * Experimental helpers for the fused grouped MLP
+ *
+ * These primarily exist to support cuDNN CuTe DSL grouped GEMM
+ * kernels. Since those are unstable and under active development,
+ * these helpers should also be considered unstable.
+ **************************************************************************************************/
+
+namespace grouped_mlp_experimental {
+
+// Prepare discrete weight tensors for the cuDNN CuTe DSL grouped GEMM
+// kernel by swizzling scales and copying data and scale pointers to
+// device. All tensors must share a uniform shape and `swizzle_type`
+// must be one of "mxfp8_rowwise", "mxfp8_columnwise", or "nvfp4".
+// Returns {data_ptrs_device, scale_ptrs_device, swizzled_scales_buffer}.
+std::tuple<at::Tensor, at::Tensor, at::Tensor> swizzle_scales_and_pack_ptrs_for_discrete_weights(
+    const std::vector<at::Tensor> &data_tensors, const std::vector<at::Tensor> &scale_tensors,
+    const std::string &swizzle_type, const c10::Device &device);
+
+}  // namespace grouped_mlp_experimental
 
 /***************************************************************************************************
  * Support THD format for Context Parallel
