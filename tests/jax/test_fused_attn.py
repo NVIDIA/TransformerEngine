@@ -407,6 +407,7 @@ class FusedAttnRunner:
     score_mod_reference: Optional[Callable[[Array], Array]] = None
     input_scale: float = 1.0
     doutput_seed: Optional[int] = None
+    doutput: Optional[Array] = field(init=False, default=None)
     rtol: Optional[float] = None
     atol: Optional[float] = None
 
@@ -417,6 +418,16 @@ class FusedAttnRunner:
                 self.num_segments_per_seq = 2
             else:
                 self.num_segments_per_seq = 1
+        if self.doutput_seed is not None:
+            output_shape = (
+                self.batch_size,
+                self.max_seqlen_q,
+                self.num_heads_q,
+                self.head_dim_v,
+            )
+            self.doutput = jax.random.normal(
+                jax.random.PRNGKey(self.doutput_seed), output_shape, dtype=self.dtype
+            )
 
     # See https://docs.nvidia.com/deeplearning/cudnn/latest/release-notes.html#cudnn-9-4-0 for known issue
     # generating zero-length ragged tensors. This setting adjusts the test to avoid the zero-length cases.
@@ -560,19 +571,6 @@ class FusedAttnRunner:
         self.v = (self.input_scale * jax.random.uniform(v_key, v_shape, self.dtype, -1.0)).astype(
             self.dtype
         )
-        if self.doutput_seed is None:
-            self.doutput = None
-        else:
-            output_shape = (
-                self.batch_size,
-                self.max_seqlen_q,
-                self.num_heads_q,
-                self.head_dim_v,
-            )
-            self.doutput = jax.random.normal(
-                jax.random.PRNGKey(self.doutput_seed), output_shape, dtype=self.dtype
-            )
-
         if self.attn_bias_type != AttnBiasType.NO_BIAS:
             if self.bias_shape == BiasShape._1HSS:
                 self.bias = jax.random.uniform(bias_key, bias_shape, self.dtype, -1.0)
