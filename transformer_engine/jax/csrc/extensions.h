@@ -23,6 +23,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "common/common.h"
@@ -147,12 +148,16 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnForwardHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnBackwardHandler);
 
-NVTE_Fused_Attn_Backend GetFusedAttnBackend(
-    bool is_training, DType q_dtype, DType kv_dtype, NVTE_QKV_Layout qkv_layout,
+std::tuple<NVTE_Fused_Attn_Backend, std::string> GetFusedAttnBackend(
+    bool is_training, size_t batch_size, DType q_dtype, DType kv_dtype, DType o_dtype,
+    DType do_dtype, DType dqkv_dtype, NVTEScalingMode scaling_mode, NVTE_QKV_Layout qkv_layout,
+    NVTE_QKV_Format o_format, NVTE_QKV_Format do_format, NVTE_QKV_Layout dqkv_layout,
+    NVTE_QKV_Format qkv_scale_inv_format, NVTE_QKV_Format do_scale_inv_format,
     NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type,
-    float dropout_probability, size_t q_attn_heads, size_t kv_attn_heads, size_t q_max_seqlen,
-    size_t kv_max_seqlen, size_t qk_head_dim, size_t v_head_dim, int64_t window_size_left,
-    int64_t window_size_right, bool deterministic);
+    float attn_scale, float dropout_probability, size_t q_attn_heads, size_t kv_attn_heads,
+    size_t q_max_seqlen, size_t kv_max_seqlen, size_t qk_head_dim, size_t v_head_dim,
+    int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal,
+    bool deterministic);
 
 pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
     size_t input_batch, size_t bias_batch, size_t q_max_seqlen, size_t kv_max_seqlen,

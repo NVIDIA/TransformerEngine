@@ -13,6 +13,8 @@
 
 #include <cudnn.h>
 
+#include <string>
+
 #include "common/common.h"
 #include "transformer_engine/fused_attn.h"
 
@@ -46,6 +48,16 @@ void fused_attn_arbitrary_seqlen_bwd(
     const Tensor *cu_seqlens_q, const Tensor *cu_seqlens_kv, const Tensor *cu_seqlens_q_padded,
     const Tensor *cu_seqlens_kv_padded, const Tensor *rng_state, Tensor *workspace,
     cudaStream_t stream, cudnnHandle_t handle);
+
+// check if a given configuration is supported for F16/BF16 forward;
+// if it is, cache the graph built for this config, and return an empty string;
+// if not, return a diagnostic message in the form of a string.
+std::string is_supported_f16_fwd(const NVTEFusedAttnConfig *cfg, cudnnHandle_t handle);
+
+// check if a given configuration is supported for F16/BF16 backward;
+// if it is, cache the graph built for this config, and return an empty string;
+// if not, return a diagnostic message in the form of a string.
+std::string is_supported_f16_bwd(const NVTEFusedAttnConfig *cfg, cudnnHandle_t handle);
 
 }  // namespace transformer_engine
 

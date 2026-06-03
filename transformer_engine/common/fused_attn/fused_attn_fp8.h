@@ -8,6 +8,8 @@
  *  \brief Functions for fused attention for FP8
  */
 
+#include <string>
+
 #include "transformer_engine/fused_attn.h"
 #include "transformer_engine/transformer_engine.h"
 
@@ -39,4 +41,14 @@ void fused_attn_fp8_bwd(
     const Tensor *output_dK, const Tensor *output_dV, Tensor *output_dSoftmaxOffset,
     const Tensor *cu_seqlens_q, const Tensor *cu_seqlens_kv, const Tensor *rng_state,
     Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle);
+
+// check if a given configuration is supported for FP8 forward;
+// if it is, cache the graph built for this config, and return an empty string;
+// if not, return a diagnostic message in the form of a string.
+std::string is_supported_fp8_fwd(const NVTEFusedAttnConfig *cfg, cudnnHandle_t handle);
+
+// check if a given configuration is supported for FP8 backward;
+// if it is, cache the graph built for this config, and return an empty string;
+// if not, return a diagnostic message in the form of a string.
+std::string is_supported_fp8_bwd(const NVTEFusedAttnConfig *cfg, cudnnHandle_t handle);
 }  // namespace transformer_engine

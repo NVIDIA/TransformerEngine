@@ -16,7 +16,12 @@ from jax.sharding import PartitionSpec, NamedSharding
 from jax.experimental.custom_partitioning import SdyShardingRule
 
 import transformer_engine_jax
-from transformer_engine_jax import NVTE_Fused_Attn_Backend
+from transformer_engine_jax import (
+    NVTE_Fused_Attn_Backend,
+    NVTE_QKV_Format,
+    NVTE_QKV_Layout,
+    NVTEScalingMode,
+)
 from transformer_engine.jax.attention import (
     AttnBiasType,
     AttnMaskType,
@@ -108,6 +113,7 @@ class FusedAttnHelper:
     """
 
     is_training: bool
+    batch_size: int
     q_dtype: jnp.dtype
     kv_dtype: jnp.dtype
     qkv_layout: QKVLayout
@@ -122,21 +128,44 @@ class FusedAttnHelper:
     head_dim_qk: int
     head_dim_v: int
     window_size: Tuple[int, int]
+    bottom_right_diagonal: bool
+    attn_scale: float = 1.0
 
     def is_fused_attn_kernel_available(self):
-        """Check if there is available fused attention kernel"""
-        return self.get_fused_attn_backend() != NVTE_Fused_Attn_Backend.NVTE_No_Backend
+        """Check if there is available fused attention kernel.
+
+        Use ``get_fused_attn_backend()`` directly to also get the diagnostic message
+        explaining why a configuration was rejected.
+        """
+        backend, _ = self.get_fused_attn_backend()
+        return backend != NVTE_Fused_Attn_Backend.NVTE_No_Backend
 
     def get_fused_attn_backend(self):
-        """Get the fused attention kernel backend"""
+        """Get the fused attention kernel backend.
+
+        Returns a ``(backend, message)`` tuple. ``message`` is empty on success, otherwise a
+        diagnostic string describing why the configuration was rejected when backend = NVTE_No_Backend.
+        """
+        q_type = jax_dtype_to_te_dtype(self.q_dtype)
         return transformer_engine_jax.get_fused_attn_backend(
             self.is_training,
-            jax_dtype_to_te_dtype(self.q_dtype),
+            self.batch_size,
+            q_type,
             jax_dtype_to_te_dtype(self.kv_dtype),
+            q_type,
+            q_type,
+            q_type,
+            NVTEScalingMode.NVTE_INVALID_SCALING,
             self.qkv_layout.value,
+            NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET,
+            NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET,
+            NVTE_QKV_Layout.NVTE_QKV_Layout_NOT_SET,
+            NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET,
+            NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET,
             self.attn_bias_type.value,
             self.attn_mask_type.value,
             self.softmax_type.value,
+            self.attn_scale,
             self.dropout_probability,
             self.q_num_heads,
             self.kv_num_heads,
@@ -146,6 +175,7 @@ class FusedAttnHelper:
             self.head_dim_v,
             self.window_size[0],
             self.window_size[1],
+            self.bottom_right_diagonal,
             not self.is_non_deterministic_allowed(),
         )
 
@@ -335,8 +365,10 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         out_aval = q_aval.update(shape=output_shape, dtype=q_dtype)
 
         # backend determines the softmax buffer shape/dtype
-        backend = FusedAttnHelper(
+        input_batch = reduce(operator.mul, batch_shape)
+        backend, message = FusedAttnHelper(
             config.is_training,
+            input_batch,
             q_dtype,
             k_dtype,
             config.qkv_layout,
@@ -351,6 +383,8 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             q_head_dim,
             v_head_dim,
             config.window_size,
+            config.bottom_right_diagonal,
+            attn_scale=float(config.scaling_factor),
         ).get_fused_attn_backend()
 
         if backend == NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
@@ -369,7 +403,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 )
             softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
         else:
-            raise ValueError(f"Unsupported {backend=}")
+            raise ValueError(f"Unsupported backend: {message}")
         softmax_aux_aval = q_aval.update(shape=softmax_shape, dtype=softmax_dtype)
 
         # JAX does not enable 64-bit int by default so we get XLA to allocate x8 memory with

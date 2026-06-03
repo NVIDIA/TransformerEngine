@@ -311,6 +311,10 @@ class ModelConfig:
         self.attn_type = "self" if (self.max_seqlen_q == self.max_seqlen_kv) else "cross"
         self.bias_shape = bias_shape
         self.window_size = check_set_window_size(self.attn_mask_type, window_size)
+        self.bottom_right_diagonal = self.attn_mask_type in {
+            "causal_bottom_right",
+            "padding_causal_bottom_right",
+        }
         self.context_parallel = context_parallel
         self.cp_comm_type = cp_comm_type
         self.return_max_logit = return_max_logit
@@ -387,6 +391,7 @@ def get_available_attention_backends(
             head_dim_v=config.head_dim_v,
             attn_mask_type=config.attn_mask_type,
             window_size=config.window_size,
+            bottom_right_diagonal=config.bottom_right_diagonal,
             alibi_slopes_shape=alibi_slopes_shape,
             core_attention_bias_type=config.attn_bias_type,
             core_attention_bias_shape=core_attention_bias_shape,

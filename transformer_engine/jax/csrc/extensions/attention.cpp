@@ -11,18 +11,62 @@
 namespace transformer_engine {
 namespace jax {
 
-NVTE_Fused_Attn_Backend GetFusedAttnBackend(
-    bool is_training, DType q_dtype, DType kv_dtype, NVTE_QKV_Layout qkv_layout,
+std::tuple<NVTE_Fused_Attn_Backend, std::string> GetFusedAttnBackend(
+    bool is_training, size_t batch_size, DType q_dtype, DType kv_dtype, DType o_dtype,
+    DType do_dtype, DType dqkv_dtype, NVTEScalingMode scaling_mode, NVTE_QKV_Layout qkv_layout,
+    NVTE_QKV_Format o_format, NVTE_QKV_Format do_format, NVTE_QKV_Layout dqkv_layout,
+    NVTE_QKV_Format qkv_scale_inv_format, NVTE_QKV_Format do_scale_inv_format,
     NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type,
-    float dropout_probability, size_t q_attn_heads, size_t kv_attn_heads, size_t q_max_seqlen,
-    size_t kv_max_seqlen, size_t qk_head_dim, size_t v_head_dim, int64_t window_size_left,
-    int64_t window_size_right, bool deterministic) {
-  auto backend = nvte_get_fused_attn_backend(
-      is_training, static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype), qkv_layout,
-      bias_type, mask_type, softmax_type, dropout_probability, q_attn_heads, kv_attn_heads,
-      q_max_seqlen, kv_max_seqlen, qk_head_dim, v_head_dim, window_size_left, window_size_right,
-      false, false, deterministic);
-  return backend;
+    float attn_scale, float dropout_probability, size_t q_attn_heads, size_t kv_attn_heads,
+    size_t q_max_seqlen, size_t kv_max_seqlen, size_t qk_head_dim, size_t v_head_dim,
+    int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal,
+    bool deterministic) {
+  if (o_format == NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET) {
+    o_format = nvte_get_q_format(qkv_layout);
+  }
+  if (do_format == NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET) {
+    do_format = o_format;
+  }
+  if (dqkv_layout == NVTE_QKV_Layout::NVTE_QKV_Layout_NOT_SET) {
+    dqkv_layout = qkv_layout;
+  }
+  NVTE_CHECK(q_dtype == kv_dtype, "Q and KV must have the same data type.");
+
+  NVTEFusedAttnConfig cfg = NVTE_FUSED_ATTN_CONFIG_INIT;
+  cfg.qkv_layout = qkv_layout;
+  cfg.o_format = o_format;
+  cfg.do_format = do_format;
+  cfg.dqkv_layout = dqkv_layout;
+  cfg.qkv_scale_inv_format = qkv_scale_inv_format;
+  cfg.do_scale_inv_format = do_scale_inv_format;
+  cfg.bias_type = bias_type;
+  cfg.attn_mask_type = mask_type;
+  cfg.softmax_type = softmax_type;
+  cfg.scaling_mode = scaling_mode;
+  cfg.attn_scale = attn_scale;
+  cfg.dropout = dropout_probability;
+  cfg.max_seqlen_q = q_max_seqlen;
+  cfg.max_seqlen_kv = kv_max_seqlen;
+  cfg.window_size_left = window_size_left;
+  cfg.window_size_right = window_size_right;
+  cfg.bottom_right_diagonal = bottom_right_diagonal;
+  cfg.cuda_graph = false;
+  cfg.qkv_dtype = static_cast<NVTEDType>(q_dtype);
+  cfg.o_dtype = static_cast<NVTEDType>(o_dtype);
+  cfg.do_dtype = static_cast<NVTEDType>(do_dtype);
+  cfg.dqkv_dtype = static_cast<NVTEDType>(dqkv_dtype);
+  cfg.batch_size = batch_size;
+  cfg.num_attn_heads = q_attn_heads;
+  cfg.num_gqa_groups = kv_attn_heads;
+  cfg.head_dim_qk = qk_head_dim;
+  cfg.head_dim_v = v_head_dim;
+  cfg.is_training = is_training;
+  cfg.return_max_logit = false;
+  cfg.deterministic = deterministic;
+
+  const char *message = nullptr;
+  auto backend = nvte_get_fused_attn_backend_v2(&cfg, &message);
+  return {backend, message != nullptr ? std::string(message) : std::string()};
 }
 
 /*
@@ -261,11 +305,13 @@ static void FusedAttnForwardImpl(
   /* Prepare RNG state */
   auto rng_state_tensor = TensorWrapper(rng_state, std::vector<size_t>{2}, DType::kInt64);
 
-  auto backend = nvte_get_fused_attn_backend(
-      is_training, static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout,
-      bias_type, mask_type, softmax_type, dropout_probability, attn_heads, num_gqa_groups,
-      q_max_seqlen, kv_max_seqlen, qk_head_dim, v_head_dim, window_size_left, window_size_right,
-      false, false, deterministic);
+  auto [backend, _fwd_msg] = GetFusedAttnBackend(
+      is_training, input_batch, dtype, dtype, dtype, dtype, dtype, NVTE_INVALID_SCALING, qkv_layout,
+      NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET, NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET,
+      NVTE_QKV_Layout::NVTE_QKV_Layout_NOT_SET, NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET,
+      NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET, bias_type, mask_type, softmax_type, scaling_factor,
+      dropout_probability, attn_heads, num_gqa_groups, q_max_seqlen, kv_max_seqlen, qk_head_dim,
+      v_head_dim, window_size_left, window_size_right, bottom_right_diagonal, deterministic);
   nvte_populate_rng_state_async(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
 
   /* Auxiliary tensors (to be propagated to the backward pass later) */
@@ -537,11 +583,13 @@ static void FusedAttnBackwardImpl(
   /* Auxiliary tensors (propagated from the forward pass) */
   NVTETensorPack aux_input_tensors;
   nvte_tensor_pack_create(&aux_input_tensors);
-  auto backend = nvte_get_fused_attn_backend(
-      is_training, static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout,
-      bias_type, mask_type, softmax_type, dropout_probability, attn_heads, num_gqa_groups,
-      q_max_seqlen, kv_max_seqlen, qk_head_dim, v_head_dim, window_size_left, window_size_right,
-      false, false, deterministic);
+  auto [backend, _bwd_msg] = GetFusedAttnBackend(
+      is_training, input_batch, dtype, dtype, dtype, dtype, dtype, NVTE_INVALID_SCALING, qkv_layout,
+      NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET, NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET,
+      NVTE_QKV_Layout::NVTE_QKV_Layout_NOT_SET, NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET,
+      NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET, bias_type, mask_type, softmax_type, scaling_factor,
+      dropout_probability, attn_heads, num_gqa_groups, q_max_seqlen, kv_max_seqlen, qk_head_dim,
+      v_head_dim, window_size_left, window_size_right, bottom_right_diagonal, deterministic);
   PrepareFusedAttnBackwardAuxTensors(&aux_input_tensors, input_batch, bias_batch, attn_heads,
                                      bias_heads, q_max_seqlen, kv_max_seqlen, dtype, backend,
                                      softmax_aux, rng_state, bias, softmax_offset);

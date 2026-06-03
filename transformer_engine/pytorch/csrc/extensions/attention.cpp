@@ -40,18 +40,52 @@ void mha_fill(const transformer_engine::TensorWrapper &self, const at::Tensor &s
 namespace transformer_engine::pytorch {
 
 // get the fused attention backend
-NVTE_Fused_Attn_Backend get_fused_attn_backend(
-    bool is_training, const DType q_dtype, const DType kv_dtype, NVTE_QKV_Layout qkv_layout,
-    NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
-    float p_dropout, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
-    size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left,
-    int64_t window_size_right, bool return_max_logit, bool cuda_graph, bool deterministic) {
-  NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
-      is_training, static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype), qkv_layout,
-      bias_type, attn_mask_type, softmax_type, p_dropout, num_attn_heads, num_gqa_groups,
-      max_seqlen_q, max_seqlen_kv, head_dim_qk, head_dim_v, window_size_left, window_size_right,
-      return_max_logit, cuda_graph, deterministic);
-  return fused_attention_backend;
+std::tuple<NVTE_Fused_Attn_Backend, std::string> get_fused_attn_backend(
+    bool is_training, size_t batch_size, const DType q_dtype, const DType kv_dtype,
+    const DType o_dtype, const DType do_dtype, const DType dqkv_dtype, NVTEScalingMode scaling_mode,
+    NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format, NVTE_QKV_Format do_format,
+    NVTE_QKV_Layout dqkv_layout, NVTE_QKV_Format qkv_scale_inv_format,
+    NVTE_QKV_Format do_scale_inv_format, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+    NVTE_Softmax_Type softmax_type, float attn_scale, float p_dropout, size_t num_attn_heads,
+    size_t num_gqa_groups, size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim_qk,
+    size_t head_dim_v, int64_t window_size_left, int64_t window_size_right,
+    bool bottom_right_diagonal, bool return_max_logit, bool cuda_graph, bool deterministic) {
+  NVTEFusedAttnConfig cfg = NVTE_FUSED_ATTN_CONFIG_INIT;
+  cfg.qkv_layout = qkv_layout;
+  cfg.o_format = o_format;
+  cfg.do_format = do_format;
+  cfg.dqkv_layout = dqkv_layout;
+  cfg.qkv_scale_inv_format = qkv_scale_inv_format;
+  cfg.do_scale_inv_format = do_scale_inv_format;
+  cfg.bias_type = bias_type;
+  cfg.attn_mask_type = attn_mask_type;
+  cfg.softmax_type = softmax_type;
+  cfg.scaling_mode = scaling_mode;
+  cfg.attn_scale = attn_scale;
+  cfg.dropout = p_dropout;
+  cfg.max_seqlen_q = max_seqlen_q;
+  cfg.max_seqlen_kv = max_seqlen_kv;
+  cfg.window_size_left = window_size_left;
+  cfg.window_size_right = window_size_right;
+  cfg.bottom_right_diagonal = bottom_right_diagonal;
+  cfg.cuda_graph = cuda_graph;
+  NVTE_CHECK(q_dtype == kv_dtype, "Q and KV must have the same data type.");
+  cfg.qkv_dtype = static_cast<NVTEDType>(q_dtype);
+  cfg.o_dtype = static_cast<NVTEDType>(o_dtype);
+  cfg.do_dtype = static_cast<NVTEDType>(do_dtype);
+  cfg.dqkv_dtype = static_cast<NVTEDType>(dqkv_dtype);
+  cfg.batch_size = batch_size;
+  cfg.num_attn_heads = num_attn_heads;
+  cfg.num_gqa_groups = num_gqa_groups;
+  cfg.head_dim_qk = head_dim_qk;
+  cfg.head_dim_v = head_dim_v;
+  cfg.is_training = is_training;
+  cfg.return_max_logit = return_max_logit;
+  cfg.deterministic = deterministic;
+
+  const char *message = nullptr;
+  NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend_v2(&cfg, &message);
+  return {fused_attention_backend, message != nullptr ? std::string(message) : std::string()};
 }
 
 // helper function for S and dP quantizers

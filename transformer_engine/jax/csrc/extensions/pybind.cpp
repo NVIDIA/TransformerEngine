@@ -160,12 +160,14 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("NVTE_BSHD_BSHD_BSHD", NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD)
       .value("NVTE_T3HD", NVTE_QKV_Layout::NVTE_T3HD)
       .value("NVTE_THD_T2HD", NVTE_QKV_Layout::NVTE_THD_T2HD)
-      .value("NVTE_THD_THD_THD", NVTE_QKV_Layout::NVTE_THD_THD_THD);
+      .value("NVTE_THD_THD_THD", NVTE_QKV_Layout::NVTE_THD_THD_THD)
+      .value("NVTE_QKV_Layout_NOT_SET", NVTE_QKV_Layout::NVTE_QKV_Layout_NOT_SET);
 
   pybind11::enum_<NVTE_QKV_Format>(m, "NVTE_QKV_Format", pybind11::module_local())
       .value("NVTE_SBHD", NVTE_QKV_Format::NVTE_SBHD)
       .value("NVTE_BSHD", NVTE_QKV_Format::NVTE_BSHD)
-      .value("NVTE_THD", NVTE_QKV_Format::NVTE_THD);
+      .value("NVTE_THD", NVTE_QKV_Format::NVTE_THD)
+      .value("NVTE_QKV_Format_NOT_SET", NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET);
 
   pybind11::enum_<NVTE_Softmax_Type>(m, "NVTE_Softmax_Type", pybind11::module_local())
       .value("NVTE_VANILLA_SOFTMAX", NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX)
@@ -205,6 +207,14 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("NVFP4_1D_SCALING", JAXX_Scaling_Mode::NVFP4_1D_SCALING)
       .value("NVFP4_2D_SCALING", JAXX_Scaling_Mode::NVFP4_2D_SCALING)
       .export_values();
+
+  pybind11::enum_<NVTEScalingMode>(m, "NVTEScalingMode", pybind11::module_local())
+      .value("NVTE_DELAYED_TENSOR_SCALING", NVTEScalingMode::NVTE_DELAYED_TENSOR_SCALING)
+      .value("NVTE_MXFP8_1D_SCALING", NVTEScalingMode::NVTE_MXFP8_1D_SCALING)
+      .value("NVTE_BLOCK_SCALING_1D", NVTEScalingMode::NVTE_BLOCK_SCALING_1D)
+      .value("NVTE_BLOCK_SCALING_2D", NVTEScalingMode::NVTE_BLOCK_SCALING_2D)
+      .value("NVTE_NVFP4_1D_SCALING", NVTEScalingMode::NVTE_NVFP4_1D_SCALING)
+      .value("NVTE_INVALID_SCALING", NVTEScalingMode::NVTE_INVALID_SCALING);
 
   pybind11::enum_<JAXX_Quantize_Layout>(m, "JAXX_Quantize_Layout", pybind11::module_local())
       .value("ROWWISE", JAXX_Quantize_Layout::ROWWISE)

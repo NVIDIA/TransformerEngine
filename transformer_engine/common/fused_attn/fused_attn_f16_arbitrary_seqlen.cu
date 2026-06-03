@@ -1333,4 +1333,138 @@ void fused_attn_arbitrary_seqlen_bwd(
     NVTE_ERROR("Unexpected workspace_size.");
   }
 }
+
+std::string is_supported_f16_fwd(const NVTEFusedAttnConfig *cfg, cudnnHandle_t handle) {
+  const size_t num_gqa_groups = cfg->num_gqa_groups;
+  const size_t head_dim_qk = cfg->head_dim_qk;
+  const size_t head_dim_v = cfg->head_dim_v;
+  const bool is_training = cfg->is_training;
+  const bool return_max_logit = cfg->return_max_logit;
+  const float attn_scale = cfg->attn_scale;
+  const float p_dropout = cfg->dropout;
+  const NVTE_QKV_Layout qkv_layout = cfg->qkv_layout;
+  const NVTE_QKV_Format o_format = cfg->o_format;
+  const NVTE_Bias_Type bias_type = cfg->bias_type;
+  const NVTE_Mask_Type mask_type = cfg->attn_mask_type;
+  const NVTE_Softmax_Type softmax_type = cfg->softmax_type;
+  const int64_t window_size_left = cfg->window_size_left;
+  const int64_t window_size_right = cfg->window_size_right;
+  const bool bottom_right_diagonal = cfg->bottom_right_diagonal;
+  const DType qkv_dtype = static_cast<DType>(cfg->qkv_dtype);
+  const auto b = static_cast<int64_t>(cfg->batch_size);
+  const auto h = static_cast<int64_t>(cfg->num_attn_heads);
+  const auto sq = static_cast<int64_t>(cfg->max_seqlen_q);
+  const auto skv = static_cast<int64_t>(cfg->max_seqlen_kv);
+
+  const NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
+  const NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
+  const bool is_ragged_q = (q_format == NVTE_QKV_Format::NVTE_THD);
+  const bool is_ragged_kv = (kv_format == NVTE_QKV_Format::NVTE_THD);
+  const NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
+  const bool is_paged_kv = (layout_group == NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD);
+  const bool has_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
+
+  const int64_t max_b = (is_ragged_q || is_ragged_kv) ? b : 0;
+  const int64_t max_t_q = is_ragged_q ? b * sq : 0;
+  const int64_t max_t_kv = is_ragged_kv ? b * skv : 0;
+  const int64_t num_pages_k = is_paged_kv ? b : 0;
+  const int64_t num_pages_v = is_paged_kv ? b : 0;
+  const int64_t page_size_k = is_paged_kv ? skv : 0;
+  const int64_t page_size_v = is_paged_kv ? skv : 0;
+  const int64_t max_pages_per_seq_k = is_paged_kv ? 1 : 0;
+  const int64_t max_pages_per_seq_v = is_paged_kv ? 1 : 0;
+  const int64_t bias_b = has_bias ? b : 0;
+  const int64_t bias_h = has_bias ? h : 0;
+  const int64_t bias_sq = has_bias ? sq : 0;
+  const int64_t bias_skv = has_bias ? skv : 0;
+
+  size_t workspace_size = 0;
+  try {
+    fused_attn::fused_attn_arbitrary_seqlen_fwd_impl(
+        b, h, static_cast<int64_t>(num_gqa_groups), sq, skv, static_cast<int64_t>(head_dim_qk),
+        static_cast<int64_t>(head_dim_v), max_b, max_t_q, max_t_kv, num_pages_k, num_pages_v,
+        page_size_k, page_size_v, max_pages_per_seq_k, max_pages_per_seq_v, bias_b, bias_h, bias_sq,
+        bias_skv, is_training, return_max_logit, attn_scale, p_dropout, qkv_layout, o_format,
+        bias_type, mask_type, softmax_type, window_size_left, window_size_right,
+        bottom_right_diagonal,
+        /*devPtrQ=*/nullptr, /*devPtrK=*/nullptr, /*devPtrV=*/nullptr, /*devPtrBias=*/nullptr,
+        /*devPtrSoftmaxOffset=*/nullptr, /*devPtrS1=*/nullptr, /*devPtrS2=*/nullptr,
+        /*devPtrO=*/nullptr, /*devPtrDropoutSeed=*/nullptr, /*devPtrDropoutOffset=*/nullptr,
+        /*devPtrCuSeqlensQ=*/nullptr, /*devPtrCuSeqlensKV=*/nullptr,
+        /*devPtrPageTableK=*/nullptr, /*devPtrPageTableV=*/nullptr,
+        /*devPtrSeqOffsetsQ=*/nullptr, /*devPtrSeqOffsetsKV=*/nullptr,
+        get_cudnn_fe_dtype(qkv_dtype),
+        /*workspace=*/nullptr, &workspace_size,
+        /*stream=*/static_cast<cudaStream_t>(0), handle);
+    return "";
+  } catch (const std::exception &e) {
+    return e.what();
+  } catch (...) {
+    return "is_supported_f16_fwd: unknown failure.";
+  }
+}
+
+std::string is_supported_f16_bwd(const NVTEFusedAttnConfig *cfg, cudnnHandle_t handle) {
+  const size_t num_gqa_groups = cfg->num_gqa_groups;
+  const size_t head_dim_qk = cfg->head_dim_qk;
+  const size_t head_dim_v = cfg->head_dim_v;
+  const float attn_scale = cfg->attn_scale;
+  const float p_dropout = cfg->dropout;
+  const NVTE_QKV_Layout qkv_layout = cfg->qkv_layout;
+  const NVTE_QKV_Format o_format = cfg->o_format;
+  const NVTE_QKV_Format do_format = cfg->do_format;
+  const NVTE_QKV_Layout dqkv_layout = cfg->dqkv_layout;
+  const NVTE_Bias_Type bias_type = cfg->bias_type;
+  const NVTE_Mask_Type mask_type = cfg->attn_mask_type;
+  const NVTE_Softmax_Type softmax_type = cfg->softmax_type;
+  const int64_t window_size_left = cfg->window_size_left;
+  const int64_t window_size_right = cfg->window_size_right;
+  const bool bottom_right_diagonal = cfg->bottom_right_diagonal;
+  const bool deterministic = cfg->deterministic;
+  const DType qkv_dtype = static_cast<DType>(cfg->qkv_dtype);
+  const auto b = static_cast<int64_t>(cfg->batch_size);
+  const auto h = static_cast<int64_t>(cfg->num_attn_heads);
+  const auto sq = static_cast<int64_t>(cfg->max_seqlen_q);
+  const auto skv = static_cast<int64_t>(cfg->max_seqlen_kv);
+
+  const NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
+  const NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
+  const bool is_ragged_q = (q_format == NVTE_QKV_Format::NVTE_THD);
+  const bool is_ragged_kv = (kv_format == NVTE_QKV_Format::NVTE_THD);
+  const bool has_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
+
+  const int64_t max_b = (is_ragged_q || is_ragged_kv) ? b : 0;
+  const int64_t max_t_q = is_ragged_q ? b * sq : 0;
+  const int64_t max_t_kv = is_ragged_kv ? b * skv : 0;
+  const int64_t bias_b = has_bias ? b : 0;
+  const int64_t bias_h = has_bias ? h : 0;
+  const int64_t bias_sq = has_bias ? sq : 0;
+  const int64_t bias_skv = has_bias ? skv : 0;
+
+  size_t workspace_size = 0;
+  try {
+    fused_attn::fused_attn_arbitrary_seqlen_bwd_impl(
+        b, h, static_cast<int64_t>(num_gqa_groups), sq, skv, static_cast<int64_t>(head_dim_qk),
+        static_cast<int64_t>(head_dim_v), max_b, max_t_q, max_t_kv, bias_b, bias_h, bias_sq,
+        bias_skv, attn_scale, p_dropout, qkv_layout, o_format, do_format, dqkv_layout, bias_type,
+        mask_type, softmax_type, window_size_left, window_size_right, bottom_right_diagonal,
+        deterministic, /*devPtrQ=*/nullptr, /*devPtrKTranspose=*/nullptr,
+        /*devPtrVTranspose=*/nullptr, /*devPtrO=*/nullptr, /*devPtrSoftmaxStats=*/nullptr,
+        /*devPtrBias=*/nullptr, /*devPtrSoftmaxOffset=*/nullptr, /*devPtrdQ=*/nullptr,
+        /*devPtrdK=*/nullptr, /*devPtrdV=*/nullptr, /*devPtrdO=*/nullptr,
+        /*devPtrdBias=*/nullptr, /*devPtrdSoftmaxOffset=*/nullptr,
+        /*devPtrDropoutSeed=*/nullptr, /*devPtrDropoutOffset=*/nullptr,
+        /*devPtrCuSeqlensQ=*/nullptr, /*devPtrCuSeqlensKV=*/nullptr,
+        /*devPtrSeqOffsetsQ=*/nullptr, /*devPtrSeqOffsetsKV=*/nullptr,
+        get_cudnn_fe_dtype(qkv_dtype),
+        /*workspace=*/nullptr, &workspace_size,
+        /*stream=*/static_cast<cudaStream_t>(0), handle);
+    return "";
+  } catch (const std::exception &e) {
+    return e.what();
+  } catch (...) {
+    return "is_supported_f16_bwd: unknown failure.";
+  }
+}
+
 }  // namespace transformer_engine

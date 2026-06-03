@@ -444,8 +444,9 @@ class FusedAttnRunner:
                 "is either BSHD_BSHD_BSHD or THD_THD_THD"
             )
 
-        self.backend = FusedAttnHelper(
+        self.backend, message = FusedAttnHelper(
             self.is_training,
+            self.batch_size,
             self.dtype,
             self.dtype,
             self.qkv_layout,
@@ -460,9 +461,10 @@ class FusedAttnRunner:
             self.head_dim_qk,
             self.head_dim_v,
             (-1, -1) if self.window_size is None else self.window_size,
+            self.attn_mask_type.is_bottom_right(),
         ).get_fused_attn_backend()
         if self.backend != NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
-            pytest.skip("Unsupported inputs combination or device compute capability.")
+            pytest.skip(message)
 
         if (
             self.attn_bias_type == AttnBiasType.POST_SCALE_BIAS

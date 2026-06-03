@@ -748,6 +748,8 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         enable_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "1"))
 
         sequence_dim = 0 if self.transpose_batch_sequence else 1
+        batch_dim = 1 - sequence_dim
+        batch_size = query.shape[batch_dim]
         seqlen_q = query.shape[sequence_dim]
         if qkv_layout == QKVLayout.BS3HD:
             seqlen_kv = seqlen_q
@@ -760,9 +762,10 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             head_dim_qk = self.head_dim
             head_dim_v = self.head_dim
 
-        has_fused_attn_kernel = is_fused_attn_kernel_available(
+        has_fused_attn_kernel, fused_attn_reject_reason = is_fused_attn_kernel_available(
             # This needs to be fixed: TE-Jax has historically correlated training mode with deterministic mode.
             not deterministic,
+            batch_size,
             input_dtype,
             # self._assert_dtypes enforces Q, K, V, bias to have the same dtype so using input_dtype as kv dtype is sufficient
             input_dtype,
@@ -778,18 +781,17 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             head_dim_qk,
             head_dim_v,
             self.window_size,
+            return_reason=True,
         )
 
         use_fused_attn = enable_fused_attn and has_fused_attn_kernel
 
         if enable_fused_attn and not has_fused_attn_kernel:
+            reason = fused_attn_reject_reason or "(no diagnostic message available)"
             warnings.warn(
-                "Fused attention is not enabled because there is no available kernel.\n"
-                "Fall back to the unfused attention.\n"
-                "Please try to update the cuDNN and TE to the latest version.\n"
-                f"{qkv_layout=}\n{attn_bias_type=}\n{attn_mask_type=}\n"
-                f"{self.attention_dropout=}\n{self.num_attention_heads=}\n{self.window_size=}\n"
-                f"{self.num_gqa_groups=}\n{seqlen_q=}\n{seqlen_kv=}\n{head_dim_qk=}\n{head_dim_v=}\n"
+                "Falling back to the unfused attention backend as fused attention does not"
+                f" support:\n{qkv_layout=}\n{attn_bias_type=}\n{attn_mask_type=}\n{self.attention_dropout=}\n{self.num_attention_heads=}\n{self.window_size=}\n{self.num_gqa_groups=}\n{seqlen_q=}\n{seqlen_kv=}\n{head_dim_qk=}\n{head_dim_v=}\nReason"
+                f" for this rejection: {reason}\n"
             )
 
         dropout_rng = None

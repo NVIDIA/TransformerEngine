@@ -23,6 +23,7 @@ import transformer_engine_torch as tex
 import transformer_engine as te
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     QKVLayout,
+    QKVFormat,
     AttnBiasType,
     AttnMaskType,
     SoftmaxType,
@@ -259,6 +260,9 @@ class AttentionParams:
         Whether support for cuda graph capture is needed or not.
     num_splits : int, default = 1
         The number of kernels to split attention to.
+    softmax_scale : float, default = 1.0
+        Pre-softmax attention scale. Plumbed through to the cuDNN graph cache key so that the
+        backend probe builds the same execution graph the runtime call later reuses.
     """
 
     qkv_type: Union[torch.Tensor, Float8Tensor] = torch.Tensor
@@ -292,6 +296,7 @@ class AttentionParams:
     return_max_logit: bool = False
     cuda_graph: bool = False
     num_splits: int = 1
+    softmax_scale: float = 1.0
 
     def __eq__(self, other):
         """
@@ -370,6 +375,7 @@ def get_attention_backend(
     return_max_logit = attention_params.return_max_logit
     cuda_graph = attention_params.cuda_graph
     num_splits = attention_params.num_splits
+    softmax_scale = attention_params.softmax_scale
 
     # Run config
     logger = logging.getLogger("DotProductAttention")
@@ -1262,17 +1268,56 @@ def get_attention_backend(
     if use_fused_attention:
         q_type = TE_DType[qkv_dtype]
         kv_type = q_type
+        o_type = q_type
+        do_type = q_type
+        dqkv_type = q_type
+        scaling_mode = tex.NVTEScalingMode.NVTE_INVALID_SCALING
+        qkv_scale_inv_format = None
+        do_scale_inv_format = None
         if fp8 and fp8_meta["recipe"].fp8_dpa:
-            q_type = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
+            recipe = fp8_meta["recipe"]
+            q_type = get_fp8_te_dtype(recipe, fprop_tensor=True)
             kv_type = q_type
-        fused_attention_backend = tex.get_fused_attn_backend(
+            cs_o_in_f16 = os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1") == "1"
+            if recipe.mxfp8():
+                scaling_mode = tex.NVTEScalingMode.NVTE_MXFP8_1D_SCALING
+                o_type = TE_DType[torch.bfloat16]
+                do_type = TE_DType[torch.bfloat16]
+                dqkv_type = TE_DType[torch.bfloat16]
+                qkv_scale_inv_format = "bhsd"
+                do_scale_inv_format = "bhsd"
+            elif recipe.float8_current_scaling() and cs_o_in_f16:
+                scaling_mode = tex.NVTEScalingMode.NVTE_DELAYED_TENSOR_SCALING
+                o_type = TE_DType[torch.bfloat16]
+                do_type = TE_DType[torch.bfloat16]
+                dqkv_type = TE_DType[torch.bfloat16]
+            else:
+                scaling_mode = tex.NVTEScalingMode.NVTE_DELAYED_TENSOR_SCALING
+                o_type = q_type
+                do_type = o_type
+                dqkv_type = q_type
+        o_format = q_format
+        do_format = o_format
+        dqkv_layout = qkv_layout
+        fused_attention_backend, reject_message = tex.get_fused_attn_backend(
             is_training,
+            batch_size,
             q_type,
             kv_type,
+            o_type,
+            do_type,
+            dqkv_type,
+            scaling_mode,
             QKVLayout[qkv_layout],
+            QKVFormat[o_format],
+            QKVFormat[do_format],
+            QKVLayout[dqkv_layout],
+            QKVFormat[qkv_scale_inv_format],
+            QKVFormat[do_scale_inv_format],
             AttnBiasType[fu_core_attention_bias_type],
             AttnMaskType[attn_mask_type],
             SoftmaxType[softmax_type],
+            softmax_scale,
             attention_dropout,
             num_heads,
             num_gqa_groups,
@@ -1282,12 +1327,16 @@ def get_attention_backend(
             head_dim_v,
             window_size[0],
             window_size[1],
+            bottom_right_diagonal,
             return_max_logit,
             cuda_graph,
             deterministic,
         )
         if fused_attention_backend == FusedAttnBackend["No_Backend"]:
-            logger.debug("Disabling FusedAttention as no backend supports the provided input")
+            logger.debug(
+                "Disabling FusedAttention: %s",
+                reject_message,
+            )
             use_fused_attention = False
             fused_attention_backend = None
     # Filter: Determinism

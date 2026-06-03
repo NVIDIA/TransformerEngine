@@ -1324,4 +1324,123 @@ void fused_attn_fp8_bwd(
     return;
   }
 }
+
+std::string is_supported_fp8_fwd(const NVTEFusedAttnConfig* cfg, cudnnHandle_t handle) {
+  const size_t batch = cfg->batch_size;
+  const size_t num_attn_heads = cfg->num_attn_heads;
+  const size_t num_gqa_groups = cfg->num_gqa_groups;
+  const size_t max_seqlen_q = cfg->max_seqlen_q;
+  const size_t max_seqlen_kv = cfg->max_seqlen_kv;
+  const size_t head_dim_qk = cfg->head_dim_qk;
+  const size_t head_dim_v = cfg->head_dim_v;
+  const bool is_training = cfg->is_training;
+  const float attn_scale = cfg->attn_scale;
+  const float p_dropout = cfg->dropout;
+  const NVTE_QKV_Layout qkv_layout = cfg->qkv_layout;
+  const NVTE_QKV_Format o_format = cfg->o_format;
+  const NVTE_QKV_Format qkv_scale_inv_format = cfg->qkv_scale_inv_format;
+  const NVTE_Bias_Type bias_type = cfg->bias_type;
+  const NVTE_Mask_Type mask_type = cfg->attn_mask_type;
+  const NVTE_Softmax_Type softmax_type = cfg->softmax_type;
+  const int64_t window_size_left = cfg->window_size_left;
+  const int64_t window_size_right = cfg->window_size_right;
+  const bool bottom_right_diagonal = cfg->bottom_right_diagonal;
+  const DType qkv_dtype = static_cast<DType>(cfg->qkv_dtype);
+  const DType o_dtype = static_cast<DType>(cfg->o_dtype);
+  const NVTEScalingMode scaling_mode = cfg->scaling_mode;
+
+  size_t workspace_size = 0;
+  try {
+    fused_attn::fused_attn_fp8_fwd_impl(
+        static_cast<int64_t>(batch), static_cast<int64_t>(num_attn_heads),
+        static_cast<int64_t>(num_gqa_groups), static_cast<int64_t>(max_seqlen_q),
+        static_cast<int64_t>(max_seqlen_kv), static_cast<int64_t>(head_dim_qk),
+        static_cast<int64_t>(head_dim_v), is_training, attn_scale, p_dropout, qkv_layout, o_format,
+        bias_type, mask_type, softmax_type, window_size_left, window_size_right,
+        bottom_right_diagonal,
+        /*devPtrQ=*/nullptr, /*devPtrK=*/nullptr, /*devPtrV=*/nullptr,
+        /*devPtrSoftmaxOffset=*/nullptr, /*devPtrM=*/nullptr, /*devPtrO=*/nullptr,
+        /*devPtrDescaleQ=*/nullptr, /*devPtrDescaleK=*/nullptr, /*devPtrDescaleV=*/nullptr,
+        /*devPtrDescaleS=*/nullptr, /*devPtrScaleS=*/nullptr, /*devPtrScaleO=*/nullptr,
+        /*devPtrAmaxO=*/nullptr, /*devPtrAmaxS=*/nullptr, /*devPtrcuSeqlensQ=*/nullptr,
+        /*devPtrcuSeqlensKV=*/nullptr, /*devPtrDropoutSeed=*/nullptr,
+        /*devPtrDropoutOffset=*/nullptr, get_cudnn_fe_dtype(qkv_dtype), get_cudnn_fe_dtype(o_dtype),
+        scaling_mode, qkv_scale_inv_format,
+        /*workspace=*/nullptr, &workspace_size,
+        /*stream=*/static_cast<cudaStream_t>(0), handle);
+    return "";
+  } catch (const std::exception& e) {
+    return e.what();
+  } catch (...) {
+    return "is_supported_fp8_fwd: unknown failure.";
+  }
+}
+
+std::string is_supported_fp8_bwd(const NVTEFusedAttnConfig* cfg, cudnnHandle_t handle) {
+  const size_t batch = cfg->batch_size;
+  const size_t num_attn_heads = cfg->num_attn_heads;
+  const size_t num_gqa_groups = cfg->num_gqa_groups;
+  const size_t max_seqlen_q = cfg->max_seqlen_q;
+  const size_t max_seqlen_kv = cfg->max_seqlen_kv;
+  const size_t head_dim_qk = cfg->head_dim_qk;
+  const size_t head_dim_v = cfg->head_dim_v;
+  const float attn_scale = cfg->attn_scale;
+  const float p_dropout = cfg->dropout;
+  const NVTE_QKV_Layout qkv_layout = cfg->qkv_layout;
+  const NVTE_QKV_Format o_format = cfg->o_format;
+  const NVTE_QKV_Format do_format = cfg->do_format;
+  const NVTE_QKV_Layout dqkv_layout = cfg->dqkv_layout;
+  const NVTE_QKV_Format qkv_scale_inv_format = cfg->qkv_scale_inv_format;
+  const NVTE_QKV_Format do_scale_inv_format = cfg->do_scale_inv_format;
+  const NVTE_Bias_Type bias_type = cfg->bias_type;
+  const NVTE_Mask_Type mask_type = cfg->attn_mask_type;
+  const NVTE_Softmax_Type softmax_type = cfg->softmax_type;
+  const int64_t window_size_left = cfg->window_size_left;
+  const int64_t window_size_right = cfg->window_size_right;
+  const bool bottom_right_diagonal = cfg->bottom_right_diagonal;
+  const bool deterministic = cfg->deterministic;
+  const DType qkv_dtype = static_cast<DType>(cfg->qkv_dtype);
+  const DType o_dtype = static_cast<DType>(cfg->o_dtype);
+  const DType do_dtype = static_cast<DType>(cfg->do_dtype);
+  const DType dqkv_dtype = static_cast<DType>(cfg->dqkv_dtype);
+  const NVTEScalingMode scaling_mode = cfg->scaling_mode;
+
+  const cudnn_frontend::DataType_t qkv_t = get_cudnn_fe_dtype(qkv_dtype);
+  const cudnn_frontend::DataType_t o_t = get_cudnn_fe_dtype(o_dtype);
+  const cudnn_frontend::DataType_t do_t = get_cudnn_fe_dtype(do_dtype);
+  const cudnn_frontend::DataType_t dqkv_t = get_cudnn_fe_dtype(dqkv_dtype);
+  size_t workspace_size = 0;
+  try {
+    fused_attn::fused_attn_fp8_bwd_impl(
+        static_cast<int64_t>(batch), static_cast<int64_t>(num_attn_heads),
+        static_cast<int64_t>(num_gqa_groups), static_cast<int64_t>(max_seqlen_q),
+        static_cast<int64_t>(max_seqlen_kv), static_cast<int64_t>(head_dim_qk),
+        static_cast<int64_t>(head_dim_v), attn_scale, p_dropout, qkv_layout, o_format, do_format,
+        dqkv_layout, bias_type, mask_type, softmax_type, window_size_left, window_size_right,
+        bottom_right_diagonal, deterministic,
+        /*devPtrQ=*/nullptr, /*devPtrK=*/nullptr, /*devPtrV=*/nullptr, /*devPtrM=*/nullptr,
+        /*devPtrO=*/nullptr, /*devPtrdO=*/nullptr, /*devPtrSoftmaxOffset=*/nullptr,
+        /*devPtrdQ=*/nullptr, /*devPtrdK=*/nullptr, /*devPtrdV=*/nullptr,
+        /*devPtrdSoftmaxOffset=*/nullptr, /*devPtrDescaleQ=*/nullptr,
+        /*devPtrDescaleK=*/nullptr, /*devPtrDescaleV=*/nullptr, /*devPtrDescaleO=*/nullptr,
+        /*devPtrDescaledO=*/nullptr, /*devPtrDescaleS=*/nullptr, /*devPtrDescaledP=*/nullptr,
+        /*devPtrScaleS=*/nullptr, /*devPtrScaledP=*/nullptr, /*devPtrScaledQ=*/nullptr,
+        /*devPtrScaledK=*/nullptr, /*devPtrScaledV=*/nullptr, /*devPtrAmaxdP=*/nullptr,
+        /*devPtrAmaxdQ=*/nullptr, /*devPtrAmaxdK=*/nullptr, /*devPtrAmaxdV=*/nullptr,
+        /*devPtrQ_t=*/nullptr, /*devPtrK_t=*/nullptr, /*devPtrdO_f16=*/nullptr,
+        /*devPtrdO_t=*/nullptr, /*devPtrDescaleQ_t=*/nullptr, /*devPtrDescaleK_t=*/nullptr,
+        /*devPtrDescaledO_t=*/nullptr, /*devPtrcuSeqlensQ=*/nullptr,
+        /*devPtrcuSeqlensKV=*/nullptr, /*devPtrDropoutSeed=*/nullptr,
+        /*devPtrDropoutOffset=*/nullptr, qkv_t, o_t, do_t, dqkv_t, scaling_mode,
+        qkv_scale_inv_format, do_scale_inv_format,
+        /*workspace=*/nullptr, &workspace_size,
+        /*stream=*/static_cast<cudaStream_t>(0), handle);
+    return "";
+  } catch (const std::exception& e) {
+    return e.what();
+  } catch (...) {
+    return "is_supported_fp8_bwd: unknown failure.";
+  }
+}
+
 }  // namespace transformer_engine
