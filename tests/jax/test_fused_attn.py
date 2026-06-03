@@ -1705,6 +1705,22 @@ class TestFusedAttn:
             QKVLayout.BSHD_BS2HD,
             id="4-128-128-16-16-256-256-FP16-SELF-KV_PACKED",
         ),
+        pytest.param(
+            4,
+            128,
+            128,
+            16,
+            16,
+            256,
+            256,
+            jnp.float16,
+            QKVLayout.THD_T2HD,
+            id="4-128-128-16-16-256-256-FP16-SELF-RAGGED_KV_PACKED",
+            marks=pytest.mark.xfail(
+                reason="cuDNN 9.23 D=256 BWD currently does not build a THD execution plan.",
+                strict=True,
+            ),
+        ),
     ],
 )
 @pytest.mark.parametrize(
