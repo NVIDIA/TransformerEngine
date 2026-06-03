@@ -343,6 +343,32 @@ def customcall_fused_dpa(
     ).astype(query.dtype)
 
 
+def test_fused_attn_score_mod_rejects_masks_before_cudnn_frontend():
+    """fused_attn rejects score_mod with masks before cuDNN frontend graph building."""
+    q = jax.ShapeDtypeStruct((1, 16, 1, 128), jnp.float16)
+    k = jax.ShapeDtypeStruct((1, 16, 1, 128), jnp.float16)
+    v = jax.ShapeDtypeStruct((1, 16, 1, 128), jnp.float16)
+
+    def score_mod(_graph, score, _tensors):
+        return score
+
+    with pytest.raises(ValueError, match="mutually exclusive with attention masks"):
+        fused_attn(
+            (q, k, v),
+            None,
+            None,
+            None,
+            AttnBiasType.NO_BIAS,
+            AttnMaskType.CAUSAL_MASK,
+            QKVLayout.BSHD_BSHD_BSHD,
+            AttnSoftmaxType.VANILLA_SOFTMAX,
+            1.0,
+            0.0,
+            True,
+            score_mod=score_mod,
+        )
+
+
 class BiasShape(Enum):
     """
     Enum class to represent the different bias shapes used in the fused attention.

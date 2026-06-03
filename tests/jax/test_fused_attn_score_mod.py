@@ -15,7 +15,6 @@ from transformer_engine.jax.attention import (
     AttnMaskType,
     AttnSoftmaxType,
     QKVLayout,
-    fused_attn,
 )
 from transformer_engine.jax.cpp_extensions import make_fused_attn_score_mod_config
 from transformer_engine.jax.flax import transformer as flax_transformer
@@ -183,7 +182,7 @@ class ScoreModFusedAttnRunner(FusedAttnRunner):
     """FusedAttnRunner configured for score_mod tests."""
 
     @classmethod
-    def softcap(
+    def generic(
         cls,
         batch,
         seqlen,
@@ -191,15 +190,20 @@ class ScoreModFusedAttnRunner(FusedAttnRunner):
         head_dim,
         dtype,
         *,
+        score_mod,
+        score_mod_reference,
+        score_mod_bprop=None,
+        score_mod_tensors=None,
+        score_mod_bprop_tensors=None,
+        doutput_seed=None,
+        rtol=5e-2,
+        atol=5e-2,
         number_of_devices=1,
         mesh_shape=(1, 1, 1),
         mesh_axes=("dp", "cp", "tp"),
         mesh_resource=None,
     ):
-        """Build a runner for softcap score modification with explicit bprop."""
-        softcap = 0.8
-        softcap_score_mod = _ScoreModSoftcap()
-        # Keep tanh(score / softcap) away from saturation for stable fp16/bf16 comparisons.
+        """Build a runner for a separate-Q/K/V score_mod fused-attention case."""
         input_scale = 1.0 / sqrt(head_dim)
         kwargs = {}
         if mesh_resource is not None:
@@ -226,16 +230,53 @@ class ScoreModFusedAttnRunner(FusedAttnRunner):
             mesh_shape=mesh_shape,
             mesh_axes=mesh_axes,
             cp_load_balanced=False,
+            score_mod=score_mod,
+            score_mod_bprop=score_mod_bprop,
+            score_mod_tensors=score_mod_tensors,
+            score_mod_bprop_tensors=score_mod_bprop_tensors,
+            score_mod_reference=score_mod_reference,
+            input_scale=input_scale,
+            doutput_seed=doutput_seed,
+            rtol=rtol,
+            atol=atol,
+            **kwargs,
+        )
+
+    @classmethod
+    def softcap(
+        cls,
+        batch,
+        seqlen,
+        num_heads,
+        head_dim,
+        dtype,
+        *,
+        number_of_devices=1,
+        mesh_shape=(1, 1, 1),
+        mesh_axes=("dp", "cp", "tp"),
+        mesh_resource=None,
+    ):
+        """Build a runner for softcap score modification with explicit bprop."""
+        softcap = 0.8
+        softcap_score_mod = _ScoreModSoftcap()
+        return cls.generic(
+            batch,
+            seqlen,
+            num_heads,
+            head_dim,
+            dtype,
+            number_of_devices=number_of_devices,
+            mesh_shape=mesh_shape,
+            mesh_axes=mesh_axes,
+            mesh_resource=mesh_resource,
             score_mod=softcap_score_mod.forward,
             score_mod_bprop=softcap_score_mod.backward,
             score_mod_tensors={"softcap": softcap},
             score_mod_bprop_tensors={"softcap": softcap},
             score_mod_reference=_reference_score_mod_softcap(softcap),
-            input_scale=input_scale,
             doutput_seed=2025,
             rtol=7e-2,
             atol=7e-2,
-            **kwargs,
         )
 
     @classmethod
@@ -253,38 +294,20 @@ class ScoreModFusedAttnRunner(FusedAttnRunner):
         mesh_resource=None,
     ):
         """Build a runner for post-scale-bias score modification without explicit bprop."""
-        input_scale = 1.0 / sqrt(head_dim)
-        kwargs = {}
-        if mesh_resource is not None:
-            kwargs["mesh_resource"] = mesh_resource
-        return cls(
+        return cls.generic(
             batch,
             seqlen,
-            seqlen,
-            num_heads,
             num_heads,
             head_dim,
-            head_dim,
-            AttnBiasType.NO_BIAS,
-            AttnMaskType.NO_MASK,
-            AttnSoftmaxType.VANILLA_SOFTMAX,
-            0.0,
             dtype,
-            True,
-            QKVLayout.BSHD_BSHD_BSHD,
-            None,
-            None,
-            SeqDescFormat.Mask,
             number_of_devices=number_of_devices,
             mesh_shape=mesh_shape,
             mesh_axes=mesh_axes,
-            cp_load_balanced=False,
+            mesh_resource=mesh_resource,
             score_mod=_score_mod_post_scale_bias,
             score_mod_reference=_reference_score_mod_post_scale_bias,
-            input_scale=input_scale,
             rtol=5e-2,
             atol=5e-2,
-            **kwargs,
         )
 
     @classmethod
@@ -302,41 +325,23 @@ class ScoreModFusedAttnRunner(FusedAttnRunner):
         mesh_resource=None,
     ):
         """Build a runner for causal score modification with explicit bprop."""
-        input_scale = 1.0 / sqrt(head_dim)
-        kwargs = {}
-        if mesh_resource is not None:
-            kwargs["mesh_resource"] = mesh_resource
-        return cls(
+        return cls.generic(
             batch,
             seqlen,
-            seqlen,
-            num_heads,
             num_heads,
             head_dim,
-            head_dim,
-            AttnBiasType.NO_BIAS,
-            AttnMaskType.NO_MASK,
-            AttnSoftmaxType.VANILLA_SOFTMAX,
-            0.0,
             dtype,
-            True,
-            QKVLayout.BSHD_BSHD_BSHD,
-            None,
-            None,
-            SeqDescFormat.Mask,
             number_of_devices=number_of_devices,
             mesh_shape=mesh_shape,
             mesh_axes=mesh_axes,
-            cp_load_balanced=False,
+            mesh_resource=mesh_resource,
             score_mod=_score_mod_causal,
             score_mod_bprop=_score_mod_causal_bprop,
             score_mod_tensors={"neg_inf": -1e9},
             score_mod_bprop_tensors={"zero": 0.0},
             score_mod_reference=_reference_score_mod_causal,
-            input_scale=input_scale,
             rtol=5e-2,
             atol=5e-2,
-            **kwargs,
         )
 
 
@@ -592,29 +597,6 @@ def test_multi_head_attention_plumbs_score_mod_to_dot_product_attention(monkeypa
     assert captured["qkv_layout"] is QKVLayout.BSHD_BSHD_BSHD
     assert captured["score_mod"] is _identity_score_mod
     assert captured["score_mod_tensors"]["aux"].shape == aux.shape
-
-
-def test_fused_attn_score_mod_validation_rejects_masks_without_cudnn_frontend():
-    """fused_attn rejects score_mod with masks before cuDNN frontend graph building."""
-    q = jax.ShapeDtypeStruct((1, 16, 1, 128), jnp.float16)
-    k = jax.ShapeDtypeStruct((1, 16, 1, 128), jnp.float16)
-    v = jax.ShapeDtypeStruct((1, 16, 1, 128), jnp.float16)
-
-    with pytest.raises(ValueError, match="mutually exclusive with attention masks"):
-        fused_attn(
-            (q, k, v),
-            None,
-            None,
-            None,
-            AttnBiasType.NO_BIAS,
-            AttnMaskType.CAUSAL_MASK,
-            QKVLayout.BSHD_BSHD_BSHD,
-            AttnSoftmaxType.VANILLA_SOFTMAX,
-            1.0,
-            0.0,
-            True,
-            score_mod=_identity_score_mod,
-        )
 
 
 def test_fused_attn_score_mod_config_splits_tensors_and_pass_by_value_scalars():
