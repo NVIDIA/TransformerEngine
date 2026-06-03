@@ -25,6 +25,12 @@ namespace {
 // Strings with headers for RTC kernels
 #include "string_code_util_math_h.h"
 #include "string_code_utils_cuh.h"
+#include "string_code_normalization_kernel_params_h.h"
+#include "string_code_normalization_kernel_traits_h.h"
+#include "string_code_normalization_layernorm_ln_fwd_kernels_cuh.h"
+#include "string_code_normalization_layernorm_ln_bwd_kernels_cuh.h"
+#include "string_code_normalization_rmsnorm_rmsnorm_fwd_kernels_cuh.h"
+#include "string_code_normalization_rmsnorm_rmsnorm_bwd_kernels_cuh.h"
 
 /*! \brief Latest compute capability that NVRTC supports
  *
@@ -132,6 +138,18 @@ void Kernel::set_function_cache_config(int device_id, CUfunc_cache cache_config)
   NVTE_CALL_CHECK_CUDA_DRIVER(cuFuncSetCacheConfig, get_function(device_id), cache_config);
 }
 
+void Kernel::set_function_attribute(int device_id, CUfunction_attribute attr, int value) {
+  NVTE_CALL_CHECK_CUDA_DRIVER(cuFuncSetAttribute, get_function(device_id), attr, value);
+}
+
+int Kernel::occupancy_max_active_blocks_per_sm(int device_id, int block_size,
+                                               std::size_t dynamic_smem_bytes) {
+  int num_blocks = 0;
+  NVTE_CALL_CHECK_CUDA_DRIVER(cuOccupancyMaxActiveBlocksPerMultiprocessor, &num_blocks,
+                              get_function(device_id), block_size, dynamic_smem_bytes);
+  return num_blocks;
+}
+
 KernelManager& KernelManager::instance() {
   NVTE_CHECK(is_enabled(), "NVRTC support is not enabled");
   static KernelManager instance_;
@@ -139,7 +157,8 @@ KernelManager& KernelManager::instance() {
 }
 
 void KernelManager::compile(const std::string& kernel_label, const std::string& kernel_name,
-                            const std::string& code, const std::string& filename) {
+                            const std::string& code, const std::string& filename,
+                            const std::vector<std::string>& extra_options) {
   std::lock_guard<std::mutex> lock_guard_(lock_);
 
   // Choose whether to compile to PTX or cubin
@@ -160,6 +179,7 @@ void KernelManager::compile(const std::string& kernel_label, const std::string& 
     opts.push_back(concat_strings("--gpu-architecture=sm_", compile_sm_arch));
   }
   opts.push_back(concat_strings("-I", cuda::include_directory(true)));
+  opts.insert(opts.end(), extra_options.begin(), extra_options.end());
   std::vector<const char*> opts_ptrs;
   for (const auto& opt : opts) {
     opts_ptrs.push_back(opt.c_str());
@@ -167,9 +187,27 @@ void KernelManager::compile(const std::string& kernel_label, const std::string& 
 
   // Compile source
   nvrtcProgram program;
-  constexpr int num_headers = 2;
-  constexpr const char* headers[num_headers] = {string_code_utils_cuh, string_code_util_math_h};
-  constexpr const char* include_names[num_headers] = {"utils.cuh", "util/math.h"};
+  constexpr int num_headers = 8;
+  constexpr const char* headers[num_headers] = {
+      string_code_utils_cuh,
+      string_code_util_math_h,
+      string_code_normalization_kernel_params_h,
+      string_code_normalization_kernel_traits_h,
+      string_code_normalization_layernorm_ln_fwd_kernels_cuh,
+      string_code_normalization_layernorm_ln_bwd_kernels_cuh,
+      string_code_normalization_rmsnorm_rmsnorm_fwd_kernels_cuh,
+      string_code_normalization_rmsnorm_rmsnorm_bwd_kernels_cuh,
+  };
+  constexpr const char* include_names[num_headers] = {
+      "utils.cuh",
+      "util/math.h",
+      "kernel_params.h",
+      "kernel_traits.h",
+      "ln_fwd_kernels.cuh",
+      "ln_bwd_kernels.cuh",
+      "rmsnorm_fwd_kernels.cuh",
+      "rmsnorm_bwd_kernels.cuh",
+  };
   NVTE_CHECK_NVRTC(nvrtcCreateProgram(&program, code.c_str(), filename.c_str(), num_headers,
                                       headers, include_names));
   NVTE_CHECK_NVRTC(nvrtcAddNameExpression(program, kernel_name.c_str()));
@@ -252,6 +290,24 @@ void KernelManager::set_cache_config(const std::string& kernel_label, CUfunc_cac
   const auto key = get_kernel_cache_key(kernel_label, device_id);
   NVTE_CHECK(kernel_cache_.count(key) > 0, "Attempted to configure RTC kernel before compilation");
   kernel_cache_.at(key).set_function_cache_config(device_id, cache_config);
+}
+
+void KernelManager::set_function_attribute(const std::string& kernel_label,
+                                           CUfunction_attribute attr, int value) {
+  const int device_id = cuda::current_device();
+  const auto key = get_kernel_cache_key(kernel_label, device_id);
+  NVTE_CHECK(kernel_cache_.count(key) > 0, "Attempted to configure RTC kernel before compilation");
+  kernel_cache_.at(key).set_function_attribute(device_id, attr, value);
+}
+
+int KernelManager::occupancy_max_active_blocks_per_sm(const std::string& kernel_label,
+                                                     int block_size,
+                                                     std::size_t dynamic_smem_bytes) {
+  const int device_id = cuda::current_device();
+  const auto key = get_kernel_cache_key(kernel_label, device_id);
+  NVTE_CHECK(kernel_cache_.count(key) > 0, "Attempted to query occupancy before compilation");
+  return kernel_cache_.at(key).occupancy_max_active_blocks_per_sm(device_id, block_size,
+                                                                  dynamic_smem_bytes);
 }
 
 bool KernelManager::is_compiled(const std::string& kernel_label, int device_id) const {

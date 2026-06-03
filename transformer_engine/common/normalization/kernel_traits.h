@@ -7,11 +7,28 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_NORM_KERNEL_TRAITS_H_
 #define TRANSFORMER_ENGINE_COMMON_NORM_KERNEL_TRAITS_H_
 
+#ifdef __CUDACC_RTC__
+#include "utils.cuh"
+#else
 #include "../common.h"
 #include "../utils.cuh"
+#endif
 
 namespace transformer_engine {
 namespace normalization {
+
+#ifdef __CUDACC_RTC__
+// Under NVRTC the kernel sources do not include common.h (it pulls in cuDNN and
+// other host-only headers), so the dtype aliases that the RTC name expressions
+// reference -- e.g. ::transformer_engine::normalization::fp16 -- are not
+// otherwise visible. Mirror the definitions from common.h here for the RTC TU.
+// The underlying CUDA types come from utils.cuh (cuda_fp16/bf16/fp8 headers).
+using fp32 = float;
+using fp16 = half;
+using bf16 = nv_bfloat16;
+using fp8e4m3 = __nv_fp8_e4m3;
+using fp8e5m2 = __nv_fp8_e5m2;
+#endif  // __CUDACC_RTC__
 
 template <uint32_t HIDDEN_SIZE_, typename weight_t_, typename input_t_, typename output_t_,
           typename compute_t_, typename index_t_, uint32_t THREADS_PER_CTA_>

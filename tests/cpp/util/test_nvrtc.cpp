@@ -39,6 +39,15 @@ __global__ void my_kernel(uint32_t *data) {
   data[1] = 12;
 }
 )code";
+  const char code3[] = R"code(
+#ifndef NVTE_GTEST_RTC_VALUE
+#error "NVTE_GTEST_RTC_VALUE must be provided"
+#endif
+__global__ void my_kernel(int *data) {
+  data[0] = NVTE_GTEST_RTC_VALUE;
+  data[1] = 34;
+}
+)code";
 
   // Make sure kernels are not available
   auto& nvrtc_manager = rtc::KernelManager::instance();
@@ -79,4 +88,18 @@ __global__ void my_kernel(uint32_t *data) {
             cudaSuccess);
   EXPECT_EQ(host_buffer[0], 789);
   EXPECT_EQ(host_buffer[1], 12);
+
+  // Compile and run kernel with extra compile options
+  EXPECT_NO_THROW(nvrtc_manager.compile("my gtest kernel3",
+                                        "my_kernel",
+                                        code3,
+                                        "test_nvrtc_kernel3.cu",
+                                        {"-DNVTE_GTEST_RTC_VALUE=56"}));
+  EXPECT_TRUE(nvrtc_manager.is_compiled("my gtest kernel3"));
+  EXPECT_NO_THROW(nvrtc_manager.launch("my gtest kernel3", 1, 1, 0, 0, device_buffer));
+  EXPECT_EQ(cudaMemcpy(host_buffer.data(), device_buffer, 2*sizeof(int),
+                       cudaMemcpyDeviceToHost),
+            cudaSuccess);
+  EXPECT_EQ(host_buffer[0], 56);
+  EXPECT_EQ(host_buffer[1], 34);
 }

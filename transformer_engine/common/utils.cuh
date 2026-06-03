@@ -28,6 +28,29 @@ static_assert(sizeof(uint8_t) == 1);
 static_assert(sizeof(uint16_t) == 2);
 static_assert(sizeof(uint32_t) == 4);
 static_assert(sizeof(uint64_t) == 8);
+// Minimal subset of <type_traits> used by the kernel headers. The full header
+// is not reliably available under NVRTC, so define just what the norm/transpose
+// device code references (std::is_same, std::conditional[_t]).
+namespace std {
+template <class T, class U>
+struct is_same {
+  static constexpr bool value = false;
+};
+template <class T>
+struct is_same<T, T> {
+  static constexpr bool value = true;
+};
+template <bool B, class T, class F>
+struct conditional {
+  using type = T;
+};
+template <class T, class F>
+struct conditional<false, T, F> {
+  using type = F;
+};
+template <bool B, class T, class F>
+using conditional_t = typename conditional<B, T, F>::type;
+}  // namespace std
 #endif
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

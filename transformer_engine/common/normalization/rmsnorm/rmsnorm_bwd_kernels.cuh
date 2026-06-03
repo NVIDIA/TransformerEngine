@@ -7,10 +7,17 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_RMSNORM_RMSNORM_BWD_KERNELS_CUH_
 #define TRANSFORMER_ENGINE_COMMON_RMSNORM_RMSNORM_BWD_KERNELS_CUH_
 
+#ifndef __CUDACC_RTC__
 #include <type_traits>
+#endif
 
+#ifdef __CUDACC_RTC__
+#include "utils.cuh"
+#include "kernel_params.h"
+#else
 #include "../../utils.cuh"
 #include "../common.h"
+#endif
 
 namespace transformer_engine {
 namespace normalization {
@@ -20,14 +27,29 @@ struct maybe_not_t {};
 template <typename T, bool Enabled>
 using maybe_t = std::conditional_t<Enabled, T, maybe_not_t>;
 
-template <typename Ivec, typename Ovec, bool FusedAdd>
+// dx and add share storage; `add` is positioned at the tail of the `dx`
+// storage via leading padding. NeedsPadding is false when dx_t and add_t are
+// the same size (or add_t is larger), in which case the padding array would be
+// zero-length -- legal as a GNU extension under nvcc but rejected by NVRTC. The
+// no-padding specialization below covers that case so both compilers are happy
+// while keeping an identical layout.
+template <typename Ivec, typename Ovec, bool FusedAdd,
+          bool NeedsPadding = (sizeof(Ivec) > sizeof(maybe_t<Ovec, FusedAdd>))>
 union dx_add_t {
   using add_t = maybe_t<Ovec, FusedAdd>;
   using dx_t = Ivec;
   struct {
-    char _padding[sizeof(dx_t) > sizeof(add_t) ? sizeof(dx_t) - sizeof(add_t) : 0];
+    char _padding[sizeof(dx_t) - sizeof(add_t)];
     add_t add;
   };
+  dx_t dx;
+};
+
+template <typename Ivec, typename Ovec, bool FusedAdd>
+union dx_add_t<Ivec, Ovec, FusedAdd, false> {
+  using add_t = maybe_t<Ovec, FusedAdd>;
+  using dx_t = Ivec;
+  add_t add;
   dx_t dx;
 };
 

@@ -7,11 +7,18 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_RMSNORM_RMSNORM_FWD_KERNELS_CUH_
 #define TRANSFORMER_ENGINE_COMMON_RMSNORM_RMSNORM_FWD_KERNELS_CUH_
 
+#ifndef __CUDACC_RTC__
 #include <cfloat>
 #include <cstdio>
+#endif
 
+#ifdef __CUDACC_RTC__
+#include "utils.cuh"
+#include "kernel_params.h"
+#else
 #include "../../utils.cuh"
 #include "../common.h"
+#endif
 
 namespace transformer_engine {
 namespace normalization {

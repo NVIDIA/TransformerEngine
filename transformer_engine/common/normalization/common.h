@@ -24,6 +24,7 @@
 #include "../common.h"
 #include "../cudnn_utils.h"
 #include "../util/system.h"
+#include "kernel_params.h"
 
 namespace transformer_engine {
 
@@ -51,96 +52,9 @@ struct LaunchParams {
   }
 };
 
-struct KernelParamsBase {
-  KernelParamsBase()
-      : ctas_per_col(0),
-        rows(0),
-        cols(0),
-        x(nullptr),
-        mu(nullptr),
-        rs(nullptr),
-        gamma(nullptr),
-        workspace(nullptr),
-        barrier(nullptr),
-        zero_centered_gamma(false) {}
-
-  // For Multi-CTA, number of different CTA groups. Otherwise same as gridDim.x.
-  int ctas_per_col;
-  // Size of CTA group.
-  int ctas_per_row;
-
-  // Input is interpreted as matrix. We normalize across columns.
-  int rows;
-  int cols;
-
-  // Common data pointers.
-  void* x;
-  void* mu;
-  void* rs;
-  void* gamma;
-
-  // Multi-CTA workspace in gmem.
-  void* workspace;
-
-  // Multi-CTA sync barriers in gmem.
-  int* barrier;
-
-  // Whether gamma is centered around 0
-  bool zero_centered_gamma;
-};
-
-struct ForwardKernelParams : public KernelParamsBase {
-  ForwardKernelParams()
-      : KernelParamsBase(), z(nullptr), beta(nullptr), epsilon(0.f), fp8_out(false) {}
-
-  // Output of LN FWD.
-  void* z;
-  void* beta;
-  float epsilon;
-
-  // Scaling factor
-  void* scale;
-  int scale_byte_size;
-
-  // Inverse of scaling factor
-  void* scale_inv;
-
-  // AMax output
-  void* amax;
-  int amax_byte_size;
-
-  // Whether to compute scale and amax
-  bool fp8_out;
-};
-
-struct BackwardKernelParams : public KernelParamsBase {
-  BackwardKernelParams()
-      : KernelParamsBase(),
-        dz(nullptr),
-        dbeta_part(nullptr),
-        dgamma_part(nullptr),
-        dx(nullptr),
-        dbeta(nullptr),
-        dgamma(nullptr) {}
-
-  // Input: gradient wrt. LN FWD output.
-  void* dz;
-
-  // Input: extra tensor to add for fused backward+add
-  void* add;
-
-  // Workspace for Wgrad pre-reduction.
-  void* dbeta_part;
-  void* dgamma_part;
-
-  // Output: Dgrad.
-  void* dx;
-  // Output: Wgrad.
-  void* dbeta;
-  void* dgamma;
-};
-
-using BackwardAddKernelParams = BackwardKernelParams;
+// KernelParamsBase / ForwardKernelParams / BackwardKernelParams /
+// BackwardAddKernelParams are defined in kernel_params.h, which is also
+// included unchanged by the NVRTC kernel sources for the norm RTC migration.
 
 enum class NVTE_Norm_Backend { Te, Cudnn };
 enum class NVTE_Norm_Stage { Forward, Backward, BackwardAdd };
@@ -188,6 +102,16 @@ class TeNormalizationRegistry {
       getInstance().tuned_function_map.emplace(key, Function(func));
     else
       getInstance().general_function_map[general_key].emplace(hidden_size, Function(func));
+    return 0;
+  }
+
+  // Overload for capturing-callable dispatchers (e.g. NVRTC closures).
+  static int registerFunction(TupleKeyType key, Function func) {
+    auto [general_key, batch_size, hidden_size, is_tuned] = key;
+    if (is_tuned)
+      getInstance().tuned_function_map.emplace(key, std::move(func));
+    else
+      getInstance().general_function_map[general_key].emplace(hidden_size, std::move(func));
     return 0;
   }
 
