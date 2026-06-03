@@ -128,8 +128,7 @@ def compute_variance(variances, numels, sums, unbiased=True):
     True -> sample (divide by N-1), False -> population (divide by N). The combine
     is done on M2 (sum of squared deviations), which is convention-agnostic, so
     both biased and unbiased inputs combine exactly across groups with different
-    means. Passing sample variances into a population combine (or vice versa)
-    silently corrupts the result, hence the explicit flag.
+    means. 
     """
     total = torch.sum(numels)
     mean = torch.sum(sums) / total
@@ -364,20 +363,23 @@ def add_scale_inv_stats(recipe_name: str, columnwise: bool = False):
     def _prefix():
         return f"{recipe_name}{'_' if recipe_name != '' else ''}"
 
-    def nonzero_min(scale_inv):
+    def real_scale_inv(quantized_tensor, columnwise):
         # MXFP8/NVFP4 quantizers round the scale_inv shape up to multiples of
-        # 128 along one axis and 4 along the other and fill the extra slots
-        # with zeros (via torch.nn.functional.pad with the default value=0),
-        # so a plain .min() always returns 0 for shapes that needed padding.
-        # A real scale_inv entry is never 0: compute_scale_from_amax returns
-        # scale=1.0 for all-zero blocks and clamps the inf case to a finite
-        # fallback, so zeros uniquely identify padding and masking them out
-        # gives the true minimum. The empty-after-mask branch is a safety
-        # net for the (in practice unreachable) all-zero tensor.
-        nz = scale_inv[scale_inv != 0]
-        if nz.numel() == 0:
-            return scale_inv.new_zeros(())
-        return nz.min()
+        # 128 along one axis and 4 along the other and fill the extra slots with
+        # zeros (via torch.nn.functional.pad with the default value=0). A real
+        # scale_inv entry is never 0: compute_scale_from_amax returns scale=1.0
+        # for all-zero blocks and clamps the inf case to a finite fallback, so
+        # zeros uniquely identify padding. Every scale_inv stat masks them out;
+        # otherwise the padding deflates the mean and shows up as spurious spread
+        # (min/std) and inflated counts (numel), which would also corrupt the
+        # numel-weighted variance reduction across microbatches/ranks.
+        scale_inv = get_scale_inv(quantized_tensor, columnwise).float()
+        return scale_inv[scale_inv != 0]
+
+    def scale_inv_min(quantized_tensor, columnwise):
+        nz = real_scale_inv(quantized_tensor, columnwise)
+        # Empty only for the (in practice unreachable) all-zero tensor.
+        return nz.min() if nz.numel() > 0 else nz.new_zeros(())
 
     columnwise_suffix = "_columnwise" if columnwise else ""
     stat_name_min = f"{_prefix()}scale_inv_min{columnwise_suffix}"
@@ -400,9 +402,7 @@ def add_scale_inv_stats(recipe_name: str, columnwise: bool = False):
 
     # Capture the attribute name inside lambdas via default args to avoid late binding.
     STATS[stat_name_min] = (
-        lambda x, aux_dict, _col=columnwise: nonzero_min(
-            get_scale_inv(aux_dict[recipe_name], _col)
-        ),
+        lambda x, aux_dict, _col=columnwise: scale_inv_min(aux_dict[recipe_name], _col),
         lambda buffers, _sn=stat_name_min: min(_get(buffers, _sn)),
     )
     STATS[stat_name_max] = (
@@ -411,25 +411,23 @@ def add_scale_inv_stats(recipe_name: str, columnwise: bool = False):
     )
     STATS[stat_name_var] = (
         lambda x, aux_dict, _col=columnwise: torch.var(
-            get_scale_inv(aux_dict[recipe_name], _col).float(), unbiased=False
+            real_scale_inv(aux_dict[recipe_name], _col), unbiased=False
         ),
         lambda buffers, _sv=stat_name_var, _sn=stat_name_numel, _ss=stat_name_sum: compute_variance(
             _get(buffers, _sv), _get(buffers, _sn), _get(buffers, _ss), unbiased=False
         ),
     )
     STATS[stat_name_numel] = (
-        lambda x, aux_dict, _col=columnwise: get_scale_inv(aux_dict[recipe_name], _col).numel(),
+        lambda x, aux_dict, _col=columnwise: real_scale_inv(aux_dict[recipe_name], _col).numel(),
         lambda buffers, _sn=stat_name_numel: sum(_get(buffers, _sn)),
     )
     STATS[stat_name_sum] = (
-        lambda x, aux_dict, _col=columnwise: get_scale_inv(aux_dict[recipe_name], _col)
-        .float()
-        .sum(),
+        lambda x, aux_dict, _col=columnwise: real_scale_inv(aux_dict[recipe_name], _col).sum(),
         lambda buffers, _ss=stat_name_sum: sum(_get(buffers, _ss)),
     )
     STATS[stat_name_std] = (
         lambda x, aux_dict, _col=columnwise: torch.std(
-            get_scale_inv(aux_dict[recipe_name], _col).float(), unbiased=False
+            real_scale_inv(aux_dict[recipe_name], _col), unbiased=False
         ),
         lambda buffers, _sv=stat_name_var, _sn=stat_name_numel, _ss=stat_name_sum: compute_std(
             _get(buffers, _sv), _get(buffers, _sn), _get(buffers, _ss), unbiased=False

@@ -391,15 +391,9 @@ def test_log_stats_numerics(feature_dirs, tensor_name):
 def test_stats_computation_microbatch_reduction():
     """Reducing per-microbatch stats must equal computing them over the concatenation.
 
-    Iterates the stats_computation registry itself: for every aux-free (high
-    precision) stat, both the per-tensor compute fn STATS[s][0] and the
-    cross-buffer combinator STATS[s][1] are taken straight from the registry - no
-    per-stat formulas are duplicated here, and ground truth is just the same
-    compute fn applied to the concatenation. The microbatches have DIFFERENT means
-    and unequal sizes, which is what stresses the parallel variance combine
-    (compute_variance/compute_std) and exactly what existing ~N(0,1) tests miss
-    (means ≈ 0 hides the (mean_i - mean)^2 term). Sweeping the whole registry means
-    a newly added high-precision stat is covered automatically.
+    Sweeps every aux-free (high precision) stat in the registry, using its own
+    compute/combine fns, with microbatches of different means and unequal sizes to
+    stress the parallel variance combine that uniform ~N(0,1) tests miss.
     """
     torch.manual_seed(0)
     microbatches = [
@@ -436,6 +430,68 @@ def test_stats_computation_microbatch_reduction():
         assert reduced == pytest.approx(
             expected, rel=1e-4, abs=1e-4
         ), f"{stat}: reduced {reduced}, expected {expected}"
+
+
+@pytest.mark.parametrize(
+    "fp8_recipe, recipe_name",
+    [
+        pytest.param(recipe.MXFP8BlockScaling(), "mxfp8", id="mxfp8"),
+        pytest.param(recipe.Float8BlockScaling(), "fp8_block_scaling", id="fp8_block_scaling"),
+    ],
+)
+def test_scale_inv_std_microbatch_reduction(fp8_recipe, recipe_name):
+    """scale_inv_std reduced across microbatches must equal std over the concatenation.
+
+    Complements test_stats_computation_microbatch_reduction, which only sweeps
+    aux-free stats and therefore skips scale_inv_std. Here we drive the same
+    parallel-variance combine through the aux-dependent path: each microbatch is
+    quantized with a block recipe (per-block scale_inv -> non-trivial variance),
+    fed through the registry's own compute/combine fns, and checked against
+    torch.std over the concatenated scale_inv values (unbiased=False).
+    """
+    if not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    if recipe_name == "mxfp8" and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    if recipe_name == "fp8_block_scaling" and not fp8_block_scaling_available:
+        pytest.skip(reason_for_no_fp8_block_scaling)
+
+    torch.manual_seed(0)
+    # Different means and unequal sizes stress the (mean_i - mean)^2 term.
+    microbatches = [
+        0.5 * torch.randn(256, 1024).cuda() + 0.0,
+        2.0 * torch.randn(512, 1024).cuda() + 8.0,
+        0.1 * torch.randn(384, 1024).cuda() - 6.0,
+    ]
+
+    def rowwise_scale_inv(quantized_tensor):
+        if hasattr(quantized_tensor, "_scale_inv"):
+            return quantized_tensor._scale_inv.float()
+        return quantized_tensor._rowwise_scale_inv.float()
+
+    stat_std = f"{recipe_name}_scale_inv_std"
+    stat_var = f"{recipe_name}_scale_inv_variance"
+    stat_numel = f"{recipe_name}_scale_inv_numel"
+    stat_sum = f"{recipe_name}_scale_inv_sum"
+
+    # Fill a [num_microbatches, num_stats] buffer exactly like _Buffer would,
+    # using the registry's own per-tensor compute fns through the aux path.
+    buffers = torch.zeros(len(microbatches), len(stats_to_num)).cuda()
+    scale_invs = []
+    for i, mb in enumerate(microbatches):
+        recipe_state = RecipeState.create(fp8_recipe, mode="forward", num_quantizers=1)
+        quantizer = recipe_state.make_quantizers()[0]
+        quantized_tensor = quantizer(mb)
+        aux_dict = {recipe_name: quantized_tensor}
+        scale_invs.append(rowwise_scale_inv(quantized_tensor).flatten())
+        for stat in (stat_var, stat_numel, stat_sum):
+            buffers[i, stats_to_num[stat]] = float(STATS[stat][0](mb, aux_dict))
+
+    reduced = float(STATS[stat_std][1](buffers))
+    expected = float(torch.std(torch.cat(scale_invs), unbiased=False))
+    assert reduced == pytest.approx(
+        expected, rel=1e-4, abs=1e-4
+    ), f"{stat_std}: reduced {reduced}, expected {expected}"
 
 
 @pytest.mark.parametrize("layer", ["linear", "transformer"])
