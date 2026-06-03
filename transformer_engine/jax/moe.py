@@ -37,7 +37,7 @@ path and overlaps with the dispatch collective).
 
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 import warnings
 
 import jax
@@ -93,6 +93,25 @@ def record_ep_bootstrap_signature_for_moe(
     )
 
 
+# Per-(top_k, alignment) EpHandle cache. ``tex.ep_make_handle`` mints a
+# fresh handle_id from a singleton pool capped at NVTE_EP_HANDLE_CACHE_SIZE
+# (default 8192); caching here keeps the pool steady across many jit traces
+# of the same MoE block configuration.
+_te_ep_handle_cache: Dict[Tuple[int, int], Any] = {}
+
+
+def _get_or_make_ep_handle(top_k: int, dispatch_output_per_expert_alignment: int):
+    key = (int(top_k), int(dispatch_output_per_expert_alignment))
+    h = _te_ep_handle_cache.get(key)
+    if h is None:
+        h = tex.ep_make_handle(
+            top_k=key[0],
+            dispatch_output_per_expert_alignment=key[1],
+        )
+        _te_ep_handle_cache[key] = h
+    return h
+
+
 def _te_ep_assert_compatible_bootstrap(
     num_experts: int,
     max_tokens_per_rank: int,
@@ -145,6 +164,7 @@ class _Ctx:
     saved_scores: jnp.ndarray
     routing_map: jnp.ndarray
     handle: Any
+    handle_mem: Any
     token_counts: jnp.ndarray
     recv_topk_weights: jnp.ndarray
     casted_sorted_x_lhs_trans: Any
@@ -538,9 +558,12 @@ def _moe_fwd_rule(
     topk_w_3d = routing_weights.reshape(B, S, K).astype(jnp.float32)
 
     # ---------------- TE EP dispatch (global view) ----------------
-    token_counts, handle = tex.ep_prepare(topk_idx_3d, slots_per_expert)
-    recv_tokens, recv_topk_weights, handle = tex.ep_dispatch_fwd(
-        handle, topk_idx_3d, x, topk_w_3d, recv_pr
+    handle = _get_or_make_ep_handle(
+        top_k=K, dispatch_output_per_expert_alignment=slots_per_expert
+    )
+    token_counts, handle_mem = tex.ep_prepare(topk_idx_3d, handle)
+    recv_tokens, recv_topk_weights = tex.ep_dispatch_fwd(
+        handle, handle_mem, topk_idx_3d, x, topk_w_3d, recv_pr
     )
     recv_tokens = jax.lax.with_sharding_constraint(recv_tokens, NamedSharding(mesh, ep3_spec))
     recv_topk_weights = jax.lax.with_sharding_constraint(
@@ -608,6 +631,7 @@ def _moe_fwd_rule(
         # expert_outputs is already weighted upstream.
         output = tex.ep_combine_fwd(
             handle,
+            handle_mem,
             expert_outputs,
             num_local_tokens=(B, S),
             out_partition_spec=out_partition_spec,
@@ -618,6 +642,7 @@ def _moe_fwd_rule(
         weighted = expert_outputs * w * mask
         output = tex.ep_combine_fwd(
             handle,
+            handle_mem,
             weighted,
             num_local_tokens=(B, S),
             out_partition_spec=out_partition_spec,
@@ -641,6 +666,7 @@ def _moe_fwd_rule(
         saved_scores=saved_scores,
         routing_map=routing_map,
         handle=handle,
+        handle_mem=handle_mem,
         token_counts=token_counts,
         recv_topk_weights=recv_topk_weights,
         casted_sorted_x_lhs_trans=casted_sorted_x_lhs_trans,
@@ -716,7 +742,7 @@ def _moe_bwd_rule(
 
     # ---------------- Combine bwd (global view) ----------------
     d_output = jax.lax.with_sharding_constraint(d_output, NamedSharding(mesh, ep3_spec))
-    grad_pre_combine = tex.ep_combine_bwd(ctx.handle, d_output, recv_pr)
+    grad_pre_combine = tex.ep_combine_bwd(ctx.handle, ctx.handle_mem, d_output, recv_pr)
     grad_pre_combine = jax.lax.with_sharding_constraint(
         grad_pre_combine, NamedSharding(mesh, ep3_spec)
     )
@@ -837,6 +863,7 @@ def _moe_bwd_rule(
     )
     d_x_from_dispatch, d_topk_w = tex.ep_dispatch_bwd(
         ctx.handle,
+        ctx.handle_mem,
         d_sorted_x,
         d_recv_w_total,
         top_k=K,
