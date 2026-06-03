@@ -207,7 +207,7 @@ class ScoreModFusedAttnRunner(FusedAttnRunner):
             pytest.skip("cuDNN score_mod SDPA requires cuDNN frontend 9.6 or newer")
 
     @staticmethod
-    def input_scale(head_dim):
+    def _compute_input_scale(head_dim):
         return 1.0 / sqrt(head_dim)
 
     @classmethod
@@ -269,7 +269,7 @@ class ScoreModFusedAttnRunner(FusedAttnRunner):
             score_mod_tensors=score_mod_tensors,
             score_mod_bprop_tensors=score_mod_bprop_tensors,
             score_mod_reference=score_mod_reference,
-            input_scale=cls.input_scale(head_dim),
+            input_scale=cls._compute_input_scale(head_dim),
             doutput_seed=doutput_seed,
             rtol=rtol,
             atol=atol,

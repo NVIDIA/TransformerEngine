@@ -108,6 +108,7 @@ def general_dot_product_attention(
         logits = jnp.where(mask, jnp.finfo(dtype).min, logits)
 
     if score_mod_reference is not None:
+        # Kernel tests use NO_MASK; fused_attn rejects mask+score_mod before this reference path.
         logits = score_mod_reference(logits.astype(jnp.float32))
 
     match softmax_type:
@@ -286,9 +287,9 @@ def jax_dpa(query, key, value, bias, softmax_offset, mask, dropout_rng, **kwargs
             raise ValueError(
                 "score_mod reference path expects separate BSHD query/key/value tensors."
             )
-        deterministic = not kwargs.get("is_training", False)
-        dropout_probability = kwargs.get("dropout_probability", 0.0)
-        softmax_type = kwargs.get("softmax_type", AttnSoftmaxType.VANILLA_SOFTMAX)
+        deterministic = not kwargs["is_training"]
+        dropout_probability = kwargs["dropout_probability"]
+        softmax_type = kwargs["softmax_type"]
     else:
         deterministic = not kwargs["is_training"]
         dropout_probability = kwargs["dropout_probability"]
