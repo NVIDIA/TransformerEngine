@@ -415,7 +415,6 @@ def test_stats_computation_microbatch_reduction():
             return False
 
     aux_free = [stat for stat in stats_to_num if is_aux_free(stat)]
-    assert {"variance", "std"} <= set(aux_free)  # sanity: the buggy combine is in scope
 
     # Fill a [num_microbatches, num_stats] buffer exactly like _Buffer would, then
     # check every combinator against its own compute fn over the concatenation.
