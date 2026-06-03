@@ -20,6 +20,9 @@ from transformer_engine.pytorch import (
 from transformer_engine.pytorch.constants import TE_DType_To_Torch
 import transformer_engine_torch as tex
 
+# Import test utilities
+from utils import assert_close
+
 # Check available recipes
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 fp8_block_scaling_available, reason_for_no_fp8_block_scaling = te.is_fp8_block_scaling_available(
@@ -190,85 +193,67 @@ class TestGroupedTensor:
     )
     @pytest.mark.parametrize("input_dtype", [torch.int32, torch.int64], ids=["int32", "int64"])
     @pytest.mark.parametrize("input_device", ["cuda", "cpu"], ids=["cuda", "cpu"])
-    def test_prepare_grouped_splits(
+    @pytest.mark.parametrize("bulk_allocate", [False, True], ids=["separate", "bulk"])
+    def test_splits_to_offsets_multi(
         self,
+        bulk_allocate: bool,
         input_device: str,
         input_dtype: torch.dtype,
         split_sizes_list: List[int],
         logical_last_dim: int,
     ) -> None:
         """Test fused grouped split metadata preparation."""
+        device = torch.device("cuda")
         split_sizes = torch.tensor(split_sizes_list, dtype=input_dtype, device=input_device)
-        num_groups = split_sizes.numel()
 
-        (
-            split_sizes_i64,
-            split_points,
-            base_offsets,
-            tensor_offsets,
-        ) = tex.prepare_grouped_splits(split_sizes, num_groups, [1, logical_last_dim])
+        # Exercise the grouped-MLP-shaped call: mix of int32 (no leading zero)
+        # and int64 (with leading zero) outputs, several strides.
+        strides = [1, 1, logical_last_dim, 0, logical_last_dim + 17]
+        include_leading_zero = [False, True, True, True, True]
+        dtypes = [torch.int32, torch.int64, torch.int64, torch.int64, torch.int64]
+        split_sizes_out, outputs = tex.splits_to_offsets_multi(
+            split_sizes,
+            device,
+            strides=strides,
+            include_leading_zero=include_leading_zero,
+            dtypes=dtypes,
+            bulk_allocate=bulk_allocate,
+        )
 
-        expected_split_sizes = split_sizes.to(device="cuda", dtype=torch.int64)
+        # Reference implementation.
+        expected_split_sizes_i64 = split_sizes.to(device=device, dtype=torch.int64)
         expected_base_offsets = torch.cat(
             (
-                torch.zeros(1, dtype=torch.int64, device="cuda"),
-                torch.cumsum(expected_split_sizes, dim=0),
+                torch.zeros(1, dtype=torch.int64, device=device),
+                torch.cumsum(expected_split_sizes_i64, dim=0),
             )
         )
-        expected_split_points = expected_base_offsets[1:].to(torch.int32)
-        expected_tensor_offsets = expected_base_offsets * logical_last_dim
 
-        assert split_sizes_i64.dtype == torch.int64
-        assert base_offsets.dtype == torch.int64
-        # cuDNN grouped GEMM consumes int32 end offsets; TE GroupedTensor metadata stays int64.
-        assert split_points.dtype == torch.int32
-        assert tensor_offsets.dtype == torch.int64
-        assert split_sizes_i64.device.type == "cuda"
-        assert base_offsets.device.type == "cuda"
-        assert split_points.device.type == "cuda"
-        assert tensor_offsets.device.type == "cuda"
-        assert torch.equal(split_sizes_i64, expected_split_sizes)
-        assert torch.equal(base_offsets, expected_base_offsets)
-        assert torch.equal(split_points, expected_split_points)
-        assert torch.equal(tensor_offsets, expected_tensor_offsets)
+        # Check output split_sizes: always int64, always on the target device.
+        assert split_sizes_out.device.type == "cuda"
+        assert split_sizes_out.dtype == torch.int64
+        assert_close(split_sizes_out, expected_split_sizes_i64)
 
-        offset_strides = [1, logical_last_dim, 0, logical_last_dim + 17]
-        multi_outputs = tex.prepare_grouped_splits(
-            split_sizes,
-            num_groups,
-            offset_strides,
-        )
-        (
-            multi_split_sizes,
-            multi_split_points,
-            multi_base_offsets,
-            *multi_tensor_offsets,
-        ) = multi_outputs
-        assert len(multi_tensor_offsets) == len(offset_strides) - 1
-        assert torch.equal(multi_split_sizes, expected_split_sizes)
-        assert torch.equal(multi_split_points, expected_split_points)
-        assert torch.equal(multi_base_offsets, expected_base_offsets)
-        for output, stride in zip(multi_tensor_offsets, offset_strides[1:]):
-            assert output.dtype == torch.int64
-            assert output.device.type == "cuda"
-            assert torch.equal(output, expected_base_offsets * stride)
-
-        # cuDNN CuTe-DSL grouped GEMM kernels require 16-byte-aligned data
-        # pointers for every tensor argument. ``split_points`` used to land at
-        # an 8-byte-aligned offset inside the bulk buffer; pin the fix here so
-        # any regression in ``prepare_grouped_splits`` / ``bulk_allocate``
-        # alignment is caught immediately instead of surfacing as a runtime
-        # "Misaligned Tensor data" error from cuDNN.
-        for name, tensor in (
-            ("split_sizes_i64", split_sizes_i64),
-            ("base_offsets", base_offsets),
-            ("split_points", split_points),
-            ("tensor_offsets", tensor_offsets),
-            *((f"multi_output_{idx}", output) for idx, output in enumerate(multi_outputs)),
+        # Check output offsets.
+        assert len(outputs) == len(strides)
+        for output, stride, with_zero, dtype in zip(
+            outputs, strides, include_leading_zero, dtypes
         ):
+            assert output.dtype == dtype
+            assert output.device.type == "cuda"
+            expected_length = split_sizes.numel() + (1 if with_zero else 0)
+            assert output.numel() == expected_length
+            expected = expected_base_offsets * stride
+            if not with_zero:
+                expected = expected[1:]
+            assert_close(output, expected)
+
+        # Check pointer alignment: cuDNN CuTe-DSL grouped GEMM kernels
+        # require 16-byte-aligned data pointers.
+        for idx, output in enumerate(outputs):
             assert (
-                tensor.data_ptr() % 16 == 0
-            ), f"{name} data_ptr is not 16-byte aligned: {tensor.data_ptr():#x}"
+                output.data_ptr() % 16 == 0
+            ), f"outputs[{idx}] data_ptr is not 16-byte aligned: {output.data_ptr():#x}"
 
     def test_split_into_quantized_tensors_no_quantization(self) -> None:
         """Test split_into_quantized_tensors for unquantized tensors"""
@@ -533,10 +518,12 @@ class TestGroupedTensor:
         quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
         quantizer.set_usage(rowwise=True, columnwise=False)
         split_sizes = torch.tensor(split_sizes_list, dtype=torch.int64, device="cuda")
-        split_sizes, _, _, tensor_offsets = tex.prepare_grouped_splits(
+        split_sizes, (tensor_offsets,) = tex.splits_to_offsets_multi(
             split_sizes,
-            num_tensors,
-            [1, last_dim],
+            torch.device("cuda"),
+            strides=[last_dim],
+            include_leading_zero=[True],
+            dtypes=[torch.int64],
         )
 
         if output_dbias:

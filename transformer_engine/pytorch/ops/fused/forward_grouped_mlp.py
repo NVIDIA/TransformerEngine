@@ -208,26 +208,21 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
         split_sizes = fc1_split_sizes
         if int(split_sizes.numel()) != num_groups:
             raise ValueError(f"Expected {num_groups} splits, but got {int(split_sizes.numel())}.")
-        # Prepare all split metadata in one CUDA kernel.  The returned split_sizes is the
-        # canonical TE representation: int64[num_groups].  Python uses it from here
-        # onward for grouped quantization and backward state.
-        #
-        # split_points: int32[num_groups], cumsum(split_sizes) without the leading 0
-        # base_split_offsets: int64[num_groups + 1], [0, cumsum(split_sizes)]
-        # fc1_x_tensor_offsets: int64[num_groups + 1], base_split_offsets * FC1 K
-        # fc2_x_tensor_offsets: int64[num_groups + 1], base_split_offsets * fc2 K
-        # fc2_out_tensor_offsets: int64[num_groups + 1], base_split_offsets * FC2 N
-        (
-            split_sizes,
+
+        # Prepare split metadata
+        split_sizes, (
             split_points,
             base_split_offsets,
             fc1_x_tensor_offsets,
             fc2_x_tensor_offsets,
             fc2_out_tensor_offsets,
-        ) = tex.prepare_grouped_splits(
+        ) = tex.splits_to_offsets_multi(
             split_sizes,
-            num_groups,
-            [1, fc1_weight_shape[1], fc2_weight_shape[1], fc2_weight_shape[0]],
+            device,
+            strides=[1, 1, fc1_weight_shape[1], fc2_weight_shape[1], fc2_weight_shape[0]],
+            include_leading_zero=[False, True, True, True, True],
+            dtypes=[torch.int32, torch.int64, torch.int64, torch.int64, torch.int64],
+            bulk_allocate=True,
         )
 
         # Extract per-row activation probabilities from the middle op.

@@ -6,6 +6,8 @@
 
 #include <ATen/cuda/CUDAContext.h>
 
+#include <tuple>
+#include <utility>
 #include <vector>
 
 #include "../extensions.h"
@@ -17,108 +19,6 @@ namespace transformer_engine::pytorch {
 size_t get_cublasLt_version() { return cublasLtGetVersion(); }
 
 size_t get_cudnn_version() { return cudnnGetVersion(); }
-
-namespace {
-
-std::vector<at::Tensor> prepare_grouped_splits_impl(const at::Tensor &split_sizes,
-                                                    int64_t num_groups,
-                                                    const std::vector<int64_t> &logical_last_dims) {
-  NVTE_CHECK(split_sizes.scalar_type() == at::kInt || split_sizes.scalar_type() == at::kLong,
-             "split_sizes must have dtype int32 or int64.");
-  NVTE_CHECK(split_sizes.dim() == 1, "split_sizes must be a 1D tensor.");
-  NVTE_CHECK(num_groups > 0, "num_groups must be greater than 0.");
-  NVTE_CHECK(split_sizes.numel() == num_groups, "split_sizes must have length ", num_groups, ".");
-  NVTE_CHECK(!logical_last_dims.empty(), "logical_last_dims must be non-empty.");
-  const size_t list_size = logical_last_dims.size();
-  for (const auto logical_last_dim : logical_last_dims) {
-    NVTE_CHECK(logical_last_dim >= 0, "logical_last_dim values must be non-negative.");
-  }
-  const c10::Device device = c10::Device(c10::kCUDA, c10::cuda::current_device());
-
-  at::Tensor split_sizes_for_kernel;
-  if (split_sizes.is_cuda()) {
-    NVTE_CHECK(split_sizes.device() == device, "CUDA split_sizes must be on current CUDA device ",
-               device.index(), ", but got CUDA device ", split_sizes.device().index(), ".");
-    split_sizes_for_kernel = split_sizes;
-  } else {
-    split_sizes_for_kernel =
-        split_sizes.to(at::TensorOptions().dtype(split_sizes.scalar_type()).device(device),
-                       /*non_blocking=*/true);
-  }
-
-  const int64_t offsets_length = num_groups + 1;
-  auto split_sizes_i64 = split_sizes_for_kernel.scalar_type() == at::kLong
-                             ? split_sizes_for_kernel
-                             : split_sizes_for_kernel.to(at::kLong);
-
-  // Return order is part of the Python contract:
-  //   0. split_sizes_i64: int64[num_groups]   - canonical TE GroupedTensor first dims.
-  //   1. split_points:    int32[num_groups]   - inclusive scan of split_sizes,
-  //                                             no leading zero. Consumed by cuDNN
-  //                                             CuTe-DSL grouped GEMM as
-  //                                             padded_offsets (requires 16-byte align).
-  //   2..: tensor_offsets[i]: int64[num_groups + 1] - inclusive scan with leading
-  //                                                   zero, scaled by logical_last_dims[i].
-  //
-  // 16-byte alignment is forced on every output so split_points (cuDNN's
-  // padded_offsets) lands on a 16-byte boundary inside the bulk-allocated buffer.
-  const size_t num_outputs = 1 + list_size;
-  std::vector<std::vector<size_t>> shapes;
-  std::vector<at::ScalarType> dtypes;
-  std::vector<size_t> alignments(num_outputs, 16);
-  shapes.reserve(num_outputs);
-  dtypes.reserve(num_outputs);
-  shapes.emplace_back(std::vector<size_t>{static_cast<size_t>(num_groups)});
-  dtypes.emplace_back(at::kInt);
-  for (size_t i = 0; i < list_size; ++i) {
-    shapes.emplace_back(std::vector<size_t>{static_cast<size_t>(offsets_length)});
-    dtypes.emplace_back(at::kLong);
-  }
-  auto outputs = bulk_allocate(shapes, dtypes, device, alignments);
-
-  // Pack output NVTETensors as a single batch so the kernel sees all metadata
-  // from one nvte_create_tensors call rather than num_outputs separate calls.
-  MultiTensorWrapper output_tensors_nvte(num_outputs);
-  std::vector<NVTETensor> nvte_outputs(num_outputs);
-  std::vector<int64_t> strides(num_outputs);
-  std::vector<int> include_leading_zero(num_outputs);
-
-  const size_t num_groups_sz = static_cast<size_t>(num_groups);
-  const size_t offsets_length_sz = static_cast<size_t>(offsets_length);
-  const auto set_output = [&](size_t out_idx, at::Tensor &tensor, DType dtype, size_t numel,
-                              int64_t stride, int with_leading_zero) {
-    NVTEShape shape = nvte_make_shape(&numel, 1);
-    NVTEBasicTensor data = {tensor.data_ptr(), static_cast<NVTEDType>(dtype), shape};
-    nvte_set_tensor_param_v2(output_tensors_nvte[out_idx], kNVTERowwiseData, &data, sizeof(data));
-    nvte_outputs[out_idx] = output_tensors_nvte[out_idx];
-    strides[out_idx] = stride;
-    include_leading_zero[out_idx] = with_leading_zero;
-  };
-
-  set_output(0, outputs[0], DType::kInt32, num_groups_sz, /*stride=*/1,
-             /*with_leading_zero=*/0);
-  for (size_t i = 0; i < list_size; ++i) {
-    set_output(1 + i, outputs[1 + i], DType::kInt64, offsets_length_sz,
-               /*stride=*/logical_last_dims[i], /*with_leading_zero=*/1);
-  }
-
-  auto split_sizes_nvte = makeTransformerEngineTensor(split_sizes_for_kernel);
-  NVTE_SCOPED_GIL_RELEASE({
-    nvte_splits_to_offsets_multi(split_sizes_nvte.data(), nvte_outputs.data(), strides.data(),
-                                 include_leading_zero.data(), num_outputs,
-                                 at::cuda::getCurrentCUDAStream());
-  });
-
-  std::vector<at::Tensor> ret;
-  ret.reserve(1 + num_outputs);
-  ret.emplace_back(split_sizes_i64);
-  for (size_t i = 0; i < num_outputs; ++i) {
-    ret.emplace_back(outputs[i]);
-  }
-  return ret;
-}
-
-}  // namespace
 
 at::Tensor splits_to_offsets(const at::Tensor &first_dims, int64_t logical_last_dim) {
   NVTE_CHECK(first_dims.is_cuda(), "first_dims must be on CUDA.");
@@ -138,9 +38,66 @@ at::Tensor splits_to_offsets(const at::Tensor &first_dims, int64_t logical_last_
   return output;
 }
 
-std::vector<at::Tensor> prepare_grouped_splits(const at::Tensor &split_sizes, int64_t num_groups,
-                                               const std::vector<int64_t> &logical_last_dims) {
-  return prepare_grouped_splits_impl(split_sizes, num_groups, logical_last_dims);
+std::tuple<at::Tensor, std::vector<at::Tensor>> splits_to_offsets_multi(
+    const at::Tensor &split_sizes, const c10::Device &device,
+    const std::vector<int64_t> &strides, const std::vector<bool> &include_leading_zero,
+    const std::vector<at::ScalarType> &dtypes, bool bulk_allocate_outputs) {
+  const size_t num_outputs = strides.size();
+  const size_t num_splits = static_cast<size_t>(split_sizes.numel());
+
+  // Check inputs.
+  NVTE_CHECK(include_leading_zero.size() == num_outputs && dtypes.size() == num_outputs,
+             "strides, include_leading_zero, and dtypes must have matching lengths, but got ",
+             strides.size(), ", ", include_leading_zero.size(), ", and ", dtypes.size(), ".");
+  NVTE_CHECK(device.is_cuda(), "device must be CUDA, but got ", device.str(), ".");
+
+  // Convert split sizes to int64 GPU tensor.
+  const at::Tensor split_sizes_i64 = split_sizes.scalar_type() == at::kLong ? split_sizes : split_sizes.to(at::kLong);
+  const at::Tensor split_sizes_out = split_sizes_i64.device() == device ? split_sizes_i64 : split_sizes_i64.to(device);
+
+  // Allocate outputs.
+  std::vector<at::Tensor> outputs;
+  outputs.reserve(num_outputs);
+  if (bulk_allocate_outputs) {
+    std::vector<std::vector<size_t>> shapes;
+    shapes.reserve(num_outputs);
+    for (size_t i = 0; i < num_outputs; ++i) {
+      const size_t length = num_splits + (include_leading_zero[i] ? 1 : 0);
+      shapes.emplace_back(std::vector<size_t>{length});
+    }
+    // cuDNN CuTe DSL grouped GEMM kernels require padded_offsets
+    // aligned to 16 bytes.
+    const std::vector<size_t> alignments(num_outputs, 16);
+    outputs = bulk_allocate(shapes, dtypes, device, alignments);
+  } else {
+    for (size_t i = 0; i < num_outputs; ++i) {
+      const int64_t length =
+          static_cast<int64_t>(num_splits) + (include_leading_zero[i] ? 1 : 0);
+      outputs.emplace_back(
+          at::empty({length}, at::TensorOptions().dtype(dtypes[i]).device(device)));
+    }
+  }
+
+  // Construct NVTETensors.
+  MultiTensorWrapper outputs_nvte(num_outputs);
+  std::vector<int> include_leading_zero_int(num_outputs);
+  for (size_t i = 0; i < num_outputs; ++i) {
+    const size_t length = num_splits + (include_leading_zero[i] ? 1 : 0);
+    NVTEShape shape = nvte_make_shape(&length, 1);
+    NVTEBasicTensor data = {outputs[i].data_ptr(),
+                            static_cast<NVTEDType>(GetTransformerEngineDType(dtypes[i])), shape};
+    nvte_set_tensor_param_v2(outputs_nvte[i], kNVTERowwiseData, &data, sizeof(data));
+    include_leading_zero_int[i] = include_leading_zero[i] ? 1 : 0;
+  }
+
+  auto split_sizes_nvte = makeTransformerEngineTensor(split_sizes_out);
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_splits_to_offsets_multi(split_sizes_nvte.data(), outputs_nvte.data(), strides.data(),
+                                 include_leading_zero_int.data(), num_outputs,
+                                 at::cuda::getCurrentCUDAStream());
+  });
+
+  return {split_sizes_out, std::move(outputs)};
 }
 
 at::Tensor copy_data_ptrs_to_device(const std::vector<at::Tensor> &tensors,

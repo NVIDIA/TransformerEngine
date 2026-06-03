@@ -489,8 +489,10 @@ size_t get_cublasLt_version();
 size_t get_cudnn_version();
 
 at::Tensor splits_to_offsets(const at::Tensor &first_dims, int64_t logical_last_dim);
-std::vector<at::Tensor> prepare_grouped_splits(const at::Tensor &split_sizes, int64_t num_groups,
-                                               const std::vector<int64_t> &logical_last_dims);
+std::tuple<at::Tensor, std::vector<at::Tensor>> splits_to_offsets_multi(
+    const at::Tensor &split_sizes, const c10::Device &device,
+    const std::vector<int64_t> &strides, const std::vector<bool> &include_leading_zero,
+    const std::vector<at::ScalarType> &dtypes, bool bulk_allocate_outputs);
 
 at::Tensor copy_data_ptrs_to_device(const std::vector<at::Tensor> &tensors,
                                     const c10::Device &device);
