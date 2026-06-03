@@ -167,6 +167,13 @@ def interleave_glu_tensor(tensor: torch.Tensor, interleave_size: int) -> torch.T
     --------
     :func:`deinterleave_glu_tensor` : Inverse transformation (block-interleaved -> contiguous).
     """
+    if interleave_size <= 0:
+        raise ValueError(f"interleave_size must be a positive integer, got {interleave_size}")
+    if tensor.shape[0] % (2 * interleave_size) != 0:
+        raise ValueError(
+            f"tensor dimension 0 ({tensor.shape[0]}) must be divisible by "
+            f"2 * interleave_size ({2 * interleave_size})"
+        )
     shape = tensor.shape
     x = tensor.reshape(
         2,
