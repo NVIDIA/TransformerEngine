@@ -89,9 +89,9 @@ def get_device_compute_capability() -> Tuple[int, int]:
 
 
 def deinterleave_glu_tensor(tensor: torch.Tensor, interleave_size: int) -> torch.Tensor:
-    """Convert a block-interleaved SwiGLU fc1 tensor to contiguous gate/linear layout.
+    """Convert a block-interleaved GLU fc1 tensor to contiguous gate/linear layout.
 
-    Fused SwiGLU kernels (for example :class:`~transformer_engine.pytorch.ops.SwiGLU`
+    Fused GLU kernels (for example :class:`~transformer_engine.pytorch.ops.SwiGLU`
     with ``glu_interleave_size`` set) expect fc1 weights in a block-interleaved
     layout along dimension 0. Checkpoints and frameworks such as Megatron-LM typically
     store the gate (``W``) and linear (``V``) halves as two contiguous blocks
@@ -113,7 +113,7 @@ def deinterleave_glu_tensor(tensor: torch.Tensor, interleave_size: int) -> torch
         divisible by ``2 * interleave_size``.
     interleave_size : int
         Number of rows (for weights) or elements (for bias) per gate/linear block.
-        Fused TE SwiGLU paths commonly use ``32``.
+        Fused TE GLU paths commonly use ``32``.
 
     Returns
     -------
