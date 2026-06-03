@@ -722,8 +722,15 @@ def get_sm_count() -> int:
     return torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
 
 
+def ceil_div(numerator, denominator):
+    """Integer ceiling division: ``ceil(numerator / denominator)``."""
+    if denominator == 0:
+        raise ValueError("denominator cannot be zero.")
+    return (numerator + denominator - 1) // denominator
+
+
 def round_up_to_nearest_multiple(value, multiple):
-    """Round up `value` to the next mutiple of `multiple`"""
+    """Round up `value` to the next multiple of `multiple`"""
     if multiple == 0:
         raise ValueError("multiple cannot be zero.")
     return ((value + multiple - 1) // multiple) * multiple
