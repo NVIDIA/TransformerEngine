@@ -1781,7 +1781,12 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
   using namespace pybind11::literals;
 
   // Scaling factor format
-  const bool with_gemm_swizzled_scales = false;  /// TODO (tmoon) self->optimize_for_gemm
+  //
+  // The NVFP4 quantize kernel requires `with_gemm_swizzled_scales=false` and
+  // emits compact scales. When `optimize_for_gemm` is set, the caller of
+  // `quantize` (cast.cpp) applies a post-quantize swizzle that flips this
+  // flag on the returned tensor.
+  const bool with_gemm_swizzled_scales = false;
 
   // Tensor dimensions
   const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
@@ -2077,7 +2082,12 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
   NVTE_CHECK(detail::IsNVFP4Tensor(tensor.ptr()), "NVFP4Quantizer must output to IsNVFP4Tensor.");
 
   // Scaling factor format
-  const bool with_gemm_swizzled_scales = false;  // TODO (tmoon) Enable with optimize_for_gemm
+  //
+  // The NVFP4 quantize kernel requires `with_gemm_swizzled_scales=false` and
+  // emits compact scales. When `optimize_for_gemm` is set, the caller of
+  // `quantize` (cast.cpp) applies a post-quantize swizzle that flips this
+  // flag on the returned tensor.
+  const bool with_gemm_swizzled_scales = false;
 
   // Extract buffers from Python tensor
   auto get_tensor = [&tensor](const char* name) -> std::optional<at::Tensor> {
@@ -2109,6 +2119,9 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
   }
 
   const auto [flat_first_dim, flat_last_dim] = get_2d_dims(shape);
+  tensor.attr("_with_gemm_swizzled_scales") = py::cast(with_gemm_swizzled_scales);
+
+  // Advanced NVFP4 modes
   const bool row_scaled_nvfp4 = this->row_scaled_nvfp4;
   const bool nvfp4_use_4over6 = this->nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
   const int nvfp4_e4m3_max = this->nvfp4_e4m3_max;

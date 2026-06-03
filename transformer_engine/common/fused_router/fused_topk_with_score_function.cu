@@ -9,6 +9,7 @@
 #include <transformer_engine/fused_router.h>
 
 #include <climits>
+#include <vector>
 
 #include "../common.h"
 #include "../util/logging.h"
@@ -24,13 +25,16 @@ namespace fused_router {
 // due to lower scheduling overhead and separate load/compute/store phases.
 // =============================================================================
 
-template <typename DataType, typename BiasType, TopkFuncType TopkFunc = TopkFuncType::Naive>
+template <typename DataType, typename BiasType, NVTERoutingMapFormat RoutingMapFormat,
+          TopkFuncType TopkFunc = TopkFuncType::Naive>
 __global__ void fused_topk_forward_simple_kernel(const DataType *logits, int num_tokens,
                                                  int num_experts, int topk, bool use_pre_softmax,
                                                  int num_groups, int group_topk,
                                                  float scaling_factor, int score_function,
                                                  const BiasType *expert_bias, DataType *probs,
-                                                 bool *routing_map, CompType *intermediate_output) {
+                                                 uint8_t *routing_map,
+                                                 CompType *intermediate_output) {
+  constexpr bool kIsBitmap = (RoutingMapFormat == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8);
   int num_token_per_block = blockDim.x / kThreadsPerWarp;
   int warp_id = threadIdx.x / kThreadsPerWarp;
   int lane_id = threadIdx.x % kThreadsPerWarp;
@@ -46,11 +50,19 @@ __global__ void fused_topk_forward_simple_kernel(const DataType *logits, int num
   } else {
     topk_indices_buf = reinterpret_cast<int *>(topk_scores_buf + topk * num_token_per_block);
   }
+  const int bitmap_words_per_warp = (num_experts + 31) / 32;
+  const int bitmap_row_bytes = (num_experts + 7) / 8;
+  uint32_t *bitmap_words_buf = nullptr;
+  if constexpr (kIsBitmap) {
+    bitmap_words_buf = reinterpret_cast<uint32_t *>(topk_indices_buf + topk * num_token_per_block);
+  }
   CompType *scores = scores_buf + warp_id * num_experts;
   CompType *topk_scores = topk_scores_buf + warp_id * topk;
   CompType *masked_scores = masked_scores_buf + warp_id * num_experts;
   CompType *group_scores = group_scores_buf + warp_id * num_groups;
   int *topk_indices = topk_indices_buf + warp_id * topk;
+  uint32_t *local_bitmap_words =
+      (bitmap_words_buf != nullptr) ? bitmap_words_buf + warp_id * bitmap_words_per_warp : nullptr;
 
   int total_round = (num_tokens + num_token_per_block - 1) / num_token_per_block;
   for (int round = blockIdx.x; round < total_round; round += gridDim.x) {
@@ -61,9 +73,17 @@ __global__ void fused_topk_forward_simple_kernel(const DataType *logits, int num
     // Clear the probs/routing_map (num_experts)
     for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
       probs[pos_offset + i] = 0.0;
-      routing_map[pos_offset + i] = false;
       if (score_function == 1) {
         intermediate_output[pos_offset + i] = -std::numeric_limits<CompType>::infinity();
+      }
+    }
+    if constexpr (!kIsBitmap) {
+      for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
+        routing_map[pos_offset + i] = 0;
+      }
+    } else {
+      for (int i = lane_id; i < bitmap_words_per_warp; i += kThreadsPerWarp) {
+        local_bitmap_words[i] = 0u;
       }
     }
     // Load the logits to shmem
@@ -172,9 +192,24 @@ __global__ void fused_topk_forward_simple_kernel(const DataType *logits, int num
     }
 
     // Write outputs
-    for (int i = lane_id; i < topk; i += kThreadsPerWarp) {
-      routing_map[pos_offset + topk_indices[i]] = true;
-      probs[pos_offset + topk_indices[i]] = scaling_factor * topk_scores[i];
+    if constexpr (!kIsBitmap) {
+      for (int i = lane_id; i < topk; i += kThreadsPerWarp) {
+        routing_map[pos_offset + topk_indices[i]] = 1;
+        probs[pos_offset + topk_indices[i]] = scaling_factor * topk_scores[i];
+      }
+    } else {
+      for (int i = lane_id; i < topk; i += kThreadsPerWarp) {
+        int e = topk_indices[i];
+        atomicOr(&local_bitmap_words[e / 32], 1u << (e % 32));
+        probs[pos_offset + e] = scaling_factor * topk_scores[i];
+      }
+      __syncwarp();
+      uint8_t *bitmap_row =
+          routing_map + static_cast<size_t>(token_offset_cur_warp) * bitmap_row_bytes;
+      const uint8_t *local_bitmap_bytes = reinterpret_cast<const uint8_t *>(local_bitmap_words);
+      for (int i = lane_id; i < bitmap_row_bytes; i += kThreadsPerWarp) {
+        bitmap_row[i] = local_bitmap_bytes[i];
+      }
     }
     __threadfence_block();
     __syncwarp();
@@ -186,12 +221,13 @@ __global__ void fused_topk_forward_simple_kernel(const DataType *logits, int num
 // Used for larger topk where radix selection and compute dominate.
 // =============================================================================
 
-template <typename DataType, typename BiasType, TopkFuncType TopkFunc = TopkFuncType::Naive,
-          int ScoreFunc = 0>
+template <typename DataType, typename BiasType, NVTERoutingMapFormat RoutingMapFormat,
+          TopkFuncType TopkFunc = TopkFuncType::Naive, int ScoreFunc = 0>
 __global__ void fused_topk_with_score_function_forward_kernel(
     const DataType *logits, int num_tokens, int num_experts, int topk, bool use_pre_softmax,
     int num_groups, int group_topk, float scaling_factor, const BiasType *expert_bias,
-    DataType *probs, bool *routing_map, CompType *intermediate_output, int num_buffers) {
+    DataType *probs, uint8_t *routing_map, CompType *intermediate_output, int num_buffers) {
+  constexpr bool kIsBitmap = (RoutingMapFormat == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8);
   /***
      * Section: Global Variables/Addresses init
      * - Each warp is responsible for one token, and has own shared memory buffer.
@@ -223,6 +259,12 @@ __global__ void fused_topk_with_score_function_forward_kernel(
   } else {
     topk_indices_buf = reinterpret_cast<int *>(topk_scores_buf + topk * num_token_per_block);
   }
+  const int bitmap_words_per_warp = (num_experts + 31) / 32;
+  const int bitmap_row_bytes = (num_experts + 7) / 8;
+  uint32_t *bitmap_words_buf = nullptr;
+  if constexpr (kIsBitmap) {
+    bitmap_words_buf = reinterpret_cast<uint32_t *>(topk_indices_buf + topk * num_token_per_block);
+  }
   // The address of buffers on the current warp
   CompType *scores = scores_buf + warp_id * num_experts;
   CompType *topk_scores = topk_scores_buf + warp_id * topk;
@@ -231,6 +273,8 @@ __global__ void fused_topk_with_score_function_forward_kernel(
   CompType *group_scores =
       (group_scores_buf != nullptr) ? group_scores_buf + warp_id * num_groups : nullptr;
   int *topk_indices = topk_indices_buf + warp_id * topk;
+  uint32_t *local_bitmap_words =
+      (bitmap_words_buf != nullptr) ? bitmap_words_buf + warp_id * bitmap_words_per_warp : nullptr;
 
   /***
      * Section: Main Loop — persistent grid with double-buffered async load
@@ -289,7 +333,13 @@ __global__ void fused_topk_with_score_function_forward_kernel(
 
     // Clear the probs/routing_map (num_experts)
     vec_fill_global(probs + pos_offset, static_cast<DataType>(0.0f), num_experts, lane_id);
-    vec_fill_global(routing_map + pos_offset, false, num_experts, lane_id);
+    if constexpr (!kIsBitmap) {
+      vec_fill_global(routing_map + pos_offset, static_cast<uint8_t>(0), num_experts, lane_id);
+    } else {
+      for (int i = lane_id; i < bitmap_words_per_warp; i += kThreadsPerWarp) {
+        local_bitmap_words[i] = 0u;
+      }
+    }
 
     if constexpr (ScoreFunc == 1) {  // Softmax
       if (use_pre_softmax) {
@@ -441,9 +491,24 @@ __global__ void fused_topk_with_score_function_forward_kernel(
     }
 
     // Write the probs/routing_map to the output tensor
-    for (int i = lane_id; i < topk; i += kThreadsPerWarp) {
-      routing_map[pos_offset + topk_indices[i]] = true;
-      probs[pos_offset + topk_indices[i]] = scaling_factor * topk_scores[i];
+    if constexpr (!kIsBitmap) {
+      for (int i = lane_id; i < topk; i += kThreadsPerWarp) {
+        routing_map[pos_offset + topk_indices[i]] = 1;
+        probs[pos_offset + topk_indices[i]] = scaling_factor * topk_scores[i];
+      }
+    } else {
+      for (int i = lane_id; i < topk; i += kThreadsPerWarp) {
+        int e = topk_indices[i];
+        atomicOr(&local_bitmap_words[e / 32], 1u << (e % 32));
+        probs[pos_offset + e] = scaling_factor * topk_scores[i];
+      }
+      __syncwarp();
+      uint8_t *bitmap_row =
+          routing_map + static_cast<size_t>(token_offset_cur_warp) * bitmap_row_bytes;
+      const uint8_t *local_bitmap_bytes = reinterpret_cast<const uint8_t *>(local_bitmap_words);
+      for (int i = lane_id; i < bitmap_row_bytes; i += kThreadsPerWarp) {
+        bitmap_row[i] = local_bitmap_bytes[i];
+      }
     }
     __syncwarp();
 
@@ -451,12 +516,12 @@ __global__ void fused_topk_with_score_function_forward_kernel(
   }
 }
 
-template <typename DataType, typename BiasType>
+template <typename DataType, typename BiasType, NVTERoutingMapFormat RoutingMapFormat>
 void fused_topk_with_score_function_forward_kernel_launcher(
     const DataType *logits, int num_tokens, int num_experts, int topk, bool use_pre_softmax,
     int num_groups, int group_topk, float scaling_factor, int score_function,
-    const BiasType *expert_bias, DataType *probs, bool *routing_map, CompType *intermediate_output,
-    cudaStream_t stream) {
+    const BiasType *expert_bias, DataType *probs, uint8_t *routing_map,
+    CompType *intermediate_output, cudaStream_t stream) {
   NVTE_CHECK(num_experts > 0, "num_experts must be positive, got ", num_experts);
   NVTE_CHECK(topk > 0 && topk <= num_experts, "topk must be in [1, num_experts], got topk=", topk,
              " num_experts=", num_experts);
@@ -477,6 +542,9 @@ void fused_topk_with_score_function_forward_kernel_launcher(
   if (group_topk > 0) {
     scratch_shmem += num_groups * num_token_per_block * sizeof(CompType);
     scratch_shmem += num_experts * num_token_per_block * sizeof(CompType);
+  }
+  if constexpr (RoutingMapFormat == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8) {
+    scratch_shmem += ((num_experts + 31) / 32) * num_token_per_block * sizeof(uint32_t);
   }
   size_t other_shmem = scores_shmem + scratch_shmem;
   size_t logits_single_buf =
@@ -515,20 +583,21 @@ void fused_topk_with_score_function_forward_kernel_launcher(
       NVTE_CHECK_CUDA(cudaGetLastError());
     };
 
-    launch_simple(fused_topk_forward_simple_kernel<DataType, BiasType, TopkFuncType::Naive>);
+    launch_simple(fused_topk_forward_simple_kernel<DataType, BiasType, RoutingMapFormat,
+                                                   TopkFuncType::Naive>);
   } else {
     // Optimized path: async loader + persistent grid + radix topk.
     switch (score_function) {
       case 0:
-        launch(fused_topk_with_score_function_forward_kernel<DataType, BiasType,
+        launch(fused_topk_with_score_function_forward_kernel<DataType, BiasType, RoutingMapFormat,
                                                              TopkFuncType::Radix, 0>);
         break;
       case 1:
-        launch(fused_topk_with_score_function_forward_kernel<DataType, BiasType,
+        launch(fused_topk_with_score_function_forward_kernel<DataType, BiasType, RoutingMapFormat,
                                                              TopkFuncType::Radix, 1>);
         break;
       case 2:
-        launch(fused_topk_with_score_function_forward_kernel<DataType, BiasType,
+        launch(fused_topk_with_score_function_forward_kernel<DataType, BiasType, RoutingMapFormat,
                                                              TopkFuncType::Radix, 2>);
         break;
       default:
@@ -537,32 +606,77 @@ void fused_topk_with_score_function_forward_kernel_launcher(
   }
 }
 
+// Build the expected routing_map shape for a given NVTERoutingMapFormat.
+//   BYTEMAP   -> [num_tokens, num_experts]
+//   BITMAP_U8 -> [num_tokens, ceil(num_experts/8)]
+static std::vector<size_t> expected_routing_map_shape(int num_tokens, int num_experts,
+                                                      NVTERoutingMapFormat format) {
+  const size_t t = static_cast<size_t>(num_tokens);
+  const size_t e = static_cast<size_t>(num_experts);
+  if (format == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8) {
+    return {t, (e + 7) / 8};
+  }
+  return {t, e};
+}
+
 void fused_topk_with_score_function_forward(const Tensor logits, int num_tokens, int num_experts,
                                             int topk, bool use_pre_softmax, int num_groups,
                                             int group_topk, float scaling_factor,
                                             int score_function, const Tensor expert_bias,
                                             Tensor probs, Tensor routing_map,
+                                            NVTERoutingMapFormat routing_map_format,
                                             Tensor intermediate_output, cudaStream_t stream) {
-  TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
-      logits.data.dtype, DataType,
-      if (expert_bias.has_data()) {
-        TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
-            expert_bias.data.dtype, BiasType,
-            fused_topk_with_score_function_forward_kernel_launcher<DataType, BiasType>(
-                reinterpret_cast<DataType *>(logits.data.dptr), num_tokens, num_experts, topk,
-                use_pre_softmax, num_groups, group_topk, scaling_factor, score_function,
-                reinterpret_cast<BiasType *>(expert_bias.data.dptr),
-                reinterpret_cast<DataType *>(probs.data.dptr),
-                reinterpret_cast<bool *>(routing_map.data.dptr),
-                reinterpret_cast<CompType *>(intermediate_output.data.dptr), stream););
-      } else {
-        fused_topk_with_score_function_forward_kernel_launcher<DataType, DataType>(
-            reinterpret_cast<DataType *>(logits.data.dptr), num_tokens, num_experts, topk,
-            use_pre_softmax, num_groups, group_topk, scaling_factor, score_function, nullptr,
-            reinterpret_cast<DataType *>(probs.data.dptr),
-            reinterpret_cast<bool *>(routing_map.data.dptr),
-            reinterpret_cast<CompType *>(intermediate_output.data.dptr), stream);
+  NVTE_CHECK(num_tokens > 0 && num_experts > 0,
+             "num_tokens and num_experts must be positive; got num_tokens=", num_tokens,
+             ", num_experts=", num_experts);
+  const std::vector<size_t> dense_shape{static_cast<size_t>(num_tokens),
+                                        static_cast<size_t>(num_experts)};
+  NVTE_CHECK(logits.data.shape == dense_shape, "logits shape must be [num_tokens, num_experts]=[",
+             num_tokens, ", ", num_experts, "], got ", logits.data.shape);
+  NVTE_CHECK(probs.data.shape == dense_shape, "probs shape must be [num_tokens, num_experts]=[",
+             num_tokens, ", ", num_experts, "], got ", probs.data.shape);
+  NVTE_CHECK(intermediate_output.data.shape == dense_shape,
+             "intermediate_output shape must be [num_tokens, num_experts]=[", num_tokens, ", ",
+             num_experts, "], got ", intermediate_output.data.shape);
+  const auto routing_map_shape =
+      expected_routing_map_shape(num_tokens, num_experts, routing_map_format);
+  NVTE_CHECK(routing_map.data.shape == routing_map_shape, "routing_map shape mismatch for ",
+             (routing_map_format == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8 ? "BITMAP_U8" : "BYTEMAP"),
+             "; expected ", routing_map_shape, ", got ", routing_map.data.shape);
+  if (expert_bias.has_data()) {
+    NVTE_CHECK(expert_bias.data.shape == std::vector<size_t>{static_cast<size_t>(num_experts)},
+               "expert_bias shape must be [num_experts]=[", num_experts, "], got ",
+               expert_bias.data.shape);
+  }
+#define ROUTER_FORWARD_DISPATCH(RoutingMapFormatVal)                                           \
+  TE_ROUTER_PROBS_TYPE_SWITCH_ALL(                                                             \
+      logits.data.dtype, DataType,                                                             \
+      if (expert_bias.has_data()) {                                                            \
+        TE_ROUTER_PROBS_TYPE_SWITCH_ALL(                                                       \
+            expert_bias.data.dtype, BiasType,                                                  \
+            fused_topk_with_score_function_forward_kernel_launcher<DataType, BiasType,         \
+                                                                   RoutingMapFormatVal>(       \
+                reinterpret_cast<DataType *>(logits.data.dptr), num_tokens, num_experts, topk, \
+                use_pre_softmax, num_groups, group_topk, scaling_factor, score_function,       \
+                reinterpret_cast<BiasType *>(expert_bias.data.dptr),                           \
+                reinterpret_cast<DataType *>(probs.data.dptr),                                 \
+                reinterpret_cast<uint8_t *>(routing_map.data.dptr),                            \
+                reinterpret_cast<CompType *>(intermediate_output.data.dptr), stream););        \
+      } else {                                                                                 \
+        fused_topk_with_score_function_forward_kernel_launcher<DataType, DataType,             \
+                                                               RoutingMapFormatVal>(           \
+            reinterpret_cast<DataType *>(logits.data.dptr), num_tokens, num_experts, topk,     \
+            use_pre_softmax, num_groups, group_topk, scaling_factor, score_function, nullptr,  \
+            reinterpret_cast<DataType *>(probs.data.dptr),                                     \
+            reinterpret_cast<uint8_t *>(routing_map.data.dptr),                                \
+            reinterpret_cast<CompType *>(intermediate_output.data.dptr), stream);              \
       });
+  if (routing_map_format == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8) {
+    ROUTER_FORWARD_DISPATCH(NVTE_ROUTING_MAP_FORMAT_BITMAP_U8)
+  } else {
+    ROUTER_FORWARD_DISPATCH(NVTE_ROUTING_MAP_FORMAT_BYTEMAP)
+  }
+#undef ROUTER_FORWARD_DISPATCH
 }
 
 // Backward: grad_probs + intermediate_output + routing_map → grad_logits.
@@ -577,11 +691,12 @@ void fused_topk_with_score_function_forward(const Tensor logits, int num_tokens,
 //   act_buf:   B × E × W × sizeof(CompType) — async-loaded activations
 //   mask_buf:  B × E × W × sizeof(bool)     — async-loaded routing mask
 
-template <typename DataType, int ScoreFunc>
+template <typename DataType, NVTERoutingMapFormat RoutingMapFormat, int ScoreFunc>
 __global__ void fused_topk_with_score_function_backward_kernel(
-    const bool *routing_map, const CompType *intermediate_output, const DataType *grad_probs,
+    const uint8_t *routing_map, const CompType *intermediate_output, const DataType *grad_probs,
     int num_tokens, int num_experts, int topk, bool use_pre_softmax, float scaling_factor,
     DataType *grad_logits, int num_buffers) {
+  constexpr bool kIsBitmap = (RoutingMapFormat == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8);
   /***
      * Section: Global Variables/Addresses init
      * - Each warp is responsible for one token, and has own shared memory buffer.
@@ -604,9 +719,9 @@ __global__ void fused_topk_with_score_function_backward_kernel(
                                       num_buffers);
   shmem_ptr += RawAsyncLoader<CompType>::shmem_bytes(num_experts, num_token_per_block, num_buffers);
 
-  bool *mask_shmem_base = reinterpret_cast<bool *>(shmem_ptr);
-  RawAsyncLoader<bool> mask_loader(mask_shmem_base, warp_id, num_experts, num_token_per_block,
-                                   num_buffers);
+  uint8_t *mask_shmem_base = reinterpret_cast<uint8_t *>(shmem_ptr);
+  RawAsyncLoader<uint8_t> mask_loader(mask_shmem_base, warp_id, num_experts, num_token_per_block,
+                                      num_buffers);
 
   /***
      * Section: Main Loop — persistent grid with double-buffered async load
@@ -623,7 +738,9 @@ __global__ void fused_topk_with_score_function_backward_kernel(
       int pos = first_token * num_experts;
       grad_loader.load_current(grad_probs + pos, num_experts, lane_id);
       act_loader.load_current(intermediate_output + pos, num_experts, lane_id);
-      mask_loader.load_current(routing_map + pos, num_experts, lane_id);
+      if constexpr (!kIsBitmap) {
+        mask_loader.load_current(routing_map + pos, num_experts, lane_id);
+      }
     }
   }
 
@@ -635,7 +752,9 @@ __global__ void fused_topk_with_score_function_backward_kernel(
     if (num_buffers == 1 && round != first_round) {
       grad_loader.load_current(grad_probs + pos, num_experts, lane_id);
       act_loader.load_current(intermediate_output + pos, num_experts, lane_id);
-      mask_loader.load_current(routing_map + pos, num_experts, lane_id);
+      if constexpr (!kIsBitmap) {
+        mask_loader.load_current(routing_map + pos, num_experts, lane_id);
+      }
     }
 
     /***
@@ -643,11 +762,21 @@ __global__ void fused_topk_with_score_function_backward_kernel(
          */
     grad_loader.wait();
     act_loader.wait();
-    mask_loader.wait();
+    if constexpr (!kIsBitmap) {
+      mask_loader.wait();
+    }
 
     DataType *raw_grad = grad_loader.current_buf();
     CompType *local_act = act_loader.current_buf();
-    bool *local_mask = mask_loader.current_buf();
+    uint8_t *local_mask = mask_loader.current_buf();
+    if constexpr (kIsBitmap) {
+      const int bitmap_row_bytes = (num_experts + 7) / 8;
+      const uint8_t *bitmap_row = routing_map + static_cast<size_t>(token_idx) * bitmap_row_bytes;
+      for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
+        local_mask[i] = (bitmap_row[i / 8] >> (i % 8)) & 1u;
+      }
+      __syncwarp();
+    }
 
     // Prefetch next round only when double-buffered; single-buffer loads above.
     if (num_buffers > 1) {
@@ -658,7 +787,9 @@ __global__ void fused_topk_with_score_function_backward_kernel(
           int next_pos = next_token * num_experts;
           grad_loader.start_load(grad_probs + next_pos, num_experts, lane_id);
           act_loader.start_load(intermediate_output + next_pos, num_experts, lane_id);
-          mask_loader.start_load(routing_map + next_pos, num_experts, lane_id);
+          if constexpr (!kIsBitmap) {
+            mask_loader.start_load(routing_map + next_pos, num_experts, lane_id);
+          }
         }
       }
     }
@@ -772,9 +903,9 @@ __global__ void fused_topk_with_score_function_backward_kernel(
   }
 }
 
-template <typename DataType>
+template <typename DataType, NVTERoutingMapFormat RoutingMapFormat>
 void fused_topk_with_score_function_backward_kernel_launcher(
-    const bool *routing_map, const CompType *intermediate_output, const DataType *grad_probs,
+    const uint8_t *routing_map, const CompType *intermediate_output, const DataType *grad_probs,
     int num_tokens, int num_experts, int topk, bool use_pre_softmax, float scaling_factor,
     int score_function, DataType *grad_logits, cudaStream_t stream) {
   NVTE_CHECK(num_experts > 0, "num_experts must be positive, got ", num_experts);
@@ -787,12 +918,12 @@ void fused_topk_with_score_function_backward_kernel_launcher(
   size_t single_buf_shmem =
       RawAsyncLoader<DataType>::shmem_bytes(num_experts, num_token_per_block, 1) +
       RawAsyncLoader<CompType>::shmem_bytes(num_experts, num_token_per_block, 1) +
-      RawAsyncLoader<bool>::shmem_bytes(num_experts, num_token_per_block, 1);
+      RawAsyncLoader<uint8_t>::shmem_bytes(num_experts, num_token_per_block, 1);
   int num_buffers = choose_num_buffers(single_buf_shmem, 0);
   size_t shmem_bytes =
       RawAsyncLoader<DataType>::shmem_bytes(num_experts, num_token_per_block, num_buffers) +
       RawAsyncLoader<CompType>::shmem_bytes(num_experts, num_token_per_block, num_buffers) +
-      RawAsyncLoader<bool>::shmem_bytes(num_experts, num_token_per_block, num_buffers);
+      RawAsyncLoader<uint8_t>::shmem_bytes(num_experts, num_token_per_block, num_buffers);
   check_shared_memory_capacity_num_experts(shmem_bytes, num_experts);
 
   auto launch = [&](auto kernel) {
@@ -807,13 +938,13 @@ void fused_topk_with_score_function_backward_kernel_launcher(
 
   switch (score_function) {
     case 0:
-      launch(fused_topk_with_score_function_backward_kernel<DataType, 0>);
+      launch(fused_topk_with_score_function_backward_kernel<DataType, RoutingMapFormat, 0>);
       break;
     case 1:
-      launch(fused_topk_with_score_function_backward_kernel<DataType, 1>);
+      launch(fused_topk_with_score_function_backward_kernel<DataType, RoutingMapFormat, 1>);
       break;
     case 2:
-      launch(fused_topk_with_score_function_backward_kernel<DataType, 2>);
+      launch(fused_topk_with_score_function_backward_kernel<DataType, RoutingMapFormat, 2>);
       break;
     default:
       NVTE_ERROR("Unsupported score_function: " + std::to_string(score_function));
@@ -821,23 +952,65 @@ void fused_topk_with_score_function_backward_kernel_launcher(
 }
 
 void fused_topk_with_score_function_backward(const Tensor &routing_map,
+                                             NVTERoutingMapFormat routing_map_format,
                                              const Tensor &intermediate_output,
                                              const Tensor &grad_probs, int num_tokens,
                                              int num_experts, int topk, bool use_pre_softmax,
                                              float scaling_factor, int score_function,
                                              Tensor &grad_logits, cudaStream_t stream) {
-  TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
-      grad_logits.data.dtype, DataType,
-      fused_topk_with_score_function_backward_kernel_launcher<DataType>(
-          reinterpret_cast<bool *>(routing_map.data.dptr),
-          reinterpret_cast<CompType *>(intermediate_output.data.dptr),
-          reinterpret_cast<DataType *>(grad_probs.data.dptr), num_tokens, num_experts, topk,
-          use_pre_softmax, scaling_factor, score_function,
+  NVTE_CHECK(num_tokens > 0 && num_experts > 0,
+             "num_tokens and num_experts must be positive; got num_tokens=", num_tokens,
+             ", num_experts=", num_experts);
+  const std::vector<size_t> dense_shape{static_cast<size_t>(num_tokens),
+                                        static_cast<size_t>(num_experts)};
+  NVTE_CHECK(intermediate_output.data.shape == dense_shape,
+             "intermediate_output shape must be [num_tokens, num_experts]=[", num_tokens, ", ",
+             num_experts, "], got ", intermediate_output.data.shape);
+  NVTE_CHECK(grad_probs.data.shape == dense_shape,
+             "grad_probs shape must be [num_tokens, num_experts]=[", num_tokens, ", ", num_experts,
+             "], got ", grad_probs.data.shape);
+  NVTE_CHECK(grad_logits.data.shape == dense_shape,
+             "grad_logits shape must be [num_tokens, num_experts]=[", num_tokens, ", ", num_experts,
+             "], got ", grad_logits.data.shape);
+  const auto routing_map_shape =
+      expected_routing_map_shape(num_tokens, num_experts, routing_map_format);
+  NVTE_CHECK(routing_map.data.shape == routing_map_shape, "routing_map shape mismatch for ",
+             (routing_map_format == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8 ? "BITMAP_U8" : "BYTEMAP"),
+             "; expected ", routing_map_shape, ", got ", routing_map.data.shape);
+#define ROUTER_BACKWARD_DISPATCH(RoutingMapFormatVal)                                         \
+  TE_ROUTER_PROBS_TYPE_SWITCH_ALL(                                                            \
+      grad_logits.data.dtype, DataType,                                                       \
+      fused_topk_with_score_function_backward_kernel_launcher<DataType, RoutingMapFormatVal>( \
+          reinterpret_cast<uint8_t *>(routing_map.data.dptr),                                 \
+          reinterpret_cast<CompType *>(intermediate_output.data.dptr),                        \
+          reinterpret_cast<DataType *>(grad_probs.data.dptr), num_tokens, num_experts, topk,  \
+          use_pre_softmax, scaling_factor, score_function,                                    \
           reinterpret_cast<DataType *>(grad_logits.data.dptr), stream););
+  if (routing_map_format == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8) {
+    ROUTER_BACKWARD_DISPATCH(NVTE_ROUTING_MAP_FORMAT_BITMAP_U8)
+  } else {
+    ROUTER_BACKWARD_DISPATCH(NVTE_ROUTING_MAP_FORMAT_BYTEMAP)
+  }
+#undef ROUTER_BACKWARD_DISPATCH
 }
 
 }  // namespace fused_router
 }  // namespace transformer_engine
+
+void nvte_fused_topk_with_score_function_forward_v2(
+    const NVTETensor logits, int num_tokens, int num_experts, int topk, int use_pre_softmax,
+    int num_groups, int group_topk, float scaling_factor, int score_function,
+    const NVTETensor expert_bias, NVTETensor probs, NVTETensor routing_map,
+    NVTERoutingMapFormat routing_map_format, NVTETensor intermediate_output, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_fused_topk_with_score_function_forward_v2);
+  using namespace transformer_engine;
+  fused_router::fused_topk_with_score_function_forward(
+      *convertNVTETensorCheck(logits), num_tokens, num_experts, topk,
+      static_cast<bool>(use_pre_softmax), num_groups, group_topk, scaling_factor, score_function,
+      *convertNVTETensorCheck(expert_bias), *convertNVTETensorCheck(probs),
+      *convertNVTETensorCheck(routing_map), routing_map_format,
+      *convertNVTETensorCheck(intermediate_output), stream);
+}
 
 void nvte_fused_topk_with_score_function_forward(
     const NVTETensor logits, int num_tokens, int num_experts, int topk, int use_pre_softmax,
@@ -845,12 +1018,26 @@ void nvte_fused_topk_with_score_function_forward(
     const NVTETensor expert_bias, NVTETensor probs, NVTETensor routing_map,
     NVTETensor intermediate_output, cudaStream_t stream) {
   NVTE_API_CALL(nvte_fused_topk_with_score_function_forward);
+  nvte_fused_topk_with_score_function_forward_v2(
+      logits, num_tokens, num_experts, topk, use_pre_softmax, num_groups, group_topk,
+      scaling_factor, score_function, expert_bias, probs, routing_map,
+      NVTE_ROUTING_MAP_FORMAT_BYTEMAP, intermediate_output, stream);
+}
+
+void nvte_fused_topk_with_score_function_backward_v2(const NVTETensor routing_map,
+                                                     NVTERoutingMapFormat routing_map_format,
+                                                     const NVTETensor intermediate_output,
+                                                     const NVTETensor grad_probs, int num_tokens,
+                                                     int num_experts, int topk, int use_pre_softmax,
+                                                     float scaling_factor, int score_function,
+                                                     NVTETensor grad_logits, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_fused_topk_with_score_function_backward_v2);
   using namespace transformer_engine;
-  fused_router::fused_topk_with_score_function_forward(
-      *convertNVTETensorCheck(logits), num_tokens, num_experts, topk,
-      static_cast<bool>(use_pre_softmax), num_groups, group_topk, scaling_factor, score_function,
-      *convertNVTETensorCheck(expert_bias), *convertNVTETensorCheck(probs),
-      *convertNVTETensorCheck(routing_map), *convertNVTETensorCheck(intermediate_output), stream);
+  fused_router::fused_topk_with_score_function_backward(
+      *convertNVTETensorCheck(routing_map), routing_map_format,
+      *convertNVTETensorCheck(intermediate_output), *convertNVTETensorCheck(grad_probs), num_tokens,
+      num_experts, topk, static_cast<bool>(use_pre_softmax), scaling_factor, score_function,
+      *convertNVTETensorCheck(grad_logits), stream);
 }
 
 void nvte_fused_topk_with_score_function_backward(const NVTETensor routing_map,
@@ -860,10 +1047,7 @@ void nvte_fused_topk_with_score_function_backward(const NVTETensor routing_map,
                                                   float scaling_factor, int score_function,
                                                   NVTETensor grad_logits, cudaStream_t stream) {
   NVTE_API_CALL(nvte_fused_topk_with_score_function_backward);
-  using namespace transformer_engine;
-  fused_router::fused_topk_with_score_function_backward(
-      *convertNVTETensorCheck(routing_map), *convertNVTETensorCheck(intermediate_output),
-      *convertNVTETensorCheck(grad_probs), num_tokens, num_experts, topk,
-      static_cast<bool>(use_pre_softmax), scaling_factor, score_function,
-      *convertNVTETensorCheck(grad_logits), stream);
+  nvte_fused_topk_with_score_function_backward_v2(
+      routing_map, NVTE_ROUTING_MAP_FORMAT_BYTEMAP, intermediate_output, grad_probs, num_tokens,
+      num_experts, topk, use_pre_softmax, scaling_factor, score_function, grad_logits, stream);
 }
