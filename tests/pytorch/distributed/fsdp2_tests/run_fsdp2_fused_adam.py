@@ -1388,11 +1388,7 @@ def test_fused_adam_hybrid_vs_base_recipe_parity(hybrid_recipe_name):
         base_first,
         rtol=0.0,
         atol=0.0,
-        msg=lambda m: (
-            f"[{hybrid_recipe_name} vs {base_recipe_name}] first forward output not"
-            f" bitwise-identical (a same-format hybrid must match its vanilla recipe"
-            f" before any optimizer step): {m}"
-        ),
+        msg=lambda m: f"[{hybrid_recipe_name} vs {base_recipe_name}] first forward output not bitwise-identical (a same-format hybrid must match its vanilla recipe before any optimizer step): {m}",
     )
 
     # (2) Every per-step loss: bitwise-identical across the whole optimizer loop.
@@ -1402,10 +1398,7 @@ def test_fused_adam_hybrid_vs_base_recipe_parity(hybrid_recipe_name):
             b_loss,
             rtol=0.0,
             atol=0.0,
-            msg=lambda m, s=step: (
-                f"[{hybrid_recipe_name} vs {base_recipe_name}] step {s} loss not"
-                f" bitwise-identical to the vanilla recipe: {m}"
-            ),
+            msg=lambda m, s=step: f"[{hybrid_recipe_name} vs {base_recipe_name}] step {s} loss not bitwise-identical to the vanilla recipe: {m}",
         )
 
     # (3) Backward: every weight-gradient shard at every step bitwise-identical
@@ -1423,10 +1416,7 @@ def test_fused_adam_hybrid_vs_base_recipe_parity(hybrid_recipe_name):
                 b_grad,
                 rtol=0.0,
                 atol=0.0,
-                msg=lambda m, s=step, i=i: (
-                    f"[{hybrid_recipe_name} vs {base_recipe_name}] step {s} param {i}"
-                    f" gradient not bitwise-identical to the vanilla recipe: {m}"
-                ),
+                msg=lambda m, s=step, i=i: f"[{hybrid_recipe_name} vs {base_recipe_name}] step {s} param {i} gradient not bitwise-identical to the vanilla recipe: {m}",
             )
 
 
@@ -1471,10 +1461,7 @@ def test_fused_adam_hybrid_scale_uniform_across_shards(hybrid_recipe_name):
                 gathered[0],
                 rtol=0.0,
                 atol=0.0,
-                msg=lambda m, n=name, r=r: (
-                    f"{n}: rank {r} rowwise _scale_inv differs from rank 0 -- cross-shard "
-                    f"amax reduction was not applied to the hybrid current-scaling weight: {m}"
-                ),
+                msg=lambda m, n=name, r=r: f"{n}: rank {r} rowwise _scale_inv differs from rank 0 -- cross-shard amax reduction was not applied to the hybrid current-scaling weight: {m}",
             )
         checked += 1
     assert checked > 0, "no hybrid current-scaling weights found to check"
@@ -1572,13 +1559,13 @@ def test_fused_adam_hybrid_mxfp8_awkward_shard_shape():
     assert per_rank_out % 32 == 0, (
         f"Test setup error: per_rank_out={per_rank_out} (= out_features / world_size, "
         f"world_size={world_size}) must be a multiple of the MXFP8 block size (32) so the "
-        f"sharded weight's data stays block-aligned. Pick a per_rank_out divisible by 32."
+        "sharded weight's data stays block-aligned. Pick a per_rank_out divisible by 32."
     )
     assert per_rank_out % 128 != 0, (
         f"Test setup error: per_rank_out={per_rank_out} must NOT be a multiple of 128, or the "
-        f"rowwise scale-inv needs no alignment padding and this test stops exercising the MXFP8 "
-        f"unpad-before-gather / pad-after-gather path it exists to cover. Pick a per_rank_out "
-        f"divisible by 32 but not 128 (e.g. 96)."
+        "rowwise scale-inv needs no alignment padding and this test stops exercising the MXFP8 "
+        "unpad-before-gather / pad-after-gather path it exists to cover. Pick a per_rank_out "
+        "divisible by 32 but not 128 (e.g. 96)."
     )
 
     for recipe_name in ("HybridMXFP8", "HybridMixed_MXFP8_FP8"):

@@ -201,9 +201,7 @@ def test_hybrid_nvfp4_transformer_layer():
 # cross-format hybrid bitwise). Needs both MXFP8 and NVFP4 hardware support.
 
 _cross_format_available = mxfp8_available and nvfp4_available
-_reason_for_no_cross_format = (
-    reason_for_no_mxfp8 if not mxfp8_available else reason_for_no_nvfp4
-)
+_reason_for_no_cross_format = reason_for_no_mxfp8 if not mxfp8_available else reason_for_no_nvfp4
 
 
 @pytest.mark.skipif(

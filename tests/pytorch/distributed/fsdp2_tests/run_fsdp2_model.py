@@ -534,9 +534,9 @@ def test_distributed_hybrid(hybrid_recipe_name):
 
     # Params must stay HybridQuantizedTensor after the optimizer step -- guards a
     # silent dequantize-to-bf16 through the FSDP2 / optimizer path.
-    assert _hybrid_param_count() == hybrid_count, (
-        "HybridQuantizedTensor params lost their quantized type after optimizer.step()"
-    )
+    assert (
+        _hybrid_param_count() == hybrid_count
+    ), "HybridQuantizedTensor params lost their quantized type after optimizer.step()"
 
     # FSDP2 quantized all-gather must match a manual fp32 dequant-then-allgather.
     _check_hybrid_fsdp2_allgather(model)
@@ -619,9 +619,9 @@ def test_distributed_hybrid_reshard_after_forward(hybrid_recipe_name):
 
     # Params must survive the split/as_strided/slice reshard dispatch ops with
     # their hybrid quantized type intact.
-    assert _hybrid_param_count() == hybrid_count, (
-        "HybridQuantizedTensor params lost their quantized type after optimizer.step()"
-    )
+    assert (
+        _hybrid_param_count() == hybrid_count
+    ), "HybridQuantizedTensor params lost their quantized type after optimizer.step()"
 
 
 if __name__ == "__main__":
