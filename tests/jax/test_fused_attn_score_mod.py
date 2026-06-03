@@ -181,6 +181,35 @@ def _reference_score_mod_softcap(softcap):
 class ScoreModFusedAttnRunner(FusedAttnRunner):
     """FusedAttnRunner configured for score_mod tests."""
 
+    ATTN_BIAS_TYPE = AttnBiasType.NO_BIAS
+    ATTN_MASK_TYPE = AttnMaskType.NO_MASK
+    SOFTMAX_TYPE = AttnSoftmaxType.VANILLA_SOFTMAX
+    DROPOUT_PROBABILITY = 0.0
+    IS_TRAINING = True
+    QKV_LAYOUT = QKVLayout.BSHD_BSHD_BSHD
+    BIAS_SHAPE = None
+    WINDOW_SIZE = None
+    SEQ_DESC_FORMAT = SeqDescFormat.Mask
+    CP_LOAD_BALANCED = False
+    DOUTPUT_SEED = None
+    RTOL = 5e-2
+    ATOL = 5e-2
+
+    @staticmethod
+    def require_cudnn_frontend():
+        """Skip unless cuDNN Python frontend supports score_mod SDPA."""
+        try:
+            cudnn = tex_attention._import_cudnn_for_score_mod()
+        except ImportError:
+            pytest.skip("cuDNN Python frontend is required for score_mod")
+        version = tuple(int(part) for part in cudnn.backend_version_string().split(".")[:2])
+        if version < (9, 6):
+            pytest.skip("cuDNN score_mod SDPA requires cuDNN frontend 9.6 or newer")
+
+    @staticmethod
+    def input_scale(head_dim):
+        return 1.0 / sqrt(head_dim)
+
     @classmethod
     def generic(
         cls,
@@ -196,18 +225,23 @@ class ScoreModFusedAttnRunner(FusedAttnRunner):
         score_mod_tensors=None,
         score_mod_bprop_tensors=None,
         doutput_seed=None,
-        rtol=5e-2,
-        atol=5e-2,
+        rtol=None,
+        atol=None,
         number_of_devices=1,
         mesh_shape=(1, 1, 1),
         mesh_axes=("dp", "cp", "tp"),
         mesh_resource=None,
     ):
         """Build a runner for a separate-Q/K/V score_mod fused-attention case."""
-        input_scale = 1.0 / sqrt(head_dim)
         kwargs = {}
         if mesh_resource is not None:
             kwargs["mesh_resource"] = mesh_resource
+        if doutput_seed is None:
+            doutput_seed = cls.DOUTPUT_SEED
+        if rtol is None:
+            rtol = cls.RTOL
+        if atol is None:
+            atol = cls.ATOL
         return cls(
             batch,
             seqlen,
@@ -216,26 +250,26 @@ class ScoreModFusedAttnRunner(FusedAttnRunner):
             num_heads,
             head_dim,
             head_dim,
-            AttnBiasType.NO_BIAS,
-            AttnMaskType.NO_MASK,
-            AttnSoftmaxType.VANILLA_SOFTMAX,
-            0.0,
+            cls.ATTN_BIAS_TYPE,
+            cls.ATTN_MASK_TYPE,
+            cls.SOFTMAX_TYPE,
+            cls.DROPOUT_PROBABILITY,
             dtype,
-            True,
-            QKVLayout.BSHD_BSHD_BSHD,
-            None,
-            None,
-            SeqDescFormat.Mask,
+            cls.IS_TRAINING,
+            cls.QKV_LAYOUT,
+            cls.BIAS_SHAPE,
+            cls.WINDOW_SIZE,
+            cls.SEQ_DESC_FORMAT,
             number_of_devices=number_of_devices,
             mesh_shape=mesh_shape,
             mesh_axes=mesh_axes,
-            cp_load_balanced=False,
+            cp_load_balanced=cls.CP_LOAD_BALANCED,
             score_mod=score_mod,
             score_mod_bprop=score_mod_bprop,
             score_mod_tensors=score_mod_tensors,
             score_mod_bprop_tensors=score_mod_bprop_tensors,
             score_mod_reference=score_mod_reference,
-            input_scale=input_scale,
+            input_scale=cls.input_scale(head_dim),
             doutput_seed=doutput_seed,
             rtol=rtol,
             atol=atol,
@@ -306,8 +340,6 @@ class ScoreModFusedAttnRunner(FusedAttnRunner):
             mesh_resource=mesh_resource,
             score_mod=_score_mod_post_scale_bias,
             score_mod_reference=_reference_score_mod_post_scale_bias,
-            rtol=5e-2,
-            atol=5e-2,
         )
 
     @classmethod
@@ -340,8 +372,6 @@ class ScoreModFusedAttnRunner(FusedAttnRunner):
             score_mod_tensors={"neg_inf": -1e9},
             score_mod_bprop_tensors={"zero": 0.0},
             score_mod_reference=_reference_score_mod_causal,
-            rtol=5e-2,
-            atol=5e-2,
         )
 
 
@@ -353,16 +383,6 @@ def init():
     # Calling customcalls before jax may cause CUDA uninitialize error
     _ = jnp.zeros(0)
     yield
-
-
-def _require_cudnn_frontend_score_mod():
-    try:
-        cudnn = tex_attention._import_cudnn_for_score_mod()
-    except ImportError:
-        pytest.skip("cuDNN Python frontend is required for score_mod")
-    version = tuple(int(part) for part in cudnn.backend_version_string().split(".")[:2])
-    if version < (9, 6):
-        pytest.skip("cuDNN score_mod SDPA requires cuDNN frontend 9.6 or newer")
 
 
 def _identity_score_mod(_graph, score, _tensors):
@@ -706,7 +726,7 @@ def test_fused_attn_score_mod_config_leaves_unkeyed_bound_methods_uncached():
 @pytest.mark.skipif(not _has_cudnn_frontend_python(), reason="cuDNN Python frontend is required")
 def test_fused_attn_score_mod_post_scale_bias_optional_bprop():
     """Post-scale-bias score_mod matches the JAX reference without explicit bprop."""
-    _require_cudnn_frontend_score_mod()
+    ScoreModFusedAttnRunner.require_cudnn_frontend()
     runner = ScoreModFusedAttnRunner.post_scale_bias(1, 64, 2, 128, jnp.float16)
     runner.test_forward()
     runner.test_backward()
@@ -715,7 +735,7 @@ def test_fused_attn_score_mod_post_scale_bias_optional_bprop():
 @pytest.mark.skipif(not _has_cudnn_frontend_python(), reason="cuDNN Python frontend is required")
 def test_fused_attn_score_mod_causal_with_bprop():
     """Causal score_mod matches the JAX reference with explicit bprop."""
-    _require_cudnn_frontend_score_mod()
+    ScoreModFusedAttnRunner.require_cudnn_frontend()
     runner = ScoreModFusedAttnRunner.causal(1, 64, 2, 128, jnp.float16)
     runner.test_forward()
     runner.test_backward()
@@ -728,6 +748,6 @@ def test_fused_attn_score_mod_causal_with_bprop():
 )
 def test_fused_attn_score_mod_softcap_with_bprop():
     """Softcap score_mod matches the JAX reference with explicit bprop."""
-    _require_cudnn_frontend_score_mod()
+    ScoreModFusedAttnRunner.require_cudnn_frontend()
     runner = ScoreModFusedAttnRunner.softcap(1, 16, 2, 64, jnp.float16)
     runner.test_backward()
