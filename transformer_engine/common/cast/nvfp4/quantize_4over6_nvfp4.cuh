@@ -105,6 +105,11 @@ struct ScalePair {
   float global_encode_scale;
 };
 
+struct FP16ErrorScalePair {
+  uint32_t map4;
+  uint32_t map6;
+};
+
 template <NVTENVFP44Over6Mode kMode>
 __device__ __forceinline__ float compute_error_rn(const float diff) {
   if constexpr (kMode == kNVTENVFP44Over6MinMSE) {
@@ -200,42 +205,50 @@ __device__ __forceinline__ uint8_t fp8_bits(const nvfp4_scale_t sf) {
   return *reinterpret_cast<const uint8_t *>(&sf);
 }
 
-__device__ __forceinline__ float2 e2m1x2_scaled_e4m3_to_float2(const uint32_t e2m1_byte,
-                                                               const nvfp4_scale_t sf) {
-  float2 result;
-  const uint32_t sf_byte = static_cast<uint32_t>(fp8_bits(sf));
+__device__ __forceinline__ FP16ErrorScalePair compute_fp16_error_scales(const ScalePair &scales) {
+  FP16ErrorScalePair result;
+  const uint32_t packed_scales = static_cast<uint32_t>(fp8_bits(scales.map4)) |
+                                 (static_cast<uint32_t>(fp8_bits(scales.map6)) << 8);
   asm volatile(
       "{\n"
-      ".reg .b8 byte0, byte1, byte2, byte3;\n"
       ".reg .b16 fp8_pair;\n"
-      ".reg .b16 scale_h, unused_h;\n"
-      ".reg .b16 lo, hi;\n"
-      ".reg .b32 q_h2;\n"
+      ".reg .b16 map4_h, map6_h;\n"
       ".reg .b32 scale_h2;\n"
-      ".reg .b32 prod_h2;\n"
-      "mov.b32 {byte0, byte1, byte2, byte3}, %2;\n"
-      "cvt.rn.f16x2.e2m1x2 q_h2, byte0;\n"
-      "cvt.u16.u32 fp8_pair, %3;\n"
+      "cvt.u16.u32 fp8_pair, %2;\n"
       "cvt.rn.f16x2.e4m3x2 scale_h2, fp8_pair;\n"
-      "mov.b32 {scale_h, unused_h}, scale_h2;\n"
-      "mov.b32 scale_h2, {scale_h, scale_h};\n"
-      "mul.rn.f16x2 prod_h2, q_h2, scale_h2;\n"
+      "mov.b32 {map4_h, map6_h}, scale_h2;\n"
+      "mov.b32 %0, {map4_h, map4_h};\n"
+      "mov.b32 %1, {map6_h, map6_h};\n"
+      "}"
+      : "=r"(result.map4), "=r"(result.map6)
+      : "r"(packed_scales));
+  return result;
+}
+
+__device__ __forceinline__ float2 f16x2_scaled_to_float2(const uint32_t q_h2,
+                                                         const uint32_t scale_h2) {
+  float2 result;
+  asm volatile(
+      "{\n"
+      ".reg .b16 lo, hi;\n"
+      ".reg .b32 prod_h2;\n"
+      "mul.rn.f16x2 prod_h2, %2, %3;\n"
       "mov.b32 {lo, hi}, prod_h2;\n"
       "cvt.f32.f16 %0, lo;\n"
       "cvt.f32.f16 %1, hi;\n"
       "}"
       : "=f"(result.x), "=f"(result.y)
-      : "r"(e2m1_byte), "r"(sf_byte));
+      : "r"(q_h2), "r"(scale_h2));
   return result;
 }
 
 template <typename Cfg>
-__device__ __forceinline__ void accumulate_fp16_scaled_error_pair(const uint32_t e2m1_byte,
+__device__ __forceinline__ void accumulate_fp16_scaled_error_pair(const uint32_t q_h2,
                                                                   const float x0, const float x1,
-                                                                  const nvfp4_scale_t sf,
+                                                                  const uint32_t scale_h2,
                                                                   const float global_encode_scale,
                                                                   float *err) {
-  const float2 candidate = e2m1x2_scaled_e4m3_to_float2(e2m1_byte, sf);
+  const float2 candidate = f16x2_scaled_to_float2(q_h2, scale_h2);
   const float original0 = __fmul_rn(x0, global_encode_scale);
   const float original1 = __fmul_rn(x1, global_encode_scale);
   const float diff0 = __fsub_rn(candidate.x, original0);
@@ -247,7 +260,8 @@ __device__ __forceinline__ void accumulate_fp16_scaled_error_pair(const uint32_t
 template <typename Cfg, int E4M3_MAX>
 __device__ __forceinline__ uint32_t cvt_fp32_to_fp4_8x_with_error(
     const float (&x)[8], const float block_scale_inverse, const nvfp4_scale_t sf,
-    const float global_amax, const float global_encode_scale, float *err) {
+    const uint32_t fp16_error_scale, const float global_amax, const float global_encode_scale,
+    float *err) {
   uint32_t out = 0;
   uint32_t out_dequant_1 = 0;
   uint32_t out_dequant_2 = 0;
@@ -282,13 +296,14 @@ __device__ __forceinline__ uint32_t cvt_fp32_to_fp4_8x_with_error(
   }
 
   if constexpr (Cfg::err_use_fast_math) {
-    accumulate_fp16_scaled_error_pair<Cfg>(out & 0xFFu, x[0], x[1], sf, global_encode_scale, err);
-    accumulate_fp16_scaled_error_pair<Cfg>((out >> 8) & 0xFFu, x[2], x[3], sf, global_encode_scale,
-                                           err);
-    accumulate_fp16_scaled_error_pair<Cfg>((out >> 16) & 0xFFu, x[4], x[5], sf, global_encode_scale,
-                                           err);
-    accumulate_fp16_scaled_error_pair<Cfg>((out >> 24) & 0xFFu, x[6], x[7], sf, global_encode_scale,
-                                           err);
+    accumulate_fp16_scaled_error_pair<Cfg>(out_dequant_1, x[0], x[1], fp16_error_scale,
+                                           global_encode_scale, err);
+    accumulate_fp16_scaled_error_pair<Cfg>(out_dequant_2, x[2], x[3], fp16_error_scale,
+                                           global_encode_scale, err);
+    accumulate_fp16_scaled_error_pair<Cfg>(out_dequant_3, x[4], x[5], fp16_error_scale,
+                                           global_encode_scale, err);
+    accumulate_fp16_scaled_error_pair<Cfg>(out_dequant_4, x[6], x[7], fp16_error_scale,
+                                           global_encode_scale, err);
   } else {
     const float sf_float = static_cast<float>(sf);
     accumulate_dequant_error<Cfg, E4M3_MAX, 0>(out_dequant_1, x[0], sf_float, global_amax, err);
@@ -310,18 +325,22 @@ __device__ __forceinline__ CandidatePair make_candidates(const float (&x0)[8], c
   CandidatePair candidates;
   candidates.map4.err = 0.0f;
   candidates.map6.err = 0.0f;
+  FP16ErrorScalePair fp16_error_scales{};
+  if constexpr (Cfg::err_use_fast_math) {
+    fp16_error_scales = compute_fp16_error_scales(scales);
+  }
   candidates.map4.packed[0] = cvt_fp32_to_fp4_8x_with_error<Cfg, E4M3_MAX>(
-      x0, scales.inv_map4, scales.map4, global_amax, scales.global_encode_scale,
-      &candidates.map4.err);
+      x0, scales.inv_map4, scales.map4, fp16_error_scales.map4, global_amax,
+      scales.global_encode_scale, &candidates.map4.err);
   candidates.map6.packed[0] = cvt_fp32_to_fp4_8x_with_error<Cfg, E4M3_MAX>(
-      x0, scales.inv_map6, scales.map6, global_amax, scales.global_encode_scale,
-      &candidates.map6.err);
+      x0, scales.inv_map6, scales.map6, fp16_error_scales.map6, global_amax,
+      scales.global_encode_scale, &candidates.map6.err);
   candidates.map4.packed[1] = cvt_fp32_to_fp4_8x_with_error<Cfg, E4M3_MAX>(
-      x1, scales.inv_map4, scales.map4, global_amax, scales.global_encode_scale,
-      &candidates.map4.err);
+      x1, scales.inv_map4, scales.map4, fp16_error_scales.map4, global_amax,
+      scales.global_encode_scale, &candidates.map4.err);
   candidates.map6.packed[1] = cvt_fp32_to_fp4_8x_with_error<Cfg, E4M3_MAX>(
-      x1, scales.inv_map6, scales.map6, global_amax, scales.global_encode_scale,
-      &candidates.map6.err);
+      x1, scales.inv_map6, scales.map6, fp16_error_scales.map6, global_amax,
+      scales.global_encode_scale, &candidates.map6.err);
   return candidates;
 }
 
