@@ -64,7 +64,7 @@ def init():
     yield
 
 
-@partial(jax.jit, static_argnums=(6, 7, 8, 9, 11))
+@partial(jax.jit, static_argnums=(6, 7, 8, 9, 11, 12))
 def general_dot_product_attention(
     query: ArrayLike,
     key: ArrayLike,
@@ -78,6 +78,7 @@ def general_dot_product_attention(
     dropout_rate: float,
     dropout_rng: ArrayLike,
     dtype: DTypeLike,
+    score_mod_reference: Optional[Callable[[Array], Array]] = None,
 ) -> Array:
     """
     Similar to flax.linen.dot_product_attention but with GQA support
@@ -105,6 +106,9 @@ def general_dot_product_attention(
         if mask.ndim != logits.ndim:
             mask = jnp.expand_dims(mask, axis=-3)
         logits = jnp.where(mask, jnp.finfo(dtype).min, logits)
+
+    if score_mod_reference is not None:
+        logits = score_mod_reference(logits.astype(jnp.float32))
 
     match softmax_type:
         case AttnSoftmaxType.VANILLA_SOFTMAX:
@@ -136,30 +140,6 @@ def general_dot_product_attention(
     context_shape = query.shape[:-1] + (value.shape[-1],)
     context = jnp.reshape(context, context_shape)
     return context
-
-
-def score_mod_reference_dot_product_attention(
-    query: ArrayLike,
-    key: ArrayLike,
-    value: ArrayLike,
-    score_mod_reference: Callable[[Array], Array],
-    scale_factor: float,
-    dtype: DTypeLike,
-) -> Array:
-    """Reference DPA path for cuDNN score_mod tests."""
-    query, key, value = promote_dtype(query, key, value, dtype=dtype)
-    input_dtype = query.dtype
-    b, s_q, h_q, d = query.shape
-    _, s_kv, h_kv, _ = key.shape
-    assert (h_q % h_kv == 0) and (h_q >= h_kv)
-    num_groups = h_q // h_kv
-    grouped_query = jnp.reshape(query, (b, s_q, h_kv, num_groups, d))
-    logits = scale_factor * jnp.einsum("...qhgd,...khd->...hgqk", grouped_query, key)
-    logits = score_mod_reference(logits.astype(jnp.float32))
-    softmax_out = jax.nn.softmax(logits, axis=-1).astype(input_dtype)
-    context = jnp.einsum("...hgqk,...khd->...qhgd", softmax_out, value)
-    context_shape = query.shape[:-1] + (value.shape[-1],)
-    return jnp.reshape(context, context_shape)
 
 
 @jax.jit
@@ -306,15 +286,13 @@ def jax_dpa(query, key, value, bias, softmax_offset, mask, dropout_rng, **kwargs
             raise ValueError(
                 "score_mod reference path expects separate BSHD query/key/value tensors."
             )
-        return score_mod_reference_dot_product_attention(
-            query,
-            key,
-            value,
-            score_mod_reference,
-            kwargs["scaling_factor"],
-            jnp.float32,
-        ).astype(query.dtype)
-
+        deterministic = not kwargs.get("is_training", False)
+        dropout_probability = kwargs.get("dropout_probability", 0.0)
+        softmax_type = kwargs.get("softmax_type", AttnSoftmaxType.VANILLA_SOFTMAX)
+    else:
+        deterministic = not kwargs["is_training"]
+        dropout_probability = kwargs["dropout_probability"]
+        softmax_type = kwargs["softmax_type"]
     output = general_dot_product_attention(
         query,
         key,
@@ -322,12 +300,13 @@ def jax_dpa(query, key, value, bias, softmax_offset, mask, dropout_rng, **kwargs
         softmax_offset,
         bias,
         mask,
-        deterministic=not kwargs["is_training"],
+        deterministic=deterministic,
         scale_factor=kwargs["scaling_factor"],
-        dropout_rate=kwargs["dropout_probability"],
-        softmax_type=kwargs["softmax_type"],
+        dropout_rate=dropout_probability,
+        softmax_type=softmax_type,
         dropout_rng=dropout_rng,
         dtype=jnp.float32,
+        score_mod_reference=score_mod_reference,
     )
     return output.astype(query.dtype)
 
