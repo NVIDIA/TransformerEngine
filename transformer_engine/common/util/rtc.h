@@ -79,6 +79,29 @@ class Kernel {
    */
   void set_function_cache_config(int device_id, CUfunc_cache cache_config);
 
+  /*! \brief Set a kernel function attribute (driver-API wrapper of
+   *  cuFuncSetAttribute, e.g. for dynamic shared memory size).
+   */
+  void set_function_attribute(int device_id, CUfunction_attribute attr, int value);
+
+  /*! \brief Wrapper of cuOccupancyMaxActiveBlocksPerMultiprocessor for a
+   *  runtime-compiled function.
+   */
+  int occupancy_max_active_blocks_per_sm(int device_id, int block_size,
+                                         std::size_t dynamic_smem_bytes);
+
+  /*! \brief Cooperative launch of an RTC kernel via cuLaunchCooperativeKernel.
+   */
+  template <typename... ArgTs>
+  void launch_cooperative(int device_id, const dim3 grid_dim, const dim3 block_dim,
+                          unsigned int shared_mem_bytes, cudaStream_t stream, ArgTs &&...args) {
+    cuda_driver::ensure_context_exists();
+    void *arg_ptrs[] = {const_cast<void *>(static_cast<const void *>(&args))...};
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuLaunchCooperativeKernel, get_function(device_id), grid_dim.x,
+                                grid_dim.y, grid_dim.z, block_dim.x, block_dim.y, block_dim.z,
+                                shared_mem_bytes, static_cast<CUstream>(stream), arg_ptrs);
+  }
+
  private:
   /*! \brief Mangled function name */
   std::string mangled_name_;
@@ -115,7 +138,8 @@ class KernelManager {
    *                         primarily for debugging
    */
   void compile(const std::string &kernel_label, const std::string &kernel_name,
-               const std::string &code, const std::string &filename);
+               const std::string &code, const std::string &filename,
+               const std::vector<std::string> &extra_options = {});
 
   /*! \brief Whether CUDA kernel has been compiled for CUDA device
    *
@@ -156,6 +180,24 @@ class KernelManager {
    * \param[in] cache_config     Prefered cache configuration
    */
   void set_cache_config(const std::string &kernel_label, CUfunc_cache cache_config);
+
+  /*! \brief Set a function attribute (e.g. cuFuncAttributeMaxDynamicSharedMemorySize). */
+  void set_function_attribute(const std::string &kernel_label, CUfunction_attribute attr, int value);
+
+  /*! \brief Query cuOccupancyMaxActiveBlocksPerMultiprocessor for a compiled kernel. */
+  int occupancy_max_active_blocks_per_sm(const std::string &kernel_label, int block_size,
+                                         std::size_t dynamic_smem_bytes);
+
+  /*! \brief Cooperative launch wrapper (cuLaunchCooperativeKernel). */
+  template <typename... ArgTs>
+  void launch_cooperative(const std::string &kernel_label, const dim3 grid_dim, const dim3 block_dim,
+                          unsigned int shared_mem_bytes, cudaStream_t stream, ArgTs &&...args) {
+    const int device_id = cuda::current_device();
+    const auto key = get_kernel_cache_key(kernel_label, device_id);
+    NVTE_CHECK(kernel_cache_.count(key) > 0, "Attempted to launch RTC kernel before compilation");
+    kernel_cache_.at(key).launch_cooperative(device_id, grid_dim, block_dim, shared_mem_bytes,
+                                             stream, std::forward<ArgTs>(args)...);
+  }
 
  private:
   /*! \brief Compiled kernels */

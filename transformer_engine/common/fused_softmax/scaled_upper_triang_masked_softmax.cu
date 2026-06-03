@@ -4,6 +4,10 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#ifdef __CUDACC_RTC__
+#include <cuda_fp16.h>
+#include "utils.cuh"
+#else
 #include <assert.h>
 #include <cuda.h>
 #include <cuda_fp16.h>
@@ -17,9 +21,27 @@
 
 #include "../common.h"
 #include "../util/logging.h"
+#include "../util/rtc.h"
+#include "../util/string.h"
 #include "../utils.cuh"
+#include "string_code_fused_softmax_scaled_upper_triang_masked_softmax_cu.h"
+#endif
 
 namespace transformer_engine {
+
+#ifdef __CUDACC_RTC__
+using fp16 = half;
+using bf16 = nv_bfloat16;
+#endif
+
+#ifndef NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX
+#define NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX 0
+#endif
+
+template <typename T>
+__device__ __forceinline__ T neg_infinity() {
+  return -static_cast<T>(__int_as_float(0x7f800000));
+}
 
 template <typename Datatype, int ELEMENTS_PER_LDG>
 __device__ __inline__ void copy_vector(Datatype *dst, const Datatype *src);
@@ -166,13 +188,13 @@ __global__ void scaled_upper_triang_masked_softmax_warp_forward(output_t *dst, c
           if ((element_index + element) < batch_element_count) {
             elements[i][it + element] = (acc_t)temp_data[element] * scale;
           } else {
-            elements[i][it + element] = -std::numeric_limits<acc_t>::infinity();
+            elements[i][it + element] = neg_infinity<acc_t>();
           }
         }
       } else {
 #pragma unroll
         for (int element = 0; element < ELEMENTS_PER_LDG_STG; ++element) {
-          elements[i][it + element] = -std::numeric_limits<acc_t>::infinity();
+          elements[i][it + element] = neg_infinity<acc_t>();
         }
       }
     }
@@ -196,7 +218,7 @@ __global__ void scaled_upper_triang_masked_softmax_warp_forward(output_t *dst, c
 #pragma unroll
     for (int it = 0; it < WARP_ITERATIONS; ++it) {
       if (it < warp_iteration_limit) {
-        elements[i][it] = std::exp((elements[i][it] - max_value[i]));
+        elements[i][it] = expf((elements[i][it] - max_value[i]));
         sum[i] += elements[i][it];
       }
     }
@@ -333,6 +355,42 @@ __global__ void scaled_upper_triang_masked_softmax_warp_backward(output_t *gradI
   }
 }
 
+#ifdef __CUDACC_RTC__
+
+#else
+
+namespace {
+
+constexpr const char *kRtcSourceFile =
+    "transformer_engine/common/fused_softmax/scaled_upper_triang_masked_softmax.cu";
+
+template <typename Type>
+std::string make_softmax_rtc_code(int log2_elements) {
+  (void)log2_elements;
+  std::string code = string_code_fused_softmax_scaled_upper_triang_masked_softmax_cu;
+  return code;
+}
+
+template <typename Type>
+std::string make_softmax_rtc_label(const char *direction, int log2_elements) {
+  return concat_strings("fused_softmax,variant=upper_triang,direction=", direction,
+                        ",type=", TypeInfo<Type>::name, ",log2=", log2_elements, ",fast_math=1");
+}
+
+template <typename Type>
+std::string make_softmax_rtc_kernel_name(const char *kernel_name, int log2_elements) {
+  return concat_strings("&", kernel_name, "<", TypeInfo<Type>::name, ",", TypeInfo<Type>::name,
+                        ",float,", log2_elements, ">");
+}
+
+void throw_nvrtc_required(const char *direction) {
+  NVTE_ERROR("Fused upper-triangular softmax RTC path is disabled for ", direction,
+             ". Set NVTE_DISABLE_NVRTC=0 or rebuild with "
+             "NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX=ON.");
+}
+
+}  // namespace
+
 template <typename input_t, typename output_t, typename acc_t>
 void dispatch_scaled_upper_triang_masked_softmax_forward(output_t *dst, const input_t *src,
                                                          const input_t scale, int softmax_elements,
@@ -365,6 +423,20 @@ void dispatch_scaled_upper_triang_masked_softmax_forward(output_t *dst, const in
     int blocks_per_seq = attn_batches / batches_per_block;
     dim3 blocks(seq_len, blocks_per_seq, 1);
     dim3 threads(warp_size, warps_per_block, 1);
+    if (rtc::is_enabled()) {
+      auto &rtc_manager = rtc::KernelManager::instance();
+      const std::string kernel_label = make_softmax_rtc_label<input_t>("forward", log2_elements);
+      if (!rtc_manager.is_compiled(kernel_label)) {
+        rtc_manager.compile(kernel_label,
+                            make_softmax_rtc_kernel_name<input_t>(
+                                "scaled_upper_triang_masked_softmax_warp_forward", log2_elements),
+                            make_softmax_rtc_code<input_t>(log2_elements), kRtcSourceFile,
+                            {"--use_fast_math"});
+      }
+      rtc_manager.launch(kernel_label, blocks, threads, 0, stream, dst, src, scale, batch_count,
+                         softmax_elements_stride, softmax_elements);
+    } else {
+#if NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX
     // Launch code would be more elegant if C++ supported FOR CONSTEXPR
     switch (log2_elements) {
       case 0:  // 1
@@ -445,6 +517,10 @@ void dispatch_scaled_upper_triang_masked_softmax_forward(output_t *dst, const in
       default:
         break;
     }
+#else
+      throw_nvrtc_required("forward");
+#endif
+    }
     NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
@@ -482,6 +558,20 @@ void dispatch_scaled_upper_triang_masked_softmax_backward(output_t *grad_input, 
     int blocks_per_seq = attn_batches / batches_per_block;
     dim3 blocks(seq_len, blocks_per_seq, 1);
     dim3 threads(warp_size, warps_per_block, 1);
+    if (rtc::is_enabled()) {
+      auto &rtc_manager = rtc::KernelManager::instance();
+      const std::string kernel_label = make_softmax_rtc_label<input_t>("backward", log2_elements);
+      if (!rtc_manager.is_compiled(kernel_label)) {
+        rtc_manager.compile(kernel_label,
+                            make_softmax_rtc_kernel_name<input_t>(
+                                "scaled_upper_triang_masked_softmax_warp_backward", log2_elements),
+                            make_softmax_rtc_code<input_t>(log2_elements), kRtcSourceFile,
+                            {"--use_fast_math"});
+      }
+      rtc_manager.launch(kernel_label, blocks, threads, 0, stream, grad_input, grad, output, scale,
+                         batch_count, softmax_elements_stride, softmax_elements);
+    } else {
+#if NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX
     // Launch code would be more elegant if C++ supported FOR CONSTEXPR
     switch (log2_elements) {
       case 0:  // 1
@@ -562,6 +652,10 @@ void dispatch_scaled_upper_triang_masked_softmax_backward(output_t *grad_input, 
       default:
         break;
     }
+#else
+      throw_nvrtc_required("backward");
+#endif
+    }
     NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
@@ -595,7 +689,11 @@ void scaled_upper_triang_masked_softmax_backward(Tensor output_grads, const Tens
           seq_len, attn_batches, stream););
 }
 
+#endif  // __CUDACC_RTC__
+
 }  // end namespace transformer_engine
+
+#ifndef __CUDACC_RTC__
 
 void nvte_scaled_upper_triang_masked_softmax_forward(const NVTETensor input,
                                                      NVTETensor softmax_results, float scale_factor,
@@ -615,3 +713,5 @@ void nvte_scaled_upper_triang_masked_softmax_backward(const NVTETensor incoming_
       *convertNVTETensorCheck(output_grads), *convertNVTETensorCheck(incoming_grads),
       *convertNVTETensorCheck(softmax_results), scale_factor, stream);
 }
+
+#endif  // __CUDACC_RTC__
