@@ -21,10 +21,10 @@ namespace detail {
  * pybind exposes ``transformer_engine::DType`` as the ``transformer_engine_torch.DType``
  * enum. C++ functions take ``transformer_engine::DType`` arguments, and from Python a
  * caller may pass any of the following, all of which carry the same integer dtype tag:
- *   - a ``transformer_engine_torch.DType`` (the pybind enum), or
  *   - a ``transformer_engine.pytorch.DType`` (an ``IntEnum``; the canonical Python type), or
- *   - a plain ``int``.
- *
+ *   - a plain ``int`` (the integer dtype tag), or
+ *   - a ``transformer_engine_torch.DType`` (the pybind enum) --> Deprecated and supported for
+ *     backward compatibility only.
  *
  * NOTE: As a compile-time specialization this must be visible in every translation unit
  * that converts ``transformer_engine::DType`` (it is pulled in via the PyTorch extension's

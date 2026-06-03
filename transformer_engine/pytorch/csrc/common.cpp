@@ -105,7 +105,11 @@ pybind11::object MakePythonDType(transformer_engine::DType dtype) {
     }
     return members;
   }();
-  return cache[idx];
+  const pybind11::object& member = cache[idx];
+  NVTE_CHECK(static_cast<bool>(member),
+             "No transformer_engine.pytorch.DType member for DType (", idx,
+             "); the Python DType enum is out of sync with the C++ enum.");
+  return member;
 }
 
 TensorWrapper makeTransformerEngineTensor(py::handle tensor, py::handle quantizer) {
