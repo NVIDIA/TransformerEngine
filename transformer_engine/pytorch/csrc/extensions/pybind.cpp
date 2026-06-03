@@ -129,6 +129,41 @@ void init_extension() {
   });
 }
 
+// Pybind11 registrations for the fused MoE router kernels. Split out of
+// PYBIND11_MODULE() to keep that function under the cpplint readability/fn_size
+// limit.
+void init_router_bindings(pybind11::module &m) {
+  pybind11::enum_<NVTERoutingMapFormat>(m, "NVTERoutingMapFormat", pybind11::module_local())
+      .value("BYTEMAP", NVTE_ROUTING_MAP_FORMAT_BYTEMAP)
+      .value("BITMAP_U8", NVTE_ROUTING_MAP_FORMAT_BITMAP_U8);
+  m.def("fused_topk_with_score_function_fwd", &fused_topk_with_score_function_fwd,
+        py::arg("logits"), py::arg("topk"), py::arg("use_pre_softmax"), py::arg("num_groups"),
+        py::arg("group_topk"), py::arg("scaling_factor"), py::arg("score_function"),
+        py::arg("expert_bias"),
+        py::arg("routing_map_format") = static_cast<int>(NVTE_ROUTING_MAP_FORMAT_BYTEMAP),
+        "Fused topk with score function fwd");
+  m.def("fused_topk_with_score_function_bwd", &fused_topk_with_score_function_bwd,
+        py::arg("routing_map"), py::arg("intermediate_output"), py::arg("grad_probs"),
+        py::arg("grad_logits"), py::arg("topk"), py::arg("use_pre_softmax"),
+        py::arg("scaling_factor"), py::arg("score_function"),
+        py::arg("routing_map_format") = static_cast<int>(NVTE_ROUTING_MAP_FORMAT_BYTEMAP),
+        "Fused topk with score function bwd");
+  m.def("fused_score_for_moe_aux_loss_fwd", &fused_score_for_moe_aux_loss_fwd, py::arg("logits"),
+        py::arg("topk"), py::arg("score_function"),
+        py::arg("routing_map_format") = static_cast<int>(NVTE_ROUTING_MAP_FORMAT_BYTEMAP),
+        "Fused aux loss with score function fwd");
+  m.def("fused_score_for_moe_aux_loss_bwd", &fused_score_for_moe_aux_loss_bwd,
+        py::arg("intermediate_output"), py::arg("grad_scores"), py::arg("grad_logits"),
+        py::arg("topk"), py::arg("score_function"), "Fused aux loss with score function bwd");
+  m.def("fused_moe_aux_loss_fwd", &fused_moe_aux_loss_fwd, py::arg("probs"),
+        py::arg("tokens_per_expert"), py::arg("total_num_tokens"), py::arg("num_experts"),
+        py::arg("num_rows"), py::arg("num_cols"), py::arg("topk"), py::arg("coeff"),
+        "Fused aux loss fwd");
+  m.def("fused_moe_aux_loss_bwd", &fused_moe_aux_loss_bwd, py::arg("Const_buf"),
+        py::arg("tokens_per_expert"), py::arg("num_rows"), py::arg("num_cols"),
+        py::arg("grad_aux_loss"), "Fused aux loss bwd");
+}
+
 }  // namespace transformer_engine::pytorch
 
 #include "common/util/pybind_helper.h"
@@ -460,31 +495,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Fused Apply QKV RoPE BWD", py::call_guard<py::gil_scoped_release>());
 
   // fused router
-  m.def("fused_topk_with_score_function_fwd",
-        &transformer_engine::pytorch::fused_topk_with_score_function_fwd, py::arg("logits"),
-        py::arg("topk"), py::arg("use_pre_softmax"), py::arg("num_groups"), py::arg("group_topk"),
-        py::arg("scaling_factor"), py::arg("score_function"), py::arg("expert_bias"),
-        "Fused topk with score function fwd");
-  m.def("fused_topk_with_score_function_bwd",
-        &transformer_engine::pytorch::fused_topk_with_score_function_bwd, py::arg("num_tokens"),
-        py::arg("num_experts"), py::arg("routing_map"), py::arg("intermediate_output"),
-        py::arg("grad_probs"), py::arg("grad_logits"), py::arg("topk"), py::arg("use_pre_softmax"),
-        py::arg("scaling_factor"), py::arg("score_function"), "Fused topk with score function bwd");
-  m.def("fused_score_for_moe_aux_loss_fwd",
-        &transformer_engine::pytorch::fused_score_for_moe_aux_loss_fwd, py::arg("logits"),
-        py::arg("topk"), py::arg("score_function"), "Fused aux loss with score function fwd");
-  m.def("fused_score_for_moe_aux_loss_bwd",
-        &transformer_engine::pytorch::fused_score_for_moe_aux_loss_bwd, py::arg("num_tokens"),
-        py::arg("num_experts"), py::arg("intermediate_output"), py::arg("grad_scores"),
-        py::arg("grad_logits"), py::arg("topk"), py::arg("score_function"),
-        "Fused aux loss with score function bwd");
-  m.def("fused_moe_aux_loss_fwd", &transformer_engine::pytorch::fused_moe_aux_loss_fwd,
-        py::arg("probs"), py::arg("tokens_per_expert"), py::arg("total_num_tokens"),
-        py::arg("num_experts"), py::arg("num_rows"), py::arg("num_cols"), py::arg("topk"),
-        py::arg("coeff"), "Fused aux loss fwd");
-  m.def("fused_moe_aux_loss_bwd", &transformer_engine::pytorch::fused_moe_aux_loss_bwd,
-        py::arg("Const_buf"), py::arg("tokens_per_expert"), py::arg("num_rows"),
-        py::arg("num_cols"), py::arg("grad_aux_loss"), "Fused aux loss bwd");
+  transformer_engine::pytorch::init_router_bindings(m);
 
   // Dropout
   m.def("dropout_fwd", transformer_engine::pytorch::dropout_fwd, "Dropout forward with 8-bit RNG",
@@ -500,10 +511,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
   m.def("copy_data_ptrs_to_device", &transformer_engine::pytorch::copy_data_ptrs_to_device,
         py::arg("tensors"), py::arg("device"), py::call_guard<py::gil_scoped_release>());
-  m.def("transform_and_copy_data_ptrs_to_device",
-        &transformer_engine::pytorch::transform_and_copy_data_ptrs_to_device,
-        py::arg("transform_type"), py::arg("tensors"), py::arg("device"),
-        py::call_guard<py::gil_scoped_release>());
   m.def("splits_to_offsets", &transformer_engine::pytorch::splits_to_offsets,
         "Compute grouped tensor offsets from split sizes", py::arg("first_dims"),
         py::arg("logical_last_dim"), py::call_guard<py::gil_scoped_release>());
@@ -619,6 +626,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Bulk overlap All-Gather with a GEMM operation launched by another communicator",
         py::call_guard<py::gil_scoped_release>(), py::arg("allgather_communicator"),
         py::arg("send_stream"), py::arg("recv_stream"));
+
+  // Experimental fused grouped MLP
+  auto grouped_mlp_experimental = m.def_submodule(
+      "grouped_mlp_experimental",
+      "Experimental helpers for the fused grouped MLP (unstable, may change or disappear).");
+  grouped_mlp_experimental.def("swizzle_scales_and_pack_ptrs_for_discrete_weights",
+                               &transformer_engine::pytorch::grouped_mlp_experimental::
+                                   swizzle_scales_and_pack_ptrs_for_discrete_weights,
+                               py::arg("data_tensors"), py::arg("scale_tensors"),
+                               py::arg("swizzle_type"), py::arg("device"),
+                               py::call_guard<py::gil_scoped_release>());
 
   // Data structures
   py::class_<transformer_engine::pytorch::FP8TensorMeta>(m, "FP8TensorMeta")
