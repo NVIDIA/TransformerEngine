@@ -179,11 +179,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Create an empty quantized tensor", py::arg("quantizer"), py::arg("shape"),
         py::arg("dtype"), py::arg("device"), py::arg("pin_memory"));
   m.def("group_quantize", transformer_engine::pytorch::group_quantize, py::arg("tensor"),
-        py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"));
+        py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
+        py::arg("tensor_offsets") = py::none());
   m.def("group_dequantize", transformer_engine::pytorch::group_dequantize,
         "Dequantize group tensor", py::arg("input"), py::arg("otype"));
   m.def("bgrad_group_quantize", transformer_engine::pytorch::bgrad_group_quantize,
-        py::arg("tensor"), py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"));
+        py::arg("tensor"), py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
+        py::arg("tensor_offsets") = py::none());
   m.def("bgrad_quantize", transformer_engine::pytorch::bgrad_quantize,
         "Compute bias gradient and quantize", py::arg("input"), py::arg("quantizer"));
   m.def("generic_gemm", transformer_engine::pytorch::gemm, "Compute GEMM (matrix-matrix multiply)",
@@ -508,6 +510,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("splits_to_offsets", &transformer_engine::pytorch::splits_to_offsets,
         "Compute grouped tensor offsets from split sizes", py::arg("first_dims"),
         py::arg("logical_last_dim"), py::call_guard<py::gil_scoped_release>());
+  m.def("splits_to_offsets_multi", &transformer_engine::pytorch::splits_to_offsets_multi,
+        "Compute multiple scaled inclusive-scan offsets from a split-sizes vector",
+        py::arg("split_sizes"), py::arg("device"), py::kw_only(), py::arg("strides"),
+        py::arg("include_leading_zero"), py::arg("dtypes"), py::arg("bulk_allocate") = false);
   m.def("get_num_cublas_streams", &nvte_get_num_compute_streams, "Get number of compute streams",
         py::call_guard<py::gil_scoped_release>());
 

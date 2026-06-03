@@ -334,12 +334,14 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
 py::object dequantize(const py::handle &input, DType otype);
 
 py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const size_t num_tensors,
-                          std::optional<at::Tensor> first_dims);
+                          std::optional<at::Tensor> first_dims,
+                          std::optional<at::Tensor> tensor_offsets);
 
 py::object group_dequantize(const py::handle &input, DType otype);
 
 py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
-                                const size_t num_tensors, std::optional<at::Tensor> first_dims);
+                                const size_t num_tensors, std::optional<at::Tensor> first_dims,
+                                std::optional<at::Tensor> tensor_offsets);
 
 std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &tensor_list,
                                               std::vector<py::handle> quantizer_list);
@@ -487,6 +489,10 @@ size_t get_cublasLt_version();
 size_t get_cudnn_version();
 
 at::Tensor splits_to_offsets(const at::Tensor &first_dims, int64_t logical_last_dim);
+std::tuple<at::Tensor, std::vector<at::Tensor>> splits_to_offsets_multi(
+    const at::Tensor &split_sizes, const c10::Device &device, const std::vector<int64_t> &strides,
+    const std::vector<bool> &include_leading_zero, const std::vector<at::ScalarType> &dtypes,
+    bool bulk_allocate_outputs);
 
 at::Tensor copy_data_ptrs_to_device(const std::vector<at::Tensor> &tensors,
                                     const c10::Device &device);
