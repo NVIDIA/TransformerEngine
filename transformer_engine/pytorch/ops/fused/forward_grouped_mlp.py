@@ -387,10 +387,14 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
         if use_nvfp4:
             nvfp4_fp4_max = 6.0
             nvfp4_fp8_max = 448.0
+            nvfp4_global_scale_denom = nvfp4_fp4_max * nvfp4_fp8_max
+            # cuDNN receives NVFP4 block-scaled inputs without TE's per-group
+            # global scale factors, so alpha supplies the product of the two
+            # operand global scales.
             fc1_alpha_tensor = (
                 _nvfp4_amax(grouped_fc1_x, columnwise=False)
                 * _nvfp4_amax(grouped_fc1_weight, columnwise=False)
-                / (nvfp4_fp4_max**2 * nvfp4_fp8_max**2)
+                / (nvfp4_global_scale_denom**2)
             ).to(torch.float32)
         else:
             fc1_alpha_tensor = alpha_tensor
@@ -449,15 +453,13 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
             fc1_activation_kwargs["sfb_tensor"] = fc1_w_scales
         else:
             # Discrete-weight kernel: per-expert data/scale pointers
-            fc1_b_ptrs = tex.copy_data_ptrs_to_device(
-                [w._rowwise_data for w in grouped_fc1_weight],
-                device,
-            )
-            swizzle_type = "uniform_nvfp4_swizzle" if use_nvfp4 else "uniform_mxfp8_rowwise_swizzle"
-            fc1_sfb_ptrs, _fc1_sfb_buffer = tex.transform_and_copy_data_ptrs_to_device(
-                swizzle_type,
-                [w._rowwise_scale_inv for w in grouped_fc1_weight],
-                device,
+            fc1_b_ptrs, fc1_sfb_ptrs, _fc1_sfb_buffer = (
+                tex.grouped_mlp_experimental.swizzle_scales_and_pack_ptrs_for_discrete_weights(
+                    [w._rowwise_data for w in grouped_fc1_weight],
+                    [w._rowwise_scale_inv for w in grouped_fc1_weight],
+                    "nvfp4" if use_nvfp4 else "mxfp8_rowwise",
+                    device,
+                )
             )
             fc1_activation_kwargs["b_ptrs"] = fc1_b_ptrs
             fc1_activation_kwargs["sfb_ptrs"] = fc1_sfb_ptrs
@@ -625,17 +627,13 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc2_quant_kwargs["b_tensor"] = fc2_w_data
                 fc2_quant_kwargs["sfb_tensor"] = fc2_w_scales
             else:
-                fc2_b_ptrs = tex.copy_data_ptrs_to_device(
-                    [w._rowwise_data for w in grouped_fc2_weight],
-                    device,
-                )
-                swizzle_type = (
-                    "uniform_nvfp4_swizzle" if use_nvfp4 else "uniform_mxfp8_rowwise_swizzle"
-                )
-                fc2_sfb_ptrs, _fc2_sfb_buffer = tex.transform_and_copy_data_ptrs_to_device(
-                    swizzle_type,
-                    [w._rowwise_scale_inv for w in grouped_fc2_weight],
-                    device,
+                fc2_b_ptrs, fc2_sfb_ptrs, _fc2_sfb_buffer = (
+                    tex.grouped_mlp_experimental.swizzle_scales_and_pack_ptrs_for_discrete_weights(
+                        [w._rowwise_data for w in grouped_fc2_weight],
+                        [w._rowwise_scale_inv for w in grouped_fc2_weight],
+                        "nvfp4" if use_nvfp4 else "mxfp8_rowwise",
+                        device,
+                    )
                 )
                 fc2_quant_kwargs["b_ptrs"] = fc2_b_ptrs
                 fc2_quant_kwargs["sfb_ptrs"] = fc2_sfb_ptrs
@@ -801,8 +799,6 @@ def fuse_forward_srelu_ops(
 ) -> list[FusibleOperation]:
     """Apply GroupedLinear + ScaledSReLU + GroupedLinear fusion for forward pass."""
 
-    if recipe is None or not recipe.mxfp8():
-        return ops
     return fuse_grouped_mlp_ops(
         ops,
         recipe=recipe,
