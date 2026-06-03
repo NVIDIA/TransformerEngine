@@ -470,6 +470,7 @@ class FusedAttnRunner:
 
     def _check_configs(self):
         # TODO(rewang): probably adds this in is_fused_attn_available
+        # TDOD(KshitijLakhani): probably add/move this to is_fused_attn_available
         if self.qkv_layout.is_thd() and not self.attn_mask_type.is_padding():
             pytest.skip("THD format requires padding masks.")
 
@@ -493,38 +494,11 @@ class FusedAttnRunner:
             pytest.skip(
                 "seqlen_q > seqlen_kv is not supported with sliding window attention in cuDNN"
             )
-
-        if get_device_compute_capability(0) >= 100 and self.is_training:
-            if FusedAttnHelper.is_non_deterministic_allowed() and (
-                (self.dropout_prob != 0.0 and self.attn_bias_type != AttnBiasType.NO_BIAS)
-                or get_cudnn_version() < 90700
-            ):
-                pytest.skip(
-                    "For sm100+, non-deterministic bprop (cuDNN 9.7+) does not support bias with"
-                    " dropout"
-                )
-            if not FusedAttnHelper.is_non_deterministic_allowed() and (
-                self.dropout_prob != 0.0
-                or self.attn_bias_type != AttnBiasType.NO_BIAS
-                or get_cudnn_version() < 91801
-            ):
-                pytest.skip(
-                    "For sm100+, deterministic bprop (cuDNN 9.18.1+) does not support bias or"
-                    " dropout"
-                )
-        # Test the MLA case where head dims for qk differ from head dims for v, only if the tensors
-        # are provided in BSHD_BSHD_BSHD or THD_THD_THD formats
-        if self.head_dim_qk != self.head_dim_v and not self.qkv_layout.is_separate():
-            pytest.skip(
-                "For head_dim_qk != head_dim_v, it is necessary that the QKV layout "
-                "is either BSHD_BSHD_BSHD or THD_THD_THD"
-            )
-
-        # D=256 bprop on SM10.x uses cuDNN's dedicated SDPA bprop kernel
-        # (cuDNN FE 1.24 / BE 9.23+). FE forces this path onto the deterministic algorithm path,
-        # which rejects dBias, dropout, and ALiBi. It supports vanilla softmax only and allows SWA
-        # together with a causal mask only.
         compute_capability = get_device_compute_capability(0)
+        cudnn_version = get_cudnn_version()
+        # D=256 bprop on SM10x (cuDNN FE 1.24 / BE 9.23+) uses the deterministic algorithm path only,
+        # which rejects dBias, dropout, and ALiBi. It supports vanilla type of softmax only and allows SWA
+        # together with a causal mask only.
         is_sm10x = 100 <= compute_capability < 110
         if self.is_training and is_sm10x and (self.head_dim_qk == 256 or self.head_dim_v == 256):
             if self.head_dim_qk != 256 or self.head_dim_v != 256:
@@ -532,7 +506,6 @@ class FusedAttnRunner:
                     "D=256 BWD on Blackwell only supports d_qk == d_v == 256;"
                     f" got d_qk={self.head_dim_qk}, d_v={self.head_dim_v}."
                 )
-            cudnn_version = get_cudnn_version()
             if cudnn_version < 92300:
                 pytest.skip(
                     "D=256 BWD on Blackwell requires cuDNN 9.23 or newer;"
@@ -569,6 +542,32 @@ class FusedAttnRunner:
                         "D=256 BWD on Blackwell only supports right window -1 or 0"
                         " for causal masks."
                     )
+
+        if compute_capability >= 100 and self.is_training:
+            if FusedAttnHelper.is_non_deterministic_allowed() and (
+                (self.dropout_prob != 0.0 and self.attn_bias_type != AttnBiasType.NO_BIAS)
+                or cudnn_version < 90700
+            ):
+                pytest.skip(
+                    "For sm100+, non-deterministic bprop (cuDNN 9.7+) does not support bias with"
+                    " dropout"
+                )
+            if not FusedAttnHelper.is_non_deterministic_allowed() and (
+                self.dropout_prob != 0.0
+                or self.attn_bias_type != AttnBiasType.NO_BIAS
+                or cudnn_version < 91801
+            ):
+                pytest.skip(
+                    "For sm100+, deterministic bprop (cuDNN 9.18.1+) does not support bias or"
+                    " dropout"
+                )
+        # Test the MLA case where head dims for qk differ from head dims for v, only if the tensors
+        # are provided in BSHD_BSHD_BSHD or THD_THD_THD formats
+        if self.head_dim_qk != self.head_dim_v and not self.qkv_layout.is_separate():
+            pytest.skip(
+                "For head_dim_qk != head_dim_v, it is necessary that the QKV layout "
+                "is either BSHD_BSHD_BSHD or THD_THD_THD"
+            )
 
         self.backend = FusedAttnHelper(
             self.is_training,
@@ -1693,8 +1692,7 @@ class TestFusedAttn:
             id="2-1024-2048-12-6-128-64-BF16-CROSS-GQA-RAGGED_SEPARATE",
         ),
         # D=256 deterministic backward on the SM100 dedicated SDPA bprop kernel
-        # (cuDNN FE 1.24 / BE 9.23+). Unsupported configs (e.g. dBias, non-256 head dims)
-        # are skipped by FusedAttnRunner._check_configs.
+        # (cuDNN FE 1.24 / BE 9.23+).
         pytest.param(
             4,
             128,
