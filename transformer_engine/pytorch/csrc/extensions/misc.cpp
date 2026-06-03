@@ -11,8 +11,8 @@
 #include <vector>
 
 #include "../extensions.h"
-#include "pybind.h"
 #include "common/common.h"
+#include "pybind.h"
 
 namespace transformer_engine::pytorch {
 
@@ -39,9 +39,9 @@ at::Tensor splits_to_offsets(const at::Tensor &first_dims, int64_t logical_last_
 }
 
 std::tuple<at::Tensor, std::vector<at::Tensor>> splits_to_offsets_multi(
-    const at::Tensor &split_sizes, const c10::Device &device,
-    const std::vector<int64_t> &strides, const std::vector<bool> &include_leading_zero,
-    const std::vector<at::ScalarType> &dtypes, bool bulk_allocate_outputs) {
+    const at::Tensor &split_sizes, const c10::Device &device, const std::vector<int64_t> &strides,
+    const std::vector<bool> &include_leading_zero, const std::vector<at::ScalarType> &dtypes,
+    bool bulk_allocate_outputs) {
   const size_t num_outputs = strides.size();
   const size_t num_splits = static_cast<size_t>(split_sizes.numel());
 
@@ -52,8 +52,10 @@ std::tuple<at::Tensor, std::vector<at::Tensor>> splits_to_offsets_multi(
   NVTE_CHECK(device.is_cuda(), "device must be CUDA, but got ", device.str(), ".");
 
   // Convert split sizes to int64 GPU tensor.
-  const at::Tensor split_sizes_i64 = split_sizes.scalar_type() == at::kLong ? split_sizes : split_sizes.to(at::kLong);
-  const at::Tensor split_sizes_out = split_sizes_i64.device() == device ? split_sizes_i64 : split_sizes_i64.to(device);
+  const at::Tensor split_sizes_i64 =
+      split_sizes.scalar_type() == at::kLong ? split_sizes : split_sizes.to(at::kLong);
+  const at::Tensor split_sizes_out =
+      split_sizes_i64.device() == device ? split_sizes_i64 : split_sizes_i64.to(device);
 
   // Allocate outputs.
   std::vector<at::Tensor> outputs;
@@ -71,8 +73,7 @@ std::tuple<at::Tensor, std::vector<at::Tensor>> splits_to_offsets_multi(
     outputs = bulk_allocate(shapes, dtypes, device, alignments);
   } else {
     for (size_t i = 0; i < num_outputs; ++i) {
-      const int64_t length =
-          static_cast<int64_t>(num_splits) + (include_leading_zero[i] ? 1 : 0);
+      const int64_t length = static_cast<int64_t>(num_splits) + (include_leading_zero[i] ? 1 : 0);
       outputs.emplace_back(
           at::empty({length}, at::TensorOptions().dtype(dtypes[i]).device(device)));
     }

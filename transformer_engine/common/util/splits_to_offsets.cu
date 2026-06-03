@@ -174,8 +174,7 @@ void nvte_splits_to_offsets_multi(NVTETensor split_sizes, NVTETensor *outputs,
              "split_sizes must be a non-empty 1D tensor, but got shape=",
              split_sizes_tensor->shape(), ".");
   NVTE_CHECK(is_integer_dtype(split_sizes_dtype),
-             "split_sizes must be an int32/int64 tensor, but got dtype=",
-             split_sizes_dtype, ".");
+             "split_sizes must be an int32/int64 tensor, but got dtype=", split_sizes_dtype, ".");
 
   // Check output tensors
   std::vector<const Tensor *> output_tensors(num_outputs);
@@ -184,12 +183,10 @@ void nvte_splits_to_offsets_multi(NVTETensor split_sizes, NVTETensor *outputs,
     const auto out_dtype = out_tensor->dtype();
     const bool has_leading_zero = include_leading_zero[i] != 0;
     const Shape expected_shape = {num_splits + (has_leading_zero ? 1 : 0)};
-    NVTE_CHECK(out_tensor->shape() == expected_shape,
-               "Expected outputs[", i, "] to have shape=", expected_shape,
-               ", but got shape=", out_tensor->shape(), ".");
-    NVTE_CHECK(is_integer_dtype(out_dtype),
-               "Expected outputs[", i, "] to be an int32/int64 tensor, but got dtype=",
-               out_dtype, ".");
+    NVTE_CHECK(out_tensor->shape() == expected_shape, "Expected outputs[", i,
+               "] to have shape=", expected_shape, ", but got shape=", out_tensor->shape(), ".");
+    NVTE_CHECK(is_integer_dtype(out_dtype), "Expected outputs[", i,
+               "] to be an int32/int64 tensor, but got dtype=", out_dtype, ".");
     output_tensors[i] = out_tensor;
   }
 

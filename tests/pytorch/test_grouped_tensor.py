@@ -236,9 +236,7 @@ class TestGroupedTensor:
 
         # Check output offsets.
         assert len(outputs) == len(strides)
-        for output, stride, with_zero, dtype in zip(
-            outputs, strides, include_leading_zero, dtypes
-        ):
+        for output, stride, with_zero, dtype in zip(outputs, strides, include_leading_zero, dtypes):
             assert output.dtype == dtype
             assert output.device.type == "cuda"
             expected_length = split_sizes.numel() + (1 if with_zero else 0)
