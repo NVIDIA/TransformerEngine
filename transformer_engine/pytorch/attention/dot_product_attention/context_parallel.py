@@ -4,7 +4,6 @@
 
 """Context Parallelism."""
 import os
-import itertools
 from typing import List, Union, Tuple
 import torch
 import transformer_engine_torch as tex
@@ -91,7 +90,7 @@ def cp_prof_dump_and_reset(tag=""):
 
     rank = _dist.get_rank() if _dist.is_available() and _dist.is_initialized() else 0
     if rank == 0 and _cp_prof_times:
-        t = {k: _cp_prof_times[k] / max(_cp_prof_counts[k], 1) for k in _cp_prof_times}
+        t = {k: total / max(_cp_prof_counts[k], 1) for k, total in _cp_prof_times.items()}
         print(f"[CP_PROFILE {tag}] per-region GPU ms/call:")
         for k in sorted(t, key=lambda x: -t[x]):
             print(f"   {k:18s}: {t[k]:8.4f} ms  (x{_cp_prof_counts[k]})")
@@ -384,36 +383,6 @@ def reorder_seq_chunks_for_a2a_after_attn(x, chunk_ids_for_a2a, seq_dim, cp_size
     return x
 
 
-def _build_thd_reorder_perms(cu_seqlens, cp_size, total_tokens):
-    """Build (P, P_inv) on-device. total_tokens is a host int (no D2H)."""
-    P = torch.cat(
-        [
-            tex.thd_get_partitioned_indices(cu_seqlens, total_tokens, cp_size, rank)
-            for rank in range(cp_size)
-        ]
-    )
-    P_inv = torch.empty_like(P)
-    P_inv[P.long()] = torch.arange(total_tokens, dtype=P.dtype, device=P.device)
-    return (P, P_inv)
-
-
-def _get_thd_reorder_perms(cu_seqlens, cp_size, total_tokens=None):
-    """Build (P, P_inv) THD reorder permutations on-device, statelessly.
-
-    P maps contiguous sequence order -> rank-concatenated dual-chunk order;
-    P_inv is the inverse. No cache: P/P_inv are recomputed every call via
-    `tex.thd_get_partitioned_indices` (a small on-device kernel). `total_tokens`
-    is supplied by the caller as the packed tensor's seq-dim length
-    (`x.shape[seq_dim]`, a host int), so there is NO D2H sync (`.tolist()`/
-    `.item()`) on the hot path. Stateless => no leak, no eviction, and
-    torch.compile / CUDA-graph safe. The `.item()` fallback is defensive only
-    (both in-tree callers pass `total_tokens`).
-    """
-    if total_tokens is None:
-        total_tokens = int(cu_seqlens[-1].item())
-    return _build_thd_reorder_perms(cu_seqlens, cp_size, total_tokens)
-
-
 @_cp_nvtx_wrap("reorder_thd_to_rank_sharded")
 def reorder_thd_sequences_to_rank_sharded(x, cu_seqlens, cp_size, seq_dim=0):
     """
@@ -458,7 +427,7 @@ def reorder_thd_sequences_to_rank_sharded(x, cu_seqlens, cp_size, seq_dim=0):
 
 
 @_cp_nvtx_wrap("reorder_thd_to_contiguous")
-def reorder_thd_sequences_to_contiguous(x, cu_seqlens, seq_chunk_ids, cp_size, seq_dim=0):
+def reorder_thd_sequences_to_contiguous(x, cu_seqlens, cp_size, seq_dim=0):
     """
     Reorder THD sequences from rank sharded according to sharding strategy
     (DualChunking here) to contiguous.
@@ -466,7 +435,6 @@ def reorder_thd_sequences_to_contiguous(x, cu_seqlens, seq_chunk_ids, cp_size, s
     Args:
         x:              The input tensor to be reordered.
         cu_seqlens:     The cumulative sequence lengths of the input tensor.
-        seq_chunk_ids:  The sequence chunk ids of the input `x` which is to be reordered.
         cp_size:        The number of ranks participating in context parallelism.
         seq_dim:        The dimension in which to reorder.
 
@@ -478,7 +446,6 @@ def reorder_thd_sequences_to_contiguous(x, cu_seqlens, seq_chunk_ids, cp_size, s
                           1.,  6.,  2.,  3., 12., 13.,  2.,  5.,  2.,  5.,  2.,  5.,  4.,  5.,
                           10., 11.,  3.,  4.,  3.,  4.,  3.,  4.,  6.,  7.,  8.,  9.]
         cu_seqlens:     [ 0,  8, 16, 24, 40]
-        seq_chunk_ids:  [ 0, 2, 4, 6, 7, 5, 3, 1]
         cp_size:        4
 
         Returns:        [ 0.,  1.,  2.,  3.,  4.,  5.,  6.,  7.,  0.,  1.,  2.,  3.,  4.,  5.,
@@ -576,7 +543,7 @@ def flash_attn_a2a_communicate(
                         x = x.view(-1, *x.shape[2:])
                         # reorder the sequence chunks
                         a2a_outputs[i - 2] = reorder_thd_sequences_to_contiguous(
-                            x, cu_seqlens_padded, chunk_ids_for_a2a, cp_size
+                            x, cu_seqlens_padded, cp_size
                         )
 
             if i < len(a2a_inputs):
@@ -3211,8 +3178,6 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
 
-        qkv_dtype = q.dtype
-
         causal = "causal" in attn_mask_type
         padding = "padding" in attn_mask_type
         if qkv_format == "thd":
@@ -3250,12 +3215,13 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             f" {q.shape[seq_dim_qkv]}, seq_len_kv = {k.shape[seq_dim_qkv]}."
         )
 
-        if qkv_format == "thd" and not use_fused_attention and not use_flash_attn_3:
-            assert False, (
-                "cp_comm_type='all_gather' with qkv_format='thd' requires FlashAttention v3"
-                " (seqused_k) or FusedAttention. The reordered KV buffer uses padded sequence"
-                " boundaries, and FA2 cannot separate tensor offsets from visibility limits."
-            )
+        assert not (
+            qkv_format == "thd" and not use_fused_attention and not use_flash_attn_3
+        ), (
+            "cp_comm_type='all_gather' with qkv_format='thd' requires FlashAttention v3"
+            " (seqused_k) or FusedAttention. The reordered KV buffer uses padded sequence"
+            " boundaries, and FA2 cannot separate tensor offsets from visibility limits."
+        )
 
         flash_attn_fwd = None
         if not use_fused_attention:
@@ -3377,13 +3343,8 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             # [cp*t, h, d] -> reorder to contiguous per-sequence order -> [t_full, h, d]
             # Use padded cu_seqlens since reorder computes slice boundaries via integer
             # division by 2*cp_size, which requires divisible values.
-            chunk_ids_for_kv_ag = get_seq_chunk_ids_for_reordering_before_attn(cp_size, k.device)
-            k_ag = reorder_thd_sequences_to_contiguous(
-                k_ag, cu_seqlens_kv_padded, chunk_ids_for_kv_ag, cp_size
-            )
-            v_ag = reorder_thd_sequences_to_contiguous(
-                v_ag, cu_seqlens_kv_padded, chunk_ids_for_kv_ag, cp_size
-            )
+            k_ag = reorder_thd_sequences_to_contiguous(k_ag, cu_seqlens_kv_padded, cp_size)
+            v_ag = reorder_thd_sequences_to_contiguous(v_ag, cu_seqlens_kv_padded, cp_size)
         else:
             # [cp, s, b, h, d] -> [cp*2, s//2, b, h, d]
             k_ag = k_ag.view(2 * cp_size, k.shape[0] // 2, *k.shape[1:])
@@ -3400,7 +3361,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         # is large enough to outlast cp_stream's launch (e.g. bucket128k @ cp=8).
         cp_stream.wait_stream(torch.cuda.current_stream())
 
-        # TODO: (sudhakars) possibly add some info that THD doesn't support FP8 yet.
+        # THD all_gather only reaches this path for f16/bf16 attention today.
         # q: [b, 2, s//2, h, d] or [2, s//2, b, h, d]
         # k: [s, b, h, d]
         # v: [s, b, h, d]
@@ -3461,9 +3422,12 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
 
             # Step 0: kernel reads from start of each seq's 2-chunk allocation (first chunk)
             # Step 1: kernel reads from midpoint of each seq's allocation (second chunk)
-            thd_cu_seqlens_q_padded_per_step = [cu_seqlens_q_padded_rank, None]
-            thd_cu_seqlens_q_padded_per_step[1] = cu_seqlens_q_padded_rank.clone()
-            thd_cu_seqlens_q_padded_per_step[1][:-1] += padded_chunk_sizes_q
+            cu_seqlens_q_padded_step_1 = cu_seqlens_q_padded_rank.clone()
+            cu_seqlens_q_padded_step_1[:-1] += padded_chunk_sizes_q
+            thd_cu_seqlens_q_padded_per_step = [
+                cu_seqlens_q_padded_rank,
+                cu_seqlens_q_padded_step_1,
+            ]
 
             # Per-step KV cu_seqlens (non-padded): how many actual KV tokens are
             # visible for each sequence.
@@ -3528,6 +3492,8 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                 if i > 0 and use_flash_attn_3:
                     flash_attn_streams[i].wait_stream(flash_attn_streams[i - 1])
                 with torch.cuda.stream(flash_attn_streams[i]):
+                    new_qkv_layout = qkv_layout
+                    qkv_scale_inv_format = None
                     if qkv_format in ["bshd", "sbhd"]:
                         # [b, 2, s//2, h, d] -> [b, s//2, h, d]
                         # [2, s//2, b, h, d] -> [s//2, b, h, d]
@@ -3555,8 +3521,6 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             x.movedim(0, seq_dim_qkv).contiguous() for x in [k_part, v_part]
                         ]
                         if use_fused_attention:
-                            new_qkv_layout = qkv_layout
-                            qkv_scale_inv_format = None
                             cu_seqlens_kv_per_step[i] = dpa_utils.get_full_cu_seqlens(
                                 cu_seqlens_q.shape[0] - 1, max_seqlen_kv_, q.device
                             )
@@ -3582,8 +3546,6 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         q_part = q
                         k_part = k_ag
                         v_part = v_ag
-                        new_qkv_layout = qkv_layout
-                        qkv_scale_inv_format = None
                         kv_range, window_size_per_step[i] = get_kv_seq_info_after_all_gather(
                             local_seq_chunk_ids[i],
                             cp_size,
@@ -3982,17 +3944,10 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         if ctx.qkv_format == "thd":
             cu_seqlens_kv_padded = ctx.cu_seqlens_kv_padded
             thd_cu_seqlens_q_per_step = ctx.thd_cu_seqlens_q_per_step
-            cu_seqlens_q_padded_rank = cu_seqlens_q_padded * 2
-
             # [cp*t, h, d] -> reorder to contiguous per-sequence order
             # Use padded cu_seqlens (divisible by 2*cp_size) for correct reorder
-            chunk_ids_for_kv_ag = get_seq_chunk_ids_for_reordering_before_attn(cp_size, k.device)
-            k_ag = reorder_thd_sequences_to_contiguous(
-                k_ag, cu_seqlens_kv_padded, chunk_ids_for_kv_ag, cp_size
-            )
-            v_ag = reorder_thd_sequences_to_contiguous(
-                v_ag, cu_seqlens_kv_padded, chunk_ids_for_kv_ag, cp_size
-            )
+            k_ag = reorder_thd_sequences_to_contiguous(k_ag, cu_seqlens_kv_padded, cp_size)
+            v_ag = reorder_thd_sequences_to_contiguous(v_ag, cu_seqlens_kv_padded, cp_size)
 
             thd_cu_seqlens_q_padded_per_step = ctx.thd_cu_seqlens_q_padded_per_step
         else:
@@ -4268,7 +4223,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             thd_cu_seqlens_q_padded_per_step[i - 1],
                             thd_cu_seqlens_q_per_step[i - 1],
                         )
-                        # dK/dV: add full tensor (kernel zeros non-valid positions)
+                        # dK/dV: accumulate full packed tensors row-wise. Padding rows may accumulate,
+                        # but valid rows are independent and only valid rows are reordered/scattered
+                        # after the per-step reductions.
                         if i > 1:
                             flash_attn_streams[i - 1].wait_event(dkv_update_done)
                         dk.add_(dk_per_step[i - 1])

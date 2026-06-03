@@ -1006,11 +1006,15 @@ void thd_valid_copy(at::Tensor out, const at::Tensor &inp, const at::Tensor &cu_
   NVTE_CHECK(cu_seqlens_padded.size(0) == cu_seqlens.size(0));
   NVTE_CHECK(inp.dim() >= 1);
   NVTE_CHECK(out.sizes() == inp.sizes() && out.scalar_type() == inp.scalar_type());
+  NVTE_CHECK(out.is_contiguous(), "thd_valid_copy output must be contiguous.");
 
-  int total_tokens = inp.size(0);
-  auto te_inp = makeTransformerEngineTensor(inp);
-  auto te_cu_seqlens_padded = makeTransformerEngineTensor(cu_seqlens_padded);
-  auto te_cu_seqlens = makeTransformerEngineTensor(cu_seqlens);
+  auto inp_c = inp.contiguous();
+  auto cu_seqlens_padded_c = cu_seqlens_padded.contiguous();
+  auto cu_seqlens_c = cu_seqlens.contiguous();
+  int total_tokens = inp_c.size(0);
+  auto te_inp = makeTransformerEngineTensor(inp_c);
+  auto te_cu_seqlens_padded = makeTransformerEngineTensor(cu_seqlens_padded_c);
+  auto te_cu_seqlens = makeTransformerEngineTensor(cu_seqlens_c);
   auto te_out = makeTransformerEngineTensor(out);
 
   nvte_cp_thd_valid_copy(te_inp.data(), te_cu_seqlens_padded.data(), te_cu_seqlens.data(),
