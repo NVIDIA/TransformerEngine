@@ -644,6 +644,7 @@ def test_fused_attn_score_mod_config_splits_tensors_and_pass_by_value_scalars():
 
 def test_fused_attn_score_mod_cudnn_frontend_version_check(monkeypatch):
     """cuDNN frontend Python and C++ versions must match."""
+
     class FakeCudnn:
         __version__ = "1.22.0"
 
@@ -707,6 +708,7 @@ def test_fused_attn_score_mod_config_stabilizes_bound_method_cache_keys():
 
 def test_fused_attn_score_mod_config_leaves_unkeyed_bound_methods_uncached():
     """Unkeyed bound methods stay uncached to avoid object-id reuse collisions."""
+
     class UnkeyedScoreMod:
         def forward(self, _graph, score, _tensors):
             return score

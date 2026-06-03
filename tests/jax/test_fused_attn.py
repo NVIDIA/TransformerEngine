@@ -890,7 +890,9 @@ class FusedAttnRunner:
         """
         self._setup_inputs()
 
-        reference_mask = self.sequence_desciptor if self.score_mod_reference is not None else self.mask
+        reference_mask = (
+            self.sequence_desciptor if self.score_mod_reference is not None else self.mask
+        )
         args = [
             self.q,
             self.k,
@@ -1022,7 +1024,9 @@ class FusedAttnRunner:
                 jnp.mean(ret_valid.astype(jnp.float32), dtype=jnp.float32) * gradient_multiplier
             ).astype(self.dtype)
 
-        reference_mask = self.sequence_desciptor if self.score_mod_reference is not None else self.mask
+        reference_mask = (
+            self.sequence_desciptor if self.score_mod_reference is not None else self.mask
+        )
         args = [
             self.q,
             self.k,
