@@ -3536,7 +3536,10 @@ class TestHybridQuantizedParamsEndToEnd:
 
             optimizer.step()
 
-        assert losses[-1] < losses[0], f"Loss did not decrease: {losses}"
+        # Strictly monotonic decrease
+        assert all(
+            losses[i + 1] < losses[i] for i in range(len(losses) - 1)
+        ), f"Loss not strictly decreasing each step: {losses}"
 
     def test_training_loop_params_remain_quantized(self):
         """Params should remain HybridQuantizedTensors after training."""
@@ -3680,7 +3683,10 @@ class TestHybridMixedFormatQuantizedParams:
             loss.backward()
             optimizer.step()
 
-        assert losses[-1] < losses[0], f"Loss did not decrease: {losses}"
+        # Strictly monotonic decrease
+        assert all(
+            losses[i + 1] < losses[i] for i in range(len(losses) - 1)
+        ), f"Loss not strictly decreasing each step: {losses}"
         for name, p in model.named_parameters():
             if "bias" not in name:
                 assert isinstance(p, HybridQuantizedTensor), f"{name} is {type(p).__name__}"

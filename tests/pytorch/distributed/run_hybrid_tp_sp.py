@@ -14,26 +14,23 @@ recipe. Weights are synchronized via ``_copy_params`` (shared with
 ``run_numerics.py``), so any drift between the two paths is a hybrid-
 specific TP/SP issue rather than an initialization artifact.
 
-Test surface:
-  * ``te.Linear`` column-parallel and row-parallel, with and without
-    sequence parallelism.
-  * ``te.LayerNormLinear`` column-parallel with sequence parallelism —
-    the quantized-AG path that currently unfuses LN+quantize for
-    ``HybridQuantizer``.
-  * ``te.TransformerLayer`` with ``set_parallel_mode=True`` and SP on —
-    integration test hitting LayerNormLinear + DPA + LayerNormMLP + row-
-    parallel output projection in one shot.
+Test surface: ``te.Linear`` (column/row x SP on/off, plus a bitwise
+hybrid-vs-vanilla operand-equivalence check), ``te.LayerNormLinear``,
+``te.LayerNormMLP``, and ``te.TransformerLayer`` (all with SP on/off). The
+non-attention tests also compare per-parameter gradients in the no-SP configs,
+where grads align directly with the single-node reference.
 
-Only same-format hybrid recipes (FP8 current rowwise + FP8 current
-columnwise; MXFP8 rowwise + MXFP8 columnwise) are exercised here so the
-numerical signal is clean. Cross-format hybrid adds independent
-numerical variation unrelated to TP/SP and is covered by single-GPU
-tests already.
+Recipes: same-format (FP8-current, MXFP8, NVFP4) for a clean signal and the
+bitwise check, plus a cross-format one (MXFP8 fwd / NVFP4 bwd) that exercises
+the forward-vs-backward all-gather format asymmetry (fwd gathers rowwise, bwd
+columnwise) -- which same-format recipes cannot surface.
 
-Tolerances match upstream ``run_numerics.py`` per-format settings (see
-``_get_tolerances``); they're loose enough to absorb the amax-reduction
-and stochastic numerical asymmetries inherent to distributed FP8, tight
-enough to catch a silent BF16 fallback on the hybrid sub-storage path.
+Two comparison kinds with different tolerances:
+  * distributed-vs-single-node (``_test_*``): inherently loose -- the sharded
+    side quantizes per-shard and reduces across ranks, so it is never bitwise.
+    ``_get_tolerances`` matches upstream ``run_numerics.py`` per format.
+  * hybrid-vs-vanilla (``_test_linear_vs_vanilla``): same topology, so bitwise
+    (``rtol=0, atol=0``) for forward (all configs) and backward (non-SP).
 """
 
 import argparse
@@ -117,31 +114,75 @@ def _hybrid_mxfp8_qfactory(role):
             rowwise_quantizer=_make_mxfp8_quantizer(),
             columnwise_quantizer=_make_mxfp8_quantizer(),
         )
-    if is_linear and role.tensor_type in ("grad_output", "grad_input"):
-        return _make_mxfp8_quantizer(fp8_dtype=tex.DType.kFloat8E5M2)
+    # MXFP8 uses E4M3 for every pass (its canonical Format.E4M3)
     return _make_mxfp8_quantizer()
 
 
-def _make_nvfp4_quantizer():
-    """Default NVFP4Quantizer: no RHT, no stochastic rounding, no 2D
-    scaling — matches upstream ``run_numerics.py::nvfp4_vanilla()`` which
-    strips the recipe to bare 1D block scaling for distributed TP
-    fairness. Same-format hybrid NVFP4 has no E5M2 variant (NVFP4 is a
-    single format family — E2M1 only), so grad roles reuse the same
-    NVFP4 quantizer."""
+def _make_nvfp4_bare():
+    """Bare NVFP4Quantizer (1D, no RHT/SR/2D), used by the cross-format recipe
+    to avoid cross-operand RHT-consistency concerns in the mixed MXFP8/NVFP4
+    GEMMs."""
     return NVFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1)
+
+
+def _make_nvfp4_quantizer(role=None):
+    """Role-based NVFP4Quantizer mirroring ``nvfp4_quantizer_factory`` /
+    :class:`NVFP4BlockScaling`, but with 2D quantization disabled.
+
+    Per role: weight = no RHT/SR, input = RHT, grad = RHT + SR.
+
+    ``with_2d_quantization`` is forced off everywhere: the 2D quantize-transpose
+    kernel has no columnwise-only path, so a hybrid columnwise sub-quantizer
+    cannot use it.
+    TODO(negvet): enable 2D for the rowwise direction once
+    https://github.com/NVIDIA/TransformerEngine/pull/3027 lands.
+    """
+    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+    is_weight = is_linear and role.tensor_type == "weight"
+    is_grad = is_linear and role.tensor_type in ("grad_output", "grad_input")
+    return NVFP4Quantizer(
+        fp4_dtype=tex.DType.kFloat4E2M1,
+        with_rht=not is_weight,
+        with_post_rht_amax=not is_weight,
+        with_2d_quantization=False,  # TODO(negvet): enable via PR #3027
+        stochastic_rounding=is_grad,
+        with_random_sign_mask=True,
+    )
 
 
 def _hybrid_nvfp4_qfactory(role):
     is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
     if is_linear and role.tensor_type in ("input", "weight", "output"):
+        # Same per-role config for both directions (RHT/SR are per role).
         return HybridQuantizer(
-            rowwise_quantizer=_make_nvfp4_quantizer(),
-            columnwise_quantizer=_make_nvfp4_quantizer(),
+            rowwise_quantizer=_make_nvfp4_quantizer(role),
+            columnwise_quantizer=_make_nvfp4_quantizer(role),
         )
     if is_linear and role.tensor_type in ("grad_output", "grad_input"):
-        return _make_nvfp4_quantizer()
-    return _make_nvfp4_quantizer()
+        return _make_nvfp4_quantizer(role)
+    return _make_nvfp4_quantizer(role)
+
+
+def _hybrid_mxfp8_nvfp4_qfactory(role):
+    """Cross-format: MXFP8 forward (rowwise) + NVFP4 backward (columnwise).
+
+      fprop TN: weight.row(MXFP8) x input.row(MXFP8)       -> MXFP8 x MXFP8
+      dgrad NN: weight.col(NVFP4) x grad_output.row(NVFP4) -> NVFP4 x NVFP4
+      wgrad NT: input.col(NVFP4)  x grad_output.col(NVFP4) -> NVFP4 x NVFP4
+
+    So weight/input = Hybrid(row=MXFP8, col=NVFP4), grad_output = plain NVFP4.
+    The forward all-gather consumes the MXFP8 rowwise sub-storage and the
+    backward all-gather the NVFP4 columnwise one -- the fwd-vs-bwd format
+    asymmetry that same-format recipes cannot surface.
+    """
+    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+    if is_linear and role.tensor_type in ("grad_output", "grad_input"):
+        return _make_nvfp4_bare()
+    # input / weight / output / unknown-None: MXFP8 rowwise + NVFP4 columnwise.
+    return HybridQuantizer(
+        rowwise_quantizer=_make_mxfp8_quantizer(),
+        columnwise_quantizer=_make_nvfp4_bare(),
+    )
 
 
 def hybrid_recipe():
@@ -153,33 +194,37 @@ def hybrid_recipe():
         return te_recipe.CustomRecipe(qfactory=_hybrid_mxfp8_qfactory)
     if QUANTIZATION == "hybrid_nvfp4":
         return te_recipe.CustomRecipe(qfactory=_hybrid_nvfp4_qfactory)
+    if QUANTIZATION == "hybrid_mxfp8_nvfp4":
+        return te_recipe.CustomRecipe(qfactory=_hybrid_mxfp8_nvfp4_qfactory)
     raise ValueError(f"Unknown hybrid QUANTIZATION={QUANTIZATION!r}")
 
 
 # ── Tolerances ───────────────────────────────────────────────────────
 #
-# Upstream ``run_numerics.py::_get_tolerances`` uses (0.4, 0.25) for
-# fp8_cs (loose because of sequence parallel & amax reduction) and
-# (0.125, 0.0625) for other FP8 recipes. Hybrid with same-format
-# sub-quantizers should inherit the underlying format's distributed
-# behaviour — with slightly looser bounds to absorb the two-pass
-# quantization (rowwise and columnwise quantizers run independently, so
-# their outputs may differ by ~1 ULP from a single fused-quantize path
-# in edge cases).
+# These match upstream ``run_numerics.py::_get_tolerances`` exactly, for
+# the same TP/SP-distributed-vs-single-node comparison. A same-format
+# hybrid inherits the underlying format's distributed behaviour: both the
+# distributed and single-node models run the *same* two-pass hybrid recipe,
+# so the two-pass quantization cancels in the comparison and the only
+# remaining difference is the TP/SP path (per-shard quantization,
+# all-gather/reduce-scatter order, and -- for fp8_cs only -- cross-rank
+# amax reduction). There is therefore no reason for hybrid to need looser
+# bounds than the vanilla format.
 
 
 def _get_tolerances():
     if QUANTIZATION == "hybrid_fp8":
+        # Loose because of sequence parallel & amax reduction (fp8_cs).
         return {"rtol": 0.4, "atol": 0.25}
     if QUANTIZATION == "hybrid_mxfp8":
-        return {"rtol": 0.2, "atol": 0.1}
+        return {"rtol": 0.125, "atol": 0.0625}
     if QUANTIZATION == "hybrid_nvfp4":
-        # Upstream ``run_numerics.py`` uses (0.125, 0.12) for vanilla
-        # NVFP4 with an open TODO to investigate why the tolerance is so
-        # large. Hybrid NVFP4 runs the same block-scaled kernel in each
-        # direction independently; bump atol modestly to absorb the
-        # two-pass asymmetry without hiding a real regression.
-        return {"rtol": 0.2, "atol": 0.15}
+        # Upstream ``run_numerics.py`` uses (0.125, 0.12) for vanilla NVFP4
+        # (with an open TODO to investigate why the tolerance is so large).
+        return {"rtol": 0.125, "atol": 0.12}
+    if QUANTIZATION == "hybrid_mxfp8_nvfp4":
+        # Backward GEMMs run in NVFP4 -> inherit the (looser) NVFP4 bounds.
+        return {"rtol": 0.125, "atol": 0.12}
     raise ValueError(f"No tolerances for QUANTIZATION={QUANTIZATION!r}")
 
 
@@ -294,10 +339,10 @@ def _loss_backward(out_single, out_dist):
 # ── Test 1: te.Linear TP (column + row) × SP (on/off) ────────────────
 
 
-def _test_linear(parallel_mode, sequence_parallel, params_dtype=torch.bfloat16):
+def _test_linear(parallel_mode, sequence_parallel, params_dtype=torch.bfloat16, amax_stress=False):
     dist_print(
         f"linear: parallel_mode={parallel_mode} sequence_parallel={sequence_parallel}"
-        f" dtype={params_dtype}"
+        f" dtype={params_dtype} amax_stress={amax_stress}"
     )
 
     torch.manual_seed(12345)
@@ -326,6 +371,11 @@ def _test_linear(parallel_mode, sequence_parallel, params_dtype=torch.bfloat16):
             # SP column: input is sharded along batch/sequence dim 0.
             inp_single = torch.empty((WORLD_SIZE * BATCH_SIZE, HIDDEN_SIZE)).cuda().to(params_dtype)
             inp_dist = torch.randn((BATCH_SIZE, HIDDEN_SIZE)).cuda().to(params_dtype)
+            if amax_stress and WORLD_RANK == WORLD_SIZE - 1:
+                # Large element on one rank: its local amax diverges from the
+                # global one. Hybrid gathers the SP activation whole before
+                # quantizing, so the output must still match the single-node ref.
+                inp_dist[-1, -1] = 1.0e3
             inp_single = _gather(inp_dist, dim=0).detach()
         else:
             inp_dist = inp_single.clone()
@@ -341,7 +391,11 @@ def _test_linear(parallel_mode, sequence_parallel, params_dtype=torch.bfloat16):
         out_dist = _gather(out_dist, dim=gather_dim)
 
     _loss_backward(out_single, out_dist)
-    _check_outputs(out_single, out_dist, label=f"linear[{parallel_mode},sp={sequence_parallel}]")
+    _check_outputs(
+        out_single,
+        out_dist,
+        label=f"linear[{parallel_mode},sp={sequence_parallel},amax_stress={amax_stress}]",
+    )
 
     # Gradient check is only well-defined in these configurations (the
     # others need cross-rank synchronization that the test doesn't
@@ -355,6 +409,146 @@ def test_linear():
     for parallel_mode in ["column", "row"]:
         for sequence_parallel in [False, True]:
             _test_linear(parallel_mode, sequence_parallel)
+    # Amax corner-case (current scaling only): a large element on one rank makes
+    # its local amax diverge from the global one. Hybrid gathers SP activations in
+    # high precision before quantizing, so the SP output must still match
+    # single-node -- guards against a future regression to quantize-then-gather
+    # without cross-rank amax reduction.
+    if QUANTIZATION == "hybrid_fp8":
+        _test_linear("column", True, amax_stress=True)
+
+
+# ── Test 1b: te.Linear hybrid-vs-vanilla bitwise operand equivalence ─
+
+
+def vanilla_recipe():
+    """Built-in single-format recipe matching the same-format hybrid recipe
+    for the bitwise ``_test_linear_vs_vanilla`` check: FP8 current scaling and
+    MXFP8 use their defaults (E4M3 fwd / E5M2 bwd, and E4M3 everywhere); NVFP4
+    uses the full recipe with 2D disabled to match the role-based 1D
+    ``_make_nvfp4_quantizer``."""
+    if QUANTIZATION == "hybrid_fp8":
+        return te_recipe.Float8CurrentScaling()
+    if QUANTIZATION == "hybrid_mxfp8":
+        return te_recipe.MXFP8BlockScaling()
+    if QUANTIZATION == "hybrid_nvfp4":
+        return te_recipe.NVFP4BlockScaling(disable_2d_quantization=True)
+    raise ValueError(f"No vanilla recipe for QUANTIZATION={QUANTIZATION!r}")
+
+
+def _backward_not_bitwise_comparable():
+    """Whether the recipe's backward can't be compared bitwise to vanilla.
+
+    True only for NVFP4's full recipe, which combines RHT with stochastic
+    rounding. That pair triggers NVFP4's separate columnwise RNG state
+    (``need_separate_columnwise_rng`` in the cast backend), and the hybrid
+    (two-pass) vs vanilla (fused) executions then consume that columnwise
+    random stream differently. Verified by isolation: neither RHT nor SR alone
+    diverges -- only the combination, and only on the columnwise gradient
+    (wgrad); the rowwise gradient (dgrad) stays bitwise.
+    """
+    return QUANTIZATION == "hybrid_nvfp4"
+
+
+def _check_bitwise(actual, expected, label):
+    """Assert bitwise equality (rtol=0, atol=0), all-reduced across ranks."""
+    failed = torch.tensor([0], dtype=torch.uint8, device="cuda")
+    try:
+        torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+    except AssertionError as exc:
+        dist_print(f"{label}: {exc}", src=WORLD_RANK, error=True)
+        failed[0] = 1
+    dist.all_reduce(failed, dist.ReduceOp.MAX, NCCL_WORLD)
+    assert not bool(failed.item()), f"{label}: not bitwise-identical on at least one rank"
+
+
+def _test_linear_vs_vanilla(parallel_mode, sequence_parallel, params_dtype=torch.bfloat16):
+    """Same-format hybrid must match its built-in vanilla recipe **bitwise**
+    through the *same* TP/SP-distributed ``te.Linear`` (forward in all configs;
+    backward in the non-SP, non-SR configs).
+
+    Unlike ``_test_linear`` (distributed vs single-node, inherently loose),
+    this compares hybrid vs vanilla at the same topology, so any non-bitwise
+    difference is a real hybrid-plumbing bug. Complements the FSDP2 parity test
+    in ``run_fsdp2_fused_adam.py`` by locking the TP/SP comm path.
+    """
+    dist_print(
+        f"linear_vs_vanilla: parallel_mode={parallel_mode} sequence_parallel={sequence_parallel}"
+    )
+
+    def run(recipe):
+        # Fresh model per recipe (re-seeded for identical weights): TE caches a
+        # quantized weight workspace on the module, so reusing one model would
+        # let the first recipe's cached weight contaminate the second.
+        torch.manual_seed(12345)
+        torch.cuda.manual_seed(12345)
+        model = te.Linear(
+            HIDDEN_SIZE,
+            HIDDEN_SIZE,
+            tp_size=WORLD_SIZE,
+            tp_group=NCCL_WORLD,
+            parallel_mode=parallel_mode,
+            sequence_parallel=sequence_parallel,
+            params_dtype=params_dtype,
+        ).cuda()
+
+        torch.manual_seed(34567)
+        torch.cuda.manual_seed(34567)
+        inp = torch.randn((BATCH_SIZE, HIDDEN_SIZE)).cuda().to(params_dtype)
+        if parallel_mode == "row":
+            split = HIDDEN_SIZE // WORLD_SIZE
+            inp = inp[:, WORLD_RANK * split : (WORLD_RANK + 1) * split].clone()
+        inp.requires_grad_()
+
+        with te.autocast(enabled=True, recipe=recipe):
+            out = model(inp)
+        # Fixed, recipe-independent target so both backward graphs match.
+        torch.manual_seed(54321)
+        torch.cuda.manual_seed(54321)
+        target = torch.randn_like(out)
+        LOSS_FN(out, target).backward()
+        weight_grads = [p.grad.detach().clone() for p in model.parameters() if p.grad is not None]
+        return out.detach().clone(), inp.grad.detach().clone(), weight_grads
+
+    out_h, dinp_h, wgrads_h = run(hybrid_recipe())
+    out_v, dinp_v, wgrads_v = run(vanilla_recipe())
+
+    tag = f"linear_vs_vanilla[{parallel_mode},sp={sequence_parallel}]"
+
+    # Forward is bitwise-identical in every config (the fprop operand-
+    # equivalence check: hybrid weight.rowwise/input.rowwise == vanilla).
+    _check_bitwise(out_h, out_v, f"{tag} forward")
+
+    # Backward is bitwise only without SP and without stochastic rounding;
+    # both are within training tolerance and covered by the loose
+    # distributed-vs-single-node check:
+    #  * Under SP, hybrid has no native quantized all-gather, so it routes
+    #    through the BF16 dequant/requant fallback while vanilla gathers native
+    #    per-shard bytes. For per-tensor-scaled formats (FP8 current, NVFP4) the
+    #    requantized scale then differs; MXFP8 (per-block only) is immune.
+    #    TODO(negvet): extend to SP once native hybrid AG lands (tracked in
+    #    HybridQuantizer.supports_only_rowwise_all_gather).
+    #  * NVFP4's full recipe combines RHT + stochastic rounding, which triggers
+    #    a separate columnwise RNG (need_separate_columnwise_rng); the hybrid
+    #    two-pass and vanilla fused paths then consume that columnwise random
+    #    stream differently, so the columnwise gradient (wgrad) rounds
+    #    differently. Neither RHT nor SR alone diverges -- only the pair.
+    if not sequence_parallel and not _backward_not_bitwise_comparable():
+        _check_bitwise(dinp_h, dinp_v, f"{tag} dgrad")
+        assert len(wgrads_h) == len(wgrads_v), f"{tag}: weight-grad count mismatch"
+        for i, (gh, gv) in enumerate(zip(wgrads_h, wgrads_v)):
+            _check_bitwise(gh, gv, f"{tag} wgrad[{i}]")
+
+
+def test_linear_vs_vanilla():
+    # Cross-format hybrid has no single built-in vanilla recipe to compare
+    # against bitwise; it is covered by the distributed-vs-single-node checks.
+    if QUANTIZATION == "hybrid_mxfp8_nvfp4":
+        dist_print("linear_vs_vanilla: skipped for cross-format hybrid (no vanilla equivalent)")
+        return
+    for parallel_mode in ["column", "row"]:
+        for sequence_parallel in [False, True]:
+            _test_linear_vs_vanilla(parallel_mode, sequence_parallel)
 
 
 # ── Test 2: te.LayerNormLinear column + SP ──────────────────────────
@@ -404,7 +598,62 @@ def test_layernorm_linear():
         _test_layernorm_linear(sequence_parallel)
 
 
-# ── Test 3: te.TransformerLayer + TP + SP ───────────────────────────
+# ── Test 3: te.LayerNormMLP + TP + SP ───────────────────────────────
+
+
+def _test_layernorm_mlp(sequence_parallel, params_dtype=torch.bfloat16):
+    """``te.LayerNormMLP`` with ``set_parallel_mode=True`` and optional SP:
+    column-parallel FC1 → activation → row-parallel FC2. Isolates the FC1
+    hybrid unfused-norm path and the row-parallel FC2 + SP reduce-scatter,
+    otherwise only exercised transitively inside ``_test_transformer_layer``.
+    """
+    dist_print(f"layernorm_mlp: parallel_mode=set sequence_parallel={sequence_parallel}")
+
+    torch.manual_seed(45678)
+    torch.cuda.manual_seed(45678)
+
+    model_single = te.LayerNormMLP(HIDDEN_SIZE, FFN_HIDDEN_SIZE, params_dtype=params_dtype).cuda()
+    model_dist = te.LayerNormMLP(
+        HIDDEN_SIZE,
+        FFN_HIDDEN_SIZE,
+        tp_size=WORLD_SIZE,
+        tp_group=NCCL_WORLD,
+        set_parallel_mode=True,
+        sequence_parallel=sequence_parallel,
+        params_dtype=params_dtype,
+    ).cuda()
+
+    _copy_params(model_dist, model_single)
+
+    if sequence_parallel:
+        inp_dist = torch.randn((BATCH_SIZE, HIDDEN_SIZE)).cuda().to(params_dtype)
+        inp_single = _gather(inp_dist, dim=0).detach()
+    else:
+        inp_single = torch.randn((BATCH_SIZE, HIDDEN_SIZE)).cuda().to(params_dtype)
+        inp_dist = inp_single.clone()
+
+    out_single, out_dist = _apply_models(model_single, model_dist, inp_single, inp_dist)
+
+    # Row-parallel FC2 output is in the full hidden space; with SP it is
+    # reduce-scattered along the token dim 0, so gather it back.
+    if sequence_parallel:
+        out_dist = _gather(out_dist, dim=0)
+
+    _loss_backward(out_single, out_dist)
+    _check_outputs(out_single, out_dist, label=f"layernorm_mlp[sp={sequence_parallel}]")
+
+    # Without SP, grads align with the single-node ref (SP needs cross-rank
+    # grad sync the test doesn't do -- matches run_numerics.py).
+    if not sequence_parallel:
+        _check_gradients(model_dist, model_single)
+
+
+def test_layernorm_mlp():
+    for sequence_parallel in [False, True]:
+        _test_layernorm_mlp(sequence_parallel)
+
+
+# ── Test 4: te.TransformerLayer + TP + SP ───────────────────────────
 
 
 def _test_transformer_layer(sequence_parallel, params_dtype=torch.bfloat16):
@@ -460,6 +709,11 @@ def _test_transformer_layer(sequence_parallel, params_dtype=torch.bfloat16):
     _loss_backward(out_single, out_dist)
     _check_outputs(out_single, out_dist, label=f"transformer_layer[sp={sequence_parallel}]")
 
+    # Without SP, verify the integration path at the gradient level too (SP
+    # needs cross-rank grad sync the test doesn't do -- matches run_numerics.py).
+    if not sequence_parallel:
+        _check_gradients(model_dist, model_single)
+
 
 def test_transformer_layer():
     for sequence_parallel in [False, True]:
@@ -496,13 +750,20 @@ def main(argv=None):
         "--quantization",
         type=str,
         required=True,
-        choices=["hybrid_fp8", "hybrid_mxfp8", "hybrid_nvfp4"],
+        choices=["hybrid_fp8", "hybrid_mxfp8", "hybrid_nvfp4", "hybrid_mxfp8_nvfp4"],
     )
     parser.add_argument(
         "--test",
         type=str,
         default="all",
-        choices=["all", "linear", "layernorm_linear", "transformer_layer"],
+        choices=[
+            "all",
+            "linear",
+            "linear_vs_vanilla",
+            "layernorm_linear",
+            "layernorm_mlp",
+            "transformer_layer",
+        ],
         help="Run only the named test (speeds up iterative debugging)",
     )
     args = parser.parse_args(argv)
@@ -510,7 +771,9 @@ def main(argv=None):
 
     test_map = {
         "linear": test_linear,
+        "linear_vs_vanilla": test_linear_vs_vanilla,
         "layernorm_linear": test_layernorm_linear,
+        "layernorm_mlp": test_layernorm_mlp,
         "transformer_layer": test_transformer_layer,
     }
     if args.test == "all":

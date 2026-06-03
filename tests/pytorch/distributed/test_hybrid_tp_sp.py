@@ -74,12 +74,30 @@ def test_hybrid_fp8_linear():
 
 
 @pytest.mark.skipif(not fp8_available, reason=f"FP8: {reason_for_no_fp8}")
+def test_hybrid_fp8_linear_vs_vanilla():
+    """Bitwise operand equivalence: same-format hybrid FP8 must match the
+    built-in ``Float8CurrentScaling`` recipe through the same TP ``te.Linear``
+    (forward in all configs; backward in the non-SP configs). Locks the TP
+    comm path that the FSDP2 parity test does not exercise."""
+    _run_test("hybrid_fp8", "linear_vs_vanilla")
+
+
+@pytest.mark.skipif(not fp8_available, reason=f"FP8: {reason_for_no_fp8}")
 def test_hybrid_fp8_layernorm_linear():
     """Column-parallel ``te.LayerNormLinear`` with and without SP.
     Probes the all-gather-before-quantize path that
     ``layernorm_linear.py`` disables the fused norm for when
     ``isinstance(input_quantizer, HybridQuantizer)``."""
     _run_test("hybrid_fp8", "layernorm_linear")
+
+
+@pytest.mark.skipif(not fp8_available, reason=f"FP8: {reason_for_no_fp8}")
+def test_hybrid_fp8_layernorm_mlp():
+    """Standalone ``te.LayerNormMLP`` (column FC1 / row FC2) with and
+    without SP under hybrid FP8. Isolates the MLP block's unfused-norm
+    and row-parallel reduce-scatter paths, and checks gradients in the
+    no-SP case."""
+    _run_test("hybrid_fp8", "layernorm_mlp")
 
 
 @pytest.mark.skipif(not fp8_available, reason=f"FP8: {reason_for_no_fp8}")
@@ -108,8 +126,18 @@ def test_hybrid_mxfp8_linear():
 
 
 @pytest.mark.skipif(not mxfp8_available, reason=f"MXFP8: {reason_for_no_mxfp8}")
+def test_hybrid_mxfp8_linear_vs_vanilla():
+    _run_test("hybrid_mxfp8", "linear_vs_vanilla")
+
+
+@pytest.mark.skipif(not mxfp8_available, reason=f"MXFP8: {reason_for_no_mxfp8}")
 def test_hybrid_mxfp8_layernorm_linear():
     _run_test("hybrid_mxfp8", "layernorm_linear")
+
+
+@pytest.mark.skipif(not mxfp8_available, reason=f"MXFP8: {reason_for_no_mxfp8}")
+def test_hybrid_mxfp8_layernorm_mlp():
+    _run_test("hybrid_mxfp8", "layernorm_mlp")
 
 
 @pytest.mark.skipif(not mxfp8_available, reason=f"MXFP8: {reason_for_no_mxfp8}")
@@ -144,10 +172,63 @@ def test_hybrid_nvfp4_linear():
 
 
 @pytest.mark.skipif(not nvfp4_available, reason=f"NVFP4: {reason_for_no_nvfp4}")
+def test_hybrid_nvfp4_linear_vs_vanilla():
+    _run_test("hybrid_nvfp4", "linear_vs_vanilla")
+
+
+@pytest.mark.skipif(not nvfp4_available, reason=f"NVFP4: {reason_for_no_nvfp4}")
 def test_hybrid_nvfp4_layernorm_linear():
     _run_test("hybrid_nvfp4", "layernorm_linear")
 
 
 @pytest.mark.skipif(not nvfp4_available, reason=f"NVFP4: {reason_for_no_nvfp4}")
+def test_hybrid_nvfp4_layernorm_mlp():
+    _run_test("hybrid_nvfp4", "layernorm_mlp")
+
+
+@pytest.mark.skipif(not nvfp4_available, reason=f"NVFP4: {reason_for_no_nvfp4}")
 def test_hybrid_nvfp4_transformer_layer():
     _run_test("hybrid_nvfp4", "transformer_layer")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Cross-format hybrid: MXFP8 forward (rowwise) + NVFP4 backward (columnwise)
+# ──────────────────────────────────────────────────────────────────────
+#
+# Forward and backward all-gather *different* formats (MXFP8 rowwise vs NVFP4
+# columnwise) -- the asymmetry same-format recipes can't surface. Only the
+# distributed-vs-single-node checks run (no single vanilla recipe to match a
+# cross-format hybrid bitwise). Needs both MXFP8 and NVFP4 hardware support.
+
+_cross_format_available = mxfp8_available and nvfp4_available
+_reason_for_no_cross_format = (
+    reason_for_no_mxfp8 if not mxfp8_available else reason_for_no_nvfp4
+)
+
+
+@pytest.mark.skipif(
+    not _cross_format_available, reason=f"MXFP8+NVFP4: {_reason_for_no_cross_format}"
+)
+def test_hybrid_mxfp8_nvfp4_linear():
+    _run_test("hybrid_mxfp8_nvfp4", "linear")
+
+
+@pytest.mark.skipif(
+    not _cross_format_available, reason=f"MXFP8+NVFP4: {_reason_for_no_cross_format}"
+)
+def test_hybrid_mxfp8_nvfp4_layernorm_linear():
+    _run_test("hybrid_mxfp8_nvfp4", "layernorm_linear")
+
+
+@pytest.mark.skipif(
+    not _cross_format_available, reason=f"MXFP8+NVFP4: {_reason_for_no_cross_format}"
+)
+def test_hybrid_mxfp8_nvfp4_layernorm_mlp():
+    _run_test("hybrid_mxfp8_nvfp4", "layernorm_mlp")
+
+
+@pytest.mark.skipif(
+    not _cross_format_available, reason=f"MXFP8+NVFP4: {_reason_for_no_cross_format}"
+)
+def test_hybrid_mxfp8_nvfp4_transformer_layer():
+    _run_test("hybrid_mxfp8_nvfp4", "transformer_layer")

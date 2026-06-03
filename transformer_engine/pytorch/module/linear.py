@@ -1694,6 +1694,15 @@ class Linear(TransformerEngineBaseModule):
             self._customize_quantizers_float8_current_scaling(fwd, recipe)
         elif recipe.nvfp4():
             self._customize_quantizers_nvfp4(fwd, recipe)
+        # Hybrid (CustomRecipe) needs no SP amax-reduction setup today: its SP
+        # activations are gathered in high precision and re-quantized whole, so
+        # every rank already sees the same global amax.
+        # TODO(negvet): once native quantized all-gather lands (see
+        # supports_only_rowwise_all_gather / gather_along_first_dim) the SP path
+        # quantizes per-shard, needing a hybrid branch here that mirrors the
+        # current-scaling / NVFP4 SP reduction above:
+        #     elif recipe.custom():
+        #         ...  # enable SP amax reduction on the hybrid input/grad quantizer
 
     def reset_parameters(self, defer_init=False):
         super().reset_parameters(defer_init=defer_init)

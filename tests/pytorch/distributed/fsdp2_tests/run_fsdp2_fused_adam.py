@@ -1059,7 +1059,6 @@ def test_dcp_resharding_load(recipe_name):
 
 def _build_hybrid_model(hybrid_recipe, use_meta_device=True):
     """Build a model with quantized_model_init using a hybrid CustomRecipe."""
-    ctx = te.quantized_model_init(enabled=True, recipe=hybrid_recipe)
     kwargs = dict(
         fuse_qkv_params=True,
         params_dtype=torch.bfloat16,
@@ -1068,7 +1067,7 @@ def _build_hybrid_model(hybrid_recipe, use_meta_device=True):
     )
     if use_meta_device:
         kwargs["device"] = "meta"
-    with ctx:
+    with te.quantized_model_init(enabled=True, recipe=hybrid_recipe):
         model = torch.nn.Sequential(
             *[
                 te.TransformerLayer(
@@ -1142,24 +1141,27 @@ def test_fused_adam_hybrid_master_weights(hybrid_recipe_name):
         if "master_param" in state:
             assert state["master_param"].dtype == torch.float32
 
-    assert losses[-1] < losses[0], f"Loss did not decrease: {losses[0]:.4f} -> {losses[-1]:.4f}"
+    # Strictly monotonic decrease
+    assert all(
+        losses[i + 1] < losses[i] for i in range(len(losses) - 1)
+    ), f"Loss not strictly decreasing each step: {losses}"
 
 
-@pytest.mark.parametrize("reshard_after_forward", [True, False])
-def test_fused_adam_hybrid_reshard_variants(hybrid_recipe_name, reshard_after_forward):
-    """Hybrid FusedAdam loop under both ``reshard_after_forward`` settings.
+def test_fused_adam_hybrid_reshard_variants(hybrid_recipe_name):
+    """Hybrid FusedAdam training must be numerically invariant to FSDP2's
+    ``reshard_after_forward`` schedule.
 
-    ``reshard_after_forward=True`` is FSDP2's default: the gathered weight is
-    dropped after forward and a second all-gather happens in backward —
-    meaning ``fsdp_post_all_gather(out=...)`` is invoked twice per training
-    step (once per pass) on the same gathered buffer. ``False`` keeps the
-    gathered weight alive through backward — only one gather per step, and
-    the gathered copy persists across forward/backward within the same step.
+    ``reshard_after_forward`` only changes *when* the gathered weight is
+    materialized/freed, not the math: ``True`` (FSDP2's child-module default)
+    drops the gathered weight after forward and re-gathers it in backward --
+    invoking ``fsdp_post_all_gather(out=...)`` twice per step -- while ``False``
+    keeps the gathered copy alive through backward (one gather per step). The
+    gathered quantized bytes are identical either way, so both schedules must
+    produce **bitwise-identical** loss trajectories.
 
-    Both modes must complete cleanly and produce a decreasing loss. This
-    locks in that the hybrid hooks handle both FSDP2 schedules, and forms a
-    regression harness for a future bandwidth optimization (P1.1) that would
-    split forward-only / backward-only buffers.
+    Strictly stronger than "loss decreased": it locks in that the hybrid
+    all-gather hooks are schedule-invariant across both FSDP2 passes, and
+    regression-guards the future P1.1 buffer-split bandwidth optimization.
     """
     if hybrid_recipe_name == "HybridFloat8BlockScaling":
         pytest.xfail(
@@ -1172,32 +1174,47 @@ def test_fused_adam_hybrid_reshard_variants(hybrid_recipe_name, reshard_after_fo
     hybrid_recipe = get_hybrid_recipe_from_string(hybrid_recipe_name)
     world_size, device = _get_dist_info()
 
-    model = _build_hybrid_model(hybrid_recipe)
-    model = _shard_model(model, world_size, reshard_after_forward=reshard_after_forward)
-
-    optimizer = te.optimizers.FusedAdam(
-        model.parameters(),
-        lr=1e-3,
-        master_weights=True,
-        master_weight_dtype=torch.float32,
-    )
-
+    # Shared, fixed input/target so the two schedules are compared on identical data.
     x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
     target = torch.randn_like(x)
 
-    losses = []
-    for _ in range(NUM_STEPS):
-        optimizer.zero_grad(set_to_none=True)
-        with te.autocast(enabled=True, recipe=hybrid_recipe):
-            output = model(x)
-        loss = F.mse_loss(output, target)
-        losses.append(loss.item())
-        loss.backward()
-        optimizer.step()
+    def run(reshard_after_forward):
+        # Re-seed so both schedules get identical weight init from reset_parameters().
+        torch.manual_seed(42)
+        torch.cuda.manual_seed(42)
+        model = _shard_model(
+            _build_hybrid_model(hybrid_recipe),
+            world_size,
+            reshard_after_forward=reshard_after_forward,
+        )
+        optimizer = te.optimizers.FusedAdam(
+            model.parameters(),
+            lr=1e-3,
+            master_weights=True,
+            master_weight_dtype=torch.float32,
+        )
+        losses = []
+        for _ in range(NUM_STEPS):
+            optimizer.zero_grad(set_to_none=True)
+            with te.autocast(enabled=True, recipe=hybrid_recipe):
+                output = model(x)
+            loss = F.mse_loss(output, target)
+            losses.append(loss.item())
+            loss.backward()
+            optimizer.step()
+        return losses
 
-    assert losses[-1] < losses[0], (
-        f"[reshard_after_forward={reshard_after_forward}] "
-        f"loss did not decrease: {losses[0]:.4f} -> {losses[-1]:.4f}"
+    losses_resharded = run(reshard_after_forward=True)  # re-gather in backward
+    losses_kept = run(reshard_after_forward=False)  # keep gathered weight through backward
+
+    # Both schedules must train (strictly monotonic decrease) ...
+    assert all(
+        losses_resharded[i + 1] < losses_resharded[i] for i in range(NUM_STEPS - 1)
+    ), f"reshard_after_forward=True loss not strictly decreasing: {losses_resharded}"
+    # ... and be numerically identical, since reshard is a schedule, not a math change.
+    assert losses_resharded == losses_kept, (
+        "reshard_after_forward changed numerics (must be schedule-invariant): "
+        f"True={losses_resharded} vs False={losses_kept}"
     )
 
 
@@ -1256,14 +1273,211 @@ def test_fused_adam_hybrid_bf16_vs_hybrid_parity(hybrid_recipe_name):
     assert hybrid_losses[-1] < hybrid_losses[0], f"Hybrid loss did not decrease: {hybrid_losses}"
     assert bf16_losses[-1] < bf16_losses[0], f"BF16 loss did not decrease: {bf16_losses}"
 
-    # Verify hybrid and bf16 loss trajectories are within the same order of magnitude.
-    # Quantized training may diverge from bf16, but should not be wildly different.
+    # Hybrid stays within a few % of bf16 (seed-fixed).
+    rel_tol = 0.10
     for step, (h_loss, b_loss) in enumerate(zip(hybrid_losses, bf16_losses)):
-        ratio = h_loss / max(b_loss, 1e-10)
-        assert 0.1 < ratio < 10.0, (
-            f"Step {step}: hybrid loss ({h_loss:.4f}) and bf16 loss ({b_loss:.4f}) "
-            f"differ by more than 10x (ratio={ratio:.2f})"
+        rel_diff = abs(h_loss - b_loss) / max(abs(b_loss), 1e-10)
+        assert rel_diff < rel_tol, (
+            f"Step {step}: hybrid loss ({h_loss:.4f}) vs bf16 ({b_loss:.4f}) "
+            f"differ by {rel_diff * 100:.2f}% (> {rel_tol * 100:.0f}%)"
         )
+
+
+# Same-format hybrid -> the vanilla recipe it must match bitwise. Cross-format
+# hybrids (e.g. HybridMixed_MXFP8_FP8) have no single-format vanilla equivalent.
+_HYBRID_TO_BASE_RECIPE = {
+    "HybridFP8CurrentScaling": "Float8CurrentScaling",
+    "HybridMXFP8": "MXFP8BlockScaling",
+    "HybridFloat8BlockScaling": "Float8BlockScaling",
+}
+
+
+def _build_linear_parity_stack(recipe):
+    """Two bare ``te.Linear`` layers under ``quantized_model_init`` for
+    hybrid-vs-vanilla bitwise parity.
+    """
+    with te.quantized_model_init(enabled=True, recipe=recipe):
+        return torch.nn.Sequential(
+            te.Linear(HIDDEN_SIZE, HIDDEN_SIZE, params_dtype=torch.bfloat16, device="meta"),
+            te.Linear(HIDDEN_SIZE, HIDDEN_SIZE, params_dtype=torch.bfloat16, device="meta"),
+        )
+
+
+def test_fused_adam_hybrid_vs_base_recipe_parity(hybrid_recipe_name):
+    """Same-format hybrid must match its vanilla recipe bitwise through the full
+    FSDP2 + FusedAdam loop.
+
+    Forward output, weight gradients, and per-step loss are all asserted
+    bitwise-identical every iteration -- regression guard for the amax-reduction
+    fix. Uses a bare ``te.Linear`` stack (see ``_build_linear_parity_stack``) to
+    isolate GEMM-operand quantization.
+    """
+    if hybrid_recipe_name == "HybridFloat8BlockScaling":
+        pytest.xfail(
+            "HybridFloat8BlockScaling: Float8BlockwiseQTensor sub-storage loses "
+            "quantized type through FSDP2 view(-1) in reset_sharded_param."
+        )
+    if hybrid_recipe_name not in _HYBRID_TO_BASE_RECIPE:
+        pytest.skip(
+            f"{hybrid_recipe_name} is cross-format; no single-format vanilla "
+            "recipe to compare against."
+        )
+
+    from fsdp2_utils import get_hybrid_recipe_from_string
+
+    base_recipe_name = _HYBRID_TO_BASE_RECIPE[hybrid_recipe_name]
+    world_size, device = _get_dist_info()
+
+    # Shared, fixed input/target; the comparison is per-rank (base vs hybrid on
+    # the same rank), so cross-rank input consistency does not matter.
+    x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
+    target = torch.randn_like(x)
+
+    def run_training(build_fn, recipe_for_autocast):
+        # Re-seed so both models get identical init from reset_parameters() (run
+        # after sharding); with same-format quantization and a dropout-free loop
+        # the full trajectory is then deterministic.
+        torch.manual_seed(1234)
+        torch.cuda.manual_seed(1234)
+        model = _shard_model(build_fn(), world_size)
+        optimizer = te.optimizers.FusedAdam(
+            model.parameters(),
+            lr=1e-3,
+            master_weights=True,
+            master_weight_dtype=torch.float32,
+        )
+        first_output = None
+        losses = []
+        grads_per_step = []
+        for step in range(NUM_STEPS):
+            optimizer.zero_grad(set_to_none=True)
+            with te.autocast(enabled=True, recipe=recipe_for_autocast):
+                output = model(x)
+            if step == 0:
+                first_output = output.detach().clone()
+            loss = F.mse_loss(output, target)
+            losses.append(loss.detach().clone())
+            loss.backward()
+            # Snapshot grad local shards before the optimizer consumes them
+            # (p.grad is a DTensor under FSDP2) to assert backward parity directly.
+            step_grads = []
+            for p in model.parameters():
+                g = p.grad
+                if g is None:
+                    step_grads.append(None)
+                else:
+                    g = g.to_local() if isinstance(g, DTensor) else g
+                    step_grads.append(g.detach().clone())
+            grads_per_step.append(step_grads)
+            optimizer.step()
+        return first_output, losses, grads_per_step
+
+    base_recipe = get_recipe_from_string(base_recipe_name)
+    hybrid_recipe = get_hybrid_recipe_from_string(hybrid_recipe_name)
+
+    base_first, base_losses, base_grads = run_training(
+        lambda: _build_linear_parity_stack(base_recipe), base_recipe
+    )
+    hybrid_first, hybrid_losses, hybrid_grads = run_training(
+        lambda: _build_linear_parity_stack(hybrid_recipe), hybrid_recipe
+    )
+
+    # (1) First forward: bitwise-identical (the core operand-equivalence check).
+    torch.testing.assert_close(
+        hybrid_first,
+        base_first,
+        rtol=0.0,
+        atol=0.0,
+        msg=lambda m: (
+            f"[{hybrid_recipe_name} vs {base_recipe_name}] first forward output not"
+            f" bitwise-identical (a same-format hybrid must match its vanilla recipe"
+            f" before any optimizer step): {m}"
+        ),
+    )
+
+    # (2) Every per-step loss: bitwise-identical across the whole optimizer loop.
+    for step, (b_loss, h_loss) in enumerate(zip(base_losses, hybrid_losses)):
+        torch.testing.assert_close(
+            h_loss,
+            b_loss,
+            rtol=0.0,
+            atol=0.0,
+            msg=lambda m, s=step: (
+                f"[{hybrid_recipe_name} vs {base_recipe_name}] step {s} loss not"
+                f" bitwise-identical to the vanilla recipe: {m}"
+            ),
+        )
+
+    # (3) Backward: every weight-gradient shard at every step bitwise-identical
+    #     (implied by the loss trajectory, but asserted directly to be explicit).
+    for step, (b_step, h_step) in enumerate(zip(base_grads, hybrid_grads)):
+        for i, (b_grad, h_grad) in enumerate(zip(b_step, h_step)):
+            assert (b_grad is None) == (h_grad is None), (
+                f"[{hybrid_recipe_name} vs {base_recipe_name}] step {step} param {i}"
+                " gradient presence differs between hybrid and vanilla"
+            )
+            if b_grad is None:
+                continue
+            torch.testing.assert_close(
+                h_grad,
+                b_grad,
+                rtol=0.0,
+                atol=0.0,
+                msg=lambda m, s=step, i=i: (
+                    f"[{hybrid_recipe_name} vs {base_recipe_name}] step {s} param {i}"
+                    f" gradient not bitwise-identical to the vanilla recipe: {m}"
+                ),
+            )
+
+
+def test_fused_adam_hybrid_scale_uniform_across_shards(hybrid_recipe_name):
+    """Per-tensor hybrid weights must share ONE amax-reduced scale across FSDP2
+    shards -- tolerance-free regression guard for the amax-reduction fix.
+
+    Without cross-shard reduction each rank quantizes its shard with a local amax
+    and the scales differ; with the fix they match. Checked directly on the
+    sharded weight (no forward). Block-scaled formats (MXFP8) are skipped.
+    """
+    if hybrid_recipe_name != "HybridFP8CurrentScaling":
+        pytest.skip("scale-uniformity check applies to per-tensor current scaling only")
+
+    from transformer_engine.pytorch import HybridQuantizedTensor
+    from fsdp2_utils import get_hybrid_recipe_from_string
+
+    world_size, device = _get_dist_info()
+    if world_size < 2:
+        pytest.skip("needs >=2 ranks to compare shard scales")
+
+    hybrid_recipe = get_hybrid_recipe_from_string(hybrid_recipe_name)
+    model = _build_hybrid_model(hybrid_recipe)
+    model = _shard_model(model, world_size)
+
+    checked = 0
+    for name, param in model.named_parameters():
+        if not (
+            isinstance(param, DTensor) and isinstance(param._local_tensor, HybridQuantizedTensor)
+        ):
+            continue
+        row_sub = param._local_tensor._rowwise_storage
+        scale_inv = getattr(row_sub, "_scale_inv", None) if row_sub is not None else None
+        if scale_inv is None:
+            continue
+        local_scale = scale_inv.detach().reshape(-1).clone()
+        gathered = [torch.zeros_like(local_scale) for _ in range(world_size)]
+        dist.all_gather(gathered, local_scale)
+        for r in range(1, world_size):
+            torch.testing.assert_close(
+                gathered[r],
+                gathered[0],
+                rtol=0.0,
+                atol=0.0,
+                msg=lambda m, n=name, r=r: (
+                    f"{n}: rank {r} rowwise _scale_inv differs from rank 0 -- cross-shard "
+                    f"amax reduction was not applied to the hybrid current-scaling weight: {m}"
+                ),
+            )
+        checked += 1
+    assert checked > 0, "no hybrid current-scaling weights found to check"
 
 
 def test_fused_adam_hybrid_allgather_correctness(hybrid_recipe_name):
@@ -1296,14 +1510,6 @@ def test_fused_adam_hybrid_allgather_correctness(hybrid_recipe_name):
     with te.autocast(enabled=True, recipe=hybrid_recipe):
         _ = model(x)
 
-    # Stateless formats gather identical bytes; dequantize must match exactly.
-    _TIGHT_TOLERANCE = {
-        "HybridFP8CurrentScaling": dict(rtol=0.0, atol=0.0),
-        "HybridMXFP8": dict(rtol=0.0, atol=0.0),
-        "HybridMixed_MXFP8_FP8": dict(rtol=0.0, atol=0.0),
-    }
-    tolerance = _TIGHT_TOLERANCE.get(hybrid_recipe_name, dict(rtol=1e-6, atol=1e-6))
-
     checked = 0
     for name, param in model.named_parameters():
         if not (isinstance(param, DTensor) and isinstance(param._local_tensor, QuantizedTensor)):
@@ -1321,11 +1527,13 @@ def test_fused_adam_hybrid_allgather_correctness(hybrid_recipe_name):
         else:
             fsdp_full_deq = full_param.float()
 
+        # Stateless formats gather identical bytes -> exact match.
         torch.testing.assert_close(
             manual_full.float(),
             fsdp_full_deq[: manual_full.shape[0]].float(),
             msg=lambda m, n=name: f"Allgather mismatch for {n}: {m}",
-            **tolerance,
+            rtol=0.0,
+            atol=0.0,
         )
         checked += 1
 
@@ -1361,8 +1569,17 @@ def test_fused_adam_hybrid_mxfp8_awkward_shard_shape():
     per_rank_out = 96
     out_features = per_rank_out * world_size
     in_features = 128  # arbitrary, divisible by 32; not sharded by FSDP2 here
-    assert per_rank_out % 32 == 0, "MXFP8 data alignment precondition"
-    assert per_rank_out % 128 != 0, "Test precondition: shard must need scale padding"
+    assert per_rank_out % 32 == 0, (
+        f"Test setup error: per_rank_out={per_rank_out} (= out_features / world_size, "
+        f"world_size={world_size}) must be a multiple of the MXFP8 block size (32) so the "
+        f"sharded weight's data stays block-aligned. Pick a per_rank_out divisible by 32."
+    )
+    assert per_rank_out % 128 != 0, (
+        f"Test setup error: per_rank_out={per_rank_out} must NOT be a multiple of 128, or the "
+        f"rowwise scale-inv needs no alignment padding and this test stops exercising the MXFP8 "
+        f"unpad-before-gather / pad-after-gather path it exists to cover. Pick a per_rank_out "
+        f"divisible by 32 but not 128 (e.g. 96)."
+    )
 
     for recipe_name in ("HybridMXFP8", "HybridMixed_MXFP8_FP8"):
         hybrid_recipe = get_hybrid_recipe_from_string(recipe_name)
@@ -1427,20 +1644,19 @@ def test_hybrid_dcp_output_parity(hybrid_recipe_name):
         )
 
     if hybrid_recipe_name == "HybridFP8CurrentScaling":
+        # TODO: preserve hybrid current-scaling primary-weight scales across DCP
+        # by implementing __tensor_flatten__/__tensor_unflatten__ on the quantized
+        # tensor stack (HybridQuantizedTensor + its Float8Tensor sub-storages) so
+        # DCP serializes fp8 data + fp32 _scale_inv as explicit tensor leaves
+        # instead of round-tripping through a dequantized bf16 weight.
         pytest.xfail(
-            "HybridFP8CurrentScaling: per-tensor _scale_inv is not preserved "
-            "through DCP's tensor-storage-byte serialization path. "
-            "HybridQuantizedTensor.__reduce_ex__ correctly round-trips through "
-            "pickle (verified by torch.save/torch.load), but DCP bypasses "
-            "pickle and serializes the tensor's storage bytes — the scalar "
-            "_scale_inv is not enumerated as a separate tensor leaf and gets "
-            "lost. Vanilla Float8CurrentScaling avoids this because per-tensor "
-            "scale lives in module.fp8_meta (saved as extra_state), not on "
-            "the tensor; hybrid uses per-sub-storage scales without that "
-            "mirror. Fix path: implement __tensor_flatten__/__tensor_unflatten__ "
-            "across the quantized tensor stack so DCP can serialize the "
-            "per-leaf tensor fields directly. Loaded model output diverges by "
-            "~5e-2."
+            "HybridFP8CurrentScaling: hybrid current-scaling primary-weight "
+            "_scale_inv is not preserved across DCP. DCP stores each weight as a "
+            "dequantized bf16 leaf (no scale leaf) and re-quantizes on load; this "
+            "is idempotent for a single per-tensor Float8Tensor (vanilla "
+            "round-trips bitwise) but not for the hybrid's two sub-storages, so "
+            "the loaded output diverges ~5e-2. torch.save/load and the FP32 "
+            "master weight are unaffected. See the TODO above for the fix."
         )
 
     from fsdp2_utils import get_hybrid_recipe_from_string
@@ -1540,6 +1756,10 @@ TESTS = {
     "safetensors_fp32_export": test_safetensors_fp32_export,
     "fused_adam_hybrid_master_weights": test_fused_adam_hybrid_master_weights,
     "fused_adam_hybrid_bf16_vs_hybrid_parity": test_fused_adam_hybrid_bf16_vs_hybrid_parity,
+    "fused_adam_hybrid_vs_base_recipe_parity": test_fused_adam_hybrid_vs_base_recipe_parity,
+    "fused_adam_hybrid_scale_uniform_across_shards": (
+        test_fused_adam_hybrid_scale_uniform_across_shards
+    ),
     "fused_adam_hybrid_allgather_correctness": test_fused_adam_hybrid_allgather_correctness,
     "fused_adam_hybrid_mxfp8_awkward_shard_shape": (
         test_fused_adam_hybrid_mxfp8_awkward_shard_shape

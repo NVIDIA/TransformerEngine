@@ -1653,8 +1653,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     raise RuntimeError("Weight quantizer has not been initialized")
                 quantizer.set_usage(rowwise=True, columnwise=torch.is_grad_enabled())
                 quantizer.internal = False
+                # HybridQuantizer is included so its current-scaling / NVFP4
+                # sub-quantizers get the same cross-shard amax reduction as the
+                # vanilla path (no-op for block-scaled sub-quantizers like MXFP8).
                 if is_dtensor and isinstance(
-                    quantizer, (Float8CurrentScalingQuantizer, NVFP4Quantizer)
+                    quantizer, (Float8CurrentScalingQuantizer, NVFP4Quantizer, HybridQuantizer)
                 ):
                     device_mesh = dtensor_param.device_mesh
                     amax_reduction_group = (

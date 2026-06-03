@@ -457,7 +457,6 @@ def test_transpose_cache_retained_after_backward(recipe_name, quantized_model_in
 
 def _build_hybrid_model(num_layers, hybrid_recipe, use_meta_device=True):
     """Build a model with quantized_model_init using a hybrid CustomRecipe."""
-    ctx = te.quantized_model_init(enabled=True, recipe=hybrid_recipe)
     kwargs = dict(
         fuse_qkv_params=True,
         params_dtype=torch.bfloat16,
@@ -466,7 +465,7 @@ def _build_hybrid_model(num_layers, hybrid_recipe, use_meta_device=True):
     )
     if use_meta_device:
         kwargs["device"] = "meta"
-    with ctx:
+    with te.quantized_model_init(enabled=True, recipe=hybrid_recipe):
         model = torch.nn.Sequential(
             *[
                 te.TransformerLayer(
@@ -540,6 +539,11 @@ def test_hybrid_no_excess_forward_memory(hybrid_recipe_name):
     hybrid_avg = sum(hybrid_increments) / len(hybrid_increments)
 
     excess_per_layer = hybrid_avg - bf16_avg
+    # Basis: forward growth is constant per layer (no accumulation) for both bf16 and
+    # hybrid; the excess is just hybrid's extra per-layer quantized buffers. Measured
+    # excess: ~3 KiB (FP8 current) / ~7 KiB (mixed MXFP8+FP8) / ~12 KiB (MXFP8). A
+    # leaked layer's quantized weights would be hundreds of KiB, so 50 KiB sits above
+    # the real per-layer overhead and well below a leak.
     tolerance_per_layer = 50 * 1024  # 50 KiB
 
     assert excess_per_layer <= tolerance_per_layer, (
@@ -602,6 +606,10 @@ def test_hybrid_transpose_cache_after_backward(hybrid_recipe_name):
     )
 
     excess = hybrid_bwd_delta - bf16_bwd_delta
+    # Basis: hybrid retains no more than bf16 after backward+step — measured excess is
+    # slightly negative (~-0.02..-0.09 MiB vs a ~2 MiB bf16 delta). The tolerance only
+    # absorbs allocator/measurement noise; a genuinely retained gathered weight or
+    # transpose cache would be MiB-scale (>> 256 KiB).
     tolerance = 256 * 1024  # 256 KiB
 
     assert excess <= tolerance, (

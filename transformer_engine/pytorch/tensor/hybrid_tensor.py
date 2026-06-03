@@ -48,6 +48,36 @@ class HybridQuantizer(Quantizer):
         self.rowwise_quantizer.set_usage(rowwise=True, columnwise=False)
         self.columnwise_quantizer.set_usage(rowwise=False, columnwise=True)
 
+    @property
+    def with_amax_reduction(self) -> bool:
+        """Whether either sub-quantizer has cross-rank amax reduction enabled."""
+        return getattr(self.rowwise_quantizer, "with_amax_reduction", False) or getattr(
+            self.columnwise_quantizer, "with_amax_reduction", False
+        )
+
+    @with_amax_reduction.setter
+    def with_amax_reduction(self, value: bool) -> None:
+        # Set on the HybridQuantizer by module / FSDP2 code, but read by the C++
+        # kernel off the sub-quantizer that runs -- hence forwarded, not stored here.
+        for sub in (self.rowwise_quantizer, self.columnwise_quantizer):
+            if hasattr(sub, "with_amax_reduction"):
+                sub.with_amax_reduction = value
+
+    @property
+    def amax_reduction_group(self):
+        """Amax-reduction group of the sub-quantizers, or ``None`` if unset."""
+        for sub in (self.rowwise_quantizer, self.columnwise_quantizer):
+            group = getattr(sub, "amax_reduction_group", None)
+            if group is not None:
+                return group
+        return None
+
+    @amax_reduction_group.setter
+    def amax_reduction_group(self, value) -> None:
+        for sub in (self.rowwise_quantizer, self.columnwise_quantizer):
+            if hasattr(sub, "amax_reduction_group"):
+                sub.amax_reduction_group = value
+
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
         # Gate each sub-quantizer call on the parent usage flag. Sub-quantizers
         # are pinned to one direction in ``__init__``; the parent flag decides
@@ -441,6 +471,14 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
         tuple; ``fsdp_post_all_gather`` would slice the gathered flat buffer
         using those offsets.
         """
+        # Mirror ``Float8Tensor.fsdp_pre_all_gather``: enable cross-shard amax
+        # reduction so the post-optimizer re-quantization of the sharded weight
+        # keeps one shared scale across shards (no-op for sub-quantizers without
+        # amax reduction, e.g. MXFP8).
+        if mesh is not None and self._quantizer is not None:
+            self._quantizer.amax_reduction_group = mesh.get_group()
+            self._quantizer.with_amax_reduction = True
+
         # Quick, targeted error for sub-storages whose FSDP2 support isn't
         # implemented yet (e.g. NVFP4). Without this, users hit
         # NotImplementedError from deep inside fsdp_extract_buffers with a

@@ -17,19 +17,6 @@ def get_recipe_from_string(recipe):
     return getattr(transformer_engine.common.recipe, recipe)()
 
 
-# ── Hybrid qfactories ─────────────────────────────────────────────────
-#
-# Module-level (picklable) qfactories used by ``get_hybrid_recipe_from_string``.
-# Each factory composes one or two role-aware base factories from
-# ``quantization_recipes_base`` per direction. Per-role behavior is delegated
-# to the base factory — the hybrid layer only decides direction pairing.
-#
-# DCP serializes ``CustomRecipe`` via ``pickle``; closure-based qfactories
-# (lambdas, inner functions referencing captured state) are not picklable,
-# so the qfactory must live at module scope. See
-# ``run_fsdp2_fused_adam.py::test_hybrid_dcp_output_parity``.
-
-
 def _hybrid_fp8_current_qfactory(role):
     """FP8 current-scaling rowwise + FP8 current-scaling columnwise."""
     is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
@@ -74,6 +61,11 @@ def _hybrid_mixed_mxfp8_fp8_qfactory(role):
     return current_scaling_quantizer_factory(role)
 
 
+# The qfactories above are registered here as module-level functions (not
+# lambdas or closures) on purpose: DCP serializes ``CustomRecipe`` via
+# ``pickle``, and closure-based qfactories (or inner functions capturing state)
+# are not picklable. Keeping them at module scope lets them pickle by reference.
+# See ``run_fsdp2_fused_adam.py::test_hybrid_dcp_output_parity``.
 _HYBRID_QFACTORIES = {
     "HybridFP8CurrentScaling": _hybrid_fp8_current_qfactory,
     "HybridMXFP8": _hybrid_mxfp8_qfactory,
@@ -84,6 +76,10 @@ _HYBRID_QFACTORIES = {
 
 def get_hybrid_recipe_from_string(recipe):
     """Build a CustomRecipe wrapping a module-level (picklable) hybrid qfactory.
+
+    Each hybrid qfactory composes one or two role-aware base factories from
+    ``quantization_recipes_base`` per direction; per-role behavior is delegated
+    to the base factory and the hybrid layer only decides the direction pairing.
 
     Supported values:
         "HybridFP8CurrentScaling" — FP8 current for both directions
