@@ -4,6 +4,7 @@
 import torch
 from typing import Optional
 from transformer_engine.pytorch.router import (
+    RoutingMapFormat,
     fused_topk_with_score_function,
     fused_compute_score_for_moe_aux_loss,
     fused_moe_aux_loss,
@@ -459,6 +460,138 @@ def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk, expert_multipl
     aux_loss_fused.backward()
 
     torch.testing.assert_close(probs.grad, probs_clone.grad, atol=atol, rtol=rtol)
+
+
+def _bytemap_to_bitmap_u8(bytemap: torch.Tensor) -> torch.Tensor:
+    """Reference packer: bool[T, E] -> uint8[T, ceil(E/8)] LSB-first.
+
+    Matches numpy.packbits(..., bitorder='little')
+    """
+    flat = bytemap.to(torch.uint8).cpu().numpy()
+    import numpy as np
+
+    return torch.from_numpy(np.packbits(flat, axis=-1, bitorder="little")).to(bytemap.device)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32])
+@pytest.mark.parametrize(
+    "num_tokens,num_experts,topk",
+    [(128, 32, 4), (256, 128, 8), (256, 130, 8), (128, 1024, 16)],
+)
+@pytest.mark.parametrize("score_function", ["softmax", "sigmoid", "sqrtsoftplus"])
+def test_topk_bitmap_vs_bytemap(dtype, num_tokens, num_experts, topk, score_function):
+    """fused_topk_with_score_function should produce identical probs and an
+    LSB-packed bitmap routing_map when routing_map_format=BITMAP_U8, and
+    backward gradients should match the bytemap path exactly."""
+    if topk >= num_experts:
+        pytest.skip(f"topk ({topk}) >= num_experts ({num_experts})")
+    if score_function in ("sigmoid", "sqrtsoftplus"):
+        offset = torch.arange(-num_tokens // 2, num_tokens // 2, dtype=dtype, device="cuda") * 1e-4
+        logits = (
+            torch.arange(-num_experts // 2, num_experts // 2, device="cuda", dtype=dtype) * 1e-2
+        )
+        logits = logits.unsqueeze(0).repeat(num_tokens, 1) + offset.unsqueeze(1)
+    else:
+        logits = (
+            torch.arange(
+                -num_tokens * num_experts // 2,
+                num_tokens * num_experts // 2,
+                device="cuda",
+                dtype=dtype,
+            )
+            * 1e-4
+        )
+        logits = logits.view(num_tokens, num_experts)
+
+    logits_byte = logits.detach().clone().requires_grad_(True)
+    logits_bit = logits.detach().clone().requires_grad_(True)
+
+    probs_byte, routing_map_byte = fused_topk_with_score_function(
+        logits=logits_byte,
+        topk=topk,
+        use_pre_softmax=False,
+        num_groups=None,
+        group_topk=None,
+        scaling_factor=None,
+        score_function=score_function,
+        expert_bias=None,
+        routing_map_format=RoutingMapFormat.BYTEMAP,
+    )
+    probs_bit, routing_map_bit = fused_topk_with_score_function(
+        logits=logits_bit,
+        topk=topk,
+        use_pre_softmax=False,
+        num_groups=None,
+        group_topk=None,
+        scaling_factor=None,
+        score_function=score_function,
+        expert_bias=None,
+        routing_map_format=RoutingMapFormat.BITMAP_U8,
+    )
+
+    assert probs_byte.dtype == probs_bit.dtype
+    torch.testing.assert_close(probs_byte, probs_bit, atol=0.0, rtol=0.0)
+
+    expected_shape = (num_tokens, (num_experts + 7) // 8)
+    assert (
+        routing_map_bit.shape == expected_shape
+    ), f"Bitmap shape {tuple(routing_map_bit.shape)} != {expected_shape}"
+    assert routing_map_bit.dtype == torch.uint8
+    assert routing_map_byte.dtype == torch.bool
+
+    packed_expected = _bytemap_to_bitmap_u8(routing_map_byte)
+    torch.testing.assert_close(routing_map_bit, packed_expected, atol=0, rtol=0)
+
+    # Backward parity: grad of probs.sum() must be bit-identical across formats.
+    probs_byte.sum().backward()
+    probs_bit.sum().backward()
+    torch.testing.assert_close(logits_byte.grad, logits_bit.grad, atol=0.0, rtol=0.0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32])
+@pytest.mark.parametrize(
+    "num_tokens,num_experts,topk",
+    [(128, 32, 4), (256, 128, 8), (256, 130, 8)],
+)
+@pytest.mark.parametrize("score_function", ["softmax", "sigmoid", "sqrtsoftplus"])
+def test_score_for_aux_loss_bitmap_vs_bytemap(dtype, num_tokens, num_experts, topk, score_function):
+    """fused_compute_score_for_moe_aux_loss: bitmap routing_map must equal
+    LSB-packed bytemap; scores must be bit-identical across formats."""
+    if topk >= num_experts:
+        pytest.skip(f"topk ({topk}) >= num_experts ({num_experts})")
+    offset = torch.arange(-num_tokens // 2, num_tokens // 2, dtype=dtype, device="cuda") * 1e-4
+    logits = torch.arange(-num_experts // 2, num_experts // 2, device="cuda", dtype=dtype) * 1e-2
+    logits = logits.unsqueeze(0).repeat(num_tokens, 1) + offset.unsqueeze(1)
+
+    logits_byte = logits.detach().clone().requires_grad_(True)
+    logits_bit = logits.detach().clone().requires_grad_(True)
+
+    routing_map_byte, scores_byte = fused_compute_score_for_moe_aux_loss(
+        logits=logits_byte,
+        topk=topk,
+        score_function=score_function,
+        routing_map_format="bytemap",
+    )
+    routing_map_bit, scores_bit = fused_compute_score_for_moe_aux_loss(
+        logits=logits_bit,
+        topk=topk,
+        score_function=score_function,
+        routing_map_format="bitmap_u8",
+    )
+
+    torch.testing.assert_close(scores_byte, scores_bit, atol=0.0, rtol=0.0)
+
+    expected_shape = (num_tokens, (num_experts + 7) // 8)
+    assert routing_map_bit.shape == expected_shape
+    assert routing_map_bit.dtype == torch.uint8
+    assert routing_map_byte.dtype == torch.bool
+    packed_expected = _bytemap_to_bitmap_u8(routing_map_byte)
+    torch.testing.assert_close(routing_map_bit, packed_expected, atol=0, rtol=0)
+
+    # Backward parity through scores.
+    scores_byte.sum().backward()
+    scores_bit.sum().backward()
+    torch.testing.assert_close(logits_byte.grad, logits_bit.grad, atol=0.0, rtol=0.0)
 
 
 def profile_topk_softmax(

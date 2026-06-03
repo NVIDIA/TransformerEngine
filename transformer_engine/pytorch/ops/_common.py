@@ -73,7 +73,13 @@ def _group_quantize_for_grouped_mlp(
 
     # Typical case: group-quantize
     if num_groups != 1 or not isinstance(quantizer, NVFP4Quantizer):
-        return tex.group_quantize(tensor, quantizer, num_groups, split_sizes)
+        return tex.group_quantize(
+            tensor,
+            quantizer,
+            num_groups,
+            split_sizes,
+            tensor_offsets=tensor_offsets,
+        )
 
     # --------------------------------------------------
     # Special case: single-tensor NVFP4 quantize
