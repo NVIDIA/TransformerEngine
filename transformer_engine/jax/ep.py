@@ -64,6 +64,30 @@ def _allgather_uid(uid_arr, world_size, uid_size):
 # ── Bootstrap ────────────────────────────────────────────────────────────────
 
 
+_TE_DTYPE_FOR_NUMPY = {
+    np.dtype(np.uint8): transformer_engine_jax.DType.kByte,
+    np.dtype(np.int32): transformer_engine_jax.DType.kInt32,
+    np.dtype(np.int64): transformer_engine_jax.DType.kInt64,
+    np.dtype(np.float32): transformer_engine_jax.DType.kFloat32,
+    np.dtype(np.float16): transformer_engine_jax.DType.kFloat16,
+}
+
+
+def _to_te_dtype_int(dtype):
+    """Map jax/numpy dtype -> NVTEDType int. bf16 / fp8 / fp4 handled explicitly."""
+    if dtype is None:
+        return int(transformer_engine_jax.DType.kByte)
+    if dtype == jnp.bfloat16:
+        return int(transformer_engine_jax.DType.kBFloat16)
+    np_dtype = np.dtype(dtype)
+    if np_dtype in _TE_DTYPE_FOR_NUMPY:
+        return int(_TE_DTYPE_FOR_NUMPY[np_dtype])
+    raise ValueError(
+        f"ep_bootstrap: unsupported max_token_dtype={dtype!r}; supported = "
+        "uint8 / int32 / int64 / float32 / float16 / bfloat16."
+    )
+
+
 def ep_bootstrap(
     world_size,
     rank,
@@ -74,6 +98,7 @@ def ep_bootstrap(
     hidden_dim,
     max_num_sms=0,
     allow_handle_mem_reloc=False,
+    max_token_dtype=None,
 ):
     """Initialize the EP communicator. Call once per process before any EP op.
 
@@ -83,6 +108,11 @@ def ep_bootstrap(
     stable ``handle_mem`` device pointer across calls (e.g. XLA-managed
     buffers reallocated between JIT executables). Default raises on
     relocation so callers detect handle-aliasing bugs.
+
+    ``max_token_dtype`` is the widest token dtype the group will dispatch
+    (sizes NCCL EP staging buffers at group create). Pass a jax/numpy
+    dtype, e.g. ``jnp.bfloat16``. Default ``None`` keeps the legacy ``kByte``
+    behavior, which only accepts 1-byte tensors.
     """
     if world_size < 2:
         raise ValueError(
@@ -148,6 +178,7 @@ def ep_bootstrap(
         hidden_dim,
         max_num_sms=int(max_num_sms),
         allow_handle_mem_reloc=int(bool(allow_handle_mem_reloc)),
+        max_token_dtype=_to_te_dtype_int(max_token_dtype),
     )
 
     # Release the C++ anchor at interpreter shutdown so RAII can tear down NCCL.

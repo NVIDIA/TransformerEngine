@@ -151,7 +151,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
         pybind11::arg("ep_size"), pybind11::arg("rank_within_group"), pybind11::arg("num_experts"),
         pybind11::arg("max_tokens_per_rank"), pybind11::arg("max_recv_tokens_per_rank"),
         pybind11::arg("hidden_dim"), pybind11::arg("max_num_sms") = 0,
-        pybind11::arg("allow_handle_mem_reloc") = 0);
+        pybind11::arg("allow_handle_mem_reloc") = 0, pybind11::arg("max_token_dtype") = 0);
   m.def("release_ep_resources", &ReleaseEpResources);
   m.def("ep_register_layer", &EpRegisterLayer, pybind11::arg("top_k"),
         pybind11::arg("dispatch_output_per_expert_alignment") = 0);

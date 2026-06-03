@@ -35,6 +35,7 @@ struct EpBootstrapParams {
   int hidden_dim = 0;
   int max_num_sms = 0;
   int allow_handle_mem_reloc = 0;
+  int max_token_dtype = 0;
 };
 
 class EpResources {
@@ -49,7 +50,8 @@ class EpResources {
                           .max_recv_tokens_per_rank = p.max_recv_tokens_per_rank,
                           .hidden_dim = p.hidden_dim,
                           .max_num_sms = p.max_num_sms,
-                          .allow_handle_mem_reloc = p.allow_handle_mem_reloc};
+                          .allow_handle_mem_reloc = p.allow_handle_mem_reloc,
+                          .max_token_dtype = static_cast<NVTEDType>(p.max_token_dtype)};
     try {
       nvte_ep_initialize(static_cast<void*>(comm_), cfg);
     } catch (...) {
@@ -139,7 +141,8 @@ struct EpCombineBwdConfig {
 // synchronize via the UID broadcast).
 void SetEpBootstrapParams(pybind11::bytes unique_id_bytes_obj, int ep_size, int rank_within_group,
                           int num_experts, int max_tokens_per_rank, int max_recv_tokens_per_rank,
-                          int hidden_dim, int max_num_sms, int allow_handle_mem_reloc) {
+                          int hidden_dim, int max_num_sms, int allow_handle_mem_reloc,
+                          int max_token_dtype) {
   std::string uid_str = unique_id_bytes_obj;
   NVTE_CHECK(static_cast<int>(uid_str.size()) >= 128,
              "unique_id_bytes must be at least 128 bytes (ncclUniqueId size).");
@@ -157,6 +160,7 @@ void SetEpBootstrapParams(pybind11::bytes unique_id_bytes_obj, int ep_size, int 
     g_ep_params.hidden_dim = hidden_dim;
     g_ep_params.max_num_sms = max_num_sms;
     g_ep_params.allow_handle_mem_reloc = allow_handle_mem_reloc;
+    g_ep_params.max_token_dtype = max_token_dtype;
     g_ep_params_set = true;
   }
   // Acquire outside the lock: EpResources ctor runs ncclCommInitRank which is
