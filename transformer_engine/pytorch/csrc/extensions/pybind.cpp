@@ -505,10 +505,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
   m.def("copy_data_ptrs_to_device", &transformer_engine::pytorch::copy_data_ptrs_to_device,
         py::arg("tensors"), py::arg("device"), py::call_guard<py::gil_scoped_release>());
-  m.def("transform_and_copy_data_ptrs_to_device",
-        &transformer_engine::pytorch::transform_and_copy_data_ptrs_to_device,
-        py::arg("transform_type"), py::arg("tensors"), py::arg("device"),
-        py::call_guard<py::gil_scoped_release>());
   m.def("splits_to_offsets", &transformer_engine::pytorch::splits_to_offsets,
         "Compute grouped tensor offsets from split sizes", py::arg("first_dims"),
         py::arg("logical_last_dim"), py::call_guard<py::gil_scoped_release>());
@@ -618,6 +614,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>(), py::arg("allgather_communicator"),
         py::arg("send_stream"), py::arg("recv_stream"));
 
+  // Experimental fused grouped MLP
+  auto grouped_mlp_experimental = m.def_submodule(
+      "grouped_mlp_experimental",
+      "Experimental helpers for the fused grouped MLP (unstable, may change or disappear).");
+  grouped_mlp_experimental.def("swizzle_scales_and_pack_ptrs_for_discrete_weights",
+                               &transformer_engine::pytorch::grouped_mlp_experimental::
+                                   swizzle_scales_and_pack_ptrs_for_discrete_weights,
+                               py::arg("data_tensors"), py::arg("scale_tensors"),
+                               py::arg("swizzle_type"), py::arg("device"),
+                               py::call_guard<py::gil_scoped_release>());
+
   // Data structures
   py::class_<transformer_engine::pytorch::FP8TensorMeta>(m, "FP8TensorMeta")
       .def(py::init<>())
@@ -687,4 +694,4 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("get_buffer", &CommOverlapP2P::get_buffer, py::arg("local_chunk") = false,
            py::arg("shape") = std::nullopt)
       .def("get_communication_stream", &CommOverlapP2P::get_communication_stream);
-}
+}  // NOLINT(readability/fn_size)

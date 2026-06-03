@@ -718,17 +718,13 @@ class _BackwardGroupedMLP_CuTeGEMMDBase(FusedOperation):
             fc2_dactivation_kwargs["b_tensor"] = fc2_w_data
             fc2_dactivation_kwargs["sfb_tensor"] = fc2_w_scales
         else:
-            fc2_b_ptrs = tex.copy_data_ptrs_to_device(
-                [w._columnwise_data for w in grouped_fc2_weight],
-                device,
-            )
-            swizzle_type = (
-                "uniform_nvfp4_swizzle" if use_nvfp4 else "uniform_mxfp8_columnwise_swizzle"
-            )
-            fc2_sfb_ptrs, _fc2_sfb_buffer = tex.transform_and_copy_data_ptrs_to_device(
-                swizzle_type,
-                [w._columnwise_scale_inv for w in grouped_fc2_weight],
-                device,
+            fc2_b_ptrs, fc2_sfb_ptrs, _fc2_sfb_buffer = (
+                tex.grouped_mlp_experimental.swizzle_scales_and_pack_ptrs_for_discrete_weights(
+                    [w._columnwise_data for w in grouped_fc2_weight],
+                    [w._columnwise_scale_inv for w in grouped_fc2_weight],
+                    "nvfp4" if use_nvfp4 else "mxfp8_columnwise",
+                    device,
+                )
             )
             fc2_dactivation_kwargs["b_ptrs"] = fc2_b_ptrs
             fc2_dactivation_kwargs["sfb_ptrs"] = fc2_sfb_ptrs
@@ -1000,17 +996,13 @@ class _BackwardGroupedMLP_CuTeGEMMDBase(FusedOperation):
                     fc1_dgrad_kwargs["b_tensor"] = fc1_w_data
                     fc1_dgrad_kwargs["sfb_tensor"] = fc1_w_scales
                 else:
-                    fc1_b_ptrs = tex.copy_data_ptrs_to_device(
-                        [w._columnwise_data for w in grouped_fc1_weight],
-                        device,
-                    )
-                    swizzle_type = (
-                        "uniform_nvfp4_swizzle" if use_nvfp4 else "uniform_mxfp8_columnwise_swizzle"
-                    )
-                    fc1_sfb_ptrs, _fc1_sfb_buffer = tex.transform_and_copy_data_ptrs_to_device(
-                        swizzle_type,
-                        [w._columnwise_scale_inv for w in grouped_fc1_weight],
-                        device,
+                    fc1_b_ptrs, fc1_sfb_ptrs, _fc1_sfb_buffer = (
+                        tex.grouped_mlp_experimental.swizzle_scales_and_pack_ptrs_for_discrete_weights(
+                            [w._columnwise_data for w in grouped_fc1_weight],
+                            [w._columnwise_scale_inv for w in grouped_fc1_weight],
+                            "nvfp4" if use_nvfp4 else "mxfp8_columnwise",
+                            device,
+                        )
                     )
 
                     fc1_dgrad_kwargs["b_ptrs"] = fc1_b_ptrs

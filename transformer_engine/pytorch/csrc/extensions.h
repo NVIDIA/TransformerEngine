@@ -491,9 +491,26 @@ at::Tensor splits_to_offsets(const at::Tensor &first_dims, int64_t logical_last_
 at::Tensor copy_data_ptrs_to_device(const std::vector<at::Tensor> &tensors,
                                     const c10::Device &device);
 
-std::tuple<at::Tensor, std::optional<at::Tensor>> transform_and_copy_data_ptrs_to_device(
-    const std::string &transform_type, const std::vector<at::Tensor> &tensors,
-    const c10::Device &device);
+/***************************************************************************************************
+ * Experimental helpers for the fused grouped MLP
+ *
+ * These primarily exist to support cuDNN CuTe DSL grouped GEMM
+ * kernels. Since those are unstable and under active development,
+ * these helpers should also be considered unstable.
+ **************************************************************************************************/
+
+namespace grouped_mlp_experimental {
+
+// Prepare discrete weight tensors for the cuDNN CuTe DSL grouped GEMM
+// kernel by swizzling scales and copying data and scale pointers to
+// device. All tensors must share a uniform shape and `swizzle_type`
+// must be one of "mxfp8_rowwise", "mxfp8_columnwise", or "nvfp4".
+// Returns {data_ptrs_device, scale_ptrs_device, swizzled_scales_buffer}.
+std::tuple<at::Tensor, at::Tensor, at::Tensor> swizzle_scales_and_pack_ptrs_for_discrete_weights(
+    const std::vector<at::Tensor> &data_tensors, const std::vector<at::Tensor> &scale_tensors,
+    const std::string &swizzle_type, const c10::Device &device);
+
+}  // namespace grouped_mlp_experimental
 
 /***************************************************************************************************
  * Support THD format for Context Parallel
