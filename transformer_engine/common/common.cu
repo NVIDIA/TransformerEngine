@@ -6,7 +6,6 @@
 
 #include <transformer_engine/transformer_engine.h>
 
-#include <algorithm>
 #include <bit>
 
 #include "./common.h"
@@ -63,38 +62,6 @@ namespace {
 
 constexpr size_t kThreadsPerBlock = 256;
 
-// Per-launch output capacity for the inclusive-scan kernel. Private to common.cu;
-// the public API loops over chunks of this size when num_outputs is larger, so
-// callers see no cap.
-constexpr size_t kSplitsToOffsetsOutputsPerLaunch = 8;
-
-struct SplitsToOffsetsArgs {
-  const void *split_sizes = nullptr;
-  DType split_sizes_dtype = DType::kNumTypes;
-  void *outputs[kSplitsToOffsetsOutputsPerLaunch] = {};
-  DType outputs_dtype[kSplitsToOffsetsOutputsPerLaunch] = {};
-  int64_t strides[kSplitsToOffsetsOutputsPerLaunch] = {};
-  int include_leading_zero[kSplitsToOffsetsOutputsPerLaunch] = {};
-  size_t num_outputs = 0;
-};
-
-__device__ __forceinline__ int64_t load_split_size(const void *__restrict__ split_sizes,
-                                                   DType dtype, size_t idx) {
-  if (dtype == DType::kInt32) {
-    return static_cast<int64_t>(static_cast<const int32_t *>(split_sizes)[idx]);
-  }
-  return static_cast<const int64_t *>(split_sizes)[idx];
-}
-
-__device__ __forceinline__ void store_output(void *__restrict__ output, DType dtype, size_t idx,
-                                             int64_t value) {
-  if (dtype == DType::kInt32) {
-    static_cast<int32_t *>(output)[idx] = static_cast<int32_t>(value);
-    return;
-  }
-  static_cast<int64_t *>(output)[idx] = value;
-}
-
 template <typename TVectorized>
 __global__ void __launch_bounds__(kThreadsPerBlock)
     memset_kernel(void *__restrict__ ptr, int value, size_t size_in_bytes) {
@@ -119,57 +86,6 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     data.data[i] = static_cast<uint8_t>(value);
   }
   reinterpret_cast<TVectorized *>(ptr)[idx] = data.value;
-}
-
-__global__ void __launch_bounds__(kThreadsPerBlock)
-    splits_to_offsets_kernel(SplitsToOffsetsArgs args, size_t num_tensors) {
-  __shared__ int64_t block_scan[kThreadsPerBlock];
-  __shared__ int64_t chunk_prefix;
-
-  const size_t tid = threadIdx.x;
-
-  if (tid == 0) {
-    chunk_prefix = 0;
-    for (size_t out_idx = 0; out_idx < args.num_outputs; ++out_idx) {
-      if (args.include_leading_zero[out_idx]) {
-        store_output(args.outputs[out_idx], args.outputs_dtype[out_idx], 0, 0);
-      }
-    }
-  }
-  __syncthreads();
-
-  for (size_t chunk_start = 0; chunk_start < num_tensors; chunk_start += kThreadsPerBlock) {
-    const size_t idx = chunk_start + tid;
-
-    block_scan[tid] = 0;
-    if (idx < num_tensors) {
-      block_scan[tid] = load_split_size(args.split_sizes, args.split_sizes_dtype, idx);
-    }
-    __syncthreads();
-
-    // Inclusive scan in shared memory.
-    for (size_t offset = 1; offset < kThreadsPerBlock; offset <<= 1) {
-      const int64_t addend = (tid >= offset) ? block_scan[tid - offset] : 0;
-      __syncthreads();
-      block_scan[tid] += addend;
-      __syncthreads();
-    }
-
-    if (idx < num_tensors) {
-      const int64_t prefix = chunk_prefix + block_scan[tid];
-      for (size_t out_idx = 0; out_idx < args.num_outputs; ++out_idx) {
-        const size_t write_idx = idx + (args.include_leading_zero[out_idx] ? 1 : 0);
-        store_output(args.outputs[out_idx], args.outputs_dtype[out_idx], write_idx,
-                     prefix * args.strides[out_idx]);
-      }
-    }
-    __syncthreads();
-
-    if (tid == kThreadsPerBlock - 1) {
-      chunk_prefix += block_scan[tid];
-    }
-    __syncthreads();
-  }
 }
 
 }  // namespace
@@ -202,80 +118,6 @@ void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream
   MEMSET_VECTORIZED_KERNEL_DISPATCH(ptr, size_in_bytes, value, uint8_t, stream);
 }
 
-void nvte_splits_to_offsets(const int64_t *first_dims, int64_t *output, size_t num_tensors,
-                            int64_t logical_last_dim, cudaStream_t stream) {
-  NVTE_API_CALL(nvte_splits_to_offsets);
-  NVTE_CHECK(output != nullptr, "Output pointer must be allocated.");
-  NVTE_CHECK(num_tensors > 0, "num_tensors must be greater than 0.");
-  NVTE_CHECK(first_dims != nullptr, "first_dims pointer must be allocated.");
-  NVTE_CHECK(logical_last_dim > 0, "logical_last_dim must be greater than 0.");
-
-  SplitsToOffsetsArgs args = {};
-  args.split_sizes = first_dims;
-  args.split_sizes_dtype = DType::kInt64;
-  args.outputs[0] = output;
-  args.outputs_dtype[0] = DType::kInt64;
-  args.strides[0] = logical_last_dim;
-  args.include_leading_zero[0] = 1;
-  args.num_outputs = 1;
-  splits_to_offsets_kernel<<<1, kThreadsPerBlock, 0, stream>>>(args, num_tensors);
-  NVTE_CHECK_CUDA(cudaGetLastError());
-}
-
-void nvte_splits_to_offsets_multi(NVTETensor split_sizes, NVTETensor *outputs,
-                                  const int64_t *strides, const int *include_leading_zero,
-                                  size_t num_outputs, cudaStream_t stream) {
-  NVTE_API_CALL(nvte_splits_to_offsets_multi);
-  NVTE_CHECK(num_outputs > 0, "num_outputs must be greater than 0.");
-  NVTE_CHECK(outputs != nullptr, "outputs must not be null.");
-  NVTE_CHECK(strides != nullptr, "strides must not be null.");
-  NVTE_CHECK(include_leading_zero != nullptr, "include_leading_zero must not be null.");
-
-  const auto *split_sizes_tensor = convertNVTETensorCheck(split_sizes);
-  const auto split_sizes_dtype = split_sizes_tensor->dtype();
-  const auto num_tensors = split_sizes_tensor->numel();
-  const auto is_integer_dtype = [](DType dtype) {
-    return dtype == DType::kInt32 || dtype == DType::kInt64;
-  };
-  NVTE_CHECK(
-      num_tensors > 0 && split_sizes_tensor->dim() == 1 && is_integer_dtype(split_sizes_dtype),
-      "split_sizes must be a non-empty 1D int32/int64 tensor.");
-
-  // Validate every output up front so a launch failure can't leave a partial
-  // result behind from a chunk that already enqueued.
-  std::vector<const Tensor *> output_tensors(num_outputs);
-  for (size_t i = 0; i < num_outputs; ++i) {
-    const auto *out_tensor = convertNVTETensorCheck(outputs[i]);
-    const auto out_dtype = out_tensor->dtype();
-    const bool has_leading_zero = include_leading_zero[i] != 0;
-    const size_t expected_numel = num_tensors + (has_leading_zero ? 1 : 0);
-    NVTE_CHECK(out_tensor->dim() == 1 && is_integer_dtype(out_dtype) &&
-                   out_tensor->numel() == expected_numel,
-               "outputs[", i, "] must be a 1D int32/int64 tensor of length ", expected_numel,
-               " (split_sizes.numel() + include_leading_zero[", i, "]).");
-    NVTE_CHECK(strides[i] >= 0, "strides[", i, "] must be non-negative.");
-    output_tensors[i] = out_tensor;
-  }
-
-  for (size_t chunk_start = 0; chunk_start < num_outputs;
-       chunk_start += kSplitsToOffsetsOutputsPerLaunch) {
-    const size_t chunk_size =
-        std::min(kSplitsToOffsetsOutputsPerLaunch, num_outputs - chunk_start);
-    SplitsToOffsetsArgs args = {};
-    args.split_sizes = split_sizes_tensor->data.dptr;
-    args.split_sizes_dtype = split_sizes_dtype;
-    args.num_outputs = chunk_size;
-    for (size_t i = 0; i < chunk_size; ++i) {
-      const size_t out_idx = chunk_start + i;
-      args.outputs[i] = output_tensors[out_idx]->data.dptr;
-      args.outputs_dtype[i] = output_tensors[out_idx]->dtype();
-      args.strides[i] = strides[out_idx];
-      args.include_leading_zero[i] = include_leading_zero[out_idx] != 0 ? 1 : 0;
-    }
-    splits_to_offsets_kernel<<<1, kThreadsPerBlock, 0, stream>>>(args, num_tensors);
-    NVTE_CHECK_CUDA(cudaGetLastError());
-  }
-}
 }  // extern "C"
 
 void checkCuDriverContext(CUstream stream) {
