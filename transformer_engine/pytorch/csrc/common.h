@@ -106,7 +106,15 @@ class Quantizer {
       const std::vector<size_t>& shape, DType dtype,
       std::optional<at::Device> device = std::nullopt, bool pin_memory = false) const = 0;
 
-  /*! @brief Construct a grouped tensor with uninitialized data */
+  /*! @brief Construct a grouped tensor with uninitialized data
+   *
+   * @param tensor_offsets If provided, the precomputed inclusive scan of
+   *   ``first_dims * logical_last_dim`` with a leading zero, used to locate
+   *   each per-group sub-tensor in the shared backing buffer. If null, the
+   *   offsets are computed from ``first_dims`` on demand. Passing this in lets
+   *   callers that already have the scan (e.g. from
+   *   ``tex.splits_to_offsets_multi``) skip the redundant kernel launch.
+   */
   virtual std::pair<GroupedTensorWrapper, py::object> create_grouped_tensor(
       size_t num_tensors, const std::vector<size_t>& logical_shape, DType dtype,
       py::object quantizer, const std::optional<at::Tensor>& first_dims,
