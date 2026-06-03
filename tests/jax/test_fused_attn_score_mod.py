@@ -8,7 +8,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from jax import value_and_grad
 
 import transformer_engine.jax.cpp_extensions.flex_attention as tex_attention
 from transformer_engine.jax.attention import (
@@ -21,8 +20,7 @@ from transformer_engine.jax.attention import (
 from transformer_engine.jax.cpp_extensions import make_fused_attn_score_mod_config
 from transformer_engine.jax.flax import transformer as flax_transformer
 from transformer_engine_jax import get_device_compute_capability
-from test_fused_attn import FusedAttnRunner, SeqDescFormat, jax_dpa
-from utils import assert_allclose
+from test_fused_attn import FusedAttnRunner, SeqDescFormat
 
 
 _CONFIG_TEST_HEAD_DIM = 128
@@ -181,27 +179,6 @@ def _reference_score_mod_softcap(softcap):
     return score_mod
 
 
-def _reference_score_mod_attention(query, key, value, scale, score_mod_reference):
-    return jax_dpa(
-        query,
-        key,
-        value,
-        None,
-        None,
-        None,
-        None,
-        qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
-        scaling_factor=scale,
-        score_mod_reference=score_mod_reference,
-    )
-
-
-def _stable_score_mod_input(key, shape, dtype):
-    """Create low-magnitude inputs for fp16/bf16 score_mod reference comparisons."""
-    input_scale = 1.0 / sqrt(shape[-1])
-    return (input_scale * jax.random.normal(key, shape, dtype=dtype)).astype(dtype)
-
-
 class ScoreModFusedAttnRunner(FusedAttnRunner):
     """FusedAttnRunner configured for score_mod tests."""
 
@@ -219,6 +196,7 @@ class ScoreModFusedAttnRunner(FusedAttnRunner):
         mesh_axes=("dp", "cp", "tp"),
         mesh_resource=None,
     ):
+        """Build a runner for softcap score modification with explicit bprop."""
         softcap = 0.8
         softcap_score_mod = _ScoreModSoftcap()
         # Keep tanh(score / softcap) away from saturation for stable fp16/bf16 comparisons.
@@ -257,6 +235,107 @@ class ScoreModFusedAttnRunner(FusedAttnRunner):
             doutput_seed=2025,
             rtol=7e-2,
             atol=7e-2,
+            **kwargs,
+        )
+
+    @classmethod
+    def post_scale_bias(
+        cls,
+        batch,
+        seqlen,
+        num_heads,
+        head_dim,
+        dtype,
+        *,
+        number_of_devices=1,
+        mesh_shape=(1, 1, 1),
+        mesh_axes=("dp", "cp", "tp"),
+        mesh_resource=None,
+    ):
+        """Build a runner for post-scale-bias score modification without explicit bprop."""
+        input_scale = 1.0 / sqrt(head_dim)
+        kwargs = {}
+        if mesh_resource is not None:
+            kwargs["mesh_resource"] = mesh_resource
+        return cls(
+            batch,
+            seqlen,
+            seqlen,
+            num_heads,
+            num_heads,
+            head_dim,
+            head_dim,
+            AttnBiasType.NO_BIAS,
+            AttnMaskType.NO_MASK,
+            AttnSoftmaxType.VANILLA_SOFTMAX,
+            0.0,
+            dtype,
+            True,
+            QKVLayout.BSHD_BSHD_BSHD,
+            None,
+            None,
+            SeqDescFormat.Mask,
+            number_of_devices=number_of_devices,
+            mesh_shape=mesh_shape,
+            mesh_axes=mesh_axes,
+            cp_load_balanced=False,
+            score_mod=_score_mod_post_scale_bias,
+            score_mod_reference=_reference_score_mod_post_scale_bias,
+            input_scale=input_scale,
+            rtol=5e-2,
+            atol=5e-2,
+            **kwargs,
+        )
+
+    @classmethod
+    def causal(
+        cls,
+        batch,
+        seqlen,
+        num_heads,
+        head_dim,
+        dtype,
+        *,
+        number_of_devices=1,
+        mesh_shape=(1, 1, 1),
+        mesh_axes=("dp", "cp", "tp"),
+        mesh_resource=None,
+    ):
+        """Build a runner for causal score modification with explicit bprop."""
+        input_scale = 1.0 / sqrt(head_dim)
+        kwargs = {}
+        if mesh_resource is not None:
+            kwargs["mesh_resource"] = mesh_resource
+        return cls(
+            batch,
+            seqlen,
+            seqlen,
+            num_heads,
+            num_heads,
+            head_dim,
+            head_dim,
+            AttnBiasType.NO_BIAS,
+            AttnMaskType.NO_MASK,
+            AttnSoftmaxType.VANILLA_SOFTMAX,
+            0.0,
+            dtype,
+            True,
+            QKVLayout.BSHD_BSHD_BSHD,
+            None,
+            None,
+            SeqDescFormat.Mask,
+            number_of_devices=number_of_devices,
+            mesh_shape=mesh_shape,
+            mesh_axes=mesh_axes,
+            cp_load_balanced=False,
+            score_mod=_score_mod_causal,
+            score_mod_bprop=_score_mod_causal_bprop,
+            score_mod_tensors={"neg_inf": -1e9},
+            score_mod_bprop_tensors={"zero": 0.0},
+            score_mod_reference=_reference_score_mod_causal,
+            input_scale=input_scale,
+            rtol=5e-2,
+            atol=5e-2,
             **kwargs,
         )
 
@@ -355,6 +434,7 @@ def _install_fake_flax_fused_attn(monkeypatch, *, kernel_available=True):
 
 
 def test_dot_product_attention_score_mod_requires_fused_attn(monkeypatch):
+    """DotProductAttention rejects score_mod when fused attention is disabled."""
     monkeypatch.setenv("NVTE_FUSED_ATTN", "0")
     query = jnp.ones((1, 8, 1, 16), dtype=jnp.float16)
     key = jnp.ones((1, 8, 1, 16), dtype=jnp.float16)
@@ -375,6 +455,7 @@ def test_dot_product_attention_score_mod_requires_fused_attn(monkeypatch):
 
 
 def test_dot_product_attention_score_mod_requires_available_fused_attn_kernel(monkeypatch):
+    """DotProductAttention rejects score_mod when no fused attention kernel is available."""
     _install_fake_flax_fused_attn(monkeypatch, kernel_available=False)
     query = jnp.ones((1, 8, 1, 16), dtype=jnp.float16)
     key = jnp.ones((1, 8, 1, 16), dtype=jnp.float16)
@@ -395,6 +476,7 @@ def test_dot_product_attention_score_mod_requires_available_fused_attn_kernel(mo
 
 
 def test_dot_product_attention_plumbs_score_mod_to_fused_attn(monkeypatch):
+    """DotProductAttention forwards score_mod operands to fused_attn."""
     captured = _install_fake_flax_fused_attn(monkeypatch)
     query = jnp.ones((1, 8, 1, 16), dtype=jnp.float16)
     key = jnp.ones((1, 8, 1, 16), dtype=jnp.float16)
@@ -425,6 +507,7 @@ def test_dot_product_attention_plumbs_score_mod_to_fused_attn(monkeypatch):
 
 
 def test_dot_product_attention_unpacks_packed_score_mod_to_separate_layout(monkeypatch):
+    """Packed QKV inputs are unpacked because score_mod requires separate Q/K/V."""
     captured = _install_fake_flax_fused_attn(monkeypatch)
     qkv = jnp.ones((1, 8, 3, 1, 16), dtype=jnp.float16)
 
@@ -448,6 +531,7 @@ def test_dot_product_attention_unpacks_packed_score_mod_to_separate_layout(monke
 
 
 def test_multi_head_attention_plumbs_score_mod_to_dot_product_attention(monkeypatch):
+    """MultiHeadAttention passes score_mod tensors through its attention stack."""
     captured = _install_fake_flax_fused_attn(monkeypatch)
 
     class FakeLayerNormDenseGeneral:
@@ -511,6 +595,7 @@ def test_multi_head_attention_plumbs_score_mod_to_dot_product_attention(monkeypa
 
 
 def test_fused_attn_score_mod_validation_rejects_masks_without_cudnn_frontend():
+    """fused_attn rejects score_mod with masks before cuDNN frontend graph building."""
     q = jax.ShapeDtypeStruct((1, 16, 1, 128), jnp.float16)
     k = jax.ShapeDtypeStruct((1, 16, 1, 128), jnp.float16)
     v = jax.ShapeDtypeStruct((1, 16, 1, 128), jnp.float16)
@@ -533,6 +618,7 @@ def test_fused_attn_score_mod_validation_rejects_masks_without_cudnn_frontend():
 
 
 def test_fused_attn_score_mod_config_splits_tensors_and_pass_by_value_scalars():
+    """Score-mod config separates array operands from pass-by-value scalars."""
     tensor = jnp.ones((1, 1, 1, 1), dtype=jnp.float32)
 
     config, tensor_operands, bprop_tensor_operands = make_fused_attn_score_mod_config(
@@ -555,6 +641,7 @@ def test_fused_attn_score_mod_config_splits_tensors_and_pass_by_value_scalars():
 
 
 def test_fused_attn_score_mod_cudnn_frontend_version_check(monkeypatch):
+    """cuDNN frontend Python and C++ versions must match."""
     class FakeCudnn:
         __version__ = "1.22.0"
 
@@ -575,6 +662,7 @@ def test_fused_attn_score_mod_cudnn_frontend_version_check(monkeypatch):
 
 
 def test_fused_attn_score_mod_config_stabilizes_bound_method_cache_keys():
+    """Bound score_mod methods with graph keys share stable cache keys."""
     softcap_score_mod = _ScoreModSoftcap()
     first_forward = softcap_score_mod.forward
     second_forward = softcap_score_mod.forward
@@ -616,6 +704,7 @@ def test_fused_attn_score_mod_config_stabilizes_bound_method_cache_keys():
 
 
 def test_fused_attn_score_mod_config_leaves_unkeyed_bound_methods_uncached():
+    """Unkeyed bound methods stay uncached to avoid object-id reuse collisions."""
     class UnkeyedScoreMod:
         def forward(self, _graph, score, _tensors):
             return score
@@ -634,99 +723,20 @@ def test_fused_attn_score_mod_config_leaves_unkeyed_bound_methods_uncached():
 
 @pytest.mark.skipif(not _has_cudnn_frontend_python(), reason="cuDNN Python frontend is required")
 def test_fused_attn_score_mod_post_scale_bias_optional_bprop():
+    """Post-scale-bias score_mod matches the JAX reference without explicit bprop."""
     _require_cudnn_frontend_score_mod()
-
-    key = jax.random.key(0)
-    q_key, k_key, v_key = jax.random.split(key, 3)
-    input_shape = (1, 64, 2, 128)
-    q = _stable_score_mod_input(q_key, input_shape, jnp.float16)
-    k = _stable_score_mod_input(k_key, input_shape, jnp.float16)
-    v = _stable_score_mod_input(v_key, input_shape, jnp.float16)
-    scale = 1.0 / sqrt(q.shape[-1])
-
-    def score_mod_loss(query, key_, value):
-        out = fused_attn(
-            (query, key_, value),
-            None,
-            None,
-            None,
-            AttnBiasType.NO_BIAS,
-            AttnMaskType.NO_MASK,
-            QKVLayout.BSHD_BSHD_BSHD,
-            AttnSoftmaxType.VANILLA_SOFTMAX,
-            scale,
-            0.0,
-            True,
-            score_mod=_score_mod_post_scale_bias,
-        )
-        return jnp.sum(out.astype(jnp.float32)), out
-
-    def ref_loss(query, key_, value):
-        out = _reference_score_mod_attention(
-            query, key_, value, scale, _reference_score_mod_post_scale_bias
-        )
-        return jnp.sum(out.astype(jnp.float32)), out
-
-    (score_mod_value, score_mod_out), score_mod_grads = value_and_grad(
-        score_mod_loss, argnums=(0, 1, 2), has_aux=True
-    )(q, k, v)
-    (ref_value, ref_out), ref_grads = value_and_grad(ref_loss, argnums=(0, 1, 2), has_aux=True)(
-        q, k, v
-    )
-
-    assert_allclose(score_mod_out, ref_out, rtol=5e-2, atol=5e-2)
-    assert_allclose(score_mod_value, ref_value, rtol=5e-2, atol=5e-2)
-    for grad, ref_grad in zip(score_mod_grads, ref_grads):
-        assert_allclose(grad, ref_grad, rtol=5e-2, atol=5e-2)
+    runner = ScoreModFusedAttnRunner.post_scale_bias(1, 64, 2, 128, jnp.float16)
+    runner.test_forward()
+    runner.test_backward()
 
 
 @pytest.mark.skipif(not _has_cudnn_frontend_python(), reason="cuDNN Python frontend is required")
 def test_fused_attn_score_mod_causal_with_bprop():
+    """Causal score_mod matches the JAX reference with explicit bprop."""
     _require_cudnn_frontend_score_mod()
-
-    key = jax.random.key(1)
-    q_key, k_key, v_key = jax.random.split(key, 3)
-    input_shape = (1, 64, 2, 128)
-    q = _stable_score_mod_input(q_key, input_shape, jnp.float16)
-    k = _stable_score_mod_input(k_key, input_shape, jnp.float16)
-    v = _stable_score_mod_input(v_key, input_shape, jnp.float16)
-    scale = 1.0 / sqrt(q.shape[-1])
-
-    def score_mod_loss(query, key_, value):
-        out = fused_attn(
-            (query, key_, value),
-            None,
-            None,
-            None,
-            AttnBiasType.NO_BIAS,
-            AttnMaskType.NO_MASK,
-            QKVLayout.BSHD_BSHD_BSHD,
-            AttnSoftmaxType.VANILLA_SOFTMAX,
-            scale,
-            0.0,
-            True,
-            score_mod=_score_mod_causal,
-            score_mod_bprop=_score_mod_causal_bprop,
-            score_mod_tensors={"neg_inf": -1e9},
-            score_mod_bprop_tensors={"zero": 0.0},
-        )
-        return jnp.sum(out.astype(jnp.float32)), out
-
-    def ref_loss(query, key_, value):
-        out = _reference_score_mod_attention(query, key_, value, scale, _reference_score_mod_causal)
-        return jnp.sum(out.astype(jnp.float32)), out
-
-    (score_mod_value, score_mod_out), score_mod_grads = value_and_grad(
-        score_mod_loss, argnums=(0, 1, 2), has_aux=True
-    )(q, k, v)
-    (ref_value, ref_out), ref_grads = value_and_grad(ref_loss, argnums=(0, 1, 2), has_aux=True)(
-        q, k, v
-    )
-
-    assert_allclose(score_mod_out, ref_out, rtol=5e-2, atol=5e-2)
-    assert_allclose(score_mod_value, ref_value, rtol=5e-2, atol=5e-2)
-    for grad, ref_grad in zip(score_mod_grads, ref_grads):
-        assert_allclose(grad, ref_grad, rtol=5e-2, atol=5e-2)
+    runner = ScoreModFusedAttnRunner.causal(1, 64, 2, 128, jnp.float16)
+    runner.test_forward()
+    runner.test_backward()
 
 
 @pytest.mark.skipif(not _has_cudnn_frontend_python(), reason="cuDNN Python frontend is required")
@@ -735,6 +745,7 @@ def test_fused_attn_score_mod_causal_with_bprop():
     reason="Softcap score_mod tests require sm90+",
 )
 def test_fused_attn_score_mod_softcap_with_bprop():
+    """Softcap score_mod matches the JAX reference with explicit bprop."""
     _require_cudnn_frontend_score_mod()
     runner = ScoreModFusedAttnRunner.softcap(1, 16, 2, 64, jnp.float16)
     runner.test_backward()
