@@ -2142,6 +2142,16 @@ class TestBasicOps:
                 "with quantized_model_init"
             )
 
+        # SM120: cuBLASLt grouped GEMM (graph-safe path) is unsupported.
+        # BF16/FP16 unquantized compute and MXFP8 quantized compute select that
+        # path on SM100+; FP32 and non-MXFP8 quantized compute use legacy GEMM.
+        if torch.cuda.get_device_capability() == (12, 0) and _uses_cublaslt_grouped_gemm_path(
+            dtype=dtype,
+            quantization=quantization,
+            quantized_compute=quantized_compute,
+        ):
+            pytest.skip("Grouped cuBLASLt GEMM is currently unsupported on SM120.")
+
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
             in_shape,
@@ -2326,6 +2336,15 @@ class TestBasicOps:
             pytest.skip("quantized_weight requires a quantization recipe")
         if single_grouped_bias and not bias:
             pytest.skip("single_grouped_bias requires bias=True")
+
+        # SM120: this test only exercises the cuBLASLt grouped GEMM path (BF16/FP16
+        # or MXFP8 autocast), which is unsupported on SM120.
+        if torch.cuda.get_device_capability() == (12, 0) and _uses_cublaslt_grouped_gemm_path(
+            dtype=dtype,
+            quantization=quantization,
+            quantized_compute=quantization is not None,
+        ):
+            pytest.skip("Grouped cuBLASLt GEMM is currently unsupported on SM120.")
 
         # Split sizes (statically pinned for graph capture)
         split_sizes = [split_alignment * (i + 1) for i in range(group_size)]
@@ -3683,6 +3702,16 @@ class TestSequentialModules:
 
         # Check values
         tols = {"rtol": 0.25, "atol": 0.5}  # Loose tols for sanity checking
+        # SM120 + NVFP4 quantized compute has wider per-element numerical spread
+        # in the bwd path (notably ffn1.bias.grad / ffn2.weight.grad with
+        # bias=True) as it falls back to RN instead of SR, uses unfused path
+        # instead of fused RHT grouped kernel, uses non-TMA gated-act kernels.
+        if (
+            quantization == "nvfp4"
+            and quantized_compute
+            and torch.cuda.get_device_capability() == (12, 0)
+        ):
+            tols["atol"] = max(tols["atol"], 0.75)
         assert_close(y_test, y_ref, **tols)
         assert_close(x_test.grad, x_ref.grad, **tols)
         assert_close_grads(norm.weight, norm_w_ref, **tols)

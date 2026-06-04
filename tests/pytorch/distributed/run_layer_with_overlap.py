@@ -30,6 +30,11 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
+FP8_DEFAULT_RTOL_ATOL = (0.125, 0.0625)
+FP8_CS_SM120_DETERMINISTIC_RTOL_ATOL = (0.4, 0.25)
+BF16_DEFAULT_RTOL_ATOL = (0.025, 0.00125)
+BF16_SM120_DETERMINISTIC_OVERLAP_RTOL_ATOL = (0.05, 0.01)
+
 
 class multi_module_model(torch.nn.Module):
     def __init__(self, module, num_layers, *args, **kwargs):
@@ -551,9 +556,33 @@ def _train(opts):
 
         # Now validate accuracy
         if not bool(numerics_failed.item()):
+            is_sm120 = torch.cuda.get_device_capability() == (12, 0)
+            is_deterministic_mode = os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1") == "0"
             for i, (test_g, ref_g) in enumerate(zip(test_grads, ref_grads)):
-                rtol = 0.125 if opts.fp8 else 0.025
-                atol = 0.0625 if opts.fp8 else 0.00125
+                if opts.fp8:
+                    if (
+                        opts.quantization == "fp8_current_scaling"
+                        and is_sm120
+                        and is_deterministic_mode
+                    ):
+                        # SM120 deterministic mode disables fused attn, so rt uses alternate attn backends.
+                        # Combined with FP8 CS, this path needs the looser distributed fp8_cs tolerance policy.
+                        rtol, atol = FP8_CS_SM120_DETERMINISTIC_RTOL_ATOL
+                    else:
+                        rtol, atol = FP8_DEFAULT_RTOL_ATOL
+                else:
+                    rtol, atol = BF16_DEFAULT_RTOL_ATOL
+                    if (
+                        is_sm120
+                        and is_deterministic_mode
+                        and opts.layer_type == te.TransformerLayer
+                        and opts.num_layers > 1
+                        and opts.overlap_rs_dgrad
+                    ):
+                        # SM120 + deterministic training disables fused attn .
+                        # Rt then selects an alternate attn backend, and
+                        # the overlap path can show tiny BF16 accumulation-order drift vs reference.
+                        rtol, atol = BF16_SM120_DETERMINISTIC_OVERLAP_RTOL_ATOL
                 grad_failed, grad_info = _compare_tensors(names[i], test_g, ref_g, rtol, atol)
                 dist_print(grad_info, src=WORLD_RANK, error=grad_failed)
                 numerics_failed[0] = int(grad_failed)

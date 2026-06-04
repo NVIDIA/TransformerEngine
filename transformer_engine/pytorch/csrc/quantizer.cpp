@@ -11,6 +11,7 @@
 #include "common/util/system.h"
 #include "pybind.h"
 #include "torch/torch.h"
+#include "util.h"
 
 namespace transformer_engine::pytorch {
 
@@ -2031,7 +2032,12 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
                                getTensorShape(*tensor_offsets));
   }
 
-  out_cpp.set_with_gemm_swizzled_scales(this->optimize_for_gemm);
+  // The grouped tensor metadata always follows the quantizer's optimize_for_gemm.
+  // Architecture-specific cast paths (e.g. the SM120 grouped NVFP4 fallback in
+  // pytorch/csrc/extensions/cast.cpp) are responsible for producing scales that
+  // match this metadata at the API boundary.
+  const bool with_gemm_swizzled_scales = this->optimize_for_gemm;
+  out_cpp.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
 
   py::handle GroupedTensorClass = grouped_tensor_python_class(this->internal);
   py::dict kwargs;
@@ -2054,7 +2060,7 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
   kwargs["first_dims"] = first_dims.has_value() ? py::cast(*first_dims) : py::none();
   kwargs["last_dims"] = py::none();
   kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
-  kwargs["with_gemm_swizzled_scales"] = this->optimize_for_gemm;
+  kwargs["with_gemm_swizzled_scales"] = with_gemm_swizzled_scales;
   kwargs["row_scaled_nvfp4"] = py::cast(row_scaled_nvfp4);
   kwargs["nvfp4_use_4over6"] = py::cast(nvfp4_use_4over6);
   kwargs["nvfp4_e4m3_max"] = py::cast(nvfp4_e4m3_max);
@@ -2345,7 +2351,11 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
     quant_config_columnwise.set_noop_tensor(noop_flag->data());
   }
   quant_config.set_nvfp4_2d_quantization(this->with_2d_quantization);
-  quant_config.set_stochastic_rounding(this->stochastic_rounding);
+  // Disable stochastic-rounding FP4 cast path for SM120, which relies on arch-specific PTX
+  // instructions.
+  const bool sm120_device = is_sm120_device();
+  const bool use_stochastic_rounding = this->stochastic_rounding && !sm120_device;
+  quant_config.set_stochastic_rounding(use_stochastic_rounding);
   quant_config.set_nvfp4_4over6_mode(this->nvfp4_4over6_mode);
   quant_config_columnwise.set_nvfp4_4over6_mode(this->nvfp4_4over6_mode);
 
@@ -2392,11 +2402,11 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
   // 3. Columnwise usage is enabled
   // 4. Rowwise and columnwise quantization are not fused,
   //    because within a single kernel we can generate two different random numbers for rowwise and columnwise
-  const bool need_separate_columnwise_rng = this->stochastic_rounding && this->with_rht &&
+  const bool need_separate_columnwise_rng = use_stochastic_rounding && this->with_rht &&
                                             this->columnwise_usage &&
                                             (!eligible_for_rht_cast_fusion);
 
-  if (this->stochastic_rounding) {
+  if (use_stochastic_rounding) {
     const size_t rng_elts_per_thread = 1024;  // Wild guess, probably can be tightened
     auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
         std::nullopt, at::cuda::detail::getDefaultCUDAGenerator());

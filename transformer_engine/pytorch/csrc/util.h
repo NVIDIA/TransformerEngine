@@ -13,6 +13,7 @@
 #include <tuple>
 #include <vector>
 
+#include "common/util/cuda_runtime.h"
 #include "transformer_engine/transformer_engine.h"
 
 namespace transformer_engine {
@@ -64,6 +65,11 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorW
  *  during the GEMM.
  */
 at::Tensor convert_block_scaling_to_mxfp8_tensor(TensorWrapper& input, bool rowwise);
+
+/*! \brief Check whether the current CUDA device is SM120. */
+inline bool is_sm120_device() {
+  return transformer_engine::cuda::sm_arch(transformer_engine::cuda::current_device()) == 120;
+}
 
 }  // namespace pytorch
 }  // namespace transformer_engine
