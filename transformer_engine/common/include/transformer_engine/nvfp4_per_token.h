@@ -102,7 +102,7 @@ void nvte_nvfp4_per_token_post_scale(NVTETensor d, const NVTETensor row_amax_a,
  *  \param[in,out] outputs        array of `num_tensors` NVTETensors; on
  *                                return, amax/columnwise_amax slots are filled.
  *  \param[in]     split_sections array of `num_tensors` size_t values,
- *                                each a multiple of 64; sum must equal sum_M.
+ *                                each a multiple of 128; sum must equal sum_M.
  *  \param[in]     num_tensors    <= 64
  *  \param[in]     rowwise        emit per-row amax in `outputs[i].amax`
  *  \param[in]     columnwise     emit per-col amax in `outputs[i].columnwise_amax`
@@ -135,12 +135,21 @@ void nvte_group_nvfp4_per_token_amax(const NVTETensor input, NVTETensor* outputs
  *                                colwise cast.
  *  \param[in]     random_sign_mask_t  low 16 bits = sign-flip pattern; must
  *                                match K1.
+ *  \param[in]     with_sr        non-zero -> the FP4 cast uses stochastic
+ *                                rounding (per-element Philox dither) for BOTH
+ *                                row and col directions. The amax (K1) stays
+ *                                deterministic. Zero is byte-equal to the RN
+ *                                path.
+ *  \param[in]     rng_state      int64 device tensor of shape [2] =
+ *                                {seed, offset} (host-unpacked Philox); one
+ *                                state shared across the whole group. May be
+ *                                NULL iff with_sr == 0.
  *  \param[in]     stream         CUDA stream
  */
 void nvte_group_nvfp4_per_token_cast(const NVTETensor input, NVTETensor* outputs,
                                      const size_t* split_sections, size_t num_tensors, bool rowwise,
                                      bool columnwise, int with_rht, int random_sign_mask_t,
-                                     cudaStream_t stream);
+                                     int with_sr, const NVTETensor rng_state, cudaStream_t stream);
 
 /*! \brief Composite K1+K2 grouped per-token quantize. Calls the amax + cast
  *         kernels on the same stream. This is the external API
@@ -152,7 +161,7 @@ void nvte_group_nvfp4_per_token_cast(const NVTETensor input, NVTETensor* outputs
  *                                columnwise_scale_inv slots allocated;
  *                                on return: all populated.
  *  \param[in]     split_sections array of `num_tensors` size_t values,
- *                                each a multiple of 64; sum must equal sum_M.
+ *                                each a multiple of 128; sum must equal sum_M.
  *  \param[in]     num_tensors    <= 64
  *  \param[in]     rowwise        emit rowwise output
  *  \param[in]     columnwise     emit columnwise output
@@ -161,12 +170,21 @@ void nvte_group_nvfp4_per_token_cast(const NVTETensor input, NVTETensor* outputs
  *                                pre-RHT path.
  *  \param[in]     random_sign_mask_t  low 16 bits = sign-flip pattern shared
  *                                between K1 and K2; ignored when with_rht==0.
+ *  \param[in]     with_sr        non-zero -> the K2 FP4 cast uses stochastic
+ *                                rounding (per-element Philox dither). K1 amax
+ *                                stays deterministic. Zero is byte-equal to the
+ *                                RN path.
+ *  \param[in]     rng_state      int64 device tensor of shape [2] =
+ *                                {seed, offset} (host-unpacked Philox); one
+ *                                state shared across the whole group. May be
+ *                                NULL iff with_sr == 0.
  *  \param[in]     stream         CUDA stream
  */
 void nvte_group_nvfp4_per_token_quantize(const NVTETensor input, NVTETensor* outputs,
                                          const size_t* split_sections, size_t num_tensors,
                                          bool rowwise, bool columnwise, int with_rht,
-                                         int random_sign_mask_t, cudaStream_t stream);
+                                         int random_sign_mask_t, int with_sr,
+                                         const NVTETensor rng_state, cudaStream_t stream);
 
 #ifdef __cplusplus
 }

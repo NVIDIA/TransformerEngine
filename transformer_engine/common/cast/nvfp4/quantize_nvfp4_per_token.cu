@@ -399,7 +399,7 @@ __device__ __forceinline__ void colwise_scaling_per_token(
 
 // =============================================================================
 // Kernel 2: per-token encode (rowwise + optional colwise transpose).
-// kWithRht=true: col-wise FP4 cast over RHT-rotated strips (row never sees RHT).
+// kWithRht=true: col-wise FP4 cast over RHT-rotated strips (row never uses RHT).
 // kWithSwizzle=true: rowwise SF emitted directly in cuBLAS LT 128x4 tile layout.
 // =============================================================================
 template <bool DO_ROW, bool DO_COL, bool kWithRht, bool kWithSwizzle, bool kWithSr>
@@ -704,7 +704,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
 // After all 4 stages, emit one atomicMaxFloat per row slot + one per col slot.
 //
 // kWithRht=true: col-wise amax over RHT-rotated 16-row strips (per-thread
-// FHT with random_sign_mask_t). Row direction never sees RHT.
+// FHT with random_sign_mask_t). Row direction never uses RHT.
 // =============================================================================
 template <bool DO_ROW, bool DO_COL, bool kWithRht>
 __global__ void __launch_bounds__(THREADS_NUM)

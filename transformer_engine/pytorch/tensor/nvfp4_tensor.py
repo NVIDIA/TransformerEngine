@@ -195,10 +195,6 @@ class NVFP4Quantizer(Quantizer):
                 )
             if self.nvfp4_use_4over6:
                 raise ValueError("NVFP4 per-token does not support 4over6.")
-            if self.stochastic_rounding:
-                raise ValueError(
-                    "NVFP4 per-token does not yet support stochastic rounding (TODO: SR kernel)."
-                )
             if self.with_amax_reduction:
                 raise ValueError(
                     "NVFP4 per-token does not yet support amax reduction "

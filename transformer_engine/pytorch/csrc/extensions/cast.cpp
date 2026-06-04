@@ -1618,7 +1618,7 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
   auto stream = at::cuda::getCurrentCUDAStream();
 
   // Per-token grouped path replaces prod 2A (split_quantize with RHT-cast
-  // fusion). Calls the existing K1+K2 grouped kernel. Constraints (M_i % 64,
+  // fusion). Calls the existing K1+K2 grouped kernel. Constraints (M_i % 128,
   // K % 128, bf16-only) are enforced inside the C-API.
   if (per_token) {
     NVTE_CHECK(input.dtype() == DType::kBFloat16, "NVFP4 per-token split-quantize is bf16-only.");
@@ -1629,11 +1629,34 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
     for (auto &out : output_list) {
       handles.push_back(out.data());
     }
+
+    // Stochastic rounding (K2 cast only; K1 amax stays deterministic). One
+    // {seed, offset} state is shared by the whole group -- the grouped kernel
+    // derives a unique Philox sequence per thread from the global grid id, so a
+    // single state still gives every FP4 element an independent dither stream.
+    // Built outside the GIL-release block (torch allocation + generator access).
+    const bool need_stochastic_rounding = quantizer.stochastic_rounding;
+    at::Tensor rng_state_tensor;
+    TensorWrapper te_rng_state;
+    NVTETensor rng_state_handle = nullptr;
+    if (need_stochastic_rounding) {
+      const size_t rng_elts_per_thread = 1024 * num_tensors;
+      auto rng_opts = at::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
+      rng_state_tensor = torch::empty({2}, rng_opts);
+      auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
+          std::nullopt, at::cuda::detail::getDefaultCUDAGenerator());
+      at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
+      philox_unpack(philox_args, static_cast<int64_t *>(rng_state_tensor.data_ptr()));
+      te_rng_state = makeTransformerEngineTensor(rng_state_tensor);
+      rng_state_handle = te_rng_state.data();
+    }
+
     NVTE_SCOPED_GIL_RELEASE({
-      nvte_group_nvfp4_per_token_quantize(input.data(), handles.data(), split_sections.data(),
-                                          num_tensors, quantizer.rowwise_usage,
-                                          quantizer.columnwise_usage, quantizer.with_rht ? 1 : 0,
-                                          quantizer.rht_matrix_random_sign_mask_t, stream);
+      nvte_group_nvfp4_per_token_quantize(
+          input.data(), handles.data(), split_sections.data(), num_tensors, quantizer.rowwise_usage,
+          quantizer.columnwise_usage, quantizer.with_rht ? 1 : 0,
+          quantizer.rht_matrix_random_sign_mask_t, need_stochastic_rounding ? 1 : 0,
+          rng_state_handle, stream);
     });
     return;
   }
