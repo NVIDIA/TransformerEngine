@@ -5,6 +5,7 @@
 from .activation import *
 from .amax import *
 from .attention import *
+from .flex_attention import *
 from .normalization import *
 from .quantization import *
 from .softmax import *

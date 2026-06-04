@@ -251,7 +251,9 @@ class UserbuffersForwardLinear(FusedOperation):
             extra_output=reduce_scatter_output,
         )
         if with_ub_reduce_scatter:
-            y_local = reduce_scatter_output
+            # cuBLASMp writes the reduce-scattered output directly into the GEMM
+            # output tensor; Userbuffers writes it into the extra-output buffer.
+            y_local = gemm_output if ub_comm.with_cublasmp() else reduce_scatter_output
         else:
             y_local = gemm_output
 

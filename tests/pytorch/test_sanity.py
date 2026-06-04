@@ -35,7 +35,6 @@ from transformer_engine.pytorch import (
     is_bf16_available,
 )
 from transformer_engine.common import recipe
-import transformer_engine_torch as tex
 from transformer_engine.pytorch.cpp_extensions import general_gemm
 from transformer_engine.pytorch.tensor.utils import replace_raw_data
 from utils import ModelConfig, recipe_id, skip_unsupported_backward_override
@@ -1064,7 +1063,7 @@ def test_sanity_fp8_gemm_with_unalignment(N, datatype):
 
     scales = torch.ones(1).cuda().squeeze()
     amaxes = torch.ones(1).cuda().squeeze()
-    dtype = tex.DType.kFloat8E4M3
+    dtype = te.DType.kFloat8E4M3
     fp8_quantizer = Float8Quantizer(scales, amaxes, dtype)
 
     outp_type = datatype
@@ -1088,7 +1087,7 @@ def test_replace_raw_data_for_float8tensor():
     torch.manual_seed(12345)
     torch.cuda.manual_seed(12345)
 
-    fp8_quantizer = Float8CurrentScalingQuantizer(fp8_dtype=tex.DType.kFloat8E4M3, device="cuda")
+    fp8_quantizer = Float8CurrentScalingQuantizer(fp8_dtype=te.DType.kFloat8E4M3, device="cuda")
     fp8_tensor = fp8_quantizer.make_empty([128, 128], dtype=torch.bfloat16, device="cuda")
     random_bf16_data = torch.randn(fp8_tensor.shape, dtype=torch.bfloat16, device="cuda")
     fp8_quantizer.update_quantized(random_bf16_data, fp8_tensor)

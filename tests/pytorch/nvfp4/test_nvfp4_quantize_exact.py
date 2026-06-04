@@ -10,7 +10,6 @@ from transformer_engine.pytorch import NVFP4Quantizer
 from transformer_engine.pytorch.custom_recipes.quantization_ref_nvfp4 import NVFP4QuantizerRef
 from transformer_engine.pytorch.custom_recipes import utils
 from transformer_engine.common.recipe import NVFP4BlockScaling
-from transformer_engine.pytorch.constants import TE_DType
 
 
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
@@ -62,7 +61,7 @@ def check_quantization_nvfp4_versus_reference(
         row_scaled_nvfp4, return_transpose, with_2d_quantization, use_4over6, x_dtype, M, N
     )
 
-    te_dtype = tex.DType.kFloat4E2M1
+    te_dtype = te.DType.kFloat4E2M1
 
     # Setup device and random seed
     device = "cuda"
@@ -259,7 +258,7 @@ def test_nvfp4_quantization_extrema_versus_reference(
         row_scaled_nvfp4, return_transpose, use_4over6=use_4over6
     )
 
-    te_dtype = tex.DType.kFloat4E2M1
+    te_dtype = te.DType.kFloat4E2M1
 
     device = "cuda"
     seed = 0
@@ -380,7 +379,7 @@ def test_nvfp4_quantization_boundary_values(
         row_scaled_nvfp4, return_transpose, use_4over6=use_4over6
     )
 
-    te_dtype = tex.DType.kFloat4E2M1
+    te_dtype = te.DType.kFloat4E2M1
 
     device = "cuda"
     seed = 123
@@ -505,7 +504,7 @@ def test_nvfp4_quantization_noncontiguous_inputs(
         row_scaled_nvfp4, return_transpose, use_4over6=use_4over6
     )
 
-    te_dtype = tex.DType.kFloat4E2M1
+    te_dtype = te.DType.kFloat4E2M1
 
     device = "cuda"
     seed = 17

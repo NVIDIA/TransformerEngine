@@ -94,7 +94,7 @@ if _opaque_available:
         opaque value type so torch.compile can treat it as a baked-in constant."""
 
         def __init__(self, tag: str):
-            super().__init__(fp8_dtype=tex.DType.kFloat8E4M3, device=torch.device("cuda"))
+            super().__init__(fp8_dtype=te.DType.kFloat8E4M3, device=torch.device("cuda"))
             self.tag = tag
 
         def __eq__(self, other):

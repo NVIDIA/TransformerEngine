@@ -214,11 +214,11 @@ class PoolWorker:
             self._kill()
             raise AssertionError(msg)
 
-        # Worker redirects non-rank-0 stdout to /dev/null at fd level, so
-        # rank 0's JSON line is the only thing that arrives on this pipe.
-        # select() on a pipe fd is Linux/macOS only — on Windows the select
-        # module only accepts sockets. CP attention tests run on Linux GPU
-        # hosts so this is fine; flag if portability is ever needed.
+        # The worker reserves rank-0's stdout fd for this JSON channel and sends
+        # every other rank's stdout (and rank 0's own library/Python writes) to
+        # /dev/null or stderr, so the only thing on this pipe is the response
+        # line. select() on a pipe fd is Linux/macOS only — fine for the GPU
+        # hosts these tests run on.
         ready, _, _ = select.select([self.proc.stdout], [], [], timeout)
         if not ready:
             msg = self._diag(
@@ -234,8 +234,8 @@ class PoolWorker:
             self._kill()
             raise AssertionError(msg)
 
-        # A stray non-JSON line from rank 0 would desynchronize the protocol;
-        # turn it into a clear test failure rather than a raw JSONDecodeError.
+        # A non-JSON line means stdout isolation failed somewhere; surface it
+        # clearly rather than as a raw JSONDecodeError.
         try:
             resp = json.loads(line)
         except json.JSONDecodeError as e:

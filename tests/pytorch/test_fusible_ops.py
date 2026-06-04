@@ -182,17 +182,17 @@ def make_reference_and_test_tensors(
         quantizer = Float8Quantizer(
             scale=torch.ones(1, dtype=torch.float32, device=test_device).squeeze(),
             amax=torch.zeros(1, dtype=torch.float32, device=test_device),
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=te.DType.kFloat8E4M3,
         )
         test = quantizer(test)
     elif quantization == "fp8_current_scaling":
         quantizer = Float8CurrentScalingQuantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=te.DType.kFloat8E4M3,
             device=test_device,
         )
         test = quantizer(test)
     elif quantization == "mxfp8":
-        test = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)(test)
+        test = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)(test)
     elif quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_rht"):
         tensor_type = "input"
         if quantizer_role is not None:
@@ -1934,9 +1934,9 @@ class TestBasicOps:
         # Expected numerical error
         tols = dtype_tols(dtype)
         if quantized_compute and quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
-            tols = dtype_tols(tex.DType.kFloat4E2M1)
+            tols = dtype_tols(te.DType.kFloat4E2M1)
         elif quantized_compute:
-            tols = dtype_tols(tex.DType.kFloat8E4M3)
+            tols = dtype_tols(te.DType.kFloat8E4M3)
 
         # Check results
         assert_close(y_test, y_ref, **tols)
@@ -5364,7 +5364,7 @@ def test_grouped_gemm_quant_cute_matches_mxfp8_quantized() -> None:
     total_m = num_groups * m
     split_sizes = torch.full((num_groups,), m, device=device, dtype=torch.int64)
 
-    q = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=False)
+    q = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3, rowwise=True, columnwise=False)
     q.optimize_for_gemm = False
 
     torch.manual_seed(0)

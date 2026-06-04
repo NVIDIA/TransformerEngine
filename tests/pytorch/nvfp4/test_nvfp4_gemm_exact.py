@@ -34,7 +34,7 @@ def check_nvfp4_gemm_versus_reference(
 ):
     if nvfp4_e4m3_max != 448 and not use_4over6:
         pytest.skip("E4M3 max 256 is only meaningful for 4over6")
-    te_dtype = tex.DType.kFloat4E2M1
+    te_dtype = te.DType.kFloat4E2M1
 
     # Setup device and random seed
     device = "cuda"
@@ -252,7 +252,7 @@ def check_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
     use_4over6: bool = False,
     nvfp4_4over6_err_mode: str = "MAE",
 ):
-    te_dtype = tex.DType.kFloat4E2M1
+    te_dtype = te.DType.kFloat4E2M1
     device = "cuda"
     torch.manual_seed(23)
     torch.cuda.manual_seed(23)
@@ -347,7 +347,7 @@ def check_nvfp4_row_scaled_gemm_matches_emulated(
     use_4over6: bool = False,
     nvfp4_4over6_err_mode: str = "MAE",
 ):
-    te_dtype = tex.DType.kFloat4E2M1
+    te_dtype = te.DType.kFloat4E2M1
     device = "cuda"
     torch.manual_seed(37)
     torch.cuda.manual_seed(37)

@@ -13,7 +13,6 @@ import logging
 import torch
 from torch.nn.parameter import Parameter
 
-import transformer_engine_torch as tex
 from transformer_engine.common.recipe import (
     Format,
     Recipe,
@@ -35,11 +34,7 @@ from transformer_engine.pytorch.quantization import (
 from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import Float8TensorStorage
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
-from transformer_engine.pytorch.constants import (
-    AttnMaskTypes,
-    AttnTypes,
-    dist_group_type,
-)
+from transformer_engine.pytorch.constants import AttnMaskTypes, AttnTypes, dist_group_type, DType
 from transformer_engine.pytorch.distributed import (
     get_distributed_world_size,
     checkpoint,
@@ -1014,6 +1009,10 @@ class DotProductAttention(TransformerEngineBaseModule):
         pad_between_seqs: Optional[bool] = None,
         fp8_output: Optional[bool] = False,
         num_splits: Optional[int] = 1,
+        score_mod: Optional[Callable] = None,
+        score_mod_bprop: Optional[Callable] = None,
+        score_mod_tensors: Optional[Dict[str, torch.Tensor]] = None,
+        score_mod_bprop_tensors: Optional[Dict[str, torch.Tensor]] = None,
     ) -> torch.Tensor:
         r"""
         Dot Product Attention Layer.
@@ -1102,6 +1101,12 @@ class DotProductAttention(TransformerEngineBaseModule):
               per run, Transformer Engine 1.13+ quantizes relevant parameters: for cuDNN < 9.6, {batch size,
               :attr:`max_seqlen_q`, :attr:`max_seqlen_kv`}, and for cuDNN >= 9.6, {"t" dimension of
               :attr:`query_layer`, "t" dimension of :attr:`key_layer`}.
+
+        .. note::
+
+            :attr:`score_mod`, :attr:`score_mod_bprop`, :attr:`score_mod_tensors`, and
+            :attr:`score_mod_bprop_tensors` are experimental cuDNN frontend Flex Attention
+            APIs. Their callback signatures and supported configurations may change.
 
         Parameters
         ----------
@@ -1202,6 +1207,22 @@ class DotProductAttention(TransformerEngineBaseModule):
             Optional split control for FlashAttention-3 only. When set, this value is forwarded
             to the FA3 backend to control internal kernel splitting behavior for non-context-parallel
             cases. It is ignored for other backends and when context parallelism is enabled.
+        score_mod: Optional[Callable], default = None
+            Experimental cuDNN frontend score modification callback. This is a cuDNN-only path
+            and is mutually exclusive with masks, bias, ALiBi, sink attention, dropout, FP8,
+            context parallelism, THD format, KV caching, and return_max_logit. The callback
+            signature is ``score_mod(graph, score, tensors) -> score``.
+        score_mod_bprop: Optional[Callable], default = None
+            Optional cuDNN frontend callback for the backward pass of score_mod. The callback
+            signature is ``score_mod_bprop(graph, dP, tensors) -> dP``.
+        score_mod_tensors: Optional[Dict[str, torch.Tensor]], default = None
+            Runtime tensors exposed to score_mod as cuDNN graph tensors. Keys are
+            user-defined string names consumed by the callback through ``tensors[name]``;
+            there is no predefined set of accepted keys.
+        score_mod_bprop_tensors: Optional[Dict[str, torch.Tensor]], default = None
+            Runtime tensors exposed to score_mod_bprop as cuDNN graph tensors. Keys are
+            user-defined string names consumed by the callback through ``tensors[name]``;
+            there is no predefined set of accepted keys.
         """
 
         with self.prepare_forward_ctx(
@@ -1232,11 +1253,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                 forward_dtype = get_fp8_te_dtype(self.fp8_meta["recipe"], fprop_tensor=True)
                 backward_dtype = get_fp8_te_dtype(self.fp8_meta["recipe"], fprop_tensor=False)
                 assert forward_dtype in [
-                    tex.DType.kFloat8E4M3,
-                    tex.DType.kFloat8E5M2,
+                    DType.kFloat8E4M3,
+                    DType.kFloat8E5M2,
                 ] and backward_dtype in [
-                    tex.DType.kFloat8E4M3,
-                    tex.DType.kFloat8E5M2,
+                    DType.kFloat8E4M3,
+                    DType.kFloat8E5M2,
                 ], """DotProductAttention only supports "E4M3" and "E5M2" FP8 data types."""
             else:
                 fp8_output = False
@@ -1528,6 +1549,40 @@ class DotProductAttention(TransformerEngineBaseModule):
                 else:
                     pad_between_seqs = False
 
+            # Validate experimental Flex Attention API inputs that backend selection
+            # cannot represent.
+            if score_mod is None:
+                assert score_mod_bprop is None, "score_mod_bprop requires score_mod!"
+                assert score_mod_tensors is None, "score_mod_tensors requires score_mod!"
+                assert (
+                    score_mod_bprop_tensors is None
+                ), "score_mod_bprop_tensors requires score_mod!"
+            else:
+                assert callable(score_mod), "score_mod must be callable!"
+                assert score_mod_bprop is None or callable(
+                    score_mod_bprop
+                ), "score_mod_bprop must be callable when provided!"
+                assert (
+                    not is_in_onnx_export_mode()
+                ), "Flex Attention is not supported with ONNX export!"
+                if score_mod_tensors is not None:
+                    assert isinstance(score_mod_tensors, dict), "score_mod_tensors must be a dict!"
+                    assert all(
+                        isinstance(k, str) and isinstance(v, torch.Tensor)
+                        for k, v in score_mod_tensors.items()
+                    ), "score_mod_tensors must map string names to torch.Tensor instances!"
+                if score_mod_bprop_tensors is not None:
+                    assert (
+                        score_mod_bprop is not None
+                    ), "score_mod_bprop_tensors requires score_mod_bprop!"
+                    assert isinstance(
+                        score_mod_bprop_tensors, dict
+                    ), "score_mod_bprop_tensors must be a dict!"
+                    assert all(
+                        isinstance(k, str) and isinstance(v, torch.Tensor)
+                        for k, v in score_mod_bprop_tensors.items()
+                    ), "score_mod_bprop_tensors must map string names to torch.Tensor instances!"
+
             # gather attention params for get_attention_backend
             attention_params = dpa_utils.AttentionParams(
                 qkv_type=type(query_layer),
@@ -1563,6 +1618,10 @@ class DotProductAttention(TransformerEngineBaseModule):
                 return_max_logit=self.return_max_logit,
                 cuda_graph=is_graph_capturing(),
                 num_splits=num_splits,
+                fp8_output=fp8_output,
+                checkpoint_core_attention=checkpoint_core_attention,
+                has_score_mod=score_mod is not None,
+                has_score_mod_bprop=score_mod_bprop is not None,
             )
             global _attention_backends
             if is_in_onnx_export_mode():
@@ -1744,6 +1803,10 @@ class DotProductAttention(TransformerEngineBaseModule):
                     inference_params=inference_params,
                     softmax_offset=softmax_offset,
                     fp8_output=fp8_output,
+                    score_mod=score_mod,
+                    score_mod_bprop=score_mod_bprop,
+                    score_mod_tensors=score_mod_tensors,
+                    score_mod_bprop_tensors=score_mod_bprop_tensors,
                 )
 
             if use_unfused_attention:
