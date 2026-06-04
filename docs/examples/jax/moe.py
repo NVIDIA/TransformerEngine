@@ -82,8 +82,7 @@ def build_ep_fsdp_mesh():
     required_devices = EP_SIZE * FSDP_SIZE
     if len(jax.devices()) < required_devices:
         raise RuntimeError(
-            f"MoE tutorial requires {required_devices} GPUs; "
-            f"only {len(jax.devices())} visible"
+            f"MoE tutorial requires {required_devices} GPUs; only {len(jax.devices())} visible"
         )
 
     devices = mesh_utils.create_device_mesh(
@@ -223,9 +222,7 @@ def compare_forward(demo):
         te_out = jax.jit(te_apply)(demo.variables, demo.x)
         native_out, te_out = jax.block_until_ready((native_out, te_out))
 
-    max_abs = jnp.max(
-        jnp.abs(native_out.astype(jnp.float32) - te_out.astype(jnp.float32))
-    )
+    max_abs = jnp.max(jnp.abs(native_out.astype(jnp.float32) - te_out.astype(jnp.float32)))
     print(f"max |native BF16 - TE BF16|: {float(max_abs):.4f}")
     return native_out, te_out
 

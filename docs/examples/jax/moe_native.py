@@ -36,9 +36,7 @@ def _forward_a2a_params(
     ).squeeze(0)
     local_by_destination = local_tokens_per_expert.reshape(num_ep, experts_per_shard)
     send_sizes = jnp.sum(local_by_destination, axis=1).astype(jnp.int32)
-    input_offsets = jnp.concatenate(
-        [jnp.array([0], dtype=jnp.int32), jnp.cumsum(send_sizes)[:-1]]
-    )
+    input_offsets = jnp.concatenate([jnp.array([0], dtype=jnp.int32), jnp.cumsum(send_sizes)[:-1]])
 
     local_expert_start = shard_id * experts_per_shard
     local_expert_columns = jax.lax.dynamic_slice(
@@ -84,9 +82,7 @@ def _reverse_a2a_params(
         slice_sizes=(num_ep, experts_per_shard),
     )
     send_sizes = jnp.sum(local_expert_columns, axis=1).astype(jnp.int32)
-    input_offsets = jnp.concatenate(
-        [jnp.array([0], dtype=jnp.int32), jnp.cumsum(send_sizes)[:-1]]
-    )
+    input_offsets = jnp.concatenate([jnp.array([0], dtype=jnp.int32), jnp.cumsum(send_sizes)[:-1]])
 
     local_tokens_per_expert = jax.lax.dynamic_slice(
         all_tokens_per_expert,
@@ -185,13 +181,9 @@ def _native_moe_local(
     tokens = batch * sequence
     x_2d = x.reshape(tokens, hidden)
 
-    selected_experts, routing_weights = _route_tokens(
-        x_2d, gate_kernel, num_experts_per_tok
-    )
+    selected_experts, routing_weights = _route_tokens(x_2d, gate_kernel, num_experts_per_tok)
     flat_experts = selected_experts.reshape(-1)
-    flat_token_ids = jnp.repeat(
-        jnp.arange(tokens, dtype=jnp.int32), num_experts_per_tok
-    )
+    flat_token_ids = jnp.repeat(jnp.arange(tokens, dtype=jnp.int32), num_experts_per_tok)
     flat_weights = routing_weights.reshape(-1)
 
     sort_order = jnp.argsort(flat_experts, stable=True)
@@ -214,9 +206,7 @@ def _native_moe_local(
         tiled=True,
     )
 
-    in_off, send_sz, out_off, recv_sz = _forward_a2a_params(
-        all_tokens_per_expert, shard_id, num_ep
-    )
+    in_off, send_sz, out_off, recv_sz = _forward_a2a_params(all_tokens_per_expert, shard_id, num_ep)
     x_recv = jax.lax.ragged_all_to_all(
         sorted_x,
         jnp.zeros((recv_buffer_rows, hidden), dtype=sorted_x.dtype),
@@ -235,9 +225,7 @@ def _native_moe_local(
     ).astype(jnp.int32)
     local_chunk_sizes = local_counts_by_source.reshape(-1)
     source_major_order = jnp.arange(num_ep * experts_per_shard, dtype=jnp.int32)
-    expert_major_order = source_major_order.reshape(
-        num_ep, experts_per_shard
-    ).T.reshape(-1)
+    expert_major_order = source_major_order.reshape(num_ep, experts_per_shard).T.reshape(-1)
     local_group_sizes = jnp.sum(local_counts_by_source, axis=0).astype(jnp.int32)
 
     x_expert_major = _reorder_ragged_chunks(
@@ -257,9 +245,7 @@ def _native_moe_local(
         expert_major_order,
         source_major_order,
     )
-    in_off, send_sz, out_off, recv_sz = _reverse_a2a_params(
-        all_tokens_per_expert, shard_id, num_ep
-    )
+    in_off, send_sz, out_off, recv_sz = _reverse_a2a_params(all_tokens_per_expert, shard_id, num_ep)
     returned = jax.lax.ragged_all_to_all(
         source_major_output,
         jnp.zeros_like(sorted_x),
@@ -293,8 +279,7 @@ def native_moe_ep(
     """Run the native BF16 EP MoE baseline on an active JAX mesh."""
     if num_experts % mesh.shape[ep_axis] != 0:
         raise ValueError(
-            f"num_experts={num_experts} must be divisible by "
-            f"EP size={mesh.shape[ep_axis]}"
+            f"num_experts={num_experts} must be divisible by EP size={mesh.shape[ep_axis]}"
         )
 
     if data_parallelism_axes:
@@ -309,10 +294,7 @@ def native_moe_ep(
     batch, sequence, _ = x.shape
     required_batch_multiple = mesh.shape[ep_axis] * dp_size
     if batch % required_batch_multiple != 0:
-        raise ValueError(
-            f"batch={batch} must be divisible by ep*dp="
-            f"{required_batch_multiple}"
-        )
+        raise ValueError(f"batch={batch} must be divisible by ep*dp={required_batch_multiple}")
 
     recv_buffer_rows = (batch // dp_size) * sequence * num_experts_per_tok
     captured = {
