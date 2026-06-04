@@ -707,14 +707,23 @@ class NormBwdPrimitive(BasePrimitive):
 
     name = "te_norm_backward_ffi"
     multiple_results = True
-    impl_static_args = (5, 6)  # norm_type, zero_centered_gamma
+    impl_static_args = (5, 6, 7)  # norm_type, zero_centered_gamma, is_outer
     inner_primitive = None
     outer_primitive = None
 
     @staticmethod
-    def abstract(dz_aval, x_aval, mu_aval, rsigma_aval, gamma_aval, norm_type, zero_centered_gamma):
+    def abstract(
+        dz_aval,
+        x_aval,
+        mu_aval,
+        rsigma_aval,
+        gamma_aval,
+        norm_type,
+        zero_centered_gamma,
+        is_outer,
+    ):
         """
-        bwd inner primitive abstract
+        bwd primitive abstract
         """
         w_dtype = dtypes.canonicalize_dtype(gamma_aval.dtype)
         rsigma_dtype = dtypes.canonicalize_dtype(rsigma_aval.dtype)
@@ -745,6 +754,10 @@ class NormBwdPrimitive(BasePrimitive):
         if norm_type != NVTE_Norm_Type.LayerNorm:
             dbeta_aval = dbeta_aval.update(shape=(1,))
 
+        outputs = (dx_aval, dgamma_aval, dbeta_aval)
+        if is_outer:
+            return outputs
+
         (wkspace_info,) = transformer_engine_jax.get_norm_bwd_workspace_sizes(
             x_aval.size // gamma_aval.size,  # batch size
             gamma_aval.size,  # hidden size
@@ -758,26 +771,14 @@ class NormBwdPrimitive(BasePrimitive):
             shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
         )
 
-        return (
-            dx_aval,
-            dgamma_aval,
-            dbeta_aval,
-            wkspace_aval,
-        )
+        return (*outputs, wkspace_aval)
 
     @staticmethod
-    def outer_abstract(*args, **kwargs):
-        """
-        LayerNorm bwd outer primitive abstract
-        """
-        dx_aval, dgamma_aval, dbeta_aval, _ = NormBwdPrimitive.abstract(*args, **kwargs)
-        return dx_aval, dgamma_aval, dbeta_aval
-
-    @staticmethod
-    def lowering(ctx, dz, x, mu, rsigma, gamma, *, norm_type, zero_centered_gamma):
+    def lowering(ctx, dz, x, mu, rsigma, gamma, *, norm_type, zero_centered_gamma, is_outer):
         """
         bwd lowering rules
         """
+        del is_outer
         g_type = ir.RankedTensorType(gamma.type)
         g_shape = g_type.shape
         b_type = ir.RankedTensorType(gamma.type)
@@ -805,17 +806,28 @@ class NormBwdPrimitive(BasePrimitive):
         )
 
     @staticmethod
-    def impl(dz, x, mu, rsigma, gamma, norm_type, zero_centered_gamma):
+    def impl(dz, x, mu, rsigma, gamma, norm_type, zero_centered_gamma, is_outer):
         assert (
             NormBwdPrimitive.inner_primitive is not None
         ), "NormBwdPrimitive.inner_primitive has not been registered"
-        dx, dgamma, dbeta, _ = NormBwdPrimitive.inner_primitive.bind(
-            dz, x, mu, rsigma, gamma, norm_type=norm_type, zero_centered_gamma=zero_centered_gamma
+        outputs = NormBwdPrimitive.inner_primitive.bind(
+            dz,
+            x,
+            mu,
+            rsigma,
+            gamma,
+            norm_type=norm_type,
+            zero_centered_gamma=zero_centered_gamma,
+            is_outer=is_outer,
         )
+        if is_outer:
+            dx, dgamma, dbeta = outputs
+        else:
+            dx, dgamma, dbeta, _ = outputs
         return dx, dgamma, dbeta
 
     @staticmethod
-    def batcher(batched_args, batch_dims, *, norm_type, zero_centered_gamma):
+    def batcher(batched_args, batch_dims, *, norm_type, zero_centered_gamma, is_outer):
         check_valid_batch_dims(batch_dims)
         assert (
             NormBwdPrimitive.outer_primitive is not None
@@ -833,13 +845,16 @@ class NormBwdPrimitive(BasePrimitive):
                 gamma,
                 norm_type=norm_type,
                 zero_centered_gamma=zero_centered_gamma,
+                is_outer=is_outer,
             ),
             out_bdims,
         )
 
     @staticmethod
-    def infer_sharding_from_operands(norm_type, zero_centered_gamma, mesh, arg_infos, result_infos):
-        del norm_type, zero_centered_gamma, result_infos
+    def infer_sharding_from_operands(
+        norm_type, zero_centered_gamma, is_outer, mesh, arg_infos, result_infos
+    ):
+        del norm_type, zero_centered_gamma, is_outer, result_infos
         x_spec = get_padded_spec(arg_infos[1])
         if x_spec[-1] is not None:
             warnings.warn(
@@ -864,8 +879,8 @@ class NormBwdPrimitive(BasePrimitive):
         return dx_sharding, dgamma_sharding, dbeta_sharding
 
     @staticmethod
-    def partition(norm_type, zero_centered_gamma, mesh, arg_infos, result_infos):
-        del result_infos
+    def partition(norm_type, zero_centered_gamma, is_outer, mesh, arg_infos, result_infos):
+        del result_infos, is_outer
         x_spec = get_padded_spec(arg_infos[1])
         if x_spec[-1] is not None:
             warnings.warn(
@@ -912,6 +927,7 @@ class NormBwdPrimitive(BasePrimitive):
                 gamma,
                 norm_type=norm_type,
                 zero_centered_gamma=zero_centered_gamma,
+                is_outer=False,
             )
             global_dgamma = all_reduce_sum_along_dp_fsdp_tpsp(local_dgamma, mesh)
             if norm_type == NVTE_Norm_Type.LayerNorm:
@@ -1236,6 +1252,7 @@ def layernorm_bwd(
         gamma,
         norm_type=NVTE_Norm_Type.LayerNorm,
         zero_centered_gamma=zero_centered_gamma,
+        is_outer=True,
     )
 
 
@@ -1481,6 +1498,7 @@ def rmsnorm_bwd(
         gamma,
         norm_type=NVTE_Norm_Type.RMSNorm,
         zero_centered_gamma=zero_centered_gamma,
+        is_outer=True,
     )
     return (dx, dgamma)
 
