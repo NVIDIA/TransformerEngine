@@ -180,7 +180,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       py::is_method(dtype_class));
   dtype_class.attr("__ne__") = py::cpp_function(
       [](transformer_engine::DType self, py::object other) -> py::object {
-      return py::cast(static_cast<int>(self) != other.cast<int>());
+        return py::cast(static_cast<int>(self) != other.cast<int>());
       },
       py::is_method(dtype_class));
 
