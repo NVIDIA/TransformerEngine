@@ -7,10 +7,14 @@
 #ifndef TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_
 #define TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_
 
+#include <nccl.h>
+
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <tuple>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -671,10 +675,18 @@ void newton_schulz(int64_t ctx_ptr, int64_t m, int64_t n, at::Tensor x, int64_t 
  **************************************************************************************************/
 
 class CommOverlapHelper : torch::CustomClassHolder {
+ public:
+  // Shared ownership of an ncclComm_t. The deleter calls ncclCommDestroy when
+  // the last reference (held by the helper and/or any CommOverlap consumers)
+  // is released, so the communicator outlives whichever owner is destroyed
+  // first.
+  using NcclCommSharedPtr = std::shared_ptr<std::remove_pointer<ncclComm_t>::type>;
+
  private:
   bool initialized{false};
   bool backend_is_nccl{false};
-  std::map<std::string, c10d::ProcessGroup *> pgs;
+  std::map<std::string, c10d::ProcessGroup *> torch_pgs;
+  std::map<std::string, NcclCommSharedPtr> nccl_comms;
 
  public:
   int myrank = -1;
@@ -695,16 +707,32 @@ class CommOverlapHelper : torch::CustomClassHolder {
                     ExtComm comm);
 
   void ub_barrier(ExtComm comm);
+
+  NcclCommSharedPtr get_nccl_comm(std::string comm_name);
 };
 
 class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOverlapBase {
+ private:
+  // Keeps the cuBLASMp NCCL communicator alive for the lifetime of this
+  // instance, independent of the CommOverlapHelper that created it.
+  CommOverlapHelper::NcclCommSharedPtr _nccl_comm;
+
  public:
   CommOverlap(const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
-              CommOverlapHelper *helper, int tp_size, int num_splits = 3,
+              CommOverlapHelper *helper, int tp_size, int num_splits = 4,
               int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int comm_cga_size = 2,
               int gemm_priority = 0, int comm_priority = 0, int num_comm_sm = 16,
               bool set_sm_margin = true, bool atomic_gemm = false,
               bool rs_overlap_first_gemm = false);
+
+  // cuBLASMp variant. `comm_type`, `buffer_shape`, and `buffer_dtype` size
+  // the construction-time warmup matmul that primes cuBLASMp's lazy NCCL
+  // window registrations and workspace allocation so subsequent matmuls
+  // (including those captured in CUDA graphs) avoid the unsafe lazy paths.
+  CommOverlap(CommOverlapHelper *helper, int tp_rank, int tp_size,
+              transformer_engine::CommOverlapType comm_type,
+              const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
+              int num_comm_sm = 16, bool atomic_gemm = false);
 
   ~CommOverlap() {}
 
@@ -719,14 +747,25 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
 };  // CommOverlap
 
 class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::CommOverlapP2PBase {
+ private:
+  // Keeps the cuBLASMp NCCL communicator alive for the lifetime of this
+  // instance, independent of the CommOverlapHelper that created it.
+  CommOverlapHelper::NcclCommSharedPtr _nccl_comm;
+
  public:
   CommOverlapP2P(const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
                  CommOverlapHelper *helper, int tp_size,
                  transformer_engine::CommOverlapType comm_type,
-                 int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int comm_cga_size = 2,
-                 int gemm_priority = 0, int comm_priority = 0, int num_comm_sm = 3,
-                 bool set_sm_margin = true, bool atomic_gemm = false, bool use_ce = true,
+                 int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int comm_cga_size = 1,
+                 int gemm_priority = 0, int comm_priority = 0, int num_comm_sm = 1,
+                 bool set_sm_margin = false, bool atomic_gemm = false, bool use_ce = true,
                  bool aggregate = false);
+
+  // cuBLASMp variant. See CommOverlap for the `comm_type`/buffer args.
+  CommOverlapP2P(CommOverlapHelper *helper, int tp_rank, int tp_size,
+                 transformer_engine::CommOverlapType comm_type,
+                 const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
+                 int num_comm_sm = 1, bool atomic_gemm = false);
 
   ~CommOverlapP2P() {}
 
