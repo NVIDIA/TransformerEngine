@@ -174,11 +174,14 @@ std::pair<TensorWrapper, py::object> NoneQuantizer::create_tensor(const std::vec
 std::pair<GroupedTensorWrapper, py::object> NoneQuantizer::create_grouped_tensor(
     const size_t num_tensors, const std::vector<size_t>& logical_shape, const DType dtype,
     py::object quantizer, const std::optional<at::Tensor>& first_dims,
-    const size_t logical_first_dim, const size_t logical_last_dim) const {
+    const std::optional<at::Tensor>& precomputed_tensor_offsets, const size_t logical_first_dim,
+    const size_t logical_last_dim) const {
   using namespace pybind11::literals;
 
   const auto tensor_offsets =
-      build_grouped_tensor_offsets(num_tensors, first_dims, logical_last_dim);
+      precomputed_tensor_offsets.has_value()
+          ? precomputed_tensor_offsets
+          : build_grouped_tensor_offsets(num_tensors, first_dims, logical_last_dim);
   const int64_t total_elements =
       static_cast<int64_t>(logical_first_dim) * static_cast<int64_t>(logical_last_dim);
 
@@ -377,11 +380,14 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
 std::pair<GroupedTensorWrapper, py::object> Float8Quantizer::create_grouped_tensor(
     const size_t num_tensors, const std::vector<size_t>& logical_shape, const DType dtype,
     py::object quantizer, const std::optional<at::Tensor>& first_dims,
-    const size_t logical_first_dim, const size_t logical_last_dim) const {
+    const std::optional<at::Tensor>& precomputed_tensor_offsets, const size_t logical_first_dim,
+    const size_t logical_last_dim) const {
   using namespace pybind11::literals;
 
   const auto tensor_offsets =
-      build_grouped_tensor_offsets(num_tensors, first_dims, logical_last_dim);
+      precomputed_tensor_offsets.has_value()
+          ? precomputed_tensor_offsets
+          : build_grouped_tensor_offsets(num_tensors, first_dims, logical_last_dim);
   const int64_t total_elements =
       static_cast<int64_t>(logical_first_dim) * static_cast<int64_t>(logical_last_dim);
 
@@ -687,11 +693,14 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
 std::pair<GroupedTensorWrapper, py::object> Float8CurrentScalingQuantizer::create_grouped_tensor(
     const size_t num_tensors, const std::vector<size_t>& logical_shape, const DType dtype,
     py::object quantizer, const std::optional<at::Tensor>& first_dims,
-    const size_t logical_first_dim, const size_t logical_last_dim) const {
+    const std::optional<at::Tensor>& precomputed_tensor_offsets, const size_t logical_first_dim,
+    const size_t logical_last_dim) const {
   using namespace pybind11::literals;
 
   const auto tensor_offsets =
-      build_grouped_tensor_offsets(num_tensors, first_dims, logical_last_dim);
+      precomputed_tensor_offsets.has_value()
+          ? precomputed_tensor_offsets
+          : build_grouped_tensor_offsets(num_tensors, first_dims, logical_last_dim);
   const int64_t total_elements =
       static_cast<int64_t>(logical_first_dim) * static_cast<int64_t>(logical_last_dim);
 
@@ -1066,11 +1075,14 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
 std::pair<GroupedTensorWrapper, py::object> Float8BlockQuantizer::create_grouped_tensor(
     const size_t num_tensors, const std::vector<size_t>& logical_shape, const DType dtype,
     py::object quantizer, const std::optional<at::Tensor>& first_dims,
-    const size_t logical_first_dim, const size_t logical_last_dim) const {
+    const std::optional<at::Tensor>& precomputed_tensor_offsets, const size_t logical_first_dim,
+    const size_t logical_last_dim) const {
   using namespace pybind11::literals;
 
   const auto tensor_offsets =
-      build_grouped_tensor_offsets(num_tensors, first_dims, logical_last_dim);
+      precomputed_tensor_offsets.has_value()
+          ? precomputed_tensor_offsets
+          : build_grouped_tensor_offsets(num_tensors, first_dims, logical_last_dim);
   const int64_t total_elements =
       static_cast<int64_t>(logical_first_dim) * static_cast<int64_t>(logical_last_dim);
 
@@ -1484,11 +1496,14 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
 std::pair<GroupedTensorWrapper, py::object> MXFP8Quantizer::create_grouped_tensor(
     const size_t num_tensors, const std::vector<size_t>& logical_shape, const DType dtype,
     py::object quantizer, const std::optional<at::Tensor>& first_dims,
-    const size_t logical_first_dim, const size_t logical_last_dim) const {
+    const std::optional<at::Tensor>& precomputed_tensor_offsets, const size_t logical_first_dim,
+    const size_t logical_last_dim) const {
   using namespace pybind11::literals;
 
   const auto tensor_offsets =
-      build_grouped_tensor_offsets(num_tensors, first_dims, logical_last_dim);
+      precomputed_tensor_offsets.has_value()
+          ? precomputed_tensor_offsets
+          : build_grouped_tensor_offsets(num_tensors, first_dims, logical_last_dim);
   const int64_t total_elements =
       static_cast<int64_t>(logical_first_dim) * static_cast<int64_t>(logical_last_dim);
 
@@ -1781,7 +1796,12 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
   using namespace pybind11::literals;
 
   // Scaling factor format
-  const bool with_gemm_swizzled_scales = false;  /// TODO (tmoon) self->optimize_for_gemm
+  //
+  // The NVFP4 quantize kernel requires `with_gemm_swizzled_scales=false` and
+  // emits compact scales. When `optimize_for_gemm` is set, the caller of
+  // `quantize` (cast.cpp) applies a post-quantize swizzle that flips this
+  // flag on the returned tensor.
+  const bool with_gemm_swizzled_scales = false;
 
   // Tensor dimensions
   const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
@@ -1937,11 +1957,14 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
 std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tensor(
     const size_t num_tensors, const std::vector<size_t>& logical_shape, const DType dtype,
     py::object quantizer, const std::optional<at::Tensor>& first_dims,
-    const size_t logical_first_dim, const size_t logical_last_dim) const {
+    const std::optional<at::Tensor>& precomputed_tensor_offsets, const size_t logical_first_dim,
+    const size_t logical_last_dim) const {
   using namespace pybind11::literals;
 
   const auto tensor_offsets =
-      build_grouped_tensor_offsets(num_tensors, first_dims, logical_last_dim);
+      precomputed_tensor_offsets.has_value()
+          ? precomputed_tensor_offsets
+          : build_grouped_tensor_offsets(num_tensors, first_dims, logical_last_dim);
   const int64_t total_elements =
       static_cast<int64_t>(logical_first_dim) * static_cast<int64_t>(logical_last_dim);
   NVTE_CHECK(total_elements % 2 == 0, "NVFP4 data size must be divisible by 2.");
@@ -2077,7 +2100,12 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
   NVTE_CHECK(detail::IsNVFP4Tensor(tensor.ptr()), "NVFP4Quantizer must output to IsNVFP4Tensor.");
 
   // Scaling factor format
-  const bool with_gemm_swizzled_scales = false;  // TODO (tmoon) Enable with optimize_for_gemm
+  //
+  // The NVFP4 quantize kernel requires `with_gemm_swizzled_scales=false` and
+  // emits compact scales. When `optimize_for_gemm` is set, the caller of
+  // `quantize` (cast.cpp) applies a post-quantize swizzle that flips this
+  // flag on the returned tensor.
+  const bool with_gemm_swizzled_scales = false;
 
   // Extract buffers from Python tensor
   auto get_tensor = [&tensor](const char* name) -> std::optional<at::Tensor> {
@@ -2109,6 +2137,9 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
   }
 
   const auto [flat_first_dim, flat_last_dim] = get_2d_dims(shape);
+  tensor.attr("_with_gemm_swizzled_scales") = py::cast(with_gemm_swizzled_scales);
+
+  // Advanced NVFP4 modes
   const bool row_scaled_nvfp4 = this->row_scaled_nvfp4;
   const bool nvfp4_use_4over6 = this->nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
   const int nvfp4_e4m3_max = this->nvfp4_e4m3_max;
