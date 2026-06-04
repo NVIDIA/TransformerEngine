@@ -62,6 +62,12 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
   // Perform quantization
   quantizer_cpp->quantize(input_cpp, output_cpp, noop_flag_cpp);
 
+  // Post-quantize swizzle for quantizers whose kernel does not bake
+  // the GEMM-swizzled scale layout in directly
+  if (quantizer_cpp->optimize_for_gemm && !output_cpp.get_with_gemm_swizzled_scales()) {
+    inplace_swizzle_scale_for_gemm(output_py);
+  }
+
   return output_py;
 }
 
@@ -153,7 +159,8 @@ void group_quantize_nvfp4_impl(const GroupedTensorWrapper &grouped_input_tensor,
 
 // NOTE: Only supports varying first dim.
 py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const size_t num_tensors,
-                          std::optional<at::Tensor> first_dims) {
+                          std::optional<at::Tensor> first_dims,
+                          std::optional<at::Tensor> tensor_offsets) {
   using namespace transformer_engine::pytorch::detail;
   init_extension();
 
@@ -178,7 +185,7 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
   // Create output GroupedTensor.
   auto [grouped_output_tensor_cpp, grouped_output_py] = quantizer_cpp->create_grouped_tensor(
       num_tensors, logical_shape, GetTransformerEngineDType(tensor.scalar_type()),
-      py::reinterpret_borrow<py::object>(quantizer), first_dims, logical_first_dim,
+      py::reinterpret_borrow<py::object>(quantizer), first_dims, tensor_offsets, logical_first_dim,
       logical_last_dim);
 
   // dispatch to scaling methods
@@ -228,7 +235,8 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
 }
 
 py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
-                                const size_t num_tensors, std::optional<at::Tensor> first_dims) {
+                                const size_t num_tensors, std::optional<at::Tensor> first_dims,
+                                std::optional<at::Tensor> tensor_offsets) {
   using namespace transformer_engine::pytorch::detail;
   init_extension();
 
@@ -254,7 +262,7 @@ py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
 
   auto [grouped_output_tensor_cpp, grouped_output_py] = quantizer_cpp->create_grouped_tensor(
       num_tensors, logical_shape, GetTransformerEngineDType(tensor.scalar_type()),
-      py::reinterpret_borrow<py::object>(quantizer), first_dims, logical_first_dim,
+      py::reinterpret_borrow<py::object>(quantizer), first_dims, tensor_offsets, logical_first_dim,
       logical_last_dim);
 
   if (empty_input_buffer) {
@@ -343,7 +351,7 @@ py::object group_dequantize(const py::handle &input, transformer_engine::DType o
     NoneQuantizer q{py::none()};
     auto [out_cpp, out_py] =
         q.create_grouped_tensor(num_tensors, logical_shape, otype, py::none(), first_dims,
-                                logical_first_dim, logical_last_dim);
+                                tensor_offsets, logical_first_dim, logical_last_dim);
     return py::reinterpret_borrow<py::object>(out_py);
   }
 
@@ -381,8 +389,9 @@ py::object group_dequantize(const py::handle &input, transformer_engine::DType o
 
   // Create output GroupedTensor using NoneQuantizer.
   NoneQuantizer q{py::none()};
-  auto [out_cpp, out_py] = q.create_grouped_tensor(num_tensors, logical_shape, otype, py::none(),
-                                                   first_dims, logical_first_dim, logical_last_dim);
+  auto [out_cpp, out_py] =
+      q.create_grouped_tensor(num_tensors, logical_shape, otype, py::none(), first_dims,
+                              tensor_offsets, logical_first_dim, logical_last_dim);
 
   NVTE_SCOPED_GIL_RELEASE({
     nvte_group_dequantize(input_cpp.data(), out_cpp.data(), at::cuda::getCurrentCUDAStream());
