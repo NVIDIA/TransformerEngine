@@ -228,6 +228,35 @@ class TestDistributedLinearBase:
         error = torch.where(b == 0, torch.ne(a, b), torch.abs((a - b) / b))
         return torch.mean(error)
 
+    @staticmethod
+    def _shard_strided(t, tp_size, rank, dim, stride):
+        """Shard tensor along ``dim`` for given partition stride.
+
+        stride == 1: naive split (existing behavior, equivalent to _shard_tensor(t, tp_size, dim)[rank]).
+        stride  > 1: MLM-golden interleaved shard from
+            ``megatron/core/tensor_parallel/layers.py:_initialize_affine_weight_cpu`` —
+            split into ``stride * tp_size`` chunks, take ``chunks[rank::tp_size]``, concat.
+            This produces the per-rank ``[block_0_chunk | block_1_chunk | ...]`` layout used
+            by gated MLPs (SwiGLU FC1 with stride=2).
+        """
+        chunk_count = tp_size * stride
+        chunk = t.shape[dim] // chunk_count
+        chunks = list(torch.split(t, chunk, dim=dim))
+        return torch.cat(chunks[rank::tp_size], dim=dim)
+
+    @staticmethod
+    def _stamp_partition_stride(layer, partition_stride, tp_size):
+        """Stamp ``partition_stride`` on layer.weight/bias (mirrors MLM-side TE extension).
+
+        TE itself only ever sets stride=1; partition_stride>1 is an MLM-side concept
+        that the downstream NVTE_TP_INVARIANT_MODE deinterleave path reads from
+        ``ctx.partition_stride``. No-op when stride==1 or tp_size==1.
+        """
+        if partition_stride > 1 and tp_size > 1:
+            setattr(layer.weight, "partition_stride", partition_stride)
+            if layer.bias is not None:
+                setattr(layer.bias, "partition_stride", partition_stride)
+
     @classmethod
     def run_linear_preprocess_parallel(
         cls,
@@ -239,14 +268,18 @@ class TestDistributedLinearBase:
         sequence_parallel=False,
         tp_size=1,
         rank=0,
+        stride=1,
     ):
         if tp_size > 1:
             if parallel_mode == "column":
-                # split w in N dim, which should be axis 0
-                w = cls._shard_tensor(w, tp_size, 0)[rank]
-                bias = cls._shard_tensor(bias, tp_size, 0)[rank] if bias is not None else None
-                # split gradient in N dim, which should be axis 1
-                gradient = cls._shard_tensor(gradient, tp_size, 1)[rank]
+                # split w in N dim (axis 0), gradient in N dim (axis 1); stride>1 → interleave.
+                w = cls._shard_strided(w, tp_size, rank, dim=0, stride=stride)
+                bias = (
+                    cls._shard_strided(bias, tp_size, rank, dim=0, stride=stride)
+                    if bias is not None
+                    else None
+                )
+                gradient = cls._shard_strided(gradient, tp_size, rank, dim=1, stride=stride)
                 if sequence_parallel:
                     # split x in M dim, which should be axis 0
                     x = cls._shard_tensor(x, tp_size, 0)[rank]
@@ -396,10 +429,16 @@ class TestDistributedLinearBase:
         run_num_steps=1,
         enable_weight_cache=False,
         fuse_wgrad_accumulation=False,
+        partition_stride=1,
     ):
         """
         If Model parallel, split inputs for a given rank and return the gathered output and gradients, so that they can be compared with
         the reference single GPU run.
+
+        ``partition_stride > 1`` enables gated-MLP-style sharding (e.g., SwiGLU FC1):
+        the weight (and gradient, bias) are sharded into interleaved per-rank chunks
+        per MLM's `_initialize_affine_weight_cpu`, and ``partition_stride`` is stamped
+        on the constructed layer's weight (mirroring what MLM does post-construction).
         """
         # clone inputs and move to current device
         # w has shape [N, K], x has shape [M, K], gradient has shape [M, N]
@@ -412,7 +451,15 @@ class TestDistributedLinearBase:
 
         # If Model parallel: split inputs for a given rank
         x, w, bias, gradient = cls.run_linear_preprocess_parallel(
-            x, w, bias, gradient, parallel_mode, sequence_parallel, tp_size, rank
+            x,
+            w,
+            bias,
+            gradient,
+            parallel_mode,
+            sequence_parallel,
+            tp_size,
+            rank,
+            stride=partition_stride,
         )
 
         # set data types
@@ -437,6 +484,8 @@ class TestDistributedLinearBase:
             layer.weight.copy_(w)
             if bias is not None:
                 layer.bias.copy_(bias)
+
+        cls._stamp_partition_stride(layer, partition_stride, tp_size)
 
         if fuse_wgrad_accumulation:
             assert (
@@ -607,10 +656,15 @@ class TestDistributedLayerNormLinearBase(TestDistributedLinearBase):
         enable_weight_cache=False,
         LayerNormLinearClass=te.LayerNormLinear,
         normalization="LayerNorm",
+        partition_stride=1,
     ):
         """
         If Model parallel, split inputs for a given rank and return the gathered output and gradients, so that they can be compared with
         the reference single GPU run.
+
+        ``partition_stride > 1`` enables gated-MLP-style sharding (SwiGLU FC1, stride=2):
+        weight + gradient are interleaved per-rank via MLM's golden algorithm, and
+        ``partition_stride`` is stamped on the constructed layer's weight.
         """
         # clone inputs and move to current device
         # w has shape [N, K], x has shape [M, K], gradient has shape [M, N]
@@ -623,7 +677,15 @@ class TestDistributedLayerNormLinearBase(TestDistributedLinearBase):
 
         # If Model parallel: split inputs for a given rank
         x, w, bias, gradient = cls.run_linear_preprocess_parallel(
-            x, w, bias, gradient, parallel_mode, sequence_parallel, tp_size, rank
+            x,
+            w,
+            bias,
+            gradient,
+            parallel_mode,
+            sequence_parallel,
+            tp_size,
+            rank,
+            stride=partition_stride,
         )
 
         # set data types
@@ -651,6 +713,8 @@ class TestDistributedLayerNormLinearBase(TestDistributedLinearBase):
             layer.weight.copy_(w)
             if bias is not None:
                 layer.bias.copy_(bias)
+
+        cls._stamp_partition_stride(layer, partition_stride, tp_size)
 
         # Run one step
         y_q, ln_out, dgrad, wgrad, bgrad = cls.run_linear_one_step(layer, x, gradient)
