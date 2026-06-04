@@ -743,18 +743,27 @@ def get_attention_backend(
                 )
             use_fused_attention = False
 
+    fa2_padded_head_dim = max(head_dim_qk, head_dim_v)
     if (  # pylint: disable=too-many-boolean-expressions
         use_flash_attention_2
         and FlashAttentionUtils.is_installed
-        and (head_dim_qk > 256 or head_dim_qk % 8 != 0)
+        and (
+            fa2_padded_head_dim > 256
+            or fa2_padded_head_dim % 8 != 0
+            or (
+                fa2_padded_head_dim > 192
+                and device_compute_capability not in ((8, 0), (9, 0), (10, 0), (12, 0))
+            )
+        )
     ):
         logger.debug(
             "Disabling FlashAttention 2 due to unsupported head_dim_qk and head_dim_v. "
-            "Supported: head_dim_qk = head_dim_v, head_dim_qk %%8 = 0, "
-            "head_dim_qk <= 256. "
-            "Found: head_dim_qk = %s, head_dim_v = %s, on sm%s.",
+            "Supported after padding: padded head_dim %%8 = 0, padded head_dim <= 256 "
+            "(>192 requires sm80/90/100+). "
+            "Found: head_dim_qk = %s, head_dim_v = %s, padded head_dim = %s, on sm%s.",
             head_dim_qk,
             head_dim_v,
+            fa2_padded_head_dim,
             ".".join([str(i) for i in device_compute_capability]),
         )
         use_flash_attention_2 = False
