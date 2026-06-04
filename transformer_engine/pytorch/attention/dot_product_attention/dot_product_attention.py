@@ -1503,8 +1503,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 num_splits=num_splits,
                 fp8_output=fp8_output,
                 checkpoint_core_attention=checkpoint_core_attention,
-                has_attention_mask=attention_mask is not None,
-                has_core_attention_bias=core_attention_bias is not None,
                 has_score_mod=score_mod is not None,
                 has_score_mod_bprop=score_mod_bprop is not None,
             )

@@ -260,10 +260,6 @@ class AttentionParams:
         Whether output is requested in FP8.
     checkpoint_core_attention : bool, default = False
         Whether core attention is recomputed during backward.
-    has_attention_mask : bool, default = False
-        Whether an explicit attention mask tensor was provided.
-    has_core_attention_bias : bool, default = False
-        Whether an explicit core attention bias tensor was provided.
     has_score_mod : bool, default = False
         Whether a score_mod callback was provided.
     has_score_mod_bprop : bool, default = False
@@ -303,8 +299,6 @@ class AttentionParams:
     num_splits: int = 1
     fp8_output: bool = False
     checkpoint_core_attention: bool = False
-    has_attention_mask: bool = False
-    has_core_attention_bias: bool = False
     has_score_mod: bool = False
     has_score_mod_bprop: bool = False
 
@@ -387,8 +381,6 @@ def get_attention_backend(
     num_splits = attention_params.num_splits
     fp8_output = attention_params.fp8_output
     checkpoint_core_attention = attention_params.checkpoint_core_attention
-    has_attention_mask = attention_params.has_attention_mask
-    has_core_attention_bias = attention_params.has_core_attention_bias
     has_score_mod = attention_params.has_score_mod
     has_score_mod_bprop = attention_params.has_score_mod_bprop
 
@@ -720,13 +712,11 @@ def get_attention_backend(
             )
         if pad_between_seqs:
             score_mod_unsupported_reasons.append("pad_between_seqs is enabled")
-        if has_attention_mask:
-            score_mod_unsupported_reasons.append("attention_mask was provided")
         if attn_mask_type != "no_mask":
             score_mod_unsupported_reasons.append(f"attn_mask_type = {attn_mask_type}")
         if window_size is not None and window_size != (-1, -1):
             score_mod_unsupported_reasons.append(f"window_size = {window_size}")
-        if core_attention_bias_type != "no_bias" or has_core_attention_bias:
+        if core_attention_bias_type != "no_bias":
             score_mod_unsupported_reasons.append(
                 f"core_attention_bias_type = {core_attention_bias_type}"
             )

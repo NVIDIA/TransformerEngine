@@ -319,15 +319,19 @@ def _cudnn_score_mod_fwd_cache_key(
     query_layer: torch.Tensor,
     key_layer: torch.Tensor,
     value_layer: torch.Tensor,
-    output_layer: torch.Tensor,
-    stats: Optional[torch.Tensor],
     q_format: str,
     kv_format: str,
     attn_scale: float,
     score_mod: Callable,
     score_mod_tensors: Optional[Dict[str, torch.Tensor]],
+    output_layer: torch.Tensor,
+    stats: Optional[torch.Tensor],
 ) -> Optional[Tuple[Any, ...]]:
-    """Cache key for score_mod fprop execution plans."""
+    """Pre-build cache key for score_mod fprop execution plans.
+
+    cuDNN exposes graph.key(), but only after graph construction has run the user callback.
+    This key avoids rebuilding the Python graph on cache hits.
+    """
     score_mod_key = _score_mod_callback_cache_key(score_mod)
     if score_mod_key is _SCORE_MOD_UNCACHEABLE:
         return None
@@ -363,7 +367,7 @@ def _cudnn_score_mod_bwd_cache_key(
     score_mod_bprop_tensors: Optional[Dict[str, torch.Tensor]],
     deterministic: bool,
 ) -> Optional[Tuple[Any, ...]]:
-    """Cache key for score_mod bprop execution plans."""
+    """Pre-build cache key for score_mod bprop execution plans."""
     score_mod_key = _score_mod_callback_cache_key(score_mod)
     score_mod_bprop_key = _score_mod_callback_cache_key(score_mod_bprop)
     if score_mod_key is _SCORE_MOD_UNCACHEABLE or score_mod_bprop_key is _SCORE_MOD_UNCACHEABLE:
@@ -459,48 +463,25 @@ def _get_cudnn_score_mod_fwd_graph(
     stats: Optional[torch.Tensor],
 ) -> _CudnnScoreModFwdGraphEntry:
     """Return a cached cuDNN frontend graph for score_mod fprop."""
-    key = _cudnn_score_mod_fwd_cache_key(
+    build_args = (
         is_training,
         query_layer,
         key_layer,
         value_layer,
-        output_layer,
-        stats,
         q_format,
         kv_format,
         attn_scale,
         score_mod,
         score_mod_tensors,
+        output_layer,
+        stats,
     )
+    key = _cudnn_score_mod_fwd_cache_key(*build_args)
     if key is None:
-        return _build_cudnn_score_mod_fwd_graph(
-            is_training,
-            query_layer,
-            key_layer,
-            value_layer,
-            q_format,
-            kv_format,
-            attn_scale,
-            score_mod,
-            score_mod_tensors,
-            output_layer,
-            stats,
-        )
+        return _build_cudnn_score_mod_fwd_graph(*build_args)
     entry = _cudnn_score_mod_graph_cache.get(key)
     if entry is None:
-        entry = _build_cudnn_score_mod_fwd_graph(
-            is_training,
-            query_layer,
-            key_layer,
-            value_layer,
-            q_format,
-            kv_format,
-            attn_scale,
-            score_mod,
-            score_mod_tensors,
-            output_layer,
-            stats,
-        )
+        entry = _build_cudnn_score_mod_fwd_graph(*build_args)
         _cudnn_score_mod_graph_cache[key] = entry
     return entry
 
