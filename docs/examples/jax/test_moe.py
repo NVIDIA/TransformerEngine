@@ -99,7 +99,7 @@ def test_native_baseline_grads_are_finite():
     with jax.set_mesh(mesh):
         variables = jax.jit(model.init)(jax.random.PRNGKey(0), x)
         grads = jax.jit(jax.grad(loss_fn))(variables, x)
-        jax.block_until_ready(jax.tree_util.tree_leaves(grads)[0])
+        jax.block_until_ready(jax.tree_util.tree_leaves(grads))
 
     for name in ("gate_kernel", "wi_0", "wi_1", "wo"):
         grad = np.asarray(grads["params"][name])
