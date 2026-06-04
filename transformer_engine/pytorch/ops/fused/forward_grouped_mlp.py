@@ -208,11 +208,22 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
         split_sizes = fc1_split_sizes
         if int(split_sizes.numel()) != num_groups:
             raise ValueError(f"Expected {num_groups} splits, but got {int(split_sizes.numel())}.")
-        split_sizes = split_sizes.to(dtype=torch.int64, device=device)
-        base_split_offsets = tex.splits_to_offsets(split_sizes, 1)
-        split_points = base_split_offsets[1:].to(dtype=torch.int)
-        fc1_x_tensor_offsets = base_split_offsets * fc1_weight_shape[1]
-        fc2_x_tensor_offsets = base_split_offsets * fc2_weight_shape[1]
+
+        # Prepare split metadata
+        split_sizes, (
+            split_points,
+            base_split_offsets,
+            fc1_x_tensor_offsets,
+            fc2_x_tensor_offsets,
+            fc2_out_tensor_offsets,
+        ) = tex.splits_to_offsets_multi(
+            split_sizes,
+            device,
+            strides=[1, 1, fc1_weight_shape[1], fc2_weight_shape[1], fc2_weight_shape[0]],
+            include_leading_zero=[False, True, True, True, True],
+            dtypes=[torch.int32, torch.int64, torch.int64, torch.int64, torch.int64],
+            bulk_allocate=True,
+        )
 
         # Extract per-row activation probabilities from the middle op.
         scales = basic_op_extra_inputs[1][0]
@@ -539,7 +550,6 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
                     else:
                         fc2_out_buf = fc2_out_buf + token_bias
             else:
-                fc2_out_offsets = base_split_offsets * fc2_weight_shape[0]
                 fc2_out_grouped = GroupedTensor(
                     shape=(in_shape[0], fc2_weight_shape[0]),
                     dtype=dtype,
@@ -547,7 +557,7 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
                     quantizer=None,
                     data=fc2_out_buf.view(-1),
                     first_dims=split_sizes,
-                    tensor_offsets=fc2_out_offsets,
+                    tensor_offsets=fc2_out_tensor_offsets,
                 )
                 general_grouped_gemm_for_grouped_tensor(
                     grouped_fc2_weight,
