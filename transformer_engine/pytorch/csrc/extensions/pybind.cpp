@@ -175,12 +175,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   py::object dtype_class = m.attr("DType");
   dtype_class.attr("__eq__") = py::cpp_function(
       [dtype_class](transformer_engine::DType self, py::object other) -> py::object {
-        if (py::isinstance(other, dtype_class)) {
-          return py::cast(self == other.cast<transformer_engine::DType>());
-        }
-        if (py::isinstance<py::int_>(other)) {
-          return py::cast(static_cast<int>(self) == other.cast<int>());
-        }
+        return py::cast(static_cast<int>(self) == other.cast<int>());
         return py::reinterpret_borrow<py::object>(Py_NotImplemented);
       },
       py::is_method(dtype_class));
