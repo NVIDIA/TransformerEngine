@@ -106,10 +106,19 @@ class Quantizer {
       const std::vector<size_t>& shape, DType dtype,
       std::optional<at::Device> device = std::nullopt, bool pin_memory = false) const = 0;
 
-  /*! @brief Construct a grouped tensor with uninitialized data */
+  /*! @brief Construct a grouped tensor with uninitialized data
+   *
+   * @param tensor_offsets If provided, the precomputed inclusive scan of
+   *   ``first_dims * logical_last_dim`` with a leading zero, used to locate
+   *   each per-group sub-tensor in the shared backing buffer. If null, the
+   *   offsets are computed from ``first_dims`` on demand. Passing this in lets
+   *   callers that already have the scan (e.g. from
+   *   ``tex.splits_to_offsets_multi``) skip the redundant kernel launch.
+   */
   virtual std::pair<GroupedTensorWrapper, py::object> create_grouped_tensor(
       size_t num_tensors, const std::vector<size_t>& logical_shape, DType dtype,
-      py::object quantizer, const std::optional<at::Tensor>& first_dims, size_t logical_first_dim,
+      py::object quantizer, const std::optional<at::Tensor>& first_dims,
+      const std::optional<at::Tensor>& tensor_offsets, size_t logical_first_dim,
       size_t logical_last_dim) const = 0;
 
   /*! @brief Convert a PyTorch tensor into a Transformer Engine C++ tensor
@@ -151,7 +160,8 @@ class NoneQuantizer : public Quantizer {
 
   std::pair<GroupedTensorWrapper, py::object> create_grouped_tensor(
       size_t num_tensors, const std::vector<size_t>& logical_shape, DType dtype,
-      py::object quantizer, const std::optional<at::Tensor>& first_dims, size_t logical_first_dim,
+      py::object quantizer, const std::optional<at::Tensor>& first_dims,
+      const std::optional<at::Tensor>& tensor_offsets, size_t logical_first_dim,
       size_t logical_last_dim) const override;
 
   /*! @brief Construct a tensor with pre-initialized data */
@@ -182,7 +192,8 @@ class Float8Quantizer : public Quantizer {
 
   std::pair<GroupedTensorWrapper, py::object> create_grouped_tensor(
       size_t num_tensors, const std::vector<size_t>& logical_shape, DType dtype,
-      py::object quantizer, const std::optional<at::Tensor>& first_dims, size_t logical_first_dim,
+      py::object quantizer, const std::optional<at::Tensor>& first_dims,
+      const std::optional<at::Tensor>& tensor_offsets, size_t logical_first_dim,
       size_t logical_last_dim) const override;
 
   /*! @brief Construct a tensor with pre-initialized data */
@@ -217,7 +228,8 @@ class Float8CurrentScalingQuantizer : public Quantizer {
 
   std::pair<GroupedTensorWrapper, py::object> create_grouped_tensor(
       size_t num_tensors, const std::vector<size_t>& logical_shape, DType dtype,
-      py::object quantizer, const std::optional<at::Tensor>& first_dims, size_t logical_first_dim,
+      py::object quantizer, const std::optional<at::Tensor>& first_dims,
+      const std::optional<at::Tensor>& tensor_offsets, size_t logical_first_dim,
       size_t logical_last_dim) const override;
 
   /*! @brief Construct an unquantized tensor with a freshly allocated amax buffer.
@@ -280,7 +292,8 @@ class Float8BlockQuantizer : public Quantizer {
 
   std::pair<GroupedTensorWrapper, py::object> create_grouped_tensor(
       size_t num_tensors, const std::vector<size_t>& logical_shape, DType dtype,
-      py::object quantizer, const std::optional<at::Tensor>& first_dims, size_t logical_first_dim,
+      py::object quantizer, const std::optional<at::Tensor>& first_dims,
+      const std::optional<at::Tensor>& tensor_offsets, size_t logical_first_dim,
       size_t logical_last_dim) const override;
 
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
@@ -305,7 +318,8 @@ class MXFP8Quantizer : public Quantizer {
 
   std::pair<GroupedTensorWrapper, py::object> create_grouped_tensor(
       size_t num_tensors, const std::vector<size_t>& logical_shape, DType dtype,
-      py::object quantizer, const std::optional<at::Tensor>& first_dims, size_t logical_first_dim,
+      py::object quantizer, const std::optional<at::Tensor>& first_dims,
+      const std::optional<at::Tensor>& tensor_offsets, size_t logical_first_dim,
       size_t logical_last_dim) const override;
 
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
@@ -327,6 +341,10 @@ class NVFP4Quantizer : public Quantizer {
   // 2D block scaling
   bool with_2d_quantization;
   bool stochastic_rounding;
+  // 4over6 candidate-selection mode used when quantizing emitted NVFP4 tensors.
+  NVTENVFP44Over6Mode nvfp4_4over6_mode;
+  // Global E4M3 scale bound used by emitted NVFP4 tensors.
+  int nvfp4_e4m3_max;
   // Whether tensors emitted by this quantizer use row-scaled NVFP4 metadata.
   bool row_scaled_nvfp4;
 
@@ -345,7 +363,8 @@ class NVFP4Quantizer : public Quantizer {
 
   std::pair<GroupedTensorWrapper, py::object> create_grouped_tensor(
       size_t num_tensors, const std::vector<size_t>& logical_shape, DType dtype,
-      py::object quantizer, const std::optional<at::Tensor>& first_dims, size_t logical_first_dim,
+      py::object quantizer, const std::optional<at::Tensor>& first_dims,
+      const std::optional<at::Tensor>& tensor_offsets, size_t logical_first_dim,
       size_t logical_last_dim) const override;
 
   /*! @brief Construct an unquantized tensor that shares NVFP4 tensor's amax pointer

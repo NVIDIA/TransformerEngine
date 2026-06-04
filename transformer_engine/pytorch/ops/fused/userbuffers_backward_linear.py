@@ -12,12 +12,13 @@ import torch
 
 from transformer_engine_torch import CommOverlapType, bulk_overlap_ag_with_external_gemm
 from ...cpp_extensions import general_gemm
-from ...distributed import get_distributed_world_size
+from ...distributed import gather_along_first_dim, get_distributed_world_size
 from ...module.base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
     fill_userbuffers_buffer_for_all_gather,
     get_ub,
+    using_cublasmp_backend,
 )
 from ...quantized_tensor import Quantizer
 from ...tensor.mxfp8_tensor import MXFP8Quantizer
@@ -234,7 +235,10 @@ class UserbuffersBackwardLinear(FusedOperation):
         # Note: Communication patterns are (1) overlap dy all-gather
         # with dgrad GEMM, (2) overlap x all-gather with dgrad GEMM
         # and dx reduce-scatter with wgrad GEMM, (3) overlap dx
-        # reduce-scatter with dgrad GEMM
+        # reduce-scatter with dgrad GEMM. The cuBLASMp backend does
+        # not support bulk overlaps; we use (3) for column-parallel
+        # and gather x separately for wgrad.
+        is_cublasmp = using_cublasmp_backend()
         ub_comm_dgrad = None
         ub_comm_wgrad = None
         ub_type_dgrad = None
@@ -249,7 +253,7 @@ class UserbuffersBackwardLinear(FusedOperation):
             ub_type_dgrad = CommOverlapType.AG
             with_dgrad_all_gather_dy = True
         elif tensor_parallel_mode == "column":
-            if input_requires_grad and weight_requires_grad:
+            if input_requires_grad and weight_requires_grad and not is_cublasmp:
                 with_bulk_overlap = True
                 ub_comm_dgrad = get_ub(ub_comm_name + "_dgrad", with_quantized_compute)
                 ub_type_dgrad = CommOverlapType.AG
@@ -265,7 +269,9 @@ class UserbuffersBackwardLinear(FusedOperation):
                 ub_comm_dgrad = get_ub(ub_comm_name + "_dgrad", with_quantized_compute)
                 ub_type_dgrad = CommOverlapType.RS
                 with_dgrad_reduce_scatter_dx = True
-                if ub_comm_dgrad.is_fp8_ubuf():
+                # cuBLASMp manages its own buffers, so the FP8 buffer
+                # restriction does not apply.
+                if not is_cublasmp and ub_comm_dgrad.is_fp8_ubuf():
                     raise RuntimeError(
                         "Userbuffers reduce-scatter is not supported with FP8 buffers"
                     )
@@ -315,16 +321,49 @@ class UserbuffersBackwardLinear(FusedOperation):
 
         # Cast input tensor dtype if needed
         x_local = None
+        cublasmp_column_tp = (
+            is_cublasmp and tensor_parallel_mode == "column" and weight_requires_grad
+        )
         if weight_requires_grad:
             if input is None:
                 raise ValueError("Input tensor is required to compute weight grad")
             x_local = input
             if with_quantized_compute:
                 if not is_quantized_tensor(x_local):
-                    input_quantizer.set_usage(columnwise=True)
+                    if cublasmp_column_tp:
+                        # The upcoming all-gather needs rowwise FP8 (transposes
+                        # are computed during the gather) or columnwise MXFP8
+                        # (rowwise->columnwise can't be done after gather).
+                        if isinstance(input_quantizer, MXFP8Quantizer):
+                            input_quantizer.set_usage(rowwise=False, columnwise=True)
+                        else:
+                            input_quantizer.set_usage(rowwise=True, columnwise=False)
+                    else:
+                        input_quantizer.set_usage(columnwise=True)
                     x_local = input_quantizer(x_local)
             else:
                 x_local = maybe_dequantize(x_local, dtype)
+
+        # cuBLASMp does not support bulk overlap so we start an async gather of x_local here
+        # to overlap with the dgrad GEMM+RS in the column-parallel case.
+        x_total = None
+        x_total_work = None
+        if cublasmp_column_tp:
+            quantizer = None
+            if with_quantized_compute:
+                quantizer = input_quantizer
+                if isinstance(quantizer, MXFP8Quantizer):
+                    quantizer.set_usage(rowwise=False, columnwise=True)
+                else:
+                    # FP8 per-tensor: gather rowwise + create the columnwise
+                    # transpose during the gather.
+                    quantizer.set_usage(rowwise=True, columnwise=True)
+            x_total, x_total_work = gather_along_first_dim(
+                x_local,
+                tensor_parallel_group,
+                async_op=True,
+                quantizer=quantizer,
+            )
 
         # dgrad GEMM
         dx_local = None
@@ -394,7 +433,10 @@ class UserbuffersBackwardLinear(FusedOperation):
                 extra_output=dx_local if with_dgrad_reduce_scatter_dx else None,
                 bulk_overlap=with_bulk_overlap,
             )
-            if not (with_dgrad_reduce_scatter_dx or with_wgrad_reduce_scatter_dx):
+
+            # cuBLASMp's GEMM+RS writes the reduce-scattered output directly into the GEMM output
+            # tensor; the extra-output buffer is only used with Userbuffers.
+            if is_cublasmp or not (with_dgrad_reduce_scatter_dx or with_wgrad_reduce_scatter_dx):
                 dx_local = dx
 
         # wgrad GEMM
@@ -402,7 +444,26 @@ class UserbuffersBackwardLinear(FusedOperation):
         if weight_requires_grad:
 
             # Initialize grad output
-            if tensor_parallel_mode == "row" and isinstance(grad_output_quantizer, MXFP8Quantizer):
+            if is_cublasmp and tensor_parallel_mode == "row":
+                # cuBLASMp's AG+GEMM DGRAD does not preserve the gathered dy ensor. Re-gather
+                # dy_local for wgrad with the appropriate quantization direction for each recipe.
+                if grad_output_quantizer is not None:
+                    if isinstance(grad_output_quantizer, MXFP8Quantizer):
+                        # MXFP8 can't convert rowwise to columnwise, so gather
+                        # columnwise data directly.
+                        grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
+                    else:
+                        # FP8 per-tensor: gather rowwise + create the columnwise
+                        # transpose during the gather.
+                        grad_output_quantizer.set_usage(rowwise=True, columnwise=True)
+                dy, _ = gather_along_first_dim(
+                    dy_local,
+                    tensor_parallel_group,
+                    quantizer=grad_output_quantizer,
+                )
+            elif tensor_parallel_mode == "row" and isinstance(
+                grad_output_quantizer, MXFP8Quantizer
+            ):
                 # UB does not support pipelined overlapping grad output
                 # all-gather with wgrad GEMM. Also, we can't
                 # convert row-scaled MXFP8 to column-scaled, so we
@@ -445,6 +506,12 @@ class UserbuffersBackwardLinear(FusedOperation):
             # Initialize input tensor
             if tensor_parallel_mode == "row":
                 x = x_local
+            elif x_total is not None:
+                # cuBLASMp+column TP: use the async-gathered x_total.
+                if x_total_work is not None:
+                    x_total_work.wait()
+                    x_total_work = None
+                x = x_total
             if x is None:
                 raise RuntimeError(
                     "wgrad GEMM requires input tensor, which has not been initialized"

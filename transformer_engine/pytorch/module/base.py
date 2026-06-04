@@ -44,6 +44,7 @@ from ..cpp_extensions.gemm import _NUM_MAX_UB_STREAMS
 from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantizer
 from ..tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
+from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
@@ -61,15 +62,33 @@ from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.debug_quantization import DebugQuantizer, DebugQuantizedTensor
 from ...debug.pytorch.utils import next_iter_when_debug_should_be_run, any_feature_enabled
 
-__all__ = ["initialize_ub", "destroy_ub", "UserBufferQuantizationMode"]
+__all__ = [
+    "initialize_ub",
+    "destroy_ub",
+    "is_ub_initialized",
+    "using_cublasmp_backend",
+    "UserBufferQuantizationMode",
+]
 
 _2X_ACC_FPROP = False
 _2X_ACC_DGRAD = True
 _2X_ACC_WGRAD = True
 _dummy_wgrads = {}
 _ub_communicators = None
+_ub_initialized = False
+_ub_with_cublasmp = False
 _MIN_STREAM_PRIORITY, _MAX_STREAM_PRIORITY = None, None
 layers_atomic_ring_exchange = []
+
+
+def is_ub_initialized() -> bool:
+    """Whether the Userbuffers communicators have been initialized."""
+    return _ub_initialized
+
+
+def using_cublasmp_backend() -> bool:
+    """Whether the active comm+GEMM overlap backend is cuBLASMp."""
+    return _ub_initialized and _ub_with_cublasmp
 
 
 class UserBufferQuantizationMode(Enum):
@@ -106,6 +125,7 @@ def initialize_ub(
     dtype: torch.dtype = torch.bfloat16,
     ub_cfgs: Optional[Union[dict, List[dict]]] = None,
     bootstrap_backend: Union[str, torch.distributed.Backend] = None,
+    with_cublasmp: bool = False,
 ) -> None:
     r"""
     Initialize the Userbuffers communicator for overlapping tensor-parallel communications with
@@ -158,8 +178,15 @@ def initialize_ub(
                         not available. Setting ``NVTE_UB_WITH_MPI=1`` when building TE overrides this
                         option and always initializes Userbuffers with direct MPI calls in C++,
                         which also requires ``MPI_HOME=/path/to/mpi/root`` to be set at compile time.
+    with_cublasmp : bool = False
+                    Whether to use cuBlasMp for the all-gather and reduce-scatter overlaps. TE must
+                    be compiled with `NVTE_WITH_CUBLASMP=1` for this option to work.
+
     """
-    if not tex.device_supports_multicast():
+    # The cuBLASMp backend falls back to a non-multicast algorithm in C++ when multicast is
+    # unsupported or disabled (via UB_SKIPMC), so only enforce the multicast requirement for
+    # the Userbuffers backend.
+    if not tex.device_supports_multicast() and not with_cublasmp:
         if not bool(int(os.getenv("UB_SKIPMC", "0"))):
             raise RuntimeError(
                 "CUDA device, driver and/or toolkit version does not support comm+GEMM overlap "
@@ -198,12 +225,13 @@ def initialize_ub(
                 f"quantization configurations ({len(quantization_modes)})"
             )
 
-    global _ub_communicators
+    global _ub_communicators, _ub_with_cublasmp
     if _ub_communicators is not None:
         raise RuntimeError("UB communicators are already initialized.")
     _ub_communicators = {}
+    _ub_with_cublasmp = with_cublasmp
 
-    if tex.ubuf_built_with_mpi():
+    if tex.ubuf_built_with_mpi() and not with_cublasmp:
         # We're bootstrapping with direct calls to MPI in Userbuffers code so we need to force
         # an MPI_Init() here by creating a new MPI process group...
         if not torch.distributed.is_mpi_available():
@@ -215,7 +243,10 @@ def initialize_ub(
         helper = tex.CommOverlapHelper()
     else:
         # Bootstrapping with torch.distributed API, so check backend and construct
-        # intra/inter-node process groups...
+        # intra/inter-node process groups. The cuBLASMp backend always takes this path
+        # (even when Userbuffers is built with MPI) because it derives its NCCL
+        # communicators from the helper's PyTorch process groups, which the dummy
+        # MPI-bootstrap helper does not provide.
         if not torch.distributed.is_initialized():
             raise RuntimeError("torch.distributed must be initialized before using Userbuffers")
         if bootstrap_backend is None:
@@ -259,7 +290,7 @@ def initialize_ub(
             local_rank = world_rank
             tp_domain_ranks = list(range(world_size))
 
-            helper = tex.CommOverlapHelper(world_group)
+            helper = tex.CommOverlapHelper(world_group, world_group)
 
         if world_rank == 0:
             print(f"!!! [UB] Number of TP domains: {num_domains}\n", end="", flush=True)
@@ -283,6 +314,7 @@ def initialize_ub(
     ]
     layers_reduce_scatter_overlap = ["proj_fprop", "fc2_fprop", "qkv_wgrad", "fc1_wgrad"]
     dgrad_reduce_scatter_overlap = ["qkv_dgrad", "fc1_dgrad"]
+
     # Default overlap methods for layers
     methods = {
         "ring_exchange": [
@@ -349,6 +381,11 @@ def initialize_ub(
         gemm_priority: int = 0,
         pipeline_rs_overlap_first_gemm: bool = False,
     ) -> None:
+        if with_cublasmp and method in ("bulk", "external"):
+            raise ValueError(
+                f"At {name}, cuBLASMp does not support `{method}` overlap method. "
+                "Please select a different method or set with_cublasmp=False."
+            )
         if atomic_gemm:
             warnings.warn(
                 "Atomic GEMM uses a beta API from cublas and is not tested for all use cases."
@@ -360,7 +397,7 @@ def initialize_ub(
                 )
             if method in ("bulk", "external"):
                 warnings.warn(
-                    f"At {name}, atoimic GEMM not is supported for a bulk overlap."
+                    f"At {name}, atomic GEMM not is supported for a bulk overlap."
                     "Defaulting to `atomic_gemm=False`."
                 )
                 atomic_gemm = 0
@@ -406,13 +443,15 @@ def initialize_ub(
             if (quantization_mode == UserBufferQuantizationMode.FP8 and fp8_buf)
             else dtype
         )
+        comm_type = tex.CommOverlapType.RS if is_reduce_scatter else tex.CommOverlapType.AG
         if method == "ring_exchange":
             ub_obj = tex.CommOverlapP2P(
                 shape,  # Communication buffer shape
                 buffer_dtype,  # Communication buffer data type
                 helper,  # Helper for torch.distributed callbacks during bootstrapping
-                tp_size,  # Tensor-parallel group size (may be different than local_size)
-                tex.CommOverlapType.RS if is_reduce_scatter else tex.CommOverlapType.AG,
+                tp_size,  # Tensor-parallel group size (may differ from local_size)
+                comm_type,
+                use_cublasmp=with_cublasmp,
                 num_max_streams=_NUM_MAX_UB_STREAMS,
                 comm_cga_size=cga_size,
                 num_comm_sm=num_sm,
@@ -428,7 +467,9 @@ def initialize_ub(
                 shape,  # Communication buffer shape
                 buffer_dtype,  # Communication buffer data type
                 helper,  # Helper for torch.distributed callbacks during bootstrapping
-                tp_size,  # Tensor-parallel group size (may be different than local_size)
+                tp_size,  # Tensor-parallel group size (may differ from local_size)
+                use_cublasmp=with_cublasmp,
+                comm_type=comm_type,
                 num_splits=num_splits,
                 num_max_streams=_NUM_MAX_UB_STREAMS,
                 comm_cga_size=cga_size,
@@ -463,9 +504,30 @@ def initialize_ub(
                     new_method = user_ub_cfg[name]["method"]
                     methods[new_method].append(name)
 
-        for name in (
-            methods["ring_exchange"] + methods["pipeline"] + methods["bulk"] + methods["external"]
-        ):
+        # Adjust defaults to account for the fact that cuBLASMp does not support
+        # bulk or external overlaps
+        if with_cublasmp:
+            warnings.warn(
+                "cuBLASMp does not support bulk or external overlaps. "
+                "'qkv_dgrad' and 'fc1_dgrad' GEMMs will be configured with 'ring_exchange'"
+                "overlap unless user configuration specifies otherwise. Bulk overlaps for the "
+                "corresponding 'qkv_wgrad' and 'fc1_wgrad' GEMMs will be disabled."
+            )
+            methods["bulk"] = []
+            methods["external"] = []
+            external_gemm_to_overlap.clear()
+
+            for name in dgrad_reduce_scatter_overlap:
+                wgrad_name = name.replace("dgrad", "wgrad")
+                if name not in layers_reduce_scatter_overlap:
+                    layers_reduce_scatter_overlap.append(name)
+                if wgrad_name in layers_reduce_scatter_overlap:
+                    layers_reduce_scatter_overlap.remove(wgrad_name)
+                if name not in methods["ring_exchange"] and name not in methods["pipeline"]:
+                    methods["ring_exchange"].append(name)
+
+        configured_methods = ["ring_exchange", "pipeline", "bulk", "external"]
+        for name in (m for k in configured_methods for m in methods[k]):
             ub_cfg = get_default_config(name)
             if user_ub_cfg is not None and name in user_ub_cfg:
                 fp8_buf = (name in layers_all_gather_overlap) or (
@@ -475,6 +537,9 @@ def initialize_ub(
                 ub_cfg["fp8_buf"] = fp8_buf
             add_ub(name, quantization_mode, **ub_cfg)
 
+    global _ub_initialized
+    _ub_initialized = True
+
 
 def get_ub(name: str, use_fp8: bool):
     """Get userbuffer communicator corresponding to give key."""
@@ -482,7 +547,7 @@ def get_ub(name: str, use_fp8: bool):
     # So favour simplicity until the correct design becomes clear.
     # This is mainly an internal API so we don't need to worry about future changes
     key = (name, UserBufferQuantizationMode.FP8 if use_fp8 else UserBufferQuantizationMode.NONE)
-    if _ub_communicators is None:
+    if not _ub_initialized or _ub_communicators is None:
         raise RuntimeError("UB manager is not initialized.")
     if key not in _ub_communicators:
         raise KeyError(f"UB for {name} with use_fp8={use_fp8} is not registered.")
@@ -491,8 +556,10 @@ def get_ub(name: str, use_fp8: bool):
 
 def destroy_ub():
     """Destroy all allocated userbuffer communicators."""
-    global _ub_communicators
+    global _ub_communicators, _ub_with_cublasmp, _ub_initialized
     _ub_communicators = None
+    _ub_with_cublasmp = False
+    _ub_initialized = False
     global layers_atomic_ring_exchange
     layers_atomic_ring_exchange = []
 
@@ -515,6 +582,15 @@ def fill_userbuffers_buffer_for_all_gather(
     tensor's metadata, e.g. scaling factors.
 
     """
+    # cuBlasMp handles its own buffer filling and gather, but its fused all-gather + GEMM
+    # still needs an already-quantized local tensor for FP8 GEMMs. The standard FP8 paths
+    # pre-quantize before this call and the quantized-norm path produces an already-quantized
+    # tensor, but custom-recipe paths pass an unquantized tensor and rely on this helper to
+    # quantize it. The callers configure the quantizer usage (rowwise) expected by cuBLASMp.
+    if comm.with_cublasmp():
+        if quantizer is not None and not isinstance(local_tensor, QuantizedTensorStorage):
+            local_tensor = quantizer(local_tensor)
+        return local_tensor, local_tensor
 
     # Tensor dimensions
     local_shape = local_tensor.size()
@@ -1641,7 +1717,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     raise RuntimeError("Weight quantizer has not been initialized")
                 quantizer.set_usage(rowwise=True, columnwise=torch.is_grad_enabled())
                 quantizer.internal = False
-                if is_dtensor and isinstance(quantizer, Float8CurrentScalingQuantizer):
+                if is_dtensor and isinstance(
+                    quantizer, (Float8CurrentScalingQuantizer, NVFP4Quantizer)
+                ):
                     device_mesh = dtensor_param.device_mesh
                     amax_reduction_group = (
                         device_mesh.get_group(mesh_dim="shard")
