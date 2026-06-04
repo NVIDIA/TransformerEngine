@@ -121,14 +121,14 @@ Error_Type InspectFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type mi
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(InspectHandler, InspectFFI,
                               FFI::Bind()
-                                  .Ctx<FFI_Stream_Type>()           // stream
-                                  .Arg<Buffer_Type>()               // input
-                                  .Arg<Buffer_Type>()               // min
-                                  .Arg<Buffer_Type>()               // max
-                                  .Arg<Buffer_Type>()               // mean
-                                  .Arg<Buffer_Type>()               // std
-                                  .Ret<Buffer_Type>()               // output
-                                  .Attr<std::string_view>("name")   // probe name
+                                  .Ctx<FFI_Stream_Type>()          // stream
+                                  .Arg<Buffer_Type>()              // input
+                                  .Arg<Buffer_Type>()              // min
+                                  .Arg<Buffer_Type>()              // max
+                                  .Arg<Buffer_Type>()              // mean
+                                  .Arg<Buffer_Type>()              // std
+                                  .Ret<Buffer_Type>()              // output
+                                  .Attr<std::string_view>("name")  // probe name
 );
 
 }  // namespace jax
