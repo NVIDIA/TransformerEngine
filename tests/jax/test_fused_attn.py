@@ -7,7 +7,7 @@ from enum import Enum, auto
 from dataclasses import dataclass, field
 from functools import partial
 from math import sqrt
-from typing import Tuple, Optional, Dict
+from typing import Any, Callable, Mapping, Tuple, Optional, Dict
 import random
 
 import jax
@@ -64,7 +64,7 @@ def init():
     yield
 
 
-@partial(jax.jit, static_argnums=(6, 7, 8, 9, 11))
+@partial(jax.jit, static_argnums=(6, 7, 8, 9, 11, 12))
 def general_dot_product_attention(
     query: ArrayLike,
     key: ArrayLike,
@@ -78,6 +78,7 @@ def general_dot_product_attention(
     dropout_rate: float,
     dropout_rng: ArrayLike,
     dtype: DTypeLike,
+    score_mod_reference: Optional[Callable[[Array], Array]] = None,
 ) -> Array:
     """
     Similar to flax.linen.dot_product_attention but with GQA support
@@ -105,6 +106,10 @@ def general_dot_product_attention(
         if mask.ndim != logits.ndim:
             mask = jnp.expand_dims(mask, axis=-3)
         logits = jnp.where(mask, jnp.finfo(dtype).min, logits)
+
+    if score_mod_reference is not None:
+        # Kernel tests use NO_MASK; fused_attn rejects mask+score_mod before this reference path.
+        logits = score_mod_reference(logits.astype(jnp.float32))
 
     match softmax_type:
         case AttnSoftmaxType.VANILLA_SOFTMAX:
@@ -267,6 +272,28 @@ def jax_dpa(query, key, value, bias, softmax_offset, mask, dropout_rng, **kwargs
     """
     JAX native dot product attention implementation
     """
+    score_mod_reference = kwargs.get("score_mod_reference")
+    if score_mod_reference is not None:
+        if (
+            bias is not None
+            or softmax_offset is not None
+            or mask is not None
+            or dropout_rng is not None
+        ):
+            raise ValueError(
+                "score_mod reference path expects no bias, mask, softmax offset, or dropout."
+            )
+        if kwargs["qkv_layout"] != QKVLayout.BSHD_BSHD_BSHD:
+            raise ValueError(
+                "score_mod reference path expects separate BSHD query/key/value tensors."
+            )
+        deterministic = not kwargs["is_training"]
+        dropout_probability = kwargs["dropout_probability"]
+        softmax_type = kwargs["softmax_type"]
+    else:
+        deterministic = not kwargs["is_training"]
+        dropout_probability = kwargs["dropout_probability"]
+        softmax_type = kwargs["softmax_type"]
     output = general_dot_product_attention(
         query,
         key,
@@ -274,12 +301,13 @@ def jax_dpa(query, key, value, bias, softmax_offset, mask, dropout_rng, **kwargs
         softmax_offset,
         bias,
         mask,
-        deterministic=not kwargs["is_training"],
+        deterministic=deterministic,
         scale_factor=kwargs["scaling_factor"],
-        dropout_rate=kwargs["dropout_probability"],
-        softmax_type=kwargs["softmax_type"],
+        dropout_rate=dropout_probability,
+        softmax_type=softmax_type,
         dropout_rng=dropout_rng,
         dtype=jnp.float32,
+        score_mod_reference=score_mod_reference,
     )
     return output.astype(query.dtype)
 
@@ -314,6 +342,32 @@ def customcall_fused_dpa(
     return fused_attn(
         qkv_args, bias, sequence_descriptor, dropout_rng, softmax_offset=softmax_offset, **kwargs
     ).astype(query.dtype)
+
+
+def test_fused_attn_score_mod_rejects_masks_before_cudnn_frontend():
+    """fused_attn rejects score_mod with masks before cuDNN frontend graph building."""
+    q = jax.ShapeDtypeStruct((1, 16, 1, 128), jnp.float16)
+    k = jax.ShapeDtypeStruct((1, 16, 1, 128), jnp.float16)
+    v = jax.ShapeDtypeStruct((1, 16, 1, 128), jnp.float16)
+
+    def score_mod(_graph, score, _tensors):
+        return score
+
+    with pytest.raises(ValueError, match="mutually exclusive with attention masks"):
+        fused_attn(
+            (q, k, v),
+            None,
+            None,
+            None,
+            AttnBiasType.NO_BIAS,
+            AttnMaskType.CAUSAL_MASK,
+            QKVLayout.BSHD_BSHD_BSHD,
+            AttnSoftmaxType.VANILLA_SOFTMAX,
+            1.0,
+            0.0,
+            True,
+            score_mod=score_mod,
+        )
 
 
 class BiasShape(Enum):
@@ -372,6 +426,18 @@ class FusedAttnRunner:
     # dictionary of expected collective comm bytes
     coll_count_ref: Optional[Dict[str, int]] = None
 
+    # Optional score_mod test hooks.
+    score_mod: Optional[Callable] = None
+    score_mod_bprop: Optional[Callable] = None
+    score_mod_tensors: Optional[Mapping[str, Any]] = None
+    score_mod_bprop_tensors: Optional[Mapping[str, Any]] = None
+    score_mod_reference: Optional[Callable[[Array], Array]] = None
+    input_scale: float = 1.0
+    doutput_seed: Optional[int] = None
+    doutput: Optional[Array] = field(init=False, default=None)
+    rtol: Optional[float] = None
+    atol: Optional[float] = None
+
     def __post_init__(self):
         # Reset defaults for num_segments_per_seq if not explicitly passed
         if self.num_segments_per_seq is None:
@@ -379,6 +445,16 @@ class FusedAttnRunner:
                 self.num_segments_per_seq = 2
             else:
                 self.num_segments_per_seq = 1
+        if self.doutput_seed is not None:
+            output_shape = (
+                self.batch_size,
+                self.max_seqlen_q,
+                self.num_heads_q,
+                self.head_dim_v,
+            )
+            self.doutput = jax.random.normal(
+                jax.random.PRNGKey(self.doutput_seed), output_shape, dtype=self.dtype
+            )
 
     # See https://docs.nvidia.com/deeplearning/cudnn/latest/release-notes.html#cudnn-9-4-0 for known issue
     # generating zero-length ragged tensors. This setting adjusts the test to avoid the zero-length cases.
@@ -513,10 +589,15 @@ class FusedAttnRunner:
         else:
             pytest.fail(f"PyTest attempted to use an unrecognized bias_layout = {self.bias_shape}!")
 
-        self.q = jax.random.uniform(q_key, q_shape, self.dtype, -1.0)
-        self.k = jax.random.uniform(k_key, k_shape, self.dtype, -1.0)
-        self.v = jax.random.uniform(v_key, v_shape, self.dtype, -1.0)
-
+        self.q = (self.input_scale * jax.random.uniform(q_key, q_shape, self.dtype, -1.0)).astype(
+            self.dtype
+        )
+        self.k = (self.input_scale * jax.random.uniform(k_key, k_shape, self.dtype, -1.0)).astype(
+            self.dtype
+        )
+        self.v = (self.input_scale * jax.random.uniform(v_key, v_shape, self.dtype, -1.0)).astype(
+            self.dtype
+        )
         if self.attn_bias_type != AttnBiasType.NO_BIAS:
             if self.bias_shape == BiasShape._1HSS:
                 self.bias = jax.random.uniform(bias_key, bias_shape, self.dtype, -1.0)
@@ -810,7 +891,18 @@ class FusedAttnRunner:
         """
         self._setup_inputs()
 
-        args = [self.q, self.k, self.v, self.bias, self.softmax_offset, self.mask, self.dropout_rng]
+        reference_mask = (
+            self.sequence_desciptor if self.score_mod_reference is not None else self.mask
+        )
+        args = [
+            self.q,
+            self.k,
+            self.v,
+            self.bias,
+            self.softmax_offset,
+            reference_mask,
+            self.dropout_rng,
+        ]
 
         customcall_args = [
             # Put test data onto each GPU for distributed.
@@ -837,7 +929,12 @@ class FusedAttnRunner:
             "context_parallel_strategy": self.cp_strategy,
             "context_parallel_causal_load_balanced": self.cp_load_balanced,
             "stripe_size": self.stripe_size,
+            "score_mod": self.score_mod,
+            "score_mod_bprop": self.score_mod_bprop,
+            "score_mod_tensors": self.score_mod_tensors,
+            "score_mod_bprop_tensors": self.score_mod_bprop_tensors,
         }
+        reference_kwargs = {**kwargs, "score_mod_reference": self.score_mod_reference}
 
         customcall_fused_dpa_jit = jit(
             partial(customcall_fused_dpa, **kwargs),
@@ -857,7 +954,7 @@ class FusedAttnRunner:
             primitive_out = customcall_fused_dpa_jit(*customcall_args)
             primitive_out = self.cp_inverse_reorder_fn(primitive_out)
 
-        reference_out = jax_dpa(*args, **kwargs)
+        reference_out = jax_dpa(*args, **reference_kwargs)
 
         if self.is_training and self.dropout_prob > 0.0:
             return
@@ -866,8 +963,20 @@ class FusedAttnRunner:
             _split_valid_and_invalid(primitive_out, reference_out, self.pad_q)
         )
 
-        assert_allclose(primitive_invalid, jnp.zeros_like(primitive_invalid), dtype=self.dtype)
-        assert_allclose(primitive_valid, reference_valid, dtype=self.dtype)
+        assert_allclose(
+            primitive_invalid,
+            jnp.zeros_like(primitive_invalid),
+            rtol=self.rtol,
+            atol=self.atol,
+            dtype=self.dtype,
+        )
+        assert_allclose(
+            primitive_valid,
+            reference_valid,
+            rtol=self.rtol,
+            atol=self.atol,
+            dtype=self.dtype,
+        )
 
         if self.coll_count_ref is not None:
             with self.mesh, autocast(mesh_resource=self.mesh_resource):
@@ -886,29 +995,48 @@ class FusedAttnRunner:
 
         self._setup_inputs()
 
-        def grad_func(func, *args, cp_reverse_out=False, **kwargs):
+        def grad_func(
+            func,
+            q,
+            k,
+            v,
+            bias,
+            softmax_offset,
+            sequence_descriptor,
+            dropout_rng,
+            doutput=None,
+            cp_reverse_out=False,
+            **kwargs,
+        ):
             # Gradient is small, use a gradient multiplier to amplify the gradient
             gradient_multiplier = self.max_seqlen_q * self.num_heads_q
             if self.attn_mask_type.is_causal():
                 gradient_multiplier /= 10
+            output = func(q, k, v, bias, softmax_offset, sequence_descriptor, dropout_rng, **kwargs)
+            if cp_reverse_out:
+                output = self.cp_inverse_reorder_fn(output)
             # Keep only valid result for the gradient
-            if not cp_reverse_out:
-                ret_valid = jnp.where(
-                    self.pad_q[..., jnp.newaxis, jnp.newaxis],
-                    0,
-                    func(*args, **kwargs),
-                )
-            else:
-                ret_valid = jnp.where(
-                    self.pad_q[..., jnp.newaxis, jnp.newaxis],
-                    0,
-                    self.cp_inverse_reorder_fn(func(*args, **kwargs)),
+            ret_valid = jnp.where(self.pad_q[..., jnp.newaxis, jnp.newaxis], 0, output)
+            if doutput is not None:
+                return jnp.sum(ret_valid.astype(jnp.float32) * doutput.astype(jnp.float32)).astype(
+                    self.dtype
                 )
             return (
                 jnp.mean(ret_valid.astype(jnp.float32), dtype=jnp.float32) * gradient_multiplier
             ).astype(self.dtype)
 
-        args = [self.q, self.k, self.v, self.bias, self.softmax_offset, self.mask, self.dropout_rng]
+        reference_mask = (
+            self.sequence_desciptor if self.score_mod_reference is not None else self.mask
+        )
+        args = [
+            self.q,
+            self.k,
+            self.v,
+            self.bias,
+            self.softmax_offset,
+            reference_mask,
+            self.dropout_rng,
+        ]
         customcall_args = [
             # TODO(mgoldfarb-nvidia): We will need to add reordering for bias, mas and
             # THD params once we support those features on CP.
@@ -920,6 +1048,19 @@ class FusedAttnRunner:
             jax.device_put(self.sequence_desciptor, self.seq_desc_sharding),
             jax.device_put(self.dropout_rng, self.dropout_rng_sharding),
         ]
+        input_shardings = [
+            self.qkvo_sharding,
+            self.qkvo_sharding,
+            self.qkvo_sharding,
+            self.bias_sharding,
+            self.softmax_offset_sharding,
+            self.seq_desc_sharding,
+            self.dropout_rng_sharding,
+        ]
+        if self.doutput is not None:
+            args.append(self.doutput)
+            customcall_args.append(jax.device_put(self.doutput, self.qkvo_sharding))
+            input_shardings.append(self.qkvo_sharding)
         kwargs = {
             "attn_bias_type": self.attn_bias_type,
             "attn_mask_type": self.attn_mask_type,
@@ -933,7 +1074,12 @@ class FusedAttnRunner:
             "context_parallel_strategy": self.cp_strategy,
             "context_parallel_causal_load_balanced": self.cp_load_balanced,
             "stripe_size": self.stripe_size,
+            "score_mod": self.score_mod,
+            "score_mod_bprop": self.score_mod_bprop,
+            "score_mod_tensors": self.score_mod_tensors,
+            "score_mod_bprop_tensors": self.score_mod_bprop_tensors,
         }
+        reference_kwargs = {**kwargs, "score_mod_reference": self.score_mod_reference}
 
         # We can compute dBias only for the [1, h, s, s] layout
         if self.bias_shape == BiasShape._1HSS:
@@ -964,21 +1110,13 @@ class FusedAttnRunner:
                 ),
                 arg_nums,
             ),
-            in_shardings=(
-                self.qkvo_sharding,
-                self.qkvo_sharding,
-                self.qkvo_sharding,
-                self.bias_sharding,
-                self.softmax_offset_sharding,
-                self.seq_desc_sharding,
-                self.dropout_rng_sharding,
-            ),
+            in_shardings=tuple(input_shardings),
             out_shardings=(None, grad_shardings),
         )
         jitted_reference = jit(
             value_and_grad(
                 lambda q, k, v, bias, softmax_offset, *args: grad_func(
-                    jax_dpa, q, k, v, bias, softmax_offset, *args, **kwargs
+                    jax_dpa, q, k, v, bias, softmax_offset, *args, **reference_kwargs
                 ),
                 arg_nums,
             )
@@ -996,7 +1134,13 @@ class FusedAttnRunner:
         print_debug_tensor_stats(f"primitive_out", primitive_out)
         print_debug_tensor_stats(f"reference_grad_valid", reference_out)
         print_debug_tensor_stats(f"diff_grad", jnp.abs(primitive_out - reference_out))
-        assert_allclose(primitive_out, reference_out, dtype=self.dtype)
+        assert_allclose(
+            primitive_out,
+            reference_out,
+            rtol=self.rtol,
+            atol=self.atol,
+            dtype=self.dtype,
+        )
 
         def check_dqkv(primitive, reference, pad, idx):
             primitive_valid, primitive_invalid, reference_valid, reference_invalid = (
@@ -1009,9 +1153,27 @@ class FusedAttnRunner:
                 f"diff_grad[{idx}]", jnp.abs(primitive_valid[idx] - reference_valid[idx])
             )
 
-            assert_allclose(primitive_invalid, jnp.zeros_like(primitive_invalid), dtype=self.dtype)
-            assert_allclose(primitive_invalid, reference_invalid, dtype=self.dtype)
-            assert_allclose(primitive_valid, reference_valid, dtype=self.dtype)
+            assert_allclose(
+                primitive_invalid,
+                jnp.zeros_like(primitive_invalid),
+                rtol=self.rtol,
+                atol=self.atol,
+                dtype=self.dtype,
+            )
+            assert_allclose(
+                primitive_invalid,
+                reference_invalid,
+                rtol=self.rtol,
+                atol=self.atol,
+                dtype=self.dtype,
+            )
+            assert_allclose(
+                primitive_valid,
+                reference_valid,
+                rtol=self.rtol,
+                atol=self.atol,
+                dtype=self.dtype,
+            )
 
         primitive_dq, primitive_dk, primitive_dv = primitive_dgrad[:3]
         reference_dq, reference_dk, reference_dv = reference_dgrad[:3]
@@ -1037,6 +1199,8 @@ class FusedAttnRunner:
             assert_allclose(
                 jnp.where(bias_mask, primitive_dbias, 0),
                 jnp.zeros_like(primitive_dbias),
+                rtol=self.rtol,
+                atol=self.atol,
                 dtype=self.dtype,
             )
 
@@ -1044,6 +1208,8 @@ class FusedAttnRunner:
             assert_allclose(
                 jnp.where(bias_mask, primitive_dbias, 0),
                 jnp.where(bias_mask, reference_dbias, 0),
+                rtol=self.rtol,
+                atol=self.atol,
                 dtype=self.dtype,
             )
 
@@ -1051,6 +1217,8 @@ class FusedAttnRunner:
             assert_allclose(
                 jnp.where(bias_mask, 0, primitive_dbias),
                 jnp.where(bias_mask, 0, reference_dbias),
+                rtol=self.rtol,
+                atol=self.atol,
                 dtype=self.dtype,
             )
 
