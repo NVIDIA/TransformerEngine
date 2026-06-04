@@ -1,0 +1,11 @@
+# Numbers below were captured on 4x NVIDIA GB200. Regenerate with:
+#     python3 docs/examples/jax/moe.py > moe.out
+
+# MOE_OUTPUT_START
+max |native BF16 - TE BF16|: 0.0604
+native JAX BF16:
+Mean time: 19.545 ms
+
+TE _MoEBlock BF16:
+Mean time: 13.632 ms
+# MOE_OUTPUT_END
