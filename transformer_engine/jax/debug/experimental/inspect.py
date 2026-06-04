@@ -22,7 +22,13 @@ class InspectPrimitive(BasePrimitive):
 
     name = "te_inspect_ffi"
     multiple_results = False
-    impl_static_args = ()
+    # ``name`` is at positional index 5 in ``impl``; declaring it static
+    # here lets ``custom_partitioning`` resolve ``bind(..., name=...)``
+    # kwargs back to that position via ``_resolve_kwargs``. Keyword-only
+    # parameters (``*, name``) would raise
+    #     TypeError: keyword arguments could not be resolved to positions
+    # at trace time, so ``impl`` accepts ``name`` positionally below.
+    impl_static_args = (5,)
     inner_primitive = None
     outer_primitive = None
 
@@ -89,14 +95,15 @@ class InspectPrimitive(BasePrimitive):
         x_max,
         x_mean,
         x_std,
-        *,
         name,
     ):
         """
-        inspect implementation
+        inspect implementation. ``name`` is positional (not keyword-only)
+        so ``custom_partitioning(static_argnums=(5,))`` can resolve
+        ``bind(..., name=...)`` kwargs to position 5.
         """
         assert InspectPrimitive.inner_primitive is not None
-        (x) = InspectPrimitive.inner_primitive.bind(
+        x = InspectPrimitive.inner_primitive.bind(
             x,
             x_min,
             x_max,
@@ -107,13 +114,16 @@ class InspectPrimitive(BasePrimitive):
         return x
 
     @staticmethod
-    def partition(mesh, arg_infos, result_infos, *, name):
+    def partition(name, mesh, arg_infos, result_infos):
         """
         Identity in sharding: the output carries the same sharding as ``x``;
         the four scalar stats (x_min, x_max, x_mean, x_std) are fully
         replicated. Without this override the primitive falls back to
         ``BasePrimitive``'s abstract partition and any multi-device JIT
         rejects the call.
+
+        Static args precede ``mesh`` per the ``custom_partitioning``
+        convention when ``static_argnums`` is set on the wrapped impl.
         """
         del result_infos
         x_sharding = arg_infos[0].sharding
@@ -128,19 +138,20 @@ class InspectPrimitive(BasePrimitive):
         out_sharding = x_sharding
 
         def sharded_impl(x, x_min, x_max, x_mean, x_std):
-            return InspectPrimitive.impl(x, x_min, x_max, x_mean, x_std, name=name)
+            return InspectPrimitive.impl(x, x_min, x_max, x_mean, x_std, name)
 
         return mesh, sharded_impl, out_sharding, arg_shardings
 
     @staticmethod
-    def shardy_sharding_rule(*args, **kwargs):
+    def shardy_sharding_rule(*args):
         """
         Five operands, one output. ``x`` and the output carry the same
         wildcard rank; the four scalar stats are rank-0 (empty operand
-        entries between commas). The ``name`` keyword attribute does not
-        participate in the rule.
+        entries between commas). ``name`` is a static arg (precedes
+        ``mesh``/``value_types``/``result_types`` in ``args``) and does
+        not participate in the rule.
         """
-        del args, kwargs
+        del args
         return "..., , , , -> ..."
 
 
