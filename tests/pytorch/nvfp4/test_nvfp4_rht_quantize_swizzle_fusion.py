@@ -286,7 +286,7 @@ def test_nvfp4_rht_swizzle_fusion_end_to_end_swizzled(M: int, N: int) -> None:
     # kernel; the unfused path + swizzle fallback run cleanly).
     result = quantizer(x)
     assert result._with_gemm_swizzled_scales is True, (
-        f"End-to-end quantize expected _with_gemm_swizzled_scales=True for shape "
+        "End-to-end quantize expected _with_gemm_swizzled_scales=True for shape "
         f"({M}, {N}) with optimize_for_gemm=True + with_rht=True, "
         f"got {result._with_gemm_swizzled_scales}"
     )
