@@ -4,8 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#ifndef TRANSFORMER_ENGINE_COMMON_UTIL_DTYPE_PYBIND_CONVERSION_H_
-#define TRANSFORMER_ENGINE_COMMON_UTIL_DTYPE_PYBIND_CONVERSION_H_
+#ifndef TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_PYBIND_DTYPE_CASTERS_H_
+#define TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_PYBIND_DTYPE_CASTERS_H_
 
 #include <pybind11/pybind11.h>
 #include <transformer_engine/transformer_engine.h>
@@ -41,8 +41,8 @@ struct type_caster<transformer_engine::DType> {
       return false;
     }
 
-    // plain ``int`` / ``IntEnum`` (including ``transformer_engine.pytorch.DType``,
-    // the canonical Python type). Cast it to the C++ enum value.
+    // Intended for ``transformer_engine.pytorch.DType``,
+    // the canonical Python type. Cast it to the C++ enum value.
     if (PyLong_Check(src.ptr())) {
       const long tag = PyLong_AsLong(src.ptr());  // NOLINT(runtime/int)
       if (tag == -1 && PyErr_Occurred()) {
@@ -76,4 +76,4 @@ struct type_caster<transformer_engine::DType> {
 }  // namespace detail
 }  // namespace pybind11
 
-#endif  // TRANSFORMER_ENGINE_COMMON_UTIL_DTYPE_PYBIND_CONVERSION_H_
+#endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_PYBIND_DTYPE_CASTERS_H_
