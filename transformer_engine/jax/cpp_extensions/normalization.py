@@ -120,7 +120,7 @@ class NormFwdPrimitive(BasePrimitive):
         is_outer,
     ):
         """
-        LayerNorm fwd inner primitive abstract
+        LayerNorm fwd primitive abstract.
         """
         del amax_scope, transpose_batch_sequence
         assert not output_amax_when_no_scaling or (
@@ -196,6 +196,18 @@ class NormFwdPrimitive(BasePrimitive):
             shape=colwise_scale_inv_shape, dtype=scale_dtype
         )
 
+        outputs = (
+            out_aval,
+            colwise_out_aval,
+            scale_inv_aval,
+            colwise_scale_inv_aval,
+            updated_amax_aval,
+            mu_aval,
+            rsigma_aval,
+        )
+        if is_outer:
+            return outputs
+
         (wkspace_info,) = transformer_engine_jax.get_norm_fwd_workspace_sizes(
             x_aval.size // gamma_aval.size,  # batch size
             gamma_aval.size,  # hidden size
@@ -213,41 +225,7 @@ class NormFwdPrimitive(BasePrimitive):
             shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
         )
 
-        return (
-            out_aval,
-            colwise_out_aval,
-            scale_inv_aval,
-            colwise_scale_inv_aval,
-            updated_amax_aval,
-            mu_aval,
-            rsigma_aval,
-            wkspace_aval,
-        )
-
-    @staticmethod
-    def outer_abstract(*args, **kwargs):
-        """
-        LayerNorm fwd outer primitive abstract
-        """
-        (
-            out_aval,
-            colwise_out_aval,
-            scale_inv_aval,
-            colwise_scale_inv_aval,
-            updated_amax_aval,
-            mu_aval,
-            rsigma_aval,
-            _,
-        ) = NormFwdPrimitive.abstract(*args, **kwargs)
-        return (
-            out_aval,
-            colwise_out_aval,
-            scale_inv_aval,
-            colwise_scale_inv_aval,
-            updated_amax_aval,
-            mu_aval,
-            rsigma_aval,
-        )
+        return (*outputs, wkspace_aval)
 
     @staticmethod
     def lowering(
@@ -348,20 +326,10 @@ class NormFwdPrimitive(BasePrimitive):
         """
         to describe implementation
         """
-        del is_outer
         assert (
             NormFwdPrimitive.inner_primitive is not None
         ), "NormFwdPrimitive.inner_primitive has not been registered"
-        (
-            out,
-            colwise_out,
-            scale_inv,
-            colwise_scale_inv,
-            updated_amax,
-            mu,
-            rsigma,
-            _,
-        ) = NormFwdPrimitive.inner_primitive.bind(
+        outputs = NormFwdPrimitive.inner_primitive.bind(
             x,
             scale,
             amax,
@@ -377,8 +345,21 @@ class NormFwdPrimitive(BasePrimitive):
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
             output_amax_when_no_scaling=output_amax_when_no_scaling,
-            is_outer=False,
+            is_outer=is_outer,
         )
+        if is_outer:
+            out, colwise_out, scale_inv, colwise_scale_inv, updated_amax, mu, rsigma = outputs
+        else:
+            (
+                out,
+                colwise_out,
+                scale_inv,
+                colwise_scale_inv,
+                updated_amax,
+                mu,
+                rsigma,
+                _,
+            ) = outputs
         rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
             scaling_mode
         ).get_scale_shape_2x(x.shape, is_padded=False)
@@ -630,7 +611,7 @@ class NormFwdPrimitive(BasePrimitive):
                 amax_scope=amax_scope,
                 transpose_batch_sequence=transpose_batch_sequence,
                 output_amax_when_no_scaling=output_amax_when_no_scaling,
-                is_outer=True,
+                is_outer=False,
             )
             if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
                 global_updated_amax = all_reduce_max_along_all_axes_except_PP(
