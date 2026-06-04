@@ -336,22 +336,6 @@ class NormFwdPrimitive(BasePrimitive):
             gamma,
             beta,
             norm_type=norm_type,
-        (
-            out,
-            colwise_out,
-            scale_inv,
-            colwise_scale_inv,
-            updated_amax,
-            mu,
-            rsigma,
-            _,
-        ) = NormFwdPrimitive.inner_primitive.bind(
-            x,
-            scale,
-            amax,
-            gamma,
-            beta,
-            norm_type=norm_type,
             zero_centered_gamma=zero_centered_gamma,
             epsilon=epsilon,
             out_dtype=out_dtype,
@@ -361,8 +345,21 @@ class NormFwdPrimitive(BasePrimitive):
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
             output_amax_when_no_scaling=output_amax_when_no_scaling,
-            is_outer=False,  # inner_primitive always emits 8 outputs (incl. workspace)
+            is_outer=is_outer,
         )
+        if is_outer:
+            out, colwise_out, scale_inv, colwise_scale_inv, updated_amax, mu, rsigma = outputs
+        else:
+            (
+                out,
+                colwise_out,
+                scale_inv,
+                colwise_scale_inv,
+                updated_amax,
+                mu,
+                rsigma,
+                _,
+            ) = outputs
         rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
             scaling_mode
         ).get_scale_shape_2x(x.shape, is_padded=False)
@@ -383,6 +380,12 @@ class NormFwdPrimitive(BasePrimitive):
             mu,
             rsigma,
         )  # Exclude wkspace
+
+    @staticmethod
+    def outer_impl(*args, **kwargs):
+        kwargs = dict(kwargs)
+        kwargs["is_outer"] = False
+        return NormFwdPrimitive.impl(*args, **kwargs)
 
     @staticmethod
     def batcher(
@@ -828,6 +831,12 @@ class NormBwdPrimitive(BasePrimitive):
         else:
             dx, dgamma, dbeta, _ = outputs
         return dx, dgamma, dbeta
+
+    @staticmethod
+    def outer_impl(*args, **kwargs):
+        kwargs = dict(kwargs)
+        kwargs["is_outer"] = False
+        return NormBwdPrimitive.impl(*args, **kwargs)
 
     @staticmethod
     def batcher(batched_args, batch_dims, *, norm_type, zero_centered_gamma, is_outer):
