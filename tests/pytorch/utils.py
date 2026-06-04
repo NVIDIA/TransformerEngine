@@ -341,6 +341,8 @@ def get_available_attention_backends(
     fp8_meta: Optional[Dict[str, Any]] = None,
     is_training: bool = True,
     inference_params: Optional[InferenceParams] = None,
+    score_mod: bool = False,
+    score_mod_bprop: bool = False,
 ) -> Tuple[List, List]:
     """Check for all available attention backends that support a model configuration"""
 
@@ -402,6 +404,8 @@ def get_available_attention_backends(
             inference_params=inference_params,
             softmax_type=config.softmax_type,
             return_max_logit=config.return_max_logit,
+            has_score_mod=score_mod,
+            has_score_mod_bprop=score_mod_bprop,
             # allow all backends to pass so they can be used for testing;
             # check for FA3 availability later
             num_splits=1,

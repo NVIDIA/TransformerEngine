@@ -147,6 +147,10 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnForwardHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnBackwardHandler);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnScoreModForwardHandler);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnScoreModBackwardHandler);
+
 NVTE_Fused_Attn_Backend GetFusedAttnBackend(
     bool is_training, DType q_dtype, DType kv_dtype, NVTE_QKV_Layout qkv_layout,
     NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type,
