@@ -8,6 +8,7 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 from jax import ffi
+from jax.sharding import NamedSharding, PartitionSpec
 
 from transformer_engine.jax.cpp_extensions.base import BasePrimitive, register_primitive
 
@@ -95,6 +96,42 @@ class InspectPrimitive(BasePrimitive):
             x_std,
         )
         return x
+
+    @staticmethod
+    def partition(mesh, arg_infos, result_infos):
+        """
+        Identity in sharding: the output carries the same sharding as ``x``;
+        the four scalar stats (x_min, x_max, x_mean, x_std) are fully
+        replicated. Without this override the primitive falls back to
+        ``BasePrimitive``'s abstract partition and any multi-device JIT
+        rejects the call.
+        """
+        del result_infos
+        x_sharding = arg_infos[0].sharding
+        scalar_sharding = NamedSharding(mesh, PartitionSpec())
+        arg_shardings = (
+            x_sharding,
+            scalar_sharding,
+            scalar_sharding,
+            scalar_sharding,
+            scalar_sharding,
+        )
+        out_sharding = x_sharding
+
+        def sharded_impl(x, x_min, x_max, x_mean, x_std):
+            return InspectPrimitive.impl(x, x_min, x_max, x_mean, x_std)
+
+        return mesh, sharded_impl, out_sharding, arg_shardings
+
+    @staticmethod
+    def shardy_sharding_rule(*args):
+        """
+        Five operands, one output. ``x`` and the output carry the same
+        wildcard rank; the four scalar stats are rank-0 (empty operand
+        entries between commas).
+        """
+        del args
+        return "..., , , , -> ..."
 
 
 register_primitive(InspectPrimitive)
