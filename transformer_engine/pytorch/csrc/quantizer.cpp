@@ -322,7 +322,7 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
     py::tuple args(0);
     kwargs["data"] = data_py;
     kwargs["fp8_scale_inv"] = scale_inv_py;
-    kwargs["fp8_dtype"] = py::cast(this->dtype);
+    kwargs["fp8_dtype"] = MakePythonDType(this->dtype);
     kwargs["data_transpose"] = transpose_py;
     kwargs["quantizer"] = this->quantizer;
     kwargs["fake_dtype"] = GetATenDType(dtype);
@@ -346,7 +346,7 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
     kwargs["dtype"] = py::cast(GetATenDType(dtype));
     kwargs["data"] = data_py;
     kwargs["fp8_scale_inv"] = scale_inv_py;
-    kwargs["fp8_dtype"] = py::cast(this->dtype);
+    kwargs["fp8_dtype"] = MakePythonDType(this->dtype);
     kwargs["data_transpose"] = transpose_py;
     kwargs["quantizer"] = this->quantizer;
     kwargs["device"] = py::cast(device);
@@ -533,7 +533,7 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::convert_and_update_tensor(
   tensor.attr("_transpose_invalid") = !need_transpose;
 
   // Coerce other attrs
-  tensor.attr("_fp8_dtype") = dtype;
+  tensor.attr("_fp8_dtype") = MakePythonDType(dtype);
 
   // Construct C++ FP8 tensor
   TensorWrapper out_cpp;
@@ -634,7 +634,7 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
     py::dict kwargs;
     kwargs["data"] = data_py;
     kwargs["fp8_scale_inv"] = scale_inv_py;
-    kwargs["fp8_dtype"] = py::cast(this->dtype);
+    kwargs["fp8_dtype"] = MakePythonDType(this->dtype);
     kwargs["data_transpose"] = transpose_py;
     kwargs["quantizer"] = this->quantizer;
     kwargs["fake_dtype"] = GetATenDType(dtype);
@@ -657,7 +657,7 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
     kwargs["dtype"] = py::cast(GetATenDType(dtype));
     kwargs["data"] = data_py;
     kwargs["fp8_scale_inv"] = scale_inv_py;
-    kwargs["fp8_dtype"] = py::cast(this->dtype);
+    kwargs["fp8_dtype"] = MakePythonDType(this->dtype);
     kwargs["data_transpose"] = transpose_py;
     kwargs["quantizer"] = this->quantizer;
     kwargs["device"] = py::cast(device);
@@ -863,7 +863,7 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::convert_and_
   tensor.attr("_transpose_invalid") = !need_transpose;
 
   // Coerce other attrs
-  tensor.attr("_fp8_dtype") = dtype;
+  tensor.attr("_fp8_dtype") = MakePythonDType(dtype);
 
   // Construct C++ FP8 tensor
   TensorWrapper out_cpp;
@@ -1028,7 +1028,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     kwargs["columnwise_data"] = py::cast(data_colwise);
     kwargs["rowwise_scale_inv"] = py::cast(scale_inv_rowwise);
     kwargs["columnwise_scale_inv"] = py::cast(scale_inv_colwise);
-    kwargs["fp8_dtype"] = py::cast(this->dtype);
+    kwargs["fp8_dtype"] = MakePythonDType(this->dtype);
     kwargs["quantizer"] = this->quantizer;
     kwargs["is_2D_scaled"] = py::cast(block_scaling_dim == 2);
     kwargs["fake_dtype"] = GetATenDType(dtype);
@@ -1054,7 +1054,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     kwargs["columnwise_data"] = py::cast(data_colwise);
     kwargs["rowwise_scale_inv"] = py::cast(scale_inv_rowwise);
     kwargs["columnwise_scale_inv"] = py::cast(scale_inv_colwise);
-    kwargs["fp8_dtype"] = py::cast(this->dtype);
+    kwargs["fp8_dtype"] = MakePythonDType(this->dtype);
     kwargs["quantizer"] = this->quantizer;
     kwargs["is_2D_scaled"] = py::cast(block_scaling_dim == 2);
     kwargs["device"] = py::cast(device);
@@ -1435,7 +1435,7 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
     kwargs["columnwise_data"] = columnwise_data_py;
     kwargs["rowwise_scale_inv"] = rowwise_scale_inv_py;
     kwargs["columnwise_scale_inv"] = columnwise_scale_inv_py;
-    kwargs["fp8_dtype"] = py::cast(this->dtype);
+    kwargs["fp8_dtype"] = MakePythonDType(this->dtype);
     kwargs["quantizer"] = this->quantizer;
     kwargs["with_gemm_swizzled_scales"] = py::cast(with_gemm_swizzled_scales);
     kwargs["fake_dtype"] = GetATenDType(dtype);
@@ -1459,7 +1459,7 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
     kwargs["columnwise_data"] = columnwise_data_py;
     kwargs["rowwise_scale_inv"] = rowwise_scale_inv_py;
     kwargs["columnwise_scale_inv"] = columnwise_scale_inv_py;
-    kwargs["fp8_dtype"] = py::cast(this->dtype);
+    kwargs["fp8_dtype"] = MakePythonDType(this->dtype);
     kwargs["quantizer"] = this->quantizer;
     kwargs["with_gemm_swizzled_scales"] = py::cast(with_gemm_swizzled_scales);
     kwargs["device"] = py::cast(device);
@@ -1672,7 +1672,7 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::convert_and_update_tensor(
   }
 
   // Coerce other attrs
-  tensor.attr("_fp8_dtype") = dtype;
+  tensor.attr("_fp8_dtype") = MakePythonDType(dtype);
   tensor.attr("_with_gemm_swizzled_scales") = with_gemm_swizzled_scales;
 
   // Construct C++ MXFP8 tensor
@@ -1877,7 +1877,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
     kwargs["columnwise_scale_inv"] = columnwise_scale_inv_py;
     kwargs["amax_rowwise"] = amax_rowwise_py;
     kwargs["amax_columnwise"] = amax_columnwise_py;
-    kwargs["fp4_dtype"] = py::cast(this->dtype);
+    kwargs["fp4_dtype"] = MakePythonDType(this->dtype);
     kwargs["quantizer"] = this->quantizer;
     kwargs["with_gemm_swizzled_scales"] = py::cast(with_gemm_swizzled_scales);
     kwargs["row_scaled_nvfp4"] = py::cast(row_scaled_nvfp4);
@@ -1908,7 +1908,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
     kwargs["columnwise_scale_inv"] = columnwise_scale_inv_py;
     kwargs["amax_rowwise"] = amax_rowwise_py;
     kwargs["amax_columnwise"] = amax_columnwise_py;
-    kwargs["fp4_dtype"] = py::cast(this->dtype);
+    kwargs["fp4_dtype"] = MakePythonDType(this->dtype);
     kwargs["quantizer"] = this->quantizer;
     kwargs["with_gemm_swizzled_scales"] = py::cast(with_gemm_swizzled_scales);
     kwargs["device"] = py::cast(device);
