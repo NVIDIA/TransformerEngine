@@ -5,6 +5,7 @@
 """Helper functions used in fusible operations."""
 
 from __future__ import annotations
+from collections.abc import Iterable
 import functools
 import math
 from importlib.metadata import PackageNotFoundError, version as get_pkg_version
@@ -13,24 +14,197 @@ from typing import Optional
 import torch
 from packaging.version import Version as PkgVersion
 
+import transformer_engine_torch as tex
 from transformer_engine_torch import FP8TensorMeta
 from ..torch_version import torch_version
 from ..quantization import FP8GlobalStateManager
+from ..tensor import NVFP4Quantizer, NVFP4Tensor, NVFP4TensorStorage, Quantizer
 from ..tensor.float8_tensor import Float8Tensor
+from ..tensor.grouped_tensor import GroupedTensor
 from ..quantized_tensor import QuantizedTensorStorage
 from ..utils import canonicalize_dtype
 
 
-@functools.lru_cache(maxsize=1)
+@functools.lru_cache(maxsize=None)
+def _cudnn_frontend_version_at_least(min_version: str) -> bool:
+    """Check cuDNN frontend package version."""
+    try:
+        return PkgVersion(get_pkg_version("nvidia-cudnn-frontend")) >= PkgVersion(min_version)
+    except PackageNotFoundError:
+        return False
+
+
 def _cudnn_frontend_version_supported() -> bool:
     """Check cuDNN frontend is at least 1.23.0.
 
-    All grouped MLP fused-kernel features require cuDNN frontend 1.23.0.
+    All grouped MLP fused-kernel features require cuDNN frontend >= 1.23.0.
     """
-    try:
-        return PkgVersion(get_pkg_version("nvidia-cudnn-frontend")) >= PkgVersion("1.23.0")
-    except PackageNotFoundError:
-        return False
+    return _cudnn_frontend_version_at_least("1.23.0")
+
+
+def _cudnn_frontend_geglu_runtime_params() -> bool:
+    """Check cuDNN frontend is at least 1.24.0.
+
+    Runtime-configurable GeGLU parameters (linear_offset, geglu_alpha,
+    glu_clamp_max, glu_clamp_min) require cuDNN frontend >= 1.24.0.
+    """
+    return _cudnn_frontend_version_at_least("1.24.0")
+
+
+def _cudnn_frontend_supports_grouped_gemm_srelu() -> bool:
+    """Check cuDNN frontend min version for grouped GEMM SReLU kernels."""
+    return _cudnn_frontend_version_at_least("1.24.0")
+
+
+def _nvidia_cudnn_frontend_supports_wgrad() -> bool:
+    """Check cuDNN FE min version for grouped GEMM wgrad kernel."""
+    return _cudnn_frontend_version_supported()
+
+
+def _group_quantize_for_grouped_mlp(
+    tensor: torch.Tensor,
+    quantizer: Quantizer,
+    num_groups: int,
+    split_sizes: Optional[torch.Tensor],
+    *,
+    tensor_offsets: Optional[torch.Tensor] = None,
+) -> GroupedTensor:
+    """Quantize into grouped storage."""
+
+    # Typical case: group-quantize
+    if num_groups != 1 or not isinstance(quantizer, NVFP4Quantizer):
+        return tex.group_quantize(
+            tensor,
+            quantizer,
+            num_groups,
+            split_sizes,
+            tensor_offsets=tensor_offsets,
+        )
+
+    # --------------------------------------------------
+    # Special case: single-tensor NVFP4 quantize
+    # --------------------------------------------------
+
+    quantized = tex.quantize(tensor, quantizer)
+    with_gemm_swizzled_scales = quantized._with_gemm_swizzled_scales
+    if quantizer.optimize_for_gemm:
+        tex.swizzle_scales_for_gemm_(quantized)
+        with_gemm_swizzled_scales = True
+
+    rowwise_data = quantized._rowwise_data
+    rowwise_scale = quantized._rowwise_scale_inv
+    columnwise_data = quantized._columnwise_data
+    columnwise_scale = quantized._columnwise_scale_inv
+    amax = quantized._amax_rowwise
+    columnwise_amax = quantized._amax_columnwise
+
+    if split_sizes is None:
+        split_sizes = torch.full((1,), tensor.shape[0], dtype=torch.int64, device=tensor.device)
+    else:
+        split_sizes = split_sizes.to(dtype=torch.int64, device=tensor.device)
+
+    m_dim = tensor.shape[0]
+    if rowwise_data is not None:
+        k_dim = rowwise_data.shape[-1] * 2
+    elif columnwise_data is not None:
+        k_dim = columnwise_data.shape[0]
+    else:
+        k_dim = tensor.shape[-1]
+
+    if tensor_offsets is None:
+        tensor_offsets = torch.cat(
+            [
+                torch.zeros(1, dtype=torch.int64, device=tensor.device),
+                torch.cumsum(split_sizes * k_dim, dim=0),
+            ],
+        )
+
+    return GroupedTensor(
+        shape=(m_dim, k_dim),
+        dtype=tensor.dtype,
+        quantizer=quantizer,
+        num_tensors=1,
+        data=rowwise_data.reshape(-1) if rowwise_data is not None else None,
+        columnwise_data=columnwise_data.reshape(-1) if columnwise_data is not None else None,
+        scale_inv=rowwise_scale.reshape(-1) if rowwise_scale is not None else None,
+        columnwise_scale_inv=columnwise_scale.reshape(-1) if columnwise_scale is not None else None,
+        amax=amax,
+        columnwise_amax=columnwise_amax,
+        first_dims=split_sizes,
+        tensor_offsets=tensor_offsets,
+        with_gemm_swizzled_scales=with_gemm_swizzled_scales,
+    )
+
+
+def _nvfp4_amax(
+    tensors: GroupedTensor | Iterable[NVFP4TensorStorage],
+    *,
+    columnwise: bool,
+) -> torch.Tensor:
+    """Get one NVFP4 amax value per group."""
+    grouped_attr = "columnwise_amax" if columnwise else "amax"
+    tensor_attr = "_amax_columnwise" if columnwise else "_amax_rowwise"
+
+    if hasattr(tensors, grouped_attr):
+        amax = getattr(tensors, grouped_attr)
+        if amax is None:
+            raise RuntimeError(f"NVFP4 GroupedTensor is missing {grouped_attr}.")
+        return amax.view(-1)
+
+    amaxes = [getattr(tensor, tensor_attr) for tensor in tensors]
+    if any(amax is None for amax in amaxes):
+        raise RuntimeError(f"NVFP4 tensor list is missing {tensor_attr}.")
+    return torch.cat([amax.view(-1) for amax in amaxes], dim=0)
+
+
+def _nvfp4_single_tensor_from_grouped(
+    grouped: GroupedTensor,
+    quantizer: Optional[NVFP4Quantizer] = None,
+    *,
+    fp4_dtype: Optional[torch.dtype] = None,
+) -> NVFP4Tensor:
+    """Build a single NVFP4Tensor view over a one-member grouped storage."""
+    if quantizer is None:
+        quantizer = grouped.quantizer
+    if not isinstance(quantizer, NVFP4Quantizer):
+        raise TypeError("Expected an NVFP4 GroupedTensor.")
+
+    shape = tuple(grouped.logical_shape)
+    rowwise_data = None
+    if grouped.rowwise_data is not None:
+        rowwise_data = grouped.rowwise_data.view(quantizer.convert_shape_for_fp4(shape))
+
+    rowwise_scale_inv = None
+    if grouped.scale_inv is not None:
+        rowwise_scale_inv = grouped.scale_inv.view(quantizer.get_scale_shape(shape, False))
+
+    columnwise_data = None
+    if grouped.columnwise_data is not None:
+        columnwise_shape = quantizer.get_columnwise_shape(shape)
+        columnwise_data = grouped.columnwise_data.view(
+            quantizer.convert_shape_for_fp4(columnwise_shape)
+        )
+
+    columnwise_scale_inv = None
+    if grouped.columnwise_scale_inv is not None:
+        columnwise_scale_inv = grouped.columnwise_scale_inv.view(
+            quantizer.get_scale_shape(shape, True)
+        )
+
+    return NVFP4Tensor(
+        shape=shape,
+        dtype=grouped.get_dtype(),
+        rowwise_data=rowwise_data,
+        rowwise_scale_inv=rowwise_scale_inv,
+        columnwise_data=columnwise_data,
+        columnwise_scale_inv=columnwise_scale_inv,
+        amax_rowwise=grouped.amax,
+        amax_columnwise=grouped.columnwise_amax,
+        fp4_dtype=fp4_dtype or quantizer.dtype,
+        quantizer=quantizer,
+        requires_grad=False,
+        with_gemm_swizzled_scales=grouped._with_gemm_swizzled_scales,
+    )
 
 
 def is_quantized_tensor(tensor: torch.Tensor | QuantizedTensorStorage) -> bool:
@@ -182,8 +356,21 @@ def get_dummy_wgrads_for_params(
     return out
 
 
-def validate_grouped_mlp_dims(fc1, glu_op, fc2) -> None:
-    """Validate FC1 / scaled GLU / FC2 dimensions for fused grouped MLP."""
+def is_glu_activation(activation_op) -> bool:
+    """Whether an activation consumes a GLU-style doubled input."""
+    from .basic import (  # pylint: disable=import-outside-toplevel
+        ScaledClampedQGeGLU,
+        ScaledSwiGLU,
+    )
+
+    return isinstance(activation_op, (ScaledSwiGLU, ScaledClampedQGeGLU))
+
+
+def validate_grouped_mlp_dims(fc1, activation_op, fc2) -> None:
+    """Validate FC1 / activation / FC2 dimensions for fused grouped MLP."""
+    from .basic import (  # pylint: disable=import-outside-toplevel
+        ScaledSReLU,
+    )
 
     if fc1.in_features % 64 != 0 or fc1.out_features % 64 != 0:
         raise ValueError(
@@ -195,17 +382,24 @@ def validate_grouped_mlp_dims(fc1, glu_op, fc2) -> None:
             f"Unsupported dims for FC2 (num_groups={fc2.num_groups}, "
             f"in_features={fc2.in_features}, out_features={fc2.out_features})."
         )
-    if fc1.out_features != 2 * fc2.in_features or fc1.num_groups != fc2.num_groups:
+    if is_glu_activation(activation_op):
+        expected_fc1_out_features = 2 * fc2.in_features
+    elif isinstance(activation_op, ScaledSReLU):
+        expected_fc1_out_features = fc2.in_features
+    else:
+        raise TypeError(f"Unsupported grouped MLP activation ({activation_op.__class__.__name__}).")
+
+    if fc1.out_features != expected_fc1_out_features or fc1.num_groups != fc2.num_groups:
         raise ValueError(
             f"FC1 (num_groups={fc1.num_groups}, in_features={fc1.in_features}, "
             f"out_features={fc1.out_features}) "
             f"and FC2 (num_groups={fc2.num_groups}, in_features={fc2.in_features}, "
             f"out_features={fc2.out_features}) do not match."
         )
-    if glu_op.glu_interleave_size != 32:
+    if is_glu_activation(activation_op) and activation_op.glu_interleave_size != 32:
         raise ValueError(
             "Fused kernel requires 32-wide GLU interleaving, "
-            f"but got glu_interleave_size={glu_op.glu_interleave_size}."
+            f"but got glu_interleave_size={activation_op.glu_interleave_size}."
         )
 
 
@@ -214,8 +408,9 @@ def fuse_grouped_mlp_ops(
     *,
     recipe,
     fused_op_cls,
+    activation_op_types=None,
 ):
-    """Sliding-window fusion for GroupedLinear + scaled GLU + GroupedLinear.
+    """Sliding-window fusion for GroupedLinear + activation + GroupedLinear.
 
     Parameters
     ----------
@@ -225,9 +420,7 @@ def fuse_grouped_mlp_ops(
         Quantization recipe.
     fused_op_cls : type
         Fused operation class with ``is_supported()`` classmethod and
-        constructor accepting ``fc1``, ``glu_op``, ``fc2`` keyword args. The
-        ``glu_op`` must be :class:`~transformer_engine.pytorch.ops.basic.swiglu.ScaledSwiGLU`
-        or :class:`~transformer_engine.pytorch.ops.basic.swiglu.ScaledClampedQGeGLU`.
+        constructor accepting ``fc1``, ``activation``, and ``fc2`` keyword args.
 
     Returns
     -------
@@ -242,8 +435,13 @@ def fuse_grouped_mlp_ops(
 
     if not fused_op_cls.is_supported():
         return ops
-    if recipe is None or not recipe.mxfp8():
+    if recipe is None or not (recipe.mxfp8() or recipe.nvfp4()):
         return ops
+    # NVFP4 fused grouped MLP uses graph-safe grouped quantize, which currently requires RHT.
+    if recipe.nvfp4() and recipe.disable_rht:
+        return ops
+    if activation_op_types is None:
+        activation_op_types = (ScaledSwiGLU, ScaledClampedQGeGLU)
 
     out = []
     window, ops = ops[:3], ops[3:]
@@ -252,30 +450,30 @@ def fuse_grouped_mlp_ops(
         matches_pattern = True
         if not (
             isinstance(window[0], GroupedLinear)
-            and isinstance(window[1], (ScaledSwiGLU, ScaledClampedQGeGLU))
+            and isinstance(window[1], activation_op_types)
             and isinstance(window[2], GroupedLinear)
         ):
             matches_pattern = False
-        elif isinstance(window[1], ScaledClampedQGeGLU) and (
-            abs(window[1]._clamped.alpha - 1.702) > 0.001
-        ):
-            matches_pattern = False
-        elif window[0].num_groups != window[2].num_groups:
-            matches_pattern = False
         elif (
-            window[0].in_features % 64 != 0
-            or window[0].out_features % 64 != 0
-            or window[2].in_features % 64 != 0
-            or window[2].out_features % 64 != 0
+            isinstance(window[1], ScaledClampedQGeGLU)
+            and not _cudnn_frontend_geglu_runtime_params()
+            and (
+                abs(window[1]._clamped.alpha - 1.702) > 0.001
+                or abs(window[1]._clamped.glu_linear_offset - 1.0) > 0.001
+                or abs(window[1]._clamped.limit - 7.0) > 0.001
+            )
         ):
             matches_pattern = False
-        elif window[1].glu_interleave_size != 32:
-            matches_pattern = False
+        else:
+            try:
+                validate_grouped_mlp_dims(window[0], window[1], window[2])
+            except (TypeError, ValueError):
+                matches_pattern = False
 
         if matches_pattern:
             op = fused_op_cls(
                 fc1=window[0],
-                swiglu=window[1],
+                activation=window[1],
                 fc2=window[2],
             )
             window = [op]
