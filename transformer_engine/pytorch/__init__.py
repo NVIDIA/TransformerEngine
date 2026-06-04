@@ -54,6 +54,8 @@ from transformer_engine.pytorch.quantization import DelayedScalingRequest
 from transformer_engine.pytorch.utils import get_cudnn_version
 from transformer_engine.pytorch.utils import get_device_compute_capability
 from transformer_engine.pytorch.utils import is_bf16_available
+from transformer_engine.pytorch.utils import deinterleave_glu_tensor
+from transformer_engine.pytorch.utils import interleave_glu_tensor
 from transformer_engine.pytorch.graph import make_graphed_callables
 from transformer_engine.pytorch.distributed import checkpoint
 from transformer_engine.pytorch.distributed import CudaRNGStatesTracker
