@@ -5,7 +5,7 @@
 """Pure Python base classes for quantization."""
 
 from __future__ import annotations
-from typing import Optional, Tuple, Iterable, Any, Dict, Union
+from typing import Optional, Tuple, Iterable, Any, Dict, List, Union
 import abc
 import warnings
 import math
@@ -16,11 +16,87 @@ from torch.utils._pytree import tree_map
 import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
+from transformer_engine.pytorch.fp8_dtype import from_tex
 from transformer_engine.pytorch.tensor._quantization_helpers import (
     _QuantizeFunc,
     _IdentityFunc,
     _stride_from_shape,
 )
+
+
+# Maps a Quantizer subclass's ``__qualname__`` to the class object. Populated
+# lazily via :meth:`Quantizer.__init_subclass__` and consumed by
+# :meth:`Quantizer._unflatten` to dispatch reconstruction to the right
+# subclass when a TE custom op is unpacked under ``torch.compile``.
+_QUANTIZER_REGISTRY: Dict[str, type] = {}
+
+
+def _quantizer_subclass_snapshot(
+    quantizer: Optional["Quantizer"],
+) -> Optional[Tuple[Tuple[str, Any], ...]]:
+    """Return a Dynamo-guard-stable snapshot of a quantizer, or ``None``.
+
+    Used by tensor subclasses (e.g. :class:`Float8Tensor`) to embed a
+    tensor-free, comparable representation of their live
+    :class:`Quantizer` in the ``meta`` dict returned from
+    ``__tensor_flatten__``. PyTorch's tensor-subclass metadata guard
+    diff-checks that dict via ``dict.__eq__`` on every entry into the
+    compiled region, so values that resolve to elementwise tensor
+    comparison or identity-only equality (live ``torch.Tensor``
+    objects, ``ProcessGroup``, the live quantizer instance itself)
+    cannot appear there.
+
+    The snapshot is a sorted tuple of ``(key, value)`` pairs derived
+    from ``quantizer._flatten()`` whenever the quantizer's state is
+    fully expressible without tensors (an empty trailing tensor list
+    in the ``_flatten`` triplet). Quantizers carrying tensors in their
+    state (e.g. :class:`Float8Quantizer`'s ``scale`` / ``amax``) and
+    quantizers that don't implement ``_flatten`` produce ``None``;
+    in that case the subclass's ``__tensor_unflatten__`` will
+    rebuild the wrapper with ``quantizer=None`` and any code that
+    needs the live quantizer must source it from the bucket-level
+    opaque metadata flowing through the inner custom op.
+    """
+    if quantizer is None:
+        return None
+    try:
+        meta, _pg, tensors = quantizer._flatten()
+    except NotImplementedError:
+        return None
+    if tensors:
+        return None
+    if hasattr(meta, "_data"):
+        meta_dict = meta._data
+    elif isinstance(meta, dict):
+        meta_dict = meta
+    else:
+        return None
+    return tuple(sorted(meta_dict.items(), key=lambda kv: kv[0]))
+
+
+def _quantizer_from_subclass_snapshot(
+    snapshot: Optional[Tuple[Tuple[str, Any], ...]],
+) -> Optional["Quantizer"]:
+    """Inverse of :func:`_quantizer_subclass_snapshot`.
+
+    Rebuilds the quantizer from the qualname stored in the snapshot's
+    ``"_qcls"`` entry, dispatching via :func:`Quantizer._unflatten`
+    (and so via the right subclass's ``_do_unflatten``). The
+    reconstructed quantizer's process-group reference is always
+    ``None`` -- live ``ProcessGroup`` objects cannot survive the
+    snapshot round trip; callers that need a real process group
+    obtain it via the bucket-level opaque metadata instead.
+    """
+    if snapshot is None:
+        return None
+    meta_dict = dict(snapshot)
+    return Quantizer._unflatten(meta_dict, None, [])
+
+
+# Same idea for lightweight QuantizedTensorStorage shells. Populated via
+# :meth:`QuantizedTensorStorage.__init_subclass__` and consumed by
+# :meth:`QuantizedTensorStorage._torch_compile_unflatten`.
+_STORAGE_REGISTRY: Dict[str, type] = {}
 
 
 # Custom ops that should pass through __torch_dispatch__ without unwrapping
@@ -47,6 +123,47 @@ class QuantizedTensorStorage:
 
     _dtype: torch.dtype
     _quantizer: Optional[Quantizer]
+
+    # ------------------------------------------------------------------ #
+    # Declarative schema for the unified flatten / unflatten machinery   #
+    # (consumed by both the storage ``_torch_compile_flatten`` protocol  #
+    # and ``QuantizedTensor``'s PyTorch ``__tensor_flatten__`` helper).  #
+    # ------------------------------------------------------------------ #
+
+    # Names of optional tensor attributes on the instance, in canonical
+    # order. Each name must be an attribute on ``self`` and must be
+    # accepted as a kwarg by ``cls(**kwargs)`` (potentially after
+    # remapping through :attr:`_FLATTEN_CTOR_KWARG`).
+    _FLATTEN_TENSOR_ATTRS: Tuple[str, ...] = ()
+
+    # Maps each entry in :attr:`_FLATTEN_TENSOR_ATTRS` to one of
+    # ``"rowwise"`` / ``"columnwise"`` / ``"always"``. Consumed by
+    # :meth:`Quantizer.create_metadata` (and the storage's
+    # :meth:`_torch_compile_flatten`) to translate a live quantizer's
+    # ``rowwise_usage`` / ``columnwise_usage`` flags into the set of
+    # present inner tensors.
+    # Unmapped attributes default to ``"always"``.
+    _FLATTEN_TENSOR_USAGE: Dict[str, str] = {}
+
+    # Names of value-stable scalar / enum attributes needed to round-trip
+    # the instance. Same naming / kwarg conventions as
+    # :attr:`_FLATTEN_TENSOR_ATTRS`.
+    _FLATTEN_META_ATTRS: Tuple[str, ...] = ()
+
+    # Map from attribute name to constructor kwarg name, used when they
+    # differ (e.g. ``_data`` -> ``data``). Identity by default.
+    _FLATTEN_CTOR_KWARG: Dict[str, str] = {}
+
+    @classmethod
+    def _flatten_meta_overrides(cls, meta: Dict[str, Any]) -> Dict[str, Any]:
+        """Hook for last-mile meta value massaging before unflatten dispatches
+        to ``cls(**kwargs)``. Default: no-op.
+
+        Used today by :class:`Float8Tensor` to bridge :class:`FP8DType`
+        (carried by the subclass output spec) back to the native
+        ``tex.DType`` accepted by pybind-bound kernels.
+        """
+        return meta
 
     def update_usage(
         self,
@@ -131,6 +248,143 @@ class QuantizedTensorStorage:
         raise NotImplementedError(
             f"{self.__class__.__name__} class does not implement copy_from_storage function"
         )
+
+    # ------------------------------------------------------------------ #
+    # torch.compile flatten / unflatten protocol
+    # ------------------------------------------------------------------ #
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        _STORAGE_REGISTRY[cls.__qualname__] = cls
+
+    def __eq__(self, other: object) -> bool:
+        return self is other
+
+    def __hash__(self) -> int:
+        return id(self)
+
+    @classmethod
+    def _flatten_ctor_kw(cls, attr_name: str) -> str:
+        """Return the constructor kwarg name corresponding to ``attr_name``.
+
+        Identity unless overridden via :attr:`_FLATTEN_CTOR_KWARG`.
+        """
+        return cls._FLATTEN_CTOR_KWARG.get(attr_name, attr_name)
+
+    @staticmethod
+    def _flatten_presence_key(attr_name: str) -> str:
+        """Return the ``has_*`` meta key indicating whether ``attr_name`` is
+        present in the flattened payload. Derived from the attribute name
+        (with the leading underscore stripped) so the static metadata
+        constructors in ``float8_tensor.py`` etc. don't need to know about
+        :attr:`_FLATTEN_CTOR_KWARG` remapping.
+        """
+        return f"has_{attr_name.lstrip('_')}"
+
+    def _torch_compile_flatten(
+        self,
+    ) -> Tuple[Any, Optional["torch.distributed.ProcessGroup"], List[torch.Tensor]]:
+        """Pack storage state into the ``(meta, pg, tensors)`` triplet
+        consumed by :mod:`transformer_engine.pytorch.dynamo`.
+
+        Generic implementation driven by :attr:`_FLATTEN_TENSOR_ATTRS`,
+        :attr:`_FLATTEN_META_ATTRS`, and :attr:`_FLATTEN_CTOR_KWARG`.
+        Quantizer-with-tensors (e.g. :class:`Float8Quantizer`'s
+        ``scale`` / ``amax``) is round-tripped via
+        :meth:`Quantizer._flatten`; quantizer tensors trail the
+        storage's own tensors in the flat list.
+        """
+        from transformer_engine.pytorch.dynamo import (  # pylint: disable=import-outside-toplevel
+            OpaqueSimpleMetadata,
+        )
+
+        tensors: List[torch.Tensor] = []
+        meta_dict: Dict[str, Any] = {"_qstorage_cls": type(self).__qualname__}
+        # Tensor-wrapper fields are only relevant when ``self`` is a live
+        # ``torch.Tensor`` (e.g. ``Float8Tensor`` flattened directly into a
+        # storage payload by ``_flatten_subclass_into_slots``); a bare
+        # storage shell has no outer shape / requires_grad / device.
+        if isinstance(self, torch.Tensor):
+            meta_dict.update(
+                {
+                    "is_tensor": True,
+                    "shape": torch.Size(self.shape),
+                    "requires_grad": self.requires_grad,
+                    "device": self.device,
+                }
+            )
+        for attr in self._FLATTEN_META_ATTRS:
+            meta_dict[self._flatten_ctor_kw(attr)] = getattr(self, attr)
+        for attr in self._FLATTEN_TENSOR_ATTRS:
+            tensor = getattr(self, attr)
+            present = tensor is not None
+            meta_dict[self._flatten_presence_key(attr)] = present
+            if present:
+                tensors.append(tensor)
+        quantizer_meta = None
+        process_group = None
+        if self._quantizer is not None:
+            quantizer_meta, process_group, q_tensors = self._quantizer._flatten()
+            tensors.extend(q_tensors)
+        meta_dict["quantizer_meta"] = quantizer_meta
+        return OpaqueSimpleMetadata(meta_dict), process_group, tensors
+
+    @classmethod
+    def _torch_compile_do_unflatten(
+        cls,
+        meta: Any,
+        process_group: Optional["torch.distributed.ProcessGroup"],
+        tensors: List[torch.Tensor],
+    ) -> "QuantizedTensorStorage":
+        """Reconstruct ``cls`` from a triplet produced by
+        :meth:`_torch_compile_flatten`. Generic; driven by the same
+        ``_FLATTEN_*`` declarations.
+        """
+        meta = cls._flatten_meta_overrides(meta)
+        tensor_iter = iter(tensors)
+        kwargs: Dict[str, Any] = {}
+        for attr in cls._FLATTEN_TENSOR_ATTRS:
+            kw = cls._flatten_ctor_kw(attr)
+            kwargs[kw] = next(tensor_iter) if meta[cls._flatten_presence_key(attr)] else None
+        quantizer = None
+        if meta["quantizer_meta"] is not None:
+            quantizer = Quantizer._unflatten(
+                meta["quantizer_meta"], process_group, list(tensor_iter)
+            )
+        for attr in cls._FLATTEN_META_ATTRS:
+            kw = cls._flatten_ctor_kw(attr)
+            kwargs[kw] = meta[kw]
+        kwargs["quantizer"] = quantizer
+        if meta.get("is_tensor", False):
+            kwargs.update(
+                {
+                    "shape": meta["shape"],
+                    "dtype": kwargs["fake_dtype"],
+                    "requires_grad": meta["requires_grad"],
+                    "device": meta["device"],
+                }
+            )
+        return cls(**kwargs)
+
+    @classmethod
+    def _torch_compile_unflatten(
+        cls,
+        meta: Any,
+        process_group: Optional["torch.distributed.ProcessGroup"],
+        tensors: List[torch.Tensor],
+    ) -> "QuantizedTensorStorage":
+        """Dispatch to the right storage subclass based on metadata."""
+        storage_cls = meta["_qstorage_cls"]
+        target = _STORAGE_REGISTRY.get(storage_cls)
+        if target is None:
+            raise ValueError(
+                "No QuantizedTensorStorage subclass registered under "
+                f"qualname {storage_cls!r}; known: {sorted(_STORAGE_REGISTRY)}"
+            )
+        return target._torch_compile_do_unflatten(meta, process_group, tensors)
+
+
+TensorOrQuantized = Union[torch.Tensor, QuantizedTensorStorage]
 
 
 def prepare_for_saving(
@@ -219,6 +473,13 @@ class Quantizer(abc.ABC):
 
     """
     rowwise_usage: bool
+
+    # The :class:`QuantizedTensorStorage` subclass produced by this
+    # quantizer's quantize / make_empty path. Consumed by
+    # :meth:`create_metadata` to drive the inner-tensor layout that
+    # round-trips through the generic
+    # :meth:`QuantizedTensorStorage._torch_compile_do_unflatten`.
+    _storage_cls: type["QuantizedTensorStorage"]
 
     """Whether to construct quantized tensors with "column-wise usage"
 
@@ -316,8 +577,27 @@ class Quantizer(abc.ABC):
         device: Optional[Union[torch.device, str]] = None,
         requires_grad: bool = False,
         pin_memory: bool = False,
+        pythonic: bool = False,
     ) -> QuantizedTensor:
-        """Construct quantized tensor with uninitialized data"""
+        """Construct quantized tensor with uninitialized data.
+
+        When ``pythonic=True`` the tensor is allocated entirely in Python
+        (``torch.empty`` plus the subclass constructor) via
+        :meth:`_make_empty_pythonic`, instead of the C++
+        ``create_empty_quantized_tensor`` builtin. The pure-Python path is
+        traceable by ``torch.compile`` / Dynamo (the pybind C++ builtin is
+        not), so it is used on the fake path of compiled modules. The default
+        (``pythonic=False``) keeps the lower-overhead C++ allocation for eager
+        execution.
+        """
+        if pythonic:
+            return self._make_empty_pythonic(
+                shape,
+                dtype=dtype,
+                device=device,
+                requires_grad=requires_grad,
+                pin_memory=pin_memory,
+            )
 
         # Guard for custom quantizers that don't have a registered C++ converter.
         # Without this, they would hit an opaque C++ NVTE_ERROR.
@@ -341,6 +621,28 @@ class Quantizer(abc.ABC):
         if requires_grad:
             result.requires_grad_(True)
         return result
+
+    def _make_empty_pythonic(
+        self,
+        shape: Iterable[int],
+        *,
+        dtype: torch.dtype = torch.float32,
+        device: Optional[Union[torch.device, str]] = None,
+        requires_grad: bool = False,
+        pin_memory: bool = False,
+    ) -> QuantizedTensor:
+        """Pure-Python (Dynamo-traceable) allocation of an uninitialized
+        quantized tensor, used by ``make_empty(..., pythonic=True)``.
+
+        Subclasses that support ``torch.compile`` override this with the same
+        allocation logic the C++ ``create_empty_quantized_tensor`` builtin
+        performs, expressed in plain ``torch.empty`` + subclass-constructor
+        calls so it can be traced.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement a pure-Python make_empty "
+            "(pythonic=True), required on the torch.compile fake path."
+        )
 
     def calibrate(self, tensor: torch.Tensor) -> None:
         """Calibrate quantizer state
@@ -400,6 +702,208 @@ class Quantizer(abc.ABC):
             "rowwise": self.rowwise_usage,
             "columnwise": self.columnwise_usage,
         }
+
+    # ------------------------------------------------------------------ #
+    # torch.compile flatten / unflatten protocol
+    # ------------------------------------------------------------------ #
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        # Auto-register every Quantizer subclass so ``_unflatten`` can
+        # dispatch back to it by ``__qualname__``.
+        _QUANTIZER_REGISTRY[cls.__qualname__] = cls
+
+    # ---- Declarative schema for the generic :meth:`_flatten` / ---- #
+    # ---- :meth:`_do_unflatten` implementations below.            ---- #
+
+    # ``__init__`` kwarg name for ``self.dtype`` (e.g. ``"fp8_dtype"``,
+    # ``"fp4_dtype"``).
+    _DTYPE_INIT_KWARG: str = "fp8_dtype"
+
+    # Scalar attribute names (besides ``dtype`` / ``rowwise_usage`` /
+    # ``columnwise_usage``) threaded through ``__init__``. The kwarg name
+    # is assumed to match the attribute name.
+    _INIT_META_ATTRS: Tuple[str, ...] = ()
+
+    # Scalar attribute names (besides ``internal`` / ``optimize_for_gemm``)
+    # set on the instance after ``__init__``.
+    _POST_INIT_META_ATTRS: Tuple[str, ...] = ()
+
+    # Tensor attribute names threaded through ``__init__``, in flatten
+    # order.
+    _INIT_TENSOR_ATTRS: Tuple[str, ...] = ()
+
+    # Tensor attribute names set on the instance after ``__init__``.
+    _POST_INIT_TENSOR_ATTRS: Tuple[str, ...] = ()
+
+    # Attribute name on ``self`` holding the (optional) ``ProcessGroup``,
+    # or ``None`` if the quantizer has no PG.
+    _PG_ATTR: Optional[str] = None
+    # ``__init__`` kwarg name to thread the PG through. ``None`` means
+    # set ``_PG_ATTR`` directly after ``__init__``.
+    _PG_INIT_KWARG: Optional[str] = None
+
+    # Hardcoded ``__init__`` kwargs not derived from meta (e.g.
+    # ``device=torch.device("cuda")`` for ``Float8CurrentScalingQuantizer``).
+    _FIXED_INIT_KWARGS: Dict[str, Any] = {}
+
+    def _flatten(
+        self,
+    ) -> Tuple[Any, Optional["torch.distributed.ProcessGroup"], List[torch.Tensor]]:
+        """Pack this quantizer's state into the
+        ``(meta, process_group, tensors)`` triplet expected by the
+        flattenable bucket in :mod:`transformer_engine.pytorch.dynamo`.
+
+        Generic implementation driven by the declarative schema attrs above.
+        Subclasses only declare which scalars / tensors go through
+        ``__init__`` vs. are set post-init; the base class round-trips
+        ``dtype`` / ``rowwise_usage`` / ``columnwise_usage`` and
+        ``internal`` / ``optimize_for_gemm`` on every quantizer.
+        """
+        from .dynamo import OpaqueSimpleMetadata  # pylint: disable=import-outside-toplevel
+
+        cls = type(self)
+        meta_dict: Dict[str, Any] = {
+            "_qcls": cls.__qualname__,
+            "dtype": self.dtype,
+            "rowwise_usage": self.rowwise_usage,
+            "columnwise_usage": self.columnwise_usage,
+            "internal": self.internal,
+            "optimize_for_gemm": self.optimize_for_gemm,
+        }
+        for attr in (*cls._INIT_META_ATTRS, *cls._POST_INIT_META_ATTRS):
+            meta_dict[attr] = getattr(self, attr)
+        tensors = [
+            getattr(self, attr) for attr in (*cls._INIT_TENSOR_ATTRS, *cls._POST_INIT_TENSOR_ATTRS)
+        ]
+        pg = getattr(self, cls._PG_ATTR) if cls._PG_ATTR else None
+        return OpaqueSimpleMetadata(meta_dict), pg, tensors
+
+    @classmethod
+    def _do_unflatten(
+        cls,
+        meta: Any,
+        process_group: Optional["torch.distributed.ProcessGroup"],
+        tensors: List[torch.Tensor],
+    ) -> "Quantizer":
+        """Reconstruct an instance of ``cls`` from the triplet returned by a
+        previous :meth:`_flatten` on the same subclass. Generic; driven
+        by the declarative schema attrs.
+        """
+        init_kwargs: Dict[str, Any] = {
+            cls._DTYPE_INIT_KWARG: meta["dtype"],
+            "rowwise": meta["rowwise_usage"],
+            "columnwise": meta["columnwise_usage"],
+        }
+        for attr in cls._INIT_META_ATTRS:
+            init_kwargs[attr] = meta[attr]
+        if cls._PG_INIT_KWARG is not None:
+            init_kwargs[cls._PG_INIT_KWARG] = process_group
+        init_kwargs.update(cls._FIXED_INIT_KWARGS)
+        tensor_iter = iter(tensors)
+        for attr in cls._INIT_TENSOR_ATTRS:
+            init_kwargs[attr] = next(tensor_iter)
+        q = cls(**init_kwargs)
+        q.internal = meta["internal"]
+        q.optimize_for_gemm = meta["optimize_for_gemm"]
+        for attr in cls._POST_INIT_META_ATTRS:
+            setattr(q, attr, meta[attr])
+        for attr in cls._POST_INIT_TENSOR_ATTRS:
+            setattr(q, attr, next(tensor_iter))
+        if cls._PG_ATTR is not None and cls._PG_INIT_KWARG is None:
+            setattr(q, cls._PG_ATTR, process_group)
+        return q
+
+    @classmethod
+    def _unflatten(
+        cls,
+        meta: Any,
+        process_group: Optional["torch.distributed.ProcessGroup"],
+        tensors: List[torch.Tensor],
+    ) -> "Quantizer":
+        """Dispatch to the right subclass's :meth:`_do_unflatten` based on
+        the ``"_qcls"`` qualname stored in ``meta``.
+        """
+        qcls = meta["_qcls"]
+        target = _QUANTIZER_REGISTRY.get(qcls)
+        if target is None:
+            raise ValueError(
+                f"No Quantizer subclass registered under qualname {qcls!r}; "
+                f"known: {sorted(_QUANTIZER_REGISTRY)}"
+            )
+        return target._do_unflatten(meta, process_group, tensors)
+
+    def _storage_scalars(self) -> Dict[str, Any]:
+        """Per-quantizer scalar fields for the storage's ``_FLATTEN_META_ATTRS``.
+
+        Keys are constructor kwarg names (matching the values of
+        :attr:`QuantizedTensorStorage._FLATTEN_CTOR_KWARG`). ``fake_dtype``
+        is supplied separately by :meth:`create_metadata`; subclasses
+        only need to return their quantizer-specific scalars (e.g.
+        ``fp8_dtype``, ``with_gemm_swizzled_scales``).
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} class does not implement _storage_scalars; "
+            "required for torch.compile output specs that emit a "
+            "QuantizedTensorStorage."
+        )
+
+    # Keys in :meth:`_storage_scalars` whose values are pybind enums
+    # (``transformer_engine_torch.DType``) and must be converted to the
+    # Python ``FP8DType`` proxy for :meth:`create_metadata`. The opaque
+    # registration in :mod:`fp8_dtype` is enough to flow ``tex.DType``
+    # through Dynamo as an FX constant, but
+    # :meth:`autograd.Function.apply` -- used by
+    # :func:`_ToSubclassFn.reassemble_with_autograd` -- still rejects
+    # opaque values via its proxy-conversion check. The reverse
+    # conversion lives in the tensor subclass's
+    # :meth:`_flatten_meta_overrides`.
+    _SUBCLASS_META_TEX_KEYS: Tuple[str, ...] = ("fp8_dtype",)
+
+    def create_metadata(
+        self,
+        *,
+        fake_dtype: torch.dtype,
+        requires_grad: bool = False,
+    ) -> Tuple[Tuple[str, ...], Dict[str, Any]]:
+        """Return ``(inner_names, meta)`` for :meth:`QuantizedTensor.__tensor_unflatten__`.
+
+        Generic implementation driven by the storage class's
+        :attr:`QuantizedTensorStorage._FLATTEN_TENSOR_ATTRS` /
+        :attr:`QuantizedTensorStorage._FLATTEN_TENSOR_USAGE` plus this
+        quantizer's :meth:`_storage_scalars`. ``inner_names`` follows the
+        declaration order of ``_FLATTEN_TENSOR_ATTRS`` so it matches the
+        slot order produced by :meth:`QuantizedTensor.__tensor_flatten__`
+        in :func:`dynamo._flatten_value_into`.
+
+        ``quantizer_snapshot`` is forced to ``None`` on this path:
+        rebuilding a live :class:`Quantizer` inside
+        ``__tensor_unflatten__`` would force Dynamo to trace the
+        constructor, which routinely trips
+        ``UserDefinedObjectVariable(...Quantizer)``.
+        """
+        storage_cls = type(self)._storage_cls
+        usage_flag = {
+            "rowwise": self.rowwise_usage,
+            "columnwise": self.columnwise_usage,
+            "always": True,
+        }
+        inner_names = tuple(
+            attr
+            for attr in storage_cls._FLATTEN_TENSOR_ATTRS
+            if usage_flag[storage_cls._FLATTEN_TENSOR_USAGE.get(attr, "always")]
+        )
+        scalars = self._storage_scalars()
+        for key in self._SUBCLASS_META_TEX_KEYS:
+            if key in scalars:
+                scalars[key] = from_tex(scalars[key])
+        meta: Dict[str, Any] = {
+            **scalars,
+            "fake_dtype": fake_dtype,
+            "quantizer_snapshot": None,
+            "requires_grad": requires_grad,
+        }
+        return inner_names, meta
 
 
 class QuantizedTensor(torch.Tensor):
@@ -756,13 +1260,13 @@ class QuantizedTensor(torch.Tensor):
         out = super().__torch_dispatch__(func, types, args, kwargs)
         return out
 
-    @classmethod
-    def __torch_function__(cls, func, types, args=(), kwargs=None):
-        if kwargs is None:
-            kwargs = {}
-
-        # Do not force the QuantizedTensor type on the returned tensor
-        return torch._C._disabled_torch_function_impl(func, types, args, kwargs)
+    # Set as a class-level attribute rather than a ``@classmethod`` so that
+    # Dynamo recognises the canonical "torch_function disabled" idiom
+    # and can trace through custom-op calls that receive a
+    # QuantizedTensor subclass as an argument. As a method override,
+    # Dynamo bails with "cannot trace builtin
+    # torch._C._disabled_torch_function_impl".
+    __torch_function__ = torch._C._disabled_torch_function_impl
 
     def contiguous(
         self, memory_format: torch.memory_format = torch.contiguous_format
@@ -782,6 +1286,65 @@ class QuantizedTensor(torch.Tensor):
         raise NotImplementedError(
             f"{self.__class__.__name__} class does not implement get_metadata function"
         )
+
+    # ------------------------------------------------------------------ #
+    # PyTorch wrapper-subclass flatten / unflatten                       #
+    # ------------------------------------------------------------------ #
+    #
+    # Driven by the same ``_FLATTEN_*_ATTRS`` / ``_FLATTEN_CTOR_KWARG``
+    # declarations as :meth:`QuantizedTensorStorage._torch_compile_flatten`,
+    # plus the :meth:`_flatten_meta_overrides` hook (Float8Tensor uses it
+    # to bridge :class:`FP8DType` <-> ``tex.DType``).
+    #
+    # Per-subclass differences vs the storage path: PyTorch's protocol
+    # carries only attributes living on ``self`` (no quantizer tensors,
+    # no process group). Quantizers whose state contains tensors (e.g.
+    # :class:`Float8Quantizer`'s ``scale`` / ``amax``,
+    # :class:`NVFP4Quantizer`'s ``rht_matrix``) therefore round-trip via
+    # :func:`_quantizer_subclass_snapshot`, which bails to ``None``; the
+    # reconstructed tensor's ``_quantizer`` is ``None`` and downstream
+    # code that needs the live quantizer sources it from the bucket-level
+    # opaque metadata flowing alongside the inner op.
+
+    def __tensor_flatten__(self) -> Tuple[list, dict]:
+        if not type(self)._FLATTEN_TENSOR_ATTRS:
+            raise NotImplementedError(
+                f"{type(self).__name__} did not declare _FLATTEN_TENSOR_ATTRS"
+            )
+        inner: list = [
+            attr for attr in self._FLATTEN_TENSOR_ATTRS if getattr(self, attr) is not None
+        ]
+        meta: Dict[str, Any] = {
+            "quantizer_snapshot": _quantizer_subclass_snapshot(self._quantizer),
+            "requires_grad": self.requires_grad,
+        }
+        for attr in self._FLATTEN_META_ATTRS:
+            meta[self._flatten_ctor_kw(attr)] = getattr(self, attr)
+        return inner, meta
+
+    @classmethod
+    def __tensor_unflatten__(
+        cls,
+        inner_tensors: dict,
+        meta: dict,
+        outer_size,
+        outer_stride,
+    ) -> "QuantizedTensor":
+        meta = cls._flatten_meta_overrides(meta)
+        quantizer = _quantizer_from_subclass_snapshot(meta.get("quantizer_snapshot"))
+        kwargs: Dict[str, Any] = {
+            "shape": outer_size,
+            "dtype": meta["fake_dtype"],
+            "requires_grad": meta.get("requires_grad", False),
+            "quantizer": quantizer,
+        }
+        for attr in cls._FLATTEN_TENSOR_ATTRS:
+            kw = cls._flatten_ctor_kw(attr)
+            kwargs[kw] = inner_tensors.get(attr)
+        for attr in cls._FLATTEN_META_ATTRS:
+            kw = cls._flatten_ctor_kw(attr)
+            kwargs[kw] = meta[kw]
+        return cls(**kwargs)
 
     @classmethod
     def make_like(

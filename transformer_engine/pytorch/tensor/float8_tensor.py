@@ -4,7 +4,7 @@
 
 """Tensor class with FP8 data"""
 from __future__ import annotations
-from typing import Any, Optional, Tuple, Iterable, Union
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 import warnings
 import torch
 from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
@@ -18,11 +18,65 @@ from transformer_engine.common.recipe import (
 )
 from ..utils import canonicalize_process_group, devices_match
 from .storage.float8_tensor_storage import Float8TensorStorage, _FromFloat8Func
-from ..quantized_tensor import QuantizedTensor, Quantizer
+from ..quantized_tensor import (
+    QuantizedTensor,
+    Quantizer,
+)
 from ._quantization_helpers import _IdentityFunc
-from ..constants import dist_group_type
+from ..constants import canonicalize_te_dtype, dist_group_type
+from ..fp8_dtype import FP8DType, to_tex
 
 aten = torch.ops.aten
+
+
+def _float8_make_fake_empty(
+    quantizer: "Quantizer",
+    shape: Iterable[int],
+    *,
+    dtype: torch.dtype = torch.float32,
+    device: Optional[torch.device] = None,
+) -> "Float8Tensor":
+    """Dynamo-safe ``Float8Tensor`` allocation shared by the FP8 quantizers.
+
+    Mirrors the inner-tensor layout of ``make_empty`` (rowwise ``_data`` /
+    columnwise ``_transpose`` / ``_scale_inv``) but assembles the wrapper
+    through :meth:`QuantizedTensor.__tensor_unflatten__` -- which takes a
+    snapshot-free ``meta`` dict (``quantizer_snapshot=None``, ``FP8DType``)
+    rather than the live ``Quantizer`` / ``tex.DType`` constructor args that
+    Dynamo cannot proxy inside a traced frame.
+    """
+    from ..dynamo import _contiguous_stride  # pylint: disable=import-outside-toplevel
+
+    if device is None:
+        device = torch.device("cuda")
+    shape = list(shape)
+
+    alloc: Dict[str, torch.Tensor] = {}
+    if quantizer.rowwise_usage:
+        alloc["_data"] = torch.empty(shape, dtype=torch.uint8, device=device)
+    if quantizer.columnwise_usage:
+        transpose_shape = [shape[-1]] + list(shape[:-1])
+        alloc["_transpose"] = torch.empty(transpose_shape, dtype=torch.uint8, device=device)
+    alloc["_scale_inv"] = torch.empty(1, dtype=torch.float32, device=device)
+
+    inner_names, meta = quantizer.create_metadata(fake_dtype=dtype)
+    inner_dict = {name: alloc[name] for name in inner_names}
+    out = Float8Tensor.__tensor_unflatten__(
+        inner_dict, meta, tuple(shape), _contiguous_stride(shape)
+    )
+    # Stamp the reassembly plan so the dynamo reassembly helper
+    # (:func:`transformer_engine.pytorch.dynamo._template_reassemble`)
+    # can rebuild this subclass from the op's flat ``Tensor[]`` payload
+    # by reading an attribute (Dynamo-safe) rather than calling
+    # ``__tensor_flatten__`` in-trace.
+    out._te_compile_unflatten_plan = (tuple(inner_names), meta)
+    # Stash the live quantizer on the template so the reassembly helper can
+    # restore it on the real output (``__tensor_unflatten__`` rebuilds with
+    # ``quantizer=None`` because the snapshot can't carry a live
+    # ``ProcessGroup`` / scale-amax tensors through Dynamo guards).
+    out._te_compile_quantizer = quantizer
+    return out
+
 
 _ops_to_preserve_subclass_in_fsdp2 = {
     torch.ops.aten.empty_like.default,
@@ -56,6 +110,9 @@ class Float8Quantizer(Quantizer):
     """FP8 datatype"""
     dtype: TE_DType
 
+    _storage_cls = Float8TensorStorage
+    _INIT_TENSOR_ATTRS = ("scale", "amax")
+
     def __init__(
         self,
         scale: torch.Tensor,
@@ -68,7 +125,7 @@ class Float8Quantizer(Quantizer):
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.scale = scale
         self.amax = amax
-        self.dtype = fp8_dtype
+        self.dtype = canonicalize_te_dtype(fp8_dtype)
 
     def copy(self) -> Float8Quantizer:
         """Create shallow copy"""
@@ -111,6 +168,83 @@ class Float8Quantizer(Quantizer):
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Quantize tensor implementation"""
         return tex.quantize(tensor, self)
+
+    def _make_empty_pythonic(
+        self,
+        shape: Iterable[int],
+        *,
+        dtype: torch.dtype = torch.float32,
+        device: Optional[torch.device] = None,
+        requires_grad: bool = False,
+        pin_memory: bool = False,
+    ) -> Float8Tensor:
+        # Canonicalize tensor attributes
+        if device is None:
+            device = torch.device("cuda")
+
+        # Allocate FP8 data
+        data = None
+        if self.rowwise_usage:
+            data = torch.empty(shape, dtype=torch.uint8, device=device, pin_memory=pin_memory)
+
+        # Allocate FP8 data transpose if needed
+        data_transpose = None
+        if self.columnwise_usage:
+            transpose_shape = [shape[-1]] + list(shape[:-1])
+            data_transpose = torch.empty(
+                transpose_shape,
+                dtype=torch.uint8,
+                device=device,
+                pin_memory=pin_memory,
+            )
+
+        scale_inv = torch.empty(1, dtype=torch.float32, device=device, pin_memory=pin_memory)
+
+        # Honor ``internal``: tex.quantize() returns a bare
+        # Float8TensorStorage when the quantizer is marked internal
+        # (lower CPU overhead, no autograd-aware subclass) and so should
+        # make_empty in order to stay shape/type-equivalent on every
+        # path that touches it (eager fast-path, fake-impl under
+        # torch.compile, etc.).
+        if self.internal:
+            return Float8TensorStorage(
+                data=data,
+                fp8_scale_inv=scale_inv,
+                fp8_dtype=self.dtype,
+                fake_dtype=dtype,
+                data_transpose=data_transpose,
+                quantizer=self,
+            )
+
+        return Float8Tensor(
+            shape=shape,
+            dtype=dtype,
+            data=data,
+            fp8_scale_inv=scale_inv,
+            fp8_dtype=self.dtype,
+            requires_grad=requires_grad,
+            data_transpose=data_transpose,
+            quantizer=self,
+            device=device,
+        )
+
+    def make_fake_empty(
+        self,
+        shape: Iterable[int],
+        *,
+        dtype: torch.dtype = torch.float32,
+        device: Optional[torch.device] = None,
+    ) -> Float8Tensor:
+        """Dynamo-safe analogue of :meth:`make_empty`.
+
+        Builds the :class:`Float8Tensor` via
+        :meth:`QuantizedTensor.__tensor_unflatten__` (snapshot-free meta,
+        :class:`FP8DType`) instead of the live-quantizer constructor, so it
+        traces under ``torch.compile(fullgraph=True)`` -- where
+        :meth:`make_empty` trips on ``UserDefinedObjectVariable(Quantizer)``
+        / ``UserDefinedObjectVariable(DType)``.
+        """
+        return _float8_make_fake_empty(self, shape, dtype=dtype, device=device)
 
     def calibrate(self, tensor: torch.Tensor) -> None:
         amin, amax = tensor.aminmax()
@@ -181,6 +315,9 @@ class Float8Quantizer(Quantizer):
         """
         return True
 
+    def _storage_scalars(self) -> Dict[str, Any]:
+        return {"fp8_dtype": self.dtype}
+
 
 class Float8CurrentScalingQuantizer(Quantizer):
     """Builder class for FP8 tensors with per-tensor current scaling
@@ -213,6 +350,12 @@ class Float8CurrentScalingQuantizer(Quantizer):
     force_pow_2_scales: bool
     amax_epsilon: float
 
+    _storage_cls = Float8TensorStorage
+    _INIT_META_ATTRS = ("with_amax_reduction", "force_pow_2_scales", "amax_epsilon")
+    _PG_ATTR = "amax_reduction_group"
+    _PG_INIT_KWARG = "amax_reduction_group"
+    _FIXED_INIT_KWARGS = {"device": torch.device("cuda")}
+
     def __init__(
         self,
         fp8_dtype: TE_DType,
@@ -237,7 +380,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
                 stacklevel=2,
             )
         del device, use_existing_amax, scale, amax  # Kept for backward compatibility
-        self.dtype = fp8_dtype
+        self.dtype = canonicalize_te_dtype(fp8_dtype)
         self.with_amax_reduction = with_amax_reduction
         self.amax_reduction_group = amax_reduction_group
         self.force_pow_2_scales = force_pow_2_scales
@@ -294,6 +437,69 @@ class Float8CurrentScalingQuantizer(Quantizer):
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Quantize tensor implementation"""
         return tex.quantize(tensor, self)
+
+    def _make_empty_pythonic(
+        self,
+        shape: Iterable[int],
+        *,
+        dtype: torch.dtype = torch.float32,
+        device: Optional[torch.device] = None,
+        requires_grad: bool = False,
+        pin_memory: bool = False,
+    ) -> Float8Tensor:
+        # Canonicalize tensor attributes
+        if device is None:
+            device = torch.device("cuda")
+
+        # Allocate FP8 data
+        data = None
+        if self.rowwise_usage:
+            data = torch.empty(shape, dtype=torch.uint8, device=device, pin_memory=pin_memory)
+
+        # Allocate FP8 data transpose if needed
+        data_transpose = None
+        if self.columnwise_usage:
+            transpose_shape = [shape[-1]] + list(shape[:-1])
+            data_transpose = torch.empty(
+                transpose_shape,
+                dtype=torch.uint8,
+                device=device,
+                pin_memory=pin_memory,
+            )
+        scale_inv = torch.empty(1, dtype=torch.float32, device=device, pin_memory=pin_memory)
+
+        if self.internal:
+            return Float8TensorStorage(
+                data=data,
+                fp8_scale_inv=scale_inv,
+                fp8_dtype=self.dtype,
+                fake_dtype=dtype,
+                data_transpose=data_transpose,
+                quantizer=self,
+            )
+
+        return Float8Tensor(
+            shape=shape,
+            dtype=dtype,
+            data=data,
+            fp8_scale_inv=scale_inv,
+            fp8_dtype=self.dtype,
+            requires_grad=requires_grad,
+            data_transpose=data_transpose,
+            quantizer=self,
+            device=device,
+        )
+
+    def make_fake_empty(
+        self,
+        shape: Iterable[int],
+        *,
+        dtype: torch.dtype = torch.float32,
+        device: Optional[torch.device] = None,
+    ) -> Float8Tensor:
+        """Dynamo-safe analogue of :meth:`make_empty` (see
+        :func:`_float8_make_fake_empty`)."""
+        return _float8_make_fake_empty(self, shape, dtype=dtype, device=device)
 
     def calibrate(self, tensor: torch.Tensor) -> None:
         # current scaling don't need to calibrate
@@ -379,6 +585,9 @@ class Float8CurrentScalingQuantizer(Quantizer):
         """
         return True
 
+    def _storage_scalars(self) -> Dict[str, Any]:
+        return {"fp8_dtype": self.dtype}
+
 
 class Float8Tensor(Float8TensorStorage, QuantizedTensor):
     """Experimental tensor class with FP8 data
@@ -412,13 +621,30 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
     """
 
     def __repr__(self, *, tensor_contents=None):
-        return (
-            "Float8Tensor("
-            f"fp8_dtype={self._fp8_dtype}, "
-            f"scale_inv={self._scale_inv.item()}, "
-            f"data={self.dequantize()}"
-            ")"
-        )
+        # ``__repr__`` is on hot diagnostic paths (Dynamo's
+        # ``Dynamo failed to run FX node`` formatter, autograd
+        # anomaly mode, FX node printers, ...) and must never raise.
+        # In particular, dequantising a fake/functional tensor here
+        # would access ``data_ptr()`` and replace the real failure
+        # with a misleading data-pointer error.
+        try:
+            shape = tuple(self.shape)
+        except BaseException:  # pylint: disable=broad-except
+            shape = "<unknown>"
+        return f"Float8Tensor(fp8_dtype={self._fp8_dtype}, shape={shape})"
+
+    @classmethod
+    def _flatten_meta_overrides(cls, meta: dict) -> dict:
+        """Bridge :class:`FP8DType` (carried by the subclass output spec
+        via :meth:`Quantizer.create_metadata`) back to the native
+        ``tex.DType`` accepted by pybind-bound TE kernels. The eager
+        :meth:`__tensor_flatten__` path stores ``tex.DType`` directly and
+        is a no-op here.
+        """
+        fp8_dtype = meta.get("fp8_dtype")
+        if isinstance(fp8_dtype, FP8DType):
+            meta = {**meta, "fp8_dtype": to_tex(fp8_dtype)}
+        return meta
 
     def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """

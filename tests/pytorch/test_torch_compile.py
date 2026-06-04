@@ -125,19 +125,10 @@ if _opaque_available:
     def _make_qfactory(tag: str):
         """Return a qfactory that produces ToyQuantizer instances tagged with *tag*."""
 
-        quantizers = {
-            role: ToyQuantizer(tag=f"{tag}:{role}")
-            for role in (
-                "linear_input",
-                "linear_weight",
-                "linear_output",
-                "linear_grad_output",
-                "linear_grad_input",
-            )
-        }
-
-        def qfactory(role: str):
-            return quantizers[role]
+        def qfactory(role):
+            # ``role`` is a QuantizerRole; tag each slot with its tensor_type so
+            # the produced ToyQuantizers are distinguishable per tensor.
+            return ToyQuantizer(tag=f"{tag}:{role.tensor_type}")
 
         return qfactory
 
@@ -363,3 +354,138 @@ def test_autocast_sanity(fp8_recipe):
 
     out = compiled(inp)
     out.sum().backward()
+
+
+@pytest.mark.parametrize(
+    "fp8_recipe",
+    [None, *_all_recipes],
+    ids=lambda r: "bf16" if r is None else type(r).__name__,
+)
+def test_te_linear_compiles(fp8_recipe):
+    """torch.compile(fullgraph=True) of ``te.Linear`` under every built-in
+    recipe (and the bf16-only baseline with no autocast).
+
+    Exercises the custom-op path in
+    :mod:`transformer_engine.pytorch.dynamo`: forward goes through
+    ``_linear_compiled_op``, backward through the registered
+    ``transformer_engine::linear_backward`` op, and the dataclass
+    arg-objects are packed/unpacked via the bucket dispatch in
+    :mod:`transformer_engine.pytorch.dynamo`.
+    """
+    if fp8_recipe is not None and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+
+    dtype = torch.bfloat16
+    device = "cuda"
+
+    # FP8 GEMMs require leading dimensions divisible by 16; pick
+    # in/out features and batch comfortably above that minimum.
+    model = te.Linear(64, 32, params_dtype=dtype, device=device)
+    inp = torch.randn(32, 64, dtype=dtype, device=device, requires_grad=True)
+
+    def fn(inp):
+        if fp8_recipe is None:
+            return model(inp)
+        with te.autocast(recipe=fp8_recipe):
+            return model(inp)
+
+    torch._dynamo.reset()
+    compiled = torch.compile(fn, fullgraph=True)
+
+    out = compiled(inp)
+    out.sum().backward()
+    assert out.shape == (32, 32)
+    assert inp.grad is not None
+    assert model.weight.grad is not None, "weight.grad missing"
+    assert model.weight.grad.shape == model.weight.shape, (
+        f"weight.grad shape {tuple(model.weight.grad.shape)} != "
+        f"weight shape {tuple(model.weight.shape)}"
+    )
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_te_linear_compile_with_quantized_fp8_weight():
+    """torch.compile should handle Linear weights initialized as FP8 tensors."""
+    dtype = torch.bfloat16
+    device = "cuda"
+    fp8_recipe = recipe.Float8CurrentScaling()
+
+    with te.quantized_model_init(enabled=True, recipe=fp8_recipe):
+        model = te.Linear(64, 32, params_dtype=dtype, device=device)
+
+    assert isinstance(model.weight, te.Float8Tensor)
+    inp = torch.randn(32, 64, dtype=dtype, device=device, requires_grad=True)
+
+    def fn(inp):
+        with te.autocast(recipe=fp8_recipe):
+            return model(inp)
+
+    torch._dynamo.reset()
+    compiled = torch.compile(fn, fullgraph=True)
+
+    out = compiled(inp)
+    out.sum().backward()
+    assert out.shape == (32, 32)
+    assert inp.grad is not None
+    assert model.weight.grad is not None, "Float8Tensor weight.grad missing"
+    assert model.weight.grad.shape == model.weight.shape, (
+        f"Float8Tensor weight.grad shape {tuple(model.weight.grad.shape)} != "
+        f"weight shape {tuple(model.weight.shape)}"
+    )
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_te_linear_compile_with_fp8_output():
+    """torch.compile of ``te.Linear(..., fp8_output=True)``: forward returns
+    a :class:`Float8Tensor`.
+
+    Exercises the output-rewrap path in
+    :mod:`transformer_engine.pytorch.dynamo`: the first user output is
+    declared ``Union[torch.Tensor, Float8Tensor]`` in ``output_annotations``,
+    and when an output quantizer is active the eager + fake paths must
+    rewrap the inner data tensors back into a ``Float8Tensor`` for the
+    user-facing slot.
+
+    Backward through a subclass return value is a known PyTorch
+    ``torch.compile`` limitation (Dynamo / AOT autograd drop the
+    ``grad_fn`` on wrapper-subclass outputs of custom ops, so
+    ``out.sum().backward()`` errors with "element 0 of tensors does
+    not require grad and does not have a grad_fn"). The forward shape
+    + type assertions below are sufficient to exercise the rewrap;
+    grad-routing on FP8 outputs under compile is left as future work.
+    """
+    dtype = torch.bfloat16
+    device = "cuda"
+    fp8_recipe = recipe.Float8CurrentScaling()
+
+    model = te.Linear(64, 32, params_dtype=dtype, device=device)
+    inp = torch.randn(32, 64, dtype=dtype, device=device, requires_grad=True)
+
+    def fn(inp):
+        with te.autocast(recipe=fp8_recipe):
+            return model(inp, fp8_output=True)
+
+    torch._dynamo.reset()
+    compiled = torch.compile(fn, fullgraph=True)
+
+    out = compiled(inp)
+    assert isinstance(
+        out, te.Float8Tensor
+    ), f"expected Float8Tensor output, got {type(out).__name__}"
+    assert out.shape == (32, 32)
+    # The compile-path reassembly rebuilds the wrapper via
+    # ``__tensor_unflatten__``, whose snapshot-free ``meta`` forces
+    # ``quantizer=None`` (a live ``ProcessGroup`` / amax-reduction group
+    # can't survive Dynamo guards). ``make_fake_empty`` stashes the live
+    # quantizer on the fake template and the reassembly helper restores it,
+    # so the output must keep a (non-``None``) quantizer rather than losing
+    # its amax-reduction group.
+    assert (
+        out._quantizer is not None
+    ), "FP8 output lost its quantizer (and thus its amax-reduction group) on the torch.compile path"
+    # Dequantising outside the compiled region exercises the
+    # ``Float8Tensor`` machinery (scale + data + dtype all wired up
+    # by the rewrap) on the value returned from the compiled fn.
+    deq = out.dequantize()
+    assert deq.shape == (32, 32)
+    assert deq.dtype == dtype

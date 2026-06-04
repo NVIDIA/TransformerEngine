@@ -76,6 +76,24 @@ class Float8TensorStorage(QuantizedTensorStorage):
     _transpose: Optional[torch.Tensor]
     _transpose_invalid: bool
 
+    # Declarative schema consumed by the generic
+    # :meth:`QuantizedTensorStorage._torch_compile_flatten` /
+    # :meth:`_torch_compile_do_unflatten` implementations in the base.
+    _FLATTEN_TENSOR_ATTRS = ("_data", "_transpose", "_scale_inv")
+    _FLATTEN_TENSOR_USAGE = {
+        "_data": "rowwise",
+        "_transpose": "columnwise",
+        "_scale_inv": "always",
+    }
+    _FLATTEN_META_ATTRS = ("_fp8_dtype", "_dtype")
+    _FLATTEN_CTOR_KWARG = {
+        "_data": "data",
+        "_transpose": "data_transpose",
+        "_scale_inv": "fp8_scale_inv",
+        "_fp8_dtype": "fp8_dtype",
+        "_dtype": "fake_dtype",
+    }
+
     def __new__(
         cls,
         *args,
@@ -157,6 +175,19 @@ class Float8TensorStorage(QuantizedTensorStorage):
         self._data = tensors[0]
         self._transpose = tensors[1]
         self._scale_inv = tensors[2]
+        # Re-derive ``_transpose_invalid`` from the restored buffer:
+        # the saved transpose, if present, was valid at save time
+        # (``prepare_for_saving`` never resets this flag, and forward
+        # producers don't save stale transposes). Tying the flag to
+        # ``self._transpose`` here makes restoration independent of
+        # whichever shell carried the storage across the trace
+        # boundary -- in particular ``torch.compile``'s save/restore
+        # round-trip, which builds a fresh wrapper shell for backward
+        # whose pre-restore ``_transpose_invalid`` would otherwise
+        # come from :meth:`Float8TensorStorage.__new__` (``True``
+        # whenever it sees ``data_transpose=None``) and trip
+        # :meth:`update_usage` downstream.
+        self._transpose_invalid = self._transpose is None
         return tensors[3:]
 
     def get_data_tensors(self, rowwise_data: bool = True, columnwise_data: bool = True):
@@ -210,13 +241,33 @@ class Float8TensorStorage(QuantizedTensorStorage):
         )
 
     def __repr__(self):
+        # Must never raise: this runs from Inductor error formatters,
+        # FX node dumps, Dynamo guards, etc. Crucially we must also
+        # avoid any tensor->scalar materialization (``.item()``,
+        # ``.tolist()``, ``dequantize()``): under fake-tensor mode they
+        # allocate fresh unbacked symbols which then leak out of the
+        # current op as "unreturned outputs" and crash the compile.
+        # Stick to shape/dtype summaries.
+        scale_shape = list(getattr(self._scale_inv, "shape", ()))
+        if self._data is None:
+            data_repr = "<no rowwise data (transpose-only)>"
+        else:
+            data_shape = list(getattr(self._data, "shape", ()))
+            data_repr = f"<fp8 data shape={data_shape}>"
         return (
             "Float8TensorStorage("
             f"fp8_dtype={self._fp8_dtype}, "
-            f"scale_inv={self._scale_inv.item()}, "
-            f"data={self.dequantize()}"
+            f"scale_inv=<shape={scale_shape}>, "
+            f"data={data_repr}"
             ")"
         )
+
+    # ``__new__`` re-derives ``_transpose_invalid`` from the restored
+    # ``_transpose`` buffer, so the flag is deliberately not round-tripped
+    # through ``_FLATTEN_META_ATTRS``: a producer that ships a transpose
+    # through the trace had it valid, and trusting a stale ``True`` from
+    # a Dynamo-embedded meta constant would trip :meth:`update_usage`'s
+    # ``not has_data_transpose`` guard in backward.
 
     def _create_transpose(self):
         """Update FP8 transpose cache"""

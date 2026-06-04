@@ -36,6 +36,32 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
     _columnwise_scale_inv: Optional[torch.Tensor]
     _is_2D_scaled: bool
 
+    # Declarative schema consumed by the generic
+    # :meth:`QuantizedTensorStorage._torch_compile_flatten` /
+    # :meth:`_torch_compile_do_unflatten` implementations in the base.
+    _FLATTEN_TENSOR_ATTRS = (
+        "_rowwise_data",
+        "_rowwise_scale_inv",
+        "_columnwise_data",
+        "_columnwise_scale_inv",
+    )
+    _FLATTEN_TENSOR_USAGE = {
+        "_rowwise_data": "rowwise",
+        "_rowwise_scale_inv": "rowwise",
+        "_columnwise_data": "columnwise",
+        "_columnwise_scale_inv": "columnwise",
+    }
+    _FLATTEN_META_ATTRS = ("_fp8_dtype", "_dtype", "_is_2D_scaled")
+    _FLATTEN_CTOR_KWARG = {
+        "_rowwise_data": "rowwise_data",
+        "_rowwise_scale_inv": "rowwise_scale_inv",
+        "_columnwise_data": "columnwise_data",
+        "_columnwise_scale_inv": "columnwise_scale_inv",
+        "_fp8_dtype": "fp8_dtype",
+        "_dtype": "fake_dtype",
+        "_is_2D_scaled": "is_2D_scaled",
+    }
+
     def __new__(
         cls,
         rowwise_data: Optional[torch.Tensor],

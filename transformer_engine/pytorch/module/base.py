@@ -1048,7 +1048,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 return
             if recipe.nvfp4() and isinstance(recipe_state, NVFP4BlockScalingRecipeState):
                 return
-            if recipe.custom() and isinstance(recipe_state, CustomRecipeState):
+            if (
+                recipe.custom()
+                and isinstance(recipe_state, CustomRecipeState)
+                and recipe_state.recipe is recipe
+            ):
                 return
 
         # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
@@ -1936,6 +1940,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if not self.primary_weights_in_fp8:
             return
         if not hasattr(self, "weight_names") or not self.weight_names:
+            return
+        # Skip under ``torch.compile`` -- the check is a one-off
+        # runtime guard that calls ``tensor._get_quantizer()`` (returns
+        # a ``Quantizer``, not a Tensor) and Dynamo cannot trace
+        # quantizer objects flowing through ``call_method``.
+        if torch.compiler.is_compiling():
             return
 
         recipe = self.fp8_meta["recipe"]

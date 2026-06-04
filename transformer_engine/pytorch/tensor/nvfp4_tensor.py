@@ -7,7 +7,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 import math
 import warnings
-from typing import Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 import functools
 
 import torch
@@ -15,7 +15,7 @@ import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 
 from transformer_engine.common.recipe import NVFP4BlockScaling, Recipe
-from ..constants import NVFP4_BLOCK_SCALING_SIZE, dist_group_type
+from ..constants import NVFP4_BLOCK_SCALING_SIZE, canonicalize_te_dtype, dist_group_type
 from ..utils import (
     canonicalize_process_group,
     devices_match,
@@ -141,6 +141,21 @@ class NVFP4Quantizer(Quantizer):
     rht_matrix_random_sign_mask_t: int
     rht_matrix: torch.Tensor
 
+    _storage_cls = NVFP4TensorStorage
+    _DTYPE_INIT_KWARG = "fp4_dtype"
+    _INIT_META_ATTRS = (
+        "with_amax_reduction",
+        "with_rht",
+        "with_post_rht_amax",
+        "with_2d_quantization",
+        "stochastic_rounding",
+        "row_scaled_nvfp4",
+    )
+    _POST_INIT_META_ATTRS = ("rht_matrix_random_sign_mask_t",)
+    _POST_INIT_TENSOR_ATTRS = ("rht_matrix",)
+    _PG_ATTR = "amax_reduction_group"
+    _PG_INIT_KWARG = "amax_reduction_group"
+
     def __init__(
         self,
         fp4_dtype: TE_DType = tex.DType.kFloat4E2M1,
@@ -159,7 +174,7 @@ class NVFP4Quantizer(Quantizer):
         with_random_sign_mask: bool = True,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
-        self.dtype = fp4_dtype
+        self.dtype = canonicalize_te_dtype(fp4_dtype)
         self.with_rht = with_rht
         self.with_post_rht_amax = with_post_rht_amax
         self.with_amax_reduction = with_amax_reduction
@@ -316,6 +331,114 @@ class NVFP4Quantizer(Quantizer):
         shape[-1] = shape[-1] // 2
         return tuple(shape)
 
+    def _make_empty_pythonic(
+        self,
+        shape: Iterable[int],
+        *,
+        dtype: torch.dtype = torch.float32,
+        device: Optional[torch.device] = None,
+        pin_memory: bool = False,
+        requires_grad: bool = False,
+    ) -> NVFP4Tensor:
+
+        # Canonicalize tensor attributes
+        if device is None:
+            device = torch.device("cuda")
+
+        assert shape[-1] % NVFP4_BLOCK_SCALING_SIZE == 0, (
+            f"Incorrect shape {shape} for NVFP4. Tensor dims must be divisible by"
+            f" {NVFP4_BLOCK_SCALING_SIZE}"
+        )
+
+        flat_first_dim = math.prod(shape[:-1])
+        assert flat_first_dim % NVFP4_BLOCK_SCALING_SIZE == 0, (
+            f"Incorrect shape {shape} for NVFP4. Tensor dims must be divisible by"
+            f" {NVFP4_BLOCK_SCALING_SIZE}"
+        )
+        if self.row_scaled_nvfp4:
+            if not self.rowwise_usage:
+                raise ValueError("Row-scaled NVFP4 quantization requires rowwise usage.")
+            if self.columnwise_usage:
+                raise ValueError("Row-scaled NVFP4 quantization does not support columnwise usage.")
+
+        # Allocate FP4 data
+        data = None
+        scale_inv = None
+        amax_rowwise = None
+        if self.rowwise_usage:
+            data = torch.empty(
+                self.convert_shape_for_fp4(shape),
+                dtype=torch.uint8,
+                device=device,
+                pin_memory=pin_memory,
+            )
+            scale_shape = self.get_scale_shape(shape, columnwise=False)
+            scale_inv = torch.empty(
+                scale_shape, dtype=torch.uint8, device=device, pin_memory=pin_memory
+            )
+            # Allocate global amax metadata. Row-scaled NVFP4 stores one value per row.
+            amax_rows = flat_first_dim if self.row_scaled_nvfp4 else 1
+            amax_rowwise = torch.zeros(
+                amax_rows, dtype=torch.float32, device=device, pin_memory=pin_memory
+            )
+
+        # Allocate FP8 data transpose if needed
+        columnwise_data = None
+        columnwise_scale_inv = None
+        amax_columnwise = None
+        if self.columnwise_usage:
+            # enforce 2D shape to avoid [S, B, H] shape and B and be 1
+            # and the transposed shape is [H, S, B], so divide last dim by 2 gives zero
+            shape_2d = tuple([flat_first_dim, shape[-1]])
+            columnwise_data = torch.empty(
+                self.convert_shape_for_fp4(self.get_columnwise_shape(shape_2d)),
+                dtype=torch.uint8,
+                device=device,
+                pin_memory=pin_memory,
+            )
+            columnwise_scale_shape = self.get_scale_shape(shape, columnwise=True)
+            columnwise_scale_inv = torch.empty(
+                columnwise_scale_shape,
+                dtype=torch.uint8,
+                device=device,
+                pin_memory=pin_memory,
+            )
+            amax_columnwise = torch.zeros(
+                1, dtype=torch.float32, device=device, pin_memory=pin_memory
+            )
+
+        # See ``Float8Quantizer._make_empty_pythonic`` for the rationale.
+        if self.internal:
+            return NVFP4TensorStorage(
+                data,
+                scale_inv,
+                columnwise_data,
+                columnwise_scale_inv,
+                amax_rowwise,
+                amax_columnwise,
+                self.dtype,
+                self,
+                False,
+                fake_dtype=dtype,
+                row_scaled_nvfp4=self.row_scaled_nvfp4,
+            )
+
+        return NVFP4Tensor(
+            shape=shape,
+            dtype=dtype,
+            rowwise_data=data,
+            rowwise_scale_inv=scale_inv,
+            columnwise_data=columnwise_data,
+            columnwise_scale_inv=columnwise_scale_inv,
+            amax_rowwise=amax_rowwise,
+            amax_columnwise=amax_columnwise,
+            fp4_dtype=self.dtype,
+            quantizer=self,
+            requires_grad=requires_grad,
+            with_gemm_swizzled_scales=False,
+            row_scaled_nvfp4=self.row_scaled_nvfp4,
+        )
+
     def calibrate(self, tensor: torch.Tensor) -> None:
         pass  # Calibration is no-op
 
@@ -325,6 +448,13 @@ class NVFP4Quantizer(Quantizer):
 
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         return NVFP4BlockScaling
+
+    def _storage_scalars(self) -> Dict[str, Any]:
+        return {
+            "fp4_dtype": self.dtype,
+            "with_gemm_swizzled_scales": self.optimize_for_gemm,
+            "row_scaled_nvfp4": self.row_scaled_nvfp4,
+        }
 
 
 class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):

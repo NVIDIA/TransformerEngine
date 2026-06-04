@@ -95,7 +95,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
     # column-scaled FP4 data)
     _amax_columnwise: torch.Tensor
 
-    # Builder class for casting to MXFP8
+    # Builder class for casting to NVFP4
     _quantizer: Optional[Quantizer]
     # FP4 data type
     _fp4_dtype: TE_DType
@@ -108,6 +108,44 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
     _nvfp4_use_4over6: bool
     # Global E4M3 scale bound used by this NVFP4 tensor
     _nvfp4_e4m3_max: int
+
+    # Declarative schema consumed by the generic
+    # :meth:`QuantizedTensorStorage._torch_compile_flatten` /
+    # :meth:`_torch_compile_do_unflatten` implementations in the base.
+    _FLATTEN_TENSOR_ATTRS = (
+        "_rowwise_data",
+        "_rowwise_scale_inv",
+        "_columnwise_data",
+        "_columnwise_scale_inv",
+        "_amax_rowwise",
+        "_amax_columnwise",
+    )
+    _FLATTEN_TENSOR_USAGE = {
+        "_rowwise_data": "rowwise",
+        "_rowwise_scale_inv": "rowwise",
+        "_columnwise_data": "columnwise",
+        "_columnwise_scale_inv": "columnwise",
+        "_amax_rowwise": "rowwise",
+        "_amax_columnwise": "columnwise",
+    }
+    _FLATTEN_META_ATTRS = (
+        "_fp4_dtype",
+        "_dtype",
+        "_with_gemm_swizzled_scales",
+        "_row_scaled_nvfp4",
+    )
+    _FLATTEN_CTOR_KWARG = {
+        "_rowwise_data": "rowwise_data",
+        "_rowwise_scale_inv": "rowwise_scale_inv",
+        "_columnwise_data": "columnwise_data",
+        "_columnwise_scale_inv": "columnwise_scale_inv",
+        "_amax_rowwise": "amax_rowwise",
+        "_amax_columnwise": "amax_columnwise",
+        "_fp4_dtype": "fp4_dtype",
+        "_dtype": "fake_dtype",
+        "_with_gemm_swizzled_scales": "with_gemm_swizzled_scales",
+        "_row_scaled_nvfp4": "row_scaled_nvfp4",
+    }
 
     def __new__(
         cls,
@@ -234,6 +272,10 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         self._amax_rowwise = tensors[4]
         self._amax_columnwise = tensors[5]
         return tensors[6:]
+
+    # ``_torch_compile_flatten`` / ``_torch_compile_do_unflatten`` are
+    # the generic implementations on :class:`QuantizedTensorStorage`,
+    # driven by the ``_FLATTEN_*`` declarations above.
 
     def get_data_tensors(self):
         """Get this Tensor's data."""
