@@ -803,6 +803,31 @@ void fused_topk_with_score_function_forward_with_indices(
     int num_groups, int group_topk, float scaling_factor, int score_function,
     const Tensor expert_bias, Tensor probs, Tensor topk_indices, Tensor intermediate_output,
     cudaStream_t stream) {
+  NVTE_CHECK(num_tokens > 0 && num_experts > 0,
+             "num_tokens and num_experts must be positive; got num_tokens=", num_tokens,
+             ", num_experts=", num_experts);
+  NVTE_CHECK(topk > 0 && topk <= num_experts, "topk must be in [1, num_experts], got topk=", topk,
+             " num_experts=", num_experts);
+  const std::vector<size_t> dense_shape{static_cast<size_t>(num_tokens),
+                                        static_cast<size_t>(num_experts)};
+  const std::vector<size_t> indices_shape{static_cast<size_t>(num_tokens),
+                                          static_cast<size_t>(topk)};
+  NVTE_CHECK(logits.data.shape == dense_shape, "logits shape must be [num_tokens, num_experts]=[",
+             num_tokens, ", ", num_experts, "], got ", logits.data.shape);
+  NVTE_CHECK(probs.data.shape == dense_shape, "probs shape must be [num_tokens, num_experts]=[",
+             num_tokens, ", ", num_experts, "], got ", probs.data.shape);
+  NVTE_CHECK(intermediate_output.data.shape == dense_shape,
+             "intermediate_output shape must be [num_tokens, num_experts]=[", num_tokens, ", ",
+             num_experts, "], got ", intermediate_output.data.shape);
+  NVTE_CHECK(topk_indices.data.shape == indices_shape,
+             "topk_indices shape must be [num_tokens, "
+             "topk]=[",
+             num_tokens, ", ", topk, "], got ", topk_indices.data.shape);
+  if (expert_bias.has_data()) {
+    NVTE_CHECK(expert_bias.data.shape == std::vector<size_t>{static_cast<size_t>(num_experts)},
+               "expert_bias shape must be [num_experts]=[", num_experts, "], got ",
+               expert_bias.data.shape);
+  }
   // Dispatch logits dtype and output-index dtype first; expert-bias dtype is only
   // dispatched when an expert-bias tensor exists, otherwise the kernel receives nullptr.
 #define ROUTER_FORWARD_WITH_INDICES_DISPATCH(DataType, IndexType)                               \
@@ -826,9 +851,9 @@ void fused_topk_with_score_function_forward_with_indices(
         reinterpret_cast<IndexType *>(topk_indices.data.dptr),                                  \
         reinterpret_cast<CompType *>(intermediate_output.data.dptr), stream);                   \
   }
-  TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
-      logits.data.dtype, DataType,
-      TE_ROUTER_INDEX_TYPE_SWITCH_ALL(topk_indices.data.dtype, IndexType,
+  TE_ROUTER_PROBS_TYPE_SWITCH_ALL(logits.data.dtype, DataType,
+                                  TE_ROUTER_DENSE_INDEX_TYPE_SWITCH_ALL(
+                                      topk_indices.data.dtype, IndexType,
                                       ROUTER_FORWARD_WITH_INDICES_DISPATCH(DataType, IndexType);););
 #undef ROUTER_FORWARD_WITH_INDICES_DISPATCH
 }
@@ -1063,6 +1088,8 @@ void fused_topk_with_score_function_backward_kernel_launcher(
     int num_tokens, int num_experts, int topk, bool use_pre_softmax, float scaling_factor,
     int score_function, DataType *grad_logits, cudaStream_t stream) {
   NVTE_CHECK(num_experts > 0, "num_experts must be positive, got ", num_experts);
+  NVTE_CHECK(topk > 0 && topk <= num_experts, "topk must be in [1, num_experts], got topk=", topk,
+             " num_experts=", num_experts);
   NVTE_CHECK(static_cast<int64_t>(num_tokens) * num_experts <= INT_MAX,
              "num_tokens * num_experts exceeds INT_MAX (kernel uses int offsets), got ",
              static_cast<int64_t>(num_tokens) * num_experts);
@@ -1240,9 +1267,15 @@ void fused_topk_with_score_function_backward_with_indices_kernel_launcher(
     int num_tokens, int num_experts, int topk, bool use_pre_softmax, float scaling_factor,
     int score_function, DataType *grad_logits, cudaStream_t stream) {
   NVTE_CHECK(num_experts > 0, "num_experts must be positive, got ", num_experts);
+  NVTE_CHECK(topk > 0 && topk <= num_experts, "topk must be in [1, num_experts], got topk=", topk,
+             " num_experts=", num_experts);
   NVTE_CHECK(static_cast<int64_t>(num_tokens) * num_experts <= INT_MAX,
              "num_tokens * num_experts exceeds INT_MAX (kernel uses int offsets), got ",
              static_cast<int64_t>(num_tokens) * num_experts);
+  if constexpr (std::is_same_v<IndexType, int16_t>) {
+    NVTE_CHECK(num_experts <= INT16_MAX, "int16 topk indices require num_experts <= ", INT16_MAX,
+               ", got ", num_experts);
+  }
   size_t num_token_per_block = kThreadsPerBlock / kThreadsPerWarp;
   size_t total_blocks = (num_tokens + num_token_per_block - 1) / num_token_per_block;
 
@@ -1274,9 +1307,31 @@ void fused_topk_with_score_function_backward_with_indices(
     const Tensor &topk_indices, const Tensor &intermediate_output, const Tensor &grad_probs,
     int num_tokens, int num_experts, int topk, bool use_pre_softmax, float scaling_factor,
     int score_function, Tensor &grad_logits, cudaStream_t stream) {
+  NVTE_CHECK(num_tokens > 0 && num_experts > 0,
+             "num_tokens and num_experts must be positive; got num_tokens=", num_tokens,
+             ", num_experts=", num_experts);
+  NVTE_CHECK(topk > 0 && topk <= num_experts, "topk must be in [1, num_experts], got topk=", topk,
+             " num_experts=", num_experts);
+  const std::vector<size_t> dense_shape{static_cast<size_t>(num_tokens),
+                                        static_cast<size_t>(num_experts)};
+  const std::vector<size_t> indices_shape{static_cast<size_t>(num_tokens),
+                                          static_cast<size_t>(topk)};
+  NVTE_CHECK(topk_indices.data.shape == indices_shape,
+             "topk_indices shape must be [num_tokens, "
+             "topk]=[",
+             num_tokens, ", ", topk, "], got ", topk_indices.data.shape);
+  NVTE_CHECK(intermediate_output.data.shape == dense_shape,
+             "intermediate_output shape must be [num_tokens, num_experts]=[", num_tokens, ", ",
+             num_experts, "], got ", intermediate_output.data.shape);
+  NVTE_CHECK(grad_probs.data.shape == dense_shape,
+             "grad_probs shape must be [num_tokens, num_experts]=[", num_tokens, ", ", num_experts,
+             "], got ", grad_probs.data.shape);
+  NVTE_CHECK(grad_logits.data.shape == dense_shape,
+             "grad_logits shape must be [num_tokens, num_experts]=[", num_tokens, ", ", num_experts,
+             "], got ", grad_logits.data.shape);
   TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
       grad_logits.data.dtype, DataType,
-      TE_ROUTER_INDEX_TYPE_SWITCH_ALL(
+      TE_ROUTER_DENSE_INDEX_TYPE_SWITCH_ALL(
           topk_indices.data.dtype, IndexType,
           fused_topk_with_score_function_backward_with_indices_kernel_launcher<DataType, IndexType>(
               reinterpret_cast<IndexType *>(topk_indices.data.dptr),

@@ -99,14 +99,15 @@ class FusedTopkScoreFunction(torch.autograd.Function):
             scaling_factor,
             score_function,
             expert_bias,
-            topk_indices,
             routing_map_format,
+            topk_indices,
         )
         if topk_indices is not None:
             routing_output = topk_indices
         probs = probs.view(tensor_shape)
         if topk_indices is not None:
             ctx.mark_dirty(topk_indices)
+        ctx.mark_non_differentiable(routing_output)
         ctx.save_for_backward(routing_output, intermediate_output)
         ctx.num_tokens = num_tokens
         ctx.num_experts = num_experts
