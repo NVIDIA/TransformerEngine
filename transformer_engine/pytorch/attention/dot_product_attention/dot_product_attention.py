@@ -13,7 +13,6 @@ import logging
 import torch
 from torch.nn.parameter import Parameter
 
-import transformer_engine_torch as tex
 from transformer_engine.common.recipe import (
     Format,
     Recipe,
@@ -35,11 +34,7 @@ from transformer_engine.pytorch.quantization import (
 from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import Float8TensorStorage
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
-from transformer_engine.pytorch.constants import (
-    AttnMaskTypes,
-    AttnTypes,
-    dist_group_type,
-)
+from transformer_engine.pytorch.constants import AttnMaskTypes, AttnTypes, dist_group_type, DType
 from transformer_engine.pytorch.distributed import (
     get_distributed_world_size,
     checkpoint,
@@ -1258,11 +1253,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                 forward_dtype = get_fp8_te_dtype(self.fp8_meta["recipe"], fprop_tensor=True)
                 backward_dtype = get_fp8_te_dtype(self.fp8_meta["recipe"], fprop_tensor=False)
                 assert forward_dtype in [
-                    tex.DType.kFloat8E4M3,
-                    tex.DType.kFloat8E5M2,
+                    DType.kFloat8E4M3,
+                    DType.kFloat8E5M2,
                 ] and backward_dtype in [
-                    tex.DType.kFloat8E4M3,
-                    tex.DType.kFloat8E5M2,
+                    DType.kFloat8E4M3,
+                    DType.kFloat8E5M2,
                 ], """DotProductAttention only supports "E4M3" and "E5M2" FP8 data types."""
             else:
                 fp8_output = False
