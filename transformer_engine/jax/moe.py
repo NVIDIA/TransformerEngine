@@ -243,8 +243,10 @@ def _ffn_fwd_per_shard(
     if apply_topk_weights_early:
         # Fold the per-token combine weights into the FFN intermediate;
         # the downstream wo GEMM is linear so this is equivalent to the
-        # late-weighting path, modulo elementwise op fusion gains.
-        w_b = recv_w_flat[:, None]
+        # late-weighting path, modulo elementwise op fusion gains. w_b is
+        # cast to intermediate.dtype so the multiply doesn't promote
+        # expert_outputs to f32 (NCCL EP combine hard-asserts bf16).
+        w_b = recv_w_flat[:, None].astype(intermediate.dtype)
         mask_b = (recv_w_flat != 0).astype(intermediate.dtype)[:, None]
         intermediate = intermediate * w_b * mask_b
 
@@ -317,7 +319,9 @@ def _ffn_bwd_per_shard(
     if apply_topk_weights_early:
         # intermediate' = intermediate * w * mask. Split the cotangent
         # across both factors before the activation bwd consumes it.
-        w_b = recv_w_flat[:, None]
+        # Cast w_b so the multiply stays in d_intermediate.dtype and
+        # d_sorted_x (downstream into ep_dispatch_bwd) stays bf16.
+        w_b = recv_w_flat[:, None].astype(d_intermediate.dtype)
         mask_b = (recv_w_flat != 0).astype(d_intermediate.dtype)[:, None]
         intermediate_unweighted = act_fn(gate_proj_out) * up_proj_out
         d_recv_w_from_intermediate = jnp.sum(
@@ -556,6 +560,17 @@ def _moe_fwd_rule(
     routing_weights = jnp.take_along_axis(sparse_probs, selected_experts, axis=-1)
     topk_idx_3d = selected_experts.reshape(B, S, K).astype(jnp.int32)
     topk_w_3d = routing_weights.reshape(B, S, K).astype(jnp.float32)
+    # tex.ep_prepare/dispatch's partition only folds ep_axis into a replicated
+    # leading dim, not the outer dp/fsdp axes, so a replicated topk_idx makes
+    # each rank see B/ep rows (not B/num_procs) and overrun the bootstrap-sized
+    # send buffer. Pin both routing tensors to the (outer, ep) leading sharding
+    # so per-rank token counts match max_tokens_per_rank.
+    topk_idx_3d = jax.lax.with_sharding_constraint(
+        topk_idx_3d, NamedSharding(mesh, ep3_spec)
+    )
+    topk_w_3d = jax.lax.with_sharding_constraint(
+        topk_w_3d, NamedSharding(mesh, ep3_spec)
+    )
 
     # ---------------- TE EP dispatch (global view) ----------------
     handle = _get_or_make_ep_handle(
@@ -637,7 +652,7 @@ def _moe_fwd_rule(
             out_partition_spec=out_partition_spec,
         )
     else:
-        w = recv_topk_weights[..., None]
+        w = recv_topk_weights[..., None].astype(expert_outputs.dtype)
         mask = (recv_topk_weights != 0).astype(expert_outputs.dtype)[..., None]
         weighted = expert_outputs * w * mask
         output = tex.ep_combine_fwd(
@@ -754,8 +769,10 @@ def _moe_bwd_rule(
         d_recv_w_from_combine = jnp.zeros_like(ctx.recv_topk_weights)
     else:
         # combine_fwd consumed weighted = expert_out * w * mask;
-        # split the cotangent across both factors.
-        w = ctx.recv_topk_weights[..., None]
+        # split the cotangent across both factors. w is cast to
+        # grad_pre_combine.dtype so the multiply stays bf16 and
+        # d_sorted_x (downstream into ep_dispatch_bwd) stays bf16.
+        w = ctx.recv_topk_weights[..., None].astype(grad_pre_combine.dtype)
         mask = (ctx.recv_topk_weights != 0).astype(grad_pre_combine.dtype)[..., None]
         d_expert_outputs = grad_pre_combine * w * mask
         d_recv_w_from_combine = (grad_pre_combine * ctx.expert_outputs * mask).sum(axis=-1)
