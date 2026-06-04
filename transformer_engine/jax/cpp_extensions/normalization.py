@@ -336,6 +336,22 @@ class NormFwdPrimitive(BasePrimitive):
             gamma,
             beta,
             norm_type=norm_type,
+        (
+            out,
+            colwise_out,
+            scale_inv,
+            colwise_scale_inv,
+            updated_amax,
+            mu,
+            rsigma,
+            _,
+        ) = NormFwdPrimitive.inner_primitive.bind(
+            x,
+            scale,
+            amax,
+            gamma,
+            beta,
+            norm_type=norm_type,
             zero_centered_gamma=zero_centered_gamma,
             epsilon=epsilon,
             out_dtype=out_dtype,
@@ -345,21 +361,8 @@ class NormFwdPrimitive(BasePrimitive):
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
             output_amax_when_no_scaling=output_amax_when_no_scaling,
-            is_outer=is_outer,
+            is_outer=False,  # inner_primitive always emits 8 outputs (incl. workspace)
         )
-        if is_outer:
-            out, colwise_out, scale_inv, colwise_scale_inv, updated_amax, mu, rsigma = outputs
-        else:
-            (
-                out,
-                colwise_out,
-                scale_inv,
-                colwise_scale_inv,
-                updated_amax,
-                mu,
-                rsigma,
-                _,
-            ) = outputs
         rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
             scaling_mode
         ).get_scale_shape_2x(x.shape, is_padded=False)
