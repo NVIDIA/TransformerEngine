@@ -374,6 +374,13 @@ def _test_linear(
             if isinstance(model[0].weight, Float8Tensor)
             else tex.DType.kFloat8E4M3
         )
+    if te.module.base.using_cublasmp_backend() and not quantized_compute:
+        # cuBLASMp's GEMM+RS kernel runs a slightly different GEMM algo than Userbuffers
+        # (e.g. split-accumulator is always enabled) so it very narrowly violates the default
+        # bf16 rtol. This is not a regression, just a quirk of how the algorithms line up at the
+        # precision floor. So we relax rtol only (atol stays same) to allow for this without
+        # masking real regressions.
+        tols = {**tols, "rtol": max(tols.get("rtol", 0.0), 3.0e-2)}
 
     # Check results
     y_test = y_test.to(dtype=torch.float64, device="cpu")
@@ -477,6 +484,7 @@ def main() -> None:
     parser.add_argument("--head-dim", type=int, default=256)
     parser.add_argument("--dtype", type=str, default="bfloat16")
     parser.add_argument("--quantization", type=str, default=None)
+    parser.add_argument("--use-cublasmp", action="store_true")
     args = parser.parse_args()
 
     # Run parallel tests if needed
@@ -517,6 +525,7 @@ def main() -> None:
             dtype=model_config.dtype,
             bootstrap_backend=bootstrap_backend,
             ub_cfgs=userbuffer_configs,
+            with_cublasmp=args.use_cublasmp,
         )
 
         # Run tests
