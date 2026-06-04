@@ -2586,9 +2586,7 @@ def grouped_gemm(
             raise ValueError("rhs must be pre-swizzled for MXFP8 1D scaling")
 
     if use_v2_ffi:
-        alpha_beta_numel = (
-            num_gemms if _v2_grouped_gemm_supports_per_group_alpha_beta() else 1
-        )
+        alpha_beta_numel = num_gemms if _v2_grouped_gemm_supports_per_group_alpha_beta() else 1
         additional_arg_0 = jnp.ones((alpha_beta_numel,), jnp.float32)  # alpha
         additional_arg_1 = jnp.zeros((alpha_beta_numel,), jnp.float32)  # beta
     else:
