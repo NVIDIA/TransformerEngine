@@ -177,8 +177,8 @@ def setup_demo(*, batch=BATCH, seq=SEQ, hidden=HIDDEN, intermediate=INTERMEDIATE
         LOGICAL_AXIS_RULES
     ):
         variables = jax.jit(native_model.init)(k_init, x)
-        jax.block_until_ready(jax.tree_util.tree_leaves(variables)[0])
-
+        variables = jax.jit(native_model.init)(k_init, x)
+        jax.block_until_ready(jax.tree_util.tree_leaves(variables))
     sharded = shard_inputs_and_variables(mesh, variables, x, dy)
     return DemoState(
         mesh=mesh,
