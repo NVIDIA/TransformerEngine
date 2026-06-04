@@ -1,3 +1,7 @@
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
 """
 Profile that the dedicated swizzle kernels (swizzle_{row,col}_scaling_kernel
 in transformer_engine/common/swizzle/swizzle.cu) disappear from the timeline
