@@ -33,10 +33,13 @@ class InspectPrimitive(BasePrimitive):
         x_max_aval,
         x_mean_aval,
         x_std_aval,
+        *,
+        name,
     ):
         """
         inspect abstract
         """
+        del name
         assert (
             x_min_aval.shape == () and x_min_aval.dtype == jnp.float32
         ), "x_min must be a scalar with dtype float32"
@@ -59,6 +62,8 @@ class InspectPrimitive(BasePrimitive):
         x_max,
         x_mean,
         x_std,
+        *,
+        name,
     ):
         """
         inspect lowering rules
@@ -74,6 +79,7 @@ class InspectPrimitive(BasePrimitive):
             x_max,
             x_mean,
             x_std,
+            name=name,
         )
 
     @staticmethod
@@ -83,6 +89,8 @@ class InspectPrimitive(BasePrimitive):
         x_max,
         x_mean,
         x_std,
+        *,
+        name,
     ):
         """
         inspect implementation
@@ -94,11 +102,12 @@ class InspectPrimitive(BasePrimitive):
             x_max,
             x_mean,
             x_std,
+            name=name,
         )
         return x
 
     @staticmethod
-    def partition(mesh, arg_infos, result_infos):
+    def partition(mesh, arg_infos, result_infos, *, name):
         """
         Identity in sharding: the output carries the same sharding as ``x``;
         the four scalar stats (x_min, x_max, x_mean, x_std) are fully
@@ -119,25 +128,26 @@ class InspectPrimitive(BasePrimitive):
         out_sharding = x_sharding
 
         def sharded_impl(x, x_min, x_max, x_mean, x_std):
-            return InspectPrimitive.impl(x, x_min, x_max, x_mean, x_std)
+            return InspectPrimitive.impl(x, x_min, x_max, x_mean, x_std, name=name)
 
         return mesh, sharded_impl, out_sharding, arg_shardings
 
     @staticmethod
-    def shardy_sharding_rule(*args):
+    def shardy_sharding_rule(*args, **kwargs):
         """
         Five operands, one output. ``x`` and the output carry the same
         wildcard rank; the four scalar stats are rank-0 (empty operand
-        entries between commas).
+        entries between commas). The ``name`` keyword attribute does not
+        participate in the rule.
         """
-        del args
+        del args, kwargs
         return "..., , , , -> ..."
 
 
 register_primitive(InspectPrimitive)
 
 
-def _inspect_array_inner(x: jnp.ndarray) -> jnp.ndarray:
+def _inspect_array_inner(x: jnp.ndarray, name: str) -> jnp.ndarray:
     assert InspectPrimitive.outer_primitive is not None, (
         "InspectPrimitive FFI is not registered. Please ensure the C++ extension is properly built"
         " and registered."
@@ -148,35 +158,31 @@ def _inspect_array_inner(x: jnp.ndarray) -> jnp.ndarray:
         jnp.max(x).astype(jnp.float32),
         jnp.mean(x.astype(jnp.float32)),
         jnp.std(x.astype(jnp.float32)),
+        name=name,
     )
 
 
-@partial(jax.custom_vjp, nondiff_argnums=())
-def _inspect(
-    x,
-):
+# ``name`` is a Python string and must not be traced through jax — it is
+# carried as a custom_vjp nondiff argument so it stays static at compile
+# time, threads into the primitive bind as a kwarg, and lands on the
+# FFI as a string attribute.
+@partial(jax.custom_vjp, nondiff_argnums=(1,))
+def _inspect(x, name):
     """ """
-    output, _ = _inspect_fwd_rule(
-        x,
-    )
+    output, _ = _inspect_fwd_rule(x, name)
     return output
 
 
-def _inspect_fwd_rule(
-    x,
-):
+def _inspect_fwd_rule(x, name):
     """"""
     ctx = ()
-    x = _inspect_array_inner(x)
+    x = _inspect_array_inner(x, name)
     return x, ctx
 
 
-def _inspect_bwd_rule(
-    ctx,
-    grad,
-):
+def _inspect_bwd_rule(name, ctx, grad):
     """"""
-    del ctx
+    del name, ctx
     return (grad,)
 
 
@@ -184,14 +190,30 @@ _inspect.defvjp(_inspect_fwd_rule, _inspect_bwd_rule)
 
 
 def inspect_array(x: jnp.ndarray, name: str) -> jnp.ndarray:
-    """Utility function to inspect JAX arrays by printing their name, shape, dtype, and statistics.
+    """Inspect a JAX array by dumping its data and stats to disk per-rank.
+
+    On every call the FFI synchronises the input device buffer to host
+    and writes two files per rank, **keyed by ``name``** so multiple
+    probes in the same program produce distinct dumps:
+
+    * ``my_tensor_gpu{device}_{sanitized_name}.bin``      – raw bytes.
+    * ``my_tensor_gpu{device}_{sanitized_name}_meta.json`` – ``name``,
+      shape, dtype, and min/max/mean/std summary stats.
+
+    A line is also printed to stdout including the probe ``name`` so
+    multi-probe traces are easy to follow in a live log.
+
+    ``name`` is treated as a static (non-traced) attribute, so the same
+    probe name must be passed in every (re-)trace of an enclosing
+    ``jax.jit``; characters outside ``[A-Za-z0-9._-]`` are mapped to
+    ``_`` when forming the filename, but the unsanitised name is echoed
+    verbatim in the JSON metadata and the printed log line.
 
     Args:
         x (jnp.ndarray): The JAX array to inspect.
-        name (str): The name of the array for identification in the output.
+        name (str): Identifier for this probe; used in filenames and logs.
     """
-    del name  # Name is currently unused, but can be included in the future for more informative output
-    return _inspect(x)
+    return _inspect(x, name)
 
 
 def load_array_dump(filename: str, shape: tuple, dtype: jnp.dtype) -> jnp.ndarray:
