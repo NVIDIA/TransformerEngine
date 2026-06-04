@@ -19,7 +19,7 @@ namespace fused_router {
 
 // Topk values below this threshold use naive O(K*E) selection;
 // at or above it, use radix O(E) selection.  Configurable via
-// NVTE_RADIX_TOPK_THRESHOLD (default 8: radix is faster for K>=8,
+// NVTE_RADIX_TOPK_THRESHOLD (default 16: matches the upstream naive/radix switch,
 // naive avoids overhead for very small K).
 //
 // NOTE: This is an inline function with a static local.  Each translation unit
@@ -27,7 +27,7 @@ namespace fused_router {
 // read once per TU (not once globally).  This is safe because environment
 // variables are immutable during process lifetime in our usage.
 inline int get_radix_topk_threshold() {
-  static int threshold = getenv<int>("NVTE_RADIX_TOPK_THRESHOLD", 8);
+  static int threshold = getenv<int>("NVTE_RADIX_TOPK_THRESHOLD", 16);
   return threshold;
 }
 
