@@ -46,7 +46,7 @@ void allreduce_nvfp4_amax_tensors(NVFP4Quantizer *nvfp4_quantizer_cpp,
 }  // namespace
 
 py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::object &output,
-                    std::optional<at::Tensor> noop_flag, bool compute_amax) {
+                    std::optional<at::Tensor> noop_flag) {
   // Convert quantizer to C++ object
   auto quantizer_cpp = convert_quantizer(quantizer);
 
