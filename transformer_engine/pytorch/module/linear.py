@@ -1861,6 +1861,20 @@ class Linear(TransformerEngineBaseModule):
                 self._fp8_workspaces.get(cache_name) if cache_name is not None else None
             )
 
+            # When the quantized weight is cached and reused across microbatches,
+            # pre-swizzle its scale factors at quantize time and persist them on the
+            # cached workspace. This collapses the per-GEMM scale swizzle (fprop
+            # rowwise + dgrad columnwise, redone every microbatch) from
+            # 2*num_microbatches kernels down to 2 per optimizer step. Gated to the
+            # cached, non-FSDP path: FSDP/FSDP2 all-gather weights using the
+            # un-swizzled scale layout (see NVFP4Tensor.fsdp_pre_all_gather), so
+            # pre-swizzling is unsupported there. No-op for recipes whose scales do
+            # not require swizzling (e.g. per-tensor FP8).
+            if weight_quantizer is not None:
+                weight_quantizer.optimize_for_gemm = (
+                    cache_name is not None and self.fsdp_group is None
+                )
+
             if self.fp8:
                 backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
             else:

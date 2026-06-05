@@ -1735,6 +1735,18 @@ class GroupedLinear(TransformerEngineBaseModule):
                 else [None] * num_gemms
             )
 
+            # Pre-swizzle (and cache) the weight scale factors when the quantized
+            # weights are cached across microbatches, so the per-GEMM scale swizzle
+            # (fprop rowwise + dgrad columnwise, redone every microbatch) collapses
+            # from 2*num_microbatches kernels to 2 per step per expert. Gated to the
+            # cached, non-FSDP path (FSDP/FSDP2 all-gather weights with un-swizzled
+            # scales; see NVFP4Tensor.fsdp_pre_all_gather), so pre-swizzling is
+            # unsupported there. No-op for non-swizzled recipes (e.g. per-tensor FP8).
+            if cache_weight and self.fsdp_group is None and not self.is_fsdp2:
+                for weight_quantizer in weight_quantizers:
+                    if weight_quantizer is not None:
+                        weight_quantizer.optimize_for_gemm = True
+
             non_tensor_args = (
                 self.apply_bias,
                 is_first_microbatch,

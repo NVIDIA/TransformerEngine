@@ -1716,6 +1716,17 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self._fp8_workspaces.get(cache_name) if cache_name is not None else None
             )
 
+            # Pre-swizzle (and cache) the weight scale factors when the quantized
+            # weight is cached across microbatches, so the per-GEMM scale swizzle
+            # (fprop rowwise + dgrad columnwise, redone every microbatch) collapses
+            # from 2*num_microbatches kernels to 2 per step. Gated to the cached,
+            # non-FSDP path (FSDP all-gathers weights with un-swizzled scales; see
+            # NVFP4Tensor.fsdp_pre_all_gather). No-op for non-swizzled recipes.
+            if weight_quantizer is not None:
+                weight_quantizer.optimize_for_gemm = (
+                    cache_name is not None and self.fsdp_group is None
+                )
+
             non_tensor_args = (
                 self.eps,
                 is_first_microbatch,
