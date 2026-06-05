@@ -408,12 +408,11 @@ size_t GetTensorHandlePoolSizeMB(const char *env_var) {
   return pool_size_mb;
 }
 
-size_t GetTensorHandlePoolCapacity(size_t pool_size_mb, size_t handle_size,
-                                   const char *handle_name, const char *env_var) {
+size_t GetTensorHandlePoolCapacity(size_t pool_size_mb, size_t handle_size, const char *handle_name,
+                                   const char *env_var) {
   const size_t pool_size_bytes = pool_size_mb * kBytesPerMB;
   NVTE_CHECK(pool_size_bytes >= handle_size, env_var, "=", pool_size_mb,
-             " MiB is too small for one ", handle_name, " handle of size ", handle_size,
-             " bytes.");
+             " MiB is too small for one ", handle_name, " handle of size ", handle_size, " bytes.");
   return pool_size_bytes / handle_size;
 }
 
@@ -432,8 +431,8 @@ class TensorAllocator {
     std::lock_guard<std::mutex> lock(mutex);
     const size_t available = free_list.size() + (memory.capacity() - memory.size());
     NVTE_CHECK(available >= N, "Cannot allocate ", N,
-               " new NVTETensors. Maximum number of tensors reached: ", MAX_TENSOR_NUM,
-               " (", TENSOR_HANDLE_POOL_SIZE_MB,
+               " new NVTETensors. Maximum number of tensors reached: ", MAX_TENSOR_NUM, " (",
+               TENSOR_HANDLE_POOL_SIZE_MB,
                " MiB handle pool). If your application legitimately needs more tensor handles, "
                "increase NVTE_TENSOR_HANDLE_POOL_SIZE_MB.");
     for (size_t i = 0; i < N; ++i) {
@@ -598,9 +597,9 @@ class GroupedTensorAllocator {
   std::atomic<size_t> size;
   const size_t GROUPED_TENSOR_HANDLE_POOL_SIZE_MB =
       GetTensorHandlePoolSizeMB("NVTE_GROUPED_TENSOR_HANDLE_POOL_SIZE_MB");
-  const size_t MAX_GROUPED_TENSOR_NUM = GetTensorHandlePoolCapacity(
-      GROUPED_TENSOR_HANDLE_POOL_SIZE_MB, sizeof(GroupedTensor), "NVTEGroupedTensor",
-      "NVTE_GROUPED_TENSOR_HANDLE_POOL_SIZE_MB");
+  const size_t MAX_GROUPED_TENSOR_NUM =
+      GetTensorHandlePoolCapacity(GROUPED_TENSOR_HANDLE_POOL_SIZE_MB, sizeof(GroupedTensor),
+                                  "NVTEGroupedTensor", "NVTE_GROUPED_TENSOR_HANDLE_POOL_SIZE_MB");
   std::vector<uintptr_t> free_list;
   std::vector<GroupedTensor> memory;
 };
