@@ -31,6 +31,7 @@ from .quantization import quantize, AmaxScope
 from ..sharding import (
     all_reduce_max_along_all_axes_except_PP,
     all_reduce_sum_along_dp_fsdp_tpsp,
+    get_num_devices_in_mesh,
 )
 from ..quantize import ScaledTensor, ScaledTensorFactory, NoScaleTensor
 from ..quantize import (
@@ -88,6 +89,14 @@ def is_norm_zero_centered_gamma_in_weight_dtype(scaling_mode: ScalingMode) -> bo
 FUSED_MXFP8_NORM_CUDNN_MIN_VERSION = (9, 10, 0)
 
 
+def _is_custom_partitioning_outer_trace(is_outer):
+    # custom_partitioning traces cls.impl once with global avals before partition() lowers the
+    # per-shard implementation. That trace must not bind the single-GPU inner primitive, because
+    # the inner primitive sizes temporary workspace from its input avals. For eager and
+    # single-device JIT paths this jaxpr is executed directly, so those paths must call inner.
+    return is_outer and get_num_devices_in_mesh() > 1
+
+
 class NormFwdPrimitive(BasePrimitive):
     """
     Layer Normalization Forward FP8 Primitive
@@ -120,9 +129,67 @@ class NormFwdPrimitive(BasePrimitive):
         is_outer,
     ):
         """
-        LayerNorm fwd primitive abstract.
+        LayerNorm fwd inner primitive abstract.
         """
-        del amax_scope, transpose_batch_sequence
+        outputs = NormFwdPrimitive._abstract_outputs(
+            x_aval,
+            scale_aval,
+            amax_aval,
+            gamma_aval,
+            beta_aval,
+            norm_type=norm_type,
+            zero_centered_gamma=zero_centered_gamma,
+            epsilon=epsilon,
+            out_dtype=out_dtype,
+            scaling_mode=scaling_mode,
+            quantize_layout=quantize_layout,
+            scale_dtype=scale_dtype,
+            amax_scope=amax_scope,
+            transpose_batch_sequence=transpose_batch_sequence,
+            output_amax_when_no_scaling=output_amax_when_no_scaling,
+            is_outer=is_outer,
+        )
+
+        (wkspace_info,) = transformer_engine_jax.get_norm_fwd_workspace_sizes(
+            x_aval.size // gamma_aval.size,  # batch size
+            gamma_aval.size,  # hidden size
+            jax_dtype_to_te_dtype(x_aval.dtype),  # itype
+            jax_dtype_to_te_dtype(gamma_aval.dtype),  # wtype
+            jax_dtype_to_te_dtype(out_dtype),
+            norm_type,
+            scaling_mode,
+            zero_centered_gamma,
+            epsilon,
+            get_forward_sm_margin(),
+            True,  # is_training
+        )
+        wkspace_aval = jax.core.ShapedArray(
+            shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
+        )
+
+        return (*outputs, wkspace_aval)
+
+    @staticmethod
+    def _abstract_outputs(
+        x_aval,
+        scale_aval,
+        amax_aval,
+        gamma_aval,
+        beta_aval,
+        *,
+        norm_type,
+        zero_centered_gamma,
+        epsilon,
+        out_dtype,
+        scaling_mode,
+        quantize_layout,
+        scale_dtype,
+        amax_scope,
+        transpose_batch_sequence,
+        output_amax_when_no_scaling,
+        is_outer,
+    ):
+        del amax_scope, transpose_batch_sequence, zero_centered_gamma, epsilon
         assert not output_amax_when_no_scaling or (
             scaling_mode == ScalingMode.NO_SCALING.value
             and not is_norm_fwd_cudnn_enabled(scaling_mode)
@@ -205,27 +272,41 @@ class NormFwdPrimitive(BasePrimitive):
             mu_aval,
             rsigma_aval,
         )
-        if is_outer:
-            return outputs
+        return outputs
 
-        (wkspace_info,) = transformer_engine_jax.get_norm_fwd_workspace_sizes(
-            x_aval.size // gamma_aval.size,  # batch size
-            gamma_aval.size,  # hidden size
-            jax_dtype_to_te_dtype(x_aval.dtype),  # itype
-            jax_dtype_to_te_dtype(gamma_aval.dtype),  # wtype
-            jax_dtype_to_te_dtype(out_dtype),
-            norm_type,
-            scaling_mode,
-            zero_centered_gamma,
-            epsilon,
-            get_forward_sm_margin(),
-            True,  # is_training
-        )
-        wkspace_aval = jax.core.ShapedArray(
-            shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
-        )
+    @staticmethod
+    def outer_abstract(*args, **kwargs):
+        """
+        LayerNorm fwd outer primitive abstract.
+        """
+        return NormFwdPrimitive._abstract_outputs(*args, **kwargs)
 
-        return (*outputs, wkspace_aval)
+    @staticmethod
+    def _custom_partitioning_trace_outputs(
+        x,
+        *,
+        norm_type,
+        out_dtype,
+        scaling_mode,
+        quantize_layout,
+        scale_dtype,
+    ):
+        out = jnp.empty(x.shape, dtype=out_dtype)
+        colwise_out_shape = x.shape if quantize_layout.has_colwise else (1,)
+        colwise_out = jnp.empty(colwise_out_shape, dtype=out_dtype)
+
+        rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
+            scaling_mode
+        ).get_scale_shape_2x(x.shape, is_padded=False)
+        scale_inv = jnp.empty(rowwise_scale_inv_shape, dtype=scale_dtype)
+        colwise_scale_inv_shape = colwise_scale_inv_shape if quantize_layout.has_colwise else (1,)
+        colwise_scale_inv = jnp.empty(colwise_scale_inv_shape, dtype=scale_dtype)
+
+        updated_amax = jnp.empty((1,), dtype=jnp.float32)
+        mu_shape = (1,) if norm_type == NVTE_Norm_Type.RMSNorm else x.shape[:-1]
+        mu = jnp.empty(mu_shape, dtype=jnp.float32)
+        rsigma = jnp.empty(x.shape[:-1], dtype=jnp.float32)
+        return out, colwise_out, scale_inv, colwise_scale_inv, updated_amax, mu, rsigma
 
     @staticmethod
     def lowering(
@@ -326,10 +407,29 @@ class NormFwdPrimitive(BasePrimitive):
         """
         to describe implementation
         """
+        if _is_custom_partitioning_outer_trace(is_outer):
+            return NormFwdPrimitive._custom_partitioning_trace_outputs(
+                x,
+                norm_type=norm_type,
+                out_dtype=out_dtype,
+                scaling_mode=scaling_mode,
+                quantize_layout=quantize_layout,
+                scale_dtype=scale_dtype,
+            )
+
         assert (
             NormFwdPrimitive.inner_primitive is not None
         ), "NormFwdPrimitive.inner_primitive has not been registered"
-        outputs = NormFwdPrimitive.inner_primitive.bind(
+        (
+            out,
+            colwise_out,
+            scale_inv,
+            colwise_scale_inv,
+            updated_amax,
+            mu,
+            rsigma,
+            _,
+        ) = NormFwdPrimitive.inner_primitive.bind(
             x,
             scale,
             amax,
@@ -345,21 +445,8 @@ class NormFwdPrimitive(BasePrimitive):
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
             output_amax_when_no_scaling=output_amax_when_no_scaling,
-            is_outer=is_outer,
+            is_outer=False,
         )
-        if is_outer:
-            out, colwise_out, scale_inv, colwise_scale_inv, updated_amax, mu, rsigma = outputs
-        else:
-            (
-                out,
-                colwise_out,
-                scale_inv,
-                colwise_scale_inv,
-                updated_amax,
-                mu,
-                rsigma,
-                _,
-            ) = outputs
         rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
             scaling_mode
         ).get_scale_shape_2x(x.shape, is_padded=False)
@@ -729,8 +816,46 @@ class NormBwdPrimitive(BasePrimitive):
         is_outer,
     ):
         """
-        bwd primitive abstract
+        bwd inner primitive abstract
         """
+        outputs = NormBwdPrimitive._abstract_outputs(
+            dz_aval,
+            x_aval,
+            mu_aval,
+            rsigma_aval,
+            gamma_aval,
+            norm_type,
+            zero_centered_gamma,
+            is_outer,
+        )
+
+        (wkspace_info,) = transformer_engine_jax.get_norm_bwd_workspace_sizes(
+            x_aval.size // gamma_aval.size,  # batch size
+            gamma_aval.size,  # hidden size
+            jax_dtype_to_te_dtype(x_aval.dtype),  # input te_dtype
+            jax_dtype_to_te_dtype(gamma_aval.dtype),  # weight te_dtype
+            norm_type,
+            zero_centered_gamma,
+            get_backward_sm_margin(),
+        )
+        wkspace_aval = outputs[0].update(
+            shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
+        )
+
+        return (*outputs, wkspace_aval)
+
+    @staticmethod
+    def _abstract_outputs(
+        dz_aval,
+        x_aval,
+        mu_aval,
+        rsigma_aval,
+        gamma_aval,
+        norm_type,
+        zero_centered_gamma,
+        is_outer,
+    ):
+        del zero_centered_gamma, is_outer
         w_dtype = dtypes.canonicalize_dtype(gamma_aval.dtype)
         rsigma_dtype = dtypes.canonicalize_dtype(rsigma_aval.dtype)
 
@@ -760,24 +885,22 @@ class NormBwdPrimitive(BasePrimitive):
         if norm_type != NVTE_Norm_Type.LayerNorm:
             dbeta_aval = dbeta_aval.update(shape=(1,))
 
-        outputs = (dx_aval, dgamma_aval, dbeta_aval)
-        if is_outer:
-            return outputs
+        return dx_aval, dgamma_aval, dbeta_aval
 
-        (wkspace_info,) = transformer_engine_jax.get_norm_bwd_workspace_sizes(
-            x_aval.size // gamma_aval.size,  # batch size
-            gamma_aval.size,  # hidden size
-            jax_dtype_to_te_dtype(x_aval.dtype),  # input te_dtype
-            jax_dtype_to_te_dtype(gamma_aval.dtype),  # weight te_dtype
-            norm_type,
-            zero_centered_gamma,
-            get_backward_sm_margin(),
-        )
-        wkspace_aval = dx_aval.update(
-            shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
-        )
+    @staticmethod
+    def outer_abstract(*args, **kwargs):
+        """
+        bwd outer primitive abstract
+        """
+        return NormBwdPrimitive._abstract_outputs(*args, **kwargs)
 
-        return (*outputs, wkspace_aval)
+    @staticmethod
+    def _custom_partitioning_trace_outputs(dz, gamma, *, norm_type):
+        dx = jnp.empty_like(dz)
+        dgamma = jnp.empty_like(gamma)
+        dbeta_shape = gamma.shape if norm_type == NVTE_Norm_Type.LayerNorm else (1,)
+        dbeta = jnp.empty(dbeta_shape, dtype=gamma.dtype)
+        return dx, dgamma, dbeta
 
     @staticmethod
     def lowering(ctx, dz, x, mu, rsigma, gamma, *, norm_type, zero_centered_gamma, is_outer):
@@ -813,10 +936,15 @@ class NormBwdPrimitive(BasePrimitive):
 
     @staticmethod
     def impl(dz, x, mu, rsigma, gamma, norm_type, zero_centered_gamma, is_outer):
+        if _is_custom_partitioning_outer_trace(is_outer):
+            return NormBwdPrimitive._custom_partitioning_trace_outputs(
+                dz, gamma, norm_type=norm_type
+            )
+
         assert (
             NormBwdPrimitive.inner_primitive is not None
         ), "NormBwdPrimitive.inner_primitive has not been registered"
-        outputs = NormBwdPrimitive.inner_primitive.bind(
+        dx, dgamma, dbeta, _ = NormBwdPrimitive.inner_primitive.bind(
             dz,
             x,
             mu,
@@ -824,12 +952,8 @@ class NormBwdPrimitive(BasePrimitive):
             gamma,
             norm_type=norm_type,
             zero_centered_gamma=zero_centered_gamma,
-            is_outer=is_outer,
+            is_outer=False,
         )
-        if is_outer:
-            dx, dgamma, dbeta = outputs
-        else:
-            dx, dgamma, dbeta, _ = outputs
         return dx, dgamma, dbeta
 
     @staticmethod
