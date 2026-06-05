@@ -17,11 +17,8 @@
 namespace transformer_engine {
 namespace jax {
 
-// Sanitize a probe name for use as a filename component: replace any
-// character that's not [A-Za-z0-9._-] with '_'. Probe names like
-// "fwd/sparse_probs_after_fused_topk" therefore become legal POSIX
-// filenames ("fwd_sparse_probs_after_fused_topk") without losing the
-// trailing semantic suffix.
+// Replace characters not in [A-Za-z0-9._-] with '_' so probe names are
+// safe to use as filename components.
 static std::string SanitizeProbeName(std::string_view name) {
   std::string out;
   out.reserve(name.size());
@@ -69,8 +66,7 @@ Error_Type InspectFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type mi
 
   // Per-probe filenames: my_tensor_gpu{device}_{sanitized_name}.bin /
   // ..._meta.json. With distinct names, the on-disk dumps survive across
-  // probes instead of being overwritten on every call, so a single test
-  // run produces one .bin per probe per rank ready for offline analysis.
+  // probes instead of being overwritten on every call
   std::string safe_name = SanitizeProbeName(name);
   std::string device_str = std::to_string(device);
   std::string filename = "my_tensor_gpu" + device_str + "_" + safe_name + ".bin";
@@ -102,9 +98,6 @@ Error_Type InspectFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type mi
   meta_file << "}";
   meta_file.close();
 
-  // Surface the probe name in the live log alongside the file path, so
-  // analysing a multi-probe trace doesn't require correlating by
-  // shape/dtype guesswork.
   printf("[gpu%d %.*s]: written to %s (shape: [", device, static_cast<int>(name.size()),
          name.data(), filename.c_str());
   for (size_t i = 0; i < input_buf.dimensions().size(); ++i) {

@@ -22,12 +22,8 @@ class InspectPrimitive(BasePrimitive):
 
     name = "te_inspect_ffi"
     multiple_results = False
-    # ``name`` is at positional index 5 in ``impl``; declaring it static
-    # here lets ``custom_partitioning`` resolve ``bind(..., name=...)``
-    # kwargs back to that position via ``_resolve_kwargs``. Keyword-only
-    # parameters (``*, name``) would raise
-    #     TypeError: keyword arguments could not be resolved to positions
-    # at trace time, so ``impl`` accepts ``name`` positionally below.
+    # ``name`` is positional (index 5 in ``impl``) so ``custom_partitioning``
+    # can resolve ``bind(..., name=...)`` kwargs back to that position.
     impl_static_args = (5,)
     inner_primitive = None
     outer_primitive = None
@@ -97,11 +93,7 @@ class InspectPrimitive(BasePrimitive):
         x_std,
         name,
     ):
-        """
-        inspect implementation. ``name`` is positional (not keyword-only)
-        so ``custom_partitioning(static_argnums=(5,))`` can resolve
-        ``bind(..., name=...)`` kwargs to position 5.
-        """
+        """inspect implementation"""
         assert InspectPrimitive.inner_primitive is not None
         x = InspectPrimitive.inner_primitive.bind(
             x,
@@ -115,16 +107,7 @@ class InspectPrimitive(BasePrimitive):
 
     @staticmethod
     def partition(name, mesh, arg_infos, result_infos):
-        """
-        Identity in sharding: the output carries the same sharding as ``x``;
-        the four scalar stats (x_min, x_max, x_mean, x_std) are fully
-        replicated. Without this override the primitive falls back to
-        ``BasePrimitive``'s abstract partition and any multi-device JIT
-        rejects the call.
-
-        Static args precede ``mesh`` per the ``custom_partitioning``
-        convention when ``static_argnums`` is set on the wrapped impl.
-        """
+        """Identity sharding: output matches ``x``; scalar stats are replicated."""
         del result_infos
         x_sharding = arg_infos[0].sharding
         scalar_sharding = NamedSharding(mesh, PartitionSpec())
@@ -144,13 +127,7 @@ class InspectPrimitive(BasePrimitive):
 
     @staticmethod
     def shardy_sharding_rule(*args):
-        """
-        Five operands, one output. ``x`` and the output carry the same
-        wildcard rank; the four scalar stats are rank-0 (empty operand
-        entries between commas). ``name`` is a static arg (precedes
-        ``mesh``/``value_types``/``result_types`` in ``args``) and does
-        not participate in the rule.
-        """
+        """``x`` and output share rank; the four scalar stats are rank-0."""
         del args
         return "..., , , , -> ..."
 
@@ -173,10 +150,8 @@ def _inspect_array_inner(x: jnp.ndarray, name: str) -> jnp.ndarray:
     )
 
 
-# ``name`` is a Python string and must not be traced through jax — it is
-# carried as a custom_vjp nondiff argument so it stays static at compile
-# time, threads into the primitive bind as a kwarg, and lands on the
-# FFI as a string attribute.
+# ``name`` is carried as a custom_vjp nondiff argument so it stays static
+# at compile time and lands on the FFI as a string attribute.
 @partial(jax.custom_vjp, nondiff_argnums=(1,))
 def _inspect(x, name):
     """ """
@@ -203,22 +178,18 @@ _inspect.defvjp(_inspect_fwd_rule, _inspect_bwd_rule)
 def inspect_array(x: jnp.ndarray, name: str) -> jnp.ndarray:
     """Inspect a JAX array by dumping its data and stats to disk per-rank.
 
-    On every call the FFI synchronises the input device buffer to host
-    and writes two files per rank, **keyed by ``name``** so multiple
+    Each call writes two files per rank, keyed by ``name`` so multiple
     probes in the same program produce distinct dumps:
 
-    * ``my_tensor_gpu{device}_{sanitized_name}.bin``      – raw bytes.
-    * ``my_tensor_gpu{device}_{sanitized_name}_meta.json`` – ``name``,
+    * ``my_tensor_gpu{device}_{sanitized_name}.bin`` -- raw bytes.
+    * ``my_tensor_gpu{device}_{sanitized_name}_meta.json`` -- ``name``,
       shape, dtype, and min/max/mean/std summary stats.
 
-    A line is also printed to stdout including the probe ``name`` so
-    multi-probe traces are easy to follow in a live log.
+    A summary line is also printed to stdout, including ``name``.
 
-    ``name`` is treated as a static (non-traced) attribute, so the same
-    probe name must be passed in every (re-)trace of an enclosing
-    ``jax.jit``; characters outside ``[A-Za-z0-9._-]`` are mapped to
-    ``_`` when forming the filename, but the unsanitised name is echoed
-    verbatim in the JSON metadata and the printed log line.
+    ``name`` is a static (non-traced) attribute. Characters outside
+    ``[A-Za-z0-9._-]`` are mapped to ``_`` in the filename, but the
+    original name is preserved in the JSON metadata and log line.
 
     Args:
         x (jnp.ndarray): The JAX array to inspect.
