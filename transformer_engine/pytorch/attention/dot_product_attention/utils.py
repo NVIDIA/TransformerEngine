@@ -1009,7 +1009,7 @@ def get_attention_backend(
         if cudnn_version < (9, 18, 1):
             if use_fused_attention:
                 logger.debug(
-                    "Disabling FusedAttention as qkv_format = thd is not supported for"
+                    "Disabling FusedAttention as q_format or kv_format = thd is not supported for"
                     " compute capability < sm90 and cuDNN version < 9.18.1"
                 )
             use_fused_attention = False
