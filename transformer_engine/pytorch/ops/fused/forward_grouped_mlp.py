@@ -722,8 +722,8 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
             mark_grouped_tensor(grouped_fc1_x, activation_in, scales, grouped_fc2_x)
             activation_op = self.basic_ops[1]
             cpu_offloading = is_cpu_offload_enabled()
-            no_offload_fc1_activation = bool(getattr(fc1_op, "no_offload_activation", False))
-            no_offload_moe_activation = bool(getattr(activation_op, "no_offload_activation", False))
+            no_offload_fc1_activation = fc1_op.no_offload_activation
+            no_offload_moe_activation = activation_op.no_offload_activation
             activation_is_srelu = isinstance(activation_op, ScaledSReLU)
             activation_recompute_in_mlp = bool(
                 getattr(activation_op, "activation_recompute_in_mlp", False)

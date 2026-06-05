@@ -12,7 +12,7 @@ import torch
 
 import transformer_engine_torch as tex
 from ...constants import DType
-from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
+from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload, mark_not_offload
 from ...tensor import Float8CurrentScalingQuantizer, Quantizer
 from ...utils import clear_tensor_data
 from ..op import BasicOperation, OperationContext
@@ -67,6 +67,9 @@ class SwiGLU(BasicOperation):
         when the interleave size is 2). This data format is highly
         experiental and is primarily intended to support some advanced
         fused kernels.
+    no_offload_activation : bool, default = ``False``
+        Keep saved activation tensors resident on GPU when CPU offload
+        is enabled.
 
     """
 
@@ -75,10 +78,12 @@ class SwiGLU(BasicOperation):
         *,
         cache_quantized_input: bool = False,
         glu_interleave_size: Optional[int] = None,
+        no_offload_activation: bool = False,
     ):
         super().__init__()
         self.cache_quantized_input: bool = cache_quantized_input
         self.glu_interleave_size: Optional[int] = glu_interleave_size
+        self.no_offload_activation: bool = no_offload_activation
 
     def op_forward(
         self,
@@ -128,7 +133,10 @@ class SwiGLU(BasicOperation):
         # Save state for backward pass
         if ctx.requires_grad:
             if is_cpu_offload_enabled():
-                mark_activation_offload(input_)
+                if self.no_offload_activation:
+                    mark_not_offload(input_)
+                else:
+                    mark_activation_offload(input_)
             ctx.save_for_backward(input_)
             ctx.dtype = dtype
             ctx.prev_op_grad_output_quantizer = prev_op_grad_output_quantizer
@@ -218,6 +226,9 @@ class ClampedSwiGLU(BasicOperation):
         When set, the GLU activations will use an experimental block
         interleaved format. See the corresponding option in the SwiGLU
         operation for more details.
+    no_offload_activation : bool, default = ``False``
+        Keep saved activation tensors resident on GPU when CPU offload
+        is enabled.
 
     """
 
@@ -229,6 +240,7 @@ class ClampedSwiGLU(BasicOperation):
         glu_linear_offset: float = 1.0,
         cache_quantized_input: bool = False,
         glu_interleave_size: Optional[int] = None,
+        no_offload_activation: bool = False,
     ):
         super().__init__()
         self.limit: float = limit
@@ -236,6 +248,7 @@ class ClampedSwiGLU(BasicOperation):
         self.glu_linear_offset: float = glu_linear_offset
         self.cache_quantized_input: bool = cache_quantized_input
         self.glu_interleave_size: Optional[int] = glu_interleave_size
+        self.no_offload_activation: bool = no_offload_activation
 
     def _tex_clamped_swiglu_forward(
         self,
@@ -312,7 +325,10 @@ class ClampedSwiGLU(BasicOperation):
         # Save state for backward pass
         if ctx.requires_grad:
             if is_cpu_offload_enabled():
-                mark_activation_offload(x)
+                if self.no_offload_activation:
+                    mark_not_offload(x)
+                else:
+                    mark_activation_offload(x)
             ctx.save_for_backward(x)
             ctx.dtype = dtype
             ctx.prev_op_grad_output_quantizer = prev_op_grad_output_quantizer
@@ -382,10 +398,12 @@ class _ScaledGLU(BasicOperation):
         glu_interleave_size: Optional[int] = None,
         *,
         activation_recompute_in_mlp: bool = False,
+        no_offload_activation: bool = False,
     ) -> None:
         super().__init__()
         self.glu_interleave_size: Optional[int] = glu_interleave_size
         self.activation_recompute_in_mlp: bool = activation_recompute_in_mlp
+        self.no_offload_activation: bool = no_offload_activation
 
     def _glu_forward(self, swiglu_in: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
@@ -463,7 +481,10 @@ class _ScaledGLU(BasicOperation):
         ctx = basic_op_ctxs[0]
         if ctx.requires_grad:
             if is_cpu_offload_enabled():
-                mark_activation_offload(input_)
+                if self.no_offload_activation:
+                    mark_not_offload(input_, scales)
+                else:
+                    mark_activation_offload(input_)
             ctx.input_requires_grad = True
             ctx.extra_input_requires_grad = extra_input.requires_grad
             ctx.dtype = dtype
@@ -555,6 +576,9 @@ class ScaledSwiGLU(_ScaledGLU):
     activation_recompute_in_mlp : bool, default = ``False``
         Enable fused grouped MLP kernels to recompute activation outputs
         during backward when supported instead of saving them.
+    no_offload_activation : bool, default = ``False``
+        Keep saved activation tensors resident on GPU when CPU offload
+        is enabled.
 
     """
 
@@ -585,6 +609,9 @@ class ScaledClampedQGeGLU(_ScaledGLU):
     activation_recompute_in_mlp : bool, default = ``False``
         Enable fused grouped MLP kernels to recompute activation outputs
         during backward when supported instead of saving them.
+    no_offload_activation : bool, default = ``False``
+        Keep saved activation tensors resident on GPU when CPU offload
+        is enabled.
     limit : float, default ``7.0``
         Clamp limit (see :class:`ClampedSwiGLU`).
     alpha : float, default ``1.702``
@@ -600,6 +627,7 @@ class ScaledClampedQGeGLU(_ScaledGLU):
         glu_interleave_size: Optional[int] = None,
         *,
         activation_recompute_in_mlp: bool = False,
+        no_offload_activation: bool = False,
         limit: float = 7.0,
         alpha: float = 1.702,
         glu_linear_offset: float = 1.0,
@@ -607,11 +635,13 @@ class ScaledClampedQGeGLU(_ScaledGLU):
         super().__init__(
             glu_interleave_size,
             activation_recompute_in_mlp=activation_recompute_in_mlp,
+            no_offload_activation=no_offload_activation,
         )
         self._clamped: ClampedSwiGLU = ClampedSwiGLU(
             limit=limit,
             alpha=alpha,
             glu_linear_offset=glu_linear_offset,
+            no_offload_activation=no_offload_activation,
         )
 
     def _glu_forward(self, swiglu_in: torch.Tensor) -> torch.Tensor:

@@ -15,6 +15,7 @@ import torch
 
 import transformer_engine_torch as tex
 from ...constants import DType
+from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload, mark_not_offload
 from ...cpp_extensions import general_grouped_gemm, general_grouped_gemm_for_grouped_tensor
 from ...distributed import CudaRNGStatesTracker
 from ...module._common import WeightGradStore
@@ -104,6 +105,9 @@ class GroupedLinear(BasicOperation):
         additional extra input and adds ``bias * scales`` instead of ``bias``
         in the forward pass. The scale tensor has shape
         ``(total_tokens,)`` and is split according to the split sizes.
+    no_offload_activation : bool, default = ``False``
+        Keep saved input activation tensors resident on GPU when CPU offload
+        is enabled.
 
     """
 
@@ -125,10 +129,12 @@ class GroupedLinear(BasicOperation):
         single_grouped_bias: bool = False,
         delay_wgrad_compute: bool = False,
         scale_bias: bool = False,
+        no_offload_activation: bool = False,
     ) -> None:
         super().__init__()
 
         self._scale_bias: bool = scale_bias and bias
+        self.no_offload_activation: bool = no_offload_activation
         if self._scale_bias:
             self.num_extra_inputs = 2
 
@@ -1026,6 +1032,27 @@ class GroupedLinear(BasicOperation):
             return
 
         ctx = basic_op_ctxs[0]
+
+        if is_cpu_offload_enabled():
+            saved_tensors = tensors_to_save[0]
+            activation_start = 4 if self._scale_bias else 3
+            activation_count = 1 if use_grouped_tensor_path else self.num_groups
+            activation_end = activation_start + activation_count
+            activation_tensors = tuple(
+                tensor
+                for tensor in saved_tensors[activation_start:activation_end]
+                if tensor is not None
+            )
+            weight_tensors = tuple(
+                tensor for tensor in saved_tensors[activation_end:] if tensor is not None
+            )
+
+            if self.no_offload_activation:
+                mark_not_offload(*activation_tensors)
+            else:
+                mark_activation_offload(*activation_tensors)
+            mark_not_offload(*weight_tensors)
+
         ctx.save_for_backward(*tensors_to_save[0])
 
         num_groups = self.num_groups
