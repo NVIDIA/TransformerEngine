@@ -201,7 +201,7 @@ __device__ void vectorized_process(size_t thread_rank, size_t num_threads, const
       for (int j = 0; j < items_per_scalar; ++j) {
         f(local_array[j], real_i + j);
       }
-   }
+    }
 
     static_assert(WARP_SIZE >= items_per_scalar);
     // and because items_per_scalar > skip_cnt, WARP_SIZE > skip_cnt
@@ -259,11 +259,11 @@ __device__ void vectorized_process(const T *in, idxT len, Func f, int sync_width
         __builtin_memcpy(local_array, &wide_data, sizeof(WideT));
         const idxT real_i = skip_cnt + i * items_per_scalar;
 #pragma unroll
-      for (int j = 0; j < items_per_scalar; ++j) {
-        f(local_array[j], real_i + j, valid);
+        for (int j = 0; j < items_per_scalar; ++j) {
+          f(local_array[j], real_i + j, valid);
+        }
       }
     }
-  }
 
     static_assert(WARP_SIZE >= items_per_scalar);
     // need at most one warp for skipped and remained elements,
