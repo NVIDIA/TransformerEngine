@@ -3099,8 +3099,6 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         # bshd/sbhd (slice-based) and THD (cu_seqlens/seqused_k-based) paths.
         if use_fused_attention and causal and "bottom_right" not in attn_mask_type:
             attn_mask_type = attn_mask_type + "_bottom_right"
-        assert attn_bias_type == "no_bias", f"{attn_bias_type} bias type is not supported!"
-        assert q.shape[-1] % 8 == 0, "Hidden size per attention head should be multiple of 8!"
         assert (
             qkv_format == "thd" or "padding" not in attn_mask_type
         ), f"No support for cp_comm_type='all_gather' and {attn_mask_type=}."
@@ -3119,12 +3117,6 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         assert q.shape[seq_dim_qkv] % 2 == 0 and k.shape[seq_dim_qkv] % 2 == 0, (
             "cp_comm_type='all_gather' requires seq_len % 2 == 0 for Q, K, V. Found seq_len_q ="
             f" {q.shape[seq_dim_qkv]}, seq_len_kv = {k.shape[seq_dim_qkv]}."
-        )
-
-        assert not (qkv_format == "thd" and not use_fused_attention and not use_flash_attn_3), (
-            "cp_comm_type='all_gather' with qkv_format='thd' requires FlashAttention v3"
-            " (seqused_k) or FusedAttention. The reordered KV buffer uses padded sequence"
-            " boundaries, and FA2 cannot separate tensor offsets from visibility limits."
         )
 
         flash_attn_fwd = None
@@ -3245,8 +3237,8 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
 
         if qkv_format == "thd":
             # [cp*t, h, d] -> reorder to contiguous per-sequence order -> [t_full, h, d]
-            # Use padded cu_seqlens since reorder computes slice boundaries via integer
-            # division by 2*cp_size, which requires divisible values.
+            # The padded cu_seqlens are global sequence offsets. Reorder uses them to
+            # derive per-sequence chunk boundaries.
             k_ag = reorder_thd_sequences_to_contiguous(k_ag, cu_seqlens_kv_padded, cp_size)
             v_ag = reorder_thd_sequences_to_contiguous(v_ag, cu_seqlens_kv_padded, cp_size)
         else:
@@ -3286,10 +3278,8 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         out_per_step = [None, None]
         softmax_lse_per_step = [None, None]
         rng_states = [None, None]
-        if qkv_format == "thd":
-            out = torch.zeros(o_shape, dtype=fwd_nominal_dtype, device=q.device)
-        else:
-            out = torch.empty_like(q)
+        out_shape = o_shape if qkv_format == "thd" else q.shape
+        out = torch.zeros(out_shape, dtype=fwd_nominal_dtype, device=q.device)
         max_logit_per_step = [None, None]
         max_logit = None
 
@@ -3382,17 +3372,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
 
         for i in range(len(local_seq_chunk_ids) + 1):
             if i < len(local_seq_chunk_ids):
-                # FA3 (hopper) forward allocates an internal persistent-scheduler workspace
-                # (tile_count_semaphore) per call and frees it on return; the caching allocator
-                # records that free only against the stream it was allocated on. With per-step
-                # calls overlapping across streams, the allocator can hand step i's FA3 the block
-                # step i-1's FA3 just freed while step i-1's scheduler kernel is still atomically
-                # incrementing it -> shared semaphore -> out-of-range tiles -> illegal memory access
-                # (FA3-only, only under overlap; root cause in mb_runs/FA3_AG_RECORDSTREAM_RACE.md
-                # -> flash-attention hopper/flash_api.cpp tile_count_semaphore). Serialize
-                # consecutive FA3 calls on the GPU (a stream wait, NO host sync) so their internal
-                # workspace lifetimes don't overlap. FusedAttention manages its own workspace and is
-                # unaffected, so keep its per-step overlap.
+                # FA3 uses internal per-call workspace. Consecutive AG per-step
+                # calls are serialized on GPU streams so that workspace lifetimes
+                # do not overlap. FusedAttention keeps the existing per-step overlap.
                 if i > 0 and use_flash_attn_3:
                     flash_attn_streams[i].wait_stream(flash_attn_streams[i - 1])
                 with torch.cuda.stream(flash_attn_streams[i]):
@@ -3571,10 +3553,8 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                     elif o_format == "sbhd":
                         out_f16[i - 1].copy_(out_per_step[i - 1])
                     elif qkv_format == "thd":
-                        # Copy valid token ranges from this step's output.
-                        # Each step writes at different positions (no overlap, no correction needed).
-                        # Sync-free fused copy of every segment's valid rows in one launch (replaces
-                        # a per-batch .item() slice-copy loop that stalled comm/compute overlap).
+                        # Copy every segment's valid token range from this step's output.
+                        # Each step writes to distinct positions.
                         tex.thd_valid_copy(
                             out,
                             out_per_step[i - 1],
@@ -3902,10 +3882,10 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         local_seq_chunk_ids = [rank, 2 * cp_size - rank - 1]
         for i in range(len(local_seq_chunk_ids) + 1):
             if i < len(local_seq_chunk_ids):
-                # Same FA3 cross-stream workspace race as the forward (here dq/dk/dv_semaphore in
-                # mha_bwd): serialize consecutive per-step FA3 backward calls on the GPU so their
-                # internal-workspace lifetimes don't overlap. FA3-only; FusedAttention keeps overlap.
-                # See mb_runs/FA3_AG_RECORDSTREAM_RACE.md.
+                # FA3 uses internal per-call workspace. Consecutive AG per-step
+                # backward calls are serialized on GPU streams so that workspace
+                # lifetimes do not overlap. FusedAttention keeps the existing
+                # per-step overlap.
                 if i > 0 and ctx.use_flash_attn_3:
                     flash_attn_streams[i].wait_stream(flash_attn_streams[i - 1])
                 with torch.cuda.stream(flash_attn_streams[i]):
@@ -4119,8 +4099,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                 # dq/dk/dv, dq_per_step/dk_per_step/dv_per_step: ctx.fwd_nominal_dtype
                 with torch.cuda.stream(flash_attn_streams[i - 1]):
                     if ctx.qkv_format == "thd":
-                        # dQ: copy valid token ranges from this step's dQ (sync-free fused copy;
-                        # replaces a per-batch .item() slice-copy loop that broke comm/compute overlap).
+                        # dQ: copy every segment's valid token range from this step's dQ.
                         tex.thd_valid_copy(
                             dq,
                             dq_per_step[i - 1],

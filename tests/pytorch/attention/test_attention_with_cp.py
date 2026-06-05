@@ -45,7 +45,7 @@ seed = 1234
 torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
 
-test_essential = True
+test_essential = bool(int(os.getenv("NVTE_TEST_ESSENTIAL", "1")))
 
 model_configs_flash_attn = {
     # test: ModelConfig(b, sq, hq, dqk)
