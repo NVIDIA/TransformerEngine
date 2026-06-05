@@ -1042,7 +1042,7 @@ class GroupedLinear(BasicOperation):
                     mark_activation_offload(grouped_x)
             else:
                 # Layout: [split_sizes, None, None, (scales?), *xs, *ws]
-                live_xs = [t for t in saved[offset:offset + self.num_groups] if t is not None]
+                live_xs = [t for t in saved[offset : offset + self.num_groups] if t is not None]
                 if live_xs:
                     mark_activation_offload(*live_xs)
 

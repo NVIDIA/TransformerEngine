@@ -751,8 +751,7 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
 
             if cpu_offloading:
                 activation_tensors = [
-                    t for t in (grouped_fc1_x, activation_in, saved_grouped_fc2_x)
-                    if t is not None
+                    t for t in (grouped_fc1_x, activation_in, saved_grouped_fc2_x) if t is not None
                 ]
                 start_offload(*activation_tensors)
                 mark_activation_offload(*activation_tensors)
