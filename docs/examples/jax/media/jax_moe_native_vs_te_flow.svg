@@ -38,7 +38,7 @@
   <text class="lane-title" x="377.5" y="126" text-anchor="middle">Native JAX BF16 EP MoE</text>
   <text class="lane-subtitle" x="377.5" y="148" text-anchor="middle">JAX router, ragged collectives, fused ragged_dot FFN</text>
   <text class="lane-title" x="1122.5" y="126" text-anchor="middle">TE _MoEBlock BF16</text>
-  <text class="lane-subtitle" x="1122.5" y="148" text-anchor="middle">TE router, dispatch/combine, grouped GEMM FFN</text>
+  <text class="lane-subtitle" x="1122.5" y="148" text-anchor="middle">TE router, NCCL EP dispatch/combine, grouped GEMM FFN</text>
 
   <rect class="vjp" x="825" y="214" width="595" height="444" rx="8"/>
   <text class="callout" x="1122.5" y="674" text-anchor="middle">single TE MoE custom_vjp boundary</text>
@@ -76,7 +76,7 @@
 
     <rect class="dispatch" x="837" y="360" width="570" height="76" rx="6"/>
     <text class="box-title" x="1122" y="387" text-anchor="middle">Dispatch</text>
-    <text class="box-text" x="1122" y="408" text-anchor="middle">token_dispatch, gather counts, ragged_all_to_all, local sort</text>
+    <text class="box-text" x="1122" y="408" text-anchor="middle">tex.ep_dispatch via NCCL EP, TE handle state</text>
 
     <rect class="compute" x="837" y="464" width="570" height="76" rx="6"/>
     <text class="box-title" x="1122" y="491" text-anchor="middle">Expert FFN</text>
@@ -84,7 +84,7 @@
 
     <rect class="combine" x="837" y="568" width="570" height="76" rx="6"/>
     <text class="box-title" x="1122" y="595" text-anchor="middle">Combine</text>
-    <text class="box-text" x="1122" y="616" text-anchor="middle">inverse local sort, reverse ragged_all_to_all, token combine</text>
+    <text class="box-text" x="1122" y="616" text-anchor="middle">tex.ep_combine via NCCL EP, output reshard</text>
   </g>
 
   <g>

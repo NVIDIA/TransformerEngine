@@ -44,6 +44,10 @@ def _te_moe_available():
 
         if transformer_engine_jax.get_device_compute_capability(0) < 100:
             return False, "TE MoE grouped GEMM requires Blackwell (sm_100+)"
+        if jax.process_count() < 4:
+            return False, "TE EP requires a multiprocess launch"
+        if jax.local_device_count() != 1:
+            return False, "TE EP requires one local GPU per process"
     except Exception as exc:  # pylint: disable=broad-exception-caught
         return False, str(exc)
     return True, ""

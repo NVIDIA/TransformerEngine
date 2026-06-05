@@ -15,9 +15,11 @@ block with TransformerEngine's experimental Flax ``_MoEBlock``.
 all-to-all setup lives in ``moe_native.py`` so the snippets below stay focused
 on model-level code.
 
-**TransformerEngine path.** This tutorial uses ``_MoEBlock`` in BF16 with the
-wrapper's current no-op quantizer sets. Quantized MoE recipes are intentionally
-out of scope here.
+**TransformerEngine path.** This tutorial uses ``_MoEBlock`` in BF16 with
+NCCL-backed TE EP and the wrapper's current no-op quantizer sets. TE EP replaces
+the tutorial's previous TE-side ragged A2A exchange with ``tex.ep_dispatch`` and
+``tex.ep_combine`` over NCCL EP. Quantized MoE recipes are intentionally out of
+scope here.
 
 `<- Back to the JAX integration overview <../te_jax_integration.html>`_
 
@@ -29,17 +31,19 @@ TE replacement.
    :align: center
    :width: 100%
 
-   Forward data flow for the tutorial's BF16 MoE block. TE keeps the same
-   sharded inputs and weights, but routes through TE fused router and grouped
-   GEMM primitives while keeping dispatch, expert compute, and combine inside
-   one MoE VJP.
+   Forward data flow for the tutorial's BF16 MoE block. The native baseline
+   keeps JAX ``ragged_all_to_all`` and ``ragged_dot``. TE keeps the same sharded
+   inputs and weights, but routes through TE fused router, NCCL EP
+   dispatch/combine, and grouped GEMM primitives while keeping dispatch, expert
+   compute, and combine inside one MoE VJP.
 
 1. Baseline: native JAX BF16 EP MoE
 -----------------------------------
 
 The example uses a 2x2 mesh: expert parallelism on ``ep`` and FSDP-style batch
 parallelism on ``fsdp``. The batch dimension is sharded over both axes, and
-expert weights are sharded over ``ep``.
+expert weights are sharded over ``ep``. TE EP requires ``ep`` to be the inner
+axis and currently runs in multi-process mode with one GPU per process.
 
 .. literalinclude:: moe.py
    :language: python
@@ -69,6 +73,10 @@ activation, ``wo`` ``ragged_dot`` output projection, reverse
 The TE replacement registers the same gate and expert parameter names as the
 baseline, then delegates routing, dispatch, grouped FFN, combine,
 expert-parallel collectives, and VJP to ``transformer_engine.jax.moe.moe``.
+On this branch, the TE-side expert exchange is NCCL EP: ``_MoEBlock`` calls
+``tex.ep_dispatch`` before the grouped FFNs and ``tex.ep_combine`` after them.
+The native baseline remains unchanged and continues to use
+``jax.lax.ragged_all_to_all`` for the comparison numbers.
 
 ``_MoEBlock`` is intentionally underscore-prefixed while the API stabilizes. Use
 it as an experimental integration point.
@@ -83,30 +91,32 @@ it as an experimental integration point.
    :start-after: # MOE_INPUTS_SETUP_START
    :end-before: # MOE_INPUTS_SETUP_END
 
-3. Correctness check
+3. TE EP smoke check
 --------------------
 
-Both models use the same Flax variable dictionary, so the gate and expert
-weights are identical. The comparison checks the BF16 forward result on the same
-sharded input.
+The direct script path initializes the TE EP communicator, creates the
+``_MoEBlock`` variables, runs a BF16 forward pass, and reports the output shape
+and dtype.
 
 .. literalinclude:: moe.py
    :language: python
    :start-after: # MOE_CORRECTNESS_START
    :end-before: # MOE_CORRECTNESS_END
 
-The two paths may not be bit-identical because the router and grouped matmul
-implementations differ, but they should stay within ordinary BF16 tolerance for
-the default no-bias, softmax top-k, ``silu`` path.
+The native ragged A2A baseline remains in ``moe_native.py`` and is used for the
+baseline timings below. Because the native ragged A2A path runs in
+single-process 4-GPU mode while TE EP runs in one-process-per-GPU mode, the
+benchmark sweep times the two paths separately.
 
 4. Performance comparison
 -------------------------
 
-``run_benchmarks`` runs a blocking JIT-compiled forward+backward loop with
-warmup. The same sharded input, output gradient, and variables are used for
-native BF16 and TE BF16. Even though quantization is disabled, the benchmark
-passes the active ``MeshResource`` through TE's autocast context so
-``_MoEBlock`` can resolve the ``ep`` axis.
+``run_te_benchmark`` runs a blocking JIT-compiled forward+backward loop with
+warmup. Even though quantization is disabled, the benchmark passes the active
+``MeshResource`` through TE's autocast context so ``_MoEBlock`` can resolve the
+``ep`` axis. The TE block folds top-k weights into the per-expert FFN
+intermediate with ``apply_topk_weights_early=True``; this is mathematically
+equivalent for the BF16 path because the down projection is linear.
 
 .. literalinclude:: moe.py
    :language: python
@@ -117,7 +127,10 @@ Run the full example with:
 
 .. code-block:: bash
 
-   python docs/examples/jax/moe.py
+   for i in 0 1 2 3; do
+     python docs/examples/jax/moe.py --num-process=4 --process-id=$i > proc_$i.log 2>&1 &
+   done
+   wait
 
 Measured on four NVIDIA GB200 GPUs with the default tutorial shape
 ``batch=8``, ``seq=2048``, ``hidden=1024``, ``intermediate=4096``,
@@ -127,34 +140,32 @@ Measured on four NVIDIA GB200 GPUs with the default tutorial shape
    :header: "Path", "Mean fwd+bwd time", "Relative time"
    :widths: 35, 25, 25
 
-   "Native JAX BF16", "17.320 ms", "1.00x"
-   "TE ``_MoEBlock`` BF16", "13.601 ms", "0.79x"
+   "Native JAX BF16 ragged A2A", "17.085 ms", "1.00x"
+   "TE ``_MoEBlock`` BF16 with NCCL EP", "3.156 ms", "0.18x"
 
-The same run reported ``max |native BF16 - TE BF16| = 0.0604`` for the forward
-correctness check. For this no-op-quantizer BF16 configuration, TE measured
-``1.27x`` the native baseline throughput on this tutorial shape.
+For this no-op-quantizer BF16 configuration, TE EP measured ``5.41x`` the
+native ragged A2A baseline throughput on this tutorial shape.
 
-A larger-shape sweep with the same blocking timing loop found TE ahead for each
-shape tried. The default shape appears in both tables; the values differ
-slightly because the standalone tutorial run and sweep were timed separately.
+A larger-shape sweep with the same blocking timing loop found TE EP ahead for
+each shape tried. The native column uses the unchanged ragged A2A baseline; the
+TE column uses NCCL EP. The default shape appears in both tables; the values
+differ slightly because the standalone tutorial run and sweep were timed
+separately.
 
 .. csv-table::
    :header: "Batch", "Seq", "Hidden", "Intermediate", "Native BF16", "TE BF16", "TE speedup"
    :widths: 10, 10, 12, 16, 16, 16, 14
 
-   "8", "1024", "1024", "4096", "8.369 ms", "7.346 ms", "1.14x"
-   "8", "2048", "1024", "4096", "17.413 ms", "13.554 ms", "1.28x"
-   "8", "4096", "1024", "4096", "34.809 ms", "32.878 ms", "1.06x"
-   "16", "2048", "1024", "4096", "35.102 ms", "32.773 ms", "1.07x"
-   "8", "1024", "2048", "8192", "19.656 ms", "14.566 ms", "1.35x"
-   "8", "2048", "2048", "8192", "38.630 ms", "32.057 ms", "1.21x"
-   "16", "2048", "2048", "8192", "85.549 ms", "66.793 ms", "1.28x"
+   "8", "1024", "1024", "4096", "8.543 ms", "2.075 ms", "4.12x"
+   "8", "2048", "1024", "4096", "17.085 ms", "3.217 ms", "5.31x"
+   "8", "4096", "1024", "4096", "38.811 ms", "5.349 ms", "7.26x"
+   "16", "2048", "1024", "4096", "39.194 ms", "5.355 ms", "7.32x"
+   "8", "1024", "2048", "8192", "19.329 ms", "4.110 ms", "4.70x"
+   "8", "2048", "2048", "8192", "42.505 ms", "6.254 ms", "6.80x"
+   "16", "2048", "2048", "8192", "88.134 ms", "10.542 ms", "8.36x"
 
-Across the sweep, the forward max-absolute difference stayed between
-``0.0598`` and ``0.0704``. The result depends on token distribution, hidden
-size, intermediate size, and the target stack. Keep
-``PermutationBackend.PURE_JAX`` until correctness is established; then compare
-it with ``PermutationBackend.TRITON`` separately.
+The result depends on token distribution, hidden size, intermediate size, and
+the target stack.
 
 .. raw:: html
 
