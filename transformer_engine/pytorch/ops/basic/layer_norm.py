@@ -14,7 +14,7 @@ import torch
 
 from transformer_engine_torch import layernorm_bwd, layernorm_fwd
 from ...constants import TE_DType
-from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
+from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload, mark_not_offload
 from ...export import is_in_onnx_export_mode
 from ...tensor import Quantizer
 from ...utils import (
@@ -64,6 +64,8 @@ class LayerNorm(BasicOperation):
         For more fine-grained control, provide a dict with the SM
         margin at each compute stage ("forward", "backward",
         "inference").
+    offload_activation : bool, default = ``True``
+        Offload saved activation tensors when CPU offload is enabled.
 
     """
 
@@ -76,10 +78,12 @@ class LayerNorm(BasicOperation):
         dtype: Optional[torch.dtype] = None,
         zero_centered_gamma: bool = False,
         sm_margin: int | dict[str, int] = 0,
+        offload_activation: bool = True,
     ) -> None:
         super().__init__()
         self.eps: float = eps
         self.zero_centered_gamma: bool = zero_centered_gamma
+        self.offload_activation: bool = offload_activation
 
         # Parameter shape
         if not isinstance(normalized_shape, Iterable):
@@ -217,7 +221,10 @@ class LayerNorm(BasicOperation):
         # Save state for backward pass
         if ctx.requires_grad:
             if is_cpu_offload_enabled():
-                mark_activation_offload(x, means, rstdevs)
+                if self.offload_activation:
+                    mark_activation_offload(x, means, rstdevs)
+                else:
+                    mark_not_offload(x, means, rstdevs)
             ctx.save_for_backward(x, means, rstdevs)
             ctx.dtype = dtype
 

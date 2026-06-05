@@ -119,6 +119,7 @@ class _LayerNormLinear(torch.autograd.Function):
             grad_weight_quantizer,
             grad_output_quantizer,
             cpu_offloading,
+            offload_activation,
             tp_group,
             tp_size,
             sequence_parallel,
@@ -458,7 +459,10 @@ class _LayerNormLinear(torch.autograd.Function):
                         ln_out.update_usage(rowwise_usage=False)
 
             if cpu_offloading:
-                mark_activation_offload(inputmat, mu, rsigma, ln_out_to_save)
+                if offload_activation:
+                    mark_activation_offload(inputmat, mu, rsigma, ln_out_to_save)
+                else:
+                    mark_not_offload(inputmat, mu, rsigma, ln_out_to_save)
 
             # Scatter intermediate/activation tensors saved for the backward pass
             # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
@@ -1250,6 +1254,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
                    This can help in latency bound communication situations.
                    Requires PyTorch version 2.7.0 or higher. When set to ``None``, standard all-reduce
                    is used.
+    offload_activation : bool, default = ``True``
+                   Offload saved activation tensors when CPU offload is enabled.
     """
 
     def __init__(
@@ -1281,6 +1287,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         ub_name: Optional[str] = None,
         delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
+        offload_activation: bool = True,
         name: Optional[str] = None,
     ) -> None:
         super().__init__(name)
@@ -1300,6 +1307,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         )
         self.zero_centered_gamma = zero_centered_gamma
         self.symmetric_ar_type = symmetric_ar_type
+        self.offload_activation = offload_activation
 
         self.wgrad_store = WeightGradStore(delay_wgrad_compute, ub_bulk_wgrad)
 
@@ -1730,6 +1738,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 grad_weight_quantizer,
                 grad_output_quantizer,
                 is_cpu_offload_enabled(),
+                self.offload_activation,
                 self.tp_group,
                 self.tp_size,
                 self.sequence_parallel,

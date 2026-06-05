@@ -49,7 +49,12 @@ from ..cpp_extensions import (
 )
 from ..constants import GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
-from ..cpu_offload import is_cpu_offload_enabled, mark_not_offload, start_offload
+from ..cpu_offload import (
+    is_cpu_offload_enabled,
+    mark_activation_offload,
+    mark_not_offload,
+    start_offload,
+)
 from ..triton.grouped_dbias_dscales import compute_grouped_dbias
 
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
@@ -402,6 +407,7 @@ class _GroupedLinear(torch.autograd.Function):
             grad_output_quantizers,
             fuse_wgrad_accumulation,
             cpu_offloading,
+            offload_activation,
             sequence_parallel,
             activation_dtype,
             is_grad_enabled,
@@ -626,6 +632,12 @@ class _GroupedLinear(torch.autograd.Function):
                                 inputmat.update_usage(rowwise_usage=False, columnwise_usage=True)
             else:
                 inputmats = [None] * num_gemms
+
+            if cpu_offloading:
+                if offload_activation:
+                    mark_activation_offload(*inputmats)
+                else:
+                    mark_not_offload(*inputmats)
 
             # Original weights are only needed by high_precision dgrad. The weakrefs
             # used for fused wgrad accumulation serve a different purpose: restoring
@@ -1232,6 +1244,8 @@ class GroupedLinear(TransformerEngineBaseModule):
                        EXPERIMENTAL and subject to change. Gated by the
                        ``NVTE_GROUPED_LINEAR_SINGLE_PARAM`` environment variable: if the env var
                        is not set this argument is forced to ``False`` with a warning.
+    offload_activation : bool, default = ``True``
+                       Offload saved activation tensors when CPU offload is enabled.
 
     Notes
     -----
@@ -1264,6 +1278,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         save_original_input: bool = False,
         single_grouped_weight: bool = False,
         single_grouped_bias: bool = False,
+        offload_activation: bool = True,
         name: Optional[str] = None,
     ) -> None:
         super().__init__(name)
@@ -1280,6 +1295,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         self.ub_overlap_ag = ub_overlap_ag
         self.ub_name = ub_name
         self.save_original_input = save_original_input
+        self.offload_activation = offload_activation
         single_grouped_weight, single_grouped_bias = resolve_grouped_linear_single_param_flags(
             single_grouped_weight, single_grouped_bias
         )
@@ -1749,6 +1765,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 grad_output_quantizers,
                 self.fuse_wgrad_accumulation,
                 is_cpu_offload_enabled(),
+                self.offload_activation,
                 self.sequence_parallel,
                 self.activation_dtype,
                 is_grad_enabled,

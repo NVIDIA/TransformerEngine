@@ -13,7 +13,7 @@ from typing import Any, Optional
 import torch
 
 from ...cpp_extensions import general_gemm
-from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
+from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload, mark_not_offload
 from ...distributed import (
     CudaRNGStatesTracker,
     gather_along_first_dim,
@@ -91,6 +91,8 @@ class BasicLinear(BasicOperation):
         Options for overlapping tensor-parallel communication with
         compute using Userbuffers. This feature is highly
         experimental.
+    offload_activation : bool, default = ``True``
+        Offload saved activation tensors when CPU offload is enabled.
 
     """
 
@@ -107,8 +109,10 @@ class BasicLinear(BasicOperation):
         rng_state_tracker_function: Optional[Callable[[], CudaRNGStatesTracker]] = None,
         accumulate_into_main_grad: bool = False,
         userbuffers_options: Optional[dict[str, Any]] = None,
+        offload_activation: bool = True,
     ) -> None:
         super().__init__()
+        self.offload_activation: bool = offload_activation
 
         # Weight tensor dimensions
         self.in_features: int = in_features
@@ -1050,7 +1054,11 @@ class BasicLinear(BasicOperation):
                 saved_input = x_local
                 saved_weight = w
             if is_cpu_offload_enabled():
-                mark_activation_offload(saved_input)
+                if self.offload_activation:
+                    mark_activation_offload(saved_input)
+                else:
+                    mark_not_offload(saved_input)
+                mark_not_offload(saved_weight)
             ctx.save_for_backward(saved_input, saved_weight)
             ctx.with_quantized_compute = with_quantized_compute and backward_override is None
             ctx.backward_override = backward_override

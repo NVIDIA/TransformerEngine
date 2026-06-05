@@ -13,7 +13,7 @@ from typing import Any, Optional
 import torch
 
 import transformer_engine_torch as tex
-from ...cpu_offload import is_cpu_offload_enabled, mark_not_offload
+from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload, mark_not_offload
 from ...cpp_extensions import general_gemm, general_grouped_gemm_for_grouped_tensor
 from ...quantization import Recipe
 from ...tensor import NVFP4Quantizer, NVFP4Tensor, Quantizer
@@ -722,8 +722,8 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
             mark_grouped_tensor(grouped_fc1_x, activation_in, scales, grouped_fc2_x)
             activation_op = self.basic_ops[1]
             cpu_offloading = is_cpu_offload_enabled()
-            no_offload_fc1_activation = fc1_op.no_offload_activation
-            no_offload_moe_activation = activation_op.no_offload_activation
+            offload_fc1_activation = fc1_op.offload_activation
+            offload_moe_activation = activation_op.offload_activation
             activation_is_srelu = isinstance(activation_op, ScaledSReLU)
             activation_recompute_in_mlp = bool(
                 getattr(activation_op, "activation_recompute_in_mlp", False)
@@ -752,7 +752,9 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
                 [grouped_fc1_weight] if fc1_op.single_grouped_weight else grouped_fc1_weight
             )
             if cpu_offloading:
-                if no_offload_fc1_activation:
+                if offload_fc1_activation:
+                    mark_activation_offload(grouped_fc1_x)
+                else:
                     mark_not_offload(grouped_fc1_x)
                 mark_not_offload(*fc1_weight_tensors)
             fc1_ctx.save_for_backward(
@@ -773,8 +775,11 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
             fc1_ctx.weight_requires_grad = weight_requires_grad
 
             # Activation
-            if cpu_offloading and no_offload_moe_activation:
-                mark_not_offload(activation_in, scales)
+            if cpu_offloading:
+                if offload_moe_activation:
+                    mark_activation_offload(activation_in, scales)
+                else:
+                    mark_not_offload(activation_in, scales)
             activation_ctx.save_for_backward(activation_in, scales)
             activation_ctx.extra_input_requires_grad = True
             activation_ctx.input_requires_grad = True

@@ -105,9 +105,8 @@ class GroupedLinear(BasicOperation):
         additional extra input and adds ``bias * scales`` instead of ``bias``
         in the forward pass. The scale tensor has shape
         ``(total_tokens,)`` and is split according to the split sizes.
-    no_offload_activation : bool, default = ``False``
-        Keep saved input activation tensors resident on GPU when CPU offload
-        is enabled.
+    offload_activation : bool, default = ``True``
+        Offload saved input activation tensors when CPU offload is enabled.
 
     """
 
@@ -129,12 +128,12 @@ class GroupedLinear(BasicOperation):
         single_grouped_bias: bool = False,
         delay_wgrad_compute: bool = False,
         scale_bias: bool = False,
-        no_offload_activation: bool = False,
+        offload_activation: bool = True,
     ) -> None:
         super().__init__()
 
         self._scale_bias: bool = scale_bias and bias
-        self.no_offload_activation: bool = no_offload_activation
+        self.offload_activation: bool = offload_activation
         if self._scale_bias:
             self.num_extra_inputs = 2
 
@@ -1047,10 +1046,10 @@ class GroupedLinear(BasicOperation):
                 tensor for tensor in saved_tensors[activation_end:] if tensor is not None
             )
 
-            if self.no_offload_activation:
-                mark_not_offload(*activation_tensors)
-            else:
+            if self.offload_activation:
                 mark_activation_offload(*activation_tensors)
+            else:
+                mark_not_offload(*activation_tensors)
             mark_not_offload(*weight_tensors)
 
         ctx.save_for_backward(*tensors_to_save[0])

@@ -153,6 +153,7 @@ class LinearFwdArgs:
 
     # --- Misc ---
     cpu_offloading: bool
+    offload_activation: bool
     is_grad_enabled: bool
 
 
@@ -269,6 +270,7 @@ def _linear_forward_impl(
     is_first_microbatch = args.is_first_microbatch
     fp8 = args.fp8
     cpu_offloading = args.cpu_offloading
+    offload_activation = args.offload_activation
     tp_group = args.tp_group
     sequence_parallel = args.sequence_parallel
     activation_dtype = args.activation_dtype
@@ -565,7 +567,10 @@ def _linear_forward_impl(
             saved_inputmat = inputmat
 
         if cpu_offloading and saved_inputmat is not None:
-            mark_activation_offload(saved_inputmat)
+            if offload_activation:
+                mark_activation_offload(saved_inputmat)
+            else:
+                mark_not_offload(saved_inputmat)
 
         # Scatter intermediate/activation tensors saved for the backward pass
         # NOTE: FSDP sharding is not valid for models initialized with primary Fp8 weights
@@ -1456,6 +1461,8 @@ class Linear(TransformerEngineBaseModule):
                        cast tensor. In some scenarios, the input tensor is used by multiple modules,
                        and saving the original input tensor may reduce the memory usage.
                        Cannot work with FP8 DelayedScaling recipe.
+    offload_activation : bool, default = ``True``
+                       Offload saved activation tensors when CPU offload is enabled.
     """
 
     def __init__(
@@ -1484,6 +1491,7 @@ class Linear(TransformerEngineBaseModule):
         delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
         save_original_input: bool = False,
+        offload_activation: bool = True,
         name: Optional[str] = None,
     ) -> None:
         super().__init__(name)
@@ -1499,6 +1507,7 @@ class Linear(TransformerEngineBaseModule):
         self.rng_tracker_name = rng_tracker_name
         self.symmetric_ar_type = symmetric_ar_type
         self.save_original_input = save_original_input
+        self.offload_activation = offload_activation
 
         self.wgrad_store = WeightGradStore(delay_wgrad_compute, ub_bulk_wgrad)
 
@@ -1947,6 +1956,7 @@ class Linear(TransformerEngineBaseModule):
                 wgrad_store=wgrad_store,
                 # misc
                 cpu_offloading=is_cpu_offload_enabled(),
+                offload_activation=self.offload_activation,
                 is_grad_enabled=is_grad_enabled,
             )
             out, new_weight_workspace = linear_fn(

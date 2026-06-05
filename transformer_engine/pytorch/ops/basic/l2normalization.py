@@ -11,7 +11,7 @@ import os
 import torch
 
 from ...torch_version import torch_version
-from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
+from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload, mark_not_offload
 from ...jit import (
     l2normalization_fused,
     l2normalization_fwd_fused,
@@ -48,6 +48,8 @@ class L2Normalization(BasicOperation):
         batch size per training step. Needed for JIT Warmup, a technique where jit
         fused functions are warmed up before training to ensure same kernels are
         used for forward propagation and activation recompute phase.
+    offload_activation : bool, default = ``True``
+        Offload saved activation tensors when CPU offload is enabled.
 
     """
 
@@ -57,9 +59,11 @@ class L2Normalization(BasicOperation):
         eps: float = 1e-6,
         seq_length: Optional[int] = None,
         micro_batch_size: Optional[int] = None,
+        offload_activation: bool = True,
     ) -> None:
         super().__init__()
         self.eps: float = eps
+        self.offload_activation: bool = offload_activation
 
         # JIT warmup for L2Normalization fused operations
         if seq_length and micro_batch_size:
@@ -103,7 +107,10 @@ class L2Normalization(BasicOperation):
         # Save state for backward pass
         if requires_grad:
             if is_cpu_offload_enabled():
-                mark_activation_offload(x, rsqrt_norm)
+                if self.offload_activation:
+                    mark_activation_offload(x, rsqrt_norm)
+                else:
+                    mark_not_offload(x, rsqrt_norm)
             ctx.save_for_backward(x, rsqrt_norm)
 
         return y

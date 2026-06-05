@@ -12,7 +12,7 @@ import torch
 
 from transformer_engine_torch import CommOverlapType
 from ...cpp_extensions import general_gemm
-from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
+from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload, mark_not_offload
 from ...distributed import get_distributed_world_size
 from ...quantization import FP8GlobalStateManager
 from ...module.base import (
@@ -355,7 +355,11 @@ class UserbuffersForwardLinear(FusedOperation):
         # Save state for backward pass
         if linear_op_ctx.requires_grad:
             if is_cpu_offload_enabled():
-                mark_activation_offload(x_local)
+                if linear_op.offload_activation:
+                    mark_activation_offload(x_local)
+                else:
+                    mark_not_offload(x_local)
+                mark_not_offload(w)
             linear_op_ctx.save_for_backward(x_local, w)
             linear_op_ctx.with_quantized_compute = with_quantized_compute
             linear_op_ctx.input_quantizer = input_quantizer
