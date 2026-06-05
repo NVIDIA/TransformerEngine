@@ -20,6 +20,7 @@ from build_tools.te_version import te_version
 from build_tools.utils import (
     cuda_archs,
     cuda_version,
+    cublas_pypi_install_requirement,
     cusolvermp_pypi_package_name,
     get_frameworks,
     remove_dups,
@@ -112,6 +113,9 @@ def setup_requirements() -> Tuple[List[str], List[str]]:
         "packaging",
         cusolvermp_pypi_package_name(),
     ]
+    cublas_req = cublas_pypi_install_requirement()
+    if cublas_req is not None:
+        install_reqs.append(cublas_req)
     test_reqs: List[str] = ["pytest>=8.2.1"]
 
     # Framework-specific requirements
