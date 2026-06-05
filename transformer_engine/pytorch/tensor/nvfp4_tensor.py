@@ -12,10 +12,9 @@ import functools
 
 import torch
 import transformer_engine_torch as tex
-from transformer_engine_torch import DType as TE_DType
 
 from transformer_engine.common.recipe import NVFP4BlockScaling, Recipe
-from ..constants import NVFP4_BLOCK_SCALING_SIZE, dist_group_type
+from ..constants import NVFP4_BLOCK_SCALING_SIZE, dist_group_type, DType
 from ..utils import (
     canonicalize_process_group,
     devices_match,
@@ -114,7 +113,7 @@ def get_random_sign_mask_for_rht(with_random_sign_mask: bool, device: int) -> in
 class NVFP4Quantizer(Quantizer):
     """Builder class for NVFP4 tensors with NV block scaling"""
 
-    dtype: TE_DType
+    dtype: DType
     """Random Hadamard Transform"""
     with_rht: bool
     with_post_rht_amax: bool
@@ -143,7 +142,7 @@ class NVFP4Quantizer(Quantizer):
 
     def __init__(
         self,
-        fp4_dtype: TE_DType = tex.DType.kFloat4E2M1,
+        fp4_dtype: Union[DType, tex.DType] = DType.kFloat4E2M1,
         rowwise: bool = True,
         columnwise: bool = True,
         with_amax_reduction: bool = False,
@@ -159,7 +158,7 @@ class NVFP4Quantizer(Quantizer):
         with_random_sign_mask: bool = True,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
-        self.dtype = fp4_dtype
+        self.dtype = DType.cast(fp4_dtype)
         self.with_rht = with_rht
         self.with_post_rht_amax = with_post_rht_amax
         self.with_amax_reduction = with_amax_reduction
@@ -352,7 +351,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         Rowwise amax tracking tensor.
     amax_columnwise : torch.Tensor, optional
         Columnwise amax tracking tensor.
-    fp4_dtype : TE_DType
+    fp4_dtype : DType
         The FP4 data type used for quantization.
     quantizer : Quantizer
         The quantizer instance used for this tensor.
@@ -371,7 +370,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         columnwise_scale_inv: Optional[torch.Tensor],
         amax_rowwise: Optional[torch.Tensor],
         amax_columnwise: Optional[torch.Tensor],
-        fp4_dtype: TE_DType,
+        fp4_dtype: DType,
         quantizer: Quantizer,
         with_gemm_swizzled_scales: bool,
         row_scaled_nvfp4: bool = False,
@@ -805,7 +804,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         columnwise_scale_inv: torch.Tensor,
         amax_rowwise: torch.Tensor,
         amax_columnwise: torch.Tensor,
-        fp4_dtype: TE_DType,
+        fp4_dtype: DType,
         dtype: torch.dtype,
         quantizer: Quantizer,
         with_gemm_swizzled_scales: bool = False,
@@ -936,7 +935,7 @@ def _make_nvfp4_tensor_in_reduce_ex(
     columnwise_scale_inv: torch.Tensor,
     amax_rowwise: torch.Tensor,
     amax_columnwise: torch.Tensor,
-    fp4_dtype: TE_DType,
+    fp4_dtype: DType,
     dtype: torch.dtype,
     quantizer: Quantizer,
     with_gemm_swizzled_scales: bool,
