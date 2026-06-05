@@ -1091,13 +1091,6 @@ def test_fused_adam_hybrid_master_weights(hybrid_recipe_name):
     - Optimizer states are FP32
     - Loss decreases over training steps
     """
-    if hybrid_recipe_name == "HybridFloat8BlockScaling":
-        pytest.xfail(
-            "HybridFloat8BlockScaling: Float8BlockwiseQTensor sub-storage loses "
-            "quantized type through FSDP2 view(-1) in reset_sharded_param. "
-            "Same root cause as vanilla Float8BlockScaling + quantized_model_init."
-        )
-
     from transformer_engine.pytorch import HybridQuantizedTensor
     from fsdp2_utils import get_hybrid_recipe_from_string
 
@@ -1163,12 +1156,6 @@ def test_fused_adam_hybrid_reshard_variants(hybrid_recipe_name):
     all-gather hooks are schedule-invariant across both FSDP2 passes, and
     regression-guards the future P1.1 buffer-split bandwidth optimization.
     """
-    if hybrid_recipe_name == "HybridFloat8BlockScaling":
-        pytest.xfail(
-            "HybridFloat8BlockScaling: Float8BlockwiseQTensor sub-storage loses "
-            "quantized type through FSDP2 view(-1) in reset_sharded_param."
-        )
-
     from fsdp2_utils import get_hybrid_recipe_from_string
 
     hybrid_recipe = get_hybrid_recipe_from_string(hybrid_recipe_name)
@@ -1224,12 +1211,6 @@ def test_fused_adam_hybrid_bf16_vs_hybrid_parity(hybrid_recipe_name):
     This is a sanity check that hybrid quantized training converges similarly
     to BF16 training, not a bitwise-exact comparison.
     """
-    if hybrid_recipe_name == "HybridFloat8BlockScaling":
-        pytest.xfail(
-            "HybridFloat8BlockScaling: Float8BlockwiseQTensor sub-storage loses "
-            "quantized type through FSDP2 view(-1)."
-        )
-
     from fsdp2_utils import get_hybrid_recipe_from_string
 
     hybrid_recipe = get_hybrid_recipe_from_string(hybrid_recipe_name)
@@ -1312,11 +1293,6 @@ def test_fused_adam_hybrid_vs_base_recipe_parity(hybrid_recipe_name):
     fix. Uses a bare ``te.Linear`` stack (see ``_build_linear_parity_stack``) to
     isolate GEMM-operand quantization.
     """
-    if hybrid_recipe_name == "HybridFloat8BlockScaling":
-        pytest.xfail(
-            "HybridFloat8BlockScaling: Float8BlockwiseQTensor sub-storage loses "
-            "quantized type through FSDP2 view(-1) in reset_sharded_param."
-        )
     if hybrid_recipe_name not in _HYBRID_TO_BASE_RECIPE:
         pytest.skip(
             f"{hybrid_recipe_name} is cross-format; no single-format vanilla "
@@ -1478,12 +1454,6 @@ def test_fused_adam_hybrid_allgather_correctness(hybrid_recipe_name):
     bytes is therefore bitwise-identical to concatenating the dequantized
     shards — the tolerance is effectively ``assert_equal``.
     """
-    if hybrid_recipe_name == "HybridFloat8BlockScaling":
-        pytest.xfail(
-            "HybridFloat8BlockScaling: Float8BlockwiseQTensor sub-storage loses "
-            "quantized type through FSDP2 view(-1)."
-        )
-
     from transformer_engine.pytorch import HybridQuantizedTensor
     from fsdp2_utils import get_hybrid_recipe_from_string
 
@@ -1623,12 +1593,6 @@ def test_hybrid_dcp_output_parity(hybrid_recipe_name):
     and asserts forward output parity.
     """
     import torch.distributed.checkpoint as dcp
-
-    if hybrid_recipe_name == "HybridFloat8BlockScaling":
-        pytest.xfail(
-            "HybridFloat8BlockScaling: Float8BlockwiseQTensor sub-storage loses "
-            "quantized type through FSDP2 view(-1)."
-        )
 
     if hybrid_recipe_name == "HybridFP8CurrentScaling":
         # TODO: preserve hybrid current-scaling primary-weight scales across DCP

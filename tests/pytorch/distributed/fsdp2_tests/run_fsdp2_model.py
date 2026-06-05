@@ -461,12 +461,6 @@ def test_distributed_hybrid(hybrid_recipe_name):
     - params keep their hybrid quantized type across optimizer.step(),
     - FSDP2's quantized all-gather matches a manual fp32 dequant-then-allgather.
     """
-    if hybrid_recipe_name == "HybridFloat8BlockScaling":
-        pytest.xfail(
-            "HybridFloat8BlockScaling: Float8BlockwiseQTensor sub-storage loses "
-            "quantized type through FSDP2 view(-1)."
-        )
-
     from fsdp2_utils import get_hybrid_recipe_from_string
 
     hybrid_recipe = get_hybrid_recipe_from_string(hybrid_recipe_name)
@@ -549,12 +543,6 @@ def test_distributed_hybrid_reshard_after_forward(hybrid_recipe_name):
     from FSDP2. This exercises the forward-reshard-backward-reshard cycle where
     split/as_strided/slice dispatch ops fire every iteration.
     """
-    if hybrid_recipe_name == "HybridFloat8BlockScaling":
-        pytest.xfail(
-            "HybridFloat8BlockScaling: Float8BlockwiseQTensor sub-storage loses "
-            "quantized type through FSDP2 view(-1)."
-        )
-
     from fsdp2_utils import get_hybrid_recipe_from_string
 
     hybrid_recipe = get_hybrid_recipe_from_string(hybrid_recipe_name)

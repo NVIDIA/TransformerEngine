@@ -486,12 +486,6 @@ def test_hybrid_no_excess_forward_memory(hybrid_recipe_name):
     Same methodology as test_fp8_temp_accumulation_across_layers but for
     hybrid quantized tensors.
     """
-    if hybrid_recipe_name == "HybridFloat8BlockScaling":
-        pytest.xfail(
-            "HybridFloat8BlockScaling: Float8BlockwiseQTensor sub-storage loses "
-            "quantized type through FSDP2 view(-1)."
-        )
-
     from fsdp2_utils import get_hybrid_recipe_from_string
 
     hybrid_recipe = get_hybrid_recipe_from_string(hybrid_recipe_name)
@@ -555,12 +549,6 @@ def test_hybrid_no_excess_forward_memory(hybrid_recipe_name):
 
 def test_hybrid_transpose_cache_after_backward(hybrid_recipe_name):
     """Detect transpose caches from hybrid sub-storages persisting after backward."""
-    if hybrid_recipe_name == "HybridFloat8BlockScaling":
-        pytest.xfail(
-            "HybridFloat8BlockScaling: Float8BlockwiseQTensor sub-storage loses "
-            "quantized type through FSDP2 view(-1)."
-        )
-
     from fsdp2_utils import get_hybrid_recipe_from_string
 
     hybrid_recipe = get_hybrid_recipe_from_string(hybrid_recipe_name)

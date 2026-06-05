@@ -496,7 +496,6 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
                     "Hybrid FSDP2 all-gather is not supported for a "
                     f"{type(sub).__name__} {role} sub-storage: it does not "
                     "implement fsdp_buffer_fields. "
-                    "See hybrid_quantization_fsdp.md section 9 (Gap 5) — "
                     "NVFP4 sub-storages need packed-FP4 dim-0 alignment, "
                     "columnwise dequantization and RHT-cache handling before "
                     "they can be gathered. Use a supported sub-quantizer "
@@ -677,6 +676,18 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
         if func == aten.view.default:
             tensor = args[0]
             shape = args[1]
+            # Identity view fast-path (FSDP2 reset_sharded_param issues a view
+            # to the param's own shape). The columnwise sub-storage's own shape
+            # is transposed relative to the hybrid for some formats (e.g. a 2D
+            # block-scaled Float8BlockwiseQTensor has shape (N, M) for an
+            # (M, N) weight). Forwarding the hybrid's row-major shape to it
+            # would be a spurious last-2-dims change, which 2D block scaling
+            # cannot represent and so dequantizes the sub-storage to a plain
+            # tensor -- breaking the FSDP2 sub-storage protocol later. Preserve
+            # the sub-storages as-is, mirroring the as_strided / slice no-op
+            # fast paths below.
+            if list(shape) == list(tensor.shape):
+                return HybridQuantizedTensor.make_like(tensor)
             row_view = None
             col_view = None
             if tensor._rowwise_storage is not None:

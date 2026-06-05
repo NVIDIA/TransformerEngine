@@ -5,6 +5,7 @@
 """Mixin class holding data specific for HybridQuantizedTensor"""
 
 from __future__ import annotations
+from collections.abc import Iterable
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -149,7 +150,25 @@ class HybridQuantizedTensorStorage(QuantizedTensorStorage):
         raise RuntimeError("HybridQuantizedTensorStorage has no data")
 
     def view(self, *shape):
-        """View delegates to each sub-storage. Used by FSDP2 reset_sharded_param."""
+        """View delegates to each sub-storage. Used by FSDP2 reset_sharded_param.
+
+        Identity views are handled without forwarding a reshape to the
+        sub-storages: the columnwise sub-storage's own shape is transposed
+        relative to the hybrid for some formats (e.g. a 2D block-scaled
+        Float8BlockwiseQTensor has shape ``(N, M)`` for an ``(M, N)`` weight),
+        so forwarding the hybrid's row-major shape would be a spurious
+        last-2-dims change that dequantizes it to a plain tensor.
+        """
+        flat_shape = shape[0] if len(shape) == 1 and isinstance(shape[0], Iterable) else shape
+        if list(flat_shape) == list(self.size()):
+            return HybridQuantizedTensorStorage(
+                rowwise_storage=self._rowwise_storage,
+                columnwise_storage=self._columnwise_storage,
+                rowwise_quantizer=self._rowwise_quantizer,
+                columnwise_quantizer=self._columnwise_quantizer,
+                quantizer=self._quantizer,
+                fake_dtype=self._dtype,
+            )
         row_view = self._rowwise_storage.view(*shape) if self._rowwise_storage is not None else None
         col_view = (
             self._columnwise_storage.view(*shape) if self._columnwise_storage is not None else None
