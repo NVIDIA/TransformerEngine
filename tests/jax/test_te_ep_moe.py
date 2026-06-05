@@ -113,8 +113,7 @@ _MP_ACTIVE = _init_distributed(_MP_NUM_PROCESS, _MP_PROCESS_ID)
 
 if not _MP_ACTIVE:
     pytest.skip(
-        "test_te_ep_moe.py requires the multiprocess launcher "
-        "(run_te_ep_moe.sh). Skipping.",
+        "test_te_ep_moe.py requires the multiprocess launcher (run_te_ep_moe.sh). Skipping.",
         allow_module_level=True,
     )
 
@@ -229,9 +228,7 @@ def mesh():
     # Eager bootstrap: ep_bootstrap does a host-side NCCL UID allgather
     # and cannot run from inside jax.jit. Sized to the worst-case recv_pr
     # across _CONFIGS so every parametrized config is bootstrap-compatible.
-    with mesh_obj, global_shard_guard(
-        MeshResource(ep_resource=EP_AXIS, fsdp_resource=FSDP_AXIS)
-    ):
+    with mesh_obj, global_shard_guard(MeshResource(ep_resource=EP_AXIS, fsdp_resource=FSDP_AXIS)):
         ep_bootstrap(
             world_size=num_procs,
             rank=jax.process_index(),
@@ -323,9 +320,7 @@ def _pure_jax_moe_reference(
         raise ValueError(f"Unsupported score_function={score_function!r}")
 
     routing_weights_full = jnp.zeros((T, num_experts), dtype=jnp.float32)
-    routing_weights_full = routing_weights_full.at[
-        jnp.arange(T)[:, None], top_indices
-    ].set(weights)
+    routing_weights_full = routing_weights_full.at[jnp.arange(T)[:, None], top_indices].set(weights)
 
     # FFN. ``apply_topk_weights_early`` is a fusion knob that doesn't
     # change the math (wo is linear), so the reference is identical for
@@ -335,9 +330,7 @@ def _pure_jax_moe_reference(
     intermediate = jax.nn.silu(layer_w0.astype(jnp.float32)) * layer_w1.astype(jnp.float32)
     intermediate = intermediate.astype(x.dtype)
     expert_out = jnp.einsum("tem,emh->teh", intermediate, wo)  # [T, E, H]
-    output_2d = jnp.einsum(
-        "te,teh->th", routing_weights_full.astype(x.dtype), expert_out
-    )
+    output_2d = jnp.einsum("te,teh->th", routing_weights_full.astype(x.dtype), expert_out)
     output = output_2d.reshape(B, S, H).astype(x.dtype)
 
     if aux_loss_coeff > 0.0:
@@ -352,9 +345,7 @@ def _pure_jax_moe_reference(
         else:  # sigmoid
             aux_scores = jax.nn.sigmoid(logits)
             if K > 1:
-                aux_scores = aux_scores / (
-                    aux_scores.sum(axis=-1, keepdims=True) + 1e-20
-                )
+                aux_scores = aux_scores / (aux_scores.sum(axis=-1, keepdims=True) + 1e-20)
         routing_map = (routing_weights_full > 0).astype(jnp.int32)
         tokens_per_expert = jnp.sum(routing_map, axis=0)  # [E]
         sum_probs_per_expert = jnp.sum(aux_scores, axis=0)  # [E]
@@ -562,9 +553,7 @@ def _reference_kwargs_from_config(config, params_np):
     return dict(
         score_function=config.get("score_function", "softmax"),
         expert_bias=(
-            jnp.asarray(params_np["expert_bias"])
-            if config.get("use_expert_bias", False)
-            else None
+            jnp.asarray(params_np["expert_bias"]) if config.get("use_expert_bias", False) else None
         ),
     )
 
@@ -715,9 +704,7 @@ class TestTeEpMoeAuxLoss:
         # wired.
         aux_grads = _grad_aux_only(block, variables, mesh, x)
         g_gate = np.asarray(
-            jax.device_get(
-                _unwrap(aux_grads["params"]["gate_kernel"]).addressable_data(0)
-            )
+            jax.device_get(_unwrap(aux_grads["params"]["gate_kernel"]).addressable_data(0))
         )
         assert np.all(np.isfinite(g_gate)), "gate grad NaN/Inf under aux-only loss"
         assert np.any(g_gate != 0.0), "aux bwd should propagate to gate_kernel"
@@ -730,9 +717,7 @@ class TestTeEpMoeAuxLoss:
         variables, _, _ = _init_apply(block, mesh, x, jax.random.PRNGKey(23))
         grads = _grad_step(block, variables, mesh, x, include_aux=True)
         for name in ("gate_kernel", "wi_0", "wi_1", "wo"):
-            g_local = np.asarray(
-                jax.device_get(_unwrap(grads["params"][name]).addressable_data(0))
-            )
+            g_local = np.asarray(jax.device_get(_unwrap(grads["params"][name]).addressable_data(0)))
             assert np.all(np.isfinite(g_local)), f"{name} grad NaN/Inf under main+aux"
             assert np.any(g_local != 0.0), f"{name} grad zero under main+aux"
 
@@ -774,9 +759,7 @@ class TestTeEpMoEBlockFlax:
 
         grads = _grad_step(block, variables, mesh, x)
         for name in ("gate_kernel", "wi_0", "wi_1", "wo"):
-            g_local = np.asarray(
-                jax.device_get(_unwrap(grads["params"][name]).addressable_data(0))
-            )
+            g_local = np.asarray(jax.device_get(_unwrap(grads["params"][name]).addressable_data(0)))
             assert np.all(np.isfinite(g_local)), f"{name} grad NaN/Inf"
             assert np.any(g_local != 0.0), f"{name} grad zero"
 
@@ -796,9 +779,7 @@ class TestZZZTeEpMoeBootstrap:
 
         # Different hidden dim → different bootstrap signature.
         bigger_hidden = HIDDEN * 2
-        x_b = jax.random.normal(
-            jax.random.PRNGKey(16), (BATCH, SEQ, bigger_hidden), dtype=DTYPE
-        )
+        x_b = jax.random.normal(jax.random.PRNGKey(16), (BATCH, SEQ, bigger_hidden), dtype=DTYPE)
         block_b = MoEBlock(
             num_experts=NUM_EXPERTS,
             num_experts_per_tok=TOPK,

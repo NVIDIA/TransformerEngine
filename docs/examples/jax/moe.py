@@ -305,14 +305,20 @@ def te_moe_supported():
         flax_mod = importlib.import_module("transformer_engine.jax.flax")
         getattr(flax_mod, "_MoEBlock")
         if jax.process_count() < EP_SIZE * FSDP_SIZE:
-            return False, (
-                "TE EP requires a multi-process launch with one GPU per process; "
-                f"got process_count={jax.process_count()}"
+            return (
+                False,
+                (
+                    "TE EP requires a multi-process launch with one GPU per process; "
+                    f"got process_count={jax.process_count()}"
+                ),
             )
         if jax.local_device_count() != 1:
-            return False, (
-                "TE EP requires one local GPU per process; "
-                f"got local_device_count={jax.local_device_count()}"
+            return (
+                False,
+                (
+                    "TE EP requires one local GPU per process; "
+                    f"got local_device_count={jax.local_device_count()}"
+                ),
             )
         if transformer_engine_jax.get_device_compute_capability(0) < 100:
             return False, "TE MoE grouped GEMM currently requires Blackwell (sm_100+)"
@@ -410,6 +416,7 @@ def run_benchmarks(demo, *, warmup_iters=5, timing_iters=10):
         )
         print(f"Mean time: {te_ms:.3f} ms")
     return native_ms, te_ms
+
 
 def run_te_benchmark(demo, *, warmup_iters=5, timing_iters=10):
     from transformer_engine.jax.sharding import global_shard_guard

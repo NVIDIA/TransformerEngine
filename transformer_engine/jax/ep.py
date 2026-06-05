@@ -49,8 +49,7 @@ def _allgather_uid(uid_arr, world_size, uid_size):
     devices = np.asarray(jax.devices())
     if devices.size != world_size:
         raise RuntimeError(
-            f"_allgather_uid fallback expected {world_size} global devices,"
-            f" got {devices.size}."
+            f"_allgather_uid fallback expected {world_size} global devices, got {devices.size}."
         )
     mesh = jax.sharding.Mesh(devices, ("_uid_all",))
     sharded = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("_uid_all", None))
@@ -258,8 +257,13 @@ ep_dispatch.defvjp(_dispatch_fwd, _dispatch_bwd)
 
 @partial(jax.custom_vjp, nondiff_argnums=(0, 5, 6))
 def ep_combine(
-    handle, handle_mem, token_counts, expert_out, recv_topk_weights,
-    num_local_tokens, out_sharding=None,
+    handle,
+    handle_mem,
+    token_counts,
+    expert_out,
+    recv_topk_weights,
+    num_local_tokens,
+    out_sharding=None,
 ):
     """Reduce weighted expert outputs back to source ranks.
 
@@ -281,8 +285,13 @@ def ep_combine(
         ``[..., H]`` combined output shaped per ``num_local_tokens``.
     """
     return _combine_fwd(
-        handle, handle_mem, token_counts, expert_out, recv_topk_weights,
-        num_local_tokens, out_sharding,
+        handle,
+        handle_mem,
+        token_counts,
+        expert_out,
+        recv_topk_weights,
+        num_local_tokens,
+        out_sharding,
     )[0]
 
 
@@ -292,8 +301,13 @@ def _make_valid_mask(recv_topk_weights, dtype):
 
 
 def _combine_fwd(
-    handle, handle_mem, token_counts, expert_out, recv_topk_weights,
-    num_local_tokens, out_sharding,
+    handle,
+    handle_mem,
+    token_counts,
+    expert_out,
+    recv_topk_weights,
+    num_local_tokens,
+    out_sharding,
 ):
     del token_counts
     w = recv_topk_weights[..., None]

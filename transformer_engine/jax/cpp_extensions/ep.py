@@ -924,7 +924,12 @@ def ep_combine_fwd(handle, handle_mem, expert_out, num_local_tokens, out_partiti
 
 @compute_on("gpu_stream:collective")
 def ep_dispatch_bwd(
-    handle, handle_mem, grad, g_recv_topk_weights, top_k, num_local_tokens,
+    handle,
+    handle_mem,
+    grad,
+    g_recv_topk_weights,
+    top_k,
+    num_local_tokens,
     out_partition_spec=None,
 ):
     """Backward of dispatch; returns (grad_tokens, grad_topk_weights)."""

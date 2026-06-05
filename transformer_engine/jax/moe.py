@@ -295,9 +295,7 @@ def _ffn_fwd_per_shard(
     wo = wo.astype(sorted_x.dtype)
 
     wi_combined = jnp.stack([wi_0, wi_1], axis=-2)
-    wi_combined_bias = (
-        jnp.stack([wi_0_bias, wi_1_bias], axis=-2) if wi_0_bias is not None else None
-    )
+    wi_combined_bias = jnp.stack([wi_0_bias, wi_1_bias], axis=-2) if wi_0_bias is not None else None
 
     q_set = noop_quantizer_set
     casted_sorted_x = tex.grouped_quantize(sorted_x, q_set.x, local_group_sizes, flatten_axis=-1)
@@ -588,9 +586,7 @@ def _moe_fwd_rule(
     # single all-gather over (*dp, ep) and lives off the dispatch
     # critical path.
     if aux_loss_coeff > 0.0:
-        global_logits_2d = jax.lax.with_sharding_constraint(
-            logits_2d, NamedSharding(mesh, P())
-        )
+        global_logits_2d = jax.lax.with_sharding_constraint(logits_2d, NamedSharding(mesh, P()))
         _, global_routing_map, _ = tex.fused_topk_with_score_function_fwd(
             global_logits_2d,
             topk=K,
@@ -641,17 +637,11 @@ def _moe_fwd_rule(
     # each rank see B/ep rows (not B/num_procs) and overrun the bootstrap-sized
     # send buffer. Pin both routing tensors to the (outer, ep) leading sharding
     # so per-rank token counts match max_tokens_per_rank.
-    topk_idx_3d = jax.lax.with_sharding_constraint(
-        topk_idx_3d, NamedSharding(mesh, ep3_spec)
-    )
-    topk_w_3d = jax.lax.with_sharding_constraint(
-        topk_w_3d, NamedSharding(mesh, ep3_spec)
-    )
+    topk_idx_3d = jax.lax.with_sharding_constraint(topk_idx_3d, NamedSharding(mesh, ep3_spec))
+    topk_w_3d = jax.lax.with_sharding_constraint(topk_w_3d, NamedSharding(mesh, ep3_spec))
 
     # ---------------- TE EP dispatch (global view) ----------------
-    handle = _get_or_make_ep_handle(
-        top_k=K, dispatch_output_per_expert_alignment=slots_per_expert
-    )
+    handle = _get_or_make_ep_handle(top_k=K, dispatch_output_per_expert_alignment=slots_per_expert)
     token_counts, handle_mem = tex.ep_prepare(topk_idx_3d, handle)
     recv_tokens, recv_topk_weights = tex.ep_dispatch_fwd(
         handle, handle_mem, topk_idx_3d, x, topk_w_3d, recv_pr
@@ -674,13 +664,13 @@ def _moe_fwd_rule(
     # FFN residuals live entirely on the local ep rank, so the leading
     # "experts" / "rows" dims map to P() (already shard-local).
     residuals_spec = (
-        P(),                    # casted_sorted_x_lhs_trans
-        P(ep_axis, None, None), # casted_wi_rhs_trans
-        P(),                    # gate_proj_out
-        P(),                    # up_proj_out
-        P(),                    # casted_intermediate_lhs_trans
-        P(ep_axis, None, None), # casted_wo_rhs_trans
-        P(),                    # local_group_sizes
+        P(),  # casted_sorted_x_lhs_trans
+        P(ep_axis, None, None),  # casted_wi_rhs_trans
+        P(),  # gate_proj_out
+        P(),  # up_proj_out
+        P(),  # casted_intermediate_lhs_trans
+        P(ep_axis, None, None),  # casted_wo_rhs_trans
+        P(),  # local_group_sizes
     )
     out_specs = (ep3_spec, residuals_spec)
 
@@ -712,9 +702,7 @@ def _moe_fwd_rule(
         out_specs=out_specs,
         check_rep=False,
     )(*ffn_in_args)
-    expert_outputs = jax.lax.with_sharding_constraint(
-        expert_outputs, NamedSharding(mesh, ep3_spec)
-    )
+    expert_outputs = jax.lax.with_sharding_constraint(expert_outputs, NamedSharding(mesh, ep3_spec))
 
     # ---------------- TE EP combine (global view) ----------------
     out_partition_spec = (batch_pspec_axis, None, None)
@@ -859,15 +847,15 @@ def _moe_bwd_rule(
     bias_spec = P(ep_axis, None) if has_bias else None
 
     bwd_in_specs = (
-        ep3_spec,                # d_expert_outputs
-        P(),                     # casted_sorted_x_lhs_trans
+        ep3_spec,  # d_expert_outputs
+        P(),  # casted_sorted_x_lhs_trans
         P(ep_axis, None, None),  # casted_wi_rhs_trans
-        P(),                     # gate_proj_out
-        P(),                     # up_proj_out
-        P(),                     # casted_intermediate_lhs_trans
+        P(),  # gate_proj_out
+        P(),  # up_proj_out
+        P(),  # casted_intermediate_lhs_trans
         P(ep_axis, None, None),  # casted_wo_rhs_trans
-        P(),                     # local_group_sizes
-        ep2_spec,                # recv_topk_weights
+        P(),  # local_group_sizes
+        ep2_spec,  # recv_topk_weights
     )
     bwd_in_args = [
         d_expert_outputs,
@@ -881,14 +869,14 @@ def _moe_bwd_rule(
         ctx.recv_topk_weights,
     ]
     bwd_out_specs = (
-        ep3_spec,                            # d_sorted_x
-        ep2_spec,                            # d_recv_w_from_intermediate
-        kernel_spec,                         # d_wi_0
-        kernel_spec,                         # d_wi_1
-        kernel_spec,                         # d_wo
-        bias_spec if has_bias else None,     # d_wi_0_bias
-        bias_spec if has_bias else None,     # d_wi_1_bias
-        bias_spec if has_bias else None,     # d_wo_bias
+        ep3_spec,  # d_sorted_x
+        ep2_spec,  # d_recv_w_from_intermediate
+        kernel_spec,  # d_wi_0
+        kernel_spec,  # d_wi_1
+        kernel_spec,  # d_wo
+        bias_spec if has_bias else None,  # d_wi_0_bias
+        bias_spec if has_bias else None,  # d_wi_1_bias
+        bias_spec if has_bias else None,  # d_wo_bias
     )
 
     def _bwd_body(*args):
@@ -945,15 +933,15 @@ def _moe_bwd_rule(
         in_specs=bwd_in_specs,
         out_specs=bwd_out_specs,
         check_rep=False,
-    )(*bwd_in_args)
+    )(
+        *bwd_in_args
+    )
 
     d_recv_w_total = d_recv_w_from_combine + d_recv_w_from_intermediate
 
     # ---------------- Dispatch bwd (global view) ----------------
     d_sorted_x = jax.lax.with_sharding_constraint(d_sorted_x, NamedSharding(mesh, ep3_spec))
-    d_recv_w_total = jax.lax.with_sharding_constraint(
-        d_recv_w_total, NamedSharding(mesh, ep2_spec)
-    )
+    d_recv_w_total = jax.lax.with_sharding_constraint(d_recv_w_total, NamedSharding(mesh, ep2_spec))
     d_x_from_dispatch, d_topk_w = tex.ep_dispatch_bwd(
         ctx.handle,
         ctx.handle_mem,
@@ -1001,9 +989,7 @@ def _moe_bwd_rule(
         )
         # routing_map is ignored by the kernel when compute_aux_scores=True,
         # so pass a zero placeholder of the right shape/dtype.
-        zero_routing_map = jnp.zeros(
-            ctx.aux_saved_scores.shape, dtype=ctx.routing_map.dtype
-        )
+        zero_routing_map = jnp.zeros(ctx.aux_saved_scores.shape, dtype=ctx.routing_map.dtype)
         d_logits_aux = tex.fused_topk_with_score_function_bwd(
             zero_routing_map,
             ctx.aux_saved_scores,
@@ -1190,9 +1176,7 @@ def moe(
     mesh = _get_mesh()
     if mesh is None or mesh.empty:
         raise ValueError("moe(...) requires an active jax.sharding.Mesh.")
-    expected_leading: Any = (
-        (*data_parallelism_axes, ep_axis) if data_parallelism_axes else ep_axis
-    )
+    expected_leading: Any = (*data_parallelism_axes, ep_axis) if data_parallelism_axes else ep_axis
     expected_spec = P(expected_leading, None, None)
     actual_spec = getattr(getattr(x, "sharding", None), "spec", None)
     if actual_spec is not None and tuple(actual_spec) != tuple(expected_spec):
