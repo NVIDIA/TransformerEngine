@@ -512,7 +512,7 @@ class FusedAttnRunner:
                     f" got cuDNN {cudnn_version}."
                 )
             # TODO(KshitijLakhani): cuDNN FE can model bias input separately from dBias,
-            # but TE does not yet plumb whether dBias is requested into the common backend selector. 
+            # but TE does not yet plumb whether dBias is requested into the common backend selector.
             # Until that distinction is available, the D=256 SM10x gate requires no bias.
             unsupported = None
             if self.attn_bias_type == AttnBiasType.PRE_SCALE_BIAS:
