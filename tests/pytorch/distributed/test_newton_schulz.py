@@ -4,15 +4,35 @@
 
 """Tests for distributed Newton-Schulz matrix orthogonalization."""
 
+import mmap
 import os
 import subprocess
 from pathlib import Path
 
 import pytest
 import torch
+from transformer_engine.common import _get_shared_object_file
 
 if torch.cuda.device_count() < 2:
     pytest.skip("Newton-Schulz tests require at least 2 GPUs.", allow_module_level=True)
+
+
+def _built_with_cusolvermp() -> bool:
+    """Whether Transformer Engine was compiled with NVTE_WITH_CUSOLVERMP=1.
+
+    There is no Python-level query for this build option, but cuSolverMp is a
+    link-time dependency, so libtransformer_engine.so has a DT_NEEDED entry for
+    libcusolverMp.so if and only if it was built with support.
+    """
+    so_path = _get_shared_object_file("core")
+    with open(so_path, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+        return mm.find(b"libcusolverMp") != -1
+
+
+pytestmark = pytest.mark.skipif(
+    not _built_with_cusolvermp(),
+    reason="Transformer Engine not built with cuSolverMp (NVTE_WITH_CUSOLVERMP=0).",
+)
 
 TEST_ROOT = Path(__file__).parent.resolve()
 NUM_PROCS = torch.cuda.device_count()
