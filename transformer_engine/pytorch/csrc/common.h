@@ -380,6 +380,8 @@ class NVFP4Quantizer : public Quantizer {
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
                 const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
+  void quantize_impl(const TensorWrapper& input, TensorWrapper& out,
+                     const std::optional<TensorWrapper>& noop_flag, bool compute_amax);
 
   /*! @brief Quantize to NVFP4, skipping local amax computation
    *
@@ -391,9 +393,13 @@ class NVFP4Quantizer : public Quantizer {
 
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
 
+  /*! @brief Whether a tensor of the given shape is eligible for
+   *  the NVFP4 RHT cast-fusion kernel (single-tensor or grouped).
+   */
+  static bool is_eligible_for_rht_cast_fusion(const std::vector<size_t>& shape,
+                                              bool for_grouped_kernel = false);
+
  private:
-  void quantize_impl(const TensorWrapper& input, TensorWrapper& out,
-                     const std::optional<TensorWrapper>& noop_flag, bool compute_amax);
   void quantize_with_rht_unfused_helper(const TensorWrapper& input, TensorWrapper& out,
                                         TensorWrapper& rht_output_t_cpp,
                                         QuantizationConfigWrapper& quant_config,

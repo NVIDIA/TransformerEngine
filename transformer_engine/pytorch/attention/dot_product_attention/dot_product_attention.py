@@ -11,6 +11,7 @@ import warnings
 import logging
 
 import torch
+import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
 from transformer_engine.common.recipe import (
@@ -50,6 +51,7 @@ from transformer_engine.pytorch.attention.inference import InferenceParams
 import transformer_engine.pytorch.attention.dot_product_attention.utils as dpa_utils
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     AttentionLogging as attn_log,
+    FlashAttentionUtils,
 )
 
 from transformer_engine.pytorch.attention.dot_product_attention.backends import (
@@ -173,6 +175,26 @@ _dpa_fp8ds_reduce_amax = os.getenv("NVTE_DPA_FP8DS_REDUCE_AMAX", "1") == "1"
 
 
 __all__ = ["DotProductAttention"]
+
+
+def _pad_qkv_head_dim(query_layer, key_layer, value_layer):
+    """Pad Q/K/V to the same head dimension for FlashAttention 2 MLA."""
+    orig_head_dim_qk = query_layer.shape[-1]
+    orig_head_dim_v = value_layer.shape[-1]
+    padded_head_dim = max(orig_head_dim_qk, orig_head_dim_v)
+    if orig_head_dim_qk < padded_head_dim:
+        query_layer = F.pad(query_layer, (0, padded_head_dim - orig_head_dim_qk))
+        key_layer = F.pad(key_layer, (0, padded_head_dim - key_layer.shape[-1]))
+    if orig_head_dim_v < padded_head_dim:
+        value_layer = F.pad(value_layer, (0, padded_head_dim - orig_head_dim_v))
+    return query_layer, key_layer, value_layer, orig_head_dim_qk, orig_head_dim_v
+
+
+def _trim_output(attn_out, num_attention_heads, padded_head_dim_v, orig_head_dim_v):
+    """Trim FlashAttention output after padding V to a larger head dimension."""
+    out_shape = attn_out.shape[:-1]
+    attn_out = attn_out.reshape(*out_shape, num_attention_heads, padded_head_dim_v)
+    return attn_out[..., :orig_head_dim_v].reshape(*out_shape, -1)
 
 
 class DotProductAttention(TransformerEngineBaseModule):
@@ -1689,6 +1711,21 @@ class DotProductAttention(TransformerEngineBaseModule):
             )
 
             if use_flash_attention:
+                orig_qk_dim = None
+                orig_v_dim = None
+                if (
+                    flash_attention_backend == FlashAttentionUtils.version
+                    and not isinstance(value_layer, Float8TensorStorage)
+                    and head_dim_qk != head_dim_v
+                ):
+                    (
+                        query_layer,
+                        key_layer,
+                        value_layer,
+                        orig_qk_dim,
+                        orig_v_dim,
+                    ) = _pad_qkv_head_dim(query_layer, key_layer, value_layer)
+
                 if core_attention_bias_type == "alibi":
                     alibi_slopes, _ = dpa_utils.get_alibi(
                         _alibi_cache,
@@ -1697,7 +1734,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         max_seqlen_kv,
                         alibi_slopes=alibi_slopes,
                     )
-                return self.flash_attention(
+                attn_out = self.flash_attention(
                     query_layer,
                     key_layer,
                     value_layer,
@@ -1725,6 +1762,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                     cu_seqlens_q_padded=cu_seqlens_q_padded,
                     cu_seqlens_kv_padded=cu_seqlens_kv_padded,
                 )
+                if orig_qk_dim is not None and orig_qk_dim > orig_v_dim:
+                    return _trim_output(attn_out, num_attention_heads, orig_qk_dim, orig_v_dim)
+                return attn_out
 
             if use_fused_attention:
                 fu_core_attention_bias_type = core_attention_bias_type

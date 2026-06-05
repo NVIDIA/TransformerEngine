@@ -33,6 +33,7 @@ from .._common import (
     _cudnn_frontend_version_supported,
     _cudnn_frontend_supports_grouped_gemm_srelu,
     _group_quantize_for_grouped_mlp,
+    _group_quantize_with_amax_for_grouped_mlp,
     _nvidia_cudnn_frontend_supports_wgrad,
     _nvfp4_amax,
     _nvfp4_single_tensor_from_grouped,
@@ -74,6 +75,12 @@ def _grouped_gemm_dsrelu_backward_supported() -> bool:
     except ImportError:
         return False
     return grouped_gemm_dsrelu_wrapper_sm100 is not None
+
+
+@functools.lru_cache(maxsize=1)
+def _use_tmem_post_rht_amax() -> bool:
+    """Whether the FC1 GLU+RHT+amax kernel should use TMEM post-RHT amax."""
+    return os.environ.get("NVTE_CUTEDSL_FUSED_GROUPED_MLP_FC1_GLU_RHT_AMAX_TMEM", "0") == "1"
 
 
 class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
@@ -410,13 +417,25 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
         else:
             fc1_alpha_tensor = alpha_tensor
 
+        use_tmem_post_rht_amax = _use_tmem_post_rht_amax()
+        use_fc1_glu_hadamard = False
+        use_nvfp4_rht_amax = (
+            use_nvfp4
+            and isinstance(fc2_input_quantizer, NVFP4Quantizer)
+            and fc2_input_quantizer.with_rht
+            and fc2_input_quantizer.with_post_rht_amax
+        )
+        if use_nvfp4_rht_amax and self._cudnn_act_func == "swiglu":
+            kernel_getter = getattr(self, "grouped_gemm_glu_hadamard_kernel", None)
+            if kernel_getter is not None:
+                use_fc1_glu_hadamard = kernel_getter() is not None
+
         fc1_activation_kwargs = {
             "a_tensor": fc1_x_data,
             "sfa_tensor": fc1_x_scales,
             "padded_offsets": split_points,
             "alpha_tensor": fc1_alpha_tensor,
             "bias_tensor": fc1_bias_packed,
-            "norm_const_tensor": fc1_norm_const_tensor,
             "prob_tensor": fc1_prob_tensor,
             "acc_dtype": torch.float32,
             "c_dtype": torch.bfloat16,
@@ -424,11 +443,15 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
             "cd_major": "n",
             "sf_vec_size": sf_vec_size,
             "current_stream": current_stream,
-            "discrete_col_sfd": not use_nvfp4,
             "use_dynamic_sched": True,
         }
         if self._cudnn_act_func is not None:
             fc1_activation_kwargs["act_func"] = self._cudnn_act_func
+        if use_fc1_glu_hadamard:
+            fc1_activation_kwargs["use_tmem_post_rht_amax"] = use_tmem_post_rht_amax
+        else:
+            fc1_activation_kwargs["norm_const_tensor"] = fc1_norm_const_tensor
+            fc1_activation_kwargs["discrete_col_sfd"] = not use_nvfp4
         if self._pass_geglu_runtime_params:
             fc1_activation_kwargs.update(
                 linear_offset=self._cudnn_linear_offset,
@@ -478,7 +501,10 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
             fc1_activation_kwargs["b_dtype"] = data_dtype
             fc1_activation_kwargs["b_major"] = "k"
 
-        fc1_kernel_out = self.grouped_gemm_activation_kernel()(**fc1_activation_kwargs)
+        if use_fc1_glu_hadamard:
+            fc1_kernel_out = self.grouped_gemm_glu_hadamard_kernel()(**fc1_activation_kwargs)
+        else:
+            fc1_kernel_out = self.grouped_gemm_activation_kernel()(**fc1_activation_kwargs)
 
         # Unpack kernel outputs
         # Note: Fused kernel outputs tensors with non-contiguous
@@ -510,13 +536,24 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
             fc2_in = fc2_in.view(in_shape[0], fc2_weight_shape[1]).contiguous()
             fc2_input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
             fc2_input_quantizer.optimize_for_gemm = True
-            grouped_fc2_x = _group_quantize_for_grouped_mlp(
-                fc2_in,
-                fc2_input_quantizer,
-                num_groups,
-                split_sizes,
-                tensor_offsets=fc2_x_tensor_offsets,
-            )
+            if use_fc1_glu_hadamard:
+                grouped_fc2_x = _group_quantize_with_amax_for_grouped_mlp(
+                    fc2_in,
+                    fc2_input_quantizer,
+                    num_groups,
+                    split_sizes,
+                    fc1_kernel_out["amax_tensor"].view(-1),
+                    fc1_kernel_out["post_rht_amax_tensor"].view(-1),
+                    tensor_offsets=fc2_x_tensor_offsets,
+                )
+            else:
+                grouped_fc2_x = _group_quantize_for_grouped_mlp(
+                    fc2_in,
+                    fc2_input_quantizer,
+                    num_groups,
+                    split_sizes,
+                    tensor_offsets=fc2_x_tensor_offsets,
+                )
 
             fc2_out_buf = torch.empty(fc2_out_shape, dtype=dtype, device=device)
             if (
@@ -752,6 +789,19 @@ class ForwardGroupedMLP_CuTeGEMMGLU(_ForwardGroupedMLP_CuTeGEMMBase):
         from cudnn import grouped_gemm_glu_wrapper_sm100  # pylint: disable=no-name-in-module
 
         return grouped_gemm_glu_wrapper_sm100
+
+    @classmethod
+    @functools.lru_cache(maxsize=None)
+    def grouped_gemm_glu_hadamard_kernel(cls) -> Optional[Callable]:
+        """Fused grouped GEMM GLU kernel that also emits NVFP4 RHT amaxes."""
+        try:
+            from cudnn import (
+                grouped_gemm_glu_hadamard_wrapper_sm100,
+            )  # pylint: disable=no-name-in-module,import-outside-toplevel
+        except ImportError:
+            return None
+
+        return grouped_gemm_glu_hadamard_wrapper_sm100
 
 
 class ForwardGroupedMLP_CuTeGEMMUnary(_ForwardGroupedMLP_CuTeGEMMBase):

@@ -1789,23 +1789,28 @@ void NVFP4Quantizer::set_quantization_params(TensorWrapper* tensor) const {
                               columnwise_data.shape);
 }
 
+bool NVFP4Quantizer::is_eligible_for_rht_cast_fusion(const std::vector<size_t>& shape,
+                                                     bool for_grouped_kernel) {
+  const auto [rows, cols] = get_2d_dims(shape);
+  const size_t row_align = for_grouped_kernel ? 128 : 64;
+  return rows % row_align == 0 && cols % 128 == 0 && transformer_engine::cuda::sm_arch() >= 100 &&
+         transformer_engine::cuda::sm_arch() <= 110;
+}
+
 std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
     const std::vector<size_t>& shape, DType dtype, std::optional<at::Device> device_opt,
     bool pin_memory) const {
   const auto device = resolve_device(device_opt);
   using namespace pybind11::literals;
 
-  // Scaling factor format
-  //
-  // The NVFP4 quantize kernel requires `with_gemm_swizzled_scales=false` and
-  // emits compact scales. When `optimize_for_gemm` is set, the caller of
-  // `quantize` (cast.cpp) applies a post-quantize swizzle that flips this
-  // flag on the returned tensor.
-  const bool with_gemm_swizzled_scales = false;
-
   // Tensor dimensions
   const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
   const auto [flat_first_dim, flat_last_dim] = get_2d_dims(shape);
+
+  // Swizzled SF is only valid when the RHT cast-fusion path runs;
+  // other quantize paths reject it.
+  const bool with_gemm_swizzled_scales = this->optimize_for_gemm && this->with_rht &&
+                                         NVFP4Quantizer::is_eligible_for_rht_cast_fusion(shape);
   NVTE_CHECK(flat_first_dim % NVFP4_BLOCK_SIZE == 0, "First dim for NVFP4 must be divisible by ",
              NVFP4_BLOCK_SIZE, " (got shape=", shape, ")");
   NVTE_CHECK(flat_last_dim % NVFP4_BLOCK_SIZE == 0,
@@ -2099,14 +2104,6 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
     py::object tensor) const {
   NVTE_CHECK(detail::IsNVFP4Tensor(tensor.ptr()), "NVFP4Quantizer must output to IsNVFP4Tensor.");
 
-  // Scaling factor format
-  //
-  // The NVFP4 quantize kernel requires `with_gemm_swizzled_scales=false` and
-  // emits compact scales. When `optimize_for_gemm` is set, the caller of
-  // `quantize` (cast.cpp) applies a post-quantize swizzle that flips this
-  // flag on the returned tensor.
-  const bool with_gemm_swizzled_scales = false;
-
   // Extract buffers from Python tensor
   auto get_tensor = [&tensor](const char* name) -> std::optional<at::Tensor> {
     auto attr_py = tensor.attr(name);
@@ -2137,9 +2134,12 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
   }
 
   const auto [flat_first_dim, flat_last_dim] = get_2d_dims(shape);
-  tensor.attr("_with_gemm_swizzled_scales") = py::cast(with_gemm_swizzled_scales);
 
-  // Advanced NVFP4 modes
+  // Swizzled SF is only valid when the RHT cast-fusion path runs;
+  // other quantize paths reject it.
+  const bool with_gemm_swizzled_scales = this->optimize_for_gemm && this->with_rht &&
+                                         NVFP4Quantizer::is_eligible_for_rht_cast_fusion(shape);
+
   const bool row_scaled_nvfp4 = this->row_scaled_nvfp4;
   const bool nvfp4_use_4over6 = this->nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
   const int nvfp4_e4m3_max = this->nvfp4_e4m3_max;
@@ -2148,7 +2148,8 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
     NVTE_CHECK(!columnwise_usage,
                "Row-scaled NVFP4 quantization does not support columnwise usage.");
   }
-  tensor.attr("_row_scaled_nvfp4") = py::cast(row_scaled_nvfp4);
+  tensor.attr("_row_scaled_nvfp4") = row_scaled_nvfp4;
+  tensor.attr("_with_gemm_swizzled_scales") = with_gemm_swizzled_scales;
   tensor.attr("_nvfp4_use_4over6") = py::cast(nvfp4_use_4over6);
   tensor.attr("_nvfp4_e4m3_max") = py::cast(nvfp4_e4m3_max);
 
@@ -2265,7 +2266,14 @@ void NVFP4Quantizer::quantize_with_rht_unfused_helper(
     const TensorWrapper& input, TensorWrapper& out, TensorWrapper& rht_output_t_cpp,
     QuantizationConfigWrapper& quant_config, QuantizationConfigWrapper& quant_config_columnwise,
     cudaStream_t stream) {
-  // only triggered for irregular shapes where RHT cast fusion kernel is not eligible
+  // The kernels invoked below reject swizzled-SF output, so trip a clear
+  // error here before reaching them.
+  NVTE_CHECK(!out.get_with_gemm_swizzled_scales(),
+             "NVFP4 RHT-unfused fallback path does not support "
+             "with_gemm_swizzled_scales=True. Either disable optimize_for_gemm on the "
+             "quantizer, or ensure the input shape is eligible for RHT cast-fusion "
+             "(bf16 dtype + rows%64==0 + cols%128==0 + SM 100/110).");
+
   if (rowwise_usage) {
     // For rowwise usage, we need to quantize the input directly, but we need to avoid quantizing columnwise
     TensorWrapper out_identity(out.scaling_mode());
@@ -2331,8 +2339,40 @@ void NVFP4Quantizer::quantize_with_rht_unfused_helper(
 void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& out,
                                    const std::optional<TensorWrapper>& noop_flag,
                                    bool compute_amax) {
+  auto reduce_amaxes = [&]() {
+    if (!this->with_amax_reduction) {
+      return;
+    }
+
+    std::vector<at::Tensor> amax_tensors;
+    auto make_amax_tensor = [](void* data_ptr) {
+      NVTE_CHECK(data_ptr != nullptr, "Could not find amax pointer for NVFP4 amax reduction.");
+      return at::from_blob(
+          data_ptr, std::vector<int64_t>{1},
+          [](void*) {},  // deleter doing nothing since it doesn't own the data
+          at::device(at::kCUDA).dtype(torch::kFloat32));
+    };
+    if (rowwise_usage) {
+      amax_tensors.push_back(make_amax_tensor(out.get_amax().data_ptr));
+    }
+    if (columnwise_usage) {
+      amax_tensors.push_back(make_amax_tensor(out.get_columnwise_amax().data_ptr));
+    }
+    if (amax_tensors.empty()) {
+      return;
+    }
+
+    c10d::AllreduceCoalescedOptions opts;
+    opts.reduceOp = c10d::ReduceOp::MAX;
+    NVTE_SCOPED_GIL_RELEASE(
+        { this->amax_reduction_group->allreduce_coalesced(amax_tensors, opts)->wait(); });
+  };
+
   // Nothing to be done if input is empty
   if (input.numel() == 0) {
+    if (!compute_amax) {
+      reduce_amaxes();
+    }
     return;
   }
 
@@ -2357,11 +2397,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
 
   // We only need RHT for columnwise usage.
   // flat first dim and last dim for multi dimensional input
-  size_t rows = 1;
-  for (size_t i = 0; i < input.ndim() - 1; ++i) {
-    rows *= input.size(i);
-  }
-  size_t cols = input.size(input.ndim() - 1);
+  const auto [rows, cols] = get_2d_dims(input.shape());
 
   const bool row_scaled_nvfp4 = out.get_row_scaled_nvfp4();
   if (row_scaled_nvfp4) {
@@ -2376,9 +2412,9 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
   }
 
   // Restriction for the RHT cast fusion kernel because we are using MMA hardware for computing RHT
-  bool eligible_for_rht_cast_fusion =
-      input.dtype() == DType::kBFloat16 && rows % 64 == 0 && cols % 128 == 0 &&
-      transformer_engine::cuda::sm_arch() >= 100 && transformer_engine::cuda::sm_arch() <= 110;
+  const bool eligible_for_rht_cast_fusion =
+      input.dtype() == DType::kBFloat16 &&
+      NVFP4Quantizer::is_eligible_for_rht_cast_fusion(convertShape(input.shape()));
 
   // Stochastic rounding
   // When both rowwise and columnwise quantization are used with RHT,
@@ -2431,10 +2467,12 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
       // We need:
       // 1. Rowwise amax = amax for input
       // 2. Columnwise amax = amax for RHT(input.t)
-      NVTE_SCOPED_GIL_RELEASE({
-        nvte_hadamard_transform_amax(input.data(), out.data(), 0,
-                                     this->rht_matrix_random_sign_mask_t, stream);
-      });
+      if (compute_amax) {
+        NVTE_SCOPED_GIL_RELEASE({
+          nvte_hadamard_transform_amax(input.data(), out.data(), 0,
+                                       this->rht_matrix_random_sign_mask_t, stream);
+        });
+      }
     } else {
       // raise error since it's not supported yet
       NVTE_ERROR(
@@ -2467,27 +2505,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
     }
   }
 
-  // amax reduction
-  if (this->with_amax_reduction) {
-    std::vector<at::Tensor> amax_tensors;
-    // push amax tensors inside if they need to be reduced
-    auto make_amax_tensor = [](void* data_ptr) {
-      return at::from_blob(
-          data_ptr, std::vector<int64_t>{1},
-          [](void*) {},  // deleter doing nothing since it doesn't own the data
-          at::device(at::kCUDA).dtype(torch::kFloat32));
-    };
-    if (rowwise_usage) {
-      amax_tensors.push_back(make_amax_tensor(out.get_amax().data_ptr));
-    }
-    if (columnwise_usage) {
-      amax_tensors.push_back(make_amax_tensor(out.get_columnwise_amax().data_ptr));
-    }
-    c10d::AllreduceCoalescedOptions opts;
-    opts.reduceOp = c10d::ReduceOp::MAX;
-    NVTE_SCOPED_GIL_RELEASE(
-        { this->amax_reduction_group->allreduce_coalesced(amax_tensors, opts)->wait(); });
-  }
+  reduce_amaxes();
 
   // Fast math toggle: RHT transform can be accelerated
   // What math is accelerated? Only the high precision math, so numerical impact is minimal
