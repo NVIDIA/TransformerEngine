@@ -83,6 +83,20 @@ def setup_jax_extension(
 
     # Header files
     include_dirs = get_cuda_include_dirs()
+    cudnn_frontend_include_dir = None
+    for base_path in (Path(common_header_files), *Path(common_header_files).parents):
+        candidate = base_path / "3rdparty" / "cudnn-frontend" / "include"
+        if candidate.exists():
+            cudnn_frontend_include_dir = candidate
+            break
+    if cudnn_frontend_include_dir is None:
+        for base_path in Path(__file__).resolve().parents:
+            candidate = base_path / "3rdparty" / "cudnn-frontend" / "include"
+            if candidate.exists():
+                cudnn_frontend_include_dir = candidate
+                break
+    if cudnn_frontend_include_dir is not None:
+        include_dirs.append(cudnn_frontend_include_dir)
     include_dirs.extend(
         [
             common_header_files,

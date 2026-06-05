@@ -55,6 +55,7 @@
 
 #include "c10/util/ArrayRef.h"
 #include "common/util/logging.h"
+#include "extensions/pybind_dtype_caster.h"
 
 namespace transformer_engine::pytorch {
 
@@ -379,6 +380,8 @@ class NVFP4Quantizer : public Quantizer {
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
                 const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
+  void quantize_impl(const TensorWrapper& input, TensorWrapper& out,
+                     const std::optional<TensorWrapper>& noop_flag, bool compute_amax);
 
   /*! @brief Quantize to NVFP4, skipping local amax computation
    *
@@ -390,9 +393,13 @@ class NVFP4Quantizer : public Quantizer {
 
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
 
+  /*! @brief Whether a tensor of the given shape is eligible for
+   *  the NVFP4 RHT cast-fusion kernel (single-tensor or grouped).
+   */
+  static bool is_eligible_for_rht_cast_fusion(const std::vector<size_t>& shape,
+                                              bool for_grouped_kernel = false);
+
  private:
-  void quantize_impl(const TensorWrapper& input, TensorWrapper& out,
-                     const std::optional<TensorWrapper>& noop_flag, bool compute_amax);
   void quantize_with_rht_unfused_helper(const TensorWrapper& input, TensorWrapper& out,
                                         TensorWrapper& rht_output_t_cpp,
                                         QuantizationConfigWrapper& quant_config,
@@ -406,6 +413,15 @@ std::vector<size_t> getTensorShape(const at::Tensor& t);
 
 transformer_engine::DType getTransformerEngineFP8Type(bool e4m3_if_hybrid,
                                                       const std::string& fp8_recipe);
+
+/*! @brief Wrap a C++ ``transformer_engine::DType`` as the canonical Python
+ *         ``transformer_engine.pytorch.DType`` ``IntEnum`` member.
+ *
+ * The returned object is cached per enum value (one ``py::object`` per
+ * ``DType``), py::object corresponds to the python ``DType`` enum member
+ * defined in transformer_engine.pytorch.
+ */
+pybind11::object MakePythonDType(transformer_engine::DType dtype);
 
 inline size_t typeToNumBits(transformer_engine::DType t) {
   switch (t) {

@@ -375,7 +375,7 @@ def get_tols(config, module, backend, dtype):
                 torch.bfloat16: (3.5e-2, 3.5e-2),
             }
         else:
-            if backend == "UnfusedAttention":
+            if backend in ("UnfusedAttention", "FlashAttention"):
                 tols = {
                     torch.half: (1.6e-2, 1.6e-2),
                     torch.bfloat16: (1.2e-1, 1e-1),
