@@ -315,6 +315,19 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
           (head_dim_qk <= 256 && head_dim_v <= 256 &&
            ((!is_training && sm_arch_ == 90 && cudnn_runtime_version >= 90100) ||
             (is_training && sm_arch_ == 90 && cudnn_runtime_version >= 90500))) ||
+          // 9.9: any head_dim + Blackwell + fprop + non_paged + sq > 1
+          (!is_training && sm_arch_ >= 100 && cudnn_runtime_version >= 90900 && max_seqlen_q > 1 &&
+           layout_group != NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD) ||
+          // 9.10.2: any head_dim + any arch + fprop + paged
+          // 9.10.2: any head_dim + any arch + fprop + non_paged + sq > 1
+          // 9.10.2: any head_dim + any arch + fprop + non_paged + sq = 1 + {no_mask, padding, BRCM, padding_BRCM}
+          (!is_training && cudnn_runtime_version >= 91002 &&
+           (layout_group == NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD || max_seqlen_q > 1 ||
+            (max_seqlen_q == 1 && attn_mask_type != NVTE_Mask_Type::NVTE_CAUSAL_MASK &&
+             attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK))) ||
+          // 9.11: d_qk = 192, d_v = 128 + Blackwell + bprop + non-paged
+          (head_dim_qk == 192 && head_dim_v == 128 && is_training && sm_arch_ >= 100 &&
+           cudnn_runtime_version >= 91100) ||
           // 9.23: d_qk = d_v = 256 + SM10x (cuDNN FE 1.24 / BE 9.23+) + bprop + non-paged
           (head_dim_qk == 256 && head_dim_v == 256 && is_training && sm_arch_ >= 100 &&
            sm_arch_ < 110 && cudnn_runtime_version >= 92300 &&
@@ -329,20 +342,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
               attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
               attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK ||
               attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK) &&
-             (window_size_right == -1 || window_size_right == 0)))) ||
-          // 9.9: any head_dim + Blackwell + fprop + non_paged + sq > 1
-          (!is_training && sm_arch_ >= 100 && cudnn_runtime_version >= 90900 && max_seqlen_q > 1 &&
-           layout_group != NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD) ||
-          // 9.10.2: any head_dim + any arch + fprop + paged
-          // 9.10.2: any head_dim + any arch + fprop + non_paged + sq > 1
-          // 9.10.2: any head_dim + any arch + fprop + non_paged + sq = 1 + {no_mask, padding, BRCM, padding_BRCM}
-          (!is_training && cudnn_runtime_version >= 91002 &&
-           (layout_group == NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD || max_seqlen_q > 1 ||
-            (max_seqlen_q == 1 && attn_mask_type != NVTE_Mask_Type::NVTE_CAUSAL_MASK &&
-             attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK))) ||
-          // 9.11: d_qk = 192, d_v = 128 + Blackwell + bprop + non-paged
-          (head_dim_qk == 192 && head_dim_v == 128 && is_training && sm_arch_ >= 100 &&
-           cudnn_runtime_version >= 91100)) &&
+             (window_size_right == -1 || window_size_right == 0))))) &&
          // 9.11+ bug: 128 < d_qk <= 256, 128 < d_v <= 256 + Hopper + bprop + MLA
          // Conditional to temporarily use blanket cudnn_runtime_version >= 9.11 until fixed
          (!((cudnn_runtime_version >= 91100) && is_training && sm_arch_ == 90 &&
