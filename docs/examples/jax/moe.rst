@@ -21,6 +21,19 @@ out of scope here.
 
 `<- Back to the JAX integration overview <../te_jax_integration.html>`_
 
+The forward path below summarizes the data flow for the native baseline and the
+TE replacement.
+
+.. figure:: media/jax_moe_native_vs_te_flow.svg
+   :alt: Side-by-side forward data flow for native JAX and TransformerEngine JAX MoE blocks.
+   :align: center
+   :width: 100%
+
+   Forward data flow for the tutorial's BF16 MoE block. TE keeps the same
+   sharded inputs and weights, but routes through TE fused router and grouped
+   GEMM primitives while keeping dispatch, expert compute, and combine inside
+   one MoE VJP.
+
 1. Baseline: native JAX BF16 EP MoE
 -----------------------------------
 
@@ -46,8 +59,9 @@ expert weights are sharded over ``ep``.
 The native baseline is exposed as a normal Flax module. Its implementation in
 ``moe_native.py`` performs softmax top-k routing, forward
 ``ragged_all_to_all`` over ``ep``, local source-major to expert-major chunk
-reordering, three ``ragged_dot`` expert GEMMs, reverse ``ragged_all_to_all``,
-and weighted token combine.
+reordering, a concatenated ``wi_0|wi_1`` ``ragged_dot`` input projection,
+activation, ``wo`` ``ragged_dot`` output projection, reverse
+``ragged_all_to_all``, and weighted token combine.
 
 2. TransformerEngine ``_MoEBlock``
 ----------------------------------
@@ -113,27 +127,28 @@ Measured on four NVIDIA GB200 GPUs with the default tutorial shape
    :header: "Path", "Mean fwd+bwd time", "Relative time"
    :widths: 35, 25, 25
 
-   "Native JAX BF16", "19.545 ms", "1.00x"
-   "TE ``_MoEBlock`` BF16", "13.632 ms", "0.70x"
+   "Native JAX BF16", "17.320 ms", "1.00x"
+   "TE ``_MoEBlock`` BF16", "13.601 ms", "0.79x"
 
 The same run reported ``max |native BF16 - TE BF16| = 0.0604`` for the forward
 correctness check. For this no-op-quantizer BF16 configuration, TE measured
-``1.43x`` the native baseline throughput on this tutorial shape.
+``1.27x`` the native baseline throughput on this tutorial shape.
 
 A larger-shape sweep with the same blocking timing loop found TE ahead for each
-shape tried:
+shape tried. The default shape appears in both tables; the values differ
+slightly because the standalone tutorial run and sweep were timed separately.
 
 .. csv-table::
    :header: "Batch", "Seq", "Hidden", "Intermediate", "Native BF16", "TE BF16", "TE speedup"
    :widths: 10, 10, 12, 16, 16, 16, 14
 
-   "8", "1024", "1024", "4096", "9.173 ms", "7.377 ms", "1.24x"
-   "8", "2048", "1024", "4096", "19.545 ms", "13.632 ms", "1.43x"
-   "8", "4096", "1024", "4096", "39.179 ms", "33.570 ms", "1.17x"
-   "16", "2048", "1024", "4096", "39.211 ms", "33.595 ms", "1.17x"
-   "8", "1024", "2048", "8192", "19.313 ms", "14.846 ms", "1.30x"
-   "8", "2048", "2048", "8192", "42.629 ms", "32.657 ms", "1.31x"
-   "16", "2048", "2048", "8192", "86.957 ms", "68.643 ms", "1.27x"
+   "8", "1024", "1024", "4096", "8.369 ms", "7.346 ms", "1.14x"
+   "8", "2048", "1024", "4096", "17.413 ms", "13.554 ms", "1.28x"
+   "8", "4096", "1024", "4096", "34.809 ms", "32.878 ms", "1.06x"
+   "16", "2048", "1024", "4096", "35.102 ms", "32.773 ms", "1.07x"
+   "8", "1024", "2048", "8192", "19.656 ms", "14.566 ms", "1.35x"
+   "8", "2048", "2048", "8192", "38.630 ms", "32.057 ms", "1.21x"
+   "16", "2048", "2048", "8192", "85.549 ms", "66.793 ms", "1.28x"
 
 Across the sweep, the forward max-absolute difference stayed between
 ``0.0598`` and ``0.0704``. The result depends on token distribution, hidden

@@ -4,8 +4,8 @@
 # MOE_OUTPUT_START
 max |native BF16 - TE BF16|: 0.0604
 native JAX BF16:
-Mean time: 19.545 ms
+Mean time: 17.320 ms
 
 TE _MoEBlock BF16:
-Mean time: 13.632 ms
+Mean time: 13.601 ms
 # MOE_OUTPUT_END

@@ -234,10 +234,10 @@ def compare_forward(demo):
 def _block_until_ready_tree(tree):
     leaves = jax.tree_util.tree_leaves(tree)
     if leaves:
-def _block_until_ready_tree(tree):
-    leaves = jax.tree_util.tree_leaves(tree)
-    if leaves:
         jax.block_until_ready(leaves)
+
+
+def _time_fwd_bwd(apply_fn, demo, *, warmup_iters=5, timing_iters=10):
     import time
 
     autocast_kwargs = {"enabled": False, "mesh_resource": demo.mesh_resource}

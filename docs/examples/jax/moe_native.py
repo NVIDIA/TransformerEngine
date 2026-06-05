@@ -234,8 +234,9 @@ def _native_moe_local(
         source_major_order,
         expert_major_order,
     )
-    hidden_0 = jax.lax.ragged_dot(x_expert_major, wi_0, local_group_sizes)
-    hidden_1 = jax.lax.ragged_dot(x_expert_major, wi_1, local_group_sizes)
+    wi_combined = jnp.concatenate([wi_0, wi_1], axis=-1)
+    hidden_combined = jax.lax.ragged_dot(x_expert_major, wi_combined, local_group_sizes)
+    hidden_0, hidden_1 = jnp.split(hidden_combined, 2, axis=-1)
     activated = jax.nn.silu(hidden_0) * hidden_1
     expert_output = jax.lax.ragged_dot(activated, wo, local_group_sizes).astype(dtype)
 
