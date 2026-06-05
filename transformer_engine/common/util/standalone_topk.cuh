@@ -252,9 +252,9 @@ __device__ void vectorized_process(const T *in, idxT len, Func f, int sync_width
         const bool valid = i < len_cast;
         // Unconditional 128-bit vector load: invalid threads read in_cast[0] (cached,
         // discarded via valid=false) so NVCC emits LDG.E.128 instead of predicated load.
-        // Safe because len_cast > 0 guarantees at least one valid WideT at in_cast[0].
-        const WideT *load_ptr = valid ? &in_cast[i] : &in_cast[0];
-        const WideT wide_data = *load_ptr;
+        // Index clamping (not pointer ternary) avoids C++ UB from &in_cast[i] when i >= len_cast.
+        const idxT safe_i = valid ? i : static_cast<idxT>(0);
+        const WideT wide_data = in_cast[safe_i];
         T local_array[items_per_scalar];  // NOLINT(runtime/arrays)
         __builtin_memcpy(local_array, &wide_data, sizeof(WideT));
         const idxT real_i = skip_cnt + i * items_per_scalar;
