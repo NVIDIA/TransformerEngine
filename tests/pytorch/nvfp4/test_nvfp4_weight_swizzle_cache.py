@@ -43,9 +43,9 @@ pytestmark = pytest.mark.skipif(not recipe_available, reason=reason_for_no_recip
 
 def _make_module(kind, in_features, out_features, device):
     if kind == "Linear":
-        return te.Linear(
-            in_features, out_features, bias=True, params_dtype=torch.bfloat16
-        ).to(device)
+        return te.Linear(in_features, out_features, bias=True, params_dtype=torch.bfloat16).to(
+            device
+        )
     if kind == "LayerNormLinear":
         return te.LayerNormLinear(
             in_features, out_features, bias=True, params_dtype=torch.bfloat16
@@ -72,9 +72,7 @@ def _step(module, x, is_first, recipe):
 
 @pytest.mark.parametrize("kind", ["Linear", "LayerNormLinear"])
 @pytest.mark.parametrize("microbatches", [1, 4])
-@pytest.mark.parametrize(
-    "shape", [(1024, 1024), (2048, 512)], ids=["1024x1024", "2048x512"]
-)
+@pytest.mark.parametrize("shape", [(1024, 1024), (2048, 512)], ids=["1024x1024", "2048x512"])
 def test_weight_swizzle_cache_numerics(kind, microbatches, shape):
     """Cached eager-swizzle path == lazy-swizzle baseline (fprop + dgrad)."""
     torch.manual_seed(1234)
@@ -172,9 +170,9 @@ def test_grouped_linear_weight_swizzle_cache_numerics(microbatches, num_gemms):
     workspaces = opt._fp8_workspaces
     assert len(workspaces) == num_gemms, "expected one cached workspace per expert"
     for name, ws in workspaces.items():
-        assert getattr(ws, "_with_gemm_swizzled_scales", False) is True, (
-            f"cached weight workspace {name!r} scales were not pre-swizzled"
-        )
+        assert (
+            getattr(ws, "_with_gemm_swizzled_scales", False) is True
+        ), f"cached weight workspace {name!r} scales were not pre-swizzled"
 
 
 @pytest.mark.parametrize("kind", ["Linear", "LayerNormLinear"])
@@ -189,6 +187,6 @@ def test_lazy_path_not_swizzled(kind):
     with te.autocast(enabled=True, recipe=recipe):
         out = module(x, is_first_microbatch=None)
     out.sum().backward()
-    assert not module._fp8_workspaces, (
-        "lazy path (is_first_microbatch=None) must not populate the weight cache"
-    )
+    assert (
+        not module._fp8_workspaces
+    ), "lazy path (is_first_microbatch=None) must not populate the weight cache"
