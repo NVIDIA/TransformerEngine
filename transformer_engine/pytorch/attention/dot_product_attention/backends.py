@@ -1679,9 +1679,17 @@ class FusedAttnFunc(torch.autograd.Function):
         rest = [None]
         if ctx.use_FAv2_bwd:
             softmax_lse, rng_state = aux_ctx_tensors
-            dq = torch.empty_like(q)
-            dk = torch.empty_like(k)
-            dv = torch.empty_like(v)
+            # During CUDA graph capture, allocate with zeros so the memset is baked into
+            # the captured graph and replay buffers start clean. Outside capture, allocate
+            # with empty for perf and rely on the explicit tail zero-fill below.
+            if torch.cuda.is_current_stream_capturing():
+                dq = torch.zeros_like(q)
+                dk = torch.zeros_like(k)
+                dv = torch.zeros_like(v)
+            else:
+                dq = torch.empty_like(q)
+                dk = torch.empty_like(k)
+                dv = torch.empty_like(v)
             d_out, q, k, v, out = [dpa_utils.maybe_contiguous(x) for x in (d_out, q, k, v, out)]
             # from transformer_engine.pytorch.attention.dot_product_attention import flash_attn_cuda_bwd
             flash_attn_cuda_bwd(
@@ -1708,6 +1716,29 @@ class FusedAttnFunc(torch.autograd.Function):
             dq = dq[..., : d_out.shape[-1]]
             dk = dk[..., : d_out.shape[-1]]
             dv = dv[..., : d_out.shape[-1]]
+            # Zero-fill positions beyond cu_seqlens_*_padded[-1] in dQ/dK/dV for THD.
+            # Use Q's padded boundary for dQ and KV's padded boundary for dK/dV.
+            # Sync-free `arange + mask` so capture and eager paths run the same code.
+            _qkv_format = ctx.qkv_layout.split("_")[0].replace("3", "").replace("2", "")
+            if _qkv_format == "thd":
+                if (
+                    cu_seqlens_q_padded is not None
+                    and isinstance(dq, torch.Tensor)
+                    and dq.shape[0] > 0
+                ):
+                    q_pad_mask = (
+                        torch.arange(dq.shape[0], device=dq.device) >= cu_seqlens_q_padded[-1]
+                    )
+                    dq[q_pad_mask] = 0
+                if cu_seqlens_kv_padded is not None:
+                    kv_actual_t = cu_seqlens_kv_padded[-1]
+                    for d_tensor in (dk, dv):
+                        if isinstance(d_tensor, torch.Tensor) and d_tensor.shape[0] > 0:
+                            kv_pad_mask = (
+                                torch.arange(d_tensor.shape[0], device=d_tensor.device)
+                                >= kv_actual_t
+                            )
+                            d_tensor[kv_pad_mask] = 0
         else:
             with get_nvtx_range_context("FusedAttnFunc.backward"):
                 # get nominal data type of dq, dk, dv

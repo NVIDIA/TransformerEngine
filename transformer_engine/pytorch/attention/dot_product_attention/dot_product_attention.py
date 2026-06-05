@@ -1536,15 +1536,14 @@ class DotProductAttention(TransformerEngineBaseModule):
                         False
                     ), "core_attention_bias must be in one of {bhss, 1hss, b1ss, 11ss, 111s} shapes"
 
-            # check if there is padding between sequences when qkv_format='thd'
+            # Default pad_between_seqs auto-detect. For THD, infer presence of
+            # inter-sequence padding from whether padded cu_seqlens were supplied --
+            # sync-free, and stable across eager and CUDA graph capture (the auto-detect
+            # must return the same value in both modes for backend selection to match).
             if pad_between_seqs is None:
                 if qkv_format == "thd":
                     pad_between_seqs = (
-                        cu_seqlens_q_padded is not None
-                        and not torch.equal(cu_seqlens_q_padded[:-1], cu_seqlens_q[:-1])
-                    ) or (
-                        cu_seqlens_kv_padded is not None
-                        and not torch.equal(cu_seqlens_kv_padded[:-1], cu_seqlens_kv[:-1])
+                        cu_seqlens_q_padded is not None or cu_seqlens_kv_padded is not None
                     )
                 else:
                     pad_between_seqs = False

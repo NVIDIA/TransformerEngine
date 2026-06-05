@@ -2245,6 +2245,22 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 ctx.S_quantizer.scale = S_quantizer.scale.clone()
 
         nvtx_range_pop(f"{nvtx_label}")
+
+        # Zero-fill output at positions beyond the actual sequence end (THD CUDA Graph).
+        # cu_seqlens_q_padded is already local to this CP rank in the THD path, so its
+        # last entry is the local extent. Skip when the caller did not provide padded
+        # cu_seqlens -- no static-shape padding can be present in that case.
+        if (
+            qkv_format == "thd"
+            and cu_seqlens_q_padded is not None
+            and isinstance(out_ret, torch.Tensor)
+            and out_ret.shape[0] > 0
+        ):
+            local_actual_t = cu_seqlens_q_padded[-1]
+            pad_mask = torch.arange(out_ret.shape[0], device=out_ret.device) >= local_actual_t
+            out_ret.data[pad_mask] = 0
+            out.data[pad_mask.view(-1, *([1] * (out.dim() - 1))).expand_as(out)] = 0
+
         if return_max_logit:
             return out_ret, max_logit
         return out_ret
@@ -2897,10 +2913,20 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             dim = ctx.qkv_format.index("s")
             dq, dk, dv = [x.view(*x.shape[:dim], -1, *x.shape[dim + 2 :]) for x in [dq, dk, dv]]
 
-        if ctx.qkv_format == "thd" and not ctx.use_fused_attention:
-            dq[cu_seqlens_q_padded[-1] :].fill_(0)
-            dk[cu_seqlens_kv_padded[-1] :].fill_(0)
-            dv[cu_seqlens_kv_padded[-1] :].fill_(0)
+        # Zero-fill dQ/dK/dV at positions beyond cu_seqlens_*_padded[-1].
+        # Use arange+mask indexing rather than `tensor[scalar_tensor:]` slicing -- the
+        # latter forces a GPU->CPU sync that is forbidden during CUDA graph capture.
+        if (
+            ctx.qkv_format == "thd"
+            and not ctx.use_fused_attention
+            and cu_seqlens_q_padded is not None
+            and cu_seqlens_kv_padded is not None
+        ):
+            q_pad_mask = torch.arange(dq.shape[0], device=dq.device) >= cu_seqlens_q_padded[-1]
+            kv_pad_mask = torch.arange(dk.shape[0], device=dk.device) >= cu_seqlens_kv_padded[-1]
+            dq[q_pad_mask] = 0
+            dk[kv_pad_mask] = 0
+            dv[kv_pad_mask] = 0
 
         if ctx.fp8 and ctx.is_input_fp8:
             dq, dk, dv, _, _ = combine_and_quantize(ctx.qkv_layout, dq, dk, dv, ctx.dQKV_quantizer)
@@ -2954,6 +2980,23 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             attn_dbias = attn_dbias.view(*attn_dbias.shape[:-2], -1)
 
         nvtx_range_pop(f"{nvtx_label}")
+
+        # Zero-fill dQ/dK/dV at positions beyond the actual sequence end (THD CUDA Graph).
+        # cu_seqlens_*_padded are already local to this CP rank in the THD path.
+        # Use Q's padded boundary for dQ and KV's padded boundary for dK/dV.
+        # Skip the corresponding zero-fill when its padded cu_seqlens is absent.
+        if ctx.qkv_format == "thd":
+            if cu_seqlens_q_padded is not None and isinstance(dq, torch.Tensor) and dq.shape[0] > 0:
+                q_pad_mask = torch.arange(dq.shape[0], device=dq.device) >= cu_seqlens_q_padded[-1]
+                dq[q_pad_mask] = 0
+            if cu_seqlens_kv_padded is not None:
+                kv_actual_t = cu_seqlens_kv_padded[-1]
+                for d_tensor in [dk, dv]:
+                    if isinstance(d_tensor, torch.Tensor) and d_tensor.shape[0] > 0:
+                        kv_pad_mask = (
+                            torch.arange(d_tensor.shape[0], device=d_tensor.device) >= kv_actual_t
+                        )
+                        d_tensor[kv_pad_mask] = 0
 
         return (
             None,
