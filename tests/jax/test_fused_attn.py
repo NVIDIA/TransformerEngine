@@ -511,16 +511,16 @@ class FusedAttnRunner:
                     "D=256 BWD on Blackwell requires cuDNN 9.23 or newer;"
                     f" got cuDNN {cudnn_version}."
                 )
-            # Non-learnable bias is fine (bias is allowed as an input); only dBias is
-            # unsupported. The JAX runner asks for dBias iff the bias shape is [1, h, s, s]
-            # (see test_backward), so gate on that.
+            # TODO(KshitijLakhani): cuDNN FE can model bias input separately from dBias,
+            # but TE does not yet plumb whether dBias is requested into the common backend selector. 
+            # Until that distinction is available, the D=256 SM10x gate requires no bias.
             unsupported = None
             if self.attn_bias_type == AttnBiasType.PRE_SCALE_BIAS:
                 unsupported = "pre-scale bias"
-            elif self.attn_bias_type != AttnBiasType.NO_BIAS and self.bias_shape == BiasShape._1HSS:
+            elif self.attn_bias_type != AttnBiasType.NO_BIAS:
                 unsupported = (
-                    "bias gradients (dBias); frozen/non-learnable bias inputs"
-                    " (i.e. non-1HSS bias shapes) are supported"
+                    "post-scale bias in TE's D=256 backend gate; bias-input-only"
+                    " support needs TE to distinguish between bias input and dBias"
                 )
             elif self.dropout_prob != 0.0:
                 unsupported = "dropout"
