@@ -106,11 +106,12 @@ Error_Type FusedTopkWithScoreFunctionForwardInitializeFFI(
     cudaStream_t stream, Buffer_Type logits_buf, Buffer_Type expert_bias_buf, Result_Type probs_buf,
     Result_Type routing_map_buf, Result_Type intermediate_buf, int64_t topk,
     int64_t use_pre_softmax, int64_t num_groups, int64_t group_topk, double scaling_factor,
-    JAXX_Score_Function score_function, int64_t compute_aux_scores) {
-  return wrapInStreamCapture(std::function(FusedTopkWithScoreFunctionForwardFFI), stream,
-                             logits_buf, expert_bias_buf, probs_buf, routing_map_buf,
-                             intermediate_buf, topk, use_pre_softmax, num_groups, group_topk,
-                             scaling_factor, score_function, compute_aux_scores);
+    JAXX_Score_Function score_function, int64_t compute_aux_scores,
+    JAXX_Routing_Map_Format routing_map_format) {
+  return wrapInStreamCapture(
+      std::function(FusedTopkWithScoreFunctionForwardFFI), stream, logits_buf, expert_bias_buf,
+      probs_buf, routing_map_buf, intermediate_buf, topk, use_pre_softmax, num_groups, group_topk,
+      scaling_factor, score_function, compute_aux_scores, routing_map_format);
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionForwardInitializeHandler,
@@ -128,7 +129,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionForwardInitializeHandler
                                   .Attr<int64_t>("group_topk")
                                   .Attr<double>("scaling_factor")
                                   .Attr<JAXX_Score_Function>("score_function")
-                                  .Attr<int64_t>("compute_aux_scores"));
+                                  .Attr<int64_t>("compute_aux_scores")
+                                  .Attr<JAXX_Routing_Map_Format>("routing_map_format"));
 
 // ============================================================================
 // Fused Top-K with Score Function - Backward
@@ -207,11 +209,12 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionBackwardHandler,
 Error_Type FusedTopkWithScoreFunctionBackwardInitializeFFI(
     cudaStream_t stream, Buffer_Type routing_map_buf, Buffer_Type intermediate_buf,
     Buffer_Type grad_probs_buf, Result_Type grad_logits_buf, int64_t topk, int64_t use_pre_softmax,
-    double scaling_factor, JAXX_Score_Function score_function, int64_t compute_aux_scores) {
+    double scaling_factor, JAXX_Score_Function score_function, int64_t compute_aux_scores,
+    JAXX_Routing_Map_Format routing_map_format) {
   return wrapInStreamCapture(std::function(FusedTopkWithScoreFunctionBackwardFFI), stream,
                              routing_map_buf, intermediate_buf, grad_probs_buf, grad_logits_buf,
                              topk, use_pre_softmax, scaling_factor, score_function,
-                             compute_aux_scores);
+                             compute_aux_scores, routing_map_format);
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionBackwardInitializeHandler,
@@ -226,7 +229,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionBackwardInitializeHandle
                                   .Attr<int64_t>("use_pre_softmax")
                                   .Attr<double>("scaling_factor")
                                   .Attr<JAXX_Score_Function>("score_function")
-                                  .Attr<int64_t>("compute_aux_scores"));
+                                  .Attr<int64_t>("compute_aux_scores")
+                                  .Attr<JAXX_Routing_Map_Format>("routing_map_format"));
 
 // ============================================================================
 // Fused MoE Aux Loss - Forward
