@@ -33,6 +33,7 @@ from .._common import (
     _cudnn_frontend_version_supported,
     _cudnn_frontend_supports_grouped_gemm_srelu,
     _group_quantize_for_grouped_mlp,
+    _group_quantize_with_amax_for_grouped_mlp,
     _nvidia_cudnn_frontend_supports_wgrad,
     _nvfp4_amax,
     _nvfp4_single_tensor_from_grouped,
@@ -74,6 +75,12 @@ def _grouped_gemm_dsrelu_backward_supported() -> bool:
     except ImportError:
         return False
     return grouped_gemm_dsrelu_wrapper_sm100 is not None
+
+
+@functools.lru_cache(maxsize=1)
+def _use_tmem_post_rht_amax() -> bool:
+    """Whether the FC1 GLU+RHT+amax kernel should use TMEM post-RHT amax."""
+    return os.environ.get("NVTE_CUTEDSL_FUSED_GROUPED_MLP_FC1_GLU_RHT_AMAX_TMEM", "0") == "1"
 
 
 class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
@@ -208,11 +215,22 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
         split_sizes = fc1_split_sizes
         if int(split_sizes.numel()) != num_groups:
             raise ValueError(f"Expected {num_groups} splits, but got {int(split_sizes.numel())}.")
-        split_sizes = split_sizes.to(dtype=torch.int64, device=device)
-        base_split_offsets = tex.splits_to_offsets(split_sizes, 1)
-        split_points = base_split_offsets[1:].to(dtype=torch.int)
-        fc1_x_tensor_offsets = base_split_offsets * fc1_weight_shape[1]
-        fc2_x_tensor_offsets = base_split_offsets * fc2_weight_shape[1]
+
+        # Prepare split metadata
+        split_sizes, (
+            split_points,
+            base_split_offsets,
+            fc1_x_tensor_offsets,
+            fc2_x_tensor_offsets,
+            fc2_out_tensor_offsets,
+        ) = tex.splits_to_offsets_multi(
+            split_sizes,
+            device,
+            strides=[1, 1, fc1_weight_shape[1], fc2_weight_shape[1], fc2_weight_shape[0]],
+            include_leading_zero=[False, True, True, True, True],
+            dtypes=[torch.int32, torch.int64, torch.int64, torch.int64, torch.int64],
+            bulk_allocate=True,
+        )
 
         # Extract per-row activation probabilities from the middle op.
         scales = basic_op_extra_inputs[1][0]
@@ -387,13 +405,30 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
         if use_nvfp4:
             nvfp4_fp4_max = 6.0
             nvfp4_fp8_max = 448.0
+            nvfp4_global_scale_denom = nvfp4_fp4_max * nvfp4_fp8_max
+            # cuDNN receives NVFP4 block-scaled inputs without TE's per-group
+            # global scale factors, so alpha supplies the product of the two
+            # operand global scales.
             fc1_alpha_tensor = (
                 _nvfp4_amax(grouped_fc1_x, columnwise=False)
                 * _nvfp4_amax(grouped_fc1_weight, columnwise=False)
-                / (nvfp4_fp4_max**2 * nvfp4_fp8_max**2)
+                / (nvfp4_global_scale_denom**2)
             ).to(torch.float32)
         else:
             fc1_alpha_tensor = alpha_tensor
+
+        use_tmem_post_rht_amax = _use_tmem_post_rht_amax()
+        use_fc1_glu_hadamard = False
+        use_nvfp4_rht_amax = (
+            use_nvfp4
+            and isinstance(fc2_input_quantizer, NVFP4Quantizer)
+            and fc2_input_quantizer.with_rht
+            and fc2_input_quantizer.with_post_rht_amax
+        )
+        if use_nvfp4_rht_amax and self._cudnn_act_func == "swiglu":
+            kernel_getter = getattr(self, "grouped_gemm_glu_hadamard_kernel", None)
+            if kernel_getter is not None:
+                use_fc1_glu_hadamard = kernel_getter() is not None
 
         fc1_activation_kwargs = {
             "a_tensor": fc1_x_data,
@@ -401,7 +436,6 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
             "padded_offsets": split_points,
             "alpha_tensor": fc1_alpha_tensor,
             "bias_tensor": fc1_bias_packed,
-            "norm_const_tensor": fc1_norm_const_tensor,
             "prob_tensor": fc1_prob_tensor,
             "acc_dtype": torch.float32,
             "c_dtype": torch.bfloat16,
@@ -409,11 +443,15 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
             "cd_major": "n",
             "sf_vec_size": sf_vec_size,
             "current_stream": current_stream,
-            "discrete_col_sfd": not use_nvfp4,
             "use_dynamic_sched": True,
         }
         if self._cudnn_act_func is not None:
             fc1_activation_kwargs["act_func"] = self._cudnn_act_func
+        if use_fc1_glu_hadamard:
+            fc1_activation_kwargs["use_tmem_post_rht_amax"] = use_tmem_post_rht_amax
+        else:
+            fc1_activation_kwargs["norm_const_tensor"] = fc1_norm_const_tensor
+            fc1_activation_kwargs["discrete_col_sfd"] = not use_nvfp4
         if self._pass_geglu_runtime_params:
             fc1_activation_kwargs.update(
                 linear_offset=self._cudnn_linear_offset,
@@ -449,15 +487,13 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
             fc1_activation_kwargs["sfb_tensor"] = fc1_w_scales
         else:
             # Discrete-weight kernel: per-expert data/scale pointers
-            fc1_b_ptrs = tex.copy_data_ptrs_to_device(
-                [w._rowwise_data for w in grouped_fc1_weight],
-                device,
-            )
-            swizzle_type = "uniform_nvfp4_swizzle" if use_nvfp4 else "uniform_mxfp8_rowwise_swizzle"
-            fc1_sfb_ptrs, _fc1_sfb_buffer = tex.transform_and_copy_data_ptrs_to_device(
-                swizzle_type,
-                [w._rowwise_scale_inv for w in grouped_fc1_weight],
-                device,
+            fc1_b_ptrs, fc1_sfb_ptrs, _fc1_sfb_buffer = (
+                tex.grouped_mlp_experimental.swizzle_scales_and_pack_ptrs_for_discrete_weights(
+                    [w._rowwise_data for w in grouped_fc1_weight],
+                    [w._rowwise_scale_inv for w in grouped_fc1_weight],
+                    "nvfp4" if use_nvfp4 else "mxfp8_rowwise",
+                    device,
+                )
             )
             fc1_activation_kwargs["b_ptrs"] = fc1_b_ptrs
             fc1_activation_kwargs["sfb_ptrs"] = fc1_sfb_ptrs
@@ -465,7 +501,10 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
             fc1_activation_kwargs["b_dtype"] = data_dtype
             fc1_activation_kwargs["b_major"] = "k"
 
-        fc1_kernel_out = self.grouped_gemm_activation_kernel()(**fc1_activation_kwargs)
+        if use_fc1_glu_hadamard:
+            fc1_kernel_out = self.grouped_gemm_glu_hadamard_kernel()(**fc1_activation_kwargs)
+        else:
+            fc1_kernel_out = self.grouped_gemm_activation_kernel()(**fc1_activation_kwargs)
 
         # Unpack kernel outputs
         # Note: Fused kernel outputs tensors with non-contiguous
@@ -497,13 +536,24 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
             fc2_in = fc2_in.view(in_shape[0], fc2_weight_shape[1]).contiguous()
             fc2_input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
             fc2_input_quantizer.optimize_for_gemm = True
-            grouped_fc2_x = _group_quantize_for_grouped_mlp(
-                fc2_in,
-                fc2_input_quantizer,
-                num_groups,
-                split_sizes,
-                tensor_offsets=fc2_x_tensor_offsets,
-            )
+            if use_fc1_glu_hadamard:
+                grouped_fc2_x = _group_quantize_with_amax_for_grouped_mlp(
+                    fc2_in,
+                    fc2_input_quantizer,
+                    num_groups,
+                    split_sizes,
+                    fc1_kernel_out["amax_tensor"].view(-1),
+                    fc1_kernel_out["post_rht_amax_tensor"].view(-1),
+                    tensor_offsets=fc2_x_tensor_offsets,
+                )
+            else:
+                grouped_fc2_x = _group_quantize_for_grouped_mlp(
+                    fc2_in,
+                    fc2_input_quantizer,
+                    num_groups,
+                    split_sizes,
+                    tensor_offsets=fc2_x_tensor_offsets,
+                )
 
             fc2_out_buf = torch.empty(fc2_out_shape, dtype=dtype, device=device)
             if (
@@ -537,7 +587,6 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
                     else:
                         fc2_out_buf = fc2_out_buf + token_bias
             else:
-                fc2_out_offsets = base_split_offsets * fc2_weight_shape[0]
                 fc2_out_grouped = GroupedTensor(
                     shape=(in_shape[0], fc2_weight_shape[0]),
                     dtype=dtype,
@@ -545,7 +594,7 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
                     quantizer=None,
                     data=fc2_out_buf.view(-1),
                     first_dims=split_sizes,
-                    tensor_offsets=fc2_out_offsets,
+                    tensor_offsets=fc2_out_tensor_offsets,
                 )
                 general_grouped_gemm_for_grouped_tensor(
                     grouped_fc2_weight,
@@ -625,17 +674,13 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc2_quant_kwargs["b_tensor"] = fc2_w_data
                 fc2_quant_kwargs["sfb_tensor"] = fc2_w_scales
             else:
-                fc2_b_ptrs = tex.copy_data_ptrs_to_device(
-                    [w._rowwise_data for w in grouped_fc2_weight],
-                    device,
-                )
-                swizzle_type = (
-                    "uniform_nvfp4_swizzle" if use_nvfp4 else "uniform_mxfp8_rowwise_swizzle"
-                )
-                fc2_sfb_ptrs, _fc2_sfb_buffer = tex.transform_and_copy_data_ptrs_to_device(
-                    swizzle_type,
-                    [w._rowwise_scale_inv for w in grouped_fc2_weight],
-                    device,
+                fc2_b_ptrs, fc2_sfb_ptrs, _fc2_sfb_buffer = (
+                    tex.grouped_mlp_experimental.swizzle_scales_and_pack_ptrs_for_discrete_weights(
+                        [w._rowwise_data for w in grouped_fc2_weight],
+                        [w._rowwise_scale_inv for w in grouped_fc2_weight],
+                        "nvfp4" if use_nvfp4 else "mxfp8_rowwise",
+                        device,
+                    )
                 )
                 fc2_quant_kwargs["b_ptrs"] = fc2_b_ptrs
                 fc2_quant_kwargs["sfb_ptrs"] = fc2_sfb_ptrs
@@ -745,6 +790,19 @@ class ForwardGroupedMLP_CuTeGEMMGLU(_ForwardGroupedMLP_CuTeGEMMBase):
 
         return grouped_gemm_glu_wrapper_sm100
 
+    @classmethod
+    @functools.lru_cache(maxsize=None)
+    def grouped_gemm_glu_hadamard_kernel(cls) -> Optional[Callable]:
+        """Fused grouped GEMM GLU kernel that also emits NVFP4 RHT amaxes."""
+        try:
+            from cudnn import (
+                grouped_gemm_glu_hadamard_wrapper_sm100,
+            )  # pylint: disable=no-name-in-module,import-outside-toplevel
+        except ImportError:
+            return None
+
+        return grouped_gemm_glu_hadamard_wrapper_sm100
+
 
 class ForwardGroupedMLP_CuTeGEMMUnary(_ForwardGroupedMLP_CuTeGEMMBase):
     """Fused op for block-scaled GroupedLinear + scaled unary activation + GroupedLinear."""
@@ -801,8 +859,6 @@ def fuse_forward_srelu_ops(
 ) -> list[FusibleOperation]:
     """Apply GroupedLinear + ScaledSReLU + GroupedLinear fusion for forward pass."""
 
-    if recipe is None or not recipe.mxfp8():
-        return ops
     return fuse_grouped_mlp_ops(
         ops,
         recipe=recipe,

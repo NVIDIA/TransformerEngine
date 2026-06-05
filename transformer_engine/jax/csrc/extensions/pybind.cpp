@@ -83,6 +83,12 @@ pybind11::dict Registrations() {
       pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
       pybind11::arg("initialize") = EncapsulateFFI(FusedAttnBackwardInitializeHandler),
       pybind11::arg("execute") = EncapsulateFFI(FusedAttnBackwardHandler));
+  dict["te_fused_attn_score_mod_forward_ffi"] =
+      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(FusedAttnScoreModForwardHandler));
+  dict["te_fused_attn_score_mod_backward_ffi"] =
+      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(FusedAttnScoreModBackwardHandler));
 
   // GEMM
   dict["te_gemm_ffi"] =
@@ -144,6 +150,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("get_fused_attn_backend", &GetFusedAttnBackend);
   m.def("get_cuda_version", &GetCudaRuntimeVersion);
   m.def("get_cudnn_version", &GetCudnnRuntimeVersion);
+  m.def("get_cudnn_frontend_version", &GetCudnnFrontendVersion);
   m.def("get_device_compute_capability", &GetDeviceComputeCapability);
   m.def("get_num_compute_streams", &nvte_get_num_compute_streams);
   m.def("get_cublasLt_version", &cublasLtGetVersion);
@@ -156,7 +163,9 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("get_topk_workspace_sizes", &GetTopkWorkspaceSizes);
   m.def("nvte_get_qkv_format", &nvte_get_qkv_format);
   m.def("is_non_nt_fp8_gemm_supported", &nvte_is_non_tn_fp8_gemm_supported);
+  m.def("nvte_built_with_cublasmp", &::nvte_built_with_cublasmp);
   m.def("initialize_cgemm_communicator", &InitializeCgemmCommunicator);
+  m.def("is_collective_gemm_with_cublasmp", &IsCollectiveGemmWithCublasmp);
   m.def("get_cgemm_num_max_streams", &GetCgemmNumMaxStreams);
   m.def("get_grouped_gemm_setup_workspace_size", &nvte_get_grouped_gemm_setup_workspace_size);
 
@@ -247,6 +256,11 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   pybind11::enum_<JAXX_Score_Function>(m, "JAXX_Score_Function", pybind11::module_local())
       .value("SIGMOID", JAXX_Score_Function::SIGMOID)
       .value("SOFTMAX", JAXX_Score_Function::SOFTMAX)
+      .export_values();
+
+  pybind11::enum_<JAXX_Routing_Map_Format>(m, "JAXX_Routing_Map_Format", pybind11::module_local())
+      .value("BYTEMAP", JAXX_Routing_Map_Format::BYTEMAP)
+      .value("BITMAP_U8", JAXX_Routing_Map_Format::BITMAP_U8)
       .export_values();
 
   pybind11::enum_<JAXX_Collective_Op>(m, "JAXX_Collective_Op", pybind11::module_local())
