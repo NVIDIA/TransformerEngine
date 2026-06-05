@@ -210,7 +210,6 @@ class _LayerNormMLP(torch.autograd.Function):
             fc2_grad_weight_quantizer,
             fc2_grad_output_quantizer,
             cpu_offloading,
-            offload_activation,
             tp_group,
             tp_size,
             sequence_parallel,
@@ -280,20 +279,6 @@ class _LayerNormMLP(torch.autograd.Function):
         # save the initial state for recomputation by bwd
         if save_for_checkpoint:
 
-            if cpu_offloading:
-                if offload_activation:
-                    mark_activation_offload(inp)
-                else:
-                    mark_not_offload(inp)
-                mark_not_offload(
-                    ln_weight,
-                    ln_bias,
-                    fc1_weight,
-                    fc1_bias,
-                    fc2_weight,
-                    fc2_bias,
-                )
-
             # save tensors
             tensors_to_save, tensor_objects = prepare_for_saving(
                 inp,
@@ -327,7 +312,6 @@ class _LayerNormMLP(torch.autograd.Function):
                 "fc2_grad_weight_quantizer": fc2_grad_weight_quantizer,
                 "fc2_grad_output_quantizer": fc2_grad_output_quantizer,
                 "cpu_offloading": cpu_offloading,
-                "offload_activation": offload_activation,
                 "tp_group": tp_group,
                 "tp_size": tp_size,
                 "sequence_parallel": sequence_parallel,
@@ -756,14 +740,9 @@ class _LayerNormMLP(torch.autograd.Function):
             if not checkpoint:  # regular path, no selective activation checkpointing
 
                 if cpu_offloading:
-                    if offload_activation:
-                        mark_activation_offload(
-                            inputmat, mu, rsigma, ln_out, fc1_out, fc1_out_without_bias, act_out
-                        )
-                    else:
-                        mark_not_offload(
-                            inputmat, mu, rsigma, ln_out, fc1_out, fc1_out_without_bias, act_out
-                        )
+                    mark_activation_offload(
+                        inputmat, mu, rsigma, ln_out, fc1_out, fc1_out_without_bias, act_out
+                    )
 
                 # Scatter intermediate/activation tensors saved for the backward pass
                 # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
@@ -1949,8 +1928,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 whether to use selective activation checkpointing, where activations are not saved for bwd,
                 and instead are recomputed (skipping fc2, as it is not needed for backward). Trades compute
                 for memory. default is false, in which activations are saved in fwd. not supported for onnx forward
-    offload_activation : bool, default = ``True``
-                Offload saved activation tensors when CPU offload is enabled.
     """
 
     def __init__(
@@ -1987,7 +1964,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
         delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
         checkpoint: bool = False,
-        offload_activation: bool = True,
     ) -> None:
         super().__init__(name)
 
@@ -2009,7 +1985,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.zero_centered_gamma = zero_centered_gamma
         self.symmetric_ar_type = symmetric_ar_type
         self.checkpoint = checkpoint
-        self.offload_activation = offload_activation
 
         # GEMM-GELU fusion is currently only supported with split GEMM-AG overlap
         self.gemm_gelu_fusion = (
@@ -2403,7 +2378,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 fc2_grad_weight_quantizer,
                 fc2_grad_output_quantizer,
                 is_cpu_offload_enabled(),
-                self.offload_activation,
                 self.tp_group,
                 self.tp_size,
                 self.sequence_parallel,

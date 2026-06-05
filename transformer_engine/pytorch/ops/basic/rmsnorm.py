@@ -14,7 +14,7 @@ import torch
 
 from transformer_engine_torch import rmsnorm_bwd, rmsnorm_fwd
 from ...constants import TE_DType
-from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload, mark_not_offload
+from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...export import is_in_onnx_export_mode
 from ...tensor import Quantizer
 from ...utils import (
@@ -63,8 +63,6 @@ class RMSNorm(BasicOperation):
         For more fine-grained control, provide a dict with the SM
         margin at each compute stage ("forward", "backward",
         "inference").
-    offload_activation : bool, default = ``True``
-        Offload saved activation tensors when CPU offload is enabled.
 
     """
 
@@ -77,12 +75,10 @@ class RMSNorm(BasicOperation):
         dtype: Optional[torch.dtype] = None,
         zero_centered_gamma: bool = False,
         sm_margin: int = 0,
-        offload_activation: bool = True,
     ) -> None:
         super().__init__()
         self.eps: float = eps
         self.zero_centered_gamma: bool = zero_centered_gamma
-        self.offload_activation: bool = offload_activation
 
         # Parameter shape
         if not isinstance(normalized_shape, Iterable):
@@ -202,10 +198,7 @@ class RMSNorm(BasicOperation):
         # Save state for backward pass
         if ctx.requires_grad:
             if is_cpu_offload_enabled():
-                if self.offload_activation:
-                    mark_activation_offload(x, rstdevs)
-                else:
-                    mark_not_offload(x, rstdevs)
+                mark_activation_offload(x, rstdevs)
             ctx.save_for_backward(x, rstdevs)
             ctx.dtype = dtype
 

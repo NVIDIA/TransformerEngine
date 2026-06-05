@@ -56,8 +56,6 @@ class Linear(FusedOperation):
         there is no guarantee that ``grad`` will be set or be
         meaningful. This is primarily intended to integrate with
         Megatron-LM.
-    offload_activation : bool, default = ``True``
-        Offload saved activation tensors when CPU offload is enabled.
 
     """
 
@@ -74,7 +72,6 @@ class Linear(FusedOperation):
         sequence_parallel: bool = False,
         rng_state_tracker_function: Optional[Callable[[], CudaRNGStatesTracker]] = None,
         accumulate_into_main_grad: bool = False,
-        offload_activation: bool = True,
     ) -> None:
 
         # Tensor parallel configuration
@@ -107,7 +104,6 @@ class Linear(FusedOperation):
             "sequence_parallel": sequence_parallel,
             "rng_state_tracker_function": rng_state_tracker_function,
             "accumulate_into_main_grad": accumulate_into_main_grad,
-            "offload_activation": offload_activation,
         }
         bias_kwargs = {
             "size": out_features,

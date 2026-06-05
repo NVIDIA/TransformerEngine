@@ -13,7 +13,7 @@ import torch
 
 import transformer_engine_torch as tex
 from ...constants import DType
-from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload, mark_not_offload
+from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...tensor.float8_tensor import Float8CurrentScalingQuantizer, Quantizer
 from ...utils import clear_tensor_data
 from ..op import BasicOperation, OperationContext
@@ -60,20 +60,12 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
         pass. This will typically reduce memory usage but require
         extra compute and increase numerical error. This feature is
         highly experimental.
-    offload_activation : bool, default = ``True``
-        Offload saved activation tensors when CPU offload is enabled.
 
     """
 
-    def __init__(
-        self,
-        *,
-        cache_quantized_input: bool = False,
-        offload_activation: bool = True,
-    ):
+    def __init__(self, *, cache_quantized_input: bool = False):
         super().__init__()
         self.cache_quantized_input: bool = cache_quantized_input
-        self.offload_activation: bool = offload_activation
 
     @abc.abstractmethod
     def _activation_forward_impl(self, *args, **kwargs) -> torch.Tensor:
@@ -123,10 +115,7 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
         # Save state for backward pass
         if ctx.requires_grad:
             if is_cpu_offload_enabled():
-                if self.offload_activation:
-                    mark_activation_offload(x)
-                else:
-                    mark_not_offload(x)
+                mark_activation_offload(x)
             ctx.save_for_backward(x)
             ctx.dtype = dtype
             ctx.prev_op_grad_output_quantizer = prev_op_grad_output_quantizer
@@ -370,21 +359,13 @@ class ScaledSReLU(BasicOperation):
     activation_recompute_in_mlp : bool, default = ``False``
         Enable fused grouped MLP kernels to recompute activation outputs
         during backward when supported instead of saving them.
-    offload_activation : bool, default = ``True``
-        Offload saved activation tensors when CPU offload is enabled.
     """
 
     num_extra_inputs: int = 1
 
-    def __init__(
-        self,
-        *,
-        activation_recompute_in_mlp: bool = False,
-        offload_activation: bool = True,
-    ) -> None:
+    def __init__(self, *, activation_recompute_in_mlp: bool = False) -> None:
         super().__init__()
         self.activation_recompute_in_mlp: bool = activation_recompute_in_mlp
-        self.offload_activation: bool = offload_activation
 
     def op_forward(self, *args, **kwargs) -> None:
         raise RuntimeError(
@@ -434,10 +415,7 @@ class ScaledSReLU(BasicOperation):
         ctx = basic_op_ctxs[0]
         if ctx.requires_grad:
             if is_cpu_offload_enabled():
-                if self.offload_activation:
-                    mark_activation_offload(x)
-                else:
-                    mark_not_offload(x, scales)
+                mark_activation_offload(x)
             ctx.input_requires_grad = True
             ctx.extra_input_requires_grad = extra_input.requires_grad
             ctx.dtype = dtype

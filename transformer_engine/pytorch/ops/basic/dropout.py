@@ -9,7 +9,7 @@ from typing import Optional
 
 import torch
 import transformer_engine_torch as tex
-from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload, mark_not_offload
+from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...tensor import Quantizer
 from ...tensor.storage.float8_tensor_storage import Float8TensorStorage
 from .._common import maybe_autocast_dtype, maybe_dequantize
@@ -25,10 +25,9 @@ class Dropout(BasicOperation):
 
     """
 
-    def __init__(self, p: float, *, offload_activation: bool = True) -> None:
+    def __init__(self, p: float) -> None:
         super().__init__()
         self.dropout_probability: float = p
-        self.offload_activation: bool = offload_activation
 
     def op_forward(
         self,
@@ -73,10 +72,7 @@ class Dropout(BasicOperation):
         # Save context for backward
         if ctx.requires_grad:
             if is_cpu_offload_enabled():
-                if self.offload_activation:
-                    mark_activation_offload(mask)
-                else:
-                    mark_not_offload(mask)
+                mark_activation_offload(mask)
             ctx.save_for_backward(mask)
             ctx.impl = impl
             ctx.dropout_probability = self.dropout_probability
