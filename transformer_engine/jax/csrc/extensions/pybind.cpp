@@ -101,6 +101,25 @@ pybind11::dict Registrations() {
   dict["te_fused_moe_aux_loss_forward_ffi"] = EncapsulateFFI(FusedMoEAuxLossForwardHandler);
   dict["te_fused_moe_aux_loss_backward_ffi"] = EncapsulateFFI(FusedMoEAuxLossBackwardHandler);
 
+#ifdef NVTE_WITH_NCCL_EP
+  // Expert Parallelism (instantiate handler pins NCCL comm to executable lifetime).
+  dict["te_ep_prepare_ffi"] =
+      pybind11::dict(pybind11::arg("instantiate") = EncapsulateFFI(EpInstantiateHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(EpPrepareHandler));
+  dict["te_ep_dispatch_ffi"] =
+      pybind11::dict(pybind11::arg("instantiate") = EncapsulateFFI(EpInstantiateHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(EpDispatchHandler));
+  dict["te_ep_combine_ffi"] =
+      pybind11::dict(pybind11::arg("instantiate") = EncapsulateFFI(EpInstantiateHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(EpCombineHandler));
+  dict["te_ep_dispatch_bwd_ffi"] =
+      pybind11::dict(pybind11::arg("instantiate") = EncapsulateFFI(EpInstantiateHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(EpDispatchBwdHandler));
+  dict["te_ep_combine_bwd_ffi"] =
+      pybind11::dict(pybind11::arg("instantiate") = EncapsulateFFI(EpInstantiateHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(EpCombineBwdHandler));
+#endif  // NVTE_WITH_NCCL_EP
+
   // TopK
   dict["te_topk_ffi"] = EncapsulateFFI(TopkHandler);
 
@@ -129,6 +148,18 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("is_collective_gemm_with_cublasmp", &IsCollectiveGemmWithCublasmp);
   m.def("get_cgemm_num_max_streams", &GetCgemmNumMaxStreams);
   m.def("get_grouped_gemm_setup_workspace_size", &nvte_get_grouped_gemm_setup_workspace_size);
+#ifdef NVTE_WITH_NCCL_EP
+  m.def("set_ep_bootstrap_params", &SetEpBootstrapParams, pybind11::arg("unique_id_bytes"),
+        pybind11::arg("ep_size"), pybind11::arg("rank_within_group"), pybind11::arg("num_experts"),
+        pybind11::arg("max_tokens_per_rank"), pybind11::arg("max_recv_tokens_per_rank"),
+        pybind11::arg("hidden_dim"), pybind11::arg("max_num_sms") = 0,
+        pybind11::arg("allow_handle_mem_reloc") = 0, pybind11::arg("max_token_dtype") = 0);
+  m.def("release_ep_resources", &ReleaseEpResources);
+  m.def("ep_register_layer", &EpRegisterLayer, pybind11::arg("top_k"),
+        pybind11::arg("dispatch_output_per_expert_alignment") = 0);
+  m.def("get_ep_instance_state_type_id", &GetEpInstanceStateTypeIdCapsule);
+  m.def("get_ep_instance_state_type_info", &GetEpInstanceStateTypeInfoCapsule);
+#endif  // NVTE_WITH_NCCL_EP
 
   pybind11::enum_<DType>(m, "DType", pybind11::module_local())
       .value("kByte", DType::kByte)
