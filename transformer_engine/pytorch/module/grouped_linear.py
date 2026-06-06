@@ -16,7 +16,10 @@ import torch
 import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
-from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
+from transformer_engine.pytorch.tensor.grouped_tensor import (
+    GroupedTensor,
+    GroupedTensorStorage,
+)
 from .base import (
     get_dummy_wgrad,
     quantize_weight,
@@ -135,9 +138,9 @@ class _GroupedLinear(torch.autograd.Function):
         base_split_offsets: torch.Tensor,
         last_dim: int,
         dtype: torch.dtype,
-    ) -> GroupedTensor:
-        """Wrap a packed 2D buffer as a varying-first-dimension GroupedTensor."""
-        return GroupedTensor(
+    ) -> GroupedTensorStorage:
+        """Wrap a packed 2D buffer as a varying-first-dimension GroupedTensorStorage."""
+        return GroupedTensorStorage(
             shape=(data.size(0), last_dim),
             dtype=dtype,
             num_tensors=num_gemms,
@@ -154,13 +157,13 @@ class _GroupedLinear(torch.autograd.Function):
         num_gemms: int,
         out_features: int,
         dtype: torch.dtype,
-    ) -> GroupedTensor:
+    ) -> GroupedTensorStorage:
         """Pack per-GEMM biases into the grouped GEMM bias format."""
         bias_data = torch.stack(
             [_GroupedLinear._maybe_dequantize(bias, dtype) for bias in biases],
             dim=0,
         ).contiguous()
-        return GroupedTensor(
+        return GroupedTensorStorage(
             shape=(num_gemms, out_features),
             dtype=dtype,
             num_tensors=num_gemms,
