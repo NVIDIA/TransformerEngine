@@ -18,6 +18,7 @@ from ..constants import MXFP8_BLOCK_SCALING_SIZE, DType
 from ..utils import devices_match, round_up_to_nearest_multiple
 from .storage.mxfp8_tensor_storage import MXFP8TensorStorage, _FromMXFP8Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
+from ..dynamo import register_value_opaque_quantizer
 from ._quantization_helpers import _IdentityFunc
 
 aten = torch.ops.aten
@@ -56,6 +57,9 @@ class MXFP8Quantizer(Quantizer):
         quantizer.optimize_for_gemm = self.optimize_for_gemm
 
         return quantizer
+
+    def _value_fields(self) -> Tuple[str, ...]:
+        return ("dtype",)
 
     def update_quantized(
         self,
@@ -1058,3 +1062,6 @@ class _ReshapeFunc(torch.autograd.Function):
             )
             return dgrad, None
         return grad.view(ctx.shape), None
+
+
+register_value_opaque_quantizer(MXFP8Quantizer)

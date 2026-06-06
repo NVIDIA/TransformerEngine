@@ -24,6 +24,7 @@ import transformer_engine_torch as tex
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.constants import FP8FwdTensorIdx, FP8BwdTensorIdx
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
+from transformer_engine.pytorch.quantization import QuantizerRole
 from transformer_engine.pytorch.ops.basic.basic_linear import BasicLinear
 from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer
 from transformer_engine.pytorch.quantization import QuantizerRole
@@ -32,6 +33,14 @@ from transformer_engine.pytorch import (
     is_mxfp8_available,
     is_fp8_block_scaling_available,
     is_nvfp4_available,
+    Float8Quantizer,
+    Float8BlockQuantizer,
+    MXFP8Quantizer,
+    NVFP4Quantizer,
+)
+from transformer_engine.pytorch.dynamo import (
+    register_value_opaque_quantizer,
+    _quantizer_from_value_key,
 )
 from utils import recipe_id
 
@@ -384,3 +393,148 @@ def test_autocast_sanity(fp8_recipe):
 
     out = compiled(inp)
     out.sum().backward()
+
+
+# ---------------------------------------------------------------------------
+# Value-opaque quantizers: eager value semantics + FX reconstruction
+#
+# The tensorless quantizers (current-scaling FP8, FP8 blockwise, MXFP8, NVFP4)
+# are torch.compile *value* opaque types: they provide value-based
+# ``__eq__`` / ``__hash__`` and an evaluable ``__fx_repr__`` (see
+# ``torch._library.opaque_object`` Note [Opaque Objects]). These tests exercise
+# the eager value semantics and the FX reconstruction round-trip. They are
+# CPU-friendly except for NVFP4 (whose constructor touches the current CUDA
+# device).
+# ---------------------------------------------------------------------------
+
+
+def _mxfp8(dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True):
+    return MXFP8Quantizer(fp8_dtype=dtype, rowwise=rowwise, columnwise=columnwise)
+
+
+def _blockwise(dtype=tex.DType.kFloat8E4M3, force_pow_2_scales=True, block_scaling_dim=2):
+    return Float8BlockQuantizer(
+        fp8_dtype=dtype,
+        rowwise=True,
+        columnwise=True,
+        force_pow_2_scales=force_pow_2_scales,
+        block_scaling_dim=block_scaling_dim,
+    )
+
+
+def _current_scaling(dtype=tex.DType.kFloat8E4M3, force_pow_2_scales=False, amax_epsilon=0.0):
+    return Float8CurrentScalingQuantizer(
+        fp8_dtype=dtype,
+        device=torch.device("cpu"),
+        force_pow_2_scales=force_pow_2_scales,
+        amax_epsilon=amax_epsilon,
+    )
+
+
+# (factory, kwargs_for_a_different_but_valid_config)
+_CPU_VALUE_QUANTIZERS = [
+    pytest.param(_mxfp8, {"dtype": tex.DType.kFloat8E5M2}, id="mxfp8"),
+    pytest.param(_blockwise, {"force_pow_2_scales": False}, id="float8_blockwise"),
+    pytest.param(_current_scaling, {"amax_epsilon": 1e-4}, id="float8_current_scaling"),
+]
+
+
+@pytest.mark.parametrize("factory, other_kwargs", _CPU_VALUE_QUANTIZERS)
+def test_quantizer_value_equality(factory, other_kwargs):
+    """Same config -> equal & same hash; different config -> not equal."""
+    a = factory()
+    b = factory()
+    assert a is not b
+    assert a == b
+    assert hash(a) == hash(b)
+
+    c = factory(**other_kwargs)
+    assert a != c
+    # Usage flags participate in the value.
+    d = factory()
+    d.set_usage(rowwise=False, columnwise=False)
+    assert a != d
+
+
+@pytest.mark.parametrize("factory, other_kwargs", _CPU_VALUE_QUANTIZERS)
+def test_quantizer_usable_in_set_and_dict(factory, other_kwargs):
+    a = factory()
+    b = factory()
+    c = factory(**other_kwargs)
+    assert len({a, b, c}) == 2
+    mapping = {a: "x"}
+    assert mapping[b] == "x"
+
+
+@pytest.mark.parametrize("factory, other_kwargs", _CPU_VALUE_QUANTIZERS)
+def test_quantizer_cross_type_inequality(factory, other_kwargs):
+    a = factory()
+    other = _current_scaling() if not isinstance(a, Float8CurrentScalingQuantizer) else _mxfp8()
+    assert a != other
+
+
+@pytest.mark.parametrize("factory, other_kwargs", _CPU_VALUE_QUANTIZERS)
+def test_quantizer_fx_repr_roundtrip(factory, other_kwargs):
+    """``__fx_repr__`` returns an evaluable expression rebuilding an equal object."""
+    a = factory()
+    repr_str, globals_ = a.__fx_repr__()
+    assert isinstance(repr_str, str)
+    assert isinstance(globals_, dict)
+    rebuilt = eval(repr_str, dict(globals_))  # pylint: disable=eval-used
+    assert rebuilt == a
+    assert rebuilt is not a
+    assert hash(rebuilt) == hash(a)
+
+
+@pytest.mark.parametrize("factory, other_kwargs", _CPU_VALUE_QUANTIZERS)
+def test_quantizer_value_key_reconstruction(factory, other_kwargs):
+    a = factory()
+    rebuilt = _quantizer_from_value_key(a._value_key())
+    assert type(rebuilt) is type(a)
+    assert rebuilt == a
+    # The deprecated amax-reduction process group is never carried in the value.
+    assert getattr(rebuilt, "amax_reduction_group", None) is None
+
+
+def test_quantizer_delayed_scaling_keeps_identity_semantics():
+    """Float8Quantizer holds live tensors -> identity (not value) semantics."""
+    scale = torch.ones(1)
+    amax = torch.zeros(1)
+    a = Float8Quantizer(scale=scale, amax=amax, fp8_dtype=tex.DType.kFloat8E4M3)
+    b = Float8Quantizer(scale=scale, amax=amax, fp8_dtype=tex.DType.kFloat8E4M3)
+    assert a._value_fields() is None
+    assert a == a
+    assert a != b  # distinct instances are not equal despite identical config
+    assert hash(a) == object.__hash__(a)
+
+
+@pytest.mark.parametrize("factory, other_kwargs", _CPU_VALUE_QUANTIZERS)
+def test_quantizer_registration_is_idempotent_and_tolerant(factory, other_kwargs):
+    """Re-registering must not raise, regardless of PyTorch opaque-object support."""
+    cls = type(factory())
+    register_value_opaque_quantizer(cls)
+    register_value_opaque_quantizer(cls)
+
+    if not _opaque_available:
+        pytest.skip("PyTorch build without opaque-object API")
+    from torch._library.opaque_object import is_opaque_value_type
+
+    assert is_opaque_value_type(cls)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="NVFP4Quantizer requires CUDA")
+def test_quantizer_nvfp4_value_semantics():
+    a = NVFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1)
+    b = NVFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1)
+    assert a == b
+    assert hash(a) == hash(b)
+
+    c = NVFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1, with_rht=not a.with_rht)
+    assert a != c
+
+    rebuilt = _quantizer_from_value_key(a._value_key())
+    assert rebuilt == a
+    assert rebuilt.amax_reduction_group is None
+
+    repr_str, globals_ = a.__fx_repr__()
+    assert eval(repr_str, dict(globals_)) == a  # pylint: disable=eval-used

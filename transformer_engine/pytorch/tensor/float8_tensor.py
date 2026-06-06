@@ -18,6 +18,7 @@ from transformer_engine.common.recipe import (
 from ..utils import canonicalize_process_group, devices_match
 from .storage.float8_tensor_storage import Float8TensorStorage, _FromFloat8Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
+from ..dynamo import register_value_opaque_quantizer
 from ._quantization_helpers import _IdentityFunc
 from ..constants import dist_group_type, DType
 
@@ -385,6 +386,14 @@ class Float8CurrentScalingQuantizer(Quantizer):
         Float8CurrentScalingQuantizer supports only rowwise all-gather
         """
         return True
+
+    def _value_fields(self) -> Tuple[str, ...]:
+        # ``amax_reduction_group`` is intentionally excluded: it is a deprecated
+        # process group (not a value) and is restored as ``None`` on rebuild.
+        return ("dtype", "force_pow_2_scales", "amax_epsilon", "with_amax_reduction")
+
+
+register_value_opaque_quantizer(Float8CurrentScalingQuantizer)
 
 
 class Float8Tensor(Float8TensorStorage, QuantizedTensor):

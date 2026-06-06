@@ -23,6 +23,7 @@ from ..utils import (
 
 from .storage.nvfp4_tensor_storage import NVFP4TensorStorage, _FromNVFP4Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
+from ..dynamo import register_value_opaque_quantizer
 from ._quantization_helpers import _IdentityFunc
 
 aten = torch.ops.aten
@@ -332,6 +333,30 @@ class NVFP4Quantizer(Quantizer):
 
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         return NVFP4BlockScaling
+
+    def _value_fields(self) -> Tuple[str, ...]:
+        # ``amax_reduction_group`` is intentionally excluded: it is a deprecated
+        # process group (not a value) and is restored as ``None`` on rebuild.
+        # ``rht_matrix_random_sign_mask_t`` is derived (from
+        # ``_with_random_sign_mask`` and the device) but is stored verbatim so
+        # reconstruction does not need to touch the device.
+        return (
+            "dtype",
+            "with_rht",
+            "with_post_rht_amax",
+            "with_2d_quantization",
+            "stochastic_rounding",
+            "row_scaled_nvfp4",
+            "nvfp4_use_4over6",
+            "nvfp4_e4m3_max",
+            "nvfp4_4over6_err_mode",
+            "_with_random_sign_mask",
+            "rht_matrix_random_sign_mask_t",
+            "with_amax_reduction",
+        )
+
+
+register_value_opaque_quantizer(NVFP4Quantizer)
 
 
 class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
