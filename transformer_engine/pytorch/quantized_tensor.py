@@ -408,20 +408,6 @@ class Quantizer(abc.ABC):
             "columnwise": self.columnwise_usage,
         }
 
-    # ----- Value-object identity (torch.compile opaque value support) -----
-    # A *tensorless* quantizer (one whose entire state is a handful of plain,
-    # reproducible scalars -- no live tensors, no process groups) behaves like a
-    # value: two instances with the same configuration are interchangeable. Such
-    # quantizers opt into value-based ``__eq__`` / ``__hash__`` by overriding
-    # ``_value_fields``. Quantizers that keep the default (e.g. delayed-scaling
-    # ``Float8Quantizer``, which holds live scale/amax tensors, and any custom
-    # quantizer) retain the default identity semantics.
-    #
-    # This is the eager-side half of registering the quantizer as a torch.compile
-    # *value* opaque type; the torch.compile glue (``__fx_repr__``, FX
-    # reconstruction and ``register_opaque_type``) lives in
-    # ``transformer_engine.pytorch.dynamo``.
-
     #: Attributes shared by every quantizer that take part in value identity.
     _BASE_VALUE_FIELDS: Tuple[str, ...] = (
         "rowwise_usage",
@@ -433,11 +419,9 @@ class Quantizer(abc.ABC):
     def _value_fields(self) -> Optional[Tuple[str, ...]]:
         """Subclass-specific value-defining attribute names, or ``None``.
 
-        Returning ``None`` (the default) means the quantizer is *not* a value
-        object and keeps identity-based equality/hashing. Tensorless quantizers
-        override this to return the tuple of attribute names that, together with
-        :attr:`_BASE_VALUE_FIELDS`, fully determine their value (excluding
-        non-value state such as a deprecated amax-reduction process group).
+        Returning ``None`` (the default) means the quantizer cannot be represented as
+        a value opaque object and keeps identity-based equality/hashing.
+        This also means, that torch.compile will not be able to optimize the quantizer.
         """
         return None
 
