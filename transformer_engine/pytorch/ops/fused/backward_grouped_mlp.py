@@ -101,6 +101,9 @@ def _cudnn_compute_wgrad(
     where a = DY^T = (out_features, total_tokens) row-major and
           b = X  = (total_tokens, in_features) column-major.
     """
+    if current_stream is None:
+        current_stream = torch.cuda.current_stream().cuda_stream
+
     out_features, in_features = weight_shape
     total_tokens = grouped_dy.logical_shape[0]
 
@@ -316,7 +319,6 @@ def _compute_grad_params(
                 data_dtype=data_dtype,
                 scale_view_dtype=scale_view_dtype,
                 sf_vec_size=sf_vec_size,
-                current_stream=torch.cuda.current_stream().cuda_stream,
             )
         elif (
             num_groups == 1
