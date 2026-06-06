@@ -784,7 +784,7 @@ class GroupedLinear(BasicOperation):
         columnwise_usage: bool,
         with_quantized_compute: bool,
         dtype: torch.dtype,
-    ) -> GroupedTensor:
+    ) -> GroupedTensorStorage:
         """Prepare weights for ``general_grouped_gemm_for_grouped_tensor``.
         Supports MXFP8/BF16/FP16 compute paths.
         """
@@ -801,7 +801,7 @@ class GroupedLinear(BasicOperation):
                 weight_parts = weight_param.split_into_quantized_tensors()
             dequantized = [maybe_dequantize(w, dtype) for w in weight_parts]
             weight_data = torch.stack(dequantized, dim=0).contiguous()
-            return GroupedTensor(
+            return GroupedTensorStorage(
                 shape=(num_groups * self.out_features, self.in_features),
                 dtype=dtype,
                 num_tensors=num_groups,
@@ -815,7 +815,7 @@ class GroupedLinear(BasicOperation):
             if weight_param.rowwise_data.dtype == dtype:
                 return weight_param
             weight_data = weight_param.rowwise_data.to(dtype=dtype)
-            return GroupedTensor(
+            return GroupedTensorStorage(
                 shape=(num_groups * self.out_features, self.in_features),
                 dtype=dtype,
                 num_tensors=num_groups,
@@ -867,8 +867,8 @@ class GroupedLinear(BasicOperation):
     def _get_grouped_bias_for_gemm(
         self,
         dtype: torch.dtype,
-    ) -> Optional[torch.Tensor]:
-        """Build a uniform GroupedTensor of per-group biases for the cublas
+    ) -> Optional[GroupedTensorStorage]:
+        """Build a uniform GroupedTensorStorage of per-group biases for the cublas
         grouped GEMM.
 
         Each group expects a (1, out_features) bias vector. Returns ``None``
@@ -889,7 +889,7 @@ class GroupedLinear(BasicOperation):
             ]
             bias_data = torch.stack(bias_list, dim=0).contiguous()
 
-        return GroupedTensor(
+        return GroupedTensorStorage(
             shape=(num_groups, self.out_features),
             dtype=dtype,
             num_tensors=num_groups,
@@ -1229,7 +1229,7 @@ class GroupedLinear(BasicOperation):
             grouped_x = tex.group_quantize(x, input_quantizer, num_groups, split_sizes)
         else:
             # No quantize: wrap the contiguous high-precision buffer.
-            grouped_x = GroupedTensor(
+            grouped_x = GroupedTensorStorage(
                 shape=(total_tokens, self.in_features),
                 dtype=dtype,
                 num_tensors=num_groups,
@@ -1265,7 +1265,7 @@ class GroupedLinear(BasicOperation):
         # Allocate output buffer and wrap as a GroupedTensor view.
         out_shape = original_shape[:-1] + [self.out_features]
         out = torch.empty(out_shape, dtype=dtype, device=device)
-        grouped_out = GroupedTensor(
+        grouped_out = GroupedTensorStorage(
             shape=(total_tokens, self.out_features),
             dtype=dtype,
             num_tensors=num_groups,
@@ -1593,7 +1593,7 @@ class GroupedLinear(BasicOperation):
         else:
             dy_2d = maybe_dequantize(dy_2d, dtype)
             # Wrap BF16/FP16 buffer as a GroupedTensor for grouped gemm
-            grouped_dy = GroupedTensor(
+            grouped_dy = GroupedTensorStorage(
                 shape=(total_tokens, self.out_features),
                 dtype=dtype,
                 num_tensors=num_groups,
@@ -1629,7 +1629,7 @@ class GroupedLinear(BasicOperation):
         if ctx.input_requires_grad:
             grad_input_shape = list(grad_output.size())[:-1] + [self.in_features]
             grad_input = torch.empty(grad_input_shape, dtype=dtype, device=device)
-            grouped_grad_input = GroupedTensor(
+            grouped_grad_input = GroupedTensorStorage(
                 shape=(total_tokens, self.in_features),
                 dtype=dtype,
                 num_tensors=num_groups,

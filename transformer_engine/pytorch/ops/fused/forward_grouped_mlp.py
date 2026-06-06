@@ -619,7 +619,7 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
                     else:
                         fc2_out_buf = fc2_out_buf + token_bias
             else:
-                fc2_out_grouped = GroupedTensor(
+                fc2_out_grouped = GroupedTensorStorage(
                     shape=(in_shape[0], fc2_weight_shape[0]),
                     dtype=dtype,
                     num_tensors=num_groups,
