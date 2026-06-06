@@ -572,6 +572,72 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
   }
 }
 
+template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &)>
+void group_quantize(const GroupedTensor &input, const Tensor *noop, GroupedTensor *output,
+                    cudaStream_t stream) {
+  constexpr float (*UnaryOP)(float, const ParamOP &) = (OP == nullptr) ? detail::identity : OP;
+  const size_t N = product(input.data.shape);
+  const size_t scale_numel = product(output->scale.shape);
+  const size_t scale_inv_numel = product(output->scale_inv.shape);
+  const size_t amax_numel = product(output->amax.shape);
+
+  const int64_t *const offsets = reinterpret_cast<const int64_t *>(input.tensor_offsets.dptr);
+  const int64_t *const first_dims = reinterpret_cast<const int64_t *>(input.first_dims.dptr);
+  const int64_t *const last_dims = reinterpret_cast<const int64_t *>(input.last_dims.dptr);
+
+  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
+      input.dtype(), IType,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
+          output->dtype(), OType,
+          constexpr int nvec = 32 / sizeof(IType);
+          VectorizedUnaryKernelLauncher<nvec, ParamOP, UnaryOP>(
+              reinterpret_cast<const IType *>(input.data.dptr),
+              reinterpret_cast<const fp32 *>(noop->data.dptr),
+              reinterpret_cast<OType *>(output->data.dptr),
+              reinterpret_cast<const fp32 *>(output->scale.dptr),
+              reinterpret_cast<fp32 *>(output->amax.dptr),
+              reinterpret_cast<fp32 *>(output->scale_inv.dptr), N, {}, stream,
+              offsets, first_dims, last_dims, input.num_tensors,
+              scale_numel, scale_inv_numel, amax_numel);
+      );
+  );
+}
+
+template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
+          float (*OP)(float, const ParamOP &)>
+void group_quantize(const GroupedTensor &grad, const GroupedTensor *input, const Tensor *noop,
+                    GroupedTensor *output, GroupedTensor *dbias, Tensor *workspace,
+                    cudaStream_t stream) {
+  NVTE_CHECK(!IS_DBIAS && !IS_DACT, "Gated or DBias fusions are not supported in FP8 Grouped Quantization.");
+
+  constexpr float (*UnaryOP)(float, const ParamOP &) = (OP == nullptr) ? detail::identity : OP;
+  const size_t N = product(input->data.shape);
+  const size_t scale_numel = product(output->scale.shape);
+  const size_t scale_inv_numel = product(output->scale_inv.shape);
+  const size_t amax_numel = product(output->amax.shape);
+
+  const int64_t *const offsets = reinterpret_cast<const int64_t *>(input->tensor_offsets.dptr);
+  const int64_t *const first_dims = reinterpret_cast<const int64_t *>(input->first_dims.dptr);
+  const int64_t *const last_dims = reinterpret_cast<const int64_t *>(input->last_dims.dptr);
+
+  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
+      input->dtype(), IType,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
+          output->dtype(), OType,
+          constexpr int nvec = 32 / sizeof(IType);
+          VectorizedUnaryGradKernelLauncher<nvec, ParamOP, UnaryOP>(
+              reinterpret_cast<const IType *>(grad.data.dptr),
+              reinterpret_cast<const IType *>(input->data.dptr),
+              reinterpret_cast<OType *>(output->data.dptr),
+              reinterpret_cast<const fp32 *>(output->scale.dptr),
+              reinterpret_cast<fp32 *>(output->amax.dptr),
+              reinterpret_cast<fp32 *>(output->scale_inv.dptr), N, {}, stream,
+              offsets, first_dims, last_dims, input->num_tensors,
+              scale_numel, scale_inv_numel, amax_numel);
+      );
+  );
+}
+
 }  // namespace fp8
 }  // namespace dispatch
 }  // namespace transformer_engine

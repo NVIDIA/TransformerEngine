@@ -61,6 +61,10 @@ inline void group_dequantize_helper(const GroupedTensor &input, GroupedTensor *o
   CheckOutputGroupedTensor(*output, "group_dequantize_output");
 
   switch (input.scaling_mode) {
+    case NVTE_DELAYED_TENSOR_SCALING: {
+      fp8::group_dequantize(input, output, stream);
+      break;
+    }
     case NVTE_MXFP8_1D_SCALING: {
       if (is_supported_by_CC_100()) {
         mxfp8::group_dequantize(&input, output, stream);

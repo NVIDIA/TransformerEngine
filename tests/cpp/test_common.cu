@@ -1108,10 +1108,10 @@ GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
                                      [&](int64_t v) { return v == last_dims[0]; });
 
   std::vector<int64_t> offsets(num_tensors + 1, 0);
+  std::mt19937 gen(12345);
   auto random_padding = [&]() -> int64_t {
     // Random padding ensuring 16-byte alignment regardless of element size
     // cuBLAS requires aligned pointers for vectorized loads
-    static std::mt19937 gen(12345);
     std::uniform_int_distribution<int64_t> dist(0, 3);
     // Calculate elements needed for 16-byte alignment
     size_t align_elements;
@@ -1263,6 +1263,8 @@ GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
     // FP8 tensor scaling: one float scale_inv per tensor
     // For delayed scaling, rowwise and columnwise share the same scale
     std::vector<float> scale_inv_cpu(num_tensors, 1.f);
+    std::vector<float> scale_cpu(num_tensors, 1.f);
+    std::vector<float> amax_cpu(num_tensors, 0.f);
     for (size_t i = 0; i < num_tensors; ++i) {
       tensors[i]->to_cpu();
       if (has_rowwise) {
@@ -1270,16 +1272,44 @@ GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
       } else {
         scale_inv_cpu[i] = tensors[i]->columnwise_cpu_scale_inv_ptr<float>()[0];
       }
+      // Gather scale
+      NVTEBasicTensor scale_bt = nvte_get_tensor_param(tensors[i]->data(), kNVTEScale);
+      if (scale_bt.data_ptr != nullptr) {
+        float val;
+        NVTE_CHECK_CUDA(cudaMemcpy(&val, scale_bt.data_ptr, sizeof(float), cudaMemcpyDeviceToHost));
+        scale_cpu[i] = val;
+      }
+      // Gather amax
+      NVTEBasicTensor amax_bt = nvte_get_tensor_param(tensors[i]->data(), kNVTEAmax);
+      if (amax_bt.data_ptr != nullptr) {
+        float val;
+        NVTE_CHECK_CUDA(cudaMemcpy(&val, amax_bt.data_ptr, sizeof(float), cudaMemcpyDeviceToHost));
+        amax_cpu[i] = val;
+      }
     }
     grouped.scale_inv = cuda_alloc(sizeof(float) * num_tensors);
     NVTE_CHECK_CUDA(cudaMemcpy(grouped.scale_inv.get(), scale_inv_cpu.data(),
                                sizeof(float) * num_tensors, cudaMemcpyHostToDevice));
     NVTEShape scale_shape = nvte_make_shape(&num_tensors, 1);
-    NVTEBasicTensor scale_tensor{grouped.scale_inv.get(), kNVTEFloat32, scale_shape};
-    nvte_set_grouped_tensor_param(h, kNVTEGroupedRowwiseScaleInv, &scale_tensor,
-                                  sizeof(scale_tensor));
-    nvte_set_grouped_tensor_param(h, kNVTEGroupedColumnwiseScaleInv, &scale_tensor,
-                                  sizeof(scale_tensor));
+    NVTEBasicTensor scale_inv_tensor{grouped.scale_inv.get(), kNVTEFloat32, scale_shape};
+    nvte_set_grouped_tensor_param(h, kNVTEGroupedRowwiseScaleInv, &scale_inv_tensor,
+                                  sizeof(scale_inv_tensor));
+    nvte_set_grouped_tensor_param(h, kNVTEGroupedColumnwiseScaleInv, &scale_inv_tensor,
+                                  sizeof(scale_inv_tensor));
+
+    // Set scale on the grouped tensor
+    grouped.scale = cuda_alloc(sizeof(float) * num_tensors);
+    NVTE_CHECK_CUDA(cudaMemcpy(grouped.scale.get(), scale_cpu.data(),
+                               sizeof(float) * num_tensors, cudaMemcpyHostToDevice));
+    NVTEBasicTensor scale_tensor{grouped.scale.get(), kNVTEFloat32, scale_shape};
+    nvte_set_grouped_tensor_param(h, kNVTEGroupedScale, &scale_tensor, sizeof(scale_tensor));
+
+    // Set amax on the grouped tensor
+    grouped.amax_dev = cuda_alloc(sizeof(float) * num_tensors);
+    NVTE_CHECK_CUDA(cudaMemcpy(grouped.amax_dev.get(), amax_cpu.data(),
+                               sizeof(float) * num_tensors, cudaMemcpyHostToDevice));
+    NVTEBasicTensor amax_tensor{grouped.amax_dev.get(), kNVTEFloat32, scale_shape};
+    nvte_set_grouped_tensor_param(h, kNVTEGroupedAmax, &amax_tensor, sizeof(amax_tensor));
   } else if (scaling_mode == NVTE_MXFP8_1D_SCALING) {
     // MXFP8: E8M0 scale_inv per block of 32 elements (1 byte per scale element).
     if (has_rowwise) {

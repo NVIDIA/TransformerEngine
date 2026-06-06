@@ -47,6 +47,37 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
               stream););  // NOLINT(*)
   );                      // NOLINT(*)
 }
+struct GroupDequantizeParam {};
+
+__device__ inline float group_dequantize_func(float value, const GroupDequantizeParam &) {
+  return value;
+}
+
+inline void group_dequantize(const GroupedTensor &input, GroupedTensor *output,
+                             cudaStream_t stream) {
+  const size_t N = product(input.data.shape);
+  const size_t scale_inv_numel = product(input.scale_inv.shape);
+
+  const int64_t *const offsets = reinterpret_cast<const int64_t *>(input.tensor_offsets.dptr);
+  const int64_t *const first_dims = reinterpret_cast<const int64_t *>(input.first_dims.dptr);
+  const int64_t *const last_dims = reinterpret_cast<const int64_t *>(input.last_dims.dptr);
+
+  TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+      input.dtype(), IType,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
+          output->dtype(), OType,
+          constexpr int nvec = 32 / sizeof(OType);
+          GroupDequantizeParam p;
+          VectorizedUnaryKernelLauncher<nvec, GroupDequantizeParam, group_dequantize_func>(
+              reinterpret_cast<const IType *>(input.data.dptr), nullptr,
+              reinterpret_cast<OType *>(output->data.dptr), nullptr, nullptr,
+              const_cast<fp32 *>(reinterpret_cast<const fp32 *>(input.scale_inv.dptr)), N, p, stream,
+              offsets, first_dims, last_dims, input.num_tensors,
+              1, scale_inv_numel, 1);
+      );
+  );
+}
+
 }  // namespace fp8
 }  // namespace dispatch
 }  // namespace transformer_engine
