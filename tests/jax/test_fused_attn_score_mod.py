@@ -24,6 +24,8 @@ from test_fused_attn import FusedAttnRunner, SeqDescFormat
 
 _CONFIG_TEST_HEAD_DIM = 128
 _CONFIG_TEST_SCALING_FACTOR = 1.0 / sqrt(_CONFIG_TEST_HEAD_DIM)
+_SCORE_MOD_MIN_CUDNN_VERSION = (9, 23)
+_SCORE_MOD_MIN_CUDNN_VERSION_STRING = ".".join(map(str, _SCORE_MOD_MIN_CUDNN_VERSION))
 
 
 def _has_cudnn_frontend_python():
@@ -197,14 +199,17 @@ class ScoreModFusedAttnRunner(FusedAttnRunner):
 
     @staticmethod
     def require_cudnn_frontend():
-        """Skip unless cuDNN Python frontend supports score_mod SDPA."""
+        """Skip unless cuDNN frontend supports score_mod SDPA."""
         try:
             cudnn = tex_attention._import_cudnn_for_score_mod()
         except ImportError:
             pytest.skip("cuDNN Python frontend is required for score_mod")
         version = tuple(int(part) for part in cudnn.backend_version_string().split(".")[:2])
-        if version < (9, 6):
-            pytest.skip("cuDNN score_mod SDPA requires cuDNN frontend 9.6 or newer")
+        if version < _SCORE_MOD_MIN_CUDNN_VERSION:
+            pytest.skip(
+                "cuDNN frontend score_mod SDPA requires "
+                f"cuDNN {_SCORE_MOD_MIN_CUDNN_VERSION_STRING} or newer"
+            )
 
     @staticmethod
     def _compute_input_scale(head_dim):

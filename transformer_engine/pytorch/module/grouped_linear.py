@@ -1696,6 +1696,15 @@ class GroupedLinear(TransformerEngineBaseModule):
                 f"does not match number of GEMMs ({num_gemms})."
             )
 
+        if FP8GlobalStateManager.fp8_graph_capturing():
+            skip_fp8_weight_update = (
+                FP8GlobalStateManager.quantization_state.skip_fp8_weight_update_tensor
+            )
+        else:
+            skip_fp8_weight_update = None
+        if skip_fp8_weight_update is not None:
+            is_first_microbatch = False
+
         # Preprocess input tensor
         if isinstance(inp, QuantizedTensorStorage):
             raise TypeError("GroupedLinear doesn't support input tensor in FP8.")
@@ -1754,7 +1763,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 is_grad_enabled,
                 weight_workspaces,
                 cache_weight,
-                None,  # skip_fp8_weight_update
+                skip_fp8_weight_update,
                 self.save_original_input,
                 debug,
             )
