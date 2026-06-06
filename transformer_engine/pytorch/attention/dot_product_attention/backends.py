@@ -1679,9 +1679,9 @@ class FusedAttnFunc(torch.autograd.Function):
         rest = [None]
         if ctx.use_FAv2_bwd:
             softmax_lse, rng_state = aux_ctx_tensors
-            # During CUDA graph capture, allocate with zeros so the memset is baked into
-            # the captured graph and replay buffers start clean. Outside capture, allocate
-            # with empty for perf and rely on the explicit tail zero-fill below.
+            # Keep capture replay buffers zero-initialized; outside capture, use
+            # empty_like to avoid the extra memset. The THD tail zero-fill below
+            # clears tail positions in both modes.
             if torch.cuda.is_current_stream_capturing():
                 dq = torch.zeros_like(q)
                 dk = torch.zeros_like(k)
