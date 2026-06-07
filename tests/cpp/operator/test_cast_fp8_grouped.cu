@@ -128,10 +128,9 @@ void test_cast_fp8_grouped_impl(const std::vector<std::vector<size_t>>& shapes,
     // 3. Compare outputs
     OutputType* out_cpu = out_tensors[t].rowwise_cpu_dptr<OutputType>();
     for (size_t i = 0; i < size; ++i) {
-      float gpu_val = static_cast<float>(out_cpu[i]) / out_tensors[t].scale();
-      float ref_val = ref_outputs[t][i] / out_tensors[t].scale();
-      // Since it's FP8 casting, check within small quantization limits
-      EXPECT_NEAR(gpu_val, ref_val, 0.05f);
+      float gpu_val = static_cast<float>(out_cpu[i]);
+      float ref_val = static_cast<float>(OutputType(ref_outputs[t][i]));
+      EXPECT_NEAR(gpu_val, ref_val, 1e-4);
     }
   }
 }

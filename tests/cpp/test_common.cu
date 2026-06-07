@@ -1111,16 +1111,11 @@ GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
   std::mt19937 gen(12345);
   auto random_padding = [&]() -> int64_t {
     // Random padding ensuring 16-byte alignment regardless of element size
-    // cuBLAS requires aligned pointers for vectorized loads
+    // We use a constant 64 elements alignment. This guarantees that all
+    // grouped tensors (input and output) in pointwise operations will
+    // have identical element offsets, preventing layout misalignment in tests.
     std::uniform_int_distribution<int64_t> dist(0, 3);
-    // Calculate elements needed for 16-byte alignment
-    size_t align_elements;
-    if (is_sub_byte) {
-      // Sub-byte types (e.g. FP4): 16 bytes = 16*8/bits_per_elem elements
-      align_elements = (16 * 8) / bits_per_elem;
-    } else {
-      align_elements = std::max<size_t>(1, (16 + elem_size - 1) / elem_size);
-    }
+    size_t align_elements = 64;
     return dist(gen) * static_cast<int64_t>(align_elements);
   };
 
