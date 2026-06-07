@@ -2,10 +2,9 @@
 #
 # See LICENSE for license information.
 
-"""torch.compile glue for Transformer Engine quantizers.
+"""Value-opaque quantizers for torch.compile.
 
-This module isolates the torch.compile-specific plumbing that turns a
-*tensorless* quantizer into a torch.compile **value** opaque type:
+Turns a *tensorless* quantizer into a torch.compile **value** opaque type:
 
   * :func:`register_value_opaque_quantizer` -- attaches the ``__fx_repr__`` used
     by FX codegen and registers the quantizer class with
@@ -33,7 +32,7 @@ themselves, including across the on-disk compile cache.
 from __future__ import annotations
 from typing import Any, Dict, Tuple
 
-from .constants import DType
+from ..constants import DType
 
 
 def _rebuild_quantizer(cls: type, items: Tuple[Tuple[str, Any], ...]) -> Any:
