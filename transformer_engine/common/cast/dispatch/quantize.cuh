@@ -451,8 +451,7 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
   // Dispatch to quantization kernel depending on data format
   switch (scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
-      fp8::group_quantize<IS_ACT, ParamOP, OP>(
-          *input_tensor, noop_tensor, output_tensor, stream);
+      fp8::group_quantize<IS_ACT, ParamOP, OP>(*input_tensor, noop_tensor, output_tensor, stream);
       break;
     }
     case NVTE_MXFP8_1D_SCALING: {
@@ -498,8 +497,8 @@ void group_quantize_bwd_helper(const NVTEGroupedTensor grad, const NVTEGroupedTe
   switch (scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
       fp8::group_quantize<IS_DBIAS, IS_DACT, /*IS_ACT=*/false, ParamOP, OP>(
-          *grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor,
-          workspace_tensor, stream);
+          *grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor, workspace_tensor,
+          stream);
       break;
     }
     case NVTE_MXFP8_1D_SCALING: {

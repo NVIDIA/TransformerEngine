@@ -65,17 +65,12 @@ inline void group_dequantize(const GroupedTensor &input, GroupedTensor *output,
   TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
       input.dtype(), IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
-          output->dtype(), OType,
-          constexpr int nvec = 32 / sizeof(OType);
-          GroupDequantizeParam p;
+          output->dtype(), OType, constexpr int nvec = 32 / sizeof(OType); GroupDequantizeParam p;
           VectorizedUnaryKernelLauncher<nvec, GroupDequantizeParam, group_dequantize_func>(
               reinterpret_cast<const IType *>(input.data.dptr), nullptr,
               reinterpret_cast<OType *>(output->data.dptr), nullptr, nullptr,
-              const_cast<fp32 *>(reinterpret_cast<const fp32 *>(input.scale_inv.dptr)), N, p, stream,
-              offsets, first_dims, last_dims, input.num_tensors,
-              1, scale_inv_numel, 1);
-      );
-  );
+              const_cast<fp32 *>(reinterpret_cast<const fp32 *>(input.scale_inv.dptr)), N, p,
+              stream, offsets, first_dims, last_dims, input.num_tensors, 1, scale_inv_numel, 1);););
 }
 
 }  // namespace fp8

@@ -171,10 +171,9 @@ class VectorizedStorer : public VectorizedAccessor<DType, nvec, aligned> {
 
 constexpr int unary_kernel_threads = 512;
 
-__device__ __forceinline__ size_t find_tensor_id(
-    const int64_t *const offsets,
-    const size_t num_tensors,
-    const size_t global_offset) {
+__device__ __forceinline__ size_t find_tensor_id(const int64_t *const offsets,
+                                                 const size_t num_tensors,
+                                                 const size_t global_offset) {
   size_t low = 0;
   size_t high = num_tensors;
   while (low < high) {
@@ -194,13 +193,9 @@ __launch_bounds__(unary_kernel_threads) __global__
     void unary_kernel(const InputType *input, const ComputeType *noop, OutputType *output,
                       const ComputeType *scale, ComputeType *amax, ComputeType *scale_inv, Param p,
                       const size_t N, const size_t num_aligned_elements,
-                      const int64_t *offsets = nullptr,
-                      const int64_t *first_dims = nullptr,
-                      const int64_t *last_dims = nullptr,
-                      size_t num_tensors = 1,
-                      size_t scale_numel = 1,
-                      size_t scale_inv_numel = 1,
-                      size_t amax_numel = 1) {
+                      const int64_t *offsets = nullptr, const int64_t *first_dims = nullptr,
+                      const int64_t *last_dims = nullptr, size_t num_tensors = 1,
+                      size_t scale_numel = 1, size_t scale_inv_numel = 1, size_t amax_numel = 1) {
   if (noop != nullptr && noop[0] == 1.0f) return;
 
   VectorizedLoader<InputType, nvec, aligned> loader(input, N);
@@ -221,7 +216,8 @@ __launch_bounds__(unary_kernel_threads) __global__
     loader.load(tid, N);
 #pragma unroll
     for (int i = 0; i < nvec; ++i) {
-      const size_t global_idx = (aligned ? (tid * nvec + i) : (tid * nvec + i - loader.alignment()));
+      const size_t global_idx =
+          (aligned ? (tid * nvec + i) : (tid * nvec + i - loader.alignment()));
       if (global_idx >= N) continue;
 
       size_t tensor_id = 0;
@@ -319,12 +315,9 @@ __launch_bounds__(unary_kernel_threads) __global__
     void unary_grad_kernel(const InputTypeGrad *grad, const InputType *input, OutputType *output,
                            const ComputeType *scale, ComputeType *amax, ComputeType *scale_inv,
                            Param p, const size_t N, const size_t num_aligned_elements,
-                           const int64_t *offsets = nullptr,
-                           const int64_t *first_dims = nullptr,
-                           const int64_t *last_dims = nullptr,
-                           size_t num_tensors = 1,
-                           size_t scale_numel = 1,
-                           size_t scale_inv_numel = 1,
+                           const int64_t *offsets = nullptr, const int64_t *first_dims = nullptr,
+                           const int64_t *last_dims = nullptr, size_t num_tensors = 1,
+                           size_t scale_numel = 1, size_t scale_inv_numel = 1,
                            size_t amax_numel = 1) {
   VectorizedLoader<InputType, nvec, aligned> loader(input, N);
   VectorizedLoader<InputTypeGrad, nvec, aligned> grad_loader(grad, N);
@@ -346,7 +339,8 @@ __launch_bounds__(unary_kernel_threads) __global__
     grad_loader.load(tid, N);
 #pragma unroll
     for (int i = 0; i < nvec; ++i) {
-      const size_t global_idx = (aligned ? (tid * nvec + i) : (tid * nvec + i - loader.alignment()));
+      const size_t global_idx =
+          (aligned ? (tid * nvec + i) : (tid * nvec + i - loader.alignment()));
       if (global_idx >= N) continue;
 
       size_t tensor_id = 0;
@@ -495,10 +489,8 @@ void VectorizedUnaryKernelLauncher(const InputType *input, const fp32 *noop, Out
                                    const Param &params, cudaStream_t stream,
                                    const int64_t *offsets = nullptr,
                                    const int64_t *first_dims = nullptr,
-                                   const int64_t *last_dims = nullptr,
-                                   size_t num_tensors = 1,
-                                   size_t scale_numel = 1,
-                                   size_t scale_inv_numel = 1,
+                                   const int64_t *last_dims = nullptr, size_t num_tensors = 1,
+                                   size_t scale_numel = 1, size_t scale_inv_numel = 1,
                                    size_t amax_numel = 1) {
   if (N != 0) {
     auto align = CheckAlignment(N, nvec, input, output);
@@ -512,19 +504,19 @@ void VectorizedUnaryKernelLauncher(const InputType *input, const fp32 *noop, Out
     switch (align) {
       case Alignment::SAME_ALIGNED:
         unary_kernel<nvec, true, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
-            input, noop, output, scale, amax, scale_inv, params, N, num_aligned_elements,
-            offsets, first_dims, last_dims, num_tensors, scale_numel, scale_inv_numel, amax_numel);
+            input, noop, output, scale, amax, scale_inv, params, N, num_aligned_elements, offsets,
+            first_dims, last_dims, num_tensors, scale_numel, scale_inv_numel, amax_numel);
         break;
       case Alignment::SAME_UNALIGNED:
         unary_kernel<nvec, false, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
-            input, noop, output, scale, amax, scale_inv, params, N, num_aligned_elements,
-            offsets, first_dims, last_dims, num_tensors, scale_numel, scale_inv_numel, amax_numel);
+            input, noop, output, scale, amax, scale_inv, params, N, num_aligned_elements, offsets,
+            first_dims, last_dims, num_tensors, scale_numel, scale_inv_numel, amax_numel);
         break;
       case Alignment::DIFFERENT: {
         // If the pointers are aligned differently we cannot vectorize
         unary_kernel<1, true, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
-            input, noop, output, scale, amax, scale_inv, params, N, N,
-            offsets, first_dims, last_dims, num_tensors, scale_numel, scale_inv_numel, amax_numel);
+            input, noop, output, scale, amax, scale_inv, params, N, N, offsets, first_dims,
+            last_dims, num_tensors, scale_numel, scale_inv_numel, amax_numel);
         break;
       }
     }
@@ -537,13 +529,10 @@ template <int nvec, typename Param, fp32 (*OP)(fp32, const Param &), typename In
 void VectorizedUnaryGradKernelLauncher(const InputTypeGrad *grad, const InputType *input,
                                        OutputType *output, const fp32 *scale, fp32 *amax,
                                        fp32 *scale_inv, const size_t N, const Param &params,
-                                       cudaStream_t stream,
-                                       const int64_t *offsets = nullptr,
+                                       cudaStream_t stream, const int64_t *offsets = nullptr,
                                        const int64_t *first_dims = nullptr,
-                                       const int64_t *last_dims = nullptr,
-                                       size_t num_tensors = 1,
-                                       size_t scale_numel = 1,
-                                       size_t scale_inv_numel = 1,
+                                       const int64_t *last_dims = nullptr, size_t num_tensors = 1,
+                                       size_t scale_numel = 1, size_t scale_inv_numel = 1,
                                        size_t amax_numel = 1) {
   if (N != 0) {
     auto align = CheckAlignment(N, nvec, input, grad, output);
@@ -557,19 +546,19 @@ void VectorizedUnaryGradKernelLauncher(const InputTypeGrad *grad, const InputTyp
     switch (align) {
       case Alignment::SAME_ALIGNED:
         unary_grad_kernel<nvec, true, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
-            grad, input, output, scale, amax, scale_inv, params, N, num_aligned_elements,
-            offsets, first_dims, last_dims, num_tensors, scale_numel, scale_inv_numel, amax_numel);
+            grad, input, output, scale, amax, scale_inv, params, N, num_aligned_elements, offsets,
+            first_dims, last_dims, num_tensors, scale_numel, scale_inv_numel, amax_numel);
         break;
       case Alignment::SAME_UNALIGNED:
         unary_grad_kernel<nvec, false, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
-            grad, input, output, scale, amax, scale_inv, params, N, num_aligned_elements,
-            offsets, first_dims, last_dims, num_tensors, scale_numel, scale_inv_numel, amax_numel);
+            grad, input, output, scale, amax, scale_inv, params, N, num_aligned_elements, offsets,
+            first_dims, last_dims, num_tensors, scale_numel, scale_inv_numel, amax_numel);
         break;
       case Alignment::DIFFERENT: {
         // If the pointers are aligned differently we cannot vectorize
         unary_grad_kernel<1, true, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
-            grad, input, output, scale, amax, scale_inv, params, N, N,
-            offsets, first_dims, last_dims, num_tensors, scale_numel, scale_inv_numel, amax_numel);
+            grad, input, output, scale, amax, scale_inv, params, N, N, offsets, first_dims,
+            last_dims, num_tensors, scale_numel, scale_inv_numel, amax_numel);
         break;
       }
     }

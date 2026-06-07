@@ -588,19 +588,15 @@ void group_quantize(const GroupedTensor &input, const Tensor *noop, GroupedTenso
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input.dtype(), IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
-          output->dtype(), OType,
-          constexpr int nvec = 32 / sizeof(IType);
+          output->dtype(), OType, constexpr int nvec = 32 / sizeof(IType);
           VectorizedUnaryKernelLauncher<nvec, ParamOP, UnaryOP>(
               reinterpret_cast<const IType *>(input.data.dptr),
               reinterpret_cast<const fp32 *>(noop->data.dptr),
               reinterpret_cast<OType *>(output->data.dptr),
               reinterpret_cast<const fp32 *>(output->scale.dptr),
               reinterpret_cast<fp32 *>(output->amax.dptr),
-              reinterpret_cast<fp32 *>(output->scale_inv.dptr), N, {}, stream,
-              offsets, first_dims, last_dims, input.num_tensors,
-              scale_numel, scale_inv_numel, amax_numel);
-      );
-  );
+              reinterpret_cast<fp32 *>(output->scale_inv.dptr), N, {}, stream, offsets, first_dims,
+              last_dims, input.num_tensors, scale_numel, scale_inv_numel, amax_numel);););
 }
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
@@ -608,7 +604,8 @@ template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
 void group_quantize(const GroupedTensor &grad, const GroupedTensor *input, const Tensor *noop,
                     GroupedTensor *output, GroupedTensor *dbias, Tensor *workspace,
                     cudaStream_t stream) {
-  NVTE_CHECK(!IS_DBIAS && !IS_DACT, "Gated or DBias fusions are not supported in FP8 Grouped Quantization.");
+  NVTE_CHECK(!IS_DBIAS && !IS_DACT,
+             "Gated or DBias fusions are not supported in FP8 Grouped Quantization.");
 
   constexpr float (*UnaryOP)(float, const ParamOP &) = (OP == nullptr) ? detail::identity : OP;
   const size_t N = product(input->data.shape);
@@ -623,19 +620,15 @@ void group_quantize(const GroupedTensor &grad, const GroupedTensor *input, const
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input->dtype(), IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
-          output->dtype(), OType,
-          constexpr int nvec = 32 / sizeof(IType);
+          output->dtype(), OType, constexpr int nvec = 32 / sizeof(IType);
           VectorizedUnaryGradKernelLauncher<nvec, ParamOP, UnaryOP>(
               reinterpret_cast<const IType *>(grad.data.dptr),
               reinterpret_cast<const IType *>(input->data.dptr),
               reinterpret_cast<OType *>(output->data.dptr),
               reinterpret_cast<const fp32 *>(output->scale.dptr),
               reinterpret_cast<fp32 *>(output->amax.dptr),
-              reinterpret_cast<fp32 *>(output->scale_inv.dptr), N, {}, stream,
-              offsets, first_dims, last_dims, input->num_tensors,
-              scale_numel, scale_inv_numel, amax_numel);
-      );
-  );
+              reinterpret_cast<fp32 *>(output->scale_inv.dptr), N, {}, stream, offsets, first_dims,
+              last_dims, input->num_tensors, scale_numel, scale_inv_numel, amax_numel);););
 }
 
 }  // namespace fp8
