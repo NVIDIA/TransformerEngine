@@ -27,7 +27,7 @@ from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.quantization import QuantizerRole
 from transformer_engine.pytorch.ops.basic.basic_linear import BasicLinear
 from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer
-from transformer_engine.pytorch.quantization import QuantizerRole
+from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 from transformer_engine.pytorch import (
     is_fp8_available,
     is_mxfp8_available,
@@ -416,11 +416,29 @@ def _current_scaling(amax_epsilon=0.0):
     )
 
 
+def _nvfp4(with_rht=False):
+    return NVFP4Quantizer(
+        fp4_dtype=tex.DType.kFloat4E2M1,
+        rowwise=True,
+        columnwise=True,
+        with_rht=with_rht,
+    )
+
+
 # (factory, kwargs producing a different-but-valid config)
 _VALUE_QUANTIZERS = [
     pytest.param(_mxfp8, {"dtype": tex.DType.kFloat8E5M2}, id="mxfp8"),
     pytest.param(_blockwise, {"force_pow_2_scales": False}, id="float8_blockwise"),
     pytest.param(_current_scaling, {"amax_epsilon": 1e-4}, id="float8_current_scaling"),
+    pytest.param(
+        _nvfp4,
+        {"with_rht": True},
+        id="nvfp4",
+        marks=pytest.mark.skipif(
+            not torch.cuda.is_available(),
+            reason="NVFP4Quantizer requires CUDA to construct",
+        ),
+    ),
 ]
 
 
