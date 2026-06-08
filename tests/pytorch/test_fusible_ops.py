@@ -3729,8 +3729,14 @@ class TestSequentialModules:
         activation: str,
     ) -> None:
         """GroupedLinear + scaled activation + GroupedLinear"""
-
-        # Split sizes
+        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0" and (
+            single_grouped_weight or single_grouped_bias
+        ):
+            pytest.skip(
+                "single_grouped_weight/single_grouped_bias requires"
+                " NVTE_GROUPED_LINEAR_SINGLE_PARAM=1"
+            )
+    # Split sizes
         split_sizes = [split_alignment * (i) for i in range(group_size)]
         random.shuffle(split_sizes)
         split_sizes = torch.tensor(split_sizes, dtype=torch.int, device=device)
