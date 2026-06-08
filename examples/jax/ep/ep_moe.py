@@ -216,12 +216,18 @@ def _moe_step(args, topk_idx, tokens, topk_w, kernels):
         recv_topk_w = jax.lax.with_sharding_constraint(recv_topk_w, NamedSharding(mesh, ep2))
         expert_out = _batched_expert_linear(recv_tokens, local_kernels, NLE, dp_size, ep_size)
         expert_out = jax.lax.with_sharding_constraint(expert_out, NamedSharding(mesh, ep3))
+        # ep_combine is unweighted: pre-multiply by recv_topk_w and zero
+        # padded slots (recv_topk_w == 0) before the scatter-sum.
+        mask = (recv_topk_w != 0).astype(jnp.float32)[..., None]
+        weighted = (
+            expert_out.astype(jnp.float32) * recv_topk_w[..., None] * mask
+        ).astype(expert_out.dtype)
+        weighted = jax.lax.with_sharding_constraint(weighted, NamedSharding(mesh, ep3))
         return ep_combine(
             ep_handle,
             handle_mem,
             _tc,
-            expert_out,
-            recv_topk_w,
+            weighted,
             num_local_tokens=(B, S),
             out_sharding=(("dp", "ep"), None, None),
         )

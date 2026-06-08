@@ -203,6 +203,13 @@ class TestEP(unittest.TestCase):
         topk_weights = jnp.asarray(np.full((T_dp, TOP_K), 1.0 / TOP_K, dtype=np.float32))
         return T_dp, tokens, topk_idx, topk_weights
 
+    @staticmethod
+    def _preweight_expert_out(expert_out, recv_topk_weights):
+        """ep_combine is unweighted; mirror the caller-side weighting + mask."""
+        mask = (recv_topk_weights != 0).astype(jnp.float32)[..., None]
+        w = recv_topk_weights[..., None]
+        return (expert_out.astype(jnp.float32) * w * mask).astype(expert_out.dtype)
+
     # ── Individual primitives (cpp_extensions level) ──────────────────────
 
     def test_two_handle_mems_no_aliasing(self):
@@ -255,8 +262,9 @@ class TestEP(unittest.TestCase):
                 )
                 recv_t = jax.lax.with_sharding_constraint(recv_t, NamedSharding(self.mesh, ep_spec_3d))
                 recv_w = jax.lax.with_sharding_constraint(recv_w, NamedSharding(self.mesh, ep_spec_2d))
+                weighted = self._preweight_expert_out(recv_t, recv_w)
                 return ep_combine(
-                    hk, hm, tc, recv_t, recv_w, T_global, out_sharding=(("dp", "ep"), None)
+                    hk, hm, tc, weighted, T_global, out_sharding=(("dp", "ep"), None)
                 )
 
             @jax.jit
@@ -383,8 +391,9 @@ class TestEP(unittest.TestCase):
                 recv_w = jax.lax.with_sharding_constraint(
                     recv_w, NamedSharding(self.mesh, ep_spec_2d)
                 )
+                weighted = self._preweight_expert_out(recv_t, recv_w)
                 out = ep_combine(
-                    self.hk, hm, tc, recv_t, recv_w, T_global, out_sharding=(("dp", "ep"), None)
+                    self.hk, hm, tc, weighted, T_global, out_sharding=(("dp", "ep"), None)
                 )
                 return 0.5 * (out.astype(jnp.float32) ** 2).sum()
 
@@ -427,12 +436,12 @@ class TestEP(unittest.TestCase):
                 recv_t, recv_w, hm, _tc = ep_dispatch(self.hk, idx, toks, w, self.recv_capacity_per_rank)
                 recv_t = jax.lax.with_sharding_constraint(recv_t, NamedSharding(self.mesh, ep_t))
                 recv_w = jax.lax.with_sharding_constraint(recv_w, NamedSharding(self.mesh, ep_w))
+                weighted = self._preweight_expert_out(recv_t, recv_w)
                 out = ep_combine(
                     self.hk,
                     hm,
                     _tc,
-                    recv_t,
-                    recv_w,
+                    weighted,
                     num_local_tokens=(B, S),
                     out_sharding=out_spec_3d,
                 )
@@ -470,12 +479,12 @@ class TestEP(unittest.TestCase):
                 recv_t, recv_w, hm, _tc = ep_dispatch(self.hk, idx, toks, w, self.recv_capacity_per_rank)
                 recv_t = jax.lax.with_sharding_constraint(recv_t, NamedSharding(self.mesh, ep_t))
                 recv_w = jax.lax.with_sharding_constraint(recv_w, NamedSharding(self.mesh, ep_w))
+                weighted = self._preweight_expert_out(recv_t, recv_w)
                 out = ep_combine(
                     self.hk,
                     hm,
                     _tc,
-                    recv_t,
-                    recv_w,
+                    weighted,
                     num_local_tokens=T_global,
                     out_sharding=(("dp", "ep"), None),
                 )
@@ -565,7 +574,8 @@ class TestEP(unittest.TestCase):
                 recv_w = jax.lax.with_sharding_constraint(
                     recv_w, NamedSharding(self.mesh, PartitionSpec(("dp", "ep"), None))
                 )
-                combined = ep_combine(self.hk, hm, tc, eo, recv_w, T_global)
+                weighted = self._preweight_expert_out(eo, recv_w)
+                combined = ep_combine(self.hk, hm, tc, weighted, T_global)
                 # Pin combined to dp-sharded so autodiff transpose feeds
                 # ep_combine_bwd a per-shard cotangent.
                 combined = jax.lax.with_sharding_constraint(
@@ -652,8 +662,9 @@ class TestEP(unittest.TestCase):
                 recv_w = jax.lax.with_sharding_constraint(
                     recv_w, NamedSharding(self.mesh, ep_spec_2d)
                 )
+                weighted = self._preweight_expert_out(recv_t, recv_w)
                 out = ep_combine(
-                    self.hk, hm, tc, recv_t, recv_w, T_dp, out_sharding=(("dp", "ep"), None)
+                    self.hk, hm, tc, weighted, T_dp, out_sharding=(("dp", "ep"), None)
                 )
                 return jax.lax.with_sharding_constraint(out, NamedSharding(self.mesh, dp_spec))
 
@@ -692,7 +703,8 @@ class TestEP(unittest.TestCase):
                 w = jax.lax.with_sharding_constraint(w, NamedSharding(self.mesh, dp_spec))
                 _rt, rw, hm, tc = ep_dispatch(self.hk, idx, toks, w, self.recv_capacity_per_rank)
                 rw = jax.lax.with_sharding_constraint(rw, NamedSharding(self.mesh, ep_spec_2d))
-                combined = ep_combine(self.hk, hm, tc, eo, rw, T_dp, out_sharding=(("dp", "ep"), None))
+                weighted = self._preweight_expert_out(eo, rw)
+                combined = ep_combine(self.hk, hm, tc, weighted, T_dp, out_sharding=(("dp", "ep"), None))
                 return jax.lax.with_sharding_constraint(combined, NamedSharding(self.mesh, dp_spec))
 
             # jax.vjp + pinned cotangent feeds ep_combine_bwd/ep_dispatch_bwd
