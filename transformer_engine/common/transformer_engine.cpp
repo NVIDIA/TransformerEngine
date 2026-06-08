@@ -414,8 +414,8 @@ size_t GetTensorHandlePoolSizeMB(const char *env_var) {
 
   size_t pool_size_mb = 0;
   for (size_t i = first; i <= last; ++i) {
-    NVTE_CHECK(value[i] >= '0' && value[i] <= '9', env_var,
-               " must be a positive integer, got \"", value, "\".");
+    NVTE_CHECK(value[i] >= '0' && value[i] <= '9', env_var, " must be a positive integer, got \"",
+               value, "\".");
     const size_t digit = static_cast<size_t>(value[i] - '0');
     NVTE_CHECK(pool_size_mb <= (std::numeric_limits<size_t>::max() - digit) / 10, env_var,
                " is too large.");
