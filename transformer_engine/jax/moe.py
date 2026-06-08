@@ -153,6 +153,7 @@ def _te_ep_assert_compatible_bootstrap(
 # =============================================================================
 
 
+@jax.tree_util.register_pytree_node_class
 @dataclass
 class _Ctx:
     """Residuals carried from the fwd rule into the bwd rule."""
@@ -179,6 +180,79 @@ class _Ctx:
     aux_const_buf: Any = None
     aux_tokens_per_expert: Any = None
     aux_saved_scores: Any = None
+
+    def tree_flatten(self):
+        children = (
+            self.x,
+            self.gate_kernel,
+            self.expert_bias,
+            self.logits_2d,
+            self.saved_scores,
+            self.routing_map,
+            self.handle_mem,
+            self.token_counts,
+            self.recv_topk_weights,
+            self.casted_sorted_x_lhs_trans,
+            self.casted_wi_rhs_trans,
+            self.gate_proj_out,
+            self.up_proj_out,
+            self.casted_intermediate_lhs_trans,
+            self.casted_wo_rhs_trans,
+            self.expert_outputs,
+            self.local_group_sizes,
+            self.aux_const_buf,
+            self.aux_tokens_per_expert,
+            self.aux_saved_scores,
+        )
+        return children, self.handle
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        (
+            x,
+            gate_kernel,
+            expert_bias,
+            logits_2d,
+            saved_scores,
+            routing_map,
+            handle_mem,
+            token_counts,
+            recv_topk_weights,
+            casted_sorted_x_lhs_trans,
+            casted_wi_rhs_trans,
+            gate_proj_out,
+            up_proj_out,
+            casted_intermediate_lhs_trans,
+            casted_wo_rhs_trans,
+            expert_outputs,
+            local_group_sizes,
+            aux_const_buf,
+            aux_tokens_per_expert,
+            aux_saved_scores,
+        ) = children
+        return cls(
+            x=x,
+            gate_kernel=gate_kernel,
+            expert_bias=expert_bias,
+            logits_2d=logits_2d,
+            saved_scores=saved_scores,
+            routing_map=routing_map,
+            handle=aux_data,
+            handle_mem=handle_mem,
+            token_counts=token_counts,
+            recv_topk_weights=recv_topk_weights,
+            casted_sorted_x_lhs_trans=casted_sorted_x_lhs_trans,
+            casted_wi_rhs_trans=casted_wi_rhs_trans,
+            gate_proj_out=gate_proj_out,
+            up_proj_out=up_proj_out,
+            casted_intermediate_lhs_trans=casted_intermediate_lhs_trans,
+            casted_wo_rhs_trans=casted_wo_rhs_trans,
+            expert_outputs=expert_outputs,
+            local_group_sizes=local_group_sizes,
+            aux_const_buf=aux_const_buf,
+            aux_tokens_per_expert=aux_tokens_per_expert,
+            aux_saved_scores=aux_saved_scores,
+        )
 
 
 # =============================================================================
@@ -218,9 +292,9 @@ def _ffn_fwd_per_shard(
     wi_1 = wi_1.astype(sorted_x.dtype)
     wo = wo.astype(sorted_x.dtype)
 
-    wi_combined = jnp.stack([wi_0, wi_1], axis=-2)
+    wi_combined = jnp.concatenate([wi_0, wi_1], axis=-1)
     wi_combined_bias = (
-        jnp.stack([wi_0_bias, wi_1_bias], axis=-2) if wi_0_bias is not None else None
+        jnp.concatenate([wi_0_bias, wi_1_bias], axis=-1) if wi_0_bias is not None else None
     )
 
     q_set = noop_quantizer_set
@@ -232,8 +306,7 @@ def _ffn_fwd_per_shard(
         contracting_dims=((1,), (1,)),
         bias=wi_combined_bias,
     )
-    gate_proj_out = combined_out[..., 0, :]
-    up_proj_out = combined_out[..., 1, :]
+    gate_proj_out, up_proj_out = jnp.split(combined_out, 2, axis=-1)
     casted_sorted_x_lhs_trans = casted_sorted_x.get_tensor(usage=TensorUsage.LHS_TRANS)
     casted_wi_rhs_trans = casted_wi.get_tensor(usage=TensorUsage.RHS_TRANS)
 
@@ -337,32 +410,24 @@ def _ffn_bwd_per_shard(
     (d_gate_proj_out,) = dact_gate_proj_pullback(d_intermediate * up_proj_out)
 
     # wi bwd (fused gate/up)
-    inter_M = d_gate_proj_out.shape[-1]
-    d_combined = jnp.stack([d_gate_proj_out, d_up_proj_out], axis=-2)
+    d_combined = jnp.concatenate([d_gate_proj_out, d_up_proj_out], axis=-1)
     casted_d_combined = tex.grouped_quantize(
         d_combined, q_set.dgrad, local_group_sizes, flatten_axis=-1
     )
     d_sorted_x = tex.grouped_gemm(
         casted_d_combined.get_tensor(usage=TensorUsage.LHS),
         casted_wi_rhs_trans,
-        contracting_dims=((1, 2), (2, 3)),
+        contracting_dims=((1,), (2,)),
     )
     d_wi_combined = tex.grouped_gemm(
         casted_sorted_x_lhs_trans,
         casted_d_combined.get_tensor(usage=TensorUsage.RHS),
         contracting_dims=((0,), (0,)),
     )
-    d_wi_0 = d_wi_combined[..., 0, :]
-    d_wi_1 = d_wi_combined[..., 1, :]
+    d_wi_0, d_wi_1 = jnp.split(d_wi_combined, 2, axis=-1)
     if has_bias:
-        # tex.grouped_dbias takes a rank-2 input; reshape around the call.
-        d_combined_2d = d_combined.reshape(d_combined.shape[0], -1)
-        d_wi_combined_bias_2d = tex.grouped_dbias(d_combined_2d, local_group_sizes)
-        d_wi_combined_bias = d_wi_combined_bias_2d.reshape(
-            *d_wi_combined_bias_2d.shape[:-1], 2, inter_M
-        )
-        d_wi_0_bias = d_wi_combined_bias[..., 0, :]
-        d_wi_1_bias = d_wi_combined_bias[..., 1, :]
+        d_wi_combined_bias = tex.grouped_dbias(d_combined, local_group_sizes)
+        d_wi_0_bias, d_wi_1_bias = jnp.split(d_wi_combined_bias, 2, axis=-1)
     else:
         d_wi_0_bias = None
         d_wi_1_bias = None
@@ -453,10 +518,11 @@ def _moe_fwd_rule(
     # block starts on the alignment boundary that grouped_gemm expects.
     natural_recv_pr = (B // dp_size) * S * K
     natural_spe = (natural_recv_pr + num_local_experts - 1) // num_local_experts
-    if align_size > 0:
-        slots_per_expert = ((natural_spe + align_size - 1) // align_size) * align_size
-    else:
-        slots_per_expert = natural_spe
+    # NCCL EP requires each expert-major output block to be at least
+    # 128-token aligned. Keep larger caller-requested alignments, but do
+    # not emit the smaller natural block size for tiny tests.
+    effective_align = max(int(align_size), 128)
+    slots_per_expert = ((natural_spe + effective_align - 1) // effective_align) * effective_align
     recv_pr = num_local_experts * slots_per_expert
     # Per-rank input token count: B/num_procs rows x S tokens. The bootstrap
     # uses this to size the dispatch send buffer; recv_pr above sizes the

@@ -571,7 +571,7 @@ class FusedMoEAuxLossBwdPrimitive(BasePrimitive):
         # backward reconstructs the full [num_tokens, num_experts] grad_probs from
         # scalar inputs.  Shardy will leave num_tokens unsharded, which matches the
         # replicated PartitionSpec(None, None) in partition().
-        return "const_buf_one, num_experts, grad_one -> i num_experts"
+        return "const_buf_one, num_experts, -> i num_experts"
 
 
 register_primitive(FusedMoEAuxLossBwdPrimitive)

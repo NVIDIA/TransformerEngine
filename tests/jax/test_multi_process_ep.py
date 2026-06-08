@@ -122,6 +122,7 @@ class TestEP(unittest.TestCase):
                 max_tokens_per_rank=TOKENS_PER_DP_SHARD,
                 recv_capacity_per_rank=cls.recv_capacity_per_rank,
                 hidden_dim=HIDDEN_DIM,
+                max_token_dtype=jnp.bfloat16,
                 # XLA reallocates handle_mem between JIT executables.
                 allow_handle_mem_reloc=True,
             )
