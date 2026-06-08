@@ -439,7 +439,7 @@ def test_fuser_ops_with_userbuffers(
     # Parallel job launcher
     command = []
     if tex.ubuf_built_with_mpi():
-        python_exe = pathlib.Path(sys.executable).resolve()
+        python_exe = pathlib.Path(sys.executable)
         command.extend(("mpirun", "-np", str(world_size), "--oversubscribe", "--quiet", python_exe))
     else:
         command.extend(("torchrun", f"--nproc_per_node={world_size}"))
