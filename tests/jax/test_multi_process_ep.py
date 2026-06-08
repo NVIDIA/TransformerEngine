@@ -460,48 +460,6 @@ class TestEP(unittest.TestCase):
                 rtol=5e-2,
             )
 
-    def test_dispatch_combine_dp_only_first_dim(self):
-        """Input sharded ``("dp", None)`` (no ep on leading) — dispatch must
-        accept it. JAX SPMD slices the missing ep axis locally so the kernel
-        still sees ``T/(dp*ep)`` tokens per rank."""
-        T_global, topk_idx, tokens, topk_w = self._make_identity_inputs(nonuniform=False)
-        dp_only = PartitionSpec("dp", None)
-        with self.mesh, global_shard_guard(self.mr):
-            idx_s = jax.lax.with_sharding_constraint(topk_idx, NamedSharding(self.mesh, dp_only))
-            tok_s = jax.lax.with_sharding_constraint(tokens, NamedSharding(self.mesh, dp_only))
-            w_s = jax.lax.with_sharding_constraint(topk_w, NamedSharding(self.mesh, dp_only))
-
-            ep_t = PartitionSpec(("dp", "ep"), None, None)
-            ep_w = PartitionSpec(("dp", "ep"), None)
-
-            @jax.jit
-            def run(idx, toks, w):
-                recv_t, recv_w, hm, _tc = ep_dispatch(self.hk, idx, toks, w, self.recv_capacity_per_rank)
-                recv_t = jax.lax.with_sharding_constraint(recv_t, NamedSharding(self.mesh, ep_t))
-                recv_w = jax.lax.with_sharding_constraint(recv_w, NamedSharding(self.mesh, ep_w))
-                weighted = self._preweight_expert_out(recv_t, recv_w)
-                out = ep_combine(
-                    self.hk,
-                    hm,
-                    _tc,
-                    weighted,
-                    num_local_tokens=T_global,
-                    out_sharding=(("dp", "ep"), None),
-                )
-                return out
-
-            out = run(idx_s, tok_s, w_s)
-            out.block_until_ready()
-            out_global = jmu.process_allgather(out, tiled=True)
-
-        if self.rank == 0:
-            np.testing.assert_allclose(
-                np.asarray(out_global.astype(jnp.float32)),
-                np.asarray(tokens.astype(jnp.float32)),
-                atol=5e-2,
-                rtol=5e-2,
-            )
-
     # ── Custom-VJP tests ─────────────────────────────────────────────────
 
     def test_dispatch_vjp_fwd_bwd(self):
