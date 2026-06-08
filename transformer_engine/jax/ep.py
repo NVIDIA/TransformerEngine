@@ -15,7 +15,11 @@ import numpy as np
 import transformer_engine_jax
 import transformer_engine.jax.cpp_extensions as tex
 from transformer_engine.jax.cpp_extensions.misc import jax_dtype_to_te_dtype
-from transformer_engine.jax.sharding import global_mesh_resource, get_mesh_axis_size
+from transformer_engine.jax.sharding import (
+    global_mesh_resource,
+    get_mesh_axis_size,
+    with_sharding_constraint,
+)
 
 ep_prepare = tex.ep_prepare
 EpLayerConfig = tex.EpLayerConfig
@@ -173,6 +177,19 @@ def ep_bootstrap(
     )
 
 
+def _default_out_partition_spec():
+    """Leading-axis default: ``(("dp","ep"),)`` if DP/FSDP is set, else ``("ep",)``."""
+    gsr = global_mesh_resource()
+    if gsr.ep_resource is None:
+        raise ValueError(
+            "ep_resource is not set on the active MeshResource;"
+            " pass out_sharding=... explicitly."
+        )
+    outer = gsr.dp_resource or gsr.fsdp_resource
+    leading = (outer, gsr.ep_resource) if outer is not None else gsr.ep_resource
+    return (leading,)
+
+
 # ── ep_dispatch (custom_vjp) ─────────────────────────────────────────────────
 
 
@@ -182,8 +199,8 @@ def ep_dispatch(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank):
 
     ``cfg`` is a per-layer ``EpLayerConfig``; distinct layers may share a
     ``cfg`` (the pointer-keyed C++ cache keys on handle_mem, not on cfg).
-    Inputs are 2D ``[T, H]`` or 3D ``[B, S, H]`` with only the leading dim
-    sharded (axis in {ep, (dp, ep), dp, None}). Returns
+    Inputs are ``[..., H]`` with only the leading dim sharded as ``ep`` or
+    ``(dp, ep)``. Returns
     ``(recv_tokens, recv_topk_weights, handle_mem, token_counts)``; pass
     ``handle_mem`` and ``token_counts`` to the matching ``ep_combine``.
     """
@@ -191,6 +208,10 @@ def ep_dispatch(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank):
 
 
 def _dispatch_fwd(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank):
+    if not jnp.issubdtype(topk_weights.dtype, jnp.floating):
+        raise TypeError(
+            f"ep_dispatch: topk_weights must be a floating dtype; got {topk_weights.dtype}."
+        )
     token_counts, handle_mem = tex.ep_prepare(cfg, topk_idx)
     recv_tokens, recv_topk_weights = tex.ep_dispatch_fwd(
         cfg, handle_mem, topk_idx, tokens, topk_weights, recv_capacity_per_rank
@@ -203,20 +224,14 @@ def _dispatch_fwd(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank):
 def _dispatch_bwd(cfg, recv_capacity_per_rank, res, g_outputs):
     del recv_capacity_per_rank
     handle_mem, out_leading = res
-    # Re-pin cotangent sharding: XLA transpose can drop the EP axis on a
-    # single-fwd-output cotangent, landing a global tensor in the FFI.
-    gsr = global_mesh_resource()
-    ep_axis = gsr.ep_resource
-    outer = gsr.dp_resource or gsr.fsdp_resource
-    leading = (outer, ep_axis) if outer is not None else ep_axis
-    g_recv_tokens = jax.lax.with_sharding_constraint(
-        g_outputs[0], jax.sharding.PartitionSpec(leading, None, None)
-    )
-    g_recv_topk_weights = jax.lax.with_sharding_constraint(
-        g_outputs[1], jax.sharding.PartitionSpec(leading, None)
-    )
+    # Re-pin cotangent: XLA transpose can drop the EP axis and feed the FFI a global tensor.
+    out_spec = _default_out_partition_spec()
+    spec = jax.sharding.PartitionSpec(*out_spec)
+    g_recv_tokens = with_sharding_constraint(g_outputs[0], spec)
+    g_recv_topk_weights = with_sharding_constraint(g_outputs[1], spec)
     grad_tokens, grad_topk_weights = tex.ep_dispatch_bwd(
-        cfg, handle_mem, g_recv_tokens, g_recv_topk_weights, out_leading
+        cfg, handle_mem, g_recv_tokens, g_recv_topk_weights, out_leading,
+        out_partition_spec=out_spec,
     )
     return (None, grad_tokens, grad_topk_weights)
 
@@ -234,27 +249,11 @@ def ep_combine(
 ):
     """Scatter-sum expert outputs back to source ranks. **Unweighted.**
 
-    ``ep_combine`` does not apply ``recv_topk_weights`` or any padded-slot
-    mask. The caller must pre-multiply ``expert_out`` by the dispatched
-    weights (and zero padded slots) before calling. Gradients w.r.t.
-    ``recv_topk_weights`` therefore flow through the caller's hadamard, not
-    through this op.
-
-    Args:
-        cfg:               ``EpLayerConfig`` matching the ``ep_dispatch`` call.
-        handle_mem:        Routing-state buffer returned by ``ep_dispatch``.
-        token_counts:      ``[num_procs, num_local_experts]`` int32 (passed through).
-        expert_out:        ``[num_procs, recv_capacity_per_rank, H]`` pre-weighted
-                           post-FFN activations.
-        num_local_tokens:  STATIC int or tuple. int -> 2D output ``[T, H]``;
-                           tuple -> N-D output ``[*tuple, H]``.
-        out_sharding:      STATIC optional ``PartitionSpec`` tuple for the
-                           output. Defaults to ``(("dp","ep"), *None)`` when
-                           DP is set, else ``("ep", *None)``. Only the leading
-                           dim may be sharded.
-
-    Returns:
-        ``[..., H]`` combined output shaped per ``num_local_tokens``.
+    Caller must pre-multiply ``expert_out`` by ``recv_topk_weights`` (and
+    zero padded slots); gradients w.r.t. weights flow through that hadamard,
+    not through this op. ``num_local_tokens`` is STATIC: int -> ``[T, H]``,
+    tuple -> ``[*tuple, H]``. ``out_sharding`` defaults via
+    ``_default_out_partition_spec``; only the leading dim may be sharded.
     """
     return _combine_fwd(
         cfg, handle_mem, token_counts, expert_out,
@@ -267,6 +266,8 @@ def _combine_fwd(
     num_local_tokens, out_sharding,
 ):
     del token_counts
+    if out_sharding is None:
+        out_sharding = _default_out_partition_spec()
     result = tex.ep_combine_fwd(
         cfg, handle_mem, expert_out, num_local_tokens, out_partition_spec=out_sharding
     )
@@ -275,21 +276,11 @@ def _combine_fwd(
 
 def _combine_bwd(cfg, _num_local_tokens, _out_sharding, res, g_result):
     handle_mem, recv_capacity_per_rank = res
-    # Re-pin cotangent sharding: same XLA-transpose workaround as _dispatch_bwd.
-    gsr = global_mesh_resource()
-    if _out_sharding is not None:
-        spec = jax.sharding.PartitionSpec(*_out_sharding)
-    else:
-        ep_axis = gsr.ep_resource
-        outer = gsr.dp_resource or gsr.fsdp_resource
-        leading = (outer, ep_axis) if outer is not None and ep_axis is not None else ep_axis
-        spec = (
-            jax.sharding.PartitionSpec(leading, *([None] * (g_result.ndim - 1)))
-            if leading is not None
-            else None
-        )
-    if spec is not None:
-        g_result = jax.lax.with_sharding_constraint(g_result, spec)
+    # Re-pin cotangent (same XLA-transpose workaround as _dispatch_bwd).
+    if _out_sharding is None:
+        _out_sharding = _default_out_partition_spec()
+    spec = jax.sharding.PartitionSpec(*_out_sharding)
+    g_result = with_sharding_constraint(g_result, spec)
     grad_expert_out = tex.ep_combine_bwd(cfg, handle_mem, g_result, recv_capacity_per_rank)
     return (None, None, grad_expert_out)
 

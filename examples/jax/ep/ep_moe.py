@@ -316,9 +316,7 @@ def main():
 
         step_jit = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))
 
-        # Run --iters fwd+bwd steps on the same compiled jit. With identical
-        # inputs every iter, the pointer-keyed handle_mem cache must keep
-        # producing identical loss/grad.
+        # Same jit + same inputs each iter: handle_mem cache must give identical loss/grad.
         for it in range(args.iters):
             (loss, out_fwd), grad_tokens = step_jit(tokens, topk_idx, topk_w, kernels)
             grad_tokens.block_until_ready()

@@ -23,7 +23,7 @@ from jax.sharding import NamedSharding, PartitionSpec
 
 import transformer_engine_jax
 from .base import BasePrimitive, register_primitive
-from ..sharding import global_mesh_resource
+from ..sharding import global_mesh_resource, get_mesh_axis_size
 
 __all__ = [
     "EpConfig",
@@ -98,54 +98,25 @@ def ep_handle_mem_size(cfg: EpLayerConfig) -> int:
     )
 
 
-def _leading_axis_ok(spec, ep_axis, outer_axes=()):
-    # Only the first dim may carry sharding; remaining dims must be replicated.
-    # The first dim's axis must be one of:
-    #   ``ep_axis`` alone,
-    #   a tuple of dp/fsdp axes (no ep — ep gets sliced in locally),
-    #   a tuple ending in ``ep_axis`` with dp/fsdp axes before it.
-    # Examples on a (dp, ep) mesh: 2D ``(ep, None)``, ``(("dp","ep"), None)``,
-    # ``("dp", None)``; 3D ``(ep, None, None)``, ``(("dp","ep"), None, None)``,
-    # ``("dp", None, None)``.
-    if len(spec) < 2 or ep_axis is None:
-        return False
-    if any(ax is not None for ax in spec[1:]):
-        return False  # only first dim sharded
-    leading = spec[0]
-    allowed_outers = {a for a in outer_axes if a is not None}
-    allowed = allowed_outers | {ep_axis, None}
-    elts = leading if isinstance(leading, tuple) else (leading,)
-    return all(a in allowed for a in elts)
+def _leading_axis_ok(spec):
+    """Validate an EP input spec; return ``(ok, ep_axis, outer_axes)``.
 
-
-def _canonical_input_spec(spec, ndim):
-    """Canonical input PartitionSpec the primitive demands JAX deliver.
-
-    Sharding lives entirely on the first dim. If ``spec[0]`` already includes
-    ``ep_resource``, returned unchanged. Otherwise ``ep_resource`` is folded
-    into the first-dim axis tuple, e.g. ``"dp"`` → ``("dp","ep")``. The added
-    ep axis is a local slice (the missing dim was replicated), no cross-device
-    comm.
+    Leading dim is ``ep`` or a tuple ending in ``ep`` (outer dp/fsdp axes
+    first); all other dims must be replicated.
     """
     gsr = global_mesh_resource()
-    ep = gsr.ep_resource
+    ep_axis = gsr.ep_resource
+    outer_axes = tuple(a for a in (gsr.dp_resource, gsr.fsdp_resource) if a is not None)
+    if len(spec) < 2 or ep_axis is None:
+        return False, ep_axis, outer_axes
+    if any(ax is not None for ax in spec[1:]):
+        return False, ep_axis, outer_axes
     leading = spec[0]
-    present = leading if isinstance(leading, tuple) else (leading,) if leading is not None else ()
-    if ep in present:
-        return PartitionSpec(*spec)
-    if leading is None:
-        new_leading = ep
-    elif isinstance(leading, tuple):
-        new_leading = (*leading, ep)
-    else:
-        new_leading = (leading, ep)
-    return PartitionSpec(new_leading, *([None] * (ndim - 1)))
-
-
-def _dispatch_input_outer_axes():
-    """dp/fsdp axes allowed as outer companions to ep_resource on dispatch input."""
-    gsr = global_mesh_resource()
-    return tuple(a for a in (gsr.dp_resource, gsr.fsdp_resource) if a is not None)
+    elts = leading if isinstance(leading, tuple) else (leading,)
+    if ep_axis not in elts:
+        return False, ep_axis, outer_axes
+    allowed = set(outer_axes) | {ep_axis}
+    return all(a in allowed for a in elts), ep_axis, outer_axes
 
 
 def _ep_outer_axis():
@@ -165,7 +136,9 @@ def _ep_leading_dims(is_outer):
     outer = _ep_outer_axis()
     if not is_outer:
         return (1,)
-    return (cfg.world_size,) if outer is not None else (cfg.ep_size,)
+    if outer is None:
+        return (cfg.ep_size,)
+    return (get_mesh_axis_size(outer) * cfg.ep_size,)
 
 
 def _ep_output_spec(*trailing):
@@ -211,8 +184,8 @@ class EpPreparePrimitive(BasePrimitive):
 
     @staticmethod
     def abstract(topk_idx_aval, *, top_k, dispatch_output_per_expert_alignment, is_outer):
-        # is_outer=True: global leading dim = (world_size,) (or (ep_size,) with
-        # no DP); False: per-shard = (1,).
+        # is_outer=True: global leading dim = (dp*ep,) (or (ep,) with no DP);
+        # False: per-shard = (1,).
         cfg = get_ep_config()
         num_local_experts = cfg.num_local_experts
         assert (
@@ -276,20 +249,19 @@ class EpPreparePrimitive(BasePrimitive):
         top_k, dispatch_output_per_expert_alignment, is_outer, mesh, arg_infos, result_infos
     ):
         del is_outer, result_infos
-        gsr = global_mesh_resource()
-        ep_axis = gsr.ep_resource
-        outer_axes = _dispatch_input_outer_axes()
         idx_spec = arg_infos[0].sharding.spec
-        if not _leading_axis_ok(idx_spec, ep_axis, outer_axes):
+        ok, ep_axis, outer_axes = _leading_axis_ok(idx_spec)
+        if not ok:
             raise NotImplementedError(
-                "EpPrepare: topk_idx leading dims must shard on ep_resource"
-                f" ('{ep_axis}') and/or {outer_axes}, with the topk dim replicated;"
-                f" got spec={idx_spec}."
+                "EpPrepare: topk_idx leading dim must include ep_resource"
+                f" ('{ep_axis}'), optionally tupled with {outer_axes},"
+                f" with the topk dim replicated; got spec={idx_spec}."
             )
-        idx_ndim = len(arg_infos[0].shape)
-        arg_shardings = (NamedSharding(mesh, _canonical_input_spec(idx_spec, idx_ndim)),)
-        tc_sharding = NamedSharding(mesh, _ep_output_spec(None))
-        hm_sharding = NamedSharding(mesh, _ep_output_spec(None))
+        arg_shardings = tuple(a.sharding for a in arg_infos)
+        # token_counts / handle_mem inherit the input's leading axis (trailing dims auto-pad to None).
+        leading_spec = PartitionSpec(idx_spec[0])
+        tc_sharding = NamedSharding(mesh, leading_spec)
+        hm_sharding = NamedSharding(mesh, leading_spec)
 
         def sharded_impl(topk_idx):
             return EpPreparePrimitive.impl(
@@ -334,8 +306,8 @@ class EpDispatchPrimitive(BasePrimitive):
         recv_capacity_per_rank,
         is_outer,
     ):
-        # is_outer=True: global leading dim = (world_size,) (or (ep_size,) with
-        # no DP); False: per-shard = (1,).
+        # is_outer=True: global leading dim = (dp*ep,) (or (ep,) with no DP);
+        # False: per-shard = (1,).
         del topk_weights_aval, top_k, dispatch_output_per_expert_alignment, handle_mem_aval
         assert (
             len(tokens_aval.shape) >= 2
@@ -429,27 +401,27 @@ class EpDispatchPrimitive(BasePrimitive):
         result_infos,
     ):
         del is_outer, result_infos
-        gsr = global_mesh_resource()
-        ep_axis = gsr.ep_resource
-        outer_axes = _dispatch_input_outer_axes()
         tokens_spec = arg_infos[2].sharding.spec
-        if not _leading_axis_ok(tokens_spec, ep_axis, outer_axes):
+        ok, ep_axis, outer_axes = _leading_axis_ok(tokens_spec)
+        if not ok:
             raise NotImplementedError(
-                "EpDispatch: tokens leading dims must shard on ep_resource"
-                f" ('{ep_axis}') and/or {outer_axes}, hidden dim replicated;"
-                f" got spec={tokens_spec}."
+                "EpDispatch: tokens leading dim must include ep_resource"
+                f" ('{ep_axis}'), optionally tupled with {outer_axes},"
+                f" hidden dim replicated; got spec={tokens_spec}."
             )
         idx_spec = arg_infos[1].sharding.spec
         tw_spec = arg_infos[3].sharding.spec
-        arg_shardings = (
-            arg_infos[0].sharding,
-            NamedSharding(mesh, _canonical_input_spec(idx_spec, len(arg_infos[1].shape))),
-            NamedSharding(mesh, _canonical_input_spec(tokens_spec, len(arg_infos[2].shape))),
-            NamedSharding(mesh, _canonical_input_spec(tw_spec, len(arg_infos[3].shape))),
-        )
+        if idx_spec[0] != tokens_spec[0] or tw_spec[0] != tokens_spec[0]:
+            raise NotImplementedError(
+                "EpDispatch: topk_idx, tokens, topk_weights must share the leading"
+                f" axis; got topk_idx={idx_spec}, tokens={tokens_spec}, topk_weights={tw_spec}."
+            )
+        # Recv outputs share the tokens leading-only spec (trailing dims auto-pad to None).
+        leading_spec = PartitionSpec(tokens_spec[0])
+        arg_shardings = tuple(a.sharding for a in arg_infos)
         out_shardings = (
-            NamedSharding(mesh, _ep_output_spec(None, None)),
-            NamedSharding(mesh, _ep_output_spec(None)),
+            NamedSharding(mesh, leading_spec),
+            NamedSharding(mesh, leading_spec),
         )
 
         def sharded_impl(handle_mem, topk_idx, tokens, topk_weights):
@@ -500,46 +472,17 @@ def _prod(seq):
     return p
 
 
-def _resolve_out_partition_spec(out_partition_spec, num_leading):
-    """Pick the combine output PartitionSpec.
-
-    Defaults to a compound leading axis ``(dp_resource, ep_resource)`` when a
-    DP/FSDP axis is set on the active MeshResource, else just ``ep_resource``.
-    This matches the input sharding so XLA does not need collective-permutes
-    in the bwd path.
-    """
-    if out_partition_spec is not None:
-        assert len(out_partition_spec) == num_leading + 1, (
-            f"out_partition_spec length {len(out_partition_spec)} must equal num_leading"
-            f" + 1 ({num_leading + 1})"
-        )
-        return tuple(out_partition_spec)
-    gsr = global_mesh_resource()
-    if gsr.ep_resource is None:
-        raise ValueError(
-            "ep_combine: ep_resource is not set on the active MeshResource;"
-            " pass out_sharding=... explicitly."
-        )
-    outer = gsr.dp_resource or gsr.fsdp_resource
-    leading = (outer, gsr.ep_resource) if outer is not None else gsr.ep_resource
-    return (leading,) + (None,) * num_leading
-
-
-def _per_shard_leading(out_leading_shape, resolved_spec, mesh):
-    """Per-shard leading shape given resolved partition spec and mesh."""
-    per_shard = list(out_leading_shape)
-    for i, ax in enumerate(resolved_spec[: len(out_leading_shape)]):
-        if ax is None:
-            continue
-        axes = ax if isinstance(ax, tuple) else (ax,)
-        factor = 1
-        for a in axes:
-            factor *= mesh.shape[a]
-        assert (
-            per_shard[i] % factor == 0
-        ), f"leading dim {per_shard[i]} not divisible by shard factor {factor} on axes {axes}"
-        per_shard[i] //= factor
-    return tuple(per_shard)
+def _leading_per_shard(out_leading_shape, leading_axis, mesh):
+    """Per-shard leading shape: divide ``out_leading_shape[0]`` by the mesh factor on ``leading_axis``."""
+    axes = leading_axis if isinstance(leading_axis, tuple) else (leading_axis,)
+    factor = 1
+    for a in axes:
+        factor *= mesh.shape[a]
+    assert out_leading_shape[0] % factor == 0, (
+        f"leading dim {out_leading_shape[0]} not divisible by shard factor"
+        f" {factor} on axes {axes}"
+    )
+    return (out_leading_shape[0] // factor,) + tuple(out_leading_shape[1:])
 
 
 class EpCombinePrimitive(BasePrimitive):
@@ -639,10 +582,9 @@ class EpCombinePrimitive(BasePrimitive):
                 " None, None) (or ((dp, ep), None, None) when dp/fsdp is set)"
                 f" over [num_procs, recv_pr, H]; got spec={eo_spec}."
             )
-        resolved = _resolve_out_partition_spec(out_partition_spec, len(out_leading_shape))
-        per_shard_leading = _per_shard_leading(out_leading_shape, resolved, mesh)
+        per_shard_leading = _leading_per_shard(out_leading_shape, out_partition_spec[0], mesh)
         arg_shardings = tuple(a.sharding for a in arg_infos)
-        out_sharding = NamedSharding(mesh, PartitionSpec(*resolved))
+        out_sharding = NamedSharding(mesh, PartitionSpec(*out_partition_spec))
 
         def sharded_impl(handle_mem, expert_out):
             return EpCombinePrimitive.impl(
@@ -785,13 +727,15 @@ class EpDispatchBwdPrimitive(BasePrimitive):
                 " PartitionSpec(ep_resource, None) (or ((dp, ep), None) when dp/fsdp is set)"
                 f" over [num_procs, recv_pr]; got spec={gw_spec}."
             )
-        resolved = _resolve_out_partition_spec(out_partition_spec, len(out_leading_shape))
-        per_shard_leading = _per_shard_leading(out_leading_shape, resolved, mesh)
+        if gw_spec[0] != g_spec[0]:
+            raise NotImplementedError(
+                "EpDispatchBwd: grad and g_recv_topk_weights must share the leading"
+                f" axis; got grad={g_spec}, g_recv_topk_weights={gw_spec}."
+            )
+        per_shard_leading = _leading_per_shard(out_leading_shape, out_partition_spec[0], mesh)
         arg_shardings = tuple(a.sharding for a in arg_infos)
-        out_shardings = [
-            NamedSharding(mesh, PartitionSpec(*resolved)),
-            NamedSharding(mesh, PartitionSpec(*resolved, None)),
-        ]
+        out_sharding = NamedSharding(mesh, PartitionSpec(*out_partition_spec))
+        out_shardings = [out_sharding, out_sharding]
 
         def sharded_impl(handle_mem, grad, g_recv_topk_weights):
             return EpDispatchBwdPrimitive.impl(
@@ -840,8 +784,8 @@ class EpCombineBwdPrimitive(BasePrimitive):
         recv_capacity_per_rank,
         is_outer,
     ):
-        # is_outer=True: global leading dim = (world_size,) (or (ep_size,) with
-        # no DP); False: per-shard = (1,).
+        # is_outer=True: global leading dim = (dp*ep,) (or (ep,) with no DP);
+        # False: per-shard = (1,).
         del top_k, dispatch_output_per_expert_alignment, handle_mem_aval
         assert (
             len(grad_aval.shape) >= 2
@@ -920,7 +864,8 @@ class EpCombineBwdPrimitive(BasePrimitive):
     ):
         del is_outer, result_infos
         arg_shardings = tuple(a.sharding for a in arg_infos)
-        out_sharding = NamedSharding(mesh, _ep_output_spec(None, None))
+        # EP-output leading (trailing dims auto-pad to None).
+        out_sharding = NamedSharding(mesh, _ep_output_spec())
 
         def sharded_impl(handle_mem, grad):
             return EpCombineBwdPrimitive.impl(

@@ -1,22 +1,11 @@
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-"""JAX EP perf bench — dispatch / combine (raw fwd + custom_vjp wrapper) on a 1DP x EP mesh.
+"""JAX EP perf bench — dispatch/combine (raw fwd + custom_vjp wrapper) on a 1DP x EP mesh.
 
-One process per GPU. Run via run_ep_bench.sh.
-
-Measured per kernel (separate jits):
-    * tex_ep.ep_dispatch_fwd      (stage: dispatch_fwd)
-    * ep_dispatch                  (stage: ep_dispatch_vjp -- custom_vjp wrapper, fwd-only)
-    * tex_ep.ep_combine_fwd       (stage: combine_fwd)
-    * ep_combine                   (stage: ep_combine_vjp  -- custom_vjp wrapper, fwd-only)
-Prepare runs once outside the timed loops.
-
-Timing: wall-clock (perf_counter) around each iter with NVTX ranges, so
-nsys can attribute kernels per stage. Rank-0 prints mean wall in us.
-Per-stage kernel breakdown comes from `nsys stats --report nvtx_kern_sum`.
-Profiling: if --xplane DIR is set, jax.profiler captures the timed region.
-nsys profiling is driven from the shell launcher (see run_ep_bench.sh).
+One process per GPU; launch via run_ep_bench.sh. Each stage is jitted and
+timed separately with NVTX ranges (prepare runs once outside the loop).
+Rank-0 prints mean wall in us; nsys / --xplane attribute kernels per stage.
 """
 
 import argparse
@@ -91,12 +80,7 @@ def _build_mesh(args):
 
 
 def _make_inputs(args, ep_size):
-    """Identity-style routing (round-robin), uniform top-k weights.
-
-    Globals: ``B = num_processes`` (sharded on compound (dp,ep)), so each rank
-    sees ``args.tokens_per_rank`` tokens. Tokens/weights are bf16 / fp32; idx
-    is int32. Rank shards land via with_sharding_constraint inside the jit.
-    """
+    """Round-robin routing, uniform top-k weights; each rank sees ``args.tokens_per_rank`` tokens."""
     n = args.num_processes
     T = args.tokens_per_rank
     H = args.hidden
