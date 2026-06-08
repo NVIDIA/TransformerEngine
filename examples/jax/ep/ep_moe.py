@@ -43,6 +43,12 @@ def _parse_args():
         default=True,
         help="Verify fwd+bwd against a single-rank numpy reference.",
     )
+    p.add_argument(
+        "--iters",
+        type=int,
+        default=3,
+        help="Number of fwd+bwd iterations to run (same compiled jit, same handle_mem).",
+    )
     return p.parse_args()
 
 
@@ -308,18 +314,22 @@ def main():
             out = _moe_step(args, idx, toks, w, kern)
             return 0.5 * (out.astype(jnp.float32) ** 2).sum(), out
 
-        (loss, out_fwd), grad_tokens = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))(
-            tokens, topk_idx, topk_w, kernels
-        )
-        grad_tokens.block_until_ready()
-        out_fwd.block_until_ready()
+        step_jit = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))
 
-        if args.process_id == 0:
-            print(
-                f"[ep_moe] loss={float(loss):.4f} grad_tokens.shape={grad_tokens.shape} "
-                f"dp={args.dp_size} ep={args.ep_size} "
-                f"num_experts={args.num_experts} recv_pr={args.recv_capacity_per_rank}"
-            )
+        # Run --iters fwd+bwd steps on the same compiled jit. With identical
+        # inputs every iter, the pointer-keyed handle_mem cache must keep
+        # producing identical loss/grad.
+        for it in range(args.iters):
+            (loss, out_fwd), grad_tokens = step_jit(tokens, topk_idx, topk_w, kernels)
+            grad_tokens.block_until_ready()
+            out_fwd.block_until_ready()
+            if args.process_id == 0:
+                print(
+                    f"[ep_moe] iter={it} loss={float(loss):.4f}"
+                    f" grad_tokens.shape={grad_tokens.shape}"
+                    f" dp={args.dp_size} ep={args.ep_size}"
+                    f" num_experts={args.num_experts} recv_pr={args.recv_capacity_per_rank}"
+                )
 
         if args.check:
 
