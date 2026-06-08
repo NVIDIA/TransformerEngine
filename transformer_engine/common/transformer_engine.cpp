@@ -10,6 +10,7 @@
 #include <array>
 #include <atomic>
 #include <climits>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <limits>
@@ -22,7 +23,6 @@
 #include "common.h"
 #include "common/util/cuda_runtime.h"
 #include "common/util/logging.h"
-#include "common/util/system.h"
 
 namespace transformer_engine {
 
@@ -401,7 +401,27 @@ constexpr size_t kDefaultTensorHandlePoolSizeMB = 20;
 constexpr size_t kBytesPerMB = 1024 * 1024;
 
 size_t GetTensorHandlePoolSizeMB(const char *env_var) {
-  const size_t pool_size_mb = getenv<size_t>(env_var, kDefaultTensorHandlePoolSizeMB);
+  const char *env_value = std::getenv(env_var);
+  if (env_value == nullptr || env_value[0] == '\0') {
+    return kDefaultTensorHandlePoolSizeMB;
+  }
+
+  const std::string value(env_value);
+  constexpr const char *kWhitespace = " \t\n\r\f\v";
+  const size_t first = value.find_first_not_of(kWhitespace);
+  const size_t last = value.find_last_not_of(kWhitespace);
+  NVTE_CHECK(first != std::string::npos, env_var, " must be a positive integer.");
+
+  size_t pool_size_mb = 0;
+  for (size_t i = first; i <= last; ++i) {
+    NVTE_CHECK(value[i] >= '0' && value[i] <= '9', env_var,
+               " must be a positive integer, got \"", value, "\".");
+    const size_t digit = static_cast<size_t>(value[i] - '0');
+    NVTE_CHECK(pool_size_mb <= (std::numeric_limits<size_t>::max() - digit) / 10, env_var,
+               " is too large.");
+    pool_size_mb = pool_size_mb * 10 + digit;
+  }
+
   NVTE_CHECK(pool_size_mb > 0, env_var, " must be a positive integer.");
   NVTE_CHECK(pool_size_mb <= std::numeric_limits<size_t>::max() / kBytesPerMB, env_var,
              " is too large.");
