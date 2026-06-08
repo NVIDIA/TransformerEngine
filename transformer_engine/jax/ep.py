@@ -227,20 +227,25 @@ ep_dispatch.defvjp(_dispatch_fwd, _dispatch_bwd)
 # ── ep_combine (custom_vjp) ──────────────────────────────────────────────────
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(0, 5, 6))
+@partial(jax.custom_vjp, nondiff_argnums=(0, 4, 5))
 def ep_combine(
-    cfg, handle_mem, token_counts, expert_out, recv_topk_weights,
+    cfg, handle_mem, token_counts, expert_out,
     num_local_tokens, out_sharding=None,
 ):
-    """Reduce weighted expert outputs back to source ranks.
+    """Scatter-sum expert outputs back to source ranks. **Unweighted.**
+
+    ``ep_combine`` does not apply ``recv_topk_weights`` or any padded-slot
+    mask. The caller must pre-multiply ``expert_out`` by the dispatched
+    weights (and zero padded slots) before calling. Gradients w.r.t.
+    ``recv_topk_weights`` therefore flow through the caller's hadamard, not
+    through this op.
 
     Args:
         cfg:               ``EpLayerConfig`` matching the ``ep_dispatch`` call.
         handle_mem:        Routing-state buffer returned by ``ep_dispatch``.
         token_counts:      ``[num_procs, num_local_experts]`` int32 (passed through).
-        expert_out:        ``[num_procs, recv_capacity_per_rank, H]`` post-FFN activations.
-        recv_topk_weights: ``[num_procs, recv_capacity_per_rank]`` float32 weights
-                           returned by ``ep_dispatch``.
+        expert_out:        ``[num_procs, recv_capacity_per_rank, H]`` pre-weighted
+                           post-FFN activations.
         num_local_tokens:  STATIC int or tuple. int -> 2D output ``[T, H]``;
                            tuple -> N-D output ``[*tuple, H]``.
         out_sharding:      STATIC optional ``PartitionSpec`` tuple for the
@@ -252,34 +257,24 @@ def ep_combine(
         ``[..., H]`` combined output shaped per ``num_local_tokens``.
     """
     return _combine_fwd(
-        cfg, handle_mem, token_counts, expert_out, recv_topk_weights,
+        cfg, handle_mem, token_counts, expert_out,
         num_local_tokens, out_sharding,
     )[0]
 
 
-def _make_valid_mask(recv_topk_weights, dtype):
-    # recv_topk_weights == 0 marks a padded slot.
-    return (recv_topk_weights != 0).astype(dtype)[..., None]
-
-
 def _combine_fwd(
-    cfg, handle_mem, token_counts, expert_out, recv_topk_weights,
+    cfg, handle_mem, token_counts, expert_out,
     num_local_tokens, out_sharding,
 ):
     del token_counts
-    w = recv_topk_weights[..., None]
-    mask = _make_valid_mask(recv_topk_weights, jnp.float32)
-    weighted = (expert_out.astype(jnp.float32) * w * mask).astype(expert_out.dtype)
     result = tex.ep_combine_fwd(
-        cfg, handle_mem, weighted, num_local_tokens, out_partition_spec=out_sharding
+        cfg, handle_mem, expert_out, num_local_tokens, out_partition_spec=out_sharding
     )
-    return result, (handle_mem, recv_topk_weights, expert_out)
+    return result, (handle_mem, expert_out.shape[-2])
 
 
 def _combine_bwd(cfg, _num_local_tokens, _out_sharding, res, g_result):
-    handle_mem, recv_topk_weights, expert_out = res
-    # expert_out is [..., recv_pr, H]; pull recv_pr from the second-to-last dim.
-    recv_capacity_per_rank = expert_out.shape[-2]
+    handle_mem, recv_capacity_per_rank = res
     # Re-pin cotangent sharding: same XLA-transpose workaround as _dispatch_bwd.
     gsr = global_mesh_resource()
     if _out_sharding is not None:
@@ -295,17 +290,8 @@ def _combine_bwd(cfg, _num_local_tokens, _out_sharding, res, g_result):
         )
     if spec is not None:
         g_result = jax.lax.with_sharding_constraint(g_result, spec)
-    grad_weighted = tex.ep_combine_bwd(cfg, handle_mem, g_result, recv_capacity_per_rank)
-    w = recv_topk_weights[..., None]
-    mask = _make_valid_mask(recv_topk_weights, jnp.float32)
-    grad_weighted_f32 = grad_weighted.astype(jnp.float32)
-    grad_expert_out = (grad_weighted_f32 * w * mask).astype(grad_weighted.dtype)
-    grad_recv_topk_weights = (
-        (grad_weighted_f32 * expert_out.astype(jnp.float32) * mask)
-        .sum(axis=-1)
-        .astype(recv_topk_weights.dtype)
-    )
-    return (None, None, grad_expert_out, grad_recv_topk_weights)
+    grad_expert_out = tex.ep_combine_bwd(cfg, handle_mem, g_result, recv_capacity_per_rank)
+    return (None, None, grad_expert_out)
 
 
 ep_combine.defvjp(_combine_fwd, _combine_bwd)
