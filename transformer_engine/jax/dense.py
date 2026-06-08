@@ -26,34 +26,6 @@ from .quantize import (
 )
 
 
-def _all_gather_kernel(kernel, mesh_axis, axis_idx):
-    assert mesh_axis is not None
-    assert 0 < axis_idx < len(kernel.shape)
-
-    # TODO(Ming Hunag): Add a condition branch for with/without shmap.
-    kernel_shape = kernel.shape
-    kernel_whole_shape = (*kernel_shape[:axis_idx], -1, *kernel_shape[axis_idx + 1 :])
-    global_kernel = jax.lax.all_gather(kernel, mesh_axis, axis=axis_idx)
-    global_kernel = global_kernel.reshape(*kernel_whole_shape)
-    return global_kernel
-
-
-def _psum_scatter_kernel(kernel, scattered_kernel_shape, mesh_axis, axis_idx):
-    assert mesh_axis is not None
-    assert 0 < axis_idx < len(scattered_kernel_shape)
-
-    # TODO(Ming Hunag): Add a condition branch for with/without shmap.
-    kernel = kernel.reshape(
-        *scattered_kernel_shape[:axis_idx],
-        -1,
-        scattered_kernel_shape[axis_idx],
-        *scattered_kernel_shape[axis_idx + 1 :],
-    )
-    kernel = jax.lax.psum_scatter(kernel, mesh_axis, scatter_dimension=axis_idx)
-    kernel = kernel.reshape(scattered_kernel_shape)
-    return kernel
-
-
 def dense(
     x: jnp.ndarray,
     kernel: jnp.ndarray,
@@ -325,7 +297,6 @@ def grouped_dense(
     preferred_element_type: jnp.dtype = None,
     group_offset: jnp.array = None,
     quantizer_set: QuantizerSet = noop_quantizer_set,
-    kernel_fsdp_info: Tuple[str, int] = (None, -1),
 ):
     """
     Perform grouped dense (linear) layer transformation with optional quantization.
@@ -341,14 +312,15 @@ def grouped_dense(
         preferred_element_type: Preferred data type for the output tensor
         group_offset: 1D array containing offsets for each group (not yet implemented)
         quantizer_set: Set of quantizers for FP8 quantization of the input and output
-        kernel_fsdp_info: A tuple containing FSDP-related information for a weight matrix
-                          represented in the format (str, int). The first element is the
-                          FSDP mesh axis, and the second element is the dimension along
-                          which the weight is sharded.
 
     Returns:
         A jnp.ndarray containing the result of the grouped linear operation
     """
+    x_contracting_dims, kernel_contracting_dims = contracting_dims
+    x_contracting_dims = tex.sanitize_dims(x.ndim, x_contracting_dims)
+    kernel_contracting_dims = tex.sanitize_dims(kernel.ndim, kernel_contracting_dims)
+    contracting_dims = (x_contracting_dims, kernel_contracting_dims)
+
     output = _grouped_dense(
         x,
         kernel,
@@ -359,12 +331,11 @@ def grouped_dense(
         preferred_element_type,
         group_offset,
         quantizer_set,
-        kernel_fsdp_info,
     )
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(3, 5, 6, 7, 9))
+@partial(jax.custom_vjp, nondiff_argnums=(3, 5, 6, 7))
 def _grouped_dense(
     x,
     kernel,
@@ -375,7 +346,6 @@ def _grouped_dense(
     preferred_element_type,
     group_offset,
     quantizer_set,
-    kernel_fsdp_info,
 ):
     output, _ = _grouped_dense_fwd_rule(
         x,
@@ -387,7 +357,6 @@ def _grouped_dense(
         preferred_element_type,
         group_offset,
         quantizer_set,
-        kernel_fsdp_info,
     )
     return output
 
@@ -402,16 +371,11 @@ def _grouped_dense_fwd_rule(
     preferred_element_type,
     group_offset,
     quantizer_set,
-    kernel_fsdp_info,
 ):
     use_bias = bias is not None
 
-    kernel_fsdp_mesh_axis, kernel_fsdp_axis_idx = kernel_fsdp_info
-    kernel_fsdp_enabled = kernel_fsdp_mesh_axis is not None
-    assert not kernel_fsdp_enabled, "FSDP sharding for grouped_dense is not supported yet."
-    del kernel_fsdp_mesh_axis, kernel_fsdp_axis_idx, kernel_fsdp_info, kernel_fsdp_enabled
-
     x_contracting_dims, k_contracting_dims = contracting_dims
+
     flatten_axis_x = -len(x_contracting_dims)
     flatten_axis_k = len(k_contracting_dims) - len(kernel.shape) + 1  # +1 for G axis
 
@@ -476,12 +440,8 @@ def _grouped_dense_fwd_rule(
 
 
 def _grouped_dense_bwd_rule(
-    contracting_dims, precision, preferred_element_type, group_offset, kernel_fsdp_info, ctx, grad
+    contracting_dims, precision, preferred_element_type, group_offset, ctx, grad
 ):
-    kernel_fsdp_mesh_axis, _ = kernel_fsdp_info
-    kernel_fsdp_enabled = kernel_fsdp_mesh_axis is not None
-    assert not kernel_fsdp_enabled, "FSDP sharding for grouped_dense is not supported yet."
-
     fwd_x_contracting_dims, fwd_k_contracting_dims = contracting_dims
 
     (
