@@ -676,9 +676,7 @@ void performTest(float (*OP)(const float),
     compare_rowwise_amax(output, ref_amax);
 }
 
-// Columnwise-only 2D NVFP4 must produce the same columnwise data/scales as the columnwise half
-// of (rowwise + columnwise) 2D. This exercises the RETURN_ROWWISE=false path of the optimized
-// kernel quantize_transpose_nvfp4_2D_kernel (and its dispatch gate) added in this PR.
+// Columnwise-only 2D NVFP4 must match the columnwise half of both-directions output
 template <typename InputType>
 void performTestColumnwiseOnly2D(const std::vector<size_t>& shape) {
     using namespace test;
