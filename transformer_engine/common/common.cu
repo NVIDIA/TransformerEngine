@@ -62,6 +62,7 @@ void update_tensor_scale_inv(Tensor *t, cudaStream_t stream) {
 namespace {
 
 constexpr size_t kThreadsPerBlock = 256;
+
 template <typename TVectorized>
 __global__ void __launch_bounds__(kThreadsPerBlock)
     memset_kernel(void *__restrict__ ptr, int value, size_t size_in_bytes) {
@@ -86,53 +87,6 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     data.data[i] = static_cast<uint8_t>(value);
   }
   reinterpret_cast<TVectorized *>(ptr)[idx] = data.value;
-}
-
-template <bool kHasFirstDims, bool kHasLastDims>
-__global__ void __launch_bounds__(kThreadsPerBlock)
-    splits_to_offsets_kernel(const int64_t *__restrict__ first_dims,
-                             const int64_t *__restrict__ last_dims, int64_t *__restrict__ output,
-                             size_t num_tensors, int64_t logical_first_dim,
-                             int64_t logical_last_dim) {
-  __shared__ int64_t block_scan[kThreadsPerBlock];
-  __shared__ int64_t chunk_prefix;
-
-  const size_t tid = threadIdx.x;
-  if (tid == 0) {
-    output[0] = 0;
-    chunk_prefix = 0;
-  }
-  __syncthreads();
-
-  for (size_t chunk_start = 0; chunk_start < num_tensors; chunk_start += kThreadsPerBlock) {
-    const size_t idx = chunk_start + tid;
-    int64_t value = 0;
-    if (idx < num_tensors) {
-      const int64_t first = kHasFirstDims ? first_dims[idx] : logical_first_dim;
-      const int64_t last = kHasLastDims ? last_dims[idx] : logical_last_dim;
-      value = first * last;
-    }
-    block_scan[tid] = value;
-    __syncthreads();
-
-    // Inclusive scan in shared memory.
-    for (size_t offset = 1; offset < kThreadsPerBlock; offset <<= 1) {
-      const int64_t addend = (tid >= offset) ? block_scan[tid - offset] : 0;
-      __syncthreads();
-      block_scan[tid] += addend;
-      __syncthreads();
-    }
-
-    if (idx < num_tensors) {
-      output[idx + 1] = chunk_prefix + block_scan[tid];
-    }
-    __syncthreads();
-
-    if (tid == kThreadsPerBlock - 1) {
-      chunk_prefix += block_scan[tid];
-    }
-    __syncthreads();
-  }
 }
 
 }  // namespace
@@ -165,39 +119,6 @@ void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream
   MEMSET_VECTORIZED_KERNEL_DISPATCH(ptr, size_in_bytes, value, uint8_t, stream);
 }
 
-void nvte_splits_to_offsets(const int64_t *first_dims, const int64_t *last_dims, int64_t *output,
-                            size_t num_tensors, int64_t logical_first_dim,
-                            int64_t logical_last_dim, cudaStream_t stream) {
-  NVTE_API_CALL(nvte_splits_to_offsets);
-  NVTE_CHECK(output != nullptr, "Output pointer must be allocated.");
-  NVTE_CHECK(num_tensors > 0, "num_tensors must be greater than 0.");
-  NVTE_CHECK(first_dims != nullptr || last_dims != nullptr,
-             "At least one of first_dims / last_dims must be non-null.");
-  if (first_dims == nullptr) {
-    NVTE_CHECK(logical_first_dim > 0,
-               "logical_first_dim must be greater than 0 when first_dims is null.");
-  }
-  if (last_dims == nullptr) {
-    NVTE_CHECK(logical_last_dim > 0,
-               "logical_last_dim must be greater than 0 when last_dims is null.");
-  }
-
-  const bool has_first_dims = first_dims != nullptr;
-  const bool has_last_dims = last_dims != nullptr;
-  auto launch = [&](auto has_first, auto has_last) {
-    splits_to_offsets_kernel<decltype(has_first)::value, decltype(has_last)::value>
-        <<<1, kThreadsPerBlock, 0, stream>>>(first_dims, last_dims, output, num_tensors,
-                                             logical_first_dim, logical_last_dim);
-  };
-  if (has_first_dims && has_last_dims) {
-    launch(std::true_type{}, std::true_type{});
-  } else if (has_first_dims) {
-    launch(std::true_type{}, std::false_type{});
-  } else {
-    launch(std::false_type{}, std::true_type{});
-  }
-  NVTE_CHECK_CUDA(cudaGetLastError());
-}
 }  // extern "C"
 
 void checkCuDriverContext(CUstream stream) {

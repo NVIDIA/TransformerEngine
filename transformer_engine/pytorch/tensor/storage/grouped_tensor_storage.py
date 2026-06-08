@@ -388,6 +388,21 @@ class GroupedTensorStorage:
         self.tensor_offsets = tensors[9]
         return tensors[10:]
 
+    def get_data_tensors(self):
+        """Get tensor fields that may be saved or offloaded."""
+        return (
+            self.rowwise_data,
+            self.columnwise_data,
+            self.scale_inv,
+            self.columnwise_scale_inv,
+            self.amax,
+            self.columnwise_amax,
+            self.scale,
+            self.first_dims,
+            self.last_dims,
+            self.tensor_offsets,
+        )
+
     def clear(self) -> None:
         """
         Reset tensor data and clear all buffers.

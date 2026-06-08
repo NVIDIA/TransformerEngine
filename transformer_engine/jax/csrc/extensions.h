@@ -147,6 +147,10 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnForwardHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnBackwardHandler);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnScoreModForwardHandler);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnScoreModBackwardHandler);
+
 NVTE_Fused_Attn_Backend GetFusedAttnBackend(
     bool is_training, DType q_dtype, DType kv_dtype, NVTE_QKV_Layout qkv_layout,
     NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type,
@@ -253,6 +257,7 @@ XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
 // ENUM_ATTR and DICT_ATTR recoding need to be registered in the global namespace
 XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Scaling_Mode);
 XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Score_Function);
+XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Routing_Map_Format);
 XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Collective_Op);
 XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Quantize_Layout);
 

@@ -147,6 +147,20 @@ typedef void *NVTETensor;
  */
 NVTETensor nvte_create_tensor(NVTEScalingMode scaling_mode);
 
+/*! \brief Create a batch of new TE tensors.
+ *
+ * Equivalent to calling nvte_create_tensor N times with the same
+ * scaling mode. Before use, each tensor's parameters need to be set.
+ * TE tensors are just wrappers on top of raw data and do not own
+ * memory.
+ *
+ *  \param[in]  scaling_mode  Scaling mode shared by all tensors.
+ *  \param[out] tensors       Caller-allocated array of length N to
+ *                            receive the new tensors.
+ *  \param[in]  N             Number of tensors to create.
+ */
+void nvte_create_tensors(NVTEScalingMode scaling_mode, NVTETensor *tensors, size_t N);
+
 /*! \brief Destroy a TE tensor.
  *
  * Since the TE tensor does not own memory, the underlying
@@ -155,6 +169,17 @@ NVTETensor nvte_create_tensor(NVTEScalingMode scaling_mode);
  *  \param[in] tensor Tensor to be destroyed.
  */
 void nvte_destroy_tensor(NVTETensor tensor);
+
+/*! \brief Destroy a batch of TE tensors.
+ *
+ * Equivalent to calling nvte_destroy_tensor N times. Since TE tensors
+ * do not own memory, the underlying data is not freed during this
+ * operation. Null entries are ignored.
+ *
+ *  \param[in] tensors  Array of tensors to be destroyed.
+ *  \param[in] N        Number of tensors in the array.
+ */
+void nvte_destroy_tensors(NVTETensor *tensors, size_t N);
 
 /*! \brief Get a raw pointer to the tensor's rowwise data.
  *
@@ -470,6 +495,8 @@ void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream
 
 /*! \brief Compute scaled prefix-sum offsets for grouped tensors.
  *
+/*! \brief Compute scaled prefix-sum offsets for grouped tensors.
+ *
  *  Given per-tensor "first" dimensions and/or per-tensor "last" dimensions,
  *  compute the cumulative element offsets:
  *
@@ -506,6 +533,27 @@ void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream
 void nvte_splits_to_offsets(const int64_t *first_dims, const int64_t *last_dims, int64_t *output,
                             size_t num_tensors, int64_t logical_first_dim,
                             int64_t logical_last_dim, cudaStream_t stream);
+
+/*! \brief Compute multiple scaled prefix-sum offsets for grouped tensors.
+ *
+ *  Computes a prefix-sum over the values in split_sizes, and for each
+ *  output multiplies the prefix-sum by a stride or varying last dimensions.
+ *  Inputs and outputs can be any combination of int32 and int64 tensors.
+ *
+ *  \param[in] split_sizes Device int32/int64 split sizes with shape [N].
+ *  \param[out] outputs Array of int32/int64 1D output tensors, one per scan.
+ *  \param[in] strides Per-output scale factor. Length num_outputs.
+ *  \param[in] include_leading_zero Per-output flag: 0 if outputs[i] has length N
+ *             (inclusive scan), nonzero if outputs[i] has length N + 1 (inclusive
+ *             scan prepended with zero). Length num_outputs.
+ *  \param[in] num_outputs Number of output tensors.
+ *  \param[in] last_dims Optional array of int32/int64 1D last dimensions, one per scan.
+ *  \param[in] stream CUDA stream to use for the operation.
+ */
+void nvte_splits_to_offsets_multi(NVTETensor split_sizes, NVTETensor *outputs,
+                                  const int64_t *strides, const int *include_leading_zero,
+                                  size_t num_outputs, const NVTETensor *last_dims,
+                                  cudaStream_t stream);
 
 /*! \brief TE Grouped Tensor type
  *
@@ -625,6 +673,7 @@ NVTEShape nvte_get_grouped_tensor_logical_shape(const NVTEGroupedTensor tensor);
 #ifdef __cplusplus
 }  // extern "C"
 
+#include <utility>
 #include <vector>
 
 /*! \namespace transformer_engine
@@ -1064,6 +1113,73 @@ class TensorWrapper {
 
   /*! \brief Wrapped NVTETensor. */
   NVTETensor tensor_ = nullptr;
+};
+
+/*! \struct MultiTensorWrapper
+ *  \brief C++ wrapper for a batch of NVTETensors allocated together.
+ */
+class MultiTensorWrapper {
+ public:
+  /*! \brief Constructs an empty batch. */
+  MultiTensorWrapper() = default;
+
+  /*! \brief Allocates a batch of NVTETensors.
+   *
+   *  \param[in] num_tensors   Number of tensors to allocate.
+   *  \param[in] scaling_mode  Scaling mode shared by all tensors.
+   */
+  explicit MultiTensorWrapper(size_t num_tensors,
+                              NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING)
+      : tensors_(num_tensors) {
+    if (!tensors_.empty()) {
+      nvte_create_tensors(scaling_mode, tensors_.data(), tensors_.size());
+    }
+  }
+
+  ~MultiTensorWrapper() {
+    if (!tensors_.empty()) {
+      nvte_destroy_tensors(tensors_.data(), tensors_.size());
+    }
+  }
+
+  MultiTensorWrapper(const MultiTensorWrapper &) = delete;
+  MultiTensorWrapper &operator=(const MultiTensorWrapper &) = delete;
+
+  MultiTensorWrapper(MultiTensorWrapper &&) noexcept = default;
+
+  MultiTensorWrapper &operator=(MultiTensorWrapper &&other) noexcept {
+    if (this == &other) return *this;
+    if (!tensors_.empty()) {
+      nvte_destroy_tensors(tensors_.data(), tensors_.size());
+    }
+    tensors_ = std::move(other.tensors_);
+    return *this;
+  }
+
+  /*! \brief Number of tensors in the batch. */
+  size_t size() const noexcept { return tensors_.size(); }
+
+  /*! \brief Whether the batch is empty. */
+  bool empty() const noexcept { return tensors_.empty(); }
+
+  /*! \brief Access an NVTETensor by index. */
+  NVTETensor operator[](size_t i) const noexcept { return tensors_[i]; }
+
+  /*! \brief Pointer to the underlying NVTETensor array. */
+  NVTETensor *data() noexcept { return tensors_.data(); }
+  const NVTETensor *data() const noexcept { return tensors_.data(); }
+
+  /*! \brief Implicit conversion for multi-tensor C API calls. */
+  operator NVTETensor *() noexcept { return tensors_.data(); }
+
+  /*! \brief Iteration over the underlying NVTETensors. */
+  auto begin() noexcept { return tensors_.begin(); }
+  auto end() noexcept { return tensors_.end(); }
+  auto begin() const noexcept { return tensors_.begin(); }
+  auto end() const noexcept { return tensors_.end(); }
+
+ private:
+  std::vector<NVTETensor> tensors_;
 };
 
 /*! \struct GroupedTensorWrapper
