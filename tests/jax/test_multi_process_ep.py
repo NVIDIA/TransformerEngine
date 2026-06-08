@@ -518,17 +518,27 @@ class TestEP(unittest.TestCase):
 
         with self.mesh, global_shard_guard(self.mr):
 
+            align = max(int(self.hk.dispatch_output_per_expert_alignment), 1)
+
             def loss_fn(toks):
                 toks = jax.lax.with_sharding_constraint(toks, NamedSharding(self.mesh, dp_spec))
                 idx = jax.lax.with_sharding_constraint(topk_idx, NamedSharding(self.mesh, dp_spec))
                 w = jax.lax.with_sharding_constraint(topk_w, NamedSharding(self.mesh, dp_spec))
-                recv_tokens, _recv_w, _hm, _tc = ep_dispatch(
+                recv_tokens, _recv_w, _hm, tc = ep_dispatch(
                     self.hk, idx, toks, w, self.recv_capacity_per_rank
                 )
                 recv_tokens = jax.lax.with_sharding_constraint(
                     recv_tokens, NamedSharding(self.mesh, ep_spec_3d)
                 )
-                return 0.5 * (recv_tokens.astype(jnp.float32) ** 2).sum()
+                # ep_dispatch fills only slots [0, sum(padded_per_expert));
+                # the tail is uninitialized. Mask with jnp.where (NaN-safe;
+                # multiply would propagate NaN*0=NaN).
+                padded = ((tc + align - 1) // align) * align
+                total_recv = jnp.sum(padded, axis=-1, keepdims=True).astype(jnp.int32)
+                slot_idx = jnp.arange(self.recv_capacity_per_rank, dtype=jnp.int32)
+                mask = slot_idx[None, :] < total_recv
+                rt32 = jnp.where(mask[..., None], recv_tokens.astype(jnp.float32), 0.0)
+                return 0.5 * (rt32 ** 2).sum()
 
             loss, grad_tokens = jax.jit(jax.value_and_grad(loss_fn))(tokens)
             grad_tokens.block_until_ready()
