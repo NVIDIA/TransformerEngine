@@ -103,16 +103,8 @@ find_library(NCCL_EP_LIB
              NO_DEFAULT_PATH
              REQUIRED)
 
-set(NCCL_EP_INCLUDE_DIR "${NCCL_EP_SUBMODULE_ROOT}/contrib/nccl_ep/include")
-if(NOT EXISTS "${NCCL_EP_INCLUDE_DIR}/nccl_ep.h")
-  message(FATAL_ERROR
-    "NCCL EP header not found at ${NCCL_EP_INCLUDE_DIR}/nccl_ep.h. "
-    "Run `git submodule update --init --recursive` to checkout 3rdparty/nccl.")
-endif()
-message(STATUS "EP test: NCCL EP headers: ${NCCL_EP_INCLUDE_DIR}")
-
-# Collect NCCL include dirs shared by all EP test targets (nccl_ep.h + nccl.h).
-set(EP_TEST_NCCL_INCLUDES ${NCCL_EP_INCLUDE_DIR})
+# Tests use TE's public <transformer_engine/ep.h> wrapper, not nccl_ep.h.
+set(EP_TEST_NCCL_INCLUDES "")
 if(DEFINED NCCL_INCLUDE_DIR)
   list(APPEND EP_TEST_NCCL_INCLUDES ${NCCL_INCLUDE_DIR})
   message(STATUS "EP test: NCCL headers: ${NCCL_INCLUDE_DIR}")
