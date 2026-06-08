@@ -26,6 +26,8 @@ from transformer_engine.pytorch import (
 from transformer_engine.pytorch.attention.dot_product_attention import (
     _attention_backends,
 )
+from transformer_engine.pytorch.attention.dot_product_attention import backends as dpa_backends
+import transformer_engine.pytorch.attention.dot_product_attention.utils as dpa_utils
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     FlashAttentionUtils,
     check_set_window_size,
@@ -645,6 +647,85 @@ model_configs_mask = {
 def test_dpa_mask(dtype, model_configs, model):
     """Test DotProductAttention module with different mask types"""
     test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required.")
+def test_unfused_thd_padding_causal_uses_sdpa_without_full_mask(monkeypatch):
+    """Unfused THD padding_causal should avoid materializing a full quadratic mask."""
+    reset_rng_states()
+    batch_size = 2
+    num_heads = 2
+    head_dim = 16
+    seqlens = torch.tensor([3, 5], dtype=torch.int32, device="cuda")
+    cu_seqlens = torch.zeros(batch_size + 1, dtype=torch.int32, device="cuda")
+    cu_seqlens[1:] = torch.cumsum(seqlens, dim=0)
+    total_seqlen = int(cu_seqlens[-1].item())
+    max_seqlen = int(seqlens.max().item())
+
+    query = torch.randn(
+        total_seqlen, num_heads, head_dim, dtype=torch.float16, device="cuda", requires_grad=True
+    )
+    key = torch.randn_like(query, requires_grad=True)
+    value = torch.randn_like(query, requires_grad=True)
+    softmax_scale = head_dim**-0.5
+
+    expected = []
+    with torch.no_grad():
+        for batch_id in range(batch_size):
+            start = int(cu_seqlens[batch_id].item())
+            end = int(cu_seqlens[batch_id + 1].item())
+            q = query[start:end].permute(1, 0, 2).unsqueeze(0)
+            k = key[start:end].permute(1, 0, 2).unsqueeze(0)
+            v = value[start:end].permute(1, 0, 2).unsqueeze(0)
+            expected.append(
+                torch.nn.functional.scaled_dot_product_attention(
+                    q, k, v, dropout_p=0.0, is_causal=True, scale=softmax_scale
+                )
+                .squeeze(0)
+                .permute(1, 0, 2)
+                .reshape(end - start, -1)
+            )
+    expected = torch.cat(expected, dim=0)
+
+    def fail_get_full_mask(*args, **kwargs):
+        raise AssertionError("get_full_mask should not be called for this path")
+
+    monkeypatch.setattr(dpa_utils, "get_full_mask", fail_get_full_mask)
+
+    attention = dpa_backends.UnfusedDotProductAttention(
+        softmax_scale=softmax_scale,
+        attention_type="self",
+        attention_dropout=0.0,
+    ).eval()
+    assert not attention._use_varlen_sdpa(
+        "padding_causal",
+        torch.zeros(batch_size, 1, 1, 1, dtype=torch.bool, device="cuda"),
+        (-1, 0),
+        1,
+        max_seqlen,
+        "no_bias",
+        None,
+        False,
+    )
+    output = attention(
+        {},
+        query,
+        key,
+        value,
+        qkv_layout="thd_thd_thd",
+        cu_seqlens_q=cu_seqlens,
+        cu_seqlens_kv=cu_seqlens,
+        max_seqlen_q=max_seqlen,
+        max_seqlen_kv=max_seqlen,
+        attn_mask_type="padding_causal",
+        window_size=(-1, 0),
+    )
+
+    torch.testing.assert_close(output, expected, rtol=1e-3, atol=1e-3)
+    output.float().sum().backward()
+    assert query.grad is not None
+    assert key.grad is not None
+    assert value.grad is not None
 
 
 model_configs_bias = {

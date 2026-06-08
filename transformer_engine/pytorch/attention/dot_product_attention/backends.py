@@ -365,6 +365,115 @@ class UnfusedDotProductAttention(torch.nn.Module):
         """Fast attribute set for non-parameter fields."""
         self.__dict__[name] = value
 
+    def _use_varlen_sdpa(
+        self,
+        attn_mask_type: str,
+        attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]],
+        window_size: Optional[Tuple[int, int]],
+        max_seqlen_q: int,
+        max_seqlen_kv: int,
+        core_attention_bias_type: str,
+        alibi_slopes: Optional[torch.Tensor],
+        fp8: bool,
+    ) -> bool:
+        """Whether PyTorch SDPA can replace unfused attention without materializing masks."""
+        if self.attention_type != "self":
+            return False
+        if attn_mask_type != "padding_causal":
+            return False
+        if window_size not in [None, (-1, 0), (-1, -1)]:
+            return False
+        if max_seqlen_q != max_seqlen_kv:
+            return False
+        if attention_mask is None:
+            return False
+        if isinstance(attention_mask, tuple):
+            return False
+        return (
+            core_attention_bias_type == "no_bias"
+            and self.attention_dropout.p == 0.0
+            and alibi_slopes is None
+            and self.softmax_type == "vanilla"
+            and not self.return_max_logit
+            and not fp8
+        )
+
+    def _format_context(
+        self,
+        context_layer: torch.Tensor,
+        q_format: str,
+        max_seqlen_q: int,
+        batch_size: int,
+        cu_seqlens_q: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Convert context from [b, h, sq, d] to the requested output layout."""
+        if q_format == "sbhd":
+            context_layer = context_layer.permute(2, 0, 1, 3).contiguous()
+            return context_layer.view(max_seqlen_q, batch_size, -1)
+        if q_format == "bshd":
+            context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
+            return context_layer.view(batch_size, max_seqlen_q, -1)
+        if q_format == "thd":
+            context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
+            context_layer = ConvertBSHDtoTHD.apply(context_layer, cu_seqlens_q)
+            return context_layer.view(context_layer.shape[0], -1)
+        raise ValueError(f"Unsupported q_format = {q_format}!")
+
+    def _forward_varlen_sdpa(
+        self,
+        query_layer: torch.Tensor,
+        key_layer: torch.Tensor,
+        value_layer: torch.Tensor,
+        q_format: str,
+        batch_size: int,
+        max_seqlen_q: int,
+        cu_seqlens_q: Optional[torch.Tensor],
+        attention_mask: Optional[torch.Tensor],
+        scale: float,
+    ) -> torch.Tensor:
+        """Run causal self-attention without expanding padding masks to [b, 1, sq, sk]."""
+        context_layer = torch.zeros(
+            batch_size,
+            query_layer.size(2),
+            max_seqlen_q,
+            value_layer.size(3),
+            dtype=query_layer.dtype,
+            device=query_layer.device,
+        )
+
+        if attention_mask is not None:
+            seqlens_q = attention_mask.logical_not()[:, 0, 0, :].sum(dim=1)
+        else:
+            seqlens_q = torch.full(
+                (batch_size,), max_seqlen_q, dtype=torch.int64, device=query_layer.device
+            )
+
+        dropout_p = self.attention_dropout.p if self.training else 0.0
+        with self.attention_dropout_ctx():
+            for batch_id in range(batch_size):
+                seqlen_q = int(seqlens_q[batch_id].item())
+                if seqlen_q == 0:
+                    continue
+                query = query_layer[:seqlen_q, batch_id].permute(1, 0, 2).unsqueeze(0)
+                key = key_layer[:seqlen_q, batch_id].permute(1, 0, 2).unsqueeze(0)
+                value = value_layer[:seqlen_q, batch_id].permute(1, 0, 2).unsqueeze(0)
+                context_layer[batch_id, :, :seqlen_q, :] = F.scaled_dot_product_attention(
+                    query,
+                    key,
+                    value,
+                    dropout_p=dropout_p,
+                    is_causal=True,
+                    scale=scale,
+                ).squeeze(0)
+
+        return self._format_context(
+            context_layer,
+            q_format,
+            max_seqlen_q,
+            batch_size,
+            cu_seqlens_q,
+        )
+
     def forward(
         self,
         _alibi_cache: Dict[str, Any],
@@ -457,22 +566,6 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 max_seqlen_kv,
                 self.attention_type,
             )
-        attn_mask_type, attention_mask, actual_seqlens_q, actual_seqlens_kv = (
-            dpa_utils.get_full_mask(
-                max_seqlen_q,
-                max_seqlen_kv,
-                attn_mask_type=attn_mask_type,
-                attention_mask=attention_mask,
-                window_size=window_size,
-                attention_type=self.attention_type,
-                bottom_right_alignment=(
-                    attn_mask_type not in ["causal", "padding_causal"]
-                    if bottom_right_diagonal is None
-                    else bottom_right_diagonal
-                ),
-            )
-        )
-
         apply_qk_layer_scaling = self.apply_qk_layer_scaling and key_layer.dtype == torch.float16
 
         # [b, h, sq, sk]
@@ -494,6 +587,48 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 int(query_layer.shape[2] / value_layer.shape[2]), dim=2
             )
 
+        scale = self.softmax_scale
+        if apply_qk_layer_scaling:
+            scale /= self.layer_number
+
+        if self._use_varlen_sdpa(
+            attn_mask_type,
+            attention_mask,
+            window_size,
+            max_seqlen_q,
+            max_seqlen_kv,
+            core_attention_bias_type,
+            alibi_slopes,
+            fp8,
+        ):
+            return self._forward_varlen_sdpa(
+                query_layer,
+                key_layer,
+                value_layer,
+                q_format,
+                batch_size,
+                max_seqlen_q,
+                cu_seqlens_q,
+                attention_mask,
+                scale,
+            )
+
+        attn_mask_type, attention_mask, actual_seqlens_q, actual_seqlens_kv = (
+            dpa_utils.get_full_mask(
+                max_seqlen_q,
+                max_seqlen_kv,
+                attn_mask_type=attn_mask_type,
+                attention_mask=attention_mask,
+                window_size=window_size,
+                attention_type=self.attention_type,
+                bottom_right_alignment=(
+                    attn_mask_type not in ["causal", "padding_causal"]
+                    if bottom_right_diagonal is None
+                    else bottom_right_diagonal
+                ),
+            )
+        )
+
         # preallocting result tensor: [b * h, sq, sk]
         matmul_result = torch.empty(
             output_size[0] * output_size[1],
@@ -502,10 +637,6 @@ class UnfusedDotProductAttention(torch.nn.Module):
             dtype=query_layer.dtype,
             device=torch.cuda.current_device(),
         )
-
-        scale = self.softmax_scale
-        if apply_qk_layer_scaling:
-            scale /= self.layer_number
 
         if fp8:
             # get fp8 recipe for DPA
