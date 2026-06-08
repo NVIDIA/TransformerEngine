@@ -537,8 +537,8 @@ void nvte_splits_to_offsets(const int64_t *first_dims, const int64_t *last_dims,
 /*! \brief Compute multiple scaled prefix-sum offsets for grouped tensors.
  *
  *  Computes a prefix-sum over the values in split_sizes, and for each
- *  output multiplies the prefix-sum by a stride or varying last dimensions.
- *  Inputs and outputs can be any combination of int32 and int64 tensors.
+ *  output multiplies the prefix-sum by a stride. Inputs and outputs
+ *  can be any combination of int32 and int64 tensors.
  *
  *  \param[in] split_sizes Device int32/int64 split sizes with shape [N].
  *  \param[out] outputs Array of int32/int64 1D output tensors, one per scan.
@@ -547,13 +547,11 @@ void nvte_splits_to_offsets(const int64_t *first_dims, const int64_t *last_dims,
  *             (inclusive scan), nonzero if outputs[i] has length N + 1 (inclusive
  *             scan prepended with zero). Length num_outputs.
  *  \param[in] num_outputs Number of output tensors.
- *  \param[in] last_dims Optional array of int32/int64 1D last dimensions, one per scan.
  *  \param[in] stream CUDA stream to use for the operation.
  */
 void nvte_splits_to_offsets_multi(NVTETensor split_sizes, NVTETensor *outputs,
                                   const int64_t *strides, const int *include_leading_zero,
-                                  size_t num_outputs, const NVTETensor *last_dims,
-                                  cudaStream_t stream);
+                                  size_t num_outputs, cudaStream_t stream);
 
 /*! \brief TE Grouped Tensor type
  *

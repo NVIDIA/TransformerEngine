@@ -42,7 +42,7 @@ at::Tensor splits_to_offsets(const at::Tensor &first_dims, int64_t logical_last_
 std::tuple<at::Tensor, std::vector<at::Tensor>> splits_to_offsets_multi(
     const at::Tensor &split_sizes, const c10::Device &device, const std::vector<int64_t> &strides,
     const std::vector<bool> &include_leading_zero, const std::vector<at::ScalarType> &dtypes,
-    bool bulk_allocate_outputs, const std::vector<std::optional<at::Tensor>> &last_dims) {
+    bool bulk_allocate_outputs) {
   const size_t num_outputs = strides.size();
   const size_t num_splits = static_cast<size_t>(split_sizes.numel());
 
@@ -51,14 +51,6 @@ std::tuple<at::Tensor, std::vector<at::Tensor>> splits_to_offsets_multi(
              "strides, include_leading_zero, and dtypes must have matching lengths, but got ",
              strides.size(), ", ", include_leading_zero.size(), ", and ", dtypes.size(), ".");
   NVTE_CHECK(device.is_cuda(), "device must be CUDA, but got ", device.str(), ".");
-
-  std::vector<std::optional<at::Tensor>> last_dims_filled = last_dims;
-  if (last_dims_filled.empty()) {
-    last_dims_filled.resize(num_outputs, std::nullopt);
-  } else {
-    NVTE_CHECK(last_dims_filled.size() == num_outputs,
-               "last_dims must have the same length as strides if provided.");
-  }
 
   // Convert split sizes to int64 GPU tensor.
   const at::Tensor split_sizes_i64 =
@@ -100,31 +92,10 @@ std::tuple<at::Tensor, std::vector<at::Tensor>> splits_to_offsets_multi(
     include_leading_zero_int[i] = include_leading_zero[i] ? 1 : 0;
   }
 
-  std::vector<at::Tensor> last_dims_keepalive;
-  last_dims_keepalive.reserve(num_outputs);
-  MultiTensorWrapper last_dims_nvte(num_outputs);
-  std::vector<NVTETensor> last_dims_ptrs(num_outputs, nullptr);
-  for (size_t i = 0; i < num_outputs; ++i) {
-    if (last_dims_filled[i].has_value()) {
-      const at::Tensor last_dims_i64 =
-          last_dims_filled[i]->scalar_type() == at::kLong ? *last_dims_filled[i] : last_dims_filled[i]->to(at::kLong);
-      const at::Tensor last_dims_device =
-          last_dims_i64.device() == device ? last_dims_i64 : last_dims_i64.to(device);
-      last_dims_keepalive.push_back(last_dims_device);
-
-      const size_t length = num_splits;
-      NVTEShape shape = nvte_make_shape(&length, 1);
-      NVTEBasicTensor data = {last_dims_device.data_ptr(), NVTEDType::kInt64, shape};
-      nvte_set_tensor_param_v2(last_dims_nvte[i], kNVTERowwiseData, &data, sizeof(data));
-      last_dims_ptrs[i] = last_dims_nvte[i].data();
-    }
-  }
-
   auto split_sizes_nvte = makeTransformerEngineTensor(split_sizes_out);
   NVTE_SCOPED_GIL_RELEASE({
     nvte_splits_to_offsets_multi(split_sizes_nvte.data(), outputs_nvte.data(), strides.data(),
                                  include_leading_zero_int.data(), num_outputs,
-                                 last_dims_ptrs.data(),
                                  at::cuda::getCurrentCUDAStream());
   });
 

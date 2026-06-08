@@ -60,7 +60,7 @@ __device__ __forceinline__ void store_output(void *__restrict__ output, DType dt
   }
 }
 
-template <bool kHasLastDims>
+template <bool kHasLastDims = false>
 __global__ void __launch_bounds__(kThreadsPerBlock) kernel(KernelArgs args) {
   const size_t tid = threadIdx.x;
 
@@ -76,103 +76,55 @@ __global__ void __launch_bounds__(kThreadsPerBlock) kernel(KernelArgs args) {
   // Workspace for prefix sum chunk
   __shared__ int64_t block_scan[kThreadsPerBlock];
 
-  if constexpr (kHasLastDims) {
-    // Sum from previous chunks for each output
-    __shared__ int64_t chunk_prefix[KernelArgs::kMaxNumOutputs];
-    if (tid == 0) {
-      for (size_t out_idx = 0; out_idx < args.num_outputs; ++out_idx) {
-        chunk_prefix[out_idx] = 0;
-      }
-    }
-    __syncthreads();
+  // Sum from previous chunks
+  __shared__ int64_t chunk_prefix;
+  if (tid == 0) {
+    chunk_prefix = 0;
+  }
+  __syncthreads();
 
-    // Perform prefix sum in chunks
-    for (size_t chunk_start = 0; chunk_start < args.num_splits; chunk_start += kThreadsPerBlock) {
-      const size_t idx = chunk_start + tid;
+  // Perform prefix sum in chunks
+  for (size_t chunk_start = 0; chunk_start < args.num_splits; chunk_start += kThreadsPerBlock) {
+    const size_t idx = chunk_start + tid;
 
-      for (size_t out_idx = 0; out_idx < args.num_outputs; ++out_idx) {
-        // Load input from global memory into shared memory
-        if (idx < args.num_splits) {
-          int64_t first = load_split_size(args.split_sizes, args.split_sizes_dtype, idx);
-          if (args.last_dims[out_idx] != nullptr) {
-            int64_t last = load_split_size(args.last_dims[out_idx], args.last_dims_dtype[out_idx], idx);
-            block_scan[tid] = first * last;
-          } else {
-            block_scan[tid] = first * args.strides[out_idx];
-          }
-        } else {
-          block_scan[tid] = 0;
-        }
-        __syncthreads();
-
-        // Prefix sum in shared memory
-        for (size_t offset = 1; offset < kThreadsPerBlock; offset <<= 1) {
-          const int64_t addend = (tid >= offset) ? block_scan[tid - offset] : 0;
-          __syncthreads();
-          block_scan[tid] += addend;
-          __syncthreads();
-        }
-
-        // Compute global prefix sum, and store to output
-        if (idx < args.num_splits) {
-          const int64_t prefix = chunk_prefix[out_idx] + block_scan[tid];
-          const size_t write_idx = idx + (args.include_leading_zero[out_idx] ? 1 : 0);
-          store_output(args.outputs[out_idx], args.outputs_dtype[out_idx], write_idx, prefix);
-        }
-
-        // Update sum for later chunks
-        __syncthreads();
-        if (tid == kThreadsPerBlock - 1) {
-          chunk_prefix[out_idx] += block_scan[tid];
-        }
-        __syncthreads();
-      }
-    }
-  } else {
-    // Sum from previous chunks
-    __shared__ int64_t chunk_prefix;
-    if (tid == 0) {
-      chunk_prefix = 0;
-    }
-    __syncthreads();
-
-    // Perform prefix sum in chunks
-    for (size_t chunk_start = 0; chunk_start < args.num_splits; chunk_start += kThreadsPerBlock) {
-      const size_t idx = chunk_start + tid;
-
-      // Load input from global memory into shared memory
-      if (idx < args.num_splits) {
-        block_scan[tid] = load_split_size(args.split_sizes, args.split_sizes_dtype, idx);
+    // Load input from global memory into shared memory
+    if (idx < args.num_splits) {
+      if constexpr (kHasLastDims) {
+        int64_t first = load_split_size(args.split_sizes, args.split_sizes_dtype, idx);
+        int64_t last = load_split_size(args.last_dims[0], args.last_dims_dtype[0], idx);
+        block_scan[tid] = first * last;
       } else {
-        block_scan[tid] = 0;
+        block_scan[tid] = load_split_size(args.split_sizes, args.split_sizes_dtype, idx);
       }
+    } else {
+      block_scan[tid] = 0;
+    }
+    __syncthreads();
+
+    // Prefix sum in shared memory
+    for (size_t offset = 1; offset < kThreadsPerBlock; offset <<= 1) {
+      const int64_t addend = (tid >= offset) ? block_scan[tid - offset] : 0;
       __syncthreads();
-
-      // Prefix sum in shared memory
-      for (size_t offset = 1; offset < kThreadsPerBlock; offset <<= 1) {
-        const int64_t addend = (tid >= offset) ? block_scan[tid - offset] : 0;
-        __syncthreads();
-        block_scan[tid] += addend;
-        __syncthreads();
-      }
-
-      // Compute global prefix sum, apply strides, and store to output
-      if (idx < args.num_splits) {
-        const int64_t prefix = chunk_prefix + block_scan[tid];
-        for (size_t out_idx = 0; out_idx < args.num_outputs; ++out_idx) {
-          const size_t write_idx = idx + (args.include_leading_zero[out_idx] ? 1 : 0);
-          store_output(args.outputs[out_idx], args.outputs_dtype[out_idx], write_idx,
-                       prefix * args.strides[out_idx]);
-        }
-      }
-
-      // Update sum for later chunks
-      __syncthreads();
-      if (tid == kThreadsPerBlock - 1) {
-        chunk_prefix += block_scan[tid];
-      }
+      block_scan[tid] += addend;
       __syncthreads();
     }
+
+    // Compute global prefix sum, apply strides, and store to output
+    if (idx < args.num_splits) {
+      const int64_t prefix = chunk_prefix + block_scan[tid];
+      for (size_t out_idx = 0; out_idx < args.num_outputs; ++out_idx) {
+        const size_t write_idx = idx + (args.include_leading_zero[out_idx] ? 1 : 0);
+        store_output(args.outputs[out_idx], args.outputs_dtype[out_idx], write_idx,
+                     prefix * args.strides[out_idx]);
+      }
+    }
+
+    // Update sum for later chunks
+    __syncthreads();
+    if (tid == kThreadsPerBlock - 1) {
+      chunk_prefix += block_scan[tid];
+    }
+    __syncthreads();
   }
 }
 
@@ -217,13 +169,11 @@ void nvte_splits_to_offsets(const int64_t *first_dims, const int64_t *last_dims,
   } else if (first_dims != nullptr) {
     args.split_sizes = first_dims;
     args.split_sizes_dtype = DType::kInt64;
-    args.last_dims[0] = nullptr;
     args.strides[0] = logical_last_dim;
     s2o::kernel<false><<<1, s2o::kThreadsPerBlock, 0, stream>>>(args);
   } else {
     args.split_sizes = last_dims;
     args.split_sizes_dtype = DType::kInt64;
-    args.last_dims[0] = nullptr;
     args.strides[0] = logical_first_dim;
     s2o::kernel<false><<<1, s2o::kThreadsPerBlock, 0, stream>>>(args);
   }
@@ -232,8 +182,7 @@ void nvte_splits_to_offsets(const int64_t *first_dims, const int64_t *last_dims,
 
 void nvte_splits_to_offsets_multi(NVTETensor split_sizes, NVTETensor *outputs,
                                   const int64_t *strides, const int *include_leading_zero,
-                                  size_t num_outputs, const NVTETensor *last_dims,
-                                  cudaStream_t stream) {
+                                  size_t num_outputs, cudaStream_t stream) {
   NVTE_API_CALL(nvte_splits_to_offsets_multi);
   using namespace transformer_engine;
   namespace s2o = transformer_engine::splits_to_offsets;
@@ -274,16 +223,6 @@ void nvte_splits_to_offsets_multi(NVTETensor split_sizes, NVTETensor *outputs,
     output_tensors[i] = out_tensor;
   }
 
-  bool has_any_last_dims = false;
-  if (last_dims != nullptr) {
-    for (size_t i = 0; i < num_outputs; ++i) {
-      if (last_dims[i] != nullptr) {
-        has_any_last_dims = true;
-        break;
-      }
-    }
-  }
-
   // Chunk outputs to fit in kernel arguments and launch kernels
   for (size_t chunk_start = 0; chunk_start < num_outputs;
        chunk_start += s2o::KernelArgs::kMaxNumOutputs) {
@@ -299,20 +238,8 @@ void nvte_splits_to_offsets_multi(NVTETensor split_sizes, NVTETensor *outputs,
       args.outputs_dtype[i] = output_tensors[out_idx]->dtype();
       args.strides[i] = strides[out_idx];
       args.include_leading_zero[i] = include_leading_zero[out_idx] != 0;
-      if (last_dims != nullptr && last_dims[out_idx] != nullptr) {
-        const auto *ld_tensor = convertNVTETensorCheck(last_dims[out_idx]);
-        args.last_dims[i] = ld_tensor->data.dptr;
-        args.last_dims_dtype[i] = ld_tensor->dtype();
-      } else {
-        args.last_dims[i] = nullptr;
-        args.last_dims_dtype[i] = DType::kNumTypes;
-      }
     }
-    if (has_any_last_dims) {
-      s2o::kernel<true><<<1, s2o::kThreadsPerBlock, 0, stream>>>(args);
-    } else {
-      s2o::kernel<false><<<1, s2o::kThreadsPerBlock, 0, stream>>>(args);
-    }
+    s2o::kernel<false><<<1, s2o::kThreadsPerBlock, 0, stream>>>(args);
     NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
