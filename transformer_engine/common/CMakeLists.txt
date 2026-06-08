@@ -518,12 +518,13 @@ set_target_properties(transformer_engine PROPERTIES
 target_sources(transformer_engine PRIVATE
     ep/ep_backend.cpp
     ep/ep_api.cpp)
+target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_NCCL_EP)
 
 message(STATUS "NCCL EP enabled: ${NCCL_EP_LIB}")
 message(STATUS "NCCL EP include: ${NCCL_EP_INCLUDE_DIR}")
 else()
-  # NCCL EP off: export throwing nvte_ep_* stubs so framework bindings link.
-  target_sources(transformer_engine PRIVATE ep/ep_api_stub.cpp)
+  # NCCL EP off: ep_api.cpp's #else branch exports throwing nvte_ep_* stubs.
+  target_sources(transformer_engine PRIVATE ep/ep_api.cpp)
   message(STATUS "NCCL EP disabled (NVTE_WITH_NCCL_EP=OFF) — using nvte_ep_* stubs")
 endif()
 
