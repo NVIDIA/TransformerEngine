@@ -23,6 +23,7 @@ from transformer_engine.common.recipe import (
     DelayedScaling,
     Float8CurrentScaling,
     Format,
+    MMParams,
     MXFP8BlockScaling,
 )
 
@@ -258,6 +259,30 @@ def _parse_args(argv=None, namespace=None):
         default=0,
         help="Number of layers at the end to run in bf16.",
     )
+    parser.add_argument(
+        "--use-cublasmp",
+        action="store_true",
+        default=False,
+        help="Use cuBLASMp backend.",
+    )
+    parser.add_argument(
+        "--rtol",
+        type=float,
+        default=None,
+        help=(
+            "Override the relative-error tolerance used in the numerical check. "
+            "When unset, defaults to 0.125 for FP8 and 0.025 otherwise."
+        ),
+    )
+    parser.add_argument(
+        "--atol",
+        type=float,
+        default=None,
+        help=(
+            "Override the absolute-error tolerance used in the numerical check. "
+            "When unset, defaults to 0.0625 for FP8 and 0.00125 otherwise."
+        ),
+    )
     args = parser.parse_args(argv, namespace)
 
     if args.use_cuda_graphs and args.layer_type in [te.MultiheadAttention, te.TransformerLayer]:
@@ -436,6 +461,7 @@ def _train(opts):
         dtype=torch.bfloat16,
         bootstrap_backend=opts.bootstrap_backend,
         ub_cfgs=ub_cfgs if opts.ub_cfg is None else opts.ub_cfg,
+        with_cublasmp=opts.use_cublasmp,
     )
 
     with te.quantized_model_init(enabled=opts.fp8_init):
@@ -470,6 +496,11 @@ def _train(opts):
         fp8_recipe = Float8CurrentScaling(fp8_format=fp8_format)
     elif opts.quantization == "mxfp8":
         fp8_recipe = MXFP8BlockScaling()
+
+    if opts.fp8:
+        fp8_recipe.fp8_gemm_fprop = MMParams(use_split_accumulator=True)
+        fp8_recipe.fp8_gemm_dgrad = MMParams(use_split_accumulator=True)
+        fp8_recipe.fp8_gemm_wgrad = MMParams(use_split_accumulator=True)
 
     layer_contexts = [
         (
@@ -552,8 +583,8 @@ def _train(opts):
         # Now validate accuracy
         if not bool(numerics_failed.item()):
             for i, (test_g, ref_g) in enumerate(zip(test_grads, ref_grads)):
-                rtol = 0.125 if opts.fp8 else 0.025
-                atol = 0.0625 if opts.fp8 else 0.00125
+                rtol = opts.rtol if opts.rtol is not None else (0.125 if opts.fp8 else 0.025)
+                atol = opts.atol if opts.atol is not None else (0.0625 if opts.fp8 else 0.00125)
                 grad_failed, grad_info = _compare_tensors(names[i], test_g, ref_g, rtol, atol)
                 dist_print(grad_info, src=WORLD_RANK, error=grad_failed)
                 numerics_failed[0] = int(grad_failed)

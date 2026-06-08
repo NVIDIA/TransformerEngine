@@ -32,6 +32,28 @@ import sys
 import time
 import traceback
 
+# Rank-0 stdout is the JSON protocol channel to the parent. NCCL/cuBLAS/cuDNN
+# (and torch itself) can write banners to fd 1 — e.g. NCCL emits
+# "NCCL version ...\n" to stdout when NCCL_DEBUG is VERSION or INFO — which
+# would corrupt the JSON stream. Reserve a private dup of the original fd 1 for
+# JSON and point fd 1 at stderr, BEFORE importing torch, so even import-time /
+# C-level writes land on stderr (still visible in CI logs, drained by the
+# parent's stderr thread) instead of the protocol pipe.
+_JSON_STDOUT = None
+
+
+def _redirect_rank0_stdout_to_stderr() -> None:
+    """Reserve rank-0's original stdout fd for the JSON channel; send the rest to stderr."""
+    global _JSON_STDOUT
+    if os.environ.get("RANK") != "0":
+        return
+    _JSON_STDOUT = os.fdopen(os.dup(1), "w", buffering=1)
+    os.dup2(2, 1)
+    sys.stdout = sys.stderr
+
+
+_redirect_rank0_stdout_to_stderr()
+
 import torch
 import torch.distributed as dist
 
@@ -53,8 +75,8 @@ def _recv_request(rank: int) -> dict:
 
 def _send_response(rank: int, payload: dict) -> None:
     if rank == 0:
-        sys.stdout.write(json.dumps(payload) + "\n")
-        sys.stdout.flush()
+        _JSON_STDOUT.write(json.dumps(payload) + "\n")
+        _JSON_STDOUT.flush()
 
 
 def _silence_non_rank0_stdout(rank: int) -> None:
@@ -64,6 +86,10 @@ def _silence_non_rank0_stdout(rank: int) -> None:
     so Python/library writes on rank>0 would interleave with rank 0's JSON
     protocol on the parent's pipe. Closing fd 1 at the OS level on rank>0
     catches both Python (``print``) and C-level (NCCL, etc.) writes.
+
+    Rank 0 is handled differently (``_redirect_rank0_stdout_to_stderr``): its
+    fd 1 also goes to stderr, but a dup of the original is kept for the JSON
+    channel. rank>0 has nothing to preserve, so it just goes to /dev/null.
     """
     if rank == 0:
         return

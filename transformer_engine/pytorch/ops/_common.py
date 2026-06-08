@@ -61,25 +61,15 @@ def _nvidia_cudnn_frontend_supports_wgrad() -> bool:
     return _cudnn_frontend_version_supported()
 
 
-def _group_quantize_for_grouped_mlp(
+def _wrap_single_nvfp4_as_grouped(
     tensor: torch.Tensor,
-    quantizer: Quantizer,
-    num_groups: int,
+    quantized: NVFP4Tensor | NVFP4TensorStorage,
+    quantizer: NVFP4Quantizer,
     split_sizes: Optional[torch.Tensor],
     *,
     tensor_offsets: Optional[torch.Tensor] = None,
 ) -> GroupedTensor:
-    """Quantize into grouped storage."""
-
-    # Typical case: group-quantize
-    if num_groups != 1 or not isinstance(quantizer, NVFP4Quantizer):
-        return tex.group_quantize(tensor, quantizer, num_groups, split_sizes)
-
-    # --------------------------------------------------
-    # Special case: single-tensor NVFP4 quantize
-    # --------------------------------------------------
-
-    quantized = tex.quantize(tensor, quantizer)
+    """Wrap a single NVFP4 tensor in GroupedTensor storage."""
     with_gemm_swizzled_scales = quantized._with_gemm_swizzled_scales
     if quantizer.optimize_for_gemm:
         tex.swizzle_scales_for_gemm_(quantized)
@@ -127,6 +117,78 @@ def _group_quantize_for_grouped_mlp(
         first_dims=split_sizes,
         tensor_offsets=tensor_offsets,
         with_gemm_swizzled_scales=with_gemm_swizzled_scales,
+    )
+
+
+def _group_quantize_for_grouped_mlp(
+    tensor: torch.Tensor,
+    quantizer: Quantizer,
+    num_groups: int,
+    split_sizes: Optional[torch.Tensor],
+    *,
+    tensor_offsets: Optional[torch.Tensor] = None,
+) -> GroupedTensor:
+    """Quantize into grouped storage."""
+
+    if num_groups != 1 or not isinstance(quantizer, NVFP4Quantizer):
+        return tex.group_quantize(
+            tensor,
+            quantizer,
+            num_groups,
+            split_sizes,
+            tensor_offsets=tensor_offsets,
+        )
+
+    quantized = tex.quantize(tensor, quantizer)
+    return _wrap_single_nvfp4_as_grouped(
+        tensor,
+        quantized,
+        quantizer,
+        split_sizes,
+        tensor_offsets=tensor_offsets,
+    )
+
+
+def _group_quantize_with_amax_for_grouped_mlp(
+    tensor: torch.Tensor,
+    quantizer: Quantizer,
+    num_groups: int,
+    split_sizes: Optional[torch.Tensor],
+    rowwise_amax: torch.Tensor,
+    columnwise_amax: torch.Tensor,
+    *,
+    tensor_offsets: Optional[torch.Tensor] = None,
+) -> GroupedTensor:
+    """Quantize with precomputed NVFP4 amaxes into grouped storage."""
+    if not isinstance(quantizer, NVFP4Quantizer):
+        return _group_quantize_for_grouped_mlp(
+            tensor,
+            quantizer,
+            num_groups,
+            split_sizes,
+            tensor_offsets=tensor_offsets,
+        )
+
+    if num_groups != 1:
+        return tex.nvfp4_group_quantize_with_amax(
+            tensor,
+            quantizer,
+            num_groups,
+            split_sizes,
+            rowwise_amax,
+            columnwise_amax,
+            tensor_offsets=tensor_offsets,
+        )
+
+    quantized = tex.nvfp4_quantize_with_amax(
+        tensor, quantizer, rowwise_amax.view(-1)[:1], columnwise_amax.view(-1)[:1]
+    )
+    return _wrap_single_nvfp4_as_grouped(
+        tensor,
+        quantized,
+        quantizer,
+        split_sizes,
+        tensor_offsets=tensor_offsets,
     )
 
 
