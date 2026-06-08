@@ -32,8 +32,7 @@ at::Tensor splits_to_offsets(const at::Tensor &first_dims, int64_t logical_last_
                           first_dims_contiguous.options().dtype(at::kLong));
 
   nvte_splits_to_offsets(static_cast<const int64_t *>(first_dims_contiguous.data_ptr()),
-                         /*last_dims=*/nullptr, static_cast<int64_t *>(output.data_ptr()),
-                         num_tensors, /*logical_first_dim=*/0, logical_last_dim,
+                         static_cast<int64_t *>(output.data_ptr()), num_tensors, logical_last_dim,
                          at::cuda::getCurrentCUDAStream());
 
   return output;

@@ -114,14 +114,32 @@ std::optional<at::Tensor> build_grouped_tensor_offsets(
   const at::TensorOptions options =
       first_dims.has_value() ? first_dims->options() : last_dims->options();
   auto tensor_offsets = at::empty({static_cast<int64_t>(num_tensors) + 1}, options);
-  NVTE_SCOPED_GIL_RELEASE({
-    nvte_splits_to_offsets(
-        first_dims.has_value() ? static_cast<const int64_t*>(first_dims->data_ptr()) : nullptr,
-        last_dims.has_value() ? static_cast<const int64_t*>(last_dims->data_ptr()) : nullptr,
-        static_cast<int64_t*>(tensor_offsets.data_ptr()), num_tensors,
-        static_cast<int64_t>(logical_first_dim), static_cast<int64_t>(logical_last_dim),
-        at::cuda::getCurrentCUDAStream());
-  });
+  if (first_dims.has_value() && last_dims.has_value()) {
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_splits_to_offsets_2d(
+          static_cast<const int64_t*>(first_dims->data_ptr()),
+          static_cast<const int64_t*>(last_dims->data_ptr()),
+          static_cast<int64_t*>(tensor_offsets.data_ptr()), num_tensors,
+          static_cast<int64_t>(logical_first_dim), static_cast<int64_t>(logical_last_dim),
+          at::cuda::getCurrentCUDAStream());
+    });
+  } else if (first_dims.has_value()) {
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_splits_to_offsets(
+          static_cast<const int64_t*>(first_dims->data_ptr()),
+          static_cast<int64_t*>(tensor_offsets.data_ptr()), num_tensors,
+          static_cast<int64_t>(logical_last_dim),
+          at::cuda::getCurrentCUDAStream());
+    });
+  } else {
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_splits_to_offsets(
+          static_cast<const int64_t*>(last_dims->data_ptr()),
+          static_cast<int64_t*>(tensor_offsets.data_ptr()), num_tensors,
+          static_cast<int64_t>(logical_first_dim),
+          at::cuda::getCurrentCUDAStream());
+    });
+  }
   return tensor_offsets;
 }
 

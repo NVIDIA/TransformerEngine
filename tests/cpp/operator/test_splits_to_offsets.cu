@@ -40,8 +40,7 @@ TEST_P(SplitsToOffsetsTestSuite, TestSplitsToOffsets) {
   NVTE_CHECK_CUDA(cudaMemcpy(d_first_dims, h_first_dims.data(), sizeof(int64_t) * num_tensors,
                              cudaMemcpyHostToDevice));
 
-  nvte_splits_to_offsets(d_first_dims, /*last_dims=*/nullptr, d_output, num_tensors,
-                         /*logical_first_dim=*/0, logical_last_dim, 0 /* stream */);
+  nvte_splits_to_offsets(d_first_dims, d_output, num_tensors, logical_last_dim, 0 /* stream */);
   NVTE_CHECK_CUDA(cudaDeviceSynchronize());
 
   NVTE_CHECK_CUDA(cudaMemcpy(h_output.data(), d_output, sizeof(int64_t) * (num_tensors + 1),

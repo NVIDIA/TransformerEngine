@@ -27,8 +27,6 @@ struct KernelArgs {
   void *outputs[kMaxNumOutputs] = {};
   DType outputs_dtype[kMaxNumOutputs] = {};
   int64_t strides[kMaxNumOutputs] = {};
-  const void *last_dims[kMaxNumOutputs] = {};
-  DType last_dims_dtype[kMaxNumOutputs] = {};
   bool include_leading_zero[kMaxNumOutputs] = {};
   size_t num_outputs = 0;
 };
@@ -60,7 +58,6 @@ __device__ __forceinline__ void store_output(void *__restrict__ output, DType dt
   }
 }
 
-template <bool kHasLastDims = false>
 __global__ void __launch_bounds__(kThreadsPerBlock) kernel(KernelArgs args) {
   const size_t tid = threadIdx.x;
 
@@ -89,13 +86,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) kernel(KernelArgs args) {
 
     // Load input from global memory into shared memory
     if (idx < args.num_splits) {
-      if constexpr (kHasLastDims) {
-        int64_t first = load_split_size(args.split_sizes, args.split_sizes_dtype, idx);
-        int64_t last = load_split_size(args.last_dims[0], args.last_dims_dtype[0], idx);
-        block_scan[tid] = first * last;
-      } else {
-        block_scan[tid] = load_split_size(args.split_sizes, args.split_sizes_dtype, idx);
-      }
+      block_scan[tid] = load_split_size(args.split_sizes, args.split_sizes_dtype, idx);
     } else {
       block_scan[tid] = 0;
     }
@@ -128,55 +119,91 @@ __global__ void __launch_bounds__(kThreadsPerBlock) kernel(KernelArgs args) {
   }
 }
 
+__global__ void __launch_bounds__(kThreadsPerBlock)
+    splits_to_offsets_2d_kernel(const int64_t *__restrict__ first_dims,
+                                const int64_t *__restrict__ last_dims, int64_t *__restrict__ output,
+                                size_t num_tensors) {
+  __shared__ int64_t block_scan[kThreadsPerBlock];
+  __shared__ int64_t chunk_prefix;
+
+  const size_t tid = threadIdx.x;
+  if (tid == 0) {
+    output[0] = 0;
+    chunk_prefix = 0;
+  }
+  __syncthreads();
+
+  for (size_t chunk_start = 0; chunk_start < num_tensors; chunk_start += kThreadsPerBlock) {
+    const size_t idx = chunk_start + tid;
+    int64_t value = 0;
+    if (idx < num_tensors) {
+      value = first_dims[idx] * last_dims[idx];
+    }
+    block_scan[tid] = value;
+    __syncthreads();
+
+    // Inclusive scan in shared memory.
+    for (size_t offset = 1; offset < kThreadsPerBlock; offset <<= 1) {
+      const int64_t addend = (tid >= offset) ? block_scan[tid - offset] : 0;
+      __syncthreads();
+      block_scan[tid] += addend;
+      __syncthreads();
+    }
+
+    if (idx < num_tensors) {
+      output[idx + 1] = chunk_prefix + block_scan[tid];
+    }
+    __syncthreads();
+
+    if (tid == kThreadsPerBlock - 1) {
+      chunk_prefix += block_scan[tid];
+    }
+    __syncthreads();
+  }
+}
+
 }  // namespace
 
 }  // namespace transformer_engine::splits_to_offsets
 
-void nvte_splits_to_offsets(const int64_t *first_dims, const int64_t *last_dims, int64_t *output,
-                            size_t num_tensors, int64_t logical_first_dim,
-                            int64_t logical_last_dim, cudaStream_t stream) {
+void nvte_splits_to_offsets(const int64_t *split_sizes, int64_t *output, size_t num_splits,
+                            int64_t stride, cudaStream_t stream) {
   NVTE_API_CALL(nvte_splits_to_offsets);
   NVTE_CHECK(output != nullptr, "Output pointer is NULL.");
-  NVTE_CHECK(num_tensors > 0, "num_tensors must be greater than 0.");
-  NVTE_CHECK(first_dims != nullptr || last_dims != nullptr,
-             "At least one of first_dims / last_dims must be non-null.");
-  if (first_dims == nullptr) {
-    NVTE_CHECK(logical_first_dim > 0,
-               "logical_first_dim must be greater than 0 when first_dims is null.");
-  }
-  if (last_dims == nullptr) {
-    NVTE_CHECK(logical_last_dim > 0,
-               "logical_last_dim must be greater than 0 when last_dims is null.");
-  }
+  NVTE_CHECK(num_splits > 0, "num_splits must be greater than 0.");
+  NVTE_CHECK(split_sizes != nullptr, "split_sizes pointer is NULL.");
+  NVTE_CHECK(stride > 0, "stride must be greater than 0.");
 
   using namespace transformer_engine;
   namespace s2o = transformer_engine::splits_to_offsets;
 
   s2o::KernelArgs args = {};
-  args.num_splits = num_tensors;
+  args.split_sizes = split_sizes;
+  args.split_sizes_dtype = DType::kInt64;
+  args.num_splits = num_splits;
   args.outputs[0] = output;
   args.outputs_dtype[0] = DType::kInt64;
+  args.strides[0] = stride;
   args.include_leading_zero[0] = true;
   args.num_outputs = 1;
+  s2o::kernel<<<1, s2o::kThreadsPerBlock, 0, stream>>>(args);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
 
-  if (first_dims != nullptr && last_dims != nullptr) {
-    args.split_sizes = first_dims;
-    args.split_sizes_dtype = DType::kInt64;
-    args.last_dims[0] = last_dims;
-    args.last_dims_dtype[0] = DType::kInt64;
-    args.strides[0] = 1;
-    s2o::kernel<true><<<1, s2o::kThreadsPerBlock, 0, stream>>>(args);
-  } else if (first_dims != nullptr) {
-    args.split_sizes = first_dims;
-    args.split_sizes_dtype = DType::kInt64;
-    args.strides[0] = logical_last_dim;
-    s2o::kernel<false><<<1, s2o::kThreadsPerBlock, 0, stream>>>(args);
-  } else {
-    args.split_sizes = last_dims;
-    args.split_sizes_dtype = DType::kInt64;
-    args.strides[0] = logical_first_dim;
-    s2o::kernel<false><<<1, s2o::kThreadsPerBlock, 0, stream>>>(args);
-  }
+void nvte_splits_to_offsets_2d(const int64_t *first_dims, const int64_t *last_dims, int64_t *output,
+                               size_t num_tensors, int64_t logical_first_dim,
+                               int64_t logical_last_dim, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_splits_to_offsets_2d);
+  NVTE_CHECK(output != nullptr, "Output pointer must be allocated.");
+  NVTE_CHECK(num_tensors > 0, "num_tensors must be greater than 0.");
+  NVTE_CHECK(first_dims != nullptr && last_dims != nullptr,
+             "Both first_dims and last_dims must be non-null.");
+
+  using namespace transformer_engine;
+  namespace s2o = transformer_engine::splits_to_offsets;
+
+  s2o::splits_to_offsets_2d_kernel<<<1, s2o::kThreadsPerBlock, 0, stream>>>(
+      first_dims, last_dims, output, num_tensors);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -239,7 +266,7 @@ void nvte_splits_to_offsets_multi(NVTETensor split_sizes, NVTETensor *outputs,
       args.strides[i] = strides[out_idx];
       args.include_leading_zero[i] = include_leading_zero[out_idx] != 0;
     }
-    s2o::kernel<false><<<1, s2o::kThreadsPerBlock, 0, stream>>>(args);
+    s2o::kernel<<<1, s2o::kThreadsPerBlock, 0, stream>>>(args);
     NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }

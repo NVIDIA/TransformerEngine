@@ -497,6 +497,22 @@ void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream
  *
 /*! \brief Compute scaled prefix-sum offsets for grouped tensors.
  *
+ *  Computes:
+ *    output[0] = 0
+ *    output[i + 1] = sum_{j=0..i}(split_sizes[j] * stride)
+ *  for i in [0, num_splits - 1].
+ *
+ *  \param[in] split_sizes Pointer to device int64 array of size num_splits.
+ *  \param[out] output Pointer to device int64 array of size num_splits + 1.
+ *  \param[in] num_splits Number of entries in split_sizes.
+ *  \param[in] stride Scale factor applied to each split_sizes entry.
+ *  \param[in] stream CUDA stream to use for the operation.
+ */
+void nvte_splits_to_offsets(const int64_t *split_sizes, int64_t *output, size_t num_splits,
+                            int64_t stride, cudaStream_t stream);
+
+/*! \brief Compute scaled prefix-sum offsets for grouped tensors with potentially varying dimensions.
+ *
  *  Given per-tensor "first" dimensions and/or per-tensor "last" dimensions,
  *  compute the cumulative element offsets:
  *
@@ -530,9 +546,9 @@ void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream
  *                               Must be > 0 in that case; ignored otherwise.
  *  \param[in] stream            CUDA stream to use for the operation.
  */
-void nvte_splits_to_offsets(const int64_t *first_dims, const int64_t *last_dims, int64_t *output,
-                            size_t num_tensors, int64_t logical_first_dim,
-                            int64_t logical_last_dim, cudaStream_t stream);
+void nvte_splits_to_offsets_2d(const int64_t *first_dims, const int64_t *last_dims, int64_t *output,
+                               size_t num_tensors, int64_t logical_first_dim,
+                               int64_t logical_last_dim, cudaStream_t stream);
 
 /*! \brief Compute multiple scaled prefix-sum offsets for grouped tensors.
  *
