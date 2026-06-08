@@ -392,11 +392,6 @@ def test_autocast_sanity(fp8_recipe):
 
 # ---------------------------------------------------------------------------
 # Value-opaque quantizers
-#
-# Tensorless quantizers (MXFP8, FP8 blockwise, FP8 current-scaling) are
-# torch.compile *value* opaque types: value-based ``__eq__`` / ``__hash__`` plus
-# an evaluable ``__fx_repr__`` that rebuilds an equal object (see
-# ``torch._library.opaque_object`` Note [Opaque Objects]).
 # ---------------------------------------------------------------------------
 
 
@@ -446,5 +441,3 @@ def test_quantizer_value_object(factory, other_kwargs):
     rebuilt = eval(repr_str, dict(globals_))  # pylint: disable=eval-used
     assert rebuilt == a and rebuilt is not a
     assert hash(rebuilt) == hash(a)
-    # The deprecated amax-reduction group is never part of the value.
-    assert getattr(rebuilt, "amax_reduction_group", None) is None

@@ -421,7 +421,9 @@ class Quantizer(abc.ABC):
 
         Returning ``None`` (the default) means the quantizer cannot be represented as
         a value opaque object and keeps identity-based equality/hashing.
-        This also means, that torch.compile will not be able to optimize the quantizer.
+        This also means that passing such a quantizer as an argument to a custom op
+        causes a graph break under torch.compile, since it cannot be baked into the
+        FX graph as a constant.
         """
         return None
 

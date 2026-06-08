@@ -2,46 +2,35 @@
 #
 # See LICENSE for license information.
 
-"""Value-opaque quantizers for torch.compile.
-
-Turns a *tensorless* quantizer into a torch.compile **value** opaque type:
-
-  * :func:`register_value_opaque_quantizer` -- attaches the ``__fx_repr__`` used
-    by FX codegen and registers the quantizer class with
-    ``torch._library.opaque_object``. It is a no-op on PyTorch builds without
-    the opaque-object API, so importing Transformer Engine never fails on older
-    PyTorch -- only torch.compile specialization on the quantizer is
-    unavailable there.
-  * :func:`_rebuild_quantizer` -- rebuilds a quantizer constant from its value
-    items inside the generated FX graph. The quantizer class is captured
-    directly in the FX globals (see :func:`_quantizer_fx_repr`), so no global
-    class registry is needed.
-
-The eager value semantics (``__eq__`` / ``__hash__`` / ``_value_key`` /
-``_value_fields``) live on the quantizer itself; see
-:class:`transformer_engine.pytorch.quantized_tensor.Quantizer`.
-
-See ``torch._library.opaque_object`` Note [Opaque Objects] for the contract a
-value-typed opaque object must satisfy (``__eq__`` / ``__hash__`` /
-``__fx_repr__``). The ``__fx_repr__`` contract -- ``(repr_string, {name: type})``
-where ``repr_string`` references the names in the dict -- is exactly how
-PyTorch's own value opaque types (e.g. DTensor placements) reconstruct
-themselves, including across the on-disk compile cache.
-"""
+"""Value-opaque quantizers for torch.compile."""
 
 from __future__ import annotations
 from typing import Any, Dict, Tuple
 
-from ..constants import DType
+from ..constants import DType, dist_group_type
+
+
+def _contains_process_group(value: Any) -> bool:
+    """Whether *value* is (or nests) a ``torch.distributed.ProcessGroup``.
+
+    Checks the value directly and one level of ``tuple``/``list`` nesting, which
+    covers the shapes a quantizer value field could plausibly take.
+    """
+    if isinstance(value, dist_group_type):
+        return True
+    if isinstance(value, (tuple, list)):
+        return any(_contains_process_group(item) for item in value)
+    return False
 
 
 def _rebuild_quantizer(cls: type, items: Tuple[Tuple[str, Any], ...]) -> Any:
     """Rebuild a tensorless quantizer of type *cls* from its value items.
 
     Referenced by the ``__fx_repr__`` emitted for value-opaque quantizers; the
-    generated FX code calls this to materialize the quantizer constant. The
-    deprecated amax-reduction process group is never part of the value, so a
-    reconstructed quantizer always starts with no stored group.
+    generated FX code calls this to materialize the quantizer constant. A
+    quantizer that actually stores a process group never reaches this path:
+    ``__fx_repr__`` raises for it. The deprecated amax-reduction group is not a
+    value field, so the rebuilt quantizer simply has no group attribute.
     """
     # Bypass ``__init__`` and restore the value attributes directly: the value
     # items already capture every value-defining field (including derived ones),
@@ -53,9 +42,9 @@ def _rebuild_quantizer(cls: type, items: Tuple[Tuple[str, Any], ...]) -> Any:
             value = DType.cast(value)
         object.__setattr__(obj, name, value)
         field_names.add(name)
-    # The deprecated amax-reduction process group is excluded from the value;
-    # restore it as ``None`` for quantizers that still carry the fallback so
-    # attribute access keeps working.
+    # The deprecated amax-reduction group is not a value field. Quantizers that
+    # actually hold a group error out in ``__fx_repr__`` before reaching here, so
+    # this only initializes the (groupless) attribute to keep access working.
     if "with_amax_reduction" in field_names and not hasattr(obj, "amax_reduction_group"):
         object.__setattr__(obj, "amax_reduction_group", None)
     return obj
@@ -68,8 +57,23 @@ def _quantizer_fx_repr(self: Any) -> Tuple[str, Dict[str, Any]]:
     :func:`_rebuild_quantizer`, capturing both the helper and the quantizer
     class itself in the FX globals so codegen can resolve them with no global
     registry and no qualname collisions.
+
+    Raises ``TypeError`` if the quantizer stores a process group (e.g. a
+    non-``None`` deprecated ``amax_reduction_group``): live distributed state
+    must never be baked into the graph as a constant, so such a quantizer cannot
+    be used with ``torch.compile``. Pass the reduction group per quantize call
+    instead of storing it on the quantizer.
     """
     cls = type(self)
+    for name, value in vars(self).items():
+        if _contains_process_group(value):
+            raise TypeError(
+                f"{cls.__name__} cannot be used with torch.compile: attribute "
+                f"{name!r} holds a torch.distributed.ProcessGroup, which is live "
+                "distributed state and must not be baked into an FX graph as a "
+                "constant. Pass the amax reduction group per quantize call instead "
+                "of storing it on the quantizer."
+            )
     items = self._value_key()[1]
     return (
         f"_rebuild_quantizer({cls.__name__}, {items!r})",
