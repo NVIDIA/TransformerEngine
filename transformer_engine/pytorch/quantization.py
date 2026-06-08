@@ -1720,10 +1720,21 @@ class NVFP4BlockScalingRecipeState(RecipeState):
             # with_rht / stochastic_rounding below are gated on those flags
             # rather than hard-forced off. SR, when enabled, lands on the
             # bwd-grad quantizer only (the recipe sets qparams.stochastic_rounding
-            # on fp4_quant_bwd_grad alone, mirroring prod).
+            # on fp4_quant_bwd_grad alone, like the default per-tensor recipe).
             per_token = self.recipe.nvfp4_per_token() and (
                 (self.mode == "forward" and tensor_type in ("input", "output", "weight"))
                 or (self.mode == "backward" and tensor_type in ("grad_output", "grad_input"))
+            )
+
+            # Per-token weight-2D (Route A): only the forward WEIGHT switches to
+            # the per-tensor 2D cast (16x16 inner + scalar outer) re-dressed in
+            # per-token layout; activation / gradient casts stay per-token 1D.
+            # The emitted weight tensor is transposition-invariant so fwd
+            # (rowwise) and dgrad (columnwise) consume the same quantized weight.
+            per_token_weight_2d = (
+                per_token
+                and tensor_type == "weight"
+                and getattr(self.recipe, "per_token_weight_2d", False)
             )
 
             return NVFP4Quantizer(
@@ -1747,6 +1758,7 @@ class NVFP4BlockScalingRecipeState(RecipeState):
                 nvfp4_e4m3_max=nvfp4_e4m3_max,
                 nvfp4_4over6_err_mode=self.recipe.nvfp4_4over6_err_mode,
                 per_token=per_token,
+                per_token_weight_2d=per_token_weight_2d,
             )
 
         if self.mode not in ("forward", "backward"):

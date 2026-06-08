@@ -1872,10 +1872,17 @@ NVFP4Quantizer::NVFP4Quantizer(const py::handle& quantizer) : Quantizer(quantize
   this->rht_matrix_random_sign_mask_t = quantizer.attr("rht_matrix_random_sign_mask_t").cast<int>();
   this->rht_matrix = quantizer.attr("rht_matrix").cast<at::Tensor>();
 
-  // Per-token NVFP4 (replaces prod 1A / 2A). Default False keeps the prod
-  // path byte-equal; when True, quantize_impl / split_quantize_nvfp4_impl
+  // Per-token NVFP4 (replaces the per-tensor 1A / 2A paths). Default False keeps
+  // the per-tensor path byte-equal; when True, quantize_impl / split_quantize_nvfp4_impl
   // dispatch to per-token K1+K2 kernels instead.
   this->per_token = quantizer.attr("per_token").cast<bool>();
+  this->per_token_weight_2d = quantizer.attr("per_token_weight_2d").cast<bool>();
+  if (this->per_token_weight_2d) {
+    NVTE_CHECK(this->per_token, "NVFP4 per-token weight-2D requires per_token=True.");
+    NVTE_CHECK(!this->with_rht, "NVFP4 per-token weight-2D does not support RHT.");
+    NVTE_CHECK(!this->stochastic_rounding,
+               "NVFP4 per-token weight-2D does not support stochastic rounding.");
+  }
   if (this->per_token) {
     NVTE_CHECK(!this->with_2d_quantization,
                "NVFP4 per-token is mutually exclusive with with_2d_quantization.");
@@ -2520,12 +2527,88 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
 
   auto stream = at::cuda::getCurrentCUDAStream();
 
-  // Per-token NVFP4 cast: replaces prod 1A (RHT fast path) and 1C (no-RHT
-  // path) with the per-token K1+K2 kernel pair. Per-token outer amax is a
+  // Per-token NVFP4 cast: replaces the per-tensor 1A (RHT fast path) and 1C
+  // (no-RHT path) with the per-token K1+K2 kernel pair. Per-token outer amax is a
   // (M,) row vector + (K,) col vector instead of scalars; cuBLASLt cannot
   // consume those, so general_gemm must dispatch to per-token CUTLASS GEMM.
   // SR / amax_reduction guarded in the constructor; noop_flag and
   // compute_amax==false flows are not yet wired (TODO).
+  if (this->per_token && this->per_token_weight_2d) {
+    // Per-token weight-2D (Route A): emit a per-tensor 2D-quantized weight (16x16
+    // inner tile + scalar outer amax) into the per-token tensor layout so the
+    // existing per-token CUTLASS GEMM consumes it unchanged. Data / scale_inv
+    // shapes already match per-tensor NVFP4; only the outer amax differs (per-row (M,)
+    // / per-col (K,) vector here, not a scalar), filled by steps 1-3 below.
+    // RHT / SR / noop / amax-reduction are unsupported.
+    NVTE_CHECK(input.dtype() == DType::kBFloat16,
+               "NVFP4 per-token weight-2D cast is bf16-only (got dtype enum value ",
+               static_cast<int>(input.dtype()), ").");
+    NVTE_CHECK(compute_amax,
+               "NVFP4 per-token weight-2D does not support quantize_with_amax.");
+    NVTE_CHECK(!noop_flag.has_value(),
+               "NVFP4 per-token weight-2D does not support noop_flag.");
+    NVTE_CHECK(!this->with_rht, "NVFP4 per-token weight-2D does not support RHT.");
+    NVTE_CHECK(!this->stochastic_rounding,
+               "NVFP4 per-token weight-2D does not support stochastic rounding.");
+    NVTE_CHECK(!this->with_amax_reduction,
+               "NVFP4 per-token weight-2D does not support amax reduction.");
+
+    // Flat 2D dims of the weight (matches the per-token (M,) / (K,) amax lengths).
+    size_t w2d_rows = 1;
+    for (size_t i = 0; i + 1 < input.ndim(); ++i) {
+      w2d_rows *= input.size(i);
+    }
+    const size_t w2d_cols = input.size(input.ndim() - 1);
+
+    QuantizationConfigWrapper w2d_config;
+    w2d_config.set_nvfp4_2d_quantization(true);
+
+    // Amax buffers (allocated as per-token (M,) / (K,) vectors).
+    void* rowwise_amax_ptr = out.get_amax().data_ptr;
+    void* columnwise_amax_ptr = out.get_columnwise_amax().data_ptr;
+    void* amax_ptr = rowwise_amax_ptr != nullptr ? rowwise_amax_ptr : columnwise_amax_ptr;
+    NVTE_CHECK(amax_ptr != nullptr, "Could not find amax pointer for per-token weight-2D.");
+
+    // 1. Single scalar tensor amax -> amax[0] (mirror the per-tensor no-RHT path:
+    //    treat the buffer as length 1 for the reduction, then fan out to both
+    //    rowwise/columnwise amax[0]).
+    out.set_amax(amax_ptr, DType::kFloat32, std::vector<size_t>{1});
+    NVTE_SCOPED_GIL_RELEASE(
+        { nvte_compute_amax_with_config(input.data(), out.data(), w2d_config, stream); });
+    out.set_amax(rowwise_amax_ptr, DType::kFloat32, std::vector<size_t>{1});
+    if (rowwise_amax_ptr != amax_ptr && rowwise_amax_ptr != nullptr) {
+      NVTE_CHECK_CUDA(cudaMemcpyAsync(rowwise_amax_ptr, amax_ptr, sizeof(float),
+                                      cudaMemcpyDeviceToDevice, stream));
+    }
+    if (columnwise_amax_ptr != amax_ptr && columnwise_amax_ptr != nullptr) {
+      NVTE_CHECK_CUDA(cudaMemcpyAsync(columnwise_amax_ptr, amax_ptr, sizeof(float),
+                                      cudaMemcpyDeviceToDevice, stream));
+    }
+
+    // 2. Per-tensor 2D cast: FP4 codes + 16-row-replicated e4m3 inner SF, rowwise +
+    //    transpose-consistent columnwise. Reads amax[0] as the scalar S_enc.
+    NVTE_SCOPED_GIL_RELEASE(
+        { nvte_quantize_v2(input.data(), out.data(), w2d_config, stream); });
+
+    // 3. Broadcast the scalar amax[0] across the per-token (M,) / (K,) vectors
+    //    so the per-token GEMM reads a constant per-row / per-col outer alpha.
+    const auto amax_opts = at::device(at::kCUDA).dtype(torch::kFloat32);
+    if (rowwise_amax_ptr != nullptr && w2d_rows > 1) {
+      auto t = at::from_blob(
+          rowwise_amax_ptr, std::vector<int64_t>{static_cast<int64_t>(w2d_rows)}, [](void*) {},
+          amax_opts);
+      // clone() the scalar first so the fill kernel never aliases its source.
+      t.fill_(t[0].clone());
+    }
+    if (columnwise_amax_ptr != nullptr && w2d_cols > 1) {
+      auto t = at::from_blob(
+          columnwise_amax_ptr, std::vector<int64_t>{static_cast<int64_t>(w2d_cols)}, [](void*) {},
+          amax_opts);
+      t.fill_(t[0].clone());
+    }
+    return;
+  }
+
   if (this->per_token) {
     NVTE_CHECK(input.dtype() == DType::kBFloat16,
                "NVFP4 per-token cast is bf16-only (got dtype enum value ",

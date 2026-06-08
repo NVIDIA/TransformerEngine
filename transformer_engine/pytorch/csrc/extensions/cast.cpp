@@ -1022,7 +1022,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
   // - per-token: callers pass the data shape so first-dim is M (rowwise)
   //   or K (columnwise; shape is already transposed), giving the right
   //   per-row / per-col vector length without extra plumbing.
-  // - default (prod scalar): (1,)
+  // - default (per-tensor scalar): (1,)
   auto amax_shape = [per_token](const std::vector<size_t> &shape,
                                 bool row_scaled = false) -> std::vector<size_t> {
     if (row_scaled || per_token) {
@@ -1597,16 +1597,23 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
                "NVFP4 4over6 quantization does not support stochastic rounding.");
   }
 
-  // Sanity-check per-token-vs-prod homogeneity across all splits. We don't
-  // support a mixed batch (some quantizers per-token, some prod) -- that
+  // Sanity-check per-token-vs-per-tensor homogeneity across all splits. We don't
+  // support a mixed batch (some quantizers per-token, some per-tensor) -- that
   // would require either two grouped kernel launches or a hybrid kernel,
   // neither of which is implemented yet.
   const bool per_token = quantizer.per_token;
   for (const auto *q : quantizers) {
     NVTE_CHECK(q->per_token == per_token,
                "NVFP4 split-quantize: all per-split quantizers must agree on "
-               "per_token mode (mixing per-token + prod in one batch is not "
+               "per_token mode (mixing per-token + per-tensor in one batch is not "
                "supported).");
+    // The per-token weight-2D cast is single-tensor only (quantize_impl). The
+    // grouped per-token kernel below is 1D; routing a weight-2D quantizer here
+    // would silently emit a 1D weight, so reject it explicitly rather than
+    // produce a wrong (1D) result.
+    NVTE_CHECK(!q->per_token_weight_2d,
+               "NVFP4 per-token weight-2D is not supported in split-quantize "
+               "(grouped 2D weight cast is not implemented).");
   }
 
   // Check input tensor shape
@@ -1617,7 +1624,7 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
   // CUDA stream
   auto stream = at::cuda::getCurrentCUDAStream();
 
-  // Per-token grouped path replaces prod 2A (split_quantize with RHT-cast
+  // Per-token grouped path replaces the per-tensor 2A path (split_quantize with RHT-cast
   // fusion). Calls the existing K1+K2 grouped kernel. Constraints (M_i % 128,
   // K % 128, bf16-only) are enforced inside the C-API.
   if (per_token) {

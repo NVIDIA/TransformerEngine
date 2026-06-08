@@ -140,7 +140,7 @@ class Recipe:
 
     @classmethod
     def nvfp4_per_token(cls):
-        """Whether the given recipe is NVFP4 per-token cast (replaces prod 1A/2A)."""
+        """Whether the given recipe is NVFP4 per-token cast (replaces the per-tensor 1A/2A paths)."""
         # Defined as a class method so callers can switch on the recipe
         # *type* (Recipe.nvfp4_per_token() called on the class itself)
         # the same way they do for ``nvfp4()``.
@@ -561,16 +561,25 @@ class NVFP4BlockScaling(Recipe):
     # Per-token only: opt INTO RHT. Per-token otherwise force-disables RHT (its
     # per-row outer amax already mitigates the long-tail outliers RHT targets),
     # but the per-token cast kernel DOES support RHT, so this flag lets callers
-    # turn it back on. Mirrors prod's disable_* knobs: it is a plain constructor
-    # flag (NOT env-driven) so it can be flipped per-recipe, e.g. from a
-    # --enable-rht CLI switch. No effect on the non-per-token (prod) path.
-    per_token_rht: bool = False
+    # turn it back on. Env-driven (NVTE_NVFP4_PER_TOKEN_RHT=1) so frameworks that
+    # only construct a default NVFP4BlockScaling (e.g. Megatron-Core) can flip it
+    # without code changes. No effect on the non-per-token path.
+    per_token_rht: bool = os.getenv("NVTE_NVFP4_PER_TOKEN_RHT", "0") == "1"
     # Per-token only: opt INTO stochastic rounding. Per-token otherwise
     # force-disables SR, but the per-token K2 encode kernel DOES implement SR
     # (Philox-dithered FP4 cast), so this flag re-enables it on the bwd-grad
-    # quantizer (mirrors prod, which only applies SR to fp4_quant_bwd_grad).
-    # Plain constructor flag (NOT env-driven). No effect on the prod path.
-    per_token_sr: bool = False
+    # quantizer (the default non-per-token recipe also applies SR to
+    # fp4_quant_bwd_grad only).
+    # Env-driven (NVTE_NVFP4_PER_TOKEN_SR=1) for the same reason as per_token_rht
+    # above. No effect on the non-per-token path.
+    per_token_sr: bool = os.getenv("NVTE_NVFP4_PER_TOKEN_SR", "0") == "1"
+    # Per-token only: quantize the forward WEIGHT with the per-tensor 2D cast
+    # (16x16 inner + scalar outer amax) instead of the per-token 1D cast, emitted in
+    # per-token layout so the per-token CUTLASS GEMM consumes it unchanged. 2D
+    # weight quant is transposition-invariant, so fwd (rowwise) and dgrad
+    # (columnwise) see the same weight, removing the 1D path's gradient bias.
+    # Env-driven (NVTE_NVFP4_PER_TOKEN_WEIGHT_2D=1); default off is byte-equal.
+    per_token_weight_2d: bool = os.getenv("NVTE_NVFP4_PER_TOKEN_WEIGHT_2D", "0") == "1"
     row_scaled_activation: bool = os.getenv("NVTE_NVFP4_ROW_SCALED_ACTIVATION", "0") == "1"
     nvfp4_4over6: str = os.getenv("NVTE_NVFP4_4OVER6", "none")
     nvfp4_4over6_e4m3_use_256: str = os.getenv("NVTE_NVFP4_4OVER6_E4M3_USE_256", "all")
@@ -670,9 +679,11 @@ class NVFP4BlockScaling(Recipe):
 
     def _make_repr(self) -> str:
         # Surface per-token state even when activated via env var on the
-        # base recipe (otherwise a per-token run looks identical to a prod
+        # base recipe (otherwise a per-token run looks identical to a per-tensor
         # run in logs, which is a debugging trap).
         per_token_repr = "per_token=True, " if self.nvfp4_per_token() else ""
+        if self.nvfp4_per_token() and self.per_token_weight_2d:
+            per_token_repr += "per_token_weight_2d=True, "
         return (
             f"recipe_type={self.__class__.__name__}, "
             f"{per_token_repr}"
@@ -694,7 +705,7 @@ class NVFP4BlockScaling(Recipe):
 @dataclass(repr=False)
 class NVFP4PerTokenBlockScaling(NVFP4BlockScaling):
     """
-    NVFP4 per-token cast variant that replaces the production prod 1A
+    NVFP4 per-token cast variant that replaces the default per-tensor 1A
     (single-tensor) and 2A (split_quantize) routes with the per-token
     fast-path (K1 vector amax + K2 encode+swizzle, plus a fused EVT GEMM
     that consumes per-row + per-col outer-amax vectors directly).
@@ -710,7 +721,7 @@ class NVFP4PerTokenBlockScaling(NVFP4BlockScaling):
     ``NVFP4Quantizer`` constructor):
       - ``disable_rht`` defaults True (per-token's per-row outer-amax
         granularity already mitigates the long-tail outliers RHT was
-        added to flatten in the prod NVFP4 path), but RHT is OPT-IN: set
+        added to flatten in the per-tensor NVFP4 path), but RHT is OPT-IN: set
         ``per_token_rht=True`` to re-enable it. The per-token cast kernel
         (``nvte_nvfp4_per_token_quantize``) supports RHT, and the C++
         ``NVFP4Quantizer`` ctor does NOT mutex it (only requires
@@ -719,8 +730,9 @@ class NVFP4PerTokenBlockScaling(NVFP4BlockScaling):
       - ``disable_stochastic_rounding`` defaults True, but SR is OPT-IN:
         set ``per_token_sr=True`` to re-enable it. The per-token K2 encode
         kernel implements SR (Philox-dithered FP4 cast); when enabled it is
-        applied to the bwd-grad quantizer only (mirrors prod, which only
-        sets SR on ``fp4_quant_bwd_grad``). The C++ ``NVFP4Quantizer`` ctor
+        applied to the bwd-grad quantizer only (matching the default per-tensor
+        recipe, which only sets SR on ``fp4_quant_bwd_grad``). The C++
+        ``NVFP4Quantizer`` ctor
         does NOT mutex it.
       - ``disable_2d_quantization`` is forced True (2D quant is mutex
         with per-token amax allocation).

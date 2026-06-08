@@ -140,8 +140,13 @@ class NVFP4Quantizer(Quantizer):
     rht_matrix_random_sign_mask_t: int
     rht_matrix: torch.Tensor
 
-    """Per-token NVFP4 cast (replaces prod 1A / 2A)."""
+    """Per-token NVFP4 cast (replaces the per-tensor 1A / 2A paths)."""
     per_token: bool
+
+    """Per-token weight only: emit a per-tensor 2D-quantized weight (16x16 inner +
+    scalar outer amax) dressed in per-token layout. See quantize_impl in
+    csrc/quantizer.cpp and recipe.per_token_weight_2d."""
+    per_token_weight_2d: bool
 
     def __init__(
         self,
@@ -160,6 +165,7 @@ class NVFP4Quantizer(Quantizer):
         nvfp4_4over6_err_mode: str = "MAE",
         with_random_sign_mask: bool = True,
         per_token: bool = False,
+        per_token_weight_2d: bool = False,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.dtype = DType.cast(fp4_dtype)
@@ -182,6 +188,7 @@ class NVFP4Quantizer(Quantizer):
         )
         self.rht_matrix = get_rht_matrix(with_random_sign_mask, torch.cuda.current_device())
         self.per_token = per_token
+        self.per_token_weight_2d = per_token_weight_2d
 
         # Per-token mode imposes a small set of feature mutex constraints.
         # Most of these are "not-yet-implemented" rather than fundamental.
@@ -199,6 +206,21 @@ class NVFP4Quantizer(Quantizer):
                 raise ValueError(
                     "NVFP4 per-token does not yet support amax reduction "
                     "(TODO: per-row/per-col vector allreduce)."
+                )
+        # The per-token weight-2D path reuses the per-tensor 2D cast (16x16 inner
+        # + scalar outer amax broadcast to the per-token vectors); only meaningful
+        # inside per-token mode. RHT / SR are rejected on THIS (weight) quantizer
+        # only -- they apply to activation / gradient quantizers, never the
+        # weight, so a per-token+rht / +sr recipe still runs (those flags land on
+        # other slots). This guard just forbids one inconsistent weight quantizer.
+        if self.per_token_weight_2d:
+            if not self.per_token:
+                raise ValueError("per_token_weight_2d requires per_token=True.")
+            if self.with_rht:
+                raise ValueError("NVFP4 per-token weight-2D does not support RHT.")
+            if self.stochastic_rounding:
+                raise ValueError(
+                    "NVFP4 per-token weight-2D does not support stochastic rounding."
                 )
 
     def __getstate__(self):
@@ -246,6 +268,7 @@ class NVFP4Quantizer(Quantizer):
             nvfp4_e4m3_max=self.nvfp4_e4m3_max,
             nvfp4_4over6_err_mode=self.nvfp4_4over6_err_mode,
             per_token=self.per_token,
+            per_token_weight_2d=self.per_token_weight_2d,
         )
         quantizer.internal = self.internal
         quantizer.optimize_for_gemm = self.optimize_for_gemm

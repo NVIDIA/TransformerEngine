@@ -35,6 +35,7 @@ from transformer_engine.pytorch.custom_recipes.quantization_nvfp4_per_token impo
     nvfp4_per_token_encode,
     nvfp4_per_token_quantize,
 )
+from transformer_engine.pytorch import NVFP4Quantizer
 
 
 def _has_sm100() -> bool:
@@ -975,7 +976,7 @@ def test_per_token_gemm_with_fused_swizzle_matches_unswizzled(M: int, K: int) ->
 #   * Unbiasedness: averaging the dequantized output over many independent SR
 #     draws has STRICTLY lower RMSE-vs-input than the single round-to-nearest
 #     (RN) result -- the defining SR property (trades per-sample error for zero
-#     bias), same assertion the prod per-tensor test makes.
+#     bias), same assertion the per-tensor test makes.
 #   * Non-determinism / RN-determinism: two SR draws with different rng_state
 #     differ; two RN casts (with_sr=False) are byte-identical.
 # The per-token outer scale is a per-row amax, so dequant reuses
@@ -1070,3 +1071,153 @@ def test_per_token_sr_nondeterministic_rn_deterministic() -> None:
     # And SR should still be close to RN (only the residual bits are dithered).
     frac_diff = (q_sr0 != q_rn0).float().mean().item()
     assert frac_diff < 0.6, f"SR changed too many codes vs RN ({frac_diff:.2%}); suspicious."
+
+
+# (10) Per-token weight-2D (Route A). The forward WEIGHT uses the per-tensor 2D
+# cast (16x16 inner tile + scalar outer amax) re-dressed in per-token layout.
+# These tests assert the cast drives the SAME nvte 2D path as a per-tensor 2D
+# weight: FP4 data + e4m3 inner SF are byte-identical, and only the outer amax
+# differs (per-tensor scalar vs the same scalar broadcast across the per-token
+# (M,)/(K,) vectors).
+
+_WEIGHT_2D_SHAPES = [(128, 128), (256, 256), (256, 512), (512, 1024), (1024, 1024)]
+
+
+def _make_weight_2d_quantizer(per_token: bool, per_token_weight_2d: bool) -> NVFP4Quantizer:
+    """Weight quantizer with rowwise + columnwise usage (fwd + dgrad)."""
+    return NVFP4Quantizer(
+        fp4_dtype=tex.DType.kFloat4E2M1,
+        rowwise=True,
+        columnwise=True,
+        with_rht=False,
+        with_post_rht_amax=False,
+        with_2d_quantization=(per_token_weight_2d is False and per_token is False),
+        per_token=per_token,
+        per_token_weight_2d=per_token_weight_2d,
+    )
+
+
+def _quantize_weight_2d(quantizer: NVFP4Quantizer, w: torch.Tensor):
+    dst = quantizer.make_empty(w.shape, dtype=w.dtype, device=w.device, requires_grad=False)
+    return quantizer.update_quantized(w, dst)
+
+
+@_GATED_SM100
+@pytest.mark.parametrize("M,K", _WEIGHT_2D_SHAPES)
+def test_per_token_weight_2d_matches_per_tensor_2d_bytes(M: int, K: int) -> None:
+    """Per-token-weight-2D FP4 data + inner SF == per-tensor-2D, bit-for-bit.
+
+    Both paths drive the identical ``nvte_quantize_v2`` 2D cast on the same
+    input, so data and scale-factor bytes must match exactly. Only the outer
+    amax buffer differs (asserted separately below).
+    """
+    device = "cuda"
+    torch.manual_seed(0)
+    torch.cuda.manual_seed(0)
+    w = torch.randn((M, K), dtype=torch.bfloat16, device=device)
+
+    # Per-tensor 2D weight (per_token=False, with_2d_quantization=True).
+    per_tensor = _quantize_weight_2d(
+        _make_weight_2d_quantizer(per_token=False, per_token_weight_2d=False), w
+    )
+    # Per-token weight-2D (per_token=True, per_token_weight_2d=True).
+    pt = _quantize_weight_2d(
+        _make_weight_2d_quantizer(per_token=True, per_token_weight_2d=True), w
+    )
+
+    # The per-token tensor must advertise per-token layout (drives GEMM dispatch).
+    assert pt._per_token is True
+    assert per_tensor._per_token is False
+
+    # FP4 data: byte-identical (rowwise + columnwise/transpose).
+    assert torch.equal(
+        per_tensor._rowwise_data.view(torch.uint8), pt._rowwise_data.view(torch.uint8)
+    ), "rowwise FP4 data differs between per-tensor-2D and per-token-weight-2D"
+    assert torch.equal(
+        per_tensor._columnwise_data.view(torch.uint8), pt._columnwise_data.view(torch.uint8)
+    ), "columnwise FP4 data differs between per-tensor-2D and per-token-weight-2D"
+
+    # Inner e4m3 scale factors: byte-identical (16-row-replicated 2D tiles).
+    assert torch.equal(
+        per_tensor._rowwise_scale_inv.view(torch.uint8), pt._rowwise_scale_inv.view(torch.uint8)
+    ), "rowwise inner scale factors differ"
+    assert torch.equal(
+        per_tensor._columnwise_scale_inv.view(torch.uint8),
+        pt._columnwise_scale_inv.view(torch.uint8),
+    ), "columnwise inner scale factors differ"
+
+
+@_GATED_SM100
+@pytest.mark.parametrize("M,K", _WEIGHT_2D_SHAPES)
+def test_per_token_weight_2d_amax_is_scalar_broadcast(M: int, K: int) -> None:
+    """The per-token outer amax is the per-tensor scalar amax broadcast to (M,)/(K,).
+
+    The per-token CUTLASS GEMM reads a per-row / per-col outer alpha vector; for
+    a 2D-quantized weight that vector must be the single tensor amax replicated,
+    so fwd (rowwise) and dgrad (columnwise) see the same outer scale.
+    """
+    device = "cuda"
+    torch.manual_seed(0)
+    torch.cuda.manual_seed(0)
+    w = torch.randn((M, K), dtype=torch.bfloat16, device=device)
+
+    per_tensor = _quantize_weight_2d(
+        _make_weight_2d_quantizer(per_token=False, per_token_weight_2d=False), w
+    )
+    pt = _quantize_weight_2d(
+        _make_weight_2d_quantizer(per_token=True, per_token_weight_2d=True), w
+    )
+
+    # Reference: the single scalar tensor amax (per-tensor stores it as length-1).
+    per_tensor_amax = per_tensor._amax_rowwise.reshape(-1)[0].item()
+
+    pt_amax_row = pt._amax_rowwise.reshape(-1)
+    pt_amax_col = pt._amax_columnwise.reshape(-1)
+
+    # Per-token amax buffers are full-length vectors (not scalars).
+    assert pt_amax_row.numel() == M, (pt_amax_row.numel(), M)
+    assert pt_amax_col.numel() == K, (pt_amax_col.numel(), K)
+
+    # Every entry equals the single tensor amax (constant per-row / per-col alpha).
+    assert torch.all(pt_amax_row == pt_amax_row[0]), "rowwise outer amax is not constant"
+    assert torch.all(pt_amax_col == pt_amax_col[0]), "columnwise outer amax is not constant"
+    assert pt_amax_row[0].item() == pytest.approx(per_tensor_amax, rel=0, abs=0), (
+        pt_amax_row[0].item(),
+        per_tensor_amax,
+    )
+    assert pt_amax_col[0].item() == pytest.approx(per_tensor_amax, rel=0, abs=0), (
+        pt_amax_col[0].item(),
+        per_tensor_amax,
+    )
+
+
+@_GATED_SM100
+@pytest.mark.parametrize("M,K", [(256, 256), (512, 1024)])
+def test_per_token_weight_2d_differs_from_1d(M: int, K: int) -> None:
+    """Sanity: the weight-2D cast actually changes the bytes vs per-token 1D.
+
+    Guards against the flag silently no-op'ing (which would make the
+    byte-equality test above pass trivially against the wrong baseline).
+    """
+    device = "cuda"
+    torch.manual_seed(0)
+    torch.cuda.manual_seed(0)
+    w = torch.randn((M, K), dtype=torch.bfloat16, device=device)
+
+    pt1d = _quantize_weight_2d(
+        _make_weight_2d_quantizer(per_token=True, per_token_weight_2d=False), w
+    )
+    pt2d = _quantize_weight_2d(
+        _make_weight_2d_quantizer(per_token=True, per_token_weight_2d=True), w
+    )
+
+    # 1D uses per-row vector outer amax (generally non-constant); 2D is constant.
+    amax1d = pt1d._amax_rowwise.reshape(-1)
+    assert amax1d.numel() == M
+    # With random data the per-row amaxes are essentially never all identical.
+    assert not torch.all(amax1d == amax1d[0]), "per-token 1D weight amax unexpectedly constant"
+
+    # The packed FP4 codes should differ between the two casts.
+    assert not torch.equal(
+        pt1d._rowwise_data.view(torch.uint8), pt2d._rowwise_data.view(torch.uint8)
+    ), "per-token 1D and 2D weight produced identical FP4 data (flag is a no-op?)"

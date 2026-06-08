@@ -678,6 +678,16 @@ def general_grouped_gemm(
         for i in range(num_gemms):
             if out_views[i].numel() == 0:
                 continue
+            # An expert that received 0 tokens this step has m_splits[i] == 0.
+            # The token count is the GEMM contraction dim for wgrad (layout NT)
+            # whose output is the weight grad [out, in] -> nonzero numel, so the
+            # numel guard above misses it and the per-token cutlass kernel would
+            # assert M > 0. Skip the launch; the empty-expert wgrad is the zero
+            # matrix (or a no-op add when accumulating into main_grad).
+            if m_splits is not None and m_splits[i] == 0:
+                if not accumulate:
+                    out_views[i].zero_()
+                continue
             general_gemm(
                 A[i],
                 B[i],
