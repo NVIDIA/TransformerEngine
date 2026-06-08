@@ -372,7 +372,7 @@ class OperationFuser:
         return fused_ops
 
     @staticmethod
-    def _match_basic_ops(
+    def _map_to_basic_ops(
         fused_ops: Sequence[FusibleOperation],
         basic_ops: Sequence[BasicOperation],
     ) -> list[tuple[FusibleOperation, list[int]]]:
@@ -475,7 +475,7 @@ class OperationFuser:
         )
 
         # Apply forward-only and backward-only fusions
-        self._forward_ops = OperationFuser._match_basic_ops(
+        self._forward_ops = OperationFuser._map_to_basic_ops(
             OperationFuser._apply_fusions(
                 joint_ops,
                 OperationFuser.forward_fusion_functions,
@@ -483,7 +483,7 @@ class OperationFuser:
             ),
             self._basic_ops,
         )
-        self._backward_ops = OperationFuser._match_basic_ops(
+        self._backward_ops = OperationFuser._map_to_basic_ops(
             OperationFuser._apply_fusions(
                 joint_ops,
                 OperationFuser.backward_fusion_functions,
