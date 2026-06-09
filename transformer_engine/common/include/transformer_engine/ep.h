@@ -48,6 +48,10 @@ typedef struct {
   /*! Widest token dtype the group will dispatch; sizes staging buffers.
    *  Per-dispatch tensors may use any dtype with element size <= this. */
   NVTEDType max_token_dtype;
+  /*! Zero-copy dispatch/combine. When nonzero, payload tensors must be backed
+   *  by NVTECommWindow handles and transfer in place (no staging copies);
+   *  0 (default) = staged. */
+  int zero_copy;
 } NVTEEpGroupConfig;
 
 /*! \brief Per-layer configuration consumed by nvte_ep_handle_mem_size and
@@ -142,7 +146,7 @@ void nvte_ep_dispatch(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor tok
 /*! \brief Scatter-sum expert outputs back to originating ranks.
  *
  *  Inverse of dispatch: the top_k destination slots for token t are summed
- *  into result[t]. Sums are unweighted: pre-scale expert_out by
+ *  into result[t]. Sums are unweighted; pre-scale expert_out by
  *  recv_topk_weights (and the valid-slot mask) before calling. Requires a
  *  prior nvte_ep_prepare on this handle_mem.
  *
