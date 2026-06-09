@@ -59,15 +59,18 @@ constexpr NVTECommWindow kNoWindow = {nullptr, 0};
 
 // Resolve ``t`` to an NCCL symm-mem window for the zero-copy one-sided path.
 // Returns ``kNoWindow`` when symm-mem support isn't compiled in, zero-copy is
-// disabled, no group is set, or ``t`` isn't symm-mem-backed. Currently unused
-// at per-step call sites (they hardcode kNoWindow); kept so flipping
-// ``g_zero_copy_enabled`` is the only change needed once the backend's
-// symm-mem IO path is exposed.
-[[maybe_unused]] NVTECommWindow maybe_make_window(const at::Tensor& t) {
+// disabled, no group is set, or ``t`` isn't symm-mem-backed; callers pass the
+// resulting window unconditionally to the backend.
+NVTECommWindow maybe_make_window(const at::Tensor& t) {
 #ifdef NCCL_HAS_SYMMEM_SUPPORT
   if (!g_zero_copy_enabled.load(std::memory_order_relaxed)) return kNoWindow;
   if (g_ep_group_name.empty()) return kNoWindow;
-  auto sm = c10d::symmetric_memory::rendezvous(t, g_ep_group_name);
+  c10::intrusive_ptr<c10d::symmetric_memory::SymmetricMemory> sm;
+  try {
+    sm = c10d::symmetric_memory::rendezvous(t, g_ep_group_name);
+  } catch (const std::exception&) {
+    return kNoWindow;  // Tensor not symm-mem-backed; fall back to staged copy.
+  }
   if (sm == nullptr) return kNoWindow;
   auto* nccl_sm = dynamic_cast<c10d::symmetric_memory::NCCLSymmetricMemory*>(sm.get());
   NVTE_CHECK(nccl_sm != nullptr,
@@ -212,9 +215,13 @@ void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
 
   // top_k / alignment are carried by the cached layer_cfg seeded at ep_prepare;
   // per-step ops look them up by handle_mem pointer in the backend.
-  nvte_ep_dispatch(handle_mem_te.data(), topk_idx_te.data(), tokens_te.data(), kNoWindow,
-                   topk_w_te.data(), kNoWindow, recv_tokens_te.data(), kNoWindow,
-                   recv_topk_w_te.data(), kNoWindow, stream);
+  NVTECommWindow tokens_win = maybe_make_window(tokens);
+  NVTECommWindow topk_w_win = maybe_make_window(topk_weights);
+  NVTECommWindow recv_tokens_win = maybe_make_window(recv_tokens);
+  NVTECommWindow recv_topk_w_win = maybe_make_window(recv_topk_weights);
+  nvte_ep_dispatch(handle_mem_te.data(), topk_idx_te.data(), tokens_te.data(), tokens_win,
+                   topk_w_te.data(), topk_w_win, recv_tokens_te.data(), recv_tokens_win,
+                   recv_topk_w_te.data(), recv_topk_w_win, stream);
 }
 
 void ep_combine(at::Tensor handle_mem, at::Tensor expert_out, at::Tensor result) {
@@ -238,7 +245,9 @@ void ep_combine(at::Tensor handle_mem, at::Tensor expert_out, at::Tensor result)
       makeTransformerEngineTensor(expert_out.data_ptr(), Shape{recv_pr, H}, eo_dtype);
   auto result_te = makeTransformerEngineTensor(result.data_ptr(), Shape{T_flat, H}, eo_dtype);
 
-  nvte_ep_combine(handle_mem_te.data(), expert_out_te.data(), kNoWindow, result_te.data(), stream);
+  NVTECommWindow expert_out_win = maybe_make_window(expert_out);
+  nvte_ep_combine(handle_mem_te.data(), expert_out_te.data(), expert_out_win, result_te.data(),
+                  stream);
 }
 
 void ep_dispatch_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor g_recv_topk_weights,
@@ -274,8 +283,10 @@ void ep_dispatch_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor g_recv_t
   auto grad_topk_w_te = makeTransformerEngineTensor(grad_topk_weights.data_ptr(),
                                                     Shape{T_flat, topk_n}, DType::kFloat32);
 
-  nvte_ep_dispatch_bwd(handle_mem_te.data(), grad_te.data(), kNoWindow, g_recv_w_te.data(),
-                       kNoWindow, grad_tokens_te.data(), grad_topk_w_te.data(), stream);
+  NVTECommWindow grad_win = maybe_make_window(grad);
+  NVTECommWindow g_recv_w_win = maybe_make_window(g_recv_topk_weights);
+  nvte_ep_dispatch_bwd(handle_mem_te.data(), grad_te.data(), grad_win, g_recv_w_te.data(),
+                       g_recv_w_win, grad_tokens_te.data(), grad_topk_w_te.data(), stream);
 }
 
 void ep_combine_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor grad_expert_out) {
@@ -299,8 +310,10 @@ void ep_combine_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor grad_expe
   auto grad_eo_te =
       makeTransformerEngineTensor(grad_expert_out.data_ptr(), Shape{recv_pr, H}, g_dtype);
 
-  nvte_ep_combine_bwd(handle_mem_te.data(), grad_te.data(), kNoWindow, grad_eo_te.data(),
-                      kNoWindow, stream);
+  NVTECommWindow grad_win = maybe_make_window(grad);
+  NVTECommWindow grad_eo_win = maybe_make_window(grad_expert_out);
+  nvte_ep_combine_bwd(handle_mem_te.data(), grad_te.data(), grad_win, grad_eo_te.data(),
+                      grad_eo_win, stream);
 }
 
 void register_ep_bindings(pybind11::module_& m) {
