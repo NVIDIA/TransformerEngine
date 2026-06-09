@@ -182,17 +182,17 @@ def make_reference_and_test_tensors(
         quantizer = Float8Quantizer(
             scale=torch.ones(1, dtype=torch.float32, device=test_device).squeeze(),
             amax=torch.zeros(1, dtype=torch.float32, device=test_device),
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=te.DType.kFloat8E4M3,
         )
         test = quantizer(test)
     elif quantization == "fp8_current_scaling":
         quantizer = Float8CurrentScalingQuantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=te.DType.kFloat8E4M3,
             device=test_device,
         )
         test = quantizer(test)
     elif quantization == "mxfp8":
-        test = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)(test)
+        test = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)(test)
     elif quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_rht"):
         tensor_type = "input"
         if quantizer_role is not None:
@@ -1934,9 +1934,9 @@ class TestBasicOps:
         # Expected numerical error
         tols = dtype_tols(dtype)
         if quantized_compute and quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
-            tols = dtype_tols(tex.DType.kFloat4E2M1)
+            tols = dtype_tols(te.DType.kFloat4E2M1)
         elif quantized_compute:
-            tols = dtype_tols(tex.DType.kFloat8E4M3)
+            tols = dtype_tols(te.DType.kFloat8E4M3)
 
         # Check results
         assert_close(y_test, y_ref, **tols)
@@ -5117,6 +5117,151 @@ class TestCustomOps:
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
         torch.testing.assert_close(dw_test, w_ref.grad, **tols)
 
+    def test_custom_forward_backward_fused_op(
+        self,
+        *,
+        shape: Iterable[int] = (7, 11),
+        dtype: torch.dtype = torch.float32,
+        device: torch.device = "cuda",
+    ):
+        """Custom joint forward-backward fused op
+
+        A single fused op implements both ``fuser_forward`` and
+        ``fuser_backward``. Because the same op owns both passes, the
+        forward saves reduced state (just the linear input and weight)
+        and lets its own backward recompute the SiLU input rather than
+        saving it.
+
+        """
+
+        class CustomLinearSiLU(te.ops.FusedOperation):
+            """Custom joint fused op for GEMM + SiLU"""
+
+            _enabled = True
+
+            def __init__(self, *, linear, silu) -> None:
+                super().__init__((linear, silu))
+
+            def fuser_forward(
+                self,
+                basic_op_ctxs: list[OperationContext],
+                input_: torch.Tensor,
+                **unused,
+            ) -> torch.Tensor:
+                weight = self.basic_ops[0].weight
+                dtype = weight.dtype
+
+                # Forward compute
+                y = torch.matmul(input_, weight.T)
+                out = torch.nn.functional.silu(y)
+
+                # Save reduced state for the joint backward. Note that we
+                # do not save the SiLU input ``y``; the backward recomputes
+                # it from the linear inputs.
+                linear_op_ctx = basic_op_ctxs[0]
+                linear_op_ctx.save_for_backward(input_, weight)
+                linear_op_ctx.dtype = dtype
+
+                return out, [(), ()]
+
+            def fuser_backward(
+                self,
+                basic_op_ctxs: list[OperationContext],
+                grad_output: torch.Tensor,
+                **unused,
+            ) -> torch.Tensor:
+
+                # Load reduced state from the joint forward
+                linear_op_ctx = basic_op_ctxs[0]
+                x, w = linear_op_ctx.saved_tensors
+                dtype = linear_op_ctx.dtype
+
+                # Recompute SiLU input and its gradient in FP64
+                x = x.double()
+                w = w.double()
+                dout = grad_output.double()
+                y = torch.matmul(x, w.T)
+                s = torch.sigmoid(y)
+                dsilu = s * (1 + y * (1 - s))
+                dy = dout * dsilu
+
+                # Linear backward
+                dx = torch.matmul(dy, w).to(dtype=dtype)
+                dw = torch.matmul(dy.T, x).to(dtype=dtype)
+
+                # grad_input, grad params per basic op, grad extra inputs per basic op
+                return dx, [(dw,), ()], [(), ()]
+
+            @staticmethod
+            def fuse_ops(
+                ops: list[FusibleOperation],
+                **unused,
+            ) -> list[FusibleOperation]:
+                """Apply fusion the first time this function is called"""
+                if CustomLinearSiLU._enabled:
+                    CustomLinearSiLU._enabled = False
+                    op = CustomLinearSiLU(linear=ops[0], silu=ops[1])
+                    return [op] + ops[2:]
+                return ops
+
+        # Random data
+        x_ref, x_test = make_reference_and_test_tensors(
+            shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        w_ref, w_test = make_reference_and_test_tensors(
+            (shape[-1], shape[-1]),
+            test_dtype=dtype,
+            test_device=device,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Plain PyTorch implementation
+        y_ref = torch.nn.functional.linear(x_ref, w_ref)
+        y_ref = torch.nn.functional.silu(y_ref)
+        y_ref.backward(dy_ref)
+
+        # Implementation with joint fusible operation
+        te.ops.register_forward_backward_fusion(CustomLinearSiLU.fuse_ops)
+        model = te.ops.Sequential(
+            te.ops.Linear(shape[-1], shape[-1], bias=False),
+            te.ops.SiLU(),
+        )
+        with torch.no_grad():
+            model[0].weight.copy_(w_test)
+            del w_test
+        y_test = model(x_test)
+        y_test.backward(dy_test)
+
+        # Check that operations have been fused in both passes, using the
+        # same fused op object
+        forward_ops = model._module_groups[0]._forward_ops
+        backward_ops = model._module_groups[0]._backward_ops
+        assert len(forward_ops) == 1
+        assert isinstance(forward_ops[0][0], CustomLinearSiLU)
+        assert len(backward_ops) == 1
+        assert isinstance(backward_ops[0][0], CustomLinearSiLU)
+        assert forward_ops[0][0] is backward_ops[0][0]
+
+        # Expected numerical error
+        tols = dtype_tols(dtype)
+        if dtype == torch.float32:
+            tols = dtype_tols(torch.float16)  # TF32 GEMM
+
+        # Check results
+        y_test = y_test.to(dtype=torch.float64, device="cpu")
+        dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
+        dw_test = model[0].weight.grad.to(dtype=torch.float64, device="cpu")
+        torch.testing.assert_close(y_test, y_ref, **tols)
+        torch.testing.assert_close(dx_test, x_ref.grad, **tols)
+        torch.testing.assert_close(dw_test, w_ref.grad, **tols)
+
 
 class TestTrainingLoops:
 
@@ -5364,7 +5509,7 @@ def test_grouped_gemm_quant_cute_matches_mxfp8_quantized() -> None:
     total_m = num_groups * m
     split_sizes = torch.full((num_groups,), m, device=device, dtype=torch.int64)
 
-    q = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=False)
+    q = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3, rowwise=True, columnwise=False)
     q.optimize_for_gemm = False
 
     torch.manual_seed(0)

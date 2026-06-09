@@ -16,6 +16,8 @@ from transformer_engine.pytorch.torch_version import torch_version
 assert torch_version() >= (2, 1), f"Minimum torch version 2.1 required. Found {torch_version()}."
 
 load_framework_extension("torch")
+from transformer_engine.pytorch import constants
+from transformer_engine.pytorch.constants import DType
 from transformer_engine.pytorch.module import LayerNormLinear
 from transformer_engine.pytorch.module import Linear
 from transformer_engine.pytorch.module import LayerNormMLP
@@ -134,7 +136,10 @@ try:
             MXFP8Quantizer,
             NVFP4Quantizer,
             Float8BlockQuantizer,
-            # pybind11 enum used as Quantizer.dtype
+            # Python IntEnum used as Quantizer.dtype.
+            DType,
+            # pybind11 enum used as Quantizer.dtype.
+            # Kept for backward compatibility.
             tex.DType,
             # __reduce_ex__ reconstructors (module-level functions).
             _make_float8_tensor_in_reduce_ex,

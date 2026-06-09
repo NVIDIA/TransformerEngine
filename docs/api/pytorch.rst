@@ -59,6 +59,12 @@ PyTorch
 
 .. autoapifunction:: transformer_engine.pytorch.deinterleave_glu_tensor
 
+Data types
+----------
+
+.. autoapiclass:: transformer_engine.pytorch.DType()
+  :members: kByte, kInt32, kFloat32, kFloat16, kBFloat16, kFloat8E4M3, kFloat8E5M2, kFloat4E2M1
+
 Recipe availability
 -------------------
 
@@ -169,6 +175,8 @@ Operation fuser
 .. autoapifunction:: transformer_engine.pytorch.ops.register_forward_fusion
 
 .. autoapifunction:: transformer_engine.pytorch.ops.register_backward_fusion
+
+.. autoapifunction:: transformer_engine.pytorch.ops.register_forward_backward_fusion
 
 .. autoapiclass:: transformer_engine.pytorch.ops.Linear
 

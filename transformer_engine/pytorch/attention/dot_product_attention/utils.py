@@ -259,6 +259,14 @@ class AttentionParams:
         Whether support for cuda graph capture is needed or not.
     num_splits : int, default = 1
         The number of kernels to split attention to.
+    fp8_output : bool, default = False
+        Whether output is requested in FP8.
+    checkpoint_core_attention : bool, default = False
+        Whether core attention is recomputed during backward.
+    has_score_mod : bool, default = False
+        Whether a score_mod callback was provided.
+    has_score_mod_bprop : bool, default = False
+        Whether a score_mod bprop callback was provided.
     """
 
     qkv_type: Union[torch.Tensor, Float8Tensor] = torch.Tensor
@@ -292,6 +300,10 @@ class AttentionParams:
     return_max_logit: bool = False
     cuda_graph: bool = False
     num_splits: int = 1
+    fp8_output: bool = False
+    checkpoint_core_attention: bool = False
+    has_score_mod: bool = False
+    has_score_mod_bprop: bool = False
 
     def __eq__(self, other):
         """
@@ -307,7 +319,7 @@ class AttentionParams:
             if fname != "fp8_meta":
                 if sf != of:
                     return False
-            elif sf.get("recipe", None) != of.get("recipe", None):
+            elif (sf or {}).get("recipe", None) != (of or {}).get("recipe", None):
                 return False
         return True
 
@@ -370,6 +382,10 @@ def get_attention_backend(
     return_max_logit = attention_params.return_max_logit
     cuda_graph = attention_params.cuda_graph
     num_splits = attention_params.num_splits
+    fp8_output = attention_params.fp8_output
+    checkpoint_core_attention = attention_params.checkpoint_core_attention
+    has_score_mod = attention_params.has_score_mod
+    has_score_mod_bprop = attention_params.has_score_mod_bprop
 
     # Run config
     logger = logging.getLogger("DotProductAttention")
@@ -435,7 +451,7 @@ def get_attention_backend(
     # regardless of whether FA2 or FA3 is installed. If FA2 or FA3 is not installed but is
     # necessary for performance/functionality, a warning will be issued to prompt users to
     # install an appropriate FA version.
-    qkv_format, q_format, _ = get_qkv_format(qkv_layout, inference_params)
+    qkv_format, q_format, kv_format = get_qkv_format(qkv_layout, inference_params)
 
     # Filter: Environment variables
     use_flash_attention = int(os.getenv("NVTE_FLASH_ATTN", "1"))
@@ -455,6 +471,18 @@ def get_attention_backend(
         logger.debug("Disabling FusedAttention due to NVTE_FUSED_ATTN=0")
     if not use_unfused_attention:
         logger.debug("Disabling UnfusedDotProductAttention due to NVTE_UNFUSED_ATTN=0")
+
+    def _any_flash_attention_enabled() -> bool:
+        return bool(
+            use_flash_attention
+            or use_flash_attention_2
+            or use_flash_attention_3
+            or use_flash_attention_4
+        )
+
+    def _disable_all_flash_attention() -> None:
+        nonlocal use_flash_attention
+        use_flash_attention = False
 
     # Filter: Compute capability
     if device_compute_capability < (8, 0):
@@ -650,6 +678,72 @@ def get_attention_backend(
             use_unfused_attention = False
             logger.debug("Disabling all backends for max_logit with FP8 attention")
 
+    # Filter: score_mod
+    if has_score_mod_bprop and not has_score_mod:
+        logger.debug("Disabling all backends because score_mod_bprop requires score_mod")
+        _disable_all_flash_attention()
+        use_fused_attention = False
+        use_unfused_attention = False
+    if has_score_mod:
+        if _any_flash_attention_enabled():
+            logger.debug("Disabling FlashAttention for score_mod")
+            _disable_all_flash_attention()
+        if use_unfused_attention:
+            logger.debug("Disabling UnfusedDotProductAttention for score_mod")
+            use_unfused_attention = False
+
+        score_mod_unsupported_reasons = []
+        if qkv_dtype not in [torch.float16, torch.bfloat16]:
+            score_mod_unsupported_reasons.append(
+                f"unsupported qkv_dtype = {qkv_dtype}; supported: torch.float16, torch.bfloat16"
+            )
+        if qkv_type is not torch.Tensor:
+            score_mod_unsupported_reasons.append(
+                f"unsupported qkv_type = {qkv_type}; supported: torch.Tensor"
+            )
+        if fp8:
+            score_mod_unsupported_reasons.append("FP8 DotProductAttention is enabled")
+        if fp8_output:
+            score_mod_unsupported_reasons.append("fp8_output is enabled")
+        if inference_params is not None:
+            score_mod_unsupported_reasons.append("KV caching is enabled")
+        if context_parallel:
+            score_mod_unsupported_reasons.append("context parallelism is enabled")
+        if "thd" in (qkv_format, q_format, kv_format):
+            score_mod_unsupported_reasons.append(
+                f"unsupported QKV format: q_format = {q_format}, kv_format = {kv_format}"
+            )
+        if pad_between_seqs:
+            score_mod_unsupported_reasons.append("pad_between_seqs is enabled")
+        if attn_mask_type != "no_mask":
+            score_mod_unsupported_reasons.append(f"attn_mask_type = {attn_mask_type}")
+        if window_size is not None and window_size != (-1, -1):
+            score_mod_unsupported_reasons.append(f"window_size = {window_size}")
+        if core_attention_bias_type != "no_bias":
+            score_mod_unsupported_reasons.append(
+                f"core_attention_bias_type = {core_attention_bias_type}"
+            )
+        if alibi_slopes_shape is not None:
+            score_mod_unsupported_reasons.append("ALiBi slopes were provided")
+        if softmax_type != "vanilla":
+            score_mod_unsupported_reasons.append(f"softmax_type = {softmax_type}")
+        if attention_dropout != 0.0:
+            score_mod_unsupported_reasons.append(f"attention_dropout = {attention_dropout}")
+        if return_max_logit:
+            score_mod_unsupported_reasons.append("return_max_logit is enabled")
+        if checkpoint_core_attention:
+            score_mod_unsupported_reasons.append("checkpoint_core_attention is enabled")
+        if cuda_graph:
+            score_mod_unsupported_reasons.append("CUDA graph capture is enabled")
+        if num_splits != 1:
+            score_mod_unsupported_reasons.append(f"num_splits = {num_splits}")
+        if score_mod_unsupported_reasons and use_fused_attention:
+            logger.debug(
+                "Disabling FusedAttention for score_mod because %s",
+                "; ".join(score_mod_unsupported_reasons),
+            )
+            use_fused_attention = False
+
     # Filter: KV cache
     # backend  | precision      |    KV cache     | architecture | qkv_format    | page_size
     # ---------------------------------------------------------------------------------------
@@ -722,10 +816,6 @@ def get_attention_backend(
 
     # Filter: Head dimension
     if head_dim_qk != head_dim_v:
-        if use_flash_attention_2 and FlashAttentionUtils.is_installed:
-            logger.debug("Disabling FlashAttention 2 as it does not support MLA.")
-            use_flash_attention_2 = False
-
         qkv_layout_group = qkv_layout.replace("b", "").replace("s", "").replace("t", "")
         if use_fused_attention and qkv_layout_group != "hd_hd_hd":
             logger.debug(
@@ -747,18 +837,27 @@ def get_attention_backend(
                 )
             use_fused_attention = False
 
+    fa2_padded_head_dim = max(head_dim_qk, head_dim_v)
     if (  # pylint: disable=too-many-boolean-expressions
         use_flash_attention_2
         and FlashAttentionUtils.is_installed
-        and (head_dim_qk > 256 or head_dim_qk % 8 != 0)
+        and (
+            fa2_padded_head_dim > 256
+            or fa2_padded_head_dim % 8 != 0
+            or (
+                fa2_padded_head_dim > 192
+                and device_compute_capability not in ((8, 0), (9, 0), (10, 0), (12, 0))
+            )
+        )
     ):
         logger.debug(
             "Disabling FlashAttention 2 due to unsupported head_dim_qk and head_dim_v. "
-            "Supported: head_dim_qk = head_dim_v, head_dim_qk %%8 = 0, "
-            "head_dim_qk <= 256. "
-            "Found: head_dim_qk = %s, head_dim_v = %s, on sm%s.",
+            "Supported after padding: padded head_dim %%8 = 0, padded head_dim <= 256 "
+            "(>192 requires sm80/90/100+). "
+            "Found: head_dim_qk = %s, head_dim_v = %s, padded head_dim = %s, on sm%s.",
             head_dim_qk,
             head_dim_v,
+            fa2_padded_head_dim,
             ".".join([str(i) for i in device_compute_capability]),
         )
         use_flash_attention_2 = False
@@ -1253,6 +1352,8 @@ def get_attention_backend(
     # Filter: cuDNN support
     fused_attention_backend = None
     if use_fused_attention:
+        # ``DType`` is implicitly convertible to ``transformer_engine::DType``
+        # on the C++ side, so pass it straight to the pybind function.
         q_type = TE_DType[qkv_dtype]
         kv_type = q_type
         if fp8 and fp8_meta["recipe"].fp8_dpa:
@@ -1281,6 +1382,14 @@ def get_attention_backend(
         )
         if fused_attention_backend == FusedAttnBackend["No_Backend"]:
             logger.debug("Disabling FusedAttention as no backend supports the provided input")
+            use_fused_attention = False
+            fused_attention_backend = None
+        elif has_score_mod and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]:
+            logger.debug(
+                "Disabling FusedAttention for score_mod because sub-backend %s is not "
+                "F16/BF16 arbitrary-seqlen",
+                int(fused_attention_backend),
+            )
             use_fused_attention = False
             fused_attention_backend = None
     # Filter: Determinism

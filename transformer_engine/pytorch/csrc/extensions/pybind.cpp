@@ -164,12 +164,35 @@ void init_router_bindings(pybind11::module &m) {
         py::arg("grad_aux_loss"), "Fused aux loss bwd");
 }
 
+void bind_quantize_with_amax_extensions(py::module_ &m) {
+  m.def("nvfp4_quantize_with_amax", nvfp4_quantize_with_amax, py::arg("tensor"),
+        py::arg("quantizer"), py::arg("rowwise_amax"), py::arg("columnwise_amax"));
+  m.def("nvfp4_group_quantize_with_amax", nvfp4_group_quantize_with_amax, py::arg("tensor"),
+        py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
+        py::arg("rowwise_amax"), py::arg("columnwise_amax"),
+        py::arg("tensor_offsets") = py::none());
+}
+
 }  // namespace transformer_engine::pytorch
 
 #include "common/util/pybind_helper.h"
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   NVTE_DECLARE_COMMON_PYBIND11_HANDLES(m)
+
+  // Register __eq__/__ne__ on the pybind ``DType`` enum so it compares by integer.
+  py::object dtype_class = m.attr("DType");
+  dtype_class.attr("__eq__") = py::cpp_function(
+      [](transformer_engine::DType self, py::object other) -> py::object {
+        return py::cast(static_cast<int>(self) == other.cast<int>());
+      },
+      py::is_method(dtype_class));
+  dtype_class.attr("__ne__") = py::cpp_function(
+      [](transformer_engine::DType self, py::object other) -> py::object {
+        return py::cast(static_cast<int>(self) != other.cast<int>());
+      },
+      py::is_method(dtype_class));
+
   m.def("quantize", transformer_engine::pytorch::quantize, py::arg("tensor"), py::arg("quantizer"),
         py::arg("output") = py::none(), py::arg("noop") = py::none());
   m.def("dequantize", &transformer_engine::pytorch::dequantize, "Dequantize", py::arg("input"),
@@ -181,6 +204,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("group_quantize", transformer_engine::pytorch::group_quantize, py::arg("tensor"),
         py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
         py::arg("tensor_offsets") = py::none());
+  transformer_engine::pytorch::bind_quantize_with_amax_extensions(m);
   m.def("group_dequantize", transformer_engine::pytorch::group_dequantize,
         "Dequantize group tensor", py::arg("input"), py::arg("otype"));
   m.def("bgrad_group_quantize", transformer_engine::pytorch::bgrad_group_quantize,
