@@ -14,6 +14,7 @@ from typing import Any, Optional
 import torch
 
 from transformer_engine.common.recipe import Recipe
+from ..cpu_offload import mark_activation_offload, mark_not_offload
 from ..quantization import (
     FP8GlobalStateManager,
     QuantizerRole,
@@ -209,11 +210,6 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         If activation offloading has been disabled for this op, mark the tensors so the
         active offload context skips them.
         """
-        from ..cpu_offload import (  # pylint: disable=import-outside-toplevel
-            mark_activation_offload,
-            mark_not_offload,
-        )
-
         tensors = tuple(tensor for tensor in tensors if tensor is not None)
         if not tensors:
             return
