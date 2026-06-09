@@ -115,6 +115,7 @@ class HybridQuantizedTensorStorage(QuantizedTensorStorage):
         return tensors
 
     def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
+        """Dequantize using the first available sub-storage."""
         if dtype is None:
             dtype = self._dtype
         if self._rowwise_storage is not None:
@@ -124,6 +125,7 @@ class HybridQuantizedTensorStorage(QuantizedTensorStorage):
         raise RuntimeError("HybridQuantizedTensorStorage has no data to dequantize")
 
     def get_data_tensors(self):
+        """Return raw data tensors from both available sub-storages."""
         row_tensors = ()
         col_tensors = ()
         if self._rowwise_storage is not None:
@@ -135,6 +137,7 @@ class HybridQuantizedTensorStorage(QuantizedTensorStorage):
         return row_tensors + col_tensors
 
     def size(self, *args, **kwargs):
+        """Return the logical size from the first available sub-storage."""
         if self._rowwise_storage is not None:
             return self._rowwise_storage.size(*args, **kwargs)
         if self._columnwise_storage is not None:
@@ -143,6 +146,7 @@ class HybridQuantizedTensorStorage(QuantizedTensorStorage):
 
     @property
     def device(self):
+        """Return the device from the first available sub-storage."""
         if self._rowwise_storage is not None:
             return self._rowwise_storage.device
         if self._columnwise_storage is not None:
@@ -183,6 +187,7 @@ class HybridQuantizedTensorStorage(QuantizedTensorStorage):
         )
 
     def get_metadata(self) -> Dict[str, Any]:
+        """Return constructor metadata for make_like and serialization paths."""
         return {
             "rowwise_storage": self._rowwise_storage,
             "columnwise_storage": self._columnwise_storage,

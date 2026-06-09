@@ -185,32 +185,16 @@ class IdentityTensor(IdentityTensorStorage, QuantizedTensor):
             device=self.device,
         )
 
-    @classmethod
-    def _make_in_reduce_ex(
-        cls,
-        hp_data: torch.Tensor,
-        quantizer: Optional[Quantizer],
-        dtype: torch.dtype,
-        shape: torch.Size,
-    ) -> "IdentityTensor":
-        """Build IdentityTensor, for use in ``__reduce_ex__``."""
-        return IdentityTensor(
-            shape=shape,
-            dtype=dtype,
-            hp_data=hp_data,
-            quantizer=quantizer,
-            requires_grad=False,
-            device=hp_data.device if hp_data is not None else None,
-        )
-
     def __reduce_ex__(self, protocol: int) -> tuple:
         """Custom pickling that preserves the high-precision payload."""
         return (
-            IdentityTensor._make_in_reduce_ex,
+            _make_identity_tensor_in_reduce_ex,
             (self._hp_data, self._quantizer, self.dtype, self.shape),
         )
 
-    def fsdp_pre_all_gather(self, mesh, orig_size, contiguous_orig_stride, module, mp_policy):
+    def fsdp_pre_all_gather(  # pylint: disable=unused-argument
+        self, mesh, orig_size, contiguous_orig_stride, module, mp_policy
+    ):
         """Extract the high-precision buffer for FSDP2 all-gather."""
         return (self._hp_data,), (self._quantizer,)
 
@@ -320,3 +304,20 @@ class IdentityTensor(IdentityTensorStorage, QuantizedTensor):
                 return out
 
         return super().__torch_dispatch__(func, types, args, kwargs)
+
+
+def _make_identity_tensor_in_reduce_ex(
+    hp_data: torch.Tensor,
+    quantizer: Optional[Quantizer],
+    dtype: torch.dtype,
+    shape: torch.Size,
+) -> IdentityTensor:
+    """Reconstruct an ``IdentityTensor`` from its ``__reduce_ex__`` payload."""
+    return IdentityTensor(
+        shape=shape,
+        dtype=dtype,
+        hp_data=hp_data,
+        quantizer=quantizer,
+        requires_grad=False,
+        device=hp_data.device if hp_data is not None else None,
+    )

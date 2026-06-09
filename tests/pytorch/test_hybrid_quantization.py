@@ -101,6 +101,15 @@ class TestHybridQuantizerConstruction:
         assert isinstance(hq.rowwise_quantizer, Float8CurrentScalingQuantizer)
         assert isinstance(hq.columnwise_quantizer, NVFP4Quantizer)
 
+    def test_rejects_same_sub_quantizer_instance_for_both_directions(self):
+        quantizer = _make_fp8_quantizer()
+
+        with pytest.raises(ValueError, match="requires distinct rowwise and columnwise"):
+            HybridQuantizer(rowwise_quantizer=quantizer, columnwise_quantizer=quantizer)
+
+        assert quantizer.rowwise_usage is True
+        assert quantizer.columnwise_usage is True
+
     def test_compatible_recipe_is_custom_recipe(self):
         hq = _make_hybrid_quantizer_fp8_row_fp4_col()
         assert hq._get_compatible_recipe() is recipe.CustomRecipe
@@ -4235,6 +4244,82 @@ def _get_dispatch_hybrid_param(config_name):
 
 
 @requires_fp8
+class TestFloat8TransposeOnlySplit:
+    """Regression coverage for columnwise-only Float8 split metadata.
+
+    A columnwise-only per-tensor Float8 sub-storage may have ``_data=None`` and
+    store its bytes in ``_transpose`` with physical shape ``[K, M]``. Splitting
+    that tensor must still produce pieces whose wrapper shape is the logical
+    row-major shape ``[M_i, K]``; otherwise HybridQuantizedTensor uses the
+    transposed shape when rowwise storage is absent.
+    """
+
+    @staticmethod
+    def _make_transpose_only_float8_tensor(shape=(12, 16)):
+        m, k = shape
+        data_transpose = torch.empty((k, m), dtype=torch.uint8, device="cuda")
+        return Float8Tensor(
+            shape=shape,
+            dtype=torch.bfloat16,
+            data=None,
+            data_transpose=data_transpose,
+            fp8_scale_inv=torch.ones(1, dtype=torch.float32, device="cuda"),
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            requires_grad=False,
+            device="cuda",
+        )
+
+    @pytest.mark.parametrize(
+        "split_size,dim,expected_shapes,expected_transpose_shapes",
+        [
+            (5, 0, [(5, 16), (5, 16), (2, 16)], [(16, 5), (16, 5), (16, 2)]),
+            (6, 1, [(12, 6), (12, 6), (12, 4)], [(6, 12), (6, 12), (4, 12)]),
+        ],
+    )
+    def test_float8_split_uses_logical_shape_for_transpose_only_storage(
+        self, split_size, dim, expected_shapes, expected_transpose_shapes
+    ):
+        tensor = self._make_transpose_only_float8_tensor()
+
+        pieces = torch.split(tensor, split_size, dim=dim)
+
+        assert [tuple(piece.shape) for piece in pieces] == expected_shapes
+        assert [
+            tuple(piece._transpose.shape) for piece in pieces
+        ] == expected_transpose_shapes
+        assert all(piece._data is None for piece in pieces)
+        assert all(piece._transpose_invalid is False for piece in pieces)
+
+    def test_hybrid_split_uses_columnwise_logical_shape_when_rowwise_is_absent(self):
+        columnwise = self._make_transpose_only_float8_tensor()
+        hybrid = HybridQuantizedTensor(
+            shape=columnwise.shape,
+            dtype=columnwise.dtype,
+            rowwise_storage=None,
+            columnwise_storage=columnwise,
+            rowwise_quantizer=None,
+            columnwise_quantizer=None,
+            quantizer=None,
+            device="cuda",
+        )
+
+        pieces = torch.split(hybrid, 5, dim=0)
+
+        assert [tuple(piece.shape) for piece in pieces] == [
+            (5, 16),
+            (5, 16),
+            (2, 16),
+        ]
+        assert all(piece.rowwise_sub_storage is None for piece in pieces)
+        assert [
+            tuple(piece.columnwise_sub_storage.shape) for piece in pieces
+        ] == [(5, 16), (5, 16), (2, 16)]
+        assert [
+            tuple(piece.columnwise_sub_storage._transpose.shape) for piece in pieces
+        ] == [(16, 5), (16, 5), (16, 2)]
+
+
+@requires_fp8
 class TestHybridTorchDispatchFSDP2Ops:
     """Test aten ops that FSDP2 relies on to preserve the HybridQuantizedTensor type.
 
@@ -4399,6 +4484,8 @@ def _make_fsdp_protocol_param(config_name):
         r = _hybrid_custom_recipe(_fp8_row_factory, _fp8_col_factory, _fp8_grad_factory)
     elif config_name == "mxfp8_fp8":
         r = _hybrid_custom_recipe(_mxfp8_factory, _fp8_col_factory, _fp8_grad_factory)
+    elif config_name == "block_fp8":
+        r = recipe.CustomRecipe(qfactory=_hybrid_block_fp8_qfactory)
     else:
         raise ValueError(f"Unknown config: {config_name}")
     with quantized_model_init(enabled=True, recipe=r):
@@ -4409,6 +4496,8 @@ def _make_fsdp_protocol_param(config_name):
 _fsdp_protocol_configs = [pytest.param("fp8_fp8", id="same-format")]
 if mxfp8_available:
     _fsdp_protocol_configs.append(pytest.param("mxfp8_fp8", id="mixed-mxfp8-fp8"))
+if fp8_block_scaling_available:
+    _fsdp_protocol_configs.append(pytest.param("block_fp8", id="same-format-block-fp8"))
 
 
 @requires_fp8
@@ -4742,6 +4831,12 @@ class TestHybridFsdpRoundtrip:
             "weight; the scale-refresh invariant is not being exercised"
         )
 
+    @pytest.mark.xfail(
+        reason=(
+            "Hybrid FSDP2 does not support NVFP4 sub-storages yet; NVFP4 uses "
+            "dedicated tensor hooks and does not implement the hybrid fsdp_buffer_fields protocol."
+        )
+    )
     def test_nvfp4_sub_storage_raises_on_pre_all_gather(self):
         """Hybrid FSDP2 with an NVFP4 sub-storage must raise a clear error.
 

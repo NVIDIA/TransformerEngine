@@ -37,6 +37,7 @@ fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
     te.is_fp8_block_scaling_available(return_reason=True)
 )
 
+
 # ── Module-level qfactories (picklable / autocast-friendly) ──────────
 
 
@@ -217,7 +218,160 @@ class TestIdentityQuantizerUnit:
         assert isinstance(out, IdentityTensorStorage)
         assert not isinstance(out, IdentityTensor)
 
+    def test_grouped_split_all_identity_uses_plain_tensor_views(self):
+        from transformer_engine.pytorch.module.grouped_linear import (
+            _split_quantize_with_identity_fallback,
+        )
 
+        x = torch.randn(8, 16, device="cuda", dtype=torch.bfloat16)
+        m_splits = [3, 5]
+        quantizers = [IdentityQuantizer(), IdentityQuantizer()]
+
+        out = _split_quantize_with_identity_fallback(
+            x, m_splits, quantizers, activation_dtype=torch.bfloat16
+        )
+
+        assert all(isinstance(t, torch.Tensor) for t in out)
+        assert not any(isinstance(t, IdentityTensorStorage) for t in out)
+        for actual, expected in zip(out, torch.split(x, m_splits)):
+            torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+
+        cast_quantizers = [
+            IdentityQuantizer(dtype=torch.float32),
+            IdentityQuantizer(dtype=torch.float32),
+        ]
+        cast_out = _split_quantize_with_identity_fallback(
+            x, m_splits, cast_quantizers, activation_dtype=torch.bfloat16
+        )
+        assert all(isinstance(t, IdentityTensorStorage) for t in cast_out)
+        assert all(t.dequantize().dtype == torch.float32 for t in cast_out)
+
+    def test_grouped_split_rejects_mixed_identity_and_quantized_operands(self):
+        from transformer_engine.pytorch.module.grouped_linear import (
+            _split_quantize_with_identity_fallback,
+        )
+
+        x = torch.empty(64, 64, dtype=torch.bfloat16)
+        m_splits = [32, 32]
+        cases = [
+            [IdentityQuantizer(), _mxfp8(tex.DType.kFloat8E4M3)],
+            [
+                HybridQuantizer(
+                    rowwise_quantizer=IdentityQuantizer(),
+                    columnwise_quantizer=IdentityQuantizer(),
+                ),
+                HybridQuantizer(
+                    rowwise_quantizer=_mxfp8(tex.DType.kFloat8E4M3),
+                    columnwise_quantizer=IdentityQuantizer(),
+                ),
+            ],
+        ]
+
+        for quantizers in cases:
+            with pytest.raises(ValueError, match="mixes Identity-backed and non-Identity-backed"):
+                _split_quantize_with_identity_fallback(
+                    x,
+                    m_splits,
+                    quantizers,
+                    activation_dtype=torch.bfloat16,
+                )
+
+    def test_hybrid_split_forwards_disable_bulk_allocation_to_both_directions(
+        self, monkeypatch
+    ):
+        import transformer_engine.pytorch.module.grouped_linear as grouped_linear
+        from transformer_engine.pytorch.module.grouped_linear import _hybrid_split_quantize
+
+        calls = []
+
+        def fake_split_quantize(tensor, m_splits, quantizers, *, disable_bulk_allocation=False):
+            calls.append(disable_bulk_allocation)
+            return [
+                quantizer(tensor_part)
+                for tensor_part, quantizer in zip(torch.split(tensor, m_splits), quantizers)
+            ]
+
+        monkeypatch.setattr(grouped_linear.tex, "split_quantize", fake_split_quantize)
+        x = torch.randn(8, 16, dtype=torch.bfloat16)
+        m_splits = [3, 5]
+        quantizers = [
+            HybridQuantizer(
+                rowwise_quantizer=IdentityQuantizer(),
+                columnwise_quantizer=IdentityQuantizer(),
+            )
+            for _ in m_splits
+        ]
+
+        out = _hybrid_split_quantize(
+            x,
+            m_splits,
+            quantizers,
+            disable_bulk_allocation=True,
+        )
+
+        assert calls == [True, True]
+        assert len(out) == len(m_splits)
+
+    @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+    def test_grouped_linear_cpu_offload_disables_bulk_allocation_for_hybrid_input(
+        self, monkeypatch
+    ):
+        import transformer_engine.pytorch.module.grouped_linear as grouped_linear
+
+        class StopAfterFlagCapture(RuntimeError):
+            pass
+
+        def qfactory(role):
+            if role is not None and role.module_type == "grouped_linear":
+                return HybridQuantizer(
+                    rowwise_quantizer=_fp8_cs(tex.DType.kFloat8E4M3),
+                    columnwise_quantizer=_fp8_cs(tex.DType.kFloat8E4M3),
+                )
+            return _fp8_cs(tex.DType.kFloat8E4M3)
+
+        calls = []
+
+        def fake_hybrid_split_quantize(
+            tensor, m_splits, quantizers, *, disable_bulk_allocation=False
+        ):
+            del tensor, m_splits, quantizers
+            calls.append(disable_bulk_allocation)
+            raise StopAfterFlagCapture("captured hybrid split kwargs")
+
+        monkeypatch.setattr(grouped_linear, "is_cpu_offload_enabled", lambda: True)
+        monkeypatch.setattr(grouped_linear, "_hybrid_split_quantize", fake_hybrid_split_quantize)
+
+        model = te.GroupedLinear(2, 64, 64, params_dtype=torch.bfloat16).cuda()
+        x = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
+        m_splits = torch.tensor([32, 32], device="cuda", dtype=torch.int32)
+
+        with pytest.raises(StopAfterFlagCapture):
+            with te.autocast(enabled=True, recipe=CustomRecipe(qfactory=qfactory)):
+                model(x, m_splits=m_splits)
+
+        assert calls == [True]
+
+    @pytest.mark.skipif(not mxfp8_available, reason=f"MXFP8: {reason_for_no_mxfp8}")
+    def test_grouped_linear_rejects_mixed_identity_weight_quantizers(self):
+        weight_count = 0
+
+        def qfactory(role):
+            nonlocal weight_count
+            if role is not None and role.module_type == "grouped_linear":
+                if role.tensor_type == "weight":
+                    weight_count += 1
+                    if weight_count == 1:
+                        return IdentityQuantizer()
+                return _mxfp8(tex.DType.kFloat8E4M3)
+            return _mxfp8(tex.DType.kFloat8E4M3)
+
+        model = te.GroupedLinear(2, 64, 64, params_dtype=torch.bfloat16).cuda()
+        x = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
+        m_splits = torch.tensor([32, 32], device="cuda", dtype=torch.int32)
+
+        with pytest.raises(ValueError, match="mixes Identity-backed and non-Identity-backed"):
+            with te.autocast(enabled=True, recipe=CustomRecipe(qfactory=qfactory)):
+                model(x, m_splits=m_splits)
 
     def test_dequantize_bitwise_identical(self):
         x = torch.randn(4, 32, device="cuda", dtype=torch.bfloat16)
@@ -306,6 +460,57 @@ class TestIdentityQuantizerUnit:
         assert reuse is gathered
         torch.testing.assert_close(reuse.dequantize(), x, rtol=0.0, atol=0.0)
 
+    def test_torch_weights_only_load_preserves_identity_tensor(self):
+        x = torch.randn(8, 16, device="cuda", dtype=torch.bfloat16)
+        t = IdentityQuantizer()(x)
+        buffer = io.BytesIO()
+        torch.save(t, buffer)
+        buffer.seek(0)
+
+        loaded = torch.load(buffer, weights_only=True)
+
+        assert isinstance(loaded, IdentityTensor)
+        assert isinstance(loaded._quantizer, IdentityQuantizer)
+        torch.testing.assert_close(loaded.dequantize(), x, rtol=0.0, atol=0.0)
+
+    def test_torch_weights_only_load_preserves_hybrid_identity_tensor(self):
+        x = torch.randn(8, 16, device="cuda", dtype=torch.bfloat16)
+        q = HybridQuantizer(
+            rowwise_quantizer=IdentityQuantizer(),
+            columnwise_quantizer=IdentityQuantizer(),
+        )
+        t = q(x)
+        buffer = io.BytesIO()
+        torch.save(t, buffer)
+        buffer.seek(0)
+
+        loaded = torch.load(buffer, weights_only=True)
+
+        assert isinstance(loaded, HybridQuantizedTensor)
+        assert isinstance(loaded._quantizer, HybridQuantizer)
+        assert isinstance(loaded._rowwise_storage, IdentityTensor)
+        assert isinstance(loaded._columnwise_storage, IdentityTensor)
+        torch.testing.assert_close(loaded.dequantize(), x, rtol=0.0, atol=0.0)
+
+    @pytest.mark.skipif(not mxfp8_available, reason=f"MXFP8: {reason_for_no_mxfp8}")
+    def test_torch_weights_only_load_preserves_hybrid_mxfp8_identity_tensor(self):
+        x = torch.randn(32, 64, device="cuda", dtype=torch.bfloat16)
+        q = HybridQuantizer(
+            rowwise_quantizer=_mxfp8(tex.DType.kFloat8E4M3),
+            columnwise_quantizer=IdentityQuantizer(),
+        )
+        t = q(x)
+        expected = t.dequantize()
+        buffer = io.BytesIO()
+        torch.save(t, buffer)
+        buffer.seek(0)
+
+        loaded = torch.load(buffer, weights_only=True)
+
+        assert isinstance(loaded, HybridQuantizedTensor)
+        assert isinstance(loaded._quantizer, HybridQuantizer)
+        assert isinstance(loaded._columnwise_storage, IdentityTensor)
+        torch.testing.assert_close(loaded.dequantize(), expected, rtol=0.0, atol=0.0)
 
     def test_cpu_offload_roundtrip_identity_exact(self):
         x = torch.randn(1024, 1024, device="cuda", dtype=torch.bfloat16)
@@ -544,12 +749,65 @@ class TestIdentityTEModuleCoverage:
         y_ref, dx_ref, wg_ref = _fwd_bwd_module(module_name, ref, x, recipe=None)
         y_id, dx_id, wg_id = _fwd_bwd_module(module_name, test, x, recipe=recipe)
 
-        torch.testing.assert_close(y_id, y_ref, rtol=0.0, atol=0.0)
-        torch.testing.assert_close(dx_id, dx_ref, rtol=0.0, atol=0.0)
+        # Linear / LayerNormLinear / GroupedLinear route through the same HP
+        # math with Identity and should stay bitwise exact. Composite modules
+        # can select different fused/unfused BF16 kernel paths after prior FP8
+        # tests have warmed TE/CUDA state, so require tight BF16 numerical
+        # parity instead of order-dependent bitwise identity.
+        kwargs = (
+            {"rtol": 0.0, "atol": 0.0}
+            if module_name in ("Linear", "LayerNormLinear", "GroupedLinear")
+            else {"rtol": 2.0e-2, "atol": 8.0e-3}
+        )
+        torch.testing.assert_close(y_id, y_ref, **kwargs)
+        torch.testing.assert_close(dx_id, dx_ref, **kwargs)
         assert len(wg_id) == len(wg_ref)
         for g_id, g_ref in zip(wg_id, wg_ref):
-            torch.testing.assert_close(g_id, g_ref, rtol=0.0, atol=0.0)
+            torch.testing.assert_close(g_id, g_ref, **kwargs)
 
+    @pytest.mark.skipif(not mxfp8_available, reason=f"MXFP8: {reason_for_no_mxfp8}")
+    def test_grouped_linear_mxfp8_forward_identity_backward_matches_override(self):
+        def mxfp8_all_factory(role):  # pylint: disable=unused-argument
+            return _mxfp8(tex.DType.kFloat8E4M3)
+
+        def run(model, x, recipe):
+            x = x.detach().clone().requires_grad_(True)
+            m_splits = torch.tensor([32, 32], device="cuda", dtype=torch.int32)
+            with te.autocast(enabled=True, recipe=recipe):
+                y = model(x, m_splits=m_splits)
+            torch.manual_seed(9001)
+            target = torch.randn_like(y)
+            loss = torch.nn.functional.mse_loss(y, target)
+            loss.backward()
+            wgrads = [p.grad.detach().clone() for p in model.parameters() if p.grad is not None]
+            return y.detach().clone(), x.grad.detach().clone(), wgrads
+
+        torch.manual_seed(8300)
+        ref = te.GroupedLinear(2, 64, 64, params_dtype=torch.bfloat16).cuda()
+        torch.manual_seed(8301)
+        test = te.GroupedLinear(2, 64, 64, params_dtype=torch.bfloat16).cuda()
+        with torch.no_grad():
+            for p_test, p_ref in zip(test.parameters(), ref.parameters()):
+                p_test.copy_(p_ref)
+
+        torch.manual_seed(8302)
+        x = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
+        y_bo, dx_bo, wg_bo = run(
+            ref,
+            x,
+            CustomRecipe(qfactory=mxfp8_all_factory, backward_override="high_precision"),
+        )
+        y_id, dx_id, wg_id = run(
+            test,
+            x,
+            CustomRecipe(qfactory=_hybrid_quantized_fwd_identity_bwd_factory("mxfp8")),
+        )
+
+        torch.testing.assert_close(y_id, y_bo, rtol=0.0, atol=0.0)
+        torch.testing.assert_close(dx_id, dx_bo, rtol=0.0, atol=0.0)
+        assert len(wg_id) == len(wg_bo)
+        for g_id, g_bo in zip(wg_id, wg_bo):
+            torch.testing.assert_close(g_id, g_bo, rtol=0.0, atol=0.0)
 
 
 class TestIdentityHybridFormatProtocols:
@@ -906,7 +1164,7 @@ class TestIdentityLinear:
 
         with te.quantized_model_init(enabled=True, recipe=recipe):
             model2 = te.Linear(64, 64, bias=False, params_dtype=torch.bfloat16).cuda()
-        model2.load_state_dict(torch.load(buffer))
+        model2.load_state_dict(torch.load(buffer, weights_only=True))
 
         with torch.no_grad(), te.autocast(enabled=True, recipe=recipe):
             out_after = model2(x)

@@ -67,6 +67,7 @@ from ..quantized_tensor import (
 from ...debug.pytorch.debug_state import TEDebugState
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.hybrid_tensor import HybridQuantizer
+from ..tensor.identity_tensor import IdentityQuantizer
 from ..cpu_offload import (
     is_cpu_offload_enabled,
     start_offload,
@@ -219,6 +220,7 @@ class _LayerNormLinear(torch.autograd.Function):
         # or if a gather of ln_out must be in high precision.
         custom = is_custom(input_quantizer)
         hybrid = isinstance(input_quantizer, HybridQuantizer)
+        identity = isinstance(input_quantizer, IdentityQuantizer)
         with_quantized_norm = (
             fp8
             and not debug
@@ -227,6 +229,7 @@ class _LayerNormLinear(torch.autograd.Function):
             and backward_override is None
             and not custom  # TODO(negvet): and not FP8GlobalStateManager.get_fp8_recipe().custom()
             and not hybrid
+            and not identity
         )
 
         # Apply normalization

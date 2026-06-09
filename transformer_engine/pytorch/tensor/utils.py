@@ -1172,10 +1172,10 @@ def _route_hybrid_to_buckets(
                 "block above _route_hybrid_to_buckets for details."
             )
         elif isinstance(sub_q, Float8BlockQuantizer):
-            # TODO(hybrid-fp8-blockwise): same shape as the NVFP4 secondary
-            # blocker (and only that one — no kernel-level construction
-            # blocker for Block FP8). Python-side post-AG fix. See top-of-file
-            # TODO block for details.
+            # Pending hybrid-fp8-blockwise work: same shape as the NVFP4
+            # secondary blocker (and only that one — no kernel-level construction
+            # blocker for Block FP8). Python-side post-AG fix. See the
+            # _route_hybrid_to_buckets design note above for details.
             raise NotImplementedError(
                 "quantize_master_weights for HybridQuantizer with Float8BlockQuantizer "
                 f"{direction} sub-quantizer is not supported yet. See the TODO "

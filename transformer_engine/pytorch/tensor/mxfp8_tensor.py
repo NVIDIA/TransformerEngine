@@ -411,16 +411,9 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             row_data_splits = _split_data(tensor._rowwise_data)
             col_data_splits = _split_data(tensor._columnwise_data)
 
-            scale_invs = [tensor._rowwise_scale_inv, tensor._columnwise_scale_inv]
-            split_sizes_for_scale = [split_size, split_size // MXFP8_BLOCK_SCALING_SIZE]
-            padding_multiples = [128, 4]
-            scale_splits = []
-            for scale_inv, scale_split_size, pad_multiple in zip(
-                scale_invs, split_sizes_for_scale, padding_multiples
-            ):
+            def _split_scale_inv(scale_inv, scale_split_size, pad_multiple):
                 if scale_inv is None:
-                    scale_splits.append(None)
-                    continue
+                    return None
                 scale_inv_out = list(
                     scale_inv.__torch_dispatch__(
                         func,
@@ -436,8 +429,18 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                         scale_inv_out[idx] = torch.nn.functional.pad(
                             split_scale_inv_out, (0, 0, 0, pad_dim0)
                         )
-                scale_splits.append(scale_inv_out)
-            row_scale_splits, col_scale_splits = scale_splits
+                return scale_inv_out
+
+            row_scale_splits = _split_scale_inv(
+                tensor._rowwise_scale_inv,
+                split_size,
+                128,
+            )
+            col_scale_splits = _split_scale_inv(
+                tensor._columnwise_scale_inv,
+                split_size // MXFP8_BLOCK_SCALING_SIZE,
+                4,
+            )
 
             ref_splits = row_data_splits if row_data_splits is not None else col_data_splits
             num_splits = len(ref_splits)

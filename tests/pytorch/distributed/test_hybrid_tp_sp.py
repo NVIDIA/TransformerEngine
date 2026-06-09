@@ -82,6 +82,21 @@ def test_hybrid_fp8_linear_vs_vanilla():
     _run_test("hybrid_fp8", "linear_vs_vanilla")
 
 
+def test_hybrid_fp8_layernorm_linear_vs_vanilla():
+    """Same-topology numerical parity against vanilla FP8 for LayerNormLinear.
+
+    This extends the Linear bitwise operand check to the unfused-norm hybrid
+    module path; exact bitwise parity is not required because vanilla may use
+    fused quantized norm while hybrid routes through high-precision norm.
+    """
+    _run_test("hybrid_fp8", "layernorm_linear_vs_vanilla")
+
+
+def test_hybrid_fp8_layernorm_mlp_vs_vanilla():
+    """Same-topology numerical parity against vanilla FP8 for LayerNormMLP."""
+    _run_test("hybrid_fp8", "layernorm_mlp_vs_vanilla")
+
+
 @pytest.mark.skipif(not fp8_available, reason=f"FP8: {reason_for_no_fp8}")
 def test_hybrid_fp8_layernorm_linear():
     """Column-parallel ``te.LayerNormLinear`` with and without SP.
@@ -116,6 +131,11 @@ def test_hybrid_fp8_identity_linear():
     _run_test("hybrid_fp8_identity", "linear")
 
 
+def test_identity_all_modules():
+    """All-Identity TP/SP end-to-end coverage for every supported TE module."""
+    _run_test("identity", "all")
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Hybrid MXFP8 (rowwise + columnwise same format)
 # ──────────────────────────────────────────────────────────────────────
@@ -135,6 +155,14 @@ def test_hybrid_mxfp8_linear():
 @pytest.mark.skipif(not mxfp8_available, reason=f"MXFP8: {reason_for_no_mxfp8}")
 def test_hybrid_mxfp8_linear_vs_vanilla():
     _run_test("hybrid_mxfp8", "linear_vs_vanilla")
+
+
+def test_hybrid_mxfp8_layernorm_linear_vs_vanilla():
+    _run_test("hybrid_mxfp8", "layernorm_linear_vs_vanilla")
+
+
+def test_hybrid_mxfp8_layernorm_mlp_vs_vanilla():
+    _run_test("hybrid_mxfp8", "layernorm_mlp_vs_vanilla")
 
 
 @pytest.mark.skipif(not mxfp8_available, reason=f"MXFP8: {reason_for_no_mxfp8}")

@@ -107,6 +107,12 @@ from transformer_engine.pytorch.tensor.nvfp4_tensor import (
 from transformer_engine.pytorch.tensor.float8_blockwise_tensor import (
     _make_float8_blockwise_tensor_in_reduce_ex,
 )
+from transformer_engine.pytorch.tensor.hybrid_tensor import (
+    _make_hybrid_quantized_tensor_in_reduce_ex,
+)
+from transformer_engine.pytorch.tensor.identity_tensor import (
+    _make_identity_tensor_in_reduce_ex,
+)
 
 try:
     torch._dynamo.config.error_on_nested_jit_trace = False
@@ -131,6 +137,8 @@ try:
             MXFP8TensorStorage,
             NVFP4TensorStorage,
             Float8BlockwiseQTensorStorage,
+            HybridQuantizedTensorStorage,
+            IdentityTensorStorage,
             # Quantizer types embedded in metadata
             Quantizer,
             Float8Quantizer,
@@ -138,6 +146,8 @@ try:
             MXFP8Quantizer,
             NVFP4Quantizer,
             Float8BlockQuantizer,
+            HybridQuantizer,
+            IdentityQuantizer,
             # pybind11 enum used as Quantizer.dtype
             tex.DType,
             # __reduce_ex__ reconstructors (module-level functions).
@@ -145,6 +155,8 @@ try:
             _make_mxfp8_tensor_in_reduce_ex,
             _make_nvfp4_tensor_in_reduce_ex,
             _make_float8_blockwise_tensor_in_reduce_ex,
+            _make_hybrid_quantized_tensor_in_reduce_ex,
+            _make_identity_tensor_in_reduce_ex,
         ]
     )
 except (ImportError, AttributeError):

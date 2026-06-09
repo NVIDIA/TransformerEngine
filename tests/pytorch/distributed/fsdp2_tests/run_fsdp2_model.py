@@ -536,6 +536,79 @@ def test_distributed_hybrid(hybrid_recipe_name):
     _check_hybrid_fsdp2_allgather(model)
 
 
+def test_distributed_hybrid_identity_all():
+    """FSDP2 training/all-gather with an all-Identity CustomRecipe.
+
+    This is the high-precision passthrough baseline for the hybrid/identity
+    tensor plumbing: quantized_model_init should produce IdentityTensor local
+    shards, optimizer steps should preserve that type, and FSDP2 all-gather
+    should reconstruct the same high-precision values as a manual gather.
+    """
+    from transformer_engine.pytorch.tensor.identity_tensor import IdentityTensor
+    from fsdp2_utils import get_hybrid_recipe_from_string
+
+    identity_recipe = get_hybrid_recipe_from_string("Identity")
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    device = torch.device(f"cuda:{int(os.getenv('LOCAL_RANK', '0'))}")
+
+    torch.manual_seed(42)
+    torch.cuda.manual_seed(42)
+
+    kwargs = dict(
+        fuse_qkv_params=True,
+        params_dtype=torch.bfloat16,
+        hidden_dropout=0.0,
+        attention_dropout=0.0,
+        device="meta",
+    )
+    with te.quantized_model_init(enabled=True, recipe=identity_recipe):
+        model = torch.nn.Sequential(
+            *[te.TransformerLayer(512, 2048, 8, **kwargs) for _ in range(2)]
+        )
+
+    custom_attrs = save_custom_attrs(model)
+    mesh = get_device_mesh(world_size, [world_size])
+    model = shard_model_with_fsdp2(model, mesh)
+    for module in model.modules():
+        if hasattr(module, "reset_parameters"):
+            module.reset_parameters()
+    restore_custom_attrs(model, custom_attrs)
+
+    def _identity_param_count():
+        return sum(
+            1
+            for p in model.parameters()
+            if isinstance(p, DTensor) and isinstance(p._local_tensor, IdentityTensor)
+        )
+
+    identity_count = _identity_param_count()
+    assert identity_count > 0, "No IdentityTensor local tensors after FSDP2 sharding"
+
+    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    input_data = torch.randn(128, 16, 512, device=device, dtype=torch.bfloat16)
+    target = torch.randn(128, 16, 512, device=device, dtype=torch.bfloat16)
+
+    losses = []
+    for iteration in range(3):
+        optimizer.zero_grad()
+        with te.autocast(enabled=True, recipe=identity_recipe):
+            output = model(input_data)
+            loss = F.mse_loss(output, target)
+        loss.backward()
+        optimizer.step()
+        loss_val = loss.item()
+        assert math.isfinite(loss_val), f"Non-finite Identity loss at iter {iteration}: {loss_val}"
+        losses.append(loss_val)
+        dist_print(f"Identity iteration {iteration} completed with loss {loss_val}")
+
+    assert losses[-1] < losses[0], f"Identity loss did not decrease: {losses}"
+    assert (
+        _identity_param_count() == identity_count
+    ), "IdentityTensor params lost their quantized type after optimizer.step()"
+
+    _check_hybrid_fsdp2_allgather(model)
+
+
 def test_distributed_hybrid_reshard_after_forward(hybrid_recipe_name):
     """FSDP2 training with hybrid params and reshard_after_forward=True.
 

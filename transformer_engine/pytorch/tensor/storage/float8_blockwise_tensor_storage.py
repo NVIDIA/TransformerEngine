@@ -465,7 +465,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
             fields.extend(("_columnwise_data", "_columnwise_scale_inv"))
         return tuple(fields)
 
-    def fsdp_buffer_fields(
+    def fsdp_extract_buffers(
         self,
     ) -> Tuple[Tuple[Optional[torch.Tensor], ...], Dict[str, Any]]:
         """Extract M-major, alignment-stripped buffers for dim-0 all-gather.

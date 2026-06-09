@@ -72,6 +72,7 @@ from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.hybrid_tensor import HybridQuantizer
+from ..tensor.identity_tensor import IdentityQuantizer
 from ._common import apply_normalization, WeightGradStore
 from ..cpu_offload import (
     is_cpu_offload_enabled,
@@ -407,6 +408,7 @@ class _LayerNormMLP(torch.autograd.Function):
 
         custom = is_custom(fc1_input_quantizer)
         hybrid = isinstance(fc1_input_quantizer, HybridQuantizer)
+        identity = isinstance(fc1_input_quantizer, IdentityQuantizer)
         with_quantized_norm = (
             fp8
             and not debug
@@ -414,6 +416,7 @@ class _LayerNormMLP(torch.autograd.Function):
             and not return_layernorm_output_gathered
             and not custom
             and not hybrid
+            and not identity
         )
 
         # Apply normalization
@@ -1428,7 +1431,10 @@ class _LayerNormMLP(torch.autograd.Function):
                 if ctx.fp8:
                     # TODO float8 blockwise current scaling (as well as custom quantizers) has no bgrad fusion for now
                     if (
-                        isinstance(ctx.fc1_grad_output_quantizer, Float8BlockQuantizer)
+                        isinstance(
+                            ctx.fc1_grad_output_quantizer,
+                            (Float8BlockQuantizer, IdentityQuantizer),
+                        )
                         or ctx.fp8_recipe.custom()
                     ):
                         fc1_bias_grad = dact.view(-1, dact.shape[-1]).sum(dim=0)

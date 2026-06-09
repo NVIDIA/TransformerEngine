@@ -143,6 +143,10 @@ def _hybrid_mxfp8_identity_qfactory(role):
     return _make_mxfp8_quantizer()
 
 
+def _identity_qfactory(role):  # pylint: disable=unused-argument
+    return IdentityQuantizer()
+
+
 def _make_nvfp4_bare():
     """Bare NVFP4Quantizer (1D, no RHT/SR/2D), used by the cross-format recipe
     to avoid cross-operand RHT-consistency concerns in the mixed MXFP8/NVFP4
@@ -221,6 +225,8 @@ def hybrid_recipe():
         return te_recipe.CustomRecipe(qfactory=_hybrid_fp8_identity_qfactory)
     if QUANTIZATION == "hybrid_mxfp8_identity":
         return te_recipe.CustomRecipe(qfactory=_hybrid_mxfp8_identity_qfactory)
+    if QUANTIZATION == "identity":
+        return te_recipe.CustomRecipe(qfactory=_identity_qfactory)
     if QUANTIZATION == "hybrid_nvfp4":
         return te_recipe.CustomRecipe(qfactory=_hybrid_nvfp4_qfactory)
     if QUANTIZATION == "hybrid_mxfp8_nvfp4":
@@ -242,6 +248,10 @@ def hybrid_recipe():
 
 
 def _get_tolerances():
+    if QUANTIZATION == "identity":
+        # Same tolerance as upstream distributed BF16 numerics: TP row
+        # reductions can accumulate in a different order from the single-node ref.
+        return {"rtol": 1.6e-2, "atol": 1.0e-5}
     if QUANTIZATION in ("hybrid_fp8", "hybrid_fp8_identity"):
         # Loose because of sequence parallel & amax reduction (fp8_cs).
         return {"rtol": 0.4, "atol": 0.25}
@@ -572,12 +582,127 @@ def _test_linear_vs_vanilla(parallel_mode, sequence_parallel, params_dtype=torch
 def test_linear_vs_vanilla():
     # Cross-format hybrid has no single built-in vanilla recipe to compare
     # against bitwise; it is covered by the distributed-vs-single-node checks.
-    if QUANTIZATION in ("hybrid_mxfp8_nvfp4", "hybrid_fp8_identity", "hybrid_mxfp8_identity"):
+    if QUANTIZATION in (
+        "identity",
+        "hybrid_mxfp8_nvfp4",
+        "hybrid_fp8_identity",
+        "hybrid_mxfp8_identity",
+    ):
         dist_print("linear_vs_vanilla: skipped for hybrid without a vanilla equivalent")
         return
     for parallel_mode in ["column", "row"]:
         for sequence_parallel in [False, True]:
             _test_linear_vs_vanilla(parallel_mode, sequence_parallel)
+
+
+def _same_format_parity_supported():
+    return QUANTIZATION in ("hybrid_fp8", "hybrid_mxfp8")
+
+
+def _check_same_topology_parity(out_h, dinp_h, model_h, out_v, dinp_v, model_v, tag, *, check_grads):
+    # Larger modules use different fused/unfused norm paths between hybrid and
+    # vanilla, so numerical parity is the meaningful contract here. Linear keeps
+    # the stricter bitwise check above.
+    _check_outputs(out_v, out_h, label=f"{tag} forward")
+    if check_grads:
+        _check_outputs(dinp_v, dinp_h, label=f"{tag} dgrad")
+        _check_gradients(model_h, model_v)
+
+
+def _test_layernorm_linear_vs_vanilla(sequence_parallel, params_dtype=torch.bfloat16):
+    if not _same_format_parity_supported():
+        dist_print("layernorm_linear_vs_vanilla: skipped for recipe without vanilla equivalent")
+        return
+    dist_print(f"layernorm_linear_vs_vanilla: sequence_parallel={sequence_parallel}")
+
+    def run(recipe_obj):
+        torch.manual_seed(23456)
+        torch.cuda.manual_seed(23456)
+        model = te.LayerNormLinear(
+            HIDDEN_SIZE,
+            HIDDEN_SIZE,
+            tp_size=WORLD_SIZE,
+            tp_group=NCCL_WORLD,
+            parallel_mode="column",
+            sequence_parallel=sequence_parallel,
+            params_dtype=params_dtype,
+        ).cuda()
+        torch.manual_seed(45670)
+        torch.cuda.manual_seed(45670)
+        inp = torch.randn((BATCH_SIZE, HIDDEN_SIZE)).cuda().to(params_dtype)
+        inp.requires_grad_()
+        with te.autocast(enabled=True, recipe=recipe_obj):
+            out = model(inp)
+        torch.manual_seed(45671)
+        torch.cuda.manual_seed(45671)
+        LOSS_FN(out, torch.randn_like(out)).backward()
+        return model, out.detach().clone(), inp.grad.detach().clone()
+
+    model_h, out_h, dinp_h = run(hybrid_recipe())
+    model_v, out_v, dinp_v = run(vanilla_recipe())
+    _check_same_topology_parity(
+        out_h,
+        dinp_h,
+        model_h,
+        out_v,
+        dinp_v,
+        model_v,
+        f"layernorm_linear_vs_vanilla[sp={sequence_parallel}]",
+        check_grads=not sequence_parallel,
+    )
+
+
+def test_layernorm_linear_vs_vanilla():
+    for sequence_parallel in [False, True]:
+        _test_layernorm_linear_vs_vanilla(sequence_parallel)
+
+
+def _test_layernorm_mlp_vs_vanilla(sequence_parallel, params_dtype=torch.bfloat16):
+    if not _same_format_parity_supported():
+        dist_print("layernorm_mlp_vs_vanilla: skipped for recipe without vanilla equivalent")
+        return
+    dist_print(f"layernorm_mlp_vs_vanilla: sequence_parallel={sequence_parallel}")
+
+    def run(recipe_obj):
+        torch.manual_seed(45678)
+        torch.cuda.manual_seed(45678)
+        model = te.LayerNormMLP(
+            HIDDEN_SIZE,
+            FFN_HIDDEN_SIZE,
+            tp_size=WORLD_SIZE,
+            tp_group=NCCL_WORLD,
+            set_parallel_mode=True,
+            sequence_parallel=sequence_parallel,
+            params_dtype=params_dtype,
+        ).cuda()
+        torch.manual_seed(56780)
+        torch.cuda.manual_seed(56780)
+        inp = torch.randn((BATCH_SIZE, HIDDEN_SIZE)).cuda().to(params_dtype)
+        inp.requires_grad_()
+        with te.autocast(enabled=True, recipe=recipe_obj):
+            out = model(inp)
+        torch.manual_seed(56781)
+        torch.cuda.manual_seed(56781)
+        LOSS_FN(out, torch.randn_like(out)).backward()
+        return model, out.detach().clone(), inp.grad.detach().clone()
+
+    model_h, out_h, dinp_h = run(hybrid_recipe())
+    model_v, out_v, dinp_v = run(vanilla_recipe())
+    _check_same_topology_parity(
+        out_h,
+        dinp_h,
+        model_h,
+        out_v,
+        dinp_v,
+        model_v,
+        f"layernorm_mlp_vs_vanilla[sp={sequence_parallel}]",
+        check_grads=not sequence_parallel,
+    )
+
+
+def test_layernorm_mlp_vs_vanilla():
+    for sequence_parallel in [False, True]:
+        _test_layernorm_mlp_vs_vanilla(sequence_parallel)
 
 
 # ── Test 2: te.LayerNormLinear column + SP ──────────────────────────
@@ -784,6 +909,7 @@ def main(argv=None):
             "hybrid_mxfp8",
             "hybrid_fp8_identity",
             "hybrid_mxfp8_identity",
+            "identity",
             "hybrid_nvfp4",
             "hybrid_mxfp8_nvfp4",
         ],
@@ -796,6 +922,8 @@ def main(argv=None):
             "all",
             "linear",
             "linear_vs_vanilla",
+            "layernorm_linear_vs_vanilla",
+            "layernorm_mlp_vs_vanilla",
             "layernorm_linear",
             "layernorm_mlp",
             "transformer_layer",
@@ -808,6 +936,8 @@ def main(argv=None):
     test_map = {
         "linear": test_linear,
         "linear_vs_vanilla": test_linear_vs_vanilla,
+        "layernorm_linear_vs_vanilla": test_layernorm_linear_vs_vanilla,
+        "layernorm_mlp_vs_vanilla": test_layernorm_mlp_vs_vanilla,
         "layernorm_linear": test_layernorm_linear,
         "layernorm_mlp": test_layernorm_mlp,
         "transformer_layer": test_transformer_layer,

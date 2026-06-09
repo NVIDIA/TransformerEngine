@@ -74,6 +74,11 @@ def _hybrid_fp8_current_identity_qfactory(role):
     return current_scaling_quantizer_factory(role)
 
 
+def _identity_qfactory(role):  # pylint: disable=unused-argument
+    """High-precision passthrough for every quantizer slot."""
+    return IdentityQuantizer()
+
+
 # The qfactories above are registered here as module-level functions (not
 # lambdas or closures) on purpose: DCP serializes ``CustomRecipe`` via
 # ``pickle``, and closure-based qfactories (or inner functions capturing state)
@@ -85,6 +90,7 @@ _HYBRID_QFACTORIES = {
     "HybridFloat8BlockScaling": _hybrid_float8_block_qfactory,
     "HybridMixed_MXFP8_FP8": _hybrid_mixed_mxfp8_fp8_qfactory,
     "HybridFP8CurrentScalingIdentity": _hybrid_fp8_current_identity_qfactory,
+    "Identity": _identity_qfactory,
 }
 
 
@@ -101,6 +107,7 @@ def get_hybrid_recipe_from_string(recipe):
         "HybridFloat8BlockScaling" — Float8 block scaling for both directions
         "HybridMixed_MXFP8_FP8"   — MXFP8 rowwise + FP8 current columnwise
         "HybridFP8CurrentScalingIdentity" — FP8 current forward + Identity backward
+        "Identity" — high-precision passthrough for every slot
     """
     if recipe not in _HYBRID_QFACTORIES:
         raise ValueError(

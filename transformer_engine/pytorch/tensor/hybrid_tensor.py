@@ -29,6 +29,19 @@ class HybridQuantizer(Quantizer):
     columnwise_quantizer : Quantizer
         Quantizer for the columnwise direction (e.g. NVFP4Quantizer).
 
+    Notes
+    -----
+    ``HybridQuantizer`` pins each sub-quantizer to its designated direction by
+    mutating its usage flags, so it takes ownership of the supplied quantizer
+    instances. The rowwise and columnwise quantizers must be distinct objects.
+    If both directions need shared state, construct two quantizer instances that
+    reference the same external state object.
+
+    Reusing a sub-quantizer instance across multiple ``HybridQuantizer`` objects
+    is unsupported by contract. Catching that robustly would require copying or
+    ownership tracking, both of which are more intrusive, so only the direct
+    rowwise/columnwise aliasing case is enforced.
+
     """
 
     rowwise_quantizer: Quantizer
@@ -41,6 +54,12 @@ class HybridQuantizer(Quantizer):
         columnwise_quantizer: Quantizer,
     ) -> None:
         super().__init__(rowwise=True, columnwise=True)
+        if rowwise_quantizer is columnwise_quantizer:
+            raise ValueError(
+                "HybridQuantizer requires distinct rowwise and columnwise quantizer"
+                " instances. If both directions need shared state, construct two"
+                " quantizer objects that reference the same shared state."
+            )
         self.rowwise_quantizer = rowwise_quantizer
         self.columnwise_quantizer = columnwise_quantizer
 
@@ -396,28 +415,6 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
     def get_metadata(self) -> Dict[str, Any]:
         return HybridQuantizedTensorStorage.get_metadata(self)
 
-    @classmethod
-    def _make_in_reduce_ex(
-        cls,
-        rowwise_storage: Optional[QuantizedTensorStorage],
-        columnwise_storage: Optional[QuantizedTensorStorage],
-        rowwise_quantizer: Optional[Quantizer],
-        columnwise_quantizer: Optional[Quantizer],
-        quantizer: Optional[Quantizer],
-        dtype: torch.dtype,
-        shape: torch.Size,
-    ) -> HybridQuantizedTensor:
-        """Build HybridQuantizedTensor, for use in ``__reduce_ex__``."""
-        return HybridQuantizedTensor(
-            shape=shape,
-            dtype=dtype,
-            rowwise_storage=rowwise_storage,
-            columnwise_storage=columnwise_storage,
-            rowwise_quantizer=rowwise_quantizer,
-            columnwise_quantizer=columnwise_quantizer,
-            quantizer=quantizer,
-        )
-
     def __reduce_ex__(self, protocol: int) -> tuple:
         """Custom pickling.
 
@@ -436,7 +433,7 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
         themselves.
         """
         return (
-            HybridQuantizedTensor._make_in_reduce_ex,
+            _make_hybrid_quantized_tensor_in_reduce_ex,
             (
                 self._rowwise_storage,
                 self._columnwise_storage,
@@ -450,7 +447,9 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
 
     # ── FSDP2 protocol ──────────────────────────────────────────────
 
-    def fsdp_pre_all_gather(self, mesh, orig_size, contiguous_orig_stride, module, mp_policy):
+    def fsdp_pre_all_gather(  # pylint: disable=unused-argument
+        self, mesh, orig_size, contiguous_orig_stride, module, mp_policy
+    ):
         """Extract plain tensor buffers from both sub-storages for FSDP2 all-gather.
 
         Always send both directions. This gives a stable buffer count/shape
@@ -827,3 +826,24 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
             )
 
         return super().__torch_dispatch__(func, types, args, kwargs)
+
+
+def _make_hybrid_quantized_tensor_in_reduce_ex(
+    rowwise_storage: Optional[QuantizedTensorStorage],
+    columnwise_storage: Optional[QuantizedTensorStorage],
+    rowwise_quantizer: Optional[Quantizer],
+    columnwise_quantizer: Optional[Quantizer],
+    quantizer: Optional[Quantizer],
+    dtype: torch.dtype,
+    shape: torch.Size,
+) -> HybridQuantizedTensor:
+    """Reconstruct a ``HybridQuantizedTensor`` from its ``__reduce_ex__`` payload."""
+    return HybridQuantizedTensor(
+        shape=shape,
+        dtype=dtype,
+        rowwise_storage=rowwise_storage,
+        columnwise_storage=columnwise_storage,
+        rowwise_quantizer=rowwise_quantizer,
+        columnwise_quantizer=columnwise_quantizer,
+        quantizer=quantizer,
+    )
