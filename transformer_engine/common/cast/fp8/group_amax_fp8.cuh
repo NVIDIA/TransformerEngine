@@ -7,14 +7,6 @@
 /*! \file group_amax_fp8.cuh
  *  \brief CUDA kernels to compute per-group amax values for grouped FP8
  *         tensor scaling.
- *
- *  These kernels are logically part of the grouped FP8 quantization stack
- *  (alongside group_quantize_fp8.cuh), but they are kept in a separate
- *  header so that only the single translation unit that actually launches
- *  them (recipe/current_scaling.cu) takes the compile-time hit. Pulling
- *  them into group_quantize_fp8.cuh forces every TU that transitively
- *  includes the quantize dispatcher (cast.cu, the activation .cu files,
- *  etc.) to recompile whenever this code changes, which defeats ccache.
  */
 
 #ifndef TRANSFORMER_ENGINE_GROUP_AMAX_FP8_CUH_
@@ -68,13 +60,12 @@ __launch_bounds__(GROUPED_AMAX_KERNEL_THREADS) __global__
 // build_grouped_tensor_offsets uses (the "logical" element span for the
 // tensor) and means we never read past the active region into the unused
 // tail of logical_shape (where logical_first_dim >= sum(first_dims)).
-template <int NVEC, typename InputType, ShapeRepresentation SHAPE_REP>
+template <int NVEC, typename InputType>
 __launch_bounds__(GROUPED_AMAX_KERNEL_THREADS) __global__
-    void grouped_amax_kernel(const InputType *__restrict__ input, float *__restrict__ amax,
-                             const size_t num_tensors, const size_t first_logical_dim,
-                             const size_t last_logical_dim,
-                             const int64_t *__restrict__ offsets_ptr,
-                             const float *__restrict__ noop_ptr) {
+    void grouped_amax_kernel_uniform_shape(const InputType *__restrict__ input, float *__restrict__ amax,
+                                           const size_t num_tensors, const size_t first_logical_dim,
+                                           const size_t last_logical_dim,
+                                           const float *__restrict__ noop_ptr) {
   if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) {
     return;
   }
@@ -84,19 +75,9 @@ __launch_bounds__(GROUPED_AMAX_KERNEL_THREADS) __global__
     return;
   }
 
-  size_t tensor_base = 0;
-  size_t numel = 0;
-  if constexpr (SHAPE_REP == ShapeRepresentation::SAME_BOTH_DIMS) {
-    const size_t rows = first_logical_dim / num_tensors;
-    numel = rows * last_logical_dim;
-    tensor_base = tensor_id * numel;
-  } else {
-    // Varying first / last / both: strictly use the logical offsets so that
-    // we never scan unused tail rows.
-    tensor_base = static_cast<size_t>(offsets_ptr[tensor_id]);
-    const size_t tensor_end = static_cast<size_t>(offsets_ptr[tensor_id + 1]);
-    numel = tensor_end > tensor_base ? tensor_end - tensor_base : 0;
-  }
+  const size_t rows = first_logical_dim / num_tensors;
+  const size_t numel = rows * last_logical_dim;
+  const size_t tensor_base = tensor_id * numel;
   if (numel == 0) {
     return;
   }
@@ -386,9 +367,9 @@ void launch_grouped_amax_kernel(const InputType *input, float *amax, const size_
       const size_t blocks_per_tensor = choose_grouped_amax_blocks_per_tensor(max_elts_per_tensor);
       const dim3 grid(blocks_per_tensor, num_tensors);
       const dim3 block(GROUPED_AMAX_KERNEL_THREADS);
-      grouped_amax_kernel<kNvec, InputType, ShapeRepresentation::SAME_BOTH_DIMS>
+      grouped_amax_kernel_uniform_shape<kNvec, InputType>
           <<<grid, block, 0, stream>>>(input, amax, num_tensors, first_logical_dim,
-                                       last_logical_dim, offsets_ptr, noop_ptr);
+                                       last_logical_dim, noop_ptr);
       break;
     }
     case ShapeRepresentation::VARYING_FIRST_DIM:
