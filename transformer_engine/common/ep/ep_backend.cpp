@@ -26,33 +26,18 @@ namespace ep {
 
 namespace {
 
-// Build a by-value ncclEpTensor_t descriptor. `sizes` is caller-owned and must
-// outlive any NCCL EP call that consumes the descriptor.
-inline ncclEpTensor_t make_tensor(void* data, unsigned int ndim, ncclDataType_t datatype,
-                                  size_t* sizes) {
-  ncclEpTensor_t t = NCCL_EP_TENSOR_INIT;
-  t.ndim = ndim;
-  t.datatype = datatype;
-  t.data = data;
-  t.sizes = sizes;
-  return t;
-}
-
-// Payload descriptor: prefer the symmem window when set, else fall back to the
-// NVTETensor's raw device pointer.
-inline ncclEpTensor_t make_payload_tensor(const NVTETensor t, const NVTECommWindow& win,
-                                          unsigned int ndim, ncclDataType_t datatype,
-                                          size_t* sizes) {
+inline ncclEpTensor_t make_nccl_ep_tensor(const NVTETensor t, const NVTECommWindow& win = {}) {
+  NVTEShape shape = nvte_tensor_shape(t);
   ncclEpTensor_t desc = NCCL_EP_TENSOR_INIT;
-  desc.ndim = ndim;
-  desc.datatype = datatype;
-  desc.sizes = sizes;
+  desc.ndim = shape.ndim;
+  desc.sizes = shape.data;
+  desc.datatype = EPBackend::nvte_dtype_to_nccl(nvte_tensor_type(t));
   if (win.window != nullptr) {
     desc.win_hdl = win.window;
     desc.win_offset = win.offset;
   } else {
     desc.data = nvte_tensor_data(t);
-    NVTE_CHECK(desc.data != nullptr, "payload tensor data must not be null");
+    NVTE_CHECK(desc.data != nullptr, "tensor data must not be null");
   }
   return desc;
 }
@@ -183,7 +168,11 @@ ncclDataType_t EPBackend::nvte_dtype_to_nccl(NVTEDType dtype) {
 ncclEpHandle_t EPBackend::open_handle(void* handle_mem, size_t handle_mem_size, int num_topk,
                                       size_t dispatch_output_per_expert_alignment) {
   size_t hm_sizes[1] = {handle_mem_size};
-  ncclEpTensor_t routing_desc = make_tensor(handle_mem, 1, ncclUint8, hm_sizes);
+  ncclEpTensor_t routing_desc = NCCL_EP_TENSOR_INIT;
+  routing_desc.ndim = 1;
+  routing_desc.datatype = ncclUint8;
+  routing_desc.data = handle_mem;
+  routing_desc.sizes = hm_sizes;
   ncclEpHandleConfig_t hcfg = NCCL_EP_HANDLE_CONFIG_INIT;
   hcfg.dispatch_output_per_expert_alignment = dispatch_output_per_expert_alignment;
   ncclEpHandle_t handle;
@@ -341,27 +330,15 @@ void EPBackend::prepare(void* handle_mem, const NVTETensor topk_idx, NVTETensor 
   NVTE_CHECK(handle_mem != nullptr, "handle_mem must not be null");
   NVTE_CHECK(layer_cfg.top_k > 0, "top_k must be > 0, got ", layer_cfg.top_k);
 
-  NVTEShape idx_shape = nvte_tensor_shape(topk_idx);
-  void* idx_data = nvte_tensor_data(topk_idx);
-  NVTE_CHECK(idx_data != nullptr, "topk_idx data must not be null");
-
-  const size_t num_tokens = idx_shape.data[0];
-  const size_t topk_in = idx_shape.ndim > 1 ? idx_shape.data[1] : 1;
-  const size_t num_local_experts =
-      static_cast<size_t>(group_config_.num_experts / group_config_.ep_size);
-
-  size_t idx_sizes[2] = {num_tokens, topk_in};
-  ncclEpTensor_t nccl_topk_idx = make_tensor(idx_data, 2, ncclInt64, idx_sizes);
+  ncclEpTensor_t nccl_topk_idx = make_nccl_ep_tensor(topk_idx);
 
   // ncclEpUpdateHandle writes per-expert counts via expert_counters.
-  size_t cnt_sizes[1] = {num_local_experts};
   ncclEpTensor_t token_counts_desc;
-  void* token_counts_data = (token_counts != nullptr) ? nvte_tensor_data(token_counts) : nullptr;
-  if (token_counts_data != nullptr) {
-    token_counts_desc = make_tensor(token_counts_data, 1, ncclInt32, cnt_sizes);
+  if (token_counts != nullptr) {
+    token_counts_desc = make_nccl_ep_tensor(token_counts);
   }
   ncclEpLayoutInfo_t layout_info = NCCL_EP_LAYOUT_INFO_INIT;
-  layout_info.expert_counters = (token_counts_data != nullptr) ? &token_counts_desc : nullptr;
+  layout_info.expert_counters = (token_counts != nullptr) ? &token_counts_desc : nullptr;
 
   std::lock_guard<std::mutex> lock(mutex_);
   ncclEpHandle_t h = prepare_handle_locked(handle_mem, layer_cfg);
@@ -376,37 +353,11 @@ void EPBackend::dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTE
   NVTE_CHECK(initialized_, "EPBackend not initialized");
   NVTE_CHECK(handle_mem != nullptr, "handle_mem must not be null");
 
-  NVTEShape tok_shape = nvte_tensor_shape(tokens);
   NVTEDType tok_dtype = nvte_tensor_type(tokens);
   NVTE_CHECK(typeToSize(static_cast<DType>(tok_dtype)) <=
                  typeToSize(static_cast<DType>(group_config_.max_token_dtype)),
              "tokens dtype (", static_cast<int>(tok_dtype), ") wider than group max_token_dtype (",
              static_cast<int>(group_config_.max_token_dtype), ")");
-
-  const size_t num_tokens = tok_shape.data[0];
-  const size_t hidden_dim = tok_shape.data[1];
-
-  size_t tok_sizes[2] = {num_tokens, hidden_dim};
-  ncclEpTensor_t nccl_tokens_in =
-      make_payload_tensor(tokens, tokens_win, 2, nvte_dtype_to_nccl(tok_dtype), tok_sizes);
-
-  const bool is_forward = (topk_weights != nullptr);
-
-  // Routing is cached in handle_mem by ep_prepare; dispatch only needs
-  // topk_weights to reconstruct the sparse-to-dense prob map.
-  size_t weights_in_sizes[2] = {0, 0};
-  ncclEpTensor_t nccl_topk_weights_in;
-  if (is_forward) {
-    NVTE_CHECK(topk_idx != nullptr, "topk_idx required in forward dispatch");
-    NVTEShape idx_shape = nvte_tensor_shape(topk_idx);
-    const size_t topk_in = idx_shape.ndim > 1 ? idx_shape.data[1] : 1;
-    weights_in_sizes[0] = num_tokens;
-    weights_in_sizes[1] = topk_in;
-    nccl_topk_weights_in =
-        make_payload_tensor(topk_weights, topk_weights_win, 2, ncclFloat32, weights_in_sizes);
-  }
-
-  NVTEShape recv_shape = nvte_tensor_shape(recv_tokens);
   NVTEDType recv_dtype = nvte_tensor_type(recv_tokens);
   NVTE_CHECK(typeToSize(static_cast<DType>(recv_dtype)) <=
                  typeToSize(static_cast<DType>(group_config_.max_token_dtype)),
@@ -414,19 +365,22 @@ void EPBackend::dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTE
              ") wider than group max_token_dtype (",
              static_cast<int>(group_config_.max_token_dtype), ")");
 
-  size_t recv_sizes[2] = {recv_shape.data[0], recv_shape.data[1]};
-  ncclEpTensor_t nccl_tokens_out = make_payload_tensor(recv_tokens, recv_tokens_win, 2,
-                                                       nvte_dtype_to_nccl(recv_dtype), recv_sizes);
+  ncclEpTensor_t nccl_tokens_in = make_nccl_ep_tensor(tokens, tokens_win);
+  ncclEpTensor_t nccl_tokens_out = make_nccl_ep_tensor(recv_tokens, recv_tokens_win);
 
-  size_t weights_out_sizes[1] = {recv_shape.data[0]};
+  // Routing is cached in handle_mem by ep_prepare; dispatch only needs
+  // topk_weights to reconstruct the sparse-to-dense prob map.
+  const bool is_forward = (topk_weights != nullptr);
+  ncclEpTensor_t nccl_topk_weights_in;
   ncclEpTensor_t nccl_topk_weights_out;
   if (is_forward) {
+    NVTE_CHECK(topk_idx != nullptr, "topk_idx required in forward dispatch");
     NVTE_CHECK(recv_topk_weights != nullptr,
                "recv_topk_weights must not be null in forward dispatch");
-    NVTEShape recv_w_shape = nvte_tensor_shape(recv_topk_weights);
-    NVTE_CHECK(recv_w_shape.ndim == 1, "recv_topk_weights must be 1D [recv_capacity]");
-    nccl_topk_weights_out = make_payload_tensor(recv_topk_weights, recv_topk_weights_win, 1,
-                                                ncclFloat32, weights_out_sizes);
+    NVTE_CHECK(nvte_tensor_shape(recv_topk_weights).ndim == 1,
+               "recv_topk_weights must be 1D [recv_capacity]");
+    nccl_topk_weights_in = make_nccl_ep_tensor(topk_weights, topk_weights_win);
+    nccl_topk_weights_out = make_nccl_ep_tensor(recv_topk_weights, recv_topk_weights_win);
   }
 
   ncclEpDispatchInputs_t in_struct = NCCL_EP_DISPATCH_INPUTS_INIT;
@@ -452,21 +406,8 @@ void EPBackend::combine(void* handle_mem, const NVTETensor expert_out,
   NVTE_CHECK(initialized_, "EPBackend not initialized");
   NVTE_CHECK(handle_mem != nullptr, "handle_mem must not be null");
 
-  NVTEShape exp_shape = nvte_tensor_shape(expert_out);
-  NVTEDType exp_dtype = nvte_tensor_type(expert_out);
-
-  size_t exp_sizes[2] = {exp_shape.data[0], exp_shape.data[1]};
-  ncclEpTensor_t nccl_expert_in =
-      make_payload_tensor(expert_out, expert_out_win, 2, nvte_dtype_to_nccl(exp_dtype), exp_sizes);
-
-  NVTEShape res_shape = nvte_tensor_shape(result);
-  void* res_data = nvte_tensor_data(result);
-  NVTEDType res_dtype = nvte_tensor_type(result);
-  NVTE_CHECK(res_data != nullptr, "result data must not be null");
-
-  size_t res_sizes[2] = {res_shape.data[0], res_shape.data[1]};
-  ncclEpTensor_t nccl_result_out =
-      make_tensor(res_data, 2, nvte_dtype_to_nccl(res_dtype), res_sizes);
+  ncclEpTensor_t nccl_expert_in = make_nccl_ep_tensor(expert_out, expert_out_win);
+  ncclEpTensor_t nccl_result_out = make_nccl_ep_tensor(result);
 
   ncclEpCombineInputs_t in_struct = NCCL_EP_COMBINE_INPUTS_INIT;
   in_struct.tokens = &nccl_expert_in;
@@ -486,32 +427,16 @@ void EPBackend::dispatch_bwd(void* handle_mem, const NVTETensor grad,
   NVTE_CHECK(initialized_, "EPBackend not initialized");
   NVTE_CHECK(handle_mem != nullptr, "handle_mem must not be null");
 
-  NVTEShape g_shape = nvte_tensor_shape(grad);
-  NVTEDType g_dtype = nvte_tensor_type(grad);
-  size_t g_sizes[2] = {g_shape.data[0], g_shape.data[1]};
-  ncclEpTensor_t nccl_tok_in =
-      make_payload_tensor(grad, grad_win, 2, nvte_dtype_to_nccl(g_dtype), g_sizes);
-
   // g_recv_topk_weights must be 1D [recv_capacity]; caller flattens.
-  NVTEShape gw_shape = nvte_tensor_shape(g_recv_topk_weights);
-  NVTE_CHECK(gw_shape.ndim == 1,
+  NVTE_CHECK(nvte_tensor_shape(g_recv_topk_weights).ndim == 1,
              "g_recv_topk_weights must be 1D [recv_capacity]; caller must flatten leading dims");
-  size_t gw_sizes[1] = {gw_shape.data[0]};
-  ncclEpTensor_t nccl_w_in =
-      make_payload_tensor(g_recv_topk_weights, g_recv_topk_weights_win, 1, ncclFloat32, gw_sizes);
+  NVTE_CHECK(nvte_tensor_shape(grad_topk_weights).ndim == 2,
+             "grad_topk_weights must be 2D [T, top_k]");
 
-  NVTEShape gt_shape = nvte_tensor_shape(grad_tokens);
-  void* gt_data = nvte_tensor_data(grad_tokens);
-  NVTE_CHECK(gt_data != nullptr, "grad_tokens data must not be null");
-  size_t gt_sizes[2] = {gt_shape.data[0], gt_shape.data[1]};
-  ncclEpTensor_t nccl_tok_out = make_tensor(gt_data, 2, nvte_dtype_to_nccl(g_dtype), gt_sizes);
-
-  NVTEShape gtw_shape = nvte_tensor_shape(grad_topk_weights);
-  void* gtw_data = nvte_tensor_data(grad_topk_weights);
-  NVTE_CHECK(gtw_data != nullptr, "grad_topk_weights data must not be null");
-  NVTE_CHECK(gtw_shape.ndim == 2, "grad_topk_weights must be 2D [T, top_k]");
-  size_t gtw_sizes[2] = {gtw_shape.data[0], gtw_shape.data[1]};
-  ncclEpTensor_t nccl_w_out = make_tensor(gtw_data, 2, ncclFloat32, gtw_sizes);
+  ncclEpTensor_t nccl_tok_in = make_nccl_ep_tensor(grad, grad_win);
+  ncclEpTensor_t nccl_w_in = make_nccl_ep_tensor(g_recv_topk_weights, g_recv_topk_weights_win);
+  ncclEpTensor_t nccl_tok_out = make_nccl_ep_tensor(grad_tokens);
+  ncclEpTensor_t nccl_w_out = make_nccl_ep_tensor(grad_topk_weights);
 
   ncclEpCombineInputs_t in_struct = NCCL_EP_COMBINE_INPUTS_INIT;
   in_struct.tokens = &nccl_tok_in;
