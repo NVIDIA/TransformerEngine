@@ -198,85 +198,103 @@ __launch_bounds__(unary_kernel_threads) __global__
                       size_t scale_numel = 1, size_t scale_inv_numel = 1, size_t amax_numel = 1) {
   if (noop != nullptr && noop[0] == 1.0f) return;
 
-  size_t start = 0;
-  size_t size = N;
-  size_t tensor_id = 0;
-  if (gridDim.y > 1) {
-    tensor_id = blockIdx.y;
-    if (offsets != nullptr) {
-      start = offsets[tensor_id];
-      size = first_dims[tensor_id] * last_dims[tensor_id];
-    } else if (num_tensors > 1) {
-      size = N / num_tensors;
-      start = tensor_id * size;
-    }
-  }
-
-  VectorizedLoader<InputType, nvec, aligned> loader(input + start, size);
-  VectorizedStorer<OutputType, nvec, aligned> storer(output + start, size);
+  VectorizedLoader<InputType, nvec, aligned> loader(input, N);
+  VectorizedStorer<OutputType, nvec, aligned> storer(output, N);
   ComputeType max = 0;
   ComputeType s = 1;
   const bool requires_amax = (amax != nullptr);
   if constexpr (is_fp8<OutputType>::value) {
-    if (scale != nullptr && offsets == nullptr && gridDim.y == 1) s = *scale;
+    if (scale != nullptr && offsets == nullptr) s = *scale;
   }
   const int warp_id = threadIdx.x / THREADS_PER_WARP;
 
-  const size_t M = loader.num_aligned_elements();
+  float block_max[64] = {0.0f};
+
+  const size_t M = num_aligned_elements;
 
   for (size_t tid = blockIdx.x * blockDim.x + threadIdx.x; tid < M; tid += gridDim.x * blockDim.x) {
-    loader.load(tid, size);
+    loader.load(tid, N);
 #pragma unroll
     for (int i = 0; i < nvec; ++i) {
       const size_t global_idx =
           (aligned ? (tid * nvec + i) : (tid * nvec + i - loader.alignment()));
-      if (global_idx >= size) continue;
+      if (global_idx >= N) continue;
 
-      ComputeType val = static_cast<ComputeType>(loader.separate()[i]);
-      if constexpr (is_fp8<InputType>::value) {
-        if (scale_inv != nullptr) {
-          val = val * ((scale_inv_numel == num_tensors) ? scale_inv[tensor_id] : scale_inv[0]);
-        }
+      size_t tensor_id = 0;
+      bool is_valid = true;
+      if (offsets != nullptr) {
+        tensor_id = find_tensor_id(offsets, num_tensors, global_idx);
+        size_t start = offsets[tensor_id];
+        size_t size = first_dims[tensor_id] * last_dims[tensor_id];
+        is_valid = (global_idx >= start && global_idx < start + size);
+      } else if (num_tensors > 1) {
+        size_t size = N / num_tensors;
+        tensor_id = global_idx / size;
+        if (tensor_id >= num_tensors) tensor_id = num_tensors - 1;
       }
-      ComputeType temp = OP(val, p);
-      if (requires_amax) {
-        __builtin_assume(max >= 0);
-        max = fmaxf(fabsf(temp), max);
-      }
-      if constexpr (is_fp8<OutputType>::value) {
-        float current_scale = 1.0f;
-        if (scale != nullptr) {
-          current_scale = (scale_numel == num_tensors) ? scale[tensor_id] : scale[0];
-        } else if (gridDim.y == 1) {
-          current_scale = s;
-        }
-        temp = temp * current_scale;
-      }
-      storer.separate()[i] = static_cast<OutputType>(temp);
 
-      // Update scale-inverse for quantization if requested
-      const bool is_start = (global_idx == 0);
-      if (is_start && scale_inv != nullptr && !is_fp8<InputType>::value) {
-        float current_scale = 1.0f;
-        if (scale != nullptr) {
-          current_scale = (scale_numel == num_tensors) ? scale[tensor_id] : scale[0];
-        } else if (gridDim.y == 1) {
-          current_scale = s;
+      if (is_valid) {
+        ComputeType val = static_cast<ComputeType>(loader.separate()[i]);
+        if constexpr (is_fp8<InputType>::value) {
+          if (scale_inv != nullptr) {
+            val = val * ((scale_inv_numel == num_tensors) ? scale_inv[tensor_id] : scale_inv[0]);
+          }
         }
-        size_t scale_inv_idx = (scale_inv_numel == num_tensors) ? tensor_id : 0;
-        reciprocal<ComputeType>(&scale_inv[scale_inv_idx], current_scale);
+        ComputeType temp = OP(val, p);
+        if (requires_amax) {
+          __builtin_assume(block_max[tensor_id] >= 0);
+          block_max[tensor_id] = fmaxf(fabsf(temp), block_max[tensor_id]);
+        }
+        if constexpr (is_fp8<OutputType>::value) {
+          float current_scale = 1.0f;
+          if (scale != nullptr) {
+            current_scale = (scale_numel == num_tensors) ? scale[tensor_id] : scale[0];
+          }
+          temp = temp * current_scale;
+        }
+        storer.separate()[i] = static_cast<OutputType>(temp);
+
+        // Update scale-inverse for quantization if requested
+        bool is_start = false;
+        if (offsets != nullptr) {
+          is_start = (global_idx == offsets[tensor_id]);
+        } else if (num_tensors > 1) {
+          size_t size = N / num_tensors;
+          is_start = (global_idx == tensor_id * size);
+        }
+        if (is_start && scale_inv != nullptr && !is_fp8<InputType>::value) {
+          float current_scale = 1.0f;
+          if (scale != nullptr) {
+            current_scale = (scale_numel == num_tensors) ? scale[tensor_id] : scale[0];
+          }
+          size_t scale_inv_idx = (scale_inv_numel == num_tensors) ? tensor_id : 0;
+          reciprocal<ComputeType>(&scale_inv[scale_inv_idx], current_scale);
+        }
+      } else {
+        storer.separate()[i] = OutputType();
       }
     }
-    storer.store(tid, size);
+    storer.store(tid, N);
   }
 
   // Reduce amax over block
   if (requires_amax) {
-    max = reduce_max<unary_kernel_threads / THREADS_PER_WARP>(max, warp_id);
-    if (threadIdx.x == 0 && max > 0.0f) {
-      size_t amax_idx = (amax_numel == num_tensors) ? tensor_id : 0;
-      static_assert(std::is_same<ComputeType, float>::value);
-      atomicMaxFloat(&amax[amax_idx], max);
+    if (offsets != nullptr || num_tensors > 1) {
+      for (size_t t = 0; t < num_tensors; ++t) {
+        float t_max = block_max[t];
+        t_max = reduce_max<unary_kernel_threads / THREADS_PER_WARP>(t_max, warp_id);
+        if (threadIdx.x == 0 && t_max > 0.0f) {
+          size_t amax_idx = (amax_numel == num_tensors) ? t : 0;
+          atomicMaxFloat(&amax[amax_idx], t_max);
+        }
+      }
+    } else {
+      max = block_max[0];
+      max = reduce_max<unary_kernel_threads / THREADS_PER_WARP>(max, warp_id);
+      if (threadIdx.x == 0) {
+        static_assert(std::is_same<ComputeType, float>::value);
+        atomicMaxFloat(amax, max);
+      }
     }
   }
 
@@ -301,88 +319,106 @@ __launch_bounds__(unary_kernel_threads) __global__
                            const int64_t *last_dims = nullptr, size_t num_tensors = 1,
                            size_t scale_numel = 1, size_t scale_inv_numel = 1,
                            size_t amax_numel = 1) {
-  size_t start = 0;
-  size_t size = N;
-  size_t tensor_id = 0;
-  if (gridDim.y > 1) {
-    tensor_id = blockIdx.y;
-    if (offsets != nullptr) {
-      start = offsets[tensor_id];
-      size = first_dims[tensor_id] * last_dims[tensor_id];
-    } else if (num_tensors > 1) {
-      size = N / num_tensors;
-      start = tensor_id * size;
-    }
-  }
-
-  VectorizedLoader<InputType, nvec, aligned> loader(input + start, size);
-  VectorizedLoader<InputTypeGrad, nvec, aligned> grad_loader(grad + start, size);
-  VectorizedStorer<OutputType, nvec, aligned> storer(output + start, size);
+  VectorizedLoader<InputType, nvec, aligned> loader(input, N);
+  VectorizedLoader<InputTypeGrad, nvec, aligned> grad_loader(grad, N);
+  VectorizedStorer<OutputType, nvec, aligned> storer(output, N);
   ComputeType max = 0;
   ComputeType s = 1;
   const bool requires_amax = (amax != nullptr);
   if constexpr (is_fp8<OutputType>::value) {
-    if (scale != nullptr && offsets == nullptr && gridDim.y == 1) s = *scale;
+    if (scale != nullptr && offsets == nullptr) s = *scale;
   }
   const int warp_id = threadIdx.x / THREADS_PER_WARP;
 
-  const size_t M = loader.num_aligned_elements();
+  float block_max[64] = {0.0f};
+
+  const size_t M = num_aligned_elements;
 
   for (size_t tid = blockIdx.x * blockDim.x + threadIdx.x; tid < M; tid += gridDim.x * blockDim.x) {
-    loader.load(tid, size);
-    grad_loader.load(tid, size);
+    loader.load(tid, N);
+    grad_loader.load(tid, N);
 #pragma unroll
     for (int i = 0; i < nvec; ++i) {
       const size_t global_idx =
           (aligned ? (tid * nvec + i) : (tid * nvec + i - loader.alignment()));
-      if (global_idx >= size) continue;
+      if (global_idx >= N) continue;
 
-      ComputeType val = static_cast<ComputeType>(loader.separate()[i]);
-      const ComputeType g = static_cast<ComputeType>(grad_loader.separate()[i]);
-      if constexpr (is_fp8<InputType>::value) {
-        if (scale_inv != nullptr) {
-          val = val * ((scale_inv_numel == num_tensors) ? scale_inv[tensor_id] : scale_inv[0]);
-        }
+      size_t tensor_id = 0;
+      bool is_valid = true;
+      if (offsets != nullptr) {
+        tensor_id = find_tensor_id(offsets, num_tensors, global_idx);
+        size_t start = offsets[tensor_id];
+        size_t size = first_dims[tensor_id] * last_dims[tensor_id];
+        is_valid = (global_idx >= start && global_idx < start + size);
+      } else if (num_tensors > 1) {
+        size_t size = N / num_tensors;
+        tensor_id = global_idx / size;
+        if (tensor_id >= num_tensors) tensor_id = num_tensors - 1;
       }
-      ComputeType temp = OP(val, p) * g;
-      if (requires_amax) {
-        __builtin_assume(max >= 0);
-        max = fmaxf(fabsf(temp), max);
-      }
-      if constexpr (is_fp8<OutputType>::value) {
-        float current_scale = 1.0f;
-        if (scale != nullptr) {
-          current_scale = (scale_numel == num_tensors) ? scale[tensor_id] : scale[0];
-        } else if (gridDim.y == 1) {
-          current_scale = s;
-        }
-        temp = temp * current_scale;
-      }
-      storer.separate()[i] = static_cast<OutputType>(temp);
 
-      // Update scale-inverse for quantization if requested
-      const bool is_start = (global_idx == 0);
-      if (is_start && scale_inv != nullptr && !is_fp8<InputType>::value) {
-        float current_scale = 1.0f;
-        if (scale != nullptr) {
-          current_scale = (scale_numel == num_tensors) ? scale[tensor_id] : scale[0];
-        } else if (gridDim.y == 1) {
-          current_scale = s;
+      if (is_valid) {
+        ComputeType val = static_cast<ComputeType>(loader.separate()[i]);
+        const ComputeType g = static_cast<ComputeType>(grad_loader.separate()[i]);
+        if constexpr (is_fp8<InputType>::value) {
+          if (scale_inv != nullptr) {
+            val = val * ((scale_inv_numel == num_tensors) ? scale_inv[tensor_id] : scale_inv[0]);
+          }
         }
-        size_t scale_inv_idx = (scale_inv_numel == num_tensors) ? tensor_id : 0;
-        reciprocal<ComputeType>(&scale_inv[scale_inv_idx], current_scale);
+        ComputeType temp = OP(val, p) * g;
+        if (requires_amax) {
+          __builtin_assume(block_max[tensor_id] >= 0);
+          block_max[tensor_id] = fmaxf(fabsf(temp), block_max[tensor_id]);
+        }
+        if constexpr (is_fp8<OutputType>::value) {
+          float current_scale = 1.0f;
+          if (scale != nullptr) {
+            current_scale = (scale_numel == num_tensors) ? scale[tensor_id] : scale[0];
+          }
+          temp = temp * current_scale;
+        }
+        storer.separate()[i] = static_cast<OutputType>(temp);
+
+        // Update scale-inverse for quantization if requested
+        bool is_start = false;
+        if (offsets != nullptr) {
+          is_start = (global_idx == offsets[tensor_id]);
+        } else if (num_tensors > 1) {
+          size_t size = N / num_tensors;
+          is_start = (global_idx == tensor_id * size);
+        }
+        if (is_start && scale_inv != nullptr && !is_fp8<InputType>::value) {
+          float current_scale = 1.0f;
+          if (scale != nullptr) {
+            current_scale = (scale_numel == num_tensors) ? scale[tensor_id] : scale[0];
+          }
+          size_t scale_inv_idx = (scale_inv_numel == num_tensors) ? tensor_id : 0;
+          reciprocal<ComputeType>(&scale_inv[scale_inv_idx], current_scale);
+        }
+      } else {
+        storer.separate()[i] = OutputType();
       }
     }
-    storer.store(tid, size);
+    storer.store(tid, N);
   }
 
   // Reduce amax over block
   if (requires_amax) {
-    max = reduce_max<unary_kernel_threads / THREADS_PER_WARP>(max, warp_id);
-    if (threadIdx.x == 0 && max > 0.0f) {
-      size_t amax_idx = (amax_numel == num_tensors) ? tensor_id : 0;
-      static_assert(std::is_same<ComputeType, float>::value);
-      atomicMaxFloat(&amax[amax_idx], max);
+    if (offsets != nullptr || num_tensors > 1) {
+      for (size_t t = 0; t < num_tensors; ++t) {
+        float t_max = block_max[t];
+        t_max = reduce_max<unary_kernel_threads / THREADS_PER_WARP>(t_max, warp_id);
+        if (threadIdx.x == 0 && t_max > 0.0f) {
+          size_t amax_idx = (amax_numel == num_tensors) ? t : 0;
+          atomicMaxFloat(&amax[amax_idx], t_max);
+        }
+      }
+    } else {
+      max = block_max[0];
+      max = reduce_max<unary_kernel_threads / THREADS_PER_WARP>(max, warp_id);
+      if (threadIdx.x == 0) {
+        static_assert(std::is_same<ComputeType, float>::value);
+        atomicMaxFloat(amax, max);
+      }
     }
   }
 
@@ -461,24 +497,24 @@ void VectorizedUnaryKernelLauncher(const InputType *input, const fp32 *noop, Out
 
     size_t num_aligned_elements = get_num_aligned_elements(input, N, nvec, sizeof(InputType));
     constexpr size_t threads = unary_kernel_threads;
+    size_t num_blocks = DIVUP(num_aligned_elements, threads);
     constexpr size_t max_blocks = 65535;
-    const size_t num_blocks = std::min(DIVUP(num_aligned_elements, threads), max_blocks);
-    const dim3 grid(num_blocks, num_tensors);
+    num_blocks = std::min(num_blocks, max_blocks);
 
     switch (align) {
       case Alignment::SAME_ALIGNED:
-        unary_kernel<nvec, true, fp32, Param, OP><<<grid, threads, 0, stream>>>(
+        unary_kernel<nvec, true, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
             input, noop, output, scale, amax, scale_inv, params, N, num_aligned_elements, offsets,
             first_dims, last_dims, num_tensors, scale_numel, scale_inv_numel, amax_numel);
         break;
       case Alignment::SAME_UNALIGNED:
-        unary_kernel<nvec, false, fp32, Param, OP><<<grid, threads, 0, stream>>>(
+        unary_kernel<nvec, false, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
             input, noop, output, scale, amax, scale_inv, params, N, num_aligned_elements, offsets,
             first_dims, last_dims, num_tensors, scale_numel, scale_inv_numel, amax_numel);
         break;
       case Alignment::DIFFERENT: {
         // If the pointers are aligned differently we cannot vectorize
-        unary_kernel<1, true, fp32, Param, OP><<<grid, threads, 0, stream>>>(
+        unary_kernel<1, true, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
             input, noop, output, scale, amax, scale_inv, params, N, N, offsets, first_dims,
             last_dims, num_tensors, scale_numel, scale_inv_numel, amax_numel);
         break;
@@ -503,24 +539,24 @@ void VectorizedUnaryGradKernelLauncher(const InputTypeGrad *grad, const InputTyp
 
     size_t num_aligned_elements = get_num_aligned_elements(input, N, nvec, sizeof(InputType));
     constexpr size_t threads = unary_kernel_threads;
+    size_t num_blocks = DIVUP(num_aligned_elements, threads);
     constexpr size_t max_blocks = 65535;
-    const size_t num_blocks = std::min(DIVUP(num_aligned_elements, threads), max_blocks);
-    const dim3 grid(num_blocks, num_tensors);
+    num_blocks = std::min(num_blocks, max_blocks);
 
     switch (align) {
       case Alignment::SAME_ALIGNED:
-        unary_grad_kernel<nvec, true, fp32, Param, OP><<<grid, threads, 0, stream>>>(
+        unary_grad_kernel<nvec, true, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
             grad, input, output, scale, amax, scale_inv, params, N, num_aligned_elements, offsets,
             first_dims, last_dims, num_tensors, scale_numel, scale_inv_numel, amax_numel);
         break;
       case Alignment::SAME_UNALIGNED:
-        unary_grad_kernel<nvec, false, fp32, Param, OP><<<grid, threads, 0, stream>>>(
+        unary_grad_kernel<nvec, false, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
             grad, input, output, scale, amax, scale_inv, params, N, num_aligned_elements, offsets,
             first_dims, last_dims, num_tensors, scale_numel, scale_inv_numel, amax_numel);
         break;
       case Alignment::DIFFERENT: {
         // If the pointers are aligned differently we cannot vectorize
-        unary_grad_kernel<1, true, fp32, Param, OP><<<grid, threads, 0, stream>>>(
+        unary_grad_kernel<1, true, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
             grad, input, output, scale, amax, scale_inv, params, N, N, offsets, first_dims,
             last_dims, num_tensors, scale_numel, scale_inv_numel, amax_numel);
         break;
