@@ -470,9 +470,11 @@ find_library(NCCL_EP_LIB
     REQUIRED)
 
 # ── NCCL + GIN headers ─────────────────────────────────────────────────────
-# libnccl.so and all GIN headers (ncclGin.h, ncclWindow_t, ncclDevComm_t)
-# ship with the base CUDA Toolkit OR the 3rdparty/nccl submodule build
-# (preferred when present; auto-built by setup.py via build_nccl_ep_submodule).
+# libnccl.so and the GIN headers (ncclGin.h, ncclWindow_t, ncclDevComm_t) are
+# resolved from, in order of preference: the 3rdparty/nccl submodule build
+# (auto-built by setup.py via build_nccl_ep_submodule), a system NCCL install
+# (e.g. apt libnccl2 / libnccl-dev), or the NVIDIA NCCL pip wheel
+# (nvidia-nccl-cu1*). NCCL is NOT part of the base CUDA Toolkit.
 if(NOT NCCL_LIB)
   find_library(NCCL_LIB
       NAMES nccl libnccl
@@ -522,7 +524,8 @@ target_link_libraries(transformer_engine PUBLIC
 #     NCCL_EP_LIB_DIR since libnccl_ep is not in target_link_libraries anymore).
 #   - INSTALL_RPATH: $ORIGIN covers the wheel layout (libnccl_ep.so sits next to
 #     libtransformer_engine.so); NCCL_EP_LIB_DIR is a dev fallback.
-# libnccl.so is already on the system via the Toolkit — no rpath needed for it.
+# libnccl.so is resolved from the system NCCL install or NVIDIA NCCL pip wheel
+# (the dynamic linker finds it via its own configured paths); no rpath needed.
 set_target_properties(transformer_engine PROPERTIES
     BUILD_RPATH "${NCCL_EP_LIB_DIR}"
     INSTALL_RPATH "$ORIGIN;${NCCL_EP_LIB_DIR}")
