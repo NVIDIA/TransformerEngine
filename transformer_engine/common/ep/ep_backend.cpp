@@ -26,12 +26,36 @@ namespace ep {
 
 namespace {
 
+ncclDataType_t te_dtype_to_nccl_dtype(NVTEDType dtype) {
+  switch (dtype) {
+    case kNVTEFloat32:
+      return ncclFloat32;
+    case kNVTEFloat16:
+      return ncclFloat16;
+    case kNVTEBFloat16:
+      return ncclBfloat16;
+    case kNVTEInt32:
+      return ncclInt32;
+    case kNVTEInt64:
+      return ncclInt64;
+    case kNVTEByte:
+      return ncclUint8;
+    case kNVTEFloat8E4M3:
+      return ncclFloat8e4m3;
+    case kNVTEFloat8E5M2:
+      return ncclFloat8e5m2;
+    default:
+      NVTE_ERROR("Unsupported NVTEDType for NCCL dtype conversion: ", static_cast<int>(dtype));
+  }
+  return ncclFloat32;  // unreachable
+}
+
 inline ncclEpTensor_t make_nccl_ep_tensor(const NVTETensor t, const NVTECommWindow& win = {}) {
   NVTEShape shape = nvte_tensor_shape(t);
   ncclEpTensor_t desc = NCCL_EP_TENSOR_INIT;
   desc.ndim = shape.ndim;
   desc.sizes = shape.data;
-  desc.datatype = EPBackend::nvte_dtype_to_nccl(nvte_tensor_type(t));
+  desc.datatype = te_dtype_to_nccl_dtype(nvte_tensor_type(t));
   if (win.window != nullptr) {
     desc.win_hdl = win.window;
     desc.win_offset = win.offset;
@@ -135,34 +159,6 @@ void EPBackend::shutdown() {
   }
   inst.ep_comm_ = nullptr;  // borrowed; caller destroys
   inst.initialized_ = false;
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-ncclDataType_t EPBackend::nvte_dtype_to_nccl(NVTEDType dtype) {
-  switch (dtype) {
-    case kNVTEFloat32:
-      return ncclFloat32;
-    case kNVTEFloat16:
-      return ncclFloat16;
-    case kNVTEBFloat16:
-      return ncclBfloat16;
-    case kNVTEInt32:
-      return ncclInt32;
-    case kNVTEInt64:
-      return ncclInt64;
-    case kNVTEByte:
-      return ncclUint8;
-    case kNVTEFloat8E4M3:
-      return ncclFloat8e4m3;
-    case kNVTEFloat8E5M2:
-      return ncclFloat8e5m2;
-    default:
-      NVTE_ERROR("Unsupported NVTEDType for NCCL EP conversion: ", static_cast<int>(dtype));
-  }
-  return ncclFloat32;  // unreachable
 }
 
 ncclEpHandle_t EPBackend::open_handle(void* handle_mem, size_t handle_mem_size, int num_topk,

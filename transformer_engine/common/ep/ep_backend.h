@@ -85,10 +85,6 @@ class EPBackend {
   static EPBackend& instance();  // Meyers singleton accessor
   static void validate_config(const NVTEEpGroupConfig& config);
 
- public:
-  static ncclDataType_t nvte_dtype_to_nccl(NVTEDType dtype);
-
- private:
   // Open a fresh ncclEpHandle over handle_mem. num_topk=-1 for paths
   // that don't carry per-token weights.
   ncclEpHandle_t open_handle(void* handle_mem, size_t handle_mem_size, int num_topk,
