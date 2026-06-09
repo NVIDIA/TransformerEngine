@@ -111,10 +111,8 @@ void EPBackend::validate_config(const NVTEEpGroupConfig& config) {
              "but current device has compute capability ",
              major, ".x");
 
-  // NCCL EP needs CUDA multicast (NVLS); init hangs without it.
   NVTE_CHECK(cuda::supports_multicast(device),
-             "NCCL EP requires CUDA multicast (NVLS) support on device ", device,
-             " but CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED reports 0.");
+             "NCCL EP requires CUDA multicast support on device ", device);
 }
 
 void EPBackend::initialize(ncclComm_t ep_comm, NVTEEpGroupConfig config) {
