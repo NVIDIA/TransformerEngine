@@ -303,13 +303,13 @@ Kernel Configuration
 
    :Type: ``str`` (``MAE`` or ``MSE``)
    :Default: ``MAE``
-   :Description: Select the input-domain error metric used by NVFP4 4over6 map-to-4 versus map-to-6 candidate selection in the ``NVFP4BlockScaling`` recipe.
+   :Description: Select the error metric used by NVFP4 4over6 map-to-4 versus map-to-6 candidate selection in the ``NVFP4BlockScaling`` recipe.
 
 .. envvar:: NVTE_NVFP4_4OVER6_ERR_USE_FAST_MATH
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
-   :Description: Allow the NVFP4 4over6 candidate error computation to use faster non-strict floating-point expressions. By default, 4over6 error comparison uses strict expressions; ``NVTE_USE_FAST_MATH`` does not control this error-comparison path.
+   :Description: Use the faster NVFP4 4over6 candidate error path that compares candidates in the E4M3-scaled domain after the E2M1 x E4M3 product is rounded to FP16. Error differences and accumulation remain FP32. By default, 4over6 error comparison uses the original input-domain path; ``NVTE_USE_FAST_MATH`` does not control this error-comparison path.
 
 Torch Compilation and Fusion
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

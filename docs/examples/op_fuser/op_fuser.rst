@@ -317,9 +317,10 @@ of context objects for all the corresponding ``BasicOperation`` s.
 
 .. warning::
 
-   Remember the contract that the fused operation must produce outputs
-   that are interchangeable with the corresponding basic operation
-   outputs.
+   Forward-only and backward-only fused operations must produce outputs
+   that are interchangeable with the corresponding basic operations,
+   since the opposite pass is fused independently. Joint forward-backward
+   fusions (described below) relax this contract.
 
 In order to make these fused operations useful, they should be
 registered with the operation fuser. To do this, first implement a
@@ -351,3 +352,65 @@ and then register it with the ``register_forward_fusion`` or
 
     # Register fusion with operation fuser
     te.ops.register_forward_fusion(fuse_axpy_ops)
+
+Joint forward-backward fusions
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The fusions above replace operations in either the forward or the
+backward pass, and they must remain interchangeable with the unfused
+operations because the opposite pass is fused independently. Some
+optimizations, however, benefit from co-designing the two passes. For
+example, a fused operation's forward pass might skip saving a tensor if
+it knows that its backward pass can recompute it.
+
+A *joint* forward-backward fusion expresses this coupling. It is a single
+``FusedOperation`` that implements both ``fuser_forward`` and
+``fuser_backward``, registered with ``register_forward_backward_fusion``.
+Joint fusions are applied before the forward-only and backward-only
+fusion passes, so the same fused operation is seen by both passes. Unlike
+forward-only or backward-only fusions, the two halves need not be
+individually interchangeable with the unfused operations; only the
+forward/backward pair must be jointly equivalent.
+
+.. code-block:: python
+
+    class LinearSiLU(te.ops.FusedOperation):
+
+        def __init__(self, linear: te.ops.Linear, silu: te.ops.SiLU) -> None:
+            super().__init__((linear, silu))  # Equivalent basic ops
+
+        def fuser_forward(self, basic_op_ctxs, input_, **unused):
+            weight = self.basic_ops[0].weight
+            out = torch.nn.functional.silu(torch.matmul(input_, weight.T))
+            # Save reduced state: the backward recomputes the SiLU input
+            # rather than saving it.
+            basic_op_ctxs[0].save_for_backward(input_, weight)
+            return out, [(), ()]
+
+        def fuser_backward(self, basic_op_ctxs, grad_output, **unused):
+            x, w = basic_op_ctxs[0].saved_tensors
+            y = torch.matmul(x, w.T)  # Recompute SiLU input
+            s = torch.sigmoid(y)
+            dy = grad_output * s * (1 + y * (1 - s))  # SiLU backward
+            return (
+                torch.matmul(dy, w),              # Grad input
+                [(torch.matmul(dy.T, x),), ()],   # Grad params for each basic op
+                [(), ()],                         # Grad extra inputs for each basic op
+            )
+
+    def fuse_linear_silu(ops, **unused):
+        """Sliding window scan to perform LinearSiLU fusion"""
+        out = []
+        window, ops = ops[:2], ops[2:]
+        while len(window) == 2:
+            if isinstance(window[0], te.ops.Linear) and isinstance(window[1], te.ops.SiLU):
+                window = [LinearSiLU(window[0], window[1])]
+            else:
+                out.append(window[0])
+                window = window[1:]
+            window, ops = window + ops[:1], ops[1:]
+        out.extend(window + ops)
+        return out
+
+    # Register joint fusion with operation fuser
+    te.ops.register_forward_backward_fusion(fuse_linear_silu)
