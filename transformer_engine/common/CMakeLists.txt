@@ -449,11 +449,12 @@ if(NVTE_WITH_NCCL_EP)
 # (auto-built by setup.py via build_nccl_ep_submodule).
 set(NCCL_EP_SUBMODULE_ROOT
     "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/nccl")
-set(NCCL_EP_INCLUDE_DIR "${NCCL_EP_SUBMODULE_ROOT}/contrib/nccl_ep/include")
+set(NCCL_EP_INCLUDE_DIR "${NCCL_EP_SUBMODULE_ROOT}/build/include")
 if(NOT EXISTS "${NCCL_EP_INCLUDE_DIR}/nccl_ep.h")
   message(FATAL_ERROR
     "NCCL EP header not found at ${NCCL_EP_INCLUDE_DIR}/nccl_ep.h. "
-    "Run `git submodule update --init --recursive` to checkout 3rdparty/nccl.")
+    "setup.py builds 3rdparty/nccl/contrib/nccl_ep/ via make, which stages "
+    "nccl_ep.h + nccl_ep/ into build/include/.")
 endif()
 message(STATUS "NCCL EP headers: ${NCCL_EP_INCLUDE_DIR}")
 
