@@ -34,6 +34,7 @@ from transformer_engine.jax.cpp_extensions.ep import (
     ep_prepare,
     ep_dispatch_fwd,
     ep_combine_fwd,
+    get_ep_config,
 )
 
 
@@ -117,12 +118,15 @@ class TestEP(unittest.TestCase):
             ep_bootstrap(
                 world_size=cls.num_procs,
                 rank=cls.rank,
-                ep_size=cls.ep,
                 num_experts=cls.num_experts,
                 max_tokens_per_rank=TOKENS_PER_DP_SHARD,
                 recv_capacity_per_rank=cls.recv_capacity_per_rank,
                 hidden_dim=HIDDEN_DIM,
             )
+        # Bootstrap must snapshot ep_size and num_ep_groups onto EpConfig so
+        # abstract-eval never needs the active mesh.
+        assert get_ep_config().ep_size == cls.ep
+        assert get_ep_config().num_ep_groups == cls.dp
         # One layer config shared by all single-layer tests below; non-zero
         # alignment exercises dispatch_output_per_expert_alignment end-to-end.
         cls.hk = EpLayerConfig(top_k=TOP_K, dispatch_output_per_expert_alignment=16)
@@ -136,7 +140,6 @@ class TestEP(unittest.TestCase):
                 ep_bootstrap(
                     world_size=self.num_procs,
                     rank=self.rank,
-                    ep_size=self.ep,
                     num_experts=self.num_experts,
                     max_tokens_per_rank=TOKENS_PER_DP_SHARD,
                     recv_capacity_per_rank=self.recv_capacity_per_rank,

@@ -43,13 +43,16 @@ class EpResources {
     ncclUniqueId uid;
     std::memcpy(&uid, p.uid_bytes.data(), sizeof(uid));
     NVTE_CHECK_NCCL(ncclCommInitRank(&comm_, p.ep_size, uid, p.rank_within_group));
+    // zero_copy=0: JAX EP path always stages payloads; the zero-copy fast path
+    // requires NVTECommWindow-backed tensors, which JAX bindings don't expose.
     NVTEEpGroupConfig cfg{.ep_size = p.ep_size,
                           .num_experts = p.num_experts,
                           .max_tokens_per_rank = p.max_tokens_per_rank,
                           .max_recv_tokens_per_rank = p.max_recv_tokens_per_rank,
                           .hidden_dim = p.hidden_dim,
                           .max_num_sms = p.max_num_sms,
-                          .max_token_dtype = p.max_token_dtype};
+                          .max_token_dtype = p.max_token_dtype,
+                          .zero_copy = 0};
     try {
       nvte_ep_initialize(static_cast<void*>(comm_), cfg);
     } catch (...) {
