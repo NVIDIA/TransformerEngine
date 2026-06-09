@@ -21,6 +21,7 @@
 #include "../../util/math.h"
 #include "../../util/ptx.cuh"
 #include "../../utils.cuh"
+#include "../../util/cuda_runtime.h"
 #include "../core/common.cuh"
 
 namespace transformer_engine {
@@ -560,8 +561,8 @@ __global__ void __launch_bounds__(ROWWISE_FLAT_THREADS)
     group_cast_fp8_varying_first_rowwise_aligned_flat_kernel(
         const IType *__restrict__ input, OType *__restrict__ output_rowwise,
         const float *__restrict__ scale_ptr, const float *__restrict__ noop,
-        const size_t num_tensors, const size_t cols, const size_t total_elements,
-        const int64_t *__restrict__ offsets_ptr, const int64_t *__restrict__ first_dims_ptr) {
+        const size_t num_tensors, const size_t total_elements,
+        const int64_t *__restrict__ offsets_ptr, const size_t block_chunk_size) {
   if (noop != nullptr && noop[0] == 1.0f) {
     return;
   }
@@ -570,31 +571,79 @@ __global__ void __launch_bounds__(ROWWISE_FLAT_THREADS)
   using IVecT = Vec<IType, nvec>;
   using OVecT = Vec<OType, nvec>;
 
-  const size_t tensor_id = blockIdx.y;
-  if (tensor_id >= num_tensors) {
+  // Dynamic shared memory layout:
+  // s_offsets: int64_t[num_tensors + 1]
+  // s_block_offsets: int[num_tensors + 1]
+  extern __shared__ char s_mem[];
+  int64_t *s_offsets = reinterpret_cast<int64_t *>(s_mem);
+  int *s_block_offsets = reinterpret_cast<int *>(s_mem + (num_tensors + 1) * sizeof(int64_t));
+
+  const size_t tid = threadIdx.x;
+
+  // 1. Copy offsets to shared memory
+  for (size_t i = tid; i <= num_tensors; i += blockDim.x) {
+    s_offsets[i] = offsets_ptr[i];
+  }
+  __syncthreads();
+
+  // 2. Compute block counts and prefix sum
+  if (tid == 0) {
+    int sum = 0;
+    for (size_t i = 0; i < num_tensors; ++i) {
+      s_block_offsets[i] = sum;
+      size_t tensor_size = s_offsets[i + 1] - s_offsets[i];
+      int blocks = (tensor_size + block_chunk_size - 1) / block_chunk_size;
+      sum += blocks;
+    }
+    s_block_offsets[num_tensors] = sum;
+  }
+  __syncthreads();
+
+  // Guard against blocks that are out of bounds of the active work
+  if (blockIdx.x >= s_block_offsets[num_tensors]) {
     return;
   }
 
-  const size_t tensor_base = static_cast<size_t>(offsets_ptr[tensor_id]);
-  if (tensor_base >= total_elements) {
+  // 3. Binary search to find which tensor this block belongs to
+  size_t tensor_id = 0;
+  {
+    size_t low = 0;
+    size_t hi = num_tensors;
+    while (low < hi) {
+      size_t mid = low + (hi - low) / 2;
+      if (s_block_offsets[mid + 1] <= blockIdx.x) {
+        low = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+    tensor_id = low;
+  }
+
+  // 4. Calculate this block's local work range within the tensor
+  const size_t local_block_id = blockIdx.x - s_block_offsets[tensor_id];
+  const size_t tensor_base = s_offsets[tensor_id];
+  const size_t tensor_size = s_offsets[tensor_id + 1] - tensor_base;
+  const size_t start_elt = local_block_id * block_chunk_size;
+  const size_t end_elt = start_elt + block_chunk_size < tensor_size ? start_elt + block_chunk_size : tensor_size;
+
+  if (start_elt >= end_elt) {
     return;
   }
-  const size_t declared_tensor_elements = static_cast<size_t>(first_dims_ptr[tensor_id]) * cols;
-  const size_t max_tensor_elements = total_elements - tensor_base;
-  const size_t tensor_elements =
-      declared_tensor_elements < max_tensor_elements ? declared_tensor_elements
-                                                     : max_tensor_elements;
-  const size_t tensor_vecs = tensor_elements / nvec;
+
+  const IType *base_input = input + tensor_base + start_elt;
+  OType *base_output = output_rowwise + tensor_base + start_elt;
+  const size_t numel = end_elt - start_elt;
+  const size_t tensor_vecs = numel / nvec;
   const float scale = scale_ptr == nullptr ? 1.0f : scale_ptr[tensor_id];
 
-  for (size_t local_vec_id = blockIdx.x * blockDim.x + threadIdx.x;
-       local_vec_id < tensor_vecs; local_vec_id += gridDim.x * blockDim.x) {
-    const size_t offset = tensor_base + local_vec_id * nvec;
+  for (size_t local_vec_id = tid; local_vec_id < tensor_vecs; local_vec_id += blockDim.x) {
+    const size_t offset = local_vec_id * nvec;
     IVecT local_input;
     OVecT local_output;
-    local_input.load_from(input + offset);
+    local_input.load_from(base_input + offset);
     scaled_fp8_cvt_vec_full<IS_ACT, ParamOP, OP>(local_input, local_output, scale);
-    local_output.store_to(output_rowwise + offset);
+    local_output.store_to(base_output + offset);
   }
 }
 
@@ -1121,13 +1170,24 @@ void group_quantize(const GroupedTensor *input, const Tensor *noop, GroupedTenso
                           const dim3 flat_block(ROWWISE_FLAT_THREADS);
                           const dim3 flat_grid(blocks_per_tensor, num_tensors);
                           if (flat_aligned) {
+                            const int num_sms = ::transformer_engine::cuda::sm_count();
+                            const size_t target_blocks = 8 * num_sms;
+                            size_t block_chunk_size = (total_elements + target_blocks - 1) / target_blocks;
+                            // Align block_chunk_size to a multiple of flat_nvec to ensure perfect vector alignment
+                            block_chunk_size = DIVUP(block_chunk_size, static_cast<size_t>(flat_nvec)) * flat_nvec;
+                            if (block_chunk_size < 8192) {
+                              block_chunk_size = 8192;
+                            }
+                            const size_t grid_size = total_elements / block_chunk_size + num_tensors;
+                            const size_t shared_mem_bytes = (num_tensors + 1) * sizeof(int64_t) + (num_tensors + 1) * sizeof(int);
+
                             group_cast_fp8_varying_first_rowwise_aligned_flat_kernel<
                                 IS_ACT, ParamOP, OP, IType, OType>
-                                <<<flat_grid, flat_block, 0, stream>>>(
+                                <<<grid_size, flat_block, shared_mem_bytes, stream>>>(
                                     reinterpret_cast<const IType *>(input->data.dptr),
                                     reinterpret_cast<OType *>(output->data.dptr), scale_ptr,
-                                    noop_ptr, num_tensors, last_logical_dim, total_elements,
-                                    offsets_ptr, first_dims_ptr);
+                                    noop_ptr, num_tensors, total_elements,
+                                    offsets_ptr, block_chunk_size);
                           } else {
                             group_cast_fp8_varying_first_rowwise_flat_kernel<
                                 IS_ACT, ParamOP, OP, IType, OType, false>

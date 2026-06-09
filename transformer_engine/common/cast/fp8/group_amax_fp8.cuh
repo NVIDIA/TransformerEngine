@@ -27,6 +27,7 @@
 
 #include "../../common.h"
 #include "../../utils.cuh"
+#include "../../util/cuda_runtime.h"
 
 namespace transformer_engine {
 namespace dispatch {
@@ -180,6 +181,169 @@ inline size_t choose_grouped_amax_blocks_per_tensor(size_t max_elts_per_tensor) 
   return blocks;
 }
 
+__device__ __forceinline__ size_t find_tensor_from_offsets(
+    const int64_t *__restrict__ offsets_ptr, const size_t num_tensors, const size_t offset) {
+  size_t low = 1;
+  size_t hi = num_tensors;
+  while (low < hi) {
+    const size_t mid = low + (hi - low) / 2;
+    if (static_cast<size_t>(offsets_ptr[mid]) <= offset) {
+      low = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  return low - 1;
+}
+
+// Flat vectorized amax kernel for imbalanced/varying shapes.
+//
+// Grid: (num_blocks).
+// Each block scans a flat chunk of elements within a specific tensor.
+// Blocks are assigned to tensors proportionally to each tensor's size, achieving perfect load balance!
+template <int NVEC, typename InputType>
+__launch_bounds__(GROUPED_AMAX_KERNEL_THREADS) __global__
+    void grouped_amax_flat_kernel(const InputType *__restrict__ input, float *__restrict__ amax,
+                                  const size_t num_tensors, const size_t total_elements,
+                                  const int64_t *__restrict__ offsets_ptr,
+                                  const size_t block_chunk_size,
+                                  const float *__restrict__ noop_ptr) {
+  if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) {
+    return;
+  }
+
+  // Dynamic shared memory layout:
+  // s_offsets: int64_t[num_tensors + 1]
+  // s_block_offsets: int[num_tensors + 1]
+  extern __shared__ char s_mem[];
+  int64_t *s_offsets = reinterpret_cast<int64_t *>(s_mem);
+  int *s_block_offsets = reinterpret_cast<int *>(s_mem + (num_tensors + 1) * sizeof(int64_t));
+
+  const size_t tid = threadIdx.x;
+
+  // 1. Copy offsets to shared memory
+  for (size_t i = tid; i <= num_tensors; i += blockDim.x) {
+    s_offsets[i] = offsets_ptr[i];
+  }
+  __syncthreads();
+
+  // 2. Compute block counts and prefix sum
+  if (tid == 0) {
+    int sum = 0;
+    for (size_t i = 0; i < num_tensors; ++i) {
+      s_block_offsets[i] = sum;
+      size_t tensor_size = s_offsets[i + 1] - s_offsets[i];
+      int blocks = (tensor_size + block_chunk_size - 1) / block_chunk_size;
+      sum += blocks;
+    }
+    s_block_offsets[num_tensors] = sum;
+  }
+  __syncthreads();
+
+  // Guard against blocks that are out of bounds of the active work
+  if (blockIdx.x >= s_block_offsets[num_tensors]) {
+    return;
+  }
+
+  // 3. Binary search to find which tensor this block belongs to
+  size_t tensor_id = 0;
+  {
+    size_t low = 0;
+    size_t hi = num_tensors;
+    while (low < hi) {
+      size_t mid = low + (hi - low) / 2;
+      if (s_block_offsets[mid + 1] <= blockIdx.x) {
+        low = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+    tensor_id = low;
+  }
+
+  // 4. Calculate this block's local work range within the tensor
+  const size_t local_block_id = blockIdx.x - s_block_offsets[tensor_id];
+  const size_t tensor_base = s_offsets[tensor_id];
+  const size_t tensor_size = s_offsets[tensor_id + 1] - tensor_base;
+  const size_t start_elt = local_block_id * block_chunk_size;
+  const size_t end_elt = start_elt + block_chunk_size < tensor_size ? start_elt + block_chunk_size : tensor_size;
+
+  if (start_elt >= end_elt) {
+    return;
+  }
+
+  using IVecT = Vec<InputType, NVEC>;
+  const InputType *base = input + tensor_base + start_elt;
+  const size_t numel = end_elt - start_elt;
+  const size_t total_vecs = numel / NVEC;
+  const size_t tail_start = total_vecs * NVEC;
+
+  float thread_amax = 0.0f;
+  const bool aligned = (reinterpret_cast<uintptr_t>(base) % IVecT::BYTES) == 0;
+
+  if (aligned) {
+    for (size_t v = tid; v < total_vecs; v += blockDim.x) {
+      IVecT vec;
+      vec.load_from(base + v * NVEC);
+#pragma unroll
+      for (int i = 0; i < NVEC; ++i) {
+        thread_amax = fmaxf(thread_amax, fabsf(static_cast<float>(vec.data.elt[i])));
+      }
+    }
+  } else {
+    for (size_t v = tid; v < total_vecs; v += blockDim.x) {
+      const InputType *p = base + v * NVEC;
+#pragma unroll
+      for (int i = 0; i < NVEC; ++i) {
+        thread_amax = fmaxf(thread_amax, fabsf(static_cast<float>(p[i])));
+      }
+    }
+  }
+
+  // Tail elements
+  for (size_t i = tail_start + tid; i < numel; i += blockDim.x) {
+    thread_amax = fmaxf(thread_amax, fabsf(static_cast<float>(base[i])));
+  }
+
+  // Warp-shuffle reduce within the block
+#pragma unroll
+  for (int s = THREADS_PER_WARP / 2; s > 0; s >>= 1) {
+    thread_amax = fmaxf(thread_amax, __shfl_xor_sync(0xFFFFFFFFu, thread_amax, s));
+  }
+
+  constexpr int kWarps = GROUPED_AMAX_KERNEL_THREADS / THREADS_PER_WARP;
+  __shared__ float s_block_amax[kWarps];
+  const int warp_id = tid / THREADS_PER_WARP;
+  const int lane = tid % THREADS_PER_WARP;
+  if (lane == 0) {
+    s_block_amax[warp_id] = thread_amax;
+  }
+  __syncthreads();
+
+  if (warp_id == 0) {
+    float v = lane < kWarps ? s_block_amax[lane] : 0.0f;
+#pragma unroll
+    for (int s = kWarps / 2; s > 0; s >>= 1) {
+      v = fmaxf(v, __shfl_xor_sync(0xFFFFFFFFu, v, s));
+    }
+    if (lane == 0) {
+      atomicMaxFloat(&amax[tensor_id], v);
+    }
+  }
+}
+
+inline size_t choose_grouped_amax_flat_blocks(size_t total_vecs) {
+  if (total_vecs == 0) return 1;
+  const int num_sms = ::transformer_engine::cuda::sm_count();
+  // Launch 4 blocks per SM to hide latency, capped at total_vecs
+  size_t blocks = 4 * num_sms;
+  if (blocks > total_vecs) {
+    blocks = total_vecs;
+  }
+  if (blocks == 0) blocks = 1;
+  return blocks;
+}
+
 }  // namespace group_amax_kernel
 
 template <typename InputType>
@@ -217,31 +381,37 @@ void launch_grouped_amax_kernel(const InputType *input, float *amax, const size_
   constexpr int kNvec = kVecBytes / sizeof(InputType);
   static_assert(kNvec >= 1, "Vector width must be at least 1");
 
-  const size_t blocks_per_tensor = choose_grouped_amax_blocks_per_tensor(max_elts_per_tensor);
-  const dim3 grid(blocks_per_tensor, num_tensors);
-  const dim3 block(GROUPED_AMAX_KERNEL_THREADS);
-
   switch (shape_rep) {
-    case ShapeRepresentation::SAME_BOTH_DIMS:
+    case ShapeRepresentation::SAME_BOTH_DIMS: {
+      const size_t blocks_per_tensor = choose_grouped_amax_blocks_per_tensor(max_elts_per_tensor);
+      const dim3 grid(blocks_per_tensor, num_tensors);
+      const dim3 block(GROUPED_AMAX_KERNEL_THREADS);
       grouped_amax_kernel<kNvec, InputType, ShapeRepresentation::SAME_BOTH_DIMS>
           <<<grid, block, 0, stream>>>(input, amax, num_tensors, first_logical_dim,
                                        last_logical_dim, offsets_ptr, noop_ptr);
       break;
+    }
     case ShapeRepresentation::VARYING_FIRST_DIM:
-      grouped_amax_kernel<kNvec, InputType, ShapeRepresentation::VARYING_FIRST_DIM>
-          <<<grid, block, 0, stream>>>(input, amax, num_tensors, first_logical_dim,
-                                       last_logical_dim, offsets_ptr, noop_ptr);
-      break;
     case ShapeRepresentation::VARYING_LAST_DIM:
-      grouped_amax_kernel<kNvec, InputType, ShapeRepresentation::VARYING_LAST_DIM>
-          <<<grid, block, 0, stream>>>(input, amax, num_tensors, first_logical_dim,
-                                       last_logical_dim, offsets_ptr, noop_ptr);
+    case ShapeRepresentation::VARYING_BOTH_DIMS: {
+      const size_t total_elements = first_logical_dim * last_logical_dim;
+      const int num_sms = ::transformer_engine::cuda::sm_count();
+      const size_t target_blocks = 8 * num_sms;
+      size_t block_chunk_size = (total_elements + target_blocks - 1) / target_blocks;
+      // Align block_chunk_size to a multiple of kNvec to ensure perfect vector alignment
+      block_chunk_size = DIVUP(block_chunk_size, static_cast<size_t>(kNvec)) * kNvec;
+      if (block_chunk_size < GROUPED_AMAX_MIN_ELTS_PER_BLOCK) {
+        block_chunk_size = GROUPED_AMAX_MIN_ELTS_PER_BLOCK;
+      }
+
+      const size_t grid_size = total_elements / block_chunk_size + num_tensors;
+      const size_t shared_mem_bytes = (num_tensors + 1) * sizeof(int64_t) + (num_tensors + 1) * sizeof(int);
+
+      grouped_amax_flat_kernel<kNvec, InputType>
+          <<<grid_size, GROUPED_AMAX_KERNEL_THREADS, shared_mem_bytes, stream>>>(
+              input, amax, num_tensors, total_elements, offsets_ptr, block_chunk_size, noop_ptr);
       break;
-    case ShapeRepresentation::VARYING_BOTH_DIMS:
-      grouped_amax_kernel<kNvec, InputType, ShapeRepresentation::VARYING_BOTH_DIMS>
-          <<<grid, block, 0, stream>>>(input, amax, num_tensors, first_logical_dim,
-                                       last_logical_dim, offsets_ptr, noop_ptr);
-      break;
+    }
   }
   NVTE_CHECK_CUDA(cudaGetLastError());
 }

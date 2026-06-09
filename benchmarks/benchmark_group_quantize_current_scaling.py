@@ -32,7 +32,17 @@ import torch
 
 
 MODES = ("rowwise", "columnwise", "both")
-SHAPE_CASES = ("same-shape", "varying-first", "varying-first-overalloc")
+SHAPE_CASES = (
+    "same-shape",
+    "varying-first",
+    "varying-first-overalloc",
+    "varying-first-mild",
+    "varying-first-zipf",
+    "varying-first-heavy",
+    "varying-first-overalloc-mild",
+    "varying-first-overalloc-zipf",
+    "varying-first-overalloc-heavy",
+)
 
 
 @dataclass
@@ -48,6 +58,7 @@ class CaseResult:
     per_iter_us: float
     relevant_bytes: int
     bw_actual_TBps: float
+    bw_physical_TBps: float
 
 
 def _make_quantizer(mode: str) -> Float8CurrentScalingQuantizer:
@@ -62,9 +73,52 @@ def _make_quantizer(mode: str) -> Float8CurrentScalingQuantizer:
     return q
 
 
-def _equal_first_dims(actual_rows: int, num_groups: int) -> List[int]:
-    assert actual_rows % num_groups == 0, "actual_rows must divide num_groups"
-    return [actual_rows // num_groups] * num_groups
+def _generate_first_dims(shape_case: str, actual_rows: int, num_groups: int) -> List[int]:
+    if "mild" in shape_case:
+        # Mild imbalance: linear variation +/- 20% around average
+        if num_groups > 1:
+            weights = [0.8 + 0.4 * i / (num_groups - 1) for i in range(num_groups)]
+        else:
+            weights = [1.0]
+    elif "zipf" in shape_case:
+        # Zipf-based imbalance: w_i = 1 / (i + 1)^s, using s = 0.7
+        weights = [1.0 / ((i + 1) ** 0.7) for i in range(num_groups)]
+    elif "heavy" in shape_case:
+        # Heavy imbalance: w_i = 1 / (i + 1)^1.5
+        weights = [1.0 / ((i + 1) ** 1.5) for i in range(num_groups)]
+    else:
+        # Uniform
+        assert actual_rows % num_groups == 0, "actual_rows must divide num_groups"
+        return [actual_rows // num_groups] * num_groups
+
+    # Normalize weights so they sum to actual_rows exactly
+    sum_weights = sum(weights)
+    first_dims = [int(round(w * actual_rows / sum_weights)) for w in weights]
+
+    # Ensure all elements are >= 1
+    for i in range(num_groups):
+        if first_dims[i] < 1:
+            first_dims[i] = 1
+
+    current_sum = sum(first_dims)
+    diff = actual_rows - current_sum
+    if diff > 0:
+        # Add 1 to the largest elements to preserve distribution shape
+        sorted_indices = sorted(range(num_groups), key=lambda idx: first_dims[idx], reverse=True)
+        for i in range(diff):
+            first_dims[sorted_indices[i % num_groups]] += 1
+    elif diff < 0:
+        # Subtract 1 from the largest elements (as long as they remain > 1)
+        sorted_indices = sorted(range(num_groups), key=lambda idx: first_dims[idx], reverse=True)
+        idx = 0
+        while diff < 0:
+            target_idx = sorted_indices[idx % num_groups]
+            if first_dims[target_idx] > 1:
+                first_dims[target_idx] -= 1
+                diff += 1
+            idx += 1
+
+    return first_dims
 
 
 def _make_inputs(shape_case: str, actual_rows: int, allocated_rows: int,
@@ -81,15 +135,15 @@ def _make_inputs(shape_case: str, actual_rows: int, allocated_rows: int,
         inputs = [torch.randn(actual_rows, hidden, dtype=dtype, device="cuda")
                   for _ in range(num_buffers)]
         return inputs, None, info
-    if shape_case == "varying-first":
-        first_dims_list = _equal_first_dims(actual_rows, num_groups)
+    if shape_case in ("varying-first", "varying-first-mild", "varying-first-zipf", "varying-first-heavy"):
+        first_dims_list = _generate_first_dims(shape_case, actual_rows, num_groups)
         first_dims = torch.tensor(first_dims_list, dtype=torch.int64, device="cuda")
         inputs = [torch.randn(actual_rows, hidden, dtype=dtype, device="cuda")
                   for _ in range(num_buffers)]
         info["first_dims"] = first_dims_list
         return inputs, first_dims, info
-    if shape_case == "varying-first-overalloc":
-        first_dims_list = _equal_first_dims(actual_rows, num_groups)
+    if shape_case in ("varying-first-overalloc", "varying-first-overalloc-mild", "varying-first-overalloc-zipf", "varying-first-overalloc-heavy"):
+        first_dims_list = _generate_first_dims(shape_case, actual_rows, num_groups)
         first_dims = torch.tensor(first_dims_list, dtype=torch.int64, device="cuda")
         inputs = []
         for _ in range(num_buffers):
@@ -176,6 +230,17 @@ def _bytes_per_call(actual_rows: int, hidden: int, mode: str) -> int:
     return in_bytes + out_bytes
 
 
+def _physical_bytes_per_call(actual_rows: int, hidden: int, mode: str) -> int:
+    # Under current scaling, the input is read twice:
+    # Pass 1: amax kernel reads input (2 bytes per element)
+    # Pass 2: cast kernel reads input (2 bytes per element) and writes output (1 byte per element per copy)
+    in_bytes = actual_rows * hidden * 2 * 2  # bf16 read twice
+    out_copies = (1 if mode in ("rowwise", "both") else 0) + \
+                 (1 if mode in ("columnwise", "both") else 0)
+    out_bytes = actual_rows * hidden * out_copies  # fp8 write(s)
+    return in_bytes + out_bytes
+
+
 def _kernel_bytes_per_call(bucket: str, actual_rows: int, hidden: int, mode: str,
                            num_tensors: int) -> int:
     """Bytes that one launch of the kernel(s) in ``bucket`` actually moves.
@@ -198,6 +263,9 @@ def _kernel_bytes_per_call(bucket: str, actual_rows: int, hidden: int, mode: str
         # Reads ``num_tensors`` amax floats, writes ``num_tensors`` of (scale,
         # scale_inv) -- ~3 floats per group.
         return num_tensors * 4 * 3
+    if bucket == "splits_to_offsets":
+        # Reads ``num_tensors`` elements, writes ``num_tensors + 1`` elements.
+        return (num_tensors * 2 + 1) * 8
     if bucket == "cast":
         # Reads bf16 input, writes fp8 rowwise and/or columnwise (1 byte per
         # element per direction). Mirrors the eager BW_actual byte count.
@@ -220,6 +288,8 @@ _KERNEL_BUCKETS = (
     # as ``multi_tensor_apply_kernel<...ComputeScaleAndScaleInvFunctor>``; match
     # on the functor name after lowercasing.
     ("compute_scale", ("computescale",)),
+    # Splits to offsets helper kernel
+    ("splits_to_offsets", ("splits_to_offsets",)),
 )
 
 
@@ -293,9 +363,12 @@ def run_case(shape_case: str, mode: str, *, actual_rows: int, allocated_rows: in
         actual_iters = iters
 
     relevant = _bytes_per_call(actual_rows, hidden, mode)
+    physical_relevant = _physical_bytes_per_call(actual_rows, hidden, mode)
     total_bytes_actual = relevant * actual_iters
+    total_bytes_physical = physical_relevant * actual_iters
     elapsed_s = elapsed_ms / 1000.0
     bw_actual = total_bytes_actual / elapsed_s / 1.0e12
+    bw_physical = total_bytes_physical / elapsed_s / 1.0e12
     res = CaseResult(
         shape_case=shape_case, mode=mode,
         actual_rows=actual_rows, allocated_rows=allocated_rows,
@@ -303,12 +376,14 @@ def run_case(shape_case: str, mode: str, *, actual_rows: int, allocated_rows: in
         elapsed_ms_total=elapsed_ms,
         per_iter_us=elapsed_ms * 1000.0 / actual_iters,
         relevant_bytes=relevant, bw_actual_TBps=bw_actual,
+        bw_physical_TBps=bw_physical,
     )
     if verbose:
         print(f"  {shape_case:30s} groups={num_groups:3d} mode={mode:10s} "
               f"loop={mode_loop:5s} "
               f"per_iter={res.per_iter_us:7.2f}us "
-              f"BW_actual={res.bw_actual_TBps:5.2f} TB/s")
+              f"BW_algo={res.bw_actual_TBps:5.2f} TB/s "
+              f"BW_phys={res.bw_physical_TBps:5.2f} TB/s")
 
     if profile_breakdown:
         profile_iters = min(iters, 50)
@@ -321,7 +396,7 @@ def run_case(shape_case: str, mode: str, *, actual_rows: int, allocated_rows: in
         print(f"        {'bucket':14s} {'per_iter_us':>12s} {'(%)':>7s} "
               f"{'launches/iter':>14s} {'per_launch_us':>15s} "
               f"{'bytes/launch':>14s} {'BW_TBps':>9s}")
-        for bucket in ("amax_zero", "amax", "compute_scale", "cast"):
+        for bucket in ("amax_zero", "amax", "compute_scale", "splits_to_offsets", "cast"):
             entry = agg[bucket]
             pct = 100.0 * entry["us_total"] / total
             per_iter_us = entry["us_total"] / profile_iters
