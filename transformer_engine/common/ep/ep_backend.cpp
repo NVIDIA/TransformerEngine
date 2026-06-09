@@ -111,8 +111,8 @@ void EPBackend::validate_config(const NVTEEpGroupConfig& config) {
              "but current device has compute capability ",
              major, ".x");
 
-  NVTE_CHECK(cuda::supports_multicast(device),
-             "NCCL EP requires CUDA multicast support on device ", device);
+  NVTE_CHECK(cuda::supports_multicast(device), "NCCL EP requires CUDA multicast support on device ",
+             device);
 }
 
 void EPBackend::initialize(ncclComm_t ep_comm, NVTEEpGroupConfig config) {
@@ -252,8 +252,7 @@ ncclEpHandle_t EPBackend::prepare_handle_locked(void* handle_mem, NVTEEpLayerCon
   // between runs; one cfg per process). Remove this once XLA preserves the
   // handle_mem device pointer across runs.
   if (fallback_layer_cfg_.has_value()) {
-    NVTE_CHECK(fallback_layer_cfg_->top_k == layer_cfg.top_k,
-               "EP prepare top_k=", layer_cfg.top_k,
+    NVTE_CHECK(fallback_layer_cfg_->top_k == layer_cfg.top_k, "EP prepare top_k=", layer_cfg.top_k,
                " disagrees with process-wide cached top_k=", fallback_layer_cfg_->top_k);
     NVTE_CHECK(fallback_layer_cfg_->dispatch_output_per_expert_alignment ==
                    layer_cfg.dispatch_output_per_expert_alignment,
@@ -448,9 +447,9 @@ void EPBackend::dispatch_bwd(void* handle_mem, const NVTETensor grad,
   NVTE_CHECK_NCCL(loader::fns().Combine(h, &in_struct, &out_struct, &cfg, stream));
 }
 
-void EPBackend::combine_bwd(void* handle_mem, const NVTETensor grad,
-                            const NVTECommWindow& grad_win, NVTETensor grad_expert_out,
-                            const NVTECommWindow& grad_expert_out_win, cudaStream_t stream) {
+void EPBackend::combine_bwd(void* handle_mem, const NVTETensor grad, const NVTECommWindow& grad_win,
+                            NVTETensor grad_expert_out, const NVTECommWindow& grad_expert_out_win,
+                            cudaStream_t stream) {
   // Backward of combine = reverse-direction dispatch.
   dispatch(handle_mem, /*topk_idx=*/nullptr, grad, grad_win,
            /*topk_weights=*/nullptr, /*topk_weights_win=*/NVTECommWindow{}, grad_expert_out,
