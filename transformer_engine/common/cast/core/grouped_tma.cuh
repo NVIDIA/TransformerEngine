@@ -23,6 +23,7 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include "../../common.h"
+#include "../../util/cuda_runtime.h"
 #include "../../util/ptx.cuh"
 #include "../../utils.cuh"
 #include "grouped_layout.cuh"
@@ -30,6 +31,98 @@
 namespace transformer_engine {
 namespace dispatch {
 namespace common {
+
+// Keep host dispatch in sync with ARCH_HAS_TMA_DESCRIPTOR_OVERRIDE. SM100/103 and
+// other architectures retain the descriptor publication/acquire protocol.
+inline bool use_tma_descriptor_override() {
+#if CUDA_VERSION >= 13040
+  return transformer_engine::cuda::sm_arch() == 107;
+#else
+  return false;
+#endif
+}
+
+// Overrides replace all geometry, so encode only a small template layout. In
+// particular, do not inherit the large-allocation class from the logical group:
+// a stage address near its end need not have the 128 KiB backing window required
+// by that class on Rubin (CUDA 13.5+).
+inline void create_grouped_tma_map(CUtensorMap &map, const SimpleTensor &tensor,
+                                   const bool use_override, const uint64_t rows,
+                                   const uint64_t cols, const uint32_t tile_rows,
+                                   const uint32_t tile_cols, const size_t type_bits,
+                                   const CUtensorMapSwizzle swizzle = CU_TENSOR_MAP_SWIZZLE_NONE) {
+  const uint64_t map_rows = use_override ? 1 : rows;
+  const uint64_t map_cols = use_override ? tile_cols : cols;
+  create_2D_tensor_map(map, tensor, map_rows, map_cols, tile_rows, tile_cols, map_cols, 0,
+                       type_bits, swizzle);
+}
+
+struct TmaDescriptorOverride2D {
+  uint64_t address;
+  uint16_t size_x;
+  uint16_t size_y;
+  uint32_t lower_stride;
+  uint16_t upper_stride;
+};
+
+// Attribute overrides require zero coordinates. Fold the tile origin into the
+// address and bound the dimensions by the stage, preserving OOB zero-fill/stores.
+// The dimensions occupy eight bits even though the PTX operands are b16.
+template <size_t TILE_Y, size_t TILE_X, typename T>
+__device__ __forceinline__ TmaDescriptorOverride2D make_tma_descriptor_override_2d(
+    const T *data, const size_t rows, const size_t cols, const size_t x, const size_t y) {
+  static_assert(TILE_X > 0 && TILE_X < 256 && TILE_Y > 0 && TILE_Y < 256);
+  const uint64_t stride_bytes = static_cast<uint64_t>(cols) * sizeof(T);
+  const uint64_t address = reinterpret_cast<uint64_t>(data + y * cols + x);
+  if (stride_bytes % TMA_GMEM_ALIGNMENT != 0 || address % TMA_GMEM_ALIGNMENT != 0) {
+    NVTE_DEVICE_ERROR("TMA override address and stride must be 16B aligned.");
+  }
+  const uint64_t stride = stride_bytes >> 4;
+  if ((stride >> 36) != 0) {
+    NVTE_DEVICE_ERROR("TMA override stride exceeds 36 bits.");
+  }
+  return {address, static_cast<uint16_t>(min(TILE_X, cols - x)),
+          static_cast<uint16_t>(min(TILE_Y, rows - y)), static_cast<uint32_t>(stride),
+          static_cast<uint16_t>(stride >> 32)};
+}
+
+template <size_t TILE_Y, size_t TILE_X, typename T>
+__device__ __forceinline__ void load_grouped_tma_2d(T *dst, const CUtensorMap &map, const size_t x,
+                                                    const size_t y, uint64_t *barrier,
+                                                    const T *data, const size_t rows,
+                                                    const size_t cols) {
+  constexpr bool has_override = ARCH_HAS_TMA_DESCRIPTOR_OVERRIDE;
+  if constexpr (has_override) {
+    if (data != nullptr) {
+      const auto info = make_tma_descriptor_override_2d<TILE_Y, TILE_X>(data, rows, cols, x, y);
+      ptx::cp_async_bulk_tensor_2d_global_to_shared_rubin(
+          reinterpret_cast<uint64_t *>(dst), reinterpret_cast<const uint64_t *>(&map), info.address,
+          info.size_x, info.size_y, info.lower_stride, info.upper_stride, barrier);
+      return;
+    }
+  }
+  ptx::cp_async_bulk_tensor_2d_global_to_shared(
+      reinterpret_cast<uint64_t *>(dst), reinterpret_cast<const uint64_t *>(&map), x, y, barrier);
+}
+
+template <size_t TILE_Y, size_t TILE_X, typename T>
+__device__ __forceinline__ void store_grouped_tma_2d(T *src, const CUtensorMap &map, const size_t x,
+                                                     const size_t y, const T *data,
+                                                     const size_t rows, const size_t cols) {
+  constexpr bool has_override = ARCH_HAS_TMA_DESCRIPTOR_OVERRIDE;
+  if constexpr (has_override) {
+    if (data != nullptr) {
+      if (x >= cols || y >= rows) return;
+      const auto info = make_tma_descriptor_override_2d<TILE_Y, TILE_X>(data, rows, cols, x, y);
+      ptx::cp_async_bulk_tensor_2d_shared_to_global_rubin(
+          reinterpret_cast<const uint64_t *>(&map), info.address, info.size_x, info.size_y,
+          info.lower_stride, info.upper_stride, reinterpret_cast<uint64_t *>(src));
+      return;
+    }
+  }
+  ptx::cp_async_bulk_tensor_2d_shared_to_global(reinterpret_cast<const uint64_t *>(&map), x, y,
+                                                reinterpret_cast<uint64_t *>(src));
+}
 
 constexpr int MAX_SUPPORTED_TENSOR_DESCRIPTORS = 64;
 
@@ -184,47 +277,59 @@ __device__ __forceinline__ void fence_acquire_tensormap(const CUtensorMap *tenso
 }
 
 // Issue TMA global->shared transfer for one stage of input (and optional activation input).
-template <typename IType, bool IS_DACT>
+template <typename IType, bool IS_DACT, size_t TILE_Y = 32, size_t TILE_X = 128>
 __device__ __forceinline__ void prefetch_input_stage(
     IType *in_sh, IType *act_in_sh, const CUtensorMap &tensor_map_input,
     const CUtensorMap &tensor_map_act_input, const size_t global_offset_X,
     const size_t global_offset_Y, const size_t buff_offset, const size_t shmem_buff_size,
-    uint64_t *barrier, const bool leading_thread) {
+    uint64_t *barrier, const bool leading_thread, const IType *input_data = nullptr,
+    const IType *act_data = nullptr, const size_t rows = 0, const size_t cols = 0) {
+  constexpr bool has_override = ARCH_HAS_TMA_DESCRIPTOR_OVERRIDE;
+  if constexpr (has_override) {
+    if (input_data != nullptr && (global_offset_X >= cols || global_offset_Y >= rows)) {
+      for (size_t i = threadIdx.x; i < TILE_Y * TILE_X; i += blockDim.x) {
+        in_sh[buff_offset + i] = static_cast<IType>(0.0f);
+        if constexpr (IS_DACT) act_in_sh[buff_offset + i] = static_cast<IType>(0.0f);
+      }
+      __syncthreads();
+      if (leading_thread) ptx::mbarrier_arrive(barrier);
+      return;
+    }
+  }
   if (leading_thread) {
     ptx::mbarrier_arrive_expect_tx(barrier, shmem_buff_size);
-    ptx::cp_async_bulk_tensor_2d_global_to_shared(
-        reinterpret_cast<uint64_t *>(&in_sh[buff_offset]),
-        reinterpret_cast<const uint64_t *>(&tensor_map_input), global_offset_X, global_offset_Y,
-        barrier);
+    load_grouped_tma_2d<TILE_Y, TILE_X>(&in_sh[buff_offset], tensor_map_input, global_offset_X,
+                                        global_offset_Y, barrier, input_data, rows, cols);
     if constexpr (IS_DACT) {
-      ptx::cp_async_bulk_tensor_2d_global_to_shared(
-          reinterpret_cast<uint64_t *>(&act_in_sh[buff_offset]),
-          reinterpret_cast<const uint64_t *>(&tensor_map_act_input), global_offset_X,
-          global_offset_Y, barrier);
+      load_grouped_tma_2d<TILE_Y, TILE_X>(&act_in_sh[buff_offset], tensor_map_act_input,
+                                          global_offset_X, global_offset_Y, barrier, act_data, rows,
+                                          cols);
     }
   }
 }
 
 // Issue TMA shared->global transfer for one stage of outputs.
-template <typename OType, bool ROWWISE_SCALING, bool COLWISE_SCALING>
+template <typename OType, bool ROWWISE_SCALING, bool COLWISE_SCALING, size_t TILE_Y = 32,
+          size_t TILE_X = 128>
 __device__ __forceinline__ void store_output_stage(
     OType *out_rowwise_data_sh, OType *out_colwise_data_sh,
     const CUtensorMap &tensor_map_output_rowwise, const CUtensorMap &tensor_map_output_colwise,
     const size_t global_offset_X, const size_t global_offset_Y, const size_t buff_offset,
-    const bool leading_thread) {
+    const bool leading_thread, const OType *rowwise_data = nullptr,
+    const OType *colwise_data = nullptr, const size_t rows = 0, const size_t cols = 0) {
   if (!leading_thread) {
     return;
   }
 
   if constexpr (ROWWISE_SCALING) {
-    ptx::cp_async_bulk_tensor_2d_shared_to_global(
-        reinterpret_cast<const uint64_t *>(&tensor_map_output_rowwise), global_offset_X,
-        global_offset_Y, reinterpret_cast<uint64_t *>(&out_rowwise_data_sh[buff_offset]));
+    store_grouped_tma_2d<TILE_Y, TILE_X>(&out_rowwise_data_sh[buff_offset],
+                                         tensor_map_output_rowwise, global_offset_X,
+                                         global_offset_Y, rowwise_data, rows, cols);
   }
   if constexpr (COLWISE_SCALING) {
-    ptx::cp_async_bulk_tensor_2d_shared_to_global(
-        reinterpret_cast<const uint64_t *>(&tensor_map_output_colwise), global_offset_X,
-        global_offset_Y, reinterpret_cast<uint64_t *>(&out_colwise_data_sh[buff_offset]));
+    store_grouped_tma_2d<TILE_Y, TILE_X>(&out_colwise_data_sh[buff_offset],
+                                         tensor_map_output_colwise, global_offset_X,
+                                         global_offset_Y, colwise_data, rows, cols);
   }
   if constexpr (ROWWISE_SCALING || COLWISE_SCALING) {
     ptx::cp_async_bulk_commit_group();

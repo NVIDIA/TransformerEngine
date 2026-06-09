@@ -619,9 +619,12 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
     const __grid_constant__ CUtensorMap tensor_map_input_static,
     const __grid_constant__ CUtensorMap tensor_map_act_input_static,
     const __grid_constant__ CUtensorMap tensor_map_output_rowwise_static,
-    const __grid_constant__ CUtensorMap tensor_map_output_colwise_static, const size_t num_tensors,
-    const size_t first_logical_dim, const size_t last_logical_dim, const size_t same_both_rows,
-    const int64_t *const __restrict__ offsets_ptr, const int64_t *const __restrict__ first_dims_ptr,
+    const __grid_constant__ CUtensorMap tensor_map_output_colwise_static,
+    const IType *const input_data_ptr, const IType *const act_input_data_ptr,
+    OType *const output_rowwise_data_ptr, OType *const output_colwise_data_ptr,
+    const size_t num_tensors, const size_t first_logical_dim, const size_t last_logical_dim,
+    const size_t same_both_rows, const int64_t *const __restrict__ offsets_ptr,
+    const int64_t *const __restrict__ first_dims_ptr,
     const int64_t *const __restrict__ last_dims_ptr, e8m0_t *const __restrict__ scales_rowwise_ptr,
     e8m0_t *const __restrict__ scales_colwise_ptr, const float *__restrict__ noop,
     float *const __restrict__ dbias_workspace, float *const __restrict__ amax_ptr,
@@ -664,6 +667,7 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
   constexpr bool use_direct_varying_first_mapper = (shape_rep == VARYING_FIRST_DIM);
   constexpr bool use_direct_mapper = use_direct_same_both_mapper || use_direct_varying_first_mapper;
   constexpr bool is_single_tensor = (shape_rep == SAME_BOTH_DIMS || shape_rep == VARYING_FIRST_DIM);
+  constexpr bool use_tma_override = !is_single_tensor && ARCH_HAS_TMA_DESCRIPTOR_OVERRIDE;
 
   const bool leading_thread = (threadIdx.x == 0);
   // Keep mapper metadata separate from dynamic shared memory. The latter is the destination of
@@ -671,15 +675,13 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
   __shared__ DirectVaryingFirstMapperStorage direct_mapper_storage;
 
   if constexpr (use_direct_varying_first_mapper) {
-    static_assert(CastTraits::THREADS_PER_CHUNK >= MAX_SUPPORTED_TENSOR_DESCRIPTORS,
-                  "The first CTA must have enough threads to validate every tensor.");
-    // The direct mapper relies on every tensor boundary being TILE_DIM_Y-aligned. The legacy
-    // mapper validated this while decoding each job, but the direct path no longer calls it.
-    // Validate all per-tensor row counts once, using the first CTA. num_tensors is bounded by
-    // MAX_SUPPORTED_TENSOR_DESCRIPTORS (64), which is smaller than the CTA size.
-    if (blockIdx.x == 0 && threadIdx.x < num_tensors) {
-      get_tensor_rows_num<ShapeRepresentation::VARYING_FIRST_DIM>(threadIdx.x, first_logical_dim,
-                                                                  first_dims_ptr, num_tensors);
+    // Validate every tensor boundary once in the first CTA. Rubin's override
+    // path is independent of the legacy 64-entry descriptor table.
+    if (blockIdx.x == 0) {
+      for (size_t id = threadIdx.x; id < num_tensors; id += blockDim.x) {
+        get_tensor_rows_num<ShapeRepresentation::VARYING_FIRST_DIM>(id, first_logical_dim,
+                                                                    first_dims_ptr, num_tensors);
+      }
     }
   }
 
@@ -785,9 +787,17 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
       if (fixed_tensor_id >= num_tensors) {
         return;
       }
-      fixed_rows = g_tensor_maps.rows[fixed_tensor_id];
-      fixed_cols = g_tensor_maps.cols[fixed_tensor_id];
-      fixed_tensor_base = g_tensor_maps.offsets[fixed_tensor_id];
+      if constexpr (use_tma_override) {
+        fixed_rows = get_tensor_rows_num<shape_rep>(fixed_tensor_id, first_logical_dim,
+                                                    first_dims_ptr, num_tensors);
+        fixed_cols =
+            get_tensor_cols_num<shape_rep>(fixed_tensor_id, last_logical_dim, last_dims_ptr);
+        fixed_tensor_base = static_cast<size_t>(offsets_ptr[fixed_tensor_id]);
+      } else {
+        fixed_rows = g_tensor_maps.rows[fixed_tensor_id];
+        fixed_cols = g_tensor_maps.cols[fixed_tensor_id];
+        fixed_tensor_base = g_tensor_maps.offsets[fixed_tensor_id];
+      }
       if (fixed_rows == 0 || fixed_cols == 0) {
         return;
       }
@@ -906,18 +916,21 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
 
     const size_t dbias_offset_Y = block_offset_Y / TILE_DIM_Y;
 
-    const CUtensorMap &tensor_map_input =
-        is_single_tensor ? tensor_map_input_static : g_tensor_maps.input[tensor_id];
-    const CUtensorMap &tensor_map_act_input =
-        is_single_tensor ? tensor_map_act_input_static : g_tensor_maps.act_input[tensor_id];
-    const CUtensorMap &tensor_map_output_rowwise = is_single_tensor
+    const CUtensorMap &tensor_map_input = (is_single_tensor || use_tma_override)
+                                              ? tensor_map_input_static
+                                              : g_tensor_maps.input[tensor_id];
+    const CUtensorMap &tensor_map_act_input = (is_single_tensor || use_tma_override)
+                                                  ? tensor_map_act_input_static
+                                                  : g_tensor_maps.act_input[tensor_id];
+    const CUtensorMap &tensor_map_output_rowwise = (is_single_tensor || use_tma_override)
                                                        ? tensor_map_output_rowwise_static
                                                        : g_tensor_maps.output_rowwise[tensor_id];
-    const CUtensorMap &tensor_map_output_colwise = is_single_tensor
+    const CUtensorMap &tensor_map_output_colwise = (is_single_tensor || use_tma_override)
                                                        ? tensor_map_output_colwise_static
                                                        : g_tensor_maps.output_colwise[tensor_id];
 
-    if (leading_thread && (!is_single_tensor) && (last_acquired_tensor_id != tensor_id)) {
+    if (leading_thread && !is_single_tensor && !use_tma_override &&
+        (last_acquired_tensor_id != tensor_id)) {
       fence_acquire_tensormap(&tensor_map_input);
       if constexpr (COMPUTE_ACTIVATIONS) {
         fence_acquire_tensormap(&tensor_map_act_input);
@@ -933,6 +946,14 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
     __syncthreads();
 
     int buff_in = 0;
+    const IType *const override_input = use_tma_override ? input_data_ptr + tensor_base : nullptr;
+    const IType *const override_act =
+        (use_tma_override && IS_DACT) ? act_input_data_ptr + tensor_base : nullptr;
+    OType *const override_rowwise =
+        (use_tma_override && ROWWISE_SCALING) ? output_rowwise_data_ptr + tensor_base : nullptr;
+    OType *const override_colwise =
+        (use_tma_override && COLWISE_SCALING) ? output_colwise_data_ptr + tensor_base : nullptr;
+
     size_t chunk_rows = CHUNK_DIM_Y;
     if constexpr (CHUNK_DIM_Y > TILE_DIM_Y) {
       chunk_rows = min(static_cast<size_t>(CHUNK_DIM_Y), rows - tensor_offset_Y);
@@ -954,9 +975,10 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
       const size_t global_offset_X = block_offset_X + stage_offset_X;
       const size_t buff_offset = buff * BUFF_DIM;
       uint64_t *barrier = &IN_buff_readable_mbar[buff];
-      prefetch_input_stage<IType, IS_DACT>(sIn_ptr, sActIn_ptr, tensor_map_input,
-                                           tensor_map_act_input, global_offset_X, global_offset_Y,
-                                           buff_offset, shmem_buff_size, barrier, leading_thread);
+      prefetch_input_stage<IType, IS_DACT, BUFF_DIM_Y, BUFF_DIM_X>(
+          sIn_ptr, sActIn_ptr, tensor_map_input, tensor_map_act_input, global_offset_X,
+          global_offset_Y, buff_offset, shmem_buff_size, barrier, leading_thread, override_input,
+          override_act, rows, cols);
     }
 
     float partial_dbias_colwise[STAGES_X] = {0.0f};
@@ -992,9 +1014,10 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
         const size_t next_prefetch_buff_offset = next_prefetch_buff * BUFF_DIM;
 
         uint64_t *barrier = &IN_buff_readable_mbar[next_prefetch_buff];
-        prefetch_input_stage<IType, IS_DACT>(
+        prefetch_input_stage<IType, IS_DACT, BUFF_DIM_Y, BUFF_DIM_X>(
             sIn_ptr, sActIn_ptr, tensor_map_input, tensor_map_act_input, global_offset_X,
-            global_offset_Y, next_prefetch_buff_offset, shmem_buff_size, barrier, leading_thread);
+            global_offset_Y, next_prefetch_buff_offset, shmem_buff_size, barrier, leading_thread,
+            override_input, override_act, rows, cols);
       }
 
       ptx::mbarrier_wait_parity_acquire_cta_shared_cta(&IN_buff_readable_mbar[buff_in],
@@ -1039,9 +1062,10 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
       const size_t global_offset_Y = block_offset_Y + stage_offset_Y;
       const size_t global_offset_X = block_offset_X + stage_offset_X;
       const size_t buff_offset = buff * BUFF_DIM;
-      store_output_stage<OType, ROWWISE_SCALING, COLWISE_SCALING>(
+      store_output_stage<OType, ROWWISE_SCALING, COLWISE_SCALING, BUFF_DIM_Y, BUFF_DIM_X>(
           sOutRowwise_ptr, sOutColwise_ptr, tensor_map_output_rowwise, tensor_map_output_colwise,
-          global_offset_X, global_offset_Y, buff_offset, leading_thread);
+          global_offset_X, global_offset_Y, buff_offset, leading_thread, override_rowwise,
+          override_colwise, rows, cols);
 
       buff_in = (buff_in + 1) % BUFFS_NUM;
     }
@@ -1177,7 +1201,8 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
   const size_t elts_total = first_logical_dim * last_logical_dim;
 
   const size_t num_tensors = input->num_tensors;
-  NVTE_CHECK(num_tensors > 0 && num_tensors <= MAX_SUPPORTED_TENSOR_DESCRIPTORS,
+  NVTE_CHECK(num_tensors > 0 && (common::use_tma_descriptor_override() ||
+                                 num_tensors <= MAX_SUPPORTED_TENSOR_DESCRIPTORS),
              "Number of tensors in a group must be between 1 and ",
              MAX_SUPPORTED_TENSOR_DESCRIPTORS, ".");
 
@@ -1257,29 +1282,25 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
                         constexpr size_t input_type_bit_size = TypeInfo<IType>::size;
                         constexpr size_t output_type_bit_size = TypeInfo<OType>::size;
 
-                        create_2D_tensor_map(tensor_map_input, input->data, first_logical_dim,
-                                             last_logical_dim, BUFF_DIM_Y, BUFF_DIM_X,
-                                             last_logical_dim, 0, input_type_bit_size);
-
+                        const bool override_map =
+                            !is_single_tensor && common::use_tma_descriptor_override();
+                        create_grouped_tma_map(tensor_map_input, input->data, override_map,
+                                               first_logical_dim, last_logical_dim, BUFF_DIM_Y,
+                                               BUFF_DIM_X, input_type_bit_size);
                         if constexpr (IS_DACT) {
-                          create_2D_tensor_map(tensor_map_act_input, activations->data,
-                                               first_logical_dim, last_logical_dim, BUFF_DIM_Y,
-                                               BUFF_DIM_X, last_logical_dim, 0,
-                                               input_type_bit_size);
+                          create_grouped_tma_map(tensor_map_act_input, activations->data,
+                                                 override_map, first_logical_dim, last_logical_dim,
+                                                 BUFF_DIM_Y, BUFF_DIM_X, input_type_bit_size);
                         }
-
                         if (use_rowwise_scaling) {
-                          create_2D_tensor_map(tensor_map_output_rowwise, output->data,
-                                               first_logical_dim, last_logical_dim, BUFF_DIM_Y,
-                                               BUFF_DIM_X, last_logical_dim, 0,
-                                               output_type_bit_size);
+                          create_grouped_tma_map(tensor_map_output_rowwise, output->data,
+                                                 override_map, first_logical_dim, last_logical_dim,
+                                                 BUFF_DIM_Y, BUFF_DIM_X, output_type_bit_size);
                         }
-
                         if (use_colwise_scaling) {
-                          create_2D_tensor_map(tensor_map_output_colwise, output->columnwise_data,
-                                               first_logical_dim, last_logical_dim, BUFF_DIM_Y,
-                                               BUFF_DIM_X, last_logical_dim, 0,
-                                               output_type_bit_size);
+                          create_grouped_tma_map(tensor_map_output_colwise, output->columnwise_data,
+                                                 override_map, first_logical_dim, last_logical_dim,
+                                                 BUFF_DIM_Y, BUFF_DIM_X, output_type_bit_size);
                         }
 
                         constexpr size_t buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
@@ -1305,19 +1326,19 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
                         const size_t dshmem_size = in_mem + out_mem + TMA_SHMEM_ALIGNMENT;
 
                         // Update tensor descriptors before launching the kernel
-                        if (!is_single_tensor) {
-                          const IType *const input_dptr =
-                              reinterpret_cast<const IType *>(input->data.dptr);
-                          const IType *const act_input_dptr =
-                              IS_DACT ? reinterpret_cast<const IType *>(activations->data.dptr)
-                                      : nullptr;
-                          OType *const output_rowwise_dptr =
-                              use_rowwise_scaling ? reinterpret_cast<OType *>(output->data.dptr)
-                                                  : nullptr;
-                          OType *const output_colwise_dptr =
-                              use_colwise_scaling
-                                  ? reinterpret_cast<OType *>(output->columnwise_data.dptr)
-                                  : nullptr;
+                        const IType *const input_dptr =
+                            reinterpret_cast<const IType *>(input->data.dptr);
+                        const IType *const act_input_dptr =
+                            IS_DACT ? reinterpret_cast<const IType *>(activations->data.dptr)
+                                    : nullptr;
+                        OType *const output_rowwise_dptr =
+                            use_rowwise_scaling ? reinterpret_cast<OType *>(output->data.dptr)
+                                                : nullptr;
+                        OType *const output_colwise_dptr =
+                            use_colwise_scaling
+                                ? reinterpret_cast<OType *>(output->columnwise_data.dptr)
+                                : nullptr;
+                        if (!is_single_tensor && !common::use_tma_descriptor_override()) {
                           update_tma_descriptors<IType, OType>
                               <<<num_tensors, THREADS_PER_WARP, 0, stream>>>(
                                   tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
@@ -1340,9 +1361,10 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
 
                               kernel<<<launch_config.grid, block_size, dshmem_size, stream>>>(
                                   tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
-                                  tensor_map_output_colwise, num_tensors, first_logical_dim,
-                                  last_logical_dim, launch_config.same_both_rows, offsets_ptr,
-                                  first_dims_ptr, last_dims_ptr, scales_rowwise_ptr,
+                                  tensor_map_output_colwise, input_dptr, act_input_dptr,
+                                  output_rowwise_dptr, output_colwise_dptr, num_tensors,
+                                  first_logical_dim, last_logical_dim, launch_config.same_both_rows,
+                                  offsets_ptr, first_dims_ptr, last_dims_ptr, scales_rowwise_ptr,
                                   scales_colwise_ptr, noop_ptr, workspace_ptr, amax_ptr,
                                   launch_config.work_blocks_X, launch_config.work_blocks_Y);
                             });
