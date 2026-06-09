@@ -19,6 +19,7 @@
 #include "../common.h"
 #include "../util/cuda_runtime.h"
 #include "../util/logging.h"
+#include "ep_nccl_loader.h"
 
 namespace transformer_engine {
 namespace ep {
@@ -135,15 +136,16 @@ void EPBackend::shutdown() {
   EPBackend& inst = instance();
   std::lock_guard<std::mutex> lock(inst.mutex_);
   if (!inst.initialized_) return;
+  const auto& nccl = loader::fns();
   for (auto& e : inst.lru_) {
-    if (e.handle != nullptr) ncclEpHandleDestroy(e.handle);
+    if (e.handle != nullptr) nccl.HandleDestroy(e.handle);
   }
   inst.lru_.clear();
   inst.index_.clear();
   inst.fallback_layer_cfg_.reset();
   // ncclEpGroupDestroy reads from ep_comm_; destroy group while comm is still alive.
   if (inst.ep_group_ != nullptr) {
-    ncclEpGroupDestroy(inst.ep_group_);
+    nccl.GroupDestroy(inst.ep_group_);
     inst.ep_group_ = nullptr;
   }
   inst.ep_comm_ = nullptr;  // borrowed; caller destroys
@@ -185,8 +187,8 @@ ncclEpHandle_t EPBackend::open_handle(void* handle_mem, size_t handle_mem_size, 
   ncclEpHandleConfig_t hcfg = NCCL_EP_HANDLE_CONFIG_INIT;
   hcfg.dispatch_output_per_expert_alignment = dispatch_output_per_expert_alignment;
   ncclEpHandle_t handle;
-  NVTE_CHECK_NCCL(ncclEpInitHandle(&handle, ep_group_, NCCL_EP_LAYOUT_EXPERT_MAJOR, &hcfg, num_topk,
-                                   &routing_desc));
+  NVTE_CHECK_NCCL(loader::fns().InitHandle(&handle, ep_group_, NCCL_EP_LAYOUT_EXPERT_MAJOR, &hcfg,
+                                           num_topk, &routing_desc));
   return handle;
 }
 
@@ -227,7 +229,7 @@ void EPBackend::init(ncclComm_t ep_comm, NVTEEpGroupConfig group_config) {
   // Must be > 0; NCCL EP errors out on 0.
   cfg.max_recv_tokens_per_rank = static_cast<unsigned int>(group_config.max_recv_tokens_per_rank);
 
-  NVTE_CHECK_NCCL(ncclEpCreateGroup(&ep_group_, ep_comm, &cfg));
+  NVTE_CHECK_NCCL(loader::fns().CreateGroup(&ep_group_, ep_comm, &cfg));
 
   ep_comm_ = ep_comm;
 
@@ -286,15 +288,15 @@ ncclEpHandle_t EPBackend::prepare_handle_locked(void* handle_mem, NVTEEpLayerCon
   ncclEpHandleConfig_t hcfg = NCCL_EP_HANDLE_CONFIG_INIT;
   hcfg.dispatch_output_per_expert_alignment = layer_cfg.dispatch_output_per_expert_alignment;
   size_t hm_size = 0;
-  NVTE_CHECK_NCCL(ncclEpHandleMemSize(ep_group_, NCCL_EP_LAYOUT_EXPERT_MAJOR, &hcfg, &hm_size,
-                                      layer_cfg.top_k));
+  NVTE_CHECK_NCCL(loader::fns().HandleMemSize(ep_group_, NCCL_EP_LAYOUT_EXPERT_MAJOR, &hcfg,
+                                              &hm_size, layer_cfg.top_k));
   ncclEpHandle_t h = open_handle(handle_mem, hm_size, layer_cfg.top_k,
                                  layer_cfg.dispatch_output_per_expert_alignment);
   lru_.push_front(HandleEntry{handle_mem, h, layer_cfg, hm_size});
   index_.emplace(handle_mem, lru_.begin());
   while (lru_.size() > cache_cap_locked()) {
     HandleEntry& victim = lru_.back();
-    if (victim.handle != nullptr) ncclEpHandleDestroy(victim.handle);
+    if (victim.handle != nullptr) loader::fns().HandleDestroy(victim.handle);
     index_.erase(victim.handle_mem);
     lru_.pop_back();
   }
@@ -327,8 +329,8 @@ size_t EPBackend::handle_mem_size(NVTEEpLayerConfig layer_cfg) {
   ncclEpHandleConfig_t hcfg = NCCL_EP_HANDLE_CONFIG_INIT;
   hcfg.dispatch_output_per_expert_alignment = layer_cfg.dispatch_output_per_expert_alignment;
   size_t hm_size = 0;
-  NVTE_CHECK_NCCL(ncclEpHandleMemSize(ep_group_, NCCL_EP_LAYOUT_EXPERT_MAJOR, &hcfg, &hm_size,
-                                      layer_cfg.top_k));
+  NVTE_CHECK_NCCL(loader::fns().HandleMemSize(ep_group_, NCCL_EP_LAYOUT_EXPERT_MAJOR, &hcfg,
+                                              &hm_size, layer_cfg.top_k));
   return hm_size;
 }
 
@@ -362,7 +364,7 @@ void EPBackend::prepare(void* handle_mem, const NVTETensor topk_idx, NVTETensor 
 
   std::lock_guard<std::mutex> lock(mutex_);
   ncclEpHandle_t h = prepare_handle_locked(handle_mem, layer_cfg);
-  NVTE_CHECK_NCCL(ncclEpUpdateHandle(h, &nccl_topk_idx, &layout_info, stream));
+  NVTE_CHECK_NCCL(loader::fns().UpdateHandle(h, &nccl_topk_idx, &layout_info, stream));
 }
 
 void EPBackend::dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTETensor tokens,
@@ -439,8 +441,8 @@ void EPBackend::dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTE
 
   std::lock_guard<std::mutex> lock(mutex_);
   ncclEpHandle_t h = lookup_handle_locked(handle_mem);
-  NVTE_CHECK_NCCL(ncclEpDispatch(h, &in_struct, &out_struct,
-                                 /*layout_info=*/nullptr, &dispatch_cfg, stream));
+  NVTE_CHECK_NCCL(loader::fns().Dispatch(h, &in_struct, &out_struct,
+                                         /*layout_info=*/nullptr, &dispatch_cfg, stream));
 }
 
 void EPBackend::combine(void* handle_mem, const NVTETensor expert_out,
@@ -473,7 +475,7 @@ void EPBackend::combine(void* handle_mem, const NVTETensor expert_out,
 
   std::lock_guard<std::mutex> lock(mutex_);
   ncclEpHandle_t h = lookup_handle_locked(handle_mem);
-  NVTE_CHECK_NCCL(ncclEpCombine(h, &in_struct, &out_struct, /*config=*/nullptr, stream));
+  NVTE_CHECK_NCCL(loader::fns().Combine(h, &in_struct, &out_struct, /*config=*/nullptr, stream));
 }
 
 void EPBackend::dispatch_bwd(void* handle_mem, const NVTETensor grad,
@@ -523,7 +525,7 @@ void EPBackend::dispatch_bwd(void* handle_mem, const NVTETensor grad,
 
   std::lock_guard<std::mutex> lock(mutex_);
   ncclEpHandle_t h = lookup_handle_locked(handle_mem);
-  NVTE_CHECK_NCCL(ncclEpCombine(h, &in_struct, &out_struct, &cfg, stream));
+  NVTE_CHECK_NCCL(loader::fns().Combine(h, &in_struct, &out_struct, &cfg, stream));
 }
 
 void EPBackend::combine_bwd(void* handle_mem, const NVTETensor grad,

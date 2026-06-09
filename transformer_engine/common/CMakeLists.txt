@@ -458,6 +458,10 @@ endif()
 message(STATUS "NCCL EP headers: ${NCCL_EP_INCLUDE_DIR}")
 
 # ── libnccl_ep.so ──────────────────────────────────────────────────────────
+# Resolved at runtime via dlopen in ep/ep_nccl_loader.cpp — NOT link-time bound,
+# so libtransformer_engine.so still loads on systems missing libnccl_ep.so or
+# with too-old NCCL. Locate the build artifact only to keep it on the rpath
+# (so dlopen by SONAME finds the bundled copy via DT_RUNPATH).
 set(NCCL_EP_LIB_DIR "${NCCL_EP_SUBMODULE_ROOT}/build/lib")
 find_library(NCCL_EP_LIB
     NAMES nccl_ep libnccl_ep
@@ -506,9 +510,12 @@ target_include_directories(transformer_engine PRIVATE
     ${NCCL_EP_INCLUDE_DIR}
     ${NCCL_INCLUDE_DIRS_FOR_TE})  # covers nccl.h + nccl_device/
 
+# libnccl_ep.so is dlopen'd from ep_nccl_loader.cpp, so do NOT link it here.
+# libnccl.so stays direct-linked: only ancient symbols (ncclGetVersion,
+# ncclCommCount, ncclGetErrorString) are referenced from this TU.
 target_link_libraries(transformer_engine PUBLIC
-    ${NCCL_EP_LIB}
-    ${NCCL_LIB})
+    ${NCCL_LIB}
+    ${CMAKE_DL_LIBS})
 
 # Embed rpath so the installed wheel finds libnccl_ep.so at runtime.
 # libnccl.so is already on the system via the Toolkit — no rpath needed for it.
@@ -517,10 +524,11 @@ set_target_properties(transformer_engine PROPERTIES
 
 target_sources(transformer_engine PRIVATE
     ep/ep_backend.cpp
-    ep/ep_api.cpp)
+    ep/ep_api.cpp
+    ep/ep_nccl_loader.cpp)
 target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_NCCL_EP)
 
-message(STATUS "NCCL EP enabled: ${NCCL_EP_LIB}")
+message(STATUS "NCCL EP enabled (dlopen at runtime): ${NCCL_EP_LIB}")
 message(STATUS "NCCL EP include: ${NCCL_EP_INCLUDE_DIR}")
 else()
   # NCCL EP off: ep_api.cpp's #else branch exports throwing nvte_ep_* stubs.
