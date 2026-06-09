@@ -24,7 +24,7 @@ from jax.sharding import NamedSharding, PartitionSpec
 
 import transformer_engine_jax
 from .base import BasePrimitive, register_primitive
-from ..sharding import global_mesh_resource
+from ..sharding import global_mesh_resource, get_mesh_axis_size
 
 __all__ = [
     "EpConfig",
@@ -189,6 +189,10 @@ def _ep_outer_axis():
     sees each DP color's slab as distinct (rather than replicated across DP).
     """
     gsr = global_mesh_resource()
+    if gsr.dp_resource is not None and get_mesh_axis_size(gsr.dp_resource) > 1:
+        return gsr.dp_resource
+    if gsr.fsdp_resource is not None and get_mesh_axis_size(gsr.fsdp_resource) > 1:
+        return gsr.fsdp_resource
     return gsr.dp_resource or gsr.fsdp_resource
 
 
@@ -536,7 +540,7 @@ def _resolve_out_partition_spec(out_partition_spec, num_leading):
             "ep_combine: ep_resource is not set on the active MeshResource;"
             " pass out_sharding=... explicitly."
         )
-    outer = gsr.dp_resource or gsr.fsdp_resource
+    outer = _ep_outer_axis()
     leading = (outer, gsr.ep_resource) if outer is not None else gsr.ep_resource
     return (leading,) + (None,) * num_leading
 

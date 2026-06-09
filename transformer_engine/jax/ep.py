@@ -236,7 +236,7 @@ def _dispatch_bwd(handle, recv_capacity_per_rank, res, g_outputs):
     # single-fwd-output cotangent, landing a global tensor in the FFI.
     gsr = global_mesh_resource()
     ep_axis = gsr.ep_resource
-    outer = gsr.dp_resource or gsr.fsdp_resource
+    outer = _ep_outer_axis()
     leading = (outer, ep_axis) if outer is not None else ep_axis
     g_recv_tokens = jax.lax.with_sharding_constraint(
         g_outputs[0], jax.sharding.PartitionSpec(leading, None, None)
@@ -251,6 +251,15 @@ def _dispatch_bwd(handle, recv_capacity_per_rank, res, g_outputs):
 
 
 ep_dispatch.defvjp(_dispatch_fwd, _dispatch_bwd)
+
+
+def _ep_outer_axis():
+    gsr = global_mesh_resource()
+    if gsr.dp_resource is not None and get_mesh_axis_size(gsr.dp_resource) > 1:
+        return gsr.dp_resource
+    if gsr.fsdp_resource is not None and get_mesh_axis_size(gsr.fsdp_resource) > 1:
+        return gsr.fsdp_resource
+    return gsr.dp_resource or gsr.fsdp_resource
 
 
 # ── ep_combine (custom_vjp) ──────────────────────────────────────────────────
@@ -315,7 +324,7 @@ def _combine_bwd(handle, _num_local_tokens, _out_sharding, res, g_result):
         spec = jax.sharding.PartitionSpec(*_out_sharding)
     else:
         ep_axis = gsr.ep_resource
-        outer = gsr.dp_resource or gsr.fsdp_resource
+        outer = _ep_outer_axis()
         leading = (outer, ep_axis) if outer is not None and ep_axis is not None else ep_axis
         spec = (
             jax.sharding.PartitionSpec(leading, *([None] * (g_result.ndim - 1)))

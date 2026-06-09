@@ -21,18 +21,18 @@ Sharding model
   :func:`moe` soft-repins this on entry and warns when a reshard is
   inserted.
 * The EP primitives operate at global view (their custom_partitioning
-  rules handle per-shard execution). The FFN GEMMs run per-shard inside
-  a small ``shard_map`` whose ``in_specs`` and ``out_specs`` mirror the
-  same ``((dp, ep), ...)`` layout.
+  rules handle per-shard execution). The FFN also stays at global view:
+  grouped GEMM custom partitioning handles the per-shard grouped math,
+  including FSDP reductions for wgrads.
 
 Out-of-scope (for now)
 ----------------------
 FP8 / MXFP8 quantizer sets are not yet wired on this path; turning
 them on requires recipe-aware residual specs and ``ScaledTensor``
-leaves across the ``shard_map`` boundary. ``aux_loss_coeff`` and
-``expert_bias`` are supported (the former forces a per-step
-all-gather over the routing-side logits, which lives off the critical
-path and overlaps with the dispatch collective).
+residual handling. ``aux_loss_coeff`` and ``expert_bias`` are supported
+(the former forces a per-step all-gather over the routing-side logits,
+which lives off the critical path and overlaps with the dispatch
+collective).
 """
 
 from dataclasses import dataclass
@@ -55,6 +55,23 @@ from .router import ScoreFunction, _validate_score_function
 from .sharding import _get_mesh
 
 __all__ = ["moe"]
+
+
+def _with_sharding_constraint_cast_bwd(x: jax.Array, sharding: NamedSharding) -> jax.Array:
+    """Apply a sharding constraint while keeping cotangents in the primal dtype."""
+
+    @jax.custom_vjp
+    def _constraint(y):
+        return jax.lax.with_sharding_constraint(y, sharding)
+
+    def _constraint_fwd(y):
+        return jax.lax.with_sharding_constraint(y, sharding), jnp.zeros((), dtype=y.dtype)
+
+    def _constraint_bwd(dtype_ref, grad):
+        return (jax.lax.with_sharding_constraint(grad.astype(dtype_ref.dtype), sharding),)
+
+    _constraint.defvjp(_constraint_fwd, _constraint_bwd)
+    return _constraint(x)
 
 
 # =============================================================================
@@ -256,7 +273,7 @@ class _Ctx:
 
 
 # =============================================================================
-# Per-shard FFN body (runs inside shard_map)
+# Custom-partitioned grouped-GEMM FFN body
 # =============================================================================
 
 
@@ -270,6 +287,10 @@ def _ffn_fwd_per_shard(
     wi_1_bias: Optional[jnp.ndarray],
     wo_bias: Optional[jnp.ndarray],
     *,
+    ep_axis: str,
+    data_parallelism_axes: Tuple[str, ...],
+    dp_size: int,
+    num_ep: int,
     num_local_experts: int,
     slots_per_expert: int,
     activation_type: str,
@@ -277,20 +298,61 @@ def _ffn_fwd_per_shard(
 ):
     """Per-shard FFN forward.
 
-    Operates on the shard-local ``[1, recv_pr, H]`` slice that
-    ``tex.ep_dispatch`` produces. Returns the expert outputs (shaped
-    ``[1, recv_pr, H_out]`` so the surrounding ``shard_map`` reassembles
-    them as ``[num_procs, recv_pr, H_out]``) plus the residuals consumed
-    by the bwd.
+    Operates on the global EP-dispatch output while grouped GEMM custom
+    partitioning lowers the math to per-shard groups. Returns expert
+    outputs shaped as ``[num_procs, recv_pr, H_out]`` plus the residuals
+    consumed by the bwd.
     """
     hidden = recv_tokens_local.shape[-1]
+    mesh = _get_mesh()
+    batch_axis: Any = ep_axis if not data_parallelism_axes else (*data_parallelism_axes, ep_axis)
+    row_sharding = NamedSharding(mesh, P(batch_axis, None))
+    group_sharding = NamedSharding(mesh, P(batch_axis))
+    weight_sharding = NamedSharding(mesh, P(batch_axis, None, None))
+    bias_sharding = NamedSharding(mesh, P(batch_axis, None))
+
     sorted_x = recv_tokens_local.reshape(-1, hidden)
     recv_w_flat = recv_topk_weights_local.reshape(-1)
-    local_group_sizes = jnp.full((num_local_experts,), slots_per_expert, dtype=jnp.int32)
+    num_groups = dp_size * num_ep * num_local_experts
+    group_sizes = jnp.full((num_groups,), slots_per_expert, dtype=jnp.int32)
+    sorted_x = jax.lax.with_sharding_constraint(sorted_x, row_sharding)
+    recv_w_flat = jax.lax.with_sharding_constraint(recv_w_flat, group_sharding)
+    group_sizes = jax.lax.with_sharding_constraint(group_sizes, group_sharding)
 
     wi_0 = wi_0.astype(sorted_x.dtype)
     wi_1 = wi_1.astype(sorted_x.dtype)
     wo = wo.astype(sorted_x.dtype)
+    wi_0 = jnp.broadcast_to(
+        wi_0.reshape(1, num_ep, num_local_experts, *wi_0.shape[1:]),
+        (dp_size, num_ep, num_local_experts, *wi_0.shape[1:]),
+    ).reshape(num_groups, *wi_0.shape[1:])
+    wi_1 = jnp.broadcast_to(
+        wi_1.reshape(1, num_ep, num_local_experts, *wi_1.shape[1:]),
+        (dp_size, num_ep, num_local_experts, *wi_1.shape[1:]),
+    ).reshape(num_groups, *wi_1.shape[1:])
+    wo = jnp.broadcast_to(
+        wo.reshape(1, num_ep, num_local_experts, *wo.shape[1:]),
+        (dp_size, num_ep, num_local_experts, *wo.shape[1:]),
+    ).reshape(num_groups, *wo.shape[1:])
+    wi_0 = jax.lax.with_sharding_constraint(wi_0, weight_sharding)
+    wi_1 = jax.lax.with_sharding_constraint(wi_1, weight_sharding)
+    wo = jax.lax.with_sharding_constraint(wo, weight_sharding)
+    if wi_0_bias is not None:
+        wi_0_bias = jnp.broadcast_to(
+            wi_0_bias.reshape(1, num_ep, num_local_experts, *wi_0_bias.shape[1:]),
+            (dp_size, num_ep, num_local_experts, *wi_0_bias.shape[1:]),
+        ).reshape(num_groups, *wi_0_bias.shape[1:])
+        wi_1_bias = jnp.broadcast_to(
+            wi_1_bias.reshape(1, num_ep, num_local_experts, *wi_1_bias.shape[1:]),
+            (dp_size, num_ep, num_local_experts, *wi_1_bias.shape[1:]),
+        ).reshape(num_groups, *wi_1_bias.shape[1:])
+        wo_bias = jnp.broadcast_to(
+            wo_bias.reshape(1, num_ep, num_local_experts, *wo_bias.shape[1:]),
+            (dp_size, num_ep, num_local_experts, *wo_bias.shape[1:]),
+        ).reshape(num_groups, *wo_bias.shape[1:])
+        wi_0_bias = jax.lax.with_sharding_constraint(wi_0_bias, bias_sharding)
+        wi_1_bias = jax.lax.with_sharding_constraint(wi_1_bias, bias_sharding)
+        wo_bias = jax.lax.with_sharding_constraint(wo_bias, bias_sharding)
 
     wi_combined = jnp.concatenate([wi_0, wi_1], axis=-1)
     wi_combined_bias = (
@@ -298,7 +360,7 @@ def _ffn_fwd_per_shard(
     )
 
     q_set = noop_quantizer_set
-    casted_sorted_x = tex.grouped_quantize(sorted_x, q_set.x, local_group_sizes, flatten_axis=-1)
+    casted_sorted_x = tex.grouped_quantize(sorted_x, q_set.x, group_sizes, flatten_axis=-1)
     casted_wi = tex.grouped_quantize(wi_combined, q_set.kernel, flatten_axis=-1)
     combined_out = tex.grouped_gemm(
         casted_sorted_x.get_tensor(usage=TensorUsage.LHS),
@@ -306,12 +368,14 @@ def _ffn_fwd_per_shard(
         contracting_dims=((1,), (1,)),
         bias=wi_combined_bias,
     )
+    combined_out = jax.lax.with_sharding_constraint(combined_out, row_sharding)
     gate_proj_out, up_proj_out = jnp.split(combined_out, 2, axis=-1)
     casted_sorted_x_lhs_trans = casted_sorted_x.get_tensor(usage=TensorUsage.LHS_TRANS)
     casted_wi_rhs_trans = casted_wi.get_tensor(usage=TensorUsage.RHS_TRANS)
 
     act_fn = _convert_to_activation_function(activation_type)
     intermediate = act_fn(gate_proj_out) * up_proj_out
+    intermediate = jax.lax.with_sharding_constraint(intermediate, row_sharding)
 
     if apply_topk_weights_early:
         # Fold the per-token combine weights into the FFN intermediate;
@@ -322,9 +386,10 @@ def _ffn_fwd_per_shard(
         w_b = recv_w_flat[:, None].astype(intermediate.dtype)
         mask_b = (recv_w_flat != 0).astype(intermediate.dtype)[:, None]
         intermediate = intermediate * w_b * mask_b
+        intermediate = jax.lax.with_sharding_constraint(intermediate, row_sharding)
 
     casted_intermediate = tex.grouped_quantize(
-        intermediate, q_set.x, local_group_sizes, flatten_axis=-1
+        intermediate, q_set.x, group_sizes, flatten_axis=-1
     )
     casted_wo = tex.grouped_quantize(wo, q_set.kernel, flatten_axis=-1)
     expert_outputs = tex.grouped_gemm(
@@ -333,10 +398,13 @@ def _ffn_fwd_per_shard(
         contracting_dims=((1,), (1,)),
         bias=wo_bias,
     )
+    expert_outputs = jax.lax.with_sharding_constraint(expert_outputs, row_sharding)
     casted_intermediate_lhs_trans = casted_intermediate.get_tensor(usage=TensorUsage.LHS_TRANS)
     casted_wo_rhs_trans = casted_wo.get_tensor(usage=TensorUsage.RHS_TRANS)
 
-    expert_outputs_3d = expert_outputs.reshape(1, expert_outputs.shape[0], expert_outputs.shape[1])
+    expert_outputs_3d = expert_outputs.reshape(
+        dp_size * num_ep, num_local_experts * slots_per_expert, expert_outputs.shape[-1]
+    )
     residuals = (
         casted_sorted_x_lhs_trans,
         casted_wi_rhs_trans,
@@ -344,7 +412,7 @@ def _ffn_fwd_per_shard(
         up_proj_out,
         casted_intermediate_lhs_trans,
         casted_wo_rhs_trans,
-        local_group_sizes,
+        group_sizes,
     )
     return expert_outputs_3d, residuals
 
@@ -360,6 +428,12 @@ def _ffn_bwd_per_shard(
     local_group_sizes: jnp.ndarray,
     recv_topk_weights_local: jnp.ndarray,
     *,
+    ep_axis: str,
+    data_parallelism_axes: Tuple[str, ...],
+    dp_size: int,
+    num_ep: int,
+    num_local_experts: int,
+    slots_per_expert: int,
     activation_type: str,
     apply_topk_weights_early: bool,
     has_bias: bool,
@@ -370,8 +444,18 @@ def _ffn_bwd_per_shard(
     ``(d_sorted_x [1, recv_pr, H], d_recv_w [1, recv_pr], d_wi_0, d_wi_1, d_wo,
     d_wi_0_bias, d_wi_1_bias, d_wo_bias)``.
     """
+    mesh = _get_mesh()
+    batch_axis: Any = ep_axis if not data_parallelism_axes else (*data_parallelism_axes, ep_axis)
+    row_sharding = NamedSharding(mesh, P(batch_axis, None))
+    group_sharding = NamedSharding(mesh, P(batch_axis))
+    weight_sharding = NamedSharding(mesh, P(batch_axis, None, None))
+    bias_sharding = NamedSharding(mesh, P(batch_axis, None))
+
     d_eo_2d = d_expert_outputs_local.reshape(-1, d_expert_outputs_local.shape[-1])
     recv_w_flat = recv_topk_weights_local.reshape(-1)
+    d_eo_2d = jax.lax.with_sharding_constraint(d_eo_2d, row_sharding)
+    recv_w_flat = jax.lax.with_sharding_constraint(recv_w_flat, group_sharding)
+    local_group_sizes = jax.lax.with_sharding_constraint(local_group_sizes, group_sharding)
     q_set = noop_quantizer_set
 
     # wo bwd
@@ -381,12 +465,16 @@ def _ffn_bwd_per_shard(
         casted_wo_rhs_trans,
         contracting_dims=((1,), (2,)),
     )
+    d_intermediate = jax.lax.with_sharding_constraint(d_intermediate, row_sharding)
     d_wo = tex.grouped_gemm(
         casted_intermediate_lhs_trans,
         casted_d_eo.get_tensor(usage=TensorUsage.RHS),
         contracting_dims=((0,), (0,)),
     )
+    d_wo = jax.lax.with_sharding_constraint(d_wo, weight_sharding)
     d_wo_bias = tex.grouped_dbias(d_eo_2d, local_group_sizes) if has_bias else None
+    if has_bias:
+        d_wo_bias = jax.lax.with_sharding_constraint(d_wo_bias, bias_sharding)
 
     act_fn = _convert_to_activation_function(activation_type)
     if apply_topk_weights_early:
@@ -401,6 +489,7 @@ def _ffn_bwd_per_shard(
             d_intermediate * intermediate_unweighted * mask_b, axis=-1
         ).astype(recv_w_flat.dtype)
         d_intermediate = d_intermediate * w_b * mask_b
+        d_intermediate = jax.lax.with_sharding_constraint(d_intermediate, row_sharding)
     else:
         d_recv_w_from_intermediate = jnp.zeros_like(recv_w_flat)
 
@@ -411,6 +500,7 @@ def _ffn_bwd_per_shard(
 
     # wi bwd (fused gate/up)
     d_combined = jnp.concatenate([d_gate_proj_out, d_up_proj_out], axis=-1)
+    d_combined = jax.lax.with_sharding_constraint(d_combined, row_sharding)
     casted_d_combined = tex.grouped_quantize(
         d_combined, q_set.dgrad, local_group_sizes, flatten_axis=-1
     )
@@ -419,21 +509,42 @@ def _ffn_bwd_per_shard(
         casted_wi_rhs_trans,
         contracting_dims=((1,), (2,)),
     )
+    d_sorted_x = jax.lax.with_sharding_constraint(d_sorted_x, row_sharding)
     d_wi_combined = tex.grouped_gemm(
         casted_sorted_x_lhs_trans,
         casted_d_combined.get_tensor(usage=TensorUsage.RHS),
         contracting_dims=((0,), (0,)),
     )
+    d_wi_combined = jax.lax.with_sharding_constraint(d_wi_combined, weight_sharding)
     d_wi_0, d_wi_1 = jnp.split(d_wi_combined, 2, axis=-1)
+    d_wi_0 = d_wi_0.reshape(dp_size, num_ep * num_local_experts, *d_wi_0.shape[1:]).sum(axis=0)
+    d_wi_1 = d_wi_1.reshape(dp_size, num_ep * num_local_experts, *d_wi_1.shape[1:]).sum(axis=0)
     if has_bias:
         d_wi_combined_bias = tex.grouped_dbias(d_combined, local_group_sizes)
+        d_wi_combined_bias = jax.lax.with_sharding_constraint(
+            d_wi_combined_bias, bias_sharding
+        )
         d_wi_0_bias, d_wi_1_bias = jnp.split(d_wi_combined_bias, 2, axis=-1)
+        d_wi_0_bias = d_wi_0_bias.reshape(
+            dp_size, num_ep * num_local_experts, *d_wi_0_bias.shape[1:]
+        ).sum(axis=0)
+        d_wi_1_bias = d_wi_1_bias.reshape(
+            dp_size, num_ep * num_local_experts, *d_wi_1_bias.shape[1:]
+        ).sum(axis=0)
     else:
         d_wi_0_bias = None
         d_wi_1_bias = None
 
-    d_sorted_x_3d = d_sorted_x.reshape(1, d_sorted_x.shape[0], d_sorted_x.shape[1])
-    d_recv_w_3d = d_recv_w_from_intermediate.reshape(1, -1)
+    d_wo = d_wo.reshape(dp_size, num_ep * num_local_experts, *d_wo.shape[1:]).sum(axis=0)
+    if has_bias:
+        d_wo_bias = d_wo_bias.reshape(dp_size, num_ep * num_local_experts, *d_wo_bias.shape[1:]).sum(axis=0)
+
+    d_sorted_x_3d = d_sorted_x.reshape(
+        dp_size * num_ep, num_local_experts * slots_per_expert, d_sorted_x.shape[-1]
+    )
+    d_recv_w_3d = d_recv_w_from_intermediate.reshape(
+        dp_size * num_ep, num_local_experts * slots_per_expert
+    )
     return (
         d_sorted_x_3d,
         d_recv_w_3d,
@@ -480,14 +591,12 @@ def _moe_fwd_rule(
     apply_topk_weights_early,
     align_size,
 ):
-    """Forward: gate -> topk -> ep_dispatch -> shard_map(FFN) -> ep_combine.
+    """Forward: gate -> topk -> ep_dispatch -> grouped-GEMM FFN -> ep_combine.
 
     Returns ``(output, aux_loss)``. ``aux_loss`` is a zero scalar when
     ``aux_loss_coeff == 0``.
     """
     del gate_kernel_axes, wi_kernel_axes, wo_kernel_axes  # used in bwd only
-    from jax.experimental.shard_map import shard_map
-
     x = with_sharding_constraint_by_logical_axes(x, input_axes)
 
     mesh = _get_mesh()
@@ -651,57 +760,26 @@ def _moe_fwd_rule(
         recv_topk_weights, NamedSharding(mesh, ep2_spec)
     )
 
-    # ---------------- FFN (per-shard via shard_map) ----------------
+    # ---------------- FFN (custom-partitioned grouped GEMM) ----------------
     has_bias = wi_0_bias is not None
-    kernel_spec = P(ep_axis, None, None)
-    bias_spec = P(ep_axis, None) if has_bias else None
-    ffn_in_specs = (ep3_spec, ep2_spec, kernel_spec, kernel_spec, kernel_spec)
-    ffn_in_args = [recv_tokens, recv_topk_weights, wi_0, wi_1, wo]
-    if has_bias:
-        ffn_in_specs = ffn_in_specs + (bias_spec, bias_spec, bias_spec)
-        ffn_in_args.extend([wi_0_bias, wi_1_bias, wo_bias])
-
-    # FFN residuals live entirely on the local ep rank, so the leading
-    # "experts" / "rows" dims map to P() (already shard-local).
-    residuals_spec = (
-        P(),                    # casted_sorted_x_lhs_trans
-        P(ep_axis, None, None), # casted_wi_rhs_trans
-        P(),                    # gate_proj_out
-        P(),                    # up_proj_out
-        P(),                    # casted_intermediate_lhs_trans
-        P(ep_axis, None, None), # casted_wo_rhs_trans
-        P(),                    # local_group_sizes
+    expert_outputs, ffn_residuals = _ffn_fwd_per_shard(
+        recv_tokens,
+        recv_topk_weights,
+        wi_0,
+        wi_1,
+        wo,
+        wi_0_bias,
+        wi_1_bias,
+        wo_bias,
+        ep_axis=ep_axis,
+        data_parallelism_axes=data_parallelism_axes,
+        dp_size=dp_size,
+        num_ep=num_ep,
+        num_local_experts=num_local_experts,
+        slots_per_expert=slots_per_expert,
+        activation_type=activation_type,
+        apply_topk_weights_early=apply_topk_weights_early,
     )
-    out_specs = (ep3_spec, residuals_spec)
-
-    def _body(*args):
-        if has_bias:
-            (r_tok, r_w, w0, w1, w_o, w0b, w1b, wob) = args
-        else:
-            (r_tok, r_w, w0, w1, w_o) = args
-            w0b = w1b = wob = None
-        return _ffn_fwd_per_shard(
-            r_tok,
-            r_w,
-            w0,
-            w1,
-            w_o,
-            w0b,
-            w1b,
-            wob,
-            num_local_experts=num_local_experts,
-            slots_per_expert=slots_per_expert,
-            activation_type=activation_type,
-            apply_topk_weights_early=apply_topk_weights_early,
-        )
-
-    expert_outputs, ffn_residuals = shard_map(
-        _body,
-        mesh=mesh,
-        in_specs=ffn_in_specs,
-        out_specs=out_specs,
-        check_rep=False,
-    )(*ffn_in_args)
     expert_outputs = jax.lax.with_sharding_constraint(
         expert_outputs, NamedSharding(mesh, ep3_spec)
     )
@@ -794,7 +872,6 @@ def _moe_bwd_rule(
 ):
     """Backward mirror of :func:`_moe_fwd_rule`."""
     del num_groups, group_topk, dtype, align_size  # captured in residuals / unused in bwd
-    from jax.experimental.shard_map import shard_map
 
     d_output, d_aux_loss = cotangents
 
@@ -844,82 +921,7 @@ def _moe_bwd_rule(
         d_recv_w_from_combine = (grad_pre_combine * ctx.expert_outputs * mask).sum(axis=-1)
         d_recv_w_from_combine = d_recv_w_from_combine.astype(ctx.recv_topk_weights.dtype)
 
-    # ---------------- FFN bwd (per-shard via shard_map) ----------------
-    kernel_spec = P(ep_axis, None, None)
-    bias_spec = P(ep_axis, None) if has_bias else None
-
-    bwd_in_specs = (
-        ep3_spec,                # d_expert_outputs
-        P(),                     # casted_sorted_x_lhs_trans
-        P(ep_axis, None, None),  # casted_wi_rhs_trans
-        P(),                     # gate_proj_out
-        P(),                     # up_proj_out
-        P(),                     # casted_intermediate_lhs_trans
-        P(ep_axis, None, None),  # casted_wo_rhs_trans
-        P(),                     # local_group_sizes
-        ep2_spec,                # recv_topk_weights
-    )
-    bwd_in_args = [
-        d_expert_outputs,
-        ctx.casted_sorted_x_lhs_trans,
-        ctx.casted_wi_rhs_trans,
-        ctx.gate_proj_out,
-        ctx.up_proj_out,
-        ctx.casted_intermediate_lhs_trans,
-        ctx.casted_wo_rhs_trans,
-        ctx.local_group_sizes,
-        ctx.recv_topk_weights,
-    ]
-    bwd_out_specs = (
-        ep3_spec,                            # d_sorted_x
-        ep2_spec,                            # d_recv_w_from_intermediate
-        kernel_spec,                         # d_wi_0
-        kernel_spec,                         # d_wi_1
-        kernel_spec,                         # d_wo
-        bias_spec if has_bias else None,     # d_wi_0_bias
-        bias_spec if has_bias else None,     # d_wi_1_bias
-        bias_spec if has_bias else None,     # d_wo_bias
-    )
-
-    def _bwd_body(*args):
-        (
-            d_sorted_x_3d,
-            d_recv_w_3d,
-            d_wi_0,
-            d_wi_1,
-            d_wo,
-            d_wi_0_bias,
-            d_wi_1_bias,
-            d_wo_bias,
-        ) = _ffn_bwd_per_shard(
-            *args,
-            activation_type=activation_type,
-            apply_topk_weights_early=apply_topk_weights_early,
-            has_bias=has_bias,
-        )
-        # Weight grads accumulate per-DP-shard inside the body; psum across
-        # DP axes so each replica sees the full sum (matches out_specs
-        # P(ep_axis, ...) which is DP-replicated).
-        if data_parallelism_axes:
-            dp = tuple(data_parallelism_axes)
-            d_wi_0 = jax.lax.psum(d_wi_0, axis_name=dp)
-            d_wi_1 = jax.lax.psum(d_wi_1, axis_name=dp)
-            d_wo = jax.lax.psum(d_wo, axis_name=dp)
-            if has_bias:
-                d_wi_0_bias = jax.lax.psum(d_wi_0_bias, axis_name=dp)
-                d_wi_1_bias = jax.lax.psum(d_wi_1_bias, axis_name=dp)
-                d_wo_bias = jax.lax.psum(d_wo_bias, axis_name=dp)
-        return (
-            d_sorted_x_3d,
-            d_recv_w_3d,
-            d_wi_0,
-            d_wi_1,
-            d_wo,
-            d_wi_0_bias,
-            d_wi_1_bias,
-            d_wo_bias,
-        )
-
+    # ---------------- FFN bwd (custom-partitioned grouped GEMM) ----------------
     (
         d_sorted_x,
         d_recv_w_from_intermediate,
@@ -929,13 +931,26 @@ def _moe_bwd_rule(
         d_wi_0_bias,
         d_wi_1_bias,
         d_wo_bias,
-    ) = shard_map(
-        _bwd_body,
-        mesh=mesh,
-        in_specs=bwd_in_specs,
-        out_specs=bwd_out_specs,
-        check_rep=False,
-    )(*bwd_in_args)
+    ) = _ffn_bwd_per_shard(
+        d_expert_outputs,
+        ctx.casted_sorted_x_lhs_trans,
+        ctx.casted_wi_rhs_trans,
+        ctx.gate_proj_out,
+        ctx.up_proj_out,
+        ctx.casted_intermediate_lhs_trans,
+        ctx.casted_wo_rhs_trans,
+        ctx.local_group_sizes,
+        ctx.recv_topk_weights,
+        ep_axis=ep_axis,
+        data_parallelism_axes=data_parallelism_axes,
+        dp_size=dp_size,
+        num_ep=num_ep,
+        num_local_experts=num_experts // num_ep,
+        slots_per_expert=recv_pr // (num_experts // num_ep),
+        activation_type=activation_type,
+        apply_topk_weights_early=apply_topk_weights_early,
+        has_bias=has_bias,
+    )
 
     d_recv_w_total = d_recv_w_from_combine + d_recv_w_from_intermediate
 
@@ -1193,7 +1208,7 @@ def moe(
             UserWarning,
             stacklevel=2,
         )
-    x = jax.lax.with_sharding_constraint(x, NamedSharding(mesh, expected_spec))
+    x = _with_sharding_constraint_cast_bwd(x, NamedSharding(mesh, expected_spec))
 
     # custom_vjp can't trace through None args; lower expert_bias to an
     # empty shape-(0,) tensor that fused_topk_with_score_function treats

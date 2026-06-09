@@ -1790,6 +1790,24 @@ class GroupedGemmPrimitive(BasePrimitive):
         additional_arg_0_spec = filter_spec_axes(original_arg_specs[11], allowed_axes)
         additional_arg_1_spec = filter_spec_axes(original_arg_specs[12], allowed_axes)
 
+        def spec_has_axes(spec):
+            return any(axis_spec is not None for axis_spec in spec)
+
+        if arg_infos[5].size > 0 and len(lhs_data_spec) > 0 and not spec_has_axes(lhs_first_dims_spec):
+            lhs_first_dims_spec = (merge_axis_specs(lhs_first_dims_spec[0], lhs_data_spec[0]),)
+        if arg_infos[6].size > 0 and len(lhs_data_spec) > 0 and not spec_has_axes(lhs_last_dims_spec):
+            lhs_last_dims_spec = (merge_axis_specs(lhs_last_dims_spec[0], lhs_data_spec[-1]),)
+        if arg_infos[7].size > 0 and len(rhs_data_spec) > 0 and not spec_has_axes(rhs_first_dims_spec):
+            rhs_first_dims_spec = (merge_axis_specs(rhs_first_dims_spec[0], rhs_data_spec[0]),)
+        if arg_infos[8].size > 0 and len(rhs_data_spec) > 0 and not spec_has_axes(rhs_last_dims_spec):
+            rhs_last_dims_spec = (merge_axis_specs(rhs_last_dims_spec[0], rhs_data_spec[-1]),)
+        if arg_infos[9].size > 0 and not spec_has_axes(out_first_dims_spec):
+            out_first_dims_spec = (
+                merge_axis_specs(out_first_dims_spec[0], lhs_first_dims_spec[0]),
+            )
+        if arg_infos[10].size > 0 and not spec_has_axes(out_last_dims_spec):
+            out_last_dims_spec = (merge_axis_specs(out_last_dims_spec[0], lhs_last_dims_spec[0]),)
+
         grouped_dim_specs = (
             lhs_first_dims_spec,
             lhs_last_dims_spec,
@@ -1828,6 +1846,20 @@ class GroupedGemmPrimitive(BasePrimitive):
             if len(bias_spec) > 0 and not spec_contains_axis(bias_spec, ep_axis):
                 bias_spec = (merge_axis_specs(bias_spec[0], ep_axis), *bias_spec[1:])
 
+        if not rhs_is_ragged and spec_contains_axis(active_group_spec, fsdp_axis):
+            if len(rhs_data_spec) > 0:
+                rhs_data_spec = (
+                    merge_axis_specs(rhs_data_spec[0], active_group_spec[0]),
+                    *rhs_data_spec[1:],
+                )
+            if len(rhs_scale_spec) > 0:
+                rhs_scale_spec = (
+                    merge_axis_specs(rhs_scale_spec[0], active_group_spec[0]),
+                    *rhs_scale_spec[1:],
+                )
+            if len(bias_spec) > 0:
+                bias_spec = (merge_axis_specs(bias_spec[0], active_group_spec[0]), *bias_spec[1:])
+
         gather_rhs_fsdp = (
             fsdp_axis is not None
             and not rhs_is_ragged
@@ -1839,9 +1871,23 @@ class GroupedGemmPrimitive(BasePrimitive):
         )
 
         if gather_rhs_fsdp:
-            rhs_data_spec = strip_axis_from_spec(rhs_data_spec, fsdp_axis)
-            rhs_scale_spec = strip_axis_from_spec(rhs_scale_spec, fsdp_axis)
-            bias_spec = strip_axis_from_spec(bias_spec, fsdp_axis)
+            if spec_contains_axis(active_group_spec, fsdp_axis):
+                if len(rhs_data_spec) > 0:
+                    rhs_data_spec = (
+                        rhs_data_spec[0],
+                        *strip_axis_from_spec(rhs_data_spec[1:], fsdp_axis),
+                    )
+                if len(rhs_scale_spec) > 0:
+                    rhs_scale_spec = (
+                        rhs_scale_spec[0],
+                        *strip_axis_from_spec(rhs_scale_spec[1:], fsdp_axis),
+                    )
+                if len(bias_spec) > 0:
+                    bias_spec = (bias_spec[0], *strip_axis_from_spec(bias_spec[1:], fsdp_axis))
+            else:
+                rhs_data_spec = strip_axis_from_spec(rhs_data_spec, fsdp_axis)
+                rhs_scale_spec = strip_axis_from_spec(rhs_scale_spec, fsdp_axis)
+                bias_spec = strip_axis_from_spec(bias_spec, fsdp_axis)
 
         reducible_axes = tuple(
             axis for axis in (gsr.dp_resource, gsr.fsdp_resource) if axis is not None
@@ -1856,6 +1902,18 @@ class GroupedGemmPrimitive(BasePrimitive):
         else:
             original_out_spec = None
             out_spec = (None,) * (len(out_shape) if out_shape is not None else 1)
+
+        if not rhs_is_ragged and lhs_is_trans is not None and lhs_axis_boundary is not None:
+            lhs_non_contracting_dims = (
+                range(lhs_axis_boundary, len(lhs_data_spec))
+                if lhs_is_trans
+                else range(0, lhs_axis_boundary)
+            )
+            out_spec = list(out_spec)
+            for out_idx, lhs_dim in enumerate(lhs_non_contracting_dims):
+                if out_idx < len(out_spec) and out_spec[out_idx] is None:
+                    out_spec[out_idx] = merge_axis_specs(out_spec[out_idx], lhs_data_spec[lhs_dim])
+            out_spec = tuple(out_spec)
 
         if rhs_is_ragged and lhs_is_trans is not None and lhs_axis_boundary is not None:
             lhs_non_contracting_dims = (
