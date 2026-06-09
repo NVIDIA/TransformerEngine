@@ -355,7 +355,7 @@ class UserbuffersForwardLinear(FusedOperation):
         # Save state for backward pass
         if linear_op_ctx.requires_grad:
             if is_cpu_offload_enabled():
-                linear_op.maybe_mark_and_start_activation_offload(x_local)
+                linear_op.maybe_mark_activation_offload(x_local)
             linear_op_ctx.save_for_backward(x_local, w)
             linear_op_ctx.with_quantized_compute = with_quantized_compute
             linear_op_ctx.input_quantizer = input_quantizer

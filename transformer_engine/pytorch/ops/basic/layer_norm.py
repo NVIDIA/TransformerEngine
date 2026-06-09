@@ -217,7 +217,7 @@ class LayerNorm(BasicOperation):
         # Save state for backward pass
         if ctx.requires_grad:
             if is_cpu_offload_enabled():
-                self.maybe_mark_and_start_activation_offload(x, means, rstdevs)
+                self.maybe_mark_activation_offload(x, means, rstdevs)
             ctx.save_for_backward(x, means, rstdevs)
             ctx.dtype = dtype
 

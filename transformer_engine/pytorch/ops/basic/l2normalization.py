@@ -103,7 +103,7 @@ class L2Normalization(BasicOperation):
         # Save state for backward pass
         if requires_grad:
             if is_cpu_offload_enabled():
-                self.maybe_mark_and_start_activation_offload(x, rsqrt_norm)
+                self.maybe_mark_activation_offload(x, rsqrt_norm)
             ctx.save_for_backward(x, rsqrt_norm)
 
         return y

@@ -83,11 +83,6 @@ def test_basic_operation_activation_offloading_policy(monkeypatch):
 
     monkeypatch.setattr(
         cpu_offload,
-        "start_offload",
-        lambda *tensors: calls.append(("start", [id(t) for t in tensors])),
-    )
-    monkeypatch.setattr(
-        cpu_offload,
         "mark_activation_offload",
         lambda *tensors: calls.append(("mark", [id(t) for t in tensors])),
     )
@@ -97,18 +92,18 @@ def test_basic_operation_activation_offloading_policy(monkeypatch):
         lambda *tensors: calls.append(("skip", [id(t) for t in tensors])),
     )
 
-    op.maybe_mark_and_start_activation_offload(tensor, None, start=True)
-    assert calls == [("start", [tensor_id]), ("mark", [tensor_id])]
+    op.maybe_mark_activation_offload(tensor, None)
+    assert calls == [("mark", [tensor_id])]
 
     calls.clear()
     op.set_activation_offloading(False)
-    op.maybe_mark_and_start_activation_offload(tensor, start=True)
+    op.maybe_mark_activation_offload(tensor)
     assert calls == [("skip", [tensor_id])]
 
     calls.clear()
     op.set_activation_offloading(True)
-    op.maybe_mark_and_start_activation_offload(tensor, start=True, mark=False)
-    assert calls == [("start", [tensor_id])]
+    op.maybe_mark_activation_offload(tensor)
+    assert calls == [("mark", [tensor_id])]
 
 
 # Supported quantization recipes

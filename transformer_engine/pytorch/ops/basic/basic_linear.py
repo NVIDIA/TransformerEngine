@@ -1053,7 +1053,7 @@ class BasicLinear(BasicOperation):
             # either self.weight (nn.Parameter, auto-excluded from offload) or a
             # workspace freshly created each forward pass.
             if is_cpu_offload_enabled():
-                self.maybe_mark_and_start_activation_offload(saved_input)
+                self.maybe_mark_activation_offload(saved_input)
             ctx.save_for_backward(saved_input, saved_weight)
             ctx.with_quantized_compute = with_quantized_compute and backward_override is None
             ctx.backward_override = backward_override

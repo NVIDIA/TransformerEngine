@@ -128,7 +128,7 @@ class SwiGLU(BasicOperation):
         # Save state for backward pass
         if ctx.requires_grad:
             if is_cpu_offload_enabled():
-                self.maybe_mark_and_start_activation_offload(input_)
+                self.maybe_mark_activation_offload(input_)
             ctx.save_for_backward(input_)
             ctx.dtype = dtype
             ctx.prev_op_grad_output_quantizer = prev_op_grad_output_quantizer
@@ -312,7 +312,7 @@ class ClampedSwiGLU(BasicOperation):
         # Save state for backward pass
         if ctx.requires_grad:
             if is_cpu_offload_enabled():
-                self.maybe_mark_and_start_activation_offload(x)
+                self.maybe_mark_activation_offload(x)
             ctx.save_for_backward(x)
             ctx.dtype = dtype
             ctx.prev_op_grad_output_quantizer = prev_op_grad_output_quantizer
@@ -463,7 +463,7 @@ class _ScaledGLU(BasicOperation):
         ctx = basic_op_ctxs[0]
         if ctx.requires_grad:
             if is_cpu_offload_enabled():
-                self.maybe_mark_and_start_activation_offload(input_)
+                self.maybe_mark_activation_offload(input_)
             ctx.input_requires_grad = True
             ctx.extra_input_requires_grad = extra_input.requires_grad
             ctx.dtype = dtype

@@ -16,7 +16,6 @@ import torch
 import transformer_engine_torch as tex
 from ...constants import DType
 from ...cpp_extensions import general_grouped_gemm, general_grouped_gemm_for_grouped_tensor
-from ...cpu_offload import is_cpu_offload_enabled
 from ...distributed import CudaRNGStatesTracker
 from ...module._common import WeightGradStore
 from ...module.base import (
@@ -24,6 +23,7 @@ from ...module.base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
+from ...cpu_offload import is_cpu_offload_enabled, start_offload
 from ...quantization import FP8GlobalStateManager, QuantizerRole, Recipe
 from ...quantized_tensor import QuantizedTensorStorage
 from ...tensor import MXFP8Quantizer, MXFP8Tensor, Quantizer
@@ -1039,12 +1039,12 @@ class GroupedLinear(BasicOperation):
                 # Layout: [split_sizes, base_split_offsets, split_points, (scales?), grouped_x, *weights]
                 grouped_x = saved[offset]
                 if grouped_x is not None:
-                    self.maybe_mark_and_start_activation_offload(grouped_x)
+                    self.maybe_mark_activation_offload(grouped_x)
             else:
                 # Layout: [split_sizes, None, None, (scales?), *xs, *ws]
                 live_xs = [t for t in saved[offset : offset + self.num_groups] if t is not None]
                 if live_xs:
-                    self.maybe_mark_and_start_activation_offload(*live_xs)
+                    self.maybe_mark_activation_offload(*live_xs)
 
         ctx.save_for_backward(*tensors_to_save[0])
 
@@ -1133,7 +1133,7 @@ class GroupedLinear(BasicOperation):
         if is_cpu_offload_enabled():
             live_xs = [t for t in xs if t is not None]
             if live_xs:
-                self.maybe_mark_and_start_activation_offload(*live_xs, start=True, mark=False)
+                start_offload(*live_xs)
 
         # Allocate output tensor
         in_shape = list(input_.size())
@@ -1240,7 +1240,7 @@ class GroupedLinear(BasicOperation):
             )
 
         if is_cpu_offload_enabled() and grouped_x is not None:
-            self.maybe_mark_and_start_activation_offload(grouped_x, start=True, mark=False)
+            start_offload(grouped_x)
 
         # Build the weight GroupedTensor / list.
         if self.single_grouped_weight:
