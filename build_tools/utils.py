@@ -296,15 +296,6 @@ def cuda_version() -> Tuple[int, ...]:
         raise RuntimeError("Could neither find NVCC executable nor CUDA runtime Python package.")
 
 
-def cublas_pypi_install_requirement(cuda_major: Optional[int] = None) -> Optional[str]:
-    """Pip install requirement for cuBLAS PyPI package, if a minimum version is needed."""
-    if cuda_major is None:
-        cuda_major = cuda_version()[0]
-    if cuda_major == 13:
-        return "nvidia-cublas>=13.3.0.5"
-    return None
-
-
 def cusolvermp_pypi_package_name(cuda_major: Optional[int] = None) -> str:
     """PyPI package providing cuSolverMp runtime libraries for a CUDA major version."""
     if cuda_major is None:
