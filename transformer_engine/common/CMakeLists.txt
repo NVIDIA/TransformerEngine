@@ -517,9 +517,14 @@ target_link_libraries(transformer_engine PUBLIC
     ${NCCL_LIB}
     ${CMAKE_DL_LIBS})
 
-# Embed rpath so the installed wheel finds libnccl_ep.so at runtime.
+# Embed rpath so dlopen("libnccl_ep.so.0") finds the bundled lib via DT_RUNPATH:
+#   - BUILD_RPATH: covers the in-tree build artifact (CMake no longer auto-adds
+#     NCCL_EP_LIB_DIR since libnccl_ep is not in target_link_libraries anymore).
+#   - INSTALL_RPATH: $ORIGIN covers the wheel layout (libnccl_ep.so sits next to
+#     libtransformer_engine.so); NCCL_EP_LIB_DIR is a dev fallback.
 # libnccl.so is already on the system via the Toolkit — no rpath needed for it.
 set_target_properties(transformer_engine PROPERTIES
+    BUILD_RPATH "${NCCL_EP_LIB_DIR}"
     INSTALL_RPATH "$ORIGIN;${NCCL_EP_LIB_DIR}")
 
 target_sources(transformer_engine PRIVATE
