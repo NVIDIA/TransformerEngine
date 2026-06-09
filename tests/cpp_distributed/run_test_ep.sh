@@ -14,9 +14,9 @@
 #   build_dir = <script_dir>/build
 #
 # Environment variables:
-#   GTEST_FILTER     — forwarded to all processes (e.g., "EPPipelineTest.*")
-#   MPIRUN           — override the mpirun binary (default: mpirun)
-#   MPIRUN_EXTRA     — extra flags forwarded to mpirun
+#   GTEST_FILTER     - forwarded to all processes (e.g., "EPPipelineTest.*")
+#   MPIRUN           - override the mpirun binary (default: mpirun)
+#   MPIRUN_EXTRA     - extra flags forwarded to mpirun
 
 set -euo pipefail
 

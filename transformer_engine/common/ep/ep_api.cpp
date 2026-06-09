@@ -78,7 +78,7 @@ void nvte_ep_combine_bwd(NVTETensor handle_mem, NVTETensor grad, NVTECommWindow 
                                grad_expert_out_win, stream);
 }
 
-#else  // !NVTE_WITH_NCCL_EP — throwing stubs.
+#else  // !NVTE_WITH_NCCL_EP - throwing stubs.
 
 namespace {
 [[noreturn]] void ep_not_built() {
