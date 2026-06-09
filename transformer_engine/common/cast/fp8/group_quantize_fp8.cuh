@@ -198,20 +198,6 @@ __device__ __forceinline__ void store_fp8_vec_streaming(OType *ptr,
   }
 }
 
-__device__ __forceinline__ size_t find_tensor_from_offsets(
-    const int64_t *__restrict__ offsets_ptr, const size_t num_tensors, const size_t offset) {
-  size_t low = 1;
-  size_t hi = num_tensors;
-  while (low < hi) {
-    const size_t mid = low + (hi - low) / 2;
-    if (static_cast<size_t>(offsets_ptr[mid]) <= offset) {
-      low = mid + 1;
-    } else {
-      hi = mid;
-    }
-  }
-  return low - 1;
-}
 
 template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &), typename IType,
           typename OType, ScalingType SCALING_TYPE, ShapeRepresentation SHAPE_REP>
@@ -670,7 +656,7 @@ __global__ void __launch_bounds__(ROWWISE_FLAT_THREADS)
   for (size_t vec_id = blockIdx.x * blockDim.x + threadIdx.x; vec_id < total_vecs;
        vec_id += gridDim.x * blockDim.x) {
     const size_t offset = vec_id * nvec;
-    const size_t tensor_id = find_tensor_from_offsets(offsets_ptr, num_tensors, offset);
+    const size_t tensor_id = transformer_engine::dispatch::common::find_tensor_from_offsets(offsets_ptr, num_tensors, offset);
     const size_t tensor_end = static_cast<size_t>(offsets_ptr[tensor_id + 1]);
     const float scale = scale_ptr == nullptr ? 1.0f : scale_ptr[tensor_id];
     IVecT local_input;
@@ -696,7 +682,7 @@ __global__ void __launch_bounds__(ROWWISE_FLAT_THREADS)
           const size_t elt_tensor_id =
               elt_offset < tensor_end
                   ? tensor_id
-                  : find_tensor_from_offsets(offsets_ptr, num_tensors, elt_offset);
+                  : transformer_engine::dispatch::common::find_tensor_from_offsets(offsets_ptr, num_tensors, elt_offset);
           const float elt_scale = scale_ptr == nullptr ? 1.0f : scale_ptr[elt_tensor_id];
           float elt = static_cast<float>(input[elt_offset]);
           if constexpr (IS_ACT) {

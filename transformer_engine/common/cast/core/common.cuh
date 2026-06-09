@@ -187,6 +187,25 @@ void grouped_reduce_dbias(const ShapeRepresentation shape_rep, const size_t num_
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
+__device__ __forceinline__ size_t
+find_tensor_from_offsets(const int64_t *const __restrict__ offsets_ptr, const size_t num_tensors,
+                         const size_t offset) {
+  size_t low = 1;
+  size_t hi = num_tensors;  // [low, hi]
+
+  while (low < hi) {
+    const size_t mid = low + (hi - low) / 2;
+    const size_t mid_offset = static_cast<size_t>(offsets_ptr[mid]);
+
+    if (mid_offset <= offset) {
+      low = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  return low - 1;
+}
+
 template <ShapeRepresentation SHAPE_REP, size_t CHUNK_DIM_Y>
 __device__ __forceinline__ size_t
 get_current_tensor_id(const size_t num_tensors, const size_t current_offset, const size_t block_Y,
@@ -197,20 +216,7 @@ get_current_tensor_id(const size_t num_tensors, const size_t current_offset, con
     const size_t rows_per_tensor = first_logical_dim / num_tensors;
     return current_row / rows_per_tensor;
   } else {
-    size_t low = 1;
-    size_t hi = num_tensors;  // [low, hi]
-
-    while (low < hi) {
-      const size_t mid = low + (hi - low) / 2;
-      const size_t mid_offset = static_cast<size_t>(offsets_ptr[mid]);
-
-      if (mid_offset <= current_offset) {
-        low = mid + 1;
-      } else {
-        hi = mid;
-      }
-    }
-    return low - 1;
+    return find_tensor_from_offsets(offsets_ptr, num_tensors, current_offset);
   }
 }
 

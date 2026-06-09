@@ -720,7 +720,7 @@ class TestGroupedTensor:
     @pytest.mark.parametrize("mode", ["rowwise", "columnwise", "both"])
     @pytest.mark.parametrize(
         "shape_case",
-        ["uniform", "varying_first", "empty_split", "varying_last"],
+        ["uniform", "varying_first", "empty_split", "varying_last", "varying_first_small", "varying_last_small"],
     )
     @pytest.mark.parametrize("overallocated", [False, True])
     @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
@@ -748,7 +748,7 @@ class TestGroupedTensor:
         assertion would fail. Overallocation is skipped for ``uniform`` and
         ``varying_last`` because they don't have a varying-first tail to test.
         """
-        if overallocated and shape_case in ("uniform", "varying_last"):
+        if overallocated and shape_case in ("uniform", "varying_last", "varying_last_small"):
             pytest.skip(
                 "Overallocation is not meaningful for this shape_case "
                 "(implicit partitioning / varying-last semantics)."
@@ -763,6 +763,10 @@ class TestGroupedTensor:
             first_dims_host = [64, 128, 96]
             last_dims_host = None
             per_tensor_shapes = [(r, 256) for r in first_dims_host]
+        elif shape_case == "varying_first_small":
+            first_dims_host = [2, 1, 3, 1, 2, 4, 1]
+            last_dims_host = None
+            per_tensor_shapes = [(r, 8) for r in first_dims_host]
         elif shape_case == "empty_split":
             first_dims_host = [128, 0, 96]
             last_dims_host = None
@@ -771,6 +775,10 @@ class TestGroupedTensor:
             first_dims_host = None
             last_dims_host = [513, 1027, 259]
             per_tensor_shapes = [(256, c) for c in last_dims_host]
+        elif shape_case == "varying_last_small":
+            first_dims_host = None
+            last_dims_host = [4, 8, 3, 1, 16, 2]
+            per_tensor_shapes = [(8, c) for c in last_dims_host]
         else:
             raise ValueError(f"Unknown shape_case: {shape_case}")
 
@@ -801,7 +809,7 @@ class TestGroupedTensor:
             flat_buffer[actual_numel:].fill_(10000.0)
 
         # View flat buffer as the 2D shape expected by group_quantize.
-        if shape_case == "varying_last":
+        if shape_case in ("varying_last", "varying_last_small"):
             common_first = per_tensor_shapes[0][0]
             total_last = sum(last_dims_host)
             grouped_input = flat_buffer.view(common_first, total_last)
@@ -830,7 +838,7 @@ class TestGroupedTensor:
         )
 
         # Metadata validation for the varying-last code path.
-        if shape_case == "varying_last":
+        if shape_case in ("varying_last", "varying_last_small"):
             assert grouped_output.first_dims is None
             assert torch.equal(grouped_output.last_dims, last_dims)
 
