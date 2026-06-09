@@ -94,16 +94,9 @@ gtest_discover_tests(test_comm_gemm DISCOVERY_TIMEOUT 600)
 
 # ── EP distributed tests ──────────────────────────────────────────────────────
 # Launched via mpirun; ncclUniqueId exchange uses MPI_Bcast (see test_ep_common.h).
-# Headers + libs come from the in-tree 3rdparty/nccl submodule build.
-set(NCCL_EP_SUBMODULE_ROOT
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/nccl")
-find_library(NCCL_EP_LIB
-             NAMES nccl_ep libnccl_ep
-             HINTS ${NCCL_EP_SUBMODULE_ROOT}/build/lib
-             NO_DEFAULT_PATH
-             REQUIRED)
-
-# Tests use TE's public <transformer_engine/ep.h> wrapper, not nccl_ep.h.
+# The test binary only uses NCCL core symbols (ncclMemAlloc, ncclCommWindow*);
+# all ncclEp* calls live behind TE's public <transformer_engine/ep.h>, which
+# resolves libnccl_ep.so via dlopen in libtransformer_engine.so itself.
 set(EP_TEST_NCCL_INCLUDES "")
 if(DEFINED NCCL_INCLUDE_DIR)
   list(APPEND EP_TEST_NCCL_INCLUDES ${NCCL_INCLUDE_DIR})
@@ -126,7 +119,6 @@ set(EP_TEST_COMMON_LIBS
     ${TE_LIB}
     CUDA::nvrtc
     ${NCCL_LIB}
-    ${NCCL_EP_LIB}
     MPI::MPI_CXX
     OpenMP::OpenMP_CXX)
 
@@ -137,4 +129,4 @@ target_link_libraries(test_ep PUBLIC ${EP_TEST_COMMON_LIBS})
 
 # Do NOT use gtest_discover_tests — these binaries require multi-process
 # launch via run_test_ep.sh, not direct single-process execution.
-message(STATUS "EP distributed tests enabled: ${NCCL_EP_LIB}")
+message(STATUS "EP distributed tests enabled (TE backend dlopens libnccl_ep.so)")
