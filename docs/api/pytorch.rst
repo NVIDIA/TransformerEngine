@@ -176,6 +176,8 @@ Operation fuser
 
 .. autoapifunction:: transformer_engine.pytorch.ops.register_backward_fusion
 
+.. autoapifunction:: transformer_engine.pytorch.ops.register_forward_backward_fusion
+
 .. autoapiclass:: transformer_engine.pytorch.ops.Linear
 
 .. autoapiclass:: transformer_engine.pytorch.ops.AddExtraInput
