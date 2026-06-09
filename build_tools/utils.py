@@ -252,6 +252,33 @@ def get_cuda_include_dirs() -> Tuple[str, str]:
 
 
 @functools.lru_cache(maxsize=None)
+def get_cuda_library_dirs() -> Tuple[str, str]:
+    """Returns the CUDA library directory."""
+
+    force_wheels = bool(int(os.getenv("NVTE_BUILD_USE_NVIDIA_WHEELS", "0")))
+    # If cuda is installed via toolkit, all libraries
+    # are bundled inside the top level cuda directory.
+    if not force_wheels and cuda_toolkit_include_path() is not None:
+        return []
+
+    # Use pip wheels to include all libraries.
+    try:
+        import nvidia
+    except ModuleNotFoundError as e:
+        raise RuntimeError("CUDA not found.")
+
+    if nvidia.__file__ is not None:
+        cuda_root = Path(nvidia.__file__).parent
+    else:
+        cuda_root = Path(nvidia.__path__[0])  # namespace
+    return [
+        subdir / "lib"
+        for subdir in cuda_root.iterdir()
+        if subdir.is_dir() and (subdir / "lib").is_dir()
+    ]
+
+
+@functools.lru_cache(maxsize=None)
 def cuda_archs() -> str:
     archs = os.getenv("NVTE_CUDA_ARCHS")
     if archs is None:
@@ -290,6 +317,13 @@ def cuda_version() -> Tuple[int, ...]:
 
     try:
         version_str = get_version("nvidia-cuda-runtime-cu12")
+        version_tuple = tuple(int(part) for part in version_str.split(".") if part.isdigit())
+        return version_tuple
+    except importlib.metadata.PackageNotFoundError:
+        pass
+
+    try:
+        version_str = get_version("nvidia-cuda-runtime")
         version_tuple = tuple(int(part) for part in version_str.split(".") if part.isdigit())
         return version_tuple
     except importlib.metadata.PackageNotFoundError:

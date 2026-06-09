@@ -7,6 +7,7 @@
 #ifndef TRANSFORMER_ENGINE_JAX_CGEMM_HELPER_H_
 #define TRANSFORMER_ENGINE_JAX_CGEMM_HELPER_H_
 
+#include <nccl.h>
 #include <unistd.h>
 
 #include <chrono>

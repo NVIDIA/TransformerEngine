@@ -22,72 +22,65 @@ jobs:
       - name: 'Dependencies'
         run: |
           apt-get update
-          apt-get install -y git python3.9 pip cudnn9-cuda-12
+          apt-get install -y git python3.9 pip cudnn9-cuda-12 ccache
           pip install cmake==3.21.0 pybind11[global] ninja
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
           submodules: recursive
-      - name: ccache
-        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad
+      - uses: actions/cache@v4
+        with:
+          path: /root/.ccache
+          key: ccache-${{ runner.os }}-core-${{ github.ref }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-core-${{ github.ref }}-
+            ccache-${{ runner.os }}-core-
       - name: 'Build'
-        run: NVTE_USE_CCACHE=1 NVTE_CCACHE_BIN=sccache pip install --no-build-isolation . -v
+        run: NVTE_USE_CCACHE=1 pip install --no-build-isolation . -v
         env:
           NVTE_FRAMEWORK: none
           MAX_JOBS: 1
-          SCCACHE_GHA_ENABLED: "true"
+          CCACHE_DIR: /root/.ccache
+          CCACHE_MAXSIZE: 5G
       - name: 'Sanity check'
         run: python3 -c "import transformer_engine"
         working-directory: /
   pytorch:
     name: 'PyTorch'
     runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/ptrendx/te_gha_pytorch:latest
+      options: --user root
     steps:
-      - name: Move /var/lib/docker/
-        shell: bash -euxo pipefail {0}
-        run: sudo mv /var/lib/docker/ "${GITHUB_WORKSPACE}/docker"
-
-      - name: Maximize build space
-        uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
-        with:
-          root-reserve-mb: 5120
-          temp-reserve-mb: 32
-          swap-size-mb: 10240
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          build-mount-path: '/var/lib/docker/'
-
-      - name: Restore /var/lib/docker/
-        shell: bash -euxo pipefail {0}
-        run: sudo sh -c "mv ${GITHUB_WORKSPACE}/docker/* /var/lib/docker"
-
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
           submodules: recursive
-
-      - name: Start named container
-        run: |
-          docker run -v $(pwd):$(pwd) -w $(pwd) --name builder -d nvcr.io/nvidia/cuda:12.8.0-devel-ubuntu22.04 sleep infinity
-
-      - name: 'Dependencies'
-        run: |
-          docker exec builder bash -c '\
-            apt-get update && \
-            apt-get install -y git python3.9 pip cudnn9-cuda-12 && \
-            pip install cmake torch ninja pydantic importlib-metadata>=1.0 packaging pybind11 numpy einops onnxscript && \
-            apt-get clean \
-          '
-
+      - name: "Disk space check after dependencies"
+        run: df -lh
+      - uses: actions/cache@v4
+        with:
+          path: /root/.ccache
+          key: ccache-${{ runner.os }}-pytorch-${{ github.ref }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-pytorch-${{ github.ref }}-
+            ccache-${{ runner.os }}-pytorch-
+      - name: "Disk space check after dependencies and ccache"
+        run: df -lh
       - name: 'Build'
-        run: docker exec builder bash -c 'pip install --no-build-isolation . -v --no-deps'
+        run: |
+          export CUDA_PATH=$(python3 -c "import nvidia; print(list(nvidia.__path__)[0] + '/cu13')")
+          export CUDNN_PATH=$(python3 -c "import nvidia; print(list(nvidia.__path__)[0] + '/cudnn')")
+          export PATH=$CUDA_PATH/bin:$PATH
+          export NVTE_BUILD_USE_NVIDIA_WHEELS=1
+          NVTE_USE_CCACHE=1 pip install --no-build-isolation . -v
         env:
           NVTE_FRAMEWORK: pytorch
-          MAX_JOBS: 1
+          MAX_JOBS: 2
+          CCACHE_DIR: /root/.ccache
+          CCACHE_MAXSIZE: 5G
       - name: 'Sanity check'
-        run: docker exec builder bash -c 'python3 tests/pytorch/test_sanity_import.py'
+        run: python3 tests/pytorch/test_sanity_import.py
   jax:
     name: 'JAX'
     runs-on: ubuntu-latest
@@ -96,65 +89,65 @@ jobs:
       options: --user root
     steps:
       - name: 'Dependencies'
-        run: pip install cmake==3.21.0 pybind11[global]
+        run: |
+          pip install cmake==3.21.0 pybind11[global]
+          apt-get update && apt-get install -y ccache
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
           submodules: recursive
-      - name: ccache
-        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad
+      - uses: actions/cache@v4
+        with:
+          path: /root/.ccache
+          key: ccache-${{ runner.os }}-jax-${{ github.ref }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-jax-${{ github.ref }}-
+            ccache-${{ runner.os }}-jax-
       - name: 'Build'
         run: |
-          NVTE_CCACHE_BIN=sccache NVTE_USE_CCACHE=1 pip install --no-build-isolation . -v
+          NVTE_USE_CCACHE=1 pip install --no-build-isolation . -v
         env:
           NVTE_FRAMEWORK: jax
           MAX_JOBS: 1
-          SCCACHE_GHA_ENABLED: "true"
+          CCACHE_DIR: /root/.ccache
+          CCACHE_MAXSIZE: 5G
       - name: 'Sanity check'
         run: python3 tests/jax/test_sanity_import.py
   all:
     name: 'All'
     runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/ptrendx/te_gha_all:latest
+      options: --user root
     steps:
-      - name: Move /var/lib/docker/
-        shell: bash -euxo pipefail {0}
-        run: sudo mv /var/lib/docker/ "${GITHUB_WORKSPACE}/docker"
-
-      - name: Maximize build space
-        uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
-        with:
-          root-reserve-mb: 5120
-          temp-reserve-mb: 32
-          swap-size-mb: 10240
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          build-mount-path: '/var/lib/docker/'
-
-      - name: Restore /var/lib/docker/
-        shell: bash -euxo pipefail {0}
-        run: sudo sh -c "mv ${GITHUB_WORKSPACE}/docker/* /var/lib/docker"
-
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
           submodules: recursive
-
-      - name: Start named container
-        run: |
-          docker run -v $(pwd):$(pwd) -w $(pwd) --name builder -d ghcr.io/nvidia/jax:jax sleep infinity
-
-      - name: 'Dependencies'
-        run: |
-          docker exec builder bash -c '\
-            pip install cmake==3.21.0 pybind11[global] einops onnxscript && \
-            pip install torch --no-cache-dir --index-url https://download.pytorch.org/whl/cu130
-          '
+      - name: "Disk space check after dependencies"
+        run: df -lh
+      - uses: actions/cache@v4
+        with:
+          path: /root/.ccache
+          key: ccache-${{ runner.os }}-all-${{ github.ref }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-all-${{ github.ref }}-
+            ccache-${{ runner.os }}-all-
+      - name: "Disk space check after dependencies and ccache"
+        run: df -lh
       - name: 'Build'
-        run: docker exec builder bash -c 'pip install --no-cache-dir --no-build-isolation . -v --no-deps'
+        run: |
+          export CUDA_PATH=$(python3 -c "import nvidia; print(list(nvidia.__path__)[0] + '/cu13')")
+          export CUDNN_PATH=$(python3 -c "import nvidia; print(list(nvidia.__path__)[0] + '/cudnn')")
+          export PATH=$CUDA_PATH/bin:$PATH
+          export NVTE_BUILD_USE_NVIDIA_WHEELS=1
+          NVTE_USE_CCACHE=1 pip install --no-build-isolation . -v
         env:
           NVTE_FRAMEWORK: all
-          MAX_JOBS: 1
-      - name: 'Sanity check'
-        run: docker exec builder bash -c 'python3 tests/pytorch/test_sanity_import.py && python3 tests/jax/test_sanity_import.py'
+          MAX_JOBS: 2
+          CCACHE_DIR: /root/.ccache
+          CCACHE_MAXSIZE: 5G
+      - name: 'Sanity check (pytorch)'
+        run: python3 tests/pytorch/test_sanity_import.py
+      - name: 'Sanity check (jax)'
+        run: python3 tests/jax/test_sanity_import.py
