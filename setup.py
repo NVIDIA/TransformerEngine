@@ -97,7 +97,8 @@ def setup_common_extension() -> CMakeExtension:
             print(f"[NCCL EP] No arch >= 90 in NVTE_CUDA_ARCHS ('{archs}'); skipping build.")
             build_with_nccl_ep = False
     if build_with_nccl_ep:
-        build_nccl_ep_submodule()
+        nccl_home = build_nccl_ep_submodule()
+        cmake_flags.append(f"-DNCCL_INCLUDE_DIR={nccl_home}/include")
     else:
         cmake_flags.append("-DNVTE_WITH_NCCL_EP=OFF")
 
@@ -189,8 +190,9 @@ def _discover_nccl_home() -> str:
 def build_nccl_ep_submodule() -> str:
     """Build libnccl_ep.so from the 3rdparty/nccl submodule.
 
-    NCCL EP is on by default; the system NCCL core (libnccl.so) supplies the
-    headers and runtime symbols. Returns the submodule build directory.
+    Returns the discovered NCCL core install prefix (the path that contains
+    include/nccl.h and lib/libnccl.so), which the caller passes to CMake as
+    NCCL_INCLUDE_DIR for TE's own NCCL link.
     """
     nccl_root = current_file_path / "3rdparty" / "nccl"
     if not (nccl_root / "Makefile").exists():
@@ -240,25 +242,7 @@ def build_nccl_ep_submodule() -> str:
     shutil.copy2(src, dst)
     print(f"[NCCL EP] Bundled {dst} ({src.stat().st_size // (1 << 20)} MB)")
 
-    # TE's CMake expects nccl.h under 3rdparty/nccl/build/include/ for its
-    # version check. Mirror the top-level host headers from the system NCCL
-    # install — DON'T mirror nccl_device/ because the submodule ships its own
-    # newer copy at src/include/nccl_device/ with device-side templates that
-    # conflict with older system versions, and the JIT include path picks the
-    # submodule's.
-    nccl_include = build_dir / "include"
-    nccl_include.mkdir(parents=True, exist_ok=True)
-    for cand in (Path(nccl_home) / "include", Path("/usr/include")):
-        p = Path(cand)
-        if (p / "nccl.h").exists():
-            for name in ("nccl.h", "nccl_net.h", "nccl_tuner.h"):
-                src = p / name
-                dst = nccl_include / name
-                if src.exists() and not dst.exists():
-                    dst.symlink_to(src)
-            break
-
-    return str(build_dir)
+    return nccl_home
 
 
 def git_check_submodules() -> None:
