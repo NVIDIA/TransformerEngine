@@ -334,8 +334,7 @@ constexpr size_t kTHDTokenLinearOverlaunchThreshold = 2;
 
 inline bool fused_rope_thd_use_token_linear(const NVTE_QKV_Format qkv_format,
                                             const size_t legacy_blocks,
-                                            const size_t token_linear_blocks,
-                                            const int cp_size) {
+                                            const size_t token_linear_blocks, const int cp_size) {
   if (qkv_format != NVTE_QKV_Format::NVTE_THD) return false;
   if (token_linear_blocks == 0) return false;
 
