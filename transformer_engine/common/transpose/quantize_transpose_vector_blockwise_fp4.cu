@@ -836,7 +836,7 @@ void quantize_transpose_vector_blockwise_fp4(
     Tensor& rng_state_te_tensor = *convertNVTETensor(rng_state_tensor);
     NVTE_CHECK(rng_state_te_tensor.dtype() == DType::kInt64,
                "RNG state should contain 2 64-bit values.");
-    NVTE_CHECK(rng_state_te_tensor.data.shape == std::vector<size_t>{2},
+    NVTE_CHECK(rng_state_te_tensor.data.shape == Shape{2},
                "Shape of the RNG state should be [2], but got ", rng_state_te_tensor.data.shape);
     rng_state = reinterpret_cast<const size_t*>(rng_state_te_tensor.data.dptr);
   }

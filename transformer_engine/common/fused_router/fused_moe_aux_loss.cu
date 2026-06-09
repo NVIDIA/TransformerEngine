@@ -63,8 +63,8 @@ __global__ void fused_moe_aux_loss_forward_kernel(const DataType* probs,
   const int warp_id = threadIdx.x / kThreadsPerWarp;
   const int lane_id = threadIdx.x % kThreadsPerWarp;
   if (warp_id == 0) {
-    CompType block_sum = warp_reduce_on_shmem(shmem_block, static_cast<int>(blockDim.x),
-                                              ReduceFuncType::SUM, lane_id);
+    CompType block_sum = warp_reduce_on_shmem<CompType, ReduceFuncType::SUM>(
+        shmem_block, static_cast<int>(blockDim.x), lane_id);
     if (lane_id == 0) {
       atomicAdd(&Coeff_buf[1], static_cast<float>(block_sum * coeff));
     }
@@ -87,8 +87,11 @@ void fused_moe_aux_loss_forward_kernel_launcher(const DataType* probs,
                                                 int num_cols, int topk, float coeff,
                                                 DataType* aux_loss, float* Coeff_buf,
                                                 cudaStream_t stream) {
-  NVTE_CHECK(num_experts == num_cols, "Number of experts (", num_experts,
-             ") must be equal to number of input columns (", num_cols, ").");
+  NVTE_CHECK(num_cols > 0, "num_cols must be positive, got ", num_cols);
+  NVTE_CHECK(num_experts > 0, "num_experts must be positive, got ", num_experts);
+  // Sequence aux loss batches independent sequences along the expert dimension.
+  NVTE_CHECK(num_cols % num_experts == 0, "Number of input columns (", num_cols,
+             ") must be a multiple of number of experts (", num_experts, ").");
 
   // Round up to a multiple of warp size for correct warp shuffles.
   const int block_size = ((std::min(1024, num_cols) + static_cast<int>(kThreadsPerWarp) - 1) /
@@ -98,7 +101,7 @@ void fused_moe_aux_loss_forward_kernel_launcher(const DataType* probs,
 
   // One CompType per thread in shared memory.
   const size_t smem_size = block_size * sizeof(CompType);
-  check_shared_memory_capacity_num_experts(smem_size, num_experts);
+  check_shared_memory_capacity_num_experts(smem_size, num_cols);
 
   // Compute final coefficient and zero the float accumulator (Coeff_buf[1]) before launch.
   const float C_coeff = (num_experts * coeff) / topk / total_num_tokens / total_num_tokens;

@@ -21,6 +21,8 @@ project(transformer_engine_distributed_tests LANGUAGES CUDA CXX)
 
 add_subdirectory(../../3rdparty/googletest ${PROJECT_BINARY_DIR}/googletest)
 
+enable_testing()
+
 include_directories(${gtest_SOURCE_DIR}/include ${gtest_SOURCE_DIR})
 
 if(NOT DEFINED TE_LIB_PATH)
@@ -30,28 +32,45 @@ if(NOT DEFINED TE_LIB_PATH)
     get_filename_component(TE_LIB_PATH ${TE_LIB_FILE} DIRECTORY)
 endif()
 
-find_library(TE_LIB NAMES transformer_engine PATHS "${TE_LIB_PATH}/.." ${TE_LIB_PATH} ENV TE_LIB_PATH REQUIRED)
-
+find_library(TE_LIB
+             NAMES transformer_engine
+             PATHS "${TE_LIB_PATH}/.." ${TE_LIB_PATH}
+             ENV TE_LIB_PATH
+             REQUIRED)
 message(STATUS "Found transformer_engine library: ${TE_LIB}")
-include_directories(../../transformer_engine/common/include)
-include_directories(../../transformer_engine/common)
-include_directories(../../transformer_engine)
-include_directories(${CMAKE_SOURCE_DIR})
-
-find_package(CUDAToolkit REQUIRED)
 
 add_executable(test_comm_gemm
                test_comm_gemm.cu
                ../cpp/test_common.cu)
 
+list(APPEND test_comm_gemm_INCLUDES
+     ${CMAKE_SOURCE_DIR}/../../transformer_engine/common/include
+     ${CMAKE_SOURCE_DIR}/../../transformer_engine/common
+     ${CMAKE_SOURCE_DIR}/../../transformer_engine
+     ${CMAKE_SOURCE_DIR}
+     ${MPI_CXX_INCLUDE_PATH}
+     $ENV{CUBLASMP_HOME}/include)
+target_include_directories(test_comm_gemm PRIVATE ${test_comm_gemm_INCLUDES})
+
+find_package(CUDAToolkit REQUIRED)
 find_package(OpenMP REQUIRED)
 find_package(MPI REQUIRED)
 find_library(NCCL_LIB
              NAMES nccl libnccl
              PATH_SUFFIXES lib
              REQUIRED)
-target_include_directories(test_comm_gemm PRIVATE ${MPI_CXX_INCLUDE_PATH} $ENV{CUBLASMP_HOME}/include)
-target_link_libraries(test_comm_gemm PUBLIC CUDA::cuda_driver CUDA::cudart GTest::gtest ${TE_LIB} CUDA::nvrtc MPI::MPI_CXX ${NCCL_LIB} OpenMP::OpenMP_CXX)
+list(APPEND test_comm_gemm_LINKER_LIBS
+     CUDA::cuda_driver
+     CUDA::cudart
+     GTest::gtest_main
+     ${TE_LIB}
+     CUDA::nvrtc
+     ${NCCL_LIB}
+     OpenMP::OpenMP_CXX
+     MPI::MPI_CXX)
+target_link_libraries(test_comm_gemm PUBLIC ${test_comm_gemm_LINKER_LIBS})
+
+target_compile_options(test_comm_gemm PRIVATE -O2 -fopenmp)
 
 include(GoogleTest)
 gtest_discover_tests(test_comm_gemm DISCOVERY_TIMEOUT 600)
