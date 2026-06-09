@@ -168,7 +168,7 @@ static bool ep_bootstrap(int argc, char* argv[]) {
 }
 
 // Re-bootstrap the EP backend on the existing g_ep_comm with a new zero_copy
-// setting. Used by tests that need the symmem zero-copy fast path.
+// setting.
 static void ep_reinitialize(int zero_copy) {
   if (!g_ep_initialized) return;
   nvte_ep_shutdown();

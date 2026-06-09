@@ -702,11 +702,8 @@ static inline NVTECommWindow symm_window(const SymmBuf& b) {
 
 }  // namespace
 
-// The symm-window path needs the EP backend bootstrapped with zero_copy=ON
-// (so dispatch-output / combine-input must be window-backed). Tests do the
-// HBM reference phase under the suite default (OFF) and rebootstrap to ON for
-// the symm phase via ep_reinitialize(); TearDown restores OFF for the rest
-// of the suite.
+// Tests rebootstrap the backend to zero_copy=ON for the symm phase via
+// ep_reinitialize(); TearDown restores OFF for the rest of the suite.
 class EPZeroCopyTest : public EpOpTestBase {
  protected:
   void TearDown() override {
@@ -743,9 +740,7 @@ TEST_F(EPZeroCopyTest, IdentityAllSymm) {
   NVTE_CHECK_CUDA(cudaMemcpy(ref_result.data(), ref_buf.result.get(),
                         ref_result.size() * sizeof(nv_bfloat16), cudaMemcpyDeviceToHost));
 
-  // Switch backend to zero_copy=ON for the symm phase. The HBM ref outputs
-  // are already host-side; cached handles tied to ref_t are evicted by the
-  // shutdown inside ep_reinitialize.
+  // Switch backend to zero_copy=ON for the symm phase.
   ep_reinitialize(/*zero_copy=*/1);
 
   // Symm-mem run: tokens, recv_tokens, combine_input (== recv_tokens) all symm.
