@@ -10,7 +10,6 @@ from typing import Any, Optional
 
 import torch
 
-from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...quantization import FP8GlobalStateManager
 from ...tensor import Quantizer
 from ..basic import AddExtraInput, BasicLinear, ConstantScale
@@ -107,8 +106,7 @@ class ForwardLinearScaleAdd(FusedOperation):
             else:
                 saved_input = x_local
                 saved_weight = w
-            if is_cpu_offload_enabled():
-                mark_activation_offload(saved_input)
+            linear_op.maybe_mark_and_start_activation_offload(saved_input)
             linear_op_ctx.save_for_backward(saved_input, saved_weight)
             linear_op_ctx.with_quantized_compute = (
                 with_quantized_compute and backward_override is None

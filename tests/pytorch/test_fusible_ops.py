@@ -71,6 +71,48 @@ if is_bf16_available():  # bf16 requires sm_80 or higher
 # Supported devices
 _devices: list[torch.device] = [torch.device("cpu"), torch.device("cuda")]
 
+
+def test_basic_operation_cpu_offloading_control(monkeypatch):
+    """BasicOperation should expose a public opt-out for activation CPU offload."""
+    import transformer_engine.pytorch.cpu_offload as cpu_offload
+
+    calls = []
+    tensor = torch.empty(1)
+    tensor_id = id(tensor)
+    op = te_ops.Identity()
+
+    monkeypatch.setattr(cpu_offload, "is_cpu_offload_enabled", lambda: True)
+    monkeypatch.setattr(
+        cpu_offload,
+        "start_offload",
+        lambda *tensors: calls.append(("start", [id(t) for t in tensors])),
+    )
+    monkeypatch.setattr(
+        cpu_offload,
+        "mark_activation_offload",
+        lambda *tensors: calls.append(("mark", [id(t) for t in tensors])),
+    )
+    monkeypatch.setattr(
+        cpu_offload,
+        "mark_not_offload",
+        lambda *tensors: calls.append(("skip", [id(t) for t in tensors])),
+    )
+
+    op.maybe_mark_and_start_activation_offload(tensor, None, start=True)
+    assert calls == [("start", [tensor_id]), ("mark", [tensor_id])]
+
+    calls.clear()
+    op.disable_cpu_offloading()
+    op.maybe_mark_and_start_activation_offload(tensor, start=True)
+    assert calls == [("skip", [tensor_id])]
+
+    calls.clear()
+    op.enable_cpu_offloading()
+    monkeypatch.setattr(cpu_offload, "is_cpu_offload_enabled", lambda: False)
+    op.maybe_mark_and_start_activation_offload(tensor, start=True)
+    assert calls == []
+
+
 # Supported quantization recipes
 _quantization_list: list[Optional[str]] = [None]
 if fp8_available:
