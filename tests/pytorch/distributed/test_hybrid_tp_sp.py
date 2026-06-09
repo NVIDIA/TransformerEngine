@@ -109,6 +109,13 @@ def test_hybrid_fp8_transformer_layer():
     _run_test("hybrid_fp8", "transformer_layer")
 
 
+@pytest.mark.skipif(not fp8_available, reason=f"FP8: {reason_for_no_fp8}")
+def test_hybrid_fp8_identity_linear():
+    """Linear-only TP/SP coverage for FP8-current forward plus Identity backward.
+    Includes the amax-stress branch inside ``run_hybrid_tp_sp.py``."""
+    _run_test("hybrid_fp8_identity", "linear")
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Hybrid MXFP8 (rowwise + columnwise same format)
 # ──────────────────────────────────────────────────────────────────────
@@ -143,6 +150,12 @@ def test_hybrid_mxfp8_layernorm_mlp():
 @pytest.mark.skipif(not mxfp8_available, reason=f"MXFP8: {reason_for_no_mxfp8}")
 def test_hybrid_mxfp8_transformer_layer():
     _run_test("hybrid_mxfp8", "transformer_layer")
+
+
+@pytest.mark.skipif(not mxfp8_available, reason=f"MXFP8: {reason_for_no_mxfp8}")
+def test_hybrid_mxfp8_identity_linear():
+    """Linear-only TP/SP coverage for MXFP8 forward plus Identity backward."""
+    _run_test("hybrid_mxfp8_identity", "linear")
 
 
 # ──────────────────────────────────────────────────────────────────────

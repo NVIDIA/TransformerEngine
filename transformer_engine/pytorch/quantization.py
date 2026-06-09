@@ -1880,18 +1880,17 @@ class CustomRecipeState(RecipeState):
             )
             roles = [QuantizerRole() for _ in range(self.num_quantizers)]
 
-        # qfactory must return a Quantizer or QuantizerRequest for every slot.
-        # None is not a valid return value — it would silently disable quantization
-        # for that tensor, risking hard-to-detect performance regressions.
-        # TODO(negvet): Introduce an explicit IdentityQuantizer for intentional no-op
-        # quantization. Until then, None is rejected.
+        # qfactory returns one quantizer-like object per slot; use
+        # ``IdentityQuantizer`` for intentional high-precision passthrough.
         raw = [qfactory(roles[i]) for i in range(self.num_quantizers)]
         for i, q in enumerate(raw):
             if q is None:
                 raise ValueError(
                     f"CustomRecipe qfactory returned None for slot {i} "
                     f"(role={roles[i]}). Every slot must return a Quantizer "
-                    "instance or a QuantizerRequest."
+                    "instance or a QuantizerRequest. For an intentional no-op "
+                    "(high-precision / unquantized) slot, return an "
+                    "IdentityQuantizer instead of None."
                 )
 
         # -- Delayed scaling sub-state --

@@ -91,7 +91,10 @@ from transformer_engine.pytorch.tensor import Float8BlockwiseQTensor
 from transformer_engine.pytorch.tensor import NVFP4Tensor
 from transformer_engine.pytorch.tensor import HybridQuantizer
 from transformer_engine.pytorch.tensor import HybridQuantizedTensorStorage
+from transformer_engine.pytorch.tensor import IdentityQuantizer
+from transformer_engine.pytorch.tensor import IdentityTensorStorage
 from transformer_engine.pytorch.tensor import HybridQuantizedTensor
+from transformer_engine.pytorch.tensor import IdentityTensor
 from transformer_engine.pytorch.tensor.float8_tensor import (
     _make_float8_tensor_in_reduce_ex,
 )

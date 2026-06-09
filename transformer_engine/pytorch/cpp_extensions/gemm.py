@@ -18,6 +18,7 @@ from ..tensor.storage.grouped_tensor_storage import GroupedTensorStorage
 from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from ..tensor.utils import is_custom
 from ..tensor.storage.hybrid_tensor_storage import HybridQuantizedTensorStorage
+from ..tensor.storage.identity_tensor_storage import IdentityTensorStorage
 from ..custom_recipes.gemm import custom_gemm
 from ...debug.pytorch.debug_quantization import DebugQuantizer
 
@@ -133,6 +134,20 @@ def _unwrap_hybrid_B(tensor, layout):
     return tensor.columnwise_sub_storage
 
 
+def _materialize_high_precision(tensor):
+    """Replace an :class:`IdentityTensorStorage` operand with its plain tensor.
+
+    Identity (high-precision passthrough) operands carry an unquantized tensor;
+    materializing it here routes the matmul through the standard high-precision
+    GEMM path. Non-identity operands pass through unchanged. Called after the
+    hybrid unwrap, so a high-precision *direction* of a hybrid tensor is handled
+    too.
+    """
+    if isinstance(tensor, IdentityTensorStorage):
+        return tensor.dequantize()
+    return tensor
+
+
 def general_gemm(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -159,8 +174,8 @@ def general_gemm(
     transa = layout[0] == "T"
     transb = layout[1] == "T"
 
-    A = _unwrap_hybrid_A(A, layout)
-    B = _unwrap_hybrid_B(B, layout)
+    A = _materialize_high_precision(_unwrap_hybrid_A(A, layout))
+    B = _materialize_high_precision(_unwrap_hybrid_B(B, layout))
 
     alpha = validate_gemm_scale(alpha, True)
     beta = validate_gemm_scale(beta, accumulate)
@@ -329,8 +344,8 @@ def general_grouped_gemm(
     """
     num_gemms = len(A)
 
-    A = [_unwrap_hybrid_A(a, layout) for a in A]
-    B = [_unwrap_hybrid_B(b, layout) for b in B]
+    A = [_materialize_high_precision(_unwrap_hybrid_A(a, layout)) for a in A]
+    B = [_materialize_high_precision(_unwrap_hybrid_B(b, layout)) for b in B]
 
     transa = layout[0] == "T"
     transb = layout[1] == "T"

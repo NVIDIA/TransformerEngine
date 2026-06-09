@@ -26,6 +26,8 @@ from .float8_blockwise_tensor import Float8BlockwiseQTensor, Float8BlockQuantize
 from .nvfp4_tensor import NVFP4Tensor, NVFP4Quantizer
 from .grouped_tensor import GroupedTensor
 from .hybrid_tensor import HybridQuantizedTensor, HybridQuantizer
+from .identity_tensor import IdentityTensor, IdentityQuantizer
+from .storage.identity_tensor_storage import IdentityTensorStorage
 from .utils import cast_master_weights_to_fp8, replace_raw_data
 
 __all__ = [
@@ -36,6 +38,7 @@ __all__ = [
     "Float8BlockQuantizer",
     "NVFP4Quantizer",
     "HybridQuantizer",
+    "IdentityQuantizer",
     "QuantizedTensorStorage",
     "Float8TensorStorage",
     "MXFP8TensorStorage",
@@ -43,8 +46,10 @@ __all__ = [
     "NVFP4TensorStorage",
     "GroupedTensorStorage",
     "HybridQuantizedTensorStorage",
+    "IdentityTensorStorage",
     "QuantizedTensor",
     "Float8Tensor",
+    "IdentityTensor",
     "MXFP8Tensor",
     "Float8BlockwiseQTensor",
     "NVFP4Tensor",
@@ -104,5 +109,7 @@ def get_all_tensor_types():
         GroupedTensorStorage,
         HybridQuantizedTensor,
         HybridQuantizedTensorStorage,
+        IdentityTensor,
+        IdentityTensorStorage,
     ]
     return all_tensor_types

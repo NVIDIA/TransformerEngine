@@ -5,7 +5,7 @@
 """Shared utility functions for FSDP2 distributed tests."""
 
 import transformer_engine.common.recipe
-from transformer_engine.pytorch import HybridQuantizer, QuantizedTensor
+from transformer_engine.pytorch import HybridQuantizer, IdentityQuantizer, QuantizedTensor
 from transformer_engine.pytorch.custom_recipes.quantization_recipes_base import (
     current_scaling_quantizer_factory,
     float8_block_scaling_quantizer_factory,
@@ -61,6 +61,19 @@ def _hybrid_mixed_mxfp8_fp8_qfactory(role):
     return current_scaling_quantizer_factory(role)
 
 
+def _hybrid_fp8_current_identity_qfactory(role):
+    """FP8 current forward + high-precision backward via Identity."""
+    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+    if is_linear and role.tensor_type in ("input", "weight", "output"):
+        return HybridQuantizer(
+            rowwise_quantizer=current_scaling_quantizer_factory(role),
+            columnwise_quantizer=IdentityQuantizer(),
+        )
+    if is_linear and role.tensor_type in ("grad_output", "grad_input"):
+        return IdentityQuantizer()
+    return current_scaling_quantizer_factory(role)
+
+
 # The qfactories above are registered here as module-level functions (not
 # lambdas or closures) on purpose: DCP serializes ``CustomRecipe`` via
 # ``pickle``, and closure-based qfactories (or inner functions capturing state)
@@ -71,6 +84,7 @@ _HYBRID_QFACTORIES = {
     "HybridMXFP8": _hybrid_mxfp8_qfactory,
     "HybridFloat8BlockScaling": _hybrid_float8_block_qfactory,
     "HybridMixed_MXFP8_FP8": _hybrid_mixed_mxfp8_fp8_qfactory,
+    "HybridFP8CurrentScalingIdentity": _hybrid_fp8_current_identity_qfactory,
 }
 
 
@@ -86,6 +100,7 @@ def get_hybrid_recipe_from_string(recipe):
         "HybridMXFP8"             — MXFP8 for both directions
         "HybridFloat8BlockScaling" — Float8 block scaling for both directions
         "HybridMixed_MXFP8_FP8"   — MXFP8 rowwise + FP8 current columnwise
+        "HybridFP8CurrentScalingIdentity" — FP8 current forward + Identity backward
     """
     if recipe not in _HYBRID_QFACTORIES:
         raise ValueError(

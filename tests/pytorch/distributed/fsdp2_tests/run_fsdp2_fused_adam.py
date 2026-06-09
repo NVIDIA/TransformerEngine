@@ -1443,6 +1443,113 @@ def test_fused_adam_hybrid_scale_uniform_across_shards(hybrid_recipe_name):
     assert checked > 0, "no hybrid current-scaling weights found to check"
 
 
+def test_fused_adam_hybrid_identity_fp8_master_weights():
+    """FSDP2 + FusedAdam with Hybrid(FP8 current rowwise, Identity columnwise).
+
+    Covers the Identity sub-storage in hybrid FSDP2 all-gather while the FP8
+    current rowwise direction validates cross-shard amax reduction via scale
+    uniformity.
+    """
+    from transformer_engine.pytorch import HybridQuantizedTensor
+    from transformer_engine.pytorch.tensor.storage.identity_tensor_storage import (
+        IdentityTensorStorage,
+    )
+    from fsdp2_utils import get_hybrid_recipe_from_string
+
+    world_size, device = _get_dist_info()
+    if world_size < 2:
+        pytest.skip("needs >=2 ranks to validate cross-shard amax reduction")
+
+    hybrid_recipe = get_hybrid_recipe_from_string("HybridFP8CurrentScalingIdentity")
+    model = _build_linear_parity_stack(hybrid_recipe)
+    model = _shard_model(model, world_size)
+
+    optimizer = te.optimizers.FusedAdam(
+        model.parameters(),
+        lr=1e-3,
+        master_weights=True,
+        master_weight_dtype=torch.float32,
+    )
+
+    x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
+    target = torch.randn_like(x)
+
+    losses = []
+    identity_steps = 2
+    for step in range(identity_steps):
+        optimizer.zero_grad(set_to_none=True)
+        with te.autocast(enabled=True, recipe=hybrid_recipe):
+            output = model(x)
+        loss = F.mse_loss(output, target)
+        losses.append(loss.item())
+        loss.backward()
+        if step < identity_steps - 1:
+            optimizer.step()
+
+    assert all(
+        losses[i + 1] < losses[i] for i in range(len(losses) - 1)
+    ), f"Hybrid Identity/FP8 loss not strictly decreasing: {losses}"
+
+    checked_identity = 0
+    checked_scale = 0
+    for name, param in model.named_parameters():
+        if not (
+            isinstance(param, DTensor) and isinstance(param._local_tensor, HybridQuantizedTensor)
+        ):
+            continue
+        local = param._local_tensor
+        assert isinstance(local._columnwise_storage, IdentityTensorStorage)
+
+        scale_inv = getattr(local._rowwise_storage, "_scale_inv", None)
+        if scale_inv is not None:
+            local_scale = scale_inv.detach().reshape(-1).clone()
+            gathered_scales = [torch.zeros_like(local_scale) for _ in range(world_size)]
+            dist.all_gather(gathered_scales, local_scale)
+            for r in range(1, world_size):
+                torch.testing.assert_close(
+                    gathered_scales[r],
+                    gathered_scales[0],
+                    rtol=0.0,
+                    atol=0.0,
+                    msg=lambda m, n=name, r=r: f"{n}: rank {r} rowwise _scale_inv differs from rank 0 for Hybrid(FP8Current, Identity): {m}",
+                )
+            checked_scale += 1
+
+        local_identity = local._columnwise_storage.dequantize().contiguous()
+        gathered_identity = [torch.zeros_like(local_identity) for _ in range(world_size)]
+        dist.all_gather(gathered_identity, local_identity)
+        manual_full = torch.cat(gathered_identity, dim=0)
+
+        sharded_tensors, metadata = local.fsdp_pre_all_gather(
+            mesh=None,
+            orig_size=local.shape,
+            contiguous_orig_stride=None,
+            module=None,
+            mp_policy=None,
+        )
+        all_gather_outputs = []
+        for shard in sharded_tensors:
+            gathered = [torch.zeros_like(shard) for _ in range(world_size)]
+            dist.all_gather(gathered, shard)
+            all_gather_outputs.append(torch.cat(gathered, dim=0))
+        fsdp_full, _ = local.fsdp_post_all_gather(
+            tuple(all_gather_outputs), metadata, local.dtype, out=None
+        )
+        assert isinstance(fsdp_full, HybridQuantizedTensor)
+        full_identity = fsdp_full._columnwise_storage.dequantize()
+        torch.testing.assert_close(
+            manual_full.float(),
+            full_identity[: manual_full.shape[0]].float(),
+            rtol=0.0,
+            atol=0.0,
+            msg=lambda m, n=name: f"{n}: Identity columnwise all-gather mismatch: {m}",
+        )
+        checked_identity += 1
+
+    assert checked_identity > 0, "no Hybrid(FP8Current, Identity) params found"
+    assert checked_scale > 0, "no FP8 current rowwise scales found to check"
+
+
 def test_fused_adam_hybrid_allgather_correctness(hybrid_recipe_name):
     """Validate that FSDP2 all-gather + post-gather reconstruction produces
     correct results by comparing ``unshard(param).dequantize()`` with a manual
@@ -1711,6 +1818,9 @@ TESTS = {
     "fused_adam_hybrid_scale_uniform_across_shards": (
         test_fused_adam_hybrid_scale_uniform_across_shards
     ),
+    "fused_adam_hybrid_identity_fp8_master_weights": (
+        test_fused_adam_hybrid_identity_fp8_master_weights
+    ),
     "fused_adam_hybrid_allgather_correctness": test_fused_adam_hybrid_allgather_correctness,
     "fused_adam_hybrid_mxfp8_awkward_shard_shape": (
         test_fused_adam_hybrid_mxfp8_awkward_shard_shape
@@ -1720,6 +1830,7 @@ TESTS = {
 
 # Hybrid tests that are NOT parametrized by recipe (they sweep internally).
 _HYBRID_NON_PARAMETRIZED_TESTS = {
+    "fused_adam_hybrid_identity_fp8_master_weights",
     "fused_adam_hybrid_mxfp8_awkward_shard_shape",
 }
 
@@ -1742,6 +1853,7 @@ if __name__ == "__main__":
             "HybridMXFP8",
             "HybridFloat8BlockScaling",
             "HybridMixed_MXFP8_FP8",
+            "HybridFP8CurrentScalingIdentity",
         ],
     )
     args = parser.parse_args()

@@ -49,6 +49,7 @@ from transformer_engine.common import recipe as te_recipe
 from transformer_engine.pytorch import (
     Float8CurrentScalingQuantizer,
     HybridQuantizer,
+    IdentityQuantizer,
     MXFP8Quantizer,
     NVFP4Quantizer,
 )
@@ -115,6 +116,30 @@ def _hybrid_mxfp8_qfactory(role):
             columnwise_quantizer=_make_mxfp8_quantizer(),
         )
     # MXFP8 uses E4M3 for every pass (its canonical Format.E4M3)
+    return _make_mxfp8_quantizer()
+
+
+def _hybrid_fp8_identity_qfactory(role):
+    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+    if is_linear and role.tensor_type in ("input", "weight", "output"):
+        return HybridQuantizer(
+            rowwise_quantizer=_make_fp8_current_quantizer(),
+            columnwise_quantizer=IdentityQuantizer(),
+        )
+    if is_linear and role.tensor_type in ("grad_output", "grad_input"):
+        return IdentityQuantizer()
+    return _make_fp8_current_quantizer()
+
+
+def _hybrid_mxfp8_identity_qfactory(role):
+    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+    if is_linear and role.tensor_type in ("input", "weight", "output"):
+        return HybridQuantizer(
+            rowwise_quantizer=_make_mxfp8_quantizer(),
+            columnwise_quantizer=IdentityQuantizer(),
+        )
+    if is_linear and role.tensor_type in ("grad_output", "grad_input"):
+        return IdentityQuantizer()
     return _make_mxfp8_quantizer()
 
 
@@ -192,6 +217,10 @@ def hybrid_recipe():
         return te_recipe.CustomRecipe(qfactory=_hybrid_fp8_qfactory)
     if QUANTIZATION == "hybrid_mxfp8":
         return te_recipe.CustomRecipe(qfactory=_hybrid_mxfp8_qfactory)
+    if QUANTIZATION == "hybrid_fp8_identity":
+        return te_recipe.CustomRecipe(qfactory=_hybrid_fp8_identity_qfactory)
+    if QUANTIZATION == "hybrid_mxfp8_identity":
+        return te_recipe.CustomRecipe(qfactory=_hybrid_mxfp8_identity_qfactory)
     if QUANTIZATION == "hybrid_nvfp4":
         return te_recipe.CustomRecipe(qfactory=_hybrid_nvfp4_qfactory)
     if QUANTIZATION == "hybrid_mxfp8_nvfp4":
@@ -213,10 +242,10 @@ def hybrid_recipe():
 
 
 def _get_tolerances():
-    if QUANTIZATION == "hybrid_fp8":
+    if QUANTIZATION in ("hybrid_fp8", "hybrid_fp8_identity"):
         # Loose because of sequence parallel & amax reduction (fp8_cs).
         return {"rtol": 0.4, "atol": 0.25}
-    if QUANTIZATION == "hybrid_mxfp8":
+    if QUANTIZATION in ("hybrid_mxfp8", "hybrid_mxfp8_identity"):
         return {"rtol": 0.125, "atol": 0.0625}
     if QUANTIZATION == "hybrid_nvfp4":
         # Upstream ``run_numerics.py`` uses (0.125, 0.12) for vanilla NVFP4
@@ -414,7 +443,7 @@ def test_linear():
     # high precision before quantizing, so the SP output must still match
     # single-node -- guards against a future regression to quantize-then-gather
     # without cross-rank amax reduction.
-    if QUANTIZATION == "hybrid_fp8":
+    if QUANTIZATION in ("hybrid_fp8", "hybrid_fp8_identity"):
         _test_linear("column", True, amax_stress=True)
 
 
@@ -543,8 +572,8 @@ def _test_linear_vs_vanilla(parallel_mode, sequence_parallel, params_dtype=torch
 def test_linear_vs_vanilla():
     # Cross-format hybrid has no single built-in vanilla recipe to compare
     # against bitwise; it is covered by the distributed-vs-single-node checks.
-    if QUANTIZATION == "hybrid_mxfp8_nvfp4":
-        dist_print("linear_vs_vanilla: skipped for cross-format hybrid (no vanilla equivalent)")
+    if QUANTIZATION in ("hybrid_mxfp8_nvfp4", "hybrid_fp8_identity", "hybrid_mxfp8_identity"):
+        dist_print("linear_vs_vanilla: skipped for hybrid without a vanilla equivalent")
         return
     for parallel_mode in ["column", "row"]:
         for sequence_parallel in [False, True]:
@@ -750,7 +779,14 @@ def main(argv=None):
         "--quantization",
         type=str,
         required=True,
-        choices=["hybrid_fp8", "hybrid_mxfp8", "hybrid_nvfp4", "hybrid_mxfp8_nvfp4"],
+        choices=[
+            "hybrid_fp8",
+            "hybrid_mxfp8",
+            "hybrid_fp8_identity",
+            "hybrid_mxfp8_identity",
+            "hybrid_nvfp4",
+            "hybrid_mxfp8_nvfp4",
+        ],
     )
     parser.add_argument(
         "--test",

@@ -269,3 +269,39 @@ def nvfp4_linear_mxfp8_dpa_factory(
         return _make_mxfp8_quantizer()
 
     return _make_nvfp4_quantizer(role)
+
+
+def high_precision_factory(
+    role: Optional[QuantizerRole],  # pylint: disable=unused-argument
+):
+    """Quantizer factory: run all GEMMs in high precision.
+
+    Dispatch logic:
+        * every role -> ``IdentityQuantizer`` (no quantization)
+    """
+    from transformer_engine.pytorch.tensor.identity_tensor import IdentityQuantizer
+
+    return IdentityQuantizer()
+
+
+def fwd_high_precision_bwd_mxfp8_factory(
+    role: Optional[QuantizerRole],
+):
+    """Quantizer factory: high-precision forward, MXFP8 backward.
+
+    Dispatch logic:
+        * ``grad_output`` / ``grad_input`` -> MXFP8 (E4M3, block-32)
+        * everything else -> ``Hybrid(rowwise=IdentityQuantizer, columnwise=MXFP8)``
+    """
+    from transformer_engine.pytorch.tensor.hybrid_tensor import HybridQuantizer
+    from transformer_engine.pytorch.tensor.identity_tensor import IdentityQuantizer
+
+    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+    if is_linear and role.tensor_type in ("grad_output", "grad_input"):
+        return _make_mxfp8_quantizer()
+
+    # fprop consumes rowwise high precision; dgrad / wgrad consume columnwise MXFP8.
+    return HybridQuantizer(
+        rowwise_quantizer=IdentityQuantizer(),
+        columnwise_quantizer=_make_mxfp8_quantizer(),
+    )
