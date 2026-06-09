@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 
+import math
 import os
 import random
 from typing import Dict, List, Optional, Sequence
@@ -14,6 +15,7 @@ from torch.nn import Parameter
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
 from transformer_engine.pytorch import (
+    Float8CurrentScalingQuantizer,
     Float8Quantizer,
     Fp8Padding,
     Fp8Unpadding,
@@ -21,6 +23,8 @@ from transformer_engine.pytorch import (
     Linear,
     MXFP8Quantizer,
     NVFP4Quantizer,
+    QuantizedTensor,
+    QuantizerRole,
     autocast,
     is_bf16_available,
     quantized_model_init,
@@ -36,10 +40,16 @@ from transformer_engine.pytorch.quantization import (
 )
 from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
 import transformer_engine_torch as tex
+from transformer_engine.pytorch.ops._common import (
+    _cudnn_frontend_supports_grouped_gemm_srelu,
+    _cudnn_frontend_version_supported,
+    is_glu_activation,
+)
 from utils import (
     MegatronTrainingHelper,
     ModelConfig,
     assert_close,
+    assert_close_grads,
     make_recipe,
     quantization_tols,
     recipe_id,
@@ -166,6 +176,22 @@ use_cutlass_grouped_gemm = [False]
 if torch.cuda.get_device_capability() == (9, 0):
     use_cutlass_grouped_gemm.append(True)
 
+_grouped_mlp_quantization_list: list = [None]
+if fp8_available:
+    _grouped_mlp_quantization_list.extend(("fp8_delayed_scaling", "fp8_current_scaling"))
+if mxfp8_available:
+    _grouped_mlp_quantization_list.append("mxfp8")
+if nvfp4_available:
+    _grouped_mlp_quantization_list.extend(("nvfp4", "nvfp4_4over6", "nvfp4_rht"))
+
+_ops_quantization_list: list = [None]
+if fp8_available:
+    _ops_quantization_list.extend(("fp8_delayed_scaling", "fp8_current_scaling"))
+if mxfp8_available:
+    _ops_quantization_list.append("mxfp8")
+if nvfp4_available:
+    _ops_quantization_list.extend(("nvfp4", "nvfp4_4over6"))
+
 
 class TorchGroupedLinearWithPadding(nn.Module):
 
@@ -267,6 +293,123 @@ def _test_grouped_linear_accuracy(
             else:
                 outputs.append(p.grad)
     return outputs
+
+
+def maybe_skip_quantization(
+    quantization: Optional[str],
+    *,
+    dims=None,
+    device=None,
+    dtype: Optional[torch.dtype] = None,
+) -> None:
+    """Skip test case if a quantization scheme is not supported on this hardware/config."""
+    if quantization is None:
+        return
+    if device is not None and torch.device(device).type != "cuda":
+        pytest.skip("Quantization is only supported on CUDA devices")
+    if quantization in ("fp8", "fp8_delayed_scaling", "fp8_current_scaling") and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    if quantization == "mxfp8" and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    if quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht") and not nvfp4_available:
+        pytest.skip(reason_for_no_nvfp4)
+    if dims is not None:
+        if not hasattr(dims, "__iter__"):
+            dims = (dims,)
+        if quantization in ("fp8", "fp8_delayed_scaling", "fp8_current_scaling"):
+            if math.prod(dims[:-1]) % 16 != 0 or dims[-1] % 16 != 0:
+                pytest.skip("FP8 GEMMs require dims divisible by 16")
+        elif quantization == "mxfp8":
+            if math.prod(dims[:-1]) % 32 != 0 or dims[-1] % 32 != 0:
+                pytest.skip("MXFP8 GEMMs require dims divisible by 32")
+        elif quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht"):
+            if math.prod(dims[:-1]) % 16 != 0 or dims[-1] % 16 != 0:
+                pytest.skip("NVFP4 GEMMs require dims divisible by 16")
+    if dtype is not None:
+        if quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht") and dtype != torch.bfloat16:
+            pytest.skip("NVFP4 quantization is only supported with BF16 data")
+
+
+@torch.no_grad()
+def make_reference_and_test_tensors(
+    shape,
+    *,
+    min: float = 0.0,
+    max: float = 1.0,
+    quantization: Optional[str] = None,
+    ref_dtype: torch.dtype = torch.float64,
+    ref_device: torch.device = "cpu",
+    test_dtype: torch.dtype = torch.float32,
+    test_device: torch.device = "cuda",
+    test_is_quantized: bool = False,
+    quantizer_role: Optional[QuantizerRole] = None,
+    requires_grad: bool = True,
+):
+    """Paired tensors: float64/CPU reference for PyTorch ops, target-dtype/CUDA for TE ops."""
+    ref = torch.empty(shape, dtype=ref_dtype, device=ref_device)
+    ref.uniform_(min, max)
+    test = ref.to(device=test_device, dtype=test_dtype)
+    if quantization is None:
+        if test_is_quantized:
+            raise ValueError("Quantization scheme not provided")
+        if test.data_ptr() == ref.data_ptr():
+            test = test.clone()
+    elif quantization in ("fp8", "fp8_delayed_scaling"):
+        quantizer = Float8Quantizer(
+            scale=torch.ones(1, dtype=torch.float32, device=test_device).squeeze(),
+            amax=torch.zeros(1, dtype=torch.float32, device=test_device),
+            fp8_dtype=te.DType.kFloat8E4M3,
+        )
+        test = quantizer(test)
+    elif quantization == "fp8_current_scaling":
+        quantizer = Float8CurrentScalingQuantizer(
+            fp8_dtype=te.DType.kFloat8E4M3,
+            device=test_device,
+        )
+        test = quantizer(test)
+    elif quantization == "mxfp8":
+        test = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)(test)
+    elif quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_rht"):
+        tensor_type = "input"
+        if quantizer_role is not None:
+            tensor_type = quantizer_role.tensor_type
+        with_rht = quantization == "nvfp4_rht" and tensor_type != "weight"
+        test = NVFP4Quantizer(
+            with_rht=with_rht,
+            with_post_rht_amax=with_rht,
+            with_2d_quantization=False,
+            stochastic_rounding=False,
+            with_random_sign_mask=False,
+        )(test)
+    elif quantization == "nvfp4_4over6":
+        tensor_type = "input"
+        if quantizer_role is not None:
+            tensor_type = quantizer_role.tensor_type
+        nvfp4_use_4over6 = False
+        with_2d_quantization = False
+        nvfp4_e4m3_max = 448
+        if tensor_type not in ("grad_output", "grad_input"):
+            nvfp4_use_4over6 = True
+            nvfp4_e4m3_max = 256
+            if tensor_type == "weight":
+                with_2d_quantization = True
+        test = NVFP4Quantizer(
+            with_rht=False,
+            with_post_rht_amax=False,
+            with_2d_quantization=with_2d_quantization,
+            stochastic_rounding=False,
+            with_random_sign_mask=False,
+            nvfp4_use_4over6=nvfp4_use_4over6,
+            nvfp4_e4m3_max=nvfp4_e4m3_max,
+        )(test)
+    else:
+        raise ValueError(f"Unsupported quantization scheme ({quantization})")
+    if isinstance(test, QuantizedTensor) and not test_is_quantized:
+        test = test.dequantize()
+    ref.copy_(test.to(dtype=ref.dtype))
+    ref.requires_grad_(requires_grad)
+    test.requires_grad_(requires_grad)
+    return ref, test
 
 
 @pytest.mark.parametrize("dtype", param_types, ids=str)
@@ -2100,6 +2243,515 @@ def test_grouped_linear_cuda_graph_safe(
     else:
         for g, param in zip(graph_param_grads, op.parameters()):
             assert_close(g, param.grad, **tols)
+
+
+@pytest.mark.parametrize("delay_wgrad_compute", (False, True))
+@pytest.mark.parametrize("single_grouped_weight", (False, True))
+@pytest.mark.parametrize("single_grouped_bias", (False, True))
+@pytest.mark.parametrize("bias", (False, True))
+@pytest.mark.parametrize("dtype", param_types, ids=str)
+@pytest.mark.parametrize("quantization", _ops_quantization_list)
+@pytest.mark.parametrize("quantized_compute", (False, True))
+@pytest.mark.parametrize("quantized_weight", (False, True))
+@pytest.mark.parametrize("input_requires_grad", (False, True))
+@pytest.mark.parametrize("weight_requires_grad", (False, True))
+def test_ops_grouped_linear(
+    *,
+    group_size: int = 4,
+    bias: bool,
+    weight_shape: tuple = (128, 128),
+    split_alignment: int = 128,
+    dtype: torch.dtype,
+    device: torch.device = "cuda",
+    quantization: Optional[str],
+    quantized_compute: bool,
+    quantized_weight: bool,
+    input_requires_grad: bool,
+    weight_requires_grad: bool,
+    delay_wgrad_compute: bool,
+    single_grouped_weight: bool,
+    single_grouped_bias: bool,
+) -> None:
+    """te.ops.GroupedLinear forward+backward accuracy"""
+
+    # Split sizes
+    split_sizes = [split_alignment * i for i in range(group_size)]
+    random.shuffle(split_sizes)
+    split_sizes = torch.tensor(split_sizes, dtype=torch.int, device=device)
+
+    # Make input and weight shapes consistent
+    out_features, in_features = weight_shape
+    in_shape = (split_sizes.sum().item(), in_features)
+    out_shape = (in_shape[0], out_features)
+
+    # Skip invalid configurations
+    maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
+    maybe_skip_quantization(quantization, dims=out_shape)
+    if quantization is None and (quantized_compute or quantized_weight):
+        pytest.skip("Quantization scheme is not specified")
+    if quantization is not None and not (quantized_compute or quantized_weight):
+        pytest.skip("Quantization scheme is not used")
+    if quantization is not None and dtype not in (torch.bfloat16, torch.float16):
+        pytest.skip("Quantized group GEMM is only supported with BF16/FP16")
+    if single_grouped_bias and not bias:
+        pytest.skip("single_grouped_bias requires bias=True")
+    if (
+        single_grouped_weight
+        and quantized_weight
+        and quantization in ("fp8_delayed_scaling", "fp8_current_scaling")
+    ):
+        pytest.skip(
+            "single_grouped_weight does not support FP8 delayed/current scaling "
+            "with quantized_model_init"
+        )
+
+    # Random data
+    x_ref, x_test = make_reference_and_test_tensors(
+        in_shape,
+        quantization=quantization,
+        test_dtype=dtype,
+        test_device=device,
+        requires_grad=input_requires_grad,
+    )
+    dy_ref, dy_test = make_reference_and_test_tensors(
+        out_shape,
+        quantization=quantization,
+        test_dtype=dtype,
+        test_device=device,
+        requires_grad=False,
+    )
+    ws_ref, ws_test = [], []
+    bs_ref, bs_test = [], []
+    for _ in range(group_size):
+        w_ref, w_test = make_reference_and_test_tensors(
+            (out_features, in_features),
+            quantization=quantization,
+            test_dtype=dtype,
+            test_device=device,
+            quantizer_role=QuantizerRole(tensor_type="weight"),
+            requires_grad=weight_requires_grad,
+        )
+        b_ref, b_test = None, None
+        if bias:
+            b_ref, b_test = make_reference_and_test_tensors(
+                out_features,
+                test_dtype=dtype,
+                test_device=device,
+                requires_grad=weight_requires_grad,
+            )
+        ws_ref.append(w_ref)
+        ws_test.append(w_test)
+        bs_ref.append(b_ref)
+        bs_test.append(b_test)
+
+    # Plain PyTorch reference implementation
+    xs_ref = torch.split(x_ref, split_sizes.tolist())
+    ys_ref = []
+    for x, w, b in zip(xs_ref, ws_ref, bs_ref):
+        ys_ref.append(torch.nn.functional.linear(x, w, bias=b))
+    y_ref = torch.cat(ys_ref)
+    if input_requires_grad or weight_requires_grad:
+        y_ref.backward(dy_ref)
+
+    # Construct te.ops.GroupedLinear
+    recipe = make_recipe(quantization)
+    with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
+        op = te.ops.GroupedLinear(
+            group_size,
+            in_features,
+            out_features,
+            bias=bias,
+            device=device,
+            dtype=dtype,
+            delay_wgrad_compute=delay_wgrad_compute,
+            single_grouped_weight=single_grouped_weight,
+            single_grouped_bias=single_grouped_bias,
+        )
+    with torch.no_grad():
+        if single_grouped_weight:
+            op_weights = op.weight.quantized_tensors
+            if op_weights is None:
+                op_weights = op.weight.split_into_quantized_tensors()
+        if single_grouped_bias:
+            op_bias_parts = op.bias.split_into_quantized_tensors()
+        for group_idx in range(group_size):
+            if single_grouped_weight:
+                op_weights[group_idx].copy_(ws_test[group_idx])
+            else:
+                getattr(op, f"weight{group_idx}").copy_(ws_test[group_idx])
+            if bias:
+                if single_grouped_bias:
+                    op_bias_parts[group_idx].reshape(-1).copy_(bs_test[group_idx])
+                else:
+                    getattr(op, f"bias{group_idx}").copy_(bs_test[group_idx])
+        del ws_test, bs_test
+        for param in op.parameters():
+            param.requires_grad_(requires_grad=weight_requires_grad)
+
+    # Forward and backward pass
+    with te.autocast(enabled=quantized_compute, recipe=recipe):
+        y_test = op(x_test, split_sizes)
+    if input_requires_grad or weight_requires_grad:
+        y_test.backward(dy_test)
+        if delay_wgrad_compute and weight_requires_grad:
+            op.backward_dw()
+
+    # Expected numerical tolerances
+    tols = dtype_tols(dtype)
+    if dtype == torch.float32:
+        tols = dtype_tols(torch.float16)  # TF32 GEMM
+    if quantized_compute:
+        tols = quantization_tols(quantization)
+
+    # Check results
+    assert_close(y_test, y_ref, **tols)
+    assert_close_grads(x_test, x_ref, **tols)
+    if single_grouped_weight:
+        if weight_requires_grad:
+            w_ref_grad = torch.stack([w.grad for w in ws_ref], dim=0)
+            assert_close(op.weight.grad, w_ref_grad, **tols)
+        else:
+            assert op.weight.grad is None
+    else:
+        for group_idx in range(group_size):
+            w_test = getattr(op, f"weight{group_idx}")
+            assert_close_grads(w_test, ws_ref[group_idx], **tols)
+    if bias:
+        if single_grouped_bias:
+            if weight_requires_grad:
+                b_ref_grad = torch.stack([b.grad for b in bs_ref], dim=0)
+                assert_close(op.bias.grad, b_ref_grad, **tols)
+            else:
+                assert op.bias.grad is None
+        else:
+            for group_idx in range(group_size):
+                b_test = getattr(op, f"bias{group_idx}")
+                assert_close_grads(b_test, bs_ref[group_idx], **tols)
+
+
+@pytest.mark.parametrize("bias", (False, True))
+@pytest.mark.parametrize("dtype", (torch.float32, torch.float16, torch.bfloat16))
+@pytest.mark.parametrize("quantization", _grouped_mlp_quantization_list)
+@pytest.mark.parametrize("glu_interleave_size", (None, 32))
+@pytest.mark.parametrize("single_grouped_weight", (False, True))
+@pytest.mark.parametrize("single_grouped_bias", (False, True))
+@pytest.mark.parametrize("accumulate_into_main_grad", (False, True))
+@pytest.mark.parametrize("delay_wgrad_compute", (False, True))
+@pytest.mark.parametrize(
+    "activation",
+    ("scaled_swiglu", "scaled_clamped_qgeglu", "scaled_clamped_qgeglu_custom", "scaled_srelu"),
+)
+def test_grouped_mlp(
+    *,
+    group_size: int = 4,
+    hidden_size: int = 128,
+    bias: bool,
+    dtype: torch.dtype,
+    quantization: Optional[str],
+    single_grouped_weight: bool,
+    single_grouped_bias: bool,
+    accumulate_into_main_grad: bool,
+    device: torch.device = "cuda",
+    split_alignment: int = 256,
+    glu_interleave_size: Optional[int],
+    delay_wgrad_compute: bool,
+    activation: str,
+) -> None:
+    """GroupedLinear + scaled activation + GroupedLinear"""
+    if dtype == torch.bfloat16 and not is_bf16_available():
+        pytest.skip("BF16 not available")
+
+    # Build activation op to determine GLU vs unary
+    if activation == "scaled_swiglu":
+        scaled_act_ref = te.ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
+    elif activation.startswith("scaled_clamped_qgeglu"):
+        scaled_act_ref = te.ops.ScaledClampedQGeGLU(glu_interleave_size=glu_interleave_size)
+    elif activation == "scaled_srelu":
+        scaled_act_ref = te.ops.ScaledSReLU()
+    else:
+        raise ValueError(f"Unexpected activation ({activation})")
+    activation_is_glu = is_glu_activation(scaled_act_ref)
+
+    # Skip invalid configurations
+    with_quantization = quantization is not None
+    maybe_skip_quantization(quantization, device=device, dtype=dtype)
+    if single_grouped_weight and quantization != "mxfp8":
+        pytest.skip("single_grouped_weight is only supported for MXFP8 quantization")
+    if single_grouped_bias and not bias:
+        pytest.skip("single_grouped_bias requires bias=True")
+    if with_quantization and dtype not in (torch.bfloat16, torch.float16):
+        pytest.skip("Quantized group GEMM is only supported with BF16/FP16")
+    if not activation_is_glu and quantization not in ("mxfp8", "nvfp4", "nvfp4_rht"):
+        pytest.skip("Scaled unary grouped MLP is only supported with MXFP8 or NVFP4")
+    if not activation_is_glu and glu_interleave_size is not None:
+        pytest.skip("Unary activations do not use GLU interleaving")
+    if quantization == "nvfp4_4over6":
+        pytest.skip("NVFP4 4over6 grouped quantization is not supported")
+    if activation == "scaled_srelu" and quantization in ("nvfp4", "nvfp4_rht") and bias:
+        pytest.skip("NVFP4 SReLU grouped MLP coverage is limited to no-bias")
+    if quantization == "nvfp4_rht":
+        if activation == "scaled_swiglu" and (bias or glu_interleave_size != 32):
+            pytest.skip("NVFP4 RHT SwiGLU grouped MLP coverage is limited to no-bias")
+        if activation not in ("scaled_swiglu", "scaled_srelu"):
+            pytest.skip("NVFP4 RHT grouped MLP coverage is limited to SwiGLU and SReLU")
+    if (
+        with_quantization
+        and quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht")
+        and activation.startswith("scaled_clamped_qgeglu")
+        and bias
+    ):
+        # TODO: ksivaman: Need to debug numerics for this case.
+        pytest.skip("Bias/dbias not yet supported in NVFP4 fused grouped MLP with GeGLU")
+
+    fc1_out_features = 2 * hidden_size if activation_is_glu else hidden_size
+    if activation == "scaled_clamped_qgeglu_custom":
+        geglu_limit, geglu_alpha, geglu_offset = 5.0, 1.5, 0.5
+    else:
+        geglu_limit, geglu_alpha, geglu_offset = 7.0, 1.702, 1.0
+
+    # Split sizes (one group intentionally empty to test the zero-token case)
+    split_sizes = [split_alignment * i for i in range(group_size)]
+    random.shuffle(split_sizes)
+    split_sizes = torch.tensor(split_sizes, dtype=torch.int, device=device)
+    in_shape = (split_sizes.sum().item(), hidden_size)
+    out_shape = in_shape
+
+    # Random data: float32 for reference path, target dtype for test path
+    x_base = torch.empty(in_shape, device=device).uniform_(-0.25, 0.25)
+    x_ref = x_base.clone().requires_grad_()
+    x_test = x_base.to(dtype).requires_grad_()
+
+    dy_base = torch.empty(out_shape, device=device).uniform_(-0.25, 0.25)
+    dy_ref = dy_base.clone()
+    dy_test = dy_base.to(dtype)
+
+    probs_base = torch.empty((in_shape[0],), device=device).uniform_(0.1, 1.0)
+    probs_ref = probs_base.clone().requires_grad_()
+    probs_test = probs_base.to(dtype).requires_grad_()
+
+    fc1_ws_ref, fc1_ws_test = [], []
+    fc1_bs_ref, fc1_bs_test = [], []
+    fc2_ws_ref, fc2_ws_test = [], []
+    fc2_bs_ref, fc2_bs_test = [], []
+    for _ in range(group_size):
+        w1 = torch.empty((fc1_out_features, hidden_size), device=device).uniform_(-0.25, 0.25)
+        fc1_ws_ref.append(w1.clone().requires_grad_())
+        fc1_ws_test.append(w1.to(dtype))
+        w2 = torch.empty((hidden_size, hidden_size), device=device).uniform_(-0.25, 0.25)
+        fc2_ws_ref.append(w2.clone().requires_grad_())
+        fc2_ws_test.append(w2.to(dtype))
+        if bias:
+            b1 = torch.empty((fc1_out_features,), device=device).uniform_(-0.5, 0.5)
+            fc1_bs_ref.append(b1.clone().requires_grad_())
+            fc1_bs_test.append(b1.to(dtype))
+            b2 = torch.empty((hidden_size,), device=device).uniform_(-0.5, 0.5)
+            fc2_bs_ref.append(b2.clone().requires_grad_())
+            fc2_bs_test.append(b2.to(dtype))
+        else:
+            fc1_bs_ref.append(None)
+            fc1_bs_test.append(None)
+            fc2_bs_ref.append(None)
+            fc2_bs_test.append(None)
+
+    def _apply_activation(x: torch.Tensor) -> torch.Tensor:
+        if activation_is_glu and glu_interleave_size is not None:
+            x = x.reshape(-1, 2 * hidden_size // (2 * glu_interleave_size), 2, glu_interleave_size)
+            x = x.transpose(1, 2).reshape(-1, 2 * hidden_size)
+        if activation == "scaled_swiglu":
+            x1, x2 = x.chunk(2, dim=-1)
+            return torch.nn.functional.silu(x1) * x2
+        if activation.startswith("scaled_clamped_qgeglu"):
+            x1, x2 = x.chunk(2, dim=-1)
+            lim = torch.tensor(geglu_limit, device=x1.device, dtype=x1.dtype)
+            x1c = torch.minimum(x1, lim)
+            x2c = torch.clamp(x2, -lim, lim)
+            return (x2c + geglu_offset) * (x1c * torch.sigmoid(geglu_alpha * x1c))
+        if activation == "scaled_srelu":
+            return torch.nn.functional.relu(x).square()
+        raise ValueError(f"Unexpected activation ({activation})")
+
+    # Reference implementation (float32 PyTorch)
+    xs = torch.split(x_ref, split_sizes.tolist())
+    probs = torch.split(probs_ref, split_sizes.tolist())
+    ys = []
+    for group_idx in range(group_size):
+        x = xs[group_idx]
+        fc1_out = torch.nn.functional.linear(x, fc1_ws_ref[group_idx], bias=fc1_bs_ref[group_idx])
+        fc2_in = _apply_activation(fc1_out) * probs[group_idx].unsqueeze(-1)
+        y = torch.nn.functional.linear(fc2_in, fc2_ws_ref[group_idx])
+        if bias:
+            y = y + fc2_bs_ref[group_idx] * probs[group_idx].unsqueeze(-1)
+        ys.append(y)
+    y_ref = torch.cat(ys)
+    y_ref.backward(dy_ref)
+
+    # Construct TE module
+    recipe = make_recipe(quantization)
+
+    def _make_scaled_act():
+        if activation == "scaled_swiglu":
+            return te.ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
+        if activation == "scaled_clamped_qgeglu_custom":
+            return te.ops.ScaledClampedQGeGLU(
+                glu_interleave_size=glu_interleave_size,
+                limit=geglu_limit,
+                alpha=geglu_alpha,
+                glu_linear_offset=geglu_offset,
+            )
+        if activation.startswith("scaled_clamped_qgeglu"):
+            return te.ops.ScaledClampedQGeGLU(glu_interleave_size=glu_interleave_size)
+        if activation == "scaled_srelu":
+            return te.ops.ScaledSReLU()
+        raise ValueError(f"Unexpected activation ({activation})")
+
+    with te.quantized_model_init(enabled=with_quantization, recipe=recipe):
+        fc1 = te.ops.GroupedLinear(
+            group_size, hidden_size, fc1_out_features,
+            bias=bias, device=device, dtype=dtype,
+            single_grouped_weight=single_grouped_weight,
+            single_grouped_bias=single_grouped_bias,
+            accumulate_into_main_grad=accumulate_into_main_grad,
+            delay_wgrad_compute=delay_wgrad_compute,
+        )
+        fc2 = te.ops.GroupedLinear(
+            group_size, hidden_size, hidden_size,
+            bias=bias, device=device, dtype=dtype,
+            single_grouped_weight=single_grouped_weight,
+            single_grouped_bias=single_grouped_bias,
+            accumulate_into_main_grad=accumulate_into_main_grad,
+            delay_wgrad_compute=delay_wgrad_compute,
+            scale_bias=bias,
+        )
+    module = te.ops.Sequential(fc1, _make_scaled_act(), fc2)
+
+    # Copy weights
+    with torch.no_grad():
+        if single_grouped_weight:
+            fc1_weights = fc1.weight.quantized_tensors
+            if fc1_weights is None:
+                fc1_weights = fc1.weight.split_into_quantized_tensors()
+            fc2_weights = fc2.weight.quantized_tensors
+            if fc2_weights is None:
+                fc2_weights = fc2.weight.split_into_quantized_tensors()
+        for group_idx in range(group_size):
+            if single_grouped_weight:
+                fc1_weights[group_idx].copy_(fc1_ws_test[group_idx])
+                fc2_weights[group_idx].copy_(fc2_ws_test[group_idx])
+            else:
+                getattr(fc1, f"weight{group_idx}").copy_(fc1_ws_test[group_idx])
+                getattr(fc2, f"weight{group_idx}").copy_(fc2_ws_test[group_idx])
+            if bias:
+                if single_grouped_bias:
+                    fc1_bparts = fc1.bias.split_into_quantized_tensors()
+                    fc2_bparts = fc2.bias.split_into_quantized_tensors()
+                    fc1_bparts[group_idx].reshape(-1).copy_(fc1_bs_test[group_idx])
+                    fc2_bparts[group_idx].reshape(-1).copy_(fc2_bs_test[group_idx])
+                else:
+                    getattr(fc1, f"bias{group_idx}").copy_(fc1_bs_test[group_idx])
+                    getattr(fc2, f"bias{group_idx}").copy_(fc2_bs_test[group_idx])
+        if accumulate_into_main_grad:
+            main_grad_sentinel = 0.5
+            if single_grouped_weight:
+                weight_params_for_main_grad = [fc1.weight, fc2.weight]
+            else:
+                weight_params_for_main_grad = [
+                    getattr(fc, f"weight{i}") for fc in (fc1, fc2) for i in range(group_size)
+                ]
+            MegatronTrainingHelper.init_main_grad_buffers(
+                weight_params_for_main_grad,
+                fill_value=main_grad_sentinel,
+                overwrite_main_grad=False,
+            )
+    del fc1_ws_test, fc1_bs_test, fc2_ws_test, fc2_bs_test
+
+    # Forward and backward pass
+    with te.autocast(enabled=with_quantization, recipe=recipe):
+        fc2_extra = (split_sizes, probs_test) if bias else (split_sizes,)
+        y_test = module(x_test, split_sizes, probs_test, *fc2_extra)
+    y_test.backward(dy_test)
+    if delay_wgrad_compute:
+        fc1.backward_dw()
+        fc2.backward_dw()
+
+    # Check for expected fusions
+    cudnn_frontend_supports_grouped_mlp = (
+        _cudnn_frontend_supports_grouped_gemm_srelu()
+        if activation == "scaled_srelu"
+        else _cudnn_frontend_version_supported()
+    )
+    expected_grouped_mlp_fusion = cudnn_frontend_supports_grouped_mlp and (
+        (
+            quantization == "mxfp8"
+            and dtype in (torch.bfloat16, torch.float16)
+            and (
+                (not activation_is_glu and glu_interleave_size is None)
+                or (activation_is_glu and glu_interleave_size == 32)
+            )
+        )
+        or (
+            quantization == "nvfp4_rht"
+            and dtype == torch.bfloat16
+            and activation == "scaled_srelu"
+            and glu_interleave_size is None
+        )
+    )
+    if expected_grouped_mlp_fusion:
+        if activation_is_glu:
+            forward_cls = te.ops.fused.ForwardGroupedMLP_CuTeGEMMGLU
+            backward_cls = te.ops.fused.BackwardGroupedMLP_CuTeGEMMDGLU
+        else:
+            forward_cls = te.ops.fused.ForwardGroupedMLP_CuTeGEMMUnary
+            backward_cls = te.ops.fused.BackwardGroupedMLP_CuTeGEMMDUnary
+        if forward_cls.is_supported():
+            forward_ops = module._module_groups[0]._forward_ops
+            assert len(forward_ops) == 1
+            assert isinstance(forward_ops[0][0], forward_cls)
+        if backward_cls is not None and backward_cls.is_supported():
+            backward_ops = module._module_groups[0]._backward_ops
+            assert len(backward_ops) == 1
+            assert isinstance(backward_ops[0][0], backward_cls)
+
+    # Loose tols for sanity checking
+    tols = {"rtol": 0.125, "atol": 0.25}
+    if quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht"):
+        tols = {"rtol": 0.25, "atol": 0.5}
+
+    # Check values
+    assert_close(y_test, y_ref, **tols)
+    assert_close_grads(x_test, x_ref, **tols)
+    assert_close_grads(probs_test, probs_ref, **tols)
+    for group_idx in range(group_size):
+        if bias:
+            if single_grouped_bias:
+                assert_close(fc2.bias.grad[group_idx], fc2_bs_ref[group_idx].grad, **tols)
+                assert_close(fc1.bias.grad[group_idx], fc1_bs_ref[group_idx].grad, **tols)
+            else:
+                assert_close_grads(getattr(fc2, f"bias{group_idx}"), fc2_bs_ref[group_idx], **tols)
+                assert_close_grads(getattr(fc1, f"bias{group_idx}"), fc1_bs_ref[group_idx], **tols)
+        if not single_grouped_weight and not accumulate_into_main_grad:
+            assert_close_grads(getattr(fc2, f"weight{group_idx}"), fc2_ws_ref[group_idx], **tols)
+            assert_close_grads(getattr(fc1, f"weight{group_idx}"), fc1_ws_ref[group_idx], **tols)
+    fc1_w_ref_grad = torch.stack([w.grad for w in fc1_ws_ref], dim=0)
+    fc2_w_ref_grad = torch.stack([w.grad for w in fc2_ws_ref], dim=0)
+    if accumulate_into_main_grad:
+        fc1_expected = (
+            [fc1_w_ref_grad + main_grad_sentinel]
+            if single_grouped_weight
+            else [g + main_grad_sentinel for g in fc1_w_ref_grad]
+        )
+        fc2_expected = (
+            [fc2_w_ref_grad + main_grad_sentinel]
+            if single_grouped_weight
+            else [g + main_grad_sentinel for g in fc2_w_ref_grad]
+        )
+        MegatronTrainingHelper.verify_main_grad_accumulation(
+            weight_params_for_main_grad,
+            expected_main_grads=fc1_expected + fc2_expected,
+            **tols,
+        )
+    elif single_grouped_weight:
+        assert_close(fc1.weight.grad, fc1_w_ref_grad, **tols)
+        assert_close(fc2.weight.grad, fc2_w_ref_grad, **tols)
 
 
 @pytest.mark.parametrize("dtype", (torch.bfloat16, torch.float16))
