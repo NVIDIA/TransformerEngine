@@ -74,7 +74,7 @@ _devices: list[torch.device] = [torch.device("cpu"), torch.device("cuda")]
 
 def test_basic_operation_activation_offloading_policy(monkeypatch):
     """BasicOperation should expose a public opt-out for saved activation CPU offload."""
-    import transformer_engine.pytorch.cpu_offload as cpu_offload
+    import transformer_engine.pytorch.ops.op as op_module
 
     calls = []
     tensor = torch.empty(1)
@@ -82,12 +82,12 @@ def test_basic_operation_activation_offloading_policy(monkeypatch):
     op = te_ops.Identity()
 
     monkeypatch.setattr(
-        cpu_offload,
+        op_module,
         "mark_activation_offload",
         lambda *tensors: calls.append(("mark", [id(t) for t in tensors])),
     )
     monkeypatch.setattr(
-        cpu_offload,
+        op_module,
         "mark_not_offload",
         lambda *tensors: calls.append(("skip", [id(t) for t in tensors])),
     )
