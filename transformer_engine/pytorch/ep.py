@@ -16,7 +16,6 @@ import transformer_engine_torch as tex
 
 
 __all__ = [
-    "EpHandle",
     "EpBuffer",
     "ep_bootstrap",
     "ep_finalize",
@@ -203,72 +202,37 @@ def ep_scope(
         ep_finalize()
 
 
-# Handle
+# Buffer
 
 
-class EpHandle:
-    """Routing context for one EP layer. Construct one per concurrently-live
-    microbatch (e.g. one per in-flight PP-1F1B step).
+class EpBuffer:
+    """Per-microbatch EP layer state: routing handle + persistent payload slots.
+
+    Owns the per-call ``handle_mem`` routing scratch and the payload buffers
+    consumed by :func:`ep_dispatch` / :func:`ep_combine`. Allocate one
+    EpBuffer per concurrently-in-flight call on the layer (one per PP-1F1B
+    microbatch); sharing across overlapping calls clobbers tensors the
+    earlier bwd still reads. Call ``record_stream`` from streams other than
+    the allocation stream.
+
+    Cross-rank payload slots are symm-mem-backed when ``ep_bootstrap`` was
+    called with ``zero_copy=True`` (requires ``ep_group``); otherwise plain
+    HBM.
     """
 
     __slots__ = (
+        # routing
         "handle_mem",
         "top_k",
         "alignment",
+        # layer config
         "max_tokens_per_rank",
         "recv_capacity_per_rank",
         "hidden_dim",
         "num_local_experts",
         "payload_dtype",
         "device",
-    )
-
-    def __init__(
-        self,
-        top_k: int,
-        max_tokens_per_rank: int,
-        recv_capacity_per_rank: int,
-        hidden_dim: int,
-        num_local_experts: int,
-        alignment: int = 0,
-        device: Optional[torch.device] = None,
-        payload_dtype: torch.dtype = torch.bfloat16,
-    ) -> None:
-        if device is None:
-            device = torch.device("cuda", torch.cuda.current_device())
-        alignment = int(alignment)
-        if alignment > 1 and (alignment & (alignment - 1)) != 0:
-            raise ValueError(
-                f"alignment must be 0, 1, or a power of two (got {alignment})."
-            )
-        self.top_k = int(top_k)
-        self.alignment = alignment
-        self.max_tokens_per_rank = int(max_tokens_per_rank)
-        self.recv_capacity_per_rank = int(recv_capacity_per_rank)
-        self.hidden_dim = int(hidden_dim)
-        self.num_local_experts = int(num_local_experts)
-        self.payload_dtype = payload_dtype
-        self.device = device
-        size_bytes = tex.ep_handle_mem_size(self.top_k, self.alignment)
-        self.handle_mem = torch.empty(int(size_bytes), dtype=torch.uint8, device=device)
-
-
-# Buffer
-
-
-class EpBuffer:
-    """Persistent payload and scratch buffers for one EP layer.
-
-    All slots are plain HBM in TE 2.17 (the symm-mem IO fast path is planned
-    for a near-future release).
-
-    Use one EpBuffer per concurrently-in-flight call on the layer (one per
-    PP-1F1B microbatch); sharing between an outstanding fwd and a later call
-    overwrites tensors the earlier bwd still reads. Call record_stream from
-    streams other than the allocation stream.
-    """
-
-    __slots__ = (
+        # payload slots
         "recv_tokens",
         "combine_in",
         "recv_topk_weights",
@@ -279,53 +243,66 @@ class EpBuffer:
 
     def __init__(
         self,
-        handle: EpHandle,
+        top_k: int,
+        max_tokens_per_rank: int,
+        recv_capacity_per_rank: int,
+        hidden_dim: int,
+        num_local_experts: int,
+        alignment: int = 0,
         ep_group: Optional[dist.ProcessGroup] = None,
-        *,
+        payload_dtype: torch.dtype = torch.bfloat16,
         device: Optional[torch.device] = None,
     ) -> None:
-        """Allocate the persistent EP slots.
-
-        Cross-rank slots are symm-mem-backed when ``ep_bootstrap`` was called
-        with ``zero_copy=True`` (requires ``ep_group``); otherwise plain HBM.
-        """
         if device is None:
             device = torch.device("cuda", torch.cuda.current_device())
-        recv_shape = (handle.recv_capacity_per_rank, handle.hidden_dim)
-        send_shape = (handle.max_tokens_per_rank, handle.hidden_dim)
+        alignment = int(alignment)
+        if alignment > 1 and (alignment & (alignment - 1)) != 0:
+            raise ValueError(f"alignment must be 0, 1, or a power of two (got {alignment}).")
+        self.top_k = int(top_k)
+        self.alignment = alignment
+        self.max_tokens_per_rank = int(max_tokens_per_rank)
+        self.recv_capacity_per_rank = int(recv_capacity_per_rank)
+        self.hidden_dim = int(hidden_dim)
+        self.num_local_experts = int(num_local_experts)
+        self.payload_dtype = payload_dtype
+        self.device = device
+
+        size_bytes = tex.ep_handle_mem_size(self.top_k, self.alignment)
+        self.handle_mem = torch.empty(int(size_bytes), dtype=torch.uint8, device=device)
+
+        recv_shape = (self.recv_capacity_per_rank, self.hidden_dim)
+        send_shape = (self.max_tokens_per_rank, self.hidden_dim)
         zero_copy = bool(tex.ep_get_zero_copy())
         if zero_copy:
             if ep_group is None:
                 raise ValueError("EpBuffer requires ep_group when ep_bootstrap(zero_copy=True).")
-            self.recv_tokens = symm_mem_alloc(
-                recv_shape, handle.payload_dtype, ep_group, device=device
-            )
-            self.combine_in = symm_mem_alloc(
-                recv_shape, handle.payload_dtype, ep_group, device=device
-            )
+            self.recv_tokens = symm_mem_alloc(recv_shape, payload_dtype, ep_group, device=device)
+            self.combine_in = symm_mem_alloc(recv_shape, payload_dtype, ep_group, device=device)
             self.recv_topk_weights = symm_mem_alloc(
-                (handle.recv_capacity_per_rank,), torch.float32, ep_group, device=device
+                (self.recv_capacity_per_rank,), torch.float32, ep_group, device=device
             )
-            self.grad_tokens = symm_mem_alloc(
-                send_shape, handle.payload_dtype, ep_group, device=device
-            )
+            self.grad_tokens = symm_mem_alloc(send_shape, payload_dtype, ep_group, device=device)
         else:
-            self.recv_tokens = torch.empty(recv_shape, dtype=handle.payload_dtype, device=device)
-            self.combine_in = torch.empty(recv_shape, dtype=handle.payload_dtype, device=device)
+            self.recv_tokens = torch.empty(recv_shape, dtype=payload_dtype, device=device)
+            self.combine_in = torch.empty(recv_shape, dtype=payload_dtype, device=device)
             self.recv_topk_weights = torch.empty(
-                handle.recv_capacity_per_rank, dtype=torch.float32, device=device
+                self.recv_capacity_per_rank, dtype=torch.float32, device=device
             )
-            self.grad_tokens = torch.empty(send_shape, dtype=handle.payload_dtype, device=device)
+            self.grad_tokens = torch.empty(send_shape, dtype=payload_dtype, device=device)
         # Per-rank scratch; never cross-rank, plain HBM regardless of mode.
-        self.token_counts = torch.empty(handle.num_local_experts, dtype=torch.int32, device=device)
+        self.token_counts = torch.empty(self.num_local_experts, dtype=torch.int32, device=device)
         self.grad_topk_weights = torch.empty(
-            (handle.max_tokens_per_rank, handle.top_k), dtype=torch.float32, device=device
+            (self.max_tokens_per_rank, self.top_k), dtype=torch.float32, device=device
         )
 
     @classmethod
     def from_external(
         cls,
-        handle: EpHandle,
+        top_k: int,
+        max_tokens_per_rank: int,
+        recv_capacity_per_rank: int,
+        hidden_dim: int,
+        num_local_experts: int,
         *,
         recv_tokens: torch.Tensor,
         combine_in: torch.Tensor,
@@ -333,23 +310,27 @@ class EpBuffer:
         grad_tokens: Optional[torch.Tensor] = None,
         token_counts: Optional[torch.Tensor] = None,
         grad_topk_weights: Optional[torch.Tensor] = None,
+        alignment: int = 0,
+        payload_dtype: torch.dtype = torch.bfloat16,
         device: Optional[torch.device] = None,
     ) -> "EpBuffer":
-        """Construct from caller-allocated buffers.
+        """Construct from caller-allocated payload buffers.
 
-        Useful for sharing a pre-allocated pool across layers/microbatches, and
-        for plugging in symm-mem-backed tensors once the zero-copy IO fast path
-        ships in a near-future release. Caller-supplied slots are validated
-        against the expected shape and dtype; ``None`` slots get a fresh HBM
-        allocation.
+        Useful for sharing a pre-allocated pool across layers/microbatches and
+        for plugging in symm-mem-backed tensors. Caller-supplied slots are
+        validated against the expected shape and dtype; ``None`` slots get a
+        fresh HBM allocation. ``handle_mem`` is always allocated fresh.
         """
         if device is None:
             device = torch.device("cuda", torch.cuda.current_device())
-        recv_shape = (handle.recv_capacity_per_rank, handle.hidden_dim)
-        send_shape = (handle.max_tokens_per_rank, handle.hidden_dim)
-        topk_shape = (handle.max_tokens_per_rank, handle.top_k)
-        recv_w_shape = (handle.recv_capacity_per_rank,)
-        counts_shape = (handle.num_local_experts,)
+        alignment = int(alignment)
+        if alignment > 1 and (alignment & (alignment - 1)) != 0:
+            raise ValueError(f"alignment must be 0, 1, or a power of two (got {alignment}).")
+        recv_shape = (recv_capacity_per_rank, hidden_dim)
+        send_shape = (max_tokens_per_rank, hidden_dim)
+        topk_shape = (max_tokens_per_rank, top_k)
+        recv_w_shape = (recv_capacity_per_rank,)
+        counts_shape = (num_local_experts,)
 
         def _check(t: torch.Tensor, name: str, shape: tuple, dtype: torch.dtype) -> torch.Tensor:
             if tuple(t.shape) != shape:
@@ -359,17 +340,29 @@ class EpBuffer:
             return t
 
         inst = cls.__new__(cls)
-        inst.recv_tokens = _check(recv_tokens, "recv_tokens", recv_shape, handle.payload_dtype)
-        inst.combine_in = _check(combine_in, "combine_in", recv_shape, handle.payload_dtype)
+        inst.top_k = int(top_k)
+        inst.alignment = alignment
+        inst.max_tokens_per_rank = int(max_tokens_per_rank)
+        inst.recv_capacity_per_rank = int(recv_capacity_per_rank)
+        inst.hidden_dim = int(hidden_dim)
+        inst.num_local_experts = int(num_local_experts)
+        inst.payload_dtype = payload_dtype
+        inst.device = device
+
+        size_bytes = tex.ep_handle_mem_size(inst.top_k, inst.alignment)
+        inst.handle_mem = torch.empty(int(size_bytes), dtype=torch.uint8, device=device)
+
+        inst.recv_tokens = _check(recv_tokens, "recv_tokens", recv_shape, payload_dtype)
+        inst.combine_in = _check(combine_in, "combine_in", recv_shape, payload_dtype)
         inst.recv_topk_weights = (
             _check(recv_topk_weights, "recv_topk_weights", recv_w_shape, torch.float32)
             if recv_topk_weights is not None
             else torch.empty(recv_w_shape, dtype=torch.float32, device=device)
         )
         inst.grad_tokens = (
-            _check(grad_tokens, "grad_tokens", send_shape, handle.payload_dtype)
+            _check(grad_tokens, "grad_tokens", send_shape, payload_dtype)
             if grad_tokens is not None
-            else torch.empty(send_shape, dtype=handle.payload_dtype, device=device)
+            else torch.empty(send_shape, dtype=payload_dtype, device=device)
         )
         inst.token_counts = (
             _check(token_counts, "token_counts", counts_shape, torch.int32)
@@ -387,6 +380,7 @@ class EpBuffer:
         """Record stream as a user of all owned tensors so the caching allocator
         defers reclaim until stream has caught up."""
         for t in (
+            self.handle_mem,
             self.recv_tokens,
             self.combine_in,
             self.recv_topk_weights,
@@ -502,19 +496,19 @@ def _(*args, **kw):
 # Non-autograd primitives
 
 
-def ep_prepare(handle: EpHandle, topk_idx: torch.Tensor) -> torch.Tensor:
-    """AllGather the routing map; fills handle.handle_mem and returns token_counts
-    (int32, shape [num_local_experts]). topk_idx must be int64.
+def ep_prepare(buffer: "EpBuffer", topk_idx: torch.Tensor) -> torch.Tensor:
+    """AllGather the routing map; fills ``buffer.handle_mem`` and returns
+    ``buffer.token_counts`` (int32, shape [num_local_experts]). topk_idx must
+    be int64.
     """
-    token_counts = torch.empty(handle.num_local_experts, dtype=torch.int32, device=handle.device)
     torch.ops.transformer_engine_ep.prepare(
-        handle.handle_mem, handle.top_k, topk_idx, token_counts, handle.alignment
+        buffer.handle_mem, buffer.top_k, topk_idx, buffer.token_counts, buffer.alignment
     )
-    return token_counts
+    return buffer.token_counts
 
 
 def _ep_dispatch_raw(
-    handle: EpHandle,
+    buffer: "EpBuffer",
     topk_idx: torch.Tensor,
     tokens: torch.Tensor,
     topk_weights: torch.Tensor,
@@ -523,13 +517,13 @@ def _ep_dispatch_raw(
 ) -> None:
     """Raw dispatch; no autograd, no prepare. Caller must run ep_prepare first."""
     tex.ep_dispatch(
-        handle.handle_mem, topk_idx, tokens, topk_weights, recv_tokens, recv_topk_weights
+        buffer.handle_mem, topk_idx, tokens, topk_weights, recv_tokens, recv_topk_weights
     )
 
 
-def _ep_combine_raw(handle: EpHandle, expert_out: torch.Tensor, result: torch.Tensor) -> None:
+def _ep_combine_raw(buffer: "EpBuffer", expert_out: torch.Tensor, result: torch.Tensor) -> None:
     """Raw combine; no autograd. Caller pre-weights expert_out."""
-    tex.ep_combine(handle.handle_mem, expert_out, result)
+    tex.ep_combine(buffer.handle_mem, expert_out, result)
 
 
 # autograd.Function wrappers
@@ -681,7 +675,6 @@ def _reject_fp8(*tensors: torch.Tensor) -> None:
 
 
 def ep_dispatch(
-    handle: EpHandle,
     buffer: EpBuffer,
     tokens: torch.Tensor,
     topk_idx: torch.Tensor,
@@ -689,15 +682,15 @@ def ep_dispatch(
 ):
     """Run prepare + dispatch with autograd. topk_idx must be int64.
 
-    Returns (recv_tokens, recv_topk_weights, token_counts); views into buffer's
-    persistent slots; consume them before the next ep_dispatch on the same
-    buffer or they get overwritten. token_counts is non-differentiable.
+    Returns (recv_tokens, recv_topk_weights, token_counts); views into the
+    buffer's persistent slots — consume them before the next ep_dispatch on
+    the same buffer or they get overwritten. token_counts is non-differentiable.
     """
     _reject_fp8(tokens, buffer.recv_tokens)
     return _EpDispatch.apply(
-        handle.handle_mem,
-        handle.top_k,
-        handle.alignment,
+        buffer.handle_mem,
+        buffer.top_k,
+        buffer.alignment,
         buffer.recv_tokens,
         buffer.recv_topk_weights,
         buffer.token_counts,
@@ -710,7 +703,6 @@ def ep_dispatch(
 
 
 def ep_combine(
-    handle: EpHandle,
     buffer: EpBuffer,
     expert_out: torch.Tensor,
     *,
@@ -719,16 +711,16 @@ def ep_combine(
     """Combine expert outputs back to the source rank, with autograd. The
     caller must pre-apply the topk weighting to expert_out.
 
-    Result shape is (num_local_tokens, handle.hidden_dim); defaults to
-    handle.max_tokens_per_rank rows.
+    Result shape is (num_local_tokens, buffer.hidden_dim); defaults to
+    buffer.max_tokens_per_rank rows.
     """
     _reject_fp8(expert_out, buffer.combine_in)
     if num_local_tokens is None:
-        num_local_tokens = handle.max_tokens_per_rank
+        num_local_tokens = buffer.max_tokens_per_rank
     return _EpCombine.apply(
-        handle.handle_mem,
+        buffer.handle_mem,
         buffer.combine_in,
         num_local_tokens,
-        handle.hidden_dim,
+        buffer.hidden_dim,
         expert_out,
     )

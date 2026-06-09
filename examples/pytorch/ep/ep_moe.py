@@ -15,7 +15,6 @@ import torch
 import torch.distributed as dist
 
 from transformer_engine.pytorch.ep import (
-    EpHandle,
     EpBuffer,
     ep_scope,
     ep_dispatch,
@@ -147,20 +146,20 @@ def _run_layer(args, rank, world_size, ep_size, num_experts, num_local_experts, 
         kernels_np[rank * num_local_experts : (rank + 1) * num_local_experts]
     ).to(device=device, dtype=torch.bfloat16)
 
-    handle = EpHandle(
+    buffer = EpBuffer(
         top_k=args.top_k,
         max_tokens_per_rank=T,
         recv_capacity_per_rank=recv_pr,
         hidden_dim=args.hidden,
         num_local_experts=num_local_experts,
+        ep_group=ep_group,
     )
-    buffer = EpBuffer(handle)
 
-    recv_t, recv_w_out, _tc = ep_dispatch(handle, buffer, tokens, topk_idx, topk_w)
+    recv_t, recv_w_out, _tc = ep_dispatch(buffer, tokens, topk_idx, topk_w)
     expert_out = _batched_expert_linear(recv_t, kernels_local, num_local_experts)
     # Apply per-slot topk weighting before combine.
     expert_out = expert_out * recv_w_out.unsqueeze(-1).to(expert_out.dtype)
-    out = ep_combine(handle, buffer, expert_out)
+    out = ep_combine(buffer, expert_out)
 
     loss = 0.5 * (out.float() ** 2).sum()
     loss.backward()
@@ -179,18 +178,18 @@ def _run_layer(args, rank, world_size, ep_size, num_experts, num_local_experts, 
         torch.cuda.synchronize()
         dist.barrier()
         for _ in range(args.benchmark_warmup):
-            rt, rw, _tc = ep_dispatch(handle, buffer, tokens.detach(), topk_idx, topk_w)
+            rt, rw, _tc = ep_dispatch(buffer, tokens.detach(), topk_idx, topk_w)
             eo = _batched_expert_linear(rt, kernels_local, num_local_experts)
             eo = eo * rw.unsqueeze(-1).to(eo.dtype)
-            ep_combine(handle, buffer, eo)
+            ep_combine(buffer, eo)
         torch.cuda.synchronize()
         dist.barrier()
         t0 = time.perf_counter()
         for _ in range(args.benchmark_iters):
-            rt, rw, _tc = ep_dispatch(handle, buffer, tokens.detach(), topk_idx, topk_w)
+            rt, rw, _tc = ep_dispatch(buffer, tokens.detach(), topk_idx, topk_w)
             eo = _batched_expert_linear(rt, kernels_local, num_local_experts)
             eo = eo * rw.unsqueeze(-1).to(eo.dtype)
-            ep_combine(handle, buffer, eo)
+            ep_combine(buffer, eo)
         torch.cuda.synchronize()
         dt_ms = (time.perf_counter() - t0) * 1000.0 / args.benchmark_iters
         if rank == 0:

@@ -30,7 +30,6 @@ import torch.distributed as dist
 
 from transformer_engine.pytorch.ep import (
     EpBuffer,
-    EpHandle,
     ep_bootstrap,
     ep_combine,
     ep_dispatch,
@@ -177,14 +176,14 @@ def main():
 
     topk_idx, tokens_hbm, topk_w_hbm = _make_inputs(rank, world_size, T, H, K, E, device)
 
-    handle = EpHandle(
+    buffer = EpBuffer(
         top_k=K,
         max_tokens_per_rank=T,
         recv_capacity_per_rank=recv_pr,
         hidden_dim=H,
         num_local_experts=num_local_experts,
+        ep_group=ep_group,
     )
-    buffer = EpBuffer(handle)
 
     tokens = tokens_hbm
     topk_w = topk_w_hbm
@@ -192,11 +191,11 @@ def main():
     recv_w = torch.empty(recv_pr, dtype=torch.float32, device=device)
 
     # -- Prepare once outside the timed loops ------------------------------
-    ep_prepare(handle, topk_idx)
+    ep_prepare(buffer, topk_idx)
     torch.cuda.synchronize()
 
     # Pre-dispatch a steady recv_tokens / recv_w so combine stages have valid input.
-    _ep_dispatch_raw(handle, topk_idx, tokens, topk_w, recv_tokens, recv_w)
+    _ep_dispatch_raw(buffer, topk_idx, tokens, topk_w, recv_tokens, recv_w)
     torch.cuda.synchronize()
     # fp-equivalent stand-in for an MLP output.
     expert_out = recv_tokens.clone()
@@ -210,20 +209,20 @@ def main():
     eo_p = recv_tokens.detach().clone().requires_grad_(True)
 
     # Stand-in callables; the cuda-graph branch below swaps in graphed versions.
-    fwd_bwd_dispatch_fn = lambda x: ep_dispatch(handle, buffer, x, topk_idx, topk_w)[  # noqa: E731
+    fwd_bwd_dispatch_fn = lambda x: ep_dispatch(buffer, x, topk_idx, topk_w)[  # noqa: E731
         0
     ]
-    fwd_bwd_combine_fn = lambda eo: ep_combine(handle, buffer, eo)  # noqa: E731
+    fwd_bwd_combine_fn = lambda eo: ep_combine(buffer, eo)  # noqa: E731
 
     def _dispatch_raw():
-        _ep_dispatch_raw(handle, topk_idx, tokens, topk_w, recv_tokens, recv_w)
+        _ep_dispatch_raw(buffer, topk_idx, tokens, topk_w, recv_tokens, recv_w)
 
     def _combine_raw():
         out_buf = torch.empty(T, H, dtype=torch.bfloat16, device=device)
-        _ep_combine_raw(handle, expert_out, out_buf)
+        _ep_combine_raw(buffer, expert_out, out_buf)
 
     def _ep_dispatch_fwd():
-        ep_dispatch(handle, buffer, tokens.detach(), topk_idx, topk_w)
+        ep_dispatch(buffer, tokens.detach(), topk_idx, topk_w)
 
     def _ep_dispatch_fwd_bwd():
         tokens_p.grad = None
@@ -231,7 +230,7 @@ def main():
         (0.5 * (r * r).sum(dtype=torch.float32)).backward()
 
     def _ep_combine_fwd():
-        ep_combine(handle, buffer, recv_tokens)
+        ep_combine(buffer, recv_tokens)
 
     def _ep_combine_fwd_bwd():
         eo_p.grad = None
@@ -265,11 +264,11 @@ def main():
         # Graph fwd+bwd of the autograd-wrapped ops via make_graphed_callables.
         class _DispatchMod(torch.nn.Module):
             def forward(self, x):
-                return ep_dispatch(handle, buffer, x, topk_idx, topk_w)[0]
+                return ep_dispatch(buffer, x, topk_idx, topk_w)[0]
 
         class _CombineMod(torch.nn.Module):
             def forward(self, eo):
-                return ep_combine(handle, buffer, eo)
+                return ep_combine(buffer, eo)
 
         disp_mod = _DispatchMod().cuda()
         comb_mod = _CombineMod().cuda()
@@ -383,7 +382,7 @@ def main():
         fwd_bwd_combine_fn = None
         captured_runners.clear()
         del g_disp, g_comb, disp_mod, comb_mod
-    del tokens_p, eo_p, buffer, handle, recv_tokens, recv_w, tokens, topk_w, expert_out
+    del tokens_p, eo_p, buffer, recv_tokens, recv_w, tokens, topk_w, expert_out
     gc.collect()
     torch.cuda.synchronize()
     # Release NCCL EP's borrowed comm before torch destroys it.

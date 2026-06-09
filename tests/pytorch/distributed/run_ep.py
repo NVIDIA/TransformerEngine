@@ -12,16 +12,19 @@ import torch
 import torch.distributed as dist
 
 from transformer_engine.pytorch.ep import (
-    EpHandle,
     EpBuffer,
     ep_bootstrap,
     ep_finalize,
     ep_prepare,
     ep_dispatch,
     ep_combine,
+    symm_mem_alloc,
     _ep_combine_raw,
     _ep_dispatch_raw,
 )
+
+
+ZERO_COPY = False
 
 # Must come after the transformer_engine import so libtransformer_engine.so is loaded.
 import transformer_engine_torch as tex  # noqa: F401
@@ -104,21 +107,22 @@ class TestEP(unittest.TestCase):
             max_tokens_per_rank=TOKENS_PER_RANK,
             recv_capacity_per_rank=cls.cfg.recv_capacity_per_rank,
             hidden_dim=HIDDEN_DIM,
-            zero_copy=True,
+            zero_copy=ZERO_COPY,
         )
 
-    def _make_handle(self, alignment=0, top_k=TOP_K):
-        return EpHandle(
+    def _make_buffer(self, alignment=0, top_k=TOP_K):
+        return EpBuffer(
             top_k=top_k,
             max_tokens_per_rank=TOKENS_PER_RANK,
             recv_capacity_per_rank=self.cfg.recv_capacity_per_rank,
             hidden_dim=HIDDEN_DIM,
             num_local_experts=NUM_LOCAL_EXPERTS,
             alignment=alignment,
+            ep_group=self.ep_group,
         )
 
-    def _make_buffers(self, dtype=torch.bfloat16):
-        """Allocate raw recv buffers + token_counts for the primitive tests."""
+    def _make_raw_recv(self, dtype=torch.bfloat16):
+        """Raw recv tensors + token_counts for the primitive tests."""
         rc = self.cfg.recv_capacity_per_rank
         return (
             torch.empty(rc, HIDDEN_DIM, dtype=dtype, device=self.cfg.device),
@@ -126,26 +130,23 @@ class TestEP(unittest.TestCase):
             torch.empty(NUM_LOCAL_EXPERTS, dtype=torch.int32, device=self.cfg.device),
         )
 
-    def _make_ep_buffer(self, handle):
-        return EpBuffer(handle)
-
     @staticmethod
     def _weighted(recv_tokens, recv_w):
         """fp32 per-slot weighting + cast back; matches the upstream combine input."""
         mask = (recv_w != 0).to(torch.float32).unsqueeze(-1)
         return (recv_tokens.float() * recv_w.unsqueeze(-1).float() * mask).to(recv_tokens.dtype)
 
-    def _moe_step(self, handle, buffer, topk_idx, tokens, w):
-        recv_t, recv_w_out, _tc = ep_dispatch(handle, buffer, tokens, topk_idx, w)
+    def _moe_step(self, buffer, topk_idx, tokens, w):
+        recv_t, recv_w_out, _tc = ep_dispatch(buffer, tokens, topk_idx, w)
         eo = self._weighted(recv_t, recv_w_out)
-        return ep_combine(handle, buffer, eo)
+        return ep_combine(buffer, eo)
 
     # Prepare
 
     def test_primitive_prepare(self):
-        handle = self._make_handle()
+        buf = self._make_buffer()
         topk_idx, _toks, _w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
-        token_counts = ep_prepare(handle, topk_idx)
+        token_counts = ep_prepare(buf, topk_idx)
         torch.cuda.synchronize()
         self.assertEqual(token_counts.shape, (NUM_LOCAL_EXPERTS,))
         local = int(token_counts.sum().item())
@@ -156,13 +157,13 @@ class TestEP(unittest.TestCase):
     # Identity round-trip via raw primitives
 
     def test_primitive_dispatch_combine_identity(self):
-        handle = self._make_handle()
+        buf = self._make_buffer()
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
-        recv_tokens, recv_w, _ = self._make_buffers()
-        ep_prepare(handle, topk_idx)
-        _ep_dispatch_raw(handle, topk_idx, tokens, w, recv_tokens, recv_w)
+        recv_tokens, recv_w, _ = self._make_raw_recv()
+        ep_prepare(buf, topk_idx)
+        _ep_dispatch_raw(buf, topk_idx, tokens, w, recv_tokens, recv_w)
         result = torch.empty_like(tokens)
-        _ep_combine_raw(handle, self._weighted(recv_tokens, recv_w), result)
+        _ep_combine_raw(buf, self._weighted(recv_tokens, recv_w), result)
         torch.cuda.synchronize()
         torch.testing.assert_close(result.float(), tokens.float(), atol=5e-2, rtol=5e-2)
 
@@ -170,11 +171,10 @@ class TestEP(unittest.TestCase):
 
     def test_dispatch_fwd_bwd(self):
         """0.5*||recv_tokens||^2 ; grad_tokens equals TOP_K * tokens."""
-        handle = self._make_handle()
-        buffer = self._make_ep_buffer(handle)
+        buf = self._make_buffer()
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
         tokens_p = tokens.detach().clone().requires_grad_(True)
-        recv_t, _recv_w, _tc = ep_dispatch(handle, buffer, tokens_p, topk_idx, w)
+        recv_t, _recv_w, _tc = ep_dispatch(buf, tokens_p, topk_idx, w)
         loss = 0.5 * (recv_t.float() ** 2).sum()
         loss.backward()
         torch.cuda.synchronize()
@@ -184,11 +184,10 @@ class TestEP(unittest.TestCase):
 
     def test_combine_fwd_bwd(self):
         """Full dispatch + combine fwd+bwd; identity inputs round-trip."""
-        handle = self._make_handle()
-        buffer = self._make_ep_buffer(handle)
+        buf = self._make_buffer()
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
         tokens_p = tokens.detach().clone().requires_grad_(True)
-        out = self._moe_step(handle, buffer, topk_idx, tokens_p, w)
+        out = self._moe_step(buf, topk_idx, tokens_p, w)
         loss = 0.5 * (out.float() ** 2).sum()
         loss.backward()
         torch.cuda.synchronize()
@@ -198,14 +197,13 @@ class TestEP(unittest.TestCase):
     # Multi-iter stability
 
     def test_dispatch_fwd_bwd_multiple_iterations(self):
-        """5 fwd+bwd iters on the same EpHandle + EpBuffer must be bit-stable."""
-        handle = self._make_handle()
-        buffer = self._make_ep_buffer(handle)
+        """5 fwd+bwd iters on the same EpBuffer must be bit-stable."""
+        buf = self._make_buffer()
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
 
         def one_step():
             tokens_p = tokens.detach().clone().requires_grad_(True)
-            out = self._moe_step(handle, buffer, topk_idx, tokens_p, w)
+            out = self._moe_step(buf, topk_idx, tokens_p, w)
             loss = 0.5 * (out.float() ** 2).sum()
             loss.backward()
             return out.detach().clone(), tokens_p.grad.detach().clone()
@@ -222,22 +220,22 @@ class TestEP(unittest.TestCase):
 
     def test_cuda_graph_capture(self):
         """Capture raw dispatch+combine into a CUDA graph; replay must be bit-stable."""
-        handle = self._make_handle()
+        buf = self._make_buffer()
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
-        recv_tokens, recv_w, _ = self._make_buffers()
+        recv_tokens, recv_w, _ = self._make_raw_recv()
         result = torch.empty_like(tokens)
 
         def step():
-            ep_prepare(handle, topk_idx)
-            _ep_dispatch_raw(handle, topk_idx, tokens, w, recv_tokens, recv_w)
-            _ep_combine_raw(handle, self._weighted(recv_tokens, recv_w), result)
+            ep_prepare(buf, topk_idx)
+            _ep_dispatch_raw(buf, topk_idx, tokens, w, recv_tokens, recv_w)
+            _ep_combine_raw(buf, self._weighted(recv_tokens, recv_w), result)
 
         for _ in range(3):
             step()
         torch.cuda.synchronize()
 
         # Routing is fixed per layer; prepare runs once before capture.
-        ep_prepare(handle, topk_idx)
+        ep_prepare(buf, topk_idx)
         torch.cuda.synchronize()
 
         graph = torch.cuda.CUDAGraph()
@@ -245,8 +243,8 @@ class TestEP(unittest.TestCase):
         s.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(s):
             with torch.cuda.graph(graph):
-                _ep_dispatch_raw(handle, topk_idx, tokens, w, recv_tokens, recv_w)
-                _ep_combine_raw(handle, self._weighted(recv_tokens, recv_w), result)
+                _ep_dispatch_raw(buf, topk_idx, tokens, w, recv_tokens, recv_w)
+                _ep_combine_raw(buf, self._weighted(recv_tokens, recv_w), result)
         torch.cuda.current_stream().wait_stream(s)
         torch.cuda.synchronize()
 
@@ -259,15 +257,13 @@ class TestEP(unittest.TestCase):
     # PP-1F1B handle isolation
 
     def test_pp_1f1b_two_handles(self):
-        """PP-1F1B interleave (F0 F1 B0 F2 B1 B2) over 3 per-microbatch handles."""
+        """PP-1F1B interleave (F0 F1 B0 F2 B1 B2) over 3 per-microbatch buffers."""
         T, H = TOKENS_PER_RANK, HIDDEN_DIM
         idx, _toks, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
         scales = (0.13, 0.41, 0.77)
-        handles, buffers, tokens, tokens_p = [], [], [], []
+        buffers, tokens, tokens_p = [], [], []
         for s in scales:
-            h = self._make_handle()
-            handles.append(h)
-            buffers.append(self._make_ep_buffer(h))
+            buffers.append(self._make_buffer())
             t = torch.full(
                 (T, H), s + self.cfg.rank * 0.01, dtype=torch.bfloat16, device=self.cfg.device
             )
@@ -277,7 +273,7 @@ class TestEP(unittest.TestCase):
         recv = [None, None, None]
 
         def fwd(k):
-            recv[k], _, _ = ep_dispatch(handles[k], buffers[k], tokens_p[k], idx, w)
+            recv[k], _, _ = ep_dispatch(buffers[k], tokens_p[k], idx, w)
 
         def bwd(k):
             (0.5 * (recv[k].float() ** 2).sum()).backward()
@@ -301,12 +297,12 @@ class TestEP(unittest.TestCase):
     # Input validation
 
     def test_topk_int32_raises_clear_error(self):
-        handle = self._make_handle()
+        buf = self._make_buffer()
         topk_idx_int32 = torch.zeros(
             TOKENS_PER_RANK, TOP_K, dtype=torch.int32, device=self.cfg.device
         )
         with self.assertRaises(RuntimeError) as cm:
-            ep_prepare(handle, topk_idx_int32)
+            ep_prepare(buf, topk_idx_int32)
         msg = str(cm.exception)
         self.assertIn("topk_idx", msg)
         self.assertIn(".long()", msg)
