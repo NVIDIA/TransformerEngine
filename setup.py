@@ -84,29 +84,18 @@ def setup_common_extension() -> CMakeExtension:
         cusolvermp_dir = os.getenv("CUSOLVERMP_HOME", "/usr")
         cmake_flags.append(f"-DCUSOLVERMP_DIR={cusolvermp_dir}")
 
-    # NCCL EP: on by default; auto-disabled if no arch >= 90.
-    # Set NVTE_BUILD_WITH_NCCL_EP=0/1 to force off/on.
-    nccl_ep_env = os.getenv("NVTE_BUILD_WITH_NCCL_EP")
-    explicit_nccl_ep = nccl_ep_env is not None
-    build_with_nccl_ep = bool(int(nccl_ep_env)) if explicit_nccl_ep else True
-
+    # NCCL EP (Hopper+): on by default; auto-skipped when no arch >= 90 is
+    # targeted. Set NVTE_BUILD_WITH_NCCL_EP=0 to force off.
+    build_with_nccl_ep = bool(int(os.getenv("NVTE_BUILD_WITH_NCCL_EP", "1")))
     if build_with_nccl_ep:
         arch_tokens = [a.strip() for a in str(archs or "").split(";") if a.strip()]
-        has_hopper_or_newer = any(t.lower() == "native" for t in arch_tokens) or any(
-            int(t.rstrip("af")) >= 90 for t in arch_tokens if t.rstrip("af").isdigit()
+        has_hopper_or_newer = any(
+            t.lower() == "native" or (t.rstrip("af").isdigit() and int(t.rstrip("af")) >= 90)
+            for t in arch_tokens
         )
         if not has_hopper_or_newer:
-            if explicit_nccl_ep:
-                raise RuntimeError(
-                    "NVTE_BUILD_WITH_NCCL_EP=1 requires at least one CUDA arch >= 90 in "
-                    f"NVTE_CUDA_ARCHS (got '{archs}'). Add '90' or unset NVTE_BUILD_WITH_NCCL_EP."
-                )
-            print(
-                "[NCCL EP] No CUDA arch >= 90 in NVTE_CUDA_ARCHS"
-                f" ('{archs}'); auto-disabling NCCL EP (nvte_ep_* will throw at runtime)."
-            )
+            print(f"[NCCL EP] No arch >= 90 in NVTE_CUDA_ARCHS ('{archs}'); skipping build.")
             build_with_nccl_ep = False
-
     if build_with_nccl_ep:
         build_nccl_ep_submodule()
     else:
@@ -213,15 +202,16 @@ def build_nccl_ep_submodule() -> str:
     build_dir = nccl_root / "build"
     nccl_ep_lib = build_dir / "lib" / "libnccl_ep.so"
 
-    archs = cuda_archs() or "90"
-    arch_list = []
-    for a in str(archs).split(";"):
-        a = a.strip().rstrip("af")
-        if a and a.isdigit() and int(a) >= 90:
-            arch_list.append(a)
-    if not arch_list:
-        arch_list = ["90"]
-    gencode = " ".join(f"-gencode=arch=compute_{a},code=sm_{a}" for a in arch_list)
+    # Caller gates on arch >= 90 or "native"; let nvcc resolve "native".
+    arch_tokens = [a.strip() for a in str(cuda_archs() or "").split(";") if a.strip()]
+    if any(t.lower() == "native" for t in arch_tokens):
+        gencode = "-arch=native"
+    else:
+        arch_list = [
+            t.rstrip("af") for t in arch_tokens
+            if t.rstrip("af").isdigit() and int(t.rstrip("af")) >= 90
+        ]
+        gencode = " ".join(f"-gencode=arch=compute_{a},code=sm_{a}" for a in arch_list)
 
     nproc = os.cpu_count() or 8
     env = os.environ.copy()
