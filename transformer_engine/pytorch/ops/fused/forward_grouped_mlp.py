@@ -14,6 +14,7 @@ import torch
 
 import transformer_engine_torch as tex
 from ...cpp_extensions import general_gemm, general_grouped_gemm_for_grouped_tensor
+from ...cpu_offload import is_cpu_offload_enabled
 from ...quantization import Recipe
 from ...tensor import NVFP4Quantizer, NVFP4Tensor, Quantizer
 from ...utils import (
@@ -725,6 +726,7 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
         # Save state for backward pass
         if requires_grad:
             mark_grouped_tensor(grouped_fc1_x, activation_in, scales, grouped_fc2_x)
+            cpu_offloading = is_cpu_offload_enabled()
             activation_is_srelu = isinstance(activation_op, ScaledSReLU)
             activation_recompute_in_mlp = bool(
                 getattr(activation_op, "activation_recompute_in_mlp", False)
@@ -746,9 +748,10 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
                         grouped_fc_x.rowwise_data = None
                         grouped_fc_x.scale_inv = None
 
-            fc1_op.maybe_mark_and_start_activation_offload(grouped_fc1_x, start=True)
-            activation_op.maybe_mark_and_start_activation_offload(activation_in, start=True)
-            fc2_op.maybe_mark_and_start_activation_offload(saved_grouped_fc2_x, start=True)
+            if cpu_offloading:
+                fc1_op.maybe_mark_and_start_activation_offload(grouped_fc1_x, start=True)
+                activation_op.maybe_mark_and_start_activation_offload(activation_in, start=True)
+                fc2_op.maybe_mark_and_start_activation_offload(saved_grouped_fc2_x, start=True)
 
             # FC1 saved-tensor layout.
             #   [split_sizes, base_split_offsets, split_points,

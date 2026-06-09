@@ -16,6 +16,7 @@ import torch
 import transformer_engine_torch as tex
 from ...constants import DType
 from ...cpp_extensions import general_grouped_gemm, general_grouped_gemm_for_grouped_tensor
+from ...cpu_offload import is_cpu_offload_enabled
 from ...distributed import CudaRNGStatesTracker
 from ...module._common import WeightGradStore
 from ...module.base import (
@@ -1033,14 +1034,15 @@ class GroupedLinear(BasicOperation):
         # temporary workspaces freshly created in each forward pass.
         saved = tensors_to_save[0]
         offset = 4 if self._scale_bias else 3
-        if use_grouped_tensor_path:
-            # Layout: [split_sizes, base_split_offsets, split_points, (scales?), grouped_x, *weights]
-            grouped_x = saved[offset]
-            self.maybe_mark_and_start_activation_offload(grouped_x)
-        else:
-            # Layout: [split_sizes, None, None, (scales?), *xs, *ws]
-            live_xs = [t for t in saved[offset : offset + self.num_groups] if t is not None]
-            self.maybe_mark_and_start_activation_offload(*live_xs)
+        if is_cpu_offload_enabled():
+            if use_grouped_tensor_path:
+                # Layout: [split_sizes, base_split_offsets, split_points, (scales?), grouped_x, *weights]
+                grouped_x = saved[offset]
+                self.maybe_mark_and_start_activation_offload(grouped_x)
+            else:
+                # Layout: [split_sizes, None, None, (scales?), *xs, *ws]
+                live_xs = [t for t in saved[offset : offset + self.num_groups] if t is not None]
+                self.maybe_mark_and_start_activation_offload(*live_xs)
 
         ctx.save_for_backward(*tensors_to_save[0])
 
@@ -1127,7 +1129,8 @@ class GroupedLinear(BasicOperation):
         else:
             xs = torch.split(x, split_sizes_int)
         live_xs = [t for t in xs if t is not None]
-        self.maybe_mark_and_start_activation_offload(*live_xs, start=True)
+        if is_cpu_offload_enabled():
+            self.maybe_mark_and_start_activation_offload(*live_xs, start=True)
 
         # Allocate output tensor
         in_shape = list(input_.size())
@@ -1233,7 +1236,8 @@ class GroupedLinear(BasicOperation):
                 tensor_offsets=base_split_offsets * self.in_features,
             )
 
-        self.maybe_mark_and_start_activation_offload(grouped_x, start=True)
+        if is_cpu_offload_enabled():
+            self.maybe_mark_and_start_activation_offload(grouped_x, start=True)
 
         # Build the weight GroupedTensor / list.
         if self.single_grouped_weight:

@@ -10,6 +10,7 @@ import os
 
 import torch
 
+from ...cpu_offload import is_cpu_offload_enabled
 from ...torch_version import torch_version
 from ...jit import (
     l2normalization_fused,
@@ -101,7 +102,8 @@ class L2Normalization(BasicOperation):
 
         # Save state for backward pass
         if requires_grad:
-            self.maybe_mark_and_start_activation_offload(x, rsqrt_norm)
+            if is_cpu_offload_enabled():
+                self.maybe_mark_and_start_activation_offload(x, rsqrt_norm)
             ctx.save_for_backward(x, rsqrt_norm)
 
         return y

@@ -14,6 +14,7 @@ import torch
 
 from transformer_engine_torch import rmsnorm_bwd, rmsnorm_fwd
 from ...constants import TE_DType
+from ...cpu_offload import is_cpu_offload_enabled
 from ...export import is_in_onnx_export_mode
 from ...tensor import Quantizer
 from ...utils import (
@@ -196,7 +197,8 @@ class RMSNorm(BasicOperation):
 
         # Save state for backward pass
         if ctx.requires_grad:
-            self.maybe_mark_and_start_activation_offload(x, rstdevs)
+            if is_cpu_offload_enabled():
+                self.maybe_mark_and_start_activation_offload(x, rstdevs)
             ctx.save_for_backward(x, rstdevs)
             ctx.dtype = dtype
 

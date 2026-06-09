@@ -212,20 +212,16 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         *tensors: Any,
         start: bool = False,
     ) -> None:
-        """Mark saved activation tensors for CPU offloading when enabled.
+        """Mark saved activation tensors for CPU offloading in an active offload context.
 
         If activation offloading has been disabled for this op, mark the tensors so the
         active offload context skips them.
         """
         from ..cpu_offload import (  # pylint: disable=import-outside-toplevel
-            is_cpu_offload_enabled,
             mark_activation_offload,
             mark_not_offload,
             start_offload,
         )
-
-        if not is_cpu_offload_enabled():
-            return
 
         tensors = tuple(tensor for tensor in tensors if tensor is not None)
         if not tensors:

@@ -11,6 +11,7 @@ from typing import Any, Optional
 import torch
 
 import transformer_engine_torch as tex
+from ...cpu_offload import is_cpu_offload_enabled
 from ...constants import DType
 from ...tensor import Float8CurrentScalingQuantizer, Quantizer
 from ...utils import clear_tensor_data
@@ -126,7 +127,8 @@ class SwiGLU(BasicOperation):
 
         # Save state for backward pass
         if ctx.requires_grad:
-            self.maybe_mark_and_start_activation_offload(input_)
+            if is_cpu_offload_enabled():
+                self.maybe_mark_and_start_activation_offload(input_)
             ctx.save_for_backward(input_)
             ctx.dtype = dtype
             ctx.prev_op_grad_output_quantizer = prev_op_grad_output_quantizer
@@ -309,7 +311,8 @@ class ClampedSwiGLU(BasicOperation):
 
         # Save state for backward pass
         if ctx.requires_grad:
-            self.maybe_mark_and_start_activation_offload(x)
+            if is_cpu_offload_enabled():
+                self.maybe_mark_and_start_activation_offload(x)
             ctx.save_for_backward(x)
             ctx.dtype = dtype
             ctx.prev_op_grad_output_quantizer = prev_op_grad_output_quantizer
@@ -459,7 +462,8 @@ class _ScaledGLU(BasicOperation):
         # Save state for backward pass
         ctx = basic_op_ctxs[0]
         if ctx.requires_grad:
-            self.maybe_mark_and_start_activation_offload(input_)
+            if is_cpu_offload_enabled():
+                self.maybe_mark_and_start_activation_offload(input_)
             ctx.input_requires_grad = True
             ctx.extra_input_requires_grad = extra_input.requires_grad
             ctx.dtype = dtype
