@@ -672,13 +672,6 @@ def get_attention_backend(
         if use_flash_attention:
             use_flash_attention = False
             logger.debug("Disabling FlashAttention for max_logit")
-        # FusedAttention emits max_logit alongside the softmax stats, which cuDNN only
-        # supports through the unified softmax node introduced in cuDNN 9.21.0. On older
-        # cuDNN the composite softmax node rejects the stats+max combination, so fall back
-        # to UnfusedDotProductAttention.
-        if use_fused_attention and cudnn_version < (9, 21, 0):
-            use_fused_attention = False
-            logger.debug("Disabling FusedAttention for max_logit for cuDNN < 9.21.0")
         if fp8 and fp8_meta["recipe"].fp8_dpa:
             use_flash_attention = False
             use_fused_attention = False
