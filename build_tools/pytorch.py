@@ -6,6 +6,7 @@
 
 import os
 from pathlib import Path
+from importlib import metadata
 
 import setuptools
 
@@ -87,6 +88,9 @@ def setup_pytorch_extension(
         library_dirs.append(nvshmem_home / "lib")
         libraries.append("nvshmem_host")
         cxx_flags.append("-DNVTE_ENABLE_NVSHMEM")
+
+    if bool(int(os.getenv("NVTE_WITH_CUBLASMP", 0))):
+        cxx_flags.append("-DNVTE_WITH_CUBLASMP")
 
     # Construct PyTorch CUDA extension
     sources = [str(path) for path in sources]
