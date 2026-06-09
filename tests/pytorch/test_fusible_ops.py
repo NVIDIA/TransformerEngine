@@ -101,12 +101,12 @@ def test_basic_operation_activation_offloading_policy(monkeypatch):
     assert calls == [("start", [tensor_id]), ("mark", [tensor_id])]
 
     calls.clear()
-    op.disable_activation_offloading()
+    op.set_activation_offloading(False)
     op.maybe_mark_and_start_activation_offload(tensor, start=True)
     assert calls == [("skip", [tensor_id])]
 
     calls.clear()
-    op.enable_activation_offloading()
+    op.set_activation_offloading(True)
     op.maybe_mark_and_start_activation_offload(tensor, start=True, mark=False)
     assert calls == [("start", [tensor_id])]
 

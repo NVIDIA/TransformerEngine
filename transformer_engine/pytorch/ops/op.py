@@ -195,17 +195,13 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
     def is_fused_op(self) -> bool:
         return False
 
-    def disable_activation_offloading(self, disabled: bool = True) -> None:
-        """Disable activation CPU offloading for tensors saved by this op.
+    def set_activation_offloading(self, enabled: bool) -> None:
+        """Enable or disable activation CPU offloading for tensors saved by this op.
 
         CPU offloading is controlled by the surrounding offload context. This setting only
-        opts this operation's saved activation tensors out of that context.
+        opts this operation's saved activation tensors in or out of that context.
         """
-        self.activation_offloading = not disabled
-
-    def enable_activation_offloading(self) -> None:
-        """Re-enable activation CPU offloading for tensors saved by this op."""
-        self.disable_activation_offloading(False)
+        self.activation_offloading = enabled
 
     def maybe_mark_and_start_activation_offload(
         self,
