@@ -238,6 +238,16 @@ def build_nccl_ep_submodule() -> str:
             env=env,
         )
 
+    # Stage libnccl_ep.so.0 alongside libtransformer_engine.so so $ORIGIN-rpath
+    # finds it in the installed wheel.
+    soname = "libnccl_ep.so.0"
+    src = (build_dir / "lib" / soname).resolve()
+    dst = current_file_path / "transformer_engine" / soname
+    if dst.is_symlink() or dst.exists():
+        dst.unlink()
+    shutil.copy2(src, dst)
+    print(f"[NCCL EP] Bundled {dst} ({src.stat().st_size // (1 << 20)} MB)")
+
     # TE's CMake expects nccl.h under 3rdparty/nccl/build/include/ for its
     # version check. Mirror the top-level host headers from the system NCCL
     # install — DON'T mirror nccl_device/ because the submodule ships its own
@@ -339,7 +349,8 @@ if __name__ == "__main__":
     else:
         install_requires, test_requires = setup_requirements()
         ext_modules = [setup_common_extension()]
-        package_data = {"": ["VERSION.txt"]}
+        # libnccl_ep.so.0 is staged by build_nccl_ep_submodule(); ship it.
+        package_data = {"": ["VERSION.txt"], "transformer_engine": ["libnccl_ep.so*"]}
         include_package_data = True
         extras_require = {"test": test_requires}
 
