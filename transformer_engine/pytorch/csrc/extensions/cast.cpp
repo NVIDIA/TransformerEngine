@@ -20,6 +20,7 @@
 #include "common/util/system.h"
 #include "pybind.h"
 #include "transformer_engine/transformer_engine.h"
+#include "tvm_ffi_bridge.h"
 
 namespace transformer_engine {
 namespace pytorch {
@@ -438,6 +439,30 @@ py::object dequantize(const py::handle &input, transformer_engine::DType otype) 
   NVTE_SCOPED_GIL_RELEASE({
     nvte_dequantize(input_tensor.data(), out_tensor.data(), at::cuda::getCurrentCUDAStream());
   });
+
+  return out;
+}
+
+py::object dequantize_with_quantizer(const py::handle &input, transformer_engine::DType otype,
+                                     py::handle quantizer) {
+  init_extension();
+
+  // If other Quantizer types also support customized dequantization, they should be allowed here as well
+  NVTE_CHECK(!quantizer.is_none() && detail::IsFlexQuantizers(quantizer.ptr()),
+             "dequantize_with_quantizer expects a FlexQuantizer");
+
+  auto quantizer_cpp = convert_quantizer(quantizer);
+  auto *flex = static_cast<FlexQuantizer *>(quantizer_cpp.get());
+
+  // Interpret the (multi-format) quantized input via the quantizer.
+  const auto &input_tensor = makeTransformerEngineTensor(input, quantizer);
+
+  // Output is always a plain high-precision tensor; allocate with NoneQuantizer.
+  NoneQuantizer out_alloc{py::none()};
+  const auto &shape = convertShape(input_tensor.shape());
+  auto [out_tensor, out] = out_alloc.create_tensor(shape, otype);
+
+  NVTE_SCOPED_GIL_RELEASE({ flex->dequantize(input_tensor, out_tensor); });
 
   return out;
 }

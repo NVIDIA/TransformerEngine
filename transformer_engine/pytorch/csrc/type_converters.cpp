@@ -174,6 +174,52 @@ TensorWrapper NVTETensorFromNVFP4Tensor(py::handle tensor, Quantizer *quantizer)
   return ret;
 }
 
+TensorWrapper NVTETensorFromFlexTensor(py::handle tensor, Quantizer *quantizer) {
+  auto ret = TensorWrapper(NVTE_FLEX_1D_SCALING);
+
+  const bool rowwise_usage = !(tensor.attr("_rowwise_data").is_none());
+  const bool columnwise_usage = !(tensor.attr("_columnwise_data").is_none());
+  const bool with_gemm_swizzled_scales = tensor.attr("_with_gemm_swizzled_scales").cast<bool>();
+  const bool row_scaled_nvfp4 = tensor.attr("_row_scaled_nvfp4").cast<bool>();
+
+  NVTE_CHECK(rowwise_usage || columnwise_usage, "No data found for Flex Tensor.");
+
+  // Row-scaled data
+  if (rowwise_usage) {
+    const DType dtype_row = tensor.attr("_dtype_row").cast<DType>();
+    const auto &rowwise_data = tensor.attr("_rowwise_data").cast<at::Tensor>();
+    const auto &scale_inv = tensor.attr("_rowwise_scale_inv").cast<at::Tensor>();
+    ret.set_rowwise_data(rowwise_data.data_ptr(), dtype_row, getTensorShape(rowwise_data));
+    ret.set_rowwise_scale_inv(scale_inv.data_ptr(), DType::kFloat32, getTensorShape(scale_inv));
+    if (is_fp4_dtype(dtype_row)) {
+      const auto &amax_rowwise = tensor.attr("_amax_rowwise").cast<at::Tensor>();
+      ret.set_amax(amax_rowwise.data_ptr(), DType::kFloat32, getTensorShape(amax_rowwise));
+    }
+  }
+
+  // Column-scaled data
+  if (columnwise_usage) {
+    const DType dtype_column = tensor.attr("_dtype_column").cast<DType>();
+    const auto &columnwise_data = tensor.attr("_columnwise_data").cast<at::Tensor>();
+    const auto &scale_inv = tensor.attr("_columnwise_scale_inv").cast<at::Tensor>();
+    ret.set_columnwise_data(columnwise_data.data_ptr(), dtype_column, getTensorShape(columnwise_data));
+    ret.set_columnwise_scale_inv(scale_inv.data_ptr(), DType::kFloat32, getTensorShape(scale_inv));
+    if (is_fp4_dtype(dtype_column)) {
+      const auto &amax_columnwise = tensor.attr("_amax_columnwise").cast<at::Tensor>();
+      ret.set_columnwise_amax(amax_columnwise.data_ptr(), DType::kFloat32,
+                              getTensorShape(amax_columnwise));
+    }
+  }
+
+  // Scale layout
+  ret.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
+
+  // Quantizer state
+  quantizer->set_quantization_params(&ret);
+
+  return ret;
+}
+
 NVTEScalingMode ScalingModeFromQuantizer(py::handle quantizer) {
   auto *quantizer_ptr = quantizer.ptr();
   if (IsMXFP8Quantizers(quantizer_ptr)) {

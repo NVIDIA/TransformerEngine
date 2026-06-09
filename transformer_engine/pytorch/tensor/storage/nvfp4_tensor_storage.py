@@ -283,18 +283,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         if shape is None or shape == cur_shape:
             return self
 
-        # Canonicalize shape
-        if not isinstance(shape, Iterable):
-            shape = [shape]
-        elif len(shape) == 1 and isinstance(shape[0], Iterable):
-            shape = shape[0]
-        if -1 in shape:
-            shape = list(shape)
-            d_inferred = -math.prod(cur_shape) // math.prod(shape)
-            for i, d in enumerate(shape):
-                if d == -1:
-                    shape[i] = d_inferred
-                    break
+        shape = canonicalize_shape(shape, cur_shape)
         if shape[-1] != cur_shape[-1]:
             raise RuntimeError(
                 "NVFP4Tensor does not support reshaping inner dimension "

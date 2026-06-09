@@ -15,7 +15,7 @@ import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import MXFP8BlockScaling, Recipe
 from ..constants import MXFP8_BLOCK_SCALING_SIZE, DType
-from ..utils import devices_match, round_up_to_nearest_multiple
+from ..utils import canonicalize_shape, devices_match, round_up_to_nearest_multiple
 from .storage.mxfp8_tensor_storage import MXFP8TensorStorage, _FromMXFP8Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ._quantization_helpers import _IdentityFunc
@@ -898,18 +898,7 @@ class _ViewFunc(torch.autograd.Function):
         if shape is None:
             return tensor
 
-        # Canonicalize shape
-        if not isinstance(shape, Iterable):
-            shape = [shape]
-        elif len(shape) == 1 and isinstance(shape[0], Iterable):
-            shape = shape[0]
-        if -1 in shape:
-            shape = list(shape)
-            d_inferred = -math.prod(ctx.shape) // math.prod(shape)
-            for i, d in enumerate(shape):
-                if d == -1:
-                    shape[i] = d_inferred
-                    break
+        shape = canonicalize_shape(shape, ctx.shape)
         if shape[-1] != ctx.shape[-1]:
             warnings.warn(
                 "MXFP8Tensor does not support reshaping inner dimension. "
@@ -991,18 +980,7 @@ class _ReshapeFunc(torch.autograd.Function):
         if shape is None:
             return tensor
 
-        # Canonicalize shape
-        if not isinstance(shape, Iterable):
-            shape = [shape]
-        elif len(shape) == 1 and isinstance(shape[0], Iterable):
-            shape = shape[0]
-        if -1 in shape:
-            shape = list(shape)
-            d_inferred = -math.prod(ctx.shape) // math.prod(shape)
-            for i, d in enumerate(shape):
-                if d == -1:
-                    shape[i] = d_inferred
-                    break
+        shape = canonicalize_shape(shape, ctx.shape)
         if shape[-1] != ctx.shape[-1]:
             raise RuntimeError(
                 "MXFP8Tensor does not support reshaping inner dimension "

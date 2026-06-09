@@ -43,6 +43,9 @@ extern PyTypeObject *Float8BlockwiseQuantizerClass;
 extern PyTypeObject *NVFP4TensorPythonClass;
 extern PyTypeObject *NVFP4TensorStoragePythonClass;
 extern PyTypeObject *NVFP4QuantizerClass;
+extern PyTypeObject *FlexTensorPythonClass;
+extern PyTypeObject *FlexTensorStoragePythonClass;
+extern PyTypeObject *FlexQuantizerClass;
 extern PyTypeObject *GroupedTensorPythonClass;
 extern PyTypeObject *GroupedTensorStoragePythonClass;
 
@@ -81,6 +84,14 @@ inline bool IsNVFP4Tensor(PyObject *obj) {
   return Py_TYPE(obj) == NVFP4TensorPythonClass || Py_TYPE(obj) == NVFP4TensorStoragePythonClass;
 }
 
+inline bool IsFlexQuantizers(PyObject *obj) { return Py_TYPE(obj) == FlexQuantizerClass; }
+
+inline bool IsFlexTensor(PyObject *obj) {
+  return Py_TYPE(obj) == FlexTensorPythonClass || Py_TYPE(obj) == FlexTensorStoragePythonClass;
+}
+
+TensorWrapper NVTETensorFromFlexTensor(py::handle tensor, Quantizer *quantization_params);
+
 TensorWrapper NVTETensorFromFloat8Tensor(py::handle tensor, Quantizer *quantizer);
 
 template <typename T>
@@ -113,7 +124,9 @@ constexpr std::array custom_types_converters = {
     std::make_tuple(IsFloat8BlockwiseQTensor, IsFloat8BlockwiseQuantizers,
                     NVTETensorFromFloat8BlockwiseQTensor, CreateQuantizer<Float8BlockQuantizer>),
     std::make_tuple(IsNVFP4Tensor, IsNVFP4Quantizers, NVTETensorFromNVFP4Tensor,
-                    CreateQuantizer<NVFP4Quantizer>)};
+                    CreateQuantizer<NVFP4Quantizer>),
+    std::make_tuple(IsFlexTensor, IsFlexQuantizers, NVTETensorFromFlexTensor,
+                    CreateQuantizer<FlexQuantizer>)};
 }  // namespace detail
 
 }  // namespace transformer_engine::pytorch

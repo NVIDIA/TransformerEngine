@@ -115,6 +115,9 @@ enum NVTEScalingMode {
   /*! Single scale per block of 16 elements consecutive in either
    * rowwise or columnwise direction */
   NVTE_NVFP4_1D_SCALING = 4,
+  /*! Flex scaling. The quantization is implemented by users via CuTeDSL.
+   */
+  NVTE_FLEX_1D_SCALING = 5,
   NVTE_INVALID_SCALING = 100
 };
 

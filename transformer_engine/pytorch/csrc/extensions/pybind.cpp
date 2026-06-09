@@ -18,7 +18,6 @@
 
 #include "../common.h"
 #include "../extensions.h"
-#include "common.h"
 
 namespace transformer_engine::pytorch {
 
@@ -35,6 +34,9 @@ PyTypeObject *Float8BlockwiseQuantizerClass = nullptr;
 PyTypeObject *NVFP4TensorPythonClass = nullptr;
 PyTypeObject *NVFP4TensorStoragePythonClass = nullptr;
 PyTypeObject *NVFP4QuantizerClass = nullptr;
+PyTypeObject *FlexTensorPythonClass = nullptr;
+PyTypeObject *FlexTensorStoragePythonClass = nullptr;
+PyTypeObject *FlexQuantizerClass = nullptr;
 PyTypeObject *GroupedTensorPythonClass = nullptr;
 PyTypeObject *GroupedTensorStoragePythonClass = nullptr;
 std::once_flag extension_init_flag;
@@ -103,6 +105,21 @@ void init_nvfp4_extensions() {
              "Internal error: could not initialize pyTorch NVFP4 extension.");
 }
 
+void init_flex_extensions() {
+  auto flex_module = py::module_::import("transformer_engine.pytorch.tensor.flex_tensor");
+  FlexQuantizerClass = reinterpret_cast<PyTypeObject *>(
+      PyObject_GetAttrString(flex_module.ptr(), "FlexQuantizer"));
+  FlexTensorPythonClass =
+      reinterpret_cast<PyTypeObject *>(PyObject_GetAttrString(flex_module.ptr(), "FlexTensor"));
+  auto flex_base_module =
+      py::module_::import("transformer_engine.pytorch.tensor.storage.flex_tensor_storage");
+  FlexTensorStoragePythonClass = reinterpret_cast<PyTypeObject *>(
+      PyObject_GetAttrString(flex_base_module.ptr(), "FlexTensorStorage"));
+  NVTE_CHECK(FlexQuantizerClass != nullptr && FlexTensorPythonClass != nullptr &&
+                 FlexTensorStoragePythonClass != nullptr,
+             "Internal error: could not initialize pyTorch Flex extension.");
+}
+
 void init_grouped_tensor_extension() {
   if (GroupedTensorPythonClass && GroupedTensorStoragePythonClass) return;
   auto grouped_tensor_module =
@@ -125,6 +142,7 @@ void init_extension() {
     init_mxfp8_extension();
     init_float8blockwise_extension();
     init_nvfp4_extensions();
+    init_flex_extensions();
     init_grouped_tensor_extension();
   });
 }
@@ -197,6 +215,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("output") = py::none(), py::arg("noop") = py::none());
   m.def("dequantize", &transformer_engine::pytorch::dequantize, "Dequantize", py::arg("input"),
         py::arg("otype"));
+  m.def("dequantize_with_quantizer", &transformer_engine::pytorch::dequantize_with_quantizer,
+        "Dequantize through the quantizer's registered dequantize_func", py::arg("input"),
+        py::arg("otype"), py::arg("quantizer"));
   m.def("create_empty_quantized_tensor",
         &transformer_engine::pytorch::create_empty_quantized_tensor,
         "Create an empty quantized tensor", py::arg("quantizer"), py::arg("shape"),

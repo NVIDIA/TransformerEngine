@@ -11,7 +11,7 @@
 #include "common/util/system.h"
 #include "pybind.h"
 #include "torch/torch.h"
-
+#include "tvm_ffi_bridge.h"  // convert_to_dltype, DLTensorWrapper, tvm::ffi::Function
 namespace transformer_engine::pytorch {
 
 namespace {
@@ -2621,6 +2621,590 @@ std::vector<size_t> NVFP4Quantizer::get_scale_shape(const std::vector<size_t>& s
     scale_shape = {sinv0, sinv1};
   }
   return scale_shape;
+}
+
+FlexQuantizer::FlexQuantizer(const py::handle& quantizer) : Quantizer(quantizer) {
+  // The quantization format for row-wise direction
+  if (quantizer.attr("dtype_row").is_none()) {
+    this->dtype_row = std::nullopt;
+    this->rowwise_usage = false;
+  } else {
+    DType dtype_row = quantizer.attr("dtype_row").cast<DType>();
+    if (is_fp8_dtype(dtype_row) || is_fp4_dtype(dtype_row)) {
+      this->dtype_row = dtype_row;
+      this->rowwise_usage = true;
+    } else {
+      NVTE_ERROR("Row-wise quantization for FlexQuantizer currently does not support this dtype");
+    }
+  }
+
+  // The quantization format for column-wise direction
+  if (quantizer.attr("dtype_column").is_none()) {
+    this->dtype_column = std::nullopt;
+    this->columnwise_usage = false;
+  } else {
+    DType dtype_col = quantizer.attr("dtype_column").cast<DType>();
+    if (is_fp8_dtype(dtype_col) || is_fp4_dtype(dtype_col)) {
+      this->dtype_column = dtype_col;
+      this->columnwise_usage = true;
+    } else {
+      NVTE_ERROR("Column-wise quantization for FlexQuantizer currently does not support this dtype");
+    }
+  }
+
+  NVTE_CHECK(rowwise_usage || columnwise_usage, "FlexQuantizer should have at least one direction quantized.");
+
+  // Name of the tvm-ffi global function (a CuTeDSL kernel the Python side
+  // already compiled + registered via tvm_ffi.register_global_func). quantize()
+  // resolves it from the registry and calls it directly — no Python on the hot
+  // path. (Resolution is deferred to quantize() so common.h stays free of the
+  // tvm-ffi headers.)
+  this->quantize_func = quantizer.attr("quantize_func").cast<std::string>();
+  this->dequantize_func = quantizer.attr("dequantize_func").cast<std::string>();
+  this->stochastic_rounding = quantizer.attr("stochastic_rounding").cast<bool>();
+}
+
+void FlexQuantizer::set_quantization_params(TensorWrapper* tensor) const {}
+
+std::pair<TensorWrapper, py::object> FlexQuantizer::create_tensor(
+    const std::vector<size_t>& shape, DType dtype, std::optional<at::Device> device_opt,
+    bool pin_memory) const {
+  const auto device = resolve_device(device_opt);
+  using namespace pybind11::literals;
+
+  // Scaling factor format
+  const bool with_gemm_swizzled_scales = this->optimize_for_gemm;
+
+  // Tensor dimensions
+  const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
+  const auto [flat_first_dim, flat_last_dim] = get_2d_dims(shape);
+  const auto rowwise_scale_inv_shape = this->dtype_row
+    ? std::optional(get_scale_shape(flat_first_dim, flat_last_dim, *this->dtype_row, false))
+    : std::nullopt;
+  const auto columnwise_scale_inv_shape = this->dtype_column
+    ? std::optional(get_scale_shape(flat_first_dim, flat_last_dim, *this->dtype_column, true))
+    : std::nullopt;
+
+  // Allocate tensors for quantized data and scaling factors
+  at::Tensor rowwise_data_tensor, rowwise_scale_inv_tensor, amax_rowwise_tensor;
+  at::Tensor columnwise_data_tensor, columnwise_scale_inv_tensor, amax_columnwise_tensor;
+
+  const auto bit8_tensor_opts =
+      at::TensorOptions().dtype(torch::kUInt8).device(device).pinned_memory(pin_memory);
+  const auto bit32_tensor_opts =
+      at::TensorOptions().dtype(torch::kFloat32).device(device).pinned_memory(pin_memory);
+
+  if (this->dtype_row) {
+    if (is_fp8_dtype(*this->dtype_row)) {
+      const std::vector<int64_t> scale_inv_shape_int64(rowwise_scale_inv_shape->begin(),
+                                                      rowwise_scale_inv_shape->end());
+      rowwise_data_tensor = at::empty(shape_int64, bit8_tensor_opts);
+      rowwise_scale_inv_tensor = at::empty(scale_inv_shape_int64, bit8_tensor_opts);
+    } else if (is_fp4_dtype(*this->dtype_row)) {
+      const std::vector<int64_t> scale_inv_shape_int64(rowwise_scale_inv_shape->begin(),
+                                                      rowwise_scale_inv_shape->end());
+      rowwise_data_tensor = at::empty(convert_shape_for_fp4(shape_int64), bit8_tensor_opts);
+      rowwise_scale_inv_tensor = at::empty(scale_inv_shape_int64, bit8_tensor_opts);
+      amax_rowwise_tensor = at::empty({1}, bit32_tensor_opts);
+    }
+  }
+
+  if (this->dtype_column) {
+    if (is_fp8_dtype(*this->dtype_column)) {
+      const std::vector<int64_t> scale_inv_shape_int64(columnwise_scale_inv_shape->begin(),
+                                                      columnwise_scale_inv_shape->end());
+      columnwise_data_tensor = at::empty(shape_int64, bit8_tensor_opts);
+      columnwise_scale_inv_tensor = at::empty(scale_inv_shape_int64, bit8_tensor_opts);
+    } else if (is_fp4_dtype(*this->dtype_column)) {
+      const std::vector<int64_t> scale_inv_shape_int64(columnwise_scale_inv_shape->begin(),
+                                                      columnwise_scale_inv_shape->end());
+      columnwise_data_tensor = at::empty(convert_shape_for_fp4(shape_int64), bit8_tensor_opts);
+      columnwise_scale_inv_tensor = at::empty(scale_inv_shape_int64, bit8_tensor_opts);
+      amax_columnwise_tensor = at::empty({1}, bit32_tensor_opts);
+    }
+  }
+
+  // Convert tensors to Python
+  auto py_cast = [](at::Tensor& tensor, bool need_cast) -> py::object {
+    return need_cast ? py::cast(tensor) : py::none();
+  };
+
+  auto rowwise_data_py = py_cast(rowwise_data_tensor, rowwise_usage);
+  auto rowwise_scale_inv_py = py_cast(rowwise_scale_inv_tensor, rowwise_usage);
+  auto columnwise_data_py = py_cast(columnwise_data_tensor, columnwise_usage);
+  auto columnwise_scale_inv_py = py_cast(columnwise_scale_inv_tensor, columnwise_usage);
+  auto amax_rowwise_py = py_cast(amax_rowwise_tensor, rowwise_usage);
+  auto amax_columnwise_py = py_cast(amax_columnwise_tensor, columnwise_usage);
+
+  py::object out_py;
+
+  if (internal) {
+    // Use direct C API call bypassing pybind11 overhead
+    py::dict kwargs;
+    py::tuple args(0);
+    kwargs["rowwise_data"] = rowwise_data_py;
+    kwargs["rowwise_scale_inv"] = rowwise_scale_inv_py;
+    kwargs["columnwise_data"] = columnwise_data_py;
+    kwargs["columnwise_scale_inv"] = columnwise_scale_inv_py;
+    kwargs["amax_rowwise"] = amax_rowwise_py;
+    kwargs["amax_columnwise"] = amax_columnwise_py;
+    kwargs["dtype_row"] = py::cast(this->dtype_row);
+    kwargs["dtype_column"] = py::cast(this->dtype_column);
+    kwargs["quantizer"] = this->quantizer;
+    kwargs["with_gemm_swizzled_scales"] = py::cast(with_gemm_swizzled_scales);
+    kwargs["fake_dtype"] = GetATenDType(dtype);
+
+    PyObject* result = PyObject_Call(reinterpret_cast<PyObject*>(FlexTensorStoragePythonClass),
+                                     args.ptr(), kwargs.ptr());
+    if (result == nullptr) {
+      PyErr_Print();
+    }
+
+    NVTE_CHECK(result != nullptr, "Failed to create FlexTensorStorage instance");
+    out_py = py::reinterpret_steal<py::object>(result);
+  } else {
+    // Use direct C API call bypassing pybind11 overhead
+    py::dict kwargs;
+    const auto stride_int64 = stride_from_shape(shape_int64);
+    kwargs["shape"] = py::cast(shape_int64);
+    kwargs["stride"] = py::cast(stride_int64);
+    kwargs["dtype"] = py::cast(GetATenDType(dtype));
+    kwargs["rowwise_data"] = rowwise_data_py;
+    kwargs["rowwise_scale_inv"] = rowwise_scale_inv_py;
+    kwargs["columnwise_data"] = columnwise_data_py;
+    kwargs["columnwise_scale_inv"] = columnwise_scale_inv_py;
+    kwargs["amax_rowwise"] = amax_rowwise_py;
+    kwargs["amax_columnwise"] = amax_columnwise_py;
+    kwargs["dtype_row"] = py::cast(this->dtype_row);
+    kwargs["dtype_column"] = py::cast(this->dtype_column);
+    kwargs["quantizer"] = this->quantizer;
+    kwargs["with_gemm_swizzled_scales"] = py::cast(with_gemm_swizzled_scales);
+    kwargs["device"] = py::cast(device);
+    py::tuple args(0);
+    PyObject* result = PyObject_Call(reinterpret_cast<PyObject*>(FlexTensorPythonClass),
+                                     args.ptr(), kwargs.ptr());
+    if (result == nullptr) {
+      PyErr_Print();
+    }
+
+    NVTE_CHECK(result != nullptr, "Failed to create FlexTensor instance");
+    out_py = py::reinterpret_steal<py::object>(result);
+  }
+
+  // Construct C++ tensor
+  TensorWrapper out_cpp(NVTE_FLEX_1D_SCALING);
+  if (rowwise_usage && this->dtype_row) {
+    out_cpp.set_rowwise_data(rowwise_data_tensor.data_ptr(), *this->dtype_row, shape);
+    if (is_fp8_dtype(*this->dtype_row)) {
+      out_cpp.set_rowwise_scale_inv(rowwise_scale_inv_tensor.data_ptr(), DType::kFloat8E8M0, *rowwise_scale_inv_shape);
+    } else if (is_fp4_dtype(*this->dtype_row)) {
+      out_cpp.set_rowwise_scale_inv(rowwise_scale_inv_tensor.data_ptr(), DType::kFloat8E4M3, *rowwise_scale_inv_shape);
+      out_cpp.set_amax(amax_rowwise_tensor.data_ptr(), DType::kFloat32, getTensorShape(amax_rowwise_tensor));
+    }
+  }
+  if (columnwise_usage && this->dtype_column) {
+    if (is_fp8_dtype(*this->dtype_column)) {
+      out_cpp.set_columnwise_data(columnwise_data_tensor.data_ptr(), *this->dtype_column, shape);
+      out_cpp.set_columnwise_scale_inv(columnwise_scale_inv_tensor.data_ptr(), DType::kFloat8E8M0, *columnwise_scale_inv_shape);
+    } else if (is_fp4_dtype(*this->dtype_column)) {
+      // Follow the pattern of NVFP4's columnwise data layout
+      std::vector<size_t> shape_2d = {flat_first_dim, flat_last_dim};
+      auto col_data_shape_fp4 = make_transpose_shape<size_t>(shape_2d);
+      out_cpp.set_columnwise_data(columnwise_data_tensor.data_ptr(), DType::kFloat4E2M1,
+                                  col_data_shape_fp4);
+      out_cpp.set_columnwise_scale_inv(columnwise_scale_inv_tensor.data_ptr(), DType::kFloat8E4M3,
+                                      *columnwise_scale_inv_shape);
+      out_cpp.set_columnwise_amax(amax_columnwise_tensor.data_ptr(), DType::kFloat32,
+                                  std::vector<size_t>{1});
+    }
+  }
+  out_cpp.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
+  this->set_quantization_params(&out_cpp);
+
+  return {std::move(out_cpp), std::move(out_py)};
+}
+
+std::pair<GroupedTensorWrapper, py::object> FlexQuantizer::create_grouped_tensor(
+        size_t num_tensors, const std::vector<size_t>& logical_shape, DType dtype,
+        py::object quantizer, const std::optional<at::Tensor>& first_dims, size_t logical_first_dim,
+        size_t logical_last_dim) const {
+  // TODO: fix this
+  NVTE_ERROR("Not implemented yet");
+}
+
+std::pair<TensorWrapper, py::object> FlexQuantizer::convert_and_update_tensor(
+    py::object tensor) const {
+  NVTE_CHECK(detail::IsFlexTensor(tensor.ptr()), "FlexQuantizer must output to FlexTensor.");
+
+  // Scaling factor format
+  const bool with_gemm_swizzled_scales = this->optimize_for_gemm;
+
+  // Extract buffers from Python tensor
+  auto get_tensor = [&tensor](const char* name) -> std::optional<at::Tensor> {
+    auto attr_py = tensor.attr(name);
+    if (attr_py.is_none()) {
+      return std::nullopt;
+    }
+    return attr_py.cast<at::Tensor>();
+  };
+  auto rowwise_data = get_tensor("_rowwise_data");
+  auto rowwise_scale_inv = get_tensor("_rowwise_scale_inv");
+  auto columnwise_data = get_tensor("_columnwise_data");
+  auto columnwise_scale_inv = get_tensor("_columnwise_scale_inv");
+  auto amax_rowwise = get_tensor("_amax_rowwise");
+  auto amax_columnwise = get_tensor("_amax_columnwise");
+  NVTE_CHECK(rowwise_data || columnwise_data, "FlexTensor has no data.");
+
+  // Tensor dimensions, shape means original shape
+  std::vector<size_t> shape;
+  if (rowwise_data && this->dtype_row) {
+    if (is_fp4_dtype(*this->dtype_row)) {
+      shape = convert_shape_back_from_fp4(getTensorShape(*rowwise_data), false);
+      if (this->dtype_column && is_fp4_dtype(*this->dtype_column)) {
+        // If both rowwise and columnwise directions are NVFP4 quantized, check if they match
+        auto col_shape = convert_shape_back_from_fp4(getTensorShape(*columnwise_data), true);
+        NVTE_CHECK(get_2d_dims(shape) == get_2d_dims(col_shape), "NVFP4 row-wise data (shape=", shape,
+        ") and column-wise data (shape=", col_shape, ") do not match");
+      }
+    } else if (is_fp8_dtype(*this->dtype_row)) {
+      shape = getTensorShape(*rowwise_data);
+    }
+  } else if (columnwise_data && this->dtype_column) {
+    if (is_fp4_dtype(*this->dtype_column)) {
+      shape = convert_shape_back_from_fp4(getTensorShape(*columnwise_data), true);
+    } else if (is_fp8_dtype(*this->dtype_column)) {
+      shape = getTensorShape(*columnwise_data);
+    }
+  } else {
+    NVTE_ERROR("FlexTensor has neither of rowwise and columnwise data");
+  }
+
+  const auto [flat_first_dim, flat_last_dim] = get_2d_dims(shape);
+  const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
+  const auto uint8_opts = at::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
+
+  // Coerce row-wise data
+  if (this->dtype_row) {
+    if (!rowwise_data) {
+      if (is_fp8_dtype(*this->dtype_row)) {
+        rowwise_data = at::empty(shape_int64, uint8_opts);
+      } else if (is_fp4_dtype(*this->dtype_row)) {
+        rowwise_data = at::empty(convert_shape_for_fp4(shape_int64), uint8_opts);
+      } else {
+        NVTE_ERROR("Unsupported dtype for row-wise quantization in FlexQuantizer: ",
+                   static_cast<int>(*this->dtype_row));
+      }
+      tensor.attr("_rowwise_data") = *rowwise_data;
+    }
+    if (!rowwise_scale_inv) {
+      if (is_fp8_dtype(*this->dtype_row)) {
+        const auto scale_inv_shape = get_scale_shape(shape, *this->dtype_row, false);
+        const std::vector<int64_t> scale_inv_shape_int64(scale_inv_shape.begin(),
+                                                       scale_inv_shape.end());
+        rowwise_scale_inv = at::empty(scale_inv_shape_int64, uint8_opts);
+      } else if (is_fp4_dtype(*this->dtype_row)) {
+        const auto scale_inv_shape = get_scale_shape(shape, *this->dtype_row, false);
+        const std::vector<int64_t> scale_inv_shape_int64(scale_inv_shape.begin(),
+                                                       scale_inv_shape.end());
+        rowwise_scale_inv = at::empty(scale_inv_shape_int64, uint8_opts);
+      } else {
+        NVTE_ERROR("Unsupported dtype for row-wise quantization in FlexQuantizer: ",
+                   static_cast<int>(*this->dtype_row));
+      }
+      tensor.attr("_rowwise_scale_inv") = *rowwise_scale_inv;
+    }
+    if (is_fp4_dtype(*this->dtype_row) && (!amax_rowwise || amax_rowwise->numel() != 1)) {
+      const auto opts = at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+      amax_rowwise = at::empty({1}, opts);
+      tensor.attr("_amax_rowwise") = *amax_rowwise;
+    }
+  } else {  // rowwise_usage == false
+    if (rowwise_data) {
+      rowwise_data.reset();
+      tensor.attr("_rowwise_data") = py::none();
+    }
+    if (rowwise_scale_inv) {
+      rowwise_scale_inv.reset();
+      tensor.attr("_rowwise_scale_inv") = py::none();
+    }
+    if (amax_rowwise) {
+      amax_rowwise.reset();
+      tensor.attr("_amax_rowwise") = py::none();
+    }
+  }
+
+  // Coerce column-wise data
+  if (this->dtype_column) {
+    if (!columnwise_data) {
+      if (is_fp8_dtype(*this->dtype_column)) {
+        columnwise_data = at::empty(shape_int64, uint8_opts);
+      } else if (is_fp4_dtype(*this->dtype_column)) {
+        // enforce 2D shape to avoid [S, B, H] shape and B and be 1
+        // and the transposed shape is [H, S, B], so divide last dim by 2 gives zero
+        std::vector<int64_t> shape_int64_2d = {static_cast<int64_t>(flat_first_dim),
+                                            static_cast<int64_t>(flat_last_dim)};
+        const auto transpose_shape_int64 = make_transpose_shape<int64_t>(shape_int64_2d);
+        columnwise_data = at::empty(convert_shape_for_fp4(transpose_shape_int64), uint8_opts);
+      } else {
+        NVTE_ERROR("Unsupported dtype for column-wise quantization in FlexQuantizer: ",
+                    static_cast<int>(*this->dtype_column));
+      }
+      tensor.attr("_columnwise_data") = *columnwise_data;
+    }
+    if (!columnwise_scale_inv) {
+      if (is_fp8_dtype(*this->dtype_column)) {
+        const auto scale_inv_shape = get_scale_shape(shape, *this->dtype_column, true);
+        const std::vector<int64_t> scale_inv_shape_int64(scale_inv_shape.begin(),
+                                                       scale_inv_shape.end());
+        columnwise_scale_inv = at::empty(scale_inv_shape_int64, uint8_opts);
+      } else if (is_fp4_dtype(*this->dtype_column)) {
+        const auto scale_inv_shape = get_scale_shape(shape, *this->dtype_column, true);
+        const std::vector<int64_t> scale_inv_shape_int64(scale_inv_shape.begin(),
+                                                       scale_inv_shape.end());
+        columnwise_scale_inv = at::empty(scale_inv_shape_int64, uint8_opts);
+      } else {
+        NVTE_ERROR("Unsupported dtype for column-wise quantization in FlexQuantizer: ",
+                    static_cast<int>(*this->dtype_column));
+      }
+      tensor.attr("_columnwise_scale_inv") = *columnwise_scale_inv;
+    }
+    if (is_fp4_dtype(*this->dtype_column) && (!amax_columnwise || amax_columnwise->numel() != 1)) {
+      const auto opts = at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+      amax_columnwise = at::empty({1}, opts);
+      tensor.attr("_amax_columnwise") = *amax_columnwise;
+    }
+  } else { // columnwise_usage == false
+    if (columnwise_data) {
+      columnwise_data.reset();
+      tensor.attr("_columnwise_data") = py::none();
+    }
+    if (columnwise_scale_inv) {
+      columnwise_scale_inv.reset();
+      tensor.attr("_columnwise_scale_inv") = py::none();
+    }
+    if (amax_columnwise) {
+      amax_columnwise.reset();
+      tensor.attr("_amax_columnwise") = py::none();
+    }
+  }
+
+  // Coerce other attrs
+  tensor.attr("_dtype_row") = py::cast(this->dtype_row);
+  tensor.attr("_dtype_column") = py::cast(this->dtype_column);
+  tensor.attr("_with_gemm_swizzled_scales") = with_gemm_swizzled_scales;
+
+  // Construct C++ flex tensor
+  TensorWrapper out_cpp(NVTE_FLEX_1D_SCALING);
+  if (this->dtype_row) {
+    out_cpp.set_rowwise_data(rowwise_data->data_ptr(), *this->dtype_row, shape);
+    if (is_fp8_dtype(*this->dtype_row)) {
+      out_cpp.set_rowwise_scale_inv(rowwise_scale_inv->data_ptr(), DType::kFloat8E8M0,
+                                    getTensorShape(*rowwise_scale_inv));
+    } else if (is_fp4_dtype(*this->dtype_row)) {
+      out_cpp.set_rowwise_scale_inv(rowwise_scale_inv->data_ptr(), DType::kFloat8E4M3,
+                                    getTensorShape(*rowwise_scale_inv));
+      out_cpp.set_amax(amax_rowwise->data_ptr(), DType::kFloat32, getTensorShape(*amax_rowwise));
+    }
+  }
+  if (this->dtype_column) {
+    if (is_fp8_dtype(*this->dtype_column)) {
+      out_cpp.set_columnwise_data(columnwise_data->data_ptr(), *this->dtype_column, shape);
+      out_cpp.set_columnwise_scale_inv(columnwise_scale_inv->data_ptr(), DType::kFloat8E8M0,
+                                       getTensorShape(*columnwise_scale_inv));
+    } else if (is_fp4_dtype(*this->dtype_column)) {
+      std::vector<size_t> shape_2d = {flat_first_dim, flat_last_dim};
+      auto col_data_shape_fp4 = make_transpose_shape<size_t>(shape_2d);
+      out_cpp.set_columnwise_data(columnwise_data->data_ptr(), DType::kFloat4E2M1,
+                                  col_data_shape_fp4);
+      out_cpp.set_columnwise_scale_inv(columnwise_scale_inv->data_ptr(), DType::kFloat8E4M3,
+                                       getTensorShape(*columnwise_scale_inv));
+      out_cpp.set_columnwise_amax(amax_columnwise->data_ptr(), DType::kFloat32,
+                                  getTensorShape(*amax_columnwise));
+    }
+  }
+  out_cpp.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
+  this->set_quantization_params(&out_cpp);
+
+  return {std::move(out_cpp), std::move(tensor)};
+}
+
+void FlexQuantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
+                               const std::optional<TensorWrapper>& noop_flag) {
+  if (input.numel() == 0) {
+    return;
+  }
+  NVTE_CHECK(!this->quantize_func.empty(),
+             "FlexQuantizer requires a registered quantize_func name");
+  NVTE_CHECK(!this->dequantize_func.empty(),
+             "FlexQuantizer requires a registered quantize_func name");
+
+  // TODO: stochastic rounding needs a per-call RNG state (seed/offset)
+  // minted from the torch CUDA generator (cf. NVFP4Quantizer::quantize) and
+  // passed as a trailing kernel arg. Not wired yet — only the non-SR path works.
+  NVTE_CHECK(!this->stochastic_rounding,
+             "FlexQuantizer: stochastic rounding is not implemented yet");
+
+  // The CuTeDSL kernel runs on the current CUDA device; NVTEBasicTensor carries
+  // no device, so stamp the current one onto the DLTensors we hand to tvm-ffi.
+  const int32_t dev_index = static_cast<int32_t>(at::cuda::current_device());
+
+  // Kernel arg order (a generic MX-style block-scaling signature):
+  //   (mX, mO_row, mS_row, mA_row, mO_col, mS_col, mA_col)
+  // mX is the high-precision input; the 6 outputs are `out`'s freshly-allocated
+  // buffers, grouped per direction as {data, scale_inv, amax}. Any buffer with a
+  // null data_ptr (a disabled direction, or amax for a format without one, e.g.
+  // MXFP8) is passed to the kernel as None, so a kernel only consumes the slots
+  // it actually needs.
+  constexpr int kNumArgs = 7;
+  const std::array<NVTEBasicTensor, kNumArgs> nvte_args = {
+      input.get_rowwise_data(),         // mX
+      out.get_rowwise_data(),           // mO_row
+      out.get_rowwise_scale_inv(),      // mS_row
+      out.get_amax(),                   // mA_row  (primary / row-wise amax)
+      out.get_columnwise_data(),        // mO_col
+      out.get_columnwise_scale_inv(),   // mS_col
+      out.get_columnwise_amax(),        // mA_col
+  };
+
+  // Named locals: each DLTensorWrapper owns the synthesized DLTensor shape/
+  // stride storage (NVTEBasicTensor -> DLTensor) and must outlive the call. A
+  // null-data_ptr buffer stays nullopt -> to_ffi_arg yields None.
+  std::array<std::optional<DLTensorWrapper>, kNumArgs> dltensors;
+  for (int i = 0; i < kNumArgs; ++i) {
+    if (nvte_args[i].data_ptr != nullptr) {
+      dltensors[i].emplace(nvte_args[i], dev_index);
+    }
+  }
+
+  // Trailing rng_state slot (seed/offset for stochastic rounding). SR isn't
+  // implemented yet (guarded above), so this stays None for now -- but keeping
+  // the slot fixes the kernel signature at 8 args: when SR lands, only this
+  // wrapper gets populated (minted from the torch generator), not the arg list.
+  std::optional<DLTensorWrapper> rng_w;  // None
+
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  // When the quantizer produces GEMM-swizzled scales (optimize_for_gemm /
+  // with_gemm_swizzled_scales=True), the scale tensor is padded up to whole
+  // 128x4 tiles and the kernel only writes the valid blocks. The padded (OOB)
+  // entries must be zeroed because cuBLAS reads the full swizzled tiles during
+  // the GEMM. So passing swizzle=True means the scale buffers are zeroed here,
+  // each quantize call, before the kernel overwrites the valid region (matches
+  // quantize_mxfp8.cuh's per-call cudaMemsetAsync). Scales are 1-byte
+  // (E8M0/E4M3), so the element count is the byte count.
+  if (this->optimize_for_gemm) {
+    const auto &scale_row = dltensors[2];  // mS_row
+    if (scale_row) {
+      NVTE_CHECK_CUDA(cudaMemsetAsync(scale_row->data, 0, scale_row->numel(), stream));
+    }
+    const auto &scale_col = dltensors[5];  // mS_col
+    if (scale_col) {
+      NVTE_CHECK_CUDA(cudaMemsetAsync(scale_col->data, 0, scale_col->numel(), stream));
+    }
+  }
+
+  // CUDA stream handle, passed as an int64 scalar. The CuTeDSL kernel takes an
+  // explicit stream arg (make_fake_stream, not env-stream); tvm-ffi decodes the
+  // int as the stream pointer (decode_param_stream -> allow_int_as_ptr).
+  const int64_t stream_handle = reinterpret_cast<int64_t>(stream);
+
+  // Variadic dispatch: each to_ffi_arg(...) is an Optional<TensorView> (None
+  // when absent), packed by tvm-ffi's operator() and kept alive through the
+  // whole call expression. The wrappers back the views and outlive the call.
+  //   (mX, mO_row, mS_row, mA_row, mO_col, mS_col, mA_col, rng_state, stream)
+  call_tvm_ffi(this->quantize_func, 
+    to_ffi_arg(dltensors[0]), // input tensor
+    to_ffi_arg(dltensors[1]), // rowwise quantized data
+    to_ffi_arg(dltensors[2]), // rowwise scale_inv
+    to_ffi_arg(dltensors[3]), // rowwise amax
+    to_ffi_arg(dltensors[4]), // columnwise quantized data
+    to_ffi_arg(dltensors[5]), // columnwise scale_inv
+    to_ffi_arg(dltensors[6]), // columnwise amax
+    to_ffi_arg(rng_w), // rng_state (used for stochastic rounding if you need it)
+    stream_handle // CUDA stream handle as int64
+  );
+}
+
+void FlexQuantizer::dequantize(const TensorWrapper& input, TensorWrapper& out) {
+  if (input.numel() == 0) {
+    return;
+  }
+  NVTE_CHECK(!this->dequantize_func.empty(),
+             "FlexQuantizer requires a registered dequantize_func name");
+
+  // The CuTeDSL kernel runs on the current CUDA stream; NVTEBasicTensor carries
+  // no device, so stamp the current one onto the DLTensors we hand to tvm-ffi.
+  const int32_t dev_index = static_cast<int32_t>(at::cuda::current_device());
+
+  // Kernel arg order (inverse of quantize: the high-precision destination
+  // first, then the quantized inputs grouped per direction as {data, scale,
+  // amax}):
+  //   (mO, mX_row, mS_row, mA_row, mX_col, mS_col, mA_col)
+  // mO is the freshly-allocated high-precision output; the 6 inputs are the
+  // quantized buffers. Any buffer with a null data_ptr (a disabled direction,
+  // or amax for a format without one, e.g. MXFP8) is passed as None, so the
+  // kernel only consumes the slots it needs (typically just one direction is
+  // required to reconstruct).
+  constexpr int kNumArgs = 7;
+  const std::array<NVTEBasicTensor, kNumArgs> nvte_args = {
+      out.get_rowwise_data(),            // mO    (high-precision destination)
+      input.get_rowwise_data(),          // mX_row
+      input.get_rowwise_scale_inv(),     // mS_row
+      input.get_amax(),                  // mA_row
+      input.get_columnwise_data(),       // mX_col
+      input.get_columnwise_scale_inv(),  // mS_col
+      input.get_columnwise_amax(),       // mA_col
+  };
+
+  // Named locals: each DLTensorWrapper owns the synthesized DLTensor shape/
+  // stride storage and must outlive the call. A null-data_ptr buffer stays
+  // nullopt -> to_ffi_arg yields None.
+  std::array<std::optional<DLTensorWrapper>, kNumArgs> w;
+  for (int i = 0; i < kNumArgs; ++i) {
+    if (nvte_args[i].data_ptr != nullptr) {
+      w[i].emplace(nvte_args[i], dev_index);
+    }
+  }
+
+  // CUDA stream handle, passed as an int64 scalar (see quantize() above).
+  const int64_t stream_handle =
+      reinterpret_cast<int64_t>(static_cast<cudaStream_t>(at::cuda::getCurrentCUDAStream()));
+
+  //   (mO, mX_row, mS_row, mA_row, mX_col, mS_col, mA_col, stream)
+  call_tvm_ffi(this->dequantize_func, to_ffi_arg(w[0]), to_ffi_arg(w[1]), to_ffi_arg(w[2]),
+               to_ffi_arg(w[3]), to_ffi_arg(w[4]), to_ffi_arg(w[5]), to_ffi_arg(w[6]),
+               stream_handle);
+}
+
+std::vector<size_t> FlexQuantizer::get_scale_shape(const std::vector<size_t>& shape, DType dtype,
+                                                     bool columnwise) const {
+  const auto [flat_first_dim, flat_last_dim] = get_2d_dims(shape);
+  return get_scale_shape(flat_first_dim, flat_last_dim, dtype, columnwise);
+}
+
+std::vector<size_t> FlexQuantizer::get_scale_shape(size_t flat_first_dim, size_t flat_last_dim,
+                                                     DType dtype, bool columnwise) const {
+  // Each direction uses its own format's scale-factor shape, mirroring the
+  // per-format MXFP8Quantizer / NVFP4Quantizer get_scale_shape implementations.
+  if (is_fp8_dtype(dtype)) {
+    NVTE_CHECK(flat_first_dim % MXFP8_BLOCK_SIZE == 0 && flat_last_dim % MXFP8_BLOCK_SIZE == 0,
+               "MXFP8 requires tensor dims that are divisible by ", MXFP8_BLOCK_SIZE,
+               " (got dims=", flat_first_dim, "x", flat_last_dim, ")");
+    if (columnwise) {
+      return {roundup(flat_first_dim / MXFP8_BLOCK_SIZE, 4), roundup(flat_last_dim, 128)};
+    }
+    return {roundup(flat_first_dim, 128), roundup(flat_last_dim / MXFP8_BLOCK_SIZE, 4)};
+  }
+  if (is_fp4_dtype(dtype)) {
+    NVTE_CHECK(flat_first_dim % NVFP4_BLOCK_SIZE == 0 && flat_last_dim % NVFP4_BLOCK_SIZE == 0,
+               "NVFP4 requires tensor dims that are divisible by ", NVFP4_BLOCK_SIZE,
+               " (got dims=", flat_first_dim, "x", flat_last_dim, ")");
+    if (columnwise) {
+      return {roundup(flat_last_dim, 128), roundup(flat_first_dim / NVFP4_BLOCK_SIZE, 4)};
+    }
+    return {roundup(flat_first_dim, 128), roundup(flat_last_dim / NVFP4_BLOCK_SIZE, 4)};
+  }
+  NVTE_ERROR("Unsupported dtype for FlexQuantizer::get_scale_shape");
 }
 
 }  // namespace transformer_engine::pytorch

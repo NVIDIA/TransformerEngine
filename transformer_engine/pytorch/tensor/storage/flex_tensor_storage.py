@@ -2,48 +2,47 @@
 #
 # See LICENSE for license information.
 
-"""Mixin class holding data specific for MXFP8Tensor"""
+"""TODO: write comments
+"""
 
 from __future__ import annotations
 from typing import Optional, Dict, Any, Tuple, Union
 from collections.abc import Iterable
 import math
+import warnings
 import torch
 
-import transformer_engine_torch as tex
+import transformer_engine_torch as tex  # pylint: disable=unused-import
+from transformer_engine_torch import (
+    DType as TE_DType
+)
 
 from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 
-from ...constants import TE_DType as torch_to_transformer_engine_dtype, DType
+from ...constants import TE_DType as torch_to_transformer_engine_dtype  # pylint: disable=unused-import
 
 from ...utils import _empty_tensor, canonicalize_shape
 
-
-class _FromMXFP8Func(torch.autograd.Function):
+class _FromFlexFunc(torch.autograd.Function):
     """Cast from MXFP8 to other dtype"""
 
     @staticmethod
     def forward(
         _ctx: Optional[torch.autograd.function.FunctionCtx],  # unused
-        tensor: MXFP8TensorStorage,
+        tensor: FlexTensorStorage,
         dtype: torch.dtype,
+        quantizer: Quantizer
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
         if tensor._rowwise_data is not None and tensor._rowwise_data.numel() == 0:
             return torch.empty(tensor.size(), dtype=dtype, device=tensor.device)
         if tensor._columnwise_data is not None and tensor._columnwise_data.numel() == 0:
             return torch.empty(tensor.size(), dtype=dtype, device=tensor.device)
+        
+        if tensor._rowwise_data is not None or tensor._columnwise_data is not None:
+            return tex.dequantize_with_quantizer(tensor, dtype, quantizer)
+        raise ValueError("Cannot dequantize Flex tensor with no data")
 
-        if tensor._rowwise_data is None and tensor._columnwise_data is None:
-            raise ValueError("Cannot dequantize MXFP8 tensor with no data")
-        te_dtype = torch_to_transformer_engine_dtype[dtype]
-        # ``tex.dequantize`` requires CUDA-resident buffers.
-        src_device = tensor.device
-        if src_device.type != "cuda":
-            cuda_tensor = tensor.to(device=torch.device("cuda"))
-            result = tex.dequantize(cuda_tensor, te_dtype)
-            return result.to(device=src_device)
-        return tex.dequantize(tensor, te_dtype)
 
     @staticmethod
     def backward(
@@ -52,34 +51,44 @@ class _FromMXFP8Func(torch.autograd.Function):
     ) -> Tuple[Optional[torch.Tensor], ...]:
         # pylint: disable=missing-function-docstring
         # Assume that we want gradients in full precision
-        return grad, None
+        return grad, None, None
 
 
-class MXFP8TensorStorage(QuantizedTensorStorage):
-    """Mixin class that holds data attributes of MXFP8Tensor.
+class FlexTensorStorage(QuantizedTensorStorage):
+    """Mixin class that holds data attributes of FlexTensor.
 
-    MXFP8Tensor inherits from the PyTorch tensor class and this mixin
+    FlexTensor inherits from the PyTorch tensor class and this mixin
     class. If this class is instantiated directly, it has the same
     data, lower CPU overhead, and less functionality. It should only
     be instantiated directly for performance-critical internal usage.
 
+    The two directions may carry different quantization formats, tracked
+    by ``_dtype_row`` and ``_dtype_column``.
+
     """
 
-    # Row-scaled FP8 data
+    # Row-scaled quantized data, None if not quantized in this direction
     _rowwise_data: Optional[torch.Tensor]
-    # Column-scaled FP8 data
+    # Column-scaled quantized data, None if not quantized in this direction
     _columnwise_data: Optional[torch.Tensor]
-    # Scaling factors for row-scaled FP8 data
-    _rowwise_scale_inv: torch.Tensor
-    # Scaling factors for column-scaled FP8 data
-    _columnwise_scale_inv: torch.Tensor
+    # Block scaling factors for row-scaled data, None if not quantized in this direction
+    _rowwise_scale_inv: Optional[torch.Tensor]
+    # Block scaling factors for column-scaled data, None if not quantized in this direction
+    _columnwise_scale_inv: Optional[torch.Tensor]
+    # Input absolute maximum for row-scaled data if quantized in NVFP4 row-wisely
+    # None if otherwise
+    _amax_rowwise: Optional[torch.Tensor]
+    # Input absolute maximum for column-scaled data if quantized in NVFP4 column-wisely
+    # Nont if otherwise
+    _amax_columnwise: Optional[torch.Tensor]
 
-    # Builder class for casting to MXFP8
+    # Builder class for casting to the flex format
     _quantizer: Optional[Quantizer]
-    # FP8 data type
-    _fp8_dtype: DType
-    # Whether scaling factors are in the swizzled format expected by
-    # GEMM
+    # Quantization format of the row-wise direction
+    _dtype_row: Optional[TE_DType]
+    # Quantization format of the column-wise direction
+    _dtype_column: Optional[TE_DType]
+    # Whether scaling factors are in the swizzled format expected by GEMM
     _with_gemm_swizzled_scales: bool
 
     def __new__(
@@ -88,14 +97,17 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
         rowwise_scale_inv: Optional[torch.Tensor],
         columnwise_data: Optional[torch.Tensor],
         columnwise_scale_inv: Optional[torch.Tensor],
-        fp8_dtype: Union[DType, tex.DType],
+        amax_rowwise: Optional[torch.Tensor],
+        amax_columnwise: Optional[torch.Tensor],
+        dtype_row: Optional[TE_DType],
+        dtype_column: Optional[TE_DType],
         quantizer: Optional[Quantizer],
         with_gemm_swizzled_scales: bool,
         *args,
         fake_dtype: Optional[torch.dtype] = None,
         **kwargs,
     ):
-        if cls is MXFP8TensorStorage:
+        if cls is FlexTensorStorage:
             instance = object.__new__(cls)
             instance._dtype = fake_dtype if fake_dtype is not None else torch.float32
         else:
@@ -104,8 +116,11 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
         instance._columnwise_data = columnwise_data
         instance._rowwise_scale_inv = rowwise_scale_inv
         instance._columnwise_scale_inv = columnwise_scale_inv
+        instance._amax_rowwise = amax_rowwise
+        instance._amax_columnwise = amax_columnwise
         instance._quantizer = quantizer.copy() if quantizer is not None else None
-        instance._fp8_dtype = DType.cast(fp8_dtype)
+        instance._dtype_row = dtype_row
+        instance._dtype_column = dtype_column
         instance._with_gemm_swizzled_scales = with_gemm_swizzled_scales
 
         return instance
@@ -117,16 +132,18 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
             self._columnwise_data,
             self._rowwise_scale_inv,
             self._columnwise_scale_inv,
+            self._amax_rowwise,
+            self._amax_columnwise,
         ):
             if t is not None:
                 t.data = _empty_tensor()
 
     def copy_from_storage(self, src: QuantizedTensorStorage) -> None:
-        """Copy data buffers from another MXFP8TensorStorage."""
-        if not isinstance(src, MXFP8TensorStorage):
-            raise TypeError("copy_from_storage expects MXFP8TensorStorage")
-        if self._fp8_dtype != src._fp8_dtype:
-            raise RuntimeError("FP8 dtype mismatch in copy_from_storage")
+        """Copy data buffers from another FlexTensorStorage."""
+        if not isinstance(src, FlexTensorStorage):
+            raise TypeError("copy_from_storage expects FlexTensorStorage")
+        if self._dtype_row != src._dtype_row or self._dtype_column != src._dtype_column:
+            raise RuntimeError("Flex dtype mismatch in copy_from_storage")
         if self._with_gemm_swizzled_scales != src._with_gemm_swizzled_scales:
             raise RuntimeError("Scale layout mismatch in copy_from_storage")
 
@@ -138,6 +155,8 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
         _copy_optional(self._columnwise_data, src._columnwise_data)
         _copy_optional(self._rowwise_scale_inv, src._rowwise_scale_inv)
         _copy_optional(self._columnwise_scale_inv, src._columnwise_scale_inv)
+        _copy_optional(self._amax_rowwise, src._amax_rowwise)
+        _copy_optional(self._amax_columnwise, src._amax_columnwise)
 
     def get_metadata(self) -> Dict[str, Any]:
         """Get this tensor's metadata."""
@@ -146,24 +165,31 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
             "rowwise_scale_inv": self._rowwise_scale_inv,
             "columnwise_data": self._columnwise_data,
             "columnwise_scale_inv": self._columnwise_scale_inv,
-            "fp8_dtype": self._fp8_dtype,
+            "amax_rowwise": self._amax_rowwise,
+            "amax_columnwise": self._amax_columnwise,
+            "dtype_row": self._dtype_row,
+            "dtype_column": self._dtype_column,
             "quantizer": self._quantizer,
             "with_gemm_swizzled_scales": self._with_gemm_swizzled_scales,
             "fake_dtype": self._dtype,
         }
 
-    def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], MXFP8TensorStorage]:
+    def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], FlexTensorStorage]:
         """Prepare the tensor base for saving for backward"""
         tensors = [
             self._rowwise_data,
             self._columnwise_data,
             self._rowwise_scale_inv,
             self._columnwise_scale_inv,
+            self._amax_rowwise,
+            self._amax_columnwise,
         ]
         self._rowwise_data = None
         self._columnwise_data = None
         self._rowwise_scale_inv = None
         self._columnwise_scale_inv = None
+        self._amax_rowwise = None
+        self._amax_columnwise = None
         return tensors, self
 
     def restore_from_saved(
@@ -174,7 +200,9 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
         self._columnwise_data = tensors[1]
         self._rowwise_scale_inv = tensors[2]
         self._columnwise_scale_inv = tensors[3]
-        return tensors[4:]
+        self._amax_rowwise = tensors[4]
+        self._amax_columnwise = tensors[5]
+        return tensors[6:]
 
     def get_data_tensors(self, rowwise_data: bool = True, columnwise_data: bool = True):
         """Get this Tensor's data."""
@@ -192,13 +220,30 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
             dtype = self._dtype
         if self._rowwise_data is not None and self._rowwise_data.numel() == 0:
             return torch.empty(self.size(), dtype=dtype, device=self.device)
-        return _FromMXFP8Func.forward(None, self, dtype)
+        return _FromFlexFunc.forward(None, self, dtype, self)
 
-    def size(self, *args, **kwargs):
+    def size(self, dim: Optional[int] = None) -> Union[torch.Size, int]:
         # pylint: disable=missing-function-docstring
+        shape = None
         if self._rowwise_data is not None:
-            return self._rowwise_data.size(*args, **kwargs)
-        return self._columnwise_data.size(*args, **kwargs)
+            if self.is_mxfp8_dtype(self._dtype_row):
+                shape = self._rowwise_data.shape
+            elif self.is_nvfp4_dtype(self._dtype_row):
+                byte_shape = list(self._rowwise_data.size())
+                shape = byte_shape[:-1] + [byte_shape[-1] * 2]
+        elif self._columnwise_data is not None:
+            if self.is_mxfp8_dtype(self._dtype_column):
+                shape = self._columnwise_data
+            elif self.is_nvfp4_dtype(self._dtype_column):
+                warnings.warn("Attempting to get shape of NVFP4 tensor with only column-wise data.")
+                byte_shape = list(self._columnwise_data.size())
+                shape = byte_shape[1:-1] + [byte_shape[-1] * 2, byte_shape[0]]
+
+        if shape is None:
+            raise RuntimeError("Attempted to get shape of Flex tensor with no data")
+        if dim is None:
+            return torch.Size(shape)
+        return shape[dim]
 
     @property
     def device(self):
@@ -207,7 +252,7 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
             return self._rowwise_data.device
         if self._columnwise_data is not None:
             return self._columnwise_data.device
-        raise RuntimeError("MXFP8TensorStorage has no data!")
+        raise RuntimeError("FlexTensorStorage has no data!")
 
     def view(self, shape: torch.Size):
         # pylint: disable=missing-function-docstring
@@ -220,39 +265,59 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
         shape = canonicalize_shape(shape, cur_shape)
         if shape[-1] != cur_shape[-1]:
             raise RuntimeError(
-                "MXFP8Tensor does not support reshaping inner dimension "
+                "FlexTensor does not support reshaping inner dimension "
                 f"(attempted to reshape dims={tuple(cur_shape)} to {tuple(shape)})"
             )
 
-        # Construct new tensor
         cur_rowwise_data = self._rowwise_data
         cur_columnwise_data = self._columnwise_data
         new_rowwise_data = None
         new_columnwise_data = None
-        if cur_rowwise_data is not None:
+        if self.is_mxfp8_dtype(self._dtype_row):
             new_rowwise_data = cur_rowwise_data.view(*shape)
-        if cur_columnwise_data is not None:
+        elif self.is_nvfp4_dtype(self._dtype_row):
+            if shape[-1] % 2 != 0:
+                raise ValueError(
+                    "Cannot represent row-wise NVFP4 quantized data for Flex tensor "
+                    f"with shape={shape} as byte array."
+                )
+            byte_shape = list(shape[:-1]) + [shape[-1] // 2]
+            new_rowwise_data = self._rowwise_data.view(byte_shape)
+        if self.is_mxfp8_dtype(self._dtype_column):
             new_columnwise_data = cur_columnwise_data.view(*shape)
+        elif self.is_nvfp4_dtype(self._dtype_column):
+            columnwise_shape = (shape[-1], math.prod(shape[:-1]))
+            if columnwise_shape[-1] % 2 != 0:
+                raise ValueError(
+                    "Cannot represent column-wise NVFP4 quantized data for Flex tensor "
+                    f"with shape={shape} as byte array."
+                )
+            byte_shape = (columnwise_shape[0], columnwise_shape[1] // 2)
+            new_columnwise_data = self._columnwise_data.view(byte_shape)
 
-        return MXFP8TensorStorage(
+        return FlexTensorStorage(
             rowwise_data=new_rowwise_data,
             rowwise_scale_inv=self._rowwise_scale_inv,
             columnwise_data=new_columnwise_data,
             columnwise_scale_inv=self._columnwise_scale_inv,
-            fp8_dtype=self._fp8_dtype,
+            amax_rowwise=self._amax_rowwise,
+            amax_columnwise=self._amax_columnwise,
+            dtype_row=self._dtype_row,
+            dtype_column=self._dtype_column,
             quantizer=self._quantizer,
             with_gemm_swizzled_scales=self._with_gemm_swizzled_scales,
             fake_dtype=self._dtype,
         )
 
     def __repr__(self):
-        data_rowwise = self.dequantize()
-
         return (
-            "MXFP8TensorStorage("
-            f"fp8_dtype={self._fp8_dtype}, "
-            f"rowwise_scaled_data={data_rowwise}"
+            "FlexTensorStorage("
+            f"dtype_row={self._dtype_row}, "
+            f"dtype_column={self._dtype_column}, "
             f"rowwise_scale_inv={self._rowwise_scale_inv}, "
+            f"columnwise_scale_inv={self._columnwise_scale_inv}, "
+            f"amax_rowwise={self._amax_rowwise},"
+            f"amax_columnwise={self._amax_columnwise},"
             ")"
         )
 
@@ -262,8 +327,7 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
         columnwise_usage: Optional[bool] = None,
     ):
         """
-        For MXFP8, columnwise scaled output is only produced by x2
-        scaling kernels, so this function only disables usages.
+        TODO: figure out what to say here
         """
 
         # Default usage is based on available data
@@ -276,30 +340,42 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
         if rowwise_usage:
             if self._rowwise_data is None:
                 raise RuntimeError(
-                    "Requested row-wise usage, but MXFP8Tensor is missing row-scaled FP8 data"
+                    "Requested row-wise usage, but FlexTensor is missing row-scaled data"
                 )
             if self._rowwise_scale_inv is None:
                 raise RuntimeError(
-                    "Requested row-wise usage, but MXFP8Tensor is missing row-scaled scale-inverses"
+                    "Requested row-wise usage, but FlexTensor is missing row-scaled scale-inverses"
+                )
+            if self._amax_rowwise is None and self.is_nvfp4_dtype(self._dtype_row):
+                raise RuntimeError(
+                    "Requested row-wise NVFP4 usage, but FlexTensor is missing per tensor"
+                    " row-scaled scale-inverse"
                 )
         else:
             self._rowwise_data = None
             self._rowwise_scale_inv = None
+            self._amax_rowwise = None
 
         # Update column-scaled data
         if columnwise_usage:
             if self._columnwise_data is None:
                 raise RuntimeError(
-                    "Requested column-wise usage, but MXFP8Tensor is missing column-scaled FP8 data"
+                    "Requested column-wise usage, but FlexTensor is missing column-scaled data"
                 )
             if self._columnwise_scale_inv is None:
                 raise RuntimeError(
                     "Requested column-wise usage, "
-                    "but MXFP8Tensor is missing column-scaled scale-inverses"
+                    "but FlexTensor is missing column-scaled scale-inverses"
+                )
+            if self._amax_columnwise is None and self.is_nvfp4_dtype(self._dtype_column):
+                raise RuntimeError(
+                    "Requested column-wise NVFP4 usage, "
+                    "but FlexTensor is missing per tensor column-scaled scale-inverse"
                 )
         else:
             self._columnwise_data = None
             self._columnwise_scale_inv = None
+            self._amax_columnwise = None
 
     def get_usages(self) -> Dict[str, bool]:
         """Get the usage of the tensor"""
@@ -307,3 +383,11 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
             "rowwise": self._rowwise_data is not None,
             "columnwise": self._columnwise_data is not None,
         }
+
+    @staticmethod
+    def is_mxfp8_dtype(dtype: TE_DType) -> bool:
+        return dtype == tex.DType.kFloat8E4M3 or dtype == tex.DType.kFloat8E5M2
+
+    @staticmethod
+    def is_nvfp4_dtype(dtype: TE_DType) -> bool:
+        return dtype == tex.DType.kFloat4E2M1

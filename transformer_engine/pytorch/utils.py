@@ -8,7 +8,7 @@ import functools
 import math
 import os
 import warnings
-from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Iterable, List, Optional, Sequence, Tuple, Union
 from contextlib import nullcontext
 import numpy as np
 import torch
@@ -970,3 +970,17 @@ def make_weak_ref(x):
         f"Invalid type {type(x).__name__} to make weak ref. "
         "Valid types are: torch.Tensor, tuple, list, dict, int, float, bool, and None."
     )
+
+def canonicalize_shape(shape, cur_shape):
+    if not isinstance(shape, Iterable):
+        shape = [shape]
+    elif len(shape) == 1 and isinstance(shape[0], Iterable):
+        shape = shape[0]
+    if -1 in shape:
+        shape = list(shape)
+        d_inferred = -math.prod(cur_shape) // math.prod(shape)
+        for i, d in enumerate(shape):
+            if d == -1:
+                shape[i] = d_inferred
+                break
+    return shape

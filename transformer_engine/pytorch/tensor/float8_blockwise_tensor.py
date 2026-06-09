@@ -16,7 +16,7 @@ from .storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStora
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ._quantization_helpers import _IdentityFunc
 from ..constants import DType
-from ..utils import devices_match, round_up_to_nearest_multiple
+from ..utils import canonicalize_shape, devices_match, round_up_to_nearest_multiple
 
 aten = torch.ops.aten
 
@@ -716,18 +716,7 @@ class _ViewFunc(torch.autograd.Function):
         if shape is None:
             return tensor
 
-        # Canonicalize shape
-        if not isinstance(shape, Iterable):
-            shape = [shape]
-        elif len(shape) == 1 and isinstance(shape[0], Iterable):
-            shape = shape[0]
-        if -1 in shape:
-            shape = list(shape)
-            d_inferred = -math.prod(ctx.shape) // math.prod(shape)
-            for i, d in enumerate(shape):
-                if d == -1:
-                    shape[i] = d_inferred
-                    break
+        shape = canonicalize_shape(shape, ctx.shape)
 
         if tensor._is_2D_scaled:
             # For the case of 2D scaled tensor, the last 2 dimensions should not change
@@ -833,18 +822,7 @@ class _ReshapeFunc(torch.autograd.Function):
         if shape is None:
             return tensor
 
-        # Canonicalize shape
-        if not isinstance(shape, Iterable):
-            shape = [shape]
-        elif len(shape) == 1 and isinstance(shape[0], Iterable):
-            shape = shape[0]
-        if -1 in shape:
-            shape = list(shape)
-            d_inferred = -math.prod(tensor.shape) // math.prod(shape)
-            for i, d in enumerate(shape):
-                if d == -1:
-                    shape[i] = d_inferred
-                    break
+        shape = canonicalize_shape(shape, ctx.shape)
 
         if tensor._is_2D_scaled:
             # For the case of 2D scaled tensor, the last 2 dimensions should not change
