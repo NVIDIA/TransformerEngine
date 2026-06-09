@@ -1679,17 +1679,9 @@ class FusedAttnFunc(torch.autograd.Function):
         rest = [None]
         if ctx.use_FAv2_bwd:
             softmax_lse, rng_state = aux_ctx_tensors
-            # Keep capture replay buffers zero-initialized; outside capture, use
-            # empty_like to avoid the extra memset. The THD tail zero-fill below
-            # clears tail positions in both modes.
-            if torch.cuda.is_current_stream_capturing():
-                dq = torch.zeros_like(q)
-                dk = torch.zeros_like(k)
-                dv = torch.zeros_like(v)
-            else:
-                dq = torch.empty_like(q)
-                dk = torch.empty_like(k)
-                dv = torch.empty_like(v)
+            dq = torch.empty_like(q)
+            dk = torch.empty_like(k)
+            dv = torch.empty_like(v)
             d_out, q, k, v, out = [dpa_utils.maybe_contiguous(x) for x in (d_out, q, k, v, out)]
             # from transformer_engine.pytorch.attention.dot_product_attention import flash_attn_cuda_bwd
             flash_attn_cuda_bwd(
