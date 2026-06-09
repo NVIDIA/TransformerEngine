@@ -107,8 +107,8 @@ def test_basic_operation_activation_offloading_policy(monkeypatch):
 
     calls.clear()
     op.enable_activation_offloading()
-    op.maybe_mark_and_start_activation_offload(tensor, start=True)
-    assert calls == [("start", [tensor_id]), ("mark", [tensor_id])]
+    op.maybe_mark_and_start_activation_offload(tensor, start=True, mark=False)
+    assert calls == [("start", [tensor_id])]
 
 
 # Supported quantization recipes

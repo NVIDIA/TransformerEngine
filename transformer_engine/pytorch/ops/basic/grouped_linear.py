@@ -1032,17 +1032,19 @@ class GroupedLinear(BasicOperation):
         # Note: No special logic is needed for weights. They are
         # either nn.Parameter (auto-excluded from offload) or are
         # temporary workspaces freshly created in each forward pass.
-        saved = tensors_to_save[0]
-        offset = 4 if self._scale_bias else 3
         if is_cpu_offload_enabled():
+            saved = tensors_to_save[0]
+            offset = 4 if self._scale_bias else 3
             if use_grouped_tensor_path:
                 # Layout: [split_sizes, base_split_offsets, split_points, (scales?), grouped_x, *weights]
                 grouped_x = saved[offset]
-                self.maybe_mark_and_start_activation_offload(grouped_x)
+                if grouped_x is not None:
+                    self.maybe_mark_and_start_activation_offload(grouped_x)
             else:
                 # Layout: [split_sizes, None, None, (scales?), *xs, *ws]
                 live_xs = [t for t in saved[offset : offset + self.num_groups] if t is not None]
-                self.maybe_mark_and_start_activation_offload(*live_xs)
+                if live_xs:
+                    self.maybe_mark_and_start_activation_offload(*live_xs)
 
         ctx.save_for_backward(*tensors_to_save[0])
 
@@ -1128,9 +1130,10 @@ class GroupedLinear(BasicOperation):
             xs = tex.split_quantize(x, split_sizes_int, input_quantizers)
         else:
             xs = torch.split(x, split_sizes_int)
-        live_xs = [t for t in xs if t is not None]
         if is_cpu_offload_enabled():
-            self.maybe_mark_and_start_activation_offload(*live_xs, start=True)
+            live_xs = [t for t in xs if t is not None]
+            if live_xs:
+                self.maybe_mark_and_start_activation_offload(*live_xs, start=True, mark=False)
 
         # Allocate output tensor
         in_shape = list(input_.size())
@@ -1236,8 +1239,8 @@ class GroupedLinear(BasicOperation):
                 tensor_offsets=base_split_offsets * self.in_features,
             )
 
-        if is_cpu_offload_enabled():
-            self.maybe_mark_and_start_activation_offload(grouped_x, start=True)
+        if is_cpu_offload_enabled() and grouped_x is not None:
+            self.maybe_mark_and_start_activation_offload(grouped_x, start=True, mark=False)
 
         # Build the weight GroupedTensor / list.
         if self.single_grouped_weight:

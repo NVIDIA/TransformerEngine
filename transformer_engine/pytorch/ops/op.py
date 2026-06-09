@@ -211,11 +211,13 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         self,
         *tensors: Any,
         start: bool = False,
+        mark: bool = True,
     ) -> None:
         """Mark saved activation tensors for CPU offloading in an active offload context.
 
         If activation offloading has been disabled for this op, mark the tensors so the
-        active offload context skips them.
+        active offload context skips them. If mark is False, only start offload for tensors
+        that were already selected by the active offload context.
         """
         from ..cpu_offload import (  # pylint: disable=import-outside-toplevel
             mark_activation_offload,
@@ -233,7 +235,8 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
 
         if start:
             start_offload(*tensors)
-        mark_activation_offload(*tensors)
+        if mark:
+            mark_activation_offload(*tensors)
 
     def num_quantizers(
         self,
