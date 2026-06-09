@@ -33,16 +33,20 @@ extern "C" {
 
 /*! \brief Group-level EP configuration (fixed for the EP group lifetime). */
 typedef struct {
-  int ep_size;             /*!< EP world size. */
-  int num_experts;         /*!< Total experts across all ranks. */
-  int max_tokens_per_rank; /*!< Upper bound on tokens this rank sends per dispatch. */
-  /*! Upper bound on tokens received per dispatch (worst-case top_k fan-out; must be > 0). */
+  /*! EP world size. */
+  int ep_size;
+  /*! Total experts across all ranks. */
+  int num_experts;
+  /*! Upper bound on tokens this rank sends per dispatch. */
+  int max_tokens_per_rank;
+  /*! Upper bound on tokens this rank receives per dispatch (must be > 0). */
   int max_recv_tokens_per_rank;
-  int hidden_dim;  /*!< Token hidden dimension. */
-  int max_num_sms; /*!< Max SMs for EP kernels. 0 = auto. */
-  /*! Widest token dtype the group will dispatch. Sizes NCCL EP staging buffers
-   *  at group create. Tensors passed to nvte_ep_dispatch may use any dtype whose
-   *  element size is <= sizeof(max_token_dtype). */
+  /*! Token hidden dimension. */
+  int hidden_dim;
+  /*! Max SMs for EP kernels. 0 = auto. */
+  int max_num_sms;
+  /*! Widest token dtype the group will dispatch; sizes staging buffers.
+   *  Per-dispatch tensors may use any dtype with element size <= this. */
   NVTEDType max_token_dtype;
 } NVTEEpGroupConfig;
 
@@ -51,22 +55,23 @@ typedef struct {
  *         overflow policy, ...).
  */
 typedef struct {
-  int top_k; /*!< Per-token expert fan-out (> 0). */
-  /*! Per-expert zone alignment in tokens (pow2; 0/1 = none). */
+  /*! Per-token expert fan-out (> 0). */
+  int top_k;
+  /*! Per-expert recv-slab alignment in tokens (power of two; 0/1 disables).
+   *  When > 1, each expert's slab in recv_tokens is zero-padded up to a
+   *  multiple of this for downstream per-expert GEMM alignment. */
   size_t dispatch_output_per_expert_alignment;
 } NVTEEpLayerConfig;
 
 /* -- Bootstrap ------------------------------------------------------------ */
 
-/*! \brief Bootstrap from an existing NCCL EP sub-communicator. Requires SM>=90.
+/*! \brief Bootstrap the EP backend from an existing NCCL EP sub-communicator.
+ *         Requires SM>=90.
  *
- *  ep_comm is borrowed and must span exactly group_config.ep_size ranks.
- *  The caller retains ownership and must keep ep_comm alive until
- *  nvte_ep_shutdown() returns; destroying it earlier is undefined behavior.
- *  Re-init after shutdown is allowed; double-init throws.
- *
- *  One EP group per process, bound to the current CUDA device at initialize
- *  time. Multiple GPUs per process are not supported.
+ *  ep_comm is borrowed and must span exactly group_config.ep_size ranks. The
+ *  caller retains ownership and must keep it alive until nvte_ep_shutdown()
+ *  returns. Re-init after shutdown is allowed; double-init throws. One EP
+ *  group per process, bound to the current CUDA device.
  *
  *  \param[in] ep_comm      Opaque ncclComm_t for the EP sub-group.
  *  \param[in] group_config Group-level EP configuration.
@@ -79,9 +84,11 @@ void nvte_ep_shutdown(void);
 /* -- Layer sizing (host-only) --------------------------------------------- */
 
 /*! \brief Report the handle_mem byte size required for the given layer config.
- *         Host-only; cheap to call. The caller allocates the buffer and passes
- *         it back to ep ops as the handle_mem argument. top_k comes from the
- *         active NVTEEpGroupConfig.
+ *
+ *  handle_mem is a per-layer kByte routing-state buffer; allocate once and
+ *  thread the same pointer through every prepare/dispatch/combine/_bwd call
+ *  for that layer (the backend keys its cache on the pointer). Host-only;
+ *  size is stable for a given (group, layer) pair.
  *
  *  \param[in] layer_cfg  Per-call layer configuration.
  *  \return size in bytes for the handle_mem buffer.
@@ -90,8 +97,13 @@ size_t nvte_ep_handle_mem_size(NVTEEpLayerConfig layer_cfg);
 
 /* -- Per-step ops (all allocation-free, CUDA graph-capturable) ------------ */
 
-/*! \brief AllGather the routing map; write per-expert counts and cache routing
- *         metadata in handle_mem for the subsequent dispatch/combine.
+/*! \brief Seed handle_mem with this step's routing plan.
+ *
+ *  AllGathers topk_idx across the EP group and stages per-expert offsets and
+ *  counts into handle_mem so the matching dispatch/combine/_bwd can run with
+ *  no further routing computation. Must precede every dispatch/combine/_bwd
+ *  that uses this handle_mem. token_counts becomes host-valid after a stream
+ *  sync.
  *
  *  \param[in]     handle_mem    uint8 routing-state buffer.
  *  \param[in]     topk_idx      [T, top_k] int64 routing indices.
@@ -102,8 +114,12 @@ size_t nvte_ep_handle_mem_size(NVTEEpLayerConfig layer_cfg);
 void nvte_ep_prepare(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor token_counts,
                      NVTEEpLayerConfig layer_cfg, cudaStream_t stream);
 
-/*! \brief Dispatch tokens (and routing weights) to expert ranks. Requires a
- *         prior nvte_ep_prepare.
+/*! \brief Dispatch tokens (and routing weights) to expert ranks.
+ *
+ *  Each local token is sent to its top_k destinations; recv_tokens is laid out
+ *  expert-major (contiguous per-expert slabs, padded per layer_cfg). The
+ *  *_win arguments enable zero-copy via symmem windows; pass NVTECommWindow{}
+ *  when unused. Requires a prior nvte_ep_prepare on this handle_mem.
  *
  *  \param[in]     handle_mem             uint8 routing-state buffer (from prepare).
  *  \param[in]     topk_idx               [T, top_k] int64 sparse routing indices.
@@ -123,9 +139,12 @@ void nvte_ep_dispatch(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor tok
                       NVTECommWindow recv_tokens_win, NVTETensor recv_topk_weights,
                       NVTECommWindow recv_topk_weights_win, cudaStream_t stream);
 
-/*! \brief Scatter-sum expert outputs back to originating ranks. Unweighted;
- *         caller must pre-multiply expert_out by recv_topk_weights (and the
- *         valid-slot mask) before calling. Requires a prior nvte_ep_prepare.
+/*! \brief Scatter-sum expert outputs back to originating ranks.
+ *
+ *  Inverse of dispatch: the top_k destination slots for token t are summed
+ *  into result[t]. Sums are unweighted: pre-scale expert_out by
+ *  recv_topk_weights (and the valid-slot mask) before calling. Requires a
+ *  prior nvte_ep_prepare on this handle_mem.
  *
  *  \param[in]  handle_mem      uint8 routing-state buffer (from prepare).
  *  \param[in]  expert_out      [recv_T, hidden_dim] pre-weighted expert outputs.
@@ -136,8 +155,11 @@ void nvte_ep_dispatch(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor tok
 void nvte_ep_combine(NVTETensor handle_mem, NVTETensor expert_out, NVTECommWindow expert_out_win,
                      NVTETensor result, cudaStream_t stream);
 
-/*! \brief Backward of dispatch; routes token and weight grads back to source.
- *         Requires a prior nvte_ep_prepare.
+/*! \brief Backward of dispatch: route per-recv-slot grads back to source.
+ *
+ *  Sums the top_k recv-slot grads into grad_tokens[t]; scatters per-slot
+ *  recv-weight grads into grad_topk_weights[t, k]. Padded recv slots
+ *  contribute nothing. Requires a prior nvte_ep_prepare on this handle_mem.
  *
  *  \param[in]  handle_mem               uint8 routing-state buffer (from prepare).
  *  \param[in]  grad                     [recv_capacity, hidden_dim] grad w.r.t. recv_tokens.
@@ -153,8 +175,11 @@ void nvte_ep_dispatch_bwd(NVTETensor handle_mem, NVTETensor grad, NVTECommWindow
                           NVTETensor grad_tokens, NVTETensor grad_topk_weights,
                           cudaStream_t stream);
 
-/*! \brief Backward of combine. Padded slots in grad_expert_out are zeroed.
- *         Requires a prior nvte_ep_prepare.
+/*! \brief Backward of combine: replicate each source-token grad to its recv
+ *         slots from the forward.
+ *
+ *  Padded recv slots in grad_expert_out are zeroed. Requires a prior
+ *  nvte_ep_prepare on this handle_mem.
  *
  *  \param[in]  handle_mem           uint8 routing-state buffer (from prepare).
  *  \param[in]  grad                 [T, hidden_dim] grad w.r.t. result.
