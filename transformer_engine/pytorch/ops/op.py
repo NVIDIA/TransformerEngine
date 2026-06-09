@@ -189,24 +189,23 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         # Objects for quantization
         self._fp8_metas: Optional[dict[str, dict[str, Any]]] = None
         self._quantizers: Optional[dict[str, list[Quantizer]]] = None
-        self._cpu_offloading_disabled: bool = False
+        self.activation_offloading: bool = True
 
     @property
     def is_fused_op(self) -> bool:
         return False
 
-    def disable_cpu_offloading(self, disabled: bool = True) -> None:
-        """Disable CPU offloading for activation tensors saved by this op.
+    def disable_activation_offloading(self, disabled: bool = True) -> None:
+        """Disable activation CPU offloading for tensors saved by this op.
 
-        CPU offloading is controlled by the surrounding offload context. This
-        setting only opts this operation's saved activation tensors out of that
-        context.
+        CPU offloading is controlled by the surrounding offload context. This setting only
+        opts this operation's saved activation tensors out of that context.
         """
-        self._cpu_offloading_disabled = disabled
+        self.activation_offloading = not disabled
 
-    def enable_cpu_offloading(self) -> None:
-        """Re-enable CPU offloading for activation tensors saved by this op."""
-        self.disable_cpu_offloading(False)
+    def enable_activation_offloading(self) -> None:
+        """Re-enable activation CPU offloading for tensors saved by this op."""
+        self.disable_activation_offloading(False)
 
     def maybe_mark_and_start_activation_offload(
         self,
@@ -215,8 +214,8 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
     ) -> None:
         """Mark saved activation tensors for CPU offloading when enabled.
 
-        If CPU offloading has been disabled for this op, mark the tensors so
-        the active offload context skips them.
+        If activation offloading has been disabled for this op, mark the tensors so the
+        active offload context skips them.
         """
         from ..cpu_offload import (  # pylint: disable=import-outside-toplevel
             is_cpu_offload_enabled,
@@ -232,7 +231,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         if not tensors:
             return
 
-        if self._cpu_offloading_disabled:
+        if not self.activation_offloading:
             mark_not_offload(*tensors)
             return
 

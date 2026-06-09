@@ -72,7 +72,7 @@ if is_bf16_available():  # bf16 requires sm_80 or higher
 _devices: list[torch.device] = [torch.device("cpu"), torch.device("cuda")]
 
 
-def test_basic_operation_cpu_offloading_control(monkeypatch):
+def test_basic_operation_activation_offloading_control(monkeypatch):
     """BasicOperation should expose a public opt-out for activation CPU offload."""
     import transformer_engine.pytorch.cpu_offload as cpu_offload
 
@@ -102,12 +102,12 @@ def test_basic_operation_cpu_offloading_control(monkeypatch):
     assert calls == [("start", [tensor_id]), ("mark", [tensor_id])]
 
     calls.clear()
-    op.disable_cpu_offloading()
+    op.disable_activation_offloading()
     op.maybe_mark_and_start_activation_offload(tensor, start=True)
     assert calls == [("skip", [tensor_id])]
 
     calls.clear()
-    op.enable_cpu_offloading()
+    op.enable_activation_offloading()
     monkeypatch.setattr(cpu_offload, "is_cpu_offload_enabled", lambda: False)
     op.maybe_mark_and_start_activation_offload(tensor, start=True)
     assert calls == []
