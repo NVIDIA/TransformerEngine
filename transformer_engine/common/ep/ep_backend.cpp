@@ -228,6 +228,7 @@ void EPBackend::init(ncclComm_t ep_comm, NVTEEpGroupConfig group_config) {
                         : NCCL_EP_AUTO;
   // Must be > 0; NCCL EP errors out on 0.
   cfg.max_recv_tokens_per_rank = static_cast<unsigned int>(group_config.max_recv_tokens_per_rank);
+  cfg.zero_copy = group_config.zero_copy ? NCCL_EP_ZERO_COPY_ON : NCCL_EP_ZERO_COPY_OFF;
 
   NVTE_CHECK_NCCL(loader::fns().CreateGroup(&ep_group_, ep_comm, &cfg));
 
