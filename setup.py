@@ -210,7 +210,8 @@ def build_nccl_ep_submodule() -> str:
         gencode = "-arch=native"
     else:
         arch_list = [
-            t.rstrip("af") for t in arch_tokens
+            t.rstrip("af")
+            for t in arch_tokens
             if t.rstrip("af").isdigit() and int(t.rstrip("af")) >= 90
         ]
         gencode = " ".join(f"-gencode=arch=compute_{a},code=sm_{a}" for a in arch_list)

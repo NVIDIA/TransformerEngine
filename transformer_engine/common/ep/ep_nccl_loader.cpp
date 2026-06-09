@@ -33,9 +33,8 @@ Fn resolve(void* lib, const char* sym) {
   dlerror();
   void* p = dlsym(lib, sym);
   const char* err = dlerror();
-  NVTE_CHECK(err == nullptr && p != nullptr,
-             "libnccl_ep.so is loaded but symbol '", sym, "' could not be resolved",
-             (err != nullptr ? std::string(": ") + err : std::string{}),
+  NVTE_CHECK(err == nullptr && p != nullptr, "libnccl_ep.so is loaded but symbol '", sym,
+             "' could not be resolved", (err != nullptr ? std::string(": ") + err : std::string{}),
              ". The runtime libnccl_ep.so is older than the version TransformerEngine "
              "was built against; upgrade NCCL EP or rebuild TE with -DNVTE_WITH_NCCL_EP=OFF.");
   return reinterpret_cast<Fn>(p);
@@ -44,8 +43,7 @@ Fn resolve(void* lib, const char* sym) {
 NcclEpFns load_or_throw() {
   std::string last_err;
   void* lib = try_dlopen(last_err);
-  NVTE_CHECK(lib != nullptr,
-             "Failed to load libnccl_ep.so (",
+  NVTE_CHECK(lib != nullptr, "Failed to load libnccl_ep.so (",
              (last_err.empty() ? "no error message" : last_err),
              "). NCCL EP requires libnccl_ep.so (>= 0.0.1) and NCCL >= 2.30.4 at runtime. "
              "Install the NCCL EP shared library, or rebuild TransformerEngine with "

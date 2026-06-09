@@ -60,8 +60,8 @@ class EPBackend {
                 const NVTECommWindow& recv_tokens_win, NVTETensor recv_topk_weights,
                 const NVTECommWindow& recv_topk_weights_win, cudaStream_t stream);
 
-  void combine(void* handle_mem, const NVTETensor expert_out,
-               const NVTECommWindow& expert_out_win, NVTETensor result, cudaStream_t stream);
+  void combine(void* handle_mem, const NVTETensor expert_out, const NVTECommWindow& expert_out_win,
+               NVTETensor result, cudaStream_t stream);
 
   // g_recv_topk_weights: 1D [recv_capacity] f32; grad_topk_weights: 2D [T, top_k] f32.
   void dispatch_bwd(void* handle_mem, const NVTETensor grad, const NVTECommWindow& grad_win,
