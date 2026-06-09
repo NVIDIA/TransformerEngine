@@ -133,6 +133,7 @@ def test_fused_rope(
 @pytest.mark.parametrize("cp_size", [1, 2])
 @pytest.mark.parametrize("interleaved", [True, False])
 def test_fused_rope_thd(
+    monkeypatch: pytest.MonkeyPatch,
     dtype: torch.dtype,
     hidden_size: int,
     rotary_percent: float,
@@ -143,6 +144,7 @@ def test_fused_rope_thd(
     start_positions: bool,
     margin: int,
 ) -> None:
+    monkeypatch.setenv("NVTE_FUSED_ROPE_THD_TOKEN_LINEAR", "1")
 
     device = torch.device("cuda:0")
     batch_size, head_num = 2, 64
@@ -539,6 +541,7 @@ def _make_packed_thd_cu_seqlens(
 @pytest.mark.parametrize("rotary_percent", [0.5, 1.0])
 @pytest.mark.parametrize("interleaved", [False, True])
 @pytest.mark.parametrize("cp_size", [1, 2])
+@pytest.mark.parametrize("cp_rank", [0, 1])
 @pytest.mark.parametrize(
     "n_seqs,mean_len,include_zero_length",
     [
@@ -558,6 +561,7 @@ def test_fused_rope_thd_token_linear_parity(
     rotary_percent: float,
     interleaved: bool,
     cp_size: int,
+    cp_rank: int,
     n_seqs: int,
     mean_len: int,
     include_zero_length: bool,
@@ -573,6 +577,8 @@ def test_fused_rope_thd_token_linear_parity(
 
     device = torch.device("cuda:0")
     head_num = 16
+    if cp_rank >= cp_size:
+        pytest.skip("cp_rank must be smaller than cp_size")
 
     rng = torch.Generator(device="cpu")
     rng.manual_seed(0xC0FFEE + n_seqs * 13 + (1 if include_zero_length else 0))
@@ -601,7 +607,6 @@ def test_fused_rope_thd_token_linear_parity(
 
     def run(force_path: str) -> Tuple[torch.Tensor, torch.Tensor]:
         monkeypatch.setenv("NVTE_FUSED_ROPE_THD_TOKEN_LINEAR", force_path)
-        cp_rank = 0
         out = apply_rotary_pos_emb(
             t,
             emb,
@@ -623,7 +628,7 @@ def test_fused_rope_thd_token_linear_parity(
     out_new, grad_new = run("1")
 
     # Both paths call the same per-token device function with the same
-    # arguments and write disjoint output rows. Bitwise equality is the right
-    # bar.
+    # arguments and write disjoint output rows. Bitwise equality is the
+    # right bar, including all CP ranks.
     torch.testing.assert_close(out_new, out_old, rtol=0.0, atol=0.0)
     torch.testing.assert_close(grad_new, grad_old, rtol=0.0, atol=0.0)
