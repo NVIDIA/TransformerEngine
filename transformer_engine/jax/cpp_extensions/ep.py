@@ -23,7 +23,7 @@ from jax.sharding import NamedSharding, PartitionSpec
 
 import transformer_engine_jax
 from .base import BasePrimitive, register_primitive
-from ..sharding import global_mesh_resource, get_mesh_axis_size
+from ..sharding import global_mesh_resource
 
 __all__ = [
     "EpConfig",
@@ -45,11 +45,16 @@ __all__ = [
 
 @dataclass(frozen=True)
 class EpConfig:
-    """Immutable Python view of the EP bootstrap config (see ep_bootstrap)."""
+    """Snapshot of the EP bootstrap config (see ep_bootstrap).
+
+    num_ep_groups is the size of the outer dp/fsdp mesh axis (1 if neither
+    is set), captured at bootstrap so abstract-eval never reads the mesh.
+    """
 
     world_size: int
     rank: int
     ep_size: int
+    num_ep_groups: int
     num_experts: int
     num_local_experts: int
     max_tokens_per_rank: int
@@ -130,15 +135,12 @@ def _ep_outer_axis():
 
 
 def _ep_leading_dims(is_outer):
-    """Single leading dim of an EP-output tensor: ``(dp*ep,)`` (or ``(ep,)`` when
-    DP is unset) globally; ``(1,)`` per shard."""
+    """Leading dim of an EP-output tensor: num_ep_groups*ep_size globally,
+    1 per shard. Read from EpConfig so abstract-eval needs no active mesh."""
     cfg = get_ep_config()
-    outer = _ep_outer_axis()
     if not is_outer:
         return (1,)
-    if outer is None:
-        return (cfg.ep_size,)
-    return (get_mesh_axis_size(outer) * cfg.ep_size,)
+    return (cfg.num_ep_groups * cfg.ep_size,)
 
 
 def _ep_output_spec(*trailing):

@@ -132,7 +132,6 @@ def main():
         ep_bootstrap(
             world_size=args.num_processes,
             rank=rank,
-            ep_size=ep_size,
             num_experts=args.num_experts,
             max_tokens_per_rank=args.tokens_per_rank,
             recv_capacity_per_rank=recv_capacity_per_rank,

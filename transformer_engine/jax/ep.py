@@ -72,7 +72,6 @@ def _allgather_uid(uid_arr, world_size, uid_size):
 def ep_bootstrap(
     world_size,
     rank,
-    ep_size,
     num_experts,
     max_tokens_per_rank,
     recv_capacity_per_rank,
@@ -82,8 +81,12 @@ def ep_bootstrap(
 ):
     """Initialize the EP communicator. Call once per process before any EP op.
 
+    Must run inside the active JAX Mesh and a global_shard_guard; ep_size and
+    num_ep_groups are read from the mesh axes named by MeshResource.ep_resource
+    and MeshResource.dp_resource/fsdp_resource.
+
     max_token_dtype is the widest jnp dtype the group will dispatch; tensors
-    passed to ``ep_dispatch`` may use any narrower dtype.
+    passed to ep_dispatch may use any narrower dtype.
     max_num_sms caps the SMs allotted to EP kernels (0 = auto).
     """
     if jnp.dtype(max_token_dtype) != jnp.bfloat16:
@@ -96,19 +99,41 @@ def ep_bootstrap(
             f"ep_bootstrap requires world_size >= 2 (got {world_size}); NCCL EP needs"
             " at least 2 ranks to form a group."
         )
-    if world_size % ep_size != 0:
-        raise ValueError(
-            f"world_size ({world_size}) must be divisible by ep_size ({ep_size}); otherwise"
-            " some EP groups would have fewer than ep_size ranks and ncclCommInitRank would hang."
-        )
-    if num_experts % ep_size != 0:
-        raise ValueError(f"num_experts ({num_experts}) must be divisible by ep_size ({ep_size}).")
     if jax.local_device_count() != 1:
         raise ValueError(
             "ep_bootstrap requires one local device per process (got"
             f" jax.local_device_count() = {jax.local_device_count()}); NCCL EP does not"
             " support single-process multi-device setups."
         )
+
+    gsr = global_mesh_resource()
+    ep_resource = gsr.ep_resource
+    if ep_resource is None:
+        raise ValueError(
+            "ep_bootstrap requires MeshResource.ep_resource to be set; enter a"
+            " global_shard_guard(MeshResource(..., ep_resource=<axis name>)) before bootstrap."
+        )
+    ep_size = get_mesh_axis_size(ep_resource)
+    outer_axis = gsr.dp_resource or gsr.fsdp_resource
+    if outer_axis is None:
+        if world_size != ep_size:
+            raise ValueError(
+                f"ep_bootstrap: world_size ({world_size}) > ep_size ({ep_size}) but neither"
+                " MeshResource.dp_resource nor fsdp_resource is set; name the outer axis so"
+                " EP-output tensors can shard across EP groups."
+            )
+        num_ep_groups = 1
+    else:
+        num_ep_groups = get_mesh_axis_size(outer_axis)
+    if num_ep_groups * ep_size != world_size:
+        raise ValueError(
+            f"ep_bootstrap: num_ep_groups*ep_size ({num_ep_groups}*{ep_size}="
+            f"{num_ep_groups * ep_size}) must equal world_size ({world_size}); check that"
+            f" the '{outer_axis}' and '{ep_resource}' mesh axes cover all ranks."
+        )
+    if num_experts % ep_size != 0:
+        raise ValueError(f"num_experts ({num_experts}) must be divisible by ep_size ({ep_size}).")
+
     UID_SIZE = 128
     dp_color = rank // ep_size
     rank_within_group = rank % ep_size
@@ -130,19 +155,6 @@ def ep_bootstrap(
     uid_arr = jnp.frombuffer(uid_bytes, dtype=jnp.uint8)
     all_uids = _allgather_uid(uid_arr, world_size, UID_SIZE)
     uid_bytes = bytes(np.asarray(all_uids[dp_color * ep_size]).tolist())
-
-    ep_resource = global_mesh_resource().ep_resource
-    if ep_resource is None:
-        raise ValueError(
-            "ep_bootstrap requires MeshResource.ep_resource to be set; enter a"
-            " global_shard_guard(MeshResource(..., ep_resource=<axis name>)) before bootstrap."
-        )
-    mesh_ep_size = get_mesh_axis_size(ep_resource)
-    if mesh_ep_size != ep_size:
-        raise ValueError(
-            f"ep_bootstrap: EpConfig.ep_size ({ep_size}) does not match mesh axis"
-            f" '{ep_resource}' size ({mesh_ep_size})."
-        )
 
     # Eager NCCL init while ranks are barrier-synced by the UID broadcast above.
     transformer_engine_jax.set_ep_bootstrap_params(
@@ -168,6 +180,7 @@ def ep_bootstrap(
             world_size=world_size,
             rank=rank,
             ep_size=ep_size,
+            num_ep_groups=num_ep_groups,
             num_experts=num_experts,
             num_local_experts=num_experts // ep_size,
             max_tokens_per_rank=max_tokens_per_rank,
