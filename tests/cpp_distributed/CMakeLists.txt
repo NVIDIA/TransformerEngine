@@ -56,12 +56,16 @@ find_package(CUDAToolkit REQUIRED)
 find_package(OpenMP REQUIRED)
 find_package(MPI REQUIRED)
 
-# ── NCCL library ──────────────────────────────────────────────────────────────
-# Search order: NCCL_HOME env → 3rdparty/nccl submodule build → system paths.
-set(NCCL_SUBMODULE_BUILD "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/nccl/build")
+# ── NCCL core ────────────────────────────────────────────────────────────────
+# Pass -DNCCL_INCLUDE_DIR=<prefix>/include; falls back to well-known prefixes.
+find_path(NCCL_INCLUDE_DIR nccl.h
+    HINTS /opt/nvidia/nccl/include /usr/local/nccl/include)
+if(NOT NCCL_INCLUDE_DIR)
+  message(FATAL_ERROR
+    "nccl.h not found. Pass -DNCCL_INCLUDE_DIR=<prefix>/include.")
+endif()
 find_library(NCCL_LIB
              NAMES nccl libnccl
-             HINTS $ENV{NCCL_HOME}/lib ${NCCL_SUBMODULE_BUILD}/lib
              PATH_SUFFIXES lib lib64
              REQUIRED)
 list(APPEND test_comm_gemm_LINKER_LIBS
@@ -77,18 +81,6 @@ target_link_libraries(test_comm_gemm PUBLIC ${test_comm_gemm_LINKER_LIBS})
 
 target_compile_options(test_comm_gemm PRIVATE -O2 -fopenmp)
 
-# NCCL headers: prefer submodule build output (has the handle_init API),
-# then submodule src, then system (CUDA toolkit).
-set(NCCL_SUBMODULE_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/nccl/build/include")
-set(NCCL_SUBMODULE_SRC_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/nccl/src/include")
-if(EXISTS "${NCCL_SUBMODULE_INCLUDE}/nccl.h")
-  set(NCCL_INCLUDE_DIR "${NCCL_SUBMODULE_INCLUDE}")
-elseif(EXISTS "${NCCL_SUBMODULE_SRC_INCLUDE}/nccl.h")
-  set(NCCL_INCLUDE_DIR "${NCCL_SUBMODULE_SRC_INCLUDE}")
-elseif(DEFINED ENV{NCCL_HOME})
-  set(NCCL_INCLUDE_DIR "$ENV{NCCL_HOME}/include")
-endif()
-
 include(GoogleTest)
 gtest_discover_tests(test_comm_gemm DISCOVERY_TIMEOUT 600)
 
@@ -97,14 +89,9 @@ gtest_discover_tests(test_comm_gemm DISCOVERY_TIMEOUT 600)
 # The test binary only uses NCCL core symbols (ncclMemAlloc, ncclCommWindow*);
 # all ncclEp* calls live behind TE's public <transformer_engine/ep.h>, which
 # resolves libnccl_ep.so via dlopen in libtransformer_engine.so itself.
-set(EP_TEST_NCCL_INCLUDES "")
-if(DEFINED NCCL_INCLUDE_DIR)
-  list(APPEND EP_TEST_NCCL_INCLUDES ${NCCL_INCLUDE_DIR})
-  message(STATUS "EP test: NCCL headers: ${NCCL_INCLUDE_DIR}")
-endif()
-
+message(STATUS "EP test: NCCL headers: ${NCCL_INCLUDE_DIR}")
 set(EP_TEST_COMMON_INCLUDES
-    ${EP_TEST_NCCL_INCLUDES}
+    ${NCCL_INCLUDE_DIR}
     ${MPI_CXX_INCLUDE_PATH}
     ../../transformer_engine/common/include
     ../../transformer_engine/common
