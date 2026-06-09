@@ -167,6 +167,22 @@ static bool ep_bootstrap(int argc, char* argv[]) {
   return true;
 }
 
+// Re-bootstrap the EP backend on the existing g_ep_comm with a new zero_copy
+// setting. Used by tests that need the symmem zero-copy fast path.
+static void ep_reinitialize(int zero_copy) {
+  if (!g_ep_initialized) return;
+  nvte_ep_shutdown();
+  NVTEEpGroupConfig group_config{};
+  group_config.ep_size                  = g_ep_size;
+  group_config.num_experts              = g_num_experts;
+  group_config.max_tokens_per_rank      = g_max_tokens_per_rank;
+  group_config.max_recv_tokens_per_rank = g_ep_size * g_max_tokens_per_rank * 2;
+  group_config.hidden_dim               = g_hidden_dim;
+  group_config.max_token_dtype          = g_max_token_dtype;
+  group_config.zero_copy                = zero_copy;
+  nvte_ep_initialize(static_cast<void*>(g_ep_comm), group_config);
+}
+
 // Tear down in dependency order: backend's ep_group reads from ep_comm,
 // so destroy the group first, then the comm.
 static void ep_teardown() {
