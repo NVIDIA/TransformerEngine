@@ -301,22 +301,8 @@ at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapp
              "Input tensor must be a block scaling tensor");
 
   // Get tensor data
-  NVTEBasicTensor data;
-  size_t data_flat_first_dim = 1;
-  size_t data_flat_last_dim = 1;
-  if (rowwise) {
-    data = input.get_rowwise_data();
-    for (size_t i = 0; i < data.shape.ndim - 1; ++i) {
-      data_flat_first_dim *= data.shape.data[i];
-    }
-    data_flat_last_dim = data.shape.data[data.shape.ndim - 1];
-  } else {
-    data = input.get_columnwise_data();
-    data_flat_first_dim = data.shape.data[0];
-    for (size_t i = 1; i < data.shape.ndim; ++i) {
-      data_flat_last_dim *= data.shape.data[i];
-    }
-  }
+  NVTEBasicTensor data = rowwise ? input.get_rowwise_data() : input.get_columnwise_data();
+  const auto [data_flat_first_dim, data_flat_last_dim] = get_2d_dims(data.shape, !rowwise);
   NVTEShape data_shape{};
   data_shape.data[0] = data_flat_first_dim;
   data_shape.data[1] = data_flat_last_dim;
@@ -378,13 +364,6 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorW
   const bool swizzle_columnwise = columnwise_usage && !is_empty_grouped_tensor_param(col_scales);
   if (!swizzle_rowwise && !swizzle_columnwise) {
     return std::nullopt;
-  }
-  const auto first_dims = input.get_first_dims();
-  const auto last_dims = input.get_last_dims();
-  if (first_dims.data_ptr != nullptr || last_dims.data_ptr != nullptr) {
-    NVTE_ERROR(
-        "Grouped GEMM swizzle requires uniform shapes for now (first_dims/last_dims must be "
-        "absent).");
   }
 
   std::optional<at::Tensor> rowwise_scales_pyt;
@@ -452,6 +431,7 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorW
   }
 
   swizzle_output.set_with_gemm_swizzled_scales(true);
+
   NVTE_SCOPED_GIL_RELEASE({
     nvte_swizzle_grouped_scaling_factors(swizzle_input.data(), swizzle_output.data(),
                                          at::cuda::getCurrentCUDAStream());

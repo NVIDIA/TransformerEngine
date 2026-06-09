@@ -128,6 +128,9 @@ class NVFP4Quantizer(Quantizer):
     """Stochastic rounding, only applicable for gradients."""
     stochastic_rounding: bool
 
+    """Whether emitted NVFP4 tensors store one FP32 amax per row."""
+    row_scaled_nvfp4: bool
+
     """RHT matrix random sign mask"""
     rht_matrix_random_sign_mask_t: int
     rht_matrix: torch.Tensor
@@ -143,6 +146,7 @@ class NVFP4Quantizer(Quantizer):
         with_post_rht_amax: bool = False,
         with_2d_quantization: bool = False,
         stochastic_rounding: bool = False,
+        row_scaled_nvfp4: bool = False,
         with_random_sign_mask: bool = True,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
@@ -153,6 +157,7 @@ class NVFP4Quantizer(Quantizer):
         self.amax_reduction_group = amax_reduction_group
         self.with_2d_quantization = with_2d_quantization
         self.stochastic_rounding = stochastic_rounding
+        self.row_scaled_nvfp4 = row_scaled_nvfp4
         self.rht_matrix_random_sign_mask_t = get_random_sign_mask_for_rht(
             with_random_sign_mask, torch.cuda.current_device()
         )
@@ -198,6 +203,7 @@ class NVFP4Quantizer(Quantizer):
             with_post_rht_amax=self.with_post_rht_amax,
             with_2d_quantization=self.with_2d_quantization,
             stochastic_rounding=self.stochastic_rounding,
+            row_scaled_nvfp4=self.row_scaled_nvfp4,
         )
         quantizer.internal = self.internal
         quantizer.optimize_for_gemm = self.optimize_for_gemm
@@ -212,6 +218,8 @@ class NVFP4Quantizer(Quantizer):
 
     def is_quantizable(self, inp: torch.Tensor) -> bool:
         """Returns whether or not given inp can be quantized"""
+        if self.row_scaled_nvfp4:
+            return False
         if inp.ndim < 2:
             return False
         if inp.shape[-1] % NVFP4_BLOCK_SCALING_SIZE != 0:
@@ -289,90 +297,6 @@ class NVFP4Quantizer(Quantizer):
         shape[-1] = shape[-1] // 2
         return tuple(shape)
 
-    def make_empty(
-        self,
-        shape: Iterable[int],
-        *,
-        dtype: torch.dtype = torch.float32,
-        device: Optional[torch.device] = None,
-        pin_memory: bool = False,
-        requires_grad: bool = False,
-    ) -> NVFP4Tensor:
-
-        # Canonicalize tensor attributes
-        if device is None:
-            device = torch.device("cuda")
-
-        assert shape[-1] % NVFP4_BLOCK_SCALING_SIZE == 0, (
-            f"Incorrect shape {shape} for NVFP4. Tensor dims must be divisible by"
-            f" {NVFP4_BLOCK_SCALING_SIZE}"
-        )
-
-        flat_first_dim = math.prod(shape[:-1])
-        assert flat_first_dim % NVFP4_BLOCK_SCALING_SIZE == 0, (
-            f"Incorrect shape {shape} for NVFP4. Tensor dims must be divisible by"
-            f" {NVFP4_BLOCK_SCALING_SIZE}"
-        )
-
-        # Allocate FP4 data
-        data = None
-        scale_inv = None
-        amax_rowwise = None
-        if self.rowwise_usage:
-            data = torch.empty(
-                self.convert_shape_for_fp4(shape),
-                dtype=torch.uint8,
-                device=device,
-                pin_memory=pin_memory,
-            )
-            scale_shape = self.get_scale_shape(shape, columnwise=False)
-            scale_inv = torch.empty(
-                scale_shape, dtype=torch.uint8, device=device, pin_memory=pin_memory
-            )
-            # Allocate per tensor scale inverse. FP32 format.
-            amax_rowwise = torch.zeros(1, dtype=torch.float32, device=device, pin_memory=pin_memory)
-
-        # Allocate FP8 data transpose if needed
-        columnwise_data = None
-        columnwise_scale_inv = None
-        amax_columnwise = None
-        if self.columnwise_usage:
-            # enforce 2D shape to avoid [S, B, H] shape and B and be 1
-            # and the transposed shape is [H, S, B], so divide last dim by 2 gives zero
-            shape_2d = tuple([flat_first_dim, shape[-1]])
-            columnwise_data = torch.empty(
-                self.convert_shape_for_fp4(self.get_columnwise_shape(shape_2d)),
-                dtype=torch.uint8,
-                device=device,
-                pin_memory=pin_memory,
-            )
-            columnwise_scale_shape = self.get_scale_shape(shape, columnwise=True)
-            columnwise_scale_inv = torch.empty(
-                columnwise_scale_shape,
-                dtype=torch.uint8,
-                device=device,
-                pin_memory=pin_memory,
-            )
-            amax_columnwise = torch.zeros(
-                1, dtype=torch.float32, device=device, pin_memory=pin_memory
-            )
-
-        # Construct FP8 tensor
-        return NVFP4Tensor(
-            shape=shape,
-            dtype=dtype,
-            rowwise_data=data,
-            rowwise_scale_inv=scale_inv,
-            columnwise_data=columnwise_data,
-            columnwise_scale_inv=columnwise_scale_inv,
-            amax_rowwise=amax_rowwise,
-            amax_columnwise=amax_columnwise,
-            fp4_dtype=self.dtype,
-            quantizer=self,
-            requires_grad=requires_grad,
-            with_gemm_swizzled_scales=False,
-        )
-
     def calibrate(self, tensor: torch.Tensor) -> None:
         pass  # Calibration is no-op
 
@@ -431,6 +355,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         fp4_dtype: TE_DType,
         quantizer: Quantizer,
         with_gemm_swizzled_scales: bool,
+        row_scaled_nvfp4: bool = False,
         **kwargs,
     ):
         instance = super().__new__(
@@ -445,6 +370,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
             quantizer,
             with_gemm_swizzled_scales,
             *args,
+            row_scaled_nvfp4=row_scaled_nvfp4,
             **kwargs,
         )
         return instance
@@ -658,6 +584,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
                 quantizer=self._quantizer,
                 requires_grad=False,
                 with_gemm_swizzled_scales=False,
+                device=rowwise_data.device,
             )
 
         # Derive columnwise data locally via transpose instead of all-gathering it
@@ -796,10 +723,30 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
                 quantizer=tensor._quantizer,
                 requires_grad=tensor.requires_grad,
                 with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
+                device=tensor.device,
             )
 
         # Default case
         return super().__torch_dispatch__(func, types, args, kwargs)
+
+    def __reduce_ex__(self, protocol: int) -> tuple:
+        """Custom pickling"""
+        return (
+            _make_nvfp4_tensor_in_reduce_ex,
+            (
+                self.shape,
+                self._rowwise_data,
+                self._rowwise_scale_inv,
+                self._columnwise_data,
+                self._columnwise_scale_inv,
+                self._amax_rowwise,
+                self._amax_columnwise,
+                self._fp4_dtype,
+                self.dtype,
+                self._quantizer,
+                self._with_gemm_swizzled_scales,
+            ),
+        )
 
     @classmethod
     def _make_in_reduce_ex(
@@ -816,44 +763,29 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         quantizer: Quantizer,
         with_gemm_swizzled_scales: bool = False,
     ) -> NVFP4Tensor:
-        """Build NVFP4Tensor, for use in __reduce__
-
-        __reduce_ex__ assumes object constructor has positional
-        arguments.
-
+        """This classmethod is kept for backward compatibility only.
+        ``__reduce_ex__`` used to point at this classmethod, but bound
+        classmethods pickle as ``(getattr, (cls, name))`` which adds an
+        extra reduction step to the pickle stream. The current
+        ``__reduce_ex__`` references the module-level
+        ``_make_nvfp4_tensor_in_reduce_ex`` instead so the pickle stream
+        uses a single ``GLOBAL`` opcode. This classmethod is retained so
+        that previously pickled ``NVFP4Tensor`` payloads (which still
+        reference ``NVFP4Tensor._make_in_reduce_ex``) can still be
+        unpickled.
         """
-        return NVFP4Tensor(
-            shape=shape,
-            dtype=dtype,
-            fp4_dtype=fp4_dtype,
-            rowwise_data=rowwise_data,
-            rowwise_scale_inv=rowwise_scale_inv,
-            columnwise_data=columnwise_data,
-            columnwise_scale_inv=columnwise_scale_inv,
-            amax_rowwise=amax_rowwise,
-            amax_columnwise=amax_columnwise,
-            quantizer=quantizer,
-            requires_grad=False,
-            with_gemm_swizzled_scales=with_gemm_swizzled_scales,
-        )
-
-    def __reduce_ex__(self, protocol: int) -> tuple:
-        """Custom pickling"""
-        return (
-            NVFP4Tensor._make_in_reduce_ex,
-            (
-                self.shape,
-                self._rowwise_data,
-                self._rowwise_scale_inv,
-                self._columnwise_data,
-                self._columnwise_scale_inv,
-                self._amax_rowwise,
-                self._amax_columnwise,
-                self._fp4_dtype,
-                self.dtype,
-                self._quantizer,
-                self._with_gemm_swizzled_scales,
-            ),
+        return _make_nvfp4_tensor_in_reduce_ex(
+            shape,
+            rowwise_data,
+            rowwise_scale_inv,
+            columnwise_data,
+            columnwise_scale_inv,
+            amax_rowwise,
+            amax_columnwise,
+            fp4_dtype,
+            dtype,
+            quantizer,
+            with_gemm_swizzled_scales,
         )
 
     def _get_data(self) -> NVFP4Tensor:
@@ -946,6 +878,45 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         raise RuntimeError("NVFP4Tensor has no data!")
 
 
+def _make_nvfp4_tensor_in_reduce_ex(
+    shape: torch.Size,
+    rowwise_data: torch.Tensor,
+    rowwise_scale_inv: torch.Tensor,
+    columnwise_data: torch.Tensor,
+    columnwise_scale_inv: torch.Tensor,
+    amax_rowwise: torch.Tensor,
+    amax_columnwise: torch.Tensor,
+    fp4_dtype: TE_DType,
+    dtype: torch.dtype,
+    quantizer: Quantizer,
+    with_gemm_swizzled_scales: bool = False,
+) -> NVFP4Tensor:
+    """Reconstruct an ``NVFP4Tensor`` from its ``__reduce_ex__`` payload."""
+    # Infer device from whichever inner buffer is populated so the wrapper
+    # subclass stays consistent with its data buffers (e.g. CPU after DCP
+    # async-staging deserialize, CUDA after the usual quantize path).
+    device = None
+    if rowwise_data is not None:
+        device = rowwise_data.device
+    elif columnwise_data is not None:
+        device = columnwise_data.device
+    return NVFP4Tensor(
+        shape=shape,
+        dtype=dtype,
+        fp4_dtype=fp4_dtype,
+        rowwise_data=rowwise_data,
+        rowwise_scale_inv=rowwise_scale_inv,
+        columnwise_data=columnwise_data,
+        columnwise_scale_inv=columnwise_scale_inv,
+        amax_rowwise=amax_rowwise,
+        amax_columnwise=amax_columnwise,
+        quantizer=quantizer,
+        requires_grad=False,
+        with_gemm_swizzled_scales=with_gemm_swizzled_scales,
+        device=device,
+    )
+
+
 class _ViewFunc(torch.autograd.Function):
     """View function
 
@@ -1025,6 +996,7 @@ class _ViewFunc(torch.autograd.Function):
             fp4_dtype=tensor._fp4_dtype,
             requires_grad=tensor.requires_grad,
             with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
+            device=tensor.device,
         )
 
     @staticmethod
@@ -1067,6 +1039,7 @@ class _ViewFunc(torch.autograd.Function):
                 fp4_dtype=grad._fp4_dtype,
                 requires_grad=grad.requires_grad,
                 with_gemm_swizzled_scales=grad._with_gemm_swizzled_scales,
+                device=grad.device,
             )
             return dgrad, None
         return grad.view(ctx.shape), None
@@ -1151,6 +1124,7 @@ class _ReshapeFunc(torch.autograd.Function):
             fp4_dtype=tensor._fp4_dtype,
             requires_grad=tensor.requires_grad,
             with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
+            device=tensor.device,
         )
 
     @staticmethod
@@ -1193,6 +1167,7 @@ class _ReshapeFunc(torch.autograd.Function):
                 fp4_dtype=grad._fp4_dtype,
                 requires_grad=grad.requires_grad,
                 with_gemm_swizzled_scales=grad._with_gemm_swizzled_scales,
+                device=grad.device,
             )
             return dgrad, None
         return grad.view(ctx.shape), None

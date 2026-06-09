@@ -19,12 +19,11 @@ from ...distributed import (
     gather_along_first_dim,
     reduce_scatter_along_first_dim,
 )
-from ...quantization import FP8GlobalStateManager, Recipe
+from ...quantization import FP8GlobalStateManager, QuantizerRole, Recipe
 from ...module.base import (
     _2X_ACC_FPROP,
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
-    get_dummy_wgrad,
 )
 from ...tensor import Quantizer
 from ...tensor.float8_tensor import Float8Quantizer
@@ -36,7 +35,13 @@ from ...utils import (
     devices_match,
 )
 from ..op import BasicOperation, OperationContext
-from .._common import maybe_dequantize, is_quantized_tensor
+from .._common import (
+    get_accumulate_flag_in_param,
+    get_dummy_wgrads_for_params,
+    get_main_grad_from_param,
+    is_quantized_tensor,
+    maybe_dequantize,
+)
 
 
 def _wait_async(handle: Optional[Any]) -> None:
@@ -270,6 +275,21 @@ class BasicLinear(BasicOperation):
             return 1
         return 0
 
+    def get_quantizer_roles(self, mode: str) -> Optional[list[QuantizerRole]]:
+        name = getattr(self, "name", "") or ""
+        if mode == "forward":
+            # BasicLinear owns input and weight quantizers.
+            # Output quantizer is provided by the next op (as its input quantizer).
+            return [
+                QuantizerRole(module_type="linear", tensor_type="input", name=name),
+                QuantizerRole(module_type="linear", tensor_type="weight", name=name),
+            ]
+        if mode == "backward":
+            # BasicLinear owns grad_output quantizer.
+            # Grad_input quantizer is provided by the previous op (as its grad_output quantizer).
+            return [QuantizerRole(module_type="linear", tensor_type="grad_output", name=name)]
+        return None
+
     def reset_parameters(self) -> None:
         """Initialize parameter buffers and values"""
 
@@ -356,15 +376,6 @@ class BasicLinear(BasicOperation):
             grad_output_quantizer.internal = True
             if not (self.tensor_parallel_mode == "row" and self.sequence_parallel):
                 grad_output_quantizer.optimize_for_gemm = True
-        if FP8GlobalStateManager.is_fp8_enabled():
-            fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
-            if fp8_recipe.backward_override is not None and (
-                fp8_recipe.mxfp8() or fp8_recipe.nvfp4()
-            ):
-                if input_quantizer is not None:
-                    input_quantizer.optimize_for_gemm = False
-                if grad_output_quantizer is not None:
-                    grad_output_quantizer.optimize_for_gemm = False
 
         # Configure weight quantizer
         # Note: This function may be called in base class constructor,
@@ -1069,16 +1080,9 @@ class BasicLinear(BasicOperation):
         grad_weight = None
         if ctx.weight_requires_grad and accumulate_into_main_grad:
             weight_param = self.weight
-            if hasattr(weight_param, "__fsdp_param__"):
-                weight_param.main_grad = weight_param.get_main_grad()
-            accumulate_into_main_grad = not getattr(weight_param, "overwrite_main_grad", False)
-            if not hasattr(weight_param, "main_grad"):
-                raise RuntimeError(
-                    "BasicLinear op is configured with "
-                    "accumulate_into_main_grad=True, "
-                    "but weight parameter does not have main_grad attribute"
-                )
-            grad_weight = weight_param.main_grad.detach()
+            main_grad = get_main_grad_from_param(weight_param, op_label="BasicLinear")
+            accumulate_into_main_grad = get_accumulate_flag_in_param(weight_param)
+            grad_weight = main_grad.detach()
         else:
             accumulate_into_main_grad = False
 
@@ -1108,14 +1112,6 @@ class BasicLinear(BasicOperation):
         # Megatron-LM wgrad fusion
         # Note: Return dummy tensor for grad weight if needed.
         if accumulate_into_main_grad:
-            grad_weight = None
-            weight_param = self.weight
-            if hasattr(weight_param, "grad_added_to_main_grad"):
-                weight_param.grad_added_to_main_grad = True
-                grad_weight = get_dummy_wgrad(
-                    list(weight_param.size()),
-                    weight_param.dtype,
-                    zero=getattr(weight_param, "zero_out_wgrad", False),
-                )
+            grad_weight = get_dummy_wgrads_for_params([self.weight])[0]
 
         return grad_input, [grad_weight]

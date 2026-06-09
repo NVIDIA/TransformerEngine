@@ -160,11 +160,13 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
 
 py::object te_general_grouped_gemm_for_grouped_tensor(
     py::handle A, bool transa, py::handle B, bool transb, py::handle D, py::object bias,
-    at::Tensor alpha, at::Tensor beta, at::Tensor workspace_setup, at::Tensor workspace_cublas,
-    bool use_split_accumulator, int math_sm_count);
+    std::optional<at::Tensor> bias_scale, at::Tensor alpha, at::Tensor beta,
+    at::Tensor workspace_setup, at::Tensor workspace_cublas, bool use_split_accumulator,
+    int math_sm_count);
 
 py::object te_general_grouped_gemm_for_discrete_in(py::handle A, bool transa, py::handle B,
                                                    bool transb, py::handle D, py::object bias,
+                                                   std::optional<at::Tensor> bias_scale,
                                                    at::Tensor alpha, at::Tensor beta,
                                                    at::Tensor workspace_setup,
                                                    at::Tensor workspace_cublas,
@@ -172,6 +174,7 @@ py::object te_general_grouped_gemm_for_discrete_in(py::handle A, bool transa, py
 
 py::object te_general_grouped_gemm_for_discrete_out(py::handle A, bool transa, py::handle B,
                                                     bool transb, py::handle D, py::object bias,
+                                                    std::optional<at::Tensor> bias_scale,
                                                     at::Tensor alpha, at::Tensor beta,
                                                     at::Tensor workspace_setup,
                                                     at::Tensor workspace_cublas,
@@ -307,8 +310,21 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
                                     const int sm_margin, const bool zero_centered_gamma);
 
 /***************************************************************************************************
- * Cast
+ * Memory allocation
  **************************************************************************************************/
+
+// Allocates tensors all backed by a single contiguous buffer.
+std::vector<at::Tensor> bulk_allocate(const std::vector<std::vector<size_t>> &shapes,
+                                      const std::vector<at::ScalarType> &dtypes,
+                                      std::optional<c10::Device> device = std::nullopt,
+                                      std::optional<std::vector<size_t>> alignments = std::nullopt);
+
+/***************************************************************************************************
+ * Quantize
+ **************************************************************************************************/
+
+py::object create_empty_quantized_tensor(py::handle quantizer, const std::vector<size_t> &shape,
+                                         at::ScalarType dtype, at::Device device, bool pin_memory);
 
 py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::object &output,
                     std::optional<at::Tensor> noop_flag);

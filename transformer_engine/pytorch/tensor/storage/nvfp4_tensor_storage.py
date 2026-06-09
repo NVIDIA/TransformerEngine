@@ -47,13 +47,18 @@ class _FromNVFP4Func(torch.autograd.Function):
         if tensor._columnwise_data is not None and tensor._columnwise_data.numel() == 0:
             return torch.empty(tensor.size(), dtype=dtype, device=tensor.device)
 
-        # Dequantize row-wise data
-        if tensor._rowwise_data is not None:
-            return tex.dequantize(tensor, torch_to_transformer_engine_dtype[dtype])
-
-        if tensor._columnwise_data is not None:
+        if tensor._rowwise_data is None and tensor._columnwise_data is None:
+            raise ValueError("Attempted to dequantize NVFP4 tensor with no data")
+        if tensor._rowwise_data is None and tensor._columnwise_data is not None:
             raise NotImplementedError("Dequantizing column-wise NVFP4 data is not implemented yet!")
-        raise ValueError("Attempted to dequantize NVFP4 tensor with no data")
+
+        # ``tex.dequantize`` requires CUDA-resident buffers. If the tensor has
+        src_device = tensor.device
+        if src_device.type != "cuda":
+            cuda_tensor = tensor.to(device=torch.device("cuda"))
+            result = tex.dequantize(cuda_tensor, torch_to_transformer_engine_dtype[dtype])
+            return result.to(device=src_device)
+        return tex.dequantize(tensor, torch_to_transformer_engine_dtype[dtype])
 
     @staticmethod
     def backward(
@@ -97,6 +102,8 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
     # Whether scaling factors are in the swizzled format expected by
     # GEMM
     _with_gemm_swizzled_scales: bool
+    # Whether this NVFP4 tensor uses row-scaled amax metadata
+    _row_scaled_nvfp4: bool
 
     def __new__(
         cls,
@@ -111,6 +118,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         with_gemm_swizzled_scales: bool,
         *args,
         fake_dtype: Optional[torch.dtype] = None,
+        row_scaled_nvfp4: bool = False,
         **kwargs,
     ):
         if cls is NVFP4TensorStorage:
@@ -128,6 +136,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         instance._amax_rowwise = amax_rowwise
         instance._amax_columnwise = amax_columnwise
         instance._with_gemm_swizzled_scales = with_gemm_swizzled_scales
+        instance._row_scaled_nvfp4 = row_scaled_nvfp4
 
         return instance
 
@@ -152,6 +161,8 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             raise RuntimeError("FP4 dtype mismatch in copy_from_storage")
         if self._with_gemm_swizzled_scales != src._with_gemm_swizzled_scales:
             raise RuntimeError("Scale layout mismatch in copy_from_storage")
+        if self._row_scaled_nvfp4 != src._row_scaled_nvfp4:
+            raise RuntimeError("Rowwise amax scaling mode mismatch in copy_from_storage")
 
         def _copy_optional(dst: Optional[torch.Tensor], src_tensor: Optional[torch.Tensor]):
             if dst is not None and src_tensor is not None:
@@ -176,6 +187,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             "fp4_dtype": self._fp4_dtype,
             "quantizer": self._quantizer,
             "with_gemm_swizzled_scales": self._with_gemm_swizzled_scales,
+            "row_scaled_nvfp4": self._row_scaled_nvfp4,
             "fake_dtype": self._dtype,
         }
 
@@ -308,6 +320,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             quantizer=self._quantizer,
             fp4_dtype=self._fp4_dtype,
             with_gemm_swizzled_scales=self._with_gemm_swizzled_scales,
+            row_scaled_nvfp4=self._row_scaled_nvfp4,
             fake_dtype=self._dtype,
         )
 

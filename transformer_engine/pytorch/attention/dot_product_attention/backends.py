@@ -167,12 +167,33 @@ else:
     from flash_attn.cute.interface import (  # pylint: disable=ungrouped-imports,no-name-in-module
         flash_attn_func as flash_attn_func_v4,
         flash_attn_varlen_func as flash_attn_varlen_func_v4,
+        _validate_head_dims as _fa4_validate_head_dims,
     )
 
+    fa_utils.v4_validate_head_dims = _fa4_validate_head_dims
     fa_utils.set_flash_attention_4_params()
 
 # Float8CurrentScaling: fused_attn_bwd takes O in FP8 by default, this flag allows it in F16
 _dpa_fp8_cs_o_in_f16 = os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1") == "1"
+
+
+def _qkv_quantizer_type(qkv_quantizer):
+    """Map a DPA QKV quantizer instance to its kernel-facing FP8 sub-recipe label.
+
+    Returns one of ``'delayed'`` / ``'current'`` / ``'mxfp8'``. Used by FP8
+    attention forward/backward to dispatch save-for-backward and
+    re-quantization decisions from the *quantizer instance* rather than
+    the top-level ``Recipe`` type, so that ``CustomRecipe``
+    is handled correctly. Built-in recipes already
+    produce the matching quantizer instances, so behavior is preserved.
+    """
+    if isinstance(qkv_quantizer, Float8Quantizer):
+        return "delayed"
+    if isinstance(qkv_quantizer, Float8CurrentScalingQuantizer):
+        return "current"
+    if isinstance(qkv_quantizer, MXFP8Quantizer):
+        return "mxfp8"
+    raise TypeError(f"Unsupported FP8 attention QKV quantizer: {type(qkv_quantizer).__name__}")
 
 
 class FP8EmulationFunc(torch.autograd.Function):
@@ -491,7 +512,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 fp8_recipe = fp8_meta["local_recipes"][0]
             # get quantizers from DPA; all Nones if not fp8
             QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer = (
-                dpa_utils.get_attention_quantizers(fp8, fp8_recipe, quantizers)
+                dpa_utils.get_attention_quantizers(fp8, quantizers)
             )
             # S/dP are forced to use DS quantizers in DPA.init_fp8_metadata; revert them here for true CS emulation
             if fp8_recipe.float8_current_scaling():
@@ -803,10 +824,13 @@ class FlashAttention(torch.nn.Module):
         fp8: bool = False,
         fp8_meta: Optional[Dict[str, Any]] = None,
         quantizers=None,
+        pad_between_seqs: Optional[bool] = False,
         inference_params: Optional[InferenceParams] = None,
         flash_attention_backend: Optional[PkgVersion] = PkgVersion("0"),
         fp8_output: bool = False,
         num_splits: Optional[int] = 1,
+        cu_seqlens_q_padded: Optional[torch.Tensor] = None,
+        cu_seqlens_kv_padded: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """flash-attn fprop"""
 
@@ -1005,8 +1029,16 @@ class FlashAttention(torch.nn.Module):
                     cu_seqlens_kv,
                     max_seqlen_q,
                     max_seqlen_kv,
-                    cu_seqlens_q if qkv_format == "thd" else None,
-                    cu_seqlens_kv if qkv_format == "thd" else None,
+                    (
+                        cu_seqlens_q_padded
+                        if pad_between_seqs
+                        else (cu_seqlens_q if qkv_format == "thd" else None)
+                    ),
+                    (
+                        cu_seqlens_kv_padded
+                        if pad_between_seqs
+                        else (cu_seqlens_kv if qkv_format == "thd" else None)
+                    ),
                     self.attention_dropout if self.training else 0.0,
                     cp_group,
                     cp_global_ranks,
@@ -1018,7 +1050,7 @@ class FlashAttention(torch.nn.Module):
                     deterministic=self.deterministic,
                     window_size=window_size,
                     quantizers=quantizers,
-                    pad_between_seqs=False,
+                    pad_between_seqs=pad_between_seqs,
                     use_flash_attn_3=use_flash_attn_3,
                     fp8_output=fp8_output,
                 )
@@ -1063,8 +1095,12 @@ class FlashAttention(torch.nn.Module):
                     else:
                         func = flash_attn_with_kvcache_v3  # pylint: disable=possibly-used-before-assignment
                     if not use_flash_attn_4 and (not use_flash_attn_3 or inference_params is None):
-                        fa_optional_forward_args_thd.append(cu_seqlens_q)
-                        fa_optional_forward_args_thd.append(cu_seqlens_kv)
+                        fa_optional_forward_args_thd.append(
+                            cu_seqlens_q_padded if pad_between_seqs else cu_seqlens_q
+                        )
+                        fa_optional_forward_args_thd.append(
+                            cu_seqlens_kv_padded if pad_between_seqs else cu_seqlens_kv
+                        )
                         fa_optional_forward_args_thd.append(max_seqlen_q)
                         fa_optional_forward_args_thd.append(max_seqlen_kv)
                 if use_flash_attn_4:
@@ -1120,6 +1156,13 @@ class FlashAttention(torch.nn.Module):
                     fa_3_optional_forward_kwargs = {}
                     fa_3_optional_forward_kwargs["window_size"] = window_size
                     fa_3_optional_forward_kwargs["num_splits"] = num_splits
+                    if pad_between_seqs:
+                        fa_3_optional_forward_kwargs["seqused_q"] = (
+                            cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+                        )
+                        fa_3_optional_forward_kwargs["seqused_k"] = (
+                            cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
+                        )
                     if inference_params is None:
                         fa_3_optional_forward_kwargs["deterministic"] = self.deterministic
                     else:
@@ -1318,8 +1361,14 @@ class FusedAttnFunc(torch.autograd.Function):
 
         # get quantizers from DPA; all Nones if not fp8
         QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer = (
-            dpa_utils.get_attention_quantizers(fp8, fp8_recipe, quantizers)
+            dpa_utils.get_attention_quantizers(fp8, quantizers)
         )
+
+        # Effective FP8 sub-recipe label inferred from the QKV quantizer
+        # instance. Drives save-for-backward and re-quantization dispatch
+        # below so that CustomRecipe (and built-in recipes alike) work
+        # without depending on `fp8_recipe.<predicate>()`.
+        qkv_type = _qkv_quantizer_type(QKV_quantizer) if fp8 else None
 
         # get nominal data type for out
         # FP16/BF16 attention: torch.float16 or torch.bfloat16
@@ -1402,19 +1451,13 @@ class FusedAttnFunc(torch.autograd.Function):
                 not is_bwd_fp8
                 or (
                     is_bwd_fp8
-                    and (
-                        (fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16)
-                        or fp8_recipe.mxfp8()
-                    )
+                    and ((qkv_type == "current" and _dpa_fp8_cs_o_in_f16) or qkv_type == "mxfp8")
                 )
             )
             bwd_requires_o_fp8 = (
                 is_training
                 and is_bwd_fp8
-                and (
-                    fp8_recipe.delayed()
-                    or (fp8_recipe.float8_current_scaling() and not _dpa_fp8_cs_o_in_f16)
-                )
+                and (qkv_type == "delayed" or (qkv_type == "current" and not _dpa_fp8_cs_o_in_f16))
             )
             if isinstance(out_, QuantizedTensorStorage):
                 if not is_output_fp8 or bwd_requires_o_f16:
@@ -1442,14 +1485,10 @@ class FusedAttnFunc(torch.autograd.Function):
             fp8_tensors = (None, None, None, None)
             f16_tensors = (None, None, None, None)
             if is_bwd_fp8:
-                if (
-                    fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16
-                ) or fp8_recipe.mxfp8():
+                if (qkv_type == "current" and _dpa_fp8_cs_o_in_f16) or qkv_type == "mxfp8":
                     fp8_tensors = (q_fp8, k_fp8, v_fp8, None)
                     f16_tensors = (None, None, None, out_f16)
-                elif fp8_recipe.delayed() or (
-                    fp8_recipe.float8_current_scaling() and not _dpa_fp8_cs_o_in_f16
-                ):
+                elif qkv_type == "delayed" or (qkv_type == "current" and not _dpa_fp8_cs_o_in_f16):
                     fp8_tensors = (q_fp8, k_fp8, v_fp8, out_fp8)
             else:
                 if is_input_fp8:
@@ -1536,6 +1575,7 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.dO_quantizer = dO_quantizer
         ctx.dP_quantizer = dP_quantizer
         ctx.S_quantizer = S_quantizer
+        ctx.qkv_type = qkv_type
         if ctx.fp8 and isinstance(ctx.S_quantizer, Float8Quantizer):
             ctx.S_quantizer = S_quantizer.copy()
             ctx.S_quantizer.scale = S_quantizer.scale.clone()
@@ -1706,9 +1746,9 @@ class FusedAttnFunc(torch.autograd.Function):
                     # MXFP8BlockScaling:
                     #   out_, dq_, dk_, dv_, d_out: torch.Tensor; dtype = torch.float16 or torch.bfloat16
                     out_ = out_fp8
-                    if ctx.fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16:
+                    if ctx.qkv_type == "current" and _dpa_fp8_cs_o_in_f16:
                         out_ = out
-                    if ctx.fp8_recipe.mxfp8():
+                    if ctx.qkv_type == "mxfp8":
                         out_ = out
                         aux_ctx_tensors.append(d_out)
                     dq_, dk_, dv_, *rest = fused_attn_bwd(
@@ -1859,31 +1899,12 @@ class FusedAttnFunc(torch.autograd.Function):
 
 
 class FusedAttention(torch.nn.Module):
-    """Dot product attention, with multiple backends:
+    """Dot product attention using cuDNN attention:
 
-    1. FusedAttnBackend["F16_max512_seqlen"]
-       cuDNN based fused attention for FP16/BF16 and <=512 sequence length.
-    2. FusedAttnBackend["F16_arbitrary_seqlen"]
-       cuDNN based fused attention for FP16/BF16 and any sequence length.
-
-    Support matrix:
-
-    | backend       | 1                       | 2                              |
-    | flash based   | no                      | yes                            |
-    | cuDNN based   | yes                     | yes                            |
-    | qkv dtype     | fp16/bf16               | fp16/bf16                      |
-    | attn_type     | self/cross              | self/cross                     |
-    | qkv_layout    |                         |                                |
-    |  - (q,k,v)    | sb3hd, bs3hd            | sb3hd, bs3hd, sbh3d, bsh3d     |
-    |               | sbhd_sb2hd, bshd_bs2hd  | sbhd_sb2hd, bshd_bs2hd         |
-    |               | bshd_bshd_bshd          | sbhd_sbh2d, bshd_bsh2d         |
-    |               |                         | sbhd_sbhd_sbhd, bshd_bshd_bshd |
-    | mask_type     | causal/padding/no_mask  | causal/padding/no_mask         |
-    | bias_type     | post_scale_bias/no_bias | post_scale_bias/alibi/no_bias  |
-    | dropout       | yes                     | yes                            |
-    | max_seqlen    | <=512, multiple of 64   | any, multiple of 64            |
-    | head_dim      | 64                      | <=128, multiple of 8           |
-    | output dtype  | fp16/bf16               | fp16/bf16                      |
+    FusedAttnBackend["F16_arbitrary_seqlen"]
+       cuDNN attention for FP16/BF16 with any sequence length.
+    FusedAttnBackend["FP8"]
+       cuDNN attention for FP8 with any sequence length.
     """
 
     def __init__(
@@ -2078,7 +2099,7 @@ class FusedAttention(torch.nn.Module):
                     " with FP8!"
                 )
             if fp8_recipe.float8_current_scaling() and context_parallel:
-                all_quantizers = dpa_utils.get_attention_quantizers(fp8, fp8_recipe, quantizers)
+                all_quantizers = dpa_utils.get_attention_quantizers(fp8, quantizers)
                 for q in all_quantizers:
                     if isinstance(q, Float8CurrentScalingQuantizer):
                         q.with_amax_reduction = True

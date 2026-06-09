@@ -2848,6 +2848,27 @@ def _make_grouped_tensor_uniform(
     )
 
 
+def _apply_grouped_bias_ref(
+    base_outs: List[torch.Tensor],
+    bias: Optional[List[torch.Tensor]],
+    bias_scale: Optional[torch.Tensor],
+    m_sizes: List[int],
+    dtype: torch.dtype,
+) -> List[torch.Tensor]:
+    """Reference: add (optionally per-row scaled) bias to each group's output, cast to ``dtype``."""
+    if bias is None:
+        return list(base_outs)
+    if bias_scale is None:
+        return [(o.float() + b.float()).to(dtype) for o, b in zip(base_outs, bias)]
+    out = []
+    offset = 0
+    for i, ms in enumerate(m_sizes):
+        s = bias_scale[offset : offset + ms].unsqueeze(-1)
+        out.append((base_outs[i].float() + bias[i].float() * s).to(dtype))
+        offset += ms
+    return out
+
+
 @pytest.mark.parametrize(
     "z, m, n, k",
     [
@@ -2860,11 +2881,15 @@ def _make_grouped_tensor_uniform(
 @pytest.mark.parametrize("case", ["no_discrete", "discrete_in", "discrete_out"])
 @pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
 @pytest.mark.parametrize("accumulate", [False, True])
-def test_grouped_gemm_grouped_tensor(z, m, n, k, case, layout, accumulate) -> None:
+@pytest.mark.parametrize("use_bias_scale", [False, True])
+def test_grouped_gemm_grouped_tensor(z, m, n, k, case, layout, accumulate, use_bias_scale) -> None:
+    if torch.cuda.get_device_capability() < (9, 0):
+        pytest.skip("Grouped GEMM requires Hopper (SM90) or newer.")
+    if torch.cuda.get_device_capability() < (10, 0):
+        if tex.get_cublasLt_version() < 130400:
+            pytest.skip("Grouped GEMM on Hopper requires cuBLAS 13.4+.")
     if tex.get_cublasLt_version() < 130300:
         pytest.skip("Grouped GEMM requires cuBLAS 13.3+.")
-    if torch.cuda.get_device_capability() < (10, 0):
-        pytest.skip("Grouped GEMM requires Blackwell (SM100) or newer.")
     if not is_bf16_available():
         pytest.skip("bfloat16 is required for grouped GEMM test.")
 
@@ -2914,12 +2939,11 @@ def test_grouped_gemm_grouped_tensor(z, m, n, k, case, layout, accumulate) -> No
         if case != "discrete_out"
         else None
     )
+    bias_scale = None
+    if use_bias_scale and bias is not None and layout != "NT":
+        bias_scale = torch.randn(m, device="cuda", dtype=torch.float32)
     # Bias add in grouped kernel accumulates in FP32 for BF16/FP16.
-    out_ref = (
-        [(o.float() + b.float()).to(dtype) for o, b in zip(out_ref_no_bias, bias)]
-        if bias is not None
-        else out_ref_no_bias
-    )
+    out_ref = _apply_grouped_bias_ref(out_ref_no_bias, bias, bias_scale, m_sizes, dtype)
     # Create grouped tensors based on case
     device = A[0].device
     grouped_A = A
@@ -2983,6 +3007,7 @@ def test_grouped_gemm_grouped_tensor(z, m, n, k, case, layout, accumulate) -> No
         layout=layout,
         accumulate=accumulate,
         bias=grouped_bias,
+        bias_scale=bias_scale,
     )
     out_grouped_no_bias = (
         grouped_out_no_bias
@@ -2995,10 +3020,8 @@ def test_grouped_gemm_grouped_tensor(z, m, n, k, case, layout, accumulate) -> No
         else grouped_out_bias.split_into_quantized_tensors()
     )
 
-    out_grouped_manual_bias = (
-        [(o.float() + b.float()).to(dtype) for o, b in zip(out_grouped_no_bias, bias)]
-        if bias is not None
-        else out_grouped_no_bias
+    out_grouped_manual_bias = _apply_grouped_bias_ref(
+        out_grouped_no_bias, bias, bias_scale, m_sizes, dtype
     )
     tols = dtype_tols(dtype)
     for o, o_ref in zip(out_grouped_no_bias, out_ref_no_bias):
@@ -3064,7 +3087,10 @@ def test_grouped_gemm_grouped_tensor_zero_work(layout, accumulate, quant_type) -
         weight_tensors = [torch.randn(n, k, dtype=dtype, device=device) for _ in range(z)]
         if use_mxfp8:
             grouped_A = _make_grouped_tensor_quantized_mxfp8(
-                weight_tensors, is_a=True, transposed=transa, device=device
+                weight_tensors,
+                rowwise=transa,
+                columnwise=not transa,
+                device=device,
             )
         else:
             grouped_A = _make_grouped_tensor_uniform(z, n, k, device, dtype)
@@ -3118,28 +3144,52 @@ def test_grouped_gemm_grouped_tensor_zero_work(layout, accumulate, quant_type) -
 def _make_grouped_tensor_quantized_mxfp8(
     tensors: List[torch.Tensor],
     *,
-    is_a: bool,
-    transposed: bool,
+    rowwise: bool,
+    columnwise: bool,
     device: torch.device,
-    optimize_for_gemm: bool = True,
+    is_weight: bool = False,
 ) -> GroupedTensor:
+    """Create a quantized MXFP8 GroupedTensor from a list of per-expert tensors.
+
+    For weights (uniform per-expert shape), we generally won't keep it swizzled since we
+    might need for future dequantize operations. Swizzling is done internally within
+    general_grouped_gemm_for_grouped_tensor call.
+
+    For non-weight tensors (inputs / grad_outputs), we still pass
+    ``first_dims`` and keep ``optimize_for_gemm=True``; so the kernel must emit the
+    already-swizzled layout up front.
+    """
     if not tensors:
         raise ValueError("Expected non-empty tensor list for grouped quantization.")
-    if is_a:
-        rowwise = transposed
-        columnwise = not transposed
-    else:
-        rowwise = not transposed
-        columnwise = transposed
     quantizer = MXFP8Quantizer(
         fp8_dtype=tex.DType.kFloat8E4M3,
         rowwise=rowwise,
         columnwise=columnwise,
     )
-    quantizer.optimize_for_gemm = optimize_for_gemm
+    quantizer.optimize_for_gemm = not is_weight
     grouped_input = torch.cat(tensors, dim=0)
-    first_dims = torch.tensor([t.shape[0] for t in tensors], dtype=torch.int64, device=device)
+    if is_weight:
+        first_dims = None
+    else:
+        first_dims = torch.tensor([t.shape[0] for t in tensors], dtype=torch.int64, device=device)
     return tex.group_quantize(grouped_input, quantizer, len(tensors), first_dims)
+
+
+def _per_tensor_quantize_mxfp8(
+    tensors: List[torch.Tensor],
+    *,
+    rowwise: bool,
+    columnwise: bool,
+) -> List:
+    """Quantize each tensor individually with MXFP8.
+    Used to build reference discrete inputs for grouped GEMM.
+    """
+    quantizer = MXFP8Quantizer(
+        fp8_dtype=tex.DType.kFloat8E4M3,
+        rowwise=rowwise,
+        columnwise=columnwise,
+    )
+    return [quantizer(t) for t in tensors]
 
 
 @pytest.mark.parametrize(
@@ -3148,6 +3198,7 @@ def _make_grouped_tensor_quantized_mxfp8(
         (1, 128, 128, 512),
         (8, 1024, 128, 512),
         (16, 4096, 128, 512),
+        (2, 256, 2880, 2880),
     ],
 )
 @pytest.mark.parametrize("accumulate", [False, True])
@@ -3188,12 +3239,21 @@ def test_grouped_gemm_grouped_tensor_mxfp8(
 
     transa = layout[0] == "T"
     transb = layout[1] == "T"
-    grouped_A = _make_grouped_tensor_quantized_mxfp8(A, is_a=True, transposed=transa, device="cuda")
-    grouped_B = _make_grouped_tensor_quantized_mxfp8(
-        B, is_a=False, transposed=transb, device="cuda"
+    a_is_weight = all(t.shape == A[0].shape for t in A)
+    a_rowwise, a_columnwise = transa, not transa
+    b_rowwise, b_columnwise = not transb, transb
+    grouped_A = _make_grouped_tensor_quantized_mxfp8(
+        A,
+        rowwise=a_rowwise,
+        columnwise=a_columnwise,
+        device="cuda",
+        is_weight=a_is_weight,
     )
-    A_fp8 = grouped_A.split_into_quantized_tensors()
-    B_fp8 = grouped_B.split_into_quantized_tensors()
+    grouped_B = _make_grouped_tensor_quantized_mxfp8(
+        B, rowwise=b_rowwise, columnwise=b_columnwise, device="cuda"
+    )
+    A_fp8 = _per_tensor_quantize_mxfp8(A, rowwise=a_rowwise, columnwise=a_columnwise)
+    B_fp8 = _per_tensor_quantize_mxfp8(B, rowwise=b_rowwise, columnwise=b_columnwise)
 
     general_grouped_gemm(
         A_fp8,
