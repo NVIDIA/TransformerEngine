@@ -10,7 +10,7 @@ old_code = """  swizzle_output.set_with_gemm_swizzled_scales(true);
   });"""
 
 new_code = """  swizzle_output.set_with_gemm_swizzled_scales(true);
-  
+
   size_t num_tensors = input.num_tensors();
   size_t workspace_size = (num_tensors + 2) * sizeof(int) + (num_tensors + 1) * sizeof(size_t);
   workspace_size = roundup(workspace_size, 256);
@@ -40,4 +40,3 @@ content = content.replace(old_check, new_check)
 
 with open("transformer_engine/pytorch/csrc/extensions/swizzle.cpp", "w") as f:
     f.write(content)
-

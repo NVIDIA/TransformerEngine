@@ -8,8 +8,8 @@ kernels_code = """
 template <int SF_TILE_DIM_M, int SF_TILE_DIM_K>
 __global__ void __launch_bounds__(TB_DIM* TB_DIM)
     grouped_swizzle_scaling_variable_shape_kernel(
-        const void* input, 
-        void* output, 
+        const void* input,
+        void* output,
         const int64_t* m_array,
         const int64_t* k_array,
         const int* block_offsets,
@@ -42,23 +42,23 @@ __global__ void __launch_bounds__(TB_DIM* TB_DIM)
   if (tensor_id == -1) return;
 
   int local_block_id = linear_block_id - block_offsets[tensor_id];
-  
+
   size_t M = rowwise ? m_array[tensor_id] : k_array[tensor_id];
   size_t K = rowwise ? k_array[tensor_id] : m_array[tensor_id];
-  
+
   size_t padded_m = round_up_to_multiple(M, 128);
   size_t padded_k = round_up_to_multiple(DIVUP(K, static_cast<size_t>(MXFP8_BLOCK_SIZE)), 4);
-  
+
   int num_tiles_m = padded_m / SF_TILE_DIM_M;
   int num_tiles_k = padded_k / SF_TILE_DIM_K;
-  
+
   int vec_load_size = (rowwise ? ((num_tiles_k - 1) % 4 + 1) : ((num_tiles_m - 1) % 4 + 1));
   if (vec_load_size == 3) vec_load_size = 1;
   int n_tiles_in_tb = TB_DIM * vec_load_size;
 
   int grid_dim_x = rowwise ? DIVUP(num_tiles_k, n_tiles_in_tb) : DIVUP(num_tiles_k, TB_DIM);
   int grid_dim_y = rowwise ? num_tiles_m : DIVUP(num_tiles_m, vec_load_size);
-  
+
   int block_x = local_block_id % grid_dim_x;
   int block_y = local_block_id / grid_dim_x;
 
@@ -71,29 +71,29 @@ __global__ void __launch_bounds__(TB_DIM* TB_DIM)
   if (rowwise) {
       if (vec_load_size == 4) {
           swizzle_row_scaling_kernel_impl<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>(
-              input_base, output_base, padded_m, padded_k, original_M, original_K, 
+              input_base, output_base, padded_m, padded_k, original_M, original_K,
               block_x, block_y, grid_dim_x, grid_dim_y);
       } else if (vec_load_size == 2) {
           swizzle_row_scaling_kernel_impl<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>(
-              input_base, output_base, padded_m, padded_k, original_M, original_K, 
+              input_base, output_base, padded_m, padded_k, original_M, original_K,
               block_x, block_y, grid_dim_x, grid_dim_y);
       } else {
           swizzle_row_scaling_kernel_impl<int, SF_TILE_DIM_M, SF_TILE_DIM_K>(
-              input_base, output_base, padded_m, padded_k, original_M, original_K, 
+              input_base, output_base, padded_m, padded_k, original_M, original_K,
               block_x, block_y, grid_dim_x, grid_dim_y);
       }
   } else {
       if (vec_load_size == 4) {
           swizzle_col_scaling_kernel_impl<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>(
-              input_base, output_base, padded_m, padded_k, original_M, original_K, 
+              input_base, output_base, padded_m, padded_k, original_M, original_K,
               block_x, block_y, grid_dim_x, grid_dim_y);
       } else if (vec_load_size == 2) {
           swizzle_col_scaling_kernel_impl<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>(
-              input_base, output_base, padded_m, padded_k, original_M, original_K, 
+              input_base, output_base, padded_m, padded_k, original_M, original_K,
               block_x, block_y, grid_dim_x, grid_dim_y);
       } else {
           swizzle_col_scaling_kernel_impl<int, SF_TILE_DIM_M, SF_TILE_DIM_K>(
-              input_base, output_base, padded_m, padded_k, original_M, original_K, 
+              input_base, output_base, padded_m, padded_k, original_M, original_K,
               block_x, block_y, grid_dim_x, grid_dim_y);
       }
   }
@@ -113,34 +113,34 @@ __global__ void compute_grouped_swizzle_setup(
   if (blockIdx.x == 0 && threadIdx.x == 0) {
     int current_block_offset = 0;
     size_t current_scale_offset = 0;
-    
+
     for (size_t i = 0; i < num_tensors; ++i) {
       block_offsets[i] = current_block_offset;
       scale_offsets[i] = current_scale_offset;
-      
+
       size_t m = rowwise ? m_array[i] : k_array[i];
       size_t k = rowwise ? k_array[i] : m_array[i];
-      
+
       size_t padded_m = round_up_to_multiple(m, 128);
       size_t padded_k = round_up_to_multiple(DIVUP(k, static_cast<size_t>(MXFP8_BLOCK_SIZE)), 4);
-      
+
       int num_tiles_m = padded_m / 128;
       int num_tiles_k = padded_k / 4;
-      
+
       int vec_load_size = (rowwise ? ((num_tiles_k - 1) % 4 + 1) : ((num_tiles_m - 1) % 4 + 1));
       if (vec_load_size == 3) vec_load_size = 1;
-      
+
       int blocks_m = num_tiles_m;
       int blocks_k = DIVUP(num_tiles_k, TB_DIM * vec_load_size);
       if (!rowwise) {
           blocks_m = DIVUP(num_tiles_m, vec_load_size);
           blocks_k = DIVUP(num_tiles_k, TB_DIM);
       }
-      
+
       current_block_offset += blocks_m * blocks_k;
       current_scale_offset += padded_m * padded_k * scale_elem_size;
     }
-    
+
     block_offsets[num_tensors] = current_block_offset;
     scale_offsets[num_tensors] = current_scale_offset;
     *total_blocks = current_block_offset;
@@ -150,7 +150,10 @@ __global__ void compute_grouped_swizzle_setup(
 
 namespace transformer_engine {
 """
-content = content.replace("namespace transformer_engine {\n\nvoid swizzle_grouped_scaling_factors", kernels_code + "\nvoid swizzle_grouped_scaling_factors")
+content = content.replace(
+    "namespace transformer_engine {\n\nvoid swizzle_grouped_scaling_factors",
+    kernels_code + "\nvoid swizzle_grouped_scaling_factors",
+)
 
 # 2. Modify swizzle_grouped_scaling_factors
 old_func = """void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* output,
@@ -206,7 +209,7 @@ new_launch_end = """  if (has_rowwise_scale_inv) {
     auto launch_grouped_swizzle_variable = [&](bool rowwise) {
       const size_t scale_elem_size = rowwise ? typeToSize(input->scale_inv.dtype)
                                              : typeToSize(input->columnwise_scale_inv.dtype);
-      
+
       compute_grouped_swizzle_setup<<<1, 1, 0, stream>>>(
           m_array, k_array, d_block_offsets, d_scale_offsets, d_total_blocks,
           d_global_counter, num_tensors, rowwise, scale_elem_size);
@@ -215,7 +218,7 @@ new_launch_end = """  if (has_rowwise_scale_inv) {
           grouped_swizzle_scaling_variable_shape_kernel<SF_TILE_DIM_M, SF_TILE_DIM_K>,
           cudaFuncAttributeMaxDynamicSharedMemorySize, max_slm_size));
 
-      int persistent_blocks = 108 * 8; 
+      int persistent_blocks = 108 * 8;
       dim3 num_blocks(persistent_blocks);
 
       const void* input_ptr = rowwise ? input->scale_inv.dptr : input->columnwise_scale_inv.dptr;
@@ -257,4 +260,3 @@ content = content.replace(old_wrapper, new_wrapper)
 
 with open("transformer_engine/common/swizzle/swizzle.cu", "w") as f:
     f.write(content)
-

@@ -228,7 +228,8 @@ __launch_bounds__(unary_kernel_threads) __global__
     loader.load(tid, size);
 #pragma unroll
     for (int i = 0; i < nvec; ++i) {
-      const size_t global_idx = (aligned ? (tid * nvec + i) : (tid * nvec + i - loader.alignment()));
+      const size_t global_idx =
+          (aligned ? (tid * nvec + i) : (tid * nvec + i - loader.alignment()));
       if (global_idx >= size) continue;
 
       ComputeType val = static_cast<ComputeType>(loader.separate()[i]);
@@ -332,7 +333,8 @@ __launch_bounds__(unary_kernel_threads) __global__
     grad_loader.load(tid, size);
 #pragma unroll
     for (int i = 0; i < nvec; ++i) {
-      const size_t global_idx = (aligned ? (tid * nvec + i) : (tid * nvec + i - loader.alignment()));
+      const size_t global_idx =
+          (aligned ? (tid * nvec + i) : (tid * nvec + i - loader.alignment()));
       if (global_idx >= size) continue;
 
       ComputeType val = static_cast<ComputeType>(loader.separate()[i]);
@@ -466,19 +468,19 @@ void VectorizedUnaryKernelLauncher(const InputType *input, const fp32 *noop, Out
     switch (align) {
       case Alignment::SAME_ALIGNED:
         unary_kernel<nvec, true, fp32, Param, OP><<<grid, threads, 0, stream>>>(
-            input, noop, output, scale, amax, scale_inv, params, N, num_aligned_elements,
-            offsets, first_dims, last_dims, num_tensors, scale_numel, scale_inv_numel, amax_numel);
+            input, noop, output, scale, amax, scale_inv, params, N, num_aligned_elements, offsets,
+            first_dims, last_dims, num_tensors, scale_numel, scale_inv_numel, amax_numel);
         break;
       case Alignment::SAME_UNALIGNED:
         unary_kernel<nvec, false, fp32, Param, OP><<<grid, threads, 0, stream>>>(
-            input, noop, output, scale, amax, scale_inv, params, N, num_aligned_elements,
-            offsets, first_dims, last_dims, num_tensors, scale_numel, scale_inv_numel, amax_numel);
+            input, noop, output, scale, amax, scale_inv, params, N, num_aligned_elements, offsets,
+            first_dims, last_dims, num_tensors, scale_numel, scale_inv_numel, amax_numel);
         break;
       case Alignment::DIFFERENT: {
         // If the pointers are aligned differently we cannot vectorize
         unary_kernel<1, true, fp32, Param, OP><<<grid, threads, 0, stream>>>(
-            input, noop, output, scale, amax, scale_inv, params, N, N,
-            offsets, first_dims, last_dims, num_tensors, scale_numel, scale_inv_numel, amax_numel);
+            input, noop, output, scale, amax, scale_inv, params, N, N, offsets, first_dims,
+            last_dims, num_tensors, scale_numel, scale_inv_numel, amax_numel);
         break;
       }
     }
@@ -508,19 +510,19 @@ void VectorizedUnaryGradKernelLauncher(const InputTypeGrad *grad, const InputTyp
     switch (align) {
       case Alignment::SAME_ALIGNED:
         unary_grad_kernel<nvec, true, fp32, Param, OP><<<grid, threads, 0, stream>>>(
-            grad, input, output, scale, amax, scale_inv, params, N, num_aligned_elements,
-            offsets, first_dims, last_dims, num_tensors, scale_numel, scale_inv_numel, amax_numel);
+            grad, input, output, scale, amax, scale_inv, params, N, num_aligned_elements, offsets,
+            first_dims, last_dims, num_tensors, scale_numel, scale_inv_numel, amax_numel);
         break;
       case Alignment::SAME_UNALIGNED:
         unary_grad_kernel<nvec, false, fp32, Param, OP><<<grid, threads, 0, stream>>>(
-            grad, input, output, scale, amax, scale_inv, params, N, num_aligned_elements,
-            offsets, first_dims, last_dims, num_tensors, scale_numel, scale_inv_numel, amax_numel);
+            grad, input, output, scale, amax, scale_inv, params, N, num_aligned_elements, offsets,
+            first_dims, last_dims, num_tensors, scale_numel, scale_inv_numel, amax_numel);
         break;
       case Alignment::DIFFERENT: {
         // If the pointers are aligned differently we cannot vectorize
         unary_grad_kernel<1, true, fp32, Param, OP><<<grid, threads, 0, stream>>>(
-            grad, input, output, scale, amax, scale_inv, params, N, N,
-            offsets, first_dims, last_dims, num_tensors, scale_numel, scale_inv_numel, amax_numel);
+            grad, input, output, scale, amax, scale_inv, params, N, N, offsets, first_dims,
+            last_dims, num_tensors, scale_numel, scale_inv_numel, amax_numel);
         break;
       }
     }
