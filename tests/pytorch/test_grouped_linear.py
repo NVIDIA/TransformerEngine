@@ -2,7 +2,6 @@
 #
 # See LICENSE for license information.
 
-import math
 import os
 import random
 from typing import Dict, List, Optional, Sequence
@@ -15,7 +14,6 @@ from torch.nn import Parameter
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
 from transformer_engine.pytorch import (
-    Float8CurrentScalingQuantizer,
     Float8Quantizer,
     Fp8Padding,
     Fp8Unpadding,
@@ -23,7 +21,6 @@ from transformer_engine.pytorch import (
     Linear,
     MXFP8Quantizer,
     NVFP4Quantizer,
-    QuantizedTensor,
     QuantizerRole,
     autocast,
     is_bf16_available,
@@ -50,7 +47,10 @@ from utils import (
     ModelConfig,
     assert_close,
     assert_close_grads,
+    dtype_tols,
     make_recipe,
+    make_reference_and_test_tensors,
+    maybe_skip_quantization,
     quantization_tols,
     recipe_id,
     reset_rng_states,
@@ -140,16 +140,6 @@ def get_nvfp4_inp_supported_dtypes(recipe: recipe.Recipe, dtype: torch.dtype) ->
     if not check_rht_usage(recipe):
         supported_input_dtypes.append(torch.float32)
     return supported_input_dtypes
-
-
-def dtype_tols(dtype: torch.dtype) -> Dict[str, float]:
-    if dtype == torch.float32:
-        return dict(rtol=1.3e-6, atol=1e-5)
-    if dtype == torch.float16:
-        return dict(rtol=1e-3, atol=1e-5)
-    if dtype == torch.bfloat16:
-        return dict(rtol=1.6e-2, atol=1e-5)
-    raise ValueError(f"Unsupported dtype ({dtype})")
 
 
 param_types = [torch.float32, torch.float16]
@@ -295,125 +285,16 @@ def _test_grouped_linear_accuracy(
     return outputs
 
 
-def maybe_skip_quantization(
-    quantization: Optional[str],
-    *,
-    dims=None,
-    device=None,
-    dtype: Optional[torch.dtype] = None,
-) -> None:
-    """Skip test case if a quantization scheme is not supported on this hardware/config."""
-    if quantization is None:
-        return
-    if device is not None and torch.device(device).type != "cuda":
-        pytest.skip("Quantization is only supported on CUDA devices")
-    if quantization in ("fp8", "fp8_delayed_scaling", "fp8_current_scaling") and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
-    if quantization == "mxfp8" and not mxfp8_available:
-        pytest.skip(reason_for_no_mxfp8)
-    if quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht") and not nvfp4_available:
-        pytest.skip(reason_for_no_nvfp4)
-    if dims is not None:
-        if not hasattr(dims, "__iter__"):
-            dims = (dims,)
-        if quantization in ("fp8", "fp8_delayed_scaling", "fp8_current_scaling"):
-            if math.prod(dims[:-1]) % 16 != 0 or dims[-1] % 16 != 0:
-                pytest.skip("FP8 GEMMs require dims divisible by 16")
-        elif quantization == "mxfp8":
-            if math.prod(dims[:-1]) % 32 != 0 or dims[-1] % 32 != 0:
-                pytest.skip("MXFP8 GEMMs require dims divisible by 32")
-        elif quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht"):
-            if math.prod(dims[:-1]) % 16 != 0 or dims[-1] % 16 != 0:
-                pytest.skip("NVFP4 GEMMs require dims divisible by 16")
-    if dtype is not None:
-        if quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht") and dtype != torch.bfloat16:
-            pytest.skip("NVFP4 quantization is only supported with BF16 data")
-
-
-@torch.no_grad()
-def make_reference_and_test_tensors(
-    shape,
-    *,
-    min: float = 0.0,
-    max: float = 1.0,
-    quantization: Optional[str] = None,
-    ref_dtype: torch.dtype = torch.float64,
-    ref_device: torch.device = "cpu",
-    test_dtype: torch.dtype = torch.float32,
-    test_device: torch.device = "cuda",
-    test_is_quantized: bool = False,
-    quantizer_role: Optional[QuantizerRole] = None,
-    requires_grad: bool = True,
-):
-    """Paired tensors: float64/CPU reference for PyTorch ops, target-dtype/CUDA for TE ops."""
-    ref = torch.empty(shape, dtype=ref_dtype, device=ref_device)
-    ref.uniform_(min, max)
-    test = ref.to(device=test_device, dtype=test_dtype)
-    if quantization is None:
-        if test_is_quantized:
-            raise ValueError("Quantization scheme not provided")
-        if test.data_ptr() == ref.data_ptr():
-            test = test.clone()
-    elif quantization in ("fp8", "fp8_delayed_scaling"):
-        quantizer = Float8Quantizer(
-            scale=torch.ones(1, dtype=torch.float32, device=test_device).squeeze(),
-            amax=torch.zeros(1, dtype=torch.float32, device=test_device),
-            fp8_dtype=te.DType.kFloat8E4M3,
-        )
-        test = quantizer(test)
-    elif quantization == "fp8_current_scaling":
-        quantizer = Float8CurrentScalingQuantizer(
-            fp8_dtype=te.DType.kFloat8E4M3,
-            device=test_device,
-        )
-        test = quantizer(test)
-    elif quantization == "mxfp8":
-        test = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)(test)
-    elif quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_rht"):
-        tensor_type = "input"
-        if quantizer_role is not None:
-            tensor_type = quantizer_role.tensor_type
-        with_rht = quantization == "nvfp4_rht" and tensor_type != "weight"
-        test = NVFP4Quantizer(
-            with_rht=with_rht,
-            with_post_rht_amax=with_rht,
-            with_2d_quantization=False,
-            stochastic_rounding=False,
-            with_random_sign_mask=False,
-        )(test)
-    elif quantization == "nvfp4_4over6":
-        tensor_type = "input"
-        if quantizer_role is not None:
-            tensor_type = quantizer_role.tensor_type
-        nvfp4_use_4over6 = False
-        with_2d_quantization = False
-        nvfp4_e4m3_max = 448
-        if tensor_type not in ("grad_output", "grad_input"):
-            nvfp4_use_4over6 = True
-            nvfp4_e4m3_max = 256
-            if tensor_type == "weight":
-                with_2d_quantization = True
-        test = NVFP4Quantizer(
-            with_rht=False,
-            with_post_rht_amax=False,
-            with_2d_quantization=with_2d_quantization,
-            stochastic_rounding=False,
-            with_random_sign_mask=False,
-            nvfp4_use_4over6=nvfp4_use_4over6,
-            nvfp4_e4m3_max=nvfp4_e4m3_max,
-        )(test)
-    else:
-        raise ValueError(f"Unsupported quantization scheme ({quantization})")
-    if isinstance(test, QuantizedTensor) and not test_is_quantized:
-        test = test.dequantize()
-    ref.copy_(test.to(dtype=ref.dtype))
-    ref.requires_grad_(requires_grad)
-    test.requires_grad_(requires_grad)
-    return ref, test
+# =============================================================================
+# te.GroupedLinear (module API)
+#
+# Tests the high-level GroupedLinear module. Reference: sequential te.Linear
+# modules with shared weights — bitwise match verifies grouping correctness.
+# =============================================================================
 
 
 @pytest.mark.parametrize("dtype", param_types, ids=str)
-@pytest.mark.parametrize("num_gemms", [3, 6])
+@pytest.mark.parametrize("num_gemms", [1, 3, 6])
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["126m"])
 @pytest.mark.parametrize("recipe", fp8_recipes + [None], ids=recipe_id)
@@ -667,22 +548,6 @@ def test_grouped_linear_accuracy_save_original_input(
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("recipe", fp8_recipes + [None], ids=recipe_id)
-def test_grouped_linear_accuracy_single_gemm(recipe):
-    """Split the tests to save CI time"""
-    test_grouped_linear_accuracy(
-        dtype=torch.float32,
-        num_gemms=1,
-        bs=2,
-        model="126m",
-        recipe=recipe,
-        fp8_model_params=True,
-        fuse_wgrad_accumulation=True,
-        bias=True,
-        delay_wgrad_compute=False,
-    )
-
-
 def _test_padding_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, recipe, fp8=False):
 
     def _pad_tensor_for_fp8(hidden_states, tokens_per_expert):
@@ -776,6 +641,7 @@ def _test_padding_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, r
     return outputs
 
 
+@pytest.mark.parametrize("save_original_input", [False, True])
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("num_gemms", [3, 6])
 @pytest.mark.parametrize("bs", batch_sizes)
@@ -791,89 +657,12 @@ def test_padding_grouped_linear_accuracy(
     fp8,
     recipe,
     fp8_model_params,
+    save_original_input,
     parallel_mode=None,
 ):
     if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
-    skip_unsupported_backward_override(
-        "grouped_linear", recipe, getattr(recipe, "backward_override", None)
-    )
-
-    config = model_configs[model]
-    if config.max_seqlen_q % 16 != 0 and fp8:
-        pytest.skip("FP8 requires sequence length to be divisible by 16.")
-
-    if recipe is not None and recipe.nvfp4():
-        if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
-            pytest.skip(
-                f"Input dtype {dtype} not supported for NVFP4 Recipe {recipe.__class__.__name__}"
-            )
-
-    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
-        grouped_linear = TorchGroupedLinearWithPadding(
-            num_gemms,
-            config.hidden_size,
-            4 * config.hidden_size,
-            bias=False,
-            params_dtype=dtype,
-            parallel_mode=parallel_mode,
-            fp8=fp8,
-        ).eval()
-
-    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
-        ref_grouped_linear = GroupedLinear(
-            num_gemms,
-            config.hidden_size,
-            4 * config.hidden_size,
-            bias=False,
-            params_dtype=dtype,
-            parallel_mode=parallel_mode,
-            device="cuda",
-            save_original_input=False,
-        ).eval()
-
-    # Share params
-    with torch.no_grad():
-        inner_grouped_linear = grouped_linear.linear_fn
-        for i in range(num_gemms):
-            setattr(
-                ref_grouped_linear,
-                f"weight{i}",
-                Parameter(getattr(inner_grouped_linear, f"weight{i}").clone()),
-            )
-
-    outputs = _test_padding_grouped_linear_accuracy(
-        grouped_linear, num_gemms, bs, dtype, config, recipe, fp8
-    )
-    outputs_ref = _test_padding_grouped_linear_accuracy(
-        ref_grouped_linear, num_gemms, bs, dtype, config, recipe, fp8
-    )
-
-    # Should be bit-wise match
-    for i, (o, o_ref) in enumerate(zip(outputs, outputs_ref)):
-        torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
-
-
-@pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("num_gemms", [3])
-@pytest.mark.parametrize("bs", [1])
-@pytest.mark.parametrize("model", ["126m"])
-@pytest.mark.parametrize("fp8", [True])
-@pytest.mark.parametrize("recipe", fp8_recipes, ids=recipe_id)
-@pytest.mark.parametrize("fp8_model_params", [False])
-def test_padding_grouped_linear_accuracy_save_original_input(
-    dtype,
-    num_gemms,
-    bs,
-    model,
-    fp8,
-    recipe,
-    fp8_model_params,
-    parallel_mode=None,
-):
-    if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
-        pytest.skip("FP8 parameters are not supported in debug mode.")
-    if fp8 and recipe.delayed():
+    if save_original_input and recipe.delayed():
         pytest.skip("DelayedScaling recipe is not supported with save_original_input")
     skip_unsupported_backward_override(
         "grouped_linear", recipe, getattr(recipe, "backward_override", None)
@@ -909,7 +698,7 @@ def test_padding_grouped_linear_accuracy_save_original_input(
             params_dtype=dtype,
             parallel_mode=parallel_mode,
             device="cuda",
-            save_original_input=True,
+            save_original_input=save_original_input,
         ).eval()
 
     # Share params
@@ -932,6 +721,292 @@ def test_padding_grouped_linear_accuracy_save_original_input(
     # Should be bit-wise match
     for i, (o, o_ref) in enumerate(zip(outputs, outputs_ref)):
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+
+
+_FUSED_GROUPED_GEMM_ENV = "NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM"
+_ALL_BOOLEAN = all_boolean
+_mxfp8_available, _reason_for_no_mxfp8 = mxfp8_available, reason_for_no_mxfp8
+
+
+@pytest.fixture(autouse=True)
+def _reset_fp8_state(monkeypatch):
+    monkeypatch.setenv(_FUSED_GROUPED_GEMM_ENV, "0")
+    yield
+    FP8GlobalStateManager.reset()
+    monkeypatch.delenv(_FUSED_GROUPED_GEMM_ENV, raising=False)
+
+
+def _clone_outputs(outputs):
+    return [None if out is None else out.detach().clone() for out in outputs]
+
+
+def _run_grouped_linear_path(
+    *,
+    enable_grouped_tensor_path: bool,
+    fp8_recipe,
+    bias: bool,
+    fp8_model_params: bool,
+    delay_wgrad_compute: bool,
+    single_grouped_bias: bool = False,
+    x_base: torch.Tensor,
+    dy: torch.Tensor,
+    weights,
+    biases,
+    m_splits,
+    monkeypatch,
+):
+    FP8GlobalStateManager.reset()
+    monkeypatch.setenv(_FUSED_GROUPED_GEMM_ENV, "1" if enable_grouped_tensor_path else "0")
+
+    dtype = x_base.dtype
+    num_gemms = len(m_splits)
+    in_features = weights[0].size(1)
+    out_features = weights[0].size(0)
+    use_fp8 = fp8_recipe is not None
+
+    x = x_base.detach().clone().requires_grad_(True)
+    with quantized_model_init(enabled=fp8_model_params, recipe=fp8_recipe):
+        grouped_linear = GroupedLinear(
+            num_gemms,
+            in_features,
+            out_features,
+            bias=bias,
+            params_dtype=dtype,
+            device="cuda",
+            delay_wgrad_compute=delay_wgrad_compute,
+            single_grouped_bias=single_grouped_bias,
+        )
+    with torch.no_grad():
+        for i in range(num_gemms):
+            getattr(grouped_linear, f"weight{i}").copy_(weights[i])
+            if bias:
+                getattr(grouped_linear, f"bias{i}").copy_(biases[i])
+
+    # The fused path is the graph-safe path and accepts a CUDA tensor for split metadata.
+    # The legacy path still expects Python split sections in several places.
+    m_splits_arg = (
+        torch.tensor(m_splits, dtype=torch.int64, device="cuda")
+        if enable_grouped_tensor_path
+        else m_splits
+    )
+    with autocast(enabled=use_fp8, recipe=fp8_recipe):
+        y = grouped_linear(x, m_splits_arg)
+    y.backward(dy)
+    if delay_wgrad_compute:
+        grouped_linear.backward_dw()
+
+    outputs = [y, x.grad]
+    for i in range(num_gemms):
+        outputs.append(getattr(grouped_linear, f"weight{i}").grad)
+        if bias:
+            outputs.append(getattr(grouped_linear, f"bias{i}").grad)
+    return _clone_outputs(outputs)
+
+
+@pytest.mark.parametrize(
+    "fp8_recipe",
+    [
+        None,
+        pytest.param(
+            recipe.MXFP8BlockScaling(),
+            marks=pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8),
+        ),
+    ],
+    ids=["bf16", "mxfp8"],
+)
+@pytest.mark.parametrize("single_grouped_bias", _ALL_BOOLEAN)
+@pytest.mark.parametrize("bias", _ALL_BOOLEAN)
+@pytest.mark.parametrize("fp8_model_params", _ALL_BOOLEAN)
+@pytest.mark.parametrize("delay_wgrad_compute", _ALL_BOOLEAN)
+def test_grouped_linear_grouped_tensor_path_matches_legacy(
+    fp8_recipe, bias, fp8_model_params, delay_wgrad_compute, single_grouped_bias, monkeypatch
+):
+    if torch.cuda.get_device_capability() < (10, 0):
+        pytest.skip("GroupedTensor grouped GEMM path requires SM100+")
+
+    use_fp8 = fp8_recipe is not None
+    if fp8_model_params and not use_fp8:
+        pytest.skip("fp8_model_params requires FP8")
+    if single_grouped_bias and not bias:
+        pytest.skip("single_grouped_bias requires bias=True")
+
+    dtype = torch.bfloat16
+    num_gemms = 3
+    in_features = 64
+    out_features = 64
+    m_splits = [128, 256, 384]
+    total_tokens = sum(m_splits)
+
+    torch.manual_seed(1234)
+    x_base = (0.1 * torch.randn(total_tokens, in_features, device="cuda")).to(dtype)
+    dy = (0.1 * torch.randn(total_tokens, out_features, device="cuda")).to(dtype)
+    weights = [
+        (0.1 * torch.randn(out_features, in_features, device="cuda")).to(dtype)
+        for _ in range(num_gemms)
+    ]
+    biases = None
+    if bias:
+        biases = [
+            (0.1 * torch.randn(out_features, device="cuda")).to(dtype) for _ in range(num_gemms)
+        ]
+
+    outputs_legacy = _run_grouped_linear_path(
+        enable_grouped_tensor_path=False,
+        fp8_recipe=fp8_recipe,
+        bias=bias,
+        fp8_model_params=fp8_model_params,
+        delay_wgrad_compute=delay_wgrad_compute,
+        single_grouped_bias=single_grouped_bias,
+        x_base=x_base,
+        dy=dy,
+        weights=weights,
+        biases=biases,
+        m_splits=m_splits,
+        monkeypatch=monkeypatch,
+    )
+    outputs_grouped_tensor = _run_grouped_linear_path(
+        enable_grouped_tensor_path=True,
+        fp8_recipe=fp8_recipe,
+        bias=bias,
+        fp8_model_params=fp8_model_params,
+        delay_wgrad_compute=delay_wgrad_compute,
+        single_grouped_bias=single_grouped_bias,
+        x_base=x_base,
+        dy=dy,
+        weights=weights,
+        biases=biases,
+        m_splits=m_splits,
+        monkeypatch=monkeypatch,
+    )
+
+    tols = dict(rtol=1e-2, atol=5e-3)
+    if use_fp8:
+        tols = dict(rtol=0.05, atol=0.05)
+    for grouped_tensor_out, legacy_out in zip(outputs_grouped_tensor, outputs_legacy):
+        assert grouped_tensor_out is not None
+        assert legacy_out is not None
+        torch.testing.assert_close(grouped_tensor_out.float(), legacy_out.float(), **tols)
+
+
+@pytest.mark.parametrize(
+    "fp8_recipe",
+    [
+        None,
+        pytest.param(
+            recipe.MXFP8BlockScaling(),
+            marks=pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8),
+        ),
+    ],
+    ids=["bf16", "mxfp8"],
+)
+@pytest.mark.parametrize("bias", _ALL_BOOLEAN)
+def test_grouped_linear_fused_path_cuda_graph_safe(fp8_recipe, bias, monkeypatch):
+    """Fused GroupedTensor GEMM path should be CUDA graph capturable."""
+    if torch.cuda.get_device_capability() < (10, 0):
+        pytest.skip("GroupedTensor grouped GEMM path requires SM100+")
+
+    monkeypatch.setenv(_FUSED_GROUPED_GEMM_ENV, "1")
+    FP8GlobalStateManager.reset()
+
+    use_fp8 = fp8_recipe is not None
+    dtype = torch.bfloat16
+    device = "cuda"
+    num_gemms = 3
+    in_features = 128
+    out_features = 128
+    split_sizes = [128, 256, 384]
+    total_tokens = sum(split_sizes)
+    static_m_splits = torch.tensor(split_sizes, dtype=torch.int64, device=device)
+
+    grouped_linear = GroupedLinear(
+        num_gemms,
+        in_features,
+        out_features,
+        bias=bias,
+        params_dtype=dtype,
+        device=device,
+    )
+
+    static_x = torch.randn(total_tokens, in_features, dtype=dtype, device=device)
+    static_x.requires_grad_(True)
+    static_dy = torch.randn(total_tokens, out_features, dtype=dtype, device=device)
+    static_out_buf = torch.empty(total_tokens, out_features, dtype=dtype, device=device)
+
+    def _zero_grads():
+        if static_x.grad is not None:
+            static_x.grad.zero_()
+        for param in grouped_linear.parameters():
+            if param.grad is None:
+                param.grad = torch.zeros_like(param)
+            else:
+                param.grad.zero_()
+
+    def _clone_param_grads():
+        return [param.grad.detach().clone() for param in grouped_linear.parameters()]
+
+    def _train_step(x, dy, out_buf, *, use_graphed):
+        with autocast(enabled=use_fp8, recipe=fp8_recipe):
+            out = (
+                graphed_grouped_linear(x, static_m_splits)
+                if use_graphed
+                else grouped_linear(x, static_m_splits)
+            )
+        out.backward(dy)
+        out_buf.copy_(out)
+        return out_buf
+
+    graphed_grouped_linear = te.make_graphed_callables(
+        grouped_linear,
+        (static_x, static_m_splits),
+        num_warmup_iters=3,
+        enabled=use_fp8,
+        recipe=fp8_recipe,
+    )
+
+    fresh_x = torch.randn_like(static_x)
+    fresh_dy = torch.randn_like(static_dy)
+    with torch.no_grad():
+        static_x.copy_(fresh_x)
+        static_dy.copy_(fresh_dy)
+
+    _zero_grads()
+    graph_out = (
+        _train_step(
+            static_x,
+            static_dy,
+            static_out_buf,
+            use_graphed=True,
+        )
+        .detach()
+        .clone()
+    )
+    torch.cuda.synchronize()
+    graph_dx = static_x.grad.detach().clone()
+    graph_param_grads = _clone_param_grads()
+
+    _zero_grads()
+    expected_x = fresh_x.detach().clone().requires_grad_(True)
+    expected_dy = fresh_dy.detach().clone()
+    with autocast(enabled=use_fp8, recipe=fp8_recipe):
+        expected_out = grouped_linear(expected_x, static_m_splits)
+    expected_out.backward(expected_dy)
+
+    tols = dict(rtol=1e-2, atol=5e-3)
+    if use_fp8:
+        tols = dict(rtol=0.05, atol=0.05)
+    torch.testing.assert_close(graph_out.float(), expected_out.float(), **tols)
+    torch.testing.assert_close(graph_dx.float(), expected_x.grad.float(), **tols)
+    for graph_grad, param in zip(graph_param_grads, grouped_linear.parameters()):
+        assert param.grad is not None
+        torch.testing.assert_close(graph_grad.float(), param.grad.float(), **tols)
+
+
+# =============================================================================
+# Raw grouped GEMM kernels (cpp_extensions)
+#
+# Tests general_grouped_gemm and general_grouped_gemm_for_grouped_tensor
+# directly. Reference: per-group general_gemm calls.
+# =============================================================================
 
 
 @pytest.mark.parametrize(
@@ -1640,306 +1715,13 @@ def test_fp8_grouped_gemm(shape, accumulate):
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
 
-_FUSED_GROUPED_GEMM_ENV = "NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM"
-_ALL_BOOLEAN = all_boolean
-_mxfp8_available, _reason_for_no_mxfp8 = mxfp8_available, reason_for_no_mxfp8
-
-
-@pytest.fixture(autouse=True)
-def _reset_fp8_state(monkeypatch):
-    monkeypatch.setenv(_FUSED_GROUPED_GEMM_ENV, "0")
-    yield
-    FP8GlobalStateManager.reset()
-    monkeypatch.delenv(_FUSED_GROUPED_GEMM_ENV, raising=False)
-
-
-def _clone_outputs(outputs):
-    return [None if out is None else out.detach().clone() for out in outputs]
-
-
-def _run_grouped_linear_path(
-    *,
-    enable_grouped_tensor_path: bool,
-    fp8_recipe,
-    bias: bool,
-    fp8_model_params: bool,
-    delay_wgrad_compute: bool,
-    x_base: torch.Tensor,
-    dy: torch.Tensor,
-    weights,
-    biases,
-    m_splits,
-    monkeypatch,
-):
-    FP8GlobalStateManager.reset()
-    monkeypatch.setenv(_FUSED_GROUPED_GEMM_ENV, "1" if enable_grouped_tensor_path else "0")
-
-    dtype = x_base.dtype
-    num_gemms = len(m_splits)
-    in_features = weights[0].size(1)
-    out_features = weights[0].size(0)
-    use_fp8 = fp8_recipe is not None
-
-    x = x_base.detach().clone().requires_grad_(True)
-    with quantized_model_init(enabled=fp8_model_params, recipe=fp8_recipe):
-        grouped_linear = GroupedLinear(
-            num_gemms,
-            in_features,
-            out_features,
-            bias=bias,
-            params_dtype=dtype,
-            device="cuda",
-            delay_wgrad_compute=delay_wgrad_compute,
-        )
-    with torch.no_grad():
-        for i in range(num_gemms):
-            getattr(grouped_linear, f"weight{i}").copy_(weights[i])
-            if bias:
-                getattr(grouped_linear, f"bias{i}").copy_(biases[i])
-
-    # The fused path is the graph-safe path and accepts a CUDA tensor for split metadata.
-    # The legacy path still expects Python split sections in several places.
-    m_splits_arg = (
-        torch.tensor(m_splits, dtype=torch.int64, device="cuda")
-        if enable_grouped_tensor_path
-        else m_splits
-    )
-    with autocast(enabled=use_fp8, recipe=fp8_recipe):
-        y = grouped_linear(x, m_splits_arg)
-    y.backward(dy)
-    if delay_wgrad_compute:
-        grouped_linear.backward_dw()
-
-    outputs = [y, x.grad]
-    for i in range(num_gemms):
-        outputs.append(getattr(grouped_linear, f"weight{i}").grad)
-        if bias:
-            outputs.append(getattr(grouped_linear, f"bias{i}").grad)
-    return _clone_outputs(outputs)
-
-
-@pytest.mark.parametrize(
-    "fp8_recipe",
-    [
-        None,
-        pytest.param(
-            recipe.MXFP8BlockScaling(),
-            marks=pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8),
-        ),
-    ],
-    ids=["bf16", "mxfp8"],
-)
-@pytest.mark.parametrize("bias", _ALL_BOOLEAN)
-@pytest.mark.parametrize("fp8_model_params", _ALL_BOOLEAN)
-@pytest.mark.parametrize("delay_wgrad_compute", _ALL_BOOLEAN)
-def test_grouped_linear_grouped_tensor_path_matches_legacy(
-    fp8_recipe, bias, fp8_model_params, delay_wgrad_compute, monkeypatch
-):
-    if torch.cuda.get_device_capability() < (10, 0):
-        pytest.skip("GroupedTensor grouped GEMM path requires SM100+")
-
-    use_fp8 = fp8_recipe is not None
-    if fp8_model_params and not use_fp8:
-        pytest.skip("fp8_model_params requires FP8")
-
-    dtype = torch.bfloat16
-    num_gemms = 3
-    in_features = 64
-    out_features = 64
-    m_splits = [128, 256, 384]
-    total_tokens = sum(m_splits)
-
-    torch.manual_seed(1234)
-    x_base = (0.1 * torch.randn(total_tokens, in_features, device="cuda")).to(dtype)
-    dy = (0.1 * torch.randn(total_tokens, out_features, device="cuda")).to(dtype)
-    weights = [
-        (0.1 * torch.randn(out_features, in_features, device="cuda")).to(dtype)
-        for _ in range(num_gemms)
-    ]
-    biases = None
-    if bias:
-        biases = [
-            (0.1 * torch.randn(out_features, device="cuda")).to(dtype) for _ in range(num_gemms)
-        ]
-
-    outputs_legacy = _run_grouped_linear_path(
-        enable_grouped_tensor_path=False,
-        fp8_recipe=fp8_recipe,
-        bias=bias,
-        fp8_model_params=fp8_model_params,
-        delay_wgrad_compute=delay_wgrad_compute,
-        x_base=x_base,
-        dy=dy,
-        weights=weights,
-        biases=biases,
-        m_splits=m_splits,
-        monkeypatch=monkeypatch,
-    )
-    outputs_grouped_tensor = _run_grouped_linear_path(
-        enable_grouped_tensor_path=True,
-        fp8_recipe=fp8_recipe,
-        bias=bias,
-        fp8_model_params=fp8_model_params,
-        delay_wgrad_compute=delay_wgrad_compute,
-        x_base=x_base,
-        dy=dy,
-        weights=weights,
-        biases=biases,
-        m_splits=m_splits,
-        monkeypatch=monkeypatch,
-    )
-
-    tols = dict(rtol=1e-2, atol=5e-3)
-    if use_fp8:
-        tols = dict(rtol=0.05, atol=0.05)
-    for grouped_tensor_out, legacy_out in zip(outputs_grouped_tensor, outputs_legacy):
-        assert grouped_tensor_out is not None
-        assert legacy_out is not None
-        torch.testing.assert_close(grouped_tensor_out.float(), legacy_out.float(), **tols)
-
-
-def test_grouped_linear_grouped_tensor_path_single_grouped_bias_delay_wgrad(monkeypatch):
-    if torch.cuda.get_device_capability() < (10, 0):
-        pytest.skip("GroupedTensor grouped GEMM path requires SM100+")
-
-    monkeypatch.setenv(_FUSED_GROUPED_GEMM_ENV, "1")
-
-    dtype = torch.bfloat16
-    num_gemms = 3
-    in_features = 64
-    out_features = 64
-    total_tokens = 64 + 96 + 128
-    m_splits = torch.tensor([64, 96, 128], dtype=torch.int64, device="cuda")
-    x = torch.randn(total_tokens, in_features, dtype=dtype, device="cuda").requires_grad_()
-    dy = torch.randn(x.size(0), out_features, dtype=dtype, device="cuda")
-
-    grouped_linear = GroupedLinear(
-        num_gemms,
-        in_features,
-        out_features,
-        bias=True,
-        params_dtype=dtype,
-        device="cuda",
-        delay_wgrad_compute=True,
-        single_grouped_bias=True,
-    )
-
-    y = grouped_linear(x, m_splits)
-    y.backward(dy)
-    grouped_linear.backward_dw()
-
-
-@pytest.mark.parametrize(
-    "fp8_recipe",
-    [
-        None,
-        pytest.param(
-            recipe.MXFP8BlockScaling(),
-            marks=pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8),
-        ),
-    ],
-    ids=["bf16", "mxfp8"],
-)
-@pytest.mark.parametrize("bias", _ALL_BOOLEAN)
-def test_grouped_linear_fused_path_cuda_graph_safe(fp8_recipe, bias, monkeypatch):
-    """Fused GroupedTensor GEMM path should be CUDA graph capturable."""
-    if torch.cuda.get_device_capability() < (10, 0):
-        pytest.skip("GroupedTensor grouped GEMM path requires SM100+")
-
-    monkeypatch.setenv(_FUSED_GROUPED_GEMM_ENV, "1")
-    FP8GlobalStateManager.reset()
-
-    use_fp8 = fp8_recipe is not None
-    dtype = torch.bfloat16
-    device = "cuda"
-    num_gemms = 3
-    in_features = 128
-    out_features = 128
-    split_sizes = [128, 256, 384]
-    total_tokens = sum(split_sizes)
-    static_m_splits = torch.tensor(split_sizes, dtype=torch.int64, device=device)
-
-    grouped_linear = GroupedLinear(
-        num_gemms,
-        in_features,
-        out_features,
-        bias=bias,
-        params_dtype=dtype,
-        device=device,
-    )
-
-    static_x = torch.randn(total_tokens, in_features, dtype=dtype, device=device)
-    static_x.requires_grad_(True)
-    static_dy = torch.randn(total_tokens, out_features, dtype=dtype, device=device)
-    static_out_buf = torch.empty(total_tokens, out_features, dtype=dtype, device=device)
-
-    def _zero_grads():
-        if static_x.grad is not None:
-            static_x.grad.zero_()
-        for param in grouped_linear.parameters():
-            if param.grad is None:
-                param.grad = torch.zeros_like(param)
-            else:
-                param.grad.zero_()
-
-    def _clone_param_grads():
-        return [param.grad.detach().clone() for param in grouped_linear.parameters()]
-
-    def _train_step(x, dy, out_buf, *, use_graphed):
-        with autocast(enabled=use_fp8, recipe=fp8_recipe):
-            out = (
-                graphed_grouped_linear(x, static_m_splits)
-                if use_graphed
-                else grouped_linear(x, static_m_splits)
-            )
-        out.backward(dy)
-        out_buf.copy_(out)
-        return out_buf
-
-    graphed_grouped_linear = te.make_graphed_callables(
-        grouped_linear,
-        (static_x, static_m_splits),
-        num_warmup_iters=3,
-        enabled=use_fp8,
-        recipe=fp8_recipe,
-    )
-
-    fresh_x = torch.randn_like(static_x)
-    fresh_dy = torch.randn_like(static_dy)
-    with torch.no_grad():
-        static_x.copy_(fresh_x)
-        static_dy.copy_(fresh_dy)
-
-    _zero_grads()
-    graph_out = (
-        _train_step(
-            static_x,
-            static_dy,
-            static_out_buf,
-            use_graphed=True,
-        )
-        .detach()
-        .clone()
-    )
-    torch.cuda.synchronize()
-    graph_dx = static_x.grad.detach().clone()
-    graph_param_grads = _clone_param_grads()
-
-    _zero_grads()
-    expected_x = fresh_x.detach().clone().requires_grad_(True)
-    expected_dy = fresh_dy.detach().clone()
-    with autocast(enabled=use_fp8, recipe=fp8_recipe):
-        expected_out = grouped_linear(expected_x, static_m_splits)
-    expected_out.backward(expected_dy)
-
-    tols = dict(rtol=1e-2, atol=5e-3)
-    if use_fp8:
-        tols = dict(rtol=0.05, atol=0.05)
-    torch.testing.assert_close(graph_out.float(), expected_out.float(), **tols)
-    torch.testing.assert_close(graph_dx.float(), expected_x.grad.float(), **tols)
-    for graph_grad, param in zip(graph_param_grads, grouped_linear.parameters()):
-        assert param.grad is not None
-        torch.testing.assert_close(graph_grad.float(), param.grad.float(), **tols)
+# =============================================================================
+# te.ops.GroupedLinear (ops/fuser API)
+#
+# Tests the ops-API GroupedLinear and grouped MLP patterns. Reference: PyTorch
+# F.linear per group via make_reference_and_test_tensors (float64 CPU).
+# Tolerance: dtype_tols() / quantization_tols().
+# =============================================================================
 
 
 @pytest.mark.parametrize("swizzle_type", ["mxfp8_rowwise", "mxfp8_columnwise", "nvfp4"])
@@ -2516,37 +2298,68 @@ def test_grouped_mlp(
     in_shape = (split_sizes.sum().item(), hidden_size)
     out_shape = in_shape
 
-    # Random data: float32 for reference path, target dtype for test path
-    x_base = torch.empty(in_shape, device=device).uniform_(-0.25, 0.25)
-    x_ref = x_base.clone().requires_grad_()
-    x_test = x_base.to(dtype).requires_grad_()
-
-    dy_base = torch.empty(out_shape, device=device).uniform_(-0.25, 0.25)
-    dy_ref = dy_base.clone()
-    dy_test = dy_base.to(dtype)
-
-    probs_base = torch.empty((in_shape[0],), device=device).uniform_(0.1, 1.0)
-    probs_ref = probs_base.clone().requires_grad_()
-    probs_test = probs_base.to(dtype).requires_grad_()
+    # Reference tensors: float64 CPU; test tensors: target dtype on CUDA
+    x_ref, x_test = make_reference_and_test_tensors(
+        in_shape,
+        min=-0.25, max=0.25,
+        quantization=quantization,
+        test_dtype=dtype,
+        test_device=device,
+    )
+    dy_ref, dy_test = make_reference_and_test_tensors(
+        out_shape,
+        min=-0.25, max=0.25,
+        test_dtype=dtype,
+        test_device=device,
+        requires_grad=False,
+    )
+    probs_ref, probs_test = make_reference_and_test_tensors(
+        (in_shape[0],),
+        min=0.1, max=1.0,
+        test_dtype=dtype,
+        test_device=device,
+    )
 
     fc1_ws_ref, fc1_ws_test = [], []
     fc1_bs_ref, fc1_bs_test = [], []
     fc2_ws_ref, fc2_ws_test = [], []
     fc2_bs_ref, fc2_bs_test = [], []
     for _ in range(group_size):
-        w1 = torch.empty((fc1_out_features, hidden_size), device=device).uniform_(-0.25, 0.25)
-        fc1_ws_ref.append(w1.clone().requires_grad_())
-        fc1_ws_test.append(w1.to(dtype))
-        w2 = torch.empty((hidden_size, hidden_size), device=device).uniform_(-0.25, 0.25)
-        fc2_ws_ref.append(w2.clone().requires_grad_())
-        fc2_ws_test.append(w2.to(dtype))
+        w1_ref, w1_test = make_reference_and_test_tensors(
+            (fc1_out_features, hidden_size),
+            min=-0.25, max=0.25,
+            quantization=quantization,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        fc1_ws_ref.append(w1_ref)
+        fc1_ws_test.append(w1_test)
+        w2_ref, w2_test = make_reference_and_test_tensors(
+            (hidden_size, hidden_size),
+            min=-0.25, max=0.25,
+            quantization=quantization,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        fc2_ws_ref.append(w2_ref)
+        fc2_ws_test.append(w2_test)
         if bias:
-            b1 = torch.empty((fc1_out_features,), device=device).uniform_(-0.5, 0.5)
-            fc1_bs_ref.append(b1.clone().requires_grad_())
-            fc1_bs_test.append(b1.to(dtype))
-            b2 = torch.empty((hidden_size,), device=device).uniform_(-0.5, 0.5)
-            fc2_bs_ref.append(b2.clone().requires_grad_())
-            fc2_bs_test.append(b2.to(dtype))
+            b1_ref, b1_test = make_reference_and_test_tensors(
+                (fc1_out_features,),
+                min=-0.5, max=0.5,
+                test_dtype=dtype,
+                test_device=device,
+            )
+            fc1_bs_ref.append(b1_ref)
+            fc1_bs_test.append(b1_test)
+            b2_ref, b2_test = make_reference_and_test_tensors(
+                (hidden_size,),
+                min=-0.5, max=0.5,
+                test_dtype=dtype,
+                test_device=device,
+            )
+            fc2_bs_ref.append(b2_ref)
+            fc2_bs_test.append(b2_test)
         else:
             fc1_bs_ref.append(None)
             fc1_bs_test.append(None)
@@ -2570,7 +2383,7 @@ def test_grouped_mlp(
             return torch.nn.functional.relu(x).square()
         raise ValueError(f"Unexpected activation ({activation})")
 
-    # Reference implementation (float32 PyTorch)
+    # Reference implementation (float64 CPU PyTorch)
     xs = torch.split(x_ref, split_sizes.tolist())
     probs = torch.split(probs_ref, split_sizes.tolist())
     ys = []
@@ -2713,8 +2526,6 @@ def test_grouped_mlp(
 
     # Loose tols for sanity checking
     tols = {"rtol": 0.125, "atol": 0.25}
-    if quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht"):
-        tols = {"rtol": 0.25, "atol": 0.5}
 
     # Check values
     assert_close(y_test, y_ref, **tols)

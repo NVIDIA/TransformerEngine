@@ -32,7 +32,6 @@ from transformer_engine.pytorch.ops.fused import (
 )
 from transformer_engine.pytorch import (
     QuantizedTensor,
-    Float8CurrentScalingQuantizer,
     Float8Quantizer,
     MXFP8Quantizer,
     NVFP4Quantizer,
@@ -47,6 +46,8 @@ from utils import (
     assert_close_grads,
     dtype_tols,
     make_recipe,
+    make_reference_and_test_tensors,
+    maybe_skip_quantization,
     quantization_tols,
     reset_rng_states,
 )
@@ -79,155 +80,6 @@ def _reset_rng_states_per_test():
     """Restore torch, CUDA, and Python ``random`` before each test in this module."""
     reset_rng_states()
     yield
-
-
-def maybe_skip_quantization(
-    quantization: Optional[str],
-    *,
-    dims: Optional[Iterable[int] | int] = None,
-    device: Optional[torch.device | str] = None,
-    dtype: Optional[torch.dtype] = None,
-) -> None:
-    """Skip test case if a quantization scheme is not supported"""
-
-    # Don't skip if there is no quantization
-    if quantization is None:
-        return
-
-    # Check if quantization scheme is supported on device
-    if device is not None and torch.device(device).type != "cuda":
-        pytest.skip("Quantization is only supported on CUDA devices")
-    if quantization in ("fp8", "fp8_delayed_scaling", "fp8_current_scaling") and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
-    if quantization == "mxfp8" and not mxfp8_available:
-        pytest.skip(reason_for_no_mxfp8)
-    if (
-        quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht")
-        and not nvfp4_available
-    ):
-        pytest.skip(reason_for_no_nvfp4)
-
-    # Check dims
-    if dims is not None:
-        if not isinstance(dims, Iterable):
-            dims = (dims,)
-        if quantization in ("fp8", "fp8_delayed_scaling", "fp8_current_scaling"):
-            if math.prod(dims[:-1]) % 16 != 0 or dims[-1] % 16 != 0:
-                pytest.skip("FP8 GEMMs require dims that are divisible by 16")
-        elif quantization == "mxfp8":
-            if math.prod(dims[:-1]) % 32 != 0 or dims[-1] % 32 != 0:
-                pytest.skip("MXFP8 GEMMs require dims that are divisible by 32")
-        elif quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht"):
-            if math.prod(dims[:-1]) % 16 != 0 or dims[-1] % 16 != 0:
-                pytest.skip("NVFP4 GEMMs require dims that are divisible by 16")
-
-    # Check dtype
-    if dtype is not None:
-        if (
-            quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht")
-            and dtype != torch.bfloat16
-        ):
-            pytest.skip("NVFP4 quantization is only supported with BF16 data")
-
-
-@torch.no_grad()
-def make_reference_and_test_tensors(
-    shape: int | Iterable[int],
-    *,
-    min: float = 0.0,
-    max: float = 1.0,
-    quantization: Optional[str] = None,
-    ref_dtype: torch.dtype = torch.float64,
-    ref_device: torch.device = "cpu",
-    test_dtype: torch.dtype = torch.float32,
-    test_device: torch.device = "cuda",
-    test_is_quantized: bool = False,
-    quantizer_role: Optional[QuantizerRole] = None,
-    requires_grad: bool = True,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Construct tensors with the same values
-
-    The reference tensor is intended for use in plain PyTorch
-    operations in high precision. The test tensor is intended for use
-    in Transformer Engine operations.
-
-    If a quantization scheme is provided, the tensor values are
-    quantized so that they are representable.
-
-    """
-
-    # Random reference tensor
-    ref = torch.empty(shape, dtype=ref_dtype, device=ref_device)
-    ref.uniform_(min, max)
-
-    # Construct test tensor from reference tensor
-    test = ref.to(device=test_device, dtype=test_dtype)
-    if quantization is None:
-        if test_is_quantized:
-            raise ValueError("Quantization scheme not provided")
-        if test.data_ptr() == ref.data_ptr():
-            test = test.clone()
-    elif quantization in ("fp8", "fp8_delayed_scaling"):
-        quantizer = Float8Quantizer(
-            scale=torch.ones(1, dtype=torch.float32, device=test_device).squeeze(),
-            amax=torch.zeros(1, dtype=torch.float32, device=test_device),
-            fp8_dtype=te.DType.kFloat8E4M3,
-        )
-        test = quantizer(test)
-    elif quantization == "fp8_current_scaling":
-        quantizer = Float8CurrentScalingQuantizer(
-            fp8_dtype=te.DType.kFloat8E4M3,
-            device=test_device,
-        )
-        test = quantizer(test)
-    elif quantization == "mxfp8":
-        test = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)(test)
-    elif quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_rht"):
-        tensor_type = "input"
-        if quantizer_role is not None:
-            tensor_type = quantizer_role.tensor_type
-        with_rht = quantization == "nvfp4_rht" and tensor_type != "weight"
-        test = NVFP4Quantizer(
-            with_rht=with_rht,
-            with_post_rht_amax=with_rht,
-            with_2d_quantization=False,
-            stochastic_rounding=False,
-            with_random_sign_mask=False,
-        )(test)
-    elif quantization == "nvfp4_4over6":
-        tensor_type = "input"
-        if quantizer_role is not None:
-            tensor_type = quantizer_role.tensor_type
-
-        nvfp4_use_4over6 = False
-        with_2d_quantization = False
-        nvfp4_e4m3_max = 448
-        if tensor_type not in ("grad_output", "grad_input"):
-            nvfp4_use_4over6 = True
-            nvfp4_e4m3_max = 256
-            if tensor_type == "weight":
-                with_2d_quantization = True
-
-        test = NVFP4Quantizer(
-            with_rht=False,
-            with_post_rht_amax=False,
-            with_2d_quantization=with_2d_quantization,
-            stochastic_rounding=False,
-            with_random_sign_mask=False,
-            nvfp4_use_4over6=nvfp4_use_4over6,
-            nvfp4_e4m3_max=nvfp4_e4m3_max,
-        )(test)
-    else:
-        raise ValueError(f"Unsupported quantization scheme ({quantization})")
-    if isinstance(test, QuantizedTensor) and not test_is_quantized:
-        test = test.dequantize()
-
-    # Make sure reference and test tensors match each other
-    ref.copy_(test.to(dtype=ref.dtype))
-
-    ref.requires_grad_(requires_grad)
-    test.requires_grad_(requires_grad)
-    return ref, test
 
 
 def to_cpu(tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
