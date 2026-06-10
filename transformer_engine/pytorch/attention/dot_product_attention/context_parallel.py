@@ -3089,8 +3089,6 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         if qkv_format == "thd":
             # THD always uses padding mask types; per-step masks set internally
             assert padding, f"THD format requires padding mask type, got {attn_mask_type}!"
-        else:
-            assert not padding, f"{attn_mask_type} mask type is not supported!"
         # Upgrade causal -> causal_bottom_right (and padding_causal ->
         # padding_causal_bottom_right) for AG CP. This applies to all qkv_format
         # values including "thd": after AG the per-step Q chunk is shorter than
