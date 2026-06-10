@@ -205,6 +205,7 @@ class EpBuffer:
         "token_counts",
         "grad_tokens",
         "grad_topk_weights",
+        "zero_copy",
     )
 
     def __init__(
@@ -239,6 +240,7 @@ class EpBuffer:
         recv_shape = (self.recv_capacity_per_rank, self.hidden_dim)
         send_shape = (self.max_tokens_per_rank, self.hidden_dim)
         zero_copy = bool(tex.ep_get_zero_copy())
+        self.zero_copy = zero_copy
         if zero_copy:
             if ep_group is None:
                 raise ValueError("EpBuffer requires ep_group when ep_bootstrap(zero_copy=True).")
@@ -314,6 +316,7 @@ class EpBuffer:
         inst.num_local_experts = int(num_local_experts)
         inst.payload_dtype = payload_dtype
         inst.device = device
+        inst.zero_copy = bool(tex.ep_get_zero_copy())
 
         size_bytes = tex.ep_handle_mem_size(inst.top_k, inst.alignment)
         inst.handle_mem = torch.empty(int(size_bytes), dtype=torch.uint8, device=device)
@@ -599,17 +602,23 @@ class _EpCombine(torch.autograd.Function):
         combine_in: torch.Tensor,
         num_local_tokens: int,
         hidden_dim: int,
+        zero_copy: bool,
         expert_out: torch.Tensor,
     ):
-        """Combine expert outputs; reuses combine_in as the grad slot for bwd."""
+        """Combine expert outputs; combine_in storage is reused as the grad slot in bwd."""
         device = expert_out.device
-        # Stage expert_out into the persistent combine_in slot (symm-mem-backed
-        # in the zero-copy path); its storage is reused as grad_combine_in in bwd.
-        combine_in.copy_(expert_out)
+        # Zero-copy mode: peers read from combine_in via symm-mem, so it must
+        # hold the expert outputs; stage expert_out into it unless aliased.
+        # Otherwise the kernel reads expert_out directly, no copy needed.
+        if zero_copy and combine_in.data_ptr() != expert_out.data_ptr():
+            combine_in.copy_(expert_out)
+            kernel_in = combine_in
+        else:
+            kernel_in = expert_out
         result = torch.empty(num_local_tokens, hidden_dim, dtype=expert_out.dtype, device=device)
-        torch.ops.transformer_engine_ep.combine(handle_mem, combine_in, result)
+        torch.ops.transformer_engine_ep.combine(handle_mem, kernel_in, result)
         ctx.handle_mem = handle_mem
-        ctx.combine_in = combine_in  # reused as grad_combine_in in bwd
+        ctx.combine_in = combine_in  # used as grad_combine_in in bwd
         return result
 
     @staticmethod
@@ -624,6 +633,7 @@ class _EpCombine(torch.autograd.Function):
             None,  # combine_in
             None,  # num_local_tokens
             None,  # hidden_dim
+            None,  # zero_copy
             grad_combine_in,
         )
 
@@ -687,5 +697,6 @@ def ep_combine(
         buffer.combine_in,
         num_local_tokens,
         buffer.hidden_dim,
+        buffer.zero_copy,
         expert_out,
     )
