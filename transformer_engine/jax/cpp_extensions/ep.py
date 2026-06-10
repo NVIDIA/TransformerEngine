@@ -245,9 +245,7 @@ class EpPreparePrimitive(BasePrimitive):
         return token_counts, handle_mem
 
     @staticmethod
-    def batcher(
-        batched_args, batch_dims, *, top_k, dispatch_output_per_expert_alignment, is_outer
-    ):
+    def batcher(batched_args, batch_dims, *, top_k, dispatch_output_per_expert_alignment, is_outer):
         raise NotImplementedError("EpPreparePrimitive does not support vmap")
 
     @staticmethod
@@ -486,10 +484,9 @@ def _leading_per_shard(out_leading_shape, leading_axis, mesh):
     factor = 1
     for a in axes:
         factor *= mesh.shape[a]
-    assert out_leading_shape[0] % factor == 0, (
-        f"leading dim {out_leading_shape[0]} not divisible by shard factor"
-        f" {factor} on axes {axes}"
-    )
+    assert (
+        out_leading_shape[0] % factor == 0
+    ), f"leading dim {out_leading_shape[0]} not divisible by shard factor {factor} on axes {axes}"
     return (out_leading_shape[0] // factor,) + tuple(out_leading_shape[1:])
 
 
@@ -918,8 +915,9 @@ def ep_prepare(cfg: EpLayerConfig, topk_idx):
     )
 
 
-def ep_dispatch_fwd(cfg: EpLayerConfig, handle_mem, topk_idx, tokens, topk_weights,
-                    recv_capacity_per_rank):
+def ep_dispatch_fwd(
+    cfg: EpLayerConfig, handle_mem, topk_idx, tokens, topk_weights, recv_capacity_per_rank
+):
     """Scatter tokens and weights to expert ranks; returns (recv_tokens, recv_topk_weights)."""
     return EpDispatchPrimitive.outer_primitive.bind(
         handle_mem,
@@ -933,8 +931,9 @@ def ep_dispatch_fwd(cfg: EpLayerConfig, handle_mem, topk_idx, tokens, topk_weigh
     )
 
 
-def ep_combine_fwd(cfg: EpLayerConfig, handle_mem, expert_out, num_local_tokens,
-                   out_partition_spec=None):
+def ep_combine_fwd(
+    cfg: EpLayerConfig, handle_mem, expert_out, num_local_tokens, out_partition_spec=None
+):
     """Gather expert outputs back to home ranks. expert_out is pre-weighted."""
     out_leading = _normalize_leading_shape(num_local_tokens)
     return EpCombinePrimitive.outer_primitive.bind(
@@ -948,7 +947,11 @@ def ep_combine_fwd(cfg: EpLayerConfig, handle_mem, expert_out, num_local_tokens,
 
 
 def ep_dispatch_bwd(
-    cfg: EpLayerConfig, handle_mem, grad, g_recv_topk_weights, num_local_tokens,
+    cfg: EpLayerConfig,
+    handle_mem,
+    grad,
+    g_recv_topk_weights,
+    num_local_tokens,
     out_partition_spec=None,
 ):
     """Backward of dispatch; returns (grad_tokens, grad_topk_weights)."""
