@@ -22,7 +22,6 @@ from build_tools.utils import (
     cuda_version,
     cusolvermp_pypi_package_name,
     get_frameworks,
-    nccl_home_path,
     remove_dups,
     min_python_version_str,
 )
@@ -149,6 +148,45 @@ def setup_requirements() -> Tuple[List[str], List[str]]:
     return [remove_dups(reqs) for reqs in [install_reqs, test_reqs]]
 
 
+def _discover_nccl_home() -> str:
+    """Resolve NCCL_HOME: honor env var, else probe well-known prefixes, else ldconfig."""
+    env_home = os.environ.get("NCCL_HOME")
+    if env_home:
+        if (Path(env_home) / "include" / "nccl.h").exists():
+            return env_home
+        print(
+            f"[NCCL EP] WARNING: NCCL_HOME='{env_home}' is set but "
+            f"'{env_home}/include/nccl.h' was not found; falling back to system probes."
+        )
+
+    lib_names = ("libnccl.so", "libnccl.so.2")
+    # Include Debian/Ubuntu multiarch subdirs (e.g. lib/aarch64-linux-gnu).
+    lib_subdirs = ("lib", "lib64", "lib/aarch64-linux-gnu", "lib/x86_64-linux-gnu")
+    for cand in ("/opt/nvidia/nccl", "/usr/local/nccl", "/usr"):
+        p = Path(cand)
+        if (p / "include" / "nccl.h").exists() and any(
+            (p / sub / name).exists() for sub in lib_subdirs for name in lib_names
+        ):
+            return str(p)
+
+    try:
+        out = subprocess.check_output(["ldconfig", "-p"], stderr=subprocess.DEVNULL).decode()
+        for line in out.splitlines():
+            if "libnccl.so" in line and "=>" in line:
+                lib_path = Path(line.split("=>")[-1].strip())
+                # Walk upward so multiarch layouts (.../lib/<triplet>/libnccl.so)
+                # resolve to the prefix that contains include/nccl.h.
+                for root in (lib_path.parent.parent, lib_path.parent.parent.parent):
+                    if (root / "include" / "nccl.h").exists():
+                        return str(root)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+
+    raise RuntimeError(
+        "Could not locate NCCL core (nccl.h + libnccl.so). Set NCCL_HOME to the install prefix."
+    )
+
+
 def build_nccl_ep_submodule() -> str:
     """Build libnccl_ep.a from the 3rdparty/nccl submodule and return NCCL_HOME."""
     nccl_root = current_file_path / "3rdparty" / "nccl"
@@ -178,7 +216,7 @@ def build_nccl_ep_submodule() -> str:
     env["NVCC_GENCODE"] = gencode
     # NCCL EP needs the core NCCL headers + libnccl.so; write NCCL EP build
     # outputs to the submodule's local build/ tree.
-    nccl_home = nccl_home_path()
+    nccl_home = _discover_nccl_home()
     env["NCCL_HOME"] = nccl_home
     env["NCCL_EP_BUILDDIR"] = str(build_dir)
 
