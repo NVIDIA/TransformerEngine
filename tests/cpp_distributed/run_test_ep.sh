@@ -56,8 +56,8 @@ echo
 if [[ -n "${GTEST_XML_PREFIX:-}" ]]; then
     # bash -c so OMPI_COMM_WORLD_RANK expands per-rank, avoiding a write race
     # on a single shared output path.
-    "${MPIRUN}" -n "${NUM_GPUS}" ${MPIRUN_EXTRA:-} bash -c \
+    "${MPIRUN}" --allow-run-as-root --oversubscribe -n "${NUM_GPUS}" ${MPIRUN_EXTRA:-} bash -c \
         "exec '${TEST_BIN}' ${GTEST_ARGS} --gtest_output=xml:${GTEST_XML_PREFIX}.rank\${OMPI_COMM_WORLD_RANK}.xml"
 else
-    "${MPIRUN}" -n "${NUM_GPUS}" ${MPIRUN_EXTRA:-} "${TEST_BIN}" ${GTEST_ARGS}
+    "${MPIRUN}" --allow-run-as-root --oversubscribe -n "${NUM_GPUS}" ${MPIRUN_EXTRA:-} "${TEST_BIN}" ${GTEST_ARGS}
 fi
