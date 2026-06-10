@@ -205,7 +205,7 @@ def _moe_step(args, topk_idx, tokens, topk_w, kernels):
     kernel_spec = PartitionSpec("ep", None, None, None)
 
     kernels = kernels.reshape(ep_size, NLE, *kernels.shape[1:])
-    ep_handle = EpLayerConfig(top_k=args.top_k, dispatch_output_per_expert_alignment=16)
+    layer_cfg = EpLayerConfig(top_k=args.top_k, dispatch_output_per_expert_alignment=16)
 
     @jax.jit
     def step(topk_idx, tokens, topk_w, local_kernels):
@@ -216,7 +216,7 @@ def _moe_step(args, topk_idx, tokens, topk_w, kernels):
             local_kernels, NamedSharding(mesh, kernel_spec)
         )
         recv_tokens, recv_topk_w, handle_mem, _tc = ep_dispatch(
-            ep_handle, topk_idx, tokens, topk_w, args.recv_capacity_per_rank
+            layer_cfg, topk_idx, tokens, topk_w, args.recv_capacity_per_rank
         )
         recv_tokens = jax.lax.with_sharding_constraint(recv_tokens, NamedSharding(mesh, ep3))
         recv_topk_w = jax.lax.with_sharding_constraint(recv_topk_w, NamedSharding(mesh, ep2))
@@ -230,7 +230,7 @@ def _moe_step(args, topk_idx, tokens, topk_w, kernels):
         ).astype(expert_out.dtype)
         weighted = jax.lax.with_sharding_constraint(weighted, NamedSharding(mesh, ep3))
         return ep_combine(
-            ep_handle,
+            layer_cfg,
             handle_mem,
             _tc,
             weighted,
@@ -358,7 +358,6 @@ def main():
             ref_out, ref_grad = _reference_grad(
                 tokens_global_np, topk_idx_global_np, w_global_np, kernels_np
             )
-            ref_loss = 0.5 * float((ref_out.astype(np.float32) ** 2).sum())
             # 3D global ``[num_procs, S, H]`` with num_procs = dp * ep. Each EP
             # column in a DP color sees identical inputs (and produces identical
             # outputs), so collapse the ep dim to one replica before flattening
@@ -374,15 +373,6 @@ def main():
                 .reshape(dp_size, ep_size, -1, ref_grad.shape[-1])[:, 0]
                 .reshape(-1, ref_grad.shape[-1])
             )
-            if args.process_id == 0:
-                fwd_diff = np.abs(global_out - ref_out)
-                grad_diff = np.abs(global_grad - ref_grad)
-                print(
-                    f"[ep_moe] DEBUG loss={float(loss):.4f} ref_loss(global)={ref_loss:.4f} "
-                    f"ratio={float(loss) / max(ref_loss, 1e-9):.4f} (expected ~1.0)"
-                )
-                print(f"[ep_moe] DEBUG fwd  max-abs-diff per row: {fwd_diff.max(axis=1)}")
-                print(f"[ep_moe] DEBUG grad max-abs-diff per row: {grad_diff.max(axis=1)}")
             np.testing.assert_allclose(
                 global_out,
                 ref_out,
