@@ -21,23 +21,29 @@ export LD_LIBRARY_PATH=$TE_LIB_PATH:$LD_LIBRARY_PATH
 
 if [[ $(nvidia-smi --list-gpus | wc -l) -ge 4 ]]; then
     cd $TE_PATH/tests/cpp_distributed
-    build_ok=1
-    cmake -GNinja -S. -Bbuild || { test_fail "configure"; build_ok=0; }
-    if [[ $build_ok -eq 1 ]]; then
-        cmake --build build || { test_fail "build"; build_ok=0; }
-    fi
+    configure_ok=1
+    cmake -GNinja -S. -Bbuild || { test_fail "configure"; configure_ok=0; }
 
-    # Run tests only when the build succeeded; otherwise mpirun on a missing or
-    # stale binary can hang across all ranks and mask the real failure.
-    if [[ $build_ok -eq 1 ]]; then
-        # test_comm_gemm: per-rank XML to avoid a write race on a shared path.
-        mpirun --allow-run-as-root --np 4 --oversubscribe bash -c \
-            "exec ./build/test_comm_gemm --gtest_output=xml:$XML_LOG_DIR/cpp_distributed_test_comm_gemm.rank\${OMPI_COMM_WORLD_RANK}.xml" \
-            || test_fail "test_comm_gemm"
+    # Build each suite independently so one suite's build failure does not
+    # mask the other's results. Skip mpirun when the binary is missing.
+    if [[ $configure_ok -eq 1 ]]; then
+        comm_gemm_ok=1
+        ep_ok=1
+        cmake --build build --target test_comm_gemm || { test_fail "test_comm_gemm_build"; comm_gemm_ok=0; }
+        cmake --build build --target test_ep        || { test_fail "test_ep_build";        ep_ok=0; }
 
-        # EP suites; runner self-skips on pre-Hopper GPUs.
-        GTEST_XML_PREFIX="$XML_LOG_DIR/cpp_distributed_test_ep" \
-            bash ./run_test_ep.sh 4 ./build || test_fail "test_ep"
+        if [[ $comm_gemm_ok -eq 1 ]]; then
+            # Per-rank XML to avoid a write race on a shared path.
+            mpirun --allow-run-as-root --np 4 --oversubscribe bash -c \
+                "exec ./build/test_comm_gemm --gtest_output=xml:$XML_LOG_DIR/cpp_distributed_test_comm_gemm.rank\${OMPI_COMM_WORLD_RANK}.xml" \
+                || test_fail "test_comm_gemm"
+        fi
+
+        if [[ $ep_ok -eq 1 ]]; then
+            # EP suites; runner self-skips on pre-Hopper GPUs.
+            GTEST_XML_PREFIX="$XML_LOG_DIR/cpp_distributed_test_ep" \
+                bash ./run_test_ep.sh 4 ./build || test_fail "test_ep"
+        fi
     fi
 fi
 
