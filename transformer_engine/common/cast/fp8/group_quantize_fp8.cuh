@@ -206,8 +206,7 @@ __device__ __forceinline__ void store_fp8_vec_streaming(OType *ptr,
 // is safe to read. Striping element ``e = k*WARP + lane`` keeps each store
 // instruction fully coalesced across the warp regardless of width.
 template <typename T, size_t SEG>
-__device__ __forceinline__ void copy_column_segment_strided(char *gl, const char *sh,
-                                                            size_t lane) {
+__device__ __forceinline__ void copy_column_segment_strided(char *gl, const char *sh, size_t lane) {
   static_assert(SEG % (sizeof(T) * THREADS_PER_WARP) == 0,
                 "segment must tile evenly into warp-wide element stripes");
   constexpr size_t STEPS = SEG / sizeof(T) / THREADS_PER_WARP;
