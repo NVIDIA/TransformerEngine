@@ -16,6 +16,8 @@ namespace fused_attn {
 
 using namespace transformer_engine;
 
+constexpr size_t kFP8THDRaggedCudnnVersion = 92300;
+
 // fused attention FWD FP8 with FE 1.0+
 void fused_attn_fp8_fwd_impl(
     int64_t b, int64_t h, int64_t hg, int64_t s_q, int64_t s_kv, int64_t d_qk, int64_t d_v,
@@ -68,13 +70,14 @@ void fused_attn_fp8_fwd_impl(
   bool is_ragged_kv = (kv_format == NVTE_QKV_Format::NVTE_THD);
   const int device_id = cuda::current_device();
   const int sm_arch_ = cuda::sm_arch(device_id);
-  bool use_ragged_stats = is_ragged_q && cudnn_runtime_version >= 90600 && sm_arch_ != 120;
+  bool use_ragged_stats =
+      is_ragged_q && cudnn_runtime_version >= kFP8THDRaggedCudnnVersion && sm_arch_ != 120;
 
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
-  const DType ragged_offset_type = cudnn_runtime_version >= 90500 ? DType::kInt64 : DType::kInt32;
+  const DType ragged_offset_type = DType::kInt64;
 
   int64_t actual_b = b;
-  if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= 90600) {
+  if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= kFP8THDRaggedCudnnVersion) {
     NVTE_CHECK(is_padding, "Ragged QKV input requires padding or padding_causal mask!");
     if (sm_arch_ != 120) {
       b = max_b;
@@ -145,9 +148,9 @@ void fused_attn_fp8_fwd_impl(
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // seq_q
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // seq_kv
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_q
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_o
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_k
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_v
+                   std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_o
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_stats
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // dropout_seed
                    std::shared_ptr<fe::graph::Tensor_attributes>>;  // dropout_offset
@@ -427,10 +430,10 @@ void fused_attn_fp8_fwd_impl(
           is_softmax_offset ? std::make_tuple(softmax_offset) : std::make_tuple(nullptr);
       auto padding_tuple =
           is_padding ? std::make_tuple(seq_q, seq_kv) : std::make_tuple(nullptr, nullptr);
-      auto offset_qo_tuple =
-          is_ragged_q ? std::make_tuple(offset_q, offset_o) : std::make_tuple(nullptr, nullptr);
+      auto offset_q_tuple = is_ragged_q ? std::make_tuple(offset_q) : std::make_tuple(nullptr);
       auto offset_kv_tuple =
           is_ragged_kv ? std::make_tuple(offset_k, offset_v) : std::make_tuple(nullptr, nullptr);
+      auto offset_o_tuple = is_ragged_q ? std::make_tuple(offset_o) : std::make_tuple(nullptr);
       auto offset_s_tuple =
           use_ragged_stats ? std::make_tuple(offset_stats) : std::make_tuple(nullptr);
       auto dropout_tuple = is_dropout ? std::make_tuple(dropout_seed, dropout_offset)
@@ -443,8 +446,8 @@ void fused_attn_fp8_fwd_impl(
       NVTE_CHECK_CUDNN_FE(mha_graph->build_plans(handle));
       auto return_tuple =
           std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, Stats_tuple, bias_tuple,
-                         softmax_offset_tuple, padding_tuple, offset_qo_tuple, offset_kv_tuple,
-                         offset_s_tuple, dropout_tuple);
+                         softmax_offset_tuple, padding_tuple, offset_q_tuple, offset_kv_tuple,
+                         offset_o_tuple, offset_s_tuple, dropout_tuple);
       cache.insert({descriptor, return_tuple});
 
       return return_tuple;
@@ -452,7 +455,7 @@ void fused_attn_fp8_fwd_impl(
 
     auto [mha_graph, Q, K, V, descale_q, descale_k, descale_v, descale_s, scale_s, scale_o,
           attn_scale, O, amax_s, amax_o, Stats, bias, softmax_offset, seq_q, seq_kv, offset_q,
-          offset_o, offset_k, offset_v, offset_stats, dropout_seed, dropout_offset] =
+          offset_k, offset_v, offset_o, offset_stats, dropout_seed, dropout_offset] =
         get_graph(sdpa_fp8_fprop_cache, descriptor);
 
     auto plan_workspace_size = alignTo<16>(mha_graph->get_workspace_size());
@@ -576,7 +579,7 @@ void fused_attn_fp8_fwd_impl(
   } catch (cudnn_frontend::cudnnException& e) {
     NVTE_ERROR(e.what());
   }
-}
+}  // NOLINT(readability/fn_size)
 
 // fused attention BWD FP8 with FE 1.0+
 void fused_attn_fp8_bwd_impl(
@@ -637,13 +640,14 @@ void fused_attn_fp8_bwd_impl(
   bool is_ragged_kv = (kv_format == NVTE_QKV_Format::NVTE_THD);
   const int device_id = cuda::current_device();
   const int sm_arch_ = cuda::sm_arch(device_id);
-  bool use_ragged_stats = is_ragged_q && cudnn_runtime_version >= 90600 && sm_arch_ != 120;
+  bool use_ragged_stats =
+      is_ragged_q && cudnn_runtime_version >= kFP8THDRaggedCudnnVersion && sm_arch_ != 120;
 
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
-  const DType ragged_offset_type = cudnn_runtime_version >= 90500 ? DType::kInt64 : DType::kInt32;
+  const DType ragged_offset_type = DType::kInt64;
 
   int64_t actual_b = b;
-  if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= 90600) {
+  if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= kFP8THDRaggedCudnnVersion) {
     NVTE_CHECK(is_padding, "Ragged QKV input requires padding or padding_causal mask!");
     if (sm_arch_ != 120) {
       b = max_b;
@@ -738,9 +742,9 @@ void fused_attn_fp8_bwd_impl(
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // seq_q
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // seq_kv
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_q
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_o
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_k
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_v
+                   std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_o
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_stats
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // dropout_seed
                    std::shared_ptr<fe::graph::Tensor_attributes>>;  // dropout_offset
@@ -1181,10 +1185,10 @@ void fused_attn_fp8_bwd_impl(
                                       : std::make_tuple(nullptr, nullptr);
       auto padding_tuple =
           is_padding ? std::make_tuple(seq_q, seq_kv) : std::make_tuple(nullptr, nullptr);
-      auto offset_qo_tuple =
-          is_ragged_q ? std::make_tuple(offset_q, offset_o) : std::make_tuple(nullptr, nullptr);
+      auto offset_q_tuple = is_ragged_q ? std::make_tuple(offset_q) : std::make_tuple(nullptr);
       auto offset_kv_tuple =
           is_ragged_kv ? std::make_tuple(offset_k, offset_v) : std::make_tuple(nullptr, nullptr);
+      auto offset_o_tuple = is_ragged_q ? std::make_tuple(offset_o) : std::make_tuple(nullptr);
       auto offset_s_tuple =
           use_ragged_stats ? std::make_tuple(offset_stats) : std::make_tuple(nullptr);
       auto dropout_tuple = is_dropout ? std::make_tuple(dropout_seed, dropout_offset)
@@ -1198,8 +1202,8 @@ void fused_attn_fp8_bwd_impl(
 
       auto return_tuple =
           std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, mxfp8_tensors_tuple,
-                         bias_tuple, softmax_offset_tuple, padding_tuple, offset_qo_tuple,
-                         offset_kv_tuple, offset_s_tuple, dropout_tuple);
+                         bias_tuple, softmax_offset_tuple, padding_tuple, offset_q_tuple,
+                         offset_kv_tuple, offset_o_tuple, offset_s_tuple, dropout_tuple);
       cache.insert({descriptor, return_tuple});
 
       return return_tuple;
@@ -1208,7 +1212,7 @@ void fused_attn_fp8_bwd_impl(
           descale_dO, descale_s, descale_dP, scale_s, scale_dQ, scale_dK, scale_dV, scale_dP, dQ,
           dK, dV, amax_dQ, amax_dK, amax_dV, amax_dP, Q_t, K_t, dO_f16, dO_t, descale_q_t,
           descale_k_t, descale_dO_t, bias, dBias, softmax_offset, d_softmax_offset, seq_q, seq_kv,
-          offset_q, offset_o, offset_k, offset_v, offset_stats, dropout_seed, dropout_offset] =
+          offset_q, offset_k, offset_v, offset_o, offset_stats, dropout_seed, dropout_offset] =
         get_graph(sdpa_fp8_bprop_cache, descriptor);
 
     auto plan_workspace_size = alignTo<16>(mha_graph->get_workspace_size());
@@ -1428,7 +1432,8 @@ void fused_attn_fp8_fwd(
     int i = 0;
     Tensor* output_M = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     output_M->data.dptr = nullptr;
-    if (q_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) {
+    if (q_format == NVTE_QKV_Format::NVTE_THD &&
+        cudnn_runtime_version >= kFP8THDRaggedCudnnVersion) {
       output_M->data.shape = {num_tokens_q, num_attn_heads, 1};
     } else {
       output_M->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};

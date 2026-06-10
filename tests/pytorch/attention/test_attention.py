@@ -2512,8 +2512,6 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training, fp8_rec
     out_grad_shape_new = [*out_grad_shape[:-2], out_grad_shape[-2] * out_grad_shape[-1]]
     out_grad = torch.randn(out_grad_shape_new, dtype=dtype, device="cuda")
 
-    print(f"qkv_format: {qkv_format}")
-    print(f"inp shape: {inp[0].shape}, {inp[1].shape}, {inp[2].shape}")
     with autocast(enabled=fp8_dpa, recipe=fp8_recipe):
         out = dpa(
             inp[0],
@@ -2529,7 +2527,7 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training, fp8_rec
             checkpoint_core_attention=False,
             core_attention_bias_type=config.attn_bias_type,
             fp8_output=fp8_dpa,
-            fast_zero_fill=False,
+            fast_zero_fill=fp8_dpa and qkv_format == "thd",
         )
     if is_training:
         out.backward(out_grad)
