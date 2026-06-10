@@ -72,12 +72,14 @@ def set_ep_config(config: EpConfig) -> None:
 
 
 def get_ep_config() -> EpConfig:
+    """Return the process-wide EpConfig set by ep_bootstrap."""
     if _ep_config is None:
         raise RuntimeError("EpConfig has not been set. Did you call ep_bootstrap()?")
     return _ep_config
 
 
 def get_ep_num_local_experts() -> int:
+    """Number of experts owned by this EP rank."""
     return get_ep_config().num_local_experts
 
 
@@ -178,6 +180,8 @@ def _ep_spec_ok(spec, trailing_count):
 
 
 class EpPreparePrimitive(BasePrimitive):
+    """FFI primitive for nvte_ep_prepare: routing setup and per-expert token counts."""
+
     name = "te_ep_prepare_ffi"
     multiple_results = True
     impl_static_args = (1, 2, 3)  # top_k, dispatch_output_per_expert_alignment, is_outer
@@ -289,6 +293,8 @@ register_primitive(EpPreparePrimitive)
 
 
 class EpDispatchPrimitive(BasePrimitive):
+    """FFI primitive for nvte_ep_dispatch (forward)."""
+
     name = "te_ep_dispatch_ffi"
     multiple_results = True
     impl_static_args = (4, 5, 6, 7)  # top_k, dispatch_output_per_expert_alignment,
@@ -329,7 +335,7 @@ class EpDispatchPrimitive(BasePrimitive):
     def outer_abstract(*args, **kwargs):
         kwargs = dict(kwargs)
         kwargs["is_outer"] = True
-        avals = EpDispatchPrimitive.abstract(*args, **kwargs)
+        avals = EpDispatchPrimitive.abstract(*args, **kwargs)  # pylint: disable=missing-kwoa
         return avals[:2]
 
     @staticmethod
@@ -488,6 +494,8 @@ def _leading_per_shard(out_leading_shape, leading_axis, mesh):
 
 
 class EpCombinePrimitive(BasePrimitive):
+    """FFI primitive for nvte_ep_combine (forward)."""
+
     name = "te_ep_combine_ffi"
     multiple_results = False
     impl_static_args = (2, 3, 4, 5)  # top_k, dispatch_output_per_expert_alignment,
@@ -617,6 +625,8 @@ register_primitive(EpCombinePrimitive)
 
 
 class EpDispatchBwdPrimitive(BasePrimitive):
+    """FFI primitive for the backward of nvte_ep_dispatch."""
+
     name = "te_ep_dispatch_bwd_ffi"
     multiple_results = True
     impl_static_args = (3, 4, 5, 6)  # top_k, dispatch_output_per_expert_alignment,
@@ -769,6 +779,8 @@ register_primitive(EpDispatchBwdPrimitive)
 
 
 class EpCombineBwdPrimitive(BasePrimitive):
+    """FFI primitive for the backward of nvte_ep_combine."""
+
     name = "te_ep_combine_bwd_ffi"
     multiple_results = False
     impl_static_args = (2, 3, 4, 5)  # top_k, dispatch_output_per_expert_alignment,
@@ -801,7 +813,7 @@ class EpCombineBwdPrimitive(BasePrimitive):
     def outer_abstract(*args, **kwargs):
         kwargs = dict(kwargs)
         kwargs["is_outer"] = True
-        return EpCombineBwdPrimitive.abstract(*args, **kwargs)
+        return EpCombineBwdPrimitive.abstract(*args, **kwargs)  # pylint: disable=missing-kwoa
 
     @staticmethod
     def lowering(
