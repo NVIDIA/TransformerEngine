@@ -118,7 +118,6 @@ class TestEP(unittest.TestCase):
             hidden_dim=HIDDEN_DIM,
             num_local_experts=NUM_LOCAL_EXPERTS,
             alignment=alignment,
-            ep_group=self.ep_group,
         )
 
     def _make_raw_recv(self, dtype=torch.bfloat16):

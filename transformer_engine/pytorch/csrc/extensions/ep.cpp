@@ -46,15 +46,12 @@ std::string g_ep_group_name;  // NOLINT(runtime/string)
 // True while the EP backend holds a borrowed reference to torch's NCCL comm.
 bool g_ep_initialized = false;
 
-// Zero-copy IO toggle. Placeholder for the symm-mem fast path; per-step ops
-// always pass kNoWindow in this release regardless of the toggle. Wired up
-// so the switch is a one-line change when the backend lands the fast path.
-// Atomic so the Python-side toggle is safe against concurrent
-// ep_dispatch/combine (which release the GIL).
+// Zero-copy IO toggle captured at ep_initialize. Atomic so the Python-side
+// toggle is safe against concurrent ep_dispatch/combine (which release the GIL).
 std::atomic<bool> g_zero_copy_enabled{false};
 
-// Per-step ops always pass kNoWindow in this release; the symm-mem IO path is
-// planned for a near-future release.
+// Sentinel returned by maybe_make_window when zero-copy is off or the tensor
+// is not symm-mem-backed; the backend treats it as "no window, use staged copy".
 constexpr NVTECommWindow kNoWindow = {nullptr, 0};
 
 // Resolve ``t`` to an NCCL symm-mem window for the zero-copy one-sided path.

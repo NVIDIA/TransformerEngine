@@ -627,17 +627,12 @@ class _EpCombine(torch.autograd.Function):
 # Public high-level wrappers
 
 
-# FP8 dispatch is not yet supported by the common backend.
-_FP8_DTYPES = (torch.float8_e4m3fn, torch.float8_e5m2)
-
-
-def _reject_fp8(*tensors: torch.Tensor) -> None:
-    for t in tensors:
-        if t.dtype in _FP8_DTYPES:
-            raise NotImplementedError(
-                f"FP8 dispatch/combine not supported (got dtype={t.dtype}); "
-                "quantize outside the EP boundary."
-            )
+# NCCL EP currently only supports bfloat16 payload tensors.
+def _require_bf16(name: str, t: torch.Tensor) -> None:
+    if t.dtype is not torch.bfloat16:
+        raise NotImplementedError(
+            f"NCCL EP currently supports only bfloat16 payloads; got {name}.dtype={t.dtype}."
+        )
 
 
 def ep_dispatch(
@@ -652,7 +647,7 @@ def ep_dispatch(
     buffer's persistent slots — consume them before the next ep_dispatch on
     the same buffer or they get overwritten. token_counts is non-differentiable.
     """
-    _reject_fp8(tokens, buffer.recv_tokens)
+    _require_bf16("tokens", tokens)
     return _EpDispatch.apply(
         buffer.handle_mem,
         buffer.top_k,
@@ -680,7 +675,7 @@ def ep_combine(
     Result shape is (num_local_tokens, buffer.hidden_dim); defaults to
     buffer.max_tokens_per_rank rows.
     """
-    _reject_fp8(expert_out, buffer.combine_in)
+    _require_bf16("expert_out", expert_out)
     if num_local_tokens is None:
         num_local_tokens = buffer.max_tokens_per_rank
     return _EpCombine.apply(
