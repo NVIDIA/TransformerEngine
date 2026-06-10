@@ -550,8 +550,7 @@ at::Tensor thd_cp_reorder_sequences(const at::Tensor &inp, const at::Tensor &cu_
                                     int cp_size, bool scatter, int total_tokens);
 
 void thd_cp_copy_valid_tokens(at::Tensor out, const at::Tensor &inp,
-                              const at::Tensor &cu_seqlens_padded,
-                              const at::Tensor &cu_seqlens);
+                              const at::Tensor &cu_seqlens_padded, const at::Tensor &cu_seqlens);
 
 /***************************************************************************************************
  * multi_tensor_* kernels

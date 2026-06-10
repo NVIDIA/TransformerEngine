@@ -998,8 +998,7 @@ at::Tensor thd_cp_reorder_sequences(const at::Tensor &inp, const at::Tensor &cu_
 }
 
 void thd_cp_copy_valid_tokens(at::Tensor out, const at::Tensor &inp,
-                              const at::Tensor &cu_seqlens_padded,
-                              const at::Tensor &cu_seqlens) {
+                              const at::Tensor &cu_seqlens_padded, const at::Tensor &cu_seqlens) {
   NVTE_CHECK(cu_seqlens.scalar_type() == at::ScalarType::Int);
   NVTE_CHECK(cu_seqlens_padded.scalar_type() == at::ScalarType::Int);
   NVTE_CHECK(cu_seqlens.dim() == 1 && cu_seqlens_padded.dim() == 1);
