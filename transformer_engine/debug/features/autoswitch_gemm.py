@@ -27,10 +27,19 @@ _AUTOSWITCH_SAMPLING_CONFIG_KEYS = set()
 _AUTOSWITCH_DISABLE_UNTIL_BY_GEMM = {}
 _AUTOSWITCH_CONFIG_FILE_LOADED = False
 _AUTOSWITCH_DISABLE_UNTIL_ENV = "NVTE_AUTOSWITCH_GEMM_DISABLE_UNTIL"
+_AUTOSWITCH_LOGGING_ENV = "NVTE_AUTOSWITCH_GEMM_LOGGING"
+_AUTOSWITCH_LOGGING_ENABLED = False
+
+
+def _env_flag_enabled(name: str, default: bool = False) -> bool:
+    """Interpret common boolean environment flag values."""
+    default_value = "1" if default else "0"
+    return os.getenv(name, default_value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _register_sampling_config(config: Dict) -> None:
     """Track AutoswitchGemm sampling schedules for runtime eager/graph routing."""
+    global _AUTOSWITCH_LOGGING_ENABLED
     schedule = {
         "start_step": config.get("start_step", None),
         "end_step": config.get("end_step", None),
@@ -41,6 +50,13 @@ def _register_sampling_config(config: Dict) -> None:
     if key not in _AUTOSWITCH_SAMPLING_CONFIG_KEYS:
         _AUTOSWITCH_SAMPLING_CONFIG_KEYS.add(key)
         _AUTOSWITCH_SAMPLING_CONFIGS.append(schedule)
+    if any(bool(config.get(key, False)) for key in ("log_metrics", "log_decisions", "verbose")):
+        _AUTOSWITCH_LOGGING_ENABLED = True
+
+
+def autoswitch_gemm_logging_enabled() -> bool:
+    """Return True when verbose AutoswitchGemm logging is globally enabled."""
+    return _AUTOSWITCH_LOGGING_ENABLED or _env_flag_enabled(_AUTOSWITCH_LOGGING_ENV, False)
 
 
 def _register_sampling_configs_from_file() -> None:
@@ -438,8 +454,18 @@ class AutoswitchGemm(TEConfigAPIMapper):
             return None
         return root_log_dir
 
-    def _get_metrics_logger(self) -> Optional[_AutoswitchGemmMetricLogger]:
+    def _logging_enabled(self, config: Optional[Dict] = None) -> bool:
+        """Return True when verbose AutoswitchGemm logging is enabled."""
+        if config is not None:
+            for key in ("log_metrics", "log_decisions", "verbose"):
+                if key in config:
+                    return self._config_bool(config, key, False)
+        return autoswitch_gemm_logging_enabled()
+
+    def _get_metrics_logger(self, config: Optional[Dict] = None) -> Optional[_AutoswitchGemmMetricLogger]:
         """Return initialized autoswitch metric logger if log dir is available."""
+        if not self._logging_enabled(config):
+            return None
         metric_logger = _get_autoswitch_metric_logger()
         if metric_logger.ensure_initialized(self._get_root_log_dir()):
             return metric_logger
@@ -459,9 +485,10 @@ class AutoswitchGemm(TEConfigAPIMapper):
         tensor_name: str,
         underflow_pct: float,
         mse: float,
+        config: Optional[Dict] = None,
     ) -> None:
         """Store the latest quality metric for a `(layer, gemm)` pair."""
-        metric_logger = self._get_metrics_logger()
+        metric_logger = self._get_metrics_logger(config)
         if metric_logger is not None:
             metric_logger.log_scalar(
                 layer_name, gemm, f"{tensor_name}_underflow_pct", iteration, underflow_pct
@@ -593,14 +620,15 @@ class AutoswitchGemm(TEConfigAPIMapper):
         _update_global_disable_until(layer_name, gemm, state.disable_until_iter)
         state.last_reason = "; ".join(reasons)
 
-        debug_api.log_message(
-            f"Feature={self.__class__.__name__}: switch {gemm} to high precision in"
-            f" iter={iteration} through iter={state.disable_until_iter}. Triggered by"
-            f" {metric['tensor_name']} sampled at iter={metric_iter}:"
-            f" {state.last_reason}",
-            layer_name,
-            extra_cachable_args=(gemm, "switch"),
-        )
+        if self._logging_enabled(config):
+            debug_api.log_message(
+                f"Feature={self.__class__.__name__}: switch {gemm} to high precision in"
+                f" iter={iteration} through iter={state.disable_until_iter}. Triggered by"
+                f" {metric['tensor_name']} sampled at iter={metric_iter}:"
+                f" {state.last_reason}",
+                layer_name,
+                extra_cachable_args=(gemm, "switch"),
+            )
 
     @api_method
     def fp8_gemm_enabled(
@@ -613,7 +641,7 @@ class AutoswitchGemm(TEConfigAPIMapper):
     ):
         """Decide whether selected GEMM should run quantized (True) or high precision (False)."""
         state = self._get_or_create_state(layer_name, gemm)
-        metric_logger = self._get_metrics_logger()
+        metric_logger = self._get_metrics_logger(config)
 
         # Keep plan-time behavior quantized. Autoswitch decisions are applied only
         # at final decision points right before GEMM launch.
@@ -641,12 +669,13 @@ class AutoswitchGemm(TEConfigAPIMapper):
                 metric_logger.log_scalar(
                     layer_name, gemm, "switch_blocked_fp8_model_params", iteration, 1.0
                 )
-            debug_api.log_message(
-                f"Feature={self.__class__.__name__}: skip switch for {gemm} at"
-                f" iter={iteration} because fp8 model parameters are enabled.",
-                layer_name,
-                extra_cachable_args=(gemm, "skip_fp8_model_params"),
-            )
+            if self._logging_enabled(config):
+                debug_api.log_message(
+                    f"Feature={self.__class__.__name__}: skip switch for {gemm} at"
+                    f" iter={iteration} because fp8 model parameters are enabled.",
+                    layer_name,
+                    extra_cachable_args=(gemm, "skip_fp8_model_params"),
+                )
             return True, iteration + 1
 
         if gemm in {"fprop", "dgrad"} and fp8_model_params_layer and allow_fp8_model_params_fallback:
@@ -654,12 +683,13 @@ class AutoswitchGemm(TEConfigAPIMapper):
                 metric_logger.log_scalar(
                     layer_name, gemm, "fp8_model_params_dequantized_fallback", iteration, 1.0
                 )
-            debug_api.log_message(
-                f"Feature={self.__class__.__name__}: {gemm} allows fp8-model-params"
-                " dequantized-weight fallback.",
-                layer_name,
-                extra_cachable_args=(gemm, "fp8_model_params_dequantized_fallback"),
-            )
+            if self._logging_enabled(config):
+                debug_api.log_message(
+                    f"Feature={self.__class__.__name__}: {gemm} allows fp8-model-params"
+                    " dequantized-weight fallback.",
+                    layer_name,
+                    extra_cachable_args=(gemm, "fp8_model_params_dequantized_fallback"),
+                )
 
         self._consume_new_metric_and_maybe_arm_switch(layer_name, gemm, iteration, config, state)
 
@@ -673,12 +703,13 @@ class AutoswitchGemm(TEConfigAPIMapper):
                     iteration,
                     float(state.disable_until_iter),
                 )
-            debug_api.log_message(
-                f"Feature={self.__class__.__name__}: {gemm} forced high precision at"
-                f" iter={iteration} (disable_until={state.disable_until_iter}).",
-                layer_name,
-                extra_cachable_args=(gemm, "high_precision"),
-            )
+            if self._logging_enabled(config):
+                debug_api.log_message(
+                    f"Feature={self.__class__.__name__}: {gemm} forced high precision at"
+                    f" iter={iteration} (disable_until={state.disable_until_iter}).",
+                    layer_name,
+                    extra_cachable_args=(gemm, "high_precision"),
+                )
             return False, iteration + 1
 
         if final_decision and metric_logger is not None:
@@ -734,7 +765,6 @@ class AutoswitchGemm(TEConfigAPIMapper):
             # Weight tensor unavailable in high precision indicates fp8 model params.
             self._layer_has_fp8_model_params[layer_name] = True
 
-        _ = config
         gemms = self._TENSOR_TO_GEMMS.get(tensor_name, (None, None))
 
         rowwise_gemm, columnwise_gemm = gemms
@@ -742,12 +772,18 @@ class AutoswitchGemm(TEConfigAPIMapper):
             metrics = self._compute_metrics(tensor, rowwise_quantized_tensor)
             if metrics is not None:
                 self._update_metric(
-                    layer_name, rowwise_gemm, iteration, tensor_name, metrics[0], metrics[1]
+                    layer_name, rowwise_gemm, iteration, tensor_name, metrics[0], metrics[1], config
                 )
 
         if columnwise_gemm is not None:
             metrics = self._compute_metrics(tensor, columnwise_quantized_tensor)
             if metrics is not None:
                 self._update_metric(
-                    layer_name, columnwise_gemm, iteration, tensor_name, metrics[0], metrics[1]
+                    layer_name,
+                    columnwise_gemm,
+                    iteration,
+                    tensor_name,
+                    metrics[0],
+                    metrics[1],
+                    config,
                 )

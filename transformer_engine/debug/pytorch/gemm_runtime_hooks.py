@@ -13,6 +13,27 @@ from transformer_engine.debug.pytorch.debug_state import TEDebugState
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage, Quantizer
 from transformer_engine.pytorch.utils import cast_if_needed
 
+_AUTOSWITCH_LOGGING_ENV = "NVTE_AUTOSWITCH_GEMM_LOGGING"
+
+
+def _env_flag_enabled(name: str, default: bool = False) -> bool:
+    """Interpret common boolean environment flag values."""
+    default_value = "1" if default else "0"
+    return os.getenv(name, default_value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _autoswitch_logging_enabled() -> bool:
+    """Return True when verbose AutoswitchGemm runtime logging is enabled."""
+    try:
+        from transformer_engine.debug.features.autoswitch_gemm import (
+            autoswitch_gemm_logging_enabled,
+        )
+
+        return bool(autoswitch_gemm_logging_enabled())
+    except Exception:  # pylint: disable=broad-except
+        return _env_flag_enabled(_AUTOSWITCH_LOGGING_ENV, False)
+
+
 def _is_fp8_debug_quantizer(quantizer: Optional[Quantizer]) -> bool:
     """Return True for DebugQuantizer objects wrapping an FP8/NVFP4 quantizer."""
     return (
@@ -226,6 +247,8 @@ def _log_final_gemm_decision(
     actual_precision: str,
 ) -> None:
     """Write final AutoswitchGemm decision to the autoswitch rank-local log."""
+    if not _autoswitch_logging_enabled():
+        return
     rank = os.getenv("RANK", "0")
     if rank != "0":
         return
