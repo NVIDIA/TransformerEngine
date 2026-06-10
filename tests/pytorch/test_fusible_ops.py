@@ -75,6 +75,7 @@ if nvfp4_available:
     _quantization_list.append("nvfp4")
     _quantization_list.append("nvfp4_4over6")
 
+
 @pytest.fixture(autouse=True, scope="function")
 def _reset_rng_states_per_test():
     """Restore torch, CUDA, and Python ``random`` before each test in this module."""
@@ -3493,18 +3494,10 @@ class TestSequentialModules:
         assert_close_grads(probs_test, probs_ref, **tols)
         for group_idx in range(group_size):
             if bias:
-                assert_close_grads(
-                    getattr(fc2, f"bias{group_idx}"), fc2_bs_ref[group_idx], **tols
-                )
-                assert_close_grads(
-                    getattr(fc1, f"bias{group_idx}"), fc1_bs_ref[group_idx], **tols
-                )
-            assert_close_grads(
-                getattr(fc2, f"weight{group_idx}"), fc2_ws_ref[group_idx], **tols
-            )
-            assert_close_grads(
-                getattr(fc1, f"weight{group_idx}"), fc1_ws_ref[group_idx], **tols
-            )
+                assert_close_grads(getattr(fc2, f"bias{group_idx}"), fc2_bs_ref[group_idx], **tols)
+                assert_close_grads(getattr(fc1, f"bias{group_idx}"), fc1_bs_ref[group_idx], **tols)
+            assert_close_grads(getattr(fc2, f"weight{group_idx}"), fc2_ws_ref[group_idx], **tols)
+            assert_close_grads(getattr(fc1, f"weight{group_idx}"), fc1_ws_ref[group_idx], **tols)
 
 
 class TestCustomOps:

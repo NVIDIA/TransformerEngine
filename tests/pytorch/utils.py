@@ -42,8 +42,12 @@ from transformer_engine.pytorch.module.base import get_dummy_wgrad
 
 
 fp8_available, reason_for_no_fp8 = transformer_engine.pytorch.is_fp8_available(return_reason=True)
-mxfp8_available, reason_for_no_mxfp8 = transformer_engine.pytorch.is_mxfp8_available(return_reason=True)
-nvfp4_available, reason_for_no_nvfp4 = transformer_engine.pytorch.is_nvfp4_available(return_reason=True)
+mxfp8_available, reason_for_no_mxfp8 = transformer_engine.pytorch.is_mxfp8_available(
+    return_reason=True
+)
+nvfp4_available, reason_for_no_nvfp4 = transformer_engine.pytorch.is_nvfp4_available(
+    return_reason=True
+)
 
 
 def str_to_dtype(dtype: str | torch.dtype) -> torch.dtype:

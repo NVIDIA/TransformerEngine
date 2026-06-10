@@ -572,7 +572,6 @@ class TestGroupedLinearModule:
     def _use_single_grouped_param(self, monkeypatch):
         _enable_single_grouped_param(monkeypatch)
 
-
     @pytest.mark.parametrize("dtype", param_types, ids=str)
     @pytest.mark.parametrize("num_gemms", [1, 3, 6])
     @pytest.mark.parametrize("bs", batch_sizes)
@@ -612,7 +611,8 @@ class TestGroupedLinearModule:
         if recipe is not None and recipe.nvfp4():
             if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
                 pytest.skip(
-                    f"Input dtype {dtype} not supported for NVFP4 Recipe {recipe.__class__.__name__}"
+                    f"Input dtype {dtype} not supported for NVFP4 Recipe"
+                    f" {recipe.__class__.__name__}"
                 )
 
         with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
@@ -646,9 +646,13 @@ class TestGroupedLinearModule:
         # Share params
         with torch.no_grad():
             for i in range(num_gemms):
-                sequential_linear[i].weight = Parameter(getattr(grouped_linear, f"weight{i}").clone())
+                sequential_linear[i].weight = Parameter(
+                    getattr(grouped_linear, f"weight{i}").clone()
+                )
                 if bias:
-                    sequential_linear[i].bias = Parameter(getattr(grouped_linear, f"bias{i}").clone())
+                    sequential_linear[i].bias = Parameter(
+                        getattr(grouped_linear, f"bias{i}").clone()
+                    )
                 if fuse_wgrad_accumulation:
                     weight_i = getattr(grouped_linear, f"weight{i}")
                     weight_i.main_grad = torch.rand_like(weight_i, dtype=torch.float32)
@@ -684,7 +688,6 @@ class TestGroupedLinearModule:
                 # cuBLAS implementation should be bit-wise match
                 torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
-
     @pytest.mark.skipif(
         torch.cuda.get_device_capability() != (9, 0),
         reason="Only enable CUTLASS grouped gemm on Hopper",
@@ -719,7 +722,6 @@ class TestGroupedLinearModule:
             None,
             use_cutlass=True,
         )
-
 
     @pytest.mark.parametrize("dtype", param_types, ids=str)
     @pytest.mark.parametrize("num_gemms", [3])
@@ -761,7 +763,8 @@ class TestGroupedLinearModule:
         if recipe is not None and recipe.nvfp4():
             if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
                 pytest.skip(
-                    f"Input dtype {dtype} not supported for NVFP4 Recipe {recipe.__class__.__name__}"
+                    f"Input dtype {dtype} not supported for NVFP4 Recipe"
+                    f" {recipe.__class__.__name__}"
                 )
 
         with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
@@ -795,9 +798,13 @@ class TestGroupedLinearModule:
         # Share params
         with torch.no_grad():
             for i in range(num_gemms):
-                sequential_linear[i].weight = Parameter(getattr(grouped_linear, f"weight{i}").clone())
+                sequential_linear[i].weight = Parameter(
+                    getattr(grouped_linear, f"weight{i}").clone()
+                )
                 if bias:
-                    sequential_linear[i].bias = Parameter(getattr(grouped_linear, f"bias{i}").clone())
+                    sequential_linear[i].bias = Parameter(
+                        getattr(grouped_linear, f"bias{i}").clone()
+                    )
                 if fuse_wgrad_accumulation:
                     weight_i = getattr(grouped_linear, f"weight{i}")
                     weight_i.main_grad = torch.rand_like(weight_i, dtype=torch.float32)
@@ -829,7 +836,6 @@ class TestGroupedLinearModule:
         # Should be bit-wise match
         for i, (o, o_ref) in enumerate(zip(outputs, outputs_ref)):
             torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
-
 
     @pytest.mark.parametrize("save_original_input", [False, True])
     @pytest.mark.parametrize("dtype", param_types)
@@ -866,7 +872,8 @@ class TestGroupedLinearModule:
         if recipe is not None and recipe.nvfp4():
             if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
                 pytest.skip(
-                    f"Input dtype {dtype} not supported for NVFP4 Recipe {recipe.__class__.__name__}"
+                    f"Input dtype {dtype} not supported for NVFP4 Recipe"
+                    f" {recipe.__class__.__name__}"
                 )
 
         with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
@@ -912,7 +919,6 @@ class TestGroupedLinearModule:
         # Should be bit-wise match
         for i, (o, o_ref) in enumerate(zip(outputs, outputs_ref)):
             torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
-
 
     @staticmethod
     def _run_grouped_linear_path(
@@ -975,7 +981,6 @@ class TestGroupedLinearModule:
             outputs.extend(getattr(grouped_linear, f"bias{i}").grad for i in range(num_gemms))
         return _clone_outputs(outputs)
 
-
     @pytest.mark.parametrize(
         "fp8_recipe",
         [
@@ -991,8 +996,7 @@ class TestGroupedLinearModule:
     @pytest.mark.parametrize("fp8_model_params", all_boolean)
     @pytest.mark.parametrize("delay_wgrad_compute", all_boolean)
     def test_grouped_linear_grouped_tensor_path_matches_legacy(
-        self,
-        fp8_recipe, bias, fp8_model_params, delay_wgrad_compute, monkeypatch
+        self, fp8_recipe, bias, fp8_model_params, delay_wgrad_compute, monkeypatch
     ):
         if torch.cuda.get_device_capability() < (10, 0):
             pytest.skip("GroupedTensor grouped GEMM path requires SM100+")
@@ -1055,7 +1059,6 @@ class TestGroupedLinearModule:
             assert grouped_tensor_out is not None
             assert legacy_out is not None
             assert_close(grouped_tensor_out, legacy_out, **tols)
-
 
     @pytest.mark.parametrize(
         "fp8_recipe",
@@ -1267,7 +1270,6 @@ class TestGroupedGemm:
             else:
                 torch.testing.assert_close(o, o_ref, rtol=1.5e-2, atol=1.5e-2)
 
-
     @pytest.mark.skipif(
         torch.cuda.get_device_capability() != (9, 0),
         reason="Only enable CUTLASS grouped gemm on Hopper",
@@ -1314,7 +1316,6 @@ class TestGroupedGemm:
         for tensor in out:
             torch.testing.assert_close(tensor, torch.zeros_like(tensor), rtol=0, atol=0)
 
-
     @staticmethod
     def _pack_grouped_tensor(grouped_tensor: GroupedTensor, tensors: List[torch.Tensor]) -> None:
         data = grouped_tensor.rowwise_data
@@ -1327,7 +1328,6 @@ class TestGroupedGemm:
             numel = tensor.numel()
             data[offset : offset + numel].copy_(tensor.reshape(-1))
             offset += numel
-
 
     @staticmethod
     def _make_grouped_tensor_from_splits(
@@ -1348,7 +1348,6 @@ class TestGroupedGemm:
             dtype=dtype,
         )
 
-
     @staticmethod
     def _make_grouped_tensor_uniform(
         num_tensors: int,
@@ -1367,7 +1366,6 @@ class TestGroupedGemm:
             device=device,
             dtype=dtype,
         )
-
 
     @staticmethod
     def _apply_grouped_bias_ref(
@@ -1390,7 +1388,6 @@ class TestGroupedGemm:
             offset += ms
         return out
 
-
     @pytest.mark.parametrize(
         "z, m, n, k",
         [
@@ -1404,7 +1401,9 @@ class TestGroupedGemm:
     @pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
     @pytest.mark.parametrize("accumulate", [False, True])
     @pytest.mark.parametrize("use_bias_scale", [False, True])
-    def test_grouped_gemm_grouped_tensor(self, z, m, n, k, case, layout, accumulate, use_bias_scale) -> None:
+    def test_grouped_gemm_grouped_tensor(
+        self, z, m, n, k, case, layout, accumulate, use_bias_scale
+    ) -> None:
         if torch.cuda.get_device_capability() < (9, 0):
             pytest.skip("Grouped GEMM requires Hopper (SM90) or newer.")
         if torch.cuda.get_device_capability() < (10, 0):
@@ -1444,7 +1443,9 @@ class TestGroupedGemm:
             if layout == "NN":
                 out_ref = [torch.matmul(B[i].float(), A[i].float()) for i in range(z)]
             else:  # layout == "TN"
-                out_ref = [torch.matmul(B[i].float(), A[i].transpose(0, 1).float()) for i in range(z)]
+                out_ref = [
+                    torch.matmul(B[i].float(), A[i].transpose(0, 1).float()) for i in range(z)
+                ]
 
         if accumulate:
             out_ref = [out[i].float() + o for i, o in enumerate(out_ref)]
@@ -1475,29 +1476,43 @@ class TestGroupedGemm:
         grouped_bias = None
         if layout == "TN":
             grouped_A = (
-                self._make_grouped_tensor_uniform(z, n, k, device, dtype) if case != "discrete_in" else A
+                self._make_grouped_tensor_uniform(z, n, k, device, dtype)
+                if case != "discrete_in"
+                else A
             )  # weight
             grouped_B = self._make_grouped_tensor_from_splits(m_sizes, k, device, dtype)  # input
             if case != "discrete_out":
-                grouped_out = self._make_grouped_tensor_from_splits(m_sizes, n, device, dtype)  # output
+                grouped_out = self._make_grouped_tensor_from_splits(
+                    m_sizes, n, device, dtype
+                )  # output
                 grouped_out_bias = self._make_grouped_tensor_from_splits(m_sizes, n, device, dtype)
-                grouped_out_no_bias = self._make_grouped_tensor_from_splits(m_sizes, n, device, dtype)
+                grouped_out_no_bias = self._make_grouped_tensor_from_splits(
+                    m_sizes, n, device, dtype
+                )
         elif layout == "NN":
             grouped_A = (
-                self._make_grouped_tensor_uniform(z, n, k, device, dtype) if case != "discrete_in" else A
+                self._make_grouped_tensor_uniform(z, n, k, device, dtype)
+                if case != "discrete_in"
+                else A
             )  # weight
-            grouped_B = self._make_grouped_tensor_from_splits(m_sizes, n, device, dtype)  # grad_output
+            grouped_B = self._make_grouped_tensor_from_splits(
+                m_sizes, n, device, dtype
+            )  # grad_output
             if case != "discrete_out":
                 grouped_out = self._make_grouped_tensor_from_splits(m_sizes, k, device, dtype)
                 grouped_out_bias = self._make_grouped_tensor_from_splits(m_sizes, k, device, dtype)
-                grouped_out_no_bias = self._make_grouped_tensor_from_splits(m_sizes, k, device, dtype)
+                grouped_out_no_bias = self._make_grouped_tensor_from_splits(
+                    m_sizes, k, device, dtype
+                )
         else:  # layout == "NT"
             grouped_A = (
                 self._make_grouped_tensor_from_splits(m_sizes, k, device, dtype)
                 if case != "discrete_in"
                 else A
             )  # input
-            grouped_B = self._make_grouped_tensor_from_splits(m_sizes, n, device, dtype)  # grad_output
+            grouped_B = self._make_grouped_tensor_from_splits(
+                m_sizes, n, device, dtype
+            )  # grad_output
             if case != "discrete_out":
                 grouped_out = self._make_grouped_tensor_uniform(z, n, k, device, dtype)  # wgrad
                 grouped_out_bias = self._make_grouped_tensor_uniform(z, n, k, device, dtype)
@@ -1551,7 +1566,6 @@ class TestGroupedGemm:
         if bias is not None:
             for o, o_ref in zip(out_grouped_bias, out_grouped_manual_bias):
                 torch.testing.assert_close(o, o_ref, **tols)
-
 
     @pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
     @pytest.mark.parametrize("accumulate", [False, True])
@@ -1652,7 +1666,9 @@ class TestGroupedGemm:
         )
 
         out_result = (
-            grouped_out if isinstance(grouped_out, list) else grouped_out.split_into_quantized_tensors()
+            grouped_out
+            if isinstance(grouped_out, list)
+            else grouped_out.split_into_quantized_tensors()
         )
         for i in range(z):
             if out_result[i].numel() == 0:
@@ -1661,7 +1677,6 @@ class TestGroupedGemm:
                 torch.testing.assert_close(out_result[i], out_before[i])
             else:
                 torch.testing.assert_close(out_result[i], torch.zeros_like(out_result[i]))
-
 
     @staticmethod
     def _make_grouped_tensor_quantized_mxfp8(
@@ -1694,9 +1709,10 @@ class TestGroupedGemm:
         if is_weight:
             first_dims = None
         else:
-            first_dims = torch.tensor([t.shape[0] for t in tensors], dtype=torch.int64, device=device)
+            first_dims = torch.tensor(
+                [t.shape[0] for t in tensors], dtype=torch.int64, device=device
+            )
         return tex.group_quantize(grouped_input, quantizer, len(tensors), first_dims)
-
 
     @staticmethod
     def _per_tensor_quantize_mxfp8(
@@ -1715,7 +1731,6 @@ class TestGroupedGemm:
         )
         return [quantizer(t) for t in tensors]
 
-
     @pytest.mark.parametrize(
         "shape",
         [
@@ -1730,8 +1745,7 @@ class TestGroupedGemm:
     @pytest.mark.parametrize("case", ["no_discrete", "discrete_in", "discrete_out"])
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
     def test_grouped_gemm_grouped_tensor_mxfp8(
-        self,
-        shape, accumulate, layout: str, case: str, dtype: torch.dtype
+        self, shape, accumulate, layout: str, case: str, dtype: torch.dtype
     ) -> None:
         if tex.get_cublasLt_version() < 130300:
             pytest.skip("Grouped GEMM requires cuBLAS 13.3+.")
@@ -1820,7 +1834,6 @@ class TestGroupedGemm:
 
         for o, o_ref in zip(out_grouped, out_ref):
             torch.testing.assert_close(o, o_ref, **tols)
-
 
     @pytest.mark.parametrize(
         "shape",
@@ -2021,7 +2034,6 @@ class TestGroupedLinearOps:
             expected_swizzled_scales_buffer,
         )
 
-
     @pytest.mark.parametrize("dtype", (torch.bfloat16, torch.float16))
     @pytest.mark.parametrize(
         "quantization",
@@ -2192,7 +2204,6 @@ class TestGroupedLinearOps:
         else:
             for g, param in zip(graph_param_grads, op.parameters()):
                 assert_close(g, param.grad, **tols)
-
 
     @pytest.mark.parametrize("delay_wgrad_compute", (False, True))
     @pytest.mark.parametrize("single_grouped_weight", (False, True))
@@ -2407,7 +2418,9 @@ class TestGroupedMLP:
 
         # Grouped MLP fused op requires GLU interleaving
         activation_is_glu = activation in (
-            "scaled_swiglu", "scaled_clamped_qgeglu", "scaled_clamped_qgeglu_custom"
+            "scaled_swiglu",
+            "scaled_clamped_qgeglu",
+            "scaled_clamped_qgeglu_custom",
         )
         glu_interleave_size = 32 if activation_is_glu else None
 
@@ -2446,21 +2459,24 @@ class TestGroupedMLP:
         # Reference tensors: float64 CPU; test tensors: target dtype on CUDA
         x_ref, x_test = make_reference_and_test_tensors(
             in_shape,
-            min=-0.25, max=0.25,
+            min=-0.25,
+            max=0.25,
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
         )
         dy_ref, dy_test = make_reference_and_test_tensors(
             out_shape,
-            min=-0.25, max=0.25,
+            min=-0.25,
+            max=0.25,
             test_dtype=dtype,
             test_device=device,
             requires_grad=False,
         )
         probs_ref, probs_test = make_reference_and_test_tensors(
             (in_shape[0],),
-            min=0.1, max=1.0,
+            min=0.1,
+            max=1.0,
             test_dtype=dtype,
             test_device=device,
         )
@@ -2472,7 +2488,8 @@ class TestGroupedMLP:
         for _ in range(group_size):
             w1_ref, w1_test = make_reference_and_test_tensors(
                 (fc1_out_features, hidden_size),
-                min=-0.125, max=0.125,
+                min=-0.125,
+                max=0.125,
                 quantization=quantization,
                 test_dtype=dtype,
                 test_device=device,
@@ -2482,7 +2499,8 @@ class TestGroupedMLP:
             fc1_ws_test.append(w1_test)
             w2_ref, w2_test = make_reference_and_test_tensors(
                 (hidden_size, hidden_size),
-                min=-0.125, max=0.125,
+                min=-0.125,
+                max=0.125,
                 quantization=quantization,
                 test_dtype=dtype,
                 test_device=device,
@@ -2493,7 +2511,8 @@ class TestGroupedMLP:
             if bias:
                 b1_ref, b1_test = make_reference_and_test_tensors(
                     (fc1_out_features,),
-                    min=-0.5, max=0.5,
+                    min=-0.5,
+                    max=0.5,
                     test_dtype=dtype,
                     test_device=device,
                 )
@@ -2501,7 +2520,8 @@ class TestGroupedMLP:
                 fc1_bs_test.append(b1_test)
                 b2_ref, b2_test = make_reference_and_test_tensors(
                     (hidden_size,),
-                    min=-0.5, max=0.5,
+                    min=-0.5,
+                    max=0.5,
                     test_dtype=dtype,
                     test_device=device,
                 )
@@ -2515,7 +2535,9 @@ class TestGroupedMLP:
 
         def _apply_activation(x: torch.Tensor) -> torch.Tensor:
             if glu_interleave_size is not None:
-                x = x.reshape(-1, 2 * hidden_size // (2 * glu_interleave_size), 2, glu_interleave_size)
+                x = x.reshape(
+                    -1, 2 * hidden_size // (2 * glu_interleave_size), 2, glu_interleave_size
+                )
                 x = x.transpose(1, 2).reshape(-1, 2 * hidden_size)
             if activation == "scaled_swiglu":
                 x1, x2 = x.chunk(2, dim=-1)
@@ -2536,7 +2558,9 @@ class TestGroupedMLP:
         ys = []
         for group_idx in range(group_size):
             x = xs[group_idx]
-            fc1_out = torch.nn.functional.linear(x, fc1_ws_ref[group_idx], bias=fc1_bs_ref[group_idx])
+            fc1_out = torch.nn.functional.linear(
+                x, fc1_ws_ref[group_idx], bias=fc1_bs_ref[group_idx]
+            )
             fc2_in = _apply_activation(fc1_out) * probs[group_idx].unsqueeze(-1)
             y = torch.nn.functional.linear(fc2_in, fc2_ws_ref[group_idx])
             if bias:
@@ -2550,16 +2574,24 @@ class TestGroupedMLP:
 
         with te.quantized_model_init(enabled=with_quantization, recipe=recipe):
             fc1 = te.ops.GroupedLinear(
-                group_size, hidden_size, fc1_out_features,
-                bias=bias, device=device, dtype=dtype,
+                group_size,
+                hidden_size,
+                fc1_out_features,
+                bias=bias,
+                device=device,
+                dtype=dtype,
                 single_grouped_weight=single_grouped_weight,
                 single_grouped_bias=single_grouped_bias,
                 accumulate_into_main_grad=accumulate_into_main_grad,
                 delay_wgrad_compute=delay_wgrad_compute,
             )
             fc2 = te.ops.GroupedLinear(
-                group_size, hidden_size, hidden_size,
-                bias=bias, device=device, dtype=dtype,
+                group_size,
+                hidden_size,
+                hidden_size,
+                bias=bias,
+                device=device,
+                dtype=dtype,
                 single_grouped_weight=single_grouped_weight,
                 single_grouped_bias=single_grouped_bias,
                 accumulate_into_main_grad=accumulate_into_main_grad,
@@ -2596,17 +2628,14 @@ class TestGroupedMLP:
             )
             if accumulate_into_main_grad:
                 main_grad_sentinel = 0.5
-                weight_params_for_main_grad = (
-                    _grouped_weight_params(
-                        fc1,
-                        group_size,
-                        single_grouped_weight=single_grouped_weight,
-                    )
-                    + _grouped_weight_params(
-                        fc2,
-                        group_size,
-                        single_grouped_weight=single_grouped_weight,
-                    )
+                weight_params_for_main_grad = _grouped_weight_params(
+                    fc1,
+                    group_size,
+                    single_grouped_weight=single_grouped_weight,
+                ) + _grouped_weight_params(
+                    fc2,
+                    group_size,
+                    single_grouped_weight=single_grouped_weight,
                 )
                 MegatronTrainingHelper.init_main_grad_buffers(
                     weight_params_for_main_grad,
@@ -2627,12 +2656,9 @@ class TestGroupedMLP:
         # Determine whether op fusion is expected
         is_fusion_expected = False
         if quantization == "mxfp8":
-            is_fusion_expected = (
-                dtype in (torch.bfloat16, torch.float16)
-                and (
-                    (not activation_is_glu and glu_interleave_size is None)
-                    or (activation_is_glu and glu_interleave_size == 32)
-                )
+            is_fusion_expected = dtype in (torch.bfloat16, torch.float16) and (
+                (not activation_is_glu and glu_interleave_size is None)
+                or (activation_is_glu and glu_interleave_size == 32)
             )
         if quantization == "nvfp4_rht":
             is_fusion_expected = (
@@ -2679,11 +2705,19 @@ class TestGroupedMLP:
                     assert_close(fc2.bias.grad[group_idx], fc2_bs_ref[group_idx].grad, **tols)
                     assert_close(fc1.bias.grad[group_idx], fc1_bs_ref[group_idx].grad, **tols)
                 else:
-                    assert_close_grads(getattr(fc2, f"bias{group_idx}"), fc2_bs_ref[group_idx], **tols)
-                    assert_close_grads(getattr(fc1, f"bias{group_idx}"), fc1_bs_ref[group_idx], **tols)
+                    assert_close_grads(
+                        getattr(fc2, f"bias{group_idx}"), fc2_bs_ref[group_idx], **tols
+                    )
+                    assert_close_grads(
+                        getattr(fc1, f"bias{group_idx}"), fc1_bs_ref[group_idx], **tols
+                    )
             if not single_grouped_weight and not accumulate_into_main_grad:
-                assert_close_grads(getattr(fc2, f"weight{group_idx}"), fc2_ws_ref[group_idx], **tols)
-                assert_close_grads(getattr(fc1, f"weight{group_idx}"), fc1_ws_ref[group_idx], **tols)
+                assert_close_grads(
+                    getattr(fc2, f"weight{group_idx}"), fc2_ws_ref[group_idx], **tols
+                )
+                assert_close_grads(
+                    getattr(fc1, f"weight{group_idx}"), fc1_ws_ref[group_idx], **tols
+                )
         fc1_w_ref_grad = torch.stack([w.grad for w in fc1_ws_ref], dim=0)
         fc2_w_ref_grad = torch.stack([w.grad for w in fc2_ws_ref], dim=0)
         if accumulate_into_main_grad:
@@ -2938,7 +2972,6 @@ class TestGroupedMLP:
             torch.testing.assert_close(fc1_db_false, fc1_db_true, **bias_tols)
             torch.testing.assert_close(fc2_db_false, fc2_db_true, **bias_tols)
 
-
     @pytest.mark.parametrize("single_grouped_weight", (False, True))
     @pytest.mark.parametrize("delay_wgrad_compute", (False, True))
     @pytest.mark.parametrize("zero_out_wgrad", (False, True))
@@ -3087,7 +3120,6 @@ class TestGroupedMLP:
         MegatronTrainingHelper.verify_main_grad_accumulation(
             _weight_params(test_fc2), expected_main_grads=ref_fc2_grads
         )
-
 
     @pytest.mark.parametrize("dtype", (torch.float32, torch.float16, torch.bfloat16))
     @pytest.mark.parametrize("single_grouped_weight", (False, True))
@@ -3284,7 +3316,6 @@ class TestGroupedMLP:
             for graph_grad, param in zip(graph_param_grads, module.parameters()):
                 assert_close(graph_grad, param.grad, **tols)
 
-
     def test_grouped_gemm_quant_cute_matches_mxfp8_quantized(self) -> None:
         if not mxfp8_available:
             pytest.skip(reason_for_no_mxfp8)
@@ -3334,12 +3365,12 @@ class TestGroupedMLP:
             device=device,
         )
         inputs = {
-            "a_tensor": torch.empty(1, total_m, k, dtype=torch.float8_e4m3fn, device=device).permute(
-                1, 2, 0
-            ),
-            "b_tensor": torch.empty(num_groups, n, k, dtype=torch.float8_e4m3fn, device=device).permute(
-                1, 2, 0
-            ),
+            "a_tensor": torch.empty(
+                1, total_m, k, dtype=torch.float8_e4m3fn, device=device
+            ).permute(1, 2, 0),
+            "b_tensor": torch.empty(
+                num_groups, n, k, dtype=torch.float8_e4m3fn, device=device
+            ).permute(1, 2, 0),
             "sfa_tensor": torch.empty(
                 1,
                 total_m // 128,
