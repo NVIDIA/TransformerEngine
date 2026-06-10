@@ -381,6 +381,189 @@ def _test_padding_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, r
 _FUSED_GROUPED_GEMM_ENV = "NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM"
 
 
+def _force_legacy_grouped_linear_path(monkeypatch) -> None:
+    monkeypatch.setenv(_FUSED_GROUPED_GEMM_ENV, "0")
+
+
+def _enable_fused_grouped_linear_path(monkeypatch) -> None:
+    monkeypatch.setenv(_FUSED_GROUPED_GEMM_ENV, "1")
+
+
+def _enable_single_grouped_param(monkeypatch) -> None:
+    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+
+
+def _enable_fused_grouped_mlp(monkeypatch) -> None:
+    monkeypatch.setenv("NVTE_CUTEDSL_FUSED_GROUPED_MLP", "1")
+
+
+def _make_grouped_split_sizes(
+    group_size: int,
+    split_alignment: int,
+    *,
+    start: int = 0,
+    dtype: torch.dtype = torch.int,
+    device: torch.device | str = "cuda",
+) -> torch.Tensor:
+    """Construct shuffled per-group token counts."""
+    split_sizes = [split_alignment * (i + start) for i in range(group_size)]
+    random.shuffle(split_sizes)
+    return torch.tensor(split_sizes, dtype=dtype, device=device)
+
+
+def _grouped_weight_params(
+    op: torch.nn.Module,
+    group_size: int,
+    *,
+    single_grouped_weight: bool,
+) -> list[torch.nn.Parameter]:
+    """Extract weight parameters from grouped linear module or op."""
+    if single_grouped_weight:
+        return [op.weight]
+    return [getattr(op, f"weight{i}") for i in range(group_size)]
+
+
+def _grouped_bias_params(
+    op: torch.nn.Module,
+    group_size: int,
+    *,
+    single_grouped_bias: bool,
+) -> list[torch.nn.Parameter]:
+    """Extract bias parameters from grouped linear module or op."""
+    if single_grouped_bias:
+        return [op.bias]
+    return [getattr(op, f"bias{i}") for i in range(group_size)]
+
+
+def _copy_grouped_linear_params(
+    op: torch.nn.Module,
+    weights: Sequence[torch.Tensor],
+    biases: Optional[Sequence[Optional[torch.Tensor]]] = None,
+    *,
+    single_grouped_weight: bool = False,
+    single_grouped_bias: bool = False,
+) -> None:
+    """Copy values into grouped linear params"""
+
+    # Copy into weights
+    if single_grouped_weight:
+        weight_parts = op.weight.quantized_tensors
+        if weight_parts is None:
+            weight_parts = op.weight.split_into_quantized_tensors()
+        for dst, src in zip(weight_parts, weights):
+            dst.copy_(src)
+    else:
+        for group_idx, weight in enumerate(weights):
+            getattr(op, f"weight{group_idx}").copy_(weight)
+
+    # Copy into biases
+    if biases is None:
+        pass
+    elif single_grouped_bias:
+        bias_parts = op.bias.split_into_quantized_tensors()
+        for dst, src in zip(bias_parts, biases):
+            dst.reshape(-1).copy_(src)
+    else:
+        for group_idx, bias in enumerate(biases):
+            getattr(op, f"bias{group_idx}").copy_(bias)
+
+
+def _fill_main_grads(
+    params: Sequence[torch.nn.Parameter],
+    value: float,
+    *,
+    device: torch.device | str,
+) -> None:
+    """Construct param main_grad if needed and fill with value"""
+    with torch.no_grad():
+        for param in params:
+            if getattr(param, "main_grad", None) is None:
+                param.main_grad = torch.empty(param.size(), device=device, dtype=torch.float32)
+            param.main_grad.fill_(value)
+
+
+def _clone_grads(params: Sequence[torch.nn.Parameter]) -> list[torch.Tensor]:
+    return [param.grad.detach().clone() for param in params]
+
+
+def _clone_main_grads(params: Sequence[torch.nn.Parameter]) -> list[torch.Tensor]:
+    return [param.main_grad.detach().clone() for param in params]
+
+
+def _stack_cloned_attr(params: Sequence[torch.nn.Parameter], attr: str) -> torch.Tensor:
+    values = [getattr(param, attr).detach().clone() for param in params]
+    if len(values) == 1:
+        return values[0]
+    return torch.stack(values, dim=0)
+
+
+def _make_scaled_grouped_mlp_activation(
+    activation: str,
+    *,
+    glu_interleave_size: Optional[int],
+    geglu_limit: float = 7.0,
+    geglu_alpha: float = 1.702,
+    geglu_offset: float = 1.0,
+) -> torch.nn.Module:
+    if activation == "scaled_swiglu":
+        return te.ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
+    if activation == "scaled_clamped_qgeglu_custom":
+        return te.ops.ScaledClampedQGeGLU(
+            glu_interleave_size=glu_interleave_size,
+            limit=geglu_limit,
+            alpha=geglu_alpha,
+            glu_linear_offset=geglu_offset,
+        )
+    if activation.startswith("scaled_clamped_qgeglu"):
+        return te.ops.ScaledClampedQGeGLU(glu_interleave_size=glu_interleave_size)
+    if activation == "scaled_srelu":
+        return te.ops.ScaledSReLU()
+    raise ValueError(f"Unexpected activation ({activation})")
+
+
+def _skip_invalid_grouped_mlp_case(
+    *,
+    activation: str,
+    activation_is_glu: bool,
+    bias: bool,
+    dtype: torch.dtype,
+    quantization: Optional[str],
+    single_grouped_weight: bool,
+    single_grouped_bias: bool,
+    glu_interleave_size: Optional[int],
+    device: torch.device | str,
+) -> None:
+    with_quantization = quantization is not None
+    maybe_skip_quantization(quantization, device=device, dtype=dtype)
+    if single_grouped_weight and quantization != "mxfp8":
+        pytest.skip("single_grouped_weight is only supported for MXFP8 quantization")
+    if single_grouped_bias and not bias:
+        pytest.skip("single_grouped_bias requires bias=True")
+    if with_quantization and dtype not in (torch.bfloat16, torch.float16):
+        pytest.skip("Quantized group GEMM is only supported with BF16/FP16")
+    if not activation_is_glu and quantization not in ("mxfp8", "nvfp4", "nvfp4_rht"):
+        pytest.skip("Scaled unary grouped MLP is only supported with MXFP8 or NVFP4")
+    if not activation_is_glu and glu_interleave_size is not None:
+        pytest.skip("Unary activations do not use GLU interleaving")
+    if quantization == "nvfp4_4over6":
+        pytest.skip("NVFP4 4over6 grouped quantization is not supported")
+    if activation == "scaled_srelu" and quantization in ("nvfp4", "nvfp4_rht") and bias:
+        pytest.skip("NVFP4 SReLU grouped MLP coverage is limited to no-bias")
+    if quantization == "nvfp4_rht":
+        if activation == "scaled_swiglu" and (bias or glu_interleave_size != 32):
+            pytest.skip("NVFP4 RHT SwiGLU grouped MLP coverage is limited to no-bias")
+        if activation not in ("scaled_swiglu", "scaled_srelu"):
+            pytest.skip("NVFP4 RHT grouped MLP coverage is limited to SwiGLU and SReLU")
+    if (
+        with_quantization
+        and quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht")
+        and activation.startswith("scaled_clamped_qgeglu")
+        and bias
+    ):
+        # TODO: ksivaman: Need to debug numerics for this case.
+        pytest.skip("Bias/dbias not yet supported in NVFP4 fused grouped MLP with GeGLU")
+
+
 class TestGroupedLinearModule:
     """Tests for te.GroupedLinear module API.
 
@@ -388,10 +571,14 @@ class TestGroupedLinearModule:
     """
 
     @pytest.fixture(autouse=True)
-    def _set_fused_grouped_gemm_env(self, monkeypatch):
-        monkeypatch.setenv(_FUSED_GROUPED_GEMM_ENV, "0")
+    def _use_legacy_grouped_linear_path(self, monkeypatch):
+        _force_legacy_grouped_linear_path(monkeypatch)
         yield
         monkeypatch.delenv(_FUSED_GROUPED_GEMM_ENV, raising=False)
+
+    @pytest.fixture(autouse=True)
+    def _use_single_grouped_param(self, monkeypatch):
+        _enable_single_grouped_param(monkeypatch)
 
 
     @pytest.mark.parametrize("dtype", param_types, ids=str)
@@ -773,10 +960,12 @@ class TestGroupedLinearModule:
                 single_grouped_bias=single_grouped_bias,
             )
         with torch.no_grad():
-            for i in range(num_gemms):
-                getattr(grouped_linear, f"weight{i}").copy_(weights[i])
-                if bias:
-                    getattr(grouped_linear, f"bias{i}").copy_(biases[i])
+            _copy_grouped_linear_params(
+                grouped_linear,
+                weights,
+                biases if bias else None,
+                single_grouped_bias=single_grouped_bias,
+            )
 
         # The fused path is the graph-safe path and accepts a CUDA tensor for split metadata.
         # The legacy path still expects Python split sections in several places.
@@ -792,10 +981,12 @@ class TestGroupedLinearModule:
             grouped_linear.backward_dw()
 
         outputs = [y, x.grad]
-        for i in range(num_gemms):
-            outputs.append(getattr(grouped_linear, f"weight{i}").grad)
-            if bias:
-                outputs.append(getattr(grouped_linear, f"bias{i}").grad)
+        outputs.extend(getattr(grouped_linear, f"weight{i}").grad for i in range(num_gemms))
+        if bias:
+            if single_grouped_bias:
+                outputs.append(grouped_linear.bias.grad)
+            else:
+                outputs.extend(getattr(grouped_linear, f"bias{i}").grad for i in range(num_gemms))
         return _clone_outputs(outputs)
 
 
@@ -882,7 +1073,7 @@ class TestGroupedLinearModule:
         for grouped_tensor_out, legacy_out in zip(outputs_grouped_tensor, outputs_legacy):
             assert grouped_tensor_out is not None
             assert legacy_out is not None
-            torch.testing.assert_close(grouped_tensor_out.float(), legacy_out.float(), **tols)
+            assert_close(grouped_tensor_out, legacy_out, **tols)
 
 
     @pytest.mark.parametrize(
@@ -902,7 +1093,7 @@ class TestGroupedLinearModule:
         if torch.cuda.get_device_capability() < (10, 0):
             pytest.skip("GroupedTensor grouped GEMM path requires SM100+")
 
-        monkeypatch.setenv(_FUSED_GROUPED_GEMM_ENV, "1")
+        _enable_fused_grouped_linear_path(monkeypatch)
         FP8GlobalStateManager.reset()
 
         use_fp8 = fp8_recipe is not None
@@ -991,11 +1182,11 @@ class TestGroupedLinearModule:
         tols = dict(rtol=1e-2, atol=5e-3)
         if use_fp8:
             tols = dict(rtol=0.05, atol=0.05)
-        torch.testing.assert_close(graph_out.float(), expected_out.float(), **tols)
-        torch.testing.assert_close(graph_dx.float(), expected_x.grad.float(), **tols)
+        assert_close(graph_out, expected_out, **tols)
+        assert_close(graph_dx, expected_x.grad, **tols)
         for graph_grad, param in zip(graph_param_grads, grouped_linear.parameters()):
             assert param.grad is not None
-            torch.testing.assert_close(graph_grad.float(), param.grad.float(), **tols)
+            assert_close(graph_grad, param.grad, **tols)
 
 
 def _clone_outputs(outputs):
@@ -1728,8 +1919,8 @@ class TestGroupedLinearOps:
     """Tests for te.ops.GroupedLinear (ops/fuser API)."""
 
     @pytest.fixture(autouse=True)
-    def _set_single_param_env(self, monkeypatch):
-        monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+    def _use_single_grouped_param(self, monkeypatch):
+        _enable_single_grouped_param(monkeypatch)
 
     @pytest.mark.parametrize("swizzle_type", ["mxfp8_rowwise", "mxfp8_columnwise", "nvfp4"])
     def test_swizzle_scales_and_pack_ptrs_for_discrete_weights(
@@ -1891,9 +2082,13 @@ class TestGroupedLinearOps:
             pytest.skip("single_grouped_bias requires bias=True")
 
         # Split sizes (statically pinned for graph capture)
-        split_sizes = [split_alignment * (i + 1) for i in range(group_size)]
-        random.shuffle(split_sizes)
-        split_sizes = torch.tensor(split_sizes, dtype=torch.int, device=device)
+        split_sizes = _make_grouped_split_sizes(
+            group_size,
+            split_alignment,
+            start=1,
+            dtype=torch.int,
+            device=device,
+        )
         # Pad input tokens to validate the sync-free flow
         in_shape = (split_sizes.sum().item() + token_padding, in_features)
         out_shape = (in_shape[0], out_features)
@@ -1911,30 +2106,19 @@ class TestGroupedLinearOps:
                 single_grouped_weight=single_grouped_weight,
                 single_grouped_bias=single_grouped_bias,
             )
-
-        def _weight_params() -> list[torch.nn.Parameter]:
-            if single_grouped_weight:
-                return [op.weight]
-            return [getattr(op, f"weight{i}") for i in range(group_size)]
-
-        def _bias_params() -> list[torch.nn.Parameter]:
-            if not bias:
-                return []
-            if single_grouped_bias:
-                return [op.bias]
-            return [getattr(op, f"bias{i}") for i in range(group_size)]
+        weight_params = _grouped_weight_params(
+            op,
+            group_size,
+            single_grouped_weight=single_grouped_weight,
+        )
 
         def _init_main_grads(value: float = 0.0) -> None:
             if not accumulate_into_main_grad:
                 return
-            with torch.no_grad():
-                for w in _weight_params():
-                    if getattr(w, "main_grad", None) is None:
-                        w.main_grad = torch.empty(w.size(), device=device, dtype=torch.float32)
-                    w.main_grad.fill_(value)
+            _fill_main_grads(weight_params, value, device=device)
 
         def _collect_main_grads() -> list[torch.Tensor]:
-            return [w.main_grad.detach().clone() for w in _weight_params()]
+            return _clone_main_grads(weight_params)
 
         def _zero_param_grads() -> None:
             for param in op.parameters():
@@ -2022,7 +2206,7 @@ class TestGroupedLinearOps:
         assert_close(graph_out, expected_out, **tols)
         assert_close(graph_dx, expected_x.grad, **tols)
         if accumulate_into_main_grad:
-            for g, w in zip(graph_main_grads, _weight_params()):
+            for g, w in zip(graph_main_grads, weight_params):
                 assert_close(g, w.main_grad, **tols)
         else:
             for g, param in zip(graph_param_grads, op.parameters()):
@@ -2039,7 +2223,7 @@ class TestGroupedLinearOps:
     @pytest.mark.parametrize("quantized_weight", (False, True))
     @pytest.mark.parametrize("input_requires_grad", (False, True))
     @pytest.mark.parametrize("weight_requires_grad", (False, True))
-    def test_ops_grouped_linear(
+    def test_grouped_linear(
         self,
         *,
         group_size: int = 4,
@@ -2060,9 +2244,12 @@ class TestGroupedLinearOps:
         """te.ops.GroupedLinear forward+backward accuracy"""
 
         # Split sizes
-        split_sizes = [split_alignment * i for i in range(group_size)]
-        random.shuffle(split_sizes)
-        split_sizes = torch.tensor(split_sizes, dtype=torch.int, device=device)
+        split_sizes = _make_grouped_split_sizes(
+            group_size,
+            split_alignment,
+            dtype=torch.int,
+            device=device,
+        )
 
         # Make input and weight shapes consistent
         out_features, in_features = weight_shape
@@ -2153,22 +2340,13 @@ class TestGroupedLinearOps:
                 single_grouped_bias=single_grouped_bias,
             )
         with torch.no_grad():
-            if single_grouped_weight:
-                op_weights = op.weight.quantized_tensors
-                if op_weights is None:
-                    op_weights = op.weight.split_into_quantized_tensors()
-            if single_grouped_bias:
-                op_bias_parts = op.bias.split_into_quantized_tensors()
-            for group_idx in range(group_size):
-                if single_grouped_weight:
-                    op_weights[group_idx].copy_(ws_test[group_idx])
-                else:
-                    getattr(op, f"weight{group_idx}").copy_(ws_test[group_idx])
-                if bias:
-                    if single_grouped_bias:
-                        op_bias_parts[group_idx].reshape(-1).copy_(bs_test[group_idx])
-                    else:
-                        getattr(op, f"bias{group_idx}").copy_(bs_test[group_idx])
+            _copy_grouped_linear_params(
+                op,
+                ws_test,
+                bs_test if bias else None,
+                single_grouped_weight=single_grouped_weight,
+                single_grouped_bias=single_grouped_bias,
+            )
             del ws_test, bs_test
             for param in op.parameters():
                 param.requires_grad_(requires_grad=weight_requires_grad)
@@ -2218,9 +2396,9 @@ class TestGroupedMLP:
     """Tests for grouped MLP patterns (te.ops.GroupedLinear + activation)."""
 
     @pytest.fixture(autouse=True)
-    def _set_envvars(self, monkeypatch):
-        monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
-        monkeypatch.setenv("NVTE_CUTEDSL_FUSED_GROUPED_MLP", "1")
+    def _enable_grouped_mlp_envvars(self, monkeypatch):
+        _enable_single_grouped_param(monkeypatch)
+        _enable_fused_grouped_mlp(monkeypatch)
 
     @pytest.mark.parametrize("bias", (False, True))
     @pytest.mark.parametrize("dtype", (torch.float32, torch.float16, torch.bfloat16))
@@ -2253,50 +2431,24 @@ class TestGroupedMLP:
         activation: str,
     ) -> None:
         """GroupedLinear + scaled activation + GroupedLinear"""
-        if dtype == torch.bfloat16 and not is_bf16_available():
-            pytest.skip("BF16 not available")
-
-        # Build activation op to determine GLU vs unary
-        if activation == "scaled_swiglu":
-            scaled_act_ref = te.ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
-        elif activation.startswith("scaled_clamped_qgeglu"):
-            scaled_act_ref = te.ops.ScaledClampedQGeGLU(glu_interleave_size=glu_interleave_size)
-        elif activation == "scaled_srelu":
-            scaled_act_ref = te.ops.ScaledSReLU()
-        else:
-            raise ValueError(f"Unexpected activation ({activation})")
+        scaled_act_ref = _make_scaled_grouped_mlp_activation(
+            activation,
+            glu_interleave_size=glu_interleave_size,
+        )
         activation_is_glu = is_glu_activation(scaled_act_ref)
 
-        # Skip invalid configurations
+        _skip_invalid_grouped_mlp_case(
+            activation=activation,
+            activation_is_glu=activation_is_glu,
+            bias=bias,
+            dtype=dtype,
+            quantization=quantization,
+            single_grouped_weight=single_grouped_weight,
+            single_grouped_bias=single_grouped_bias,
+            glu_interleave_size=glu_interleave_size,
+            device=device,
+        )
         with_quantization = quantization is not None
-        maybe_skip_quantization(quantization, device=device, dtype=dtype)
-        if single_grouped_weight and quantization != "mxfp8":
-            pytest.skip("single_grouped_weight is only supported for MXFP8 quantization")
-        if single_grouped_bias and not bias:
-            pytest.skip("single_grouped_bias requires bias=True")
-        if with_quantization and dtype not in (torch.bfloat16, torch.float16):
-            pytest.skip("Quantized group GEMM is only supported with BF16/FP16")
-        if not activation_is_glu and quantization not in ("mxfp8", "nvfp4", "nvfp4_rht"):
-            pytest.skip("Scaled unary grouped MLP is only supported with MXFP8 or NVFP4")
-        if not activation_is_glu and glu_interleave_size is not None:
-            pytest.skip("Unary activations do not use GLU interleaving")
-        if quantization == "nvfp4_4over6":
-            pytest.skip("NVFP4 4over6 grouped quantization is not supported")
-        if activation == "scaled_srelu" and quantization in ("nvfp4", "nvfp4_rht") and bias:
-            pytest.skip("NVFP4 SReLU grouped MLP coverage is limited to no-bias")
-        if quantization == "nvfp4_rht":
-            if activation == "scaled_swiglu" and (bias or glu_interleave_size != 32):
-                pytest.skip("NVFP4 RHT SwiGLU grouped MLP coverage is limited to no-bias")
-            if activation not in ("scaled_swiglu", "scaled_srelu"):
-                pytest.skip("NVFP4 RHT grouped MLP coverage is limited to SwiGLU and SReLU")
-        if (
-            with_quantization
-            and quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht")
-            and activation.startswith("scaled_clamped_qgeglu")
-            and bias
-        ):
-            # TODO: ksivaman: Need to debug numerics for this case.
-            pytest.skip("Bias/dbias not yet supported in NVFP4 fused grouped MLP with GeGLU")
 
         fc1_out_features = 2 * hidden_size if activation_is_glu else hidden_size
         if activation == "scaled_clamped_qgeglu_custom":
@@ -2305,9 +2457,12 @@ class TestGroupedMLP:
             geglu_limit, geglu_alpha, geglu_offset = 7.0, 1.702, 1.0
 
         # Split sizes (one group intentionally empty to test the zero-token case)
-        split_sizes = [split_alignment * i for i in range(group_size)]
-        random.shuffle(split_sizes)
-        split_sizes = torch.tensor(split_sizes, dtype=torch.int, device=device)
+        split_sizes = _make_grouped_split_sizes(
+            group_size,
+            split_alignment,
+            dtype=torch.int,
+            device=device,
+        )
         in_shape = (split_sizes.sum().item(), hidden_size)
         out_shape = in_shape
 
@@ -2416,22 +2571,6 @@ class TestGroupedMLP:
         # Construct TE module
         recipe = make_recipe(quantization)
 
-        def _make_scaled_act():
-            if activation == "scaled_swiglu":
-                return te.ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
-            if activation == "scaled_clamped_qgeglu_custom":
-                return te.ops.ScaledClampedQGeGLU(
-                    glu_interleave_size=glu_interleave_size,
-                    limit=geglu_limit,
-                    alpha=geglu_alpha,
-                    glu_linear_offset=geglu_offset,
-                )
-            if activation.startswith("scaled_clamped_qgeglu"):
-                return te.ops.ScaledClampedQGeGLU(glu_interleave_size=glu_interleave_size)
-            if activation == "scaled_srelu":
-                return te.ops.ScaledSReLU()
-            raise ValueError(f"Unexpected activation ({activation})")
-
         with te.quantized_model_init(enabled=with_quantization, recipe=recipe):
             fc1 = te.ops.GroupedLinear(
                 group_size, hidden_size, fc1_out_features,
@@ -2450,41 +2589,48 @@ class TestGroupedMLP:
                 delay_wgrad_compute=delay_wgrad_compute,
                 scale_bias=bias,
             )
-        module = te.ops.Sequential(fc1, _make_scaled_act(), fc2)
+        module = te.ops.Sequential(
+            fc1,
+            _make_scaled_grouped_mlp_activation(
+                activation,
+                glu_interleave_size=glu_interleave_size,
+                geglu_limit=geglu_limit,
+                geglu_alpha=geglu_alpha,
+                geglu_offset=geglu_offset,
+            ),
+            fc2,
+        )
 
         # Copy weights
         with torch.no_grad():
-            if single_grouped_weight:
-                fc1_weights = fc1.weight.quantized_tensors
-                if fc1_weights is None:
-                    fc1_weights = fc1.weight.split_into_quantized_tensors()
-                fc2_weights = fc2.weight.quantized_tensors
-                if fc2_weights is None:
-                    fc2_weights = fc2.weight.split_into_quantized_tensors()
-            for group_idx in range(group_size):
-                if single_grouped_weight:
-                    fc1_weights[group_idx].copy_(fc1_ws_test[group_idx])
-                    fc2_weights[group_idx].copy_(fc2_ws_test[group_idx])
-                else:
-                    getattr(fc1, f"weight{group_idx}").copy_(fc1_ws_test[group_idx])
-                    getattr(fc2, f"weight{group_idx}").copy_(fc2_ws_test[group_idx])
-                if bias:
-                    if single_grouped_bias:
-                        fc1_bparts = fc1.bias.split_into_quantized_tensors()
-                        fc2_bparts = fc2.bias.split_into_quantized_tensors()
-                        fc1_bparts[group_idx].reshape(-1).copy_(fc1_bs_test[group_idx])
-                        fc2_bparts[group_idx].reshape(-1).copy_(fc2_bs_test[group_idx])
-                    else:
-                        getattr(fc1, f"bias{group_idx}").copy_(fc1_bs_test[group_idx])
-                        getattr(fc2, f"bias{group_idx}").copy_(fc2_bs_test[group_idx])
+            _copy_grouped_linear_params(
+                fc1,
+                fc1_ws_test,
+                fc1_bs_test if bias else None,
+                single_grouped_weight=single_grouped_weight,
+                single_grouped_bias=single_grouped_bias,
+            )
+            _copy_grouped_linear_params(
+                fc2,
+                fc2_ws_test,
+                fc2_bs_test if bias else None,
+                single_grouped_weight=single_grouped_weight,
+                single_grouped_bias=single_grouped_bias,
+            )
             if accumulate_into_main_grad:
                 main_grad_sentinel = 0.5
-                if single_grouped_weight:
-                    weight_params_for_main_grad = [fc1.weight, fc2.weight]
-                else:
-                    weight_params_for_main_grad = [
-                        getattr(fc, f"weight{i}") for fc in (fc1, fc2) for i in range(group_size)
-                    ]
+                weight_params_for_main_grad = (
+                    _grouped_weight_params(
+                        fc1,
+                        group_size,
+                        single_grouped_weight=single_grouped_weight,
+                    )
+                    + _grouped_weight_params(
+                        fc2,
+                        group_size,
+                        single_grouped_weight=single_grouped_weight,
+                    )
+                )
                 MegatronTrainingHelper.init_main_grad_buffers(
                     weight_params_for_main_grad,
                     fill_value=main_grad_sentinel,
@@ -2605,9 +2751,13 @@ class TestGroupedMLP:
         if not te.ops.fused.BackwardGroupedMLP_CuTeGEMMDGLU.is_supported():
             pytest.skip("MXFP8 fused grouped MLP backward is not supported on this system")
 
-        split_sizes = [split_alignment * (i + 1) for i in range(group_size)]
-        random.shuffle(split_sizes)
-        split_sizes = torch.tensor(split_sizes, dtype=torch.int64, device=device)
+        split_sizes = _make_grouped_split_sizes(
+            group_size,
+            split_alignment,
+            start=1,
+            dtype=torch.int64,
+            device=device,
+        )
         in_shape = (split_sizes.sum().item(), hidden_size)
         recipe = make_recipe("mxfp8")
 
@@ -2645,10 +2795,9 @@ class TestGroupedMLP:
 
         def _run_case(single_grouped_weight: bool) -> tuple[torch.Tensor, ...]:
             with te.quantized_model_init(enabled=True, recipe=recipe):
-                scaled_act = (
-                    te.ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
-                    if activation == "scaled_swiglu"
-                    else te.ops.ScaledClampedQGeGLU(glu_interleave_size=glu_interleave_size)
+                scaled_act = _make_scaled_grouped_mlp_activation(
+                    activation,
+                    glu_interleave_size=glu_interleave_size,
                 )
                 fc1 = te.ops.GroupedLinear(
                     group_size,
@@ -2672,23 +2821,18 @@ class TestGroupedMLP:
                 module = te.ops.Sequential(fc1, scaled_act, fc2)
 
             with torch.no_grad():
-                if single_grouped_weight:
-                    fc1_weights = fc1.weight.quantized_tensors
-                    if fc1_weights is None:
-                        fc1_weights = fc1.weight.split_into_quantized_tensors()
-                    fc2_weights = fc2.weight.quantized_tensors
-                    if fc2_weights is None:
-                        fc2_weights = fc2.weight.split_into_quantized_tensors()
-                for group_idx in range(group_size):
-                    if single_grouped_weight:
-                        fc1_weights[group_idx].copy_(fc1_ws_base[group_idx])
-                        fc2_weights[group_idx].copy_(fc2_ws_base[group_idx])
-                    else:
-                        getattr(fc1, f"weight{group_idx}").copy_(fc1_ws_base[group_idx])
-                        getattr(fc2, f"weight{group_idx}").copy_(fc2_ws_base[group_idx])
-                    if bias:
-                        getattr(fc1, f"bias{group_idx}").copy_(fc1_bs_base[group_idx])
-                        getattr(fc2, f"bias{group_idx}").copy_(fc2_bs_base[group_idx])
+                _copy_grouped_linear_params(
+                    fc1,
+                    fc1_ws_base,
+                    fc1_bs_base if bias else None,
+                    single_grouped_weight=single_grouped_weight,
+                )
+                _copy_grouped_linear_params(
+                    fc2,
+                    fc2_ws_base,
+                    fc2_bs_base if bias else None,
+                    single_grouped_weight=single_grouped_weight,
+                )
 
             x = x_base.detach().clone().requires_grad_(True)
             probs = probs_base.detach().clone().requires_grad_(True)
@@ -2712,41 +2856,41 @@ class TestGroupedMLP:
                 te.ops.fused.BackwardGroupedMLP_CuTeGEMMDGLU,
             )
 
-            if single_grouped_weight:
-                fc1_dw = fc1.weight.grad.detach().clone()
-                fc2_dw = fc2.weight.grad.detach().clone()
-            else:
-                fc1_dw = torch.stack(
-                    [
-                        getattr(fc1, f"weight{group_idx}").grad.detach().clone()
-                        for group_idx in range(group_size)
-                    ],
-                    dim=0,
-                )
-                fc2_dw = torch.stack(
-                    [
-                        getattr(fc2, f"weight{group_idx}").grad.detach().clone()
-                        for group_idx in range(group_size)
-                    ],
-                    dim=0,
-                )
+            fc1_dw = _stack_cloned_attr(
+                _grouped_weight_params(
+                    fc1,
+                    group_size,
+                    single_grouped_weight=single_grouped_weight,
+                ),
+                "grad",
+            )
+            fc2_dw = _stack_cloned_attr(
+                _grouped_weight_params(
+                    fc2,
+                    group_size,
+                    single_grouped_weight=single_grouped_weight,
+                ),
+                "grad",
+            )
 
             fc1_db = None
             fc2_db = None
             if bias:
-                fc1_db = torch.stack(
-                    [
-                        getattr(fc1, f"bias{group_idx}").grad.detach().clone()
-                        for group_idx in range(group_size)
-                    ],
-                    dim=0,
+                fc1_db = _stack_cloned_attr(
+                    _grouped_bias_params(
+                        fc1,
+                        group_size,
+                        single_grouped_bias=False,
+                    ),
+                    "grad",
                 )
-                fc2_db = torch.stack(
-                    [
-                        getattr(fc2, f"bias{group_idx}").grad.detach().clone()
-                        for group_idx in range(group_size)
-                    ],
-                    dim=0,
+                fc2_db = _stack_cloned_attr(
+                    _grouped_bias_params(
+                        fc2,
+                        group_size,
+                        single_grouped_bias=False,
+                    ),
+                    "grad",
                 )
 
             return (
@@ -2829,9 +2973,13 @@ class TestGroupedMLP:
             pytest.skip("MXFP8 fused grouped MLP backward is not supported on this system")
 
         recipe = make_recipe("mxfp8")
-        split_sizes = [split_alignment * (i + 1) for i in range(group_size)]
-        random.shuffle(split_sizes)
-        split_sizes = torch.tensor(split_sizes, dtype=torch.int64, device=device)
+        split_sizes = _make_grouped_split_sizes(
+            group_size,
+            split_alignment,
+            start=1,
+            dtype=torch.int64,
+            device=device,
+        )
         in_shape = (split_sizes.sum().item(), hidden_size)
         x_base = torch.empty(in_shape, device=device, dtype=dtype).uniform_(-0.25, 0.25)
         probs_base = torch.empty((in_shape[0],), device=device, dtype=dtype).uniform_(-0.25, 0.25)
@@ -2877,26 +3025,24 @@ class TestGroupedMLP:
                 module = te.ops.Sequential(fc1, scaled_act, fc2)
 
             with torch.no_grad():
-                if single_grouped_weight:
-                    fc1_weights = (
-                        fc1.weight.quantized_tensors or fc1.weight.split_into_quantized_tensors()
-                    )
-                    fc2_weights = (
-                        fc2.weight.quantized_tensors or fc2.weight.split_into_quantized_tensors()
-                    )
-                    for group_idx in range(group_size):
-                        fc1_weights[group_idx].copy_(fc1_ws_base[group_idx])
-                        fc2_weights[group_idx].copy_(fc2_ws_base[group_idx])
-                else:
-                    for group_idx in range(group_size):
-                        getattr(fc1, f"weight{group_idx}").copy_(fc1_ws_base[group_idx])
-                        getattr(fc2, f"weight{group_idx}").copy_(fc2_ws_base[group_idx])
+                _copy_grouped_linear_params(
+                    fc1,
+                    fc1_ws_base,
+                    single_grouped_weight=single_grouped_weight,
+                )
+                _copy_grouped_linear_params(
+                    fc2,
+                    fc2_ws_base,
+                    single_grouped_weight=single_grouped_weight,
+                )
             return module, fc1, fc2
 
         def _weight_params(fc):
-            if single_grouped_weight:
-                return [fc.weight]
-            return [getattr(fc, f"weight{i}") for i in range(group_size)]
+            return _grouped_weight_params(
+                fc,
+                group_size,
+                single_grouped_weight=single_grouped_weight,
+            )
 
         def _run_backward(module, fc1, fc2):
             x = x_base.detach().clone().requires_grad_(True)
@@ -2911,8 +3057,8 @@ class TestGroupedMLP:
         # Reference run: vanilla autograd, no Megatron protocol.
         ref_module, ref_fc1, ref_fc2 = _build_module(accumulate_into_main_grad=False)
         _run_backward(ref_module, ref_fc1, ref_fc2)
-        ref_fc1_grads = [wp.grad.detach().clone() for wp in _weight_params(ref_fc1)]
-        ref_fc2_grads = [wp.grad.detach().clone() for wp in _weight_params(ref_fc2)]
+        ref_fc1_grads = _clone_grads(_weight_params(ref_fc1))
+        ref_fc2_grads = _clone_grads(_weight_params(ref_fc2))
 
         # Test run: main_grad fusion with overwrite_main_grad=True (MegatronFSDP).
         # NaN sentinel makes a missed write loud (would surface as NaN diff).
@@ -2963,9 +3109,13 @@ class TestGroupedMLP:
         if dtype not in (torch.bfloat16, torch.float16):
             pytest.skip("MXFP8 fused grouped MLP is only supported with BF16/FP16")
 
-        split_sizes = [split_alignment * (i + 1) for i in range(group_size)]
-        random.shuffle(split_sizes)
-        split_sizes = torch.tensor(split_sizes, dtype=torch.int64, device=device)
+        split_sizes = _make_grouped_split_sizes(
+            group_size,
+            split_alignment,
+            start=1,
+            dtype=torch.int64,
+            device=device,
+        )
         # Pad the input tokens to validate the sync-free MOE
         in_shape = (split_sizes.sum().item() + token_padding, hidden_size)
         recipe = make_recipe("mxfp8")
@@ -2990,75 +3140,36 @@ class TestGroupedMLP:
                 single_grouped_weight=single_grouped_weight,
                 accumulate_into_main_grad=accumulate_into_main_grad,
             )
-            scaled_act = (
-                te.ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
-                if activation == "scaled_swiglu"
-                else te.ops.ScaledClampedQGeGLU(glu_interleave_size=glu_interleave_size)
+            scaled_act = _make_scaled_grouped_mlp_activation(
+                activation,
+                glu_interleave_size=glu_interleave_size,
             )
             module = te.ops.Sequential(
                 fc1,
                 scaled_act,
                 fc2,
             )
+        fc1_weight_params = _grouped_weight_params(
+            fc1,
+            group_size,
+            single_grouped_weight=single_grouped_weight,
+        )
+        fc2_weight_params = _grouped_weight_params(
+            fc2,
+            group_size,
+            single_grouped_weight=single_grouped_weight,
+        )
 
         def _init_main_grads(value: float = 0.0) -> None:
             if not accumulate_into_main_grad:
                 return
-            with torch.no_grad():
-                if single_grouped_weight:
-                    if getattr(fc1.weight, "main_grad", None) is None:
-                        fc1.weight.main_grad = torch.empty(
-                            fc1.weight.size(),
-                            device=device,
-                            dtype=torch.float32,
-                        )
-                    if getattr(fc2.weight, "main_grad", None) is None:
-                        fc2.weight.main_grad = torch.empty(
-                            fc2.weight.size(),
-                            device=device,
-                            dtype=torch.float32,
-                        )
-                    fc1.weight.main_grad.fill_(value)
-                    fc2.weight.main_grad.fill_(value)
-                else:
-                    for group_idx in range(group_size):
-                        fc1_weight = getattr(fc1, f"weight{group_idx}")
-                        fc2_weight = getattr(fc2, f"weight{group_idx}")
-                        if getattr(fc1_weight, "main_grad", None) is None:
-                            fc1_weight.main_grad = torch.empty(
-                                fc1_weight.size(),
-                                device=device,
-                                dtype=torch.float32,
-                            )
-                        if getattr(fc2_weight, "main_grad", None) is None:
-                            fc2_weight.main_grad = torch.empty(
-                                fc2_weight.size(),
-                                device=device,
-                                dtype=torch.float32,
-                            )
-                        fc1_weight.main_grad.fill_(value)
-                        fc2_weight.main_grad.fill_(value)
+            _fill_main_grads(fc1_weight_params + fc2_weight_params, value, device=device)
 
         def _collect_main_grads() -> tuple[torch.Tensor, torch.Tensor]:
-            if single_grouped_weight:
-                fc1_main_grad = fc1.weight.main_grad.detach().clone()
-                fc2_main_grad = fc2.weight.main_grad.detach().clone()
-            else:
-                fc1_main_grad = torch.stack(
-                    [
-                        getattr(fc1, f"weight{group_idx}").main_grad.detach().clone()
-                        for group_idx in range(group_size)
-                    ],
-                    dim=0,
-                )
-                fc2_main_grad = torch.stack(
-                    [
-                        getattr(fc2, f"weight{group_idx}").main_grad.detach().clone()
-                        for group_idx in range(group_size)
-                    ],
-                    dim=0,
-                )
-            return fc1_main_grad, fc2_main_grad
+            return (
+                _stack_cloned_attr(fc1_weight_params, "main_grad"),
+                _stack_cloned_attr(fc2_weight_params, "main_grad"),
+            )
 
         static_split_sizes = split_sizes.clone()
 
