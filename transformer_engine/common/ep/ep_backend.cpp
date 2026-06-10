@@ -11,6 +11,7 @@
 #include "ep_backend.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -228,7 +229,7 @@ size_t EPBackend::cache_cap_locked() {
   if (handle_cache_cap_ == 0) {
     const char* cap_env = std::getenv("NVTE_EP_HANDLE_CACHE_SIZE");
     if (cap_env != nullptr) {
-      const long v = std::atol(cap_env);
+      const int64_t v = static_cast<int64_t>(std::atol(cap_env));
       if (v < 0) {
         // Unlimited cache. WAR for JAX until XLA fixes handle_mem
         // reloc between runs.
