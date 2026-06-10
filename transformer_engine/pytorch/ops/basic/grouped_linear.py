@@ -12,8 +12,9 @@ import math
 from typing import Any, Optional
 
 import torch
-
 import transformer_engine_torch as tex
+
+from transformer_engine import te_device_type
 from ...cpp_extensions import general_grouped_gemm
 from ...distributed import CudaRNGStatesTracker
 from ...module._common import WeightGradStore
@@ -690,7 +691,7 @@ class GroupedLinear(BasicOperation):
 
         # Get autocast dtype if needed
         if torch.is_autocast_enabled():
-            dtype = torch.get_autocast_dtype("cuda")
+            dtype = torch.get_autocast_dtype(te_device_type())
         else:
             dtype = weight_param.dtype
 

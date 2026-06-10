@@ -10,6 +10,35 @@ import os
 from importlib import metadata
 import transformer_engine.common
 
+import torch
+
+# Public, simple global (kept for backward compatibility).
+TE_DEVICE_TYPE = "cuda"
+TE_PLATFORM = torch.cuda
+
+# Apply MUSA (VENDOR) Patches, such as torch.cuda.device -> torch.musa.device
+try:
+    from .plugin.core.backends.vendor.musa.patches import apply_patch as _musa_apply_patch
+
+    _musa_apply_patch()
+except Exception as e:
+    pass
+
+
+def te_device_type(default: str = "cuda") -> str:
+    try:
+        return TE_DEVICE_TYPE
+    except Exception:
+        return default
+
+
+def te_platform(default=torch.cuda):
+    try:
+        return TE_PLATFORM
+    except Exception:
+        return default
+
+
 try:
     from . import pytorch
 except ImportError:

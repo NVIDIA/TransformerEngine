@@ -24,7 +24,6 @@ except ImportError as e:
 
 FORCE_BUILD = os.getenv("NVTE_PYTORCH_FORCE_BUILD", "FALSE") == "TRUE"
 FORCE_CXX11_ABI = os.getenv("NVTE_PYTORCH_FORCE_CXX11_ABI", "FALSE") == "TRUE"
-SKIP_CUDA_BUILD = os.getenv("NVTE_PYTORCH_SKIP_CUDA_BUILD", "FALSE") == "TRUE"
 PACKAGE_NAME = "transformer_engine_torch"
 BASE_WHEEL_URL = (
     "https://github.com/NVIDIA/TransformerEngine/releases/download/{tag_name}/{wheel_name}"

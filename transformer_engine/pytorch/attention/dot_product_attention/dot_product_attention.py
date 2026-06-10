@@ -14,6 +14,7 @@ import torch
 from torch.nn.parameter import Parameter
 
 import transformer_engine_torch as tex
+from transformer_engine import te_device_type
 from transformer_engine.common.recipe import (
     Format,
     Recipe,
@@ -61,6 +62,18 @@ from transformer_engine.pytorch.attention.dot_product_attention.backends import 
     FlashAttention,
 )
 
+#########################################################################
+# Save reference to native FlashAttention for fallback
+_FlashAttentionNative = FlashAttention
+# Use plugin system's flash_attention if available, otherwise use native
+FlashAttention = getattr(tex, "flash_attention", _FlashAttentionNative)
+# Save the original get_attention_backend for backends that want to use default logic
+# CUDA backend can access this via dpa_utils._original_get_attention_backend
+dpa_utils._original_get_attention_backend = dpa_utils.get_attention_backend
+# Replace dpa_utils.get_attention_backend with tex.get_attention_backend
+# This allows each backend (FlagOS, CUDA, Reference) to control its own backend selection
+dpa_utils.get_attention_backend = tex.get_attention_backend
+#########################################################################
 
 # Setup Attention Logging
 attn_log.setup_logging()
@@ -434,12 +447,14 @@ class DotProductAttention(TransformerEngineBaseModule):
             self.softmax_offset = None
         if self.softmax_type == "off-by-one":
             self.softmax_offset = torch.zeros(
-                self.num_attention_heads // self.tp_size, device="cuda"
+                self.num_attention_heads // self.tp_size, device=te_device_type()
             )
         if self.softmax_type == "learnable":
             self.register_parameter(
                 "softmax_offset",
-                Parameter(torch.zeros(self.num_attention_heads // self.tp_size, device="cuda")),
+                Parameter(
+                    torch.zeros(self.num_attention_heads // self.tp_size, device=te_device_type())
+                ),
                 get_rng_state_tracker=get_rng_state_tracker,
             )
 
@@ -1057,8 +1072,10 @@ class DotProductAttention(TransformerEngineBaseModule):
 
             # checks for q/k/v shapes
             assert (
-                query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
-            ), "DotProductAttention only supports CUDA tensors."
+                query_layer.device.type == te_device_type()
+                and key_layer.device.type == te_device_type()
+                and value_layer.device.type == te_device_type()
+            ), f"DotProductAttention only supports {te_device_type()} tensors."
             assert (
                 query_layer.dtype == key_layer.dtype and query_layer.dtype == value_layer.dtype
             ), "Queries, keys and values must have the same data type!"

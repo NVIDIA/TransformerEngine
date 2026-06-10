@@ -8,6 +8,8 @@ from typing import Optional, Tuple, List, Union
 import math
 
 import torch
+
+from transformer_engine import te_device_type
 from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 
 from ..mxfp8_tensor import MXFP8Tensor
@@ -563,7 +565,7 @@ class GroupedTensorStorage:
             # TODO(ksivaman): Single kernel + remove the host offset calculation.
             tensor_offsets = GroupedTensorStorage.make_tensor_offsets(first_dims, logical_last_dim)
             if (
-                first_dims.device.type == "cuda"
+                first_dims.device.type == te_device_type()
                 and torch.cuda.is_available()
                 and torch.cuda.is_current_stream_capturing()
             ):

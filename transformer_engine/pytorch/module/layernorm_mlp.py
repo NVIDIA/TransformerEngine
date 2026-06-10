@@ -15,9 +15,12 @@ from torch.nn import init
 
 import transformer_engine_torch as tex
 
+from transformer_engine import te_device_type
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.torch_version import torch_version
 from transformer_engine.pytorch.tensor.utils import is_custom
+
+
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
     _ub_communicators,
@@ -1376,7 +1379,7 @@ class _LayerNormMLP(torch.autograd.Function):
             reduce_scatter_out = None
             if ctx.ub_overlap_rs_dgrad:
                 reduce_scatter_out = torch.empty(
-                    fc1_dgrad_shape, dtype=ctx.activation_dtype, device="cuda"
+                    fc1_dgrad_shape, dtype=ctx.activation_dtype, device=te_device_type()
                 )
             if ctx.ub_bulk_wgrad:
                 gemm_out = ub_obj_fc1_wgrad.get_buffer(local_chunk=False)
@@ -1458,7 +1461,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 reduce_scatter_out = None
                 if ctx.ub_bulk_wgrad and ub_obj_fc1_wgrad.is_fp8_ubuf():
                     reduce_scatter_out = torch.empty(
-                        fc1_dgrad_shape, dtype=ctx.activation_dtype, device="cuda"
+                        fc1_dgrad_shape, dtype=ctx.activation_dtype, device=te_device_type()
                     )
 
                 # Arguments to include in wgrad GEMM closure
