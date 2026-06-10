@@ -323,7 +323,6 @@ size_t EPBackend::handle_mem_size(NVTEEpLayerConfig layer_cfg) {
 
 void EPBackend::prepare(void* handle_mem, const NVTETensor topk_idx, NVTETensor token_counts,
                         NVTEEpLayerConfig layer_cfg, cudaStream_t stream) {
-  NVTE_CHECK(initialized_, "EPBackend not initialized");
   NVTE_CHECK(handle_mem != nullptr, "handle_mem must not be null");
   NVTE_CHECK(layer_cfg.top_k > 0, "top_k must be > 0, got ", layer_cfg.top_k);
   NVTE_CHECK(nvte_tensor_shape(topk_idx).ndim == 2, "topk_idx must be 2D [T, top_k]");
@@ -341,6 +340,7 @@ void EPBackend::prepare(void* handle_mem, const NVTETensor topk_idx, NVTETensor 
   layout_info.expert_counters = (token_counts != nullptr) ? &token_counts_desc : nullptr;
 
   std::lock_guard<std::mutex> lock(mutex_);
+  NVTE_CHECK(initialized_, "EPBackend not initialized");
   ncclEpHandle_t h = prepare_handle_locked(handle_mem, layer_cfg);
   NVTE_CHECK_NCCL(ncclEpUpdateHandle(h, &nccl_topk_idx, &layout_info, stream));
 }
@@ -350,7 +350,6 @@ void EPBackend::dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTE
                          const NVTECommWindow& topk_weights_win, NVTETensor recv_tokens,
                          const NVTECommWindow& recv_tokens_win, NVTETensor recv_topk_weights,
                          const NVTECommWindow& recv_topk_weights_win, cudaStream_t stream) {
-  NVTE_CHECK(initialized_, "EPBackend not initialized");
   NVTE_CHECK(handle_mem != nullptr, "handle_mem must not be null");
   NVTE_CHECK(nvte_tensor_shape(tokens).ndim == 2, "tokens must be 2D [T, hidden_dim]");
   NVTE_CHECK(nvte_tensor_shape(recv_tokens).ndim == 2,
@@ -404,6 +403,7 @@ void EPBackend::dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTE
   dispatch_cfg.pass_direction = is_forward ? NCCL_EP_FWD_PASS : NCCL_EP_BWD_PASS;
 
   std::lock_guard<std::mutex> lock(mutex_);
+  NVTE_CHECK(initialized_, "EPBackend not initialized");
   ncclEpHandle_t h = lookup_handle_locked(handle_mem);
   NVTE_CHECK_NCCL(ncclEpDispatch(h, &in_struct, &out_struct,
                                  /*layout_info=*/nullptr, &dispatch_cfg, stream));
@@ -412,7 +412,6 @@ void EPBackend::dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTE
 void EPBackend::combine(void* handle_mem, const NVTETensor expert_out,
                         const NVTECommWindow& expert_out_win, NVTETensor result,
                         cudaStream_t stream) {
-  NVTE_CHECK(initialized_, "EPBackend not initialized");
   NVTE_CHECK(handle_mem != nullptr, "handle_mem must not be null");
   NVTE_CHECK(nvte_tensor_shape(expert_out).ndim == 2, "expert_out must be 2D [recv_T, hidden_dim]");
   NVTE_CHECK(nvte_tensor_shape(result).ndim == 2, "result must be 2D [T, hidden_dim]");
@@ -428,6 +427,7 @@ void EPBackend::combine(void* handle_mem, const NVTETensor expert_out,
   out_struct.tokens = &nccl_result_out;
 
   std::lock_guard<std::mutex> lock(mutex_);
+  NVTE_CHECK(initialized_, "EPBackend not initialized");
   ncclEpHandle_t h = lookup_handle_locked(handle_mem);
   NVTE_CHECK_NCCL(ncclEpCombine(h, &in_struct, &out_struct, /*config=*/nullptr, stream));
 }
@@ -436,7 +436,6 @@ void EPBackend::dispatch_bwd(void* handle_mem, const NVTETensor grad,
                              const NVTECommWindow& grad_win, const NVTETensor g_recv_topk_weights,
                              const NVTECommWindow& g_recv_topk_weights_win, NVTETensor grad_tokens,
                              NVTETensor grad_topk_weights, cudaStream_t stream) {
-  NVTE_CHECK(initialized_, "EPBackend not initialized");
   NVTE_CHECK(handle_mem != nullptr, "handle_mem must not be null");
   NVTE_CHECK(nvte_tensor_shape(grad).ndim == 2, "grad must be 2D [recv_capacity, hidden_dim]");
   NVTE_CHECK(nvte_tensor_shape(grad_tokens).ndim == 2, "grad_tokens must be 2D [T, hidden_dim]");
@@ -466,6 +465,7 @@ void EPBackend::dispatch_bwd(void* handle_mem, const NVTETensor grad,
   cfg.pass_direction = NCCL_EP_BWD_PASS;
 
   std::lock_guard<std::mutex> lock(mutex_);
+  NVTE_CHECK(initialized_, "EPBackend not initialized");
   ncclEpHandle_t h = lookup_handle_locked(handle_mem);
   NVTE_CHECK_NCCL(ncclEpCombine(h, &in_struct, &out_struct, &cfg, stream));
 }
