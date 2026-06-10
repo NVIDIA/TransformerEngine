@@ -19,14 +19,16 @@ import torch
 import transformer_engine
 from transformer_engine.common.recipe import Recipe
 import math
-from transformer_engine.pytorch import InferenceParams, QuantizedTensor
-from transformer_engine.pytorch import DType
 from transformer_engine.pytorch import (
+    DType,
     Float8CurrentScalingQuantizer,
     Float8Quantizer,
+    InferenceParams,
     MXFP8Quantizer,
     NVFP4Quantizer,
+    QuantizedTensor,
     QuantizerRole,
+    is_bf16_available,
 )
 from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
