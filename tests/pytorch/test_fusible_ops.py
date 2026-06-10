@@ -3736,7 +3736,7 @@ class TestSequentialModules:
                 "single_grouped_weight/single_grouped_bias requires"
                 " NVTE_GROUPED_LINEAR_SINGLE_PARAM=1"
             )
-    # Split sizes
+        # Split sizes
         split_sizes = [split_alignment * (i) for i in range(group_size)]
         random.shuffle(split_sizes)
         split_sizes = torch.tensor(split_sizes, dtype=torch.int, device=device)

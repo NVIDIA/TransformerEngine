@@ -659,9 +659,7 @@ class TestGroupedTensor:
             num_tensors = len(first_dims_host)
             hidden = 1024
             shape = [(r, hidden) for r in first_dims_host]
-            input_tensors = [
-                torch.randn(s, dtype=torch.bfloat16, device="cuda") for s in shape
-            ]
+            input_tensors = [torch.randn(s, dtype=torch.bfloat16, device="cuda") for s in shape]
             grouped_input = torch.cat(input_tensors, dim=0)
             first_dims = torch.tensor(first_dims_host, dtype=torch.int64, device="cuda")
             last_dims = None
@@ -720,7 +718,14 @@ class TestGroupedTensor:
     @pytest.mark.parametrize("mode", ["rowwise", "columnwise", "both"])
     @pytest.mark.parametrize(
         "shape_case",
-        ["uniform", "varying_first", "empty_split", "varying_last", "varying_first_small", "varying_last_small"],
+        [
+            "uniform",
+            "varying_first",
+            "empty_split",
+            "varying_last",
+            "varying_first_small",
+            "varying_last_small",
+        ],
     )
     @pytest.mark.parametrize("overallocated", [False, True])
     @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
@@ -820,9 +825,7 @@ class TestGroupedTensor:
 
         requested_rowwise = mode in ("rowwise", "both")
         requested_columnwise = mode in ("columnwise", "both")
-        rowwise = requested_rowwise or (
-            requested_columnwise and is_non_tn_fp8_gemm_supported()
-        )
+        rowwise = requested_rowwise or (requested_columnwise and is_non_tn_fp8_gemm_supported())
         columnwise = requested_columnwise and not is_non_tn_fp8_gemm_supported()
 
         quantizer = Float8CurrentScalingQuantizer(
@@ -1031,10 +1034,7 @@ class TestGroupedTensor:
         out_features = 32
         dtype = torch.float32
         if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0":
-            pytest.skip(
-                "single_grouped_weight requires"
-                " NVTE_GROUPED_LINEAR_SINGLE_PARAM=1"
-            )
+            pytest.skip("single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
         src = te.GroupedLinear(
             num_gemms=num_gemms,
             in_features=in_features,
@@ -1086,10 +1086,7 @@ class TestGroupedTensor:
     def test_grouped_linear_load_state_dict_single_to_multi_param(self, tmp_path) -> None:
         """Load grouped-parameter checkpoint from disk into per-GEMM parameter format."""
         if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0":
-            pytest.skip(
-                "single_grouped_weight requires"
-                " NVTE_GROUPED_LINEAR_SINGLE_PARAM=1"
-            )
+            pytest.skip("single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
         num_gemms = 3
         in_features = 64
         out_features = 32

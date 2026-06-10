@@ -270,15 +270,14 @@ void compute_grouped_fp8_current_scaling_amax_and_scale(
     c10d::AllreduceOptions opts;
     opts.reduceOp = c10d::ReduceOp::MAX;
     std::vector<at::Tensor> tensors = {amax};
-    NVTE_SCOPED_GIL_RELEASE({
-      quantizer_cpp->amax_reduction_group->allreduce(tensors, opts)->wait();
-    });
+    NVTE_SCOPED_GIL_RELEASE(
+        { quantizer_cpp->amax_reduction_group->allreduce(tensors, opts)->wait(); });
   }
 
   // Build single-element TE tensor lists ({{amax}, {scale}, {scale_inv}}
   // for the multi_tensor_compute_scale_and_scale_inv_cuda kernel.
-  TensorWrapper amax_cpp =
-      makeTransformerEngineTensor(amax_bt.data_ptr, amax_bt.shape, static_cast<DType>(amax_bt.dtype));
+  TensorWrapper amax_cpp = makeTransformerEngineTensor(amax_bt.data_ptr, amax_bt.shape,
+                                                       static_cast<DType>(amax_bt.dtype));
   TensorWrapper scale_cpp = makeTransformerEngineTensor(scale_bt.data_ptr, scale_bt.shape,
                                                         static_cast<DType>(scale_bt.dtype));
   TensorWrapper scale_inv_cpp = makeTransformerEngineTensor(
@@ -301,8 +300,7 @@ void compute_grouped_fp8_current_scaling_amax_and_scale(
 }  // namespace
 
 py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const size_t num_tensors,
-                          std::optional<at::Tensor> first_dims,
-                          std::optional<at::Tensor> last_dims,
+                          std::optional<at::Tensor> first_dims, std::optional<at::Tensor> last_dims,
                           std::optional<at::Tensor> tensor_offsets) {
   using namespace transformer_engine::pytorch::detail;
   init_extension();
@@ -322,15 +320,15 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
 
   // Create input GroupedTensor.
   auto grouped_input_tensor = GroupedTensorWrapper(num_tensors, logical_shape);
-  grouped_input_tensor.set_rowwise_data(
-      tensor.data_ptr(), GetTransformerEngineDType(tensor.scalar_type()),
-      std::vector<size_t>{static_cast<size_t>(tensor.numel())});
+  grouped_input_tensor.set_rowwise_data(tensor.data_ptr(),
+                                        GetTransformerEngineDType(tensor.scalar_type()),
+                                        std::vector<size_t>{static_cast<size_t>(tensor.numel())});
 
   // Create output GroupedTensor.
   auto [grouped_output_tensor_cpp, grouped_output_py] = quantizer_cpp->create_grouped_tensor(
       num_tensors, logical_shape, GetTransformerEngineDType(tensor.scalar_type()),
-      py::reinterpret_borrow<py::object>(quantizer), first_dims, last_dims, tensor_offsets, logical_first_dim,
-      logical_last_dim);
+      py::reinterpret_borrow<py::object>(quantizer), first_dims, last_dims, tensor_offsets,
+      logical_first_dim, logical_last_dim);
 
   // dispatch to scaling methods
   enum class GroupedQuantizationMode {
@@ -365,8 +363,7 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
       break;
     }
     case GroupedQuantizationMode::FP8_CURRENT_SCALING_GROUPED_QUANTIZE: {
-      auto *fp8_quantizer_cpp =
-          static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
+      auto *fp8_quantizer_cpp = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
       compute_grouped_fp8_current_scaling_amax_and_scale(
           grouped_input_tensor, grouped_output_tensor_cpp, grouped_output_py, fp8_quantizer_cpp);
       QuantizationConfigWrapper quant_config_cpp;
@@ -386,8 +383,9 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
     }
     case GroupedQuantizationMode::INVALID_FOR_GROUPED_QUANTIZE:
     default:
-      NVTE_ERROR("group_quantize: only supports MXFP8, NVFP4, or "
-                 "Float8CurrentScalingQuantizer.");
+      NVTE_ERROR(
+          "group_quantize: only supports MXFP8, NVFP4, or "
+          "Float8CurrentScalingQuantizer.");
       break;
   }
 
@@ -435,8 +433,8 @@ py::object nvfp4_group_quantize_with_amax(const at::Tensor &tensor, py::handle q
 
   auto [grouped_output_tensor_cpp, grouped_output_py] = quantizer_cpp->create_grouped_tensor(
       num_tensors, logical_shape, GetTransformerEngineDType(tensor.scalar_type()),
-      py::reinterpret_borrow<py::object>(quantizer), first_dims, last_dims, tensor_offsets, logical_first_dim,
-      logical_last_dim);
+      py::reinterpret_borrow<py::object>(quantizer), first_dims, last_dims, tensor_offsets,
+      logical_first_dim, logical_last_dim);
 
   if (grouped_output_tensor_cpp.get_amax().data_ptr != nullptr) {
     grouped_output_tensor_cpp.set_amax(rowwise_amax.data_ptr(), DType::kFloat32,
@@ -495,14 +493,14 @@ py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
   auto quantizer_cpp = convert_quantizer(quantizer);
 
   auto grouped_input_tensor = GroupedTensorWrapper(num_tensors, logical_shape);
-  grouped_input_tensor.set_rowwise_data(
-      tensor.data_ptr(), GetTransformerEngineDType(tensor.scalar_type()),
-      std::vector<size_t>{static_cast<size_t>(tensor.numel())});
+  grouped_input_tensor.set_rowwise_data(tensor.data_ptr(),
+                                        GetTransformerEngineDType(tensor.scalar_type()),
+                                        std::vector<size_t>{static_cast<size_t>(tensor.numel())});
 
   auto [grouped_output_tensor_cpp, grouped_output_py] = quantizer_cpp->create_grouped_tensor(
       num_tensors, logical_shape, GetTransformerEngineDType(tensor.scalar_type()),
-      py::reinterpret_borrow<py::object>(quantizer), first_dims, last_dims, tensor_offsets, logical_first_dim,
-      logical_last_dim);
+      py::reinterpret_borrow<py::object>(quantizer), first_dims, last_dims, tensor_offsets,
+      logical_first_dim, logical_last_dim);
 
   if (empty_input_buffer) {
     at::Tensor dbias_torch =
@@ -629,8 +627,8 @@ py::object group_dequantize(const py::handle &input, transformer_engine::DType o
   // Create output GroupedTensor using NoneQuantizer.
   NoneQuantizer q{py::none()};
   auto [out_cpp, out_py] =
-      q.create_grouped_tensor(num_tensors, logical_shape, otype, py::none(), first_dims,
-                              last_dims, tensor_offsets, logical_first_dim, logical_last_dim);
+      q.create_grouped_tensor(num_tensors, logical_shape, otype, py::none(), first_dims, last_dims,
+                              tensor_offsets, logical_first_dim, logical_last_dim);
 
   NVTE_SCOPED_GIL_RELEASE({
     nvte_group_dequantize(input_cpp.data(), out_cpp.data(), at::cuda::getCurrentCUDAStream());

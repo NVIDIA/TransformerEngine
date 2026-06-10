@@ -202,8 +202,8 @@ void nvte_splits_to_offsets_2d(const int64_t *first_dims, const int64_t *last_di
   using namespace transformer_engine;
   namespace s2o = transformer_engine::splits_to_offsets;
 
-  s2o::splits_to_offsets_2d_kernel<<<1, s2o::kThreadsPerBlock, 0, stream>>>(
-      first_dims, last_dims, output, num_tensors);
+  s2o::splits_to_offsets_2d_kernel<<<1, s2o::kThreadsPerBlock, 0, stream>>>(first_dims, last_dims,
+                                                                            output, num_tensors);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 

@@ -4,9 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <pybind.h>
-
 #include <cuda_runtime_api.h>
+#include <pybind.h>
 
 #include "common.h"
 #include "common/util/cuda_runtime.h"
@@ -96,10 +95,11 @@ void check_grouped_dims_tensor(const at::Tensor& dims_tensor, const char* dims_n
              " must have length ", num_tensors, ".");
 }
 
-std::optional<at::Tensor> build_grouped_tensor_offsets(
-    const size_t num_tensors, const std::optional<at::Tensor>& first_dims,
-    const std::optional<at::Tensor>& last_dims, const size_t logical_first_dim,
-    const size_t logical_last_dim) {
+std::optional<at::Tensor> build_grouped_tensor_offsets(const size_t num_tensors,
+                                                       const std::optional<at::Tensor>& first_dims,
+                                                       const std::optional<at::Tensor>& last_dims,
+                                                       const size_t logical_first_dim,
+                                                       const size_t logical_last_dim) {
   if (!first_dims.has_value() && !last_dims.has_value()) {
     return std::nullopt;
   }
@@ -116,28 +116,26 @@ std::optional<at::Tensor> build_grouped_tensor_offsets(
   auto tensor_offsets = at::empty({static_cast<int64_t>(num_tensors) + 1}, options);
   if (first_dims.has_value() && last_dims.has_value()) {
     NVTE_SCOPED_GIL_RELEASE({
-      nvte_splits_to_offsets_2d(
-          static_cast<const int64_t*>(first_dims->data_ptr()),
-          static_cast<const int64_t*>(last_dims->data_ptr()),
-          static_cast<int64_t*>(tensor_offsets.data_ptr()), num_tensors,
-          static_cast<int64_t>(logical_first_dim), static_cast<int64_t>(logical_last_dim),
-          at::cuda::getCurrentCUDAStream());
+      nvte_splits_to_offsets_2d(static_cast<const int64_t*>(first_dims->data_ptr()),
+                                static_cast<const int64_t*>(last_dims->data_ptr()),
+                                static_cast<int64_t*>(tensor_offsets.data_ptr()), num_tensors,
+                                static_cast<int64_t>(logical_first_dim),
+                                static_cast<int64_t>(logical_last_dim),
+                                at::cuda::getCurrentCUDAStream());
     });
   } else if (first_dims.has_value()) {
     NVTE_SCOPED_GIL_RELEASE({
-      nvte_splits_to_offsets(
-          static_cast<const int64_t*>(first_dims->data_ptr()),
-          static_cast<int64_t*>(tensor_offsets.data_ptr()), num_tensors,
-          static_cast<int64_t>(logical_last_dim),
-          at::cuda::getCurrentCUDAStream());
+      nvte_splits_to_offsets(static_cast<const int64_t*>(first_dims->data_ptr()),
+                             static_cast<int64_t*>(tensor_offsets.data_ptr()), num_tensors,
+                             static_cast<int64_t>(logical_last_dim),
+                             at::cuda::getCurrentCUDAStream());
     });
   } else {
     NVTE_SCOPED_GIL_RELEASE({
-      nvte_splits_to_offsets(
-          static_cast<const int64_t*>(last_dims->data_ptr()),
-          static_cast<int64_t*>(tensor_offsets.data_ptr()), num_tensors,
-          static_cast<int64_t>(logical_first_dim),
-          at::cuda::getCurrentCUDAStream());
+      nvte_splits_to_offsets(static_cast<const int64_t*>(last_dims->data_ptr()),
+                             static_cast<int64_t*>(tensor_offsets.data_ptr()), num_tensors,
+                             static_cast<int64_t>(logical_first_dim),
+                             at::cuda::getCurrentCUDAStream());
     });
   }
   return tensor_offsets;
@@ -217,7 +215,7 @@ std::pair<GroupedTensorWrapper, py::object> NoneQuantizer::create_grouped_tensor
       precomputed_tensor_offsets.has_value()
           ? precomputed_tensor_offsets
           : build_grouped_tensor_offsets(num_tensors, first_dims, last_dims, logical_first_dim,
-                                       logical_last_dim);
+                                         logical_last_dim);
   const int64_t total_elements =
       static_cast<int64_t>(logical_first_dim) * static_cast<int64_t>(logical_last_dim);
 
@@ -428,7 +426,7 @@ std::pair<GroupedTensorWrapper, py::object> Float8Quantizer::create_grouped_tens
       precomputed_tensor_offsets.has_value()
           ? precomputed_tensor_offsets
           : build_grouped_tensor_offsets(num_tensors, first_dims, last_dims, logical_first_dim,
-                                       logical_last_dim);
+                                         logical_last_dim);
   const int64_t total_elements =
       static_cast<int64_t>(logical_first_dim) * static_cast<int64_t>(logical_last_dim);
 
@@ -460,7 +458,7 @@ std::pair<GroupedTensorWrapper, py::object> Float8Quantizer::create_grouped_tens
     out_cpp.set_columnwise_data(columnwise_data->data_ptr(), this->dtype,
                                 getTensorShape(*columnwise_data));
     out_cpp.set_columnwise_scale_inv(columnwise_scale_inv->data_ptr(), DType::kFloat32,
-                                      getTensorShape(*columnwise_scale_inv));
+                                     getTensorShape(*columnwise_scale_inv));
   }
   out_cpp.set_amax(amax.data_ptr(), DType::kFloat32, getTensorShape(amax));
   if (first_dims.has_value()) {
@@ -471,7 +469,7 @@ std::pair<GroupedTensorWrapper, py::object> Float8Quantizer::create_grouped_tens
   }
   if (tensor_offsets.has_value()) {
     out_cpp.set_tensor_offsets(tensor_offsets->data_ptr(), DType::kInt64,
-                                getTensorShape(*tensor_offsets));
+                               getTensorShape(*tensor_offsets));
   }
 
   py::handle GroupedTensorClass = grouped_tensor_python_class(this->internal);
@@ -751,7 +749,7 @@ std::pair<GroupedTensorWrapper, py::object> Float8CurrentScalingQuantizer::creat
       precomputed_tensor_offsets.has_value()
           ? precomputed_tensor_offsets
           : build_grouped_tensor_offsets(num_tensors, first_dims, last_dims, logical_first_dim,
-                                       logical_last_dim);
+                                         logical_last_dim);
   const int64_t total_elements =
       static_cast<int64_t>(logical_first_dim) * static_cast<int64_t>(logical_last_dim);
 
@@ -768,7 +766,7 @@ std::pair<GroupedTensorWrapper, py::object> Float8CurrentScalingQuantizer::creat
   const bool with_rowwise_data = rowwise_usage || is_non_tn_fp8_gemm_supported;
   const bool with_columnwise_data = columnwise_usage && !is_non_tn_fp8_gemm_supported;
 
-  // FP8 current scaling has a single per-tensor scale 
+  // FP8 current scaling has a single per-tensor scale
   std::optional<at::Tensor> scale_inv;
   if (with_rowwise_data || with_columnwise_data) {
     scale_inv = at::empty({static_cast<int64_t>(num_tensors)}, float_opts);
@@ -1147,7 +1145,7 @@ std::pair<GroupedTensorWrapper, py::object> Float8BlockQuantizer::create_grouped
       precomputed_tensor_offsets.has_value()
           ? precomputed_tensor_offsets
           : build_grouped_tensor_offsets(num_tensors, first_dims, last_dims, logical_first_dim,
-                                       logical_last_dim);
+                                         logical_last_dim);
   const int64_t total_elements =
       static_cast<int64_t>(logical_first_dim) * static_cast<int64_t>(logical_last_dim);
 
@@ -1573,7 +1571,7 @@ std::pair<GroupedTensorWrapper, py::object> MXFP8Quantizer::create_grouped_tenso
       precomputed_tensor_offsets.has_value()
           ? precomputed_tensor_offsets
           : build_grouped_tensor_offsets(num_tensors, first_dims, last_dims, logical_first_dim,
-                                       logical_last_dim);
+                                         logical_last_dim);
   const int64_t total_elements =
       static_cast<int64_t>(logical_first_dim) * static_cast<int64_t>(logical_last_dim);
 
@@ -2059,7 +2057,7 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
       precomputed_tensor_offsets.has_value()
           ? precomputed_tensor_offsets
           : build_grouped_tensor_offsets(num_tensors, first_dims, last_dims, logical_first_dim,
-                                       logical_last_dim);
+                                         logical_last_dim);
   const int64_t total_elements =
       static_cast<int64_t>(logical_first_dim) * static_cast<int64_t>(logical_last_dim);
   NVTE_CHECK(total_elements % 2 == 0, "NVFP4 data size must be divisible by 2.");

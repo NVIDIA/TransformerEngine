@@ -52,6 +52,7 @@ def _parse_shape(spec: str, default_hidden: int) -> tuple:
     contain ``*`` so you can write the work directly, e.g. ``4096*16x4096``. If
     no hidden is given, ``default_hidden`` is used (e.g. ``98304``).
     """
+
     def _eval_int(token: str) -> int:
         token = token.strip()
         # Only allow simple integer multiplication like "4096*16".
@@ -96,8 +97,7 @@ def _make_quantizer(mode: str) -> Float8CurrentScalingQuantizer:
         force_pow_2_scales=False,
         amax_epsilon=0.0,
     )
-    q.set_usage(rowwise=mode in ("rowwise", "both"),
-                columnwise=mode in ("columnwise", "both"))
+    q.set_usage(rowwise=mode in ("rowwise", "both"), columnwise=mode in ("columnwise", "both"))
     return q
 
 
@@ -149,8 +149,14 @@ def _generate_first_dims(shape_case: str, actual_rows: int, num_groups: int) -> 
     return first_dims
 
 
-def _make_inputs(shape_case: str, actual_rows: int, allocated_rows: int,
-                 hidden: int, num_groups: int, num_buffers: int):
+def _make_inputs(
+    shape_case: str,
+    actual_rows: int,
+    allocated_rows: int,
+    hidden: int,
+    num_groups: int,
+    num_buffers: int,
+):
     """Returns (inputs, first_dims_or_None, info)."""
     dtype = torch.bfloat16
     info = {
@@ -160,17 +166,29 @@ def _make_inputs(shape_case: str, actual_rows: int, allocated_rows: int,
         "num_groups": num_groups,
     }
     if shape_case == "same-shape":
-        inputs = [torch.randn(actual_rows, hidden, dtype=dtype, device="cuda")
-                  for _ in range(num_buffers)]
+        inputs = [
+            torch.randn(actual_rows, hidden, dtype=dtype, device="cuda") for _ in range(num_buffers)
+        ]
         return inputs, None, info
-    if shape_case in ("varying-first", "varying-first-mild", "varying-first-zipf", "varying-first-heavy"):
+    if shape_case in (
+        "varying-first",
+        "varying-first-mild",
+        "varying-first-zipf",
+        "varying-first-heavy",
+    ):
         first_dims_list = _generate_first_dims(shape_case, actual_rows, num_groups)
         first_dims = torch.tensor(first_dims_list, dtype=torch.int64, device="cuda")
-        inputs = [torch.randn(actual_rows, hidden, dtype=dtype, device="cuda")
-                  for _ in range(num_buffers)]
+        inputs = [
+            torch.randn(actual_rows, hidden, dtype=dtype, device="cuda") for _ in range(num_buffers)
+        ]
         info["first_dims"] = first_dims_list
         return inputs, first_dims, info
-    if shape_case in ("varying-first-overalloc", "varying-first-overalloc-mild", "varying-first-overalloc-zipf", "varying-first-overalloc-heavy"):
+    if shape_case in (
+        "varying-first-overalloc",
+        "varying-first-overalloc-mild",
+        "varying-first-overalloc-zipf",
+        "varying-first-overalloc-heavy",
+    ):
         first_dims_list = _generate_first_dims(shape_case, actual_rows, num_groups)
         first_dims = torch.tensor(first_dims_list, dtype=torch.int64, device="cuda")
         inputs = []
@@ -186,8 +204,9 @@ def _make_inputs(shape_case: str, actual_rows: int, allocated_rows: int,
     raise ValueError(shape_case)
 
 
-def _verify_no_tail_read(quantizer, inp: torch.Tensor, first_dims, num_groups: int,
-                         actual_rows: int):
+def _verify_no_tail_read(
+    quantizer, inp: torch.Tensor, first_dims, num_groups: int, actual_rows: int
+):
     """Sanity check: amax must not be polluted by the poisoned tail rows."""
     out = tex.group_quantize(inp, quantizer, num_groups, first_dims)
     amax_max = float(out.amax.max().item())
@@ -195,7 +214,7 @@ def _verify_no_tail_read(quantizer, inp: torch.Tensor, first_dims, num_groups: i
     if amax_max > 1e10:
         raise RuntimeError(
             f"group_quantize is reading the over-allocated tail rows: amax_max={amax_max}. "
-            f"This means kernels are scanning unused memory (a perf and correctness bug)."
+            "This means kernels are scanning unused memory (a perf and correctness bug)."
         )
     return out
 
@@ -213,8 +232,9 @@ def _timed_eager(quantizer, inputs, first_dims, num_groups: int, iters: int) -> 
     return start.elapsed_time(end)  # ms
 
 
-def _timed_cuda_graph(quantizer, inputs, first_dims, num_groups: int,
-                      iters: int, calls_per_replay: int = 32) -> float:
+def _timed_cuda_graph(
+    quantizer, inputs, first_dims, num_groups: int, iters: int, calls_per_replay: int = 32
+) -> float:
     """Capture `calls_per_replay` group_quantize calls into one CUDA graph and
     replay it `iters / calls_per_replay` times. Effectively eliminates Python /
     cudaLaunchKernel overhead. The output tensor is allocated inside each call
@@ -252,8 +272,9 @@ def _timed_cuda_graph(quantizer, inputs, first_dims, num_groups: int,
 
 def _bytes_per_call(actual_rows: int, hidden: int, mode: str) -> int:
     in_bytes = actual_rows * hidden * 2  # bf16 read
-    out_copies = (1 if mode in ("rowwise", "both") else 0) + \
-                 (1 if mode in ("columnwise", "both") else 0)
+    out_copies = (1 if mode in ("rowwise", "both") else 0) + (
+        1 if mode in ("columnwise", "both") else 0
+    )
     out_bytes = actual_rows * hidden * out_copies  # fp8 write(s)
     return in_bytes + out_bytes
 
@@ -263,14 +284,16 @@ def _physical_bytes_per_call(actual_rows: int, hidden: int, mode: str) -> int:
     # Pass 1: amax kernel reads input (2 bytes per element)
     # Pass 2: cast kernel reads input (2 bytes per element) and writes output (1 byte per element per copy)
     in_bytes = actual_rows * hidden * 2 * 2  # bf16 read twice
-    out_copies = (1 if mode in ("rowwise", "both") else 0) + \
-                 (1 if mode in ("columnwise", "both") else 0)
+    out_copies = (1 if mode in ("rowwise", "both") else 0) + (
+        1 if mode in ("columnwise", "both") else 0
+    )
     out_bytes = actual_rows * hidden * out_copies  # fp8 write(s)
     return in_bytes + out_bytes
 
 
-def _kernel_bytes_per_call(bucket: str, actual_rows: int, hidden: int, mode: str,
-                           num_tensors: int) -> int:
+def _kernel_bytes_per_call(
+    bucket: str, actual_rows: int, hidden: int, mode: str, num_tensors: int
+) -> int:
     """Bytes that one launch of the kernel(s) in ``bucket`` actually moves.
 
     Counts both reads and writes. Tiny kernels (amax_zero, compute_scale) move
@@ -310,8 +333,8 @@ def _kernel_bytes_per_call(bucket: str, actual_rows: int, hidden: int, mode: str
 _KERNEL_BUCKETS = (
     # Split amax into the trivial zero-init kernel and the real reduction kernel,
     # otherwise the bucket average misleadingly suggests the zero kernel is slow.
-    ("amax_zero",     ("grouped_amax_zero",)),
-    ("amax",          ("grouped_amax",)),
+    ("amax_zero", ("grouped_amax_zero",)),
+    ("amax", ("grouped_amax",)),
     # The compute-scale kernel is launched via the multi_tensor_apply framework
     # as ``multi_tensor_apply_kernel<...ComputeScaleAndScaleInvFunctor>``; match
     # on the functor name after lowercasing.
@@ -329,8 +352,7 @@ def _bucket_for_kernel(name: str) -> str:
     return "cast"
 
 
-def _profile_breakdown(quantizer, inputs, first_dims, num_groups: int,
-                       iters: int) -> dict:
+def _profile_breakdown(quantizer, inputs, first_dims, num_groups: int, iters: int) -> dict:
     """Run ``iters`` group_quantize calls under torch.profiler and aggregate CUDA
     kernel time into {amax, compute_scale, cast} buckets.
 
@@ -364,13 +386,25 @@ def _profile_breakdown(quantizer, inputs, first_dims, num_groups: int,
     return agg
 
 
-def run_case(shape_case: str, mode: str, *, actual_rows: int, allocated_rows: int,
-             hidden: int, num_groups: int, num_buffers: int, warmup: int,
-             iters: int, mode_loop: str = "eager", verbose: bool = True,
-             profile_breakdown: bool = False,
-             print_breakdown: bool = True) -> CaseResult:
-    inputs, first_dims, _ = _make_inputs(shape_case, actual_rows, allocated_rows,
-                                          hidden, num_groups, num_buffers)
+def run_case(
+    shape_case: str,
+    mode: str,
+    *,
+    actual_rows: int,
+    allocated_rows: int,
+    hidden: int,
+    num_groups: int,
+    num_buffers: int,
+    warmup: int,
+    iters: int,
+    mode_loop: str = "eager",
+    verbose: bool = True,
+    profile_breakdown: bool = False,
+    print_breakdown: bool = True,
+) -> CaseResult:
+    inputs, first_dims, _ = _make_inputs(
+        shape_case, actual_rows, allocated_rows, hidden, num_groups, num_buffers
+    )
     quantizer = _make_quantizer(mode)
 
     # Run once for correctness sanity check (no tail-read leak).
@@ -385,10 +419,10 @@ def run_case(shape_case: str, mode: str, *, actual_rows: int, allocated_rows: in
 
     if mode_loop == "graph":
         elapsed_ms, actual_iters = _timed_cuda_graph(
-            quantizer, inputs, first_dims, num_groups, iters)
+            quantizer, inputs, first_dims, num_groups, iters
+        )
     else:
-        elapsed_ms = _timed_eager(
-            quantizer, inputs, first_dims, num_groups, iters)
+        elapsed_ms = _timed_eager(quantizer, inputs, first_dims, num_groups, iters)
         actual_iters = iters
 
     relevant = _bytes_per_call(actual_rows, hidden, mode)
@@ -399,42 +433,42 @@ def run_case(shape_case: str, mode: str, *, actual_rows: int, allocated_rows: in
     bw_actual = total_bytes_actual / elapsed_s / 1.0e12
     bw_physical = total_bytes_physical / elapsed_s / 1.0e12
     res = CaseResult(
-        shape_case=shape_case, mode=mode,
-        actual_rows=actual_rows, allocated_rows=allocated_rows,
-        hidden=hidden, num_groups=num_groups, iters=actual_iters,
+        shape_case=shape_case,
+        mode=mode,
+        actual_rows=actual_rows,
+        allocated_rows=allocated_rows,
+        hidden=hidden,
+        num_groups=num_groups,
+        iters=actual_iters,
         elapsed_ms_total=elapsed_ms,
         per_iter_us=elapsed_ms * 1000.0 / actual_iters,
-        relevant_bytes=relevant, bw_actual_TBps=bw_actual,
+        relevant_bytes=relevant,
+        bw_actual_TBps=bw_actual,
         bw_physical_TBps=bw_physical,
         loop=mode_loop,
     )
     if verbose:
-        print(f"  {shape_case:30s} groups={num_groups:3d} mode={mode:10s} "
-              f"loop={mode_loop:5s} "
-              f"per_iter={res.per_iter_us:7.2f}us "
-              f"BW_algo={res.bw_actual_TBps:5.2f} TB/s "
-              f"BW_phys={res.bw_physical_TBps:5.2f} TB/s")
+        print(
+            f"  {shape_case:30s} groups={num_groups:3d} mode={mode:10s} "
+            f"loop={mode_loop:5s} "
+            f"per_iter={res.per_iter_us:7.2f}us "
+            f"BW_algo={res.bw_actual_TBps:5.2f} TB/s "
+            f"BW_phys={res.bw_physical_TBps:5.2f} TB/s"
+        )
 
     if profile_breakdown:
         profile_iters = min(iters, 50)
-        agg = _profile_breakdown(quantizer, inputs, first_dims, num_groups,
-                                 iters=profile_iters)
+        agg = _profile_breakdown(quantizer, inputs, first_dims, num_groups, iters=profile_iters)
         total = agg["_total_us"] if agg["_total_us"] > 0 else 1.0
 
         def _bucket_metrics(bucket: str) -> dict:
             entry = agg[bucket]
             per_iter_us = entry["us_total"] / profile_iters
             launches_per_iter = entry["calls"] / profile_iters
-            per_launch_us = (
-                entry["us_total"] / entry["calls"] if entry["calls"] else 0.0
-            )
-            bytes_per_launch = _kernel_bytes_per_call(
-                bucket, actual_rows, hidden, mode, num_groups
-            )
+            per_launch_us = entry["us_total"] / entry["calls"] if entry["calls"] else 0.0
+            bytes_per_launch = _kernel_bytes_per_call(bucket, actual_rows, hidden, mode, num_groups)
             bw_tbps = (
-                bytes_per_launch / (per_launch_us * 1.0e-6) / 1.0e12
-                if per_launch_us > 0
-                else 0.0
+                bytes_per_launch / (per_launch_us * 1.0e-6) / 1.0e12 if per_launch_us > 0 else 0.0
             )
             return {
                 "per_iter_us": per_iter_us,
@@ -452,33 +486,39 @@ def run_case(shape_case: str, mode: str, *, actual_rows: int, allocated_rows: in
 
         if print_breakdown:
             per_iter_total = total / profile_iters
-            print(f"      kernel breakdown over {profile_iters} iters "
-                  f"(per-iter sum={per_iter_total:6.2f}us):")
-            print(f"        {'bucket':14s} {'per_iter_us':>12s} {'(%)':>7s} "
-                  f"{'launches/iter':>14s} {'per_launch_us':>15s} "
-                  f"{'bytes/launch':>14s} {'BW_TBps':>9s}")
-            for bucket in ("amax_zero", "amax", "compute_scale",
-                           "splits_to_offsets", "cast"):
+            print(
+                f"      kernel breakdown over {profile_iters} iters "
+                f"(per-iter sum={per_iter_total:6.2f}us):"
+            )
+            print(
+                f"        {'bucket':14s} {'per_iter_us':>12s} {'(%)':>7s} "
+                f"{'launches/iter':>14s} {'per_launch_us':>15s} "
+                f"{'bytes/launch':>14s} {'BW_TBps':>9s}"
+            )
+            for bucket in ("amax_zero", "amax", "compute_scale", "splits_to_offsets", "cast"):
                 m = _bucket_metrics(bucket)
-                print(f"        {bucket:14s} {m['per_iter_us']:12.2f} "
-                      f"{m['pct']:7.1f} {m['launches_per_iter']:14.2f} "
-                      f"{m['per_launch_us']:15.2f} "
-                      f"{m['bytes_per_launch']:14d} {m['bw_TBps']:9.2f}")
+                print(
+                    f"        {bucket:14s} {m['per_iter_us']:12.2f} "
+                    f"{m['pct']:7.1f} {m['launches_per_iter']:14.2f} "
+                    f"{m['per_launch_us']:15.2f} "
+                    f"{m['bytes_per_launch']:14d} {m['bw_TBps']:9.2f}"
+                )
     return res
 
 
 def print_kernel_summary(results: List[CaseResult]) -> None:
     """Print one clean consolidated table containing only the amax and cast
     kernel metrics for every profiled use-case."""
-    rows = [r for r in results if r.amax_profile is not None
-            and r.cast_profile is not None]
+    rows = [r for r in results if r.amax_profile is not None and r.cast_profile is not None]
     if not rows:
         return
 
     print()
-    header = (f"{'rows x hidden':16s} {'shape_case':30s} {'groups':>6s} "
-              f"{'mode':10s} {'loop':6s} "
-              f"{'amax_us':>9s} {'amax_BW':>9s} {'cast_us':>9s} {'cast_BW':>9s}")
+    header = (
+        f"{'rows x hidden':16s} {'shape_case':30s} {'groups':>6s} "
+        f"{'mode':10s} {'loop':6s} "
+        f"{'amax_us':>9s} {'amax_BW':>9s} {'cast_us':>9s} {'cast_BW':>9s}"
+    )
     print("=" * len(header))
     print("amax + cast kernel profile (per-iter device time)")
     print("=" * len(header))
@@ -488,10 +528,12 @@ def print_kernel_summary(results: List[CaseResult]) -> None:
         a = r.amax_profile
         c = r.cast_profile
         shape = f"{r.actual_rows}x{r.hidden}"
-        print(f"{shape:16s} {r.shape_case:30s} {r.num_groups:6d} "
-              f"{r.mode:10s} {r.loop:6s} "
-              f"{a['per_iter_us']:9.2f} {a['bw_TBps']:9.2f} "
-              f"{c['per_iter_us']:9.2f} {c['bw_TBps']:9.2f}")
+        print(
+            f"{shape:16s} {r.shape_case:30s} {r.num_groups:6d} "
+            f"{r.mode:10s} {r.loop:6s} "
+            f"{a['per_iter_us']:9.2f} {a['bw_TBps']:9.2f} "
+            f"{c['per_iter_us']:9.2f} {c['bw_TBps']:9.2f}"
+        )
     print("-" * len(header))
     print("amax_us/cast_us = per-iter device time (us); BW in TB/s.")
 
@@ -499,37 +541,74 @@ def print_kernel_summary(results: List[CaseResult]) -> None:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--actual-rows", type=int, default=98304)
-    parser.add_argument("--allocated-rows", type=int, default=None,
-                        help="For varying-first-overalloc; default overalloc * "
-                             "actual-rows. Ignored when --shapes is given.")
+    parser.add_argument(
+        "--allocated-rows",
+        type=int,
+        default=None,
+        help=(
+            "For varying-first-overalloc; default overalloc * "
+            "actual-rows. Ignored when --shapes is given."
+        ),
+    )
     parser.add_argument("--hidden", type=int, default=2880)
-    parser.add_argument("--shapes", nargs="+", default=None,
-                        help="Sweep multiple shapes. Each entry is "
-                             "'rows[xX,:]hidden' (hidden optional, falls back to "
-                             "--hidden). '*' is allowed, e.g. "
-                             "'4096*16x4096 98304x2880'. Overrides "
-                             "--actual-rows/--hidden.")
-    parser.add_argument("--overalloc", type=int, default=2,
-                        help="Over-allocation factor: allocated_rows = "
-                             "overalloc * actual_rows (default 2). Used for the "
-                             "varying-first-overalloc* shape cases.")
-    parser.add_argument("--num-groups", type=int, nargs="+", default=[16, 64],
-                        help="Sweep one or more group counts (default: 16 64).")
+    parser.add_argument(
+        "--shapes",
+        nargs="+",
+        default=None,
+        help=(
+            "Sweep multiple shapes. Each entry is "
+            "'rows[xX,:]hidden' (hidden optional, falls back to "
+            "--hidden). '*' is allowed, e.g. "
+            "'4096*16x4096 98304x2880'. Overrides "
+            "--actual-rows/--hidden."
+        ),
+    )
+    parser.add_argument(
+        "--overalloc",
+        type=int,
+        default=2,
+        help=(
+            "Over-allocation factor: allocated_rows = "
+            "overalloc * actual_rows (default 2). Used for the "
+            "varying-first-overalloc* shape cases."
+        ),
+    )
+    parser.add_argument(
+        "--num-groups",
+        type=int,
+        nargs="+",
+        default=[16, 64],
+        help="Sweep one or more group counts (default: 16 64).",
+    )
     parser.add_argument("--num-buffers", type=int, default=4)
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--iters", type=int, default=200)
     parser.add_argument("--shape-cases", nargs="+", default=list(SHAPE_CASES))
     parser.add_argument("--modes", nargs="+", default=list(MODES))
-    parser.add_argument("--loop", choices=("eager", "graph", "both"), default="both",
-                        help="eager Python loop, captured CUDA graph, or both")
-    parser.add_argument("--profile", action="store_true",
-                        help="After each timed case, also run a torch.profiler pass "
-                             "and break down CUDA kernel time into "
-                             "{amax, compute_scale, cast} buckets. Adds overhead.")
-    parser.add_argument("--profile-table-only", action="store_true",
-                        help="Implies --profile. Suppress the verbose per-case "
-                             "kernel breakdown and only print the final "
-                             "consolidated amax + cast table.")
+    parser.add_argument(
+        "--loop",
+        choices=("eager", "graph", "both"),
+        default="both",
+        help="eager Python loop, captured CUDA graph, or both",
+    )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help=(
+            "After each timed case, also run a torch.profiler pass "
+            "and break down CUDA kernel time into "
+            "{amax, compute_scale, cast} buckets. Adds overhead."
+        ),
+    )
+    parser.add_argument(
+        "--profile-table-only",
+        action="store_true",
+        help=(
+            "Implies --profile. Suppress the verbose per-case "
+            "kernel breakdown and only print the final "
+            "consolidated amax + cast table."
+        ),
+    )
     parser.add_argument("--json-out", default=None)
     args = parser.parse_args()
 
@@ -554,15 +633,15 @@ def main():
     for actual_rows, hidden, _ in shapes:
         for ng in args.num_groups:
             if actual_rows % ng != 0:
-                raise SystemExit(
-                    f"actual_rows={actual_rows} not divisible by num_groups={ng}"
-                )
+                raise SystemExit(f"actual_rows={actual_rows} not divisible by num_groups={ng}")
 
     print(f"GPU: {torch.cuda.get_device_name(0)}")
     shapes_desc = ", ".join(f"{r}x{h}(alloc={a})" for r, h, a in shapes)
-    print(f"Config: shapes=[{shapes_desc}], overalloc={args.overalloc}, "
-          f"num_groups_sweep={args.num_groups}, "
-          f"iters={args.iters}, warmup={args.warmup}")
+    print(
+        f"Config: shapes=[{shapes_desc}], overalloc={args.overalloc}, "
+        f"num_groups_sweep={args.num_groups}, "
+        f"iters={args.iters}, warmup={args.warmup}"
+    )
     print()
 
     loop_modes = ("eager", "graph") if args.loop == "both" else (args.loop,)
@@ -576,8 +655,10 @@ def main():
     results: List[CaseResult] = []
     for actual_rows, hidden, allocated_rows in shapes:
         if not quiet:
-            print(f"################ shape: actual_rows={actual_rows} "
-                  f"hidden={hidden} allocated_rows={allocated_rows} ################")
+            print(
+                f"################ shape: actual_rows={actual_rows} "
+                f"hidden={hidden} allocated_rows={allocated_rows} ################"
+            )
         for num_groups in args.num_groups:
             if not quiet:
                 print(f"#### num_groups={num_groups} ####")
@@ -595,19 +676,23 @@ def main():
                         # launch event, which hides per-kernel time. Eager mode
                         # gives true per-kernel device time.
                         do_profile = args.profile and loop == "eager"
-                        results.append(run_case(
-                            shape_case, mode,
-                            actual_rows=actual_rows,
-                            allocated_rows=allocated_rows,
-                            hidden=hidden,
-                            num_groups=num_groups,
-                            num_buffers=args.num_buffers,
-                            warmup=args.warmup, iters=args.iters,
-                            mode_loop=loop,
-                            verbose=not quiet,
-                            profile_breakdown=do_profile,
-                            print_breakdown=not args.profile_table_only,
-                        ))
+                        results.append(
+                            run_case(
+                                shape_case,
+                                mode,
+                                actual_rows=actual_rows,
+                                allocated_rows=allocated_rows,
+                                hidden=hidden,
+                                num_groups=num_groups,
+                                num_buffers=args.num_buffers,
+                                warmup=args.warmup,
+                                iters=args.iters,
+                                mode_loop=loop,
+                                verbose=not quiet,
+                                profile_breakdown=do_profile,
+                                print_breakdown=not args.profile_table_only,
+                            )
+                        )
                 if not quiet:
                     print()
 

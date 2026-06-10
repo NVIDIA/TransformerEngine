@@ -453,7 +453,7 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
   switch (scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
       fp8::group_quantize<IS_ACT, ParamOP, OP>(input_tensor, noop_tensor, output_tensor,
-                                                &quant_config_cpp, stream);
+                                               &quant_config_cpp, stream);
       break;
     }
     case NVTE_MXFP8_1D_SCALING: {

@@ -188,8 +188,7 @@ void group_compute_amax_impl(const NVTEGroupedTensor input_, NVTEGroupedTensor o
              "Number of grouped input and output tensors must match.");
   NVTE_CHECK(input.has_data(), "Grouped amax input must have rowwise data.");
   NVTE_CHECK(!is_fp8_dtype(input.data.dtype),
-             "Grouped amax input must be unquantized, but got dtype=",
-             to_string(input.data.dtype));
+             "Grouped amax input must be unquantized, but got dtype=", to_string(input.data.dtype));
   NVTE_CHECK(output.amax.has_data() || output.columnwise_amax.has_data(),
              "Grouped amax output must have an amax buffer.");
 
@@ -257,8 +256,7 @@ void nvte_compute_amax_with_config(const NVTETensor input_, const NVTETensor out
 }
 
 void nvte_group_compute_amax_with_config(const NVTEGroupedTensor input, NVTEGroupedTensor output,
-                                         const NVTEQuantizationConfig config,
-                                         cudaStream_t stream) {
+                                         const NVTEQuantizationConfig config, cudaStream_t stream) {
   NVTE_API_CALL(nvte_group_compute_amax_with_config);
   group_compute_amax_impl(input, output, config, stream);
 }

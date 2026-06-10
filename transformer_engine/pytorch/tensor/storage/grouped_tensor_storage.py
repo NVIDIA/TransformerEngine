@@ -487,9 +487,7 @@ class GroupedTensorStorage:
                 if uniform_first_dim and not uniform_last_dim
                 else sum(first_dim_list)
             )
-            logical_last_dim = (
-                sum(last_dim_list) if not uniform_last_dim else last_dim_list[0]
-            )
+            logical_last_dim = sum(last_dim_list) if not uniform_last_dim else last_dim_list[0]
 
         return GroupedTensorStorage.make_grouped_tensor(
             num_tensors=num_tensors,
@@ -677,9 +675,7 @@ class GroupedTensorStorage:
         offsets = None
         shape = []
         if not all_same_first and not all_same_last:
-            tensor_offsets = GroupedTensorStorage.make_tensor_offsets(
-                first_dims * last_dims, 1
-            )
+            tensor_offsets = GroupedTensorStorage.make_tensor_offsets(first_dims * last_dims, 1)
         elif not all_same_first:
             # Need explicit offsets for non-uniform shapes
             # Offsets are based on number of elements and not pointers.
@@ -707,16 +703,15 @@ class GroupedTensorStorage:
         if not shape:
             if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
                 raise ValueError(
-                    "Varying-dimension grouped tensor construction is not graph-safe for block-scaling quantizers"
+                    "Varying-dimension grouped tensor construction is not graph-safe for"
+                    " block-scaling quantizers"
                 )
             else:
                 offsets = tensor_offsets.tolist()
                 if first_dims is not None and last_dims is not None:
                     first_dims_list = first_dims.tolist()
                     last_dims_list = last_dims.tolist()
-                    shape = [
-                        (first_dims_list[i], last_dims_list[i]) for i in range(num_tensors)
-                    ]
+                    shape = [(first_dims_list[i], last_dims_list[i]) for i in range(num_tensors)]
                 elif first_dims is not None:
                     first_dims_list = first_dims.tolist()
                     shape = [(rows, logical_last_dim) for rows in first_dims_list]

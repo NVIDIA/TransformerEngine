@@ -110,10 +110,8 @@ void nvte_compute_amax_with_config(const NVTETensor input, NVTETensor output,
  *  \param[in]     config           Quantization configuration.
  *  \param[in]     stream           CUDA stream used for the operation.
  */
-void nvte_group_compute_amax_with_config(const NVTEGroupedTensor input,
-                                         NVTEGroupedTensor output,
-                                         const NVTEQuantizationConfig config,
-                                         cudaStream_t stream);
+void nvte_group_compute_amax_with_config(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                                         const NVTEQuantizationConfig config, cudaStream_t stream);
 
 /*! \brief Update an FP8 tensor's scale based on its amax.
  *

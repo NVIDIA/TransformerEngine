@@ -18,8 +18,8 @@
 #include <cstdint>
 
 #include "../../common.h"
-#include "../../utils.cuh"
 #include "../../util/cuda_runtime.h"
+#include "../../utils.cuh"
 #include "../core/common.cuh"
 
 namespace transformer_engine {
@@ -94,14 +94,16 @@ __launch_bounds__(GROUPED_AMAX_KERNEL_THREADS) __global__
   size_t block_chunk_size = (total_active_elements + gridDim.x - 1) / gridDim.x;
   // Align block_chunk_size to a multiple of NVEC to ensure perfect vector alignment
   block_chunk_size = DIVUP(block_chunk_size, static_cast<size_t>(NVEC)) * NVEC;
-  // 
+  //
   if (block_chunk_size < GROUPED_AMAX_MIN_ELTS_PER_BLOCK) {
     block_chunk_size = GROUPED_AMAX_MIN_ELTS_PER_BLOCK;
   }
 
   // Calculate this block's local work range
   const size_t start_elt = blockIdx.x * block_chunk_size;
-  const size_t end_elt = start_elt + block_chunk_size < total_active_elements ? start_elt + block_chunk_size : total_active_elements;
+  const size_t end_elt = start_elt + block_chunk_size < total_active_elements
+                             ? start_elt + block_chunk_size
+                             : total_active_elements;
 
   if (start_elt >= end_elt) {
     return;
@@ -113,7 +115,8 @@ __launch_bounds__(GROUPED_AMAX_KERNEL_THREADS) __global__
   using IVecT = Vec<InputType, NVEC>;
 
   size_t curr_elt = start_elt;
-  size_t tensor_id = transformer_engine::dispatch::common::find_tensor_from_offsets(s_offsets, num_tensors, curr_elt);
+  size_t tensor_id = transformer_engine::dispatch::common::find_tensor_from_offsets(
+      s_offsets, num_tensors, curr_elt);
 
   while (curr_elt < end_elt) {
     const size_t t_next_offset = s_offsets[tensor_id + 1];
