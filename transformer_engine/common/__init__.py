@@ -191,6 +191,16 @@ def load_framework_extension(framework: str) -> None:
     sys.modules[module_name] = solib
     spec.loader.exec_module(solib)
 
+    # Plugin system: if NVTE_ENABLE_PLUGIN=1, let plugin stub take over
+    # transformer_engine_torch and register original pybind as _nv for CUDA backend.
+    if os.environ.get("NVTE_ENABLE_PLUGIN", "0") == "1":
+        sys.modules[module_name + "_nv"] = solib
+        try:
+            from plugin import load_plugins
+            load_plugins()
+        except ImportError as e:
+            print(f"[TE] NVTE_ENABLE_PLUGIN=1 but plugin import failed: {e}")
+
 
 def sanity_checks_for_pypi_installation() -> None:
     """Ensure that package is installed correctly if using PyPI."""
