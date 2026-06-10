@@ -10,14 +10,14 @@
 
 #include "ep_backend.h"
 
+#include <nccl_ep.h>
+
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <utility>
-
-#include <nccl_ep.h>
 
 #include "../common.h"
 #include "../util/cuda_runtime.h"
@@ -415,8 +415,7 @@ void EPBackend::combine(void* handle_mem, const NVTETensor expert_out,
                         cudaStream_t stream) {
   NVTE_CHECK(initialized_, "EPBackend not initialized");
   NVTE_CHECK(handle_mem != nullptr, "handle_mem must not be null");
-  NVTE_CHECK(nvte_tensor_shape(expert_out).ndim == 2,
-             "expert_out must be 2D [recv_T, hidden_dim]");
+  NVTE_CHECK(nvte_tensor_shape(expert_out).ndim == 2, "expert_out must be 2D [recv_T, hidden_dim]");
   NVTE_CHECK(nvte_tensor_shape(result).ndim == 2, "result must be 2D [T, hidden_dim]");
 
   NVTEShape expert_out_shape, result_shape;

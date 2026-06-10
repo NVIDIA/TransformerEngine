@@ -39,6 +39,7 @@ def require_nccl_ep() -> None:
             "rebuild Transformer Engine with NVTE_BUILD_WITH_NCCL_EP=0."
         )
 
+
 try:
     from . import pytorch
 except ImportError:
