@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import atexit
+import warnings
 from typing import Optional
 
 import torch
@@ -129,6 +130,12 @@ def ep_bootstrap(
     if ep_group.size() < 2:
         raise ValueError(f"ep_bootstrap requires ep_group.size() >= 2 (got {ep_group.size()}).")
     _check_nccl_runtime_version()
+    if zero_copy:
+        warnings.warn(
+            "ep_bootstrap(zero_copy=True) is experimental; the symm-mem IO path "
+            "and its alias contracts on EpBuffer slots are subject to change.",
+            stacklevel=2,
+        )
 
     # Materialize the PG's NCCL comm before borrowing its raw handle.
     dist.barrier(group=ep_group, device_ids=[torch.cuda.current_device()])
