@@ -102,8 +102,8 @@ bool ep_get_zero_copy() { return g_zero_copy_enabled.load(std::memory_order_rela
 
 void ep_initialize(uintptr_t comm_ptr, const std::string& group_name, int64_t num_experts,
                    int64_t max_tokens_per_rank, int64_t max_recv_tokens_per_rank,
-                   int64_t hidden_dim, int64_t max_num_sms,
-                   pybind11::object max_token_dtype, bool zero_copy) {
+                   int64_t hidden_dim, int64_t max_num_sms, pybind11::object max_token_dtype,
+                   bool zero_copy) {
   NVTE_CHECK(!group_name.empty(), "group_name must be non-empty (used for symm-mem lookup)");
   NVTE_CHECK(comm_ptr != 0, "comm_ptr must be non-null (torch NCCL host comm pointer)");
   NVTE_CHECK(!g_ep_initialized, "ep_initialize called twice without ep_finalize");

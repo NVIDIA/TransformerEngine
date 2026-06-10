@@ -123,7 +123,9 @@ def main():
         hidden_dim=args.hidden,
     )
     try:
-        _run_layer(args, rank, world_size, ep_size, num_experts, num_local_experts, T, recv_pr, device)
+        _run_layer(
+            args, rank, world_size, ep_size, num_experts, num_local_experts, T, recv_pr, device
+        )
     finally:
         ep_finalize()
         dist.destroy_process_group()
@@ -196,10 +198,7 @@ def _run_layer(args, rank, world_size, ep_size, num_experts, num_local_experts, 
         torch.cuda.synchronize()
         dt_ms = (time.perf_counter() - t0) * 1000.0 / args.benchmark_iters
         if rank == 0:
-            print(
-                f"[ep_moe --benchmark] HBM: {dt_ms:.3f} ms/iter "
-                f"(iters={args.benchmark_iters})"
-            )
+            print(f"[ep_moe --benchmark] HBM: {dt_ms:.3f} ms/iter (iters={args.benchmark_iters})")
 
     if args.check:
         # All-gather inputs/outputs/grads for a global reference comparison.
