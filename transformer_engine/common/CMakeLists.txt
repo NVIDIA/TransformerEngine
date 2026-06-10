@@ -457,14 +457,14 @@ if(NOT EXISTS "${NCCL_EP_INCLUDE_DIR}/nccl_ep.h")
 endif()
 message(STATUS "NCCL EP headers: ${NCCL_EP_INCLUDE_DIR}")
 
-# -- libnccl_ep.so ----------------------------------------------------------
-# Resolved at runtime via dlopen in ep/ep_nccl_loader.cpp - NOT link-time bound,
-# so libtransformer_engine.so still loads on systems missing libnccl_ep.so or
-# with too-old NCCL. Locate the build artifact only to keep it on the rpath
-# (so dlopen by SONAME finds the bundled copy via DT_RUNPATH).
+# -- libnccl_ep.a -----------------------------------------------------------
+# Statically linked into libtransformer_engine.so. EPBackend::initialize checks
+# NCCL >= 2.30.4 before any nccl_ep call, so the newer NCCL symbols nccl_ep
+# imports stay unresolved (and harmless) under default ELF lazy binding when
+# the gate trips. LD_BIND_NOW environments lose this property.
 set(NCCL_EP_LIB_DIR "${NCCL_EP_SUBMODULE_ROOT}/build/lib")
-find_library(NCCL_EP_LIB
-    NAMES nccl_ep libnccl_ep
+find_file(NCCL_EP_LIB
+    NAMES libnccl_ep.a
     HINTS ${NCCL_EP_LIB_DIR}
     NO_DEFAULT_PATH
     REQUIRED)
@@ -501,27 +501,20 @@ target_include_directories(transformer_engine PRIVATE
     ${NCCL_EP_INCLUDE_DIR}
     ${NCCL_INCLUDE_DIR})
 
-# libnccl_ep.so is dlopen'd from ep_nccl_loader.cpp, so do NOT link it here.
-# libnccl.so stays direct-linked: only ancient symbols (ncclGetVersion,
-# ncclCommCount, ncclGetErrorString) are referenced from this TU.
-target_link_libraries(transformer_engine PUBLIC
-    ${NCCL_LIB}
-    ${CMAKE_DL_LIBS})
-
-# rpath for dlopen("libnccl_ep.so.0"): in-tree build dir for dev, $ORIGIN for
-# the wheel (libnccl_ep.so.0 ships beside libtransformer_engine.so).
-# libnccl.so: resolved by the dynamic linker via its configured paths.
-set_target_properties(transformer_engine PROPERTIES
-    BUILD_RPATH "${NCCL_EP_LIB_DIR}"
-    INSTALL_RPATH "$ORIGIN")
+# libnccl.so direct symbols (ncclGetVersion etc.) come from libnccl_ep.a's
+# DT_NEEDED chain plus this TU's own references. CUDA::cuda_driver must follow
+# the static archive on the link line so --as-needed records libcuda.so.1.
+target_link_libraries(transformer_engine PUBLIC ${NCCL_LIB})
+target_link_libraries(transformer_engine PRIVATE
+    -Wl,--whole-archive ${NCCL_EP_LIB} -Wl,--no-whole-archive
+    CUDA::cuda_driver)
 
 target_sources(transformer_engine PRIVATE
     ep/ep_backend.cpp
-    ep/ep_api.cpp
-    ep/ep_nccl_loader.cpp)
+    ep/ep_api.cpp)
 target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_NCCL_EP)
 
-message(STATUS "NCCL EP enabled (dlopen at runtime): ${NCCL_EP_LIB}")
+message(STATUS "NCCL EP enabled (static link): ${NCCL_EP_LIB}")
 message(STATUS "NCCL EP include: ${NCCL_EP_INCLUDE_DIR}")
 else()
   # NCCL EP off: ep_api.cpp's #else branch exports throwing nvte_ep_* stubs.

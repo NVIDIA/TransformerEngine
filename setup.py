@@ -188,12 +188,7 @@ def _discover_nccl_home() -> str:
 
 
 def build_nccl_ep_submodule() -> str:
-    """Build libnccl_ep.so from the 3rdparty/nccl submodule.
-
-    Returns the discovered NCCL core install prefix (the path that contains
-    include/nccl.h and lib/libnccl.so), which the caller passes to CMake as
-    NCCL_INCLUDE_DIR for TE's own NCCL link.
-    """
+    """Build libnccl_ep.a from the 3rdparty/nccl submodule and return NCCL_HOME."""
     nccl_root = current_file_path / "3rdparty" / "nccl"
     if not (nccl_root / "Makefile").exists():
         raise RuntimeError(
@@ -202,7 +197,7 @@ def build_nccl_ep_submodule() -> str:
         )
 
     build_dir = nccl_root / "build"
-    nccl_ep_lib = build_dir / "lib" / "libnccl_ep.so"
+    nccl_ep_lib = build_dir / "lib" / "libnccl_ep.a"
 
     # Caller gates on arch >= 90 or "native"; let nvcc resolve "native".
     arch_tokens = [a.strip() for a in str(cuda_archs() or "").split(";") if a.strip()]
@@ -226,22 +221,12 @@ def build_nccl_ep_submodule() -> str:
     env["NCCL_EP_BUILDDIR"] = str(build_dir)
 
     if not nccl_ep_lib.exists():
-        print(f"[NCCL EP] Building libnccl_ep.so (gencode='{gencode}')")
+        print(f"[NCCL EP] Building libnccl_ep.a (gencode='{gencode}')")
         subprocess.check_call(
             ["make", "-j", str(nproc), "-C", "contrib/nccl_ep", "lib"],
             cwd=str(nccl_root),
             env=env,
         )
-
-    # Stage libnccl_ep.so.0 alongside libtransformer_engine.so so $ORIGIN-rpath
-    # finds it in the installed wheel.
-    soname = "libnccl_ep.so.0"
-    src = (build_dir / "lib" / soname).resolve()
-    dst = current_file_path / "transformer_engine" / soname
-    if dst.is_symlink() or dst.exists():
-        dst.unlink()
-    shutil.copy2(src, dst)
-    print(f"[NCCL EP] Bundled {dst} ({src.stat().st_size // (1 << 20)} MB)")
 
     return nccl_home
 
@@ -326,8 +311,7 @@ if __name__ == "__main__":
     else:
         install_requires, test_requires = setup_requirements()
         ext_modules = [setup_common_extension()]
-        # libnccl_ep.so.0 is staged by build_nccl_ep_submodule(); ship it.
-        package_data = {"": ["VERSION.txt"], "transformer_engine": ["libnccl_ep.so*"]}
+        package_data = {"": ["VERSION.txt"]}
         include_package_data = True
         extras_require = {"test": test_requires}
 

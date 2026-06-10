@@ -87,8 +87,8 @@ gtest_discover_tests(test_comm_gemm DISCOVERY_TIMEOUT 600)
 # -- EP distributed tests ------------------------------------------------------
 # Launched via mpirun; ncclUniqueId exchange uses MPI_Bcast (see test_ep_common.h).
 # The test binary only uses NCCL core symbols (ncclMemAlloc, ncclCommWindow*);
-# all ncclEp* calls live behind TE's public <transformer_engine/ep.h>, which
-# resolves libnccl_ep.so via dlopen in libtransformer_engine.so itself.
+# all ncclEp* calls live behind TE's public <transformer_engine/ep.h>, which is
+# statically linked into libtransformer_engine.so.
 message(STATUS "EP test: NCCL headers: ${NCCL_INCLUDE_DIR}")
 set(EP_TEST_COMMON_INCLUDES
     ${NCCL_INCLUDE_DIR}
@@ -116,4 +116,4 @@ target_link_libraries(test_ep PUBLIC ${EP_TEST_COMMON_LIBS})
 
 # Do NOT use gtest_discover_tests - these binaries require multi-process
 # launch via run_test_ep.sh, not direct single-process execution.
-message(STATUS "EP distributed tests enabled (TE backend dlopens libnccl_ep.so)")
+message(STATUS "EP distributed tests enabled (NCCL EP statically linked into libtransformer_engine.so)")
