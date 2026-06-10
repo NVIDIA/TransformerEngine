@@ -537,7 +537,6 @@ class EpCombinePrimitive(BasePrimitive):
             expert_out,
             top_k=int(top_k),
             dispatch_output_per_expert_alignment=int(dispatch_output_per_expert_alignment),
-            num_local_tokens=_prod(out_leading_shape),
         )
 
     @staticmethod
@@ -675,7 +674,6 @@ class EpDispatchBwdPrimitive(BasePrimitive):
             g_recv_topk_weights,
             top_k=int(top_k),
             dispatch_output_per_expert_alignment=int(dispatch_output_per_expert_alignment),
-            num_local_tokens=_prod(out_leading_shape),
         )
 
     @staticmethod

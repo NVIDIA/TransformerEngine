@@ -113,29 +113,7 @@ std::shared_ptr<EpResources> AcquireEpResources() {
 // attributes; prepare passes them to the C API as NVTEEpLayerConfig, and the
 // per-step ops carry top_k only to validate the topk_idx last dim.
 
-struct EpPrepareConfig {
-  int64_t top_k;
-  int64_t dispatch_output_per_expert_alignment;
-};
-
-struct EpDispatchConfig {
-  int64_t top_k;
-  int64_t dispatch_output_per_expert_alignment;
-};
-
-struct EpCombineConfig {
-  int64_t top_k;
-  int64_t dispatch_output_per_expert_alignment;
-  int64_t num_local_tokens;
-};
-
-struct EpDispatchBwdConfig {
-  int64_t top_k;
-  int64_t dispatch_output_per_expert_alignment;
-  int64_t num_local_tokens;
-};
-
-struct EpCombineBwdConfig {
+struct EpConfig {
   int64_t top_k;
   int64_t dispatch_output_per_expert_alignment;
 };
@@ -215,7 +193,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpInstantiateHandler, EpInstantiateImpl, FFI::Bind
 
 Error_Type EpPrepareFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_Type topk_idx,
                         Result_Type token_counts, Result_Type handle_mem, Result_Type workspace,
-                        EpPrepareConfig config) {
+                        EpConfig config) {
   (void)ep_state;  // lifetime only.
   auto topk_dims = topk_idx.dimensions();
   NVTE_CHECK(topk_dims.size() >= 2,
@@ -260,7 +238,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpPrepareHandler, EpPrepareFFI,
                                   .Ret<Buffer_Type>()                         // token_counts
                                   .Ret<Buffer_Type>()                         // handle_mem
                                   .Ret<Buffer_Type>()  // workspace (FFI scratch)
-                                  .Attrs<EpPrepareConfig>(),
+                                  .Attrs<EpConfig>(),
                               FFI_CudaGraph_Traits);
 
 // ── ep_dispatch ───────────────────────────────────────────────────────────────
@@ -268,7 +246,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpPrepareHandler, EpPrepareFFI,
 Error_Type EpDispatchFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_Type handle_mem,
                          Buffer_Type topk_idx, Buffer_Type tokens, Buffer_Type topk_weights,
                          Result_Type recv_tokens, Result_Type recv_topk_weights,
-                         Result_Type workspace, EpDispatchConfig config) {
+                         Result_Type workspace, EpConfig config) {
   (void)ep_state;
   auto token_dims = tokens.dimensions();
   NVTE_CHECK(token_dims.size() >= 2,
@@ -351,13 +329,13 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpDispatchHandler, EpDispatchFFI,
                                   .Ret<Buffer_Type>()                         // recv_tokens
                                   .Ret<Buffer_Type>()                         // recv_topk_weights
                                   .Ret<Buffer_Type>()  // workspace (FFI scratch)
-                                  .Attrs<EpDispatchConfig>(),
+                                  .Attrs<EpConfig>(),
                               FFI_CudaGraph_Traits);
 
 // ── ep_combine ────────────────────────────────────────────────────────────────
 
 Error_Type EpCombineFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_Type handle_mem,
-                        Buffer_Type expert_out, Result_Type result, EpCombineConfig config) {
+                        Buffer_Type expert_out, Result_Type result, EpConfig config) {
   (void)ep_state;
   auto eo_dims = expert_out.dimensions();
   NVTE_CHECK(eo_dims.size() >= 2,
@@ -376,9 +354,6 @@ Error_Type EpCombineFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_T
   NVTE_CHECK(res_dims.size() >= 2,
              "result must be at least 2D [..., H]; got ndim=", res_dims.size());
   const size_t res_T_flat = product(res_dims, 0, res_dims.size() - 1);
-  NVTE_CHECK(static_cast<int64_t>(res_T_flat) == config.num_local_tokens,
-             "result leading-dim product (", res_T_flat, ") must equal num_local_tokens (",
-             config.num_local_tokens, ")");
   std::vector<size_t> res_shape = {res_T_flat, H};
   auto result_ = TensorWrapper(result->untyped_data(), res_shape, eo_dtype);
 
@@ -395,7 +370,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpCombineHandler, EpCombineFFI,
                                   .Arg<Buffer_Type>()                         // handle_mem
                                   .Arg<Buffer_Type>()                         // expert_out
                                   .Ret<Buffer_Type>()                         // result
-                                  .Attrs<EpCombineConfig>(),
+                                  .Attrs<EpConfig>(),
                               FFI_CudaGraph_Traits);
 
 // ── ep_dispatch_bwd ───────────────────────────────────────────────────────────
@@ -403,7 +378,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpCombineHandler, EpCombineFFI,
 Error_Type EpDispatchBwdFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_Type handle_mem,
                             Buffer_Type grad, Buffer_Type g_recv_topk_weights,
                             Result_Type grad_tokens, Result_Type grad_topk_weights,
-                            EpDispatchBwdConfig config) {
+                            EpConfig config) {
   (void)ep_state;
   auto grad_dims = grad.dimensions();
   NVTE_CHECK(grad_dims.size() >= 2,
@@ -433,9 +408,6 @@ Error_Type EpDispatchBwdFFI(cudaStream_t stream, EpInstanceState* ep_state, Buff
   NVTE_CHECK(out_dims.size() >= 2,
              "grad_tokens must be at least 2D [..., H], got ndim=", out_dims.size());
   const size_t T_flat = product(out_dims, 0, out_dims.size() - 1);
-  NVTE_CHECK(static_cast<int64_t>(T_flat) == config.num_local_tokens,
-             "grad_tokens leading-dim product (", T_flat, ") must equal num_local_tokens (",
-             config.num_local_tokens, ")");
   std::vector<size_t> out_shape = {T_flat, H};
   auto grad_tokens_ = TensorWrapper(grad_tokens->untyped_data(), out_shape, g_dtype);
 
@@ -468,14 +440,14 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpDispatchBwdHandler, EpDispatchBwdFFI,
                                   .Arg<Buffer_Type>()  // g_recv_topk_weights
                                   .Ret<Buffer_Type>()  // grad_tokens
                                   .Ret<Buffer_Type>()  // grad_topk_weights
-                                  .Attrs<EpDispatchBwdConfig>(),
+                                  .Attrs<EpConfig>(),
                               FFI_CudaGraph_Traits);
 
 // ── ep_combine_bwd ────────────────────────────────────────────────────────────
 
 Error_Type EpCombineBwdFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_Type handle_mem,
                            Buffer_Type grad, Result_Type grad_expert_out,
-                           EpCombineBwdConfig config) {
+                           EpConfig config) {
   (void)ep_state;
   auto grad_dims = grad.dimensions();
   NVTE_CHECK(grad_dims.size() >= 2,
@@ -513,32 +485,14 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpCombineBwdHandler, EpCombineBwdFFI,
                                   .Arg<Buffer_Type>()                         // handle_mem
                                   .Arg<Buffer_Type>()  // grad (w.r.t. result)
                                   .Ret<Buffer_Type>()  // grad_expert_out
-                                  .Attrs<EpCombineBwdConfig>(),
+                                  .Attrs<EpConfig>(),
                               FFI_CudaGraph_Traits);
 
 }  // namespace jax
 }  // namespace transformer_engine
 
 XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
-    transformer_engine::jax::EpPrepareConfig, ::xla::ffi::StructMember<int64_t>("top_k"),
-    ::xla::ffi::StructMember<int64_t>("dispatch_output_per_expert_alignment"));
-
-XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
-    transformer_engine::jax::EpDispatchConfig, ::xla::ffi::StructMember<int64_t>("top_k"),
-    ::xla::ffi::StructMember<int64_t>("dispatch_output_per_expert_alignment"));
-
-XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
-    transformer_engine::jax::EpCombineConfig, ::xla::ffi::StructMember<int64_t>("top_k"),
-    ::xla::ffi::StructMember<int64_t>("dispatch_output_per_expert_alignment"),
-    ::xla::ffi::StructMember<int64_t>("num_local_tokens"));
-
-XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
-    transformer_engine::jax::EpDispatchBwdConfig, ::xla::ffi::StructMember<int64_t>("top_k"),
-    ::xla::ffi::StructMember<int64_t>("dispatch_output_per_expert_alignment"),
-    ::xla::ffi::StructMember<int64_t>("num_local_tokens"));
-
-XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
-    transformer_engine::jax::EpCombineBwdConfig, ::xla::ffi::StructMember<int64_t>("top_k"),
+    transformer_engine::jax::EpConfig, ::xla::ffi::StructMember<int64_t>("top_k"),
     ::xla::ffi::StructMember<int64_t>("dispatch_output_per_expert_alignment"));
 
 #endif  // NVTE_WITH_NCCL_EP
