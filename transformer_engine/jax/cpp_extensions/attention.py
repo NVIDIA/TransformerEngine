@@ -75,6 +75,7 @@ __all__ = [
         "cp_axis",
         "cp_striped_window_size",
         "stripe_size",
+        "return_max_logit",
     ],
 )
 @dataclass(frozen=True)
@@ -99,6 +100,7 @@ class _FusedAttnConfig:
     stripe_size: (
         int | None
     )  # Only for CP + Striped. For Ring P2P, stripe_size=1 only.For AG, stripe_size>=1.
+    return_max_logit: bool = False
 
 
 @dataclass(frozen=True)
@@ -122,6 +124,7 @@ class FusedAttnHelper:
     head_dim_qk: int
     head_dim_v: int
     window_size: Tuple[int, int]
+    return_max_logit: bool = False
 
     def is_fused_attn_kernel_available(self):
         """Check if there is available fused attention kernel"""
@@ -146,6 +149,7 @@ class FusedAttnHelper:
             self.head_dim_v,
             self.window_size[0],
             self.window_size[1],
+            self.return_max_logit,
             not self.is_non_deterministic_allowed(),
         )
 
@@ -351,6 +355,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             q_head_dim,
             v_head_dim,
             config.window_size,
+            config.return_max_logit,
         ).get_fused_attn_backend()
 
         if backend == NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen:
@@ -374,6 +379,14 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         else:
             raise ValueError(f"Unsupported {backend=}")
         softmax_aux_aval = q_aval.update(shape=softmax_shape, dtype=softmax_dtype)
+        if config.return_max_logit:
+            if config.qkv_layout.is_thd() and get_cudnn_version() >= (9, 6, 0):
+                max_tensor_shape = (*batch_shape, q_max_seqlen, attn_heads, 1)
+            else:
+                max_tensor_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
+        else:
+            max_tensor_shape = (0,)
+        max_tensor_aval = q_aval.update(shape=max_tensor_shape, dtype=softmax_dtype)
 
         # JAX does not enable 64-bit int by default so we get XLA to allocate x8 memory with
         # 32-bit unsigned int to get the buffer size we need in the C++ kernel
@@ -420,6 +433,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             config.max_segments_per_seq,
             config.window_size[0],
             config.window_size[1],
+            config.return_max_logit,
             bottom_right_diagonal,
         )
         wkspace_aval = q_aval.update(
@@ -440,17 +454,19 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 f" {softmax_offset_aval.shape}"
             )
 
-        return out_aval, softmax_aux_aval, rng_state_aval, wkspace_aval
+        return out_aval, softmax_aux_aval, max_tensor_aval, rng_state_aval, wkspace_aval
 
     @staticmethod
     def outer_abstract(*args, **kwargs):
         """
         Fused attention fwd outer primitive abstract
         """
-        out_aval, softmax_aux_aval, rng_state_aval, _ = FusedAttnFwdPrimitive.abstract(
+        out_aval, softmax_aux_aval, _, rng_state_aval, _ = FusedAttnFwdPrimitive.abstract(
             *args, **kwargs
         )
-        return out_aval, softmax_aux_aval, rng_state_aval
+        max_logit_shape = (out_aval.shape[-2],) if kwargs["config"].return_max_logit else (0,)
+        max_logit_aval = out_aval.update(shape=max_logit_shape, dtype=out_aval.dtype)
+        return out_aval, softmax_aux_aval, rng_state_aval, max_logit_aval
 
     @staticmethod
     def lowering(
@@ -534,6 +550,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             mask_type=int(config.attn_mask_type.value),
             qkv_layout=int(config.qkv_layout.value),
             is_training=config.is_training,
+            return_max_logit=config.return_max_logit,
             deterministic=not FusedAttnHelper.is_non_deterministic_allowed(),
             window_size_left=window_size_left,
             window_size_right=window_size_right,
@@ -577,6 +594,9 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 config.max_segments_per_seq,
             )
         )
+        raw_q_seqlen = q_seqlen
+        raw_q_seq_offsets = q_seq_offsets
+
         if config.qkv_layout.is_thd():
 
             def _fix_len_take(x, condition, fill_value=-1):
@@ -633,7 +653,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         q_cu_seqlen = generate_cu_seqlen(q_seqlen.flatten())
         kv_cu_seqlen = generate_cu_seqlen(kv_seqlen.flatten())
 
-        output, softmax_aux, rng_state, _ = FusedAttnFwdPrimitive.inner_primitive.bind(
+        output, softmax_aux, max_tensor, rng_state, _ = FusedAttnFwdPrimitive.inner_primitive.bind(
             q,
             k,
             v,
@@ -650,7 +670,39 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             _kv_segment_pos,
             config=config,
         )
-        return output, softmax_aux, rng_state
+        max_logit = FusedAttnFwdPrimitive._reduce_max_logit(
+            max_tensor, output, raw_q_seqlen, raw_q_seq_offsets, config
+        )
+        return output, softmax_aux, rng_state, max_logit
+
+    @staticmethod
+    def _reduce_max_logit(max_tensor, output, q_seqlen, q_seq_offsets, config):
+        """Reduce cuDNN's raw Max tensor to PyTorch-compatible per-head max_logit."""
+        if not config.return_max_logit:
+            return jnp.zeros((0,), dtype=output.dtype)
+
+        if config.qkv_layout.is_thd() and max_tensor.ndim == 4:
+            q_seqlen = jnp.where(q_seqlen > 0, q_seqlen, 0)
+            q_seq_offsets = jnp.where(q_seq_offsets >= 0, q_seq_offsets, -1)
+            token_idx = jnp.arange(output.shape[-3], dtype=q_seq_offsets.dtype)
+            valid = jnp.any(
+                (q_seq_offsets[..., :-1, None] >= 0)
+                & (token_idx >= q_seq_offsets[..., :-1, None])
+                & (token_idx < (q_seq_offsets[..., :-1, None] + q_seqlen[..., None])),
+                axis=-2,
+            )
+            if max_tensor.shape[1] == output.shape[-3]:
+                max_tensor = jnp.where(valid[:, :, None, None], max_tensor, -jnp.inf)
+            else:
+                max_tensor = jnp.where(valid[:, None, :, None], max_tensor, -jnp.inf)
+
+        if max_tensor.ndim == 3:
+            amax_dims = (0, 2)
+        elif config.qkv_layout.is_thd() and max_tensor.shape[1] == output.shape[-3]:
+            amax_dims = (0, 1, 3)
+        else:
+            amax_dims = (0, 2, 3)
+        return jnp.max(max_tensor, axis=amax_dims).astype(output.dtype)
 
     @staticmethod
     def batcher(batched_args, batch_dims, *, config):
@@ -662,7 +714,8 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         q_bdim, _, _, _, _, seed_bdim, *_ = batch_dims
         # Pass through; segment_ids/segment_pos may have different batch dims (e.g. vmapped ids,
         # replicated pos). get_seqlens_and_offsets() in attention.py handles conversion without expanding.
-        out_bdims = q_bdim, q_bdim, seed_bdim
+        max_logit_bdim = q_bdim if config.return_max_logit else None
+        out_bdims = q_bdim, q_bdim, seed_bdim, max_logit_bdim
         return (
             FusedAttnFwdPrimitive.outer_primitive.bind(*batched_args, config=config),
             out_bdims,
@@ -716,12 +769,16 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             raise ValueError(f"Unsupported {config.qkv_layout=}")
 
         rng_state_sharding = NamedSharding(mesh, PartitionSpec(get_all_mesh_axes(), None))
-        return (out_sharding, softmax_aux_sharding, rng_state_sharding)
+        max_logit_sharding = NamedSharding(
+            mesh, PartitionSpec(q_spec[-2] if config.return_max_logit else None)
+        )
+        return (out_sharding, softmax_aux_sharding, rng_state_sharding, max_logit_sharding)
 
     @staticmethod
     def partition(config, mesh, arg_infos, result_infos):
         out_sharding = result_infos[0].sharding
         softmax_aux_sharding = result_infos[1].sharding
+        max_logit_sharding = result_infos[3].sharding
         rng_state_sharding = seed_sharding = NamedSharding(
             mesh, PartitionSpec(get_all_mesh_axes(), None)
         )
@@ -730,7 +787,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         arg_shardings[-1] = arg_shardings[-3]
         arg_shardings[-2] = arg_shardings[-4]
         arg_shardings = tuple(arg_shardings)
-        out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding)
+        out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding, max_logit_sharding)
         impl = partial(FusedAttnFwdPrimitive.impl, config=config)
         return mesh, impl, out_shardings, arg_shardings
 
@@ -759,8 +816,10 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         else:
             softmax_aux_sharding = ("…0", "head", "seqlen", "i")
 
+        max_logit_sharding = ("head",) if config.return_max_logit else ("max_logit",)
         return SdyShardingRule(
-            tuple(input_spec), (out_sharding, softmax_aux_sharding, rng_sharding)
+            tuple(input_spec),
+            (out_sharding, softmax_aux_sharding, rng_sharding, max_logit_sharding),
         )
 
 
@@ -1813,19 +1872,22 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
         ), "Sliding window attention is not supported when context parallelism is enabled"
         if not is_context_parallel:
             return FusedAttnFwdPrimitive.partition(config, mesh, arg_infos, result_infos)
+        if config.return_max_logit:
+            raise NotImplementedError("return_max_logit is not yet supported with context parallelism")
 
         helper = _FusedAttnCPWithAllGatherHelper(mesh, config)
         helper.check_supported()
 
         out_sharding = result_infos[0].sharding
         softmax_aux_sharding = result_infos[1].sharding
+        max_logit_sharding = result_infos[3].sharding
         rng_state_sharding = seed_sharding = NamedSharding(
             mesh, PartitionSpec(get_all_mesh_axes(), None)
         )
         arg_shardings = [arg_i.sharding for arg_i in arg_infos]
         arg_shardings[5] = seed_sharding
         arg_shardings = tuple(arg_shardings)
-        out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding)
+        out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding, max_logit_sharding)
 
         def impl(
             q,
@@ -1873,7 +1935,7 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
                     q_seqlen_for_step = q_seqlen / (cp_size * 2)
                     num_kv_chunks = kv_max_seqlen // kv_seqlens_for_rank[sub_idx]
                     kv_seqlen_for_step = (kv_seqlen / (cp_size * 2)) * num_kv_chunks
-                    output, softmax_aux, rng_state = FusedAttnFwdPrimitive.impl(
+                    output, softmax_aux, rng_state, _ = FusedAttnFwdPrimitive.impl(
                         q_split[sub_idx],
                         k_unmasked,
                         v_unmasked,
@@ -1895,8 +1957,9 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
                 output = jnp.concatenate((results[0][0], results[1][0]), axis=1)
                 softmax_aux = jnp.concatenate((results[0][1], results[1][1]), axis=2)
                 rng_state = results[1][2]  # Use the final RNG state
+                max_logit = jnp.zeros((0,), dtype=output.dtype)
 
-                return output, softmax_aux, rng_state
+                return output, softmax_aux, rng_state, max_logit
 
             k_ag, v_ag = helper.all_gather_kv(k, v)
 
@@ -2106,19 +2169,22 @@ class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
         is_context_parallel = get_mesh_axis_size(config.cp_axis, mesh) > 1
         if not is_context_parallel:
             return FusedAttnFwdPrimitive.partition(config, mesh, arg_infos, result_infos)
+        if config.return_max_logit:
+            raise NotImplementedError("return_max_logit is not yet supported with context parallelism")
 
         helper = _FusedAttnCPWithAllGatherHelper(mesh, config)
         helper.check_supported()
 
         out_sharding = result_infos[0].sharding
         softmax_aux_sharding = result_infos[1].sharding
+        max_logit_sharding = result_infos[3].sharding
         rng_state_sharding = seed_sharding = NamedSharding(
             mesh, PartitionSpec(get_all_mesh_axes(), None)
         )
         arg_shardings = [arg_i.sharding for arg_i in arg_infos]
         arg_shardings[5] = seed_sharding
         arg_shardings = tuple(arg_shardings)
-        out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding)
+        out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding, max_logit_sharding)
 
         def impl(
             q,
@@ -2182,7 +2248,7 @@ class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
                     max_segments_per_seq=adjusted_max_segments_per_seq,
                 )
 
-                output, softmax_aux, rng_state = FusedAttnFwdPrimitive.impl(
+                output, softmax_aux, rng_state, _ = FusedAttnFwdPrimitive.impl(
                     q,  # sharded for rank
                     k,  # ag
                     v,  # ag
@@ -2201,7 +2267,8 @@ class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
                         max_seqlen=kv_max_seqlen, cp_size=cp_size
                     ),
                 )
-                return output, softmax_aux, rng_state
+                max_logit = jnp.zeros((0,), dtype=output.dtype)
+                return output, softmax_aux, rng_state, max_logit
 
             # AG the k, v, kv_segment_ids and kv_segment_pos
             k_ag, v_ag = helper.all_gather_kv(k, v)
@@ -2556,12 +2623,15 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
         ), "Sliding window attention is not supported when context parallelism is enabled"
         if not is_context_parallel:
             return FusedAttnFwdPrimitive.partition(config, mesh, arg_infos, result_infos)
+        if config.return_max_logit:
+            raise NotImplementedError("return_max_logit is not yet supported with context parallelism")
 
         helper = _FusedAttnCPWithP2PHelper(mesh, config)
         helper.check_supported()
 
         out_sharding = result_infos[0].sharding
         softmax_aux_sharding = result_infos[1].sharding
+        max_logit_sharding = result_infos[3].sharding
         rng_state_sharding = seed_sharding = NamedSharding(
             mesh, PartitionSpec(get_all_mesh_axes(), None)
         )
@@ -2571,7 +2641,7 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
         arg_shardings[-1] = arg_shardings[-3]
         arg_shardings[-2] = arg_shardings[-4]
         arg_shardings = tuple(arg_shardings)
-        out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding)
+        out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding, max_logit_sharding)
 
         def ring_attn_fwd_impl(
             q,
@@ -2619,7 +2689,7 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
                 def mask_compute(attn_mask_type):
                     q_seqlen_per_step = helper.adjust_seqlen(q_seqlen, q_max_seqlen, idx)
                     kv_seqlen_per_step = helper.adjust_seqlen(kv_seqlen, kv_max_seqlen, idx)
-                    output_per_step, softmax_aux_per_step, _ = FusedAttnFwdPrimitive.impl(
+                    output_per_step, softmax_aux_per_step, _, _ = FusedAttnFwdPrimitive.impl(
                         q,
                         kv,
                         _not_used,
@@ -2645,7 +2715,7 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
                     q_seqlen_per_step = helper.adjust_seqlen(q_seqlen, q_max_seqlen, idx)
                     kv_seqlen_per_step = helper.adjust_seqlen(kv_seqlen, kv_max_seqlen, idx) // 2
                     kv_part = lax.slice_in_dim(kv, 0, kv.shape[1] // 2, axis=1)
-                    output_per_step, softmax_aux_per_step, _ = FusedAttnFwdPrimitive.impl(
+                    output_per_step, softmax_aux_per_step, _, _ = FusedAttnFwdPrimitive.impl(
                         q,
                         kv_part,
                         _not_used,
@@ -2668,7 +2738,7 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
                     q_seqlen_per_step = helper.adjust_seqlen(q_seqlen, q_max_seqlen, idx) // 2
                     kv_seqlen_per_step = helper.adjust_seqlen(kv_seqlen, kv_max_seqlen, idx)
                     q_part = lax.slice_in_dim(q, q_max_seqlen // 2, q_max_seqlen, axis=1)
-                    output_per_step, softmax_aux_per_step, _ = FusedAttnFwdPrimitive.impl(
+                    output_per_step, softmax_aux_per_step, _, _ = FusedAttnFwdPrimitive.impl(
                         q_part,
                         kv,
                         _not_used,
@@ -2750,7 +2820,8 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
             (kv, output, softmax_aux) = carry
 
             output = output.astype(q.dtype)
-            return output, softmax_aux, rng_state
+            max_logit = jnp.zeros((0,), dtype=output.dtype)
+            return output, softmax_aux, rng_state, max_logit
 
         return mesh, ring_attn_fwd_impl, out_shardings, arg_shardings
 
@@ -3062,12 +3133,15 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
         is_context_parallel = get_mesh_axis_size(config.cp_axis, mesh) > 1
         if not is_context_parallel:
             return FusedAttnFwdPrimitive.partition(config, mesh, arg_infos, result_infos)
+        if config.return_max_logit:
+            raise NotImplementedError("return_max_logit is not yet supported with context parallelism")
 
         helper = _FusedAttnCPWithP2PHelper(mesh, config)
         helper.check_supported()
 
         out_sharding = result_infos[0].sharding
         softmax_aux_sharding = result_infos[1].sharding
+        max_logit_sharding = result_infos[3].sharding
         rng_state_sharding = seed_sharding = NamedSharding(
             mesh, PartitionSpec(get_all_mesh_axes(), None)
         )
@@ -3077,7 +3151,7 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
         arg_shardings[-1] = arg_shardings[-3]
         arg_shardings[-2] = arg_shardings[-4]
         arg_shardings = tuple(arg_shardings)
-        out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding)
+        out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding, max_logit_sharding)
 
         def fwd_impl(
             q,
@@ -3160,7 +3234,7 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
                     )
                 else:
                     current_config = subblock_config
-                output_per_step, softmax_aux_per_step, _ = compute(current_config)
+                output_per_step, softmax_aux_per_step, _, _ = compute(current_config)
 
                 softmax_aux_per_step = softmax_aux_per_step.reshape((batch, q_max_seqlen, head, 1))
 
@@ -3197,7 +3271,9 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
                     carry = scan_kv_block(i, carry)
             (_, _, _, output, softmax_aux) = carry
 
-            return output.astype(q.dtype), softmax_aux, rng_state
+            output = output.astype(q.dtype)
+            max_logit = jnp.zeros((0,), dtype=output.dtype)
+            return output, softmax_aux, rng_state, max_logit
 
         return mesh, fwd_impl, out_shardings, arg_shardings
 
@@ -3378,6 +3454,7 @@ def fused_attn_fwd(
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
     stripe_size: int | None = None,
+    return_max_logit: bool = False,
 ) -> jnp.ndarray:
     """
     Perform the forward pass of with cuDNN fused attention implementations.
@@ -3417,6 +3494,7 @@ def fused_attn_fwd(
             Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
         context_parallel_axis (str): The name of the context parallel axis.
         stripe_size (int | None): Indicates the striping height to be used for ReorderStrategy.Striped Load Balancing
+        return_max_logit (bool): Whether to return the per-head maximum attention logit.
     Returns:
         (jnp.ndarray): The output tensor from the fused attention.
     """
@@ -3492,6 +3570,7 @@ def fused_attn_fwd(
         cp_axis=_maybe_context_parallel_axis(context_parallel_axis),
         cp_striped_window_size=None,
         stripe_size=stripe_size,
+        return_max_logit=return_max_logit,
     )
 
     primitive = None
@@ -3509,7 +3588,7 @@ def fused_attn_fwd(
                 primitive = FusedRingAttnFwdPrimitive.outer_primitive
 
     seq_desc_flatten, _ = jax.tree.flatten(sequence_descriptor)
-    output, softmax_aux, rng_state = primitive.bind(
+    output, softmax_aux, rng_state, max_logit = primitive.bind(
         *qkv_for_primitive,
         bias,
         softmax_offset,
@@ -3518,7 +3597,7 @@ def fused_attn_fwd(
         config=fused_config,
     )
     rng_state = with_sharding_constraint(rng_state, PartitionSpec(get_all_mesh_axes(), None))
-    return (output, softmax_aux, rng_state)
+    return (output, softmax_aux, rng_state, max_logit)
 
 
 def fused_attn_bwd(
