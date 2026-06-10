@@ -366,8 +366,8 @@ void EPBackend::dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTE
 
   NVTEShape tokens_shape, recv_tokens_shape;
   ncclEpTensor_t nccl_tokens_in = make_nccl_ep_tensor(tokens, tokens_shape, tokens_win);
-  ncclEpTensor_t nccl_tokens_out = make_nccl_ep_tensor(recv_tokens, recv_tokens_shape,
-                                                       recv_tokens_win);
+  ncclEpTensor_t nccl_tokens_out =
+      make_nccl_ep_tensor(recv_tokens, recv_tokens_shape, recv_tokens_win);
 
   // Routing is cached in handle_mem by ep_prepare; dispatch only needs
   // topk_weights to reconstruct the sparse-to-dense prob map.
@@ -381,10 +381,9 @@ void EPBackend::dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTE
                "recv_topk_weights must not be null in forward dispatch");
     NVTE_CHECK(nvte_tensor_shape(recv_topk_weights).ndim == 1,
                "recv_topk_weights must be 1D [recv_capacity]");
-    nccl_topk_weights_in = make_nccl_ep_tensor(topk_weights, topk_weights_shape,
-                                               topk_weights_win);
-    nccl_topk_weights_out = make_nccl_ep_tensor(recv_topk_weights, recv_topk_weights_shape,
-                                                recv_topk_weights_win);
+    nccl_topk_weights_in = make_nccl_ep_tensor(topk_weights, topk_weights_shape, topk_weights_win);
+    nccl_topk_weights_out =
+        make_nccl_ep_tensor(recv_topk_weights, recv_topk_weights_shape, recv_topk_weights_win);
   }
 
   ncclEpDispatchInputs_t in_struct = NCCL_EP_DISPATCH_INPUTS_INIT;
@@ -411,8 +410,7 @@ void EPBackend::combine(void* handle_mem, const NVTETensor expert_out,
   NVTE_CHECK(handle_mem != nullptr, "handle_mem must not be null");
 
   NVTEShape expert_out_shape, result_shape;
-  ncclEpTensor_t nccl_expert_in = make_nccl_ep_tensor(expert_out, expert_out_shape,
-                                                      expert_out_win);
+  ncclEpTensor_t nccl_expert_in = make_nccl_ep_tensor(expert_out, expert_out_shape, expert_out_win);
   ncclEpTensor_t nccl_result_out = make_nccl_ep_tensor(result, result_shape);
 
   ncclEpCombineInputs_t in_struct = NCCL_EP_COMBINE_INPUTS_INIT;
@@ -441,8 +439,8 @@ void EPBackend::dispatch_bwd(void* handle_mem, const NVTETensor grad,
 
   NVTEShape grad_shape, g_recv_w_shape, grad_tokens_shape, grad_w_shape;
   ncclEpTensor_t nccl_tok_in = make_nccl_ep_tensor(grad, grad_shape, grad_win);
-  ncclEpTensor_t nccl_w_in = make_nccl_ep_tensor(g_recv_topk_weights, g_recv_w_shape,
-                                                 g_recv_topk_weights_win);
+  ncclEpTensor_t nccl_w_in =
+      make_nccl_ep_tensor(g_recv_topk_weights, g_recv_w_shape, g_recv_topk_weights_win);
   ncclEpTensor_t nccl_tok_out = make_nccl_ep_tensor(grad_tokens, grad_tokens_shape);
   ncclEpTensor_t nccl_w_out = make_nccl_ep_tensor(grad_topk_weights, grad_w_shape);
 
