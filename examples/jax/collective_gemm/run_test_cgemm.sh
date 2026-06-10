@@ -18,8 +18,10 @@ if ! mkdir -p "$XML_LOG_DIR" 2>/dev/null; then
   echo "XML_LOG_DIR is not writable; using $XML_LOG_DIR"
 fi
 
-CGEMM_NCCL_FILE_DIR=$(mktemp -d /tmp/te_cgemm_nccl_ids.XXXXXX)
-export NVTE_JAX_NCCL_FILE_PATH="${NVTE_JAX_NCCL_FILE_PATH:-$CGEMM_NCCL_FILE_DIR}"
+CGEMM_NCCL_FILE_BASE_DIR=
+if [ -z "${NVTE_JAX_NCCL_FILE_PATH:-}" ]; then
+  CGEMM_NCCL_FILE_BASE_DIR=$(mktemp -d /tmp/te_cgemm_nccl_ids.XXXXXX)
+fi
 
 # Check if NVLINK is supported before running tests
 echo "*** Checking NVLINK support***"
@@ -90,13 +92,14 @@ cleanup() {
       kill -KILL "$pid" 2>/dev/null || true
     fi
   done
-  if [ -n "$CGEMM_NCCL_FILE_DIR" ] && [ -d "$CGEMM_NCCL_FILE_DIR" ]; then
-    rm -rf "$CGEMM_NCCL_FILE_DIR"
+  if [ -n "$CGEMM_NCCL_FILE_BASE_DIR" ] && [ -d "$CGEMM_NCCL_FILE_BASE_DIR" ]; then
+    rm -rf "$CGEMM_NCCL_FILE_BASE_DIR"
   fi
 }
 
 # Set up signal handlers to cleanup on exit
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT TERM
 
 # Run each test case across all GPUs
 for TEST_CASE in "${TEST_CASES[@]}"; do
@@ -105,6 +108,10 @@ for TEST_CASE in "${TEST_CASES[@]}"; do
 
   # Extract just the test method name for log/xml file naming
   TEST_NAME=$(echo "$TEST_CASE" | awk -F'::' '{print $NF}')
+  if [ -n "$CGEMM_NCCL_FILE_BASE_DIR" ]; then
+    export NVTE_JAX_NCCL_FILE_PATH="$CGEMM_NCCL_FILE_BASE_DIR/$TEST_NAME"
+    mkdir -p "$NVTE_JAX_NCCL_FILE_PATH"
+  fi
 
   # Clear PIDs array for this test case
   PIDS=()
