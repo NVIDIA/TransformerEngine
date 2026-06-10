@@ -24,7 +24,7 @@ from .identity_tensor import IdentityQuantizer
 from .storage.identity_tensor_storage import IdentityTensorStorage
 from ..optimizers.multi_tensor_apply import multi_tensor_applier
 from ..utils import is_non_tn_fp8_gemm_supported
-from ..constants import NVFP4_BLOCK_SCALING_SIZE
+from ..constants import NVFP4_BLOCK_SCALING_SIZE, DType
 
 
 def replace_raw_data(tensor: QuantizedTensor, new_raw_data: torch.Tensor):
@@ -411,9 +411,9 @@ def _cast_master_weights_to_fp8_current_scaling(
     # ---------------------------------------------------------------------------------------------
     # Step 3: Update scales and scale_invs.
     # ---------------------------------------------------------------------------------------------
-    if fp8_dtype == tex.DType.kFloat8E4M3:
+    if fp8_dtype == DType.kFloat8E4M3:
         max_fp8 = 448.0
-    elif fp8_dtype == tex.DType.kFloat8E5M2:
+    elif fp8_dtype == DType.kFloat8E5M2:
         max_fp8 = 57344.0
     else:
         raise ValueError(f"Unsupported FP8 dtype: {fp8_dtype}")
@@ -574,9 +574,9 @@ def _cast_master_weights_to_fp8_blockwise_scaling(
     # ---------------------------------------------------------------------------------------------
     # Step 3: Update scales and scale_invs.
     # ---------------------------------------------------------------------------------------------
-    if fp8_dtype == tex.DType.kFloat8E4M3:
+    if fp8_dtype == DType.kFloat8E4M3:
         max_fp8 = 448.0
-    elif fp8_dtype == tex.DType.kFloat8E5M2:
+    elif fp8_dtype == DType.kFloat8E5M2:
         max_fp8 = 57344.0
     else:
         raise ValueError(f"Unsupported FP8 dtype: {fp8_dtype}")

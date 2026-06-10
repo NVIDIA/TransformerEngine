@@ -12,6 +12,7 @@ from typing import Any, Optional
 import torch
 
 import transformer_engine_torch as tex
+from ...constants import DType
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...tensor.float8_tensor import Float8CurrentScalingQuantizer, Quantizer
 from ...utils import clear_tensor_data
@@ -107,7 +108,7 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
 
         # Quantize input to FP8 before caching if needed
         if self.cache_quantized_input:
-            input_quantizer = Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, x.device)
+            input_quantizer = Float8CurrentScalingQuantizer(DType.kFloat8E4M3, x.device)
             input_quantizer.set_usage(rowwise=True, columnwise=False)
             x = input_quantizer(x)
 

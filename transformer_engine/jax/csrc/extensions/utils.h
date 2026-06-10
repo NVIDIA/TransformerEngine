@@ -20,6 +20,7 @@ namespace jax {
 
 int GetCudaRuntimeVersion();
 size_t GetCudnnRuntimeVersion();
+size_t GetCudnnFrontendVersion();
 int GetDeviceComputeCapability(int gpu_id);
 
 class cudaDevicePropertiesManager {

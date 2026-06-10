@@ -9,7 +9,6 @@ import warnings
 import torch
 from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
 import transformer_engine_torch as tex
-from transformer_engine_torch import DType as TE_DType
 
 from transformer_engine.common.recipe import (
     DelayedScaling,
@@ -20,7 +19,7 @@ from ..utils import canonicalize_process_group, devices_match
 from .storage.float8_tensor_storage import Float8TensorStorage, _FromFloat8Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ._quantization_helpers import _IdentityFunc
-from ..constants import dist_group_type
+from ..constants import dist_group_type, DType
 
 aten = torch.ops.aten
 
@@ -54,13 +53,13 @@ class Float8Quantizer(Quantizer):
     """Max-abs value from last FP8 cast"""
     amax: torch.Tensor
     """FP8 datatype"""
-    dtype: TE_DType
+    dtype: DType
 
     def __init__(
         self,
         scale: torch.Tensor,
         amax: torch.Tensor,
-        fp8_dtype: TE_DType,
+        fp8_dtype: Union[DType, tex.DType],
         *,
         rowwise: bool = True,
         columnwise: bool = True,
@@ -68,7 +67,7 @@ class Float8Quantizer(Quantizer):
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.scale = scale
         self.amax = amax
-        self.dtype = fp8_dtype
+        self.dtype = DType.cast(fp8_dtype)
 
     def copy(self) -> Float8Quantizer:
         """Create shallow copy"""
@@ -205,7 +204,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
     """
 
     """FP8 datatype"""
-    dtype: TE_DType
+    dtype: DType
     """amax reduction options"""
     with_amax_reduction: bool
     amax_reduction_group: Optional[dist_group_type]
@@ -215,7 +214,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
 
     def __init__(
         self,
-        fp8_dtype: TE_DType,
+        fp8_dtype: Union[DType, tex.DType],
         device: torch.device,
         *,
         rowwise: bool = True,
@@ -237,7 +236,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
                 stacklevel=2,
             )
         del device, use_existing_amax, scale, amax  # Kept for backward compatibility
-        self.dtype = fp8_dtype
+        self.dtype = DType.cast(fp8_dtype)
         self.with_amax_reduction = with_amax_reduction
         self.amax_reduction_group = amax_reduction_group
         self.force_pow_2_scales = force_pow_2_scales
@@ -402,8 +401,9 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         Reciprocal of the scaling factor applied when casting to FP8,
         i.e. the scaling factor that must be applied when casting from
         FP8 to higher precision.
-    fp8_dtype : transformer_engine_torch.DType
-        FP8 format.
+    fp8_dtype : transformer_engine.pytorch.DType or transformer_engine_torch.DType
+        optional, default = kFloat8E4M3 FP8 format. transformer_engine_torch.DType
+        is accepted for backward compatibility.
     data_transpose : torch.Tensor, optional
         FP8 transpose data in a uint8 tensor
     quantizer : Float8Quantizer, Float8CurrentScalingQuantizer, optional
@@ -946,7 +946,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
     def _make_in_reduce_ex(
         cls,
         data: torch.Tensor,
-        fp8_dtype: TE_DType,
+        fp8_dtype: DType,
         fp8_scale_inv: torch.Tensor,
         dtype: torch.dtype,
         shape: torch.Size,
@@ -1029,7 +1029,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
 
 def _make_float8_tensor_in_reduce_ex(
     data: torch.Tensor,
-    fp8_dtype: TE_DType,
+    fp8_dtype: DType,
     fp8_scale_inv: torch.Tensor,
     dtype: torch.dtype,
     shape: torch.Size,

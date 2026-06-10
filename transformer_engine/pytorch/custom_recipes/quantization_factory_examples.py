@@ -38,9 +38,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-import transformer_engine_torch as tex
-
 from transformer_engine.pytorch.quantization import QuantizerRole
+from ..constants import DType
 
 
 def nvfp4_linear_mxfp8_grouped_linear_factory(
@@ -70,7 +69,7 @@ def _make_mxfp8_quantizer():
     from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 
     return MXFP8Quantizer(
-        fp8_dtype=tex.DType.kFloat8E4M3,
+        fp8_dtype=DType.kFloat8E4M3,
     )
 
 
@@ -87,7 +86,7 @@ def _make_nvfp4_quantizer(role: Optional[QuantizerRole]):
 
     if is_weight:
         return NVFP4Quantizer(
-            fp4_dtype=tex.DType.kFloat4E2M1,
+            fp4_dtype=DType.kFloat4E2M1,
             with_rht=False,
             with_post_rht_amax=False,
             with_2d_quantization=True,
@@ -97,7 +96,7 @@ def _make_nvfp4_quantizer(role: Optional[QuantizerRole]):
 
     if is_grad:
         return NVFP4Quantizer(
-            fp4_dtype=tex.DType.kFloat4E2M1,
+            fp4_dtype=DType.kFloat4E2M1,
             rowwise=True,
             columnwise=True,
             with_rht=True,
@@ -108,7 +107,7 @@ def _make_nvfp4_quantizer(role: Optional[QuantizerRole]):
         )
 
     return NVFP4Quantizer(
-        fp4_dtype=tex.DType.kFloat4E2M1,
+        fp4_dtype=DType.kFloat4E2M1,
         rowwise=True,
         columnwise=True,
         with_rht=True,
@@ -180,7 +179,7 @@ def nvfp4_linear_fp8_dpa_factory(
 
     if is_dpa:
         return Float8CurrentScalingQuantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=DType.kFloat8E4M3,
             device="cuda",
         )
 
@@ -193,7 +192,7 @@ def nvfp4_linear_fp8_dpa_factory(
     )
     if is_dpa_boundary:
         return Float8CurrentScalingQuantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=DType.kFloat8E4M3,
             device="cuda",
         )
 

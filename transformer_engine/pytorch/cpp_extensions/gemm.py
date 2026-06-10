@@ -9,7 +9,7 @@ import os
 import functools
 import torch
 import transformer_engine_torch as tex
-from ..constants import TE_DType
+from ..constants import TE_DType, DType
 from ..utils import get_sm_count, _empty_tensor
 
 from ..quantized_tensor import Quantizer
@@ -336,7 +336,7 @@ def general_grouped_gemm(
     bias: Optional[List[torch.Tensor]] = None,
     use_bias: bool = False,
     use_split_accumulator: bool = False,
-    D_dtype: Optional[tex.DType] = None,
+    D_dtype: Optional[DType] = None,
     single_output=False,
 ) -> Tuple[List[torch.Tensor], ...]:
     """

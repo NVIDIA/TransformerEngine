@@ -201,7 +201,7 @@ __device__ __forceinline__ void colwise_scaling(const IType *__restrict__ sIn_pt
   const int warp = threadIdx.x / THREADS_PER_WARP;
   const int thread_lane = threadIdx.x % THREADS_PER_WARP;
 
-  const int tid_Y_colwise = (thread_lane % 4 + warp) % 4;
+  const int tid_Y_colwise = (thread_lane / 2 + warp) % 4;
   const int tid_X_colwise = thread_lane;
 
   const int thread_offset_Y_colwise = tid_Y_colwise * SCALE_DIM;
