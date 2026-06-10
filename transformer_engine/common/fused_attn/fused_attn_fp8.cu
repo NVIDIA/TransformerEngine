@@ -1433,7 +1433,7 @@ void fused_attn_fp8_fwd(
     Tensor* output_M = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     output_M->data.dptr = nullptr;
     if (q_format == NVTE_QKV_Format::NVTE_THD &&
-        cudnn_runtime_version >= kFP8THDRaggedCudnnVersion) {
+        cudnn_runtime_version >= fused_attn::kFP8THDRaggedCudnnVersion) {
       output_M->data.shape = {num_tokens_q, num_attn_heads, 1};
     } else {
       output_M->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
