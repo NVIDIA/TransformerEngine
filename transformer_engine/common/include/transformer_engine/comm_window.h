@@ -5,8 +5,8 @@
  ************************************************************************/
 
 /*! \file comm_window.h
- *  \brief Borrowed symmetric-memory window + offset for zero-copy one-sided ops.
- *         Pass ``{NULL, 0}`` to use the raw-pointer path.
+ *  \brief NCCL symmetric-memory window handle for zero-copy ops. Pass
+ *         {NULL, 0} to use the raw-pointer path.
  */
 
 #ifndef TRANSFORMER_ENGINE_COMM_WINDOW_H_
@@ -18,15 +18,14 @@
 extern "C" {
 #endif
 
-/* Forward declaration of NCCL's opaque window struct so this header does not
- * pull in <nccl.h>; matches NCCL's own typedef
- * (struct ncclWindow_vidmem* ncclWindow_t). */
+/* Forward-declare NCCL's opaque window struct so this header does not pull in
+ * <nccl.h>; matches NCCL's typedef (struct ncclWindow_vidmem* ncclWindow_t). */
 struct ncclWindow_vidmem;
 
-/*! \brief NCCL window + byte offset for a zero-copy payload tensor. */
+/*! \brief NCCL window plus byte offset for a zero-copy payload tensor. */
 typedef struct {
   struct ncclWindow_vidmem* window; /*!< NCCL window, or NULL to use the raw data pointer. */
-  uint64_t offset;                  /*!< Byte offset of the payload within ``window``. */
+  uint64_t offset;                  /*!< Byte offset of the payload within window. */
 } NVTECommWindow;
 
 #ifdef __cplusplus

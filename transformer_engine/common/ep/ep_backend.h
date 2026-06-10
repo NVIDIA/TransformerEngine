@@ -5,12 +5,7 @@
  ************************************************************************/
 
 /*! \file ep_backend.h
- *  \brief Internal NCCL EP singleton; not part of the public API.
- *
- *  ncclEpHandles are cached by handle_mem device pointer. nvte_ep_prepare
- *  seeds the entry with the layer_cfg; dispatch/combine/_bwd look up by
- *  pointer. Cache cap: NVTE_EP_HANDLE_CACHE_SIZE (default 4096; -1 disables
- *  LRU eviction).
+ *  \brief Internal NCCL EP singleton; not part of the public API. See ep.h.
  */
 
 #ifndef TRANSFORMER_ENGINE_COMMON_EP_EP_BACKEND_H_

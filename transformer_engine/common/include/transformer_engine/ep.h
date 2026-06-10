@@ -128,13 +128,13 @@ void nvte_ep_prepare(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor toke
  *  \param[in]     handle_mem             uint8 routing-state buffer (from prepare).
  *  \param[in]     topk_idx               [T, top_k] int64 sparse routing indices.
  *  \param[in]     tokens                 [T, hidden_dim] input tokens.
- *  \param[in]     tokens_win             Optional symmem window for ``tokens``.
+ *  \param[in]     tokens_win             Optional symmem window for tokens.
  *  \param[in]     topk_weights           [T, top_k] float32 weights, or null in backward.
- *  \param[in]     topk_weights_win       Optional symmem window for ``topk_weights``.
+ *  \param[in]     topk_weights_win       Optional symmem window for topk_weights.
  *  \param[out]    recv_tokens            [recv_T, hidden_dim] received tokens.
- *  \param[in]     recv_tokens_win        Optional symmem window for ``recv_tokens``.
+ *  \param[in]     recv_tokens_win        Optional symmem window for recv_tokens.
  *  \param[out]    recv_topk_weights      [recv_T] float32 per-slot weights, or null in backward.
- *  \param[in]     recv_topk_weights_win  Optional symmem window for ``recv_topk_weights``.
+ *  \param[in]     recv_topk_weights_win  Optional symmem window for recv_topk_weights.
  *  \param[in]     stream                 CUDA stream.
  */
 void nvte_ep_dispatch(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor tokens,
@@ -152,7 +152,7 @@ void nvte_ep_dispatch(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor tok
  *
  *  \param[in]  handle_mem      uint8 routing-state buffer (from prepare).
  *  \param[in]  expert_out      [recv_T, hidden_dim] pre-weighted expert outputs.
- *  \param[in]  expert_out_win  Optional symmem window for ``expert_out``.
+ *  \param[in]  expert_out_win  Optional symmem window for expert_out.
  *  \param[out] result          [T, hidden_dim] combined output.
  *  \param[in]  stream          CUDA stream.
  */
@@ -167,9 +167,9 @@ void nvte_ep_combine(NVTETensor handle_mem, NVTETensor expert_out, NVTECommWindo
  *
  *  \param[in]  handle_mem               uint8 routing-state buffer (from prepare).
  *  \param[in]  grad                     [recv_capacity, hidden_dim] grad w.r.t. recv_tokens.
- *  \param[in]  grad_win                 Optional symmem window for ``grad``.
+ *  \param[in]  grad_win                 Optional symmem window for grad.
  *  \param[in]  g_recv_topk_weights      [recv_capacity] f32 grad w.r.t. recv_topk_weights.
- *  \param[in]  g_recv_topk_weights_win  Optional symmem window for ``g_recv_topk_weights``.
+ *  \param[in]  g_recv_topk_weights_win  Optional symmem window for g_recv_topk_weights.
  *  \param[out] grad_tokens              [T, hidden_dim] grad w.r.t. tokens.
  *  \param[out] grad_topk_weights        [T, top_k] f32 grad w.r.t. topk_weights.
  *  \param[in]  stream                   CUDA stream.
@@ -187,9 +187,9 @@ void nvte_ep_dispatch_bwd(NVTETensor handle_mem, NVTETensor grad, NVTECommWindow
  *
  *  \param[in]  handle_mem           uint8 routing-state buffer (from prepare).
  *  \param[in]  grad                 [T, hidden_dim] grad w.r.t. result.
- *  \param[in]  grad_win             Optional symmem window for ``grad``.
+ *  \param[in]  grad_win             Optional symmem window for grad.
  *  \param[out] grad_expert_out      [recv_capacity, hidden_dim] grad w.r.t. expert_out.
- *  \param[in]  grad_expert_out_win  Optional symmem window for ``grad_expert_out``.
+ *  \param[in]  grad_expert_out_win  Optional symmem window for grad_expert_out.
  *  \param[in]  stream               CUDA stream.
  */
 void nvte_ep_combine_bwd(NVTETensor handle_mem, NVTETensor grad, NVTECommWindow grad_win,
