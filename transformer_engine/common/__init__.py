@@ -256,6 +256,29 @@ def _nvidia_cudart_include_dir() -> str:
 
 
 @functools.lru_cache(maxsize=None)
+def _is_cusolvermp_installed_in_system() -> bool:
+    """Check if cuSolverMp is registered in the system library cache."""
+
+    if platform.system() != "Linux":
+        return False
+
+    try:
+        result = subprocess.run(
+            ["ldconfig", "-p"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+    if result.returncode != 0:
+        return False
+
+    return any("cusolvermp" in line.lower() for line in result.stdout.splitlines())
+
+
+@functools.lru_cache(maxsize=None)
 def _load_cuda_library_from_python(lib_name: str, strict: bool = False):
     """
     Attempts to load shared object file installed via python packages.
@@ -369,6 +392,11 @@ if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE
     _, _CUDNN_LIB_CTYPES = _load_cuda_library("cudnn")
     system_nvrtc, _NVRTC_LIB_CTYPES = _load_cuda_library("nvrtc")
     system_curand, _CURAND_LIB_CTYPES = _load_cuda_library("curand")
+    _CUSOLVERMP_LIB_CTYPES = None
+    if not _is_cusolvermp_installed_in_system() and any(
+        _is_package_installed(p) for p in ("nvidia-cusolvermp-cu12", "nvidia-cusolvermp-cu13")
+    ):
+        _, _CUSOLVERMP_LIB_CTYPES = _load_cuda_library_from_python("cusolverMp", strict=False)
 
     # This additional step is necessary to be able to install TE wheels
     # and import TE (without any guards) in an environment where the cuda
