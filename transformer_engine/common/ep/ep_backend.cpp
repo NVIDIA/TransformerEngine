@@ -311,8 +311,9 @@ ncclEpHandle_t EPBackend::lookup_handle_locked(void* handle_mem) {
 // ---------------------------------------------------------------------------
 
 size_t EPBackend::handle_mem_size(NVTEEpLayerConfig layer_cfg) {
-  NVTE_CHECK(initialized_, "EPBackend not initialized");
   NVTE_CHECK(layer_cfg.top_k > 0, "top_k must be > 0, got ", layer_cfg.top_k);
+  std::lock_guard<std::mutex> lock(mutex_);
+  NVTE_CHECK(initialized_, "EPBackend not initialized");
   ncclEpHandleConfig_t hcfg = NCCL_EP_HANDLE_CONFIG_INIT;
   hcfg.dispatch_output_per_expert_alignment = layer_cfg.dispatch_output_per_expert_alignment;
   size_t hm_size = 0;
@@ -326,6 +327,7 @@ void EPBackend::prepare(void* handle_mem, const NVTETensor topk_idx, NVTETensor 
   NVTE_CHECK(initialized_, "EPBackend not initialized");
   NVTE_CHECK(handle_mem != nullptr, "handle_mem must not be null");
   NVTE_CHECK(layer_cfg.top_k > 0, "top_k must be > 0, got ", layer_cfg.top_k);
+  NVTE_CHECK(nvte_tensor_shape(topk_idx).ndim == 2, "topk_idx must be 2D [T, top_k]");
 
   NVTEShape topk_idx_shape;
   ncclEpTensor_t nccl_topk_idx = make_nccl_ep_tensor(topk_idx, topk_idx_shape);
@@ -351,6 +353,9 @@ void EPBackend::dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTE
                          const NVTECommWindow& recv_topk_weights_win, cudaStream_t stream) {
   NVTE_CHECK(initialized_, "EPBackend not initialized");
   NVTE_CHECK(handle_mem != nullptr, "handle_mem must not be null");
+  NVTE_CHECK(nvte_tensor_shape(tokens).ndim == 2, "tokens must be 2D [T, hidden_dim]");
+  NVTE_CHECK(nvte_tensor_shape(recv_tokens).ndim == 2,
+             "recv_tokens must be 2D [recv_T, hidden_dim]");
 
   NVTEDType tok_dtype = nvte_tensor_type(tokens);
   NVTE_CHECK(typeToSize(static_cast<DType>(tok_dtype)) <=
@@ -377,6 +382,8 @@ void EPBackend::dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTE
   ncclEpTensor_t nccl_topk_weights_out;
   if (is_forward) {
     NVTE_CHECK(topk_idx != nullptr, "topk_idx required in forward dispatch");
+    NVTE_CHECK(nvte_tensor_shape(topk_idx).ndim == 2, "topk_idx must be 2D [T, top_k]");
+    NVTE_CHECK(nvte_tensor_shape(topk_weights).ndim == 2, "topk_weights must be 2D [T, top_k]");
     NVTE_CHECK(recv_topk_weights != nullptr,
                "recv_topk_weights must not be null in forward dispatch");
     NVTE_CHECK(nvte_tensor_shape(recv_topk_weights).ndim == 1,
@@ -408,6 +415,9 @@ void EPBackend::combine(void* handle_mem, const NVTETensor expert_out,
                         cudaStream_t stream) {
   NVTE_CHECK(initialized_, "EPBackend not initialized");
   NVTE_CHECK(handle_mem != nullptr, "handle_mem must not be null");
+  NVTE_CHECK(nvte_tensor_shape(expert_out).ndim == 2,
+             "expert_out must be 2D [recv_T, hidden_dim]");
+  NVTE_CHECK(nvte_tensor_shape(result).ndim == 2, "result must be 2D [T, hidden_dim]");
 
   NVTEShape expert_out_shape, result_shape;
   ncclEpTensor_t nccl_expert_in = make_nccl_ep_tensor(expert_out, expert_out_shape, expert_out_win);
@@ -430,6 +440,8 @@ void EPBackend::dispatch_bwd(void* handle_mem, const NVTETensor grad,
                              NVTETensor grad_topk_weights, cudaStream_t stream) {
   NVTE_CHECK(initialized_, "EPBackend not initialized");
   NVTE_CHECK(handle_mem != nullptr, "handle_mem must not be null");
+  NVTE_CHECK(nvte_tensor_shape(grad).ndim == 2, "grad must be 2D [recv_capacity, hidden_dim]");
+  NVTE_CHECK(nvte_tensor_shape(grad_tokens).ndim == 2, "grad_tokens must be 2D [T, hidden_dim]");
 
   // g_recv_topk_weights must be 1D [recv_capacity]; caller flattens.
   NVTE_CHECK(nvte_tensor_shape(g_recv_topk_weights).ndim == 1,
