@@ -120,6 +120,9 @@ def setup_jax_extension(
     if bool(int(os.getenv("NVTE_WITH_CUBLASMP", 0))):
         cxx_flags.append("-DNVTE_WITH_CUBLASMP")
 
+    if bool(int(os.getenv("NVTE_BUILD_WITH_NCCL_EP", "1"))):
+        cxx_flags.append("-DNVTE_WITH_NCCL_EP")
+
     # Define TE/JAX as a Pybind11Extension
     from pybind11.setup_helpers import Pybind11Extension
 
