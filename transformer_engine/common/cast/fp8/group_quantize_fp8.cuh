@@ -548,7 +548,7 @@ __global__ void __launch_bounds__(ROWWISE_FLAT_THREADS)
         const IType *__restrict__ input, OType *__restrict__ output_rowwise,
         const float *__restrict__ scale_ptr, const float *__restrict__ noop,
         const size_t num_tensors, const size_t total_elements,
-        const int64_t *__restrict__ offsets_ptr, const size_t block_chunk_size) {
+        const int64_t *__restrict__ offsets_ptr, const size_t target_blocks) {
   if (noop != nullptr && noop[0] == 1.0f) {
     return;
   }
@@ -571,6 +571,17 @@ __global__ void __launch_bounds__(ROWWISE_FLAT_THREADS)
     s_offsets[i] = offsets_ptr[i];
   }
   __syncthreads();
+
+  // Derive the per-block chunk size from the *active* element count
+  // (offsets_ptr[num_tensors]) rather than the over-allocated buffer, so that
+  // over-allocation does not inflate the chunk and reduce the number of active
+  // blocks. Every thread computes the same value from shared memory.
+  const size_t active_elements = static_cast<size_t>(s_offsets[num_tensors]);
+  size_t block_chunk_size = DIVUP(active_elements, target_blocks);
+  block_chunk_size = DIVUP(block_chunk_size, nvec) * nvec;
+  if (block_chunk_size < 8192) {
+    block_chunk_size = 8192;
+  }
 
   // 2. Compute block counts and prefix sum
   if (tid == 0) {
@@ -1157,14 +1168,15 @@ void group_quantize(const GroupedTensor *input, const Tensor *noop, GroupedTenso
                           const dim3 flat_grid(blocks_per_tensor, num_tensors);
                           if (flat_aligned) {
                             const int num_sms = ::transformer_engine::cuda::sm_count();
+                            // Target ~8 blocks per SM of *active* work. The actual
+                            // per-block chunk size is derived inside the kernel from
+                            // the device-side offsets (the active element count), so
+                            // that an over-allocated backing buffer does not inflate
+                            // the chunk and starve the grid of active blocks. We
+                            // launch enough blocks to cover target_blocks plus up to
+                            // one partial block per tensor (from per-tensor rounding).
                             const size_t target_blocks = 8 * num_sms;
-                            size_t block_chunk_size = (total_elements + target_blocks - 1) / target_blocks;
-                            // Align block_chunk_size to a multiple of flat_nvec to ensure perfect vector alignment
-                            block_chunk_size = DIVUP(block_chunk_size, static_cast<size_t>(flat_nvec)) * flat_nvec;
-                            if (block_chunk_size < 8192) {
-                              block_chunk_size = 8192;
-                            }
-                            const size_t grid_size = total_elements / block_chunk_size + num_tensors;
+                            const size_t grid_size = target_blocks + num_tensors;
                             const size_t shared_mem_bytes = (num_tensors + 1) * sizeof(int64_t) + (num_tensors + 1) * sizeof(int);
 
                             group_cast_fp8_varying_first_rowwise_aligned_flat_kernel<
@@ -1173,7 +1185,7 @@ void group_quantize(const GroupedTensor *input, const Tensor *noop, GroupedTenso
                                     reinterpret_cast<const IType *>(input->data.dptr),
                                     reinterpret_cast<OType *>(output->data.dptr), scale_ptr,
                                     noop_ptr, num_tensors, total_elements,
-                                    offsets_ptr, block_chunk_size);
+                                    offsets_ptr, target_blocks);
                           } else {
                             group_cast_fp8_varying_first_rowwise_flat_kernel<
                                 IS_ACT, ParamOP, OP, IType, OType, false>
