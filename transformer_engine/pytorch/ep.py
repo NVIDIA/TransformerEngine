@@ -241,6 +241,8 @@ class EpBuffer:
         send_shape = (self.max_tokens_per_rank, self.hidden_dim)
         zero_copy = bool(tex.ep_get_zero_copy())
         self.zero_copy = zero_copy
+        # Cross-rank slots are pre-allocated as symm-mem only when zero-copy
+        # is on; non-zero-copy mode allocates plain HBM per call in the ops.
         if zero_copy:
             if ep_group is None:
                 raise ValueError("EpBuffer requires ep_group when ep_bootstrap(zero_copy=True).")
@@ -251,12 +253,10 @@ class EpBuffer:
             )
             self.grad_tokens = symm_mem_alloc(send_shape, payload_dtype, ep_group, device=device)
         else:
-            self.recv_tokens = torch.empty(recv_shape, dtype=payload_dtype, device=device)
-            self.combine_in = torch.empty(recv_shape, dtype=payload_dtype, device=device)
-            self.recv_topk_weights = torch.empty(
-                self.recv_capacity_per_rank, dtype=torch.float32, device=device
-            )
-            self.grad_tokens = torch.empty(send_shape, dtype=payload_dtype, device=device)
+            self.recv_tokens = None
+            self.combine_in = None
+            self.recv_topk_weights = None
+            self.grad_tokens = None
         # Per-rank scratch; never cross-rank, plain HBM regardless of mode.
         self.token_counts = torch.empty(self.num_local_experts, dtype=torch.int32, device=device)
         self.grad_topk_weights = torch.empty(
@@ -272,8 +272,8 @@ class EpBuffer:
         hidden_dim: int,
         num_local_experts: int,
         *,
-        recv_tokens: torch.Tensor,
-        combine_in: torch.Tensor,
+        recv_tokens: Optional[torch.Tensor] = None,
+        combine_in: Optional[torch.Tensor] = None,
         recv_topk_weights: Optional[torch.Tensor] = None,
         grad_tokens: Optional[torch.Tensor] = None,
         token_counts: Optional[torch.Tensor] = None,
@@ -284,10 +284,10 @@ class EpBuffer:
     ) -> "EpBuffer":
         """Construct from caller-allocated payload buffers.
 
-        Useful for sharing a pre-allocated pool across layers/microbatches and
-        for plugging in symm-mem-backed tensors. Caller-supplied slots are
-        validated against the expected shape and dtype; ``None`` slots get a
-        fresh HBM allocation. ``handle_mem`` is always allocated fresh.
+        In zero-copy mode recv_tokens, combine_in, recv_topk_weights, and
+        grad_tokens must be supplied and symm-mem-backed; in non-zero-copy
+        mode they default to None and the ops allocate per call. handle_mem
+        is always allocated fresh.
         """
         if device is None:
             device = torch.device("cuda", torch.cuda.current_device())
@@ -321,18 +321,28 @@ class EpBuffer:
         size_bytes = tex.ep_handle_mem_size(inst.top_k, inst.alignment)
         inst.handle_mem = torch.empty(int(size_bytes), dtype=torch.uint8, device=device)
 
-        inst.recv_tokens = _check(recv_tokens, "recv_tokens", recv_shape, payload_dtype)
-        inst.combine_in = _check(combine_in, "combine_in", recv_shape, payload_dtype)
-        inst.recv_topk_weights = (
-            _check(recv_topk_weights, "recv_topk_weights", recv_w_shape, torch.float32)
-            if recv_topk_weights is not None
-            else torch.empty(recv_w_shape, dtype=torch.float32, device=device)
-        )
-        inst.grad_tokens = (
-            _check(grad_tokens, "grad_tokens", send_shape, payload_dtype)
-            if grad_tokens is not None
-            else torch.empty(send_shape, dtype=payload_dtype, device=device)
-        )
+        if inst.zero_copy:
+            if (
+                recv_tokens is None
+                or combine_in is None
+                or recv_topk_weights is None
+                or grad_tokens is None
+            ):
+                raise ValueError(
+                    "EpBuffer.from_external requires recv_tokens, combine_in, recv_topk_weights, "
+                    "and grad_tokens (all symm-mem-backed) when zero-copy is enabled."
+                )
+            inst.recv_tokens = _check(recv_tokens, "recv_tokens", recv_shape, payload_dtype)
+            inst.combine_in = _check(combine_in, "combine_in", recv_shape, payload_dtype)
+            inst.recv_topk_weights = _check(
+                recv_topk_weights, "recv_topk_weights", recv_w_shape, torch.float32
+            )
+            inst.grad_tokens = _check(grad_tokens, "grad_tokens", send_shape, payload_dtype)
+        else:
+            inst.recv_tokens = None
+            inst.combine_in = None
+            inst.recv_topk_weights = None
+            inst.grad_tokens = None
         inst.token_counts = (
             _check(token_counts, "token_counts", counts_shape, torch.int32)
             if token_counts is not None
@@ -357,7 +367,8 @@ class EpBuffer:
             self.token_counts,
             self.grad_topk_weights,
         ):
-            t.record_stream(stream)
+            if t is not None:
+                t.record_stream(stream)
 
 
 # torch.library custom ops (so they don't graph-break under torch.compile)
@@ -549,7 +560,8 @@ class _EpDispatch(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, g_recv_tokens, g_recv_topk_weights, _g_token_counts):  # type: ignore[override]
-        """Dispatch backward into the persistent grad_tokens/grad_topk_weights slots."""
+        """Dispatch backward; grad_tokens uses the buffer's symm-mem slot in
+        zero-copy mode or a fresh HBM tensor otherwise."""
         device = ctx.handle_mem.device
         if g_recv_tokens is None:
             g_recv_tokens = torch.zeros(
@@ -561,8 +573,13 @@ class _EpDispatch(torch.autograd.Function):
             g_recv_tokens = g_recv_tokens.contiguous()
         if not g_recv_topk_weights.is_contiguous():
             g_recv_topk_weights = g_recv_topk_weights.contiguous()
-        # Narrow the persistent slots to this call's flattened leading dim.
-        grad_tokens = ctx.grad_tokens_buf.narrow(0, 0, ctx.tokens_T_flat)
+        if ctx.grad_tokens_buf is not None:
+            # Zero-copy: narrow the persistent symm-mem slot to this call's leading dim.
+            grad_tokens = ctx.grad_tokens_buf.narrow(0, 0, ctx.tokens_T_flat)
+        else:
+            grad_tokens = torch.empty(
+                ctx.tokens_T_flat, ctx.hidden_dim, dtype=ctx.tokens_dtype, device=device
+            )
         grad_topk_weights = ctx.grad_topk_weights_buf.narrow(0, 0, ctx.topk_T_flat)
         torch.ops.transformer_engine_ep.dispatch_bwd(
             ctx.handle_mem,
@@ -590,43 +607,59 @@ class _EpDispatch(torch.autograd.Function):
 
 
 class _EpCombine(torch.autograd.Function):
-    """Autograd-aware combine. combine_in is reused as grad_combine_in in bwd;
-    fwd/bwd share handle_mem so don't re-run ep_prepare between them. Caller
-    must pre-apply the topk weighting to expert_out.
+    """Autograd-aware combine. Zero-copy mode requires expert_out to alias
+    buffer.combine_in (no implicit staging), and that storage is reused as
+    the grad slot in bwd. Non-zero-copy mode reads expert_out directly and
+    allocates the bwd grad slot fresh. Caller pre-applies topk weighting.
     """
 
     @staticmethod
     def forward(  # type: ignore[override]
         ctx,
         handle_mem: torch.Tensor,
-        combine_in: torch.Tensor,
+        combine_in: Optional[torch.Tensor],
         num_local_tokens: int,
         hidden_dim: int,
         zero_copy: bool,
         expert_out: torch.Tensor,
     ):
-        """Combine expert outputs; combine_in storage is reused as the grad slot in bwd."""
+        """Combine fwd; zero-copy requires expert_out to alias combine_in."""
+        if zero_copy:
+            if combine_in is None:
+                raise RuntimeError(
+                    "ep_combine: zero-copy mode requires buffer.combine_in to be allocated."
+                )
+            if combine_in.data_ptr() != expert_out.data_ptr():
+                raise RuntimeError(
+                    "ep_combine: zero-copy mode requires expert_out to alias "
+                    "buffer.combine_in (write expert outputs directly into that slot; "
+                    "no implicit copy)."
+                )
         device = expert_out.device
-        # Zero-copy mode: peers read from combine_in via symm-mem, so it must
-        # hold the expert outputs; stage expert_out into it unless aliased.
-        # Otherwise the kernel reads expert_out directly, no copy needed.
-        if zero_copy and combine_in.data_ptr() != expert_out.data_ptr():
-            combine_in.copy_(expert_out)
-            kernel_in = combine_in
-        else:
-            kernel_in = expert_out
         result = torch.empty(num_local_tokens, hidden_dim, dtype=expert_out.dtype, device=device)
-        torch.ops.transformer_engine_ep.combine(handle_mem, kernel_in, result)
+        torch.ops.transformer_engine_ep.combine(handle_mem, expert_out, result)
         ctx.handle_mem = handle_mem
-        ctx.combine_in = combine_in  # used as grad_combine_in in bwd
+        ctx.combine_in = combine_in  # None in non-zero-copy; reused as grad slot otherwise
+        ctx.zero_copy = zero_copy
+        ctx.recv_capacity = expert_out.shape[0]
+        ctx.hidden_dim = expert_out.shape[-1]
+        ctx.expert_out_dtype = expert_out.dtype
         return result
 
     @staticmethod
     def backward(ctx, g_result):  # type: ignore[override]
-        """Combine backward into combine_in storage; returned as grad of expert_out."""
-        grad_combine_in = ctx.combine_in
+        """Combine bwd; writes into combine_in in zero-copy or a fresh slot otherwise."""
         if not g_result.is_contiguous():
             g_result = g_result.contiguous()
+        if ctx.zero_copy:
+            grad_combine_in = ctx.combine_in
+        else:
+            grad_combine_in = torch.empty(
+                ctx.recv_capacity,
+                ctx.hidden_dim,
+                dtype=ctx.expert_out_dtype,
+                device=ctx.handle_mem.device,
+            )
         torch.ops.transformer_engine_ep.combine_bwd(ctx.handle_mem, g_result, grad_combine_in)
         return (
             None,  # handle_mem
@@ -657,17 +690,30 @@ def ep_dispatch(
 ):
     """Run prepare + dispatch with autograd. topk_idx must be int64.
 
-    Returns (recv_tokens, recv_topk_weights, token_counts); views into the
-    buffer's persistent slots — consume them before the next ep_dispatch on
-    the same buffer or they get overwritten. token_counts is non-differentiable.
+    Returns (recv_tokens, recv_topk_weights, token_counts). In zero-copy mode
+    recv_tokens / recv_topk_weights alias the buffer's persistent symm-mem
+    slots; otherwise they are freshly allocated. token_counts is non-diff.
     """
     _require_bf16("tokens", tokens)
+    if buffer.zero_copy:
+        recv_tokens = buffer.recv_tokens
+        recv_topk_weights = buffer.recv_topk_weights
+    else:
+        recv_tokens = torch.empty(
+            buffer.recv_capacity_per_rank,
+            buffer.hidden_dim,
+            dtype=buffer.payload_dtype,
+            device=buffer.device,
+        )
+        recv_topk_weights = torch.empty(
+            buffer.recv_capacity_per_rank, dtype=torch.float32, device=buffer.device
+        )
     return _EpDispatch.apply(
         buffer.handle_mem,
         buffer.top_k,
         buffer.alignment,
-        buffer.recv_tokens,
-        buffer.recv_topk_weights,
+        recv_tokens,
+        recv_topk_weights,
         buffer.token_counts,
         buffer.grad_tokens,
         buffer.grad_topk_weights,
@@ -683,8 +729,9 @@ def ep_combine(
     *,
     num_local_tokens: Optional[int] = None,
 ):
-    """Combine expert outputs back to the source rank, with autograd. The
-    caller must pre-apply the topk weighting to expert_out.
+    """Combine expert outputs back to the source rank, with autograd. Caller
+    pre-applies topk weighting. Zero-copy mode requires expert_out to alias
+    buffer.combine_in (write expert outputs into that slot directly).
 
     Result shape is (num_local_tokens, buffer.hidden_dim); defaults to
     buffer.max_tokens_per_rank rows.
