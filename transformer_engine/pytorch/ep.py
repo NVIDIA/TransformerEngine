@@ -96,7 +96,7 @@ def _atexit_finalize() -> None:
     if _BOOTSTRAPPED:
         try:
             tex.ep_finalize()
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             import traceback
 
             traceback.print_exc()
@@ -378,7 +378,7 @@ def _prepare_op(
 
 
 @_prepare_op.register_fake
-def _(*args, **kw):
+def _(*_args, **_kw):
     return None
 
 
@@ -399,7 +399,7 @@ def _dispatch_op(
 
 
 @_dispatch_op.register_fake
-def _(*args, **kw):
+def _(*_args, **_kw):
     return None
 
 
@@ -417,7 +417,7 @@ def _combine_op(
 
 
 @_combine_op.register_fake
-def _(*args, **kw):
+def _(*_args, **_kw):
     return None
 
 
@@ -437,7 +437,7 @@ def _dispatch_bwd_op(
 
 
 @_dispatch_bwd_op.register_fake
-def _(*args, **kw):
+def _(*_args, **_kw):
     return None
 
 
@@ -455,7 +455,7 @@ def _combine_bwd_op(
 
 
 @_combine_bwd_op.register_fake
-def _(*args, **kw):
+def _(*_args, **_kw):
     return None
 
 
@@ -516,6 +516,7 @@ class _EpDispatch(torch.autograd.Function):
         tokens: torch.Tensor,
         topk_weights: torch.Tensor,
     ):
+        """Prepare + dispatch; stashes buffer slots + shapes for the bwd pass."""
         torch.ops.transformer_engine_ep.prepare(
             handle_mem, top_k, topk_idx, token_counts, alignment
         )
@@ -545,6 +546,7 @@ class _EpDispatch(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, g_recv_tokens, g_recv_topk_weights, _g_token_counts):  # type: ignore[override]
+        """Dispatch backward into the persistent grad_tokens/grad_topk_weights slots."""
         device = ctx.handle_mem.device
         if g_recv_tokens is None:
             g_recv_tokens = torch.zeros(
@@ -599,6 +601,7 @@ class _EpCombine(torch.autograd.Function):
         hidden_dim: int,
         expert_out: torch.Tensor,
     ):
+        """Combine expert outputs; reuses combine_in as the grad slot for bwd."""
         device = expert_out.device
         # Stage expert_out into the persistent combine_in slot (symm-mem-backed
         # in the zero-copy path); its storage is reused as grad_combine_in in bwd.
@@ -611,6 +614,7 @@ class _EpCombine(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, g_result):  # type: ignore[override]
+        """Combine backward into combine_in storage; returned as grad of expert_out."""
         grad_combine_in = ctx.combine_in
         if not g_result.is_contiguous():
             g_result = g_result.contiguous()
