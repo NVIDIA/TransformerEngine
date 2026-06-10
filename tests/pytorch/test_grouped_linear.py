@@ -930,7 +930,6 @@ class TestGroupedLinearModule:
         bias: bool,
         fp8_model_params: bool,
         delay_wgrad_compute: bool,
-        single_grouped_bias: bool = False,
         x_base: torch.Tensor,
         dy: torch.Tensor,
         weights,
@@ -957,14 +956,12 @@ class TestGroupedLinearModule:
                 params_dtype=dtype,
                 device="cuda",
                 delay_wgrad_compute=delay_wgrad_compute,
-                single_grouped_bias=single_grouped_bias,
             )
         with torch.no_grad():
             _copy_grouped_linear_params(
                 grouped_linear,
                 weights,
                 biases if bias else None,
-                single_grouped_bias=single_grouped_bias,
             )
 
         # The fused path is the graph-safe path and accepts a CUDA tensor for split metadata.
@@ -983,10 +980,7 @@ class TestGroupedLinearModule:
         outputs = [y, x.grad]
         outputs.extend(getattr(grouped_linear, f"weight{i}").grad for i in range(num_gemms))
         if bias:
-            if single_grouped_bias:
-                outputs.append(grouped_linear.bias.grad)
-            else:
-                outputs.extend(getattr(grouped_linear, f"bias{i}").grad for i in range(num_gemms))
+            outputs.extend(getattr(grouped_linear, f"bias{i}").grad for i in range(num_gemms))
         return _clone_outputs(outputs)
 
 
@@ -1001,13 +995,12 @@ class TestGroupedLinearModule:
         ],
         ids=["bf16", "mxfp8"],
     )
-    @pytest.mark.parametrize("single_grouped_bias", all_boolean)
     @pytest.mark.parametrize("bias", all_boolean)
     @pytest.mark.parametrize("fp8_model_params", all_boolean)
     @pytest.mark.parametrize("delay_wgrad_compute", all_boolean)
     def test_grouped_linear_grouped_tensor_path_matches_legacy(
         self,
-        fp8_recipe, bias, fp8_model_params, delay_wgrad_compute, single_grouped_bias, monkeypatch
+        fp8_recipe, bias, fp8_model_params, delay_wgrad_compute, monkeypatch
     ):
         if torch.cuda.get_device_capability() < (10, 0):
             pytest.skip("GroupedTensor grouped GEMM path requires SM100+")
@@ -1015,8 +1008,6 @@ class TestGroupedLinearModule:
         use_fp8 = fp8_recipe is not None
         if fp8_model_params and not use_fp8:
             pytest.skip("fp8_model_params requires FP8")
-        if single_grouped_bias and not bias:
-            pytest.skip("single_grouped_bias requires bias=True")
 
         dtype = torch.bfloat16
         num_gemms = 3
@@ -1044,7 +1035,6 @@ class TestGroupedLinearModule:
             bias=bias,
             fp8_model_params=fp8_model_params,
             delay_wgrad_compute=delay_wgrad_compute,
-            single_grouped_bias=single_grouped_bias,
             x_base=x_base,
             dy=dy,
             weights=weights,
@@ -1058,7 +1048,6 @@ class TestGroupedLinearModule:
             bias=bias,
             fp8_model_params=fp8_model_params,
             delay_wgrad_compute=delay_wgrad_compute,
-            single_grouped_bias=single_grouped_bias,
             x_base=x_base,
             dy=dy,
             weights=weights,
