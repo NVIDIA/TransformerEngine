@@ -30,7 +30,6 @@ __all__ = [
     "EpLayerConfig",
     "set_ep_config",
     "get_ep_config",
-    "get_ep_num_local_experts",
     "ep_handle_mem_size",
     "ep_prepare",
     "ep_dispatch_fwd",
@@ -76,11 +75,6 @@ def get_ep_config() -> EpConfig:
     if _ep_config is None:
         raise RuntimeError("EpConfig has not been set. Did you call ep_bootstrap()?")
     return _ep_config
-
-
-def get_ep_num_local_experts() -> int:
-    """Number of experts owned by this EP rank."""
-    return get_ep_config().num_local_experts
 
 
 @dataclass(frozen=True)
@@ -156,24 +150,22 @@ def _ep_output_spec(*trailing):
 
 
 def _ep_spec_ok(spec, trailing_count):
-    """Accept ``(ep, *[None])`` (no DP) or ``((dp,ep), *[None])`` /
-    ``(("dp",), *[None])`` / ``("dp", *[None])`` / ``(None, *[None])`` (with DP)
-    on an EP-output tensor's single leading dim. JAX may collapse a size-1
-    mesh axis to ``None`` (matters for dp_size=1 like 1x4)."""
+    """Leading dim shards along ep (and outer dp/fsdp when set); trailing dims
+    are replicated. JAX may collapse size-1 mesh axes to ``None`` or drop them,
+    so the leading entry is normalized to a set of named axes before comparing.
+    """
     gsr = global_mesh_resource()
     ep_axis = gsr.ep_resource
     outer = _ep_outer_axis()
-    expected_len = 1 + trailing_count
-    if len(spec) != expected_len:
+    if len(spec) != 1 + trailing_count:
         return False
     if any(ax is not None for ax in spec[1:]):
         return False
     leading = spec[0]
-    if outer is None:
-        return leading == ep_axis
-    allowed = {ep_axis, outer, None}
     elts = leading if isinstance(leading, tuple) else (leading,)
-    return all(a in allowed for a in elts)
+    actual = frozenset(a for a in elts if a is not None)
+    expected = {ep_axis} if outer is None else {ep_axis, outer}
+    return actual <= expected
 
 
 # ── ep_prepare ──────────────────────────────────────────────────────────────
@@ -213,15 +205,9 @@ class EpPreparePrimitive(BasePrimitive):
         return token_counts_aval, handle_mem_aval, workspace_aval
 
     @staticmethod
-    def outer_abstract(topk_idx_aval, *, top_k, dispatch_output_per_expert_alignment, is_outer):
-        del is_outer
-        avals = EpPreparePrimitive.abstract(
-            topk_idx_aval,
-            top_k=top_k,
-            dispatch_output_per_expert_alignment=dispatch_output_per_expert_alignment,
-            is_outer=True,
-        )
-        return avals[:2]
+    def outer_abstract(*args, **kwargs):
+        kwargs["is_outer"] = True
+        return EpPreparePrimitive.abstract(*args, **kwargs)[:2]  # pylint: disable=missing-kwoa
 
     @staticmethod
     def lowering(ctx, topk_idx, *, top_k, dispatch_output_per_expert_alignment, is_outer):
@@ -331,10 +317,8 @@ class EpDispatchPrimitive(BasePrimitive):
 
     @staticmethod
     def outer_abstract(*args, **kwargs):
-        kwargs = dict(kwargs)
         kwargs["is_outer"] = True
-        avals = EpDispatchPrimitive.abstract(*args, **kwargs)  # pylint: disable=missing-kwoa
-        return avals[:2]
+        return EpDispatchPrimitive.abstract(*args, **kwargs)[:2]  # pylint: disable=missing-kwoa
 
     @staticmethod
     def lowering(
@@ -806,7 +790,6 @@ class EpCombineBwdPrimitive(BasePrimitive):
 
     @staticmethod
     def outer_abstract(*args, **kwargs):
-        kwargs = dict(kwargs)
         kwargs["is_outer"] = True
         return EpCombineBwdPrimitive.abstract(*args, **kwargs)  # pylint: disable=missing-kwoa
 
