@@ -34,7 +34,12 @@ from ...utils import (
     mark_grouped_tensor,
     round_up_to_nearest_multiple,
 )
-from ..basic import GroupedLinear, ScaledClampedQGeGLU, ScaledSReLU
+from ..basic import (
+    GroupedLinear,
+    ScaledClampedQGeGLU,
+    ScaledSReLU,
+    ScaledSwiGLU,
+)
 from ..fuser import register_forward_backward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
 from .._common import (
@@ -637,20 +642,11 @@ def _compute_grad_params(
 
 def is_glu_activation(activation_op) -> bool:
     """Whether an activation consumes a GLU-style doubled input."""
-    from ..basic import (  # pylint: disable=import-outside-toplevel
-        ScaledClampedQGeGLU,
-        ScaledSwiGLU,
-    )
-
     return isinstance(activation_op, (ScaledSwiGLU, ScaledClampedQGeGLU))
 
 
 def validate_grouped_mlp_dims(fc1, activation_op, fc2) -> None:
     """Validate FC1 / activation / FC2 dimensions for fused grouped MLP."""
-    from ..basic import (  # pylint: disable=import-outside-toplevel
-        ScaledSReLU,
-    )
-
     if fc1.in_features % 64 != 0 or fc1.out_features % 64 != 0:
         raise ValueError(
             f"Unsupported dims for FC1 (num_groups={fc1.num_groups}, "
@@ -706,12 +702,6 @@ def fuse_grouped_mlp_ops(
     list of FusibleOperation
         Updated operations with matched triples replaced by fused ops.
     """
-    from ..basic import (  # pylint: disable=import-outside-toplevel
-        GroupedLinear,
-        ScaledClampedQGeGLU,
-        ScaledSwiGLU,
-    )
-
     if not fused_op_cls.is_supported():
         return ops
     if recipe is None or not (recipe.mxfp8() or recipe.nvfp4()):
@@ -889,7 +879,8 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         fc2_weight_shape = (fc2_op.out_features, fc2_op.in_features)
         input_ = input_.reshape(-1, fc1_weight_shape[1])
         in_shape = list(input_.size())
-        assert in_shape[0] % 128 == 0, "Unsupported input shape for fused grouped MLP."
+        if in_shape[0] % 128 != 0:
+            raise ValueError(f"Unsupported input shape for fused grouped MLP ({in_shape=}).")
 
         num_groups = fc1_op.num_groups
         fc1_weight_param = fc1_op.weight if fc1_op.single_grouped_weight else fc1_op.weight0
@@ -1008,7 +999,6 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             quantized_fc2_weights = []
             for idx, weight in enumerate(fc2_weights):
                 quantizer = fc2_op.get_quantizer("forward", 2 * idx + 1)
-                quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
                 if not is_quantized_tensor(weight):
                     quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
                     quantized_fc2_weights.append(quantizer(weight))
