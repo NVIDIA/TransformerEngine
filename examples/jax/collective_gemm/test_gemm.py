@@ -150,7 +150,7 @@ def run_gemm_tests(args, mesh=None):
         jax.block_until_ready(gathered_ref_output)
         jax.block_until_ready(gathered_output)
 
-    if args.enable_result_check and args.process_id == 0:
+    if args.enable_result_check:
         # CGEMM + RS + BF16 uses TE's reduce_bf16 kernel (sequential left-to-right in FP32).
         # With catastrophic cancellation the output is near zero while the absolute diff can
         # reach 1 ULP of the partial GEMM magnitude (~0.0625 for typical transformer

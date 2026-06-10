@@ -4,9 +4,22 @@
 
 NUM_GPUS=${NUM_GPUS:-$(nvidia-smi -L | wc -l)}
 
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd "$SCRIPT_DIR/../../.." && pwd)
+
 : ${TE_PATH:=/opt/transformerengine}
+if [ ! -d "$TE_PATH" ] && [ -f "$REPO_ROOT/tests/jax/pytest.ini" ]; then
+  TE_PATH="$REPO_ROOT"
+fi
+
 : ${XML_LOG_DIR:=/logs}
-mkdir -p "$XML_LOG_DIR"
+if ! mkdir -p "$XML_LOG_DIR" 2>/dev/null; then
+  XML_LOG_DIR=$(mktemp -d /tmp/te_cgemm_xml.XXXXXX)
+  echo "XML_LOG_DIR is not writable; using $XML_LOG_DIR"
+fi
+
+CGEMM_NCCL_FILE_DIR=$(mktemp -d /tmp/te_cgemm_nccl_ids.XXXXXX)
+export NVTE_JAX_NCCL_FILE_PATH="${NVTE_JAX_NCCL_FILE_PATH:-$CGEMM_NCCL_FILE_DIR}"
 
 # Check if NVLINK is supported before running tests
 echo "*** Checking NVLINK support***"
@@ -77,6 +90,9 @@ cleanup() {
       kill -KILL "$pid" 2>/dev/null || true
     fi
   done
+  if [ -n "$CGEMM_NCCL_FILE_DIR" ] && [ -d "$CGEMM_NCCL_FILE_DIR" ]; then
+    rm -rf "$CGEMM_NCCL_FILE_DIR"
+  fi
 }
 
 # Set up signal handlers to cleanup on exit
