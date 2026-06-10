@@ -152,7 +152,6 @@ def _run_layer(args, rank, world_size, ep_size, num_experts, num_local_experts, 
         recv_capacity_per_rank=recv_pr,
         hidden_dim=args.hidden,
         num_local_experts=num_local_experts,
-        ep_group=ep_group,
     )
 
     recv_t, recv_w_out, _tc = ep_dispatch(buffer, tokens, topk_idx, topk_w)
