@@ -225,6 +225,47 @@ def nvcc_path() -> Tuple[str, str]:
 
 
 @functools.lru_cache(maxsize=None)
+def nccl_home_path() -> str:
+    """Returns the NCCL install prefix containing include/nccl.h and libnccl.so.
+
+    Throws RuntimeError if NCCL is not found.
+    """
+    # Honor env var when its include is valid.
+    env_home = os.environ.get("NCCL_HOME")
+    if env_home:
+        if (Path(env_home) / "include" / "nccl.h").is_file():
+            return env_home
+        print(
+            f"[NCCL EP] WARNING: NCCL_HOME='{env_home}' is set but "
+            f"'{env_home}/include/nccl.h' was not found; falling back to system probes."
+        )
+
+    lib_names = ("libnccl.so", "libnccl.so.2")
+    lib_subdirs = ("lib", "lib64", "lib/aarch64-linux-gnu", "lib/x86_64-linux-gnu")
+    for cand in ("/opt/nvidia/nccl", "/usr/local/nccl", "/usr"):
+        p = Path(cand)
+        if (p / "include" / "nccl.h").is_file() and any(
+            (p / sub / name).exists() for sub in lib_subdirs for name in lib_names
+        ):
+            return str(p)
+
+    try:
+        out = subprocess.check_output(["ldconfig", "-p"], stderr=subprocess.DEVNULL).decode()
+        for line in out.splitlines():
+            if "libnccl.so" in line and "=>" in line:
+                lib_path = Path(line.split("=>")[-1].strip())
+                for root in (lib_path.parent.parent, lib_path.parent.parent.parent):
+                    if (root / "include" / "nccl.h").is_file():
+                        return str(root)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+
+    raise RuntimeError(
+        "Could not locate NCCL core (nccl.h + libnccl.so). Set NCCL_HOME to the install prefix."
+    )
+
+
+@functools.lru_cache(maxsize=None)
 def get_cuda_include_dirs() -> Tuple[str, str]:
     """Returns the CUDA header directory."""
 

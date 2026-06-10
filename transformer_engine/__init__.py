@@ -10,6 +10,7 @@ import ctypes
 import functools
 import os
 from importlib import metadata
+from typing import Optional, Tuple
 import transformer_engine.common
 
 # Minimum NCCL version for the statically-linked NCCL EP backend.
@@ -17,26 +18,41 @@ _NCCL_EP_MIN_VERSION = (2, 30, 4)
 
 
 @functools.lru_cache(maxsize=1)
-def is_nccl_ep_available() -> bool:
-    """Return True if the runtime libnccl.so is new enough for NCCL EP."""
+def _nccl_runtime_version() -> Optional[Tuple[int, int, int]]:
+    """Return runtime (major, minor, patch) from libnccl.so.2, or None if unavailable."""
     try:
-        libnccl = ctypes.CDLL("libnccl.so.2", mode=ctypes.RTLD_GLOBAL)
-        ver = ctypes.c_int(0)
-        libnccl.ncclGetVersion(ctypes.byref(ver))
+        libnccl = ctypes.CDLL("libnccl.so.2", mode=ctypes.RTLD_LOCAL)
+        ncclGetVersion = libnccl.ncclGetVersion
     except (OSError, AttributeError):
-        return False
+        return None
+    ver = ctypes.c_int(0)
+    if ncclGetVersion(ctypes.byref(ver)) != 0:
+        return None
     v = ver.value
-    cur = (v // 10000, (v // 100) % 100, v % 100)
-    return cur >= _NCCL_EP_MIN_VERSION
+    return (v // 10000, (v // 100) % 100, v % 100)
+
+
+def is_nccl_ep_available() -> bool:
+    """Return True if the runtime libnccl.so meets the NCCL EP minimum."""
+    cur = _nccl_runtime_version()
+    return cur is not None and cur >= _NCCL_EP_MIN_VERSION
 
 
 def require_nccl_ep() -> None:
     """Raise RuntimeError if NCCL EP cannot run on the current libnccl."""
-    if not is_nccl_ep_available():
-        mn = ".".join(str(x) for x in _NCCL_EP_MIN_VERSION)
+    mn = ".".join(str(x) for x in _NCCL_EP_MIN_VERSION)
+    cur = _nccl_runtime_version()
+    if cur is None:
         raise RuntimeError(
-            f"NCCL EP requires NCCL >= {mn} at runtime; upgrade libnccl.so or "
-            "rebuild Transformer Engine with NVTE_BUILD_WITH_NCCL_EP=0."
+            f"NCCL EP requires libnccl.so.2 (>= {mn}); could not load libnccl.so.2 "
+            "or query its version. Install NCCL or rebuild Transformer Engine with "
+            "NVTE_BUILD_WITH_NCCL_EP=0."
+        )
+    if cur < _NCCL_EP_MIN_VERSION:
+        raise RuntimeError(
+            f"NCCL EP requires NCCL >= {mn} at runtime; found "
+            f"{'.'.join(str(x) for x in cur)}. Upgrade libnccl.so or rebuild "
+            "Transformer Engine with NVTE_BUILD_WITH_NCCL_EP=0."
         )
 
 

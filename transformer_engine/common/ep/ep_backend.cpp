@@ -13,6 +13,7 @@
 #include <nccl_ep.h>
 
 #include <algorithm>
+#include <climits>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -99,25 +100,24 @@ void EPBackend::validate_config(const NVTEEpGroupConfig& config) {
   NVTE_CHECK(config.max_token_dtype >= 0 && config.max_token_dtype < kNVTENumTypes,
              "max_token_dtype out of range, got ", static_cast<int>(config.max_token_dtype));
   const size_t elem_bytes = typeToSize(static_cast<DType>(config.max_token_dtype));
-  NVTE_CHECK(config.hidden_dim * elem_bytes >= 16,
+  const size_t row_bytes = static_cast<size_t>(config.hidden_dim) * elem_bytes;
+  NVTE_CHECK(row_bytes >= 16,
              "hidden_dim * sizeof(max_token_dtype) must be >= 16 (NCCL EP 16B row alignment); "
              "got hidden_dim=",
              config.hidden_dim, ", element_bytes=", elem_bytes);
+  // NCCL EP packs row size into ncclEpGroupConfig::max_token_bytes (unsigned int).
+  NVTE_CHECK(row_bytes <= static_cast<size_t>(UINT_MAX),
+             "hidden_dim * sizeof(max_token_dtype) exceeds 4 GiB; got ", row_bytes, " bytes");
   NVTE_CHECK(config.num_experts % config.ep_size == 0, "num_experts (", config.num_experts,
              ") must be divisible by ep_size (", config.ep_size, ")");
   NVTE_CHECK(config.max_num_sms >= 0, "max_num_sms must be >= 0 (0 = auto), got ",
              config.max_num_sms);
 
-  int device, major;
-  NVTE_CHECK_CUDA(cudaGetDevice(&device));
-  NVTE_CHECK_CUDA(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device));
-  NVTE_CHECK(major >= 9,
-             "NCCL EP requires SM_90+ (Hopper or later), "
-             "but current device has compute capability ",
-             major, ".x");
-
-  NVTE_CHECK(cuda::supports_multicast(device), "NCCL EP requires CUDA multicast support on device ",
-             device);
+  const int sm = cuda::sm_arch();
+  NVTE_CHECK(sm >= 90,
+             "NCCL EP requires SM_90+ (Hopper or later), but current device is SM_", sm);
+  NVTE_CHECK(cuda::supports_multicast(),
+             "NCCL EP requires CUDA multicast support on the current device");
 }
 
 void EPBackend::initialize(ncclComm_t ep_comm, NVTEEpGroupConfig config) {

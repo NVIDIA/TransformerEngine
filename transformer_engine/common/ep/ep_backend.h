@@ -21,6 +21,7 @@
 #include <nccl_ep.h>
 #include <transformer_engine/ep.h>
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <list>
@@ -101,7 +102,7 @@ class EPBackend {
   ncclEpGroup_t ep_group_{nullptr};
   ncclComm_t ep_comm_{nullptr};
   NVTEEpGroupConfig group_config_{};
-  bool initialized_{false};
+  std::atomic<bool> initialized_{false};
   std::mutex mutex_;
   std::list<HandleEntry> lru_;
   std::unordered_map<void*, std::list<HandleEntry>::iterator> index_;
