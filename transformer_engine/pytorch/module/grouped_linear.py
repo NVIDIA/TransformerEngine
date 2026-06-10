@@ -76,9 +76,9 @@ def _uses_identity_quantizer(quantizer):
     if isinstance(quantizer, IdentityQuantizer):
         return True
     if isinstance(quantizer, HybridQuantizer):
-        return _uses_identity_quantizer(
-            quantizer.rowwise_quantizer
-        ) or _uses_identity_quantizer(quantizer.columnwise_quantizer)
+        return _uses_identity_quantizer(quantizer.rowwise_quantizer) or _uses_identity_quantizer(
+            quantizer.columnwise_quantizer
+        )
     return False
 
 
@@ -1312,9 +1312,7 @@ class _GroupedLinear(torch.autograd.Function):
                     inputmats: list
                     input_identity = _has_identity_quantizer_list(ctx.input_quantizers)
                     input_hybrid = (
-                        False
-                        if input_identity
-                        else _is_hybrid_quantizer_list(ctx.input_quantizers)
+                        False if input_identity else _is_hybrid_quantizer_list(ctx.input_quantizers)
                     )
                     if ctx.fp8 and not ctx.debug and not input_hybrid:
                         inputmats = _split_quantize_with_identity_fallback(

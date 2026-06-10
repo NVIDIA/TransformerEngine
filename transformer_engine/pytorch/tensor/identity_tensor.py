@@ -125,8 +125,7 @@ class IdentityQuantizer(Quantizer):
     ) -> QuantizedTensorStorage:
         if not isinstance(dst, IdentityTensorStorage):
             raise ValueError(
-                "IdentityQuantizer can only update IdentityTensorStorage, got"
-                f" {type(dst).__name__}"
+                f"IdentityQuantizer can only update IdentityTensorStorage, got {type(dst).__name__}"
             )
         data = self._maybe_cast(src)
         if (
@@ -190,9 +189,7 @@ class IdentityTensor(IdentityTensorStorage, QuantizedTensor):
         memory_format: torch.memory_format = torch.contiguous_format,
     ) -> "IdentityTensor":
         """Return an IdentityTensor with contiguous high-precision storage."""
-        if self._hp_data is not None and self._hp_data.is_contiguous(
-            memory_format=memory_format
-        ):
+        if self._hp_data is not None and self._hp_data.is_contiguous(memory_format=memory_format):
             return self
         return self._wrap_data_view(self._hp_data.contiguous(memory_format=memory_format))
 

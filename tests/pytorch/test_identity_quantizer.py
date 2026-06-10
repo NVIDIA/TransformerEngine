@@ -33,8 +33,8 @@ from transformer_engine.pytorch.tensor.storage.identity_tensor_storage import (
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
-fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
-    te.is_fp8_block_scaling_available(return_reason=True)
+fp8_block_scaling_available, reason_for_no_fp8_block_scaling = te.is_fp8_block_scaling_available(
+    return_reason=True
 )
 
 
@@ -276,9 +276,7 @@ class TestIdentityQuantizerUnit:
                     activation_dtype=torch.bfloat16,
                 )
 
-    def test_hybrid_split_forwards_disable_bulk_allocation_to_both_directions(
-        self, monkeypatch
-    ):
+    def test_hybrid_split_forwards_disable_bulk_allocation_to_both_directions(self, monkeypatch):
         import transformer_engine.pytorch.module.grouped_linear as grouped_linear
         from transformer_engine.pytorch.module.grouped_linear import _hybrid_split_quantize
 
@@ -607,7 +605,10 @@ class TestIdentityQuantizerUnit:
         zeros = t.new_zeros((2, 3))
         assert isinstance(zeros, IdentityTensor)
         torch.testing.assert_close(
-            zeros.dequantize(), torch.zeros((2, 3), device="cuda", dtype=x.dtype), rtol=0.0, atol=0.0
+            zeros.dequantize(),
+            torch.zeros((2, 3), device="cuda", dtype=x.dtype),
+            rtol=0.0,
+            atol=0.0,
         )
 
         dst = IdentityQuantizer().make_empty(x.shape, dtype=x.dtype, device="cuda")
@@ -1022,9 +1023,7 @@ class TestIdentityHybridFormatProtocols:
 
         assert isinstance(reloaded, HybridQuantizedTensor)
         assert isinstance(reloaded._columnwise_storage, IdentityTensorStorage)
-        torch.testing.assert_close(
-            reloaded._columnwise_storage.dequantize(), x, rtol=0.0, atol=0.0
-        )
+        torch.testing.assert_close(reloaded._columnwise_storage.dequantize(), x, rtol=0.0, atol=0.0)
         torch.testing.assert_close(
             reloaded._rowwise_storage.dequantize(), expected_row, rtol=0.0, atol=0.0
         )
@@ -1181,9 +1180,7 @@ class TestIdentityLinear:
             x,
             recipe=CustomRecipe(qfactory=fp8_fwd_factory, backward_override="high_precision"),
         )
-        y_id, dx_id, wg_id = _fwd_bwd(
-            test, x, recipe=CustomRecipe(qfactory=fwd_fp8_bwd_hp_factory)
-        )
+        y_id, dx_id, wg_id = _fwd_bwd(test, x, recipe=CustomRecipe(qfactory=fwd_fp8_bwd_hp_factory))
 
         torch.testing.assert_close(y_id, y_bo, rtol=0.0, atol=0.0)
         torch.testing.assert_close(dx_id, dx_bo, rtol=0.0, atol=0.0)
@@ -1231,9 +1228,7 @@ class TestIdentityLinear:
         recipe = CustomRecipe(qfactory=identity_all_factory)
         torch.manual_seed(2718)
         with te.quantized_model_init(enabled=True, recipe=recipe):
-            test = te.Linear(
-                self.IN_F, self.OUT_F, bias=False, params_dtype=torch.bfloat16
-            ).cuda()
+            test = te.Linear(self.IN_F, self.OUT_F, bias=False, params_dtype=torch.bfloat16).cuda()
         with torch.no_grad():
             for p_test, p_ref in zip(test.parameters(), ref.parameters()):
                 assert isinstance(p_test, IdentityTensor)
@@ -1255,9 +1250,7 @@ class TestIdentityLinear:
         recipe = CustomRecipe(qfactory=identity_all_factory)
         torch.manual_seed(888)
         with te.quantized_model_init(enabled=True, recipe=recipe):
-            test = te.Linear(
-                self.IN_F, self.OUT_F, bias=False, params_dtype=torch.bfloat16
-            ).cuda()
+            test = te.Linear(self.IN_F, self.OUT_F, bias=False, params_dtype=torch.bfloat16).cuda()
         with torch.no_grad():
             for p_test, p_ref in zip(test.parameters(), ref.parameters()):
                 assert isinstance(p_test, IdentityTensor)
@@ -1290,13 +1283,10 @@ class TestIdentityLinear:
             torch.testing.assert_close(y_test, y_ref, rtol=0.0, atol=0.0)
             torch.testing.assert_close(loss_test, loss_ref, rtol=0.0, atol=0.0)
             for p_test, p_ref in zip(test.parameters(), ref.parameters()):
-                torch.testing.assert_close(
-                    p_test.dequantize(), p_ref, rtol=0.0, atol=0.0
-                )
+                torch.testing.assert_close(p_test.dequantize(), p_ref, rtol=0.0, atol=0.0)
 
         assert all(
-            losses_ref[i + 1].item() < losses_ref[i].item()
-            for i in range(len(losses_ref) - 1)
+            losses_ref[i + 1].item() < losses_ref[i].item() for i in range(len(losses_ref) - 1)
         ), f"BF16 loss did not strictly decrease: {[x.item() for x in losses_ref]}"
         for loss_test, loss_ref in zip(losses_test, losses_ref):
             torch.testing.assert_close(loss_test, loss_ref, rtol=0.0, atol=0.0)

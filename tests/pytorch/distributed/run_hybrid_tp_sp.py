@@ -599,7 +599,9 @@ def _same_format_parity_supported():
     return QUANTIZATION in ("hybrid_fp8", "hybrid_mxfp8")
 
 
-def _check_same_topology_parity(out_h, dinp_h, model_h, out_v, dinp_v, model_v, tag, *, check_grads):
+def _check_same_topology_parity(
+    out_h, dinp_h, model_h, out_v, dinp_v, model_v, tag, *, check_grads
+):
     # Larger modules use different fused/unfused norm paths between hybrid and
     # vanilla, so numerical parity is the meaningful contract here. Linear keeps
     # the stricter bitwise check above.

@@ -1660,7 +1660,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             ):
                 grad_bias = grad_output.dequantize().view(-1, grad_output.shape[-1]).sum(dim=0)
             else:
-                if isinstance(quantizer, (Float8BlockQuantizer, HybridQuantizer, IdentityQuantizer)):
+                if isinstance(
+                    quantizer, (Float8BlockQuantizer, HybridQuantizer, IdentityQuantizer)
+                ):
                     # Float8BlockQuantizer: unfused until cast_transpose + dgrad is ready.
                     # HybridQuantizer: tex.bgrad_quantize doesn't recognize hybrid quantizers.
                     # IdentityQuantizer: high-precision passthrough; bgrad computed in HP.

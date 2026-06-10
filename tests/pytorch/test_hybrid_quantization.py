@@ -4333,9 +4333,7 @@ class TestFloat8TransposeOnlySplit:
         pieces = torch.split(tensor, split_size, dim=dim)
 
         assert [tuple(piece.shape) for piece in pieces] == expected_shapes
-        assert [
-            tuple(piece._transpose.shape) for piece in pieces
-        ] == expected_transpose_shapes
+        assert [tuple(piece._transpose.shape) for piece in pieces] == expected_transpose_shapes
         assert all(piece._data is None for piece in pieces)
         assert all(piece._transpose_invalid is False for piece in pieces)
 
@@ -4360,12 +4358,16 @@ class TestFloat8TransposeOnlySplit:
             (2, 16),
         ]
         assert all(piece.rowwise_sub_storage is None for piece in pieces)
-        assert [
-            tuple(piece.columnwise_sub_storage.shape) for piece in pieces
-        ] == [(5, 16), (5, 16), (2, 16)]
-        assert [
-            tuple(piece.columnwise_sub_storage._transpose.shape) for piece in pieces
-        ] == [(16, 5), (16, 5), (16, 2)]
+        assert [tuple(piece.columnwise_sub_storage.shape) for piece in pieces] == [
+            (5, 16),
+            (5, 16),
+            (2, 16),
+        ]
+        assert [tuple(piece.columnwise_sub_storage._transpose.shape) for piece in pieces] == [
+            (16, 5),
+            (16, 5),
+            (16, 2),
+        ]
 
 
 @requires_fp8
