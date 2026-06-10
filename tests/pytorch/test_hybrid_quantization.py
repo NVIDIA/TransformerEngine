@@ -2456,6 +2456,55 @@ class TestHybridGroupedLinearClassifier:
         assert "HybridQuantizer" in msg
         assert "Float8CurrentScalingQuantizer" in msg
 
+    @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+    @pytest.mark.parametrize(
+        ("usage", "expected"),
+        [
+            pytest.param((True, False), {"rowwise": True, "columnwise": False}, id="rowwise"),
+            pytest.param((False, True), {"rowwise": False, "columnwise": True}, id="columnwise"),
+            pytest.param((True, True), {"rowwise": True, "columnwise": True}, id="both"),
+        ],
+    )
+    def test_hybrid_split_quantize_respects_parent_usage_flags(self, usage, expected):
+        from transformer_engine.pytorch.module.grouped_linear import (
+            _hybrid_split_quantize,
+        )
+
+        tensor = torch.randn(32, 128, dtype=torch.bfloat16, device="cuda")
+        quantizers = [
+            HybridQuantizer(
+                rowwise_quantizer=_make_fp8_quantizer(),
+                columnwise_quantizer=_make_fp8_quantizer(),
+            )
+            for _ in range(2)
+        ]
+        for quantizer in quantizers:
+            quantizer.set_usage(rowwise=usage[0], columnwise=usage[1])
+
+        out = _hybrid_split_quantize(tensor, [16, 16], quantizers)
+
+        assert [storage.get_usages() for storage in out] == [expected, expected]
+
+    @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+    def test_hybrid_split_quantize_rejects_mixed_parent_usage_flags(self):
+        from transformer_engine.pytorch.module.grouped_linear import (
+            _hybrid_split_quantize,
+        )
+
+        tensor = torch.randn(32, 128, dtype=torch.bfloat16, device="cuda")
+        quantizers = [
+            HybridQuantizer(
+                rowwise_quantizer=_make_fp8_quantizer(),
+                columnwise_quantizer=_make_fp8_quantizer(),
+            )
+            for _ in range(2)
+        ]
+        quantizers[0].set_usage(rowwise=True, columnwise=False)
+        quantizers[1].set_usage(rowwise=True, columnwise=True)
+
+        with pytest.raises(ValueError, match="mixed parent usage flags"):
+            _hybrid_split_quantize(tensor, [16, 16], quantizers)
+
 
 # ===========================================================================
 # Quantized Parameters (quantized_model_init) tests for hybrid quantization

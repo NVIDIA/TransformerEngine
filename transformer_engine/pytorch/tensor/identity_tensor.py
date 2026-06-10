@@ -185,6 +185,17 @@ class IdentityTensor(IdentityTensorStorage, QuantizedTensor):
             device=self.device,
         )
 
+    def contiguous(
+        self,
+        memory_format: torch.memory_format = torch.contiguous_format,
+    ) -> "IdentityTensor":
+        """Return an IdentityTensor with contiguous high-precision storage."""
+        if self._hp_data is not None and self._hp_data.is_contiguous(
+            memory_format=memory_format
+        ):
+            return self
+        return self._wrap_data_view(self._hp_data.contiguous(memory_format=memory_format))
+
     def __reduce_ex__(self, protocol: int) -> tuple:
         """Custom pickling that preserves the high-precision payload."""
         return (

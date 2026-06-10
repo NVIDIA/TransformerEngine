@@ -54,6 +54,28 @@ class HybridQuantizer(Quantizer):
         columnwise_quantizer: Quantizer,
     ) -> None:
         super().__init__(rowwise=True, columnwise=True)
+        from transformer_engine.pytorch.quantization import QuantizerRequest  # local import
+
+        for role, quantizer in (
+            ("rowwise", rowwise_quantizer),
+            ("columnwise", columnwise_quantizer),
+        ):
+            if isinstance(quantizer, QuantizerRequest):
+                raise TypeError(
+                    "HybridQuantizer does not support nested QuantizerRequest "
+                    f"objects yet; got {type(quantizer).__name__} for the {role} "
+                    "direction. Delayed scaling in CustomRecipe is currently "
+                    "supported only when the qfactory returns DelayedScalingRequest "
+                    "as a top-level slot. Resolving delayed-scaling requests inside "
+                    "HybridQuantizer is future work; pass a concrete Quantizer "
+                    "instance instead."
+                )
+            if not isinstance(quantizer, Quantizer):
+                raise TypeError(
+                    "HybridQuantizer requires concrete Quantizer instances for "
+                    f"both directions, but the {role} argument is "
+                    f"{type(quantizer).__name__}."
+                )
         if rowwise_quantizer is columnwise_quantizer:
             raise ValueError(
                 "HybridQuantizer requires distinct rowwise and columnwise quantizer"
@@ -66,6 +88,20 @@ class HybridQuantizer(Quantizer):
         # Pin each sub-quantizer to its designated direction
         self.rowwise_quantizer.set_usage(rowwise=True, columnwise=False)
         self.columnwise_quantizer.set_usage(rowwise=False, columnwise=True)
+
+    def copy(self) -> "HybridQuantizer":
+        """Create a shallow copy, preserving parent and sub-quantizer state."""
+        quantizer = HybridQuantizer(
+            rowwise_quantizer=self.rowwise_quantizer.copy(),
+            columnwise_quantizer=self.columnwise_quantizer.copy(),
+        )
+        quantizer.set_usage(
+            rowwise=self.rowwise_usage,
+            columnwise=self.columnwise_usage,
+        )
+        quantizer.internal = self.internal
+        quantizer.optimize_for_gemm = self.optimize_for_gemm
+        return quantizer
 
     @property
     def with_amax_reduction(self) -> bool:
@@ -415,6 +451,94 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
     def get_metadata(self) -> Dict[str, Any]:
         return HybridQuantizedTensorStorage.get_metadata(self)
 
+    @staticmethod
+    def _move_metadata_value(
+        value: Any,
+        *,
+        target_device: torch.device,
+        non_blocking: bool,
+        pin_memory: bool,
+    ) -> Any:
+        if isinstance(value, torch.Tensor):
+            value = value.to(device=target_device, non_blocking=non_blocking)
+            if pin_memory and target_device.type == "cpu":
+                value = value.pin_memory()
+        return value
+
+    @classmethod
+    def _move_sub_storage(
+        cls,
+        sub_storage: Optional[QuantizedTensorStorage],
+        *,
+        target_device: torch.device,
+        non_blocking: bool,
+        pin_memory: bool,
+    ) -> Optional[QuantizedTensorStorage]:
+        if sub_storage is None:
+            return None
+        metadata = {
+            key: cls._move_metadata_value(
+                value,
+                target_device=target_device,
+                non_blocking=non_blocking,
+                pin_memory=pin_memory,
+            )
+            for key, value in sub_storage.get_metadata().items()
+        }
+        if isinstance(sub_storage, QuantizedTensor):
+            metadata.update(
+                {
+                    "shape": sub_storage.shape,
+                    "dtype": sub_storage.dtype,
+                    "requires_grad": sub_storage.requires_grad,
+                    "device": target_device,
+                }
+            )
+        return type(sub_storage)(**metadata)
+
+    def contiguous(
+        self,
+        memory_format: torch.memory_format = torch.contiguous_format,
+    ) -> "HybridQuantizedTensor":
+        """Return a HybridQuantizedTensor with contiguous sub-storages."""
+
+        def _contiguous_sub(
+            role: str,
+            sub_storage: Optional[QuantizedTensorStorage],
+        ) -> Optional[QuantizedTensorStorage]:
+            if sub_storage is None:
+                return None
+            if not isinstance(sub_storage, torch.Tensor):
+                raise ValueError(
+                    "HybridQuantizedTensor.contiguous does not support storage-only "
+                    f"{role} sub-storage {type(sub_storage).__name__}. This path is "
+                    "only supported for tensor sub-storages."
+                )
+            try:
+                return sub_storage.contiguous(memory_format=memory_format)
+            except (NotImplementedError, ValueError) as err:
+                raise ValueError(
+                    "HybridQuantizedTensor.contiguous could not make the "
+                    f"{role} sub-storage {type(sub_storage).__name__} contiguous "
+                    f"with memory_format={memory_format}."
+                ) from err
+
+        row = _contiguous_sub("rowwise", self._rowwise_storage)
+        col = _contiguous_sub("columnwise", self._columnwise_storage)
+        if row is self._rowwise_storage and col is self._columnwise_storage:
+            return self
+        return HybridQuantizedTensor(
+            shape=self.shape,
+            dtype=self.dtype,
+            rowwise_storage=row,
+            columnwise_storage=col,
+            rowwise_quantizer=self._rowwise_quantizer,
+            columnwise_quantizer=self._columnwise_quantizer,
+            quantizer=self._quantizer,
+            requires_grad=self.requires_grad,
+            device=self.device,
+        )
+
     def __reduce_ex__(self, protocol: int) -> tuple:
         """Custom pickling.
 
@@ -488,6 +612,14 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
         ):
             if sub is None:
                 continue
+            if not isinstance(sub, QuantizedTensor):
+                raise NotImplementedError(
+                    "Hybrid FSDP2 all-gather does not support storage-only "
+                    f"{role} sub-storage {type(sub).__name__}. This usually means "
+                    "a HybridQuantizer sub-quantizer had internal=True; use "
+                    "tensor sub-storages for Hybrid FSDP2 or disable Hybrid FSDP2 "
+                    "for this parameter."
+                )
             try:
                 sub.fsdp_buffer_fields()
             except NotImplementedError as err:
@@ -670,6 +802,38 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
 
         if func == aten.detach.default:
             return args[0].detach()
+
+        if func == aten._to_copy.default:
+            tensor = args[0]
+            kw = dict(kwargs) if kwargs else {}
+            dtype = kw.get("dtype", None)
+            if dtype is None or dtype == tensor.dtype:
+                target_device = torch.device(kw.get("device", tensor.device) or tensor.device)
+                pin_memory = bool(kw.get("pin_memory", False))
+                non_blocking = bool(kw.get("non_blocking", False))
+                row = cls._move_sub_storage(
+                    tensor._rowwise_storage,
+                    target_device=target_device,
+                    non_blocking=non_blocking,
+                    pin_memory=pin_memory,
+                )
+                col = cls._move_sub_storage(
+                    tensor._columnwise_storage,
+                    target_device=target_device,
+                    non_blocking=non_blocking,
+                    pin_memory=pin_memory,
+                )
+                return HybridQuantizedTensor(
+                    shape=tensor.shape,
+                    dtype=tensor.dtype,
+                    rowwise_storage=row,
+                    columnwise_storage=col,
+                    rowwise_quantizer=tensor._rowwise_quantizer,
+                    columnwise_quantizer=tensor._columnwise_quantizer,
+                    quantizer=tensor._quantizer,
+                    requires_grad=tensor.requires_grad,
+                    device=target_device,
+                )
 
         # ── FSDP2: view ──────────────────────────────────────────────
         if func == aten.view.default:

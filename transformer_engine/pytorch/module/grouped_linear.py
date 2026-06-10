@@ -218,20 +218,38 @@ def _hybrid_split_quantize(tensor, m_splits, quantizers, *, disable_bulk_allocat
             f" Got types: {[type(q).__name__ for q in quantizers]}"
         )
 
+    usage_signatures = [(q.rowwise_usage, q.columnwise_usage) for q in quantizers]
+    if not all(signature == usage_signatures[0] for signature in usage_signatures):
+        raise ValueError(
+            "GroupedLinear HybridQuantizer list has mixed parent usage flags "
+            f"{usage_signatures}. This is not supported by the grouped "
+            "split-quantize path; all experts for a grouped operand must "
+            "request the same rowwise/columnwise directions."
+        )
+    rowwise_enabled, columnwise_enabled = usage_signatures[0]
+
     row_quantizers = [q.rowwise_quantizer for q in quantizers]
     col_quantizers = [q.columnwise_quantizer for q in quantizers]
 
-    row_results = tex.split_quantize(
-        tensor,
-        m_splits,
-        row_quantizers,
-        disable_bulk_allocation=disable_bulk_allocation,
+    row_results = (
+        tex.split_quantize(
+            tensor,
+            m_splits,
+            row_quantizers,
+            disable_bulk_allocation=disable_bulk_allocation,
+        )
+        if rowwise_enabled
+        else [None] * len(quantizers)
     )
-    col_results = tex.split_quantize(
-        tensor,
-        m_splits,
-        col_quantizers,
-        disable_bulk_allocation=disable_bulk_allocation,
+    col_results = (
+        tex.split_quantize(
+            tensor,
+            m_splits,
+            col_quantizers,
+            disable_bulk_allocation=disable_bulk_allocation,
+        )
+        if columnwise_enabled
+        else [None] * len(quantizers)
     )
 
     return [

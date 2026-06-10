@@ -373,6 +373,175 @@ class TestIdentityQuantizerUnit:
             with te.autocast(enabled=True, recipe=CustomRecipe(qfactory=qfactory)):
                 model(x, m_splits=m_splits)
 
+    def test_identity_contiguous_preserves_wrapper_and_values(self):
+        x = torch.randn(8, 16, device="cuda", dtype=torch.bfloat16).t()
+        t = IdentityQuantizer()(x)
+
+        out = t.contiguous()
+
+        assert isinstance(out, IdentityTensor)
+        assert out.is_contiguous()
+        torch.testing.assert_close(out.dequantize(), x.contiguous(), rtol=0.0, atol=0.0)
+
+    def test_hybrid_identity_contiguous_preserves_wrapper_and_values(self):
+        x = torch.randn(8, 16, device="cuda", dtype=torch.bfloat16)
+        q = HybridQuantizer(
+            rowwise_quantizer=IdentityQuantizer(),
+            columnwise_quantizer=IdentityQuantizer(),
+        )
+        t = q(x)
+
+        out = t.contiguous()
+
+        assert out is t
+        assert isinstance(out, HybridQuantizedTensor)
+        assert isinstance(out.rowwise_sub_storage, IdentityTensor)
+        assert isinstance(out.columnwise_sub_storage, IdentityTensor)
+        torch.testing.assert_close(out.dequantize(), x, rtol=0.0, atol=0.0)
+
+    def test_hybrid_identity_cpu_preserves_nested_storage_types(self):
+        x = torch.randn(8, 16, device="cuda", dtype=torch.bfloat16)
+        q = HybridQuantizer(
+            rowwise_quantizer=IdentityQuantizer(),
+            columnwise_quantizer=IdentityQuantizer(),
+        )
+        t = q(x)
+
+        out = t.cpu()
+
+        assert isinstance(out, HybridQuantizedTensor)
+        assert out.device.type == "cpu"
+        assert isinstance(out.rowwise_sub_storage, IdentityTensor)
+        assert isinstance(out.columnwise_sub_storage, IdentityTensor)
+        assert out.rowwise_sub_storage.device.type == "cpu"
+        assert out.columnwise_sub_storage.device.type == "cpu"
+        torch.testing.assert_close(out.dequantize(), x.cpu(), rtol=0.0, atol=0.0)
+        assert len(out.get_data_tensors()) == 4
+        out.copy_(torch.ones_like(x, device="cpu"))
+        torch.testing.assert_close(
+            out.dequantize(), torch.ones_like(x, device="cpu"), rtol=0.0, atol=0.0
+        )
+
+    def test_hybrid_quantizer_copy_preserves_parent_flags(self):
+        q = HybridQuantizer(
+            rowwise_quantizer=IdentityQuantizer(),
+            columnwise_quantizer=IdentityQuantizer(),
+        )
+        q.set_usage(rowwise=True, columnwise=False)
+        q.internal = True
+        q.optimize_for_gemm = True
+
+        out = q.copy()
+
+        assert isinstance(out, HybridQuantizer)
+        assert out is not q
+        assert out.rowwise_quantizer is not q.rowwise_quantizer
+        assert out.columnwise_quantizer is not q.columnwise_quantizer
+        assert out.rowwise_usage is True
+        assert out.columnwise_usage is False
+        assert out.internal is True
+        assert out.optimize_for_gemm is True
+        assert out.rowwise_quantizer.rowwise_usage is True
+        assert out.rowwise_quantizer.columnwise_usage is False
+        assert out.columnwise_quantizer.rowwise_usage is False
+        assert out.columnwise_quantizer.columnwise_usage is True
+
+    def test_te_ops_basic_linear_accepts_hybrid_identity_quantized_weight(self):
+        import transformer_engine.pytorch.ops as te_ops
+
+        def qfactory(role):  # pylint: disable=unused-argument
+            return HybridQuantizer(
+                rowwise_quantizer=IdentityQuantizer(),
+                columnwise_quantizer=IdentityQuantizer(),
+            )
+
+        custom_recipe = CustomRecipe(qfactory=qfactory)
+        with te.quantized_model_init(enabled=True, recipe=custom_recipe):
+            op = te_ops.BasicLinear(16, 16, device="cuda", dtype=torch.bfloat16)
+
+        x = torch.randn(16, 16, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        with te.autocast(enabled=True, recipe=custom_recipe):
+            y = op(x)
+        y.sum().backward()
+
+        assert isinstance(op.weight, HybridQuantizedTensor)
+        assert x.grad is not None
+
+    @pytest.mark.parametrize(
+        "qfactory",
+        [
+            pytest.param(lambda role: IdentityQuantizer(), id="identity"),
+            pytest.param(
+                lambda role: HybridQuantizer(
+                    rowwise_quantizer=IdentityQuantizer(),
+                    columnwise_quantizer=IdentityQuantizer(),
+                ),
+                id="hybrid_identity",
+            ),
+        ],
+    )
+    def test_te_ops_quantize_then_gelu_accepts_identity_backed_tensors(self, qfactory):
+        import transformer_engine.pytorch.ops as te_ops
+
+        model = te_ops.Sequential(te_ops.Quantize(forward=True), te_ops.GELU())
+        x = torch.randn(16, 16, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+
+        with te.autocast(enabled=True, recipe=CustomRecipe(qfactory=qfactory)):
+            y = model(x)
+
+        assert isinstance(y, torch.Tensor)
+        assert y.shape == x.shape
+
+    def test_hybrid_fsdp_rejects_storage_only_sub_storages(self):
+        row_quantizer = IdentityQuantizer()
+        col_quantizer = IdentityQuantizer()
+        row_quantizer.internal = True
+        col_quantizer.internal = True
+        q = HybridQuantizer(
+            rowwise_quantizer=row_quantizer,
+            columnwise_quantizer=col_quantizer,
+        )
+        t = q(torch.randn(8, 16, device="cuda", dtype=torch.bfloat16))
+
+        with pytest.raises(NotImplementedError, match="storage-only rowwise sub-storage"):
+            t.fsdp_pre_all_gather(
+                mesh=None,
+                orig_size=t.shape,
+                contiguous_orig_stride=t.stride(),
+                module=None,
+                mp_policy=None,
+            )
+
+    def test_hybrid_quantizer_rejects_nested_quantizer_requests(self):
+        from transformer_engine.pytorch.quantization import DelayedScalingRequest
+
+        with pytest.raises(TypeError, match="does not support nested QuantizerRequest"):
+            HybridQuantizer(
+                rowwise_quantizer=DelayedScalingRequest(),
+                columnwise_quantizer=IdentityQuantizer(),
+            )
+
+    def test_fp8_dpa_rejects_identity_quantizer_with_type_error(self):
+        from transformer_engine.pytorch.attention.dot_product_attention import utils as dpa_utils
+        from transformer_engine.pytorch.cpp_extensions.fused_attn import (
+            META_DO,
+            META_DP,
+            META_DQKV,
+            META_O,
+            META_QKV,
+            META_S,
+        )
+
+        n_fwd = max(META_QKV, META_S, META_O) + 1
+        n_bwd = max(META_DO, META_DP, META_DQKV) + 1
+        quantizers = {
+            "scaling_fwd": [IdentityQuantizer() for _ in range(n_fwd)],
+            "scaling_bwd": [IdentityQuantizer() for _ in range(n_bwd)],
+        }
+
+        with pytest.raises(TypeError, match="FP8 attention requires FP8-compatible quantizers"):
+            dpa_utils.get_attention_quantizers(True, quantizers)
+
     def test_dequantize_bitwise_identical(self):
         x = torch.randn(4, 32, device="cuda", dtype=torch.bfloat16)
         out = IdentityQuantizer()(x)
