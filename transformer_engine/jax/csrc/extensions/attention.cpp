@@ -16,12 +16,12 @@ NVTE_Fused_Attn_Backend GetFusedAttnBackend(
     NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type,
     float dropout_probability, size_t q_attn_heads, size_t kv_attn_heads, size_t q_max_seqlen,
     size_t kv_max_seqlen, size_t qk_head_dim, size_t v_head_dim, int64_t window_size_left,
-    int64_t window_size_right, bool deterministic) {
+    int64_t window_size_right, bool return_max_logit, bool deterministic) {
   auto backend = nvte_get_fused_attn_backend(
       is_training, static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype), qkv_layout,
       bias_type, mask_type, softmax_type, dropout_probability, q_attn_heads, kv_attn_heads,
       q_max_seqlen, kv_max_seqlen, qk_head_dim, v_head_dim, window_size_left, window_size_right,
-      false, false, deterministic);
+      return_max_logit, false, deterministic);
   return backend;
 }
 
@@ -36,8 +36,8 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t
                                        const size_t bias_heads, const size_t q_max_seqlen,
                                        const size_t kv_max_seqlen, DType dtype,
                                        NVTE_Bias_Type bias_type, NVTE_Fused_Attn_Backend backend,
-                                       void *softmax_buf, void *rng_state_buf = nullptr,
-                                       void *bias_buf = nullptr,
+                                       void *softmax_buf, void *max_buf = nullptr,
+                                       void *rng_state_buf = nullptr, void *bias_buf = nullptr,
                                        void *softmax_offset_buf = nullptr) {
   // all backends need softmax but expect different shapes/dtypes
   // start with the max512 sequence length softmax shape/dtype and correct later
@@ -54,8 +54,23 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t
 
   // arbitrary sequence length backend needs the RNG state and a different shape/dtype softmax
   if (backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
-    tensor_pack->size = 2;
-    NVTETensor &rng_state_aux = tensor_pack->tensors[1];
+    int size = 1;  // Start after softmax.
+
+    if (max_buf != nullptr) {
+      NVTETensor &max_aux = tensor_pack->tensors[size++];
+      NVTEBasicTensor max_aux_data;
+      max_aux_data.data_ptr = max_buf;
+      max_aux_data.shape = {};
+      max_aux_data.shape.ndim = 4;
+      max_aux_data.shape.data[0] = input_batch;
+      max_aux_data.shape.data[1] = attn_heads;
+      max_aux_data.shape.data[2] = q_max_seqlen;
+      max_aux_data.shape.data[3] = 1;
+      max_aux_data.dtype = static_cast<NVTEDType>(DType::kFloat32);
+      nvte_set_tensor_param(&max_aux, kNVTERowwiseData, &max_aux_data);
+    }
+
+    NVTETensor &rng_state_aux = tensor_pack->tensors[size++];
     NVTEBasicTensor rng_state_aux_data;
     rng_state_aux_data.data_ptr = rng_state_buf;
     rng_state_aux_data.shape = {};
@@ -65,8 +80,6 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t
     // correct softmax shape/dtype
     softmax_aux_data.shape.data[3] = 1;  // {B,H,Qs,Ks} -> {B,H,Qs,1}
     softmax_aux_data.dtype = static_cast<NVTEDType>(DType::kFloat32);
-
-    int size = 2;  // Start at 2 (we have softmax and rng_state at indices 0, 1)
 
     // include bias if enabled
     if (bias_type != NVTE_Bias_Type::NVTE_NO_BIAS && bias_type != NVTE_Bias_Type::NVTE_ALIBI) {
@@ -125,7 +138,7 @@ void PrepareFusedAttnBackwardAuxTensors(NVTETensorPack *tensor_pack, const size_
   auto dummy_backend = NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen;
   PrepareFusedAttnForwardAuxTensors(tensor_pack, input_batch, bias_batch, attn_heads, bias_heads,
                                     q_max_seqlen, kv_max_seqlen, dtype, dummy_bias_type,
-                                    dummy_backend, softmax_buf, rng_state_buf, bias_buf,
+                                    dummy_backend, softmax_buf, nullptr, rng_state_buf, bias_buf,
                                     softmax_offset_buf);
 
   // correct softmax shape for max512 sequence length kernel
@@ -144,7 +157,7 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
     size_t v_head_dim, float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type, NVTE_QKV_Layout qkv_layout,
     DType dtype, bool is_training, size_t max_segments_per_seq, int64_t window_size_left,
-    int64_t window_size_right, bool bottom_right_diagonal) {
+    int64_t window_size_right, bool return_max_logit, bool bottom_right_diagonal) {
   auto is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD;
   auto q_shape = is_ragged
                      ? std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, qk_head_dim}
@@ -198,8 +211,8 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
         dummy_softmax_offset_tensor.data(), s_tensor.data(), o_tensor.data(), &aux_output_tensors,
         q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(), ragged_offset_tensor.data(),
         ragged_offset_tensor.data(), dummy_page_table_tensor.data(), dummy_page_table_tensor.data(),
-        dummy_rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen, is_training, false, false,
-        scaling_factor, dropout_probability, qkv_layout, nvte_get_q_format(qkv_layout),
+        dummy_rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen, is_training, return_max_logit,
+        false, scaling_factor, dropout_probability, qkv_layout, nvte_get_q_format(qkv_layout),
         NVTE_QKV_Format_NOT_SET, bias_type, mask_type, softmax_type, window_size_left,
         window_size_right, bottom_right_diagonal, query_workspace_tensor.data(), nullptr);
   }
@@ -240,13 +253,14 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
 static void FusedAttnForwardImpl(
     cudaStream_t stream, void *q, void *k, void *v, void *bias, void *softmax_offset, void *seed,
     void *q_cu_seqlens, void *kv_cu_seqlens, void *q_seq_offsets, void *k_seq_offsets, void *output,
-    void *softmax_aux, void *rng_state, void *workspace, size_t input_batch, size_t bias_batch,
-    size_t q_max_seqlen, size_t kv_max_seqlen, size_t attn_heads, size_t num_gqa_groups,
-    size_t bias_heads, size_t qk_head_dim, size_t v_head_dim, size_t max_segments_per_seq,
-    size_t wkspace_size, float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
-    NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type, NVTE_QKV_Layout qkv_layout,
-    DType dtype, DType wkspace_dtype, bool is_training, bool deterministic,
-    int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal) {
+    void *softmax_aux, void *max_tensor, void *rng_state, void *workspace, size_t input_batch,
+    size_t bias_batch, size_t q_max_seqlen, size_t kv_max_seqlen, size_t attn_heads,
+    size_t num_gqa_groups, size_t bias_heads, size_t qk_head_dim, size_t v_head_dim,
+    size_t max_segments_per_seq, size_t wkspace_size, float scaling_factor,
+    float dropout_probability, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
+    NVTE_Softmax_Type softmax_type, NVTE_QKV_Layout qkv_layout, DType dtype, DType wkspace_dtype,
+    bool is_training, bool return_max_logit, bool deterministic, int64_t window_size_left,
+    int64_t window_size_right, bool bottom_right_diagonal) {
   FUSED_ATTN_IMPL_COMMON_BLOCK;
 
   /* Input tensors */
@@ -261,6 +275,9 @@ static void FusedAttnForwardImpl(
     // Memset to 0xF0 for filling large negative numbers
     auto softmax_aux_size = input_batch * q_max_seqlen * attn_heads;
     cudaMemsetAsync(softmax_aux, 0xF0, softmax_aux_size * sizeof(float), stream);
+    if (return_max_logit) {
+      cudaMemsetAsync(max_tensor, 0xF0, softmax_aux_size * sizeof(float), stream);
+    }
   }
 
   /* Output tensors */
@@ -276,7 +293,7 @@ static void FusedAttnForwardImpl(
       is_training, static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout,
       bias_type, mask_type, softmax_type, dropout_probability, attn_heads, num_gqa_groups,
       q_max_seqlen, kv_max_seqlen, qk_head_dim, v_head_dim, window_size_left, window_size_right,
-      false, false, deterministic);
+      return_max_logit, false, deterministic);
   nvte_populate_rng_state_async(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
 
   /* Auxiliary tensors (to be propagated to the backward pass later) */
@@ -284,7 +301,8 @@ static void FusedAttnForwardImpl(
   nvte_tensor_pack_create(&aux_output_tensors);
   PrepareFusedAttnForwardAuxTensors(&aux_output_tensors, input_batch, bias_batch, attn_heads,
                                     bias_heads, q_max_seqlen, kv_max_seqlen, dtype, bias_type,
-                                    backend, softmax_aux, softmax_offset);
+                                    backend, softmax_aux, return_max_logit ? max_tensor : nullptr,
+                                    rng_state, bias, softmax_offset);
 
   /* Call the underlying NVTE API */
   auto dummy_page_table_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, DType::kInt32);
@@ -342,7 +360,7 @@ static void FusedAttnForwardImpl(
       softmax_offset_tensor.data(), s_tensor.data(), o_tensor.data(), &aux_output_tensors,
       q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(), q_seq_offsets_tensor.data(),
       k_seq_offsets_tensor.data(), dummy_page_table_tensor.data(), dummy_page_table_tensor.data(),
-      rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen, is_training, false, false,
+      rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen, is_training, return_max_logit, false,
       scaling_factor, dropout_probability, qkv_layout, nvte_get_q_format(qkv_layout),
       NVTE_QKV_Format_NOT_SET, bias_type, mask_type, softmax_type, window_size_left,
       window_size_right, bottom_right_diagonal, workspace_tensor.data(), stream);
@@ -376,6 +394,7 @@ static void FusedAttnForwardImpl(
   NVTE_QKV_Layout qkv_layout =                                                                    \
       static_cast<NVTE_QKV_Layout>(get_attr_value<int64_t>(attrs, "qkv_layout"));                 \
   bool is_training = get_attr_value<bool>(attrs, "is_training");                                  \
+  bool return_max_logit = get_attr_value_or_default<bool>(attrs, "return_max_logit", false);      \
   bool deterministic = get_attr_value<bool>(attrs, "deterministic");                              \
   auto is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD;                  \
   size_t wkspace_size = product(workspace_buf->dimensions());                                     \
@@ -388,8 +407,9 @@ Error_Type FusedAttnForwardFFI(cudaStream_t stream, Buffer_Type q_buf, Buffer_Ty
                                Buffer_Type q_cu_seqlens_buf, Buffer_Type kv_cu_seqlens_buf,
                                Buffer_Type q_seq_offsets_buf, Buffer_Type k_seq_offsets_buf,
                                Variadic_Buffer_Type _unused_args, Result_Type output_buf,
-                               Result_Type softmax_aux_buf, Result_Type rng_state_buf,
-                               Result_Type workspace_buf, Dictionary attrs) {
+                               Result_Type softmax_aux_buf, Result_Type max_tensor_buf,
+                               Result_Type rng_state_buf, Result_Type workspace_buf,
+                               Dictionary attrs) {
   FUSED_ATTN_FFI_GET_ATTRS;
 
   FusedAttnForwardImpl(
@@ -398,11 +418,12 @@ Error_Type FusedAttnForwardFFI(cudaStream_t stream, Buffer_Type q_buf, Buffer_Ty
       q_cu_seqlens_buf.untyped_data(), kv_cu_seqlens_buf.untyped_data(),
       is_ragged ? q_seq_offsets_buf.untyped_data() : nullptr,
       is_ragged ? k_seq_offsets_buf.untyped_data() : nullptr, output_buf->untyped_data(),
-      softmax_aux_buf->untyped_data(), rng_state_buf->untyped_data(), workspace_buf->untyped_data(),
-      input_batch, bias_batch, q_max_seqlen, kv_max_seqlen, attn_heads, num_gqa_groups, bias_heads,
-      qk_head_dim, v_head_dim, max_segments_per_seq, wkspace_size, scaling_factor,
-      dropout_probability, bias_type, mask_type, softmax_type, qkv_layout, dtype, wkspace_dtype,
-      is_training, deterministic, window_size_left, window_size_right, bottom_right_diagonal);
+      softmax_aux_buf->untyped_data(), max_tensor_buf->untyped_data(),
+      rng_state_buf->untyped_data(), workspace_buf->untyped_data(), input_batch, bias_batch,
+      q_max_seqlen, kv_max_seqlen, attn_heads, num_gqa_groups, bias_heads, qk_head_dim, v_head_dim,
+      max_segments_per_seq, wkspace_size, scaling_factor, dropout_probability, bias_type, mask_type,
+      softmax_type, qkv_layout, dtype, wkspace_dtype, is_training, return_max_logit, deterministic,
+      window_size_left, window_size_right, bottom_right_diagonal);
   return ffi_with_cuda_error_check();
 }
 
@@ -422,6 +443,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedAttnForwardHandler, FusedAttnForwardFFI,
                                   .RemainingArgs()         // _cp_aux_args unused
                                   .Ret<Buffer_Type>()      // output
                                   .Ret<Buffer_Type>()      // softmax_aux
+                                  .Ret<Buffer_Type>()      // max_tensor
                                   .Ret<Buffer_Type>()      // rng_state
                                   .Ret<Buffer_Type>()      // workspace
                                   .Attrs(),
