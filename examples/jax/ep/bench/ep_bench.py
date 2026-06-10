@@ -153,9 +153,7 @@ def main():
 
         @jax.jit
         def run_dispatch(hm, idx, toks, w):
-            recv_t, recv_w = tex_ep.ep_dispatch_fwd(
-                cfg, hm, idx, toks, w, recv_capacity_per_rank
-            )
+            recv_t, recv_w = tex_ep.ep_dispatch_fwd(cfg, hm, idx, toks, w, recv_capacity_per_rank)
             recv_t = jax.lax.with_sharding_constraint(recv_t, NamedSharding(mesh, ep_spec_3d))
             recv_w = jax.lax.with_sharding_constraint(recv_w, NamedSharding(mesh, ep_spec_2d))
             return recv_t, recv_w

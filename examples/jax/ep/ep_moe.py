@@ -225,9 +225,9 @@ def _moe_step(args, topk_idx, tokens, topk_w, kernels):
         # ep_combine is unweighted: pre-multiply by recv_topk_w and zero
         # padded slots (recv_topk_w == 0) before the scatter-sum.
         mask = (recv_topk_w != 0).astype(jnp.float32)[..., None]
-        weighted = (
-            expert_out.astype(jnp.float32) * recv_topk_w[..., None] * mask
-        ).astype(expert_out.dtype)
+        weighted = (expert_out.astype(jnp.float32) * recv_topk_w[..., None] * mask).astype(
+            expert_out.dtype
+        )
         weighted = jax.lax.with_sharding_constraint(weighted, NamedSharding(mesh, ep3))
         return ep_combine(
             layer_cfg,

@@ -54,8 +54,7 @@ def _allgather_uid(uid_arr, world_size, uid_size):
     devices = np.asarray(jax.devices())
     if devices.size != world_size:
         raise RuntimeError(
-            f"_allgather_uid fallback expected {world_size} global devices,"
-            f" got {devices.size}."
+            f"_allgather_uid fallback expected {world_size} global devices, got {devices.size}."
         )
     mesh = jax.sharding.Mesh(devices, ("_uid_all",))
     sharded = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("_uid_all", None))
@@ -91,7 +90,7 @@ def ep_bootstrap(
     """
     if jnp.dtype(max_token_dtype) != jnp.bfloat16:
         raise NotImplementedError(
-            f"ep_bootstrap: only max_token_dtype=jnp.bfloat16 is supported today, got"
+            "ep_bootstrap: only max_token_dtype=jnp.bfloat16 is supported today, got"
             f" {jnp.dtype(max_token_dtype)}."
         )
     if world_size < 2:
@@ -195,8 +194,7 @@ def _default_out_partition_spec():
     gsr = global_mesh_resource()
     if gsr.ep_resource is None:
         raise ValueError(
-            "ep_resource is not set on the active MeshResource;"
-            " pass out_sharding=... explicitly."
+            "ep_resource is not set on the active MeshResource; pass out_sharding=... explicitly."
         )
     outer = gsr.dp_resource or gsr.fsdp_resource
     leading = (outer, gsr.ep_resource) if outer is not None else gsr.ep_resource
@@ -243,7 +241,11 @@ def _dispatch_bwd(cfg, recv_capacity_per_rank, res, g_outputs):
     g_recv_tokens = with_sharding_constraint(g_outputs[0], spec)
     g_recv_topk_weights = with_sharding_constraint(g_outputs[1], spec)
     grad_tokens, grad_topk_weights = tex.ep_dispatch_bwd(
-        cfg, handle_mem, g_recv_tokens, g_recv_topk_weights, out_leading,
+        cfg,
+        handle_mem,
+        g_recv_tokens,
+        g_recv_topk_weights,
+        out_leading,
         out_partition_spec=out_spec,
     )
     return (None, grad_tokens, grad_topk_weights)
@@ -257,8 +259,12 @@ ep_dispatch.defvjp(_dispatch_fwd, _dispatch_bwd)
 
 @partial(jax.custom_vjp, nondiff_argnums=(0, 4, 5))
 def ep_combine(
-    cfg, handle_mem, token_counts, expert_out,
-    num_local_tokens, out_sharding=None,
+    cfg,
+    handle_mem,
+    token_counts,
+    expert_out,
+    num_local_tokens,
+    out_sharding=None,
 ):
     """Scatter-sum expert outputs back to source ranks. **Unweighted.**
 
@@ -269,14 +275,22 @@ def ep_combine(
     ``_default_out_partition_spec``; only the leading dim may be sharded.
     """
     return _combine_fwd(
-        cfg, handle_mem, token_counts, expert_out,
-        num_local_tokens, out_sharding,
+        cfg,
+        handle_mem,
+        token_counts,
+        expert_out,
+        num_local_tokens,
+        out_sharding,
     )[0]
 
 
 def _combine_fwd(
-    cfg, handle_mem, token_counts, expert_out,
-    num_local_tokens, out_sharding,
+    cfg,
+    handle_mem,
+    token_counts,
+    expert_out,
+    num_local_tokens,
+    out_sharding,
 ):
     del token_counts
     if out_sharding is None:
