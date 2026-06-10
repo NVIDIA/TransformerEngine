@@ -14,6 +14,7 @@ import numpy as np
 
 import transformer_engine_jax
 import transformer_engine.jax.cpp_extensions as tex
+from transformer_engine.jax.cpp_extensions.ep import _ep_outer_axis
 from transformer_engine.jax.cpp_extensions.misc import jax_dtype_to_te_dtype
 from transformer_engine.jax.sharding import (
     global_mesh_resource,
@@ -113,7 +114,7 @@ def ep_bootstrap(
             " global_shard_guard(MeshResource(..., ep_resource=<axis name>)) before bootstrap."
         )
     ep_size = get_mesh_axis_size(ep_resource)
-    outer_axis = gsr.dp_resource or gsr.fsdp_resource
+    outer_axis = _ep_outer_axis()
     if outer_axis is None:
         if world_size != ep_size:
             raise ValueError(
@@ -138,16 +139,11 @@ def ep_bootstrap(
     rank_within_group = rank % ep_size
     is_color_root = rank_within_group == 0
     if is_color_root:
-        try:
-            from nccl import get_unique_id
-
-            uid_bytes = bytes(get_unique_id())[:UID_SIZE]
-        except ImportError:
-            libnccl = ctypes.CDLL("libnccl.so.2", use_errno=True)
-            uid_arr = (ctypes.c_uint8 * UID_SIZE)()
-            ret = libnccl.ncclGetUniqueId(ctypes.cast(uid_arr, ctypes.c_void_p))
-            assert ret == 0, f"ncclGetUniqueId failed with code {ret}"
-            uid_bytes = bytes(uid_arr)
+        libnccl = ctypes.CDLL("libnccl.so.2", use_errno=True)
+        uid_arr = (ctypes.c_uint8 * UID_SIZE)()
+        ret = libnccl.ncclGetUniqueId(ctypes.cast(uid_arr, ctypes.c_void_p))
+        assert ret == 0, f"ncclGetUniqueId failed with code {ret}"
+        uid_bytes = bytes(uid_arr)
     else:
         uid_bytes = bytes(UID_SIZE)
 
@@ -196,7 +192,7 @@ def _default_out_partition_spec():
         raise ValueError(
             "ep_resource is not set on the active MeshResource; pass out_sharding=... explicitly."
         )
-    outer = gsr.dp_resource or gsr.fsdp_resource
+    outer = _ep_outer_axis()
     leading = (outer, gsr.ep_resource) if outer is not None else gsr.ep_resource
     return (leading,)
 
