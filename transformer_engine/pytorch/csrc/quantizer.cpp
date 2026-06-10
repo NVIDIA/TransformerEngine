@@ -115,13 +115,12 @@ std::optional<at::Tensor> build_grouped_tensor_offsets(const size_t num_tensors,
       first_dims.has_value() ? first_dims->options() : last_dims->options();
   auto tensor_offsets = at::empty({static_cast<int64_t>(num_tensors) + 1}, options);
   if (first_dims.has_value() && last_dims.has_value()) {
+    auto first_dims_nvte = makeTransformerEngineTensor(*first_dims);
+    auto last_dims_nvte = makeTransformerEngineTensor(*last_dims);
+    auto tensor_offsets_nvte = makeTransformerEngineTensor(tensor_offsets);
     NVTE_SCOPED_GIL_RELEASE({
-      nvte_splits_to_offsets_2d(static_cast<const int64_t*>(first_dims->data_ptr()),
-                                static_cast<const int64_t*>(last_dims->data_ptr()),
-                                static_cast<int64_t*>(tensor_offsets.data_ptr()), num_tensors,
-                                static_cast<int64_t>(logical_first_dim),
-                                static_cast<int64_t>(logical_last_dim),
-                                at::cuda::getCurrentCUDAStream());
+      nvte_splits_to_offsets_2d(first_dims_nvte.data(), last_dims_nvte.data(),
+                                tensor_offsets_nvte.data(), at::cuda::getCurrentCUDAStream());
     });
   } else if (first_dims.has_value()) {
     NVTE_SCOPED_GIL_RELEASE({
