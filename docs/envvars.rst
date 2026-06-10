@@ -287,6 +287,30 @@ Kernel Configuration
    :Default: ``0``
    :Description: Enable row-scaled NVFP4 tensors for forward activation quantizers in the ``NVFP4BlockScaling`` recipe. When set to ``1`` (or when ``NVFP4BlockScaling(row_scaled_activation=True)`` is used), rowwise ``amax`` metadata is stored as one FP32 value per tensor row instead of a single scalar.
 
+.. envvar:: NVTE_NVFP4_4OVER6
+
+   :Type: ``str`` (``none``, ``weights``, ``activations``, or ``all``)
+   :Default: ``none``
+   :Description: Enable 4over6 adaptive NVFP4 block scaling for weights, activations, or both in the ``NVFP4BlockScaling`` recipe. For each selected FP4 block, quantization compares map-to-4 and map-to-6 candidates and stores the candidate with lower configured error. ``none`` keeps standard NVFP4. Current 4over6 support targets RL and post-training scenarios; pre-training paths that combine 4over6 with RHT are not yet implemented.
+
+.. envvar:: NVTE_NVFP4_4OVER6_E4M3_USE_256
+
+   :Type: ``str`` (``none``, ``weights``, ``activations``, or ``all``)
+   :Default: ``all``
+   :Description: Select NVFP4 4over6 quantizers that use 256 instead of 448 as the global E4M3 scale bound. By default, all 4over6 quantizers use 256. Set the env var to ``none`` (or set ``NVFP4BlockScaling(nvfp4_4over6_e4m3_use_256="none")``) to use the standard NVFP4 448 bound for all 4over6 quantizers. This option is only meaningful for tensor roles that also enable :envvar:`NVTE_NVFP4_4OVER6`.
+
+.. envvar:: NVTE_NVFP4_4OVER6_ERR_MODE
+
+   :Type: ``str`` (``MAE`` or ``MSE``)
+   :Default: ``MAE``
+   :Description: Select the error metric used by NVFP4 4over6 map-to-4 versus map-to-6 candidate selection in the ``NVFP4BlockScaling`` recipe.
+
+.. envvar:: NVTE_NVFP4_4OVER6_ERR_USE_FAST_MATH
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Use the faster NVFP4 4over6 candidate error path that compares candidates in the E4M3-scaled domain after the E2M1 x E4M3 product is rounded to FP16. Error differences and accumulation remain FP32. By default, 4over6 error comparison uses the original input-domain path; ``NVTE_USE_FAST_MATH`` does not control this error-comparison path.
+
 Torch Compilation and Fusion
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

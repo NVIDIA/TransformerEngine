@@ -83,6 +83,13 @@ enum NVTETensorParam {
    *  its values are populated during quantization.
    */
   kNVTERowScaledNVFP4 = 8,
+  /*! Global E4M3 scale bound used by an NVFP4 tensor.
+   *
+   *  This is part of the tensor data contract. Downstream dequantization and
+   *  GEMM scale consumers must use the same bound used during quantization.
+   *  Standard NVFP4 uses 448; 4over6 may use 256 for map-to-4 headroom.
+   */
+  kNVTENVFP4E4M3Max = 9,
   kNVTENumTensorParams
 };
 
@@ -111,6 +118,15 @@ enum NVTEScalingMode {
   NVTE_INVALID_SCALING = 100
 };
 
+/*! \enum NVTENVFP44Over6Mode
+ * \brief Method for NVFP4 4over6 quantization.
+ */
+enum NVTENVFP44Over6Mode {
+  kNVTENVFP44Over6Disabled = 0, /*!< 4over6 is not applied */
+  kNVTENVFP44Over6MinMAE = 1,   /*!< Select the candidate with lower mean absolute error */
+  kNVTENVFP44Over6MinMSE = 2,   /*!< Select the candidate with lower mean squared error */
+};
+
 /*! \brief TE Tensor type
  *
  * NVTETensor is a contiguous tensor type storing a pointer
@@ -131,6 +147,20 @@ typedef void *NVTETensor;
  */
 NVTETensor nvte_create_tensor(NVTEScalingMode scaling_mode);
 
+/*! \brief Create a batch of new TE tensors.
+ *
+ * Equivalent to calling nvte_create_tensor N times with the same
+ * scaling mode. Before use, each tensor's parameters need to be set.
+ * TE tensors are just wrappers on top of raw data and do not own
+ * memory.
+ *
+ *  \param[in]  scaling_mode  Scaling mode shared by all tensors.
+ *  \param[out] tensors       Caller-allocated array of length N to
+ *                            receive the new tensors.
+ *  \param[in]  N             Number of tensors to create.
+ */
+void nvte_create_tensors(NVTEScalingMode scaling_mode, NVTETensor *tensors, size_t N);
+
 /*! \brief Destroy a TE tensor.
  *
  * Since the TE tensor does not own memory, the underlying
@@ -139,6 +169,17 @@ NVTETensor nvte_create_tensor(NVTEScalingMode scaling_mode);
  *  \param[in] tensor Tensor to be destroyed.
  */
 void nvte_destroy_tensor(NVTETensor tensor);
+
+/*! \brief Destroy a batch of TE tensors.
+ *
+ * Equivalent to calling nvte_destroy_tensor N times. Since TE tensors
+ * do not own memory, the underlying data is not freed during this
+ * operation. Null entries are ignored.
+ *
+ *  \param[in] tensors  Array of tensors to be destroyed.
+ *  \param[in] N        Number of tensors in the array.
+ */
+void nvte_destroy_tensors(NVTETensor *tensors, size_t N);
 
 /*! \brief Get a raw pointer to the tensor's rowwise data.
  *
@@ -282,7 +323,7 @@ void nvte_zero_tensor(const NVTETensor tensor, cudaStream_t stream);
  *
  *  \warning Deprecated in favor of nvte_set_tensor_param_v2.
  *
- *  \param[in/out] tensor Tensor.
+ *  \param[in,out] tensor Tensor.
  *  \param[in] param_name The parameter to be set.
  *  \param[in] param The value to be set.
  */
@@ -300,7 +341,7 @@ NVTEBasicTensor nvte_get_tensor_param(const NVTETensor tensor, NVTETensorParam p
 
 /*! \brief Set a tensor parameter.
  *
- *  \param[in/out] tensor        Tensor.
+ *  \param[in,out] tensor        Tensor.
  *  \param[in]     param         Tensor parameter type.
  *  \param[in]     buf           Memory address to read parameter value.
  *  \param[in]     size_in_bytes Size of buf.
@@ -381,6 +422,20 @@ enum NVTEQuantizationConfigAttribute {
    *  inconsistently between kernels.
    */
   kNVTEQuantizationConfigUseFastMath = 7,
+  /*! Method for NVFP4 4over6 block scale selection.
+   *
+   *  Non-disabled modes evaluate map-to-4 and map-to-6 candidates for each
+   *  1x16 block and store the lower-error candidate. The value is an
+   *  NVTENVFP44Over6Mode encoded as uint8_t.
+   */
+  kNVTEQuantizationConfigNVFP44Over6Mode = 8,
+  /*! Whether the NVFP4 4over6 candidate error computation may use fast math.
+   *
+   *  This is intentionally separate from kNVTEQuantizationConfigUseFastMath so
+   *  callers can keep candidate selection bitwise deterministic independent
+   *  of ordinary NVFP4 fast-math settings.
+   */
+  kNVTEQuantizationConfigNVFP44Over6ErrUseFastMath = 9,
   kNVTEQuantizationConfigNumAttributes
 };
 
@@ -406,7 +461,7 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
 
 /*! \brief Set an option in quantization config.
  *
- *  \param[in/out] config        Quantization config.
+ *  \param[in,out] config        Quantization config.
  *  \param[in]     attr          Option type.
  *  \param[in]     buf           Memory address to read option value.
  *  \param[in]     size_in_bytes Size of buf.
@@ -442,17 +497,36 @@ void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream
  *
  *  Computes:
  *    output[0] = 0
- *    output[i + 1] = sum_{j=0..i}(first_dims[j] * logical_last_dim)
- *  for i in [0, num_tensors - 1].
+ *    output[i + 1] = sum_{j=0..i}(split_sizes[j] * stride)
+ *  for i in [0, num_splits - 1].
  *
- *  \param[in] first_dims Pointer to device int64 array of size num_tensors.
- *  \param[out] output Pointer to device int64 array of size num_tensors + 1.
- *  \param[in] num_tensors Number of entries in first_dims.
- *  \param[in] logical_last_dim Scale factor applied to each first_dims entry.
+ *  \param[in] split_sizes Pointer to device int64 array of size num_splits.
+ *  \param[out] output Pointer to device int64 array of size num_splits + 1.
+ *  \param[in] num_splits Number of entries in split_sizes.
+ *  \param[in] stride Scale factor applied to each split_sizes entry.
  *  \param[in] stream CUDA stream to use for the operation.
  */
-void nvte_splits_to_offsets(const int64_t *first_dims, int64_t *output, size_t num_tensors,
-                            int64_t logical_last_dim, cudaStream_t stream);
+void nvte_splits_to_offsets(const int64_t *split_sizes, int64_t *output, size_t num_splits,
+                            int64_t stride, cudaStream_t stream);
+
+/*! \brief Compute multiple scaled prefix-sum offsets for grouped tensors.
+ *
+ *  Computes a prefix-sum over the values in split_sizes, and for each
+ *  output multiplies the prefix-sum by a stride. Inputs and outputs
+ *  can be any combination of int32 and int64 tensors.
+ *
+ *  \param[in] split_sizes Device int32/int64 split sizes with shape [N].
+ *  \param[out] outputs Array of int32/int64 1D output tensors, one per scan.
+ *  \param[in] strides Per-output scale factor. Length num_outputs.
+ *  \param[in] include_leading_zero Per-output flag: 0 if outputs[i] has length N
+ *             (inclusive scan), nonzero if outputs[i] has length N + 1 (inclusive
+ *             scan prepended with zero). Length num_outputs.
+ *  \param[in] num_outputs Number of output tensors.
+ *  \param[in] stream CUDA stream to use for the operation.
+ */
+void nvte_splits_to_offsets_multi(NVTETensor split_sizes, NVTETensor *outputs,
+                                  const int64_t *strides, const int *include_leading_zero,
+                                  size_t num_outputs, cudaStream_t stream);
 
 /*! \brief TE Grouped Tensor type
  *
@@ -510,7 +584,7 @@ void nvte_destroy_grouped_tensor(NVTEGroupedTensor tensor);
 /* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
 /*! \brief Set a grouped tensor parameter.
  *
- *  \param[in/out] tensor        Grouped tensor.
+ *  \param[in,out] tensor        Grouped tensor.
  *  \param[in]     param         Grouped tensor parameter type.
  *  \param[in]     buf           Memory address to read parameter value.
  *  \param[in]     size_in_bytes Size of buf.
@@ -572,6 +646,7 @@ NVTEShape nvte_get_grouped_tensor_logical_shape(const NVTEGroupedTensor tensor);
 #ifdef __cplusplus
 }  // extern "C"
 
+#include <utility>
 #include <vector>
 
 /*! \namespace transformer_engine
@@ -781,6 +856,11 @@ class TensorWrapper {
     nvte_set_tensor_param_v2(tensor_, kNVTERowScaledNVFP4, &val, sizeof(val));
   }
 
+  void set_nvfp4_e4m3_max(int nvfp4_e4m3_max) {
+    const auto val = nvfp4_e4m3_max;
+    nvte_set_tensor_param_v2(tensor_, kNVTENVFP4E4M3Max, &val, sizeof(val));
+  }
+
   // Parameter getters
 
   NVTEBasicTensor get_parameter(const NVTETensorParam param) const noexcept {
@@ -821,6 +901,12 @@ class TensorWrapper {
     uint8_t val = 0;
     nvte_get_tensor_param_v2(tensor_, kNVTERowScaledNVFP4, &val, sizeof(val), nullptr);
     return static_cast<bool>(val);
+  }
+
+  int get_nvfp4_e4m3_max() const {
+    int val = 448;
+    nvte_get_tensor_param_v2(tensor_, kNVTENVFP4E4M3Max, &val, sizeof(val), nullptr);
+    return val;
   }
 
   /*! \brief Get an underlying NVTETensor.
@@ -1000,6 +1086,73 @@ class TensorWrapper {
 
   /*! \brief Wrapped NVTETensor. */
   NVTETensor tensor_ = nullptr;
+};
+
+/*! \struct MultiTensorWrapper
+ *  \brief C++ wrapper for a batch of NVTETensors allocated together.
+ */
+class MultiTensorWrapper {
+ public:
+  /*! \brief Constructs an empty batch. */
+  MultiTensorWrapper() = default;
+
+  /*! \brief Allocates a batch of NVTETensors.
+   *
+   *  \param[in] num_tensors   Number of tensors to allocate.
+   *  \param[in] scaling_mode  Scaling mode shared by all tensors.
+   */
+  explicit MultiTensorWrapper(size_t num_tensors,
+                              NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING)
+      : tensors_(num_tensors) {
+    if (!tensors_.empty()) {
+      nvte_create_tensors(scaling_mode, tensors_.data(), tensors_.size());
+    }
+  }
+
+  ~MultiTensorWrapper() {
+    if (!tensors_.empty()) {
+      nvte_destroy_tensors(tensors_.data(), tensors_.size());
+    }
+  }
+
+  MultiTensorWrapper(const MultiTensorWrapper &) = delete;
+  MultiTensorWrapper &operator=(const MultiTensorWrapper &) = delete;
+
+  MultiTensorWrapper(MultiTensorWrapper &&) noexcept = default;
+
+  MultiTensorWrapper &operator=(MultiTensorWrapper &&other) noexcept {
+    if (this == &other) return *this;
+    if (!tensors_.empty()) {
+      nvte_destroy_tensors(tensors_.data(), tensors_.size());
+    }
+    tensors_ = std::move(other.tensors_);
+    return *this;
+  }
+
+  /*! \brief Number of tensors in the batch. */
+  size_t size() const noexcept { return tensors_.size(); }
+
+  /*! \brief Whether the batch is empty. */
+  bool empty() const noexcept { return tensors_.empty(); }
+
+  /*! \brief Access an NVTETensor by index. */
+  NVTETensor operator[](size_t i) const noexcept { return tensors_[i]; }
+
+  /*! \brief Pointer to the underlying NVTETensor array. */
+  NVTETensor *data() noexcept { return tensors_.data(); }
+  const NVTETensor *data() const noexcept { return tensors_.data(); }
+
+  /*! \brief Implicit conversion for multi-tensor C API calls. */
+  operator NVTETensor *() noexcept { return tensors_.data(); }
+
+  /*! \brief Iteration over the underlying NVTETensors. */
+  auto begin() noexcept { return tensors_.begin(); }
+  auto end() noexcept { return tensors_.end(); }
+  auto begin() const noexcept { return tensors_.begin(); }
+  auto end() const noexcept { return tensors_.end(); }
+
+ private:
+  std::vector<NVTETensor> tensors_;
 };
 
 /*! \struct GroupedTensorWrapper
@@ -1316,6 +1469,20 @@ class QuantizationConfigWrapper {
     const auto val = static_cast<uint8_t>(use_fast_math);
     nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigUseFastMath, &val,
                                            sizeof(val));
+  }
+
+  /*! \brief Set NVFP4 4over6 candidate-selection mode */
+  void set_nvfp4_4over6_mode(NVTENVFP44Over6Mode mode) {
+    const auto val = static_cast<uint8_t>(mode);
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigNVFP44Over6Mode, &val,
+                                           sizeof(val));
+  }
+
+  /*! \brief Set whether NVFP4 4over6 candidate error computation uses fast math */
+  void set_nvfp4_4over6_err_use_fast_math(bool use_fast_math) {
+    const auto val = static_cast<uint8_t>(use_fast_math);
+    nvte_set_quantization_config_attribute(
+        config_, kNVTEQuantizationConfigNVFP44Over6ErrUseFastMath, &val, sizeof(val));
   }
 
  private:

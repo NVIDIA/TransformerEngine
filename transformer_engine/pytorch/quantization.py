@@ -26,7 +26,7 @@ from transformer_engine.common.recipe import (
     NVFP4BlockScaling,
     CustomRecipe,
 )
-from .constants import dist_group_type
+from .constants import dist_group_type, DType
 
 from .utils import get_device_compute_capability
 from .jit import jit_fuser
@@ -277,23 +277,23 @@ def get_fp8_torch_dtype(fp8_recipe: Recipe, fprop_tensor: bool = True) -> torch.
     return torch.float8_e5m2
 
 
-def get_fp8_te_dtype(fp8_recipe: Recipe, fprop_tensor: bool = True) -> tex.DType:
+def get_fp8_te_dtype(fp8_recipe: Recipe, fprop_tensor: bool = True) -> DType:
     """Get fp8 data type according to recipe and tensor"""
     if fp8_recipe.fp8_format == Format.E4M3 or (
         fp8_recipe.fp8_format == Format.HYBRID and fprop_tensor
     ):
-        return tex.DType.kFloat8E4M3
-    return tex.DType.kFloat8E5M2
+        return DType.kFloat8E4M3
+    return DType.kFloat8E5M2
 
 
-def get_fp4_te_dtype(fp4_recipe: Recipe) -> tex.DType:
+def get_fp4_te_dtype(fp4_recipe: Recipe) -> DType:
     """Get fp4 data type according to recipe and tensor"""
     if fp4_recipe.fp4_format == Format.E2M1:
-        return tex.DType.kFloat4E2M1
+        return DType.kFloat4E2M1
     raise ValueError(f"Unsupported FP4 format: {fp4_recipe.fp4_format}")
 
 
-def get_fp8_max(fp8_recipe: Recipe, fprop_tensor: bool = True) -> tex.DType:
+def get_fp8_max(fp8_recipe: Recipe, fprop_tensor: bool = True) -> DType:
     """Get max representible FP8 value."""
     if fp8_recipe.fp8_format == Format.E4M3 or (
         fp8_recipe.fp8_format == Format.HYBRID and fprop_tensor
@@ -408,6 +408,20 @@ class FP8GlobalStateManager:
     """
 
     quantization_state = FP8GlobalState()
+
+    @classmethod
+    def set_skip_fp8_weight_update_tensor(cls, skip: bool) -> None:
+        """Set the skip fp8 weight update tensor"""
+        if cls.quantization_state.skip_fp8_weight_update_tensor is None:
+            cls.quantization_state.skip_fp8_weight_update_tensor = torch.empty(
+                1, dtype=torch.float32, device="cuda"
+            )
+        cls.quantization_state.skip_fp8_weight_update_tensor.fill_(skip)
+
+    @classmethod
+    def get_skip_fp8_weight_update_tensor(cls) -> Optional[torch.Tensor]:
+        """Get the skip fp8 weight update tensor"""
+        return cls.quantization_state.skip_fp8_weight_update_tensor
 
     @classmethod
     def reset(cls) -> None:
@@ -686,9 +700,8 @@ class FP8GlobalStateManager:
                         amax_history, scale, get_fp8_max(recipe, forward), recipe
                     )
 
-    @classmethod
+    @staticmethod
     def get_unique_autocast_key(
-        cls,
         recipe: Optional[Recipe] = None,
         group: Optional[dist_group_type] = None,
     ):
@@ -697,7 +710,11 @@ class FP8GlobalStateManager:
         Object identity is sufficient since autocast contexts never outlive a single
         training session.
         """
-        return str((str(recipe), id(group) if group is not None else None))
+        recipe_repr = recipe.__dict__.get("_cached_repr") if recipe is not None else None
+        if recipe_repr is None:
+            recipe_repr = str(recipe)
+        group_id = id(group) if group is not None else None
+        return f"recipe={recipe_repr},group={group_id}"
 
     @classmethod
     def autocast_enter(
@@ -911,14 +928,13 @@ def quantized_model_init(
         qstate.high_precision_init_val = _high_precision_init_val
 
 
-@contextmanager
 def fp8_autocast(
     enabled: bool = True,
     calibrating: bool = False,
     fp8_recipe: Optional[Recipe] = None,
     fp8_group: Optional[dist_group_type] = None,
     _graph: bool = False,
-) -> None:
+) -> "autocast":
     """
     .. warning::
 
@@ -934,25 +950,16 @@ def fp8_autocast(
         stacklevel=2,
     )
 
-    # Call new implementation.
-    with autocast(
+    return autocast(
         enabled=enabled,
         calibrating=calibrating,
         recipe=fp8_recipe,
         amax_reduction_group=fp8_group,
         _graph=_graph,
-    ):
-        yield
+    )
 
 
-@contextmanager
-def autocast(
-    enabled: bool = True,
-    calibrating: bool = False,
-    recipe: Optional["Recipe"] = None,
-    amax_reduction_group: Optional["dist_group_type"] = None,
-    _graph: bool = False,
-) -> None:
+class autocast:
     """
     Context manager for quantization schemes like FP8 or FP4.
 
@@ -991,24 +998,60 @@ def autocast(
                           are reduced at the end of each training step.
     """
 
-    if enabled:
-        check_recipe_support(recipe)
-
-    # Save current state so we always restore it on exit.
-    fp8_state = FP8GlobalStateManager.get_autocast_state()
-
-    FP8GlobalStateManager.autocast_enter(
-        enabled=enabled,
-        calibrating=calibrating,
-        fp8_recipe=recipe,
-        fp8_group=amax_reduction_group,
-        _graph=_graph,
+    # Class-based context manager (instead of ``@contextmanager`` from contextlib)
+    # to avoid overheads.
+    __slots__ = (
+        "_enabled",
+        "_calibrating",
+        "_recipe",
+        "_amax_reduction_group",
+        "_graph",
+        "_fp8_state",
     )
-    try:
-        yield
-    finally:
-        FP8GlobalStateManager.set_autocast_state(fp8_state)
-        FP8GlobalStateManager.autocast_exit(enabled, _graph=_graph)
+
+    def __init__(
+        self,
+        enabled: bool = True,
+        calibrating: bool = False,
+        recipe: Optional["Recipe"] = None,
+        amax_reduction_group: Optional["dist_group_type"] = None,
+        _graph: bool = False,
+    ) -> None:
+        self._enabled = enabled
+        self._calibrating = calibrating
+        self._recipe = recipe
+        self._amax_reduction_group = amax_reduction_group
+        self._graph = _graph
+        self._fp8_state = None
+
+    def __enter__(self) -> "autocast":
+        # Disallow nested re-entry of the same instance.
+        if self._fp8_state is not None:
+            raise RuntimeError(
+                "autocast context manager cannot be entered more than once concurrently"
+            )
+        if self._enabled:
+            check_recipe_support(self._recipe)
+        # Save current state so we always restore it on exit.
+        self._fp8_state = FP8GlobalStateManager.get_autocast_state()
+        FP8GlobalStateManager.autocast_enter(
+            enabled=self._enabled,
+            calibrating=self._calibrating,
+            fp8_recipe=self._recipe,
+            fp8_group=self._amax_reduction_group,
+            _graph=self._graph,
+        )
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        try:
+            FP8GlobalStateManager.set_autocast_state(self._fp8_state)
+            FP8GlobalStateManager.autocast_exit(self._enabled, _graph=self._graph)
+        finally:
+            # Clear the saved state so the instance can be entered again
+            # sequentially (and so a failure inside the restore path does not
+            # permanently mark the instance as "active").
+            self._fp8_state = None
 
 
 def _update_amax_history(amax_history: torch.Tensor) -> torch.Tensor:
@@ -1353,7 +1396,7 @@ class DelayedScalingRecipeState(RecipeState):
 
     recipe: DelayedScaling
     mode: str
-    dtype: tex.DType
+    dtype: DType
     scale: torch.Tensor
     amax_history: torch.Tensor
 
@@ -1407,7 +1450,7 @@ class Float8CurrentScalingRecipeState(RecipeState):
 
     recipe: Float8CurrentScaling
     mode: str
-    dtype: tex.DType
+    dtype: DType
     device: torch.device
 
     def __init__(
@@ -1451,7 +1494,7 @@ class MXFP8BlockScalingRecipeState(RecipeState):
 
     recipe: MXFP8BlockScaling
     mode: str
-    dtype: tex.DType
+    dtype: DType
 
     def __init__(
         self,
@@ -1489,9 +1532,9 @@ class Float8BlockScalingRecipeState(RecipeState):
 
     recipe: Float8BlockScaling
     mode: str
-    qx_dtype: tex.DType
-    qw_dtype: tex.DType
-    qgrad_dtype: tex.DType
+    qx_dtype: DType
+    qw_dtype: DType
+    qgrad_dtype: DType
 
     def __init__(
         self,
@@ -1576,7 +1619,7 @@ class NVFP4BlockScalingRecipeState(RecipeState):
 
     recipe: NVFP4BlockScaling
     mode: str
-    dtype: tex.DType
+    dtype: DType
 
     def __init__(
         self,
@@ -1606,7 +1649,11 @@ class NVFP4BlockScalingRecipeState(RecipeState):
         * Forward, ``"weight"`` -> ``recipe.fp4_quant_fwd_weight``.
         * Forward, ``"input"`` / ``"output"`` (and any unknown forward type) ->
           ``recipe.fp4_quant_fwd_inp``.
-        * Backward, any slot -> ``recipe.fp4_quant_bwd_grad``.
+        * ``"grad_output"`` / ``"grad_input"`` -> ``recipe.fp4_quant_bwd_grad``.
+        * NVFP4 4over6 is applied to non-gradient slots selected by
+          ``recipe.nvfp4_4over6``. Gradient slots always use standard NVFP4,
+          which lets gradient RHT and stochastic rounding follow the base
+          recipe.
 
         When the owning module/op provides a role list via
         ``get_quantizer_roles``, the per-slot ``tensor_type`` drives dispatch.
@@ -1618,7 +1665,7 @@ class NVFP4BlockScalingRecipeState(RecipeState):
         from .tensor.nvfp4_tensor import NVFP4Quantizer
 
         def _qparams(tensor_type: str):
-            if self.mode == "backward":
+            if tensor_type in ("grad_output", "grad_input"):
                 return self.recipe.fp4_quant_bwd_grad
             if tensor_type == "weight":
                 return self.recipe.fp4_quant_fwd_weight
@@ -1626,6 +1673,34 @@ class NVFP4BlockScalingRecipeState(RecipeState):
 
         def _make(tensor_type: str) -> NVFP4Quantizer:
             qparams = _qparams(tensor_type)
+            nvfp4_use_4over6 = False
+            if tensor_type not in ("grad_output", "grad_input"):
+                if self.recipe.nvfp4_4over6 == "all":
+                    nvfp4_use_4over6 = True
+                elif self.recipe.nvfp4_4over6 == "weights":
+                    nvfp4_use_4over6 = tensor_type == "weight"
+                elif self.recipe.nvfp4_4over6 == "activations":
+                    nvfp4_use_4over6 = tensor_type != "weight"
+            nvfp4_e4m3_max = 448
+            if nvfp4_use_4over6:
+                # Current 4over6 kernels target RL and post-training quantization paths.
+                # Pre-training usage still needs a fused RHT + 4over6 quantization kernel.
+                if qparams.random_hadamard_transform:
+                    raise ValueError("NVFP4 4over6 quantization does not support RHT.")
+                if qparams.stochastic_rounding:
+                    raise ValueError(
+                        "NVFP4 4over6 quantization does not support stochastic rounding."
+                    )
+                if self.recipe.nvfp4_4over6_e4m3_use_256 == "all":
+                    nvfp4_e4m3_max = 256
+                elif self.recipe.nvfp4_4over6_e4m3_use_256 == "weights":
+                    if tensor_type == "weight":
+                        nvfp4_e4m3_max = 256
+                elif self.recipe.nvfp4_4over6_e4m3_use_256 == "activations":
+                    if tensor_type != "weight":
+                        nvfp4_e4m3_max = 256
+                elif self.recipe.nvfp4_4over6_e4m3_use_256 == "none":
+                    nvfp4_e4m3_max = 448
             return NVFP4Quantizer(
                 fp4_dtype=self.dtype,
                 rowwise=True,
@@ -1639,6 +1714,9 @@ class NVFP4BlockScalingRecipeState(RecipeState):
                     and tensor_type != "weight"
                     and self.recipe.row_scaled_activation
                 ),
+                nvfp4_use_4over6=nvfp4_use_4over6,
+                nvfp4_e4m3_max=nvfp4_e4m3_max,
+                nvfp4_4over6_err_mode=self.recipe.nvfp4_4over6_err_mode,
             )
 
         if self.mode not in ("forward", "backward"):

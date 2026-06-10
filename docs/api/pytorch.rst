@@ -38,7 +38,7 @@ PyTorch
   :members: reset, get_states, set_states, add, fork
 
 
-.. autoapifunction:: transformer_engine.pytorch.autocast
+.. autoapiclass:: transformer_engine.pytorch.autocast(enabled=True, calibrating=False, recipe=None, amax_reduction_group=None)
 
 .. autoapifunction:: transformer_engine.pytorch.quantized_model_init
 
@@ -54,6 +54,16 @@ PyTorch
 .. autoapiclass:: transformer_engine.pytorch.ManualOffloadSynchronizer
 
 .. autoapifunction:: transformer_engine.pytorch.parallel_cross_entropy
+
+.. autoapifunction:: transformer_engine.pytorch.interleave_glu_tensor
+
+.. autoapifunction:: transformer_engine.pytorch.deinterleave_glu_tensor
+
+Data types
+----------
+
+.. autoapiclass:: transformer_engine.pytorch.DType()
+  :members: kByte, kInt32, kFloat32, kFloat16, kBFloat16, kFloat8E4M3, kFloat8E5M2, kFloat4E2M1
 
 Recipe availability
 -------------------
@@ -165,6 +175,8 @@ Operation fuser
 .. autoapifunction:: transformer_engine.pytorch.ops.register_forward_fusion
 
 .. autoapifunction:: transformer_engine.pytorch.ops.register_backward_fusion
+
+.. autoapifunction:: transformer_engine.pytorch.ops.register_forward_backward_fusion
 
 .. autoapiclass:: transformer_engine.pytorch.ops.Linear
 

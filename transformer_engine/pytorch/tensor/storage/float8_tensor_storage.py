@@ -6,15 +6,14 @@
 
 from __future__ import annotations
 import math
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Union
 import torch
 
 import transformer_engine_torch as tex
-from transformer_engine_torch import DType as TE_DType
 
 from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 
-from ...constants import TE_DType as torch_to_transformer_engine_dtype, TE_DType_To_Torch
+from ...constants import TE_DType as torch_to_transformer_engine_dtype, TE_DType_To_Torch, DType
 
 from ...utils import is_non_tn_fp8_gemm_supported, _empty_tensor
 
@@ -69,7 +68,7 @@ class Float8TensorStorage(QuantizedTensorStorage):
 
     _data: Optional[torch.Tensor]
     _quantizer: Optional[Quantizer]
-    _fp8_dtype: TE_DType
+    _fp8_dtype: DType
     _scale_inv: torch.Tensor
 
     # FP8 transpose cache
@@ -81,7 +80,7 @@ class Float8TensorStorage(QuantizedTensorStorage):
         *args,
         data: Optional[torch.Tensor],
         fp8_scale_inv: torch.Tensor,
-        fp8_dtype: TE_DType,
+        fp8_dtype: Union[DType, tex.DType],
         fake_dtype: Optional[torch.dtype] = None,
         data_transpose: Optional[torch.Tensor] = None,
         quantizer: Optional[Quantizer] = None,
@@ -94,7 +93,7 @@ class Float8TensorStorage(QuantizedTensorStorage):
             instance = super().__new__(cls, *args, fake_dtype=fake_dtype, **kwargs)
         instance._data = data
         instance._quantizer = quantizer.copy() if quantizer is not None else None
-        instance._fp8_dtype = fp8_dtype
+        instance._fp8_dtype = DType.cast(fp8_dtype)
         instance._scale_inv = fp8_scale_inv
         instance._transpose = data_transpose
         instance._transpose_invalid = instance._transpose is None
@@ -139,11 +138,6 @@ class Float8TensorStorage(QuantizedTensorStorage):
             "fp8_dtype": self._fp8_dtype,
             "data_transpose": self._transpose,
             "quantizer": self._quantizer,
-            "device": (
-                self._data.device
-                if self._data is not None
-                else (self._transpose.device if self._transpose is not None else None)
-            ),
             "fake_dtype": self._dtype,
         }
 

@@ -245,7 +245,7 @@ class TestActivation:
             value_and_grad(self.primitive_func, (0,)), static_argnums=(1, 3)
         )
         act_args = (
-            {"limit": 0.75, "alpha": 1.702}
+            {"limit": 0.75, "alpha": 1.702, "glu_linear_offset": 0.5}
             if activation_type == ("clamped_silu", "clamped_linear")
             else {}
         )
