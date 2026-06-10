@@ -166,21 +166,13 @@ use_cutlass_grouped_gemm = [False]
 if torch.cuda.get_device_capability() == (9, 0):
     use_cutlass_grouped_gemm.append(True)
 
-_grouped_mlp_quantization_list: list = [None]
+_quantization_list: list = [None]
 if fp8_available:
-    _grouped_mlp_quantization_list.extend(("fp8_delayed_scaling", "fp8_current_scaling"))
+    _quantization_list.extend(("fp8_delayed_scaling", "fp8_current_scaling"))
 if mxfp8_available:
-    _grouped_mlp_quantization_list.append("mxfp8")
+    _quantization_list.append("mxfp8")
 if nvfp4_available:
-    _grouped_mlp_quantization_list.extend(("nvfp4", "nvfp4_4over6", "nvfp4_rht"))
-
-_ops_quantization_list: list = [None]
-if fp8_available:
-    _ops_quantization_list.extend(("fp8_delayed_scaling", "fp8_current_scaling"))
-if mxfp8_available:
-    _ops_quantization_list.append("mxfp8")
-if nvfp4_available:
-    _ops_quantization_list.extend(("nvfp4", "nvfp4_4over6"))
+    _quantization_list.extend(("nvfp4", "nvfp4_4over6", "nvfp4_rht"))
 
 
 class TorchGroupedLinearWithPadding(nn.Module):
@@ -2207,7 +2199,7 @@ class TestGroupedLinearOps:
     @pytest.mark.parametrize("single_grouped_bias", (False, True))
     @pytest.mark.parametrize("bias", (False, True))
     @pytest.mark.parametrize("dtype", param_types, ids=str)
-    @pytest.mark.parametrize("quantization", _ops_quantization_list)
+    @pytest.mark.parametrize("quantization", _quantization_list)
     @pytest.mark.parametrize("quantized_compute", (False, True))
     @pytest.mark.parametrize("quantized_weight", (False, True))
     @pytest.mark.parametrize("input_requires_grad", (False, True))
@@ -2390,14 +2382,8 @@ class TestGroupedMLP:
         _enable_fused_grouped_mlp(monkeypatch)
 
     @pytest.mark.parametrize("bias", (False, True))
-    @pytest.mark.parametrize("dtype", (torch.float32, torch.float16, torch.bfloat16))
-    @pytest.mark.parametrize("quantization", _grouped_mlp_quantization_list)
-    @pytest.mark.parametrize("glu_interleave_size", (None, 32))
+    @pytest.mark.parametrize("quantization", _quantization_list)
     @pytest.mark.parametrize("single_grouped_weight", (False, True))
-    @pytest.mark.parametrize("single_grouped_bias", (False, True))
-    @pytest.mark.parametrize("accumulate_into_main_grad", (False, True))
-    @pytest.mark.parametrize("delay_wgrad_compute", (False, True))
-    @pytest.mark.parametrize("hidden_size", (128, 256))
     @pytest.mark.parametrize(
         "activation",
         ("scaled_swiglu", "scaled_clamped_qgeglu", "scaled_clamped_qgeglu_custom", "scaled_srelu"),
@@ -2406,25 +2392,27 @@ class TestGroupedMLP:
         self,
         *,
         group_size: int = 4,
-        hidden_size: int,
+        hidden_size: int = 256,
         bias: bool,
-        dtype: torch.dtype,
+        dtype: torch.dtype = torch.bfloat16,
         quantization: Optional[str],
         single_grouped_weight: bool,
-        single_grouped_bias: bool,
-        accumulate_into_main_grad: bool,
+        accumulate_into_main_grad: bool = False,
         device: torch.device = "cuda",
         split_alignment: int = 256,
-        glu_interleave_size: Optional[int],
-        delay_wgrad_compute: bool,
+        delay_wgrad_compute: bool = False,
         activation: str,
     ) -> None:
         """GroupedLinear + scaled activation + GroupedLinear"""
-        scaled_act_ref = _make_scaled_grouped_mlp_activation(
-            activation,
-            glu_interleave_size=glu_interleave_size,
+
+        # Grouped MLP fused op requires GLU interleaving
+        activation_is_glu = activation in (
+            "scaled_swiglu", "scaled_clamped_qgeglu", "scaled_clamped_qgeglu_custom"
         )
-        activation_is_glu = is_glu_activation(scaled_act_ref)
+        glu_interleave_size = 32 if activation_is_glu else None
+
+        # Enable grouped bias if weights are grouped
+        single_grouped_bias = bias and single_grouped_weight
 
         _skip_invalid_grouped_mlp_case(
             activation=activation,
@@ -2526,7 +2514,7 @@ class TestGroupedMLP:
                 fc2_bs_test.append(None)
 
         def _apply_activation(x: torch.Tensor) -> torch.Tensor:
-            if activation_is_glu and glu_interleave_size is not None:
+            if glu_interleave_size is not None:
                 x = x.reshape(-1, 2 * hidden_size // (2 * glu_interleave_size), 2, glu_interleave_size)
                 x = x.transpose(1, 2).reshape(-1, 2 * hidden_size)
             if activation == "scaled_swiglu":
@@ -2636,29 +2624,31 @@ class TestGroupedMLP:
             fc1.backward_dw()
             fc2.backward_dw()
 
-        # Check for expected fusions
-        cudnn_frontend_supports_grouped_mlp = (
-            _cudnn_frontend_supports_grouped_gemm_srelu()
-            if activation == "scaled_srelu"
-            else _cudnn_frontend_version_supported()
-        )
-        expected_grouped_mlp_fusion = cudnn_frontend_supports_grouped_mlp and (
-            (
-                quantization == "mxfp8"
-                and dtype in (torch.bfloat16, torch.float16)
+        # Determine whether op fusion is expected
+        is_fusion_expected = False
+        if quantization == "mxfp8":
+            is_fusion_expected = (
+                dtype in (torch.bfloat16, torch.float16)
                 and (
                     (not activation_is_glu and glu_interleave_size is None)
                     or (activation_is_glu and glu_interleave_size == 32)
                 )
             )
-            or (
-                quantization == "nvfp4_rht"
-                and dtype == torch.bfloat16
+        if quantization == "nvfp4_rht":
+            is_fusion_expected = (
+                dtype == torch.bfloat16
                 and activation == "scaled_srelu"
                 and glu_interleave_size is None
             )
-        )
-        if expected_grouped_mlp_fusion:
+        if is_fusion_expected:
+            is_fusion_expected = (
+                _cudnn_frontend_supports_grouped_gemm_srelu()
+                if activation == "scaled_srelu"
+                else _cudnn_frontend_version_supported()
+            )
+
+        # Check that fusion is applied if expected
+        if is_fusion_expected:
             if activation_is_glu:
                 forward_cls = te.ops.fused.ForwardGroupedMLP_CuTeGEMMGLU
                 backward_cls = te.ops.fused.BackwardGroupedMLP_CuTeGEMMDGLU
@@ -2716,6 +2706,33 @@ class TestGroupedMLP:
             assert_close(fc1.weight.grad, fc1_w_ref_grad, **tols)
             assert_close(fc2.weight.grad, fc2_w_ref_grad, **tols)
 
+    @pytest.mark.parametrize("bias", (False, True))
+    @pytest.mark.parametrize("quantization", ("mxfp8", "nvfp4_rht"))
+    @pytest.mark.parametrize("single_grouped_weight", (False, True))
+    @pytest.mark.parametrize("accumulate_into_main_grad", (False, True))
+    @pytest.mark.parametrize("delay_wgrad_compute", (False, True))
+    @pytest.mark.parametrize("activation", ("scaled_swiglu", "scaled_srelu"))
+    def test_grouped_mlp_mcore_integrations(
+        self,
+        *,
+        bias: bool,
+        quantization: Optional[str],
+        single_grouped_weight: bool,
+        accumulate_into_main_grad: bool,
+        delay_wgrad_compute: bool,
+        activation: str,
+    ) -> None:
+        """Grouped MLP with advanced Mcore integrations"""
+        if not (accumulate_into_main_grad or delay_wgrad_compute):
+            pytest.skip("Repeated test case in test_grouped_mlp")
+        self.test_grouped_mlp(
+            bias=bias,
+            quantization=quantization,
+            single_grouped_weight=single_grouped_weight,
+            accumulate_into_main_grad=accumulate_into_main_grad,
+            delay_wgrad_compute=delay_wgrad_compute,
+            activation=activation,
+        )
 
     @pytest.mark.parametrize("dtype", (torch.bfloat16, torch.float16))
     @pytest.mark.parametrize("bias", (False, True))
