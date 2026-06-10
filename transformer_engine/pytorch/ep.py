@@ -6,8 +6,7 @@
 from __future__ import annotations
 
 import atexit
-from contextlib import contextmanager
-from typing import Iterator, Optional
+from typing import Optional
 
 import torch
 import torch.distributed as dist
@@ -19,7 +18,6 @@ __all__ = [
     "EpBuffer",
     "ep_bootstrap",
     "ep_finalize",
-    "ep_scope",
     "ep_dispatch",
     "ep_combine",
     "symm_mem_alloc",
@@ -154,12 +152,12 @@ def ep_bootstrap(
 
 
 def ep_finalize() -> None:
-    """Explicit EP teardown; optional and idempotent. An atexit handler covers
-    normal shutdown; call this only before ``dist.destroy_process_group()``,
-    since the borrowed NCCL comm is invalid once the PG is destroyed.
+    """Optional explicit EP teardown; idempotent.
 
-    Propagates errors from the C++ teardown; use ``_atexit_finalize`` for the
-    best-effort interpreter-shutdown path.
+    An atexit handler covers normal interpreter shutdown, so most users do not
+    need to call this. Call it explicitly only before
+    ``dist.destroy_process_group()``, since the borrowed NCCL comm becomes
+    invalid once the PG is destroyed.
     """
     global _BOOTSTRAPPED
     if not _BOOTSTRAPPED:
@@ -168,38 +166,6 @@ def ep_finalize() -> None:
         tex.ep_finalize()
     finally:
         _BOOTSTRAPPED = False
-
-
-@contextmanager
-def ep_scope(
-    ep_group: dist.ProcessGroup,
-    num_experts: int,
-    max_tokens_per_rank: int,
-    recv_capacity_per_rank: int,
-    hidden_dim: int,
-    max_num_sms: int = 0,
-    zero_copy: bool = False,
-    max_token_dtype: torch.dtype = torch.bfloat16,
-) -> Iterator[None]:
-    """Context manager: ``ep_bootstrap`` on enter, ``ep_finalize`` on exit.
-
-    Use when you tear down the EP process group yourself, so the borrowed NCCL
-    comm is released before ``dist.destroy_process_group()``.
-    """
-    ep_bootstrap(
-        ep_group,
-        num_experts=num_experts,
-        max_tokens_per_rank=max_tokens_per_rank,
-        recv_capacity_per_rank=recv_capacity_per_rank,
-        hidden_dim=hidden_dim,
-        max_num_sms=max_num_sms,
-        zero_copy=zero_copy,
-        max_token_dtype=max_token_dtype,
-    )
-    try:
-        yield
-    finally:
-        ep_finalize()
 
 
 # Buffer

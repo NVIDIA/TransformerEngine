@@ -16,9 +16,10 @@ import torch.distributed as dist
 
 from transformer_engine.pytorch.ep import (
     EpBuffer,
-    ep_scope,
-    ep_dispatch,
+    ep_bootstrap,
     ep_combine,
+    ep_dispatch,
+    ep_finalize,
 )
 
 
@@ -114,15 +115,18 @@ def main():
     recv_pr = ep_size * T * args.top_k
 
     ep_group = dist.new_group(ranks=list(range(world_size)), backend="nccl")
-    with ep_scope(
+    ep_bootstrap(
         ep_group,
         num_experts=num_experts,
         max_tokens_per_rank=T,
         recv_capacity_per_rank=recv_pr,
         hidden_dim=args.hidden,
-    ):
+    )
+    try:
         _run_layer(args, rank, world_size, ep_size, num_experts, num_local_experts, T, recv_pr, device)
-    dist.destroy_process_group()
+    finally:
+        ep_finalize()
+        dist.destroy_process_group()
 
 
 def _run_layer(args, rank, world_size, ep_size, num_experts, num_local_experts, T, recv_pr, device):
