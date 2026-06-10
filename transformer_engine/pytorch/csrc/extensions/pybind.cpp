@@ -168,129 +168,6 @@ void init_router_bindings(pybind11::module &m) {
 
 #include "common/util/pybind_helper.h"
 
-namespace {
-
-void bind_comm_overlap_extensions(py::module_ &m) {
-  // Comm+GEMM Overlap
-  m.def("bulk_overlap_ag_with_external_gemm",
-        &transformer_engine::pytorch::bulk_overlap_ag_with_external_gemm,
-        "Bulk overlap All-Gather with a GEMM operation launched by another communicator",
-        py::call_guard<py::gil_scoped_release>(), py::arg("allgather_communicator"),
-        py::arg("send_stream"), py::arg("recv_stream"));
-
-  // Experimental fused grouped MLP
-  auto grouped_mlp_experimental = m.def_submodule(
-      "grouped_mlp_experimental",
-      "Experimental helpers for the fused grouped MLP (unstable, may change or disappear).");
-  grouped_mlp_experimental.def("swizzle_scales_and_pack_ptrs_for_discrete_weights",
-                               &transformer_engine::pytorch::grouped_mlp_experimental::
-                                   swizzle_scales_and_pack_ptrs_for_discrete_weights,
-                               py::arg("data_tensors"), py::arg("scale_tensors"),
-                               py::arg("swizzle_type"), py::arg("device"),
-                               py::call_guard<py::gil_scoped_release>());
-
-  // Data structures
-  py::class_<transformer_engine::pytorch::FP8TensorMeta>(m, "FP8TensorMeta")
-      .def(py::init<>())
-      .def_readwrite("scale", &transformer_engine::pytorch::FP8TensorMeta::scale)
-      .def_readwrite("scale_inv", &transformer_engine::pytorch::FP8TensorMeta::scale_inv)
-      .def_readwrite("amax_history", &transformer_engine::pytorch::FP8TensorMeta::amax_history);
-
-  py::enum_<transformer_engine::pytorch::FP8FwdTensors>(m, "FP8FwdTensors")
-      .value("GEMM1_INPUT", transformer_engine::pytorch::FP8FwdTensors::GEMM1_INPUT)
-      .value("GEMM1_WEIGHT", transformer_engine::pytorch::FP8FwdTensors::GEMM1_WEIGHT)
-      .value("GEMM1_OUTPUT", transformer_engine::pytorch::FP8FwdTensors::GEMM1_OUTPUT)
-      .value("GEMM2_INPUT", transformer_engine::pytorch::FP8FwdTensors::GEMM2_INPUT)
-      .value("GEMM2_WEIGHT", transformer_engine::pytorch::FP8FwdTensors::GEMM2_WEIGHT)
-      .value("GEMM2_OUTPUT", transformer_engine::pytorch::FP8FwdTensors::GEMM2_OUTPUT)
-      .value("GEMM3_INPUT", transformer_engine::pytorch::FP8FwdTensors::GEMM3_INPUT)
-      .value("GEMM3_WEIGHT", transformer_engine::pytorch::FP8FwdTensors::GEMM3_WEIGHT)
-      .value("GEMM3_OUTPUT", transformer_engine::pytorch::FP8FwdTensors::GEMM3_OUTPUT);
-
-  py::enum_<transformer_engine::pytorch::FP8BwdTensors>(m, "FP8BwdTensors")
-      .value("GRAD_OUTPUT1", transformer_engine::pytorch::FP8BwdTensors::GRAD_OUTPUT1)
-      .value("GRAD_INPUT1", transformer_engine::pytorch::FP8BwdTensors::GRAD_INPUT1)
-      .value("GRAD_OUTPUT2", transformer_engine::pytorch::FP8BwdTensors::GRAD_OUTPUT2)
-      .value("GRAD_INPUT2", transformer_engine::pytorch::FP8BwdTensors::GRAD_INPUT2)
-      .value("GRAD_OUTPUT3", transformer_engine::pytorch::FP8BwdTensors::GRAD_OUTPUT3)
-      .value("GRAD_INPUT3", transformer_engine::pytorch::FP8BwdTensors::GRAD_INPUT3);
-
-  py::class_<CommOverlapHelper>(m, "CommOverlapHelper")
-      .def(py::init<>(), py::call_guard<py::gil_scoped_release>())
-      .def(py::init<c10d::ProcessGroup *, std::optional<c10d::ProcessGroup *>>(),
-           py::call_guard<py::gil_scoped_release>(), py::arg("world_group"),
-           py::arg("intra_node_group") = py::none());
-
-  py::class_<CommOverlap, std::shared_ptr<CommOverlap>, transformer_engine::CommOverlapBase,
-             transformer_engine::CommOverlapCore>(m, "CommOverlap")
-      .def(py::init([](const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
-                       CommOverlapHelper *helper, int tp_size, bool use_cublasmp,
-                       transformer_engine::CommOverlapType comm_type, int num_splits,
-                       int num_max_streams, int comm_cga_size, int gemm_priority, int comm_priority,
-                       int num_comm_sm, bool set_sm_margin, bool atomic_gemm,
-                       bool rs_overlap_first_gemm) {
-             if (use_cublasmp) {
-               return std::make_shared<CommOverlap>(helper, helper->mylocal, tp_size, comm_type,
-                                                    buffer_shape, buffer_dtype, num_comm_sm,
-                                                    atomic_gemm);
-             }
-             return std::make_shared<CommOverlap>(
-                 buffer_shape, buffer_dtype, helper, tp_size, num_splits, num_max_streams,
-                 comm_cga_size, gemm_priority, comm_priority, num_comm_sm, set_sm_margin,
-                 atomic_gemm, rs_overlap_first_gemm);
-           }),
-           py::call_guard<py::gil_scoped_release>(), py::arg("buffer_shape"),
-           py::arg("buffer_dtype"), py::arg("helper"), py::arg("tp_size"),
-           py::arg("use_cublasmp") = false,
-           py::arg("comm_type") = transformer_engine::CommOverlapType::RS,
-           py::arg("num_splits") = 4, py::arg("num_max_streams") = NVTE_COMM_OVERLAP_MAX_STREAMS,
-           py::arg("comm_cga_size") = 2, py::arg("gemm_priority") = 0, py::arg("comm_priority") = 0,
-           py::arg("num_comm_sm") = 16, py::arg("set_sm_margin") = true,
-           py::arg("atomic_gemm") = false, py::arg("rs_overlap_first_gemm") = false)
-      .def("copy_into_buffer",
-           static_cast<void (CommOverlap::*)(const at::Tensor &, bool)>(
-               &CommOverlap::copy_into_buffer),
-           py::arg("input"), py::arg("local_chunk") = false)
-      .def("get_buffer", &CommOverlap::get_buffer, py::arg("local_chunk") = false,
-           py::arg("shape") = std::nullopt)
-      .def("get_communication_stream", &CommOverlap::get_communication_stream);
-
-  py::class_<CommOverlapP2P, std::shared_ptr<CommOverlapP2P>,
-             transformer_engine::CommOverlapP2PBase, transformer_engine::CommOverlapCore>(
-      m, "CommOverlapP2P")
-      .def(py::init([](const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
-                       CommOverlapHelper *helper, int tp_size,
-                       transformer_engine::CommOverlapType comm_type, int num_max_streams,
-                       int comm_cga_size, int gemm_priority, int comm_priority, int num_comm_sm,
-                       bool set_sm_margin, bool atomic_gemm, bool use_ce, bool aggregate,
-                       bool use_cublasmp) {
-             if (use_cublasmp) {
-               return std::make_shared<CommOverlapP2P>(helper, helper->mylocal, tp_size, comm_type,
-                                                       buffer_shape, buffer_dtype, num_comm_sm,
-                                                       atomic_gemm);
-             }
-             return std::make_shared<CommOverlapP2P>(buffer_shape, buffer_dtype, helper, tp_size,
-                                                     comm_type, num_max_streams, comm_cga_size,
-                                                     gemm_priority, comm_priority, num_comm_sm,
-                                                     set_sm_margin, atomic_gemm, use_ce, aggregate);
-           }),
-           py::call_guard<py::gil_scoped_release>(), py::arg("buffer_shape"),
-           py::arg("buffer_dtype"), py::arg("helper"), py::arg("tp_size"), py::arg("comm_type"),
-           py::arg("num_max_streams") = NVTE_COMM_OVERLAP_MAX_STREAMS, py::arg("comm_cga_size") = 1,
-           py::arg("gemm_priority") = 0, py::arg("comm_priority") = 0, py::arg("num_comm_sm") = 1,
-           py::arg("set_sm_margin") = false, py::arg("atomic_gemm") = false,
-           py::arg("use_ce") = true, py::arg("aggregate") = false, py::arg("use_cublasmp") = false)
-      .def("copy_into_buffer",
-           static_cast<void (CommOverlapP2P::*)(const at::Tensor &, bool)>(
-               &CommOverlapP2P::copy_into_buffer),
-           py::arg("input"), py::arg("local_chunk") = false)
-      .def("get_buffer", &CommOverlapP2P::get_buffer, py::arg("local_chunk") = false,
-           py::arg("shape") = std::nullopt)
-      .def("get_communication_stream", &CommOverlapP2P::get_communication_stream);
-}
-
-}  // namespace
-
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   NVTE_DECLARE_COMMON_PYBIND11_HANDLES(m)
 
@@ -673,11 +550,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("thd_get_partitioned_indices", &transformer_engine::pytorch::thd_get_partitioned_indices,
         "Generate partitioned indices for inputs in THD format",
         py::call_guard<py::gil_scoped_release>());
-  m.def("thd_reorder", &transformer_engine::pytorch::thd_reorder,
-        "Fused dual-chunk THD reorder for context parallel (gather/scatter), inline index",
+  m.def("thd_cp_reorder_sequences", &transformer_engine::pytorch::thd_cp_reorder_sequences,
+        "Reorder a THD tensor between CP rank-sharded dual-chunk order and contiguous "
+        "per-sequence order",
         py::call_guard<py::gil_scoped_release>());
-  m.def("thd_valid_copy", &transformer_engine::pytorch::thd_valid_copy,
-        "Sync-free copy of valid THD token rows into an accumulator (CP AllGather fwd/bwd)",
+  m.def("thd_cp_copy_valid_tokens", &transformer_engine::pytorch::thd_cp_copy_valid_tokens,
+        "Copy valid THD sequence entries from a padded input tensor into an output tensor",
         py::call_guard<py::gil_scoped_release>());
 
   // nvshmem functions
@@ -756,5 +634,120 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("x"), py::arg("num_iterations"), py::arg("coefficients"),
         py::call_guard<py::gil_scoped_release>());
 
-  bind_comm_overlap_extensions(m);
-}
+  // Comm+GEMM Overlap
+  m.def("bulk_overlap_ag_with_external_gemm",
+        &transformer_engine::pytorch::bulk_overlap_ag_with_external_gemm,
+        "Bulk overlap All-Gather with a GEMM operation launched by another communicator",
+        py::call_guard<py::gil_scoped_release>(), py::arg("allgather_communicator"),
+        py::arg("send_stream"), py::arg("recv_stream"));
+
+  // Experimental fused grouped MLP
+  auto grouped_mlp_experimental = m.def_submodule(
+      "grouped_mlp_experimental",
+      "Experimental helpers for the fused grouped MLP (unstable, may change or disappear).");
+  grouped_mlp_experimental.def("swizzle_scales_and_pack_ptrs_for_discrete_weights",
+                               &transformer_engine::pytorch::grouped_mlp_experimental::
+                                   swizzle_scales_and_pack_ptrs_for_discrete_weights,
+                               py::arg("data_tensors"), py::arg("scale_tensors"),
+                               py::arg("swizzle_type"), py::arg("device"),
+                               py::call_guard<py::gil_scoped_release>());
+
+  // Data structures
+  py::class_<transformer_engine::pytorch::FP8TensorMeta>(m, "FP8TensorMeta")
+      .def(py::init<>())
+      .def_readwrite("scale", &transformer_engine::pytorch::FP8TensorMeta::scale)
+      .def_readwrite("scale_inv", &transformer_engine::pytorch::FP8TensorMeta::scale_inv)
+      .def_readwrite("amax_history", &transformer_engine::pytorch::FP8TensorMeta::amax_history);
+
+  py::enum_<transformer_engine::pytorch::FP8FwdTensors>(m, "FP8FwdTensors")
+      .value("GEMM1_INPUT", transformer_engine::pytorch::FP8FwdTensors::GEMM1_INPUT)
+      .value("GEMM1_WEIGHT", transformer_engine::pytorch::FP8FwdTensors::GEMM1_WEIGHT)
+      .value("GEMM1_OUTPUT", transformer_engine::pytorch::FP8FwdTensors::GEMM1_OUTPUT)
+      .value("GEMM2_INPUT", transformer_engine::pytorch::FP8FwdTensors::GEMM2_INPUT)
+      .value("GEMM2_WEIGHT", transformer_engine::pytorch::FP8FwdTensors::GEMM2_WEIGHT)
+      .value("GEMM2_OUTPUT", transformer_engine::pytorch::FP8FwdTensors::GEMM2_OUTPUT)
+      .value("GEMM3_INPUT", transformer_engine::pytorch::FP8FwdTensors::GEMM3_INPUT)
+      .value("GEMM3_WEIGHT", transformer_engine::pytorch::FP8FwdTensors::GEMM3_WEIGHT)
+      .value("GEMM3_OUTPUT", transformer_engine::pytorch::FP8FwdTensors::GEMM3_OUTPUT);
+
+  py::enum_<transformer_engine::pytorch::FP8BwdTensors>(m, "FP8BwdTensors")
+      .value("GRAD_OUTPUT1", transformer_engine::pytorch::FP8BwdTensors::GRAD_OUTPUT1)
+      .value("GRAD_INPUT1", transformer_engine::pytorch::FP8BwdTensors::GRAD_INPUT1)
+      .value("GRAD_OUTPUT2", transformer_engine::pytorch::FP8BwdTensors::GRAD_OUTPUT2)
+      .value("GRAD_INPUT2", transformer_engine::pytorch::FP8BwdTensors::GRAD_INPUT2)
+      .value("GRAD_OUTPUT3", transformer_engine::pytorch::FP8BwdTensors::GRAD_OUTPUT3)
+      .value("GRAD_INPUT3", transformer_engine::pytorch::FP8BwdTensors::GRAD_INPUT3);
+
+  py::class_<CommOverlapHelper>(m, "CommOverlapHelper")
+      .def(py::init<>(), py::call_guard<py::gil_scoped_release>())
+      .def(py::init<c10d::ProcessGroup *, std::optional<c10d::ProcessGroup *>>(),
+           py::call_guard<py::gil_scoped_release>(), py::arg("world_group"),
+           py::arg("intra_node_group") = py::none());
+
+  py::class_<CommOverlap, std::shared_ptr<CommOverlap>, transformer_engine::CommOverlapBase,
+             transformer_engine::CommOverlapCore>(m, "CommOverlap")
+      .def(py::init([](const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
+                       CommOverlapHelper *helper, int tp_size, bool use_cublasmp,
+                       transformer_engine::CommOverlapType comm_type, int num_splits,
+                       int num_max_streams, int comm_cga_size, int gemm_priority, int comm_priority,
+                       int num_comm_sm, bool set_sm_margin, bool atomic_gemm,
+                       bool rs_overlap_first_gemm) {
+             if (use_cublasmp) {
+               return std::make_shared<CommOverlap>(helper, helper->mylocal, tp_size, comm_type,
+                                                    buffer_shape, buffer_dtype, num_comm_sm,
+                                                    atomic_gemm);
+             }
+             return std::make_shared<CommOverlap>(
+                 buffer_shape, buffer_dtype, helper, tp_size, num_splits, num_max_streams,
+                 comm_cga_size, gemm_priority, comm_priority, num_comm_sm, set_sm_margin,
+                 atomic_gemm, rs_overlap_first_gemm);
+           }),
+           py::call_guard<py::gil_scoped_release>(), py::arg("buffer_shape"),
+           py::arg("buffer_dtype"), py::arg("helper"), py::arg("tp_size"),
+           py::arg("use_cublasmp") = false,
+           py::arg("comm_type") = transformer_engine::CommOverlapType::RS,
+           py::arg("num_splits") = 4, py::arg("num_max_streams") = NVTE_COMM_OVERLAP_MAX_STREAMS,
+           py::arg("comm_cga_size") = 2, py::arg("gemm_priority") = 0, py::arg("comm_priority") = 0,
+           py::arg("num_comm_sm") = 16, py::arg("set_sm_margin") = true,
+           py::arg("atomic_gemm") = false, py::arg("rs_overlap_first_gemm") = false)
+      .def("copy_into_buffer",
+           static_cast<void (CommOverlap::*)(const at::Tensor &, bool)>(
+               &CommOverlap::copy_into_buffer),
+           py::arg("input"), py::arg("local_chunk") = false)
+      .def("get_buffer", &CommOverlap::get_buffer, py::arg("local_chunk") = false,
+           py::arg("shape") = std::nullopt)
+      .def("get_communication_stream", &CommOverlap::get_communication_stream);
+
+  py::class_<CommOverlapP2P, std::shared_ptr<CommOverlapP2P>,
+             transformer_engine::CommOverlapP2PBase, transformer_engine::CommOverlapCore>(
+      m, "CommOverlapP2P")
+      .def(py::init([](const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
+                       CommOverlapHelper *helper, int tp_size,
+                       transformer_engine::CommOverlapType comm_type, int num_max_streams,
+                       int comm_cga_size, int gemm_priority, int comm_priority, int num_comm_sm,
+                       bool set_sm_margin, bool atomic_gemm, bool use_ce, bool aggregate,
+                       bool use_cublasmp) {
+             if (use_cublasmp) {
+               return std::make_shared<CommOverlapP2P>(helper, helper->mylocal, tp_size, comm_type,
+                                                       buffer_shape, buffer_dtype, num_comm_sm,
+                                                       atomic_gemm);
+             }
+             return std::make_shared<CommOverlapP2P>(buffer_shape, buffer_dtype, helper, tp_size,
+                                                     comm_type, num_max_streams, comm_cga_size,
+                                                     gemm_priority, comm_priority, num_comm_sm,
+                                                     set_sm_margin, atomic_gemm, use_ce, aggregate);
+           }),
+           py::call_guard<py::gil_scoped_release>(), py::arg("buffer_shape"),
+           py::arg("buffer_dtype"), py::arg("helper"), py::arg("tp_size"), py::arg("comm_type"),
+           py::arg("num_max_streams") = NVTE_COMM_OVERLAP_MAX_STREAMS, py::arg("comm_cga_size") = 1,
+           py::arg("gemm_priority") = 0, py::arg("comm_priority") = 0, py::arg("num_comm_sm") = 1,
+           py::arg("set_sm_margin") = false, py::arg("atomic_gemm") = false,
+           py::arg("use_ce") = true, py::arg("aggregate") = false, py::arg("use_cublasmp") = false)
+      .def("copy_into_buffer",
+           static_cast<void (CommOverlapP2P::*)(const at::Tensor &, bool)>(
+               &CommOverlapP2P::copy_into_buffer),
+           py::arg("input"), py::arg("local_chunk") = false)
+      .def("get_buffer", &CommOverlapP2P::get_buffer, py::arg("local_chunk") = false,
+           py::arg("shape") = std::nullopt)
+      .def("get_communication_stream", &CommOverlapP2P::get_communication_stream);
+}  // NOLINT(readability/fn_size)

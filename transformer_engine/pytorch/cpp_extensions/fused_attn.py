@@ -371,8 +371,8 @@ def fused_attn_fwd(
                         device=max_tensor.device
                     )
                     tq = max_tensor.shape[0]
-                    starts = cu_seqlens_q_padded[:-1].to(device=max_tensor.device, dtype=torch.long)
-                    ends = (starts + actual_seqlens.to(dtype=torch.long)).clamp(max=tq)
+                    starts = cu_seqlens_q_padded[:-1].to(device=max_tensor.device)
+                    ends = (starts + actual_seqlens).clamp(max=tq)
                     delta = torch.zeros(tq + 1, dtype=torch.int32, device=max_tensor.device)
                     updates = torch.ones_like(starts, dtype=torch.int32)
                     delta.scatter_add_(0, starts.clamp(max=tq), updates)

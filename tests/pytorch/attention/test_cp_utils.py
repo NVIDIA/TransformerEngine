@@ -814,12 +814,12 @@ def _legacy_valid_copy(out, inp, cu_seqlens_padded, cu_seqlens):
     "THD kernel tests require CUDA and transformer_engine_torch",
 )
 class TestTHDKernels(unittest.TestCase):
-    def test_thd_reorder_matches_legacy_python_reorder(self):
+    def test_thd_cp_reorder_sequences_matches_legacy_python_reorder(self):
         cp_size = 4
         cu_seqlens = torch.tensor([0, 8, 24, 40], dtype=torch.int32, device="cuda")
         x = torch.arange(40 * 2 * 4, dtype=torch.float16, device="cuda").view(40, 2, 4)
 
-        rank_sharded = tex.thd_reorder(x, cu_seqlens, cp_size, False, x.shape[0])
+        rank_sharded = tex.thd_cp_reorder_sequences(x, cu_seqlens, cp_size, False, x.shape[0])
         ref_rank_sharded = _legacy_reorder_thd_to_rank_sharded(x, cu_seqlens, cp_size)
         self.assertTrue(torch.equal(rank_sharded, ref_rank_sharded))
 
@@ -827,7 +827,9 @@ class TestTHDKernels(unittest.TestCase):
         for rank in range(cp_size):
             seq_chunk_ids[rank] = 2 * rank
             seq_chunk_ids[rank + cp_size] = 2 * cp_size - 2 * rank - 1
-        contiguous = tex.thd_reorder(rank_sharded, cu_seqlens, cp_size, True, rank_sharded.shape[0])
+        contiguous = tex.thd_cp_reorder_sequences(
+            rank_sharded, cu_seqlens, cp_size, True, rank_sharded.shape[0]
+        )
         ref_contiguous = _legacy_reorder_thd_to_contiguous(
             rank_sharded, cu_seqlens, seq_chunk_ids, cp_size
         )
@@ -847,7 +849,7 @@ class TestTHDKernels(unittest.TestCase):
         self.assertTrue(torch.equal(rank0, expected_rank0))
         self.assertTrue(torch.equal(rank1, expected_rank1))
 
-    def test_thd_valid_copy_matches_legacy_slice_copy_loop(self):
+    def test_thd_cp_copy_valid_tokens_matches_legacy_slice_copy_loop(self):
         cu_seqlens_padded = torch.tensor([2, 6, 12], dtype=torch.int32, device="cuda")
         cu_seqlens = torch.tensor([0, 3, 7], dtype=torch.int32, device="cuda")
         inp = torch.arange(12 * 2 * 4, dtype=torch.float16, device="cuda").view(12, 2, 4)
@@ -855,7 +857,7 @@ class TestTHDKernels(unittest.TestCase):
         expected = torch.full_like(inp, -1)
 
         _legacy_valid_copy(expected, inp, cu_seqlens_padded, cu_seqlens)
-        tex.thd_valid_copy(out, inp, cu_seqlens_padded, cu_seqlens)
+        tex.thd_cp_copy_valid_tokens(out, inp, cu_seqlens_padded, cu_seqlens)
         self.assertTrue(torch.equal(out, expected))
 
     def test_thd_read_half_tensor_reads_each_sequence_half(self):

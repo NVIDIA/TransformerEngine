@@ -975,8 +975,8 @@ at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_t
   return output;
 }
 
-at::Tensor thd_reorder(const at::Tensor &inp, const at::Tensor &cu_seqlens, int cp_size,
-                       bool scatter, int total_tokens) {
+at::Tensor thd_cp_reorder_sequences(const at::Tensor &inp, const at::Tensor &cu_seqlens,
+                                    int cp_size, bool scatter, int total_tokens) {
   NVTE_CHECK(cu_seqlens.scalar_type() == at::ScalarType::Int);
   NVTE_CHECK(cu_seqlens.dim() == 1);
   NVTE_CHECK(cu_seqlens.size(0) >= 2);
@@ -997,8 +997,9 @@ at::Tensor thd_reorder(const at::Tensor &inp, const at::Tensor &cu_seqlens, int 
   return out;
 }
 
-void thd_valid_copy(at::Tensor out, const at::Tensor &inp, const at::Tensor &cu_seqlens_padded,
-                    const at::Tensor &cu_seqlens) {
+void thd_cp_copy_valid_tokens(at::Tensor out, const at::Tensor &inp,
+                              const at::Tensor &cu_seqlens_padded,
+                              const at::Tensor &cu_seqlens) {
   NVTE_CHECK(cu_seqlens.scalar_type() == at::ScalarType::Int);
   NVTE_CHECK(cu_seqlens_padded.scalar_type() == at::ScalarType::Int);
   NVTE_CHECK(cu_seqlens.dim() == 1 && cu_seqlens_padded.dim() == 1);
@@ -1006,7 +1007,7 @@ void thd_valid_copy(at::Tensor out, const at::Tensor &inp, const at::Tensor &cu_
   NVTE_CHECK(cu_seqlens_padded.size(0) == cu_seqlens.size(0));
   NVTE_CHECK(inp.dim() >= 1);
   NVTE_CHECK(out.sizes() == inp.sizes() && out.scalar_type() == inp.scalar_type());
-  NVTE_CHECK(out.is_contiguous(), "thd_valid_copy output must be contiguous.");
+  NVTE_CHECK(out.is_contiguous(), "thd_cp_copy_valid_tokens output must be contiguous.");
 
   auto inp_c = inp.contiguous();
   auto cu_seqlens_padded_c = cu_seqlens_padded.contiguous();

@@ -333,8 +333,8 @@ def reorder_thd_sequences_to_rank_sharded(x, cu_seqlens, cp_size, seq_dim=0):
                 3.,  4.,  3.,  4.,  3.,  4.,  6.,  7.,  8.,  9.   # chunk on rank 3
              ]
     """
-    assert seq_dim == 0, "tex.thd_reorder operates on the leading (token) dim"
-    return tex.thd_reorder(x, cu_seqlens, cp_size, False, x.shape[seq_dim])
+    assert seq_dim == 0, "tex.thd_cp_reorder_sequences operates on the leading (token) dim"
+    return tex.thd_cp_reorder_sequences(x, cu_seqlens, cp_size, False, x.shape[seq_dim])
 
 
 def reorder_thd_sequences_to_contiguous(x, cu_seqlens, cp_size, seq_dim=0):
@@ -380,8 +380,8 @@ def reorder_thd_sequences_to_contiguous(x, cu_seqlens, cp_size, seq_dim=0):
             1b. Concatenate the indices of the first half and the second half.
         2. Reorder the entire input tensor by those indices.
     """
-    assert seq_dim == 0, "tex.thd_reorder operates on the leading (token) dim"
-    return tex.thd_reorder(x, cu_seqlens, cp_size, True, x.shape[seq_dim])
+    assert seq_dim == 0, "tex.thd_cp_reorder_sequences operates on the leading (token) dim"
+    return tex.thd_cp_reorder_sequences(x, cu_seqlens, cp_size, True, x.shape[seq_dim])
 
 
 def flash_attn_a2a_communicate(
@@ -3278,8 +3278,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         out_per_step = [None, None]
         softmax_lse_per_step = [None, None]
         rng_states = [None, None]
-        out_shape = o_shape if qkv_format == "thd" else q.shape
-        out = torch.zeros(out_shape, dtype=fwd_nominal_dtype, device=q.device)
+        # THD per-step kernels may leave padded rows untouched; valid-copy only
+        # writes real tokens, so keep the final accumulator zero-initialized.
+        out = torch.zeros(o_shape, dtype=fwd_nominal_dtype, device=q.device)
         max_logit_per_step = [None, None]
         max_logit = None
 
@@ -3555,7 +3556,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                     elif qkv_format == "thd":
                         # Copy every segment's valid token range from this step's output.
                         # Each step writes to distinct positions.
-                        tex.thd_valid_copy(
+                        tex.thd_cp_copy_valid_tokens(
                             out,
                             out_per_step[i - 1],
                             thd_cu_seqlens_q_padded_per_step[i - 1],
@@ -3938,17 +3939,10 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             cu_seqlens_q_padded_ = cu_seqlens_q_padded
                             cu_seqlens_kv_padded_ = cu_seqlens_kv_per_step[i]
 
-                        if ctx.fp8 and ctx.qkv_layout == "t3hd":
-                            aux_ctx_tensors = [
-                                softmax_lse_per_step[i],
-                                softmax_lse_per_step[i],
-                                rng_states[i],
-                            ]
-                        else:
-                            aux_ctx_tensors = [
-                                softmax_lse_per_step[i],
-                                rng_states[i],
-                            ]
+                        aux_ctx_tensors = [
+                            softmax_lse_per_step[i],
+                            rng_states[i],
+                        ]
                         fused_attn_backend = tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
                         fp8_meta_kwargs = {}
                         new_qkv_layout = ctx.qkv_layout
@@ -4100,7 +4094,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                 with torch.cuda.stream(flash_attn_streams[i - 1]):
                     if ctx.qkv_format == "thd":
                         # dQ: copy every segment's valid token range from this step's dQ.
-                        tex.thd_valid_copy(
+                        tex.thd_cp_copy_valid_tokens(
                             dq,
                             dq_per_step[i - 1],
                             thd_cu_seqlens_q_padded_per_step[i - 1],
