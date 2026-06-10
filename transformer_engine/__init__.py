@@ -16,15 +16,6 @@ import torch
 TE_DEVICE_TYPE = "cuda"
 TE_PLATFORM = torch.cuda
 
-# Apply MUSA (VENDOR) Patches, such as torch.cuda.device -> torch.musa.device
-try:
-    from .plugin.core.backends.vendor.musa.patches import apply_patch as _musa_apply_patch
-
-    _musa_apply_patch()
-except Exception as e:
-    pass
-
-
 def te_device_type(default: str = "cuda") -> str:
     try:
         return TE_DEVICE_TYPE
@@ -37,6 +28,23 @@ def te_platform(default=torch.cuda):
         return TE_PLATFORM
     except Exception:
         return default
+
+
+# Plugin system: if NVTE_ENABLE_PLUGIN=1, replace cuda hardcodes and torch.cuda apis
+if os.environ.get("NVTE_ENABLE_PLUGIN", "0") == "1":
+    try:
+        from plugin import load_plugins
+        load_plugins()
+    except ImportError as e:
+        print(f"[TE] NVTE_ENABLE_PLUGIN=1 but plugin import failed: {e}")
+    else:
+        # Only apply patches if load_plugins() succeeded
+        try:
+            from plugin.patches import apply_patches
+
+            apply_patches()
+        except Exception as e:
+            print(f"[TE] NVTE_ENABLE_PLUGIN=1 but plugin patch apply failed: {e}")
 
 
 try:
