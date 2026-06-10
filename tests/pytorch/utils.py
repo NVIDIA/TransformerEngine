@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import random
 import subprocess
@@ -18,7 +19,6 @@ import torch
 
 import transformer_engine
 from transformer_engine.common.recipe import Recipe
-import math
 from transformer_engine.pytorch import (
     DType,
     Float8CurrentScalingQuantizer,
