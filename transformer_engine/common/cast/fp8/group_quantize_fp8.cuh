@@ -198,6 +198,45 @@ __device__ __forceinline__ void store_fp8_vec_streaming(OType *ptr,
   }
 }
 
+// Copy a warp's contiguous SEG-byte column segment from shared to global using
+// the widest store the destination alignment allows. The destination alignment
+// is warp-uniform (all lanes of a warp target the same column, so the segment
+// base offset is identical), so the width selection below never diverges. The
+// shared source is contiguous and 8-byte aligned, so every width up to 8 bytes
+// is safe to read. Striping element ``e = k*WARP + lane`` keeps each store
+// instruction fully coalesced across the warp regardless of width.
+template <typename T, size_t SEG>
+__device__ __forceinline__ void copy_column_segment_strided(char *gl, const char *sh,
+                                                            size_t lane) {
+  static_assert(SEG % (sizeof(T) * THREADS_PER_WARP) == 0,
+                "segment must tile evenly into warp-wide element stripes");
+  constexpr size_t STEPS = SEG / sizeof(T) / THREADS_PER_WARP;
+  T *const g = reinterpret_cast<T *>(gl);
+  const T *const s = reinterpret_cast<const T *>(sh);
+#pragma unroll
+  for (size_t k = 0; k < STEPS; ++k) {
+    const size_t e = k * THREADS_PER_WARP + lane;
+    g[e] = s[e];
+  }
+}
+
+template <typename OVecT>
+__device__ __forceinline__ void store_column_segment(OVecT *shared_segment, char *gl, size_t lane) {
+  // The segment is the WARP contiguous OVecT slots produced for one column.
+  constexpr size_t SEG = THREADS_PER_WARP * sizeof(OVecT);
+  const char *const sh = reinterpret_cast<const char *>(shared_segment);
+  const uint64_t a = reinterpret_cast<uint64_t>(gl);
+  if ((a & 7) == 0) {
+    copy_column_segment_strided<uint64_t, SEG>(gl, sh, lane);
+  } else if ((a & 3) == 0) {
+    copy_column_segment_strided<uint32_t, SEG>(gl, sh, lane);
+  } else if ((a & 1) == 0) {
+    copy_column_segment_strided<uint16_t, SEG>(gl, sh, lane);
+  } else {
+    copy_column_segment_strided<uint8_t, SEG>(gl, sh, lane);
+  }
+}
+
 template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &), typename IType,
           typename OType, ScalingType SCALING_TYPE, ShapeRepresentation SHAPE_REP>
 __global__ void __launch_bounds__(THREADS_PER_TILE)
@@ -272,6 +311,17 @@ __global__ void __launch_bounds__(THREADS_PER_TILE)
     if (tile_col >= last_logical_dim) {
       return;
     }
+    // The grid is sized to the (possibly over-allocated) logical first dim, so
+    // for capacity-padded buffers up to half the Y blocks fall past the active
+    // region. Bound the active tile count from offsets_ptr[num_tensors] (the
+    // active element total, one cached load) and drop those blocks in O(1)
+    // instead of paying the full O(num_tensors) scan below. This is graph-safe:
+    // it reads device offsets rather than requiring a host-side active count.
+    const size_t active_rows = static_cast<size_t>(offsets_ptr[num_tensors]) / last_logical_dim;
+    const size_t max_active_tiles = DIVUP(active_rows, tile_dim_m) + num_tensors;
+    if (blockIdx.y >= max_active_tiles) {
+      return;
+    }
     size_t local_tile_id = blockIdx.y;
     bool found_tensor = false;
     for (size_t i = 0; i < num_tensors; ++i) {
@@ -307,6 +357,81 @@ __global__ void __launch_bounds__(THREADS_PER_TILE)
   if constexpr (COLWISE_OUTPUT) {
     __shared__ OVecT
         shared_output_t[nvec_in][THREADS_PER_WARP][THREADS_PER_WARP + TRANSPOSE_SHARED_PAD];
+
+    // Interior tiles (every fragment full) can skip *all* per-fragment bounds
+    // checks. That instruction overhead -- not occupancy -- is what holds the
+    // generic kernel to ~58% of HBM; the branchless path below is HBM-bound.
+    // The condition is block-uniform (derived from tile_row/tile_col/rows/cols),
+    // so there is no warp divergence: only edge tiles (partial trailing columns,
+    // or the last row tile of a group) fall through to the bounds-checked path.
+    //
+    // Alignment is split between the two phases because they have independent
+    // requirements. Phase 1 (load bf16 + convert + optional rowwise store +
+    // transpose into shared) is governed by the *column* stride and is the bulk
+    // of global traffic (a 2-byte read per element). Phase 2 (store the
+    // transposed fp8 columns) is governed by the per-group *row* count, which
+    // for varying-first groups is an arbitrary integer and is therefore rarely
+    // a multiple of nvec_out. We still take the branchless interior path
+    // whenever the loads are aligned -- the common case -- and only the final
+    // store falls back to per-element stores when the row stride is unaligned,
+    // so imbalanced group shapes keep the branchless phase-1 win.
+    const bool full_tile = (tile_row + tile_dim_m <= rows) && (tile_col + tile_dim_n <= cols);
+    const bool aligned_load = (cols % nvec_in == 0) && (tensor_base % nvec_in == 0);
+    if (full_tile && aligned_load) {
+#pragma unroll
+      for (size_t iter = 0; iter < num_iterations; ++iter) {
+        const size_t i1 = tidy + iter * WARPS_PER_TILE;
+        const size_t j1 = tidx;
+        const size_t base_row = tile_row + i1 * nvec_out;
+        const size_t base_col = tile_col + j1 * nvec_in;
+        OVecT local_output_t[nvec_in];
+#pragma unroll
+        for (size_t i2 = 0; i2 < nvec_out; ++i2) {
+          const size_t row = base_row + i2;
+          IVecT local_input;
+          OVecC local_output;
+          local_input.load_from(input + tensor_base + row * cols + base_col);
+          scaled_fp8_cvt_vec_full<IS_ACT, ParamOP, OP>(local_input, local_output, scale);
+          if constexpr (ROWWISE_OUTPUT) {
+            OType *const output_ptr = output_rowwise + tensor_base + row * cols + base_col;
+            if constexpr (SCALING_TYPE == ScalingType::BIDIMENSIONAL) {
+              store_fp8_vec_streaming(output_ptr, local_output);
+            } else {
+              local_output.store_to(output_ptr);
+            }
+          }
+#pragma unroll
+          for (size_t j2 = 0; j2 < nvec_in; ++j2) {
+            local_output_t[j2].data.elt[i2] = local_output.data.elt[j2];
+          }
+        }
+#pragma unroll
+        for (size_t j2 = 0; j2 < nvec_in; ++j2) {
+          shared_output_t[j2][j1][i1] = local_output_t[j2];
+        }
+      }
+      __syncthreads();
+#pragma unroll
+      for (size_t j2 = 0; j2 < nvec_in; ++j2) {
+#pragma unroll
+        for (size_t iter = 0; iter < num_iterations; ++iter) {
+          // All 32 lanes of a warp share j1 (= tidy + iter*WARPS_PER_TILE) and
+          // therefore the same column, so shared_output_t[j2][j1][0..WARP-1] is a
+          // contiguous nvec_out*WARP-byte segment in shared and maps to a
+          // contiguous segment of one output column. Store it with the widest
+          // type the (warp-uniform) destination offset allows: row strides that
+          // are multiples of nvec_out give a single vectorized store per lane;
+          // arbitrary varying-first strides degrade gracefully to narrower
+          // coalesced stores instead of faulting.
+          const size_t j1 = tidy + iter * WARPS_PER_TILE;
+          const size_t col = tile_col + j1 * nvec_in + j2;
+          char *const gl =
+              reinterpret_cast<char *>(output_colwise + tensor_base + col * rows + tile_row);
+          store_column_segment(&shared_output_t[j2][j1][0], gl, tidx);
+        }
+      }
+      return;
+    }
 
 #pragma unroll
     for (size_t iter = 0; iter < num_iterations; ++iter) {
@@ -1193,35 +1318,14 @@ void group_quantize(const GroupedTensor *input, const Tensor *noop, GroupedTenso
                       launched_fast_path = true;
                     }
                   }
-                  if constexpr (SHAPE_REP == ShapeRepresentation::VARYING_FIRST_DIM) {
-                    if constexpr (colwise_output) {
-                      const size_t total_elements = first_logical_dim * last_logical_dim;
-                      constexpr size_t store_size_bytes = TRANSPOSE_STORE_SIZE_BYTES;
-                      constexpr size_t nvec_out = store_size_bytes / sizeof(OType);
-                      constexpr size_t tile_dim_m = THREADS_PER_WARP * nvec_out;
-                      const size_t rows_per_tensor_upper = DIVUP(first_logical_dim, num_tensors);
-                      size_t row_tiles_per_tensor = DIVUP(rows_per_tensor_upper, tile_dim_m);
-                      if (row_tiles_per_tensor == 0) {
-                        row_tiles_per_tensor = 1;
-                      }
-                      if (row_tiles_per_tensor > VARYING_FIRST_TRANSPOSE_MAX_ROW_TILES_PER_TENSOR) {
-                        row_tiles_per_tensor = VARYING_FIRST_TRANSPOSE_MAX_ROW_TILES_PER_TENSOR;
-                      }
-                      const size_t work_blocks_X = DIVUP(last_logical_dim, tile_dim_n);
-                      const dim3 varying_first_grid(work_blocks_X, row_tiles_per_tensor,
-                                                    num_tensors);
-                      group_cast_fp8_varying_first_tile_kernel<IS_ACT, ParamOP, OP, IType, OType,
-                                                               SCALING_TYPE>
-                          <<<varying_first_grid, block, 0, stream>>>(
-                              reinterpret_cast<const IType *>(input->data.dptr),
-                              use_rowwise_output ? reinterpret_cast<OType *>(output->data.dptr)
-                                                 : nullptr,
-                              reinterpret_cast<OType *>(output->columnwise_data.dptr), scale_ptr,
-                              noop_ptr, num_tensors, first_logical_dim, last_logical_dim,
-                              total_elements, offsets_ptr, first_dims_ptr);
-                      launched_fast_path = true;
-                    }
-                  }
+                  // Varying-first columnwise intentionally falls through to the
+                  // generic group_cast_fp8_kernel below. The dedicated
+                  // group_cast_fp8_varying_first_tile_kernel used a grid-stride
+                  // row loop that spilled to 118 registers/thread (2 blocks/SM,
+                  // ~24% occupancy, ~1.1 TB/s). The generic kernel processes one
+                  // tile per block and now carries a branchless interior-tile
+                  // fast path, so it is both lighter on registers and HBM-bound
+                  // on the interior of every group.
                   if (!launched_fast_path) {
                     const size_t work_blocks_X = DIVUP(last_logical_dim, tile_dim_n);
                     const dim3 grid(work_blocks_X, work_blocks_Y);
