@@ -1310,14 +1310,12 @@ TEST_P(CastNVFP4ColumnwiseOnly2DTestSuite, ColumnwiseOnlyMatchesBothDirections) 
 INSTANTIATE_TEST_SUITE_P(
     OperatorTest,
     CastNVFP4ColumnwiseOnly2DTestSuite,
-    // Square 128-multiple shapes: for columnwise-only tensors the test harness sizes the NVFP4
-    // columnwise scale from the transposed data, so non-square shapes mismatch CheckScaleTensorShape.
-    // Non-square/padded columnwise-only is covered by the Python exact test.
+    // Include rectangular 128-multiple shapes to guard transposed data/scale indexing.
     ::testing::Values(
         std::vector<size_t>{128, 128},
-        std::vector<size_t>{256, 256},
-        std::vector<size_t>{512, 512},
-        std::vector<size_t>{1024, 1024}),
+        std::vector<size_t>{256, 512},
+        std::vector<size_t>{384, 1024},
+        std::vector<size_t>{2048, 256}),
     [](const testing::TestParamInfo<CastNVFP4ColumnwiseOnly2DTestSuite::ParamType>& info) {
         std::string name;
         for (const auto& s : info.param) {
