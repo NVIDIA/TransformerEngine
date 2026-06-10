@@ -971,6 +971,7 @@ def make_weak_ref(x):
         "Valid types are: torch.Tensor, tuple, list, dict, int, float, bool, and None."
     )
 
+
 def canonicalize_shape(shape, cur_shape):
     if not isinstance(shape, Iterable):
         shape = [shape]

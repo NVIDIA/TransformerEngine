@@ -7,13 +7,6 @@
 #ifndef TRANSFORMER_ENGINE_PYTORCH_CSRC_TVM_FFI_BRIDGE_H_
 #define TRANSFORMER_ENGINE_PYTORCH_CSRC_TVM_FFI_BRIDGE_H_
 
-#include <cstdint>
-#include <memory>
-#include <optional>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include <ATen/ATen.h>
 #include <ATen/DLConvertor.h>
 #include <c10/core/ScalarType.h>
@@ -23,6 +16,13 @@
 #include <tvm/ffi/container/tensor.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/optional.h>
+
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "transformer_engine/transformer_engine.h"
 #include "util/logging.h"
@@ -39,17 +39,27 @@ namespace py = pybind11;
 // support) requires this manual mapping.
 inline DLDataType convert_to_dltype(NVTEDType type) {
   switch (type) {
-    case kNVTEFloat32:    return DLDataType{kDLFloat,  32, 1};
-    case kNVTEFloat16:    return DLDataType{kDLFloat,  16, 1};
-    case kNVTEBFloat16:   return DLDataType{kDLBfloat, 16, 1};
-    case kNVTEByte:       return DLDataType{kDLUInt,    8, 1};
-    case kNVTEInt32:      return DLDataType{kDLInt,    32, 1};
-    case kNVTEInt64:      return DLDataType{kDLInt,    64, 1};
+    case kNVTEFloat32:
+      return DLDataType{kDLFloat, 32, 1};
+    case kNVTEFloat16:
+      return DLDataType{kDLFloat, 16, 1};
+    case kNVTEBFloat16:
+      return DLDataType{kDLBfloat, 16, 1};
+    case kNVTEByte:
+      return DLDataType{kDLUInt, 8, 1};
+    case kNVTEInt32:
+      return DLDataType{kDLInt, 32, 1};
+    case kNVTEInt64:
+      return DLDataType{kDLInt, 64, 1};
     // FP8 / E8M0 → raw 1-byte uint; the kernel interprets the bits.
-    case kNVTEFloat8E4M3: return DLDataType{kDLUInt,    8, 1};
-    case kNVTEFloat8E5M2: return DLDataType{kDLUInt,    8, 1};
-    case kNVTEFloat8E8M0: return DLDataType{kDLUInt,    8, 1};
-    default: NVTE_ERROR("unsupported NVTEDType: ", static_cast<int>(type));
+    case kNVTEFloat8E4M3:
+      return DLDataType{kDLUInt, 8, 1};
+    case kNVTEFloat8E5M2:
+      return DLDataType{kDLUInt, 8, 1};
+    case kNVTEFloat8E8M0:
+      return DLDataType{kDLUInt, 8, 1};
+    default:
+      NVTE_ERROR("unsupported NVTEDType: ", static_cast<int>(type));
   }
 }
 
@@ -80,21 +90,21 @@ class DLTensorWrapper : public DLTensor {
   // contiguous strides (TE tensors are always contiguous).
   DLTensorWrapper(const NVTEBasicTensor &tensor, int32_t device_index) {
     const int n = static_cast<int>(tensor.shape.ndim);
-    shape_buf_   = std::make_unique<int64_t[]>(n);
+    shape_buf_ = std::make_unique<int64_t[]>(n);
     strides_buf_ = std::make_unique<int64_t[]>(n);
     int64_t stride = 1;
     for (int i = n - 1; i >= 0; --i) {
-      shape_buf_[i]   = static_cast<int64_t>(tensor.shape.data[i]);
+      shape_buf_[i] = static_cast<int64_t>(tensor.shape.data[i]);
       strides_buf_[i] = stride;
       stride *= shape_buf_[i];
     }
-    this->numel_      = stride;  // product of all dims
-    this->data        = tensor.data_ptr;
-    this->device      = DLDevice{kDLCUDA, device_index};
-    this->ndim        = n;
-    this->dtype       = convert_to_dltype(tensor.dtype);
-    this->shape       = shape_buf_.get();
-    this->strides     = strides_buf_.get();
+    this->numel_ = stride;  // product of all dims
+    this->data = tensor.data_ptr;
+    this->device = DLDevice{kDLCUDA, device_index};
+    this->ndim = n;
+    this->dtype = convert_to_dltype(tensor.dtype);
+    this->shape = shape_buf_.get();
+    this->strides = strides_buf_.get();
     this->byte_offset = 0;
   }
 
@@ -158,8 +168,7 @@ inline tvm::ffi::Optional<tvm::ffi::TensorView> to_ffi_arg(
 template <typename... Args>
 inline tvm::ffi::Any call_tvm_ffi(const std::string &fn_name, Args &&...args) {
   std::optional<tvm::ffi::Function> fn = tvm::ffi::Function::GetGlobal(fn_name);
-  NVTE_CHECK(fn.has_value(),
-             "No tvm-ffi kernel registered under '", fn_name,
+  NVTE_CHECK(fn.has_value(), "No tvm-ffi kernel registered under '", fn_name,
              "'. This name is the quantizer's cache key, which encodes the "
              "kernel's compile-time (constexpr) signature; a miss means the "
              "registered kernel's constexpr guarantee does not match what is "

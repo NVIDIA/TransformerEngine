@@ -2,8 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""TODO: write comments
-"""
+"""TODO: write comments"""
 
 from __future__ import annotations
 from typing import Optional, Dict, Any, Tuple, Union
@@ -13,15 +12,16 @@ import warnings
 import torch
 
 import transformer_engine_torch as tex  # pylint: disable=unused-import
-from transformer_engine_torch import (
-    DType as TE_DType
-)
+from transformer_engine_torch import DType as TE_DType
 
 from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 
-from ...constants import TE_DType as torch_to_transformer_engine_dtype  # pylint: disable=unused-import
+from ...constants import (
+    TE_DType as torch_to_transformer_engine_dtype,
+)  # pylint: disable=unused-import
 
 from ...utils import _empty_tensor, canonicalize_shape
+
 
 class _FromFlexFunc(torch.autograd.Function):
     """Cast from MXFP8 to other dtype"""
@@ -31,18 +31,17 @@ class _FromFlexFunc(torch.autograd.Function):
         _ctx: Optional[torch.autograd.function.FunctionCtx],  # unused
         tensor: FlexTensorStorage,
         dtype: torch.dtype,
-        quantizer: Quantizer
+        quantizer: Quantizer,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
         if tensor._rowwise_data is not None and tensor._rowwise_data.numel() == 0:
             return torch.empty(tensor.size(), dtype=dtype, device=tensor.device)
         if tensor._columnwise_data is not None and tensor._columnwise_data.numel() == 0:
             return torch.empty(tensor.size(), dtype=dtype, device=tensor.device)
-        
+
         if tensor._rowwise_data is not None or tensor._columnwise_data is not None:
             return tex.dequantize_with_quantizer(tensor, dtype, quantizer)
         raise ValueError("Cannot dequantize Flex tensor with no data")
-
 
     @staticmethod
     def backward(

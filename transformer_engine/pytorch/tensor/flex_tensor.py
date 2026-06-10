@@ -24,6 +24,7 @@ from ._quantization_helpers import _IdentityFunc
 
 aten = torch.ops.aten
 
+
 class FlexQuantizer(Quantizer):
     """Builder class for Flex tensors that are quantized in potentially both directions
 
@@ -184,11 +185,7 @@ class FlexQuantizer(Quantizer):
         return quantizer
 
     def update_quantized(
-        self,
-        src: torch.Tensor,
-        dst: QuantizedTensor,
-        *,
-        noop_flag = None
+        self, src: torch.Tensor, dst: QuantizedTensor, *, noop_flag=None
     ) -> QuantizedTensor:
         assert isinstance(dst, FlexTensor), f"Cannot store quantized MXFP8 in {type(dst)} type."
 
@@ -225,10 +222,7 @@ class FlexQuantizer(Quantizer):
         pass  # Calibration is no-op since this supports only blockwise quantization, which doesn't require calibration.
 
     def get_scale_shape(
-        self,
-        shape: Iterable[int],
-        columnwise: bool,
-        dtype: TE_DType
+        self, shape: Iterable[int], columnwise: bool, dtype: TE_DType
     ) -> Tuple[int, int]:
         """Calculate the shape of the scaling tensor for Flex quantization.
 
@@ -265,7 +259,9 @@ class FlexQuantizer(Quantizer):
         elif FlexTensor.is_mxfp8_dtype(dtype):
             if columnwise:
                 return (
-                    round_up_to_nearest_multiple(math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE, 4),
+                    round_up_to_nearest_multiple(
+                        math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE, 4
+                    ),
                     round_up_to_nearest_multiple(shape[-1], 128),
                 )
             return (
@@ -314,6 +310,7 @@ class FlexQuantizer(Quantizer):
         """Get a compatible recipe for this quantizer, if any."""
         # TODO: really?
         return None  # Flex quantizer does not have a specific compatible recipe since it's orthogonal to the choice of recipe.
+
 
 class FlexTensor(FlexTensorStorage, QuantizedTensor):
     """Tensor class for flex tensors with quantization in both directions.
@@ -422,7 +419,7 @@ class FlexTensor(FlexTensorStorage, QuantizedTensor):
             {
                 "rowwise_data": rowwise_data,
                 "columnwise_data": columnwise_data,
-            }
+            },
         )
 
     def view(self, *shape: Tuple[int]) -> FlexTensor:
@@ -456,9 +453,7 @@ class FlexTensor(FlexTensorStorage, QuantizedTensor):
         # pylint: disable=missing-function-docstring
         # TODO: handle aten ops (view/copy_/split/...) per direction,
         # following MXFP8Tensor.__torch_dispatch__.
-        raise NotImplementedError(
-            f"FlexTensor.__torch_dispatch__ does not support {func} yet"
-        )
+        raise NotImplementedError(f"FlexTensor.__torch_dispatch__ does not support {func} yet")
 
     # ------------------------------------------------------------------
     # FSDP2 is not supported yet. Define the hooks so any accidental
@@ -652,6 +647,7 @@ def _flex_rowwise_byte_shape(dtype: Optional[TE_DType], shape) -> tuple:
             )
         return shape[:-1] + (shape[-1] // 2,)
     return tuple(shape)
+
 
 def _flex_columnwise_byte_shape(dtype: Optional[TE_DType], shape) -> tuple:
     """Physical column-wise buffer shape for a logical ``shape``.

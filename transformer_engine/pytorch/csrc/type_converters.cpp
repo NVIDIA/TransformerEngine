@@ -202,7 +202,8 @@ TensorWrapper NVTETensorFromFlexTensor(py::handle tensor, Quantizer *quantizer) 
     const DType dtype_column = tensor.attr("_dtype_column").cast<DType>();
     const auto &columnwise_data = tensor.attr("_columnwise_data").cast<at::Tensor>();
     const auto &scale_inv = tensor.attr("_columnwise_scale_inv").cast<at::Tensor>();
-    ret.set_columnwise_data(columnwise_data.data_ptr(), dtype_column, getTensorShape(columnwise_data));
+    ret.set_columnwise_data(columnwise_data.data_ptr(), dtype_column,
+                            getTensorShape(columnwise_data));
     ret.set_columnwise_scale_inv(scale_inv.data_ptr(), DType::kFloat32, getTensorShape(scale_inv));
     if (is_fp4_dtype(dtype_column)) {
       const auto &amax_columnwise = tensor.attr("_amax_columnwise").cast<at::Tensor>();

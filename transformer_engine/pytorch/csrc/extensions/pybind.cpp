@@ -107,8 +107,8 @@ void init_nvfp4_extensions() {
 
 void init_flex_extensions() {
   auto flex_module = py::module_::import("transformer_engine.pytorch.tensor.flex_tensor");
-  FlexQuantizerClass = reinterpret_cast<PyTypeObject *>(
-      PyObject_GetAttrString(flex_module.ptr(), "FlexQuantizer"));
+  FlexQuantizerClass =
+      reinterpret_cast<PyTypeObject *>(PyObject_GetAttrString(flex_module.ptr(), "FlexQuantizer"));
   FlexTensorPythonClass =
       reinterpret_cast<PyTypeObject *>(PyObject_GetAttrString(flex_module.ptr(), "FlexTensor"));
   auto flex_base_module =

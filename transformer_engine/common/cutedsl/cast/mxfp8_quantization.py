@@ -42,36 +42,43 @@ from transformer_engine.common.cutedsl.cast.quantization_utils import (
 )
 
 # MXFP8 settings
-MXFP8_BLOCK_SIZE = 32 # Number of elements per MXFP8 scale block. They will share the same E8M0 scale factor
+MXFP8_BLOCK_SIZE = (
+    32  # Number of elements per MXFP8 scale block. They will share the same E8M0 scale factor
+)
 SCALE_DIM = MXFP8_BLOCK_SIZE
 
 # Double-buffering for async copy + compute overlap
 BUFFER_NUM = 2
 
 # Vectorised access constants for bank-conflict avoidance (rowwise pass)
-PACK_SIZE = 4                              # Elements per vector load
-WAVES = SCALE_DIM // PACK_SIZE             # Each thread reads 8 waves with each wave reads 4 packed bf16, so it reads a whole MXFP8 block in total
+PACK_SIZE = 4  # Elements per vector load
+WAVES = (
+    SCALE_DIM // PACK_SIZE
+)  # Each thread reads 8 waves with each wave reads 4 packed bf16, so it reads a whole MXFP8 block in total
 THREADS_PER_WARP = 32
 TOTAL_BANKS_WIDTH = (32 * 4) // 1  # 32 banks × 4 bytes, in bytes (uint8 stride)
 THREADS_PER_BANK = TOTAL_BANKS_WIDTH // SCALE_DIM  # 4 threads per bank
 
 # Tiling sizes
-NUM_STAGES = 2 # Pipeline depth of the producer/consumer ring buffer for the TMA-G2S input loads (PipelineTmaAsync stage count)
-NUM_TILES = 2 # Each CTA process 2 tiles along the Y (row, slowest-changing) dimension
-TILE_Y = 32 # Each tile has 32 rows, so each CTA handles 32 * 2 rows in total
-TILE_X = 64 # Each tile has 64 columns
+NUM_STAGES = 2  # Pipeline depth of the producer/consumer ring buffer for the TMA-G2S input loads (PipelineTmaAsync stage count)
+NUM_TILES = 2  # Each CTA process 2 tiles along the Y (row, slowest-changing) dimension
+TILE_Y = 32  # Each tile has 32 rows, so each CTA handles 32 * 2 rows in total
+TILE_X = 64  # Each tile has 64 columns
 
 # CTA size
 THREADS_PER_CHUNK = 64
 NUM_WARPS = THREADS_PER_CHUNK // 32
 
+
 class MXFP8QuantizeConfig:
 
-    def __init__(self, 
-                 dtype: torch.dtype,
-                 dtype_row: Union[Literal["e4m3", "e5m2", "none"]], 
-                 dtype_column: Union[Literal["e4m3", "e5m2", "none"]],
-                 with_gemm_swizzled_scales=False):
+    def __init__(
+        self,
+        dtype: torch.dtype,
+        dtype_row: Union[Literal["e4m3", "e5m2", "none"]],
+        dtype_column: Union[Literal["e4m3", "e5m2", "none"]],
+        with_gemm_swizzled_scales=False,
+    ):
         self.DTYPE = dtype
         self.DTYPE_ROW = dtype_row
         self.ROWWISE = dtype_row != "none"
@@ -83,6 +90,7 @@ class MXFP8QuantizeConfig:
         # dead-stripped). NVFP4 (which needs amax) will flip these later.
         self.WITH_AMAX = False
         self.ACTIVATION = None
+
 
 class MXFP8QuantizeKernel:
     """MXFP8 quantization with shared-memory tiling (rowwise, colwise, or both).
@@ -109,9 +117,11 @@ class MXFP8QuantizeKernel:
     def __call__(
         self,
         mX: cute.Tensor,  # Input tensor to quantize
-        mO_row: Optional[cute.Tensor], mS_row: Optional[cute.Tensor],  # Rowwise data + scale
+        mO_row: Optional[cute.Tensor],
+        mS_row: Optional[cute.Tensor],  # Rowwise data + scale
         mA_row: Optional[cute.Tensor],  # Rowwise amax (None for MXFP8)
-        mO_col: Optional[cute.Tensor], mS_col: Optional[cute.Tensor],  # Colwise data + scale
+        mO_col: Optional[cute.Tensor],
+        mS_col: Optional[cute.Tensor],  # Colwise data + scale
         mA_col: Optional[cute.Tensor],  # Colwise amax (None for MXFP8)
         rng_state: Optional[cute.Tensor],  # SR seed/offset (None when SR disabled)
         stream: cuda.CUstream,  # launch stream (C++ passes the handle as an int64 scalar)
@@ -121,7 +131,7 @@ class MXFP8QuantizeKernel:
         cfg = self.cfg
         num_scale_cols = N // SCALE_DIM
         num_scale_rows = M // SCALE_DIM
-        
+
         # Rewrap mS_row / mS_col with the GEMM-swizzled layout when requested.
         # Wrapper passes in a tensor with the compact (M, N/32):(N/32, 1) layout
         # (built from a compact fake-ptr at compile time), and we re-view the
@@ -131,12 +141,12 @@ class MXFP8QuantizeKernel:
         # and swizzle_demo.svg for a visual of the byte permutation.
         if cutlass.const_expr(cfg.WITH_GEMM_SWIZZLED_SCALES):
             num_tiles_M = (M + 127) // 128
-            num_tiles_SC = (num_scale_cols + 3) // 4   # = ceil(N / 128)
-            num_tiles_SR = (num_scale_rows + 3) // 4   # = ceil(M / 128)
+            num_tiles_SC = (num_scale_cols + 3) // 4  # = ceil(N / 128)
+            num_tiles_SR = (num_scale_rows + 3) // 4  # = ceil(M / 128)
             num_tiles_N = (N + 127) // 128
             # row i = i_lo + 32 * (i_hi + 4 * tile_Y);  col j = j_lo + 4 * tile_X.
             # Within one 128×4 tile: byte = i_lo*16 + i_hi*4 + j_lo.
-        
+
             # Tile-major outer dims add (tile_Y * num_tiles_SC + tile_X) * 512.
             # For example, if M=256, N=512, then num_scale_cols = 16, num_scale_rows = 8, and num_tiles_M=2, num_tiles_SC=4, num_tiles_SR=2, num_tiles_N=4
             # The swizzled layout is ((32, 4, 2), (4, 4)):((16, 4, 2048), (1, 512))
@@ -158,7 +168,7 @@ class MXFP8QuantizeKernel:
                         stride=((1, 512), (16, 4, num_tiles_SR * 512)),
                     ),
                 )
-        
+
         # Divide by the STAGE tile (TILE_Y, TILE_X // SCALE_DIM), not the CTA
         # tile. Each CTA owns NUM_TILES consecutive row-tiles; the kernel walks
         # them by indexing GRID's row dim with `bidy * NUM_TILES + stage` (cute
@@ -170,20 +180,24 @@ class MXFP8QuantizeKernel:
         #                                    → SCALE_TILE = (32, 2):(16, 1)
         # The bigger (TILE_Y * NUM_TILES, ...) divide we used before tangles the
         # swizzle's (32, 4) row hierarchy under flatten + sub-divide chain.
-        
+
         # Declare TMA descriptors on the host side.
         # make_tiled_tma_atom returns the UNTILED gmem tensor with basis strides.
         # Tile it inside the kernel with zipped_divide so each coord selects
         # one (TILE_Y, TILE_X) tile.
         smem_tile_layout = cute.make_ordered_layout((TILE_Y, TILE_X), order=(1, 0))
         cta_tiler = (TILE_Y, TILE_X)
-        
+
         # Input: TMA G2S (bf16/fp16 → smem).
         op_load = cute.nvgpu.cpasync.CopyBulkTensorTileG2SOp()
         tma_atom, tma_src = cute.nvgpu.cpasync.make_tiled_tma_atom(
-            op_load, mX, smem_tile_layout, cta_tiler, num_multicast=1,
+            op_load,
+            mX,
+            smem_tile_layout,
+            cta_tiler,
+            num_multicast=1,
         )
-        
+
         # Output: TMA S2G (uint8 smem → gmem) for both directions. Creating
         # both atoms unconditionally — if a direction is disabled the kernel
         # simply won't dispatch its copy, and the atom cost is negligible.
@@ -195,27 +209,43 @@ class MXFP8QuantizeKernel:
         tma_dst_out_col = None
         if cutlass.const_expr(cfg.ROWWISE):
             tma_atom_out_row, tma_dst_out_row = cute.nvgpu.cpasync.make_tiled_tma_atom(
-                op_store, mO_row, out_smem_layout, cta_tiler, num_multicast=1,
+                op_store,
+                mO_row,
+                out_smem_layout,
+                cta_tiler,
+                num_multicast=1,
             )
         if cutlass.const_expr(cfg.COLUMNWISE):
             tma_atom_out_col, tma_dst_out_col = cute.nvgpu.cpasync.make_tiled_tma_atom(
-                op_store, mO_col, out_smem_layout, cta_tiler, num_multicast=1,
+                op_store,
+                mO_col,
+                out_smem_layout,
+                cta_tiler,
+                num_multicast=1,
             )
-        
-        # CUDA launches in (0,0), (1,0), (2,0)... order, so we should make N the leading dimension for better access pattern 
+
+        # CUDA launches in (0,0), (1,0), (2,0)... order, so we should make N the leading dimension for better access pattern
         # So consecutive blocks will move along the N dimension first, which is the innermost dimension in memory and we can use cache better
         grid = [
             cute.ceil_div(Int32(N), TILE_X),
             cute.ceil_div(M, TILE_Y * NUM_TILES),
         ]
-        block = [THREADS_PER_CHUNK,]
-        
+        block = [
+            THREADS_PER_CHUNK,
+        ]
+
         self.kernel(
-            mX, mS_row, mS_col, None,  # mAmax = None (no amax for the MXFP8 path)
+            mX,
+            mS_row,
+            mS_col,
+            None,  # mAmax = None (no amax for the MXFP8 path)
             mX.element_type,
-            tma_atom, tma_src,
-            tma_atom_out_row, tma_dst_out_row,
-            tma_atom_out_col, tma_dst_out_col,
+            tma_atom,
+            tma_src,
+            tma_atom_out_row,
+            tma_dst_out_row,
+            tma_atom_out_col,
+            tma_dst_out_col,
         ).launch(
             grid=grid,
             block=block,
@@ -230,9 +260,12 @@ class MXFP8QuantizeKernel:
         mS_col,
         mAmax,
         dtype: cutlass.Constexpr[Type[cutlass.Numeric]],
-        tma_atom, tma_src, # how to use TMA to copy the input
-        tma_atom_out_row, tma_dst_out_row, # how to use TMA to copy the rowwise output
-        tma_atom_out_col, tma_dst_out_col, # how to use TMA to copy the colwise output
+        tma_atom,
+        tma_src,  # how to use TMA to copy the input
+        tma_atom_out_row,
+        tma_dst_out_row,  # how to use TMA to copy the rowwise output
+        tma_atom_out_col,
+        tma_dst_out_col,  # how to use TMA to copy the colwise output
     ):
         cfg = self.cfg
 
@@ -254,6 +287,7 @@ class MXFP8QuantizeKernel:
         # negligible (8 bytes for NUM_WARPS=2) and we always allocate so the
         # struct doesn't fork on a 4th const-expr (cfg.WITH_AMAX) dimension.
         if cutlass.const_expr(cfg.ROWWISE and cfg.COLUMNWISE):
+
             @cute.struct
             class SharedStorage:
                 mbar_storage: cute.struct.MemRange[cute.Int64, 2 * NUM_STAGES]
@@ -267,7 +301,9 @@ class MXFP8QuantizeKernel:
                     cute.struct.MemRange[Uint8, TILE_Y * TILE_X * NUM_STAGES], 128
                 ]
                 sAmax: cute.struct.MemRange[Float32, NUM_WARPS]
+
         elif cutlass.const_expr(cfg.ROWWISE and not cfg.COLUMNWISE):
+
             @cute.struct
             class SharedStorage:
                 mbar_storage: cute.struct.MemRange[cute.Int64, 2 * NUM_STAGES]
@@ -278,7 +314,9 @@ class MXFP8QuantizeKernel:
                     cute.struct.MemRange[Uint8, TILE_Y * TILE_X * NUM_STAGES], 128
                 ]
                 sAmax: cute.struct.MemRange[Float32, NUM_WARPS]
+
         elif cutlass.const_expr(cfg.ROWWISE):
+
             @cute.struct
             class SharedStorage:
                 mbar_storage: cute.struct.MemRange[cute.Int64, 2 * NUM_STAGES]
@@ -289,7 +327,9 @@ class MXFP8QuantizeKernel:
                     cute.struct.MemRange[Uint8, TILE_Y * TILE_X * NUM_STAGES], 128
                 ]
                 sAmax: cute.struct.MemRange[Float32, NUM_WARPS]
+
         else:
+
             @cute.struct
             class SharedStorage:
                 mbar_storage: cute.struct.MemRange[cute.Int64, 2 * NUM_STAGES]
@@ -300,6 +340,7 @@ class MXFP8QuantizeKernel:
                     cute.struct.MemRange[Uint8, TILE_Y * TILE_X * NUM_STAGES], 128
                 ]
                 sAmax: cute.struct.MemRange[Float32, NUM_WARPS]
+
         smem = cutlass.utils.SmemAllocator()
         storage = smem.allocate(SharedStorage)
 
@@ -355,15 +396,11 @@ class MXFP8QuantizeKernel:
             producer_group=producer_group,
             consumer_group=consumer_group,
             tx_count=tx_count,
-            cta_layout_vmnk=None,   # single-CTA, no cluster/multicast
+            cta_layout_vmnk=None,  # single-CTA, no cluster/multicast
         )
 
-        prod_state = pipeline.make_pipeline_state(
-            pipeline.PipelineUserType.Producer, NUM_STAGES
-        )
-        cons_state = pipeline.make_pipeline_state(
-            pipeline.PipelineUserType.Consumer, NUM_STAGES
-        )
+        prod_state = pipeline.make_pipeline_state(pipeline.PipelineUserType.Producer, NUM_STAGES)
+        cons_state = pipeline.make_pipeline_state(pipeline.PipelineUserType.Consumer, NUM_STAGES)
 
         M = mX.shape[0]
         N = mX.shape[1]
@@ -379,8 +416,8 @@ class MXFP8QuantizeKernel:
         # Partition sX/gX for the TMA atom (single-CTA, no cluster/multicast).
         tXsX, tXgX = cute.nvgpu.cpasync.tma_partition(
             tma_atom,
-            0, # Use the only CTA to do the TMA copy
-            cute.make_layout(1), # This cluster only has 1 CTAs
+            0,  # Use the only CTA to do the TMA copy
+            cute.make_layout(1),  # This cluster only has 1 CTAs
             sX,
             gX_tiled,
         )
@@ -437,7 +474,7 @@ class MXFP8QuantizeKernel:
         # ---- Consumer: all threads quantize each completed tile. ----
         for stage in cutlass.range(num_tiles, unroll=1):
             mainloop_pipeline.consumer_wait(cons_state)
-            sX_tile = sX[(None, stage)]          # (TILE_Y, TILE_X) bf16
+            sX_tile = sX[(None, stage)]  # (TILE_Y, TILE_X) bf16
 
             """
             grid = [
@@ -448,7 +485,7 @@ class MXFP8QuantizeKernel:
             """
             # This is just block's x axis idx
             tile_idx_x = bidx
-            # Each CTA has `NUM_TILES` tiles. Each stage we need to obtain the tile for that specific stage. 
+            # Each CTA has `NUM_TILES` tiles. Each stage we need to obtain the tile for that specific stage.
             # So the tile index along Y dimension is `bidy * NUM_TILES + stage`
             tile_idx_y = bidy * NUM_TILES + stage
 
@@ -459,9 +496,13 @@ class MXFP8QuantizeKernel:
                 mS_col_stage = cute.flatten(mS_col[(None, (tile_idx_y, tile_idx_x))])
 
                 amax_c = self._process_colwise(
-                    sX_tile, sO_col_tile,
+                    sX_tile,
+                    sO_col_tile,
                     mS_col_stage,
-                    tile_idx_y * TILE_Y, bidx * TILE_X, M, N,
+                    tile_idx_y * TILE_Y,
+                    bidx * TILE_X,
+                    M,
+                    N,
                 )
 
             if cutlass.const_expr(cfg.ROWWISE):
@@ -479,9 +520,13 @@ class MXFP8QuantizeKernel:
                 # print(f"mS_row_stage: {mS_row_stage}\n")
                 # print(f"mS_row_stage: {mS_row_stage}\n")
                 amax_r = self._process_rowwise(
-                    sX_tile, sO_row_tile,
+                    sX_tile,
+                    sO_row_tile,
                     mS_row_stage,
-                    tile_idx_y * TILE_Y, bidx * TILE_X, M, N,
+                    tile_idx_y * TILE_Y,
+                    bidx * TILE_X,
+                    M,
+                    N,
                 )
 
             # Make all smem stores (sO_row and/or sO_col) visible to the TMA
@@ -517,7 +562,7 @@ class MXFP8QuantizeKernel:
         # before the kernel returns.
         cute.arch.cp_async_bulk_wait_group(0, read=False)
 
-                # ---- amax block reduction + cross-CTA atomic ----------------------
+        # ---- amax block reduction + cross-CTA atomic ----------------------
         # 1) intra-warp: redux.sync.fmax.f32 (sm_80+, single instruction).
         # 2) cross-warp: NUM_WARPS shmem floats + sync_threads.
         # 3) cross-CTA: int-atomic-max on the f32 bit pattern. Since amax is
@@ -541,19 +586,20 @@ class MXFP8QuantizeKernel:
                     cute.make_layout(1),
                 )
                 cute.arch.atomic_max(
-                    amax_i32.iterator, _bitcast_f32_to_i32(cta_amax),
+                    amax_i32.iterator,
+                    _bitcast_f32_to_i32(cta_amax),
                 )
-
 
     @cute.jit
     def _process_rowwise(
         self,
-        sX_tile,        # (TILE_Y, TILE_X) bf16/fp16 smem view, post-TMA
-        sO_row_tile,    # (TILE_Y, TILE_X) uint8 smem view (rowwise FP8 output)
-        mS_row_stage,   # rowwise scale tensor (1D swizzled, or 2D linear)
-        tile_row_start, # Int32 — global row of this stage's row 0
-        tile_col_start, # Int32 — global col of this CTA's col 0
-        M, N,           # Int32 — full input extents, for OOB masking
+        sX_tile,  # (TILE_Y, TILE_X) bf16/fp16 smem view, post-TMA
+        sO_row_tile,  # (TILE_Y, TILE_X) uint8 smem view (rowwise FP8 output)
+        mS_row_stage,  # rowwise scale tensor (1D swizzled, or 2D linear)
+        tile_row_start,  # Int32 — global row of this stage's row 0
+        tile_col_start,  # Int32 — global col of this CTA's col 0
+        M,
+        N,  # Int32 — full input extents, for OOB masking
     ):
         """Rowwise MXFP8 pass: thread `(tid_Y, tid_X) = (tidx % 32, tidx // 32)`
         owns one 32-element scale block (row `tid_Y`, columns `tid_X*32 .. +32`).
@@ -587,18 +633,19 @@ class MXFP8QuantizeKernel:
             WAVES=WAVES,
             THREADS_PER_WARP=THREADS_PER_WARP,
             THREADS_PER_BANK=THREADS_PER_BANK,
-            PACK_SIZE=PACK_SIZE
+            PACK_SIZE=PACK_SIZE,
         )
 
     @cute.jit
     def _process_colwise(
         self,
-        sX_tile,        # (TILE_Y, TILE_X) bf16/fp16 smem view, post-TMA
-        sO_col_tile,    # (TILE_Y, TILE_X) uint8 smem view (colwise FP8 output)
-        mS_col_stage,   # colwise scale tensor (1D swizzled, or 2D linear)
-        tile_row_start, # Int32 — global row of this stage's row 0
-        tile_col_start, # Int32 — global col of this CTA's col 0
-        M, N,           # Int32 — full input extents, for OOB masking
+        sX_tile,  # (TILE_Y, TILE_X) bf16/fp16 smem view, post-TMA
+        sO_col_tile,  # (TILE_Y, TILE_X) uint8 smem view (colwise FP8 output)
+        mS_col_stage,  # colwise scale tensor (1D swizzled, or 2D linear)
+        tile_row_start,  # Int32 — global row of this stage's row 0
+        tile_col_start,  # Int32 — global col of this CTA's col 0
+        M,
+        N,  # Int32 — full input extents, for OOB masking
     ):
         """Colwise MXFP8 pass: thread `tidx` owns column `tidx` of the (32, 64)
         smem tile — 32 elements down. Writes quantized bytes into `sO_col_tile`
@@ -616,7 +663,8 @@ class MXFP8QuantizeKernel:
             max_norm_rcp,
             tile_row_start,
             tile_col_start,
-            M, N,
+            M,
+            N,
             ACTIVATION=None,
             DTYPE=cfg.DTYPE,
             FP8_DTYPE=cfg.DTYPE_COLUMN,
@@ -626,17 +674,27 @@ class MXFP8QuantizeKernel:
             SCALE_DIM=SCALE_DIM,
         )
 
+
 def _cfg_to_fn_name(cfg, M, N) -> str:
     """Deterministic registry key from (cfg, shape)."""
-    key = (cfg.DTYPE.__name__, cfg.DTYPE_ROW, cfg.DTYPE_COLUMN,
-           int(cfg.ROWWISE), int(cfg.COLUMNWISE),
-           int(cfg.WITH_GEMM_SWIZZLED_SCALES), int(cfg.WITH_AMAX),
-           cfg.ACTIVATION or "none",
-           M, N)
+    key = (
+        cfg.DTYPE.__name__,
+        cfg.DTYPE_ROW,
+        cfg.DTYPE_COLUMN,
+        int(cfg.ROWWISE),
+        int(cfg.COLUMNWISE),
+        int(cfg.WITH_GEMM_SWIZZLED_SCALES),
+        int(cfg.WITH_AMAX),
+        cfg.ACTIVATION or "none",
+        M,
+        N,
+    )
     h = hashlib.sha1(repr(key).encode()).hexdigest()[:16]
     return f"mxfp8_{h}"
 
+
 _compile_cache_tvm_ffi: dict = {}
+
 
 def _get_compiled_kernel(cfg, M, N):
     """Compile the kernel for THIS (cfg, M, N) with LITERAL shapes — every
@@ -658,24 +716,22 @@ def _get_compiled_kernel(cfg, M, N):
     #   rowwise:    (roundup(M, 128),    roundup(N // 32, 4))
     #   columnwise: (roundup(M // 32, 4), roundup(N, 128))
     SCALE_R = (((M + 127) // 128) * 128, ((N + 127) // 128) * 4)
-    SCALE_C = (((M + 127) // 128) * 4,   ((N + 127) // 128) * 128)
+    SCALE_C = (((M + 127) // 128) * 4, ((N + 127) // 128) * 128)
     WS_M = (M + TILE_Y * NUM_TILES - 1) // (TILE_Y * NUM_TILES)
 
     # stride_order=(1, 0): row-major, dim 1 stride 1. 1D: (0,).
-    kw_rm16_2d = dict(stride_order=(1, 0),
-                      memspace=cute.AddressSpace.gmem, assumed_align=16)
-    kw_rm4_2d  = dict(stride_order=(1, 0),
-                      memspace=cute.AddressSpace.gmem, assumed_align=4)
-    kw_rm4_1d  = dict(stride_order=(0,),
-                      memspace=cute.AddressSpace.gmem, assumed_align=4)
+    kw_rm16_2d = dict(stride_order=(1, 0), memspace=cute.AddressSpace.gmem, assumed_align=16)
+    kw_rm4_2d = dict(stride_order=(1, 0), memspace=cute.AddressSpace.gmem, assumed_align=4)
+    kw_rm4_1d = dict(stride_order=(0,), memspace=cute.AddressSpace.gmem, assumed_align=4)
+
     def fake(dtype, shape, kw):
         return cute.runtime.make_fake_compact_tensor(dtype, shape, **kw)
 
-    in_fake        = fake(cfg.DTYPE,  (M, N),    kw_rm16_2d)
-    out_row_fake   = fake(cute.Uint8, (M, N),    kw_rm16_2d) if cfg.ROWWISE    else None
-    scale_row_fake = fake(cute.Uint8, SCALE_R,   kw_rm16_2d) if cfg.ROWWISE    else None
-    out_col_fake   = fake(cute.Uint8, (M, N),    kw_rm16_2d) if cfg.COLUMNWISE else None
-    scale_col_fake = fake(cute.Uint8, SCALE_C,   kw_rm16_2d) if cfg.COLUMNWISE else None
+    in_fake = fake(cfg.DTYPE, (M, N), kw_rm16_2d)
+    out_row_fake = fake(cute.Uint8, (M, N), kw_rm16_2d) if cfg.ROWWISE else None
+    scale_row_fake = fake(cute.Uint8, SCALE_R, kw_rm16_2d) if cfg.ROWWISE else None
+    out_col_fake = fake(cute.Uint8, (M, N), kw_rm16_2d) if cfg.COLUMNWISE else None
+    scale_col_fake = fake(cute.Uint8, SCALE_C, kw_rm16_2d) if cfg.COLUMNWISE else None
     # No amax / no SR for the MXFP8 path: these slots are None. The kernel's
     # __call__ takes them as Optional and dead-strips the amax/SR branches.
     amax_row_fake = None
@@ -687,11 +743,15 @@ def _get_compiled_kernel(cfg, M, N):
 
     compiled = cute.compile(
         kernel_obj,
-        in_fake,                                 # mX
-        out_row_fake, scale_row_fake, amax_row_fake,  # mO_row, mS_row, mA_row
-        out_col_fake, scale_col_fake, amax_col_fake,  # mO_col, mS_col, mA_col
-        rng_state_fake,                          # rng_state
-        stream_fake,                             # stream
+        in_fake,  # mX
+        out_row_fake,
+        scale_row_fake,
+        amax_row_fake,  # mO_row, mS_row, mA_row
+        out_col_fake,
+        scale_col_fake,
+        amax_col_fake,  # mO_col, mS_col, mA_col
+        rng_state_fake,  # rng_state
+        stream_fake,  # stream
         options="--enable-tvm-ffi",
     )
     cache[fn_name] = compiled
@@ -738,7 +798,7 @@ def get_mxfp8_quantizer(
         # Dequant isn't implemented for this storage-only milestone, but
         # FlexQuantizer::quantize (C++) rejects an empty dequantize_func, so
         # carry a placeholder name. It is never resolved/called by quantize().
-        dequantize_func=f"{fn_name}_dequant", # TODO: this is fake, implement dequant and remove the placeholder
+        dequantize_func=f"{fn_name}_dequant",  # TODO: this is fake, implement dequant and remove the placeholder
         stochastic_rounding=False,
     )
     # Storage-only milestone: no full PyTorch-tensor compatibility / GEMM yet.

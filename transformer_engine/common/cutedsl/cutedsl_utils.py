@@ -23,10 +23,12 @@ _str_to_te_dtype = {
     "none": None,
 }
 
+
 def torch_to_cutlass_dtype(torch_dtype):
     if torch_dtype not in _torch_to_cutlass_dtype:
         raise ValueError(f"Unsupported torch dtype: {torch_dtype}")
     return _torch_to_cutlass_dtype[torch_dtype]
+
 
 def str_to_te_dtype(str_dtype):
     if str_dtype not in _str_to_te_dtype:

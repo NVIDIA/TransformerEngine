@@ -18,18 +18,22 @@ MXFP8_BLOCK = 32  # MXFP8 scale block size; valid shapes must be multiples of th
 # 2 aligned (no scale padding) + 2 padded (partial tiles);
 SHAPES = [(256, 256), (128, 512), (96, 224), (160, 96)]
 
+
 def get_dtype_combinations():
     dtype_row = ("e4m3", "e5m2", "none")
     dtype_column = ("e4m3", "e5m2", "none")
     return [(r, c) for r in dtype_row for c in dtype_column]
 
+
 DTYPE_PAIRS = get_dtype_combinations()
+
 
 def reference_quantize(x, fp8_type, rowwise, columnwise, swizzle):
     q = MXFP8Quantizer(fp8_dtype=str_to_te_dtype(fp8_type), rowwise=rowwise, columnwise=columnwise)
     q.optimize_for_gemm = swizzle  # makes the native kernel emit swizzled scales
     ref = tex.quantize(x.clone(), q)
     return ref
+
 
 @pytest.mark.parametrize("swizzle", [False, True])
 @pytest.mark.parametrize("dtype_pair", DTYPE_PAIRS)
@@ -57,15 +61,22 @@ def test_flex_mxfp8_bitexact(shape, dtype_pair, swizzle):
         # Reference for this direction uses THIS direction's dtype.
         ref = reference_quantize(x, dtype_row, rowwise=True, columnwise=False, swizzle=swizzle)
         assert ref._rowwise_data.shape == flex._rowwise_data.shape, "rowwise data shape mismatch"
-        assert ref._rowwise_scale_inv.shape == flex._rowwise_scale_inv.shape, "rowwise scale shape mismatch"
-        torch.testing.assert_close(flex._rowwise_data, ref._rowwise_data, rtol=0, atol=0)  # bit-identical
+        assert (
+            ref._rowwise_scale_inv.shape == flex._rowwise_scale_inv.shape
+        ), "rowwise scale shape mismatch"
+        torch.testing.assert_close(
+            flex._rowwise_data, ref._rowwise_data, rtol=0, atol=0
+        )  # bit-identical
         if swizzle:
-            torch.testing.assert_close(flex._rowwise_scale_inv, ref._rowwise_scale_inv, rtol=0, atol=0)
+            torch.testing.assert_close(
+                flex._rowwise_scale_inv, ref._rowwise_scale_inv, rtol=0, atol=0
+            )
         else:
             torch.testing.assert_close(
                 flex._rowwise_scale_inv[:scale_M, :scale_N],
-                ref._rowwise_scale_inv[:scale_M, :scale_N], 
-                rtol=0, atol=0
+                ref._rowwise_scale_inv[:scale_M, :scale_N],
+                rtol=0,
+                atol=0,
             )
     else:
         assert flex._rowwise_data is None, "row=none must not produce rowwise data"
@@ -73,19 +84,29 @@ def test_flex_mxfp8_bitexact(shape, dtype_pair, swizzle):
     if dtype_column != "none":
         scale_M, scale_N = M // MXFP8_BLOCK, N
         ref = reference_quantize(x, dtype_column, rowwise=False, columnwise=True, swizzle=swizzle)
-        assert ref._columnwise_data.shape == flex._columnwise_data.shape, "columnwise data shape mismatch"
-        assert ref._columnwise_scale_inv.shape == flex._columnwise_scale_inv.shape, "columnwise scale shape mismatch"
-        torch.testing.assert_close(flex._columnwise_data, ref._columnwise_data, rtol=0, atol=0)  # bit-identical
+        assert (
+            ref._columnwise_data.shape == flex._columnwise_data.shape
+        ), "columnwise data shape mismatch"
+        assert (
+            ref._columnwise_scale_inv.shape == flex._columnwise_scale_inv.shape
+        ), "columnwise scale shape mismatch"
+        torch.testing.assert_close(
+            flex._columnwise_data, ref._columnwise_data, rtol=0, atol=0
+        )  # bit-identical
         if swizzle:
-            torch.testing.assert_close(flex._columnwise_scale_inv, ref._columnwise_scale_inv, rtol=0, atol=0)
+            torch.testing.assert_close(
+                flex._columnwise_scale_inv, ref._columnwise_scale_inv, rtol=0, atol=0
+            )
         else:
             torch.testing.assert_close(
                 flex._columnwise_scale_inv[:scale_M, :scale_N],
-                ref._columnwise_scale_inv[:scale_M, :scale_N], 
-                rtol=0, atol=0
+                ref._columnwise_scale_inv[:scale_M, :scale_N],
+                rtol=0,
+                atol=0,
             )
     else:
         assert flex._columnwise_data is None, "col=none must not produce colwise data"
+
 
 def test_flex_mxfp8_wrong_shape():
     """A quantizer is compiled for a specific (M, N); using it on a different N
