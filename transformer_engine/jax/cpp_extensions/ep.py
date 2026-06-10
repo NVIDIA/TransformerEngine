@@ -514,7 +514,7 @@ class EpCombinePrimitive(BasePrimitive):
         out_leading_shape,
         out_partition_spec,
     ):
-        del out_partition_spec
+        del out_leading_shape, out_partition_spec
         return ffi.ffi_lowering(EpCombinePrimitive.name)(
             ctx,
             handle_mem,
@@ -650,7 +650,7 @@ class EpDispatchBwdPrimitive(BasePrimitive):
         out_leading_shape,
         out_partition_spec,
     ):
-        del out_partition_spec
+        del out_leading_shape, out_partition_spec
         return ffi.ffi_lowering(EpDispatchBwdPrimitive.name)(
             ctx,
             handle_mem,

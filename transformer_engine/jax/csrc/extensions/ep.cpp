@@ -446,8 +446,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpDispatchBwdHandler, EpDispatchBwdFFI,
 // ── ep_combine_bwd ────────────────────────────────────────────────────────────
 
 Error_Type EpCombineBwdFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_Type handle_mem,
-                           Buffer_Type grad, Result_Type grad_expert_out,
-                           EpConfig config) {
+                           Buffer_Type grad, Result_Type grad_expert_out, EpConfig config) {
   (void)ep_state;
   auto grad_dims = grad.dimensions();
   NVTE_CHECK(grad_dims.size() >= 2,
