@@ -453,8 +453,7 @@ set(NCCL_EP_INCLUDE_DIR "${NCCL_EP_SUBMODULE_ROOT}/build/include")
 if(NOT EXISTS "${NCCL_EP_INCLUDE_DIR}/nccl_ep.h")
   message(FATAL_ERROR
     "NCCL EP header not found at ${NCCL_EP_INCLUDE_DIR}/nccl_ep.h. "
-    "setup.py builds 3rdparty/nccl/contrib/nccl_ep/ via make, which stages "
-    "nccl_ep.h + nccl_ep/ into build/include/.")
+    "Run `git submodule update --init --recursive` and rebuild TE.")
 endif()
 message(STATUS "NCCL EP headers: ${NCCL_EP_INCLUDE_DIR}")
 
