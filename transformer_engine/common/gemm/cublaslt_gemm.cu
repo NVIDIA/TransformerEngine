@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <mutex>
 #include <vector>
 
@@ -798,6 +799,227 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescDestroy(operationDesc));
 }
 
+void cublas_gemm_strided_batched(const Tensor *inputA, const Tensor *inputB, const Tensor *inputC,
+                                 Tensor *outputD, cublasOperation_t transa,
+                                 cublasOperation_t transb, void *workspace, size_t workspaceSize,
+                                 const void *alpha, const void *beta, bool use_split_accumulator,
+                                 int math_sm_count, int64_t lda, int64_t stridea, int64_t ldb,
+                                 int64_t strideb, int64_t ldc, int64_t stridec, int64_t ldd,
+                                 int64_t strided, int64_t batch_count, int64_t m, int64_t n,
+                                 int64_t k, cudaStream_t stream) {
+  NVTE_CHECK(inputA != nullptr && inputB != nullptr && inputC != nullptr && outputD != nullptr,
+             "Strided batched GEMM requires A, B, C, and D tensors.");
+  NVTE_CHECK(batch_count >= 0, "Strided batched GEMM got negative batch_count=", batch_count);
+  NVTE_CHECK(m >= 0 && n >= 0 && k >= 0, "Strided batched GEMM got invalid dims m=", m, ", n=", n,
+             ", k=", k);
+  if (batch_count == 0 || m == 0 || n == 0) {
+    return;
+  }
+  NVTE_CHECK(k > 0);
+
+  auto checked_int = [](int64_t value, const char *name) {
+    NVTE_CHECK(value <= static_cast<int64_t>(std::numeric_limits<int>::max()), name,
+               " is too large for cuBLASLt: ", value);
+    NVTE_CHECK(value >= 0, name, " must be non-negative, got ", value);
+    return static_cast<int>(value);
+  };
+  auto checked_positive_int = [&checked_int](int64_t value, const char *name) {
+    NVTE_CHECK(value > 0, name, " must be positive, got ", value);
+    return checked_int(value, name);
+  };
+  const int m_int = checked_positive_int(m, "m");
+  const int n_int = checked_positive_int(n, "n");
+  const int k_int = checked_positive_int(k, "k");
+  const int batch_count_int = checked_int(batch_count, "batch_count");
+  const int lda_int = checked_positive_int(lda, "lda");
+  const int ldb_int = checked_positive_int(ldb, "ldb");
+  const int ldc_int = checked_positive_int(ldc, "ldc");
+  const int ldd_int = checked_positive_int(ldd, "ldd");
+  NVTE_CHECK(stridea >= 0 && strideb >= 0 && stridec >= 0 && strided >= 0,
+             "Strided batched GEMM requires non-negative batch strides (got stridea=", stridea,
+             ", strideb=", strideb, ", stridec=", stridec, ", strided=", strided, ").");
+
+  GemmParam param = CanonicalizeGemmInput(*inputA, transa, *inputB, transb, m_int, n_int, k_int);
+  param.lda = lda_int;
+  param.ldb = ldb_int;
+
+  void *C = inputC->data.dptr;
+  void *D = outputD->data.dptr;
+  NVTE_CHECK(C != nullptr && D != nullptr, "Strided batched GEMM requires allocated C and D.");
+
+  const bool high_precision_inputs =
+      is_high_precision_dtype(param.Atype) && is_high_precision_dtype(param.Btype);
+  const bool use_mxfp8 = is_fp8_dtype(param.Atype) && is_fp8_dtype(param.Btype) &&
+                         is_mxfp8_scaling(inputA->scaling_mode) &&
+                         is_mxfp8_scaling(inputB->scaling_mode);
+  NVTE_CHECK(high_precision_inputs || use_mxfp8,
+             "Strided batched GEMM supports only high-precision or MXFP8 A and B tensor pairs "
+             "(got A dtype=",
+             to_string(param.Atype), ", A scaling mode=", to_string(inputA->scaling_mode),
+             ", B dtype=", to_string(param.Btype),
+             ", B scaling mode=", to_string(inputB->scaling_mode), ").");
+  if (use_mxfp8) {
+    NVTE_CHECK(param.A_scale_inv != nullptr && param.B_scale_inv != nullptr,
+               "MXFP8 inputs to strided batched GEMM require inverse scales.");
+  }
+  NVTE_CHECK(is_high_precision_dtype(outputD->data.dtype),
+             "Strided batched GEMM currently supports high-precision output only.");
+
+  const cudaDataType_t A_type = get_cuda_dtype(param.Atype);
+  const cudaDataType_t B_type = get_cuda_dtype(param.Btype);
+  const cudaDataType_t C_type = get_cuda_dtype(inputC->data.dtype);
+  const cudaDataType_t D_type = get_cuda_dtype(outputD->data.dtype);
+  NVTE_CHECK(C_type == D_type,
+             "Strided batched GEMM currently requires C and D to have the same dtype.");
+  cublasLtHandle_t handle = cublasHandleManager::Instance().GetHandle();
+
+  cublasLtMatmulDesc_t operationDesc = nullptr;
+  cublasLtMatrixLayout_t Adesc = nullptr, Bdesc = nullptr, Cdesc = nullptr, Ddesc = nullptr;
+  cublasLtMatmulPreference_t preference = nullptr;
+  int returnedResults = 0;
+  cublasLtMatmulHeuristicResult_t heuristicResult = {};
+
+  auto set_strided_batch = [&](cublasLtMatrixLayout_t desc, int64_t stride) {
+    NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(desc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT,
+                                                       &batch_count_int, sizeof(batch_count_int)));
+    NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(
+        desc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &stride, sizeof(stride)));
+  };
+
+  NVTE_CHECK_CUBLAS(
+      cublasLtMatrixLayoutCreate(&Adesc, A_type, param.transA == CUBLAS_OP_N ? m_int : k_int,
+                                 param.transA == CUBLAS_OP_N ? k_int : m_int, param.lda));
+  set_strided_batch(Adesc, stridea);
+
+  NVTE_CHECK_CUBLAS(
+      cublasLtMatrixLayoutCreate(&Bdesc, B_type, param.transB == CUBLAS_OP_N ? k_int : n_int,
+                                 param.transB == CUBLAS_OP_N ? n_int : k_int, param.ldb));
+  set_strided_batch(Bdesc, strideb);
+
+  NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&Cdesc, C_type, m_int, n_int, ldc_int));
+  set_strided_batch(Cdesc, stridec);
+  NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&Ddesc, D_type, m_int, n_int, ldd_int));
+  set_strided_batch(Ddesc, strided);
+
+  cublasComputeType_t gemm_compute_type = CUBLAS_COMPUTE_32F;
+  if (A_type == CUDA_R_32F && B_type == CUDA_R_32F && D_type == CUDA_R_32F) {
+    gemm_compute_type = CUBLAS_COMPUTE_32F_FAST_TF32;
+  }
+  NVTE_CHECK_CUBLAS(cublasLtMatmulDescCreate(&operationDesc, gemm_compute_type, CUDA_R_32F));
+  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSA,
+                                                   &param.transA, sizeof(param.transA)));
+  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSB,
+                                                   &param.transB, sizeof(param.transB)));
+  if (math_sm_count != 0) {
+    NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
+                                                     CUBLASLT_MATMUL_DESC_SM_COUNT_TARGET,
+                                                     &math_sm_count, sizeof(math_sm_count)));
+  }
+
+  if (use_mxfp8) {
+    const int8_t fastAccuMode = use_split_accumulator ? 0 : 1;
+    NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_FAST_ACCUM,
+                                                     &fastAccuMode, sizeof(fastAccuMode)));
+  }
+
+  if (use_mxfp8) {
+#if CUBLAS_VERSION >= 120800
+    NVTE_CHECK(transformer_engine::cuda::cublas_version() >= 120800,
+               "MXFP8 strided batched GEMM requires cuBLAS 12.8+, but run-time cuBLAS version is ",
+               transformer_engine::cuda::cublas_version());
+    NVTE_CHECK(
+        inputA->with_gemm_swizzled_scales,
+        "MXFP8 A scales for strided batched GEMM must be packed by batch and GEMM-swizzled.");
+    NVTE_CHECK(
+        inputB->with_gemm_swizzled_scales,
+        "MXFP8 B scales for strided batched GEMM must be packed by batch and GEMM-swizzled.");
+
+    fp8e8m0 *A_scale_inverse = reinterpret_cast<fp8e8m0 *>(param.A_scale_inv);
+    fp8e8m0 *B_scale_inverse = reinterpret_cast<fp8e8m0 *>(param.B_scale_inv);
+    NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
+                                                     CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
+                                                     &A_scale_inverse, sizeof(A_scale_inverse)));
+    NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
+                                                     CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
+                                                     &B_scale_inverse, sizeof(B_scale_inverse)));
+    const cublasLtMatmulMatrixScale_t scaling_mode_a = CUBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
+    const cublasLtMatmulMatrixScale_t scaling_mode_b = CUBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
+
+    NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
+        operationDesc, CUBLASLT_MATMUL_DESC_A_SCALE_MODE, &scaling_mode_a, sizeof(scaling_mode_a)));
+    NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
+        operationDesc, CUBLASLT_MATMUL_DESC_B_SCALE_MODE, &scaling_mode_b, sizeof(scaling_mode_b)));
+
+    // Workaround for the same heuristic-cache issue handled in the non-batched MXFP8 GEMM.
+    if (transformer_engine::cuda::cublas_version() <= 120803) {
+      const int64_t dummy_a_vec_stride = 1;
+      NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
+          operationDesc, CUBLASLT_MATMUL_DESC_ALPHA_VECTOR_BATCH_STRIDE, &dummy_a_vec_stride,
+          sizeof(dummy_a_vec_stride)));
+    }
+#else
+    NVTE_ERROR(
+        "MXFP8 strided batched GEMM requires cuBLAS 12.8+, but compile-time cuBLAS version is ",
+        CUBLAS_VERSION);
+#endif  // CUBLAS_VERSION >= 120800
+  }
+
+  cublasLtEpilogue_t epilogue = CUBLASLT_EPILOGUE_DEFAULT;
+  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_EPILOGUE,
+                                                   &epilogue, sizeof(epilogue)));
+
+  uint8_t *aligned_workspace_ptr = nullptr;
+  if (workspaceSize > 0) {
+    NVTE_CHECK(workspace != nullptr,
+               "Strided batched GEMM got non-zero workspace size with null workspace pointer.");
+    constexpr uintptr_t required_alignment = 256;
+    const uintptr_t workspace_addr = reinterpret_cast<uintptr_t>(workspace);
+    const uintptr_t aligned_addr = (workspace_addr + required_alignment - 1) &
+                                   ~(required_alignment - static_cast<uintptr_t>(1));
+    const size_t padding = aligned_addr - workspace_addr;
+    NVTE_CHECK(workspaceSize >= padding, "Workspace is too small to align to 256 bytes.");
+    aligned_workspace_ptr = reinterpret_cast<uint8_t *>(aligned_addr);
+    workspaceSize -= padding;
+  }
+
+  NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceCreate(&preference));
+  NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
+      preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspaceSize, sizeof(workspaceSize)));
+  const auto A_alignment = _getAlignment(reinterpret_cast<uintptr_t>(param.A));
+  const auto B_alignment = _getAlignment(reinterpret_cast<uintptr_t>(param.B));
+  const auto C_alignment = _getAlignment(reinterpret_cast<uintptr_t>(C));
+  const auto D_alignment = _getAlignment(reinterpret_cast<uintptr_t>(D));
+  NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
+      preference, CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_A_BYTES, &A_alignment, sizeof(A_alignment)));
+  NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
+      preference, CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_B_BYTES, &B_alignment, sizeof(B_alignment)));
+  NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
+      preference, CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_C_BYTES, &C_alignment, sizeof(C_alignment)));
+  NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
+      preference, CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_D_BYTES, &D_alignment, sizeof(D_alignment)));
+
+  const auto status =
+      cublasLtMatmulAlgoGetHeuristic(handle, operationDesc, Adesc, Bdesc, Cdesc, Ddesc, preference,
+                                     1, &heuristicResult, &returnedResults);
+  NVTE_CHECK(status != CUBLAS_STATUS_NOT_SUPPORTED,
+             "Unable to find suitable cuBLAS strided batched GEMM algorithm");
+  NVTE_CHECK_CUBLAS(status);
+  if (returnedResults == 0) {
+    NVTE_ERROR("Unable to find any suitable strided batched GEMM algorithms");
+  }
+
+  NVTE_CHECK_CUBLAS(cublasLtMatmul(handle, operationDesc, alpha, param.A, Adesc, param.B, Bdesc,
+                                   beta, C, Cdesc, D, Ddesc, &heuristicResult.algo,
+                                   aligned_workspace_ptr, workspaceSize, stream));
+
+  NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceDestroy(preference));
+  NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(Ddesc));
+  NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(Cdesc));
+  NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(Bdesc));
+  NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(Adesc));
+  NVTE_CHECK_CUBLAS(cublasLtMatmulDescDestroy(operationDesc));
+}
+
 }  // namespace transformer_engine
 
 void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, const NVTETensor bias,
@@ -890,6 +1112,60 @@ void nvte_cublas_gemm_v2(int transa, int transb, const float *alpha, const NVTET
               transa ? CUBLAS_OP_T : CUBLAS_OP_N, transb ? CUBLAS_OP_T : CUBLAS_OP_N,
               with_grad_epilogue, workspace_ptr, workspace_size, alpha, beta,
               config_.use_split_accumulator, config_.sm_count, 0, 0, false, nullptr, stream);
+}
+
+void nvte_cublas_gemm_strided_batched(int transa, int transb, const float *alpha,
+                                      const NVTETensor A, int64_t lda, int64_t stridea,
+                                      const NVTETensor B, int64_t ldb, int64_t strideb,
+                                      const float *beta, const NVTETensor C, int64_t ldc,
+                                      int64_t stridec, NVTETensor D, int64_t ldd, int64_t strided,
+                                      int64_t batch_count, int64_t m, int64_t n, int64_t k,
+                                      NVTETensor workspace, NVTEMatmulConfig config,
+                                      cudaStream_t stream) {
+  NVTE_API_CALL(nvte_cublas_gemm_strided_batched);
+  using namespace transformer_engine;
+
+  const Tensor *A_tensor = convertNVTETensorCheck(A);
+  const Tensor *B_tensor = convertNVTETensorCheck(B);
+  const Tensor *C_tensor = convertNVTETensorCheck(C);
+  Tensor *D_tensor = convertNVTETensorCheck(D);
+
+  const bool high_precision_inputs =
+      is_high_precision_dtype(A_tensor->dtype()) && is_high_precision_dtype(B_tensor->dtype());
+  const bool mxfp8_inputs = is_mxfp8_scaling(A_tensor->scaling_mode) &&
+                            is_mxfp8_scaling(B_tensor->scaling_mode) &&
+                            is_fp8_dtype(A_tensor->dtype()) && is_fp8_dtype(B_tensor->dtype());
+  NVTE_CHECK(high_precision_inputs || mxfp8_inputs,
+             "nvte_cublas_gemm_strided_batched supports only high-precision or MXFP8 A and B "
+             "tensor pairs.");
+  if (mxfp8_inputs) {
+    NVTE_CHECK(A_tensor->with_gemm_swizzled_scales && B_tensor->with_gemm_swizzled_scales,
+               "nvte_cublas_gemm_strided_batched expects packed, GEMM-swizzled MXFP8 scales.");
+  }
+
+  void *workspace_ptr = nullptr;
+  size_t workspace_size = 0;
+  Tensor *workspace_tensor = convertNVTETensor(workspace);
+  if (workspace_tensor != nullptr) {
+    workspace_ptr = workspace_tensor->data.dptr;
+    workspace_size =
+        get_buffer_size_bytes(workspace_tensor->data.numel(), workspace_tensor->data.dtype);
+  }
+
+  MatmulConfig config_;
+  if (config != nullptr) {
+    config_ = *reinterpret_cast<MatmulConfig *>(config);
+  }
+  NVTE_CHECK(config_.bias_tensor == nullptr && config_.dbias_tensor == nullptr &&
+                 !config_.with_gelu_epilogue && !config_.with_dgelu_epilogue &&
+                 config_.epilogue_aux_tensor == nullptr,
+             "Strided batched GEMM does not support fused epilogues yet.");
+
+  cublas_gemm_strided_batched(
+      A_tensor, B_tensor, C_tensor, D_tensor, transa ? CUBLAS_OP_T : CUBLAS_OP_N,
+      transb ? CUBLAS_OP_T : CUBLAS_OP_N, workspace_ptr, workspace_size, alpha, beta,
+      config_.use_split_accumulator, config_.sm_count, lda, stridea, ldb, strideb, ldc, stridec,
+      ldd, strided, batch_count, m, n, k, stream);
 }
 
 void nvte_cublas_gemm_scaled(const NVTETensor A, const NVTETensor B, NVTETensor D,
