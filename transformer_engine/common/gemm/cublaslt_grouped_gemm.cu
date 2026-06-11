@@ -335,7 +335,8 @@ inline void check_grouped_gemm_requirements(const char *api_name) {
   const int sm = transformer_engine::cuda::sm_arch(current_device);
   const int cublas_ver = transformer_engine::cuda::cublas_version();
 #if CUBLAS_VERSION >= CUBLAS_GROUPED_GEMM_HOPPER_VERSION
-  NVTE_CHECK(sm >= 90 && sm <= 110, api_name, " requires Hopper (SM90) or Blackwell (SM10x and SM110).");
+  NVTE_CHECK(sm >= 90 && sm <= 110, api_name,
+             " requires Hopper (SM90) or Blackwell (SM10x and SM110).");
   NVTE_CHECK(cublas_ver >= CUBLAS_GROUPED_GEMM_VERSION, api_name,
              " requires cuBLAS 13.3+, but run-time cuBLAS version is ", cublas_ver);
   if (sm < 100) {
