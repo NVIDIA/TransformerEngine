@@ -32,6 +32,15 @@ export PYTHONPATH="${TE_PATH}${PYTHONPATH:+:${PYTHONPATH}}"
 COORD="${COORD:-127.0.0.1:12345}"
 TEST_TIMEOUT_S="${TEST_TIMEOUT_S:-300}"
 
+# Editable installs don't embed rpath; libtransformer_engine.so needs
+# libnccl_ep.so.0 from the TE editable location at dlopen time.
+TE_LIB_PATH=$(pip3 show transformer-engine 2>/dev/null \
+    | grep -E "Location:|Editable project location:" \
+    | tail -n 1 | awk '{print $NF}')
+if [ -n "$TE_LIB_PATH" ]; then
+    export LD_LIBRARY_PATH="${TE_LIB_PATH}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+fi
+
 XLA_BASE_FLAGS="--xla_gpu_enable_latency_hiding_scheduler=true
                 --xla_gpu_graph_min_graph_size=1"
 export XLA_FLAGS="${XLA_BASE_FLAGS}"

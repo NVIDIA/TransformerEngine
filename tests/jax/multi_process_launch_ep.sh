@@ -17,6 +17,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TE_REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 export PYTHONPATH="${TE_REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
+# Editable installs don't embed rpath; libtransformer_engine.so needs
+# libnccl_ep.so.0 from the TE editable location at dlopen time.
+TE_LIB_PATH=$(pip3 show transformer-engine 2>/dev/null \
+    | grep -E "Location:|Editable project location:" \
+    | tail -n 1 | awk '{print $NF}')
+if [ -n "$TE_LIB_PATH" ]; then
+    export LD_LIBRARY_PATH="${TE_LIB_PATH}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+fi
+
 NUM_RUNS=$(nvidia-smi -L | wc -l)
 
 if [ "${NUM_RUNS}" -lt 4 ]; then
@@ -29,15 +38,22 @@ NUM_RUNS="${NVTE_TEST_EP_NUM_RANKS:-4}"
 OVERALL_RET=0
 
 for SCRIPT_NAME in $SCRIPT_NAMES; do
-  echo "=== Running ${SCRIPT_NAME} ==="
+  # Allow callers to pass either a bare test name (resolved against this
+  # script's directory) or an absolute/relative path.
+  if [ -f "$SCRIPT_NAME" ]; then
+    SCRIPT_PATH="$SCRIPT_NAME"
+  else
+    SCRIPT_PATH="${SCRIPT_DIR}/${SCRIPT_NAME}"
+  fi
+  echo "=== Running ${SCRIPT_PATH} ==="
   for ((i=1; i<NUM_RUNS; i++))
   do
       timeout --foreground --signal=KILL "${TEST_TIMEOUT_S}" \
-          python $SCRIPT_NAME 127.0.0.1:12345 $i $NUM_RUNS > stdout_rank_${i}.txt 2>&1 &
+          python "$SCRIPT_PATH" 127.0.0.1:12345 $i $NUM_RUNS > stdout_rank_${i}.txt 2>&1 &
   done
 
   timeout --foreground --signal=KILL "${TEST_TIMEOUT_S}" \
-      python $SCRIPT_NAME 127.0.0.1:12345 0 $NUM_RUNS 2>&1 | tee stdout_multi_process.txt
+      python "$SCRIPT_PATH" 127.0.0.1:12345 0 $NUM_RUNS 2>&1 | tee stdout_multi_process.txt
 
   wait
 
