@@ -57,17 +57,30 @@ find_package(OpenMP REQUIRED)
 find_package(MPI REQUIRED)
 
 # -- NCCL core ----------------------------------------------------------------
-# Pass -DNCCL_INCLUDE_DIR=<prefix>/include; falls back to well-known prefixes.
-find_path(NCCL_INCLUDE_DIR nccl.h
-    HINTS /opt/nvidia/nccl/include /usr/local/nccl/include)
-if(NOT NCCL_INCLUDE_DIR)
-  message(FATAL_ERROR
-    "nccl.h not found. Pass -DNCCL_INCLUDE_DIR=<prefix>/include.")
-endif()
+# Anchor on libnccl and derive nccl.h from the same install prefix so the
+# header and library can't drift across installs.
 find_library(NCCL_LIB
              NAMES nccl libnccl
+             HINTS /opt/nvidia/nccl/lib /opt/nvidia/nccl/lib64
+                   /usr/local/nccl/lib /usr/local/nccl/lib64
              PATH_SUFFIXES lib lib64
              REQUIRED)
+get_filename_component(_nccl_lib_dir "${NCCL_LIB}" DIRECTORY)
+set(NCCL_PREFIX "${_nccl_lib_dir}")
+while(NCCL_PREFIX AND NOT EXISTS "${NCCL_PREFIX}/include/nccl.h")
+  get_filename_component(_nccl_parent "${NCCL_PREFIX}" DIRECTORY)
+  if(_nccl_parent STREQUAL NCCL_PREFIX)
+    break()
+  endif()
+  set(NCCL_PREFIX "${_nccl_parent}")
+endwhile()
+find_path(NCCL_INCLUDE_DIR nccl.h
+          HINTS "${NCCL_PREFIX}/include"
+          NO_DEFAULT_PATH)
+if(NOT NCCL_INCLUDE_DIR)
+  message(FATAL_ERROR
+    "nccl.h not found under the prefix of ${NCCL_LIB}.")
+endif()
 list(APPEND test_comm_gemm_LINKER_LIBS
      CUDA::cuda_driver
      CUDA::cudart
