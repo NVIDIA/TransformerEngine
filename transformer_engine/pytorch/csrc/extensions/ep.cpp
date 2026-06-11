@@ -193,6 +193,10 @@ void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
 
   NVTE_CHECK(static_cast<size_t>(topk_weights.size(-1)) == topk_n,
              "topk_weights last dim must equal topk_idx last dim");
+  NVTE_CHECK(static_cast<size_t>(topk_idx.numel()) == T_flat * topk_n,
+             "topk_idx token count must equal tokens token count");
+  NVTE_CHECK(static_cast<size_t>(topk_weights.numel()) == T_flat * topk_n,
+             "topk_weights token count must equal tokens token count");
   NVTE_CHECK(static_cast<size_t>(recv_topk_weights.numel()) == recv_pr,
              "recv_topk_weights total size must equal recv_tokens recv_pr");
   NVTE_CHECK(recv_tokens.scalar_type() == tokens.scalar_type(), "recv_tokens dtype (",
