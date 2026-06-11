@@ -413,6 +413,60 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   return out;
 }
 
+at::Tensor strided_batched_gemm(py::handle A, bool transa, py::handle B, bool transb, at::Tensor D,
+                                at::Tensor workspace, size_t workspaceSize, int64_t m, int64_t n,
+                                int64_t k, int64_t batch_count, int64_t lda, int64_t stridea,
+                                int64_t ldb, int64_t strideb, int64_t ldd, int64_t strided,
+                                bool accumulate, bool use_split_accumulator, int math_sm_count,
+                                float alpha, std::optional<float> beta) {
+  NVTE_CHECK(!A.is_none(), "Tensor A has not been provided");
+  NVTE_CHECK(!B.is_none(), "Tensor B has not been provided");
+  NVTE_CHECK(D.is_cuda(), "Output tensor D must be on CUDA.");
+  NVTE_CHECK(workspace.is_cuda(), "cuBLASLt workspace must be on CUDA.");
+
+  at::cuda::CUDAGuard device_guard(D.device());
+
+  if (accumulate) {
+    beta = beta.value_or(1.0f);
+  } else {
+    beta = beta.value_or(0.0f);
+    NVTE_CHECK(beta.value() == 0.0f,
+               "Trying to use non-zero beta while not accumulating into D tensor.");
+  }
+  const auto none = py::none();
+  TensorWrapper A_tensor = makeTransformerEngineTensor(A, none);
+  TensorWrapper B_tensor = makeTransformerEngineTensor(B, none);
+  TensorWrapper D_tensor = makeTransformerEngineTensor(D);
+  auto te_workspace = makeTransformerEngineTensor(workspace.data_ptr(),
+                                                  std::vector<size_t>{workspaceSize}, DType::kByte);
+
+  const bool high_precision_inputs =
+      is_high_precision_dtype(A_tensor.dtype()) && is_high_precision_dtype(B_tensor.dtype());
+  const bool mxfp8_inputs = A_tensor.scaling_mode() == NVTE_MXFP8_1D_SCALING &&
+                            B_tensor.scaling_mode() == NVTE_MXFP8_1D_SCALING &&
+                            is_fp8_dtype(A_tensor.dtype()) && is_fp8_dtype(B_tensor.dtype());
+  NVTE_CHECK(high_precision_inputs || mxfp8_inputs,
+             "strided_batched_gemm supports only high-precision or MXFP8 A and B tensor pairs.");
+  if (mxfp8_inputs) {
+    NVTE_CHECK(A_tensor.get_with_gemm_swizzled_scales() && B_tensor.get_with_gemm_swizzled_scales(),
+               "strided_batched_gemm expects packed, GEMM-swizzled MXFP8 scales.");
+  }
+  NVTE_CHECK(is_high_precision_dtype(D_tensor.dtype()),
+             "strided_batched_gemm currently expects a high-precision output tensor.");
+
+  transformer_engine::MatmulConfigWrapper config;
+  config.set_use_split_accumulator(use_split_accumulator);
+  config.set_sm_count(math_sm_count);
+
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_cublas_gemm_strided_batched(
+        transa, transb, &alpha, A_tensor.data(), lda, stridea, B_tensor.data(), ldb, strideb,
+        &beta.value(), D_tensor.data(), ldd, strided, D_tensor.data(), ldd, strided, batch_count, m,
+        n, k, te_workspace.data(), config, at::cuda::getCurrentCUDAStream());
+  });
+  return D;
+}
+
 void te_atomic_gemm(at::Tensor A, at::Tensor A_scale_inverse, DType A_type,
                     std::vector<int64_t> A_scaling_mode, bool transa, at::Tensor B,
                     at::Tensor B_scale_inverse, DType B_type, std::vector<int64_t> B_scaling_mode,
