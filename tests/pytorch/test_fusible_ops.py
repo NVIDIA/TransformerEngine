@@ -71,42 +71,6 @@ if is_bf16_available():  # bf16 requires sm_80 or higher
 # Supported devices
 _devices: list[torch.device] = [torch.device("cpu"), torch.device("cuda")]
 
-
-def test_basic_operation_activation_offloading_policy(monkeypatch):
-    """BasicOperation should expose a public opt-out for saved activation CPU offload."""
-    import transformer_engine.pytorch.ops.op as op_module
-
-    calls = []
-    tensor = torch.empty(1)
-    tensor_id = id(tensor)
-    op = te_ops.Identity()
-
-    monkeypatch.setattr(
-        op_module,
-        "mark_activation_offload",
-        lambda *tensors: calls.append(("mark", [id(t) for t in tensors])),
-    )
-    monkeypatch.setattr(
-        op_module,
-        "mark_not_offload",
-        lambda *tensors: calls.append(("skip", [id(t) for t in tensors])),
-    )
-    monkeypatch.setattr(op_module, "is_cpu_offload_enabled", lambda: True)
-
-    op.mark_for_cpu_offload_if_needed(tensor, None)
-    assert calls == [("mark", [tensor_id])]
-
-    calls.clear()
-    op.set_activation_offloading(False)
-    op.mark_for_cpu_offload_if_needed(tensor)
-    assert calls == [("skip", [tensor_id])]
-
-    calls.clear()
-    op.set_activation_offloading(True)
-    op.mark_for_cpu_offload_if_needed(tensor)
-    assert calls == [("mark", [tensor_id])]
-
-
 # Supported quantization recipes
 _quantization_list: list[Optional[str]] = [None]
 if fp8_available:
@@ -669,6 +633,40 @@ class TestFuser:
             assert y.dtype == autocast_dtype
             assert x.grad.dtype == model_dtype
             assert op.weight.grad.dtype == model_dtype
+
+    def test_activation_offloading_policy(self, monkeypatch):
+        """Test opt-out API for activation CPU offloading."""
+        import transformer_engine.pytorch.ops.op as op_module
+
+        calls = []
+        tensor = torch.empty(1)
+        tensor_id = id(tensor)
+        op = te_ops.Identity()
+
+        monkeypatch.setattr(
+            op_module,
+            "mark_activation_offload",
+            lambda *tensors: calls.append(("mark", [id(t) for t in tensors])),
+        )
+        monkeypatch.setattr(
+            op_module,
+            "mark_not_offload",
+            lambda *tensors: calls.append(("skip", [id(t) for t in tensors])),
+        )
+        monkeypatch.setattr(op_module, "is_cpu_offload_enabled", lambda: True)
+
+        op.mark_for_cpu_offload_if_needed(tensor, None)
+        assert calls == [("mark", [tensor_id])]
+
+        calls.clear()
+        op.set_activation_offloading(False)
+        op.mark_for_cpu_offload_if_needed(tensor)
+        assert calls == [("skip", [tensor_id])]
+
+        calls.clear()
+        op.set_activation_offloading(True)
+        op.mark_for_cpu_offload_if_needed(tensor)
+        assert calls == [("mark", [tensor_id])]
 
 
 class TestBasicOps:
