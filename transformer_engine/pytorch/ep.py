@@ -323,11 +323,7 @@ class EpBuffer:
         inst.handle_mem = torch.empty(int(size_bytes), dtype=torch.uint8, device=device)
 
         if inst.zero_copy:
-            if (
-                dispatch_symm_buf is None
-                or dispatch_w_symm_buf is None
-                or combine_symm_buf is None
-            ):
+            if dispatch_symm_buf is None or dispatch_w_symm_buf is None or combine_symm_buf is None:
                 raise ValueError(
                     "EpBuffer.from_external: zero-copy mode requires dispatch_symm_buf, "
                     "dispatch_w_symm_buf, and combine_symm_buf (all symm-mem-backed)."
