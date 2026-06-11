@@ -183,6 +183,8 @@ void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
   NVTE_CHECK(topk_weights.dim() >= 2, "topk_weights must be at least 2D [..., top_k]");
   NVTE_CHECK(recv_tokens.dim() >= 2, "recv_tokens must be at least 2D [..., recv_pr, H]");
   check_topk_idx_int64(topk_idx);
+  NVTE_CHECK(tokens.is_contiguous(), "tokens must be contiguous");
+  NVTE_CHECK(topk_weights.is_contiguous(), "topk_weights must be contiguous");
 
   const size_t H = static_cast<size_t>(tokens.size(-1));
   const size_t T_flat = tokens.numel() / H;
@@ -225,6 +227,7 @@ void ep_combine(at::Tensor handle_mem, at::Tensor expert_out, at::Tensor result)
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   NVTE_CHECK(expert_out.dim() >= 2, "expert_out must be at least 2D [..., recv_pr, H]");
   NVTE_CHECK(result.dim() >= 2, "result must be at least 2D [..., H]");
+  NVTE_CHECK(expert_out.is_contiguous(), "expert_out must be contiguous");
 
   const size_t H = static_cast<size_t>(expert_out.size(-1));
   const size_t recv_pr = expert_out.numel() / H;

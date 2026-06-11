@@ -704,6 +704,11 @@ def ep_dispatch(
     slots; otherwise they are freshly allocated. token_counts is non-diff.
     """
     _require_bf16("tokens", tokens)
+    if topk_weights.dtype is not torch.float32:
+        raise TypeError(
+            f"topk_weights must be float32; got dtype={topk_weights.dtype}. "
+            "Cast with topk_weights.float() before calling."
+        )
     if buffer.zero_copy:
         recv_tokens = buffer.dispatch_symm_buf
         recv_topk_weights = buffer.dispatch_w_symm_buf
