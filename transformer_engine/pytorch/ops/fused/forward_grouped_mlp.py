@@ -753,9 +753,9 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
                     t for t in (grouped_fc1_x, activation_in, saved_grouped_fc2_x) if t is not None
                 ]
                 start_offload(*activation_tensors)
-                fc1_op.maybe_mark_activation_offload(grouped_fc1_x)
-                activation_op.maybe_mark_activation_offload(activation_in)
-                fc2_op.maybe_mark_activation_offload(saved_grouped_fc2_x)
+                fc1_op.mark_for_cpu_offload_if_needed(grouped_fc1_x)
+                activation_op.mark_for_cpu_offload_if_needed(activation_in)
+                fc2_op.mark_for_cpu_offload_if_needed(saved_grouped_fc2_x)
 
             # FC1 saved-tensor layout.
             #   [split_sizes, base_split_offsets, split_points,

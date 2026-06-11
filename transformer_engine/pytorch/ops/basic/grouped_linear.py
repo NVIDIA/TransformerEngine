@@ -1032,19 +1032,14 @@ class GroupedLinear(BasicOperation):
         # Note: No special logic is needed for weights. They are
         # either nn.Parameter (auto-excluded from offload) or are
         # temporary workspaces freshly created in each forward pass.
-        if is_cpu_offload_enabled():
-            saved = tensors_to_save[0]
-            offset = 4 if self._scale_bias else 3
-            if use_grouped_tensor_path:
-                # Layout: [split_sizes, base_split_offsets, split_points, (scales?), grouped_x, *weights]
-                grouped_x = saved[offset]
-                if grouped_x is not None:
-                    self.maybe_mark_activation_offload(grouped_x)
-            else:
-                # Layout: [split_sizes, None, None, (scales?), *xs, *ws]
-                live_xs = [t for t in saved[offset : offset + self.num_groups] if t is not None]
-                if live_xs:
-                    self.maybe_mark_activation_offload(*live_xs)
+        saved = tensors_to_save[0]
+        offset = 4 if self._scale_bias else 3
+        if use_grouped_tensor_path:
+            # Layout: [split_sizes, base_split_offsets, split_points, (scales?), grouped_x, *weights]
+            self.mark_for_cpu_offload_if_needed(saved[offset])
+        else:
+            # Layout: [split_sizes, None, None, (scales?), *xs, *ws]
+            self.mark_for_cpu_offload_if_needed(saved[offset : offset + self.num_groups])
 
         ctx.save_for_backward(*tensors_to_save[0])
 

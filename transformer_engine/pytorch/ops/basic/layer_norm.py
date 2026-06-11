@@ -14,7 +14,6 @@ import torch
 
 from transformer_engine_torch import layernorm_bwd, layernorm_fwd
 from ...constants import TE_DType
-from ...cpu_offload import is_cpu_offload_enabled
 from ...export import is_in_onnx_export_mode
 from ...tensor import Quantizer
 from ...utils import (
@@ -216,8 +215,7 @@ class LayerNorm(BasicOperation):
 
         # Save state for backward pass
         if ctx.requires_grad:
-            if is_cpu_offload_enabled():
-                self.maybe_mark_activation_offload(x, means, rstdevs)
+            self.mark_for_cpu_offload_if_needed(x, means, rstdevs)
             ctx.save_for_backward(x, means, rstdevs)
             ctx.dtype = dtype
 

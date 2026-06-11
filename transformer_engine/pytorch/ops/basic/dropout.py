@@ -9,7 +9,6 @@ from typing import Optional
 
 import torch
 import transformer_engine_torch as tex
-from ...cpu_offload import is_cpu_offload_enabled
 from ...tensor import Quantizer
 from ...tensor.storage.float8_tensor_storage import Float8TensorStorage
 from .._common import maybe_autocast_dtype, maybe_dequantize
@@ -71,8 +70,7 @@ class Dropout(BasicOperation):
 
         # Save context for backward
         if ctx.requires_grad:
-            if is_cpu_offload_enabled():
-                self.maybe_mark_activation_offload(mask)
+            self.mark_for_cpu_offload_if_needed(mask)
             ctx.save_for_backward(mask)
             ctx.impl = impl
             ctx.dropout_probability = self.dropout_probability

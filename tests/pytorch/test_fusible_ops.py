@@ -91,18 +91,19 @@ def test_basic_operation_activation_offloading_policy(monkeypatch):
         "mark_not_offload",
         lambda *tensors: calls.append(("skip", [id(t) for t in tensors])),
     )
+    monkeypatch.setattr(op_module, "is_cpu_offload_enabled", lambda: True)
 
-    op.maybe_mark_activation_offload(tensor, None)
+    op.mark_for_cpu_offload_if_needed(tensor, None)
     assert calls == [("mark", [tensor_id])]
 
     calls.clear()
     op.set_activation_offloading(False)
-    op.maybe_mark_activation_offload(tensor)
+    op.mark_for_cpu_offload_if_needed(tensor)
     assert calls == [("skip", [tensor_id])]
 
     calls.clear()
     op.set_activation_offloading(True)
-    op.maybe_mark_activation_offload(tensor)
+    op.mark_for_cpu_offload_if_needed(tensor)
     assert calls == [("mark", [tensor_id])]
 
 
