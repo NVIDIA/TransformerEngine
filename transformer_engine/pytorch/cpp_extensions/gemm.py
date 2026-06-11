@@ -12,17 +12,18 @@ import transformer_engine_torch as tex
 from ..constants import TE_DType, DType
 from ..utils import get_sm_count, _empty_tensor
 
-from ..quantized_tensor import Quantizer
+from ..quantized_tensor import QuantizedTensorStorage, Quantizer
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from ..tensor.storage.grouped_tensor_storage import GroupedTensorStorage
+from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from ..tensor.utils import is_custom
 from ..custom_recipes.gemm import custom_gemm
 from ...debug.pytorch.debug_quantization import DebugQuantizer
 
-
 __all__ = [
     "general_gemm",
+    "strided_batched_gemm",
     "general_grouped_gemm",
     "general_grouped_gemm_for_grouped_tensor",
 ]
@@ -271,6 +272,85 @@ def general_gemm(
         out = debug_quantizer.process_gemm_output(out)
 
     return out, bias_grad, gelu_input, extra_output
+
+
+def strided_batched_gemm(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    out: torch.Tensor,
+    *,
+    m: int,
+    n: int,
+    k: int,
+    batch_count: int,
+    lda: int,
+    stridea: int,
+    ldb: int,
+    strideb: int,
+    ldd: int,
+    strided: int,
+    layout: str = "TN",
+    accumulate: bool = False,
+    use_split_accumulator: bool = False,
+    alpha: float = 1.0,
+    beta: Optional[float] = None,
+) -> torch.Tensor:
+    """Experimental strided batched GEMM.
+
+    The shape is intentionally explicit. ``m``, ``n``, and ``k`` use the same
+    cuBLAS/TE convention as the C++ GEMM backend. For the common row-major
+    ``layout="TN"`` case, this computes per batch:
+    ``out[n, m] = B[n, k] @ A[m, k].T``.
+
+    Inputs must both be high-precision tensors or both be MXFP8 tensors. MXFP8
+    scale tensors are packed consecutively by batch and must already use the
+    GEMM-swizzled layout.
+    """
+    assert layout in ("TN", "NN", "NT"), f"GEMM layout {layout} not supported."
+    high_precision_dtypes = (torch.float32, torch.float16, torch.bfloat16)
+    high_precision_inputs = all(
+        isinstance(tensor, torch.Tensor)
+        and not isinstance(tensor, QuantizedTensorStorage)
+        and tensor.dtype in high_precision_dtypes
+        for tensor in (A, B)
+    )
+    mxfp8_inputs = isinstance(A, MXFP8TensorStorage) and isinstance(B, MXFP8TensorStorage)
+    assert (
+        high_precision_inputs or mxfp8_inputs
+    ), "strided_batched_gemm supports only high-precision or MXFP8 A and B tensor pairs."
+    if mxfp8_inputs:
+        assert (
+            A._with_gemm_swizzled_scales and B._with_gemm_swizzled_scales
+        ), "strided_batched_gemm expects packed, GEMM-swizzled MXFP8 scales."
+    transa = layout[0] == "T"
+    transb = layout[1] == "T"
+    beta = validate_gemm_scale(beta, accumulate)
+    workspace = get_cublas_workspace(out.device.index, False, False)
+    sm_count = get_sm_count()
+    return tex.strided_batched_gemm(
+        A,
+        transa,
+        B,
+        transb,
+        out,
+        workspace,
+        workspace.shape[0],
+        m,
+        n,
+        k,
+        batch_count,
+        lda,
+        stridea,
+        ldb,
+        strideb,
+        ldd,
+        strided,
+        accumulate,
+        use_split_accumulator,
+        sm_count - int(os.getenv("NVTE_EXT_MARGIN_SM", str(sm_count))),
+        alpha,
+        beta,
+    )
 
 
 def general_grouped_gemm(
