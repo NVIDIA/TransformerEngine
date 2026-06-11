@@ -754,8 +754,7 @@ void thd_get_partitioned_indices(const Tensor &cu_seqlens, Tensor output, int to
 }
 
 void thd_cp_reorder_sequences(const Tensor &inp, const Tensor &cu_seqlens, Tensor &out,
-                              int world_size, bool scatter, int total_tokens,
-                              cudaStream_t stream) {
+                              int world_size, bool scatter, int total_tokens, cudaStream_t stream) {
   using namespace transformer_engine;
   NVTE_CHECK(cu_seqlens.dtype() == DType::kInt32);
   NVTE_CHECK(cu_seqlens.dim() == 1);
