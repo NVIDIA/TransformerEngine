@@ -81,10 +81,12 @@ class _MoEBlock(TransformerEngineBase):
         Grouped top-k knobs (DeepSeek-style). ``None`` disables grouping.
     scaling_factor : float
         Multiplier on the routing weights.
-    use_expert_bias : bool
-        If ``True``, registers a per-expert routing bias (shape ``[E]``).
-        Only meaningful with ``score_function="sigmoid"``; the underlying
-        primitive validates the pairing.
+    use_expert_routing_bias : bool
+        If ``True``, registers a per-expert routing bias (shape ``[E]``)
+        used by the topk selection. Only meaningful with
+        ``score_function="sigmoid"``; the underlying primitive validates
+        the pairing. (Renamed from ``use_expert_bias`` per PR #3116
+        review for symmetry with ``use_ffn_bias``.)
     aux_loss_coeff : float
         If ``> 0``, return the MoE auxiliary load-balancing loss scalar
         in addition to the main output.
@@ -103,17 +105,20 @@ class _MoEBlock(TransformerEngineBase):
         If ``True``, multiply expert outputs by their top-k weights
         *inside* each shard before ``ep_combine`` (saves one global
         reduction at the cost of an extra broadcast). Default ``False``.
-    align_size : int
-        Per-expert group-size alignment (``0`` disables; required > 0
-        for quantized grouped GEMM). Forwarded to ``tex.ep_prepare`` as
-        ``dispatch_output_per_expert_alignment``; will be inferred from
-        the active quantization recipe in a follow-up PR.
+
+    Note that the per-expert dispatch-slot alignment is fixed internally
+    at 128 tokens (see ``moe._ALIGN_SIZE``). Per PR #3116 review there's
+    no current model that wants a >128 alignment, so this is not exposed
+    as a parameter; re-introduce a knob (or recipe-driven inference) if
+    a future FP8 recipe needs >128.
 
     dtype : jnp.dtype
         Compute / parameter dtype.
     kernel_init, bias_init, expert_bias_init : Initializers.
-    use_bias : bool
-        Register per-expert FFN biases.
+    use_ffn_bias : bool
+        Register per-expert FFN biases (``wi_0_bias``, ``wi_1_bias``,
+        ``wo_bias``). (Renamed from ``use_bias`` per PR #3116 review
+        for symmetry with ``use_expert_routing_bias``.)
 
     Quantization is currently configured via the standard TE autocast
     context (``fp8_autocast``/``with_quantizer_set``) and threaded
@@ -133,7 +138,7 @@ class _MoEBlock(TransformerEngineBase):
     num_groups: Optional[int] = None
     group_topk: Optional[int] = None
     scaling_factor: float = 1.0
-    use_expert_bias: bool = False
+    use_expert_routing_bias: bool = False
     aux_loss_coeff: float = 0.0
 
     # Sharding (logical axes)
@@ -147,14 +152,13 @@ class _MoEBlock(TransformerEngineBase):
 
     # MoE knobs forwarded to ``moe()``
     apply_topk_weights_early: bool = False
-    align_size: int = 0
 
     # Dtypes / init / misc
     dtype: DType = jnp.float32
     kernel_init: Optional[Initializer] = None
     bias_init: Initializer = nn.initializers.zeros
     expert_bias_init: Initializer = nn.initializers.zeros
-    use_bias: bool = False
+    use_ffn_bias: bool = False
 
     def __post_init__(self):
         if self.kernel_init is None:
@@ -218,7 +222,7 @@ class _MoEBlock(TransformerEngineBase):
             self.dtype,
         )
         wi_0_bias = wi_1_bias = wo_bias = None
-        if self.use_bias:
+        if self.use_ffn_bias:
             wi_0_bias = self.param(
                 "wi_0_bias",
                 nn.with_logical_partitioning(self.bias_init, ("exp", "mlp")),
@@ -238,7 +242,7 @@ class _MoEBlock(TransformerEngineBase):
                 self.dtype,
             )
         expert_bias = None
-        if self.use_expert_bias:
+        if self.use_expert_routing_bias:
             expert_bias = self.param(
                 "expert_bias",
                 nn.with_logical_partitioning(self.expert_bias_init, ("exp",)),
@@ -268,7 +272,6 @@ class _MoEBlock(TransformerEngineBase):
             scaling_factor=self.scaling_factor,
             aux_loss_coeff=self.aux_loss_coeff,
             apply_topk_weights_early=self.apply_topk_weights_early,
-            align_size=self.align_size,
             ep_axis=ep_axis,
             data_parallelism_axes=self.data_parallelism_axes,
             input_axes=self.input_axes,
