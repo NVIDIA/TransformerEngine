@@ -238,12 +238,9 @@ std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd(at::Tensor probs,
   return std::make_tuple(aux_loss, Const_buf);
 }
 
-std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd_tensor(at::Tensor probs,
-                                                                 at::Tensor tokens_per_expert,
-                                                                 at::Tensor total_num_tokens,
-                                                                 int num_experts, int num_rows,
-                                                                 int num_cols, int topk,
-                                                                 float coeff) {
+std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd_tensor(
+    at::Tensor probs, at::Tensor tokens_per_expert, at::Tensor total_num_tokens, int num_experts,
+    int num_rows, int num_cols, int topk, float coeff) {
   TORCH_CHECK(topk > 0, "topk must be greater than 0");
   TORCH_CHECK(num_experts > 0, "num_experts must be greater than 0");
   // Device-tensor path: keep total_num_tokens dynamic across CUDA Graph replays.
@@ -251,8 +248,8 @@ std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd_tensor(at::Tensor prob
   TORCH_CHECK(total_num_tokens.is_cuda(), "total_num_tokens must be a CUDA tensor");
   TORCH_CHECK(total_num_tokens.numel() == 1,
               "total_num_tokens must contain exactly one element; got ", total_num_tokens.numel());
-  TORCH_CHECK(total_num_tokens.scalar_type() == at::kLong,
-              "total_num_tokens must be int64; got ", total_num_tokens.scalar_type());
+  TORCH_CHECK(total_num_tokens.scalar_type() == at::kLong, "total_num_tokens must be int64; got ",
+              total_num_tokens.scalar_type());
 
   // Create the output tensor
   at::Tensor aux_loss = at::empty({}, at::dtype(probs.scalar_type()).device(at::kCUDA));
@@ -264,10 +261,10 @@ std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd_tensor(at::Tensor prob
   auto aux_loss_cu = makeTransformerEngineTensor(aux_loss);
   auto Const_buf_cu = makeTransformerEngineTensor(Const_buf);
 
-  nvte_fused_moe_aux_loss_forward_tensor(
-      probs_cu.data(), tokens_per_expert_cu.data(), total_num_tokens_cu.data(), num_experts,
-      num_rows, num_cols, topk, coeff, aux_loss_cu.data(), Const_buf_cu.data(),
-      at::cuda::getCurrentCUDAStream());
+  nvte_fused_moe_aux_loss_forward_tensor(probs_cu.data(), tokens_per_expert_cu.data(),
+                                         total_num_tokens_cu.data(), num_experts, num_rows,
+                                         num_cols, topk, coeff, aux_loss_cu.data(),
+                                         Const_buf_cu.data(), at::cuda::getCurrentCUDAStream());
 
   return std::make_tuple(aux_loss, Const_buf);
 }
