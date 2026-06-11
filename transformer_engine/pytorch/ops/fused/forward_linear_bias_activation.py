@@ -10,6 +10,7 @@ from typing import Any, Optional
 
 import torch
 
+from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...quantization import FP8GlobalStateManager
 from ...tensor import Quantizer
 from ..basic import BasicLinear, Bias
@@ -128,7 +129,8 @@ class ForwardLinearBiasActivation(FusedOperation):
             else:
                 saved_input = x_local
                 saved_weight = w
-            linear_op.mark_for_cpu_offload_if_needed(saved_input)
+            if is_cpu_offload_enabled():
+                mark_activation_offload(saved_input)
             linear_op_ctx.save_for_backward(saved_input, saved_weight)
             linear_op_ctx.with_quantized_compute = (
                 with_quantized_compute and backward_override is None
