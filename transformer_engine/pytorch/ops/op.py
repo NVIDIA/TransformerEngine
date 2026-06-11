@@ -14,14 +14,22 @@ from typing import Any, Optional
 import torch
 
 from transformer_engine.common.recipe import Recipe
-from ..cpu_offload import mark_activation_offload, mark_not_offload
+from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload, mark_not_offload
 from ..quantization import (
     FP8GlobalStateManager,
     QuantizerRole,
     RecipeState,
     autocast,
 )
-from ..tensor import Quantizer
+from ..tensor import (
+    GroupedTensorStorage,
+    QuantizedTensorStorage,
+    Quantizer,
+)
+
+
+# Tensor class supported by fusible operation
+TensorLike = torch.Tensor | QuantizedTensorStorage | GroupedTensorStorage
 
 
 @dataclasses.dataclass
@@ -190,35 +198,13 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         # Objects for quantization
         self._fp8_metas: Optional[dict[str, dict[str, Any]]] = None
         self._quantizers: Optional[dict[str, list[Quantizer]]] = None
-        self.activation_offloading: bool = True
+
+        # Whether to participate when activation CPU offloading is enabled
+        self._activation_offloading_enabled: bool = True
 
     @property
     def is_fused_op(self) -> bool:
         return False
-
-    def set_activation_offloading(self, enabled: bool) -> None:
-        """Enable or disable activation CPU offloading for tensors saved by this op.
-
-        CPU offloading is controlled by the surrounding offload context. This setting only
-        opts this operation's saved activation tensors in or out of that context.
-        """
-        self.activation_offloading = enabled
-
-    def maybe_mark_activation_offload(self, *tensors: Any) -> None:
-        """Mark saved activation tensors for CPU offloading in an active offload context.
-
-        If activation offloading has been disabled for this op, mark the tensors so the
-        active offload context skips them.
-        """
-        tensors = tuple(tensor for tensor in tensors if tensor is not None)
-        if not tensors:
-            return
-
-        if not self.activation_offloading:
-            mark_not_offload(*tensors)
-            return
-
-        mark_activation_offload(*tensors)
 
     def num_quantizers(
         self,
@@ -454,6 +440,72 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                 scale, amax_history = tensors
                 self._fp8_metas[mode][fp8_meta_key].scale.copy_(scale)
                 self._fp8_metas[mode][fp8_meta_key].amax_history.copy_(amax_history)
+
+    def set_activation_offloading(self, enabled: bool) -> None:
+        """Set whether to participate when activation CPU offloading is enabled.
+
+        Offloading is controlled by an offloading context (see
+        ``get_cpu_offload_context``). Disabling this setting allows
+        this operation to opt out when the offloading context is
+        active, but enabling does not activate offloading outside that
+        context.
+        """
+        self._activation_offloading_enabled = enabled
+
+    def mark_for_cpu_offload_if_needed(
+        self,
+        *tensors: TensorLike | Iterable[Optional[TensorLike]] | None,
+        exclude_tensors: TensorLike | Iterable[Optional[TensorLike]] | None = None,
+    ) -> None:
+        """Mark tensors to include and exclude from activation CPU offloading.
+
+        Call in op forward implementation in order to control what
+        tensors participate in CPU offloading. It does nothing if
+        offloading is not enabled (see ``get_cpu_offload_context``),
+        and it excludes all tensors if the op is not participating in
+        offloading.
+        """
+        if not tensors and not exclude_tensors:
+            return
+        if not is_cpu_offload_enabled():
+            return
+
+        supported_classes = (torch.Tensor, QuantizedTensorStorage, GroupedTensorStorage)
+
+        def filter_supported_and_extend(
+            out: list[TensorLike],
+            ts: TensorLike | Iterable[Optional[TensorLike]] | None,
+        ) -> None:
+            """Extend a list with objects that support CPU offloading.
+
+            Filters out ``None`` and checks for unsupported classes.
+            """
+            if ts is None:
+                return
+            if isinstance(ts, supported_classes):
+                ts = (ts,)
+            for t in ts:
+                if t is None:
+                    continue
+                if not isinstance(t, supported_classes):
+                    raise TypeError(f"{t.__class__.__name__} does not support CPU offloading.")
+                out.append(t)
+
+        # Choose tensors to include and exclude from CPU offloading
+        include = []
+        exclude = []
+        if self._activation_offloading_enabled:
+            filter_supported_and_extend(include, tensors)
+            filter_supported_and_extend(exclude, exclude_tensors)
+        else:
+            filter_supported_and_extend(exclude, tensors)
+            filter_supported_and_extend(exclude, exclude_tensors)
+
+        # Mark tensors
+        if include:
+            mark_activation_offload(*include)
+        if exclude:
+            mark_not_offload(*exclude)
 
     @abc.abstractmethod
     def op_forward(
@@ -773,6 +825,18 @@ class FusedOperation(FusibleOperation):
 
     def get_grad_output_quantizer(self) -> Optional[Quantizer]:
         return self.basic_ops[-1].get_grad_output_quantizer()
+
+    def set_activation_offloading(self, enabled: bool) -> None:
+        """Whether to participate when activation CPU offloading is enabled globally.
+
+        Offloading is controlled by an offloading context (see
+        ``get_cpu_offload_context``). Disabling this setting allows
+        this operation to opt out when the offloading context is
+        active, but enabling does not activate offloading outside that
+        context.
+        """
+        for op in self.basic_ops:
+            op.set_activation_offloading(enabled)
 
     def pre_first_fuser_forward(self) -> None:
         for op in self.basic_ops:
