@@ -249,6 +249,10 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
             if fc1_op.weight.quantizer is not None:
                 fc1_weight_quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
                 fc1_op.weight.quantizer = fc1_weight_quantizer
+                if fc1_op.weight.quantized_tensors is not None:
+                    for qt in fc1_op.weight.quantized_tensors:
+                        if getattr(qt, "_quantizer", None) is not None:
+                            qt._quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
                 grouped_fc1_weight = fc1_op.weight
             else:
                 if fc1_op.weight.rowwise_data is None:
@@ -269,6 +273,8 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
                     quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
                     quantized_fc1_weights.append(quantizer(weight))
                 else:
+                    if getattr(weight, "_quantizer", None) is not None:
+                        weight._quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
                     quantized_fc1_weights.append(weight)
             grouped_fc1_weight = quantized_fc1_weights
 
@@ -281,6 +287,10 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
             if fc2_op.weight.quantizer is not None:
                 fc2_weight_quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
                 fc2_op.weight.quantizer = fc2_weight_quantizer
+                if fc2_op.weight.quantized_tensors is not None:
+                    for qt in fc2_op.weight.quantized_tensors:
+                        if getattr(qt, "_quantizer", None) is not None:
+                            qt._quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
                 grouped_fc2_weight = fc2_op.weight
             else:
                 if fc2_op.weight.rowwise_data is None:
@@ -302,6 +312,8 @@ class _ForwardGroupedMLP_CuTeGEMMBase(FusedOperation):
                     quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
                     quantized_fc2_weights.append(quantizer(weight))
                 else:
+                    if getattr(weight, "_quantizer", None) is not None:
+                        weight._quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
                     quantized_fc2_weights.append(weight)
             grouped_fc2_weight = quantized_fc2_weights
 
