@@ -744,11 +744,32 @@ class NVFP4PerTokenBlockScaling(NVFP4BlockScaling):
 
     Parameters
     ----------
+    per_token_rht : bool, default = False (env ``NVTE_NVFP4_PER_TOKEN_RHT``)
+        Opt into the random Hadamard transform on the forward activation
+        and backward gradient quantizers. Per-token disables RHT by
+        default (its per-row outer amax already mitigates the long-tail
+        outliers RHT targets).
+    per_token_sr : bool, default = False (env ``NVTE_NVFP4_PER_TOKEN_SR``)
+        Opt into stochastic rounding on the backward gradient quantizer
+        (the K2 encode kernel implements a Philox-dithered FP4 cast).
+        Per-token disables SR by default.
+    per_token_weight_2d : bool, default = False (env ``NVTE_NVFP4_PER_TOKEN_WEIGHT_2D``)
+        Quantize the forward weight with the per-tensor 2D cast (16x16
+        inner tile + scalar outer amax) emitted in per-token layout.
+        2D weight quantization is transposition-invariant, removing the
+        1D path's weight-gradient bias. Activations/gradients stay 1D.
     backward_override : {None, 'high_precision', 'dequantized'}, default = None
         Inherited from ``NVFP4BlockScaling``.
 
     Notes
     -----
+    The per-token forward path currently requires the unfused norm+amax
+    path. When training a model whose first GEMM consumes a fused
+    norm+quantize output (e.g. ``LayerNormLinear``), also set
+    ``NVTE_NORM_FWD_USE_CUDNN=1`` so the norm forward uses the unfused
+    implementation; the fused norm+amax path rejects per-token
+    quantizers at the C++ quantizer.
+
     Per-token cast covers both forward and backward:
 
       * fwd:  ``input`` / ``output`` / ``weight`` -> per-token cast +
@@ -760,12 +781,12 @@ class NVFP4PerTokenBlockScaling(NVFP4BlockScaling):
         rowwise vs columnwise quantized data + amax for each operand
         so the contraction dim is contiguous in both kernel inputs.
 
+    Random Hadamard transform (``per_token_rht``) and stochastic
+    rounding (``per_token_sr``) are supported on the per-token path but
+    OFF by default; opt in via the constructor kwargs or env vars above.
+
     Currently unsupported (with future work tickets):
 
-      * Stochastic rounding -- per-token relies on RNE rounding for
-        both fwd and bwd. Per-row outer-amax granularity already
-        mitigates the bias-cancellation case SR was originally added
-        for; SR can be added later as a pure-additive enhancement.
       * ``fuse_wgrad_accumulation=True`` -- the per-token kernel does
         not yet support ``D += A @ B``; users must disable wgrad
         accumulation when training with the per-token recipe.

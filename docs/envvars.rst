@@ -287,6 +287,48 @@ Kernel Configuration
    :Default: ``0``
    :Description: Enable row-scaled NVFP4 tensors for forward activation quantizers in the ``NVFP4BlockScaling`` recipe. When set to ``1`` (or when ``NVFP4BlockScaling(row_scaled_activation=True)`` is used), rowwise ``amax`` metadata is stored as one FP32 value per tensor row instead of a single scalar.
 
+.. envvar:: NVTE_NVFP4_DISABLE_RHT
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Opt out of the random Hadamard transform (RHT) in the per-tensor ``NVFP4BlockScaling`` recipe. RHT is applied by default to the forward activation and backward gradient quantizers. Set to ``1`` (or use ``NVFP4BlockScaling(disable_rht=True)``) to disable it. No effect on the per-token path (see :envvar:`NVTE_NVFP4_PER_TOKEN_RHT`).
+
+.. envvar:: NVTE_NVFP4_DISABLE_STOCHASTIC_ROUNDING
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Opt out of stochastic rounding (SR) in the per-tensor ``NVFP4BlockScaling`` recipe. SR is applied by default to the backward gradient quantizer. Set to ``1`` (or use ``NVFP4BlockScaling(disable_stochastic_rounding=True)``) to disable it. No effect on the per-token path (see :envvar:`NVTE_NVFP4_PER_TOKEN_SR`).
+
+.. envvar:: NVTE_NVFP4_DISABLE_2D_QUANTIZATION
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Opt out of 2D (16x16 inner tile + scalar outer amax) weight quantization in the per-tensor ``NVFP4BlockScaling`` recipe. 2D weight quantization is enabled by default. Set to ``1`` (or use ``NVFP4BlockScaling(disable_2d_quantization=True)``) to fall back to 1D (16-element block) weight quantization. Forced on the per-token path (the per-token cast hard-disables 2D); see :envvar:`NVTE_NVFP4_PER_TOKEN_WEIGHT_2D` for the per-token weight-2D route.
+
+.. envvar:: NVTE_NVFP4_PER_TOKEN
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Flip a plain ``NVFP4BlockScaling`` recipe into per-token mode (per-row / per-col outer ``amax`` cast plus the fused-EVT CUTLASS GEMM) without changing the recipe class. This lets frameworks that already construct a default ``NVFP4BlockScaling`` (e.g. Megatron-Core with ``--fp4-format e2m1``) opt into per-token purely from the launch environment. Equivalent to constructing the explicit ``NVFP4PerTokenBlockScaling`` recipe. The per-token forward path currently requires the unfused norm+amax path: also set ``NVTE_NORM_FWD_USE_CUDNN=1`` (the fused norm+amax path rejects per-token quantizers).
+
+.. envvar:: NVTE_NVFP4_PER_TOKEN_RHT
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Per-token only. Opt into the random Hadamard transform (RHT) on the per-token forward activation and backward gradient quantizers. Per-token disables RHT by default (its per-row outer amax already mitigates the long-tail outliers RHT targets); set to ``1`` (or use ``NVFP4PerTokenBlockScaling(per_token_rht=True)``) to re-enable it. No effect on the per-tensor path.
+
+.. envvar:: NVTE_NVFP4_PER_TOKEN_SR
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Per-token only. Opt into stochastic rounding (SR) on the per-token backward gradient quantizer (the K2 encode kernel implements a Philox-dithered FP4 cast). Per-token disables SR by default; set to ``1`` (or use ``NVFP4PerTokenBlockScaling(per_token_sr=True)``) to re-enable it. No effect on the per-tensor path.
+
+.. envvar:: NVTE_NVFP4_PER_TOKEN_WEIGHT_2D
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Per-token only. Quantize the forward weight with the per-tensor 2D cast (16x16 inner tile + scalar outer amax) emitted in per-token layout, instead of the per-token 1D weight cast. 2D weight quantization is transposition-invariant, so forward (rowwise) and dgrad (columnwise) see the same weight, removing the 1D path's weight-gradient bias. Activations and gradients stay on the standard per-token 1D cast. Set to ``1`` (or use ``NVFP4PerTokenBlockScaling(per_token_weight_2d=True)``). No effect on the per-tensor path.
+
 .. envvar:: NVTE_NVFP4_4OVER6
 
    :Type: ``str`` (``none``, ``weights``, ``activations``, or ``all``)
