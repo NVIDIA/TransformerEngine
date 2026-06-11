@@ -13,6 +13,7 @@ from typing import Any, Optional
 import torch
 
 from ...cpp_extensions import general_gemm
+from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...distributed import (
     CudaRNGStatesTracker,
     gather_along_first_dim,
@@ -1048,13 +1049,11 @@ class BasicLinear(BasicOperation):
             else:
                 saved_input = x_local
                 saved_weight = w
-
-            # Activation CPU offloading
-            # Note: No special CPU offloading logic is needed for weights. saved_weight is
-            # either self.weight (nn.Parameter, auto-excluded from offload) or a
-            # workspace freshly created each forward pass.
-            self.mark_for_cpu_offload_if_needed(saved_input)
-
+            if is_cpu_offload_enabled():
+                # No special CPU offloading logic is needed for weights. saved_weight is
+                # either self.weight (nn.Parameter, auto-excluded from offload) or a
+                # workspace freshly created each forward pass.
+                mark_activation_offload(saved_input)
             ctx.save_for_backward(saved_input, saved_weight)
             ctx.with_quantized_compute = with_quantized_compute and backward_override is None
             ctx.backward_override = backward_override
