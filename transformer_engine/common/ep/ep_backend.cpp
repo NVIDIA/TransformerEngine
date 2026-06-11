@@ -115,8 +115,6 @@ void EPBackend::validate_config(const NVTEEpGroupConfig& config) {
 
   const int sm = cuda::sm_arch();
   NVTE_CHECK(sm >= 90, "NCCL EP requires SM_90+ (Hopper or later), but current device is SM_", sm);
-  NVTE_CHECK(cuda::supports_multicast(),
-             "NCCL EP requires CUDA multicast support on the current device");
 }
 
 void EPBackend::initialize(ncclComm_t ep_comm, NVTEEpGroupConfig config) {
