@@ -40,13 +40,13 @@ def _hybrid_fp8_mxfp8_qfactory(role):
     if is_linear and role.tensor_type in ("input", "weight", "output"):
         return te.HybridQuantizer(
             rowwise_quantizer=te.Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E4M3, device="cuda"
+                te.DType.kFloat8E4M3, device="cuda"
             ),
-            columnwise_quantizer=te.MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
+            columnwise_quantizer=te.MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3),
         )
     if is_linear and role.tensor_type in ("grad_output", "grad_input"):
-        return te.MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E5M2)
-    return te.Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
+        return te.MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E5M2)
+    return te.Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda")
 
 
 def _hybrid_mxfp8_nvfp4_qfactory(role):
@@ -59,12 +59,12 @@ def _hybrid_mxfp8_nvfp4_qfactory(role):
     is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
     if is_linear and role.tensor_type in ("input", "weight", "output"):
         return te.HybridQuantizer(
-            rowwise_quantizer=te.MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
-            columnwise_quantizer=te.NVFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1),
+            rowwise_quantizer=te.MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3),
+            columnwise_quantizer=te.NVFP4Quantizer(fp4_dtype=te.DType.kFloat4E2M1),
         )
     if is_linear and role.tensor_type in ("grad_output", "grad_input"):
-        return te.NVFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1)
-    return te.MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        return te.NVFP4Quantizer(fp4_dtype=te.DType.kFloat4E2M1)
+    return te.MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)
 
 
 def nvfp4_row_scaled():

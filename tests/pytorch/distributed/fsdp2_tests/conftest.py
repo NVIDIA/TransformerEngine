@@ -52,6 +52,13 @@ _HYBRID_RECIPE_CONFIGS = [
     ("HybridMixed_MXFP8_FP8", fp8.check_mxfp8_support),
 ]
 
+_HYBRID_FLOAT8_BLOCK_FSDP2_XFAIL_REASON = (
+    "HybridFloat8BlockScaling + FSDP2 is not supported when dim-0 shards split "
+    "128-row Float8Block scale tiles. Each shard stores independently rounded "
+    "scale rows, but the gathered tensor expects scale rows rounded from the "
+    "global row count, so naively all-gathered scale buffers have the wrong shape."
+)
+
 
 def _parametrize_recipes():
     params = []
@@ -67,9 +74,15 @@ def _parametrize_hybrid_recipes():
     params = []
     for name, check_fn in _HYBRID_RECIPE_CONFIGS:
         supported, reason = check_fn()
-        params.append(
-            pytest.param(name, id=name, marks=pytest.mark.skipif(not supported, reason=reason))
-        )
+        marks = [pytest.mark.skipif(not supported, reason=reason)]
+        if name == "HybridFloat8BlockScaling":
+            marks.append(
+                pytest.mark.xfail(
+                    raises=RuntimeError,
+                    reason=_HYBRID_FLOAT8_BLOCK_FSDP2_XFAIL_REASON,
+                )
+            )
+        params.append(pytest.param(name, id=name, marks=marks))
     return params
 
 

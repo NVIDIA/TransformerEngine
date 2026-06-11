@@ -425,6 +425,62 @@ class TestHybridClear:
                 assert n == 0
 
 
+@requires_fp8
+class TestHybridTensorShapeOps:
+    """Shape ops that preserve supported Hybrid sub-storages."""
+
+    def test_fp8_current_non_noop_slice_and_narrow_preserve_hybrid(self):
+        torch.manual_seed(42)
+        x = torch.randn(64, 32, dtype=torch.bfloat16, device="cuda")
+        quantizer = HybridQuantizer(
+            rowwise_quantizer=_make_fp8_quantizer(),
+            columnwise_quantizer=_make_fp8_quantizer(),
+        )
+        tensor = quantizer.quantize(x)
+        dequantized = tensor.dequantize()
+
+        sliced = torch.ops.aten.slice.Tensor(tensor, 0, 0, 32, 1)
+        narrowed = tensor.narrow(0, 16, 32)
+
+        assert isinstance(sliced, HybridQuantizedTensor)
+        assert isinstance(narrowed, HybridQuantizedTensor)
+        torch.testing.assert_close(sliced.dequantize(), dequantized[:32], rtol=0, atol=0)
+        torch.testing.assert_close(narrowed.dequantize(), dequantized[16:48], rtol=0, atol=0)
+
+    def test_full_span_step_slice_is_not_treated_as_noop(self):
+        torch.manual_seed(42)
+        x = torch.randn(64, 32, dtype=torch.bfloat16, device="cuda")
+        quantizer = HybridQuantizer(
+            rowwise_quantizer=_make_fp8_quantizer(),
+            columnwise_quantizer=_make_fp8_quantizer(),
+        )
+        tensor = quantizer.quantize(x)
+        dequantized = tensor.dequantize()
+
+        sliced = torch.ops.aten.slice.Tensor(tensor, 0, 0, tensor.size(0), 2)
+
+        assert isinstance(sliced, HybridQuantizedTensor)
+        torch.testing.assert_close(sliced.dequantize(), dequantized[::2], rtol=0, atol=0)
+
+    def test_same_shape_as_strided_with_offset_is_not_treated_as_noop(self):
+        torch.manual_seed(42)
+        x = torch.randn(64, 32, dtype=torch.bfloat16, device="cuda")
+        quantizer = HybridQuantizer(
+            rowwise_quantizer=_make_fp8_quantizer(),
+            columnwise_quantizer=_make_fp8_quantizer(),
+        )
+        tensor = quantizer.quantize(x)
+        dequantized = tensor.dequantize()
+
+        base_view = torch.ops.aten.slice.Tensor(tensor, 0, 0, 63, 1)
+        shifted = torch.ops.aten.as_strided.default(
+            base_view, base_view.shape, base_view.stride(), x.stride(0)
+        )
+
+        assert isinstance(shifted, HybridQuantizedTensor)
+        torch.testing.assert_close(shifted.dequantize(), dequantized[1:], rtol=0, atol=0)
+
+
 @requires_fp8_and_nvfp4
 class TestHybridDetachIsolation:
     """``HybridQuantizedTensor.detach()`` must produce a hybrid whose

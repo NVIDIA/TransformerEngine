@@ -1044,6 +1044,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # Return early if recipe state matches recipe
         if self.fp8_meta_tensors_initialized:
             recipe_state = self.fp8_meta[fp8_meta_tensor_key]
+            # Follow-up: Match built-in recipes by full config, not just RecipeState type, so
+            # same-class mid-training changes rebuild quantizers/workspaces correctly.
             if recipe.delayed() and isinstance(recipe_state, DelayedScalingRecipeState):
                 self.adjust_amax_history_length(recipe.amax_history_len, fwd=fwd)
                 return
@@ -1060,6 +1062,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if recipe.nvfp4() and isinstance(recipe_state, NVFP4BlockScalingRecipeState):
                 return
             if recipe.custom() and isinstance(recipe_state, CustomRecipeState):
+                # Follow-up: Compare CustomRecipe/qfactory config here. qfactory changes made
+                # mid-training currently do not take effect because stale quantizers are reused.
                 return
 
         # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and

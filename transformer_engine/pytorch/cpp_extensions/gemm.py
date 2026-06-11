@@ -17,6 +17,8 @@ from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTen
 from ..tensor.storage.grouped_tensor_storage import GroupedTensorStorage
 from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from ..tensor.utils import is_custom
+from ..tensor.hybrid_tensor import HybridQuantizer
+from ..tensor.identity_tensor import IdentityQuantizer
 from ..tensor.storage.hybrid_tensor_storage import HybridQuantizedTensorStorage
 from ..tensor.storage.identity_tensor_storage import IdentityTensorStorage
 from ..custom_recipes.gemm import custom_gemm
@@ -148,6 +150,21 @@ def _materialize_high_precision(tensor):
     return tensor
 
 
+def _reject_unsupported_output_quantizer(quantization_params):
+    """Reject output quantizers that the native C++ GEMM path cannot convert."""
+    if isinstance(quantization_params, (HybridQuantizer, IdentityQuantizer)):
+        quantizer_name = type(quantization_params).__name__
+        # TODO(negvet): Lower HybridQuantizer output to its native rowwise
+        # sub-quantizer, and IdentityQuantizer output to an unquantized/no-op
+        # path, once the returned tensor contract is defined for these boundary
+        # roles.
+        raise NotImplementedError(
+            f"{quantizer_name} is not supported as a native GEMM output quantizer. "
+            "Return a TE-native quantizer for output/grad_input roles or disable "
+            "quantized GEMM output for this boundary."
+        )
+
+
 def general_gemm(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -221,6 +238,8 @@ def general_gemm(
         quantization_params = quantization_params.parent_quantizer
         A = A.get_tensor(not transa)
         B = B.get_tensor(transb)
+
+    _reject_unsupported_output_quantizer(quantization_params)
 
     # Use bfloat16 as default bias_dtype
     bias_dtype = TE_DType[torch.bfloat16 if bias is None else bias.dtype]

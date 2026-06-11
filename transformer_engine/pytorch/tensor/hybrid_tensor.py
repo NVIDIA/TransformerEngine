@@ -917,26 +917,32 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
             tensor = args[0]
             shape = args[1]
             strides = args[2]
+            storage_offset = kwargs.get("storage_offset", args[3] if len(args) > 3 else None)
+            if storage_offset is None:
+                storage_offset = tensor.storage_offset()
             if (
-                len(shape) == len(strides) == 2
-                and tuple(strides) == (shape[-1], 1)
-                and tuple(shape) == tuple(tensor.size())
+                tuple(shape) == tuple(tensor.size())
+                and tuple(strides) == tuple(tensor.stride())
+                and storage_offset == tensor.storage_offset()
             ):
                 return HybridQuantizedTensor.make_like(tensor)
-            return cls._delegate_reshape_op(
-                func, tensor, args, kwargs
-            ) or super().__torch_dispatch__(func, types, args, kwargs)
+            out = cls._delegate_reshape_op(func, tensor, args, kwargs)
+            if out is not None:
+                return out
+            return super().__torch_dispatch__(func, types, args, kwargs)
 
         if func == aten.slice.Tensor:
             tensor = args[0]
             dim = args[1]
             start = args[2]
-            length = args[3]
-            if start == 0 and length == tensor.size(dim):
+            end = args[3]
+            step = args[4] if len(args) > 4 else 1
+            if start == 0 and end == tensor.size(dim) and step == 1:
                 return HybridQuantizedTensor.make_like(tensor)
-            return cls._delegate_reshape_op(
-                func, tensor, args, kwargs
-            ) or super().__torch_dispatch__(func, types, args, kwargs)
+            out = cls._delegate_reshape_op(func, tensor, args, kwargs)
+            if out is not None:
+                return out
+            return super().__torch_dispatch__(func, types, args, kwargs)
 
         # ── FSDP2: copy_ ─────────────────────────────────────────────
         # Fast path for hybrid-to-hybrid (FSDP2 fills buffer allocated via

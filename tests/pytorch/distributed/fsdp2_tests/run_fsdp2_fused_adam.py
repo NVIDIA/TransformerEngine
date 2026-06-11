@@ -1701,21 +1701,6 @@ def test_hybrid_dcp_output_parity(hybrid_recipe_name):
     """
     import torch.distributed.checkpoint as dcp
 
-    if hybrid_recipe_name == "HybridFP8CurrentScaling":
-        # TODO: preserve hybrid current-scaling primary-weight scales across DCP
-        # by implementing __tensor_flatten__/__tensor_unflatten__ on the quantized
-        # tensor stack (HybridQuantizedTensor + its Float8Tensor sub-storages) so
-        # DCP serializes fp8 data + fp32 _scale_inv as explicit tensor leaves
-        # instead of round-tripping through a dequantized bf16 weight.
-        pytest.xfail(
-            "HybridFP8CurrentScaling: hybrid current-scaling primary-weight "
-            "_scale_inv is not preserved across DCP. DCP stores each weight as a "
-            "dequantized bf16 leaf (no scale leaf) and re-quantizes on load; this "
-            "is idempotent for a single per-tensor Float8Tensor (vanilla "
-            "round-trips bitwise) but not for the hybrid's two sub-storages, so "
-            "the loaded output diverges ~5e-2. torch.save/load and the FP32 "
-            "master weight are unaffected. See the TODO above for the fix."
-        )
 
     from fsdp2_utils import get_hybrid_recipe_from_string
 
