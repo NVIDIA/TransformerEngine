@@ -2033,8 +2033,10 @@ class TestDebugInspectFFI:
         ]
         + ([jnp.float8_e4m3fn, jnp.float8_e5m2] if is_fp8_supported else []),
     )
-    def test_debug_inspect_ffi(self, shape, dtype):
+    def test_debug_inspect_ffi(self, shape, dtype, tmp_path, monkeypatch):
         from transformer_engine.jax.debug.experimental import inspect_array, load_array_dump
+
+        monkeypatch.chdir(tmp_path)
 
         def f(x):
             x = x + 1
@@ -2048,7 +2050,7 @@ class TestDebugInspectFFI:
         _ = jax.jit(f)(x)
 
         expected = x + 1
-        actual = load_array_dump("my_tensor_gpu0.bin", shape, dtype)
+        actual = load_array_dump("my_tensor_gpu0_my_array.bin", shape, dtype)
 
         assert_allclose(actual, expected, dtype=dtype)
 
