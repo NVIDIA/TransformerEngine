@@ -2899,19 +2899,24 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             dq, dk, dv = [x.view(*x.shape[:dim], -1, *x.shape[dim + 2 :]) for x in [dq, dk, dv]]
 
         # Zero-fill dQ/dK/dV at positions beyond cu_seqlens_*_padded[-1].
-        # Use arange+mask indexing rather than `tensor[scalar_tensor:]` slicing -- the
-        # latter forces a GPU->CPU sync that is forbidden during CUDA graph capture.
         if (
             ctx.qkv_format == "thd"
             and not ctx.use_fused_attention
             and cu_seqlens_q_padded is not None
             and cu_seqlens_kv_padded is not None
         ):
-            q_pad_mask = torch.arange(dq.shape[0], device=dq.device) >= cu_seqlens_q_padded[-1]
-            kv_pad_mask = torch.arange(dk.shape[0], device=dk.device) >= cu_seqlens_kv_padded[-1]
-            dq[q_pad_mask] = 0
-            dk[kv_pad_mask] = 0
-            dv[kv_pad_mask] = 0
+            if is_graph_capturing():
+                q_pad_mask = torch.arange(dq.shape[0], device=dq.device) >= cu_seqlens_q_padded[-1]
+                kv_pad_mask = (
+                    torch.arange(dk.shape[0], device=dk.device) >= cu_seqlens_kv_padded[-1]
+                )
+                dq[q_pad_mask] = 0
+                dk[kv_pad_mask] = 0
+                dv[kv_pad_mask] = 0
+            else:
+                dq[cu_seqlens_q_padded[-1] :].fill_(0)
+                dk[cu_seqlens_kv_padded[-1] :].fill_(0)
+                dv[cu_seqlens_kv_padded[-1] :].fill_(0)
 
         if ctx.fp8 and ctx.is_input_fp8:
             dq, dk, dv, _, _ = combine_and_quantize(ctx.qkv_layout, dq, dk, dv, ctx.dQKV_quantizer)
