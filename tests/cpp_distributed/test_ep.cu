@@ -14,7 +14,7 @@
  *   EPDispatchBwdGradWeightsTest/RoundTrip  : exact per-(t, k) grad_topk_weights
  *   EPPipelineTest/FullForwardBackward     : fwd + bwd NaN/Inf check
  *
- * Routing: token t on rank r -> expert (r * num_local_experts + t * top_k + k) % num_experts
+ * Routing: token t on rank r -> expert (r * num_tokens * top_k + t * top_k + k) % num_experts
  * Token values: rank r, token t -> all hidden dims = (r+1)*0.01 + t*0.001
  *
  * Closed-form expected values:
@@ -76,6 +76,7 @@ static std::vector<int32_t> expected_token_counts(
   return cnt;
 }
 
+template <typename T = nv_bfloat16>
 static std::vector<float> expected_recv_values_sorted(
     int recv_rank, int num_processes, int num_tokens, int top_k,
     int num_experts, int num_local_experts) {
@@ -88,7 +89,7 @@ static std::vector<float> expected_recv_values_sorted(
         int64_t e = idx[t * top_k + k];
         if (e >= base && e < base + num_local_experts) {
           float raw = token_value(src, t, num_tokens);
-          vals.push_back(__bfloat162float(__float2bfloat16(raw)));
+          vals.push_back(tok_to_float(tok_from_float<T>(raw)));
         }
       }
   }
@@ -266,18 +267,33 @@ class EpOpTestBase : public ::testing::Test {
   }
 };
 
+// Pull non-dependent base members into the typed-test scope as local consts so
+// the bodies can reference them unqualified.
+#define EP_PULL_FIXTURE()                                       \
+  const int ep_size_             = this->ep_size_;              \
+  const int num_experts_         = this->num_experts_;          \
+  const int num_local_experts_   = this->num_local_experts_;    \
+  const int hidden_dim_          = this->hidden_dim_;           \
+  const int max_tokens_per_rank_ = this->max_tokens_per_rank_;  \
+  const int top_k_               = this->top_k_;                \
+  const int num_tokens_          = this->num_tokens_
+
 // =============================================================================
 // EPDispatchTest: exact recv values and per-expert counts.
 // =============================================================================
 
-class EPDispatchTest : public EpOpTestBase {};
+template <typename T> class EPDispatchTest : public EpOpTestBase {};
+using EPBf16Only = ::testing::Types<nv_bfloat16>;
+TYPED_TEST_SUITE(EPDispatchTest, EPBf16Only);
 
-TEST_F(EPDispatchTest, PrepareAndDispatch) {
-  EPBuffers<> buf;
+TYPED_TEST(EPDispatchTest, PrepareAndDispatch) {
+  using Tok = TypeParam;
+  EP_PULL_FIXTURE();
+  EPBuffers<Tok> buf;
   buf.alloc(num_tokens_, top_k_, hidden_dim_, num_local_experts_,
             ep_size_, max_tokens_per_rank_);
-  upload_inputs(buf);
-  EPTensors<> t(buf, num_tokens_, top_k_, hidden_dim_, num_local_experts_);
+  this->template upload_inputs<Tok>(buf);
+  EPTensors<Tok> t(buf, num_tokens_, top_k_, hidden_dim_, num_local_experts_);
 
   NVTE_CHECK_CUDA(cudaMemset(buf.recv_tokens.get(), 0, buf.recv_tokens.bytes()));
 
@@ -307,27 +323,27 @@ TEST_F(EPDispatchTest, PrepareAndDispatch) {
 
   // 2. Recv values: read only the filled prefix per local-expert zone, not the
   // whole recv buffer; avoids false positives from legitimate-zero token values.
-  std::vector<nv_bfloat16> h_recv(buf.recv_capacity * hidden_dim_);
+  std::vector<Tok> h_recv(buf.recv_capacity * hidden_dim_);
   NVTE_CHECK_CUDA(cudaMemcpy(h_recv.data(), buf.recv_tokens.get(),
-                        h_recv.size() * sizeof(nv_bfloat16), cudaMemcpyDeviceToHost));
+                        h_recv.size() * sizeof(Tok), cudaMemcpyDeviceToHost));
 
   std::vector<float> got_vals;
   got_vals.reserve(total_recv);
   size_t slot = 0;
   for (int e = 0; e < num_local_experts_; ++e) {
     for (int i = 0; i < got_counts[e]; ++i) {
-      got_vals.push_back(__bfloat162float(h_recv[slot * hidden_dim_]));
+      got_vals.push_back(tok_to_float(h_recv[slot * hidden_dim_]));
       ++slot;
     }
   }
   std::sort(got_vals.begin(), got_vals.end());
 
-  auto exp_vals = expected_recv_values_sorted(g_process_id, g_num_processes, num_tokens_,
-                                              top_k_, num_experts_, num_local_experts_);
+  auto exp_vals = expected_recv_values_sorted<Tok>(g_process_id, g_num_processes, num_tokens_,
+                                                   top_k_, num_experts_, num_local_experts_);
 
   ASSERT_EQ(got_vals.size(), exp_vals.size());
   for (size_t i = 0; i < exp_vals.size(); ++i)
-    EXPECT_NEAR(got_vals[i], exp_vals[i], bf16_tol(exp_vals[i]))
+    EXPECT_EQ(got_vals[i], exp_vals[i])
         << "recv value mismatch at sorted index " << i;
 
   // 3. recv_topk_weights: every filled slot must equal the per-token weight (1/top_k).
@@ -348,14 +364,17 @@ TEST_F(EPDispatchTest, PrepareAndDispatch) {
 // EPCombineTest: round-trip identity expert -> result == top_k * tokens.
 // =============================================================================
 
-class EPCombineTest : public EpOpTestBase {};
+template <typename T> class EPCombineTest : public EpOpTestBase {};
+TYPED_TEST_SUITE(EPCombineTest, EPBf16Only);
 
-TEST_F(EPCombineTest, Combine) {
-  EPBuffers<> buf;
+TYPED_TEST(EPCombineTest, Combine) {
+  using Tok = TypeParam;
+  EP_PULL_FIXTURE();
+  EPBuffers<Tok> buf;
   buf.alloc(num_tokens_, top_k_, hidden_dim_, num_local_experts_,
             ep_size_, max_tokens_per_rank_);
-  upload_inputs(buf);
-  EPTensors<> t(buf, num_tokens_, top_k_, hidden_dim_, num_local_experts_);
+  this->template upload_inputs<Tok>(buf);
+  EPTensors<Tok> t(buf, num_tokens_, top_k_, hidden_dim_, num_local_experts_);
 
   cudaStream_t stream;
   NVTE_CHECK_CUDA(cudaStreamCreate(&stream));
@@ -369,14 +388,14 @@ TEST_F(EPCombineTest, Combine) {
                                   t.result.data(), stream));
   NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
 
-  std::vector<nv_bfloat16> h_result(num_tokens_ * hidden_dim_);
+  std::vector<Tok> h_result(num_tokens_ * hidden_dim_);
   NVTE_CHECK_CUDA(cudaMemcpy(h_result.data(), buf.result.get(),
-                        h_result.size() * sizeof(nv_bfloat16), cudaMemcpyDeviceToHost));
-  auto h_tok = generate_tokens(g_process_id, num_tokens_, hidden_dim_);
+                        h_result.size() * sizeof(Tok), cudaMemcpyDeviceToHost));
+  auto h_tok = generate_tokens<Tok>(g_process_id, num_tokens_, hidden_dim_);
   for (int tok = 0; tok < num_tokens_; ++tok) {
-    float exp = __bfloat162float(h_tok[tok * hidden_dim_]) * static_cast<float>(top_k_);
+    float exp = tok_to_float(h_tok[tok * hidden_dim_]) * static_cast<float>(top_k_);
     for (int p = 0; p < hidden_dim_; ++p) {
-      float got = __bfloat162float(h_result[tok * hidden_dim_ + p]);
+      float got = tok_to_float(h_result[tok * hidden_dim_ + p]);
       EXPECT_NEAR(got, exp, bf16_tol(exp))
           << "token " << tok << " rank " << g_process_id << " hidden " << p;
     }
@@ -392,14 +411,17 @@ TEST_F(EPCombineTest, Combine) {
 // EPCombineBwdTest: filled slots in grad_expert == d_result (unweighted).
 // =============================================================================
 
-class EPCombineBwdTest : public EpOpTestBase {};
+template <typename T> class EPCombineBwdTest : public EpOpTestBase {};
+TYPED_TEST_SUITE(EPCombineBwdTest, EPBf16Only);
 
-TEST_F(EPCombineBwdTest, CombineBwdCheck) {
-  EPBuffers<> buf;
+TYPED_TEST(EPCombineBwdTest, CombineBwdCheck) {
+  using Tok = TypeParam;
+  EP_PULL_FIXTURE();
+  EPBuffers<Tok> buf;
   buf.alloc(num_tokens_, top_k_, hidden_dim_, num_local_experts_,
             ep_size_, max_tokens_per_rank_);
-  upload_inputs(buf);
-  EPTensors<> t(buf, num_tokens_, top_k_, hidden_dim_, num_local_experts_);
+  this->template upload_inputs<Tok>(buf);
+  EPTensors<Tok> t(buf, num_tokens_, top_k_, hidden_dim_, num_local_experts_);
 
   cudaStream_t stream;
   NVTE_CHECK_CUDA(cudaStreamCreate(&stream));
@@ -412,9 +434,9 @@ TEST_F(EPCombineBwdTest, CombineBwdCheck) {
   ASSERT_NO_THROW(nvte_ep_combine(t.handle_mem.data(), t.recv_tokens.data(), NVTECommWindow{},
                                   t.result.data(), stream));
 
-  std::vector<nv_bfloat16> h_grad_r(num_tokens_ * hidden_dim_, __float2bfloat16(0.1f));
+  std::vector<Tok> h_grad_r(num_tokens_ * hidden_dim_, tok_from_float<Tok>(0.1f));
   NVTE_CHECK_CUDA(cudaMemcpyAsync(buf.grad_result.get(), h_grad_r.data(),
-                             h_grad_r.size() * sizeof(nv_bfloat16),
+                             h_grad_r.size() * sizeof(Tok),
                              cudaMemcpyHostToDevice, stream));
   NVTE_CHECK_CUDA(cudaMemsetAsync(buf.grad_expert.get(), 0, buf.grad_expert.bytes(), stream));
 
@@ -422,23 +444,23 @@ TEST_F(EPCombineBwdTest, CombineBwdCheck) {
                                       t.grad_expert.data(), NVTECommWindow{}, stream));
   NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
 
-  int total_recv = read_total_recv(buf);
+  int total_recv = this->template read_total_recv<Tok>(buf);
 
   std::vector<int32_t> cnt(num_local_experts_);
   NVTE_CHECK_CUDA(cudaMemcpy(cnt.data(), buf.token_counts.get(),
                         num_local_experts_ * sizeof(int32_t), cudaMemcpyDeviceToHost));
-  std::vector<nv_bfloat16> h_ge(buf.recv_capacity * hidden_dim_);
+  std::vector<Tok> h_ge(buf.recv_capacity * hidden_dim_);
   NVTE_CHECK_CUDA(cudaMemcpy(h_ge.data(), buf.grad_expert.get(),
-                        h_ge.size() * sizeof(nv_bfloat16), cudaMemcpyDeviceToHost));
+                        h_ge.size() * sizeof(Tok), cudaMemcpyDeviceToHost));
 
   // Walk filled slots by per-expert zone (no v != 0 heuristic).
-  const float kExpGrad = 0.1f;
+  const float kExpGrad = tok_to_float(tok_from_float<Tok>(0.1f));
   size_t slot = 0;
   int filled = 0;
   for (int e = 0; e < num_local_experts_; ++e) {
     for (int i = 0; i < cnt[e]; ++i) {
       for (int p = 0; p < hidden_dim_; ++p) {
-        float v = __bfloat162float(h_ge[slot * hidden_dim_ + p]);
+        float v = tok_to_float(h_ge[slot * hidden_dim_ + p]);
         EXPECT_NEAR(v, kExpGrad, bf16_tol(kExpGrad))
             << "grad_expert expert " << e << " slot " << i
             << " (linear " << slot << ") hidden " << p;
@@ -458,14 +480,17 @@ TEST_F(EPCombineBwdTest, CombineBwdCheck) {
 // EPDispatchBwdTest: grad_tokens == top_k * d_result.
 // =============================================================================
 
-class EPDispatchBwdTest : public EpOpTestBase {};
+template <typename T> class EPDispatchBwdTest : public EpOpTestBase {};
+TYPED_TEST_SUITE(EPDispatchBwdTest, EPBf16Only);
 
-TEST_F(EPDispatchBwdTest, DispatchBwdCheck) {
-  EPBuffers<> buf;
+TYPED_TEST(EPDispatchBwdTest, DispatchBwdCheck) {
+  using Tok = TypeParam;
+  EP_PULL_FIXTURE();
+  EPBuffers<Tok> buf;
   buf.alloc(num_tokens_, top_k_, hidden_dim_, num_local_experts_,
             ep_size_, max_tokens_per_rank_);
-  upload_inputs(buf);
-  EPTensors<> t(buf, num_tokens_, top_k_, hidden_dim_, num_local_experts_);
+  this->template upload_inputs<Tok>(buf);
+  EPTensors<Tok> t(buf, num_tokens_, top_k_, hidden_dim_, num_local_experts_);
 
   cudaStream_t stream;
   NVTE_CHECK_CUDA(cudaStreamCreate(&stream));
@@ -478,9 +503,9 @@ TEST_F(EPDispatchBwdTest, DispatchBwdCheck) {
   ASSERT_NO_THROW(nvte_ep_combine(t.handle_mem.data(), t.recv_tokens.data(), NVTECommWindow{},
                                   t.result.data(), stream));
 
-  std::vector<nv_bfloat16> h_grad(num_tokens_ * hidden_dim_, __float2bfloat16(0.1f));
+  std::vector<Tok> h_grad(num_tokens_ * hidden_dim_, tok_from_float<Tok>(0.1f));
   NVTE_CHECK_CUDA(cudaMemcpyAsync(buf.grad_result.get(), h_grad.data(),
-                             h_grad.size() * sizeof(nv_bfloat16),
+                             h_grad.size() * sizeof(Tok),
                              cudaMemcpyHostToDevice, stream));
   NVTE_CHECK_CUDA(cudaMemsetAsync(buf.grad_expert.get(),         0, buf.grad_expert.bytes(),         stream));
   NVTE_CHECK_CUDA(cudaMemsetAsync(buf.g_recv_topk_weights.get(), 0, buf.g_recv_topk_weights.bytes(), stream));
@@ -493,13 +518,13 @@ TEST_F(EPDispatchBwdTest, DispatchBwdCheck) {
                                        t.grad_tokens.data(), t.grad_topk_weights.data(), stream));
   NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
 
-  std::vector<nv_bfloat16> h_gt(num_tokens_ * hidden_dim_);
+  std::vector<Tok> h_gt(num_tokens_ * hidden_dim_);
   NVTE_CHECK_CUDA(cudaMemcpy(h_gt.data(), buf.grad_tokens.get(),
-                        h_gt.size() * sizeof(nv_bfloat16), cudaMemcpyDeviceToHost));
-  const float kExpGrad = static_cast<float>(top_k_) * 0.1f;
+                        h_gt.size() * sizeof(Tok), cudaMemcpyDeviceToHost));
+  const float kExpGrad = static_cast<float>(top_k_) * tok_to_float(tok_from_float<Tok>(0.1f));
   for (int tok = 0; tok < num_tokens_; ++tok)
     for (int p = 0; p < hidden_dim_; ++p)
-      EXPECT_NEAR(__bfloat162float(h_gt[tok * hidden_dim_ + p]), kExpGrad,
+      EXPECT_NEAR(tok_to_float(h_gt[tok * hidden_dim_ + p]), kExpGrad,
                   bf16_tol(kExpGrad))
           << "grad_tokens token " << tok << " hidden " << p;
 
@@ -513,21 +538,25 @@ TEST_F(EPDispatchBwdTest, DispatchBwdCheck) {
 // EPDispatchBwdGradWeightsTest: round-trip per-(t, k) weights.
 // =============================================================================
 
-class EPDispatchBwdGradWeightsTest : public EpOpTestBase {};
+template <typename T> class EPDispatchBwdGradWeightsTest : public EpOpTestBase {};
+TYPED_TEST_SUITE(EPDispatchBwdGradWeightsTest, EPBf16Only);
 
-TEST_F(EPDispatchBwdGradWeightsTest, RoundTrip) {
-  EPBuffers<> buf;
+TYPED_TEST(EPDispatchBwdGradWeightsTest, RoundTrip) {
+  using Tok = TypeParam;
+  EP_PULL_FIXTURE();
+  EPBuffers<Tok> buf;
   buf.alloc(num_tokens_, top_k_, hidden_dim_, num_local_experts_,
             ep_size_, max_tokens_per_rank_);
-  upload_inputs(buf);
-  EPTensors<> t(buf, num_tokens_, top_k_, hidden_dim_, num_local_experts_);
+  this->template upload_inputs<Tok>(buf);
+  EPTensors<Tok> t(buf, num_tokens_, top_k_, hidden_dim_, num_local_experts_);
 
   // Distinct per-(rank, t, k) weights so each slot carries a unique value.
+  // Global integer counter over (rank, tok, k) keeps every slot unique.
   std::vector<float> h_w(num_tokens_ * top_k_);
   for (int tok = 0; tok < num_tokens_; ++tok)
     for (int k = 0; k < top_k_; ++k)
-      h_w[tok * top_k_ + k] = 0.1f + 0.01f * tok + 0.001f * k +
-                              0.0001f * (g_process_id + 1);
+      h_w[tok * top_k_ + k] = static_cast<float>(
+          (g_process_id * num_tokens_ + tok) * top_k_ + k + 1);
   NVTE_CHECK_CUDA(cudaMemcpy(buf.topk_weights.get(), h_w.data(),
                         h_w.size() * sizeof(float), cudaMemcpyHostToDevice));
 
@@ -704,22 +733,28 @@ static inline NVTECommWindow symm_window(const SymmBuf& b) {
 
 // Tests rebootstrap the backend to zero_copy=ON for the symm phase via
 // ep_reinitialize(); TearDown restores OFF for the rest of the suite.
+template <typename T>
 class EPZeroCopyTest : public EpOpTestBase {
  protected:
   void TearDown() override {
     if (g_ep_initialized) ep_reinitialize(/*zero_copy=*/0);
   }
 };
+TYPED_TEST_SUITE(EPZeroCopyTest, EPBf16Only);
 
 // Identity round-trip with symm-mem on dispatch i/o + combine input. Bit-exact
 // vs HBM reference (same routing, same input).
-TEST_F(EPZeroCopyTest, IdentityAllSymm) {
+TYPED_TEST(EPZeroCopyTest, IdentityAllSymm) {
+  using Tok = TypeParam;
+  EP_PULL_FIXTURE();
+  constexpr DType kTokDType = test::TypeInfo<Tok>::dtype;
+
   // HBM reference run.
-  EPBuffers<> ref_buf;
+  EPBuffers<Tok> ref_buf;
   ref_buf.alloc(num_tokens_, top_k_, hidden_dim_, num_local_experts_,
                 ep_size_, max_tokens_per_rank_);
-  upload_inputs(ref_buf);
-  EPTensors<> ref_t(ref_buf, num_tokens_, top_k_, hidden_dim_, num_local_experts_);
+  this->template upload_inputs<Tok>(ref_buf);
+  EPTensors<Tok> ref_t(ref_buf, num_tokens_, top_k_, hidden_dim_, num_local_experts_);
 
   cudaStream_t stream;
   NVTE_CHECK_CUDA(cudaStreamCreate(&stream));
@@ -733,37 +768,37 @@ TEST_F(EPZeroCopyTest, IdentityAllSymm) {
                                   ref_t.result.data(), stream));
   NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
 
-  std::vector<nv_bfloat16> ref_recv(ref_buf.recv_capacity * hidden_dim_);
-  std::vector<nv_bfloat16> ref_result(num_tokens_ * hidden_dim_);
+  std::vector<Tok> ref_recv(ref_buf.recv_capacity * hidden_dim_);
+  std::vector<Tok> ref_result(num_tokens_ * hidden_dim_);
   NVTE_CHECK_CUDA(cudaMemcpy(ref_recv.data(),   ref_buf.recv_tokens.get(),
-                        ref_recv.size() * sizeof(nv_bfloat16), cudaMemcpyDeviceToHost));
+                        ref_recv.size() * sizeof(Tok), cudaMemcpyDeviceToHost));
   NVTE_CHECK_CUDA(cudaMemcpy(ref_result.data(), ref_buf.result.get(),
-                        ref_result.size() * sizeof(nv_bfloat16), cudaMemcpyDeviceToHost));
+                        ref_result.size() * sizeof(Tok), cudaMemcpyDeviceToHost));
 
   // Switch backend to zero_copy=ON for the symm phase.
   ep_reinitialize(/*zero_copy=*/1);
 
   // Symm-mem run: tokens, recv_tokens, combine_input (== recv_tokens) all symm.
-  EPBuffers<> sym_buf;  // alloc all buffers except the symm ones.
+  EPBuffers<Tok> sym_buf;  // alloc all buffers except the symm ones.
   sym_buf.alloc(num_tokens_, top_k_, hidden_dim_, num_local_experts_,
                 ep_size_, max_tokens_per_rank_);
-  upload_inputs(sym_buf);
+  this->template upload_inputs<Tok>(sym_buf);
 
   SymmBuf sym_tokens, sym_recv;
-  sym_tokens.alloc(num_tokens_           * hidden_dim_ * sizeof(nv_bfloat16));
-  sym_recv  .alloc(sym_buf.recv_capacity * hidden_dim_ * sizeof(nv_bfloat16));
+  sym_tokens.alloc(num_tokens_           * hidden_dim_ * sizeof(Tok));
+  sym_recv  .alloc(sym_buf.recv_capacity * hidden_dim_ * sizeof(Tok));
 
   // Stage same tokens into the symm-mem input.
-  auto h_tok = generate_tokens(g_process_id, num_tokens_, hidden_dim_);
+  auto h_tok = generate_tokens<Tok>(g_process_id, num_tokens_, hidden_dim_);
   NVTE_CHECK_CUDA(cudaMemcpy(sym_tokens.ptr, h_tok.data(),
-                        h_tok.size() * sizeof(nv_bfloat16), cudaMemcpyHostToDevice));
+                        h_tok.size() * sizeof(Tok), cudaMemcpyHostToDevice));
 
-  EPTensors<> sym_t(sym_buf, num_tokens_, top_k_, hidden_dim_, num_local_experts_);
+  EPTensors<Tok> sym_t(sym_buf, num_tokens_, top_k_, hidden_dim_, num_local_experts_);
   // Replace the tokens/recv_tokens views with ones pointing at the symm buffers.
   sym_t.tokens      = TensorWrapper(sym_tokens.ptr,
-                          std::vector<size_t>{(size_t)num_tokens_, (size_t)hidden_dim_}, DType::kBFloat16);
+                          std::vector<size_t>{(size_t)num_tokens_, (size_t)hidden_dim_}, kTokDType);
   sym_t.recv_tokens = TensorWrapper(sym_recv.ptr,
-                          std::vector<size_t>{sym_buf.recv_capacity, (size_t)hidden_dim_}, DType::kBFloat16);
+                          std::vector<size_t>{sym_buf.recv_capacity, (size_t)hidden_dim_}, kTokDType);
 
   ASSERT_NO_THROW(nvte_ep_prepare(sym_t.handle_mem.data(), sym_t.topk_idx.data(), sym_t.token_counts.data(), NVTEEpLayerConfig{sym_t.top_k_, sym_t.alignment_}, stream));
   ASSERT_NO_THROW(nvte_ep_dispatch(sym_t.handle_mem.data(), sym_t.topk_idx.data(),
@@ -775,20 +810,20 @@ TEST_F(EPZeroCopyTest, IdentityAllSymm) {
                                   symm_window(sym_recv), sym_t.result.data(), stream));
   NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
 
-  std::vector<nv_bfloat16> sym_recv_host(sym_buf.recv_capacity * hidden_dim_);
-  std::vector<nv_bfloat16> sym_result(num_tokens_ * hidden_dim_);
+  std::vector<Tok> sym_recv_host(sym_buf.recv_capacity * hidden_dim_);
+  std::vector<Tok> sym_result(num_tokens_ * hidden_dim_);
   NVTE_CHECK_CUDA(cudaMemcpy(sym_recv_host.data(), sym_recv.ptr,
-                        sym_recv_host.size() * sizeof(nv_bfloat16), cudaMemcpyDeviceToHost));
+                        sym_recv_host.size() * sizeof(Tok), cudaMemcpyDeviceToHost));
   NVTE_CHECK_CUDA(cudaMemcpy(sym_result.data(),    sym_buf.result.get(),
-                        sym_result.size() * sizeof(nv_bfloat16), cudaMemcpyDeviceToHost));
+                        sym_result.size() * sizeof(Tok), cudaMemcpyDeviceToHost));
 
   // Compare per filled recv slot (HBM ref vs symm) and full result.
-  int total_recv = read_total_recv(sym_buf);
+  int total_recv = this->template read_total_recv<Tok>(sym_buf);
   for (int i = 0; i < total_recv * hidden_dim_; ++i)
-    ASSERT_EQ(__bfloat162float(sym_recv_host[i]), __bfloat162float(ref_recv[i]))
+    ASSERT_EQ(tok_to_float(sym_recv_host[i]), tok_to_float(ref_recv[i]))
         << "recv mismatch at " << i;
   for (size_t i = 0; i < sym_result.size(); ++i)
-    ASSERT_EQ(__bfloat162float(sym_result[i]), __bfloat162float(ref_result[i]))
+    ASSERT_EQ(tok_to_float(sym_result[i]), tok_to_float(ref_result[i]))
         << "result mismatch at " << i;
 
   if (g_process_id == 0)

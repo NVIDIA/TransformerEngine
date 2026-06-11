@@ -80,13 +80,14 @@ struct DevBuf {
 // -- Shared routing helper -----------------------------------------------------
 
 // Balanced round-robin routing: token t on rank r maps top_k experts to
-//   (r * num_local_experts + t * top_k + k) % num_experts
+//   (r * num_tokens * top_k + t * top_k + k) % num_experts
+// i.e. a single global counter over all (rank, t, k) triples mod num_experts.
 static inline std::vector<int64_t> routing_balanced(
-    int rank, int num_tokens, int top_k, int num_experts, int num_local_experts) {
+    int rank, int num_tokens, int top_k, int num_experts, int /*num_local_experts*/) {
   std::vector<int64_t> idx(num_tokens * top_k);
   for (int t = 0; t < num_tokens; ++t)
     for (int k = 0; k < top_k; ++k)
-      idx[t * top_k + k] = (rank * num_local_experts + t * top_k + k) % num_experts;
+      idx[t * top_k + k] = (rank * num_tokens * top_k + t * top_k + k) % num_experts;
   return idx;
 }
 
