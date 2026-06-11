@@ -970,7 +970,7 @@ def get_attention_backend(
                 use_flash_attention_4 = False
 
     # Filter: QKV layout
-    if qkv_format == "thd":
+    if "thd" in (q_format, kv_format):
         if pad_between_seqs:
             if (  # pylint: disable=too-many-boolean-expressions
                 use_flash_attention_2 and FlashAttentionUtils.is_installed
