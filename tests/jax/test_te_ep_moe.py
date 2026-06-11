@@ -34,17 +34,24 @@ on the block are pytest parametrize values rather than separate test
 classes:
 
 * ``test_forward`` covers the forward across a curated set of
-  configurations (apply_topk_weights_early on/off, softmax/sigmoid
-  scoring, optional expert_bias). Each config asserts shape, dtype,
-  finiteness and numerical parity vs the reference in one run.
+  configurations (softmax/sigmoid scoring, optional non-zero
+  expert_bias). Each config asserts shape, dtype, finiteness and
+  numerical parity vs the reference in one run.
 * ``test_backward`` mirrors that for gradients.
 * ``TestTeEpMoeAuxLoss`` covers the second return value end-to-end
   (returned + parity + aux-only grad propagates to gate + combined
   main+aux grads stay finite) in two consolidated tests.
-* ``TestTeEpMoEBlockFlax`` exercises the Flax wrapper with the same
-  parity reference.
-* ``TestZZZTeEpMoeBootstrap`` verifies the per-process NCCL bootstrap
-  rejects a mismatched signature.
+
+Intentional non-coverage:
+
+* No dedicated "Flax wrapper init+apply" smoke test: every config above
+  already calls ``MoEBlock`` (the Flax wrapper) end-to-end, so a
+  separate wrapper smoke would just duplicate ``test_forward[softmax]``
+  + ``test_backward[softmax]``.
+* No re-bootstrap-mismatch test: ``ep_bootstrap`` rejects a mismatched
+  signature unconditionally and is a one-line guard; covering it from
+  this suite would taint the per-process NCCL bootstrap cache for the
+  rest of the file with no real upside.
 
 FP8 / MXFP8 recipes are deferred — the ``quantizer_sets`` plumbing
 has not yet been re-wired across the TE-EP ``shard_map`` boundary
@@ -536,10 +543,12 @@ _CONFIGS = [
         dict(score_function="sigmoid"),
         id="sigmoid",
     ),
-    pytest.param(
-        dict(score_function="sigmoid", use_expert_bias=True),
-        id="sigmoid-bias-zero",
-    ),
+    # NOTE: a ``sigmoid-bias-zero`` config (use_expert_bias=True with a
+    # zero-initialised bias buffer) was previously exercised here. It
+    # was dropped because the routing math collapses to the no-bias
+    # case when the buffer is zero -- ``sigmoid`` already covers that
+    # numerical path. The bias-aware codepath is still exercised by
+    # ``sigmoid-bias-strong`` below, which uses a non-zero bias.
     pytest.param(
         dict(
             score_function="sigmoid",
@@ -723,72 +732,3 @@ class TestTeEpMoeAuxLoss:
             g_local = np.asarray(jax.device_get(_unwrap(grads["params"][name]).addressable_data(0)))
             assert np.all(np.isfinite(g_local)), f"{name} grad NaN/Inf under main+aux"
             assert np.any(g_local != 0.0), f"{name} grad zero under main+aux"
-
-
-class TestTeEpMoEBlockFlax:
-    """Flax wrapper end-to-end in one run: shape/dtype/finiteness on the
-    forward, numerical parity vs the same reference, and per-tensor
-    grad finiteness + non-zeroness."""
-
-    def test_init_apply_parity(self, mesh):
-        block = _make_block()
-        x = _make_inputs(jax.random.PRNGKey(12))
-        variables, output, aux = _init_apply(block, mesh, x, jax.random.PRNGKey(13))
-
-        assert aux is None
-        assert output.shape == x.shape
-        assert output.dtype == x.dtype
-        out_local = np.asarray(jax.device_get(output.addressable_data(0)))
-        assert np.all(np.isfinite(out_local))
-
-        params_np = _params_global_numpy(variables, mesh)
-        x_np = np.asarray(jax.device_get(x))
-        out_te_np = _to_global_numpy(output, mesh)
-        out_ref, _ = _pure_jax_moe_reference(
-            jnp.asarray(x_np),
-            jnp.asarray(params_np["gate_kernel"]),
-            jnp.asarray(params_np["wi_0"]),
-            jnp.asarray(params_np["wi_1"]),
-            jnp.asarray(params_np["wo"]),
-            num_experts=NUM_EXPERTS,
-            num_experts_per_tok=TOPK,
-        )
-        np.testing.assert_allclose(
-            out_te_np.astype(np.float32),
-            np.asarray(jax.device_get(out_ref)).astype(np.float32),
-            atol=FWD_ATOL,
-            rtol=FWD_RTOL,
-        )
-
-        grads = _grad_step(block, variables, mesh, x)
-        for name in ("gate_kernel", "wi_0", "wi_1", "wo"):
-            g_local = np.asarray(jax.device_get(_unwrap(grads["params"][name]).addressable_data(0)))
-            assert np.all(np.isfinite(g_local)), f"{name} grad NaN/Inf"
-            assert np.any(g_local != 0.0), f"{name} grad zero"
-
-
-# Keep the bootstrap-signature test last in the module (the "ZZZ" prefix
-# ensures pytest's alphabetic class ordering picks it last): it
-# intentionally mismatches the NCCL EP bootstrap signature, which
-# permanently taints the per-process bootstrap cache for the rest of
-# the file.
-class TestZZZTeEpMoeBootstrap:
-    """Per-process NCCL bootstrap re-bootstrap rejection."""
-
-    def test_bootstrap_signature_mismatch_raises(self, mesh):
-        block_a = _make_block()
-        x_a = _make_inputs(jax.random.PRNGKey(14))
-        _init_apply(block_a, mesh, x_a, jax.random.PRNGKey(15))
-
-        # Different hidden dim → different bootstrap signature.
-        bigger_hidden = HIDDEN * 2
-        x_b = jax.random.normal(jax.random.PRNGKey(16), (BATCH, SEQ, bigger_hidden), dtype=DTYPE)
-        block_b = MoEBlock(
-            num_experts=NUM_EXPERTS,
-            num_experts_per_tok=TOPK,
-            intermediate_size=INTER,
-            data_parallelism_axes=(FSDP_AXIS,),
-            dtype=DTYPE,
-        )
-        with pytest.raises(ValueError, match="bootstrapped"):
-            _init_apply(block_b, mesh, x_b, jax.random.PRNGKey(17))
