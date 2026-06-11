@@ -991,8 +991,9 @@ at::Tensor thd_cp_reorder_sequences(const at::Tensor &inp, const at::Tensor &cu_
   auto te_cu_seqlens = makeTransformerEngineTensor(cu_seqlens);
   auto te_out = makeTransformerEngineTensor(out);
 
-  nvte_cp_thd_reorder(te_inp.data(), te_cu_seqlens.data(), te_out.data(), cp_size, scatter ? 1 : 0,
-                      total_tokens, at::cuda::getCurrentCUDAStream());
+  nvte_cp_thd_reorder_sequences(te_inp.data(), te_cu_seqlens.data(), te_out.data(), cp_size,
+                                scatter ? 1 : 0, total_tokens,
+                                at::cuda::getCurrentCUDAStream());
 
   return out;
 }
@@ -1017,8 +1018,8 @@ void thd_cp_copy_valid_tokens(at::Tensor out, const at::Tensor &inp,
   auto te_cu_seqlens = makeTransformerEngineTensor(cu_seqlens_c);
   auto te_out = makeTransformerEngineTensor(out);
 
-  nvte_cp_thd_valid_copy(te_inp.data(), te_cu_seqlens_padded.data(), te_cu_seqlens.data(),
-                         te_out.data(), total_tokens, at::cuda::getCurrentCUDAStream());
+  nvte_cp_thd_copy_valid_tokens(te_inp.data(), te_cu_seqlens_padded.data(), te_cu_seqlens.data(),
+                                te_out.data(), total_tokens, at::cuda::getCurrentCUDAStream());
 }
 
 /***************************************************************************************************

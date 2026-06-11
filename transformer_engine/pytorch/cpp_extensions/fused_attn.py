@@ -363,10 +363,7 @@ def fused_attn_fwd(
                 max_tensor = max_tensor.masked_fill(~valid, float("-inf"))
             elif max_tensor.ndim == 3:
                 if cu_seqlens_q_padded is not None:
-                    # For THD + pad_between_seqs=True + non-sm120 + cuDNN>9.6, Max tensor is [tq, h, 1]
-                    # and padding positions could be uninitialized. Exclude those padded positions when
-                    # computing max_logit. Use absolute positions from cu_seqlens_q_padded to handle
-                    # cases where cu_seqlens_q_padded may not start at 0 (e.g. CP offset-based approach).
+                    # Exclude padded THD rows; CP may pass nonzero padded offsets.
                     actual_seqlens = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).to(
                         device=max_tensor.device
                     )

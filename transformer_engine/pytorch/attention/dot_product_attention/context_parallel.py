@@ -2940,27 +2940,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 def get_kv_seq_info_after_all_gather(
     local_chunk_id, cp_size, max_seqlen_q, max_seqlen_kv, window_size, causal
 ):
-    """Compute per-step KV range, effective max_seqlen_kv, and adjusted window
-    size for one chunk in the all-gather CP forward/backward.
+    """Return the visible KV range and adjusted window for one AG CP step.
 
-    After all-gather, the full KV buffer spans ``2 * cp_size`` chunks of
-    ``max_seqlen_kv`` tokens each.  For a given Q chunk (``local_chunk_id``),
-    this function determines:
-
-    * **kv_range** ``(seq_start_idx, seq_end_idx)`` — the slice of the KV
-      buffer that is visible to this Q chunk.  bshd/sbhd uses this to slice
-      ``k_ag``/``v_ag``; THD ignores ``seq_start_idx`` (passes the full
-      buffer; visibility is controlled via ``cu_seqlens``/``seqused_k``)
-      but uses ``seq_end_idx`` as max_seqlen_kv.
-    * **adjusted_window** ``(window_left, window_right)`` — window size
-      compensated for the KV trim.  Under FA3's bottom_right alignment
-      ``Q[0]`` aligns to ``KV[kv_len - q_len]``, so trimming KV shifts
-      the alignment and the window must be adjusted to preserve the
-      original attention pattern.  Used by both bshd/sbhd and THD.
-
-    The caller derives max_seqlen_kv from kv_range: bshd uses
-    ``seq_end - seq_start`` (the sliced KV length), THD uses ``seq_end``
-    (full buffer from offset 0).
+    bshd/sbhd slices K/V with ``kv_range``.  THD keeps full K/V and uses the end
+    bound as ``max_seqlen_kv`` because per-sequence visibility is passed through
+    ``cu_seqlens`` or ``seqused_k``.  ``adjusted_window`` compensates for
+    bottom-right alignment after KV trimming.
 
     Returns:
         Tuple of ``(kv_range, adjusted_window)``.
@@ -2995,50 +2980,13 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
     Attention implementation with context parallelism. KV all-gather between CP ranks is exposed.
     Refer section 3.3.2 of `The Llama 3 Herd of Models <https://arxiv.org/abs/2407.21783>`_.
 
-    THD format requires FlashAttention v3 or FusedAttention (cuDNN).
-
-    **Background — padding in CP.**  All CP backends pad each sequence to a
-    multiple of ``2 * cp_size`` for dual-chunk partitioning.  The tensor is
-    allocated at these padded lengths; the actual (unpadded) token counts may
-    be smaller.  An attention kernel therefore needs two pieces of information
-    per sequence: the *tensor offset* (where it lives in the buffer) and the
-    *visibility limit* (how many tokens to actually attend to).
-
-    **How each backend communicates this to the kernel:**
-
-    - *FusedAttention (cuDNN)* accepts ``cu_seqlens`` (visibility) and
-      ``cu_seqlens_padded`` (tensor layout) as separate arguments.  The two
-      tensors naturally decouple offset from visibility, so FusedAttention
-      works with THD in all CP backends without additional mechanisms.
-
-    - *FlashAttention v3* accepts ``cu_seqlens`` (tensor layout) and
-      ``seqused_k`` (visibility limit per sequence) — a similar split.
-
-    - *FlashAttention v2* has only ``cu_seqlens``, which must serve as both
-      tensor offset and visibility limit.  When these diverge, FA2 silently
-      reads wrong data.
-
-    **Why all-gather is special.**  In P2P and A2A each step's KV is a single
-    chunk whose layout directly matches the caller's ``cu_seqlens``, so FA2
-    works when the user-facing ``pad_between_seqs`` flag is False
-    (``cu_seqlens == cu_seqlens_padded``).
-
-    All-gather is different: after gathering, the KV buffer is reordered into
-    contiguous per-sequence order via ``reorder_thd_sequences_to_contiguous``,
-    producing one buffer where each sequence sits at its padded offset.  For
-    causal or SWA steps the kernel must attend to a *subset* of each
-    sequence's KV (visibility < allocation).  A cumsum of per-sequence visible
-    counts gives the right visibility limits but the wrong tensor offsets for
-    every sequence after the first, because padding gaps accumulate.
-
-    This offset/visibility divergence is *intrinsic* to the gathered buffer
-    layout and occurs regardless of the user-facing ``pad_between_seqs``
-    flag.  That flag controls a different concept — whether the *caller*
-    constructed the input with ``cu_seqlens != cu_seqlens_padded``.  In P2P
-    and A2A this distinction matters because their per-step KV mirrors the
-    caller's layout.  In all-gather the buffer is always padded internally,
-    so the offset/visibility split (FA3's ``seqused_k`` or cuDNN's dual
-    ``cu_seqlens``) is always required for THD.
+    THD all-gather needs separate tensor offsets and visible lengths.  After
+    K/V all-gather, each sequence occupies its padded offset in the reordered
+    buffer, while causal/SWA steps may expose only a prefix of valid tokens.
+    FusedAttention carries this split with ``cu_seqlens`` plus
+    ``cu_seqlens_padded``; FlashAttention v3 uses layout ``cu_seqlens`` plus
+    ``seqused_k``.  FlashAttention v2 cannot represent both values, so THD
+    all-gather is restricted to FusedAttention or FlashAttention v3.
     """
 
     @staticmethod
@@ -3089,12 +3037,8 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         if qkv_format == "thd":
             # THD always uses padding mask types; per-step masks set internally
             assert padding, f"THD format requires padding mask type, got {attn_mask_type}!"
-        # Upgrade causal -> causal_bottom_right (and padding_causal ->
-        # padding_causal_bottom_right) for AG CP. This applies to all qkv_format
-        # values including "thd": after AG the per-step Q chunk is shorter than
-        # the visible KV slice, so Q[0] must align with KV[kv_len - q_len] rather
-        # than KV[0]. The bottom_right variant encodes that alignment for both
-        # bshd/sbhd (slice-based) and THD (cu_seqlens/seqused_k-based) paths.
+        # AG CP uses shorter per-step Q against longer KV, so causal masks need
+        # bottom-right alignment for both sliced and THD paths.
         if use_fused_attention and causal and "bottom_right" not in attn_mask_type:
             attn_mask_type = attn_mask_type + "_bottom_right"
         assert (
@@ -3322,21 +3266,6 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                 cu_seqlens_q_padded_step_1,
             ]
 
-            # Per-step KV cu_seqlens (non-padded): how many actual KV tokens are
-            # visible for each sequence.
-            #
-            # Non-causal default: the kernel sees every actual KV token across
-            # the whole sequence, so we initialise to ``cu_seqlens_kv_original``
-            # (unpadded). This deliberately does NOT encode CP padding
-            # boundaries — those are conveyed to the kernel via
-            # ``cu_seqlens_kv_padded_`` (passed separately, see below), which
-            # describes the tensor layout. The kernel uses cu_seqlens_kv for
-            # visibility and cu_seqlens_kv_padded for offsets; conflating the
-            # two would incorrectly mask actual tokens.
-            actual_seqlens_kv = cu_seqlens_kv_original[1:] - cu_seqlens_kv_original[:-1]
-            padded_chunk_sizes_kv = (cu_seqlens_kv_padded[1:] - cu_seqlens_kv_padded[:-1]) // (
-                2 * cp_size
-            )
             thd_cu_seqlens_kv_per_step = [
                 cu_seqlens_kv_original.clone(),
                 cu_seqlens_kv_original.clone(),
@@ -3346,16 +3275,16 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                 window_size is not None and window_size != (-1, 0) and window_size != (-1, -1)
             )
             if causal or sliding_window_attn:
-                # Visible KV covers chunks 0..chunk_id. For causal this is the
-                # natural boundary; for non-causal SWA we need the same trimming
-                # so that FA3's bottom_right alignment encodes the Q chunk
-                # offset correctly (kv_len - q_len = chunk_id * chunk_size).
+                actual_seqlens_kv = cu_seqlens_kv_original[1:] - cu_seqlens_kv_original[:-1]
+                padded_chunk_sizes_kv = (cu_seqlens_kv_padded[1:] - cu_seqlens_kv_padded[:-1]) // (
+                    2 * cp_size
+                )
+                # Visible KV covers chunks 0..chunk_id so bottom-right alignment
+                # places this Q chunk at the right offset.
                 visible_padded = [
                     padded_chunk_sizes_kv * (chunk_id + 1) for chunk_id in local_seq_chunk_ids
                 ]
-                # SWA right window: extend visibility beyond the chunk boundary so
-                # the kernel can attend to tokens right of the diagonal. The
-                # minimum() below naturally caps this at actual_seqlens_kv.
+                # Right-window SWA extends visibility past the chunk boundary.
                 if window_size is not None and window_size[1] > 0:
                     visible_padded = [vp + window_size[1] for vp in visible_padded]
                 visible_actual = [
@@ -3424,10 +3353,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                                         )
                                     )
                     elif qkv_format == "thd":
-                        # THD: pass full Q/KV with per-step cu_seqlens to select chunks.
-                        # Reuse get_kv_seq_info_after_all_gather for max_seqlen_kv_ and
-                        # window adjustment (same formulas as bshd). THD ignores kv_range
-                        # since visibility is controlled via cu_seqlens/seqused_k.
+                        # THD passes full Q/KV; per-step cu_seqlens select chunks.
                         q_part = q
                         k_part = k_ag
                         v_part = v_ag
@@ -3889,9 +3815,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                     flash_attn_streams[i].wait_stream(flash_attn_streams[i - 1])
                 with torch.cuda.stream(flash_attn_streams[i]):
                     if ctx.qkv_format == "thd":
-                        # THD: pass full Q/dout with per-step cu_seqlens_q_padded.
-                        # Use original window_size (not forward-adjusted) to
-                        # recompute max_seqlen_kv via the shared function.
+                        # THD passes full Q/dout; per-step cu_seqlens select chunks.
                         q_part = q
                         k_part = k_ag
                         v_part = v_ag

@@ -79,7 +79,7 @@ __forceinline__ __device__ int binary_search(int target, int *array, int len) {
 
 // Dual-chunk source index for THD CP partitioning. cu_seqlens_s must already be divided by
 // world_size. Single source of truth shared by thd_partition_indices_kernel and
-// thd_reorder_kernel so the two never diverge.
+// thd_cp_reorder_sequences_kernel so the two never diverge.
 __forceinline__ __device__ int thd_partition_src_index(int token_id, int *cu_seqlens_s, int batch,
                                                        int world_size, int rank) {
   int seq_id = binary_search(token_id, cu_seqlens_s, batch + 1);
@@ -113,15 +113,12 @@ __global__ void thd_partition_indices_kernel(int *output, int *cu_seqlens, int b
 }
 
 /***************************************************************************************************
- * Support THD format for Context Parallel: fused dual-chunk reorder (gather/scatter)
- * out[gi] = inp[src(gi)] (gather, to_rank_sharded) or out[src(gi)] = inp[gi] (scatter,
- * to_contiguous). src is computed inline (no materialized index tensor). Modeled on
- * thd_read_half_tensor_kernel: warp-per-token, cu_seqlens_s in shared, float4 vectorized copy.
- * hidden_size_in_bytes must be a multiple of 16 (same assumption as thd_read_half_tensor).
+ * Fused dual-chunk THD reorder. Computes src inline and copies one token row per warp.
+ * scatter=false: out[gi]=inp[src(gi)]; scatter=true: out[src(gi)]=inp[gi].
  **************************************************************************************************/
-__global__ void thd_reorder_kernel(void *out, void *inp, int *cu_seqlens, int batch,
-                                   int total_tokens, int world_size, int hidden_size_in_bytes,
-                                   bool scatter) {
+__global__ void thd_cp_reorder_sequences_kernel(void *out, void *inp, int *cu_seqlens, int batch,
+                                                int total_tokens, int world_size,
+                                                int hidden_size_in_bytes, bool scatter) {
   extern __shared__ int cu_seqlens_s[];
   for (int i = threadIdx.x; i <= batch; i += blockDim.x) {
     cu_seqlens_s[i] = cu_seqlens[i] / world_size;
@@ -149,14 +146,12 @@ __global__ void thd_reorder_kernel(void *out, void *inp, int *cu_seqlens, int ba
 }
 
 /***************************************************************************************************
- * Support THD format for Context Parallel: copy the VALID token rows of a per-step output/grad
- * into the destination accumulator, leaving padded tails untouched. Sync-free replacement for the
- * per-batch `.item()` slice-copy loops in the AllGather CP THD fwd/bwd. cu_seqlens_padded gives a
- * token's segment + local offset in the padded layout; cu_seqlens gives each segment's valid
- * length. Warp-per-token, float4 vectorized, modeled on thd_reorder_kernel.
+ * Copy valid token rows from a per-step THD tensor into an accumulator.
+ * cu_seqlens_padded gives row offsets; cu_seqlens gives valid lengths.
  **************************************************************************************************/
-__global__ void thd_valid_copy_kernel(void *out, void *inp, int *cu_seqlens_padded, int *cu_seqlens,
-                                      int batch, int total_tokens, int hidden_size_in_bytes) {
+__global__ void thd_cp_copy_valid_tokens_kernel(void *out, void *inp, int *cu_seqlens_padded,
+                                                int *cu_seqlens, int batch, int total_tokens,
+                                                int hidden_size_in_bytes) {
   extern __shared__ int padded_s[];       // [0..batch] padded boundaries
   int *valid_s = padded_s + (batch + 1);  // [0..batch] valid boundaries
   for (int i = threadIdx.x; i <= batch; i += blockDim.x) {
@@ -174,9 +169,7 @@ __global__ void thd_valid_copy_kernel(void *out, void *inp, int *cu_seqlens_padd
     int seq_id = binary_search(token_id, padded_s, batch + 1);
     int local = token_id - padded_s[seq_id];
     int valid_len = valid_s[seq_id + 1] - valid_s[seq_id];
-    // local can be negative when a segment's padded start is shifted past earlier tokens (e.g.
-    // step-1 chunks: cu_seqlens_padded[:-1] += chunk_size). Those tokens are outside any valid
-    // run, so skip them -- otherwise the first chunk's already-written rows get clobbered.
+    // Step-1 offsets can shift a segment start past earlier tokens; skip those rows.
     if (local >= 0 && local < valid_len) {
       float4 *src_tok = reinterpret_cast<float4 *>(
           reinterpret_cast<char *>(inp) + static_cast<size_t>(token_id) * hidden_size_in_bytes);
@@ -760,8 +753,9 @@ void thd_get_partitioned_indices(const Tensor &cu_seqlens, Tensor output, int to
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
-void thd_reorder(const Tensor &inp, const Tensor &cu_seqlens, Tensor &out, int world_size,
-                 bool scatter, int total_tokens, cudaStream_t stream) {
+void thd_cp_reorder_sequences(const Tensor &inp, const Tensor &cu_seqlens, Tensor &out,
+                              int world_size, bool scatter, int total_tokens,
+                              cudaStream_t stream) {
   using namespace transformer_engine;
   NVTE_CHECK(cu_seqlens.dtype() == DType::kInt32);
   NVTE_CHECK(cu_seqlens.dim() == 1);
@@ -779,14 +773,15 @@ void thd_reorder(const Tensor &inp, const Tensor &cu_seqlens, Tensor &out, int w
   int batch = cu_seqlens_shape[0] - 1;
   constexpr unsigned int block = 256;
   unsigned int grid = (static_cast<unsigned int>(total_tokens) * 32 + block - 1) / block;
-  thd_reorder_kernel<<<grid, block, sizeof(int) * (batch + 1), stream>>>(
+  thd_cp_reorder_sequences_kernel<<<grid, block, sizeof(int) * (batch + 1), stream>>>(
       out.data.dptr, inp.data.dptr, reinterpret_cast<int *>(cu_seqlens.data.dptr), batch,
       total_tokens, world_size, hidden_size_in_bytes, scatter);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
-void thd_valid_copy(const Tensor &inp, const Tensor &cu_seqlens_padded, const Tensor &cu_seqlens,
-                    Tensor &out, int total_tokens, cudaStream_t stream) {
+void thd_cp_copy_valid_tokens(const Tensor &inp, const Tensor &cu_seqlens_padded,
+                              const Tensor &cu_seqlens, Tensor &out, int total_tokens,
+                              cudaStream_t stream) {
   using namespace transformer_engine;
   NVTE_CHECK(cu_seqlens.dtype() == DType::kInt32);
   NVTE_CHECK(cu_seqlens_padded.dtype() == DType::kInt32);
@@ -805,7 +800,7 @@ void thd_valid_copy(const Tensor &inp, const Tensor &cu_seqlens_padded, const Te
   int batch = cu_seqlens_shape[0] - 1;
   constexpr unsigned int block = 256;
   unsigned int grid = (static_cast<unsigned int>(total_tokens) * 32 + block - 1) / block;
-  thd_valid_copy_kernel<<<grid, block, sizeof(int) * 2 * (batch + 1), stream>>>(
+  thd_cp_copy_valid_tokens_kernel<<<grid, block, sizeof(int) * 2 * (batch + 1), stream>>>(
       out.data.dptr, inp.data.dptr, reinterpret_cast<int *>(cu_seqlens_padded.data.dptr),
       reinterpret_cast<int *>(cu_seqlens.data.dptr), batch, total_tokens, hidden_size_in_bytes);
   NVTE_CHECK_CUDA(cudaGetLastError());
@@ -884,23 +879,24 @@ void nvte_cp_thd_get_partitioned_indices(const NVTETensor &cu_seqlens, NVTETenso
                                                 world_size, rank, stream);
 }
 
-void nvte_cp_thd_reorder(const NVTETensor &inp, const NVTETensor &cu_seqlens, NVTETensor out,
-                         int world_size, int scatter, int total_tokens, cudaStream_t stream) {
-  NVTE_API_CALL(nvte_cp_thd_reorder);
+void nvte_cp_thd_reorder_sequences(const NVTETensor &inp, const NVTETensor &cu_seqlens,
+                                   NVTETensor out, int world_size, int scatter, int total_tokens,
+                                   cudaStream_t stream) {
+  NVTE_API_CALL(nvte_cp_thd_reorder_sequences);
   using namespace transformer_engine;
 
-  context_parallel::thd_reorder(*convertNVTETensorCheck(inp), *convertNVTETensorCheck(cu_seqlens),
-                                *convertNVTETensorCheck(out), world_size, scatter != 0,
-                                total_tokens, stream);
+  context_parallel::thd_cp_reorder_sequences(
+      *convertNVTETensorCheck(inp), *convertNVTETensorCheck(cu_seqlens),
+      *convertNVTETensorCheck(out), world_size, scatter != 0, total_tokens, stream);
 }
 
-void nvte_cp_thd_valid_copy(const NVTETensor &inp, const NVTETensor &cu_seqlens_padded,
-                            const NVTETensor &cu_seqlens, NVTETensor out, int total_tokens,
-                            cudaStream_t stream) {
-  NVTE_API_CALL(nvte_cp_thd_valid_copy);
+void nvte_cp_thd_copy_valid_tokens(const NVTETensor &inp, const NVTETensor &cu_seqlens_padded,
+                                   const NVTETensor &cu_seqlens, NVTETensor out, int total_tokens,
+                                   cudaStream_t stream) {
+  NVTE_API_CALL(nvte_cp_thd_copy_valid_tokens);
   using namespace transformer_engine;
 
-  context_parallel::thd_valid_copy(
+  context_parallel::thd_cp_copy_valid_tokens(
       *convertNVTETensorCheck(inp), *convertNVTETensorCheck(cu_seqlens_padded),
       *convertNVTETensorCheck(cu_seqlens), *convertNVTETensorCheck(out), total_tokens, stream);
 }
