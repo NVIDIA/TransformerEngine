@@ -454,8 +454,8 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
 
     def mark_for_cpu_offload_if_needed(
         self,
-        *tensors: TensorLike | Iterable[Optional[TensorLike]] | None,
-        exclude_tensors: TensorLike | Iterable[Optional[TensorLike]] | None = None,
+        *tensors: Iterable[Optional[TensorLike]] | TensorLike | None,
+        exclude: Iterable[Optional[TensorLike]] | TensorLike | None = None,
     ) -> None:
         """Mark tensors to include and exclude from activation CPU offloading.
 
@@ -465,7 +465,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         and it excludes all tensors if the op is not participating in
         offloading.
         """
-        if not tensors and not exclude_tensors:
+        if not tensors and not exclude:
             return
         if not is_cpu_offload_enabled():
             return
@@ -474,7 +474,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
 
         def filter_supported_and_extend(
             out: list[TensorLike],
-            ts: TensorLike | Iterable[Optional[TensorLike]] | None,
+            ts: Iterable[Optional[TensorLike]] | TensorLike | None,
         ) -> None:
             """Extend a list with objects that support CPU offloading.
 
@@ -492,20 +492,21 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                 out.append(t)
 
         # Choose tensors to include and exclude from CPU offloading
-        include = []
-        exclude = []
-        if self._activation_offloading_enabled:
-            filter_supported_and_extend(include, tensors)
-            filter_supported_and_extend(exclude, exclude_tensors)
-        else:
-            filter_supported_and_extend(exclude, tensors)
-            filter_supported_and_extend(exclude, exclude_tensors)
+        include_tensors = []
+        exclude_tensors = []
+        is_enabled = self._activation_offloading_enabled
+        for t in tensors:
+            filter_supported_and_extend(
+                include_tensors if is_enabled else exclude_tensors,
+                t,
+            )
+        filter_supported_and_extend(exclude_tensors, exclude)
 
         # Mark tensors
-        if include:
-            mark_activation_offload(*include)
-        if exclude:
-            mark_not_offload(*exclude)
+        if include_tensors:
+            mark_activation_offload(*include_tensors)
+        if exclude_tensors:
+            mark_not_offload(*exclude_tensors)
 
     @abc.abstractmethod
     def op_forward(
