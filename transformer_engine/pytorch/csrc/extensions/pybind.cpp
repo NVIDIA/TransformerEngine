@@ -158,7 +158,11 @@ void init_router_bindings(pybind11::module &m) {
   m.def("fused_moe_aux_loss_fwd", &fused_moe_aux_loss_fwd, py::arg("probs"),
         py::arg("tokens_per_expert"), py::arg("total_num_tokens"), py::arg("num_experts"),
         py::arg("num_rows"), py::arg("num_cols"), py::arg("topk"), py::arg("coeff"),
-        "Fused aux loss fwd");
+        "Fused aux loss fwd (host-int total_num_tokens, host-folded C_coeff)");
+  m.def("fused_moe_aux_loss_fwd_tensor", &fused_moe_aux_loss_fwd_tensor, py::arg("probs"),
+        py::arg("tokens_per_expert"), py::arg("total_num_tokens"), py::arg("num_experts"),
+        py::arg("num_rows"), py::arg("num_cols"), py::arg("topk"), py::arg("coeff"),
+        "Fused aux loss fwd (device-tensor total_num_tokens, CUDA-graph-safe)");
   m.def("fused_moe_aux_loss_bwd", &fused_moe_aux_loss_bwd, py::arg("Const_buf"),
         py::arg("tokens_per_expert"), py::arg("num_rows"), py::arg("num_cols"),
         py::arg("grad_aux_loss"), "Fused aux loss bwd");

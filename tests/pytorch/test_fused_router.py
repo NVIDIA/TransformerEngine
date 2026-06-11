@@ -462,6 +462,70 @@ def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk, expert_multipl
     torch.testing.assert_close(probs.grad, probs_clone.grad, atol=atol, rtol=rtol)
 
 
+def test_fused_moe_aux_loss_cuda_graph_capture():
+    """CUDA-graph-safe path: total_num_tokens is a device tensor whose value
+    changes between replays. The captured graph must observe the new value
+    via the device-side coefficient computation."""
+    dtype = torch.float32
+    num_tokens = 4096
+    num_experts = 128
+    topk = 4
+    num_cols = num_experts
+    coeff = 0.01
+
+    offset = torch.arange(-num_tokens // 2, num_tokens // 2, dtype=dtype, device="cuda") * 1e-4
+    probs = (
+        torch.arange(-num_cols // 2, num_cols // 2, device="cuda", dtype=dtype) * 1e-2
+    ).unsqueeze(0).repeat(num_tokens, 1) + offset.unsqueeze(1)
+    probs = probs.contiguous()
+    tokens_per_expert = torch.randint(1, 1000, (num_cols,), device="cuda", dtype=torch.int32)
+
+    total_num_tokens_dev = torch.tensor(num_tokens, dtype=torch.int64, device="cuda")
+
+    # Warmup on a side stream to satisfy CUDA Graph capture requirements.
+    s = torch.cuda.Stream()
+    s.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(s):
+        for _ in range(3):
+            _ = fused_moe_aux_loss(
+                probs=probs,
+                tokens_per_expert=tokens_per_expert,
+                total_num_tokens=total_num_tokens_dev,
+                num_experts=num_experts,
+                topk=topk,
+                coeff=coeff,
+            )
+    torch.cuda.current_stream().wait_stream(s)
+
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        out = fused_moe_aux_loss(
+            probs=probs,
+            tokens_per_expert=tokens_per_expert,
+            total_num_tokens=total_num_tokens_dev,
+            num_experts=num_experts,
+            topk=topk,
+            coeff=coeff,
+        )
+
+    atol, rtol = _get_tolerances(dtype, num_cols)
+    # Replay with several distinct token counts; the captured graph must pick
+    # up each new value through total_num_tokens_dev.
+    for new_total in (num_tokens, num_tokens // 2, num_tokens * 2 - 17):
+        total_num_tokens_dev.fill_(new_total)
+        g.replay()
+        torch.cuda.synchronize()
+        ref = aux_loss_pytorch(
+            probs=probs,
+            tokens_per_expert=tokens_per_expert,
+            total_num_tokens=new_total,
+            topk=topk,
+            num_experts=num_experts,
+            moe_aux_loss_coeff=coeff,
+        )
+        torch.testing.assert_close(out, ref, atol=atol, rtol=rtol)
+
+
 def _bytemap_to_bitmap_u8(bytemap: torch.Tensor) -> torch.Tensor:
     """Reference packer: bool[T, E] -> uint8[T, ceil(E/8)] LSB-first.
 

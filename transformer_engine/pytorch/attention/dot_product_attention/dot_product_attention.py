@@ -1562,11 +1562,20 @@ class DotProductAttention(TransformerEngineBaseModule):
             # inter-sequence padding from whether padded cu_seqlens were supplied --
             # sync-free, and stable across eager and CUDA graph capture (the auto-detect
             # must return the same value in both modes for backend selection to match).
+            # If padded cu_seqlens are the *same object* as the unpadded ones, no real
+            # inter-sequence padding exists (only THD tail padding) -- treat as False so
+            # FlashAttention v2/v4 remain eligible.
             if pad_between_seqs is None:
                 if qkv_format == "thd":
-                    pad_between_seqs = (
-                        cu_seqlens_q_padded is not None or cu_seqlens_kv_padded is not None
-                    )
+                    if (
+                        cu_seqlens_q_padded is cu_seqlens_q
+                        and cu_seqlens_kv_padded is cu_seqlens_kv
+                    ):
+                        pad_between_seqs = False
+                    else:
+                        pad_between_seqs = (
+                            cu_seqlens_q_padded is not None or cu_seqlens_kv_padded is not None
+                        )
                 else:
                     pad_between_seqs = False
 

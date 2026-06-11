@@ -2246,21 +2246,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         nvtx_range_pop(f"{nvtx_label}")
 
-        # Zero-fill output at positions beyond the actual sequence end (THD CUDA Graph).
-        # cu_seqlens_q_padded is already local to this CP rank in the THD path, so its
-        # last entry is the local extent. Skip when the caller did not provide padded
-        # cu_seqlens -- no static-shape padding can be present in that case.
-        if (
-            qkv_format == "thd"
-            and cu_seqlens_q_padded is not None
-            and isinstance(out_ret, torch.Tensor)
-            and out_ret.shape[0] > 0
-        ):
-            local_actual_t = cu_seqlens_q_padded[-1]
-            pad_mask = torch.arange(out_ret.shape[0], device=out_ret.device) >= local_actual_t
-            out_ret.data[pad_mask] = 0
-            out.data[pad_mask.view(-1, *([1] * (out.dim() - 1))).expand_as(out)] = 0
-
         if return_max_logit:
             return out_ret, max_logit
         return out_ret
