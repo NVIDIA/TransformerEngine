@@ -326,7 +326,7 @@ def _ffn_fwd_per_shard(
     the tail-zeroing masks needed to keep ``segment_sum`` well-defined.
     If the bias path ever lands, re-add ``jnp.where`` masks on
     ``combined_out`` / ``d_eo_2d`` / ``d_intermediate``.
-    
+
     Separately, the grouped_gemm *wgrad* outputs (``d_wo``,
     ``d_wi_combined`` in bwd) are per-group ``(num_local_experts, K, N)``
     and are the *user-visible* weight gradients. cuBLAS skips groups
@@ -465,7 +465,7 @@ def _ffn_bwd_per_shard(
     upstream (see ``_ffn_fwd_per_shard`` docstring) so we skip the
     per-row tail-zeroing masks until cuBLAS gains fused-bias grouped
     GEMM (or PR 3083's pure-JAX bias add lands).
-    
+
     The *wgrad* outputs (``d_wo``, ``d_wi_combined``) are different.
     They're per-group ``(num_local_experts, K, N)``, and cuBLAS
     skips groups with ``size_g == 0`` without zero-filling the
@@ -551,9 +551,7 @@ def _ffn_bwd_per_shard(
         casted_d_combined.get_tensor(usage=TensorUsage.RHS),
         contracting_dims=((0,), (0,)),
     )
-    d_wi_combined = jnp.where(
-        wgrad_group_active, d_wi_combined, jnp.zeros_like(d_wi_combined)
-    )
+    d_wi_combined = jnp.where(wgrad_group_active, d_wi_combined, jnp.zeros_like(d_wi_combined))
     d_wi_0, d_wi_1 = jnp.split(d_wi_combined, 2, axis=-1)
     if has_bias:
         d_wi_combined_bias = tex.grouped_dbias(d_combined, local_group_sizes)
