@@ -46,13 +46,13 @@ def require_nccl_ep() -> None:
         raise RuntimeError(
             f"NCCL EP requires libnccl.so.2 (>= {mn}); could not load libnccl.so.2 "
             "or query its version. Install NCCL or rebuild Transformer Engine with "
-            "NVTE_BUILD_WITH_NCCL_EP=0."
+            "NVTE_WITH_NCCL_EP=0."
         )
     if cur < _NCCL_EP_MIN_VERSION:
         raise RuntimeError(
             f"NCCL EP requires NCCL >= {mn} at runtime; found "
             f"{'.'.join(str(x) for x in cur)}. Upgrade libnccl.so or rebuild "
-            "Transformer Engine with NVTE_BUILD_WITH_NCCL_EP=0."
+            "Transformer Engine with NVTE_WITH_NCCL_EP=0."
         )
 
 

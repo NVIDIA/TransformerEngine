@@ -84,7 +84,7 @@ namespace {
 [[noreturn]] void ep_not_built() {
   NVTE_ERROR(
       "NCCL EP is not built into this TransformerEngine. Rebuild TE with "
-      "NVTE_BUILD_WITH_NCCL_EP=1 and CUDA arch >= 90 (e.g. NVTE_CUDA_ARCHS=\"90\").");
+      "NVTE_WITH_NCCL_EP=1 and CUDA arch >= 90 (e.g. NVTE_CUDA_ARCHS=\"90\").");
 }
 }  // namespace
 

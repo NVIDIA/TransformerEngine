@@ -85,8 +85,10 @@ def setup_common_extension() -> CMakeExtension:
         cmake_flags.append(f"-DCUSOLVERMP_DIR={cusolvermp_dir}")
 
     # NCCL EP (Hopper+): on by default; auto-skipped when no arch >= 90 is
-    # targeted. Set NVTE_BUILD_WITH_NCCL_EP=0 to force off.
-    build_with_nccl_ep = bool(int(os.getenv("NVTE_BUILD_WITH_NCCL_EP", "1")))
+    # targeted. Set NVTE_WITH_NCCL_EP=0 to force off.
+    nccl_ep_env = os.getenv("NVTE_WITH_NCCL_EP")
+    nccl_ep_explicit = nccl_ep_env is not None
+    build_with_nccl_ep = bool(int(nccl_ep_env if nccl_ep_explicit else "1"))
     if build_with_nccl_ep:
         arch_tokens = [a.strip() for a in str(archs or "").split(";") if a.strip()]
         has_hopper_or_newer = any(
@@ -94,6 +96,11 @@ def setup_common_extension() -> CMakeExtension:
             for t in arch_tokens
         )
         if not has_hopper_or_newer:
+            if nccl_ep_explicit:
+                raise RuntimeError(
+                    f"NVTE_WITH_NCCL_EP=1 was set but NVTE_CUDA_ARCHS ('{archs}') "
+                    "contains no arch >= 90. NCCL EP requires Hopper or newer."
+                )
             print(f"[NCCL EP] No arch >= 90 in NVTE_CUDA_ARCHS ('{archs}'); skipping build.")
             build_with_nccl_ep = False
     if build_with_nccl_ep:
@@ -162,6 +169,22 @@ def _discover_nccl_home() -> str:
     lib_names = ("libnccl.so", "libnccl.so.2")
     # Include Debian/Ubuntu multiarch subdirs (e.g. lib/aarch64-linux-gnu).
     lib_subdirs = ("lib", "lib64", "lib/aarch64-linux-gnu", "lib/x86_64-linux-gnu")
+
+    # pip-installed NCCL (nvidia-nccl-cu* wheel) lives under nvidia/nccl in
+    # site-packages and has no top-level include/lib layout.
+    try:
+        import importlib.util
+
+        spec = importlib.util.find_spec("nvidia.nccl")
+        if spec is not None and spec.submodule_search_locations:
+            pip_root = Path(next(iter(spec.submodule_search_locations)))
+            if (pip_root / "include" / "nccl.h").exists() and any(
+                (pip_root / sub / name).exists() for sub in lib_subdirs for name in lib_names
+            ):
+                return str(pip_root)
+    except (ImportError, ValueError):
+        pass
+
     for cand in ("/opt/nvidia/nccl", "/usr/local/nccl", "/usr"):
         p = Path(cand)
         if (p / "include" / "nccl.h").exists() and any(
@@ -198,18 +221,32 @@ def build_nccl_ep_submodule() -> str:
 
     build_dir = nccl_root / "build"
     nccl_ep_lib = build_dir / "lib" / "libnccl_ep.a"
+    gencode_stamp = build_dir / "lib" / "libnccl_ep.gencode"
 
-    # Caller gates on arch >= 90 or "native"; let nvcc resolve "native".
+    # Caller gates on arch >= 90 or "native"; expand "native" to the host's
+    # actual sm_XX so the build stamp distinguishes machines.
     arch_tokens = [a.strip() for a in str(cuda_archs() or "").split(";") if a.strip()]
-    if any(t.lower() == "native" for t in arch_tokens):
-        gencode = "-arch=native"
-    else:
-        arch_list = [
-            t.rstrip("af")
-            for t in arch_tokens
-            if t.rstrip("af").isdigit() and int(t.rstrip("af")) >= 90
-        ]
-        gencode = " ".join(f"-gencode=arch=compute_{a},code=sm_{a}" for a in arch_list)
+    arch_list: list[str] = []
+    for t in arch_tokens:
+        if t.lower() == "native":
+            try:
+                out = subprocess.check_output(
+                    ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
+                    stderr=subprocess.DEVNULL,
+                ).decode()
+            except (subprocess.CalledProcessError, FileNotFoundError) as e:
+                raise RuntimeError(
+                    "NVTE_CUDA_ARCHS=native requires nvidia-smi to resolve the host arch."
+                ) from e
+            for line in out.splitlines():
+                cap = line.strip().replace(".", "")
+                if cap.isdigit() and int(cap) >= 90 and cap not in arch_list:
+                    arch_list.append(cap)
+        else:
+            bare = t.rstrip("af")
+            if bare.isdigit() and int(bare) >= 90 and bare not in arch_list:
+                arch_list.append(bare)
+    gencode = " ".join(f"-gencode=arch=compute_{a},code=sm_{a}" for a in arch_list)
 
     nproc = os.cpu_count() or 8
     env = os.environ.copy()
@@ -220,13 +257,26 @@ def build_nccl_ep_submodule() -> str:
     env["NCCL_HOME"] = nccl_home
     env["NCCL_EP_BUILDDIR"] = str(build_dir)
 
-    if not nccl_ep_lib.exists():
+    prev_gencode = gencode_stamp.read_text().strip() if gencode_stamp.exists() else None
+    if not nccl_ep_lib.exists() or prev_gencode != gencode:
+        if nccl_ep_lib.exists() and prev_gencode != gencode:
+            print(
+                f"[NCCL EP] gencode changed ('{prev_gencode}' -> '{gencode}'); "
+                "rebuilding libnccl_ep.a"
+            )
+            subprocess.check_call(
+                ["make", "-C", "contrib/nccl_ep", "clean"],
+                cwd=str(nccl_root),
+                env=env,
+            )
         print(f"[NCCL EP] Building libnccl_ep.a (gencode='{gencode}')")
         subprocess.check_call(
             ["make", "-j", str(nproc), "-C", "contrib/nccl_ep", "lib"],
             cwd=str(nccl_root),
             env=env,
         )
+        gencode_stamp.parent.mkdir(parents=True, exist_ok=True)
+        gencode_stamp.write_text(gencode)
 
     return nccl_home
 

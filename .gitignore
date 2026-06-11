@@ -43,6 +43,3 @@ tensor_dumps/
 artifacts/
 .DS_Store
 .claude/
-
-# NCCL EP shared library staged by setup.py for wheel packaging.
-/transformer_engine/libnccl_ep.so*

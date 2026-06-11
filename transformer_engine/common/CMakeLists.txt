@@ -438,7 +438,7 @@ if (NVTE_WITH_CUSOLVERMP)
 endif()
 
 # -- NCCL EP (on by default, HT mode only) ---------------------------------
-# Set -DNVTE_WITH_NCCL_EP=OFF (or NVTE_BUILD_WITH_NCCL_EP=0 in setup.py) to
+# Set -DNVTE_WITH_NCCL_EP=OFF (or NVTE_WITH_NCCL_EP=0 in setup.py) to
 # skip NCCL EP entirely - useful on older images whose system NCCL is below
 # the 2.30.4 EP minimum.
 option(NVTE_WITH_NCCL_EP "Build NCCL EP into libtransformer_engine.so" ON)
