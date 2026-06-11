@@ -1701,7 +1701,6 @@ def test_hybrid_dcp_output_parity(hybrid_recipe_name):
     """
     import torch.distributed.checkpoint as dcp
 
-
     from fsdp2_utils import get_hybrid_recipe_from_string
 
     hybrid_recipe = get_hybrid_recipe_from_string(hybrid_recipe_name)

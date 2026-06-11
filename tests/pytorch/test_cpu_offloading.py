@@ -39,9 +39,7 @@ def _hybrid_fp8_mxfp8_qfactory(role):
     is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
     if is_linear and role.tensor_type in ("input", "weight", "output"):
         return te.HybridQuantizer(
-            rowwise_quantizer=te.Float8CurrentScalingQuantizer(
-                te.DType.kFloat8E4M3, device="cuda"
-            ),
+            rowwise_quantizer=te.Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda"),
             columnwise_quantizer=te.MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3),
         )
     if is_linear and role.tensor_type in ("grad_output", "grad_input"):
