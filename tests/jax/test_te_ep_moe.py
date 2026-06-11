@@ -181,7 +181,7 @@ GRAD_GATE_ATOL = 5e-1
 GRAD_GATE_RTOL = 5e-1
 
 # Two TE EP runs that should be bitwise-equal modulo XLA fusion order
-# (align_size rounding, etc.).
+# (slot alignment rounding, etc.).
 TE_TO_TE_ATOL = 5e-3
 TE_TO_TE_RTOL = 5e-3
 
@@ -373,9 +373,8 @@ def _pure_jax_moe_reference(
 def _make_block(
     *,
     apply_topk_weights_early=False,
-    align_size=0,
     aux_loss_coeff=0.0,
-    use_expert_bias=False,
+    use_expert_routing_bias=False,
     score_function="softmax",
     bias_init=None,
 ):
@@ -385,9 +384,8 @@ def _make_block(
         intermediate_size=INTER,
         data_parallelism_axes=(FSDP_AXIS,),
         apply_topk_weights_early=apply_topk_weights_early,
-        align_size=align_size,
         aux_loss_coeff=aux_loss_coeff,
-        use_expert_bias=use_expert_bias,
+        use_expert_routing_bias=use_expert_routing_bias,
         score_function=score_function,
         dtype=DTYPE,
     )
@@ -532,27 +530,26 @@ _CONFIGS = [
     # 0*NaN -> NaN leak from padded recv slots in the early-weighting
     # multiply (intermediate * recv_w * mask) is debugged. Late
     # weighting (combine-side) is unaffected and stays covered above.
-    # Note: a dedicated align_size=128 config was previously listed
-    # here. It is no longer interesting because moe.py now floors
-    # slots_per_expert at 128 unconditionally (effective_align =
-    # max(align_size, 128)), so align_size=0 (default) and
-    # align_size=128 produce identical layouts. Re-add a distinct
-    # case only if the floor is loosened or a >128 align is needed
-    # by a recipe (e.g. some FP8 paths want 256-aligned slots).
+    # Note: align_size is no longer a user-facing parameter; it is
+    # hard-coded to _ALIGN_SIZE = 128 in moe.py (per PR #3116
+    # review). Re-add a distinct align-size config only if the
+    # constant is loosened, or a recipe-driven inference is added
+    # that selects a >128 alignment.
     pytest.param(
         dict(score_function="sigmoid"),
         id="sigmoid",
     ),
-    # NOTE: a ``sigmoid-bias-zero`` config (use_expert_bias=True with a
-    # zero-initialised bias buffer) was previously exercised here. It
-    # was dropped because the routing math collapses to the no-bias
-    # case when the buffer is zero -- ``sigmoid`` already covers that
-    # numerical path. The bias-aware codepath is still exercised by
-    # ``sigmoid-bias-strong`` below, which uses a non-zero bias.
+    # NOTE: a ``sigmoid-bias-zero`` config (use_expert_routing_bias=True
+    # with a zero-initialised bias buffer) was previously exercised
+    # here. It was dropped because the routing math collapses to the
+    # no-bias case when the buffer is zero -- ``sigmoid`` already
+    # covers that numerical path. The bias-aware codepath is still
+    # exercised by ``sigmoid-bias-strong`` below, which uses a
+    # non-zero bias.
     pytest.param(
         dict(
             score_function="sigmoid",
-            use_expert_bias=True,
+            use_expert_routing_bias=True,
             bias_init=_strong_expert_bias_init,
         ),
         id="sigmoid-bias-strong",
@@ -565,7 +562,9 @@ def _reference_kwargs_from_config(config, params_np):
     return dict(
         score_function=config.get("score_function", "softmax"),
         expert_bias=(
-            jnp.asarray(params_np["expert_bias"]) if config.get("use_expert_bias", False) else None
+            jnp.asarray(params_np["expert_bias"])
+            if config.get("use_expert_routing_bias", False)
+            else None
         ),
     )
 
