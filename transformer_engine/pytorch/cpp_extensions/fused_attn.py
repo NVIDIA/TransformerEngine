@@ -340,16 +340,6 @@ def fused_attn_fwd(
         cuda_graph,
     )
 
-    # Zero-fill output at positions beyond the actual sequence end (THD CUDA Graph).
-    # Uses arange+mask indexing instead of `tensor[scalar_tensor:]` slicing -- the
-    # latter forces a GPU->CPU sync that is forbidden during CUDA graph capture.
-    if qkv_layout in ("t3hd", "th3d", "thd_t2hd", "thd_th2d", "thd_thd_thd"):
-        out_tensor = output_tensors[0]
-        actual_t = cu_seqlens_q[-1] if cu_seqlens_q_padded is None else cu_seqlens_q_padded[-1]
-        if isinstance(out_tensor, torch.Tensor) and out_tensor.shape[0] > 0:
-            pad_mask = torch.arange(out_tensor.shape[0], device=out_tensor.device) >= actual_t
-            out_tensor[pad_mask] = 0
-
     if return_max_logit:
         qkv_format = qkv_layout.replace("3", "").replace("2", "").split("_")[0]
         # thd (newer cuDNN runtimes, non-sm120): output_tensors: out [tq, h, d],    Stats [tq, h, 1],    Max [tq, h, 1]
@@ -605,21 +595,5 @@ def fused_attn_bwd(
         dqkv_quantizer,
         cuda_graph,
     )
-
-    # Zero-fill dQ/dK/dV at positions beyond the actual sequence end (THD CUDA Graph).
-    # Use Q's padded boundary for dQ and KV's padded boundary for dK/dV.
-    if qkv_layout in ("t3hd", "th3d", "thd_t2hd", "thd_th2d", "thd_thd_thd"):
-        q_actual_t = cu_seqlens_q[-1] if cu_seqlens_q_padded is None else cu_seqlens_q_padded[-1]
-        kv_actual_t = (
-            cu_seqlens_kv[-1] if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded[-1]
-        )
-        dq_tensor = output_tensors[0]
-        if isinstance(dq_tensor, torch.Tensor) and dq_tensor.shape[0] > 0:
-            q_pad_mask = torch.arange(dq_tensor.shape[0], device=dq_tensor.device) >= q_actual_t
-            dq_tensor[q_pad_mask] = 0
-        for d_tensor in output_tensors[1:3]:  # dk, dv
-            if isinstance(d_tensor, torch.Tensor) and d_tensor.shape[0] > 0:
-                kv_pad_mask = torch.arange(d_tensor.shape[0], device=d_tensor.device) >= kv_actual_t
-                d_tensor[kv_pad_mask] = 0
 
     return output_tensors

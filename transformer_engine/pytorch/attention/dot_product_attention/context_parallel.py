@@ -2906,6 +2906,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             and cu_seqlens_kv_padded is not None
         ):
             if is_graph_capturing():
+                # arange+mask under capture: `tensor[scalar_tensor:]` slicing would
+                # force a GPU->CPU sync that is forbidden during CUDA graph capture.
                 q_pad_mask = torch.arange(dq.shape[0], device=dq.device) >= cu_seqlens_q_padded[-1]
                 kv_pad_mask = (
                     torch.arange(dk.shape[0], device=dk.device) >= cu_seqlens_kv_padded[-1]
@@ -2914,6 +2916,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 dk[kv_pad_mask] = 0
                 dv[kv_pad_mask] = 0
             else:
+                # Pre-existing TE eager-mode behaviour.
                 dq[cu_seqlens_q_padded[-1] :].fill_(0)
                 dk[cu_seqlens_kv_padded[-1] :].fill_(0)
                 dv[cu_seqlens_kv_padded[-1] :].fill_(0)
