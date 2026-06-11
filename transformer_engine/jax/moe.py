@@ -58,15 +58,44 @@ from .sharding import _get_mesh
 __all__ = ["moe"]
 
 
+# Per-expert dispatch-slot alignment fed to ``tex.ep_prepare`` as
+# ``dispatch_output_per_expert_alignment``. NCCL EP HT requires the
+# per-expert recv block to be at least 128-token aligned, and all current
+# TE grouped-GEMM recipes (bf16/fp16/fp8/mxfp8) are satisfied by a
+# 128-token tile, so a single hard-coded constant suffices.
+#
+# We deliberately omit a user-facing knob: per PR #3116 review there's no
+# current model that wants a >128 alignment, and exposing it widens the
+# MoEBlock API surface without buying anything. Re-introduce a parameter
+# (or recipe-driven inference, see jberchtold's follow-up) if a future
+# recipe needs >128.
+_ALIGN_SIZE = 128
+
+
 def _with_sharding_constraint_cast_bwd(x: jnp.ndarray, sharding) -> jnp.ndarray:
     """Apply a sharding constraint while keeping bwd cotangents in the primal dtype.
 
     Plain ``jax.lax.with_sharding_constraint`` propagates cotangents in
-    whatever dtype the upstream gradient lands in; under mixed precision
+    whatever dtype the upstream gradient lands in. Under mixed precision
     that can be wider than the primal, blowing up bandwidth and (for
     bf16 primals) breaking downstream kernels that pin a bf16 input
     layout. This wrapper re-casts the cotangent back to the primal
     dtype and re-asserts the same sharding on the bwd path.
+
+    Why MoE specifically needs this (per PR #3116 review): unlike a
+    plain LN+MLP block, the MoE bwd composes two cotangent paths into
+    ``d_x`` -- one through ``ep_dispatch_bwd`` (bf16) and one through
+    ``d_logits_2d @ gate_kernel.T``. The latter starts from
+    ``fused_topk_with_score_function_bwd``, which returns ``d_logits_2d``
+    in fp32 because the fwd promoted ``logits_2d`` to fp32 (the topk /
+    softmax / sigmoid kernels are only validated at fp32; see
+    ``tests/pytorch/test_fused_router.py``). The fp32 ``d_logits_2d``
+    then composes with ``gate_kernel.T`` and adds into the bf16
+    ``d_x_from_dispatch``, yielding an fp32 sum even though the user's
+    ``x`` is bf16. Without this cast, the user-visible ``d_x`` flows
+    back into the optimizer at fp32 -- silently doubling the activation
+    grad bandwidth and tripping any downstream kernel that pins a bf16
+    input layout (e.g. an LN bwd that fuses into our ``d_x``).
     """
 
     @jax.custom_vjp
@@ -524,6 +553,19 @@ def _ffn_bwd_per_shard(
     # Activation bwd. Mirror the fwd's fp32 promotion of silu+multiply
     # so the silu derivative composes through the gradient at fp32 too;
     # cast back to the bf16 layout the wi grouped_quantize expects.
+    #
+    # Why MoE specifically needs this (per PR #3116 review): the
+    # non-MoE LN+MLP block can stay in the activation dtype because
+    # its silu accumulates over a single per-row dot product whose
+    # numerical drift is absorbed by the downstream LN. The MoE
+    # silu, by contrast, sits on the *expert* side of the routing,
+    # so its bf16 rounding error rides directly into ``expert_outputs``
+    # and is summed (weighted by routing probs) across topk experts
+    # by ep_combine -- bf16 silu alone drifts ~1% vs fp32 silu, which
+    # compounds through wo->combine into the ~1.4% per-element parity
+    # gap we measured against the pure-JAX softmax reference. Mirroring
+    # the fwd fp32 promotion keeps the bwd's silu' derivative in lock-
+    # step with the fwd's silu and preserves grad parity.
     gp_fp32 = gate_proj_out.astype(jnp.float32)
     up_fp32 = up_proj_out.astype(jnp.float32)
     d_int_fp32 = d_intermediate.astype(jnp.float32)
@@ -608,7 +650,6 @@ def _moe_fwd_rule(
     wo_kernel_axes,
     dtype,
     apply_topk_weights_early,
-    align_size,
 ):
     """Forward: gate -> topk -> ep_dispatch -> shard_map(FFN) -> ep_combine.
 
@@ -653,10 +694,8 @@ def _moe_fwd_rule(
     # rejects the dispatch buffer with ``invalid argument``.
     natural_spe = num_ep * max_tokens_per_rank  # = (B // dp_size) * S
     # NCCL EP requires each expert-major output block to be at least
-    # 128-token aligned. Keep larger caller-requested alignments, but
-    # do not emit a smaller natural block size for tiny tests.
-    effective_align = max(int(align_size), 128)
-    slots_per_expert = ((natural_spe + effective_align - 1) // effective_align) * effective_align
+    # ``_ALIGN_SIZE`` (=128) tokens; see the constant's docstring.
+    slots_per_expert = ((natural_spe + _ALIGN_SIZE - 1) // _ALIGN_SIZE) * _ALIGN_SIZE
     recv_pr = num_local_experts * slots_per_expert
 
     _te_ep_assert_compatible_bootstrap(
@@ -706,15 +745,19 @@ def _moe_fwd_rule(
         expert_bias=eb_arg,
         compute_aux_scores=False,
     )
-    # Sigmoid + K>1 normalises as `weights / (weights.sum + 1e-20)`; for
-    # tokens whose top-K sigmoid scores all underflow at bf16/fp32 the
-    # output is NaN at the selected positions. Those NaNs ride
+    # NOTE (PR #3116 review): this NaN filter is a *correctness
+    # requirement*, NOT a debugging artifact. Sigmoid + K>1 normalises
+    # as ``weights / (weights.sum + 1e-20)``; for tokens whose top-K
+    # sigmoid scores all underflow at bf16/fp32, the output is NaN
+    # at the selected positions. Those NaNs ride
     # ep_dispatch -> recv_topk_weights -> combine and poison the per-token
     # weighted sum, leaving entire output rows as NaN. Sanitize at the
     # source so neither the fwd combine nor the bwd's manual
-    # `grad_pre_combine * w` sees them. Padded positions in sparse_probs
-    # are already zero (routing_map is False there); only the rare
-    # underflow path emits NaN.
+    # ``grad_pre_combine * w`` sees them. Padded positions in
+    # sparse_probs are already zero (routing_map is False there); only
+    # the rare sigmoid-underflow path emits NaN, which is why the
+    # filter is observationally a no-op in dense unit tests but must
+    # stay in for sparse / production routing distributions.
     sparse_probs = jnp.where(jnp.isnan(sparse_probs), 0, sparse_probs).astype(dtype)
 
     # ---------------- Aux loss (global view, replicated) ----------------
@@ -965,12 +1008,11 @@ def _moe_bwd_rule(
     wo_kernel_axes,
     dtype,
     apply_topk_weights_early,
-    align_size,
     residuals,
     cotangents,
 ):
     """Backward mirror of :func:`_moe_fwd_rule`."""
-    del num_groups, group_topk, dtype, align_size  # captured in residuals / unused in bwd
+    del num_groups, group_topk, dtype  # captured in residuals / unused in bwd
     from jax.experimental.shard_map import shard_map
 
     d_output, d_aux_loss = cotangents
@@ -1245,7 +1287,7 @@ def _moe_bwd_rule(
 # =============================================================================
 
 
-@partial(jax.custom_vjp, nondiff_argnums=tuple(range(9, 27)))
+@partial(jax.custom_vjp, nondiff_argnums=tuple(range(9, 26)))
 def _moe(
     x,
     gate_kernel,
@@ -1273,7 +1315,6 @@ def _moe(
     wo_kernel_axes,
     dtype,
     apply_topk_weights_early,
-    align_size,
 ):
     primal, _ = _moe_fwd_rule(
         x,
@@ -1302,7 +1343,6 @@ def _moe(
         wo_kernel_axes,
         dtype,
         apply_topk_weights_early,
-        align_size,
     )
     return primal
 
@@ -1331,7 +1371,6 @@ def moe(
     scaling_factor: float = 1.0,
     aux_loss_coeff: float = 0.0,
     apply_topk_weights_early: bool = False,
-    align_size: int = 0,
     ep_axis: str,
     data_parallelism_axes: Tuple[str, ...] = (),
     input_axes: Tuple[Optional[str], ...] = (),
@@ -1359,16 +1398,35 @@ def moe(
         all-gather over the routing-side logits is inserted so the
         ``fused_moe_aux_loss`` kernel sees a global ``[T_global, E]``
         view; this lives off the dispatch critical path.
-    align_size : int
-        Minimum per-expert slot alignment passed to ``tex.ep_prepare``
-        as ``dispatch_output_per_expert_alignment``. ``0`` (default)
-        means use the NCCL-EP-required natural slot count
-        ``ep_size * max_tokens_per_rank == (B/dp)*S`` (the per-rank
-        all-tokens-to-one-expert worst case the HT kernel demands).
-        Any positive value rounds that count up to the nearest
-        multiple, growing the per-rank receive buffer accordingly.
-        Set to ``128`` for FP8 recipes that require 128-aligned
-        grouped-GEMM tiles.
+
+    Note that the per-expert dispatch-slot alignment is fixed internally
+    at 128 tokens (``_ALIGN_SIZE``); see that constant's docstring for
+    rationale and how to extend if a future recipe needs >128.
+
+    Axis-name parameters (per PR #3116 review):
+
+    * ``ep_axis`` and ``data_parallelism_axes`` are *physical mesh
+      axis names* -- they index ``jax.sharding.Mesh.shape`` directly
+      (to compute ``num_ep`` / ``dp_size`` and to construct
+      ``P((dp..., ep), None, None)`` for the per-shard
+      ``jax.lax.with_sharding_constraint`` calls that JAX requires
+      to refer to real mesh axes).
+    * ``input_axes``, ``gate_kernel_axes``, ``wi_kernel_axes``,
+      ``wo_kernel_axes`` are *logical axis names* (e.g.
+      ``"batch"``, ``"embed"``, ``"mlp"``, ``"exp"``) -- they get
+      resolved via the active Flax logical-axis rules and consumed
+      by ``with_sharding_constraint_by_logical_axes``. They are
+      ``Optional[str]`` tuples so a rule of ``None`` means
+      "replicated on this axis".
+
+    Logical-axis support for ``ep_axis`` / ``data_parallelism_axes``
+    is intentionally out of scope: the EP comm-group construction
+    (``dp_color = rank // ep_size``) and the bootstrap signature
+    check both require concrete integer sizes, so a logical name
+    would have to be resolved to a physical one anyway before any
+    EP primitive is called. If a downstream pipeline needs to plumb
+    logical names all the way to ``moe()``, do the rule lookup at
+    the call site.
 
     See module docstring for the rest of the parameter semantics and the
     surrounding design rationale.
@@ -1430,7 +1488,6 @@ def moe(
         wo_kernel_axes,
         dtype,
         apply_topk_weights_early,
-        align_size,
     )
     if aux_loss_coeff <= 0.0:
         aux_loss = None
