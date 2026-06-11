@@ -276,6 +276,7 @@ class _Ctx:
 def _ffn_fwd_per_shard(
     recv_tokens_local: jnp.ndarray,
     recv_topk_weights_local: jnp.ndarray,
+    token_counts_local: jnp.ndarray,
     wi_0: jnp.ndarray,
     wi_1: jnp.ndarray,
     wo: jnp.ndarray,
@@ -295,11 +296,50 @@ def _ffn_fwd_per_shard(
     ``[1, recv_pr, H_out]`` so the surrounding ``shard_map`` reassembles
     them as ``[num_procs, recv_pr, H_out]``) plus the residuals consumed
     by the bwd.
+
+    ``token_counts_local`` is the per-expert padded token count (shape
+    ``[1, num_local_experts]``) from ``tex.ep_prepare``. With NCCL EP's
+    HT expert-major layout, the dispatch lays out experts contiguously
+    in ``recv_tokens`` as ``[expert_0_padded | expert_1_padded | ... |
+    overalloc_tail]``, where each per-expert block already includes the
+    ``dispatch_output_per_expert_alignment`` zero-padding and only the
+    trailing overalloc tail (slack between ``sum(token_counts)`` and the
+    worst-case ``recv_pr``) is unused. Plumbing ``token_counts`` straight
+    into ``grouped_gemm`` as ``group_sizes`` makes cuBLAS skip both the
+    overalloc tail (saving FMAs on partially-loaded shards) and any
+    expert whose per-shard routed count is zero (saving the GEMM
+    altogether, not just the rows).
+
+    cuBLAS leaves the trailing of each grouped_gemm *per-row* output
+    (``combined_out``, ``expert_outputs`` in fwd; ``d_intermediate``,
+    ``d_sorted_x`` in bwd) uninitialised past ``sum(group_sizes)``, and
+    fully uninitialised on a shard whose every local expert has count 0.
+    That per-row tail is harmless for everything in this block:
+    subsequent ``grouped_gemm`` / ``ep_combine`` / ``ep_dispatch_bwd``
+    only read valid rows per ``local_group_sizes`` / ``handle_mem``, and
+    ``act_fn``'s NaN tail only contaminates positions that no
+    group-aware consumer reads. The one per-row exception is
+    ``grouped_dbias`` (a ``segment_sum`` that walks every row), which
+    is only reached when ``has_bias=True``. That FFN bias path is
+    currently gated upstream (cuBLAS grouped_gemm has no fused bias on
+    Hopper yet; PR 3083 adds a pure-JAX bias add), so we don't pay for
+    the tail-zeroing masks needed to keep ``segment_sum`` well-defined.
+    If the bias path ever lands, re-add ``jnp.where`` masks on
+    ``combined_out`` / ``d_eo_2d`` / ``d_intermediate``.
+    
+    Separately, the grouped_gemm *wgrad* outputs (``d_wo``,
+    ``d_wi_combined`` in bwd) are per-group ``(num_local_experts, K, N)``
+    and are the *user-visible* weight gradients. cuBLAS skips groups
+    with ``size_g == 0`` without zero-filling, so for 0-token-globally
+    experts the slice would be NaN and leak into the optimizer. This
+    is handled by per-group ``jnp.where`` masks (``wgrad_group_active``)
+    in ``_ffn_bwd_per_shard``; see that docstring.
     """
     hidden = recv_tokens_local.shape[-1]
     sorted_x = recv_tokens_local.reshape(-1, hidden)
     recv_w_flat = recv_topk_weights_local.reshape(-1)
-    local_group_sizes = jnp.full((num_local_experts,), slots_per_expert, dtype=jnp.int32)
+    local_group_sizes = token_counts_local.reshape(-1).astype(jnp.int32)
+    del slots_per_expert  # not used since group_sizes is plumbed in dynamically
 
     wi_0 = wi_0.astype(sorted_x.dtype)
     wi_1 = wi_1.astype(sorted_x.dtype)
@@ -347,8 +387,7 @@ def _ffn_fwd_per_shard(
     # input layout is unchanged.
     act_fn = _convert_to_activation_function(activation_type)
     intermediate = (
-        act_fn(gate_proj_out.astype(jnp.float32))
-        * up_proj_out.astype(jnp.float32)
+        act_fn(gate_proj_out.astype(jnp.float32)) * up_proj_out.astype(jnp.float32)
     ).astype(sorted_x.dtype)
 
     if apply_topk_weights_early:
@@ -375,6 +414,10 @@ def _ffn_fwd_per_shard(
     casted_wo_rhs_trans = casted_wo.get_tensor(usage=TensorUsage.RHS_TRANS)
 
     expert_outputs_3d = expert_outputs.reshape(1, expert_outputs.shape[0], expert_outputs.shape[1])
+    # Reshape local_group_sizes to (1, num_local_experts) so the
+    # surrounding shard_map can stitch per-shard counts back into the
+    # global (num_procs, num_local_experts) layout matching token_counts.
+    local_group_sizes_3d = local_group_sizes.reshape(1, num_local_experts)
     residuals = (
         casted_sorted_x_lhs_trans,
         casted_wi_rhs_trans,
@@ -382,7 +425,7 @@ def _ffn_fwd_per_shard(
         up_proj_out,
         casted_intermediate_lhs_trans,
         casted_wo_rhs_trans,
-        local_group_sizes,
+        local_group_sizes_3d,
     )
     return expert_outputs_3d, residuals
 
@@ -407,10 +450,43 @@ def _ffn_bwd_per_shard(
     Mirrors :func:`_ffn_fwd_per_shard`. Returns
     ``(d_sorted_x [1, recv_pr, H], d_recv_w [1, recv_pr], d_wi_0, d_wi_1, d_wo,
     d_wi_0_bias, d_wi_1_bias, d_wo_bias)``.
+
+    ``local_group_sizes`` arrives as ``(1, num_local_experts)`` (the
+    fwd-side shard residual), with the same per-expert padded counts the
+    fwd used as ``grouped_gemm`` ``group_sizes``. cuBLAS leaves rows
+    past ``sum(group_sizes)`` uninit in the bwd grouped_gemm *dgrad*
+    outputs (``d_intermediate``, ``d_sorted_x``), but every downstream
+    consumer of those per-row outputs is group-aware (wi/wo wgrads
+    contract only over valid rows; ``ep_dispatch_bwd`` reads only
+    valid positions per ``handle_mem``), so the per-row trailing tail
+    sits unread. ``grouped_dbias`` (per-row ``segment_sum``) is the
+    only per-row consumer that would propagate the tail, and it is
+    only invoked when ``has_bias=True``; that FFN bias path is gated
+    upstream (see ``_ffn_fwd_per_shard`` docstring) so we skip the
+    per-row tail-zeroing masks until cuBLAS gains fused-bias grouped
+    GEMM (or PR 3083's pure-JAX bias add lands).
+    
+    The *wgrad* outputs (``d_wo``, ``d_wi_combined``) are different.
+    They're per-group ``(num_local_experts, K, N)``, and cuBLAS
+    skips groups with ``size_g == 0`` without zero-filling the
+    corresponding ``out[g, :, :]`` slice (see
+    ``cublaslt_grouped_gemm.cu`` lines 2086/2096). For shards hosting
+    an expert that received zero tokens globally, that expert's
+    ``d_wo`` / ``d_wi`` slice would be uninit → NaN propagates to the
+    user's optimizer. We zero those slices via a per-group ``jnp.where``
+    immediately after each wgrad. The mask is shape ``(num_groups, 1, 1)``
+    and ``num_groups == num_local_experts`` is tiny, so this is cheap.
     """
+    local_group_sizes = local_group_sizes.reshape(-1).astype(jnp.int32)
     d_eo_2d = d_expert_outputs_local.reshape(-1, d_expert_outputs_local.shape[-1])
     recv_w_flat = recv_topk_weights_local.reshape(-1)
     q_set = noop_quantizer_set
+    # Per-group active mask for wgrad outputs. cuBLAS grouped_gemm skips
+    # groups with size_g == 0 and leaves the corresponding output slice
+    # uninit; without this, ``d_wo[g] / d_wi_combined[g]`` for any expert
+    # that received zero tokens globally would be NaN and propagate to
+    # the user's optimizer.
+    wgrad_group_active = (local_group_sizes > 0)[:, None, None]
 
     # wo bwd
     casted_d_eo = tex.grouped_quantize(d_eo_2d, q_set.dgrad, local_group_sizes, flatten_axis=-1)
@@ -426,6 +502,7 @@ def _ffn_bwd_per_shard(
         _casted_d_eo_rhs,
         contracting_dims=((0,), (0,)),
     )
+    d_wo = jnp.where(wgrad_group_active, d_wo, jnp.zeros_like(d_wo))
     d_wo_bias = tex.grouped_dbias(d_eo_2d, local_group_sizes) if has_bias else None
 
     act_fn = _convert_to_activation_function(activation_type)
@@ -473,6 +550,9 @@ def _ffn_bwd_per_shard(
         casted_sorted_x_lhs_trans,
         casted_d_combined.get_tensor(usage=TensorUsage.RHS),
         contracting_dims=((0,), (0,)),
+    )
+    d_wi_combined = jnp.where(
+        wgrad_group_active, d_wi_combined, jnp.zeros_like(d_wi_combined)
     )
     d_wi_0, d_wi_1 = jnp.split(d_wi_combined, 2, axis=-1)
     if has_bias:
@@ -645,9 +725,7 @@ def _moe_fwd_rule(
     # single all-gather over (*dp, ep) and lives off the dispatch
     # critical path.
     if aux_loss_coeff > 0.0:
-        global_logits_2d = jax.lax.with_sharding_constraint(
-            logits_2d, NamedSharding(mesh, P())
-        )
+        global_logits_2d = jax.lax.with_sharding_constraint(logits_2d, NamedSharding(mesh, P()))
         _, global_routing_map, _ = tex.fused_topk_with_score_function_fwd(
             global_logits_2d,
             topk=K,
@@ -698,12 +776,8 @@ def _moe_fwd_rule(
     # each rank see B/ep rows (not B/num_procs) and overrun the bootstrap-sized
     # send buffer. Pin both routing tensors to the (outer, ep) leading sharding
     # so per-rank token counts match max_tokens_per_rank.
-    topk_idx_3d = jax.lax.with_sharding_constraint(
-        topk_idx_3d, NamedSharding(mesh, ep3_spec)
-    )
-    topk_w_3d = jax.lax.with_sharding_constraint(
-        topk_w_3d, NamedSharding(mesh, ep3_spec)
-    )
+    topk_idx_3d = jax.lax.with_sharding_constraint(topk_idx_3d, NamedSharding(mesh, ep3_spec))
+    topk_w_3d = jax.lax.with_sharding_constraint(topk_w_3d, NamedSharding(mesh, ep3_spec))
 
     # ---------------- TE EP dispatch (global view) ----------------
     cfg = tex.EpLayerConfig(
@@ -723,8 +797,12 @@ def _moe_fwd_rule(
     has_bias = wi_0_bias is not None
     kernel_spec = P(ep_axis, None, None)
     bias_spec = P(ep_axis, None) if has_bias else None
-    ffn_in_specs = (ep3_spec, ep2_spec, kernel_spec, kernel_spec, kernel_spec)
-    ffn_in_args = [recv_tokens, recv_topk_weights, wi_0, wi_1, wo]
+    # token_counts is the per-shard (1, num_local_experts) padded
+    # per-expert count from ep_prepare; piped into _ffn_fwd_per_shard
+    # as the grouped_gemm group_sizes so cuBLAS skips both 0-token
+    # experts and the trailing overalloc tail.
+    ffn_in_specs = (ep3_spec, ep2_spec, ep2_spec, kernel_spec, kernel_spec, kernel_spec)
+    ffn_in_args = [recv_tokens, recv_topk_weights, token_counts, wi_0, wi_1, wo]
     if has_bias:
         ffn_in_specs = ffn_in_specs + (bias_spec, bias_spec, bias_spec)
         ffn_in_args.extend([wi_0_bias, wi_1_bias, wo_bias])
@@ -734,46 +812,49 @@ def _moe_fwd_rule(
     # fused via jnp.concatenate along the trailing (output) axis
     # (see _ffn_fwd_per_shard for rationale), so the residual is a
     # single 3D casted_wi_rhs_trans of shape
-    # (num_local_experts, hidden, 2*H_inter).
+    # (num_local_experts, hidden, 2*H_inter). local_group_sizes is
+    # now per-shard dynamic (= per-shard token_counts), so its
+    # residual spec mirrors ep2_spec (one row per ep rank).
     residuals_spec = (
-        P(),                    # casted_sorted_x_lhs_trans
-        P(ep_axis, None, None), # casted_wi_rhs_trans
-        P(),                    # gate_proj_out
-        P(),                    # up_proj_out
-        P(),                    # casted_intermediate_lhs_trans
-        P(ep_axis, None, None), # casted_wo_rhs_trans
-        P(),                    # local_group_sizes
+        P(),  # casted_sorted_x_lhs_trans
+        P(ep_axis, None, None),  # casted_wi_rhs_trans
+        P(),  # gate_proj_out
+        P(),  # up_proj_out
+        P(),  # casted_intermediate_lhs_trans
+        P(ep_axis, None, None),  # casted_wo_rhs_trans
+        ep2_spec,  # local_group_sizes (1, num_local_experts) per shard
     )
     out_specs = (ep3_spec, residuals_spec)
 
     def _body(*args):
         if has_bias:
-            (r_tok, r_w, w0, w1, w_o, w0b, w1b, wob) = args
+            (r_tok, r_w, tc, w0, w1, w_o, w0b, w1b, wob) = args
         else:
-            (r_tok, r_w, w0, w1, w_o) = args
+            (r_tok, r_w, tc, w0, w1, w_o) = args
             w0b = w1b = wob = None
-        # Per-rank conditional zero-init of r_tok. Works around a
-        # narrowly-scoped tex.ep_dispatch_fwd contract gap: the NCCL EP
-        # HT dispatch kernel zero-initialises the recv buffer correctly
-        # on ranks that receive at least one token, but leaves
-        # uninitialised memory on fully-empty-receiver ranks. ``r_w``
-        # (the dispatch's own written-or-not indicator: 0 at padded
-        # slots, non-zero at real-routed slots) gives us a per-shard
-        # predicate for free. ``jax.lax.cond`` only executes the
-        # selected branch, so loaded ranks pay nothing at runtime;
-        # only empty ranks do the zero-fill.
-        # TODO: remove once tex.ep_dispatch_fwd zero-inits empty-rank
-        # recv buffers upstream.
-        rank_has_tokens = jnp.any(r_w != 0)
-        r_tok = jax.lax.cond(
-            rank_has_tokens,
-            lambda x: x,
-            lambda x: jnp.zeros_like(x),
-            r_tok,
-        )
+        # NOTE: tex.ep_dispatch_fwd's NCCL EP HT path leaves the recv
+        # buffer uninitialised on fully-empty-receiver ranks (and at
+        # padded slots on partially-loaded ranks). We don't need a
+        # zero-init guard here anymore because:
+        #   1. ``tc`` (per-expert padded counts) is plumbed into
+        #      grouped_gemm as group_sizes, so cuBLAS skips both
+        #      0-token experts and the trailing overalloc tail.
+        #   2. The per-group wgrad masks in _ffn_bwd_per_shard zero
+        #      ``d_wo`` / ``d_wi_combined`` slices for 0-token-globally
+        #      experts (cuBLAS skips size_g==0 groups without
+        #      zero-filling, which would otherwise leak NaN into the
+        #      user's optimizer).
+        #   3. All other downstream consumers (ep_combine,
+        #      ep_dispatch_bwd) are handle_mem-aware and read only
+        #      valid positions.
+        # If a future caller adds a non-group-aware reader of r_tok
+        # (e.g. an inspect probe over the full recv tile), re-add the
+        # ``jax.lax.cond(jnp.any(r_w != 0), identity, zeros_like)``
+        # guard here.
         return _ffn_fwd_per_shard(
             r_tok,
             r_w,
+            tc,
             w0,
             w1,
             w_o,
@@ -793,9 +874,7 @@ def _moe_fwd_rule(
         out_specs=out_specs,
         check_rep=False,
     )(*ffn_in_args)
-    expert_outputs = jax.lax.with_sharding_constraint(
-        expert_outputs, NamedSharding(mesh, ep3_spec)
-    )
+    expert_outputs = jax.lax.with_sharding_constraint(expert_outputs, NamedSharding(mesh, ep3_spec))
 
     # ---------------- TE EP combine (global view) ----------------
     out_partition_spec = (batch_pspec_axis, None, None)
@@ -973,15 +1052,15 @@ def _moe_bwd_rule(
     bias_spec = P(ep_axis, None) if has_bias else None
 
     bwd_in_specs = (
-        ep3_spec,                # d_expert_outputs
-        P(),                     # casted_sorted_x_lhs_trans
+        ep3_spec,  # d_expert_outputs
+        P(),  # casted_sorted_x_lhs_trans
         P(ep_axis, None, None),  # casted_wi_rhs_trans
-        P(),                     # gate_proj_out
-        P(),                     # up_proj_out
-        P(),                     # casted_intermediate_lhs_trans
+        P(),  # gate_proj_out
+        P(),  # up_proj_out
+        P(),  # casted_intermediate_lhs_trans
         P(ep_axis, None, None),  # casted_wo_rhs_trans
-        P(),                     # local_group_sizes
-        ep2_spec,                # recv_topk_weights
+        ep2_spec,  # local_group_sizes (1, num_local_experts) per shard
+        ep2_spec,  # recv_topk_weights
     )
     bwd_in_args = [
         d_expert_outputs,
@@ -995,14 +1074,14 @@ def _moe_bwd_rule(
         ctx.recv_topk_weights,
     ]
     bwd_out_specs = (
-        ep3_spec,                            # d_sorted_x
-        ep2_spec,                            # d_recv_w_from_intermediate
-        kernel_spec,                         # d_wi_0
-        kernel_spec,                         # d_wi_1
-        kernel_spec,                         # d_wo
-        bias_spec if has_bias else None,     # d_wi_0_bias
-        bias_spec if has_bias else None,     # d_wi_1_bias
-        bias_spec if has_bias else None,     # d_wo_bias
+        ep3_spec,  # d_sorted_x
+        ep2_spec,  # d_recv_w_from_intermediate
+        kernel_spec,  # d_wi_0
+        kernel_spec,  # d_wi_1
+        kernel_spec,  # d_wo
+        bias_spec if has_bias else None,  # d_wi_0_bias
+        bias_spec if has_bias else None,  # d_wi_1_bias
+        bias_spec if has_bias else None,  # d_wo_bias
     )
 
     def _bwd_body(*args):
@@ -1059,15 +1138,15 @@ def _moe_bwd_rule(
         in_specs=bwd_in_specs,
         out_specs=bwd_out_specs,
         check_rep=False,
-    )(*bwd_in_args)
+    )(
+        *bwd_in_args
+    )
 
     d_recv_w_total = d_recv_w_from_combine + d_recv_w_from_intermediate
 
     # ---------------- Dispatch bwd (global view) ----------------
     d_sorted_x = jax.lax.with_sharding_constraint(d_sorted_x, NamedSharding(mesh, ep3_spec))
-    d_recv_w_total = jax.lax.with_sharding_constraint(
-        d_recv_w_total, NamedSharding(mesh, ep2_spec)
-    )
+    d_recv_w_total = jax.lax.with_sharding_constraint(d_recv_w_total, NamedSharding(mesh, ep2_spec))
     d_x_from_dispatch, d_topk_w = tex.ep_dispatch_bwd(
         ctx.cfg,
         ctx.handle_mem,
@@ -1114,9 +1193,7 @@ def _moe_bwd_rule(
         )
         # routing_map is ignored by the kernel when compute_aux_scores=True,
         # so pass a zero placeholder of the right shape/dtype.
-        zero_routing_map = jnp.zeros(
-            ctx.aux_saved_scores.shape, dtype=ctx.routing_map.dtype
-        )
+        zero_routing_map = jnp.zeros(ctx.aux_saved_scores.shape, dtype=ctx.routing_map.dtype)
         d_logits_aux = tex.fused_topk_with_score_function_bwd(
             zero_routing_map,
             ctx.aux_saved_scores,
@@ -1305,9 +1382,7 @@ def moe(
     mesh = _get_mesh()
     if mesh is None or mesh.empty:
         raise ValueError("moe(...) requires an active jax.sharding.Mesh.")
-    expected_leading: Any = (
-        (*data_parallelism_axes, ep_axis) if data_parallelism_axes else ep_axis
-    )
+    expected_leading: Any = (*data_parallelism_axes, ep_axis) if data_parallelism_axes else ep_axis
     expected_spec = P(expected_leading, None, None)
     actual_spec = getattr(getattr(x, "sharding", None), "spec", None)
     if actual_spec is not None and tuple(actual_spec) != tuple(expected_spec):
