@@ -485,18 +485,6 @@ if(NOT NCCL_LIB)
       REQUIRED)
 endif()
 
-# Diagnostic: log detected NCCL header version (minimum enforced at runtime).
-file(READ "${NCCL_INCLUDE_DIR}/nccl.h" _nvte_nccl_h)
-string(REGEX MATCH "#define[ \t]+NCCL_MAJOR[ \t]+([0-9]+)" _ "${_nvte_nccl_h}")
-set(_nvte_nccl_major "${CMAKE_MATCH_1}")
-string(REGEX MATCH "#define[ \t]+NCCL_MINOR[ \t]+([0-9]+)" _ "${_nvte_nccl_h}")
-set(_nvte_nccl_minor "${CMAKE_MATCH_1}")
-string(REGEX MATCH "#define[ \t]+NCCL_PATCH[ \t]+([0-9]+)" _ "${_nvte_nccl_h}")
-set(_nvte_nccl_patch "${CMAKE_MATCH_1}")
-if(_nvte_nccl_major AND _nvte_nccl_minor AND _nvte_nccl_patch)
-  message(STATUS "NCCL header: ${NCCL_INCLUDE_DIR}/nccl.h (version ${_nvte_nccl_major}.${_nvte_nccl_minor}.${_nvte_nccl_patch})")
-endif()
-
 target_include_directories(transformer_engine PRIVATE
     ${NCCL_EP_INCLUDE_DIR}
     ${NCCL_INCLUDE_DIR})
