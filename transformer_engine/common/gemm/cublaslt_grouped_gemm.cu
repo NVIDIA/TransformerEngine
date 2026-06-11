@@ -228,7 +228,7 @@ struct GroupedGemmSetupWorkspace {
   }
 };
 
-inline bool grouped_gemm_supports_per_group_alpha_beta(int sm) { return sm >= 100; }
+inline bool grouped_gemm_supports_per_group_alpha_beta(int sm) { return sm >= 100 && sm <= 110; }
 
 inline size_t validate_grouped_gemm_inputs(
     size_t num_tensors, std::initializer_list<const transformer_engine::GroupedTensor *> inputs,
@@ -335,7 +335,7 @@ inline void check_grouped_gemm_requirements(const char *api_name) {
   const int sm = transformer_engine::cuda::sm_arch(current_device);
   const int cublas_ver = transformer_engine::cuda::cublas_version();
 #if CUBLAS_VERSION >= CUBLAS_GROUPED_GEMM_HOPPER_VERSION
-  NVTE_CHECK(sm >= 90, api_name, " requires Hopper (SM90) or newer architecture.");
+  NVTE_CHECK(sm >= 90 && sm <= 110, api_name, " requires Hopper (SM90) or Blackwell (SM10x and SM110).");
   NVTE_CHECK(cublas_ver >= CUBLAS_GROUPED_GEMM_VERSION, api_name,
              " requires cuBLAS 13.3+, but run-time cuBLAS version is ", cublas_ver);
   if (sm < 100) {
@@ -344,7 +344,7 @@ inline void check_grouped_gemm_requirements(const char *api_name) {
                cublas_ver);
   }
 #else
-  NVTE_CHECK(sm >= 100, api_name, " requires Blackwell (SM100) or newer architecture.");
+  NVTE_CHECK(sm >= 100 && sm <= 110, api_name, " requires Blackwell (SM10x and SM110).");
   NVTE_CHECK(cublas_ver >= CUBLAS_GROUPED_GEMM_VERSION, api_name,
              " requires cuBLAS 13.3+, but run-time cuBLAS version is ", cublas_ver);
 #endif
@@ -400,7 +400,7 @@ inline void validate_fp8_block_grouped_gemm_support(const GroupedOperandSelectio
              "Grouped GEMM: A and B must both use FP8 block scaling or both not.");
   NVTE_CHECK(sm == 90,
              "Grouped GEMM: FP8 block scaling is only supported on Hopper (SM90); "
-             "use MXFP8 on Blackwell (SM100) or newer.");
+             "use MXFP8 on Blackwell (SM10x and SM110).");
 }
 
 inline bool is_compatible_grouped_scaling_mode(NVTEScalingMode a_mode, NVTEScalingMode b_mode) {
@@ -1567,7 +1567,7 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
   NVTE_API_CALL(nvte_grouped_gemm);
   using namespace transformer_engine;
 
-  // Grouped GEMM requires Blackwell (SM100) or newer with cuBLAS 13.3+,
+  // Grouped GEMM requires Blackwell (SM10x and SM110) with cuBLAS 13.3+,
   // or Hopper (SM90) with cuBLAS 13.4+.
   check_grouped_gemm_requirements("nvte_grouped_gemm");
 
@@ -1650,7 +1650,7 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
   NVTE_API_CALL(nvte_grouped_gemm_with_discrete_inputA);
   using namespace transformer_engine;
 
-  // Grouped GEMM requires Blackwell (SM100) or newer with cuBLAS 13.3+,
+  // Grouped GEMM requires Blackwell (SM10x and SM110) with cuBLAS 13.3+,
   // or Hopper (SM90) with cuBLAS 13.4+.
   check_grouped_gemm_requirements("nvte_grouped_gemm_with_discrete_inputA");
 
@@ -1801,7 +1801,7 @@ void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
   NVTE_API_CALL(nvte_grouped_gemm_with_discrete_out);
   using namespace transformer_engine;
 
-  // Grouped GEMM requires Blackwell (SM100) or newer with cuBLAS 13.3+,
+  // Grouped GEMM requires Blackwell (SM10x and SM110) with cuBLAS 13.3+,
   // or Hopper (SM90) with cuBLAS 13.4+.
   check_grouped_gemm_requirements("nvte_grouped_gemm_with_discrete_out");
 
