@@ -146,8 +146,6 @@ class HybridQuantizer(Quantizer):
             return HybridQuantizedTensorStorage(
                 rowwise_storage=rowwise_result,
                 columnwise_storage=columnwise_result,
-                rowwise_quantizer=self.rowwise_quantizer,
-                columnwise_quantizer=self.columnwise_quantizer,
                 quantizer=self,
                 fake_dtype=tensor.dtype,
             )
@@ -157,8 +155,6 @@ class HybridQuantizer(Quantizer):
             dtype=tensor.dtype,
             rowwise_storage=rowwise_result,
             columnwise_storage=columnwise_result,
-            rowwise_quantizer=self.rowwise_quantizer,
-            columnwise_quantizer=self.columnwise_quantizer,
             quantizer=self,
         )
 
@@ -197,8 +193,6 @@ class HybridQuantizer(Quantizer):
             device=device,
             rowwise_storage=rowwise_empty,
             columnwise_storage=columnwise_empty,
-            rowwise_quantizer=self.rowwise_quantizer,
-            columnwise_quantizer=self.columnwise_quantizer,
             quantizer=self,
         )
 
@@ -350,12 +344,8 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
         Sub-storage for rowwise quantized data.
     columnwise_storage : QuantizedTensorStorage
         Sub-storage for columnwise quantized data.
-    rowwise_quantizer : Quantizer, optional
-        Quantizer used for the rowwise sub-storage.
-    columnwise_quantizer : Quantizer, optional
-        Quantizer used for the columnwise sub-storage.
-    quantizer : HybridQuantizer, optional
-        Parent hybrid quantizer.
+    quantizer : HybridQuantizer
+        Parent hybrid quantizer that owns the rowwise and columnwise sub-quantizers.
     requires_grad : bool, default = False
         Whether to compute gradients for this tensor.
 
@@ -366,9 +356,7 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
         *args,
         rowwise_storage: Optional[QuantizedTensorStorage],
         columnwise_storage: Optional[QuantizedTensorStorage],
-        rowwise_quantizer: Optional[Quantizer] = None,
-        columnwise_quantizer: Optional[Quantizer] = None,
-        quantizer: Optional[Quantizer] = None,
+        quantizer: HybridQuantizer,
         **kwargs,
     ):
         instance = super().__new__(
@@ -376,8 +364,6 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
             *args,
             rowwise_storage=rowwise_storage,
             columnwise_storage=columnwise_storage,
-            rowwise_quantizer=rowwise_quantizer,
-            columnwise_quantizer=columnwise_quantizer,
             quantizer=quantizer,
             **kwargs,
         )
@@ -443,8 +429,6 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
             dtype=self.dtype,
             rowwise_storage=row,
             columnwise_storage=col,
-            rowwise_quantizer=self._rowwise_quantizer,
-            columnwise_quantizer=self._columnwise_quantizer,
             quantizer=self._quantizer,
         )
 
@@ -532,8 +516,6 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
             dtype=self.dtype,
             rowwise_storage=row,
             columnwise_storage=col,
-            rowwise_quantizer=self._rowwise_quantizer,
-            columnwise_quantizer=self._columnwise_quantizer,
             quantizer=self._quantizer,
             requires_grad=self.requires_grad,
             device=self.device,
@@ -561,8 +543,6 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
             (
                 self._rowwise_storage,
                 self._columnwise_storage,
-                self._rowwise_quantizer,
-                self._columnwise_quantizer,
                 self._quantizer,
                 self.dtype,
                 self.shape,
@@ -598,7 +578,7 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
         # reduction so the post-optimizer re-quantization of the sharded weight
         # keeps one shared scale across shards (no-op for sub-quantizers without
         # amax reduction, e.g. MXFP8).
-        if mesh is not None and self._quantizer is not None:
+        if mesh is not None:
             self._quantizer.amax_reduction_group = mesh.get_group()
             self._quantizer.with_amax_reduction = True
 
@@ -651,8 +631,6 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
             col_meta,
             self._rowwise_storage,  # original sharded sub-storage (for make_like on iter-1)
             self._columnwise_storage,
-            self._rowwise_quantizer,
-            self._columnwise_quantizer,
             self._quantizer,
         )
         return sharded_tensors, metadata
@@ -680,10 +658,11 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
             col_meta,
             orig_row_sub,
             orig_col_sub,
-            row_quantizer,
-            col_quantizer,
             hybrid_quantizer,
         ) = metadata
+
+        row_quantizer = hybrid_quantizer.rowwise_quantizer
+        col_quantizer = hybrid_quantizer.columnwise_quantizer
 
         row_gathered = all_gather_outputs[:n_row_buffers]
         col_gathered = all_gather_outputs[n_row_buffers:]
@@ -714,10 +693,10 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
             # Iteration 2+: in-place field update on existing sub-storages
             if out._rowwise_storage is not None and row_meta is not None:
                 out._rowwise_storage.fsdp_assign_gathered(row_gathered, row_meta)
-                _sync_usage(out._rowwise_storage, out._rowwise_quantizer)
+                _sync_usage(out._rowwise_storage, out._quantizer.rowwise_quantizer)
             if out._columnwise_storage is not None and col_meta is not None:
                 out._columnwise_storage.fsdp_assign_gathered(col_gathered, col_meta)
-                _sync_usage(out._columnwise_storage, out._columnwise_quantizer)
+                _sync_usage(out._columnwise_storage, out._quantizer.columnwise_quantizer)
         else:
             # First iteration: clone the original sharded sub-storages via make_like,
             # then write gathered (full-size) buffers via each sub-storage's own
@@ -748,8 +727,6 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
                 dtype=param_dtype,
                 rowwise_storage=row_sub,
                 columnwise_storage=col_sub,
-                rowwise_quantizer=row_quantizer,
-                columnwise_quantizer=col_quantizer,
                 quantizer=hybrid_quantizer,
             )
 
@@ -790,8 +767,6 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
             dtype=tensor.dtype,
             rowwise_storage=row_out,
             columnwise_storage=col_out,
-            rowwise_quantizer=tensor._rowwise_quantizer,
-            columnwise_quantizer=tensor._columnwise_quantizer,
             quantizer=tensor._quantizer,
         )
 
@@ -828,8 +803,6 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
                     dtype=tensor.dtype,
                     rowwise_storage=row,
                     columnwise_storage=col,
-                    rowwise_quantizer=tensor._rowwise_quantizer,
-                    columnwise_quantizer=tensor._columnwise_quantizer,
                     quantizer=tensor._quantizer,
                     requires_grad=tensor.requires_grad,
                     device=target_device,
@@ -862,8 +835,6 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
                 dtype=tensor.dtype,
                 rowwise_storage=row_view,
                 columnwise_storage=col_view,
-                rowwise_quantizer=tensor._rowwise_quantizer,
-                columnwise_quantizer=tensor._columnwise_quantizer,
                 quantizer=tensor._quantizer,
             )
 
@@ -897,8 +868,6 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
                     dtype=tensor.dtype,
                     rowwise_storage=row_pieces[i] if row_pieces is not None else None,
                     columnwise_storage=col_pieces[i] if col_pieces is not None else None,
-                    rowwise_quantizer=tensor._rowwise_quantizer,
-                    columnwise_quantizer=tensor._columnwise_quantizer,
                     quantizer=tensor._quantizer,
                 )
                 for i in range(num_pieces)
@@ -962,15 +931,14 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
         if func == aten.new_zeros.default:
             tensor = args[0]
             new_shape = args[1]
-            if tensor._quantizer is not None:
-                # FSDP2 allocates new_zeros buffers as all-gather destinations
-                # that are immediately overwritten by copy_. Use make_empty
-                # (uninitialized storage with the right container shape/fields).
-                return tensor._quantizer.make_empty(
-                    new_shape,
-                    dtype=tensor.dtype,
-                    device=tensor.device,
-                )
+            # FSDP2 allocates new_zeros buffers as all-gather destinations
+            # that are immediately overwritten by copy_. Use make_empty
+            # (uninitialized storage with the right container shape/fields).
+            return tensor._quantizer.make_empty(
+                new_shape,
+                dtype=tensor.dtype,
+                device=tensor.device,
+            )
 
         # ── FSDP2: clone ─────────────────────────────────────────────
         if func == aten.clone.default:
@@ -990,8 +958,6 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
                 dtype=tensor.dtype,
                 rowwise_storage=row_clone,
                 columnwise_storage=col_clone,
-                rowwise_quantizer=tensor._rowwise_quantizer,
-                columnwise_quantizer=tensor._columnwise_quantizer,
                 quantizer=tensor._quantizer,
             )
 
@@ -1001,9 +967,7 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
 def _make_hybrid_quantized_tensor_in_reduce_ex(
     rowwise_storage: Optional[QuantizedTensorStorage],
     columnwise_storage: Optional[QuantizedTensorStorage],
-    rowwise_quantizer: Optional[Quantizer],
-    columnwise_quantizer: Optional[Quantizer],
-    quantizer: Optional[Quantizer],
+    quantizer: HybridQuantizer,
     dtype: torch.dtype,
     shape: torch.Size,
 ) -> HybridQuantizedTensor:
@@ -1013,7 +977,5 @@ def _make_hybrid_quantized_tensor_in_reduce_ex(
         dtype=dtype,
         rowwise_storage=rowwise_storage,
         columnwise_storage=columnwise_storage,
-        rowwise_quantizer=rowwise_quantizer,
-        columnwise_quantizer=columnwise_quantizer,
         quantizer=quantizer,
     )

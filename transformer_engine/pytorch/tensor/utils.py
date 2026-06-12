@@ -1223,8 +1223,8 @@ def _route_hybrid_to_buckets(
     """
     row_sub = model_weight._rowwise_storage
     col_sub = model_weight._columnwise_storage
-    sub_q_row = model_weight._rowwise_quantizer
-    sub_q_col = model_weight._columnwise_quantizer
+    sub_q_row = model_weight._quantizer.rowwise_quantizer
+    sub_q_col = model_weight._quantizer.columnwise_quantizer
 
     if row_sub is None and col_sub is None:
         raise ValueError(

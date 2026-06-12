@@ -101,6 +101,22 @@ class TestHybridQuantizerConstruction:
         assert isinstance(hq.rowwise_quantizer, Float8CurrentScalingQuantizer)
         assert isinstance(hq.columnwise_quantizer, NVFP4Quantizer)
 
+    def test_hybrid_storage_and_tensor_require_parent_quantizer(self):
+        with pytest.raises(TypeError, match="requires a parent HybridQuantizer"):
+            HybridQuantizedTensorStorage(
+                rowwise_storage=None,
+                columnwise_storage=None,
+                quantizer=None,
+            )
+        with pytest.raises(TypeError, match="requires a parent HybridQuantizer"):
+            HybridQuantizedTensor(
+                shape=(1, 1),
+                dtype=torch.bfloat16,
+                rowwise_storage=None,
+                columnwise_storage=None,
+                quantizer=None,
+            )
+
     def test_rejects_same_sub_quantizer_instance_for_both_directions(self):
         quantizer = _make_fp8_quantizer()
 
@@ -3241,8 +3257,8 @@ class TestHybridQuantizeMasterWeights:
 
         assert weight._rowwise_storage is not None
         assert weight._columnwise_storage is not None
-        assert isinstance(weight._rowwise_quantizer, Float8Quantizer)
-        assert isinstance(weight._columnwise_quantizer, Float8CurrentScalingQuantizer)
+        assert isinstance(weight._quantizer.rowwise_quantizer, Float8Quantizer)
+        assert isinstance(weight._quantizer.columnwise_quantizer, Float8CurrentScalingQuantizer)
         dq_row = weight._rowwise_storage.dequantize(dtype=torch.float32)
         dq_col = weight._columnwise_storage.dequantize(dtype=torch.float32)
         torch.testing.assert_close(dq_row.reshape(-1), master_flat, rtol=0.125, atol=0.1)
@@ -3270,8 +3286,8 @@ class TestHybridQuantizeMasterWeights:
 
         assert weight._rowwise_storage is not None
         assert weight._columnwise_storage is not None
-        assert isinstance(weight._rowwise_quantizer, Float8CurrentScalingQuantizer)
-        assert isinstance(weight._columnwise_quantizer, Float8Quantizer)
+        assert isinstance(weight._quantizer.rowwise_quantizer, Float8CurrentScalingQuantizer)
+        assert isinstance(weight._quantizer.columnwise_quantizer, Float8Quantizer)
         dq_row = weight._rowwise_storage.dequantize(dtype=torch.float32)
         dq_col = weight._columnwise_storage.dequantize(dtype=torch.float32)
         torch.testing.assert_close(dq_row.reshape(-1), master_flat, rtol=0.125, atol=0.1)
@@ -4506,14 +4522,17 @@ class TestFloat8TransposeOnlySplit:
 
     def test_hybrid_split_uses_columnwise_logical_shape_when_rowwise_is_absent(self):
         columnwise = self._make_transpose_only_float8_tensor()
+        quantizer = HybridQuantizer(
+            rowwise_quantizer=_make_fp8_quantizer(),
+            columnwise_quantizer=_make_fp8_quantizer(),
+        )
+        quantizer.set_usage(rowwise=False, columnwise=True)
         hybrid = HybridQuantizedTensor(
             shape=columnwise.shape,
             dtype=columnwise.dtype,
             rowwise_storage=None,
             columnwise_storage=columnwise,
-            rowwise_quantizer=None,
-            columnwise_quantizer=None,
-            quantizer=None,
+            quantizer=quantizer,
             device="cuda",
         )
 

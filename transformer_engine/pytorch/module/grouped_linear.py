@@ -259,16 +259,12 @@ def _hybrid_split_quantize(tensor, m_splits, quantizers, *, disable_bulk_allocat
         HybridStorage(
             rowwise_storage=row,
             columnwise_storage=col,
-            rowwise_quantizer=rq,
-            columnwise_quantizer=cq,
             quantizer=q,
             fake_dtype=tensor.dtype,
         )
-        for row, col, rq, cq, q in zip(
+        for row, col, q in zip(
             row_results,
             col_results,
-            row_quantizers,
-            col_quantizers,
             quantizers,
         )
     ]
