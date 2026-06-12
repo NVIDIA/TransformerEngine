@@ -85,8 +85,7 @@ class _MoEBlock(TransformerEngineBase):
         If ``True``, registers a per-expert routing bias (shape ``[E]``)
         used by the topk selection. Only meaningful with
         ``score_function="sigmoid"``; the underlying primitive validates
-        the pairing. (Renamed from ``use_expert_bias`` per PR #3116
-        review for symmetry with ``use_ffn_bias``.)
+        the pairing.
     aux_loss_coeff : float
         If ``> 0``, return the MoE auxiliary load-balancing loss scalar
         in addition to the main output.
@@ -106,19 +105,17 @@ class _MoEBlock(TransformerEngineBase):
         *inside* each shard before ``ep_combine`` (saves one global
         reduction at the cost of an extra broadcast). Default ``False``.
 
-    Note that the per-expert dispatch-slot alignment is fixed internally
-    at 128 tokens (see ``moe._ALIGN_SIZE``). Per PR #3116 review there's
-    no current model that wants a >128 alignment, so this is not exposed
-    as a parameter; re-introduce a knob (or recipe-driven inference) if
-    a future FP8 recipe needs >128.
+    The per-expert dispatch-slot alignment is fixed internally at 128
+    tokens (see ``moe._ALIGN_SIZE``) -- the value required by NCCL EP
+    HT and satisfied by every current TE grouped-GEMM recipe -- and is
+    therefore not exposed as a per-instance knob.
 
     dtype : jnp.dtype
         Compute / parameter dtype.
     kernel_init, bias_init, expert_bias_init : Initializers.
     use_ffn_bias : bool
         Register per-expert FFN biases (``wi_0_bias``, ``wi_1_bias``,
-        ``wo_bias``). (Renamed from ``use_bias`` per PR #3116 review
-        for symmetry with ``use_expert_routing_bias``.)
+        ``wo_bias``).
 
     Quantization is currently configured via the standard TE autocast
     context (``fp8_autocast``/``with_quantizer_set``) and threaded

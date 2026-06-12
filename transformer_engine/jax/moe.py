@@ -61,41 +61,32 @@ __all__ = ["moe"]
 # Per-expert dispatch-slot alignment fed to ``tex.ep_prepare`` as
 # ``dispatch_output_per_expert_alignment``. NCCL EP HT requires the
 # per-expert recv block to be at least 128-token aligned, and all current
-# TE grouped-GEMM recipes (bf16/fp16/fp8/mxfp8) are satisfied by a
-# 128-token tile, so a single hard-coded constant suffices.
-#
-# We deliberately omit a user-facing knob: per PR #3116 review there's no
-# current model that wants a >128 alignment, and exposing it widens the
-# MoEBlock API surface without buying anything. Re-introduce a parameter
-# (or recipe-driven inference, see jberchtold's follow-up) if a future
-# recipe needs >128.
+# TE grouped-GEMM recipes (bf16/fp16/fp8/mxfp8) are satisfied by the
+# same 128-token tile, so a single constant covers every supported path.
 _ALIGN_SIZE = 128
 
 
 def _with_sharding_constraint_cast_bwd(x: jnp.ndarray, sharding) -> jnp.ndarray:
-    """Apply a sharding constraint while keeping bwd cotangents in the primal dtype.
+    """Sharding constraint that keeps bwd cotangents in the primal dtype.
 
-    Plain ``jax.lax.with_sharding_constraint`` propagates cotangents in
-    whatever dtype the upstream gradient lands in. Under mixed precision
-    that can be wider than the primal, blowing up bandwidth and (for
-    bf16 primals) breaking downstream kernels that pin a bf16 input
-    layout. This wrapper re-casts the cotangent back to the primal
-    dtype and re-asserts the same sharding on the bwd path.
+    Plain ``jax.lax.with_sharding_constraint`` is identity on the fwd
+    but does not constrain the dtype of the cotangent that flows back
+    through it. In this MoE bwd, ``d_x`` is built from two paths:
 
-    Why MoE specifically needs this (per PR #3116 review): unlike a
-    plain LN+MLP block, the MoE bwd composes two cotangent paths into
-    ``d_x`` -- one through ``ep_dispatch_bwd`` (bf16) and one through
-    ``d_logits_2d @ gate_kernel.T``. The latter starts from
-    ``fused_topk_with_score_function_bwd``, which returns ``d_logits_2d``
-    in fp32 because the fwd promoted ``logits_2d`` to fp32 (the topk /
-    softmax / sigmoid kernels are only validated at fp32; see
-    ``tests/pytorch/test_fused_router.py``). The fp32 ``d_logits_2d``
-    then composes with ``gate_kernel.T`` and adds into the bf16
-    ``d_x_from_dispatch``, yielding an fp32 sum even though the user's
-    ``x`` is bf16. Without this cast, the user-visible ``d_x`` flows
-    back into the optimizer at fp32 -- silently doubling the activation
-    grad bandwidth and tripping any downstream kernel that pins a bf16
-    input layout (e.g. an LN bwd that fuses into our ``d_x``).
+      * ``d_x_from_dispatch`` from ``ep_dispatch_bwd`` -- primal dtype
+        (bf16 in mixed precision).
+      * ``d_x_from_gate = d_logits_2d @ gate_kernel.T`` where
+        ``d_logits_2d`` is produced by
+        ``fused_topk_with_score_function_bwd``. That primitive runs at
+        fp32 because the fwd promoted ``logits_2d`` to fp32 (the fused
+        topk/softmax/sigmoid kernels are only validated at fp32).
+
+    JAX's type promotion then makes ``d_x_from_gate + d_x_from_dispatch``
+    fp32, so the user-visible ``d_x`` ends up wider than ``x``. That
+    doubles activation-grad bandwidth and breaks any downstream kernel
+    that pins a bf16 input layout. This wrapper inserts an explicit
+    cast back to the primal dtype on the bwd side and re-asserts the
+    same sharding there as well.
     """
 
     @jax.custom_vjp
@@ -550,22 +541,14 @@ def _ffn_bwd_per_shard(
     else:
         d_recv_w_from_intermediate = jnp.zeros_like(recv_w_flat)
 
-    # Activation bwd. Mirror the fwd's fp32 promotion of silu+multiply
-    # so the silu derivative composes through the gradient at fp32 too;
-    # cast back to the bf16 layout the wi grouped_quantize expects.
-    #
-    # Why MoE specifically needs this (per PR #3116 review): the
-    # non-MoE LN+MLP block can stay in the activation dtype because
-    # its silu accumulates over a single per-row dot product whose
-    # numerical drift is absorbed by the downstream LN. The MoE
-    # silu, by contrast, sits on the *expert* side of the routing,
-    # so its bf16 rounding error rides directly into ``expert_outputs``
-    # and is summed (weighted by routing probs) across topk experts
-    # by ep_combine -- bf16 silu alone drifts ~1% vs fp32 silu, which
-    # compounds through wo->combine into the ~1.4% per-element parity
-    # gap we measured against the pure-JAX softmax reference. Mirroring
-    # the fwd fp32 promotion keeps the bwd's silu' derivative in lock-
-    # step with the fwd's silu and preserves grad parity.
+    # Activation bwd. The fwd already computes silu+multiply at fp32
+    # because the MoE silu sits on the expert side of routing: its
+    # output rides into ``expert_outputs`` and is then summed -- weighted
+    # by routing probabilities -- across topk experts by ep_combine.
+    # Doing silu/silu' in bf16 drifts by ~1% per element vs fp32 and
+    # that drift compounds through wo->combine. Mirror the fwd's fp32
+    # promotion here so silu' lines up with silu, then cast back to the
+    # bf16 layout the wi grouped_quantize expects.
     gp_fp32 = gate_proj_out.astype(jnp.float32)
     up_fp32 = up_proj_out.astype(jnp.float32)
     d_int_fp32 = d_intermediate.astype(jnp.float32)
@@ -745,20 +728,7 @@ def _moe_fwd_rule(
         expert_bias=eb_arg,
         compute_aux_scores=False,
     )
-    # NOTE (PR #3116 review): this NaN filter is a *correctness
-    # requirement*, NOT a debugging artifact. Sigmoid + K>1 normalises
-    # as ``weights / (weights.sum + 1e-20)``; for tokens whose top-K
-    # sigmoid scores all underflow at bf16/fp32, the output is NaN
-    # at the selected positions. Those NaNs ride
-    # ep_dispatch -> recv_topk_weights -> combine and poison the per-token
-    # weighted sum, leaving entire output rows as NaN. Sanitize at the
-    # source so neither the fwd combine nor the bwd's manual
-    # ``grad_pre_combine * w`` sees them. Padded positions in
-    # sparse_probs are already zero (routing_map is False there); only
-    # the rare sigmoid-underflow path emits NaN, which is why the
-    # filter is observationally a no-op in dense unit tests but must
-    # stay in for sparse / production routing distributions.
-    sparse_probs = jnp.where(jnp.isnan(sparse_probs), 0, sparse_probs).astype(dtype)
+    sparse_probs = sparse_probs.astype(dtype)
 
     # ---------------- Aux loss (global view, replicated) ----------------
     # ``fused_moe_aux_loss_fwd`` sums probs and tokens_per_expert across
@@ -1403,7 +1373,7 @@ def moe(
     at 128 tokens (``_ALIGN_SIZE``); see that constant's docstring for
     rationale and how to extend if a future recipe needs >128.
 
-    Axis-name parameters (per PR #3116 review):
+    Axis-name parameters:
 
     * ``ep_axis`` and ``data_parallelism_axes`` are *physical mesh
       axis names* -- they index ``jax.sharding.Mesh.shape`` directly
