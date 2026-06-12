@@ -35,15 +35,14 @@ all-gather over the routing-side logits, which lives off the critical
 path and overlaps with the dispatch collective).
 """
 
-from dataclasses import dataclass
 from functools import partial
 from typing import Any, Optional, Tuple, Union
 import warnings
 
+import flax.struct
 import jax
 import jax.numpy as jnp
 from jax.sharding import NamedSharding, PartitionSpec as P
-from jax.tree_util import register_pytree_node_class
 
 from . import cpp_extensions as tex
 from .quantize import (
@@ -180,14 +179,14 @@ def _te_ep_assert_compatible_bootstrap(
 # =============================================================================
 
 
-# Registered as a pytree so jax.custom_vjp can flatten/unflatten it across
-# the fwd -> bwd boundary. ``cfg`` is the only static field (EpLayerConfig
-# is a frozen dataclass of ints); the rest are jnp.ndarray,
-# GroupedNoScaleTensor (already a pytree), or None when aux_loss_coeff == 0.
-@register_pytree_node_class
-@dataclass
+@flax.struct.dataclass
 class _Ctx:
-    """Residuals carried from the fwd rule into the bwd rule."""
+    """Residuals carried from the fwd rule into the bwd rule.
+
+    Flattened automatically by jax.custom_vjp; ``cfg`` is the only
+    static field (the rest are jnp.ndarray, GroupedNoScaleTensor, or
+    None when aux_loss_coeff == 0).
+    """
 
     x: jnp.ndarray
     gate_kernel: jnp.ndarray
@@ -195,8 +194,8 @@ class _Ctx:
     logits_2d: jnp.ndarray
     saved_scores: jnp.ndarray
     routing_map: jnp.ndarray
-    cfg: Any
-    handle_mem: Any
+    cfg: Any = flax.struct.field(pytree_node=False)
+    handle_mem: jnp.ndarray
     token_counts: jnp.ndarray
     recv_topk_weights: jnp.ndarray
     casted_sorted_x_lhs_trans: Any
@@ -207,85 +206,9 @@ class _Ctx:
     casted_wo_rhs_trans: Any
     expert_outputs: jnp.ndarray
     local_group_sizes: jnp.ndarray
-    # Aux-loss residuals; None when aux_loss_coeff == 0.
     aux_const_buf: Any = None
     aux_tokens_per_expert: Any = None
     aux_saved_scores: Any = None
-
-    def tree_flatten(self):
-        children = (
-            self.x,
-            self.gate_kernel,
-            self.expert_bias,
-            self.logits_2d,
-            self.saved_scores,
-            self.routing_map,
-            self.handle_mem,
-            self.token_counts,
-            self.recv_topk_weights,
-            self.casted_sorted_x_lhs_trans,
-            self.casted_wi_rhs_trans,
-            self.gate_proj_out,
-            self.up_proj_out,
-            self.casted_intermediate_lhs_trans,
-            self.casted_wo_rhs_trans,
-            self.expert_outputs,
-            self.local_group_sizes,
-            self.aux_const_buf,
-            self.aux_tokens_per_expert,
-            self.aux_saved_scores,
-        )
-        aux_data = (self.cfg,)
-        return children, aux_data
-
-    @classmethod
-    def tree_unflatten(cls, aux_data, children):
-        (cfg,) = aux_data
-        (
-            x,
-            gate_kernel,
-            expert_bias,
-            logits_2d,
-            saved_scores,
-            routing_map,
-            handle_mem,
-            token_counts,
-            recv_topk_weights,
-            casted_sorted_x_lhs_trans,
-            casted_wi_rhs_trans,
-            gate_proj_out,
-            up_proj_out,
-            casted_intermediate_lhs_trans,
-            casted_wo_rhs_trans,
-            expert_outputs,
-            local_group_sizes,
-            aux_const_buf,
-            aux_tokens_per_expert,
-            aux_saved_scores,
-        ) = children
-        return cls(
-            x=x,
-            gate_kernel=gate_kernel,
-            expert_bias=expert_bias,
-            logits_2d=logits_2d,
-            saved_scores=saved_scores,
-            routing_map=routing_map,
-            cfg=cfg,
-            handle_mem=handle_mem,
-            token_counts=token_counts,
-            recv_topk_weights=recv_topk_weights,
-            casted_sorted_x_lhs_trans=casted_sorted_x_lhs_trans,
-            casted_wi_rhs_trans=casted_wi_rhs_trans,
-            gate_proj_out=gate_proj_out,
-            up_proj_out=up_proj_out,
-            casted_intermediate_lhs_trans=casted_intermediate_lhs_trans,
-            casted_wo_rhs_trans=casted_wo_rhs_trans,
-            expert_outputs=expert_outputs,
-            local_group_sizes=local_group_sizes,
-            aux_const_buf=aux_const_buf,
-            aux_tokens_per_expert=aux_tokens_per_expert,
-            aux_saved_scores=aux_saved_scores,
-        )
 
 
 # =============================================================================
