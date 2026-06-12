@@ -352,6 +352,26 @@ def test_dpa_fa4_base(dtype, model_configs, model):
     test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False)
 
 
+@pytest.mark.skipif(
+    not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
+)
+@pytest.mark.skipif(
+    device_compute_capability != (12, 1),
+    reason="SM_121 (GB10 consumer Blackwell / DGX Spark) specific FA4 correctness test.",
+)
+@pytest.mark.parametrize("dtype", param_types_lean)
+@pytest.mark.parametrize("model_configs", [model_configs_fa4_base])
+@pytest.mark.parametrize("model", model_configs_fa4_base.keys())
+def test_dpa_fa4_sm121(dtype, model_configs, model):
+    """Test DotProductAttention with FA4 on SM_121 (GB10 consumer Blackwell).
+
+    SM_121 is architecturally a variant of SM_120 (professional Blackwell). This test
+    gates explicitly on (12, 1) to ensure the SM_121 SASS path is exercised and to
+    provide an unambiguous CI signal for GB10 hardware.
+    """
+    test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False)
+
+
 # head_dim=256 is supported only on SM100 via FA4's dedicated kernel
 # (flash_attn/cute/sm100_hd256_2cta_fmha_*.py), available in flash-attn-4 > 4.0.0b10.
 # On other architectures, _validate_head_dims rejects (256, 256), FA4 is disabled, and
