@@ -18,6 +18,16 @@ assert torch_version() >= (2, 1), f"Minimum torch version 2.1 required. Found {t
 load_framework_extension("torch")
 from transformer_engine.pytorch import constants
 from transformer_engine.pytorch.constants import DType
+
+# Register the CuTeDSL kernel entrypoints (TVM-FFI global funcs) so the C++
+# dispatcher can discover them via GetGlobal and compile kernels on demand. The
+# CuTeDSL toolchain (cutlass, tvm_ffi) is optional; if it is unavailable the
+# import is skipped and C++ simply falls back to the CUDA C++ kernels.
+try:
+    import transformer_engine.common.CuTeDSL  # noqa: F401
+except Exception:
+    pass
+
 from transformer_engine.pytorch.module import LayerNormLinear
 from transformer_engine.pytorch.module import Linear
 from transformer_engine.pytorch.module import LayerNormMLP

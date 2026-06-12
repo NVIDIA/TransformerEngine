@@ -3,7 +3,10 @@
 # See LICENSE for license information.
 
 [build-system]
-requires = ["setuptools>=61.0", "cmake>=3.21", "wheel", "pybind11[global]", "ninja", "pip", "torch>=2.1", "jax>=0.5.0", "flax>=0.7.1"]
+# apache-tvm-ffi is required at configure/compile/link time: the common C++
+# library finds it via find_package(tvm_ffi) and links libtvm_ffi.so (the
+# CuTeDSL quant backend bridge). It is also a runtime dependency (see setup.py).
+requires = ["setuptools>=61.0", "cmake>=3.21", "wheel", "pybind11[global]", "ninja", "pip", "torch>=2.1", "jax>=0.5.0", "flax>=0.7.1", "apache-tvm-ffi>=0.1.12"]
 
 # Use legacy backend to import local packages in setup.py
 build-backend = "setuptools.build_meta:__legacy__"

@@ -106,6 +106,24 @@ set(CUTLASS_TOOLS_INCLUDE_DIR
 # Python
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 
+# tvm-ffi: the quantize dispatch layer bridges to JIT-compiled CuTeDSL kernels
+# through tvm-ffi (see common/tvm_ffi_bridge.h). Locate the tvm_ffi package that
+# ships with the Python install and use its exported CMake config (provides the
+# tvm_ffi::shared imported target with headers + libtvm_ffi.so).
+execute_process(
+  COMMAND ${Python_EXECUTABLE} -c "import tvm_ffi.libinfo as li; print(li.find_cmake_path())"
+  OUTPUT_VARIABLE TVM_FFI_CMAKE_DIR
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  RESULT_VARIABLE TVM_FFI_CMAKE_QUERY)
+if(NOT TVM_FFI_CMAKE_QUERY EQUAL 0)
+  message(FATAL_ERROR
+          "Could not import the tvm_ffi Python package (with '${Python_EXECUTABLE}'), "
+          "which Transformer Engine requires to build the CuTeDSL quantize backend "
+          "bridge (common/tvm_ffi_bridge.h). Install it into this Python environment: "
+          "`pip install apache-tvm-ffi`.")
+endif()
+find_package(tvm_ffi CONFIG REQUIRED PATHS "${TVM_FFI_CMAKE_DIR}")
+
 function(find_nccl_version OUT_VERSION OUT_INCLUDE_DIR)
   find_path(_nvte_nccl_include_dir
             NAMES nccl.h
@@ -359,6 +377,22 @@ target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
                       CUDA::cudart
                       CUDNN::cudnn_all)
+
+# CuTeDSL quantize backend bridge. PRIVATE: tvm_ffi_bridge.h is an internal
+# header (not in the installed public include dir), so the symbols and headers
+# are only needed to compile transformer_engine itself, not by downstream
+# consumers. The INTERFACE include dirs of tvm_ffi::shared still apply to our
+# own TUs, which is what fixes the <tvm/ffi/*.h> not-found error.
+target_link_libraries(transformer_engine PRIVATE tvm_ffi::shared)
+
+# libtvm_ffi.so ships inside the tvm_ffi Python package (not a system lib dir),
+# so add its directory to the RPATH; otherwise the runtime loader can't satisfy
+# the DT_NEEDED on libtvm_ffi.so and dlopen fails with "cannot open shared
+# object file". Applied to both the build tree and the installed library.
+get_target_property(TVM_FFI_SHARED_LOCATION tvm_ffi::shared IMPORTED_LOCATION)
+get_filename_component(TVM_FFI_LIB_DIR "${TVM_FFI_SHARED_LOCATION}" DIRECTORY)
+set_property(TARGET transformer_engine APPEND PROPERTY BUILD_RPATH "${TVM_FFI_LIB_DIR}")
+set_property(TARGET transformer_engine APPEND PROPERTY INSTALL_RPATH "${TVM_FFI_LIB_DIR}")
 
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})

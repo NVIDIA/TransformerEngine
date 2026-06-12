@@ -136,6 +136,9 @@ def setup_requirements() -> Tuple[List[str], List[str]]:
         "importlib-metadata>=1.0",
         "packaging",
         cusolvermp_pypi_package_name(),
+        # The core C++ library links libtvm_ffi.so (CuTeDSL quant backend bridge),
+        # so apache-tvm-ffi is required at runtime by every TE install.
+        "apache-tvm-ffi>=0.1.12",
     ]
     test_reqs: List[str] = ["pytest>=8.2.1"]
 
