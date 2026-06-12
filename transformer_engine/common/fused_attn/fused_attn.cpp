@@ -502,8 +502,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
                    "Please upgrade your cuDNN version if possible."
                 << std::endl;
     }
-    if (backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen
-        && (sm_arch_ == 120 || sm_arch_ == 121)) {
+    if (backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen &&
+        (sm_arch_ == 120 || sm_arch_ == 121)) {
       if (cudnn_runtime_version < 91801) {
         backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
         std::cout << "Warning: Given combination of sm_arch_ == " << sm_arch_

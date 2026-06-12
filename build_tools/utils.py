@@ -246,6 +246,7 @@ def get_cuda_include_dirs() -> List[Path]:
     # cudnn and nccl are found even when the system toolkit doesn't have them.
     try:
         import nvidia
+
         cuda_root = Path(nvidia.__path__[0])  # namespace package — no __file__
         dirs.extend(
             subdir / "include"

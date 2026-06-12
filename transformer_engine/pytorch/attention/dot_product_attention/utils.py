@@ -831,8 +831,8 @@ def get_attention_backend(
             if use_fused_attention:
                 logger.debug(
                     "Disabling FusedAttention as MLA for backward pass is not supported for compute"
-                    " capability = sm120/sm121 for a head_dim_qk > 128 or head_dim_qk %%8 != 0. Found:"
-                    " head_dim_qk = %s",
+                    " capability = sm120/sm121 for a head_dim_qk > 128 or head_dim_qk %%8 != 0."
+                    " Found: head_dim_qk = %s",
                     head_dim_qk,
                 )
             use_fused_attention = False
@@ -989,8 +989,8 @@ def get_attention_backend(
             if cudnn_version < (9, 18, 1):
                 if use_fused_attention:
                     logger.debug(
-                        "Disabling FusedAttention as qkv_format = thd is"
-                        " not supported for compute capability = sm120/sm121 and cuDNN version < 9.18.1"
+                        "Disabling FusedAttention as qkv_format = thd is not supported for compute"
+                        " capability = sm120/sm121 and cuDNN version < 9.18.1"
                     )
                 use_fused_attention = False
             elif qkv_layout in {"t3hd", "th3d"}:
