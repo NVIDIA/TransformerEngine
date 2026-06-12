@@ -295,14 +295,13 @@ def reorder_seq_chunks_for_a2a_after_attn(x, chunk_ids_for_a2a, seq_dim, cp_size
     return x
 
 
-def reorder_thd_sequences_to_rank_sharded(x, cu_seqlens, cp_size, seq_dim=0):
+def thd_sequence_order_to_cp_rank_order(x, cu_seqlens, cp_size, seq_dim=0):
     """
-    Reorder THD sequences from contiguous to rank sharded according to sharding
-    strategy (DualChunking here).
+    Reorder a THD tensor from sequence order to dual-chunk CP rank order.
 
     Args:
         x:              The input tensor to be reordered.
-        cu_seqlens:     The cumulative sequence lengths of the input tensor.
+        cu_seqlens:     The padded cumulative sequence lengths of the input tensor.
         cp_size:        The number of ranks participating in context parallelism.
         seq_dim:        The dimension in which to reorder.
 
@@ -321,10 +320,8 @@ def reorder_thd_sequences_to_rank_sharded(x, cu_seqlens, cp_size, seq_dim=0):
                           10., 11.,  3.,  4.,  3.,  4.,  3.,  4.,  6.,  7.,  8.,  9.]
 
 
-        This logic is similar to how the DualChunking is done to split the sequence
-        for each rank. Here, the indices of sequence chunks for all those ranks
-        are concatenated together. So the returned tensor ends up looking like as if
-        the chunks from all the ranks are concatenated together.
+        This follows the same dual-chunk CP partitioning used to split each sequence
+        across ranks. The output concatenates each rank's two chunks in CP rank order.
 
          e.g. [
                 0.,  7.,  0.,  7.,  0.,  7.,  0.,  1., 14., 15.,  # chunk on rank 0
@@ -333,18 +330,19 @@ def reorder_thd_sequences_to_rank_sharded(x, cu_seqlens, cp_size, seq_dim=0):
                 3.,  4.,  3.,  4.,  3.,  4.,  6.,  7.,  8.,  9.   # chunk on rank 3
              ]
     """
-    assert seq_dim == 0, "tex.thd_cp_reorder_sequences operates on the leading (token) dim"
-    return tex.thd_cp_reorder_sequences(x, cu_seqlens, cp_size, False, x.shape[seq_dim])
+    assert (
+        seq_dim == 0
+    ), "tex.thd_sequence_order_to_cp_rank_order operates on the leading THD token dimension"
+    return tex.thd_sequence_order_to_cp_rank_order(x, cu_seqlens, cp_size, x.shape[seq_dim])
 
 
-def reorder_thd_sequences_to_contiguous(x, cu_seqlens, cp_size, seq_dim=0):
+def thd_cp_rank_order_to_sequence_order(x, cu_seqlens, cp_size, seq_dim=0):
     """
-    Reorder THD sequences from rank sharded according to sharding strategy
-    (DualChunking here) to contiguous.
+    Reorder a THD tensor from dual-chunk CP rank order to sequence order.
 
     Args:
         x:              The input tensor to be reordered.
-        cu_seqlens:     The cumulative sequence lengths of the input tensor.
+        cu_seqlens:     The padded cumulative sequence lengths of the input tensor.
         cp_size:        The number of ranks participating in context parallelism.
         seq_dim:        The dimension in which to reorder.
 
@@ -362,8 +360,8 @@ def reorder_thd_sequences_to_contiguous(x, cu_seqlens, cp_size, seq_dim=0):
                           6.,  7.,  0.,  1.,  2.,  3.,  4.,  5.,  6.,  7.,  0.,  1.,  2.,  3.,
                           4.,  5.,  6.,  7.,  8.,  9., 10., 11., 12., 13., 14., 15.]
 
-        Note that the input sequences (x) are arranged after A2A communication as if DualChunked
-        chunks on all the ranks are concatenated together in the `seq_dim`.
+        Note that the input sequences (x) are arranged as if dual-chunk CP chunks on all
+        ranks are concatenated together in `seq_dim`.
 
         e.g. [
                 0.,  7.,  0.,  7.,  0.,  7.,  0.,  1., 14., 15.,  # chunk on rank 0
@@ -372,16 +370,18 @@ def reorder_thd_sequences_to_contiguous(x, cu_seqlens, cp_size, seq_dim=0):
                 3.,  4.,  3.,  4.,  3.,  4.,  6.,  7.,  8.,  9.   # chunk on rank 3
              ]
 
-        Then the logic to serialize the sequences is:
-        1. For every sequence segment on any rank (denoted by `start` and `end`):
+        Then the logic to restore sequence order is:
+        1. For every sequence range on any rank (denoted by `start` and `end`):
             1a. For every chunk (in `chunk_id` and the total of those are twice as many as the number of CP ranks) :
                 1aa. The first `cp_size` number of chunks form the first half of the whole sequence. Get those indices.
                 1ab. The second `cp_size` number of chunks form the second half of the whole sequence. Get those indices.
             1b. Concatenate the indices of the first half and the second half.
         2. Reorder the entire input tensor by those indices.
     """
-    assert seq_dim == 0, "tex.thd_cp_reorder_sequences operates on the leading (token) dim"
-    return tex.thd_cp_reorder_sequences(x, cu_seqlens, cp_size, True, x.shape[seq_dim])
+    assert (
+        seq_dim == 0
+    ), "tex.thd_cp_rank_order_to_sequence_order operates on the leading THD token dimension"
+    return tex.thd_cp_rank_order_to_sequence_order(x, cu_seqlens, cp_size, x.shape[seq_dim])
 
 
 def flash_attn_a2a_communicate(
@@ -450,7 +450,7 @@ def flash_attn_a2a_communicate(
                         # [cp, t, h//cp, d] -> [cp*t, h//cp, d]
                         x = x.view(-1, *x.shape[2:])
                         # reorder the sequence chunks
-                        a2a_outputs[i - 2] = reorder_thd_sequences_to_contiguous(
+                        a2a_outputs[i - 2] = thd_cp_rank_order_to_sequence_order(
                             x, cu_seqlens_padded, cp_size
                         )
 
@@ -496,7 +496,7 @@ def flash_attn_a2a_communicate(
                         else cu_seqlens_kv_padded
                     )
                     # reorder the sequence chunks
-                    x = reorder_thd_sequences_to_rank_sharded(x, cu_seqlens_padded, cp_size)
+                    x = thd_sequence_order_to_cp_rank_order(x, cu_seqlens_padded, cp_size)
                     # [cp*t, h//cp, d] -> [cp, t, h//cp, d]
                     a2a_inputs[i] = x.view(cp_size, -1, *x.shape[-2:])
             if i > 1:
@@ -3178,11 +3178,11 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         v_ag, _ = gather_along_first_dim(v, cp_group)
 
         if qkv_format == "thd":
-            # [cp*t, h, d] -> reorder to contiguous per-sequence order -> [t_full, h, d]
+            # [cp*t, h, d] -> reorder to sequence order -> [t_full, h, d]
             # The padded cu_seqlens are global sequence offsets. Reorder uses them to
             # derive per-sequence chunk boundaries.
-            k_ag = reorder_thd_sequences_to_contiguous(k_ag, cu_seqlens_kv_padded, cp_size)
-            v_ag = reorder_thd_sequences_to_contiguous(v_ag, cu_seqlens_kv_padded, cp_size)
+            k_ag = thd_cp_rank_order_to_sequence_order(k_ag, cu_seqlens_kv_padded, cp_size)
+            v_ag = thd_cp_rank_order_to_sequence_order(v_ag, cu_seqlens_kv_padded, cp_size)
         else:
             # [cp, s, b, h, d] -> [cp*2, s//2, b, h, d]
             k_ag = k_ag.view(2 * cp_size, k.shape[0] // 2, *k.shape[1:])
@@ -3220,8 +3220,8 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         out_per_step = [None, None]
         softmax_lse_per_step = [None, None]
         rng_states = [None, None]
-        # THD per-step kernels may leave padded rows untouched; valid-copy only
-        # writes real tokens, so keep the final accumulator zero-initialized.
+        # THD per-split kernels may leave padded entries untouched; valid-copy only
+        # writes valid token entries, so keep the final accumulator zero-initialized.
         out = torch.zeros(o_shape, dtype=fwd_nominal_dtype, device=q.device)
         max_logit_per_step = [None, None]
         max_logit = None
@@ -3478,9 +3478,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                     elif o_format == "sbhd":
                         out_f16[i - 1].copy_(out_per_step[i - 1])
                     elif qkv_format == "thd":
-                        # Copy every segment's valid token range from this step's output.
-                        # Each step writes to distinct positions.
-                        tex.thd_cp_copy_valid_tokens(
+                        # Copy every sequence's valid token range from this split's output.
+                        # Each split writes to distinct positions.
+                        tex.thd_copy_valid_tokens_from_per_split_to_rank_local(
                             out,
                             out_per_step[i - 1],
                             thd_cu_seqlens_q_padded_per_step[i - 1],
@@ -3753,10 +3753,10 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         if ctx.qkv_format == "thd":
             cu_seqlens_kv_padded = ctx.cu_seqlens_kv_padded
             thd_cu_seqlens_q_per_step = ctx.thd_cu_seqlens_q_per_step
-            # [cp*t, h, d] -> reorder to contiguous per-sequence order
+            # [cp*t, h, d] -> reorder to sequence order
             # Use padded cu_seqlens (divisible by 2*cp_size) for correct reorder
-            k_ag = reorder_thd_sequences_to_contiguous(k_ag, cu_seqlens_kv_padded, cp_size)
-            v_ag = reorder_thd_sequences_to_contiguous(v_ag, cu_seqlens_kv_padded, cp_size)
+            k_ag = thd_cp_rank_order_to_sequence_order(k_ag, cu_seqlens_kv_padded, cp_size)
+            v_ag = thd_cp_rank_order_to_sequence_order(v_ag, cu_seqlens_kv_padded, cp_size)
 
             thd_cu_seqlens_q_padded_per_step = ctx.thd_cu_seqlens_q_padded_per_step
         else:
@@ -4015,16 +4015,16 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                 # dq/dk/dv, dq_per_step/dk_per_step/dv_per_step: ctx.fwd_nominal_dtype
                 with torch.cuda.stream(flash_attn_streams[i - 1]):
                     if ctx.qkv_format == "thd":
-                        # dQ: copy every segment's valid token range from this step's dQ.
-                        tex.thd_cp_copy_valid_tokens(
+                        # dQ: copy every sequence's valid token range from this split's dQ.
+                        tex.thd_copy_valid_tokens_from_per_split_to_rank_local(
                             dq,
                             dq_per_step[i - 1],
                             thd_cu_seqlens_q_padded_per_step[i - 1],
                             thd_cu_seqlens_q_per_step[i - 1],
                         )
-                        # dK/dV: accumulate full packed tensors row-wise. Padding rows may accumulate,
-                        # but valid rows are independent and only valid rows are reordered/scattered
-                        # after the per-step reductions.
+                        # dK/dV: accumulate full packed tensors. Padded entries may accumulate,
+                        # but valid token entries are independent and only valid entries are
+                        # reordered after the per-step reductions.
                         if i > 1:
                             flash_attn_streams[i - 1].wait_event(dkv_update_done)
                         dk.add_(dk_per_step[i - 1])
@@ -4061,11 +4061,11 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         torch.cuda.current_stream().wait_stream(ctx.cp_stream)
 
         if ctx.qkv_format == "thd":
-            # Reverse-reorder dK/dV from contiguous order back to dual-chunk order,
+            # Reorder dK/dV from sequence order back to dual-chunk CP rank order,
             # then reduce-scatter across CP ranks.
             # Use padded cu_seqlens for correct slice boundaries.
-            dk = reorder_thd_sequences_to_rank_sharded(dk, cu_seqlens_kv_padded, cp_size)
-            dv = reorder_thd_sequences_to_rank_sharded(dv, cu_seqlens_kv_padded, cp_size)
+            dk = thd_sequence_order_to_cp_rank_order(dk, cu_seqlens_kv_padded, cp_size)
+            dv = thd_sequence_order_to_cp_rank_order(dv, cu_seqlens_kv_padded, cp_size)
             dk, _ = reduce_scatter_along_first_dim(dk, ctx.cp_group)
             dv, _ = reduce_scatter_along_first_dim(dv, ctx.cp_group)
             # dQ is already [t_rank, h, d], no reshape needed

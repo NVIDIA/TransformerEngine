@@ -748,7 +748,7 @@ class TestContextParallelUtils(unittest.TestCase):
         self.assertTrue(torch.equal(input_ids_r0, expected_input_ids_r0))
 
 
-def _legacy_reorder_thd_to_rank_sharded(x, cu_seqlens, cp_size, seq_dim=0):
+def _legacy_reorder_thd_to_cp_rank_order(x, cu_seqlens, cp_size, seq_dim=0):
     total_slices_of_any_sequence = 2 * cp_size
     slice_sizes = (cu_seqlens[1:] - cu_seqlens[:-1]) // total_slices_of_any_sequence
 
@@ -774,7 +774,7 @@ def _legacy_reorder_thd_to_rank_sharded(x, cu_seqlens, cp_size, seq_dim=0):
     return x.index_select(seq_dim, indices)
 
 
-def _legacy_reorder_thd_to_contiguous(x, cu_seqlens, seq_chunk_ids, cp_size, seq_dim=0):
+def _legacy_reorder_thd_to_sequence_order(x, cu_seqlens, seq_chunk_ids, cp_size, seq_dim=0):
     max_cum_seqlen_per_cp_rank = cu_seqlens[-1] // cp_size
     cu_seqlens_on_any_cp_rank = cu_seqlens // cp_size
 
@@ -814,27 +814,29 @@ def _legacy_valid_copy(out, inp, cu_seqlens_padded, cu_seqlens):
     "THD kernel tests require CUDA and transformer_engine_torch",
 )
 class TestTHDKernels(unittest.TestCase):
-    def test_thd_cp_reorder_sequences_matches_legacy_python_reorder(self):
+    def test_thd_sequence_cp_rank_order_roundtrip_matches_legacy_python_reorder(self):
         cp_size = 4
         cu_seqlens = torch.tensor([0, 8, 24, 40], dtype=torch.int32, device="cuda")
         x = torch.arange(40 * 2 * 4, dtype=torch.float16, device="cuda").view(40, 2, 4)
 
-        rank_sharded = tex.thd_cp_reorder_sequences(x, cu_seqlens, cp_size, False, x.shape[0])
-        ref_rank_sharded = _legacy_reorder_thd_to_rank_sharded(x, cu_seqlens, cp_size)
-        self.assertTrue(torch.equal(rank_sharded, ref_rank_sharded))
+        cp_rank_order = tex.thd_sequence_order_to_cp_rank_order(
+            x, cu_seqlens, cp_size, x.shape[0]
+        )
+        ref_cp_rank_order = _legacy_reorder_thd_to_cp_rank_order(x, cu_seqlens, cp_size)
+        self.assertTrue(torch.equal(cp_rank_order, ref_cp_rank_order))
 
         seq_chunk_ids = torch.empty(2 * cp_size, dtype=torch.int32, device="cuda")
         for rank in range(cp_size):
             seq_chunk_ids[rank] = 2 * rank
             seq_chunk_ids[rank + cp_size] = 2 * cp_size - 2 * rank - 1
-        contiguous = tex.thd_cp_reorder_sequences(
-            rank_sharded, cu_seqlens, cp_size, True, rank_sharded.shape[0]
+        sequence_order = tex.thd_cp_rank_order_to_sequence_order(
+            cp_rank_order, cu_seqlens, cp_size, cp_rank_order.shape[0]
         )
-        ref_contiguous = _legacy_reorder_thd_to_contiguous(
-            rank_sharded, cu_seqlens, seq_chunk_ids, cp_size
+        ref_sequence_order = _legacy_reorder_thd_to_sequence_order(
+            cp_rank_order, cu_seqlens, seq_chunk_ids, cp_size
         )
-        self.assertTrue(torch.equal(contiguous, ref_contiguous))
-        self.assertTrue(torch.equal(contiguous, x))
+        self.assertTrue(torch.equal(sequence_order, ref_sequence_order))
+        self.assertTrue(torch.equal(sequence_order, x))
 
     def test_thd_get_partitioned_indices_matches_dual_chunk_expected_indices(self):
         cu_seqlens = torch.tensor([0, 8, 16], dtype=torch.int32, device="cuda")
@@ -849,7 +851,7 @@ class TestTHDKernels(unittest.TestCase):
         self.assertTrue(torch.equal(rank0, expected_rank0))
         self.assertTrue(torch.equal(rank1, expected_rank1))
 
-    def test_thd_cp_copy_valid_tokens_matches_legacy_slice_copy_loop(self):
+    def test_thd_copy_valid_tokens_from_per_split_matches_legacy_slice_copy_loop(self):
         cu_seqlens_padded = torch.tensor([2, 6, 12], dtype=torch.int32, device="cuda")
         cu_seqlens = torch.tensor([0, 3, 7], dtype=torch.int32, device="cuda")
         inp = torch.arange(12 * 2 * 4, dtype=torch.float16, device="cuda").view(12, 2, 4)
@@ -857,7 +859,9 @@ class TestTHDKernels(unittest.TestCase):
         expected = torch.full_like(inp, -1)
 
         _legacy_valid_copy(expected, inp, cu_seqlens_padded, cu_seqlens)
-        tex.thd_cp_copy_valid_tokens(out, inp, cu_seqlens_padded, cu_seqlens)
+        tex.thd_copy_valid_tokens_from_per_split_to_rank_local(
+            out, inp, cu_seqlens_padded, cu_seqlens
+        )
         self.assertTrue(torch.equal(out, expected))
 
     def test_thd_read_half_tensor_reads_each_sequence_half(self):
