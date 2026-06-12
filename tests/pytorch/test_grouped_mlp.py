@@ -64,7 +64,7 @@ if nvfp4_available:
 # Quantization recipes supported by grouped MLP fused op
 _grouped_mlp_quantization_list: list[Optional[str]] = [None]
 if mxfp8_available:
-    _quantization_list.append("mxfp8")
+    _grouped_mlp_quantization_list.append("mxfp8")
 if nvfp4_available:
     _grouped_mlp_quantization_list.append("nvfp4_rht")
 
