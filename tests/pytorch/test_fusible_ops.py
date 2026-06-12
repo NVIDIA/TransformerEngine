@@ -3595,8 +3595,6 @@ class TestSequentialModules:
 
         # Loose tols for sanity checking
         tols = {"rtol": 0.125, "atol": 0.25}
-        if quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht"):
-            tols = {"rtol": 0.25, "atol": 0.5}
 
         # Check values
         assert_close(y_test, y_ref, **tols)

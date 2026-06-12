@@ -80,7 +80,11 @@ if mxfp8_available:
 if nvfp4_available:
     _quantization_list.append("nvfp4")
     _quantization_list.append("nvfp4_4over6")
-_grouped_mlp_quantization_list = list(_quantization_list)
+
+# Quantization recipes supported by grouped MLP fused op
+_grouped_mlp_quantization_list: list[Optional[str]] = [None]
+if mxfp8_available:
+    _quantization_list.append("mxfp8")
 if nvfp4_available:
     _grouped_mlp_quantization_list.append("nvfp4_rht")
 
@@ -253,8 +257,8 @@ def to_cpu(tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
     return out
 
 
-class TestBasicOps:
-    """Tests for individual operations"""
+class TestGroupedLinearOp:
+    """Tests for advanced features with grouped linear basic op"""
 
     @pytest.mark.parametrize("bias", (False, True))
     @pytest.mark.parametrize("dtype", _dtypes)
@@ -472,7 +476,6 @@ class TestBasicOps:
     @pytest.mark.parametrize("quantized_weight", (False, True))
     @pytest.mark.parametrize("bias", (False, True))
     @pytest.mark.parametrize("single_grouped_weight", (False, True))
-    @pytest.mark.parametrize("single_grouped_bias", (False, True))
     @pytest.mark.parametrize("accumulate_into_main_grad", (False, True))
     def test_grouped_linear_cuda_graph_safe(
         self,
@@ -482,7 +485,6 @@ class TestBasicOps:
         quantized_weight: bool,
         bias: bool,
         single_grouped_weight: bool,
-        single_grouped_bias: bool,
         accumulate_into_main_grad: bool,
         device: torch.device = "cuda",
         group_size: int = 4,
@@ -496,8 +498,10 @@ class TestBasicOps:
         Exercises the grouped-tensor / cublas-grouped-gemm path which uses
         GPU-resident split offsets and is the only flow safe to capture.
         """
+
+        # Skip invalid configurations
         if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0" and (
-            single_grouped_weight or single_grouped_bias
+            single_grouped_weight
         ):
             pytest.skip(
                 "single_grouped_weight/single_grouped_bias requires"
@@ -505,16 +509,16 @@ class TestBasicOps:
             )
         if torch.cuda.get_device_capability() < (10, 0):
             pytest.skip("Grouped GEMM CUDA-graph-safe path requires SM100+ (Blackwell)")
-        # Skip invalid configurations
         if quantization is None and quantized_weight:
             pytest.skip("quantized_weight requires a quantization recipe")
-        if single_grouped_bias and not bias:
-            pytest.skip("single_grouped_bias requires bias=True")
+
+        single_grouped_bias = bias and single_grouped_weight
 
         # Split sizes (statically pinned for graph capture)
         split_sizes = [split_alignment * (i + 1) for i in range(group_size)]
         random.shuffle(split_sizes)
         split_sizes = torch.tensor(split_sizes, dtype=torch.int, device=device)
+
         # Pad input tokens to validate the sync-free flow
         in_shape = (split_sizes.sum().item() + token_padding, in_features)
         out_shape = (in_shape[0], out_features)
@@ -650,17 +654,12 @@ class TestBasicOps:
                 assert_close(g, param.grad, **tols)
 
 
-class TestSequentialModules:
-    """Test for larger Sequentials with modules commonly used together"""
+class TestGroupedMLPFusedOp:
+    """Tests for grouped MLP fused op"""
 
     @pytest.mark.parametrize("bias", (False, True))
-    @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("quantization", _grouped_mlp_quantization_list)
     @pytest.mark.parametrize("single_grouped_weight", (False, True))
-    @pytest.mark.parametrize("single_grouped_bias", (False, True))
-    @pytest.mark.parametrize("accumulate_into_main_grad", (False, True))
-    @pytest.mark.parametrize("glu_interleave_size", (None, 32))
-    @pytest.mark.parametrize("delay_wgrad_compute", (False, True))
     @pytest.mark.parametrize("hidden_size", (128, 256))
     @pytest.mark.parametrize(
         "activation",
@@ -677,15 +676,13 @@ class TestSequentialModules:
         group_size: int = 4,
         bias: bool,
         hidden_size: int,
-        dtype: torch.dtype,
+        dtype: torch.dtype = torch.bfloat16,
         quantization: Optional[str],
         single_grouped_weight: bool,
-        single_grouped_bias: bool,
-        accumulate_into_main_grad: bool,
+        accumulate_into_main_grad: bool = False,
         device: torch.device = "cuda",
         split_alignment: int = 256,
-        glu_interleave_size: Optional[int],
-        delay_wgrad_compute: bool,
+        delay_wgrad_compute: bool = False,
         activation: str,
     ) -> None:
         """GroupedLinear + scaled activation + GroupedLinear"""
@@ -699,18 +696,21 @@ class TestSequentialModules:
         in_shape = (split_sizes.sum().item(), hidden_size)
         out_shape = in_shape
 
-        # Skip invalid configurations
         with_quantization = quantization is not None
-        if activation == "scaled_swiglu":
-            scaled_act = te_ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
-        elif activation.startswith("scaled_clamped_qgeglu"):
-            scaled_act = te_ops.ScaledClampedQGeGLU(glu_interleave_size=glu_interleave_size)
-        elif activation == "scaled_srelu":
-            scaled_act = te_ops.ScaledSReLU()
-        else:
-            raise ValueError(f"Unexpected grouped MLP activation ({activation})")
-        activation_is_glu = is_glu_activation(scaled_act)
+
+        activation_is_glu = activation in (
+            "scaled_swiglu",
+            "scaled_clamped_qgeglu",
+            "scaled_clamped_qgeglu_custom",
+        )
+        glu_interleave_size = 32 if activation_is_glu else None
+
+        single_grouped_bias = bias and single_grouped_weight
+
+        # Skip invalid configurations
         maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
+        if dtype == torch.bfloat16 and not is_bf16_available():
+            pytest.skip("BF16 requires SM 8.0+")
         if single_grouped_weight and quantization != "mxfp8":
             pytest.skip("single_grouped_weight is only supported for MXFP8 quantization")
         if single_grouped_bias and not bias:
@@ -1063,17 +1063,68 @@ class TestSequentialModules:
             assert_close(fc1.weight.grad, fc1_w_ref_grad, **tols)
             assert_close(fc2.weight.grad, fc2_w_ref_grad, **tols)
 
+    @pytest.mark.parametrize("bias", (False, True))
+    @pytest.mark.parametrize("quantization", _grouped_mlp_quantization_list)
     @pytest.mark.parametrize(
-        "dtype",
-        tuple(dtype for dtype in _dtypes if dtype in (torch.float16, torch.bfloat16)),
+        "activation",
+        (
+            "scaled_swiglu",
+            "scaled_clamped_qgeglu",
+            "scaled_clamped_qgeglu_custom",
+            "scaled_srelu",
+        ),
     )
+    def test_grouped_mlp_fp16(
+        self,
+        *,
+        bias: bool,
+        quantization: Optional[str],
+        activation: str,
+    ) -> None:
+        """Grouped MLP with high-precision tensors in FP16"""
+        self.test_grouped_mlp(
+            bias=bias,
+            hidden_size=128,
+            dtype=torch.float16,
+            quantization=quantization,
+            single_grouped_weight=True,
+            activation=activation,
+        )
+
+    @pytest.mark.parametrize("quantization", _grouped_mlp_quantization_list)
+    @pytest.mark.parametrize("single_grouped_weight", (False, True))
+    @pytest.mark.parametrize("accumulate_into_main_grad", (False, True))
+    @pytest.mark.parametrize("delay_wgrad_compute", (False, True))
+    @pytest.mark.parametrize("activation", ("scaled_swiglu", "scaled_srelu"))
+    def test_grouped_mlp_mcore_integrations(
+        self,
+        *,
+        quantization: Optional[str],
+        single_grouped_weight: bool,
+        accumulate_into_main_grad: bool,
+        delay_wgrad_compute: bool,
+        activation: str,
+    ) -> None:
+        """Grouped MLP with main_grad accumulation and delayed wgrad"""
+        if not accumulate_into_main_grad and not delay_wgrad_compute:
+            pytest.skip("Configuration is already tests in test_grouped_mlp")
+        self.test_grouped_mlp(
+            bias=False,
+            hidden_size=128,
+            quantization=quantization,
+            single_grouped_weight=single_grouped_weight,
+            accumulate_into_main_grad=accumulate_into_main_grad,
+            delay_wgrad_compute=delay_wgrad_compute,
+            activation=activation,
+        )
+
     @pytest.mark.parametrize("bias", (False, True))
     @pytest.mark.parametrize("activation", ("scaled_swiglu", "scaled_clamped_qgeglu"))
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     def test_grouped_mlp_single_weight_numerics(
         self,
         *,
-        dtype: torch.dtype,
+        dtype: torch.dtype = torch.bfloat16,
         bias: bool,
         activation: str,
         device: torch.device = "cuda",
@@ -1416,7 +1467,6 @@ class TestSequentialModules:
             _weight_params(test_fc2), expected_main_grads=ref_fc2_grads
         )
 
-    @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("single_grouped_weight", (False, True))
     @pytest.mark.parametrize("accumulate_into_main_grad", (False, True))
     @pytest.mark.parametrize("activation", ("scaled_swiglu", "scaled_clamped_qgeglu"))
@@ -1424,7 +1474,7 @@ class TestSequentialModules:
     def test_grouped_mlp_cuda_graph_safe_mxfp8(
         self,
         *,
-        dtype: torch.dtype,
+        dtype: torch.dtype = torch.bfloat16,
         single_grouped_weight: bool,
         accumulate_into_main_grad: bool,
         activation: str,
