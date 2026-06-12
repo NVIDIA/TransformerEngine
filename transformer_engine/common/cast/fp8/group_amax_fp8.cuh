@@ -110,7 +110,6 @@ __launch_bounds__(GROUPED_AMAX_KERNEL_THREADS) __global__
   }
 
   constexpr int kWarps = GROUPED_AMAX_KERNEL_THREADS / THREADS_PER_WARP;
-  __shared__ float s_block_amax[kWarps];
 
   using IVecT = Vec<InputType, NVEC>;
 
@@ -153,7 +152,7 @@ __launch_bounds__(GROUPED_AMAX_KERNEL_THREADS) __global__
           }
         }
         thread_amax_val = max_val(max_val(acc0, acc1), max_val(acc2, acc3));
-        // 1-way vectorized load and reduce for the tail
+        // 1-way vectorized load and reduce for the tail block
         for (; v < total_vecs; v += blockDim.x) {
           IVecT vec;
           vec.load_from(base + v * NVEC);
@@ -177,30 +176,13 @@ __launch_bounds__(GROUPED_AMAX_KERNEL_THREADS) __global__
         thread_amax_val = max_val(thread_amax_val, abs_val(base[i]));
       }
 
-      // Warp-shuffle reduce within the block
-      float thread_amax = static_cast<float>(thread_amax_val);
-#pragma unroll
-      for (int s = THREADS_PER_WARP / 2; s > 0; s >>= 1) {
-        thread_amax = fmaxf(thread_amax, __shfl_xor_sync(0xFFFFFFFFu, thread_amax, s));
-      }
-
+      // Reduce the per-thread amax over the block and update the global amax.
       const int warp_id = tid / THREADS_PER_WARP;
-      const int lane = tid % THREADS_PER_WARP;
-      if (lane == 0) {
-        s_block_amax[warp_id] = thread_amax;
+      const float block_amax = reduce_max<kWarps>(static_cast<float>(thread_amax_val), warp_id);
+      if (tid == 0) {
+        atomicMaxFloat(&amax[tensor_id], block_amax);
       }
-      __syncthreads();
-      // Reduce amax within the warp
-      if (warp_id == 0) {
-        float v = lane < kWarps ? s_block_amax[lane] : 0.0f;
-#pragma unroll
-        for (int s = kWarps / 2; s > 0; s >>= 1) {
-          v = fmaxf(v, __shfl_xor_sync(0xFFFFFFFFu, v, s));
-        }
-        if (lane == 0) {
-          atomicMaxFloat(&amax[tensor_id], v);
-        }
-      }
+      // Guard reduce_max's shared staging against reuse by the next iteration.
       __syncthreads();
       curr_elt = t_end;
     }

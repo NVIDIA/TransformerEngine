@@ -270,29 +270,41 @@ def _timed_cuda_graph(
     return elapsed, actual_iters
 
 
-def _bytes_per_call(actual_rows: int, hidden: int, mode: str) -> int:
+def _produced_out_copies(quantizer, inp: torch.Tensor, num_groups: int, first_dims) -> int:
+    """Number of FP8 output buffers the kernel actually materializes.
+
+    Don't infer this from ``mode``: on Blackwell, FP8 *current scaling* reuses the
+    rowwise FP8 data as the columnwise GEMM operand (cuBLAS transposes on the fly),
+    so a ``both``-usage quantizer writes only the rowwise buffer -- not two. Detect
+    it empirically from the produced GroupedTensor so the byte/BW accounting matches
+    what the kernels actually move on this device.
+    """
+    out = tex.group_quantize(inp, quantizer, num_groups, first_dims)
+    copies = 0
+    for attr in ("rowwise_data", "columnwise_data"):
+        buf = getattr(out, attr, None)
+        if buf is not None and buf.numel() > 0:
+            copies += 1
+    return copies
+
+
+def _bytes_per_call(actual_rows: int, hidden: int, out_copies: int) -> int:
     in_bytes = actual_rows * hidden * 2  # bf16 read
-    out_copies = (1 if mode in ("rowwise", "both") else 0) + (
-        1 if mode in ("columnwise", "both") else 0
-    )
     out_bytes = actual_rows * hidden * out_copies  # fp8 write(s)
     return in_bytes + out_bytes
 
 
-def _physical_bytes_per_call(actual_rows: int, hidden: int, mode: str) -> int:
+def _physical_bytes_per_call(actual_rows: int, hidden: int, out_copies: int) -> int:
     # Under current scaling, the input is read twice:
     # Pass 1: amax kernel reads input (2 bytes per element)
     # Pass 2: cast kernel reads input (2 bytes per element) and writes output (1 byte per element per copy)
     in_bytes = actual_rows * hidden * 2 * 2  # bf16 read twice
-    out_copies = (1 if mode in ("rowwise", "both") else 0) + (
-        1 if mode in ("columnwise", "both") else 0
-    )
     out_bytes = actual_rows * hidden * out_copies  # fp8 write(s)
     return in_bytes + out_bytes
 
 
 def _kernel_bytes_per_call(
-    bucket: str, actual_rows: int, hidden: int, mode: str, num_tensors: int
+    bucket: str, actual_rows: int, hidden: int, out_copies: int, num_tensors: int
 ) -> int:
     """Bytes that one launch of the kernel(s) in ``bucket`` actually moves.
 
@@ -319,8 +331,8 @@ def _kernel_bytes_per_call(
         return (num_tensors * 2 + 1) * 8
     if bucket == "cast":
         # Reads bf16 input, writes fp8 rowwise and/or columnwise (1 byte per
-        # element per direction). Mirrors the eager BW_actual byte count.
-        return _bytes_per_call(actual_rows, hidden, mode)
+        # element per materialized direction). Mirrors the eager BW_actual byte count.
+        return _bytes_per_call(actual_rows, hidden, out_copies)
     return 0
 
 
@@ -411,6 +423,11 @@ def run_case(
     if shape_case == "varying-first-overalloc":
         _verify_no_tail_read(quantizer, inputs[0], first_dims, num_groups, actual_rows)
 
+    # Number of FP8 output buffers actually written (e.g. on Blackwell, "both"
+    # materializes only the rowwise buffer), measured from a real quantize so the
+    # BW accounting reflects the bytes the kernels truly move.
+    out_copies = _produced_out_copies(quantizer, inputs[0], num_groups, first_dims)
+
     # Warmup so GPU clocks are at boost.
     for it in range(warmup):
         i = it % len(inputs)
@@ -425,8 +442,8 @@ def run_case(
         elapsed_ms = _timed_eager(quantizer, inputs, first_dims, num_groups, iters)
         actual_iters = iters
 
-    relevant = _bytes_per_call(actual_rows, hidden, mode)
-    physical_relevant = _physical_bytes_per_call(actual_rows, hidden, mode)
+    relevant = _bytes_per_call(actual_rows, hidden, out_copies)
+    physical_relevant = _physical_bytes_per_call(actual_rows, hidden, out_copies)
     total_bytes_actual = relevant * actual_iters
     total_bytes_physical = physical_relevant * actual_iters
     elapsed_s = elapsed_ms / 1000.0
@@ -466,7 +483,9 @@ def run_case(
             per_iter_us = entry["us_total"] / profile_iters
             launches_per_iter = entry["calls"] / profile_iters
             per_launch_us = entry["us_total"] / entry["calls"] if entry["calls"] else 0.0
-            bytes_per_launch = _kernel_bytes_per_call(bucket, actual_rows, hidden, mode, num_groups)
+            bytes_per_launch = _kernel_bytes_per_call(
+                bucket, actual_rows, hidden, out_copies, num_groups
+            )
             bw_tbps = (
                 bytes_per_launch / (per_launch_us * 1.0e-6) / 1.0e12 if per_launch_us > 0 else 0.0
             )

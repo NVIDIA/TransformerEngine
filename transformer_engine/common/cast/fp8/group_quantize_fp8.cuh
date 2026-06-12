@@ -39,7 +39,6 @@ constexpr size_t ROWWISE_STORE_SIZE_BYTES = 16;
 constexpr size_t TRANSPOSE_STORE_SIZE_BYTES = 8;
 constexpr size_t ROWWISE_FLAT_LOAD_SIZE_BYTES = 32;
 constexpr size_t ROWWISE_FLAT_THREADS = 512;
-constexpr size_t VARYING_FIRST_ROWWISE_MAX_BLOCKS_PER_TENSOR = 1024;
 constexpr size_t VARYING_FIRST_TRANSPOSE_MAX_ROW_TILES_PER_TENSOR = 4;
 constexpr size_t TRANSPOSE_SHARED_PAD = 1;
 
@@ -55,59 +54,12 @@ template <typename IType, typename OType>
 __device__ __forceinline__ void fast_scaled_fp8_cvt_4(const IType *input, OType *output,
                                                       const float scale) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  using IType4 = ptx::FPx4<IType>;
+  using OType4 = ptx::FPx4<OType>;
   const ptx::floatx2 scale_2x{scale, scale};
-  if constexpr (std::is_same<IType, bf16>::value) {
-    const ptx::bf16x4 in{input[0], input[1], input[2], input[3]};
-    if constexpr (std::is_same<OType, fp8e4m3>::value) {
-      ptx::fp8e4m3x4 out;
-      ptx::mul_cvt_4x(out, in, scale_2x);
-      output[0] = out.x1;
-      output[1] = out.x2;
-      output[2] = out.x3;
-      output[3] = out.x4;
-    } else {
-      ptx::fp8e5m2x4 out;
-      ptx::mul_cvt_4x(out, in, scale_2x);
-      output[0] = out.x1;
-      output[1] = out.x2;
-      output[2] = out.x3;
-      output[3] = out.x4;
-    }
-  } else if constexpr (std::is_same<IType, fp16>::value) {
-    const ptx::fp16x4 in{input[0], input[1], input[2], input[3]};
-    if constexpr (std::is_same<OType, fp8e4m3>::value) {
-      ptx::fp8e4m3x4 out;
-      ptx::mul_cvt_4x(out, in, scale_2x);
-      output[0] = out.x1;
-      output[1] = out.x2;
-      output[2] = out.x3;
-      output[3] = out.x4;
-    } else {
-      ptx::fp8e5m2x4 out;
-      ptx::mul_cvt_4x(out, in, scale_2x);
-      output[0] = out.x1;
-      output[1] = out.x2;
-      output[2] = out.x3;
-      output[3] = out.x4;
-    }
-  } else if constexpr (std::is_same<IType, fp32>::value) {
-    const ptx::floatx4 in{input[0], input[1], input[2], input[3]};
-    if constexpr (std::is_same<OType, fp8e4m3>::value) {
-      ptx::fp8e4m3x4 out;
-      ptx::mul_cvt_4x(out, in, scale_2x);
-      output[0] = out.x1;
-      output[1] = out.x2;
-      output[2] = out.x3;
-      output[3] = out.x4;
-    } else {
-      ptx::fp8e5m2x4 out;
-      ptx::mul_cvt_4x(out, in, scale_2x);
-      output[0] = out.x1;
-      output[1] = out.x2;
-      output[2] = out.x3;
-      output[3] = out.x4;
-    }
-  }
+  const IType4 &in4x = *reinterpret_cast<const IType4 *>(input);
+  OType4 &out4x = *reinterpret_cast<OType4 *>(output);
+  ptx::mul_cvt_4x(out4x, in4x, scale_2x);
 #else
   (void)input;
   (void)output;
@@ -598,76 +550,12 @@ __global__ void __launch_bounds__(ROWWISE_FLAT_THREADS)
   }
 }
 
-template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &), typename IType,
-          typename OType, bool ALIGNED>
-__global__ void __launch_bounds__(ROWWISE_FLAT_THREADS)
-    group_cast_fp8_varying_first_rowwise_flat_kernel(const IType *__restrict__ input,
-                                                     OType *__restrict__ output_rowwise,
-                                                     const float *__restrict__ scale_ptr,
-                                                     const float *__restrict__ noop,
-                                                     const size_t num_tensors,
-                                                     const size_t total_elements,
-                                                     const int64_t *__restrict__ offsets_ptr) {
-  if (noop != nullptr && noop[0] == 1.0f) {
-    return;
-  }
-
-  constexpr size_t nvec = ROWWISE_FLAT_LOAD_SIZE_BYTES / sizeof(IType);
-  using IVecT = Vec<IType, nvec>;
-  using OVecT = Vec<OType, nvec>;
-
-  const size_t tensor_id = blockIdx.y;
-  if (tensor_id >= num_tensors) {
-    return;
-  }
-
-  const size_t raw_tensor_base = static_cast<size_t>(offsets_ptr[tensor_id]);
-  const size_t raw_tensor_end = static_cast<size_t>(offsets_ptr[tensor_id + 1]);
-  const size_t tensor_base = raw_tensor_base < total_elements ? raw_tensor_base : total_elements;
-  const size_t tensor_end = raw_tensor_end < total_elements ? raw_tensor_end : total_elements;
-  if (tensor_end <= tensor_base) {
-    return;
-  }
-
-  const size_t tensor_elements = tensor_end - tensor_base;
-  const size_t tensor_vecs = DIVUP(tensor_elements, nvec);
-  const float scale = scale_ptr == nullptr ? 1.0f : scale_ptr[tensor_id];
-
-  for (size_t local_vec_id = blockIdx.x * blockDim.x + threadIdx.x; local_vec_id < tensor_vecs;
-       local_vec_id += gridDim.x * blockDim.x) {
-    const size_t offset = tensor_base + local_vec_id * nvec;
-    const size_t remaining_elts = tensor_end - offset;
-    IVecT local_input;
-    OVecT local_output;
-    if (remaining_elts >= nvec) {
-      if constexpr (ALIGNED) {
-        local_input.load_from(input + offset);
-      } else {
-        local_input.load_from_elts(input + offset);
-      }
-      scaled_fp8_cvt_vec_full<IS_ACT, ParamOP, OP>(local_input, local_output, scale);
-      if constexpr (ALIGNED) {
-        local_output.store_to(output_rowwise + offset);
-      } else {
-        local_output.store_to_elts(output_rowwise + offset);
-      }
-    } else {
-      const size_t valid_elts = remaining_elts < nvec ? remaining_elts : nvec;
-#pragma unroll
-      for (size_t i = 0; i < nvec; ++i) {
-        if (i < valid_elts) {
-          float elt = static_cast<float>(input[offset + i]);
-          if constexpr (IS_ACT) {
-            elt = OP(elt, {});
-          }
-          local_output.data.elt[i] = static_cast<OType>(elt * scale);
-        }
-      }
-      local_output.store_to_elts(output_rowwise + offset, 0, valid_elts);
-    }
-  }
-}
-
+// Flat, dynamically load-balanced varying-first rowwise group cast. The block
+// -> tensor mapping (1D grid, shared-mem prefix sum, binary search,
+// size-proportional chunks) distributes work proportionally to each group's
+// size. Requires vector-aligned inputs (row length a multiple of nvec and base
+// pointers vector aligned); the caller guarantees this, so every access is a
+// full-width vectorized load/store with no per-iteration masking.
 template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &), typename IType,
           typename OType>
 __global__ void __launch_bounds__(ROWWISE_FLAT_THREADS)
@@ -710,13 +598,22 @@ __global__ void __launch_bounds__(ROWWISE_FLAT_THREADS)
     block_chunk_size = 8192;
   }
 
-  // 2. Compute block counts and prefix sum
+  // 2. Compute block counts and prefix sum.
+  // Do the expensive per-tensor ceil-division in parallel (one tensor per
+  // thread); the remaining exclusive scan is then just integer adds. This keeps
+  // the single-thread work O(num_tensors) cheap adds instead of O(num_tensors)
+  // divisions running on lane 0 alone -- the latter scales with group count and
+  // showed up as per-warp divergence / exposed block startup in profiling.
+  for (size_t i = tid; i < num_tensors; i += blockDim.x) {
+    const size_t tensor_size = s_offsets[i + 1] - s_offsets[i];
+    s_block_offsets[i] = static_cast<int>(DIVUP(tensor_size, block_chunk_size));
+  }
+  __syncthreads();
   if (tid == 0) {
     int sum = 0;
     for (size_t i = 0; i < num_tensors; ++i) {
-      s_block_offsets[i] = sum;
-      size_t tensor_size = s_offsets[i + 1] - s_offsets[i];
-      int blocks = (tensor_size + block_chunk_size - 1) / block_chunk_size;
+      const int blocks = s_block_offsets[i];
+      s_block_offsets[i] = sum;  // exclusive prefix
       sum += blocks;
     }
     s_block_offsets[num_tensors] = sum;
@@ -759,9 +656,12 @@ __global__ void __launch_bounds__(ROWWISE_FLAT_THREADS)
   const IType *base_input = input + tensor_base + start_elt;
   OType *base_output = output_rowwise + tensor_base + start_elt;
   const size_t numel = end_elt - start_elt;
-  const size_t tensor_vecs = numel / nvec;
   const float scale = scale_ptr == nullptr ? 1.0f : scale_ptr[tensor_id];
 
+  // Inputs are guaranteed vector aligned by the caller, so chunk start and
+  // length are nvec-aligned and every access is a full-width vectorized
+  // load/store with no per-iteration masking.
+  const size_t tensor_vecs = numel / nvec;
   for (size_t local_vec_id = tid; local_vec_id < tensor_vecs; local_vec_id += blockDim.x) {
     const size_t offset = local_vec_id * nvec;
     IVecT local_input;
@@ -1274,46 +1174,35 @@ void group_quantize(const GroupedTensor *input, const Tensor *noop, GroupedTenso
                           last_logical_dim % flat_nvec == 0 &&
                           reinterpret_cast<uintptr_t>(input->data.dptr) % IVecT::BYTES == 0 &&
                           reinterpret_cast<uintptr_t>(output->data.dptr) % OVecT::BYTES == 0;
-                      const size_t rows_per_tensor_upper = DIVUP(first_logical_dim, num_tensors);
-                      const size_t vecs_per_tensor_upper =
-                          DIVUP(rows_per_tensor_upper * last_logical_dim, flat_nvec);
-                      size_t blocks_per_tensor = DIVUP(vecs_per_tensor_upper, ROWWISE_FLAT_THREADS);
-                      if (blocks_per_tensor == 0) {
-                        blocks_per_tensor = 1;
-                      }
-                      if (blocks_per_tensor > VARYING_FIRST_ROWWISE_MAX_BLOCKS_PER_TENSOR) {
-                        blocks_per_tensor = VARYING_FIRST_ROWWISE_MAX_BLOCKS_PER_TENSOR;
-                      }
+                      // Only vector-aligned inputs are supported. A non-multiple
+                      // row length or a misaligned base pointer would force
+                      // uncoalesced scalar access, which we deliberately do not
+                      // support on this path.
+                      NVTE_CHECK(flat_aligned,
+                                 "Varying first-dimension rowwise grouped FP8 quantization requires "
+                                 "vector-aligned inputs: the last logical dimension must be a "
+                                 "multiple of ",
+                                 flat_nvec,
+                                 " and the input/output base pointers must be vector aligned.");
                       const dim3 flat_block(ROWWISE_FLAT_THREADS);
-                      const dim3 flat_grid(blocks_per_tensor, num_tensors);
-                      if (flat_aligned) {
-                        const int num_sms = ::transformer_engine::cuda::sm_count();
-                        // Target ~8 blocks per SM of *active* work. The actual
-                        // per-block chunk size is derived inside the kernel from
-                        // the device-side offsets (the active element count), so
-                        // that an over-allocated backing buffer does not inflate
-                        // the chunk and starve the grid of active blocks. We
-                        // launch enough blocks to cover target_blocks plus up to
-                        // one partial block per tensor (from per-tensor rounding).
-                        const size_t target_blocks = 8 * num_sms;
-                        const size_t grid_size = target_blocks + num_tensors;
-                        const size_t shared_mem_bytes =
-                            (num_tensors + 1) * sizeof(int64_t) + (num_tensors + 1) * sizeof(int);
-
-                        group_cast_fp8_varying_first_rowwise_aligned_flat_kernel<IS_ACT, ParamOP,
-                                                                                 OP, IType, OType>
-                            <<<grid_size, flat_block, shared_mem_bytes, stream>>>(
-                                reinterpret_cast<const IType *>(input->data.dptr),
-                                reinterpret_cast<OType *>(output->data.dptr), scale_ptr, noop_ptr,
-                                num_tensors, total_elements, offsets_ptr, target_blocks);
-                      } else {
-                        group_cast_fp8_varying_first_rowwise_flat_kernel<IS_ACT, ParamOP, OP, IType,
-                                                                         OType, false>
-                            <<<flat_grid, flat_block, 0, stream>>>(
-                                reinterpret_cast<const IType *>(input->data.dptr),
-                                reinterpret_cast<OType *>(output->data.dptr), scale_ptr, noop_ptr,
-                                num_tensors, total_elements, offsets_ptr);
-                      }
+                      const int num_sms = ::transformer_engine::cuda::sm_count();
+                      // Target ~8 blocks per SM of *active* work. The actual
+                      // per-block chunk size is derived inside the kernel from
+                      // the device-side offsets (the active element count), so
+                      // that an over-allocated backing buffer does not inflate
+                      // the chunk and starve the grid of active blocks. We
+                      // launch enough blocks to cover target_blocks plus up to
+                      // one partial block per tensor (from per-tensor rounding).
+                      const size_t target_blocks = 8 * num_sms;
+                      const size_t grid_size = target_blocks + num_tensors;
+                      const size_t shared_mem_bytes =
+                          (num_tensors + 1) * sizeof(int64_t) + (num_tensors + 1) * sizeof(int);
+                      group_cast_fp8_varying_first_rowwise_aligned_flat_kernel<IS_ACT, ParamOP, OP,
+                                                                               IType, OType>
+                          <<<grid_size, flat_block, shared_mem_bytes, stream>>>(
+                              reinterpret_cast<const IType *>(input->data.dptr),
+                              reinterpret_cast<OType *>(output->data.dptr), scale_ptr, noop_ptr,
+                              num_tensors, total_elements, offsets_ptr, target_blocks);
                       launched_fast_path = true;
                     }
                   }
