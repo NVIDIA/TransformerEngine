@@ -258,8 +258,12 @@ def cuda_archs() -> str:
         version = cuda_version()
         if version >= (13, 0):
             archs = "75;80;89;90;100;120;121"
-        elif version >= (12, 8):
+        elif version >= (12, 9):
+            # SM_121 (GB10 consumer Blackwell) confirmed under CUDA >= 12.9;
+            # minimum version for 12.8 needs verification on target hardware.
             archs = "70;80;89;90;100;120;121"
+        elif version >= (12, 8):
+            archs = "70;80;89;90;100;120"
         else:
             archs = "70;80;89;90"
     return archs

@@ -636,16 +636,16 @@ def get_attention_backend(
             logger.debug("Disabling FusedAttention for %s", fp8_recipe.__class__.__name__)
             use_fused_attention = False
 
-        if device_compute_capability == (12, 0):
+        if device_compute_capability in ((12, 0), (12, 1)):
             if use_flash_attention:
                 logger.debug(
                     "Disabling FlashAttention as FP8 is not supported"
-                    " for compute capability = sm120"
+                    " for compute capability = sm120/sm121"
                 )
             if use_fused_attention:
                 logger.debug(
                     "Disabling FusedAttention as FP8 is not supported"
-                    " for compute capability = sm120"
+                    " for compute capability = sm120/sm121"
                 )
             use_flash_attention = False
             use_fused_attention = False
@@ -754,14 +754,14 @@ def get_attention_backend(
     # Flash v4 | FP16/BF16      | TODO            | sm80+        | bshd,sbhd,thd | TODO
     # Unfused  | FP32/FP16/BF16 | non-paged/paged | all          | bshd,sbhd,thd | >= 1
     if inference_params is not None:
-        # Temporarily disabling fused attention for kv caching for sm89/sm120 irrespective of
+        # Temporarily disabling fused attention for kv caching for sm89/sm120/sm121 irrespective of
         # cuDNN version until the cuDNN bug is resolved.
-        if device_compute_capability in ((8, 9), (12, 0)):
-            logger.debug("Disabling FusedAttention for KV caching for sm89/sm120")
+        if device_compute_capability in ((8, 9), (12, 0), (12, 1)):
+            logger.debug("Disabling FusedAttention for KV caching for sm89/sm120/sm121")
             use_fused_attention = False
-        # Temporarily disable FlashAttention for KV caching on sm120
-        if device_compute_capability == (12, 0):
-            logger.debug("Disabling FlashAttention for KV caching for sm120")
+        # Temporarily disable FlashAttention for KV caching on sm120/sm121
+        if device_compute_capability in ((12, 0), (12, 1)):
+            logger.debug("Disabling FlashAttention for KV caching for sm120/sm121")
             use_flash_attention = False
         if context_parallel:
             logger.debug("Disabling all backends for KV caching with context parallelism")
@@ -824,14 +824,14 @@ def get_attention_backend(
             )
             use_fused_attention = False
         if (
-            device_compute_capability == (12, 0)
+            device_compute_capability in ((12, 0), (12, 1))
             and (head_dim_qk > 128 or head_dim_qk % 8 != 0)
             and is_training
         ):
             if use_fused_attention:
                 logger.debug(
                     "Disabling FusedAttention as MLA for backward pass is not supported for compute"
-                    " capability = sm120 for a head_dim_qk > 128 or head_dim_qk %%8 != 0. Found:"
+                    " capability = sm120/sm121 for a head_dim_qk > 128 or head_dim_qk %%8 != 0. Found:"
                     " head_dim_qk = %s",
                     head_dim_qk,
                 )
@@ -985,19 +985,19 @@ def get_attention_backend(
             if use_unfused_attention:
                 logger.debug("Disabling UnfusedDotProductAttention for pad_between_seqs = True")
             use_unfused_attention = False
-        if device_compute_capability == (12, 0):
+        if device_compute_capability in ((12, 0), (12, 1)):
             if cudnn_version < (9, 18, 1):
                 if use_fused_attention:
                     logger.debug(
                         "Disabling FusedAttention as qkv_format = thd is"
-                        " not supported for compute capability = sm120 and cuDNN version < 9.18.1"
+                        " not supported for compute capability = sm120/sm121 and cuDNN version < 9.18.1"
                     )
                 use_fused_attention = False
             elif qkv_layout in {"t3hd", "th3d"}:
                 if use_fused_attention:
                     logger.debug(
                         "Disabling FusedAttention as qkv_layout = %s is not supported for"
-                        " compute capability = sm120",
+                        " compute capability = sm120/sm121",
                         qkv_layout,
                     )
                 use_fused_attention = False

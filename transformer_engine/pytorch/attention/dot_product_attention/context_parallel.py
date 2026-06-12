@@ -1671,7 +1671,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     9,
                     6,
                     0,
-                ) and get_device_compute_capability() != (12, 0)
+                ) and get_device_compute_capability() not in ((12, 0), (12, 1))
             else:
                 softmax_lse_in_packed_format = fa_utils.v2_6_0_plus or use_flash_attn_3
 
