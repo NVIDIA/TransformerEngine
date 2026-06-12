@@ -1598,8 +1598,7 @@ def test_grouped_linear_grouped_tensor_path_matches_legacy(
     device_capability = torch.cuda.get_device_capability()
     if not (9, 0) <= device_capability <= (11, 0):
         pytest.skip(
-            "GroupedTensor grouped GEMM path requires Hopper (SM90) "
-            "or Blackwell (SM10x and SM110)."
+            "GroupedTensor grouped GEMM path requires Hopper (SM90) or Blackwell (SM10x and SM110)."
         )
     if use_fp8 and device_capability < (10, 0):
         pytest.skip("Quantized GroupedTensor grouped GEMM path requires Blackwell (SM100+).")

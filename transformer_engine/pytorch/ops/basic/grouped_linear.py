@@ -783,9 +783,7 @@ class GroupedLinear(BasicOperation):
             if not (10, 0) <= get_device_compute_capability() <= (11, 0):
                 return False
             return all(isinstance(q, MXFP8Quantizer) for q in input_quantizers) or all(
-                
-                    isinstance(q, NVFP4Quantizer) and q.with_rht for q in input_quantizers
-                
+                isinstance(q, NVFP4Quantizer) and q.with_rht for q in input_quantizers
             )
         return dtype in (torch.bfloat16, torch.float16)
 
