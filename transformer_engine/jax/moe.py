@@ -862,22 +862,16 @@ def _moe_bwd_rule(
         d_expert_outputs = grad_pre_combine
         d_recv_w_from_combine = jnp.zeros_like(ctx.recv_topk_weights)
     else:
-        # ep_dispatch_fwd can land NaN into recv_topk_weights on padded
-        # slots. Untreated, `(NaN != 0) == True` in IEEE,
-        # so the multiplicative mask cannot suppress the NaN and it
-        # propagates through grad_pre_combine * w * mask into d_expert_outputs
-        # and then into every downstream gradient (gate_kernel ends up
-        # all-NaN). Sanitize once here.
-        recv_w_clean = jnp.where(jnp.isnan(ctx.recv_topk_weights), 0, ctx.recv_topk_weights)
-        w = recv_w_clean[..., None].astype(grad_pre_combine.dtype)
-        mask_bool = (recv_w_clean != 0)[..., None]
+        # Bwd mirror of the fwd mask: grad_pre_combine and ctx.expert_outputs
+        # both carry NaN at padded slots (ep_dispatch_fwd leaves uninit
+        # memory in recv_tokens, the FFN and combine_bwd propagate), and
+        # IEEE NaN * 0 = NaN, so jnp.where is needed to overwrite padded
+        # positions with literal zeros before the sum reduction.
+        w = ctx.recv_topk_weights[..., None].astype(grad_pre_combine.dtype)
+        mask_bool = (ctx.recv_topk_weights != 0)[..., None]
         d_expert_outputs = jnp.where(
             mask_bool, grad_pre_combine * w, jnp.zeros_like(grad_pre_combine)
         )
-        # Same masking strategy for the cotangent on recv_topk_weights:
-        # grad_pre_combine has NaN at padded slots and ctx.expert_outputs
-        # may too, so the per-element product must be jnp.where'd before
-        # the sum reduction.
         d_recv_w_from_combine = jnp.where(
             mask_bool,
             grad_pre_combine * ctx.expert_outputs,
