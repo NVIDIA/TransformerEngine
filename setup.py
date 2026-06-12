@@ -122,6 +122,7 @@ def setup_requirements() -> Tuple[List[str], List[str]]:
         "pydantic",
         "importlib-metadata>=1.0",
         "packaging",
+        "apache-tvm-ffi>=0.1.12",
     ]
     test_reqs: List[str] = ["pytest>=8.2.1"]
 
@@ -359,13 +360,17 @@ if __name__ == "__main__":
             "core_cu13": [f"transformer_engine_cu13=={__version__}"],
             "pytorch": [f"transformer_engine_torch=={__version__}"],
             "jax": [f"transformer_engine_jax=={__version__}"],
+            "cutedsl": ["nvidia-cutlass-dsl>=4.2.0"],
         }
     else:
         install_requires, test_requires = setup_requirements()
         ext_modules = [setup_common_extension()]
         package_data = {"": ["VERSION.txt"]}
         include_package_data = True
-        extras_require = {"test": test_requires}
+        extras_require = {
+            "test": test_requires,
+            "cutedsl": ["nvidia-cutlass-dsl>=4.2.0"],
+        }
 
         if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
             if "pytorch" in frameworks:
