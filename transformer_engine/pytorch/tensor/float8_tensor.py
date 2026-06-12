@@ -523,6 +523,12 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         Set transpose cache as invalid.
         Should be called after any in-place operation.
         """
+        if self._data is None and self._transpose is not None:
+            # Columnwise-only Float8 tensors on Hopper / L40 store their only
+            # live FP8 payload in _transpose. Treat it as primary storage, not
+            # as a derived cache that can be invalidated.
+            self._transpose_invalid = False
+            return
         self._transpose_invalid = True
 
     def remove_caches(self) -> None:

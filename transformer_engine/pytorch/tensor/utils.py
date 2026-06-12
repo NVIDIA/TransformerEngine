@@ -98,6 +98,107 @@ def replace_raw_data(tensor: QuantizedTensor, new_raw_data: torch.Tensor):
         raise ValueError(f"replace_raw_data for {type(tensor)} is not supported yet")
 
 
+def _is_float8_transpose_only(tensor: QuantizedTensor) -> bool:
+    """Whether a Float8 tensor stores its live payload only in _transpose."""
+    return (
+        isinstance(tensor, Float8Tensor)
+        and tensor._data is None
+        and tensor._transpose is not None
+        and not tensor._transpose_invalid
+    )
+
+
+def _validate_flat_fragment(model_weight: QuantizedTensor, master_weight: torch.Tensor, start_offset):
+    """Validate a flat logical shard and return its exclusive end offset."""
+    if start_offset is None:
+        raise ValueError("start_offset must not be None when master_weight is provided")
+    if start_offset < 0:
+        raise ValueError(f"start_offset must be non-negative, got {start_offset}")
+    end_offset = start_offset + master_weight.numel()
+    if end_offset > model_weight.numel():
+        raise ValueError(
+            f"end_offset ({end_offset}) exceeds model_weight numel ({model_weight.numel()}), "
+            f"start_offset={start_offset}, master_weight numel={master_weight.numel()}"
+        )
+    return end_offset
+
+
+def _cast_master_weight_to_rowwise_fp8_bytes(
+    master_weight: torch.Tensor,
+    model_weight: Float8Tensor,
+    quantizer: Float8Quantizer,
+) -> torch.Tensor:
+    """Cast a flat master shard to row-major FP8 bytes using ``quantizer`` scale state."""
+    rowwise_quantizer = Float8Quantizer(
+        scale=quantizer.scale,
+        amax=quantizer.amax,
+        fp8_dtype=quantizer.dtype,
+        rowwise=True,
+        columnwise=False,
+    )
+    raw = torch.empty((1, master_weight.numel()), dtype=torch.uint8, device=model_weight.device)
+    temp = rowwise_quantizer.create_tensor_from_data(raw, model_weight.dtype)
+    rowwise_quantizer.update_quantized(master_weight.reshape(1, -1), temp)
+    if temp._data is None:
+        raise RuntimeError("Expected rowwise Float8 temporary to populate _data")
+    return temp._data.reshape(-1)
+
+
+def _update_transpose_only_float8_flat_fragment(
+    model_weight: QuantizedTensor,
+    master_weight: torch.Tensor,
+    start_offset,
+    quantizer: Float8Quantizer,
+) -> bool:
+    """Update a logical flat shard in a transpose-only Float8 tensor.
+
+    Hopper / L40 columnwise-only Float8 sub-storages keep their live FP8
+    bytes in ``_transpose`` with physical shape ``[K, rows]`` for a logical
+    ``[rows, K]`` tensor. A row-major logical shard is not contiguous in that
+    storage, so cast the shard once and scatter the resulting FP8 bytes by
+    logical row into the transpose buffer.
+    """
+    if not _is_float8_transpose_only(model_weight):
+        return False
+
+    _validate_flat_fragment(model_weight, master_weight, start_offset)
+    numel = master_weight.numel()
+    if numel == 0:
+        return True
+
+    shape = tuple(model_weight.shape)
+    if len(shape) == 0:
+        raise ValueError("Float8 scalar transpose-only flat update is not supported")
+    logical_cols = int(shape[-1])
+    if logical_cols <= 0 or model_weight.numel() % logical_cols != 0:
+        raise ValueError(f"Invalid Float8 logical shape for transpose-only update: {shape}")
+    logical_rows = model_weight.numel() // logical_cols
+
+    transpose = model_weight._transpose
+    if transpose.numel() != model_weight.numel():
+        raise ValueError(
+            "Float8 transpose-only storage has unexpected numel: "
+            f"transpose={transpose.numel()}, logical={model_weight.numel()}"
+        )
+    transpose_2d = transpose.reshape(logical_cols, logical_rows)
+    fp8_bytes = _cast_master_weight_to_rowwise_fp8_bytes(master_weight, model_weight, quantizer)
+
+    remaining = numel
+    logical_offset = start_offset
+    src_offset = 0
+    while remaining > 0:
+        row = logical_offset // logical_cols
+        col = logical_offset % logical_cols
+        n = min(remaining, logical_cols - col)
+        transpose_2d[col : col + n, row].copy_(fp8_bytes[src_offset : src_offset + n])
+        logical_offset += n
+        src_offset += n
+        remaining -= n
+
+    model_weight._transpose_invalid = False
+    return True
+
+
 def quantize_master_weights(
     model_weights,
     master_weights,
@@ -301,6 +402,10 @@ def _cast_master_weights_to_fp8_delayed_scaling(
         # master_weight may be smaller than model_weight because it could be distributed across
         # multiple ranks. So we need to create a dummy weight using the raw data from model_weight.
         if not use_fsdp_shard_model_weights:
+            if _update_transpose_only_float8_flat_fragment(
+                model_weight, master_weight, start_offset, quantizer
+            ):
+                continue
             shard_model_weight_raw = model_weight._data.view(-1)[start_offset:end_offset]
         shard_model_weight_fp8 = quantizer.create_tensor_from_data(
             shard_model_weight_raw.view(1, -1),
@@ -446,13 +551,17 @@ def _cast_master_weights_to_fp8_current_scaling(
 
         # Cast master weight to FP8
         end_offset = start_offset + master_weight.numel()
-        if not use_fsdp_shard_model_weights:
-            model_weight_fragment = model_weight.reshape(-1)[start_offset:end_offset]
         quantizer = Float8Quantizer(
             scale=scale,
             amax=torch.Tensor(),
             fp8_dtype=model_weight._fp8_dtype,
         )
+        if not use_fsdp_shard_model_weights:
+            if _update_transpose_only_float8_flat_fragment(
+                model_weight, master_weight, start_offset, quantizer
+            ):
+                continue
+            model_weight_fragment = model_weight.reshape(-1)[start_offset:end_offset]
         if use_fsdp_shard_model_weights and not isinstance(model_weight_fragment, Float8Tensor):
             # NOTE: The fsdp shard model weight may be a unit8 tensor instead of
             # a float8 tensor. We should handle this situation properly.

@@ -3019,6 +3019,117 @@ class TestHybridQuantizeMasterWeights:
       * Both sub-storages dropped (caller bug: nothing left to cast)
     """
 
+    @staticmethod
+    def _make_transpose_only_float8_weight(shape, quantizer, *, fill_value=173):
+        """Build a Hopper/L40-style columnwise-only Float8Tensor.
+
+        Blackwell keeps ``_data`` populated for columnwise-only Float8, so these
+        tests synthesize the older architecture layout directly: logical
+        ``[M, K]`` shape with the only live FP8 bytes in ``_transpose[K, M]``.
+        """
+        rows, cols = shape
+        return Float8Tensor(
+            shape=shape,
+            dtype=torch.bfloat16,
+            data=None,
+            data_transpose=torch.full(
+                (cols, rows), fill_value, dtype=torch.uint8, device="cuda"
+            ),
+            fp8_scale_inv=torch.ones(1, dtype=torch.float32, device="cuda"),
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            quantizer=quantizer,
+            requires_grad=False,
+            device="cuda",
+        )
+
+    @staticmethod
+    def _scatter_expected_logical_bytes(initial_transpose, fp8_bytes, logical_shape, start_offset):
+        rows, cols = logical_shape
+        expected = initial_transpose.clone()
+        expected_2d = expected.reshape(cols, rows)
+        remaining = fp8_bytes.numel()
+        logical_offset = start_offset
+        src_offset = 0
+        while remaining > 0:
+            row = logical_offset // cols
+            col = logical_offset % cols
+            n = min(remaining, cols - col)
+            expected_2d[col : col + n, row].copy_(fp8_bytes[src_offset : src_offset + n])
+            logical_offset += n
+            src_offset += n
+            remaining -= n
+        return expected
+
+    @staticmethod
+    def _reference_fp8_bytes(master, scale, dtype=torch.bfloat16):
+        quantizer = Float8Quantizer(
+            scale=scale,
+            amax=torch.zeros(1, dtype=torch.float32, device="cuda"),
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            rowwise=True,
+            columnwise=False,
+        )
+        raw = torch.empty((1, master.numel()), dtype=torch.uint8, device="cuda")
+        temp = quantizer.create_tensor_from_data(raw, dtype)
+        quantizer.update_quantized(master.reshape(1, -1), temp)
+        return temp._data.reshape(-1)
+
+    def test_fp8_current_transpose_only_nonzero_offset(self):
+        """Current-scaling distopt update handles Hopper-style columnwise storage.
+
+        Regression for ``model_weight.reshape(-1)`` reaching
+        ``Float8Tensor._ReshapeFunc.forward`` and dereferencing ``_data=None``.
+        The nonzero offset spans multiple logical rows, so the test also checks
+        row-major shard bytes are scattered into transposed storage correctly.
+        """
+        from transformer_engine.pytorch.tensor.utils import quantize_master_weights
+
+        group = _ensure_single_rank_dp_group()
+        shape = (4, 8)
+        start_offset = 5
+        master = torch.linspace(-2.0, 2.0, steps=17, dtype=torch.float32, device="cuda")
+        quantizer = Float8CurrentScalingQuantizer(
+            tex.DType.kFloat8E4M3, device="cuda", rowwise=False, columnwise=True
+        )
+        weight = self._make_transpose_only_float8_weight(shape, quantizer)
+        initial = weight._transpose.clone()
+
+        quantize_master_weights([weight], [master], [start_offset], group=group)
+
+        scale = torch.reciprocal(weight._scale_inv.detach().clone())
+        fp8_bytes = self._reference_fp8_bytes(master.to(weight.dtype), scale, weight.dtype)
+        expected = self._scatter_expected_logical_bytes(initial, fp8_bytes, shape, start_offset)
+        assert weight._data is None
+        assert weight._transpose_invalid is False
+        assert torch.equal(weight._transpose, expected)
+
+    def test_fp8_delayed_transpose_only_nonzero_offset(self):
+        """Delayed-scaling distopt update handles Hopper-style columnwise storage.
+
+        Regression for the direct ``model_weight._data.view(-1)`` path in the
+        delayed-scaling helper.
+        """
+        from transformer_engine.pytorch.tensor.utils import quantize_master_weights
+
+        group = _ensure_single_rank_dp_group()
+        shape = (4, 8)
+        start_offset = 6
+        master = torch.linspace(-3.0, 1.0, steps=15, dtype=torch.float32, device="cuda")
+        quantizer = _make_delayed_quantizer(tex.DType.kFloat8E4M3)
+        quantizer.set_usage(rowwise=False, columnwise=True)
+        weight = self._make_transpose_only_float8_weight(shape, quantizer)
+        initial = weight._transpose.clone()
+
+        quantize_master_weights([weight], [master], [start_offset], group=group)
+
+        fp8_bytes = self._reference_fp8_bytes(
+            master.to(weight.dtype), weight._get_quantizer().scale, weight.dtype
+        )
+        expected = self._scatter_expected_logical_bytes(initial, fp8_bytes, shape, start_offset)
+        assert weight._data is None
+        assert weight._transpose_invalid is False
+        assert torch.equal(weight._transpose, expected)
+
     # ---------- Positive tests (same-format) ----------
 
     def test_fp8_current_same_format_full_master(self):
