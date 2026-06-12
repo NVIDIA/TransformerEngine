@@ -777,16 +777,17 @@ void thd_reorder_between_sequence_and_cp_rank_order(const Tensor &inp, const Ten
   int batch = cu_seqlens_shape[0] - 1;
   constexpr unsigned int block = 256;
   unsigned int grid = (static_cast<unsigned int>(total_tokens) * 32 + block - 1) / block;
-  thd_reorder_between_sequence_and_cp_rank_order_kernel<<<
-      grid, block, sizeof(int) * (batch + 1), stream>>>(
+  thd_reorder_between_sequence_and_cp_rank_order_kernel<<<grid, block, sizeof(int) * (batch + 1),
+                                                          stream>>>(
       out.data.dptr, inp.data.dptr, reinterpret_cast<int *>(cu_seqlens.data.dptr), batch,
       total_tokens, world_size, hidden_size_in_bytes, cp_rank_to_sequence_order);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
-void thd_copy_valid_tokens_from_per_split_to_rank_local(
-    const Tensor &inp, const Tensor &cu_seqlens_padded, const Tensor &cu_seqlens, Tensor &out,
-    int total_tokens, cudaStream_t stream) {
+void thd_copy_valid_tokens_from_per_split_to_rank_local(const Tensor &inp,
+                                                        const Tensor &cu_seqlens_padded,
+                                                        const Tensor &cu_seqlens, Tensor &out,
+                                                        int total_tokens, cudaStream_t stream) {
   using namespace transformer_engine;
   NVTE_CHECK(cu_seqlens.dtype() == DType::kInt32);
   NVTE_CHECK(cu_seqlens_padded.dtype() == DType::kInt32);
@@ -885,9 +886,8 @@ void nvte_cp_thd_get_partitioned_indices(const NVTETensor &cu_seqlens, NVTETenso
                                                 world_size, rank, stream);
 }
 
-void nvte_thd_sequence_order_to_cp_rank_order(const NVTETensor &inp,
-                                              const NVTETensor &cu_seqlens, NVTETensor out,
-                                              int world_size, int total_tokens,
+void nvte_thd_sequence_order_to_cp_rank_order(const NVTETensor &inp, const NVTETensor &cu_seqlens,
+                                              NVTETensor out, int world_size, int total_tokens,
                                               cudaStream_t stream) {
   NVTE_API_CALL(nvte_thd_sequence_order_to_cp_rank_order);
   using namespace transformer_engine;
@@ -897,9 +897,8 @@ void nvte_thd_sequence_order_to_cp_rank_order(const NVTETensor &inp,
       *convertNVTETensorCheck(out), world_size, false, total_tokens, stream);
 }
 
-void nvte_thd_cp_rank_order_to_sequence_order(const NVTETensor &inp,
-                                              const NVTETensor &cu_seqlens, NVTETensor out,
-                                              int world_size, int total_tokens,
+void nvte_thd_cp_rank_order_to_sequence_order(const NVTETensor &inp, const NVTETensor &cu_seqlens,
+                                              NVTETensor out, int world_size, int total_tokens,
                                               cudaStream_t stream) {
   NVTE_API_CALL(nvte_thd_cp_rank_order_to_sequence_order);
   using namespace transformer_engine;
@@ -909,9 +908,11 @@ void nvte_thd_cp_rank_order_to_sequence_order(const NVTETensor &inp,
       *convertNVTETensorCheck(out), world_size, true, total_tokens, stream);
 }
 
-void nvte_thd_copy_valid_tokens_from_per_split_to_rank_local(
-    const NVTETensor &inp, const NVTETensor &cu_seqlens_padded, const NVTETensor &cu_seqlens,
-    NVTETensor out, int total_tokens, cudaStream_t stream) {
+void nvte_thd_copy_valid_tokens_from_per_split_to_rank_local(const NVTETensor &inp,
+                                                             const NVTETensor &cu_seqlens_padded,
+                                                             const NVTETensor &cu_seqlens,
+                                                             NVTETensor out, int total_tokens,
+                                                             cudaStream_t stream) {
   NVTE_API_CALL(nvte_thd_copy_valid_tokens_from_per_split_to_rank_local);
   using namespace transformer_engine;
 

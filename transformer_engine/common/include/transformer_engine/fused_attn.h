@@ -545,9 +545,8 @@ void nvte_cp_thd_get_partitioned_indices(const NVTETensor &cu_seqlens, NVTETenso
  *  \param[in]     total_tokens  Total padded tokens (= inp.shape[0]).
  *  \param[in]     stream        CUDA stream used for this operation.
  */
-void nvte_thd_sequence_order_to_cp_rank_order(const NVTETensor &inp,
-                                              const NVTETensor &cu_seqlens, NVTETensor out,
-                                              int world_size, int total_tokens,
+void nvte_thd_sequence_order_to_cp_rank_order(const NVTETensor &inp, const NVTETensor &cu_seqlens,
+                                              NVTETensor out, int world_size, int total_tokens,
                                               cudaStream_t stream);
 
 /*!  \brief Reorder THD tensor from dual-chunk CP rank order to sequence order.
@@ -562,9 +561,8 @@ void nvte_thd_sequence_order_to_cp_rank_order(const NVTETensor &inp,
  *  \param[in]     total_tokens  Total padded tokens (= inp.shape[0]).
  *  \param[in]     stream        CUDA stream used for this operation.
  */
-void nvte_thd_cp_rank_order_to_sequence_order(const NVTETensor &inp,
-                                              const NVTETensor &cu_seqlens, NVTETensor out,
-                                              int world_size, int total_tokens,
+void nvte_thd_cp_rank_order_to_sequence_order(const NVTETensor &inp, const NVTETensor &cu_seqlens,
+                                              NVTETensor out, int world_size, int total_tokens,
                                               cudaStream_t stream);
 
 /*!  \brief Copy valid token entries from a per-split THD tensor to a rank-local accumulator.
@@ -579,9 +577,11 @@ void nvte_thd_cp_rank_order_to_sequence_order(const NVTETensor &inp,
  *  \param[in]     total_tokens        Total padded tokens (= inp.shape[0]).
  *  \param[in]     stream              CUDA stream used for this operation.
  */
-void nvte_thd_copy_valid_tokens_from_per_split_to_rank_local(
-    const NVTETensor &inp, const NVTETensor &cu_seqlens_padded, const NVTETensor &cu_seqlens,
-    NVTETensor out, int total_tokens, cudaStream_t stream);
+void nvte_thd_copy_valid_tokens_from_per_split_to_rank_local(const NVTETensor &inp,
+                                                             const NVTETensor &cu_seqlens_padded,
+                                                             const NVTETensor &cu_seqlens,
+                                                             NVTETensor out, int total_tokens,
+                                                             cudaStream_t stream);
 
 /*!  \brief Convert tensor from THD to BSHD format.
  *

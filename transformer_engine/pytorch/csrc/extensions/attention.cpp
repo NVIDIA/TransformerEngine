@@ -976,8 +976,7 @@ at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_t
 }
 
 at::Tensor thd_reorder_between_sequence_and_cp_rank_order(const at::Tensor &inp,
-                                                          const at::Tensor &cu_seqlens,
-                                                          int cp_size,
+                                                          const at::Tensor &cu_seqlens, int cp_size,
                                                           bool cp_rank_to_sequence_order,
                                                           int total_tokens) {
   NVTE_CHECK(cu_seqlens.scalar_type() == at::ScalarType::Int);
@@ -1007,23 +1006,21 @@ at::Tensor thd_reorder_between_sequence_and_cp_rank_order(const at::Tensor &inp,
   return out;
 }
 
-at::Tensor thd_sequence_order_to_cp_rank_order(const at::Tensor &inp,
-                                               const at::Tensor &cu_seqlens, int cp_size,
-                                               int total_tokens) {
+at::Tensor thd_sequence_order_to_cp_rank_order(const at::Tensor &inp, const at::Tensor &cu_seqlens,
+                                               int cp_size, int total_tokens) {
   return thd_reorder_between_sequence_and_cp_rank_order(inp, cu_seqlens, cp_size, false,
                                                         total_tokens);
 }
 
-at::Tensor thd_cp_rank_order_to_sequence_order(const at::Tensor &inp,
-                                               const at::Tensor &cu_seqlens, int cp_size,
-                                               int total_tokens) {
+at::Tensor thd_cp_rank_order_to_sequence_order(const at::Tensor &inp, const at::Tensor &cu_seqlens,
+                                               int cp_size, int total_tokens) {
   return thd_reorder_between_sequence_and_cp_rank_order(inp, cu_seqlens, cp_size, true,
                                                         total_tokens);
 }
 
-void thd_copy_valid_tokens_from_per_split_to_rank_local(
-    at::Tensor out, const at::Tensor &inp, const at::Tensor &cu_seqlens_padded,
-    const at::Tensor &cu_seqlens) {
+void thd_copy_valid_tokens_from_per_split_to_rank_local(at::Tensor out, const at::Tensor &inp,
+                                                        const at::Tensor &cu_seqlens_padded,
+                                                        const at::Tensor &cu_seqlens) {
   NVTE_CHECK(cu_seqlens.scalar_type() == at::ScalarType::Int);
   NVTE_CHECK(cu_seqlens_padded.scalar_type() == at::ScalarType::Int);
   NVTE_CHECK(cu_seqlens.dim() == 1 && cu_seqlens_padded.dim() == 1);
@@ -1044,8 +1041,8 @@ void thd_copy_valid_tokens_from_per_split_to_rank_local(
   auto te_out = makeTransformerEngineTensor(out);
 
   nvte_thd_copy_valid_tokens_from_per_split_to_rank_local(
-      te_inp.data(), te_cu_seqlens_padded.data(), te_cu_seqlens.data(), te_out.data(),
-      total_tokens, at::cuda::getCurrentCUDAStream());
+      te_inp.data(), te_cu_seqlens_padded.data(), te_cu_seqlens.data(), te_out.data(), total_tokens,
+      at::cuda::getCurrentCUDAStream());
 }
 
 /***************************************************************************************************

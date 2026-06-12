@@ -819,9 +819,7 @@ class TestTHDKernels(unittest.TestCase):
         cu_seqlens = torch.tensor([0, 8, 24, 40], dtype=torch.int32, device="cuda")
         x = torch.arange(40 * 2 * 4, dtype=torch.float16, device="cuda").view(40, 2, 4)
 
-        cp_rank_order = tex.thd_sequence_order_to_cp_rank_order(
-            x, cu_seqlens, cp_size, x.shape[0]
-        )
+        cp_rank_order = tex.thd_sequence_order_to_cp_rank_order(x, cu_seqlens, cp_size, x.shape[0])
         ref_cp_rank_order = _legacy_reorder_thd_to_cp_rank_order(x, cu_seqlens, cp_size)
         self.assertTrue(torch.equal(cp_rank_order, ref_cp_rank_order))
 
