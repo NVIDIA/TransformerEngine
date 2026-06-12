@@ -384,6 +384,18 @@ target_include_directories(transformer_engine PRIVATE
                           ${CUTLASS_INCLUDE_DIR}
                           ${CUTLASS_TOOLS_INCLUDE_DIR})
 
+# NCCL headers are included in TE's public API (e.g. comm_gemm_overlap.h).
+# On pip-based CUDA installs (nvidia-nccl-* wheels) nccl.h is not in the
+# CUDA toolkit tree, so find it explicitly and add it to the build.
+find_path(NVTE_NCCL_INCLUDE_DIR
+          NAMES nccl.h
+          PATH_SUFFIXES include
+          QUIET)
+if(NVTE_NCCL_INCLUDE_DIR)
+    target_include_directories(transformer_engine PRIVATE ${NVTE_NCCL_INCLUDE_DIR})
+    message(STATUS "Found NCCL headers at: ${NVTE_NCCL_INCLUDE_DIR}")
+endif()
+
 # Compiling Userbuffers with native MPI bootstrapping requires linking against MPI
 option(NVTE_UB_WITH_MPI "Bootstrap Userbuffers with MPI" OFF)
 if (NVTE_UB_WITH_MPI)
