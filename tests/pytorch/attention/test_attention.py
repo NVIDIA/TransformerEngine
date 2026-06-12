@@ -352,6 +352,17 @@ def test_dpa_fa4_base(dtype, model_configs, model):
     test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False)
 
 
+model_configs_fa4_sm121 = {
+    # MHA-only configs confirmed working on SM_121 (GB10) via flash-attn-4 SM_80 code path.
+    # GQA excluded: flash-attn-4 pack_gqa store_O has a hierarchical-layout mismatch on SM_80/12x
+    # (upstream flash-attn-4 issue, not a TE or SM_121 defect).
+    # num_splits excluded: explicit upstream assertion "SplitKV not supported on SM 12.0".
+    "fa4_base_1": ModelConfig(4, 128, 16, 64),
+    "fa4_base_2": ModelConfig(2, 2048, 24, 128, attn_mask_type="causal"),
+    "fa4_base_3": ModelConfig(2, 1024, 8, 96, attn_mask_type="causal"),
+}
+
+
 @pytest.mark.skipif(
     not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
 )
@@ -360,8 +371,8 @@ def test_dpa_fa4_base(dtype, model_configs, model):
     reason="SM_121 (GB10 consumer Blackwell / DGX Spark) specific FA4 correctness test.",
 )
 @pytest.mark.parametrize("dtype", param_types_lean)
-@pytest.mark.parametrize("model_configs", [model_configs_fa4_base])
-@pytest.mark.parametrize("model", model_configs_fa4_base.keys())
+@pytest.mark.parametrize("model_configs", [model_configs_fa4_sm121])
+@pytest.mark.parametrize("model", model_configs_fa4_sm121.keys())
 def test_dpa_fa4_sm121(dtype, model_configs, model):
     """Test DotProductAttention with FA4 on SM_121 (GB10 consumer Blackwell).
 
