@@ -21,7 +21,7 @@ import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch._extra_state import UNSAFE_PICKLE_EXTRA_STATE_ENV
-from transformer_engine.pytorch.ops._common import (
+from transformer_engine.pytorch.ops.fused.grouped_mlp import (
     _cudnn_frontend_supports_grouped_gemm_srelu,
     _cudnn_frontend_version_supported,
     is_glu_activation,
@@ -4038,25 +4038,19 @@ class TestSequentialModules:
         )
         if expected_grouped_mlp_fusion:
             if activation_is_glu:
-                forward_cls = te_ops.fused.ForwardGroupedMLP_CuTeGEMMGLU
-                backward_cls = te_ops.fused.BackwardGroupedMLP_CuTeGEMMDGLU
+                fused_cls = te_ops.fused.GroupedMLP_CuTeGEMMGLU
             else:
-                forward_cls = te_ops.fused.ForwardGroupedMLP_CuTeGEMMUnary
-                backward_cls = te_ops.fused.BackwardGroupedMLP_CuTeGEMMDUnary
-            if forward_cls.is_supported():
+                fused_cls = te_ops.fused.GroupedMLP_CuTeGEMMUnary
+            if fused_cls.is_supported():
                 forward_ops = module._module_groups[0]._forward_ops
-                assert len(forward_ops) == 1
-                assert isinstance(
-                    forward_ops[0][0],
-                    forward_cls,
-                )
-            if backward_cls is not None and backward_cls.is_supported():
                 backward_ops = module._module_groups[0]._backward_ops
+                assert len(forward_ops) == 1
                 assert len(backward_ops) == 1
                 assert isinstance(
-                    backward_ops[0][0],
-                    backward_cls,
+                    forward_ops[0][0],
+                    fused_cls,
                 )
+                assert backward_ops[0][0] is forward_ops[0][0]
 
         # Loose tols for sanity checking
         tols = {"rtol": 0.125, "atol": 0.25}
@@ -4140,10 +4134,8 @@ class TestSequentialModules:
     ) -> None:
         """single_grouped_weight=True/False should match exactly for fused MXFP8 grouped MLP."""
 
-        if not te_ops.fused.ForwardGroupedMLP_CuTeGEMMGLU.is_supported():
-            pytest.skip("MXFP8 fused grouped MLP forward is not supported on this system")
-        if not te_ops.fused.BackwardGroupedMLP_CuTeGEMMDGLU.is_supported():
-            pytest.skip("MXFP8 fused grouped MLP backward is not supported on this system")
+        if not te_ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
+            pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
 
         split_sizes = [split_alignment * (i + 1) for i in range(group_size)]
         random.shuffle(split_sizes)
@@ -4244,13 +4236,14 @@ class TestSequentialModules:
             assert len(forward_ops) == 1
             assert isinstance(
                 forward_ops[0][0],
-                te_ops.fused.ForwardGroupedMLP_CuTeGEMMGLU,
+                te_ops.fused.GroupedMLP_CuTeGEMMGLU,
             )
             assert len(backward_ops) == 1
             assert isinstance(
                 backward_ops[0][0],
-                te_ops.fused.BackwardGroupedMLP_CuTeGEMMDGLU,
+                te_ops.fused.GroupedMLP_CuTeGEMMGLU,
             )
+            assert backward_ops[0][0] is forward_ops[0][0]
 
             if single_grouped_weight:
                 fc1_dw = fc1.weight.grad.detach().clone()
@@ -4362,10 +4355,8 @@ class TestSequentialModules:
         that read ``.grad`` don't see stale bytes from the cached dummy).
         """
 
-        if not te_ops.fused.ForwardGroupedMLP_CuTeGEMMGLU.is_supported():
-            pytest.skip("MXFP8 fused grouped MLP forward is not supported on this system")
-        if not te_ops.fused.BackwardGroupedMLP_CuTeGEMMDGLU.is_supported():
-            pytest.skip("MXFP8 fused grouped MLP backward is not supported on this system")
+        if not te_ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
+            pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
 
         recipe = make_recipe("mxfp8")
         split_sizes = [split_alignment * (i + 1) for i in range(group_size)]
@@ -4496,7 +4487,7 @@ class TestSequentialModules:
     ) -> None:
         """Grouped MLP forward+backward should be CUDA graph capturable (MXFP8)."""
 
-        if not te_ops.fused.ForwardGroupedMLP_CuTeGEMMGLU.is_supported():
+        if not te_ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
             pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
         if dtype not in (torch.bfloat16, torch.float16):
             pytest.skip("MXFP8 fused grouped MLP is only supported with BF16/FP16")
@@ -4638,13 +4629,14 @@ class TestSequentialModules:
         assert len(forward_ops) == 1
         assert isinstance(
             forward_ops[0][0],
-            te_ops.fused.ForwardGroupedMLP_CuTeGEMMGLU,
+            te_ops.fused.GroupedMLP_CuTeGEMMGLU,
         )
         assert len(backward_ops) == 1
         assert isinstance(
             backward_ops[0][0],
-            te_ops.fused.BackwardGroupedMLP_CuTeGEMMDGLU,
+            te_ops.fused.GroupedMLP_CuTeGEMMGLU,
         )
+        assert backward_ops[0][0] is forward_ops[0][0]
 
         fresh_x = torch.randn_like(static_x)
         fresh_probs = torch.randn_like(static_probs)
