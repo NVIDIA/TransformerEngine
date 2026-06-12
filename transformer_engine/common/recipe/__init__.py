@@ -7,7 +7,7 @@ from __future__ import annotations
 import abc
 import os
 from enum import Enum
-from typing import Any, Literal, Optional, Union, Callable, NamedTuple
+from typing import Any, ClassVar, Literal, Optional, Union, Callable, NamedTuple
 from dataclasses import field
 from pydantic.dataclasses import dataclass
 
@@ -48,6 +48,20 @@ class Format(Enum):
     E4M3 = _FormatHelper(max_fwd=448, max_bwd=448)
     E5M2 = _FormatHelper(max_fwd=57344, max_bwd=57344)
     HYBRID = _FormatHelper(max_fwd=E4M3.max_fwd, max_bwd=E5M2.max_bwd)
+
+
+class CheckpointExtraStatePolicy(Enum):
+    """How pickled PyTorch ``_extra_state`` should be handled in ``set_extra_state``.
+
+    Each recipe subclass must choose a policy so checkpoint loading can decide
+    whether unpickling is required. ``DYNAMIC`` means the recipe class alone is
+    not enough; callers must inspect the checkpoint payload shape inside
+    ``set_extra_state`` before deciding whether the pickle can be ignored.
+    """
+
+    STATELESS = "stateless"
+    STATEFUL = "stateful"
+    DYNAMIC = "dynamic"
 
 
 @dataclass(frozen=True)
@@ -113,6 +127,7 @@ class Recipe:
     # subclasses and invalidated by ``__setattr__`` whenever any attribute
     # changes. This makes repeated ``str(recipe)`` calls much cheaper
     _cached_repr: Optional[str] = None
+    checkpoint_extra_state_policy: ClassVar[Optional[CheckpointExtraStatePolicy]] = None
 
     def __setattr__(self, name: str, value: Any) -> None:
         # Invalidate the cached repr on any attribute mutation.
@@ -250,6 +265,10 @@ class DelayedScaling(Recipe):
       subject to change in future Transformer Engine releases.
     """
 
+    checkpoint_extra_state_policy: ClassVar[CheckpointExtraStatePolicy] = (
+        CheckpointExtraStatePolicy.STATEFUL
+    )
+
     margin: int = 0
     fp8_format: Format = Format.HYBRID
     amax_history_len: int = 1024
@@ -298,6 +317,10 @@ class Float8CurrentScaling(Recipe):
             and `dequantized` dequantizes saved operands to the active high-precision
             compute dtype (e.g. BF16/FP16/FP32) for backward.
     """
+
+    checkpoint_extra_state_policy: ClassVar[CheckpointExtraStatePolicy] = (
+        CheckpointExtraStatePolicy.STATELESS
+    )
 
     use_power_2_scales: bool = os.getenv("NVTE_FP8_CURRENT_SCALING_POWER_2_SCALES", "0") == "1"
     fp8_format: Format = Format.HYBRID
@@ -363,6 +386,10 @@ class MXFP8BlockScaling(Recipe):
             compute dtype (e.g. BF16/FP16/FP32) for backward.
     """
 
+    checkpoint_extra_state_policy: ClassVar[CheckpointExtraStatePolicy] = (
+        CheckpointExtraStatePolicy.STATELESS
+    )
+
     margin: int = 0
     fp8_format: Format = Format.E4M3
     fp8_dpa: bool = False
@@ -415,6 +442,10 @@ class Float8BlockScaling(Recipe):
             and `dequantized` dequantizes saved operands to the active high-precision
             compute dtype (e.g. BF16/FP16/FP32) for backward.
     """
+
+    checkpoint_extra_state_policy: ClassVar[CheckpointExtraStatePolicy] = (
+        CheckpointExtraStatePolicy.STATELESS
+    )
 
     use_f32_scales: bool = os.getenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", "0") == "1"
 
@@ -544,6 +575,10 @@ class NVFP4BlockScaling(Recipe):
             compute dtype (e.g. BF16/FP16/FP32) for backward.
     """
 
+    checkpoint_extra_state_policy: ClassVar[CheckpointExtraStatePolicy] = (
+        CheckpointExtraStatePolicy.STATELESS
+    )
+
     # Configuration envvars
     disable_rht: bool = os.getenv("NVTE_NVFP4_DISABLE_RHT", "0") == "1"
     disable_stochastic_rounding: bool = (
@@ -661,6 +696,10 @@ class CustomRecipe(Recipe):
         and `dequantized` dequantizes saved operands to the active high-precision
         compute dtype (e.g. BF16/FP16/FP32) for backward.
     """
+
+    checkpoint_extra_state_policy: ClassVar[CheckpointExtraStatePolicy] = (
+        CheckpointExtraStatePolicy.DYNAMIC
+    )
 
     qfactory: Callable[..., Any]
 

@@ -4,6 +4,8 @@
 
 from typing import Optional
 
+import pickle
+
 import pytest
 import torch
 import warnings
@@ -31,10 +33,19 @@ from transformer_engine.pytorch.quantization import (
 )
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.common.recipe import (
+    CheckpointExtraStatePolicy,
+    CustomRecipe,
     DelayedScaling,
+    Float8CurrentScaling,
     Float8BlockScaling,
     MXFP8BlockScaling,
     NVFP4BlockScaling,
+    Recipe,
+)
+from transformer_engine.pytorch._extra_state import (
+    UNSAFE_PICKLE_EXTRA_STATE_ENV,
+    _RECIPE_POLICIES,
+    should_load_extra_state_pickle,
 )
 
 # Check if FP8 is supported
@@ -691,3 +702,77 @@ def test_fp4_dequantize(dtype, row_scaled_nvfp4, use_4over6, M, N):
         )
     new_dequantized_tensor = new_tensor.dequantize()
     torch.testing.assert_close(dequantized_tensor, new_dequantized_tensor)
+
+
+def _custom_recipe_qfactory(_role):
+    return None
+
+
+def _recipe_subclasses(cls):
+    for subcls in cls.__subclasses__():
+        yield subcls
+        yield from _recipe_subclasses(subcls)
+
+
+def _pickled_extra_state_payload(recipe_obj, *, include_delayed_state=False):
+    state = {"recipe": recipe_obj, "extra_fp8_variables": {}}
+    if include_delayed_state:
+        state.update(
+            {
+                "scale_fwd": torch.ones(1),
+                "amax_history_fwd": torch.zeros(1, 1),
+                "scale_bwd": torch.ones(1),
+                "amax_history_bwd": torch.zeros(1, 1),
+            }
+        )
+    return pickle.dumps(state)
+
+
+def test_checkpoint_extra_state_policy_declared_for_all_recipes():
+    for cls in _recipe_subclasses(Recipe):
+        assert "checkpoint_extra_state_policy" in cls.__dict__
+        assert cls.checkpoint_extra_state_policy in CheckpointExtraStatePolicy
+
+
+def test_checkpoint_extra_state_policy_classifier_map_covers_all_recipes():
+    for cls in _recipe_subclasses(Recipe):
+        assert ("transformer_engine.common.recipe", cls.__name__) in _RECIPE_POLICIES
+
+
+@pytest.mark.parametrize(
+    "recipe_obj",
+    [
+        Float8CurrentScaling(),
+        MXFP8BlockScaling(),
+        Float8BlockScaling(),
+        NVFP4BlockScaling(),
+    ],
+)
+def test_stateless_pickled_extra_state_is_ignored(recipe_obj):
+    payload = _pickled_extra_state_payload(recipe_obj)
+    assert not should_load_extra_state_pickle(payload, "test")
+
+
+def test_stateless_custom_pickled_extra_state_is_ignored():
+    payload = _pickled_extra_state_payload(CustomRecipe(qfactory=_custom_recipe_qfactory))
+    assert not should_load_extra_state_pickle(payload, "test")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        _pickled_extra_state_payload(DelayedScaling(), include_delayed_state=True),
+        _pickled_extra_state_payload(
+            CustomRecipe(qfactory=_custom_recipe_qfactory), include_delayed_state=True
+        ),
+        pickle.dumps({"scale_inv_fwd": torch.ones(1), "extra_fp8_variables": {}}),
+        pickle.dumps({"recipe": object(), "extra_fp8_variables": {}}),
+        b"not a pickle",
+    ],
+)
+def test_stateful_unknown_or_malformed_pickled_extra_state_requires_opt_in(payload, monkeypatch):
+    with pytest.raises(RuntimeError, match=UNSAFE_PICKLE_EXTRA_STATE_ENV):
+        should_load_extra_state_pickle(payload, "test")
+
+    monkeypatch.setenv(UNSAFE_PICKLE_EXTRA_STATE_ENV, "1")
+    assert should_load_extra_state_pickle(payload, "test")
