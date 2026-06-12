@@ -3591,19 +3591,11 @@ class TestSequentialModules:
         assert_close_grads(x_test, x_ref, **tols)
         assert_close_grads(probs_test, probs_ref, **tols)
         for group_idx in range(group_size):
-            assert_close_grads(
-                getattr(fc2, f"weight{group_idx}"), fc2_ws_ref[group_idx], **tols
-            )
-            assert_close_grads(
-                getattr(fc1, f"weight{group_idx}"), fc1_ws_ref[group_idx], **tols
-            )
+            assert_close_grads(getattr(fc2, f"weight{group_idx}"), fc2_ws_ref[group_idx], **tols)
+            assert_close_grads(getattr(fc1, f"weight{group_idx}"), fc1_ws_ref[group_idx], **tols)
             if bias:
-                assert_close_grads(
-                    getattr(fc2, f"bias{group_idx}"), fc2_bs_ref[group_idx], **tols
-                )
-                assert_close_grads(
-                    getattr(fc1, f"bias{group_idx}"), fc1_bs_ref[group_idx], **tols
-                )
+                assert_close_grads(getattr(fc2, f"bias{group_idx}"), fc2_bs_ref[group_idx], **tols)
+                assert_close_grads(getattr(fc1, f"bias{group_idx}"), fc1_bs_ref[group_idx], **tols)
 
 
 class TestCustomOps:
