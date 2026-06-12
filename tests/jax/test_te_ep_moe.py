@@ -5,8 +5,7 @@
 """Multi-process (one-GPU-per-process) tests for the TE-EP MoE custom_vjp.
 
 The launcher ``tests/jax/run_te_ep_moe.sh`` forks one pytest process per
-visible GPU (mirroring ``run_multiprocess_moe_vjp.sh``). Each process binds
-to exactly one device via
+visible GPU. Each process binds to exactly one device via
 ``jax.distributed.initialize(..., local_device_ids=process_id)``; the
 participating processes form a global ``(ep, fsdp)`` mesh through JAX's
 distributed runtime.
@@ -26,9 +25,8 @@ least four ranks.
 What this suite covers
 ----------------------
 
-This file is the TE-EP-only successor to ``test_moe_vjp.py`` and
-``test_multiprocess_moe_vjp.py``. Each test exercises one MoE-block
-run and bundles every check that single run supports — shape, dtype,
+Each test exercises one MoE-block run and bundles every check that
+single run supports — shape, dtype,
 finiteness AND numerical parity vs a pure-JAX reference. Variations
 on the block are pytest parametrize values rather than separate test
 classes:
