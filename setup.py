@@ -248,8 +248,9 @@ def build_nccl_ep_submodule() -> str:
                 arch_list.append(bare)
     if not arch_list:
         raise RuntimeError(
-            f"NCCL EP requires Hopper or newer (SM >= 90); none found in NVTE_CUDA_ARCHS={cuda_archs()!r}. "
-            "Re-run with NVTE_WITH_NCCL_EP=0 to skip the NCCL EP build (the rest of TE still builds)."
+            "NCCL EP requires Hopper or newer (SM >= 90); none found in"
+            f" NVTE_CUDA_ARCHS={cuda_archs()!r}. Re-run with NVTE_WITH_NCCL_EP=0 to skip the NCCL"
+            " EP build (the rest of TE still builds)."
         )
     gencode = " ".join(f"-gencode=arch=compute_{a},code=sm_{a}" for a in arch_list)
 
