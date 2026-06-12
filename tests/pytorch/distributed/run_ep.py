@@ -173,8 +173,11 @@ class TestEP(unittest.TestCase):
         buf = self._make_buffer()
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
         tokens_p = tokens.detach().clone().requires_grad_(True)
-        recv_t, _recv_w, _tc = ep_dispatch(buf, tokens_p, topk_idx, w)
-        loss = 0.5 * (recv_t.float() ** 2).sum()
+        recv_t, recv_w, _tc = ep_dispatch(buf, tokens_p, topk_idx, w)
+        # Pull recv_w into the loss with a zero scale so both dispatch outputs
+        # contribute a (possibly-zero) grad — backward respects user-supplied
+        # grad inputs and won't fabricate Nones into zeros.
+        loss = 0.5 * (recv_t.float() ** 2).sum() + 0.0 * recv_w.float().sum()
         loss.backward()
         torch.cuda.synchronize()
         torch.testing.assert_close(
@@ -292,6 +295,41 @@ class TestEP(unittest.TestCase):
                 atol=5e-2,
                 rtol=5e-2,
             )
+
+    # Caller-supplied output buffers (autograd)
+
+    def test_dispatch_caller_recv_buffers_autograd(self):
+        """ep_dispatch with caller-supplied recv buffers; fwd+bwd matches default-alloc grads."""
+        buf = self._make_buffer()
+        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        recv_tokens, recv_w, _ = self._make_raw_recv()
+        tokens_p = tokens.detach().clone().requires_grad_(True)
+        rt, rw, _tc = ep_dispatch(
+            buf, tokens_p, topk_idx, w, recv_tokens=recv_tokens, recv_topk_weights=recv_w
+        )
+        self.assertEqual(rt.data_ptr(), recv_tokens.data_ptr())
+        self.assertEqual(rw.data_ptr(), recv_w.data_ptr())
+        (0.5 * (rt.float() ** 2).sum() + 0.0 * rw.float().sum()).backward()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(
+            tokens_p.grad.float(), tokens.float() * float(TOP_K), atol=5e-2, rtol=5e-2
+        )
+
+    def test_combine_grad_expert_out_autograd(self):
+        """ep_combine with caller-supplied grad_expert_out; bwd writes into that slot."""
+        buf = self._make_buffer()
+        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        tokens_p = tokens.detach().clone().requires_grad_(True)
+        recv_t, recv_w, _ = ep_dispatch(buf, tokens_p, topk_idx, w)
+        eo = self._weighted(recv_t, recv_w)
+        grad_eo = torch.empty_like(eo)
+        gp = grad_eo.data_ptr()
+        out = ep_combine(buf, eo, grad_expert_out=grad_eo)
+        (0.5 * (out.float() ** 2).sum()).backward()
+        torch.cuda.synchronize()
+        self.assertEqual(grad_eo.data_ptr(), gp)
+        torch.testing.assert_close(out.float(), tokens.float(), atol=5e-2, rtol=5e-2)
+        torch.testing.assert_close(tokens_p.grad.float(), tokens.float(), atol=5e-2, rtol=5e-2)
 
     # Input validation
 

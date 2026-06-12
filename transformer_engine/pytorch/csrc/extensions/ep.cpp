@@ -81,6 +81,29 @@ NVTECommWindow maybe_make_window(const at::Tensor& t) {
 #endif
 }
 
+// When zero-copy is enabled, the named tensor must be symm-mem-backed on the
+// EP group. Throws a clear error otherwise. No-op when zero-copy is off or
+// symm-mem support isn't compiled in. Mirrors maybe_make_window's resolution
+// path but turns the "not symm-mem" outcome into a hard error.
+void check_symm_mem_required(const at::Tensor& t, const char* name) {
+#ifdef NCCL_HAS_SYMMEM_SUPPORT
+  if (!g_zero_copy_enabled.load(std::memory_order_relaxed)) return;
+  NVTE_CHECK(!g_ep_group_name.empty(),
+             "Zero-copy is enabled but EP group name is unset; call ep_initialize first.");
+  c10::intrusive_ptr<c10d::symmetric_memory::SymmetricMemory> sm;
+  try {
+    sm = c10d::symmetric_memory::rendezvous(t, g_ep_group_name);
+  } catch (const std::exception&) {
+    sm = nullptr;
+  }
+  NVTE_CHECK(sm != nullptr, "ep zero-copy: ", name,
+             " must be symm-mem-backed on the EP group (allocate via symm_mem_alloc).");
+#else
+  (void)t;
+  (void)name;
+#endif
+}
+
 // The backend only accepts int64 topk_idx. The PyTorch wrapper enforces this
 // at the boundary so the per-step ops don't need an upcast workspace.
 void check_topk_idx_int64(at::Tensor topk_idx) {
@@ -202,6 +225,8 @@ void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
   NVTE_CHECK(recv_tokens.scalar_type() == tokens.scalar_type(), "recv_tokens dtype (",
              c10::toString(recv_tokens.scalar_type()), ") must match tokens dtype (",
              c10::toString(tokens.scalar_type()), ")");
+  check_symm_mem_required(recv_tokens, "recv_tokens");
+  check_symm_mem_required(recv_topk_weights, "recv_topk_weights");
 
   auto tok_dtype = GetTransformerEngineDType(tokens.scalar_type());
   auto handle_mem_te = makeTransformerEngineTensor(
@@ -241,6 +266,7 @@ void ep_combine(at::Tensor handle_mem, at::Tensor expert_out, at::Tensor result)
   NVTE_CHECK(result.scalar_type() == expert_out.scalar_type(), "result dtype (",
              c10::toString(result.scalar_type()), ") must match expert_out dtype (",
              c10::toString(expert_out.scalar_type()), ")");
+  check_symm_mem_required(expert_out, "expert_out");
 
   auto eo_dtype = GetTransformerEngineDType(expert_out.scalar_type());
   auto handle_mem_te = makeTransformerEngineTensor(
@@ -275,6 +301,8 @@ void ep_dispatch_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor g_recv_t
   NVTE_CHECK(grad_tokens.scalar_type() == grad.scalar_type(), "grad_tokens dtype (",
              c10::toString(grad_tokens.scalar_type()), ") must match grad dtype (",
              c10::toString(grad.scalar_type()), ")");
+  check_symm_mem_required(grad, "grad (dispatch_bwd input)");
+  check_symm_mem_required(g_recv_topk_weights, "g_recv_topk_weights");
 
   auto g_dtype = GetTransformerEngineDType(grad.scalar_type());
   auto handle_mem_te = makeTransformerEngineTensor(
@@ -306,6 +334,8 @@ void ep_combine_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor grad_expe
   NVTE_CHECK(grad_expert_out.scalar_type() == grad.scalar_type(), "grad_expert_out dtype (",
              c10::toString(grad_expert_out.scalar_type()), ") must match grad dtype (",
              c10::toString(grad.scalar_type()), ")");
+  check_symm_mem_required(grad, "grad (combine_bwd input)");
+  check_symm_mem_required(grad_expert_out, "grad_expert_out");
 
   auto g_dtype = GetTransformerEngineDType(grad.scalar_type());
   auto handle_mem_te = makeTransformerEngineTensor(
