@@ -531,10 +531,9 @@ _CONFIGS = [
     # multiply (intermediate * recv_w * mask) is debugged. Late
     # weighting (combine-side) is unaffected and stays covered above.
     # Note: align_size is no longer a user-facing parameter; it is
-    # hard-coded to _ALIGN_SIZE = 128 in moe.py (per PR #3116
-    # review). Re-add a distinct align-size config only if the
-    # constant is loosened, or a recipe-driven inference is added
-    # that selects a >128 alignment.
+    # hard-coded to _ALIGN_SIZE = 128 in moe.py. Re-add a distinct
+    # align-size config only if the constant is loosened, or a
+    # recipe-driven inference is added that selects a >128 alignment.
     pytest.param(
         dict(score_function="sigmoid"),
         id="sigmoid",
