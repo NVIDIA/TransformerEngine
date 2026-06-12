@@ -208,6 +208,8 @@ void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
   check_topk_idx_int64(topk_idx);
   NVTE_CHECK(tokens.is_contiguous(), "tokens must be contiguous");
   NVTE_CHECK(topk_weights.is_contiguous(), "topk_weights must be contiguous");
+  NVTE_CHECK(recv_tokens.is_contiguous(), "recv_tokens must be contiguous");
+  NVTE_CHECK(recv_topk_weights.is_contiguous(), "recv_topk_weights must be contiguous");
 
   const size_t H = static_cast<size_t>(tokens.size(-1));
   const size_t T_flat = tokens.numel() / H;
@@ -286,6 +288,8 @@ void ep_dispatch_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor g_recv_t
   NVTE_CHECK(grad.dim() >= 2, "grad must be at least 2D [..., recv_pr, H]");
   NVTE_CHECK(grad_tokens.dim() >= 2, "grad_tokens must be at least 2D [..., H]");
   NVTE_CHECK(grad_topk_weights.dim() >= 2, "grad_topk_weights must be at least 2D [..., top_k]");
+  NVTE_CHECK(grad.is_contiguous(), "grad must be contiguous");
+  NVTE_CHECK(g_recv_topk_weights.is_contiguous(), "g_recv_topk_weights must be contiguous");
 
   const size_t H = static_cast<size_t>(grad.size(-1));
   const size_t recv_pr = grad.numel() / H;
@@ -325,6 +329,8 @@ void ep_combine_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor grad_expe
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   NVTE_CHECK(grad.dim() >= 2, "grad must be at least 2D [..., H]");
   NVTE_CHECK(grad_expert_out.dim() >= 2, "grad_expert_out must be at least 2D [..., recv_pr, H]");
+  NVTE_CHECK(grad.is_contiguous(), "grad must be contiguous");
+  NVTE_CHECK(grad_expert_out.is_contiguous(), "grad_expert_out must be contiguous");
 
   const size_t H = static_cast<size_t>(grad.size(-1));
   const size_t T_flat = grad.numel() / H;

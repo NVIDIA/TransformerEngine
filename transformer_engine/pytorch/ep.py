@@ -465,8 +465,10 @@ class _EpDispatch(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, g_recv_tokens, g_recv_topk_weights, _g_token_counts):  # type: ignore[override]
-        """Dispatch bwd; uses user-supplied grad inputs as-is."""
+        """Dispatch bwd; normalizes grad-input layout, otherwise passes through."""
         device = ctx.handle_mem.device
+        g_recv_tokens = g_recv_tokens.contiguous()
+        g_recv_topk_weights = g_recv_topk_weights.contiguous()
         grad_tokens = torch.empty(
             ctx.tokens_T_flat, ctx.hidden_dim, dtype=ctx.tokens_dtype, device=device
         )
