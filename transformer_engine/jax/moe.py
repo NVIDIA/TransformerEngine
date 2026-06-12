@@ -317,43 +317,10 @@ def _ffn_fwd_per_shard(
     them as ``[num_procs, recv_pr, H_out]``) plus the residuals consumed
     by the bwd.
 
-    ``token_counts_local`` is the per-expert padded token count (shape
-    ``[1, num_local_experts]``) from ``tex.ep_prepare``. With NCCL EP's
-    HT expert-major layout, the dispatch lays out experts contiguously
-    in ``recv_tokens`` as ``[expert_0_padded | expert_1_padded | ... |
-    overalloc_tail]``, where each per-expert block already includes the
-    ``dispatch_output_per_expert_alignment`` zero-padding and only the
-    trailing overalloc tail (slack between ``sum(token_counts)`` and the
-    worst-case ``recv_pr``) is unused. Plumbing ``token_counts`` straight
-    into ``grouped_gemm`` as ``group_sizes`` makes cuBLAS skip both the
-    overalloc tail (saving FMAs on partially-loaded shards) and any
-    expert whose per-shard routed count is zero (saving the GEMM
-    altogether, not just the rows).
-
-    cuBLAS leaves the trailing of each grouped_gemm *per-row* output
-    (``combined_out``, ``expert_outputs`` in fwd; ``d_intermediate``,
-    ``d_sorted_x`` in bwd) uninitialised past ``sum(group_sizes)``, and
-    fully uninitialised on a shard whose every local expert has count 0.
-    That per-row tail is harmless for everything in this block:
-    subsequent ``grouped_gemm`` / ``ep_combine`` / ``ep_dispatch_bwd``
-    only read valid rows per ``local_group_sizes`` / ``handle_mem``, and
-    ``act_fn``'s NaN tail only contaminates positions that no
-    group-aware consumer reads. The one per-row exception is
-    ``grouped_dbias`` (a ``segment_sum`` that walks every row), which
-    is only reached when ``has_bias=True``. That FFN bias path is
-    currently gated upstream (cuBLAS grouped_gemm has no fused bias on
-    Hopper yet; PR 3083 adds a pure-JAX bias add), so we don't pay for
-    the tail-zeroing masks needed to keep ``segment_sum`` well-defined.
-    If the bias path ever lands, re-add ``jnp.where`` masks on
-    ``combined_out`` / ``d_eo_2d`` / ``d_intermediate``.
-    
-    Separately, the grouped_gemm *wgrad* outputs (``d_wo``,
-    ``d_wi_combined`` in bwd) are per-group ``(num_local_experts, K, N)``
-    and are the *user-visible* weight gradients. cuBLAS skips groups
-    with ``size_g == 0`` without zero-filling, so for 0-token-globally
-    experts the slice would be NaN and leak into the optimizer. This
-    is handled by per-group ``jnp.where`` masks (``wgrad_group_active``)
-    in ``_ffn_bwd_per_shard``; see that docstring.
+    ``token_counts_local`` (``[1, num_local_experts]``, from
+    ``tex.ep_prepare``) is passed to ``grouped_gemm`` as ``group_sizes``
+    so cuBLAS skips both 0-token-routed experts and the dispatch
+    overalloc tail.
     """
     hidden = recv_tokens_local.shape[-1]
     sorted_x = recv_tokens_local.reshape(-1, hidden)
@@ -365,22 +332,10 @@ def _ffn_fwd_per_shard(
     wi_1 = wi_1.astype(sorted_x.dtype)
     wo = wo.astype(sorted_x.dtype)
 
-    # wi GEMM uses ONE fused grouped_gemm with the gate/up weights
-    # concatenated along the trailing (output) axis: wi_combined has
-    # shape ``(num_local_experts, hidden, 2*H_inter)`` and the resulting
-    # combined_out has shape ``(num_rows, 2*H_inter)``, which jnp.split
-    # cleanly slices back into gate / up halves. tex.grouped_gemm only
-    # supports the canonical (G, K, N) 3D weight layout with
-    # contracting_dims=((1,),(1,)) -- see the docstring on
-    # transformer_engine.jax.dense.grouped_dense ("currently only
-    # supports ((1,), (1,))") and the CI test
-    # tests/jax/test_multi_process_distributed_grouped_gemm.py.
-    # An older fused 4D variant built via jnp.stack([wi_0, wi_1], axis=-2)
-    # put a non-contracting axis in the middle of the RHS, which the
-    # kernel walked as if it were 3D and read off the end -> NaN.
-    # Bisected against a jnp.einsum reference: the stack-axis variant
-    # produced all-NaN output, while the concat-axis variant (this
-    # path) produces finite outputs matching the reference.
+    # Concat wi_0/wi_1 along the trailing axis (NOT stack on a new
+    # axis). grouped_gemm requires the 3D (G, K, N) weight layout with
+    # contracting_dims=((1,), (1,)); a 4D stack variant walks off the
+    # end of the RHS and returns NaN.
     wi_combined = jnp.concatenate([wi_0, wi_1], axis=-1)
     wi_combined_bias = (
         jnp.concatenate([wi_0_bias, wi_1_bias], axis=-1) if wi_0_bias is not None else None
@@ -403,8 +358,7 @@ def _ffn_fwd_per_shard(
     # output dtype; the activation output (`intermediate`) stays in the
     # dtype the wo GEMM / wo's quantized input consumes. For bf16 compute
     # that's all bf16; for FP8/FP4 the downstream grouped_quantize is what
-    # transitions to the target precision. Storing a higher precision than
-    # the consumer GEMM buys nothing.
+    # transitions to the target precision.
     act_fn = _convert_to_activation_function(activation_type)
     intermediate = act_fn(gate_proj_out) * up_proj_out
 
@@ -468,44 +422,16 @@ def _ffn_bwd_per_shard(
     """Per-shard FFN backward.
 
     Mirrors :func:`_ffn_fwd_per_shard`. Returns
-    ``(d_sorted_x [1, recv_pr, H], d_recv_w [1, recv_pr], d_wi_0, d_wi_1, d_wo,
-    d_wi_0_bias, d_wi_1_bias, d_wo_bias)``.
-
-    ``local_group_sizes`` arrives as ``(1, num_local_experts)`` (the
-    fwd-side shard residual), with the same per-expert padded counts the
-    fwd used as ``grouped_gemm`` ``group_sizes``. cuBLAS leaves rows
-    past ``sum(group_sizes)`` uninit in the bwd grouped_gemm *dgrad*
-    outputs (``d_intermediate``, ``d_sorted_x``), but every downstream
-    consumer of those per-row outputs is group-aware (wi/wo wgrads
-    contract only over valid rows; ``ep_dispatch_bwd`` reads only
-    valid positions per ``handle_mem``), so the per-row trailing tail
-    sits unread. ``grouped_dbias`` (per-row ``segment_sum``) is the
-    only per-row consumer that would propagate the tail, and it is
-    only invoked when ``has_bias=True``; that FFN bias path is gated
-    upstream (see ``_ffn_fwd_per_shard`` docstring) so we skip the
-    per-row tail-zeroing masks until cuBLAS gains fused-bias grouped
-    GEMM (or PR 3083's pure-JAX bias add lands).
-    
-    The *wgrad* outputs (``d_wo``, ``d_wi_combined``) are different.
-    They're per-group ``(num_local_experts, K, N)``, and cuBLAS
-    skips groups with ``size_g == 0`` without zero-filling the
-    corresponding ``out[g, :, :]`` slice (see
-    ``cublaslt_grouped_gemm.cu`` lines 2086/2096). For shards hosting
-    an expert that received zero tokens globally, that expert's
-    ``d_wo`` / ``d_wi`` slice would be uninit → NaN propagates to the
-    user's optimizer. We zero those slices via a per-group ``jnp.where``
-    immediately after each wgrad. The mask is shape ``(num_groups, 1, 1)``
-    and ``num_groups == num_local_experts`` is tiny, so this is cheap.
+    ``(d_sorted_x [1, recv_pr, H], d_recv_w [1, recv_pr],
+    d_wi_0, d_wi_1, d_wo, d_wi_0_bias, d_wi_1_bias, d_wo_bias)``.
     """
     local_group_sizes = local_group_sizes.reshape(-1).astype(jnp.int32)
     d_eo_2d = d_expert_outputs_local.reshape(-1, d_expert_outputs_local.shape[-1])
     recv_w_flat = recv_topk_weights_local.reshape(-1)
     q_set = noop_quantizer_set
-    # Per-group active mask for wgrad outputs. cuBLAS grouped_gemm skips
-    # groups with size_g == 0 and leaves the corresponding output slice
-    # uninit; without this, ``d_wo[g] / d_wi_combined[g]`` for any expert
-    # that received zero tokens globally would be NaN and propagate to
-    # the user's optimizer.
+    # cuBLAS grouped_gemm skips size_g == 0 groups without zero-filling
+    # the output slice; mask 0-token-expert wgrads to zero so the
+    # optimizer never sees uninit memory.
     wgrad_group_active = (local_group_sizes > 0)[:, None, None]
 
     # wo bwd
@@ -568,9 +494,7 @@ def _ffn_bwd_per_shard(
         casted_d_combined.get_tensor(usage=TensorUsage.RHS),
         contracting_dims=((0,), (0,)),
     )
-    d_wi_combined = jnp.where(
-        wgrad_group_active, d_wi_combined, jnp.zeros_like(d_wi_combined)
-    )
+    d_wi_combined = jnp.where(wgrad_group_active, d_wi_combined, jnp.zeros_like(d_wi_combined))
     d_wi_0, d_wi_1 = jnp.split(d_wi_combined, 2, axis=-1)
     if has_bias:
         d_wi_combined_bias = tex.grouped_dbias(d_combined, local_group_sizes)
@@ -1015,26 +939,13 @@ def _moe_bwd_rule(
         d_expert_outputs = grad_pre_combine
         d_recv_w_from_combine = jnp.zeros_like(ctx.recv_topk_weights)
     else:
-        # combine_fwd consumed weighted = expert_out * w * mask;
-        # split the cotangent across both factors. w is cast to
-        # grad_pre_combine.dtype so the multiply stays bf16 and
-        # d_sorted_x (downstream into ep_dispatch_bwd) stays bf16.
-        #
         # ep_dispatch_fwd can land NaN into recv_topk_weights on padded
-        # slots (the public NCCL EP HT path does not zero-fill unused
-        # recv buffer entries). Untreated, `(NaN != 0) == True` in IEEE,
+        # slots. Untreated, `(NaN != 0) == True` in IEEE,
         # so the multiplicative mask cannot suppress the NaN and it
         # propagates through grad_pre_combine * w * mask into d_expert_outputs
         # and then into every downstream gradient (gate_kernel ends up
         # all-NaN). Sanitize once here.
         recv_w_clean = jnp.where(jnp.isnan(ctx.recv_topk_weights), 0, ctx.recv_topk_weights)
-        # IEEE 754: NaN * 0 = NaN, so multiplying grad_pre_combine by a
-        # 0/1 mask cannot kill the NaNs tex.ep_combine_bwd leaves at
-        # padded slots of grad_pre_combine: ctx.recv_topk_weights is
-        # clean after the sanitize above, but grad_pre_combine[padded]
-        # is still NaN, so grad_pre_combine * w * mask = NaN. Use
-        # jnp.where to overwrite padded positions with literal 0
-        # instead.
         w = recv_w_clean[..., None].astype(grad_pre_combine.dtype)
         mask_bool = (recv_w_clean != 0)[..., None]
         d_expert_outputs = jnp.where(
