@@ -399,23 +399,23 @@ def _ffn_fwd_per_shard(
     casted_sorted_x_lhs_trans = casted_sorted_x.get_tensor(usage=TensorUsage.LHS_TRANS)
     casted_wi_rhs_trans = casted_wi.get_tensor(usage=TensorUsage.RHS_TRANS)
 
-    # Promote the silu+multiply to fp32 to match the pure-JAX reference
-    # (and ML common practice). bf16 silu accumulation alone drifts ~1%
-    # vs fp32 silu, which composes through wo -> combine into the
-    # ~1.4% per-element parity gap we were seeing on softmax. Cast back
-    # to the activation dtype before the grouped_quantize so the wo GEMM
-    # input layout is unchanged.
+    # Activation inputs (gate_proj_out, up_proj_out) stay in the wi GEMM
+    # output dtype; the activation output (`intermediate`) stays in the
+    # dtype the wo GEMM / wo's quantized input consumes. For bf16 compute
+    # that's all bf16; for FP8/FP4 the downstream grouped_quantize is what
+    # transitions to the target precision. Storing a higher precision than
+    # the consumer GEMM buys nothing.
     act_fn = _convert_to_activation_function(activation_type)
-    intermediate = (
-        act_fn(gate_proj_out.astype(jnp.float32)) * up_proj_out.astype(jnp.float32)
-    ).astype(sorted_x.dtype)
+    intermediate = act_fn(gate_proj_out) * up_proj_out
 
     if apply_topk_weights_early:
         # Fold the per-token combine weights into the FFN intermediate;
         # the downstream wo GEMM is linear so this is equivalent to the
         # late-weighting path, modulo elementwise op fusion gains. w_b is
         # cast to intermediate.dtype so the multiply doesn't promote
-        # expert_outputs to f32 (NCCL EP combine hard-asserts bf16).
+        # expert_outputs above the EP buffer's element width
+        # (ep_bootstrap rejects max_token_dtype != bf16, and the NCCL EP
+        # HT mega-buffer is sized for 2-byte slots accordingly).
         w_b = recv_w_flat[:, None].astype(intermediate.dtype)
         mask_b = (recv_w_flat != 0).astype(intermediate.dtype)[:, None]
         intermediate = intermediate * w_b * mask_b
@@ -541,21 +541,13 @@ def _ffn_bwd_per_shard(
     else:
         d_recv_w_from_intermediate = jnp.zeros_like(recv_w_flat)
 
-    # Activation bwd. The fwd already computes silu+multiply at fp32
-    # because the MoE silu sits on the expert side of routing: its
-    # output rides into ``expert_outputs`` and is then summed -- weighted
-    # by routing probabilities -- across topk experts by ep_combine.
-    # Doing silu/silu' in bf16 drifts by ~1% per element vs fp32 and
-    # that drift compounds through wo->combine. Mirror the fwd's fp32
-    # promotion here so silu' lines up with silu, then cast back to the
-    # bf16 layout the wi grouped_quantize expects.
-    gp_fp32 = gate_proj_out.astype(jnp.float32)
-    up_fp32 = up_proj_out.astype(jnp.float32)
-    d_int_fp32 = d_intermediate.astype(jnp.float32)
-    act_gp_fp32, dact_pullback_fp32 = jax.vjp(act_fn, gp_fp32)
-    d_up_proj_out = (d_int_fp32 * act_gp_fp32).astype(up_proj_out.dtype)
-    (d_gate_proj_fp32,) = dact_pullback_fp32(d_int_fp32 * up_fp32)
-    d_gate_proj_out = d_gate_proj_fp32.astype(gate_proj_out.dtype)
+    # Activation bwd, symmetric with the fwd: silu' and the two
+    # elementwise products run in the GEMM dtype (no fp32 island), so
+    # the chain rule composes through at the same precision the wi/wo
+    # GEMMs consume.
+    act_gp, dact_pullback = jax.vjp(act_fn, gate_proj_out)
+    d_up_proj_out = d_intermediate * act_gp
+    (d_gate_proj_out,) = dact_pullback(d_intermediate * up_proj_out)
 
     # wi bwd (fused gate/up via concat). Mirror the fused fwd: pack the
     # gate/up cotangents along the trailing axis, run a single

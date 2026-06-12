@@ -334,8 +334,10 @@ def _pure_jax_moe_reference(
     # both placements.
     layer_w0 = jnp.einsum("th,ehm->tem", x_2d, wi_0)
     layer_w1 = jnp.einsum("th,ehm->tem", x_2d, wi_1)
-    intermediate = jax.nn.silu(layer_w0.astype(jnp.float32)) * layer_w1.astype(jnp.float32)
-    intermediate = intermediate.astype(x.dtype)
+    # Activation runs in x.dtype (typically bf16) to mirror the impl --
+    # the impl keeps silu+multiply in the wi GEMM output dtype because
+    # storing higher precision than the consumer (wo) GEMM buys nothing.
+    intermediate = jax.nn.silu(layer_w0) * layer_w1
     expert_out = jnp.einsum("tem,emh->teh", intermediate, wo)  # [T, E, H]
     output_2d = jnp.einsum("te,teh->th", routing_weights_full.astype(x.dtype), expert_out)
     output = output_2d.reshape(B, S, H).astype(x.dtype)
