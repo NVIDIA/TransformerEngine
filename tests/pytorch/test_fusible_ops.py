@@ -5,9 +5,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-import functools
 import io
-import os
 import math
 import random
 from typing import Optional
@@ -20,11 +18,6 @@ import torch
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.ops as te_ops
-from transformer_engine.pytorch.ops.fused.grouped_mlp import (
-    _cudnn_frontend_supports_grouped_gemm_srelu,
-    _cudnn_frontend_version_supported,
-    is_glu_activation,
-)
 
 from transformer_engine.pytorch.ops.fused import (
     BackwardActivationBias,
@@ -44,8 +37,6 @@ from transformer_engine.pytorch import (
     QuantizerRole,
     is_bf16_available,
 )
-from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
-import transformer_engine_torch as tex
 
 # Import utility functions
 from utils import (
@@ -53,7 +44,6 @@ from utils import (
     assert_close_grads,
     dtype_tols,
     make_recipe,
-    MegatronTrainingHelper,
     quantization_tols,
     reset_rng_states,
 )

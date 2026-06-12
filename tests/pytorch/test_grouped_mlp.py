@@ -4,9 +4,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
-import functools
-import io
+from collections.abc import Iterable
 import os
 import math
 import random
@@ -14,26 +12,12 @@ from typing import Optional
 
 import pytest
 
-import transformer_engine
 import torch
 
-import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
-import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch.ops.fused.grouped_mlp import (
     _cudnn_frontend_supports_grouped_gemm_srelu,
     _cudnn_frontend_version_supported,
-    is_glu_activation,
-)
-
-from transformer_engine.pytorch.ops.fused import (
-    BackwardActivationBias,
-    BackwardAddRMSNorm,
-    BackwardLinearAdd,
-    BackwardLinearScale,
-    ForwardLinearBiasActivation,
-    ForwardLinearBiasAdd,
-    ForwardLinearScaleAdd,
 )
 from transformer_engine.pytorch import (
     QuantizedTensor,
@@ -44,7 +28,6 @@ from transformer_engine.pytorch import (
     QuantizerRole,
     is_bf16_available,
 )
-from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
 import transformer_engine_torch as tex
 
 # Import utility functions
@@ -67,9 +50,6 @@ nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
 _dtypes: list[torch.dtype] = [torch.float32, torch.float16]
 if is_bf16_available():  # bf16 requires sm_80 or higher
     _dtypes.append(torch.bfloat16)
-
-# Supported devices
-_devices: list[torch.device] = [torch.device("cpu"), torch.device("cuda")]
 
 # Supported quantization recipes
 _quantization_list: list[Optional[str]] = [None]
@@ -245,18 +225,6 @@ def make_reference_and_test_tensors(
     return ref, test
 
 
-def to_cpu(tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
-    """Convert to an FP64 CPU tensor"""
-    if tensor is None:
-        return None
-    out = tensor.detach()
-    if isinstance(out, QuantizedTensor):
-        out = out.dequantize()
-    out = out.to(dtype=torch.float64, device="cpu")
-    out = out.requires_grad_(requires_grad=tensor.requires_grad)
-    return out
-
-
 class TestGroupedLinearOp:
     """Tests for advanced features with grouped linear basic op"""
 
@@ -381,7 +349,7 @@ class TestGroupedLinearOp:
         # Construct fusible operation
         recipe = make_recipe(quantization)
         with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
-            op = te_ops.GroupedLinear(
+            op = te.ops.GroupedLinear(
                 group_size,
                 in_features,
                 out_features,
@@ -525,7 +493,7 @@ class TestGroupedLinearOp:
 
         recipe = make_recipe(quantization)
         with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
-            op = te_ops.GroupedLinear(
+            op = te.ops.GroupedLinear(
                 group_size,
                 in_features,
                 out_features,
@@ -867,23 +835,23 @@ class TestGroupedMLPFusedOp:
 
         def _make_scaled_act():
             if activation == "scaled_swiglu":
-                return te_ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
+                return te.ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
             if activation == "scaled_clamped_qgeglu_custom":
-                return te_ops.ScaledClampedQGeGLU(
+                return te.ops.ScaledClampedQGeGLU(
                     glu_interleave_size=glu_interleave_size,
                     limit=geglu_limit,
                     alpha=geglu_alpha,
                     glu_linear_offset=geglu_offset,
                 )
             if activation.startswith("scaled_clamped_qgeglu"):
-                return te_ops.ScaledClampedQGeGLU(glu_interleave_size=glu_interleave_size)
+                return te.ops.ScaledClampedQGeGLU(glu_interleave_size=glu_interleave_size)
             if activation == "scaled_srelu":
-                return te_ops.ScaledSReLU()
+                return te.ops.ScaledSReLU()
             raise ValueError(f"Unexpected grouped MLP activation ({activation})")
 
         def _make_module():
             with te.quantized_model_init(enabled=with_quantization, recipe=recipe):
-                fc1_op = te_ops.GroupedLinear(
+                fc1_op = te.ops.GroupedLinear(
                     group_size,
                     hidden_size,
                     fc1_out_features,
@@ -896,7 +864,7 @@ class TestGroupedMLPFusedOp:
                     delay_wgrad_compute=delay_wgrad_compute,
                 )
 
-                fc2_op = te_ops.GroupedLinear(
+                fc2_op = te.ops.GroupedLinear(
                     group_size,
                     hidden_size,
                     hidden_size,
@@ -909,7 +877,7 @@ class TestGroupedMLPFusedOp:
                     delay_wgrad_compute=delay_wgrad_compute,
                     scale_bias=bias,
                 )
-                return te_ops.Sequential(fc1_op, _make_scaled_act(), fc2_op), fc1_op, fc2_op
+                return te.ops.Sequential(fc1_op, _make_scaled_act(), fc2_op), fc1_op, fc2_op
 
         module, fc1, fc2 = _make_module()
 
@@ -988,9 +956,9 @@ class TestGroupedMLPFusedOp:
         )
         if expected_grouped_mlp_fusion:
             if activation_is_glu:
-                fused_cls = te_ops.fused.GroupedMLP_CuTeGEMMGLU
+                fused_cls = te.ops.fused.GroupedMLP_CuTeGEMMGLU
             else:
-                fused_cls = te_ops.fused.GroupedMLP_CuTeGEMMUnary
+                fused_cls = te.ops.fused.GroupedMLP_CuTeGEMMUnary
             if fused_cls.is_supported():
                 forward_ops = module._module_groups[0]._forward_ops
                 backward_ops = module._module_groups[0]._backward_ops
@@ -1135,7 +1103,7 @@ class TestGroupedMLPFusedOp:
     ) -> None:
         """single_grouped_weight=True/False should match exactly for fused MXFP8 grouped MLP."""
 
-        if not te_ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
+        if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
             pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
 
         split_sizes = [split_alignment * (i + 1) for i in range(group_size)]
@@ -1179,11 +1147,11 @@ class TestGroupedMLPFusedOp:
         def _run_case(single_grouped_weight: bool) -> tuple[torch.Tensor, ...]:
             with te.quantized_model_init(enabled=True, recipe=recipe):
                 scaled_act = (
-                    te_ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
+                    te.ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
                     if activation == "scaled_swiglu"
-                    else te_ops.ScaledClampedQGeGLU(glu_interleave_size=glu_interleave_size)
+                    else te.ops.ScaledClampedQGeGLU(glu_interleave_size=glu_interleave_size)
                 )
-                fc1 = te_ops.GroupedLinear(
+                fc1 = te.ops.GroupedLinear(
                     group_size,
                     hidden_size,
                     2 * hidden_size,
@@ -1192,7 +1160,7 @@ class TestGroupedMLPFusedOp:
                     dtype=dtype,
                     single_grouped_weight=single_grouped_weight,
                 )
-                fc2 = te_ops.GroupedLinear(
+                fc2 = te.ops.GroupedLinear(
                     group_size,
                     hidden_size,
                     hidden_size,
@@ -1202,7 +1170,7 @@ class TestGroupedMLPFusedOp:
                     single_grouped_weight=single_grouped_weight,
                     scale_bias=bias,
                 )
-                module = te_ops.Sequential(fc1, scaled_act, fc2)
+                module = te.ops.Sequential(fc1, scaled_act, fc2)
 
             with torch.no_grad():
                 if single_grouped_weight:
@@ -1237,12 +1205,12 @@ class TestGroupedMLPFusedOp:
             assert len(forward_ops) == 1
             assert isinstance(
                 forward_ops[0][0],
-                te_ops.fused.GroupedMLP_CuTeGEMMGLU,
+                te.ops.fused.GroupedMLP_CuTeGEMMGLU,
             )
             assert len(backward_ops) == 1
             assert isinstance(
                 backward_ops[0][0],
-                te_ops.fused.GroupedMLP_CuTeGEMMGLU,
+                te.ops.fused.GroupedMLP_CuTeGEMMGLU,
             )
             assert backward_ops[0][0] is forward_ops[0][0]
 
@@ -1356,7 +1324,7 @@ class TestGroupedMLPFusedOp:
         that read ``.grad`` don't see stale bytes from the cached dummy).
         """
 
-        if not te_ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
+        if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
             pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
 
         recipe = make_recipe("mxfp8")
@@ -1382,7 +1350,7 @@ class TestGroupedMLPFusedOp:
 
         def _build_module(*, accumulate_into_main_grad: bool):
             with te.quantized_model_init(enabled=True, recipe=recipe):
-                fc1 = te_ops.GroupedLinear(
+                fc1 = te.ops.GroupedLinear(
                     group_size,
                     hidden_size,
                     2 * hidden_size,
@@ -1393,7 +1361,7 @@ class TestGroupedMLPFusedOp:
                     accumulate_into_main_grad=accumulate_into_main_grad,
                     delay_wgrad_compute=delay_wgrad_compute,
                 )
-                fc2 = te_ops.GroupedLinear(
+                fc2 = te.ops.GroupedLinear(
                     group_size,
                     hidden_size,
                     hidden_size,
@@ -1404,8 +1372,8 @@ class TestGroupedMLPFusedOp:
                     accumulate_into_main_grad=accumulate_into_main_grad,
                     delay_wgrad_compute=delay_wgrad_compute,
                 )
-                scaled_act = te_ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
-                module = te_ops.Sequential(fc1, scaled_act, fc2)
+                scaled_act = te.ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
+                module = te.ops.Sequential(fc1, scaled_act, fc2)
 
             with torch.no_grad():
                 if single_grouped_weight:
@@ -1487,7 +1455,7 @@ class TestGroupedMLPFusedOp:
     ) -> None:
         """Grouped MLP forward+backward should be CUDA graph capturable (MXFP8)."""
 
-        if not te_ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
+        if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
             pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
         if dtype not in (torch.bfloat16, torch.float16):
             pytest.skip("MXFP8 fused grouped MLP is only supported with BF16/FP16")
@@ -1499,7 +1467,7 @@ class TestGroupedMLPFusedOp:
         in_shape = (split_sizes.sum().item() + token_padding, hidden_size)
         recipe = make_recipe("mxfp8")
         with te.quantized_model_init(enabled=True, recipe=recipe):
-            fc1 = te_ops.GroupedLinear(
+            fc1 = te.ops.GroupedLinear(
                 group_size,
                 hidden_size,
                 2 * hidden_size,
@@ -1509,7 +1477,7 @@ class TestGroupedMLPFusedOp:
                 single_grouped_weight=single_grouped_weight,
                 accumulate_into_main_grad=accumulate_into_main_grad,
             )
-            fc2 = te_ops.GroupedLinear(
+            fc2 = te.ops.GroupedLinear(
                 group_size,
                 hidden_size,
                 hidden_size,
@@ -1520,11 +1488,11 @@ class TestGroupedMLPFusedOp:
                 accumulate_into_main_grad=accumulate_into_main_grad,
             )
             scaled_act = (
-                te_ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
+                te.ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
                 if activation == "scaled_swiglu"
-                else te_ops.ScaledClampedQGeGLU(glu_interleave_size=glu_interleave_size)
+                else te.ops.ScaledClampedQGeGLU(glu_interleave_size=glu_interleave_size)
             )
-            module = te_ops.Sequential(
+            module = te.ops.Sequential(
                 fc1,
                 scaled_act,
                 fc2,
@@ -1629,12 +1597,12 @@ class TestGroupedMLPFusedOp:
         assert len(forward_ops) == 1
         assert isinstance(
             forward_ops[0][0],
-            te_ops.fused.GroupedMLP_CuTeGEMMGLU,
+            te.ops.fused.GroupedMLP_CuTeGEMMGLU,
         )
         assert len(backward_ops) == 1
         assert isinstance(
             backward_ops[0][0],
-            te_ops.fused.GroupedMLP_CuTeGEMMGLU,
+            te.ops.fused.GroupedMLP_CuTeGEMMGLU,
         )
         assert backward_ops[0][0] is forward_ops[0][0]
 
