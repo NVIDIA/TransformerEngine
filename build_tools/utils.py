@@ -225,58 +225,45 @@ def nvcc_path() -> Tuple[str, str]:
 
 
 @functools.lru_cache(maxsize=None)
-def get_cuda_include_dirs() -> Tuple[str, str]:
-    """Returns the CUDA header directory."""
+def get_cuda_include_dirs() -> List[Path]:
+    """Returns all CUDA-related header directories.
+
+    Combines the system CUDA toolkit path (if present) with include directories
+    from nvidia pip wheel packages (nvidia-cudnn-cu1x, nvidia-nccl-cu1x, …).
+
+    On modern setups these are NOT mutually exclusive: the system toolkit may
+    provide core CUDA headers while cudnn and nccl arrive as separate pip wheels.
+    Returning both avoids "fatal error: cudnn.h / nccl.h not found" when a
+    system CUDA toolkit is present but those components are pip-distributed.
+    """
+    dirs: List[Path] = []
 
     force_wheels = bool(int(os.getenv("NVTE_BUILD_USE_NVIDIA_WHEELS", "0")))
-    # If cuda is installed via toolkit, all necessary headers
-    # are bundled inside the top level cuda directory.
     if not force_wheels and cuda_toolkit_include_path() is not None:
-        return [cuda_toolkit_include_path()]
+        dirs.append(cuda_toolkit_include_path())
 
-    # Use pip wheels to include all headers.
+    # Always supplement with nvidia pip wheel includes so components like
+    # cudnn and nccl are found even when the system toolkit doesn't have them.
     try:
         import nvidia
-    except ModuleNotFoundError as e:
-        raise RuntimeError("CUDA not found.")
-
-    if nvidia.__file__ is not None:
-        cuda_root = Path(nvidia.__file__).parent
-    else:
-        cuda_root = Path(nvidia.__path__[0])  # namespace
-    return [
-        subdir / "include"
-        for subdir in cuda_root.iterdir()
-        if subdir.is_dir() and (subdir / "include").is_dir()
-    ]
-
-
-@functools.lru_cache(maxsize=None)
-def get_nccl_include_dirs() -> List[Path]:
-    """Returns NCCL header directories not already covered by get_cuda_include_dirs().
-
-    On systems where CUDA is installed via the system toolkit, nccl.h may not
-    be in the toolkit tree.  This function checks the nvidia-nccl pip wheel as
-    a fallback so the build succeeds on pip-only CUDA setups (e.g. DGX Spark).
-    """
-    nccl_include: Optional[Path] = None
-
-    # Check whether nccl.h is already reachable from the CUDA toolkit tree
-    cuda_inc = cuda_toolkit_include_path()
-    if cuda_inc is not None and (cuda_inc / "nccl.h").is_file():
-        return []  # already covered
-
-    # Try to locate nccl.h via the nvidia pip wheel namespace package
-    try:
-        import nvidia.nccl as _nccl_pkg
-        nccl_root = Path(_nccl_pkg.__file__).parent if _nccl_pkg.__file__ else Path(_nccl_pkg.__path__[0])
-        candidate = nccl_root / "include"
-        if candidate.is_dir() and (candidate / "nccl.h").is_file():
-            nccl_include = candidate
-    except (ImportError, AttributeError):
+        cuda_root = Path(nvidia.__path__[0])  # namespace package — no __file__
+        dirs.extend(
+            subdir / "include"
+            for subdir in cuda_root.iterdir()
+            if subdir.is_dir() and (subdir / "include").is_dir()
+        )
+    except (ImportError, StopIteration, IndexError, AttributeError):
         pass
 
-    return [nccl_include] if nccl_include else []
+    if not dirs:
+        raise RuntimeError("CUDA not found.")
+
+    return dirs
+
+
+def get_nccl_include_dirs() -> List[Path]:
+    """Compatibility shim — nccl includes are now returned by get_cuda_include_dirs()."""
+    return []
 
 
 @functools.lru_cache(maxsize=None)
