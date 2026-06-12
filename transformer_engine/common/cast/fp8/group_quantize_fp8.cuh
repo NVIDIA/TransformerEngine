@@ -1178,12 +1178,12 @@ void group_quantize(const GroupedTensor *input, const Tensor *noop, GroupedTenso
                       // row length or a misaligned base pointer would force
                       // uncoalesced scalar access, which we deliberately do not
                       // support on this path.
-                      NVTE_CHECK(flat_aligned,
-                                 "Varying first-dimension rowwise grouped FP8 quantization requires "
-                                 "vector-aligned inputs: the last logical dimension must be a "
-                                 "multiple of ",
-                                 flat_nvec,
-                                 " and the input/output base pointers must be vector aligned.");
+                      NVTE_CHECK(
+                          flat_aligned,
+                          "Varying first-dimension rowwise grouped FP8 quantization requires "
+                          "vector-aligned inputs: the last logical dimension must be a "
+                          "multiple of ",
+                          flat_nvec, " and the input/output base pointers must be vector aligned.");
                       const dim3 flat_block(ROWWISE_FLAT_THREADS);
                       const int num_sms = ::transformer_engine::cuda::sm_count();
                       // Target ~8 blocks per SM of *active* work. The actual
