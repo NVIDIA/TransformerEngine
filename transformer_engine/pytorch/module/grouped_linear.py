@@ -104,9 +104,11 @@ class _GroupedLinear(torch.autograd.Function):
 
         Supported Compute Capability (CC) and precisions:
         * Hopper (CC 9.0): BF16/FP16.
-        * Blackwell (CC 10.x and 11.0): BF16/FP16/MXFP8/NVFP4.
+        * Blackwell (CC 10.x and 11.0): BF16/FP16/MXFP8/NVFP4 with RHT.
         FP8 delayed / current scaling, and FP8 block scaling are not supported because the
         corresponding grouped quantization kernels are missing.
+        Non-RHT NVFP4 falls back to the legacy path because graph-safe grouped quantization
+        currently requires RHT.
 
         Input/weight/grad_output quantizers are assumed to be of the same type, otherwise it would
         trigger a fatal error in the cuBLASLt grouped GEMM check.
@@ -124,17 +126,19 @@ class _GroupedLinear(torch.autograd.Function):
         ):
             return False
         # 3. Filter by compute capability
-        if not ((9, 0) <= get_device_compute_capability() <= (11, 0)):
+        if not (9, 0) <= get_device_compute_capability() <= (11, 0):
             return False
         # 4. Output quantization is not supported.
         if any(q is not None for q in output_quantizers):
             return False
         # 5. Filter by quantization recipes.
         if fp8:
-            if not ((10, 0) <= get_device_compute_capability() <= (11, 0)):
+            if not (10, 0) <= get_device_compute_capability() <= (11, 0):
                 return False
             return all(isinstance(q, MXFP8Quantizer) for q in input_quantizers) or all(
-                isinstance(q, NVFP4Quantizer) for q in input_quantizers
+                
+                    isinstance(q, NVFP4Quantizer) and q.with_rht for q in input_quantizers
+                
             )
         return activation_dtype in (torch.bfloat16, torch.float16)
 

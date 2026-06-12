@@ -767,7 +767,8 @@ class GroupedLinear(BasicOperation):
           library. This filter mirrors cuBLASLt grouped GEMM's architecture
           requirement without duplicating its cuBLAS version checks.
         * Quantized compute supports MXFP8 and NVFP4 on Blackwell GPUs with Compute Capability (CC)
-          10.x and 11.0;
+          10.x and 11.0. NVFP4 requires RHT because graph-safe grouped quantization currently
+          requires RHT;
           Every other quantization recipe (fp8 delayed / current scaling, fp8 block scaling, ...)
           falls back to the legacy flow because the corresponding grouped quantization kernels are
           missing.
@@ -776,13 +777,15 @@ class GroupedLinear(BasicOperation):
         * Input/weight/grad_output quantizers are assumed to be of the same type, otherwise it
           would trigger a fatal error in the cuBLASLt grouped GEMM check.
         """
-        if not ((9, 0) <= get_device_compute_capability() <= (11, 0)):
+        if not (9, 0) <= get_device_compute_capability() <= (11, 0):
             return False
         if with_quantized_compute:
-            if not ((10, 0) <= get_device_compute_capability() <= (11, 0)):
+            if not (10, 0) <= get_device_compute_capability() <= (11, 0):
                 return False
             return all(isinstance(q, MXFP8Quantizer) for q in input_quantizers) or all(
-                isinstance(q, NVFP4Quantizer) for q in input_quantizers
+                
+                    isinstance(q, NVFP4Quantizer) and q.with_rht for q in input_quantizers
+                
             )
         return dtype in (torch.bfloat16, torch.float16)
 
