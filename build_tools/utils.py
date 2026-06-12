@@ -252,6 +252,34 @@ def get_cuda_include_dirs() -> Tuple[str, str]:
 
 
 @functools.lru_cache(maxsize=None)
+def get_nccl_include_dirs() -> List[Path]:
+    """Returns NCCL header directories not already covered by get_cuda_include_dirs().
+
+    On systems where CUDA is installed via the system toolkit, nccl.h may not
+    be in the toolkit tree.  This function checks the nvidia-nccl pip wheel as
+    a fallback so the build succeeds on pip-only CUDA setups (e.g. DGX Spark).
+    """
+    nccl_include: Optional[Path] = None
+
+    # Check whether nccl.h is already reachable from the CUDA toolkit tree
+    cuda_inc = cuda_toolkit_include_path()
+    if cuda_inc is not None and (cuda_inc / "nccl.h").is_file():
+        return []  # already covered
+
+    # Try to locate nccl.h via the nvidia pip wheel namespace package
+    try:
+        import nvidia.nccl as _nccl_pkg
+        nccl_root = Path(_nccl_pkg.__file__).parent if _nccl_pkg.__file__ else Path(_nccl_pkg.__path__[0])
+        candidate = nccl_root / "include"
+        if candidate.is_dir() and (candidate / "nccl.h").is_file():
+            nccl_include = candidate
+    except (ImportError, AttributeError):
+        pass
+
+    return [nccl_include] if nccl_include else []
+
+
+@functools.lru_cache(maxsize=None)
 def cuda_archs() -> str:
     archs = os.getenv("NVTE_CUDA_ARCHS")
     if archs is None:

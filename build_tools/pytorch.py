@@ -14,6 +14,7 @@ from .utils import (
     all_files_in_dir,
     cuda_version,
     get_cuda_include_dirs,
+    get_nccl_include_dirs,
     debug_build_enabled,
     setup_mpi_flags,
 )
@@ -49,6 +50,7 @@ def setup_pytorch_extension(
 
     # Header files
     include_dirs = get_cuda_include_dirs()
+    include_dirs.extend(get_nccl_include_dirs())
     include_dirs.extend(
         [
             common_header_files,
