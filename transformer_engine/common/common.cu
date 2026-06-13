@@ -7,7 +7,6 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include <bit>
-#include <type_traits>
 
 #include "./common.h"
 #include "./utils.cuh"
