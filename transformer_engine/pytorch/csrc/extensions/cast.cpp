@@ -235,8 +235,7 @@ float fp8_max_for_dtype(const DType dtype) {
 void compute_grouped_fp8_current_scaling_amax_and_scale(
     const GroupedTensorWrapper &grouped_input_tensor,
     const GroupedTensorWrapper &grouped_output_tensor, const py::object &grouped_output_py,
-    Float8CurrentScalingQuantizer *quantizer_cpp,
-    const std::optional<TensorWrapper> &noop_flag) {
+    Float8CurrentScalingQuantizer *quantizer_cpp, const std::optional<TensorWrapper> &noop_flag) {
   // The amax / scale / scale_inv buffers were allocated by create_grouped_tensor
   // and their pointers are stored directly in the C++ grouped tensor, so we read
   // them back from there instead of going through the Python object's attributes.
@@ -373,10 +372,9 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
     }
     case GroupedQuantizationMode::FP8_CURRENT_SCALING_GROUPED_QUANTIZE: {
       auto *fp8_quantizer_cpp = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
-      compute_grouped_fp8_current_scaling_amax_and_scale(grouped_input_tensor,
-                                                         grouped_output_tensor_cpp,
-                                                         grouped_output_py, fp8_quantizer_cpp,
-                                                         noop_flag_cpp);
+      compute_grouped_fp8_current_scaling_amax_and_scale(
+          grouped_input_tensor, grouped_output_tensor_cpp, grouped_output_py, fp8_quantizer_cpp,
+          noop_flag_cpp);
       QuantizationConfigWrapper quant_config_cpp;
       if (noop_flag_cpp.has_value()) {
         quant_config_cpp.set_noop_tensor(noop_flag_cpp->data());
