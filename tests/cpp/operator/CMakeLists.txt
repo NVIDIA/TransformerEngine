@@ -24,6 +24,7 @@ add_executable(test_operator
                test_cast_transpose_dbias_dgelu.cu
                test_cast_transpose_dgeglu.cu
                test_act.cu
+               test_scaled_activation.cu
                test_normalization.cu
                test_normalization_mxfp8.cu
                test_memset.cu
