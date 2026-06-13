@@ -741,20 +741,20 @@ class TestGroupedTensor:
         - ``empty_split``: ``first_dims`` set with one zero entry.
         - ``varying_last``: ``last_dims`` set, values vary.
 
-        When ``overallocated`` is True the input is reshaped to a logical_shape whose
-        first dim is twice ``sum(first_dims)``, so the kernel sees an active region
-        (rows covered by ``first_dims``) followed by an unused tail. The backing
-        buffer always matches logical_shape exactly. The unused input tail rows are
-        poisoned with a large sentinel value (1e4); since the per-group amax
-        assertion compares against amax computed over the active input tensors only,
-        any tail read by the kernel would explode the per-group amax and the
-        assertion would fail. Overallocation is skipped for ``uniform`` and
-        ``varying_last`` because they don't have a varying-first tail to test.
+        When ``overallocated`` is True the backing buffer is twice the active size
+        in the test case, so the kernel sees an active region followed by an unused tail.
+        The unused tail elements are poisoned with a large sentinel value (1e4);
+        since the per-group amax assertion compares against amax computed over the
+        active input tensors only, any tail read by the kernel would explode the
+        per-group amax and the assertion would fail. Overallocation is skipped for
+        ``uniform`` because it partitions the buffer implicitly (no metadata-defined
+        active region to over-allocate against).
         """
-        if overallocated and shape_case in ("uniform", "varying_last"):
+        if overallocated and shape_case == "uniform":
             pytest.skip(
-                "Overallocation is not meaningful for this shape_case "
-                "(implicit partitioning / varying-last semantics)."
+                "Overallocation is not meaningful for ``uniform`` "
+                "(the kernel partitions the buffer implicitly, so there is no "
+                "metadata-defined active region to over-allocate against)."
             )
 
         # Per-tensor shapes for each shape_case.
@@ -807,8 +807,8 @@ class TestGroupedTensor:
         # View flat buffer as the 2D shape expected by group_quantize.
         if shape_case in ("varying_last",):
             common_first = per_tensor_shapes[0][0]
-            total_last = sum(last_dims_host)
-            grouped_input = flat_buffer.view(common_first, total_last)
+            allocated_last = allocated_numel // common_first
+            grouped_input = flat_buffer.view(common_first, allocated_last)
         else:
             common_last = per_tensor_shapes[0][1]
             allocated_first = allocated_numel // common_last
