@@ -706,18 +706,17 @@ class GroupedTensorStorage:
                     "Varying-dimension grouped tensor construction is not graph-safe for"
                     " block-scaling quantizers"
                 )
+            offsets = tensor_offsets.tolist()
+            if first_dims is not None and last_dims is not None:
+                first_dims_list = first_dims.tolist()
+                last_dims_list = last_dims.tolist()
+                shape = [(first_dims_list[i], last_dims_list[i]) for i in range(num_tensors)]
+            elif first_dims is not None:
+                first_dims_list = first_dims.tolist()
+                shape = [(rows, logical_last_dim) for rows in first_dims_list]
             else:
-                offsets = tensor_offsets.tolist()
-                if first_dims is not None and last_dims is not None:
-                    first_dims_list = first_dims.tolist()
-                    last_dims_list = last_dims.tolist()
-                    shape = [(first_dims_list[i], last_dims_list[i]) for i in range(num_tensors)]
-                elif first_dims is not None:
-                    first_dims_list = first_dims.tolist()
-                    shape = [(rows, logical_last_dim) for rows in first_dims_list]
-                else:
-                    last_dims_list = last_dims.tolist()
-                    shape = [(logical_first_dim, cols) for cols in last_dims_list]
+                last_dims_list = last_dims.tolist()
+                shape = [(logical_first_dim, cols) for cols in last_dims_list]
 
         # Calculate total elements across all tensors
         total_elements = logical_first_dim * logical_last_dim

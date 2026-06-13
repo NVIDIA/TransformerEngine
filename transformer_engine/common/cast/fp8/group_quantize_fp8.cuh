@@ -210,15 +210,15 @@ __global__ void __launch_bounds__(THREADS_PER_TILE)
       COLWISE_OUTPUT ? TRANSPOSE_LOAD_SIZE_BYTES : ROWWISE_LOAD_SIZE_BYTES;
   constexpr size_t STORE_SIZE_BYTES =
       COLWISE_OUTPUT ? TRANSPOSE_STORE_SIZE_BYTES : ROWWISE_STORE_SIZE_BYTES;
-  constexpr size_t nvec_in = LOAD_SIZE_BYTES / sizeof(IType);
-  constexpr size_t nvec_out = STORE_SIZE_BYTES / sizeof(OType);
-  constexpr size_t tile_dim_m = THREADS_PER_WARP * nvec_out;
-  constexpr size_t tile_dim_n = THREADS_PER_WARP * nvec_in;
+  constexpr size_t kNVecIn = LOAD_SIZE_BYTES / sizeof(IType);
+  constexpr size_t kNVecOut = STORE_SIZE_BYTES / sizeof(OType);
+  constexpr size_t tile_dim_m = THREADS_PER_WARP * kNVecOut;
+  constexpr size_t tile_dim_n = THREADS_PER_WARP * kNVecIn;
   constexpr size_t num_iterations = THREADS_PER_WARP / WARPS_PER_TILE;
 
-  using IVecT = Vec<IType, nvec_in>;
-  using OVecC = Vec<OType, nvec_in>;
-  using OVecT = Vec<OType, nvec_out>;
+  using IVecT = Vec<IType, kNVecIn>;
+  using OVecC = Vec<OType, kNVecIn>;
+  using OVecT = Vec<OType, kNVecOut>;
 
   size_t tile_col = blockIdx.x * tile_dim_n;
   size_t tensor_id = 0;
@@ -307,7 +307,7 @@ __global__ void __launch_bounds__(THREADS_PER_TILE)
 
   if constexpr (COLWISE_OUTPUT) {
     __shared__ OVecT
-        shared_output_t[nvec_in][THREADS_PER_WARP][THREADS_PER_WARP + TRANSPOSE_SHARED_PAD];
+        shared_output_t[kNVecIn][THREADS_PER_WARP][THREADS_PER_WARP + TRANSPOSE_SHARED_PAD];
 
     // Interior tiles (every fragment full) can skip *all* per-fragment bounds
     // checks. That instruction overhead -- not occupancy -- is what holds the
@@ -322,22 +322,22 @@ __global__ void __launch_bounds__(THREADS_PER_TILE)
     // of global traffic (a 2-byte read per element). Phase 2 (store the
     // transposed fp8 columns) is governed by the per-group *row* count, which
     // for varying-first groups is an arbitrary integer and is therefore rarely
-    // a multiple of nvec_out. We still take the branchless interior path
+    // a multiple of kNVecOut. We still take the branchless interior path
     // whenever the loads are aligned -- the common case -- and only the final
     // store falls back to per-element stores when the row stride is unaligned,
     // so imbalanced group shapes keep the branchless phase-1 win.
     const bool full_tile = (tile_row + tile_dim_m <= rows) && (tile_col + tile_dim_n <= cols);
-    const bool aligned_load = (cols % nvec_in == 0) && (tensor_base % nvec_in == 0);
+    const bool aligned_load = (cols % kNVecIn == 0) && (tensor_base % kNVecIn == 0);
     if (full_tile && aligned_load) {
 #pragma unroll
       for (size_t iter = 0; iter < num_iterations; ++iter) {
         const size_t i1 = tidy + iter * WARPS_PER_TILE;
         const size_t j1 = tidx;
-        const size_t base_row = tile_row + i1 * nvec_out;
-        const size_t base_col = tile_col + j1 * nvec_in;
-        OVecT local_output_t[nvec_in];
+        const size_t base_row = tile_row + i1 * kNVecOut;
+        const size_t base_col = tile_col + j1 * kNVecIn;
+        OVecT local_output_t[kNVecIn];
 #pragma unroll
-        for (size_t i2 = 0; i2 < nvec_out; ++i2) {
+        for (size_t i2 = 0; i2 < kNVecOut; ++i2) {
           const size_t row = base_row + i2;
           IVecT local_input;
           OVecC local_output;
@@ -352,30 +352,30 @@ __global__ void __launch_bounds__(THREADS_PER_TILE)
             }
           }
 #pragma unroll
-          for (size_t j2 = 0; j2 < nvec_in; ++j2) {
+          for (size_t j2 = 0; j2 < kNVecIn; ++j2) {
             local_output_t[j2].data.elt[i2] = local_output.data.elt[j2];
           }
         }
 #pragma unroll
-        for (size_t j2 = 0; j2 < nvec_in; ++j2) {
+        for (size_t j2 = 0; j2 < kNVecIn; ++j2) {
           shared_output_t[j2][j1][i1] = local_output_t[j2];
         }
       }
       __syncthreads();
 #pragma unroll
-      for (size_t j2 = 0; j2 < nvec_in; ++j2) {
+      for (size_t j2 = 0; j2 < kNVecIn; ++j2) {
 #pragma unroll
         for (size_t iter = 0; iter < num_iterations; ++iter) {
           // All 32 lanes of a warp share j1 (= tidy + iter*WARPS_PER_TILE) and
           // therefore the same column, so shared_output_t[j2][j1][0..WARP-1] is a
-          // contiguous nvec_out*WARP-byte segment in shared and maps to a
+          // contiguous kNVecOut*WARP-byte segment in shared and maps to a
           // contiguous segment of one output column. Store it with the widest
           // type the (warp-uniform) destination offset allows: row strides that
-          // are multiples of nvec_out give a single vectorized store per lane;
+          // are multiples of kNVecOut give a single vectorized store per lane;
           // arbitrary varying-first strides degrade gracefully to narrower
           // coalesced stores instead of faulting.
           const size_t j1 = tidy + iter * WARPS_PER_TILE;
-          const size_t col = tile_col + j1 * nvec_in + j2;
+          const size_t col = tile_col + j1 * kNVecIn + j2;
           char *const gl =
               reinterpret_cast<char *>(output_colwise + tensor_base + col * rows + tile_row);
           store_column_segment(&shared_output_t[j2][j1][0], gl, tidx);
@@ -388,17 +388,17 @@ __global__ void __launch_bounds__(THREADS_PER_TILE)
     for (size_t iter = 0; iter < num_iterations; ++iter) {
       const size_t i1 = tidy + iter * WARPS_PER_TILE;
       const size_t j1 = tidx;
-      const size_t base_row = tile_row + i1 * nvec_out;
-      const size_t base_col = tile_col + j1 * nvec_in;
+      const size_t base_row = tile_row + i1 * kNVecOut;
+      const size_t base_col = tile_col + j1 * kNVecIn;
       const size_t fragment_cols =
-          base_col < cols ? ((cols - base_col) < nvec_in ? (cols - base_col) : nvec_in) : 0;
+          base_col < cols ? ((cols - base_col) < kNVecIn ? (cols - base_col) : kNVecIn) : 0;
       if (base_row >= rows || fragment_cols == 0) {
         continue;
       }
-      const bool full_fragment = (base_row + nvec_out <= rows) && (fragment_cols == nvec_in);
-      OVecT local_output_t[nvec_in];
+      const bool full_fragment = (base_row + kNVecOut <= rows) && (fragment_cols == kNVecIn);
+      OVecT local_output_t[kNVecIn];
 #pragma unroll
-      for (size_t i2 = 0; i2 < nvec_out; ++i2) {
+      for (size_t i2 = 0; i2 < kNVecOut; ++i2) {
         const size_t row = base_row + i2;
         if (full_fragment || row < rows) {
           IVecT local_input;
@@ -436,7 +436,7 @@ __global__ void __launch_bounds__(THREADS_PER_TILE)
             }
           }
 #pragma unroll
-          for (size_t j2 = 0; j2 < nvec_in; ++j2) {
+          for (size_t j2 = 0; j2 < kNVecIn; ++j2) {
             if (j2 < fragment_cols) {
               local_output_t[j2].data.elt[i2] = local_output.data.elt[j2];
             }
@@ -444,7 +444,7 @@ __global__ void __launch_bounds__(THREADS_PER_TILE)
         }
       }
 #pragma unroll
-      for (size_t j2 = 0; j2 < nvec_in; ++j2) {
+      for (size_t j2 = 0; j2 < kNVecIn; ++j2) {
         if (j2 < fragment_cols) {
           shared_output_t[j2][j1][i1] = local_output_t[j2];
         }
@@ -453,20 +453,20 @@ __global__ void __launch_bounds__(THREADS_PER_TILE)
 
     __syncthreads();
 #pragma unroll
-    for (size_t j2 = 0; j2 < nvec_in; ++j2) {
+    for (size_t j2 = 0; j2 < kNVecIn; ++j2) {
 #pragma unroll
       for (size_t iter = 0; iter < num_iterations; ++iter) {
         const size_t i1 = tidx;
         const size_t j1 = tidy + iter * WARPS_PER_TILE;
-        const size_t row = tile_row + i1 * nvec_out;
-        const size_t col = tile_col + j1 * nvec_in + j2;
+        const size_t row = tile_row + i1 * kNVecOut;
+        const size_t col = tile_col + j1 * kNVecIn + j2;
         if (col < cols) {
           const size_t valid_rows =
-              row < rows ? ((rows - row) < nvec_out ? (rows - row) : nvec_out) : 0;
+              row < rows ? ((rows - row) < kNVecOut ? (rows - row) : kNVecOut) : 0;
           if (valid_rows > 0) {
             OType *const output_ptr = output_colwise + tensor_base + col * rows + row;
             const OVecT local_output_t = shared_output_t[j2][j1][i1];
-            if (valid_rows == nvec_out &&
+            if (valid_rows == kNVecOut &&
                 reinterpret_cast<uint64_t>(output_ptr) % OVecT::BYTES == 0) {
               local_output_t.store_to(output_ptr);
             } else {
@@ -482,13 +482,13 @@ __global__ void __launch_bounds__(THREADS_PER_TILE)
       const size_t i1 = tidy + iter * WARPS_PER_TILE;
       const size_t j1 = tidx;
 #pragma unroll
-      for (size_t i2 = 0; i2 < nvec_out; ++i2) {
-        const size_t row = tile_row + i1 * nvec_out + i2;
-        const size_t col = tile_col + j1 * nvec_in;
+      for (size_t i2 = 0; i2 < kNVecOut; ++i2) {
+        const size_t row = tile_row + i1 * kNVecOut + i2;
+        const size_t col = tile_col + j1 * kNVecIn;
         if (row < rows) {
           IVecT local_input;
           OVecC local_output;
-          if (col + nvec_in <= cols) {
+          if (col + kNVecIn <= cols) {
             const IType *const input_ptr = input + tensor_base + row * cols + col;
             if (reinterpret_cast<uint64_t>(input_ptr) % IVecT::BYTES == 0) {
               local_input.load_from(input_ptr);
@@ -504,7 +504,7 @@ __global__ void __launch_bounds__(THREADS_PER_TILE)
             }
           } else {
             const size_t valid_cols =
-                col < cols ? ((cols - col) < nvec_in ? (cols - col) : nvec_in) : 0;
+                col < cols ? ((cols - col) < kNVecIn ? (cols - col) : kNVecIn) : 0;
             if (valid_cols == 0) {
               continue;
             }
@@ -626,20 +626,8 @@ __global__ void __launch_bounds__(ROWWISE_FLAT_THREADS)
   }
 
   // 3. Binary search to find which tensor this block belongs to
-  size_t tensor_id = 0;
-  {
-    size_t low = 0;
-    size_t hi = num_tensors;
-    while (low < hi) {
-      size_t mid = low + (hi - low) / 2;
-      if (s_block_offsets[mid + 1] <= blockIdx.x) {
-        low = mid + 1;
-      } else {
-        hi = mid;
-      }
-    }
-    tensor_id = low;
-  }
+  const size_t tensor_id = transformer_engine::dispatch::common::find_tensor_from_offsets(
+      s_block_offsets, num_tensors, blockIdx.x);
 
   // 4. Calculate this block's local work range within the tensor
   const size_t local_block_id = blockIdx.x - s_block_offsets[tensor_id];
@@ -754,15 +742,15 @@ __global__ void __launch_bounds__(THREADS_PER_TILE)
       (SCALING_TYPE == ScalingType::COLWISE) || (SCALING_TYPE == ScalingType::BIDIMENSIONAL);
   static_assert(COLWISE_OUTPUT, "The full-tile grouped FP8 kernel is for columnwise outputs.");
 
-  constexpr size_t nvec_in = TRANSPOSE_LOAD_SIZE_BYTES / sizeof(IType);
-  constexpr size_t nvec_out = TRANSPOSE_STORE_SIZE_BYTES / sizeof(OType);
-  constexpr size_t tile_dim_m = THREADS_PER_WARP * nvec_out;
-  constexpr size_t tile_dim_n = THREADS_PER_WARP * nvec_in;
+  constexpr size_t kNVecIn = TRANSPOSE_LOAD_SIZE_BYTES / sizeof(IType);
+  constexpr size_t kNVecOut = TRANSPOSE_STORE_SIZE_BYTES / sizeof(OType);
+  constexpr size_t tile_dim_m = THREADS_PER_WARP * kNVecOut;
+  constexpr size_t tile_dim_n = THREADS_PER_WARP * kNVecIn;
   constexpr size_t num_iterations = THREADS_PER_WARP / WARPS_PER_TILE;
 
-  using IVecT = Vec<IType, nvec_in>;
-  using OVecC = Vec<OType, nvec_in>;
-  using OVecT = Vec<OType, nvec_out>;
+  using IVecT = Vec<IType, kNVecIn>;
+  using OVecC = Vec<OType, kNVecIn>;
+  using OVecT = Vec<OType, kNVecOut>;
 
   const size_t tiles_per_tensor = rows_per_tensor / tile_dim_m;
   const size_t tensor_id = blockIdx.y / tiles_per_tensor;
@@ -777,17 +765,17 @@ __global__ void __launch_bounds__(THREADS_PER_TILE)
   const size_t tidy = tid / THREADS_PER_WARP;
 
   __shared__ OVecT
-      shared_output_t[nvec_in][THREADS_PER_WARP][THREADS_PER_WARP + TRANSPOSE_SHARED_PAD];
+      shared_output_t[kNVecIn][THREADS_PER_WARP][THREADS_PER_WARP + TRANSPOSE_SHARED_PAD];
 
 #pragma unroll
   for (size_t iter = 0; iter < num_iterations; ++iter) {
     const size_t i1 = tidy + iter * WARPS_PER_TILE;
     const size_t j1 = tidx;
-    const size_t base_row = tile_row + i1 * nvec_out;
-    const size_t base_col = tile_col + j1 * nvec_in;
-    OVecT local_output_t[nvec_in];
+    const size_t base_row = tile_row + i1 * kNVecOut;
+    const size_t base_col = tile_col + j1 * kNVecIn;
+    OVecT local_output_t[kNVecIn];
 #pragma unroll
-    for (size_t i2 = 0; i2 < nvec_out; ++i2) {
+    for (size_t i2 = 0; i2 < kNVecOut; ++i2) {
       const size_t row = base_row + i2;
       IVecT local_input;
       OVecC local_output;
@@ -803,25 +791,25 @@ __global__ void __launch_bounds__(THREADS_PER_TILE)
         }
       }
 #pragma unroll
-      for (size_t j2 = 0; j2 < nvec_in; ++j2) {
+      for (size_t j2 = 0; j2 < kNVecIn; ++j2) {
         local_output_t[j2].data.elt[i2] = local_output.data.elt[j2];
       }
     }
 #pragma unroll
-    for (size_t j2 = 0; j2 < nvec_in; ++j2) {
+    for (size_t j2 = 0; j2 < kNVecIn; ++j2) {
       shared_output_t[j2][j1][i1] = local_output_t[j2];
     }
   }
 
   __syncthreads();
 #pragma unroll
-  for (size_t j2 = 0; j2 < nvec_in; ++j2) {
+  for (size_t j2 = 0; j2 < kNVecIn; ++j2) {
 #pragma unroll
     for (size_t iter = 0; iter < num_iterations; ++iter) {
       const size_t i1 = tidx;
       const size_t j1 = tidy + iter * WARPS_PER_TILE;
-      const size_t row = tile_row + i1 * nvec_out;
-      const size_t col = tile_col + j1 * nvec_in + j2;
+      const size_t row = tile_row + i1 * kNVecOut;
+      const size_t col = tile_col + j1 * kNVecIn + j2;
       OType *const output_ptr = output_colwise + tensor_base + col * rows_per_tensor + row;
       const OVecT local_output_t = shared_output_t[j2][j1][i1];
       local_output_t.store_to(output_ptr);
@@ -847,15 +835,15 @@ __global__ void __launch_bounds__(THREADS_PER_TILE) group_cast_fp8_varying_first
       (SCALING_TYPE == ScalingType::COLWISE) || (SCALING_TYPE == ScalingType::BIDIMENSIONAL);
   static_assert(COLWISE_OUTPUT, "The varying-first tile kernel is for columnwise outputs.");
 
-  constexpr size_t nvec_in = TRANSPOSE_LOAD_SIZE_BYTES / sizeof(IType);
-  constexpr size_t nvec_out = TRANSPOSE_STORE_SIZE_BYTES / sizeof(OType);
-  constexpr size_t tile_dim_m = THREADS_PER_WARP * nvec_out;
-  constexpr size_t tile_dim_n = THREADS_PER_WARP * nvec_in;
+  constexpr size_t kNVecIn = TRANSPOSE_LOAD_SIZE_BYTES / sizeof(IType);
+  constexpr size_t kNVecOut = TRANSPOSE_STORE_SIZE_BYTES / sizeof(OType);
+  constexpr size_t tile_dim_m = THREADS_PER_WARP * kNVecOut;
+  constexpr size_t tile_dim_n = THREADS_PER_WARP * kNVecIn;
   constexpr size_t num_iterations = THREADS_PER_WARP / WARPS_PER_TILE;
 
-  using IVecT = Vec<IType, nvec_in>;
-  using OVecC = Vec<OType, nvec_in>;
-  using OVecT = Vec<OType, nvec_out>;
+  using IVecT = Vec<IType, kNVecIn>;
+  using OVecC = Vec<OType, kNVecIn>;
+  using OVecT = Vec<OType, kNVecOut>;
 
   const size_t tensor_id = blockIdx.z;
   if (tensor_id >= num_tensors || cols == 0) {
@@ -889,7 +877,7 @@ __global__ void __launch_bounds__(THREADS_PER_TILE) group_cast_fp8_varying_first
   const size_t tidy = tid / THREADS_PER_WARP;
 
   __shared__ OVecT
-      shared_output_t[nvec_in][THREADS_PER_WARP][THREADS_PER_WARP + TRANSPOSE_SHARED_PAD];
+      shared_output_t[kNVecIn][THREADS_PER_WARP][THREADS_PER_WARP + TRANSPOSE_SHARED_PAD];
 
   for (size_t tensor_tile_id = blockIdx.y; tensor_tile_id < row_tiles;
        tensor_tile_id += gridDim.y) {
@@ -899,17 +887,17 @@ __global__ void __launch_bounds__(THREADS_PER_TILE) group_cast_fp8_varying_first
     for (size_t iter = 0; iter < num_iterations; ++iter) {
       const size_t i1 = tidy + iter * WARPS_PER_TILE;
       const size_t j1 = tidx;
-      const size_t base_row = tile_row + i1 * nvec_out;
-      const size_t base_col = tile_col + j1 * nvec_in;
+      const size_t base_row = tile_row + i1 * kNVecOut;
+      const size_t base_col = tile_col + j1 * kNVecIn;
       const size_t fragment_cols =
-          base_col < cols ? ((cols - base_col) < nvec_in ? (cols - base_col) : nvec_in) : 0;
+          base_col < cols ? ((cols - base_col) < kNVecIn ? (cols - base_col) : kNVecIn) : 0;
       if (base_row >= rows || fragment_cols == 0) {
         continue;
       }
-      const bool full_fragment = (base_row + nvec_out <= rows) && (fragment_cols == nvec_in);
-      OVecT local_output_t[nvec_in];
+      const bool full_fragment = (base_row + kNVecOut <= rows) && (fragment_cols == kNVecIn);
+      OVecT local_output_t[kNVecIn];
 #pragma unroll
-      for (size_t i2 = 0; i2 < nvec_out; ++i2) {
+      for (size_t i2 = 0; i2 < kNVecOut; ++i2) {
         const size_t row = base_row + i2;
         if (full_fragment || row < rows) {
           IVecT local_input;
@@ -947,7 +935,7 @@ __global__ void __launch_bounds__(THREADS_PER_TILE) group_cast_fp8_varying_first
             }
           }
 #pragma unroll
-          for (size_t j2 = 0; j2 < nvec_in; ++j2) {
+          for (size_t j2 = 0; j2 < kNVecIn; ++j2) {
             if (j2 < fragment_cols) {
               local_output_t[j2].data.elt[i2] = local_output.data.elt[j2];
             }
@@ -955,7 +943,7 @@ __global__ void __launch_bounds__(THREADS_PER_TILE) group_cast_fp8_varying_first
         }
       }
 #pragma unroll
-      for (size_t j2 = 0; j2 < nvec_in; ++j2) {
+      for (size_t j2 = 0; j2 < kNVecIn; ++j2) {
         if (j2 < fragment_cols) {
           shared_output_t[j2][j1][i1] = local_output_t[j2];
         }
@@ -964,20 +952,20 @@ __global__ void __launch_bounds__(THREADS_PER_TILE) group_cast_fp8_varying_first
 
     __syncthreads();
 #pragma unroll
-    for (size_t j2 = 0; j2 < nvec_in; ++j2) {
+    for (size_t j2 = 0; j2 < kNVecIn; ++j2) {
 #pragma unroll
       for (size_t iter = 0; iter < num_iterations; ++iter) {
         const size_t i1 = tidx;
         const size_t j1 = tidy + iter * WARPS_PER_TILE;
-        const size_t row = tile_row + i1 * nvec_out;
-        const size_t col = tile_col + j1 * nvec_in + j2;
+        const size_t row = tile_row + i1 * kNVecOut;
+        const size_t col = tile_col + j1 * kNVecIn + j2;
         if (col < cols) {
           const size_t valid_rows =
-              row < rows ? ((rows - row) < nvec_out ? (rows - row) : nvec_out) : 0;
+              row < rows ? ((rows - row) < kNVecOut ? (rows - row) : kNVecOut) : 0;
           if (valid_rows > 0) {
             OType *const output_ptr = output_colwise + tensor_base + col * rows + row;
             const OVecT local_output_t = shared_output_t[j2][j1][i1];
-            if (valid_rows == nvec_out &&
+            if (valid_rows == kNVecOut &&
                 reinterpret_cast<uint64_t>(output_ptr) % OVecT::BYTES == 0) {
               local_output_t.store_to(output_ptr);
             } else {
@@ -1095,8 +1083,8 @@ void group_quantize(const GroupedTensor *input, const Tensor *noop, GroupedTenso
                                                 (SCALING_TYPE == ScalingType::BIDIMENSIONAL);
                 constexpr size_t load_size_bytes =
                     colwise_output ? TRANSPOSE_LOAD_SIZE_BYTES : ROWWISE_LOAD_SIZE_BYTES;
-                constexpr size_t nvec_in = load_size_bytes / sizeof(IType);
-                constexpr size_t tile_dim_n = THREADS_PER_WARP * nvec_in;
+                constexpr size_t kNVecIn = load_size_bytes / sizeof(IType);
+                constexpr size_t tile_dim_n = THREADS_PER_WARP * kNVecIn;
                 TRANSFORMER_ENGINE_GROUP_TENSOR_SHAPE_REPRESENTATION_SWITCH(shape_rep, SHAPE_REP, {
                   if constexpr (SHAPE_REP == ShapeRepresentation::VARYING_FIRST_DIM) {
                     NVTE_CHECK(offsets_ptr != nullptr && first_dims_ptr != nullptr,
@@ -1132,8 +1120,8 @@ void group_quantize(const GroupedTensor *input, const Tensor *noop, GroupedTenso
                       }
                     } else if constexpr (colwise_output) {
                       constexpr size_t store_size_bytes = TRANSPOSE_STORE_SIZE_BYTES;
-                      constexpr size_t nvec_out = store_size_bytes / sizeof(OType);
-                      constexpr size_t tile_dim_m = THREADS_PER_WARP * nvec_out;
+                      constexpr size_t kNVecOut = store_size_bytes / sizeof(OType);
+                      constexpr size_t tile_dim_m = THREADS_PER_WARP * kNVecOut;
                       if (rows_per_tensor % tile_dim_m == 0 && last_logical_dim % tile_dim_n == 0) {
                         const dim3 full_grid(last_logical_dim / tile_dim_n,
                                              num_tensors * (rows_per_tensor / tile_dim_m));
@@ -1209,11 +1197,10 @@ void group_quantize(const GroupedTensor *input, const Tensor *noop, GroupedTenso
                   // Varying-first columnwise intentionally falls through to the
                   // generic group_cast_fp8_kernel below. The dedicated
                   // group_cast_fp8_varying_first_tile_kernel used a grid-stride
-                  // row loop that spilled to 118 registers/thread (2 blocks/SM,
-                  // ~24% occupancy, ~1.1 TB/s). The generic kernel processes one
-                  // tile per block and now carries a branchless interior-tile
-                  // fast path, so it is both lighter on registers and HBM-bound
-                  // on the interior of every group.
+                  // row loop whose high register pressure limited occupancy. The
+                  // generic kernel processes one tile per block and now carries a
+                  // branchless interior-tile fast path, so it is both lighter on
+                  // registers and HBM-bound on the interior of every group.
                   if (!launched_fast_path) {
                     const size_t work_blocks_X = DIVUP(last_logical_dim, tile_dim_n);
                     const dim3 grid(work_blocks_X, work_blocks_Y);

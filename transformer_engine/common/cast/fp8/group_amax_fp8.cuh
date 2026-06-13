@@ -210,8 +210,7 @@ void launch_grouped_amax_kernel(const InputType *input, float *amax, const size_
   (void)last_dims_ptr;
 
   // Zero out the per-tensor amax buffer so atomicMaxFloat works.
-  const size_t zero_blocks =
-      (num_tensors + GROUPED_AMAX_KERNEL_THREADS - 1) / GROUPED_AMAX_KERNEL_THREADS;
+  const size_t zero_blocks = DIVUP(num_tensors, static_cast<size_t>(GROUPED_AMAX_KERNEL_THREADS));
   grouped_amax_zero_kernel<<<zero_blocks, GROUPED_AMAX_KERNEL_THREADS, 0, stream>>>(
       amax, num_tensors, noop_ptr);
   NVTE_CHECK_CUDA(cudaGetLastError());

@@ -187,8 +187,10 @@ void grouped_reduce_dbias(const ShapeRepresentation shape_rep, const size_t num_
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
+template <typename OffsetType>
 __device__ __forceinline__ size_t find_tensor_from_offsets(
-    const int64_t *const __restrict__ offsets_ptr, const size_t num_tensors, const size_t offset) {
+    const OffsetType *const __restrict__ offsets_ptr, const size_t num_tensors,
+    const size_t offset) {
   size_t low = 1;
   size_t hi = num_tensors;  // [low, hi]
 
