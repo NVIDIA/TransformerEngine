@@ -1684,6 +1684,15 @@ class GroupedLinear(TransformerEngineBaseModule):
         is_grad_enabled = torch.is_grad_enabled()
         num_gemms = self.num_gemms
 
+        if FP8GlobalStateManager.fp8_graph_capturing():
+            skip_fp8_weight_update = (
+                FP8GlobalStateManager.quantization_state.skip_fp8_weight_update_tensor
+            )
+        else:
+            skip_fp8_weight_update = None
+        if skip_fp8_weight_update is not None:
+            is_first_microbatch = False
+
         # Make sure splits are in expected format
         if not isinstance(m_splits, torch.Tensor):
             # Convert list of ints to tensor for backward compatibility
