@@ -284,6 +284,49 @@ def test_multi_tensor_l2norm(input_size_pair, applier, repeat, in_type, per_tens
     assert overflow_buf.item() == 0
 
 
+raw_moment_size_pairs = [
+    (777, 555),
+    (2048 * 32 + 1, 555),
+]
+
+
+def _raw_moment_reference(tensor):
+    values = tensor.float()
+    values_2 = values * values
+    return torch.stack(
+        [
+            torch.tensor(float(values.numel()), dtype=torch.float32, device=tensor.device),
+            values.sum(),
+            values_2.sum(),
+            (values_2 * values).sum(),
+            (values_2 * values_2).sum(),
+        ]
+    )
+
+
+@pytest.mark.parametrize("input_size_pair", raw_moment_size_pairs)
+@pytest.mark.parametrize("applier", appliers)
+@pytest.mark.parametrize("repeat", [1, 55])
+@pytest.mark.parametrize("in_type", [torch.float32, torch.float16, torch.bfloat16])
+def test_multi_tensor_raw_moments(input_size_pair, applier, repeat, in_type):
+    sizea, sizeb = input_size_pair
+    device = torch.device("cuda")
+    overflow_buf = torch.zeros(1, dtype=torch.int32, device=device)
+
+    a = (torch.arange(sizea, dtype=torch.float32, device=device) % 17) - 8
+    b = (torch.arange(sizeb, dtype=torch.float32, device=device) % 11) - 5
+
+    in_list = []
+    for _ in range(repeat):
+        in_list += [a.clone().to(in_type), b.clone().to(in_type)]
+
+    moments = applier(tex.multi_tensor_raw_moments, overflow_buf, [in_list])
+    references = torch.stack([_raw_moment_reference(tensor) for tensor in in_list])
+
+    torch.testing.assert_close(moments, references, rtol=1e-5, atol=1e-2)
+    assert overflow_buf.item() == 0
+
+
 @pytest.mark.parametrize("input_size_pair", input_size_pairs)
 @pytest.mark.parametrize("applier", appliers)
 @pytest.mark.parametrize("repeat", [1, 55])
