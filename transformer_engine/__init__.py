@@ -6,53 +6,9 @@
 
 # pylint: disable=unused-import
 
-import ctypes
-import functools
 import os
 from importlib import metadata
-from typing import Optional, Tuple
 import transformer_engine.common
-
-# Minimum NCCL version for the statically-linked NCCL EP backend.
-_NCCL_EP_MIN_VERSION = (2, 30, 4)
-
-
-@functools.lru_cache(maxsize=1)
-def _nccl_runtime_version() -> Optional[Tuple[int, int, int]]:
-    """Return runtime (major, minor, patch) from libnccl.so.2, or None if unavailable."""
-    try:
-        libnccl = ctypes.CDLL("libnccl.so.2", mode=ctypes.RTLD_LOCAL)
-        ncclGetVersion = libnccl.ncclGetVersion
-    except (OSError, AttributeError):
-        return None
-    ver = ctypes.c_int(0)
-    if ncclGetVersion(ctypes.byref(ver)) != 0:
-        return None
-    v = ver.value
-    return (v // 10000, (v // 100) % 100, v % 100)
-
-
-def is_nccl_ep_available() -> bool:
-    """Return True if the runtime libnccl.so meets the NCCL EP minimum."""
-    cur = _nccl_runtime_version()
-    return cur is not None and cur >= _NCCL_EP_MIN_VERSION
-
-
-def require_nccl_ep() -> None:
-    """Raise RuntimeError if NCCL EP cannot run on the current libnccl."""
-    mn = ".".join(str(x) for x in _NCCL_EP_MIN_VERSION)
-    cur = _nccl_runtime_version()
-    if cur is None:
-        raise RuntimeError(
-            f"NCCL EP requires NCCL >= {mn}; could not load libnccl.so.2 or query its "
-            "version. Install NCCL or ensure libnccl.so.2 is on the loader path."
-        )
-    if cur < _NCCL_EP_MIN_VERSION:
-        raise RuntimeError(
-            f"NCCL EP requires NCCL >= {mn} at runtime; found "
-            f"{'.'.join(str(x) for x in cur)}. Upgrade NCCL to a compatible version."
-        )
-
 
 try:
     from . import pytorch
