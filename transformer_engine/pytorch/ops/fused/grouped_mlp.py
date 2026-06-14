@@ -17,7 +17,12 @@ from packaging.version import Version as PkgVersion
 
 import transformer_engine_torch as tex
 from ...constants import MXFP8_BLOCK_SCALING_SIZE, NVFP4_BLOCK_SCALING_SIZE
-from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload, start_offload
+from ...cpu_offload import (
+    is_cpu_offload_enabled,
+    mark_activation_offload,
+    mark_not_offload,
+    start_offload,
+)
 from ...cpp_extensions import general_gemm, general_grouped_gemm_for_grouped_tensor
 from ...module.base import _2X_ACC_WGRAD
 from ...quantization import Recipe
@@ -1509,9 +1514,29 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                         grouped_fc_x.rowwise_data = None
                         grouped_fc_x.scale_inv = None
 
+            # Per-op fine-grained offload markers.
+            offload_fc1_x = bool(getattr(fc1_op, "fine_grained_activation_offloading", False))
+            offload_act = bool(getattr(activation_op, "fine_grained_activation_offloading", False))
+            fine_grained_offload = offload_fc1_x or offload_act
+            saved_activations = (
+                (grouped_fc1_x, offload_fc1_x),
+                (activation_in, offload_act),
+                (saved_grouped_fc2_x, offload_act),
+            )
+
+            # The hook-based offloader is opt-out, so explicitly keep the
+            # non-selected tensors resident (mark_not_offload sets _TE_do_not_offload).
+            if fine_grained_offload:
+                keep = [t for t, sel in saved_activations if t is not None and not sel]
+                if keep:
+                    mark_not_offload(*keep)
+
             if cpu_offloading:
+                # TE-native path; with no markers, offload everything saved (legacy).
                 activation_tensors = [
-                    t for t in (grouped_fc1_x, activation_in, saved_grouped_fc2_x) if t is not None
+                    t
+                    for t, sel in saved_activations
+                    if t is not None and (sel or not fine_grained_offload)
                 ]
                 start_offload(*activation_tensors)
                 mark_activation_offload(*activation_tensors)
