@@ -21,6 +21,8 @@ from .base import (
     fill_userbuffers_buffer_for_all_gather,
     get_dummy_wgrad,
     get_ub,
+    is_ub_initialized,
+    using_cublasmp_backend,
     quantize_weight,
     TransformerEngineBaseModule,
     _2X_ACC_FPROP,
@@ -414,6 +416,8 @@ def _linear_forward_impl(
             skip_weight_cast=is_first_microbatch is False,
             cast_noop_flag=args.skip_fp8_weight_update,
         )
+        # Refresh out_features from the gathered weight (captured sharded above, pre-gather).
+        out_features = weight.shape[0]
 
     new_weight_workspace = None
     weightmat = weight
@@ -520,7 +524,9 @@ def _linear_forward_impl(
     # ------------------------------------------------------
     out = None
     if ub_overlap_rs_fprop:
-        out = reduce_scatter_out
+        # cuBLASMp writes the reduce-scattered output directly into the GEMM
+        # output tensor; Userbuffers writes it into the extra-output buffer.
+        out = gemm_out if ub_obj is not None and ub_obj.with_cublasmp() else reduce_scatter_out
     elif parallel_mode == "row" and args.tp_size > 1:
         nvtx_range_push(f"{nvtx_label}.row_parallel_comm")
         out = gemm_out
@@ -534,6 +540,13 @@ def _linear_forward_impl(
         nvtx_range_pop(f"{nvtx_label}.row_parallel_comm")
     else:
         out = gemm_out
+
+    # Restore the input's logical rank (e.g., (seq, batch, hidden)) on the output.
+    # This is mainly to correct for cuBLASMp comm+GEMM operators that unconditionally
+    # return a 2D output buffer that ends up incompatible with downstream consumers
+    # (e.g. ``bias_dropout_add`` residual connections inside ``TransformerLayer``).
+    out = out.view(-1, *inp.shape[1:-1], out_features)
+
     # ------------------------------------------------------
     # Output tensor is ready to return...
     # ------------------------------------------------------
@@ -1039,7 +1052,13 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
             # Prepare grad input tensor
             # Note: Perform tensor-parallel communication
             if bwd_args.ub_overlap_rs_dgrad:
-                dgrad = reduce_scatter_out
+                # cuBLASMp writes the reduce-scattered dgrad directly into the
+                # GEMM output tensor; Userbuffers uses the extra-output buffer.
+                dgrad = (
+                    gemm_out
+                    if ub_obj_dgrad is not None and ub_obj_dgrad.with_cublasmp()
+                    else reduce_scatter_out
+                )
             elif bwd_args.ub_bulk_wgrad:
                 dgrad = ub_obj_wgrad.get_buffer(local_chunk=True)
             elif bwd_args.parallel_mode == "column" and bwd_args.tp_size > 1:
@@ -1060,6 +1079,27 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
         # --------------------------------------------------
         # Grad input tensor has been computed...
         # --------------------------------------------------
+
+        # cuBLASMp's AG+GEMM consumes the gathered grad_output inline and does
+        # not preserve it for wgrad. Userbuffers leaves the gathered tensor in
+        # its persistent buffer; cuBLASMp does not, so we gather here. Route
+        # through the same FP8-aware all-gather as the non-overlap path in
+        # ``TransformerEngineBaseModule.grad_output_preprocess`` by passing the
+        # grad_output quantizer. The columnwise data needed for wgrad is then
+        # produced by ``update_usage(columnwise_usage=True)`` further below.
+        if (
+            bwd_args.requires_wgrad
+            and bwd_args.ub_overlap_ag
+            and bwd_args.ub_obj_gradout is not None
+            and bwd_args.ub_obj_gradout.with_cublasmp()
+        ):
+            if grad_output_quantizer is not None:
+                grad_output_quantizer.set_usage(rowwise=True, columnwise=False)
+            grad_output, _ = gather_along_first_dim(
+                grad_output,
+                bwd_args.tp_group,
+                quantizer=grad_output_quantizer,
+            )
 
         # --------------------------------------------------
         # Compute grad weight
@@ -1541,6 +1581,8 @@ class Linear(TransformerEngineBaseModule):
         self.ub_overlap_rs_dgrad = (
             self.parallel_mode == "column" and self.sequence_parallel and ub_overlap_rs_dgrad
         )
+        # Bulk overlaps require the Userbuffers backend; the cuBLASMp backend falls back on
+        # DGRAD+RS overlap with no bulk overlap for WGRAD
         self.ub_bulk_dgrad = (
             self.parallel_mode == "column"
             and self.sequence_parallel
@@ -1572,8 +1614,22 @@ class Linear(TransformerEngineBaseModule):
                 self.ub_bulk_wgrad,
             ]
         ):
+            assert is_ub_initialized(), "initialize_ub() must be called before layer construction."
             assert ub_name is not None, f"Comm+GEMM overlap layer '{ub_name}' is not initialized."
         self.ub_name = ub_name
+
+        if using_cublasmp_backend():
+            if self.ub_bulk_dgrad:
+                warnings.warn(
+                    f"cuBLASMp backend does not support bulk overlaps for '{self.ub_name}_dgrad' "
+                    f"and '{self.ub_name}_wgrad' GEMMs. Falling back on DGRAD+RS overlap for "
+                    f"'{self.ub_name}_dgrad' GEMM with no bulk overlap for '{self.ub_name}_wgrad' "
+                    "GEMM. In order to enable bulk overlaps for these GEMMs, set "
+                    "`with_cublasmp=False` when calling `initialize_ub()`."
+                )
+            self.ub_overlap_rs_dgrad = self.ub_overlap_rs_dgrad or self.ub_bulk_dgrad
+            self.ub_bulk_dgrad = False
+            self.ub_bulk_wgrad = False
 
         if self.symmetric_ar_type is not None:
             assert torch_version() >= (

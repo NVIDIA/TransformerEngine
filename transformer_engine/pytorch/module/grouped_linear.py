@@ -16,7 +16,10 @@ import torch
 import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
-from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
+from transformer_engine.pytorch.tensor.grouped_tensor import (
+    GroupedTensor,
+    GroupedTensorStorage,
+)
 from .base import (
     get_dummy_wgrad,
     quantize_weight,
@@ -136,9 +139,9 @@ class _GroupedLinear(torch.autograd.Function):
         base_split_offsets: torch.Tensor,
         last_dim: int,
         dtype: torch.dtype,
-    ) -> GroupedTensor:
-        """Wrap a packed 2D buffer as a varying-first-dimension GroupedTensor."""
-        return GroupedTensor(
+    ) -> GroupedTensorStorage:
+        """Wrap a packed 2D buffer as a varying-first-dimension GroupedTensorStorage."""
+        return GroupedTensorStorage(
             shape=(data.size(0), last_dim),
             dtype=dtype,
             num_tensors=num_gemms,
@@ -155,13 +158,13 @@ class _GroupedLinear(torch.autograd.Function):
         num_gemms: int,
         out_features: int,
         dtype: torch.dtype,
-    ) -> GroupedTensor:
+    ) -> GroupedTensorStorage:
         """Pack per-GEMM biases into the grouped GEMM bias format."""
         bias_data = torch.stack(
             [_GroupedLinear._maybe_dequantize(bias, dtype) for bias in biases],
             dim=0,
         ).contiguous()
-        return GroupedTensor(
+        return GroupedTensorStorage(
             shape=(num_gemms, out_features),
             dtype=dtype,
             num_tensors=num_gemms,
@@ -606,11 +609,8 @@ class _GroupedLinear(torch.autograd.Function):
 
         if fp8_calibration:
             for i in range(num_gemms):
-                # amax of input
-                for i in range(num_gemms):
-                    input_quantizers[i].calibrate(inputmats[i])
-                for i in range(num_gemms):
-                    weight_quantizers[i].calibrate(weights[i])
+                input_quantizers[i].calibrate(inputmats[i])
+                weight_quantizers[i].calibrate(weights[i])
 
         if cpu_offloading:
             mark_not_offload(*weights_fp8, *weights)
@@ -1738,6 +1738,15 @@ class GroupedLinear(TransformerEngineBaseModule):
         is_grad_enabled = torch.is_grad_enabled()
         num_gemms = self.num_gemms
 
+        if FP8GlobalStateManager.fp8_graph_capturing():
+            skip_fp8_weight_update = (
+                FP8GlobalStateManager.quantization_state.skip_fp8_weight_update_tensor
+            )
+        else:
+            skip_fp8_weight_update = None
+        if skip_fp8_weight_update is not None:
+            is_first_microbatch = False
+
         # Make sure splits are in expected format
         if not isinstance(m_splits, torch.Tensor):
             # Convert list of ints to tensor for backward compatibility
@@ -1749,6 +1758,15 @@ class GroupedLinear(TransformerEngineBaseModule):
                 f"Shape of splits tensor ({tuple(m_splits.size())}) "
                 f"does not match number of GEMMs ({num_gemms})."
             )
+
+        if FP8GlobalStateManager.fp8_graph_capturing():
+            skip_fp8_weight_update = (
+                FP8GlobalStateManager.quantization_state.skip_fp8_weight_update_tensor
+            )
+        else:
+            skip_fp8_weight_update = None
+        if skip_fp8_weight_update is not None:
+            is_first_microbatch = False
 
         # Preprocess input tensor
         if isinstance(inp, QuantizedTensorStorage):
@@ -1813,7 +1831,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 is_grad_enabled,
                 weight_workspaces,
                 cache_weight,
-                None,  # skip_fp8_weight_update
+                skip_fp8_weight_update,
                 self.save_original_input,
                 debug,
                 self.gtp_size,

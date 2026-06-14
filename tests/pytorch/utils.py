@@ -17,9 +17,9 @@ import pytest
 import torch
 
 import transformer_engine
-import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch import InferenceParams, QuantizedTensor
+from transformer_engine.pytorch import DType
 from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     get_attention_backend,
@@ -70,7 +70,7 @@ def str_to_dtype(dtype: str | torch.dtype) -> torch.dtype:
     return dtype
 
 
-def dtype_tols(dtype: torch.dtype | tex.DType) -> dict[str, float]:
+def dtype_tols(dtype: torch.dtype | DType) -> dict[str, float]:
     """Estimated numerical error for a datatype
 
     Based on tolerances for torch.testing.assert_close.
@@ -78,17 +78,17 @@ def dtype_tols(dtype: torch.dtype | tex.DType) -> dict[str, float]:
     """
 
     # Transformer Engine dtypes
-    if isinstance(dtype, tex.DType):
-        if dtype == tex.DType.kFloat4E2M1:
+    if isinstance(dtype, DType):
+        if dtype == DType.kFloat4E2M1:
             return dict(rtol=0.25, atol=0.125)  # epsilon = 0.25
         dtype = {
-            tex.DType.kByte: torch.uint8,
-            tex.DType.kInt32: torch.int32,
-            tex.DType.kFloat32: torch.float32,
-            tex.DType.kFloat16: torch.half,
-            tex.DType.kBFloat16: torch.bfloat16,
-            tex.DType.kFloat8E4M3: torch.float8_e4m3fn,
-            tex.DType.kFloat8E5M2: torch.float8_e5m2,
+            DType.kByte: torch.uint8,
+            DType.kInt32: torch.int32,
+            DType.kFloat32: torch.float32,
+            DType.kFloat16: torch.half,
+            DType.kBFloat16: torch.bfloat16,
+            DType.kFloat8E4M3: torch.float8_e4m3fn,
+            DType.kFloat8E5M2: torch.float8_e5m2,
         }[dtype]
 
     # PyTorch dtypes
@@ -117,9 +117,9 @@ def quantization_tols(name: str) -> dict[str, float]:
         "mxfp8",
         "mxfp8_block_scaling",
     ):
-        return dtype_tols(tex.DType.kFloat8E4M3)
-    if name in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
-        return dtype_tols(tex.DType.kFloat4E2M1)
+        return dtype_tols(DType.kFloat8E4M3)
+    if name in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht"):
+        return dtype_tols(DType.kFloat4E2M1)
     raise ValueError(f"Unsupported quantization scheme ({name})")
 
 
@@ -145,10 +145,10 @@ def make_recipe(name: Optional[str], **recipe_kwargs: Any) -> Optional[Recipe]:
         )
     if name == "fp8_block_scaling":
         return transformer_engine.common.recipe.Float8BlockScaling(**recipe_kwargs)
-    if name in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
+    if name in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht"):
         use_4over6 = name == "nvfp4_4over6"
         kwargs = {
-            "disable_rht": True,
+            "disable_rht": name != "nvfp4_rht",
             "disable_stochastic_rounding": True,
             "disable_2d_quantization": not use_4over6,
             "row_scaled_activation": name == "nvfp4_row_scaled",
@@ -163,12 +163,16 @@ def recipe_id(recipe: Optional[Recipe]) -> str:
     """Readable pytest id for a quantization recipe."""
     if not isinstance(recipe, Recipe):
         return "None"
-    if recipe.nvfp4() and recipe.row_scaled_activation and recipe.nvfp4_4over6 != "none":
-        return "NVFP4RowScaled4Over6BlockScaling"
-    if recipe.nvfp4() and recipe.nvfp4_4over6 != "none":
-        return "NVFP44Over6BlockScaling"
-    if recipe.nvfp4() and recipe.row_scaled_activation:
-        return "NVFP4RowScaledBlockScaling"
+    if recipe.nvfp4():
+        nvfp4_features = []
+        if recipe.row_scaled_activation:
+            nvfp4_features.append("RowScaled")
+        if recipe.nvfp4_4over6 != "none":
+            nvfp4_features.append("4Over6")
+        if not recipe.disable_rht:
+            nvfp4_features.append("RHT")
+        if nvfp4_features:
+            return f"NVFP4{''.join(nvfp4_features)}BlockScaling"
     return type(recipe).__name__
 
 
@@ -337,6 +341,8 @@ def get_available_attention_backends(
     fp8_meta: Optional[Dict[str, Any]] = None,
     is_training: bool = True,
     inference_params: Optional[InferenceParams] = None,
+    score_mod: bool = False,
+    score_mod_bprop: bool = False,
 ) -> Tuple[List, List]:
     """Check for all available attention backends that support a model configuration"""
 
@@ -398,6 +404,8 @@ def get_available_attention_backends(
             inference_params=inference_params,
             softmax_type=config.softmax_type,
             return_max_logit=config.return_max_logit,
+            has_score_mod=score_mod,
+            has_score_mod_bprop=score_mod_bprop,
             # allow all backends to pass so they can be used for testing;
             # check for FA3 availability later
             num_splits=1,

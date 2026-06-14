@@ -25,6 +25,10 @@ git submodule update --init --recursive
 # Install deps
 /opt/python/cp310-cp310/bin/pip install cmake pybind11[global] ninja setuptools wheel
 
+# Enable optional build features. cuSolverMp is provided by the build image
+# (see Dockerfile.x86 / Dockerfile.aarch), which also sets CUSOLVERMP_HOME.
+export NVTE_WITH_CUSOLVERMP=1
+
 if $BUILD_METAPACKAGE ; then
         cd /TransformerEngine
         NVTE_BUILD_METAPACKAGE=1 /opt/python/cp310-cp310/bin/python setup.py bdist_wheel 2>&1 | tee /wheelhouse/logs/metapackage.txt
@@ -44,6 +48,8 @@ if $BUILD_COMMON ; then
         sed -i "s/Name: transformer-engine/Name: transformer-engine-cu${CUDA_MAJOR}/g" "transformer_engine-${VERSION}/transformer_engine-${VERSION}.dist-info/METADATA"
         sed -i "s/Name: transformer_engine/Name: transformer_engine_cu${CUDA_MAJOR}/g" "transformer_engine-${VERSION}/transformer_engine-${VERSION}.dist-info/METADATA"
         mv "${WHL_BASE}/${WHL_BASE}.dist-info" "${WHL_BASE}/transformer_engine_cu${CUDA_MAJOR}-${VERSION}.dist-info"
+        # Set WHEEL Tag to match the py3-none filename written by line 54.
+        sed -i "s/Tag: cp310-cp310/Tag: py3-none/g" "${WHL_BASE}/transformer_engine_cu${CUDA_MAJOR}-${VERSION}.dist-info/WHEEL"
         /opt/python/cp310-cp310/bin/wheel pack ${WHL_BASE}
 
         # Rename the wheel to make it python version agnostic.

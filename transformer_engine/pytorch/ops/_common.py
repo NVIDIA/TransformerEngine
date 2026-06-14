@@ -5,13 +5,10 @@
 """Helper functions used in fusible operations."""
 
 from __future__ import annotations
-import functools
 import math
-from importlib.metadata import PackageNotFoundError, version as get_pkg_version
 from typing import Optional
 
 import torch
-from packaging.version import Version as PkgVersion
 
 from transformer_engine_torch import FP8TensorMeta
 from ..torch_version import torch_version
@@ -19,42 +16,6 @@ from ..quantization import FP8GlobalStateManager
 from ..tensor.float8_tensor import Float8Tensor
 from ..quantized_tensor import QuantizedTensorStorage
 from ..utils import canonicalize_dtype
-
-
-@functools.lru_cache(maxsize=None)
-def _cudnn_frontend_version_at_least(min_version: str) -> bool:
-    """Check cuDNN frontend package version."""
-    try:
-        return PkgVersion(get_pkg_version("nvidia-cudnn-frontend")) >= PkgVersion(min_version)
-    except PackageNotFoundError:
-        return False
-
-
-def _cudnn_frontend_version_supported() -> bool:
-    """Check cuDNN frontend is at least 1.23.0.
-
-    All grouped MLP fused-kernel features require cuDNN frontend >= 1.23.0.
-    """
-    return _cudnn_frontend_version_at_least("1.23.0")
-
-
-def _cudnn_frontend_geglu_runtime_params() -> bool:
-    """Check cuDNN frontend is at least 1.24.0.
-
-    Runtime-configurable GeGLU parameters (linear_offset, geglu_alpha,
-    glu_clamp_max, glu_clamp_min) require cuDNN frontend >= 1.24.0.
-    """
-    return _cudnn_frontend_version_at_least("1.24.0")
-
-
-def _cudnn_frontend_supports_grouped_gemm_srelu() -> bool:
-    """Check cuDNN frontend min version for grouped GEMM SReLU kernels."""
-    return _cudnn_frontend_version_at_least("1.24.0")
-
-
-def _nvidia_cudnn_frontend_supports_wgrad() -> bool:
-    """Check cuDNN FE min version for grouped GEMM wgrad kernel."""
-    return _cudnn_frontend_version_supported()
 
 
 def is_quantized_tensor(tensor: torch.Tensor | QuantizedTensorStorage) -> bool:
@@ -203,136 +164,4 @@ def get_dummy_wgrads_for_params(
             )
         else:
             out.append(None)
-    return out
-
-
-def is_glu_activation(activation_op) -> bool:
-    """Whether an activation consumes a GLU-style doubled input."""
-    from .basic import (  # pylint: disable=import-outside-toplevel
-        ScaledClampedQGeGLU,
-        ScaledSwiGLU,
-    )
-
-    return isinstance(activation_op, (ScaledSwiGLU, ScaledClampedQGeGLU))
-
-
-def validate_grouped_mlp_dims(fc1, activation_op, fc2) -> None:
-    """Validate FC1 / activation / FC2 dimensions for fused grouped MLP."""
-    from .basic import (  # pylint: disable=import-outside-toplevel
-        ScaledSReLU,
-    )
-
-    if fc1.in_features % 64 != 0 or fc1.out_features % 64 != 0:
-        raise ValueError(
-            f"Unsupported dims for FC1 (num_groups={fc1.num_groups}, "
-            f"in_features={fc1.in_features}, out_features={fc1.out_features})."
-        )
-    if fc2.in_features % 64 != 0 or fc2.out_features % 64 != 0:
-        raise ValueError(
-            f"Unsupported dims for FC2 (num_groups={fc2.num_groups}, "
-            f"in_features={fc2.in_features}, out_features={fc2.out_features})."
-        )
-    if is_glu_activation(activation_op):
-        expected_fc1_out_features = 2 * fc2.in_features
-    elif isinstance(activation_op, ScaledSReLU):
-        expected_fc1_out_features = fc2.in_features
-    else:
-        raise TypeError(f"Unsupported grouped MLP activation ({activation_op.__class__.__name__}).")
-
-    if fc1.out_features != expected_fc1_out_features or fc1.num_groups != fc2.num_groups:
-        raise ValueError(
-            f"FC1 (num_groups={fc1.num_groups}, in_features={fc1.in_features}, "
-            f"out_features={fc1.out_features}) "
-            f"and FC2 (num_groups={fc2.num_groups}, in_features={fc2.in_features}, "
-            f"out_features={fc2.out_features}) do not match."
-        )
-    if is_glu_activation(activation_op) and activation_op.glu_interleave_size != 32:
-        raise ValueError(
-            "Fused kernel requires 32-wide GLU interleaving, "
-            f"but got glu_interleave_size={activation_op.glu_interleave_size}."
-        )
-
-
-def fuse_grouped_mlp_ops(
-    ops,
-    *,
-    recipe,
-    fused_op_cls,
-    activation_op_types=None,
-):
-    """Sliding-window fusion for GroupedLinear + activation + GroupedLinear.
-
-    Parameters
-    ----------
-    ops : list of FusibleOperation
-        Operations to scan.
-    recipe : Recipe or None
-        Quantization recipe.
-    fused_op_cls : type
-        Fused operation class with ``is_supported()`` classmethod and
-        constructor accepting ``fc1``, ``activation``, and ``fc2`` keyword args.
-
-    Returns
-    -------
-    list of FusibleOperation
-        Updated operations with matched triples replaced by fused ops.
-    """
-    from .basic import (  # pylint: disable=import-outside-toplevel
-        GroupedLinear,
-        ScaledClampedQGeGLU,
-        ScaledSwiGLU,
-    )
-
-    if not fused_op_cls.is_supported():
-        return ops
-    if recipe is None or not recipe.mxfp8():
-        return ops
-    if activation_op_types is None:
-        activation_op_types = (ScaledSwiGLU, ScaledClampedQGeGLU)
-
-    out = []
-    window, ops = ops[:3], ops[3:]
-    while len(window) == 3:
-
-        matches_pattern = True
-        if not (
-            isinstance(window[0], GroupedLinear)
-            and isinstance(window[1], activation_op_types)
-            and isinstance(window[2], GroupedLinear)
-        ):
-            matches_pattern = False
-        elif (
-            isinstance(window[1], ScaledClampedQGeGLU)
-            and not _cudnn_frontend_geglu_runtime_params()
-            and (
-                abs(window[1]._clamped.alpha - 1.702) > 0.001
-                or abs(window[1]._clamped.glu_linear_offset - 1.0) > 0.001
-                or abs(window[1]._clamped.limit - 7.0) > 0.001
-            )
-        ):
-            matches_pattern = False
-        else:
-            try:
-                validate_grouped_mlp_dims(window[0], window[1], window[2])
-            except (TypeError, ValueError):
-                matches_pattern = False
-
-        if matches_pattern:
-            op = fused_op_cls(
-                fc1=window[0],
-                activation=window[1],
-                fc2=window[2],
-            )
-            window = [op]
-        else:
-            out.extend(window[:-2])
-            window = window[-2:]
-
-        out.extend(window[:-3])
-        window = window[-3:]
-        while ops and len(window) < 3:
-            window.append(ops[0])
-            ops = ops[1:]
-
-    out.extend(window)
     return out
