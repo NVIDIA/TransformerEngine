@@ -347,10 +347,14 @@ _KERNEL_BUCKETS = (
     # otherwise the bucket average misleadingly suggests the zero kernel is slow.
     ("amax_zero", ("grouped_amax_zero",)),
     ("amax", ("grouped_amax",)),
-    # The compute-scale kernel is launched via the multi_tensor_apply framework
-    # as ``multi_tensor_apply_kernel<...ComputeScaleAndScaleInvFunctor>``; match
-    # on the functor name after lowercasing.
-    ("compute_scale", ("computescale",)),
+    # The compute-scale kernel: the grouped current-scaling path launches
+    # ``grouped_compute_scale_kernel`` directly, while the legacy per-tensor path
+    # launches it via the multi_tensor_apply framework as
+    # ``multi_tensor_apply_kernel<...ComputeScaleAndScaleInvFunctor>``. Match both
+    # (the underscored kernel name and the flattened functor name) after
+    # lowercasing. Without the underscored pattern the grouped kernel would fall
+    # through to the ``cast`` bucket and inflate its reported BW.
+    ("compute_scale", ("compute_scale", "computescale")),
     # Splits to offsets helper kernel
     ("splits_to_offsets", ("splits_to_offsets",)),
 )
