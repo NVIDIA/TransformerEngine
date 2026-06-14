@@ -224,11 +224,11 @@ float fp8_max_for_dtype(const DType dtype) {
 //    (current scaling -> amax is computed from this batch's inputs, never from
 //    history).
 // 2) Optional NCCL allreduce on the amax buffer (when DP/TP amax sync is on).
-// 3) nvte_multi_tensor_compute_scale_and_scale_inv_cuda: pure math kernel that
-//    derives scale = max_fp8 / amax and scale_inv = 1/scale per group. This
-//    kernel is recipe-agnostic (it pre-existed for FP8 delayed scaling but the
-//    math is identical for current scaling); we reuse it here so we get one
-//    bulk launch instead of N per-group kernels.
+// 3) nvte_group_compute_scale_from_amax: graph-safe per-group math kernel that
+//    derives scale = max_fp8 / amax and scale_inv = 1/scale per group in a
+//    single launch. It honors the config's no-op flag, so a skipped weight
+//    update (skip_fp8_weight_update) preserves the cached scale instead of
+//    recomputing it from a stale/uninitialized amax.
 //
 // After this returns, the per-group `scale` / `scale_inv` buffers are
 // populated and the actual cast/transpose is performed by `nvte_group_quantize`.
@@ -236,21 +236,6 @@ void compute_grouped_fp8_current_scaling_amax_and_scale(
     const GroupedTensorWrapper &grouped_input_tensor,
     const GroupedTensorWrapper &grouped_output_tensor, const py::object &grouped_output_py,
     Float8CurrentScalingQuantizer *quantizer_cpp, const std::optional<TensorWrapper> &noop_flag) {
-  // The amax / scale / scale_inv buffers were allocated by create_grouped_tensor
-  // and their pointers are stored directly in the C++ grouped tensor, so we read
-  // them back from there instead of going through the Python object's attributes.
-  const NVTEBasicTensor amax_bt = grouped_output_tensor.get_amax();
-  const NVTEBasicTensor scale_bt = grouped_output_tensor.get_scale();
-  // FP8 current scaling has one scale per tensor regardless of direction, so
-  // create_grouped_tensor allocates a single scale_inv buffer aliased by both
-  // rowwise_scale_inv and columnwise_scale_inv. Pick whichever is set.
-  NVTEBasicTensor scale_inv_bt = grouped_output_tensor.get_rowwise_scale_inv();
-  if (scale_inv_bt.data_ptr == nullptr) {
-    scale_inv_bt = grouped_output_tensor.get_columnwise_scale_inv();
-  }
-  NVTE_CHECK(scale_inv_bt.data_ptr != nullptr,
-             "Grouped FP8 current-scaling output must have at least one scale_inv buffer.");
-
   QuantizationConfigWrapper quant_config;
   quant_config.set_force_pow_2_scales(quantizer_cpp->force_pow_2_scales);
   quant_config.set_amax_epsilon(quantizer_cpp->amax_epsilon);
@@ -266,7 +251,8 @@ void compute_grouped_fp8_current_scaling_amax_and_scale(
 
   if (quantizer_cpp->with_amax_reduction) {
     // NCCL collectives require an at::Tensor; the amax buffer lives on the Python
-    // object (same allocation as amax_bt above), so fetch it only on this path.
+    // object (same allocation as the grouped tensor's amax), so fetch it only on
+    // this path.
     auto amax = grouped_output_py.attr("amax").cast<at::Tensor>();
     c10d::AllreduceOptions opts;
     opts.reduceOp = c10d::ReduceOp::MAX;
@@ -275,26 +261,14 @@ void compute_grouped_fp8_current_scaling_amax_and_scale(
         { quantizer_cpp->amax_reduction_group->allreduce(tensors, opts)->wait(); });
   }
 
-  // Build single-element TE tensor lists ({{amax}, {scale}, {scale_inv}}
-  // for the multi_tensor_compute_scale_and_scale_inv_cuda kernel.
-  TensorWrapper amax_cpp = makeTransformerEngineTensor(amax_bt.data_ptr, amax_bt.shape,
-                                                       static_cast<DType>(amax_bt.dtype));
-  TensorWrapper scale_cpp = makeTransformerEngineTensor(scale_bt.data_ptr, scale_bt.shape,
-                                                        static_cast<DType>(scale_bt.dtype));
-  TensorWrapper scale_inv_cpp = makeTransformerEngineTensor(
-      scale_inv_bt.data_ptr, scale_inv_bt.shape, static_cast<DType>(scale_inv_bt.dtype));
-  std::array<NVTETensor, 1> amax_list = {amax_cpp.data()};
-  std::array<NVTETensor, 1> scale_list = {scale_cpp.data()};
-  std::array<NVTETensor, 1> scale_inv_list = {scale_inv_cpp.data()};
-  std::array<NVTETensor *, 3> tensor_lists_ptr = {amax_list.data(), scale_list.data(),
-                                                  scale_inv_list.data()};
-
-  TensorWrapper noop_flag_cpp;
+  // Derive per-group scale/scale_inv from the (possibly reduced) amax. The same
+  // quant_config carries force_pow_2_scales/amax_epsilon and, crucially, the
+  // no-op flag, so the update is skipped on device when skip_fp8_weight_update is
+  // set -- preserving the cached scale instead of recomputing it from a
+  // stale/uninitialized amax. Buffers and the FP8 max are read from the grouped
+  // tensor inside the kernel launch.
   NVTE_SCOPED_GIL_RELEASE({
-    nvte_multi_tensor_compute_scale_and_scale_inv_cuda(
-        2048 * 32, noop_flag_cpp.data(), tensor_lists_ptr.data(), tensor_lists_ptr.size(),
-        /*num_tensors_per_list=*/1, fp8_max_for_dtype(quantizer_cpp->dtype),
-        quantizer_cpp->force_pow_2_scales, quantizer_cpp->amax_epsilon, stream);
+    nvte_group_compute_scale_from_amax(grouped_output_tensor.data(), quant_config, stream);
   });
 }
 

@@ -16,8 +16,10 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include <cstdint>
+#include <limits>
 
 #include "../../common.h"
+#include "../../recipe/recipe_common.cuh"
 #include "../../util/cuda_runtime.h"
 #include "../../utils.cuh"
 #include "../core/grouped_layout.cuh"
@@ -36,7 +38,9 @@ constexpr int GROUPED_AMAX_BLOCKS_PER_TENSOR_CAP = 64;
 constexpr size_t GROUPED_AMAX_MIN_ELTS_PER_BLOCK = 8 * 1024;  // ~16KB of bf16
 
 // Zero per-tensor amax buffer so the main kernel can use atomicMax updates.
-__launch_bounds__(GROUPED_AMAX_KERNEL_THREADS) __global__
+// ``static`` gives the kernel internal linkage so this header can be included
+// from multiple translation units without violating the ODR.
+static __launch_bounds__(GROUPED_AMAX_KERNEL_THREADS) __global__
     void grouped_amax_zero_kernel(float *amax_ptr, const size_t num_tensors,
                                   const float *noop_ptr) {
   if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) {
@@ -193,6 +197,28 @@ __launch_bounds__(GROUPED_AMAX_KERNEL_THREADS) __global__
   }
 }
 
+// Per-group scale update: derive scale = max_fp8 / amax and scale_inv = 1/scale,
+// one thread per group. This is the grouped counterpart of compute_scale_from_amax in
+// the per-tensor current-scaling path. ``static`` gives the kernel internal
+// linkage so this header can be included from multiple translation units.
+static __launch_bounds__(GROUPED_AMAX_KERNEL_THREADS) __global__
+    void grouped_compute_scale_kernel(const float *__restrict__ amax_ptr,
+                                      float *__restrict__ scale_ptr,
+                                      float *__restrict__ scale_inv_ptr, const size_t num_tensors,
+                                      const float max_fp8, const bool force_pow_2_scales,
+                                      const float epsilon, const float *__restrict__ noop_ptr) {
+  if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) {
+    return;
+  }
+  const size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (tid < num_tensors) {
+    const float scale = compute_scale_from_amax(amax_ptr[tid], max_fp8, force_pow_2_scales, epsilon,
+                                                std::numeric_limits<float>::max());
+    scale_ptr[tid] = scale;
+    reciprocal(scale_inv_ptr + tid, scale);
+  }
+}
+
 }  // namespace group_amax_kernel
 
 template <typename InputType>
@@ -227,6 +253,23 @@ void launch_grouped_amax_kernel(const InputType *input, float *amax, const size_
       <<<grid_size, GROUPED_AMAX_KERNEL_THREADS, shared_mem_bytes, stream>>>(
           input, amax, num_tensors, first_logical_dim, last_logical_dim, offsets_ptr, noop_ptr);
 
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
+
+// Launch the per-group scale/scale_inv update. The amax, scale and scale_inv
+// buffers each hold one FP32 entry per group. ``noop_ptr`` is the optional
+// graph-safe no-op flag (skip when 1.0f); pass nullptr to always update.
+inline void launch_grouped_compute_scale_kernel(const float *amax, float *scale, float *scale_inv,
+                                                const size_t num_tensors, const float max_fp8,
+                                                const bool force_pow_2_scales, const float epsilon,
+                                                const float *noop_ptr, cudaStream_t stream) {
+  using namespace group_amax_kernel;
+  if (num_tensors == 0) {
+    return;
+  }
+  const size_t blocks = DIVUP(num_tensors, static_cast<size_t>(GROUPED_AMAX_KERNEL_THREADS));
+  grouped_compute_scale_kernel<<<blocks, GROUPED_AMAX_KERNEL_THREADS, 0, stream>>>(
+      amax, scale, scale_inv, num_tensors, max_fp8, force_pow_2_scales, epsilon, noop_ptr);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
