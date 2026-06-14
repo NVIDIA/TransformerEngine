@@ -703,8 +703,8 @@ class GroupedTensorStorage:
         if not shape:
             if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
                 raise ValueError(
-                    "Varying-dimension grouped tensor construction is not graph-safe for"
-                    " block-scaling quantizers"
+                    "Varying-dimension grouped tensor construction is not graph-safe: it"
+                    " requires device-to-host copies of per-tensor shapes/offsets."
                 )
             offsets = tensor_offsets.tolist()
             if first_dims is not None and last_dims is not None:
