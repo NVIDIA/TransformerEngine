@@ -20,7 +20,7 @@
 #include "../../common.h"
 #include "../../util/cuda_runtime.h"
 #include "../../utils.cuh"
-#include "../core/common.cuh"
+#include "../core/grouped_layout.cuh"
 
 namespace transformer_engine {
 namespace dispatch {

@@ -22,7 +22,7 @@
 #include "../../util/math.h"
 #include "../../util/ptx.cuh"
 #include "../../utils.cuh"
-#include "../core/common.cuh"
+#include "../core/grouped_layout.cuh"
 
 namespace transformer_engine {
 namespace dispatch {
