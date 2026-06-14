@@ -136,8 +136,8 @@ void nvte_compute_scale_from_amax(NVTETensor output, const NVTEQuantizationConfi
  *  \param[in]     config           Quantization configuration.
  *  \param[in]     stream           CUDA stream used for the operation.
  */
- void nvte_group_compute_scale_from_amax(NVTEGroupedTensor output,
-    const NVTEQuantizationConfig config, cudaStream_t stream);
+void nvte_group_compute_scale_from_amax(NVTEGroupedTensor output,
+                                        const NVTEQuantizationConfig config, cudaStream_t stream);
 
 /*! \brief Compute partial amax for FP8 blockwise scaling.
  *

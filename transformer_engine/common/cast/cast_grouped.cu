@@ -43,14 +43,14 @@ void nvte_group_compute_scale_from_amax(NVTEGroupedTensor output,
   if (num_tensors == 0) {
     return;
   }
-  NVTE_CHECK(is_fp8_dtype(out.dtype()),
-             "Grouped scale update requires an FP8 output tensor, but got dtype=",
-             to_string(out.dtype()));
+  NVTE_CHECK(
+      is_fp8_dtype(out.dtype()),
+      "Grouped scale update requires an FP8 output tensor, but got dtype=", to_string(out.dtype()));
 
   // FP8 current scaling keeps a single amax/scale/scale_inv per group; the
   // scale_inv buffer is aliased by both directions, so pick whichever is set.
-  float *amax_ptr = reinterpret_cast<float *>(
-      out.amax.dptr != nullptr ? out.amax.dptr : out.columnwise_amax.dptr);
+  float *amax_ptr = reinterpret_cast<float *>(out.amax.dptr != nullptr ? out.amax.dptr
+                                                                       : out.columnwise_amax.dptr);
   NVTE_CHECK(amax_ptr != nullptr, "Grouped scale update requires an amax buffer.");
   float *scale_ptr = reinterpret_cast<float *>(out.scale.dptr);
   NVTE_CHECK(scale_ptr != nullptr, "Grouped scale update requires a scale buffer.");
@@ -59,8 +59,9 @@ void nvte_group_compute_scale_from_amax(NVTEGroupedTensor output,
   NVTE_CHECK(scale_inv_ptr != nullptr, "Grouped scale update requires a scale_inv buffer.");
 
   float max_fp8 = 0.f;
-  TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(out.dtype(), DType,
-                                         max_fp8 = Quantized_Limits<DType>::max_norm;);  // NOLINT(*)
+  TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+      out.dtype(), DType,
+      max_fp8 = Quantized_Limits<DType>::max_norm;);  // NOLINT(*)
 
   bool force_pow_2_scales = false;
   float epsilon = 0.f;
@@ -70,8 +71,8 @@ void nvte_group_compute_scale_from_amax(NVTEGroupedTensor output,
     force_pow_2_scales = config_cpp->force_pow_2_scales;
     epsilon = config_cpp->amax_epsilon;
     const NVTETensor noop = config_cpp->noop_tensor;
-    noop_ptr = reinterpret_cast<float *>(
-        noop != nullptr ? convertNVTETensorCheck(noop)->data.dptr : nullptr);
+    noop_ptr = reinterpret_cast<float *>(noop != nullptr ? convertNVTETensorCheck(noop)->data.dptr
+                                                         : nullptr);
   }
 
   dispatch::fp8::launch_grouped_compute_scale_kernel(amax_ptr, scale_ptr, scale_inv_ptr,

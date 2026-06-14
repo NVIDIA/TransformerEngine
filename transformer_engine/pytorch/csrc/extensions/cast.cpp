@@ -267,9 +267,8 @@ void compute_grouped_fp8_current_scaling_amax_and_scale(
   // set -- preserving the cached scale instead of recomputing it from a
   // stale/uninitialized amax. Buffers and the FP8 max are read from the grouped
   // tensor inside the kernel launch.
-  NVTE_SCOPED_GIL_RELEASE({
-    nvte_group_compute_scale_from_amax(grouped_output_tensor.data(), quant_config, stream);
-  });
+  NVTE_SCOPED_GIL_RELEASE(
+      { nvte_group_compute_scale_from_amax(grouped_output_tensor.data(), quant_config, stream); });
 }
 
 }  // namespace
