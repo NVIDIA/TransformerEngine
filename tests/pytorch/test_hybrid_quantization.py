@@ -3048,9 +3048,7 @@ class TestHybridQuantizeMasterWeights:
             shape=shape,
             dtype=torch.bfloat16,
             data=None,
-            data_transpose=torch.full(
-                (cols, rows), fill_value, dtype=torch.uint8, device="cuda"
-            ),
+            data_transpose=torch.full((cols, rows), fill_value, dtype=torch.uint8, device="cuda"),
             fp8_scale_inv=torch.ones(1, dtype=torch.float32, device="cuda"),
             fp8_dtype=tex.DType.kFloat8E4M3,
             quantizer=quantizer,

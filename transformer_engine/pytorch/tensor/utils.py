@@ -108,7 +108,9 @@ def _is_float8_transpose_only(tensor: QuantizedTensor) -> bool:
     )
 
 
-def _validate_flat_fragment(model_weight: QuantizedTensor, master_weight: torch.Tensor, start_offset):
+def _validate_flat_fragment(
+    model_weight: QuantizedTensor, master_weight: torch.Tensor, start_offset
+):
     """Validate a flat logical shard and return its exclusive end offset."""
     if start_offset is None:
         raise ValueError("start_offset must not be None when master_weight is provided")
