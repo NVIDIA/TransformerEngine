@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <cstdio>
 #include <cuda/barrier>
 #include <limits>
 #include <utility>
@@ -167,6 +168,7 @@ static_assert(kNumThreadsLoad <= kThreadsPerWarp, "kNumThreadsLoad must be <= kT
 static_assert(kNumThreadsStore <= kThreadsPerWarp, "kNumThreadsStore must be <= kThreadsPerWarp");
 constexpr int kNumWarps = kThreadsPerBlock / kThreadsPerWarp;
 constexpr int kMaxTensorsPerBlockwiseKernel = 32;  // Keep kernel args comfortably under 4 KB.
+bool g_printed_blockwise_fp8_multi_tensor_kernel = false;
 
 struct MultiBlockwiseQuantizeArgs {
   void* input_list[kMaxTensorsPerBlockwiseKernel];
@@ -607,6 +609,14 @@ void launch_multi_block_scaled_1d_cast_transpose_kernel(
         &multi_block_scaled_1d_cast_transpose_kernel<kAligned, float, InputType, OutputType>,
         cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
     NVTE_CHECK(err == cudaSuccess, "Failed to set dynamic shared memory size.");
+  }
+  if (!g_printed_blockwise_fp8_multi_tensor_kernel) {
+    g_printed_blockwise_fp8_multi_tensor_kernel = true;
+    std::fprintf(stderr,
+                 "[TransformerEngine] Using blockwise FP8 multi-tensor quantize kernel "
+                 "(num_tensors=%d, num_blocks=%d, aligned=%d)\n",
+                 kernel_args.num_tensors, n_blocks, kAligned ? 1 : 0);
+    std::fflush(stderr);
   }
   multi_block_scaled_1d_cast_transpose_kernel<kAligned, float, InputType, OutputType>
       <<<n_blocks, kThreadsPerBlock, smem_bytes, stream>>>(
