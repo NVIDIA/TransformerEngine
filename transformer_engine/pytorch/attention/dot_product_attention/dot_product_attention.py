@@ -152,8 +152,10 @@ _dpa_fp8ds_reduce_amax = os.getenv("NVTE_DPA_FP8DS_REDUCE_AMAX", "1") == "1"
 if os.environ.get("NVTE_ENABLE_PLUGIN", "0") == "1":
     _FlashAttentionNative = FlashAttention
     FlashAttention = getattr(tex, "flash_attention", _FlashAttentionNative)
-    dpa_utils._original_get_attention_backend = dpa_utils.get_attention_backend
-    dpa_utils.get_attention_backend = tex.get_attention_backend
+    _plugin_get_attention_backend = getattr(tex, "get_attention_backend", None)
+    if _plugin_get_attention_backend is not None:
+        dpa_utils._original_get_attention_backend = dpa_utils.get_attention_backend
+        dpa_utils.get_attention_backend = _plugin_get_attention_backend
 
 
 __all__ = ["DotProductAttention"]
