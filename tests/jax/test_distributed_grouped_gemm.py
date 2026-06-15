@@ -1,8 +1,16 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-"""Partitioning tests for grouped quantize and grouped GEMM."""
+"""Partitioning tests for grouped quantize and grouped GEMM.
 
+The file normally runs in a single process over all local GPUs. It also
+supports the ``--num-process`` / ``--process-id`` options from
+``tests/jax/conftest.py`` so the executable grouped-dense MXFP8 test can
+be run with one process per GPU, matching the TE-EP MoE launcher model.
+"""
+
+import os
+import sys
 from types import SimpleNamespace
 
 import jax
@@ -16,6 +24,40 @@ from transformer_engine.jax.cpp_extensions.quantization import GroupedQuantizePr
 from transformer_engine.jax.dense import grouped_dense
 from transformer_engine.jax.quantize import QuantizeLayout, QuantizerFactory, ScalingMode
 from transformer_engine.jax.sharding import MeshResource, global_shard_guard
+
+
+def _init_distributed_from_pytest_args() -> bool:
+    num_process = int(os.environ.get("MP_NUM_PROCESS", "0") or "0")
+    process_id = int(os.environ.get("MP_PROCESS_ID", "0") or "0")
+    for i, arg in enumerate(sys.argv):
+        if arg.startswith("--num-process="):
+            num_process = int(arg.split("=", 1)[1])
+        elif arg == "--num-process" and i + 1 < len(sys.argv):
+            num_process = int(sys.argv[i + 1])
+        elif arg.startswith("--process-id="):
+            process_id = int(arg.split("=", 1)[1])
+        elif arg == "--process-id" and i + 1 < len(sys.argv):
+            process_id = int(sys.argv[i + 1])
+
+    if num_process <= 1:
+        return False
+
+    coordinator = os.environ.get(
+        "TE_GROUPED_GEMM_COORDINATOR_ADDRESS",
+        os.environ.get("TE_EP_MOE_COORDINATOR_ADDRESS", "127.0.0.1:13457"),
+    )
+    jax.distributed.initialize(
+        coordinator_address=coordinator,
+        num_processes=num_process,
+        process_id=process_id,
+        local_device_ids=process_id,
+    )
+    assert jax.local_device_count() == 1, "one GPU per process is required"
+    assert jax.device_count() == num_process
+    return True
+
+
+_MP_ACTIVE = _init_distributed_from_pytest_args()
 
 
 def _mesh():

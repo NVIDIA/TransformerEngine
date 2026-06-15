@@ -47,9 +47,8 @@ classes:
 * ``TestZZZTeEpMoeBootstrap`` verifies the per-process NCCL bootstrap
   rejects a mismatched signature.
 
-FP8 / MXFP8 recipes are deferred — the ``quantizer_sets`` plumbing
-has not yet been re-wired across the TE-EP ``shard_map`` boundary
-(see ``.pr3036-review/INTEGRATION_DESIGN.md``).
+FP8 / MXFP8 recipes are deferred — the quantizer-set plumbing needs
+additional validation with the TE-EP dispatch/combine path.
 """
 
 import os
@@ -132,6 +131,8 @@ if get_device_compute_capability(0) < 100:
 from transformer_engine.jax.flax import _MoEBlock as MoEBlock
 from transformer_engine.jax.moe import moe, record_ep_bootstrap_signature_for_moe
 from transformer_engine.jax.ep import ep_bootstrap
+from transformer_engine.jax.dense import grouped_dense
+from transformer_engine.jax.quantize import QuantizerFactory, ScalingMode
 from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 
 
@@ -557,6 +558,26 @@ _CONFIGS = [
 ]
 
 
+def _forward_tolerances(_config):
+    return FWD_ATOL, FWD_RTOL
+
+
+def _grad_tolerances(_config, param_name):
+    if param_name == "gate_kernel":
+        return GRAD_GATE_ATOL, GRAD_GATE_RTOL
+    return GRAD_FFN_ATOL, GRAD_FFN_RTOL
+
+
+def _mxfp8_grouped_quantizer_set(n_groups):
+    return QuantizerFactory.create_set(
+        scaling_mode=ScalingMode.MXFP8_1D_SCALING,
+        fwd_dtype=jnp.float8_e4m3fn,
+        bwd_dtype=jnp.float8_e4m3fn,
+        is_2x2x=True,
+        n_groups=n_groups,
+    )
+
+
 def _reference_kwargs_from_config(config, params_np):
     """Pick out the reference-relevant pieces of a parametrize config."""
     return dict(
@@ -567,6 +588,77 @@ def _reference_kwargs_from_config(config, params_np):
             else None
         ),
     )
+
+
+class TestTeEpMoeMXFP8GroupedGemm:
+    """MXFP8 grouped-GEMM smoke coverage under the TE-EP multiprocess launcher."""
+
+    def test_grouped_dense_mxfp8_ep_fsdp_outside_shard_map(self):
+        devices = jax.devices()
+        if len(devices) < 4:
+            pytest.skip("MXFP8 grouped GEMM test requires at least 4 visible GPUs.")
+
+        mesh = Mesh(np.asarray(devices[:4]).reshape(2, 2), ("expert", FSDP_AXIS))
+        n_groups = 4
+        group_tokens = 128
+        hidden = 256
+        out_hidden = 128
+        x_shape = (n_groups * group_tokens, hidden)
+        w_shape = (n_groups, hidden, out_hidden)
+
+        x_sharding = NamedSharding(mesh, P("expert", None))
+        w_sharding = NamedSharding(mesh, P("expert", FSDP_AXIS, None))
+        group_sharding = NamedSharding(mesh, P("expert"))
+        out_sharding = NamedSharding(mesh, P("expert", None))
+
+        quantizer_set = _mxfp8_grouped_quantizer_set(n_groups)
+
+        with mesh, global_shard_guard(
+            MeshResource(fsdp_resource=FSDP_AXIS, ep_resource="expert")
+        ):
+            x = jax.device_put(
+                jax.random.normal(jax.random.PRNGKey(20), x_shape, dtype=DTYPE)
+                * jnp.asarray(0.01, dtype=DTYPE),
+                x_sharding,
+            )
+            w = jax.device_put(
+                jax.random.normal(jax.random.PRNGKey(21), w_shape, dtype=DTYPE)
+                * jnp.asarray(0.01, dtype=DTYPE),
+                w_sharding,
+            )
+            group_sizes = jax.device_put(
+                jnp.full((n_groups,), group_tokens, dtype=jnp.int32),
+                group_sharding,
+            )
+
+            def apply_with_vjp(x, w, group_sizes):
+                def apply(x, w):
+                    return grouped_dense(
+                        x,
+                        w,
+                        group_sizes,
+                        contracting_dims=((1,), (1,)),
+                        quantizer_set=quantizer_set,
+                    )
+
+                out, vjp_fn = jax.vjp(apply, x, w)
+                dx, dw = vjp_fn(out)
+                return out, dx, dw
+
+            out, dx, dw = jax.jit(
+                apply_with_vjp,
+                in_shardings=(x_sharding, w_sharding, group_sharding),
+                out_shardings=(out_sharding, x_sharding, w_sharding),
+            )(x, w, group_sizes)
+            out, dx, dw = jax.block_until_ready((out, dx, dw))
+
+        assert tuple(out.sharding.spec) == ("expert", None)
+        assert tuple(dx.sharding.spec) == ("expert", None)
+        assert tuple(dw.sharding.spec) == ("expert", FSDP_AXIS, None)
+        for name, value in (("out", out), ("dx", dx), ("dw", dw)):
+            local_value = np.asarray(jax.device_get(value.addressable_data(0)))
+            assert np.all(np.isfinite(local_value)), f"{name} has NaN/Inf"
+            assert np.any(local_value != 0.0), f"{name} is identically zero"
 
 
 class TestTeEpMoeForward:
@@ -601,11 +693,12 @@ class TestTeEpMoeForward:
             num_experts_per_tok=TOPK,
             **_reference_kwargs_from_config(config, params_np),
         )
+        atol, rtol = _forward_tolerances(config)
         np.testing.assert_allclose(
             out_te_np.astype(np.float32),
             np.asarray(jax.device_get(out_ref)).astype(np.float32),
-            atol=FWD_ATOL,
-            rtol=FWD_RTOL,
+            atol=atol,
+            rtol=rtol,
             err_msg=f"forward parity breach for config={config}",
         )
 
@@ -653,11 +746,7 @@ class TestTeEpMoeBackward:
             g_te = _to_global_numpy(_unwrap(grads_te["params"][name]), mesh)
             assert np.all(np.isfinite(g_te)), f"{name} grad has NaN/Inf [config={config}]"
             assert np.any(g_te != 0.0), f"{name} grad identically zero [config={config}]"
-            atol, rtol = (
-                (GRAD_GATE_ATOL, GRAD_GATE_RTOL)
-                if name == "gate_kernel"
-                else (GRAD_FFN_ATOL, GRAD_FFN_RTOL)
-            )
+            atol, rtol = _grad_tolerances(config, name)
             np.testing.assert_allclose(
                 g_te.astype(np.float32),
                 grads_ref_np[name].astype(np.float32),

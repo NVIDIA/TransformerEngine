@@ -21,6 +21,7 @@ alias will be introduced once TE's NCCL-backed EP component (and the
 recipe-driven alignment follow-up) stabilises.
 """
 
+from dataclasses import field
 from typing import Any, Callable, NewType, Optional, Tuple, Union
 
 import jax.numpy as jnp
@@ -31,6 +32,7 @@ from flax import linen as nn
 from jax.sharding import PartitionSpec as P  # noqa: F401  # pylint: disable=unused-import
 
 from ..moe import moe
+from ..quantize import QuantizerSet, noop_quantizer_set
 from ..router import ScoreFunction
 from ..sharding import get_active_resource_axis
 from .module import TransformerEngineBase
@@ -84,17 +86,20 @@ class _MoEBlock(TransformerEngineBase):
         :func:`with_logical_partitioning` and our internal
         :func:`with_sharding_constraint_by_logical_axes`).
     data_parallelism_axes : tuple[str, ...]
-        FSDP axes over which the input *batch* dim is sharded IN ADDITION
-        to the EP axis. Empty (default) means activations are replicated
-        across non-EP axes within an EP group; set e.g. ``("fsdp",)`` for
-        true FSDP-of-batch where each device owns a unique slice of the
-        batch.
+        DP/FSDP axes over which the input *batch* dim is sharded IN
+        ADDITION to the EP axis. Empty (default) means activations are
+        replicated across non-EP axes within an EP group; set e.g.
+        ``("fsdp",)`` or ``("dp", "fsdp")`` for outer data axes where
+        each EP group owns a unique slice of the batch.
 
     dtype : jnp.dtype
         Compute / parameter dtype.
     kernel_init, bias_init : Initializers.
     use_bias : bool
         Register per-expert FFN biases.
+    ffn_quantizer_set : QuantizerSet
+        Quantizer set for the grouped-GEMM FFN body. Defaults to no
+        quantization; MXFP8 callers should also set ``align_size=128``.
     """
 
     # Architecture
@@ -140,6 +145,7 @@ class _MoEBlock(TransformerEngineBase):
     # Per-expert router bias added before the top-k. Only meaningful when
     # score_function='sigmoid'.
     use_expert_bias: bool = False
+    ffn_quantizer_set: QuantizerSet = field(default_factory=lambda: noop_quantizer_set)
 
     def __post_init__(self):
         if self.kernel_init is None:
@@ -173,10 +179,10 @@ class _MoEBlock(TransformerEngineBase):
         ), f"_MoEBlock expects [batch, sequence, hidden] input, got shape {inputs.shape}"
         _, _, hidden_size = inputs.shape
 
-        # Param registrations must run OUTSIDE any JAX transform that
-        # alters the variable scope (e.g. shard_map). The functional
-        # ``moe(...)`` opens its own shard_map internally for the FFN
-        # body, so registering params here is correct.
+        # Param registrations stay in the Flax module scope. The functional
+        # ``moe(...)`` calls custom-partitioned EP and grouped-GEMM primitives
+        # directly, so the FFN body no longer wraps the layer params in a
+        # separate mapping transform.
         gate_kernel = self.param(
             "gate_kernel",
             nn.with_logical_partitioning(self.kernel_init, self.gate_kernel_axes),
@@ -243,6 +249,7 @@ class _MoEBlock(TransformerEngineBase):
             wi_1_bias,
             wo_bias,
             expert_bias,
+            self.ffn_quantizer_set,
             num_experts=self.num_experts,
             num_experts_per_tok=self.num_experts_per_tok,
             activation_type=self.activation_type,

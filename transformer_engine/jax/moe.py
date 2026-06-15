@@ -27,12 +27,12 @@ Sharding model
 
 Out-of-scope (for now)
 ----------------------
-FP8 / MXFP8 quantizer sets are not yet wired on this path; turning
-them on requires recipe-aware residual specs and ``ScaledTensor``
-residual handling. ``aux_loss_coeff`` and ``expert_bias`` are supported
-(the former forces a per-step all-gather over the routing-side logits,
-which lives off the critical path and overlaps with the dispatch
-collective).
+The FFN grouped GEMMs accept a caller-supplied quantizer set, including
+MXFP8 grouped quantizers. Full recipe/state-module integration is not
+yet wired through this functional MoE API. ``aux_loss_coeff`` and
+``expert_bias`` are supported (the former forces a per-step all-gather
+over the routing-side logits, which lives off the critical path and
+overlaps with the dispatch collective).
 """
 
 from dataclasses import dataclass
@@ -47,6 +47,7 @@ from jax.sharding import NamedSharding, PartitionSpec as P
 from . import cpp_extensions as tex
 from .quantize import (
     TensorUsage,
+    QuantizerSet,
     noop_quantizer_set,
     with_sharding_constraint_by_logical_axes,
 )
@@ -273,13 +274,21 @@ class _Ctx:
 
 
 # =============================================================================
-# Custom-partitioned grouped-GEMM FFN body
+# Global-view grouped-GEMM FFN body
 # =============================================================================
 
 
-def _ffn_fwd_per_shard(
-    recv_tokens_local: jnp.ndarray,
-    recv_topk_weights_local: jnp.ndarray,
+def _compound_data_ep_axis(
+    data_parallelism_axes: Tuple[str, ...],
+    ep_axis: str,
+) -> Union[str, Tuple[str, ...]]:
+    """Leading sharding axis for tensors split across DP/FSDP and EP."""
+    return ep_axis if not data_parallelism_axes else (*data_parallelism_axes, ep_axis)
+
+
+def _ffn_fwd_global(
+    recv_tokens: jnp.ndarray,
+    recv_topk_weights: jnp.ndarray,
     wi_0: jnp.ndarray,
     wi_1: jnp.ndarray,
     wo: jnp.ndarray,
@@ -295,24 +304,26 @@ def _ffn_fwd_per_shard(
     slots_per_expert: int,
     activation_type: str,
     apply_topk_weights_early: bool,
+    ffn_quantizer_set: QuantizerSet,
 ):
-    """Per-shard FFN forward.
+    """Global-view FFN forward.
 
-    Operates on the global EP-dispatch output while grouped GEMM custom
-    partitioning lowers the math to per-shard groups. Returns expert
-    outputs shaped as ``[num_procs, recv_pr, H_out]`` plus the residuals
-    consumed by the bwd.
+    The operands stay in the same global shape produced by EP dispatch.
+    Grouped GEMM custom partitioning owns the local grouped math, including
+    EP expert sharding and DP/FSDP handling on the leading group dimension.
+    Returns expert outputs shaped as ``[num_procs, recv_pr, H_out]`` plus
+    the residuals consumed by the bwd.
     """
-    hidden = recv_tokens_local.shape[-1]
+    hidden = recv_tokens.shape[-1]
     mesh = _get_mesh()
-    batch_axis: Any = ep_axis if not data_parallelism_axes else (*data_parallelism_axes, ep_axis)
-    row_sharding = NamedSharding(mesh, P(batch_axis, None))
-    group_sharding = NamedSharding(mesh, P(batch_axis))
-    weight_sharding = NamedSharding(mesh, P(batch_axis, None, None))
-    bias_sharding = NamedSharding(mesh, P(batch_axis, None))
+    data_ep_axis = _compound_data_ep_axis(data_parallelism_axes, ep_axis)
+    row_sharding = NamedSharding(mesh, P(data_ep_axis, None))
+    group_sharding = NamedSharding(mesh, P(data_ep_axis))
+    weight_sharding = NamedSharding(mesh, P(data_ep_axis, None, None))
+    bias_sharding = NamedSharding(mesh, P(data_ep_axis, None))
 
-    sorted_x = recv_tokens_local.reshape(-1, hidden)
-    recv_w_flat = recv_topk_weights_local.reshape(-1)
+    sorted_x = recv_tokens.reshape(-1, hidden)
+    recv_w_flat = recv_topk_weights.reshape(-1)
     num_groups = dp_size * num_ep * num_local_experts
     group_sizes = jnp.full((num_groups,), slots_per_expert, dtype=jnp.int32)
     sorted_x = jax.lax.with_sharding_constraint(sorted_x, row_sharding)
@@ -359,9 +370,12 @@ def _ffn_fwd_per_shard(
         jnp.concatenate([wi_0_bias, wi_1_bias], axis=-1) if wi_0_bias is not None else None
     )
 
-    q_set = noop_quantizer_set
-    casted_sorted_x = tex.grouped_quantize(sorted_x, q_set.x, group_sizes, flatten_axis=-1)
-    casted_wi = tex.grouped_quantize(wi_combined, q_set.kernel, flatten_axis=-1)
+    casted_sorted_x = tex.grouped_quantize(
+        sorted_x, ffn_quantizer_set.x, group_sizes, flatten_axis=-1
+    )
+    casted_wi = tex.grouped_quantize(
+        wi_combined, ffn_quantizer_set.kernel, flatten_axis=-1
+    )
     combined_out = tex.grouped_gemm(
         casted_sorted_x.get_tensor(usage=TensorUsage.LHS),
         casted_wi.get_tensor(usage=TensorUsage.RHS),
@@ -389,9 +403,9 @@ def _ffn_fwd_per_shard(
         intermediate = jax.lax.with_sharding_constraint(intermediate, row_sharding)
 
     casted_intermediate = tex.grouped_quantize(
-        intermediate, q_set.x, group_sizes, flatten_axis=-1
+        intermediate, ffn_quantizer_set.x, group_sizes, flatten_axis=-1
     )
-    casted_wo = tex.grouped_quantize(wo, q_set.kernel, flatten_axis=-1)
+    casted_wo = tex.grouped_quantize(wo, ffn_quantizer_set.kernel, flatten_axis=-1)
     expert_outputs = tex.grouped_gemm(
         casted_intermediate.get_tensor(usage=TensorUsage.LHS),
         casted_wo.get_tensor(usage=TensorUsage.RHS),
@@ -417,8 +431,8 @@ def _ffn_fwd_per_shard(
     return expert_outputs_3d, residuals
 
 
-def _ffn_bwd_per_shard(
-    d_expert_outputs_local: jnp.ndarray,
+def _ffn_bwd_global(
+    d_expert_outputs: jnp.ndarray,
     casted_sorted_x_lhs_trans,
     casted_wi_rhs_trans,
     gate_proj_out: jnp.ndarray,
@@ -426,7 +440,7 @@ def _ffn_bwd_per_shard(
     casted_intermediate_lhs_trans,
     casted_wo_rhs_trans,
     local_group_sizes: jnp.ndarray,
-    recv_topk_weights_local: jnp.ndarray,
+    recv_topk_weights: jnp.ndarray,
     *,
     ep_axis: str,
     data_parallelism_axes: Tuple[str, ...],
@@ -437,29 +451,30 @@ def _ffn_bwd_per_shard(
     activation_type: str,
     apply_topk_weights_early: bool,
     has_bias: bool,
+    ffn_quantizer_set: QuantizerSet,
 ):
-    """Per-shard FFN backward.
+    """Global-view FFN backward.
 
-    Mirrors :func:`_ffn_fwd_per_shard`. Returns
+    Mirrors :func:`_ffn_fwd_global`. Returns
     ``(d_sorted_x [1, recv_pr, H], d_recv_w [1, recv_pr], d_wi_0, d_wi_1, d_wo,
     d_wi_0_bias, d_wi_1_bias, d_wo_bias)``.
     """
     mesh = _get_mesh()
-    batch_axis: Any = ep_axis if not data_parallelism_axes else (*data_parallelism_axes, ep_axis)
-    row_sharding = NamedSharding(mesh, P(batch_axis, None))
-    group_sharding = NamedSharding(mesh, P(batch_axis))
-    weight_sharding = NamedSharding(mesh, P(batch_axis, None, None))
-    bias_sharding = NamedSharding(mesh, P(batch_axis, None))
+    data_ep_axis = _compound_data_ep_axis(data_parallelism_axes, ep_axis)
+    row_sharding = NamedSharding(mesh, P(data_ep_axis, None))
+    group_sharding = NamedSharding(mesh, P(data_ep_axis))
+    weight_sharding = NamedSharding(mesh, P(data_ep_axis, None, None))
+    bias_sharding = NamedSharding(mesh, P(data_ep_axis, None))
 
-    d_eo_2d = d_expert_outputs_local.reshape(-1, d_expert_outputs_local.shape[-1])
-    recv_w_flat = recv_topk_weights_local.reshape(-1)
+    d_eo_2d = d_expert_outputs.reshape(-1, d_expert_outputs.shape[-1])
+    recv_w_flat = recv_topk_weights.reshape(-1)
     d_eo_2d = jax.lax.with_sharding_constraint(d_eo_2d, row_sharding)
     recv_w_flat = jax.lax.with_sharding_constraint(recv_w_flat, group_sharding)
     local_group_sizes = jax.lax.with_sharding_constraint(local_group_sizes, group_sharding)
-    q_set = noop_quantizer_set
-
     # wo bwd
-    casted_d_eo = tex.grouped_quantize(d_eo_2d, q_set.dgrad, local_group_sizes, flatten_axis=-1)
+    casted_d_eo = tex.grouped_quantize(
+        d_eo_2d, ffn_quantizer_set.dgrad, local_group_sizes, flatten_axis=-1
+    )
     d_intermediate = tex.grouped_gemm(
         casted_d_eo.get_tensor(usage=TensorUsage.LHS),
         casted_wo_rhs_trans,
@@ -502,7 +517,7 @@ def _ffn_bwd_per_shard(
     d_combined = jnp.concatenate([d_gate_proj_out, d_up_proj_out], axis=-1)
     d_combined = jax.lax.with_sharding_constraint(d_combined, row_sharding)
     casted_d_combined = tex.grouped_quantize(
-        d_combined, q_set.dgrad, local_group_sizes, flatten_axis=-1
+        d_combined, ffn_quantizer_set.dgrad, local_group_sizes, flatten_axis=-1
     )
     d_sorted_x = tex.grouped_gemm(
         casted_d_combined.get_tensor(usage=TensorUsage.LHS),
@@ -572,6 +587,7 @@ def _moe_fwd_rule(
     wi_1_bias,
     wo_bias,
     expert_bias,
+    ffn_quantizer_set,
     num_experts,
     num_experts_per_tok,
     activation_type,
@@ -646,13 +662,10 @@ def _moe_fwd_rule(
         ep_size=num_ep,
     )
 
-    if not data_parallelism_axes:
-        batch_pspec_axis: Any = ep_axis
-    else:
-        # ep must be innermost: ep_bootstrap forms NCCL EP comms from
-        # consecutive global ranks (dp_color = rank // ep_size), so the
-        # comm only stays within one model replica under (outer_dp, ep).
-        batch_pspec_axis = (*data_parallelism_axes, ep_axis)
+    # ep must be innermost: ep_bootstrap forms NCCL EP comms from
+    # consecutive global ranks (dp_color = rank // ep_size), so the comm
+    # only stays within one model replica under (outer DP/FSDP, ep).
+    batch_pspec_axis = _compound_data_ep_axis(data_parallelism_axes, ep_axis)
     ep3_spec = P(batch_pspec_axis, None, None)
     ep2_spec = P(batch_pspec_axis, None)
     x = jax.lax.with_sharding_constraint(x, NamedSharding(mesh, ep3_spec))
@@ -762,7 +775,7 @@ def _moe_fwd_rule(
 
     # ---------------- FFN (custom-partitioned grouped GEMM) ----------------
     has_bias = wi_0_bias is not None
-    expert_outputs, ffn_residuals = _ffn_fwd_per_shard(
+    expert_outputs, ffn_residuals = _ffn_fwd_global(
         recv_tokens,
         recv_topk_weights,
         wi_0,
@@ -779,6 +792,7 @@ def _moe_fwd_rule(
         slots_per_expert=slots_per_expert,
         activation_type=activation_type,
         apply_topk_weights_early=apply_topk_weights_early,
+        ffn_quantizer_set=ffn_quantizer_set,
     )
     expert_outputs = jax.lax.with_sharding_constraint(
         expert_outputs, NamedSharding(mesh, ep3_spec)
@@ -844,6 +858,7 @@ def _moe_fwd_rule(
         "has_bias": has_bias,
         "x_shape": x.shape,
         "recv_pr": recv_pr,
+        "ffn_quantizer_set": ffn_quantizer_set,
     }
     return (output, aux_loss), (ctx, static)
 
@@ -879,6 +894,7 @@ def _moe_bwd_rule(
     has_bias = static["has_bias"]
     x_shape = static["x_shape"]
     recv_pr = static["recv_pr"]
+    ffn_quantizer_set = static["ffn_quantizer_set"]
 
     mesh = _get_mesh()
     if mesh is None or mesh.empty:
@@ -890,10 +906,7 @@ def _moe_bwd_rule(
 
     B, S, _ = x_shape
     K = num_experts_per_tok
-    if not data_parallelism_axes:
-        batch_pspec_axis: Any = ep_axis
-    else:
-        batch_pspec_axis = (*data_parallelism_axes, ep_axis)
+    batch_pspec_axis = _compound_data_ep_axis(data_parallelism_axes, ep_axis)
     ep3_spec = P(batch_pspec_axis, None, None)
     ep2_spec = P(batch_pspec_axis, None)
     out_partition_spec = (batch_pspec_axis, None, None)
@@ -931,7 +944,7 @@ def _moe_bwd_rule(
         d_wi_0_bias,
         d_wi_1_bias,
         d_wo_bias,
-    ) = _ffn_bwd_per_shard(
+    ) = _ffn_bwd_global(
         d_expert_outputs,
         ctx.casted_sorted_x_lhs_trans,
         ctx.casted_wi_rhs_trans,
@@ -950,6 +963,7 @@ def _moe_bwd_rule(
         activation_type=activation_type,
         apply_topk_weights_early=apply_topk_weights_early,
         has_bias=has_bias,
+        ffn_quantizer_set=ffn_quantizer_set,
     )
 
     d_recv_w_total = d_recv_w_from_combine + d_recv_w_from_intermediate
@@ -1052,6 +1066,7 @@ def _moe_bwd_rule(
         d_wi_1_bias if has_bias else None,
         d_wo_bias if has_bias else None,
         d_expert_bias,
+        ffn_quantizer_set,
     )
 
 
@@ -1060,7 +1075,7 @@ def _moe_bwd_rule(
 # =============================================================================
 
 
-@partial(jax.custom_vjp, nondiff_argnums=tuple(range(9, 27)))
+@partial(jax.custom_vjp, nondiff_argnums=tuple(range(10, 28)))
 def _moe(
     x,
     gate_kernel,
@@ -1071,6 +1086,7 @@ def _moe(
     wi_1_bias,
     wo_bias,
     expert_bias,
+    ffn_quantizer_set,
     num_experts,
     num_experts_per_tok,
     activation_type,
@@ -1100,6 +1116,7 @@ def _moe(
         wi_1_bias,
         wo_bias,
         expert_bias,
+        ffn_quantizer_set,
         num_experts,
         num_experts_per_tok,
         activation_type,
@@ -1135,6 +1152,7 @@ def moe(
     wi_1_bias: Optional[jnp.ndarray] = None,
     wo_bias: Optional[jnp.ndarray] = None,
     expert_bias: Optional[jnp.ndarray] = None,
+    ffn_quantizer_set: QuantizerSet = noop_quantizer_set,
     *,
     num_experts: int,
     num_experts_per_tok: int,
@@ -1182,6 +1200,10 @@ def moe(
         rounds that count up to the nearest multiple, growing the
         per-rank receive buffer accordingly. Set to ``128`` for FP8
         recipes that require 128-aligned grouped-GEMM tiles.
+    ffn_quantizer_set : QuantizerSet
+        Quantizers used by the two grouped-GEMM FFN projections. Defaults
+        to no quantization; pass an MXFP8 grouped quantizer set with
+        ``align_size=128`` to exercise the MXFP8 grouped-GEMM kernels.
 
     See module docstring for the rest of the parameter semantics and the
     surrounding design rationale.
@@ -1195,9 +1217,7 @@ def moe(
     mesh = _get_mesh()
     if mesh is None or mesh.empty:
         raise ValueError("moe(...) requires an active jax.sharding.Mesh.")
-    expected_leading: Any = (
-        (*data_parallelism_axes, ep_axis) if data_parallelism_axes else ep_axis
-    )
+    expected_leading: Any = _compound_data_ep_axis(data_parallelism_axes, ep_axis)
     expected_spec = P(expected_leading, None, None)
     actual_spec = getattr(getattr(x, "sharding", None), "spec", None)
     if actual_spec is not None and tuple(actual_spec) != tuple(expected_spec):
@@ -1228,6 +1248,7 @@ def moe(
         wi_1_bias,
         wo_bias,
         expert_bias_arg,
+        ffn_quantizer_set,
         num_experts,
         num_experts_per_tok,
         activation_type,
