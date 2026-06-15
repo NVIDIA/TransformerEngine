@@ -16,6 +16,7 @@ import subprocess
 import sys
 import sysconfig
 from typing import Optional, Tuple
+import warnings
 
 
 @functools.lru_cache(maxsize=None)
@@ -190,6 +191,29 @@ def load_framework_extension(framework: str) -> None:
     solib = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = solib
     spec.loader.exec_module(solib)
+
+    # Plugin system: if NVTE_ENABLE_PLUGIN=1, let plugin stub take over
+    # transformer_engine_torch and register original pybind as _nv for CUDA backend.
+    # Only applies to the PyTorch extension — JAX has no plugin stub.
+    if os.environ.get("NVTE_ENABLE_PLUGIN", "0") == "1" and framework == "torch":
+        _original_module = sys.modules.get(module_name)
+        try:
+            from transformer_engine_plugin_fl import load_plugins
+
+            sys.modules[module_name + "_nv"] = solib
+            load_plugins()
+        except Exception as e:
+            # Rollback to pre-plugin state if plugin failed to fully initialize
+            sys.modules.pop(module_name + "_nv", None)
+            if _original_module is not None:
+                sys.modules[module_name] = _original_module
+            else:
+                sys.modules.pop(module_name, None)
+            warnings.warn(
+                f"NVTE_ENABLE_PLUGIN=1 but plugin loading failed: {e}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
 
 def sanity_checks_for_pypi_installation() -> None:
