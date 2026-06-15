@@ -1700,23 +1700,37 @@ def test_grouped_linear_grouped_tensor_path_single_grouped_bias_delay_wgrad(monk
 
 @pytest.mark.skipif(not _nvfp4_available, reason=_reason_for_no_nvfp4)
 def test_grouped_linear_grouped_tensor_path_skips_non_rht_nvfp4(monkeypatch):
-    """Non-RHT NVFP4 should fall back to legacy path instead of grouped quantization."""
+    """Non-RHT NVFP4 falls back to the legacy path; check it stays numerically correct.
+
+    Graph-safe grouped quantization currently requires RHT, so requesting NVFP4 with
+    ``disable_rht=True`` while the fused grouped-tensor path is enabled falls back to the
+    legacy path internally. We verify the output and gradients against the pure-PyTorch
+    NVFP4 reference quantizer (``NVFP4QuantizerRef``) driven through a ``CustomRecipe``,
+    which emulates the kernel's quantized GEMM math.
+    """
+    from transformer_engine.pytorch.custom_recipes import quantization_ref_nvfp4
+    from transformer_engine.pytorch.custom_recipes import utils as custom_recipe_utils
+
     if torch.cuda.get_device_capability() < (10, 0):
         pytest.skip("NVFP4 GroupedTensor grouped GEMM path requires SM100+")
 
     monkeypatch.setenv(_FUSED_GROUPED_GEMM_ENV, "1")
-    FP8GlobalStateManager.reset()
 
     dtype = torch.bfloat16
     num_gemms = 3
     in_features = 128
     out_features = 128
-    split_sizes = [128, 256, 384]
-    total_tokens = sum(split_sizes)
+    m_splits = [128, 256, 384]
+    total_tokens = sum(m_splits)
 
-    x = torch.randn(total_tokens, in_features, dtype=dtype, device="cuda")
-    x.requires_grad_(True)
-    dy = torch.randn(total_tokens, out_features, dtype=dtype, device="cuda")
+    torch.manual_seed(1234)
+    x_base = (0.1 * torch.randn(total_tokens, in_features, device="cuda")).to(dtype)
+    dy = (0.1 * torch.randn(total_tokens, out_features, device="cuda")).to(dtype)
+    weights = [
+        (0.1 * torch.randn(out_features, in_features, device="cuda")).to(dtype)
+        for _ in range(num_gemms)
+    ]
+
     grouped_linear = GroupedLinear(
         num_gemms,
         in_features,
@@ -1725,14 +1739,49 @@ def test_grouped_linear_grouped_tensor_path_skips_non_rht_nvfp4(monkeypatch):
         params_dtype=dtype,
         device="cuda",
     )
+    with torch.no_grad():
+        for i in range(num_gemms):
+            getattr(grouped_linear, f"weight{i}").copy_(weights[i])
 
-    fp8_recipe = recipe.NVFP4BlockScaling(
+    # Real (kernel) non-RHT NVFP4 recipe; the fused path is enabled but falls back to legacy.
+    native_recipe = recipe.NVFP4BlockScaling(
         disable_rht=True,
         disable_stochastic_rounding=True,
     )
-    with autocast(enabled=True, recipe=fp8_recipe):
-        y = grouped_linear(x, split_sizes)
-    y.backward(dy)
+
+    # Pure-PyTorch NVFP4 reference: 1x16 tiles, FP8 (non-pow2) scales, no RHT -- matching the
+    # native recipe above. Boundary slots (output / grad_input) get role=None; returning a
+    # quantizer for them is harmless since the GEMM outputs in the high-precision dtype.
+    def _ref_quantizer_factory(role):
+        return quantization_ref_nvfp4.NVFP4QuantizerRef(
+            dtype=custom_recipe_utils.Fp4Formats.E2M1,
+            quant_tile_shape=(1, 16),
+            pow_2_scales=False,
+            with_rht=False,
+        )
+
+    ref_recipe = recipe.CustomRecipe(qfactory=_ref_quantizer_factory)
+
+    def _run(run_recipe):
+        FP8GlobalStateManager.reset()
+        grouped_linear.zero_grad(set_to_none=True)
+        x = x_base.detach().clone().requires_grad_(True)
+        with autocast(enabled=True, recipe=run_recipe):
+            y = grouped_linear(x, m_splits)
+        y.backward(dy)
+        outputs = [y.detach().clone(), x.grad.detach().clone()]
+        for i in range(num_gemms):
+            outputs.append(getattr(grouped_linear, f"weight{i}").grad.detach().clone())
+        return outputs
+
+    outputs_native = _run(native_recipe)
+    outputs_ref = _run(ref_recipe)
+
+    # Native (kernel) vs PyTorch emulated reference; same tolerance used by the NVFP4
+    # native-vs-reference GEMM exactness tests.
+    tols = dict(rtol=8e-3, atol=8e-3)
+    for native_out, ref_out in zip(outputs_native, outputs_ref):
+        torch.testing.assert_close(native_out.float(), ref_out.float(), **tols)
 
 
 @pytest.mark.parametrize(
