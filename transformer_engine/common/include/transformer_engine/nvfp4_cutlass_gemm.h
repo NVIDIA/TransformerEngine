@@ -34,6 +34,31 @@ void nvte_nvfp4_cutlass_per_token_gemm(const NVTETensor a_data, const NVTETensor
                                        const NVTETensor alpha_a, const NVTETensor alpha_b,
                                        NVTETensor d, cudaStream_t stream);
 
+/*! \brief Grouped (MoE) variant of nvte_nvfp4_cutlass_per_token_gemm.
+ *
+ *  Computes, for every group g in [0, num_groups):
+ *      D_g[i,j] = bf16(alpha_a_g[i] * alpha_b_g[j] * (A_g @ B_g^T)[i,j])
+ *  with a single CUTLASS ptr-array grouped NVFP4 launch (no per-expert loop).
+ *
+ *  All array parameters are host arrays of length num_groups; the underlying
+ *  data they reference must live on device. Per group:
+ *    - a_data[g] : FP4-e2m1 packed, logical (M_g, K)
+ *    - b_data[g] : FP4-e2m1 packed, logical (N_g, K)
+ *    - a_sf[g]   : FP8-e4m3 1x16 inner SF for A, ALREADY in CUTLASS
+ *                  Sm1xxBlkScaledConfig swizzled layout
+ *    - b_sf[g]   : FP8-e4m3 1x16 inner SF for B, ALREADY swizzled
+ *    - alpha_a[g]: FP32 per-row outer scale, length M_g
+ *    - alpha_b[g]: FP32 per-col outer scale, length N_g
+ *    - d[g]      : BF16 output, logical (M_g, N_g)
+ *
+ *  Each group must satisfy M_g % 128 == 0, N_g % 128 == 0, K % 128 == 0
+ *  (same 1-CTA MmaTile = (128,128,256) constraint as the dense per-token
+ *  kernel). Groups with M_g == 0 must be filtered out by the caller. */
+void nvte_nvfp4_cutlass_grouped_per_token_gemm(
+    int num_groups, const NVTETensor *a_data, const NVTETensor *b_data, const NVTETensor *a_sf,
+    const NVTETensor *b_sf, const NVTETensor *alpha_a, const NVTETensor *alpha_b, NVTETensor *d,
+    cudaStream_t stream);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif  // __cplusplus

@@ -371,6 +371,138 @@ def _nvfp4_per_token_gemm(
     return out
 
 
+def _nvfp4_per_token_grouped_gemm(
+    A: List[NVFP4TensorStorage],
+    B: List[NVFP4TensorStorage],
+    out: List[torch.Tensor],
+    *,
+    transa: bool,
+    transb: bool,
+    m_splits: List[int],
+    single_output: bool,
+) -> List[torch.Tensor]:
+    """Native grouped (MoE) per-token NVFP4 GEMM (one ptr-array CUTLASS launch).
+
+    Per-group analogue of ``_nvfp4_per_token_gemm``: applies the same
+    layout -> rowwise/columnwise operand selection and the kernel_a = TE B,
+    kernel_b = TE A swap to every group, then issues a single grouped launch
+    over all non-empty experts. Empty experts (``m_splits[g] == 0``) are
+    zeroed and excluded from the launch (the kernel requires M, N, K > 0).
+
+    Only the plain D = bf16(alpha_a * alpha_b * (A @ B^T)) path is handled
+    here; callers must route accumulate / bias / gelu / output-quantization
+    to the per-expert fallback (those are rejected by the dense kernel too).
+    """
+    # Same (transa, transb) -> rowwise/columnwise table as _nvfp4_per_token_gemm.
+    if (transa, transb) == (True, False):
+        layout_label = "TN"
+        a_use_col, b_use_col = False, False
+    elif (transa, transb) == (False, False):
+        layout_label = "NN"
+        a_use_col, b_use_col = True, False
+    elif (transa, transb) == (False, True):
+        layout_label = "NT"
+        a_use_col, b_use_col = True, True
+    else:
+        raise NotImplementedError(
+            "NVFP4 per-token grouped GEMM does not support TT layout "
+            f"(got transa={transa}, transb={transb})."
+        )
+
+    num_gemms = len(A)
+
+    # Resolve the per-group output views (single contiguous buffer sliced
+    # along the token/M dim, or one tensor per group).
+    if single_output:
+        assert m_splits is not None, "single_output grouped GEMM requires m_splits."
+        out_init = out[0]
+        out_views = []
+        start = 0
+        for size in m_splits:
+            out_views.append(out_init[start : start + size])
+            start += size
+    else:
+        out_init = None
+        out_views = out
+
+    # Collect per-group kernel operands for the non-empty experts.
+    a_data_l, b_data_l, a_sf_l, b_sf_l, alpha_a_l, alpha_b_l, d_l = ([] for _ in range(7))
+    a_sf_swz_seen: Optional[bool] = None
+    b_sf_swz_seen: Optional[bool] = None
+
+    for g in range(num_gemms):
+        # Empty expert: weight grad is the zero matrix; fwd/dgrad slice is
+        # empty. The CUTLASS kernel asserts M, N, K > 0, so handle here.
+        if m_splits is not None and m_splits[g] == 0:
+            if out_views[g].numel() != 0:
+                out_views[g].zero_()
+            continue
+
+        ka_data, ka_sf, ka_amax, a_sf_swz = _nvfp4_per_token_select(
+            B[g], use_columnwise=b_use_col, side="kernel_a (=TE B)"
+        )
+        kb_data, kb_sf, kb_amax, b_sf_swz = _nvfp4_per_token_select(
+            A[g], use_columnwise=a_use_col, side="kernel_b (=TE A)"
+        )
+
+        # Flatten any rowwise (possibly N-D) operand to 2D (no-op / no-copy
+        # for the already-2D grouped operands).
+        if not b_use_col:
+            ka_data = ka_data.reshape(-1, ka_data.shape[-1])
+        if not a_use_col:
+            kb_data = kb_data.reshape(-1, kb_data.shape[-1])
+
+        M = ka_data.shape[0]
+        K = ka_data.shape[-1] * 2
+        N = kb_data.shape[0]
+        if kb_data.shape[-1] * 2 != K:
+            raise RuntimeError(
+                f"NVFP4 per-token grouped GEMM K mismatch ({layout_label}, group {g}): "
+                f"kernel_a K={K}, kernel_b K={kb_data.shape[-1] * 2}."
+            )
+        if ka_amax.shape[0] != M or kb_amax.shape[0] != N:
+            raise RuntimeError(
+                f"NVFP4 per-token grouped GEMM amax mismatch ({layout_label}, group {g}): "
+                f"ka_amax={tuple(ka_amax.shape)} (exp ({M},)), "
+                f"kb_amax={tuple(kb_amax.shape)} (exp ({N},))."
+            )
+
+        # The SF swizzle flag must be uniform across groups (all share one
+        # quantizer state); the C++ wrapper takes a single flag per side.
+        if a_sf_swz_seen is None:
+            a_sf_swz_seen, b_sf_swz_seen = a_sf_swz, b_sf_swz
+        elif (a_sf_swz, b_sf_swz) != (a_sf_swz_seen, b_sf_swz_seen):
+            raise RuntimeError(
+                "NVFP4 per-token grouped GEMM requires a uniform SF-swizzle "
+                "state across all groups."
+            )
+
+        a_data_l.append(ka_data)
+        b_data_l.append(kb_data)
+        a_sf_l.append(ka_sf)
+        b_sf_l.append(kb_sf)
+        alpha_a_l.append(ka_amax)
+        alpha_b_l.append(kb_amax)
+        d_l.append(out_views[g].view(M, N))
+
+    if a_data_l:
+        tex.nvfp4_cutlass_grouped_per_token_gemm(
+            a_data_l,
+            b_data_l,
+            a_sf_l,
+            b_sf_l,
+            alpha_a_l,
+            alpha_b_l,
+            d_l,
+            bool(a_sf_swz_seen),
+            bool(b_sf_swz_seen),
+        )
+
+    if single_output:
+        return out_init
+    return out
+
+
 def _nvfp4_row_scaled_gemm_inputs(
     A: NVFP4TensorStorage,
     B: NVFP4TensorStorage,
@@ -643,12 +775,13 @@ def general_grouped_gemm(
     else:
         bias_dtype = TE_DType[torch.bfloat16]
 
-    # Per-token NVFP4 grouped GEMM has no native multi-shape kernel yet, so
-    # fall through to a Python loop over per-shape `general_gemm` calls.
-    # `general_gemm` already routes per-token tensors to the fused EVT GEMM,
-    # so we get the same numerics as a single-tensor per-token GEMM. The
-    # only cost is num_gemms launch overhead — acceptable for the MVP.
-    # TODO: replace with a true CUTLASS grouped per-token GEMM kernel.
+    # Per-token NVFP4 grouped GEMM. The plain D = bf16(alpha_a * alpha_b *
+    # (A @ B^T)) path is served by a native single-launch CUTLASS grouped
+    # per-token kernel (_nvfp4_per_token_grouped_gemm). Cases the dense
+    # per-token kernel can't fuse (accumulate / bias / gelu / output
+    # quantization) fall through to a Python loop over per-shape `general_gemm`
+    # calls, which routes each shape to the same fused EVT GEMM (identical
+    # numerics, at the cost of num_gemms launch overhead).
     if any(_is_nvfp4_per_token_tensor(t) for t in A) or any(
         _is_nvfp4_per_token_tensor(t) for t in B
     ):
@@ -662,6 +795,32 @@ def general_grouped_gemm(
                 raise NotImplementedError(
                     "NVFP4 per-token grouped GEMM requires all B operands to be per-token."
                 )
+
+        # Native single-launch CUTLASS grouped per-token kernel. Used for the
+        # plain D = bf16(alpha_a * alpha_b * (A @ B^T)) path; accumulate / bias
+        # / gelu / output-quantization are rejected by the dense per-token
+        # kernel too, so those fall through to the per-expert loop below.
+        _native_ok = (
+            not accumulate
+            and not gelu
+            and not use_bias
+            and D_dtype is None
+            and all(qp is None for qp in quantization_params)
+        )
+        if _native_ok and not int(os.getenv("NVTE_NVFP4_PER_TOKEN_GROUPED_FALLBACK", "0")):
+            transa = layout[0] == "T"
+            transb = layout[1] == "T"
+            out = _nvfp4_per_token_grouped_gemm(
+                A,
+                B,
+                out,
+                transa=transa,
+                transb=transb,
+                m_splits=m_splits,
+                single_output=single_output,
+            )
+            return out, grad_bias, gelu_input
+
         if single_output:
             assert (
                 m_splits is not None

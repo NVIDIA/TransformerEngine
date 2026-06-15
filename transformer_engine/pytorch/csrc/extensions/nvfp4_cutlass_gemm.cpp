@@ -223,4 +223,126 @@ void nvfp4_cutlass_per_token_gemm(const at::Tensor &a_data, const at::Tensor &b_
                                     aa_te.data(), ab_te.data(), d_te.data(), stream);
 }
 
+// Grouped (MoE) per-token GEMM. Each list holds one entry per expert/group.
+// Per group g: D_g[i,j] = bf16(alpha_a_g[i] * alpha_b_g[j] * (A_g @ B_g^T)[i,j]).
+// SF inner block scales are swizzled here per group (same contract as the dense
+// entry points above) unless the corresponding *_sf_swizzled flag is set.
+// Callers must drop empty experts (M_g == 0) before calling.
+void nvfp4_cutlass_grouped_per_token_gemm(
+    std::vector<at::Tensor> a_data, std::vector<at::Tensor> b_data, std::vector<at::Tensor> a_sf,
+    std::vector<at::Tensor> b_sf, std::vector<at::Tensor> alpha_a, std::vector<at::Tensor> alpha_b,
+    std::vector<at::Tensor> d, bool a_sf_swizzled, bool b_sf_swizzled) {
+  const int64_t G = static_cast<int64_t>(a_data.size());
+  TORCH_CHECK(G > 0, "grouped per-token GEMM needs at least one group");
+  TORCH_CHECK(b_data.size() == static_cast<size_t>(G) && a_sf.size() == static_cast<size_t>(G) &&
+                  b_sf.size() == static_cast<size_t>(G) &&
+                  alpha_a.size() == static_cast<size_t>(G) &&
+                  alpha_b.size() == static_cast<size_t>(G) && d.size() == static_cast<size_t>(G),
+              "all grouped per-token GEMM operand lists must have the same length");
+
+  const auto stream = at::cuda::getCurrentCUDAStream();
+  auto byte_opts = a_sf[0].options().dtype(at::kByte);
+
+  // Keep TensorWrappers and swizzle buffers alive until the launch completes.
+  std::vector<TensorWrapper> a_te_v, b_te_v, a_sf_te_v, b_sf_te_v, aa_te_v, ab_te_v, d_te_v;
+  std::vector<at::Tensor> swz_keepalive;
+  std::vector<NVTETensor> a_arr(G), b_arr(G), a_sf_arr(G), b_sf_arr(G), aa_arr(G), ab_arr(G),
+      d_arr(G);
+  a_te_v.reserve(G);
+  b_te_v.reserve(G);
+  a_sf_te_v.reserve(G);
+  b_sf_te_v.reserve(G);
+  aa_te_v.reserve(G);
+  ab_te_v.reserve(G);
+  d_te_v.reserve(G);
+
+  for (int64_t g = 0; g < G; ++g) {
+    TORCH_CHECK(a_data[g].is_contiguous() && b_data[g].is_contiguous() &&
+                    a_sf[g].is_contiguous() && b_sf[g].is_contiguous() &&
+                    alpha_a[g].is_contiguous() && alpha_b[g].is_contiguous() &&
+                    d[g].is_contiguous(),
+                "group ", g, ": all tensors must be contiguous");
+    TORCH_CHECK(a_data[g].scalar_type() == at::ScalarType::Byte &&
+                    b_data[g].scalar_type() == at::ScalarType::Byte,
+                "group ", g, ": a_data/b_data must be uint8 (FP4 packed)");
+    TORCH_CHECK(d[g].scalar_type() == at::ScalarType::BFloat16, "group ", g, ": d must be bf16");
+    TORCH_CHECK(alpha_a[g].scalar_type() == at::ScalarType::Float &&
+                    alpha_b[g].scalar_type() == at::ScalarType::Float,
+                "group ", g, ": alpha_a/alpha_b must be float32");
+
+    const int64_t M = a_data[g].size(0);
+    const int64_t K = a_data[g].size(1) * 2;
+    const int64_t N = b_data[g].size(0);
+    TORCH_CHECK(b_data[g].size(1) * 2 == K, "group ", g, ": A.K/B.K mismatch");
+    TORCH_CHECK(d[g].size(0) == M && d[g].size(1) == N, "group ", g, ": d shape mismatch");
+    TORCH_CHECK(alpha_a[g].numel() == M, "group ", g, ": alpha_a must have M elements");
+    TORCH_CHECK(alpha_b[g].numel() == N, "group ", g, ": alpha_b must have N elements");
+
+    const std::vector<size_t> a_data_shape = {static_cast<size_t>(M), static_cast<size_t>(K)};
+    const std::vector<size_t> b_data_shape = {static_cast<size_t>(N), static_cast<size_t>(K)};
+    const std::vector<size_t> a_sf_shape = {static_cast<size_t>(M), static_cast<size_t>(K / 16)};
+    const std::vector<size_t> b_sf_shape = {static_cast<size_t>(N), static_cast<size_t>(K / 16)};
+
+    // Per-group SF swizzle into the CUTLASS Sm1xxBlkScaledConfig layout.
+    void *a_sf_ptr = a_sf[g].data_ptr();
+    if (!a_sf_swizzled) {
+      at::Tensor buf = at::empty({a_sf[g].numel()}, byte_opts);
+      TensorWrapper in_nvte(NVTE_NVFP4_1D_SCALING);
+      in_nvte.set_rowwise_data(a_data[g].data_ptr(), DType::kFloat4E2M1, a_data_shape);
+      in_nvte.set_rowwise_scale_inv(a_sf[g].data_ptr(), DType::kFloat8E4M3, a_sf_shape);
+      TensorWrapper out_nvte(NVTE_NVFP4_1D_SCALING);
+      out_nvte.set_rowwise_data(a_data[g].data_ptr(), DType::kFloat4E2M1, a_data_shape);
+      out_nvte.set_rowwise_scale_inv(buf.data_ptr(), DType::kFloat8E4M3, a_sf_shape);
+      out_nvte.set_with_gemm_swizzled_scales(true);
+      nvte_swizzle_scaling_factors(in_nvte.data(), out_nvte.data(), stream);
+      a_sf_ptr = buf.data_ptr();
+      swz_keepalive.push_back(std::move(buf));
+    }
+    void *b_sf_ptr = b_sf[g].data_ptr();
+    if (!b_sf_swizzled) {
+      at::Tensor buf = at::empty({b_sf[g].numel()}, byte_opts);
+      TensorWrapper in_nvte(NVTE_NVFP4_1D_SCALING);
+      in_nvte.set_rowwise_data(b_data[g].data_ptr(), DType::kFloat4E2M1, b_data_shape);
+      in_nvte.set_rowwise_scale_inv(b_sf[g].data_ptr(), DType::kFloat8E4M3, b_sf_shape);
+      TensorWrapper out_nvte(NVTE_NVFP4_1D_SCALING);
+      out_nvte.set_rowwise_data(b_data[g].data_ptr(), DType::kFloat4E2M1, b_data_shape);
+      out_nvte.set_rowwise_scale_inv(buf.data_ptr(), DType::kFloat8E4M3, b_sf_shape);
+      out_nvte.set_with_gemm_swizzled_scales(true);
+      nvte_swizzle_scaling_factors(in_nvte.data(), out_nvte.data(), stream);
+      b_sf_ptr = buf.data_ptr();
+      swz_keepalive.push_back(std::move(buf));
+    }
+
+    a_te_v.push_back(
+        makeTransformerEngineTensor(a_data[g].data_ptr(), a_data_shape, DType::kFloat4E2M1));
+    b_te_v.push_back(
+        makeTransformerEngineTensor(b_data[g].data_ptr(), b_data_shape, DType::kFloat4E2M1));
+    a_sf_te_v.push_back(makeTransformerEngineTensor(
+        a_sf_ptr, std::vector<size_t>{static_cast<size_t>(a_sf[g].numel())}, DType::kFloat8E4M3));
+    b_sf_te_v.push_back(makeTransformerEngineTensor(
+        b_sf_ptr, std::vector<size_t>{static_cast<size_t>(b_sf[g].numel())}, DType::kFloat8E4M3));
+    aa_te_v.push_back(makeTransformerEngineTensor(
+        alpha_a[g].data_ptr(), std::vector<size_t>{static_cast<size_t>(M)}, DType::kFloat32));
+    ab_te_v.push_back(makeTransformerEngineTensor(
+        alpha_b[g].data_ptr(), std::vector<size_t>{static_cast<size_t>(N)}, DType::kFloat32));
+    d_te_v.push_back(makeTransformerEngineTensor(
+        d[g].data_ptr(), std::vector<size_t>{static_cast<size_t>(M), static_cast<size_t>(N)},
+        DType::kBFloat16));
+  }
+
+  for (int64_t g = 0; g < G; ++g) {
+    a_arr[g] = a_te_v[g].data();
+    b_arr[g] = b_te_v[g].data();
+    a_sf_arr[g] = a_sf_te_v[g].data();
+    b_sf_arr[g] = b_sf_te_v[g].data();
+    aa_arr[g] = aa_te_v[g].data();
+    ab_arr[g] = ab_te_v[g].data();
+    d_arr[g] = d_te_v[g].data();
+  }
+
+  nvte_nvfp4_cutlass_grouped_per_token_gemm(static_cast<int>(G), a_arr.data(), b_arr.data(),
+                                            a_sf_arr.data(), b_sf_arr.data(), aa_arr.data(),
+                                            ab_arr.data(), d_arr.data(), stream);
+}
+
 }  // namespace transformer_engine::pytorch

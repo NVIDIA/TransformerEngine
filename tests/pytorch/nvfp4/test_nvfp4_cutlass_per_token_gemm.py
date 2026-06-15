@@ -28,7 +28,7 @@ M, N, K % 256 == 0 (kernel + per-token quant alignment).
 from __future__ import annotations
 
 import os
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 
 import pytest
 import torch
@@ -71,6 +71,11 @@ _GATED_SM100 = pytest.mark.skipif(
 _GATED_HAS_KERNEL = pytest.mark.skipif(
     not hasattr(tex, "nvfp4_cutlass_per_token_gemm"),
     reason="tex.nvfp4_cutlass_per_token_gemm not built into this binary.",
+)
+
+_GATED_HAS_GROUPED = pytest.mark.skipif(
+    not hasattr(tex, "nvfp4_cutlass_grouped_per_token_gemm"),
+    reason="tex.nvfp4_cutlass_grouped_per_token_gemm not built into this binary.",
 )
 
 
@@ -886,6 +891,85 @@ def test_e2e_bwd_per_token_vs_per_tensor_snr(M: int, N: int, K: int) -> None:
     ), f"per-token wgrad rel_l2={snr_cf_wgrad['rel_l2']:.4f} > floor."
 
 
+# ============================================================================
+# Grouped (MoE) per-token GEMM parity
+# ============================================================================
+# The grouped kernel (tex.nvfp4_cutlass_grouped_per_token_gemm) must produce,
+# for every group g, the SAME result as the dense per-token GEMM (_run_fused)
+# run on that group alone -- bit-exact, since both share the same mainloop +
+# EVT. If grouped == dense for every group, the ptr-array plumbing (per-group
+# pointers / strides / SF layouts / alpha vectors) is correct.
+#
+# (M_g list, N, K). M_g vary per group (the point of grouped MoE); N, K shared.
+# All % 128 (kernel contract under 1-CTA MmaTile (128, 128, 256)).
+_GROUPED_CASES = [
+    ([128, 256, 384, 512], 256, 256),  # 4 experts, increasing token counts
+    ([256, 256, 256, 256, 256, 256, 256, 256], 512, 256),  # 8 balanced experts
+    ([128, 512, 128, 1024], 1024, 768),  # imbalanced, non-pow2 K
+    ([256], 256, 256),  # single group (degenerate)
+    # Larger, MoE-realistic shapes (big N/K, larger token counts).
+    ([512, 1024, 1536, 2048], 2048, 2048),  # 4 experts, wide N/K
+    ([1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024], 4096, 2048),  # 8 experts, wide N
+    ([2048, 2048], 2048, 4096),  # large K contraction
+    ([768, 2048, 384, 2560], 3072, 1536),  # imbalanced, large non-pow2 N/K
+]
+
+
+@_GATED_SM100
+@_GATED_HAS_KERNEL
+@_GATED_HAS_GROUPED
+@pytest.mark.parametrize("Ms,N,K", _GROUPED_CASES)
+def test_grouped_matches_dense_per_group(Ms: List[int], N: int, K: int) -> None:
+    """grouped[g] must equal dense(group g) bit-exact for every group."""
+    device = torch.device("cuda")
+    torch.manual_seed(0xACE1)
+    G = len(Ms)
+
+    a_data_l, b_data_l, a_sf_l, b_sf_l, alpha_a_l, alpha_b_l, d_l = ([] for _ in range(7))
+    goldens = []
+
+    for M in Ms:
+        a = (torch.randn((M, K), dtype=torch.bfloat16, device=device) * 0.5).contiguous()
+        b = (torch.randn((N, K), dtype=torch.bfloat16, device=device) * 0.5).contiguous()
+        a_q, a_sf, a_amax = _quantize_per_token(a)
+        b_q, b_sf, b_amax = _quantize_per_token(b)
+
+        # Golden = dense per-token GEMM for this group (same kernel, no grouping).
+        goldens.append(_run_fused(a_q, b_q, a_sf, b_sf, a_amax, b_amax, M, N, K))
+
+        a_data_l.append(a_q)
+        b_data_l.append(b_q)
+        a_sf_l.append(a_sf.reshape(-1))
+        b_sf_l.append(b_sf.reshape(-1))
+        alpha_a_l.append(a_amax)
+        alpha_b_l.append(b_amax)
+        d_l.append(torch.empty((M, N), dtype=torch.bfloat16, device=device))
+
+    tex.nvfp4_cutlass_grouped_per_token_gemm(
+        a_data_l,
+        b_data_l,
+        a_sf_l,
+        b_sf_l,
+        alpha_a_l,
+        alpha_b_l,
+        d_l,
+        False,  # a_sf_swizzled
+        False,  # b_sf_swizzled
+    )
+
+    for g in range(G):
+        max_abs = (d_l[g].float() - goldens[g].float()).abs().max().item()
+        print(f"  group {g:>2} M={Ms[g]:>5} N={N} K={K}: max_abs_vs_dense={max_abs:.3e}")
+        # Same mainloop + EVT, just grouped plumbing -> expect bit-exact.
+        torch.testing.assert_close(
+            d_l[g].float(),
+            goldens[g].float(),
+            rtol=0.0,
+            atol=0.0,
+            msg=f"grouped group {g} (M={Ms[g]}) != dense golden",
+        )
+
+
 if __name__ == "__main__":
     if not _has_sm100():
         print("SKIP: not SM100")
@@ -904,4 +988,7 @@ if __name__ == "__main__":
             test_e2e_bwd_per_token_vs_bf16_ground_truth(*shape)
         for shape in _E2E_BWD_SHAPES:
             test_e2e_bwd_per_token_vs_per_tensor_snr(*shape)
+        if hasattr(tex, "nvfp4_cutlass_grouped_per_token_gemm"):
+            for Ms, N, K in _GROUPED_CASES:
+                test_grouped_matches_dense_per_group(Ms, N, K)
         print("All tests passed.")

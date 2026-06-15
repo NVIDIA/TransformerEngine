@@ -494,6 +494,15 @@ void nvfp4_cutlass_per_token_gemm(const at::Tensor &a_data, const at::Tensor &b_
                                   at::Tensor d, int64_t m, int64_t n, int64_t k, bool a_sf_swizzled,
                                   bool b_sf_swizzled);
 
+// Grouped (MoE) per-token NVFP4 GEMM. Each list holds one entry per group:
+//   D_g[i,j] = bf16(alpha_a_g[i] * alpha_b_g[j] * (A_g @ B_g^T)[i,j]).
+// SF inner block scales are swizzled per group unless *_sf_swizzled is set.
+// Empty experts (M_g == 0) must be dropped by the caller.
+void nvfp4_cutlass_grouped_per_token_gemm(
+    std::vector<at::Tensor> a_data, std::vector<at::Tensor> b_data, std::vector<at::Tensor> a_sf,
+    std::vector<at::Tensor> b_sf, std::vector<at::Tensor> alpha_a, std::vector<at::Tensor> alpha_b,
+    std::vector<at::Tensor> d, bool a_sf_swizzled, bool b_sf_swizzled);
+
 // with_swizzle=true makes K2 write rowwise scale_inv in the cuBLAS LT
 // swizzled tile layout (skips the standalone nvte_swizzle_scaling_factors).
 // Has no effect on colwise scale_inv (rowwise-only for now).
