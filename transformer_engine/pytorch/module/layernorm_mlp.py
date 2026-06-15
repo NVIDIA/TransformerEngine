@@ -23,6 +23,7 @@ from .base import (
     fill_userbuffers_buffer_for_all_gather,
     _ub_communicators,
     get_ub,
+    get_ub_is_fp8,
     is_ub_initialized,
     using_cublasmp_backend,
     quantize_weight,
@@ -2292,7 +2293,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
         fp8_output = False
         if self.ub_overlap_rs:
-            if get_ub("fc2_fprop", FP8GlobalStateManager.is_fp8_enabled()).is_fp8_ubuf():
+            if get_ub_is_fp8("fc2_fprop", FP8GlobalStateManager.is_fp8_enabled()):
                 fp8_output = True
 
         inp = self.prepare_forward(inp, num_gemms=2)

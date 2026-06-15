@@ -21,6 +21,7 @@ from .base import (
     fill_userbuffers_buffer_for_all_gather,
     get_dummy_wgrad,
     get_ub,
+    get_ub_is_fp8,
     is_ub_initialized,
     using_cublasmp_backend,
     quantize_weight,
@@ -1228,8 +1229,11 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
                 elif bwd_args.backward_input_needs_gather:
                     # Gathered input tensor is internal
                     clear_tensor_data(inputmat_total)
-                if bwd_args.parallel_mode == "row" and bwd_args.sequence_parallel:
-                    # Gathered grad output tensor is internal
+                if bwd_args.sequence_parallel and (
+                    bwd_args.parallel_mode == "row"
+                    or (bwd_args.parallel_mode == "column" and bwd_args.fp8)
+                ):
+                    # Gathered (row-SP) or quantized (column-SP FP8) grad_output is internal
                     clear_tensor_data(grad_output)
 
             # Update grad input if overlapping reduce-scatter with wgrad GEMM
@@ -1816,14 +1820,10 @@ class Linear(TransformerEngineBaseModule):
             is_first_microbatch = False
 
         if self.ub_overlap_rs_fprop:
-            if get_ub(
-                self.ub_name + "_fprop", FP8GlobalStateManager.is_fp8_enabled()
-            ).is_fp8_ubuf():
+            if get_ub_is_fp8(self.ub_name + "_fprop", FP8GlobalStateManager.is_fp8_enabled()):
                 fp8_output = True
         if self.ub_overlap_rs_dgrad:
-            if get_ub(
-                self.ub_name + "_dgrad", FP8GlobalStateManager.is_fp8_enabled()
-            ).is_fp8_ubuf():
+            if get_ub_is_fp8(self.ub_name + "_dgrad", FP8GlobalStateManager.is_fp8_enabled()):
                 fp8_grad = True
 
         inp = self.prepare_forward(inp, allow_non_contiguous=isinstance(inp, QuantizedTensor))
