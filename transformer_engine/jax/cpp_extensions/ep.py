@@ -237,6 +237,14 @@ def _ep_spec_ok(spec, trailing_count):
     return all(a in allowed for a in elts)
 
 
+def _result_tree_like(result_infos, shardings):
+    if isinstance(result_infos, list):
+        return list(shardings)
+    if isinstance(result_infos, tuple):
+        return tuple(shardings)
+    return tuple(shardings)
+
+
 # ── ep_prepare ──────────────────────────────────────────────────────────────
 
 
@@ -332,6 +340,29 @@ class EpPreparePrimitive(BasePrimitive):
             )
 
         return mesh, sharded_impl, (tc_sharding, hm_sharding), arg_shardings
+
+    @staticmethod
+    def infer_sharding_from_operands(
+        handle_id,
+        dispatch_output_per_expert_alignment,
+        is_outer,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
+        del handle_id, dispatch_output_per_expert_alignment, is_outer
+        gsr = global_mesh_resource()
+        ep_axis = gsr.ep_resource
+        outer_axes = _dispatch_input_outer_axes()
+        idx_spec = arg_infos[0].sharding.spec
+        if not _leading_axis_ok(idx_spec, ep_axis, outer_axes):
+            raise NotImplementedError(
+                "EpPrepare: topk_idx leading dims must shard on ep_resource"
+                f" ('{ep_axis}') and/or {outer_axes}, with the topk dim replicated;"
+                f" got spec={idx_spec}."
+        )
+        out_sharding = NamedSharding(mesh, _ep_output_spec(None))
+        return _result_tree_like(result_infos, (out_sharding, out_sharding))
 
     @staticmethod
     def shardy_sharding_rule(*args):
@@ -485,6 +516,35 @@ class EpDispatchPrimitive(BasePrimitive):
             )
 
         return mesh, sharded_impl, out_shardings, arg_shardings
+
+    @staticmethod
+    def infer_sharding_from_operands(
+        handle_id,
+        recv_capacity_per_rank,
+        top_k,
+        is_outer,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
+        del handle_id, recv_capacity_per_rank, top_k, is_outer
+        gsr = global_mesh_resource()
+        ep_axis = gsr.ep_resource
+        outer_axes = _dispatch_input_outer_axes()
+        tokens_spec = arg_infos[2].sharding.spec
+        if not _leading_axis_ok(tokens_spec, ep_axis, outer_axes):
+            raise NotImplementedError(
+                "EpDispatch: tokens leading dims must shard on ep_resource"
+                f" ('{ep_axis}') and/or {outer_axes}, hidden dim replicated;"
+                f" got spec={tokens_spec}."
+            )
+        return _result_tree_like(
+            result_infos,
+            (
+                NamedSharding(mesh, _ep_output_spec(None, None)),
+                NamedSharding(mesh, _ep_output_spec(None)),
+            ),
+        )
 
     @staticmethod
     def shardy_sharding_rule(*args):
@@ -644,6 +704,21 @@ class EpCombinePrimitive(BasePrimitive):
         return mesh, sharded_impl, out_sharding, arg_shardings
 
     @staticmethod
+    def infer_sharding_from_operands(
+        handle_id, out_leading_shape, out_partition_spec, mesh, arg_infos, result_infos
+    ):
+        del handle_id, result_infos
+        eo_spec = arg_infos[1].sharding.spec
+        if not _ep_spec_ok(eo_spec, trailing_count=2):
+            raise NotImplementedError(
+                "EpCombine: expert_out must be sharded as PartitionSpec(ep_resource,"
+                " None, None) (or ((dp, ep), None, None) when dp/fsdp is set)"
+                f" over [num_procs, recv_pr, H]; got spec={eo_spec}."
+            )
+        resolved = _resolve_out_partition_spec(out_partition_spec, len(out_leading_shape))
+        return NamedSharding(mesh, PartitionSpec(*resolved))
+
+    @staticmethod
     def shardy_sharding_rule(*args):
         # Signature: (*static_args, mesh, value_types, result_types). Static args:
         # (handle_id, out_leading_shape, out_partition_spec).
@@ -792,6 +867,40 @@ class EpDispatchBwdPrimitive(BasePrimitive):
         return mesh, sharded_impl, out_shardings, arg_shardings
 
     @staticmethod
+    def infer_sharding_from_operands(
+        handle_id,
+        top_k,
+        out_leading_shape,
+        out_partition_spec,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
+        del handle_id, top_k
+        g_spec = arg_infos[1].sharding.spec
+        if not _ep_spec_ok(g_spec, trailing_count=2):
+            raise NotImplementedError(
+                "EpDispatchBwd: grad must be sharded as PartitionSpec(ep_resource,"
+                " None, None) (or ((dp, ep), None, None) when dp/fsdp is set)"
+                f" over [num_procs, recv_pr, H]; got spec={g_spec}."
+            )
+        gw_spec = arg_infos[2].sharding.spec
+        if not _ep_spec_ok(gw_spec, trailing_count=1):
+            raise NotImplementedError(
+                "EpDispatchBwd: g_recv_topk_weights must be sharded as"
+                " PartitionSpec(ep_resource, None) (or ((dp, ep), None) when dp/fsdp is set)"
+                f" over [num_procs, recv_pr]; got spec={gw_spec}."
+            )
+        resolved = _resolve_out_partition_spec(out_partition_spec, len(out_leading_shape))
+        return _result_tree_like(
+            result_infos,
+            (
+                NamedSharding(mesh, PartitionSpec(*resolved)),
+                NamedSharding(mesh, PartitionSpec(*resolved, None)),
+            ),
+        )
+
+    @staticmethod
     def shardy_sharding_rule(*args):
         # Signature: (*static_args, mesh, value_types, result_types). Result rank
         # follows out_leading_shape (static arg #2): rank = len(out_leading) + 1.
@@ -870,6 +979,13 @@ class EpCombineBwdPrimitive(BasePrimitive):
             )
 
         return mesh, sharded_impl, out_sharding, arg_shardings
+
+    @staticmethod
+    def infer_sharding_from_operands(
+        handle_id, recv_capacity_per_rank, is_outer, mesh, arg_infos, result_infos
+    ):
+        del handle_id, recv_capacity_per_rank, is_outer, arg_infos, result_infos
+        return NamedSharding(mesh, _ep_output_spec(None, None))
 
     @staticmethod
     def shardy_sharding_rule(*args):

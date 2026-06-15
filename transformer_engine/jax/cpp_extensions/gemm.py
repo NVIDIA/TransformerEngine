@@ -1974,6 +1974,49 @@ class GroupedGemmPrimitive(BasePrimitive):
         )
 
     @staticmethod
+    def infer_sharding_from_operands(
+        lhs_is_trans,
+        rhs_is_trans,
+        scaling_mode,
+        out_dtype,
+        has_bias,
+        use_async_d2h_group_sizes,
+        use_v2_ffi,
+        lhs_axis_boundary,
+        rhs_axis_boundary,
+        out_shape,
+        lhs_left_size,
+        lhs_right_size,
+        rhs_left_size,
+        rhs_right_size,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
+        del (
+            rhs_is_trans,
+            scaling_mode,
+            out_dtype,
+            has_bias,
+            use_async_d2h_group_sizes,
+            use_v2_ffi,
+            rhs_axis_boundary,
+            lhs_left_size,
+            lhs_right_size,
+            rhs_left_size,
+            rhs_right_size,
+        )
+        _, out_spec, _ = GroupedGemmPrimitive._parse_partition_specs(
+            mesh,
+            arg_infos,
+            result_infos,
+            out_shape,
+            lhs_is_trans=lhs_is_trans,
+            lhs_axis_boundary=lhs_axis_boundary,
+        )
+        return NamedSharding(mesh, PartitionSpec(*out_spec))
+
+    @staticmethod
     def partition(
         lhs_is_trans,
         rhs_is_trans,

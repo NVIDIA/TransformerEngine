@@ -64,6 +64,18 @@ def _flat_data_spec(input_spec):
     return (merge_axis_specs(*input_spec),)
 
 
+def _grouped_data_spec(input_spec, flatten_axis):
+    return _contiguous_flat_input_spec(input_spec, flatten_axis)
+
+
+def _result_tree_like(result_infos, shardings):
+    if isinstance(result_infos, list):
+        return list(shardings)
+    if isinstance(result_infos, tuple):
+        return tuple(shardings)
+    return tuple(shardings)
+
+
 def _normalize_flatten_axis(flatten_axis, ndim):
     return flatten_axis + ndim if flatten_axis < 0 else flatten_axis
 
@@ -1128,7 +1140,7 @@ class GroupedQuantizePrimitive(BasePrimitive):
         """
         dtype = dtypes.canonicalize_dtype(x_aval.dtype)
         assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
-        out_shape = math.prod(x_aval.shape)
+        out_shape = x_aval.shape
         # TODO(Phuong): can scale_aval be None?
         assert scale_aval is None or scale_aval.dtype == jnp.float32
 
@@ -1306,10 +1318,11 @@ class GroupedQuantizePrimitive(BasePrimitive):
             group_spec = (x_spec[0],)
         _warn_if_axes_ignored("group_sizes", original_group_spec, group_spec)
         flat_spec = _flat_data_spec(x_spec)
+        data_spec = _grouped_data_spec(x_spec, flatten_axis)
         replicated_spec = (None,)
 
-        rowwise_out_spec = flat_spec if q_layout.has_rowwise else replicated_spec
-        colwise_out_spec = flat_spec if q_layout.has_colwise else replicated_spec
+        rowwise_out_spec = data_spec if q_layout.has_rowwise else replicated_spec
+        colwise_out_spec = data_spec if q_layout.has_colwise else replicated_spec
 
         rowwise_scale_inv_spec = replicated_spec
         colwise_scale_inv_spec = replicated_spec
@@ -1331,6 +1344,33 @@ class GroupedQuantizePrimitive(BasePrimitive):
                 colwise_scale_inv_spec,
                 updated_amax_spec,
             ),
+        )
+
+    @staticmethod
+    def infer_sharding_from_operands(
+        out_dtype,
+        scaling_mode,
+        q_layout,
+        flatten_axis,
+        scale_dtype,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
+        del out_dtype, scale_dtype
+        _, _, out_specs = GroupedQuantizePrimitive._parse_partition_specs(
+            scaling_mode, q_layout, flatten_axis, mesh, arg_infos
+        )
+        return _result_tree_like(
+            result_infos,
+            (
+                NamedSharding(
+                    mesh,
+                    PartitionSpec(*spec),
+                    desc=f"GroupedQuantizePrimitive.out_sharding_{idx}",
+                )
+                for idx, spec in enumerate(out_specs)
+            )
         )
 
     @staticmethod
@@ -1406,16 +1446,22 @@ class GroupedQuantizePrimitive(BasePrimitive):
         value_types,
         result_types,
     ):
-        del out_dtype, scale_dtype, mesh, result_types, flatten_axis
+        del out_dtype, scale_dtype, mesh, result_types
 
         prefix = "GroupedQuantize"
         input_spec = tuple(f"{prefix}_x_{i}" for i in range(len(value_types[0].shape)))
+        data_spec = tuple(
+            input_spec[i]
+            if i < _normalize_flatten_axis(flatten_axis, len(input_spec))
+            else f"{prefix}_data_{i}"
+            for i in range(len(input_spec))
+        )
         flat_spec = (f"{prefix}_flat",)
         group_spec = (BATCHING + f"{prefix}_group",)
         scalar_spec = (BATCHING + f"{prefix}_scalar",)
 
-        rowwise_out_spec = flat_spec if q_layout.has_rowwise else scalar_spec
-        colwise_out_spec = flat_spec if q_layout.has_colwise else scalar_spec
+        rowwise_out_spec = data_spec if q_layout.has_rowwise else scalar_spec
+        colwise_out_spec = data_spec if q_layout.has_colwise else scalar_spec
 
         if ScalingMode(scaling_mode).is_block_scaling:
             rowwise_scale_spec = flat_spec if q_layout.has_rowwise else scalar_spec

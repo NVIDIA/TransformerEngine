@@ -428,7 +428,6 @@ class GroupedScaledTensor1x(ScaledTensor1x):
 
     def __post_init__(self):
         assert self.scale_inv.ndim == 1, "Only support flattened scale_inv"
-        assert self.data.ndim == 1, "Only support flattened data"
         assert self.flatten_axis > 0
 
         data_ndim = len(self.original_shape)

@@ -4,26 +4,19 @@
 """JAX/TE base custom ops"""
 import os
 import re
+import inspect
 import warnings
 from abc import ABCMeta, abstractmethod
 from functools import partial
 
-import jax
 from jax.extend import core
 from jax.interpreters import xla, mlir
 from jax.experimental.custom_partitioning import custom_partitioning
 from jax._src.interpreters import batching
 from jax._src import dispatch
 from jax import ffi
-from packaging.version import Version as PkgVersion
 
 import transformer_engine_jax
-
-# GSPMD sharding propagation (infer_sharding_from_operands) is removed in JAX > 0.9.1.
-# Only register it for older JAX versions to maintain backwards compatibility.
-# For JAX > 0.9.1, infer_sharding_from_operands is also removed from def_partition's signature,
-# so it must not be passed at all.
-_JAX_GSPMD_SUPPORTED = PkgVersion(jax.__version__) <= PkgVersion("0.9.1")
 
 
 class BasePrimitive(metaclass=ABCMeta):
@@ -235,7 +228,7 @@ def register_primitive(cls, outer_only=False):
     batching.primitive_batchers[outer_p] = cls.batcher
     outer_p_lower = custom_partitioning(cls.impl, static_argnums=cls.impl_static_args)
 
-    if _JAX_GSPMD_SUPPORTED:
+    if "infer_sharding_from_operands" in inspect.signature(outer_p_lower.def_partition).parameters:
         fn = cls.__dict__.get("infer_sharding_from_operands")
         if fn is not None:
             actual_fn = (

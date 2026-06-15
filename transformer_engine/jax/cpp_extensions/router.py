@@ -28,6 +28,14 @@ class ScoreFunction(IntEnum):
     SOFTMAX = int(JAXX_Score_Function.SOFTMAX)
 
 
+def _result_tree_like(result_infos, shardings):
+    if isinstance(result_infos, list):
+        return list(shardings)
+    if isinstance(result_infos, tuple):
+        return tuple(shardings)
+    return tuple(shardings)
+
+
 # =========================================== ==================================
 # Fused Top-K with Score Function - Forward
 # =============================================================================
@@ -204,6 +212,32 @@ class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
         return mesh, sharded_impl, out_shardings, arg_shardings
 
     @staticmethod
+    def infer_sharding_from_operands(
+        topk,
+        use_pre_softmax,
+        num_groups,
+        group_topk,
+        scaling_factor,
+        score_function,
+        compute_aux_scores,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
+        del (
+            topk,
+            use_pre_softmax,
+            num_groups,
+            group_topk,
+            scaling_factor,
+            score_function,
+            compute_aux_scores,
+        )
+        logits_spec = get_padded_spec(arg_infos[0])
+        out_sharding = NamedSharding(mesh, PartitionSpec(*logits_spec))
+        return _result_tree_like(result_infos, (out_sharding, out_sharding, out_sharding))
+
+    @staticmethod
     def shardy_sharding_rule(*args):
         del args
         return (
@@ -369,6 +403,22 @@ class FusedTopkWithScoreFunctionBwdPrimitive(BasePrimitive):
         return mesh, sharded_impl, out_sharding, arg_shardings
 
     @staticmethod
+    def infer_sharding_from_operands(
+        topk,
+        use_pre_softmax,
+        scaling_factor,
+        score_function,
+        compute_aux_scores,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
+        del topk, use_pre_softmax, scaling_factor, score_function, compute_aux_scores
+        del result_infos
+        grad_spec = get_padded_spec(arg_infos[2])
+        return NamedSharding(mesh, PartitionSpec(*grad_spec))
+
+    @staticmethod
     def shardy_sharding_rule(*args):
         del args
         return (
@@ -462,6 +512,14 @@ class FusedMoEAuxLossFwdPrimitive(BasePrimitive):
             )
 
         return mesh, sharded_impl, out_shardings, arg_shardings
+
+    @staticmethod
+    def infer_sharding_from_operands(topk, coeff, mesh, arg_infos, result_infos):
+        del topk, coeff, arg_infos
+        return _result_tree_like(
+            result_infos,
+            (NamedSharding(mesh, PartitionSpec()), NamedSharding(mesh, PartitionSpec(None))),
+        )
 
     @staticmethod
     def shardy_sharding_rule(*args):
@@ -563,6 +621,11 @@ class FusedMoEAuxLossBwdPrimitive(BasePrimitive):
             )
 
         return mesh, sharded_impl, out_sharding, arg_shardings
+
+    @staticmethod
+    def infer_sharding_from_operands(num_tokens, mesh, arg_infos, result_infos):
+        del num_tokens, arg_infos, result_infos
+        return NamedSharding(mesh, PartitionSpec(None, None))
 
     @staticmethod
     def shardy_sharding_rule(*args):
