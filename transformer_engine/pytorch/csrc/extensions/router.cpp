@@ -14,6 +14,14 @@ namespace transformer_engine::pytorch {
 static std::map<std::string, int> score_function_map = {
     {"sigmoid", 0}, {"softmax", 1}, {"sqrtsoftplus", 2}};
 
+static int get_score_function_value(const std::string &score_function) {
+  auto it = score_function_map.find(score_function);
+  TORCH_CHECK(it != score_function_map.end(),
+              "score_function must be softmax, sigmoid or sqrtsoftplus for router fusion, got ",
+              score_function);
+  return it->second;
+}
+
 // Allocate a routing_map output tensor:
 //   BYTEMAP   -> bool [*leading_dims, num_experts]
 //   BITMAP_U8 -> uint8[*leading_dims, ceil(num_experts/8)], LSB-first
@@ -130,13 +138,13 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fw
     nvte_fused_topk_with_score_function_forward_with_indices(
         logits_cu.data(), static_cast<int>(num_tokens), static_cast<int>(num_experts), topk,
         use_pre_softmax, num_groups_value, group_topk_value, scaling_factor_value,
-        score_function_map[score_function], expert_bias_cu.data(), probs_cu.data(),
+        get_score_function_value(score_function), expert_bias_cu.data(), probs_cu.data(),
         routing_map_cu.data(), intermediate_output_cu.data(), at::cuda::getCurrentCUDAStream());
   } else {
     nvte_fused_topk_with_score_function_forward_v2(
         logits_cu.data(), static_cast<int>(num_tokens), static_cast<int>(num_experts), topk,
         use_pre_softmax, num_groups_value, group_topk_value, scaling_factor_value,
-        score_function_map[score_function], expert_bias_cu.data(), probs_cu.data(),
+        get_score_function_value(score_function), expert_bias_cu.data(), probs_cu.data(),
         routing_map_cu.data(), static_cast<NVTERoutingMapFormat>(routing_map_format),
         intermediate_output_cu.data(), at::cuda::getCurrentCUDAStream());
   }
@@ -166,7 +174,7 @@ void fused_topk_with_score_function_bwd(at::Tensor routing_map, at::Tensor inter
   }
 
   auto scaling_factor_value = scaling_factor.has_value() ? scaling_factor.value() : 1.0f;
-  auto score_function_value = score_function_map[score_function];
+  auto score_function_value = get_score_function_value(score_function);
 
   const std::vector<size_t> shape_2d = {static_cast<size_t>(num_tokens),
                                         static_cast<size_t>(num_experts)};
@@ -217,7 +225,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_score_for_moe_aux_loss_fwd(
   TORCH_CHECK(score_function == "softmax" || score_function == "sigmoid" ||
                   score_function == "sqrtsoftplus",
               "score_function must be softmax, sigmoid or sqrtsoftplus for router fusion");
-  int score_function_value = score_function_map[score_function];
+  int score_function_value = get_score_function_value(score_function);
 
   at::Tensor scores = at::empty(sizes, at::dtype(at::kFloat).device(at::kCUDA));
   at::Tensor routing_map =
@@ -261,7 +269,7 @@ void fused_score_for_moe_aux_loss_bwd(at::Tensor intermediate_output, at::Tensor
   int64_t num_tokens =
       std::accumulate(sizes.begin(), sizes.end() - 1, int64_t{1}, std::multiplies<int64_t>());
 
-  int score_function_value = score_function_map[score_function];
+  int score_function_value = get_score_function_value(score_function);
 
   const std::vector<size_t> shape_2d = {static_cast<size_t>(num_tokens),
                                         static_cast<size_t>(num_experts)};

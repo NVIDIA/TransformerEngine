@@ -556,6 +556,16 @@ void fused_topk_with_score_function_forward_kernel_launcher(
   if (group_topk > 0) {
     NVTE_CHECK(topk % group_topk == 0, "topk must be divisible by group_topk, got topk=", topk,
                " group_topk=", group_topk);
+    NVTE_CHECK(num_groups > 0, "num_groups must be positive when group_topk > 0, got ", num_groups);
+    NVTE_CHECK(group_topk <= num_groups,
+               "group_topk must be <= num_groups, got group_topk=", group_topk,
+               " num_groups=", num_groups);
+    NVTE_CHECK(num_experts % num_groups == 0,
+               "num_experts must be divisible by num_groups, got num_experts=", num_experts,
+               " num_groups=", num_groups);
+    NVTE_CHECK(topk / group_topk <= num_experts / num_groups,
+               "per-group topk must be <= group size, got per_group_topk=", topk / group_topk,
+               " group_size=", num_experts / num_groups);
   }
   size_t num_token_per_block = kThreadsPerBlock / kThreadsPerWarp;
   size_t total_blocks = (num_tokens + num_token_per_block - 1) / num_token_per_block;
@@ -648,6 +658,16 @@ void fused_topk_with_score_function_forward_with_indices_kernel_launcher(
   if (group_topk > 0) {
     NVTE_CHECK(topk % group_topk == 0, "topk must be divisible by group_topk, got topk=", topk,
                " group_topk=", group_topk);
+    NVTE_CHECK(num_groups > 0, "num_groups must be positive when group_topk > 0, got ", num_groups);
+    NVTE_CHECK(group_topk <= num_groups,
+               "group_topk must be <= num_groups, got group_topk=", group_topk,
+               " num_groups=", num_groups);
+    NVTE_CHECK(num_experts % num_groups == 0,
+               "num_experts must be divisible by num_groups, got num_experts=", num_experts,
+               " num_groups=", num_groups);
+    NVTE_CHECK(topk / group_topk <= num_experts / num_groups,
+               "per-group topk must be <= group size, got per_group_topk=", topk / group_topk,
+               " group_size=", num_experts / num_groups);
   }
   if constexpr (std::is_same_v<IndexType, int16_t>) {
     NVTE_CHECK(num_experts <= INT16_MAX, "int16 topk indices require num_experts <= ", INT16_MAX,
@@ -745,6 +765,7 @@ void fused_topk_with_score_function_forward(const Tensor logits, int num_tokens,
                                             Tensor probs, Tensor routing_map,
                                             NVTERoutingMapFormat routing_map_format,
                                             Tensor intermediate_output, cudaStream_t stream) {
+  check_routing_map_format(routing_map_format);
   NVTE_CHECK(num_tokens > 0 && num_experts > 0,
              "num_tokens and num_experts must be positive; got num_tokens=", num_tokens,
              ", num_experts=", num_experts);
@@ -1139,6 +1160,7 @@ void fused_topk_with_score_function_backward(const Tensor &routing_map,
                                              int num_experts, int topk, bool use_pre_softmax,
                                              float scaling_factor, int score_function,
                                              Tensor &grad_logits, cudaStream_t stream) {
+  check_routing_map_format(routing_map_format);
   NVTE_CHECK(num_tokens > 0 && num_experts > 0,
              "num_tokens and num_experts must be positive; got num_tokens=", num_tokens,
              ", num_experts=", num_experts);

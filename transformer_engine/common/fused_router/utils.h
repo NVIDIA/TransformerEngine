@@ -12,10 +12,18 @@
 #include "../util/logging.h"
 #include "../util/system.h"
 #include "../utils.cuh"
+#include "transformer_engine/fused_router.h"
 #include "transformer_engine/transformer_engine.h"
 
 namespace transformer_engine {
 namespace fused_router {
+
+inline void check_routing_map_format(NVTERoutingMapFormat routing_map_format) {
+  NVTE_CHECK(routing_map_format == NVTE_ROUTING_MAP_FORMAT_BYTEMAP ||
+                 routing_map_format == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8,
+             "routing_map_format must be BYTEMAP (0) or BITMAP_U8 (1), got ",
+             static_cast<int>(routing_map_format));
+}
 
 // Topk values below this threshold use naive O(K*E) selection;
 // at or above it, use radix O(E) selection.  Configurable via
