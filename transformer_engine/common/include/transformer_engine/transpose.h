@@ -93,6 +93,20 @@ void nvte_fp8_transpose_dbias(const NVTETensor input, NVTETensor transposed_outp
 void nvte_multi_cast_transpose(size_t num_tensors, const NVTETensor* input_list,
                                NVTETensor* output_list, cudaStream_t stream);
 
+/*! \brief Cast multiple input tensors to 1D block-scaled FP8 tensors.
+ *
+ *  \param[in]     num_tensors         Number of tensors.
+ *  \param[in]     input_list          List of input tensors.
+ *  \param[in,out] output_list         List of 1D block-scaled FP8 output tensors.
+ *  \param[in]     quant_config        Quantization configuration.
+ *  \param[in]     stream              CUDA stream used for the operation.
+ */
+void nvte_multi_quantize_transpose_vector_blockwise(size_t num_tensors,
+                                                    const NVTETensor* input_list,
+                                                    NVTETensor* output_list,
+                                                    const NVTEQuantizationConfig quant_config,
+                                                    cudaStream_t stream);
+
 /*! \brief Compute backward of GeLU operation on the input, then cast and transpose.
  *         Additionally, reduce the result of the GeLU backward along the first dimension.
  *

@@ -141,6 +141,62 @@ void multi_tensor_quantize_impl(const std::vector<TensorWrapper> &input_list,
       nvte_multi_cast_transpose(nvte_tensor_input_list.size(), nvte_tensor_input_list.data(),
                                 nvte_tensor_output_list.data(), at::cuda::getCurrentCUDAStream());
     });
+    return;
+  }
+
+  // Fused kernel for 1D FP8 blockwise multi-tensor quantize.
+  bool with_blockwise_fused_kernel = true;
+  Float8BlockQuantizer *first_blockwise_quantizer = nullptr;
+  for (size_t i = 0; i < num_tensors; i++) {
+    if (!detail::IsFloat8BlockwiseQuantizers(quantizer_py_list[i].ptr())) {
+      with_blockwise_fused_kernel = false;
+      break;
+    }
+
+    auto *blockwise_quantizer = dynamic_cast<Float8BlockQuantizer *>(quantizer_cpp_list[i].get());
+    if (blockwise_quantizer == nullptr ||
+        blockwise_quantizer->get_scaling_mode() != NVTE_BLOCK_SCALING_1D) {
+      with_blockwise_fused_kernel = false;
+      break;
+    }
+
+    if (i == 0) {
+      first_blockwise_quantizer = blockwise_quantizer;
+      continue;
+    }
+
+    if (blockwise_quantizer->dtype != first_blockwise_quantizer->dtype ||
+        blockwise_quantizer->force_pow_2_scales !=
+            first_blockwise_quantizer->force_pow_2_scales ||
+        blockwise_quantizer->amax_epsilon != first_blockwise_quantizer->amax_epsilon ||
+        blockwise_quantizer->all_gather_usage != first_blockwise_quantizer->all_gather_usage ||
+        blockwise_quantizer->rowwise_usage != first_blockwise_quantizer->rowwise_usage ||
+        blockwise_quantizer->columnwise_usage != first_blockwise_quantizer->columnwise_usage) {
+      with_blockwise_fused_kernel = false;
+      break;
+    }
+  }
+
+  if (with_blockwise_fused_kernel && first_blockwise_quantizer != nullptr) {
+    std::vector<NVTETensor> nvte_tensor_input_list;
+    std::vector<NVTETensor> nvte_tensor_output_list;
+    for (size_t i = 0; i < num_tensors; ++i) {
+      nvte_tensor_input_list.push_back(input_list[i].data());
+      nvte_tensor_output_list.push_back(output_list[i].data());
+    }
+
+    QuantizationConfigWrapper quant_config;
+    quant_config.set_force_pow_2_scales(first_blockwise_quantizer->force_pow_2_scales);
+    quant_config.set_amax_epsilon(first_blockwise_quantizer->amax_epsilon);
+    if (first_blockwise_quantizer->all_gather_usage) {
+      quant_config.set_float8_block_scale_tensor_format(Float8BlockScaleTensorFormat::COMPACT);
+    }
+
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_multi_quantize_transpose_vector_blockwise(
+          nvte_tensor_input_list.size(), nvte_tensor_input_list.data(),
+          nvte_tensor_output_list.data(), quant_config, at::cuda::getCurrentCUDAStream());
+    });
   } else {
     // Quantize kernels individually
     for (size_t i = 0; i < num_tensors; ++i) {
