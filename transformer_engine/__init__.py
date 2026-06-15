@@ -33,18 +33,11 @@ def te_platform(default=torch.cuda):
 # Plugin system: if NVTE_ENABLE_PLUGIN=1, replace cuda hardcodes and torch.cuda apis
 if os.environ.get("NVTE_ENABLE_PLUGIN", "0") == "1":
     try:
-        from plugin import load_plugins
-        load_plugins()
-    except ImportError as e:
-        print(f"[TE] NVTE_ENABLE_PLUGIN=1 but plugin import failed: {e}")
-    else:
-        # Only apply patches if load_plugins() succeeded
-        try:
-            from plugin.patches import apply_patches
+        from plugin.patches import apply_patches
 
-            apply_patches()
-        except Exception as e:
-            print(f"[TE] NVTE_ENABLE_PLUGIN=1 but plugin patch apply failed: {e}")
+        apply_patches()
+    except Exception as e:
+        print(f"[TE] NVTE_ENABLE_PLUGIN=1 but plugin patch apply failed: {e}")
 
 
 try:
