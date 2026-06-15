@@ -706,3 +706,103 @@ def test_nvfp4_quantization_noncontiguous_inputs(
         torch.testing.assert_close(qx_amax_t, ref_amax_t, atol=0.0, rtol=0.0)
 
     torch.testing.assert_close(qx_amax, ref_amax, atol=0.0, rtol=0.0)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize(
+    "M, N",
+    [
+        # Aligned tiles
+        (128, 128),
+        (256, 256),
+        (512, 512),
+        (2048, 2048),
+        # Padded tiles (non-multiple of kTileDim=128)
+        (256, 272),
+        (304, 304),
+        (320, 256),
+    ],
+)
+@pytest.mark.parametrize("x_dtype", [torch.float32, torch.bfloat16], ids=str)
+def test_nvfp4_2d_columnwise_only_matches_both_directions(
+    x_dtype: torch.dtype,
+    M: int,
+    N: int,
+):
+    """Bitwise check: 2D NVFP4 with columnwise-only must produce the same
+    columnwise data/scales as the columnwise half of (rowwise + columnwise) 2D.
+
+    Covers both kernels depending on the (dtype, shape) routing:
+    - bf16 with rows % 32 == 0 and cols % 32 == 0 routes to the optimized
+      ``quantize_transpose_nvfp4_2D_kernel`` (instantiated with RETURN_ROWWISE=false),
+      validating that gating the rowwise pass/store leaves the shared
+      ``block_amax_matrix`` and columnwise output bitwise-identical to both-directions.
+    - non-bf16, or cols % 32 != 0, falls back to the columnwise-only 2D-amax-only
+      pass in ``quantize_transpose_vector_blockwise_fp4.cu``.
+    """
+    te_dtype = tex.DType.kFloat4E2M1
+    device = "cuda"
+
+    torch.manual_seed(0)
+    torch.cuda.manual_seed(0)
+    x = torch.randn((M, N), dtype=x_dtype, device=device)
+
+    def _make_quantizer(*, rowwise: bool, columnwise: bool) -> NVFP4Quantizer:
+        return NVFP4Quantizer(
+            fp4_dtype=te_dtype,
+            rowwise=rowwise,
+            columnwise=columnwise,
+            with_amax_reduction=False,
+            amax_reduction_group=None,
+            with_rht=False,
+            with_post_rht_amax=False,
+            with_2d_quantization=True,
+            row_scaled_nvfp4=False,
+        )
+
+    # Reference: produce both directions in a single kernel call.
+    q_both = _make_quantizer(rowwise=True, columnwise=True)
+    out_both = q_both(x)
+
+    # SUT: produce columnwise only (the path that hits the new amax-only pass).
+    q_col_only = _make_quantizer(rowwise=False, columnwise=True)
+    out_col_only = q_col_only(x)
+
+    # Columnwise data/scales/amax must be bitwise identical between the two paths.
+    # If amax_smem is populated differently in the column-only path, scales diverge,
+    # and the FP4 cast (which divides by encode_scale) produces different bytes.
+    assert out_both._columnwise_data is not None
+    assert out_col_only._columnwise_data is not None
+    torch.testing.assert_close(
+        out_col_only._columnwise_data.view(dtype=torch.uint8),
+        out_both._columnwise_data.view(dtype=torch.uint8),
+        atol=0,
+        rtol=0,
+    )
+
+    # Compare only the valid (in-bounds) region of the columnwise scale tensor.
+    # The padded tail (rows K..round_up(K, 128), cols ceil(M/16)..round_up(.., 4))
+    # exists for cuBLAS alignment and is NEVER written by the kernel — its bytes
+    # are whatever ``at::empty`` returned, which differs between two allocations.
+    NVFP4_BLOCK = 16
+    valid_outer = N  # cols of input == rows of columnwise scale tensor
+    valid_inner = (M + NVFP4_BLOCK - 1) // NVFP4_BLOCK
+    assert out_both._columnwise_scale_inv is not None
+    assert out_col_only._columnwise_scale_inv is not None
+    col_sx_both = out_both._columnwise_scale_inv.view(dtype=torch.uint8)
+    col_sx_col_only = out_col_only._columnwise_scale_inv.view(dtype=torch.uint8)
+    torch.testing.assert_close(
+        col_sx_col_only[:valid_outer, :valid_inner],
+        col_sx_both[:valid_outer, :valid_inner],
+        atol=0,
+        rtol=0,
+    )
+
+    assert out_both._amax_columnwise is not None
+    assert out_col_only._amax_columnwise is not None
+    torch.testing.assert_close(
+        out_col_only._amax_columnwise, out_both._amax_columnwise, atol=0, rtol=0
+    )
+
+    # Sanity: column-only path must not allocate a rowwise output.
+    assert out_col_only._rowwise_data is None
