@@ -196,13 +196,19 @@ def load_framework_extension(framework: str) -> None:
     # transformer_engine_torch and register original pybind as _nv for CUDA backend.
     # Only applies to the PyTorch extension — JAX has no plugin stub.
     if os.environ.get("NVTE_ENABLE_PLUGIN", "0") == "1" and framework == "torch":
+        _original_module = sys.modules.get(module_name)
         try:
             from transformer_engine_plugin_fl import load_plugins
+
             sys.modules[module_name + "_nv"] = solib
             load_plugins()
         except Exception as e:
-            # Rollback _nv registration if plugin failed to fully initialize
+            # Rollback to pre-plugin state if plugin failed to fully initialize
             sys.modules.pop(module_name + "_nv", None)
+            if _original_module is not None:
+                sys.modules[module_name] = _original_module
+            else:
+                sys.modules.pop(module_name, None)
             warnings.warn(
                 f"NVTE_ENABLE_PLUGIN=1 but plugin loading failed: {e}",
                 RuntimeWarning,
