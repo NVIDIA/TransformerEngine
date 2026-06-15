@@ -24,6 +24,9 @@ Pick a topic
    * - `Dense GEMMs <jax/dense.html>`_
      - **Available**
      - ``nn.Dense`` → quantized GEMM; single-GPU speedup; multi-GPU speedup;
+   * - `Mixture-of-Experts <jax/moe.html>`_
+     - **Available**
+     - Native BF16 EP MoE → experimental ``_MoEBlock``; BF16 performance;
    * - `Collective GEMMs <jax/collective_gemm.html>`_
      - *Coming soon*
      -
@@ -90,6 +93,7 @@ Conventions used across these documents
    :hidden:
 
    jax/dense
+   jax/moe
    jax/collective_gemm
    jax/attention
    jax/expert_parallelism

@@ -1,0 +1,12 @@
+# Numbers below were captured on 4x NVIDIA GB200.
+# Native JAX BF16 uses the ragged A2A baseline in single-process 4-GPU mode.
+# TE BF16 uses NCCL EP in 4-process mode with one GPU per process.
+
+# MOE_OUTPUT_START
+native JAX BF16 ragged A2A:
+Mean time: 17.085 ms
+
+TE _MoEBlock BF16 with NCCL EP:
+TE _MoEBlock BF16 output: shape=(8, 2048, 1024), dtype=bfloat16
+Mean time: 3.156 ms
+# MOE_OUTPUT_END
