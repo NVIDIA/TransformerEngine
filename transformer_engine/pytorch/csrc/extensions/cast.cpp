@@ -338,6 +338,8 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
   switch (grouped_quantization_mode) {
     case GroupedQuantizationMode::NVFP4_GROUPED_QUANTIZE: {
       // NVFP4 grouped quantization
+      NVTE_CHECK(!last_dims.has_value(),
+                 "group_quantize: varying last dim is not supported with NVFP4.");
       NVFP4Quantizer *nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());
       group_quantize_nvfp4_impl(grouped_input_tensor, grouped_output_tensor_cpp,
                                 nvfp4_quantizer_cpp, at::cuda::getCurrentCUDAStream(), true);
@@ -391,6 +393,8 @@ py::object nvfp4_group_quantize_with_amax(const at::Tensor &tensor, py::handle q
   init_extension();
 
   NVTE_CHECK(tensor.dim() == 2, "Tensor must be 2D");
+  NVTE_CHECK(!last_dims.has_value(),
+             "nvfp4_group_quantize_with_amax: varying last dim is not supported with NVFP4.");
   NVTE_CHECK(rowwise_amax.is_cuda() && columnwise_amax.is_cuda(),
              "Precomputed amax tensors must be CUDA tensors.");
   NVTE_CHECK(

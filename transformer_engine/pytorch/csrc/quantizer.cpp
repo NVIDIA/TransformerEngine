@@ -1582,9 +1582,11 @@ std::pair<GroupedTensorWrapper, py::object> MXFP8Quantizer::create_grouped_tenso
   std::optional<at::Tensor> columnwise_scale_inv;
   const std::vector<size_t> logical_shape_vec = {logical_first_dim, logical_last_dim};
 
-  // For VARYING_BOTH_DIMS each tensor in groupe should have
-  // first dim/last_dim must be a multiple of 128
-  // so scale_inv_numel = data_numel / 128
+  // For VARYING_BOTH_DIMS each tensor in the group must have its first and last
+  // dim be a multiple of 128 (grouped-kernel tile alignment). MXFP8 stores one
+  // E8M0 scale per MXFP8_BLOCK_SIZE (32) elements, so the 128-alignment
+  // guarantees the per-group scale counts tile evenly and the total scale count
+  // is simply scale_inv_numel = data_numel / MXFP8_BLOCK_SIZE (i.e. / 32).
   const bool is_varying_both = first_dims.has_value() && last_dims.has_value();
 
   if (rowwise_usage) {
