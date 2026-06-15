@@ -495,8 +495,6 @@ void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream
 
 /*! \brief Compute scaled prefix-sum offsets for grouped tensors.
  *
-/*! \brief Compute scaled prefix-sum offsets for grouped tensors.
- *
  *  Computes:
  *    output[0] = 0
  *    output[i + 1] = sum_{j=0..i}(split_sizes[j] * stride)
