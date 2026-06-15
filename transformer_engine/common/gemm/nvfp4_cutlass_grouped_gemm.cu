@@ -153,6 +153,43 @@ using ElementADataT = typename ElementA::DataType;
 using ElementBDataT = typename ElementB::DataType;
 using ElementSFT = typename ElementA::ScaleFactorType;
 
+// ---- fp32-output accumulate variant (grouped wgrad into fp32 main_grad) -----
+// D_g = float(beta * C_g + NVFP4_DEQUANT_K * alpha_a_g[i] * alpha_b_g[j] * acc).
+// Reuses the per-group ptr-array scale subtree; only the output element type and
+// the beta*C add differ from the overwrite EVT. beta == 0 skips the C load.
+using ElementCAcc = float;
+using ElementDAcc = float;
+constexpr int AlignmentCAcc = 128 / cutlass::sizeof_bits<ElementCAcc>::value;
+constexpr int AlignmentDAcc = 128 / cutlass::sizeof_bits<ElementDAcc>::value;
+
+// Z = NVFP4_DEQUANT_K * alpha_b[j] * (alpha_a[i] * acc), in fp32.
+using ScaledAccEVT = fusion::Sm90EVT<
+    fusion::Sm90Compute<cutlass::multiplies, ElementAccumulator, ElementAccumulator,
+                        kRoundStyleFused>,
+    ConstScaleNode, MulByColEVT>;
+using BetaNode = fusion::Sm90ScalarBroadcast<ElementScale>;
+using AccumEVT = fusion::Sm90EVT<
+    fusion::Sm90Compute<cutlass::homogeneous_multiply_add, ElementDAcc, ElementAccumulator,
+                        kRoundStyleFused>,
+    BetaNode, fusion::Sm90SrcFetch<ElementCAcc>, ScaledAccEVT>;
+
+using CollectiveEpilogueAcc = typename cutlass::epilogue::collective::CollectiveBuilder<
+    ArchTag, OperatorClass, MmaTileShape, ClusterShape,
+    cutlass::epilogue::collective::EpilogueTileAuto, ElementAccumulator, ElementAccumulator,
+    ElementCAcc, LayoutCTag*, AlignmentCAcc, ElementDAcc, LayoutDTag*, AlignmentDAcc,
+    EpilogueSchedule, AccumEVT>::CollectiveOp;
+
+using CollectiveMainloopAcc = typename cutlass::gemm::collective::CollectiveBuilder<
+    ArchTag, OperatorClass, ElementA, LayoutATag*, AlignmentA, ElementB, LayoutBTag*, AlignmentB,
+    ElementAccumulator, MmaTileShape, ClusterShape,
+    cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
+        sizeof(typename CollectiveEpilogueAcc::SharedStorage))>,
+    MainloopSchedule>::CollectiveOp;
+
+using GemmKernelAcc =
+    cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloopAcc, CollectiveEpilogueAcc>;
+using GemmAcc = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelAcc>;
+
 // Query the SM count exactly once (cudaGetDeviceProperties is very slow and was
 // adding a ~ms fixed cost to every grouped launch).
 static int cached_sm_count() {
@@ -181,46 +218,113 @@ static void* persistent_buffer(size_t bytes, cudaStream_t stream, int which) {
   return bufs[which];
 }
 
+// Build the shared Z-subtree EVT arguments:
+//   Z = NVFP4_DEQUANT_K * alpha_b[j] * (alpha_a[i] * acc).
+// ArgsT is FusedEVT::Arguments (overwrite path) or ScaledAccEVT::Arguments
+// (accumulate path). The two are structurally identical aggregates but distinct
+// C++ types (the enclosing Sm90EVT differs only in its top-level output element),
+// so the target type must be named explicitly per call site. aa_d/ab_d are the
+// per-group device pointer arrays consumed by the array-of-pointers broadcasts.
+template <class ArgsT, class P>
+static ArgsT make_z_args(P aa_d, P ab_d) {
+  // clang-format off
+  return ArgsT{
+      {/*scalars=*/{kNvfp4DequantFactor}, /*scalar_ptrs=*/{nullptr}, /*dScalar=*/{}},
+      {
+          {ab_d, /*null_default=*/ElementScale{0}, /*dRow=*/{}},
+          {
+              {aa_d, /*null_default=*/ElementScale{0}, /*dCol=*/{}},
+              {},  // AccFetch
+              {},  // multiplies
+          },
+          {},  // multiplies
+      },
+      {},  // multiplies
+  };
+  // clang-format on
+}
+
 // Core launcher. All *_ptrs are host vectors of device pointers (length G);
 // Ms/Ns/Ks are host per-group extents. SFs must already be swizzled.
-static void run_cutlass_grouped_per_token_gemm(
+// Shared workspace-alloc + launch tail for both output paths.
+template <class GemmT>
+static void run_grouped_gemm(GemmT& gemm, typename GemmT::Arguments& args, int G,
+                             cudaStream_t stream) {
+  size_t workspace_size = GemmT::get_workspace_size(args);
+  void* workspace = nullptr;
+  if (workspace_size > 0) {
+    workspace = persistent_buffer(workspace_size, stream, /*which=*/1);
+  }
+
+  cutlass::Status status = gemm.can_implement(args);
+  NVTE_CHECK(status == cutlass::Status::kSuccess,
+             "CUTLASS NVFP4 grouped per-token GEMM cannot implement: ",
+             cutlassGetStatusString(status), " (num_groups=", G, ")");
+
+  status = gemm.initialize(args, workspace, stream);
+  NVTE_CHECK(status == cutlass::Status::kSuccess,
+             "CUTLASS NVFP4 grouped per-token GEMM initialize failed: ",
+             cutlassGetStatusString(status));
+
+  status = gemm.run(stream);
+  NVTE_CHECK(status == cutlass::Status::kSuccess,
+             "CUTLASS NVFP4 grouped per-token GEMM run failed: ", cutlassGetStatusString(status));
+
+  // No per-call frees: scratch + workspace live in persistent_buffer and are
+  // reused across launches (and grow on demand).
+}
+
+// Accumulate=false -> overwrite, ElementD=bf16. Accumulate=true -> fp32 output
+// with D += beta * C (beta=1 accumulates into main_grad, beta=0 overwrites).
+template <bool Accumulate>
+static void run_cutlass_grouped_per_token_gemm_impl(
     const std::vector<const void*>& a_data_ptrs, const std::vector<const void*>& b_data_ptrs,
     const std::vector<const void*>& a_sf_ptrs, const std::vector<const void*>& b_sf_ptrs,
     const std::vector<const float*>& alpha_a_ptrs, const std::vector<const float*>& alpha_b_ptrs,
     const std::vector<void*>& d_ptrs, const std::vector<int>& Ms, const std::vector<int>& Ns,
-    const std::vector<int>& Ks, cudaStream_t stream) {
+    const std::vector<int>& Ks, float beta, cudaStream_t stream) {
+  using GemmT = std::conditional_t<Accumulate, GemmAcc, Gemm>;
+  using StrideAT = typename GemmT::GemmKernel::InternalStrideA;
+  using StrideBT = typename GemmT::GemmKernel::InternalStrideB;
+  using StrideCT = typename GemmT::GemmKernel::InternalStrideC;
+  using StrideDT = typename GemmT::GemmKernel::InternalStrideD;
+  using LayoutSFAT = typename GemmT::GemmKernel::CollectiveMainloop::InternalLayoutSFA;
+  using LayoutSFBT = typename GemmT::GemmKernel::CollectiveMainloop::InternalLayoutSFB;
+  using BlkCfgT = typename GemmT::GemmKernel::CollectiveMainloop::Sm1xxBlkScaledConfig;
+  using ElementDT = std::conditional_t<Accumulate, ElementDAcc, ElementD>;
+
   const int G = static_cast<int>(Ms.size());
 
   // Host-side per-group metadata.
   std::vector<typename ProblemShape::UnderlyingProblemShape> problems(G);
-  std::vector<StrideA> stride_A_h(G);
-  std::vector<StrideB> stride_B_h(G);
-  std::vector<StrideC> stride_C_h(G);
-  std::vector<StrideD> stride_D_h(G);
-  std::vector<LayoutSFA> layout_SFA_h(G);
-  std::vector<LayoutSFB> layout_SFB_h(G);
+  std::vector<StrideAT> stride_A_h(G);
+  std::vector<StrideBT> stride_B_h(G);
+  std::vector<StrideCT> stride_C_h(G);
+  std::vector<StrideDT> stride_D_h(G);
+  std::vector<LayoutSFAT> layout_SFA_h(G);
+  std::vector<LayoutSFBT> layout_SFB_h(G);
 
   std::vector<const ElementADataT*> a_ptr_h(G);
   std::vector<const ElementBDataT*> b_ptr_h(G);
   std::vector<const ElementSFT*> sfa_ptr_h(G);
   std::vector<const ElementSFT*> sfb_ptr_h(G);
-  std::vector<ElementD*> d_ptr_h(G);
+  std::vector<ElementDT*> d_ptr_h(G);
 
   for (int g = 0; g < G; ++g) {
     const int M = Ms[g], N = Ns[g], K = Ks[g];
     problems[g] = {M, N, K};
-    stride_A_h[g] = cutlass::make_cute_packed_stride(StrideA{}, {M, K, 1});
-    stride_B_h[g] = cutlass::make_cute_packed_stride(StrideB{}, {N, K, 1});
-    stride_C_h[g] = cutlass::make_cute_packed_stride(StrideC{}, {M, N, 1});
-    stride_D_h[g] = cutlass::make_cute_packed_stride(StrideD{}, {M, N, 1});
-    layout_SFA_h[g] = Sm1xxBlkScaledConfig::tile_atom_to_shape_SFA(cute_::make_shape(M, N, K, 1));
-    layout_SFB_h[g] = Sm1xxBlkScaledConfig::tile_atom_to_shape_SFB(cute_::make_shape(M, N, K, 1));
+    stride_A_h[g] = cutlass::make_cute_packed_stride(StrideAT{}, {M, K, 1});
+    stride_B_h[g] = cutlass::make_cute_packed_stride(StrideBT{}, {N, K, 1});
+    stride_C_h[g] = cutlass::make_cute_packed_stride(StrideCT{}, {M, N, 1});
+    stride_D_h[g] = cutlass::make_cute_packed_stride(StrideDT{}, {M, N, 1});
+    layout_SFA_h[g] = BlkCfgT::tile_atom_to_shape_SFA(cute_::make_shape(M, N, K, 1));
+    layout_SFB_h[g] = BlkCfgT::tile_atom_to_shape_SFB(cute_::make_shape(M, N, K, 1));
 
     a_ptr_h[g] = reinterpret_cast<const ElementADataT*>(a_data_ptrs[g]);
     b_ptr_h[g] = reinterpret_cast<const ElementBDataT*>(b_data_ptrs[g]);
     sfa_ptr_h[g] = reinterpret_cast<const ElementSFT*>(a_sf_ptrs[g]);
     sfb_ptr_h[g] = reinterpret_cast<const ElementSFT*>(b_sf_ptrs[g]);
-    d_ptr_h[g] = reinterpret_cast<ElementD*>(d_ptrs[g]);
+    d_ptr_h[g] = reinterpret_cast<ElementDT*>(d_ptrs[g]);
   }
 
   // Mirror all per-group metadata to device through ONE persistent scratch
@@ -228,12 +332,12 @@ static void run_cutlass_grouped_per_token_gemm(
   // are O(G) and tiny; 256B sub-alignment is safe for every cute POD type here.
   const size_t need =
       align256(problems.size() * sizeof(problems[0])) +
-      align256(stride_A_h.size() * sizeof(StrideA)) +
-      align256(stride_B_h.size() * sizeof(StrideB)) +
-      align256(stride_C_h.size() * sizeof(StrideC)) +
-      align256(stride_D_h.size() * sizeof(StrideD)) +
-      align256(layout_SFA_h.size() * sizeof(LayoutSFA)) +
-      align256(layout_SFB_h.size() * sizeof(LayoutSFB)) +
+      align256(stride_A_h.size() * sizeof(StrideAT)) +
+      align256(stride_B_h.size() * sizeof(StrideBT)) +
+      align256(stride_C_h.size() * sizeof(StrideCT)) +
+      align256(stride_D_h.size() * sizeof(StrideDT)) +
+      align256(layout_SFA_h.size() * sizeof(LayoutSFAT)) +
+      align256(layout_SFB_h.size() * sizeof(LayoutSFBT)) +
       align256(a_ptr_h.size() * sizeof(a_ptr_h[0])) +
       align256(b_ptr_h.size() * sizeof(b_ptr_h[0])) +
       align256(sfa_ptr_h.size() * sizeof(sfa_ptr_h[0])) +
@@ -272,57 +376,39 @@ static void run_cutlass_grouped_per_token_gemm(
   hw_info.device_id = 0;
   hw_info.sm_count = cached_sm_count();
 
-  // EVT argument tree (same nesting as the dense kernel; the only difference is
-  // ptr_col/ptr_row are now device arrays of per-group pointers).
-  typename FusedEVT::Arguments fusion_args{
-      // L3 child[0]: uniform NVFP4 dequant constant.
-      {/*scalars=*/{kNvfp4DequantFactor}, /*scalar_ptrs=*/{nullptr}, /*dScalar=*/{}},
-      // L3 child[1]: L2 (MulByColEVT).
-      {
-          // L2 child[0]: alpha_b per-col broadcast (array of N_g vectors).
-          {alpha_b_d, /*null_default=*/ElementScale{0}, /*dRow=*/{}},
-          // L2 child[1]: L1 (MulAccByRowEVT).
-          {
-              // L1 child[0]: alpha_a per-row broadcast (array of M_g vectors).
-              {alpha_a_d, /*null_default=*/ElementScale{0}, /*dCol=*/{}},
-              {},  // AccFetch
-              {},  // multiplies
-          },
-          {},  // multiplies
-      },
-      {},  // multiplies
-  };
-
-  typename Gemm::Arguments args{
-      cutlass::gemm::GemmUniversalMode::kGrouped,
-      {G, problems_d, /*host_problem_shapes=*/nullptr},
-      {a_ptr_d, stride_A_d, b_ptr_d, stride_B_d, sfa_ptr_d, layout_SFA_d, sfb_ptr_d, layout_SFB_d},
-      {fusion_args, /*ptr_C=*/nullptr, stride_C_d, d_ptr_d, stride_D_d},
-      hw_info};
-
-  Gemm gemm;
-  size_t workspace_size = Gemm::get_workspace_size(args);
-  void* workspace = nullptr;
-  if (workspace_size > 0) {
-    workspace = persistent_buffer(workspace_size, stream, /*which=*/1);
+  GemmT gemm;
+  if constexpr (Accumulate) {
+    // D = float(beta * C + Z). beta == 0 skips the C load (uninitialized D safe);
+    // beta == 1 accumulates in place (ptr_C aliases ptr_D == main_grad).
+    typename AccumEVT::Arguments fusion_args{
+        {/*scalars=*/{beta}, /*scalar_ptrs=*/{nullptr}, /*dScalar=*/{}},      // beta
+        {},                                                                  // C source fetch
+        make_z_args<typename ScaledAccEVT::Arguments>(alpha_a_d, alpha_b_d),  // Z subtree
+        {},                                                                  // multiply_add
+    };
+    // ptr_C aliases ptr_D (== main_grad). The epilogue wants ElementC const**;
+    // d_ptr_d is ElementCAcc** (non-const), so round-trip through void* to add
+    // the inner const (a direct reinterpret_cast would reject the qualifier change).
+    auto* c_ptr_d = reinterpret_cast<const ElementCAcc**>(reinterpret_cast<void*>(d_ptr_d));
+    typename GemmT::Arguments args{
+        cutlass::gemm::GemmUniversalMode::kGrouped,
+        {G, problems_d, /*host_problem_shapes=*/nullptr},
+        {a_ptr_d, stride_A_d, b_ptr_d, stride_B_d, sfa_ptr_d, layout_SFA_d, sfb_ptr_d, layout_SFB_d},
+        {fusion_args, /*ptr_C=*/c_ptr_d, stride_C_d, d_ptr_d, stride_D_d},
+        hw_info};
+    run_grouped_gemm(gemm, args, G, stream);
+  } else {
+    // Overwrite path: D = bf16(Z). GemmT == Gemm here.
+    typename FusedEVT::Arguments fusion_args =
+        make_z_args<typename FusedEVT::Arguments>(alpha_a_d, alpha_b_d);
+    typename GemmT::Arguments args{
+        cutlass::gemm::GemmUniversalMode::kGrouped,
+        {G, problems_d, /*host_problem_shapes=*/nullptr},
+        {a_ptr_d, stride_A_d, b_ptr_d, stride_B_d, sfa_ptr_d, layout_SFA_d, sfb_ptr_d, layout_SFB_d},
+        {fusion_args, /*ptr_C=*/nullptr, stride_C_d, d_ptr_d, stride_D_d},
+        hw_info};
+    run_grouped_gemm(gemm, args, G, stream);
   }
-
-  cutlass::Status status = gemm.can_implement(args);
-  NVTE_CHECK(status == cutlass::Status::kSuccess,
-             "CUTLASS NVFP4 grouped per-token GEMM cannot implement: ",
-             cutlassGetStatusString(status), " (num_groups=", G, ")");
-
-  status = gemm.initialize(args, workspace, stream);
-  NVTE_CHECK(status == cutlass::Status::kSuccess,
-             "CUTLASS NVFP4 grouped per-token GEMM initialize failed: ",
-             cutlassGetStatusString(status));
-
-  status = gemm.run(stream);
-  NVTE_CHECK(status == cutlass::Status::kSuccess,
-             "CUTLASS NVFP4 grouped per-token GEMM run failed: ", cutlassGetStatusString(status));
-
-  // No per-call frees: scratch + workspace live in persistent_buffer and are
-  // reused across launches (and grow on demand).
 }
 
 #endif  // CUTLASS_ARCH_MMA_SM100_SUPPORTED
@@ -335,7 +421,7 @@ static void run_cutlass_grouped_per_token_gemm(
 void nvte_nvfp4_cutlass_grouped_per_token_gemm(
     int num_groups, const NVTETensor* a_data, const NVTETensor* b_data, const NVTETensor* a_sf,
     const NVTETensor* b_sf, const NVTETensor* alpha_a, const NVTETensor* alpha_b, NVTETensor* d,
-    cudaStream_t stream) {
+    bool accumulate, cudaStream_t stream) {
   using namespace transformer_engine;
 
   NVTE_CHECK(num_groups > 0, "num_groups must be positive, got ", num_groups);
@@ -346,6 +432,12 @@ void nvte_nvfp4_cutlass_grouped_per_token_gemm(
   std::vector<const float*> alpha_a_ptrs(num_groups), alpha_b_ptrs(num_groups);
   std::vector<void*> d_ptrs(num_groups);
   std::vector<int> Ms(num_groups), Ns(num_groups), Ks(num_groups);
+
+  // Output dtype must be uniform across groups (one kernel instance per launch).
+  // BF16 -> overwrite. FP32 -> accumulate-capable (wgrad into fp32 main_grad).
+  const bool d_is_fp32 = convertNVTETensorCheck(d[0])->data.dtype == DType::kFloat32;
+  NVTE_CHECK(!accumulate || d_is_fp32,
+             "NVFP4 grouped per-token GEMM accumulate=true requires FP32 outputs (main_grad)");
 
   for (int g = 0; g < num_groups; ++g) {
     auto* a_t = convertNVTETensorCheck(a_data[g]);
@@ -372,7 +464,10 @@ void nvte_nvfp4_cutlass_grouped_per_token_gemm(
                "group ", g, ": D shape mismatch");
     NVTE_CHECK(a_t->data.dtype == DType::kFloat4E2M1 && b_t->data.dtype == DType::kFloat4E2M1,
                "group ", g, ": A/B must be FP4 e2m1");
-    NVTE_CHECK(d_t->data.dtype == DType::kBFloat16, "group ", g, ": D must be BF16");
+    NVTE_CHECK((d_t->data.dtype == DType::kFloat32) == d_is_fp32,
+               "group ", g, ": D dtype must be uniform across groups");
+    NVTE_CHECK(d_t->data.dtype == DType::kBFloat16 || d_t->data.dtype == DType::kFloat32,
+               "group ", g, ": D must be BF16 or FP32");
     NVTE_CHECK(aa_t->data.dtype == DType::kFloat32 && ab_t->data.dtype == DType::kFloat32,
                "group ", g, ": alpha_a/alpha_b must be FP32");
     NVTE_CHECK(aa_t->data.numel() == static_cast<size_t>(M), "group ", g, ": alpha_a must be (M,)");
@@ -394,9 +489,15 @@ void nvte_nvfp4_cutlass_grouped_per_token_gemm(
     Ks[g] = K;
   }
 
-  nvfp4_cutlass::run_cutlass_grouped_per_token_gemm(a_data_ptrs, b_data_ptrs, a_sf_ptrs, b_sf_ptrs,
-                                                    alpha_a_ptrs, alpha_b_ptrs, d_ptrs, Ms, Ns, Ks,
-                                                    stream);
+  if (d_is_fp32) {
+    nvfp4_cutlass::run_cutlass_grouped_per_token_gemm_impl</*Accumulate=*/true>(
+        a_data_ptrs, b_data_ptrs, a_sf_ptrs, b_sf_ptrs, alpha_a_ptrs, alpha_b_ptrs, d_ptrs, Ms, Ns,
+        Ks, /*beta=*/accumulate ? 1.0f : 0.0f, stream);
+  } else {
+    nvfp4_cutlass::run_cutlass_grouped_per_token_gemm_impl</*Accumulate=*/false>(
+        a_data_ptrs, b_data_ptrs, a_sf_ptrs, b_sf_ptrs, alpha_a_ptrs, alpha_b_ptrs, d_ptrs, Ms, Ns,
+        Ks, /*beta=*/0.0f, stream);
+  }
 #else
   NVTE_ERROR(
       "CUTLASS NVFP4 grouped per-token GEMM requires SM100 (Blackwell). Build with "

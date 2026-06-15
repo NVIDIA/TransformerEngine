@@ -26,13 +26,16 @@ void nvte_nvfp4_cutlass_gemm(const NVTETensor a_data, const NVTETensor b_data,
                              const NVTETensor a_sf, const NVTETensor b_sf, NVTETensor d,
                              float alpha, float beta, cudaStream_t stream);
 
-/*! \brief D[i,j] = bf16(alpha_a[i] * alpha_b[j] * (A @ B^T)[i,j]). Per-row *
- *  per-col rescale fused into the EVT epilogue (replaces the trailing
- *  nvte_nvfp4_per_token_post_scale kernel). alpha_a/b are FP32 (M,)/(N,). */
+/*! \brief D[i,j] = alpha_a[i] * alpha_b[j] * (A @ B^T)[i,j] (per-row * per-col
+ *  rescale fused into the EVT epilogue). alpha_a/b are FP32 (M,)/(N,).
+ *
+ *  D may be BF16 (plain overwrite) or FP32. When D is FP32, accumulate=true
+ *  computes D += ... in place (used for wgrad fused into a FP32 main_grad);
+ *  accumulate=false overwrites. accumulate=true requires a FP32 D. */
 void nvte_nvfp4_cutlass_per_token_gemm(const NVTETensor a_data, const NVTETensor b_data,
                                        const NVTETensor a_sf, const NVTETensor b_sf,
                                        const NVTETensor alpha_a, const NVTETensor alpha_b,
-                                       NVTETensor d, cudaStream_t stream);
+                                       NVTETensor d, bool accumulate, cudaStream_t stream);
 
 /*! \brief Grouped (MoE) variant of nvte_nvfp4_cutlass_per_token_gemm.
  *
@@ -49,15 +52,19 @@ void nvte_nvfp4_cutlass_per_token_gemm(const NVTETensor a_data, const NVTETensor
  *    - b_sf[g]   : FP8-e4m3 1x16 inner SF for B, ALREADY swizzled
  *    - alpha_a[g]: FP32 per-row outer scale, length M_g
  *    - alpha_b[g]: FP32 per-col outer scale, length N_g
- *    - d[g]      : BF16 output, logical (M_g, N_g)
+ *    - d[g]      : BF16 (overwrite) or FP32 output, logical (M_g, N_g)
  *
  *  Each group must satisfy M_g % 128 == 0, N_g % 128 == 0, K % 128 == 0
  *  (same 1-CTA MmaTile = (128,128,256) constraint as the dense per-token
- *  kernel). Groups with M_g == 0 must be filtered out by the caller. */
+ *  kernel). Groups with M_g == 0 must be filtered out by the caller.
+ *
+ *  When d is FP32, accumulate=true computes d[g] += ... in place (wgrad fused
+ *  into FP32 main_grad); accumulate=false overwrites. accumulate requires FP32
+ *  outputs. The output dtype must be uniform across groups. */
 void nvte_nvfp4_cutlass_grouped_per_token_gemm(
     int num_groups, const NVTETensor *a_data, const NVTETensor *b_data, const NVTETensor *a_sf,
     const NVTETensor *b_sf, const NVTETensor *alpha_a, const NVTETensor *alpha_b, NVTETensor *d,
-    cudaStream_t stream);
+    bool accumulate, cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"

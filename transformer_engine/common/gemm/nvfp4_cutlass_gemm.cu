@@ -301,6 +301,135 @@ static void run_cutlass_per_token_gemm(void const* a_data_ptr, void const* b_dat
   }
 }
 
+// ---------------------------------------------------------------------------
+// fp32-output accumulate variant (wgrad fused into a fp32 main_grad buffer):
+//   D = float(beta * C + NVFP4_DEQUANT_K * alpha_a[i] * alpha_b[j] * acc)
+// beta = 1 accumulates in place (C == D == main_grad); beta = 0 overwrites
+// (first microbatch). The built-in homogeneous_multiply_add tree skips the C
+// load when beta == 0 (Sm90ScalarBroadcast::is_zero()), so an uninitialized D
+// is safe in the overwrite case. Reuses the per-token EVT subtree (ConstScale
+// * alpha_b * alpha_a * acc), kept in fp32 instead of casting to bf16.
+
+using ElementCAcc = float;
+using ElementDAcc = float;
+constexpr int AlignmentCAcc = 128 / cutlass::sizeof_bits<ElementCAcc>::value;
+constexpr int AlignmentDAcc = 128 / cutlass::sizeof_bits<ElementDAcc>::value;
+
+// Z = NVFP4_DEQUANT_K * alpha_b[j] * (alpha_a[i] * acc), in fp32.
+using ScaledAccEVT = fusion::Sm90EVT<
+    fusion::Sm90Compute<cutlass::multiplies, ElementAccumulator, ElementAccumulator,
+                        kRoundStyleFused>,
+    ConstScaleNode, MulByColEVT>;
+
+// beta scalar (is_zero() gates the C load).
+using BetaNode = fusion::Sm90ScalarBroadcast<ElementScale>;
+
+// D = float(beta * C + Z) -- same multiply_add tree as Sm90LinearCombination.
+using AccumEVT = fusion::Sm90EVT<
+    fusion::Sm90Compute<cutlass::homogeneous_multiply_add, ElementDAcc, ElementAccumulator,
+                        kRoundStyleFused>,
+    BetaNode, fusion::Sm90SrcFetch<ElementCAcc>, ScaledAccEVT>;
+
+using CollectiveEpilogueAcc = typename cutlass::epilogue::collective::CollectiveBuilder<
+    ArchTag, OperatorClass, MmaTileShape, ClusterShape,
+    cutlass::epilogue::collective::EpilogueTileAuto, ElementAccumulator, ElementAccumulator,
+    ElementCAcc, LayoutCTag, AlignmentCAcc, ElementDAcc, LayoutDTag, AlignmentDAcc,
+    cutlass::epilogue::collective::EpilogueScheduleAuto, AccumEVT>::CollectiveOp;
+
+using CollectiveMainloopAcc = typename cutlass::gemm::collective::CollectiveBuilder<
+    ArchTag, OperatorClass, ElementA, LayoutATag, AlignmentA, ElementB, LayoutBTag, AlignmentB,
+    ElementAccumulator, MmaTileShape, ClusterShape,
+    cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
+        sizeof(typename CollectiveEpilogueAcc::SharedStorage))>,
+    cutlass::gemm::collective::KernelScheduleAuto>::CollectiveOp;
+
+using GemmKernelAcc =
+    cutlass::gemm::kernel::GemmUniversal<cute_::Shape<int, int, int, int>, CollectiveMainloopAcc,
+                                         CollectiveEpilogueAcc, void>;
+using GemmAcc = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelAcc>;
+
+using StrideAAcc = typename GemmAcc::GemmKernel::StrideA;
+using StrideBAcc = typename GemmAcc::GemmKernel::StrideB;
+using StrideCAcc = typename GemmAcc::GemmKernel::StrideC;
+using StrideDAcc = typename GemmAcc::GemmKernel::StrideD;
+using LayoutSFAAcc = typename GemmAcc::GemmKernel::CollectiveMainloop::LayoutSFA;
+using LayoutSFBAcc = typename GemmAcc::GemmKernel::CollectiveMainloop::LayoutSFB;
+using Sm1xxBlkScaledConfigAcc =
+    typename GemmAcc::GemmKernel::CollectiveMainloop::Sm1xxBlkScaledConfig;
+
+static void run_cutlass_per_token_gemm_accumulate(void const* a_data_ptr, void const* b_data_ptr,
+                                                  void const* a_sf_ptr, void const* b_sf_ptr,
+                                                  float const* alpha_a_ptr, float const* alpha_b_ptr,
+                                                  void* d_ptr, int M, int N, int K, float beta,
+                                                  cudaStream_t stream) {
+  auto stride_A = cutlass::make_cute_packed_stride(StrideAAcc{}, {M, K, 1});
+  auto stride_B = cutlass::make_cute_packed_stride(StrideBAcc{}, {N, K, 1});
+  auto stride_C = cutlass::make_cute_packed_stride(StrideCAcc{}, {M, N, 1});
+  auto stride_D = cutlass::make_cute_packed_stride(StrideDAcc{}, {M, N, 1});
+
+  auto layout_SFA = Sm1xxBlkScaledConfigAcc::tile_atom_to_shape_SFA(cute_::make_shape(M, N, K, 1));
+  auto layout_SFB = Sm1xxBlkScaledConfigAcc::tile_atom_to_shape_SFB(cute_::make_shape(M, N, K, 1));
+
+  typename AccumEVT::Arguments fusion_args{
+      // child[0]: beta scalar broadcast.
+      {/*scalars=*/{beta}, /*scalar_ptrs=*/{nullptr}, /*dScalar=*/{}},
+      // child[1]: C source fetch (empty Arguments).
+      {},
+      // child[2]: Z subtree = NVFP4_DEQUANT_K * alpha_b * (alpha_a * acc).
+      {
+          {/*scalars=*/{kNvfp4DequantFactor}, /*scalar_ptrs=*/{nullptr}, /*dScalar=*/{}},
+          {
+              {alpha_b_ptr, /*null_default=*/ElementScale{0}, /*dRow=*/{}},
+              {
+                  {alpha_a_ptr, /*null_default=*/ElementScale{0}, /*dCol=*/{}},
+                  {},
+                  {},
+              },
+              {},
+          },
+          {},
+      },
+      // node: multiply_add Arguments (empty).
+      {},
+  };
+
+  typename GemmAcc::Arguments args{
+      cutlass::gemm::GemmUniversalMode::kGemm,
+      {M, N, K, 1},
+      {reinterpret_cast<ElementADataPtr>(a_data_ptr), stride_A,
+       reinterpret_cast<ElementBDataPtr>(b_data_ptr), stride_B,
+       reinterpret_cast<ElementASfPtr>(a_sf_ptr), layout_SFA,
+       reinterpret_cast<ElementBSfPtr>(b_sf_ptr), layout_SFB},
+      {fusion_args, reinterpret_cast<ElementCAcc const*>(d_ptr), stride_C,
+       reinterpret_cast<ElementDAcc*>(d_ptr), stride_D}};
+
+  GemmAcc gemm;
+  size_t workspace_size = GemmAcc::get_workspace_size(args);
+  void* workspace = nullptr;
+  if (workspace_size > 0) {
+    NVTE_CHECK_CUDA(cudaMallocAsync(&workspace, workspace_size, stream));
+  }
+
+  cutlass::Status status = gemm.can_implement(args);
+  NVTE_CHECK(status == cutlass::Status::kSuccess,
+             "CUTLASS NVFP4 per-token accumulate GEMM cannot implement: ",
+             cutlassGetStatusString(status), " (M=", M, " N=", N, " K=", K, ")");
+
+  status = gemm.initialize(args, workspace, stream);
+  NVTE_CHECK(status == cutlass::Status::kSuccess,
+             "CUTLASS NVFP4 per-token accumulate GEMM initialize failed: ",
+             cutlassGetStatusString(status));
+
+  status = gemm.run(stream);
+  NVTE_CHECK(status == cutlass::Status::kSuccess,
+             "CUTLASS NVFP4 per-token accumulate GEMM run failed: ",
+             cutlassGetStatusString(status));
+
+  if (workspace != nullptr) {
+    NVTE_CHECK_CUDA(cudaFreeAsync(workspace, stream));
+  }
+}
+
 #endif  // CUTLASS_ARCH_MMA_SM100_SUPPORTED
 
 }  // namespace nvfp4_cutlass
@@ -364,7 +493,7 @@ void nvte_nvfp4_cutlass_gemm(const NVTETensor a_data, const NVTETensor b_data,
 void nvte_nvfp4_cutlass_per_token_gemm(const NVTETensor a_data, const NVTETensor b_data,
                                        const NVTETensor a_sf, const NVTETensor b_sf,
                                        const NVTETensor alpha_a, const NVTETensor alpha_b,
-                                       NVTETensor d, cudaStream_t stream) {
+                                       NVTETensor d, bool accumulate, cudaStream_t stream) {
   using namespace transformer_engine;
 
   auto* a_t = convertNVTETensorCheck(a_data);
@@ -394,7 +523,12 @@ void nvte_nvfp4_cutlass_per_token_gemm(const NVTETensor a_data, const NVTETensor
 
   NVTE_CHECK(a_t->data.dtype == DType::kFloat4E2M1, "A data must be FP4 e2m1");
   NVTE_CHECK(b_t->data.dtype == DType::kFloat4E2M1, "B data must be FP4 e2m1");
-  NVTE_CHECK(d_t->data.dtype == DType::kBFloat16, "D must be BF16");
+  // BF16 output: plain overwrite path. FP32 output: accumulate-capable path
+  // (used for wgrad fused into a fp32 main_grad). accumulate requires fp32 D.
+  const bool d_is_fp32 = d_t->data.dtype == DType::kFloat32;
+  NVTE_CHECK(d_t->data.dtype == DType::kBFloat16 || d_is_fp32, "D must be BF16 or FP32");
+  NVTE_CHECK(!accumulate || d_is_fp32,
+             "NVFP4 per-token GEMM accumulate=true requires a FP32 output (main_grad)");
   NVTE_CHECK(sa_t->data.dtype == DType::kFloat8E4M3 || sa_t->data.dtype == DType::kByte,
              "A scale must be FP8 e4m3 (or raw uint8 byte)");
   NVTE_CHECK(sb_t->data.dtype == DType::kFloat8E4M3 || sb_t->data.dtype == DType::kByte,
@@ -429,10 +563,18 @@ void nvte_nvfp4_cutlass_per_token_gemm(const NVTETensor a_data, const NVTETensor
              M, " N=", N, " K=", K, ".");
 
 #if defined(CUTLASS_ARCH_MMA_SM100_SUPPORTED)
-  nvfp4_cutlass::run_cutlass_per_token_gemm(
-      a_t->data.dptr, b_t->data.dptr, sa_t->data.dptr, sb_t->data.dptr,
-      reinterpret_cast<float const*>(aa_t->data.dptr),
-      reinterpret_cast<float const*>(ab_t->data.dptr), d_t->data.dptr, M, N, K, stream);
+  if (d_is_fp32) {
+    nvfp4_cutlass::run_cutlass_per_token_gemm_accumulate(
+        a_t->data.dptr, b_t->data.dptr, sa_t->data.dptr, sb_t->data.dptr,
+        reinterpret_cast<float const*>(aa_t->data.dptr),
+        reinterpret_cast<float const*>(ab_t->data.dptr), d_t->data.dptr, M, N, K,
+        /*beta=*/accumulate ? 1.0f : 0.0f, stream);
+  } else {
+    nvfp4_cutlass::run_cutlass_per_token_gemm(
+        a_t->data.dptr, b_t->data.dptr, sa_t->data.dptr, sb_t->data.dptr,
+        reinterpret_cast<float const*>(aa_t->data.dptr),
+        reinterpret_cast<float const*>(ab_t->data.dptr), d_t->data.dptr, M, N, K, stream);
+  }
 #else
   NVTE_ERROR(
       "CUTLASS NVFP4 per-token fused GEMM requires SM100 (Blackwell). Build with sm_100a/sm_100f.");

@@ -175,6 +175,43 @@ def _run_fused(
     return d
 
 
+def _run_fused_into(
+    out: torch.Tensor,
+    a_q: torch.Tensor,
+    b_q: torch.Tensor,
+    a_sf: torch.Tensor,
+    b_sf: torch.Tensor,
+    alpha_a: torch.Tensor,
+    alpha_b: torch.Tensor,
+    M: int,
+    N: int,
+    K: int,
+    accumulate: bool,
+) -> torch.Tensor:
+    """Run the fused per-token GEMM into a caller-provided ``out`` buffer.
+
+    ``out`` may be bf16 (overwrite) or fp32. With ``accumulate=True`` (fp32
+    out only) the kernel computes ``out = out + dW`` in place (the
+    fuse_wgrad_accumulation path); otherwise it overwrites.
+    """
+    tex.nvfp4_cutlass_per_token_gemm(
+        a_q,
+        b_q,
+        a_sf.reshape(-1),
+        b_sf.reshape(-1),
+        alpha_a,
+        alpha_b,
+        out,
+        M,
+        N,
+        K,
+        a_sf_swizzled=False,
+        b_sf_swizzled=False,
+        accumulate=accumulate,
+    )
+    return out
+
+
 # Shapes obey the kernel contract: M, N, K all multiples of 128 under 1-CTA
 # MmaTile (128, 128, 256). K_tile = 256 is the mainloop step, NOT a K alignment
 # requirement — CUTLASS predicates the K-residue tile so K can be < K_tile.
@@ -310,6 +347,90 @@ def test_fused_alpha_unity_matches_scalar_gemm_with_baked_const() -> None:
             "Fused EVT with unity alpha + baked 1/2688^2 must match "
             "nvfp4_cutlass_gemm(alpha=1/2688^2) bit-exact."
         ),
+    )
+
+
+# Shapes for the fp32-output / accumulate (fuse_wgrad_accumulation) path.
+_ACC_SHAPES = [
+    (256, 256, 256),
+    (512, 256, 384),
+    (128, 1024, 768),
+    (1024, 1024, 1024),
+]
+
+
+@_GATED_SM100
+@_GATED_HAS_KERNEL
+@pytest.mark.parametrize("M,N,K", _ACC_SHAPES)
+def test_fused_fp32_output_matches_bf16(M: int, N: int, K: int) -> None:
+    """fp32 overwrite (accumulate=False) == bf16 path bit-exact after a bf16
+    cast. Both compute Z = NVFP4_DEQUANT_K * alpha_a * alpha_b * acc with the
+    same mainloop + EVT subtree; the only difference is the final epilogue cast
+    (fp32 vs bf16), so fp32(Z).bfloat16() must equal bf16(Z) bit-for-bit."""
+    device = torch.device("cuda")
+    torch.manual_seed(0xACE8)
+
+    a = (torch.randn((M, K), dtype=torch.bfloat16, device=device) * 0.5).contiguous()
+    b = (torch.randn((N, K), dtype=torch.bfloat16, device=device) * 0.5).contiguous()
+    a_q, a_sf, a_amax = _quantize_per_token(a)
+    b_q, b_sf, b_amax = _quantize_per_token(b)
+
+    d_bf16 = _run_fused(a_q, b_q, a_sf, b_sf, a_amax, b_amax, M, N, K)
+
+    d_fp32 = torch.empty((M, N), dtype=torch.float32, device=device)
+    _run_fused_into(d_fp32, a_q, b_q, a_sf, b_sf, a_amax, b_amax, M, N, K, accumulate=False)
+
+    torch.testing.assert_close(
+        d_fp32.bfloat16().float(),
+        d_bf16.float(),
+        rtol=0.0,
+        atol=0.0,
+        msg="fp32 overwrite output cast to bf16 must match the bf16 path bit-exact.",
+    )
+
+
+@_GATED_SM100
+@_GATED_HAS_KERNEL
+@pytest.mark.parametrize("M,N,K", _ACC_SHAPES)
+def test_fused_fp32_accumulate(M: int, N: int, K: int) -> None:
+    """accumulate=True computes D = main_grad + dW in place (beta=1 EVT), and
+    must equal the fp32 overwrite result added to the initial main_grad
+    bit-exact: the Z subtree is computed identically, the only extra op is the
+    fp32 ``1.0 * C + Z`` fused multiply-add."""
+    device = torch.device("cuda")
+    torch.manual_seed(0xACE9)
+
+    a = (torch.randn((M, K), dtype=torch.bfloat16, device=device) * 0.5).contiguous()
+    b = (torch.randn((N, K), dtype=torch.bfloat16, device=device) * 0.5).contiguous()
+    a_q, a_sf, a_amax = _quantize_per_token(a)
+    b_q, b_sf, b_amax = _quantize_per_token(b)
+
+    # dW = fp32 overwrite (the gradient this step would produce on its own).
+    dW = torch.empty((M, N), dtype=torch.float32, device=device)
+    _run_fused_into(dW, a_q, b_q, a_sf, b_sf, a_amax, b_amax, M, N, K, accumulate=False)
+
+    # Pre-existing main_grad from earlier microbatches.
+    c0 = (torch.randn((M, N), dtype=torch.float32, device=device) * 2.0).contiguous()
+    main_grad = c0.clone()
+    _run_fused_into(main_grad, a_q, b_q, a_sf, b_sf, a_amax, b_amax, M, N, K, accumulate=True)
+
+    torch.testing.assert_close(
+        main_grad,
+        c0 + dW,
+        rtol=0.0,
+        atol=0.0,
+        msg="accumulate path (D = main_grad + dW) must equal c0 + fp32-overwrite bit-exact.",
+    )
+
+    # beta=0 overwrite into a dirty fp32 buffer must ignore the stale contents.
+    dirty = (torch.randn((M, N), dtype=torch.float32, device=device) * 7.0).contiguous()
+    _run_fused_into(dirty, a_q, b_q, a_sf, b_sf, a_amax, b_amax, M, N, K, accumulate=False)
+    torch.testing.assert_close(
+        dirty,
+        dW,
+        rtol=0.0,
+        atol=0.0,
+        msg="overwrite (accumulate=False) must ignore pre-existing fp32 buffer contents.",
     )
 
 
@@ -970,6 +1091,66 @@ def test_grouped_matches_dense_per_group(Ms: List[int], N: int, K: int) -> None:
         )
 
 
+@_GATED_SM100
+@_GATED_HAS_KERNEL
+@_GATED_HAS_GROUPED
+@pytest.mark.parametrize("Ms,N,K", _GROUPED_CASES)
+def test_grouped_fp32_accumulate(Ms: List[int], N: int, K: int) -> None:
+    """Grouped accumulate (fuse_wgrad_accumulation, fp32 main_grad per group):
+    grouped(accumulate=True) into a pre-seeded main_grad must equal, per group,
+    c0[g] + grouped-overwrite(fp32)[g] bit-exact."""
+    device = torch.device("cuda")
+    torch.manual_seed(0xACEA)
+    G = len(Ms)
+
+    a_data_l, b_data_l, a_sf_l, b_sf_l, alpha_a_l, alpha_b_l = ([] for _ in range(6))
+    for M in Ms:
+        a = (torch.randn((M, K), dtype=torch.bfloat16, device=device) * 0.5).contiguous()
+        b = (torch.randn((N, K), dtype=torch.bfloat16, device=device) * 0.5).contiguous()
+        a_q, a_sf, a_amax = _quantize_per_token(a)
+        b_q, b_sf, b_amax = _quantize_per_token(b)
+        a_data_l.append(a_q)
+        b_data_l.append(b_q)
+        a_sf_l.append(a_sf.reshape(-1))
+        b_sf_l.append(b_sf.reshape(-1))
+        alpha_a_l.append(a_amax)
+        alpha_b_l.append(b_amax)
+
+    def _grouped(d_list, accumulate):
+        tex.nvfp4_cutlass_grouped_per_token_gemm(
+            a_data_l,
+            b_data_l,
+            a_sf_l,
+            b_sf_l,
+            alpha_a_l,
+            alpha_b_l,
+            d_list,
+            False,  # a_sf_swizzled
+            False,  # b_sf_swizzled
+            accumulate,
+        )
+
+    # fp32 overwrite -> per-group dW.
+    dW_l = [torch.empty((M, N), dtype=torch.float32, device=device) for M in Ms]
+    _grouped(dW_l, accumulate=False)
+
+    # Pre-seeded main_grad buffers; accumulate into them in place.
+    c0_l = [(torch.randn((M, N), dtype=torch.float32, device=device) * 2.0).contiguous() for M in Ms]
+    mg_l = [c0.clone() for c0 in c0_l]
+    _grouped(mg_l, accumulate=True)
+
+    for g in range(G):
+        max_abs = (mg_l[g] - (c0_l[g] + dW_l[g])).abs().max().item()
+        print(f"  group {g:>2} M={Ms[g]:>5} N={N} K={K}: max_abs_acc={max_abs:.3e}")
+        torch.testing.assert_close(
+            mg_l[g],
+            c0_l[g] + dW_l[g],
+            rtol=0.0,
+            atol=0.0,
+            msg=f"grouped accumulate group {g} (M={Ms[g]}) != c0 + dW",
+        )
+
+
 if __name__ == "__main__":
     if not _has_sm100():
         print("SKIP: not SM100")
@@ -979,6 +1160,9 @@ if __name__ == "__main__":
         for shape in _SHAPES:
             test_fused_matches_cublaslt_per_token(*shape)
         test_fused_alpha_unity_matches_scalar_gemm_with_baked_const()
+        for shape in _ACC_SHAPES:
+            test_fused_fp32_output_matches_bf16(*shape)
+            test_fused_fp32_accumulate(*shape)
         test_prod_fwd_weight_2d_quant_plumbing()
         for shape in _E2E_FWD_SHAPES:
             test_e2e_fwd_per_token_vs_bf16_ground_truth(*shape)
@@ -991,4 +1175,5 @@ if __name__ == "__main__":
         if hasattr(tex, "nvfp4_cutlass_grouped_per_token_gemm"):
             for Ms, N, K in _GROUPED_CASES:
                 test_grouped_matches_dense_per_group(Ms, N, K)
+                test_grouped_fp32_accumulate(Ms, N, K)
         print("All tests passed.")

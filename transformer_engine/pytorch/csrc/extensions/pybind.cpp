@@ -503,17 +503,19 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "skip the internal swizzle for bench parity.",
         py::arg("a_data"), py::arg("b_data"), py::arg("a_sf"), py::arg("b_sf"), py::arg("alpha_a"),
         py::arg("alpha_b"), py::arg("d"), py::arg("m"), py::arg("n"), py::arg("k"),
-        py::arg("a_sf_swizzled") = false, py::arg("b_sf_swizzled") = false);
+        py::arg("a_sf_swizzled") = false, py::arg("b_sf_swizzled") = false,
+        py::arg("accumulate") = false);
   m.def("nvfp4_cutlass_grouped_per_token_gemm",
         &transformer_engine::pytorch::nvfp4_cutlass_grouped_per_token_gemm,
         "Grouped (MoE) CUTLASS NVFP4 per-token GEMM. One ptr-array launch over "
-        "all groups: D_g = bf16(alpha_a_g[i] * alpha_b_g[j] * (A_g @ B_g^T)). "
+        "all groups: D_g = alpha_a_g[i] * alpha_b_g[j] * (A_g @ B_g^T). "
         "Each argument is a list of per-group tensors; alpha_a_g (M_g,) and "
         "alpha_b_g (N_g,) are fp32 outer-scale vectors. SFs are swizzled per "
-        "group unless *_sf_swizzled is set. Empty experts must be filtered out.",
+        "group unless *_sf_swizzled is set. Empty experts must be filtered out. "
+        "d may be bf16 (overwrite) or fp32; accumulate=true (fp32 d) adds in place.",
         py::arg("a_data"), py::arg("b_data"), py::arg("a_sf"), py::arg("b_sf"), py::arg("alpha_a"),
         py::arg("alpha_b"), py::arg("d"), py::arg("a_sf_swizzled") = false,
-        py::arg("b_sf_swizzled") = false);
+        py::arg("b_sf_swizzled") = false, py::arg("accumulate") = false);
   m.def("nvfp4_per_token_post_scale", &transformer_engine::pytorch::nvfp4_per_token_post_scale,
         "Apply d[i,j] *= row_amax_a[i] * row_amax_b[j] in-place on bf16 D.", py::arg("d"),
         py::arg("row_amax_a"), py::arg("row_amax_b"));

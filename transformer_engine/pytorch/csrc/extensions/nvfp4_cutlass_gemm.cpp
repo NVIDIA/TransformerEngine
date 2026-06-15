@@ -124,7 +124,7 @@ void nvfp4_cutlass_per_token_gemm(const at::Tensor &a_data, const at::Tensor &b_
                                   const at::Tensor &a_sf, const at::Tensor &b_sf,
                                   const at::Tensor &alpha_a, const at::Tensor &alpha_b,
                                   at::Tensor d, int64_t m, int64_t n, int64_t k, bool a_sf_swizzled,
-                                  bool b_sf_swizzled) {
+                                  bool b_sf_swizzled, bool accumulate) {
   TORCH_CHECK(a_data.is_cuda() && b_data.is_cuda() && a_sf.is_cuda() && b_sf.is_cuda() &&
                   alpha_a.is_cuda() && alpha_b.is_cuda() && d.is_cuda(),
               "All tensors must be CUDA tensors");
@@ -137,7 +137,13 @@ void nvfp4_cutlass_per_token_gemm(const at::Tensor &a_data, const at::Tensor &b_
   TORCH_CHECK(b_data.scalar_type() == at::ScalarType::Byte, "b_data must be uint8 (FP4 packed)");
   TORCH_CHECK(a_sf.scalar_type() == at::ScalarType::Byte, "a_sf must be uint8 (FP8 e4m3)");
   TORCH_CHECK(b_sf.scalar_type() == at::ScalarType::Byte, "b_sf must be uint8 (FP8 e4m3)");
-  TORCH_CHECK(d.scalar_type() == at::ScalarType::BFloat16, "d must be bfloat16");
+  // BF16 output -> plain overwrite. FP32 output -> accumulate-capable path
+  // (wgrad into a fp32 main_grad). accumulate=true requires a fp32 output.
+  const bool d_is_fp32 = d.scalar_type() == at::ScalarType::Float;
+  TORCH_CHECK(d.scalar_type() == at::ScalarType::BFloat16 || d_is_fp32,
+              "d must be bfloat16 or float32");
+  TORCH_CHECK(!accumulate || d_is_fp32,
+              "nvfp4_cutlass_per_token_gemm accumulate=true requires a float32 output");
   TORCH_CHECK(alpha_a.scalar_type() == at::ScalarType::Float, "alpha_a must be float32");
   TORCH_CHECK(alpha_b.scalar_type() == at::ScalarType::Float, "alpha_b must be float32");
 
@@ -217,10 +223,10 @@ void nvfp4_cutlass_per_token_gemm(const at::Tensor &a_data, const at::Tensor &b_
       alpha_b.data_ptr(), std::vector<size_t>{static_cast<size_t>(n)}, DType::kFloat32);
   TensorWrapper d_te = makeTransformerEngineTensor(
       d.data_ptr(), std::vector<size_t>{static_cast<size_t>(m), static_cast<size_t>(n)},
-      DType::kBFloat16);
+      d_is_fp32 ? DType::kFloat32 : DType::kBFloat16);
 
   nvte_nvfp4_cutlass_per_token_gemm(a_te.data(), b_te.data(), a_sf_te.data(), b_sf_te.data(),
-                                    aa_te.data(), ab_te.data(), d_te.data(), stream);
+                                    aa_te.data(), ab_te.data(), d_te.data(), accumulate, stream);
 }
 
 // Grouped (MoE) per-token GEMM. Each list holds one entry per expert/group.
@@ -231,7 +237,7 @@ void nvfp4_cutlass_per_token_gemm(const at::Tensor &a_data, const at::Tensor &b_
 void nvfp4_cutlass_grouped_per_token_gemm(
     std::vector<at::Tensor> a_data, std::vector<at::Tensor> b_data, std::vector<at::Tensor> a_sf,
     std::vector<at::Tensor> b_sf, std::vector<at::Tensor> alpha_a, std::vector<at::Tensor> alpha_b,
-    std::vector<at::Tensor> d, bool a_sf_swizzled, bool b_sf_swizzled) {
+    std::vector<at::Tensor> d, bool a_sf_swizzled, bool b_sf_swizzled, bool accumulate) {
   const int64_t G = static_cast<int64_t>(a_data.size());
   TORCH_CHECK(G > 0, "grouped per-token GEMM needs at least one group");
   TORCH_CHECK(b_data.size() == static_cast<size_t>(G) && a_sf.size() == static_cast<size_t>(G) &&
@@ -239,6 +245,12 @@ void nvfp4_cutlass_grouped_per_token_gemm(
                   alpha_a.size() == static_cast<size_t>(G) &&
                   alpha_b.size() == static_cast<size_t>(G) && d.size() == static_cast<size_t>(G),
               "all grouped per-token GEMM operand lists must have the same length");
+
+  // Output dtype must be uniform across groups (single kernel instance). BF16 ->
+  // overwrite; FP32 -> accumulate-capable (wgrad into fp32 main_grad).
+  const bool d_is_fp32 = d[0].scalar_type() == at::ScalarType::Float;
+  TORCH_CHECK(!accumulate || d_is_fp32,
+              "nvfp4_cutlass_grouped_per_token_gemm accumulate=true requires float32 outputs");
 
   const auto stream = at::cuda::getCurrentCUDAStream();
   auto byte_opts = a_sf[0].options().dtype(at::kByte);
@@ -265,7 +277,11 @@ void nvfp4_cutlass_grouped_per_token_gemm(
     TORCH_CHECK(a_data[g].scalar_type() == at::ScalarType::Byte &&
                     b_data[g].scalar_type() == at::ScalarType::Byte,
                 "group ", g, ": a_data/b_data must be uint8 (FP4 packed)");
-    TORCH_CHECK(d[g].scalar_type() == at::ScalarType::BFloat16, "group ", g, ": d must be bf16");
+    TORCH_CHECK((d[g].scalar_type() == at::ScalarType::Float) == d_is_fp32, "group ", g,
+                ": d dtype must be uniform across groups");
+    TORCH_CHECK(d[g].scalar_type() == at::ScalarType::BFloat16 ||
+                    d[g].scalar_type() == at::ScalarType::Float,
+                "group ", g, ": d must be bf16 or float32");
     TORCH_CHECK(alpha_a[g].scalar_type() == at::ScalarType::Float &&
                     alpha_b[g].scalar_type() == at::ScalarType::Float,
                 "group ", g, ": alpha_a/alpha_b must be float32");
@@ -327,7 +343,7 @@ void nvfp4_cutlass_grouped_per_token_gemm(
         alpha_b[g].data_ptr(), std::vector<size_t>{static_cast<size_t>(N)}, DType::kFloat32));
     d_te_v.push_back(makeTransformerEngineTensor(
         d[g].data_ptr(), std::vector<size_t>{static_cast<size_t>(M), static_cast<size_t>(N)},
-        DType::kBFloat16));
+        d_is_fp32 ? DType::kFloat32 : DType::kBFloat16));
   }
 
   for (int64_t g = 0; g < G; ++g) {
@@ -342,7 +358,7 @@ void nvfp4_cutlass_grouped_per_token_gemm(
 
   nvte_nvfp4_cutlass_grouped_per_token_gemm(static_cast<int>(G), a_arr.data(), b_arr.data(),
                                             a_sf_arr.data(), b_sf_arr.data(), aa_arr.data(),
-                                            ab_arr.data(), d_arr.data(), stream);
+                                            ab_arr.data(), d_arr.data(), accumulate, stream);
 }
 
 }  // namespace transformer_engine::pytorch

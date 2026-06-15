@@ -485,23 +485,27 @@ void nvfp4_cutlass_gemm(const at::Tensor &a_data, const at::Tensor &b_data, cons
                         double alpha, double beta, bool a_sf_swizzled, bool b_sf_swizzled);
 
 // CUTLASS NVFP4 GEMM with per-token rescale fused into the epilogue:
-//   D[i, j] = bf16(alpha_a[i] * alpha_b[j] * (A @ B^T)[i, j])
+//   D[i, j] = alpha_a[i] * alpha_b[j] * (A @ B^T)[i, j]
 // One launch, no separate post-scale kernel. alpha_a / alpha_b are fp32
-// (M,) / (N,) outer-scale vectors.
+// (M,) / (N,) outer-scale vectors. d may be bf16 (overwrite) or fp32;
+// accumulate=true (requires fp32 d) computes d += ... in place (wgrad fused
+// into a fp32 main_grad).
 void nvfp4_cutlass_per_token_gemm(const at::Tensor &a_data, const at::Tensor &b_data,
                                   const at::Tensor &a_sf, const at::Tensor &b_sf,
                                   const at::Tensor &alpha_a, const at::Tensor &alpha_b,
                                   at::Tensor d, int64_t m, int64_t n, int64_t k, bool a_sf_swizzled,
-                                  bool b_sf_swizzled);
+                                  bool b_sf_swizzled, bool accumulate);
 
 // Grouped (MoE) per-token NVFP4 GEMM. Each list holds one entry per group:
-//   D_g[i,j] = bf16(alpha_a_g[i] * alpha_b_g[j] * (A_g @ B_g^T)[i,j]).
+//   D_g[i,j] = alpha_a_g[i] * alpha_b_g[j] * (A_g @ B_g^T)[i,j].
 // SF inner block scales are swizzled per group unless *_sf_swizzled is set.
-// Empty experts (M_g == 0) must be dropped by the caller.
+// Empty experts (M_g == 0) must be dropped by the caller. d may be bf16
+// (overwrite) or fp32; accumulate=true (requires fp32 d) computes d += ...
+// in place (wgrad fused into fp32 main_grad).
 void nvfp4_cutlass_grouped_per_token_gemm(
     std::vector<at::Tensor> a_data, std::vector<at::Tensor> b_data, std::vector<at::Tensor> a_sf,
     std::vector<at::Tensor> b_sf, std::vector<at::Tensor> alpha_a, std::vector<at::Tensor> alpha_b,
-    std::vector<at::Tensor> d, bool a_sf_swizzled, bool b_sf_swizzled);
+    std::vector<at::Tensor> d, bool a_sf_swizzled, bool b_sf_swizzled, bool accumulate);
 
 // with_swizzle=true makes K2 write rowwise scale_inv in the cuBLAS LT
 // swizzled tile layout (skips the standalone nvte_swizzle_scaling_factors).

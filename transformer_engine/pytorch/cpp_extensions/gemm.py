@@ -188,15 +188,11 @@ def _nvfp4_per_token_gemm(
     is which (data, sf, amax) tuple of each tensor we hand in.
     """
     # Hard-fail unsupported config rather than silently degrade.
-    if accumulate:
-        # NOTE: te.Linear sets accumulate=True for wgrad when
-        # fuse_wgrad_accumulation=True. Per-token kernel doesn't yet
-        # support D += A @ B (would need an out_init epilogue node).
-        raise NotImplementedError(
-            "NVFP4 per-token GEMM does not yet support accumulate=True. "
-            "Disable fuse_wgrad_accumulation when using NVFP4 per-token "
-            "(or fall back to prod NVFP4)."
-        )
+    #
+    # accumulate=True (fuse_wgrad_accumulation) is supported only with a fp32
+    # output: te.Linear's wgrad target is the fp32 main_grad buffer, and the
+    # fused EVT computes D = main_grad + dW directly (beta=1). It is validated
+    # against the resolved output dtype further below (after `out` is known).
     if gelu:
         raise NotImplementedError("NVFP4 per-token GEMM does not yet support fused gelu.")
     if ub is not None:
@@ -319,12 +315,25 @@ def _nvfp4_per_token_gemm(
             f"kb_amax={tuple(kb_amax.shape)} (expected ({N},))."
         )
 
-    # Allocate output if needed.
-    out_dtype = out_dtype or torch.bfloat16
-    if out_dtype != torch.bfloat16:
-        raise NotImplementedError(f"NVFP4 per-token GEMM only emits bf16 (requested {out_dtype}).")
+    # Resolve the output dtype. The kernel emits bf16 (plain overwrite) or fp32.
+    # fp32 is used for wgrad fused into the fp32 main_grad buffer
+    # (fuse_wgrad_accumulation): a caller-provided `out` (main_grad) takes
+    # precedence over `out_dtype`, which TE's grouped/dense wgrad partials set to
+    # the activation dtype even when the real target is fp32 main_grad.
+    target_dtype = out.dtype if out is not None else (out_dtype or torch.bfloat16)
+    if target_dtype not in (torch.bfloat16, torch.float32):
+        raise NotImplementedError(
+            f"NVFP4 per-token GEMM only emits bf16 or fp32 (requested {target_dtype})."
+        )
+    if accumulate and target_dtype != torch.float32:
+        # accumulate writes D = C + dW in place; main_grad is fp32. A bf16
+        # accumulate target would lose the fp32 gradient accumulator.
+        raise NotImplementedError(
+            "NVFP4 per-token GEMM accumulate=True requires a float32 output "
+            f"(main_grad), got {target_dtype}."
+        )
     if out is None:
-        out = torch.empty((M, N), dtype=torch.bfloat16, device=ka_data.device)
+        out = torch.empty((M, N), dtype=target_dtype, device=ka_data.device)
     elif out.numel() != M * N:
         raise RuntimeError(
             f"NVFP4 per-token GEMM output shape mismatch ({layout_label}): "
@@ -353,6 +362,7 @@ def _nvfp4_per_token_gemm(
         K,
         a_sf_swizzled,
         b_sf_swizzled,
+        accumulate,
     )
 
     if bias is not None:
@@ -380,6 +390,7 @@ def _nvfp4_per_token_grouped_gemm(
     transb: bool,
     m_splits: List[int],
     single_output: bool,
+    accumulate: bool = False,
 ) -> List[torch.Tensor]:
     """Native grouped (MoE) per-token NVFP4 GEMM (one ptr-array CUTLASS launch).
 
@@ -389,9 +400,13 @@ def _nvfp4_per_token_grouped_gemm(
     over all non-empty experts. Empty experts (``m_splits[g] == 0``) are
     zeroed and excluded from the launch (the kernel requires M, N, K > 0).
 
-    Only the plain D = bf16(alpha_a * alpha_b * (A @ B^T)) path is handled
-    here; callers must route accumulate / bias / gelu / output-quantization
-    to the per-expert fallback (those are rejected by the dense kernel too).
+    Handles the plain D = alpha_a * alpha_b * (A @ B^T) path (bf16 output) and
+    the wgrad-accumulate path (accumulate=True, fp32 main_grad outputs:
+    D = main_grad + dW in place). Callers must route bias / gelu /
+    output-quantization to the per-expert fallback (rejected by the kernel).
+
+    accumulate=True requires every output view to be fp32 (the main_grad
+    buffers); the kernel computes beta=1 accumulation directly in the EVT.
     """
     # Same (transa, transb) -> rowwise/columnwise table as _nvfp4_per_token_gemm.
     if (transa, transb) == (True, False):
@@ -432,9 +447,11 @@ def _nvfp4_per_token_grouped_gemm(
 
     for g in range(num_gemms):
         # Empty expert: weight grad is the zero matrix; fwd/dgrad slice is
-        # empty. The CUTLASS kernel asserts M, N, K > 0, so handle here.
+        # empty. The CUTLASS kernel asserts M, N, K > 0, so handle here. Under
+        # accumulate (D += dW) a zero dW leaves main_grad unchanged, so we must
+        # NOT zero it; only the overwrite path writes the zero matrix.
         if m_splits is not None and m_splits[g] == 0:
-            if out_views[g].numel() != 0:
+            if out_views[g].numel() != 0 and not accumulate:
                 out_views[g].zero_()
             continue
 
@@ -496,6 +513,7 @@ def _nvfp4_per_token_grouped_gemm(
             d_l,
             bool(a_sf_swz_seen),
             bool(b_sf_swz_seen),
+            accumulate,
         )
 
     if single_output:
@@ -775,13 +793,13 @@ def general_grouped_gemm(
     else:
         bias_dtype = TE_DType[torch.bfloat16]
 
-    # Per-token NVFP4 grouped GEMM. The plain D = bf16(alpha_a * alpha_b *
-    # (A @ B^T)) path is served by a native single-launch CUTLASS grouped
-    # per-token kernel (_nvfp4_per_token_grouped_gemm). Cases the dense
-    # per-token kernel can't fuse (accumulate / bias / gelu / output
-    # quantization) fall through to a Python loop over per-shape `general_gemm`
-    # calls, which routes each shape to the same fused EVT GEMM (identical
-    # numerics, at the cost of num_gemms launch overhead).
+    # Per-token NVFP4 grouped GEMM. The plain D = alpha_a * alpha_b * (A @ B^T)
+    # path (bf16 out) and the wgrad-accumulate path (accumulate into fp32
+    # main_grad) are both served by a native single-launch CUTLASS grouped
+    # per-token kernel (_nvfp4_per_token_grouped_gemm). Cases the kernel can't
+    # fuse (bias / gelu / output quantization) fall through to a Python loop over
+    # per-shape `general_gemm` calls, which routes each shape to the same fused
+    # EVT GEMM (identical numerics, at the cost of num_gemms launch overhead).
     if any(_is_nvfp4_per_token_tensor(t) for t in A) or any(
         _is_nvfp4_per_token_tensor(t) for t in B
     ):
@@ -796,12 +814,16 @@ def general_grouped_gemm(
                     "NVFP4 per-token grouped GEMM requires all B operands to be per-token."
                 )
 
-        # Native single-launch CUTLASS grouped per-token kernel. Used for the
-        # plain D = bf16(alpha_a * alpha_b * (A @ B^T)) path; accumulate / bias
-        # / gelu / output-quantization are rejected by the dense per-token
-        # kernel too, so those fall through to the per-expert loop below.
+        # Native single-launch CUTLASS grouped per-token kernel. Serves the
+        # plain D = alpha_a * alpha_b * (A @ B^T) path (bf16 out) and the
+        # wgrad-accumulate path (accumulate=True with fp32 main_grad outputs:
+        # D = main_grad + dW via a beta=1 EVT). bias / gelu / output-quantization
+        # fall through to the per-expert loop below.
+        _accumulate_native_ok = (not accumulate) or all(
+            o.numel() == 0 or o.dtype == torch.float32 for o in out
+        )
         _native_ok = (
-            not accumulate
+            _accumulate_native_ok
             and not gelu
             and not use_bias
             and D_dtype is None
@@ -818,6 +840,7 @@ def general_grouped_gemm(
                 transb=transb,
                 m_splits=m_splits,
                 single_output=single_output,
+                accumulate=accumulate,
             )
             return out, grad_bias, gelu_input
 
