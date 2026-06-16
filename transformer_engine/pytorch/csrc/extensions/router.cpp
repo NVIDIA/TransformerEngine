@@ -94,6 +94,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fw
     use_pre_softmax = false;  // Pre-softmax only happens at the softmax case
   }
   if (topk_indices.has_value()) {
+    TORCH_CHECK(routing_map_format == NVTE_ROUTING_MAP_FORMAT_BYTEMAP,
+                "topk_indices output cannot be combined with non-default routing_map_format; "
+                "dense top-k indices are returned instead of a routing map.");
     check_dense_topk_indices(topk_indices.value(), logits, num_tokens, topk);
   }
 
@@ -157,7 +160,13 @@ void fused_topk_with_score_function_bwd(at::Tensor routing_map, at::Tensor inter
                                         bool use_pre_softmax, std::optional<float> scaling_factor,
                                         std::string score_function, bool use_dense_indices,
                                         int routing_map_format) {
-  check_routing_map_format(routing_map_format);
+  if (use_dense_indices) {
+    TORCH_CHECK(routing_map_format == NVTE_ROUTING_MAP_FORMAT_BYTEMAP,
+                "use_dense_indices cannot be combined with non-default routing_map_format; "
+                "dense top-k indices are consumed instead of a routing map.");
+  } else {
+    check_routing_map_format(routing_map_format);
+  }
   TORCH_CHECK(grad_probs.dim() >= 1, "grad_probs must have at least 1 dim");
   TORCH_CHECK(grad_probs.is_contiguous(), "grad_probs must be contiguous");
   TORCH_CHECK(grad_logits.is_contiguous(), "grad_logits must be contiguous");
