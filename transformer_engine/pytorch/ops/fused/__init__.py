@@ -39,3 +39,9 @@ from .backward_grouped_mlp import (  # pylint: disable=wrong-import-position
     BackwardGroupedMLP_CuTeGEMMDGLU,
     BackwardGroupedMLP_CuTeGEMMDUnary,
 )
+from .forward_grouped_mlp_megacpp import (  # pylint: disable=wrong-import-position
+    ForwardGroupedMLP_MegaCpp,
+)
+from .backward_grouped_mlp_megacpp import (  # pylint: disable=wrong-import-position
+    BackwardGroupedMLP_MegaCpp,
+)
