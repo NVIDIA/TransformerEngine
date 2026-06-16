@@ -113,8 +113,13 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
                    "Row-scaled NVFP4 quantization does not produce columnwise output.");
         nvfp4::compute_rowwise_amax(*input_tensor, noop_tensor, output_tensor, stream);
       }
-      bool use_optimized_kernel = (dtype == DType::kBFloat16) && (rows % 32 == 0) &&
-                                  (cols % 32 == 0) && output_tensor->has_data();
+      // Columnwise-only is supported on the optimized path only for 2D scaling; rowwise-only and
+      // both-directions keep their existing routing. Columnwise-only 1D and non-bf16 fall back to
+      // quantize_transpose_vector_blockwise_fp4.
+      bool use_optimized_kernel =
+          (dtype == DType::kBFloat16) && (rows % 32 == 0) && (cols % 32 == 0) &&
+          (output_tensor->has_data() ||
+           (output_tensor->has_columnwise_data() && quant_config_cpp.nvfp4_2d_quantization));
 
       // Launch NVFP4 quantize kernel
       if (nvfp4_use_4over6) {
@@ -268,8 +273,13 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
                  "NVFP4 4over6 quantization does not support stochastic rounding.");
       NVTE_CHECK(!output_tensor->row_scaled_nvfp4,
                  "Backward NVFP4 quantization does not support row-scaled outputs.");
-      bool use_optimized_kernel = (dtype == DType::kBFloat16) && (rows % 32 == 0) &&
-                                  (cols % 32 == 0) && output_tensor->has_data();
+      // Columnwise-only is supported on the optimized path only for 2D scaling; rowwise-only and
+      // both-directions keep their existing routing. Columnwise-only 1D and non-bf16 fall back to
+      // quantize_transpose_vector_blockwise_fp4.
+      bool use_optimized_kernel =
+          (dtype == DType::kBFloat16) && (rows % 32 == 0) && (cols % 32 == 0) &&
+          (output_tensor->has_data() ||
+           (output_tensor->has_columnwise_data() && quant_config_cpp.nvfp4_2d_quantization));
 
       // Launch NVFP4 quantize kernel
       if (nvfp4_use_4over6) {
