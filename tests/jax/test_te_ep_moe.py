@@ -39,21 +39,6 @@ classes:
 * ``TestTeEpMoeAuxLoss`` covers the second return value end-to-end
   (returned + parity + aux-only grad propagates to gate + combined
   main+aux grads stay finite) in two consolidated tests.
-
-Intentional non-coverage:
-
-* No dedicated "Flax wrapper init+apply" smoke test: every config above
-  already calls ``MoEBlock`` (the Flax wrapper) end-to-end, so a
-  separate wrapper smoke would just duplicate ``test_forward[softmax]``
-  + ``test_backward[softmax]``.
-* No re-bootstrap-mismatch test: ``ep_bootstrap`` rejects a mismatched
-  signature unconditionally and is a one-line guard; covering it from
-  this suite would taint the per-process NCCL bootstrap cache for the
-  rest of the file with no real upside.
-
-FP8 / MXFP8 recipes are deferred — the ``quantizer_sets`` plumbing
-has not yet been re-wired across the TE-EP ``shard_map`` boundary
-(see ``.pr3036-review/INTEGRATION_DESIGN.md``).
 """
 
 import os
