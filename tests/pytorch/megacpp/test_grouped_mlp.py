@@ -31,6 +31,72 @@ _AVAILABLE, _SKIP_REASON = _megacpp_available()
 pytestmark = pytest.mark.skipif(not _AVAILABLE, reason=_SKIP_REASON)
 
 
+class _Fp32ScaledActivationMixin:
+    """Run the wrapped scaled-activation op in fp32 (test-only).
+
+    The scaled-activation ops choose their compute dtype from the input dtype,
+    so upcasting the activation input (and the per-row scales) to fp32 makes the
+    GLU/SReLU and the scaling run in fp32 with a single cast back to the output
+    dtype -- matching the fused megacpp activation kernel. Outputs and gradients
+    are cast back to the original dtype so the surrounding grouped GEMMs see the
+    same dtype as the unwrapped op. This keeps the production ops unchanged and
+    only exercises their existing input-dtype-driven fp32 path in the reference.
+    """
+
+    def fuser_forward(
+        self,
+        basic_op_ctxs,
+        input_,
+        *,
+        basic_op_extra_inputs,
+        prev_op_grad_output_quantizer,
+        next_op_input_quantizer,
+        basic_op_kwargs,
+    ):
+        # The op picks its compute dtype from the main input, then upcasts the
+        # scales internally via maybe_dequantize. So only ``input_`` needs to be
+        # fp32; the extra inputs (act_scales) are passed through untouched to
+        # preserve their requires_grad (casting them here, inside the fuser's
+        # no-grad forward, would drop the grad and skip the scale gradient).
+        out, extra_outputs = super().fuser_forward(
+            basic_op_ctxs,
+            input_.float(),
+            basic_op_extra_inputs=basic_op_extra_inputs,
+            prev_op_grad_output_quantizer=prev_op_grad_output_quantizer,
+            next_op_input_quantizer=next_op_input_quantizer,
+            basic_op_kwargs=basic_op_kwargs,
+        )
+        return out.to(input_.dtype), extra_outputs
+
+    def fuser_backward(self, basic_op_ctxs, grad_output, *, basic_op_grad_extra_outputs):
+        # Returns: (grad_input, grad_params, grad_extra_inputs). The act_scales
+        # gradient lives in grad_extra_inputs (the third element).
+        grad_input, grad_params, grad_extra_inputs = super().fuser_backward(
+            basic_op_ctxs,
+            grad_output,
+            basic_op_grad_extra_outputs=basic_op_grad_extra_outputs,
+        )
+        if grad_input is not None:
+            grad_input = grad_input.to(grad_output.dtype)
+        grad_extra_inputs = [
+            tuple(None if g is None else g.to(grad_output.dtype) for g in group)
+            for group in grad_extra_inputs
+        ]
+        return grad_input, grad_params, grad_extra_inputs
+
+
+class _Fp32ScaledSwiGLU(_Fp32ScaledActivationMixin, te_ops.ScaledSwiGLU):
+    pass
+
+
+class _Fp32ScaledClampedQGeGLU(_Fp32ScaledActivationMixin, te_ops.ScaledClampedQGeGLU):
+    pass
+
+
+class _Fp32ScaledSReLU(_Fp32ScaledActivationMixin, te_ops.ScaledSReLU):
+    pass
+
+
 def _make_grouped_mlp(
     *,
     num_groups: int,
@@ -57,12 +123,16 @@ def _make_grouped_mlp(
         single_grouped_weight=single_grouped_param,
         single_grouped_bias=single_grouped_param and bias,
     )
+    # Use the fp32-compute wrappers so the (non-fused) reference path computes
+    # the activation in fp32, matching the fused megacpp kernel. The wrappers
+    # subclass the real ops, so the megacpp fusion still recognizes them via
+    # isinstance and the fused path ignores the wrapper entirely.
     if activation_kind == "scaled_swiglu":
-        act = te_ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
+        act = _Fp32ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
     elif activation_kind == "scaled_clamped_qgeglu":
-        act = te_ops.ScaledClampedQGeGLU(glu_interleave_size=glu_interleave_size)
+        act = _Fp32ScaledClampedQGeGLU(glu_interleave_size=glu_interleave_size)
     elif activation_kind == "scaled_srelu":
-        act = te_ops.ScaledSReLU()
+        act = _Fp32ScaledSReLU()
     else:
         raise ValueError(f"Unsupported test activation_kind={activation_kind}.")
     fc2 = te_ops.GroupedLinear(

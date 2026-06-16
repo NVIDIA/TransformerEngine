@@ -462,141 +462,74 @@ void add_grouped_bias(GroupedTensorWrapper *output, const at::Tensor &bias, size
   }
 }
 
-bool is_gated_activation(const std::string &activation) {
-  return activation == "swiglu" || activation == "clamped_swiglu" || activation == "geglu" ||
-         activation == "reglu" || activation == "qgeglu" || activation == "sreglu";
-}
+enum class MegacppActivation {
+  kSwiGLU,
+  kClampedSwiGLU,
+  kSReLU,
+};
 
-at::Tensor maybe_deinterleave_glu(const at::Tensor &input, int64_t glu_interleave_size) {
-  if (glu_interleave_size <= 0) {
-    return input;
+MegacppActivation activation_from_string(const std::string &activation) {
+  if (activation == "swiglu") {
+    return MegacppActivation::kSwiGLU;
   }
-  auto shape = input.sizes().vec();
-  const int64_t last_dim = shape.back();
-  NVTE_CHECK(last_dim % (2 * glu_interleave_size) == 0,
-             "GLU interleaving requires the last dimension to be divisible by 2*interleave.");
-  check_contiguous(input, "GLU input");
-  // Explicit layout materialization: GLU interleave changes memory order.
-  return input.view({-1, last_dim / (2 * glu_interleave_size), 2, glu_interleave_size})
-      .transpose(1, 2)
-      .contiguous()
-      .view(shape);
-}
-
-at::Tensor maybe_reinterleave_glu_grad(const at::Tensor &input, int64_t glu_interleave_size) {
-  if (glu_interleave_size <= 0) {
-    return input;
+  if (activation == "clamped_swiglu") {
+    return MegacppActivation::kClampedSwiGLU;
   }
-  auto shape = input.sizes().vec();
-  const int64_t last_dim = shape.back();
-  check_contiguous(input, "GLU grad input");
-  // Explicit layout materialization: reverse GLU interleave changes memory order.
-  return input.view({-1, 2, last_dim / (2 * glu_interleave_size), glu_interleave_size})
-      .transpose(1, 2)
-      .contiguous()
-      .view(shape);
+  if (activation == "srelu") {
+    return MegacppActivation::kSReLU;
+  }
+  NVTE_ERROR("Unsupported megacpp grouped MLP scaled activation: ", activation);
+  return MegacppActivation::kSwiGLU;
 }
 
-at::Tensor activation_forward_impl(const at::Tensor &input, const std::string &activation,
-                                   double activation_limit, double activation_alpha,
-                                   double activation_glu_linear_offset) {
+bool is_gated_activation(MegacppActivation activation) {
+  return activation == MegacppActivation::kSwiGLU ||
+         activation == MegacppActivation::kClampedSwiGLU;
+}
+
+int64_t activation_output_features(const at::Tensor &input, MegacppActivation activation) {
   const int64_t out_features =
       is_gated_activation(activation) ? input.size(-1) / 2 : input.size(-1);
+  NVTE_CHECK(out_features > 0, "Activation output dimension must be non-zero.");
+  return out_features;
+}
+
+at::Tensor grouped_mlp_activation_forward(const at::Tensor &input,
+                                          const std::optional<at::Tensor> &act_scales,
+                                          MegacppActivation activation, int64_t glu_interleave_size,
+                                          double activation_limit, double activation_alpha,
+                                          double activation_glu_linear_offset) {
+  const int64_t out_features = activation_output_features(input, activation);
+  NVTE_CHECK(act_scales.has_value(), "megacpp grouped MLP scaled activation requires act_scales.");
+  const at::Tensor &scales = *act_scales;
+  NVTE_CHECK(scales.is_cuda(), "act_scales must be a CUDA tensor.");
+  NVTE_CHECK(scales.device() == input.device(),
+             "act_scales must be on the same device as activation.");
+  NVTE_CHECK(scales.numel() == input.size(0), "act_scales must have one value per activation row.");
+  check_contiguous(scales, "act_scales");
   auto output = at::empty({input.size(0), out_features}, input.options());
   auto te_input = makeTransformerEngineTensor(input);
+  auto te_scales = makeTransformerEngineTensor(scales);
   auto te_output = makeTransformerEngineTensor(output);
   auto stream = at::cuda::getCurrentCUDAStream();
   NVTE_SCOPED_GIL_RELEASE({
-    if (activation == "swiglu") {
-      nvte_swiglu(te_input.data(), te_output.data(), stream);
-    } else if (activation == "glu") {
-      nvte_glu(te_input.data(), te_output.data(), stream);
-    } else if (activation == "geglu") {
-      nvte_geglu(te_input.data(), te_output.data(), stream);
-    } else if (activation == "qgeglu") {
-      nvte_qgeglu(te_input.data(), te_output.data(), stream);
-    } else if (activation == "reglu") {
-      nvte_reglu(te_input.data(), te_output.data(), stream);
-    } else if (activation == "sreglu") {
-      nvte_sreglu(te_input.data(), te_output.data(), stream);
-    } else if (activation == "clamped_swiglu") {
-      nvte_clamped_swiglu_v2(te_input.data(), te_output.data(),
-                             static_cast<float>(activation_limit),
-                             static_cast<float>(activation_alpha),
-                             static_cast<float>(activation_glu_linear_offset), stream);
-    } else if (activation == "srelu") {
-      nvte_srelu(te_input.data(), te_output.data(), stream);
-    } else if (activation == "gelu") {
-      nvte_gelu(te_input.data(), te_output.data(), stream);
-    } else if (activation == "qgelu") {
-      nvte_qgelu(te_input.data(), te_output.data(), stream);
-    } else if (activation == "relu") {
-      nvte_relu(te_input.data(), te_output.data(), stream);
-    } else if (activation == "silu") {
-      nvte_silu(te_input.data(), te_output.data(), stream);
-    } else {
-      NVTE_ERROR("Unsupported megacpp grouped MLP activation: ", activation);
+    switch (activation) {
+      case MegacppActivation::kSwiGLU:
+        nvte_scaled_swiglu(te_input.data(), te_scales.data(), te_output.data(), glu_interleave_size,
+                           stream);
+        break;
+      case MegacppActivation::kClampedSwiGLU:
+        nvte_scaled_clamped_swiglu(
+            te_input.data(), te_scales.data(), te_output.data(),
+            static_cast<float>(activation_limit), static_cast<float>(activation_alpha),
+            static_cast<float>(activation_glu_linear_offset), glu_interleave_size, stream);
+        break;
+      case MegacppActivation::kSReLU:
+        nvte_scaled_srelu(te_input.data(), te_scales.data(), te_output.data(), stream);
+        break;
     }
   });
   return output;
-}
-
-at::Tensor activation_backward_impl(const at::Tensor &grad, const at::Tensor &input,
-                                    const std::string &activation, double activation_limit,
-                                    double activation_alpha, double activation_glu_linear_offset) {
-  auto output = at::empty_like(input);
-  auto te_grad = makeTransformerEngineTensor(grad);
-  auto te_input = makeTransformerEngineTensor(input);
-  auto te_output = makeTransformerEngineTensor(output);
-  auto stream = at::cuda::getCurrentCUDAStream();
-  NVTE_SCOPED_GIL_RELEASE({
-    if (activation == "swiglu") {
-      nvte_dswiglu(te_grad.data(), te_input.data(), te_output.data(), stream);
-    } else if (activation == "glu") {
-      nvte_dglu(te_grad.data(), te_input.data(), te_output.data(), stream);
-    } else if (activation == "geglu") {
-      nvte_dgeglu(te_grad.data(), te_input.data(), te_output.data(), stream);
-    } else if (activation == "qgeglu") {
-      nvte_dqgeglu(te_grad.data(), te_input.data(), te_output.data(), stream);
-    } else if (activation == "reglu") {
-      nvte_dreglu(te_grad.data(), te_input.data(), te_output.data(), stream);
-    } else if (activation == "sreglu") {
-      nvte_dsreglu(te_grad.data(), te_input.data(), te_output.data(), stream);
-    } else if (activation == "clamped_swiglu") {
-      nvte_clamped_dswiglu_v2(te_grad.data(), te_input.data(), te_output.data(),
-                              static_cast<float>(activation_limit),
-                              static_cast<float>(activation_alpha),
-                              static_cast<float>(activation_glu_linear_offset), stream);
-    } else if (activation == "srelu") {
-      nvte_dsrelu(te_grad.data(), te_input.data(), te_output.data(), stream);
-    } else if (activation == "gelu") {
-      nvte_dgelu(te_grad.data(), te_input.data(), te_output.data(), stream);
-    } else if (activation == "qgelu") {
-      nvte_dqgelu(te_grad.data(), te_input.data(), te_output.data(), stream);
-    } else if (activation == "relu") {
-      nvte_drelu(te_grad.data(), te_input.data(), te_output.data(), stream);
-    } else if (activation == "silu") {
-      nvte_dsilu(te_grad.data(), te_input.data(), te_output.data(), stream);
-    } else {
-      NVTE_ERROR("Unsupported megacpp grouped MLP activation backward: ", activation);
-    }
-  });
-  return output;
-}
-
-at::Tensor grouped_mlp_activation_forward(
-    const at::Tensor &input, const std::optional<at::Tensor> &act_scales,
-    const std::string &activation, int64_t glu_interleave_size, double activation_limit,
-    double activation_alpha, double activation_glu_linear_offset, at::ScalarType dtype) {
-  auto activation_input = maybe_deinterleave_glu(input, glu_interleave_size);
-  auto activation_output = activation_forward_impl(activation_input, activation, activation_limit,
-                                                   activation_alpha, activation_glu_linear_offset);
-  if (!act_scales.has_value()) {
-    return activation_output;
-  }
-  auto act_scales_for_fc2 = maybe_cast_dtype(*act_scales, dtype);
-  check_contiguous(act_scales_for_fc2, "act_scales");
-  return activation_output * act_scales_for_fc2.view({-1, 1});
 }
 
 struct ActivationBackwardResult {
@@ -606,32 +539,54 @@ struct ActivationBackwardResult {
 
 ActivationBackwardResult grouped_mlp_activation_backward(
     const at::Tensor &grad_output, const at::Tensor &input,
-    const std::optional<at::Tensor> &act_scales, const std::string &activation,
+    const std::optional<at::Tensor> &act_scales, MegacppActivation activation,
     int64_t glu_interleave_size, double activation_limit, double activation_alpha,
-    double activation_glu_linear_offset, at::ScalarType dtype, bool act_scales_requires_grad) {
-  auto activation_input = maybe_deinterleave_glu(input, glu_interleave_size);
-
-  at::Tensor grad_activation_output = grad_output;
+    double activation_glu_linear_offset, bool act_scales_requires_grad) {
+  NVTE_CHECK(act_scales.has_value(), "megacpp grouped MLP scaled activation requires act_scales.");
+  const at::Tensor &scales = *act_scales;
+  NVTE_CHECK(scales.is_cuda(), "act_scales must be a CUDA tensor.");
+  NVTE_CHECK(scales.device() == input.device(),
+             "act_scales must be on the same device as activation.");
+  NVTE_CHECK(scales.numel() == input.size(0), "act_scales must have one value per activation row.");
+  check_contiguous(scales, "act_scales");
+  auto grad_input = at::empty_like(input);
   at::Tensor grad_act_scales;
-  if (act_scales.has_value()) {
-    if (act_scales_requires_grad) {
-      // Scaled activations compute y = activation(x) * act_scales[:, None].
-      // Recompute activation(x) for dact_scales to match the Python basic-op
-      // path without saving another [tokens, hidden] activation tensor.
-      auto activation_output =
-          activation_forward_impl(activation_input, activation, activation_limit, activation_alpha,
-                                  activation_glu_linear_offset);
-      grad_act_scales = (activation_output * grad_output).sum(-1);
-    }
-    auto act_scales_for_grad = maybe_cast_dtype(*act_scales, dtype);
-    check_contiguous(act_scales_for_grad, "act_scales");
-    grad_activation_output = grad_output * act_scales_for_grad.view({-1, 1});
+  if (act_scales_requires_grad) {
+    grad_act_scales = at::empty({input.size(0)}, grad_output.options());
   }
 
-  auto grad_activation_input =
-      activation_backward_impl(grad_activation_output, activation_input, activation,
-                               activation_limit, activation_alpha, activation_glu_linear_offset);
-  return {maybe_reinterleave_glu_grad(grad_activation_input, glu_interleave_size), grad_act_scales};
+  auto te_grad_output = makeTransformerEngineTensor(grad_output);
+  auto te_input = makeTransformerEngineTensor(input);
+  auto te_scales = makeTransformerEngineTensor(scales);
+  auto te_grad_input = makeTransformerEngineTensor(grad_input);
+  std::optional<TensorWrapper> te_grad_act_scales;
+  if (grad_act_scales.defined()) {
+    te_grad_act_scales.emplace(makeTransformerEngineTensor(grad_act_scales));
+  }
+  NVTETensor te_grad_act_scales_ptr =
+      grad_act_scales.defined() ? te_grad_act_scales->data() : nullptr;
+  auto stream = at::cuda::getCurrentCUDAStream();
+  NVTE_SCOPED_GIL_RELEASE({
+    switch (activation) {
+      case MegacppActivation::kSwiGLU:
+        nvte_scaled_dswiglu(te_grad_output.data(), te_input.data(), te_scales.data(),
+                            te_grad_input.data(), te_grad_act_scales_ptr, glu_interleave_size,
+                            stream);
+        break;
+      case MegacppActivation::kClampedSwiGLU:
+        nvte_scaled_clamped_dswiglu(
+            te_grad_output.data(), te_input.data(), te_scales.data(), te_grad_input.data(),
+            te_grad_act_scales_ptr, static_cast<float>(activation_limit),
+            static_cast<float>(activation_alpha), static_cast<float>(activation_glu_linear_offset),
+            glu_interleave_size, stream);
+        break;
+      case MegacppActivation::kSReLU:
+        nvte_scaled_dsrelu(te_grad_output.data(), te_input.data(), te_scales.data(),
+                           te_grad_input.data(), te_grad_act_scales_ptr, stream);
+        break;
+    }
+  });
+  return {grad_input, grad_act_scales};
 }
 
 }  // namespace
@@ -644,6 +599,7 @@ std::vector<at::Tensor> megacpp_grouped_mlp_forward(
     double activation_glu_linear_offset, py::handle gemm_scratch) {
   NVTE_CHECK(input.is_cuda(), "megacpp_grouped_mlp_forward requires CUDA input.");
   at::cuda::CUDAGuard device_guard(input.device());
+  const auto activation_kind = activation_from_string(activation);
 
   // act_dtype is the requested activation/GEMM input dtype. The incoming
   // tensor may have a different dtype, so canonicalize it once at the API
@@ -665,7 +621,7 @@ std::vector<at::Tensor> megacpp_grouped_mlp_forward(
   const int64_t fc2_out_features = fc2_weights.rows;
   const int64_t fc2_in_features = fc2_weights.cols;
   const int64_t activation_out_features =
-      is_gated_activation(activation) ? fc1_out_features / 2 : fc1_out_features;
+      is_gated_activation(activation_kind) ? fc1_out_features / 2 : fc1_out_features;
   NVTE_CHECK(activation_out_features == fc2_in_features,
              "FC1 activation output dimension must match FC2 input dimension.");
   auto fc1_bias_tensor =
@@ -699,9 +655,9 @@ std::vector<at::Tensor> megacpp_grouped_mlp_forward(
                          &gemm_resources);
   add_grouped_bias(&grouped_fc1_preact, fc1_bias_tensor, num_groups, dtype, fc1_out_features);
 
-  auto fc2_x = grouped_mlp_activation_forward(
-      fc1_preact, act_scales, activation, glu_interleave_size, activation_limit, activation_alpha,
-      activation_glu_linear_offset, dtype);
+  auto fc2_x = grouped_mlp_activation_forward(fc1_preact, act_scales, activation_kind,
+                                              glu_interleave_size, activation_limit,
+                                              activation_alpha, activation_glu_linear_offset);
 
   std::vector<int64_t> out_shape = input.sizes().vec();
   out_shape.back() = fc2_out_features;
@@ -731,6 +687,7 @@ py::tuple megacpp_grouped_mlp_backward(
   (void)base_offsets;
   NVTE_CHECK(grad_output.is_cuda(), "megacpp_grouped_mlp_backward requires CUDA grad_output.");
   at::cuda::CUDAGuard device_guard(grad_output.device());
+  const auto activation_kind = activation_from_string(activation);
 
   // act_dtype is the requested grouped-MLP compute dtype. Backward receives
   // autograd's grad_output as-is, so canonicalize it here instead of requiring
@@ -772,8 +729,8 @@ py::tuple megacpp_grouped_mlp_backward(
   grouped_gemm_fwd_dgrad(&fc2_weights, false, &grouped_dy, false, &grouped_fc2_dx, &gemm_resources);
 
   auto activation_grads = grouped_mlp_activation_backward(
-      fc2_dx, fc1_activation_input, act_scales, activation, glu_interleave_size, activation_limit,
-      activation_alpha, activation_glu_linear_offset, dtype, act_scales_requires_grad);
+      fc2_dx, fc1_activation_input, act_scales, activation_kind, glu_interleave_size,
+      activation_limit, activation_alpha, activation_glu_linear_offset, act_scales_requires_grad);
   auto fc1_dy = activation_grads.grad_input;
   auto grad_act_scales = activation_grads.grad_act_scales;
   auto grouped_fc1_dy = make_grouped_tensor(fc1_dy, split_sizes, fc1_offsets, fc1_out_features);
