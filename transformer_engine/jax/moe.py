@@ -1281,4 +1281,5 @@ def moe(
     )
     if aux_loss_coeff <= 0.0:
         aux_loss = None
+    assert output.dtype == x.dtype, f"moe() output dtype {output.dtype} != input dtype {x.dtype}"
     return output, aux_loss
