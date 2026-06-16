@@ -91,8 +91,7 @@ __device__ __forceinline__ float gated_forward_value(const float act_in, const f
 template <ScaledActivation Act>
 __device__ __forceinline__ void gated_backward_values(const float act_in, const float gate_in,
                                                       const ClampedSwiGLUParam &param, float *dact,
-                                                      float *dgate,
-                                                      float *unscaled) {
+                                                      float *dgate, float *unscaled) {
   if constexpr (Act == ScaledActivation::kSwiGLU) {
     const float sigmoid = sigmoid_from_float(act_in);
     const float act = act_in * sigmoid;
@@ -171,9 +170,8 @@ Alignment row_vector_alignment(const size_t lead_dim, const int nvec, const Ptrs
 
 template <int nvec, typename InputT, typename ScaleT, typename OutputT, ScaledActivation Act>
 __global__ void scaled_gated_forward_kernel(const InputT *input, const ScaleT *act_scales,
-                                            OutputT *output, const size_t rows,
-                                            const size_t hidden, const size_t segment_size,
-                                            const size_t num_segments,
+                                            OutputT *output, const size_t rows, const size_t hidden,
+                                            const size_t segment_size, const size_t num_segments,
                                             const size_t num_vectors_per_segment,
                                             const ClampedSwiGLUParam param) {
   const size_t total_vectors = rows * num_segments * num_vectors_per_segment;
@@ -186,8 +184,8 @@ __global__ void scaled_gated_forward_kernel(const InputT *input, const ScaleT *a
     const size_t output_segment_offset = row * hidden + segment * segment_size;
 
     VectorizedLoader<InputT, nvec, true> act_loader(input + input_segment_offset, segment_size);
-    VectorizedLoader<InputT, nvec, true> gate_loader(
-        input + input_segment_offset + segment_size, segment_size);
+    VectorizedLoader<InputT, nvec, true> gate_loader(input + input_segment_offset + segment_size,
+                                                     segment_size);
     VectorizedStorer<OutputT, nvec, true> output_storer(output + output_segment_offset,
                                                         segment_size);
     act_loader.load(vector_idx, segment_size);
@@ -206,8 +204,7 @@ __global__ void scaled_gated_forward_kernel(const InputT *input, const ScaleT *a
 
 template <int nvec, typename InputT, typename ScaleT, typename OutputT>
 __global__ void scaled_srelu_forward_kernel(const InputT *input, const ScaleT *act_scales,
-                                            OutputT *output, const size_t rows,
-                                            const size_t hidden,
+                                            OutputT *output, const size_t rows, const size_t hidden,
                                             const size_t num_vectors_per_row) {
   Empty empty = {};
   const size_t total_vectors = rows * num_vectors_per_row;
@@ -231,10 +228,12 @@ __global__ void scaled_srelu_forward_kernel(const InputT *input, const ScaleT *a
 
 template <int nvec, typename GradT, typename InputT, typename ScaleT, typename OutputT,
           ScaledActivation Act>
-__global__ void scaled_gated_backward_kernel(
-    const GradT *grad_output, const InputT *input, const ScaleT *act_scales, OutputT *grad_input,
-    const size_t rows, const size_t hidden, const size_t segment_size, const size_t num_segments,
-    const size_t num_vectors_per_segment, const ClampedSwiGLUParam param) {
+__global__ void scaled_gated_backward_kernel(const GradT *grad_output, const InputT *input,
+                                             const ScaleT *act_scales, OutputT *grad_input,
+                                             const size_t rows, const size_t hidden,
+                                             const size_t segment_size, const size_t num_segments,
+                                             const size_t num_vectors_per_segment,
+                                             const ClampedSwiGLUParam param) {
   const size_t total_vectors = rows * num_segments * num_vectors_per_segment;
   for (size_t tid = blockIdx.x * blockDim.x + threadIdx.x; tid < total_vectors;
        tid += gridDim.x * blockDim.x) {
@@ -247,8 +246,8 @@ __global__ void scaled_gated_backward_kernel(
     VectorizedLoader<GradT, nvec, true> grad_loader(grad_output + output_segment_offset,
                                                     segment_size);
     VectorizedLoader<InputT, nvec, true> act_loader(input + input_segment_offset, segment_size);
-    VectorizedLoader<InputT, nvec, true> gate_loader(
-        input + input_segment_offset + segment_size, segment_size);
+    VectorizedLoader<InputT, nvec, true> gate_loader(input + input_segment_offset + segment_size,
+                                                     segment_size);
     VectorizedStorer<OutputT, nvec, true> act_storer(grad_input + input_segment_offset,
                                                      segment_size);
     VectorizedStorer<OutputT, nvec, true> gate_storer(
@@ -295,9 +294,8 @@ __global__ void scaled_srelu_backward_kernel(const GradT *grad_output, const Inp
 #pragma unroll
     for (int lane = 0; lane < nvec; ++lane) {
       const float grad = static_cast<float>(grad_loader.separate()[lane]) * scale;
-      grad_input_storer.separate()[lane] =
-          static_cast<OutputT>(
-              grad * dsrelu<float, float>(static_cast<float>(input_loader.separate()[lane]), empty));
+      grad_input_storer.separate()[lane] = static_cast<OutputT>(
+          grad * dsrelu<float, float>(static_cast<float>(input_loader.separate()[lane]), empty));
     }
     grad_input_storer.store(vector_idx, hidden);
   }
@@ -307,8 +305,8 @@ template <int nvec, typename GradT, typename InputT, typename ScaleT, typename O
           typename GradScaleT, ScaledActivation Act>
 __global__ void scaled_gated_backward_with_scale_grad_kernel(
     const GradT *grad_output, const InputT *input, const ScaleT *act_scales, OutputT *grad_input,
-    GradScaleT *grad_act_scales, const size_t rows, const size_t hidden,
-    const size_t segment_size, const size_t num_segments, const size_t num_vectors_per_segment,
+    GradScaleT *grad_act_scales, const size_t rows, const size_t hidden, const size_t segment_size,
+    const size_t num_segments, const size_t num_vectors_per_segment,
     const ClampedSwiGLUParam param) {
   __shared__ float smem[kReductionWarps];
   const size_t row = blockIdx.x;
@@ -328,8 +326,8 @@ __global__ void scaled_gated_backward_with_scale_grad_kernel(
     VectorizedLoader<GradT, nvec, true> grad_loader(grad_output + output_segment_offset,
                                                     segment_size);
     VectorizedLoader<InputT, nvec, true> act_loader(input + input_segment_offset, segment_size);
-    VectorizedLoader<InputT, nvec, true> gate_loader(
-        input + input_segment_offset + segment_size, segment_size);
+    VectorizedLoader<InputT, nvec, true> gate_loader(input + input_segment_offset + segment_size,
+                                                     segment_size);
     VectorizedStorer<OutputT, nvec, true> act_storer(grad_input + input_segment_offset,
                                                      segment_size);
     VectorizedStorer<OutputT, nvec, true> gate_storer(
@@ -450,9 +448,8 @@ void check_grad_scale_tensor(const Tensor *grad_act_scales, const size_t rows,
 
 void check_gated_backward_tensors(const Tensor *grad_output, const Tensor *input,
                                   const Tensor *act_scales, const Tensor *grad_input,
-                                  const Tensor *grad_act_scales,
-                                  const int64_t glu_interleave_size, const char *api_name,
-                                  size_t *rows, size_t *hidden) {
+                                  const Tensor *grad_act_scales, const int64_t glu_interleave_size,
+                                  const char *api_name, size_t *rows, size_t *hidden) {
   const auto grad_dims = grad_output->flat_2d_dims();
   const auto input_dims = input->flat_2d_dims();
   const auto grad_input_dims = grad_input->flat_2d_dims();
@@ -475,8 +472,8 @@ void check_gated_backward_tensors(const Tensor *grad_output, const Tensor *input
 
 void check_unary_backward_tensors(const Tensor *grad_output, const Tensor *input,
                                   const Tensor *act_scales, const Tensor *grad_input,
-                                  const Tensor *grad_act_scales, const char *api_name,
-                                  size_t *rows, size_t *hidden) {
+                                  const Tensor *grad_act_scales, const char *api_name, size_t *rows,
+                                  size_t *hidden) {
   const auto grad_dims = grad_output->flat_2d_dims();
   const auto input_dims = input->flat_2d_dims();
   const auto grad_input_dims = grad_input->flat_2d_dims();
@@ -507,17 +504,15 @@ void launch_scaled_gated_forward(const NVTETensor nvte_input, const NVTETensor n
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(input->data.dtype, InputT, {
     TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(act_scales->data.dtype, ScaleT, {
       TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(output->data.dtype, OutputT, {
-        constexpr int nvec =
-            sizeof(InputT) == sizeof(OutputT) ? vector_width<InputT>() : 1;
+        constexpr int nvec = sizeof(InputT) == sizeof(OutputT) ? vector_width<InputT>() : 1;
         const auto input_ptr = reinterpret_cast<const InputT *>(input->data.dptr);
         const auto scale_ptr = reinterpret_cast<const ScaleT *>(act_scales->data.dptr);
         auto output_ptr = reinterpret_cast<OutputT *>(output->data.dptr);
         const size_t segment_size =
             glu_interleave_size > 0 ? static_cast<size_t>(glu_interleave_size) : hidden;
         const size_t num_segments = glu_interleave_size > 0 ? hidden / segment_size : 1;
-        const auto align =
-            row_vector_alignment(segment_size, nvec, input_ptr, input_ptr + segment_size,
-                                 output_ptr);
+        const auto align = row_vector_alignment(segment_size, nvec, input_ptr,
+                                                input_ptr + segment_size, output_ptr);
         const bool use_vector = align == Alignment::SAME_ALIGNED;
         const size_t num_vectors =
             use_vector ? get_num_aligned_elements(input_ptr, segment_size, nvec, sizeof(InputT))
@@ -552,8 +547,7 @@ void launch_scaled_srelu_forward(const NVTETensor nvte_input, const NVTETensor n
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(input->data.dtype, InputT, {
     TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(act_scales->data.dtype, ScaleT, {
       TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(output->data.dtype, OutputT, {
-        constexpr int nvec =
-            sizeof(InputT) == sizeof(OutputT) ? vector_width<InputT>() : 1;
+        constexpr int nvec = sizeof(InputT) == sizeof(OutputT) ? vector_width<InputT>() : 1;
         const auto input_ptr = reinterpret_cast<const InputT *>(input->data.dptr);
         const auto scale_ptr = reinterpret_cast<const ScaleT *>(act_scales->data.dptr);
         auto output_ptr = reinterpret_cast<OutputT *>(output->data.dptr);
@@ -567,9 +561,8 @@ void launch_scaled_srelu_forward(const NVTETensor nvte_input, const NVTETensor n
               <<<blocks, kThreads, 0, stream>>>(input_ptr, scale_ptr, output_ptr, rows, hidden,
                                                 num_vectors);
         } else {
-          scaled_srelu_forward_kernel<1, InputT, ScaleT, OutputT>
-              <<<blocks, kThreads, 0, stream>>>(input_ptr, scale_ptr, output_ptr, rows, hidden,
-                                                hidden);
+          scaled_srelu_forward_kernel<1, InputT, ScaleT, OutputT><<<blocks, kThreads, 0, stream>>>(
+              input_ptr, scale_ptr, output_ptr, rows, hidden, hidden);
         }
       });
     });
@@ -581,9 +574,8 @@ template <ScaledActivation Act>
 void launch_scaled_gated_backward(const NVTETensor nvte_grad_output, const NVTETensor nvte_input,
                                   const NVTETensor nvte_act_scales, NVTETensor nvte_grad_input,
                                   NVTETensor nvte_grad_act_scales,
-                                  const int64_t glu_interleave_size,
-                                  const ClampedSwiGLUParam param, cudaStream_t stream,
-                                  const char *api_name) {
+                                  const int64_t glu_interleave_size, const ClampedSwiGLUParam param,
+                                  cudaStream_t stream, const char *api_name) {
   const Tensor *grad_output = convertNVTETensorCheck(nvte_grad_output);
   const Tensor *input = convertNVTETensorCheck(nvte_input);
   const Tensor *act_scales = convertNVTETensorCheck(nvte_act_scales);
@@ -600,8 +592,7 @@ void launch_scaled_gated_backward(const NVTETensor nvte_grad_output, const NVTET
     TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(input->data.dtype, InputT, {
       TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(act_scales->data.dtype, ScaleT, {
         TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(grad_input->data.dtype, OutputT, {
-          constexpr int nvec = sizeof(GradT) == sizeof(InputT) &&
-                                       sizeof(InputT) == sizeof(OutputT)
+          constexpr int nvec = sizeof(GradT) == sizeof(InputT) && sizeof(InputT) == sizeof(OutputT)
                                    ? vector_width<GradT>()
                                    : 1;
           const auto grad_ptr = reinterpret_cast<const GradT *>(grad_output->data.dptr);
@@ -611,9 +602,9 @@ void launch_scaled_gated_backward(const NVTETensor nvte_grad_output, const NVTET
           const size_t segment_size =
               glu_interleave_size > 0 ? static_cast<size_t>(glu_interleave_size) : hidden;
           const size_t num_segments = glu_interleave_size > 0 ? hidden / segment_size : 1;
-          const auto align = row_vector_alignment(
-              segment_size, nvec, grad_ptr, input_ptr, input_ptr + segment_size, grad_input_ptr,
-              grad_input_ptr + segment_size);
+          const auto align = row_vector_alignment(segment_size, nvec, grad_ptr, input_ptr,
+                                                  input_ptr + segment_size, grad_input_ptr,
+                                                  grad_input_ptr + segment_size);
           const bool use_vector = align == Alignment::SAME_ALIGNED;
           const size_t num_vectors =
               use_vector ? get_num_aligned_elements(input_ptr, segment_size, nvec, sizeof(InputT))
@@ -633,17 +624,16 @@ void launch_scaled_gated_backward(const NVTETensor nvte_grad_output, const NVTET
             }
           } else {
             TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(grad_act_scales->data.dtype, GradScaleT, {
-              auto grad_act_scales_ptr =
-                  reinterpret_cast<GradScaleT *>(grad_act_scales->data.dptr);
+              auto grad_act_scales_ptr = reinterpret_cast<GradScaleT *>(grad_act_scales->data.dptr);
               if (use_vector) {
-                scaled_gated_backward_with_scale_grad_kernel<
-                    nvec, GradT, InputT, ScaleT, OutputT, GradScaleT, Act>
+                scaled_gated_backward_with_scale_grad_kernel<nvec, GradT, InputT, ScaleT, OutputT,
+                                                             GradScaleT, Act>
                     <<<static_cast<int>(rows), kReductionThreads, 0, stream>>>(
                         grad_ptr, input_ptr, scale_ptr, grad_input_ptr, grad_act_scales_ptr, rows,
                         hidden, segment_size, num_segments, num_vectors, param);
               } else {
-                scaled_gated_backward_with_scale_grad_kernel<
-                    1, GradT, InputT, ScaleT, OutputT, GradScaleT, Act>
+                scaled_gated_backward_with_scale_grad_kernel<1, GradT, InputT, ScaleT, OutputT,
+                                                             GradScaleT, Act>
                     <<<static_cast<int>(rows), kReductionThreads, 0, stream>>>(
                         grad_ptr, input_ptr, scale_ptr, grad_input_ptr, grad_act_scales_ptr, rows,
                         hidden, segment_size, num_segments, segment_size, param);
@@ -677,16 +667,15 @@ void launch_scaled_srelu_backward(const NVTETensor nvte_grad_output, const NVTET
     TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(input->data.dtype, InputT, {
       TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(act_scales->data.dtype, ScaleT, {
         TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(grad_input->data.dtype, OutputT, {
-          constexpr int nvec = sizeof(GradT) == sizeof(InputT) &&
-                                       sizeof(InputT) == sizeof(OutputT)
+          constexpr int nvec = sizeof(GradT) == sizeof(InputT) && sizeof(InputT) == sizeof(OutputT)
                                    ? vector_width<GradT>()
                                    : 1;
           const auto grad_ptr = reinterpret_cast<const GradT *>(grad_output->data.dptr);
           const auto input_ptr = reinterpret_cast<const InputT *>(input->data.dptr);
           const auto scale_ptr = reinterpret_cast<const ScaleT *>(act_scales->data.dptr);
           auto grad_input_ptr = reinterpret_cast<OutputT *>(grad_input->data.dptr);
-          const auto align = row_vector_alignment(hidden, nvec, grad_ptr, input_ptr,
-                                                  grad_input_ptr);
+          const auto align =
+              row_vector_alignment(hidden, nvec, grad_ptr, input_ptr, grad_input_ptr);
           const bool use_vector = align == Alignment::SAME_ALIGNED;
           const size_t num_vectors =
               use_vector ? get_num_aligned_elements(input_ptr, hidden, nvec, sizeof(InputT))
@@ -704,17 +693,16 @@ void launch_scaled_srelu_backward(const NVTETensor nvte_grad_output, const NVTET
             }
           } else {
             TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(grad_act_scales->data.dtype, GradScaleT, {
-              auto grad_act_scales_ptr =
-                  reinterpret_cast<GradScaleT *>(grad_act_scales->data.dptr);
+              auto grad_act_scales_ptr = reinterpret_cast<GradScaleT *>(grad_act_scales->data.dptr);
               if (use_vector) {
-                scaled_srelu_backward_with_scale_grad_kernel<
-                    nvec, GradT, InputT, ScaleT, OutputT, GradScaleT>
+                scaled_srelu_backward_with_scale_grad_kernel<nvec, GradT, InputT, ScaleT, OutputT,
+                                                             GradScaleT>
                     <<<static_cast<int>(rows), kReductionThreads, 0, stream>>>(
                         grad_ptr, input_ptr, scale_ptr, grad_input_ptr, grad_act_scales_ptr, rows,
                         hidden, num_vectors);
               } else {
-                scaled_srelu_backward_with_scale_grad_kernel<
-                    1, GradT, InputT, ScaleT, OutputT, GradScaleT>
+                scaled_srelu_backward_with_scale_grad_kernel<1, GradT, InputT, ScaleT, OutputT,
+                                                             GradScaleT>
                     <<<static_cast<int>(rows), kReductionThreads, 0, stream>>>(
                         grad_ptr, input_ptr, scale_ptr, grad_input_ptr, grad_act_scales_ptr, rows,
                         hidden, hidden);
@@ -742,16 +730,15 @@ void nvte_scaled_swiglu(const NVTETensor input, const NVTETensor act_scales, NVT
       input, act_scales, output, glu_interleave_size, param, stream, "nvte_scaled_swiglu");
 }
 
-void nvte_scaled_dswiglu(const NVTETensor grad, const NVTETensor input,
-                         const NVTETensor act_scales, NVTETensor grad_input,
-                         NVTETensor grad_act_scales, int64_t glu_interleave_size,
-                         cudaStream_t stream) {
+void nvte_scaled_dswiglu(const NVTETensor grad, const NVTETensor input, const NVTETensor act_scales,
+                         NVTETensor grad_input, NVTETensor grad_act_scales,
+                         int64_t glu_interleave_size, cudaStream_t stream) {
   NVTE_API_CALL(nvte_scaled_dswiglu);
   using namespace transformer_engine;
   ClampedSwiGLUParam param = {};
-  launch_scaled_gated_backward<ScaledActivation::kSwiGLU>(
-      grad, input, act_scales, grad_input, grad_act_scales, glu_interleave_size, param, stream,
-      "nvte_scaled_dswiglu");
+  launch_scaled_gated_backward<ScaledActivation::kSwiGLU>(grad, input, act_scales, grad_input,
+                                                          grad_act_scales, glu_interleave_size,
+                                                          param, stream, "nvte_scaled_dswiglu");
 }
 
 void nvte_scaled_clamped_swiglu(const NVTETensor input, const NVTETensor act_scales,
@@ -762,8 +749,7 @@ void nvte_scaled_clamped_swiglu(const NVTETensor input, const NVTETensor act_sca
   using namespace transformer_engine;
   ClampedSwiGLUParam param = {limit, alpha, glu_linear_offset};
   launch_scaled_gated_forward<ScaledActivation::kClampedSwiGLU>(
-      input, act_scales, output, glu_interleave_size, param, stream,
-      "nvte_scaled_clamped_swiglu");
+      input, act_scales, output, glu_interleave_size, param, stream, "nvte_scaled_clamped_swiglu");
 }
 
 void nvte_scaled_clamped_dswiglu(const NVTETensor grad, const NVTETensor input,
@@ -786,9 +772,8 @@ void nvte_scaled_srelu(const NVTETensor input, const NVTETensor act_scales, NVTE
   launch_scaled_srelu_forward(input, act_scales, output, stream, "nvte_scaled_srelu");
 }
 
-void nvte_scaled_dsrelu(const NVTETensor grad, const NVTETensor input,
-                        const NVTETensor act_scales, NVTETensor grad_input,
-                        NVTETensor grad_act_scales, cudaStream_t stream) {
+void nvte_scaled_dsrelu(const NVTETensor grad, const NVTETensor input, const NVTETensor act_scales,
+                        NVTETensor grad_input, NVTETensor grad_act_scales, cudaStream_t stream) {
   NVTE_API_CALL(nvte_scaled_dsrelu);
   using namespace transformer_engine;
   launch_scaled_srelu_backward(grad, input, act_scales, grad_input, grad_act_scales, stream,
