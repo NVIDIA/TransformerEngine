@@ -444,6 +444,18 @@ class Quantizer(abc.ABC):
             items.append((name, value))
         return (type(self).__qualname__, tuple(items))
 
+    def _check_value_has_no_amax_reduction_group(self) -> None:
+        # The amax reduction group is not part of the value key, so a value
+        # quantizer that stores one would compare/hash equal to a groupless one
+        # and let torch.compile reuse a graph that skips the reduction. Reject it
+        # (mirrors ``__fx_repr__``); pass the group per quantize call instead.
+        if getattr(self, "amax_reduction_group", None) is not None:
+            raise TypeError(
+                f"{type(self).__name__} with a non-None amax_reduction_group cannot be "
+                "used as a value object; pass the amax reduction group per quantize call "
+                "instead of storing it on the quantizer."
+            )
+
     def __eq__(self, other: object) -> Any:
         # Value quantizers compare by configuration; everything else keeps the
         # default identity semantics (returning ``NotImplemented`` makes Python
@@ -454,11 +466,14 @@ class Quantizer(abc.ABC):
             return NotImplemented
         if other._value_fields() is None:
             return NotImplemented
+        self._check_value_has_no_amax_reduction_group()
+        other._check_value_has_no_amax_reduction_group()
         return self._value_key() == other._value_key()
 
     def __hash__(self) -> int:
         if self._value_fields() is None:
             return object.__hash__(self)
+        self._check_value_has_no_amax_reduction_group()
         return hash(self._value_key())
 
 
