@@ -448,7 +448,12 @@ def _init_apply(block, mesh, x, key):
 
 
 def _grad_step(block, variables, mesh, x, *, include_aux=False):
-    """Run jax.grad of mean(out^2) [+ aux if include_aux] vs params."""
+    """Run jax.grad of mean(out^2) [+ aux if include_aux] vs (params, x).
+
+    Returns ``(grads_variables, grad_x)`` so callers can check both the
+    weight gradients and the input-activation gradient that propagates
+    back to the previous layer.
+    """
     with _ctx(mesh):
         x_sh = _shard_inputs(x, mesh)
 
@@ -459,9 +464,10 @@ def _grad_step(block, variables, mesh, x, *, include_aux=False):
                 loss = loss + aux.astype(jnp.float32)
             return loss
 
-        grads = jax.jit(jax.grad(loss_fn))(variables, x_sh)
-        jax.block_until_ready(jax.tree_util.tree_leaves(grads)[0])
-        return grads
+        grads_v, grad_x = jax.jit(jax.grad(loss_fn, argnums=(0, 1)))(variables, x_sh)
+        jax.block_until_ready(jax.tree_util.tree_leaves(grads_v)[0])
+        jax.block_until_ready(grad_x)
+        return grads_v, grad_x
 
 
 def _grad_aux_only(block, variables, mesh, x):
@@ -618,10 +624,11 @@ class TestTeEpMoeBackward:
         block = _make_block(**config)
         x = _make_inputs(jax.random.PRNGKey(2))
         variables, _, _ = _init_apply(block, mesh, x, jax.random.PRNGKey(3))
-        grads_te = _grad_step(block, variables, mesh, x)
+        grads_te, grad_x_te = _grad_step(block, variables, mesh, x)
 
         # Reference grads via jax.grad over the pure-JAX MoE with the
-        # same config.
+        # same config. argnums=(0, 1) so the reference also produces a
+        # d_x for the propagated-gradient parity check below.
         params_np = _params_global_numpy(variables, mesh)
         x_np = np.asarray(jax.device_get(x))
         ref_kwargs = _reference_kwargs_from_config(config, params_np)
@@ -641,11 +648,12 @@ class TestTeEpMoeBackward:
             )
             return jnp.mean(out.astype(jnp.float32) ** 2)
 
-        grads_ref = jax.jit(jax.grad(loss_fn))(
+        grads_ref, grad_x_ref = jax.jit(jax.grad(loss_fn, argnums=(0, 1)))(
             {k: jnp.asarray(v) for k, v in params_np.items() if k != "expert_bias"},
             jnp.asarray(x_np),
         )
         grads_ref_np = {k: np.asarray(jax.device_get(v)) for k, v in grads_ref.items()}
+        grad_x_ref_np = np.asarray(jax.device_get(grad_x_ref))
 
         for name in ("gate_kernel", "wi_0", "wi_1", "wo"):
             # Per-tensor: finite + non-zero + parity in one pass.
@@ -664,6 +672,28 @@ class TestTeEpMoeBackward:
                 rtol=rtol,
                 err_msg=f"grad parity breach on {name} [config={config}]",
             )
+
+        # d_x: the gradient propagated back to the previous layer. Checks
+        # shape, dtype (must match x.dtype — protects the
+        # _with_sharding_constraint_cast_bwd wrapper that casts the
+        # fp32-promoted gate path back to bf16), finiteness, non-zero
+        # AND numerical parity vs the pure-JAX reference d_x.
+        grad_x_te_np = _to_global_numpy(grad_x_te, mesh)
+        assert grad_x_te.shape == x.shape, (
+            f"d_x shape {grad_x_te.shape} != x.shape {x.shape} [config={config}]"
+        )
+        assert grad_x_te.dtype == x.dtype, (
+            f"d_x dtype {grad_x_te.dtype} != x.dtype {x.dtype} [config={config}]"
+        )
+        assert np.all(np.isfinite(grad_x_te_np)), f"d_x has NaN/Inf [config={config}]"
+        assert np.any(grad_x_te_np != 0.0), f"d_x identically zero [config={config}]"
+        np.testing.assert_allclose(
+            grad_x_te_np.astype(np.float32),
+            grad_x_ref_np.astype(np.float32),
+            atol=GRAD_FFN_ATOL,
+            rtol=GRAD_FFN_RTOL,
+            err_msg=f"d_x parity breach [config={config}]",
+        )
 
 
 class TestTeEpMoeAuxLoss:
@@ -725,7 +755,7 @@ class TestTeEpMoeAuxLoss:
         block = _make_block(aux_loss_coeff=1e-2)
         x = _make_inputs(jax.random.PRNGKey(22))
         variables, _, _ = _init_apply(block, mesh, x, jax.random.PRNGKey(23))
-        grads = _grad_step(block, variables, mesh, x, include_aux=True)
+        grads, _ = _grad_step(block, variables, mesh, x, include_aux=True)
         for name in ("gate_kernel", "wi_0", "wi_1", "wo"):
             g_local = np.asarray(jax.device_get(_unwrap(grads["params"][name]).addressable_data(0)))
             assert np.all(np.isfinite(g_local)), f"{name} grad NaN/Inf under main+aux"
