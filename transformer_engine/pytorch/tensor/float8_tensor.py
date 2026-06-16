@@ -4,7 +4,7 @@
 
 """Tensor class with FP8 data"""
 from __future__ import annotations
-from typing import Any, Optional, Tuple, Iterable, Union
+from typing import Any, Dict, Optional, Tuple, Iterable, Union
 import warnings
 import torch
 from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
@@ -15,7 +15,7 @@ from transformer_engine.common.recipe import (
     Float8CurrentScaling,
     Recipe,
 )
-from ..utils import canonicalize_process_group, devices_match
+from ..utils import canonicalize_process_group, devices_match, is_non_tn_fp8_gemm_supported
 from .storage.float8_tensor_storage import Float8TensorStorage, _FromFloat8Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ..dynamo import register_value_opaque_quantizer
@@ -392,6 +392,36 @@ class Float8CurrentScalingQuantizer(Quantizer):
         # process group (not a value). If one is actually stored, ``__fx_repr__``
         # raises so it can never be baked into a torch.compile graph.
         return ("dtype", "force_pow_2_scales", "amax_epsilon", "with_amax_reduction")
+
+    # ----- TensorProto / pure-Python allocation -----
+
+    def _storage_metadata(self, fake_dtype: torch.dtype) -> Dict[str, Any]:
+        return {
+            "cls": Float8TensorStorage if self.internal else Float8Tensor,
+            "nontensor_kwargs": {
+                "fp8_dtype": self.dtype,
+                "quantizer": self,
+                "fake_dtype": fake_dtype,
+            },
+        }
+
+    def _describe_buffers(
+        self, shape: Tuple[int, ...]
+    ) -> Dict[str, Tuple[Tuple[int, ...], torch.dtype]]:
+        shape = tuple(shape)
+        buffers: Dict[str, Tuple[Tuple[int, ...], torch.dtype]] = {}
+        # Mirror the C++ quantizer allocation (csrc/quantizer.cpp): on non-TN-capable
+        # archs (Blackwell+) a single ``_data`` buffer backs both row- and column-wise
+        # usage and no separate transpose is materialized. This must match what the
+        # real kernel produces so the torch.compile fake layout lines up slot-for-slot.
+        non_tn = is_non_tn_fp8_gemm_supported()
+        if self.rowwise_usage or non_tn:
+            buffers["_data"] = (shape, torch.uint8)
+        if self.columnwise_usage and not non_tn:
+            buffers["_transpose"] = ((shape[-1], *shape[:-1]), torch.uint8)
+        # Per-tensor scale-inv is always present for current scaling.
+        buffers["_scale_inv"] = ((1,), torch.float32)
+        return buffers
 
 
 register_value_opaque_quantizer(Float8CurrentScalingQuantizer)

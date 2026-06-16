@@ -7,7 +7,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 import math
 import warnings
-from typing import Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 import functools
 
 import torch
@@ -365,6 +365,49 @@ class NVFP4Quantizer(Quantizer):
             "rht_matrix_random_sign_mask_t",
             "with_amax_reduction",
         )
+
+    # ----- TensorProto / pure-Python allocation -----
+
+    def _storage_metadata(self, fake_dtype: torch.dtype) -> Dict[str, Any]:
+        return {
+            "cls": NVFP4TensorStorage if self.internal else NVFP4Tensor,
+            "nontensor_kwargs": {
+                "fp4_dtype": self.dtype,
+                "quantizer": self,
+                "with_gemm_swizzled_scales": self.optimize_for_gemm,
+                "row_scaled_nvfp4": self.row_scaled_nvfp4,
+                "nvfp4_use_4over6": self.nvfp4_use_4over6,
+                "nvfp4_e4m3_max": self.nvfp4_e4m3_max,
+                "fake_dtype": fake_dtype,
+            },
+        }
+
+    def _describe_buffers(
+        self, shape: Tuple[int, ...]
+    ) -> Dict[str, Tuple[Tuple[int, ...], torch.dtype]]:
+        shape = tuple(shape)
+        buffers: Dict[str, Tuple[Tuple[int, ...], torch.dtype]] = {}
+        # FP4 data packs 2 values per byte (uint8); block scales are E4M3 stored
+        # as uint8; amax buffers are FP32 (per-row when row-scaled, else scalar).
+        if self.rowwise_usage:
+            buffers["_rowwise_data"] = (self.convert_shape_for_fp4(shape), torch.uint8)
+            buffers["_rowwise_scale_inv"] = (
+                tuple(self.get_scale_shape(shape, columnwise=False)),
+                torch.uint8,
+            )
+            amax_rowwise_shape = (math.prod(shape[:-1]),) if self.row_scaled_nvfp4 else (1,)
+            buffers["_amax_rowwise"] = (amax_rowwise_shape, torch.float32)
+        if self.columnwise_usage:
+            buffers["_columnwise_data"] = (
+                self.convert_shape_for_fp4(self.get_columnwise_shape(shape)),
+                torch.uint8,
+            )
+            buffers["_columnwise_scale_inv"] = (
+                tuple(self.get_scale_shape(shape, columnwise=True)),
+                torch.uint8,
+            )
+            buffers["_amax_columnwise"] = ((1,), torch.float32)
+        return buffers
 
 
 register_value_opaque_quantizer(NVFP4Quantizer)

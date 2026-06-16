@@ -6,7 +6,7 @@
 from __future__ import annotations
 from collections.abc import Iterable
 import math
-from typing import Optional, Tuple, Union, Any
+from typing import Optional, Tuple, Union, Any, Dict
 import warnings
 
 import torch
@@ -60,6 +60,40 @@ class MXFP8Quantizer(Quantizer):
 
     def _value_fields(self) -> Tuple[str, ...]:
         return ("dtype",)
+
+    # ----- TensorProto / pure-Python allocation -----
+
+    def _storage_metadata(self, fake_dtype: torch.dtype) -> Dict[str, Any]:
+        return {
+            "cls": MXFP8TensorStorage if self.internal else MXFP8Tensor,
+            "nontensor_kwargs": {
+                "fp8_dtype": self.dtype,
+                "quantizer": self,
+                "with_gemm_swizzled_scales": self.optimize_for_gemm,
+                "fake_dtype": fake_dtype,
+            },
+        }
+
+    def _describe_buffers(
+        self, shape: Tuple[int, ...]
+    ) -> Dict[str, Tuple[Tuple[int, ...], torch.dtype]]:
+        shape = tuple(shape)
+        buffers: Dict[str, Tuple[Tuple[int, ...], torch.dtype]] = {}
+        # MXFP8 block scales are stored as uint8 (E8M0); data buffers keep the
+        # logical shape (rowwise) and its transpose (columnwise).
+        if self.rowwise_usage:
+            buffers["_rowwise_data"] = (shape, torch.uint8)
+            buffers["_rowwise_scale_inv"] = (
+                tuple(self.get_scale_shape(shape, columnwise=False)),
+                torch.uint8,
+            )
+        if self.columnwise_usage:
+            buffers["_columnwise_data"] = (shape, torch.uint8)
+            buffers["_columnwise_scale_inv"] = (
+                tuple(self.get_scale_shape(shape, columnwise=True)),
+                torch.uint8,
+            )
+        return buffers
 
     def update_quantized(
         self,
