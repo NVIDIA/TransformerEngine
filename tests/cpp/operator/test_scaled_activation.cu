@@ -231,10 +231,12 @@ void run_scaled_activation_test(ScaledActivationCase activation, const size_t ro
     atol = 5e-5;
     rtol = 5e-5;
   }
-  compareResults("scaled_activation_output", output, ref_output.get(), atol, rtol);
-  compareResults("scaled_activation_grad_input", grad_input, ref_grad_input.get(), atol, rtol);
+  compareResults("scaled_activation_output", output, ref_output.get(), true, atol, rtol);
+  compareResults("scaled_activation_grad_input", grad_input, ref_grad_input.get(), true, atol,
+                 rtol);
   if (compute_grad_scales) {
-    compareResults("scaled_activation_grad_scales", grad_scales, ref_grad_scales.get(), atol, rtol);
+    compareResults("scaled_activation_grad_scales", grad_scales, ref_grad_scales.get(), true, atol,
+                   rtol);
   }
 }
 
