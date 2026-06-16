@@ -372,8 +372,7 @@ def test_grouped_linear_accuracy(
 
 @pytest.mark.skipif(
     not (
-        torch.cuda.get_device_capability() == (9, 0)
-        or torch.cuda.get_device_capability()[0] == 10
+        torch.cuda.get_device_capability() == (9, 0) or torch.cuda.get_device_capability()[0] == 10
     ),
     reason="CUTLASS grouped GEMM is supported on Hopper (SM90) and Blackwell (SM100/SM103)",
 )
