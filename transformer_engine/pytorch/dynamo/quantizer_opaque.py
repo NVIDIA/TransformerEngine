@@ -10,6 +10,17 @@ from typing import Any, Dict, Tuple
 from ..constants import DType, dist_group_type
 
 
+# Class attribute stamped on quantizers registered as torch.compile value-opaque
+# types.
+_VALUE_OPAQUE_FLAG = "_te_compile_value_opaque"
+
+
+def is_value_opaque_quantizer(quantizer: Any) -> bool:
+    """Whether *quantizer*'s class is registered as a torch.compile value-opaque
+    type."""
+    return getattr(quantizer, _VALUE_OPAQUE_FLAG, False)
+
+
 def _contains_process_group(value: Any) -> bool:
     """Whether *value* is (or nests) a ``torch.distributed.ProcessGroup``.
 
@@ -93,6 +104,10 @@ def register_value_opaque_quantizer(cls: type) -> None:
     a non-``None`` ``_value_fields`` (see
     :class:`transformer_engine.pytorch.quantized_tensor.Quantizer`).
     """
+    # Stamp the class so it can be recognized as value-opaque in dynamo-traced
+    # code (used to fall back to eager for unregistered quantizers).
+    setattr(cls, _VALUE_OPAQUE_FLAG, True)
+
     # ``register_opaque_type`` requires ``__fx_repr__`` to already exist on the
     # class, so attach it before registering.
     if "__fx_repr__" not in cls.__dict__:
