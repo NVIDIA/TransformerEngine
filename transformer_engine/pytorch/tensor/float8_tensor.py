@@ -612,8 +612,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                     out_transpose = out_transpose.view(*view_shape_for_transpose)
             if data is None and out_transpose is None:
                 raise NotImplementedError(
-                    "Float8Tensor view with columnwise-only data requires a valid "
-                    "columnwise buffer"
+                    "Float8Tensor view with columnwise-only data requires a valid columnwise buffer"
                 )
             return Float8Tensor(
                 shape=out_shape,

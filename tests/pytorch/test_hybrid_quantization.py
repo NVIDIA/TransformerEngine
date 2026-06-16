@@ -1154,7 +1154,6 @@ class TestHybridGemmBitwiseIdenticalBlockFP8:
             )
 
 
-
 @pytest.mark.skipif(
     not (fp8_available and nvfp4_available),
     reason=f"FP8: {reason_for_no_fp8}; NVFP4: {reason_for_no_nvfp4}",
