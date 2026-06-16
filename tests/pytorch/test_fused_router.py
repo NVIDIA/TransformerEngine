@@ -390,6 +390,33 @@ def test_topk_softmax(
     )
 
 
+@pytest.mark.parametrize("topk_index_dtype", [None, torch.int16])
+def test_topk_preserves_leading_dims(topk_index_dtype):
+    num_tokens = 128
+    num_experts = 32
+    topk = 4
+    logits = torch.randn(num_tokens, 2, num_experts, device="cuda", dtype=torch.float32)
+    topk_indices = None
+    if topk_index_dtype is not None:
+        topk_indices = torch.empty(num_tokens, 2, topk, device="cuda", dtype=topk_index_dtype)
+
+    probs, routing_output = fused_topk_with_score_function(
+        logits=logits,
+        topk=topk,
+        use_pre_softmax=False,
+        num_groups=None,
+        group_topk=None,
+        scaling_factor=None,
+        score_function="softmax",
+        expert_bias=None,
+        topk_indices=topk_indices,
+    )
+
+    assert probs.shape == logits.shape
+    expected_routing_shape = topk_indices.shape if topk_indices is not None else logits.shape
+    assert routing_output.shape == expected_routing_shape
+
+
 @pytest.mark.parametrize("dtype", [torch.float32])
 @pytest.mark.parametrize("num_tokens", [2048, 7168])
 @pytest.mark.parametrize("num_experts", [1024, 256, 128, 32])

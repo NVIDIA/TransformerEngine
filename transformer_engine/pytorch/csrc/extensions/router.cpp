@@ -47,7 +47,7 @@ static bool is_supported_dense_index_dtype(at::ScalarType dtype) {
 }
 
 static void check_dense_topk_indices(const at::Tensor &topk_indices, const at::Tensor &ref,
-                                     int64_t num_tokens, int topk) {
+                                     c10::IntArrayRef leading_dims, int topk) {
   TORCH_CHECK(topk_indices.is_cuda(), "topk_indices must be a CUDA tensor");
   TORCH_CHECK(topk_indices.device() == ref.device(), "topk_indices must be on the same device as ",
               "the logits/grad tensor");
@@ -55,11 +55,10 @@ static void check_dense_topk_indices(const at::Tensor &topk_indices, const at::T
   TORCH_CHECK(is_supported_dense_index_dtype(topk_indices.scalar_type()),
               "topk_indices dtype must be int16, int32, or int64, got ",
               topk_indices.scalar_type());
-  TORCH_CHECK(topk_indices.numel() == num_tokens * static_cast<int64_t>(topk),
-              "topk_indices must contain num_tokens * topk elements, got ", topk_indices.numel(),
-              " but expected ", num_tokens * static_cast<int64_t>(topk));
-  TORCH_CHECK(topk_indices.dim() >= 1 && topk_indices.size(-1) == topk,
-              "topk_indices last dimension must be topk=", topk, ", got shape ",
+  std::vector<int64_t> expected_shape(leading_dims.begin(), leading_dims.end());
+  expected_shape.push_back(static_cast<int64_t>(topk));
+  TORCH_CHECK(topk_indices.sizes() == expected_shape,
+              "topk_indices shape must be [*leading_dims, topk]=", expected_shape, ", got ",
               topk_indices.sizes());
 }
 
@@ -97,7 +96,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fw
     TORCH_CHECK(routing_map_format == NVTE_ROUTING_MAP_FORMAT_BYTEMAP,
                 "topk_indices output cannot be combined with non-default routing_map_format; "
                 "dense top-k indices are returned instead of a routing map.");
-    check_dense_topk_indices(topk_indices.value(), logits, num_tokens, topk);
+    check_dense_topk_indices(topk_indices.value(), logits, sizes.slice(0, sizes.size() - 1), topk);
   }
 
   // Reformat the input to make it compatible with the kernel
@@ -179,7 +178,7 @@ void fused_topk_with_score_function_bwd(at::Tensor routing_map, at::Tensor inter
   TORCH_CHECK(topk > 0 && topk <= num_experts, "topk must be in [1, num_experts], got topk=", topk,
               " num_experts=", num_experts);
   if (use_dense_indices) {
-    check_dense_topk_indices(routing_map, grad_probs, num_tokens, topk);
+    check_dense_topk_indices(routing_map, grad_probs, sizes.slice(0, sizes.size() - 1), topk);
   }
 
   auto scaling_factor_value = scaling_factor.has_value() ? scaling_factor.value() : 1.0f;

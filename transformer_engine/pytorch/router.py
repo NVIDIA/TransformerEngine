@@ -86,10 +86,6 @@ class FusedTopkScoreFunction(torch.autograd.Function):
         topk_indices: Optional[torch.Tensor],
     ):
         # pylint: disable=missing-function-docstring
-        tensor_shape = logits.shape
-        logits = logits.view(-1, tensor_shape[-1])
-        num_tokens = logits.size(0)
-        num_experts = logits.size(1)
         probs, routing_output, intermediate_output = tex.fused_topk_with_score_function_fwd(
             logits,
             topk,
@@ -104,20 +100,15 @@ class FusedTopkScoreFunction(torch.autograd.Function):
         )
         if topk_indices is not None:
             routing_output = topk_indices
-        probs = probs.view(tensor_shape)
         if topk_indices is not None:
             ctx.mark_dirty(topk_indices)
         ctx.mark_non_differentiable(routing_output)
         ctx.save_for_backward(routing_output, intermediate_output)
-        ctx.num_tokens = num_tokens
-        ctx.num_experts = num_experts
-        ctx.tensor_shape = tensor_shape
         ctx.use_pre_softmax = use_pre_softmax
         ctx.topk = topk
         ctx.scaling_factor = scaling_factor
         ctx.score_function = score_function
         ctx.routing_map_format = routing_map_format
-        ctx.logits_dtype = logits.dtype
         ctx.use_dense_indices = topk_indices is not None
         return probs, routing_output
 
@@ -125,10 +116,9 @@ class FusedTopkScoreFunction(torch.autograd.Function):
     def backward(ctx, grad_probs, _):
         # pylint: disable=missing-function-docstring
         routing_map, intermediate_output = ctx.saved_tensors
-        grad_probs = grad_probs.contiguous().view(-1, ctx.tensor_shape[-1])
-        grad_logits = torch.empty(
-            (ctx.num_tokens, ctx.num_experts), dtype=ctx.logits_dtype, device=grad_probs.device
-        )
+        if not grad_probs.is_contiguous():
+            grad_probs = grad_probs.contiguous()
+        grad_logits = torch.empty_like(grad_probs)
         tex.fused_topk_with_score_function_bwd(
             routing_map,
             intermediate_output,
@@ -141,7 +131,6 @@ class FusedTopkScoreFunction(torch.autograd.Function):
             ctx.use_dense_indices,
             ctx.routing_map_format,
         )
-        grad_logits = grad_logits.view(ctx.tensor_shape)
         return grad_logits, None, None, None, None, None, None, None, None, None
 
 
