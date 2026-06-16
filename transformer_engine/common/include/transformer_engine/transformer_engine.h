@@ -497,17 +497,36 @@ void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream
  *
  *  Computes:
  *    output[0] = 0
- *    output[i + 1] = sum_{j=0..i}(first_dims[j] * logical_last_dim)
- *  for i in [0, num_tensors - 1].
+ *    output[i + 1] = sum_{j=0..i}(split_sizes[j] * stride)
+ *  for i in [0, num_splits - 1].
  *
- *  \param[in] first_dims Pointer to device int64 array of size num_tensors.
- *  \param[out] output Pointer to device int64 array of size num_tensors + 1.
- *  \param[in] num_tensors Number of entries in first_dims.
- *  \param[in] logical_last_dim Scale factor applied to each first_dims entry.
+ *  \param[in] split_sizes Pointer to device int64 array of size num_splits.
+ *  \param[out] output Pointer to device int64 array of size num_splits + 1.
+ *  \param[in] num_splits Number of entries in split_sizes.
+ *  \param[in] stride Scale factor applied to each split_sizes entry.
  *  \param[in] stream CUDA stream to use for the operation.
  */
-void nvte_splits_to_offsets(const int64_t *first_dims, int64_t *output, size_t num_tensors,
-                            int64_t logical_last_dim, cudaStream_t stream);
+void nvte_splits_to_offsets(const int64_t *split_sizes, int64_t *output, size_t num_splits,
+                            int64_t stride, cudaStream_t stream);
+
+/*! \brief Compute multiple scaled prefix-sum offsets for grouped tensors.
+ *
+ *  Computes a prefix-sum over the values in split_sizes, and for each
+ *  output multiplies the prefix-sum by a stride. Inputs and outputs
+ *  can be any combination of int32 and int64 tensors.
+ *
+ *  \param[in] split_sizes Device int32/int64 split sizes with shape [N].
+ *  \param[out] outputs Array of int32/int64 1D output tensors, one per scan.
+ *  \param[in] strides Per-output scale factor. Length num_outputs.
+ *  \param[in] include_leading_zero Per-output flag: 0 if outputs[i] has length N
+ *             (inclusive scan), nonzero if outputs[i] has length N + 1 (inclusive
+ *             scan prepended with zero). Length num_outputs.
+ *  \param[in] num_outputs Number of output tensors.
+ *  \param[in] stream CUDA stream to use for the operation.
+ */
+void nvte_splits_to_offsets_multi(NVTETensor split_sizes, NVTETensor *outputs,
+                                  const int64_t *strides, const int *include_leading_zero,
+                                  size_t num_outputs, cudaStream_t stream);
 
 /*! \brief TE Grouped Tensor type
  *

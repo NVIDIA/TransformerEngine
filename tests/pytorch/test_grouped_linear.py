@@ -4,7 +4,7 @@
 
 import os
 import random
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 import pytest
 import torch
@@ -20,6 +20,7 @@ from transformer_engine.pytorch import (
     GroupedLinear,
     Linear,
     MXFP8Quantizer,
+    NVFP4Quantizer,
     autocast,
     is_bf16_available,
     quantized_model_init,
@@ -35,13 +36,19 @@ from transformer_engine.pytorch.quantization import (
 )
 from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
 import transformer_engine_torch as tex
-from utils import ModelConfig, recipe_id, reset_rng_states, skip_unsupported_backward_override
+from utils import (
+    ModelConfig,
+    assert_close,
+    recipe_id,
+    reset_rng_states,
+    skip_unsupported_backward_override,
+)
 
 # Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 fp8_block_scaling_available, _ = te.is_fp8_block_scaling_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
-nvfp4_available, _ = te.is_nvfp4_available(return_reason=True)
+nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
 
 seed = 1234
 reset_rng_states()
@@ -868,6 +875,53 @@ def test_grouped_gemm(shape, dtype, layout, accumulate, use_cutlass, monkeypatch
             torch.testing.assert_close(o, o_ref, rtol=1.5e-2, atol=1.5e-2)
 
 
+@pytest.mark.skipif(
+    torch.cuda.get_device_capability() != (9, 0),
+    reason="Only enable CUTLASS grouped gemm on Hopper",
+)
+@pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
+def test_grouped_gemm_cutlass_empty_groups(layout, monkeypatch):
+    dtype = torch.bfloat16
+    z, k, n = 1, 2048, 1536
+    m_splits = [0] * z
+
+    if layout == "TN":
+        A = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # weight
+        B = [torch.empty(0, k, dtype=dtype, device="cuda") for _ in range(z)]  # input
+        out = [torch.empty(0, n, dtype=dtype, device="cuda")]  # output
+        grad = False
+        single_output = True
+    elif layout == "NN":
+        A = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # weight
+        B = [torch.empty(0, n, dtype=dtype, device="cuda") for _ in range(z)]  # grad_output
+        out = [torch.empty(0, k, dtype=dtype, device="cuda")]  # dgrad
+        grad = True
+        single_output = True
+    else:  # layout == "NT"
+        A = [torch.empty(0, k, dtype=dtype, device="cuda") for _ in range(z)]  # input
+        B = [torch.empty(0, n, dtype=dtype, device="cuda") for _ in range(z)]  # grad_output
+        out = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # wgrad
+        grad = True
+        single_output = False
+
+    monkeypatch.setenv("NVTE_USE_CUTLASS_GROUPED_GEMM", "1")
+    general_grouped_gemm(
+        A,
+        B,
+        out,
+        [None] * z,
+        dtype,
+        m_splits=m_splits,
+        grad=grad,
+        layout=layout,
+        single_output=single_output,
+    )
+    torch.cuda.synchronize()
+
+    for tensor in out:
+        torch.testing.assert_close(tensor, torch.zeros_like(tensor), rtol=0, atol=0)
+
+
 def _pack_grouped_tensor(grouped_tensor: GroupedTensor, tensors: List[torch.Tensor]) -> None:
     data = grouped_tensor.rowwise_data
     if data is None:
@@ -1445,6 +1499,7 @@ def test_fp8_grouped_gemm(shape, accumulate):
 _FUSED_GROUPED_GEMM_ENV = "NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM"
 _ALL_BOOLEAN = all_boolean
 _mxfp8_available, _reason_for_no_mxfp8 = mxfp8_available, reason_for_no_mxfp8
+_nvfp4_available, _reason_for_no_nvfp4 = nvfp4_available, reason_for_no_nvfp4
 
 
 @pytest.fixture(autouse=True)
@@ -1528,8 +1583,12 @@ def _run_grouped_linear_path(
             recipe.MXFP8BlockScaling(),
             marks=pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8),
         ),
+        pytest.param(
+            recipe.NVFP4BlockScaling(disable_stochastic_rounding=True),
+            marks=pytest.mark.skipif(not _nvfp4_available, reason=_reason_for_no_nvfp4),
+        ),
     ],
-    ids=["bf16", "mxfp8"],
+    ids=["bf16", "mxfp8", "nvfp4"],
 )
 @pytest.mark.parametrize("bias", _ALL_BOOLEAN)
 @pytest.mark.parametrize("fp8_model_params", _ALL_BOOLEAN)
@@ -1537,17 +1596,27 @@ def _run_grouped_linear_path(
 def test_grouped_linear_grouped_tensor_path_matches_legacy(
     fp8_recipe, bias, fp8_model_params, delay_wgrad_compute, monkeypatch
 ):
-    if torch.cuda.get_device_capability() < (10, 0):
-        pytest.skip("GroupedTensor grouped GEMM path requires SM100+")
-
     use_fp8 = fp8_recipe is not None
+    device_capability = torch.cuda.get_device_capability()
+    if not (9, 0) <= device_capability <= (11, 0):
+        pytest.skip(
+            "GroupedTensor grouped GEMM path requires Hopper (SM90) or Blackwell (SM10x and SM110)."
+        )
+    if use_fp8 and device_capability < (10, 0):
+        pytest.skip("Quantized GroupedTensor grouped GEMM path requires Blackwell (SM100+).")
+    cublaslt_version = tex.get_cublasLt_version()
+    if device_capability < (10, 0) and cublaslt_version < 130400:
+        pytest.skip("Grouped GEMM on Hopper requires cuBLAS 13.4+.")
+    if cublaslt_version < 130300:
+        pytest.skip("Grouped GEMM requires cuBLAS 13.3+.")
+
     if fp8_model_params and not use_fp8:
         pytest.skip("fp8_model_params requires FP8")
 
     dtype = torch.bfloat16
     num_gemms = 3
-    in_features = 64
-    out_features = 64
+    in_features = 128
+    out_features = 128
     m_splits = [128, 256, 384]
     total_tokens = sum(m_splits)
 
@@ -1631,6 +1700,90 @@ def test_grouped_linear_grouped_tensor_path_single_grouped_bias_delay_wgrad(monk
     grouped_linear.backward_dw()
 
 
+@pytest.mark.skipif(not _nvfp4_available, reason=_reason_for_no_nvfp4)
+def test_grouped_linear_grouped_tensor_path_skips_non_rht_nvfp4(monkeypatch):
+    """Non-RHT NVFP4 falls back to the legacy path; check it stays numerically correct.
+
+    Graph-safe grouped quantization currently requires RHT, so requesting NVFP4 with
+    ``disable_rht=True`` while the fused grouped-tensor path is enabled falls back to the
+    legacy path internally. We verify the output and gradients against a reference built from
+    per-GEMM ``te.Linear`` modules that share the same weights and use the same NVFP4 recipe;
+    the grouped GEMM should match the loop of single GEMMs.
+    """
+    if torch.cuda.get_device_capability() < (10, 0):
+        pytest.skip("NVFP4 GroupedTensor grouped GEMM path requires SM100+")
+
+    monkeypatch.setenv(_FUSED_GROUPED_GEMM_ENV, "1")
+    FP8GlobalStateManager.reset()
+
+    dtype = torch.bfloat16
+    num_gemms = 3
+    in_features = 128
+    out_features = 128
+    m_splits = [128, 256, 384]
+    total_tokens = sum(m_splits)
+
+    torch.manual_seed(1234)
+    x_base = (0.1 * torch.randn(total_tokens, in_features, device="cuda")).to(dtype)
+    dy = (0.1 * torch.randn(total_tokens, out_features, device="cuda")).to(dtype)
+    weights = [
+        (0.1 * torch.randn(out_features, in_features, device="cuda")).to(dtype)
+        for _ in range(num_gemms)
+    ]
+
+    fp8_recipe = recipe.NVFP4BlockScaling(
+        disable_rht=True,
+        disable_stochastic_rounding=True,
+    )
+
+    # Grouped path: fused path enabled, but non-RHT NVFP4 falls back to legacy internally.
+    grouped_linear = GroupedLinear(
+        num_gemms,
+        in_features,
+        out_features,
+        bias=False,
+        params_dtype=dtype,
+        device="cuda",
+    )
+    with torch.no_grad():
+        for i in range(num_gemms):
+            getattr(grouped_linear, f"weight{i}").copy_(weights[i])
+
+    x = x_base.detach().clone().requires_grad_(True)
+    with autocast(enabled=True, recipe=fp8_recipe):
+        y = grouped_linear(x, m_splits)
+    y.backward(dy)
+
+    # Reference: one te.Linear per GEMM sharing the same weights and NVFP4 recipe.
+    ref_linears = torch.nn.ModuleList(
+        [
+            Linear(in_features, out_features, bias=False, params_dtype=dtype, device="cuda")
+            for _ in range(num_gemms)
+        ]
+    )
+    with torch.no_grad():
+        for i in range(num_gemms):
+            ref_linears[i].weight.copy_(weights[i])
+
+    x_ref = x_base.detach().clone().requires_grad_(True)
+    with autocast(enabled=True, recipe=fp8_recipe):
+        y_ref = torch.cat(
+            [ref_linears[i](x_i) for i, x_i in enumerate(torch.split(x_ref, m_splits))]
+        )
+    y_ref.backward(dy)
+
+    # cuBLAS grouped GEMM should match the loop of single GEMMs bit-for-bit.
+    tols = dict(rtol=0, atol=0)
+    torch.testing.assert_close(y.float(), y_ref.float(), **tols)
+    torch.testing.assert_close(x.grad.float(), x_ref.grad.float(), **tols)
+    for i in range(num_gemms):
+        torch.testing.assert_close(
+            getattr(grouped_linear, f"weight{i}").grad.float(),
+            ref_linears[i].weight.grad.float(),
+            **tols,
+        )
+
+
 @pytest.mark.parametrize(
     "fp8_recipe",
     [
@@ -1639,19 +1792,33 @@ def test_grouped_linear_grouped_tensor_path_single_grouped_bias_delay_wgrad(monk
             recipe.MXFP8BlockScaling(),
             marks=pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8),
         ),
+        pytest.param(
+            recipe.NVFP4BlockScaling(disable_stochastic_rounding=True),
+            marks=pytest.mark.skipif(not _nvfp4_available, reason=_reason_for_no_nvfp4),
+        ),
     ],
-    ids=["bf16", "mxfp8"],
+    ids=["bf16", "mxfp8", "nvfp4"],
 )
 @pytest.mark.parametrize("bias", _ALL_BOOLEAN)
 def test_grouped_linear_fused_path_cuda_graph_safe(fp8_recipe, bias, monkeypatch):
     """Fused GroupedTensor GEMM path should be CUDA graph capturable."""
-    if torch.cuda.get_device_capability() < (10, 0):
-        pytest.skip("GroupedTensor grouped GEMM path requires SM100+")
+    use_fp8 = fp8_recipe is not None
+    device_capability = torch.cuda.get_device_capability()
+    if not (9, 0) <= device_capability <= (11, 0):
+        pytest.skip(
+            "GroupedTensor grouped GEMM path requires Hopper (SM90) or Blackwell (SM10x and SM110)."
+        )
+    if use_fp8 and device_capability < (10, 0):
+        pytest.skip("Quantized GroupedTensor grouped GEMM path requires Blackwell (SM100+).")
+    cublaslt_version = tex.get_cublasLt_version()
+    if device_capability < (10, 0) and cublaslt_version < 130400:
+        pytest.skip("Grouped GEMM on Hopper requires cuBLAS 13.4+.")
+    if cublaslt_version < 130300:
+        pytest.skip("Grouped GEMM requires cuBLAS 13.3+.")
 
     monkeypatch.setenv(_FUSED_GROUPED_GEMM_ENV, "1")
     FP8GlobalStateManager.reset()
 
-    use_fp8 = fp8_recipe is not None
     dtype = torch.bfloat16
     device = "cuda"
     num_gemms = 3
@@ -1742,3 +1909,121 @@ def test_grouped_linear_fused_path_cuda_graph_safe(fp8_recipe, bias, monkeypatch
     for graph_grad, param in zip(graph_param_grads, grouped_linear.parameters()):
         assert param.grad is not None
         torch.testing.assert_close(graph_grad.float(), param.grad.float(), **tols)
+
+
+@pytest.mark.parametrize("swizzle_type", ["mxfp8_rowwise", "mxfp8_columnwise", "nvfp4"])
+def test_swizzle_scales_and_pack_ptrs_for_discrete_weights(
+    swizzle_type: str,
+    num_tensors: int = 4,
+    shape: Sequence[int] = (160, 96),
+):
+    """Helper function for preparing discrete weights for cuDNN group GEMM kernel"""
+
+    # Skip unsupported configurations
+    if not mxfp8_available and swizzle_type in ("mxfp8_rowwise", "mxfp8_columnwise"):
+        pytest.skip(reason_for_no_mxfp8)
+    if not nvfp4_available and swizzle_type == "nvfp4":
+        pytest.skip(reason_for_no_nvfp4)
+
+    # Construct quantizer
+    quantizer = None
+    if swizzle_type in ("mxfp8_rowwise", "mxfp8_columnwise"):
+        quantizer = MXFP8Quantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            rowwise=swizzle_type == "mxfp8_rowwise",
+            columnwise=swizzle_type == "mxfp8_columnwise",
+        )
+    elif swizzle_type == "nvfp4":
+        quantizer = NVFP4Quantizer(
+            columnwise=False,
+            with_rht=False,
+            with_post_rht_amax=False,
+            with_2d_quantization=False,
+            stochastic_rounding=False,
+            with_random_sign_mask=False,
+        )
+
+    # Per-expert tensors: unquantized, quantized with compact scales,
+    # quantized with swizzled scales
+    device = torch.device("cuda")
+    unquantized_tensors = [
+        torch.randn(shape, dtype=torch.bfloat16, device=device) for _ in range(num_tensors)
+    ]
+    quantizer.optimize_for_gemm = False
+    tensors_with_compact_scales = [quantizer(t) for t in unquantized_tensors]
+    quantizer.optimize_for_gemm = True
+    tensors_with_swizzled_scales = [quantizer(t) for t in unquantized_tensors]
+
+    # Extract data and scale buffers
+    if swizzle_type in ("mxfp8_rowwise", "nvfp4"):
+        data_tensors = [qx._rowwise_data for qx in tensors_with_compact_scales]
+        scale_tensors = [qx._rowwise_scale_inv for qx in tensors_with_compact_scales]
+        ref_scale_tensors = [qx._rowwise_scale_inv for qx in tensors_with_swizzled_scales]
+    elif swizzle_type == "mxfp8_columnwise":
+        data_tensors = [qx._columnwise_data for qx in tensors_with_compact_scales]
+        scale_tensors = [qx._columnwise_scale_inv for qx in tensors_with_compact_scales]
+        ref_scale_tensors = [qx._columnwise_scale_inv for qx in tensors_with_swizzled_scales]
+    else:
+        raise ValueError("Unrecogized swizzle type")
+
+    # Call the helper function
+    data_ptrs, scale_ptrs, swizzled_scales_buffer = (
+        tex.grouped_mlp_experimental.swizzle_scales_and_pack_ptrs_for_discrete_weights(
+            data_tensors,
+            scale_tensors,
+            swizzle_type,
+            device,
+        )
+    )
+
+    # Check data pointer values
+    expected_data_ptrs = torch.tensor(
+        [t.data_ptr() for t in data_tensors],
+        dtype=torch.int64,
+        device="cpu",
+    )
+    assert_close(data_ptrs, expected_data_ptrs)
+
+    # Check scale pointer values
+    scale_bytes = scale_tensors[0].numel() * scale_tensors[0].element_size()
+    expected_scale_ptrs = torch.tensor(
+        [swizzled_scales_buffer.data_ptr() + i * scale_bytes for i in range(num_tensors)],
+        dtype=torch.int64,
+        device="cpu",
+    )
+    assert_close(scale_ptrs, expected_scale_ptrs)
+
+    # Check swizzled scale values
+    swizzled_scales_buffer = swizzled_scales_buffer.view(torch.uint8)
+    expected_swizzled_scales_buffer = (
+        torch.cat(ref_scale_tensors).view(torch.uint8).view_as(swizzled_scales_buffer)
+    )
+    assert_close(
+        swizzled_scales_buffer,
+        expected_swizzled_scales_buffer,
+    )
+
+    # Poison the padded compact scales
+    if swizzle_type == "mxfp8_rowwise":
+        unpadded_scale_shape = (shape[0], shape[1] // 32)
+    elif swizzle_type == "mxfp8_columnwise":
+        unpadded_scale_shape = (shape[0] // 32, shape[1])
+    elif swizzle_type == "nvfp4":
+        unpadded_scale_shape = (shape[0], shape[1] // 16)
+    for scale in scale_tensors:
+        scale[unpadded_scale_shape[0] :, :].view(torch.uint8).fill_(-1)
+        scale[:, unpadded_scale_shape[1] :].view(torch.uint8).fill_(-1)
+
+    # Check that swizzling removes poisoned pad scales
+    _, _, swizzled_scales_buffer = (
+        tex.grouped_mlp_experimental.swizzle_scales_and_pack_ptrs_for_discrete_weights(
+            data_tensors,
+            scale_tensors,
+            swizzle_type,
+            device,
+        )
+    )
+    assert_close(
+        swizzled_scales_buffer,
+        expected_swizzled_scales_buffer,
+    )

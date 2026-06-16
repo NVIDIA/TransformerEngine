@@ -1049,6 +1049,11 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
         " column-wise scaling factors, but got shape=", output->columnwise_scale_inv.shape, ".");
   }
 
+  // Return early if tensor has no entries
+  if (m == 0 || k == 0) {
+    return;
+  }
+
   // Choose swizzle implementation
   bool rowwise_swizzle{false}, columnwise_swizzle{false};
   switch (scaling_mode) {

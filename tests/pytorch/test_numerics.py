@@ -43,6 +43,7 @@ from transformer_engine.pytorch import (
 from transformer_engine.pytorch import checkpoint as te_checkpoint
 from transformer_engine.pytorch.cpp_extensions import general_gemm
 from transformer_engine.common import recipe
+from transformer_engine.pytorch import DType
 import transformer_engine_torch as tex
 from utils import ModelConfig, recipe_id, reset_rng_states, skip_unsupported_backward_override
 
@@ -2126,17 +2127,19 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
 @pytest.mark.parametrize(
     "input_quantizer",
     [
-        Float8CurrentScalingQuantizer(fp8_dtype=tex.DType.kFloat8E4M3, device="cuda"),
-        MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
+        Float8CurrentScalingQuantizer(fp8_dtype=DType.kFloat8E4M3, device="cuda"),
+        MXFP8Quantizer(fp8_dtype=DType.kFloat8E4M3),
     ],
 )
 @pytest.mark.parametrize(
     "out_quantizer",
     [
-        Float8CurrentScalingQuantizer(fp8_dtype=tex.DType.kFloat8E4M3, device="cuda"),
-        MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
+        Float8CurrentScalingQuantizer(fp8_dtype=DType.kFloat8E4M3, device="cuda"),
+        MXFP8Quantizer(fp8_dtype=DType.kFloat8E4M3),
         Float8Quantizer(
-            torch.ones(1).cuda().squeeze(), torch.ones(1).cuda().squeeze(), tex.DType.kFloat8E4M3
+            torch.ones(1).cuda().squeeze(),
+            torch.ones(1).cuda().squeeze(),
+            DType.kFloat8E4M3,
         ),
     ],
 )

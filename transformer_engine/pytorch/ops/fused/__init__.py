@@ -31,11 +31,7 @@ register_backward_fusion(BackwardAddRMSNorm.fuse_backward_ops)
 
 # Import experimental fusions
 # Note: Registration logic is non-trivial, so submodule handles it internally.
-from .forward_grouped_mlp import (  # pylint: disable=wrong-import-position
-    ForwardGroupedMLP_CuTeGEMMGLU_MXFP8,
-    ForwardGroupedMLP_CuTeGEMMUnary_MXFP8,
-)
-from .backward_grouped_mlp import (  # pylint: disable=wrong-import-position
-    BackwardGroupedMLP_CuTeGEMMDGLU_MXFP8,
-    BackwardGroupedMLP_CuTeGEMMDUnary_MXFP8,
+from .grouped_mlp import (  # pylint: disable=wrong-import-position
+    GroupedMLP_CuTeGEMMGLU,
+    GroupedMLP_CuTeGEMMUnary,
 )

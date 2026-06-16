@@ -28,9 +28,8 @@ from __future__ import annotations
 from typing import Optional
 
 import torch
-import transformer_engine_torch as tex
-
 from transformer_engine.pytorch.quantization import QuantizerRole
+from ..constants import DType
 
 
 def delayed_scaling_quantizer_factory(
@@ -65,7 +64,7 @@ def current_scaling_quantizer_factory(
     )
 
     is_backward = role is not None and role.tensor_type == "grad_output"
-    fp8_dtype = tex.DType.kFloat8E5M2 if is_backward else tex.DType.kFloat8E4M3
+    fp8_dtype = DType.kFloat8E5M2 if is_backward else DType.kFloat8E4M3
 
     return Float8CurrentScalingQuantizer(
         fp8_dtype=fp8_dtype,
@@ -86,7 +85,7 @@ def mxfp8_quantizer_factory(
     from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 
     return MXFP8Quantizer(
-        fp8_dtype=tex.DType.kFloat8E4M3,
+        fp8_dtype=DType.kFloat8E4M3,
     )
 
 
@@ -111,7 +110,7 @@ def float8_block_scaling_quantizer_factory(
     block_scaling_dim = 2 if is_weight else 1
 
     return Float8BlockQuantizer(
-        fp8_dtype=tex.DType.kFloat8E4M3,
+        fp8_dtype=DType.kFloat8E4M3,
         rowwise=True,
         columnwise=True,
         amax_epsilon=0.0,  # clamp amax from below to avoid div-by-zero
@@ -146,7 +145,7 @@ def nvfp4_quantizer_factory(
 
     if is_weight:
         return NVFP4Quantizer(
-            fp4_dtype=tex.DType.kFloat4E2M1,
+            fp4_dtype=DType.kFloat4E2M1,
             with_rht=False,
             with_post_rht_amax=False,
             with_2d_quantization=True,
@@ -156,7 +155,7 @@ def nvfp4_quantizer_factory(
 
     if is_grad:
         return NVFP4Quantizer(
-            fp4_dtype=tex.DType.kFloat4E2M1,
+            fp4_dtype=DType.kFloat4E2M1,
             rowwise=True,
             columnwise=True,
             with_rht=True,
@@ -168,7 +167,7 @@ def nvfp4_quantizer_factory(
 
     # For input and unknown roles
     return NVFP4Quantizer(
-        fp4_dtype=tex.DType.kFloat4E2M1,
+        fp4_dtype=DType.kFloat4E2M1,
         rowwise=True,
         columnwise=True,
         with_rht=True,

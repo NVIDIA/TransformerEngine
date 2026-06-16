@@ -139,6 +139,40 @@ function(find_nccl_version OUT_VERSION OUT_INCLUDE_DIR)
   set(${OUT_INCLUDE_DIR} "${_nvte_nccl_include_dir}" PARENT_SCOPE)
 endfunction()
 
+function(find_cublasmp_version OUT_VERSION OUT_INCLUDE_DIR SEARCH_DIR)
+  find_path(_nvte_cublasmp_include_dir
+            NAMES cublasmp.h
+            HINTS "${SEARCH_DIR}/include"
+            PATH_SUFFIXES include
+            REQUIRED)
+
+  file(STRINGS "${_nvte_cublasmp_include_dir}/cublasmp.h" _nvte_cublasmp_major_line
+       REGEX "^#define CUBLASMP_VER_MAJOR[ \t]+[0-9]+$")
+  file(STRINGS "${_nvte_cublasmp_include_dir}/cublasmp.h" _nvte_cublasmp_minor_line
+       REGEX "^#define CUBLASMP_VER_MINOR[ \t]+[0-9]+$")
+  file(STRINGS "${_nvte_cublasmp_include_dir}/cublasmp.h" _nvte_cublasmp_patch_line
+       REGEX "^#define CUBLASMP_VER_PATCH[ \t]+[0-9]+$")
+
+  string(REGEX REPLACE "^#define CUBLASMP_VER_MAJOR[ \t]+([0-9]+)$" "\\1"
+         _nvte_cublasmp_major "${_nvte_cublasmp_major_line}")
+  string(REGEX REPLACE "^#define CUBLASMP_VER_MINOR[ \t]+([0-9]+)$" "\\1"
+         _nvte_cublasmp_minor "${_nvte_cublasmp_minor_line}")
+  string(REGEX REPLACE "^#define CUBLASMP_VER_PATCH[ \t]+([0-9]+)$" "\\1"
+         _nvte_cublasmp_patch "${_nvte_cublasmp_patch_line}")
+
+  if ("${_nvte_cublasmp_major}" STREQUAL ""
+      OR "${_nvte_cublasmp_minor}" STREQUAL ""
+      OR "${_nvte_cublasmp_patch}" STREQUAL "")
+    message(FATAL_ERROR
+            "Failed to parse cuBLASMp version from ${_nvte_cublasmp_include_dir}/cublasmp.h")
+  endif()
+
+  set(${OUT_VERSION}
+      "${_nvte_cublasmp_major}.${_nvte_cublasmp_minor}.${_nvte_cublasmp_patch}"
+      PARENT_SCOPE)
+  set(${OUT_INCLUDE_DIR} "${_nvte_cublasmp_include_dir}" PARENT_SCOPE)
+endfunction()
+
 # Configure Transformer Engine library
 include_directories(${PROJECT_SOURCE_DIR}/..)
 set(transformer_engine_SOURCES)
@@ -194,6 +228,7 @@ list(APPEND transformer_engine_cuda_sources
      permutation/permutation.cu
      util/utils.cu
      util/padding.cu
+     util/splits_to_offsets.cu
      util/topk.cu
      swizzle/swizzle.cu
      swizzle/swizzle_block_scaling.cu
@@ -354,25 +389,36 @@ endif()
 
 option(NVTE_WITH_CUBLASMP "Use cuBLASMp for tensor parallel GEMMs" OFF)
 if (NVTE_WITH_CUBLASMP)
+
     target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_CUBLASMP)
     target_include_directories(transformer_engine PRIVATE ${CUBLASMP_DIR}/include)
     find_nccl_version(NCCL_VERSION NCCL_INCLUDE_DIR)
+    find_cublasmp_version(CUBLASMP_VERSION CUBLASMP_INCLUDE_DIR ${CUBLASMP_DIR})
     find_library(CUBLASMP_LIB
-                 NAMES cublasmp libcublasmp
+                 NAMES cublasmp libcublasmp.so libcublasmp.so.0
                  PATHS ${CUBLASMP_DIR}
-                 PATH_SUFFIXES lib
+                 PATH_SUFFIXES lib lib64 lib/aarch64-linux-gnu lib/sbsa-linux-gnu lib/x86_64-linux-gnu
                  REQUIRED)
     find_library(NCCL_LIB
                  NAMES nccl libnccl
                  PATH_SUFFIXES lib
                  REQUIRED)
-    if (NCCL_VERSION VERSION_LESS 2.29.0)
+    # cuBLASMp 0.8 is the first release with CUDA-graph-safe overlap algos,
+    # and NCCL 2.30 is the first release with graph-safe one-sided RMA
+    # primitives (ncclPutSignal/ncclWaitSignal) that those algos use.
+    if (CUBLASMP_VERSION VERSION_LESS 0.8.0)
       message(FATAL_ERROR
-              "NVTE_WITH_CUBLASMP requires NCCL >= 2.29.0, but found NCCL ${NCCL_VERSION} "
-              "in ${NCCL_INCLUDE_DIR}/nccl.h")
+              "NVTE_WITH_CUBLASMP requires cuBLASMp >= 0.8.0, but found cuBLASMp "
+              "${CUBLASMP_VERSION} in ${CUBLASMP_INCLUDE_DIR}/cublasmp.h")
+    endif()
+    if (NCCL_VERSION VERSION_LESS 2.30.0)
+      message(FATAL_ERROR
+              "NVTE_WITH_CUBLASMP requires NCCL >= 2.30.0 (for graph-capture-safe "
+              "one-sided RMA primitives used by cuBLASMp's overlap algorithms), but "
+              "found NCCL ${NCCL_VERSION} in ${NCCL_INCLUDE_DIR}/nccl.h")
     endif()
     target_link_libraries(transformer_engine PUBLIC ${NCCL_LIB} ${CUBLASMP_LIB})
-    message(STATUS "Using cuBLASMp at: ${CUBLASMP_DIR}")
+    message(STATUS "Using cuBLASMp ${CUBLASMP_VERSION} at: ${CUBLASMP_DIR}")
     message(STATUS "Using NCCL ${NCCL_VERSION} at: ${NCCL_LIB}")
 endif()
 

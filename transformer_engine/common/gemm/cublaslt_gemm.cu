@@ -1056,6 +1056,10 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
                             cudaStream_t stream) {
   NVTE_API_CALL(nvte_multi_tensor_gemm);
 
+  if (num_gemms <= 0) {
+    return;
+  }
+
   const int current_device = transformer_engine::cuda::current_device();
   const bool is_hopper = (transformer_engine::cuda::sm_arch(current_device) == 90);
   const bool is_blackwell = (transformer_engine::cuda::sm_arch(current_device) == 100 ||
