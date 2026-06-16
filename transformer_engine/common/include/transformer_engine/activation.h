@@ -521,10 +521,9 @@ void nvte_clamped_dswiglu_v2(const NVTETensor grad, const NVTETensor input, NVTE
  *  \param[in]     glu_interleave_size  GLU interleave chunk size, or 0 for non-interleaved layout.
  *  \param[in]     stream               CUDA stream used for the operation.
  */
-void nvte_scaled_dswiglu(const NVTETensor grad, const NVTETensor input,
-                         const NVTETensor act_scales, NVTETensor grad_input,
-                         NVTETensor grad_act_scales, int64_t glu_interleave_size,
-                         cudaStream_t stream);
+void nvte_scaled_dswiglu(const NVTETensor grad, const NVTETensor input, const NVTETensor act_scales,
+                         NVTETensor grad_input, NVTETensor grad_act_scales,
+                         int64_t glu_interleave_size, cudaStream_t stream);
 
 /*! \brief Computes ScaledClampedSwiGLU backward without materializing GLU deinterleave.
  *
@@ -608,9 +607,8 @@ void nvte_scaled_srelu(const NVTETensor input, const NVTETensor act_scales, NVTE
  *  \param[in,out] grad_act_scales  Optional row-wise scale gradient of shape [N], or null.
  *  \param[in]     stream           CUDA stream used for the operation.
  */
-void nvte_scaled_dsrelu(const NVTETensor grad, const NVTETensor input,
-                        const NVTETensor act_scales, NVTETensor grad_input,
-                        NVTETensor grad_act_scales, cudaStream_t stream);
+void nvte_scaled_dsrelu(const NVTETensor grad, const NVTETensor input, const NVTETensor act_scales,
+                        NVTETensor grad_input, NVTETensor grad_act_scales, cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"
