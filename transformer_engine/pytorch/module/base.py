@@ -568,6 +568,9 @@ def destroy_ub():
     _ub_initialized = False
     global layers_atomic_ring_exchange
     layers_atomic_ring_exchange = []
+    # Compiled graphs may have baked is_fp8_ubuf() via assume_constant_result;
+    # reset so re-init with different settings doesn't read stale constants.
+    torch.compiler.reset()
 
 
 def fill_userbuffers_buffer_for_all_gather(
