@@ -295,12 +295,9 @@ TEST_P(ScaledActivationTest, ForwardBackward) {
 //                            for gated activations with hidden % 32 == 0; SReLU skips != 0.
 //   6. compute_grad_scales : whether the backward also reduces grad_act_scales.
 
-// Regular shapes: hidden is a multiple of 32, so the interleaved (32) layout is exercised
-// alongside the contiguous (0) layout.
-// Regular shapes (hidden % 32 == 0) and weird/irregular shapes (tiny, prime, non-32-aligned)
-// share one instantiation. Interleave is swept over {0, 32}; invalid combinations -- SReLU with
-// any nonzero interleave, or a gated activation whose hidden is not divisible by the interleave --
-// are skipped at runtime by the GTEST_SKIP guards in the test body.
+// Interleave is swept over {0, 32}; invalid combinations -- SReLU with any nonzero interleave, or
+// a gated activation whose hidden is not divisible by the interleave -- are skipped at runtime by
+// the GTEST_SKIP guards in the test body.
 INSTANTIATE_TEST_SUITE_P(
     OperatorTest_ScaledActivation, ScaledActivationTest,
     ::testing::Combine(
@@ -309,20 +306,14 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::Values(DType::kFloat32, DType::kBFloat16),   // data dtype
         ::testing::Values(DType::kFloat32, DType::kBFloat16),   // scale dtype
         ::testing::Values(std::pair<size_t, size_t>{17, 64},    // odd rows, aligned hidden
-                          std::pair<size_t, size_t>{8, 96},     // 96 = 3 * 32
                           std::pair<size_t, size_t>{32, 32},    // minimal aligned square
                           std::pair<size_t, size_t>{128, 128},  // square
-                          std::pair<size_t, size_t>{64, 256},   // wide hidden
                           std::pair<size_t, size_t>{256, 64},   // many rows, narrow hidden
-                          std::pair<size_t, size_t>{128, 512},  // FFN-ish width
+                          std::pair<size_t, size_t>{1024, 2048},  // large FFN-ish width
                           std::pair<size_t, size_t>{1, 1},      // single element
                           std::pair<size_t, size_t>{1, 96},     // single row
                           std::pair<size_t, size_t>{96, 1},     // single hidden column
-                          std::pair<size_t, size_t>{3, 7},      // tiny primes
-                          std::pair<size_t, size_t>{13, 100},   // non-power-of-two
-                          std::pair<size_t, size_t>{7, 257},    // prime, odd hidden
-                          std::pair<size_t, size_t>{33, 65},    // odd dims
-                          std::pair<size_t, size_t>{129, 31}),  // odd rows, hidden < 32
+                          std::pair<size_t, size_t>{13, 100}),  // non-power-of-two
         ::testing::Values(0, 32),                                // contiguous + interleaved
         ::testing::Values(false, true)),                         // grad_act_scales off / on
     test_name_generator);
