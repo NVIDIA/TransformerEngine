@@ -11,6 +11,9 @@ import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 
 from transformer_engine.common import recipe
+from transformer_engine.pytorch.custom_recipes.quantization_recipes_base import (
+    nvfp4_quantizer_factory,
+)
 from transformer_engine.pytorch import (
     autocast,
     quantized_model_init,
@@ -1151,18 +1154,13 @@ class TestHybridGemmBitwiseIdenticalBlockFP8:
             )
 
 
+
 @pytest.mark.skipif(
     not (fp8_available and nvfp4_available),
     reason=f"FP8: {reason_for_no_fp8}; NVFP4: {reason_for_no_nvfp4}",
 )
 class TestHybridGemmBitwiseIdenticalNVFP4:
-    """Hybrid quantizer with NVFP4 in both directions must produce
-    bitwise-identical results to the vanilla NVFP4BlockScaling recipe.
-
-    RHT, stochastic rounding, and 2D quantization are disabled so the
-    test is fully deterministic and two independent quantizer instances
-    produce the same output.
-    """
+    """Same-format hybrid NVFP4 must match vanilla with seeded SR."""
 
     def test_linear_fwd_bwd_matches_vanilla_nvfp4(self):
         torch.manual_seed(202)
@@ -1177,11 +1175,9 @@ class TestHybridGemmBitwiseIdenticalNVFP4:
         inp_ref = base_inp.clone().detach().requires_grad_(True)
         inp_hybrid = base_inp.clone().detach().requires_grad_(True)
 
-        ref_recipe = recipe.NVFP4BlockScaling(
-            disable_rht=True,
-            disable_stochastic_rounding=True,
-            disable_2d_quantization=True,
-        )
+        ref_recipe = recipe.NVFP4BlockScaling()
+        torch.manual_seed(1202)
+        torch.cuda.manual_seed_all(1202)
         with autocast(enabled=True, recipe=ref_recipe):
             out_ref = model_ref(inp_ref)
         out_ref.float().sum().backward()
@@ -1190,15 +1186,17 @@ class TestHybridGemmBitwiseIdenticalNVFP4:
             if (
                 role is not None
                 and role.module_type in ("linear", "grouped_linear")
-                and role.tensor_type in ("grad_output", "grad_input")
+                and role.tensor_type == "grad_output"
             ):
-                return NVFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1)
+                return nvfp4_quantizer_factory(role)
             return HybridQuantizer(
-                rowwise_quantizer=NVFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1),
-                columnwise_quantizer=NVFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1),
+                rowwise_quantizer=nvfp4_quantizer_factory(role),
+                columnwise_quantizer=nvfp4_quantizer_factory(role),
             )
 
         hybrid_recipe = recipe.CustomRecipe(qfactory=hybrid_nvfp4_factory)
+        torch.manual_seed(1202)
+        torch.cuda.manual_seed_all(1202)
         with autocast(enabled=True, recipe=hybrid_recipe):
             out_hybrid = model_hybrid(inp_hybrid)
         out_hybrid.float().sum().backward()
@@ -1220,9 +1218,7 @@ class TestHybridGemmBitwiseIdenticalNVFP4:
             )
 
     def test_linear_fwd_bwd_all_roles_hybrid(self):
-        """All roles (including grad_output) use HybridQuantizer with NVFP4 both
-        directions. Validates per-operand unwrap produces bitwise-identical results
-        when grad_output is hybrid."""
+        """Exercise grad_output as a HybridQuantizer too."""
         torch.manual_seed(203)
 
         in_features, out_features, batch = 128, 128, 32
@@ -1235,22 +1231,22 @@ class TestHybridGemmBitwiseIdenticalNVFP4:
         inp_ref = base_inp.clone().detach().requires_grad_(True)
         inp_hybrid = base_inp.clone().detach().requires_grad_(True)
 
-        ref_recipe = recipe.NVFP4BlockScaling(
-            disable_rht=True,
-            disable_stochastic_rounding=True,
-            disable_2d_quantization=True,
-        )
+        ref_recipe = recipe.NVFP4BlockScaling()
+        torch.manual_seed(1203)
+        torch.cuda.manual_seed_all(1203)
         with autocast(enabled=True, recipe=ref_recipe):
             out_ref = model_ref(inp_ref)
         out_ref.float().sum().backward()
 
         def hybrid_nvfp4_all_roles_factory(role):
             return HybridQuantizer(
-                rowwise_quantizer=NVFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1),
-                columnwise_quantizer=NVFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1),
+                rowwise_quantizer=nvfp4_quantizer_factory(role),
+                columnwise_quantizer=nvfp4_quantizer_factory(role),
             )
 
         hybrid_recipe = recipe.CustomRecipe(qfactory=hybrid_nvfp4_all_roles_factory)
+        torch.manual_seed(1203)
+        torch.cuda.manual_seed_all(1203)
         with autocast(enabled=True, recipe=hybrid_recipe):
             out_hybrid = model_hybrid(inp_hybrid)
         out_hybrid.float().sum().backward()
@@ -3359,21 +3355,19 @@ class TestHybridQuantizeMasterWeights:
         documented in the TODO block above ``_route_hybrid_to_buckets`` in
         tensor/utils.py.
 
-        NOTE: this test exercises the rejection at the ``quantize_master_weights``
-        entrypoint, but ``quantized_model_init`` with 2D NVFP4 hybrid already
-        fails earlier (single-direction 2D NVFP4 quantize is rejected by the
-        kernel). Use ``with_2d_quantization=False`` so the param can be
-        constructed and the rejection surfaces at the cast site we care about.
+        NOTE: after PR #3027, single-direction 2D NVFP4 construction works,
+        so this test now reaches the intended ``quantize_master_weights``
+        rejection while using the base weight scaling mode.
         """
         from transformer_engine.pytorch.tensor.utils import quantize_master_weights
 
         group = _ensure_single_rank_dp_group()
         hybrid_recipe = _hybrid_custom_recipe(
             row_factory=lambda: NVFP4Quantizer(
-                fp4_dtype=tex.DType.kFloat4E2M1, with_2d_quantization=False
+                fp4_dtype=tex.DType.kFloat4E2M1, with_2d_quantization=True
             ),
             col_factory=lambda: NVFP4Quantizer(
-                fp4_dtype=tex.DType.kFloat4E2M1, with_2d_quantization=False
+                fp4_dtype=tex.DType.kFloat4E2M1, with_2d_quantization=True
             ),
             grad_factory=lambda: NVFP4Quantizer(
                 fp4_dtype=tex.DType.kFloat4E2M1, with_2d_quantization=False
@@ -3850,12 +3844,20 @@ class TestHybridMixedFormatQuantizedParams:
     """Quantized params with genuinely different formats per direction."""
 
     def _build_mixed_model(self, in_features=256, out_features=256):
-        """MXFP8 rowwise (for fprop TN) + NVFP4 columnwise (for wgrad NT)."""
-        hybrid_recipe = _hybrid_custom_recipe(
-            row_factory=lambda: MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
-            col_factory=lambda: NVFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1),
-            grad_factory=lambda: NVFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1),
-        )
+        """MXFP8 rowwise (fprop) + role-aware NVFP4 columnwise (bwd)."""
+
+        def qfactory(role):
+            is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+            if is_linear and role.tensor_type in ("input", "weight", "output"):
+                return HybridQuantizer(
+                    rowwise_quantizer=MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
+                    columnwise_quantizer=nvfp4_quantizer_factory(role),
+                )
+            if is_linear and role.tensor_type == "grad_output":
+                return nvfp4_quantizer_factory(role)
+            return MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+
+        hybrid_recipe = recipe.CustomRecipe(qfactory=qfactory)
         with quantized_model_init(enabled=True, recipe=hybrid_recipe):
             model = Linear(in_features, out_features, params_dtype=torch.bfloat16).cuda()
         return model, hybrid_recipe
@@ -4008,13 +4010,13 @@ def _hybrid_block_fp8_qfactory(role):
 
 
 def _hybrid_nvfp4_qfactory(role):
-    """Hybrid NVFP4 (E2M1 both dirs)."""
+    """Hybrid NVFP4 (E2M1 both dirs, base role behavior)."""
     is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
-    if is_linear and role.tensor_type in ("grad_output", "grad_input"):
-        return NVFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1)
+    if is_linear and role.tensor_type == "grad_output":
+        return nvfp4_quantizer_factory(role)
     return HybridQuantizer(
-        rowwise_quantizer=NVFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1),
-        columnwise_quantizer=NVFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1),
+        rowwise_quantizer=nvfp4_quantizer_factory(role),
+        columnwise_quantizer=nvfp4_quantizer_factory(role),
     )
 
 
@@ -4085,6 +4087,8 @@ class _QuantizedParamsEquivalenceBase:
         x = torch.randn(4, 32, self.hidden_size, dtype=torch.bfloat16, device="cuda")
         target = torch.randn_like(x)
 
+        torch.manual_seed(199)
+        torch.cuda.manual_seed_all(199)
         losses_ref, masters_ref = self._run_training_loop(
             model_ref,
             self._vanilla_recipe(),
@@ -4092,6 +4096,8 @@ class _QuantizedParamsEquivalenceBase:
             target,
             self.num_steps,
         )
+        torch.manual_seed(199)
+        torch.cuda.manual_seed_all(199)
         losses_hyb, masters_hyb = self._run_training_loop(
             model_hyb,
             self._hybrid_recipe(),
@@ -4200,17 +4206,10 @@ class TestQuantizedParamsEquivalenceBlockFP8(_QuantizedParamsEquivalenceBase):
     reason=f"FP8: {reason_for_no_fp8}; NVFP4: {reason_for_no_nvfp4}",
 )
 class TestQuantizedParamsEquivalenceNVFP4(_QuantizedParamsEquivalenceBase):
-    """Vanilla NVFP4BlockScaling vs hybrid NVFP4 (same format both dirs).
-
-    RHT, stochastic rounding, and 2D quantization disabled for determinism.
-    """
+    """Vanilla NVFP4BlockScaling vs same-format hybrid NVFP4."""
 
     def _vanilla_recipe(self):
-        return recipe.NVFP4BlockScaling(
-            disable_rht=True,
-            disable_stochastic_rounding=True,
-            disable_2d_quantization=True,
-        )
+        return recipe.NVFP4BlockScaling()
 
     def _hybrid_recipe(self):
         return recipe.CustomRecipe(qfactory=_hybrid_nvfp4_qfactory)
@@ -4517,6 +4516,51 @@ class TestFloat8TransposeOnlySplit:
         assert [tuple(piece._transpose.shape) for piece in pieces] == expected_transpose_shapes
         assert all(piece._data is None for piece in pieces)
         assert all(piece._transpose_invalid is False for piece in pieces)
+
+    def test_float8_view_preserves_transpose_only_storage(self):
+        tensor = self._make_transpose_only_float8_tensor()
+
+        viewed = tensor.view(12, 16)
+
+        assert tuple(viewed.shape) == (12, 16)
+        assert viewed._data is None
+        assert viewed._transpose is not None
+        assert tuple(viewed._transpose.shape) == (16, 12)
+        assert viewed._transpose_invalid is False
+
+    def test_float8_aten_view_preserves_transpose_only_storage(self):
+        tensor = self._make_transpose_only_float8_tensor()
+
+        viewed = torch.ops.aten.view.default(tensor, [12, 16])
+
+        assert tuple(viewed.shape) == (12, 16)
+        assert viewed._data is None
+        assert viewed._transpose is not None
+        assert tuple(viewed._transpose.shape) == (16, 12)
+        assert viewed._transpose_invalid is False
+
+    def test_float8_storage_view_preserves_transpose_only_storage(self):
+        data_transpose = torch.empty((16, 12), dtype=torch.uint8, device="cuda")
+        storage = Float8TensorStorage(
+            data=None,
+            data_transpose=data_transpose,
+            fp8_scale_inv=torch.ones(1, dtype=torch.float32, device="cuda"),
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            fake_dtype=torch.bfloat16,
+        )
+
+        viewed = storage.view(torch.Size((12, 16)))
+
+        assert viewed._data is None
+        assert viewed._transpose is not None
+        assert tuple(viewed._transpose.shape) == (16, 12)
+        assert viewed._transpose_invalid is False
+
+    def test_float8_shape_changing_view_raises_for_transpose_only_storage(self):
+        tensor = self._make_transpose_only_float8_tensor()
+
+        with pytest.raises(NotImplementedError, match="columnwise-only data"):
+            tensor.view(6, 32)
 
     def test_hybrid_split_uses_columnwise_logical_shape_when_rowwise_is_absent(self):
         columnwise = self._make_transpose_only_float8_tensor()

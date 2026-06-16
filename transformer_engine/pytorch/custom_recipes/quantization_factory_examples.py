@@ -13,10 +13,18 @@ Usage::
     from transformer_engine.common.recipe import CustomRecipe
     from transformer_engine.pytorch.quantization import autocast
     from transformer_engine.pytorch.custom_recipes.quantization_factory_examples import (
+        mxfp8_fwd_nvfp4_bwd_quantizer_factory,
         nvfp4_linear_mxfp8_grouped_linear_factory,
         nvfp4_linear_fp8_dpa_factory,
         nvfp4_linear_mxfp8_dpa_factory,
+        high_precision_factory,
+        fwd_high_precision_bwd_mxfp8_factory,
     )
+
+    # Hybrid per-direction recipe: MXFP8 for fprop, NVFP4 for dgrad/wgrad
+    recipe = CustomRecipe(qfactory=mxfp8_fwd_nvfp4_bwd_quantizer_factory)
+    with autocast(recipe=recipe):
+        output = model(input)
 
     # Mixed module types: NVFP4 for Linear, MXFP8 for GroupedLinear
     recipe = CustomRecipe(qfactory=nvfp4_linear_mxfp8_grouped_linear_factory)
@@ -32,6 +40,11 @@ Usage::
     recipe = CustomRecipe(qfactory=nvfp4_linear_mxfp8_dpa_factory, fp8_dpa=True)
     with autocast(recipe=recipe):
         output = model(input)
+
+    # High precision forward, MXFP8 backward
+    recipe = CustomRecipe(qfactory=fwd_high_precision_bwd_mxfp8_factory)
+    with autocast(recipe=recipe):
+        output = model(input)
 """
 
 from __future__ import annotations
@@ -40,6 +53,35 @@ from typing import Optional
 
 from transformer_engine.pytorch.quantization import QuantizerRole
 from ..constants import DType
+from .quantization_recipes_base import mxfp8_quantizer_factory, nvfp4_quantizer_factory
+
+
+def mxfp8_fwd_nvfp4_bwd_quantizer_factory(
+    role: Optional[QuantizerRole],
+):
+    """Quantizer factory: MXFP8 forward, NVFP4 backward.
+
+    Per-GEMM format consumption:
+        * fprop: ``weight.row(MXFP8) x input.row(MXFP8)``
+        * dgrad: ``weight.col(NVFP4) x grad_output.row(NVFP4)``
+        * wgrad: ``input.col(NVFP4) x grad_output.col(NVFP4)``
+
+    The NVFP4 side mirrors :func:`nvfp4_quantizer_factory` role semantics:
+    weights use 2D scaling, activations/grads use the base 1D RHT/SR settings.
+    ``HybridQuantizer`` then pins each sub-quantizer to the direction that is
+    actually consumed.
+    """
+    from transformer_engine.pytorch.tensor.hybrid_tensor import HybridQuantizer
+
+    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+    if is_linear and role.tensor_type in ("input", "weight", "output"):
+        return HybridQuantizer(
+            rowwise_quantizer=mxfp8_quantizer_factory(role),
+            columnwise_quantizer=nvfp4_quantizer_factory(role),
+        )
+    if is_linear and role.tensor_type in ("grad_output", "grad_input"):
+        return nvfp4_quantizer_factory(role)
+    return mxfp8_quantizer_factory(role)
 
 
 def nvfp4_linear_mxfp8_grouped_linear_factory(
@@ -59,63 +101,9 @@ def nvfp4_linear_mxfp8_grouped_linear_factory(
     is_grouped_linear = role is not None and role.module_type == "grouped_linear"
 
     if is_grouped_linear:
-        return _make_mxfp8_quantizer()
+        return mxfp8_quantizer_factory(role)
 
-    return _make_nvfp4_quantizer(role)
-
-
-def _make_mxfp8_quantizer():
-    """Return an MXFP8 quantizer with default settings (E4M3, block-32, E8M0 scales)."""
-    from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
-
-    return MXFP8Quantizer(
-        fp8_dtype=DType.kFloat8E4M3,
-    )
-
-
-def _make_nvfp4_quantizer(role: Optional[QuantizerRole]):
-    """Return an NVFP4 quantizer configured per tensor role.
-
-    Mirrors :class:`NVFP4BlockScaling` recipe defaults.
-    """
-    from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
-
-    is_linear = role is not None and role.module_type == "linear"
-    is_weight = is_linear and role.tensor_type == "weight"
-    is_grad = is_linear and role.tensor_type == "grad_output"
-
-    if is_weight:
-        return NVFP4Quantizer(
-            fp4_dtype=DType.kFloat4E2M1,
-            with_rht=False,
-            with_post_rht_amax=False,
-            with_2d_quantization=True,
-            stochastic_rounding=False,
-            with_random_sign_mask=True,
-        )
-
-    if is_grad:
-        return NVFP4Quantizer(
-            fp4_dtype=DType.kFloat4E2M1,
-            rowwise=True,
-            columnwise=True,
-            with_rht=True,
-            with_post_rht_amax=True,
-            with_2d_quantization=False,
-            stochastic_rounding=True,
-            with_random_sign_mask=True,
-        )
-
-    return NVFP4Quantizer(
-        fp4_dtype=DType.kFloat4E2M1,
-        rowwise=True,
-        columnwise=True,
-        with_rht=True,
-        with_post_rht_amax=True,
-        with_2d_quantization=False,
-        stochastic_rounding=False,
-        with_random_sign_mask=True,
-    )
+    return nvfp4_quantizer_factory(role)
 
 
 def nvfp4_linear_fp8_dpa_factory(
@@ -196,7 +184,7 @@ def nvfp4_linear_fp8_dpa_factory(
             device="cuda",
         )
 
-    return _make_nvfp4_quantizer(role)
+    return nvfp4_quantizer_factory(role)
 
 
 def nvfp4_linear_mxfp8_dpa_factory(
@@ -253,7 +241,7 @@ def nvfp4_linear_mxfp8_dpa_factory(
     """
     is_dpa = role is not None and role.module_type == "dpa"
     if is_dpa:
-        return _make_mxfp8_quantizer()
+        return mxfp8_quantizer_factory(role)
 
     # DPA boundary slots (O output / dQKV grad-input): emitted by DPA with
     # empty `module_type` and a `name` like "<dpa>.dpa_output". The fused
@@ -265,9 +253,9 @@ def nvfp4_linear_mxfp8_dpa_factory(
         and ("dpa_output" in role.name or "dpa_grad_input" in role.name)
     )
     if is_dpa_boundary:
-        return _make_mxfp8_quantizer()
+        return mxfp8_quantizer_factory(role)
 
-    return _make_nvfp4_quantizer(role)
+    return nvfp4_quantizer_factory(role)
 
 
 def high_precision_factory(
@@ -297,10 +285,10 @@ def fwd_high_precision_bwd_mxfp8_factory(
 
     is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
     if is_linear and role.tensor_type in ("grad_output", "grad_input"):
-        return _make_mxfp8_quantizer()
+        return mxfp8_quantizer_factory(role)
 
     # fprop consumes rowwise high precision; dgrad / wgrad consume columnwise MXFP8.
     return HybridQuantizer(
         rowwise_quantizer=IdentityQuantizer(),
-        columnwise_quantizer=_make_mxfp8_quantizer(),
+        columnwise_quantizer=mxfp8_quantizer_factory(role),
     )

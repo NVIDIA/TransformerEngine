@@ -192,12 +192,31 @@ class Float8TensorStorage(QuantizedTensorStorage):
 
     def view(self, shape: torch.Size):
         # pylint: disable=missing-function-docstring
-        out_data = self._data.view(shape)
+        out_data = self._data.view(shape) if self._data is not None else None
+        if out_data is not None:
+            out_shape = out_data.size()
+        else:
+            out_shape = torch.empty(tuple(self.size()), device="meta").view(shape).shape
         out_transpose = None if self._transpose_invalid else self._transpose
         if out_transpose is not None:
-            out_transpose_shape = out_transpose.size()
-            if out_transpose_shape[0] != shape[-1] or out_transpose_shape[1:] != shape[:-1]:
+            if len(out_shape) == 0:
+                view_shape_for_transpose = out_shape
+            else:
+                view_shape_for_transpose = torch.Size((out_shape[-1], *out_shape[:-1]))
+            if out_transpose.shape != view_shape_for_transpose:
+                if self._data is None:
+                    raise NotImplementedError(
+                        "Float8TensorStorage view with columnwise-only data is only "
+                        "supported when the requested shape preserves the columnwise layout"
+                    )
                 out_transpose = None
+            else:
+                out_transpose = out_transpose.view(*view_shape_for_transpose)
+        if self._data is None and out_transpose is None:
+            raise NotImplementedError(
+                "Float8TensorStorage view with columnwise-only data requires a valid "
+                "columnwise buffer"
+            )
 
         return Float8TensorStorage(
             data=out_data,

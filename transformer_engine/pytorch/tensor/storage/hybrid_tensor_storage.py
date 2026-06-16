@@ -126,6 +126,8 @@ class HybridQuantizedTensorStorage(QuantizedTensorStorage):
         """Dequantize using the first available sub-storage."""
         if dtype is None:
             dtype = self._dtype
+        # TODO: choose the best native sub-storage for dequantization, preferring  # pylint: disable=fixme
+        # identity/high-precision and FP8-ish formats over FP4 when both exist.
         if self._rowwise_storage is not None:
             return self._rowwise_storage.dequantize(dtype=dtype)
         if self._columnwise_storage is not None:

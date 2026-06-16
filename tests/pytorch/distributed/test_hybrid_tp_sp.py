@@ -2,19 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Pytest driver for hybrid quantization TP/SP distributed tests.
-
-Launches ``run_hybrid_tp_sp.py`` via ``torchrun --nproc_per_node=N``
-and asserts a zero exit code. Rank-level numerical checks are performed
-inside ``run_hybrid_tp_sp.py`` and propagated via ``dist.all_reduce``
-with ``ReduceOp.MAX`` on a failure flag, so a failure on any rank
-fails the whole subprocess (and thus the pytest assertion).
-
-Mirrors the ``test_numerics.py`` ↔ ``run_numerics.py`` split pattern but
-scoped to hybrid recipes only. Isolated from the main ``run_numerics.py``
-harness so that adding hybrid-specific cases here doesn't perturb the
-larger vanilla-recipe test matrix.
-"""
+"""Pytest launcher for hybrid TP/SP distributed tests."""
 
 import os
 import subprocess
@@ -51,83 +39,54 @@ def _run_test(quantization: str, test: str = "all"):
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Hybrid FP8 current scaling (rowwise + columnwise same format)
+# Hybrid FP8 current scaling
 # ──────────────────────────────────────────────────────────────────────
-#
-# FP8 current scaling is stateless per-tensor (amax computed from the
-# live tensor) and therefore uses amax reduction across TP ranks when
-# sequence parallelism is on. This is the tightest integration of
-# hybrid with the distributed codepath: each rank computes an
-# independent amax, reduces it across TP group, then both sub-
-# quantizers (rowwise + columnwise) use the same reduced scale. If
-# ``HybridQuantizer`` mis-plumbs the amax reduction through its two
-# inner quantizers, we'd see numerical drift vs single-node.
+# Exercises TP amax reduction and SP gather paths.
 
 
 @pytest.mark.skipif(not fp8_available, reason=f"FP8: {reason_for_no_fp8}")
 def test_hybrid_fp8_linear():
-    """TP column + row × SP on/off for ``te.Linear`` under hybrid FP8
-    current-scaling. Fine-grained: this runs first (cheapest, most
-    likely to surface TP-path hybrid bugs) so a failure here tells us
-    to stop before the more-expensive TransformerLayer run."""
+    """Linear TP/SP coverage for hybrid FP8 current scaling."""
     _run_test("hybrid_fp8", "linear")
 
 
 @pytest.mark.skipif(not fp8_available, reason=f"FP8: {reason_for_no_fp8}")
 def test_hybrid_fp8_linear_vs_vanilla():
-    """Bitwise operand equivalence: same-format hybrid FP8 must match the
-    built-in ``Float8CurrentScaling`` recipe through the same TP ``te.Linear``
-    (forward in all configs; backward in the non-SP configs). Locks the TP
-    comm path that the FSDP2 parity test does not exercise."""
+    """Same-topology Linear parity against Float8CurrentScaling."""
     _run_test("hybrid_fp8", "linear_vs_vanilla")
 
 
 def test_hybrid_fp8_layernorm_linear_vs_vanilla():
-    """Same-topology numerical parity against vanilla FP8 for LayerNormLinear.
-
-    This extends the Linear bitwise operand check to the unfused-norm hybrid
-    module path; exact bitwise parity is not required because vanilla may use
-    fused quantized norm while hybrid routes through high-precision norm.
-    """
+    """Same-topology LayerNormLinear parity against vanilla FP8."""
     _run_test("hybrid_fp8", "layernorm_linear_vs_vanilla")
 
 
 def test_hybrid_fp8_layernorm_mlp_vs_vanilla():
-    """Same-topology numerical parity against vanilla FP8 for LayerNormMLP."""
+    """Same-topology LayerNormMLP parity against vanilla FP8."""
     _run_test("hybrid_fp8", "layernorm_mlp_vs_vanilla")
 
 
 @pytest.mark.skipif(not fp8_available, reason=f"FP8: {reason_for_no_fp8}")
 def test_hybrid_fp8_layernorm_linear():
-    """Column-parallel ``te.LayerNormLinear`` with and without SP.
-    Probes the all-gather-before-quantize path that
-    ``layernorm_linear.py`` disables the fused norm for when
-    ``isinstance(input_quantizer, HybridQuantizer)``."""
+    """LayerNormLinear TP/SP coverage for hybrid FP8."""
     _run_test("hybrid_fp8", "layernorm_linear")
 
 
 @pytest.mark.skipif(not fp8_available, reason=f"FP8: {reason_for_no_fp8}")
 def test_hybrid_fp8_layernorm_mlp():
-    """Standalone ``te.LayerNormMLP`` (column FC1 / row FC2) with and
-    without SP under hybrid FP8. Isolates the MLP block's unfused-norm
-    and row-parallel reduce-scatter paths, and checks gradients in the
-    no-SP case."""
+    """LayerNormMLP TP/SP coverage for hybrid FP8."""
     _run_test("hybrid_fp8", "layernorm_mlp")
 
 
 @pytest.mark.skipif(not fp8_available, reason=f"FP8: {reason_for_no_fp8}")
 def test_hybrid_fp8_transformer_layer():
-    """Full ``te.TransformerLayer`` with ``set_parallel_mode=True`` and
-    SP on/off. Integration check hitting LayerNormLinear(QKV) → DPA →
-    LayerNormMLP → row-parallel output projection all under hybrid
-    FP8."""
+    """TransformerLayer TP/SP coverage for hybrid FP8."""
     _run_test("hybrid_fp8", "transformer_layer")
 
 
 @pytest.mark.skipif(not fp8_available, reason=f"FP8: {reason_for_no_fp8}")
 def test_hybrid_fp8_identity_linear():
-    """Linear-only TP/SP coverage for FP8-current forward plus Identity backward.
-    Includes the amax-stress branch inside ``run_hybrid_tp_sp.py``."""
+    """Linear TP/SP coverage for FP8 forward plus Identity backward."""
     _run_test("hybrid_fp8_identity", "linear")
 
 
@@ -137,14 +96,9 @@ def test_identity_all_modules():
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Hybrid MXFP8 (rowwise + columnwise same format)
+# Hybrid MXFP8
 # ──────────────────────────────────────────────────────────────────────
-#
-# MXFP8 is per-block (32-element microblocks), stateless, no amax
-# reduction. Simpler distributed behaviour than FP8 current scaling,
-# but exercises the ``[128, 4]`` / ``[4, 128]`` scale alignment padding
-# through TP shards (each rank sees its own dim-0 slice which may not
-# be a multiple of 128).
+# Covers per-block scale layout through TP shards.
 
 
 @pytest.mark.skipif(not mxfp8_available, reason=f"MXFP8: {reason_for_no_mxfp8}")
@@ -182,29 +136,14 @@ def test_hybrid_mxfp8_transformer_layer():
 
 @pytest.mark.skipif(not mxfp8_available, reason=f"MXFP8: {reason_for_no_mxfp8}")
 def test_hybrid_mxfp8_identity_linear():
-    """Linear-only TP/SP coverage for MXFP8 forward plus Identity backward."""
+    """Linear TP/SP coverage for MXFP8 forward plus Identity backward."""
     _run_test("hybrid_mxfp8_identity", "linear")
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Hybrid NVFP4 (rowwise + columnwise same format, 1D block scaling)
+# Hybrid NVFP4
 # ──────────────────────────────────────────────────────────────────────
-#
-# NVFP4 is the Rubin-era target recipe: 4-bit data (E2M1) with FP8 block
-# scales on 16-element microblocks. The default ``NVFP4Quantizer()`` is
-# 1D block scaling only — no RHT, no stochastic rounding, no 2D block
-# scaling — matching upstream ``run_numerics.py::nvfp4_vanilla()``.
-# Those more-sophisticated knobs are orthogonal to hybrid composition
-# and can be layered in separately once baseline distributed NVFP4
-# hybrid is stable.
-#
-# Unlike FP8 current scaling, NVFP4 does not reduce amax across TP ranks
-# (block-level scales are computed per-microblock locally), so SP
-# amax-reduction issues don't apply. The tight interaction to watch is
-# the packed FP4 dim-0 alignment in the TP shard — each rank sees a
-# weight slice that may not be naturally aligned to the NVFP4 block
-# boundary, and hybrid quantizes twice (rowwise + columnwise) on that
-# shard.
+# Same-format NVFP4 coverage with base role-wise settings.
 
 
 @pytest.mark.skipif(not nvfp4_available, reason=f"NVFP4: {reason_for_no_nvfp4}")
@@ -233,13 +172,9 @@ def test_hybrid_nvfp4_transformer_layer():
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Cross-format hybrid: MXFP8 forward (rowwise) + NVFP4 backward (columnwise)
+# Cross-format hybrid: MXFP8 rowwise + NVFP4 columnwise
 # ──────────────────────────────────────────────────────────────────────
-#
-# Forward and backward all-gather *different* formats (MXFP8 rowwise vs NVFP4
-# columnwise) -- the asymmetry same-format recipes can't surface. Only the
-# distributed-vs-single-node checks run (no single vanilla recipe to match a
-# cross-format hybrid bitwise). Needs both MXFP8 and NVFP4 hardware support.
+# No single vanilla recipe exists for bitwise comparison.
 
 _cross_format_available = mxfp8_available and nvfp4_available
 _reason_for_no_cross_format = reason_for_no_mxfp8 if not mxfp8_available else reason_for_no_nvfp4

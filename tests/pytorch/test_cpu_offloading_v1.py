@@ -13,6 +13,9 @@ import torch
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.common import recipe
+from transformer_engine.pytorch.custom_recipes.quantization_recipes_base import (
+    nvfp4_quantizer_factory,
+)
 from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
 from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
 from utils import ModelConfig, get_available_attention_backends
@@ -48,17 +51,17 @@ def _hybrid_mxfp8_nvfp4_qfactory(role):
     """Hybrid CustomRecipe factory: MXFP8 rowwise + NVFP4 columnwise.
 
     Mirrors the ``mxfp8_fwd_nvfp4_bwd_quantizer_factory`` headline recipe
-    from ``custom_recipes/quantization_nvfp4.py``. grad_output uses plain
+    from ``custom_recipes/quantization_factory_examples.py``. grad_output uses plain
     NVFP4 (both directions) so wgrad's columnwise operand matches.
     """
     is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
     if is_linear and role.tensor_type in ("input", "weight", "output"):
         return te.HybridQuantizer(
             rowwise_quantizer=te.MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
-            columnwise_quantizer=te.NVFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1),
+            columnwise_quantizer=nvfp4_quantizer_factory(role),
         )
     if is_linear and role.tensor_type in ("grad_output", "grad_input"):
-        return te.NVFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1)
+        return nvfp4_quantizer_factory(role)
     return te.MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
 
 

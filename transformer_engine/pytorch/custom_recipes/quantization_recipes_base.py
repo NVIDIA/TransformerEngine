@@ -146,6 +146,8 @@ def nvfp4_quantizer_factory(
     if is_weight:
         return NVFP4Quantizer(
             fp4_dtype=DType.kFloat4E2M1,
+            rowwise=True,
+            columnwise=True,
             with_rht=False,
             with_post_rht_amax=False,
             with_2d_quantization=True,
