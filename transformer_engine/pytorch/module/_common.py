@@ -16,6 +16,13 @@ from ..export import is_in_onnx_export_mode
 from ..utils import get_default_init_method
 
 
+def set_quantizer_amax_reduction_group(quantizer, amax_reduction_group) -> None:
+    """Set the amax reduction group on a quantizer; no-op if it doesn't support it."""
+    if quantizer is not None and hasattr(quantizer, "with_amax_reduction"):
+        quantizer.with_amax_reduction = amax_reduction_group is not None
+        quantizer.amax_reduction_group = amax_reduction_group
+
+
 def _get_normalization_func(normalization: str, forward: bool):
     fwd_normalization_funcs = {
         "LayerNorm": tex.layernorm_fwd,
