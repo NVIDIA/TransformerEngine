@@ -1704,17 +1704,15 @@ def test_grouped_linear_grouped_tensor_path_skips_non_rht_nvfp4(monkeypatch):
 
     Graph-safe grouped quantization currently requires RHT, so requesting NVFP4 with
     ``disable_rht=True`` while the fused grouped-tensor path is enabled falls back to the
-    legacy path internally. We verify the output and gradients against the pure-PyTorch
-    NVFP4 reference quantizer (``NVFP4QuantizerRef``) driven through a ``CustomRecipe``,
-    which emulates the kernel's quantized GEMM math.
+    legacy path internally. We verify the output and gradients against a reference built from
+    per-GEMM ``te.Linear`` modules that share the same weights and use the same NVFP4 recipe;
+    the grouped GEMM should match the loop of single GEMMs.
     """
-    from transformer_engine.pytorch.custom_recipes import quantization_ref_nvfp4
-    from transformer_engine.pytorch.custom_recipes import utils as custom_recipe_utils
-
     if torch.cuda.get_device_capability() < (10, 0):
         pytest.skip("NVFP4 GroupedTensor grouped GEMM path requires SM100+")
 
     monkeypatch.setenv(_FUSED_GROUPED_GEMM_ENV, "1")
+    FP8GlobalStateManager.reset()
 
     dtype = torch.bfloat16
     num_gemms = 3
@@ -1731,6 +1729,12 @@ def test_grouped_linear_grouped_tensor_path_skips_non_rht_nvfp4(monkeypatch):
         for _ in range(num_gemms)
     ]
 
+    fp8_recipe = recipe.NVFP4BlockScaling(
+        disable_rht=True,
+        disable_stochastic_rounding=True,
+    )
+
+    # Grouped path: fused path enabled, but non-RHT NVFP4 falls back to legacy internally.
     grouped_linear = GroupedLinear(
         num_gemms,
         in_features,
@@ -1743,45 +1747,42 @@ def test_grouped_linear_grouped_tensor_path_skips_non_rht_nvfp4(monkeypatch):
         for i in range(num_gemms):
             getattr(grouped_linear, f"weight{i}").copy_(weights[i])
 
-    # Real (kernel) non-RHT NVFP4 recipe; the fused path is enabled but falls back to legacy.
-    native_recipe = recipe.NVFP4BlockScaling(
-        disable_rht=True,
-        disable_stochastic_rounding=True,
+    x = x_base.detach().clone().requires_grad_(True)
+    with autocast(enabled=True, recipe=fp8_recipe):
+        y = grouped_linear(x, m_splits)
+    y.backward(dy)
+
+    # Reference: one te.Linear per GEMM sharing the same weights and NVFP4 recipe.
+    ref_linears = torch.nn.ModuleList(
+        [
+            Linear(in_features, out_features, bias=False, params_dtype=dtype, device="cuda")
+            for _ in range(num_gemms)
+        ]
     )
-
-    # Pure-PyTorch NVFP4 reference: 1x16 tiles, FP8 (non-pow2) scales, no RHT -- matching the
-    # native recipe above. Boundary slots (output / grad_input) get role=None; returning a
-    # quantizer for them is harmless since the GEMM outputs in the high-precision dtype.
-    def _ref_quantizer_factory(role):
-        return quantization_ref_nvfp4.NVFP4QuantizerRef(
-            dtype=custom_recipe_utils.Fp4Formats.E2M1,
-            quant_tile_shape=(1, 16),
-            pow_2_scales=False,
-            with_rht=False,
-        )
-
-    ref_recipe = recipe.CustomRecipe(qfactory=_ref_quantizer_factory)
-
-    def _run(run_recipe):
-        FP8GlobalStateManager.reset()
-        grouped_linear.zero_grad(set_to_none=True)
-        x = x_base.detach().clone().requires_grad_(True)
-        with autocast(enabled=True, recipe=run_recipe):
-            y = grouped_linear(x, m_splits)
-        y.backward(dy)
-        outputs = [y.detach().clone(), x.grad.detach().clone()]
+    with torch.no_grad():
         for i in range(num_gemms):
-            outputs.append(getattr(grouped_linear, f"weight{i}").grad.detach().clone())
-        return outputs
+            ref_linears[i].weight.copy_(weights[i])
 
-    outputs_native = _run(native_recipe)
-    outputs_ref = _run(ref_recipe)
+    x_ref = x_base.detach().clone().requires_grad_(True)
+    with autocast(enabled=True, recipe=fp8_recipe):
+        y_ref = torch.cat(
+            [
+                ref_linears[i](x_i)
+                for i, x_i in enumerate(torch.split(x_ref, m_splits))
+            ]
+        )
+    y_ref.backward(dy)
 
-    # Native (kernel) vs PyTorch emulated reference; same tolerance used by the NVFP4
-    # native-vs-reference GEMM exactness tests.
-    tols = dict(rtol=8e-3, atol=8e-3)
-    for native_out, ref_out in zip(outputs_native, outputs_ref):
-        torch.testing.assert_close(native_out.float(), ref_out.float(), **tols)
+    # cuBLAS grouped GEMM should match the loop of single GEMMs bit-for-bit.
+    tols = dict(rtol=0, atol=0)
+    torch.testing.assert_close(y.float(), y_ref.float(), **tols)
+    torch.testing.assert_close(x.grad.float(), x_ref.grad.float(), **tols)
+    for i in range(num_gemms):
+        torch.testing.assert_close(
+            getattr(grouped_linear, f"weight{i}").grad.float(),
+            ref_linears[i].weight.grad.float(),
+            **tols,
+        )
 
 
 @pytest.mark.parametrize(
