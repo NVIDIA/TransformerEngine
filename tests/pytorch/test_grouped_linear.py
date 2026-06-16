@@ -1766,10 +1766,7 @@ def test_grouped_linear_grouped_tensor_path_skips_non_rht_nvfp4(monkeypatch):
     x_ref = x_base.detach().clone().requires_grad_(True)
     with autocast(enabled=True, recipe=fp8_recipe):
         y_ref = torch.cat(
-            [
-                ref_linears[i](x_i)
-                for i, x_i in enumerate(torch.split(x_ref, m_splits))
-            ]
+            [ref_linears[i](x_i) for i, x_i in enumerate(torch.split(x_ref, m_splits))]
         )
     y_ref.backward(dy)
 
