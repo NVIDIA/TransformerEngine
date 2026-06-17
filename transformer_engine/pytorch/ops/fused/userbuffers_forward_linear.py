@@ -157,7 +157,9 @@ class UserbuffersForwardLinear(FusedOperation):
 
         # Check device
         if device.type != te_device_type():
-            raise ValueError(f"Only CUDA devices are supported (got {device})")
+            raise ValueError(
+                f"Only {te_device_type().upper()} devices are supported (got {device})"
+            )
 
         # Check datatype
         if dtype not in (torch.float32, torch.float16, torch.bfloat16):

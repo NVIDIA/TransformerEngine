@@ -643,7 +643,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
     def __init__(self, name: Optional[str] = None) -> None:
         super().__init__()
-        assert te_platform().is_available(), f"TransformerEngine needs {te_device_type()}."
+        if not te_platform().is_available():
+            raise RuntimeError(f"TransformerEngine needs {te_device_type()}.")
         self.name = name
         self.next_iter_when_debug_should_be_run = 0
         self.fp8_initialized = False

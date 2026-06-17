@@ -10,12 +10,7 @@ import warnings
 
 import torch
 
-from transformer_engine_torch import CommOverlapType
-
-try:
-    from transformer_engine_torch import bulk_overlap_ag_with_external_gemm
-except ImportError:
-    bulk_overlap_ag_with_external_gemm = None
+from transformer_engine_torch import CommOverlapType, bulk_overlap_ag_with_external_gemm
 
 from transformer_engine import te_device_type
 
@@ -184,7 +179,9 @@ class UserbuffersBackwardLinear(FusedOperation):
                 device = grad_output.device
         device = canonicalize_device(device)
         if device.type != te_device_type():
-            raise ValueError(f"Only CUDA devices are supported (got {device})")
+            raise ValueError(
+                f"Only {te_device_type().upper()}  devices are supported (got {device})"
+            )
 
         # Check datatype
         if dtype is None:
