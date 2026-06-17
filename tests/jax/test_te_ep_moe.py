@@ -664,12 +664,12 @@ class TestTeEpMoeBackward:
         # fp32-promoted gate path back to bf16), finiteness, non-zero
         # AND numerical parity vs the pure-JAX reference d_x.
         grad_x_te_np = _to_global_numpy(grad_x_te, mesh)
-        assert grad_x_te.shape == x.shape, (
-            f"d_x shape {grad_x_te.shape} != x.shape {x.shape} [config={config}]"
-        )
-        assert grad_x_te.dtype == x.dtype, (
-            f"d_x dtype {grad_x_te.dtype} != x.dtype {x.dtype} [config={config}]"
-        )
+        assert (
+            grad_x_te.shape == x.shape
+        ), f"d_x shape {grad_x_te.shape} != x.shape {x.shape} [config={config}]"
+        assert (
+            grad_x_te.dtype == x.dtype
+        ), f"d_x dtype {grad_x_te.dtype} != x.dtype {x.dtype} [config={config}]"
         assert np.all(np.isfinite(grad_x_te_np)), f"d_x has NaN/Inf [config={config}]"
         assert np.any(grad_x_te_np != 0.0), f"d_x identically zero [config={config}]"
         np.testing.assert_allclose(
