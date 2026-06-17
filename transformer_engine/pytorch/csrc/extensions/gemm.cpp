@@ -636,6 +636,80 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
   return bias;
 }
 
+at::Tensor nvfp4_grouped_per_tensor_compute_alpha(std::vector<py::handle> A, bool transa,
+                                                  std::vector<py::handle> B, bool transb) {
+  // Bench-only: precompute the per-group second-level scale (alpha) for a
+  // per-tensor NVFP4 grouped GEMM so the GEMM launch can be timed in isolation.
+  const size_t num_gemms = A.size();
+  NVTE_CHECK(B.size() == num_gemms, "A and B must have matching lengths (", num_gemms, " vs ",
+             B.size(), ").");
+  const auto none = py::none();
+  std::vector<TensorWrapper> te_A_wrappers, te_B_wrappers;
+  for (size_t i = 0; i < num_gemms; i++) {
+    te_A_wrappers.emplace_back(makeTransformerEngineTensor(A[i], none));
+    te_B_wrappers.emplace_back(makeTransformerEngineTensor(B[i], none));
+  }
+  std::vector<NVTETensor> te_A_vector, te_B_vector;
+  for (size_t i = 0; i < num_gemms; i++) {
+    te_A_vector.emplace_back(te_A_wrappers[i].data());
+    te_B_vector.emplace_back(te_B_wrappers[i].data());
+  }
+
+  auto opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+  at::Tensor alpha = at::zeros({static_cast<int64_t>(num_gemms)}, opts);
+  at::cuda::CUDAGuard device_guard(alpha.device());
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_nvfp4_grouped_per_tensor_compute_alpha(
+        te_A_vector.data(), te_B_vector.data(), static_cast<int>(num_gemms), transa, transb,
+        reinterpret_cast<float*>(alpha.data_ptr()), at::cuda::getCurrentCUDAStream());
+  });
+  return alpha;
+}
+
+void nvfp4_grouped_per_tensor_gemm(std::vector<py::handle> A, bool transa,
+                                   std::vector<py::handle> B, bool transb,
+                                   std::vector<at::Tensor> D, std::vector<at::Tensor> bias,
+                                   at::Tensor alpha, bool accumulate) {
+  // Bench-only: single-launch per-tensor NVFP4 grouped GEMM with a precomputed
+  // alpha. Scales of A/B must already be GEMM-swizzled by the caller (e.g. via
+  // multi_tensor_swizzle_scales_for_gemm_). Only the GEMM launch happens here.
+  const size_t num_gemms = A.size();
+  NVTE_CHECK(B.size() == num_gemms && D.size() == num_gemms,
+             "A, B, D must have matching lengths.");
+  const bool have_bias = !bias.empty();
+  NVTE_CHECK(!have_bias || bias.size() == num_gemms,
+             "bias must be empty or have length num_gemms.");
+  at::cuda::CUDAGuard device_guard(D[0].device());
+
+  const auto none = py::none();
+  std::vector<TensorWrapper> te_A_wrappers, te_B_wrappers, te_D_wrappers, te_bias_wrappers;
+  for (size_t i = 0; i < num_gemms; i++) {
+    te_A_wrappers.emplace_back(makeTransformerEngineTensor(A[i], none));
+    te_B_wrappers.emplace_back(makeTransformerEngineTensor(B[i], none));
+    te_D_wrappers.emplace_back(makeTransformerEngineTensor(D[i]));
+    if (have_bias) {
+      te_bias_wrappers.emplace_back(makeTransformerEngineTensor(bias[i]));
+    }
+  }
+  std::vector<NVTETensor> te_A_vector, te_B_vector, te_D_vector, te_bias_vector;
+  for (size_t i = 0; i < num_gemms; i++) {
+    te_A_vector.emplace_back(te_A_wrappers[i].data());
+    te_B_vector.emplace_back(te_B_wrappers[i].data());
+    te_D_vector.emplace_back(te_D_wrappers[i].data());
+    if (have_bias) {
+      te_bias_vector.emplace_back(te_bias_wrappers[i].data());
+    }
+  }
+
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_nvfp4_grouped_per_tensor_gemm(
+        te_A_vector.data(), te_B_vector.data(), te_D_vector.data(),
+        have_bias ? te_bias_vector.data() : nullptr, static_cast<int>(num_gemms), transa, transb,
+        accumulate, reinterpret_cast<const float*>(alpha.data_ptr()),
+        at::cuda::getCurrentCUDAStream());
+  });
+}
+
 py::object te_general_grouped_gemm_for_grouped_tensor(
     py::handle A, bool transa, py::handle B, bool transb, py::handle D, py::object bias,
     std::optional<at::Tensor> bias_scale, at::Tensor alpha, at::Tensor beta,

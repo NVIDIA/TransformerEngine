@@ -24,6 +24,7 @@
 #include "../util/multi_stream.h"
 #include "./config.h"
 #include "./cutlass_grouped_gemm.cuh"
+#include "./nvfp4_cutlass_grouped_gemm.cuh"
 
 namespace {
 
@@ -1071,6 +1072,155 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
                              workspace, accumulate, use_split_accumulator, math_sm_count, stream);
   };
 
+  // ---- Blackwell single-launch CUTLASS grouped GEMM for per-tensor NVFP4 ----
+  // Opt-in (NVTE_NVFP4_CUTLASS_GROUPED_GEMM) replacement for the multi-stream
+  // cuBLASLt loop. Covers per-tensor NVFP4 with M/N/K % 128:
+  //   * BF16 output, overwrite        -> fprop / dgrad
+  //   * BF16 output, overwrite, fused per-group bias -> fprop with bias
+  //   * FP32 output, overwrite        -> wgrad (fresh)
+  //   * FP32 output, accumulate (beta=1, in-place) -> Megatron wgrad fusion
+  // Empty experts (0 tokens) are fine: CUTLASS schedules 0 tiles for an M==0
+  // group, so a single empty expert does NOT force the whole batch back to
+  // multi-stream (common in real MoE routing).
+  // Anything else (gelu/dbias, per-token, non-128 shapes, bf16 accumulate,
+  // fp32+bias, ...) falls through to the existing cuBLAS path, so production
+  // behavior is unchanged by default.
+  const bool is_blackwell = (transformer_engine::cuda::sm_arch(current_device) >= 100 &&
+                             transformer_engine::cuda::sm_arch(current_device) < 110);
+  if (is_blackwell &&
+      transformer_engine::getenv<bool>("NVTE_NVFP4_CUTLASS_GROUPED_GEMM", false)) {
+    using namespace transformer_engine;
+    const cublasOperation_t transaOp = transa ? CUBLAS_OP_T : CUBLAS_OP_N;
+    const cublasOperation_t transbOp = transb ? CUBLAS_OP_T : CUBLAS_OP_N;
+
+    auto has_aux = [&](const NVTETensor *p, int i) -> bool {
+      return p != nullptr && convertNVTETensor(p[i]) != nullptr &&
+             convertNVTETensor(p[i])->has_data();
+    };
+    // Fused per-group bias is supported for the forward overwrite case only
+    // (BF16 out, no accumulate, grad == false -> a plain epilogue add, not the
+    // BGRADB dbias reduction). It must be uniform across groups.
+    const bool bias_present = has_aux(bias, 0);
+    auto eligible = [&]() -> bool {
+      for (int i = 0; i < num_gemms; ++i) {
+        // gelu fusion is never taken on this path (no NVFP4 grouped caller fuses
+        // it; the aux pre-gelu store EVT is intentionally not implemented).
+        if (has_aux(pre_gelu_out, i)) return false;
+        if (has_aux(bias, i) != bias_present) return false;  // must be uniform
+        const auto *iA = convertNVTETensorCheck(A[i]);
+        const auto *iB = convertNVTETensorCheck(B[i]);
+        const auto *oD = convertNVTETensorCheck(D[i]);
+        if (!(is_nvfp_scaling(iA->scaling_mode) && is_nvfp_scaling(iB->scaling_mode))) return false;
+        if (iA->row_scaled_nvfp4 || iB->row_scaled_nvfp4) return false;  // per-token -> skip
+        // BF16 out (fprop/dgrad, overwrite) or FP32 out (wgrad). accumulate
+        // (Megatron wgrad fusion) reads+writes D in-place and needs FP32 out.
+        const bool bf16_out = oD->data.dtype == DType::kBFloat16;
+        const bool fp32_out = oD->data.dtype == DType::kFloat32;
+        if (!bf16_out && !fp32_out) return false;
+        if (accumulate && !fp32_out) return false;
+        if (bias_present) {
+          // Forward bias add only: BF16 overwrite, and bias matches the output.
+          if (grad || accumulate || !bf16_out) return false;
+          const auto *bt = convertNVTETensorCheck(bias[i]);
+          if (bt->data.dtype != DType::kBFloat16) return false;
+        }
+        const auto [A0, A1] = iA->flat_2d_dims();
+        const auto [B0, B1] = iB->flat_2d_dims();
+        const int m = transa ? A0 : A1;  // out_features (static weight dim, > 0)
+        const int n = transb ? B1 : B0;  // tokens (0 == empty expert, allowed)
+        const int k = transa ? A1 : A0;  // hidden (static weight dim, > 0)
+        // n (tokens) may be 0 for an empty expert. CUTLASS grouped GEMM schedules
+        // 0 tiles for a group with M==0, so a single empty group must NOT veto the
+        // whole batch (that would force a multi-stream fallback in real MoE loads
+        // where empty experts are common). m/k are the static weight dims.
+        if (m <= 0 || k <= 0 || n < 0) return false;
+        if ((m % 128) || (n % 128) || (k % 128)) return false;
+      }
+      return true;
+    };
+
+    if (eligible()) {
+      std::vector<const void *> a_data(num_gemms), b_data(num_gemms), a_sf(num_gemms),
+          b_sf(num_gemms);
+      std::vector<const float *> alpha_ptrs(num_gemms);
+      std::vector<void *> d_ptrs(num_gemms);
+      std::vector<int> Ms(num_gemms), Ns(num_gemms), Ks(num_gemms);
+      // Per-group fused bias pointers (length N == cuBLAS m per group). Left
+      // empty when there is no bias, which selects the no-bias kernel.
+      std::vector<const void *> bias_data(bias_present ? num_gemms : 0);
+
+      // Per-group second-level scale (alpha) computed with the exact same kernel
+      // cuBLASLt uses, so results match the multi-stream path bit-for-bit modulo
+      // accumulation order.
+      float *alpha_buf = nullptr;
+      NVTE_CHECK_CUDA(cudaMallocAsync(&alpha_buf, sizeof(float) * num_gemms, stream));
+      const bool a_rowwise_amax = transa;   // transa == T
+      const bool b_rowwise_amax = !transb;  // transb != T
+
+      int num_nonempty = 0;
+      for (int i = 0; i < num_gemms; ++i) {
+        const auto *iA = convertNVTETensorCheck(A[i]);
+        const auto *iB = convertNVTETensorCheck(B[i]);
+        auto *oD = convertNVTETensorCheck(D[i]);
+        const auto [A0, A1] = iA->flat_2d_dims();
+        const auto [B0, B1] = iB->flat_2d_dims();
+        const int m = transa ? A0 : A1;
+        const int n = transb ? B1 : B0;
+        const int k = transa ? A1 : A0;
+
+        // CUTLASS M (== cuBLAS n == tokens). Record the (possibly zero) problem
+        // size up front; alpha pointer is valid even for empty groups.
+        Ms[i] = n;
+        Ns[i] = m;
+        Ks[i] = k;
+        alpha_ptrs[i] = alpha_buf + i;
+
+        // Empty expert: M==0 -> CUTLASS schedules 0 tiles for this group, so its
+        // operand / SF / bias / alpha pointers are never dereferenced. Skip
+        // operand canonicalization (which asserts on operand layout/usage and may
+        // see no data for a 0-token tensor) and the per-tensor amax (a reduction
+        // over 0 rows). Leave the operand pointers null; they are not read.
+        if (n == 0) continue;
+        ++num_nonempty;
+
+        const GemmParam param = CanonicalizeGemmInput(*iA, transaOp, *iB, transbOp, m, n, k);
+
+        // cuBLAS (col-major) -> CUTLASS (row-major) operand swap: CUTLASS A := TE
+        // B, CUTLASS B := TE A; M=n, N=m, K=k. Matches the Hopper cutlass path,
+        // and our kernel's fixed RowMajor-A / ColMajor-B layouts == the NVFP4 TN
+        // (transa=T, transb=N) case.
+        a_data[i] = param.B;
+        a_sf[i] = param.B_scale_inv;
+        b_data[i] = param.A;
+        b_sf[i] = param.A_scale_inv;
+        d_ptrs[i] = oD->data.dptr;
+        if (bias_present) {
+          // Bias is per cuBLAS output row (length m) == CUTLASS N == per-col bias.
+          bias_data[i] = convertNVTETensorCheck(bias[i])->data.dptr;
+        }
+
+        TensorWrapper alpha_g(alpha_buf + i, std::vector<size_t>{1}, DType::kFloat32);
+        nvte_nvfp4_compute_per_tensor_scale(A[i], a_rowwise_amax, B[i], b_rowwise_amax,
+                                            /*alpha_in=*/1.0f, alpha_g.data(), stream);
+      }
+
+      // All experts empty -> nothing to compute (every output is 0-row). Avoid a
+      // zero-group CUTLASS launch.
+      if (num_nonempty == 0) {
+        NVTE_CHECK_CUDA(cudaFreeAsync(alpha_buf, stream));
+        return;
+      }
+
+      const bool fp32_output =
+          convertNVTETensorCheck(D[0])->data.dtype == DType::kFloat32;
+      nvfp4_cutlass::run_grouped_per_tensor_gemm(a_data, b_data, a_sf, b_sf, alpha_ptrs, d_ptrs,
+                                                 bias_data, Ms, Ns, Ks, fp32_output, accumulate,
+                                                 stream);
+      NVTE_CHECK_CUDA(cudaFreeAsync(alpha_buf, stream));
+      return;
+    }
+  }
+
   // Currently only support cutlass group gemm on Hopper Arch
   if (!(is_hopper && use_cutlass)) {
     cublas_path();
@@ -1133,4 +1283,86 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
     }
     cublas_path();
   }
+}
+
+// ---- Bench-only direct entry points for the per-tensor NVFP4 grouped GEMM ----
+// These split the work of the NVTE_NVFP4_CUTLASS_GROUPED_GEMM branch above so a
+// benchmark can precompute the per-group alpha OUTSIDE a timed region and then
+// time ONLY the single CUTLASS grouped launch (the same pure-GEMM methodology
+// used for the per-token kernel). They deliberately do NOT recompute alpha or
+// allocate temporaries on the hot path. The production dispatch keeps using the
+// fused branch above (recomputes alpha every call for bit-exact cuBLASLt parity).
+
+void nvte_nvfp4_grouped_per_tensor_compute_alpha(const NVTETensor *A, const NVTETensor *B,
+                                                 const int num_gemms, bool transa, bool transb,
+                                                 float *alpha, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_nvfp4_grouped_per_tensor_compute_alpha);
+  using namespace transformer_engine;
+  const bool a_rowwise_amax = transa;   // transa == T
+  const bool b_rowwise_amax = !transb;  // transb != T
+  for (int i = 0; i < num_gemms; ++i) {
+    const auto *iB = convertNVTETensorCheck(B[i]);
+    const auto [B0, B1] = iB->flat_2d_dims();
+    const int n = transb ? B1 : B0;  // tokens; 0 == empty expert (alpha unused)
+    if (n == 0) continue;
+    TensorWrapper alpha_g(alpha + i, std::vector<size_t>{1}, DType::kFloat32);
+    nvte_nvfp4_compute_per_tensor_scale(A[i], a_rowwise_amax, B[i], b_rowwise_amax,
+                                        /*alpha_in=*/1.0f, alpha_g.data(), stream);
+  }
+}
+
+void nvte_nvfp4_grouped_per_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
+                                        const NVTETensor *bias, const int num_gemms, bool transa,
+                                        bool transb, bool accumulate, const float *alpha,
+                                        cudaStream_t stream) {
+  NVTE_API_CALL(nvte_nvfp4_grouped_per_tensor_gemm);
+  using namespace transformer_engine;
+  if (num_gemms <= 0) return;
+  const cublasOperation_t transaOp = transa ? CUBLAS_OP_T : CUBLAS_OP_N;
+  const cublasOperation_t transbOp = transb ? CUBLAS_OP_T : CUBLAS_OP_N;
+
+  auto has_aux = [&](const NVTETensor *p, int i) -> bool {
+    return p != nullptr && convertNVTETensor(p[i]) != nullptr &&
+           convertNVTETensor(p[i])->has_data();
+  };
+  const bool bias_present = has_aux(bias, 0);
+
+  std::vector<const void *> a_data(num_gemms), b_data(num_gemms), a_sf(num_gemms), b_sf(num_gemms);
+  std::vector<const float *> alpha_ptrs(num_gemms);
+  std::vector<void *> d_ptrs(num_gemms);
+  std::vector<int> Ms(num_gemms), Ns(num_gemms), Ks(num_gemms);
+  std::vector<const void *> bias_data(bias_present ? num_gemms : 0);
+
+  int num_nonempty = 0;
+  for (int i = 0; i < num_gemms; ++i) {
+    const auto *iA = convertNVTETensorCheck(A[i]);
+    const auto *iB = convertNVTETensorCheck(B[i]);
+    auto *oD = convertNVTETensorCheck(D[i]);
+    const auto [A0, A1] = iA->flat_2d_dims();
+    const auto [B0, B1] = iB->flat_2d_dims();
+    const int m = transa ? A0 : A1;
+    const int n = transb ? B1 : B0;
+    const int k = transa ? A1 : A0;
+    Ms[i] = n;
+    Ns[i] = m;
+    Ks[i] = k;
+    alpha_ptrs[i] = alpha + i;
+    if (n == 0) continue;  // empty expert -> 0 tiles, pointers never dereferenced
+    ++num_nonempty;
+
+    const GemmParam param = CanonicalizeGemmInput(*iA, transaOp, *iB, transbOp, m, n, k);
+    a_data[i] = param.B;
+    a_sf[i] = param.B_scale_inv;
+    b_data[i] = param.A;
+    b_sf[i] = param.A_scale_inv;
+    d_ptrs[i] = oD->data.dptr;
+    if (bias_present) {
+      bias_data[i] = convertNVTETensorCheck(bias[i])->data.dptr;
+    }
+  }
+  if (num_nonempty == 0) return;
+
+  const bool fp32_output = convertNVTETensorCheck(D[0])->data.dtype == DType::kFloat32;
+  nvfp4_cutlass::run_grouped_per_tensor_gemm(a_data, b_data, a_sf, b_sf, alpha_ptrs, d_ptrs,
+                                             bias_data, Ms, Ns, Ks, fp32_output, accumulate, stream);
 }

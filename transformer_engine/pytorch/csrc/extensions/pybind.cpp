@@ -348,6 +348,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Required workspace size for grouped GEMM setup");
   m.def("te_general_grouped_gemm", &transformer_engine::pytorch::te_general_grouped_gemm,
         "Grouped GEMM");
+  m.def("nvfp4_grouped_per_tensor_compute_alpha",
+        &transformer_engine::pytorch::nvfp4_grouped_per_tensor_compute_alpha,
+        "Bench-only: precompute per-group alpha for per-tensor NVFP4 grouped GEMM",
+        py::arg("A"), py::arg("transa"), py::arg("B"), py::arg("transb"));
+  m.def("nvfp4_grouped_per_tensor_gemm",
+        &transformer_engine::pytorch::nvfp4_grouped_per_tensor_gemm,
+        "Bench-only: single-launch per-tensor NVFP4 grouped GEMM with precomputed alpha",
+        py::arg("A"), py::arg("transa"), py::arg("B"), py::arg("transb"), py::arg("D"),
+        py::arg("bias"), py::arg("alpha"), py::arg("accumulate"));
   m.def("te_general_grouped_gemm_for_grouped_tensor",
         &transformer_engine::pytorch::te_general_grouped_gemm_for_grouped_tensor,
         "Grouped GEMM for GroupedTensor");
