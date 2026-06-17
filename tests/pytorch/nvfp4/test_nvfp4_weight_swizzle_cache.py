@@ -41,16 +41,27 @@ recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=Tru
 pytestmark = pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 
 
-def _make_module(kind, in_features, out_features, device):
+def _make_module(kind, in_features, out_features, device, num_gemms=1):
+    common = dict(bias=True, params_dtype=torch.bfloat16)
     if kind == "Linear":
-        return te.Linear(in_features, out_features, bias=True, params_dtype=torch.bfloat16).to(
-            device
-        )
+        return te.Linear(in_features, out_features, **common).to(device)
     if kind == "LayerNormLinear":
-        return te.LayerNormLinear(
-            in_features, out_features, bias=True, params_dtype=torch.bfloat16
-        ).to(device)
+        return te.LayerNormLinear(in_features, out_features, **common).to(device)
+    if kind == "LayerNormMLP":
+        # fc1 (in->ffn) and fc2 (ffn->in) each cache a weight, so two workspaces.
+        return te.LayerNormMLP(in_features, out_features, **common).to(device)
+    if kind == "GroupedLinear":
+        return te.GroupedLinear(num_gemms, in_features, out_features, **common).to(device)
     raise ValueError(f"unknown module kind {kind}")
+
+
+def _expected_num_workspaces(kind, num_gemms):
+    """Number of cached weight workspaces a module populates on the cached path."""
+    if kind == "GroupedLinear":
+        return num_gemms  # one per expert
+    if kind == "LayerNormMLP":
+        return 2  # fc1 + fc2
+    return 1
 
 
 def _clone_params(src, dst):
@@ -61,24 +72,45 @@ def _clone_params(src, dst):
             dst_params[name].copy_(param)
 
 
-def _step(module, x, is_first, recipe):
+def _step(module, x, is_first, recipe, m_splits=None):
     x = x.detach().clone().requires_grad_(True)
     module.zero_grad(set_to_none=True)  # per-micro-batch grads (no accumulation)
     with te.autocast(enabled=True, recipe=recipe):
-        out = module(x, is_first_microbatch=is_first)
+        # Passing m_splits is the only call-site difference for GroupedLinear; the
+        # rest of the cached-weight numerics check is identical across modules.
+        if m_splits is None:
+            out = module(x, is_first_microbatch=is_first)
+        else:
+            out = module(x, m_splits, is_first_microbatch=is_first)
     out.sum().backward()
     return out.detach().float(), x.grad.detach().float()
 
 
-@pytest.mark.parametrize("kind", ["Linear", "LayerNormLinear"])
+_MODULE_KINDS = ["Linear", "LayerNormLinear", "LayerNormMLP", "GroupedLinear"]
+
+
+def _grouped_m_splits(kind, batch, num_gemms):
+    """m_splits for GroupedLinear (even token split across experts), else None."""
+    if kind != "GroupedLinear":
+        return None
+    return [batch // num_gemms] * num_gemms
+
+
+@pytest.mark.parametrize("kind", _MODULE_KINDS)
 @pytest.mark.parametrize("microbatches", [1, 4])
 @pytest.mark.parametrize("shape", [(1024, 1024), (2048, 512)], ids=["1024x1024", "2048x512"])
 def test_weight_swizzle_cache_numerics(kind, microbatches, shape):
-    """Cached eager-swizzle path == lazy-swizzle baseline (fprop + dgrad)."""
+    """Cached eager-swizzle path == lazy-swizzle baseline (fprop + dgrad).
+
+    Shared across all module kinds: GroupedLinear only differs by passing
+    m_splits (handled in _step), LayerNormMLP only by caching two weights.
+    """
     torch.manual_seed(1234)
     device = "cuda"
     in_features, out_features = shape
     batch = 512
+    num_gemms = 2 if kind == "GroupedLinear" else 1
+    m_splits = _grouped_m_splits(kind, batch, num_gemms)
 
     # Stochastic rounding is the only run-to-run nondeterminism source (RHT uses
     # a fixed sign mask) and it is applied to the bwd grad regardless of this
@@ -90,8 +122,8 @@ def test_weight_swizzle_cache_numerics(kind, microbatches, shape):
     # ref: always lazy-swizzle (is_first_microbatch=None => no weight cache =>
     # optimize_for_gemm stays False). opt: cached eager-swizzle path. Identical
     # weights so per-micro-batch outputs are directly comparable.
-    ref = _make_module(kind, in_features, out_features, device)
-    opt = _make_module(kind, in_features, out_features, device)
+    ref = _make_module(kind, in_features, out_features, device, num_gemms)
+    opt = _make_module(kind, in_features, out_features, device, num_gemms)
     _clone_params(ref, opt)
 
     # Distinct inputs per micro-batch (mirrors gradient accumulation: different
@@ -103,8 +135,8 @@ def test_weight_swizzle_cache_numerics(kind, microbatches, shape):
 
     atol, rtol = 1e-3, 1e-3
     for mb in range(microbatches):
-        ref_out, ref_dgrad = _step(ref, inputs[mb], None, recipe)
-        opt_out, opt_dgrad = _step(opt, inputs[mb], mb == 0, recipe)
+        ref_out, ref_dgrad = _step(ref, inputs[mb], None, recipe, m_splits)
+        opt_out, opt_dgrad = _step(opt, inputs[mb], mb == 0, recipe, m_splits)
         torch.testing.assert_close(
             opt_out, ref_out, atol=atol, rtol=rtol, msg=f"fprop mismatch at mb {mb}"
         )
@@ -112,9 +144,12 @@ def test_weight_swizzle_cache_numerics(kind, microbatches, shape):
             opt_dgrad, ref_dgrad, atol=atol, rtol=rtol, msg=f"dgrad mismatch at mb {mb}"
         )
 
-    # The swizzled flag must be set & persisted on the cached weight workspace.
+    # The swizzled flag must be set & persisted on every cached weight workspace
+    # (one per expert for GroupedLinear, fc1+fc2 for LayerNormMLP, else one).
     workspaces = opt._fp8_workspaces
-    assert workspaces, "no cached weight workspace was created on the optimized module"
+    assert len(workspaces) == _expected_num_workspaces(kind, num_gemms), (
+        f"unexpected cached weight workspace count for {kind}: {len(workspaces)}"
+    )
     for name, ws in workspaces.items():
         assert getattr(ws, "_with_gemm_swizzled_scales", False) is True, (
             f"cached weight workspace {name!r} scales were not pre-swizzled "
@@ -122,70 +157,23 @@ def test_weight_swizzle_cache_numerics(kind, microbatches, shape):
         )
 
 
-@pytest.mark.parametrize("microbatches", [1, 4])
-@pytest.mark.parametrize("num_gemms", [1, 2])
-def test_grouped_linear_weight_swizzle_cache_numerics(microbatches, num_gemms):
-    """GroupedLinear (MoE expert path): cached eager-swizzle == lazy baseline."""
-    torch.manual_seed(1234)
-    device = "cuda"
-    in_features, out_features = 1024, 1024
-    tokens_per_gemm = 256
-    batch = tokens_per_gemm * num_gemms
-    m_splits = [tokens_per_gemm] * num_gemms
-
-    recipe = NVFP4BlockScaling(disable_stochastic_rounding=True)
-
-    ref = te.GroupedLinear(
-        num_gemms, in_features, out_features, bias=True, params_dtype=torch.bfloat16
-    ).to(device)
-    opt = te.GroupedLinear(
-        num_gemms, in_features, out_features, bias=True, params_dtype=torch.bfloat16
-    ).to(device)
-    _clone_params(ref, opt)
-
-    inputs = [
-        torch.randn(batch, in_features, dtype=torch.bfloat16, device=device)
-        for _ in range(microbatches)
-    ]
-
-    def grouped_step(module, x, is_first):
-        x = x.detach().clone().requires_grad_(True)
-        module.zero_grad(set_to_none=True)
-        with te.autocast(enabled=True, recipe=recipe):
-            out = module(x, m_splits, is_first_microbatch=is_first)
-        out.sum().backward()
-        return out.detach().float(), x.grad.detach().float()
-
-    atol, rtol = 1e-3, 1e-3
-    for mb in range(microbatches):
-        ref_out, ref_dgrad = grouped_step(ref, inputs[mb], None)
-        opt_out, opt_dgrad = grouped_step(opt, inputs[mb], mb == 0)
-        torch.testing.assert_close(
-            opt_out, ref_out, atol=atol, rtol=rtol, msg=f"fprop mismatch at mb {mb}"
-        )
-        torch.testing.assert_close(
-            opt_dgrad, ref_dgrad, atol=atol, rtol=rtol, msg=f"dgrad mismatch at mb {mb}"
-        )
-
-    workspaces = opt._fp8_workspaces
-    assert len(workspaces) == num_gemms, "expected one cached workspace per expert"
-    for name, ws in workspaces.items():
-        assert (
-            getattr(ws, "_with_gemm_swizzled_scales", False) is True
-        ), f"cached weight workspace {name!r} scales were not pre-swizzled"
-
-
-@pytest.mark.parametrize("kind", ["Linear", "LayerNormLinear"])
+@pytest.mark.parametrize("kind", _MODULE_KINDS)
 def test_lazy_path_not_swizzled(kind):
     """Without weight caching (is_first_microbatch=None) no workspace is created
     and the optimization stays off — guards against accidentally always-on."""
     torch.manual_seed(0)
     device = "cuda"
+    batch = 512
+    num_gemms = 2 if kind == "GroupedLinear" else 1
+    m_splits = _grouped_m_splits(kind, batch, num_gemms)
     recipe = NVFP4BlockScaling(disable_stochastic_rounding=True)
-    module = _make_module(kind, 1024, 1024, device)
-    x = torch.randn(512, 1024, dtype=torch.bfloat16, device=device, requires_grad=True)
+    module = _make_module(kind, 1024, 1024, device, num_gemms)
+    x = torch.randn(batch, 1024, dtype=torch.bfloat16, device=device, requires_grad=True)
     with te.autocast(enabled=True, recipe=recipe):
-        out = module(x, is_first_microbatch=None)
+        if m_splits is None:
+            out = module(x, is_first_microbatch=None)
+        else:
+            out = module(x, m_splits, is_first_microbatch=None)
     out.sum().backward()
     assert (
         not module._fp8_workspaces
