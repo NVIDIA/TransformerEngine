@@ -46,16 +46,13 @@ namespace nvfp4_cutlass {
 //     points to group g's length-N bias vector (D-element dtype), added in the
 //     epilogue (D[g] = alpha[g]*acc + bias[g]). Requires BF16 output and
 //     overwrite (no accumulate). Pass an empty vector when there is no bias.
-void run_grouped_per_tensor_gemm(const std::vector<const void *> &a_data,
-                                 const std::vector<const void *> &b_data,
-                                 const std::vector<const void *> &a_sf,
-                                 const std::vector<const void *> &b_sf,
-                                 const std::vector<const float *> &alpha_ptrs,
-                                 const std::vector<void *> &d_ptrs,
-                                 const std::vector<const void *> &bias_ptrs,
-                                 const std::vector<int> &Ms, const std::vector<int> &Ns,
-                                 const std::vector<int> &Ks, bool fp32_output, bool accumulate,
-                                 cudaStream_t stream);
+void run_grouped_per_tensor_gemm(
+    const std::vector<const void *> &a_data, const std::vector<const void *> &b_data,
+    const std::vector<const void *> &a_sf, const std::vector<const void *> &b_sf,
+    const std::vector<const float *> &alpha_ptrs, const std::vector<void *> &d_ptrs,
+    const std::vector<const void *> &bias_ptrs, const std::vector<int> &Ms,
+    const std::vector<int> &Ns, const std::vector<int> &Ks, bool fp32_output, bool accumulate,
+    cudaStream_t stream);
 
 }  // namespace nvfp4_cutlass
 }  // namespace transformer_engine

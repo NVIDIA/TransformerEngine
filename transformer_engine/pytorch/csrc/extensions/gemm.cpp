@@ -674,8 +674,7 @@ void nvfp4_grouped_per_tensor_gemm(std::vector<py::handle> A, bool transa,
   // alpha. Scales of A/B must already be GEMM-swizzled by the caller (e.g. via
   // multi_tensor_swizzle_scales_for_gemm_). Only the GEMM launch happens here.
   const size_t num_gemms = A.size();
-  NVTE_CHECK(B.size() == num_gemms && D.size() == num_gemms,
-             "A, B, D must have matching lengths.");
+  NVTE_CHECK(B.size() == num_gemms && D.size() == num_gemms, "A, B, D must have matching lengths.");
   const bool have_bias = !bias.empty();
   NVTE_CHECK(!have_bias || bias.size() == num_gemms,
              "bias must be empty or have length num_gemms.");
@@ -702,11 +701,11 @@ void nvfp4_grouped_per_tensor_gemm(std::vector<py::handle> A, bool transa,
   }
 
   NVTE_SCOPED_GIL_RELEASE({
-    nvte_nvfp4_grouped_per_tensor_gemm(
-        te_A_vector.data(), te_B_vector.data(), te_D_vector.data(),
-        have_bias ? te_bias_vector.data() : nullptr, static_cast<int>(num_gemms), transa, transb,
-        accumulate, reinterpret_cast<const float*>(alpha.data_ptr()),
-        at::cuda::getCurrentCUDAStream());
+    nvte_nvfp4_grouped_per_tensor_gemm(te_A_vector.data(), te_B_vector.data(), te_D_vector.data(),
+                                       have_bias ? te_bias_vector.data() : nullptr,
+                                       static_cast<int>(num_gemms), transa, transb, accumulate,
+                                       reinterpret_cast<const float*>(alpha.data_ptr()),
+                                       at::cuda::getCurrentCUDAStream());
   });
 }
 

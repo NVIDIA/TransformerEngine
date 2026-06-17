@@ -26,8 +26,6 @@
 //     A/B swap). The EVT is passed straight to the CollectiveBuilder, so no
 //     custom FusionCallbacks specialization is required.
 
-#include "nvfp4_cutlass_grouped_gemm.cuh"
-
 #include <transformer_engine/transformer_engine.h>
 
 #include <cstdint>
@@ -56,6 +54,7 @@
 #include "cutlass/gemm/kernel/gemm_universal.hpp"
 #include "cutlass/numeric_types.h"
 #include "cutlass/util/packed_stride.hpp"
+#include "nvfp4_cutlass_grouped_gemm.cuh"
 
 namespace transformer_engine {
 namespace nvfp4_cutlass {
@@ -130,8 +129,8 @@ struct PerTensorCfg {
   // passed straight to the CollectiveBuilder, so no custom FusionCallbacks
   // specialization is needed.
   using BiasAlphaNode =
-      fusion::Sm90ScalarBroadcastPtrArray<ElementScale, cute_::Stride<cute_::_0, cute_::_0,
-                                                                      int64_t> >;
+      fusion::Sm90ScalarBroadcastPtrArray<ElementScale,
+                                          cute_::Stride<cute_::_0, cute_::_0, int64_t>>;
   using BiasNode =
       fusion::Sm90RowBroadcast<0, MmaTileShape, ElementBias *, ElementCompute,
                                cute_::Stride<cute_::_0, cute_::_1, int64_t>, AlignmentBias>;
@@ -139,10 +138,10 @@ struct PerTensorCfg {
       fusion::Sm90Compute<cutlass::homogeneous_multiply_add, ElementD, ElementCompute, kRoundStyle>,
       BiasAlphaNode, fusion::Sm90AccFetch, BiasNode>;  // alpha[g] * acc + bias[g]
 
-  using FusionOp = std::conditional_t<
-      kHasBias, BiasEVT,
-      cutlass::epilogue::fusion::LinearCombination<ElementD, ElementCompute, ElementC, ElementScale,
-                                                   kRoundStyle> >;
+  using FusionOp =
+      std::conditional_t<kHasBias, BiasEVT,
+                         cutlass::epilogue::fusion::LinearCombination<
+                             ElementD, ElementCompute, ElementC, ElementScale, kRoundStyle>>;
 
   using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
       ArchTag, OperatorClass, MmaTileShape, ClusterShape,
@@ -215,13 +214,12 @@ static void *persistent_host_buffer(size_t bytes) {
 
 template <typename ElementOutT, bool kHasBias>
 static void run_impl(const std::vector<const void *> &a_data,
-                     const std::vector<const void *> &b_data,
-                     const std::vector<const void *> &a_sf, const std::vector<const void *> &b_sf,
+                     const std::vector<const void *> &b_data, const std::vector<const void *> &a_sf,
+                     const std::vector<const void *> &b_sf,
                      const std::vector<const float *> &alpha_ptrs,
-                     const std::vector<void *> &d_ptrs,
-                     const std::vector<const void *> &bias_ptrs, const std::vector<int> &Ms,
-                     const std::vector<int> &Ns, const std::vector<int> &Ks, bool accumulate,
-                     cudaStream_t stream) {
+                     const std::vector<void *> &d_ptrs, const std::vector<const void *> &bias_ptrs,
+                     const std::vector<int> &Ms, const std::vector<int> &Ns,
+                     const std::vector<int> &Ks, bool accumulate, cudaStream_t stream) {
   using Cfg = PerTensorCfg<ElementOutT, kHasBias>;
   using Gemm = typename Cfg::Gemm;
   using StrideA = typename Cfg::StrideA;
@@ -346,10 +344,10 @@ static void run_impl(const std::vector<const void *> &a_data,
     // bias_ptr_array[g] already points at group g's length-N bias base.
     fusion_args = {
         {/*scalars=*/{}, /*scalar_ptrs=*/{}, /*scalar_ptr_arrays=*/{alpha_ptr_array_d},
-         /*dScalar=*/{}},                          // alpha[g]
-        {},                                        // acc
-        {bias_ptr_array_d, ElementBias(0), {}},    // bias[g]
-        {}                                         // homogeneous_multiply_add
+         /*dScalar=*/{}},                        // alpha[g]
+        {},                                      // acc
+        {bias_ptr_array_d, ElementBias(0), {}},  // bias[g]
+        {}                                       // homogeneous_multiply_add
     };
   } else {
     fusion_args.alpha = 1.0f;  // overridden per-group by alpha_ptr_array
@@ -387,25 +385,22 @@ static void run_impl(const std::vector<const void *> &a_data,
              cutlassGetStatusString(status), " (num_groups=", G, ")");
 
   status = gemm.initialize(arguments, workspace, stream);
-  NVTE_CHECK(status == cutlass::Status::kSuccess,
-             "CUTLASS NVFP4 grouped per-tensor GEMM initialize failed: ",
-             cutlassGetStatusString(status));
+  NVTE_CHECK(
+      status == cutlass::Status::kSuccess,
+      "CUTLASS NVFP4 grouped per-tensor GEMM initialize failed: ", cutlassGetStatusString(status));
 
   status = gemm.run(stream);
   NVTE_CHECK(status == cutlass::Status::kSuccess,
              "CUTLASS NVFP4 grouped per-tensor GEMM run failed: ", cutlassGetStatusString(status));
 }
 
-void run_grouped_per_tensor_gemm(const std::vector<const void *> &a_data,
-                                 const std::vector<const void *> &b_data,
-                                 const std::vector<const void *> &a_sf,
-                                 const std::vector<const void *> &b_sf,
-                                 const std::vector<const float *> &alpha_ptrs,
-                                 const std::vector<void *> &d_ptrs,
-                                 const std::vector<const void *> &bias_ptrs,
-                                 const std::vector<int> &Ms, const std::vector<int> &Ns,
-                                 const std::vector<int> &Ks, bool fp32_output, bool accumulate,
-                                 cudaStream_t stream) {
+void run_grouped_per_tensor_gemm(
+    const std::vector<const void *> &a_data, const std::vector<const void *> &b_data,
+    const std::vector<const void *> &a_sf, const std::vector<const void *> &b_sf,
+    const std::vector<const float *> &alpha_ptrs, const std::vector<void *> &d_ptrs,
+    const std::vector<const void *> &bias_ptrs, const std::vector<int> &Ms,
+    const std::vector<int> &Ns, const std::vector<int> &Ks, bool fp32_output, bool accumulate,
+    cudaStream_t stream) {
   static const std::vector<const void *> kNoBias;
   const bool has_bias = !bias_ptrs.empty();
   if (has_bias) {
@@ -421,16 +416,17 @@ void run_grouped_per_tensor_gemm(const std::vector<const void *> &a_data,
   } else {
     NVTE_CHECK(!accumulate,
                "CUTLASS NVFP4 grouped per-tensor GEMM: accumulate requires FP32 output.");
-    run_impl<cutlass::bfloat16_t, /*kHasBias=*/false>(a_data, b_data, a_sf, b_sf, alpha_ptrs,
-                                                      d_ptrs, kNoBias, Ms, Ns, Ks, accumulate,
-                                                      stream);
+    run_impl<cutlass::bfloat16_t, /*kHasBias=*/false>(
+        a_data, b_data, a_sf, b_sf, alpha_ptrs, d_ptrs, kNoBias, Ms, Ns, Ks, accumulate, stream);
   }
 }
 
 #else   // !CUTLASS_ARCH_MMA_SM100_SUPPORTED
 
-void run_grouped_per_tensor_gemm(const std::vector<const void *> &, const std::vector<const void *> &,
-                                 const std::vector<const void *> &, const std::vector<const void *> &,
+void run_grouped_per_tensor_gemm(const std::vector<const void *> &,
+                                 const std::vector<const void *> &,
+                                 const std::vector<const void *> &,
+                                 const std::vector<const void *> &,
                                  const std::vector<const float *> &, const std::vector<void *> &,
                                  const std::vector<const void *> &, const std::vector<int> &,
                                  const std::vector<int> &, const std::vector<int> &, bool, bool,

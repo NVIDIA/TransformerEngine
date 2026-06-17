@@ -931,9 +931,7 @@ def test_grouped_gemm_cutlass_empty_groups(layout, monkeypatch):
 # which is SM100-only and additionally fuses bias (fprop) / accumulate (wgrad).
 # =============================================================================
 _NVFP4_CUTLASS_ENV = "NVTE_NVFP4_CUTLASS_GROUPED_GEMM"
-nvfp4_cutlass_grouped_available = (
-    nvfp4_available and torch.cuda.get_device_capability()[0] == 10
-)
+nvfp4_cutlass_grouped_available = nvfp4_available and torch.cuda.get_device_capability()[0] == 10
 
 
 def _nvfp4_pertensor_quantize(hp: torch.Tensor):
@@ -994,8 +992,9 @@ def _nvfp4_dequant_reference(A, B, *, layout: str, bias=None, init=None):
     return refs
 
 
-def _run_nvfp4_grouped(A, B, out, *, layout, grad, accumulate, m_splits, single_output,
-                       bias, cutlass, monkeypatch):
+def _run_nvfp4_grouped(
+    A, B, out, *, layout, grad, accumulate, m_splits, single_output, bias, cutlass, monkeypatch
+):
     monkeypatch.setenv(_NVFP4_CUTLASS_ENV, "1" if cutlass else "0")
     general_grouped_gemm(
         A,
@@ -1024,16 +1023,15 @@ def _assert_nvfp4_grouped_parity(out_ms, out_cu, hp):
         assert ms_inf > 1e-6, "reference output is ~0 (operand/quant bug, not a real check)"
         # Backend consistency: overwrite paths are bit-identical; bias / accumulate
         # add a ~1 ULP fp32/bf16 rounding diff. Allow either bound.
-        assert abs_d <= 5e-2 or rel_d <= 2e-2, (
-            f"cutlass vs multi-stream diverged: max_abs={abs_d:.4g}, rel={rel_d:.4g}"
-        )
+        assert (
+            abs_d <= 5e-2 or rel_d <= 2e-2
+        ), f"cutlass vs multi-stream diverged: max_abs={abs_d:.4g}, rel={rel_d:.4g}"
         # Correctness: cutlass no worse than production vs the neutral reference.
         _, ms_hp, _ = _diff(h, ms)
         _, cu_hp, _ = _diff(h, cu)
-        assert cu_hp <= max(0.05, ms_hp * 1.3), (
-            f"cutlass less accurate than multi-stream vs dequant ref: "
-            f"cu={cu_hp:.4g}, ms={ms_hp:.4g}"
-        )
+        assert cu_hp <= max(
+            0.05, ms_hp * 1.3
+        ), f"cutlass less accurate than multi-stream vs dequant ref: cu={cu_hp:.4g}, ms={ms_hp:.4g}"
 
 
 def _build_nvfp4_grouped_operands(layout, m_splits, k, n, *, accumulate, use_bias, odt, dev):
@@ -1083,12 +1081,32 @@ def _run_nvfp4_gemm_case(layout, fp32_out, accumulate, use_bias, m_splits, k, n,
     A, B, out_ms, out_cu, grad, single_output, bias, init = _build_nvfp4_grouped_operands(
         layout, m_splits, k, n, accumulate=accumulate, use_bias=use_bias, odt=odt, dev=dev
     )
-    _run_nvfp4_grouped(A, B, out_ms, layout=layout, grad=grad, accumulate=accumulate,
-                       m_splits=m_splits, single_output=single_output, bias=bias,
-                       cutlass=False, monkeypatch=monkeypatch)
-    _run_nvfp4_grouped(A, B, out_cu, layout=layout, grad=grad, accumulate=accumulate,
-                       m_splits=m_splits, single_output=single_output, bias=bias,
-                       cutlass=True, monkeypatch=monkeypatch)
+    _run_nvfp4_grouped(
+        A,
+        B,
+        out_ms,
+        layout=layout,
+        grad=grad,
+        accumulate=accumulate,
+        m_splits=m_splits,
+        single_output=single_output,
+        bias=bias,
+        cutlass=False,
+        monkeypatch=monkeypatch,
+    )
+    _run_nvfp4_grouped(
+        A,
+        B,
+        out_cu,
+        layout=layout,
+        grad=grad,
+        accumulate=accumulate,
+        m_splits=m_splits,
+        single_output=single_output,
+        bias=bias,
+        cutlass=True,
+        monkeypatch=monkeypatch,
+    )
     hp = _nvfp4_dequant_reference(A, B, layout=layout, bias=bias, init=init)
     _assert_nvfp4_grouped_parity(out_ms, out_cu, hp)
 
@@ -1179,7 +1197,12 @@ def test_nvfp4_cutlass_grouped_linear(groups, bias, fuse_wgrad_accumulation, mon
 
     torch.manual_seed(0)
     model = GroupedLinear(
-        groups, K, N, bias=bias, params_dtype=torch.bfloat16, device="cuda",
+        groups,
+        K,
+        N,
+        bias=bias,
+        params_dtype=torch.bfloat16,
+        device="cuda",
         fuse_wgrad_accumulation=fuse_wgrad_accumulation,
     ).eval()
     x = torch.randn(total_m, K, dtype=torch.bfloat16, device="cuda", requires_grad=True)
@@ -1202,8 +1225,7 @@ def test_nvfp4_cutlass_grouped_linear(groups, bias, fuse_wgrad_accumulation, mon
         with autocast(enabled=True, recipe=nvfp4_recipe):
             out = model(x, m_splits)
         out.backward(dy)
-        snap = {"out": out.detach().float().clone(),
-                "dgrad": x.grad.detach().float().clone()}
+        snap = {"out": out.detach().float().clone(), "dgrad": x.grad.detach().float().clone()}
         for i in range(groups):
             w = getattr(model, f"weight{i}")
             g = w.main_grad if fuse_wgrad_accumulation else w.grad
@@ -1218,9 +1240,9 @@ def test_nvfp4_cutlass_grouped_linear(groups, bias, fuse_wgrad_accumulation, mon
     test = run(cutlass=True)
     for key in ref:
         abs_d, rel_d, _ = _diff(ref[key], test[key])
-        assert abs_d <= 5e-2 or rel_d <= 2e-2, (
-            f"{key}: cutlass vs multi-stream diverged (max_abs={abs_d:.4g}, rel={rel_d:.4g})"
-        )
+        assert (
+            abs_d <= 5e-2 or rel_d <= 2e-2
+        ), f"{key}: cutlass vs multi-stream diverged (max_abs={abs_d:.4g}, rel={rel_d:.4g})"
 
 
 def _pack_grouped_tensor(grouped_tensor: GroupedTensor, tensors: List[torch.Tensor]) -> None:

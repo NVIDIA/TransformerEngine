@@ -350,8 +350,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Grouped GEMM");
   m.def("nvfp4_grouped_per_tensor_compute_alpha",
         &transformer_engine::pytorch::nvfp4_grouped_per_tensor_compute_alpha,
-        "Bench-only: precompute per-group alpha for per-tensor NVFP4 grouped GEMM",
-        py::arg("A"), py::arg("transa"), py::arg("B"), py::arg("transb"));
+        "Bench-only: precompute per-group alpha for per-tensor NVFP4 grouped GEMM", py::arg("A"),
+        py::arg("transa"), py::arg("B"), py::arg("transb"));
   m.def("nvfp4_grouped_per_tensor_gemm",
         &transformer_engine::pytorch::nvfp4_grouped_per_tensor_gemm,
         "Bench-only: single-launch per-tensor NVFP4 grouped GEMM with precomputed alpha",

@@ -1087,8 +1087,7 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
   // behavior is unchanged by default.
   const bool is_blackwell = (transformer_engine::cuda::sm_arch(current_device) >= 100 &&
                              transformer_engine::cuda::sm_arch(current_device) < 110);
-  if (is_blackwell &&
-      transformer_engine::getenv<bool>("NVTE_NVFP4_CUTLASS_GROUPED_GEMM", false)) {
+  if (is_blackwell && transformer_engine::getenv<bool>("NVTE_NVFP4_CUTLASS_GROUPED_GEMM", false)) {
     using namespace transformer_engine;
     const cublasOperation_t transaOp = transa ? CUBLAS_OP_T : CUBLAS_OP_N;
     const cublasOperation_t transbOp = transb ? CUBLAS_OP_T : CUBLAS_OP_N;
@@ -1211,8 +1210,7 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
         return;
       }
 
-      const bool fp32_output =
-          convertNVTETensorCheck(D[0])->data.dtype == DType::kFloat32;
+      const bool fp32_output = convertNVTETensorCheck(D[0])->data.dtype == DType::kFloat32;
       nvfp4_cutlass::run_grouped_per_tensor_gemm(a_data, b_data, a_sf, b_sf, alpha_ptrs, d_ptrs,
                                                  bias_data, Ms, Ns, Ks, fp32_output, accumulate,
                                                  stream);
@@ -1364,5 +1362,6 @@ void nvte_nvfp4_grouped_per_tensor_gemm(const NVTETensor *A, const NVTETensor *B
 
   const bool fp32_output = convertNVTETensorCheck(D[0])->data.dtype == DType::kFloat32;
   nvfp4_cutlass::run_grouped_per_tensor_gemm(a_data, b_data, a_sf, b_sf, alpha_ptrs, d_ptrs,
-                                             bias_data, Ms, Ns, Ks, fp32_output, accumulate, stream);
+                                             bias_data, Ms, Ns, Ks, fp32_output, accumulate,
+                                             stream);
 }

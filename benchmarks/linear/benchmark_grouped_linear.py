@@ -406,10 +406,18 @@ def _nvfp4_gg_bench_pure(
             with _nvfp4_gg_backend(False):  # multi-stream, on pre-swizzled operands
                 return _nvfp4_gg_time_us(
                     lambda: general_grouped_gemm(
-                        A, B, out, [None] * len(Ms), out[0].dtype,
-                        layout=layout, m_splits=m_splits, single_output=single_output, grad=grad,
+                        A,
+                        B,
+                        out,
+                        [None] * len(Ms),
+                        out[0].dtype,
+                        layout=layout,
+                        m_splits=m_splits,
+                        single_output=single_output,
+                        grad=grad,
                     ),
-                    warmup, iters,
+                    warmup,
+                    iters,
                 )
         except Exception:  # noqa: BLE001
             return None
@@ -420,7 +428,8 @@ def _nvfp4_gg_bench_pure(
                 lambda: tex.nvfp4_grouped_per_tensor_gemm(
                     A, transa, B, transb, d_groups, [], alpha, False
                 ),
-                warmup, iters,
+                warmup,
+                iters,
             )
         except Exception:  # noqa: BLE001
             return None
@@ -439,8 +448,15 @@ def _nvfp4_gg_bench(
 
     def run():
         general_grouped_gemm(
-            A, B, out, [None] * len(Ms), out[0].dtype,
-            layout=layout, m_splits=m_splits, single_output=single_output, grad=grad,
+            A,
+            B,
+            out,
+            [None] * len(Ms),
+            out[0].dtype,
+            layout=layout,
+            m_splits=m_splits,
+            single_output=single_output,
+            grad=grad,
         )
 
     def timed(cutlass: bool) -> Optional[float]:
@@ -470,15 +486,19 @@ def run_nvfp4_grouped_gemm_comparison(layouts, configs, warmup, iters, want_pure
         return
 
     layout_label = {"TN": "TN fprop", "NN": "NN dgrad", "NT": "NT wgrad"}
-    pure_hdr = "" if not want_pure else (
-        "  + PURE row (fair kernel-vs-kernel): both pre-swizzled, swizzle excluded from both.\n"
+    pure_hdr = (
+        ""
+        if not want_pure
+        else (
+            "  + PURE row (fair kernel-vs-kernel): both pre-swizzled, swizzle excluded from both.\n"
+        )
     )
     print(
-        f"\nNVFP4 grouped GEMM: CUTLASS vs multi-stream cuBLASLt  "
+        "\nNVFP4 grouped GEMM: CUTLASS vs multi-stream cuBLASLt  "
         f"[warmup={warmup} iters={iters}]\n"
-        f"  DISPATCH row (real prod): multi-stream = env=0 (4-stream cuBLASLt), cutlass = env=1.\n"
+        "  DISPATCH row (real prod): multi-stream = env=0 (4-stream cuBLASLt), cutlass = env=1.\n"
         f"{pure_hdr}"
-        f"  speedup = multi-stream / cutlass (>1 => cutlass faster).\n"
+        "  speedup = multi-stream / cutlass (>1 => cutlass faster).\n"
     )
 
     def _ms(us: Optional[float]) -> str:
@@ -609,14 +629,14 @@ if __name__ == "__main__":
             gg_configs = [(Ms, args.output_dim, args.hidden_dim)]
         else:
             gg_configs = [
-                (_nvfp4_gg_token_counts(8, 128, False, 0), 2048, 2048),   # small (launch-bound)
+                (_nvfp4_gg_token_counts(8, 128, False, 0), 2048, 2048),  # small (launch-bound)
                 (_nvfp4_gg_token_counts(8, 256, False, 0), 2048, 2048),
                 (_nvfp4_gg_token_counts(8, 512, False, 0), 2048, 2048),
-                (_nvfp4_gg_token_counts(8, 256, True, 1), 2048, 2048),    # imbalanced
+                (_nvfp4_gg_token_counts(8, 256, True, 1), 2048, 2048),  # imbalanced
                 (_nvfp4_gg_token_counts(16, 256, False, 0), 2048, 2048),
-                (_nvfp4_gg_token_counts(16, 256, True, 2), 4096, 2048),   # imbalanced, wider N
+                (_nvfp4_gg_token_counts(16, 256, True, 2), 4096, 2048),  # imbalanced, wider N
                 (_nvfp4_gg_token_counts(32, 128, False, 0), 2048, 2048),  # many small experts
-                (_nvfp4_gg_token_counts(32, 256, True, 3), 2048, 2048),   # many imbalanced
+                (_nvfp4_gg_token_counts(32, 256, True, 3), 2048, 2048),  # many imbalanced
             ]
         run_nvfp4_grouped_gemm_comparison(
             args.layouts, gg_configs, args.gemm_warmup, args.gemm_iters, not args.no_pure
