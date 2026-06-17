@@ -55,9 +55,18 @@ target_include_directories(test_comm_gemm PRIVATE ${test_comm_gemm_INCLUDES})
 find_package(CUDAToolkit REQUIRED)
 find_package(OpenMP REQUIRED)
 find_package(MPI REQUIRED)
+
+# -- NCCL core ----------------------------------------------------------------
+# Pass -DNCCL_INCLUDE_DIR=<prefix>/include; falls back to well-known prefixes.
+find_path(NCCL_INCLUDE_DIR nccl.h
+    HINTS /opt/nvidia/nccl/include /usr/local/nccl/include)
+if(NOT NCCL_INCLUDE_DIR)
+  message(FATAL_ERROR
+    "nccl.h not found. Pass -DNCCL_INCLUDE_DIR=<prefix>/include.")
+endif()
 find_library(NCCL_LIB
              NAMES nccl libnccl
-             PATH_SUFFIXES lib
+             PATH_SUFFIXES lib lib64
              REQUIRED)
 list(APPEND test_comm_gemm_LINKER_LIBS
      CUDA::cuda_driver
@@ -74,3 +83,37 @@ target_compile_options(test_comm_gemm PRIVATE -O2 -fopenmp)
 
 include(GoogleTest)
 gtest_discover_tests(test_comm_gemm DISCOVERY_TIMEOUT 600)
+
+# -- EP distributed tests ------------------------------------------------------
+# Launched via mpirun; ncclUniqueId exchange uses MPI_Bcast (see test_ep_common.h).
+# The test binary only uses NCCL core symbols (ncclMemAlloc, ncclCommWindow*);
+# all ncclEp* calls live behind TE's public <transformer_engine/ep.h>, which
+# resolves libnccl_ep.so via dlopen in libtransformer_engine.so itself.
+message(STATUS "EP test: NCCL headers: ${NCCL_INCLUDE_DIR}")
+set(EP_TEST_COMMON_INCLUDES
+    ${NCCL_INCLUDE_DIR}
+    ${MPI_CXX_INCLUDE_PATH}
+    ../../transformer_engine/common/include
+    ../../transformer_engine/common
+    ${CMAKE_CURRENT_SOURCE_DIR})
+
+# nvrtc must follow TE_LIB so symbols referenced from libtransformer_engine.so
+# (loaded via dlopen in Python; not in its DT_NEEDED) resolve through nvrtc.
+set(EP_TEST_COMMON_LIBS
+    CUDA::cuda_driver
+    CUDA::cudart
+    GTest::gtest
+    ${TE_LIB}
+    CUDA::nvrtc
+    ${NCCL_LIB}
+    MPI::MPI_CXX
+    OpenMP::OpenMP_CXX)
+
+# -- EP distributed tests (per-op + full pipeline + zero-copy symm) -----------
+add_executable(test_ep test_ep.cu ../cpp/test_common.cu)
+target_include_directories(test_ep PRIVATE ${EP_TEST_COMMON_INCLUDES})
+target_link_libraries(test_ep PUBLIC ${EP_TEST_COMMON_LIBS})
+
+# Do NOT use gtest_discover_tests - these binaries require multi-process
+# launch via run_test_ep.sh, not direct single-process execution.
+message(STATUS "EP distributed tests enabled (TE backend dlopens libnccl_ep.so)")

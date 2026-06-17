@@ -84,6 +84,24 @@ def setup_common_extension() -> CMakeExtension:
         cusolvermp_dir = os.getenv("CUSOLVERMP_HOME", "/usr")
         cmake_flags.append(f"-DCUSOLVERMP_DIR={cusolvermp_dir}")
 
+    # NCCL EP (Hopper+): on by default; auto-skipped when no arch >= 90 is
+    # targeted. Set NVTE_BUILD_WITH_NCCL_EP=0 to force off.
+    build_with_nccl_ep = bool(int(os.getenv("NVTE_BUILD_WITH_NCCL_EP", "1")))
+    if build_with_nccl_ep:
+        arch_tokens = [a.strip() for a in str(archs or "").split(";") if a.strip()]
+        has_hopper_or_newer = any(
+            t.lower() == "native" or (t.rstrip("af").isdigit() and int(t.rstrip("af")) >= 90)
+            for t in arch_tokens
+        )
+        if not has_hopper_or_newer:
+            print(f"[NCCL EP] No arch >= 90 in NVTE_CUDA_ARCHS ('{archs}'); skipping build.")
+            build_with_nccl_ep = False
+    if build_with_nccl_ep:
+        nccl_home = build_nccl_ep_submodule()
+        cmake_flags.append(f"-DNCCL_INCLUDE_DIR={nccl_home}/include")
+    else:
+        cmake_flags.append("-DNVTE_WITH_NCCL_EP=OFF")
+
     # Add custom CMake arguments from environment variable
     nvte_cmake_extra_args = os.getenv("NVTE_CMAKE_EXTRA_ARGS")
     if nvte_cmake_extra_args:
@@ -128,6 +146,104 @@ def setup_requirements() -> Tuple[List[str], List[str]]:
             test_reqs.extend(test_requirements())
 
     return [remove_dups(reqs) for reqs in [install_reqs, test_reqs]]
+
+
+def _discover_nccl_home() -> str:
+    """Resolve NCCL_HOME: honor env var, else probe well-known prefixes, else ldconfig."""
+    env_home = os.environ.get("NCCL_HOME")
+    if env_home:
+        if (Path(env_home) / "include" / "nccl.h").exists():
+            return env_home
+        print(
+            f"[NCCL EP] WARNING: NCCL_HOME='{env_home}' is set but "
+            f"'{env_home}/include/nccl.h' was not found; falling back to system probes."
+        )
+
+    lib_names = ("libnccl.so", "libnccl.so.2")
+    # Include Debian/Ubuntu multiarch subdirs (e.g. lib/aarch64-linux-gnu).
+    lib_subdirs = ("lib", "lib64", "lib/aarch64-linux-gnu", "lib/x86_64-linux-gnu")
+    for cand in ("/opt/nvidia/nccl", "/usr/local/nccl", "/usr"):
+        p = Path(cand)
+        if (p / "include" / "nccl.h").exists() and any(
+            (p / sub / name).exists() for sub in lib_subdirs for name in lib_names
+        ):
+            return str(p)
+
+    try:
+        out = subprocess.check_output(["ldconfig", "-p"], stderr=subprocess.DEVNULL).decode()
+        for line in out.splitlines():
+            if "libnccl.so" in line and "=>" in line:
+                lib_path = Path(line.split("=>")[-1].strip())
+                # Walk upward so multiarch layouts (.../lib/<triplet>/libnccl.so)
+                # resolve to the prefix that contains include/nccl.h.
+                for root in (lib_path.parent.parent, lib_path.parent.parent.parent):
+                    if (root / "include" / "nccl.h").exists():
+                        return str(root)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+
+    raise RuntimeError(
+        "Could not locate NCCL core (nccl.h + libnccl.so). Set NCCL_HOME to the install prefix."
+    )
+
+
+def build_nccl_ep_submodule() -> str:
+    """Build libnccl_ep.so from the 3rdparty/nccl submodule.
+
+    Returns the discovered NCCL core install prefix (the path that contains
+    include/nccl.h and lib/libnccl.so), which the caller passes to CMake as
+    NCCL_INCLUDE_DIR for TE's own NCCL link.
+    """
+    nccl_root = current_file_path / "3rdparty" / "nccl"
+    if not (nccl_root / "Makefile").exists():
+        raise RuntimeError(
+            f"NCCL submodule not found at {nccl_root}. "
+            "Run `git submodule update --init --recursive`."
+        )
+
+    build_dir = nccl_root / "build"
+    nccl_ep_lib = build_dir / "lib" / "libnccl_ep.so"
+
+    # Caller gates on arch >= 90 or "native"; let nvcc resolve "native".
+    arch_tokens = [a.strip() for a in str(cuda_archs() or "").split(";") if a.strip()]
+    if any(t.lower() == "native" for t in arch_tokens):
+        gencode = "-arch=native"
+    else:
+        arch_list = [
+            t.rstrip("af")
+            for t in arch_tokens
+            if t.rstrip("af").isdigit() and int(t.rstrip("af")) >= 90
+        ]
+        gencode = " ".join(f"-gencode=arch=compute_{a},code=sm_{a}" for a in arch_list)
+
+    nproc = os.cpu_count() or 8
+    env = os.environ.copy()
+    env["NVCC_GENCODE"] = gencode
+    # NCCL EP needs the core NCCL headers + libnccl.so; write NCCL EP build
+    # outputs to the submodule's local build/ tree.
+    nccl_home = _discover_nccl_home()
+    env["NCCL_HOME"] = nccl_home
+    env["NCCL_EP_BUILDDIR"] = str(build_dir)
+
+    if not nccl_ep_lib.exists():
+        print(f"[NCCL EP] Building libnccl_ep.so (gencode='{gencode}')")
+        subprocess.check_call(
+            ["make", "-j", str(nproc), "-C", "contrib/nccl_ep", "lib"],
+            cwd=str(nccl_root),
+            env=env,
+        )
+
+    # Stage libnccl_ep.so.0 alongside libtransformer_engine.so so $ORIGIN-rpath
+    # finds it in the installed wheel.
+    soname = "libnccl_ep.so.0"
+    src = (build_dir / "lib" / soname).resolve()
+    dst = current_file_path / "transformer_engine" / soname
+    if dst.is_symlink() or dst.exists():
+        dst.unlink()
+    shutil.copy2(src, dst)
+    print(f"[NCCL EP] Bundled {dst} ({src.stat().st_size // (1 << 20)} MB)")
+
+    return nccl_home
 
 
 def git_check_submodules() -> None:
@@ -210,7 +326,8 @@ if __name__ == "__main__":
     else:
         install_requires, test_requires = setup_requirements()
         ext_modules = [setup_common_extension()]
-        package_data = {"": ["VERSION.txt"]}
+        # libnccl_ep.so.0 is staged by build_nccl_ep_submodule(); ship it.
+        package_data = {"": ["VERSION.txt"], "transformer_engine": ["libnccl_ep.so*"]}
         include_package_data = True
         extras_require = {"test": test_requires}
 
