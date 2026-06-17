@@ -19,7 +19,7 @@ from torch import nn
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.common import recipe as te_recipe
-from transformer_engine.pytorch.custom_recipes.quantization_recipes_base import (
+from transformer_engine.pytorch.custom_recipes.quantization_factory_base import (
     nvfp4_quantizer_factory,
 )
 from transformer_engine.pytorch import (

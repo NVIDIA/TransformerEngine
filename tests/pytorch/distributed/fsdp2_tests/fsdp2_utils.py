@@ -6,7 +6,7 @@
 
 import transformer_engine.common.recipe
 from transformer_engine.pytorch import HybridQuantizer, IdentityQuantizer, QuantizedTensor
-from transformer_engine.pytorch.custom_recipes.quantization_recipes_base import (
+from transformer_engine.pytorch.custom_recipes.quantization_factory_base import (
     current_scaling_quantizer_factory,
     float8_block_scaling_quantizer_factory,
     mxfp8_quantizer_factory,
@@ -98,7 +98,7 @@ def get_hybrid_recipe_from_string(recipe):
     """Build a CustomRecipe wrapping a module-level (picklable) hybrid qfactory.
 
     Each hybrid qfactory composes one or two role-aware base factories from
-    ``quantization_recipes_base`` per direction; per-role behavior is delegated
+    ``quantization_factory_base`` per direction; per-role behavior is delegated
     to the base factory and the hybrid layer only decides the direction pairing.
 
     Supported values:

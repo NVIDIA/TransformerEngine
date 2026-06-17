@@ -19,7 +19,7 @@ from transformer_engine.pytorch.cpu_offload import (
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
-from transformer_engine.pytorch.custom_recipes.quantization_recipes_base import (
+from transformer_engine.pytorch.custom_recipes.quantization_factory_base import (
     nvfp4_quantizer_factory,
 )
 from utils import ModelConfig, recipe_id, skip_unsupported_backward_override
@@ -54,7 +54,7 @@ def _hybrid_mxfp8_nvfp4_qfactory(role):
     """Hybrid CustomRecipe factory: MXFP8 rowwise + NVFP4 columnwise.
 
     Mirrors ``mxfp8_fwd_nvfp4_bwd_quantizer_factory`` from
-    ``custom_recipes/quantization_factory_examples.py``. grad_output uses plain NVFP4
+    ``custom_recipes/quantization_factory_zoo.py``. grad_output uses plain NVFP4
     (both directions) so wgrad's columnwise operand matches.
     """
     is_linear = role is not None and role.module_type in ("linear", "grouped_linear")

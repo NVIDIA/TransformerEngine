@@ -13,7 +13,7 @@ import torch
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.common import recipe
-from transformer_engine.pytorch.custom_recipes.quantization_recipes_base import (
+from transformer_engine.pytorch.custom_recipes.quantization_factory_base import (
     nvfp4_quantizer_factory,
 )
 from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
@@ -51,7 +51,7 @@ def _hybrid_mxfp8_nvfp4_qfactory(role):
     """Hybrid CustomRecipe factory: MXFP8 rowwise + NVFP4 columnwise.
 
     Mirrors the ``mxfp8_fwd_nvfp4_bwd_quantizer_factory`` headline recipe
-    from ``custom_recipes/quantization_factory_examples.py``. grad_output uses plain
+    from ``custom_recipes/quantization_factory_zoo.py``. grad_output uses plain
     NVFP4 (both directions) so wgrad's columnwise operand matches.
     """
     is_linear = role is not None and role.module_type in ("linear", "grouped_linear")

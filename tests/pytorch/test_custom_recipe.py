@@ -19,12 +19,13 @@ from transformer_engine.pytorch import (
 )
 from transformer_engine.pytorch.quantization import QuantizerRole
 import transformer_engine.pytorch.ops as te_ops
-from transformer_engine.pytorch.custom_recipes.quantization_recipes_base import (
+from transformer_engine.pytorch.custom_recipes.quantization_factory_base import (
     current_scaling_quantizer_factory,
     mxfp8_quantizer_factory,
     float8_block_scaling_quantizer_factory,
     nvfp4_quantizer_factory,
     delayed_scaling_quantizer_factory,
+    high_precision_factory,
 )
 from transformer_engine.pytorch.custom_recipes.quantization_ref_nvfp4 import (
     nvfp4_ref_rht_2d_quantizer_factory,
@@ -472,6 +473,40 @@ def test_factory_matches_nvfp4():
     )
     out_cus, grad_cus, pgrads_cus = _run_linear_fwd_bwd(
         model_cus, inp_cus, recipe.CustomRecipe(qfactory=nvfp4_quantizer_factory)
+    )
+
+    _assert_match(out_ref, out_cus, grad_ref, grad_cus, pgrads_ref, pgrads_cus)
+
+
+def test_factory_matches_high_precision():
+    """high_precision_factory (all IdentityQuantizer) should produce bit-identical
+    results to running with no quantization (plain BF16, no autocast).
+
+    Unlike the other ``test_factory_matches_*`` cases, the reference here is not a
+    built-in recipe but the unquantized path: IdentityQuantizer leaves tensors
+    untouched, so the GEMMs run in high precision exactly as they would with
+    autocast disabled.
+
+    Note: the custom side still runs inside ``autocast(enabled=True, ...)``, which
+    asserts FP8 availability on entry, so this test skips on non-FP8 hardware even
+    though no tensor is actually quantized.
+    """
+    available, reason = te.is_fp8_available(return_reason=True)
+    if not torch.cuda.is_available() or not available:
+        pytest.skip(f"FP8 unsupported: {reason}")
+
+    model_ref, model_cus, inp_ref, inp_cus = _make_pair()
+
+    # Reference: no autocast -> high-precision GEMMs, no quantization.
+    with autocast(enabled=False):
+        out_ref = model_ref(inp_ref)
+    out_ref.float().sum().backward()
+    out_ref = out_ref.clone()
+    grad_ref = inp_ref.grad.clone()
+    pgrads_ref = {n: p.grad.clone() for n, p in model_ref.named_parameters() if p.grad is not None}
+
+    out_cus, grad_cus, pgrads_cus = _run_linear_fwd_bwd(
+        model_cus, inp_cus, recipe.CustomRecipe(qfactory=high_precision_factory)
     )
 
     _assert_match(out_ref, out_cus, grad_ref, grad_cus, pgrads_ref, pgrads_cus)
@@ -1090,7 +1125,7 @@ def test_custom_recipe_dpa_fp8():
         Float8Quantizer,
         Float8CurrentScalingQuantizer,
     )
-    from transformer_engine.pytorch.custom_recipes.quantization_factory_examples import (
+    from transformer_engine.pytorch.custom_recipes.quantization_factory_zoo import (
         nvfp4_linear_fp8_dpa_factory,
     )
 
@@ -1217,7 +1252,7 @@ def test_custom_recipe_dpa_mxfp8():
     from transformer_engine.pytorch.quantization import CustomRecipeState
     from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
     from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
-    from transformer_engine.pytorch.custom_recipes.quantization_factory_examples import (
+    from transformer_engine.pytorch.custom_recipes.quantization_factory_zoo import (
         nvfp4_linear_mxfp8_dpa_factory,
     )
 

@@ -3,48 +3,46 @@
 # See LICENSE for license information.
 
 """
-Quantizer factory examples.
+Quantizer factory zoo.
 
-Demonstrates how to use the ``CustomRecipe`` + ``qfactory`` interface to apply
-*different* quantization recipes to different module/tensor types/instances within the same model.
+A collection of composed/mixed-recipe factories built on top of the single-format
+building blocks.  They demonstrate how to use the ``CustomRecipe`` + ``qfactory`` 
+interface to apply *different* quantization recipes to different
+module/tensor types/instances within the same model.
+
+.. warning::
+
+    Use these with caution.  These are **not** official, supported recipes
+    provided by Transformer Engine -- they are illustrative examples meant to
+    inspire your own experiments, not drop-in production defaults.  While most
+    of the factories here are grounded in some evidence or rationale (see the
+    per-factory docstrings), they have not been broadly validated for accuracy,
+    convergence, or performance across models and hardware.  Treat them as
+    starting points: benchmark and verify on your own workload before relying on
+    any of them.
 
 Usage::
 
     from transformer_engine.common.recipe import CustomRecipe
     from transformer_engine.pytorch.quantization import autocast
-    from transformer_engine.pytorch.custom_recipes.quantization_factory_examples import (
+    from transformer_engine.pytorch.custom_recipes.quantization_factory_zoo import (
         mxfp8_fwd_nvfp4_bwd_quantizer_factory,
-        nvfp4_linear_mxfp8_grouped_linear_factory,
-        nvfp4_linear_fp8_dpa_factory,
         nvfp4_linear_mxfp8_dpa_factory,
-        high_precision_factory,
-        fwd_high_precision_bwd_mxfp8_factory,
     )
 
-    # Hybrid per-direction recipe: MXFP8 for fprop, NVFP4 for dgrad/wgrad
+    # Linear-only recipe (no attention quantization): the qfactory is the only knob.
     recipe = CustomRecipe(qfactory=mxfp8_fwd_nvfp4_bwd_quantizer_factory)
     with autocast(recipe=recipe):
         output = model(input)
 
-    # Mixed module types: NVFP4 for Linear, MXFP8 for GroupedLinear
-    recipe = CustomRecipe(qfactory=nvfp4_linear_mxfp8_grouped_linear_factory)
-    with autocast(recipe=recipe):
-        output = model(input)
-
-    # NVFP4 for Linear, FP8 current-scaling + delayed-scaling for DPA
-    recipe = CustomRecipe(qfactory=nvfp4_linear_fp8_dpa_factory, fp8_dpa=True)
-    with autocast(recipe=recipe):
-        output = model(input)
-
-    # NVFP4 for Linear, MXFP8 for DPA
+    # Recipe that also quantizes DotProductAttention: set ``fp8_dpa=True`` so the
+    # attention GEMMs request quantizers from the factory (DPA roles) too.
     recipe = CustomRecipe(qfactory=nvfp4_linear_mxfp8_dpa_factory, fp8_dpa=True)
     with autocast(recipe=recipe):
         output = model(input)
 
-    # High precision forward, MXFP8 backward
-    recipe = CustomRecipe(qfactory=fwd_high_precision_bwd_mxfp8_factory)
-    with autocast(recipe=recipe):
-        output = model(input)
+    # The other factories in this module follow the same two patterns; see their
+    # docstrings for the exact per-role dispatch.
 """
 
 from __future__ import annotations
@@ -53,7 +51,7 @@ from typing import Optional
 
 from transformer_engine.pytorch.quantization import QuantizerRole
 from ..constants import DType
-from .quantization_recipes_base import mxfp8_quantizer_factory, nvfp4_quantizer_factory
+from .quantization_factory_base import mxfp8_quantizer_factory, nvfp4_quantizer_factory
 
 
 def mxfp8_fwd_nvfp4_bwd_quantizer_factory(
@@ -145,7 +143,7 @@ def nvfp4_linear_fp8_dpa_factory(
 
         from transformer_engine.common.recipe import CustomRecipe
         from transformer_engine.pytorch.quantization import autocast
-        from transformer_engine.pytorch.custom_recipes.quantization_factory_examples import (
+        from transformer_engine.pytorch.custom_recipes.quantization_factory_zoo import (
             nvfp4_linear_fp8_dpa_factory,
         )
 
@@ -228,7 +226,7 @@ def nvfp4_linear_mxfp8_dpa_factory(
 
         from transformer_engine.common.recipe import CustomRecipe
         from transformer_engine.pytorch.quantization import autocast
-        from transformer_engine.pytorch.custom_recipes.quantization_factory_examples import (
+        from transformer_engine.pytorch.custom_recipes.quantization_factory_zoo import (
             nvfp4_linear_mxfp8_dpa_factory,
         )
 
@@ -256,19 +254,6 @@ def nvfp4_linear_mxfp8_dpa_factory(
         return mxfp8_quantizer_factory(role)
 
     return nvfp4_quantizer_factory(role)
-
-
-def high_precision_factory(
-    role: Optional[QuantizerRole],  # pylint: disable=unused-argument
-):
-    """Quantizer factory: run all GEMMs in high precision.
-
-    Dispatch logic:
-        * every role -> ``IdentityQuantizer`` (no quantization)
-    """
-    from transformer_engine.pytorch.tensor.identity_tensor import IdentityQuantizer
-
-    return IdentityQuantizer()
 
 
 def fwd_high_precision_bwd_mxfp8_factory(
