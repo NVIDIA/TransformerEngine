@@ -20,7 +20,6 @@ from ...utils import clear_tensor_data
 from ..op import BasicOperation, OperationContext
 from .._common import maybe_dequantize
 
-
 __all__ = [
     "GELU",
     "GEGLU",

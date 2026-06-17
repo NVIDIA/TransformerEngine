@@ -11,7 +11,6 @@ import torch
 import nvdlfw_inspect.api as debug_api
 from nvdlfw_inspect.registry import Registry, api_method
 
-
 import transformer_engine_torch as tex
 from transformer_engine import te_device_type
 from transformer_engine.pytorch.tensor import Quantizer

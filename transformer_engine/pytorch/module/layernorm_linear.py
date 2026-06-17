@@ -78,7 +78,6 @@ from ..cpp_extensions import (
     general_gemm,
 )
 
-
 __all__ = ["LayerNormLinear"]
 
 

@@ -224,6 +224,7 @@ class RMSNorm(BasicOperation):
         dy = maybe_dequantize(grad_output.contiguous(), dtype).view(x.size())
         w = maybe_dequantize(self.weight, dtype).view((inner_dim,))
 
+        # Compute RMSNorm backward pass
         dx, dw = rmsnorm_bwd(
             dy,
             x,
