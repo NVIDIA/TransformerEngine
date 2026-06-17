@@ -147,9 +147,9 @@ def test_weight_swizzle_cache_numerics(kind, microbatches, shape):
     # The swizzled flag must be set & persisted on every cached weight workspace
     # (one per expert for GroupedLinear, fc1+fc2 for LayerNormMLP, else one).
     workspaces = opt._fp8_workspaces
-    assert len(workspaces) == _expected_num_workspaces(kind, num_gemms), (
-        f"unexpected cached weight workspace count for {kind}: {len(workspaces)}"
-    )
+    assert len(workspaces) == _expected_num_workspaces(
+        kind, num_gemms
+    ), f"unexpected cached weight workspace count for {kind}: {len(workspaces)}"
     for name, ws in workspaces.items():
         assert getattr(ws, "_with_gemm_swizzled_scales", False) is True, (
             f"cached weight workspace {name!r} scales were not pre-swizzled "
