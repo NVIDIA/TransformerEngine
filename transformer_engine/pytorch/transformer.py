@@ -10,6 +10,7 @@ from typing import Any, Callable, List, Optional, Tuple, Union
 
 import torch
 
+from transformer_engine import te_device_type
 from transformer_engine.pytorch.torch_version import torch_version
 from transformer_engine.pytorch.module import LayerNormMLP, LayerNorm, RMSNorm
 from transformer_engine.pytorch.attention.multi_head_attention import MultiheadAttention
@@ -343,7 +344,7 @@ class TransformerLayer(torch.nn.Module):
         activation: str = "gelu",
         activation_params: Optional[dict] = None,
         normalization: str = "LayerNorm",
-        device: Union[torch.device, str] = "cuda",
+        device: Union[torch.device, str] = te_device_type(),
         attn_input_format: str = "sbhd",
         name: str = None,
         qk_norm_type: Optional[str] = None,

@@ -9,8 +9,9 @@ from collections.abc import Iterable
 from typing import Any, Optional
 
 import torch
-
 import transformer_engine_torch as tex
+
+from transformer_engine import te_device_type
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...tensor import Float8CurrentScalingQuantizer, Quantizer
 from ...utils import clear_tensor_data
@@ -90,7 +91,7 @@ class SwiGLU(BasicOperation):
         # Compute dtype
         dtype: torch.dtype
         if torch.is_autocast_enabled():
-            dtype = torch.get_autocast_dtype("cuda")
+            dtype = torch.get_autocast_dtype(te_device_type())
         else:
             dtype = input_.dtype
         if dtype not in (torch.float32, torch.float16, torch.bfloat16):
@@ -242,7 +243,7 @@ class ClampedSwiGLU(BasicOperation):
         # Compute dtype
         dtype: torch.dtype
         if torch.is_autocast_enabled():
-            dtype = torch.get_autocast_dtype("cuda")
+            dtype = torch.get_autocast_dtype(te_device_type())
         else:
             dtype = input_.dtype
         if dtype not in (torch.float32, torch.float16, torch.bfloat16):
@@ -400,7 +401,7 @@ class ScaledSwiGLU(BasicOperation):
 
         # Determine compute dtype
         if torch.is_autocast_enabled():
-            dtype = torch.get_autocast_dtype("cuda")
+            dtype = torch.get_autocast_dtype(te_device_type())
         elif isinstance(input_, torch.Tensor):
             dtype = input_.dtype
         else:

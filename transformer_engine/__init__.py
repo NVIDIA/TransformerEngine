@@ -10,6 +10,43 @@ import os
 from importlib import metadata
 import transformer_engine.common
 
+import torch
+
+# Public, simple global (kept for backward compatibility).
+TE_DEVICE_TYPE = "cuda"
+TE_PLATFORM = torch.cuda
+
+
+def te_device_type(default: str = "cuda") -> str:
+    try:
+        return TE_DEVICE_TYPE
+    except Exception:
+        return default
+
+
+def te_platform(default=torch.cuda):
+    try:
+        return TE_PLATFORM
+    except Exception:
+        return default
+
+
+# Plugin system: if NVTE_ENABLE_PLUGIN=1, replace cuda hardcodes and torch.cuda apis
+if os.environ.get("NVTE_ENABLE_PLUGIN", "0") == "1":
+    try:
+        from transformer_engine_plugin_fl.patches import apply_patches
+
+        apply_patches()
+    except Exception as e:
+        import warnings
+
+        warnings.warn(
+            f"NVTE_ENABLE_PLUGIN=1 but plugin patch apply failed: {e}",
+            RuntimeWarning,
+            stacklevel=1,
+        )
+
+
 try:
     from . import pytorch
 except ImportError:
