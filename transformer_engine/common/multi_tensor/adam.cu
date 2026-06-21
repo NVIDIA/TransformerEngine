@@ -382,7 +382,7 @@ struct AdamFunctor {
 
 template <typename T, typename FULL_T, typename MOMENT_T>
 struct AdamCapturableFunctor {
-  __device__ __forceinline__ void operator()(int chunk_size, volatile int *noop_gmem,
+  __device__ __forceinline__ void operator()(int64_t chunk_size, volatile int *noop_gmem,
                                              TensorListMetadata<4> &tl,  // NOLINT(*)
                                              const float beta1, const float beta2, const int *step,
                                              const int bias_correction, const float epsilon,
@@ -402,7 +402,7 @@ struct AdamCapturableFunctor {
     // int tensor_num = tl.start_tensor_this_launch + tensor_loc;
 
     int chunk_idx = tl.block_to_chunk[blockIdx.x];
-    int n = tl.sizes[tensor_loc];
+    int64_t n = tl.sizes[tensor_loc];
 
     T *g = reinterpret_cast<T *>(tl.addresses[0][tensor_loc]);
     g += chunk_idx * chunk_size;
@@ -476,7 +476,7 @@ struct AdamCapturableFunctor {
 
 template <typename T, typename FULL_T, typename MOMENT_T>
 struct AdamCapturableMasterFunctor {
-  __device__ __forceinline__ void operator()(int chunk_size, volatile int *noop_gmem,
+  __device__ __forceinline__ void operator()(int64_t chunk_size, volatile int *noop_gmem,
                                              TensorListMetadata<5> &tl,  // NOLINT(*)
                                              const float beta1, const float beta2, const int *step,
                                              const int bias_correction, const float epsilon,
@@ -496,7 +496,7 @@ struct AdamCapturableMasterFunctor {
     // int tensor_num = tl.start_tensor_this_launch + tensor_loc;
 
     int chunk_idx = tl.block_to_chunk[blockIdx.x];
-    int n = tl.sizes[tensor_loc];
+    int64_t n = tl.sizes[tensor_loc];
 
     T *g = reinterpret_cast<T *>(tl.addresses[0][tensor_loc]);
     g += chunk_idx * chunk_size;
