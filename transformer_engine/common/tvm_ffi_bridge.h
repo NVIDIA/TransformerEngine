@@ -240,9 +240,9 @@ class TVMFFICentral {
   TVMFFICentral &operator=(TVMFFICentral &&) = delete;
 
   static bool is_cutedsl_backend_enabled() {
-    // On by default; set NVTE_ENABLE_CUTEDSL_QUANT_BACKEND=0 to disable.
+    // Off by default; set NVTE_ENABLE_CUTEDSL_QUANT_BACKEND=1 to enable.
     const char *flag = std::getenv("NVTE_ENABLE_CUTEDSL_QUANT_BACKEND");
-    return flag == nullptr || flag[0] != '0';
+    return flag != nullptr && flag[0] != '0';
   }
 
   const bool enabled_;

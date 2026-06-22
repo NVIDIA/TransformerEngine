@@ -20,21 +20,25 @@
 #include "../core/common.cuh"  // dispatch::common::reduce_dbias
 
 namespace transformer_engine {
-namespace tvm_ffi_bridge {
+namespace cutedsl_backend {
+
+// Activation, te_dtype_to_str, activation_to_str, DLTensorWrapper, TVMFFICentral
+// all live in transformer_engine::tvm_ffi_bridge (tvm_ffi_bridge.h).
+using namespace tvm_ffi_bridge;
 
 struct MXFP8QuantConfig {
   static constexpr const char *kEntrypointName = "get_mxfp8_quantization_function";
 
-  DType dtype;
-  DType fp8_dtype;
-  bool rowwise;
-  bool colwise;
-  bool swizzled;
-  bool with_amax;
-  bool with_dbias = false;
-  bool with_dact = false;
-  bool with_act = false;
-  bool with_noop = false;
+  DType dtype; // The input format
+  DType fp8_dtype; // The fp8 output format
+  bool rowwise; // If quantize rowwisely
+  bool colwise; // If quantize columnwisely
+  bool swizzled; // If the scale output is used for cudnn's swizzled layout
+  bool with_amax; // If the kernel should return the amax
+  bool with_dbias = false; // If the dbias is computated (via the workspace tensor)
+  bool with_dact = false; // If an activation derivative operation is fused
+  bool with_act = false; // If an activation operation is fused
+  bool with_noop = false; // If a non-nullptr noop tensor is passed to the kernel
   Activation activation = Activation::kNone;
 
   std::string to_key() const {
@@ -73,7 +77,7 @@ template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &)>
 struct MXFP8QuantFused {
   static constexpr Activation activation = Activation::kNone;
-  // No fused op: plain quantize, or dbias-only cast (IS_DBIAS, no activation).
+  // No fused activation / activation derivative op: plain quantize
   static constexpr bool supported = (OP == nullptr) && !IS_DACT && !IS_ACT;
 };
 template <>
@@ -127,13 +131,9 @@ struct MXFP8QuantFused<IS_DBIAS, true, false, Empty, dsrelu<fp32, fp32>> {
   static constexpr bool supported = true;
 };
 
-}  // namespace tvm_ffi_bridge
-
-namespace quantize {
-
 // Signature mirrors mxfp8::quantize (input, act_input, noop, output, dbias,
 // workspace, stream). Returns false to fall back to the CUDA kernel.
-inline bool mxfp8_quantize_cutedsl(const tvm_ffi_bridge::MXFP8QuantConfig &config,
+inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config,
                                    const Tensor *input_tensor, const Tensor *act_input_tensor,
                                    const Tensor *noop_tensor, Tensor *output_tensor,
                                    Tensor *dbias_tensor, Tensor *workspace_tensor,
@@ -169,6 +169,7 @@ inline bool mxfp8_quantize_cutedsl(const tvm_ffi_bridge::MXFP8QuantConfig &confi
   // 128x128 GEMM tile. The kernel writes only the meaningful scale region, so
   // cuBLAS would otherwise read uninitialized padding. Mirrors the CUDA launcher
   // in quantize_mxfp8.cuh (the kernel itself does not pad the scales).
+
   // TODO: move this into the CuTeDSL host code so the padding is handled inside
   // the kernel launch — this CUDA-driver memset is an implementation detail that
   // doesn't belong in the dispatcher (blocked on calling the driver API there).
@@ -193,19 +194,16 @@ inline bool mxfp8_quantize_cutedsl(const tvm_ffi_bridge::MXFP8QuantConfig &confi
   tvm_ffi_bridge::DLTensorWrapper mS_col(output_tensor->columnwise_scale_inv);
   tvm_ffi_bridge::DLTensorWrapper mAmax(output_tensor->amax);
   tvm_ffi_bridge::DLTensorWrapper mNoop(noop_tensor->data);
-  // Backward tensors: null wrapper (None) unless present, no allocation when absent.
-  // mDbias stays None: the kernel writes per-block partials into the workspace, and
-  // the final dbias is produced by a separate reduction (not by this kernel).
-  tvm_ffi_bridge::DLTensorWrapper mActInput, mDbias, mWorkspace;
+  // Backward tensors: if the passed tensor pointer is nullptr, they will be empty DLTensorWrapper with null data pointer too
+  tvm_ffi_bridge::DLTensorWrapper mActInput, mWorkspace;
+  // If these tensors are not nullptr, wrap them as DLTensorWrappers with real data
   if (act_input_tensor != nullptr) mActInput = tvm_ffi_bridge::DLTensorWrapper(act_input_tensor->data);
   if (workspace_tensor != nullptr) mWorkspace = tvm_ffi_bridge::DLTensorWrapper(workspace_tensor->data);
   // stream is a tvm-ffi opaque "handle"; pass the CUDA stream as void*.
   (*mxfp8_quant_func_opt)(&mX, &mO_row, &mS_row, &mO_col, &mS_col, &mAmax, &mNoop,
-                          &mActInput, &mDbias, &mWorkspace, static_cast<void *>(stream));
+                          &mActInput, &mWorkspace, static_cast<void *>(stream));
 
-  // dbias: the kernel wrote per-row-block partials into the workspace; reduce them
-  // over the row-blocks into the final dbias[N]. Mirrors mxfp8::quantize, which
-  // launches common::reduce_dbias after its quantize kernel.
+  // If WITH_DBIAS, reduce the workspace partial dbias in CUDA C++ for now.
   if (config.with_dbias) {
     const size_t blocks_Y = (flat_m + 63) / 64;  // ceil(M/64) = workspace rows
     const float *workspace_ptr = reinterpret_cast<const float *>(workspace_tensor->data.dptr);
@@ -223,12 +221,12 @@ bool mxfp8_quantize_cutedsl(const Tensor *input_tensor, const Tensor *act_input_
                             const Tensor *noop_tensor, Tensor *output_tensor,
                             Tensor *dbias_tensor, Tensor *workspace_tensor,
                             cudaStream_t stream) {
-  using Fused = tvm_ffi_bridge::MXFP8QuantFused<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>;
+  using Fused = MXFP8QuantFused<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>;
   if constexpr (!Fused::supported) {
     return false;
   } else {
     const bool with_noop = noop_tensor != nullptr && noop_tensor->data.dptr != nullptr;
-    const tvm_ffi_bridge::MXFP8QuantConfig config{
+    const MXFP8QuantConfig config{
         /*dtype=*/input_tensor->dtype(),
         /*fp8_dtype=*/output_tensor->dtype(),
         /*rowwise=*/output_tensor->has_data(),
@@ -245,7 +243,7 @@ bool mxfp8_quantize_cutedsl(const Tensor *input_tensor, const Tensor *act_input_
   }
 }
 
-}  // namespace quantize
+}  // namespace cutedsl_backend
 }  // namespace transformer_engine
 
 #endif  // TRANSFORMER_ENGINE_COMMON_CAST_MXFP8_QUANTIZE_MXFP8_CUTEDSL_CUH_
