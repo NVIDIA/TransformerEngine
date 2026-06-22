@@ -607,12 +607,24 @@ def _linear_forward_impl(
         if is_fsdp2 and weightmat is not weight:
             wt_save = None
 
-        # Dedup save slots that alias forward inputs; ``_linear_setup_ctx``
-        # rebuilds the refs from ``inp`` / ``weight`` / ``bias``.
-        # Needed for torch.compile to work correctly.
+        # Dedup save slots that alias forward inputs or other op returns;
+        # ``_linear_setup_ctx`` rebuilds the refs. Needed because a custom op may
+        # not return a tensor that aliases an input or another return: the cached
+        # FP8 weight is the same tensor as ``new_weight_workspace`` (a return, on a
+        # cache miss) or ``weight_workspace`` (an input, on a cache hit).
+        if wt_save is None:
+            wt_alias = None
+        elif wt_save is weight:
+            wt_alias = "weight"
+        elif new_weight_workspace is not None and wt_save is new_weight_workspace:
+            wt_alias = "new_workspace"
+        elif args.weight_workspace is not None and wt_save is args.weight_workspace:
+            wt_alias = "weight_workspace"
+        else:
+            wt_alias = None
         saved_tensor_aliases = (
             "inp" if saved_inputmat is inp else None,
-            "weight" if wt_save is weight else None,
+            wt_alias,
             "weight",  # ``saved_weight`` slot is always the weight parameter
             "bias" if bias is not None else None,
         )
@@ -798,13 +810,20 @@ def _linear_forward_impl_fake(
                     shape=tuple(inp.shape), dtype=activation_dtype, device=inp.device
                 )
 
-        # Slot 1 -- ``wt_save``.
+        # Slot 1 -- ``wt_save``. Mirror the real impl's alias dedup: the cached
+        # FP8 weight is shared with ``new_weight_workspace`` (a return, on a cache
+        # miss) or the ``weight_workspace`` input (on a cache hit), so it is
+        # reconstructed in ``_linear_setup_ctx`` rather than saved twice.
         wt_alias = None
         wt_save = None
         if weightmat_aliases_weight:
             wt_alias = "weight"
         elif args.is_fsdp2:
             pass  # FSDP2 re-quantizes from the gathered weight in backward.
+        elif weightmat_is_storage and new_weight_workspace is not None:
+            wt_alias = "new_workspace"
+        elif weightmat_is_storage and args.weight_workspace is not None:
+            wt_alias = "weight_workspace"
         elif weightmat_is_storage:
             wt_save = weightmat
         else:
@@ -832,7 +851,7 @@ def _linear_forward_impl_fake(
 def _linear_setup_ctx(
     bwd_args: LinearBwdArgs,
     fwd_args: LinearFwdArgs,
-    out: torch.Tensor,
+    fwd_outputs: Tuple[Any, ...],
     ctx_attrs: Dict,
     tensors_to_save_from_forward: Tuple[Any, ...],
 ) -> Tuple[Any, ...]:
@@ -845,7 +864,8 @@ def _linear_setup_ctx(
     for FSDP2 re-quantization) without having to mutate the structured
     metadata returned by ``prepare_for_saving``.
     """
-    del out  # No-op; kept for symmetry with the compile-time helper signature.
+    # ``fwd_outputs`` are the op's user outputs ``(out, new_weight_workspace)``;
+    # only ``new_weight_workspace`` is needed here, to rebuild the deduped weight.
 
     inp = fwd_args.inp
     weight = fwd_args.weight
@@ -935,6 +955,10 @@ def _linear_setup_ctx(
         saved_inputmat = inp
     if wt_save_alias == "weight":
         wt_save = weight
+    elif wt_save_alias == "new_workspace":
+        wt_save = fwd_outputs[1]
+    elif wt_save_alias == "weight_workspace":
+        wt_save = fwd_args.weight_workspace
     if saved_weight_alias == "weight":
         saved_weight = weight
     if bias_alias == "bias":
@@ -1619,7 +1643,7 @@ class _Linear(torch.autograd.Function):
             tensors_to_save_from_setup = _linear_setup_ctx(
                 bwd_args,
                 fwd_args,
-                out,
+                (out, new_weight_workspace),
                 ctx_attrs,
                 tensors_to_save_from_forward,
             )
