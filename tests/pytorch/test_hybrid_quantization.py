@@ -29,6 +29,7 @@ from transformer_engine.pytorch import (
     NVFP4Quantizer,
     HybridQuantizer,
     HybridQuantizedTensor,
+    IdentityQuantizer,
     HybridQuantizedTensorStorage,
     Float8Tensor,
     Float8TensorStorage,
@@ -53,9 +54,19 @@ requires_fp8 = pytest.mark.skipif(
     reason=f"FP8: {reason_for_no_fp8}",
 )
 
+requires_nvfp4 = pytest.mark.skipif(
+    not nvfp4_available,
+    reason=f"NVFP4: {reason_for_no_nvfp4}",
+)
+
 requires_fp8_and_nvfp4 = pytest.mark.skipif(
     not (fp8_available and nvfp4_available),
     reason=f"FP8: {reason_for_no_fp8}; NVFP4: {reason_for_no_nvfp4}",
+)
+
+requires_mxfp8_and_nvfp4 = pytest.mark.skipif(
+    not (mxfp8_available and nvfp4_available),
+    reason=f"MXFP8: {reason_for_no_mxfp8}; NVFP4: {reason_for_no_nvfp4}",
 )
 
 
@@ -90,6 +101,164 @@ def _make_hybrid_quantizer_fp4_row_fp8_col():
         rowwise_quantizer=_make_nvfp4_quantizer(),
         columnwise_quantizer=_make_fp8_quantizer(),
     )
+
+
+@requires_mxfp8_and_nvfp4
+class TestComposerStyleFactory:
+    """Composer 2-style row-scaled NVFP4 forward + MXFP8 backward dispatch."""
+
+    @staticmethod
+    def _factory(role):
+        from transformer_engine.pytorch.custom_recipes.quantization_factory_zoo import (
+            nvfp4_row_scaled_fwd_mxfp8_bwd_quantizer_factory,
+        )
+
+        return nvfp4_row_scaled_fwd_mxfp8_bwd_quantizer_factory(role)
+
+    @pytest.mark.parametrize(
+        "tensor_type,row_scaled",
+        [("input", True), ("weight", False)],
+    )
+    def test_grouped_linear_forward_roles_use_nvfp4_rowwise_mxfp8_columnwise(
+        self, tensor_type, row_scaled
+    ):
+        from transformer_engine.pytorch.quantization import QuantizerRole
+
+        quantizer = self._factory(
+            QuantizerRole(module_type="grouped_linear", tensor_type=tensor_type)
+        )
+
+        assert isinstance(quantizer, HybridQuantizer)
+        assert quantizer.columnwise_source == "original"
+        assert isinstance(quantizer.rowwise_quantizer, NVFP4Quantizer)
+        assert isinstance(quantizer.columnwise_quantizer, MXFP8Quantizer)
+        assert quantizer.rowwise_quantizer.row_scaled_nvfp4 is row_scaled
+        assert quantizer.rowwise_quantizer.with_rht is False
+        assert quantizer.rowwise_quantizer.with_post_rht_amax is False
+        assert quantizer.rowwise_quantizer.with_2d_quantization is False
+        assert quantizer.rowwise_quantizer.stochastic_rounding is False
+        assert quantizer.rowwise_quantizer.rowwise_usage is True
+        assert quantizer.rowwise_quantizer.columnwise_usage is False
+        assert quantizer.columnwise_quantizer.rowwise_usage is False
+        assert quantizer.columnwise_quantizer.columnwise_usage is True
+
+    @pytest.mark.parametrize("tensor_type", ["input", "output", "weight"])
+    def test_regular_linear_forward_roles_fall_back_to_mxfp8(self, tensor_type):
+        from transformer_engine.pytorch.quantization import QuantizerRole
+
+        quantizer = self._factory(
+            QuantizerRole(module_type="linear", tensor_type=tensor_type)
+        )
+
+        assert isinstance(quantizer, MXFP8Quantizer)
+
+    @pytest.mark.parametrize("module_type", ["linear", "grouped_linear"])
+    @pytest.mark.parametrize("tensor_type", ["grad_output", "grad_input"])
+    def test_backward_roles_use_mxfp8(self, module_type, tensor_type):
+        from transformer_engine.pytorch.quantization import QuantizerRole
+
+        quantizer = self._factory(QuantizerRole(
+            module_type=module_type, tensor_type=tensor_type
+        ))
+
+        assert isinstance(quantizer, MXFP8Quantizer)
+
+    def test_non_linear_roles_fall_back_to_mxfp8(self):
+        from transformer_engine.pytorch.quantization import QuantizerRole
+
+        quantizer = self._factory(QuantizerRole(module_type="dpa", tensor_type="qkv"))
+
+        assert isinstance(quantizer, MXFP8Quantizer)
+
+
+@requires_nvfp4
+class TestNVFP4WeightDoubleQuantFactory:
+    """Base NVFP4 recipe with W.T sourced from dequantized 1D W."""
+
+    @staticmethod
+    def _factory(role):
+        from transformer_engine.pytorch.custom_recipes.quantization_factory_zoo import (
+            nvfp4_1d_double_quantized_weight_quantizer_factory,
+        )
+
+        return nvfp4_1d_double_quantized_weight_quantizer_factory(role)
+
+    @staticmethod
+    def _assert_plain_1d_nvfp4(quantizer):
+        assert isinstance(quantizer, NVFP4Quantizer)
+        assert quantizer.row_scaled_nvfp4 is False
+        assert quantizer.with_rht is False
+        assert quantizer.with_post_rht_amax is False
+        assert quantizer.with_2d_quantization is False
+        assert quantizer.stochastic_rounding is False
+
+    @pytest.mark.parametrize("module_type", ["linear", "grouped_linear"])
+    def test_weight_roles_use_rowwise_dequantized_source(self, module_type):
+        from transformer_engine.pytorch.quantization import QuantizerRole
+
+        quantizer = self._factory(
+            QuantizerRole(module_type=module_type, tensor_type="weight")
+        )
+
+        assert isinstance(quantizer, HybridQuantizer)
+        assert quantizer.columnwise_source == "rowwise_dequantized"
+        self._assert_plain_1d_nvfp4(quantizer.rowwise_quantizer)
+        self._assert_plain_1d_nvfp4(quantizer.columnwise_quantizer)
+        assert quantizer.rowwise_quantizer.rowwise_usage is True
+        assert quantizer.rowwise_quantizer.columnwise_usage is False
+        assert quantizer.columnwise_quantizer.rowwise_usage is False
+        assert quantizer.columnwise_quantizer.columnwise_usage is True
+
+    @staticmethod
+    def _assert_matches_base_nvfp4_recipe(quantizer, expected):
+        assert isinstance(quantizer, NVFP4Quantizer)
+        assert isinstance(expected, NVFP4Quantizer)
+        assert quantizer.dtype == expected.dtype
+        assert quantizer.rowwise_usage == expected.rowwise_usage
+        assert quantizer.columnwise_usage == expected.columnwise_usage
+        assert quantizer.with_rht == expected.with_rht
+        assert quantizer.with_post_rht_amax == expected.with_post_rht_amax
+        assert quantizer.with_2d_quantization == expected.with_2d_quantization
+        assert quantizer.stochastic_rounding == expected.stochastic_rounding
+        assert quantizer.row_scaled_nvfp4 == expected.row_scaled_nvfp4
+
+    @pytest.mark.parametrize("module_type", ["linear", "grouped_linear"])
+    @pytest.mark.parametrize("tensor_type", ["input", "output", "grad_output", "grad_input"])
+    def test_non_weight_linear_roles_match_base_nvfp4_recipe(self, module_type, tensor_type):
+        from transformer_engine.pytorch.quantization import QuantizerRole
+        from transformer_engine.pytorch.custom_recipes.quantization_factory_base import (
+            nvfp4_quantizer_factory,
+        )
+
+        role = QuantizerRole(module_type=module_type, tensor_type=tensor_type)
+        quantizer = self._factory(role)
+        expected = nvfp4_quantizer_factory(role)
+
+        self._assert_matches_base_nvfp4_recipe(quantizer, expected)
+
+    def test_non_linear_roles_match_base_nvfp4_recipe(self):
+        from transformer_engine.pytorch.quantization import QuantizerRole
+        from transformer_engine.pytorch.custom_recipes.quantization_factory_base import (
+            nvfp4_quantizer_factory,
+        )
+
+        role = QuantizerRole(module_type="dpa", tensor_type="qkv")
+        quantizer = self._factory(role)
+        expected = nvfp4_quantizer_factory(role)
+
+        self._assert_matches_base_nvfp4_recipe(quantizer, expected)
+
+    def test_weight_quantizer_produces_both_nvfp4_storages(self):
+        from transformer_engine.pytorch.quantization import QuantizerRole
+
+        torch.manual_seed(2026)
+        src = torch.randn(128, 256, dtype=torch.bfloat16, device="cuda")
+        quantizer = self._factory(QuantizerRole(module_type="linear", tensor_type="weight"))
+
+        out = quantizer.quantize(src)
+
+        assert isinstance(out.rowwise_sub_storage, (NVFP4TensorStorage, NVFP4Tensor))
+        assert isinstance(out.columnwise_sub_storage, (NVFP4TensorStorage, NVFP4Tensor))
 
 
 @requires_fp8_and_nvfp4
@@ -178,6 +347,104 @@ class TestHybridQuantizerConstruction:
             columnwise_quantizer=_make_nvfp4_quantizer(),
         )
         assert hq.supports_only_rowwise_all_gather() is True
+
+
+@requires_fp8
+class TestHybridColumnwiseSource:
+    """Test columnwise source provenance in HybridQuantizer."""
+
+    @pytest.fixture
+    def input_tensor(self):
+        torch.manual_seed(90210)
+        return torch.randn(128, 256, dtype=torch.bfloat16, device="cuda")
+
+    @staticmethod
+    def _make_quantizer(columnwise_source="original"):
+        return HybridQuantizer(
+            rowwise_quantizer=_make_fp8_quantizer(),
+            columnwise_quantizer=IdentityQuantizer(),
+            columnwise_source=columnwise_source,
+        )
+
+    def test_default_columnwise_source_original(self, input_tensor):
+        hq = self._make_quantizer()
+        out = hq.quantize(input_tensor)
+
+        assert hq.columnwise_source == "original"
+        torch.testing.assert_close(
+            out.columnwise_sub_storage.dequantize(), input_tensor, rtol=0.0, atol=0.0
+        )
+
+    def test_invalid_columnwise_source_raises(self):
+        with pytest.raises(ValueError, match="columnwise_source"):
+            HybridQuantizer(
+                rowwise_quantizer=IdentityQuantizer(),
+                columnwise_quantizer=IdentityQuantizer(),
+                columnwise_source="dequantized",
+            )
+
+    def test_copy_preserves_columnwise_source(self):
+        hq = self._make_quantizer(columnwise_source="rowwise_dequantized")
+        hq.set_usage(rowwise=False, columnwise=True)
+
+        copied = hq.copy()
+
+        assert copied.columnwise_source == "rowwise_dequantized"
+        assert copied.rowwise_usage is False
+        assert copied.columnwise_usage is True
+
+    def test_rowwise_dequantized_identity_columnwise_matches_rowwise(self, input_tensor):
+        hq = self._make_quantizer(columnwise_source="rowwise_dequantized")
+        out = hq.quantize(input_tensor)
+
+        rowwise_dq = out.rowwise_sub_storage.dequantize()
+        columnwise_dq = out.columnwise_sub_storage.dequantize()
+        torch.testing.assert_close(columnwise_dq, rowwise_dq, rtol=0.0, atol=0.0)
+
+    def test_columnwise_only_uses_transient_rowwise_source(self, input_tensor):
+        hq = self._make_quantizer(columnwise_source="rowwise_dequantized")
+        hq.set_usage(rowwise=False, columnwise=True)
+        expected = _make_fp8_quantizer().quantize(input_tensor).dequantize()
+
+        out = hq.quantize(input_tensor)
+
+        assert out.rowwise_sub_storage is None
+        assert out.columnwise_sub_storage is not None
+        torch.testing.assert_close(
+            out.columnwise_sub_storage.dequantize(), expected, rtol=0.0, atol=0.0
+        )
+
+    def test_update_quantized_columnwise_only_uses_transient_rowwise_source(self, input_tensor):
+        hq = self._make_quantizer(columnwise_source="rowwise_dequantized")
+        dst = hq.quantize(input_tensor)
+        rowwise_before = dst.rowwise_sub_storage.dequantize().clone()
+        new_src = torch.randn_like(input_tensor) * 8
+        expected = _make_fp8_quantizer().quantize(new_src).dequantize()
+
+        hq.set_usage(rowwise=False, columnwise=True)
+        hq.update_quantized(new_src, dst)
+
+        torch.testing.assert_close(
+            dst.rowwise_sub_storage.dequantize(), rowwise_before, rtol=0.0, atol=0.0
+        )
+        torch.testing.assert_close(
+            dst.columnwise_sub_storage.dequantize(), expected, rtol=0.0, atol=0.0
+        )
+
+    def test_update_quantized_uses_updated_rowwise_storage(self, input_tensor):
+        hq = self._make_quantizer(columnwise_source="rowwise_dequantized")
+        dst = hq.quantize(input_tensor)
+        new_src = torch.randn_like(input_tensor) * 8
+
+        hq.set_usage(rowwise=True, columnwise=True)
+        hq.update_quantized(new_src, dst)
+
+        torch.testing.assert_close(
+            dst.columnwise_sub_storage.dequantize(),
+            dst.rowwise_sub_storage.dequantize(),
+            rtol=0.0,
+            atol=0.0,
+        )
 
 
 @requires_fp8_and_nvfp4

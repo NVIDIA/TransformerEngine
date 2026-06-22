@@ -5,7 +5,7 @@
 """Tensor class with hybrid quantized data (different formats for rowwise vs columnwise)"""
 
 from __future__ import annotations
-from typing import Any, Dict, Iterable, Optional, Tuple
+from typing import Any, Dict, Iterable, Literal, Optional, Tuple
 
 import torch
 
@@ -28,6 +28,11 @@ class HybridQuantizer(Quantizer):
         Quantizer for the rowwise direction (e.g. MXFP8Quantizer).
     columnwise_quantizer : Quantizer
         Quantizer for the columnwise direction (e.g. NVFP4Quantizer).
+    columnwise_source : {"original", "rowwise_dequantized"}, default = "original"
+        Source tensor for columnwise quantization. ``"original"`` quantizes
+        columnwise directly from the input tensor. ``"rowwise_dequantized"``
+        quantizes rowwise first, dequantizes the rowwise result, then uses that
+        value as the columnwise source.
 
     Notes
     -----
@@ -42,16 +47,31 @@ class HybridQuantizer(Quantizer):
     ownership tracking, both of which are more intrusive, so only the direct
     rowwise/columnwise aliasing case is enforced.
 
+    Example
+    -------
+    MXFP8 forward plus high-precision backward from the rowwise-dequantized
+    forward value can be expressed as::
+
+        HybridQuantizer(
+            rowwise_quantizer=mxfp8_quantizer,
+            columnwise_quantizer=IdentityQuantizer(),
+            columnwise_source="rowwise_dequantized",
+        )
+
     """
+
+    _COLUMNWISE_SOURCES = ("original", "rowwise_dequantized")
 
     rowwise_quantizer: Quantizer
     columnwise_quantizer: Quantizer
+    columnwise_source: Literal["original", "rowwise_dequantized"]
 
     def __init__(
         self,
         *,
         rowwise_quantizer: Quantizer,
         columnwise_quantizer: Quantizer,
+        columnwise_source: Literal["original", "rowwise_dequantized"] = "original",
     ) -> None:
         super().__init__(rowwise=True, columnwise=True)
         from transformer_engine.pytorch.quantization import QuantizerRequest  # local import
@@ -82,18 +102,35 @@ class HybridQuantizer(Quantizer):
                 " instances. If both directions need shared state, construct two"
                 " quantizer objects that reference the same shared state."
             )
+        if columnwise_source not in self._COLUMNWISE_SOURCES:
+            raise ValueError(
+                "HybridQuantizer columnwise_source must be one of "
+                f"{self._COLUMNWISE_SOURCES}, got {columnwise_source!r}."
+            )
         self.rowwise_quantizer = rowwise_quantizer
         self.columnwise_quantizer = columnwise_quantizer
+        self.columnwise_source = columnwise_source
 
         # Pin each sub-quantizer to its designated direction
         self.rowwise_quantizer.set_usage(rowwise=True, columnwise=False)
         self.columnwise_quantizer.set_usage(rowwise=False, columnwise=True)
+
+    def __repr__(self):
+        return (
+            f"{self.__class__.__name__}("
+            f"rowwise_usage={self.rowwise_usage}, "
+            f"columnwise_usage={self.columnwise_usage}, "
+            f"columnwise_source={self.columnwise_source!r}, "
+            f"internal={self.internal}, "
+            ")"
+        )
 
     def copy(self) -> "HybridQuantizer":
         """Create a shallow copy, preserving parent and sub-quantizer state."""
         quantizer = HybridQuantizer(
             rowwise_quantizer=self.rowwise_quantizer.copy(),
             columnwise_quantizer=self.columnwise_quantizer.copy(),
+            columnwise_source=self.columnwise_source,
         )
         quantizer.set_usage(
             rowwise=self.rowwise_usage,
@@ -133,13 +170,25 @@ class HybridQuantizer(Quantizer):
             if hasattr(sub, "amax_reduction_group"):
                 sub.amax_reduction_group = value
 
+    def _columnwise_src_from_rowwise(
+        self,
+        tensor: torch.Tensor,
+        rowwise_result: Optional[Any],
+    ) -> torch.Tensor:
+        if rowwise_result is None:
+            rowwise_result = self.rowwise_quantizer.quantize(tensor)
+        return rowwise_result.dequantize()
+
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
         # Gate each sub-quantizer call on the parent usage flag. Sub-quantizers
         # are pinned to one direction in ``__init__``; the parent flag decides
         # whether to invoke them.
         rowwise_result = self.rowwise_quantizer.quantize(tensor) if self.rowwise_usage else None
+        columnwise_src = tensor
+        if self.columnwise_usage and self.columnwise_source == "rowwise_dequantized":
+            columnwise_src = self._columnwise_src_from_rowwise(tensor, rowwise_result)
         columnwise_result = (
-            self.columnwise_quantizer.quantize(tensor) if self.columnwise_usage else None
+            self.columnwise_quantizer.quantize(columnwise_src) if self.columnwise_usage else None
         )
 
         if self.internal:
@@ -213,11 +262,18 @@ class HybridQuantizer(Quantizer):
                 "HybridQuantizer can only update HybridQuantizedTensorStorage, got"
                 f" {type(dst).__name__}"
             )
+        rowwise_result_for_columnwise = None
         if self.rowwise_usage and dst._rowwise_storage is not None:
             self.rowwise_quantizer.update_quantized(src, dst._rowwise_storage, noop_flag=noop_flag)
+            rowwise_result_for_columnwise = dst._rowwise_storage
         if self.columnwise_usage and dst._columnwise_storage is not None:
+            columnwise_src = src
+            if self.columnwise_source == "rowwise_dequantized":
+                columnwise_src = self._columnwise_src_from_rowwise(
+                    src, rowwise_result_for_columnwise
+                )
             self.columnwise_quantizer.update_quantized(
-                src, dst._columnwise_storage, noop_flag=noop_flag
+                columnwise_src, dst._columnwise_storage, noop_flag=noop_flag
             )
         return dst
 

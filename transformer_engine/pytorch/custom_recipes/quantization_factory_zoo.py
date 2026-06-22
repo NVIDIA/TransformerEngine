@@ -6,9 +6,18 @@
 Quantizer factory zoo.
 
 A collection of composed/mixed-recipe factories built on top of the single-format
-building blocks.  They demonstrate how to use the ``CustomRecipe`` + ``qfactory`` 
+building blocks.  They demonstrate how to use the ``CustomRecipe`` + ``qfactory``
 interface to apply *different* quantization recipes to different
-module/tensor types/instances within the same model.
+module/tensor types/instances within the same model, and how to use
+``HybridQuantizer`` when rowwise and columnwise tensor directions should use
+different formats or sources.
+
+Organization:
+    * Linear / grouped-linear recipes: from conservative to more aggressive quantization.
+    * RL-oriented recipes: dequantized-backward and MoE-inspired recipes that
+      favor more precision or explicit source control in backward GEMMs.
+    * Linear + attention recipes: factories that also cover ``DotProductAttention``
+      roles and require ``CustomRecipe(..., fp8_dpa=True)``.
 
 .. warning::
 
@@ -54,6 +63,34 @@ from ..constants import DType
 from .quantization_factory_base import mxfp8_quantizer_factory, nvfp4_quantizer_factory
 
 
+# -----------------------------------------------------------------------------
+# Linear / GroupedLinear Recipes
+# -----------------------------------------------------------------------------
+
+
+def high_precision_fwd_mxfp8_bwd_quantizer_factory(
+    role: Optional[QuantizerRole],
+):
+    """Quantizer factory: high-precision forward, MXFP8 backward.
+
+    Dispatch logic:
+        * ``grad_output`` -> MXFP8 (E4M3, block-32)
+        * everything else -> ``Hybrid(rowwise=IdentityQuantizer, columnwise=MXFP8)``
+    """
+    from transformer_engine.pytorch.tensor.hybrid_tensor import HybridQuantizer
+    from transformer_engine.pytorch.tensor.identity_tensor import IdentityQuantizer
+
+    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+    if is_linear and role.tensor_type == "grad_output":
+        return mxfp8_quantizer_factory(role)
+
+    # fprop consumes rowwise high precision; dgrad / wgrad consume columnwise MXFP8.
+    return HybridQuantizer(
+        rowwise_quantizer=IdentityQuantizer(),
+        columnwise_quantizer=mxfp8_quantizer_factory(role),
+    )
+
+
 def mxfp8_fwd_nvfp4_bwd_quantizer_factory(
     role: Optional[QuantizerRole],
 ):
@@ -72,39 +109,221 @@ def mxfp8_fwd_nvfp4_bwd_quantizer_factory(
     from transformer_engine.pytorch.tensor.hybrid_tensor import HybridQuantizer
 
     is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
-    if is_linear and role.tensor_type in ("input", "weight", "output"):
+    if is_linear and role.tensor_type in ("input", "weight"):
         return HybridQuantizer(
             rowwise_quantizer=mxfp8_quantizer_factory(role),
             columnwise_quantizer=nvfp4_quantizer_factory(role),
         )
-    if is_linear and role.tensor_type in ("grad_output", "grad_input"):
+    if is_linear and role.tensor_type == "grad_output":
         return nvfp4_quantizer_factory(role)
     return mxfp8_quantizer_factory(role)
 
 
-def nvfp4_linear_mxfp8_grouped_linear_factory(
+def _plain_nvfp4_quantizer(*, row_scaled_nvfp4: bool = False):
+    """NVFP4 quantizer without RHT, stochastic rounding, or 2D scaling."""
+    from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
+
+    return NVFP4Quantizer(
+        fp4_dtype=DType.kFloat4E2M1,
+        rowwise=True,
+        columnwise=True,
+        with_rht=False,
+        with_post_rht_amax=False,
+        with_2d_quantization=False,
+        stochastic_rounding=False,
+        row_scaled_nvfp4=row_scaled_nvfp4,
+    )
+
+
+def nvfp4_1d_double_quantized_weight_quantizer_factory(
     role: Optional[QuantizerRole],
 ):
-    """Quantizer factory: NVFP4 for ``Linear``, MXFP8 for ``GroupedLinear``.
+    """Quantizer factory: NVFP4 recipe with 1D weight double quantization.
 
     Dispatch logic:
-        * ``role.module_type == "grouped_linear"`` -> MXFP8 (E4M3, block-32)
-        * everything else (``"linear"`` or unknown)  -> NVFP4 (E2M1)
+        * ``linear`` / ``grouped_linear`` ``weight`` ->
+          ``Hybrid(rowwise=plain 1D NVFP4, columnwise=plain 1D NVFP4,
+          columnwise_source="rowwise_dequantized")``
+        * everything else -> :func:`nvfp4_quantizer_factory`
 
-    NVFP4 settings follow the built-in ``NVFP4BlockScaling`` defaults:
-        * Weights: 2D quantization (16x16), no RHT, no stochastic rounding
-        * Inputs:  1D quantization, RHT enabled, no stochastic rounding
-        * Grads:   1D quantization, RHT enabled, stochastic rounding enabled
+    ``W.T`` is quantized from the dequantized forward/rowwise ``W`` value
+    instead of directly from the original high-precision weight. In
+    ``HybridQuantizer`` terms, that source choice is expressed with
+    ``columnwise_source="rowwise_dequantized"``.
+
+    All non-weight roles keep the standard NVFP4 factory behavior, including RHT
+    for inputs and stochastic rounding for gradients. The weight override uses
+    plain 1D NVFP4 in both directions: no RHT, stochastic rounding, row-scaled
+    activations, or 2D weight scaling.
     """
-    is_grouped_linear = role is not None and role.module_type == "grouped_linear"
+    from transformer_engine.pytorch.tensor.hybrid_tensor import HybridQuantizer
 
-    if is_grouped_linear:
-        return mxfp8_quantizer_factory(role)
-
+    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+    if is_linear and role.tensor_type == "weight":
+        return HybridQuantizer(
+            rowwise_quantizer=_plain_nvfp4_quantizer(),
+            columnwise_quantizer=_plain_nvfp4_quantizer(),
+            columnwise_source="rowwise_dequantized",
+        )
     return nvfp4_quantizer_factory(role)
 
 
-def nvfp4_linear_fp8_dpa_factory(
+# -----------------------------------------------------------------------------
+# RL-Oriented Recipes
+# -----------------------------------------------------------------------------
+
+
+def mxfp8_fwd_dequantized_bwd_quantizer_factory(
+    role: Optional[QuantizerRole],
+):
+    """Quantizer factory: MXFP8 forward, high-precision dequantized backward.
+
+    This expresses the linear/grouped-linear equivalent of
+    ``backward_override="dequantized"`` through per-direction quantizers:
+
+        * ``input`` / ``weight`` ->
+          ``Hybrid(rowwise=MXFP8, columnwise=Identity, columnwise_source="rowwise_dequantized")``
+        * ``grad_output`` -> ``IdentityQuantizer``
+        * everything else -> MXFP8
+
+    Backward GEMMs use high-precision operands dequantized from the MXFP8
+    forward payload, avoiding gradient quantization.
+
+    This recipe targets RL-style training use cases and is motivated by
+    NVIDIA/TransformerEngine#2644, where ``backward_override="dequantized"``
+    was introduced:
+    https://github.com/NVIDIA/TransformerEngine/pull/2644
+    """
+    from transformer_engine.pytorch.tensor.hybrid_tensor import HybridQuantizer
+    from transformer_engine.pytorch.tensor.identity_tensor import IdentityQuantizer
+
+    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+    if is_linear and role.tensor_type in ("input", "weight"):
+        return HybridQuantizer(
+            rowwise_quantizer=mxfp8_quantizer_factory(role),
+            columnwise_quantizer=IdentityQuantizer(),
+            columnwise_source="rowwise_dequantized",
+        )
+    if is_linear and role.tensor_type == "grad_output":
+        return IdentityQuantizer()
+    return mxfp8_quantizer_factory(role)
+
+
+def nvfp4_row_scaled_fwd_dequantized_bwd_quantizer_factory(
+    role: Optional[QuantizerRole],
+):
+    """Quantizer factory: row-scaled NVFP4 forward, dequantized backward.
+
+    This expresses the linear/grouped-linear equivalent of
+    ``NVFP4BlockScaling(row_scaled_activation=True,
+    backward_override="dequantized")`` through per-direction quantizers:
+
+        * ``input`` ->
+          ``Hybrid(rowwise=row-scaled NVFP4, columnwise=Identity,
+          columnwise_source="rowwise_dequantized")``
+        * ``weight`` ->
+          ``Hybrid(rowwise=plain NVFP4, columnwise=Identity,
+          columnwise_source="rowwise_dequantized")``
+        * ``grad_output`` -> ``IdentityQuantizer``
+        * everything else -> plain NVFP4
+
+    Row-scaled NVFP4 is fprop-only, so the forward quantizers avoid RHT,
+    stochastic rounding, and 2D scaling.
+
+    This recipe targets RL-style training use cases and builds on
+    NVIDIA/TransformerEngine#2931, which introduced row-scaled NVFP4:
+    https://github.com/NVIDIA/TransformerEngine/pull/2931
+    """
+    from transformer_engine.pytorch.tensor.hybrid_tensor import HybridQuantizer
+    from transformer_engine.pytorch.tensor.identity_tensor import IdentityQuantizer
+
+    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+    if is_linear and role.tensor_type == "input":
+        return HybridQuantizer(
+            rowwise_quantizer=_plain_nvfp4_quantizer(row_scaled_nvfp4=True),
+            columnwise_quantizer=IdentityQuantizer(),
+            columnwise_source="rowwise_dequantized",
+        )
+    if is_linear and role.tensor_type == "weight":
+        return HybridQuantizer(
+            rowwise_quantizer=_plain_nvfp4_quantizer(),
+            columnwise_quantizer=IdentityQuantizer(),
+            columnwise_source="rowwise_dequantized",
+        )
+    if is_linear and role.tensor_type == "grad_output":
+        return IdentityQuantizer()
+    return _plain_nvfp4_quantizer()
+
+
+def nvfp4_row_scaled_fwd_mxfp8_bwd_quantizer_factory(
+    role: Optional[QuantizerRole],
+):
+    """Quantizer factory: row-scaled NVFP4 forward, MXFP8 backward.
+
+    This RL-related recipe is inspired by the Composer 2 MoE grouped-GEMM
+    recipe described in arXiv:2603.24477.
+
+    Derived from the report: Composer 2 describes row-scaled NVFP4 for the MoE
+    forward pass and standard MXFP8 for the MoE backward pass. This factory maps
+    that format split onto ``GroupedLinear`` roles.
+
+    Assumed here: regular non-MoE ``Linear`` layers use the MXFP8 fallback. The
+    public report does not specify the precision used for non-MoE linears.
+
+    Dispatch logic:
+
+        * ``GroupedLinear`` ``input`` ->
+          ``Hybrid(rowwise=row-scaled NVFP4, columnwise=MXFP8)``
+        * ``GroupedLinear`` ``weight`` ->
+          ``Hybrid(rowwise=plain NVFP4, columnwise=MXFP8)``
+        * regular ``Linear`` -> MXFP8
+        * ``grad_output`` -> MXFP8
+        * everything else -> MXFP8
+
+    Row-scaled NVFP4 is fprop-only, so the forward NVFP4 quantizers avoid
+    RHT, stochastic rounding, and 2D scaling. By default, ``HybridQuantizer``
+    leaves ``columnwise_source="original"``, so MXFP8 backward operands are
+    quantized from the original high-precision tensor. The paper does not
+    specify how Composer materializes MXFP8 backward operands from saved
+    training tensors.
+
+    Users who want MXFP8 backward operands to include the forward NVFP4
+    quantization source can construct the same ``HybridQuantizer`` with
+    ``columnwise_source="rowwise_dequantized"``. That makes columnwise MXFP8
+    quantization consume the dequantized rowwise NVFP4 value instead of the
+    original high-precision tensor, which can be useful when the backward path
+    should reflect the forward quantization error (might be helpful for convergence).
+
+    Composer 2 Technical Report:
+    https://arxiv.org/abs/2603.24477
+    """
+    from transformer_engine.pytorch.tensor.hybrid_tensor import HybridQuantizer
+
+    is_grouped_linear = role is not None and role.module_type == "grouped_linear"
+    is_linear = role is not None and role.module_type == "linear"
+    if is_grouped_linear and role.tensor_type == "input":
+        return HybridQuantizer(
+            rowwise_quantizer=_plain_nvfp4_quantizer(row_scaled_nvfp4=True),
+            columnwise_quantizer=mxfp8_quantizer_factory(role),
+        )
+    if is_grouped_linear and role.tensor_type == "weight":
+        return HybridQuantizer(
+            rowwise_quantizer=_plain_nvfp4_quantizer(),
+            columnwise_quantizer=mxfp8_quantizer_factory(role),
+        )
+    if is_grouped_linear and role.tensor_type == "grad_output":
+        return mxfp8_quantizer_factory(role)
+    if is_linear:
+        return mxfp8_quantizer_factory(role)
+    return mxfp8_quantizer_factory(role)
+
+
+# -----------------------------------------------------------------------------
+# Linear + Attention Recipes
+# -----------------------------------------------------------------------------
+
+
+def nvfp4_linear_mixed_fp8_dpa_factory(
     role: Optional[QuantizerRole],
 ):
     """Quantizer factory: NVFP4 for ``Linear``, mixed FP8 for ``DotProductAttention``.
@@ -144,11 +363,11 @@ def nvfp4_linear_fp8_dpa_factory(
         from transformer_engine.common.recipe import CustomRecipe
         from transformer_engine.pytorch.quantization import autocast
         from transformer_engine.pytorch.custom_recipes.quantization_factory_zoo import (
-            nvfp4_linear_fp8_dpa_factory,
+            nvfp4_linear_mixed_fp8_dpa_factory,
         )
 
         recipe = CustomRecipe(
-            qfactory=nvfp4_linear_fp8_dpa_factory,
+            qfactory=nvfp4_linear_mixed_fp8_dpa_factory,
             fp8_dpa=True,
         )
         with autocast(recipe=recipe):
@@ -254,26 +473,3 @@ def nvfp4_linear_mxfp8_dpa_factory(
         return mxfp8_quantizer_factory(role)
 
     return nvfp4_quantizer_factory(role)
-
-
-def fwd_high_precision_bwd_mxfp8_factory(
-    role: Optional[QuantizerRole],
-):
-    """Quantizer factory: high-precision forward, MXFP8 backward.
-
-    Dispatch logic:
-        * ``grad_output`` / ``grad_input`` -> MXFP8 (E4M3, block-32)
-        * everything else -> ``Hybrid(rowwise=IdentityQuantizer, columnwise=MXFP8)``
-    """
-    from transformer_engine.pytorch.tensor.hybrid_tensor import HybridQuantizer
-    from transformer_engine.pytorch.tensor.identity_tensor import IdentityQuantizer
-
-    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
-    if is_linear and role.tensor_type in ("grad_output", "grad_input"):
-        return mxfp8_quantizer_factory(role)
-
-    # fprop consumes rowwise high precision; dgrad / wgrad consume columnwise MXFP8.
-    return HybridQuantizer(
-        rowwise_quantizer=IdentityQuantizer(),
-        columnwise_quantizer=mxfp8_quantizer_factory(role),
-    )

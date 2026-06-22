@@ -153,6 +153,18 @@ def fwd_fp8_bwd_hp_factory(role):
     )
 
 
+def fwd_fp8_bwd_rowwise_dequantized_hp_factory(role):
+    """FP8 forward, high-precision backward from dequantized fprop values."""
+    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+    if is_linear and role.tensor_type in ("grad_output", "grad_input"):
+        return IdentityQuantizer()
+    return HybridQuantizer(
+        rowwise_quantizer=_fp8_cs(tex.DType.kFloat8E4M3),
+        columnwise_quantizer=IdentityQuantizer(),
+        columnwise_source="rowwise_dequantized",
+    )
+
+
 def hybrid_all_identity_factory(role):
     """All directions high precision, expressed through the hybrid container.
 
@@ -1187,6 +1199,101 @@ class TestIdentityLinear:
         assert len(wg_id) == len(wg_bo)
         for g_id, g_bo in zip(wg_id, wg_bo):
             torch.testing.assert_close(g_id, g_bo, rtol=0.0, atol=0.0)
+
+    def test_identity_reproduces_backward_override_dequantized_bitwise(self):
+        """Per-direction Identity must reproduce ``backward_override=dequantized``.
+
+        Both runs quantize forward to the same FP8 values. The reference saves
+        rowwise fprop payloads and dequantizes them for high-precision backward;
+        the hybrid path stores Identity columnwise data sourced from the rowwise
+        dequantized value and uses Identity grad tensors.
+        """
+        ref, test = _make_linears(self.IN_F, self.OUT_F)
+        x = self._input()
+
+        y_bo, dx_bo, wg_bo = _fwd_bwd(
+            ref,
+            x,
+            recipe=CustomRecipe(qfactory=fp8_fwd_factory, backward_override="dequantized"),
+        )
+        y_id, dx_id, wg_id = _fwd_bwd(
+            test, x, recipe=CustomRecipe(qfactory=fwd_fp8_bwd_rowwise_dequantized_hp_factory)
+        )
+
+        torch.testing.assert_close(y_id, y_bo, rtol=0.0, atol=0.0)
+        torch.testing.assert_close(dx_id, dx_bo, rtol=0.0, atol=0.0)
+        assert len(wg_id) == len(wg_bo)
+        for g_id, g_bo in zip(wg_id, wg_bo):
+            torch.testing.assert_close(g_id, g_bo, rtol=0.0, atol=0.0)
+
+    @pytest.mark.skipif(not mxfp8_available, reason=f"MXFP8: {reason_for_no_mxfp8}")
+    def test_zoo_mxfp8_dequantized_bwd_matches_backward_override_bitwise(self):
+        """The zoo MXFP8-dequantized recipe should reproduce
+        ``backward_override=dequantized`` bitwise for Linear.
+        """
+        from transformer_engine.pytorch.custom_recipes.quantization_factory_zoo import (
+            mxfp8_fwd_dequantized_bwd_quantizer_factory,
+        )
+
+        def mxfp8_all_factory(role):  # pylint: disable=unused-argument
+            return _mxfp8(tex.DType.kFloat8E4M3)
+
+        ref, test = _make_linears(self.IN_F, self.OUT_F)
+        x = self._input()
+
+        y_bo, dx_bo, wg_bo = _fwd_bwd(
+            ref,
+            x,
+            recipe=CustomRecipe(qfactory=mxfp8_all_factory, backward_override="dequantized"),
+        )
+        y_zoo, dx_zoo, wg_zoo = _fwd_bwd(
+            test,
+            x,
+            recipe=CustomRecipe(qfactory=mxfp8_fwd_dequantized_bwd_quantizer_factory),
+        )
+
+        torch.testing.assert_close(y_zoo, y_bo, rtol=0.0, atol=0.0)
+        torch.testing.assert_close(dx_zoo, dx_bo, rtol=0.0, atol=0.0)
+        assert len(wg_zoo) == len(wg_bo)
+        for g_zoo, g_bo in zip(wg_zoo, wg_bo):
+            torch.testing.assert_close(g_zoo, g_bo, rtol=0.0, atol=0.0)
+
+    @pytest.mark.skipif(not nvfp4_available, reason=f"NVFP4: {reason_for_no_nvfp4}")
+    def test_zoo_nvfp4_row_scaled_dequantized_bwd_matches_recipe_bitwise(self):
+        """The zoo row-scaled NVFP4-dequantized recipe should reproduce
+        the built-in row-scaled NVFP4 recipe with dequantized backward bitwise.
+        """
+        from transformer_engine.common import recipe as te_recipe
+        from transformer_engine.pytorch.custom_recipes.quantization_factory_zoo import (
+            nvfp4_row_scaled_fwd_dequantized_bwd_quantizer_factory,
+        )
+
+        ref_recipe = te_recipe.NVFP4BlockScaling(
+            disable_rht=True,
+            disable_stochastic_rounding=True,
+            disable_2d_quantization=True,
+            row_scaled_activation=True,
+            backward_override="dequantized",
+        )
+        ref_recipe.fp4_quant_fwd_inp = te_recipe.QParams()
+        ref_recipe.fp4_quant_fwd_weight = te_recipe.QParams()
+        ref_recipe.fp4_quant_bwd_grad = te_recipe.QParams()
+
+        ref, test = _make_linears(self.IN_F, self.OUT_F)
+        x = self._input()
+
+        y_ref, dx_ref, wg_ref = _fwd_bwd(ref, x, recipe=ref_recipe)
+        y_zoo, dx_zoo, wg_zoo = _fwd_bwd(
+            test,
+            x,
+            recipe=CustomRecipe(qfactory=nvfp4_row_scaled_fwd_dequantized_bwd_quantizer_factory),
+        )
+
+        torch.testing.assert_close(y_zoo, y_ref, rtol=0.0, atol=0.0)
+        torch.testing.assert_close(dx_zoo, dx_ref, rtol=0.0, atol=0.0)
+        assert len(wg_zoo) == len(wg_ref)
+        for g_zoo, g_ref in zip(wg_zoo, wg_ref):
+            torch.testing.assert_close(g_zoo, g_ref, rtol=0.0, atol=0.0)
 
     def test_identity_matches_bf16_multistep_training_bitwise(self):
         """Multi-step SGD: an all-Identity recipe must track a plain BF16
