@@ -389,14 +389,14 @@ class NVFP4Quantizer(Quantizer):
         buffers: Dict[str, Tuple[Tuple[int, ...], torch.dtype]] = {}
         # FP4 data packs 2 values per byte (uint8); block scales are E4M3 stored
         # as uint8; amax buffers are FP32 (per-row when row-scaled, else scalar).
+        # Order matches NVFP4TensorStorage._FLATTEN_TENSOR_BUFFERS (the canonical
+        # __tensor_flatten__ order): data + scale_inv per usage first, amax last.
         if self.rowwise_usage:
             buffers["_rowwise_data"] = (self.convert_shape_for_fp4(shape), torch.uint8)
             buffers["_rowwise_scale_inv"] = (
                 tuple(self.get_scale_shape(shape, columnwise=False)),
                 torch.uint8,
             )
-            amax_rowwise_shape = (math.prod(shape[:-1]),) if self.row_scaled_nvfp4 else (1,)
-            buffers["_amax_rowwise"] = (amax_rowwise_shape, torch.float32)
         if self.columnwise_usage:
             buffers["_columnwise_data"] = (
                 self.convert_shape_for_fp4(self.get_columnwise_shape(shape)),
@@ -406,6 +406,10 @@ class NVFP4Quantizer(Quantizer):
                 tuple(self.get_scale_shape(shape, columnwise=True)),
                 torch.uint8,
             )
+        if self.rowwise_usage:
+            amax_rowwise_shape = (math.prod(shape[:-1]),) if self.row_scaled_nvfp4 else (1,)
+            buffers["_amax_rowwise"] = (amax_rowwise_shape, torch.float32)
+        if self.columnwise_usage:
             buffers["_amax_columnwise"] = ((1,), torch.float32)
         return buffers
 
