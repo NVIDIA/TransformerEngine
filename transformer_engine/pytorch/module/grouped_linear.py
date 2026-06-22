@@ -1735,16 +1735,6 @@ class GroupedLinear(TransformerEngineBaseModule):
                 else [None] * num_gemms
             )
 
-            # Pre-swizzle (and cache) the weight scale factors when the quantized
-            # weights are cached across microbatches, so the per-GEMM scale swizzle
-            # (fprop rowwise + dgrad columnwise, redone every microbatch) collapses
-            # from 2*num_microbatches kernels to 2 per step per expert.
-            # No-op for non-swizzled recipes (e.g. per-tensor FP8).
-            if cache_weight:
-                for weight_quantizer in weight_quantizers:
-                    if weight_quantizer is not None:
-                        weight_quantizer.optimize_for_gemm = True
-
             non_tensor_args = (
                 self.apply_bias,
                 is_first_microbatch,
@@ -1901,8 +1891,16 @@ class GroupedLinear(TransformerEngineBaseModule):
             ]
             for i in range(self.num_gemms)
         ]
+        # Preswizzle the weights during quantization instead of lazily inside every GEMM.
+        # This wont work when primay weights are in fp8 because of 2 reasons
+        # 1. optimizer step updates would need to dequantize the weights. But swizzled weights
+        # currently dont support dequantization.
+        # 2. For FSDP2, quantized weight all-gather would need to be done in the
+        # unswizzled layout.
         for i in range(self.num_gemms):
             weight_quantizers[i].internal = not self.primary_weights_in_fp8
+            if not self.primary_weights_in_fp8:
+                weight_quantizers[i].optimize_for_gemm = True
         return weight_quantizers
 
     def _get_quantizers(self):
