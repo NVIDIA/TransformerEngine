@@ -146,9 +146,7 @@ class TestComposerStyleFactory:
     def test_regular_linear_forward_roles_fall_back_to_mxfp8(self, tensor_type):
         from transformer_engine.pytorch.quantization import QuantizerRole
 
-        quantizer = self._factory(
-            QuantizerRole(module_type="linear", tensor_type=tensor_type)
-        )
+        quantizer = self._factory(QuantizerRole(module_type="linear", tensor_type=tensor_type))
 
         assert isinstance(quantizer, MXFP8Quantizer)
 
@@ -157,9 +155,7 @@ class TestComposerStyleFactory:
     def test_backward_roles_use_mxfp8(self, module_type, tensor_type):
         from transformer_engine.pytorch.quantization import QuantizerRole
 
-        quantizer = self._factory(QuantizerRole(
-            module_type=module_type, tensor_type=tensor_type
-        ))
+        quantizer = self._factory(QuantizerRole(module_type=module_type, tensor_type=tensor_type))
 
         assert isinstance(quantizer, MXFP8Quantizer)
 
@@ -196,9 +192,7 @@ class TestNVFP4WeightDoubleQuantFactory:
     def test_weight_roles_use_rowwise_dequantized_source(self, module_type):
         from transformer_engine.pytorch.quantization import QuantizerRole
 
-        quantizer = self._factory(
-            QuantizerRole(module_type=module_type, tensor_type="weight")
-        )
+        quantizer = self._factory(QuantizerRole(module_type=module_type, tensor_type="weight"))
 
         assert isinstance(quantizer, HybridQuantizer)
         assert quantizer.columnwise_source == "rowwise_dequantized"
