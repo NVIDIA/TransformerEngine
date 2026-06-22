@@ -1861,15 +1861,6 @@ class Linear(TransformerEngineBaseModule):
                 self._fp8_workspaces.get(cache_name) if cache_name is not None else None
             )
 
-            # When the quantized weight is cached and reused across microbatches,
-            # pre-swizzle its scale factors at quantize time and persist them on the
-            # cached workspace. This collapses the per-GEMM scale swizzle (fprop
-            # rowwise + dgrad columnwise, redone every microbatch) from
-            # 2*num_microbatches kernels down to 2 per optimizer step. No-op for
-            # recipes whose scales do not require swizzling (e.g. per-tensor FP8).
-            if weight_quantizer is not None:
-                weight_quantizer.optimize_for_gemm = cache_name is not None
-
             if self.fp8:
                 backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
             else:
@@ -2175,4 +2166,12 @@ class Linear(TransformerEngineBaseModule):
             return [None]
         weight_quantizer = self.quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM1_WEIGHT]
         weight_quantizer.internal = True
+        # Preswizzle the weights during quantization instead of lazily inside every GEMM.
+        # This wont work when primay weights are in fp8 because of 2 reasons
+        # 1. optimizer step updates would need to dequantize the weights. But swizzled weights
+        # currently dont support dequantization.
+        # 2. For FSDP2, quantized weight all-gather would need to be done in the
+        # unswizzled layout.
+        if not self.primary_weights_in_fp8:
+            weight_quantizer.optimize_for_gemm = True
         return [weight_quantizer]
