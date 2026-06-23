@@ -416,6 +416,7 @@ void fused_score_for_moe_aux_loss_forward(const Tensor &logits, int num_tokens, 
                                           Tensor &routing_map,
                                           NVTERoutingMapFormat routing_map_format,
                                           Tensor &intermediate_output, cudaStream_t stream) {
+  check_routing_map_format(routing_map_format);
   NVTE_CHECK(num_tokens > 0 && num_experts > 0,
              "num_tokens and num_experts must be positive; got num_tokens=", num_tokens,
              ", num_experts=", num_experts);

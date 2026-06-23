@@ -82,6 +82,17 @@ void nvte_fused_topk_with_score_function_forward_v2(
     const NVTETensor expert_bias, NVTETensor probs, NVTETensor routing_map,
     NVTERoutingMapFormat routing_map_format, NVTETensor intermediate_output, cudaStream_t stream);
 
+/*! \brief Apply topk + softmax/sigmoid and output dense top-k indices.
+ *
+ *  This entry point does not materialize routing_map. Instead, it writes the
+ *  selected expert ids to topk_indices with shape [num_tokens, topk].
+ */
+void nvte_fused_topk_with_score_function_forward_with_indices(
+    const NVTETensor logits, int num_tokens, int num_experts, int topk, int use_pre_softmax,
+    int num_groups, int group_topk, float scaling_factor, int score_function,
+    const NVTETensor expert_bias, NVTETensor probs, NVTETensor topk_indices,
+    NVTETensor intermediate_output, cudaStream_t stream);
+
 /*! \brief Backward pass for fused topk + softmax/sigmoid (deprecated).
  *
  *  \deprecated This function has been deprecated in favor of
@@ -129,6 +140,15 @@ void nvte_fused_topk_with_score_function_backward_v2(const NVTETensor routing_ma
                                                      int num_experts, int topk, int use_pre_softmax,
                                                      float scaling_factor, int score_function,
                                                      NVTETensor grad_logits, cudaStream_t stream);
+
+/*! \brief Backward pass for fused topk + score function with dense top-k indices.
+ *
+ *  \param[in]     topk_indices    Dense [num_tokens, topk] selected expert indices.
+ */
+void nvte_fused_topk_with_score_function_backward_with_indices(
+    const NVTETensor topk_indices, const NVTETensor intermediate_output,
+    const NVTETensor grad_probs, int num_tokens, int num_experts, int topk, int use_pre_softmax,
+    float scaling_factor, int score_function, NVTETensor grad_logits, cudaStream_t stream);
 
 /*! \brief Forward pass for computing scores/routing map for auxiliary loss (deprecated).
  *

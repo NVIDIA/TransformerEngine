@@ -34,12 +34,13 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fw
     at::Tensor logits, int topk, bool use_pre_softmax, std::optional<int> num_groups,
     std::optional<int> group_topk, std::optional<float> scaling_factor, std::string score_function,
     std::optional<at::Tensor> expert_bias,
-    int routing_map_format = static_cast<int>(NVTE_ROUTING_MAP_FORMAT_BYTEMAP));
+    int routing_map_format = static_cast<int>(NVTE_ROUTING_MAP_FORMAT_BYTEMAP),
+    std::optional<at::Tensor> topk_indices = std::nullopt);
 
 void fused_topk_with_score_function_bwd(
     at::Tensor routing_map, at::Tensor intermediate_output, at::Tensor grad_probs,
     at::Tensor grad_logits, int topk, bool use_pre_softmax, std::optional<float> scaling_factor,
-    std::string score_function,
+    std::string score_function, bool use_dense_indices = false,
     int routing_map_format = static_cast<int>(NVTE_ROUTING_MAP_FORMAT_BYTEMAP));
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_score_for_moe_aux_loss_fwd(

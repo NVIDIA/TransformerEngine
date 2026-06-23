@@ -12,10 +12,18 @@
 #include "../util/logging.h"
 #include "../util/system.h"
 #include "../utils.cuh"
+#include "transformer_engine/fused_router.h"
 #include "transformer_engine/transformer_engine.h"
 
 namespace transformer_engine {
 namespace fused_router {
+
+inline void check_routing_map_format(NVTERoutingMapFormat routing_map_format) {
+  NVTE_CHECK(routing_map_format == NVTE_ROUTING_MAP_FORMAT_BYTEMAP ||
+                 routing_map_format == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8,
+             "routing_map_format must be BYTEMAP (0) or BITMAP_U8 (1), got ",
+             static_cast<int>(routing_map_format));
+}
 
 // Topk values below this threshold use naive O(K*E) selection;
 // at or above it, use radix O(E) selection.  Configurable via
@@ -569,6 +577,10 @@ __device__ __forceinline__ void topk_and_mask(CompType *scores, int data_size, i
 #define TE_ROUTER_INDEX_TYPE_SWITCH_ALL(dtype, type, ...)                                 \
   switch (dtype) {                                                                        \
     using namespace transformer_engine;                                                   \
+    case DType::kInt16: {                                                                 \
+      using type = int16_t;                                                               \
+      { __VA_ARGS__ }                                                                     \
+    } break;                                                                              \
     case DType::kInt32: {                                                                 \
       using type = int32_t;                                                               \
       { __VA_ARGS__ }                                                                     \
@@ -587,8 +599,28 @@ __device__ __forceinline__ void topk_and_mask(CompType *scores, int data_size, i
     } break;                                                                              \
     default:                                                                              \
       NVTE_ERROR("Unsupported router index dtype ", to_string(static_cast<DType>(dtype)), \
-                 ". Expected one of: Int32, Int64, BFloat16, "                            \
+                 ". Expected one of: Int16, Int32, Int64, BFloat16, "                     \
                  "Float32.");                                                             \
+  }
+
+#define TE_ROUTER_DENSE_INDEX_TYPE_SWITCH_ALL(dtype, type, ...)                                 \
+  switch (dtype) {                                                                              \
+    using namespace transformer_engine;                                                         \
+    case DType::kInt16: {                                                                       \
+      using type = int16_t;                                                                     \
+      { __VA_ARGS__ }                                                                           \
+    } break;                                                                                    \
+    case DType::kInt32: {                                                                       \
+      using type = int32_t;                                                                     \
+      { __VA_ARGS__ }                                                                           \
+    } break;                                                                                    \
+    case DType::kInt64: {                                                                       \
+      using type = int64_t;                                                                     \
+      { __VA_ARGS__ }                                                                           \
+    } break;                                                                                    \
+    default:                                                                                    \
+      NVTE_ERROR("Unsupported dense router index dtype ", to_string(static_cast<DType>(dtype)), \
+                 ". Expected one of: Int16, Int32, Int64.");                                    \
   }
 }  // namespace fused_router
 }  // namespace transformer_engine
