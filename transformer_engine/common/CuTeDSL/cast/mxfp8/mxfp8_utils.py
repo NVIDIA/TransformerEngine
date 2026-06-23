@@ -34,6 +34,7 @@ FP32_MAX = 3.4028234663852886e38
 FP32_MANTISSA_BITS = 23
 
 
+# TODO: move these to util
 @dsl_user_op
 def _bitcast_f32_to_i32(val: Float32, *, loc=None, ip=None) -> Int32:
     return Int32(mlir_arith.bitcast(T.i32(), val.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
@@ -479,6 +480,11 @@ def quantize_rowwise_mxfp8(
 
     amax_r = Float32(0.0)
 
+    # Each thread start reading from the specfic bank based on its thread ID so they can do their best to access different banks
+    # to avoid bank conflict.
+    bank_group = (tidx % THREADS_PER_WARP) // THREADS_PER_BANK
+    # The offset this thread should start reading from based on what's its first bank to access.
+    offset = bank_group * 4 # Each bank group will read 4 f16 from their bank
     if cutlass.const_expr(_row_fast):
         # If no activation, f16 / bf16 and rowwise quantization, we can read 2 f16 / bf16 at once in a pack
         # and use max.xorsign.abs.f16x2 / max.xorsign.abs.bf16x2 to compute
@@ -490,10 +496,8 @@ def quantize_rowwise_mxfp8(
         # Each wave we read 2 packed i32, which is 4 fp16/bf16 elements (PACK_SIZE)
         # In total we have 8 waves where each wave reads 4 elements, so we read 32 elements in total.
         in_r = [[None, None] for _ in range(WAVES)]
-        bank_group = (tidx % THREADS_PER_WARP) // THREADS_PER_BANK # Each 4 threads share the same bank, which forms a bank group
-        offset = bank_group * 2 # Each bank group will read 2 i32 from their bank
         for w in cutlass.range_constexpr(WAVES):
-            idx = (w * 2 + offset) % (MXFP8_BLOCK_SIZE // 2)
+            idx = (w * 2 + offset // 2) % (MXFP8_BLOCK_SIZE // 2)
             in_r[w][0] = sX_thread_rw_i32[0, idx]
             in_r[w][1] = sX_thread_rw_i32[0, idx + 1]
 
@@ -544,11 +548,6 @@ def quantize_rowwise_mxfp8(
 
         # Each wave we read PACK_SIZE elements, and we have WAVES waves, so we read WAVES * PACK_SIZE (= MXFP8_BLOCK_SIZE) elements in total.
         in_r = [[None] * PACK_SIZE for _ in range(WAVES)]
-        # Each thread start reading from the specfic bank based on its thread ID so they can do their best to access different banks
-        # to avoid bank conflict.
-        bank_group = (tidx % THREADS_PER_WARP) // THREADS_PER_BANK
-        # The offset this thread should start reading from based on what's its first bank to access.
-        offset = bank_group * 4 # Each bank group will read 4 f16 from their bank
         for w in cutlass.range_constexpr(WAVES):
             start = (w * PACK_SIZE + offset) % MXFP8_BLOCK_SIZE
             for i in cutlass.range_constexpr(PACK_SIZE):
