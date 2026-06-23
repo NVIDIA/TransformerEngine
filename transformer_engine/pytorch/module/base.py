@@ -23,6 +23,7 @@ import transformer_engine_torch as tex
 from ._common import _ParameterInitMeta, noop_cat
 from .._extra_state import (
     extra_state_pickle_advisory,
+    is_stateless_recipe,
     should_load_extra_state_pickle,
     unsafe_pickle_extra_state_enabled,
 )
@@ -62,7 +63,7 @@ from ..utils import (
     nvtx_range_pop,
 )
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
-from ...common.recipe import CheckpointExtraStatePolicy, DelayedScaling, Recipe
+from ...common.recipe import DelayedScaling, Recipe
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.debug_quantization import DebugQuantizer, DebugQuantizedTensor
 from ...debug.pytorch.utils import next_iter_when_debug_should_be_run, any_feature_enabled
@@ -1277,7 +1278,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             return torch.empty(0, dtype=torch.uint8)
 
         recipe = self.fp8_meta["recipe"]
-        if recipe.checkpoint_extra_state_policy is CheckpointExtraStatePolicy.STATELESS:
+        if is_stateless_recipe(recipe):
             return torch.empty(0, dtype=torch.uint8)
 
         # Copy tensors to CPU and store

@@ -33,7 +33,6 @@ from transformer_engine.pytorch.quantization import (
 )
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.common.recipe import (
-    CheckpointExtraStatePolicy,
     CustomRecipe,
     DelayedScaling,
     Float8CurrentScaling,
@@ -43,6 +42,7 @@ from transformer_engine.common.recipe import (
     Recipe,
 )
 from transformer_engine.pytorch._extra_state import (
+    CheckpointExtraStatePolicy,
     UNSAFE_PICKLE_EXTRA_STATE_ENV,
     _RECIPE_POLICIES,
     should_load_extra_state_pickle,
@@ -728,15 +728,11 @@ def _pickled_extra_state_payload(recipe_obj, *, include_delayed_state=False):
     return pickle.dumps(state)
 
 
-def test_checkpoint_extra_state_policy_declared_for_all_recipes():
-    for cls in _recipe_subclasses(Recipe):
-        assert "checkpoint_extra_state_policy" in cls.__dict__
-        assert cls.checkpoint_extra_state_policy in CheckpointExtraStatePolicy
-
-
 def test_checkpoint_extra_state_policy_classifier_map_covers_all_recipes():
     for cls in _recipe_subclasses(Recipe):
-        assert ("transformer_engine.common.recipe", cls.__name__) in _RECIPE_POLICIES
+        key = ("transformer_engine.common.recipe", cls.__name__)
+        assert key in _RECIPE_POLICIES
+        assert _RECIPE_POLICIES[key] in CheckpointExtraStatePolicy
 
 
 @pytest.mark.parametrize(

@@ -11,14 +11,18 @@ import os
 import pickletools
 from typing import Optional
 
-from ..common.recipe import CheckpointExtraStatePolicy, Recipe
+from ..common.recipe import Recipe
 
 
 UNSAFE_PICKLE_EXTRA_STATE_ENV = "NVTE_ALLOW_UNSAFE_PICKLE_EXTRA_STATE"
 
 _RECIPE_MODULE = "transformer_engine.common.recipe"
 _RECIPE_KEY = "recipe"
-_DELAYED_STATE_KEYS = {
+
+# Pickle keys that FP8 delayed scaling stores in its ``_extra_state``. This is
+# purely a backward-compatibility hack for that recipe; any future stateful
+# recipe is expected to checkpoint without pickling.
+_FLOAT8_DELAYED_SCALING_STATE_KEYS = {
     "scale_fwd",
     "amax_history_fwd",
     "scale_bwd",
@@ -26,19 +30,47 @@ _DELAYED_STATE_KEYS = {
 }
 
 
-def _recipe_subclasses(cls: type[Recipe]) -> list[type[Recipe]]:
-    subclasses = []
-    for subcls in cls.__subclasses__():
-        subclasses.append(subcls)
-        subclasses.extend(_recipe_subclasses(subcls))
-    return subclasses
+class CheckpointExtraStatePolicy(Enum):
+    """How pickled PyTorch ``_extra_state`` should be handled in ``set_extra_state``.
+
+    Pickling of ``_extra_state`` is a PyTorch-specific backward-compatibility
+    concern, so the recipe-to-policy map lives here in ``te.pytorch`` rather than
+    in ``te.common``.
+
+    ``STATELESS`` recipes carry no checkpoint state and never need unpickling.
+    ``STATEFUL_FP8_DELAYED_SCALING`` is the only recipe that still relies on
+    unsafe pickling (a legacy of FP8 delayed scaling). ``DYNAMIC`` means the
+    recipe class alone is not enough; callers must inspect the checkpoint payload
+    shape before deciding whether the pickle can be ignored.
+    """
+
+    STATELESS = "stateless"
+    STATEFUL_FP8_DELAYED_SCALING = "stateful_fp8_delayed_scaling"
+    DYNAMIC = "dynamic"
 
 
-_RECIPE_POLICIES = {
-    (_RECIPE_MODULE, cls.__name__): cls.checkpoint_extra_state_policy
-    for cls in _recipe_subclasses(Recipe)
-    if cls.checkpoint_extra_state_policy is not None
+# Map of first-party recipes to their checkpoint policy. When a new stateful
+# recipe is added, update this map (and any associated checkpoint handling)
+# here instead of adding PyTorch-specific logic to ``te.common``.
+_RECIPE_POLICIES: dict[tuple[str, str], CheckpointExtraStatePolicy] = {
+    (_RECIPE_MODULE, "DelayedScaling"): CheckpointExtraStatePolicy.STATEFUL_FP8_DELAYED_SCALING,
+    (_RECIPE_MODULE, "Float8CurrentScaling"): CheckpointExtraStatePolicy.STATELESS,
+    (_RECIPE_MODULE, "MXFP8BlockScaling"): CheckpointExtraStatePolicy.STATELESS,
+    (_RECIPE_MODULE, "Float8BlockScaling"): CheckpointExtraStatePolicy.STATELESS,
+    (_RECIPE_MODULE, "NVFP4BlockScaling"): CheckpointExtraStatePolicy.STATELESS,
+    (_RECIPE_MODULE, "CustomRecipe"): CheckpointExtraStatePolicy.DYNAMIC,
 }
+
+
+def recipe_extra_state_policy(recipe: Recipe) -> Optional[CheckpointExtraStatePolicy]:
+    """Return the checkpoint policy for a recipe instance, if known."""
+    cls = type(recipe)
+    return _RECIPE_POLICIES.get((cls.__module__, cls.__name__))
+
+
+def is_stateless_recipe(recipe: Recipe) -> bool:
+    """Return whether a recipe carries no extra state to checkpoint."""
+    return recipe_extra_state_policy(recipe) is CheckpointExtraStatePolicy.STATELESS
 
 
 class _PickledExtraStateAction(Enum):
@@ -109,7 +141,9 @@ def _classify_extra_state_pickle_impl(data: bytes) -> _PickledExtraStateAction:
             if text is not None:
                 strings.append(text)
                 has_recipe_key = has_recipe_key or text == _RECIPE_KEY
-                has_delayed_state_keys = has_delayed_state_keys or text in _DELAYED_STATE_KEYS
+                has_delayed_state_keys = (
+                    has_delayed_state_keys or text in _FLOAT8_DELAYED_SCALING_STATE_KEYS
+                )
             continue
 
         if opcode.name == "GLOBAL":
@@ -129,7 +163,7 @@ def _classify_extra_state_pickle_impl(data: bytes) -> _PickledExtraStateAction:
     if not has_recipe_key:
         return _PickledExtraStateAction.UNSAFE_LOAD
 
-    if CheckpointExtraStatePolicy.STATEFUL in policies:
+    if CheckpointExtraStatePolicy.STATEFUL_FP8_DELAYED_SCALING in policies:
         return _PickledExtraStateAction.UNSAFE_LOAD
 
     if has_delayed_state_keys:

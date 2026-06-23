@@ -13,8 +13,8 @@ from typing import Any, Optional
 
 import torch
 
-from transformer_engine.common.recipe import CheckpointExtraStatePolicy, Recipe
-from .._extra_state import should_load_extra_state_pickle
+from transformer_engine.common.recipe import Recipe
+from .._extra_state import is_stateless_recipe, should_load_extra_state_pickle
 from ..quantization import (
     FP8GlobalStateManager,
     QuantizerRole,
@@ -592,7 +592,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             # Quantizer state
             fp8_meta = self._fp8_metas[mode]
             recipe = fp8_meta["recipe"]
-            if recipe.checkpoint_extra_state_policy is CheckpointExtraStatePolicy.STATELESS:
+            if is_stateless_recipe(recipe):
                 continue
             state[mode] = {}
             state[mode]["recipe"] = recipe
