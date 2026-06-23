@@ -24,6 +24,7 @@ from build_tools.utils import (
     get_frameworks,
     remove_dups,
     min_python_version_str,
+    nccl_ep_enabled,
 )
 
 frameworks = get_frameworks()
@@ -86,24 +87,7 @@ def setup_common_extension() -> CMakeExtension:
 
     # NCCL EP (Hopper+): on by default; auto-skipped when no arch >= 90 is
     # targeted. Set NVTE_WITH_NCCL_EP=0 to force off.
-    nccl_ep_env = os.getenv("NVTE_WITH_NCCL_EP")
-    nccl_ep_explicit = nccl_ep_env is not None
-    build_with_nccl_ep = bool(int(nccl_ep_env if nccl_ep_explicit else "1"))
-    if build_with_nccl_ep:
-        arch_tokens = [a.strip() for a in str(archs or "").split(";") if a.strip()]
-        has_hopper_or_newer = any(
-            t.lower() == "native" or (t.rstrip("af").isdigit() and int(t.rstrip("af")) >= 90)
-            for t in arch_tokens
-        )
-        if not has_hopper_or_newer:
-            if nccl_ep_explicit:
-                raise RuntimeError(
-                    f"NVTE_WITH_NCCL_EP=1 was set but NVTE_CUDA_ARCHS ('{archs}') "
-                    "contains no arch >= 90. NCCL EP requires Hopper or newer."
-                )
-            print(f"[NCCL EP] No arch >= 90 in NVTE_CUDA_ARCHS ('{archs}'); skipping build.")
-            build_with_nccl_ep = False
-    if build_with_nccl_ep:
+    if nccl_ep_enabled(archs):
         nccl_home = build_nccl_ep_submodule()
         cmake_flags.append(f"-DNCCL_INCLUDE_DIR={nccl_home}/include")
     else:
