@@ -80,7 +80,7 @@ def setup_pytorch_extension(
     # Mirror the NCCL EP gate from setup.py / common CMake. When disabled, the
     # ep.cpp source no-ops at the #ifdef boundary; without the define it would
     # produce undefined references to nvte_ep_*.
-    if bool(int(os.getenv("NVTE_BUILD_WITH_NCCL_EP", "1"))):
+    if bool(int(os.getenv("NVTE_WITH_NCCL_EP", "1"))):
         cxx_flags.append("-DNVTE_WITH_NCCL_EP")
         # PyTorch's symm-mem headers gate the NCCL_HAS_SYMMEM_* feature macros on
         # USE_NCCL. The EP extension shares the symm-mem NCCL comm with torch, so
