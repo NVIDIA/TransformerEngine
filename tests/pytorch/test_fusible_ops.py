@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 import io
+import os
 import math
 import random
 from typing import Optional

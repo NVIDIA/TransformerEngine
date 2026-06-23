@@ -850,8 +850,6 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
         block = _test_e2e_checkpointing_get_model(config, dtype)
         loaded_state_dict = torch.load(path, weights_only=False)
         old_unsafe_extra_state = os.environ.get(UNSAFE_PICKLE_EXTRA_STATE_ENV)
-        if recipe is not None and recipe.delayed():
-            os.environ[UNSAFE_PICKLE_EXTRA_STATE_ENV] = "1"
         try:
             block.load_state_dict(loaded_state_dict)
         finally:
