@@ -18,27 +18,44 @@ shared memory.
 """
 import logging
 
-from transformer_engine.common.CuTeDSL.utils import str_to_cutlass_dtype
+from transformer_engine.common.CuTeDSL.utils import _bitcast_f32_to_i32, str_to_cutlass_dtype
 
 from typing import Optional, Type
 
 import cutlass
 import cutlass.cute as cute
 import cutlass.pipeline as pipeline
-from cutlass import Float32, Int32, Uint8
+from cutlass import Float32, Int16, Int32, Uint32, Uint8
 from cuda.bindings.driver import CUstream
 
 import tvm_ffi
 
-from .mxfp8_utils import (
-    SUPPORTED_ACTIVATIONS,
-    SUPPORTED_DACTIVATIONS,
-    FP8E4M3_MAX_NORM_RCP,
-    FP8E5M2_MAX_NORM_RCP,
-    _bitcast_f32_to_i32,
-    quantize_colwise_mxfp8,
-    quantize_rowwise_mxfp8,
+from transformer_engine.common.CuTeDSL.activations import (
+    act_relu,
+    act_gelu,
+    act_silu,
+    act_qgelu,
+    act_srelu,
+    dact_drelu,
+    dact_dsrelu,
+    dact_dsilu,
+    dact_dqgelu,
+    dact_dgelu,
 )
+
+from transformer_engine.common.CuTeDSL.utils import (
+    is_packed16,
+    packed16_kit,
+    fabs_f32,
+    exp2f_rcp,
+    pack_f32x2,
+)
+from transformer_engine.common.CuTeDSL.utils_fp8 import (
+    cvt_f32_to_fp8, 
+    cvt_f32x2_to_fp8x2,
+    cvt_f32_to_fp8e8m0
+)
+
 
 logger = logging.getLogger("transformer_engine.cutedsl.mxfp8")
 
@@ -64,6 +81,353 @@ TILE_X = 64 # Each tile has 64 columns
 # CTA size
 THREADS_PER_CTA = 64
 NUM_WARPS = THREADS_PER_CTA // 32
+
+# FP8E4M3 max representable value
+FP8E4M3_MAX_NORM = 448.0
+FP8E4M3_MAX_NORM_RCP = 1.0 / FP8E4M3_MAX_NORM
+FP8E5M2_MAX_NORM = 57344.0
+FP8E5M2_MAX_NORM_RCP = 1.0 / FP8E5M2_MAX_NORM
+
+
+SUPPORTED_ACTIVATIONS = {
+    "relu": act_relu,
+    "gelu": act_gelu,
+    "silu": act_silu,
+    "qgelu": act_qgelu,
+    "srelu": act_srelu,
+}
+
+SUPPORTED_DACTIVATIONS = {
+    "drelu": dact_drelu,
+    "dgelu": dact_dgelu,
+    "dsilu": dact_dsilu,
+    "dqgelu": dact_dqgelu,
+    "dsrelu": dact_dsrelu,
+}
+
+
+@cute.jit
+def quantize_rowwise_mxfp8(
+    sX_tile,        # (TILE_Y, TILE_X) bf16/fp16 smem view, post-TMA
+    sA_tile,        # (TILE_Y, TILE_X) activation-input smem tile (dact only)
+    sO_row_tile,    # (TILE_Y, TILE_X) uint8 smem view (rowwise FP8 output)
+    mS_row_stage,   # rowwise scale tensor (1D swizzled, or 2D linear)
+    max_norm_rcp,
+    tile_row_start, # Int32 — global row index of this stage's row 0
+                    # (= tile_idx_y * TILE_Y). Used to mask OOB scale stores
+                    # for irregular shapes.
+    tile_col_start, # Int32 — global col index of this CTA's col 0
+                    # (= bidx * TILE_X). Same purpose.
+    M, N,           # Int32 — full tensor extents; OOB threads skip their
+                    # scale store.
+    ACTIVATION,
+    DTYPE,
+    FP8_DTYPE,
+    TILE_Y,
+    MXFP8_BLOCK_SIZE,
+    WAVES,
+    THREADS_PER_WARP,
+    THREADS_PER_BANK,
+    PACK_SIZE,
+    WITH_ACT=False,
+    WITH_DACT=False,
+    WITH_DBIAS=False,  # rowwise-only dbias: accumulate per-column partials
+    dbias_acc=None,         #  only needed when WITH_DBIAS is True
+):
+    tidx, _, _ = cute.arch.thread_idx()
+
+    _, tv_layout = cute.make_layout_tv(
+        thr_layout=cute.make_layout((TILE_Y, 2), stride=(2, 1)),
+        val_layout=cute.make_layout((1, MXFP8_BLOCK_SIZE), stride=(0, 1))
+    )
+
+    sX_tv = cute.composition(sX_tile, tv_layout)
+    sO_tv = cute.composition(sO_row_tile, tv_layout)
+
+    # I/O Elements that belong to this thread
+    sX_thread = sX_tv[tidx, None]   # shape (32,) bf16
+    sO_thread = sO_tv[tidx, None]   # shape (32,) uint8
+
+    sO_thread_u32_ptr = cute.recast_ptr(sO_thread.iterator, dtype=Uint32)
+    # Each wave it writes 32 bytes = 8 uint32s, so in 4 waves we write all 32 quantized elements.
+    sO_thread_u32 = cute.make_tensor(
+        sO_thread_u32_ptr,
+        cute.make_layout((MXFP8_BLOCK_SIZE // 4,), stride=(1,)), # 1 uint32 is 4 fp8 elements
+    )
+
+    # PTX allows to fuse relu activation in `cvt.rn.satfinite`
+    FUSE_RELU = cutlass.const_expr(ACTIVATION == "relu")
+    # For this fast path we can read in pack of 2 instead of reading individual f16 / bf16 element.
+    # dbias needs the per-element fp32 values to accumulate, so it forces the slow path.
+    _row_fast = (is_packed16(DTYPE) and (ACTIVATION is None or FUSE_RELU)
+                 and not WITH_DBIAS)
+
+    amax_r = Float32(0.0)
+
+    # Each thread start reading from the specfic bank based on its thread ID so they can do their best to access different banks
+    # to avoid bank conflict.
+    bank_group = (tidx % THREADS_PER_WARP) // THREADS_PER_BANK
+    # The offset this thread should start reading from based on what's its first bank to access.
+    offset = bank_group * 4 # Each bank group will read 4 f16 from their bank
+    if cutlass.const_expr(_row_fast):
+        # If no activation, f16 / bf16 and rowwise quantization, we can read 2 f16 / bf16 at once in a pack
+        # and use max.xorsign.abs.f16x2 / max.xorsign.abs.bf16x2 to compute
+        kit = packed16_kit(DTYPE)
+        sX_thread_rw_i32 = cute.make_tensor(
+            cute.recast_ptr(sX_thread.iterator, dtype=Int32),
+            cute.make_layout((1, MXFP8_BLOCK_SIZE // 2), stride=(0, 1)), # 1 int32 is 2 fp16/bf16 elements
+        )
+        # Each wave we read 2 packed i32, which is 4 fp16/bf16 elements (PACK_SIZE)
+        # In total we have 8 waves where each wave reads 4 elements, so we read 32 elements in total.
+        in_r = [[None, None] for _ in range(WAVES)]
+        for w in cutlass.range_constexpr(WAVES):
+            idx = (w * 2 + offset // 2) % (MXFP8_BLOCK_SIZE // 2)
+            in_r[w][0] = sX_thread_rw_i32[0, idx]
+            in_r[w][1] = sX_thread_rw_i32[0, idx + 1]
+
+        amax_2x = Int32(0)
+        # Each wave will use max.xorsign.abs.f16x2 or max.xorsign.abs.bf16x2 to compare 2 packed elements in parallel
+        for w in cutlass.range_constexpr(WAVES):
+            if cutlass.const_expr(FUSE_RELU):
+                # If we fuse relu then we don't want to do abs since negative value will be set to 0 and they will lose comparison automatically
+                amax_2x = kit.max_x2(amax_2x, in_r[w][0])
+                amax_2x = kit.max_x2(amax_2x, in_r[w][1])
+            else:
+                amax_2x = kit.abs_max_x2(amax_2x, in_r[w][0])
+                amax_2x = kit.abs_max_x2(amax_2x, in_r[w][1])
+        if cutlass.const_expr(FUSE_RELU):
+            # Compare the 2 packed max without abs
+            amax_r = cute.arch.fmax(
+                kit.x2_lo_to_f32(amax_2x),
+                kit.x2_hi_to_f32(amax_2x),
+            )
+            # For relu the max is at least 0
+            amax_r = cute.arch.fmax(amax_r, Float32(0.0))
+        else:
+            # Compare the 2 packed abs max
+            amax_r = cute.arch.fmax(
+                fabs_f32(kit.x2_lo_to_f32(amax_2x)),
+                fabs_f32(kit.x2_hi_to_f32(amax_2x)),
+            )
+    else:
+        # Since we need to do computation on individual f16 / bf16 elements, we can't read in pack
+        sX_thread_rw = cute.make_tensor(
+            sX_thread.iterator,
+            cute.make_layout((1, MXFP8_BLOCK_SIZE), stride=(0, 1)),
+        )
+
+        if cutlass.const_expr(WITH_DACT):
+            # Backward: out = grad · act'(act_input). sX is grad, sA is act_input.
+            dop = SUPPORTED_DACTIVATIONS[ACTIVATION]
+            sA_thread = cute.composition(sA_tile, tv_layout)[tidx, None]
+            sA_thread_rw = cute.make_tensor(
+                sA_thread.iterator,
+                cute.make_layout((1, MXFP8_BLOCK_SIZE), stride=(0, 1)),
+            )
+        elif cutlass.const_expr(WITH_ACT):
+            op = SUPPORTED_ACTIVATIONS[ACTIVATION]
+
+        if cutlass.const_expr(is_packed16(DTYPE) and ACTIVATION is not None):
+            kit_act = packed16_kit(DTYPE)
+
+        # Each wave we read PACK_SIZE elements, and we have WAVES waves, so we read WAVES * PACK_SIZE (= MXFP8_BLOCK_SIZE) elements in total.
+        in_r = [[None] * PACK_SIZE for _ in range(WAVES)]
+        for w in cutlass.range_constexpr(WAVES):
+            start = (w * PACK_SIZE + offset) % MXFP8_BLOCK_SIZE
+            for i in cutlass.range_constexpr(PACK_SIZE):
+                x = Float32(sX_thread_rw[0, start + i])
+                if cutlass.const_expr(WITH_DACT):
+                    # out = grad · act'(act_input)
+                    x = x * dop(Float32(sA_thread_rw[0, start + i]))
+                # If IS_ACT, apply activation function to x in f32
+                elif cutlass.const_expr(WITH_ACT):
+                    # If it's relu, we can handle it later
+                    if not cutlass.const_expr(FUSE_RELU):
+                        x = op(x)
+                # Accumulate to the per-thread dbias register buffer for this tile if WITH_DBIAS
+                if cutlass.const_expr(WITH_DBIAS):
+                    dbias_acc[start + i] += x
+                # If 16-bit input with activation, truncate to IType
+                if cutlass.const_expr(is_packed16(DTYPE) and ACTIVATION is not None):
+                    x = kit_act.truncate_f32(x)
+                in_r[w][i] = x
+                if cutlass.const_expr(FUSE_RELU):
+                    amax_r = cute.arch.fmax(amax_r, x) # For relu cases, we don't need abs since negative values will be 0 so they lose comparison automatically
+                else:
+                    amax_r = cute.arch.fmax(amax_r, fabs_f32(x))
+        if cutlass.const_expr(FUSE_RELU):
+            amax_r = cute.arch.fmax(amax_r, Float32(0.0)) # If relu, the amax is at least 0
+
+    biased_exp_r = cvt_f32_to_fp8e8m0(amax_r * max_norm_rcp)
+
+    # mS_row_stage has logical shape (32, 2) and we have 64 threads where each is mapped to one scale factor
+    # The TV layout is equivalent to TV layout with thr_layout=(32, 2):(2, 1), val_layout=(1,)
+    # but it's too trival so let's just index it directly without using layout
+    # Note this is the logical layout, which is on top of the swizzled / non-swizzled scale factor layout
+    # that mappes the logical index to the physical offset
+
+    # For irregular shapes, skip the scale store if this thread's logical row / col-block lies past the input's actual extents. 
+    # TMA already zero-fills OOB input reads and drops OOB output writes; only the direct scale-byte gmem store needs an explicit guard.
+    scale_row = tile_row_start + tidx // 2
+    scale_col_first_elt = tile_col_start + (tidx % 2) * MXFP8_BLOCK_SIZE
+    if scale_row < M and scale_col_first_elt < N:
+        mS_row_stage[(tidx // 2, tidx % 2)] = Uint8(biased_exp_r)
+
+    inv_scale_r = exp2f_rcp(biased_exp_r) # f32 reciprocal of the scale
+    # Fetch the conversion function based on the FP8 format
+    cvt_f32x2 = cvt_f32x2_to_fp8x2(FP8_DTYPE)
+    if cutlass.const_expr(_row_fast):
+        kit_cast = packed16_kit(DTYPE)
+        mul_cvt_x2 = kit_cast.mul_cvt_to_fp8x2(FP8_DTYPE, FUSE_RELU)
+        # Pack `(inv_scale_r, inv_scale_r)` as a single 64-bit f32x2 once;
+        # the per-wave mul_cvt consumes this directly.
+        scale_2x = pack_f32x2(inv_scale_r, inv_scale_r)
+
+    for w in cutlass.range_constexpr(WAVES):
+        idx = (w * 4 + offset) % MXFP8_BLOCK_SIZE
+        idx = idx // 4
+        if cutlass.const_expr(_row_fast):
+            # One fused PTX per <fmt>x2 pair: <fmt>x2 × f32x2 → fp8x2.
+            # Byte layout: byte[0]=fp8(lo * s), byte[1]=fp8(hi * s).
+            p01 = mul_cvt_x2(in_r[w][0], scale_2x)
+            p23 = mul_cvt_x2(in_r[w][1], scale_2x)
+        else:
+            # cvt PTX semantics: `cvt.rn.satfinite.<fmt>.f32 d, a, b` gives
+            # d[15:8]=fp8(a), d[7:0]=fp8(b). Pass (v1, v0) so the u16 low
+            # byte ends up as fp8(v0) and the high byte as fp8(v1).
+            v0 = in_r[w][0] * inv_scale_r
+            v1 = in_r[w][1] * inv_scale_r
+            v2 = in_r[w][2] * inv_scale_r
+            v3 = in_r[w][3] * inv_scale_r
+            p01 = cvt_f32x2(v1, v0, FUSE_RELU)  # u16 little-endian: v0,v1
+            p23 = cvt_f32x2(v3, v2, FUSE_RELU)  # u16 little-endian: v2,v3
+        quad = (p23 << Int32(16)) | p01
+        sO_thread_u32[idx] = Uint32(quad)
+
+    return amax_r
+
+@cute.jit
+def quantize_colwise_mxfp8(
+    sX_tile,        # (TILE_Y, TILE_X) bf16/fp16 smem view, post-TMA
+    sO_col_tile,    # (TILE_Y, TILE_X) uint8 smem view (colwise FP8 output)
+    mS_col_stage,         # colwise scale tensor (1D swizzled, or 2D linear)
+    max_norm_rcp,
+    tile_row_start, # Int32 — global row index of this stage's row 0
+                    # (= tile_idx_y * TILE_Y). Used to mask OOB scale stores
+                    # for irregular shapes.
+    tile_col_start, # Int32 — global col index of this CTA's col 0
+                    # (= bidx * TILE_X).
+    M, N,           # Int32 — full tensor extents.
+    ACTIVATION,
+    DTYPE,
+    FP8_DTYPE,
+    SWIZZLE,
+    TILE_X,
+    TILE_Y,
+    MXFP8_BLOCK_SIZE,
+    WITH_ACT=False,     # forward: apply activation to the element
+    WITH_DACT=False,    # backward: out = grad · act'(act_input)
+    sA_tile=None,       # (TILE_Y, TILE_X) activation-input smem tile (dact only)
+    WITH_DBIAS=False,   # also return this thread's column sum (pre-truncate)
+    CACHE_ACTIVATION=False,  # overwrite sX_tile in place with the post-activation
+                             # (IType-truncated) values, so the rowwise pass can read
+                             # them instead of recomputing op
+):
+    tidx, _, _ = cute.arch.thread_idx()
+
+    _, tv_layout = cute.make_layout_tv(
+        thr_layout=cute.make_layout((1, TILE_X), stride=(TILE_X, 1)),
+        val_layout=cute.make_layout((MXFP8_BLOCK_SIZE, 1), stride=(1, 1))
+    )
+
+    sX_tv = cute.composition(sX_tile, tv_layout)
+    sO_tv = cute.composition(sO_col_tile, tv_layout)
+
+    # I/O Elements that belong to this thread
+    sX_thread = sX_tv[tidx, None]
+    sO_thread = sO_tv[tidx, None]
+
+    # dbias needs the per-element fp32 values to sum, so it takes the f32 path
+    # (never the i16 fast path) — matching CUDA, whose f16 fast path requires
+    # `!IS_DBIAS` (quantize_mxfp8.cuh:219).
+    USE_HALF_PRECISION = is_packed16(DTYPE) and ACTIVATION is None
+    dbias_partial = Float32(0.0)
+
+    if cutlass.const_expr(USE_HALF_PRECISION):
+        kit = packed16_kit(DTYPE)
+        # If we can use the half precision format, then use the input tile directly since there is no need to upcast
+        sX_thread_i16 = cute.make_tensor(
+            cute.recast_ptr(sX_thread.iterator, dtype=Int16),
+            cute.make_layout((MXFP8_BLOCK_SIZE,), stride=(TILE_X,)),
+        )
+        if cutlass.const_expr(WITH_DBIAS):
+            for i in cutlass.range_constexpr(MXFP8_BLOCK_SIZE):
+                dbias_partial += kit.bits_to_f32(sX_thread_i16[i])
+        amax_bits = Int16(0)
+        for i in cutlass.range_constexpr(MXFP8_BLOCK_SIZE):
+            amax_bits = kit.abs_max_scalar(amax_bits, sX_thread_i16[i])
+        amax_c = fabs_f32(kit.bits_to_f32(amax_bits))
+    else:
+        # Otherwise we need to case input values to fp32. Allocate the register tensor and load from SMEM input tiles.
+        sX_thread_f32 = cute.make_rmem_tensor(
+            layout_or_shape=cute.make_layout((MXFP8_BLOCK_SIZE,), stride=(1,)),
+            dtype=Float32,
+        )
+        for i in cutlass.range_constexpr(MXFP8_BLOCK_SIZE):
+            sX_thread_f32[i] = Float32(sX_thread[i])
+        # Apply activation (fwd) or grad·act'(act_input) (bwd dact) in f32.
+        if cutlass.const_expr(WITH_DACT):
+            dop = SUPPORTED_DACTIVATIONS[ACTIVATION]
+            sA_thread = cute.composition(sA_tile, tv_layout)[tidx, None]
+            for i in cutlass.range_constexpr(MXFP8_BLOCK_SIZE):
+                sX_thread_f32[i] = sX_thread_f32[i] * dop(Float32(sA_thread[i]))
+        elif cutlass.const_expr(WITH_ACT):
+            op = SUPPORTED_ACTIVATIONS[ACTIVATION]
+            for i in cutlass.range_constexpr(MXFP8_BLOCK_SIZE):
+                sX_thread_f32[i] = op(sX_thread_f32[i])
+        # Accumulate the per-thread column partial for dbias if WITH_DBIAS.
+        if cutlass.const_expr(WITH_DBIAS):
+            for i in cutlass.range_constexpr(MXFP8_BLOCK_SIZE):
+                dbias_partial += sX_thread_f32[i]
+        # Truncate the activation (after we apply op) back to the half precision type if input is also half precision.
+        if cutlass.const_expr(is_packed16(DTYPE) and ACTIVATION is not None):
+            kit_act = packed16_kit(DTYPE)
+            for i in cutlass.range_constexpr(MXFP8_BLOCK_SIZE):
+                sX_thread_f32[i] = kit_act.truncate_f32(sX_thread_f32[i])
+        # Columnwise is the preferred direction so it runs first. If it needs to cache the activation in the input tile
+        # to let the rowwise pass read it, we need to cast and overwrite the input data in-place here
+        if cutlass.const_expr(CACHE_ACTIVATION):
+            for i in cutlass.range_constexpr(MXFP8_BLOCK_SIZE):
+                sX_thread[i] = DTYPE(sX_thread_f32[i])
+        amax_c = Float32(0.0)
+        for i in cutlass.range_constexpr(MXFP8_BLOCK_SIZE):
+            amax_c = cute.arch.fmax(amax_c, fabs_f32(sX_thread_f32[i]))
+
+    # Irregular shapes: skip when this stage's row range or this thread's
+    # column lies past the input extents. TILE_Y == MXFP8_BLOCK_SIZE so each stage
+    # is exactly one scale-row; valid iff `tile_row_start < M`.
+    biased_exp_c = cvt_f32_to_fp8e8m0(amax_c * max_norm_rcp)
+    scale_col = tile_col_start + tidx
+    if tile_row_start < M and scale_col < N:
+        if cutlass.const_expr(SWIZZLE):
+            mS_col_stage[(0, tidx % 32, tidx // 32)] = Uint8(biased_exp_c)
+        else:
+            mS_col_stage[(0, tidx)] = Uint8(biased_exp_c)
+
+    inv_scale_c = exp2f_rcp(biased_exp_c)
+    cvt_to_fp8_func = cvt_f32_to_fp8(FP8_DTYPE)
+    if cutlass.const_expr(USE_HALF_PRECISION):
+        kit_cast = packed16_kit(DTYPE)
+        for i in cutlass.range_constexpr(MXFP8_BLOCK_SIZE):
+            v_f32 = kit_cast.bits_to_f32(sX_thread_i16[i])
+            sO_thread[i] = Uint8(cvt_to_fp8_func(v_f32 * inv_scale_c))
+    else:
+        for i in cutlass.range_constexpr(MXFP8_BLOCK_SIZE):
+            sO_thread[i] = Uint8(cvt_to_fp8_func(sX_thread_f32[i] * inv_scale_c))
+
+    # Return this stage's per-column partial alongside amax; the caller accumulates
+    # it across stages (a scalar can't be updated in-place through the arg).
+    return amax_c, dbias_partial
 
 class MXFP8QuantizeConfig:
     """Configs for the compiled CuTeDSL kernel. These will be fixed once the kernel is compiled and

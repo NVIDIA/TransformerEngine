@@ -19,14 +19,27 @@ load_framework_extension("torch")
 from transformer_engine.pytorch import constants
 from transformer_engine.pytorch.constants import DType
 
-# Register the CuTeDSL kernel entrypoints (TVM-FFI global funcs) so the C++
-# dispatcher can discover them via GetGlobal and compile kernels on demand. The
-# CuTeDSL toolchain (cutlass, tvm_ffi) is optional; if it is unavailable the
-# import is skipped and C++ simply falls back to the CUDA C++ kernels.
+# Import the CuTeDSL module to register its quantize entrypoints with TVM-FFI.
+# This backend is optional (install via `pip install transformer-engine[cutedsl]`);
+# without it, TE simply uses the built-in CUDA kernels.
 try:
     import transformer_engine.common.CuTeDSL  # noqa: F401
-except Exception:
-    pass
+except ModuleNotFoundError as e:
+    # The optional CuTeDSL toolchain (e.g. nvidia-cutlass-dsl) isn't installed —
+    # expected for a default install; quietly fall back to the CUDA kernels.
+    import logging
+    logging.getLogger(__name__).debug(
+        "CuTeDSL quantize backend not available (%s); using the CUDA kernels. "
+        "Install `transformer-engine[cutedsl]` to enable it.",
+        e,
+    )
+except Exception as e:
+    # Something is really broken if it's not an import error
+    import logging
+    logging.getLogger(__name__).warning(
+        "CuTeDSL quantize backend failed to import (%s); using the CUDA kernels.",
+        e,
+    )
 
 from transformer_engine.pytorch.module import LayerNormLinear
 from transformer_engine.pytorch.module import Linear

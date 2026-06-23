@@ -11,9 +11,7 @@ functions. The C++ dispatcher probes for those names via
 inside a Python environment with the CuTeDSL toolchain available, so the kernel
 may be compiled on demand; not finding it means a plain C++ environment, and
 the dispatcher falls back to the CUDA C++ kernel.
-
-Importing requires the optional CuTeDSL toolchain (cutlass, tvm_ffi). Callers
-that want graceful degradation should guard the import in a try/except.
 """
 
-from . import cast  # noqa: F401  (import side effect: registers global funcs)
+# Trigger the casting CuTeDSL entrypoints registration via TVM-FFI.
+from . import cast  # noqa: F401

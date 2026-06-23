@@ -2,11 +2,13 @@
 #
 # See LICENSE for license information.
 
-import cutlass
 import cutlass.cute as cute
 from cutlass import Float32
 from cutlass._mlir.dialects import arith as mlir_arith
-from cutlass.cutlass_dsl import dsl_user_op
+from cutlass.cutlass_dsl import T, dsl_user_op
+
+from transformer_engine.common.CuTeDSL.utils import fma_f32
+
 
 def act_relu(x: Float32) -> Float32:
     return cute.arch.fmax(x, Float32(0.0))
@@ -28,14 +30,14 @@ def act_gelu(x: Float32) -> Float32:
 def act_silu(x: Float32) -> Float32:
     """SiLU/Swish: x · σ(x) = x / (1 + e^-x).
     Matches TE's `silu` (`val / (1 + expf(-val))`)."""
-    return x / (Float32(1.0) + cute.arch.exp(-x))
+    return x / (Float32(1.0) + cute.math.exp(-x, fastmath=True))
 
 
 def act_qgelu(x: Float32) -> Float32:
     """Quick GELU: x · σ(1.702·x). Matches TE `qgelu_with_alpha(val, 1.702)` =
     `cval · (1 / (1 + expf(-1.702·cval)))` (multiply by sigmoid, not a divide)."""
     z = Float32(1.702) * x
-    return x * (Float32(1.0) / (Float32(1.0) + cute.arch.exp(-z)))
+    return x * (Float32(1.0) / (Float32(1.0) + cute.math.exp(-z, fastmath=True)))
 
 
 def act_srelu(x: Float32) -> Float32:
@@ -61,14 +63,16 @@ def dact_dsrelu(x: Float32) -> Float32:
 
 def sigmoid(x: Float32) -> Float32:
     """σ(x) = 1 / (1 + e^-x), same exp intrinsic as the forward silu/qgelu."""
-    return Float32(1.0) / (Float32(1.0) + cute.arch.exp(-x))
+    return Float32(1.0) / (Float32(1.0) + cute.math.exp(-x, fastmath=True))
 
 
 def dact_dsilu(x: Float32) -> Float32:
     """dsilu: x·σ(x)·(1-σ(x)) + σ(x). Matches math.h `dsilu`
     (`cval·dsigmoid + sigmoid`, dsigmoid = s·(1-s))."""
     s = sigmoid(x)
-    return x * (s * (Float32(1.0) - s)) + s
+    # cval·dsigmoid + sigmoid as one FFMA — matches nvcc's contraction of
+    # math.h `dsilu` (`cval * dsigmoid + sigmoid`) so dbias is bit-exact.
+    return fma_f32(x, s * (Float32(1.0) - s), s)
 
 
 def dact_dqgelu(x: Float32) -> Float32:
