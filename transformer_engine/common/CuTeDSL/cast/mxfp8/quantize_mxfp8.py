@@ -17,6 +17,7 @@ Each block processes a 64x64 chunk in 2 stages of 32x64 tiles loaded into
 shared memory.
 """
 import logging
+import os
 
 from transformer_engine.common.CuTeDSL.utils import _bitcast_f32_to_i32, str_to_cutlass_dtype
 
@@ -56,6 +57,7 @@ from transformer_engine.common.CuTeDSL.utils_fp8 import (
     cvt_f32_to_fp8e8m0
 )
 
+CUTEDSL_DEBUG_LOGGING = os.environ.get("CUTEDSL_DEBUG_LOGGING", "0") == "1"
 
 logger = logging.getLogger("transformer_engine.cutedsl.mxfp8")
 
@@ -528,6 +530,7 @@ class MXFP8QuantizeSmemKernel:
         # scale; this only skips the redundant global comparison in the other pass.
         self.AMAX_FROM_COLWISE = cfg.WITH_AMAX and cfg.COLWISE
         self.AMAX_FROM_ROWWISE = cfg.WITH_AMAX and not cfg.COLWISE
+        # Only enable logging if CUTEDSL_DEBUG_LOGGING=1
 
     @cute.jit
     def __call__(
@@ -541,6 +544,9 @@ class MXFP8QuantizeSmemKernel:
         mWorkspace: Optional[cute.Tensor], # Workspace for the dbias reduction, only used when WITH_DBIAS is True
         stream: CUstream,
     ):
+        if cutlass.const_expr(CUTEDSL_DEBUG_LOGGING):
+            cute.printf(f"[CuTeDSL] MXFP8QuantizeSmemKernel.__call__() with config: {self.cfg}\n")
+
         M = mX.shape[0]
         N = mX.shape[1]
         cfg = self.cfg
