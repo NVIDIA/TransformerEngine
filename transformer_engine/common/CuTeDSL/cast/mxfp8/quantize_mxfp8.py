@@ -147,6 +147,23 @@ class MXFP8QuantizeSmemKernel:
         # Only do rowwise reduction when we don't quantize columnwisely when WITH_DBIAS is True.
         self.DBIAS_REDUCTION_COLWISE = cfg.WITH_DBIAS and cfg.COLWISE
         self.DBIAS_REDUCTION_ROWWISE = cfg.WITH_DBIAS and not cfg.COLWISE
+        # Cache activation in-place in the SMEM input tile when we process both rowwise and colwise passes
+        # so the activation is only computed once in the direction we favor (columnwise) and the other direction (rowwise)
+        # reads the cached value instead of recomputing it.
+        # Note: if activation is relu, there is no standalong relu applied because it's already fused into `cvt.rn.satfinite`
+        # so it should be treated as "no activation"
+        self.CACHE_ACTIVATION = (
+            (cfg.WITH_ACT or cfg.WITH_DACT)
+            and cfg.ROWWISE and cfg.COLWISE
+            and cfg.ACTIVATION != "relu"
+        )
+        # The global tensor amax (mAmax) is the max over ALL elements. Each direction's
+        # per-block amaxes already span every element, so when both passes run we only
+        # fold the global amax from one of them — favor colwise (matches the flags
+        # above). The per-block *scale* amax is still computed in each pass for its own
+        # scale; this only skips the redundant global comparison in the other pass.
+        self.AMAX_FROM_COLWISE = cfg.WITH_AMAX and cfg.COLWISE
+        self.AMAX_FROM_ROWWISE = cfg.WITH_AMAX and not cfg.COLWISE
 
     @cute.jit
     def __call__(
@@ -538,6 +555,7 @@ class MXFP8QuantizeSmemKernel:
             # Each CTA has `NUM_TILES` tiles. Each stage we need to obtain the tile for that specific stage. 
             # So the tile index along Y dimension is `bidy * NUM_TILES + stage`
             tile_idx_y = bidy * NUM_TILES + stage
+            # Process rowwise and colwise quantization separately
             if cutlass.const_expr(cfg.COLWISE):
                 # The first row that belongs to this CTA. Each CTA handles NUM_TILES of (TILE_Y, TILE_X) tiles stacked vertically,
                 # and each stage handles one of them.
@@ -550,10 +568,14 @@ class MXFP8QuantizeSmemKernel:
                     tile_idx_y * TILE_Y, bidx * TILE_X, M, N,
                     sActInput_tile,
                 )
-                if cutlass.const_expr(cfg.WITH_AMAX):
+                if cutlass.const_expr(self.AMAX_FROM_COLWISE):
                     per_thread_amax = cute.arch.fmax(per_thread_amax, amax_c)
                 if cutlass.const_expr(self.DBIAS_REDUCTION_COLWISE):
                     block_dbias += dbias_c
+            # If we cache the activation in shared memory, we need to ensure that all threads have finished writing to the shared memory 
+            # from the columnwise pass before any thread reads from it in the rowwise pass.
+            if cutlass.const_expr(self.CACHE_ACTIVATION):
+                cute.arch.sync_threads()
             if cutlass.const_expr(cfg.ROWWISE):
                 sO_row_tile = sO_row[(None, stage)]
                 # mS_row is ((SCALE_TILE), (GRID)) where SCALE_TILE = (32, 2).
@@ -576,7 +598,7 @@ class MXFP8QuantizeSmemKernel:
                     rowwise_dbias_acc,
                 )
 
-                if cutlass.const_expr(cfg.WITH_AMAX):
+                if cutlass.const_expr(self.AMAX_FROM_ROWWISE):
                     per_thread_amax = cute.arch.fmax(per_thread_amax, amax_r)
 
             # Make the shared-memory writes visible to the TMA's async proxy before the TMA reads them.
@@ -694,7 +716,7 @@ class MXFP8QuantizeSmemKernel:
         cfg = self.cfg
         return quantize_rowwise_mxfp8(
             sX_tile,
-            sActInput_tile,
+            None if self.CACHE_ACTIVATION else sActInput_tile,
             sO_row_tile,
             mS_row_stage,
             max_norm_rcp,
@@ -702,7 +724,7 @@ class MXFP8QuantizeSmemKernel:
             tile_col_start,
             M,
             N,
-            ACTIVATION=cfg.ACTIVATION,
+            ACTIVATION=None if self.CACHE_ACTIVATION else cfg.ACTIVATION,
             DTYPE=cfg.DTYPE,
             FP8_DTYPE=cfg.FP8_DTYPE,
             TILE_Y=TILE_Y,
@@ -711,8 +733,8 @@ class MXFP8QuantizeSmemKernel:
             THREADS_PER_WARP=THREADS_PER_WARP,
             THREADS_PER_BANK=THREADS_PER_BANK,
             PACK_SIZE=PACK_SIZE,
-            WITH_ACT=cfg.WITH_ACT,
-            WITH_DACT=cfg.WITH_DACT,
+            WITH_ACT=cfg.WITH_ACT and not self.CACHE_ACTIVATION,
+            WITH_DACT=cfg.WITH_DACT and not self.CACHE_ACTIVATION,
             WITH_DBIAS=self.DBIAS_REDUCTION_ROWWISE,
             dbias_acc=dbias_acc,
         )
@@ -750,6 +772,7 @@ class MXFP8QuantizeSmemKernel:
             WITH_DACT=cfg.WITH_DACT,
             sA_tile=sActInput_tile,
             WITH_DBIAS=self.DBIAS_REDUCTION_COLWISE,
+            CACHE_ACTIVATION=self.CACHE_ACTIVATION,
         )
 
 def compile_cutedsl_function_from_cfg(cfg):

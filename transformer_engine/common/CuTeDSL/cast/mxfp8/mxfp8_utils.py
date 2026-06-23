@@ -224,18 +224,9 @@ def _cvt_f32x2_to_fp8x2(fp8_dtype: str):
     return cvt_f32x2_to_fp8e4m3x2
 
 
-# ---------------------------------------------------------------------------
-# 16-bit packed input PTX kit (bf16 / f16)
-#
-# bf16 and f16 share the same fast-path shape: packed-x2 amax via
-# `max.xorsign.abs.<fmt>x2`, then per-lane widen-to-f32 + `mul.f32x2` +
-# `cvt.rn.satfinite.<out>x2.f32`. Only the opcodes differ. Build one PTX kit
-# per format at module load and let the kernel pick the right kit at JIT
-# trace time via `cfg.DTYPE` — equivalent to a C++ template arg specialization
-# on `IType`, with no runtime branch.
-# ---------------------------------------------------------------------------
 def _build_packed16_kit(in_fmt: str):
-    """Build a kit of PTX wrappers for a 16-bit input format.
+    """Build a kit of PTX wrappers for a 16-bit input format so we don't have to repeat
+    the same inline asm boilerplate code for FP16 and BF16 dtypes.
 
     `in_fmt` is the PTX format string ('bf16' or 'f16'). Returns a namespace
     with the per-format ops the rowwise/colwise inner loops need:
@@ -460,7 +451,7 @@ def quantize_rowwise_mxfp8(
 ):
     tidx, _, _ = cute.arch.thread_idx()
 
-    tiler, tv_layout = cute.make_layout_tv(
+    _, tv_layout = cute.make_layout_tv(
         thr_layout=cute.make_layout((TILE_Y, 2), stride=(2, 1)),
         val_layout=cute.make_layout((1, MXFP8_BLOCK_SIZE), stride=(0, 1))
     )
@@ -479,7 +470,7 @@ def quantize_rowwise_mxfp8(
         cute.make_layout((MXFP8_BLOCK_SIZE // 4,), stride=(1,)), # 1 uint32 is 4 fp8 elements
     )
 
-    # PTX allows to fuse relu operation in `cvt.rn.satfinite`
+    # PTX allows to fuse relu activation in `cvt.rn.satfinite`
     FUSE_RELU = cutlass.const_expr(ACTIVATION == "relu")
     # For this fast path we can read in pack of 2 instead of reading individual f16 / bf16 element.
     # dbias needs the per-element fp32 values to accumulate, so it forces the slow path.
@@ -497,7 +488,7 @@ def quantize_rowwise_mxfp8(
             cute.make_layout((1, MXFP8_BLOCK_SIZE // 2), stride=(0, 1)), # 1 int32 is 2 fp16/bf16 elements
         )
         # Each wave we read 2 packed i32, which is 4 fp16/bf16 elements (PACK_SIZE)
-        # In total we have 8 waves where each wave reads 
+        # In total we have 8 waves where each wave reads 4 elements, so we read 32 elements in total.
         in_r = [[None, None] for _ in range(WAVES)]
         bank_group = (tidx % THREADS_PER_WARP) // THREADS_PER_BANK # Each 4 threads share the same bank, which forms a bank group
         offset = bank_group * 2 # Each bank group will read 2 i32 from their bank
@@ -536,9 +527,6 @@ def quantize_rowwise_mxfp8(
             sX_thread.iterator,
             cute.make_layout((1, MXFP8_BLOCK_SIZE), stride=(0, 1)),
         )
-        in_r = [[None] * PACK_SIZE for _ in range(WAVES)]
-        bank_group = (tidx % THREADS_PER_WARP) // THREADS_PER_BANK # Each 4 threads share the same bank, which forms a bank group
-        offset = bank_group * 4 # Each bank group will read 4 f16 from their bank
 
         if cutlass.const_expr(WITH_DACT):
             # Backward: out = grad · act'(act_input). sX is grad, sA is act_input.
@@ -554,10 +542,17 @@ def quantize_rowwise_mxfp8(
         if cutlass.const_expr(_is_packed16(DTYPE) and ACTIVATION is not None):
             kit_act = _packed16_kit(DTYPE)
 
+        # Each wave we read PACK_SIZE elements, and we have WAVES waves, so we read WAVES * PACK_SIZE (= MXFP8_BLOCK_SIZE) elements in total.
+        in_r = [[None] * PACK_SIZE for _ in range(WAVES)]
+        # Each thread start reading from the specfic bank based on its thread ID so they can do their best to access different banks
+        # to avoid bank conflict.
+        bank_group = (tidx % THREADS_PER_WARP) // THREADS_PER_BANK
+        # The offset this thread should start reading from based on what's its first bank to access.
+        offset = bank_group * 4 # Each bank group will read 4 f16 from their bank
         for w in cutlass.range_constexpr(WAVES):
             start = (w * PACK_SIZE + offset) % MXFP8_BLOCK_SIZE
             for i in cutlass.range_constexpr(PACK_SIZE):
-                x = Float32(sX_thread_rw[0, start + i]) # grad
+                x = Float32(sX_thread_rw[0, start + i])
                 if cutlass.const_expr(WITH_DACT):
                     # out = grad · act'(act_input)
                     x = x * dop(Float32(sA_thread_rw[0, start + i]))
@@ -566,9 +561,7 @@ def quantize_rowwise_mxfp8(
                     # If it's relu, we can handle it later
                     if not cutlass.const_expr(FUSE_RELU):
                         x = op(x)
-                # dbias: accumulate this row's column (start+e) value BEFORE the bf16
-                # truncation (matches CUDA's `thread_dbias_rowwise[j] += elt`). start+i
-                # is a multiple-of-PACK_SIZE group + i, so it stays within [0, MXFP8_BLOCK_SIZE).
+                # Accumulate to the per-thread dbias register buffer for this tile if WITH_DBIAS
                 if cutlass.const_expr(WITH_DBIAS):
                     dbias_acc[start + i] += x
                 # If 16-bit input with activation, truncate to IType
@@ -607,8 +600,6 @@ def quantize_rowwise_mxfp8(
         # the per-wave mul_cvt consumes this directly.
         scale_2x = pack_f32x2(inv_scale_r, inv_scale_r)
 
-    bank_group = (tidx % THREADS_PER_WARP) // THREADS_PER_BANK # Each 4 threads share the same bank, which forms a bank group
-    offset = bank_group * 4 # Each bank group will write 4 fp8 to
     for w in cutlass.range_constexpr(WAVES):
         idx = (w * 4 + offset) % MXFP8_BLOCK_SIZE
         idx = idx // 4
@@ -655,10 +646,13 @@ def quantize_colwise_mxfp8(
     WITH_DACT=False,    # backward: out = grad · act'(act_input)
     sA_tile=None,       # (TILE_Y, TILE_X) activation-input smem tile (dact only)
     WITH_DBIAS=False,   # also return this thread's column sum (pre-truncate)
+    CACHE_ACTIVATION=False,  # overwrite sX_tile in place with the post-activation
+                             # (IType-truncated) values, so the rowwise pass can read
+                             # them instead of recomputing op
 ):
     tidx, _, _ = cute.arch.thread_idx()
 
-    tiler, tv_layout = cute.make_layout_tv(
+    _, tv_layout = cute.make_layout_tv(
         thr_layout=cute.make_layout((1, TILE_X), stride=(TILE_X, 1)),
         val_layout=cute.make_layout((MXFP8_BLOCK_SIZE, 1), stride=(1, 1))
     )
@@ -673,30 +667,25 @@ def quantize_colwise_mxfp8(
     # dbias needs the per-element fp32 values to sum, so it takes the f32 path
     # (never the i16 fast path) — matching CUDA, whose f16 fast path requires
     # `!IS_DBIAS` (quantize_mxfp8.cuh:219).
-    USE_HALF_PRECISION = _is_packed16(DTYPE) and ACTIVATION is None and not WITH_DBIAS
+    USE_HALF_PRECISION = _is_packed16(DTYPE) and ACTIVATION is None
     dbias_partial = Float32(0.0)
 
-    # 0. Load the 32-element column from smem into registers once (matches
-    # C++'s `in_colwise_IType[i]` cache). Amax and cast both reuse these.
     if cutlass.const_expr(USE_HALF_PRECISION):
         kit = _packed16_kit(DTYPE)
-        # Per-thread Int16 view of the column. Same byte address as
-        # `sX_thread` (bf16/fp16 are 16-bit, same width as Int16); the
-        # element stride is TILE_X because the column elements are
-        # TILE_X apart in the row-major tile.
+        # If we can use the half precision format, then use the input tile directly since there is no need to upcast
         sX_thread_i16 = cute.make_tensor(
             cute.recast_ptr(sX_thread.iterator, dtype=Int16),
             cute.make_layout((MXFP8_BLOCK_SIZE,), stride=(TILE_X,)),
         )
+        if cutlass.const_expr(WITH_DBIAS):
+            for i in cutlass.range_constexpr(MXFP8_BLOCK_SIZE):
+                dbias_partial += kit.bits_to_f32(sX_thread_i16[i])
         amax_bits = Int16(0)
         for i in cutlass.range_constexpr(MXFP8_BLOCK_SIZE):
             amax_bits = kit.abs_max_scalar(amax_bits, sX_thread_i16[i])
         amax_c = fabs_f32(kit.bits_to_f32(amax_bits))
     else:
-        # Materialize the column into f32 registers — widen on read so
-        # bf16/fp16 inputs become real fp32 values (a pointer recast to
-        # Float32 would not widen; it would reinterpret the 16-bit bytes
-        # as half of a 32-bit float).
+        # Otherwise we need to case input values to fp32. Allocate the register tensor and load from SMEM input tiles.
         sX_thread_f32 = cute.make_rmem_tensor(
             layout_or_shape=cute.make_layout((MXFP8_BLOCK_SIZE,), stride=(1,)),
             dtype=Float32,
@@ -713,18 +702,20 @@ def quantize_colwise_mxfp8(
             op = SUPPORTED_ACTIVATIONS[ACTIVATION]
             for i in cutlass.range_constexpr(MXFP8_BLOCK_SIZE):
                 sX_thread_f32[i] = op(sX_thread_f32[i])
-        # dbias = column sum of the (post-act/dact) value, taken BEFORE the bf16
-        # truncation — matches CUDA's `partial_dbias_colwise += elt`.
+        # Accumulate the per-thread column partial for dbias if WITH_DBIAS.
         if cutlass.const_expr(WITH_DBIAS):
             for i in cutlass.range_constexpr(MXFP8_BLOCK_SIZE):
                 dbias_partial += sX_thread_f32[i]
-        # Numerical truncation through IType so amax/cast match C++.
-        # Only needed when 16-bit input + activation; without activation
-        # the widening was already exact.
+        # Truncate the activation (after we apply op) back to the half precision type if input is also half precision.
         if cutlass.const_expr(_is_packed16(DTYPE) and ACTIVATION is not None):
             kit_act = _packed16_kit(DTYPE)
             for i in cutlass.range_constexpr(MXFP8_BLOCK_SIZE):
                 sX_thread_f32[i] = kit_act.truncate_f32(sX_thread_f32[i])
+        # Columnwise is the preferred direction so it runs first. If it needs to cache the activation in the input tile
+        # to let the rowwise pass read it, we need to cast and overwrite the input data in-place here
+        if cutlass.const_expr(CACHE_ACTIVATION):
+            for i in cutlass.range_constexpr(MXFP8_BLOCK_SIZE):
+                sX_thread[i] = DTYPE(sX_thread_f32[i])
         amax_c = Float32(0.0)
         for i in cutlass.range_constexpr(MXFP8_BLOCK_SIZE):
             amax_c = cute.arch.fmax(amax_c, fabs_f32(sX_thread_f32[i]))
@@ -741,15 +732,15 @@ def quantize_colwise_mxfp8(
             mS_col_stage[(0, tidx)] = Uint8(biased_exp_c)
 
     inv_scale_c = exp2f_rcp(biased_exp_c)
-    cvt_to_fp8 = _cvt_f32_to_fp8(FP8_DTYPE)
+    cvt_to_fp8_func = _cvt_f32_to_fp8(FP8_DTYPE)
     if cutlass.const_expr(USE_HALF_PRECISION):
         kit_cast = _packed16_kit(DTYPE)
         for i in cutlass.range_constexpr(MXFP8_BLOCK_SIZE):
             v_f32 = kit_cast.bits_to_f32(sX_thread_i16[i])
-            sO_thread[i] = Uint8(cvt_to_fp8(v_f32 * inv_scale_c))
+            sO_thread[i] = Uint8(cvt_to_fp8_func(v_f32 * inv_scale_c))
     else:
         for i in cutlass.range_constexpr(MXFP8_BLOCK_SIZE):
-            sO_thread[i] = Uint8(cvt_to_fp8(sX_thread_f32[i] * inv_scale_c))
+            sO_thread[i] = Uint8(cvt_to_fp8_func(sX_thread_f32[i] * inv_scale_c))
 
     # Return this stage's per-column partial alongside amax; the caller accumulates
     # it across stages (a scalar can't be updated in-place through the arg).
