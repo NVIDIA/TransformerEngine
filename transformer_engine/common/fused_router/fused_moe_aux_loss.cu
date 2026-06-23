@@ -63,8 +63,8 @@ __global__ void fused_moe_aux_loss_forward_kernel(const DataType* probs,
   const int warp_id = threadIdx.x / kThreadsPerWarp;
   const int lane_id = threadIdx.x % kThreadsPerWarp;
   if (warp_id == 0) {
-    CompType block_sum = warp_reduce_on_shmem(shmem_block, static_cast<int>(blockDim.x),
-                                              ReduceFuncType::SUM, lane_id);
+    CompType block_sum = warp_reduce_on_shmem<CompType, ReduceFuncType::SUM>(
+        shmem_block, static_cast<int>(blockDim.x), lane_id);
     if (lane_id == 0) {
       atomicAdd(&Coeff_buf[1], static_cast<float>(block_sum * coeff));
     }

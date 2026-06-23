@@ -23,9 +23,10 @@ from ...module.base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
+from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload, start_offload
 from ...quantization import FP8GlobalStateManager, QuantizerRole, Recipe
 from ...quantized_tensor import QuantizedTensorStorage
-from ...tensor import MXFP8Quantizer, MXFP8Tensor, Quantizer
+from ...tensor import MXFP8Quantizer, MXFP8Tensor, NVFP4Quantizer, Quantizer
 from ...utils import (
     canonicalize_device,
     canonicalize_dtype,
@@ -763,17 +764,27 @@ class GroupedLinear(BasicOperation):
 
         * The graph-safe path dispatches to ``general_grouped_gemm_for_grouped_tensor``,
           which is backed by ``nvte_grouped_gemm_with_discrete_inputA`` in the common
-          library. That kernel requires Blackwell (SM100) or newer with cuBLAS 13.3+.
-        * Quantized compute is currently MXFP8-only; every other quantization
-          recipe (fp8 delayed / current scaling, fp8 block scaling, NVFP4, ...)
-          falls back to the legacy flow.
-        * Unquantized compute supports BF16/FP16 only -- FP32 is excluded
-          because the cublasLt grouped GEMM doesn't support it.
+          library. This filter mirrors cuBLASLt grouped GEMM's architecture
+          requirement without duplicating its cuBLAS version checks.
+        * Quantized compute supports MXFP8 and NVFP4 on Blackwell GPUs with Compute Capability (CC)
+          10.x and 11.0. NVFP4 requires RHT because graph-safe grouped quantization currently
+          requires RHT;
+          Every other quantization recipe (fp8 delayed / current scaling, fp8 block scaling, ...)
+          falls back to the legacy flow because the corresponding grouped quantization kernels are
+          missing.
+        * Unquantized compute supports BF16/FP16 on Hopper (CC 9.0) and Blackwell (CC 10.x and 11.0)
+          -- FP32 is excluded because the cuBLASLt grouped GEMM doesn't support it.
+        * Input/weight/grad_output quantizers are assumed to be of the same type, otherwise it
+          would trigger a fatal error in the cuBLASLt grouped GEMM check.
         """
-        if get_device_compute_capability() < (10, 0):
+        if not (9, 0) <= get_device_compute_capability() <= (11, 0):
             return False
         if with_quantized_compute:
-            return all(isinstance(q, MXFP8Quantizer) for q in input_quantizers)
+            if not (10, 0) <= get_device_compute_capability() <= (11, 0):
+                return False
+            return all(isinstance(q, MXFP8Quantizer) for q in input_quantizers) or all(
+                isinstance(q, NVFP4Quantizer) and q.with_rht for q in input_quantizers
+            )
         return dtype in (torch.bfloat16, torch.float16)
 
     def _get_grouped_weight_for_gemm(
@@ -783,7 +794,7 @@ class GroupedLinear(BasicOperation):
         columnwise_usage: bool,
         with_quantized_compute: bool,
         dtype: torch.dtype,
-    ) -> GroupedTensor:
+    ) -> GroupedTensorStorage:
         """Prepare weights for ``general_grouped_gemm_for_grouped_tensor``.
         Supports MXFP8/BF16/FP16 compute paths.
         """
@@ -800,7 +811,7 @@ class GroupedLinear(BasicOperation):
                 weight_parts = weight_param.split_into_quantized_tensors()
             dequantized = [maybe_dequantize(w, dtype) for w in weight_parts]
             weight_data = torch.stack(dequantized, dim=0).contiguous()
-            return GroupedTensor(
+            return GroupedTensorStorage(
                 shape=(num_groups * self.out_features, self.in_features),
                 dtype=dtype,
                 num_tensors=num_groups,
@@ -814,7 +825,7 @@ class GroupedLinear(BasicOperation):
             if weight_param.rowwise_data.dtype == dtype:
                 return weight_param
             weight_data = weight_param.rowwise_data.to(dtype=dtype)
-            return GroupedTensor(
+            return GroupedTensorStorage(
                 shape=(num_groups * self.out_features, self.in_features),
                 dtype=dtype,
                 num_tensors=num_groups,
@@ -866,8 +877,8 @@ class GroupedLinear(BasicOperation):
     def _get_grouped_bias_for_gemm(
         self,
         dtype: torch.dtype,
-    ) -> Optional[torch.Tensor]:
-        """Build a uniform GroupedTensor of per-group biases for the cublas
+    ) -> Optional[GroupedTensorStorage]:
+        """Build a uniform GroupedTensorStorage of per-group biases for the cublas
         grouped GEMM.
 
         Each group expects a (1, out_features) bias vector. Returns ``None``
@@ -888,7 +899,7 @@ class GroupedLinear(BasicOperation):
             ]
             bias_data = torch.stack(bias_list, dim=0).contiguous()
 
-        return GroupedTensor(
+        return GroupedTensorStorage(
             shape=(num_groups, self.out_features),
             dtype=dtype,
             num_tensors=num_groups,
@@ -953,7 +964,7 @@ class GroupedLinear(BasicOperation):
 
         # Dispatch: graph-safe GroupedTensor flow whenever it can be used.
         # See ``_is_graph_safe_path_supported`` for the gating rationale --
-        # in short it requires Blackwell (SM100+) plus a supported dtype /
+        # in short it requires Hopper (SM90+) plus a supported dtype /
         # quantization recipe. Otherwise we fall back to the legacy
         # ``tex.split_quantize`` + ``general_grouped_gemm`` flow.
         use_grouped_tensor_path = self._is_graph_safe_path_supported(
@@ -1026,6 +1037,25 @@ class GroupedLinear(BasicOperation):
             return
 
         ctx = basic_op_ctxs[0]
+
+        # Activation CPU offloading
+        # Note: No special logic is needed for weights. They are
+        # either nn.Parameter (auto-excluded from offload) or are
+        # temporary workspaces freshly created in each forward pass.
+        if is_cpu_offload_enabled():
+            saved = tensors_to_save[0]
+            offset = 4 if self._scale_bias else 3
+            if use_grouped_tensor_path:
+                # Layout: [split_sizes, base_split_offsets, split_points, (scales?), grouped_x, *weights]
+                grouped_x = saved[offset]
+                if grouped_x is not None:
+                    mark_activation_offload(grouped_x)
+            else:
+                # Layout: [split_sizes, None, None, (scales?), *xs, *ws]
+                live_xs = [t for t in saved[offset : offset + self.num_groups] if t is not None]
+                if live_xs:
+                    mark_activation_offload(*live_xs)
+
         ctx.save_for_backward(*tensors_to_save[0])
 
         num_groups = self.num_groups
@@ -1110,6 +1140,10 @@ class GroupedLinear(BasicOperation):
             xs = tex.split_quantize(x, split_sizes_int, input_quantizers)
         else:
             xs = torch.split(x, split_sizes_int)
+        if is_cpu_offload_enabled():
+            live_xs = [t for t in xs if t is not None]
+            if live_xs:
+                start_offload(*live_xs)
 
         # Allocate output tensor
         in_shape = list(input_.size())
@@ -1205,7 +1239,7 @@ class GroupedLinear(BasicOperation):
             grouped_x = tex.group_quantize(x, input_quantizer, num_groups, split_sizes)
         else:
             # No quantize: wrap the contiguous high-precision buffer.
-            grouped_x = GroupedTensor(
+            grouped_x = GroupedTensorStorage(
                 shape=(total_tokens, self.in_features),
                 dtype=dtype,
                 num_tensors=num_groups,
@@ -1214,6 +1248,9 @@ class GroupedLinear(BasicOperation):
                 first_dims=split_sizes,
                 tensor_offsets=base_split_offsets * self.in_features,
             )
+
+        if is_cpu_offload_enabled() and grouped_x is not None:
+            start_offload(grouped_x)
 
         # Build the weight GroupedTensor / list.
         if self.single_grouped_weight:
@@ -1238,7 +1275,7 @@ class GroupedLinear(BasicOperation):
         # Allocate output buffer and wrap as a GroupedTensor view.
         out_shape = original_shape[:-1] + [self.out_features]
         out = torch.empty(out_shape, dtype=dtype, device=device)
-        grouped_out = GroupedTensor(
+        grouped_out = GroupedTensorStorage(
             shape=(total_tokens, self.out_features),
             dtype=dtype,
             num_tensors=num_groups,
@@ -1555,7 +1592,11 @@ class GroupedLinear(BasicOperation):
             )
             grad_output_quantizer.optimize_for_gemm = True
 
-            if has_bias and not self._scale_bias:
+            if (
+                has_bias
+                and not self._scale_bias
+                and isinstance(grad_output_quantizer, MXFP8Quantizer)
+            ):
                 grouped_dy, dbias_packed = tex.bgrad_group_quantize(
                     dy_2d, grad_output_quantizer, num_groups, split_sizes
                 )
@@ -1566,7 +1607,7 @@ class GroupedLinear(BasicOperation):
         else:
             dy_2d = maybe_dequantize(dy_2d, dtype)
             # Wrap BF16/FP16 buffer as a GroupedTensor for grouped gemm
-            grouped_dy = GroupedTensor(
+            grouped_dy = GroupedTensorStorage(
                 shape=(total_tokens, self.out_features),
                 dtype=dtype,
                 num_tensors=num_groups,
@@ -1602,7 +1643,7 @@ class GroupedLinear(BasicOperation):
         if ctx.input_requires_grad:
             grad_input_shape = list(grad_output.size())[:-1] + [self.in_features]
             grad_input = torch.empty(grad_input_shape, dtype=dtype, device=device)
-            grouped_grad_input = GroupedTensor(
+            grouped_grad_input = GroupedTensorStorage(
                 shape=(total_tokens, self.in_features),
                 dtype=dtype,
                 num_tensors=num_groups,

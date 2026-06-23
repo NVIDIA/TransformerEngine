@@ -1042,7 +1042,7 @@ if torch.cuda.device_count() >= 2 and 2 not in _world_sizes:
 @pytest.mark.parametrize("world_size", _world_sizes)
 def test_distributed_fuser_ops(world_size: int) -> None:
     """Launch parallel job that runs parallel tests"""
-    python_exe = pathlib.Path(sys.executable).resolve()
+    python_exe = pathlib.Path(sys.executable)
     current_file = pathlib.Path(__file__).resolve()
     command = [
         python_exe,

@@ -455,6 +455,10 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         (cudnn_runtime_version >= 91301 ||
          (cudnn_runtime_version < 91301 &&
           softmax_type == NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX)) &&
+        // max_logit
+        // pre-9.21: no (the composite softmax node rejects the Stats + Max output combination)
+        // 9.21+: yes (Stats + Max via the unified softmax node)
+        (!return_max_logit || cudnn_runtime_version >= 92100) &&
         // determinism on Blackwell
         // pre-9.18.1: fwd: deterministic; bwd: non-deterministic
         // 9.18.1+: fwd: deterministic; bwd: non-deterministic/deterministic
