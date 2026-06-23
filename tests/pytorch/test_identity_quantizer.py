@@ -1236,9 +1236,7 @@ def _assert_zoo_layernorm_mlp_role_semantics(case_name):
 
     fwd_roles = module.get_quantizer_roles(fwd=True, num_quantizers=6)
     fwd_gemm_roles = [
-        role
-        for role in fwd_roles
-        if role is not None and role.tensor_type in ("input", "weight")
+        role for role in fwd_roles if role is not None and role.tensor_type in ("input", "weight")
     ]
     assert len(fwd_gemm_roles) == 5
     for role in fwd_gemm_roles:
@@ -1303,15 +1301,11 @@ class TestZooDequantizedBackwardFactoryModuleCoverage:
         module = _make_zoo_dequantized_module("LayerNormMLP")
         inp = _zoo_dequantized_input("LayerNormMLP")
         recipe = CustomRecipe(qfactory=_zoo_dequantized_qfactory(case_name))
-        out, dx, grads = _fwd_bwd_zoo_dequantized_module(
-            "LayerNormMLP", module, inp, recipe
-        )
+        out, dx, grads = _fwd_bwd_zoo_dequantized_module("LayerNormMLP", module, inp, recipe)
 
         assert torch.isfinite(out).all()
         assert torch.isfinite(dx).all()
-        expected_grads = {
-            name for name, param in module.named_parameters() if param.requires_grad
-        }
+        expected_grads = {name for name, param in module.named_parameters() if param.requires_grad}
         assert grads.keys() == expected_grads
         for grad in grads.values():
             assert torch.isfinite(grad).all()
