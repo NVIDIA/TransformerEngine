@@ -3603,9 +3603,7 @@ class TestSequentialModules:
         y_test.backward(dy_test)
 
         # Loose tols for sanity checking
-        tols = {"rtol": 0.125, "atol": 0.25}
-        if quantization == "nvfp4_rht":
-            tols = {"rtol": 0.25, "atol": 0.5}
+tols = quantization_tols(quantization)
 
         # Check values
         assert_close(y_test, y_ref, **tols)
