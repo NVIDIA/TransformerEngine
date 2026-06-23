@@ -4,8 +4,8 @@
 
 """Tests for IdentityQuantizer (high-precision passthrough) and its use as a
 per-direction component of HybridQuantizer to express mixed forward/backward
-precision via the CustomRecipe + qfactory machinery. Scoped to te.Linear,
-single GPU.
+precision via the CustomRecipe + qfactory machinery. Scoped to single-GPU
+TE GEMM modules.
 """
 
 import io
@@ -1081,6 +1081,242 @@ class TestIdentityHybridFormatProtocols:
             torch.testing.assert_close(g_test, g_ref, rtol=0.0, atol=0.0)
 
 
+_ZOO_DEQUANTIZED_MODULES = [
+    pytest.param("Linear", id="linear"),
+    pytest.param("LayerNormLinear", id="layernorm_linear"),
+    pytest.param("GroupedLinear", id="grouped_linear"),
+    pytest.param(
+        "LayerNormMLP",
+        marks=pytest.mark.xfail(
+            reason="LayerNormMLP does not support built-in backward_override=dequantized",
+            strict=True,
+        ),
+        id="layernorm_mlp",
+    ),
+    pytest.param("LayerNormLinearLinear", id="layernorm_linear_linear"),
+]
+
+_ZOO_DEQUANTIZED_CASES = [
+    pytest.param(
+        "mxfp8",
+        marks=pytest.mark.skipif(not mxfp8_available, reason=f"MXFP8: {reason_for_no_mxfp8}"),
+        id="mxfp8",
+    ),
+    pytest.param(
+        "nvfp4_row_scaled",
+        marks=pytest.mark.skipif(not nvfp4_available, reason=f"NVFP4: {reason_for_no_nvfp4}"),
+        id="nvfp4_row_scaled",
+    ),
+]
+
+
+def _make_zoo_dequantized_module(module_name, *, save_original_input=False):
+    hidden_size = 128
+    if module_name == "Linear":
+        return te.Linear(
+            hidden_size,
+            hidden_size,
+            params_dtype=torch.bfloat16,
+            save_original_input=save_original_input,
+        ).cuda()
+    if module_name == "LayerNormLinear":
+        return te.LayerNormLinear(hidden_size, hidden_size, params_dtype=torch.bfloat16).cuda()
+    if module_name == "GroupedLinear":
+        return te.GroupedLinear(
+            2,
+            hidden_size,
+            hidden_size,
+            params_dtype=torch.bfloat16,
+            save_original_input=save_original_input,
+        ).cuda()
+    if module_name == "LayerNormMLP":
+        return te.LayerNormMLP(
+            hidden_size,
+            2 * hidden_size,
+            params_dtype=torch.bfloat16,
+        ).cuda()
+    if module_name == "LayerNormLinearLinear":
+        return torch.nn.Sequential(
+            te.LayerNormLinear(hidden_size, hidden_size, params_dtype=torch.bfloat16),
+            te.Linear(
+                hidden_size,
+                hidden_size,
+                params_dtype=torch.bfloat16,
+                save_original_input=save_original_input,
+            ),
+        ).cuda()
+    raise ValueError(module_name)
+
+
+def _make_zoo_dequantized_module_pair(module_name):
+    torch.manual_seed(9400)
+    torch.cuda.manual_seed(9400)
+    ref = _make_zoo_dequantized_module(module_name, save_original_input=False)
+    torch.manual_seed(9401)
+    torch.cuda.manual_seed(9401)
+    test = _make_zoo_dequantized_module(module_name, save_original_input=True)
+    test.load_state_dict(ref.state_dict())
+    return ref, test
+
+
+def _zoo_dequantized_input(module_name):
+    torch.manual_seed(9402)
+    batch = 128 if module_name == "GroupedLinear" else 64
+    return torch.randn(batch, 128, device="cuda", dtype=torch.bfloat16)
+
+
+def _zoo_dequantized_forward(module_name, module, inp):
+    if module_name == "GroupedLinear":
+        m_splits = torch.tensor([64, 64], device="cuda", dtype=torch.int32)
+        return module(inp, m_splits=m_splits)
+    return module(inp)
+
+
+def _fwd_bwd_zoo_dequantized_module(module_name, module, inp, recipe):
+    inp = inp.detach().clone().requires_grad_(True)
+    with te.autocast(enabled=True, recipe=recipe):
+        out = _zoo_dequantized_forward(module_name, module, inp)
+    torch.manual_seed(9403)
+    grad = torch.randn_like(out)
+    out.backward(grad)
+    param_grads = {
+        name: param.grad.detach().clone()
+        for name, param in module.named_parameters()
+        if param.grad is not None
+    }
+    return out.detach().clone(), inp.grad.detach().clone(), param_grads
+
+
+def _mxfp8_all_qfactory(role):  # pylint: disable=unused-argument
+    return _mxfp8(tex.DType.kFloat8E4M3)
+
+
+def _zoo_dequantized_qfactory(case_name):
+    from transformer_engine.pytorch.custom_recipes.quantization_factory_zoo import (
+        mxfp8_fwd_dequantized_bwd_quantizer_factory,
+        nvfp4_row_scaled_fwd_dequantized_bwd_quantizer_factory,
+    )
+
+    if case_name == "mxfp8":
+        return mxfp8_fwd_dequantized_bwd_quantizer_factory
+    if case_name == "nvfp4_row_scaled":
+        return nvfp4_row_scaled_fwd_dequantized_bwd_quantizer_factory
+    raise ValueError(case_name)
+
+
+def _zoo_dequantized_recipes(case_name):
+    from transformer_engine.common import recipe as te_recipe
+
+    if case_name == "mxfp8":
+        return (
+            CustomRecipe(qfactory=_mxfp8_all_qfactory, backward_override="dequantized"),
+            CustomRecipe(qfactory=_zoo_dequantized_qfactory(case_name)),
+        )
+    if case_name == "nvfp4_row_scaled":
+        ref_recipe = te_recipe.NVFP4BlockScaling(
+            disable_rht=True,
+            disable_stochastic_rounding=True,
+            disable_2d_quantization=True,
+            row_scaled_activation=True,
+            backward_override="dequantized",
+        )
+        ref_recipe.fp4_quant_fwd_inp = te_recipe.QParams()
+        ref_recipe.fp4_quant_fwd_weight = te_recipe.QParams()
+        ref_recipe.fp4_quant_bwd_grad = te_recipe.QParams()
+        return (
+            ref_recipe,
+            CustomRecipe(qfactory=_zoo_dequantized_qfactory(case_name)),
+        )
+    raise ValueError(case_name)
+
+
+def _assert_zoo_layernorm_mlp_role_semantics(case_name):
+    module = _make_zoo_dequantized_module("LayerNormMLP")
+    qfactory = _zoo_dequantized_qfactory(case_name)
+
+    fwd_roles = module.get_quantizer_roles(fwd=True, num_quantizers=6)
+    fwd_gemm_roles = [
+        role
+        for role in fwd_roles
+        if role is not None and role.tensor_type in ("input", "weight")
+    ]
+    assert len(fwd_gemm_roles) == 5
+    for role in fwd_gemm_roles:
+        quantizer = qfactory(role)
+        assert isinstance(quantizer, HybridQuantizer)
+        assert quantizer.columnwise_source == "rowwise_dequantized"
+        assert isinstance(quantizer.columnwise_quantizer, IdentityQuantizer)
+        if case_name == "mxfp8":
+            assert isinstance(quantizer.rowwise_quantizer, MXFP8Quantizer)
+        else:
+            assert isinstance(quantizer.rowwise_quantizer, NVFP4Quantizer)
+            assert quantizer.rowwise_quantizer.row_scaled_nvfp4 == (role.tensor_type == "input")
+
+    bwd_roles = module.get_quantizer_roles(fwd=False, num_quantizers=4)
+    grad_output_roles = [
+        role for role in bwd_roles if role is not None and role.tensor_type == "grad_output"
+    ]
+    assert len(grad_output_roles) == 3
+    for role in grad_output_roles:
+        assert isinstance(qfactory(role), IdentityQuantizer)
+
+
+class TestZooDequantizedBackwardFactoryModuleCoverage:
+    """Zoo dequantized-backward recipes should match base recipes across TE modules."""
+
+    @pytest.mark.parametrize("case_name", _ZOO_DEQUANTIZED_CASES)
+    @pytest.mark.parametrize("module_name", _ZOO_DEQUANTIZED_MODULES)
+    def test_matches_base_recipe_bitwise(self, case_name, module_name):
+        ref, test = _make_zoo_dequantized_module_pair(module_name)
+        inp = _zoo_dequantized_input(module_name)
+        ref_recipe, qfactory_recipe = _zoo_dequantized_recipes(case_name)
+
+        y_ref, dx_ref, grads_ref = _fwd_bwd_zoo_dequantized_module(
+            module_name, ref, inp, ref_recipe
+        )
+        if module_name in ("Linear", "GroupedLinear", "LayerNormLinearLinear"):
+            with pytest.warns(UserWarning, match="Ignoring save_original_input=True"):
+                y_test, dx_test, grads_test = _fwd_bwd_zoo_dequantized_module(
+                    module_name, test, inp, qfactory_recipe
+                )
+        else:
+            y_test, dx_test, grads_test = _fwd_bwd_zoo_dequantized_module(
+                module_name, test, inp, qfactory_recipe
+            )
+
+        torch.testing.assert_close(y_test, y_ref, rtol=0.0, atol=0.0)
+        torch.testing.assert_close(dx_test, dx_ref, rtol=0.0, atol=0.0)
+        assert grads_test.keys() == grads_ref.keys()
+        for name, grad_ref in grads_ref.items():
+            torch.testing.assert_close(
+                grads_test[name],
+                grad_ref,
+                rtol=0.0,
+                atol=0.0,
+                msg=f"{case_name}/{module_name} grad mismatch for {name}",
+            )
+
+    @pytest.mark.parametrize("case_name", _ZOO_DEQUANTIZED_CASES)
+    def test_layernorm_mlp_runs_and_uses_dequantized_backward_roles(self, case_name):
+        _assert_zoo_layernorm_mlp_role_semantics(case_name)
+
+        module = _make_zoo_dequantized_module("LayerNormMLP")
+        inp = _zoo_dequantized_input("LayerNormMLP")
+        recipe = CustomRecipe(qfactory=_zoo_dequantized_qfactory(case_name))
+        out, dx, grads = _fwd_bwd_zoo_dequantized_module(
+            "LayerNormMLP", module, inp, recipe
+        )
+
+        assert torch.isfinite(out).all()
+        assert torch.isfinite(dx).all()
+        expected_grads = {
+            name for name, param in module.named_parameters() if param.requires_grad
+        }
+        assert grads.keys() == expected_grads
+        for grad in grads.values():
+            assert torch.isfinite(grad).all()
+
+
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 class TestIdentityLinear:
     """End-to-end te.Linear with Identity-based recipes."""
@@ -1225,75 +1461,6 @@ class TestIdentityLinear:
         assert len(wg_id) == len(wg_bo)
         for g_id, g_bo in zip(wg_id, wg_bo):
             torch.testing.assert_close(g_id, g_bo, rtol=0.0, atol=0.0)
-
-    @pytest.mark.skipif(not mxfp8_available, reason=f"MXFP8: {reason_for_no_mxfp8}")
-    def test_zoo_mxfp8_dequantized_bwd_matches_backward_override_bitwise(self):
-        """The zoo MXFP8-dequantized recipe should reproduce
-        ``backward_override=dequantized`` bitwise for Linear.
-        """
-        from transformer_engine.pytorch.custom_recipes.quantization_factory_zoo import (
-            mxfp8_fwd_dequantized_bwd_quantizer_factory,
-        )
-
-        def mxfp8_all_factory(role):  # pylint: disable=unused-argument
-            return _mxfp8(tex.DType.kFloat8E4M3)
-
-        ref, test = _make_linears(self.IN_F, self.OUT_F)
-        x = self._input()
-
-        y_bo, dx_bo, wg_bo = _fwd_bwd(
-            ref,
-            x,
-            recipe=CustomRecipe(qfactory=mxfp8_all_factory, backward_override="dequantized"),
-        )
-        y_zoo, dx_zoo, wg_zoo = _fwd_bwd(
-            test,
-            x,
-            recipe=CustomRecipe(qfactory=mxfp8_fwd_dequantized_bwd_quantizer_factory),
-        )
-
-        torch.testing.assert_close(y_zoo, y_bo, rtol=0.0, atol=0.0)
-        torch.testing.assert_close(dx_zoo, dx_bo, rtol=0.0, atol=0.0)
-        assert len(wg_zoo) == len(wg_bo)
-        for g_zoo, g_bo in zip(wg_zoo, wg_bo):
-            torch.testing.assert_close(g_zoo, g_bo, rtol=0.0, atol=0.0)
-
-    @pytest.mark.skipif(not nvfp4_available, reason=f"NVFP4: {reason_for_no_nvfp4}")
-    def test_zoo_nvfp4_row_scaled_dequantized_bwd_matches_recipe_bitwise(self):
-        """The zoo row-scaled NVFP4-dequantized recipe should reproduce
-        the built-in row-scaled NVFP4 recipe with dequantized backward bitwise.
-        """
-        from transformer_engine.common import recipe as te_recipe
-        from transformer_engine.pytorch.custom_recipes.quantization_factory_zoo import (
-            nvfp4_row_scaled_fwd_dequantized_bwd_quantizer_factory,
-        )
-
-        ref_recipe = te_recipe.NVFP4BlockScaling(
-            disable_rht=True,
-            disable_stochastic_rounding=True,
-            disable_2d_quantization=True,
-            row_scaled_activation=True,
-            backward_override="dequantized",
-        )
-        ref_recipe.fp4_quant_fwd_inp = te_recipe.QParams()
-        ref_recipe.fp4_quant_fwd_weight = te_recipe.QParams()
-        ref_recipe.fp4_quant_bwd_grad = te_recipe.QParams()
-
-        ref, test = _make_linears(self.IN_F, self.OUT_F)
-        x = self._input()
-
-        y_ref, dx_ref, wg_ref = _fwd_bwd(ref, x, recipe=ref_recipe)
-        y_zoo, dx_zoo, wg_zoo = _fwd_bwd(
-            test,
-            x,
-            recipe=CustomRecipe(qfactory=nvfp4_row_scaled_fwd_dequantized_bwd_quantizer_factory),
-        )
-
-        torch.testing.assert_close(y_zoo, y_ref, rtol=0.0, atol=0.0)
-        torch.testing.assert_close(dx_zoo, dx_ref, rtol=0.0, atol=0.0)
-        assert len(wg_zoo) == len(wg_ref)
-        for g_zoo, g_ref in zip(wg_zoo, wg_ref):
-            torch.testing.assert_close(g_zoo, g_ref, rtol=0.0, atol=0.0)
 
     def test_identity_matches_bf16_multistep_training_bitwise(self):
         """Multi-step SGD: an all-Identity recipe must track a plain BF16
