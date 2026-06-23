@@ -107,9 +107,7 @@ def _make_routing(dp_color, num_tokens, top_k, num_experts, num_local_experts, o
     topk_idx = np.empty((num_tokens, top_k), dtype=np.int32)
     for t in range(num_tokens):
         for k in range(top_k):
-            topk_idx[t, k] = (
-                dp_color * num_local_experts + t * top_k + k + offset
-            ) % num_experts
+            topk_idx[t, k] = (dp_color * num_local_experts + t * top_k + k + offset) % num_experts
     return topk_idx
 
 
@@ -230,7 +228,9 @@ def _moe_layer(args, cfg, mesh, topk_idx, tokens, topk_w, local_kernels):
     topk_idx = jax.lax.with_sharding_constraint(topk_idx, NamedSharding(mesh, in_spec))
     tokens = jax.lax.with_sharding_constraint(tokens, NamedSharding(mesh, in_spec))
     topk_w = jax.lax.with_sharding_constraint(topk_w, NamedSharding(mesh, in_spec))
-    local_kernels = jax.lax.with_sharding_constraint(local_kernels, NamedSharding(mesh, kernel_spec))
+    local_kernels = jax.lax.with_sharding_constraint(
+        local_kernels, NamedSharding(mesh, kernel_spec)
+    )
     recv_tokens, recv_topk_w, handle_mem, _tc = ep_dispatch(
         cfg, topk_idx, tokens, topk_w, args.recv_capacity_per_rank
     )

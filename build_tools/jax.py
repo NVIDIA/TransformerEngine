@@ -10,7 +10,13 @@ from packaging import version
 
 import setuptools
 
-from .utils import get_cuda_include_dirs, all_files_in_dir, debug_build_enabled, setup_mpi_flags, nccl_ep_enabled
+from .utils import (
+    get_cuda_include_dirs,
+    all_files_in_dir,
+    debug_build_enabled,
+    setup_mpi_flags,
+    nccl_ep_enabled,
+)
 from typing import List
 
 
