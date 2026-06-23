@@ -7,7 +7,7 @@
 	branch = develop
 [submodule "3rdparty/cutlass"]
 	path = 3rdparty/cutlass
-	url = https://gitlab-master.nvidia.com/dlarch-fastkernels/cutlass-gitlab-mirror.git
+	url = ../../../dlarch-fastkernels/cutlass-gitlab-mirror.git
 	branch = main
 [submodule "3rdparty/nccl"]
 	path = 3rdparty/nccl
