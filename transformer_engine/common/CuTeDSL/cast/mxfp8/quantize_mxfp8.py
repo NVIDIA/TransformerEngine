@@ -68,8 +68,8 @@ MXFP8_BLOCK_SIZE = 32 # Number of elements per MXFP8 scale block. They will shar
 BUFFER_NUM = 2
 
 # Vectorised access constants for bank-conflict avoidance (rowwise pass)
-PACK_SIZE = 4                              # Elements per vector load
-WAVES = MXFP8_BLOCK_SIZE // PACK_SIZE             # Each thread reads 8 waves with each wave reads 4 packed bf16, so it reads a whole MXFP8 block in total
+PACK_SIZE = 4 # Elements per vector load
+WAVES = MXFP8_BLOCK_SIZE // PACK_SIZE # Each thread reads 8 waves with each wave reads 4 packed bf16, so it reads a whole MXFP8 block in total
 THREADS_PER_WARP = 32
 TOTAL_BANKS_WIDTH = (32 * 4) // 1  # 32 banks × 4 bytes, in bytes (uint8 stride)
 THREADS_PER_BANK = TOTAL_BANKS_WIDTH // MXFP8_BLOCK_SIZE  # 4 threads per bank
