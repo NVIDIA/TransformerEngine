@@ -646,6 +646,24 @@ class _GroupedLinear(torch.autograd.Function):
         biases = weights_and_biases[num_gemms:]
         device = inp.device
         weight_requires_grad = weights[0].requires_grad
+        backward_needs_input = is_grad_enabled and weight_requires_grad
+        if save_original_input and backward_needs_input:
+            disallowed_input_quantizer = next(
+                (
+                    q
+                    for q in input_quantizers
+                    if q is not None and not q.allows_save_original_input_for_backward()
+                ),
+                None,
+            )
+            if disallowed_input_quantizer is not None:
+                warnings.warn(
+                    "Ignoring save_original_input=True because the input quantizer requires "
+                    "the forward quantized activation for backward "
+                    f"({disallowed_input_quantizer}).",
+                    stacklevel=2,
+                )
+                save_original_input = False
 
         # Configure quantizers
         if save_original_input and isinstance(input_quantizers[0], Float8Quantizer):

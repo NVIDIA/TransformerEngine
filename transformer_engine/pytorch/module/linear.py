@@ -298,6 +298,19 @@ def _linear_forward_impl(
     # Configure tensor-parallel communication
     tp_world_size = get_distributed_world_size(tp_group)
     backward_needs_input = is_grad_enabled and weight.requires_grad
+    if (
+        save_original_input
+        and backward_needs_input
+        and input_quantizer is not None
+        and not input_quantizer.allows_save_original_input_for_backward()
+    ):
+        warnings.warn(
+            "Ignoring save_original_input=True because the input quantizer requires "
+            "the forward quantized activation for backward "
+            f"({input_quantizer}).",
+            stacklevel=2,
+        )
+        save_original_input = False
     with_input_all_gather_nccl = (
         parallel_mode == "column" and sequence_parallel and not ub_overlap_ag_fprop
     )

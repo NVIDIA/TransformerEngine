@@ -350,6 +350,11 @@ class HybridQuantizer(Quantizer):
             return True
         return False
 
+    def allows_save_original_input_for_backward(self) -> bool:
+        # TODO: Add an explicit recompute-from-original policy for deterministic
+        # quantizers that can trade backward compute for saved activation memory.
+        return self.columnwise_source == "original"
+
     def _get_compatible_recipe(self):
         # HybridQuantizer is only reachable via CustomRecipe (the qfactory
         # returns HybridQuantizer per role). Checking that the autocast recipe
