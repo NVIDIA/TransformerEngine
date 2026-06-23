@@ -219,9 +219,7 @@ class TestMXFP8FwdDequantizedBwdFactory:
     def test_grad_output_role_allows_save_original_input(self, module_type):
         from transformer_engine.pytorch.quantization import QuantizerRole
 
-        quantizer = self._factory(
-            QuantizerRole(module_type=module_type, tensor_type="grad_output")
-        )
+        quantizer = self._factory(QuantizerRole(module_type=module_type, tensor_type="grad_output"))
 
         assert isinstance(quantizer, IdentityQuantizer)
         assert quantizer.allows_save_original_input_for_backward() is True
@@ -313,6 +311,7 @@ class TestNVFP4WeightDoubleQuantFactory:
 
         assert isinstance(out.rowwise_sub_storage, (NVFP4TensorStorage, NVFP4Tensor))
         assert isinstance(out.columnwise_sub_storage, (NVFP4TensorStorage, NVFP4Tensor))
+
 
 @requires_fp8_and_nvfp4
 class TestHybridQuantizerConstruction:
@@ -519,11 +518,7 @@ class TestHybridSaveOriginalInputPolicy:
     @staticmethod
     def _counting_identity_hybrid_recipe(counter):
         def factory(role):
-            if (
-                role is not None
-                and role.module_type == "linear"
-                and role.tensor_type == "input"
-            ):
+            if role is not None and role.module_type == "linear" and role.tensor_type == "input":
                 return HybridQuantizer(
                     rowwise_quantizer=_CountingIdentityQuantizer(counter),
                     columnwise_quantizer=IdentityQuantizer(),
@@ -1462,7 +1457,6 @@ class TestHybridGemmBitwiseIdenticalMXFP8:
                 f"{(p_ref.grad - p_hyb.grad).abs().max().item()}"
             )
 
-
     def test_dequantized_bwd_qfactory_save_original_input_matches_base_recipe_bitwise(self):
         from transformer_engine.pytorch.custom_recipes.quantization_factory_zoo import (
             mxfp8_fwd_dequantized_bwd_quantizer_factory,
@@ -1496,23 +1490,21 @@ class TestHybridGemmBitwiseIdenticalMXFP8:
         with autocast(enabled=True, recipe=ref_recipe):
             out_ref = model_ref(inp_ref)
 
-        qfactory_recipe = recipe.CustomRecipe(
-            qfactory=mxfp8_fwd_dequantized_bwd_quantizer_factory
-        )
+        qfactory_recipe = recipe.CustomRecipe(qfactory=mxfp8_fwd_dequantized_bwd_quantizer_factory)
         with pytest.warns(UserWarning, match="Ignoring save_original_input=True"):
             with autocast(enabled=True, recipe=qfactory_recipe):
                 out_qfactory = model_qfactory(inp_qfactory)
 
-        assert torch.equal(out_ref, out_qfactory), (
-            f"Forward mismatch: max diff = {(out_ref - out_qfactory).abs().max().item()}"
-        )
+        assert torch.equal(
+            out_ref, out_qfactory
+        ), f"Forward mismatch: max diff = {(out_ref - out_qfactory).abs().max().item()}"
 
         out_ref.float().sum().backward()
         out_qfactory.float().sum().backward()
 
         assert inp_ref.grad is not None and inp_qfactory.grad is not None
         assert torch.equal(inp_ref.grad, inp_qfactory.grad), (
-            f"Input grad mismatch: max diff = "
+            "Input grad mismatch: max diff = "
             f"{(inp_ref.grad - inp_qfactory.grad).abs().max().item()}"
         )
         for name, p_ref in dict(model_ref.named_parameters()).items():
