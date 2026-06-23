@@ -14,6 +14,8 @@ import torch.distributed as dist
 
 import transformer_engine_torch as tex
 
+from .cpu_offload import mark_not_offload
+
 
 __all__ = [
     "EpBuffer",
@@ -228,6 +230,8 @@ class EpBuffer:
         size_bytes = tex.ep_handle_mem_size(self.top_k, self.alignment)
         self.handle_mem = torch.empty(int(size_bytes), dtype=torch.uint8, device=device)
         self.token_counts = torch.empty(self.num_local_experts, dtype=torch.int32, device=device)
+        # Persistent workspace; keep resident if activation CPU offloading is on.
+        mark_not_offload(self.handle_mem)
 
     @classmethod
     def from_external(
@@ -264,6 +268,8 @@ class EpBuffer:
 
         size_bytes = tex.ep_handle_mem_size(inst.top_k, inst.alignment)
         inst.handle_mem = torch.empty(int(size_bytes), dtype=torch.uint8, device=device)
+        # Persistent workspace; keep resident if activation CPU offloading is on.
+        mark_not_offload(inst.handle_mem)
 
         if token_counts is not None:
             if tuple(token_counts.shape) != counts_shape:
@@ -449,7 +455,7 @@ class _EpDispatch(torch.autograd.Function):
             recv_tokens,
             recv_topk_weights,
         )
-        ctx.handle_mem = handle_mem
+        ctx.save_for_backward(handle_mem)
         ctx.tokens_shape = tokens.shape
         ctx.tokens_dtype = tokens.dtype
         ctx.topk_weights_shape = topk_weights.shape
@@ -466,7 +472,8 @@ class _EpDispatch(torch.autograd.Function):
     @staticmethod
     def backward(ctx, g_recv_tokens, g_recv_topk_weights, _g_token_counts):  # type: ignore[override]
         """Dispatch bwd; normalizes grad-input layout, otherwise passes through."""
-        device = ctx.handle_mem.device
+        (handle_mem,) = ctx.saved_tensors
+        device = handle_mem.device
         g_recv_tokens = g_recv_tokens.contiguous()
         g_recv_topk_weights = g_recv_topk_weights.contiguous()
         grad_tokens = torch.empty(
@@ -476,7 +483,7 @@ class _EpDispatch(torch.autograd.Function):
             ctx.topk_T_flat, ctx.top_k, dtype=torch.float32, device=device
         )
         torch.ops.transformer_engine_ep.dispatch_bwd(
-            ctx.handle_mem,
+            handle_mem,
             g_recv_tokens,
             g_recv_topk_weights,
             grad_tokens,
@@ -511,16 +518,18 @@ class _EpCombine(torch.autograd.Function):
         device = expert_out.device
         result = torch.empty(num_local_tokens, hidden_dim, dtype=expert_out.dtype, device=device)
         torch.ops.transformer_engine_ep.combine(handle_mem, expert_out, result)
-        ctx.handle_mem = handle_mem
-        ctx.grad_expert_out = grad_expert_out if grad_expert_out is not None else expert_out
+        grad_combine_in = grad_expert_out if grad_expert_out is not None else expert_out
+        # bwd write target reused across microbatches; keep resident under CPU offloading.
+        mark_not_offload(grad_combine_in)
+        ctx.save_for_backward(handle_mem, grad_combine_in)
         return result
 
     @staticmethod
     def backward(ctx, g_result):  # type: ignore[override]
         if not g_result.is_contiguous():
             g_result = g_result.contiguous()
-        grad_combine_in = ctx.grad_expert_out
-        torch.ops.transformer_engine_ep.combine_bwd(ctx.handle_mem, g_result, grad_combine_in)
+        handle_mem, grad_combine_in = ctx.saved_tensors
+        torch.ops.transformer_engine_ep.combine_bwd(handle_mem, g_result, grad_combine_in)
         return (
             None,  # handle_mem
             None,  # num_local_tokens

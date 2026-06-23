@@ -305,8 +305,7 @@ void ep_dispatch_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor g_recv_t
   NVTE_CHECK(grad_tokens.scalar_type() == grad.scalar_type(), "grad_tokens dtype (",
              c10::toString(grad_tokens.scalar_type()), ") must match grad dtype (",
              c10::toString(grad.scalar_type()), ")");
-  check_symm_mem_required(grad, "grad (dispatch_bwd input)");
-  check_symm_mem_required(g_recv_topk_weights, "g_recv_topk_weights");
+  // Upstream grads are autograd-allocated, so they take the staged-copy path.
 
   auto g_dtype = GetTransformerEngineDType(grad.scalar_type());
   auto handle_mem_te = makeTransformerEngineTensor(
@@ -340,7 +339,8 @@ void ep_combine_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor grad_expe
   NVTE_CHECK(grad_expert_out.scalar_type() == grad.scalar_type(), "grad_expert_out dtype (",
              c10::toString(grad_expert_out.scalar_type()), ") must match grad dtype (",
              c10::toString(grad.scalar_type()), ")");
-  check_symm_mem_required(grad, "grad (combine_bwd input)");
+  // grad is autograd-allocated (staged-copy path); grad_expert_out is the
+  // caller-supplied scatter target and must be symm-mem in zero-copy mode.
   check_symm_mem_required(grad_expert_out, "grad_expert_out");
 
   auto g_dtype = GetTransformerEngineDType(grad.scalar_type());
