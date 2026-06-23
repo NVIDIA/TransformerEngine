@@ -85,9 +85,16 @@ def ep_bootstrap(
     num_ep_groups are read from the mesh axes named by MeshResource.ep_resource
     and MeshResource.dp_resource/fsdp_resource.
 
-    max_token_dtype is the widest jnp dtype the group will dispatch; tensors
-    passed to ep_dispatch may use any narrower dtype.
-    max_num_sms caps the SMs allotted to EP kernels (0 = auto).
+    Args:
+        world_size: Total number of processes (dp_size * ep_size).
+        rank: Global rank of the calling process.
+        num_experts: Total experts across the EP group.
+        max_tokens_per_rank: Max tokens one rank dispatches per step (sizes send buffers).
+        recv_capacity_per_rank: Max tokens one rank receives per step; set to
+            at least ep_size * max_tokens_per_rank * top_k to avoid drops.
+        hidden_dim: Feature dimension of token tensors passed to ep_dispatch.
+        max_token_dtype: Widest dtype the group will dispatch (only bfloat16 supported).
+        max_num_sms: SM budget for EP kernels; 0 = auto.
     """
     if jnp.dtype(max_token_dtype) != jnp.bfloat16:
         raise NotImplementedError(
