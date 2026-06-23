@@ -431,6 +431,8 @@ class _GroupedLinear(torch.autograd.Function):
             backward_override = None
         if backward_override == "high_precision":
             save_original_input = True
+        elif backward_override == "dequantized":
+            save_original_input = False
 
         num_gemms = len(m_splits)
         weights = weights_and_biases[:num_gemms]
