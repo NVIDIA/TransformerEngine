@@ -910,9 +910,7 @@ def test_linear_backward_override_dequantized_ignores_save_original_input(
     dw_test = module_test.weight.grad.detach().clone()
     test_bias = getattr(module_test, "bias", None)
     db_test = (
-        None
-        if test_bias is None or test_bias.grad is None
-        else test_bias.grad.detach().clone()
+        None if test_bias is None or test_bias.grad is None else test_bias.grad.detach().clone()
     )
 
     assert_close(y_test_detached, y_ref, rtol=0, atol=0, check_dtype=True)
@@ -982,9 +980,7 @@ def test_grouped_linear_backward_override_dequantized_ignores_save_original_inpu
     y_test.backward(dy)
     assert x_test.grad is not None
     dx_test = x_test.grad.detach().clone()
-    dw_test = [
-        getattr(module_test, f"weight{i}").grad.detach().clone() for i in range(num_gemms)
-    ]
+    dw_test = [getattr(module_test, f"weight{i}").grad.detach().clone() for i in range(num_gemms)]
     db_test: list[Optional[torch.Tensor]] = []
     for i in range(num_gemms):
         if use_bias:
