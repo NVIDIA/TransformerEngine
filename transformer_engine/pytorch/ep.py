@@ -230,7 +230,7 @@ class EpBuffer:
         size_bytes = tex.ep_handle_mem_size(self.top_k, self.alignment)
         self.handle_mem = torch.empty(int(size_bytes), dtype=torch.uint8, device=device)
         self.token_counts = torch.empty(self.num_local_experts, dtype=torch.int32, device=device)
-        # Persistent workspace; keep resident if activation CPU offloading is on.
+        # Persistent tensor; keep resident if activation CPU offloading is on.
         mark_not_offload(self.handle_mem)
 
     @classmethod
@@ -268,7 +268,7 @@ class EpBuffer:
 
         size_bytes = tex.ep_handle_mem_size(inst.top_k, inst.alignment)
         inst.handle_mem = torch.empty(int(size_bytes), dtype=torch.uint8, device=device)
-        # Persistent workspace; keep resident if activation CPU offloading is on.
+        # Persistent tensor; keep resident if activation CPU offloading is on.
         mark_not_offload(inst.handle_mem)
 
         if token_counts is not None:

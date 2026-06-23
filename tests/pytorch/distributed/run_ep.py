@@ -173,11 +173,8 @@ class TestEP(unittest.TestCase):
         buf = self._make_buffer()
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
         tokens_p = tokens.detach().clone().requires_grad_(True)
-        recv_t, recv_w, _tc = ep_dispatch(buf, tokens_p, topk_idx, w)
-        # Pull recv_w into the loss with a zero scale so both dispatch outputs
-        # contribute a (possibly-zero) grad — backward respects user-supplied
-        # grad inputs and won't fabricate Nones into zeros.
-        loss = 0.5 * (recv_t.float() ** 2).sum() + 0.0 * recv_w.float().sum()
+        recv_t, _recv_w, _tc = ep_dispatch(buf, tokens_p, topk_idx, w)
+        loss = 0.5 * (recv_t.float() ** 2).sum()
         loss.backward()
         torch.cuda.synchronize()
         torch.testing.assert_close(
