@@ -85,14 +85,16 @@ std::vector<T> convert_shape_for_fp4(const std::vector<T>& shape) {
   return ret;
 }
 
-/*! @brief Validate optional first_dims / last_dims tensors */
-void check_grouped_dims_tensor(const at::Tensor& dims_tensor, const char* dims_name,
-                               const size_t num_tensors) {
-  NVTE_CHECK(dims_tensor.is_cuda(), dims_name, " must be on CUDA.");
-  NVTE_CHECK(dims_tensor.scalar_type() == at::kLong, dims_name, " must have dtype int64.");
-  NVTE_CHECK(dims_tensor.is_contiguous(), dims_name, " must be contiguous.");
-  NVTE_CHECK(static_cast<size_t>(dims_tensor.numel()) == num_tensors, dims_name,
-             " must have length ", num_tensors, ".");
+/*! @brief Validate an optional 1D int64 CUDA grouped-tensor metadata tensor
+ *         (first_dims / last_dims / tensor_offsets) of a given expected length. */
+void check_grouped_metadata_tensor(const at::Tensor& metadata_tensor, const char* metadata_name,
+                                   const size_t expected_len) {
+  NVTE_CHECK(metadata_tensor.is_cuda(), metadata_name, " must be on CUDA.");
+  NVTE_CHECK(metadata_tensor.scalar_type() == at::kLong, metadata_name,
+             " must have dtype int64.");
+  NVTE_CHECK(metadata_tensor.is_contiguous(), metadata_name, " must be contiguous.");
+  NVTE_CHECK(static_cast<size_t>(metadata_tensor.numel()) == expected_len, metadata_name,
+             " must have length ", expected_len, ".");
 }
 
 std::optional<at::Tensor> build_grouped_tensor_offsets(const size_t num_tensors,
@@ -104,11 +106,12 @@ std::optional<at::Tensor> build_grouped_tensor_offsets(const size_t num_tensors,
     return std::nullopt;
   }
 
+  // Validate dims before the splits-to-offsets kernel reads them.
   if (first_dims.has_value()) {
-    check_grouped_dims_tensor(*first_dims, "first_dims", num_tensors);
+    check_grouped_metadata_tensor(*first_dims, "first_dims", num_tensors);
   }
   if (last_dims.has_value()) {
-    check_grouped_dims_tensor(*last_dims, "last_dims", num_tensors);
+    check_grouped_metadata_tensor(*last_dims, "last_dims", num_tensors);
   }
 
   const at::TensorOptions options =
@@ -138,6 +141,24 @@ std::optional<at::Tensor> build_grouped_tensor_offsets(const size_t num_tensors,
     });
   }
   return tensor_offsets;
+}
+
+/*! @brief Validate grouped-tensor offset metadata and resolve the final offsets,
+ *         whether they are precomputed or built from first_dims/last_dims. */
+std::optional<at::Tensor> resolve_grouped_tensor_offsets(
+    const size_t num_tensors, const std::optional<at::Tensor>& first_dims,
+    const std::optional<at::Tensor>& last_dims,
+    const std::optional<at::Tensor>& precomputed_tensor_offsets, const size_t logical_first_dim,
+    const size_t logical_last_dim) {
+  // Precomputed offsets take priority; otherwise build them from first_dims/last_dims
+  // (which validates the dims internally).
+  if (precomputed_tensor_offsets.has_value()) {
+    // tensor_offsets uses a CSR-style prefix-sum layout with num_tensors+1 entries.
+    check_grouped_metadata_tensor(*precomputed_tensor_offsets, "tensor_offsets", num_tensors + 1);
+    return precomputed_tensor_offsets;
+  }
+  return build_grouped_tensor_offsets(num_tensors, first_dims, last_dims, logical_first_dim,
+                                      logical_last_dim);
 }
 
 at::TensorOptions grouped_tensor_data_options(const DType dtype) {
@@ -211,10 +232,9 @@ std::pair<GroupedTensorWrapper, py::object> NoneQuantizer::create_grouped_tensor
   using namespace pybind11::literals;
 
   const auto tensor_offsets =
-      precomputed_tensor_offsets.has_value()
-          ? precomputed_tensor_offsets
-          : build_grouped_tensor_offsets(num_tensors, first_dims, last_dims, logical_first_dim,
-                                         logical_last_dim);
+      resolve_grouped_tensor_offsets(num_tensors, first_dims, last_dims,
+                                     precomputed_tensor_offsets, logical_first_dim,
+                                     logical_last_dim);
   const int64_t total_elements =
       static_cast<int64_t>(logical_first_dim) * static_cast<int64_t>(logical_last_dim);
 
@@ -422,10 +442,9 @@ std::pair<GroupedTensorWrapper, py::object> Float8Quantizer::create_grouped_tens
   using namespace pybind11::literals;
 
   const auto tensor_offsets =
-      precomputed_tensor_offsets.has_value()
-          ? precomputed_tensor_offsets
-          : build_grouped_tensor_offsets(num_tensors, first_dims, last_dims, logical_first_dim,
-                                         logical_last_dim);
+      resolve_grouped_tensor_offsets(num_tensors, first_dims, last_dims,
+                                     precomputed_tensor_offsets, logical_first_dim,
+                                     logical_last_dim);
   const int64_t total_elements =
       static_cast<int64_t>(logical_first_dim) * static_cast<int64_t>(logical_last_dim);
 
@@ -745,10 +764,9 @@ std::pair<GroupedTensorWrapper, py::object> Float8CurrentScalingQuantizer::creat
              "first and last dimensions.");
 
   const auto tensor_offsets =
-      precomputed_tensor_offsets.has_value()
-          ? precomputed_tensor_offsets
-          : build_grouped_tensor_offsets(num_tensors, first_dims, last_dims, logical_first_dim,
-                                         logical_last_dim);
+      resolve_grouped_tensor_offsets(num_tensors, first_dims, last_dims,
+                                     precomputed_tensor_offsets, logical_first_dim,
+                                     logical_last_dim);
   const int64_t total_elements =
       static_cast<int64_t>(logical_first_dim) * static_cast<int64_t>(logical_last_dim);
 
@@ -1141,10 +1159,9 @@ std::pair<GroupedTensorWrapper, py::object> Float8BlockQuantizer::create_grouped
   using namespace pybind11::literals;
 
   const auto tensor_offsets =
-      precomputed_tensor_offsets.has_value()
-          ? precomputed_tensor_offsets
-          : build_grouped_tensor_offsets(num_tensors, first_dims, last_dims, logical_first_dim,
-                                         logical_last_dim);
+      resolve_grouped_tensor_offsets(num_tensors, first_dims, last_dims,
+                                     precomputed_tensor_offsets, logical_first_dim,
+                                     logical_last_dim);
   const int64_t total_elements =
       static_cast<int64_t>(logical_first_dim) * static_cast<int64_t>(logical_last_dim);
 
@@ -1567,10 +1584,9 @@ std::pair<GroupedTensorWrapper, py::object> MXFP8Quantizer::create_grouped_tenso
   using namespace pybind11::literals;
 
   const auto tensor_offsets =
-      precomputed_tensor_offsets.has_value()
-          ? precomputed_tensor_offsets
-          : build_grouped_tensor_offsets(num_tensors, first_dims, last_dims, logical_first_dim,
-                                         logical_last_dim);
+      resolve_grouped_tensor_offsets(num_tensors, first_dims, last_dims,
+                                     precomputed_tensor_offsets, logical_first_dim,
+                                     logical_last_dim);
   const int64_t total_elements =
       static_cast<int64_t>(logical_first_dim) * static_cast<int64_t>(logical_last_dim);
 
@@ -2055,10 +2071,9 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
   using namespace pybind11::literals;
 
   const auto tensor_offsets =
-      precomputed_tensor_offsets.has_value()
-          ? precomputed_tensor_offsets
-          : build_grouped_tensor_offsets(num_tensors, first_dims, last_dims, logical_first_dim,
-                                         logical_last_dim);
+      resolve_grouped_tensor_offsets(num_tensors, first_dims, last_dims,
+                                     precomputed_tensor_offsets, logical_first_dim,
+                                     logical_last_dim);
   const int64_t total_elements =
       static_cast<int64_t>(logical_first_dim) * static_cast<int64_t>(logical_last_dim);
   NVTE_CHECK(total_elements % 2 == 0, "NVFP4 data size must be divisible by 2.");
