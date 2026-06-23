@@ -192,6 +192,38 @@ def load_framework_extension(framework: str) -> None:
     spec.loader.exec_module(solib)
 
 
+def register_cutedsl_quant_backend() -> None:
+    """Import the CuTeDSL module so it registers its quantize entrypoints with
+    TVM-FFI, making the (framework-agnostic) C++ dispatcher able to discover and
+    JIT-compile them. Call this from each framework's __init__ after the extension
+    is loaded — the registration itself is framework-agnostic.
+
+    The backend is optional (`pip install transformer-engine[cutedsl]`); on a
+    default install the import is skipped and TE uses the built-in CUDA kernels.
+    """
+    try:
+        import transformer_engine.common.CuTeDSL  # noqa: F401
+    except ModuleNotFoundError as e:
+        # The optional CuTeDSL toolchain (e.g. nvidia-cutlass-dsl) isn't installed —
+        # expected for a default install; quietly fall back to the CUDA kernels.
+        import logging
+
+        logging.getLogger(__name__).debug(
+            "CuTeDSL quantize backend not available (%s); using the CUDA kernels. "
+            "Install `transformer-engine[cutedsl]` to enable it.",
+            e,
+        )
+    except Exception as e:
+        # Toolchain is present but the backend failed to import — unexpected and
+        # worth surfacing; TE still falls back to the CUDA kernels.
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "CuTeDSL quantize backend failed to import (%s); using the CUDA kernels.",
+            e,
+        )
+
+
 def sanity_checks_for_pypi_installation() -> None:
     """Ensure that package is installed correctly if using PyPI."""
 

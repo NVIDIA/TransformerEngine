@@ -27,9 +27,13 @@ model and support automatic differentiation.
 # extensions are not available.
 import jax
 
-from transformer_engine.common import load_framework_extension
+from transformer_engine.common import load_framework_extension, register_cutedsl_quant_backend
 
 load_framework_extension("jax")
+
+# Register the CuTeDSL quantize backend entrypoints (TVM-FFI). Optional; falls
+# back to the CUDA kernels if the CuTeDSL toolchain isn't installed.
+register_cutedsl_quant_backend()
 
 from . import flax
 from . import quantize
