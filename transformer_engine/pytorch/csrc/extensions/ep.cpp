@@ -347,15 +347,15 @@ void ep_combine_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor grad_expe
   auto handle_mem_te = makeTransformerEngineTensor(
       handle_mem.data_ptr(), Shape{static_cast<size_t>(handle_mem.numel())}, DType::kByte);
   auto grad_te = makeTransformerEngineTensor(grad.data_ptr(), Shape{T_flat, H}, g_dtype);
-  auto grad_eo_te =
+  auto grad_expert_out_te =
       makeTransformerEngineTensor(grad_expert_out.data_ptr(), Shape{recv_pr, H}, g_dtype);
 
   // grad is autograd-allocated (staged); grad_expert_out resolves to a symm-mem
   // window in zero-copy mode, else kNoWindow for the staged path.
   NVTECommWindow grad_win = maybe_make_window(grad);
-  NVTECommWindow grad_eo_win = maybe_make_window(grad_expert_out);
-  nvte_ep_combine_bwd(handle_mem_te.data(), grad_te.data(), grad_win, grad_eo_te.data(),
-                      grad_eo_win, stream);
+  NVTECommWindow grad_expert_out_win = maybe_make_window(grad_expert_out);
+  nvte_ep_combine_bwd(handle_mem_te.data(), grad_te.data(), grad_win, grad_expert_out_te.data(),
+                      grad_expert_out_win, stream);
 }
 
 void register_ep_bindings(pybind11::module_& m) {

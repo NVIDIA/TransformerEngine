@@ -36,9 +36,9 @@ TOP_K = 2
 TOKENS_PER_RANK = 4
 
 
-def _zero_copy_capable(fn):
+def _zero_copy_test_include(fn):
     """Mark a test to also run in the zero-copy pass; others skip there."""
-    fn._zero_copy_capable = True
+    fn._zero_copy_test_include = True
     return fn
 
 
@@ -151,7 +151,7 @@ class TestEP(unittest.TestCase):
     def setUp(self):
         # Only the zero-copy-capable tests run in the zero-copy pass.
         if ZERO_COPY and not getattr(
-            getattr(self, self._testMethodName), "_zero_copy_capable", False
+            getattr(self, self._testMethodName), "_zero_copy_test_include", False
         ):
             self.skipTest("not exercised in zero-copy mode")
 
@@ -240,7 +240,7 @@ class TestEP(unittest.TestCase):
 
     # Autograd
 
-    @_zero_copy_capable
+    @_zero_copy_test_include
     def test_dispatch_autograd(self):
         """0.5*||recv_tokens||^2 ; grad_tokens equals TOP_K * tokens."""
         buf = self._make_buffer()
@@ -330,7 +330,7 @@ class TestEP(unittest.TestCase):
 
     # PP-1F1B handle isolation
 
-    @_zero_copy_capable
+    @_zero_copy_test_include
     def test_pp_1f1b_two_handles(self):
         """PP-1F1B interleave (F0 F1 B0 F2 B1 B2) over 3 per-microbatch buffers."""
         T, H = TOKENS_PER_RANK, HIDDEN_DIM
@@ -401,7 +401,7 @@ class TestEP(unittest.TestCase):
             tokens_p.grad.float(), tokens.float() * float(TOP_K), atol=5e-2, rtol=5e-2
         )
 
-    @_zero_copy_capable
+    @_zero_copy_test_include
     def test_combine_autograd(self):
         """ep_combine fwd+bwd; bwd grad target is the EpBuffer symm buffer (zc) or in-flight."""
         buf = self._make_buffer()
