@@ -6,7 +6,7 @@
 - `CUDA_DEVICE_MAX_CONNECTIONS=1` must be enabled in the environment.
 - For best performance, point-to-point communication via _CUDA Multicast_ needs CUDA Toolkit 12.0+
   and CUDA driver 535+ on devices with compute capability 9.0 or newer.
-- Devices older than compute capability 9.0 require `UB_SKIPMC=1` in the environment in order fall
+- Devices older than compute capability 9.0 require `UB_SKIPMC=1` in the environment in order to fall
   back on a less performant implementation based on CUDA Inter-Process Communication (IPC) handles.
 
 ## Examples
@@ -22,7 +22,7 @@ $ torchrun --nnodes=1 --nproc-per-node=$(nvidia-smi -L | wc -l) te_layer_with_ov
 #   [rank0:node0] |-- Created tensor-parallel group: [0, 1, 2, 3, 4, 5, 6, 7]
 #   !!! [UB] Create UbufP2PCommOverlap Communicator
 #   UB_TIMEOUT is set to 110 sec, 217800000000 cycles, freq: 1980000khz
-#   MC initialized succesfully, window size = 549755813888
+#   MC initialized successfully, window size = 549755813888
 #   !!! [UBP2P] Register UBuf 1
 #   !!! [UBP2P] Register UBuf 2
 #   !!! [UBP2P] Register UBuf 3
@@ -66,7 +66,7 @@ $ torchrun --nnodes=1 --nproc-per-node=$(nvidia-smi -L | wc -l) te_layer_with_ov
 ```
 ### Single node, mixed data- and tensor-parallel LayerNormMLP:
 
-Uses `torch.nn.parallel.DistributedDataParallel` for replicatin the model across 2 tensor-parallel
+Uses `torch.nn.parallel.DistributedDataParallel` for replicating the model across 2 tensor-parallel
 groups in a single node.
 
 ```bash
@@ -81,7 +81,7 @@ $ torchrun --nnodes=1 --nproc-per-node=$(nvidia-smi -L | wc -l) te_layer_with_ov
 #   [rank2:node0] |-- Created data-parallel group: [2, 6]
 #   !!! [UB] Create UbufP2PCommOverlap Communicator
 #   UB_TIMEOUT is set to 110 sec, 217800000000 cycles, freq: 1980000khz
-#   MC initialized succesfully, window size = 549755813888
+#   MC initialized successfully, window size = 549755813888
 #   !!! [UBP2P] Register UBuf 1
 #   !!! [UBP2P] Register UBuf 2
 #   !!! [UBP2P] Register UBuf 3

@@ -22,7 +22,7 @@ from transformer_engine.common.recipe import (
 )
 from transformer_engine.pytorch import NVFP4Quantizer
 from transformer_engine.pytorch.constants import NVFP4_BLOCK_SCALING_SIZE
-from transformer_engine.pytorch.custom_recipes import quantization_nvfp4
+from transformer_engine.pytorch.custom_recipes import quantization_ref_nvfp4
 from transformer_engine.pytorch.custom_recipes import utils
 from run_layer_with_overlap import _compare_tensors
 
@@ -52,44 +52,39 @@ def get_nvfp4_quantizer_factory():
     """
     Create a quantizer factory for NVFP4 reference implementation.
 
-    This factory returns NVFP4QuantizerRef instances with RHT and 2D quantization
-    enabled.
+    Linear/grouped-linear weight slots get 2D (16x16) quantization without RHT;
+    every other slot (input, gradient, boundary slots with ``role is None``,
+    and any unknown tensor type) gets 1D (1x16) quantization with RHT.
+
+    Mirrors the canonical "branch on what we care about, default fall-through"
+    pattern from
+    ``transformer_engine.pytorch.custom_recipes.quantization_recipes_base``;
+    every slot gets a real :class:`NVFP4QuantizerRef` (``CustomRecipeState``
+    rejects ``None`` returns).
 
     Returns:
-        A factory function that takes a role string and returns a quantizer instance
+        A factory function that takes a QuantizerRole and returns a quantizer instance
     """
 
     def factory(role):
-        if role == "linear_input":
-            return quantization_nvfp4.NVFP4QuantizerRef(
+        is_weight = (
+            role is not None
+            and role.module_type in ("linear", "grouped_linear")
+            and role.tensor_type == "weight"
+        )
+        if is_weight:
+            return quantization_ref_nvfp4.NVFP4QuantizerRef(
                 dtype=utils.Fp4Formats.E2M1,
-                quant_tile_shape=(1, 16),
-                pow_2_scales=False,
-                with_rht=True,  # RHT enabled for input
-            )
-        elif role == "linear_weight":
-            return quantization_nvfp4.NVFP4QuantizerRef(
-                dtype=utils.Fp4Formats.E2M1,
-                quant_tile_shape=(16, 16),  # 2D quantization for weight
+                quant_tile_shape=(16, 16),
                 pow_2_scales=False,
                 with_rht=False,
             )
-        elif role == "linear_output":
-            # Output quantization not used
-            return None
-        elif role == "linear_grad_output":
-            return quantization_nvfp4.NVFP4QuantizerRef(
-                dtype=utils.Fp4Formats.E2M1,
-                quant_tile_shape=(1, 16),
-                pow_2_scales=False,
-                with_rht=True,  # RHT enabled for grad_output
-            )
-        elif role == "linear_grad_input":
-            # Grad input quantization not used
-            return None
-        else:
-            # For any other roles, return None
-            return None
+        return quantization_ref_nvfp4.NVFP4QuantizerRef(
+            dtype=utils.Fp4Formats.E2M1,
+            quant_tile_shape=(1, 16),
+            pow_2_scales=False,
+            with_rht=True,
+        )
 
     return factory
 

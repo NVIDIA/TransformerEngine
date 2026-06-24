@@ -3,43 +3,107 @@
 # See LICENSE for license information.
 
 """Enums for e2e transformer"""
+import enum
 from types import SimpleNamespace
+from typing import Union
 import torch
 import torch.distributed
 import transformer_engine_torch as tex
 
 
-"""
-This is a map: torch.dtype -> int
-Used for passing dtypes into cuda
-extension. Has one to one mapping
-with enum in transformer_engine.h
-"""
+class DType(enum.IntEnum):
+    """Transformer Engine data types used to tag tensors passed to the
+    Transformer Engine backend.
+    This is the canonical dtype enum for ``transformer_engine.pytorch`` and
+    is used throughout the library (for example, to specify the precision of
+    quantized tensors and quantizers). Each member corresponds to a data type
+    supported by the Transformer Engine backend:
+
+    * ``kByte`` -- 8-bit unsigned integer (``torch.uint8``).
+    * ``kInt32`` -- 32-bit signed integer (``torch.int32``).
+    * ``kFloat32`` -- 32-bit floating point (``torch.float32``).
+    * ``kFloat16`` -- 16-bit floating point (``torch.float16``).
+    * ``kBFloat16`` -- 16-bit brain floating point (``torch.bfloat16``).
+    * ``kFloat8E4M3`` -- 8-bit floating point with 4 exponent and 3 mantissa
+      bits (``torch.float8_e4m3fn``).
+    * ``kFloat8E5M2`` -- 8-bit floating point with 5 exponent and 2 mantissa
+      bits (``torch.float8_e5m2``).
+    * ``kFloat4E2M1`` -- 4-bit floating point with 2 exponent and 1 mantissa
+      bits.
+
+    The enum mirrors the backend ``transformer_engine_torch.DType`` (pybind11)
+    enum value-for-value, and instances of the two enums compare equal when
+    they share the same integer value.
+    """
+
+    kByte = int(tex.DType.kByte)
+    kInt32 = int(tex.DType.kInt32)
+    kFloat32 = int(tex.DType.kFloat32)
+    kFloat16 = int(tex.DType.kFloat16)
+    kBFloat16 = int(tex.DType.kBFloat16)
+    kFloat8E4M3 = int(tex.DType.kFloat8E4M3)
+    kFloat8E5M2 = int(tex.DType.kFloat8E5M2)
+    kFloat4E2M1 = int(tex.DType.kFloat4E2M1)
+
+    @classmethod
+    def cast(cls, dtype: "Union[DType, tex.DType]") -> "DType":
+        """Normalize a supported dtype value to the canonical ``DType`` ``IntEnum``.
+        ``DType`` is the canonical dtype tag used internally throughout
+        ``transformer_engine.pytorch``, and is what this function always outputs.
+        The pybind ``transformer_engine_torch.DType`` enum is an additional type
+        accepted as input (for backward compatibility), which this function maps
+        to the matching ``DType`` member so stored attributes are always ``DType``.
+        """
+        if isinstance(dtype, cls):
+            return dtype
+        return cls(int(dtype))
+
+    def __eq__(self, other: object) -> bool:
+        # ``DType`` is an ``IntEnum`` while ``tex.DType`` is a pybind11 enum.
+        # ``int.__eq__`` returns ``NotImplemented`` for a pybind enum, so without
+        # this override a comparison such as ``quantizer.dtype == tex.DType.kX``
+        # would silently be ``False``. Compare by integer value so the two enums
+        # stay equivalent (the pybind ``DType.__eq__`` handles the reverse order).
+        if isinstance(other, tex.DType):
+            return int(self) == int(other)
+        return int.__eq__(self, other)
+
+    def __ne__(self, other: object) -> bool:
+        result = self.__eq__(other)
+        if result is NotImplemented:
+            return result
+        return not result
+
+    def __hash__(self) -> int:
+        return int.__hash__(self)
+
+
+# Fail fast at import time if a new enumerator is added
+# on the C++ side without being mirrored above.
+assert {m.name for m in DType} == set(tex.DType.__members__), (
+    "DType in python is out of sync with transformer_engine_torch.DType; "
+    "defined in C++ side. Please make sure TE C++ and python are in sync."
+)
+
+
+# One-to-one mapping ``torch.dtype -> DType`` (mirrors the enum order in
+# ``transformer_engine.h``). Use the bracket syntax ``TE_DType[torch_dtype]``
+# to resolve a ``torch.dtype`` to its matching ``DType`` member.
+# Used for passing dtypes into cuda extension.
 TE_DType = {
-    torch.uint8: tex.DType.kByte,
-    torch.float8_e4m3fn: tex.DType.kFloat8E4M3,
-    torch.float8_e5m2: tex.DType.kFloat8E5M2,
-    torch.int32: tex.DType.kInt32,
-    torch.float32: tex.DType.kFloat32,
-    torch.half: tex.DType.kFloat16,
-    torch.bfloat16: tex.DType.kBFloat16,
+    torch.uint8: DType.kByte,
+    torch.float8_e4m3fn: DType.kFloat8E4M3,
+    torch.float8_e5m2: DType.kFloat8E5M2,
+    torch.int32: DType.kInt32,
+    torch.float32: DType.kFloat32,
+    torch.half: DType.kFloat16,
+    torch.bfloat16: DType.kBFloat16,
 }
 
-"""
-This is a map: int -> torch.dtype
-Used for resolving cuda extension types to torch.
-Has one to one mapping with enum in
-transformer_engine.h
-"""
-TE_DType_To_Torch = {
-    tex.DType.kByte: torch.uint8,
-    tex.DType.kFloat8E4M3: torch.float8_e4m3fn,
-    tex.DType.kFloat8E5M2: torch.float8_e5m2,
-    tex.DType.kInt32: torch.int32,
-    tex.DType.kFloat32: torch.float32,
-    tex.DType.kFloat16: torch.half,
-    tex.DType.kBFloat16: torch.bfloat16,
-}
+
+# Map ``DType -> torch.dtype`` for resolving cuda extension types to
+# torch.
+TE_DType_To_Torch = {value: key for key, value in TE_DType.items()}
 
 # Cache enum -> int conversions to avoid repeated PyObject lookups.
 FP8FwdTensorIdx = SimpleNamespace(

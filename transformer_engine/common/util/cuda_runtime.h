@@ -67,6 +67,21 @@ bool supports_multicast(int device_id = -1);
  */
 const std::string &include_directory(bool required = false);
 
+/* \brief Version number of CUDA Toolkit headers
+ *
+ * The headers are accessed at run-time and its CUDA version may
+ * differ from compile-time and from the CUDA Runtime. The header path
+ * can be configured by setting NVTE_CUDA_INCLUDE_DIR in the
+ * environment (default is to search in common install paths).
+ *
+ * \param[in] required Whether to throw exception if headers are not
+ *                     found or if version cannot be determined.
+ *
+ * \return CUDA version encoded as major * 1000 + minor * 10, or -1 if
+ *         it could not be determined.
+ */
+int include_directory_version(bool required = false);
+
 /* \brief CUDA Runtime version number at run-time
  *
  * Versions may differ between compile-time and run-time.

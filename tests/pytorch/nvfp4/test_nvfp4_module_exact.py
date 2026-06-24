@@ -6,7 +6,7 @@ import pytest
 import torch
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
-from transformer_engine.pytorch.custom_recipes import quantization_nvfp4
+from transformer_engine.pytorch.custom_recipes import quantization_ref_nvfp4
 from transformer_engine.pytorch.custom_recipes import utils
 
 
@@ -76,40 +76,37 @@ def get_nvfp4_quantizer_factory(with_rht: bool = False, with_2d_quantization: bo
         with_2d_quantization: Whether to use 2D quantization (16x16 tiles for weights)
 
     Returns:
-        A factory function that takes a role string and returns a quantizer instance
+        A factory function that takes a QuantizerRole (or None for boundary slots)
+        and returns a quantizer instance.
     """
 
+    # Boundary slots (output, grad_input) get role=None from Linear.get_quantizer_roles
+    # when no consumer is configured. CustomRecipeState rejects None returns from
+    # qfactory, so we return a valid quantizer for those slots; it is harmless because
+    # the GEMM outputs in the high-precision activation dtype, not in NVFP4.
+    def _default_quantizer():
+        return quantization_ref_nvfp4.NVFP4QuantizerRef(
+            dtype=utils.Fp4Formats.E2M1,
+            quant_tile_shape=(1, 16),
+            pow_2_scales=False,
+            with_rht=with_rht,
+        )
+
     def factory(role):
-        if role == "linear_input":
-            return quantization_nvfp4.NVFP4QuantizerRef(
-                dtype=utils.Fp4Formats.E2M1,
-                quant_tile_shape=(1, 16),
-                pow_2_scales=False,
-                with_rht=with_rht,
-            )
-        elif role == "linear_weight":
-            return quantization_nvfp4.NVFP4QuantizerRef(
+        if role is None:
+            return _default_quantizer()
+        if role.tensor_type == "input":
+            return _default_quantizer()
+        if role.tensor_type == "weight":
+            return quantization_ref_nvfp4.NVFP4QuantizerRef(
                 dtype=utils.Fp4Formats.E2M1,
                 quant_tile_shape=(16, 16) if with_2d_quantization else (1, 16),
                 pow_2_scales=False,
                 with_rht=False,
             )
-        elif role == "linear_output":
-            # Output quantization not used
-            return None
-        elif role == "linear_grad_output":
-            return quantization_nvfp4.NVFP4QuantizerRef(
-                dtype=utils.Fp4Formats.E2M1,
-                quant_tile_shape=(1, 16),
-                pow_2_scales=False,
-                with_rht=with_rht,
-            )
-        elif role == "linear_grad_input":
-            # Grad input quantization not used
-            return None
-        else:
-            # For any other roles, return None
-            return None
+        if role.tensor_type == "grad_output":
+            return _default_quantizer()
+        return _default_quantizer()
 
     return factory
 

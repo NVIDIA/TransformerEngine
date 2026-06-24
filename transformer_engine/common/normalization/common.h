@@ -219,7 +219,7 @@ class TeNormalizationRegistry {
 class NormalizationPlanBase {
  public:
   virtual ~NormalizationPlanBase() = default;
-  virtual std::vector<size_t> getWorkspaceShape() const = 0;
+  virtual Shape getWorkspaceShape() const = 0;
 
   virtual void execute(Tensor* z, void* x_dptr, void* gamma_dptr, void* beta_dptr, void* mean_dptr,
                        void* eps_dptr, void* rsigma_dptr, void* workspace_dptr,
@@ -239,7 +239,7 @@ class TeNormalizationPlan : public NormalizationPlanBase {
   TeNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype, DType itype,
                       DType otype, DType ctype, const size_t batch_size, const size_t hidden_size,
                       const size_t sm_count, const bool zero_centered_gamma, const bool is_tuned);
-  std::vector<size_t> getWorkspaceShape() const override;
+  Shape getWorkspaceShape() const override;
 
   void execute(Tensor* z, void* x_dptr, void* gamma_dptr, void* beta_dptr, void* mean_dptr,
                void* eps_dptr, void* rsigma_dptr, void* workspace_dptr,
@@ -268,7 +268,7 @@ class CudnnNormalizationPlan : public NormalizationPlanBase {
                          const bool zero_centered_gamma, const NVTEScalingMode mode,
                          const bool training);
 
-  std::vector<size_t> getWorkspaceShape() const override;
+  Shape getWorkspaceShape() const override;
 
   void execute(Tensor* z, void* x_dptr, void* gamma_dptr, void* beta_dptr, void* mean_dptr,
                void* eps_dptr, void* rsigma_dptr, void* workspace_dptr,

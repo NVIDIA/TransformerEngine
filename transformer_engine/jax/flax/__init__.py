@@ -9,6 +9,7 @@ from .module import (
     make_dot_general_cls,
     make_grouped_dense_cls,
 )
+from .moe import _MoEBlock
 from .transformer import extend_logical_axis_rules
 from .transformer import DotProductAttention, MultiHeadAttention, RelativePositionBiases
 from .transformer import TransformerLayer, TransformerLayerType
@@ -18,6 +19,7 @@ __all__ = [
     "LayerNorm",
     "LayerNormDenseGeneral",
     "LayerNormMLP",
+    "_MoEBlock",
     "wrap_function_in_te_state_module",
     "make_dot_general_cls",
     "make_grouped_dense_cls",

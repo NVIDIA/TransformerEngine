@@ -5,6 +5,7 @@
 add_executable(test_operator
                test_cast.cu
                test_cast_current_scaling.cu
+               test_cast_current_scaling_grouped.cu
                test_cast_dbias.cu
                test_cast_dbias_dgelu.cu
                test_cast_gated_swiglu.cu

@@ -1,0 +1,63 @@
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
+# A workflow to automatically label the contributions as community/org
+name: Label community contributions
+
+on:
+  pull_request_target:
+    types: [opened, reopened, ready_for_review, synchronize]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const user = pr.user.login;
+            const association = pr.author_association;
+
+            const communityLabel = "community-contribution";
+            const orgLabel = "org-contribution";
+
+            let targetLabel = null;
+
+            const isOrgMember =
+              association === "MEMBER" || association === "OWNER";
+
+            let permission = "none";
+
+            try {
+              const res = await github.rest.repos.getCollaboratorPermissionLevel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                username: user,
+              });
+              permission = res.data.permission;
+            } catch (e) {
+              if (e.status !== 404) throw e;
+            }
+
+            const isCore = permission === "write" || permission === "admin";
+            if (!isOrgMember) {
+              targetLabel = communityLabel;
+            } else {
+              targetLabel = orgLabel;
+            }
+
+            if (!isCore) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                labels: [targetLabel],
+              });
+            }

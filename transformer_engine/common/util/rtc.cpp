@@ -12,6 +12,7 @@
 
 #include "../common.h"
 #include "../util/cuda_driver.h"
+#include "../util/cuda_runtime.h"
 #include "../util/string.h"
 #include "../util/system.h"
 
@@ -175,14 +176,46 @@ void KernelManager::compile(const std::string& kernel_label, const std::string& 
   const nvrtcResult compile_result =
       nvrtcCompileProgram(program, opts_ptrs.size(), opts_ptrs.data());
   if (compile_result != NVRTC_SUCCESS) {
-    // Display log if compilation failed
-    std::string log = concat_strings("NVRTC compilation log for ", filename, ":\n");
+    std::string log;
+
+    // Decode CUDA version number to "major.minor" string
+    auto version_string = [](int v) -> std::string {
+      if (v < 0) {
+        return "<not found>";
+      }
+      return concat_strings(v / 1000, ".", (v % 1000) / 10);
+    };
+
+    // Check CUDA versions
+    const int build_version = CUDA_VERSION;
+    int nvrtc_version = -1;
+    int nvrtc_version_major = 0, nvrtc_version_minor = 0;
+    if (nvrtcVersion(&nvrtc_version_major, &nvrtc_version_minor) == NVRTC_SUCCESS) {
+      nvrtc_version = nvrtc_version_major * 1000 + nvrtc_version_minor * 10;
+    }
+    const int header_version = cuda::include_directory_version();
+    log += concat_strings("Compile-time CUDA version: ", version_string(build_version), "\n",
+                          "Run-time NVRTC version: ", version_string(nvrtc_version), "\n",
+                          "Run-time CUDA headers version: ", version_string(header_version), "\n");
+    if (nvrtc_version != header_version) {
+      log += concat_strings(
+          "\nWarning: CUDA versions do not match between NVRTC and CUDA headers (",
+          cuda::include_directory(),
+          "). "
+          "Consider changing the CUDA header search path (by setting NVTE_CUDA_INCLUDE_DIR) "
+          "or the linked CUDA Runtime (by setting CUDA_HOME or LD_LIBRARY_PATH).\n\n");
+    }
+
+    // Get build log
+    log += concat_strings("NVRTC compilation log for ", filename, ":\n");
     const size_t log_offset = log.size();
     size_t log_size;
     NVTE_CHECK_NVRTC(nvrtcGetProgramLogSize(program, &log_size));
     log.resize(log_offset + log_size);
     NVTE_CHECK_NVRTC(nvrtcGetProgramLog(program, &log[log_offset]));
     log.back() = '\n';
+
+    // Display log and throw error
     std::cerr << log;
     NVTE_CHECK_NVRTC(compile_result);
   }

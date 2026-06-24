@@ -12,7 +12,15 @@ from distributed_test_base import (
     generate_context_parallel_configs_for_attn,
     generate_collectives_count,
 )
-from test_fused_attn import FusedAttnRunner, BiasShape, SeqDescFormat
+from test_fused_attn import (
+    FusedAttnRunner,
+    BiasShape,
+    SeqDescFormat,
+)
+from test_fused_attn_score_mod import (
+    ScoreModFusedAttnRunner,
+    _has_cudnn_frontend_python,
+)
 from utils import pytest_parametrize_wrapper
 from transformer_engine.jax.attention import (
     is_fused_attn_kernel_available,
@@ -268,6 +276,54 @@ class TestDistributedCrossAttn:
             mesh_axes=mesh_axes,
             mesh_resource=mesh_resource,
             coll_count_ref=col_ref,
+        )
+        runner.test_backward()
+
+
+DISTRIBUTED_SCORE_MOD_DATA_SHAPES = {
+    "L0": [],
+    "L1": [(4, 16, 4, 64)],
+}
+
+
+@pytest.mark.skipif(not _has_cudnn_frontend_python(), reason="cuDNN Python frontend is required")
+class TestDistributedScoreModSelfAttn:
+    @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
+    @pytest_parametrize_wrapper("data_shape", DISTRIBUTED_SCORE_MOD_DATA_SHAPES)
+    @pytest.mark.parametrize("dtype", DTYPES)
+    def test_softcap_score_mod_with_aux_params_backward(
+        self,
+        device_count,
+        mesh_shape,
+        mesh_axes,
+        mesh_resource,
+        data_shape,
+        dtype,
+    ):
+        ScoreModFusedAttnRunner.require_cudnn_frontend()
+        batch, seqlen, num_heads, head_dim = data_shape
+        dp_axis = mesh_resource.dp_resource
+        tp_axis = mesh_resource.tpsp_resource
+
+        if dp_axis is not None:
+            dp_size = mesh_shape[mesh_axes.index(dp_axis)]
+            if batch % dp_size != 0:
+                pytest.skip(f"{batch=} must be divisible by {dp_size=}")
+        if tp_axis is not None:
+            tp_size = mesh_shape[mesh_axes.index(tp_axis)]
+            if num_heads % tp_size != 0:
+                pytest.skip(f"{num_heads=} must be divisible by {tp_size=}")
+
+        runner = ScoreModFusedAttnRunner.softcap(
+            batch,
+            seqlen,
+            num_heads,
+            head_dim,
+            dtype,
+            number_of_devices=device_count,
+            mesh_shape=mesh_shape,
+            mesh_axes=mesh_axes,
+            mesh_resource=mesh_resource,
         )
         runner.test_backward()
 

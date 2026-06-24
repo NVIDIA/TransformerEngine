@@ -271,22 +271,17 @@ std::vector<py::object> fused_attn_fwd(
     nvte_set_tensor_param(&nvte_aux_tensor_pack.tensors[i], kNVTERowwiseData, &temp_data);
   };
   // allocate memory for nvte_aux_tensor_pack.tensors
-  // f16_max512   : S [b, h, sq, skv]
-  // f16_arbitrary:
-  // return_max_logit=false: S [b, h, sq, 1], rng_state [2], (optional) Bias [1, h, sq, skv], (optional) SoftmaxOffset [1, h, 1, 1]
-  // return_max_logit=true: S [b, h, sq, 1], Max [b, h, sq, 1], rng_state [2], (optional) Bias [1, h, sq, skv], (optional) SoftmaxOffset [1, h, 1, 1]
-  // fp8          : M [b, h, sq, 1], optional ZInv [b, h, sq, 1] (T3HD path), rng_state [2]
+  // f16_arbitrary: S [b, h, sq, 1]/[tq, h, 1], (optional) Max [b, h, sq, 1]/[tq, h, 1], rng_state [2], (optional) Bias [1, h, sq, skv], (optional) SoftmaxOffset [1, h, 1, 1]
+  // fp8          : S [b, h, sq, 1], rng_state [2]
   size_t i = 0;
   at::Tensor output_tensor;
-  // intermediate softmax tensor, S or M (for fp8)
+  // intermediate softmax stats tensor S
   output_tensor =
       allocateSpace(nvte_shape_to_vector(nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i])),
                     static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false);
   set_tensor_param(i++, output_tensor);
-  // fp8 T3HD has an additional softmax stats tensor, ZInv; return_max_logit=true has an additional Max tensor
-  if (((qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) &&
-       qkv_layout == NVTE_QKV_Layout::NVTE_T3HD) ||
-      return_max_logit) {
+  // return_max_logit=true allocates Max after S
+  if (return_max_logit) {
     output_tensor =
         allocateSpace(nvte_shape_to_vector(nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i])),
                       static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false);

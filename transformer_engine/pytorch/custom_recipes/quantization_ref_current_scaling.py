@@ -18,17 +18,18 @@ from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage, 
 def current_scaling_ref_quantizer_factory(role):
     """Factory function for current scaling reference quantizer.
 
-    Usage with CustomRecipe and autocast:
+    Receives a :class:`~transformer_engine.pytorch.quantization.QuantizerRole`.
+
+    Backward tensors use E5M2, everything else uses E4M3.
+
+    Usage with CustomRecipe and autocast::
+
         custom_recipe = recipe.CustomRecipe(qfactory=current_scaling_ref_quantizer_factory)
         with autocast(recipe=custom_recipe):
             output = model(input)
     """
-    if role in ("linear_input", "linear_weight"):
-        dtype = torch.float8_e4m3fn
-    elif role in ("linear_output", "linear_grad_output"):
-        dtype = torch.float8_e5m2
-    else:
-        return None
+    is_backward = role is not None and role.tensor_type == "grad_output"
+    dtype = torch.float8_e5m2 if is_backward else torch.float8_e4m3fn
     return CurrentScalingQuantizerRef(
         dtype=dtype,
         rowwise=True,

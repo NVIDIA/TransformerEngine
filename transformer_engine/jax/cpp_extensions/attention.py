@@ -353,10 +353,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             config.window_size,
         ).get_fused_attn_backend()
 
-        if backend == NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen:
-            softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, kv_max_seqlen)
-            softmax_dtype = q_dtype
-        elif backend == NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
+        if backend == NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
             # cuDNN 9.6 reduces the required softmax shape
             if get_cudnn_version() >= (9, 6, 0):
                 if config.qkv_layout.is_thd():

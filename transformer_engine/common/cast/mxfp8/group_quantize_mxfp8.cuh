@@ -867,7 +867,7 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
     NVTE_CHECK(dbias->data.dtype == input->dtype(),
                "DBias must have the same type as input_tensor.");
 
-    std::vector<size_t> expected_shape_dbias_tensor = {num_tensors, last_logical_dim};
+    Shape expected_shape_dbias_tensor = {num_tensors, last_logical_dim};
     NVTE_CHECK(dbias->data.shape == expected_shape_dbias_tensor, "Wrong shape of DBias.");
 
     NVTE_CHECK(workspace != nullptr, "Workspace must be a tensor.");

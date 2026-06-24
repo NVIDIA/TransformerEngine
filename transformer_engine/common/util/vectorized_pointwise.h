@@ -434,9 +434,8 @@ __launch_bounds__(unary_kernel_threads) __global__
       ComputeType val2 = static_cast<ComputeType>(loader1.separate()[i]);
 
       if constexpr (std::is_same<Param, ClampedSwiGLUParam>::value) {
-        // Clamp the gated value and add 1 at the end
         ComputeType limit = p.limit;
-        val2 = std::min(std::max(-limit, val2), limit) + 1;
+        val2 = std::min(std::max(-limit, val2), limit) + p.glu_linear_offset;
       }
       ComputeType temp = static_cast<ComputeType>(Activation(val, p) * val2);
       if (requires_amax) {
@@ -542,10 +541,9 @@ __launch_bounds__(unary_kernel_threads) __global__
       bool dgate_in = true;
 
       if constexpr (std::is_same<Param, ClampedSwiGLUParam>::value) {
-        // In case of GPT OSS, clamp the activation and gate values
         const ComputeType limit = p.limit;
-        dgate_in = gate_in <= limit && gate_in >= -limit;  // Derivative of clamp
-        gate_in = std::min(std::max(-limit, gate_in), limit) + 1.0f;
+        dgate_in = gate_in <= limit && gate_in >= -limit;
+        gate_in = std::min(std::max(-limit, gate_in), limit) + p.glu_linear_offset;
       }
 
       ComputeType after_dgelu = Dactivation(gelu_in, p) * grad_val * gate_in;

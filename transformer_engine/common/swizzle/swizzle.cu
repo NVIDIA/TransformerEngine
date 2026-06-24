@@ -24,15 +24,18 @@ namespace {
 constexpr int MXFP8_BLOCK_SIZE = 32;
 constexpr int NVFP4_BLOCK_SIZE = 16;
 
-int get_max_dynamic_smem() {
-  static int max_smem = -1;
-  if (max_smem < 0) {
-    int device;
-    NVTE_CHECK_CUDA(cudaGetDevice(&device));
-    NVTE_CHECK_CUDA(
-        cudaDeviceGetAttribute(&max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
+int get_max_dynamic_smem(int device_id = -1) {
+  static std::vector<int> cache(cuda::num_devices(), -1);
+  static std::vector<std::once_flag> flags(cuda::num_devices());
+  if (device_id < 0) {
+    device_id = cuda::current_device();
   }
-  return max_smem;
+  auto init = [&]() {
+    NVTE_CHECK_CUDA(cudaDeviceGetAttribute(&cache[device_id],
+                                           cudaDevAttrMaxSharedMemoryPerBlockOptin, device_id));
+  };
+  std::call_once(flags[device_id], init);
+  return cache[device_id];
 }
 
 constexpr __device__ __host__ int TB_DIM = 32;
@@ -1046,6 +1049,11 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
         " column-wise scaling factors, but got shape=", output->columnwise_scale_inv.shape, ".");
   }
 
+  // Return early if tensor has no entries
+  if (m == 0 || k == 0) {
+    return;
+  }
+
   // Choose swizzle implementation
   bool rowwise_swizzle{false}, columnwise_swizzle{false};
   switch (scaling_mode) {
@@ -1456,10 +1464,8 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
 
     // We don't allow empty tensors. They should be filtered out before calling this function.
     NVTE_CHECK(input[i]->numel() != 0, "Tensor input[", i, "] is empty.");
-    CheckInputTensor(*input[i], "scaling_factor_input[" + std::to_string(i) + "]",
-                     check_scale_inv_shapes);
-    CheckInputTensor(*output[i], "scaling_factor_output[" + std::to_string(i) + "]",
-                     check_scale_inv_shapes);
+    CheckInputTensor(*input[i], "scaling_factor_input", check_scale_inv_shapes);
+    CheckInputTensor(*output[i], "scaling_factor_output", check_scale_inv_shapes);
     all_has_data = all_has_data && input[i]->scale_inv.has_data();
     all_has_columnwise_data =
         (all_has_columnwise_data && input[i]->columnwise_scale_inv.has_data());
@@ -1540,17 +1546,18 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
       const int pos = kernel_args.num_tensors;
       kernel_args.m_list[pos] = m;
       kernel_args.k_list[pos] = k;
+      const auto [first_dim, last_dim] = input[i]->flat_2d_dims();
       if (!all_nvfp4 || all_has_data) {
         int block_scale_size = all_nvfp4 ? NVFP4_BLOCK_SIZE : MXFP8_BLOCK_SIZE;
         kernel_args.input_list[pos] = const_cast<void*>(input[i]->scale_inv.dptr);
         kernel_args.output_list[pos] = output[i]->scale_inv.dptr;
-        kernel_args.original_m_list[pos] = input[i]->flat_first_dim();
-        kernel_args.original_k_list[pos] = input[i]->flat_last_dim() / block_scale_size;
+        kernel_args.original_m_list[pos] = first_dim;
+        kernel_args.original_k_list[pos] = last_dim / block_scale_size;
       } else {
         kernel_args.input_list[pos] = const_cast<void*>(input[i]->columnwise_scale_inv.dptr);
         kernel_args.output_list[pos] = output[i]->columnwise_scale_inv.dptr;
-        kernel_args.original_m_list[pos] = input[i]->flat_last_dim();
-        kernel_args.original_k_list[pos] = input[i]->flat_first_dim() / NVFP4_BLOCK_SIZE;
+        kernel_args.original_m_list[pos] = last_dim;
+        kernel_args.original_k_list[pos] = first_dim / NVFP4_BLOCK_SIZE;
       }
       kernel_args.num_tensors++;
     }
@@ -1609,8 +1616,9 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
       kernel_args.output_list[pos] = output[i]->columnwise_scale_inv.dptr;
       kernel_args.m_list[pos] = m;
       kernel_args.k_list[pos] = k;
-      kernel_args.original_m_list[pos] = input[i]->flat_last_dim();
-      kernel_args.original_k_list[pos] = input[i]->flat_first_dim() / MXFP8_BLOCK_SIZE;
+      const auto [first_dim, last_dim] = input[i]->flat_2d_dims();
+      kernel_args.original_m_list[pos] = last_dim;
+      kernel_args.original_k_list[pos] = first_dim / MXFP8_BLOCK_SIZE;
       kernel_args.num_tensors++;
     }
     // Launch the remaining tensors
@@ -1958,6 +1966,8 @@ void nvte_multi_tensor_swizzle_scaling_factors(const NVTETensor* inputs, NVTETen
   using namespace transformer_engine;
   NVTE_CHECK(num_tensors > 0, "Number of tensors should be greater than 0.");
   std::vector<Tensor*> input_list, output_list;
+  input_list.reserve(num_tensors);
+  output_list.reserve(num_tensors);
   for (size_t i = 0; i < num_tensors; i++) {
     input_list.push_back(convertNVTETensorCheck(inputs[i]));
     output_list.push_back(convertNVTETensorCheck(outputs[i]));

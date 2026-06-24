@@ -245,9 +245,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         float after_gate_elt;
         bool dgate_elt = true;  // gating is ideally an identity function
         if constexpr (std::is_same<ParamOP, ClampedSwiGLUParam>::value) {
-          // In case of GPT OSS, clamp the activation and gate values
-          dgate_elt = gate_elt <= p.limit && gate_elt >= -p.limit;  // Derivative of clamp
-          gate_elt = min(max(-p.limit, gate_elt), p.limit) + 1.0f;
+          dgate_elt = gate_elt <= p.limit && gate_elt >= -p.limit;
+          gate_elt = min(max(-p.limit, gate_elt), p.limit) + p.glu_linear_offset;
         }
         if constexpr (IS_BWD) {
           float grad_elt = static_cast<float>(in_grad_sh[shmem_offset_colwise]);
@@ -510,9 +509,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             float after_gate_elt;
             bool dgate_elt = true;
             if constexpr (std::is_same<ParamOP, ClampedSwiGLUParam>::value) {
-              // In case of GPT OSS, clamp the activation and gate values
-              dgate_elt = gate_elt <= p.limit && gate_elt >= -p.limit;  // Derivative of clamp
-              gate_elt = min(max(-p.limit, gate_elt), p.limit) + 1.0f;
+              dgate_elt = gate_elt <= p.limit && gate_elt >= -p.limit;
+              gate_elt = min(max(-p.limit, gate_elt), p.limit) + p.glu_linear_offset;
             }
             if constexpr (IS_BWD) {
               float grad_elt = static_cast<float>(in_grad.data.elt[e]);

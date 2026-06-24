@@ -16,6 +16,9 @@ namespace dispatch {
 namespace mxfp8 {
 namespace swizzle {
 
+constexpr size_t GEMM_SWIZZLED_SCALE_TILE_DIM_X = 4;
+constexpr size_t GEMM_SWIZZLED_SCALE_TILE_DIM_Y = 128;
+
 /*! \brief Convert compact scale indices into GEMM swizzled scale index
  *
  *  MXFP8 GEMM expects scaling factors to be in a "swizzled" order
@@ -25,8 +28,8 @@ namespace swizzle {
  *
  */
 __device__ __forceinline__ size_t gemm_swizzled_scale_idx(size_t i, size_t j, size_t num_tiles_X) {
-  constexpr size_t TILE_DIM_X = 4;  // Tile dim in scale buffer
-  constexpr size_t TILE_DIM_Y = 128;
+  constexpr size_t TILE_DIM_X = GEMM_SWIZZLED_SCALE_TILE_DIM_X;
+  constexpr size_t TILE_DIM_Y = GEMM_SWIZZLED_SCALE_TILE_DIM_Y;
   constexpr size_t TILE_SIZE = TILE_DIM_X * TILE_DIM_Y;
   const size_t tile_idx_X = j / TILE_DIM_X;
   const size_t tile_idx_Y = i / TILE_DIM_Y;

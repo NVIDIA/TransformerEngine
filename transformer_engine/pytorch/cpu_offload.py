@@ -307,8 +307,9 @@ class OffloadableLayerState:
         # needed to restore pre-offload state after reload.
         self.aux = aux
 
-        self.finish_offload_event = torch.cuda.Event()
-        self.finish_offload_event.record(self.offload_stream)
+        if len(self.fwd_gpu_tensor_group.tensor_list) > 0:
+            self.finish_offload_event = torch.cuda.Event()
+            self.finish_offload_event.record(self.offload_stream)
 
     def release_activation_forward_gpu_memory(self):
         """
@@ -319,13 +320,13 @@ class OffloadableLayerState:
             func_name="release_activation_forward_gpu_memory", allowed_states=["offload_started"]
         )
         self.state = "offload_finished"
+        if len(self.fwd_gpu_tensor_group.tensor_list) > 0:
+            torch.cuda.current_stream().wait_event(self.finish_offload_event)  # type: ignore[arg-type]
 
-        torch.cuda.current_stream().wait_event(self.finish_offload_event)  # type: ignore[arg-type]
-
-        # GPU memory can be released safely after the offload.
-        # Notice that the memory needs to be kept alive when GPU->CPU copy is performed.
-        self.fwd_gpu_tensor_group = TensorGroup()
-        del self.finish_offload_event
+            # GPU memory can be released safely after the offload.
+            # Notice that the memory needs to be kept alive when GPU->CPU copy is performed.
+            self.fwd_gpu_tensor_group = TensorGroup()
+            del self.finish_offload_event
 
     def start_reload(self):
         """

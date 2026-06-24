@@ -318,11 +318,12 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  const void *alpha, const void *beta, bool use_split_accumulator, int math_sm_count,
                  int m_split, int n_split, bool gemm_producer, const Tensor *inputCounter,
                  cudaStream_t stream) {
+  NVTE_CHECK(!inputA->row_scaled_nvfp4 && !inputB->row_scaled_nvfp4,
+             "cuBLAS GEMM does not support row-scaled NVFP4 inputs.");
+
   // Tensor dims in row-major order
-  const int A0 = inputA->flat_first_dim();
-  const int A1 = inputA->flat_last_dim();
-  const int B0 = inputB->flat_first_dim();
-  const int B1 = inputB->flat_last_dim();
+  const auto [A0, A1] = inputA->flat_2d_dims();
+  const auto [B0, B1] = inputB->flat_2d_dims();
 
   // GEMM dims in column-major order
   const int m = transa == CUBLAS_OP_T ? A0 : A1;
@@ -1054,6 +1055,10 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
                             bool accumulate, bool use_split_accumulator, int math_sm_count,
                             cudaStream_t stream) {
   NVTE_API_CALL(nvte_multi_tensor_gemm);
+
+  if (num_gemms <= 0) {
+    return;
+  }
 
   const int current_device = transformer_engine::cuda::current_device();
   const bool is_hopper = (transformer_engine::cuda::sm_arch(current_device) == 90);
