@@ -207,8 +207,8 @@ def _group_quantize_with_amax_for_grouped_mlp(
             quantizer,
             num_groups,
             split_sizes,
-            rowwise_amax,
-            columnwise_amax,
+            rowwise_amax=rowwise_amax,
+            columnwise_amax=columnwise_amax,
             tensor_offsets=tensor_offsets,
         )
 
