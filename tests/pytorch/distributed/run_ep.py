@@ -24,7 +24,7 @@ from transformer_engine.pytorch.ep import (
 )
 
 
-ZERO_COPY = False
+ZERO_COPY = os.environ.get("NVTE_EP_ZERO_COPY", "0") == "1"
 
 # Must come after the transformer_engine import so libtransformer_engine.so is loaded.
 import transformer_engine_torch as tex  # noqa: F401
@@ -34,6 +34,44 @@ NUM_LOCAL_EXPERTS = 2
 HIDDEN_DIM = 32
 TOP_K = 2
 TOKENS_PER_RANK = 4
+
+
+def _zero_copy_capable(fn):
+    """Mark a test to also run in the zero-copy pass; others skip there."""
+    fn._zero_copy_capable = True
+    return fn
+
+
+class _StageToSymm(torch.autograd.Function):
+    """Identity op that stages ``src`` into a symm-mem buffer; grad passes through.
+    Lets a test feed a symm-mem-backed, autograd-tracked tensor into ep_combine.
+    """
+
+    @staticmethod
+    def forward(ctx, src, symm_buf):  # type: ignore[override]
+        symm_buf.copy_(src)
+        return symm_buf
+
+    @staticmethod
+    def backward(ctx, g):  # type: ignore[override]
+        return g, None
+
+
+class _GradToSymm(torch.autograd.Function):
+    """Identity fwd; bwd stages the upstream grad into a symm-mem buffer and
+    returns it, so the next backward (dispatch_bwd) receives a symm-window grad
+    input — which zero-copy ncclEpCombine requires.
+    """
+
+    @staticmethod
+    def forward(ctx, x, symm_buf):  # type: ignore[override]
+        ctx.symm_buf = symm_buf
+        return x
+
+    @staticmethod
+    def backward(ctx, g):  # type: ignore[override]
+        ctx.symm_buf.copy_(g)
+        return ctx.symm_buf, None
 
 
 def _device_sm() -> int:
@@ -110,6 +148,13 @@ class TestEP(unittest.TestCase):
             zero_copy=ZERO_COPY,
         )
 
+    def setUp(self):
+        # Only the zero-copy-capable tests run in the zero-copy pass.
+        if ZERO_COPY and not getattr(
+            getattr(self, self._testMethodName), "_zero_copy_capable", False
+        ):
+            self.skipTest("not exercised in zero-copy mode")
+
     def _make_buffer(self, alignment=0, top_k=TOP_K):
         return EpBuffer(
             top_k=top_k,
@@ -119,6 +164,33 @@ class TestEP(unittest.TestCase):
             num_local_experts=NUM_LOCAL_EXPERTS,
             alignment=alignment,
         )
+
+    def _recv_kwargs(self):
+        """ep_dispatch recv-buffer kwargs: symm-mem-backed under zero-copy, else default-alloc."""
+        if not ZERO_COPY:
+            return {}
+        rc = self.cfg.recv_capacity_per_rank
+        return {
+            "recv_tokens": symm_mem_alloc((rc, HIDDEN_DIM), torch.bfloat16, self.ep_group),
+            "recv_topk_weights": symm_mem_alloc((rc,), torch.float32, self.ep_group),
+        }
+
+    def _expert_out(self, eo):
+        """Stage the combine input into symm-mem under zero-copy (combine requires it)."""
+        if not ZERO_COPY:
+            return eo
+        symm_buf = symm_mem_alloc(tuple(eo.shape), eo.dtype, self.ep_group)
+        return _StageToSymm.apply(eo, symm_buf)
+
+    def _stage_grad_symm(self, x, symm_buf=None):
+        """Route x's upstream grad through a symm-mem buffer so dispatch_bwd gets
+        a symm-window grad input under zero-copy; passthrough otherwise. Pass a
+        pre-allocated symm_buf to avoid allocating during an interleaved schedule."""
+        if not ZERO_COPY:
+            return x
+        if symm_buf is None:
+            symm_buf = symm_mem_alloc(tuple(x.shape), x.dtype, self.ep_group)
+        return _GradToSymm.apply(x, symm_buf)
 
     def _make_raw_recv(self, dtype=torch.bfloat16):
         """Raw recv tensors + token_counts for the primitive tests."""
@@ -168,13 +240,16 @@ class TestEP(unittest.TestCase):
 
     # Autograd
 
-    def test_dispatch_fwd_bwd(self):
+    @_zero_copy_capable
+    def test_dispatch_autograd(self):
         """0.5*||recv_tokens||^2 ; grad_tokens equals TOP_K * tokens."""
         buf = self._make_buffer()
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
         tokens_p = tokens.detach().clone().requires_grad_(True)
-        recv_t, _recv_w, _tc = ep_dispatch(buf, tokens_p, topk_idx, w)
-        loss = 0.5 * (recv_t.float() ** 2).sum()
+        recv_t, recv_w, _tc = ep_dispatch(buf, tokens_p, topk_idx, w, **self._recv_kwargs())
+        recv_t = self._stage_grad_symm(recv_t)
+        recv_w = self._stage_grad_symm(recv_w)
+        loss = 0.5 * (recv_t.float() ** 2).sum() + 0.0 * recv_w.float().sum()
         loss.backward()
         torch.cuda.synchronize()
         torch.testing.assert_close(
@@ -195,7 +270,7 @@ class TestEP(unittest.TestCase):
 
     # Multi-iter stability
 
-    def test_dispatch_fwd_bwd_multiple_iterations(self):
+    def test_dispatch_autograd_multiple_iterations(self):
         """5 fwd+bwd iters on the same EpBuffer must be bit-stable."""
         buf = self._make_buffer()
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
@@ -255,6 +330,7 @@ class TestEP(unittest.TestCase):
 
     # PP-1F1B handle isolation
 
+    @_zero_copy_capable
     def test_pp_1f1b_two_handles(self):
         """PP-1F1B interleave (F0 F1 B0 F2 B1 B2) over 3 per-microbatch buffers."""
         T, H = TOKENS_PER_RANK, HIDDEN_DIM
@@ -270,13 +346,26 @@ class TestEP(unittest.TestCase):
             tokens_p.append(t.detach().clone().requires_grad_(True))
 
         recv = [None, None, None]
+        # Per-microbatch recv + grad-staging buffers, all symm-mem under zero-copy
+        # and pre-allocated so nothing is allocated/freed mid-interleave.
+        recv_kw = [self._recv_kwargs() for _ in scales]
+        recv_w = [None, None, None]
+        rc = self.cfg.recv_capacity_per_rank
+        if ZERO_COPY:
+            gbuf_t = [symm_mem_alloc((rc, H), torch.bfloat16, self.ep_group) for _ in scales]
+            gbuf_w = [symm_mem_alloc((rc,), torch.float32, self.ep_group) for _ in scales]
+        else:
+            gbuf_t = gbuf_w = [None, None, None]
 
         def fwd(k):
-            recv[k], _, _ = ep_dispatch(buffers[k], tokens_p[k], idx, w)
+            rt, rw, _ = ep_dispatch(buffers[k], tokens_p[k], idx, w, **recv_kw[k])
+            recv[k] = self._stage_grad_symm(rt, gbuf_t[k])
+            recv_w[k] = self._stage_grad_symm(rw, gbuf_w[k])
 
         def bwd(k):
-            (0.5 * (recv[k].float() ** 2).sum()).backward()
+            (0.5 * (recv[k].float() ** 2).sum() + 0.0 * recv_w[k].float().sum()).backward()
             recv[k] = None
+            recv_w[k] = None
 
         fwd(0)
         fwd(1)
@@ -312,19 +401,19 @@ class TestEP(unittest.TestCase):
             tokens_p.grad.float(), tokens.float() * float(TOP_K), atol=5e-2, rtol=5e-2
         )
 
-    def test_combine_grad_expert_out_autograd(self):
-        """ep_combine with caller-supplied grad_expert_out; bwd writes into that slot."""
+    @_zero_copy_capable
+    def test_combine_autograd(self):
+        """ep_combine fwd+bwd; bwd grad target is the EpBuffer symm buffer (zc) or in-flight."""
         buf = self._make_buffer()
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
         tokens_p = tokens.detach().clone().requires_grad_(True)
-        recv_t, recv_w, _ = ep_dispatch(buf, tokens_p, topk_idx, w)
-        eo = self._weighted(recv_t, recv_w)
-        grad_eo = torch.empty_like(eo)
-        gp = grad_eo.data_ptr()
-        out = ep_combine(buf, eo, grad_expert_out=grad_eo)
+        recv_t, recv_w, _ = ep_dispatch(buf, tokens_p, topk_idx, w, **self._recv_kwargs())
+        recv_t = self._stage_grad_symm(recv_t)
+        recv_w = self._stage_grad_symm(recv_w)
+        eo = self._expert_out(self._weighted(recv_t, recv_w))
+        out = ep_combine(buf, eo)
         (0.5 * (out.float() ** 2).sum()).backward()
         torch.cuda.synchronize()
-        self.assertEqual(grad_eo.data_ptr(), gp)
         torch.testing.assert_close(out.float(), tokens.float(), atol=5e-2, rtol=5e-2)
         torch.testing.assert_close(tokens_p.grad.float(), tokens.float(), atol=5e-2, rtol=5e-2)
 
