@@ -939,6 +939,36 @@ __device__ __forceinline__ float ordered_uint_to_float(unsigned int u) {
 }
 
 template <typename T>
+__device__ __forceinline__ T abs_val(T val) {
+  if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+#if __CUDA_ARCH__ >= 800
+    return __habs(val);
+#else
+    return static_cast<__nv_bfloat16>(fabsf(static_cast<float>(val)));
+#endif
+  } else if constexpr (std::is_same_v<T, __half>) {
+    return __habs(val);
+  } else {
+    return fabsf(val);
+  }
+}
+
+template <typename T>
+__device__ __forceinline__ T max_val(T a, T b) {
+  if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+#if __CUDA_ARCH__ >= 800
+    return __hmax(a, b);
+#else
+    return static_cast<__nv_bfloat16>(fmaxf(static_cast<float>(a), static_cast<float>(b)));
+#endif
+  } else if constexpr (std::is_same_v<T, __half>) {
+    return __hmax(a, b);
+  } else {
+    return fmaxf(a, b);
+  }
+}
+
+template <typename T>
 __device__ __forceinline__ T warp_allreduce_sum(T x) {
   // Butterfly reduction
 #pragma unroll

@@ -18,6 +18,7 @@ from .float8_tensor_storage import Float8TensorStorage
 from .mxfp8_tensor_storage import MXFP8TensorStorage
 from .float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from .nvfp4_tensor_storage import NVFP4TensorStorage
+from ...utils import is_non_tn_fp8_gemm_supported
 
 
 class GroupedTensorStorage:
@@ -464,7 +465,6 @@ class GroupedTensorStorage:
         # First dim
         first_dim_list = [s[0] for s in shapes]
         uniform_first_dim = all(first_dim_list[0] == x for x in first_dim_list)
-        logical_first_dim = sum(first_dim_list)
         if uniform_first_dim:
             first_dims = None
         else:
@@ -472,13 +472,27 @@ class GroupedTensorStorage:
 
         # Last dim
         last_dim_list = [s[1] for s in shapes]
-        logical_last_dim = last_dim_list[0]
-        assert all(logical_last_dim == x for x in last_dim_list), "Last dims should be uniform"
+        uniform_last_dim = all(last_dim_list[0] == x for x in last_dim_list)
+        if uniform_last_dim:
+            last_dims = None
+        else:
+            last_dims = torch.tensor([s[1] for s in shapes], dtype=torch.int64, device=device)
+        if first_dims is not None and last_dims is not None:
+            total_elements = sum(f * l for f, l in zip(first_dim_list, last_dim_list))
+            logical_first_dim = 1
+            logical_last_dim = total_elements
+        else:
+            logical_first_dim = (
+                first_dim_list[0]
+                if uniform_first_dim and not uniform_last_dim
+                else sum(first_dim_list)
+            )
+            logical_last_dim = sum(last_dim_list) if not uniform_last_dim else last_dim_list[0]
 
         return GroupedTensorStorage.make_grouped_tensor(
             num_tensors=num_tensors,
             first_dims=first_dims,
-            last_dims=None,
+            last_dims=last_dims,
             logical_first_dim=logical_first_dim,
             logical_last_dim=logical_last_dim,
             quantizer=quantizer,
@@ -602,12 +616,12 @@ class GroupedTensorStorage:
         )
 
     @staticmethod
-    def make_tensor_offsets(first_dims: torch.Tensor, logical_last_dim: int) -> torch.Tensor:
-        """Calculate GPU offsets from first dim splits."""
+    def make_tensor_offsets(split_dims: torch.Tensor, common_dim: int) -> torch.Tensor:
+        """Calculate GPU element offsets from one varying dimension and one common dimension."""
         return torch.cat(
             [
-                torch.zeros(1, device=first_dims.device, dtype=first_dims.dtype),
-                torch.cumsum(first_dims * logical_last_dim, dim=0),
+                torch.zeros(1, device=split_dims.device, dtype=split_dims.dtype),
+                torch.cumsum(split_dims * common_dim, dim=0),
             ]
         )
 
@@ -648,7 +662,6 @@ class GroupedTensorStorage:
         all_same_first = first_dims is None
         all_same_last = last_dims is None
 
-        assert all_same_last, "Last dim must be uniform for GroupedTensor"
         assert logical_first_dim >= 0, "Logical first dim must be non-negative for GroupedTensor"
         assert logical_last_dim > 0, "Logical last dim must be positive for GroupedTensor"
 
@@ -661,26 +674,16 @@ class GroupedTensorStorage:
         tensor_offsets = None
         offsets = None
         shape = []
-        if not all_same_first:
+        if not all_same_first and not all_same_last:
+            tensor_offsets = GroupedTensorStorage.make_tensor_offsets(first_dims * last_dims, 1)
+        elif not all_same_first:
             # Need explicit offsets for non-uniform shapes
             # Offsets are based on number of elements and not pointers.
             # Kernels need to calculate precise pointers based on size of elements.
-
             # TODO(ksivaman): Single kernel + remove the host offset calculation.
             tensor_offsets = GroupedTensorStorage.make_tensor_offsets(first_dims, logical_last_dim)
-            if (
-                first_dims.device.type == "cuda"
-                and torch.cuda.is_available()
-                and torch.cuda.is_current_stream_capturing()
-            ):
-                # Avoid host sync during CUDA graph capture.
-                offsets = None
-                shape = None
-            else:
-                offsets = tensor_offsets.tolist()
-                first_dims_list = first_dims.tolist()
-                for i in range(num_tensors):
-                    shape.append((first_dims_list[i], logical_last_dim))
+        elif not all_same_last:
+            tensor_offsets = GroupedTensorStorage.make_tensor_offsets(last_dims, logical_first_dim)
         else:
             offsets = [
                 i * logical_first_dim * logical_last_dim // num_tensors
@@ -693,9 +696,27 @@ class GroupedTensorStorage:
         logical_shape = (logical_first_dim, logical_last_dim)
 
         no_quantization = quantizer is None
-
         rowwise_usage = quantizer.rowwise_usage if not no_quantization else True
         columnwise_usage = quantizer.columnwise_usage if not no_quantization else False
+        compatible_recipe = None if no_quantization else quantizer._get_compatible_recipe()
+
+        if not shape:
+            if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+                raise ValueError(
+                    "Varying-dimension grouped tensor construction is not graph-safe: it"
+                    " requires device-to-host copies of per-tensor shapes/offsets."
+                )
+            offsets = tensor_offsets.tolist()
+            if first_dims is not None and last_dims is not None:
+                first_dims_list = first_dims.tolist()
+                last_dims_list = last_dims.tolist()
+                shape = [(first_dims_list[i], last_dims_list[i]) for i in range(num_tensors)]
+            elif first_dims is not None:
+                first_dims_list = first_dims.tolist()
+                shape = [(rows, logical_last_dim) for rows in first_dims_list]
+            else:
+                last_dims_list = last_dims.tolist()
+                shape = [(logical_first_dim, cols) for cols in last_dims_list]
 
         # Calculate total elements across all tensors
         total_elements = logical_first_dim * logical_last_dim
@@ -721,7 +742,7 @@ class GroupedTensorStorage:
             if columnwise_usage:
                 # Allocate columnwise data buffer (1D flattened, uint8)
                 columnwise_data = torch.empty(total_elements, dtype=dtype, device=device)
-        elif quantizer._get_compatible_recipe().mxfp8():
+        elif compatible_recipe.mxfp8():
             if rowwise_usage:
                 # Allocate rowwise data buffer (1D flattened, uint8)
                 data = torch.empty(total_elements, dtype=torch.uint8, device=device)
@@ -750,7 +771,7 @@ class GroupedTensorStorage:
                 columnwise_scale_inv = torch.empty(
                     total_columnwise_scale_elements, dtype=torch.uint8, device=device
                 )
-        elif quantizer._get_compatible_recipe().delayed():
+        elif compatible_recipe.delayed():
             if rowwise_usage:
                 # Allocate rowwise data buffer (1D flattened, uint8)
                 data = torch.empty(total_elements, dtype=torch.uint8, device=device)
@@ -769,7 +790,7 @@ class GroupedTensorStorage:
 
             # Amax buffer for delayed scaling - one per tensor
             amax = torch.empty(num_tensors, dtype=torch.float32, device=device)
-        elif quantizer._get_compatible_recipe().nvfp4():
+        elif compatible_recipe.nvfp4():
             row_scaled_nvfp4 = quantizer.row_scaled_nvfp4
             nvfp4_use_4over6 = quantizer.nvfp4_use_4over6
             nvfp4_e4m3_max = quantizer.nvfp4_e4m3_max
@@ -816,7 +837,7 @@ class GroupedTensorStorage:
                     total_columnwise_scale_elements, dtype=torch.uint8, device=device
                 )
                 columnwise_amax = torch.empty(num_tensors, dtype=torch.float32, device=device)
-        elif quantizer._get_compatible_recipe().float8_block_scaling():
+        elif compatible_recipe.float8_block_scaling():
             if rowwise_usage:
                 # Allocate rowwise data buffer (1D flattened, uint8)
                 data = torch.empty(total_elements, dtype=torch.uint8, device=device)
@@ -843,21 +864,25 @@ class GroupedTensorStorage:
                 columnwise_scale_inv = torch.empty(
                     total_columnwise_scale_elements, dtype=torch.float32, device=device
                 )
-        elif quantizer._get_compatible_recipe().float8_current_scaling():
-            # Current scaling - per-tensor scaling computed on the fly
-            if rowwise_usage:
+        elif compatible_recipe.float8_current_scaling():
+            # only rowwise would be be needed for Blackwell FP8 GEMM
+            non_tn_fp8_gemm_supported = is_non_tn_fp8_gemm_supported()
+            fp8_rowwise_usage = rowwise_usage or non_tn_fp8_gemm_supported
+            fp8_columnwise_usage = columnwise_usage and not non_tn_fp8_gemm_supported
+            shared_scale_inv = None
+            if fp8_rowwise_usage or fp8_columnwise_usage:
+                shared_scale_inv = torch.empty(num_tensors, dtype=torch.float32, device=device)
+            if fp8_rowwise_usage:
                 # Allocate rowwise data buffer (1D flattened, uint8)
                 data = torch.empty(total_elements, dtype=torch.uint8, device=device)
-                # Scale inverse - one per tensor
-                scale_inv = torch.empty(num_tensors, dtype=torch.float32, device=device)
+                scale_inv = shared_scale_inv
                 # One scale per tensor, so offsets are simply 0, 1, 2, ..., num_tensors
                 scale_inv_offsets = list(range(num_tensors + 1))
 
-            if columnwise_usage:
+            if fp8_columnwise_usage:
                 # Allocate columnwise data buffer (1D flattened, uint8)
                 columnwise_data = torch.empty(total_elements, dtype=torch.uint8, device=device)
-                # Columnwise scale inverse - one per tensor
-                columnwise_scale_inv = torch.empty(num_tensors, dtype=torch.float32, device=device)
+                columnwise_scale_inv = shared_scale_inv
                 # One scale per tensor, so offsets are simply 0, 1, 2, ..., num_tensors
                 columnwise_scale_inv_offsets = list(range(num_tensors + 1))
 
@@ -931,11 +956,19 @@ class GroupedTensorStorage:
 
         # if self.tensor_shapes is None, then trigger D2H copy and get the shape (not graph safe)
         if self.tensor_shapes is None:
-            first_dims_list = (
-                [self.logical_shape[0]] * self.num_tensors
-                if self.first_dims is None
-                else self.first_dims.tolist()
-            )
+            # Default per-tensor first dim: depends on whether last_dims varies.
+            #   * same-shape          (first/last both None): logical_shape[0] // num_tensors
+            #   * varying-last-dim   (first None, last given): logical_shape[0] (every tensor
+            #                                                  shares the full row count)
+            # When self.first_dims is set we use it directly below, so no default is needed.
+            if self.first_dims is None:
+                if self.last_dims is None:
+                    default_first_dim = self.logical_shape[0] // self.num_tensors
+                else:
+                    default_first_dim = self.logical_shape[0]
+                first_dims_list = [default_first_dim] * self.num_tensors
+            else:
+                first_dims_list = self.first_dims.tolist()
             last_dims_list = (
                 [self.logical_shape[1]] * self.num_tensors
                 if self.last_dims is None
@@ -1119,6 +1152,8 @@ class GroupedTensorStorage:
                 scale_inv = None
                 if self.scale_inv is not None:
                     scale_inv = self.scale_inv[i : i + 1]
+                elif self.columnwise_scale_inv is not None:
+                    scale_inv = self.columnwise_scale_inv[i : i + 1]
 
                 if quantizer.internal:
                     float8_tensor_class = Float8TensorStorage
