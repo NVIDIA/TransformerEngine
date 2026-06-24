@@ -312,6 +312,12 @@ class AutoswitchGemm(TEConfigAPIMapper):
         tensor for GEMM execution.
         If False, `fprop`/`dgrad` stay quantized for such layers.
 
+    direct_high_precision_in_hold_window: bool, default = False
+        If True, non-sampling iterations within an active hold window return
+        high-precision plans directly from `fp8_gemm_enabled(..., final_decision=False)`.
+        This bypasses the quantize->dequantize runtime conversion path for tensors
+        that are available in high precision.
+
     freq/start_step/end_step/start_end_list: Optional
         Sampling controls for tensor inspection calls.
 
@@ -351,6 +357,7 @@ class AutoswitchGemm(TEConfigAPIMapper):
     _DEFAULT_UNDERFLOW_THRESHOLD_PCT = 5.0
     _DEFAULT_MSE_THRESHOLD = 1e-4
     _DEFAULT_ALLOW_FP8_MODEL_PARAMS_DEQUANTIZED_WEIGHT = True
+    _DEFAULT_DIRECT_HIGH_PRECISION_IN_HOLD_WINDOW = False
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -453,6 +460,18 @@ class AutoswitchGemm(TEConfigAPIMapper):
         except Exception:  # pylint: disable=broad-except
             return None
         return root_log_dir
+
+    @staticmethod
+    def _is_sampling_iteration_for_config(config: Dict, iteration: int) -> bool:
+        """Return True when this config schedules tensor sampling in `iteration`."""
+        run_current, _ = next_enabled_iter(
+            config.get("start_step", None),
+            config.get("end_step", None),
+            config.get("start_end_list", None),
+            config.get("freq", 1),
+            iteration,
+        )
+        return run_current
 
     def _logging_enabled(self, config: Optional[Dict] = None) -> bool:
         """Return True when verbose AutoswitchGemm logging is enabled."""
@@ -646,6 +665,29 @@ class AutoswitchGemm(TEConfigAPIMapper):
         # Keep plan-time behavior quantized. Autoswitch decisions are applied only
         # at final decision points right before GEMM launch.
         if not final_decision:
+            direct_high_precision_in_hold_window = self._config_bool(
+                config,
+                "direct_high_precision_in_hold_window",
+                self._DEFAULT_DIRECT_HIGH_PRECISION_IN_HOLD_WINDOW,
+            )
+            if (
+                direct_high_precision_in_hold_window
+                and not self._is_sampling_iteration_for_config(config, iteration)
+                and iteration <= state.disable_until_iter
+            ):
+                fp8_model_params_layer = self._layer_has_fp8_model_params.get(layer_name, False)
+                allow_fp8_model_params_fallback = self._config_bool(
+                    config,
+                    "allow_fp8_model_params_dequantized_weight",
+                    self._DEFAULT_ALLOW_FP8_MODEL_PARAMS_DEQUANTIZED_WEIGHT,
+                )
+                if (
+                    gemm in {"fprop", "dgrad"}
+                    and fp8_model_params_layer
+                    and not allow_fp8_model_params_fallback
+                ):
+                    return True, iteration + 1
+                return False, iteration + 1
             return True, iteration + 1
 
         fp8_model_params_layer = self._layer_has_fp8_model_params.get(layer_name, False)

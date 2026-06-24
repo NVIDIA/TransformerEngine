@@ -245,6 +245,7 @@ Example config matching attention and MLP linears:
           underflow_threshold_pct: 5
           mse_threshold: 0.1
           allow_fp8_model_params_dequantized_weight: True
+          direct_high_precision_in_hold_window: True
           freq: 10
           start_step: 10
 
@@ -261,7 +262,11 @@ Behavior summary:
 4. If model parameters are stored in a quantized format, set
    ``allow_fp8_model_params_dequantized_weight: True`` to allow ``fprop`` and
    ``dgrad`` to switch by using temporary dequantized weights.
-5. When CUDA Graphs are used, sampling and high-precision windows must run in eager
+5. Set ``direct_high_precision_in_hold_window: True`` to directly select
+   high-precision tensor plans on non-sampling hold-window iterations. This
+   bypasses runtime quantize->dequantize conversion when high-precision source
+   tensors are available.
+6. When CUDA Graphs are used, sampling and high-precision windows must run in eager
    mode. Quantized windows can continue using CUDA Graphs if the training framework
    supports this routing. Megatron-LM support for this workflow depends on the
    ``autogemm`` branch:

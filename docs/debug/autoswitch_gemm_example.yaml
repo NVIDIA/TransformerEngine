@@ -45,6 +45,11 @@ log_tensor_stats_all:
       # switch to high precision by using temporary dequantized weights.
       allow_fp8_model_params_dequantized_weight: True
 
+      # Optional: in hold-window non-sampling steps, route directly to
+      # high-precision plans when source tensors are available in bf16/fp16.
+      # This avoids quantize->dequantize conversion in runtime hooks.
+      direct_high_precision_in_hold_window: True
+
       # Start sampling at step 10, then sample every 10 steps. A threshold
       # breach at step N keeps that (layer, GEMM) in high precision through
       # step N + freq - 1. The next sampling step refreshes the decision.
