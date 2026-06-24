@@ -235,8 +235,12 @@ def main():
     eo_p = recv_tokens.detach().clone().requires_grad_(True)
 
     # Stand-in callables; the cuda-graph branch below swaps in graphed versions.
-    fwd_bwd_dispatch_fn = lambda x: ep_dispatch(buffer, x, topk_idx, topk_w, **dispatch_recv_kw)[0]  # noqa: E731
-    fwd_bwd_combine_fn = lambda expert_out: ep_combine(buffer, expert_out, **combine_grad_kw)  # noqa: E731
+    fwd_bwd_dispatch_fn = lambda x: ep_dispatch(buffer, x, topk_idx, topk_w, **dispatch_recv_kw)[
+        0
+    ]  # noqa: E731
+    fwd_bwd_combine_fn = lambda expert_out: ep_combine(
+        buffer, expert_out, **combine_grad_kw
+    )  # noqa: E731
 
     def _dispatch_raw():
         _ep_dispatch_raw(buffer, topk_idx, tokens, topk_w, recv_tokens, recv_w)

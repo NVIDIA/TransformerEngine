@@ -227,20 +227,28 @@ class EpBuffer:
             self.grad_expert_out_symm_buf = None
             return
         if _EP_GROUP is None:
-            raise RuntimeError("ep_bootstrap must be called before constructing a zero-copy EpBuffer")
+            raise RuntimeError(
+                "ep_bootstrap must be called before constructing a zero-copy EpBuffer"
+            )
         rc, h = self.recv_capacity_per_rank, self.hidden_dim
         # Persistent across microbatches; keep resident under CPU offloading.
-        self.recv_topk_weights_symm_buf = symm_mem_alloc((rc,), torch.float32, _EP_GROUP, device=self.device)
+        self.recv_topk_weights_symm_buf = symm_mem_alloc(
+            (rc,), torch.float32, _EP_GROUP, device=self.device
+        )
         mark_not_offload(self.recv_topk_weights_symm_buf)
         if self.caller_provides_grad_expert_out:
             self.grad_expert_out_symm_buf = None
         else:
-            self.grad_expert_out_symm_buf = symm_mem_alloc((rc, h), self.payload_dtype, _EP_GROUP, device=self.device)
+            self.grad_expert_out_symm_buf = symm_mem_alloc(
+                (rc, h), self.payload_dtype, _EP_GROUP, device=self.device
+            )
             mark_not_offload(self.grad_expert_out_symm_buf)
         if self.caller_provides_dispatch_recv_tokens:
             self.recv_tokens_symm_buf = None
         else:
-            self.recv_tokens_symm_buf = symm_mem_alloc((rc, h), self.payload_dtype, _EP_GROUP, device=self.device)
+            self.recv_tokens_symm_buf = symm_mem_alloc(
+                (rc, h), self.payload_dtype, _EP_GROUP, device=self.device
+            )
             mark_not_offload(self.recv_tokens_symm_buf)
 
     def __init__(
