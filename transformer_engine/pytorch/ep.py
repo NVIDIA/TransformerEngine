@@ -492,6 +492,10 @@ class _EpCombine(torch.autograd.Function):
     symm-mem, one-sided) in zero-copy mode, or into a plain tensor allocated
     in-flight here otherwise. The latter keeps allocation torch.compile /
     CUDA-graph safe and lets autograd own the grad's lifetime.
+
+    ``grad_symm_buf`` is the backward's scatter target (an output it writes, never
+    reads), so it is stashed as a plain ctx attribute rather than via
+    save_for_backward, which would version-track a tensor we mutate.
     """
 
     @staticmethod
@@ -507,10 +511,9 @@ class _EpCombine(torch.autograd.Function):
         device = expert_out.device
         result = torch.empty(num_local_tokens, hidden_dim, dtype=expert_out.dtype, device=device)
         torch.ops.transformer_engine_ep.combine(handle_mem, expert_out, result)
-        if grad_symm_buf is not None:
-            ctx.save_for_backward(handle_mem, grad_symm_buf)
-        else:
-            ctx.save_for_backward(handle_mem)
+        ctx.save_for_backward(handle_mem)
+        ctx.grad_symm_buf = grad_symm_buf
+        if grad_symm_buf is None:
             ctx.expert_out_shape = expert_out.shape
             ctx.expert_out_dtype = expert_out.dtype
             ctx.device = device
@@ -520,11 +523,9 @@ class _EpCombine(torch.autograd.Function):
     def backward(ctx, g_result):  # type: ignore[override]
         if not g_result.is_contiguous():
             g_result = g_result.contiguous()
-        saved = ctx.saved_tensors
-        handle_mem = saved[0]
-        if len(saved) == 2:
-            grad_expert_out = saved[1]
-        else:
+        (handle_mem,) = ctx.saved_tensors
+        grad_expert_out = ctx.grad_symm_buf
+        if grad_expert_out is None:
             grad_expert_out = torch.empty(
                 ctx.expert_out_shape, dtype=ctx.expert_out_dtype, device=ctx.device
             )
