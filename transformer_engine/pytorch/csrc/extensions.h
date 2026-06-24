@@ -343,12 +343,14 @@ py::object nvfp4_quantize_with_amax(const at::Tensor &tensor, py::handle quantiz
 py::object dequantize(const py::handle &input, DType otype);
 
 py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const size_t num_tensors,
-                          std::optional<at::Tensor> first_dims,
-                          std::optional<at::Tensor> tensor_offsets);
+                          std::optional<at::Tensor> first_dims, std::optional<at::Tensor> last_dims,
+                          std::optional<at::Tensor> tensor_offsets,
+                          std::optional<at::Tensor> noop_flag);
 
 py::object nvfp4_group_quantize_with_amax(const at::Tensor &tensor, py::handle quantizer,
                                           const size_t num_tensors,
                                           std::optional<at::Tensor> first_dims,
+                                          std::optional<at::Tensor> last_dims,
                                           const at::Tensor &rowwise_amax,
                                           const at::Tensor &columnwise_amax,
                                           std::optional<at::Tensor> tensor_offsets);
@@ -357,6 +359,7 @@ py::object group_dequantize(const py::handle &input, DType otype);
 
 py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
                                 const size_t num_tensors, std::optional<at::Tensor> first_dims,
+                                std::optional<at::Tensor> last_dims,
                                 std::optional<at::Tensor> tensor_offsets);
 
 std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &tensor_list,
