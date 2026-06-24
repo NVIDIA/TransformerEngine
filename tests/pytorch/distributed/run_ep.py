@@ -165,16 +165,6 @@ class TestEP(unittest.TestCase):
             alignment=alignment,
         )
 
-    def _recv_kwargs(self):
-        """ep_dispatch recv-buffer kwargs: symm-mem-backed under zero-copy, else default-alloc."""
-        if not ZERO_COPY:
-            return {}
-        rc = self.cfg.recv_capacity_per_rank
-        return {
-            "recv_tokens": symm_mem_alloc((rc, HIDDEN_DIM), torch.bfloat16, self.ep_group),
-            "recv_topk_weights": symm_mem_alloc((rc,), torch.float32, self.ep_group),
-        }
-
     def _expert_out(self, eo):
         """Stage the combine input into symm-mem under zero-copy (combine requires it)."""
         if not ZERO_COPY:
@@ -242,11 +232,11 @@ class TestEP(unittest.TestCase):
 
     @_zero_copy_test_include
     def test_dispatch_autograd(self):
-        """0.5*||recv_tokens||^2 ; grad_tokens equals TOP_K * tokens. Covers both
-        default-allocated and caller-supplied recv buffers (caller-supplied is
-        required and symm-mem-backed under zero-copy)."""
+        """0.5*||recv_tokens||^2 ; grad_tokens equals TOP_K * tokens. Covers the
+        EpBuffer-owned recv outputs (symm-mem under zero-copy) and, in normal
+        mode, caller-supplied recv buffers."""
         if ZERO_COPY:
-            cases = [("caller_recv_symm", self._recv_kwargs())]
+            cases = [("buffer_owned", {})]
         else:
             rt_buf, rw_buf, _ = self._make_raw_recv()
             cases = [
@@ -355,9 +345,9 @@ class TestEP(unittest.TestCase):
             tokens_p.append(t.detach().clone().requires_grad_(True))
 
         recv = [None, None, None]
-        # Per-microbatch recv + grad-staging buffers, all symm-mem under zero-copy
-        # and pre-allocated so nothing is allocated/freed mid-interleave.
-        recv_kw = [self._recv_kwargs() for _ in scales]
+        # Per-microbatch grad-staging buffers, symm-mem under zero-copy and
+        # pre-allocated so nothing is allocated/freed mid-interleave. The recv
+        # outputs are owned by each EpBuffer (symm-mem under zero-copy).
         recv_w = [None, None, None]
         rc = self.cfg.recv_capacity_per_rank
         if ZERO_COPY:
@@ -367,7 +357,7 @@ class TestEP(unittest.TestCase):
             gbuf_t = gbuf_w = [None, None, None]
 
         def fwd(k):
-            rt, rw, _ = ep_dispatch(buffers[k], tokens_p[k], idx, w, **recv_kw[k])
+            rt, rw, _ = ep_dispatch(buffers[k], tokens_p[k], idx, w)
             recv[k] = self._stage_grad_symm(rt, gbuf_t[k])
             recv_w[k] = self._stage_grad_symm(rw, gbuf_w[k])
 
@@ -426,7 +416,7 @@ class TestEP(unittest.TestCase):
         buf = self._make_buffer()
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
         tokens_p = tokens.detach().clone().requires_grad_(True)
-        recv_t, recv_w, _ = ep_dispatch(buf, tokens_p, topk_idx, w, **self._recv_kwargs())
+        recv_t, recv_w, _ = ep_dispatch(buf, tokens_p, topk_idx, w)
         recv_t = self._stage_grad_symm(recv_t)
         recv_w = self._stage_grad_symm(recv_w)
         eo = self._expert_out(self._weighted(recv_t, recv_w))

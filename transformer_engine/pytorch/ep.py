@@ -188,13 +188,13 @@ def ep_finalize() -> None:
 
 class EpBuffer:
     """Per-microbatch EP layer state holding handle_mem and token_counts.
-    Cross-rank payload buffers are caller-supplied to ep_dispatch and
-    ep_combine; allocate via symm_mem_alloc in zero-copy mode.
     Use one EpBuffer per concurrently-in-flight call (e.g. per PP-1F1B microbatch).
 
-    In zero-copy mode the combine backward scatters into a symm-mem grad buffer
-    owned here (one per buffer, so each layer/microbatch is isolated); the normal
-    mode allocates that grad in-flight in the backward.
+    In zero-copy mode the buffer owns the symm-mem buffers the one-sided path
+    requires: the dispatch recv outputs (recv_tokens, recv_topk_weights) and the
+    combine backward grad target. One set per buffer, so each layer/microbatch is
+    isolated. In normal mode these are None and allocated in-flight instead (recv
+    outputs in the dispatch forward, the combine grad in the backward).
     """
 
     __slots__ = (
@@ -209,25 +209,27 @@ class EpBuffer:
         "device",
         "token_counts",
         "zero_copy",
+        "recv_tokens_symm_buf",
+        "recv_topk_weights_symm_buf",
         "grad_combine_symm_buf",
     )
 
-    def _alloc_grad_combine_symm_buf(self) -> None:
-        """Allocate the zero-copy combine grad buffer; None in normal mode."""
+    def _alloc_symm_buffers(self) -> None:
+        """Allocate the EpBuffer-owned symm-mem buffers; all None in normal mode."""
         if not self.zero_copy:
+            self.recv_tokens_symm_buf = None
+            self.recv_topk_weights_symm_buf = None
             self.grad_combine_symm_buf = None
             return
         if _EP_GROUP is None:
             raise RuntimeError("ep_bootstrap must be called before constructing a zero-copy EpBuffer")
-        buf = symm_mem_alloc(
-            (self.recv_capacity_per_rank, self.hidden_dim),
-            self.payload_dtype,
-            _EP_GROUP,
-            device=self.device,
-        )
+        rc, h = self.recv_capacity_per_rank, self.hidden_dim
+        self.recv_tokens_symm_buf = symm_mem_alloc((rc, h), self.payload_dtype, _EP_GROUP, device=self.device)
+        self.recv_topk_weights_symm_buf = symm_mem_alloc((rc,), torch.float32, _EP_GROUP, device=self.device)
+        self.grad_combine_symm_buf = symm_mem_alloc((rc, h), self.payload_dtype, _EP_GROUP, device=self.device)
         # Persistent across microbatches; keep resident under CPU offloading.
-        mark_not_offload(buf)
-        self.grad_combine_symm_buf = buf
+        for buf in (self.recv_tokens_symm_buf, self.recv_topk_weights_symm_buf, self.grad_combine_symm_buf):
+            mark_not_offload(buf)
 
     def __init__(
         self,
@@ -260,7 +262,7 @@ class EpBuffer:
         self.token_counts = torch.empty(self.num_local_experts, dtype=torch.int32, device=device)
         # Persistent tensor; keep resident if activation CPU offloading is on.
         mark_not_offload(self.handle_mem)
-        self._alloc_grad_combine_symm_buf()
+        self._alloc_symm_buffers()
 
     def record_stream(self, stream: torch.cuda.Stream) -> None:
         """Defer caching-allocator reclaim of owned tensors until stream catches up."""
@@ -558,8 +560,9 @@ def ep_dispatch(
 ):
     """Prepare + dispatch with autograd. topk_idx must be int64.
 
-    recv_tokens / recv_topk_weights are used as-is if supplied, else allocated.
-    Zero-copy mode requires both to be supplied and symm-mem-backed.
+    recv_tokens / recv_topk_weights are used as-is if supplied, else taken from
+    the EpBuffer-owned symm-mem buffers in zero-copy mode or allocated in-flight
+    otherwise.
     Returns (recv_tokens, recv_topk_weights, token_counts); token_counts is non-diff.
     """
     _require_bf16("tokens", tokens)
@@ -568,21 +571,24 @@ def ep_dispatch(
             f"topk_weights must be float32; got dtype={topk_weights.dtype}. "
             "Cast with topk_weights.float() before calling."
         )
-    if buffer.zero_copy and (recv_tokens is None or recv_topk_weights is None):
-        raise ValueError(
-            "ep_dispatch: zero-copy mode requires caller-supplied recv_tokens and "
-            "recv_topk_weights (allocate via symm_mem_alloc)."
-        )
     if recv_tokens is None:
-        recv_tokens = torch.empty(
-            buffer.recv_capacity_per_rank,
-            buffer.hidden_dim,
-            dtype=buffer.payload_dtype,
-            device=buffer.device,
+        recv_tokens = (
+            buffer.recv_tokens_symm_buf
+            if buffer.zero_copy
+            else torch.empty(
+                buffer.recv_capacity_per_rank,
+                buffer.hidden_dim,
+                dtype=buffer.payload_dtype,
+                device=buffer.device,
+            )
         )
     if recv_topk_weights is None:
-        recv_topk_weights = torch.empty(
-            buffer.recv_capacity_per_rank, dtype=torch.float32, device=buffer.device
+        recv_topk_weights = (
+            buffer.recv_topk_weights_symm_buf
+            if buffer.zero_copy
+            else torch.empty(
+                buffer.recv_capacity_per_rank, dtype=torch.float32, device=buffer.device
+            )
         )
     return _EpDispatch.apply(
         buffer.handle_mem,
