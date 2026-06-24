@@ -83,6 +83,11 @@ def _cudnn_frontend_supports_grouped_gemm_srelu() -> bool:
     return _cudnn_frontend_version_at_least("1.24.0")
 
 
+def _cudnn_frontend_supports_grouped_gemm_srelu_hadamard() -> bool:
+    """Check cuDNN frontend min version for grouped GEMM SReLU hadamard kernels."""
+    return _cudnn_frontend_version_at_least("1.26.0")
+
+
 def _nvidia_cudnn_frontend_supports_wgrad() -> bool:
     """Check cuDNN FE min version for grouped GEMM wgrad kernel."""
     return _cudnn_frontend_version_supported()
@@ -1160,7 +1165,10 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             and fc2_input_quantizer.with_post_rht_amax
         )
         activation_is_srelu = isinstance(activation_op, ScaledSReLU)
-        if use_nvfp4_rht_amax and (self._cudnn_act_func == "swiglu" or activation_is_srelu):
+        activation_supports_hadamard = self._cudnn_act_func == "swiglu" or (
+            activation_is_srelu and _cudnn_frontend_supports_grouped_gemm_srelu_hadamard()
+        )
+        if use_nvfp4_rht_amax and activation_supports_hadamard:
             kernel_getter = getattr(self, "grouped_gemm_act_hadamard_kernel", None)
             if kernel_getter is not None:
                 use_fc1_act_hadamard = kernel_getter() is not None
@@ -2155,6 +2163,9 @@ class GroupedMLP_CuTeGEMMUnary(_GroupedMLP_CuTeGEMMBase):
     @functools.lru_cache(maxsize=None)
     def grouped_gemm_act_hadamard_kernel(cls) -> Optional[Callable]:
         """Fused grouped GEMM activation kernel that also emits NVFP4 RHT amaxes."""
+        if not _cudnn_frontend_supports_grouped_gemm_srelu_hadamard():
+            return None
+
         try:
             from cudnn import (
                 grouped_gemm_glu_hadamard_wrapper_sm100,
