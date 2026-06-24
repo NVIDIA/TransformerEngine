@@ -1,5 +1,5 @@
 import cutlass
-from cutlass import Float32, Int64, Int32, Int16
+from cutlass import Float32, Int64, Int32, Int16, Uint32
 from cutlass._mlir.dialects import arith as mlir_arith
 from cutlass._mlir.dialects import llvm
 from cutlass.cutlass_dsl import T, dsl_user_op
@@ -85,6 +85,56 @@ def pack_f32x2(lo: Float32, hi: Float32, *, loc=None, ip=None) -> Int64:
         "mov.b64 $0, {$1, $2};",
         "=l,f,f", has_side_effects=False, is_align_stack=False,
         asm_dialect=llvm.AsmDialect.AD_ATT))
+
+
+def _build_mul_cvt_f32x4(out_fmt: str, relu: bool = False):
+    """Build a fused 4-wide `f32x4 * f32x2 -> fp8x4` PTX wrapper.
+
+    Multiplies four f32 inputs by a broadcast inverse scale (passed as an
+    f32x2 pack of (s, s)) and converts to FP8, packing the four bytes into one
+    uint32: byte i = fp8(v_i * s). Two `mul.f32x2` + two `cvt...x2.f32` — the
+    4-wide analogue of the kit's `mul_cvt_to_fp8x2` (CUDA ptx::mul_cvt_4x).
+    """
+    out_op = "e4m3x2" if out_fmt == "e4m3" else "e5m2x2"
+    asm = (
+        "{\n"
+        ".reg.b64 vp0; .reg.b64 vp1; .reg.b64 vp2; .reg.b64 vp3;\n\t"
+        ".reg.b32 vs0; .reg.b32 vs1; .reg.b32 vs2; .reg.b32 vs3;\n\t"
+        ".reg.b16 vo0; .reg.b16 vo1;\n\t"
+        "mov.b64 vp0, {$1, $2};\n\t"
+        "mov.b64 vp2, {$3, $4};\n\t"
+        "mul.f32x2 vp1, vp0, $5;\n\t"
+        "mul.f32x2 vp3, vp2, $5;\n\t"
+        "mov.b64 {vs0, vs1}, vp1;\n\t"
+        "mov.b64 {vs2, vs3}, vp3;\n\t"
+        # cvt d, a, b => d[15:8]=fp8(a), d[7:0]=fp8(b); feed (hi, lo) so the low
+        # byte holds the earlier element.
+        f"cvt.rn.satfinite{".relu" if relu else ""}.{out_op}.f32 vo0, vs1, vs0;\n\t"
+        f"cvt.rn.satfinite{".relu" if relu else ""}.{out_op}.f32 vo1, vs3, vs2;\n\t"
+        "mov.b32 $0, {vo0, vo1};\n\t"
+        "}"
+    )
+
+    @dsl_user_op
+    def fn(v0: Float32, v1: Float32, v2: Float32, v3: Float32, scale_2x: Int64,
+           *, loc=None, ip=None) -> Uint32:
+        return Uint32(llvm.inline_asm(
+            T.i32(),
+            [v0.ir_value(loc=loc, ip=ip), v1.ir_value(loc=loc, ip=ip),
+             v2.ir_value(loc=loc, ip=ip), v3.ir_value(loc=loc, ip=ip),
+             scale_2x.ir_value(loc=loc, ip=ip)],
+            asm,
+            "=r,f,f,f,f,l", has_side_effects=False, is_align_stack=False,
+            asm_dialect=llvm.AsmDialect.AD_ATT))
+    return fn
+
+
+def mul_cvt_f32x4_to_fp8x4(fp8_dtype: str, relu: bool = False):
+    """Return the fused 4-wide f32->FP8 multiply+cast op for the given FP8 format.
+
+    The op takes (v0, v1, v2, v3, scale_2x) and returns a uint32 of four packed
+    fp8 bytes, byte i = fp8(v_i * scale). `scale_2x` is pack_f32x2(s, s)."""
+    return _build_mul_cvt_f32x4("e5m2" if fp8_dtype == "e5m2" else "e4m3", relu)
 
 def _build_packed16_kit(in_fmt: str):
     """Build a kit of PTX wrappers for a 16-bit input format so we don't have to repeat
