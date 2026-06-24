@@ -11,10 +11,14 @@ from transformer_engine.pytorch import moe_unpermute
 # merging_probs: [num_tokens, num_experts]; routing probabilities used to
 #                weight the per-expert contributions to each token. Provide
 #                for top-k routing; pass None for top-1.
+# restore_shape: the original [num_tokens, hidden_size]. Required when the
+#                permuted buffer has more rows than the input (top-k routing);
+#                for top-1 it can be omitted and is inferred from expert_out.
 tokens_out = moe_unpermute(
     expert_out,
     row_id_map,
     merging_probs=merging_probs,
+    restore_shape=(num_tokens, hidden_size),
 )
 
 # tokens_out: [num_tokens, hidden_size], in the original token order
