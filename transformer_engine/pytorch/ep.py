@@ -262,57 +262,6 @@ class EpBuffer:
         mark_not_offload(self.handle_mem)
         self._alloc_grad_combine_symm_buf()
 
-    @classmethod
-    def from_external(
-        cls,
-        top_k: int,
-        max_tokens_per_rank: int,
-        recv_capacity_per_rank: int,
-        hidden_dim: int,
-        num_local_experts: int,
-        *,
-        token_counts: Optional[torch.Tensor] = None,
-        alignment: int = 0,
-        payload_dtype: torch.dtype = torch.bfloat16,
-        device: Optional[torch.device] = None,
-    ) -> "EpBuffer":
-        """Construct from a caller-allocated token_counts; handle_mem is always fresh."""
-        if device is None:
-            device = torch.device("cuda", torch.cuda.current_device())
-        alignment = int(alignment)
-        if alignment > 1 and (alignment & (alignment - 1)) != 0:
-            raise ValueError(f"alignment must be 0, 1, or a power of two (got {alignment}).")
-        counts_shape = (num_local_experts,)
-
-        inst = cls.__new__(cls)
-        inst.top_k = int(top_k)
-        inst.alignment = alignment
-        inst.max_tokens_per_rank = int(max_tokens_per_rank)
-        inst.recv_capacity_per_rank = int(recv_capacity_per_rank)
-        inst.hidden_dim = int(hidden_dim)
-        inst.num_local_experts = int(num_local_experts)
-        inst.payload_dtype = payload_dtype
-        inst.device = device
-        inst.zero_copy = bool(tex.ep_get_zero_copy())
-
-        size_bytes = tex.ep_handle_mem_size(inst.top_k, inst.alignment)
-        inst.handle_mem = torch.empty(int(size_bytes), dtype=torch.uint8, device=device)
-        # Persistent tensor; keep resident if activation CPU offloading is on.
-        mark_not_offload(inst.handle_mem)
-
-        if token_counts is not None:
-            if tuple(token_counts.shape) != counts_shape:
-                raise ValueError(
-                    f"token_counts shape {tuple(token_counts.shape)} != expected {counts_shape}"
-                )
-            if token_counts.dtype != torch.int32:
-                raise ValueError(f"token_counts dtype {token_counts.dtype} != expected int32")
-            inst.token_counts = token_counts
-        else:
-            inst.token_counts = torch.empty(counts_shape, dtype=torch.int32, device=device)
-        inst._alloc_grad_combine_symm_buf()
-        return inst
-
     def record_stream(self, stream: torch.cuda.Stream) -> None:
         """Defer caching-allocator reclaim of owned tensors until stream catches up."""
         self.handle_mem.record_stream(stream)
