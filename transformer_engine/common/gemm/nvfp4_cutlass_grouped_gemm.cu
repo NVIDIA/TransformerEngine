@@ -22,11 +22,13 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include <cstdint>
+#include <cstring>
 #include <type_traits>
 #include <vector>
 
 #include "../common.h"
 #include "../util/logging.h"
+#include "../util/system.h"
 #include "cute/tensor.hpp"
 #include "cutlass/cutlass.h"
 #include "cutlass/detail/sm100_blockscaled_layout.hpp"
@@ -218,6 +220,29 @@ static void* persistent_buffer(size_t bytes, cudaStream_t stream, int which) {
   return bufs[which];
 }
 
+// Process-persistent PAGEABLE host staging buffer, mirror of the device metadata
+// scratch. All per-group arrays are packed into it host-side, then shipped in a
+// SINGLE H2D copy (vs. one cudaMemcpyAsync per array). Deliberately pageable (not
+// pinned): cudaMemcpyAsync from pageable host memory copies the source into the
+// driver staging buffer before returning, so the buffer is safe to overwrite on
+// the next call even when the host runs ahead of the stream (training). A pinned
+// + truly-async buffer would need event-guarded reuse to avoid that race.
+static void* persistent_host_buffer(size_t bytes) {
+  static std::vector<uint8_t> buf;
+  if (buf.size() < bytes) {
+    buf.resize(bytes + bytes / 2);  // slack to avoid frequent regrows
+  }
+  return buf.data();
+}
+
+// A/B switch: batched single H2D of all metadata (default) vs. the legacy
+// one-cudaMemcpyAsync-per-array path. Set NVTE_NVFP4_GROUPED_BATCHED_H2D=0 to
+// measure the per-array baseline against the batched copy in the same build.
+static bool use_batched_h2d() {
+  static bool v = transformer_engine::getenv<bool>("NVTE_NVFP4_GROUPED_BATCHED_H2D", true);
+  return v;
+}
+
 // Build the shared Z-subtree EVT arguments:
 //   Z = NVFP4_DEQUANT_K * alpha_b[j] * (alpha_a[i] * acc).
 // ArgsT is FusedEVT::Arguments (overwrite path) or ScaledAccEVT::Arguments
@@ -345,14 +370,22 @@ static void run_cutlass_grouped_per_token_gemm_impl(
       align256(d_ptr_h.size() * sizeof(d_ptr_h[0])) +
       align256(alpha_a_ptrs.size() * sizeof(alpha_a_ptrs[0])) +
       align256(alpha_b_ptrs.size() * sizeof(alpha_b_ptrs[0]));
+  const bool batched = use_batched_h2d();
   uint8_t* scr = static_cast<uint8_t*>(persistent_buffer(need, stream, /*which=*/0));
+  uint8_t* hscr = batched ? static_cast<uint8_t*>(persistent_host_buffer(need)) : nullptr;
   size_t off = 0;
+  // Batched path: pack each array into the pageable host mirror at its 256B-aligned
+  // slot and defer to ONE H2D after all puts. Legacy path: copy each array to the
+  // device scratch immediately. Either way return the DEVICE pointer (scr + off).
   auto put = [&](const auto& vec) {
     using T = typename std::decay_t<decltype(vec)>::value_type;
-    T* p = reinterpret_cast<T*>(scr + off);
     const size_t bytes = vec.size() * sizeof(T);
-    NVTE_CHECK_CUDA(
-        cudaMemcpyAsync(p, vec.data(), bytes, cudaMemcpyHostToDevice, stream));
+    T* p = reinterpret_cast<T*>(scr + off);
+    if (batched) {
+      std::memcpy(hscr + off, vec.data(), bytes);
+    } else {
+      NVTE_CHECK_CUDA(cudaMemcpyAsync(p, vec.data(), bytes, cudaMemcpyHostToDevice, stream));
+    }
     off += align256(bytes);
     return p;
   };
@@ -371,6 +404,12 @@ static void run_cutlass_grouped_per_token_gemm_impl(
   // Per-token outer-scale ptr arrays (consumed by the array-of-pointers EVT).
   auto* alpha_a_d = put(alpha_a_ptrs);
   auto* alpha_b_d = put(alpha_b_ptrs);
+
+  // Batched path only: one H2D for ALL per-group metadata (off == packed bytes).
+  // Stream-ordered before the GEMM consumes the device pointers returned above.
+  if (batched) {
+    NVTE_CHECK_CUDA(cudaMemcpyAsync(scr, hscr, off, cudaMemcpyHostToDevice, stream));
+  }
 
   cutlass::KernelHardwareInfo hw_info;
   hw_info.device_id = 0;
