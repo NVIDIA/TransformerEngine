@@ -264,13 +264,6 @@ class EpBuffer:
         mark_not_offload(self.handle_mem)
         self._alloc_symm_buffers()
 
-    def record_stream(self, stream: torch.cuda.Stream) -> None:
-        """Defer caching-allocator reclaim of owned tensors until stream catches up."""
-        self.handle_mem.record_stream(stream)
-        self.token_counts.record_stream(stream)
-        if self.grad_combine_symm_buf is not None:
-            self.grad_combine_symm_buf.record_stream(stream)
-
 
 # torch.library custom ops (so they don't graph-break under torch.compile)
 
