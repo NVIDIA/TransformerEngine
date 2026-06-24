@@ -38,6 +38,18 @@ def _parse_args():
     )
     p.add_argument("--benchmark-iters", type=int, default=20)
     p.add_argument("--benchmark-warmup", type=int, default=5)
+    p.add_argument(
+        "--caller-provides-dispatch-recv-tokens",
+        action="store_true",
+        default=False,
+        help="Supply recv_tokens to ep_dispatch instead of letting EpBuffer own it.",
+    )
+    p.add_argument(
+        "--caller-provides-combine-grad-buffer",
+        action="store_true",
+        default=False,
+        help="Supply the combine backward grad buffer to ep_combine.",
+    )
     return p.parse_args()
 
 
@@ -158,13 +170,27 @@ def _run_layer(args, rank, world_size, ep_size, num_experts, num_local_experts, 
         recv_capacity_per_rank=recv_pr,
         hidden_dim=args.hidden,
         num_local_experts=num_local_experts,
+        caller_provides_dispatch_recv_tokens=args.caller_provides_dispatch_recv_tokens,
+        caller_provides_combine_grad_buffer=args.caller_provides_combine_grad_buffer,
     )
 
-    recv_t, recv_w_out, _tc = ep_dispatch(buffer, tokens, topk_idx, topk_w)
+    # Caller-supplied buffers (normal mode -> plain tensors), reused across iters.
+    dispatch_kw = (
+        {"recv_tokens": torch.empty(recv_pr, args.hidden, dtype=torch.bfloat16, device=device)}
+        if args.caller_provides_dispatch_recv_tokens
+        else {}
+    )
+    combine_kw = (
+        {"grad_combine_buffer": torch.empty(recv_pr, args.hidden, dtype=torch.bfloat16, device=device)}
+        if args.caller_provides_combine_grad_buffer
+        else {}
+    )
+
+    recv_t, recv_w_out, _tc = ep_dispatch(buffer, tokens, topk_idx, topk_w, **dispatch_kw)
     expert_out = _batched_expert_linear(recv_t, kernels_local, num_local_experts)
     # Apply per-slot topk weighting before combine.
     expert_out = expert_out * recv_w_out.unsqueeze(-1).to(expert_out.dtype)
-    out = ep_combine(buffer, expert_out)
+    out = ep_combine(buffer, expert_out, **combine_kw)
 
     loss = 0.5 * (out.float() ** 2).sum()
     loss.backward()
@@ -183,18 +209,18 @@ def _run_layer(args, rank, world_size, ep_size, num_experts, num_local_experts, 
         torch.cuda.synchronize()
         dist.barrier()
         for _ in range(args.benchmark_warmup):
-            rt, rw, _tc = ep_dispatch(buffer, tokens.detach(), topk_idx, topk_w)
+            rt, rw, _tc = ep_dispatch(buffer, tokens.detach(), topk_idx, topk_w, **dispatch_kw)
             eo = _batched_expert_linear(rt, kernels_local, num_local_experts)
             eo = eo * rw.unsqueeze(-1).to(eo.dtype)
-            ep_combine(buffer, eo)
+            ep_combine(buffer, eo, **combine_kw)
         torch.cuda.synchronize()
         dist.barrier()
         t0 = time.perf_counter()
         for _ in range(args.benchmark_iters):
-            rt, rw, _tc = ep_dispatch(buffer, tokens.detach(), topk_idx, topk_w)
+            rt, rw, _tc = ep_dispatch(buffer, tokens.detach(), topk_idx, topk_w, **dispatch_kw)
             eo = _batched_expert_linear(rt, kernels_local, num_local_experts)
             eo = eo * rw.unsqueeze(-1).to(eo.dtype)
-            ep_combine(buffer, eo)
+            ep_combine(buffer, eo, **combine_kw)
         torch.cuda.synchronize()
         dt_ms = (time.perf_counter() - t0) * 1000.0 / args.benchmark_iters
         if rank == 0:

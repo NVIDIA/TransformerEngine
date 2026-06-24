@@ -74,6 +74,18 @@ def _parse_args():
         default=None,
         help="Optional suffix for NVTX range names (e.g. 'fused' / 'unfused').",
     )
+    p.add_argument(
+        "--caller-provides-dispatch-recv-tokens",
+        action="store_true",
+        default=False,
+        help="Supply recv_tokens to ep_dispatch instead of letting EpBuffer own it.",
+    )
+    p.add_argument(
+        "--caller-provides-combine-grad-buffer",
+        action="store_true",
+        default=False,
+        help="Supply the combine backward grad buffer to ep_combine.",
+    )
     return p.parse_args()
 
 
@@ -182,12 +194,27 @@ def main():
         recv_capacity_per_rank=recv_pr,
         hidden_dim=H,
         num_local_experts=num_local_experts,
+        caller_provides_dispatch_recv_tokens=args.caller_provides_dispatch_recv_tokens,
+        caller_provides_combine_grad_buffer=args.caller_provides_combine_grad_buffer,
     )
 
     tokens = tokens_hbm
     topk_w = topk_w_hbm
     recv_tokens = torch.empty(recv_pr, H, dtype=torch.bfloat16, device=device)
     recv_w = torch.empty(recv_pr, dtype=torch.float32, device=device)
+
+    # Caller-supplied buffers for the autograd ep_dispatch/ep_combine stages
+    # (normal mode -> plain tensors), reused across iters. Empty when not opted in.
+    dispatch_recv_kw = (
+        {"recv_tokens": torch.empty(recv_pr, H, dtype=torch.bfloat16, device=device)}
+        if args.caller_provides_dispatch_recv_tokens
+        else {}
+    )
+    combine_grad_kw = (
+        {"grad_combine_buffer": torch.empty(recv_pr, H, dtype=torch.bfloat16, device=device)}
+        if args.caller_provides_combine_grad_buffer
+        else {}
+    )
 
     # -- Prepare once outside the timed loops ------------------------------
     ep_prepare(buffer, topk_idx)
@@ -208,8 +235,8 @@ def main():
     eo_p = recv_tokens.detach().clone().requires_grad_(True)
 
     # Stand-in callables; the cuda-graph branch below swaps in graphed versions.
-    fwd_bwd_dispatch_fn = lambda x: ep_dispatch(buffer, x, topk_idx, topk_w)[0]  # noqa: E731
-    fwd_bwd_combine_fn = lambda eo: ep_combine(buffer, eo)  # noqa: E731
+    fwd_bwd_dispatch_fn = lambda x: ep_dispatch(buffer, x, topk_idx, topk_w, **dispatch_recv_kw)[0]  # noqa: E731
+    fwd_bwd_combine_fn = lambda eo: ep_combine(buffer, eo, **combine_grad_kw)  # noqa: E731
 
     def _dispatch_raw():
         _ep_dispatch_raw(buffer, topk_idx, tokens, topk_w, recv_tokens, recv_w)
@@ -219,7 +246,7 @@ def main():
         _ep_combine_raw(buffer, expert_out, out_buf)
 
     def _ep_dispatch_fwd():
-        ep_dispatch(buffer, tokens.detach(), topk_idx, topk_w)
+        ep_dispatch(buffer, tokens.detach(), topk_idx, topk_w, **dispatch_recv_kw)
 
     def _ep_dispatch_fwd_bwd():
         tokens_p.grad = None
@@ -227,7 +254,7 @@ def main():
         (0.5 * (r * r).sum(dtype=torch.float32)).backward()
 
     def _ep_combine_fwd():
-        ep_combine(buffer, recv_tokens)
+        ep_combine(buffer, recv_tokens, **combine_grad_kw)
 
     def _ep_combine_fwd_bwd():
         eo_p.grad = None
@@ -261,11 +288,11 @@ def main():
         # Graph fwd+bwd of the autograd-wrapped ops via make_graphed_callables.
         class _DispatchMod(torch.nn.Module):
             def forward(self, x):
-                return ep_dispatch(buffer, x, topk_idx, topk_w)[0]
+                return ep_dispatch(buffer, x, topk_idx, topk_w, **dispatch_recv_kw)[0]
 
         class _CombineMod(torch.nn.Module):
             def forward(self, eo):
-                return ep_combine(buffer, eo)
+                return ep_combine(buffer, eo, **combine_grad_kw)
 
         disp_mod = _DispatchMod().cuda()
         comb_mod = _CombineMod().cuda()
