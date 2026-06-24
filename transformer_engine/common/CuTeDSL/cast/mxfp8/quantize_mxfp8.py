@@ -676,9 +676,9 @@ class MXFP8QuantizeKernel:
         cfg = self.cfg
 
         if cutlass.const_expr(cfg.ROWWISE):
-            mS_row = cute.zipped_divide(mS_row, (self._TILE_Y, self._TILE_X // self._MXFP8_BLOCK_SIZE))
+            mS_row = cute.zipped_divide(mS_row, (self._TILE_Y, self._TILE_X // MXFP8_BLOCK_SIZE))
         if cutlass.const_expr(cfg.COLWISE):
-            mS_col = cute.zipped_divide(mS_col, (self._TILE_Y // self._MXFP8_BLOCK_SIZE, self._TILE_X))
+            mS_col = cute.zipped_divide(mS_col, (self._TILE_Y // MXFP8_BLOCK_SIZE, self._TILE_X))
 
         # Allocate shared memory for the input and rowwise / columnwise outputs
         if cutlass.const_expr(cfg.ROWWISE and cfg.COLWISE):
@@ -1229,6 +1229,9 @@ class MXFP8QuantizeSpecializedRowwiseKernel:
             cute.recast_ptr(rO_thread.iterator, dtype=Uint32),
             cute.make_layout((MXFP8_BLOCK_SCALING_SIZE // 4,), stride=(1,)),
         )
+
+        # TODO: review this kernel myself.
+
 
         # Each thread owns only one scale byte, so a direct RF->GMEM scale write
         # can't vectorize (128 scattered 1-byte stores). If STASH_SCALE_TO_SMEM,
