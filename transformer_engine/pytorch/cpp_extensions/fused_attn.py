@@ -363,7 +363,7 @@ def fused_attn_fwd(
                 max_tensor = max_tensor.masked_fill(~valid, float("-inf"))
             elif max_tensor.ndim == 3:
                 if cu_seqlens_q_padded is not None:
-                    # Exclude padded THD rows; CP may pass nonzero padded offsets.
+                    # Exclude padding; CP may pass nonzero padded offsets.
                     actual_seqlens = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).to(
                         device=max_tensor.device
                     )
