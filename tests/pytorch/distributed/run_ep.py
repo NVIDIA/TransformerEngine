@@ -160,7 +160,7 @@ class TestEP(unittest.TestCase):
         alignment=0,
         top_k=TOP_K,
         caller_provides_dispatch_recv_tokens=False,
-        caller_provides_combine_grad_buffer=False,
+        caller_provides_grad_expert_out=False,
     ):
         return EpBuffer(
             top_k=top_k,
@@ -170,7 +170,7 @@ class TestEP(unittest.TestCase):
             num_local_experts=NUM_LOCAL_EXPERTS,
             alignment=alignment,
             caller_provides_dispatch_recv_tokens=caller_provides_dispatch_recv_tokens,
-            caller_provides_combine_grad_buffer=caller_provides_combine_grad_buffer,
+            caller_provides_grad_expert_out=caller_provides_grad_expert_out,
         )
 
     def _expert_out(self, eo):
@@ -296,11 +296,11 @@ class TestEP(unittest.TestCase):
         )
 
     @_zero_copy_test_include
-    def test_caller_provides_combine_grad_buffer(self):
-        """caller_provides_combine_grad_buffer: EpBuffer skips combine-grad allocation
+    def test_caller_provides_grad_expert_out(self):
+        """caller_provides_grad_expert_out: EpBuffer skips combine-grad allocation
         and ep_combine requires a caller-supplied grad buffer (symm-mem under zero-copy)."""
-        buf = self._make_buffer(caller_provides_combine_grad_buffer=True)
-        self.assertIsNone(buf.grad_combine_symm_buf)
+        buf = self._make_buffer(caller_provides_grad_expert_out=True)
+        self.assertIsNone(buf.grad_expert_out_symm_buf)
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
         tokens_p = tokens.detach().clone().requires_grad_(True)
         recv_t, recv_w, _ = ep_dispatch(buf, tokens_p, topk_idx, w)
@@ -314,7 +314,7 @@ class TestEP(unittest.TestCase):
             gbuf = symm_mem_alloc((rc, HIDDEN_DIM), torch.bfloat16, self.ep_group)
         else:
             gbuf = torch.empty(rc, HIDDEN_DIM, dtype=torch.bfloat16, device=self.cfg.device)
-        out = ep_combine(buf, eo, grad_combine_buffer=gbuf)
+        out = ep_combine(buf, eo, grad_expert_out=gbuf)
         (0.5 * (out.float() ** 2).sum()).backward()
         torch.cuda.synchronize()
         torch.testing.assert_close(out.float(), tokens.float(), atol=5e-2, rtol=5e-2)

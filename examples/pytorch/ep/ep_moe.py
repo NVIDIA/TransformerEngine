@@ -45,7 +45,7 @@ def _parse_args():
         help="Supply recv_tokens to ep_dispatch instead of letting EpBuffer own it.",
     )
     p.add_argument(
-        "--caller-provides-combine-grad-buffer",
+        "--caller-provides-grad-expert-out",
         action="store_true",
         default=False,
         help="Supply the combine backward grad buffer to ep_combine.",
@@ -171,7 +171,7 @@ def _run_layer(args, rank, world_size, ep_size, num_experts, num_local_experts, 
         hidden_dim=args.hidden,
         num_local_experts=num_local_experts,
         caller_provides_dispatch_recv_tokens=args.caller_provides_dispatch_recv_tokens,
-        caller_provides_combine_grad_buffer=args.caller_provides_combine_grad_buffer,
+        caller_provides_grad_expert_out=args.caller_provides_grad_expert_out,
     )
 
     # Caller-supplied buffers (normal mode -> plain tensors), reused across iters.
@@ -181,8 +181,8 @@ def _run_layer(args, rank, world_size, ep_size, num_experts, num_local_experts, 
         else {}
     )
     combine_kw = (
-        {"grad_combine_buffer": torch.empty(recv_pr, args.hidden, dtype=torch.bfloat16, device=device)}
-        if args.caller_provides_combine_grad_buffer
+        {"grad_expert_out": torch.empty(recv_pr, args.hidden, dtype=torch.bfloat16, device=device)}
+        if args.caller_provides_grad_expert_out
         else {}
     )
 
