@@ -91,11 +91,14 @@ def _check_nccl_runtime_version() -> None:
 
 _BOOTSTRAPPED = False
 _ATEXIT_REGISTERED = False
+# EP group captured at bootstrap; EpBuffer uses it to allocate the symm-mem
+# combine grad buffer in zero-copy mode.
+_EP_GROUP: Optional[dist.ProcessGroup] = None
 
 
 def _atexit_finalize() -> None:
     """Best-effort teardown at interpreter shutdown; swallows errors."""
-    global _BOOTSTRAPPED
+    global _BOOTSTRAPPED, _EP_GROUP
     if _BOOTSTRAPPED:
         try:
             tex.ep_finalize()
@@ -105,6 +108,7 @@ def _atexit_finalize() -> None:
             traceback.print_exc()
         finally:
             _BOOTSTRAPPED = False
+            _EP_GROUP = None
 
 
 def ep_bootstrap(
@@ -126,7 +130,7 @@ def ep_bootstrap(
     ``True`` only when payload tensors are allocated via ``symm_mem_alloc``.
     Defaults to ``False``.
     """
-    global _BOOTSTRAPPED, _ATEXIT_REGISTERED
+    global _BOOTSTRAPPED, _ATEXIT_REGISTERED, _EP_GROUP
     if _BOOTSTRAPPED:
         raise RuntimeError("ep_bootstrap was already called in this process")
     if ep_group.size() < 2:
@@ -155,6 +159,7 @@ def ep_bootstrap(
         bool(zero_copy),
     )
     _BOOTSTRAPPED = True
+    _EP_GROUP = ep_group
     if not _ATEXIT_REGISTERED:
         atexit.register(_atexit_finalize)
         _ATEXIT_REGISTERED = True
@@ -168,13 +173,14 @@ def ep_finalize() -> None:
     ``dist.destroy_process_group()``, since the borrowed NCCL comm becomes
     invalid once the PG is destroyed.
     """
-    global _BOOTSTRAPPED
+    global _BOOTSTRAPPED, _EP_GROUP
     if not _BOOTSTRAPPED:
         return
     try:
         tex.ep_finalize()
     finally:
         _BOOTSTRAPPED = False
+        _EP_GROUP = None
 
 
 # Buffer
@@ -185,6 +191,10 @@ class EpBuffer:
     Cross-rank payload buffers are caller-supplied to ep_dispatch and
     ep_combine; allocate via symm_mem_alloc in zero-copy mode.
     Use one EpBuffer per concurrently-in-flight call (e.g. per PP-1F1B microbatch).
+
+    In zero-copy mode the combine backward scatters into a symm-mem grad buffer
+    owned here (one per buffer, so each layer/microbatch is isolated); the normal
+    mode allocates that grad in-flight in the backward.
     """
 
     __slots__ = (
@@ -199,7 +209,25 @@ class EpBuffer:
         "device",
         "token_counts",
         "zero_copy",
+        "grad_combine_symm_buf",
     )
+
+    def _alloc_grad_combine_symm_buf(self) -> None:
+        """Allocate the zero-copy combine grad buffer; None in normal mode."""
+        if not self.zero_copy:
+            self.grad_combine_symm_buf = None
+            return
+        if _EP_GROUP is None:
+            raise RuntimeError("ep_bootstrap must be called before constructing a zero-copy EpBuffer")
+        buf = symm_mem_alloc(
+            (self.recv_capacity_per_rank, self.hidden_dim),
+            self.payload_dtype,
+            _EP_GROUP,
+            device=self.device,
+        )
+        # Persistent across microbatches; keep resident under CPU offloading.
+        mark_not_offload(buf)
+        self.grad_combine_symm_buf = buf
 
     def __init__(
         self,
@@ -232,6 +260,7 @@ class EpBuffer:
         self.token_counts = torch.empty(self.num_local_experts, dtype=torch.int32, device=device)
         # Persistent tensor; keep resident if activation CPU offloading is on.
         mark_not_offload(self.handle_mem)
+        self._alloc_grad_combine_symm_buf()
 
     @classmethod
     def from_external(
@@ -281,12 +310,15 @@ class EpBuffer:
             inst.token_counts = token_counts
         else:
             inst.token_counts = torch.empty(counts_shape, dtype=torch.int32, device=device)
+        inst._alloc_grad_combine_symm_buf()
         return inst
 
     def record_stream(self, stream: torch.cuda.Stream) -> None:
         """Defer caching-allocator reclaim of owned tensors until stream catches up."""
         self.handle_mem.record_stream(stream)
         self.token_counts.record_stream(stream)
+        if self.grad_combine_symm_buf is not None:
+            self.grad_combine_symm_buf.record_stream(stream)
 
 
 # torch.library custom ops (so they don't graph-break under torch.compile)
@@ -503,7 +535,13 @@ class _EpDispatch(torch.autograd.Function):
 
 
 class _EpCombine(torch.autograd.Function):
-    """Autograd combine; bwd writes into grad_expert_out, or expert_out's storage if None."""
+    """Autograd combine.
+
+    bwd scatters the expert_out grad into ``grad_symm_buf`` (EpBuffer-owned
+    symm-mem, one-sided) in zero-copy mode, or into a plain tensor allocated
+    in-flight here otherwise. The latter keeps allocation torch.compile /
+    CUDA-graph safe and lets autograd own the grad's lifetime.
+    """
 
     @staticmethod
     def forward(  # type: ignore[override]
@@ -511,31 +549,41 @@ class _EpCombine(torch.autograd.Function):
         handle_mem: torch.Tensor,
         num_local_tokens: int,
         hidden_dim: int,
-        grad_expert_out: Optional[torch.Tensor],
+        grad_symm_buf: Optional[torch.Tensor],
         expert_out: torch.Tensor,
     ):
-        """Combine fwd; stashes grad_expert_out (or expert_out) as the bwd output slot."""
+        """Combine fwd; stashes the bwd grad target or expert_out shape to size it."""
         device = expert_out.device
         result = torch.empty(num_local_tokens, hidden_dim, dtype=expert_out.dtype, device=device)
         torch.ops.transformer_engine_ep.combine(handle_mem, expert_out, result)
-        grad_combine_in = grad_expert_out if grad_expert_out is not None else expert_out
-        # bwd write target reused across microbatches; keep resident under CPU offloading.
-        mark_not_offload(grad_combine_in)
-        ctx.save_for_backward(handle_mem, grad_combine_in)
+        if grad_symm_buf is not None:
+            ctx.save_for_backward(handle_mem, grad_symm_buf)
+        else:
+            ctx.save_for_backward(handle_mem)
+            ctx.expert_out_shape = expert_out.shape
+            ctx.expert_out_dtype = expert_out.dtype
+            ctx.device = device
         return result
 
     @staticmethod
     def backward(ctx, g_result):  # type: ignore[override]
         if not g_result.is_contiguous():
             g_result = g_result.contiguous()
-        handle_mem, grad_combine_in = ctx.saved_tensors
-        torch.ops.transformer_engine_ep.combine_bwd(handle_mem, g_result, grad_combine_in)
+        saved = ctx.saved_tensors
+        handle_mem = saved[0]
+        if len(saved) == 2:
+            grad_expert_out = saved[1]
+        else:
+            grad_expert_out = torch.empty(
+                ctx.expert_out_shape, dtype=ctx.expert_out_dtype, device=ctx.device
+            )
+        torch.ops.transformer_engine_ep.combine_bwd(handle_mem, g_result, grad_expert_out)
         return (
             None,  # handle_mem
             None,  # num_local_tokens
             None,  # hidden_dim
-            None,  # grad_expert_out
-            grad_combine_in,
+            None,  # grad_symm_buf
+            grad_expert_out,
         )
 
 
@@ -605,26 +653,21 @@ def ep_combine(
     expert_out: torch.Tensor,
     *,
     num_local_tokens: Optional[int] = None,
-    grad_expert_out: Optional[torch.Tensor] = None,
 ):
     """Combine with autograd; caller pre-applies topk weighting.
 
-    grad_expert_out is the slot the bwd writes into; if None, expert_out's storage is reused.
-    Zero-copy mode requires both expert_out and grad_expert_out to be symm-mem-backed.
-    Result shape is (num_local_tokens, buffer.hidden_dim); defaults to buffer.max_tokens_per_rank rows.
+    The backward scatters the expert_out grad into buffer.grad_combine_symm_buf
+    (symm-mem) in zero-copy mode, else into a tensor allocated in-flight. Result
+    shape is (num_local_tokens, buffer.hidden_dim); defaults to
+    buffer.max_tokens_per_rank rows.
     """
     _require_bf16("expert_out", expert_out)
-    if buffer.zero_copy and grad_expert_out is None:
-        raise ValueError(
-            "ep_combine: zero-copy mode requires caller-supplied grad_expert_out "
-            "(allocate via symm_mem_alloc)."
-        )
     if num_local_tokens is None:
         num_local_tokens = buffer.max_tokens_per_rank
     return _EpCombine.apply(
         buffer.handle_mem,
         num_local_tokens,
         buffer.hidden_dim,
-        grad_expert_out,
+        buffer.grad_combine_symm_buf,
         expert_out,
     )

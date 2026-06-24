@@ -340,7 +340,7 @@ void ep_combine_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor grad_expe
              c10::toString(grad_expert_out.scalar_type()), ") must match grad dtype (",
              c10::toString(grad.scalar_type()), ")");
   // grad is autograd-allocated (staged-copy path); grad_expert_out is the
-  // caller-supplied scatter target and must be symm-mem in zero-copy mode.
+  // EpBuffer-owned scatter target and must be symm-mem in zero-copy mode.
   check_symm_mem_required(grad_expert_out, "grad_expert_out");
 
   auto g_dtype = GetTransformerEngineDType(grad.scalar_type());
@@ -350,6 +350,8 @@ void ep_combine_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor grad_expe
   auto grad_eo_te =
       makeTransformerEngineTensor(grad_expert_out.data_ptr(), Shape{recv_pr, H}, g_dtype);
 
+  // grad is autograd-allocated (staged); grad_expert_out resolves to a symm-mem
+  // window in zero-copy mode, else kNoWindow for the staged path.
   NVTECommWindow grad_win = maybe_make_window(grad);
   NVTECommWindow grad_eo_win = maybe_make_window(grad_expert_out);
   nvte_ep_combine_bwd(handle_mem_te.data(), grad_te.data(), grad_win, grad_eo_te.data(),
