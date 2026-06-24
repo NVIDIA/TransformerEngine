@@ -236,7 +236,7 @@ def main():
 
     # Stand-in callables; the cuda-graph branch below swaps in graphed versions.
     fwd_bwd_dispatch_fn = lambda x: ep_dispatch(buffer, x, topk_idx, topk_w, **dispatch_recv_kw)[0]  # noqa: E731
-    fwd_bwd_combine_fn = lambda eo: ep_combine(buffer, eo, **combine_grad_kw)  # noqa: E731
+    fwd_bwd_combine_fn = lambda expert_out: ep_combine(buffer, expert_out, **combine_grad_kw)  # noqa: E731
 
     def _dispatch_raw():
         _ep_dispatch_raw(buffer, topk_idx, tokens, topk_w, recv_tokens, recv_w)
@@ -291,8 +291,8 @@ def main():
                 return ep_dispatch(buffer, x, topk_idx, topk_w, **dispatch_recv_kw)[0]
 
         class _CombineMod(torch.nn.Module):
-            def forward(self, eo):
-                return ep_combine(buffer, eo, **combine_grad_kw)
+            def forward(self, expert_out):
+                return ep_combine(buffer, expert_out, **combine_grad_kw)
 
         disp_mod = _DispatchMod().cuda()
         comb_mod = _CombineMod().cuda()

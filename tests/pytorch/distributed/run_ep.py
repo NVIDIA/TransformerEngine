@@ -173,12 +173,12 @@ class TestEP(unittest.TestCase):
             caller_provides_grad_expert_out=caller_provides_grad_expert_out,
         )
 
-    def _expert_out(self, eo):
+    def _expert_out(self, expert_out):
         """Stage the combine input into symm-mem under zero-copy (combine requires it)."""
         if not ZERO_COPY:
-            return eo
-        symm_buf = symm_mem_alloc(tuple(eo.shape), eo.dtype, self.ep_group)
-        return _StageToSymm.apply(eo, symm_buf)
+            return expert_out
+        symm_buf = symm_mem_alloc(tuple(expert_out.shape), expert_out.dtype, self.ep_group)
+        return _StageToSymm.apply(expert_out, symm_buf)
 
     def _stage_grad_symm(self, x, symm_buf=None):
         """Route x's upstream grad through a symm-mem buffer so dispatch_bwd gets
@@ -207,8 +207,8 @@ class TestEP(unittest.TestCase):
 
     def _moe_step(self, buffer, topk_idx, tokens, w):
         recv_t, recv_w_out, _tc = ep_dispatch(buffer, tokens, topk_idx, w)
-        eo = self._weighted(recv_t, recv_w_out)
-        return ep_combine(buffer, eo)
+        expert_out = self._weighted(recv_t, recv_w_out)
+        return ep_combine(buffer, expert_out)
 
     # Prepare
 
@@ -306,15 +306,15 @@ class TestEP(unittest.TestCase):
         recv_t, recv_w, _ = ep_dispatch(buf, tokens_p, topk_idx, w)
         recv_t = self._stage_grad_symm(recv_t)
         recv_w = self._stage_grad_symm(recv_w)
-        eo = self._expert_out(self._weighted(recv_t, recv_w))
+        expert_out = self._expert_out(self._weighted(recv_t, recv_w))
         with self.assertRaises(ValueError):
-            ep_combine(buf, eo)
+            ep_combine(buf, expert_out)
         rc = self.cfg.recv_capacity_per_rank
         if ZERO_COPY:
             gbuf = symm_mem_alloc((rc, HIDDEN_DIM), torch.bfloat16, self.ep_group)
         else:
             gbuf = torch.empty(rc, HIDDEN_DIM, dtype=torch.bfloat16, device=self.cfg.device)
-        out = ep_combine(buf, eo, grad_expert_out=gbuf)
+        out = ep_combine(buf, expert_out, grad_expert_out=gbuf)
         (0.5 * (out.float() ** 2).sum()).backward()
         torch.cuda.synchronize()
         torch.testing.assert_close(out.float(), tokens.float(), atol=5e-2, rtol=5e-2)
@@ -479,8 +479,8 @@ class TestEP(unittest.TestCase):
         recv_t, recv_w, _ = ep_dispatch(buf, tokens_p, topk_idx, w)
         recv_t = self._stage_grad_symm(recv_t)
         recv_w = self._stage_grad_symm(recv_w)
-        eo = self._expert_out(self._weighted(recv_t, recv_w))
-        out = ep_combine(buf, eo)
+        expert_out = self._expert_out(self._weighted(recv_t, recv_w))
+        out = ep_combine(buf, expert_out)
         (0.5 * (out.float() ** 2).sum()).backward()
         torch.cuda.synchronize()
         torch.testing.assert_close(out.float(), tokens.float(), atol=5e-2, rtol=5e-2)
