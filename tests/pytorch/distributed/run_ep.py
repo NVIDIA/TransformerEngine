@@ -242,31 +242,33 @@ class TestEP(unittest.TestCase):
 
     @_zero_copy_test_include
     def test_dispatch_autograd(self):
-        """0.5*||recv_tokens||^2 ; grad_tokens equals TOP_K * tokens."""
-        buf = self._make_buffer()
-        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
-        tokens_p = tokens.detach().clone().requires_grad_(True)
-        recv_t, recv_w, _tc = ep_dispatch(buf, tokens_p, topk_idx, w, **self._recv_kwargs())
-        recv_t = self._stage_grad_symm(recv_t)
-        recv_w = self._stage_grad_symm(recv_w)
-        loss = 0.5 * (recv_t.float() ** 2).sum() + 0.0 * recv_w.float().sum()
-        loss.backward()
-        torch.cuda.synchronize()
-        torch.testing.assert_close(
-            tokens_p.grad.float(), tokens.float() * float(TOP_K), atol=5e-2, rtol=5e-2
-        )
-
-    def test_combine_fwd_bwd(self):
-        """Full dispatch + combine fwd+bwd; identity inputs round-trip."""
-        buf = self._make_buffer()
-        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
-        tokens_p = tokens.detach().clone().requires_grad_(True)
-        out = self._moe_step(buf, topk_idx, tokens_p, w)
-        loss = 0.5 * (out.float() ** 2).sum()
-        loss.backward()
-        torch.cuda.synchronize()
-        torch.testing.assert_close(out.float(), tokens.float(), atol=5e-2, rtol=5e-2)
-        torch.testing.assert_close(tokens_p.grad.float(), tokens.float(), atol=5e-2, rtol=5e-2)
+        """0.5*||recv_tokens||^2 ; grad_tokens equals TOP_K * tokens. Covers both
+        default-allocated and caller-supplied recv buffers (caller-supplied is
+        required and symm-mem-backed under zero-copy)."""
+        if ZERO_COPY:
+            cases = [("caller_recv_symm", self._recv_kwargs())]
+        else:
+            rt_buf, rw_buf, _ = self._make_raw_recv()
+            cases = [
+                ("default_alloc", {}),
+                ("caller_recv", {"recv_tokens": rt_buf, "recv_topk_weights": rw_buf}),
+            ]
+        for label, recv_kw in cases:
+            with self.subTest(case=label):
+                buf = self._make_buffer()
+                topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+                tokens_p = tokens.detach().clone().requires_grad_(True)
+                rt, rw, _tc = ep_dispatch(buf, tokens_p, topk_idx, w, **recv_kw)
+                if recv_kw:  # caller-supplied buffers must be used in place
+                    self.assertEqual(rt.data_ptr(), recv_kw["recv_tokens"].data_ptr())
+                    self.assertEqual(rw.data_ptr(), recv_kw["recv_topk_weights"].data_ptr())
+                rt = self._stage_grad_symm(rt)
+                rw = self._stage_grad_symm(rw)
+                (0.5 * (rt.float() ** 2).sum() + 0.0 * rw.float().sum()).backward()
+                torch.cuda.synchronize()
+                torch.testing.assert_close(
+                    tokens_p.grad.float(), tokens.float() * float(TOP_K), atol=5e-2, rtol=5e-2
+                )
 
     # Multi-iter stability
 
@@ -332,7 +334,14 @@ class TestEP(unittest.TestCase):
 
     @_zero_copy_test_include
     def test_pp_1f1b_two_handles(self):
-        """PP-1F1B interleave (F0 F1 B0 F2 B1 B2) over 3 per-microbatch buffers."""
+        """PP-1F1B interleave (F0 F1 B0 F2 B1 B2) over 3 per-microbatch buffers,
+        run eagerly and replayed from a CUDA graph capturing the full fwd+bwd
+        schedule (prepare included; routing is fixed so replay reproduces it)."""
+        for capture in (False, True):
+            with self.subTest(capture=capture):
+                self._run_1f1b(capture)
+
+    def _run_1f1b(self, capture):
         T, H = TOKENS_PER_RANK, HIDDEN_DIM
         idx, _toks, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
         scales = (0.13, 0.41, 0.77)
@@ -367,12 +376,41 @@ class TestEP(unittest.TestCase):
             recv[k] = None
             recv_w[k] = None
 
-        fwd(0)
-        fwd(1)
-        bwd(0)
-        fwd(2)
-        bwd(1)
-        bwd(2)
+        def interleave():
+            fwd(0)
+            fwd(1)
+            bwd(0)
+            fwd(2)
+            bwd(1)
+            bwd(2)
+
+        def zero_grads():
+            for tp in tokens_p:
+                if tp.grad is not None:
+                    tp.grad.zero_()
+
+        if not capture:
+            interleave()
+        else:
+            # Warmup on a side stream, then capture the full schedule and replay.
+            # Grads stay pre-allocated (zeroed, not None) so backward accumulates
+            # in place during both capture and replay.
+            s = torch.cuda.Stream()
+            s.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(s):
+                for _ in range(3):
+                    zero_grads()
+                    interleave()
+            torch.cuda.current_stream().wait_stream(s)
+            torch.cuda.synchronize()
+
+            zero_grads()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                interleave()
+            zero_grads()
+            graph.replay()
+
         torch.cuda.synchronize()
         for k in range(3):
             torch.testing.assert_close(
@@ -381,25 +419,6 @@ class TestEP(unittest.TestCase):
                 atol=5e-2,
                 rtol=5e-2,
             )
-
-    # Caller-supplied output buffers (autograd)
-
-    def test_dispatch_caller_recv_buffers_autograd(self):
-        """ep_dispatch with caller-supplied recv buffers; fwd+bwd matches default-alloc grads."""
-        buf = self._make_buffer()
-        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
-        recv_tokens, recv_w, _ = self._make_raw_recv()
-        tokens_p = tokens.detach().clone().requires_grad_(True)
-        rt, rw, _tc = ep_dispatch(
-            buf, tokens_p, topk_idx, w, recv_tokens=recv_tokens, recv_topk_weights=recv_w
-        )
-        self.assertEqual(rt.data_ptr(), recv_tokens.data_ptr())
-        self.assertEqual(rw.data_ptr(), recv_w.data_ptr())
-        (0.5 * (rt.float() ** 2).sum() + 0.0 * rw.float().sum()).backward()
-        torch.cuda.synchronize()
-        torch.testing.assert_close(
-            tokens_p.grad.float(), tokens.float() * float(TOP_K), atol=5e-2, rtol=5e-2
-        )
 
     @_zero_copy_test_include
     def test_combine_autograd(self):
