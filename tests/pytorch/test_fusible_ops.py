@@ -3603,7 +3603,7 @@ class TestSequentialModules:
         y_test.backward(dy_test)
 
         # Loose tols for sanity checking
-        tols = quantization_tols(quantization)
+        tols = quantization_tols(quantization) if quantization is not None else {"rtol": 0.125, "atol": 0.25}
 
         # Check values
         assert_close(y_test, y_ref, **tols)
