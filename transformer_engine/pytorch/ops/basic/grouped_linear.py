@@ -26,7 +26,7 @@ from ...module.base import (
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload, start_offload
 from ...quantization import FP8GlobalStateManager, QuantizerRole, Recipe
 from ...quantized_tensor import QuantizedTensorStorage
-from ...tensor import MXFP8Quantizer, MXFP8Tensor, Quantizer
+from ...tensor import MXFP8Quantizer, MXFP8Tensor, NVFP4Quantizer, Quantizer
 from ...utils import (
     canonicalize_device,
     canonicalize_dtype,
@@ -764,17 +764,27 @@ class GroupedLinear(BasicOperation):
 
         * The graph-safe path dispatches to ``general_grouped_gemm_for_grouped_tensor``,
           which is backed by ``nvte_grouped_gemm_with_discrete_inputA`` in the common
-          library. That kernel requires Blackwell (SM100) or newer with cuBLAS 13.3+.
-        * Quantized compute is currently MXFP8-only; every other quantization
-          recipe (fp8 delayed / current scaling, fp8 block scaling, NVFP4, ...)
-          falls back to the legacy flow.
-        * Unquantized compute supports BF16/FP16 only -- FP32 is excluded
-          because the cublasLt grouped GEMM doesn't support it.
+          library. This filter mirrors cuBLASLt grouped GEMM's architecture
+          requirement without duplicating its cuBLAS version checks.
+        * Quantized compute supports MXFP8 and NVFP4 on Blackwell GPUs with Compute Capability (CC)
+          10.x and 11.0. NVFP4 requires RHT because graph-safe grouped quantization currently
+          requires RHT;
+          Every other quantization recipe (fp8 delayed / current scaling, fp8 block scaling, ...)
+          falls back to the legacy flow because the corresponding grouped quantization kernels are
+          missing.
+        * Unquantized compute supports BF16/FP16 on Hopper (CC 9.0) and Blackwell (CC 10.x and 11.0)
+          -- FP32 is excluded because the cuBLASLt grouped GEMM doesn't support it.
+        * Input/weight/grad_output quantizers are assumed to be of the same type, otherwise it
+          would trigger a fatal error in the cuBLASLt grouped GEMM check.
         """
-        if get_device_compute_capability() < (10, 0):
+        if not (9, 0) <= get_device_compute_capability() <= (11, 0):
             return False
         if with_quantized_compute:
-            return all(isinstance(q, MXFP8Quantizer) for q in input_quantizers)
+            if not (10, 0) <= get_device_compute_capability() <= (11, 0):
+                return False
+            return all(isinstance(q, MXFP8Quantizer) for q in input_quantizers) or all(
+                isinstance(q, NVFP4Quantizer) and q.with_rht for q in input_quantizers
+            )
         return dtype in (torch.bfloat16, torch.float16)
 
     def _get_grouped_weight_for_gemm(
@@ -954,7 +964,7 @@ class GroupedLinear(BasicOperation):
 
         # Dispatch: graph-safe GroupedTensor flow whenever it can be used.
         # See ``_is_graph_safe_path_supported`` for the gating rationale --
-        # in short it requires Blackwell (SM100+) plus a supported dtype /
+        # in short it requires Hopper (SM90+) plus a supported dtype /
         # quantization recipe. Otherwise we fall back to the legacy
         # ``tex.split_quantize`` + ``general_grouped_gemm`` flow.
         use_grouped_tensor_path = self._is_graph_safe_path_supported(
@@ -1582,7 +1592,11 @@ class GroupedLinear(BasicOperation):
             )
             grad_output_quantizer.optimize_for_gemm = True
 
-            if has_bias and not self._scale_bias:
+            if (
+                has_bias
+                and not self._scale_bias
+                and isinstance(grad_output_quantizer, MXFP8Quantizer)
+            ):
                 grouped_dy, dbias_packed = tex.bgrad_group_quantize(
                     dy_2d, grad_output_quantizer, num_groups, split_sizes
                 )

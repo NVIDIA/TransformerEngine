@@ -10,6 +10,7 @@
 #include <limits>
 #include <type_traits>
 
+#include "../cast/fp8/group_amax_fp8.cuh"
 #include "../common.h"
 #include "../util/logging.h"
 #include "../util/vectorized_pointwise.h"
@@ -175,6 +176,72 @@ void compute_amax_impl(const NVTETensor input_, const NVTETensor output_, cudaSt
           stream););  // NOLINT(*)
 }
 
+void group_compute_amax_impl(const NVTEGroupedTensor input_, NVTEGroupedTensor output_,
+                             const NVTEQuantizationConfig config_, cudaStream_t stream) {
+  using namespace transformer_engine;
+
+  NVTE_CHECK(input_ != nullptr, "Invalid grouped input tensor (got NULL)");
+  const auto &input = *convertNVTEGroupedTensorCheck(input_);
+  NVTE_CHECK(output_ != nullptr, "Invalid grouped output tensor (got NULL)");
+  auto &output = *convertNVTEGroupedTensorCheck(output_);
+  NVTE_CHECK(input.num_tensors == output.num_tensors,
+             "Number of grouped input and output tensors must match.");
+  NVTE_CHECK(input.has_data(), "Grouped amax input must have rowwise data.");
+  NVTE_CHECK(!is_fp8_dtype(input.data.dtype),
+             "Grouped amax input must be unquantized, but got dtype=", to_string(input.data.dtype));
+  NVTE_CHECK(output.amax.has_data() || output.columnwise_amax.has_data(),
+             "Grouped amax output must have an amax buffer.");
+
+  CheckInputGroupedTensor(input, "group_compute_amax_input");
+  CheckOutputGroupedTensor(output, "group_compute_amax_output", true);
+
+  ShapeRepresentation shape_rep = ShapeRepresentation::SAME_BOTH_DIMS;
+  if (output.all_same_shape()) {
+    shape_rep = ShapeRepresentation::SAME_BOTH_DIMS;
+  } else if (output.all_same_last_dim()) {
+    shape_rep = ShapeRepresentation::VARYING_FIRST_DIM;
+  } else if (output.all_same_first_dim()) {
+    shape_rep = ShapeRepresentation::VARYING_LAST_DIM;
+  } else {
+    shape_rep = ShapeRepresentation::VARYING_BOTH_DIMS;
+  }
+
+  const int64_t *offsets_ptr = reinterpret_cast<const int64_t *>(output.tensor_offsets.dptr);
+  const int64_t *first_dims_ptr = reinterpret_cast<const int64_t *>(output.first_dims.dptr);
+  const int64_t *last_dims_ptr = reinterpret_cast<const int64_t *>(output.last_dims.dptr);
+  if (shape_rep != ShapeRepresentation::SAME_BOTH_DIMS) {
+    NVTE_CHECK(offsets_ptr != nullptr,
+               "Grouped amax requires tensor_offsets when a grouped dimension varies.");
+  }
+  if (shape_rep == ShapeRepresentation::VARYING_FIRST_DIM ||
+      shape_rep == ShapeRepresentation::VARYING_BOTH_DIMS) {
+    NVTE_CHECK(first_dims_ptr != nullptr,
+               "Grouped amax requires first_dims for varying first dimensions.");
+  }
+  if (shape_rep == ShapeRepresentation::VARYING_LAST_DIM ||
+      shape_rep == ShapeRepresentation::VARYING_BOTH_DIMS) {
+    NVTE_CHECK(last_dims_ptr != nullptr,
+               "Grouped amax requires last_dims for varying last dimensions.");
+  }
+
+  float *noop_ptr = nullptr;
+  if (config_ != nullptr) {
+    const QuantizationConfig *config_cpp = reinterpret_cast<const QuantizationConfig *>(config_);
+    const NVTETensor noop = config_cpp ? config_cpp->noop_tensor : nullptr;
+    noop_ptr = reinterpret_cast<float *>(
+        (noop != nullptr ? convertNVTETensorCheck(noop)->data.dptr : nullptr));
+  }
+
+  float *amax_ptr = reinterpret_cast<float *>(
+      output.amax.dptr != nullptr ? output.amax.dptr : output.columnwise_amax.dptr);
+  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
+      input.data.dtype, IType,
+      dispatch::fp8::launch_grouped_amax_kernel(
+          reinterpret_cast<const IType *>(input.data.dptr), amax_ptr, output.num_tensors,
+          output.logical_shape.data[0], output.logical_shape.data[1], shape_rep, offsets_ptr,
+          first_dims_ptr, last_dims_ptr, noop_ptr, stream););  // NOLINT(*)
+}
+
 }  // anonymous namespace
 
 void nvte_compute_amax(const NVTETensor input_, const NVTETensor output_, cudaStream_t stream) {
@@ -186,6 +253,12 @@ void nvte_compute_amax_with_config(const NVTETensor input_, const NVTETensor out
                                    const NVTEQuantizationConfig config_, cudaStream_t stream) {
   NVTE_API_CALL(nvte_compute_amax_with_config);
   compute_amax_impl(input_, output_, stream, config_);
+}
+
+void nvte_group_compute_amax_with_config(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                                         const NVTEQuantizationConfig config, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_group_compute_amax_with_config);
+  group_compute_amax_impl(input, output, config, stream);
 }
 
 namespace transformer_engine {
