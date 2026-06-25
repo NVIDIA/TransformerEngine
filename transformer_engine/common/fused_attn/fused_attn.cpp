@@ -399,16 +399,22 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         // qkv format
         (qkv_format == NVTE_QKV_Format::NVTE_SBHD || qkv_format == NVTE_QKV_Format::NVTE_BSHD ||
          qkv_format == NVTE_QKV_Format::NVTE_BHSD ||
-         (qkv_format == NVTE_QKV_Format::NVTE_THD && sm_arch_ >= 90 &&
+         (qkv_format == NVTE_QKV_Format::NVTE_THD &&
+          (sm_arch_ >= 90 || cudnn_runtime_version >= 91801) &&
           ((cudnn_runtime_version >= 90100 && num_attn_heads == num_gqa_groups) ||
            cudnn_runtime_version >= 90600)) ||
          ((q_format == NVTE_QKV_Format::NVTE_SBHD || q_format == NVTE_QKV_Format::NVTE_BSHD ||
            q_format == NVTE_QKV_Format::NVTE_BHSD ||
-           (q_format == NVTE_QKV_Format::NVTE_THD && sm_arch_ >= 90) ||
+           (q_format == NVTE_QKV_Format::NVTE_THD &&
+            (sm_arch_ >= 90 || cudnn_runtime_version >= 91801)) ||
            kv_format == NVTE_QKV_Format::NVTE_SBHD || kv_format == NVTE_QKV_Format::NVTE_BSHD ||
            kv_format == NVTE_QKV_Format::NVTE_BHSD ||
-           (kv_format == NVTE_QKV_Format::NVTE_THD && sm_arch_ >= 90)) &&
+           (kv_format == NVTE_QKV_Format::NVTE_THD &&
+            (sm_arch_ >= 90 || cudnn_runtime_version >= 91801))) &&
           cudnn_runtime_version >= 90700)) &&
+        // THD (ragged offset) support: Ampere/Ada (sm80/sm89) only from cuDNN 9.18.1
+        ((q_format != NVTE_QKV_Format::NVTE_THD && kv_format != NVTE_QKV_Format::NVTE_THD) ||
+         sm_arch_ >= 90 || cudnn_runtime_version >= 91801) &&
         // sliding window
         // pre-9.2: full attn, causal
         ((cudnn_runtime_version < 90200 && window_size_left == -1 &&
