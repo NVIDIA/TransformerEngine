@@ -118,7 +118,7 @@ def safe_quantized_repr(obj, cls_name, extras=None, error=None):
     if error is not None and not _is_fake_data_access_error(error):
         warnings.warn(
             f"{cls_name}.__repr__ fell back to a metadata-only representation "
-            f"because an unexpected error occurred while materializing data: "
+            "because an unexpected error occurred while materializing data: "
             f"{type(error).__name__}: {error}",
             stacklevel=2,
         )
