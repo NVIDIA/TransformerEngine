@@ -12,6 +12,10 @@ Scope:
 - Exact cuDNN patch-level gates and FlashAttention package-version gates stay
   in `transformer_engine/pytorch/attention/dot_product_attention/utils.py` and
   `transformer_engine/common/fused_attn/fused_attn.cpp`.
+- Matrix shape: CP communication mode is the primary axis in this draft because
+  it removes or preserves larger feature groups than hardware does. Hardware
+  still appears in leaf notes where it changes a family, for example `sm90`
+  FA3 or `sm100+` FP8 CurrentS/MXFP8.
 
 Legend:
 
@@ -133,7 +137,7 @@ CP docs
 | --- | --- | --- |
 | MHA/MQA/GQA | Supported | Requires even `num_heads` and `num_gqa_groups` for A2A. |
 | MLA | Limited | Selected unequal QK/V head dimensions can remain. |
-| SWA | Limited | CP SWA keeps only selected communication and mask forms. |
+| SWA | Limited | Fused CP SWA can remain for A2A or AG, not `p2p`/`a2a+p2p`; use no bias, zero dropout, `max_seqlen_q <= max_seqlen_kv`, and non-bottom-right masks such as `no_mask`, `padding`, or `padding_causal`. |
 | Mask types | Limited | No bottom-right CP masks, causal cross-attention, or arbitrary masks. |
 | Bias | No | FusedAttention CP keeps explicit bias only for `p2p`; A2A uses no bias. |
 | Sink softmax | Limited | A2A is the CP mode that can keep non-vanilla softmax. |
@@ -147,7 +151,7 @@ CP docs
 | --- | --- | --- |
 | MHA/MQA/GQA | Limited | THD CP depends on cuDNN shape support. |
 | MLA | Limited | Selected shapes only. |
-| SWA | Limited | CP SWA constraints still apply. |
+| SWA | Limited | Fused CP SWA can remain for A2A or AG, not `p2p`/`a2a+p2p`; THD still needs padding-style masks, no bias, zero dropout, and no bottom-right CP mask. |
 | Mask types | Limited | Padding-style masks only; bottom-right CP masks are removed. |
 | Bias | No | THD CP removes attention bias. |
 | Sink softmax | Limited | A2A can keep selected non-vanilla softmax paths. |
@@ -170,7 +174,7 @@ CP docs
 | `fp8_mha=True` | Limited | KV cache with FP8 MHA is removed. |
 | MHA/MQA/GQA | Limited | Broadly plausible when FP8 gates pass. |
 | MLA | Limited | Selected shapes only. |
-| SWA | Limited | CP SWA constraints still apply. |
+| SWA | Limited | Fused FP8 CP SWA can remain only on selected A2A or AG dense-layout paths; no bias, zero dropout, no bottom-right CP mask, and FP8 cuDNN gates still apply. |
 | Mask types | Limited | No bottom-right CP masks or arbitrary masks. |
 | Bias | No | Fused FP8 requires no bias. |
 | Sink softmax | Limited | Requires newer cuDNN-supported paths. |
@@ -214,7 +218,7 @@ CP docs
 | --- | --- | --- |
 | MHA/MQA/GQA | Supported | `p2p` is the broadest FusedAttention CP communication mode. |
 | MLA | Limited | Selected unequal QK/V head dimensions can remain. |
-| SWA | No | FusedAttention CP removes SWA for `p2p`. |
+| SWA | No | The selector removes FusedAttention SWA for `p2p`; use A2A or AG if SWA is required, with non-bottom-right masks and no bias/dropout. |
 | Mask types | Limited | No bottom-right CP masks, causal cross-attention, or arbitrary masks. |
 | Bias | Limited | `p2p` can keep selected post-scale bias; pre-scale bias is removed. |
 | Sink softmax | No | CP non-vanilla softmax keeps A2A Fused paths, not `p2p`. |
@@ -228,7 +232,7 @@ CP docs
 | --- | --- | --- |
 | MHA/MQA/GQA | Limited | THD CP depends on cuDNN shape support. |
 | MLA | Limited | Selected shapes only. |
-| SWA | No | FusedAttention CP removes SWA for `p2p`. |
+| SWA | No | The selector removes FusedAttention SWA for `p2p`; THD SWA would need A2A or AG plus padding-style non-bottom-right masks. |
 | Mask types | Limited | Padding-style masks only; bottom-right CP masks are removed. |
 | Bias | No | THD CP removes attention bias. |
 | Sink softmax | No | CP non-vanilla softmax keeps A2A Fused paths, not `p2p`. |
@@ -251,7 +255,7 @@ CP docs
 | `fp8_mha=True` | Limited | KV cache with FP8 MHA is removed. |
 | MHA/MQA/GQA | Limited | Broadly plausible when FP8 gates pass. |
 | MLA | Limited | Selected shapes only. |
-| SWA | No | FusedAttention CP removes SWA for `p2p`. |
+| SWA | No | The selector removes FusedAttention SWA for `p2p`; FP8 SWA would need selected A2A or AG dense-layout paths, no bias, and no bottom-right CP masks. |
 | Mask types | Limited | No bottom-right CP masks or arbitrary masks. |
 | Bias | No | Fused FP8 requires no bias. |
 | Sink softmax | No | CP non-vanilla softmax keeps A2A Fused paths, not `p2p`. |
@@ -295,7 +299,7 @@ CP docs
 | --- | --- | --- |
 | MHA/MQA/GQA | Limited | Requires even `num_heads` and `num_gqa_groups`. |
 | MLA | Limited | Selected unequal QK/V head dimensions can remain. |
-| SWA | No | FusedAttention CP removes SWA for `a2a+p2p`. |
+| SWA | No | The selector removes FusedAttention SWA for `a2a+p2p`; use A2A or AG if SWA is required, with non-bottom-right masks and no bias/dropout. |
 | Mask types | Limited | No bottom-right CP masks, causal cross-attention, or arbitrary masks. |
 | Bias | No | FusedAttention CP keeps explicit bias only for `p2p`. |
 | Sink softmax | No | CP non-vanilla softmax keeps A2A Fused paths, not `a2a+p2p`. |
@@ -326,7 +330,7 @@ CP docs
 | `fp8_mha=True` | Limited | KV cache with FP8 MHA is removed. |
 | MHA/MQA/GQA | Limited | Even `num_heads` and `num_gqa_groups` are required. |
 | MLA | Limited | Selected shapes only. |
-| SWA | No | FusedAttention CP removes SWA for `a2a+p2p`. |
+| SWA | No | The selector removes FusedAttention SWA for `a2a+p2p`; FP8 SWA would need selected A2A or AG dense-layout paths, no bias, and no bottom-right CP masks. |
 | Mask types | Limited | No bottom-right CP masks or arbitrary masks. |
 | Bias | No | Fused FP8 requires no bias. |
 | Sink softmax | No | CP non-vanilla softmax keeps A2A Fused paths, not `a2a+p2p`. |
@@ -372,7 +376,7 @@ AG means `cp_comm_type="all_gather"`.
 | --- | --- | --- |
 | MHA/MQA/GQA | Limited | AG does not overlap communication with compute. |
 | MLA | Limited | Selected unequal QK/V head dimensions can remain. |
-| SWA | Limited | Exact support remains cuDNN-owned. |
+| SWA | Limited | AG can keep selected Fused CP SWA because the Python selector only removes SWA for `p2p` and `a2a+p2p`; still requires no bias, zero dropout, `max_seqlen_q <= max_seqlen_kv`, and non-bottom-right masks such as `no_mask`, `padding`, or `padding_causal`. |
 | Mask types | Limited | No bottom-right CP masks, causal cross-attention, or arbitrary masks. |
 | Bias | No | FusedAttention CP keeps explicit bias only for `p2p`. |
 | Sink softmax | No | CP non-vanilla softmax keeps A2A Fused paths, not AG. |
@@ -403,7 +407,7 @@ AG means `cp_comm_type="all_gather"`.
 | `fp8_mha=True` | Limited | KV cache with FP8 MHA is removed. |
 | MHA/MQA/GQA | Limited | Broadly plausible when FP8 gates pass. |
 | MLA | Limited | Selected shapes only. |
-| SWA | Limited | Exact support remains cuDNN-owned. |
+| SWA | Limited | AG can keep selected FP8 Fused CP SWA on dense layouts; no bias, zero dropout, no bottom-right CP mask, and FP8 cuDNN gates still apply. |
 | Mask types | Limited | No bottom-right CP masks or arbitrary masks. |
 | Bias | No | Fused FP8 requires no bias. |
 | Sink softmax | No | CP non-vanilla softmax keeps A2A Fused paths, not AG. |
@@ -452,6 +456,7 @@ AG means `cp_comm_type="all_gather"`.
 | FA4 CP | No | Removed for CP. |
 | THD without `pad_between_seqs` | Limited | Package and shape gates apply. |
 | THD with `pad_between_seqs=True` | Limited | FA2 and FA4 are removed; FA3 can remain. |
+| SWA | Limited | FA2 supports SWA with package gates; FA3/FA4 are narrower. Under CP, only FA2/FA3 can remain and bottom-right masks, causal cross-attention, and explicit bias are removed. |
 | Arbitrary mask | No | FlashAttention is removed. |
 | Explicit pre/post-scale bias | No | FlashAttention is removed. |
 | ALiBi | Limited | FA2 only, with package and alignment limits. |
