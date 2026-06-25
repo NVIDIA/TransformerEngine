@@ -125,6 +125,7 @@ def _classify_extra_state_pickle_impl(data: bytes) -> _PickledExtraStateAction:
     strings: list[str] = []
     has_recipe_key = False
     has_delayed_state_keys = False
+    has_global = False
     policies: set[CheckpointExtraStatePolicy] = set()
 
     for opcode, arg, _pos in pickletools.genops(data):
@@ -147,8 +148,10 @@ def _classify_extra_state_pickle_impl(data: bytes) -> _PickledExtraStateAction:
             continue
 
         if opcode.name == "GLOBAL":
+            has_global = True
             global_ref = _global_opcode_arg(arg)
         elif opcode.name == "STACK_GLOBAL":
+            has_global = True
             global_ref = _stack_global_args(strings)
         else:
             continue
@@ -158,6 +161,14 @@ def _classify_extra_state_pickle_impl(data: bytes) -> _PickledExtraStateAction:
         policy = _RECIPE_POLICIES.get(global_ref)
         if policy is not None:
             policies.add(policy)
+
+    # A payload that never resolves a global cannot construct an arbitrary
+    # callable, so unpickling it cannot execute code (e.g. the empty dict that
+    # older stateless checkpoints serialized). It carries no state worth
+    # loading, so treat it as safe to ignore. A genuine TE 1.x delayed-scaling
+    # checkpoint always serializes torch tensors and thus contains globals.
+    if not has_global and not has_delayed_state_keys:
+        return _PickledExtraStateAction.IGNORE
 
     # TE 1.x checkpoints did not store a recipe and only supported delayed scaling.
     if not has_recipe_key:

@@ -754,6 +754,14 @@ def test_stateless_custom_pickled_extra_state_is_ignored():
     assert not should_load_extra_state_pickle(payload, "test")
 
 
+@pytest.mark.parametrize("payload", [pickle.dumps({}), pickle.dumps({"extra_fp8_variables": {}})])
+def test_global_free_pickled_extra_state_is_ignored(payload):
+    # Older stateless checkpoints serialized an empty dict. Such a payload
+    # resolves no globals and cannot execute code, so it must load without the
+    # unsafe opt-in.
+    assert not should_load_extra_state_pickle(payload, "test")
+
+
 @pytest.mark.parametrize(
     "payload",
     [
