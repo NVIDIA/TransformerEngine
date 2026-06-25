@@ -572,9 +572,13 @@ class EpCombinePrimitive(BasePrimitive):
                 " None, None) (or ((dp, ep), None, None) when dp/fsdp is set)"
                 f" over [num_procs, recv_pr, H]; got spec={eo_spec}."
             )
-        per_shard_leading = _leading_per_shard(out_leading_shape, out_partition_spec[0], mesh)
+        if out_partition_spec is not None:
+            per_shard_leading = _leading_per_shard(out_leading_shape, out_partition_spec[0], mesh)
+            out_sharding = NamedSharding(mesh, PartitionSpec(*out_partition_spec))
+        else:
+            per_shard_leading = out_leading_shape
+            out_sharding = NamedSharding(mesh, PartitionSpec())
         arg_shardings = tuple(a.sharding for a in arg_infos)
-        out_sharding = NamedSharding(mesh, PartitionSpec(*out_partition_spec))
 
         def sharded_impl(handle_mem, expert_out):
             return EpCombinePrimitive.impl(
@@ -723,9 +727,13 @@ class EpDispatchBwdPrimitive(BasePrimitive):
                 "EpDispatchBwd: grad and g_recv_topk_weights must share the leading"
                 f" axis; got grad={g_spec}, g_recv_topk_weights={gw_spec}."
             )
-        per_shard_leading = _leading_per_shard(out_leading_shape, out_partition_spec[0], mesh)
+        if out_partition_spec is not None:
+            per_shard_leading = _leading_per_shard(out_leading_shape, out_partition_spec[0], mesh)
+            out_sharding = NamedSharding(mesh, PartitionSpec(*out_partition_spec))
+        else:
+            per_shard_leading = out_leading_shape
+            out_sharding = NamedSharding(mesh, PartitionSpec())
         arg_shardings = tuple(a.sharding for a in arg_infos)
-        out_sharding = NamedSharding(mesh, PartitionSpec(*out_partition_spec))
         out_shardings = [out_sharding, out_sharding]
 
         def sharded_impl(handle_mem, grad, g_recv_topk_weights):
