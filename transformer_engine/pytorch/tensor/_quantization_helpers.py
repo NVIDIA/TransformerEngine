@@ -10,7 +10,6 @@ the quantization machinery.
 
 from __future__ import annotations
 from typing import Callable, Optional, Tuple, Any, Dict, TYPE_CHECKING
-import warnings
 import torch
 
 if TYPE_CHECKING:
@@ -86,22 +85,11 @@ def _stride_from_shape(shape: list[int]):
     return list(reversed(rstride))
 
 
-def _is_fake_data_access_error(error):
-    """Heuristic: is this the error PyTorch raises when a repr tries to read the
-    data pointer of a fake/functional tensor (e.g. under torch.compile tracing)?
-
-    The exact exception type and message are not contractual across PyTorch
-    versions, so match defensively on the message text. Anything that is not
-    recognized is treated as an unexpected error worth surfacing.
-    """
-    message = str(error).lower()
-    return "data pointer" in message or "faketensor" in message or "functionaltensor" in message
-
-
 def safe_quantized_repr(obj, cls_name, extras=None, error=None):
     """Metadata-only repr fallback for quantized tensors whose data cannot be
-    materialized (e.g. a FakeTensor under torch.compile tracing, where
-    dequantize()/.item() would access a data pointer).
+    materialized for any reason.
+
+    Each attribute access is guarded so that ``__repr__`` never raises.
 
     Parameters
     ----------
@@ -110,18 +98,10 @@ def safe_quantized_repr(obj, cls_name, extras=None, error=None):
         ``{"is_2D_scaled": self._is_2D_scaled}``. Values are inserted after
         ``fp8_dtype`` and before ``shape``.
     error : BaseException, optional
-        The exception that triggered the fallback. The expected trigger is the
-        data-pointer access error PyTorch raises for fake/functional tensors;
-        anything else is surfaced as a warning so that real eager-path failures
-        (e.g. CUDA OOM, shape bugs) are not silently swallowed by ``__repr__``.
+        The exception that triggered the fallback. When given, its type and
+        message are included in the ``data=`` field so that it is visible *why*
+        the data could not be materialized.
     """
-    if error is not None and not _is_fake_data_access_error(error):
-        warnings.warn(
-            f"{cls_name}.__repr__ fell back to a metadata-only representation "
-            "because an unexpected error occurred while materializing data: "
-            f"{type(error).__name__}: {error}",
-            stacklevel=2,
-        )
     parts = []
     fp8_dtype = getattr(obj, "_fp8_dtype", None)
     if fp8_dtype is not None:
@@ -137,5 +117,8 @@ def safe_quantized_repr(obj, cls_name, extras=None, error=None):
         parts.append(f"dtype={obj.dtype}")
     except Exception:  # pylint: disable=broad-except
         pass
-    parts.append("data=<unmaterialized>")
+    if error is not None:
+        parts.append(f"data=<unmaterialized: {type(error).__name__}: {error}>")
+    else:
+        parts.append("data=<unmaterialized>")
     return f"{cls_name}({', '.join(parts)})"
