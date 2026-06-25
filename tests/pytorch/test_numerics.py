@@ -16,6 +16,7 @@ from transformer_engine.pytorch.quantization import (
     FP8GlobalStateManager,
     get_align_size_for_quantization,
 )
+from transformer_engine.pytorch._extra_state import UNSAFE_PICKLE_EXTRA_STATE_ENV
 from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
@@ -860,7 +861,15 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
 
         del block
         block = _test_e2e_checkpointing_get_model(config, dtype)
-        block.load_state_dict(torch.load(path, weights_only=False))
+        loaded_state_dict = torch.load(path, weights_only=False)
+        old_unsafe_extra_state = os.environ.get(UNSAFE_PICKLE_EXTRA_STATE_ENV)
+        try:
+            block.load_state_dict(loaded_state_dict)
+        finally:
+            if old_unsafe_extra_state is None:
+                os.environ.pop(UNSAFE_PICKLE_EXTRA_STATE_ENV, None)
+            else:
+                os.environ[UNSAFE_PICKLE_EXTRA_STATE_ENV] = old_unsafe_extra_state
         torch.set_rng_state(_cpu_rng_state)
         torch.cuda.set_rng_state(_cuda_rng_state)
 
