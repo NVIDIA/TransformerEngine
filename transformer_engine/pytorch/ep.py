@@ -48,8 +48,6 @@ def _check_nccl_runtime_version() -> None:
         lib = ctypes.CDLL("libnccl.so.2", mode=ctypes.RTLD_GLOBAL)
         v = ctypes.c_int(0)
         if lib.ncclGetVersion(ctypes.byref(v)) != 0:
-            import warnings
-
             warnings.warn("ncclGetVersion failed; skipping NCCL EP version check.")
             return
     except OSError:  # libnccl not findable; let the C++ side error
@@ -511,6 +509,7 @@ class _EpCombine(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, g_result):  # type: ignore[override]
+        """Combine bwd; scatters the result grad into the grad target."""
         if not g_result.is_contiguous():
             g_result = g_result.contiguous()
         (handle_mem,) = ctx.saved_tensors
