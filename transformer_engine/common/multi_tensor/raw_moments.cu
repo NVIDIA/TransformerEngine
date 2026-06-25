@@ -128,8 +128,8 @@ struct RawMomentsFunctor {
           !isfinite(final_sum_4)) {
         *noop_gmem = 1;
       }
-      float *row = output_per_tensor +
-                   (tensor_idx * max_chunks_per_tensor + chunk_idx) * RAW_MOMENT_FIELDS;
+      float *row =
+          output_per_tensor + (tensor_idx * max_chunks_per_tensor + chunk_idx) * RAW_MOMENT_FIELDS;
       row[0] = static_cast<float>(elements_this_chunk);
       row[1] = final_sum_1;
       row[2] = final_sum_2;
@@ -158,8 +158,8 @@ __global__ void cleanup(float *output_per_tensor, float *ret, int max_chunks_per
 
 void multi_tensor_raw_moments_cuda(int chunk_size, Tensor noop_flag,
                                    std::vector<std::vector<Tensor *>> tensor_lists,
-                                   Tensor output_per_tensor, Tensor ret,
-                                   int max_chunks_per_tensor, cudaStream_t stream) {
+                                   Tensor output_per_tensor, Tensor ret, int max_chunks_per_tensor,
+                                   cudaStream_t stream) {
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       tensor_lists[0][0]->dtype(), dtype,
       multi_tensor_apply<1>(
@@ -169,9 +169,9 @@ void multi_tensor_raw_moments_cuda(int chunk_size, Tensor noop_flag,
   NVTE_CHECK_CUDA(cudaGetLastError());
 
   dim3 grid(tensor_lists[0].size(), RAW_MOMENT_FIELDS);
-  cleanup<<<grid, BLOCK_SIZE, 0, stream>>>(
-      reinterpret_cast<float *>(output_per_tensor.data.dptr),
-      reinterpret_cast<float *>(ret.data.dptr), max_chunks_per_tensor);
+  cleanup<<<grid, BLOCK_SIZE, 0, stream>>>(reinterpret_cast<float *>(output_per_tensor.data.dptr),
+                                           reinterpret_cast<float *>(ret.data.dptr),
+                                           max_chunks_per_tensor);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -179,8 +179,7 @@ void multi_tensor_raw_moments_cuda(int chunk_size, Tensor noop_flag,
 }  // namespace transformer_engine
 
 void nvte_multi_tensor_raw_moments_cuda(int chunk_size, NVTETensor noop_flag,
-                                        NVTETensor **tensor_lists,
-                                        const size_t num_tensor_lists,
+                                        NVTETensor **tensor_lists, const size_t num_tensor_lists,
                                         const size_t num_tensors_per_list,
                                         NVTETensor output_per_tensor, NVTETensor ret,
                                         int max_chunks_per_tensor, cudaStream_t stream) {

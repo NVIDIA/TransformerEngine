@@ -580,8 +580,8 @@ std::tuple<at::Tensor, at::Tensor> multi_tensor_unscale_l2norm_cuda(
     int chunk_size, at::Tensor noop_flag, std::vector<std::vector<at::Tensor>> tensor_lists,
     at::Tensor inv_scale, at::optional<bool> per_tensor_python);
 
-at::Tensor multi_tensor_raw_moments_cuda(
-    int chunk_size, at::Tensor noop_flag, std::vector<std::vector<at::Tensor>> tensor_lists);
+at::Tensor multi_tensor_raw_moments_cuda(int chunk_size, at::Tensor noop_flag,
+                                         std::vector<std::vector<at::Tensor>> tensor_lists);
 
 void multi_tensor_adam_cuda(int chunk_size, at::Tensor noop_flag,
                             std::vector<std::vector<at::Tensor>> tensor_lists, const float lr,

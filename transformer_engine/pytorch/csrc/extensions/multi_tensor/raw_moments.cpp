@@ -8,8 +8,8 @@
 
 namespace transformer_engine::pytorch {
 
-at::Tensor multi_tensor_raw_moments_cuda(
-    int chunk_size, at::Tensor noop_flag, std::vector<std::vector<at::Tensor>> tensor_lists) {
+at::Tensor multi_tensor_raw_moments_cuda(int chunk_size, at::Tensor noop_flag,
+                                         std::vector<std::vector<at::Tensor>> tensor_lists) {
   auto float_options = tensor_lists[0][0].options().dtype(at::kFloat);
 
   int ntensors = tensor_lists[0].size();
@@ -35,10 +35,10 @@ at::Tensor multi_tensor_raw_moments_cuda(
   auto output_per_tensor_cu = makeTransformerEngineTensor(output_per_tensor);
   auto ret_cu = makeTransformerEngineTensor(ret);
 
-  nvte_multi_tensor_raw_moments_cuda(
-      chunk_size, noop_flag_cu.data(), tensor_lists_ptr.data(), num_lists, num_tensors,
-      output_per_tensor_cu.data(), ret_cu.data(), max_chunks_per_tensor,
-      at::cuda::getCurrentCUDAStream());
+  nvte_multi_tensor_raw_moments_cuda(chunk_size, noop_flag_cu.data(), tensor_lists_ptr.data(),
+                                     num_lists, num_tensors, output_per_tensor_cu.data(),
+                                     ret_cu.data(), max_chunks_per_tensor,
+                                     at::cuda::getCurrentCUDAStream());
 
   return ret;
 }

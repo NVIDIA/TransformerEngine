@@ -85,8 +85,7 @@ void nvte_multi_tensor_unscale_l2norm_cuda(int chunk_size, NVTETensor noop_flag,
  *  \param[in]     stream                  CUDA stream used for this operation.
  */
 void nvte_multi_tensor_raw_moments_cuda(int chunk_size, NVTETensor noop_flag,
-                                        NVTETensor **tensor_lists,
-                                        const size_t num_tensor_lists,
+                                        NVTETensor **tensor_lists, const size_t num_tensor_lists,
                                         const size_t num_tensors_per_list,
                                         NVTETensor output_per_tensor, NVTETensor ret,
                                         int max_chunks_per_tensor, cudaStream_t stream);
