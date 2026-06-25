@@ -1028,6 +1028,49 @@ def test_linear_backward_override_high_precision_forces_save_original_input(
 
 
 @pytest.mark.parametrize("recipe_name", _quantized_numerics_recipe_list)
+def test_grouped_linear_backward_override_high_precision_forces_save_original_input(
+    recipe_name: str,
+) -> None:
+    reset_rng_states()
+    dtype = torch.bfloat16
+    in_features = 128
+    out_features = 128
+    m_splits = [64, 64]
+    num_gemms = len(m_splits)
+    num_tokens = sum(m_splits)
+    _maybe_skip_recipe_dtype(recipe_name, dtype, "grouped_linear")
+    _maybe_skip_unsupported_recipe_module_combo(recipe_name, "grouped_linear")
+    _maybe_skip_unsupported_grouped_splits(recipe_name, m_splits)
+
+    mode_recipe = make_recipe(recipe_name, backward_override="high_precision")
+    skip_unsupported_backward_override("grouped_linear", mode_recipe, "high_precision")
+
+    module = te.GroupedLinear(
+        num_gemms,
+        in_features,
+        out_features,
+        bias=False,
+        params_dtype=dtype,
+        device="cuda",
+        save_original_input=False,
+    )
+    x = torch.randn(num_tokens, in_features, dtype=dtype, device="cuda")
+
+    _, _, saved_operands = _run_grouped_linear_step_with_saved_operands(
+        module, x, m_splits, mode_recipe
+    )
+
+    saved_inputs = saved_operands[:num_gemms]
+    assert isinstance(saved_inputs[0], torch.Tensor)
+    assert saved_inputs[0].shape == x.shape
+    assert all(saved_input is None for saved_input in saved_inputs[1:])
+
+    saved_weights = saved_operands[2 * num_gemms : 3 * num_gemms]
+    for saved_weight in saved_weights:
+        assert isinstance(saved_weight, torch.Tensor)
+
+
+@pytest.mark.parametrize("recipe_name", _quantized_numerics_recipe_list)
 @pytest.mark.parametrize("module_type", ("linear", "layernorm_linear", "ops_linear"))
 @pytest.mark.parametrize("input_shape,out_features", _shape_test_cases)
 @pytest.mark.parametrize("use_bias", (False, True), ids=("no_bias", "bias"))
