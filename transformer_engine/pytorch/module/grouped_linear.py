@@ -106,9 +106,6 @@ class _GroupedLinear(torch.autograd.Function):
         * Hopper (CC 9.0): BF16/FP16 and FP8 per-tensor current scaling.
         * Blackwell (CC 10.x and 11.0): BF16/FP16/MXFP8/NVFP4 with RHT and FP8
           per-tensor current scaling.
-        FP8 current scaling uses grouped current-scaling quantization
-        (``tex.group_quantize``) plus cuBLASLt grouped GEMM with per-batch scalar FP8
-        scaling, both of which are available on Hopper and Blackwell.
         FP8 delayed scaling and FP8 block scaling are not supported because the
         corresponding grouped quantization kernels are missing.
         Non-RHT NVFP4 falls back to the legacy path because graph-safe grouped quantization
