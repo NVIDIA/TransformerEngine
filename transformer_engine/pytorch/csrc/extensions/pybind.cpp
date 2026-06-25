@@ -561,6 +561,18 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("thd_get_partitioned_indices", &transformer_engine::pytorch::thd_get_partitioned_indices,
         "Generate partitioned indices for inputs in THD format",
         py::call_guard<py::gil_scoped_release>());
+  m.def("thd_sequence_order_to_cp_rank_order",
+        &transformer_engine::pytorch::thd_sequence_order_to_cp_rank_order,
+        "Reorder a THD tensor from sequence order to dual-chunk CP rank order",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("thd_cp_rank_order_to_sequence_order",
+        &transformer_engine::pytorch::thd_cp_rank_order_to_sequence_order,
+        "Reorder a THD tensor from dual-chunk CP rank order to sequence order",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("thd_copy_valid_tokens_from_per_split_to_rank_local",
+        &transformer_engine::pytorch::thd_copy_valid_tokens_from_per_split_to_rank_local,
+        "Copy valid THD token entries from a per-split tensor into a rank-local accumulator",
+        py::call_guard<py::gil_scoped_release>());
 
   // nvshmem functions
   m.def("init_nvshmem_backend", &transformer_engine::pytorch::init_nvshmem_backend,
