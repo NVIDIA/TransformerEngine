@@ -159,8 +159,8 @@ class TestEP(unittest.TestCase):
         self,
         alignment=0,
         top_k=TOP_K,
-        caller_provides_dispatch_recv_tokens=False,
-        caller_provides_grad_expert_out=False,
+        dispatch_recv_tokens=None,
+        combine_grad_expert_out=None,
     ):
         return EpBuffer(
             top_k=top_k,
@@ -169,8 +169,8 @@ class TestEP(unittest.TestCase):
             hidden_dim=HIDDEN_DIM,
             num_local_experts=NUM_LOCAL_EXPERTS,
             alignment=alignment,
-            caller_provides_dispatch_recv_tokens=caller_provides_dispatch_recv_tokens,
-            caller_provides_grad_expert_out=caller_provides_grad_expert_out,
+            dispatch_recv_tokens=dispatch_recv_tokens,
+            combine_grad_expert_out=combine_grad_expert_out,
         )
 
     def _expert_out(self, expert_out):
@@ -244,21 +244,21 @@ class TestEP(unittest.TestCase):
         EpBuffer-owned recv tokens (symm-mem under zero-copy) and, in normal
         mode, a caller-supplied recv_tokens buffer."""
         if ZERO_COPY:
-            cases = [("buffer_owned", {})]
+            cases = [("buffer_owned", None)]
         else:
             rt_buf, _rw_buf, _ = self._make_raw_recv()
             cases = [
-                ("default_alloc", {}),
-                ("caller_recv", {"recv_tokens": rt_buf}),
+                ("default_alloc", None),
+                ("caller_recv", rt_buf),
             ]
-        for label, recv_kw in cases:
+        for label, recv_tokens in cases:
             with self.subTest(case=label):
-                buf = self._make_buffer()
+                buf = self._make_buffer(dispatch_recv_tokens=recv_tokens)
                 topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
                 tokens_p = tokens.detach().clone().requires_grad_(True)
-                rt, rw, _tc = ep_dispatch(buf, tokens_p, topk_idx, w, **recv_kw)
-                if recv_kw:  # caller-supplied recv_tokens must be used in place
-                    self.assertEqual(rt.data_ptr(), recv_kw["recv_tokens"].data_ptr())
+                rt, rw, _tc = ep_dispatch(buf, tokens_p, topk_idx, w)
+                if recv_tokens is not None:  # caller-supplied recv_tokens must be used in place
+                    self.assertEqual(rt.data_ptr(), recv_tokens.data_ptr())
                 rt = self._stage_grad_symm(rt)
                 rw = self._stage_grad_symm(rw)
                 (0.5 * (rt.float() ** 2).sum() + 0.0 * rw.float().sum()).backward()
@@ -269,23 +269,20 @@ class TestEP(unittest.TestCase):
 
     @_zero_copy_test_include
     def test_caller_provides_dispatch_recv_tokens(self):
-        """caller_provides_dispatch_recv_tokens: EpBuffer skips recv_tokens allocation
-        (recv_topk_weights stays owned) and ep_dispatch requires caller-supplied
-        recv_tokens (symm-mem under zero-copy)."""
-        buf = self._make_buffer(caller_provides_dispatch_recv_tokens=True)
-        self.assertIsNone(buf.recv_tokens_symm_buf)
-        if ZERO_COPY:  # recv_topk_weights is always buffer-owned in zero-copy
-            self.assertIsNotNone(buf.recv_topk_weights_symm_buf)
-        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
-        tokens_p = tokens.detach().clone().requires_grad_(True)
-        with self.assertRaises(ValueError):
-            ep_dispatch(buf, tokens_p, topk_idx, w)
+        """Caller-supplied recv_tokens: EpBuffer adopts it (recv_topk_weights stays
+        owned) and ep_dispatch returns a view of the caller's buffer."""
         if ZERO_COPY:
             rc = self.cfg.recv_capacity_per_rank
             rt_buf = symm_mem_alloc((rc, HIDDEN_DIM), torch.bfloat16, self.ep_group)
         else:
             rt_buf, _rw_buf, _ = self._make_raw_recv()
-        rt, rw, _ = ep_dispatch(buf, tokens_p, topk_idx, w, recv_tokens=rt_buf)
+        buf = self._make_buffer(dispatch_recv_tokens=rt_buf)
+        self.assertEqual(buf.recv_tokens_symm_buf.data_ptr(), rt_buf.data_ptr())
+        if ZERO_COPY:  # recv_topk_weights is always buffer-owned in zero-copy
+            self.assertIsNotNone(buf.recv_topk_weights_symm_buf)
+        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        tokens_p = tokens.detach().clone().requires_grad_(True)
+        rt, rw, _ = ep_dispatch(buf, tokens_p, topk_idx, w)
         self.assertEqual(rt.data_ptr(), rt_buf.data_ptr())
         rt = self._stage_grad_symm(rt)
         rw = self._stage_grad_symm(rw)
@@ -297,24 +294,22 @@ class TestEP(unittest.TestCase):
 
     @_zero_copy_test_include
     def test_caller_provides_grad_expert_out(self):
-        """caller_provides_grad_expert_out: EpBuffer skips combine-grad allocation
-        and ep_combine requires a caller-supplied grad buffer (symm-mem under zero-copy)."""
-        buf = self._make_buffer(caller_provides_grad_expert_out=True)
-        self.assertIsNone(buf.grad_expert_out_symm_buf)
+        """Caller-supplied grad_expert_out: EpBuffer adopts it as the combine
+        backward grad target (symm-mem under zero-copy)."""
+        rc = self.cfg.recv_capacity_per_rank
+        if ZERO_COPY:
+            gbuf = symm_mem_alloc((rc, HIDDEN_DIM), torch.bfloat16, self.ep_group)
+        else:
+            gbuf = torch.empty(rc, HIDDEN_DIM, dtype=torch.bfloat16, device=self.cfg.device)
+        buf = self._make_buffer(combine_grad_expert_out=gbuf)
+        self.assertEqual(buf.grad_expert_out_symm_buf.data_ptr(), gbuf.data_ptr())
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
         tokens_p = tokens.detach().clone().requires_grad_(True)
         recv_t, recv_w, _ = ep_dispatch(buf, tokens_p, topk_idx, w)
         recv_t = self._stage_grad_symm(recv_t)
         recv_w = self._stage_grad_symm(recv_w)
         expert_out = self._expert_out(self._weighted(recv_t, recv_w))
-        with self.assertRaises(ValueError):
-            ep_combine(buf, expert_out)
-        rc = self.cfg.recv_capacity_per_rank
-        if ZERO_COPY:
-            gbuf = symm_mem_alloc((rc, HIDDEN_DIM), torch.bfloat16, self.ep_group)
-        else:
-            gbuf = torch.empty(rc, HIDDEN_DIM, dtype=torch.bfloat16, device=self.cfg.device)
-        out = ep_combine(buf, expert_out, grad_expert_out=gbuf)
+        out = ep_combine(buf, expert_out)
         (0.5 * (out.float() ** 2).sum()).backward()
         torch.cuda.synchronize()
         torch.testing.assert_close(out.float(), tokens.float(), atol=5e-2, rtol=5e-2)

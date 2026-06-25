@@ -164,33 +164,33 @@ def _run_layer(args, rank, world_size, ep_size, num_experts, num_local_experts, 
         kernels_np[rank * num_local_experts : (rank + 1) * num_local_experts]
     ).to(device=device, dtype=torch.bfloat16)
 
+    # Caller-supplied buffers (normal mode -> plain tensors), reused across iters.
+    recv_tokens = (
+        torch.empty(recv_pr, args.hidden, dtype=torch.bfloat16, device=device)
+        if args.caller_provides_dispatch_recv_tokens
+        else None
+    )
+    grad_expert_out = (
+        torch.empty(recv_pr, args.hidden, dtype=torch.bfloat16, device=device)
+        if args.caller_provides_grad_expert_out
+        else None
+    )
+
     buffer = EpBuffer(
         top_k=args.top_k,
         max_tokens_per_rank=T,
         recv_capacity_per_rank=recv_pr,
         hidden_dim=args.hidden,
         num_local_experts=num_local_experts,
-        caller_provides_dispatch_recv_tokens=args.caller_provides_dispatch_recv_tokens,
-        caller_provides_grad_expert_out=args.caller_provides_grad_expert_out,
+        dispatch_recv_tokens=recv_tokens,
+        combine_grad_expert_out=grad_expert_out,
     )
 
-    # Caller-supplied buffers (normal mode -> plain tensors), reused across iters.
-    dispatch_kw = (
-        {"recv_tokens": torch.empty(recv_pr, args.hidden, dtype=torch.bfloat16, device=device)}
-        if args.caller_provides_dispatch_recv_tokens
-        else {}
-    )
-    combine_kw = (
-        {"grad_expert_out": torch.empty(recv_pr, args.hidden, dtype=torch.bfloat16, device=device)}
-        if args.caller_provides_grad_expert_out
-        else {}
-    )
-
-    recv_t, recv_w_out, _tc = ep_dispatch(buffer, tokens, topk_idx, topk_w, **dispatch_kw)
+    recv_t, recv_w_out, _tc = ep_dispatch(buffer, tokens, topk_idx, topk_w)
     expert_out = _batched_expert_linear(recv_t, kernels_local, num_local_experts)
     # Apply per-slot topk weighting before combine.
     expert_out = expert_out * recv_w_out.unsqueeze(-1).to(expert_out.dtype)
-    out = ep_combine(buffer, expert_out, **combine_kw)
+    out = ep_combine(buffer, expert_out)
 
     loss = 0.5 * (out.float() ** 2).sum()
     loss.backward()

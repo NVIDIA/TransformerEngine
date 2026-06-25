@@ -186,22 +186,17 @@ class EpBuffer:
         "device",
         "token_counts",
         "zero_copy",
-        "caller_provides_dispatch_recv_tokens",
-        "caller_provides_grad_expert_out",
         "recv_tokens_symm_buf",
         "recv_topk_weights_symm_buf",
         "grad_expert_out_symm_buf",
     )
 
     def _alloc_symm_buffers(self) -> None:
-        """Allocate the EpBuffer-owned symm-mem buffers; all None in normal mode.
-        recv_topk_weights is always owned; recv_tokens is skipped under
-        caller_provides_dispatch_recv_tokens and the combine grad target under
-        caller_provides_grad_expert_out (the caller supplies those)."""
+        """Fill in buffer-owned symm-mem buffers the caller did not supply.
+        recv_topk_weights is always owned. In normal mode caller-supplied
+        tensors are kept as-is and the rest stay None (allocated in-flight)."""
         if not self.zero_copy:
-            self.recv_tokens_symm_buf = None
             self.recv_topk_weights_symm_buf = None
-            self.grad_expert_out_symm_buf = None
             return
         if _EP_GROUP is None:
             raise RuntimeError(
@@ -213,20 +208,16 @@ class EpBuffer:
             (rc,), torch.float32, _EP_GROUP, device=self.device
         )
         mark_not_offload(self.recv_topk_weights_symm_buf)
-        if self.caller_provides_grad_expert_out:
-            self.grad_expert_out_symm_buf = None
-        else:
-            self.grad_expert_out_symm_buf = symm_mem_alloc(
-                (rc, h), self.payload_dtype, _EP_GROUP, device=self.device
-            )
-            mark_not_offload(self.grad_expert_out_symm_buf)
-        if self.caller_provides_dispatch_recv_tokens:
-            self.recv_tokens_symm_buf = None
-        else:
+        if self.recv_tokens_symm_buf is None:
             self.recv_tokens_symm_buf = symm_mem_alloc(
                 (rc, h), self.payload_dtype, _EP_GROUP, device=self.device
             )
             mark_not_offload(self.recv_tokens_symm_buf)
+        if self.grad_expert_out_symm_buf is None:
+            self.grad_expert_out_symm_buf = symm_mem_alloc(
+                (rc, h), self.payload_dtype, _EP_GROUP, device=self.device
+            )
+            mark_not_offload(self.grad_expert_out_symm_buf)
 
     def __init__(
         self,
@@ -238,15 +229,14 @@ class EpBuffer:
         alignment: int = 0,
         payload_dtype: torch.dtype = torch.bfloat16,
         device: Optional[torch.device] = None,
-        caller_provides_dispatch_recv_tokens: bool = False,
-        caller_provides_grad_expert_out: bool = False,
+        dispatch_recv_tokens: Optional[torch.Tensor] = None,
+        combine_grad_expert_out: Optional[torch.Tensor] = None,
     ) -> None:
-        """``caller_provides_dispatch_recv_tokens`` declares that the caller passes
-        recv_tokens to ep_dispatch; ``caller_provides_grad_expert_out`` that the
-        caller passes the combine backward grad target to ep_combine (both symm-mem
-        under zero-copy). This buffer then does not allocate the declared tensor and
-        the corresponding op requires it to be supplied. recv_topk_weights is always
-        owned by the buffer."""
+        """Pass ``dispatch_recv_tokens`` (dispatch recv output) and/or
+        ``combine_grad_expert_out`` (combine backward grad target) to use caller-owned
+        buffers; the buffer then skips allocating them. Both must be symm-mem-backed
+        under zero-copy. Whatever is left None is buffer-owned (zero-copy) or allocated
+        in-flight (normal mode). recv_topk_weights is always owned by the buffer."""
         if device is None:
             device = torch.device("cuda", torch.cuda.current_device())
         alignment = int(alignment)
@@ -261,8 +251,8 @@ class EpBuffer:
         self.payload_dtype = payload_dtype
         self.device = device
         self.zero_copy = bool(tex.ep_get_zero_copy())
-        self.caller_provides_dispatch_recv_tokens = bool(caller_provides_dispatch_recv_tokens)
-        self.caller_provides_grad_expert_out = bool(caller_provides_grad_expert_out)
+        self.recv_tokens_symm_buf = dispatch_recv_tokens
+        self.grad_expert_out_symm_buf = combine_grad_expert_out
 
         size_bytes = tex.ep_handle_mem_size(self.top_k, self.alignment)
         self.handle_mem = torch.empty(int(size_bytes), dtype=torch.uint8, device=device)
@@ -555,16 +545,13 @@ def ep_dispatch(
     tokens: torch.Tensor,
     topk_idx: torch.Tensor,
     topk_weights: torch.Tensor,
-    *,
-    recv_tokens: Optional[torch.Tensor] = None,
 ):
     """Prepare + dispatch with autograd. topk_idx must be int64.
 
-    recv_tokens is used as-is if supplied, else taken from the EpBuffer-owned
-    symm-mem buffer (zero-copy) or allocated in-flight (normal mode) -- unless the
-    buffer was created with caller_provides_dispatch_recv_tokens, in which case it
-    must be supplied here. recv_topk_weights is always owned by the buffer.
-    Returns (recv_tokens, recv_topk_weights, token_counts); token_counts is non-diff.
+    recv_tokens comes from the EpBuffer (caller-supplied or buffer-owned under
+    zero-copy) or is allocated in-flight (normal mode). recv_topk_weights is always
+    owned by the buffer. Returns (recv_tokens, recv_topk_weights, token_counts);
+    token_counts is non-diff.
     """
     _require_bf16("tokens", tokens)
     if topk_weights.dtype is not torch.float32:
@@ -572,21 +559,13 @@ def ep_dispatch(
             f"topk_weights must be float32; got dtype={topk_weights.dtype}. "
             "Cast with topk_weights.float() before calling."
         )
-    if recv_tokens is None and not buffer.caller_provides_dispatch_recv_tokens:
-        recv_tokens = (
-            buffer.recv_tokens_symm_buf
-            if buffer.zero_copy
-            else torch.empty(
-                buffer.recv_capacity_per_rank,
-                buffer.hidden_dim,
-                dtype=buffer.payload_dtype,
-                device=buffer.device,
-            )
-        )
+    recv_tokens = buffer.recv_tokens_symm_buf
     if recv_tokens is None:
-        raise ValueError(
-            "ep_dispatch: buffer was created with caller_provides_dispatch_recv_tokens=True, "
-            "so recv_tokens must be supplied (symm-mem-backed under zero-copy)."
+        recv_tokens = torch.empty(
+            buffer.recv_capacity_per_rank,
+            buffer.hidden_dim,
+            dtype=buffer.payload_dtype,
+            device=buffer.device,
         )
     recv_topk_weights = (
         buffer.recv_topk_weights_symm_buf
@@ -611,27 +590,18 @@ def ep_combine(
     expert_out: torch.Tensor,
     *,
     num_local_tokens: Optional[int] = None,
-    grad_expert_out: Optional[torch.Tensor] = None,
 ):
     """Combine with autograd; caller pre-applies topk weighting.
 
-    The backward scatters the expert_out grad into grad_expert_out if
-    supplied, else the EpBuffer-owned symm-mem buffer (zero-copy) or a tensor
-    allocated in-flight (normal mode). When the buffer was created with
-    caller_provides_grad_expert_out, grad_expert_out must be supplied.
-    Result shape is (num_local_tokens, buffer.hidden_dim); defaults to
-    buffer.max_tokens_per_rank rows.
+    The backward scatters the expert_out grad into the EpBuffer grad target
+    (caller-supplied or buffer-owned under zero-copy), or a tensor allocated
+    in-flight (normal mode). Result shape is (num_local_tokens, buffer.hidden_dim);
+    defaults to buffer.max_tokens_per_rank rows.
     """
     _require_bf16("expert_out", expert_out)
     if num_local_tokens is None:
         num_local_tokens = buffer.max_tokens_per_rank
-    if grad_expert_out is None and not buffer.caller_provides_grad_expert_out:
-        grad_expert_out = buffer.grad_expert_out_symm_buf
-    if grad_expert_out is None and buffer.caller_provides_grad_expert_out:
-        raise ValueError(
-            "ep_combine: buffer was created with caller_provides_grad_expert_out=True, "
-            "so grad_expert_out must be supplied (symm-mem-backed under zero-copy)."
-        )
+    grad_expert_out = buffer.grad_expert_out_symm_buf
     return _EpCombine.apply(
         buffer.handle_mem,
         num_local_tokens,
