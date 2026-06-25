@@ -15,6 +15,7 @@ import torch.distributed as dist
 import transformer_engine_torch as tex
 
 from .cpu_offload import mark_not_offload
+from .distributed import symm_mem_alloc
 
 
 __all__ = [
@@ -27,33 +28,9 @@ __all__ = [
 ]
 
 
-# Symmetric-memory buffer allocator
-#
-# Used for the symm-mem zero-copy IO path. Set ``ep_bootstrap(zero_copy=True)``
-# to opt in; the C++ backend then operates the EP group in zero-copy mode.
-
-
-def symm_mem_alloc(
-    shape,
-    dtype: torch.dtype,
-    ep_group: dist.ProcessGroup,
-    device: Optional[torch.device] = None,
-) -> torch.Tensor:
-    """Allocate and rendezvous a symm-mem buffer on ep_group. Collective on ep_group."""
-    if device is None:
-        device = torch.device("cuda", torch.cuda.current_device())
-    try:
-        from torch.distributed import _symmetric_memory as _symm_mem
-    except ImportError as e:
-        raise RuntimeError(
-            "torch.distributed._symmetric_memory is unavailable; symm_mem_alloc "
-            "requires PyTorch built with NCCL symm-mem support."
-        ) from e
-    if _symm_mem.get_backend(device) != "NCCL":
-        _symm_mem.set_backend("NCCL")
-    t = _symm_mem.empty(*shape, dtype=dtype, device=device)
-    _symm_mem.rendezvous(t, group=ep_group.group_name)
-    return t
+# ``symm_mem_alloc`` (imported from .distributed) allocates the symm-mem buffers
+# used by the zero-copy IO path. Set ``ep_bootstrap(zero_copy=True)`` to opt in;
+# the C++ backend then operates the EP group in zero-copy mode.
 
 
 # Bootstrap
