@@ -1920,8 +1920,16 @@ class GroupedLinear(TransformerEngineBaseModule):
             ]
             for i in range(self.num_gemms)
         ]
+        # Preswizzle the weights during quantization instead of lazily inside every GEMM.
+        # This wont work when primay weights are in fp8 because of 2 reasons
+        # 1. optimizer step updates would need to dequantize the weights. But swizzled weights
+        # currently dont support dequantization.
+        # 2. For FSDP2, quantized weight all-gather would need to be done in the
+        # unswizzled layout.
         for i in range(self.num_gemms):
             weight_quantizers[i].internal = not self.primary_weights_in_fp8
+            if not self.primary_weights_in_fp8:
+                weight_quantizers[i].optimize_for_gemm = True
         return weight_quantizers
 
     def _get_quantizers(self):
