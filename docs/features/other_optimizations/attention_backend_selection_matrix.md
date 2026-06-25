@@ -2,8 +2,8 @@
 
 This Markdown file is the editable matrix companion to
 `attention_backend_selection.rst`. It starts with the CP documentation outline
-from `attention_docs/misc/ideas.md`, then uses a hardware-by-feature matrix at
-the selected leaf.
+from `attention_docs/misc/ideas.md`, then uses a feature-by-hardware monospace
+ASCII matrix at the selected leaf.
 
 Scope:
 
@@ -36,17 +36,27 @@ CP docs
         P2P
             F16
                 BSHD/SBHD
-```
+                    +------------------+---------+---------------------------+---------------------------+---------------------------+---------------------------+
+                    | Feature          | sm < 80 | sm80/sm89                 | sm90                      | sm100+                    | sm120                     |
+                    +------------------+---------+---------------------------+---------------------------+---------------------------+---------------------------+
+                    | MHA/MQA/GQA      | No      | Yes; cuDNN shape gate     | Yes; cuDNN shape gate     | Yes; cuDNN shape gate     | Yes; newer cuDNN paths    |
+                    | MLA              | No      | Q/K/V separate dims only  | Q/K/V separate dims only  | Q/K/V separate dims only  | Narrower; train MLA gates |
+                    | SWA              | No      | No p2p; use a2a/all_gath. | No p2p; use a2a/all_gath. | No p2p; use a2a/all_gath. | No p2p; use a2a/all_gath. |
+                    | Standard masks   | No      | no,pad,causal,pad_causal  | no,pad,causal,pad_causal  | no,pad,causal,pad_causal  | no,pad,causal,pad_causal  |
+                    | Bottom-right     | No      | No under CP               | No under CP               | No under CP               | No under CP               |
+                    | Bias             | No      | no_bias/post_scale only   | no_bias/post_scale only   | no_bias/post_scale only   | no_bias/post_scale only   |
+                    | Sink softmax     | No      | No p2p; use a2a           | No p2p; use a2a           | No p2p; use a2a           | No p2p; use a2a           |
+                    | return_max_logit | No      | non-FP8; cuDNN shape gate | non-FP8; cuDNN shape gate | non-FP8; cuDNN shape gate | non-FP8; cuDNN shape gate |
+                    | Determinism      | No      | cuDNN/train/bias gates    | better; bias may disable  | stricter cuDNN gates      | No deterministic training |
+                    +------------------+---------+---------------------------+---------------------------+---------------------------+---------------------------+
+                    Notes:
+                        - "all_gath." means the all_gather communication path.
+                        - Standard masks are no_mask, padding, causal, and padding_causal.
+                        - Causal cross-attention and bottom-right masks are excluded under CP here.
+                        - For exact cuDNN versions, shape gates, and exclusions, refer to:
+                            transformer_engine/pytorch/attention/dot_product_attention/utils.py
+                            transformer_engine/common/fused_attn/fused_attn.cpp
 
-| Hardware | MHA/MQA/GQA | MLA | SWA | Standard masks | Bottom-right masks | Bias | Sink softmax | `return_max_logit` | Determinism |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `sm < 80` | Not supported: FusedAttention requires `sm80+`. | Not supported. | Not supported. | Not supported. | Not supported. | Not supported. | Not supported. | Not supported. | Not supported. |
-| `sm80/sm89` | Supported when cuDNN accepts the shape. | Selected separate Q/K/V layout and head dimensions only. | Not supported with `p2p`; use `a2a` or `all_gather`. | `no_mask`, `padding`, `causal`, `padding_causal`; no causal cross-attention. | Not supported under CP. | `no_bias` or selected `post_scale_bias`; no `pre_scale_bias`. | Not supported with `p2p`; use `a2a`. | Supported only for non-FP8 when cuDNN accepts the shape. | Depends on cuDNN, training mode, and bias. |
-| `sm90` | Supported when cuDNN accepts the shape. | Selected separate Q/K/V layout and head dimensions only. | Not supported with `p2p`; use `a2a` or `all_gather`. | `no_mask`, `padding`, `causal`, `padding_causal`; no causal cross-attention. | Not supported under CP. | `no_bias` or selected `post_scale_bias`; no `pre_scale_bias`. | Not supported with `p2p`; use `a2a`. | Supported only for non-FP8 when cuDNN accepts the shape. | Better supported than pre-Hopper, but trainable bias can still remove it. |
-| `sm100+` | Supported when cuDNN accepts the shape. | Selected separate Q/K/V layout and head dimensions only. | Not supported with `p2p`; use `a2a` or `all_gather`. | `no_mask`, `padding`, `causal`, `padding_causal`; no causal cross-attention. | Not supported under CP. | `no_bias` or selected `post_scale_bias`; no `pre_scale_bias`. | Not supported with `p2p`; use `a2a`. | Supported only for non-FP8 when cuDNN accepts the shape. | Depends on cuDNN; deterministic training has stricter gates. |
-| `sm120` | Supported only on newer cuDNN-accepted paths. | Narrower than generic `sm100+`; training MLA has extra exclusions. | Not supported with `p2p`; use `a2a` or `all_gather`. | `no_mask`, `padding`, `causal`, `padding_causal`; no causal cross-attention. | Not supported under CP. | `no_bias` or selected `post_scale_bias`; no `pre_scale_bias`. | Not supported with `p2p`; use `a2a`. | Supported only for non-FP8 when cuDNN accepts the shape. | Deterministic training is not supported. |
-
-```text
                 THD
                     [not expanded]
 
