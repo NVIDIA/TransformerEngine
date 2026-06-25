@@ -209,18 +209,18 @@ def _run_layer(args, rank, world_size, ep_size, num_experts, num_local_experts, 
         torch.cuda.synchronize()
         dist.barrier()
         for _ in range(args.benchmark_warmup):
-            rt, rw, _tc = ep_dispatch(buffer, tokens.detach(), topk_idx, topk_w, **dispatch_kw)
+            rt, rw, _tc = ep_dispatch(buffer, tokens.detach(), topk_idx, topk_w)
             expert_out = _batched_expert_linear(rt, kernels_local, num_local_experts)
             expert_out = expert_out * rw.unsqueeze(-1).to(expert_out.dtype)
-            ep_combine(buffer, expert_out, **combine_kw)
+            ep_combine(buffer, expert_out)
         torch.cuda.synchronize()
         dist.barrier()
         t0 = time.perf_counter()
         for _ in range(args.benchmark_iters):
-            rt, rw, _tc = ep_dispatch(buffer, tokens.detach(), topk_idx, topk_w, **dispatch_kw)
+            rt, rw, _tc = ep_dispatch(buffer, tokens.detach(), topk_idx, topk_w)
             expert_out = _batched_expert_linear(rt, kernels_local, num_local_experts)
             expert_out = expert_out * rw.unsqueeze(-1).to(expert_out.dtype)
-            ep_combine(buffer, expert_out, **combine_kw)
+            ep_combine(buffer, expert_out)
         torch.cuda.synchronize()
         dt_ms = (time.perf_counter() - t0) * 1000.0 / args.benchmark_iters
         if rank == 0:
