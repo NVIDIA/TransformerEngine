@@ -1859,7 +1859,7 @@ def symm_mem_alloc(
     if symm_mem.get_backend(device) != "NCCL":
         symm_mem.set_backend("NCCL")
     t = symm_mem.empty(*shape, dtype=dtype, device=device)
-    symm_mem.rendezvous(t, group=ep_group.group_name)
+    symm_mem.rendezvous(t, group=ep_group)
     return t
 
 
