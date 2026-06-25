@@ -152,7 +152,7 @@ def quantize_rowwise_mxfp8(
     # to avoid bank conflict.
     bank_group = (tidx % THREADS_PER_WARP) // THREADS_PER_BANK
     # The offset this thread should start reading from based on what's its first bank to access.
-    offset = bank_group * 4 # Each bank group will read 4 f16 from their bank
+    offset = bank_group * PACK_SIZE
     if cutlass.const_expr(_row_fast):
         # If no activation, f16 / bf16 and rowwise quantization, we can read 2 f16 / bf16 at once in a pack
         # and use max.xorsign.abs.f16x2 / max.xorsign.abs.bf16x2 to compute
@@ -230,7 +230,8 @@ def quantize_rowwise_mxfp8(
                         x = op(x)
                 # Accumulate to the per-thread dbias register buffer for this tile if WITH_DBIAS
                 if cutlass.const_expr(WITH_DBIAS):
-                    dbias_acc[start + i] += x
+                    # dbias_acc is register buffer so we can just write without bank conflict
+                    dbias_acc[w * PACK_SIZE + i] += x
                 # If 16-bit input with activation, truncate to IType
                 if cutlass.const_expr(is_packed16(DTYPE) and ACTIVATION is not None):
                     x = kit_act.truncate_f32(x)
@@ -1017,9 +1018,16 @@ class MXFP8QuantizeKernel:
                 val_layout=cute.make_layout((1, MXFP8_BLOCK_SIZE), stride=(MXFP8_BLOCK_SIZE, 1)),
             )
             sDbias_write = cute.composition(sDbias, tv_layout_dbias_write)
-            # All threads write their per-thread partial sum results to the shared buffer.
-            for i in cutlass.range_constexpr(MXFP8_BLOCK_SIZE):
-                sDbias_write[(tidx, i)] = rowwise_dbias_acc[i]
+            # Each thread start reading from the specfic bank based on its thread ID so they can do their best to access different banks
+            # to avoid bank conflict.
+            bank_group = (tidx % THREADS_PER_WARP) // self._THREADS_PER_BANK
+            # The offset this thread should start reading from based on what's its first bank to access.
+            offset = bank_group * self._PACK_SIZE
+            for w in cutlass.range_constexpr(self._WAVES):                # Each thread starts from this offset when writing into SMEM to avoid bank conflict
+                start = (w * self._PACK_SIZE + offset) % MXFP8_BLOCK_SIZE
+                for i in cutlass.range_constexpr(self._PACK_SIZE):
+                    # All threads write their per-thread partial sum results to the shared buffer.
+                    sDbias_write[(tidx, start + i)] = rowwise_dbias_acc[w * self._PACK_SIZE + i]
             cute.arch.sync_threads()
             # All threads reduce the cross-thread partial sums to the per-block partial sum.
             _, tv_layout_dbias_reduce = cute.make_layout_tv(
