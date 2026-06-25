@@ -439,7 +439,10 @@ class TestGroupedLinearOp:
     @pytest.mark.parametrize("dtype", (torch.bfloat16, torch.float16))
     @pytest.mark.parametrize(
         "quantization",
-        [None] + (["mxfp8"] if mxfp8_available else []),
+        [None]
+        + (["fp8_current_scaling"] if fp8_available else [])
+        + (["mxfp8"] if mxfp8_available else [])
+        + (["nvfp4_rht"] if nvfp4_available else []),
     )
     @pytest.mark.parametrize("quantized_weight", (False, True))
     @pytest.mark.parametrize("bias", (False, True))
@@ -479,6 +482,8 @@ class TestGroupedLinearOp:
             pytest.skip("Grouped GEMM CUDA-graph-safe path requires SM100+ (Blackwell)")
         if quantization is None and quantized_weight:
             pytest.skip("quantized_weight requires a quantization recipe")
+        if quantization is not None and quantization.startswith("nvfp4") and dtype != torch.bfloat16:
+            pytest.skip("NVFP4 grouped GEMM only supports BF16 output")
 
         single_grouped_bias = bias and single_grouped_weight
 

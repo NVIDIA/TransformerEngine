@@ -26,7 +26,13 @@ from ...module.base import (
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload, start_offload
 from ...quantization import FP8GlobalStateManager, QuantizerRole, Recipe
 from ...quantized_tensor import QuantizedTensorStorage
-from ...tensor import MXFP8Quantizer, MXFP8Tensor, NVFP4Quantizer, Quantizer
+from ...tensor import (
+    Float8CurrentScalingQuantizer,
+    MXFP8Quantizer,
+    MXFP8Tensor,
+    NVFP4Quantizer,
+    Quantizer,
+)
 from ...utils import (
     canonicalize_device,
     canonicalize_dtype,
@@ -768,8 +774,11 @@ class GroupedLinear(BasicOperation):
           requirement without duplicating its cuBLAS version checks.
         * Quantized compute supports MXFP8 and NVFP4 on Blackwell GPUs with Compute Capability (CC)
           10.x and 11.0. NVFP4 requires RHT because graph-safe grouped quantization currently
-          requires RHT;
-          Every other quantization recipe (fp8 delayed / current scaling, fp8 block scaling, ...)
+          requires RHT.
+        * FP8 per-tensor current scaling is backed by grouped current-scaling quantization
+          (``tex.group_quantize``) and cuBLASLt grouped GEMM with per-batch scalar FP8 scaling,
+          which are supported on Hopper (CC 9.0) and Blackwell (CC 10.x and 11.0).
+          Every other quantization recipe (fp8 delayed scaling, fp8 block scaling, ...)
           falls back to the legacy flow because the corresponding grouped quantization kernels are
           missing.
         * Unquantized compute supports BF16/FP16 on Hopper (CC 9.0) and Blackwell (CC 10.x and 11.0)
@@ -780,6 +789,11 @@ class GroupedLinear(BasicOperation):
         if not (9, 0) <= get_device_compute_capability() <= (11, 0):
             return False
         if with_quantized_compute:
+            # FP8 per-tensor current scaling runs on the Hopper and Blackwell grouped GEMM
+            # path; the compute-capability range was already checked above.
+            if all(isinstance(q, Float8CurrentScalingQuantizer) for q in input_quantizers):
+                return True
+            # MXFP8 and NVFP4 grouped quantization kernels require Blackwell.
             if not (10, 0) <= get_device_compute_capability() <= (11, 0):
                 return False
             return all(isinstance(q, MXFP8Quantizer) for q in input_quantizers) or all(
@@ -1318,8 +1332,9 @@ class GroupedLinear(BasicOperation):
         #   [split_sizes, base_split_offsets, split_points,
         #    (scales if _scale_bias), grouped_x, *weights]
         if grouped_x is not None:
-            if with_quantized_compute:
-                # only columnwise data is needed for wgrad
+            # Free Rowwise Data if columnwise data is available for backward pass
+            # (For FP8 per tensor current scaling on Hopper)
+            if with_quantized_compute and grouped_x.columnwise_data is not None:
                 grouped_x.rowwise_data = None
                 grouped_x.scale_inv = None
         saved: list[Optional[torch.Tensor]] = [split_sizes, base_split_offsets, split_points]
