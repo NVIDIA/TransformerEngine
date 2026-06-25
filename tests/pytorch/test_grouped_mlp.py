@@ -482,7 +482,11 @@ class TestGroupedLinearOp:
             pytest.skip("Grouped GEMM CUDA-graph-safe path requires SM100+ (Blackwell)")
         if quantization is None and quantized_weight:
             pytest.skip("quantized_weight requires a quantization recipe")
-        if quantization is not None and quantization.startswith("nvfp4") and dtype != torch.bfloat16:
+        if (
+            quantization is not None
+            and quantization.startswith("nvfp4")
+            and dtype != torch.bfloat16
+        ):
             pytest.skip("NVFP4 grouped GEMM only supports BF16 output")
 
         single_grouped_bias = bias and single_grouped_weight
