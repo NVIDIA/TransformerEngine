@@ -146,15 +146,20 @@ inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config,
     return false;
   }
 
+  // When only WITH_DBIAS is true, we use a larger tile size (align with CUDA C++ implementation)
+  const bool cast_dbias_only = config.with_dbias && !config.with_dact && !config.with_act;
+  const size_t chunk_rows = cast_dbias_only ? 128 : 64;  // input rows reduced per CTA
+  // Each CTA writes one partial-dbias row, so the workspace (and the cross-CTA
+  // reduction below) has ceil(M / chunk_rows) rows.
+  const size_t workspace_rows = (flat_m + chunk_rows - 1) / chunk_rows;
+
   // dbias workspace-size query, mirroring mxfp8::quantize: the framework first
   // calls with an unallocated workspace to learn its shape, allocates a buffer of
   // that shape, then calls again to run. The kernel writes per-row-block partial
   // dbias into this workspace; reducing it to the final dbias is a separate step.
   if (config.with_dbias && workspace_tensor != nullptr &&
       workspace_tensor->data.dptr == nullptr) {
-    constexpr size_t kCuTeDSLMXFP8ChunkRows = 64;  // TILE_Y * NUM_TILES (CTA row span)
-    const size_t dbias_rows = (flat_m + kCuTeDSLMXFP8ChunkRows - 1) / kCuTeDSLMXFP8ChunkRows;
-    workspace_tensor->data.shape = {dbias_rows, flat_n};
+    workspace_tensor->data.shape = {workspace_rows, flat_n};
     workspace_tensor->data.dtype = DType::kFloat32;
     return true;
   }
@@ -167,12 +172,10 @@ inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config,
 
   // Zero out swizzled scale padding when the matrix isn't a multiple of the
   // 128x128 GEMM tile. The kernel writes only the meaningful scale region, so
-  // cuBLAS would otherwise read uninitialized padding. Mirrors the CUDA launcher
-  // in quantize_mxfp8.cuh (the kernel itself does not pad the scales).
+  // cuBLAS would otherwise read uninitialized padding.
 
-  // TODO: move this into the CuTeDSL host code so the padding is handled inside
-  // the kernel launch — this CUDA-driver memset is an implementation detail that
-  // doesn't belong in the dispatcher (blocked on calling the driver API there).
+  // TODO: see if it's possible to move this into the CuTeDSL host code so the padding is handled inside
+  // the kernel launch so it's more flexible
   if (config.swizzled && (flat_m % 128 != 0 || flat_n % 128 != 0)) {
     if (output_tensor->has_data()) {
       NVTE_CHECK_CUDA(cudaMemsetAsync(output_tensor->scale_inv.dptr, 0,
@@ -205,11 +208,10 @@ inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config,
 
   // If WITH_DBIAS, reduce the workspace partial dbias in CUDA C++ for now.
   if (config.with_dbias) {
-    const size_t blocks_Y = (flat_m + 63) / 64;  // ceil(M/64) = workspace rows
     const float *workspace_ptr = reinterpret_cast<const float *>(workspace_tensor->data.dptr);
     TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
         input_tensor->dtype(), IType,
-        dispatch::common::reduce_dbias<IType>(workspace_ptr, dbias_tensor, blocks_Y, flat_n,
+        dispatch::common::reduce_dbias<IType>(workspace_ptr, dbias_tensor, workspace_rows, flat_n,
                                               stream);)  // NOLINT(*)
   }
   return true;

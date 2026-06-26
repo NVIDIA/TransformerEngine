@@ -108,6 +108,7 @@ def quantize_rowwise_mxfp8(
     ACTIVATION,
     DTYPE,
     FP8_DTYPE,
+    TILE_X,
     TILE_Y,
     WAVES,
     THREADS_PER_BANK,
@@ -119,8 +120,11 @@ def quantize_rowwise_mxfp8(
 ):
     tidx, _, _ = cute.arch.thread_idx()
 
+    CTA_THREADS_Y = TILE_Y # threads per column (rows per tile)
+    CTA_THREADS_X = TILE_X // MXFP8_BLOCK_SIZE  # threads per row (chunks per row)
+
     _, tv_layout = cute.make_layout_tv(
-        thr_layout=cute.make_layout((TILE_Y, 2), stride=(2, 1)),
+        thr_layout=cute.make_layout((CTA_THREADS_Y, CTA_THREADS_X), stride=(CTA_THREADS_X, 1)),
         val_layout=cute.make_layout((1, MXFP8_BLOCK_SIZE), stride=(0, 1))
     )
 
@@ -252,10 +256,10 @@ def quantize_rowwise_mxfp8(
 
     # For irregular shapes, skip the scale store if this thread's logical row / col-block lies past the input's actual extents. 
     # TMA already zero-fills OOB input reads and drops OOB output writes; only the direct scale-byte gmem store needs an explicit guard.
-    scale_row = tile_row_start + tidx // 2
-    scale_col_first_elt = tile_col_start + (tidx % 2) * MXFP8_BLOCK_SIZE
+    scale_row = tile_row_start + tidx // CTA_THREADS_X
+    scale_col_first_elt = tile_col_start + (tidx % CTA_THREADS_X) * MXFP8_BLOCK_SIZE
     if scale_row < M and scale_col_first_elt < N:
-        mS_row_stage[(tidx // 2, tidx % 2)] = Uint8(biased_exp_r)
+        mS_row_stage[(tidx // CTA_THREADS_X, tidx % CTA_THREADS_X)] = Uint8(biased_exp_r)
 
     inv_scale_r = exp2f_rcp(biased_exp_r) # f32 reciprocal of the scale
     # Fetch the conversion function based on the FP8 format
@@ -492,16 +496,24 @@ class MXFP8QuantizeKernel:
     
     # Tiling sizes
     _NUM_STAGES = 2 # Pipeline depth of the producer/consumer ring buffer for the TMA-G2S input loads (PipelineTmaAsync stage count)
-    _NUM_TILES = 2 # Each CTA process 2 tiles along the Y (row, slowest-changing) dimension
-    _TILE_Y = 32 # Each tile has 32 rows, so each CTA handles 32 * 2 rows in total
-    _TILE_X = 64 # Each tile has 64 columns
-
-    # CTA size
-    _THREADS_PER_CTA = 64
-    _NUM_WARPS = _THREADS_PER_CTA // 32
 
     def __init__(self, cfg):
         self.cfg = cfg
+        # Cast + dbias with no activation gets the larger tile (CUDA CAST_DBIAS_ONLY).
+        cast_dbias_only = cfg.WITH_DBIAS and not cfg.WITH_DACT and not cfg.WITH_ACT
+        # Use a different tile size for dbias only config
+        # No matter what tile size we use, each thread always handles a (1, MXFP8_BLOCK_SIZE) chunk
+        if cast_dbias_only:
+            self._NUM_TILES = 4
+            self._THREADS_PER_CTA = 128
+            self._TILE_X = 128 
+            self._TILE_Y = 32
+        else:
+            self._NUM_TILES = 2
+            self._THREADS_PER_CTA = 64
+            self._TILE_X = 64
+            self._TILE_Y = 32
+        self._NUM_WARPS = self._THREADS_PER_CTA // 32
         # We prefer to do dbias reduction in colwise which is easier (no cross-thread reduction needed).
         # Only do rowwise reduction when we don't quantize columnwisely when WITH_DBIAS is True.
         self.DBIAS_REDUCTION_COLWISE = cfg.WITH_DBIAS and cfg.COLWISE
@@ -1004,12 +1016,9 @@ class MXFP8QuantizeKernel:
             sDbias = dbias_storage.sDbias.get_tensor(
                 cute.make_layout((self._TILE_Y, self._TILE_X), stride=(DBIAS_BUFF_WIDTH, 1)),
             )
-            # Thread layout: (TILE_Y, 2); value layout: (1, MXFP8_BLOCK_SIZE) where TILE_X = 2 * MXFP8_BLOCK_SIZE
-            # And each thread writes the (1, MXFP8_BLOCK_SIZE) partial sum to this (TILE_Y, TILE_X) buffer
-            # and then each thread reads its (TILE_Y, 1) sDbias column and writes the reduced sum to the GMEM workspace.
-            # Since TILE_X == THREADS_PER_CTA, this column reduction yields (TILE_Y, TILE_X) -> (1, TILE_X).
             _, tv_layout_dbias_write = cute.make_layout_tv(
-                thr_layout=cute.make_layout((self._TILE_Y, 2), stride=(2, 1)), 
+                thr_layout=cute.make_layout((self._TILE_Y, self._TILE_X // MXFP8_BLOCK_SIZE),
+                                            stride=(self._TILE_X // MXFP8_BLOCK_SIZE, 1)),
                 val_layout=cute.make_layout((1, MXFP8_BLOCK_SIZE), stride=(MXFP8_BLOCK_SIZE, 1)),
             )
             sDbias_write = cute.composition(sDbias, tv_layout_dbias_write)
@@ -1096,6 +1105,7 @@ class MXFP8QuantizeKernel:
             ACTIVATION=None if self.CACHE_ACTIVATION else cfg.ACTIVATION,
             DTYPE=cfg.DTYPE,
             FP8_DTYPE=cfg.FP8_DTYPE,
+            TILE_X=self._TILE_X,
             TILE_Y=self._TILE_Y,
             WAVES=self._WAVES,
             THREADS_PER_BANK=self._THREADS_PER_BANK,
