@@ -10,7 +10,7 @@ import functools
 
 import torch
 
-from transformer_engine.common import load_framework_extension, register_cutedsl_quant_backend
+from transformer_engine.common import load_framework_extension
 from transformer_engine.pytorch.torch_version import torch_version
 
 assert torch_version() >= (2, 1), f"Minimum torch version 2.1 required. Found {torch_version()}."
@@ -18,10 +18,6 @@ assert torch_version() >= (2, 1), f"Minimum torch version 2.1 required. Found {t
 load_framework_extension("torch")
 from transformer_engine.pytorch import constants
 from transformer_engine.pytorch.constants import DType
-
-# Register the CuTeDSL quantize backend entrypoints (TVM-FFI). Optional; falls
-# back to the CUDA kernels if the CuTeDSL toolchain isn't installed.
-register_cutedsl_quant_backend()
 
 from transformer_engine.pytorch.module import LayerNormLinear
 from transformer_engine.pytorch.module import Linear

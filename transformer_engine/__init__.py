@@ -13,6 +13,12 @@ from importlib import metadata
 from typing import Optional, Tuple
 import transformer_engine.common
 
+# Register the CuTeDSL quantize backend (TVM-FFI entrypoints). Framework-agnostic,
+# so do it once here rather than per framework — it applies no matter whether
+# pytorch or jax is used. Optional: a no-op fallback to the CUDA kernels if the
+# CuTeDSL toolchain isn't installed.
+transformer_engine.common.register_cutedsl_quant_backend()
+
 # Minimum NCCL version for the statically-linked NCCL EP backend.
 _NCCL_EP_MIN_VERSION = (2, 30, 4)
 
