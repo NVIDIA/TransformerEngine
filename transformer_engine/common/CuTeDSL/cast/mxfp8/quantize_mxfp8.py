@@ -57,7 +57,6 @@ from transformer_engine.common.CuTeDSL.utils_fp8 import (
     get_cvt_f32x2_to_fp8x2_func,
     cvt_f32_to_fp8e8m0
 )
-from transformer_engine.pytorch.constants import MXFP8_BLOCK_SCALING_SIZE
 
 CUTEDSL_DEBUG_LOGGING = os.environ.get("CUTEDSL_DEBUG_LOGGING", "0") == "1"
 
@@ -331,9 +330,6 @@ def quantize_colwise_mxfp8(
     sX_thread = sX_tv[tidx, None]
     sO_thread = sO_tv[tidx, None]
 
-    # dbias needs the per-element fp32 values to sum, so it takes the f32 path
-    # (never the i16 fast path) — matching CUDA, whose f16 fast path requires
-    # `!IS_DBIAS` (quantize_mxfp8.cuh:219).
     USE_HALF_PRECISION = is_packed16(DTYPE) and ACTIVATION is None
     dbias_partial = Float32(0.0)
 
@@ -344,9 +340,6 @@ def quantize_colwise_mxfp8(
             cute.recast_ptr(sX_thread.iterator, dtype=Int16),
             cute.make_layout((MXFP8_BLOCK_SIZE,), stride=(TILE_X,)),
         )
-        if cutlass.const_expr(WITH_DBIAS):
-            for i in cutlass.range_constexpr(MXFP8_BLOCK_SIZE):
-                dbias_partial += kit.bits_to_f32(sX_thread_i16[i])
         amax_bits = Int16(0)
         for i in cutlass.range_constexpr(MXFP8_BLOCK_SIZE):
             amax_bits = kit.abs_max_scalar(amax_bits, sX_thread_i16[i])
@@ -369,10 +362,6 @@ def quantize_colwise_mxfp8(
             op = SUPPORTED_ACTIVATIONS[ACTIVATION]
             for i in cutlass.range_constexpr(MXFP8_BLOCK_SIZE):
                 sX_thread_f32[i] = op(sX_thread_f32[i])
-        # Accumulate the per-thread column partial for dbias if WITH_DBIAS.
-        if cutlass.const_expr(WITH_DBIAS):
-            for i in cutlass.range_constexpr(MXFP8_BLOCK_SIZE):
-                dbias_partial += sX_thread_f32[i]
         # Truncate the activation (after we apply op) back to the half precision type if input is also half precision.
         if cutlass.const_expr(is_packed16(DTYPE) and ACTIVATION is not None):
             kit_act = packed16_kit(DTYPE)
@@ -404,9 +393,15 @@ def quantize_colwise_mxfp8(
         kit_cast = packed16_kit(DTYPE)
         for i in cutlass.range_constexpr(MXFP8_BLOCK_SIZE):
             v_f32 = kit_cast.bits_to_f32(sX_thread_i16[i])
+            if cutlass.const_expr(WITH_DBIAS):
+                dbias_partial += v_f32
             sO_thread[i] = Uint8(cvt_to_fp8_func(v_f32 * inv_scale_c))
     else:
         for i in cutlass.range_constexpr(MXFP8_BLOCK_SIZE):
+            # Accumulate the per-thread column partial for dbias if WITH_DBIAS.
+            if cutlass.const_expr(WITH_DBIAS):
+                for i in cutlass.range_constexpr(MXFP8_BLOCK_SIZE):
+                    dbias_partial += sX_thread_f32[i]
             sO_thread[i] = Uint8(cvt_to_fp8_func(sX_thread_f32[i] * inv_scale_c))
 
     # Return this stage's per-column partial alongside amax; the caller accumulates
@@ -1199,11 +1194,11 @@ class MXFP8QuantizeSpecializedRowwiseKernel:
         # The 128 threads in the CTA are grouped as (4, 32), so they cover a
         # (4, 1024) input tile and the matching (4, 32) scale tile.
         CTA_Y = self._TILE_Y
-        CTA_X = self._TILE_X // MXFP8_BLOCK_SCALING_SIZE
+        CTA_X = self._TILE_X // MXFP8_BLOCK_SIZE
         tiler, tv_layout = cute.make_layout_tv(
             thr_layout=cute.make_layout((CTA_Y, CTA_X), stride=(CTA_X, 1)),
-            val_layout=cute.make_layout((1, MXFP8_BLOCK_SCALING_SIZE),
-                                        stride=(MXFP8_BLOCK_SCALING_SIZE, 1)),
+            val_layout=cute.make_layout((1, MXFP8_BLOCK_SIZE),
+                                        stride=(MXFP8_BLOCK_SIZE, 1)),
         )
         tiler_scale, tv_layout_scale = cute.make_layout_tv(
             thr_layout=cute.make_layout((CTA_Y, CTA_X), stride=(CTA_X, 1)),
@@ -1219,23 +1214,23 @@ class MXFP8QuantizeSpecializedRowwiseKernel:
         mS_thread = cute.composition(mS_tile, tv_layout_scale)[tidx, None]
 
         rX_thread = cute.make_rmem_tensor(
-            cute.make_layout((1, MXFP8_BLOCK_SCALING_SIZE), stride=(MXFP8_BLOCK_SCALING_SIZE, 1)),
+            cute.make_layout((1, MXFP8_BLOCK_SIZE), stride=(MXFP8_BLOCK_SIZE, 1)),
             dtype=DTYPE,
         )
         # Inputs widened to f32 once (reused by amax and the fused cvt). The FP8
         # output stays a uint8 fragment; we write it through a uint32 view so the
         # 4-wide mul_cvt drops one packed word per call (see the cvt loop).
         rX_f32 = cute.make_rmem_tensor(
-            cute.make_layout((1, MXFP8_BLOCK_SCALING_SIZE), stride=(MXFP8_BLOCK_SCALING_SIZE, 1)),
+            cute.make_layout((1, MXFP8_BLOCK_SIZE), stride=(MXFP8_BLOCK_SIZE, 1)),
             dtype=Float32,
         )
         rO_thread = cute.make_rmem_tensor(
-            cute.make_layout((1, MXFP8_BLOCK_SCALING_SIZE), stride=(MXFP8_BLOCK_SCALING_SIZE, 1)),
+            cute.make_layout((1, MXFP8_BLOCK_SIZE), stride=(MXFP8_BLOCK_SIZE, 1)),
             dtype=Uint8,
         )
         rO_u32 = cute.make_tensor(
             cute.recast_ptr(rO_thread.iterator, dtype=Uint32),
-            cute.make_layout((MXFP8_BLOCK_SCALING_SIZE // 4,), stride=(1,)),
+            cute.make_layout((MXFP8_BLOCK_SIZE // 4,), stride=(1,)),
         )
 
         # TODO: review this kernel myself.
@@ -1259,14 +1254,14 @@ class MXFP8QuantizeSpecializedRowwiseKernel:
             cute.arch.sync_threads()
 
         row = bidy * self._TILE_Y + tidx // CTA_X
-        col = bidx * self._TILE_X + (tidx % CTA_X) * MXFP8_BLOCK_SCALING_SIZE
+        col = bidx * self._TILE_X + (tidx % CTA_X) * MXFP8_BLOCK_SIZE
         if row < M and col < N:
             cute.autovec_copy(mX_thread, rX_thread)
 
             # Widen once and reduce. bf16/fp16 -> f32 widening is exact, so the
             # amax matches the CUDA 16-bit abs_max path bit-for-bit.
             amax = Float32(0.0)
-            for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
+            for i in cutlass.range_constexpr(MXFP8_BLOCK_SIZE):
                 rX_f32[0, i] = Float32(rX_thread[0, i])
                 amax = cute.arch.fmax(amax, fabs_f32(rX_f32[0, i]))
 
@@ -1281,7 +1276,7 @@ class MXFP8QuantizeSpecializedRowwiseKernel:
             inv_scale = exp2f_rcp(biased_exp)
             scale_2x = pack_f32x2(inv_scale, inv_scale)
             mul_cvt4 = mul_cvt_f32x4_to_fp8x4(self.cfg.FP8_DTYPE)
-            for w in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE // 4):
+            for w in cutlass.range_constexpr(MXFP8_BLOCK_SIZE // 4):
                 b = 4 * w
                 rO_u32[w] = mul_cvt4(rX_f32[0, b], rX_f32[0, b + 1],
                                      rX_f32[0, b + 2], rX_f32[0, b + 3], scale_2x)
@@ -1307,7 +1302,7 @@ class MXFP8QuantizeSpecializedRowwiseKernel:
     def _flush_scales(self, sScale, mS_tile, tidx, bidx, bidy, M, padded_cols, G):
         """Flush the staged (CTA_Y, CTA_X) scale tile to gmem with G-wide stores."""
         CTA_Y = self._TILE_Y
-        CTA_X = self._TILE_X // MXFP8_BLOCK_SCALING_SIZE
+        CTA_X = self._TILE_X // MXFP8_BLOCK_SIZE
         GROUPS = CTA_X // G
         _, tv_flush = cute.make_layout_tv(
             thr_layout=cute.make_layout((CTA_Y, GROUPS), stride=(GROUPS, 1)),
