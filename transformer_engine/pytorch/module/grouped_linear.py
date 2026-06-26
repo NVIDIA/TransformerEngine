@@ -136,7 +136,7 @@ class _GroupedLinear(torch.autograd.Function):
         if fp8:
             if all(isinstance(q, Float8CurrentScalingQuantizer) for q in input_quantizers):
                 return True
-            # MXFP8 and NVFP4 grouped quantization kernels require Blackwell.
+            # MXFP8 and NVFP4 require Blackwell+.
             if not (10, 0) <= get_device_compute_capability() <= (11, 0):
                 return False
             return all(isinstance(q, MXFP8Quantizer) for q in input_quantizers) or all(
@@ -332,7 +332,6 @@ class _GroupedLinear(torch.autograd.Function):
 
         if is_grad_enabled:
             if weight_requires_grad:
-                # Free Rowwise Data if columnwise data is available for backward pass
                 # (For FP8 per tensor current scaling on Hopper --> Free Rowwise Data
                 # in backward pass)
                 if fp8 and grouped_x.columnwise_data is not None:

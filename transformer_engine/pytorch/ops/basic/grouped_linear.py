@@ -1339,8 +1339,8 @@ class GroupedLinear(BasicOperation):
         #   [split_sizes, base_split_offsets, split_points,
         #    (scales if _scale_bias), grouped_x, *weights]
         if grouped_x is not None:
-            # Free Rowwise Data if columnwise data is available for backward pass
-            # (For FP8 per tensor current scaling on Hopper)
+            # (For FP8 per tensor current scaling on Hopper --> Free Rowwise Data
+            # in backward pass)
             if with_quantized_compute and grouped_x.columnwise_data is not None:
                 grouped_x.rowwise_data = None
                 grouped_x.scale_inv = None
