@@ -165,11 +165,15 @@ try:
 except PackageNotFoundError:
     flash_attn_func_v4 = None
     flash_attn_varlen_func_v4 = None
+    _flash_attn_fwd_v4 = None
+    _flash_attn_bwd_v4 = None
 else:
     from flash_attn.cute.interface import (  # pylint: disable=ungrouped-imports,no-name-in-module
         flash_attn_func as flash_attn_func_v4,
         flash_attn_varlen_func as flash_attn_varlen_func_v4,
         _validate_head_dims as _fa4_validate_head_dims,
+        _flash_attn_fwd as _flash_attn_fwd_v4,
+        _flash_attn_bwd as _flash_attn_bwd_v4,
     )
 
     fa_utils.v4_validate_head_dims = _fa4_validate_head_dims
@@ -1054,6 +1058,7 @@ class FlashAttention(torch.nn.Module):
                     quantizers=quantizers,
                     pad_between_seqs=pad_between_seqs,
                     use_flash_attn_3=use_flash_attn_3,
+                    use_flash_attn_4=use_flash_attn_4,
                     fp8_output=fp8_output,
                 )
         else:
@@ -1113,10 +1118,21 @@ class FlashAttention(torch.nn.Module):
                     if inference_params is None:
                         fa_4_optional_forward_kwargs["deterministic"] = self.deterministic
                     if func is flash_attn_varlen_func_v4:
-                        fa_4_optional_forward_kwargs["cu_seqlens_q"] = cu_seqlens_q
-                        fa_4_optional_forward_kwargs["cu_seqlens_k"] = cu_seqlens_kv
+                        fa_4_optional_forward_kwargs["cu_seqlens_q"] = (
+                            cu_seqlens_q_padded if pad_between_seqs else cu_seqlens_q
+                        )
+                        fa_4_optional_forward_kwargs["cu_seqlens_k"] = (
+                            cu_seqlens_kv_padded if pad_between_seqs else cu_seqlens_kv
+                        )
                         fa_4_optional_forward_kwargs["max_seqlen_q"] = max_seqlen_q
                         fa_4_optional_forward_kwargs["max_seqlen_k"] = max_seqlen_kv
+                        if pad_between_seqs:
+                            fa_4_optional_forward_kwargs["seqused_q"] = (
+                                cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+                            )
+                            fa_4_optional_forward_kwargs["seqused_k"] = (
+                                cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
+                            )
                     output = func(
                         query_layer,
                         key_layer,
