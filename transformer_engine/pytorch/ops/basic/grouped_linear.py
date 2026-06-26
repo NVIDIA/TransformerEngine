@@ -424,9 +424,7 @@ class GroupedLinear(BasicOperation):
 
         recipe = None if quantizer is None else quantizer._get_compatible_recipe()
         if recipe is not None and recipe.delayed():
-            raise RuntimeError(
-                "Delayed scaling is not supported with single_grouped_weight=True"
-            )
+            raise RuntimeError("Delayed scaling is not supported with single_grouped_weight=True")
 
         grouped_weights = GroupedTensor.make_grouped_tensor_with_shapes(
             num_tensors=self.num_groups,

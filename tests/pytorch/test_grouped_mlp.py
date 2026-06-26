@@ -288,11 +288,7 @@ class TestGroupedLinearOp:
 
         if single_grouped_bias and not bias:
             pytest.skip("single_grouped_bias requires bias=True")
-        if (
-            single_grouped_weight
-            and quantized_weight
-            and quantization in ("fp8_delayed_scaling")
-        ):
+        if single_grouped_weight and quantized_weight and quantization in ("fp8_delayed_scaling"):
             pytest.skip(
                 "single_grouped_weight does not support FP8 delayed/current scaling "
                 "with quantized_model_init"
@@ -492,8 +488,10 @@ class TestGroupedLinearOp:
             # Currently, split_quantization is used which is not cuda graph safe.
             # We should either support grouped weight quantization without rht or need to do
             # inplace per tensor weight quantization to make this use-case cuda graphable if needed.
-            pytest.skip("NVFP4 grouped GEMM with single_grouped_weight is not supported yet; "
-                        "only discrete weights (single_grouped_weight=False) are supported.")
+            pytest.skip(
+                "NVFP4 grouped GEMM with single_grouped_weight is not supported yet; "
+                "only discrete weights (single_grouped_weight=False) are supported."
+            )
 
         single_grouped_bias = bias and single_grouped_weight
 
