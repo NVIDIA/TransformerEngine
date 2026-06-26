@@ -283,6 +283,7 @@ class TestDistributedCrossAttn:
 DISTRIBUTED_SCORE_MOD_DATA_SHAPES = {
     "L0": [],
     "L1": [(4, 16, 4, 64)],
+    "L2": [],
 }
 
 
