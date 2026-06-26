@@ -25,6 +25,11 @@ git submodule update --init --recursive
 # Install deps
 /opt/python/cp310-cp310/bin/pip install cmake pybind11[global] ninja setuptools wheel
 
+echo "Building vendored nvidia-cudnn-frontend wheel"
+CUDNN_FRONTEND_VERSION=$(/opt/python/cp310-cp310/bin/python -m build_tools.cudnn_frontend version)
+/opt/python/cp310-cp310/bin/python -m build_tools.cudnn_frontend wheel /wheelhouse 2>&1 | tee /wheelhouse/logs/cudnn_frontend.txt
+/opt/python/cp310-cp310/bin/pip install --no-index --find-links /wheelhouse "nvidia-cudnn-frontend==${CUDNN_FRONTEND_VERSION}"
+
 # Enable optional build features. cuSolverMp is provided by the build image
 # (see Dockerfile.x86 / Dockerfile.aarch), which also sets CUSOLVERMP_HOME.
 export NVTE_WITH_CUSOLVERMP=1

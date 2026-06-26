@@ -13,8 +13,9 @@ blocks of 32 to match the GLU interleaved layout that fused kernel reads.
 
 The fused kernel is enabled by ``utils._enable_fused_mxfp8_grouped_mlp()``
 (sets ``NVTE_CUTEDSL_FUSED_GROUPED_MLP=1`` and patches the SM-version /
-cudnn-frontend signature checks). Requires
-``nvidia-cudnn-frontend >= 1.23.0`` and SM>=10 (Blackwell B100/B200/B300+).
+cudnn-frontend signature checks). Requires the cuDNN frontend Python package
+built from Transformer Engine's vendored submodule and SM>=10
+(Blackwell B100/B200/B300+).
 """
 
 from __future__ import annotations

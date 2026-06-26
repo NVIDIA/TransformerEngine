@@ -159,16 +159,18 @@ def _enable_fused_mxfp8_grouped_mlp() -> None:
 
     We also (a) relax the SM-version check from ``!= 10`` to ``>= 10`` so
     SM>=11 successors of B300 fire the kernel, and (b) wrap the cudnn-frontend
-    grouped-GEMM wrappers so the installed TE's ``c_dtype`` kwarg (dropped by
-    cudnn-frontend 1.23.0) is silently filtered out.
+    grouped-GEMM wrappers so the installed TE's ``c_dtype`` kwarg is silently
+    filtered out when the vendored cuDNN frontend does not accept it.
     """
     os.environ["NVTE_CUTEDSL_FUSED_GROUPED_MLP"] = "1"
 
     import inspect
-    import cudnn  # type: ignore
+    from transformer_engine.common.cudnn_frontend import import_cudnn_frontend
     from transformer_engine.pytorch.ops.fused import forward_grouped_mlp as _fwd_mod
     from transformer_engine.pytorch.ops.fused import backward_grouped_mlp as _bwd_mod
     from transformer_engine.pytorch.utils import get_device_compute_capability
+
+    cudnn = import_cudnn_frontend()
 
     def _make_is_supported(kernel_method_names):
         def _is_supported(cls) -> bool:

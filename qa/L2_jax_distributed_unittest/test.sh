@@ -11,5 +11,7 @@ export NVTE_JAX_TEST_TIMING=1
 : ${XML_LOG_DIR:=/logs}
 mkdir -p "$XML_LOG_DIR"
 
+PYTHONPATH=$TE_PATH python3 -m build_tools.cudnn_frontend install
+
 # Use --xla_gpu_enable_triton_gemm=false to ensure the reference JAX implementation we are using is accurate.
 XLA_FLAGS="$XLA_FLAGS --xla_gpu_enable_triton_gemm=false" NVTE_JAX_UNITTEST_LEVEL="L2" python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest.xml $TE_PATH/tests/jax/test_distributed_*

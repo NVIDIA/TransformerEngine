@@ -14,6 +14,7 @@ import pytest
 
 import torch
 
+from transformer_engine.common.cudnn_frontend import import_cudnn_frontend
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch.ops.fused.grouped_mlp import (
     _cudnn_frontend_supports_grouped_gemm_srelu,
@@ -1673,8 +1674,10 @@ def test_grouped_gemm_quant_cute_matches_mxfp8_quantized() -> None:
         pytest.skip("Requires SM100+ for grouped GEMM quant kernel.")
 
     try:
-        from cudnn import grouped_gemm_quant_wrapper_sm100  # pylint: disable=no-name-in-module
-    except ImportError as exc:
+        grouped_gemm_quant_wrapper_sm100 = getattr(
+            import_cudnn_frontend(), "grouped_gemm_quant_wrapper_sm100"
+        )
+    except (AttributeError, ImportError) as exc:
         pytest.skip(f"grouped_gemm_quant_wrapper_sm100 unavailable: {exc}")
 
     device = torch.device("cuda")

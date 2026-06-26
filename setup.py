@@ -8,6 +8,7 @@ from importlib import metadata
 import os
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import List, Tuple
@@ -17,6 +18,7 @@ from wheel.bdist_wheel import bdist_wheel
 
 from build_tools.build_ext import CMakeExtension, get_build_ext
 from build_tools.te_version import te_version
+from build_tools.cudnn_frontend import install_from_submodule as install_cudnn_frontend
 from build_tools.utils import (
     cuda_archs,
     cuda_version,
@@ -153,6 +155,25 @@ def setup_requirements() -> Tuple[List[str], List[str]]:
             test_reqs.extend(test_requirements())
 
     return [remove_dups(reqs) for reqs in [install_reqs, test_reqs]]
+
+
+def maybe_install_cudnn_frontend() -> None:
+    """Install cuDNN frontend Python bindings from the vendored submodule for source builds."""
+    build_commands = {"build", "build_ext", "bdist_wheel", "install", "develop"}
+    if not build_commands.intersection(sys.argv):
+        return
+    if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
+        return
+    if not {"pytorch", "jax"}.intersection(frameworks):
+        return
+    if not bool(int(os.getenv("NVTE_INSTALL_CUDNN_FRONTEND", "1"))):
+        return
+
+    build_isolation = bool(int(os.getenv("NVTE_CUDNN_FRONTEND_BUILD_ISOLATION", "0")))
+    install_cudnn_frontend(
+        current_file_path,
+        no_build_isolation=not build_isolation,
+    )
 
 
 def _discover_nccl_home() -> str:
@@ -344,6 +365,7 @@ if __name__ == "__main__":
     __version__ = te_version()
 
     git_check_submodules()
+    maybe_install_cudnn_frontend()
 
     with open("README.rst", encoding="utf-8") as f:
         long_description = f.read()

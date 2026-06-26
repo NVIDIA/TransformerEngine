@@ -9,13 +9,15 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 import functools
 import os
-from importlib.metadata import PackageNotFoundError, version as get_pkg_version
 from typing import Any, Optional
 
 import torch
-from packaging.version import Version as PkgVersion
 
 import transformer_engine_torch as tex
+from transformer_engine.common.cudnn_frontend import (
+    cudnn_frontend_version_at_least,
+    import_cudnn_frontend,
+)
 from ...constants import MXFP8_BLOCK_SCALING_SIZE, NVFP4_BLOCK_SCALING_SIZE
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload, start_offload
 from ...cpp_extensions import general_gemm, general_grouped_gemm_for_grouped_tensor
@@ -55,10 +57,16 @@ from .._common import (
 @functools.lru_cache(maxsize=None)
 def _cudnn_frontend_version_at_least(min_version: str) -> bool:
     """Check cuDNN frontend package version."""
+    return cudnn_frontend_version_at_least(min_version)
+
+
+def _get_cudnn_frontend_symbol(name: str) -> Callable:
+    """Look up a symbol in the cuDNN frontend Python package."""
+    cudnn = import_cudnn_frontend()
     try:
-        return PkgVersion(get_pkg_version("nvidia-cudnn-frontend")) >= PkgVersion(min_version)
-    except PackageNotFoundError:
-        return False
+        return getattr(cudnn, name)
+    except AttributeError as exc:
+        raise ImportError(f"cuDNN frontend does not provide {name}.") from exc
 
 
 def _cudnn_frontend_version_supported() -> bool:
@@ -314,9 +322,9 @@ def _grouped_gemm_dsrelu_backward_supported() -> bool:
     if not _cudnn_frontend_supports_grouped_gemm_srelu():
         return False
     try:
-        from cudnn import (
-            grouped_gemm_dsrelu_wrapper_sm100,
-        )  # pylint: disable=import-outside-toplevel
+        grouped_gemm_dsrelu_wrapper_sm100 = _get_cudnn_frontend_symbol(
+            "grouped_gemm_dsrelu_wrapper_sm100"
+        )
     except ImportError:
         return False
     return grouped_gemm_dsrelu_wrapper_sm100 is not None
@@ -781,9 +789,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
     @functools.lru_cache(maxsize=None)
     def grouped_gemm_quant_kernel(cls) -> Callable:
         """Grouped GEMM quant kernel for block-scaled inputs."""
-        from cudnn import grouped_gemm_quant_wrapper_sm100  # pylint: disable=no-name-in-module
-
-        return grouped_gemm_quant_wrapper_sm100
+        return _get_cudnn_frontend_symbol("grouped_gemm_quant_wrapper_sm100")
 
     @classmethod
     @functools.lru_cache(maxsize=None)
@@ -795,9 +801,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         """
         if int(os.environ.get("NVTE_DISABLE_CUTEDSL_WGRAD_FUSED_GROUPED_MLP", "0")) >= 1:
             return None
-        from cudnn import grouped_gemm_wgrad_wrapper_sm100  # pylint: disable=no-name-in-module
-
-        return grouped_gemm_wgrad_wrapper_sm100
+        return _get_cudnn_frontend_symbol("grouped_gemm_wgrad_wrapper_sm100")
 
     @classmethod
     @functools.lru_cache(maxsize=None)
@@ -2103,30 +2107,22 @@ class GroupedMLP_CuTeGEMMGLU(_GroupedMLP_CuTeGEMMBase):
     @functools.lru_cache(maxsize=None)
     def grouped_gemm_activation_kernel(cls) -> Callable:
         """Fused kernel for grouped GEMM, GLU activation, and post-multiplication."""
-        from cudnn import grouped_gemm_glu_wrapper_sm100  # pylint: disable=no-name-in-module
-
-        return grouped_gemm_glu_wrapper_sm100
+        return _get_cudnn_frontend_symbol("grouped_gemm_glu_wrapper_sm100")
 
     @classmethod
     @functools.lru_cache(maxsize=None)
     def grouped_gemm_glu_hadamard_kernel(cls) -> Optional[Callable]:
         """Fused grouped GEMM GLU kernel that also emits NVFP4 RHT amaxes."""
         try:
-            from cudnn import (
-                grouped_gemm_glu_hadamard_wrapper_sm100,
-            )  # pylint: disable=no-name-in-module,import-outside-toplevel
+            return _get_cudnn_frontend_symbol("grouped_gemm_glu_hadamard_wrapper_sm100")
         except ImportError:
             return None
-
-        return grouped_gemm_glu_hadamard_wrapper_sm100
 
     @classmethod
     @functools.lru_cache(maxsize=None)
     def grouped_gemm_dactivation_kernel(cls) -> Callable:
         """Fused kernel for grouped GEMM, GLU activation backward, and scale grad."""
-        from cudnn import grouped_gemm_dglu_wrapper_sm100  # pylint: disable=no-name-in-module
-
-        return grouped_gemm_dglu_wrapper_sm100
+        return _get_cudnn_frontend_symbol("grouped_gemm_dglu_wrapper_sm100")
 
 
 class GroupedMLP_CuTeGEMMUnary(_GroupedMLP_CuTeGEMMBase):
@@ -2142,17 +2138,13 @@ class GroupedMLP_CuTeGEMMUnary(_GroupedMLP_CuTeGEMMBase):
     @functools.lru_cache(maxsize=None)
     def grouped_gemm_activation_kernel(cls) -> Callable:
         """Fused kernel for grouped GEMM, SReLU activation, and post-multiplication."""
-        from cudnn import grouped_gemm_srelu_wrapper_sm100  # pylint: disable=no-name-in-module
-
-        return grouped_gemm_srelu_wrapper_sm100
+        return _get_cudnn_frontend_symbol("grouped_gemm_srelu_wrapper_sm100")
 
     @classmethod
     @functools.lru_cache(maxsize=None)
     def grouped_gemm_dactivation_kernel(cls) -> Callable:
         """Fused kernel for grouped GEMM and dSReLU activation backward."""
-        from cudnn import grouped_gemm_dsrelu_wrapper_sm100  # pylint: disable=no-name-in-module
-
-        return grouped_gemm_dsrelu_wrapper_sm100
+        return _get_cudnn_frontend_symbol("grouped_gemm_dsrelu_wrapper_sm100")
 
 
 def fuse_ops(
