@@ -300,7 +300,10 @@ if test_essential:
     qkv_formats = ["sbhd", "thd"]
 
 
-@pytest.mark.skipif(not FlashAttentionUtils.v2_plus, reason="Flash-attn 2.0+ is required.")
+@pytest.mark.skipif(
+    not (FlashAttentionUtils.v2_plus or FlashAttentionUtils.v4_is_installed),
+    reason="Flash-attn 2.0+ or Flash-attn 4 is required.",
+)
 @pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("model", model_configs_flash_attn.keys())
@@ -314,16 +317,10 @@ def test_cp_with_flash_attention(cp_pool, dtype, model, qkv_format, cp_comm_type
     if pad_between_seqs:
         if qkv_format != "thd":
             pytest.skip("pad_between_seqs only applies to THD format!")
-        if not FlashAttentionUtils.v3_is_installed or get_device_compute_capability() > (9, 0):
-            pytest.skip("pad_between_seqs with CP requires Flash Attention v3 on Hopper (sm90)!")
-        if cp_comm_type == "a2a+p2p":
-            pytest.skip("pad_between_seqs is not yet supported with A2A+P2P CP comm type!")
-
-    if pad_between_seqs:
-        if qkv_format != "thd":
-            pytest.skip("pad_between_seqs only applies to THD format!")
-        if not FlashAttentionUtils.v3_is_installed:
-            pytest.skip("pad_between_seqs with CP requires Flash Attention v3!")
+        has_fa3 = FlashAttentionUtils.v3_is_installed and get_device_compute_capability() == (9, 0)
+        has_fa4 = FlashAttentionUtils.v4_is_installed
+        if not (has_fa3 or has_fa4):
+            pytest.skip("pad_between_seqs with CP requires Flash Attention v3 on Hopper or v4!")
         if cp_comm_type == "a2a+p2p":
             pytest.skip("pad_between_seqs is not yet supported with A2A+P2P CP comm type!")
 
@@ -345,9 +342,10 @@ def test_cp_with_flash_attention(cp_pool, dtype, model, qkv_format, cp_comm_type
         qkv_format == "thd"
         and cp_comm_type == "all_gather"
         and not FlashAttentionUtils.v3_is_installed
+        and not FlashAttentionUtils.v4_is_installed
     ):
         pytest.skip(
-            "THD + all_gather requires FA3 (seqused_k) to separate tensor offsets from"
+            "THD + all_gather requires FA3 or FA4 (seqused_k) to separate tensor offsets from"
             " visibility limits in the gathered KV buffer."
         )
 
