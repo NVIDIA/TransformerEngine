@@ -333,9 +333,11 @@ class _GroupedLinear(torch.autograd.Function):
         if is_grad_enabled:
             if weight_requires_grad:
                 # Free Rowwise Data if columnwise data is available for backward pass
-                # (For FP8 per tensor current scaling on Hopper)                if fp8 and grouped_x.columnwise_data is not None:
-                grouped_x.rowwise_data = None
-                grouped_x.scale_inv = None
+                # (For FP8 per tensor current scaling on Hopper --> Free Rowwise Data
+                # in backward pass)
+                if fp8 and grouped_x.columnwise_data is not None:
+                    grouped_x.rowwise_data = None
+                    grouped_x.scale_inv = None
             else:
                 grouped_x = None
 
