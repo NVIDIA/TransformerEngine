@@ -240,10 +240,8 @@ class TestEP(unittest.TestCase):
         self.assertNotEqual(hm_a.unsafe_buffer_pointer(), hm_b.unsafe_buffer_pointer())
 
     def test_two_layer_dispatch_no_handle_aliasing(self):
-        """Two ep_dispatch calls in one jit with distinct ``EpLayerConfig``s must
-        not clobber each other's routing state. Different inputs per layer with
-        identity routing + uniform weights => both recv buffers must independently
-        identity-round-trip via ep_combine."""
+        """Two ep_dispatch calls in one jit must not clobber each other's routing
+        state. A->B data edge forces XLA to order the collectives sequentially."""
         T_global, topk_idx, tokens, topk_w = self._make_identity_inputs(nonuniform=False)
         tokens_b = (tokens.astype(jnp.float32) * -1.0 + 0.25).astype(tokens.dtype)
         ka, kb = (
@@ -272,7 +270,10 @@ class TestEP(unittest.TestCase):
 
             @jax.jit
             def run(idx, ta_, tb_, w_):
-                return one_layer(ka, idx, ta_, w_), one_layer(kb, idx, tb_, w_)
+                out_a = one_layer(ka, idx, ta_, w_)
+                # Give XLA a data edge so it cannot schedule B's ep_prepare before A's completes.
+                tb_dep = tb_ + (out_a * 0).astype(tb_.dtype)
+                return out_a, one_layer(kb, idx, tb_dep, w_)
 
             out_a, out_b = run(idx_s, ta, tb, w)
             out_a.block_until_ready()
