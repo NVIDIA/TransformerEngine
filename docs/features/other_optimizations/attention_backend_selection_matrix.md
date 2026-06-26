@@ -9,8 +9,8 @@ Scope:
 
 - PyTorch `DotProductAttention` is the first target.
 - JAX is left as a later pass.
-- The populated leaf below is only `Fused Attention -> P2P -> F16 ->
-  BSHD/SBHD`.
+- The populated leaves below are under `Fused Attention -> P2P -> F16`:
+  `BSHD/SBHD` and `THD`.
 
 Support cells are intentionally broad. For exact cuDNN versions, shape gates,
 and exclusions, refer to:
@@ -55,7 +55,26 @@ CP docs
                     +------------------+-----------------------------------------------+--------------------------------------------+
 
                 THD
-                    [not expanded]
+                    sm80/sm89: no FusedAttention THD backend for this leaf.
+
+                    +-------------------+-------------------------------------------------+--------------------------------------------+
+                    | Feature           | sm90                                            | sm100+                                     |
+                    +-------------------+-------------------------------------------------+--------------------------------------------+
+                    | Required metadata | cu_seqlens_q, cu_seqlens_kv,                    | Same; SM120 adds cuDNN/layout gates        |
+                    |                   | cu_seqlens_q_padded, cu_seqlens_kv_padded       |                                            |
+                    | MHA/MQA/GQA       | MHA and selected MQA/GQA through cuDNN gates    | Same broad surface; Blackwell gates differ |
+                    | MLA               | Selected separate Q/K/V dims; training gates    | Selected; Blackwell/SM120 gates differ     |
+                    | pad_between_seqs  | Supported through padded cu_seqlens metadata    | Same broad surface; Blackwell gates differ |
+                    | SWA               | No with p2p; use a2a                            | No with p2p; use a2a                       |
+                    | Masks             | padding; padding_causal when                    | Same broad surface; Blackwell gates differ |
+                    |                   | max_seqlen_q == max_seqlen_kv; no               |                                            |
+                    |                   | causal_bottom_right or                          |                                            |
+                    |                   | padding_causal_bottom_right                     |                                            |
+                    | Bias              | no_bias only                                    | no_bias only                               |
+                    | Sink softmax      | No with p2p; use a2a                            | No with p2p; use a2a                       |
+                    | return_max_logit  | Yes for non-FP8 when cuDNN accepts shape        | Same broad surface; Blackwell gates differ |
+                    | Determinism       | Yes through selector gates                      | Stricter Blackwell/SM120 training gates    |
+                    +-------------------+-------------------------------------------------+--------------------------------------------+
 
             FP8 DelayedS
                 [not expanded]
