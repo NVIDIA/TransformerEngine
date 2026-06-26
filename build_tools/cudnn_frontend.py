@@ -161,8 +161,7 @@ def install_from_submodule(
     )
     if installed_version == vendored_version and installed_from_vendored and not force:
         print(
-            f"{PACKAGE_NAME}=={installed_version} is already installed from "
-            "the vendored submodule."
+            f"{PACKAGE_NAME}=={installed_version} is already installed from the vendored submodule."
         )
         return
 

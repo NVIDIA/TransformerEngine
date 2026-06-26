@@ -29,6 +29,7 @@ __all__ = [
     "fused_attn_score_mod_bwd",
 ]
 
+
 def _is_non_deterministic_allowed():
     """Check if non-deterministic kernels are allowed."""
     return bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
