@@ -1019,7 +1019,12 @@ def cp_p2p_fwd_flash_attn(
     elif section == "upper-triangle":
         max_seqlen_q_ = max_seqlen_q // 2
     if section in ["lower-triangle", "upper-triangle"]:
-        if not use_flash_attn_3 and not use_flash_attn_4 and fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus:
+        if (
+            not use_flash_attn_3
+            and not use_flash_attn_4
+            and fa_utils.v2_3_plus
+            and not fa_utils.v2_7_0_plus
+        ):
             fa_forward_kwargs["window_size"] = (-1, -1)
         elif use_flash_attn_3 or use_flash_attn_4 or fa_utils.v2_7_0_plus:
             fa_forward_kwargs["window_size_left"] = -1
@@ -1328,7 +1333,12 @@ def cp_p2p_bwd_flash_attn(
         dq, dk, dv = [torch.zeros_like(x) for x in [q_part, k_part, v_part]]
     else:
         dq, dk, dv = [torch.empty_like(x) for x in [q_part, k_part, v_part]]
-    if not use_flash_attn_3 and not use_flash_attn_4 and fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus:
+    if (
+        not use_flash_attn_3
+        and not use_flash_attn_4
+        and fa_utils.v2_3_plus
+        and not fa_utils.v2_7_0_plus
+    ):
         fa_backward_kwargs["window_size"] = (-1, -1)
     elif use_flash_attn_3 or use_flash_attn_4 or fa_utils.v2_7_0_plus:
         fa_backward_kwargs["window_size_left"] = -1
@@ -1340,7 +1350,12 @@ def cp_p2p_bwd_flash_attn(
     softmax_lse__ = softmax_lse
     causal_ = False
     if section == "diagonal":
-        if not use_flash_attn_3 and not use_flash_attn_4 and fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus:
+        if (
+            not use_flash_attn_3
+            and not use_flash_attn_4
+            and fa_utils.v2_3_plus
+            and not fa_utils.v2_7_0_plus
+        ):
             fa_backward_kwargs["window_size"] = (-1, 0)
         elif use_flash_attn_3 or use_flash_attn_4 or fa_utils.v2_7_0_plus:
             fa_backward_kwargs["window_size_left"] = -1
@@ -4089,7 +4104,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                                 for x in [dq_per_step[i], dk_per_step[i], dv_per_step[i]]
                             ]
                     else:
-                        if (ctx.use_flash_attn_3 or ctx.use_flash_attn_4) and ctx.qkv_format == "thd":
+                        if (
+                            ctx.use_flash_attn_3 or ctx.use_flash_attn_4
+                        ) and ctx.qkv_format == "thd":
                             dq_per_step[i], dk_per_step[i], dv_per_step[i] = [
                                 torch.zeros_like(x) for x in [q_part, k_part, v_part]
                             ]
@@ -4105,7 +4122,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             else cu_seqlens_q
                         )
                         fa_cu_seqlens_kv = cu_seqlens_kv_per_step[i]
-                        if (ctx.use_flash_attn_3 or ctx.use_flash_attn_4) and ctx.qkv_format == "thd":
+                        if (
+                            ctx.use_flash_attn_3 or ctx.use_flash_attn_4
+                        ) and ctx.qkv_format == "thd":
                             seqused_q = (
                                 thd_cu_seqlens_q_per_step[i][1:] - thd_cu_seqlens_q_per_step[i][:-1]
                             )
