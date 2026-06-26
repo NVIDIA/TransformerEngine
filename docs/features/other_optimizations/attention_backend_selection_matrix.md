@@ -11,9 +11,12 @@ Scope:
 - JAX is left as a later pass.
 - The populated leaf below is only `Fused Attention -> P2P -> F16 ->
   BSHD/SBHD`.
-- Exact cuDNN patch-level gates and FlashAttention package-version gates stay
-  in `transformer_engine/pytorch/attention/dot_product_attention/utils.py` and
-  `transformer_engine/common/fused_attn/fused_attn.cpp`.
+
+Support cells are intentionally broad. For exact cuDNN versions, shape gates,
+and exclusions, refer to:
+
+- `transformer_engine/pytorch/attention/dot_product_attention/utils.py`
+- `transformer_engine/common/fused_attn/fused_attn.cpp`
 
 ## Outline
 
@@ -36,26 +39,20 @@ CP docs
         P2P
             F16
                 BSHD/SBHD
-                    +------------------+---------+---------------------------+---------------------------+---------------------------+---------------------------+
-                    | Feature          | sm < 80 | sm80/sm89                 | sm90                      | sm100+                    | sm120                     |
-                    +------------------+---------+---------------------------+---------------------------+---------------------------+---------------------------+
-                    | MHA/MQA/GQA      | No      | Yes; cuDNN shape gate     | Yes; cuDNN shape gate     | Yes; cuDNN shape gate     | Yes; newer cuDNN paths    |
-                    | MLA              | No      | Q/K/V separate dims only  | Q/K/V separate dims only  | Q/K/V separate dims only  | Narrower; train MLA gates |
-                    | SWA              | No      | No p2p; use a2a/all_gath. | No p2p; use a2a/all_gath. | No p2p; use a2a/all_gath. | No p2p; use a2a/all_gath. |
-                    | Standard masks   | No      | no,pad,causal,pad_causal  | no,pad,causal,pad_causal  | no,pad,causal,pad_causal  | no,pad,causal,pad_causal  |
-                    | Bottom-right     | No      | No under CP               | No under CP               | No under CP               | No under CP               |
-                    | Bias             | No      | no_bias/post_scale only   | no_bias/post_scale only   | no_bias/post_scale only   | no_bias/post_scale only   |
-                    | Sink softmax     | No      | No p2p; use a2a           | No p2p; use a2a           | No p2p; use a2a           | No p2p; use a2a           |
-                    | return_max_logit | No      | non-FP8; cuDNN shape gate | non-FP8; cuDNN shape gate | non-FP8; cuDNN shape gate | non-FP8; cuDNN shape gate |
-                    | Determinism      | No      | cuDNN/train/bias gates    | better; bias may disable  | stricter cuDNN gates      | No deterministic training |
-                    +------------------+---------+---------------------------+---------------------------+---------------------------+---------------------------+
-                    Notes:
-                        - "all_gath." means the all_gather communication path.
-                        - Standard masks are no_mask, padding, causal, and padding_causal.
-                        - Causal cross-attention and bottom-right masks are excluded under CP here.
-                        - For exact cuDNN versions, shape gates, and exclusions, refer to:
-                            transformer_engine/pytorch/attention/dot_product_attention/utils.py
-                            transformer_engine/common/fused_attn/fused_attn.cpp
+                    +------------------+-----------------------------------------------+--------------------------------------------+
+                    | Feature          | sm80/sm89/sm90                                | sm100+                                     |
+                    +------------------+-----------------------------------------------+--------------------------------------------+
+                    | MHA/MQA/GQA      | Yes; cuDNN shape gates                        | Yes; Blackwell cuDNN gates differ          |
+                    | MLA              | Selected separate Q/K/V dims                   | Selected; narrower Blackwell/SM120 gates   |
+                    | SWA              | No with p2p; use a2a or all_gather             | No with p2p; use a2a or all_gather         |
+                    | Masks            | no_mask, padding, causal, padding_causal;      | Same CP mask surface; Blackwell gates      |
+                    |                  | no causal_bottom_right or                      | differ in backend probe                    |
+                    |                  | padding_causal_bottom_right                    |                                            |
+                    | Bias             | no_bias; selected post_scale_bias              | Same broad surface; Blackwell gates differ |
+                    | Sink softmax     | No with p2p; use a2a                           | No with p2p; use a2a                       |
+                    | return_max_logit | Yes for non-FP8 when cuDNN accepts shape       | Same broad surface; Blackwell gates differ |
+                    | Determinism      | Yes through selector gates                     | Stricter Blackwell/SM120 training gates    |
+                    +------------------+-----------------------------------------------+--------------------------------------------+
 
                 THD
                     [not expanded]
@@ -81,15 +78,3 @@ CP docs
     Unfused Attention
         [not expanded]
 ```
-
-### Where To Check Exact Behavior
-
-For exact support, users should refer to:
-
-- Python selector:
-  `transformer_engine/pytorch/attention/dot_product_attention/utils.py`
-- cuDNN FusedAttention probe:
-  `transformer_engine/common/fused_attn/fused_attn.cpp`
-
-Those files contain the precise cuDNN version gates, shape gates, and
-hardware-specific exclusions.
