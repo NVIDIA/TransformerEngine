@@ -78,22 +78,23 @@ CP docs
             FP8 DelayedS
                 BSHD/SBHD
                     sm80/sm89: no FP8 FusedAttention backend for this leaf.
+                    sm120: no FP8 backend for this leaf.
 
-                    +------------------+----------------------------------------+----------------------------------------+------------------------+
-                    | Feature          | sm90                                   | sm100+ not sm120                       | sm120                  |
-                    +------------------+----------------------------------------+----------------------------------------+------------------------+
-                    | Recipe           | DelayedScaling + fp8_dpa               | Same; Blackwell gates differ           | No FP8 backend         |
-                    | MHA/MQA/GQA      | Yes; selected cuDNN shapes             | Yes; Blackwell cuDNN gates differ      | No FP8 backend         |
-                    | MLA              | Selected Q/K/V dims; train gates       | Selected; Blackwell train gates differ | No FP8 backend         |
-                    | SWA              | No with p2p; use a2a or all_gather     | No with p2p; use a2a or all_gather     | No FP8 backend         |
-                    | Masks            | no_mask, padding, causal,              | Same CP mask surface; Blackwell gates  | No FP8 backend         |
-                    |                  | padding_causal; no causal_bottom_right | differ in backend probe                |                        |
-                    |                  | or padding_causal_bottom_right         |                                        |                        |
-                    | Bias             | no_bias only                           | no_bias only                           | No FP8 backend         |
-                    | Sink softmax     | No with p2p; use a2a                   | No with p2p; use a2a                   | No FP8 backend         |
-                    | return_max_logit | No with FP8                            | No with FP8                            | No FP8 backend         |
-                    | Determinism      | Yes through FP8 training gates         | Yes through Blackwell FP8 gates        | No FP8 backend         |
-                    +------------------+----------------------------------------+----------------------------------------+------------------------+
+                    +------------------+----------------------------------------+----------------------------------------+
+                    | Feature          | sm90                                   | sm100+ not sm120                       |
+                    +------------------+----------------------------------------+----------------------------------------+
+                    | Recipe           | DelayedScaling + fp8_dpa               | Same; Blackwell gates differ           |
+                    | MHA/MQA/GQA      | Yes; selected cuDNN shapes             | Yes; Blackwell cuDNN gates differ      |
+                    | MLA              | Selected Q/K/V dims; train gates       | Selected; Blackwell train gates differ |
+                    | SWA              | No with p2p; use a2a or all_gather     | No with p2p; use a2a or all_gather     |
+                    | Masks            | no_mask, padding, causal,              | Same CP mask surface; Blackwell gates  |
+                    |                  | padding_causal; no causal_bottom_right | differ in backend probe                |
+                    |                  | or padding_causal_bottom_right         |                                        |
+                    | Bias             | no_bias only                           | no_bias only                           |
+                    | Sink softmax     | No with p2p; use a2a                   | No with p2p; use a2a                   |
+                    | return_max_logit | No with FP8                            | No with FP8                            |
+                    | Determinism      | Yes through FP8 training gates         | Yes through Blackwell FP8 gates        |
+                    +------------------+----------------------------------------+----------------------------------------+
 
                 THD
                     No backend: CP disables FP8 FusedAttention for qkv_format=thd,
@@ -103,22 +104,23 @@ CP docs
                 BSHD/SBHD
                     sm80/sm89/sm90: no FP8 current-scaling FusedAttention backend
                     for this leaf.
+                    sm120: no FP8 backend for this leaf.
 
-                    +------------------+----------------------------------------+------------------------+
-                    | Feature          | sm100+ not sm120                       | sm120                  |
-                    +------------------+----------------------------------------+------------------------+
-                    | Recipe           | Float8CurrentScaling + fp8_dpa         | No FP8 backend         |
-                    | MHA/MQA/GQA      | Yes; Blackwell cuDNN gates             | No FP8 backend         |
-                    | MLA              | Selected; Blackwell train gates differ | No FP8 backend         |
-                    | SWA              | No with p2p; use a2a or all_gather     | No FP8 backend         |
-                    | Masks            | no_mask, padding, causal,              | No FP8 backend         |
-                    |                  | padding_causal; no causal_bottom_right |                        |
-                    |                  | or padding_causal_bottom_right         |                        |
-                    | Bias             | no_bias only                           | No FP8 backend         |
-                    | Sink softmax     | No with p2p; use a2a                   | No FP8 backend         |
-                    | return_max_logit | No with FP8                            | No FP8 backend         |
-                    | Determinism      | Yes through current-scaling gates      | No FP8 backend         |
-                    +------------------+----------------------------------------+------------------------+
+                    +------------------+----------------------------------------+
+                    | Feature          | sm100+ not sm120                       |
+                    +------------------+----------------------------------------+
+                    | Recipe           | Float8CurrentScaling + fp8_dpa         |
+                    | MHA/MQA/GQA      | Yes; Blackwell cuDNN gates             |
+                    | MLA              | Selected; Blackwell train gates differ |
+                    | SWA              | No with p2p; use a2a or all_gather     |
+                    | Masks            | no_mask, padding, causal,              |
+                    |                  | padding_causal; no causal_bottom_right |
+                    |                  | or padding_causal_bottom_right         |
+                    | Bias             | no_bias only                           |
+                    | Sink softmax     | No with p2p; use a2a                   |
+                    | return_max_logit | No with FP8                            |
+                    | Determinism      | Yes through current-scaling gates      |
+                    +------------------+----------------------------------------+
 
                 THD
                     No backend: CP disables FP8 FusedAttention for qkv_format=thd,
@@ -127,23 +129,24 @@ CP docs
             MXFP8
                 BSHD/SBHD
                     sm80/sm89/sm90: no MXFP8 FusedAttention backend for this leaf.
+                    sm120: no FP8 backend for this leaf.
 
-                    +------------------+----------------------------------------+------------------------+
-                    | Feature          | sm100+ not sm120                       | sm120                  |
-                    +------------------+----------------------------------------+------------------------+
-                    | Recipe           | MXFP8BlockScaling + fp8_dpa;           | No FP8 backend         |
-                    |                  | fp8_mha must be false                  |                        |
-                    | MHA/MQA/GQA      | Yes; Blackwell cuDNN gates             | No FP8 backend         |
-                    | MLA              | Selected; Blackwell train gates differ | No FP8 backend         |
-                    | SWA              | No with p2p; use a2a or all_gather     | No FP8 backend         |
-                    | Masks            | no_mask, padding, causal,              | No FP8 backend         |
-                    |                  | padding_causal; no causal_bottom_right |                        |
-                    |                  | or padding_causal_bottom_right         |                        |
-                    | Bias             | no_bias only                           | No FP8 backend         |
-                    | Sink softmax     | No with p2p; use a2a                   | No FP8 backend         |
-                    | return_max_logit | No with FP8                            | No FP8 backend         |
-                    | Determinism      | Yes through MXFP8/Blackwell gates      | No FP8 backend         |
-                    +------------------+----------------------------------------+------------------------+
+                    +------------------+----------------------------------------+
+                    | Feature          | sm100+ not sm120                       |
+                    +------------------+----------------------------------------+
+                    | Recipe           | MXFP8BlockScaling + fp8_dpa;           |
+                    |                  | fp8_mha must be false                  |
+                    | MHA/MQA/GQA      | Yes; Blackwell cuDNN gates             |
+                    | MLA              | Selected; Blackwell train gates differ |
+                    | SWA              | No with p2p; use a2a or all_gather     |
+                    | Masks            | no_mask, padding, causal,              |
+                    |                  | padding_causal; no causal_bottom_right |
+                    |                  | or padding_causal_bottom_right         |
+                    | Bias             | no_bias only                           |
+                    | Sink softmax     | No with p2p; use a2a                   |
+                    | return_max_logit | No with FP8                            |
+                    | Determinism      | Yes through MXFP8/Blackwell gates      |
+                    +------------------+----------------------------------------+
 
                 THD
                     No backend: MXFP8 FusedAttention excludes qkv_format=thd,
