@@ -28,7 +28,9 @@ _AUTOSWITCH_DISABLE_UNTIL_BY_GEMM = {}
 _AUTOSWITCH_CONFIG_FILE_LOADED = False
 _AUTOSWITCH_DISABLE_UNTIL_ENV = "NVTE_AUTOSWITCH_GEMM_DISABLE_UNTIL"
 _AUTOSWITCH_LOGGING_ENV = "NVTE_AUTOSWITCH_GEMM_LOGGING"
+_AUTOSWITCH_HOLD_WINDOW_SCOPE_ENV = "NVTE_AUTOSWITCH_GEMM_HOLD_WINDOW_SCOPE"
 _AUTOSWITCH_LOGGING_ENABLED = False
+_AUTOSWITCH_HOLD_WINDOW_SCOPE = "global"
 
 
 def _env_flag_enabled(name: str, default: bool = False) -> bool:
@@ -40,6 +42,7 @@ def _env_flag_enabled(name: str, default: bool = False) -> bool:
 def _register_sampling_config(config: Dict) -> None:
     """Track AutoswitchGemm sampling schedules for runtime eager/graph routing."""
     global _AUTOSWITCH_LOGGING_ENABLED
+    global _AUTOSWITCH_HOLD_WINDOW_SCOPE
     schedule = {
         "start_step": config.get("start_step", None),
         "end_step": config.get("end_step", None),
@@ -52,6 +55,20 @@ def _register_sampling_config(config: Dict) -> None:
         _AUTOSWITCH_SAMPLING_CONFIGS.append(schedule)
     if any(bool(config.get(key, False)) for key in ("log_metrics", "log_decisions", "verbose")):
         _AUTOSWITCH_LOGGING_ENABLED = True
+
+    scope = str(config.get("hold_window_scope", "global")).strip().lower()
+    if scope not in {"global", "layer"}:
+        scope = "global"
+    if scope == "layer":
+        _AUTOSWITCH_HOLD_WINDOW_SCOPE = "layer"
+
+
+def _get_hold_window_scope() -> str:
+    """Return hold-window eager-routing scope: `global` or `layer`."""
+    env_scope = os.getenv(_AUTOSWITCH_HOLD_WINDOW_SCOPE_ENV, "").strip().lower()
+    if env_scope in {"global", "layer"}:
+        return env_scope
+    return _AUTOSWITCH_HOLD_WINDOW_SCOPE
 
 
 def autoswitch_gemm_logging_enabled() -> bool:
@@ -130,9 +147,31 @@ def _get_global_disable_until() -> int:
     return max(max_disable_until, env_disable_until)
 
 
-def autoswitch_gemm_should_force_eager(iteration: Optional[int] = None) -> bool:
+def _get_layer_disable_until(layer_name: str, layer_number: Optional[int] = None) -> int:
+    """Return layer-local high-precision window end iteration."""
+    if not layer_name and layer_number is None:
+        return -1
+
+    max_disable_until = -1
+    layer_marker = f".layers.{layer_number}." if layer_number is not None else None
+    for (gemm_layer_name, _), disable_until in _AUTOSWITCH_DISABLE_UNTIL_BY_GEMM.items():
+        if layer_name and (
+            gemm_layer_name == layer_name or gemm_layer_name.startswith(f"{layer_name}.")
+        ):
+            max_disable_until = max(max_disable_until, disable_until)
+            continue
+        if layer_marker and layer_marker in gemm_layer_name:
+            max_disable_until = max(max_disable_until, disable_until)
+    return max_disable_until
+
+
+def autoswitch_gemm_should_force_eager(
+    iteration: Optional[int] = None,
+    layer_name: Optional[str] = None,
+    layer_number: Optional[int] = None,
+) -> bool:
     """
-    Return True when AutoswitchGemm needs eager execution for the whole iteration.
+    Return True when AutoswitchGemm needs eager execution for current routing target.
 
     This is used by Megatron CUDA graph routing. Sampling iterations must be eager
     so tensor inspection can run; high-precision windows must also be eager because
@@ -148,6 +187,9 @@ def autoswitch_gemm_should_force_eager(iteration: Optional[int] = None) -> bool:
 
     if _is_sampling_iteration(iteration):
         return True
+
+    if _get_hold_window_scope() == "layer":
+        return iteration <= _get_layer_disable_until(layer_name or "", layer_number)
 
     return iteration <= _get_global_disable_until()
 
@@ -317,6 +359,12 @@ class AutoswitchGemm(TEConfigAPIMapper):
         high-precision plans directly from `fp8_gemm_enabled(..., final_decision=False)`.
         This bypasses the quantize->dequantize runtime conversion path for tensors
         that are available in high precision.
+
+    hold_window_scope: str, default = "global"
+        Controls eager routing scope for hold-window iterations in CUDA graph mode.
+        ``global`` keeps current behavior (any triggered layer forces eager globally).
+        ``layer`` enables per-layer eager routing (only layers that triggered hold
+        windows force eager; other layers can stay on graph replay).
 
     freq/start_step/end_step/start_end_list: Optional
         Sampling controls for tensor inspection calls.

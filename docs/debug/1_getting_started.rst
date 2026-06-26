@@ -246,6 +246,7 @@ Example config matching attention and MLP linears:
           mse_threshold: 0.1
           allow_fp8_model_params_dequantized_weight: True
           direct_high_precision_in_hold_window: True
+          hold_window_scope: layer
           freq: 10
           start_step: 10
 
@@ -266,7 +267,11 @@ Behavior summary:
    high-precision tensor plans on non-sampling hold-window iterations. This
    bypasses runtime quantize->dequantize conversion when high-precision source
    tensors are available.
-6. When CUDA Graphs are used, sampling and high-precision windows must run in eager
+6. Set ``hold_window_scope`` to control eager routing scope during hold windows
+   in CUDA graph mode:
+   ``global`` (default) forces eager globally when any layer is in hold window,
+   while ``layer`` only forces eager for layers that have active hold windows.
+7. When CUDA Graphs are used, sampling and high-precision windows must run in eager
    mode. Quantized windows can continue using CUDA Graphs if the training framework
    supports this routing. Megatron-LM support for this workflow depends on the
    ``autogemm`` branch:
