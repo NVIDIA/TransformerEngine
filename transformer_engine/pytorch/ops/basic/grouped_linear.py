@@ -423,10 +423,9 @@ class GroupedLinear(BasicOperation):
         quantizer = self.get_quantizer("forward", 1)
 
         recipe = None if quantizer is None else quantizer._get_compatible_recipe()
-        if recipe is not None and (recipe.delayed() or recipe.float8_current_scaling()):
+        if recipe is not None and recipe.delayed():
             raise RuntimeError(
-                "Delayed scaling or float8 current scaling is not supported with"
-                " single_grouped_weight=True"
+                "Delayed scaling is not supported with single_grouped_weight=True"
             )
 
         grouped_weights = GroupedTensor.make_grouped_tensor_with_shapes(
@@ -765,6 +764,7 @@ class GroupedLinear(BasicOperation):
         with_quantized_compute: bool,
         input_quantizers: Sequence[Optional[Quantizer]],
         dtype: torch.dtype,
+        single_grouped_weight: bool,
     ) -> bool:
         """Whether the graph-safe grouped-tensor flow can be used.
 
@@ -774,7 +774,9 @@ class GroupedLinear(BasicOperation):
           requirement without duplicating its cuBLAS version checks.
         * Quantized compute supports MXFP8 and NVFP4 on Blackwell GPUs with Compute Capability (CC)
           10.x and 11.0. NVFP4 requires RHT because graph-safe grouped quantization currently
-          requires RHT.
+          requires RHT. NVFP4 is additionally restricted to discrete weights: with
+          ``single_grouped_weight=True`` the weight quantizer is non-RHT and cannot use the
+          graph-safe grouped quantize kernel, so we fall back to the split-quantize flow.
         * FP8 per-tensor current scaling is backed by grouped current-scaling quantization
           (``tex.group_quantize``) and cuBLASLt grouped GEMM with per-batch scalar FP8 scaling,
           which are supported on Hopper (CC 9.0) and Blackwell (CC 10.x and 11.0).
@@ -796,9 +798,13 @@ class GroupedLinear(BasicOperation):
             # MXFP8 and NVFP4 grouped quantization kernels require Blackwell.
             if not (10, 0) <= get_device_compute_capability() <= (11, 0):
                 return False
-            return all(isinstance(q, MXFP8Quantizer) for q in input_quantizers) or all(
-                isinstance(q, NVFP4Quantizer) and q.with_rht for q in input_quantizers
-            )
+            if all(isinstance(q, MXFP8Quantizer) for q in input_quantizers):
+                return True
+            # NVFP4 graph-safe grouped quantization requires RHT and only supports
+            # discrete weights; otherwise fall back to the split-quantize flow.
+            if all(isinstance(q, NVFP4Quantizer) and q.with_rht for q in input_quantizers):
+                return not single_grouped_weight
+            return False
         return dtype in (torch.bfloat16, torch.float16)
 
     def _get_grouped_weight_for_gemm(
@@ -985,6 +991,7 @@ class GroupedLinear(BasicOperation):
             with_quantized_compute=with_quantized_compute,
             input_quantizers=input_quantizers,
             dtype=dtype,
+            single_grouped_weight=self.single_grouped_weight,
         )
 
         if use_grouped_tensor_path:
