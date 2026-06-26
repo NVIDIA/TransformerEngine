@@ -12,10 +12,12 @@ module/tensor types/instances within the same model, and how to use
 ``HybridQuantizer`` when rowwise and columnwise tensor directions should use
 different formats or sources.
 
+Factories are ordered from conservative to more aggressive quantization.
+
 Organization:
-    * Linear / grouped-linear recipes: from conservative to more aggressive quantization.
-    * RL-oriented recipes: dequantized-backward and MoE-inspired recipes that
-      favor more precision or explicit source control in backward GEMMs.
+    * Linear / grouped-linear recipes (pre-training). Favor more precision 
+      on the forward pass.
+    * RL-oriented recipes: Favor more precision in backward GEMMs.
     * Linear + attention recipes: factories that also cover ``DotProductAttention``
       roles and require ``CustomRecipe(..., fp8_dpa=True)``.
 
@@ -64,7 +66,7 @@ from .quantization_factory_base import mxfp8_quantizer_factory, nvfp4_quantizer_
 
 
 # -----------------------------------------------------------------------------
-# Linear / GroupedLinear Recipes
+# Linear / GroupedLinear Recipes (pre-training)
 # -----------------------------------------------------------------------------
 
 
@@ -346,9 +348,9 @@ def nvfp4_linear_mixed_fp8_dpa_factory(
 
     Dispatch logic:
         * ``role.module_type == "dpa"`` with ``tensor_type in ("s", "dp")``
-          -> FP8 delayed scaling (stateful amax tracking)
-        * ``role.module_type == "dpa"`` (QKV, dO)
-          -> FP8 current scaling (E4M3)
+          -> FP8 delayed scaling (HYBRID, most_recent, history length 1)
+        * other DPA roles
+          -> FP8 current scaling (HYBRID: E4M3 fwd, E5M2 bwd)
         * DPA boundary hints (``"dpa_output"`` / ``"dpa_grad_input"`` in ``role.name``)
           -> FP8 current scaling placeholder.  The fused attention kernel requires
           FP8-compatible quantizers in all DPA slots, even when the output is
@@ -373,33 +375,30 @@ def nvfp4_linear_mixed_fp8_dpa_factory(
         with autocast(recipe=recipe):
             output = model(input)
     """
+    from transformer_engine.common.recipe import Format
     from transformer_engine.pytorch.quantization import DelayedScalingRequest
     from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer
 
     is_dpa = role is not None and role.module_type == "dpa"
-    is_softmax_or_dp = is_dpa and role.tensor_type in ("s", "dp")
-
-    if is_softmax_or_dp:
-        return DelayedScalingRequest()
-
-    if is_dpa:
-        return Float8CurrentScalingQuantizer(
-            fp8_dtype=DType.kFloat8E4M3,
-            device="cuda",
-        )
-
-    # DPA boundary slots (O output / dQKV grad-input): the fused attention
-    # kernel only supports FP8 quantizers here, regardless of the linear recipe.
-    is_dpa_boundary = (
-        role is not None
-        and not role.module_type
-        and ("dpa_output" in role.name or "dpa_grad_input" in role.name)
+    is_dpa_boundary = role is not None and not role.module_type and (
+        "dpa_output" in role.name or "dpa_grad_input" in role.name
     )
-    if is_dpa_boundary:
-        return Float8CurrentScalingQuantizer(
-            fp8_dtype=DType.kFloat8E4M3,
-            device="cuda",
+
+    # Native NVFP4 + FP8CS attention uses delayed scaling for S/dP.
+    if is_dpa and role.tensor_type in ("s", "dp"):
+        return DelayedScalingRequest(
+            fp8_format=Format.HYBRID,
+            amax_history_len=1,
+            amax_compute_algo="most_recent",
+            reduce_amax=True,
         )
+
+    if is_dpa or is_dpa_boundary:
+        is_bwd_role = (is_dpa and role.tensor_type in ("do", "dp", "dqkv")) or (
+            is_dpa_boundary and "dpa_grad_input" in role.name
+        )
+        fp8_dtype = DType.kFloat8E5M2 if is_bwd_role else DType.kFloat8E4M3
+        return Float8CurrentScalingQuantizer(fp8_dtype=fp8_dtype, device="cuda")
 
     return nvfp4_quantizer_factory(role)
 
@@ -430,7 +429,7 @@ def nvfp4_linear_mxfp8_dpa_factory(
     =========== ============================================================
 
     Dispatch logic:
-        * ``role.module_type == "dpa"`` -> MXFP8 (E4M3, block-32)
+        * ``role.module_type == "dpa"`` -> MXFP8 (HYBRID: E4M3 fwd, E5M2 bwd)
           The MXFP8 fused-attention kernel handles the S/dP slots
           internally, so any quantizer returned for those roles is later
           nulled out by ``get_attention_quantizers``.  Returning MXFP8 is
@@ -456,20 +455,18 @@ def nvfp4_linear_mxfp8_dpa_factory(
         with autocast(recipe=recipe):
             output = model(input)
     """
-    is_dpa = role is not None and role.module_type == "dpa"
-    if is_dpa:
-        return mxfp8_quantizer_factory(role)
+    from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 
-    # DPA boundary slots (O output / dQKV grad-input): emitted by DPA with
-    # empty `module_type` and a `name` like "<dpa>.dpa_output". The fused
-    # attention kernel requires an FP8-compatible quantizer here even when
-    # the downstream consumer is unknown.
-    is_dpa_boundary = (
-        role is not None
-        and not role.module_type
-        and ("dpa_output" in role.name or "dpa_grad_input" in role.name)
+    is_dpa = role is not None and role.module_type == "dpa"
+    is_dpa_boundary = role is not None and not role.module_type and (
+        "dpa_output" in role.name or "dpa_grad_input" in role.name
     )
-    if is_dpa_boundary:
-        return mxfp8_quantizer_factory(role)
+
+    if is_dpa or is_dpa_boundary:
+        is_bwd_role = (is_dpa and role.tensor_type in ("do", "dp", "dqkv")) or (
+            is_dpa_boundary and "dpa_grad_input" in role.name
+        )
+        fp8_dtype = DType.kFloat8E5M2 if is_bwd_role else DType.kFloat8E4M3
+        return MXFP8Quantizer(fp8_dtype=fp8_dtype)
 
     return nvfp4_quantizer_factory(role)

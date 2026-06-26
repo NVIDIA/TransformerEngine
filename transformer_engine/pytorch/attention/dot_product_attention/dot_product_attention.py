@@ -86,6 +86,74 @@ _alibi_cache = {
     "_alibi_bias_require_update": False,
 }
 
+
+def _infer_custom_dpa_local_recipes(
+    fp8_recipe: Recipe,
+    fp8_meta: Dict[str, Any],
+    quantizers: Dict[str, Any],
+) -> Optional[List[Recipe]]:
+    """Infer native-equivalent DPA recipe labels for CustomRecipe control-flow.
+
+    CustomRecipe owns quantizer construction, but DPA backend selection and a
+    few fused-attention branches still dispatch on recipe predicates. Attach
+    local recipe labels that match the qfactory DPA quantizer family while
+    keeping the actual qfactory-created quantizers untouched.
+    """
+    try:
+        qkv_quantizer = quantizers["scaling_fwd"][dpa_utils.META_QKV]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+    from transformer_engine.pytorch.tensor.float8_tensor import (
+        Float8CurrentScalingQuantizer,
+        Float8Quantizer,
+    )
+    from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+
+    if isinstance(qkv_quantizer, MXFP8Quantizer):
+        return [
+            MXFP8BlockScaling(
+                fp8_format=fp8_recipe.fp8_format,
+                fp8_dpa=fp8_recipe.fp8_dpa,
+                fp8_mha=fp8_recipe.fp8_mha,
+            )
+        ]
+
+    def _delayed_scaling_recipe() -> Optional[DelayedScaling]:
+        fwd_state = fp8_meta.get("scaling_fwd")
+        ds_recipe = getattr(fwd_state, "_inner_delayed_scaling_recipe", None)
+        if ds_recipe is None:
+            return None
+        return DelayedScaling(
+            fp8_format=ds_recipe.fp8_format,
+            margin=ds_recipe.margin,
+            amax_history_len=ds_recipe.amax_history_len,
+            amax_compute_algo=ds_recipe.amax_compute_algo,
+            scaling_factor_compute_algo=ds_recipe.scaling_factor_compute_algo,
+            reduce_amax=ds_recipe.reduce_amax,
+            fp8_dpa=fp8_recipe.fp8_dpa,
+            fp8_mha=fp8_recipe.fp8_mha,
+        )
+
+    if isinstance(qkv_quantizer, Float8CurrentScalingQuantizer):
+        ds_recipe = _delayed_scaling_recipe()
+        if ds_recipe is not None:
+            return [
+                Float8CurrentScaling(
+                    fp8_format=fp8_recipe.fp8_format,
+                    fp8_dpa=fp8_recipe.fp8_dpa,
+                    fp8_mha=fp8_recipe.fp8_mha,
+                ),
+                ds_recipe,
+            ]
+
+    if isinstance(qkv_quantizer, Float8Quantizer):
+        ds_recipe = _delayed_scaling_recipe()
+        if ds_recipe is not None:
+            return [ds_recipe]
+
+    return None
+
 """
 This feature is **experimental** and subject to change.
 
@@ -634,6 +702,11 @@ class DotProductAttention(TransformerEngineBaseModule):
         fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
         if fp8_recipe.custom():
             super().init_fp8_metadata(num_gemms=num_gemms)
+            local_recipes = _infer_custom_dpa_local_recipes(
+                fp8_recipe, self.fp8_meta, self.quantizers
+            )
+            if local_recipes is not None:
+                self.fp8_meta["local_recipes"] = local_recipes
             return
 
         # switch/append recipe: fp8_recipe stays unchanged, but DPA.fp8_meta["recipe"] may be set to

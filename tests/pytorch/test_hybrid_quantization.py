@@ -1518,6 +1518,363 @@ class TestHybridGemmBitwiseIdenticalMXFP8:
             )
 
 
+@requires_fp8_and_nvfp4
+class TestAttentionFactoryNativeRecipeParity:
+    """Linear + DPA qfactories should match native DPA recipe switches bitwise."""
+
+    batch = 2
+    seq_len = 128
+    hidden_size = 128
+    num_heads = 4
+    kv_channels = hidden_size // num_heads
+
+    class _LinearDPALinear(torch.nn.Module):
+        def __init__(self, hidden_size, num_heads, kv_channels):
+            super().__init__()
+            self.hidden_size = hidden_size
+            self.num_heads = num_heads
+            self.kv_channels = kv_channels
+            self.qkv_proj = Linear(
+                hidden_size,
+                3 * hidden_size,
+                params_dtype=torch.bfloat16,
+                bias=False,
+                name="qkv",
+            ).cuda()
+            self.dpa = te.DotProductAttention(
+                num_heads,
+                kv_channels,
+                attention_dropout=0.0,
+                qkv_format="bshd",
+                name="core_attention",
+            ).cuda()
+            self.out_proj = Linear(
+                hidden_size,
+                hidden_size,
+                params_dtype=torch.bfloat16,
+                bias=False,
+                name="proj",
+            ).cuda()
+
+        def forward(self, inp):
+            batch, seq_len, _ = inp.shape
+            qkv = self.qkv_proj(inp).view(
+                batch,
+                seq_len,
+                3,
+                self.num_heads,
+                self.kv_channels,
+            )
+            q, k, v = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]
+            attn_out = self.dpa(q, k, v, qkv_format="bshd").reshape(
+                batch,
+                seq_len,
+                self.hidden_size,
+            )
+            return self.out_proj(attn_out)
+
+    @staticmethod
+    def _set_native_dpa_recipe(monkeypatch, recipe_name):
+        from transformer_engine.pytorch.attention import multi_head_attention as mha_module
+        from transformer_engine.pytorch.attention.dot_product_attention import (
+            dot_product_attention as dpa_module,
+        )
+
+        monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "0")
+        monkeypatch.setenv("NVTE_DPA_FP8_RECIPE", recipe_name)
+        monkeypatch.setenv("NVTE_DPA_FP8_FORMAT", "HYBRID")
+        monkeypatch.setenv("NVTE_DPA_FP8DS_AMAX_ALGO", "most_recent")
+        monkeypatch.setenv("NVTE_DPA_FP8DS_AMAX_HISTLEN", "1")
+        monkeypatch.setenv("NVTE_DPA_FP8DS_REDUCE_AMAX", "1")
+        monkeypatch.setattr(dpa_module, "_dpa_fp8_recipe", recipe_name)
+        monkeypatch.setattr(dpa_module, "_dpa_fp8_format", recipe.Format.HYBRID)
+        monkeypatch.setattr(dpa_module, "_dpa_fp8ds_amax_algo", "most_recent")
+        monkeypatch.setattr(dpa_module, "_dpa_fp8ds_amax_histlen", 1)
+        monkeypatch.setattr(dpa_module, "_dpa_fp8ds_reduce_amax", True)
+        monkeypatch.setattr(mha_module, "_dpa_fp8_recipe", recipe_name)
+        monkeypatch.setattr(mha_module, "_dpa_fp8_recipe_dpa", False)
+        monkeypatch.setattr(mha_module, "_dpa_fp8_recipe_mha", False)
+
+    @staticmethod
+    def _clear_native_dpa_recipe(monkeypatch):
+        from transformer_engine.pytorch.attention import multi_head_attention as mha_module
+        from transformer_engine.pytorch.attention.dot_product_attention import (
+            dot_product_attention as dpa_module,
+        )
+
+        monkeypatch.delenv("NVTE_DPA_FP8_RECIPE", raising=False)
+        monkeypatch.delenv("NVTE_DPA_FP8_FORMAT", raising=False)
+        monkeypatch.delenv("NVTE_DPA_FP8DS_AMAX_ALGO", raising=False)
+        monkeypatch.delenv("NVTE_DPA_FP8DS_AMAX_HISTLEN", raising=False)
+        monkeypatch.delenv("NVTE_DPA_FP8DS_REDUCE_AMAX", raising=False)
+        monkeypatch.setattr(dpa_module, "_dpa_fp8_recipe", "")
+        monkeypatch.setattr(mha_module, "_dpa_fp8_recipe", "")
+        monkeypatch.setattr(mha_module, "_dpa_fp8_recipe_dpa", False)
+        monkeypatch.setattr(mha_module, "_dpa_fp8_recipe_mha", False)
+
+    @staticmethod
+    def _assert_equal(actual, expected, label):
+        assert torch.equal(actual, expected), (
+            f"{label} mismatch: max diff = "
+            f"{(actual.float() - expected.float()).abs().max().item()}"
+        )
+
+    def _run_model(self, model, inp, grad, fp8_recipe, seed):
+        run_inp = inp.clone().detach().requires_grad_(True)
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        with autocast(enabled=True, recipe=fp8_recipe):
+            out = model(run_inp)
+        out.backward(grad)
+        local_recipes = [
+            type(r).__name__ for r in model.dpa.fp8_meta.get("local_recipes", [])
+        ]
+        return (
+            out.detach().clone(),
+            run_inp.grad.detach().clone(),
+            {
+                name: param.grad.detach().clone()
+                for name, param in model.named_parameters()
+                if param.grad is not None
+            },
+            local_recipes,
+        )
+
+    @pytest.mark.parametrize(
+        "case_name,native_dpa_recipe,qfactory_name",
+        [
+            (
+                "mixed_fp8_dpa",
+                "Float8CurrentScaling",
+                "nvfp4_linear_mixed_fp8_dpa_factory",
+            ),
+            (
+                "mxfp8_dpa",
+                "MXFP8BlockScaling",
+                "nvfp4_linear_mxfp8_dpa_factory",
+            ),
+        ],
+    )
+    def test_linear_dpa_linear_matches_native_env_recipe_bitwise(
+        self,
+        monkeypatch,
+        case_name,
+        native_dpa_recipe,
+        qfactory_name,
+    ):
+        if case_name == "mxfp8_dpa" and not mxfp8_available:
+            pytest.skip(f"MXFP8: {reason_for_no_mxfp8}")
+
+        from transformer_engine.pytorch.custom_recipes import quantization_factory_zoo
+        from transformer_engine.pytorch.utils import get_device_compute_capability
+
+        cc = get_device_compute_capability()
+        if cc < (9, 0) or cc >= (12, 0):
+            pytest.skip(f"FP8 attention not supported on sm{cc[0] * 10 + cc[1]}")
+
+        self._set_native_dpa_recipe(monkeypatch, native_dpa_recipe)
+
+        torch.manual_seed(2201)
+        model_native = self._LinearDPALinear(
+            self.hidden_size,
+            self.num_heads,
+            self.kv_channels,
+        )
+        model_qfactory = self._LinearDPALinear(
+            self.hidden_size,
+            self.num_heads,
+            self.kv_channels,
+        )
+        model_qfactory.load_state_dict(model_native.state_dict())
+
+        torch.manual_seed(2202)
+        base_inp = torch.randn(
+            self.batch,
+            self.seq_len,
+            self.hidden_size,
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        grad = torch.randn_like(base_inp)
+
+        native_recipe = recipe.NVFP4BlockScaling(fp8_dpa=True)
+        qfactory = getattr(quantization_factory_zoo, qfactory_name)
+        qfactory_recipe = recipe.CustomRecipe(qfactory=qfactory, fp8_dpa=True)
+
+        native_out, native_dx, native_grads, native_local_recipes = self._run_model(
+            model_native,
+            base_inp,
+            grad,
+            native_recipe,
+            seed=2203,
+        )
+        self._clear_native_dpa_recipe(monkeypatch)
+        qfactory_out, qfactory_dx, qfactory_grads, qfactory_local_recipes = self._run_model(
+            model_qfactory,
+            base_inp,
+            grad,
+            qfactory_recipe,
+            seed=2203,
+        )
+
+        expected_local_recipes = (
+            ["Float8CurrentScaling", "DelayedScaling"]
+            if native_dpa_recipe == "Float8CurrentScaling"
+            else ["MXFP8BlockScaling"]
+        )
+        assert native_local_recipes == expected_local_recipes
+        assert qfactory_local_recipes == expected_local_recipes
+
+        self._assert_equal(qfactory_out, native_out, f"{case_name} output")
+        self._assert_equal(qfactory_dx, native_dx, f"{case_name} input grad")
+        assert qfactory_grads.keys() == native_grads.keys()
+        for name, native_grad in native_grads.items():
+            self._assert_equal(
+                qfactory_grads[name],
+                native_grad,
+                f"{case_name} param grad {name}",
+            )
+
+    def _run_mha_model(self, model, inp, grad, fp8_recipe, seed):
+        run_inp = inp.clone().detach().requires_grad_(True)
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        with autocast(enabled=True, recipe=fp8_recipe):
+            out = model(run_inp, attn_mask_type="no_mask")
+            if isinstance(out, tuple):
+                out = out[0]
+        out.backward(grad)
+        return (
+            out.detach().clone(),
+            run_inp.grad.detach().clone(),
+            {
+                name: param.grad.detach().clone()
+                for name, param in model.named_parameters()
+                if param.grad is not None
+            },
+        )
+
+    @pytest.mark.parametrize(
+        "case_name,native_dpa_recipe,qfactory_name,expected_flags",
+        [
+            (
+                "mixed_fp8_dpa",
+                "Float8CurrentScaling",
+                "nvfp4_linear_mixed_fp8_dpa_factory",
+                (False, False, False),
+            ),
+            (
+                "mxfp8_dpa",
+                "MXFP8BlockScaling",
+                "nvfp4_linear_mxfp8_dpa_factory",
+                (False, False, False),
+            ),
+        ],
+    )
+    def test_multihead_attention_matches_native_env_recipe_bitwise(
+        self,
+        monkeypatch,
+        case_name,
+        native_dpa_recipe,
+        qfactory_name,
+        expected_flags,
+    ):
+        if case_name == "mxfp8_dpa" and not mxfp8_available:
+            pytest.skip(f"MXFP8: {reason_for_no_mxfp8}")
+
+        from transformer_engine.pytorch.attention import multi_head_attention as mha_module
+        from transformer_engine.pytorch.custom_recipes import quantization_factory_zoo
+        from transformer_engine.pytorch.utils import get_device_compute_capability
+
+        cc = get_device_compute_capability()
+        if cc < (9, 0) or cc >= (12, 0):
+            pytest.skip(f"FP8 attention not supported on sm{cc[0] * 10 + cc[1]}")
+
+        recorded_flags = []
+        orig_update_roles = mha_module.MultiheadAttention._update_output_quantizer_roles
+
+        def _recording_update_roles(self, qkv_fp8_output, proj_fp8_grad, dpa_fp8_output):
+            recorded_flags.append((qkv_fp8_output, dpa_fp8_output, proj_fp8_grad))
+            return orig_update_roles(self, qkv_fp8_output, proj_fp8_grad, dpa_fp8_output)
+
+        monkeypatch.setattr(
+            mha_module.MultiheadAttention,
+            "_update_output_quantizer_roles",
+            _recording_update_roles,
+        )
+
+        self._set_native_dpa_recipe(monkeypatch, native_dpa_recipe)
+
+        torch.manual_seed(2301)
+        model_native = te.MultiheadAttention(
+            self.hidden_size,
+            self.num_heads,
+            kv_channels=self.kv_channels,
+            attention_dropout=0.0,
+            attn_mask_type="no_mask",
+            params_dtype=torch.bfloat16,
+            bias=False,
+            qkv_format="sbhd",
+            name="mha",
+        ).cuda()
+        model_qfactory = te.MultiheadAttention(
+            self.hidden_size,
+            self.num_heads,
+            kv_channels=self.kv_channels,
+            attention_dropout=0.0,
+            attn_mask_type="no_mask",
+            params_dtype=torch.bfloat16,
+            bias=False,
+            qkv_format="sbhd",
+            name="mha",
+        ).cuda()
+        model_qfactory.load_state_dict(model_native.state_dict())
+
+        torch.manual_seed(2302)
+        base_inp = torch.randn(
+            self.seq_len,
+            self.batch,
+            self.hidden_size,
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        grad = torch.randn_like(base_inp)
+
+        native_recipe = recipe.NVFP4BlockScaling(fp8_dpa=True)
+        qfactory = getattr(quantization_factory_zoo, qfactory_name)
+        qfactory_recipe = recipe.CustomRecipe(qfactory=qfactory, fp8_dpa=True)
+
+        native_out, native_dx, native_grads = self._run_mha_model(
+            model_native,
+            base_inp,
+            grad,
+            native_recipe,
+            seed=2303,
+        )
+        native_flags = recorded_flags[-1]
+        self._clear_native_dpa_recipe(monkeypatch)
+        qfactory_out, qfactory_dx, qfactory_grads = self._run_mha_model(
+            model_qfactory,
+            base_inp,
+            grad,
+            qfactory_recipe,
+            seed=2303,
+        )
+        qfactory_flags = recorded_flags[-1]
+
+        assert native_flags == expected_flags
+        assert qfactory_flags == expected_flags
+        self._assert_equal(qfactory_out, native_out, f"{case_name} MHA output")
+        self._assert_equal(qfactory_dx, native_dx, f"{case_name} MHA input grad")
+        assert qfactory_grads.keys() == native_grads.keys()
+        for name, native_grad in native_grads.items():
+            self._assert_equal(
+                qfactory_grads[name],
+                native_grad,
+                f"{case_name} MHA param grad {name}",
+            )
+
+
 @pytest.mark.skipif(not fp8_block_scaling_available, reason=reason_for_no_fp8_block_scaling)
 class TestHybridGemmBitwiseIdenticalBlockFP8:
     """Hybrid quantizer with Block FP8 in both directions must produce
