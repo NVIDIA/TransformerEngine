@@ -55,8 +55,7 @@ from ..jit import no_torch_dynamo
 from ..cpu_offload import is_cpu_offload_enabled, mark_not_offload, start_offload
 from ..triton.grouped_dbias_dscales import compute_grouped_dbias
 
-from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
-from ..tensor.mxfp8_tensor import MXFP8Quantizer
+from ..tensor import Float8CurrentScalingQuantizer, Float8Quantizer, MXFP8Quantizer, NVFP4Quantizer
 from ..quantized_tensor import (
     QuantizedTensorStorage,
     Quantizer,
@@ -95,19 +94,29 @@ class _GroupedLinear(torch.autograd.Function):
         save_original_input: bool,
         activation_dtype: torch.dtype,
         input_quantizers: List[Optional[Quantizer]],
-        weight_quantizers: List[Optional[Quantizer]],
         output_quantizers: List[Optional[Quantizer]],
-        grad_output_quantizers: List[Optional[Quantizer]],
     ) -> bool:
-        """Whether to use cublasLt grouped GEMM through GroupedTensor metadata.
+        """Whether to use cuBLASLt grouped GEMM through GroupedTensor metadata.
 
         There are no checks whether split sizes are supported. Splits
         may be in a CUDA tensor, so checking would hurt performance
         and be incompatible with CUDA Graphs.
 
+        Supported Compute Capability (CC) and precisions:
+        * Hopper (CC 9.0): BF16/FP16.
+        * Blackwell (CC 10.x and 11.0): BF16/FP16/MXFP8/NVFP4 with RHT.
+        FP8 delayed / current scaling, and FP8 block scaling are not supported because the
+        corresponding grouped quantization kernels are missing.
+        Non-RHT NVFP4 falls back to the legacy path because graph-safe grouped quantization
+        currently requires RHT.
+
+        Input/weight/grad_output quantizers are assumed to be of the same type, otherwise it would
+        trigger a fatal error in the cuBLASLt grouped GEMM check.
         """
+        # 1. Filter by environment variable
         if not bool(int(os.getenv("NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM", "0"))):
             return False
+        # 2. Filter out advanced features
         if (
             debug
             or cpu_offloading
@@ -116,16 +125,18 @@ class _GroupedLinear(torch.autograd.Function):
             or save_original_input
         ):
             return False
-        if get_device_compute_capability() < (10, 0):
+        # 3. Filter by compute capability
+        if not (9, 0) <= get_device_compute_capability() <= (11, 0):
             return False
+        # 4. Output quantization is not supported.
         if any(q is not None for q in output_quantizers):
             return False
+        # 5. Filter by quantization recipes.
         if fp8:
-            return (
-                activation_dtype in (torch.bfloat16, torch.float16)
-                and all(isinstance(q, MXFP8Quantizer) for q in input_quantizers)
-                and all(isinstance(q, MXFP8Quantizer) for q in weight_quantizers)
-                and all(q is None or isinstance(q, MXFP8Quantizer) for q in grad_output_quantizers)
+            if not (10, 0) <= get_device_compute_capability() <= (11, 0):
+                return False
+            return all(isinstance(q, MXFP8Quantizer) for q in input_quantizers) or all(
+                isinstance(q, NVFP4Quantizer) and q.with_rht for q in input_quantizers
             )
         return activation_dtype in (torch.bfloat16, torch.float16)
 
@@ -234,7 +245,7 @@ class _GroupedLinear(torch.autograd.Function):
         weights: Tuple[torch.Tensor, ...],
         biases: Tuple[torch.Tensor, ...],
     ) -> Tuple[torch.Tensor, list]:
-        """Forward path backed by GroupedTensor + cublasLt grouped GEMM."""
+        """Forward path backed by GroupedTensor + cuBLASLt grouped GEMM."""
         num_gemms = len(m_splits)
         device = inp.device
         in_features = weights[0].size(-1)
@@ -491,9 +502,7 @@ class _GroupedLinear(torch.autograd.Function):
             save_original_input=save_original_input,
             activation_dtype=activation_dtype,
             input_quantizers=input_quantizers,
-            weight_quantizers=weight_quantizers,
             output_quantizers=output_quantizers,
-            grad_output_quantizers=grad_output_quantizers,
         ):
             return _GroupedLinear._forward_grouped_tensor(
                 ctx,
@@ -599,11 +608,8 @@ class _GroupedLinear(torch.autograd.Function):
 
         if fp8_calibration:
             for i in range(num_gemms):
-                # amax of input
-                for i in range(num_gemms):
-                    input_quantizers[i].calibrate(inputmats[i])
-                for i in range(num_gemms):
-                    weight_quantizers[i].calibrate(weights[i])
+                input_quantizers[i].calibrate(inputmats[i])
+                weight_quantizers[i].calibrate(weights[i])
 
         if cpu_offloading:
             mark_not_offload(*weights_fp8, *weights)
@@ -748,7 +754,7 @@ class _GroupedLinear(torch.autograd.Function):
                 columnwise=ctx.weights_requires_grad,
             )
             grad_output_quantizer.optimize_for_gemm = True
-            if ctx.use_bias:
+            if ctx.use_bias and isinstance(grad_output_quantizer, MXFP8Quantizer):
                 grouped_dy, dbias_packed = tex.bgrad_group_quantize(
                     dy_2d,
                     grad_output_quantizer,
@@ -1687,6 +1693,15 @@ class GroupedLinear(TransformerEngineBaseModule):
         is_grad_enabled = torch.is_grad_enabled()
         num_gemms = self.num_gemms
 
+        if FP8GlobalStateManager.fp8_graph_capturing():
+            skip_fp8_weight_update = (
+                FP8GlobalStateManager.quantization_state.skip_fp8_weight_update_tensor
+            )
+        else:
+            skip_fp8_weight_update = None
+        if skip_fp8_weight_update is not None:
+            is_first_microbatch = False
+
         # Make sure splits are in expected format
         if not isinstance(m_splits, torch.Tensor):
             # Convert list of ints to tensor for backward compatibility
@@ -1903,8 +1918,16 @@ class GroupedLinear(TransformerEngineBaseModule):
             ]
             for i in range(self.num_gemms)
         ]
+        # Preswizzle the weights during quantization instead of lazily inside every GEMM.
+        # This wont work when primay weights are in fp8 because of 2 reasons
+        # 1. optimizer step updates would need to dequantize the weights. But swizzled weights
+        # currently dont support dequantization.
+        # 2. For FSDP2, quantized weight all-gather would need to be done in the
+        # unswizzled layout.
         for i in range(self.num_gemms):
             weight_quantizers[i].internal = not self.primary_weights_in_fp8
+            if not self.primary_weights_in_fp8:
+                weight_quantizers[i].optimize_for_gemm = True
         return weight_quantizers
 
     def _get_quantizers(self):

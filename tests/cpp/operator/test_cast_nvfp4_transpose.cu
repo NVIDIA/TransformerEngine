@@ -1049,6 +1049,76 @@ void performTest(float (*OP)(const float),
     compare_rowwise_amax(output, ref_amax);
 }
 
+// Columnwise-only 2D NVFP4 must match the columnwise half of both-directions output
+template <typename InputType>
+void performTestColumnwiseOnly2D(const std::vector<size_t>& shape) {
+    using namespace test;
+
+    DType itype = TypeInfo<InputType>::dtype;
+    DType otype = DType::kFloat4E2M1;
+
+    const size_t rows = first_dimension(shape);
+    const size_t cols = last_dimension(shape);
+
+    // Columnwise (transposed) scale-tensor dimensions.
+    const std::array<size_t, 4> scale_dims_t = get_scale_tensor_dims(cols, rows, 1, 16);
+    const size_t unpadded_blocks_Y_t = scale_dims_t[0];
+    const size_t unpadded_blocks_X_t = scale_dims_t[1];
+    const size_t scales_stride_t = scale_dims_t[3];
+
+    Tensor input("input", shape, itype);
+    fillCase<fp32>(&input, InputsFillCase::uniform);
+
+    // Golden amax chosen so the 2nd-stage scaling mantissa is zero (avoids rounding noise).
+    const float golden_amax = 448.0f * 6.0f * 8.0f;
+
+    // Reference: both directions produced in a single kernel call (rowwise + columnwise).
+    Tensor output_both("output_both", shape, otype, /*rowwise=*/true, /*columnwise=*/true,
+                       NVTE_NVFP4_1D_SCALING);
+    output_both.cpu_rowwise_amax_ptr<float>()[0] = golden_amax;
+    output_both.cpu_columnwise_amax_ptr<float>()[0] = golden_amax;
+    output_both.from_cpu();
+
+    // System under test: columnwise-only output (no rowwise data allocated).
+    Tensor output_col("output_col", shape, otype, /*rowwise=*/false, /*columnwise=*/true,
+                      NVTE_NVFP4_1D_SCALING);
+    output_col.cpu_columnwise_amax_ptr<float>()[0] = golden_amax;
+    output_col.from_cpu();
+
+    QuantizationConfigWrapper quant_config;
+    quant_config.set_stochastic_rounding(false);
+    quant_config.set_nvfp4_2d_quantization(true);
+
+    nvte_quantize_v2(input.data(), output_both.data(), quant_config, 0);
+    nvte_quantize_v2(input.data(), output_col.data(), quant_config, 0);
+
+    cudaDeviceSynchronize();
+    auto err = cudaGetLastError();
+    ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+
+    output_both.to_cpu();
+    output_col.to_cpu();
+
+    // Columnwise FP4 data must match bitwise (atol = rtol = 0).
+    compare_nvfp4_tensors("columnwise_only_data",
+                          output_col.columnwise_cpu_dptr<fp4e2m1>(),
+                          output_both.columnwise_cpu_dptr<fp4e2m1>(),
+                          static_cast<int>(cols), static_cast<int>(rows),
+                          /*atol=*/0.0, /*rtol=*/0.0);
+
+    // Columnwise scale factors must match over the in-bounds region.
+    size_t scale_mismatches = 0;
+    compare_scaling_factors<fp8e4m3>("columnwise_only_scales",
+                                     output_col.columnwise_cpu_scale_inv_ptr<fp8e4m3>(),
+                                     output_both.columnwise_cpu_scale_inv_ptr<fp8e4m3>(),
+                                     unpadded_blocks_Y_t, unpadded_blocks_X_t, scales_stride_t,
+                                     scale_mismatches);
+    ASSERT_EQ(scale_mismatches, 0u);
+
+    // The columnwise-only tensor must not allocate rowwise output.
+    EXPECT_FALSE(output_col.rowwise());
+}
+
 std::vector<std::vector<size_t>> tensor_dims = {
     {32, 32},
     {32, 64},
@@ -1225,4 +1295,31 @@ INSTANTIATE_TEST_SUITE_P(
             NVFP4FourOverSixTestConfig{kNVTENVFP44Over6MinMSE, 256, true})), // four_over_six_config
     [](const testing::TestParamInfo<FusedCastTransposeNVFP4TestSuite::ParamType>& info) {
         return test_name(info.param);
+    });
+
+class CastNVFP4ColumnwiseOnly2DTestSuite : public ::testing::TestWithParam<std::vector<size_t>> {};
+
+TEST_P(CastNVFP4ColumnwiseOnly2DTestSuite, ColumnwiseOnlyMatchesBothDirections) {
+    // The optimized NVFP4 quantize-transpose kernel requires Blackwell.
+    if (getDeviceComputeCapability() < blackwellComputeCapability) {
+        GTEST_SKIP();
+    }
+    performTestColumnwiseOnly2D<bf16>(GetParam());
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    OperatorTest,
+    CastNVFP4ColumnwiseOnly2DTestSuite,
+    // Include rectangular 128-multiple shapes to guard transposed data/scale indexing.
+    ::testing::Values(
+        std::vector<size_t>{128, 128},
+        std::vector<size_t>{256, 512},
+        std::vector<size_t>{384, 1024},
+        std::vector<size_t>{2048, 256}),
+    [](const testing::TestParamInfo<CastNVFP4ColumnwiseOnly2DTestSuite::ParamType>& info) {
+        std::string name;
+        for (const auto& s : info.param) {
+            name += "X" + std::to_string(s);
+        }
+        return name;
     });
