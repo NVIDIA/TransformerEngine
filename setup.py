@@ -136,6 +136,9 @@ def setup_requirements() -> Tuple[List[str], List[str]]:
         "importlib-metadata>=1.0",
         "packaging",
         cusolvermp_pypi_package_name(),
+        # The core C++ library links libtvm_ffi.so (CuTeDSL quant backend bridge),
+        # so apache-tvm-ffi is required at runtime by every TE install.
+        "apache-tvm-ffi>=0.1.12",
     ]
     test_reqs: List[str] = ["pytest>=8.2.1"]
 
@@ -363,13 +366,19 @@ if __name__ == "__main__":
             "core_cu13": [f"transformer_engine_cu13=={__version__}"],
             "pytorch": [f"transformer_engine_torch=={__version__}"],
             "jax": [f"transformer_engine_jax=={__version__}"],
+            "cutedsl": [
+                "nvidia-cutlass-dsl>=4.2.0"
+            ],  # TODO: explain this in the docs when shipping this: `pip3 install --no-build-isolation '.[cutedsl]' `
         }
     else:
         install_requires, test_requires = setup_requirements()
         ext_modules = [setup_common_extension()]
         package_data = {"": ["VERSION.txt"]}
         include_package_data = True
-        extras_require = {"test": test_requires}
+        extras_require = {
+            "test": test_requires,
+            "cutedsl": ["nvidia-cutlass-dsl>=4.2.0"],
+        }
 
         if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
             if "pytorch" in frameworks:

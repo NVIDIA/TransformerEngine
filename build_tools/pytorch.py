@@ -4,6 +4,7 @@
 
 """PyTorch related extensions."""
 
+import importlib.util
 import os
 from pathlib import Path
 from importlib import metadata
@@ -58,6 +59,25 @@ def setup_pytorch_extension(
         ]
     )
 
+    # apache-tvm-ffi: headers for the C++ API (Module / Function / TensorView)
+    # and libtvm_ffi.so for symbol resolution. Used by tvm_ffi_bridge.h /
+    # applyTVMFunction. Python registers AOT-compiled CuTeDSL kernels into
+    # the global registry; TE C++ looks them up via Function::GetGlobalRequired.
+    tvm_ffi_spec = importlib.util.find_spec("tvm_ffi")
+    if tvm_ffi_spec is None or not tvm_ffi_spec.submodule_search_locations:
+        raise RuntimeError(
+            "apache-tvm-ffi package not found; install it (e.g. "
+            "`pip install apache-tvm-ffi`) — required for the TVM FFI bridge."
+        )
+    tvm_ffi_root = Path(tvm_ffi_spec.submodule_search_locations[0])
+    tvm_ffi_include = tvm_ffi_root / "include"
+    tvm_ffi_lib_dir = tvm_ffi_root / "lib"
+    if not tvm_ffi_include.is_dir() or not (tvm_ffi_lib_dir / "libtvm_ffi.so").exists():
+        raise RuntimeError(
+            f"apache-tvm-ffi assets missing at {tvm_ffi_root} (need include/ and lib/libtvm_ffi.so)"
+        )
+    include_dirs.append(tvm_ffi_include)
+
     # Compiler flags
     cxx_flags = ["-O3", "-fvisibility=hidden"]
     if debug_build_enabled():
@@ -77,8 +97,11 @@ def setup_pytorch_extension(
 
     setup_mpi_flags(include_dirs, cxx_flags)
 
-    library_dirs = []
-    libraries = []
+    library_dirs = [tvm_ffi_lib_dir]
+    libraries = ["tvm_ffi"]
+    # rpath pinned to the pip install dir so the loader finds libtvm_ffi.so
+    # without LD_LIBRARY_PATH at runtime.
+    extra_link_args = [f"-Wl,-rpath,{tvm_ffi_lib_dir}"]
     if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", 0))):
         assert (
             os.getenv("NVSHMEM_HOME") is not None
@@ -102,6 +125,7 @@ def setup_pytorch_extension(
         sources=[str(src) for src in sources],
         include_dirs=[str(inc) for inc in include_dirs],
         extra_compile_args={"cxx": cxx_flags},
+        extra_link_args=extra_link_args,
         libraries=[str(lib) for lib in libraries],
         library_dirs=[str(lib_dir) for lib_dir in library_dirs],
     )
