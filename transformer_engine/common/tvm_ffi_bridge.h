@@ -211,7 +211,14 @@ class TVMFFICentral {
     static_assert(detail::is_lazyloadable_config<Config>::value,
                   "Config must define `std::string to_key() const` and "
                   "`bool retrieve_func_from_python(const std::string&) const`.");
-    if (!cutedsl_backend_enabled_) return std::nullopt;
+    if (!cutedsl_backend_enabled_) {
+      if (warn_cutedsl_backend_not_chosen_) {
+        NVTE_WARN("TVM-FFI kernel for config `", cfg.to_key(),
+                  "` is not supported because the CuTeDSL backend is disabled. "
+                  "Set NVTE_ENABLE_CUTEDSL_QUANT_BACKEND=1 to enable it.");
+      }
+      return std::nullopt;
+    }
     const std::string key = cfg.to_key();
     {
       std::shared_lock<std::shared_mutex> read_lock(mutex_);
@@ -231,7 +238,7 @@ class TVMFFICentral {
     if (supported) {
       return tvm::ffi::Function::GetGlobal(key);
     }
-    if (warn_unsupported_kernels_) {
+    if (warn_cutedsl_backend_not_chosen_) {
       NVTE_WARN("TVM-FFI kernel for config `", key, "` is not supported.");
     }
     return std::nullopt;
@@ -240,7 +247,7 @@ class TVMFFICentral {
  private:
   ~TVMFFICentral() = default;
   TVMFFICentral() : cutedsl_backend_enabled_(is_cutedsl_backend_enabled()),
-                    warn_unsupported_kernels_(warn_if_cutedsl_backend_unsupported()) {}
+                    warn_cutedsl_backend_not_chosen_(warn_if_cutedsl_backend_not_chosen()) {}
   TVMFFICentral(const TVMFFICentral &) = delete;
   TVMFFICentral &operator=(const TVMFFICentral &) = delete;
   TVMFFICentral(TVMFFICentral &&) = delete;
@@ -252,13 +259,13 @@ class TVMFFICentral {
     return flag != nullptr && flag[0] != '0';
   }
   
-  static bool warn_if_cutedsl_backend_unsupported() {
-    const char *flag = std::getenv("NVTE_WARN_IF_CUTEDSL_BACKEND_UNSUPPORTED");
+  static bool warn_if_cutedsl_backend_not_chosen() {
+    const char *flag = std::getenv("NVTE_WARN_IF_CUTEDSL_BACKEND_NOT_CHOSEN");
     return flag != nullptr && flag[0] != '0';
   }
 
   const bool cutedsl_backend_enabled_;
-  const bool warn_unsupported_kernels_;
+  const bool warn_cutedsl_backend_not_chosen_;
   std::shared_mutex mutex_;
   // Per-config support decision (cfg.to_key() -> supported). Holds NO Python-
   // backed handles, so it is safe to destroy at static teardown — the kernels
