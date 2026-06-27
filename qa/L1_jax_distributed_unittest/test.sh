@@ -3,6 +3,11 @@
 # See LICENSE for license information.
 export TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
 
+function error_exit() {
+    echo "Error: $1"
+    exit 1
+}
+
 function test_fail() {
     RET=1
     FAILED_CASES="$FAILED_CASES $1"
@@ -17,6 +22,9 @@ export NVTE_JAX_TEST_TIMING=1
 : ${TE_PATH:=/opt/transformerengine}
 : ${XML_LOG_DIR:=/logs}
 mkdir -p "$XML_LOG_DIR"
+
+PYTHONPATH=$TE_PATH python3 -m build_tools.cudnn_frontend install \
+    || error_exit "Failed to install vendored nvidia-cudnn-frontend"
 
 export NVTE_JAX_UNITTEST_LEVEL="L1"
 

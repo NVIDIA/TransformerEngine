@@ -3,11 +3,8 @@
 # See LICENSE for license information.
 """cuDNN frontend score_mod fused attention helpers."""
 import hashlib
-import importlib
 import inspect
 import os
-from pathlib import Path
-import sys
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
@@ -16,6 +13,11 @@ import jax.numpy as jnp
 import numpy as np
 from jax import ffi
 
+from transformer_engine.common.cudnn_frontend import (
+    check_cudnn_frontend_version_match,
+    encode_cudnn_frontend_version,
+    import_cudnn_frontend,
+)
 import transformer_engine_jax
 
 
@@ -26,10 +28,6 @@ __all__ = [
     "fused_attn_score_mod_fwd",
     "fused_attn_score_mod_bwd",
 ]
-
-_CUDNN_FRONTEND_PYTHON_PATH = (
-    Path(__file__).resolve().parents[3] / "3rdparty" / "cudnn-frontend" / "python"
-)
 
 
 def _is_non_deterministic_allowed():
@@ -484,28 +482,12 @@ def _score_mod_graph_tensors(
 
 
 def _encode_cudnn_frontend_version(version: str) -> int:
-    public_version = version.split("+", 1)[0].split("-", 1)[0]
-    parts = public_version.split(".")
-    if len(parts) < 3:
-        raise RuntimeError(f"Could not parse cuDNN frontend Python version: {version!r}.")
-    major, minor, patch = (int(part) for part in parts[:3])
-    return major * 10000 + minor * 100 + patch
+    return encode_cudnn_frontend_version(version)
 
 
 def _check_cudnn_frontend_version_match(cudnn) -> int:
-    python_version_string = getattr(cudnn, "__version__", None)
-    if python_version_string is None:
-        raise RuntimeError("cuDNN frontend Python package does not expose __version__.")
-    python_version = _encode_cudnn_frontend_version(python_version_string)
     cpp_version = int(transformer_engine_jax.get_cudnn_frontend_version())
-    if python_version != cpp_version:
-        raise RuntimeError(
-            "cuDNN frontend Python/C++ version mismatch for score_mod graph serialization: "
-            f"Python cudnn.__version__={python_version_string!r} encodes to {python_version}, "
-            f"but Transformer Engine C++ was built with CUDNN_FRONTEND_VERSION={cpp_version}. "
-            "Use matching cuDNN frontend Python package and C++ headers."
-        )
-    return python_version
+    return check_cudnn_frontend_version_match(cudnn, cpp_version)
 
 
 def _score_mod_graph_hash(serialized_graph: bytes) -> Tuple[int, int]:
@@ -600,15 +582,8 @@ def _shape_dtype(value) -> jax.ShapeDtypeStruct:
 
 
 def _import_cudnn_for_score_mod():
-    cudnn_frontend_path = str(_CUDNN_FRONTEND_PYTHON_PATH)
-    cudnn_frontend_package = _CUDNN_FRONTEND_PYTHON_PATH / "cudnn"
-    if (
-        any(cudnn_frontend_package.glob("_compiled_module*"))
-        and cudnn_frontend_path not in sys.path
-    ):
-        sys.path.insert(0, cudnn_frontend_path)
     try:
-        cudnn = importlib.import_module("cudnn")
+        cudnn = import_cudnn_frontend()
     except ImportError as exc:
         raise ImportError(
             "score_mod fused_attn requires the cuDNN frontend Python package (`cudnn`)."
