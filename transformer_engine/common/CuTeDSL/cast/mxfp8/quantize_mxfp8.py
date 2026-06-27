@@ -404,8 +404,7 @@ def quantize_colwise_mxfp8(
         for i in cutlass.range_constexpr(MXFP8_BLOCK_SIZE):
             # Accumulate the per-thread column partial for dbias if WITH_DBIAS.
             if cutlass.const_expr(WITH_DBIAS):
-                for i in cutlass.range_constexpr(MXFP8_BLOCK_SIZE):
-                    dbias_partial += sX_thread_f32[i]
+                dbias_partial += sX_thread_f32[i]
             sO_thread[i] = Uint8(cvt_to_fp8_func(sX_thread_f32[i] * inv_scale_c))
 
     # Return this stage's per-column partial alongside amax; the caller accumulates
@@ -493,9 +492,7 @@ class MXFP8QuantizeKernel:
     _WAVES = MXFP8_BLOCK_SIZE // _PACK_SIZE # Each thread reads 8 waves with each wave reads 4 packed bf16, so it reads a whole MXFP8 block in total
     _TOTAL_BANKS_WIDTH = (32 * 4) // 1  # 32 banks × 4 bytes, in bytes (uint8 stride)
     _THREADS_PER_BANK = _TOTAL_BANKS_WIDTH // MXFP8_BLOCK_SIZE  # 4 threads per bank
-    
-    # Tiling sizes
-    _NUM_STAGES = 2 # Pipeline depth of the producer/consumer ring buffer for the TMA-G2S input loads (PipelineTmaAsync stage count)
+    _NUM_STAGES = 2 # The pipeline depth is always 2
 
     def __init__(self, cfg):
         self.cfg = cfg
@@ -871,26 +868,27 @@ class MXFP8QuantizeKernel:
         # Ensure barrier init is visible to all threads before the pipeline is used.
         cute.arch.sync_threads()
 
-        # ---- Producer: warp 0 issues one TMA copy per tile. ----
+        # Prologue: warp 0 prefetches up to NUM_STAGES tiles to fully fill the pipeline
         if warp_idx == 0:
-            for stage in cutlass.range(num_tiles, unroll=1):
-                mainloop_pipeline.producer_acquire(prod_state)
-                tile_y = bidy * self._NUM_TILES + stage
-                cute.copy(
-                    tma_atom,
-                    tXgX[(None, (tile_y, bidx))],
-                    tXsX[(None, prod_state.index)],
-                    tma_bar_ptr=mainloop_pipeline.producer_get_barrier(prod_state),
-                )
-                if cutlass.const_expr(cfg.WITH_DACT):
+            for s in cutlass.range_constexpr(self._NUM_STAGES):
+                if s < num_tiles:
+                    mainloop_pipeline.producer_acquire(prod_state)
+                    tile_y = bidy * self._NUM_TILES + s
                     cute.copy(
-                        tma_atom_act,
-                        tXgA[(None, (tile_y, bidx))],
-                        tXsA[(None, prod_state.index)],
+                        tma_atom,
+                        tXgX[(None, (tile_y, bidx))],
+                        tXsX[(None, prod_state.index)],
                         tma_bar_ptr=mainloop_pipeline.producer_get_barrier(prod_state),
                     )
-                mainloop_pipeline.producer_commit(prod_state)
-                prod_state.advance()
+                    if cutlass.const_expr(cfg.WITH_DACT):
+                        cute.copy(
+                            tma_atom_act,
+                            tXgA[(None, (tile_y, bidx))],
+                            tXsA[(None, prod_state.index)],
+                            tma_bar_ptr=mainloop_pipeline.producer_get_barrier(prod_state),
+                        )
+                    mainloop_pipeline.producer_commit(prod_state)
+                    prod_state.advance()
 
         # Per-thread amax accumulator
         if cutlass.const_expr(cfg.WITH_AMAX):
@@ -918,22 +916,31 @@ class MXFP8QuantizeKernel:
         if cutlass.const_expr(self.DBIAS_REDUCTION_COLWISE):
             block_dbias = Float32(0.0)
 
-        # ---- Consumer: all threads quantize each completed tile. ----
-        for stage in cutlass.range(num_tiles, unroll=1):
+        # Consumer: all threads fetch from the pipeline, and 
+        for tile_idx in cutlass.range(num_tiles, unroll=1):
             mainloop_pipeline.consumer_wait(cons_state)
-            sX_tile = sX[(None, stage)]
+            # Only allow at most _NUM_STAGES-1 stages to be in-flight, because this iteration will reuse the ring buffer
+            # that is read _NUM_STAGES iterations ago
+            if warp_idx == 0:
+                cute.arch.cp_async_bulk_wait_group(self._NUM_STAGES - 1, read=True)
+            cute.arch.sync_threads()
+            # The current pipeline stage index, which is the tile index modulo the number of stages. 
+            # This is used to index into the shared memory ring buffers that are wrapped around the number of stages.
+            stage_idx = cons_state.index
+            sX_tile = sX[(None, stage_idx)]
+            # Also fetch the activation input if WITH_DACT
             sActInput_tile = None
             if cutlass.const_expr(cfg.WITH_DACT):
-                sActInput_tile = sActInput[(None, stage)]
+                sActInput_tile = sActInput[(None, stage_idx)]
+            # Each CTA handles `NUM_TILES` tiles stacked vertically, so tile_idx_x is just the block index along X dimension
+            # and tile_idx_y is the tile that this stage handles out of the `NUM_TILES` tiles
             tile_idx_x = bidx
-            # Each CTA has `NUM_TILES` tiles. Each stage we need to obtain the tile for that specific stage. 
-            # So the tile index along Y dimension is `bidy * NUM_TILES + stage`
-            tile_idx_y = bidy * self._NUM_TILES + stage
+            tile_idx_y = bidy * self._NUM_TILES + tile_idx
             # Process rowwise and colwise quantization separately
             if cutlass.const_expr(cfg.COLWISE):
                 # The first row that belongs to this CTA. Each CTA handles NUM_TILES of (TILE_Y, TILE_X) tiles stacked vertically,
                 # and each stage handles one of them.
-                sO_col_tile = sO_col[(None, stage)]
+                sO_col_tile = sO_col[(None, stage_idx)]
                 mS_col_stage = cute.flatten(mS_col[(None, (tile_idx_y, tile_idx_x))])
 
                 amax_c, dbias_c = self._process_colwise(
@@ -951,19 +958,14 @@ class MXFP8QuantizeKernel:
             if cutlass.const_expr(self.CACHE_ACTIVATION):
                 cute.arch.sync_threads()
             if cutlass.const_expr(cfg.ROWWISE):
-                sO_row_tile = sO_row[(None, stage)]
+                sO_row_tile = sO_row[(None, stage_idx)]
                 # mS_row is ((SCALE_TILE), (GRID)) where SCALE_TILE = (32, 2).
                 # Each CTA owns NUM_TILES consecutive row-tiles of GRID. cute
-                # auto-decomposes the flat row coord `bidy * NUM_TILES + stage`
+                # auto-decomposes the flat row coord `bidy * NUM_TILES + tile_idx`
                 # onto GRID's hierarchical row modes — which is the
                 # (i_hi, tile_Y) tile-major order for swizzled, and the plain
                 # row-tile order for compact. Same source, both layouts correct.
                 mS_row_stage = cute.flatten(mS_row[(None, (tile_idx_y, tile_idx_x))])
-                # print(f"s0_row_tile: {sO_row_tile}\n")
-                # print(f"sO_row: {sO_row}\n")
-                # print(f"mS_row: {mS_row}\n")
-                # print(f"mS_row_stage: {mS_row_stage}\n")
-                # print(f"mS_row_stage: {mS_row_stage}\n")
                 amax_r = self._process_rowwise(
                     sX_tile, sO_row_tile,
                     mS_row_stage, max_norm_rcp,
@@ -984,17 +986,17 @@ class MXFP8QuantizeKernel:
 
             # Warp 0 issues TMA copy to write the quantized output tile from shared memory to global memory and then commits
             if warp_idx == 0:
-                tile_y = bidy * self._NUM_TILES + stage
+                tile_y = bidy * self._NUM_TILES + tile_idx
                 if cutlass.const_expr(cfg.ROWWISE):
                     cute.copy(
                         tma_atom_out_row,
-                        tXsO_row[(None, stage)],
+                        tXsO_row[(None, stage_idx)],
                         tXgO_row[(None, (tile_y, bidx))],
                     )
                 if cutlass.const_expr(cfg.COLWISE):
                     cute.copy(
                         tma_atom_out_col,
-                        tXsO_col[(None, stage)],
+                        tXsO_col[(None, stage_idx)],
                         tXgO_col[(None, (tile_y, bidx))],
                     )
                 cute.arch.cp_async_bulk_commit_group()
@@ -1002,48 +1004,35 @@ class MXFP8QuantizeKernel:
             mainloop_pipeline.consumer_release(cons_state)
             cons_state.advance()
 
+            # The pipeline is no longer fully filled after we consume this tile, so we fetch a new tile to fill the pipeline.
+            # The next _NUM_STAGES-1 tiles are already in-flight, so the next tile to fetch is after _NUM_STAGES tiles.
+            if warp_idx == 0:
+                next_tile_idx = tile_idx + self._NUM_STAGES
+                if next_tile_idx < num_tiles:
+                    mainloop_pipeline.producer_acquire(prod_state)
+                    tile_y = bidy * self._NUM_TILES + next_tile_idx
+                    cute.copy(
+                        tma_atom,
+                        tXgX[(None, (tile_y, bidx))],
+                        tXsX[(None, prod_state.index)],
+                        tma_bar_ptr=mainloop_pipeline.producer_get_barrier(prod_state),
+                    )
+                    if cutlass.const_expr(cfg.WITH_DACT):
+                        cute.copy(
+                            tma_atom_act,
+                            tXgA[(None, (tile_y, bidx))],
+                            tXsA[(None, prod_state.index)],
+                            tma_bar_ptr=mainloop_pipeline.producer_get_barrier(prod_state),
+                        )
+                    mainloop_pipeline.producer_commit(prod_state)
+                    prod_state.advance()
+        # End of the main pipeline loop
+
         # Complete the cross-thread dbias reduction after each thread has its own per-thread partial sum after the rowwise quantization.
         if cutlass.const_expr(self.DBIAS_REDUCTION_ROWWISE):
-            # Allocate the SMEM buffer that all threads use to reduce the two-stage partial sum (per thread) to the 
-            # partial sum (per block).
-
-            # Pad the buffer to avoid bank conflicts. The logical shape is still the same. Only the stride is different.
-            DBIAS_BUFF_WIDTH = self._TILE_X // MXFP8_BLOCK_SIZE * (MXFP8_BLOCK_SIZE + 1)
-            @cute.struct
-            class DbiasStorage:
-                sDbias: cute.struct.MemRange[Float32, self._TILE_Y * DBIAS_BUFF_WIDTH]
-            dbias_storage = smem.allocate(DbiasStorage)
-            sDbias = dbias_storage.sDbias.get_tensor(
-                cute.make_layout((self._TILE_Y, self._TILE_X), stride=(DBIAS_BUFF_WIDTH, 1)),
-            )
-            _, tv_layout_dbias_write = cute.make_layout_tv(
-                thr_layout=cute.make_layout((self._TILE_Y, self._TILE_X // MXFP8_BLOCK_SIZE),
-                                            stride=(self._TILE_X // MXFP8_BLOCK_SIZE, 1)),
-                val_layout=cute.make_layout((1, MXFP8_BLOCK_SIZE), stride=(MXFP8_BLOCK_SIZE, 1)),
-            )
-            sDbias_write = cute.composition(sDbias, tv_layout_dbias_write)
-            # Each thread start reading from the specfic bank based on its thread ID so they can do their best to access different banks
-            # to avoid bank conflict.
-            bank_group = (tidx % THREADS_PER_WARP) // self._THREADS_PER_BANK
-            # The offset this thread should start reading from based on what's its first bank to access.
-            offset = bank_group * self._PACK_SIZE
-            for w in cutlass.range_constexpr(self._WAVES):                # Each thread starts from this offset when writing into SMEM to avoid bank conflict
-                start = (w * self._PACK_SIZE + offset) % MXFP8_BLOCK_SIZE
-                for i in cutlass.range_constexpr(self._PACK_SIZE):
-                    # All threads write their per-thread partial sum results to the shared buffer.
-                    sDbias_write[(tidx, start + i)] = rowwise_dbias_acc[w * self._PACK_SIZE + i]
-            cute.arch.sync_threads()
-            # All threads reduce the cross-thread partial sums to the per-block partial sum.
-            _, tv_layout_dbias_reduce = cute.make_layout_tv(
-                thr_layout=cute.make_layout((1, self._TILE_X), stride=(self._TILE_X, 1)),
-                val_layout=cute.make_layout((self._TILE_Y, 1), stride=(1, 1))
-            )
-            sDbias_reduce = cute.composition(sDbias, tv_layout_dbias_reduce)
-            # make_layout_tv yields a (thread, value) layout: thread=tidx -> column tidx,
-            # value=i -> row i. So index [tidx, i] (thread first), summing the column's rows.
-            block_dbias = Float32(0.0)
-            for i in cutlass.range_constexpr(self._TILE_Y):
-                block_dbias += sDbias_reduce[tidx, i]
+            # If we do the dbias reduction in the rowwise pass, each thread will have a (1, MXFP8_BLOCK_SIZE) partial sum
+            # and we need to write these to a SMEM buffer and let each thread reduce it in the columnwise direction
+            block_dbias = self._dbias_reduction_rowwise_epilouge(smem, tidx, rowwise_dbias_acc)
 
         # Write the per-tile reduced dbias to the global workspace. 
         if cutlass.const_expr(cfg.WITH_DBIAS):
@@ -1052,31 +1041,78 @@ class MXFP8QuantizeKernel:
                 mWorkspace[(bidy, dbias_col)] = block_dbias
 
         if cutlass.const_expr(cfg.WITH_AMAX):
-            # Reduce and get the per-warp amax.
-            warp_amax = cute.arch.warp_redux_sync(per_thread_amax, kind="fmax")
-            # Write the per-warp amax to shared memory
             sAmax = storage.sAmax.get_tensor(cute.make_layout(self._NUM_WARPS))
-            lane_idx = tidx % 32
-            if lane_idx == 0:
-                sAmax[warp_idx] = warp_amax
-            cute.arch.sync_threads()
-            if tidx == 0:
-                cta_amax = Float32(0.0)
-                # The first thread reduces all the per-warp amax to the per-CTA amax
-                for w in cutlass.range_constexpr(self._NUM_WARPS):
-                    cta_amax = cute.arch.fmax(cta_amax, sAmax[w])
-                amax_i32 = cute.make_tensor(
-                    cute.recast_ptr(mAmax.iterator, dtype=Int32),
-                    cute.make_layout(1),
-                )
-                # The first thread updates the global amax with an atomic max on the bitcasted float value
-                cute.arch.atomic_max(
-                    amax_i32.iterator, _bitcast_f32_to_i32(cta_amax),
-                )
+            self._amax_epilogue(sAmax, mAmax, tidx, warp_idx, per_thread_amax)
 
         # Wait for in-flight TMA stores so data is visible to the host
         # before the kernel returns.
         cute.arch.cp_async_bulk_wait_group(0, read=False)
+
+    @cute.jit
+    def _dbias_reduction_rowwise_epilouge(self, smem, tidx, rowwise_dbias_acc):
+        # Pad the buffer to avoid bank conflicts. The logical shape is still the same. Only the stride is different.
+        DBIAS_BUFF_WIDTH = self._TILE_X // MXFP8_BLOCK_SIZE * (MXFP8_BLOCK_SIZE + 1)
+        # Allocate the SMEM buffer that all threads use to reduce the two-stage partial sum (per thread) to the 
+        # partial sum (per block).
+        @cute.struct
+        class DbiasStorage:
+            sDbias: cute.struct.MemRange[Float32, self._TILE_Y * DBIAS_BUFF_WIDTH]
+        dbias_storage = smem.allocate(DbiasStorage)
+        sDbias = dbias_storage.sDbias.get_tensor(
+            cute.make_layout((self._TILE_Y, self._TILE_X), stride=(DBIAS_BUFF_WIDTH, 1)),
+        )
+        _, tv_layout_dbias_write = cute.make_layout_tv(
+            thr_layout=cute.make_layout((self._TILE_Y, self._TILE_X // MXFP8_BLOCK_SIZE),
+                                        stride=(self._TILE_X // MXFP8_BLOCK_SIZE, 1)),
+            val_layout=cute.make_layout((1, MXFP8_BLOCK_SIZE), stride=(MXFP8_BLOCK_SIZE, 1)),
+        )
+        sDbias_write = cute.composition(sDbias, tv_layout_dbias_write)
+        # Each thread start reading from the specfic bank based on its thread ID so they can do their best to access different banks
+        # to avoid bank conflict.
+        bank_group = (tidx % THREADS_PER_WARP) // self._THREADS_PER_BANK
+        # The offset this thread should start reading from based on what's its first bank to access.
+        offset = bank_group * self._PACK_SIZE
+        for w in cutlass.range_constexpr(self._WAVES):                # Each thread starts from this offset when writing into SMEM to avoid bank conflict
+            start = (w * self._PACK_SIZE + offset) % MXFP8_BLOCK_SIZE
+            for i in cutlass.range_constexpr(self._PACK_SIZE):
+                # All threads write their per-thread partial sum results to the shared buffer.
+                sDbias_write[(tidx, start + i)] = rowwise_dbias_acc[w * self._PACK_SIZE + i]
+        cute.arch.sync_threads()
+        # All threads reduce the cross-thread partial sums to the per-block partial sum.
+        _, tv_layout_dbias_reduce = cute.make_layout_tv(
+            thr_layout=cute.make_layout((1, self._TILE_X), stride=(self._TILE_X, 1)),
+            val_layout=cute.make_layout((self._TILE_Y, 1), stride=(1, 1))
+        )
+        sDbias_reduce = cute.composition(sDbias, tv_layout_dbias_reduce)
+        # make_layout_tv yields a (thread, value) layout: thread=tidx -> column tidx,
+        # value=i -> row i. So index [tidx, i] (thread first), summing the column's rows.
+        block_dbias = Float32(0.0)
+        for i in cutlass.range_constexpr(self._TILE_Y):
+            block_dbias += sDbias_reduce[tidx, i]
+        return block_dbias
+
+    @cute.jit
+    def _amax_epilogue(self, sAmax, mAmax, tidx, warp_idx, per_thread_amax):
+        # Reduce and get the per-warp amax.
+        warp_amax = cute.arch.warp_redux_sync(per_thread_amax, kind="fmax")
+        # Write the per-warp amax to shared memory
+        lane_idx = tidx % 32
+        if lane_idx == 0:
+            sAmax[warp_idx] = warp_amax
+        cute.arch.sync_threads()
+        if tidx == 0:
+            cta_amax = Float32(0.0)
+            # The first thread reduces all the per-warp amax to the per-CTA amax
+            for w in cutlass.range_constexpr(self._NUM_WARPS):
+                cta_amax = cute.arch.fmax(cta_amax, sAmax[w])
+            amax_i32 = cute.make_tensor(
+                cute.recast_ptr(mAmax.iterator, dtype=Int32),
+                cute.make_layout(1),
+            )
+            # The first thread updates the global amax with an atomic max on the bitcasted float value
+            cute.arch.atomic_max(
+                amax_i32.iterator, _bitcast_f32_to_i32(cta_amax),
+            )
 
     @cute.jit
     def _process_rowwise(
