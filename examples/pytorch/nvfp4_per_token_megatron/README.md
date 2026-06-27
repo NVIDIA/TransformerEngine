@@ -18,7 +18,6 @@ recipe is constructed:
 | Variable | Effect |
 | --- | --- |
 | `NVTE_NVFP4_PER_TOKEN=1` | **Required**: Flip the recipe into per-token mode (per-row/per-col outer amax + fused CUTLASS GEMM) |
-| `NVTE_NORM_FWD_USE_CUDNN=1` | **Required** with per-token: forces the unfused norm forward (the fused norm+amax path rejects per-token currently) |
 | `NVTE_NVFP4_PER_TOKEN_RHT=1` | Opt into the random Hadamard transform (off by default) |
 | `NVTE_NVFP4_PER_TOKEN_SR=1` | Opt into stochastic rounding (off by default) |
 | `NVTE_NVFP4_PER_TOKEN_WEIGHT_2D=1` | Use the transposition-invariant 2D weight cast in per-token layout |
@@ -122,10 +121,6 @@ The per-token recipe is currently intended for **accuracy evaluation and
 comparison** (per-token vs per-tensor vs BF16), **not** for optimized production
 deployment. Concretely:
 
-- **Requires `NVTE_NORM_FWD_USE_CUDNN=1`** (the unfused cuDNN norm forward).
-  The fused norm+amax path (`NVTE_NORM_FWD_USE_CUDNN=0`, the default) does **not**
-  support per-token and is rejected at the C++ quantizer. The launcher sets this
-  for you in `pertoken` mode.
 - **Not tested with CUDA graphs.** The per-token path has not been validated under
   Megatron's CUDA graph capture; leave CUDA graphs disabled for now.
 - **Kernels are not yet performance-optimal.** Several per-token cast / GEMM

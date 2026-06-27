@@ -250,13 +250,15 @@ There are two ways to select per-token, both equivalent:
 * ``row_scaled_activation`` and 4over6 are forced off (mutually exclusive with
   the per-token amax layout).
 
-**Requirement: unfused norm forward.** The per-token forward path requires the
-unfused norm+amax implementation; the fused norm+amax path rejects per-token
-quantizers. When the first GEMM consumes a fused norm output (for example
-``LayerNormLinear``), also set ``NVTE_NORM_FWD_USE_CUDNN=1``.
+**Norm forward.** The per-token forward path uses the unfused norm+amax
+implementation. Its per-row/per-col outer amax is computed by the per-token
+cast's first kernel (K1, the amax pass), a per-row ``(M,)`` + per-col ``(K,)``
+vector that the fused norm+amax kernel (which only emits a scalar amax) cannot
+produce. This is selected automatically for per-token quantizers -- no
+``NVTE_NORM_FWD_USE_CUDNN=1`` needed.
 
-**Currently unsupported on the per-token path**: ``fuse_wgrad_accumulation=True``,
-forward/backward output quantization, and communication/bulk overlap.
+**Currently unsupported on the per-token path**: forward/backward output
+quantization, and communication/bulk overlap.
 
 Running per-token NVFP4 with Megatron-Core
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -269,7 +271,6 @@ environment variables. A minimal launch looks like:
 
    # Select NVFP4 per-token via TE env vars (read at recipe construction).
    export NVTE_NVFP4_PER_TOKEN=1
-   export NVTE_NORM_FWD_USE_CUDNN=1          # required: unfused norm forward
    # Optional per-token knobs:
    # export NVTE_NVFP4_PER_TOKEN_RHT=1
    # export NVTE_NVFP4_PER_TOKEN_SR=1

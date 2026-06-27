@@ -54,8 +54,12 @@ def _make_per_token_recipe() -> recipe.NVFP4PerTokenBlockScaling:
     return recipe.NVFP4PerTokenBlockScaling()
 
 
-def test_recipe_construction_forces_mutex_flags():
+def test_recipe_construction_forces_mutex_flags(monkeypatch):
     """Recipe __post_init__ must zero out flags incompatible with per-token."""
+    # Clear NVTE_NVFP4_PER_TOKEN so the base-recipe-stays-prod check below holds
+    # even when the suite is run under NVTE_NVFP4_PER_TOKEN=1. The explicit
+    # subclass still forces per-token, so the other assertions are unaffected.
+    monkeypatch.delenv("NVTE_NVFP4_PER_TOKEN", raising=False)
     r = _make_per_token_recipe()
     assert r.disable_rht is True, "per-token recipe must force disable_rht=True"
     assert (
@@ -451,3 +455,102 @@ def test_linear_3d_input_fwd_bwd_smoke(B, S, K, N):
     bias_grad = linear.bias.grad
     assert bias_grad is not None and bias_grad.shape == (N,)
     assert torch.isfinite(bias_grad).all(), "db contains NaN/inf"
+
+
+# ------------------------------------------------------------------------
+# Fused norm/activation + amax dispatch regression (NO env-var workaround).
+# ------------------------------------------------------------------------
+#
+# Unlike te.Linear, LayerNormLinear / LayerNormMLP route their norm and
+# activation outputs through the FUSED_*_AMAX_NVFP4 dispatch sites in
+# normalization.cpp / activation.cpp / bias.cpp. Per-token's amax is a
+# per-row/per-col vector (not a scalar), so each site must auto-select
+# UNFUSED for per-token -- otherwise quantize_with_amax asserts compute_amax.
+# This must hold with NVTE_NORM_FWD_USE_CUDNN unset (the old workaround), so
+# the tests delete it to guard against any site reverting to the fused path.
+
+
+@pytest.fixture
+def _no_cudnn_norm_workaround(monkeypatch):
+    """Force the legacy NVTE_NORM_FWD_USE_CUDNN workaround off."""
+    monkeypatch.delenv("NVTE_NORM_FWD_USE_CUDNN", raising=False)
+
+
+@pytest.mark.parametrize(
+    # M = token count (%128), K = in_features (%128), N = out_features (%128).
+    "M,K,N",
+    [
+        (128, 128, 128),  # smallest legal per-token shape
+        (256, 1024, 1024),  # mid-size, K not power-of-2 multiple
+        (512, 1024, 2048),  # asymmetric
+    ],
+)
+def test_layernorm_linear_fwd_bwd_no_cudnn_workaround(_no_cudnn_norm_workaround, M, K, N):
+    """LayerNormLinear fwd+bwd under per-token, no NVTE_NORM_FWD_USE_CUDNN.
+
+    Exercises the norm+amax dispatch (normalization.cpp): per-token must take
+    the UNFUSED path, not the scalar-amax fused kernel.
+    """
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+
+    torch.manual_seed(0)
+    m = te.LayerNormLinear(K, N, bias=True, params_dtype=dtype).to(device=device)
+    x = torch.randn((M, K), dtype=dtype, device=device, requires_grad=True)
+
+    rec = _make_per_token_recipe()
+    with te.fp8_autocast(enabled=True, fp8_recipe=rec):
+        y = m(x)
+        y.sum().backward()
+
+    assert y.shape == (M, N), f"y.shape={tuple(y.shape)}, want {(M, N)}"
+    assert torch.isfinite(y).all(), "LayerNormLinear fwd non-finite"
+    assert y.abs().max().item() > 0.0
+    assert x.grad is not None and x.grad.shape == (M, K)
+    assert torch.isfinite(x.grad).all(), "LayerNormLinear dX non-finite"
+    assert x.grad.abs().max().item() > 0.0
+
+
+@pytest.mark.parametrize(
+    # M = token count (%128), H = hidden (%128), FFN = ffn_hidden (%128).
+    "M,H,FFN",
+    [
+        (128, 128, 256),  # smallest
+        (256, 1024, 4096),  # the shape that first hit the act+amax assertion
+        (512, 1024, 2048),  # asymmetric
+    ],
+)
+def test_layernorm_mlp_fwd_bwd_no_cudnn_workaround(_no_cudnn_norm_workaround, M, H, FFN):
+    """LayerNormMLP fwd+bwd under per-token, no NVTE_NORM_FWD_USE_CUDNN.
+
+    Pins down all three fused-amax dispatch sites in one shot: norm cast
+    (normalization.cpp), GELU fwd (activation.cpp), dGELU+dBias bwd
+    (bias.cpp / activation.cpp). The fwd GELU cast is what raised the
+    compute_amax assertion before the per-token auto-unfused fix.
+    """
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+
+    torch.manual_seed(0)
+    m = te.LayerNormMLP(H, FFN, bias=True, params_dtype=dtype).to(device=device)
+    x = torch.randn((M, H), dtype=dtype, device=device, requires_grad=True)
+
+    rec = _make_per_token_recipe()
+    with te.fp8_autocast(enabled=True, fp8_recipe=rec):
+        y = m(x)
+        y.sum().backward()
+
+    # LayerNormMLP returns hidden-sized output (H), not FFN.
+    assert y.shape == (M, H), f"y.shape={tuple(y.shape)}, want {(M, H)}"
+    assert torch.isfinite(y).all(), "LayerNormMLP fwd non-finite (act+amax path?)"
+    assert y.abs().max().item() > 0.0
+
+    assert x.grad is not None and x.grad.shape == (M, H)
+    assert torch.isfinite(x.grad).all(), "LayerNormMLP dX non-finite (dact+dbias path?)"
+    assert x.grad.abs().max().item() > 0.0
+
+    # Both FC weights must have received finite, non-zero gradients (wgrad
+    # ran for both GEMMs in the MLP).
+    for name, p in m.named_parameters():
+        if p.grad is not None and "weight" in name:
+            assert torch.isfinite(p.grad).all(), f"{name}.grad non-finite"

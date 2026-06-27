@@ -29,8 +29,10 @@ pip uninstall -y flash-attn flash_attn flash_attn_2_cuda >/dev/null 2>&1 || true
 # ---------------------------------------------------------------------------
 if [[ "$MODE" == "pertoken" ]]; then
     export NVTE_NVFP4_PER_TOKEN=1
-    export NVTE_NORM_FWD_USE_CUDNN=1
-    echo "[run] MODE=pertoken  -> NVTE_NVFP4_PER_TOKEN=1 NVTE_NORM_FWD_USE_CUDNN=1"
+    # NVTE_NORM_FWD_USE_CUDNN=1 is no longer required: the norm forward now
+    # auto-selects the unfused path for per-token NVFP4 (its per-row/per-col
+    # outer amax is computed by the per-token cast's K1 amax kernel).
+    echo "[run] MODE=pertoken  -> NVTE_NVFP4_PER_TOKEN=1"
 elif [[ "$MODE" == "prod" ]]; then
     unset NVTE_NVFP4_PER_TOKEN || true
     export NVTE_NVFP4_DISABLE_RHT="${NVTE_NVFP4_DISABLE_RHT:-1}"

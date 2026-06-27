@@ -43,8 +43,11 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
     auto nvfp4_quantizer_cpp = dynamic_cast<NVFP4Quantizer*>(quantizer_cpp.get());
     NVTE_CHECK(nvfp4_quantizer_cpp != nullptr, "Could not cast to NVFP4 quantizer");
     if (nvfp4_quantizer_cpp->row_scaled_nvfp4 ||
-        (nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax)) {
-      // Amax is handled within NVFP4 quantizer
+        (nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax) ||
+        nvfp4_quantizer_cpp->per_token) {
+      // Per-token's amax is a per-row/per-col vector from its K1 amax kernel;
+      // the fused activation+amax path only emits a scalar, so per-token must
+      // use UNFUSED (activation in high precision, then K1 amax + K2 cast).
       impl = Impl::UNFUSED;
     } else {
       impl = Impl::FUSED_ACTIVATION_AMAX_NVFP4;
@@ -156,8 +159,11 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
     auto nvfp4_quantizer_cpp = dynamic_cast<NVFP4Quantizer*>(quantizer_cpp.get());
     NVTE_CHECK(nvfp4_quantizer_cpp != nullptr, "Could not cast to NVFP4 quantizer");
     if (nvfp4_quantizer_cpp->row_scaled_nvfp4 ||
-        (nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax)) {
-      // Amax is handled within NVFP4 quantizer
+        (nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax) ||
+        nvfp4_quantizer_cpp->per_token) {
+      // Per-token's amax is a per-row/per-col vector from its K1 amax kernel;
+      // the fused activation+amax path only emits a scalar, so per-token must
+      // use UNFUSED (activation in high precision, then K1 amax + K2 cast).
       impl = Impl::UNFUSED;
     } else {
       impl = Impl::FUSED_ACTIVATION_AMAX_NVFP4;

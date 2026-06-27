@@ -309,7 +309,7 @@ Kernel Configuration
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
-   :Description: Flip a plain ``NVFP4BlockScaling`` recipe into per-token mode (per-row / per-col outer ``amax`` cast plus the fused-EVT CUTLASS GEMM) without changing the recipe class. This lets frameworks that already construct a default ``NVFP4BlockScaling`` (e.g. Megatron-Core with ``--fp4-format e2m1``) opt into per-token purely from the launch environment. Equivalent to constructing the explicit ``NVFP4PerTokenBlockScaling`` recipe. The per-token forward path currently requires the unfused norm+amax path: also set ``NVTE_NORM_FWD_USE_CUDNN=1`` (the fused norm+amax path rejects per-token quantizers).
+   :Description: Flip a plain ``NVFP4BlockScaling`` recipe into per-token mode (per-row / per-col outer ``amax`` cast plus the fused-EVT CUTLASS GEMM) without changing the recipe class. This lets frameworks that already construct a default ``NVFP4BlockScaling`` (e.g. Megatron-Core with ``--fp4-format e2m1``) opt into per-token purely from the launch environment. Equivalent to constructing the explicit ``NVFP4PerTokenBlockScaling`` recipe.
 
 .. envvar:: NVTE_NVFP4_PER_TOKEN_RHT
 
