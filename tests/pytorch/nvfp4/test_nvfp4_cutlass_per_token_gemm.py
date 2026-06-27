@@ -1135,7 +1135,9 @@ def test_grouped_fp32_accumulate(Ms: List[int], N: int, K: int) -> None:
     _grouped(dW_l, accumulate=False)
 
     # Pre-seeded main_grad buffers; accumulate into them in place.
-    c0_l = [(torch.randn((M, N), dtype=torch.float32, device=device) * 2.0).contiguous() for M in Ms]
+    c0_l = [
+        (torch.randn((M, N), dtype=torch.float32, device=device) * 2.0).contiguous() for M in Ms
+    ]
     mg_l = [c0.clone() for c0 in c0_l]
     _grouped(mg_l, accumulate=True)
 
@@ -1193,7 +1195,9 @@ def test_grouped_bias_matches_fp32_plus_bias(Ms: List[int], N: int, K: int) -> N
 
     # Per-group bias (fp32 (N,)); the wrapper accepts fp32 directly. Scaled well
     # above the bf16 ULP floor so a missing/wrong bias can't hide in the tolerance.
-    bias_l = [(torch.randn((N,), dtype=torch.float32, device=device) * 1.5).contiguous() for _ in Ms]
+    bias_l = [
+        (torch.randn((N,), dtype=torch.float32, device=device) * 1.5).contiguous() for _ in Ms
+    ]
 
     # Fused bias into bf16 output.
     d_l = [torch.empty((M, N), dtype=torch.bfloat16, device=device) for M in Ms]

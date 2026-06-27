@@ -316,19 +316,17 @@ constexpr int AlignmentCAcc = 128 / cutlass::sizeof_bits<ElementCAcc>::value;
 constexpr int AlignmentDAcc = 128 / cutlass::sizeof_bits<ElementDAcc>::value;
 
 // Z = NVFP4_DEQUANT_K * alpha_b[j] * (alpha_a[i] * acc), in fp32.
-using ScaledAccEVT = fusion::Sm90EVT<
-    fusion::Sm90Compute<cutlass::multiplies, ElementAccumulator, ElementAccumulator,
-                        kRoundStyleFused>,
-    ConstScaleNode, MulByColEVT>;
+using ScaledAccEVT = fusion::Sm90EVT<fusion::Sm90Compute<cutlass::multiplies, ElementAccumulator,
+                                                         ElementAccumulator, kRoundStyleFused>,
+                                     ConstScaleNode, MulByColEVT>;
 
 // beta scalar (is_zero() gates the C load).
 using BetaNode = fusion::Sm90ScalarBroadcast<ElementScale>;
 
 // D = float(beta * C + Z) -- same multiply_add tree as Sm90LinearCombination.
-using AccumEVT = fusion::Sm90EVT<
-    fusion::Sm90Compute<cutlass::homogeneous_multiply_add, ElementDAcc, ElementAccumulator,
-                        kRoundStyleFused>,
-    BetaNode, fusion::Sm90SrcFetch<ElementCAcc>, ScaledAccEVT>;
+using AccumEVT = fusion::Sm90EVT<fusion::Sm90Compute<cutlass::homogeneous_multiply_add, ElementDAcc,
+                                                     ElementAccumulator, kRoundStyleFused>,
+                                 BetaNode, fusion::Sm90SrcFetch<ElementCAcc>, ScaledAccEVT>;
 
 using CollectiveEpilogueAcc = typename cutlass::epilogue::collective::CollectiveBuilder<
     ArchTag, OperatorClass, MmaTileShape, ClusterShape,
@@ -359,9 +357,9 @@ using Sm1xxBlkScaledConfigAcc =
 
 static void run_cutlass_per_token_gemm_accumulate(void const* a_data_ptr, void const* b_data_ptr,
                                                   void const* a_sf_ptr, void const* b_sf_ptr,
-                                                  float const* alpha_a_ptr, float const* alpha_b_ptr,
-                                                  void* d_ptr, int M, int N, int K, float beta,
-                                                  cudaStream_t stream) {
+                                                  float const* alpha_a_ptr,
+                                                  float const* alpha_b_ptr, void* d_ptr, int M,
+                                                  int N, int K, float beta, cudaStream_t stream) {
   auto stride_A = cutlass::make_cute_packed_stride(StrideAAcc{}, {M, K, 1});
   auto stride_B = cutlass::make_cute_packed_stride(StrideBAcc{}, {N, K, 1});
   auto stride_C = cutlass::make_cute_packed_stride(StrideCAcc{}, {M, N, 1});
@@ -393,15 +391,14 @@ static void run_cutlass_per_token_gemm_accumulate(void const* a_data_ptr, void c
       {},
   };
 
-  typename GemmAcc::Arguments args{
-      cutlass::gemm::GemmUniversalMode::kGemm,
-      {M, N, K, 1},
-      {reinterpret_cast<ElementADataPtr>(a_data_ptr), stride_A,
-       reinterpret_cast<ElementBDataPtr>(b_data_ptr), stride_B,
-       reinterpret_cast<ElementASfPtr>(a_sf_ptr), layout_SFA,
-       reinterpret_cast<ElementBSfPtr>(b_sf_ptr), layout_SFB},
-      {fusion_args, reinterpret_cast<ElementCAcc const*>(d_ptr), stride_C,
-       reinterpret_cast<ElementDAcc*>(d_ptr), stride_D}};
+  typename GemmAcc::Arguments args{cutlass::gemm::GemmUniversalMode::kGemm,
+                                   {M, N, K, 1},
+                                   {reinterpret_cast<ElementADataPtr>(a_data_ptr), stride_A,
+                                    reinterpret_cast<ElementBDataPtr>(b_data_ptr), stride_B,
+                                    reinterpret_cast<ElementASfPtr>(a_sf_ptr), layout_SFA,
+                                    reinterpret_cast<ElementBSfPtr>(b_sf_ptr), layout_SFB},
+                                   {fusion_args, reinterpret_cast<ElementCAcc const*>(d_ptr),
+                                    stride_C, reinterpret_cast<ElementDAcc*>(d_ptr), stride_D}};
 
   GemmAcc gemm;
   size_t workspace_size = GemmAcc::get_workspace_size(args);
@@ -421,9 +418,9 @@ static void run_cutlass_per_token_gemm_accumulate(void const* a_data_ptr, void c
              cutlassGetStatusString(status));
 
   status = gemm.run(stream);
-  NVTE_CHECK(status == cutlass::Status::kSuccess,
-             "CUTLASS NVFP4 per-token accumulate GEMM run failed: ",
-             cutlassGetStatusString(status));
+  NVTE_CHECK(
+      status == cutlass::Status::kSuccess,
+      "CUTLASS NVFP4 per-token accumulate GEMM run failed: ", cutlassGetStatusString(status));
 
   if (workspace != nullptr) {
     NVTE_CHECK_CUDA(cudaFreeAsync(workspace, stream));

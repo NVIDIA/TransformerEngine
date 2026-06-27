@@ -2543,10 +2543,8 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
     NVTE_CHECK(input.dtype() == DType::kBFloat16,
                "NVFP4 per-token weight-2D cast is bf16-only (got dtype enum value ",
                static_cast<int>(input.dtype()), ").");
-    NVTE_CHECK(compute_amax,
-               "NVFP4 per-token weight-2D does not support quantize_with_amax.");
-    NVTE_CHECK(!noop_flag.has_value(),
-               "NVFP4 per-token weight-2D does not support noop_flag.");
+    NVTE_CHECK(compute_amax, "NVFP4 per-token weight-2D does not support quantize_with_amax.");
+    NVTE_CHECK(!noop_flag.has_value(), "NVFP4 per-token weight-2D does not support noop_flag.");
     NVTE_CHECK(!this->with_rht, "NVFP4 per-token weight-2D does not support RHT.");
     NVTE_CHECK(!this->stochastic_rounding,
                "NVFP4 per-token weight-2D does not support stochastic rounding.");
@@ -2587,8 +2585,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
 
     // 2. Per-tensor 2D cast: FP4 codes + 16-row-replicated e4m3 inner SF, rowwise +
     //    transpose-consistent columnwise. Reads amax[0] as the scalar S_enc.
-    NVTE_SCOPED_GIL_RELEASE(
-        { nvte_quantize_v2(input.data(), out.data(), w2d_config, stream); });
+    NVTE_SCOPED_GIL_RELEASE({ nvte_quantize_v2(input.data(), out.data(), w2d_config, stream); });
 
     // 3. Broadcast the scalar amax[0] across the per-token (M,) / (K,) vectors
     //    so the per-token GEMM reads a constant per-row / per-col outer alpha.

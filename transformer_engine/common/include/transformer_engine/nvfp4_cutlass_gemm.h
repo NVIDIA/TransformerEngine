@@ -65,10 +65,12 @@ void nvte_nvfp4_cutlass_per_token_gemm(const NVTETensor a_data, const NVTETensor
  *  When d is FP32, accumulate=true computes d[g] += ... in place (wgrad fused
  *  into FP32 main_grad); accumulate=false overwrites. accumulate requires FP32
  *  outputs. The output dtype must be uniform across groups. */
-void nvte_nvfp4_cutlass_grouped_per_token_gemm(
-    int num_groups, const NVTETensor *a_data, const NVTETensor *b_data, const NVTETensor *a_sf,
-    const NVTETensor *b_sf, const NVTETensor *alpha_a, const NVTETensor *alpha_b, NVTETensor *d,
-    const NVTETensor *bias, bool accumulate, cudaStream_t stream);
+void nvte_nvfp4_cutlass_grouped_per_token_gemm(int num_groups, const NVTETensor *a_data,
+                                               const NVTETensor *b_data, const NVTETensor *a_sf,
+                                               const NVTETensor *b_sf, const NVTETensor *alpha_a,
+                                               const NVTETensor *alpha_b, NVTETensor *d,
+                                               const NVTETensor *bias, bool accumulate,
+                                               cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"

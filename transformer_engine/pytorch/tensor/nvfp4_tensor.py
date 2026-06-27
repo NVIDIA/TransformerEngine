@@ -219,9 +219,7 @@ class NVFP4Quantizer(Quantizer):
             if self.with_rht:
                 raise ValueError("NVFP4 per-token weight-2D does not support RHT.")
             if self.stochastic_rounding:
-                raise ValueError(
-                    "NVFP4 per-token weight-2D does not support stochastic rounding."
-                )
+                raise ValueError("NVFP4 per-token weight-2D does not support stochastic rounding.")
 
     def __getstate__(self):
         """Exclude unpicklable process group from serialized state."""

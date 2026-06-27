@@ -165,15 +165,13 @@ constexpr int AlignmentCAcc = 128 / cutlass::sizeof_bits<ElementCAcc>::value;
 constexpr int AlignmentDAcc = 128 / cutlass::sizeof_bits<ElementDAcc>::value;
 
 // Z = NVFP4_DEQUANT_K * alpha_b[j] * (alpha_a[i] * acc), in fp32.
-using ScaledAccEVT = fusion::Sm90EVT<
-    fusion::Sm90Compute<cutlass::multiplies, ElementAccumulator, ElementAccumulator,
-                        kRoundStyleFused>,
-    ConstScaleNode, MulByColEVT>;
+using ScaledAccEVT = fusion::Sm90EVT<fusion::Sm90Compute<cutlass::multiplies, ElementAccumulator,
+                                                         ElementAccumulator, kRoundStyleFused>,
+                                     ConstScaleNode, MulByColEVT>;
 using BetaNode = fusion::Sm90ScalarBroadcast<ElementScale>;
-using AccumEVT = fusion::Sm90EVT<
-    fusion::Sm90Compute<cutlass::homogeneous_multiply_add, ElementDAcc, ElementAccumulator,
-                        kRoundStyleFused>,
-    BetaNode, fusion::Sm90SrcFetch<ElementCAcc>, ScaledAccEVT>;
+using AccumEVT = fusion::Sm90EVT<fusion::Sm90Compute<cutlass::homogeneous_multiply_add, ElementDAcc,
+                                                     ElementAccumulator, kRoundStyleFused>,
+                                 BetaNode, fusion::Sm90SrcFetch<ElementCAcc>, ScaledAccEVT>;
 
 using CollectiveEpilogueAcc = typename cutlass::epilogue::collective::CollectiveBuilder<
     ArchTag, OperatorClass, MmaTileShape, ClusterShape,
@@ -188,8 +186,8 @@ using CollectiveMainloopAcc = typename cutlass::gemm::collective::CollectiveBuil
         sizeof(typename CollectiveEpilogueAcc::SharedStorage))>,
     MainloopSchedule>::CollectiveOp;
 
-using GemmKernelAcc =
-    cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloopAcc, CollectiveEpilogueAcc>;
+using GemmKernelAcc = cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloopAcc,
+                                                           CollectiveEpilogueAcc>;
 using GemmAcc = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelAcc>;
 
 // ---- bias-fused overwrite variant (fprop): D = bf16(bias[n] + Z) -----------
@@ -317,9 +315,9 @@ static void run_grouped_gemm(GemmT& gemm, typename GemmT::Arguments& args, int G
              cutlassGetStatusString(status), " (num_groups=", G, ")");
 
   status = gemm.initialize(args, workspace, stream);
-  NVTE_CHECK(status == cutlass::Status::kSuccess,
-             "CUTLASS NVFP4 grouped per-token GEMM initialize failed: ",
-             cutlassGetStatusString(status));
+  NVTE_CHECK(
+      status == cutlass::Status::kSuccess,
+      "CUTLASS NVFP4 grouped per-token GEMM initialize failed: ", cutlassGetStatusString(status));
 
   status = gemm.run(stream);
   NVTE_CHECK(status == cutlass::Status::kSuccess,
@@ -386,22 +384,21 @@ static void run_cutlass_grouped_per_token_gemm_impl(
   // Mirror all per-group metadata to device through ONE persistent scratch
   // buffer (one H2D copy per array, zero per-call cudaMalloc/Free). All arrays
   // are O(G) and tiny; 256B sub-alignment is safe for every cute POD type here.
-  const size_t need =
-      align256(problems.size() * sizeof(problems[0])) +
-      align256(stride_A_h.size() * sizeof(StrideAT)) +
-      align256(stride_B_h.size() * sizeof(StrideBT)) +
-      align256(stride_C_h.size() * sizeof(StrideCT)) +
-      align256(stride_D_h.size() * sizeof(StrideDT)) +
-      align256(layout_SFA_h.size() * sizeof(LayoutSFAT)) +
-      align256(layout_SFB_h.size() * sizeof(LayoutSFBT)) +
-      align256(a_ptr_h.size() * sizeof(a_ptr_h[0])) +
-      align256(b_ptr_h.size() * sizeof(b_ptr_h[0])) +
-      align256(sfa_ptr_h.size() * sizeof(sfa_ptr_h[0])) +
-      align256(sfb_ptr_h.size() * sizeof(sfb_ptr_h[0])) +
-      align256(d_ptr_h.size() * sizeof(d_ptr_h[0])) +
-      align256(alpha_a_ptrs.size() * sizeof(alpha_a_ptrs[0])) +
-      align256(alpha_b_ptrs.size() * sizeof(alpha_b_ptrs[0])) +
-      (bias_ptrs.empty() ? 0 : align256(bias_ptrs.size() * sizeof(bias_ptrs[0])));
+  const size_t need = align256(problems.size() * sizeof(problems[0])) +
+                      align256(stride_A_h.size() * sizeof(StrideAT)) +
+                      align256(stride_B_h.size() * sizeof(StrideBT)) +
+                      align256(stride_C_h.size() * sizeof(StrideCT)) +
+                      align256(stride_D_h.size() * sizeof(StrideDT)) +
+                      align256(layout_SFA_h.size() * sizeof(LayoutSFAT)) +
+                      align256(layout_SFB_h.size() * sizeof(LayoutSFBT)) +
+                      align256(a_ptr_h.size() * sizeof(a_ptr_h[0])) +
+                      align256(b_ptr_h.size() * sizeof(b_ptr_h[0])) +
+                      align256(sfa_ptr_h.size() * sizeof(sfa_ptr_h[0])) +
+                      align256(sfb_ptr_h.size() * sizeof(sfb_ptr_h[0])) +
+                      align256(d_ptr_h.size() * sizeof(d_ptr_h[0])) +
+                      align256(alpha_a_ptrs.size() * sizeof(alpha_a_ptrs[0])) +
+                      align256(alpha_b_ptrs.size() * sizeof(alpha_b_ptrs[0])) +
+                      (bias_ptrs.empty() ? 0 : align256(bias_ptrs.size() * sizeof(bias_ptrs[0])));
   const bool batched = use_batched_h2d();
   uint8_t* scr = static_cast<uint8_t*>(persistent_buffer(need, stream, /*which=*/0));
   uint8_t* hscr = batched ? static_cast<uint8_t*>(persistent_host_buffer(need)) : nullptr;
@@ -455,9 +452,9 @@ static void run_cutlass_grouped_per_token_gemm_impl(
     // beta == 1 accumulates in place (ptr_C aliases ptr_D == main_grad).
     typename AccumEVT::Arguments fusion_args{
         {/*scalars=*/{beta}, /*scalar_ptrs=*/{nullptr}, /*dScalar=*/{}},      // beta
-        {},                                                                  // C source fetch
+        {},                                                                   // C source fetch
         make_z_args<typename ScaledAccEVT::Arguments>(alpha_a_d, alpha_b_d),  // Z subtree
-        {},                                                                  // multiply_add
+        {},                                                                   // multiply_add
     };
     // ptr_C aliases ptr_D (== main_grad). The epilogue wants ElementC const**;
     // d_ptr_d is ElementCAcc** (non-const), so round-trip through void* to add
@@ -466,7 +463,8 @@ static void run_cutlass_grouped_per_token_gemm_impl(
     typename GemmT::Arguments args{
         cutlass::gemm::GemmUniversalMode::kGrouped,
         {G, problems_d, /*host_problem_shapes=*/nullptr},
-        {a_ptr_d, stride_A_d, b_ptr_d, stride_B_d, sfa_ptr_d, layout_SFA_d, sfb_ptr_d, layout_SFB_d},
+        {a_ptr_d, stride_A_d, b_ptr_d, stride_B_d, sfa_ptr_d, layout_SFA_d, sfb_ptr_d,
+         layout_SFB_d},
         {fusion_args, /*ptr_C=*/c_ptr_d, stride_C_d, d_ptr_d, stride_D_d},
         hw_info};
     run_grouped_gemm(gemm, args, G, stream);
@@ -477,7 +475,8 @@ static void run_cutlass_grouped_per_token_gemm_impl(
     typename GemmT::Arguments args{
         cutlass::gemm::GemmUniversalMode::kGrouped,
         {G, problems_d, /*host_problem_shapes=*/nullptr},
-        {a_ptr_d, stride_A_d, b_ptr_d, stride_B_d, sfa_ptr_d, layout_SFA_d, sfb_ptr_d, layout_SFB_d},
+        {a_ptr_d, stride_A_d, b_ptr_d, stride_B_d, sfa_ptr_d, layout_SFA_d, sfb_ptr_d,
+         layout_SFB_d},
         {fusion_args, /*ptr_C=*/nullptr, stride_C_d, d_ptr_d, stride_D_d},
         hw_info};
     run_grouped_gemm(gemm, args, G, stream);
@@ -494,7 +493,8 @@ static void run_cutlass_grouped_per_token_gemm_impl(
     typename GemmBias::Arguments args{
         cutlass::gemm::GemmUniversalMode::kGrouped,
         {G, problems_d, /*host_problem_shapes=*/nullptr},
-        {a_ptr_d, stride_A_d, b_ptr_d, stride_B_d, sfa_ptr_d, layout_SFA_d, sfb_ptr_d, layout_SFB_d},
+        {a_ptr_d, stride_A_d, b_ptr_d, stride_B_d, sfa_ptr_d, layout_SFA_d, sfb_ptr_d,
+         layout_SFB_d},
         {fusion_args, /*ptr_C=*/nullptr, stride_C_d, d_ptr_d, stride_D_d},
         hw_info};
     run_grouped_gemm(gemm_bias, args, G, stream);
@@ -508,10 +508,12 @@ static void run_cutlass_grouped_per_token_gemm_impl(
 
 // ---- C API ----------------------------------------------------------------
 
-void nvte_nvfp4_cutlass_grouped_per_token_gemm(
-    int num_groups, const NVTETensor* a_data, const NVTETensor* b_data, const NVTETensor* a_sf,
-    const NVTETensor* b_sf, const NVTETensor* alpha_a, const NVTETensor* alpha_b, NVTETensor* d,
-    const NVTETensor* bias, bool accumulate, cudaStream_t stream) {
+void nvte_nvfp4_cutlass_grouped_per_token_gemm(int num_groups, const NVTETensor* a_data,
+                                               const NVTETensor* b_data, const NVTETensor* a_sf,
+                                               const NVTETensor* b_sf, const NVTETensor* alpha_a,
+                                               const NVTETensor* alpha_b, NVTETensor* d,
+                                               const NVTETensor* bias, bool accumulate,
+                                               cudaStream_t stream) {
   using namespace transformer_engine;
 
   NVTE_CHECK(num_groups > 0, "num_groups must be positive, got ", num_groups);
@@ -558,16 +560,16 @@ void nvte_nvfp4_cutlass_grouped_per_token_gemm(
     const int N = static_cast<int>(b_shape[0]);
 
     NVTE_CHECK(static_cast<int>(b_shape[1]) == K, "group ", g, ": A.K/B.K mismatch");
-    NVTE_CHECK(static_cast<int>(d_shape[0]) == M && static_cast<int>(d_shape[1]) == N,
-               "group ", g, ": D shape mismatch");
+    NVTE_CHECK(static_cast<int>(d_shape[0]) == M && static_cast<int>(d_shape[1]) == N, "group ", g,
+               ": D shape mismatch");
     NVTE_CHECK(a_t->data.dtype == DType::kFloat4E2M1 && b_t->data.dtype == DType::kFloat4E2M1,
                "group ", g, ": A/B must be FP4 e2m1");
-    NVTE_CHECK((d_t->data.dtype == DType::kFloat32) == d_is_fp32,
-               "group ", g, ": D dtype must be uniform across groups");
-    NVTE_CHECK(d_t->data.dtype == DType::kBFloat16 || d_t->data.dtype == DType::kFloat32,
-               "group ", g, ": D must be BF16 or FP32");
-    NVTE_CHECK(aa_t->data.dtype == DType::kFloat32 && ab_t->data.dtype == DType::kFloat32,
-               "group ", g, ": alpha_a/alpha_b must be FP32");
+    NVTE_CHECK((d_t->data.dtype == DType::kFloat32) == d_is_fp32, "group ", g,
+               ": D dtype must be uniform across groups");
+    NVTE_CHECK(d_t->data.dtype == DType::kBFloat16 || d_t->data.dtype == DType::kFloat32, "group ",
+               g, ": D must be BF16 or FP32");
+    NVTE_CHECK(aa_t->data.dtype == DType::kFloat32 && ab_t->data.dtype == DType::kFloat32, "group ",
+               g, ": alpha_a/alpha_b must be FP32");
     NVTE_CHECK(aa_t->data.numel() == static_cast<size_t>(M), "group ", g, ": alpha_a must be (M,)");
     NVTE_CHECK(ab_t->data.numel() == static_cast<size_t>(N), "group ", g, ": alpha_b must be (N,)");
     NVTE_CHECK(M > 0 && N > 0 && K > 0, "group ", g, ": M, N, K must be positive (filter empties)");

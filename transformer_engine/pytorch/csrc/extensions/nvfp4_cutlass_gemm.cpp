@@ -282,10 +282,9 @@ void nvfp4_cutlass_grouped_per_token_gemm(
   if (has_bias) bias_te_v.reserve(G);
 
   for (int64_t g = 0; g < G; ++g) {
-    TORCH_CHECK(a_data[g].is_contiguous() && b_data[g].is_contiguous() &&
-                    a_sf[g].is_contiguous() && b_sf[g].is_contiguous() &&
-                    alpha_a[g].is_contiguous() && alpha_b[g].is_contiguous() &&
-                    d[g].is_contiguous(),
+    TORCH_CHECK(a_data[g].is_contiguous() && b_data[g].is_contiguous() && a_sf[g].is_contiguous() &&
+                    b_sf[g].is_contiguous() && alpha_a[g].is_contiguous() &&
+                    alpha_b[g].is_contiguous() && d[g].is_contiguous(),
                 "group ", g, ": all tensors must be contiguous");
     TORCH_CHECK(a_data[g].scalar_type() == at::ScalarType::Byte &&
                     b_data[g].scalar_type() == at::ScalarType::Byte,

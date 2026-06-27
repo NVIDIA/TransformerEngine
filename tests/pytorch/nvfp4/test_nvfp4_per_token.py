@@ -1121,9 +1121,7 @@ def test_per_token_weight_2d_matches_per_tensor_2d_bytes(M: int, K: int) -> None
         _make_weight_2d_quantizer(per_token=False, per_token_weight_2d=False), w
     )
     # Per-token weight-2D (per_token=True, per_token_weight_2d=True).
-    pt = _quantize_weight_2d(
-        _make_weight_2d_quantizer(per_token=True, per_token_weight_2d=True), w
-    )
+    pt = _quantize_weight_2d(_make_weight_2d_quantizer(per_token=True, per_token_weight_2d=True), w)
 
     # The per-token tensor must advertise per-token layout (drives GEMM dispatch).
     assert pt._per_token is True
@@ -1164,9 +1162,7 @@ def test_per_token_weight_2d_amax_is_scalar_broadcast(M: int, K: int) -> None:
     per_tensor = _quantize_weight_2d(
         _make_weight_2d_quantizer(per_token=False, per_token_weight_2d=False), w
     )
-    pt = _quantize_weight_2d(
-        _make_weight_2d_quantizer(per_token=True, per_token_weight_2d=True), w
-    )
+    pt = _quantize_weight_2d(_make_weight_2d_quantizer(per_token=True, per_token_weight_2d=True), w)
 
     # Reference: the single scalar tensor amax (per-tensor stores it as length-1).
     per_tensor_amax = per_tensor._amax_rowwise.reshape(-1)[0].item()

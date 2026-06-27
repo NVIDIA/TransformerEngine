@@ -1151,8 +1151,8 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
         rowwise_data, rowwise_scale, columnwise_data, columnwise_scale, amax_rowwise,
         amax_columnwise, MakePythonDType(fp4_dtype), quantizer_py_list[i],
         with_gemm_swizzled_scales, py::arg("row_scaled_nvfp4") = row_scaled_nvfp4,
-        py::arg("nvfp4_use_4over6") = nvfp4_use_4over6,
-        py::arg("nvfp4_e4m3_max") = nvfp4_e4m3_max, py::arg("per_token") = per_token));
+        py::arg("nvfp4_use_4over6") = nvfp4_use_4over6, py::arg("nvfp4_e4m3_max") = nvfp4_e4m3_max,
+        py::arg("per_token") = per_token));
 
     // Construct C++ tensor
     // Use a TensorWrapper variable to hold the output of makeTransformerEngineTensor,

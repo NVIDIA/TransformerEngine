@@ -123,7 +123,7 @@ else
     echo "[job] SKIP_BUILD=1 -> assuming TE already registered"
 fi
 
-# Sanity: TE must import AND expose a per-token symbol 
+# Sanity: TE must import AND expose a per-token symbol
 python - <<'PY'
 import transformer_engine            # libtransformer_engine.so first
 import transformer_engine_torch as tex
