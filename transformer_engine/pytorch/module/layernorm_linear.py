@@ -146,7 +146,7 @@ class _LayerNormLinear(torch.autograd.Function):
             symmetric_ar_type,
             debug,
             is_fsdp2,
-            gtp_size,
+            gtp_remat_size,
         ) = non_tensor_args
         if fp8:
             backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
@@ -303,7 +303,7 @@ class _LayerNormLinear(torch.autograd.Function):
         # ------------------------------------------------------
 
         weight_gtp_sharded = weight
-        if gtp_size > 1:
+        if gtp_remat_size > 1:
             weight = weight.all_gather_and_prefetch(
                 fwd=True,
                 skip_weight_cast=is_first_microbatch is False,
@@ -504,8 +504,8 @@ class _LayerNormLinear(torch.autograd.Function):
             tensors_to_save, tensor_objects = prepare_for_saving(
                 inputmat,
                 # GTP: save the sharded reference only; backward re-gathers it.
-                wt_save if gtp_size == 1 else None,
-                weight if gtp_size == 1 else weight_gtp_sharded,
+                wt_save if gtp_remat_size == 1 else None,
+                weight if gtp_remat_size == 1 else weight_gtp_sharded,
                 bias,
                 ln_weight,
                 ln_out_to_save,
@@ -532,7 +532,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 if hasattr(weight, "__fsdp_param__"):
                     # MCore FSDP creates main_grad lazily before backward
                     ctx.main_grad_func = weight.get_main_grad
-                elif gtp_size > 1:
+                elif gtp_remat_size > 1:
                     ctx.main_grad_func = weight_gtp_sharded.get_wgrad_tensor
                 else:
                     ctx.main_grad_func = lambda: weight.main_grad
@@ -576,7 +576,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     qstate.is_first_fp8_module = _first_fp8_module
             ctx.wgrad_store = wgrad_store
             ctx.debug = debug
-            ctx.gtp_size = gtp_size
+            ctx.gtp_remat_size = gtp_remat_size
 
             # backward overrides
             if backward_override is not None:
@@ -628,7 +628,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 rsigma,
             ) = restore_from_func_ctx(ctx)
 
-            if ctx.gtp_size > 1:
+            if ctx.gtp_remat_size > 1:
                 weight = saved_weight.all_gather_and_prefetch_bwd()
 
             # Restore from weakref to get original weight python object
@@ -648,7 +648,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 ), "weight was removed while fuse_wgrad_accumulation=True"
                 # Since main_grad can be modified inplace, it should not be a part of saved_tensors
                 main_grad = ctx.main_grad_func() if weight is not None else None
-                if main_grad is not None and ctx.gtp_size == 1:
+                if main_grad is not None and ctx.gtp_remat_size == 1:
                     origin_weight.main_grad = main_grad
 
             # Gather intermediate/activation tensors if needed
@@ -983,7 +983,7 @@ class _LayerNormLinear(torch.autograd.Function):
                         use_split_accumulator = recipe.fp8_gemm_wgrad.use_split_accumulator
 
                 # Figure out whether to output wgrad GEMM directly into main grad
-                if ctx.gtp_size > 1:
+                if ctx.gtp_remat_size > 1:
                     # GTP: accumulation happens downstream in wgrad_reduce_scatter.
                     accumulate_wgrad_into_param_main_grad = False
                 elif ctx.is_first_microbatch is not None:
@@ -1058,7 +1058,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     # Call wgrad GEMM now
                     wgrad, grad_bias_ = wgrad_gemm(ln_out_total, grad_output)
 
-                    if ctx.gtp_size > 1:
+                    if ctx.gtp_remat_size > 1:
                         wgrad = saved_weight.wgrad_reduce_scatter(wgrad)
 
                     # Update grad bias if needed
@@ -1140,7 +1140,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
         if ctx.requires_wgrad:
             # Handle custom DDP from mcore.
-            if ctx.gtp_size > 1:
+            if ctx.gtp_remat_size > 1:
                 # GTP: skip — wgrad RS already produced the correct shard.
                 pass
             elif ctx.fuse_wgrad_accumulation and hasattr(origin_weight, "grad_added_to_main_grad"):
@@ -1310,7 +1310,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
         name: Optional[str] = None,
-        gtp_group: Optional[dist_group_type] = None,
+        gtp_remat_group: Optional[dist_group_type] = None,
     ) -> None:
         super().__init__(name)
 
@@ -1341,10 +1341,10 @@ class LayerNormLinear(TransformerEngineBaseModule):
             self.set_tensor_parallel_group(tp_group)
         self.set_nccl_overlap_warning_if_tp()
 
-        if gtp_group is None:
-            self.gtp_size = 1
+        if gtp_remat_group is None:
+            self.gtp_remat_size = 1
         else:
-            self.gtp_size = get_distributed_world_size(gtp_group)
+            self.gtp_remat_size = get_distributed_world_size(gtp_remat_group)
 
         self.parallel_mode = parallel_mode
         assert (
@@ -1556,15 +1556,15 @@ class LayerNormLinear(TransformerEngineBaseModule):
         if with_fp8_params:
             self.init_fp8_metadata()
 
-        if gtp_group is not None:
+        if gtp_remat_group is not None:
             # Stashed before reset_parameters so the slice hook can see it.
-            self._gtp_group = gtp_group
+            self._gtp_group = gtp_remat_group
             self._gtp_is_grouped = False
 
         self.reset_parameters(defer_init=device == "meta")
 
-        maybe_wrap_gtp(self, self.weight_names, gtp_group)
-        if gtp_group is not None:
+        maybe_wrap_gtp(self, self.weight_names, gtp_remat_group)
+        if gtp_remat_group is not None:
             # Free the full-size backing buffer; GTP replaced it with a sharded param.
             del weight_tensor
 
@@ -1730,7 +1730,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
             # Get concatenated weight and bias tensors
             weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
 
-            if self.gtp_size > 1:
+            if self.gtp_remat_size > 1:
                 weight_tensor.setup(
                     weight_quantizer=self._get_weight_quantizers(),
                 )
@@ -1805,7 +1805,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.symmetric_ar_type,
                 debug,
                 self.is_fsdp2,
-                self.gtp_size,
+                self.gtp_remat_size,
             )
             out, ln_out, new_weight_workspace = fwd_fn(
                 *autograd_ctx,

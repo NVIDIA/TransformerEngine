@@ -539,7 +539,7 @@ def _compute_grad_params(
     wgrad_output = None
     op_label = f"Grouped MLP fused backward ({label})" if label else "Grouped MLP fused backward"
     weights = fc_op._get_weight_tensors()
-    gtp_size = getattr(ctx, "gtp_size", 1)
+    gtp_remat_size = getattr(ctx, "gtp_remat_size", 1)
     if fc_op.single_grouped_weight:
         w_list = [None]
         if ctx.weight_requires_grad:
@@ -574,7 +574,7 @@ def _compute_grad_params(
         if ctx.weight_requires_grad:
             # EGTP: the GEMM produces full-sized wgrads but main_grad is sharded, so use a
             # full-sized scratch buffer (the reduce-scatter below lands it in main_grad).
-            if fc_op._accumulate_into_main_grad and gtp_size == 1:
+            if fc_op._accumulate_into_main_grad and gtp_remat_size == 1:
                 w_list = [get_main_grad_from_param(w, op_label=op_label) for w in weights]
                 accumulate_into_main_grad = get_accumulate_flag_in_param(weights[0])
             else:
@@ -590,7 +590,7 @@ def _compute_grad_params(
     if ctx.weight_requires_grad:
         # Launch or defer the GEMM
         delay_wgrad = fc_op.wgrad_store is not None and fc_op.wgrad_store.delay_wgrad_compute()
-        if gtp_size > 1 and delay_wgrad:
+        if gtp_remat_size > 1 and delay_wgrad:
             raise RuntimeError(
                 "EGTP + cuteDSL fused grouped-MLP does not support delay_wgrad / "
                 "overlap_dispatch_backward_with_experts_wgrad yet; set "
@@ -636,12 +636,12 @@ def _compute_grad_params(
             gemm_fn(grouped_x, grouped_dy, wgrad_output)
             # EGTP: reduce-scatter the full per-rank wgrads into each sharded main_grad
             # (also fires the Megatron grad-accum hook).
-            if gtp_size > 1:
+            if gtp_remat_size > 1:
                 weights[0].batched_wgrad_reduce_scatter(w_list)
 
         # Need to return dummy wgrads for Megatron-LM wgrad fusion if grad is already added
         # (wgrad fusion, or the EGTP reduce-scatter above) so it doesn't double-add.
-        if fc_op._accumulate_into_main_grad or gtp_size > 1:
+        if fc_op._accumulate_into_main_grad or gtp_remat_size > 1:
             w_list = get_dummy_wgrads_for_params(weights)
         elif delay_wgrad:
             w_list = [None] if fc_op.single_grouped_weight else [None] * num_groups
@@ -906,9 +906,9 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         fc2_weight_param = fc2_op.weight if fc2_op.single_grouped_weight else fc2_op.weight0
 
         # EGTP: expert weights are sharded 1/N along out_features; the fused kernels read
-        # the full shape, so all-gather the full weight first. gtp_size==1 is a no-op.
-        fc1_gtp_size = getattr(fc1_weight_param, "gtp_size", 1)
-        fc2_gtp_size = getattr(fc2_weight_param, "gtp_size", 1)
+        # the full shape, so all-gather the full weight first. gtp_remat_size==1 is a no-op.
+        fc1_gtp_size = getattr(fc1_weight_param, "gtp_remat_size", 1)
+        fc2_gtp_size = getattr(fc2_weight_param, "gtp_remat_size", 1)
         assert fc1_gtp_size == fc2_gtp_size, "FC1/FC2 must share one EGTP group."
         if fc1_gtp_size > 1:
             assert not fc1_op.single_grouped_weight and not fc2_op.single_grouped_weight, (
@@ -1573,7 +1573,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             fc1_ctx.dtype = dtype
             fc1_ctx.input_requires_grad = input_requires_grad
             fc1_ctx.weight_requires_grad = weight_requires_grad
-            fc1_ctx.gtp_size = fc1_gtp_size
+            fc1_ctx.gtp_remat_size = fc1_gtp_size
 
             fc2_ctx.input_quantizers = [fc2_input_quantizer]
             fc2_ctx.grad_output_quantizers = [fc2_grad_output_quantizer]
@@ -1581,7 +1581,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             fc2_ctx.input_requires_grad = input_requires_grad
             fc2_ctx.weight_requires_grad = weight_requires_grad
             fc2_ctx.recompute_input_from_dsrelu = recompute_srelu_fc2_x
-            fc2_ctx.gtp_size = fc2_gtp_size
+            fc2_ctx.gtp_remat_size = fc2_gtp_size
 
         return fc2_out, [(), (), ()]
 
@@ -1823,7 +1823,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
 
         # EGTP: forward gathered rowwise; col-AG the columnwise layout the dgrad needs,
         # right before use (one weight live at a time).
-        if getattr(fc2_ctx, "gtp_size", 1) > 1:
+        if getattr(fc2_ctx, "gtp_remat_size", 1) > 1:
             grouped_fc2_weight = fc2_op.weight0.batched_all_gather_and_prefetch_bwd()
 
         if fc2_op.single_grouped_weight:
@@ -2105,7 +2105,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 }
 
                 # EGTP: col-AG the columnwise layout for the FC1 dgrad (only when dgrad runs).
-                if getattr(fc1_ctx, "gtp_size", 1) > 1:
+                if getattr(fc1_ctx, "gtp_remat_size", 1) > 1:
                     grouped_fc1_weight = fc1_op.weight0.batched_all_gather_and_prefetch_bwd()
 
                 if fc1_op.single_grouped_weight:

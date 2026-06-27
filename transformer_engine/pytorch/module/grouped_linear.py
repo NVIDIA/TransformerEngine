@@ -425,7 +425,7 @@ class _GroupedLinear(torch.autograd.Function):
             skip_fp8_weight_update,
             save_original_input,
             debug,
-            gtp_size,
+            gtp_remat_size,
         ) = non_tensor_args
         if fp8:
             backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
@@ -441,7 +441,7 @@ class _GroupedLinear(torch.autograd.Function):
         weight_requires_grad = weights[0].requires_grad
 
         weights_gtp_sharded = weights
-        if gtp_size > 1:
+        if gtp_remat_size > 1:
             weights = weights[0].batched_all_gather_and_prefetch(
                 fwd=True,
                 skip_weight_cast=is_first_microbatch is False,
@@ -651,12 +651,12 @@ class _GroupedLinear(torch.autograd.Function):
             # Python parameter attributes without keeping the parameter alive here.
             saved_weights = (
                 weights
-                if backward_override == "high_precision" and inp.requires_grad and gtp_size == 1
+                if backward_override == "high_precision" and inp.requires_grad and gtp_remat_size == 1
                 else [None] * num_gemms
             )
             tensors_to_save, tensor_objects = prepare_for_saving(
                 *inputmats,
-                *weights_fp8 if gtp_size == 1 else weights_gtp_sharded,
+                *weights_fp8 if gtp_remat_size == 1 else weights_gtp_sharded,
                 *saved_weights,
                 *biases,
             )
@@ -681,7 +681,7 @@ class _GroupedLinear(torch.autograd.Function):
                 if hasattr(weights[0], "__fsdp_param__"):
                     # MCore FSDP creates main_grad lazily before backward
                     ctx.main_grad_funcs = [weights[i].get_main_grad for i in range(num_gemms)]
-                elif gtp_size > 1:
+                elif gtp_remat_size > 1:
                     ctx.main_grad_funcs = [
                         weights_gtp_sharded[i].get_wgrad_tensor for i in range(num_gemms)
                     ]
@@ -714,7 +714,7 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.debug = debug
             ctx.save_original_input = save_original_input
             ctx.input_quantizers = input_quantizers
-            ctx.gtp_size = gtp_size
+            ctx.gtp_remat_size = gtp_remat_size
 
             # backward overrides
             if backward_override is not None:
@@ -939,7 +939,7 @@ class _GroupedLinear(torch.autograd.Function):
             # Only needed when fuse_wgrad_accumulation is enabled.
             origin_weights = [None] * N
             main_grads = [None] * N
-            if ctx.gtp_size > 1:
+            if ctx.gtp_remat_size > 1:
                 # GTP: origin_weights come from saved tensors; main_grads are
                 # get_wgrad_tensor scratch (do not assign to param.main_grad).
                 origin_weights = weights
@@ -1006,7 +1006,7 @@ class _GroupedLinear(torch.autograd.Function):
                     ctx.m_splits,
                 )
 
-            if ctx.gtp_size > 1:
+            if ctx.gtp_remat_size > 1:
                 accumulate_wgrad_into_param_main_grad = False
             elif ctx.is_first_microbatch is not None:
                 accumulate_wgrad_into_param_main_grad = (
@@ -1015,7 +1015,7 @@ class _GroupedLinear(torch.autograd.Function):
             else:
                 accumulate_wgrad_into_param_main_grad = ctx.fuse_wgrad_accumulation
 
-            if ctx.gtp_size > 1:
+            if ctx.gtp_remat_size > 1:
                 weights = origin_weights[0].batched_all_gather_and_prefetch_bwd()
 
             if ctx.requires_dgrad:
@@ -1086,7 +1086,7 @@ class _GroupedLinear(torch.autograd.Function):
                         device=ctx.device,
                     )
                     wgrad_list = [wgrad_packed[i] for i in range(ctx.num_gemms)]
-                    if ctx.gtp_size > 1:
+                    if ctx.gtp_remat_size > 1:
                         # Gathered weights are no longer needed after dgrad GEMM.
                         del weights
 
@@ -1139,7 +1139,7 @@ class _GroupedLinear(torch.autograd.Function):
                     use_split_accumulator=wgrad_gemm_use_split_accumulator,
                     accumulate=(
                         accumulate_wgrad_into_param_main_grad
-                        if ctx.gtp_size == 1
+                        if ctx.gtp_remat_size == 1
                         and not getattr(ctx, "origin_weights_overwrite_main_grad", False)
                         else False
                     ),
@@ -1182,7 +1182,7 @@ class _GroupedLinear(torch.autograd.Function):
                         wgrad = None
                     return wgrad
 
-                if ctx.gtp_size > 1:
+                if ctx.gtp_remat_size > 1:
                     wgrad_list = origin_weights[0].batched_wgrad_reduce_scatter(wgrad_list)
                     # Drop Python refs to wgrad input buffers. The async RS on rs_stream
                     # still holds C++ refs (via NCCL Work); those are released when
@@ -1313,7 +1313,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         single_grouped_weight: bool = False,
         single_grouped_bias: bool = False,
         name: Optional[str] = None,
-        gtp_group: Optional[dist_group_type] = None,
+        gtp_remat_group: Optional[dist_group_type] = None,
     ) -> None:
         super().__init__(name)
 
@@ -1369,10 +1369,10 @@ class GroupedLinear(TransformerEngineBaseModule):
                 "Because the TP communication is handled outside of this module."
             )
 
-        if gtp_group is None:
-            self.gtp_size = 1
+        if gtp_remat_group is None:
+            self.gtp_remat_size = 1
         else:
-            self.gtp_size = get_distributed_world_size(gtp_group)
+            self.gtp_remat_size = get_distributed_world_size(gtp_remat_group)
 
         self.parallel_mode = parallel_mode
         if self.parallel_mode not in GemmParallelModes:
@@ -1427,15 +1427,15 @@ class GroupedLinear(TransformerEngineBaseModule):
 
         self.weight_names = [f"weight{idx}" for idx in range(self.num_gemms)]
         is_meta = torch.device(device).type == "meta"
-        if gtp_group is not None:
+        if gtp_remat_group is not None:
             # Stashed before reset_parameters so the slice hook can see it;
             # _gtp_is_grouped routes through the GroupedLinear finalize path.
-            self._gtp_group = gtp_group
+            self._gtp_group = gtp_remat_group
             self._gtp_is_grouped = True
 
         self.reset_parameters(defer_init=is_meta)
 
-        maybe_wrap_gtp(self, self.weight_names, gtp_group, is_grouped=True)
+        maybe_wrap_gtp(self, self.weight_names, gtp_remat_group, is_grouped=True)
 
         if self.wgrad_store.delay_wgrad_compute():
             for name, param in self.named_parameters():
@@ -1786,7 +1786,7 @@ class GroupedLinear(TransformerEngineBaseModule):
             weight_tensors = self._get_weight_tensors()
             bias_tensors = self._get_bias_tensors()
 
-            if self.gtp_size > 1:
+            if self.gtp_remat_size > 1:
                 weight_tensors[0].setup(
                     weight_quantizer=self._get_weight_quantizers(),
                 )
@@ -1843,7 +1843,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 skip_fp8_weight_update,
                 self.save_original_input,
                 debug,
-                self.gtp_size,
+                self.gtp_remat_size,
             )
             out, new_workspaces = linear_fn(
                 *autograd_ctx, inp, m_splits, non_tensor_args, *weight_tensors, *bias_tensors

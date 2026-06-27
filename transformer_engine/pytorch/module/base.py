@@ -85,7 +85,7 @@ layers_atomic_ring_exchange = []
 
 # GTP hook slots. An external integrator (currently ``megatron.experimental.gtp``)
 # populates these via ``register_gtp_hooks`` at its own import time. When the
-# slots stay ``None``, the ``gtp_group=`` codepath in TE modules is a no-op
+# slots stay ``None``, the ``gtp_remat_group=`` codepath in TE modules is a no-op
 # and TE has no ``from megatron...`` dependency.
 _gtp_slice_fn = None
 _gtp_finalize_fn = None
@@ -99,7 +99,7 @@ def register_gtp_hooks(*, slice_fn=None, finalize_fn=None, wrap_fn=None):
         Fires per weight during ``reset_parameters``, before FP8 quantize.
     finalize_fn(module, weight_names) -> None
         Fires after the per-weight loop in ``reset_parameters``.
-    wrap_fn(module, weight_names, gtp_group, is_grouped=False) -> None
+    wrap_fn(module, weight_names, gtp_remat_group, is_grouped=False) -> None
         Fires at the end of a module's ``__init__`` to finalize GTP wiring.
     """
     global _gtp_slice_fn, _gtp_finalize_fn, _gtp_wrap_fn
@@ -111,17 +111,17 @@ def register_gtp_hooks(*, slice_fn=None, finalize_fn=None, wrap_fn=None):
         _gtp_wrap_fn = wrap_fn
 
 
-def maybe_wrap_gtp(module, weight_names, gtp_group, is_grouped=False):
+def maybe_wrap_gtp(module, weight_names, gtp_remat_group, is_grouped=False):
     """Finalize GTP wiring on a module if a wrap hook is registered.
 
-    No-op when ``gtp_group`` is None or no GTP integrator has called
+    No-op when ``gtp_remat_group`` is None or no GTP integrator has called
     ``register_gtp_hooks``. Called from each TE module's ``__init__`` after
     ``reset_parameters`` finishes; the per-weight slice already happened
     inside ``reset_parameters`` via ``_gtp_slice_fn``.
     """
-    if gtp_group is None or _gtp_wrap_fn is None:
+    if gtp_remat_group is None or _gtp_wrap_fn is None:
         return
-    _gtp_wrap_fn(module, weight_names, gtp_group, is_grouped=is_grouped)
+    _gtp_wrap_fn(module, weight_names, gtp_remat_group, is_grouped=is_grouped)
 
 
 def is_ub_initialized() -> bool:
