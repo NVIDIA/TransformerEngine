@@ -1199,7 +1199,9 @@ class MXFP8QuantizeSpecializedRowwiseKernel:
 
     def __init__(self, cfg):
         self.cfg = cfg
-        self.STASH_SCALE_TO_SMEM = True
+        # If True, then this kernel will first write each thread's scale byte to a shared memory buffer,
+        # then utilize vectorized store to flush the buffer to global memory.
+        self._STASH_SCALE_TO_SMEM = True # Hardcode to true for now
 
     @cute.jit
     def __call__(
@@ -1276,27 +1278,22 @@ class MXFP8QuantizeSpecializedRowwiseKernel:
         )
         rO_u32 = cute.make_tensor(
             cute.recast_ptr(rO_thread.iterator, dtype=Uint32),
-            cute.make_layout((MXFP8_BLOCK_SIZE // 4,), stride=(1,)),
+            cute.make_layout((MXFP8_BLOCK_SIZE // 4,), stride=(1,)), # Unit is Uint32, divide by 4 here
         )
 
-        # TODO: review this kernel myself.
-
-
-        # Each thread owns only one scale byte, so a direct RF->GMEM scale write
-        # can't vectorize (128 scattered 1-byte stores). If STASH_SCALE_TO_SMEM,
-        # stage the CTA's (CTA_Y, CTA_X) scale tile in SMEM, then flush it to gmem
-        # with wide (uint32) stores. Compile-time gated.
-        sS_slot = None
-        if cutlass.const_expr(self.STASH_SCALE_TO_SMEM):
+        sS_thread = None
+        if cutlass.const_expr(self._STASH_SCALE_TO_SMEM):
             @cute.struct
             class SharedStorage:
                 buf: cute.struct.Align[cute.struct.MemRange[Uint8, CTA_Y * CTA_X], 16]
             storage = cutlass.utils.SmemAllocator().allocate(SharedStorage)
             sScale = storage.buf.get_tensor(cute.make_layout((CTA_Y, CTA_X), stride=(CTA_X, 1)))
-            sS_slot = cute.composition(sScale, tv_layout_scale)[tidx, None]
+            # sScale is (CTA_Y, CTA_X):(CTA_X, 1), which is the same layout as tv_layout_scale
+            # so sS_thread is really just an 1 Uint8 buffer for this thread's scale byte.
+            sS_thread = cute.composition(sScale, tv_layout_scale)[tidx, None]
             # Zero first so padding columns (cols past N/32 in the padded scale
             # matrix) flush as 0 and we never read uninitialized smem.
-            sS_slot[0] = Uint8(0)
+            sS_thread[0] = Uint8(0)
             cute.arch.sync_threads()
 
         row = bidy * self._TILE_Y + tidx // CTA_X
@@ -1312,8 +1309,8 @@ class MXFP8QuantizeSpecializedRowwiseKernel:
                 amax = cute.arch.fmax(amax, fabs_f32(rX_f32[0, i]))
 
             biased_exp = cvt_f32_to_fp8e8m0(amax * max_norm_rcp)
-            if cutlass.const_expr(self.STASH_SCALE_TO_SMEM):
-                sS_slot[0] = Uint8(biased_exp)
+            if cutlass.const_expr(self._STASH_SCALE_TO_SMEM):
+                sS_thread[0] = Uint8(biased_exp)
             else:
                 mS_thread[0] = Uint8(biased_exp)
 
@@ -1322,10 +1319,10 @@ class MXFP8QuantizeSpecializedRowwiseKernel:
             inv_scale = exp2f_rcp(biased_exp)
             scale_2x = pack_f32x2(inv_scale, inv_scale)
             mul_cvt4 = mul_cvt_f32x4_to_fp8x4(self.cfg.FP8_DTYPE)
-            for w in cutlass.range_constexpr(MXFP8_BLOCK_SIZE // 4):
-                b = 4 * w
-                rO_u32[w] = mul_cvt4(rX_f32[0, b], rX_f32[0, b + 1],
-                                     rX_f32[0, b + 2], rX_f32[0, b + 3], scale_2x)
+            for i in cutlass.range_constexpr(MXFP8_BLOCK_SIZE // 4):
+                offset = 4 * i
+                rO_u32[i] = mul_cvt4(rX_f32[0, offset], rX_f32[0, offset + 1],
+                                     rX_f32[0, offset + 2], rX_f32[0, offset + 3], scale_2x)
             cute.autovec_copy(rO_thread, mO_thread)
 
         # Cooperative wide flush of the staged scales: the first CTA_Y*(CTA_X/G)
@@ -1336,28 +1333,35 @@ class MXFP8QuantizeSpecializedRowwiseKernel:
         # straddles the allocation boundary (base and padded_cols are both multiples
         # of G), so flush a group iff its first column is in-allocation. Zeroed
         # padding columns flush as 0.
-        if cutlass.const_expr(self.STASH_SCALE_TO_SMEM):
+        if cutlass.const_expr(self._STASH_SCALE_TO_SMEM):
             cute.arch.sync_threads()
             padded_cols = mS_row.shape[1]
             if padded_cols % 16 == 0:
-                self._flush_scales(sScale, mS_tile, tidx, bidx, bidy, M, padded_cols, 16)
+                # If columns is divisible by 16, use 16 bytes as the vectorized store width
+                self._flush_scales_to_gmem(sScale, mS_tile, tidx, bidx, bidy, M, padded_cols, 16)
             else:
-                self._flush_scales(sScale, mS_tile, tidx, bidx, bidy, M, padded_cols, 4)
-
+                # Otherwise use 4 bytes as the vectorized store width.
+                # Note our fake tensor requires 4 divisibility so this is enforced as long as you can get here
+                self._flush_scales_to_gmem(sScale, mS_tile, tidx, bidx, bidy, M, padded_cols, 4)
     @cute.jit
-    def _flush_scales(self, sScale, mS_tile, tidx, bidx, bidy, M, padded_cols, G):
-        """Flush the staged (CTA_Y, CTA_X) scale tile to gmem with G-wide stores."""
+    def _flush_scales_to_gmem(self, sScale, mS_tile, tidx, bidx, bidy, M, padded_cols, width):
+        """Flush the staged (CTA_Y, CTA_X) scale tile to gmem with vectorized stores."""
         CTA_Y = self._TILE_Y
         CTA_X = self._TILE_X // MXFP8_BLOCK_SIZE
-        GROUPS = CTA_X // G
+        # Previously each threads has 1 byte, but now we are doing vectorized store,
+        # which means only a subset of threads will need to issue the store while other threads are not used.
+        active_threads = CTA_X // width
         _, tv_flush = cute.make_layout_tv(
-            thr_layout=cute.make_layout((CTA_Y, GROUPS), stride=(GROUPS, 1)),
-            val_layout=cute.make_layout((1, G), stride=(G, 1)),
+            thr_layout=cute.make_layout((CTA_Y, active_threads), stride=(active_threads, 1)),
+            val_layout=cute.make_layout((1, width), stride=(width, 1)),
         )
-        if tidx < CTA_Y * GROUPS:
-            frow = tidx // GROUPS
-            fgroup = tidx % GROUPS
-            if bidy * CTA_Y + frow < M and bidx * CTA_X + fgroup * G < padded_cols:
+        # We only need to use a subset of threads with shape (CTA_Y, active_threads) to write
+        # so if the thread is outside of this subset, it will remain inactive
+        if tidx < CTA_Y * active_threads:
+            # Absolute position of the scale vector to write in the GMEM buffer
+            thread_y = bidy * CTA_Y + tidx // active_threads
+            thread_x = bidx * CTA_X + (tidx % active_threads) * width
+            if thread_y < M and thread_x < padded_cols:
                 cute.autovec_copy(
                     cute.composition(sScale, tv_flush)[tidx, None],
                     cute.composition(mS_tile, tv_flush)[tidx, None],
@@ -1396,7 +1400,7 @@ class MXFP8QuantizeSpecializedBidimensionalKernel:
         # produced yet; this stub exists so dispatch routing can be wired now.
 
 
-def get_specialized_kernel_class(cfg):
+def get_kernel_class(cfg):
     """If no fusion is involved and the kernel only quantizes, dispatch to the specialized kernel for better performance."""
     plain_cast_only = (
         not cfg.WITH_GEMM_SWIZZLED_SCALES
@@ -1419,7 +1423,7 @@ def compile_cutedsl_function_from_cfg(cfg):
 
     # Route plain cast-only configs to the matching specialized kernel (mirrors the
     # CUDA dispatcher); everything else uses the general standard kernel.
-    kernel_class = get_specialized_kernel_class(cfg)
+    kernel_class = get_kernel_class(cfg)
     kernel_obj = kernel_class(cfg)
     # M, N must be divisible by the MXFP8 scale-block size (MXFP8_BLOCK_SIZE = 32) — the
     # same alignment the CUDA C++ kernel requires.
