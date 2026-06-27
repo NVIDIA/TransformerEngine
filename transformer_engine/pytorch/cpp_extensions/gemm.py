@@ -126,6 +126,12 @@ def _nvfp4_per_token_select(
             f"NVFP4 per-token GEMM ({side}) requires the per-token amax "
             "vector. Got None — was the tensor built with per_token=True?"
         )
+    # Upstream stores the NVFP4 1x16 block scale_inv as ``torch.float8_e4m3fn``;
+    # the CUTLASS binding wants raw ``uint8`` bytes. e4m3 and uint8 are both 1
+    # byte with identical layout, so this is a zero-copy reinterpret. Tolerate
+    # either storage dtype (older builds emitted uint8 directly).
+    if sf is not None and sf.dtype != torch.uint8:
+        sf = sf.view(torch.uint8)
     return data, sf, amax, sf_swizzled
 
 
