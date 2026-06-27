@@ -651,7 +651,9 @@ class _GroupedLinear(torch.autograd.Function):
             # Python parameter attributes without keeping the parameter alive here.
             saved_weights = (
                 weights
-                if backward_override == "high_precision" and inp.requires_grad and gtp_remat_size == 1
+                if backward_override == "high_precision"
+                and inp.requires_grad
+                and gtp_remat_size == 1
                 else [None] * num_gemms
             )
             tensors_to_save, tensor_objects = prepare_for_saving(
