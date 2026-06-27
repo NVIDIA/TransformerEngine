@@ -72,6 +72,8 @@ __all__ = [
     "initialize_ub",
     "destroy_ub",
     "is_ub_initialized",
+    "maybe_wrap_gtp",
+    "register_gtp_hooks",
     "using_cublasmp_backend",
     "UserBufferQuantizationMode",
 ]
@@ -85,6 +87,47 @@ _ub_initialized = False
 _ub_with_cublasmp = False
 _MIN_STREAM_PRIORITY, _MAX_STREAM_PRIORITY = None, None
 layers_atomic_ring_exchange = []
+
+
+# GTP hook slots. An external integrator (currently ``megatron.experimental.gtp``)
+# populates these via ``register_gtp_hooks`` at its own import time. When the
+# slots stay ``None``, the ``gtp_remat_group=`` codepath in TE modules is a no-op
+# and TE has no ``from megatron...`` dependency.
+_gtp_slice_fn = None
+_gtp_finalize_fn = None
+_gtp_wrap_fn = None
+
+
+def register_gtp_hooks(*, slice_fn=None, finalize_fn=None, wrap_fn=None):
+    """Register GTP integration hooks. Hooks left as ``None`` are unchanged.
+
+    slice_fn(module, name, param, *, expert_idx) -> GTPShardedParam | None
+        Fires per weight during ``reset_parameters``, before FP8 quantize.
+    finalize_fn(module, weight_names) -> None
+        Fires after the per-weight loop in ``reset_parameters``.
+    wrap_fn(module, weight_names, gtp_remat_group, is_grouped=False) -> None
+        Fires at the end of a module's ``__init__`` to finalize GTP wiring.
+    """
+    global _gtp_slice_fn, _gtp_finalize_fn, _gtp_wrap_fn
+    if slice_fn is not None:
+        _gtp_slice_fn = slice_fn
+    if finalize_fn is not None:
+        _gtp_finalize_fn = finalize_fn
+    if wrap_fn is not None:
+        _gtp_wrap_fn = wrap_fn
+
+
+def maybe_wrap_gtp(module, weight_names, gtp_remat_group, is_grouped=False):
+    """Finalize GTP wiring on a module if a wrap hook is registered.
+
+    No-op when ``gtp_remat_group`` is None or no GTP integrator has called
+    ``register_gtp_hooks``. Called from each TE module's ``__init__`` after
+    ``reset_parameters`` finishes; the per-weight slice already happened
+    inside ``reset_parameters`` via ``_gtp_slice_fn``.
+    """
+    if gtp_remat_group is None or _gtp_wrap_fn is None:
+        return
+    _gtp_wrap_fn(module, weight_names, gtp_remat_group, is_grouped=is_grouped)
 
 
 def is_ub_initialized() -> bool:
@@ -1705,7 +1748,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if defer_init:
             return
 
-        for name, param in self.named_parameters(recurse=False):
+        # Names of GTP-sharded weights, for GroupedLinear's post-loop finalize.
+        _gtp_sharded_weight_names = []
+
+        for idx, (name, param) in enumerate(self.named_parameters(recurse=False)):
             # Check if parameter is a DTensor (FSDP2) or regular tensor
             is_dtensor = isinstance(param, DTensor)
             dtensor_param = param if is_dtensor else None
@@ -1727,10 +1773,23 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     with get_rng_state_tracker().fork():
                         init_fn(param)
 
+            # GTP slice: shard the freshly-init weight into a GTPShardedParam;
+            # the FP8 quantize block below is skipped for it.
+            gtp_sharded = None
+            if (
+                not is_dtensor
+                and getattr(self, "_gtp_group", None) is not None
+                and _gtp_slice_fn is not None
+            ):
+                gtp_sharded = _gtp_slice_fn(self, name, param, expert_idx=idx)
+                if gtp_sharded is not None:
+                    param = gtp_sharded
+                    _gtp_sharded_weight_names.append(name)
+
             # Wrap parameters in QuantizedTensor if needed
             fp8_meta_index = self.param_init_meta[name].fp8_meta_index
             high_precision_init_val = None
-            if self.primary_weights_in_fp8 and fp8_meta_index is not None:
+            if self.primary_weights_in_fp8 and fp8_meta_index is not None and gtp_sharded is None:
 
                 # Keep high-precision values on CPU if needed
                 if self.preserve_high_precision_init_val:
@@ -1760,6 +1819,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             # NOTE: Currently this can only be broken when primary weights are in Fp8 but
             #       re-applying the nn.Parameter() wrap is a no-op when the input is already
             #       a parameter so we always re-apply it just for extra safety.
+            # Skip the wrap for GTPShardedParam (Parameter.__new__ would drop attrs).
             if is_dtensor:
                 # recreate the DTensor from the parameter.
                 dtensor_param = DTensor.from_local(
@@ -1770,7 +1830,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     stride=dtensor_param.stride(),
                 )
                 dtensor_param = torch.nn.Parameter(dtensor_param)
-            else:
+            elif gtp_sharded is None:
                 param = torch.nn.Parameter(param)
 
             # Keep high-precision values on CPU if needed
@@ -1807,6 +1867,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 self.module_setattr(name, param)
             else:
                 self.module_setattr(name, dtensor_param)
+
+        # GroupedLinear post-loop finalize hook (no-op outside GroupedLinear).
+        if _gtp_sharded_weight_names and _gtp_finalize_fn is not None:
+            _gtp_finalize_fn(self, _gtp_sharded_weight_names)
 
     @abstractmethod
     def forward(self):
