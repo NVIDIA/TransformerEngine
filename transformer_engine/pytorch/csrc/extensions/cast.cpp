@@ -316,6 +316,7 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
     FP8_CURRENT_SCALING_GROUPED_QUANTIZE,
     MXFP8_GROUPED_QUANTIZE,
     NVFP4_GROUPED_QUANTIZE,
+    FP8_BLOCKWISE_GROUPED_QUANTIZE,
     INVALID_FOR_GROUPED_QUANTIZE
   };
   GroupedQuantizationMode grouped_quantization_mode =
@@ -326,6 +327,8 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
     grouped_quantization_mode = GroupedQuantizationMode::NVFP4_GROUPED_QUANTIZE;
   } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
     grouped_quantization_mode = GroupedQuantizationMode::FP8_CURRENT_SCALING_GROUPED_QUANTIZE;
+  } else if (detail::IsFloat8BlockwiseQuantizers(quantizer.ptr())) {
+    grouped_quantization_mode = GroupedQuantizationMode::FP8_BLOCKWISE_GROUPED_QUANTIZE;
   }
 
   if (empty_input_buffer) {
@@ -371,11 +374,23 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
       });
       break;
     }
+    case GroupedQuantizationMode::FP8_BLOCKWISE_GROUPED_QUANTIZE: {
+      Float8BlockQuantizer *fp8_block_quantizer_cpp =
+          static_cast<Float8BlockQuantizer *>(quantizer_cpp.get());
+      QuantizationConfigWrapper quant_config_cpp;
+      quant_config_cpp.set_force_pow_2_scales(fp8_block_quantizer_cpp->force_pow_2_scales);
+      quant_config_cpp.set_amax_epsilon(fp8_block_quantizer_cpp->amax_epsilon);
+      NVTE_SCOPED_GIL_RELEASE({
+        nvte_group_quantize(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(),
+                            quant_config_cpp, at::cuda::getCurrentCUDAStream());
+      });
+      break;
+    }
     case GroupedQuantizationMode::INVALID_FOR_GROUPED_QUANTIZE:
     default:
       NVTE_ERROR(
-          "group_quantize: only supports MXFP8, NVFP4, or "
-          "Float8CurrentScalingQuantizer.");
+          "group_quantize: only supports MXFP8, NVFP4, Float8CurrentScalingQuantizer, or "
+          "Float8Blockwise quantizer.");
       break;
   }
 
@@ -479,8 +494,9 @@ py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
 
   bool empty_input_buffer = logical_first_dim == 0 || logical_last_dim == 0;
 
-  NVTE_CHECK(detail::IsMXFP8Quantizers(quantizer.ptr()),
-             "bgrad_group_quantize: only MXFP8 quantizer is supported.");
+  NVTE_CHECK(detail::IsMXFP8Quantizers(quantizer.ptr()) ||
+                 detail::IsFloat8BlockwiseQuantizers(quantizer.ptr()),
+             "bgrad_group_quantize: only MXFP8 and FP8 block-scaling quantizers are supported.");
 
   auto quantizer_cpp = convert_quantizer(quantizer);
 
@@ -587,12 +603,19 @@ py::object group_dequantize(const py::handle &input, transformer_engine::DType o
   // Build input GroupedTensorWrapper.
   // Data tensors are stored as flat 1D buffers; use the quantizer's dtype
   // (e.g. kFloat8E4M3) rather than the raw tensor scalar_type (uint8).
-  auto input_cpp = GroupedTensorWrapper(num_tensors, logical_shape, quantizer->get_scaling_mode());
+  const NVTEScalingMode scaling_mode = quantizer->get_scaling_mode();
+  const bool is_block_scaling =
+      (scaling_mode == NVTE_BLOCK_SCALING_1D || scaling_mode == NVTE_BLOCK_SCALING_2D);
+  const bool is_nvfp4 = (scaling_mode == NVTE_NVFP4_1D_SCALING);
+  const DType scale_dtype = is_block_scaling ? DType::kFloat32
+                            : is_nvfp4       ? DType::kFloat8E4M3
+                                             : DType::kFloat8E8M0;
+  auto input_cpp = GroupedTensorWrapper(num_tensors, logical_shape, scaling_mode);
   if (rowwise_data.has_value()) {
     input_cpp.set_rowwise_data(rowwise_data->data_ptr(), quantizer->dtype,
                                std::vector<size_t>{static_cast<size_t>(rowwise_data->numel())});
     if (rowwise_scale_inv.has_value()) {
-      input_cpp.set_rowwise_scale_inv(rowwise_scale_inv->data_ptr(), DType::kFloat8E8M0,
+      input_cpp.set_rowwise_scale_inv(rowwise_scale_inv->data_ptr(), scale_dtype,
                                       getTensorShape(*rowwise_scale_inv));
     }
   }
@@ -601,7 +624,7 @@ py::object group_dequantize(const py::handle &input, transformer_engine::DType o
         columnwise_data->data_ptr(), quantizer->dtype,
         std::vector<size_t>{static_cast<size_t>(columnwise_data->numel())});
     if (columnwise_scale_inv.has_value()) {
-      input_cpp.set_columnwise_scale_inv(columnwise_scale_inv->data_ptr(), DType::kFloat8E8M0,
+      input_cpp.set_columnwise_scale_inv(columnwise_scale_inv->data_ptr(), scale_dtype,
                                          getTensorShape(*columnwise_scale_inv));
     }
   }
