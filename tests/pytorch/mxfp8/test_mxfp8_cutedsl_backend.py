@@ -38,29 +38,41 @@ recipe_available, reason_for_no_recipe = te.is_mxfp8_available(return_reason=Tru
 _FP8 = {"e4m3": tex.DType.kFloat8E4M3, "e5m2": tex.DType.kFloat8E5M2}
 _DT = {"bf16": torch.bfloat16, "fp16": torch.float16}
 _FWD = {"plain", "gelu", "silu", "relu", "qgelu", "srelu"}
-_FWD_FN = {"gelu": tex.gelu, "silu": tex.silu, "relu": tex.relu,
-           "qgelu": tex.qgelu, "srelu": tex.srelu}
-_DACT_FN = {"dgelu": tex.dgelu, "dsilu": tex.dsilu, "drelu": tex.drelu,
-            "dqgelu": tex.dqgelu, "dsrelu": tex.dsrelu}
-_DBIAS_DACT_FN = {f"dbias_{k}": getattr(tex, f"dbias_{k}")
-                  for k in ("dgelu", "dsilu", "drelu", "dqgelu", "dsrelu")}
+_FWD_FN = {
+    "gelu": tex.gelu,
+    "silu": tex.silu,
+    "relu": tex.relu,
+    "qgelu": tex.qgelu,
+    "srelu": tex.srelu,
+}
+_DACT_FN = {
+    "dgelu": tex.dgelu,
+    "dsilu": tex.dsilu,
+    "drelu": tex.drelu,
+    "dqgelu": tex.dqgelu,
+    "dsrelu": tex.dsrelu,
+}
+_DBIAS_DACT_FN = {
+    f"dbias_{k}": getattr(tex, f"dbias_{k}")
+    for k in ("dgelu", "dsilu", "drelu", "dqgelu", "dsrelu")
+}
 
 # A diverse set of configs to interleave/repeat: mixed dtypes, fp8 formats,
 # directions, and the plain / forward-act / dact / dbias / dbias+dact families.
 _CONFIGS = [
     # (combo, rowwise, columnwise, in_dtype, fp8)
-    ("plain",        True,  True,  "bf16", "e4m3"),
-    ("plain",        True,  False, "bf16", "e4m3"),
-    ("plain",        False, True,  "bf16", "e4m3"),
-    ("plain",        True,  True,  "bf16", "e5m2"),
-    ("plain",        True,  True,  "fp16", "e4m3"),
-    ("gelu",         True,  True,  "bf16", "e4m3"),
-    ("relu",         True,  True,  "bf16", "e4m3"),
-    ("silu",         True,  True,  "bf16", "e4m3"),
-    ("dgelu",        True,  True,  "bf16", "e4m3"),
-    ("dbias",        True,  True,  "bf16", "e4m3"),
-    ("dbias_dsilu",  True,  True,  "bf16", "e4m3"),
-    ("dbias_dqgelu", True,  False, "bf16", "e4m3"),
+    ("plain", True, True, "bf16", "e4m3"),
+    ("plain", True, False, "bf16", "e4m3"),
+    ("plain", False, True, "bf16", "e4m3"),
+    ("plain", True, True, "bf16", "e5m2"),
+    ("plain", True, True, "fp16", "e4m3"),
+    ("gelu", True, True, "bf16", "e4m3"),
+    ("relu", True, True, "bf16", "e4m3"),
+    ("silu", True, True, "bf16", "e4m3"),
+    ("dgelu", True, True, "bf16", "e4m3"),
+    ("dbias", True, True, "bf16", "e4m3"),
+    ("dbias_dsilu", True, True, "bf16", "e4m3"),
+    ("dbias_dqgelu", True, False, "bf16", "e4m3"),
 ]
 
 
@@ -106,13 +118,11 @@ def _signature(out, db, rowwise, columnwise):
     if rowwise:
         data = out._rowwise_data.view(torch.uint8)
         M, N = data.shape
-        parts += [data.clone(),
-                  out._rowwise_scale_inv[:M, :(N + 31) // 32].clone()]
+        parts += [data.clone(), out._rowwise_scale_inv[:M, : (N + 31) // 32].clone()]
     if columnwise:
         data = out._columnwise_data.view(torch.uint8)
         M, N = data.shape
-        parts += [data.clone(),
-                  out._columnwise_scale_inv[:(M + 31) // 32, :N].clone()]
+        parts += [data.clone(), out._columnwise_scale_inv[: (M + 31) // 32, :N].clone()]
     if db is not None:
         parts.append(db.clone())
     return parts
@@ -150,9 +160,13 @@ def _require_active_cutedsl_backend():
     active = False
     try:
         import tvm_ffi
-        active = tvm_ffi.get_global_func(
-            "cutedsl_mxfp8_bf16_e4m3_1_1_0_0_0_0_0_0_none", allow_missing=True
-        ) is not None
+
+        active = (
+            tvm_ffi.get_global_func(
+                "cutedsl_mxfp8_bf16_e4m3_1_1_0_0_0_0_0_0_none", allow_missing=True
+            )
+            is not None
+        )
     except Exception:
         active = False
     if not active:
@@ -180,7 +194,7 @@ def test_interleaved_configs_do_not_clobber_each_other():
         out, db = _run(combo, x, ain, rw, cw, fp8)
         assert _sig_equal(_signature(out, db, rw, cw), golden[cfg]), (
             f"config {cfg} produced different output after other configs were "
-            f"(re)compiled — cached kernel was clobbered or mis-keyed"
+            "(re)compiled — cached kernel was clobbered or mis-keyed"
         )
 
 
@@ -199,9 +213,9 @@ def test_cached_kernel_stable_while_new_configs_compile():
         x, ain = _inputs(M, N, dt)
         _run(combo, x, ain, rw, cw, fp8)  # (re)compile / run another config
         out, db = _run(p_combo, px, pain, p_rw, p_cw, p_fp8)
-        assert _sig_equal(_signature(out, db, p_rw, p_cw), golden), (
-            f"probe ({p_combo}) output changed after running config {combo!r}"
-        )
+        assert _sig_equal(
+            _signature(out, db, p_rw, p_cw), golden
+        ), f"probe ({p_combo}) output changed after running config {combo!r}"
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
@@ -212,8 +226,7 @@ def test_one_symbolic_kernel_handles_many_shapes(combo):
     forward combos, output close to the reference)."""
     rw = cw = True
     fp8, dt = "e4m3", "bf16"
-    shapes = [(32, 32), (64, 64), (32, 2048), (2048, 32),
-              (256, 512), (1024, 1536), (2048, 2048)]
+    shapes = [(32, 32), (64, 64), (32, 2048), (2048, 32), (256, 512), (1024, 1536), (2048, 2048)]
     for M, N in shapes:
         x, ain = _inputs(M, N, dt)
         out, _ = _run(combo, x, ain, rw, cw, fp8)
@@ -232,12 +245,11 @@ def test_repeated_calls_are_deterministic():
     M, N = 256, 512
     for combo, rw, cw, dt, fp8 in _CONFIGS:
         x, ain = _inputs(M, N, dt)
-        sigs = [_signature(*_run(combo, x, ain, rw, cw, fp8), rw, cw)
-                for _ in range(4)]
+        sigs = [_signature(*_run(combo, x, ain, rw, cw, fp8), rw, cw) for _ in range(4)]
         for i in range(1, len(sigs)):
-            assert _sig_equal(sigs[i], sigs[0]), (
-                f"config ({combo},{dt},{fp8}) call {i} differs from call 0"
-            )
+            assert _sig_equal(
+                sigs[i], sigs[0]
+            ), f"config ({combo},{dt},{fp8}) call {i} differs from call 0"
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
@@ -259,6 +271,7 @@ def test_distinct_configs_compile_and_are_correct(combo, fp8, direction):
     rel = (deq - ref).norm() / ref.norm().clamp_min(1e-6)
     tol = 0.12 if fp8 == "e4m3" else 0.30
     assert rel < tol, f"{combo}/{fp8}/{direction}: rel_err={rel:.4f}"
+
 
 # ---------------------------------------------------------------------------
 # Numerical parity vs an fp32 reference, mirroring tests/cpp/operator/
@@ -287,8 +300,13 @@ _FP8_T = {"e4m3": torch.float8_e4m3fn, "e5m2": torch.float8_e5m2}
 # mixing %128 and %32-not-%128 (the kernels' partial-tile / OOB edge).
 _PARITY_SHAPES = [(128, 128), (256, 1024), (512, 512), (160, 160), (128, 1056), (256, 384)]
 # (op for _run, is_activation): the GeLU-family ProcessingMethods.
-_CPP_OPS = [("plain", False), ("dbias", False),
-            ("gelu", True), ("dgelu", True), ("dbias_dgelu", True)]
+_CPP_OPS = [
+    ("plain", False),
+    ("dbias", False),
+    ("gelu", True),
+    ("dgelu", True),
+    ("dbias_dgelu", True),
+]
 _CPP_DIRECTIONS = ["row", "col", "both"]
 
 
@@ -339,9 +357,9 @@ def _ref_scales(v, d, fp8):
     """Reference e8m0 scales for value v (fp32), direction d."""
     M, N = v.shape
     if d == "row":
-        amax = v.reshape(M, N // 32, 32).abs().amax(-1)          # (M, N//32)
+        amax = v.reshape(M, N // 32, 32).abs().amax(-1)  # (M, N//32)
     else:
-        amax = v.reshape(M // 32, 32, N).abs().amax(1)           # (M//32, N)
+        amax = v.reshape(M // 32, 32, N).abs().amax(1)  # (M//32, N)
     return _ref_e8m0(amax * _FP8_MAX_RCP[fp8])
 
 
@@ -362,8 +380,9 @@ def _check_parity(op, is_act, direction, M, N, in_dtype, fp8):
         # Scales: bit-exact vs the fp32 reference (C++ zero-tolerance) — only for
         # no-activation ops, where the reference value equals the kernel input.
         if not is_act:
-            assert torch.equal(sc, _ref_scales(v, d, fp8)), \
-                f"{op}/{d}/{fp8}/{in_dtype} {M}x{N}: e8m0 scales differ from reference"
+            assert torch.equal(
+                sc, _ref_scales(v, d, fp8)
+            ), f"{op}/{d}/{fp8}/{in_dtype} {M}x{N}: e8m0 scales differ from reference"
 
     if db is not None:
         dref = v.sum(dim=0)
