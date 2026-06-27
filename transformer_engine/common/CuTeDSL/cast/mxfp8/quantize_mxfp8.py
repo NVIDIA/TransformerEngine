@@ -1343,6 +1343,7 @@ class MXFP8QuantizeSpecializedRowwiseKernel:
                 # Otherwise use 4 bytes as the vectorized store width.
                 # Note our fake tensor requires 4 divisibility so this is enforced as long as you can get here
                 self._flush_scales_to_gmem(sScale, mS_tile, tidx, bidx, bidy, M, padded_cols, 4)
+
     @cute.jit
     def _flush_scales_to_gmem(self, sScale, mS_tile, tidx, bidx, bidy, M, padded_cols, width):
         """Flush the staged (CTA_Y, CTA_X) scale tile to gmem with vectorized stores."""
