@@ -391,6 +391,7 @@ def _nvfp4_per_token_grouped_gemm(
     m_splits: List[int],
     single_output: bool,
     accumulate: bool = False,
+    bias: Optional[List[torch.Tensor]] = None,
 ) -> List[torch.Tensor]:
     """Native grouped (MoE) per-token NVFP4 GEMM (one ptr-array CUTLASS launch).
 
@@ -402,12 +403,18 @@ def _nvfp4_per_token_grouped_gemm(
 
     Handles the plain D = alpha_a * alpha_b * (A @ B^T) path (bf16 output) and
     the wgrad-accumulate path (accumulate=True, fp32 main_grad outputs:
-    D = main_grad + dW in place). Callers must route bias / gelu /
-    output-quantization to the per-expert fallback (rejected by the kernel).
+    D = main_grad + dW in place). gelu / output-quantization still route to the
+    per-expert fallback (rejected by the kernel).
+
+    bias (fprop only) is an optional per-expert list of (N,) tensors fused into
+    the epilogue: D_g += bias_g (added in fp32 before the bf16 cast). It requires
+    the bf16 overwrite path (mutually exclusive with accumulate).
 
     accumulate=True requires every output view to be fp32 (the main_grad
     buffers); the kernel computes beta=1 accumulation directly in the EVT.
     """
+    if bias is not None:
+        assert not accumulate, "NVFP4 per-token grouped GEMM bias is fprop-only (no accumulate)."
     # Same (transa, transb) -> rowwise/columnwise table as _nvfp4_per_token_gemm.
     if (transa, transb) == (True, False):
         layout_label = "TN"
@@ -442,6 +449,7 @@ def _nvfp4_per_token_grouped_gemm(
 
     # Collect per-group kernel operands for the non-empty experts.
     a_data_l, b_data_l, a_sf_l, b_sf_l, alpha_a_l, alpha_b_l, d_l = ([] for _ in range(7))
+    bias_l: List[torch.Tensor] = []
     a_sf_swz_seen: Optional[bool] = None
     b_sf_swz_seen: Optional[bool] = None
 
@@ -501,6 +509,10 @@ def _nvfp4_per_token_grouped_gemm(
         alpha_a_l.append(ka_amax)
         alpha_b_l.append(kb_amax)
         d_l.append(out_views[g].view(M, N))
+        if bias is not None:
+            # Kernel consumes an fp32 (N,) bias per group (mirrors the fp32 alpha
+            # arrays; the add happens in fp32 before the bf16 cast).
+            bias_l.append(bias[g].to(dtype=torch.float32).contiguous())
 
     if a_data_l:
         tex.nvfp4_cutlass_grouped_per_token_gemm(
@@ -514,6 +526,7 @@ def _nvfp4_per_token_grouped_gemm(
             bool(a_sf_swz_seen),
             bool(b_sf_swz_seen),
             accumulate,
+            bias_l,
         )
 
     if single_output:
@@ -815,17 +828,21 @@ def general_grouped_gemm(
                 )
 
         # Native single-launch CUTLASS grouped per-token kernel. Serves the
-        # plain D = alpha_a * alpha_b * (A @ B^T) path (bf16 out) and the
-        # wgrad-accumulate path (accumulate=True with fp32 main_grad outputs:
-        # D = main_grad + dW via a beta=1 EVT). bias / gelu / output-quantization
-        # fall through to the per-expert loop below.
+        # plain D = alpha_a * alpha_b * (A @ B^T) path (bf16 out), the fprop
+        # bias-fused path (bias added in the EVT epilogue), and the wgrad-
+        # accumulate path (accumulate=True with fp32 main_grad outputs:
+        # D = main_grad + dW via a beta=1 EVT). gelu / output-quantization fall
+        # through to the per-expert loop below.
         _accumulate_native_ok = (not accumulate) or all(
             o.numel() == 0 or o.dtype == torch.float32 for o in out
         )
+        # Bias is fused only on the fprop overwrite path: forward (not grad), no
+        # accumulate. Backward dbias (grad=True) still uses the fallback.
+        _bias_native_ok = (not use_bias) or (not grad and not accumulate)
         _native_ok = (
             _accumulate_native_ok
             and not gelu
-            and not use_bias
+            and _bias_native_ok
             and D_dtype is None
             and all(qp is None for qp in quantization_params)
         )
@@ -841,6 +858,7 @@ def general_grouped_gemm(
                 m_splits=m_splits,
                 single_output=single_output,
                 accumulate=accumulate,
+                bias=bias if use_bias else None,
             )
             return out, grad_bias, gelu_input
 

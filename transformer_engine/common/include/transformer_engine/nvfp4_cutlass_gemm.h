@@ -53,6 +53,10 @@ void nvte_nvfp4_cutlass_per_token_gemm(const NVTETensor a_data, const NVTETensor
  *    - alpha_a[g]: FP32 per-row outer scale, length M_g
  *    - alpha_b[g]: FP32 per-col outer scale, length N_g
  *    - d[g]      : BF16 (overwrite) or FP32 output, logical (M_g, N_g)
+ *    - bias      : optional (may be NULL). When non-NULL, bias[g] is an FP32
+ *                  (N_g,) vector fused into the epilogue: D_g += bias[g] (added
+ *                  in FP32 before the BF16 cast). Forward-only; requires BF16
+ *                  outputs (mutually exclusive with accumulate).
  *
  *  Each group must satisfy M_g % 128 == 0, N_g % 128 == 0, K % 128 == 0
  *  (same 1-CTA MmaTile = (128,128,256) constraint as the dense per-token
@@ -64,7 +68,7 @@ void nvte_nvfp4_cutlass_per_token_gemm(const NVTETensor a_data, const NVTETensor
 void nvte_nvfp4_cutlass_grouped_per_token_gemm(
     int num_groups, const NVTETensor *a_data, const NVTETensor *b_data, const NVTETensor *a_sf,
     const NVTETensor *b_sf, const NVTETensor *alpha_a, const NVTETensor *alpha_b, NVTETensor *d,
-    bool accumulate, cudaStream_t stream);
+    const NVTETensor *bias, bool accumulate, cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"

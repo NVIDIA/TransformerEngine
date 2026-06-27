@@ -237,7 +237,8 @@ void nvfp4_cutlass_per_token_gemm(const at::Tensor &a_data, const at::Tensor &b_
 void nvfp4_cutlass_grouped_per_token_gemm(
     std::vector<at::Tensor> a_data, std::vector<at::Tensor> b_data, std::vector<at::Tensor> a_sf,
     std::vector<at::Tensor> b_sf, std::vector<at::Tensor> alpha_a, std::vector<at::Tensor> alpha_b,
-    std::vector<at::Tensor> d, bool a_sf_swizzled, bool b_sf_swizzled, bool accumulate) {
+    std::vector<at::Tensor> d, bool a_sf_swizzled, bool b_sf_swizzled, bool accumulate,
+    std::vector<at::Tensor> bias) {
   const int64_t G = static_cast<int64_t>(a_data.size());
   TORCH_CHECK(G > 0, "grouped per-token GEMM needs at least one group");
   TORCH_CHECK(b_data.size() == static_cast<size_t>(G) && a_sf.size() == static_cast<size_t>(G) &&
@@ -252,14 +253,25 @@ void nvfp4_cutlass_grouped_per_token_gemm(
   TORCH_CHECK(!accumulate || d_is_fp32,
               "nvfp4_cutlass_grouped_per_token_gemm accumulate=true requires float32 outputs");
 
+  // Optional fused bias (fprop only): one FP32 (N_g,) vector per group, added in
+  // the epilogue before the BF16 cast. Empty list -> no bias. Forward-only, so
+  // it requires the BF16 overwrite path (mutually exclusive with accumulate).
+  const bool has_bias = !bias.empty();
+  if (has_bias) {
+    TORCH_CHECK(bias.size() == static_cast<size_t>(G),
+                "bias list must have one (N,) tensor per group");
+    TORCH_CHECK(!d_is_fp32, "nvfp4_cutlass_grouped_per_token_gemm bias requires bf16 outputs");
+  }
+
   const auto stream = at::cuda::getCurrentCUDAStream();
   auto byte_opts = a_sf[0].options().dtype(at::kByte);
 
   // Keep TensorWrappers and swizzle buffers alive until the launch completes.
-  std::vector<TensorWrapper> a_te_v, b_te_v, a_sf_te_v, b_sf_te_v, aa_te_v, ab_te_v, d_te_v;
+  std::vector<TensorWrapper> a_te_v, b_te_v, a_sf_te_v, b_sf_te_v, aa_te_v, ab_te_v, d_te_v,
+      bias_te_v;
   std::vector<at::Tensor> swz_keepalive;
   std::vector<NVTETensor> a_arr(G), b_arr(G), a_sf_arr(G), b_sf_arr(G), aa_arr(G), ab_arr(G),
-      d_arr(G);
+      d_arr(G), bias_arr(has_bias ? G : 0);
   a_te_v.reserve(G);
   b_te_v.reserve(G);
   a_sf_te_v.reserve(G);
@@ -267,6 +279,7 @@ void nvfp4_cutlass_grouped_per_token_gemm(
   aa_te_v.reserve(G);
   ab_te_v.reserve(G);
   d_te_v.reserve(G);
+  if (has_bias) bias_te_v.reserve(G);
 
   for (int64_t g = 0; g < G; ++g) {
     TORCH_CHECK(a_data[g].is_contiguous() && b_data[g].is_contiguous() &&
@@ -344,6 +357,16 @@ void nvfp4_cutlass_grouped_per_token_gemm(
     d_te_v.push_back(makeTransformerEngineTensor(
         d[g].data_ptr(), std::vector<size_t>{static_cast<size_t>(M), static_cast<size_t>(N)},
         d_is_fp32 ? DType::kFloat32 : DType::kBFloat16));
+
+    if (has_bias) {
+      TORCH_CHECK(bias[g].is_cuda() && bias[g].is_contiguous(), "group ", g,
+                  ": bias must be a contiguous CUDA tensor");
+      TORCH_CHECK(bias[g].scalar_type() == at::ScalarType::Float, "group ", g,
+                  ": bias must be float32");
+      TORCH_CHECK(bias[g].numel() == N, "group ", g, ": bias must have N elements");
+      bias_te_v.push_back(makeTransformerEngineTensor(
+          bias[g].data_ptr(), std::vector<size_t>{static_cast<size_t>(N)}, DType::kFloat32));
+    }
   }
 
   for (int64_t g = 0; g < G; ++g) {
@@ -354,11 +377,13 @@ void nvfp4_cutlass_grouped_per_token_gemm(
     aa_arr[g] = aa_te_v[g].data();
     ab_arr[g] = ab_te_v[g].data();
     d_arr[g] = d_te_v[g].data();
+    if (has_bias) bias_arr[g] = bias_te_v[g].data();
   }
 
-  nvte_nvfp4_cutlass_grouped_per_token_gemm(static_cast<int>(G), a_arr.data(), b_arr.data(),
-                                            a_sf_arr.data(), b_sf_arr.data(), aa_arr.data(),
-                                            ab_arr.data(), d_arr.data(), accumulate, stream);
+  nvte_nvfp4_cutlass_grouped_per_token_gemm(
+      static_cast<int>(G), a_arr.data(), b_arr.data(), a_sf_arr.data(), b_sf_arr.data(),
+      aa_arr.data(), ab_arr.data(), d_arr.data(), has_bias ? bias_arr.data() : nullptr, accumulate,
+      stream);
 }
 
 }  // namespace transformer_engine::pytorch

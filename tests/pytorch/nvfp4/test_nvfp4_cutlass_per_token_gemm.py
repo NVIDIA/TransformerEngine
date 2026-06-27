@@ -1151,6 +1151,87 @@ def test_grouped_fp32_accumulate(Ms: List[int], N: int, K: int) -> None:
         )
 
 
+@_GATED_SM100
+@_GATED_HAS_KERNEL
+@_GATED_HAS_GROUPED
+@pytest.mark.parametrize("Ms,N,K", _GROUPED_CASES)
+def test_grouped_bias_matches_fp32_plus_bias(Ms: List[int], N: int, K: int) -> None:
+    """Fused per-group bias (fprop): grouped(bias) [bf16] must match, per group,
+    bf16(Z + bias) where Z is the bias-free grouped result computed in fp32 and
+    bias is the per-group (N,) vector broadcast over rows.
+
+    NOT bit-exact: the fp32 Z baseline comes from the fp32-output kernel instance
+    (GemmAcc) while the fused-bias path's Z comes from the bf16-output instance
+    (GemmBias). The two instances differ only in the epilogue (output dtype +
+    bias add), but the distinct EpilogueTile / mainloop-stage carveout lets their
+    fp32 Z disagree by <=1 fp32 ULP, which flips the final bf16 round by at most
+    one bf16 ULP. So we compare within the bf16 ULP floor (2^-7 ~= 7.8e-3 rel),
+    same tolerance the dense vs-cuBLASLt test uses. A missing / mis-broadcast /
+    wrong-scale bias would diverge by ~|bias| (>> the tolerance) and still fail."""
+    device = torch.device("cuda")
+    torch.manual_seed(0xB1A5)
+    G = len(Ms)
+
+    a_data_l, b_data_l, a_sf_l, b_sf_l, alpha_a_l, alpha_b_l = ([] for _ in range(6))
+    for M in Ms:
+        a = (torch.randn((M, K), dtype=torch.bfloat16, device=device) * 0.5).contiguous()
+        b = (torch.randn((N, K), dtype=torch.bfloat16, device=device) * 0.5).contiguous()
+        a_q, a_sf, a_amax = _quantize_per_token(a)
+        b_q, b_sf, b_amax = _quantize_per_token(b)
+        a_data_l.append(a_q)
+        b_data_l.append(b_q)
+        a_sf_l.append(a_sf.reshape(-1))
+        b_sf_l.append(b_sf.reshape(-1))
+        alpha_a_l.append(a_amax)
+        alpha_b_l.append(b_amax)
+
+    # Bias-free Z, computed in fp32 (overwrite). fp32 baseline for Z + bias.
+    z_l = [torch.empty((M, N), dtype=torch.float32, device=device) for M in Ms]
+    tex.nvfp4_cutlass_grouped_per_token_gemm(
+        a_data_l, b_data_l, a_sf_l, b_sf_l, alpha_a_l, alpha_b_l, z_l, False, False, False
+    )
+
+    # Per-group bias (fp32 (N,)); the wrapper accepts fp32 directly. Scaled well
+    # above the bf16 ULP floor so a missing/wrong bias can't hide in the tolerance.
+    bias_l = [(torch.randn((N,), dtype=torch.float32, device=device) * 1.5).contiguous() for _ in Ms]
+
+    # Fused bias into bf16 output.
+    d_l = [torch.empty((M, N), dtype=torch.bfloat16, device=device) for M in Ms]
+    tex.nvfp4_cutlass_grouped_per_token_gemm(
+        a_data_l,
+        b_data_l,
+        a_sf_l,
+        b_sf_l,
+        alpha_a_l,
+        alpha_b_l,
+        d_l,
+        False,  # a_sf_swizzled
+        False,  # b_sf_swizzled
+        False,  # accumulate
+        bias_l,
+    )
+
+    for g in range(G):
+        ref_f32 = (z_l[g] + bias_l[g]).to(torch.bfloat16).float()
+        out_f32 = d_l[g].float()
+        abs_diff = (out_f32 - ref_f32).abs()
+        max_abs = abs_diff.max().item()
+        max_rel = (abs_diff / ref_f32.abs().clamp_min(1e-6)).max().item()
+        print(
+            f"  group {g:>2} M={Ms[g]:>5} N={N} K={K}: "
+            f"max_abs_bias={max_abs:.3e} max_rel={max_rel:.3e}"
+        )
+        # bf16 ULP floor (cross-instance fp32-Z rounding); same tol as the dense
+        # vs-cuBLASLt test. A missing/mis-broadcast bias diverges by ~|bias|.
+        torch.testing.assert_close(
+            out_f32,
+            ref_f32,
+            rtol=2e-2,
+            atol=2e-2,
+            msg=f"grouped bias group {g} (M={Ms[g]}) != bf16(Z + bias)",
+        )
+
+
 if __name__ == "__main__":
     if not _has_sm100():
         print("SKIP: not SM100")
@@ -1176,4 +1257,5 @@ if __name__ == "__main__":
             for Ms, N, K in _GROUPED_CASES:
                 test_grouped_matches_dense_per_group(Ms, N, K)
                 test_grouped_fp32_accumulate(Ms, N, K)
+                test_grouped_bias_matches_fp32_plus_bias(Ms, N, K)
         print("All tests passed.")

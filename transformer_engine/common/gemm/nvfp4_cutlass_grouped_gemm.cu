@@ -192,6 +192,36 @@ using GemmKernelAcc =
     cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloopAcc, CollectiveEpilogueAcc>;
 using GemmAcc = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelAcc>;
 
+// ---- bias-fused overwrite variant (fprop): D = bf16(bias[n] + Z) -----------
+// Bias is a per-output-channel (N) vector broadcast down rows -- the SAME
+// broadcast family as alpha_b (ColScaleNode = Sm90RowBroadcast). Fed as FP32
+// per-group pointer arrays to mirror the alpha arrays exactly: bias is tiny, so
+// the host-side bf16->fp32 cast is negligible and this dodges any converting-
+// load edge cases in the array-of-pointers broadcast. Reuses the fp32 Z subtree
+// (ScaledAccEVT); only the top-level (bias + Z) add and the bf16 cast are new.
+using BiasNode = fusion::Sm90RowBroadcast<
+    /*Stages=*/0, MmaTileShape, /*ElementInput_=*/ElementScale*,
+    /*ElementCompute=*/ElementAccumulator>;
+// D = bf16(bias[n] + Z), Z (fp32) = NVFP4_DEQUANT_K * alpha_b[j] * alpha_a[i] * acc.
+using FusedBiasEVT = fusion::Sm90EVT<
+    fusion::Sm90Compute<cutlass::plus, ElementD, ElementAccumulator, kRoundStyleFused>, BiasNode,
+    ScaledAccEVT>;
+
+using CollectiveEpilogueBias = typename cutlass::epilogue::collective::CollectiveBuilder<
+    ArchTag, OperatorClass, MmaTileShape, ClusterShape,
+    cutlass::epilogue::collective::EpilogueTileAuto, ElementAccumulator, ElementAccumulator,
+    ElementC, LayoutCTag*, AlignmentC, ElementD, LayoutDTag*, AlignmentD, EpilogueSchedule,
+    FusedBiasEVT>::CollectiveOp;
+using CollectiveMainloopBias = typename cutlass::gemm::collective::CollectiveBuilder<
+    ArchTag, OperatorClass, ElementA, LayoutATag*, AlignmentA, ElementB, LayoutBTag*, AlignmentB,
+    ElementAccumulator, MmaTileShape, ClusterShape,
+    cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
+        sizeof(typename CollectiveEpilogueBias::SharedStorage))>,
+    MainloopSchedule>::CollectiveOp;
+using GemmKernelBias = cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloopBias,
+                                                            CollectiveEpilogueBias>;
+using GemmBias = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelBias>;
+
 // Query the SM count exactly once (cudaGetDeviceProperties is very slow and was
 // adding a ~ms fixed cost to every grouped launch).
 static int cached_sm_count() {
@@ -306,8 +336,9 @@ static void run_cutlass_grouped_per_token_gemm_impl(
     const std::vector<const void*>& a_data_ptrs, const std::vector<const void*>& b_data_ptrs,
     const std::vector<const void*>& a_sf_ptrs, const std::vector<const void*>& b_sf_ptrs,
     const std::vector<const float*>& alpha_a_ptrs, const std::vector<const float*>& alpha_b_ptrs,
-    const std::vector<void*>& d_ptrs, const std::vector<int>& Ms, const std::vector<int>& Ns,
-    const std::vector<int>& Ks, float beta, cudaStream_t stream) {
+    const std::vector<const float*>& bias_ptrs, const std::vector<void*>& d_ptrs,
+    const std::vector<int>& Ms, const std::vector<int>& Ns, const std::vector<int>& Ks, float beta,
+    cudaStream_t stream) {
   using GemmT = std::conditional_t<Accumulate, GemmAcc, Gemm>;
   using StrideAT = typename GemmT::GemmKernel::InternalStrideA;
   using StrideBT = typename GemmT::GemmKernel::InternalStrideB;
@@ -369,7 +400,8 @@ static void run_cutlass_grouped_per_token_gemm_impl(
       align256(sfb_ptr_h.size() * sizeof(sfb_ptr_h[0])) +
       align256(d_ptr_h.size() * sizeof(d_ptr_h[0])) +
       align256(alpha_a_ptrs.size() * sizeof(alpha_a_ptrs[0])) +
-      align256(alpha_b_ptrs.size() * sizeof(alpha_b_ptrs[0]));
+      align256(alpha_b_ptrs.size() * sizeof(alpha_b_ptrs[0])) +
+      (bias_ptrs.empty() ? 0 : align256(bias_ptrs.size() * sizeof(bias_ptrs[0])));
   const bool batched = use_batched_h2d();
   uint8_t* scr = static_cast<uint8_t*>(persistent_buffer(need, stream, /*which=*/0));
   uint8_t* hscr = batched ? static_cast<uint8_t*>(persistent_host_buffer(need)) : nullptr;
@@ -404,6 +436,8 @@ static void run_cutlass_grouped_per_token_gemm_impl(
   // Per-token outer-scale ptr arrays (consumed by the array-of-pointers EVT).
   auto* alpha_a_d = put(alpha_a_ptrs);
   auto* alpha_b_d = put(alpha_b_ptrs);
+  // Optional per-group bias ptr array (fprop bf16 overwrite path only).
+  const float** bias_d = bias_ptrs.empty() ? nullptr : put(bias_ptrs);
 
   // Batched path only: one H2D for ALL per-group metadata (off == packed bytes).
   // Stream-ordered before the GEMM consumes the device pointers returned above.
@@ -436,7 +470,7 @@ static void run_cutlass_grouped_per_token_gemm_impl(
         {fusion_args, /*ptr_C=*/c_ptr_d, stride_C_d, d_ptr_d, stride_D_d},
         hw_info};
     run_grouped_gemm(gemm, args, G, stream);
-  } else {
+  } else if (bias_d == nullptr) {
     // Overwrite path: D = bf16(Z). GemmT == Gemm here.
     typename FusedEVT::Arguments fusion_args =
         make_z_args<typename FusedEVT::Arguments>(alpha_a_d, alpha_b_d);
@@ -447,6 +481,23 @@ static void run_cutlass_grouped_per_token_gemm_impl(
         {fusion_args, /*ptr_C=*/nullptr, stride_C_d, d_ptr_d, stride_D_d},
         hw_info};
     run_grouped_gemm(gemm, args, G, stream);
+  } else {
+    // Bias-fused overwrite path: D = bf16(bias[n] + Z). Same metadata/strides
+    // as the plain overwrite path (only the epilogue EVT differs), so the
+    // device pointer arrays packed above are reused as-is.
+    typename FusedBiasEVT::Arguments fusion_args{
+        {bias_d, /*null_default=*/ElementScale{0}, /*dRow=*/{}},
+        make_z_args<typename ScaledAccEVT::Arguments>(alpha_a_d, alpha_b_d),
+        {},  // plus
+    };
+    GemmBias gemm_bias;
+    typename GemmBias::Arguments args{
+        cutlass::gemm::GemmUniversalMode::kGrouped,
+        {G, problems_d, /*host_problem_shapes=*/nullptr},
+        {a_ptr_d, stride_A_d, b_ptr_d, stride_B_d, sfa_ptr_d, layout_SFA_d, sfb_ptr_d, layout_SFB_d},
+        {fusion_args, /*ptr_C=*/nullptr, stride_C_d, d_ptr_d, stride_D_d},
+        hw_info};
+    run_grouped_gemm(gemm_bias, args, G, stream);
   }
 }
 
@@ -460,7 +511,7 @@ static void run_cutlass_grouped_per_token_gemm_impl(
 void nvte_nvfp4_cutlass_grouped_per_token_gemm(
     int num_groups, const NVTETensor* a_data, const NVTETensor* b_data, const NVTETensor* a_sf,
     const NVTETensor* b_sf, const NVTETensor* alpha_a, const NVTETensor* alpha_b, NVTETensor* d,
-    bool accumulate, cudaStream_t stream) {
+    const NVTETensor* bias, bool accumulate, cudaStream_t stream) {
   using namespace transformer_engine;
 
   NVTE_CHECK(num_groups > 0, "num_groups must be positive, got ", num_groups);
@@ -477,6 +528,14 @@ void nvte_nvfp4_cutlass_grouped_per_token_gemm(
   const bool d_is_fp32 = convertNVTETensorCheck(d[0])->data.dtype == DType::kFloat32;
   NVTE_CHECK(!accumulate || d_is_fp32,
              "NVFP4 grouped per-token GEMM accumulate=true requires FP32 outputs (main_grad)");
+
+  // Optional fused bias (fprop only): per-group FP32 (N,) vector added in the
+  // epilogue. Only valid on the BF16 overwrite path (mutually exclusive with the
+  // FP32 accumulate/wgrad path). Empty -> no bias.
+  const bool has_bias = bias != nullptr;
+  NVTE_CHECK(!has_bias || !d_is_fp32,
+             "NVFP4 grouped per-token GEMM bias requires BF16 outputs (fprop overwrite path)");
+  std::vector<const float*> bias_ptrs(has_bias ? num_groups : 0);
 
   for (int g = 0; g < num_groups; ++g) {
     auto* a_t = convertNVTETensorCheck(a_data[g]);
@@ -526,16 +585,24 @@ void nvte_nvfp4_cutlass_grouped_per_token_gemm(
     Ms[g] = M;
     Ns[g] = N;
     Ks[g] = K;
+
+    if (has_bias) {
+      auto* bias_t = convertNVTETensorCheck(bias[g]);
+      NVTE_CHECK(bias_t->data.dtype == DType::kFloat32, "group ", g, ": bias must be FP32");
+      NVTE_CHECK(bias_t->data.numel() == static_cast<size_t>(N), "group ", g,
+                 ": bias must be (N,)");
+      bias_ptrs[g] = reinterpret_cast<const float*>(bias_t->data.dptr);
+    }
   }
 
   if (d_is_fp32) {
     nvfp4_cutlass::run_cutlass_grouped_per_token_gemm_impl</*Accumulate=*/true>(
-        a_data_ptrs, b_data_ptrs, a_sf_ptrs, b_sf_ptrs, alpha_a_ptrs, alpha_b_ptrs, d_ptrs, Ms, Ns,
-        Ks, /*beta=*/accumulate ? 1.0f : 0.0f, stream);
+        a_data_ptrs, b_data_ptrs, a_sf_ptrs, b_sf_ptrs, alpha_a_ptrs, alpha_b_ptrs,
+        /*bias_ptrs=*/{}, d_ptrs, Ms, Ns, Ks, /*beta=*/accumulate ? 1.0f : 0.0f, stream);
   } else {
     nvfp4_cutlass::run_cutlass_grouped_per_token_gemm_impl</*Accumulate=*/false>(
-        a_data_ptrs, b_data_ptrs, a_sf_ptrs, b_sf_ptrs, alpha_a_ptrs, alpha_b_ptrs, d_ptrs, Ms, Ns,
-        Ks, /*beta=*/0.0f, stream);
+        a_data_ptrs, b_data_ptrs, a_sf_ptrs, b_sf_ptrs, alpha_a_ptrs, alpha_b_ptrs, bias_ptrs,
+        d_ptrs, Ms, Ns, Ks, /*beta=*/0.0f, stream);
   }
 #else
   NVTE_ERROR(

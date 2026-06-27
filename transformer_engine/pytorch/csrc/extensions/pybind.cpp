@@ -512,10 +512,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Each argument is a list of per-group tensors; alpha_a_g (M_g,) and "
         "alpha_b_g (N_g,) are fp32 outer-scale vectors. SFs are swizzled per "
         "group unless *_sf_swizzled is set. Empty experts must be filtered out. "
-        "d may be bf16 (overwrite) or fp32; accumulate=true (fp32 d) adds in place.",
+        "d may be bf16 (overwrite) or fp32; accumulate=true (fp32 d) adds in place. "
+        "bias (optional) is a per-group fp32 (N_g,) vector fused into the epilogue "
+        "(fprop only; requires bf16 d).",
         py::arg("a_data"), py::arg("b_data"), py::arg("a_sf"), py::arg("b_sf"), py::arg("alpha_a"),
         py::arg("alpha_b"), py::arg("d"), py::arg("a_sf_swizzled") = false,
-        py::arg("b_sf_swizzled") = false, py::arg("accumulate") = false);
+        py::arg("b_sf_swizzled") = false, py::arg("accumulate") = false,
+        py::arg("bias") = std::vector<at::Tensor>());
   m.def("nvfp4_per_token_post_scale", &transformer_engine::pytorch::nvfp4_per_token_post_scale,
         "Apply d[i,j] *= row_amax_a[i] * row_amax_b[j] in-place on bf16 D.", py::arg("d"),
         py::arg("row_amax_a"), py::arg("row_amax_b"));

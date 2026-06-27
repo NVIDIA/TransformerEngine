@@ -505,7 +505,8 @@ void nvfp4_cutlass_per_token_gemm(const at::Tensor &a_data, const at::Tensor &b_
 void nvfp4_cutlass_grouped_per_token_gemm(
     std::vector<at::Tensor> a_data, std::vector<at::Tensor> b_data, std::vector<at::Tensor> a_sf,
     std::vector<at::Tensor> b_sf, std::vector<at::Tensor> alpha_a, std::vector<at::Tensor> alpha_b,
-    std::vector<at::Tensor> d, bool a_sf_swizzled, bool b_sf_swizzled, bool accumulate);
+    std::vector<at::Tensor> d, bool a_sf_swizzled, bool b_sf_swizzled, bool accumulate,
+    std::vector<at::Tensor> bias = {});
 
 // with_swizzle=true makes K2 write rowwise scale_inv in the cuBLAS LT
 // swizzled tile layout (skips the standalone nvte_swizzle_scaling_factors).
