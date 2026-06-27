@@ -7,6 +7,11 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_TVM_FFI_BRIDGE_H_
 #define TRANSFORMER_ENGINE_COMMON_TVM_FFI_BRIDGE_H_
 
+#include <tvm/ffi/any.h>
+#include <tvm/ffi/container/tensor.h>
+#include <tvm/ffi/function.h>
+#include <tvm/ffi/optional.h>
+
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
@@ -18,11 +23,6 @@
 #include <utility>
 #include <vector>
 
-#include <tvm/ffi/any.h>
-#include <tvm/ffi/container/tensor.h>
-#include <tvm/ffi/function.h>
-#include <tvm/ffi/optional.h>
-
 #include "transformer_engine/transformer_engine.h"
 #include "util/cuda_runtime.h"
 #include "util/logging.h"
@@ -32,12 +32,18 @@ namespace tvm_ffi_bridge {
 
 inline const char *te_dtype_to_str(DType dtype) {
   switch (dtype) {
-    case DType::kFloat32:  return "fp32";
-    case DType::kFloat16:  return "fp16";
-    case DType::kBFloat16: return "bf16";
-    case DType::kFloat8E4M3: return "e4m3";
-    case DType::kFloat8E5M2: return "e5m2";
-    default:               return "";
+    case DType::kFloat32:
+      return "fp32";
+    case DType::kFloat16:
+      return "fp16";
+    case DType::kBFloat16:
+      return "bf16";
+    case DType::kFloat8E4M3:
+      return "e4m3";
+    case DType::kFloat8E5M2:
+      return "e5m2";
+    default:
+      return "";
   }
 }
 
@@ -63,34 +69,55 @@ enum class Activation {
 
 inline const char *activation_to_str(Activation act) {
   switch (act) {
-    case Activation::kReLU:   return "relu";
-    case Activation::kGeLU:   return "gelu";
-    case Activation::kSiLU:   return "silu";
-    case Activation::kQGeLU:  return "qgelu";
-    case Activation::kSReLU:  return "srelu";
-    case Activation::kDReLU:  return "drelu";
-    case Activation::kDGeLU:  return "dgelu";
-    case Activation::kDSiLU:  return "dsilu";
-    case Activation::kDQGeLU: return "dqgelu";
-    case Activation::kDSReLU: return "dsrelu";
-    case Activation::kNone:   return "none";
+    case Activation::kReLU:
+      return "relu";
+    case Activation::kGeLU:
+      return "gelu";
+    case Activation::kSiLU:
+      return "silu";
+    case Activation::kQGeLU:
+      return "qgelu";
+    case Activation::kSReLU:
+      return "srelu";
+    case Activation::kDReLU:
+      return "drelu";
+    case Activation::kDGeLU:
+      return "dgelu";
+    case Activation::kDSiLU:
+      return "dsilu";
+    case Activation::kDQGeLU:
+      return "dqgelu";
+    case Activation::kDSReLU:
+      return "dsrelu";
+    case Activation::kNone:
+      return "none";
   }
   return "none";
 }
 
 inline DLDataType convert_to_dltype(NVTEDType type) {
   switch (type) {
-    case kNVTEFloat32:    return DLDataType{kDLFloat,  32, 1};
-    case kNVTEFloat16:    return DLDataType{kDLFloat,  16, 1};
-    case kNVTEBFloat16:   return DLDataType{kDLBfloat, 16, 1};
-    case kNVTEByte:       return DLDataType{kDLUInt,    8, 1};
-    case kNVTEInt32:      return DLDataType{kDLInt,    32, 1};
-    case kNVTEInt64:      return DLDataType{kDLInt,    64, 1};
+    case kNVTEFloat32:
+      return DLDataType{kDLFloat, 32, 1};
+    case kNVTEFloat16:
+      return DLDataType{kDLFloat, 16, 1};
+    case kNVTEBFloat16:
+      return DLDataType{kDLBfloat, 16, 1};
+    case kNVTEByte:
+      return DLDataType{kDLUInt, 8, 1};
+    case kNVTEInt32:
+      return DLDataType{kDLInt, 32, 1};
+    case kNVTEInt64:
+      return DLDataType{kDLInt, 64, 1};
     // FP8 / E8M0 → raw 1-byte uint; the kernel interprets the bits.
-    case kNVTEFloat8E4M3: return DLDataType{kDLUInt,    8, 1};
-    case kNVTEFloat8E5M2: return DLDataType{kDLUInt,    8, 1};
-    case kNVTEFloat8E8M0: return DLDataType{kDLUInt,    8, 1};
-    default: NVTE_ERROR("unsupported NVTEDType: ", static_cast<int>(type));
+    case kNVTEFloat8E4M3:
+      return DLDataType{kDLUInt, 8, 1};
+    case kNVTEFloat8E5M2:
+      return DLDataType{kDLUInt, 8, 1};
+    case kNVTEFloat8E8M0:
+      return DLDataType{kDLUInt, 8, 1};
+    default:
+      NVTE_ERROR("unsupported NVTEDType: ", static_cast<int>(type));
   }
 }
 
@@ -106,27 +133,29 @@ class DLTensorWrapper : public DLTensor {
       int64_t flat_first = 1;
       for (int i = 0; i + 1 < n; ++i) flat_first *= static_cast<int64_t>(tensor.shape.data[i]);
       const int64_t flat_last = static_cast<int64_t>(tensor.shape.data[n - 1]);
-      shape_buf_   = std::make_unique<int64_t[]>(2);
+      shape_buf_ = std::make_unique<int64_t[]>(2);
       strides_buf_ = std::make_unique<int64_t[]>(2);
-      shape_buf_[0] = flat_first;  shape_buf_[1] = flat_last;
-      strides_buf_[0] = flat_last; strides_buf_[1] = 1;
+      shape_buf_[0] = flat_first;
+      shape_buf_[1] = flat_last;
+      strides_buf_[0] = flat_last;
+      strides_buf_[1] = 1;
       this->ndim = 2;
     } else {
-      shape_buf_   = std::make_unique<int64_t[]>(n);
+      shape_buf_ = std::make_unique<int64_t[]>(n);
       strides_buf_ = std::make_unique<int64_t[]>(n);
       int64_t stride = 1;
       for (int i = n - 1; i >= 0; --i) {
-        shape_buf_[i]   = static_cast<int64_t>(tensor.shape.data[i]);
+        shape_buf_[i] = static_cast<int64_t>(tensor.shape.data[i]);
         strides_buf_[i] = stride;
         stride *= shape_buf_[i];
       }
       this->ndim = n;
     }
-    this->data        = tensor.data_ptr;
-    this->device      = DLDevice{kDLCUDA, device_index};
-    this->dtype       = convert_to_dltype(tensor.dtype);
-    this->shape       = shape_buf_.get();
-    this->strides     = strides_buf_.get();
+    this->data = tensor.data_ptr;
+    this->device = DLDevice{kDLCUDA, device_index};
+    this->dtype = convert_to_dltype(tensor.dtype);
+    this->shape = shape_buf_.get();
+    this->strides = strides_buf_.get();
     this->byte_offset = 0;
   }
 
@@ -157,9 +186,8 @@ namespace ffi {
 template <>
 struct TypeTraits<transformer_engine::tvm_ffi_bridge::DLTensorWrapper *>
     : public TypeTraits<DLTensor *> {
-  TVM_FFI_INLINE static void CopyToAnyView(
-      transformer_engine::tvm_ffi_bridge::DLTensorWrapper *src, TVMFFIAny *result
-  ) {
+  TVM_FFI_INLINE static void CopyToAnyView(transformer_engine::tvm_ffi_bridge::DLTensorWrapper *src,
+                                           TVMFFIAny *result) {
     if (src == nullptr || src->data == nullptr) {
       TypeTraits<std::nullptr_t>::CopyToAnyView(nullptr, result);  // -> TVM-FFI None
     } else {
@@ -190,7 +218,6 @@ struct is_lazyloadable_config<
                    decltype(std::declval<const T &>().retrieve_func_from_python(
                        std::declval<const std::string &>()))>> : std::true_type {};
 }  // namespace detail
-
 
 class TVMFFICentral {
  public:
@@ -246,8 +273,9 @@ class TVMFFICentral {
 
  private:
   ~TVMFFICentral() = default;
-  TVMFFICentral() : cutedsl_backend_enabled_(is_cutedsl_backend_enabled()),
-                    warn_cutedsl_backend_not_chosen_(warn_if_cutedsl_backend_not_chosen()) {}
+  TVMFFICentral()
+      : cutedsl_backend_enabled_(is_cutedsl_backend_enabled()),
+        warn_cutedsl_backend_not_chosen_(warn_if_cutedsl_backend_not_chosen()) {}
   TVMFFICentral(const TVMFFICentral &) = delete;
   TVMFFICentral &operator=(const TVMFFICentral &) = delete;
   TVMFFICentral(TVMFFICentral &&) = delete;
@@ -258,7 +286,7 @@ class TVMFFICentral {
     const char *flag = std::getenv("NVTE_ENABLE_CUTEDSL_QUANT_BACKEND");
     return flag != nullptr && flag[0] != '0';
   }
-  
+
   static bool warn_if_cutedsl_backend_not_chosen() {
     const char *flag = std::getenv("NVTE_WARN_IF_CUTEDSL_BACKEND_NOT_CHOSEN");
     return flag != nullptr && flag[0] != '0';
