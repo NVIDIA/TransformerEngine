@@ -560,6 +560,12 @@ def get_ub(name: str, use_fp8: bool):
     return _ub_communicators[key]
 
 
+@torch.compiler.assume_constant_result
+def get_ub_is_fp8(name: str, use_fp8: bool) -> bool:
+    """Query is_fp8_ubuf for a named UB communicator; treated as compile-time constant."""
+    return get_ub(name, use_fp8).is_fp8_ubuf()
+
+
 def destroy_ub():
     """Destroy all allocated userbuffer communicators."""
     global _ub_communicators, _ub_with_cublasmp, _ub_initialized
@@ -568,6 +574,9 @@ def destroy_ub():
     _ub_initialized = False
     global layers_atomic_ring_exchange
     layers_atomic_ring_exchange = []
+    # Compiled graphs may have baked is_fp8_ubuf() via assume_constant_result;
+    # reset so re-init with different settings doesn't read stale constants.
+    torch.compiler.reset()
 
 
 def fill_userbuffers_buffer_for_all_gather(
@@ -1055,7 +1064,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if recipe.nvfp4() and isinstance(recipe_state, NVFP4BlockScalingRecipeState):
                 return
             if recipe.custom() and isinstance(recipe_state, CustomRecipeState):
-                return
+                if recipe_state.recipe is recipe:
+                    return
 
         # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
         # 2 (grad_output and grad_input) for bwd

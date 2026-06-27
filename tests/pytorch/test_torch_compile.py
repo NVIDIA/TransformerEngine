@@ -26,6 +26,7 @@ from transformer_engine.pytorch.constants import FP8FwdTensorIdx, FP8BwdTensorId
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.ops.basic.basic_linear import BasicLinear
 from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer
+from transformer_engine.pytorch.quantization import QuantizerRole
 from transformer_engine.pytorch import (
     is_fp8_available,
     is_mxfp8_available,
@@ -123,21 +124,25 @@ if _opaque_available:
     _Q = get_opaque_type_name(ToyQuantizer)
 
     def _make_qfactory(tag: str):
-        """Return a qfactory that produces ToyQuantizer instances tagged with *tag*."""
+        """Return a qfactory that produces ToyQuantizer instances tagged with *tag*.
+
+        The factory dispatches on ``QuantizerRole.tensor_type``; the roles are
+        supplied by :meth:`ToyLinear.get_quantizer_roles`.
+        """
 
         quantizers = {
-            role: ToyQuantizer(tag=f"{tag}:{role}")
-            for role in (
-                "linear_input",
-                "linear_weight",
-                "linear_output",
-                "linear_grad_output",
-                "linear_grad_input",
+            tensor_type: ToyQuantizer(tag=f"{tag}:{tensor_type}")
+            for tensor_type in (
+                "input",
+                "weight",
+                "output",
+                "grad_output",
+                "grad_input",
             )
         }
 
-        def qfactory(role: str):
-            return quantizers[role]
+        def qfactory(role: QuantizerRole):
+            return quantizers[role.tensor_type]
 
         return qfactory
 
@@ -162,6 +167,22 @@ if _opaque_available:
                 torch.empty(out_features, in_features, dtype=dtype, device=device)
             )
             torch.nn.init.normal_(self.weight)
+
+        def get_quantizer_roles(self, *, fwd: bool, num_quantizers: int):
+            # Supplying explicit roles keeps CustomRecipeState from emitting a
+            # warning (which would graph-break under fullgraph=True) and lets the
+            # qfactory dispatch per tensor slot. Order must match the module's
+            # quantizer array (FP8FwdTensorIdx / FP8BwdTensorIdx).
+            if fwd:
+                return [
+                    QuantizerRole(module_type="linear", tensor_type="input"),
+                    QuantizerRole(module_type="linear", tensor_type="weight"),
+                    QuantizerRole(module_type="linear", tensor_type="output"),
+                ]
+            return [
+                QuantizerRole(module_type="linear", tensor_type="grad_output"),
+                QuantizerRole(module_type="linear", tensor_type="grad_input"),
+            ]
 
         def _get_weight_tensors(self):
             return [self.weight]

@@ -10,7 +10,13 @@ from packaging import version
 
 import setuptools
 
-from .utils import get_cuda_include_dirs, all_files_in_dir, debug_build_enabled, setup_mpi_flags
+from .utils import (
+    get_cuda_include_dirs,
+    all_files_in_dir,
+    debug_build_enabled,
+    setup_mpi_flags,
+    nccl_ep_enabled,
+)
 from typing import List
 
 
@@ -119,6 +125,9 @@ def setup_jax_extension(
 
     if bool(int(os.getenv("NVTE_WITH_CUBLASMP", 0))):
         cxx_flags.append("-DNVTE_WITH_CUBLASMP")
+
+    if nccl_ep_enabled():
+        cxx_flags.append("-DNVTE_WITH_NCCL_EP")
 
     # Define TE/JAX as a Pybind11Extension
     from pybind11.setup_helpers import Pybind11Extension

@@ -266,6 +266,17 @@ def register_primitive(cls, outer_only=False):
 for _name, _value in transformer_engine_jax.registrations().items():
     ffi.register_ffi_target(_name, _value, platform="CUDA")
 
+# Register EpInstanceState (no-op when TE is built without NCCL EP).
+if hasattr(transformer_engine_jax, "get_ep_instance_state_type_id"):
+    ffi.register_ffi_type(
+        "EpInstanceState",
+        {
+            "type_id": transformer_engine_jax.get_ep_instance_state_type_id(),
+            "type_info": transformer_engine_jax.get_ep_instance_state_type_info(),
+        },
+        platform="CUDA",
+    )
+
 
 def manage_primitives(enable_names=None, disable_names=None, disable_all_first=False):
     """
