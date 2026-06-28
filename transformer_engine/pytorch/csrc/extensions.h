@@ -344,12 +344,14 @@ py::object nvfp4_quantize_with_amax(const at::Tensor &tensor, py::handle quantiz
 py::object dequantize(const py::handle &input, DType otype);
 
 py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const size_t num_tensors,
-                          std::optional<at::Tensor> first_dims,
-                          std::optional<at::Tensor> tensor_offsets);
+                          std::optional<at::Tensor> first_dims, std::optional<at::Tensor> last_dims,
+                          std::optional<at::Tensor> tensor_offsets,
+                          std::optional<at::Tensor> noop_flag);
 
 py::object nvfp4_group_quantize_with_amax(const at::Tensor &tensor, py::handle quantizer,
                                           const size_t num_tensors,
                                           std::optional<at::Tensor> first_dims,
+                                          std::optional<at::Tensor> last_dims,
                                           const at::Tensor &rowwise_amax,
                                           const at::Tensor &columnwise_amax,
                                           std::optional<at::Tensor> tensor_offsets);
@@ -358,6 +360,7 @@ py::object group_dequantize(const py::handle &input, DType otype);
 
 py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
                                 const size_t num_tensors, std::optional<at::Tensor> first_dims,
+                                std::optional<at::Tensor> last_dims,
                                 std::optional<at::Tensor> tensor_offsets);
 
 std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &tensor_list,
@@ -558,6 +561,16 @@ void thd_grad_correction(at::Tensor grad, const at::Tensor &grad_per_step,
 
 at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_tokens,
                                        int world_size, int rank);
+
+at::Tensor thd_sequence_order_to_cp_rank_order(const at::Tensor &inp, const at::Tensor &cu_seqlens,
+                                               int cp_size, int total_tokens);
+
+at::Tensor thd_cp_rank_order_to_sequence_order(const at::Tensor &inp, const at::Tensor &cu_seqlens,
+                                               int cp_size, int total_tokens);
+
+void thd_copy_valid_tokens_from_per_split_to_rank_local(at::Tensor out, const at::Tensor &inp,
+                                                        const at::Tensor &cu_seqlens_padded,
+                                                        const at::Tensor &cu_seqlens);
 
 /***************************************************************************************************
  * multi_tensor_* kernels
