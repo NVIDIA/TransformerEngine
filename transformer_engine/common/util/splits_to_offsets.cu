@@ -119,6 +119,50 @@ __global__ void __launch_bounds__(kThreadsPerBlock) kernel(KernelArgs args) {
   }
 }
 
+__global__ void __launch_bounds__(kThreadsPerBlock)
+    splits_to_offsets_2d_kernel(const void *__restrict__ first_dims, DType first_dims_dtype,
+                                const void *__restrict__ last_dims, DType last_dims_dtype,
+                                void *__restrict__ output, DType output_dtype, size_t num_tensors) {
+  __shared__ int64_t block_scan[kThreadsPerBlock];
+  __shared__ int64_t chunk_prefix;
+
+  const size_t tid = threadIdx.x;
+  if (tid == 0) {
+    store_output(output, output_dtype, 0, 0);
+    chunk_prefix = 0;
+  }
+  __syncthreads();
+
+  for (size_t chunk_start = 0; chunk_start < num_tensors; chunk_start += kThreadsPerBlock) {
+    const size_t idx = chunk_start + tid;
+    int64_t value = 0;
+    if (idx < num_tensors) {
+      value = load_split_size(first_dims, first_dims_dtype, idx) *
+              load_split_size(last_dims, last_dims_dtype, idx);
+    }
+    block_scan[tid] = value;
+    __syncthreads();
+
+    // Inclusive scan in shared memory.
+    for (size_t offset = 1; offset < kThreadsPerBlock; offset <<= 1) {
+      const int64_t addend = (tid >= offset) ? block_scan[tid - offset] : 0;
+      __syncthreads();
+      block_scan[tid] += addend;
+      __syncthreads();
+    }
+
+    if (idx < num_tensors) {
+      store_output(output, output_dtype, idx + 1, chunk_prefix + block_scan[tid]);
+    }
+    __syncthreads();
+
+    if (tid == kThreadsPerBlock - 1) {
+      chunk_prefix += block_scan[tid];
+    }
+    __syncthreads();
+  }
+}
+
 }  // namespace
 
 }  // namespace transformer_engine::splits_to_offsets
@@ -144,6 +188,42 @@ void nvte_splits_to_offsets(const int64_t *split_sizes, int64_t *output, size_t 
   args.include_leading_zero[0] = true;
   args.num_outputs = 1;
   s2o::kernel<<<1, s2o::kThreadsPerBlock, 0, stream>>>(args);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
+
+void nvte_splits_to_offsets_2d(const NVTETensor first_dims, const NVTETensor last_dims,
+                               NVTETensor output, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_splits_to_offsets_2d);
+  using namespace transformer_engine;
+  namespace s2o = transformer_engine::splits_to_offsets;
+
+  const auto is_integer_dtype = [](DType dtype) {
+    return dtype == DType::kInt32 || dtype == DType::kInt64;
+  };
+
+  const auto *first_dims_tensor = convertNVTETensorCheck(first_dims);
+  const auto *last_dims_tensor = convertNVTETensorCheck(last_dims);
+  auto *output_tensor = convertNVTETensorCheck(output);
+
+  const auto num_tensors = first_dims_tensor->numel();
+  NVTE_CHECK(num_tensors > 0 && first_dims_tensor->dim() == 1,
+             "first_dims must be a non-empty 1D tensor, but got shape=", first_dims_tensor->shape(),
+             ".");
+  NVTE_CHECK(last_dims_tensor->shape() == first_dims_tensor->shape(),
+             "first_dims and last_dims must have the same shape, but got ",
+             first_dims_tensor->shape(), " and ", last_dims_tensor->shape(), ".");
+  const Shape expected_output_shape = {num_tensors + 1};
+  NVTE_CHECK(output_tensor->shape() == expected_output_shape,
+             "Expected output to have shape=", expected_output_shape,
+             ", but got shape=", output_tensor->shape(), ".");
+  NVTE_CHECK(is_integer_dtype(first_dims_tensor->dtype()) &&
+                 is_integer_dtype(last_dims_tensor->dtype()) &&
+                 is_integer_dtype(output_tensor->dtype()),
+             "first_dims, last_dims and output must be int32/int64 tensors.");
+
+  s2o::splits_to_offsets_2d_kernel<<<1, s2o::kThreadsPerBlock, 0, stream>>>(
+      first_dims_tensor->data.dptr, first_dims_tensor->dtype(), last_dims_tensor->data.dptr,
+      last_dims_tensor->dtype(), output_tensor->data.dptr, output_tensor->dtype(), num_tensors);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 

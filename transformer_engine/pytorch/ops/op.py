@@ -14,6 +14,7 @@ from typing import Any, Optional
 import torch
 
 from transformer_engine.common.recipe import Recipe
+from .._extra_state import is_stateless_recipe, should_load_extra_state_pickle
 from ..quantization import (
     FP8GlobalStateManager,
     QuantizerRole,
@@ -590,11 +591,14 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
 
             # Quantizer state
             fp8_meta = self._fp8_metas[mode]
+            recipe = fp8_meta["recipe"]
+            if is_stateless_recipe(recipe):
+                continue
             state[mode] = {}
-            state[mode]["recipe"] = fp8_meta["recipe"]
+            state[mode]["recipe"] = recipe
 
             # Copy tensors to CPU and store
-            if state[mode]["recipe"].delayed():
+            if recipe.delayed():
                 if mode == "forward":
                     state[mode]["scale_fwd"] = to_cpu(fp8_meta["scaling_fwd"].scale)
                     state[mode]["amax_history_fwd"] = to_cpu(fp8_meta["scaling_fwd"].amax_history)
@@ -626,8 +630,12 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         if state is None or state.numel() == 0:
             return
 
-        # Deserialize state from byte tensor
-        state = pickle.loads(state.detach().numpy(force=True).tobytes())
+        # Deserialize state from byte tensor only when unsafe loading is enabled.
+        state_bytes = state.detach().numpy(force=True).tobytes()
+        context = self.__class__.__name__
+        if not should_load_extra_state_pickle(state_bytes, context):
+            return
+        state = pickle.loads(state_bytes)
         if state is None or len(state) == 0:
             return
 

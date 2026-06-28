@@ -21,6 +21,12 @@ from torch.distributed.tensor import DTensor
 import transformer_engine_torch as tex
 
 from ._common import _ParameterInitMeta, noop_cat
+from .._extra_state import (
+    extra_state_pickle_advisory,
+    is_stateless_recipe,
+    should_load_extra_state_pickle,
+    unsafe_pickle_extra_state_enabled,
+)
 from ..quantization import (
     MXFP8BlockScalingRecipeState,
     DelayedScalingRecipeState,
@@ -1281,9 +1287,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if not fp8_checkpoint:
             return torch.empty(0, dtype=torch.uint8)
 
+        recipe = self.fp8_meta["recipe"]
+        if is_stateless_recipe(recipe):
+            return torch.empty(0, dtype=torch.uint8)
+
         # Copy tensors to CPU and store
         state = {}
-        state["recipe"] = self.fp8_meta["recipe"]
+        state["recipe"] = recipe
         if _has_delayed_scaling_state(self.fp8_meta):
             state["scale_fwd"] = to_cpu(self.fp8_meta["scaling_fwd"].scale)
             state["amax_history_fwd"] = to_cpu(self.fp8_meta["scaling_fwd"].amax_history)
@@ -1313,16 +1323,21 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             return
 
         # Load state
+        context = self.__class__.__name__
         if isinstance(state, torch.Tensor):
-            # No FP8 is indicated by an empty tensor we don't need to unpickle.
+            # Empty extra state does not need pickle handling.
             if state.numel() == 0:
                 return
-            # Default format: byte tensor with pickled data
-            state = pickle.loads(state.detach().cpu().numpy().tobytes())
+            state_bytes = state.detach().cpu().numpy().tobytes()
+            if not should_load_extra_state_pickle(state_bytes, context):
+                return
+            state = pickle.loads(state_bytes)
         elif isinstance(state, io.BytesIO):
-            # Deprecated format with io.BytesIO
+            # Deprecated format with io.BytesIO. Treat it as unsafe pickle.
+            if not unsafe_pickle_extra_state_enabled():
+                raise RuntimeError(extra_state_pickle_advisory(context))
             state.seek(0)
-            state = torch.load(state, map_location="cuda")
+            state = torch.load(state, map_location="cuda", weights_only=False)
         else:
             raise RuntimeError("Unsupported checkpoint format.")
 
