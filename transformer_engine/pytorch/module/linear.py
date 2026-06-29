@@ -768,8 +768,7 @@ def _linear_forward_impl_fake(
         shape=(out_leading, *tuple(inp.shape[1:-1]), out_features),
         dtype=activation_dtype,
         quantizer=output_quantizer,
-        requires_grad=is_grad_enabled
-        and (args.input_requires_grad or args.weight_requires_grad),
+        requires_grad=is_grad_enabled and (args.input_requires_grad or args.weight_requires_grad),
         device=inp.device,
     )
 
