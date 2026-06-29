@@ -348,9 +348,9 @@ class NVFP4Quantizer(Quantizer):
     def _value_fields(self) -> Tuple[str, ...]:
         # ``amax_reduction_group`` is intentionally excluded: it is a deprecated
         # process group, not a value (``_value_key`` rejects a stored group).
-        # ``rht_matrix_random_sign_mask_t`` is derived (from
-        # ``_with_random_sign_mask`` and the device) but is stored verbatim so
-        # reconstruction does not need to touch the device.
+        # ``rht_matrix_random_sign_mask_t`` is a device-independent int derived
+        # from ``_with_random_sign_mask``; kept in the key so the rebuilt
+        # quantizer carries it without recomputation.
         return (
             "dtype",
             "with_rht",
