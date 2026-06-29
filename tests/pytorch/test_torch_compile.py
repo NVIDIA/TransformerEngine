@@ -459,3 +459,21 @@ def test_quantizer_value_object(factory, other_kwargs):
     rebuilt = eval(repr_str, dict(globals_))  # pylint: disable=eval-used
     assert rebuilt == a and rebuilt is not a
     assert hash(rebuilt) == hash(a)
+
+
+@pytest.mark.skipif(
+    not _opaque_available,
+    reason="torch.compile opaque-object support requires PyTorch >= 2.11",
+)
+@pytest.mark.parametrize("factory, other_kwargs", _VALUE_QUANTIZERS)
+def test_quantizer_value_object_fullgraph(factory, other_kwargs):
+    """Quantizer survives torch.compile(fullgraph=True) - verifies registration took effect."""
+
+    def fn(quantizer):
+        return quantizer
+
+    torch._dynamo.reset()
+    compiled = torch.compile(fn, fullgraph=True)
+
+    quantizer = factory()
+    assert compiled(quantizer) is quantizer

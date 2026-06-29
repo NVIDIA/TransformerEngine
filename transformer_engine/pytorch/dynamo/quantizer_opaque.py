@@ -128,6 +128,7 @@ def register_value_opaque_quantizer(cls: type) -> None:
 
     try:
         register_opaque_type(cls, typ="value")
-    except (ImportError, AttributeError, RuntimeError, TypeError):
-        # Tolerate partial / experimental opaque-object support.
+    except (RuntimeError, TypeError):
+        # Keep TE importable: registration must never crash the import, e.g. on
+        # PyTorch versions with only partial / experimental opaque-object support.
         pass
