@@ -483,9 +483,7 @@ class TestGroupedLinearOp:
         # but MXFP8/NVFP4 grouped quantization kernels require Blackwell (SM100+).
         requires_blackwell = quantization is not None and quantization != "fp8_current_scaling"
         if requires_blackwell and device_capability < (10, 0):
-            pytest.skip(
-                "MXFP8/NVFP4 grouped GEMM CUDA-graph-safe path requires SM100+ (Blackwell)"
-            )
+            pytest.skip("MXFP8/NVFP4 grouped GEMM CUDA-graph-safe path requires SM100+ (Blackwell)")
         # Grouped GEMM on Hopper requires cuBLAS 13.4+; Blackwell requires cuBLAS 13.3+.
         cublaslt_version = tex.get_cublasLt_version()
         if device_capability < (10, 0) and cublaslt_version < 130400:
