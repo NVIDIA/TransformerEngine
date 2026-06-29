@@ -45,7 +45,8 @@ class EpResources {
     NVTE_CHECK_NCCL(ncclCommInitRank(&comm_, p.ep_size, uid, p.rank_within_group));
     // zero_copy=0: JAX EP path always stages payloads; the zero-copy fast path
     // requires NVTECommWindow-backed tensors, which JAX bindings don't expose.
-    NVTEEpGroupConfig cfg{.ep_size = p.ep_size,
+    NVTEEpGroupConfig cfg{.struct_size = sizeof(NVTEEpGroupConfig),
+                          .ep_size = p.ep_size,
                           .num_experts = p.num_experts,
                           .max_tokens_per_rank = p.max_tokens_per_rank,
                           .max_recv_tokens_per_rank = p.max_recv_tokens_per_rank,
@@ -54,7 +55,7 @@ class EpResources {
                           .max_token_dtype = p.max_token_dtype,
                           .zero_copy = 0};
     try {
-      nvte_ep_initialize(static_cast<void*>(comm_), cfg);
+      nvte_ep_initialize(static_cast<void*>(comm_), &cfg);
     } catch (...) {
       ncclCommDestroy(comm_);
       comm_ = nullptr;
@@ -162,8 +163,11 @@ void ReleaseEpResources() {
 }
 
 size_t EpHandleMemSize(int top_k, size_t dispatch_output_per_expert_alignment) {
-  NVTEEpLayerConfig layer_cfg{top_k, dispatch_output_per_expert_alignment};
-  return nvte_ep_handle_mem_size(layer_cfg);
+  NVTEEpLayerConfig layer_cfg{.struct_size = sizeof(NVTEEpLayerConfig),
+                              .top_k = top_k,
+                              .dispatch_output_per_expert_alignment =
+                                  dispatch_output_per_expert_alignment};
+  return nvte_ep_handle_mem_size(&layer_cfg);
 }
 
 pybind11::capsule GetEpInstanceStateTypeIdCapsule() {
@@ -224,9 +228,12 @@ Error_Type EpPrepareFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_T
   std::vector<size_t> hm_shape = {static_cast<size_t>(handle_mem->element_count())};
   auto handle_mem_ = TensorWrapper(handle_mem->untyped_data(), hm_shape, DType::kByte);
 
-  NVTEEpLayerConfig layer_cfg{static_cast<int>(config.top_k),
-                              static_cast<size_t>(config.dispatch_output_per_expert_alignment)};
-  nvte_ep_prepare(handle_mem_.data(), topk_idx_.data(), token_counts_.data(), layer_cfg, stream);
+  NVTEEpLayerConfig layer_cfg{
+      .struct_size = sizeof(NVTEEpLayerConfig),
+      .top_k = static_cast<int>(config.top_k),
+      .dispatch_output_per_expert_alignment =
+          static_cast<size_t>(config.dispatch_output_per_expert_alignment)};
+  nvte_ep_prepare(handle_mem_.data(), topk_idx_.data(), token_counts_.data(), &layer_cfg, stream);
   return ffi_with_cuda_error_check();
 }
 
