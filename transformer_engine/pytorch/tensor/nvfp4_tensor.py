@@ -200,8 +200,16 @@ class NVFP4Quantizer(Quantizer):
         if not src.is_contiguous():
             src = src.contiguous()
 
+        # Apply the destination tensor's amax reduction group on a throwaway copy
+        quantizer = self
+        group = getattr(dst, "amax_reduction_group", None)
+        if group is not None:
+            quantizer = self.copy()
+            quantizer.with_amax_reduction = True
+            quantizer.amax_reduction_group = group
+
         # Launch cast kernel
-        tex.quantize(src, self, dst, noop_flag)
+        tex.quantize(src, quantizer, dst, noop_flag)
 
         return dst
 
@@ -359,6 +367,9 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         Nominal tensor datatype, used in dequantize.
     """
 
+    # Optional amax all-reduce group, set by FSDP2 in ``fsdp_pre_all_gather``
+    amax_reduction_group: Optional[dist_group_type] = None
+
     # NOTE: We reorder the *args so that we can instantiate a NVFP4TensorStorage with positional args,
     # which significantly reduces the Pybind11 overhead when calling the constructor from C++.
     def __new__(
@@ -512,6 +523,10 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
             raise NotImplementedError(
                 "FSDP2 is not supported for NVFP4Tensors with GEMM-swizzled scales."
             )
+
+        if mesh is not None:
+            # Reduce amax across the mesh so all weight shards get the same scale
+            self.amax_reduction_group = mesh.get_group()
 
         shard_M = math.prod(self.shape[:-1])
 
