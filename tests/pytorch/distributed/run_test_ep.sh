@@ -17,6 +17,15 @@ if [ "${DETECTED_GPUS}" -lt 4 ]; then
   echo "EP requires >= 4 GPUs (found ${DETECTED_GPUS}); SKIPPING."
   exit 0
 fi
+
+# NCCL EP requires NVLink/NVSwitch between GPUs.
+# On PCIe-only nodes (no NVLink) it falls back to the network
+# transport and deadlocks, so skip cleanly there.
+if ! nvidia-smi topo -m 2>/dev/null | grep -qE "\bNV[0-9]+\b"; then
+  echo "No NVLink between GPUs (PCIe-only fabric); NCCL EP is unsupported here. SKIPPING."
+  exit 0
+fi
+
 NUM_RANKS="${NVTE_TEST_EP_NUM_RANKS:-${DETECTED_GPUS}}"
 if [ "${NUM_RANKS}" -gt 8 ]; then NUM_RANKS=8; fi
 
