@@ -48,8 +48,8 @@ typedef struct {
   int max_recv_tokens_per_rank;
   /*! Token hidden dimension. */
   int hidden_dim;
-  /*! Max SMs for EP kernels. 0 = auto. */
-  int max_num_sms;
+  /*! Max SMs for NCCL EP dispatch/combine kernels. 0 = auto. */
+  int num_comm_sms;
   /*! Widest token dtype the group will dispatch; sizes staging buffers.
    *  Required (no default): must be set to a real token dtype. Per-dispatch
    *  tensors may use any dtype with element size <= this. */

@@ -108,8 +108,8 @@ void EPBackend::validate_config(const NVTEEpGroupConfig& config) {
              "hidden_dim * sizeof(max_token_dtype) exceeds 4 GiB; got ", row_bytes, " bytes");
   NVTE_CHECK(config.num_experts % config.ep_size == 0, "num_experts (", config.num_experts,
              ") must be divisible by ep_size (", config.ep_size, ")");
-  NVTE_CHECK(config.max_num_sms >= 0, "max_num_sms must be >= 0 (0 = auto), got ",
-             config.max_num_sms);
+  NVTE_CHECK(config.num_comm_sms >= 0, "num_comm_sms must be >= 0 (0 = auto), got ",
+             config.num_comm_sms);
 
   const int sm = cuda::sm_arch();
   NVTE_CHECK(sm >= 90, "NCCL EP requires SM_90+ (Hopper or later), but current device is SM_", sm);
@@ -205,8 +205,8 @@ void EPBackend::init(ncclComm_t ep_comm, NVTEEpGroupConfig group_config) {
   cfg.rdma_buffer_size = NCCL_EP_AUTO;
   cfg.num_qp_per_rank = NCCL_EP_AUTO;
   cfg.num_channels = NCCL_EP_AUTO;
-  cfg.max_num_sms = group_config.max_num_sms > 0
-                        ? static_cast<unsigned int>(group_config.max_num_sms)
+  cfg.max_num_sms = group_config.num_comm_sms > 0
+                        ? static_cast<unsigned int>(group_config.num_comm_sms)
                         : NCCL_EP_AUTO;
   // Must be > 0; NCCL EP errors out on 0.
   cfg.max_recv_tokens_per_rank = static_cast<unsigned int>(group_config.max_recv_tokens_per_rank);

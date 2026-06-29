@@ -142,7 +142,7 @@ void ep_initialize(uintptr_t comm_ptr, const std::string& group_name, int64_t nu
       .max_tokens_per_rank = static_cast<int>(max_tokens_per_rank),
       .max_recv_tokens_per_rank = static_cast<int>(max_recv_tokens_per_rank),
       .hidden_dim = static_cast<int>(hidden_dim),
-      .max_num_sms = static_cast<int>(max_num_sms),
+      .num_comm_sms = static_cast<int>(max_num_sms),
       .max_token_dtype = static_cast<NVTEDType>(GetTransformerEngineDType(torch_dtype)),
       .zero_copy = zero_copy ? 1 : 0,
   };

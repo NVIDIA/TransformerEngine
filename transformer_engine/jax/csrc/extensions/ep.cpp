@@ -51,7 +51,7 @@ class EpResources {
                           .max_tokens_per_rank = p.max_tokens_per_rank,
                           .max_recv_tokens_per_rank = p.max_recv_tokens_per_rank,
                           .hidden_dim = p.hidden_dim,
-                          .max_num_sms = p.max_num_sms,
+                          .num_comm_sms = p.max_num_sms,
                           .max_token_dtype = p.max_token_dtype,
                           .zero_copy = 0};
     try {
