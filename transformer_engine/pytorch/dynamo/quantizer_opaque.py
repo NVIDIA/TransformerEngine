@@ -106,12 +106,11 @@ def register_value_opaque_quantizer(cls: type) -> None:
         # still work; torch.compile specialization on the quantizer does not.
         return
 
-    if is_opaque_value_type(cls):
-        return
-
     try:
-        register_opaque_type(cls, typ="value")
+        if not is_opaque_value_type(cls):
+            register_opaque_type(cls, typ="value")
     except (RuntimeError, TypeError):
-        # Keep TE importable: registration must never crash the import, e.g. on
-        # PyTorch versions with only partial / experimental opaque-object support.
+        # Keep TE importable: neither the opaque-type query nor the registration
+        # must crash the import, e.g. on PyTorch versions with only partial /
+        # experimental opaque-object support.
         pass
