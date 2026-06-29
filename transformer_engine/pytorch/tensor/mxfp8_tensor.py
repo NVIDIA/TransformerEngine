@@ -79,8 +79,6 @@ class MXFP8Quantizer(Quantizer):
     ) -> Dict[str, Tuple[Tuple[int, ...], torch.dtype]]:
         shape = tuple(shape)
         buffers: Dict[str, Tuple[Tuple[int, ...], torch.dtype]] = {}
-        # MXFP8 block scales are stored as uint8 (E8M0); data buffers keep the
-        # logical shape (rowwise) and its transpose (columnwise).
         if self.rowwise_usage:
             buffers["_rowwise_data"] = (shape, torch.uint8)
             buffers["_rowwise_scale_inv"] = (

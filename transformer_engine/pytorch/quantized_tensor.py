@@ -176,7 +176,9 @@ class QuantizedTensorStorage:
         ctx = {
             "cls": type(self).__qualname__,
             "is_tensor": isinstance(self, QuantizedTensor),
-            "requires_grad": bool(self.requires_grad) if isinstance(self, QuantizedTensor) else False,
+            "requires_grad": (
+                bool(self.requires_grad) if isinstance(self, QuantizedTensor) else False
+            ),
             "nontensor_kwargs": self._flatten_nontensor_kwargs(),
         }
         return present, ctx

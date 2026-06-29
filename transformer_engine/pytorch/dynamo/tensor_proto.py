@@ -83,9 +83,14 @@ class TensorProto:
         described = list(self.quantizer._describe_buffers(tuple(self.shape)).keys())
         storage_cls = self.quantizer._storage_metadata(self.dtype)["cls"]
         flatten_order = [attr for attr, _ in storage_cls._FLATTEN_TENSOR_BUFFERS]
-        ordered = [name for name in flatten_order if name in described]
-        ordered += [name for name in described if name not in flatten_order]
-        return tuple(ordered)
+        extra = [name for name in described if name not in flatten_order]
+        if extra:
+            raise RuntimeError(
+                f"{storage_cls.__name__} describes buffer(s) {extra} absent from its "
+                f"_FLATTEN_TENSOR_BUFFERS {flatten_order}; the fake layout cannot be "
+                "aligned with the real one slot-for-slot."
+            )
+        return tuple(name for name in flatten_order if name in described)
 
     def create_metadata(self) -> Dict[str, Any]:
         """Data-free ``__tensor_unflatten__`` context describing this tensor."""

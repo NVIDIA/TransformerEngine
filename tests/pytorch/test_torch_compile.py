@@ -31,7 +31,6 @@ from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScaling
 from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensor, _STORAGE_REGISTRY
 from transformer_engine.pytorch.dynamo import TensorProto, to_tensor_proto
-from transformer_engine.pytorch.dynamo.tensor_proto import _contiguous_stride
 from transformer_engine.pytorch import (
     is_fp8_available,
     is_mxfp8_available,
@@ -585,8 +584,8 @@ _PROTO_QUANTIZERS = [
         (64, 128),
         id="nvfp4",
         marks=pytest.mark.skipif(
-            not torch.cuda.is_available(),
-            reason="NVFP4Quantizer requires CUDA to construct",
+            not nvfp4_available,
+            reason="NVFP4 is not available",
         ),
     ),
 ]
@@ -603,7 +602,10 @@ def _build_from_primitives(quantizer, shape, dtype, device="cpu"):
     buffers = quantizer.alloc_tensors(shape, device=device)
     inner = {name: buffers[name] for name in names}
     storage_cls = _STORAGE_REGISTRY[ctx["cls"]]
-    return storage_cls.__tensor_unflatten__(inner, ctx, tuple(shape), _contiguous_stride(shape))
+    # Row-major (contiguous) outer stride for ``__tensor_unflatten__``; ``meta``
+    # device computes it without allocating storage.
+    outer_stride = torch.empty(tuple(shape), device="meta").stride()
+    return storage_cls.__tensor_unflatten__(inner, ctx, tuple(shape), outer_stride)
 
 
 def _signature(tensor, names):
@@ -807,7 +809,9 @@ def test_to_tensor_proto_quantized(factory, shape):
     assert proto.shape == tuple(shape)
     assert proto.dtype == torch.bfloat16
     # Same buffer layout as the original tensor.
-    assert proto.inner_names() == tuple(q._describe_buffers(shape))  # pylint: disable=protected-access
+    assert proto.inner_names() == tuple(
+        q._describe_buffers(shape)
+    )  # pylint: disable=protected-access
     # Rebuilding from the derived proto matches the original tensor's structure.
     assert _signature(proto.create_tensor(), proto.inner_names()) == _signature(
         tensor, proto.inner_names()
