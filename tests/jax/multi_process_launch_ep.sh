@@ -37,7 +37,7 @@ fi
 NVLINK_OUTPUT=$(nvidia-smi nvlink --status 2>&1)
 if [ $? -ne 0 ] || [[ "$NVLINK_OUTPUT" == *"not supported"* ]] \
    || [[ "$NVLINK_OUTPUT" == *"No devices"* ]] || [ -z "$NVLINK_OUTPUT" ]; then
-  echo "NVLink not detected on this platform — EP test requires NVLink; SKIPPING."
+  echo "NVLink not detected on this platform; SKIPPING."
   exit 0
 fi
 
