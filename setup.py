@@ -20,7 +20,6 @@ from build_tools.te_version import te_version
 from build_tools.utils import (
     cuda_archs,
     cuda_version,
-    cusolvermp_pypi_package_name,
     get_frameworks,
     remove_dups,
     min_python_version_str,
@@ -119,7 +118,6 @@ def setup_requirements() -> Tuple[List[str], List[str]]:
         "pydantic",
         "importlib-metadata>=1.0",
         "packaging",
-        cusolvermp_pypi_package_name(),
     ]
     test_reqs: List[str] = ["pytest>=8.2.1"]
 
