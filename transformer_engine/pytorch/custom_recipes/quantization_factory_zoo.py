@@ -257,10 +257,10 @@ def nvfp4_row_scaled_fwd_dequantized_bwd_quantizer_factory(
     return _plain_nvfp4_quantizer()
 
 
-def nvfp4_row_scaled_fwd_mxfp8_bwd_quantizer_factory(
+def nvfp4_row_scaled_fwd_dequantized_mxfp8_bwd_quantizer_factory(
     role: Optional[QuantizerRole],
 ):
-    """Quantizer factory: row-scaled NVFP4 forward, MXFP8 backward.
+    """Quantizer factory: row-scaled NVFP4 forward, dequantized-source MXFP8 backward.
 
     This RL-related recipe is inspired by the Composer 2 MoE grouped-GEMM
     recipe described in arXiv:2603.24477.
@@ -275,26 +275,22 @@ def nvfp4_row_scaled_fwd_mxfp8_bwd_quantizer_factory(
     Dispatch logic:
 
         * ``GroupedLinear`` ``input`` ->
-          ``Hybrid(rowwise=row-scaled NVFP4, columnwise=MXFP8)``
+          ``Hybrid(rowwise=row-scaled NVFP4, columnwise=MXFP8,
+          columnwise_source="rowwise_dequantized")``
         * ``GroupedLinear`` ``weight`` ->
-          ``Hybrid(rowwise=plain NVFP4, columnwise=MXFP8)``
+          ``Hybrid(rowwise=plain NVFP4, columnwise=MXFP8,
+          columnwise_source="rowwise_dequantized")``
         * regular ``Linear`` -> MXFP8
         * ``grad_output`` -> MXFP8
         * everything else -> MXFP8
 
     Row-scaled NVFP4 is fprop-only, so the forward NVFP4 quantizers avoid
-    RHT, stochastic rounding, and 2D scaling. By default, ``HybridQuantizer``
-    leaves ``columnwise_source="original"``, so MXFP8 backward operands are
-    quantized from the original high-precision tensor. The paper does not
-    specify how Composer materializes MXFP8 backward operands from saved
-    training tensors.
-
-    Users who want MXFP8 backward operands to include the forward NVFP4
-    quantization source can construct the same ``HybridQuantizer`` with
-    ``columnwise_source="rowwise_dequantized"``. That makes columnwise MXFP8
-    quantization consume the dequantized rowwise NVFP4 value instead of the
-    original high-precision tensor, which can be useful when the backward path
-    should reflect the forward quantization error (might be helpful for convergence).
+    RHT, stochastic rounding, and 2D scaling. This sample assumes MXFP8
+    backward operands are quantized from the dequantized rowwise NVFP4 forward
+    value, expressed with ``columnwise_source="rowwise_dequantized"``. To
+    quantize MXFP8 backward operands from the original high-precision tensor
+    instead, construct the same ``HybridQuantizer`` while omitting
+    ``columnwise_source="rowwise_dequantized"``.
 
     Composer 2 Technical Report:
     https://arxiv.org/abs/2603.24477
@@ -307,11 +303,13 @@ def nvfp4_row_scaled_fwd_mxfp8_bwd_quantizer_factory(
         return HybridQuantizer(
             rowwise_quantizer=_plain_nvfp4_quantizer(row_scaled_nvfp4=True),
             columnwise_quantizer=mxfp8_quantizer_factory(role),
+            columnwise_source="rowwise_dequantized",
         )
     if is_grouped_linear and role.tensor_type == "weight":
         return HybridQuantizer(
             rowwise_quantizer=_plain_nvfp4_quantizer(),
             columnwise_quantizer=mxfp8_quantizer_factory(role),
+            columnwise_source="rowwise_dequantized",
         )
     if is_grouped_linear and role.tensor_type == "grad_output":
         return mxfp8_quantizer_factory(role)
@@ -325,10 +323,10 @@ def nvfp4_row_scaled_fwd_mxfp8_bwd_quantizer_factory(
 # -----------------------------------------------------------------------------
 
 
-def nvfp4_linear_mixed_fp8_dpa_factory(
+def nvfp4_linear_fp8_dpa_factory(
     role: Optional[QuantizerRole],
 ):
-    """Quantizer factory: NVFP4 for ``Linear``, mixed FP8 for ``DotProductAttention``.
+    """Quantizer factory: NVFP4 for ``Linear``, FP8 for ``DotProductAttention``.
 
     This factory demonstrates how to use ``CustomRecipe`` with ``fp8_dpa=True``
     to combine NVFP4 quantization for linear layers with FP8 attention.
@@ -365,11 +363,11 @@ def nvfp4_linear_mixed_fp8_dpa_factory(
         from transformer_engine.common.recipe import CustomRecipe
         from transformer_engine.pytorch.quantization import autocast
         from transformer_engine.pytorch.custom_recipes.quantization_factory_zoo import (
-            nvfp4_linear_mixed_fp8_dpa_factory,
+            nvfp4_linear_fp8_dpa_factory,
         )
 
         recipe = CustomRecipe(
-            qfactory=nvfp4_linear_mixed_fp8_dpa_factory,
+            qfactory=nvfp4_linear_fp8_dpa_factory,
             fp8_dpa=True,
         )
         with autocast(recipe=recipe):
@@ -384,7 +382,7 @@ def nvfp4_linear_mixed_fp8_dpa_factory(
         "dpa_output" in role.name or "dpa_grad_input" in role.name
     )
 
-    # Native NVFP4 + FP8CS attention uses delayed scaling for S/dP.
+    # Native NVFP4 + FP8 attention uses delayed scaling for S/dP.
     if is_dpa and role.tensor_type in ("s", "dp"):
         return DelayedScalingRequest(
             fp8_format=Format.HYBRID,

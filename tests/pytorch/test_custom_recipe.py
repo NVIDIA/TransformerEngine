@@ -1098,9 +1098,9 @@ def test_role_change_does_not_invalidate_when_role_unchanged():
 
 
 def test_custom_recipe_dpa_fp8():
-    """DotProductAttention forward+backward with CustomRecipe and role-based mixed quantizers.
+    """DotProductAttention forward+backward with CustomRecipe and role-based DPA quantizers.
 
-    Uses the nvfp4_linear_mixed_fp8_dpa_factory which dispatches:
+    Uses the nvfp4_linear_fp8_dpa_factory which dispatches:
       * DPA S/dP slots -> DelayedScalingRequest (stateful)
       * DPA QKV/O/dO/dQKV slots -> Float8CurrentScalingQuantizer
       * Linear slots -> NVFP4Quantizer
@@ -1126,7 +1126,7 @@ def test_custom_recipe_dpa_fp8():
         Float8CurrentScalingQuantizer,
     )
     from transformer_engine.pytorch.custom_recipes.quantization_factory_zoo import (
-        nvfp4_linear_mixed_fp8_dpa_factory,
+        nvfp4_linear_fp8_dpa_factory,
     )
 
     torch.manual_seed(42)
@@ -1145,7 +1145,7 @@ def test_custom_recipe_dpa_fp8():
     out_proj = Linear(H, H, params_dtype=torch.bfloat16, bias=False, name="proj").cuda()
 
     custom_recipe = recipe.CustomRecipe(
-        qfactory=nvfp4_linear_mixed_fp8_dpa_factory,
+        qfactory=nvfp4_linear_fp8_dpa_factory,
         fp8_dpa=True,
     )
 

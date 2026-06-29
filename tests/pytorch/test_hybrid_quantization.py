@@ -133,10 +133,10 @@ class TestComposerStyleFactory:
     @staticmethod
     def _factory(role):
         from transformer_engine.pytorch.custom_recipes.quantization_factory_zoo import (
-            nvfp4_row_scaled_fwd_mxfp8_bwd_quantizer_factory,
+            nvfp4_row_scaled_fwd_dequantized_mxfp8_bwd_quantizer_factory,
         )
 
-        return nvfp4_row_scaled_fwd_mxfp8_bwd_quantizer_factory(role)
+        return nvfp4_row_scaled_fwd_dequantized_mxfp8_bwd_quantizer_factory(role)
 
     @pytest.mark.parametrize(
         "tensor_type,row_scaled",
@@ -152,7 +152,7 @@ class TestComposerStyleFactory:
         )
 
         assert isinstance(quantizer, HybridQuantizer)
-        assert quantizer.columnwise_source == "original"
+        assert quantizer.columnwise_source == "rowwise_dequantized"
         assert isinstance(quantizer.rowwise_quantizer, NVFP4Quantizer)
         assert isinstance(quantizer.columnwise_quantizer, MXFP8Quantizer)
         assert quantizer.rowwise_quantizer.row_scaled_nvfp4 is row_scaled
@@ -1644,9 +1644,9 @@ class TestAttentionFactoryNativeRecipeParity:
         "case_name,native_dpa_recipe,qfactory_name",
         [
             (
-                "mixed_fp8_dpa",
+                "fp8_dpa",
                 "Float8CurrentScaling",
-                "nvfp4_linear_mixed_fp8_dpa_factory",
+                "nvfp4_linear_fp8_dpa_factory",
             ),
             (
                 "mxfp8_dpa",
@@ -1758,9 +1758,9 @@ class TestAttentionFactoryNativeRecipeParity:
         "case_name,native_dpa_recipe,qfactory_name,expected_flags",
         [
             (
-                "mixed_fp8_dpa",
+                "fp8_dpa",
                 "Float8CurrentScaling",
-                "nvfp4_linear_mixed_fp8_dpa_factory",
+                "nvfp4_linear_fp8_dpa_factory",
                 (False, False, False),
             ),
             (
