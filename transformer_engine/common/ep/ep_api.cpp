@@ -61,24 +61,21 @@ inline void* handle_mem_ptr(NVTETensor mem) {
 
 void nvte_ep_initialize(void* ep_comm, const NVTEEpGroupConfig* group_config) {
   NVTE_CHECK(ep_comm != nullptr, "ep_comm must not be null");
-  NVTEEpGroupConfig cfg =
-      normalize_ep_config(group_config, kGroupConfigMinSize, "group_config");
+  NVTEEpGroupConfig cfg = normalize_ep_config(group_config, kGroupConfigMinSize, "group_config");
   EPBackend::initialize(static_cast<ncclComm_t>(ep_comm), cfg);
 }
 
 void nvte_ep_shutdown(void) { EPBackend::shutdown(); }
 
 size_t nvte_ep_handle_mem_size(const NVTEEpLayerConfig* layer_cfg) {
-  NVTEEpLayerConfig cfg =
-      normalize_ep_config(layer_cfg, kLayerConfigMinSize, "layer_cfg");
+  NVTEEpLayerConfig cfg = normalize_ep_config(layer_cfg, kLayerConfigMinSize, "layer_cfg");
   return EPBackend::get().handle_mem_size(cfg);
 }
 
 void nvte_ep_prepare(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor recv_tokens_per_expert,
                      NVTETensor total_recv_tokens_per_rank, const NVTEEpLayerConfig* layer_cfg,
                      cudaStream_t stream) {
-  NVTEEpLayerConfig cfg =
-      normalize_ep_config(layer_cfg, kLayerConfigMinSize, "layer_cfg");
+  NVTEEpLayerConfig cfg = normalize_ep_config(layer_cfg, kLayerConfigMinSize, "layer_cfg");
   EPBackend::get().prepare(handle_mem_ptr(handle_mem), topk_idx, recv_tokens_per_expert,
                            total_recv_tokens_per_rank, cfg, stream);
 }

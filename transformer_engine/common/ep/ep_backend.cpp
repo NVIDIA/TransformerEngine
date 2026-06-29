@@ -317,7 +317,8 @@ size_t EPBackend::handle_mem_size(NVTEEpLayerConfig layer_cfg) {
   return hm_size;
 }
 
-void EPBackend::prepare(void* handle_mem, const NVTETensor topk_idx, NVTETensor recv_tokens_per_expert,
+void EPBackend::prepare(void* handle_mem, const NVTETensor topk_idx,
+                        NVTETensor recv_tokens_per_expert,
                         NVTETensor /*total_recv_tokens_per_rank*/, NVTEEpLayerConfig layer_cfg,
                         cudaStream_t stream) {
   // total_recv_tokens_per_rank is a reserved placeholder; not yet populated.
@@ -332,10 +333,12 @@ void EPBackend::prepare(void* handle_mem, const NVTETensor topk_idx, NVTETensor 
   NVTEShape recv_tokens_per_expert_shape;
   ncclEpTensor_t recv_tokens_per_expert_desc;
   if (recv_tokens_per_expert != nullptr) {
-    recv_tokens_per_expert_desc = make_nccl_ep_tensor(recv_tokens_per_expert, recv_tokens_per_expert_shape);
+    recv_tokens_per_expert_desc =
+        make_nccl_ep_tensor(recv_tokens_per_expert, recv_tokens_per_expert_shape);
   }
   ncclEpLayoutInfo_t layout_info = NCCL_EP_LAYOUT_INFO_INIT;
-  layout_info.expert_counters = (recv_tokens_per_expert != nullptr) ? &recv_tokens_per_expert_desc : nullptr;
+  layout_info.expert_counters =
+      (recv_tokens_per_expert != nullptr) ? &recv_tokens_per_expert_desc : nullptr;
 
   std::lock_guard<std::mutex> lock(mutex_);
   NVTE_CHECK(initialized_, "EPBackend not initialized");

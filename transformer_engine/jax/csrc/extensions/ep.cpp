@@ -163,10 +163,10 @@ void ReleaseEpResources() {
 }
 
 size_t EpHandleMemSize(int top_k, size_t dispatch_output_per_expert_alignment) {
-  NVTEEpLayerConfig layer_cfg{.struct_size = sizeof(NVTEEpLayerConfig),
-                              .top_k = top_k,
-                              .dispatch_output_per_expert_alignment =
-                                  dispatch_output_per_expert_alignment};
+  NVTEEpLayerConfig layer_cfg{
+      .struct_size = sizeof(NVTEEpLayerConfig),
+      .top_k = top_k,
+      .dispatch_output_per_expert_alignment = dispatch_output_per_expert_alignment};
   return nvte_ep_handle_mem_size(&layer_cfg);
 }
 
@@ -196,8 +196,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpInstantiateHandler, EpInstantiateImpl, FFI::Bind
 // ── ep_prepare ────────────────────────────────────────────────────────────────
 
 Error_Type EpPrepareFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_Type topk_idx,
-                        Result_Type recv_tokens_per_expert, Result_Type handle_mem, Result_Type workspace,
-                        EpConfig config) {
+                        Result_Type recv_tokens_per_expert, Result_Type handle_mem,
+                        Result_Type workspace, EpConfig config) {
   (void)ep_state;  // lifetime only.
   auto topk_dims = topk_idx.dimensions();
   NVTE_CHECK(topk_dims.size() >= 2,
@@ -223,16 +223,16 @@ Error_Type EpPrepareFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_T
   auto topk_idx_ = TensorWrapper(topk_idx_data, topk_shape, DType::kInt64);
 
   std::vector<size_t> tc_shape = {static_cast<size_t>(recv_tokens_per_expert->element_count())};
-  auto recv_tokens_per_expert_ = TensorWrapper(recv_tokens_per_expert->untyped_data(), tc_shape, DType::kInt32);
+  auto recv_tokens_per_expert_ =
+      TensorWrapper(recv_tokens_per_expert->untyped_data(), tc_shape, DType::kInt32);
 
   std::vector<size_t> hm_shape = {static_cast<size_t>(handle_mem->element_count())};
   auto handle_mem_ = TensorWrapper(handle_mem->untyped_data(), hm_shape, DType::kByte);
 
-  NVTEEpLayerConfig layer_cfg{
-      .struct_size = sizeof(NVTEEpLayerConfig),
-      .top_k = static_cast<int>(config.top_k),
-      .dispatch_output_per_expert_alignment =
-          static_cast<size_t>(config.dispatch_output_per_expert_alignment)};
+  NVTEEpLayerConfig layer_cfg{.struct_size = sizeof(NVTEEpLayerConfig),
+                              .top_k = static_cast<int>(config.top_k),
+                              .dispatch_output_per_expert_alignment =
+                                  static_cast<size_t>(config.dispatch_output_per_expert_alignment)};
   nvte_ep_prepare(handle_mem_.data(), topk_idx_.data(), recv_tokens_per_expert_.data(),
                   /*total_recv_tokens_per_rank=*/nullptr, &layer_cfg, stream);
   return ffi_with_cuda_error_check();
@@ -243,8 +243,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpPrepareHandler, EpPrepareFFI,
                                   .Ctx<FFI_Stream_Type>()                     // stream
                                   .Ctx<::xla::ffi::State<EpInstanceState>>()  // EP state
                                   .Arg<Buffer_Type>()                         // topk_idx
-                                  .Ret<Buffer_Type>()                         // recv_tokens_per_expert
-                                  .Ret<Buffer_Type>()                         // handle_mem
+                                  .Ret<Buffer_Type>()  // recv_tokens_per_expert
+                                  .Ret<Buffer_Type>()  // handle_mem
                                   .Ret<Buffer_Type>()  // workspace (FFI scratch)
                                   .Attrs<EpConfig>(),
                               FFI_CudaGraph_Traits);

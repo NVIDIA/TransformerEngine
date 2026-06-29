@@ -79,10 +79,8 @@ typedef struct {
 /* Zero-init a config with struct_size set to the current layout:
  *   NVTEEpGroupConfig cfg = NVTE_EP_GROUP_CONFIG_INIT;
  *   cfg.ep_size = ...; */
-#define NVTE_EP_GROUP_CONFIG_INIT \
-  { sizeof(NVTEEpGroupConfig) }
-#define NVTE_EP_LAYER_CONFIG_INIT \
-  { sizeof(NVTEEpLayerConfig) }
+#define NVTE_EP_GROUP_CONFIG_INIT {sizeof(NVTEEpGroupConfig)}
+#define NVTE_EP_LAYER_CONFIG_INIT {sizeof(NVTEEpLayerConfig)}
 
 /* -- Bootstrap ------------------------------------------------------------ */
 
