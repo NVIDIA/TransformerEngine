@@ -14,7 +14,7 @@ import subprocess
 import sys
 import platform
 from pathlib import Path
-from importlib.metadata import PackageNotFoundError, distribution, version as get_version
+from importlib.metadata import version as get_version
 from subprocess import CalledProcessError
 from typing import List, Optional, Tuple, Union
 
@@ -323,15 +323,8 @@ def cuda_version() -> Tuple[int, ...]:
         version_str = get_version("nvidia-cuda-runtime-cu12")
         version_tuple = tuple(int(part) for part in version_str.split(".") if part.isdigit())
         return version_tuple
-    except PackageNotFoundError:
+    except importlib.metadata.PackageNotFoundError:
         raise RuntimeError("Could neither find NVCC executable nor CUDA runtime Python package.")
-
-
-def cusolvermp_pypi_package_name(cuda_major: Optional[int] = None) -> str:
-    """PyPI package providing cuSolverMp runtime libraries for a CUDA major version."""
-    if cuda_major is None:
-        cuda_major = cuda_version()[0]
-    return f"nvidia-cusolvermp-cu{cuda_major}"
 
 
 def get_frameworks() -> List[str]:

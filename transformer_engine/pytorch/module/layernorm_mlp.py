@@ -74,7 +74,7 @@ from ..tensor.float8_tensor import (
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
-from ._common import apply_normalization, WeightGradStore
+from ._common import apply_normalization, set_quantizer_amax_reduction_group, WeightGradStore
 from ..cpu_offload import (
     is_cpu_offload_enabled,
     start_offload,
@@ -400,6 +400,11 @@ class _LayerNormMLP(torch.autograd.Function):
             if sequence_parallel and fc1_input_quantizer.supports_only_rowwise_all_gather():
                 # All-gather is not supported with FP8 column-wise data
                 fc1_input_quantizer.set_usage(columnwise=False)
+            # Amax reduction group for the FC1 input quantizer (column-parallel sequence parallel)
+            set_quantizer_amax_reduction_group(
+                fc1_input_quantizer,
+                tp_group if (sequence_parallel and set_parallel_mode) else None,
+            )
 
         # for fp8 DelayedScaling: layernorm output = FP8
         #                   only output of the linear is returned
@@ -1139,6 +1144,11 @@ class _LayerNormMLP(torch.autograd.Function):
                     # tensor usage at a time. Configure quantizer with
                     # usage for only dgrad GEMM.
                     quantizer.set_usage(columnwise=False)
+                # Amax reduction group for FC2 grad output (row-parallel sequence parallel)
+                set_quantizer_amax_reduction_group(
+                    quantizer,
+                    ctx.tp_group if (ctx.sequence_parallel and ctx.set_parallel_mode) else None,
+                )
 
             # Prepare FC2 grad output tensor
             # Note: Cast to expected dtype and perform tensor-parallel communication
@@ -2166,8 +2176,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
         recipe = FP8GlobalStateManager.get_fp8_recipe()
         if recipe.float8_current_scaling():
             self._customize_quantizers_float8_current_scaling(fwd, recipe)
-        elif recipe.nvfp4():
-            self._customize_quantizers_nvfp4(fwd, recipe)
 
     def get_quantizer_roles(
         self,
@@ -2677,15 +2685,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
             self.quantizers["scaling_fwd"][
                 FP8FwdTensorIdx.GEMM2_WEIGHT
             ].amax_epsilon = recipe.fp8_quant_fwd_weight.amax_epsilon
-            # parallel related
-            if self.sequence_parallel and self.set_parallel_mode:
-                # fc1_input_quantizer: customize input_quantizer with amax reduction TP group, column parallel + sequence parallel here
-                self.quantizers["scaling_fwd"][
-                    FP8FwdTensorIdx.GEMM1_INPUT
-                ].with_amax_reduction = True
-                self.quantizers["scaling_fwd"][
-                    FP8FwdTensorIdx.GEMM1_INPUT
-                ].amax_reduction_group = self.tp_group
         else:
             # fc2_grad_output_quantizer: set configs about amax epsilon and power_2_scale for fc2_grad_output_quantizer
             self.quantizers["scaling_bwd"][
@@ -2701,36 +2700,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
             self.quantizers["scaling_bwd"][
                 FP8BwdTensorIdx.GRAD_OUTPUT1
             ].amax_epsilon = recipe.fp8_quant_bwd_grad.amax_epsilon
-            if self.sequence_parallel and self.set_parallel_mode:
-                # fc2_grad_output_quantizer: customize grad_output_quantizer with amax reduction TP group, row parallel + sequence parallel here
-                self.quantizers["scaling_bwd"][
-                    FP8BwdTensorIdx.GRAD_OUTPUT2
-                ].with_amax_reduction = True
-                self.quantizers["scaling_bwd"][
-                    FP8BwdTensorIdx.GRAD_OUTPUT2
-                ].amax_reduction_group = self.tp_group
-
-    def _customize_quantizers_nvfp4(self, fwd: bool, recipe: Recipe) -> None:
-        """Customize quantizers based on current scaling recipe + layernorm_mlp."""
-        assert recipe.nvfp4(), "Incorrect recipe."
-        if fwd:
-            if self.sequence_parallel and self.set_parallel_mode:
-                # fc1_input_quantizer: customize input_quantizer with amax reduction TP group, column parallel + sequence parallel here
-                self.quantizers["scaling_fwd"][
-                    FP8FwdTensorIdx.GEMM1_INPUT
-                ].with_amax_reduction = True
-                self.quantizers["scaling_fwd"][
-                    FP8FwdTensorIdx.GEMM1_INPUT
-                ].amax_reduction_group = self.tp_group
-        else:
-            if self.sequence_parallel and self.set_parallel_mode:
-                # fc2_grad_output_quantizer: customize grad_output_quantizer with amax reduction TP group, row parallel + sequence parallel here
-                self.quantizers["scaling_bwd"][
-                    FP8BwdTensorIdx.GRAD_OUTPUT2
-                ].with_amax_reduction = True
-                self.quantizers["scaling_bwd"][
-                    FP8BwdTensorIdx.GRAD_OUTPUT2
-                ].amax_reduction_group = self.tp_group
 
     def _get_weight_tensors(self) -> List[Union[torch.Tensor, QuantizedTensorStorage]]:
         """Get the weight tensors of the module."""

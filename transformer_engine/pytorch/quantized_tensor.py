@@ -288,8 +288,15 @@ class Quantizer(abc.ABC):
         if out is not None:
             return self.update_quantized(tensor, out)
         if (not self.internal) and torch.is_grad_enabled():
-            return _QuantizeFunc.apply(tensor, self.quantize_impl)
-        return _QuantizeFunc.forward(None, tensor, self.quantize_impl)
+            result = _QuantizeFunc.apply(tensor, self.quantize_impl)
+        else:
+            result = _QuantizeFunc.forward(None, tensor, self.quantize_impl)
+        # The amax reduction group must never persist on a tensor's quantizer
+        result_quantizer = getattr(result, "_quantizer", None)
+        if getattr(result_quantizer, "with_amax_reduction", False):
+            result_quantizer.with_amax_reduction = False
+            result_quantizer.amax_reduction_group = None
+        return result
 
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Quantize tensor implementation"""

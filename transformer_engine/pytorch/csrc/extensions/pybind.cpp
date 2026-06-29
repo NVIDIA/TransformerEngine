@@ -293,6 +293,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "DSquaredReLU + DBias + Quantize", py::arg("grad"), py::arg("fwd_input"),
         py::arg("quantizer"));
 
+#ifdef NVTE_WITH_NCCL_EP
+  transformer_engine::pytorch::register_ep_bindings(m);
+#endif  // NVTE_WITH_NCCL_EP
+
   // Permutation functions
   m.def("moe_permute_fwd", transformer_engine::pytorch::moe_permute_fwd, "MOE permute FWD",
         py::call_guard<py::gil_scoped_release>());
