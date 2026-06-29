@@ -1317,6 +1317,95 @@ class TestGroupedMLPFusedOp:
             torch.testing.assert_close(fc1_db_false, fc1_db_true, **bias_tols)
             torch.testing.assert_close(fc2_db_false, fc2_db_true, **bias_tols)
 
+    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    def test_grouped_mlp_caller_buffers(
+        self,
+        *,
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",
+        group_size: int = 4,
+        hidden_size: int = 256,
+        split_alignment: int = 128,
+        glu_interleave_size: int = 32,
+    ) -> None:
+        """Caller-provided output/grad_input buffers on the fused MXFP8 grouped MLP."""
+        if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
+            pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
+
+        split_sizes = torch.tensor(
+            [split_alignment * (i + 1) for i in range(group_size)],
+            dtype=torch.int64,
+            device=device,
+        )
+        num_tokens = int(split_sizes.sum())
+        recipe = make_recipe("mxfp8")
+
+        x_base = torch.empty((num_tokens, hidden_size), device=device, dtype=dtype).uniform_(
+            -0.25, 0.25
+        )
+        probs_base = torch.empty((num_tokens,), device=device, dtype=dtype).uniform_(-0.25, 0.25)
+        dy_base = torch.empty((num_tokens, hidden_size), device=device, dtype=dtype).uniform_(
+            -0.25, 0.25
+        )
+        fc1_ws_base = [
+            torch.empty((2 * hidden_size, hidden_size), device=device, dtype=dtype).uniform_(
+                -0.25, 0.25
+            )
+            for _ in range(group_size)
+        ]
+        fc2_ws_base = [
+            torch.empty((hidden_size, hidden_size), device=device, dtype=dtype).uniform_(
+                -0.25, 0.25
+            )
+            for _ in range(group_size)
+        ]
+
+        def build() -> te.ops.Sequential:
+            with te.quantized_model_init(enabled=True, recipe=recipe):
+                fc1 = te.ops.GroupedLinear(
+                    group_size, hidden_size, 2 * hidden_size, bias=False, device=device, dtype=dtype
+                )
+                scaled_act = te.ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
+                fc2 = te.ops.GroupedLinear(
+                    group_size, hidden_size, hidden_size, bias=False, device=device, dtype=dtype
+                )
+                module = te.ops.Sequential(fc1, scaled_act, fc2)
+            with torch.no_grad():
+                for i in range(group_size):
+                    getattr(fc1, f"weight{i}").copy_(fc1_ws_base[i])
+                    getattr(fc2, f"weight{i}").copy_(fc2_ws_base[i])
+            return module
+
+        def run(module, *, output=None, grad_input=None):
+            x = x_base.detach().clone().requires_grad_(True)
+            probs = probs_base.detach().clone().requires_grad_(True)
+            with te.autocast(enabled=True, recipe=recipe):
+                y = module(
+                    x, split_sizes, probs, split_sizes, output=output, grad_input=grad_input
+                )
+            y.backward(dy_base)
+            return y, x.grad
+
+        # Reference: internal allocation.
+        y_ref, dx_ref = run(build())
+
+        # Caller-provided buffers.
+        module = build()
+        sentinel = 7.0
+        out_buf = torch.full((num_tokens, hidden_size), sentinel, dtype=dtype, device=device)
+        dgrad_buf = torch.full((num_tokens, hidden_size), sentinel, dtype=dtype, device=device)
+        y, _ = run(module, output=out_buf, grad_input=dgrad_buf)
+
+        # The fused op ran, the returned output aliases the buffer, and both buffers were written.
+        assert isinstance(
+            module._module_groups[0]._forward_ops[0][0],
+            te.ops.fused.GroupedMLP_CuTeGEMMGLU,
+        )
+        assert y.data_ptr() == out_buf.data_ptr()
+        assert not torch.all(dgrad_buf == sentinel)
+        torch.testing.assert_close(y, y_ref, rtol=0, atol=0)
+        torch.testing.assert_close(dgrad_buf, dx_ref, rtol=0, atol=0)
+
     @pytest.mark.parametrize("single_grouped_weight", (False, True))
     @pytest.mark.parametrize("delay_wgrad_compute", (False, True))
     @pytest.mark.parametrize("zero_out_wgrad", (False, True))

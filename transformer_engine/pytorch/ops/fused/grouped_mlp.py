@@ -43,11 +43,14 @@ from ..basic import (
 from ..fuser import register_forward_backward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
 from .._common import (
+    GRAD_INPUT_BUFFER_KEY,
+    OUTPUT_BUFFER_KEY,
     get_accumulate_flag_in_param,
     get_dummy_wgrads_for_params,
     get_main_grad_from_param,
     is_quantized_tensor,
     maybe_dequantize,
+    validate_or_alloc_output,
     view_main_grad_as_grouped_buffer,
 )
 
@@ -763,7 +766,9 @@ def fuse_grouped_mlp_ops(
 class _GroupedMLP_CuTeGEMMBase(FusedOperation):
     """Joint fused op for block-scaled GroupedLinear + activation + GroupedLinear.
 
-    Uses experimental CuTe DSL kernels from cuDNN front-end.
+    MXFP8 uses CuTe DSL grouped-GEMM kernels via the cuDNN front-end. Caller
+    buffers (``output``, ``grad_input``) receive their result directly, except the
+    MXFP8 dgrad kernel, which has no output argument, thus copies into ``grad_input``.
 
     """
 
@@ -873,6 +878,10 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         # Get basic operations
         fc1_op, _, fc2_op = self.basic_ops
         fc1_ctx, _activation_ctx, fc2_ctx = basic_op_ctxs
+
+        # Caller-provided buffers: FC2 forward output and FC1 backward grad-input.
+        output_buffer = basic_op_kwargs[-1].get(OUTPUT_BUFFER_KEY)
+        fc1_ctx.dgrad_out = basic_op_kwargs[0].get(GRAD_INPUT_BUFFER_KEY)
 
         # Tensor properties
         fc1_weight_shape = (fc1_op.out_features, fc1_op.in_features)
@@ -1422,7 +1431,19 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc2_quant_kwargs["b_major"] = "k"
 
             fc2_kernel_out = self.grouped_gemm_quant_kernel()(**fc2_quant_kwargs)
-            fc2_out = fc2_kernel_out["d_tensor"].permute(2, 0, 1).view(fc2_out_shape).contiguous()
+            fc2_out = fc2_kernel_out["d_tensor"].permute(2, 0, 1).view(fc2_out_shape)
+            # The kernel output is non-contiguous and must be materialized. When a
+            # caller buffer is given, materialize into it directly (no extra copy).
+            if output_buffer is None:
+                fc2_out = fc2_out.contiguous()
+
+        # Route the forward output into the caller-provided buffer. This is free
+        # when the value above was materialized into it; otherwise it is copied.
+        if output_buffer is not None:
+            output_buffer = validate_or_alloc_output(output_buffer, fc2_out_shape, dtype, device)
+            if output_buffer.data_ptr() != fc2_out.data_ptr():
+                output_buffer.copy_(fc2_out)
+            fc2_out = output_buffer
 
         # Save state for backward pass
         if requires_grad:
@@ -1949,11 +1970,13 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
 
         # FC1 dgrad GEMM
         grad_input = None
+        grad_input_buffer = getattr(fc1_ctx, "dgrad_out", None)
         if fc1_ctx.input_requires_grad:
             in_shape = out_shape[:-1] + [fc1_weight_shape[1]]
 
             if use_nvfp4:
-                grad_input = torch.empty(in_shape, dtype=dtype, device=device)
+                # GEMM writes straight into the caller buffer when provided.
+                grad_input = validate_or_alloc_output(grad_input_buffer, in_shape, dtype, device)
                 if num_groups == 1:
                     if fc1_op.single_grouped_weight:
                         fc1_w_single = grouped_fc1_weight.split_into_quantized_tensors()[0]
@@ -2052,6 +2075,22 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
 
                 fc1_dgrad_kernel_out = self.grouped_gemm_quant_kernel()(**fc1_dgrad_kwargs)
                 grad_input = fc1_dgrad_kernel_out["d_tensor"].view(in_shape)
+
+        # Route grad-input into the caller buffer. Only the MXFP8 dgrad kernel owns
+        # its output (no output argument), so it copies; any other path must have
+        # written the buffer in place.
+        if grad_input is not None and grad_input_buffer is not None:
+            grad_input_buffer = validate_or_alloc_output(
+                grad_input_buffer, grad_input.shape, dtype, device
+            )
+            if grad_input_buffer.data_ptr() != grad_input.data_ptr():
+                if isinstance(fc2_grad_output_quantizer, MXFP8Quantizer):
+                    grad_input_buffer.copy_(grad_input)
+                else:
+                    raise RuntimeError(
+                        "grad_input buffer was not written in place on the dgrad path."
+                    )
+            grad_input = grad_input_buffer
 
         # FC1 wgrad GEMM
         fc1_grad_params = _compute_grad_params(

@@ -226,6 +226,41 @@ class _GroupedLinear(torch.autograd.Function):
         return weights_for_gemm, new_workspaces
 
     @staticmethod
+    def _validate_or_alloc_output(
+        buffer: Optional[torch.Tensor],
+        rows: int,
+        cols: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Validate and return the caller's output buffer, or allocate one if it is None.
+
+        The buffer must be a 2D, contiguous, non-grad tensor matching the required shape,
+        dtype, and device. Validation reads host-side metadata only, with no device sync.
+        """
+        if buffer is None:
+            return torch.empty((rows, cols), dtype=dtype, device=device)
+        if buffer.dim() != 2:
+            raise ValueError(f"Output buffer must be 2D, got {buffer.dim()}D.")
+        if buffer.size(0) != rows:
+            raise ValueError(f"Output buffer rows {buffer.size(0)} must match input rows {rows}.")
+        if buffer.size(1) != cols:
+            raise ValueError(
+                f"Output buffer last dim {buffer.size(1)} does not match required {cols}."
+            )
+        if buffer.dtype != dtype:
+            raise ValueError(f"Output buffer dtype {buffer.dtype} does not match required {dtype}.")
+        if buffer.device != device:
+            raise ValueError(
+                f"Output buffer device {buffer.device} does not match required {device}."
+            )
+        if not buffer.is_contiguous():
+            raise ValueError("Output buffer must be contiguous.")
+        if buffer.requires_grad:
+            raise ValueError("Output buffer must not require gradient.")
+        return buffer
+
+    @staticmethod
     def _forward_grouped_tensor(
         ctx,
         *,
@@ -248,6 +283,8 @@ class _GroupedLinear(torch.autograd.Function):
         skip_fp8_weight_update: Optional[torch.Tensor],
         weights: Tuple[torch.Tensor, ...],
         biases: Tuple[torch.Tensor, ...],
+        out: Optional[torch.Tensor] = None,
+        dgrad_out: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, list]:
         """Forward path backed by GroupedTensor + cuBLASLt grouped GEMM."""
         num_gemms = len(m_splits)
@@ -292,10 +329,12 @@ class _GroupedLinear(torch.autograd.Function):
             cache_weight=cache_weight,
         )
 
-        out = torch.empty(
-            [x.size(0), out_features],
-            dtype=activation_dtype,
-            device=device,
+        out = _GroupedLinear._validate_or_alloc_output(
+            out,
+            x.size(0),
+            out_features,
+            activation_dtype,
+            device,
         )
         grouped_out = _GroupedLinear._make_grouped_tensor(
             out,
@@ -370,6 +409,7 @@ class _GroupedLinear(torch.autograd.Function):
                         lambda j=i: weights[j].main_grad for i in range(num_gemms)
                     ]
             ctx.device = device
+            ctx.dgrad_out = dgrad_out
             ctx.m_splits = None
             ctx.num_gemms = num_gemms
             ctx.activation_dtype = activation_dtype
@@ -430,6 +470,8 @@ class _GroupedLinear(torch.autograd.Function):
             skip_fp8_weight_update,
             save_original_input,
             debug,
+            out,
+            dgrad_out,
         ) = non_tensor_args
         if fp8:
             backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
@@ -533,6 +575,8 @@ class _GroupedLinear(torch.autograd.Function):
                 skip_fp8_weight_update=skip_fp8_weight_update,
                 weights=weights,
                 biases=biases,
+                out=out,
+                dgrad_out=dgrad_out,
             )
 
         # Convert splits to list of ints for compatibility with split functions
@@ -587,10 +631,12 @@ class _GroupedLinear(torch.autograd.Function):
             bias_dtype = torch.bfloat16  # FP8 GEMM only supports BF16/FP16 bias
         biases = [cast_if_needed(bias, bias_dtype) for bias in biases] if use_bias else biases
         # Initialize output tensor
-        out = torch.empty(
-            [sum(m_splits), weights_fp8[0].size(0)],
-            dtype=activation_dtype,
-            device=device,
+        out = _GroupedLinear._validate_or_alloc_output(
+            out,
+            sum(m_splits),
+            weights_fp8[0].size(0),
+            activation_dtype,
+            device,
         )
 
         # Choose whether to use split accumulator
@@ -708,6 +754,7 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.debug = debug
             ctx.save_original_input = save_original_input
             ctx.input_quantizers = input_quantizers
+            ctx.dgrad_out = dgrad_out
 
             # backward overrides
             if backward_override is not None:
@@ -802,10 +849,12 @@ class _GroupedLinear(torch.autograd.Function):
             for weight in weights:
                 if isinstance(weight, QuantizedTensorStorage):
                     weight.update_usage(columnwise_usage=True)
-            dgrad = torch.empty(
-                (dy_2d.size(0), ctx.weights_shape_1),
-                dtype=ctx.activation_dtype,
-                device=ctx.device,
+            dgrad = _GroupedLinear._validate_or_alloc_output(
+                ctx.dgrad_out,
+                dy_2d.size(0),
+                ctx.weights_shape_1,
+                ctx.activation_dtype,
+                ctx.device,
             )
             grouped_dgrad = _GroupedLinear._make_grouped_tensor(
                 dgrad,
@@ -1008,10 +1057,12 @@ class _GroupedLinear(torch.autograd.Function):
                         dgrad_gemm_use_split_accumulator = (
                             recipe.fp8_gemm_dgrad.use_split_accumulator
                         )
-                dgrad = torch.empty(
-                    (sum(ctx.m_splits), ctx.weights_shape_1),
-                    dtype=ctx.activation_dtype,
-                    device=ctx.device,
+                dgrad = _GroupedLinear._validate_or_alloc_output(
+                    ctx.dgrad_out,
+                    sum(ctx.m_splits),
+                    ctx.weights_shape_1,
+                    ctx.activation_dtype,
+                    ctx.device,
                 )
                 weights_for_dgrad = weights
                 if ctx.backward_override == "dequantized":
@@ -1673,6 +1724,8 @@ class GroupedLinear(TransformerEngineBaseModule):
         inp: torch.Tensor,
         m_splits: torch.Tensor,
         is_first_microbatch: Optional[bool] = None,
+        out: Optional[torch.Tensor] = None,
+        dgrad_out: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
         Apply the linear transformation to the input.
@@ -1696,6 +1749,17 @@ class GroupedLinear(TransformerEngineBaseModule):
                              * it also allows skipping gradient accumulation during the
                                first microbatch (since it is the first gradient being
                                produced)
+        out : torch.Tensor, default = None
+             Optional preallocated buffer for the forward output; the returned tensor
+             aliases it with no copy. Must be a 2D, contiguous, non-grad tensor of shape
+             [num_tokens, out_features] in the activation dtype. Only the first
+             sum(m_splits) rows are written; any padded trailing rows are left unchanged.
+             Can be given independently of dgrad_out.
+        dgrad_out : torch.Tensor, default = None
+             Optional preallocated buffer for the backward input gradient, of shape
+             [num_tokens, in_features] with the same constraints as out. Receives the
+             final gradient only when inp has a single consumer in the autograd graph;
+             otherwise autograd accumulates into a new tensor.
         """
         debug = self.is_debug_iter()
         is_grad_enabled = torch.is_grad_enabled()
@@ -1792,6 +1856,8 @@ class GroupedLinear(TransformerEngineBaseModule):
                 skip_fp8_weight_update,
                 self.save_original_input,
                 debug,
+                out,
+                dgrad_out,
             )
             out, new_workspaces = linear_fn(
                 *autograd_ctx, inp, m_splits, non_tensor_args, *weight_tensors, *bias_tensors

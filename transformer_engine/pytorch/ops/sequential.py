@@ -12,6 +12,10 @@ import torch
 
 from transformer_engine.pytorch.ops.op import FusibleOperation
 from transformer_engine.pytorch.ops.fuser import OperationFuser
+from transformer_engine.pytorch.ops._common import (
+    OUTPUT_BUFFER_KEY,
+    GRAD_INPUT_BUFFER_KEY,
+)
 
 
 class Sequential(torch.nn.Module):
@@ -168,12 +172,28 @@ class Sequential(torch.nn.Module):
         self,
         input: torch.Tensor,  # pylint: disable=redefined-builtin
         *extra_inputs: torch.Tensor,
+        output: Optional[torch.Tensor] = None,
+        grad_input: Optional[torch.Tensor] = None,
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
-        """Forward pass"""
+        """Forward pass.
+
+        output : optional preallocated buffer for the container's forward
+            output. Routed to the last op, which writes it in place; the
+            returned tensor aliases it. The last op must support it
+            (``GroupedLinear`` does).
+        grad_input : optional preallocated buffer for the gradient w.r.t.
+            the container's input. Routed to the first op's backward.
+
+        Only the boundary ops can receive a buffer; interior ops cannot be
+        targeted, as their outputs are internal activations.
+        """
 
         # Create module groups if needed
         if self._module_groups is None:
             self._module_groups = self._make_module_groups(self._modules.values())
+
+        first_group = self._module_groups[0] if self._module_groups else None
+        last_group = self._module_groups[-1] if self._module_groups else None
 
         # Forward pass for each module group
         x = input
@@ -184,15 +204,45 @@ class Sequential(torch.nn.Module):
                     (x,) + extra_inputs[: module_group.num_extra_inputs],
                     extra_inputs[module_group.num_extra_inputs :],
                 )
-                xs = module_group(*xs)
+                basic_op_kwargs = self._make_buffer_op_kwargs(
+                    module_group,
+                    output=output if module_group is last_group else None,
+                    grad_input=grad_input if module_group is first_group else None,
+                )
+                xs = module_group(*xs, basic_op_kwargs=basic_op_kwargs)
                 if isinstance(xs, tuple):
                     x, ys = xs[0], xs[1:]
                     extra_outputs.extend(ys)
                 else:
                     x = xs
             else:
+                if (module_group is last_group and output is not None) or (
+                    module_group is first_group and grad_input is not None
+                ):
+                    raise ValueError(
+                        "Caller-provided output/grad_input buffer requires the "
+                        "boundary op to be a fusible operation."
+                    )
                 x = module_group(x)
 
         if extra_outputs:
             return (x,) + tuple(extra_outputs)
         return x
+
+    @staticmethod
+    def _make_buffer_op_kwargs(
+        module_group: OperationFuser,
+        *,
+        output: Optional[torch.Tensor],
+        grad_input: Optional[torch.Tensor],
+    ) -> Optional[list[dict]]:
+        """Route caller buffers to the group's last (output) / first (grad_input) op."""
+        if output is None and grad_input is None:
+            return None
+        basic_ops = module_group._basic_ops  # pylint: disable=protected-access
+        kwargs: list[dict] = [{} for _ in basic_ops]
+        if grad_input is not None:
+            kwargs[0][GRAD_INPUT_BUFFER_KEY] = grad_input
+        if output is not None:
+            kwargs[-1][OUTPUT_BUFFER_KEY] = output
+        return kwargs
