@@ -97,6 +97,8 @@ void EPBackend::validate_config(const NVTEEpGroupConfig& config) {
   NVTE_CHECK(config.max_recv_tokens_per_rank > 0, "max_recv_tokens_per_rank must be positive, got ",
              config.max_recv_tokens_per_rank);
   NVTE_CHECK(config.hidden_dim > 0, "hidden_dim must be positive, got ", config.hidden_dim);
+  NVTE_CHECK(config.max_token_dtype >= 0 && config.max_token_dtype < kNVTENumTypes,
+             "max_token_dtype out of range, got ", static_cast<int>(config.max_token_dtype));
   const size_t elem_bytes = typeToSize(static_cast<DType>(config.max_token_dtype));
   const size_t row_bytes = static_cast<size_t>(config.hidden_dim) * elem_bytes;
   NVTE_CHECK(row_bytes >= 16,
