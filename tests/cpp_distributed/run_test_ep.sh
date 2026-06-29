@@ -35,10 +35,8 @@ if (( MIN_SM > 0 && MIN_SM < 90 )); then
     exit 0
 fi
 
-# NCCL EP requires NVLink P2P among ranks on the node.
-NVLINK_OUTPUT=$(nvidia-smi nvlink --status 2>&1)
-if [[ $? -ne 0 ]] || [[ "$NVLINK_OUTPUT" == *"not supported"* ]] \
-   || [[ "$NVLINK_OUTPUT" == *"No devices"* ]] || [[ -z "$NVLINK_OUTPUT" ]]; then
+# NCCL EP requires active NVLink P2P among ranks on the node.
+if ! nvidia-smi nvlink --status 2>/dev/null | grep -qE 'Link [0-9]+:.*GB/s'; then
     echo "NVLink not detected on this platform; SKIPPING."
     exit 0
 fi
