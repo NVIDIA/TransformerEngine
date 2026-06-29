@@ -290,7 +290,7 @@ class TestGroupedLinearOp:
             pytest.skip("single_grouped_bias requires bias=True")
         if single_grouped_weight and quantized_weight and quantization in ("fp8_delayed_scaling"):
             pytest.skip(
-                "single_grouped_weight does not support FP8 delayed/current scaling "
+                "single_grouped_weight does not support FP8 delayed scaling "
                 "with quantized_model_init"
             )
 
