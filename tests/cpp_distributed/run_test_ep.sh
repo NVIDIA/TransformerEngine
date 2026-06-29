@@ -35,6 +35,14 @@ if (( MIN_SM > 0 && MIN_SM < 90 )); then
     exit 0
 fi
 
+# NCCL EP requires NVLink P2P among ranks on the node.
+NVLINK_OUTPUT=$(nvidia-smi nvlink --status 2>&1)
+if [[ $? -ne 0 ]] || [[ "$NVLINK_OUTPUT" == *"not supported"* ]] \
+   || [[ "$NVLINK_OUTPUT" == *"No devices"* ]] || [[ -z "$NVLINK_OUTPUT" ]]; then
+    echo "NVLink not detected on this platform; SKIPPING."
+    exit 0
+fi
+
 TEST_BIN="${BUILD_DIR}/test_ep"
 if [[ ! -x "${TEST_BIN}" ]]; then
     echo "ERROR: binary not found: ${TEST_BIN}"

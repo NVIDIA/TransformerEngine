@@ -47,6 +47,15 @@ NUM_GPUS=$(nvidia-smi -L 2>/dev/null | wc -l)
 if [ "${NUM_GPUS}" -lt 4 ]; then
   echo "EP bench requires >=4 GPUs (found ${NUM_GPUS}); SKIPPING."; exit 0
 fi
+
+# NCCL EP requires NVLink P2P among ranks on the node.
+NVLINK_OUTPUT=$(nvidia-smi nvlink --status 2>&1)
+if [ $? -ne 0 ] || [[ "$NVLINK_OUTPUT" == *"not supported"* ]] \
+   || [[ "$NVLINK_OUTPUT" == *"No devices"* ]] || [ -z "$NVLINK_OUTPUT" ]; then
+  echo "NVLink not detected on this platform — EP bench requires NVLink; SKIPPING."
+  exit 0
+fi
+
 NUM=4
 COORD="${COORD:-127.0.0.1:23457}"
 TIMEOUT_S="${TIMEOUT_S:-1800}"
