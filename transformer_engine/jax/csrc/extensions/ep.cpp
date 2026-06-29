@@ -233,7 +233,8 @@ Error_Type EpPrepareFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_T
       .top_k = static_cast<int>(config.top_k),
       .dispatch_output_per_expert_alignment =
           static_cast<size_t>(config.dispatch_output_per_expert_alignment)};
-  nvte_ep_prepare(handle_mem_.data(), topk_idx_.data(), recv_tokens_per_expert_.data(), &layer_cfg, stream);
+  nvte_ep_prepare(handle_mem_.data(), topk_idx_.data(), recv_tokens_per_expert_.data(),
+                  /*total_recv_tokens_per_rank=*/nullptr, &layer_cfg, stream);
   return ffi_with_cuda_error_check();
 }
 

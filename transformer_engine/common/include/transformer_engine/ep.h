@@ -126,14 +126,16 @@ size_t nvte_ep_handle_mem_size(const NVTEEpLayerConfig* layer_cfg);
  *  that uses this handle_mem. recv_tokens_per_expert becomes host-valid after a
  *  stream sync.
  *
- *  \param[in]     handle_mem              uint8 routing-state buffer.
- *  \param[in]     topk_idx                [T, top_k] int64 routing indices.
- *  \param[out]    recv_tokens_per_expert  [num_local_experts] int32 counts.
- *  \param[in]     layer_cfg               Per-call layer configuration (struct_size set).
- *  \param[in]     stream                  CUDA stream.
+ *  \param[in]     handle_mem                 uint8 routing-state buffer.
+ *  \param[in]     topk_idx                   [T, top_k] int64 routing indices.
+ *  \param[out]    recv_tokens_per_expert     [num_local_experts] int32 counts.
+ *  \param[out]    total_recv_tokens_per_rank Reserved placeholder; may be null. Unused for now.
+ *  \param[in]     layer_cfg                  Per-call layer configuration (struct_size set).
+ *  \param[in]     stream                     CUDA stream.
  */
 void nvte_ep_prepare(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor recv_tokens_per_expert,
-                     const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream);
+                     NVTETensor total_recv_tokens_per_rank, const NVTEEpLayerConfig* layer_cfg,
+                     cudaStream_t stream);
 
 /*! \brief Dispatch tokens (and routing weights) to expert ranks.
  *

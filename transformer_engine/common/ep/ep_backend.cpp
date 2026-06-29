@@ -318,7 +318,9 @@ size_t EPBackend::handle_mem_size(NVTEEpLayerConfig layer_cfg) {
 }
 
 void EPBackend::prepare(void* handle_mem, const NVTETensor topk_idx, NVTETensor recv_tokens_per_expert,
-                        NVTEEpLayerConfig layer_cfg, cudaStream_t stream) {
+                        NVTETensor /*total_recv_tokens_per_rank*/, NVTEEpLayerConfig layer_cfg,
+                        cudaStream_t stream) {
+  // total_recv_tokens_per_rank is a reserved placeholder; not yet populated.
   NVTE_CHECK(handle_mem != nullptr, "handle_mem must not be null");
   NVTE_CHECK(layer_cfg.top_k > 0, "top_k must be > 0, got ", layer_cfg.top_k);
   NVTE_CHECK(nvte_tensor_shape(topk_idx).ndim == 2, "topk_idx must be 2D [T, top_k]");
