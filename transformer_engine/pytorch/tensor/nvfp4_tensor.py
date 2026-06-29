@@ -347,8 +347,7 @@ class NVFP4Quantizer(Quantizer):
 
     def _value_fields(self) -> Tuple[str, ...]:
         # ``amax_reduction_group`` is intentionally excluded: it is a deprecated
-        # process group (not a value). If one is actually stored, ``__fx_repr__``
-        # raises so it can never be baked into a torch.compile graph.
+        # process group, not a value (``_value_key`` rejects a stored group).
         # ``rht_matrix_random_sign_mask_t`` is derived (from
         # ``_with_random_sign_mask`` and the device) but is stored verbatim so
         # reconstruction does not need to touch the device.

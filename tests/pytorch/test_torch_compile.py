@@ -505,19 +505,59 @@ def test_value_quantizer_rejects_process_group():
             dist.destroy_process_group()
 
 
+if _opaque_available:
+    # A minimal custom op taking a tensor and a value-opaque quantizer that
+    # quantizes + dequantizes inside it, one per production quantizer class.
+    # ``test_quantizer_value_object_fullgraph`` drives this under
+    # ``torch.compile(fullgraph=True)`` so the quantizer is used *inside* the
+    # graph -- proving the opaque-type registration took effect (a graph break
+    # would make ``fullgraph=True`` raise).
+    _qdq_lib = torch.library.Library("test_te_qdq", "DEF")
+    _QDQ_OPS = {}
+    for _qcls in (
+        MXFP8Quantizer,
+        Float8BlockQuantizer,
+        Float8CurrentScalingQuantizer,
+        NVFP4Quantizer,
+    ):
+        _op = f"qdq_{_qcls.__name__}"
+        _qdq_lib.define(f"{_op}(Tensor x, {get_opaque_type_name(_qcls)} q) -> Tensor")
+
+        @torch.library.impl(f"test_te_qdq::{_op}", "CompositeExplicitAutograd", lib=_qdq_lib)
+        def _qdq_impl(x, q):
+            return q(x).dequantize()
+
+        @torch.library.register_fake(f"test_te_qdq::{_op}", lib=_qdq_lib)
+        def _qdq_fake(x, q):
+            return torch.empty_like(x)
+
+        _QDQ_OPS[_qcls] = getattr(torch.ops.test_te_qdq, _op)
+
+
 @pytest.mark.skipif(
     not _opaque_available,
     reason="torch.compile opaque-object support requires PyTorch >= 2.11",
 )
 @pytest.mark.parametrize("factory, other_kwargs", _VALUE_QUANTIZERS)
 def test_quantizer_value_object_fullgraph(factory, other_kwargs):
-    """Quantizer survives torch.compile(fullgraph=True) - verifies registration took effect."""
+    """Quantizer is usable *inside* a torch.compile(fullgraph=True) graph.
 
-    def fn(quantizer):
-        return quantizer
+    A custom op quantizes+dequantizes with the (opaque value) quantizer; the
+    compiled result must match eager. ``fullgraph=True`` raises on any graph
+    break, so this proves the opaque-type registration actually took effect --
+    unlike merely passing the quantizer through.
+    """
+    q = factory()
+    if not (torch.cuda.is_available() and _hw_available(q)):
+        pytest.skip("format not supported on this HW")
 
+    op = _QDQ_OPS[type(q)]
+    x = torch.randn(128, 256, dtype=torch.bfloat16, device="cuda")
+
+    def fn(inp):
+        return op(inp, q)
+
+    ref = fn(x)
     torch._dynamo.reset()
-    compiled = torch.compile(fn, fullgraph=True)
-
-    quantizer = factory()
-    assert compiled(quantizer) is quantizer
+    out = torch.compile(fn, fullgraph=True)(x)
+    torch.testing.assert_close(out, ref, rtol=0.0, atol=0.0)

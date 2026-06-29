@@ -25,10 +25,7 @@ def _rebuild_quantizer(cls: type, items: Tuple[Tuple[str, Any], ...]) -> Any:
     """Rebuild a tensorless quantizer of type *cls* from its value items.
 
     Referenced by the ``__fx_repr__`` emitted for value-opaque quantizers; the
-    generated FX code calls this to materialize the quantizer constant. A
-    quantizer that actually stores a process group never reaches this path:
-    ``__fx_repr__`` raises for it. The deprecated amax-reduction group is not a
-    value field, so the rebuilt quantizer simply has no group attribute.
+    generated FX code calls this to materialize the quantizer constant.
     """
     # Bypass ``__init__`` and restore the value attributes directly: the value
     # items already capture every value-defining field (including derived ones),
@@ -40,9 +37,8 @@ def _rebuild_quantizer(cls: type, items: Tuple[Tuple[str, Any], ...]) -> Any:
             value = DType.cast(value)
         object.__setattr__(obj, name, value)
         field_names.add(name)
-    # The deprecated amax-reduction group is not a value field. Quantizers that
-    # actually hold a group error out in ``__fx_repr__`` before reaching here, so
-    # this only initializes the (groupless) attribute to keep access working.
+    # The deprecated amax-reduction group is not a value field; initialize it to
+    # None so attribute access keeps working on the rebuilt quantizer.
     if "with_amax_reduction" in field_names and not hasattr(obj, "amax_reduction_group"):
         object.__setattr__(obj, "amax_reduction_group", None)
     # Restore non-value derived state that ``__init__`` would normally build but
