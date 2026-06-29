@@ -370,15 +370,17 @@ class NVFP4Quantizer(Quantizer):
         # as uint8; amax buffers are FP32 (per-row when row-scaled, else scalar).
         # Order matches NVFP4TensorStorage._FLATTEN_TENSOR_BUFFERS (the canonical
         # __tensor_flatten__ order): data + scale_inv per usage first, amax last.
+        # Workaround: call @staticmethods via the class, not the instance --
+        # instance access breaks torch.compile guard generation (pytorch #182741).
         if self.rowwise_usage:
-            buffers["_rowwise_data"] = (self.convert_shape_for_fp4(shape), torch.uint8)
+            buffers["_rowwise_data"] = (type(self).convert_shape_for_fp4(shape), torch.uint8)
             buffers["_rowwise_scale_inv"] = (
                 tuple(self.get_scale_shape(shape, columnwise=False)),
                 torch.uint8,
             )
         if self.columnwise_usage:
             buffers["_columnwise_data"] = (
-                self.convert_shape_for_fp4(self.get_columnwise_shape(shape)),
+                type(self).convert_shape_for_fp4(type(self).get_columnwise_shape(shape)),
                 torch.uint8,
             )
             buffers["_columnwise_scale_inv"] = (
