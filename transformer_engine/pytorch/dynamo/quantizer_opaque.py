@@ -10,12 +10,12 @@ from typing import Any, Dict, Tuple
 from ..constants import DType
 
 
-# Registration marks the class with this attribute instead of recording it in a
-# module-level set. ``is_value_opaque_quantizer`` runs *inside* the torch.compile
-# graph (``Linear.forward`` consults it): Dynamo can trace a ``getattr`` on the
-# opaque quantizer and bake the result as a constant, but cannot evaluate
-# ``type(q) in some_set`` -- it has no equality/hash rules for the opaque class
-# object, so a set/dict lookup graph-breaks under ``fullgraph=True``.
+# Registration marks the class with this attribute rather than recording it in a
+# module-level set. It looks odd but is a deliberate workaround: the check must
+# stay traceable when it runs inside a torch.compile graph -- Dynamo can bake a
+# ``getattr`` on the opaque quantizer into a constant, but cannot evaluate
+# ``type(q) in some_set`` (no equality/hash rules for the opaque class object),
+# which would graph-break under ``fullgraph=True``.
 _VALUE_OPAQUE_FLAG = "_te_compile_value_opaque"
 
 
