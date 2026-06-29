@@ -74,11 +74,11 @@ size_t nvte_ep_handle_mem_size(const NVTEEpLayerConfig* layer_cfg) {
   return EPBackend::get().handle_mem_size(cfg);
 }
 
-void nvte_ep_prepare(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor token_counts,
+void nvte_ep_prepare(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor recv_tokens_per_expert,
                      const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream) {
   NVTEEpLayerConfig cfg =
       normalize_ep_config(layer_cfg, kLayerConfigMinSize, "layer_cfg");
-  EPBackend::get().prepare(handle_mem_ptr(handle_mem), topk_idx, token_counts, cfg, stream);
+  EPBackend::get().prepare(handle_mem_ptr(handle_mem), topk_idx, recv_tokens_per_expert, cfg, stream);
 }
 
 void nvte_ep_dispatch(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor tokens,
@@ -130,7 +130,7 @@ void nvte_ep_shutdown(void) {}
 size_t nvte_ep_handle_mem_size(const NVTEEpLayerConfig* /*layer_cfg*/) { ep_not_built(); }
 
 void nvte_ep_prepare(NVTETensor /*handle_mem*/, NVTETensor /*topk_idx*/,
-                     NVTETensor /*token_counts*/, const NVTEEpLayerConfig* /*layer_cfg*/,
+                     NVTETensor /*recv_tokens_per_expert*/, const NVTEEpLayerConfig* /*layer_cfg*/,
                      cudaStream_t /*stream*/) {
   ep_not_built();
 }

@@ -46,7 +46,7 @@ class EPBackend {
   size_t handle_mem_size(NVTEEpLayerConfig layer_cfg);
 
   // Seeds the cache for handle_mem with layer_cfg and runs the routing AllGather.
-  void prepare(void* handle_mem, const NVTETensor topk_idx, NVTETensor token_counts,
+  void prepare(void* handle_mem, const NVTETensor topk_idx, NVTETensor recv_tokens_per_expert,
                NVTEEpLayerConfig layer_cfg, cudaStream_t stream);
 
   // Per-step ops below require a prior prepare().

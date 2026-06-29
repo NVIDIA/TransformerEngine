@@ -317,7 +317,7 @@ size_t EPBackend::handle_mem_size(NVTEEpLayerConfig layer_cfg) {
   return hm_size;
 }
 
-void EPBackend::prepare(void* handle_mem, const NVTETensor topk_idx, NVTETensor token_counts,
+void EPBackend::prepare(void* handle_mem, const NVTETensor topk_idx, NVTETensor recv_tokens_per_expert,
                         NVTEEpLayerConfig layer_cfg, cudaStream_t stream) {
   NVTE_CHECK(handle_mem != nullptr, "handle_mem must not be null");
   NVTE_CHECK(layer_cfg.top_k > 0, "top_k must be > 0, got ", layer_cfg.top_k);
@@ -327,13 +327,13 @@ void EPBackend::prepare(void* handle_mem, const NVTETensor topk_idx, NVTETensor 
   ncclEpTensor_t nccl_topk_idx = make_nccl_ep_tensor(topk_idx, topk_idx_shape);
 
   // ncclEpUpdateHandle writes per-expert counts via expert_counters.
-  NVTEShape token_counts_shape;
-  ncclEpTensor_t token_counts_desc;
-  if (token_counts != nullptr) {
-    token_counts_desc = make_nccl_ep_tensor(token_counts, token_counts_shape);
+  NVTEShape recv_tokens_per_expert_shape;
+  ncclEpTensor_t recv_tokens_per_expert_desc;
+  if (recv_tokens_per_expert != nullptr) {
+    recv_tokens_per_expert_desc = make_nccl_ep_tensor(recv_tokens_per_expert, recv_tokens_per_expert_shape);
   }
   ncclEpLayoutInfo_t layout_info = NCCL_EP_LAYOUT_INFO_INIT;
-  layout_info.expert_counters = (token_counts != nullptr) ? &token_counts_desc : nullptr;
+  layout_info.expert_counters = (recv_tokens_per_expert != nullptr) ? &recv_tokens_per_expert_desc : nullptr;
 
   std::lock_guard<std::mutex> lock(mutex_);
   NVTE_CHECK(initialized_, "EPBackend not initialized");
