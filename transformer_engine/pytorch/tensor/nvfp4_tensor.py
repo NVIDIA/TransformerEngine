@@ -186,6 +186,16 @@ class NVFP4Quantizer(Quantizer):
         state["amax_reduction_group"] = None
         return state
 
+    def _rebuild_derived_state(self) -> None:
+        """Restore the derived ``rht_matrix`` after value-key reconstruction.
+
+        ``rht_matrix`` is a ``torch.Tensor`` built from ``_with_random_sign_mask``
+        and the device, so it cannot be part of the (hashable) value key.
+        ``_rebuild_quantizer`` calls this hook to rebuild it; the ``lru_cache`` on
+        :func:`get_rht_matrix` makes an already-seen (flag, device) a cheap hit.
+        """
+        self.rht_matrix = get_rht_matrix(self._with_random_sign_mask, torch.cuda.current_device())
+
     def update_quantized(
         self,
         src: torch.Tensor,

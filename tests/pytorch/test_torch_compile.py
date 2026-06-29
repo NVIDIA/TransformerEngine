@@ -416,13 +416,27 @@ def _current_scaling(amax_epsilon=0.0):
     )
 
 
-def _nvfp4(with_rht=False):
+def _nvfp4(with_rht=True):
+    # Default with_rht=True so the quantize round-trip below exercises the
+    # derived ``rht_matrix`` tensor (the field most likely to be dropped on
+    # value-key reconstruction).
     return NVFP4Quantizer(
         fp4_dtype=tex.DType.kFloat4E2M1,
         rowwise=True,
         columnwise=True,
         with_rht=with_rht,
     )
+
+
+def _hw_available(quantizer):
+    """Whether this HW can actually run the quantize kernel for *quantizer*."""
+    if isinstance(quantizer, MXFP8Quantizer):
+        return mxfp8_available
+    if isinstance(quantizer, NVFP4Quantizer):
+        return nvfp4_available
+    if isinstance(quantizer, Float8BlockQuantizer):
+        return fp8_block_scaling_available
+    return fp8_available  # Float8CurrentScalingQuantizer
 
 
 # (factory, kwargs producing a different-but-valid config)
@@ -432,7 +446,7 @@ _VALUE_QUANTIZERS = [
     pytest.param(_current_scaling, {"amax_epsilon": 1e-4}, id="float8_current_scaling"),
     pytest.param(
         _nvfp4,
-        {"with_rht": True},
+        {"with_rht": False},
         id="nvfp4",
         marks=pytest.mark.skipif(
             not torch.cuda.is_available(),
@@ -459,6 +473,15 @@ def test_quantizer_value_object(factory, other_kwargs):
     rebuilt = eval(repr_str, dict(globals_))  # pylint: disable=eval-used
     assert rebuilt == a and rebuilt is not a
     assert hash(rebuilt) == hash(a)
+
+    # The rebuilt quantizer must also *behave* identically, not just compare
+    # equal: equality only looks at the value key, so a field the kernel needs
+    # but that is absent from the key (e.g. NVFP4's derived ``rht_matrix``) would
+    # slip through the checks above and only blow up at quantize time. Run the
+    # real quantize kernel on both and require bit-exact results.
+    if torch.cuda.is_available() and _hw_available(a):
+        x = torch.randn(128, 256, dtype=torch.bfloat16, device="cuda")
+        torch.testing.assert_close(rebuilt(x).dequantize(), a(x).dequantize(), rtol=0.0, atol=0.0)
 
 
 @pytest.mark.skipif(

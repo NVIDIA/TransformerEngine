@@ -58,6 +58,11 @@ def _rebuild_quantizer(cls: type, items: Tuple[Tuple[str, Any], ...]) -> Any:
     # this only initializes the (groupless) attribute to keep access working.
     if "with_amax_reduction" in field_names and not hasattr(obj, "amax_reduction_group"):
         object.__setattr__(obj, "amax_reduction_group", None)
+    # Restore non-value derived state that ``__init__`` would normally build but
+    # that cannot live in the value key (e.g. NVFP4's ``rht_matrix`` tensor).
+    finalize = getattr(obj, "_rebuild_derived_state", None)
+    if finalize is not None:
+        finalize()
     return obj
 
 
