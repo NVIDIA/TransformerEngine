@@ -138,7 +138,12 @@ def setup_requirements() -> Tuple[List[str], List[str]]:
 
 
 def _discover_nccl_home() -> str:
-    """Resolve NCCL_HOME: honor env var, else probe well-known prefixes, else ldconfig."""
+    """Resolve NCCL_HOME, preferring the NCCL the dynamic loader resolves at runtime.
+
+    Probes in order: NCCL_HOME env var, ldconfig cache, well-known prefixes, then a
+    pip-installed nvidia-nccl-cu* wheel. To test a non-default NCCL (e.g. a wheel), set
+    NCCL_HOME and ensure the runtime loader resolves the same lib (e.g. LD_LIBRARY_PATH).
+    """
     env_home = os.environ.get("NCCL_HOME")
     if env_home:
         if (Path(env_home) / "include" / "nccl.h").exists():
@@ -152,28 +157,11 @@ def _discover_nccl_home() -> str:
     # Include Debian/Ubuntu multiarch subdirs (e.g. lib/aarch64-linux-gnu).
     lib_subdirs = ("lib", "lib64", "lib/aarch64-linux-gnu", "lib/x86_64-linux-gnu")
 
-    # pip-installed NCCL (nvidia-nccl-cu* wheel) lives under nvidia/nccl in
-    # site-packages and has no top-level include/lib layout.
-    try:
-        import importlib.util
-
-        spec = importlib.util.find_spec("nvidia.nccl")
-        if spec is not None and spec.submodule_search_locations:
-            pip_root = Path(next(iter(spec.submodule_search_locations)))
-            if (pip_root / "include" / "nccl.h").exists() and any(
-                (pip_root / sub / name).exists() for sub in lib_subdirs for name in lib_names
-            ):
-                return str(pip_root)
-    except (ImportError, ValueError):
-        pass
-
-    for cand in ("/opt/nvidia/nccl", "/usr/local/nccl", "/usr"):
-        p = Path(cand)
-        if (p / "include" / "nccl.h").exists() and any(
-            (p / sub / name).exists() for sub in lib_subdirs for name in lib_names
-        ):
-            return str(p)
-
+    # Prefer the NCCL the dynamic loader will actually resolve at runtime so the
+    # EP build links against the same libnccl that gets loaded. libtransformer_engine
+    # carries no NCCL RUNPATH, so the loader uses ldconfig/system paths; building
+    # against a different NCCL (e.g. a pip wheel) causes ABI mismatches. ldconfig is
+    # the ground truth for runtime resolution, so consult it before well-known prefixes.
     try:
         out = subprocess.check_output(["ldconfig", "-p"], stderr=subprocess.DEVNULL).decode()
         for line in out.splitlines():
@@ -185,6 +173,28 @@ def _discover_nccl_home() -> str:
                     if (root / "include" / "nccl.h").exists():
                         return str(root)
     except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+
+    for cand in ("/opt/nvidia/nccl", "/usr/local/nccl", "/usr"):
+        p = Path(cand)
+        if (p / "include" / "nccl.h").exists() and any(
+            (p / sub / name).exists() for sub in lib_subdirs for name in lib_names
+        ):
+            return str(p)
+
+    # Fall back to a pip-installed NCCL (nvidia-nccl-cu* wheel) under nvidia/nccl
+    # in site-packages, used only when no system NCCL is present.
+    try:
+        import importlib.util
+
+        spec = importlib.util.find_spec("nvidia.nccl")
+        if spec is not None and spec.submodule_search_locations:
+            pip_root = Path(next(iter(spec.submodule_search_locations)))
+            if (pip_root / "include" / "nccl.h").exists() and any(
+                (pip_root / sub / name).exists() for sub in lib_subdirs for name in lib_names
+            ):
+                return str(pip_root)
+    except (ImportError, ValueError):
         pass
 
     raise RuntimeError(
