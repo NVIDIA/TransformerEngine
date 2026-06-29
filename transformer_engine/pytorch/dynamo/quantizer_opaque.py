@@ -7,7 +7,7 @@
 from __future__ import annotations
 from typing import Any, Dict, Tuple
 
-from ..constants import DType, dist_group_type
+from ..constants import DType
 
 
 # Class attribute stamped on quantizers registered as torch.compile value-opaque
@@ -19,19 +19,6 @@ def is_value_opaque_quantizer(quantizer: Any) -> bool:
     """Whether *quantizer*'s class is registered as a torch.compile value-opaque
     type."""
     return getattr(quantizer, _VALUE_OPAQUE_FLAG, False)
-
-
-def _contains_process_group(value: Any) -> bool:
-    """Whether *value* is (or nests) a ``torch.distributed.ProcessGroup``.
-
-    Checks the value directly and one level of ``tuple``/``list`` nesting, which
-    covers the shapes a quantizer value field could plausibly take.
-    """
-    if isinstance(value, dist_group_type):
-        return True
-    if isinstance(value, (tuple, list)):
-        return any(_contains_process_group(item) for item in value)
-    return False
 
 
 def _rebuild_quantizer(cls: type, items: Tuple[Tuple[str, Any], ...]) -> Any:
@@ -74,22 +61,13 @@ def _quantizer_fx_repr(self: Any) -> Tuple[str, Dict[str, Any]]:
     class itself in the FX globals so codegen can resolve them with no global
     registry and no qualname collisions.
 
-    Raises ``TypeError`` if the quantizer stores a process group (e.g. a
-    non-``None`` deprecated ``amax_reduction_group``): live distributed state
-    must never be baked into the graph as a constant, so such a quantizer cannot
-    be used with ``torch.compile``. Pass the reduction group per quantize call
-    instead of storing it on the quantizer.
+    Raises ``TypeError`` (via :meth:`Quantizer._value_key`) if the quantizer
+    stores a process group (e.g. a non-``None`` deprecated
+    ``amax_reduction_group``): live distributed state must never be baked into
+    the graph as a constant. Pass the reduction group per quantize call instead
+    of storing it on the quantizer.
     """
     cls = type(self)
-    for name, value in vars(self).items():
-        if _contains_process_group(value):
-            raise TypeError(
-                f"{cls.__name__} cannot be used with torch.compile: attribute "
-                f"{name!r} holds a torch.distributed.ProcessGroup, which is live "
-                "distributed state and must not be baked into an FX graph as a "
-                "constant. Pass the amax reduction group per quantize call instead "
-                "of storing it on the quantizer."
-            )
     items = self._value_key()[1]
     return (
         f"_rebuild_quantizer({cls.__name__}, {items!r})",

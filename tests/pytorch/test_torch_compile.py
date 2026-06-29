@@ -484,6 +484,27 @@ def test_quantizer_value_object(factory, other_kwargs):
         torch.testing.assert_close(rebuilt(x).dequantize(), a(x).dequantize(), rtol=0.0, atol=0.0)
 
 
+def test_value_quantizer_rejects_process_group():
+    """A value quantizer holding a live ProcessGroup must refuse to be turned
+    into a value key / FX constant (raise), not silently drop the group."""
+    import torch.distributed as dist  # pylint: disable=import-outside-toplevel
+
+    created = not dist.is_initialized()
+    if created:
+        dist.init_process_group(backend="gloo", store=dist.HashStore(), rank=0, world_size=1)
+    try:
+        q = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        q.amax_reduction_group = dist.group.WORLD
+        # Every value-materialization path must reject it (hash, eq, __fx_repr__).
+        with pytest.raises(TypeError):
+            hash(q)
+        with pytest.raises(TypeError):
+            q.__fx_repr__()
+    finally:
+        if created:
+            dist.destroy_process_group()
+
+
 @pytest.mark.skipif(
     not _opaque_available,
     reason="torch.compile opaque-object support requires PyTorch >= 2.11",

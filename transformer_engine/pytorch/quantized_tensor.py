@@ -16,11 +16,25 @@ from torch.utils._pytree import tree_map
 import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
+from transformer_engine.pytorch.constants import dist_group_type
 from transformer_engine.pytorch.tensor._quantization_helpers import (
     _QuantizeFunc,
     _IdentityFunc,
     _stride_from_shape,
 )
+
+
+def _contains_process_group(value: Any) -> bool:
+    """Whether *value* is (or nests) a ``torch.distributed.ProcessGroup``.
+
+    Checks the value directly and one level of ``tuple``/``list`` nesting, which
+    covers the shapes a quantizer value field could plausibly take.
+    """
+    if isinstance(value, dist_group_type):
+        return True
+    if isinstance(value, (tuple, list)):
+        return any(_contains_process_group(item) for item in value)
+    return False
 
 
 # Custom ops that should pass through __torch_dispatch__ without unwrapping
@@ -427,6 +441,24 @@ class Quantizer(abc.ABC):
         """
         return None
 
+    def _check_value_has_no_process_group(self) -> None:
+        # A value quantizer is baked into the FX graph as a constant via its
+        # value key, which cannot carry live distributed state. Enforced here --
+        # the single point every value-materialization path (``__eq__`` /
+        # ``__hash__`` / ``__fx_repr__``) goes through -- so a custom
+        # ``__fx_repr__`` cannot bypass it. Reject any field holding a
+        # ProcessGroup (e.g. the deprecated ``amax_reduction_group``) rather than
+        # silently dropping it; pass the reduction group per quantize call.
+        for name, value in vars(self).items():
+            if _contains_process_group(value):
+                raise TypeError(
+                    f"{type(self).__name__} cannot be used as a torch.compile value "
+                    f"object: attribute {name!r} holds a torch.distributed.ProcessGroup, "
+                    "which is live distributed state and must not be baked into an FX "
+                    "graph. Pass the amax reduction group per quantize call instead of "
+                    "storing it on the quantizer."
+                )
+
     def _value_key(self) -> Tuple[Any, ...]:
         """Hashable, reproducible key identifying this quantizer's value.
 
@@ -434,6 +466,7 @@ class Quantizer(abc.ABC):
         """
         fields = self._value_fields()  # pylint: disable=assignment-from-none
         assert fields is not None, f"{type(self).__name__} is not a value quantizer"
+        self._check_value_has_no_process_group()
         items = []
         for name in self._BASE_VALUE_FIELDS + tuple(fields):
             value = getattr(self, name)
@@ -444,36 +477,21 @@ class Quantizer(abc.ABC):
             items.append((name, value))
         return (type(self).__qualname__, tuple(items))
 
-    def _check_value_has_no_amax_reduction_group(self) -> None:
-        # The amax reduction group is not part of the value key, so a value
-        # quantizer that stores one would compare/hash equal to a groupless one
-        # and let torch.compile reuse a graph that skips the reduction. Reject it
-        # (mirrors ``__fx_repr__``); pass the group per quantize call instead.
-        if getattr(self, "amax_reduction_group", None) is not None:
-            raise TypeError(
-                f"{type(self).__name__} with a non-None amax_reduction_group cannot be "
-                "used as a value object; pass the amax reduction group per quantize call "
-                "instead of storing it on the quantizer."
-            )
-
     def __eq__(self, other: object) -> Any:
         # Value quantizers compare by configuration; everything else keeps the
         # default identity semantics (returning ``NotImplemented`` makes Python
-        # fall back to identity).
+        # fall back to identity). ``_value_key`` rejects a stored ProcessGroup.
         if self is other:
             return True
         if self._value_fields() is None or type(self) is not type(other):
             return NotImplemented
         if other._value_fields() is None:
             return NotImplemented
-        self._check_value_has_no_amax_reduction_group()
-        other._check_value_has_no_amax_reduction_group()
         return self._value_key() == other._value_key()
 
     def __hash__(self) -> int:
         if self._value_fields() is None:
             return object.__hash__(self)
-        self._check_value_has_no_amax_reduction_group()
         return hash(self._value_key())
 
 
