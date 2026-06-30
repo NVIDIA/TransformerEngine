@@ -467,7 +467,9 @@ def test_mhc_fuse_grad_acc(cfg: MHCConfig, dtype):
     N = 2 * n + n * n
     nC = n * C
 
-    tols = get_tols(dtype)
+    # TODO(kainzhong): the larget tols here is because the fuse_grad_acc path accumulates multiple operators using atomic add
+    # which introduces randomness and the result is not deterministic. Use a smaller tols once the deterministic kernel is implemented.
+    tols = dict(atol=5e-2, rtol=5e-2)
     use_tf32 = False
 
     x = torch.randn(s, b, C, n, device="cuda", requires_grad=True, dtype=dtype)
