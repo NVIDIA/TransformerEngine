@@ -18,7 +18,7 @@ from transformer_engine.common.recipe import (
 from ..utils import canonicalize_process_group, devices_match
 from .storage.float8_tensor_storage import Float8TensorStorage, _FromFloat8Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
-from ._quantization_helpers import _IdentityFunc
+from ._quantization_helpers import _IdentityFunc, safe_quantized_repr
 from ..constants import dist_group_type, DType
 
 aten = torch.ops.aten
@@ -423,13 +423,16 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
     amax_reduction_group: Optional[dist_group_type] = None
 
     def __repr__(self, *, tensor_contents=None):
-        return (
-            "Float8Tensor("
-            f"fp8_dtype={self._fp8_dtype}, "
-            f"scale_inv={self._scale_inv.item()}, "
-            f"data={self.dequantize()}"
-            ")"
-        )
+        try:
+            return (
+                "Float8Tensor("
+                f"fp8_dtype={self._fp8_dtype}, "
+                f"scale_inv={self._scale_inv.item()}, "
+                f"data={self.dequantize()}"
+                ")"
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            return safe_quantized_repr(self, "Float8Tensor", error=exc)
 
     def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """
