@@ -87,12 +87,10 @@ def register_value_opaque_quantizer(cls: type) -> None:
     a non-``None`` ``_value_fields`` (see
     :class:`transformer_engine.pytorch.quantized_tensor.Quantizer`).
     """
-    # Stamp the class so it can be recognized as value-opaque in dynamo-traced
-    # code (used to fall back to eager for unregistered quantizers).
-    setattr(cls, _VALUE_OPAQUE_FLAG, True)
-
     # ``register_opaque_type`` requires ``__fx_repr__`` to already exist on the
-    # class, so attach it before registering.
+    # class, so attach it before registering. Eager value semantics
+    # (``__eq__`` / ``__hash__`` / ``__fx_repr__``) work regardless of whether
+    # the opaque-object registration below succeeds.
     if "__fx_repr__" not in cls.__dict__:
         cls.__fx_repr__ = _quantizer_fx_repr
 
@@ -113,4 +111,9 @@ def register_value_opaque_quantizer(cls: type) -> None:
         # Keep TE importable: neither the opaque-type query nor the registration
         # must crash the import, e.g. on PyTorch versions with only partial /
         # experimental opaque-object support.
-        pass
+        return
+
+    # Stamp the class only once torch actually knows it as an opaque value type,
+    # so ``is_value_opaque_quantizer`` never reports a quantizer as opaque when
+    # the registration was skipped or failed.
+    setattr(cls, _VALUE_OPAQUE_FLAG, True)
