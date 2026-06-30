@@ -6,7 +6,7 @@
 from __future__ import annotations
 from collections.abc import Iterable
 import math
-from typing import Optional, Tuple, Union, Any
+from typing import Optional, Tuple, Union, Any, Dict
 import warnings
 
 import torch
@@ -18,6 +18,7 @@ from ..constants import MXFP8_BLOCK_SCALING_SIZE, DType
 from ..utils import devices_match, round_up_to_nearest_multiple
 from .storage.mxfp8_tensor_storage import MXFP8TensorStorage, _FromMXFP8Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
+from ..dynamo import register_value_opaque_quantizer
 from ._quantization_helpers import _IdentityFunc
 
 aten = torch.ops.aten
@@ -56,6 +57,41 @@ class MXFP8Quantizer(Quantizer):
         quantizer.optimize_for_gemm = self.optimize_for_gemm
 
         return quantizer
+
+    def _value_fields(self) -> Tuple[str, ...]:
+        return ("dtype",)
+
+    # ----- TensorProto / pure-Python allocation -----
+
+    def _storage_metadata(self, fake_dtype: torch.dtype) -> Dict[str, Any]:
+        return {
+            "cls": MXFP8TensorStorage if self.internal else MXFP8Tensor,
+            "nontensor_kwargs": {
+                "fp8_dtype": self.dtype,
+                "quantizer": self,
+                "with_gemm_swizzled_scales": self.optimize_for_gemm,
+                "fake_dtype": fake_dtype,
+            },
+        }
+
+    def _describe_buffers(
+        self, shape: Tuple[int, ...]
+    ) -> Dict[str, Tuple[Tuple[int, ...], torch.dtype]]:
+        shape = tuple(shape)
+        buffers: Dict[str, Tuple[Tuple[int, ...], torch.dtype]] = {}
+        if self.rowwise_usage:
+            buffers["_rowwise_data"] = (shape, torch.uint8)
+            buffers["_rowwise_scale_inv"] = (
+                tuple(self.get_scale_shape(shape, columnwise=False)),
+                torch.uint8,
+            )
+        if self.columnwise_usage:
+            buffers["_columnwise_data"] = (shape, torch.uint8)
+            buffers["_columnwise_scale_inv"] = (
+                tuple(self.get_scale_shape(shape, columnwise=True)),
+                torch.uint8,
+            )
+        return buffers
 
     def update_quantized(
         self,
@@ -1058,3 +1094,6 @@ class _ReshapeFunc(torch.autograd.Function):
             )
             return dgrad, None
         return grad.view(ctx.shape), None
+
+
+register_value_opaque_quantizer(MXFP8Quantizer)

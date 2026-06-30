@@ -82,6 +82,15 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
     # GEMM
     _with_gemm_swizzled_scales: bool
 
+    # (attribute_name, constructor_kwarg) for each tensor buffer; drives
+    # __tensor_flatten__ / __tensor_unflatten__ (see QuantizedTensorStorage).
+    _FLATTEN_TENSOR_BUFFERS = (
+        ("_rowwise_data", "rowwise_data"),
+        ("_rowwise_scale_inv", "rowwise_scale_inv"),
+        ("_columnwise_data", "columnwise_data"),
+        ("_columnwise_scale_inv", "columnwise_scale_inv"),
+    )
+
     def __new__(
         cls,
         rowwise_data: Optional[torch.Tensor],

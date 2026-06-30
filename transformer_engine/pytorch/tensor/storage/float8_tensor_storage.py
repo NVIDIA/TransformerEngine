@@ -75,6 +75,14 @@ class Float8TensorStorage(QuantizedTensorStorage):
     _transpose: Optional[torch.Tensor]
     _transpose_invalid: bool
 
+    # (attribute_name, constructor_kwarg) for each tensor buffer; drives
+    # __tensor_flatten__ / __tensor_unflatten__ (see QuantizedTensorStorage).
+    _FLATTEN_TENSOR_BUFFERS = (
+        ("_data", "data"),
+        ("_transpose", "data_transpose"),
+        ("_scale_inv", "fp8_scale_inv"),
+    )
+
     def __new__(
         cls,
         *args,

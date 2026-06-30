@@ -7,7 +7,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 import math
 import warnings
-from typing import Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 import functools
 
 import torch
@@ -23,6 +23,7 @@ from ..utils import (
 
 from .storage.nvfp4_tensor_storage import NVFP4TensorStorage, _FromNVFP4Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
+from ..dynamo import register_value_opaque_quantizer
 from ._quantization_helpers import _IdentityFunc
 
 aten = torch.ops.aten
@@ -173,6 +174,7 @@ class NVFP4Quantizer(Quantizer):
         self.nvfp4_4over6_err_mode = nvfp4_4over6_err_mode.upper()
         if self.nvfp4_4over6_err_mode not in ("MAE", "MSE"):
             raise ValueError("nvfp4_4over6_err_mode must be 'MAE' or 'MSE'.")
+        self._with_random_sign_mask = with_random_sign_mask
         self.rht_matrix_random_sign_mask_t = get_random_sign_mask_for_rht(
             with_random_sign_mask, torch.cuda.current_device()
         )
@@ -183,6 +185,16 @@ class NVFP4Quantizer(Quantizer):
         state = self.__dict__.copy()
         state["amax_reduction_group"] = None
         return state
+
+    def _rebuild_derived_state(self) -> None:
+        """Restore the derived ``rht_matrix`` after value-key reconstruction.
+
+        ``rht_matrix`` is a ``torch.Tensor`` built from ``_with_random_sign_mask``
+        and the device, so it cannot be part of the (hashable) value key.
+        ``_rebuild_quantizer`` calls this hook to rebuild it; the ``lru_cache`` on
+        :func:`get_rht_matrix` makes an already-seen (flag, device) a cheap hit.
+        """
+        self.rht_matrix = get_rht_matrix(self._with_random_sign_mask, torch.cuda.current_device())
 
     def update_quantized(
         self,
@@ -332,6 +344,79 @@ class NVFP4Quantizer(Quantizer):
 
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         return NVFP4BlockScaling
+
+    def _value_fields(self) -> Tuple[str, ...]:
+        # ``amax_reduction_group`` is intentionally excluded: it is a deprecated
+        # process group, not a value (``_value_key`` rejects a stored group).
+        # ``rht_matrix_random_sign_mask_t`` is a device-independent int derived
+        # from ``_with_random_sign_mask``; kept in the key so the rebuilt
+        # quantizer carries it without recomputation.
+        return (
+            "dtype",
+            "with_rht",
+            "with_post_rht_amax",
+            "with_2d_quantization",
+            "stochastic_rounding",
+            "row_scaled_nvfp4",
+            "nvfp4_use_4over6",
+            "nvfp4_e4m3_max",
+            "nvfp4_4over6_err_mode",
+            "_with_random_sign_mask",
+            "rht_matrix_random_sign_mask_t",
+            "with_amax_reduction",
+        )
+
+    # ----- TensorProto / pure-Python allocation -----
+
+    def _storage_metadata(self, fake_dtype: torch.dtype) -> Dict[str, Any]:
+        return {
+            "cls": NVFP4TensorStorage if self.internal else NVFP4Tensor,
+            "nontensor_kwargs": {
+                "fp4_dtype": self.dtype,
+                "quantizer": self,
+                "with_gemm_swizzled_scales": self.optimize_for_gemm,
+                "row_scaled_nvfp4": self.row_scaled_nvfp4,
+                "nvfp4_use_4over6": self.nvfp4_use_4over6,
+                "nvfp4_e4m3_max": self.nvfp4_e4m3_max,
+                "fake_dtype": fake_dtype,
+            },
+        }
+
+    def _describe_buffers(
+        self, shape: Tuple[int, ...]
+    ) -> Dict[str, Tuple[Tuple[int, ...], torch.dtype]]:
+        shape = tuple(shape)
+        buffers: Dict[str, Tuple[Tuple[int, ...], torch.dtype]] = {}
+        # FP4 data packs 2 values per byte (uint8); block scales are E4M3 stored
+        # as uint8; amax buffers are FP32 (per-row when row-scaled, else scalar).
+        # Order matches NVFP4TensorStorage._FLATTEN_TENSOR_BUFFERS (the canonical
+        # __tensor_flatten__ order): data + scale_inv per usage first, amax last.
+        # Workaround: call @staticmethods via the class, not the instance --
+        # instance access breaks torch.compile guard generation (pytorch #182741).
+        if self.rowwise_usage:
+            buffers["_rowwise_data"] = (type(self).convert_shape_for_fp4(shape), torch.uint8)
+            buffers["_rowwise_scale_inv"] = (
+                tuple(self.get_scale_shape(shape, columnwise=False)),
+                torch.uint8,
+            )
+        if self.columnwise_usage:
+            buffers["_columnwise_data"] = (
+                type(self).convert_shape_for_fp4(type(self).get_columnwise_shape(shape)),
+                torch.uint8,
+            )
+            buffers["_columnwise_scale_inv"] = (
+                tuple(self.get_scale_shape(shape, columnwise=True)),
+                torch.uint8,
+            )
+        if self.rowwise_usage:
+            amax_rowwise_shape = (math.prod(shape[:-1]),) if self.row_scaled_nvfp4 else (1,)
+            buffers["_amax_rowwise"] = (amax_rowwise_shape, torch.float32)
+        if self.columnwise_usage:
+            buffers["_amax_columnwise"] = ((1,), torch.float32)
+        return buffers
+
+
+register_value_opaque_quantizer(NVFP4Quantizer)
 
 
 class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):

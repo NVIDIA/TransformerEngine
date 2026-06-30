@@ -16,6 +16,7 @@ from torch.utils._pytree import tree_map
 import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
+from transformer_engine.pytorch.constants import dist_group_type
 from transformer_engine.pytorch.tensor._quantization_helpers import (
     _QuantizeFunc,
     _IdentityFunc,
@@ -23,10 +24,27 @@ from transformer_engine.pytorch.tensor._quantization_helpers import (
 )
 
 
+def _contains_process_group(value: Any) -> bool:
+    """Whether *value* is (or nests) a ``torch.distributed.ProcessGroup``.
+
+    Checks the value directly and one level of ``tuple``/``list`` nesting, which
+    covers the shapes a quantizer value field could plausibly take.
+    """
+    if isinstance(value, dist_group_type):
+        return True
+    if isinstance(value, (tuple, list)):
+        return any(_contains_process_group(item) for item in value)
+    return False
+
+
 # Custom ops that should pass through __torch_dispatch__ without unwrapping
 # QuantizedTensor subclasses (e.g. Float8Tensor). Register ops here that
 # handle quantized tensors internally.
 _quantized_tensor_passthrough_ops: set = set()
+
+
+#: Maps storage / wrapper class qualname -> class object, for ``__tensor_unflatten__``.
+_STORAGE_REGISTRY: Dict[str, type] = {}
 
 
 class QuantizedTensorStorage:
@@ -130,6 +148,66 @@ class QuantizedTensorStorage:
         """Copy data from another QuantizedTensorStorage."""
         raise NotImplementedError(
             f"{self.__class__.__name__} class does not implement copy_from_storage function"
+        )
+
+    # ----- PyTorch subclass flatten protocol (torch.compile / TensorProto) -----
+
+    # Subclasses declare their tensor buffers once, as ``(attribute_name,
+    # constructor_kwarg)`` pairs in flatten order; everything else returned by
+    # :meth:`get_metadata` is treated as non-tensor context.
+    _FLATTEN_TENSOR_BUFFERS: Tuple[Tuple[str, str], ...] = ()
+
+    def __init_subclass__(cls, **kwargs) -> None:
+        super().__init_subclass__(**kwargs)
+        # Register every storage / wrapper class so ``__tensor_unflatten__`` can
+        # resolve the concrete class from its qualname inside an FX graph.
+        _STORAGE_REGISTRY[cls.__qualname__] = cls
+
+    def _flatten_nontensor_kwargs(self) -> Dict[str, Any]:
+        """Non-tensor constructor kwargs (scalars, dtype, quantizer)."""
+        tensor_kwargs = {kwarg for _, kwarg in self._FLATTEN_TENSOR_BUFFERS}
+        return {k: v for k, v in self.get_metadata().items() if k not in tensor_kwargs}
+
+    def __tensor_flatten__(self) -> Tuple[list, Dict[str, Any]]:
+        """Return ``(inner_tensor_attr_names, context)``; see class comment."""
+        present = [
+            attr for attr, _ in self._FLATTEN_TENSOR_BUFFERS if getattr(self, attr) is not None
+        ]
+        ctx = {
+            "cls": type(self).__qualname__,
+            "is_tensor": isinstance(self, QuantizedTensor),
+            "requires_grad": (
+                bool(self.requires_grad) if isinstance(self, QuantizedTensor) else False
+            ),
+            "nontensor_kwargs": self._flatten_nontensor_kwargs(),
+        }
+        return present, ctx
+
+    @staticmethod
+    def __tensor_unflatten__(
+        inner_tensors: Dict[str, torch.Tensor],
+        ctx: Dict[str, Any],
+        outer_size: Iterable[int],
+        outer_stride: Optional[Iterable[int]],
+    ) -> QuantizedTensorStorage:
+        """Rebuild a storage / wrapper from flat tensors + context."""
+        cls = _STORAGE_REGISTRY[ctx["cls"]]
+        kwargs: Dict[str, Any] = dict(ctx["nontensor_kwargs"])
+        # Map each declared buffer back to its constructor kwarg (absent -> None).
+        for attr, kwarg in cls._FLATTEN_TENSOR_BUFFERS:
+            kwargs[kwarg] = inner_tensors.get(attr)
+        if not ctx["is_tensor"]:
+            return cls(**kwargs)
+        # Wrapper subclass: it also needs outer shape / dtype / device / stride.
+        fake_dtype = kwargs.get("fake_dtype")
+        device = next((t.device for t in inner_tensors.values() if t is not None), None)
+        return cls(
+            shape=tuple(outer_size),
+            dtype=fake_dtype,
+            requires_grad=ctx["requires_grad"],
+            device=device,
+            stride=tuple(outer_stride) if outer_stride is not None else None,
+            **kwargs,
         )
 
 
@@ -349,6 +427,71 @@ class Quantizer(abc.ABC):
             result.requires_grad_(True)
         return result
 
+    # ----- Data-free buffer/metadata primitives backing TensorProto -----
+
+    def _describe_buffers(
+        self, shape: Tuple[int, ...]
+    ) -> Dict[str, Tuple[Tuple[int, ...], torch.dtype]]:
+        """Return ``{attr_name: (buffer_shape, buffer_dtype)}`` for the buffers
+        this quantizer would allocate for a logical tensor of ``shape``.
+
+        Keys must match the buffer attribute names declared in the storage's
+        ``_FLATTEN_TENSOR_BUFFERS`` and respect the quantizer's usage flags.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement _describe_buffers; "
+            "it cannot be used with TensorProto / pure-Python allocation"
+        )
+
+    def _storage_metadata(self, fake_dtype: torch.dtype) -> Dict[str, Any]:
+        """Non-tensor context for the produced storage.
+
+        Returns ``{"cls": <type>, "nontensor_kwargs": {...}}`` where ``cls`` is
+        the concrete class to instantiate (wrapper subclass for user-visible
+        tensors, bare storage class for ``internal`` quantizers) and
+        ``nontensor_kwargs`` are its non-tensor constructor kwargs (e.g.
+        ``fp8_dtype``, ``quantizer``, ``fake_dtype``).
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement _storage_metadata; "
+            "it cannot be used with TensorProto / pure-Python allocation"
+        )
+
+    def alloc_tensors(
+        self,
+        shape: Iterable[int],
+        *,
+        device: Optional[Union[torch.device, str]] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """Allocate (uninitialized) the flat buffers for ``shape``.
+
+        Returns ``{attr_name: torch.Tensor}`` suitable as the ``inner_tensors``
+        argument of the storage's ``__tensor_unflatten__``.
+        """
+        device = torch.device(device if device is not None else "cuda")
+        return {
+            attr: torch.empty(buf_shape, dtype=buf_dtype, device=device)
+            for attr, (buf_shape, buf_dtype) in self._describe_buffers(tuple(shape)).items()
+        }
+
+    def create_metadata(
+        self,
+        _shape: Iterable[int],
+        *,
+        dtype: torch.dtype,
+        requires_grad: bool = False,
+    ) -> Dict[str, Any]:
+        """Build the data-free ``__tensor_unflatten__`` context describing the
+        quantized tensor this quantizer would produce for ``shape`` / ``dtype``.
+        """
+        meta = self._storage_metadata(dtype)
+        return {
+            "cls": meta["cls"].__qualname__,
+            "is_tensor": not self.internal,
+            "requires_grad": requires_grad,
+            "nontensor_kwargs": meta["nontensor_kwargs"],
+        }
+
     def calibrate(self, tensor: torch.Tensor) -> None:
         """Calibrate quantizer state
 
@@ -407,6 +550,78 @@ class Quantizer(abc.ABC):
             "rowwise": self.rowwise_usage,
             "columnwise": self.columnwise_usage,
         }
+
+    #: Attributes shared by every quantizer that take part in value identity.
+    _BASE_VALUE_FIELDS: Tuple[str, ...] = (
+        "rowwise_usage",
+        "columnwise_usage",
+        "internal",
+        "optimize_for_gemm",
+    )
+
+    def _value_fields(self) -> Optional[Tuple[str, ...]]:
+        """Subclass-specific value-defining attribute names, or ``None``.
+
+        Returning ``None`` (the default) means the quantizer cannot be represented as
+        a value opaque object and keeps identity-based equality/hashing.
+        This also means that passing such a quantizer as an argument to a custom op
+        causes a graph break under torch.compile, since it cannot be baked into the
+        FX graph as a constant.
+        """
+        return None
+
+    def _check_value_has_no_process_group(self) -> None:
+        # A value quantizer is baked into the FX graph as a constant via its
+        # value key, which cannot carry live distributed state. Enforced here --
+        # the single point every value-materialization path (``__eq__`` /
+        # ``__hash__`` / ``__fx_repr__``) goes through -- so a custom
+        # ``__fx_repr__`` cannot bypass it. Reject any field holding a
+        # ProcessGroup (e.g. the deprecated ``amax_reduction_group``) rather than
+        # silently dropping it; pass the reduction group per quantize call.
+        for name, value in vars(self).items():
+            if _contains_process_group(value):
+                raise TypeError(
+                    f"{type(self).__name__} cannot be used as a torch.compile value "
+                    f"object: attribute {name!r} holds a torch.distributed.ProcessGroup, "
+                    "which is live distributed state and must not be baked into an FX "
+                    "graph. Pass the amax reduction group per quantize call instead of "
+                    "storing it on the quantizer."
+                )
+
+    def _value_key(self) -> Tuple[Any, ...]:
+        """Hashable, reproducible key identifying this quantizer's value.
+
+        Only valid for value quantizers (``_value_fields()`` is not ``None``).
+        """
+        fields = self._value_fields()  # pylint: disable=assignment-from-none
+        assert fields is not None, f"{type(self).__name__} is not a value quantizer"
+        self._check_value_has_no_process_group()
+        items = []
+        for name in self._BASE_VALUE_FIELDS + tuple(fields):
+            value = getattr(self, name)
+            if name == "dtype":
+                # ``DType`` is an ``IntEnum``; store the int so the key stays
+                # plain: hashable and ``repr``-reproducible for FX codegen.
+                value = int(value)
+            items.append((name, value))
+        return (type(self).__qualname__, tuple(items))
+
+    def __eq__(self, other: object) -> Any:
+        # Value quantizers compare by configuration; everything else keeps the
+        # default identity semantics (returning ``NotImplemented`` makes Python
+        # fall back to identity). ``_value_key`` rejects a stored ProcessGroup.
+        if self is other:
+            return True
+        if self._value_fields() is None or type(self) is not type(other):
+            return NotImplemented
+        if other._value_fields() is None:
+            return NotImplemented
+        return self._value_key() == other._value_key()
+
+    def __hash__(self) -> int:
+        if self._value_fields() is None:
+            return object.__hash__(self)
+        return hash(self._value_key())
 
 
 class QuantizedTensor(torch.Tensor):
