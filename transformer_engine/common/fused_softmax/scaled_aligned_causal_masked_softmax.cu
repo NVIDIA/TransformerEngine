@@ -517,7 +517,8 @@ void dispatch_scaled_aligned_causal_masked_softmax_forward(output_t *dst, const 
                           make_softmax_rtc_code<input_t>(log2_elements), kRtcSourceFile,
                           {"--use_fast_math"});
     }
-    rtc_manager.launch(kernel_label, grid_size, block_size, 0, stream, dst, src, scale,
+    const acc_t rtc_scale = static_cast<acc_t>(scale);
+    rtc_manager.launch(kernel_label, grid_size, block_size, 0, stream, dst, src, rtc_scale,
                        microbatches, query_seq_len, key_seq_len);
     NVTE_CHECK_CUDA(cudaGetLastError());
     return;

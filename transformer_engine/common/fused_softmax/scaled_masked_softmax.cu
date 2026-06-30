@@ -516,8 +516,9 @@ void dispatch_scaled_softmax_forward(output_t *dst, const input_t *src, const in
                             make_softmax_rtc_code<input_t>(log2_elements), kRtcSourceFile,
                             {"--use_fast_math"});
       }
-      rtc_manager.launch(kernel_label, blocks, threads, 0, stream, dst, src, scale, batch_count,
-                         key_seq_len);
+      const acc_t rtc_scale = static_cast<acc_t>(scale);
+      rtc_manager.launch(kernel_label, blocks, threads, 0, stream, dst, src, rtc_scale,
+                         batch_count, key_seq_len);
     } else {
 #if NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX
     // Launch code would be more elegant if C++ supported FOR CONSTEXPR
@@ -633,7 +634,8 @@ void dispatch_scaled_masked_softmax_forward(output_t *dst, const input_t *src, c
                             make_softmax_rtc_code<input_t>(log2_elements), kRtcSourceFile,
                             {"--use_fast_math"});
       }
-      rtc_manager.launch(kernel_label, blocks, threads, 0, stream, dst, src, mask, scale,
+      const acc_t rtc_scale = static_cast<acc_t>(scale);
+      rtc_manager.launch(kernel_label, blocks, threads, 0, stream, dst, src, mask, rtc_scale,
                          batch_count, key_seq_len, pad_batches);
     } else {
 #if NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX

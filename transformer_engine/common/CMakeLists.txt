@@ -588,18 +588,18 @@ target_include_directories(transformer_engine PRIVATE
                            "${CMAKE_CURRENT_BINARY_DIR}/string_headers")
 
 option(NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX
-       "Compile legacy static fused softmax template dispatch instead of requiring NVRTC fallback"
+       "Also compile legacy static fused softmax kernels for NVTE_DISABLE_NVRTC fallback"
        OFF)
 target_compile_definitions(transformer_engine
                            PRIVATE
                            NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX=$<BOOL:${NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX}>)
 
-# Default OFF: use NVRTC dispatch for LayerNorm/RMSNorm forward/backward.
-# Set ON to fall back to the legacy static template instantiations (compiles
-# all 556 REGISTER_NORM_LAUNCHER variants up front; only needed if NVRTC is
-# disabled via NVTE_DISABLE_NVRTC=1 at runtime).
+# Default OFF: LayerNorm/RMSNorm require NVRTC. Set ON to additionally compile
+# the legacy static template instantiations, which are selected only when
+# NVTE_DISABLE_NVRTC=1 at runtime. This compiles all 556
+# REGISTER_NORM_LAUNCHER variants up front.
 option(NVTE_BUILD_LEGACY_STATIC_NORM
-       "Compile legacy static norm REGISTER_NORM_LAUNCHER template dispatch"
+       "Also compile static norm kernels for NVTE_DISABLE_NVRTC fallback"
        OFF)
 target_compile_definitions(transformer_engine
                            PRIVATE
