@@ -19,7 +19,7 @@ from ..utils import devices_match, round_up_to_nearest_multiple
 from .storage.mxfp8_tensor_storage import MXFP8TensorStorage, _FromMXFP8Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ..dynamo import register_value_opaque_quantizer
-from ._quantization_helpers import _IdentityFunc
+from ._quantization_helpers import _IdentityFunc, safe_quantized_repr
 
 aten = torch.ops.aten
 
@@ -237,7 +237,10 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         )
 
     def __repr__(self, *, tensor_contents=None):
-        return f"MXFP8Tensor(fp8_dtype={self._fp8_dtype}, data={self.dequantize()})"
+        try:
+            return f"MXFP8Tensor(fp8_dtype={self._fp8_dtype}, data={self.dequantize()})"
+        except Exception as exc:  # pylint: disable=broad-except
+            return safe_quantized_repr(self, "MXFP8Tensor", error=exc)
 
     def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """

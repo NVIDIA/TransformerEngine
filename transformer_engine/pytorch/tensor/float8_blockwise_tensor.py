@@ -15,7 +15,7 @@ from transformer_engine.common.recipe import Float8BlockScaling, Recipe
 from .storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ..dynamo import register_value_opaque_quantizer
-from ._quantization_helpers import _IdentityFunc
+from ._quantization_helpers import _IdentityFunc, safe_quantized_repr
 from ..constants import DType
 from ..utils import devices_match, round_up_to_nearest_multiple
 
@@ -274,11 +274,19 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
         return instance
 
     def __repr__(self, *, tensor_contents=None):
-        return (
-            f"Float8BlockwiseQTensor(fp8_dtype={self._fp8_dtype},"
-            f" is_2D_scaled={self._is_2D_scaled},"
-            f" data={self.dequantize()})"
-        )
+        try:
+            return (
+                f"Float8BlockwiseQTensor(fp8_dtype={self._fp8_dtype},"
+                f" is_2D_scaled={self._is_2D_scaled},"
+                f" data={self.dequantize()})"
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            return safe_quantized_repr(
+                self,
+                "Float8BlockwiseQTensor",
+                extras={"is_2D_scaled": self._is_2D_scaled},
+                error=exc,
+            )
 
     def quantize_(
         self,
