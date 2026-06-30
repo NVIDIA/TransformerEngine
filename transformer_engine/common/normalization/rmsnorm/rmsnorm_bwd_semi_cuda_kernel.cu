@@ -144,49 +144,52 @@ void launch_rmsnorm_bwd_general_(LaunchParams<BackwardKernelParams> &launch_para
 // Two-level dispatch: stage (Backward / BackwardAdd) and launch type
 // (tuned / general). The optional static fallback is selected only when
 // NVTE_DISABLE_NVRTC=1.
-#define REGISTER_NORM_LAUNCHER_RMSN_BWD_tuned_Backward(HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE,        \
-                                                        CTAS_PER_ROW, WARPS_M, WARPS_N, BL_MAIN,      \
-                                                        BL_FINAL, STATIC_FALLBACK)                     \
-  [[maybe_unused]] static const int                                                                      \
+#define REGISTER_NORM_LAUNCHER_RMSN_BWD_tuned_Backward(HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE,                                                 \
+                                                       CTAS_PER_ROW, WARPS_M, WARPS_N, BL_MAIN,                                                 \
+                                                       BL_FINAL, STATIC_FALLBACK)                                                               \
+  [[maybe_unused]] static const int                                                                                                             \
       _rmsn_bwd_tuned_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE##_##CTAS_PER_ROW##_##WARPS_M##_##WARPS_N##_##BL_MAIN##_##BL_FINAL = \
-          ([] {                                                                                          \
-            ::transformer_engine::normalization::rtc_norm::register_rmsnorm_bwd_tuned(                  \
-                NVTE_NORM_DT(WTYPE), NVTE_NORM_DT(ITYPE), NVTE_NORM_DT(OTYPE), NVTE_NORM_DT(CTYPE),     \
-                HIDDEN_SIZE, CTAS_PER_ROW, WARPS_M, WARPS_N, BL_MAIN, BL_FINAL, false, STATIC_FALLBACK); \
-            return 0;                                                                                    \
+          ([] {                                                                                                                                 \
+            ::transformer_engine::normalization::rtc_norm::register_rmsnorm_bwd_tuned(                                                          \
+                NVTE_NORM_DT(WTYPE), NVTE_NORM_DT(ITYPE), NVTE_NORM_DT(OTYPE),                                                                  \
+                NVTE_NORM_DT(CTYPE), HIDDEN_SIZE, CTAS_PER_ROW, WARPS_M, WARPS_N, BL_MAIN,                                                      \
+                BL_FINAL, false, STATIC_FALLBACK);                                                                                              \
+            return 0;                                                                                                                           \
           })()
-#define REGISTER_NORM_LAUNCHER_RMSN_BWD_tuned_BackwardAdd(HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE,     \
-                                                           CTAS_PER_ROW, WARPS_M, WARPS_N, BL_MAIN,   \
-                                                           BL_FINAL, ADD_FLAG, STATIC_FALLBACK)         \
-  [[maybe_unused]] static const int                                                                      \
+#define REGISTER_NORM_LAUNCHER_RMSN_BWD_tuned_BackwardAdd(HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE,                                                  \
+                                                          CTAS_PER_ROW, WARPS_M, WARPS_N, BL_MAIN,                                                  \
+                                                          BL_FINAL, ADD_FLAG, STATIC_FALLBACK)                                                      \
+  [[maybe_unused]] static const int                                                                                                                 \
       _rmsn_bwd_tuned_add_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE##_##CTAS_PER_ROW##_##WARPS_M##_##WARPS_N##_##BL_MAIN##_##BL_FINAL = \
-          ([] {                                                                                          \
-            ::transformer_engine::normalization::rtc_norm::register_rmsnorm_bwd_tuned(                  \
-                NVTE_NORM_DT(WTYPE), NVTE_NORM_DT(ITYPE), NVTE_NORM_DT(OTYPE), NVTE_NORM_DT(CTYPE),     \
-                HIDDEN_SIZE, CTAS_PER_ROW, WARPS_M, WARPS_N, BL_MAIN, BL_FINAL, true, STATIC_FALLBACK); \
-            return 0;                                                                                    \
+          ([] {                                                                                                                                     \
+            ::transformer_engine::normalization::rtc_norm::register_rmsnorm_bwd_tuned(                                                              \
+                NVTE_NORM_DT(WTYPE), NVTE_NORM_DT(ITYPE), NVTE_NORM_DT(OTYPE),                                                                      \
+                NVTE_NORM_DT(CTYPE), HIDDEN_SIZE, CTAS_PER_ROW, WARPS_M, WARPS_N, BL_MAIN,                                                          \
+                BL_FINAL, true, STATIC_FALLBACK);                                                                                                   \
+            return 0;                                                                                                                               \
           })()
-#define REGISTER_NORM_LAUNCHER_RMSN_BWD_general_Backward(HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE,      \
-                                                          WARPS_M, WARPS_N, BL_MAIN, BL_FINAL,          \
-                                                          STATIC_FALLBACK)                              \
-  [[maybe_unused]] static const int                                                                      \
+#define REGISTER_NORM_LAUNCHER_RMSN_BWD_general_Backward(                                                                        \
+    HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, WARPS_M, WARPS_N, BL_MAIN, BL_FINAL, STATIC_FALLBACK)                               \
+  [[maybe_unused]] static const int                                                                                              \
       _rmsn_bwd_general_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE##_##WARPS_M##_##WARPS_N##_##BL_MAIN##_##BL_FINAL = \
-          ([] {                                                                                          \
-            ::transformer_engine::normalization::rtc_norm::register_rmsnorm_bwd_general(                \
-                NVTE_NORM_DT(WTYPE), NVTE_NORM_DT(ITYPE), NVTE_NORM_DT(OTYPE), NVTE_NORM_DT(CTYPE),     \
-                HIDDEN_SIZE, WARPS_M, WARPS_N, BL_MAIN, BL_FINAL, false, STATIC_FALLBACK);              \
-            return 0;                                                                                    \
+          ([] {                                                                                                                  \
+            ::transformer_engine::normalization::rtc_norm::register_rmsnorm_bwd_general(                                         \
+                NVTE_NORM_DT(WTYPE), NVTE_NORM_DT(ITYPE), NVTE_NORM_DT(OTYPE),                                                   \
+                NVTE_NORM_DT(CTYPE), HIDDEN_SIZE, WARPS_M, WARPS_N, BL_MAIN, BL_FINAL, false,                                    \
+                STATIC_FALLBACK);                                                                                                \
+            return 0;                                                                                                            \
           })()
-#define REGISTER_NORM_LAUNCHER_RMSN_BWD_general_BackwardAdd(HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE,   \
-                                                             WARPS_M, WARPS_N, BL_MAIN, BL_FINAL,       \
-                                                             ADD_FLAG, STATIC_FALLBACK)                  \
-  [[maybe_unused]] static const int                                                                      \
+#define REGISTER_NORM_LAUNCHER_RMSN_BWD_general_BackwardAdd(HIDDEN_SIZE, WTYPE, ITYPE, OTYPE,                                        \
+                                                            CTYPE, WARPS_M, WARPS_N, BL_MAIN,                                        \
+                                                            BL_FINAL, ADD_FLAG, STATIC_FALLBACK)                                     \
+  [[maybe_unused]] static const int                                                                                                  \
       _rmsn_bwd_general_add_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE##_##WARPS_M##_##WARPS_N##_##BL_MAIN##_##BL_FINAL = \
-          ([] {                                                                                          \
-            ::transformer_engine::normalization::rtc_norm::register_rmsnorm_bwd_general(                \
-                NVTE_NORM_DT(WTYPE), NVTE_NORM_DT(ITYPE), NVTE_NORM_DT(OTYPE), NVTE_NORM_DT(CTYPE),     \
-                HIDDEN_SIZE, WARPS_M, WARPS_N, BL_MAIN, BL_FINAL, true, STATIC_FALLBACK);               \
-            return 0;                                                                                    \
+          ([] {                                                                                                                      \
+            ::transformer_engine::normalization::rtc_norm::register_rmsnorm_bwd_general(                                             \
+                NVTE_NORM_DT(WTYPE), NVTE_NORM_DT(ITYPE), NVTE_NORM_DT(OTYPE),                                                       \
+                NVTE_NORM_DT(CTYPE), HIDDEN_SIZE, WARPS_M, WARPS_N, BL_MAIN, BL_FINAL, true,                                         \
+                STATIC_FALLBACK);                                                                                                    \
+            return 0;                                                                                                                \
           })()
 
 #if NVTE_BUILD_LEGACY_STATIC_NORM
@@ -199,15 +202,15 @@ void launch_rmsnorm_bwd_general_(LaunchParams<BackwardKernelParams> &launch_para
     launch_rmsnorm_bwd_##LAUNCH_TYPE##_<WTYPE, ITYPE, OTYPE, CTYPE, uint32_t, HIDDEN_SIZE,                      \
                                         __VA_ARGS__>(launch_params, configure_params);                          \
   }                                                                                                             \
-  REGISTER_NORM_LAUNCHER_RMSN_BWD_##LAUNCH_TYPE##_##NORM_STAGE(                                                \
-      HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, __VA_ARGS__,                                                    \
+  REGISTER_NORM_LAUNCHER_RMSN_BWD_##LAUNCH_TYPE##_##NORM_STAGE(                                                 \
+      HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, __VA_ARGS__,                                                     \
       norm_##NORM_TYPE##_##NORM_STAGE##_##LAUNCH_TYPE##_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE); \
   }  // namespace
 #else
-#define REGISTER_NORM_LAUNCHER(NORM_TYPE, NORM_STAGE, LAUNCH_TYPE, HIDDEN_SIZE, WTYPE, ITYPE,         \
-                               OTYPE, CTYPE, ...)                                                     \
-  REGISTER_NORM_LAUNCHER_RMSN_BWD_##LAUNCH_TYPE##_##NORM_STAGE(                                      \
-      HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, __VA_ARGS__, nullptr)
+#define REGISTER_NORM_LAUNCHER(NORM_TYPE, NORM_STAGE, LAUNCH_TYPE, HIDDEN_SIZE, WTYPE, ITYPE,    \
+                               OTYPE, CTYPE, ...)                                                \
+  REGISTER_NORM_LAUNCHER_RMSN_BWD_##LAUNCH_TYPE##_##NORM_STAGE(HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, \
+                                                               CTYPE, __VA_ARGS__, nullptr)
 #endif  // NVTE_BUILD_LEGACY_STATIC_NORM
 
 // Create rmsnorm bwd tuned launch function and register. Macro signature:

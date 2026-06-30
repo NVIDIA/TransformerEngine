@@ -12,8 +12,8 @@
 #endif
 
 #ifdef __CUDACC_RTC__
-#include "utils.cuh"
 #include "kernel_params.h"
+#include "utils.cuh"
 #else
 #include "../../utils.cuh"
 #include "../common.h"

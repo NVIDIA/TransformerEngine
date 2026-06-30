@@ -23,14 +23,14 @@ namespace rtc {
 namespace {
 
 // Strings with headers for RTC kernels
-#include "string_code_util_math_h.h"
-#include "string_code_utils_cuh.h"
 #include "string_code_normalization_kernel_params_h.h"
 #include "string_code_normalization_kernel_traits_h.h"
-#include "string_code_normalization_layernorm_ln_fwd_kernels_cuh.h"
 #include "string_code_normalization_layernorm_ln_bwd_kernels_cuh.h"
-#include "string_code_normalization_rmsnorm_rmsnorm_fwd_kernels_cuh.h"
+#include "string_code_normalization_layernorm_ln_fwd_kernels_cuh.h"
 #include "string_code_normalization_rmsnorm_rmsnorm_bwd_kernels_cuh.h"
+#include "string_code_normalization_rmsnorm_rmsnorm_fwd_kernels_cuh.h"
+#include "string_code_util_math_h.h"
+#include "string_code_utils_cuh.h"
 
 /*! \brief Latest compute capability that NVRTC supports
  *
@@ -301,8 +301,8 @@ void KernelManager::set_function_attribute(const std::string& kernel_label,
 }
 
 int KernelManager::occupancy_max_active_blocks_per_sm(const std::string& kernel_label,
-                                                     int block_size,
-                                                     std::size_t dynamic_smem_bytes) {
+                                                      int block_size,
+                                                      std::size_t dynamic_smem_bytes) {
   const int device_id = cuda::current_device();
   const auto key = get_kernel_cache_key(kernel_label, device_id);
   NVTE_CHECK(kernel_cache_.count(key) > 0, "Attempted to query occupancy before compilation");
