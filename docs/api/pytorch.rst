@@ -9,6 +9,9 @@ PyTorch
 .. autoapiclass:: transformer_engine.pytorch.Linear(in_features, out_features, bias=True, **kwargs)
   :members: forward, set_tensor_parallel_group
 
+.. autoapiclass:: transformer_engine.pytorch.BatchedLinear(num_gemms, in_features, out_features, **kwargs)
+  :members: forward
+
 .. autoapiclass:: transformer_engine.pytorch.GroupedLinear(in_features, out_features, bias=True, **kwargs)
   :members: forward, set_tensor_parallel_group
 
