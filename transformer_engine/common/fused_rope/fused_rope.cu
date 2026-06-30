@@ -10,9 +10,31 @@
 
 #include "../common.h"
 #include "../util/logging.h"
+#include "../util/system.h"
 #include "../utils.cuh"
 
 namespace transformer_engine {
+
+// Returns the largest sequence index `b` such that
+// `cu_seqlens[b] / cp_size <= t_id`. Used by the token-linear THD kernels to
+// locate the sequence span that owns local packed token `t_id`. Uses the same
+// integer-division semantics as the existing THD kernels so that the
+// per-sequence boundaries agree exactly.
+__device__ __forceinline__ int fused_rope_thd_find_seq_id(const int *cu_seqlens, const int nseq,
+                                                          const int t_id, const int cp_size) {
+  int lo = 0;
+  int hi = nseq;
+  while (lo + 1 < hi) {
+    int mid = (lo + hi) >> 1;
+    int mid_start = cu_seqlens[mid] / cp_size;
+    if (mid_start <= t_id) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+  return lo;
+}
 
 template <typename scalar_t>
 __device__ void fused_rope_block_forward(const scalar_t *src, const float *freqs, scalar_t *dst,
@@ -213,6 +235,119 @@ __global__ void fused_rope_backward_kernel(
 
   fused_rope_block_backward(src, freqs, dst, interleaved, s_id_for_freqs, offset_block,
                             offset_block_dst, h, d, d2, stride_h, stride_d, o_stride_h, o_stride_d);
+}
+
+// Token-linear THD forward kernel. Each block handles exactly one packed local
+// token row. The block locates its owning sequence via binary search over the
+// divided cumulative sequence boundaries, then defers to the same
+// `fused_rope_block_forward` device function as the original kernel.
+template <typename scalar_t>
+__global__ void fused_rope_thd_token_forward_kernel(
+    const scalar_t *src, const int *cu_seqlens, const float *freqs, const int *start_positions,
+    scalar_t *dst, const bool interleaved, const int cp_size, const int cp_rank, const int nseq,
+    const int h, const int d, const int d2, const int stride_t, const int stride_h,
+    const int stride_d, const int o_stride_t, const int o_stride_h, const int o_stride_d) {
+  int t_id = blockIdx.x;
+  __shared__ int valid_token;
+  __shared__ int seq_id;
+  if (threadIdx.x == 0 && threadIdx.y == 0) {
+    valid_token = t_id < cu_seqlens[nseq] / cp_size;
+    seq_id = valid_token ? fused_rope_thd_find_seq_id(cu_seqlens, nseq, t_id, cp_size) : 0;
+  }
+  __syncthreads();
+  if (!valid_token) return;
+
+  int b_id = seq_id;
+  int start = cu_seqlens[b_id] / cp_size;
+  int end = cu_seqlens[b_id + 1] / cp_size;
+  int s_id = t_id - start;
+  int cur_seqlens = end - start;
+
+  int offset_block = t_id * stride_t;
+  int offset_block_dst = t_id * o_stride_t;
+
+  int begin_offset = (start_positions == nullptr) ? 0 : start_positions[b_id];
+  int s_id_for_freqs = s_id + begin_offset;
+
+  if (cp_size > 1) {
+    assert(cur_seqlens % 2 == 0);
+    if (s_id < cur_seqlens / 2) {
+      s_id_for_freqs += cp_rank * cur_seqlens / 2;
+    } else {
+      s_id_for_freqs += cur_seqlens * cp_size - (cp_rank + 1) * cur_seqlens / 2 - cur_seqlens / 2;
+    }
+  }
+
+  fused_rope_block_forward(src, freqs, dst, interleaved, s_id_for_freqs, offset_block,
+                           offset_block_dst, h, d, d2, stride_h, stride_d, o_stride_h, o_stride_d);
+}
+
+// Token-linear THD backward kernel. Mirrors the forward variant and dispatches
+// to `fused_rope_block_backward`.
+template <typename scalar_t>
+__global__ void fused_rope_thd_token_backward_kernel(
+    const scalar_t *src, const int *cu_seqlens, const float *freqs, const int *start_positions,
+    scalar_t *dst, const bool interleaved, const int cp_size, const int cp_rank, const int nseq,
+    const int h, const int d, const int d2, const int stride_t, const int stride_h,
+    const int stride_d, const int o_stride_t, const int o_stride_h, const int o_stride_d) {
+  int t_id = blockIdx.x;
+  __shared__ int valid_token;
+  __shared__ int seq_id;
+  if (threadIdx.x == 0 && threadIdx.y == 0) {
+    valid_token = t_id < cu_seqlens[nseq] / cp_size;
+    seq_id = valid_token ? fused_rope_thd_find_seq_id(cu_seqlens, nseq, t_id, cp_size) : 0;
+  }
+  __syncthreads();
+  if (!valid_token) return;
+
+  int b_id = seq_id;
+  int start = cu_seqlens[b_id] / cp_size;
+  int end = cu_seqlens[b_id + 1] / cp_size;
+  int s_id = t_id - start;
+  int cur_seqlens = end - start;
+
+  int offset_block = t_id * stride_t;
+  int offset_block_dst = t_id * o_stride_t;
+
+  int begin_offset = (start_positions == nullptr) ? 0 : start_positions[b_id];
+  int s_id_for_freqs = s_id + begin_offset;
+
+  if (cp_size > 1) {
+    assert(cur_seqlens % 2 == 0);
+    if (s_id < cur_seqlens / 2) {
+      s_id_for_freqs += cp_rank * cur_seqlens / 2;
+    } else {
+      s_id_for_freqs += cur_seqlens * cp_size - (cp_rank + 1) * cur_seqlens / 2 - cur_seqlens / 2;
+    }
+  }
+
+  fused_rope_block_backward(src, freqs, dst, interleaved, s_id_for_freqs, offset_block,
+                            offset_block_dst, h, d, d2, stride_h, stride_d, o_stride_h, o_stride_d);
+}
+
+// Host-side dispatcher. Selects the token-linear THD path when it would
+// eliminate a meaningful number of dead blocks. The environment variable
+// NVTE_FUSED_ROPE_THD_TOKEN_LINEAR overrides the heuristic for testing and
+// benchmarking: "0" forces the old kernel, "1" forces the new one. Read on
+// every call so tests can toggle it inside a single process.
+constexpr size_t kTHDTokenLinearOverlaunchThreshold = 2;
+
+inline bool fused_rope_thd_use_token_linear(const NVTE_QKV_Format qkv_format,
+                                            const size_t legacy_blocks,
+                                            const size_t token_linear_blocks, const int cp_size) {
+  if (qkv_format != NVTE_QKV_Format::NVTE_THD) return false;
+  if (token_linear_blocks == 0) return false;
+
+  const int env_override = transformer_engine::getenv<int>("NVTE_FUSED_ROPE_THD_TOKEN_LINEAR", -1);
+  if (env_override == 0) return false;
+  if (env_override == 1) return true;
+
+  // Heuristic: use the token-linear path when the legacy launch would issue
+  // enough extra blocks to amortize one sequence lookup per useful token. The
+  // CP factor keeps the gate conservative because local rows shrink with
+  // context parallelism while legacy launch space does not.
+  return legacy_blocks >
+         kTHDTokenLinearOverlaunchThreshold * static_cast<size_t>(cp_size) * token_linear_blocks;
 }
 
 template <typename scalar_t>
@@ -467,9 +602,8 @@ void fused_rope_forward_launcher(const scalar_t *input, const int *cu_seqlens, c
                                  const int cp_size, const int cp_rank, const int s, const int b,
                                  const int h, const int d, const int d2, const int stride_s_or_t,
                                  const int stride_b, const int stride_h, const int stride_d,
-                                 cudaStream_t stream) {
+                                 const int64_t local_tokens, cudaStream_t stream) {
   int warps_per_block = h < 16 ? 4 : 8;
-  dim3 blocks(s, b);
   dim3 threads(THREADS_PER_WARP, warps_per_block);
   const int shared_mem_size = 2 * d2 * sizeof(float);  // cos, sin
   int o_stride_s_or_t, o_stride_b;
@@ -487,6 +621,18 @@ void fused_rope_forward_launcher(const scalar_t *input, const int *cu_seqlens, c
   const int o_stride_h = d;
   const int o_stride_d = 1;
 
+  const size_t token_linear_blocks = static_cast<size_t>(local_tokens);
+  const size_t legacy_blocks = static_cast<size_t>(s) * static_cast<size_t>(b);
+  if (fused_rope_thd_use_token_linear(qkv_format, legacy_blocks, token_linear_blocks, cp_size)) {
+    dim3 blocks(static_cast<unsigned int>(token_linear_blocks));
+    fused_rope_thd_token_forward_kernel<<<blocks, threads, shared_mem_size, stream>>>(
+        input, cu_seqlens, freqs, start_positions, output, interleaved, cp_size, cp_rank, b, h, d,
+        d2, stride_s_or_t, stride_h, stride_d, o_stride_s_or_t, o_stride_h, o_stride_d);
+    NVTE_CHECK_CUDA(cudaGetLastError());
+    return;
+  }
+
+  dim3 blocks(s, b);
   fused_rope_forward_kernel<<<blocks, threads, shared_mem_size, stream>>>(
       input, cu_seqlens, freqs, start_positions, output, interleaved, cp_size, cp_rank, s, h, d, d2,
       stride_s_or_t, stride_b, stride_h, stride_d, o_stride_s_or_t, o_stride_b, o_stride_h,
@@ -501,9 +647,9 @@ void fused_rope_backward_launcher(const scalar_t *output_grads, const int *cu_se
                                   const bool interleaved, const int cp_size, const int cp_rank,
                                   const int s, const int b, const int h, const int d, const int d2,
                                   const int stride_s_or_t, const int stride_b, const int stride_h,
-                                  const int stride_d, cudaStream_t stream) {
+                                  const int stride_d, const int64_t local_tokens,
+                                  cudaStream_t stream) {
   int warps_per_block = h < 16 ? 4 : 8;
-  dim3 blocks(s, b);
   dim3 threads(THREADS_PER_WARP, warps_per_block);
   const int shared_mem_size = 2 * d2 * sizeof(float);  // cos, sin
   int o_stride_s_or_t, o_stride_b;
@@ -521,6 +667,19 @@ void fused_rope_backward_launcher(const scalar_t *output_grads, const int *cu_se
   const int o_stride_h = d;
   const int o_stride_d = 1;
 
+  const size_t token_linear_blocks = static_cast<size_t>(local_tokens);
+  const size_t legacy_blocks = static_cast<size_t>(s) * static_cast<size_t>(b);
+  if (fused_rope_thd_use_token_linear(qkv_format, legacy_blocks, token_linear_blocks, cp_size)) {
+    dim3 blocks(static_cast<unsigned int>(token_linear_blocks));
+    fused_rope_thd_token_backward_kernel<<<blocks, threads, shared_mem_size, stream>>>(
+        output_grads, cu_seqlens, freqs, start_positions, input_grads, interleaved, cp_size,
+        cp_rank, b, h, d, d2, stride_s_or_t, stride_h, stride_d, o_stride_s_or_t, o_stride_h,
+        o_stride_d);
+    NVTE_CHECK_CUDA(cudaGetLastError());
+    return;
+  }
+
+  dim3 blocks(s, b);
   fused_rope_backward_kernel<<<blocks, threads, shared_mem_size, stream>>>(
       output_grads, cu_seqlens, freqs, start_positions, input_grads, interleaved, cp_size, cp_rank,
       s, h, d, d2, stride_s_or_t, stride_b, stride_h, stride_d, o_stride_s_or_t, o_stride_b,
@@ -579,6 +738,12 @@ void fused_rope_forward(const Tensor &input, const Tensor &cu_seqlens, const Ten
                         const int cp_rank, const int s, const int b, const int h, const int d,
                         const int d2, const int stride_s_or_t, const int stride_b,
                         const int stride_h, const int stride_d, cudaStream_t stream) {
+  // For THD the packed local token count is the first dimension of the input
+  // tensor. SBHD/BSHD ignore this value.
+  const int64_t local_tokens =
+      (qkv_format == NVTE_QKV_Format::NVTE_THD && !input.data.shape.empty())
+          ? static_cast<int64_t>(input.data.shape[0])
+          : 0;
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input.data.dtype, scalar_t,
       fused_rope_forward_launcher(reinterpret_cast<const scalar_t *>(input.data.dptr),
@@ -587,7 +752,7 @@ void fused_rope_forward(const Tensor &input, const Tensor &cu_seqlens, const Ten
                                   reinterpret_cast<const int *>(start_positions.data.dptr),
                                   reinterpret_cast<scalar_t *>(output->data.dptr), qkv_format,
                                   interleaved, cp_size, cp_rank, s, b, h, d, d2, stride_s_or_t,
-                                  stride_b, stride_h, stride_d, stream););
+                                  stride_b, stride_h, stride_d, local_tokens, stream););
 }
 
 void fused_rope_backward(const Tensor &output_grads, const Tensor &cu_seqlens, const Tensor &freqs,
@@ -597,6 +762,10 @@ void fused_rope_backward(const Tensor &output_grads, const Tensor &cu_seqlens, c
                          const int h, const int d, const int d2, const int stride_s_or_t,
                          const int stride_b, const int stride_h, const int stride_d,
                          cudaStream_t stream) {
+  const int64_t local_tokens =
+      (qkv_format == NVTE_QKV_Format::NVTE_THD && !output_grads.data.shape.empty())
+          ? static_cast<int64_t>(output_grads.data.shape[0])
+          : 0;
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       output_grads.data.dtype, scalar_t,
       fused_rope_backward_launcher(reinterpret_cast<const scalar_t *>(output_grads.data.dptr),
@@ -605,7 +774,7 @@ void fused_rope_backward(const Tensor &output_grads, const Tensor &cu_seqlens, c
                                    reinterpret_cast<const int *>(start_positions.data.dptr),
                                    reinterpret_cast<scalar_t *>(input_grads->data.dptr), qkv_format,
                                    interleaved, cp_size, cp_rank, s, b, h, d, d2, stride_s_or_t,
-                                   stride_b, stride_h, stride_d, stream););
+                                   stride_b, stride_h, stride_d, local_tokens, stream););
 }
 
 void fused_qkv_rope_forward(const Tensor &qkv_input, const Tensor &q_freqs, const Tensor &k_freqs,
