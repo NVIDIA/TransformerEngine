@@ -20,6 +20,7 @@ from .activation import (
 from .add_extra_input import AddExtraInput
 from .all_gather import AllGather
 from .all_reduce import AllReduce
+from .batched_linear import BatchedLinear
 from .basic_linear import BasicLinear
 from .bias import Bias
 from .constant_scale import ConstantScale
