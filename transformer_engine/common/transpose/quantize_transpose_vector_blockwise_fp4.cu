@@ -564,15 +564,20 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
 
         if constexpr (kErrCorrectedNVFP4) {
           const float4 q4 = static_cast<float4>(out_4x);
-          const float dequant_scale = static_cast<float>(scale_inv) * row_global_decode_scale;
           const int residual_offset = i * kNVecSMem;
           const float q_values[4] = {q4.x, q4.y, q4.z, q4.w};
+          constexpr float fp8_max = TypeExtrema<fp8e4m3>::max;
+          constexpr float fp4_max = TypeExtrema<fp4e2m1>::max;
+          constexpr float global_decode_scale_multiplier = 1.0f / (fp4_max * fp8_max);
+          const float primary_global_decode_scale =
+              row_idx < num_rows ? global_amax[row_idx] * global_decode_scale_multiplier : 1.0f;
 #pragma unroll
           for (int j = 0; j < 4; ++j) {
             const int smem_vec_idx = i + j / kNVecSMem;
             const int smem_elt_idx = j % kNVecSMem;
-            const IType primary_dequantized =
-                static_cast<IType>(q_values[j] * dequant_scale);
+            float primary_dequantized_fp32 = q_values[j] * static_cast<float>(scale_inv);
+            primary_dequantized_fp32 *= primary_global_decode_scale;
+            const IType primary_dequantized = static_cast<IType>(primary_dequantized_fp32);
             const float error =
                 static_cast<float>(smem_vec[smem_vec_idx].data.elt[smem_elt_idx]) -
                 static_cast<float>(primary_dequantized);

@@ -497,7 +497,7 @@ def test_nvfp4_gemm_versus_reference(
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
-@pytest.mark.parametrize("M, K, N", [(128, 128, 128), (112, 272, 96)])
+@pytest.mark.parametrize("M, K, N", [(128, 128, 128), (112, 288, 96)])
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32], ids=str)
 @pytest.mark.parametrize("use_bias", [False, True], ids=["no_bias", "bias"])
 def test_error_corrected_row_scaled_gemm_versus_reference(

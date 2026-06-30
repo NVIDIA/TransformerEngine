@@ -126,8 +126,7 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       bool use_optimized_kernel =
           (dtype == DType::kBFloat16) && (rows % 32 == 0) && (cols % 32 == 0) &&
           (output_tensor->has_data() ||
-           (output_tensor->has_columnwise_data() && quant_config_cpp.nvfp4_2d_quantization)) &&
-          !err_corrected_nvfp4;
+           (output_tensor->has_columnwise_data() && quant_config_cpp.nvfp4_2d_quantization));
 
       // Launch NVFP4 quantize kernel
       if (nvfp4_use_4over6) {

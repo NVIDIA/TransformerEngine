@@ -266,7 +266,13 @@ def check_quantization_nvfp4_versus_reference(
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
-@pytest.mark.parametrize("M, N", [(128, 128), (112, 272)])
+@pytest.mark.parametrize(
+    "M, N",
+    [
+        pytest.param(128, 128, id="aligned-tuned-1d"),
+        pytest.param(112, 272, id="unaligned-generic-vector"),
+    ],
+)
 @pytest.mark.parametrize(
     "use_cpp_allocator", [True, False], ids=["cpp_allocator", "python_allocator"]
 )
