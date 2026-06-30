@@ -1617,10 +1617,9 @@ class TestAttentionFactoryNativeRecipeParity:
 
     @staticmethod
     def _assert_equal(actual, expected, label):
-        assert torch.equal(actual, expected), (
-            f"{label} mismatch: max diff = "
-            f"{(actual.float() - expected.float()).abs().max().item()}"
-        )
+        assert torch.equal(
+            actual, expected
+        ), f"{label} mismatch: max diff = {(actual.float() - expected.float()).abs().max().item()}"
 
     def _run_model(self, model, inp, grad, fp8_recipe, seed):
         run_inp = inp.clone().detach().requires_grad_(True)
@@ -1629,9 +1628,7 @@ class TestAttentionFactoryNativeRecipeParity:
         with autocast(enabled=True, recipe=fp8_recipe):
             out = model(run_inp)
         out.backward(grad)
-        local_recipes = [
-            type(r).__name__ for r in model.dpa.fp8_meta.get("local_recipes", [])
-        ]
+        local_recipes = [type(r).__name__ for r in model.dpa.fp8_meta.get("local_recipes", [])]
         return (
             out.detach().clone(),
             run_inp.grad.detach().clone(),

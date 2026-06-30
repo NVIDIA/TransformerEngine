@@ -15,7 +15,7 @@ different formats or sources.
 Factories are ordered from conservative to more aggressive quantization.
 
 Organization:
-    * Linear / grouped-linear recipes (pre-training). Favor more precision 
+    * Linear / grouped-linear recipes (pre-training). Favor more precision
       on the forward pass.
     * RL-oriented recipes: Favor more precision in backward GEMMs.
     * Linear + attention recipes: factories that also cover ``DotProductAttention``
@@ -378,8 +378,10 @@ def nvfp4_linear_fp8_dpa_factory(
     from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer
 
     is_dpa = role is not None and role.module_type == "dpa"
-    is_dpa_boundary = role is not None and not role.module_type and (
-        "dpa_output" in role.name or "dpa_grad_input" in role.name
+    is_dpa_boundary = (
+        role is not None
+        and not role.module_type
+        and ("dpa_output" in role.name or "dpa_grad_input" in role.name)
     )
 
     # Native NVFP4 + FP8 attention uses delayed scaling for S/dP.
@@ -456,8 +458,10 @@ def nvfp4_linear_mxfp8_dpa_factory(
     from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 
     is_dpa = role is not None and role.module_type == "dpa"
-    is_dpa_boundary = role is not None and not role.module_type and (
-        "dpa_output" in role.name or "dpa_grad_input" in role.name
+    is_dpa_boundary = (
+        role is not None
+        and not role.module_type
+        and ("dpa_output" in role.name or "dpa_grad_input" in role.name)
     )
 
     if is_dpa or is_dpa_boundary:

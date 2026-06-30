@@ -175,8 +175,7 @@ class HybridQuantizer(Quantizer):
                 result = group
             elif group is not result:
                 raise RuntimeError(
-                    "HybridQuantizer sub-quantizers have inconsistent "
-                    "amax_reduction_group values."
+                    "HybridQuantizer sub-quantizers have inconsistent amax_reduction_group values."
                 )
         return result
 
