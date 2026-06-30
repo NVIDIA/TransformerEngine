@@ -15,37 +15,48 @@ namespace transformer_engine {
 namespace normalization {
 namespace rtc_norm {
 
+template <typename KernelParamsType>
+using StaticFallback = void (*)(LaunchParams<KernelParamsType>&, const bool);
+
 // Register an RTC-backed launcher for a single LayerNorm Forward "tuned"
 // (multi-CTA-capable) config. Compiles and launches via NVRTC on first use.
 void register_ln_fwd_tuned(DType wtype, DType itype, DType otype, DType ctype, int hidden_size,
-                           int ctas_per_row, int warps_m, int warps_n, int bytes_per_ldg);
+                           int ctas_per_row, int warps_m, int warps_n, int bytes_per_ldg,
+                           StaticFallback<ForwardKernelParams> static_fallback = nullptr);
 
 // Register an RTC-backed launcher for a single LayerNorm Forward "general"
 // (no multi-CTA) config.
 void register_ln_fwd_general(DType wtype, DType itype, DType otype, DType ctype, int hidden_size,
-                             int warps_m, int warps_n, int bytes_per_ldg);
+                             int warps_m, int warps_n, int bytes_per_ldg,
+                             StaticFallback<ForwardKernelParams> static_fallback = nullptr);
 
 // Register an RTC-backed launcher for a single LayerNorm Backward "tuned" config.
 void register_ln_bwd_tuned(DType wtype, DType itype, DType otype, DType ctype, int hidden_size,
                            int ctas_per_row, int warps_m, int warps_n, int bytes_per_ldg_main,
-                           int bytes_per_ldg_final);
+                           int bytes_per_ldg_final,
+                           StaticFallback<BackwardKernelParams> static_fallback = nullptr);
 
 // Register an RTC-backed launcher for a single LayerNorm Backward "general" config.
 void register_ln_bwd_general(DType wtype, DType itype, DType otype, DType ctype, int hidden_size,
                              int warps_m, int warps_n, int bytes_per_ldg_main,
-                             int bytes_per_ldg_final);
+                             int bytes_per_ldg_final,
+                             StaticFallback<BackwardKernelParams> static_fallback = nullptr);
 
 // Same set for RMSNorm.
 void register_rmsnorm_fwd_tuned(DType wtype, DType itype, DType otype, DType ctype, int hidden_size,
-                                int ctas_per_row, int warps_m, int warps_n, int bytes_per_ldg);
+                                int ctas_per_row, int warps_m, int warps_n, int bytes_per_ldg,
+                                StaticFallback<ForwardKernelParams> static_fallback = nullptr);
 void register_rmsnorm_fwd_general(DType wtype, DType itype, DType otype, DType ctype,
-                                  int hidden_size, int warps_m, int warps_n, int bytes_per_ldg);
+                                  int hidden_size, int warps_m, int warps_n, int bytes_per_ldg,
+                                  StaticFallback<ForwardKernelParams> static_fallback = nullptr);
 void register_rmsnorm_bwd_tuned(DType wtype, DType itype, DType otype, DType ctype, int hidden_size,
                                 int ctas_per_row, int warps_m, int warps_n, int bytes_per_ldg_main,
-                                int bytes_per_ldg_final, bool with_add);
+                                int bytes_per_ldg_final, bool with_add,
+                                StaticFallback<BackwardKernelParams> static_fallback = nullptr);
 void register_rmsnorm_bwd_general(DType wtype, DType itype, DType otype, DType ctype,
                                   int hidden_size, int warps_m, int warps_n, int bytes_per_ldg_main,
-                                  int bytes_per_ldg_final, bool with_add);
+                                  int bytes_per_ldg_final, bool with_add,
+                                  StaticFallback<BackwardKernelParams> static_fallback = nullptr);
 
 }  // namespace rtc_norm
 }  // namespace normalization

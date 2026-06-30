@@ -5,12 +5,11 @@
  ************************************************************************/
 
 // NVRTC-backed registry registration for LayerNorm/RMSNorm forward + backward
-// launchers. When NVTE_BUILD_LEGACY_STATIC_NORM=OFF, the per-config
-// REGISTER_NORM_LAUNCHER macro expands to a call into one of the
-// register_*_tuned/general functions defined here. Each registers a closure
-// in the TeNormalizationRegistry that, on first invocation, compiles the
-// matching template instantiation via NVRTC and from then on dispatches via
-// the cached CUfunction.
+// launchers. Each per-config REGISTER_NORM_LAUNCHER macro expands to a call
+// into one of the register_*_tuned/general functions defined here. When
+// NVTE_BUILD_LEGACY_STATIC_NORM=ON, that call also supplies a static fallback.
+// The registered closure prefers NVRTC and selects the fallback only when
+// NVTE_DISABLE_NVRTC=1.
 
 #include "rtc_dispatch.h"
 
@@ -123,6 +122,19 @@ int bwd_smem_bytes(DType ctype, int hidden_size, int ctas_per_row, int warps_m, 
   return dgrad + wgrad;
 }
 
+template <typename ParamsT>
+bool try_static_fallback(StaticFallback<ParamsT> static_fallback,
+                         LaunchParams<ParamsT>& launch_params, const bool configure_params) {
+  if (rtc::is_enabled()) {
+    return false;
+  }
+  NVTE_CHECK(static_fallback != nullptr,
+             "NVRTC is disabled and this normalization build has no static fallback. Rebuild with "
+             "NVTE_BUILD_LEGACY_STATIC_NORM=ON.");
+  static_fallback(launch_params, configure_params);
+  return true;
+}
+
 // Common per-launch configure/launch helper. `kernel_expr` is the full
 // templated kernel symbol (used as the nvrtcAddNameExpression argument); the
 // closure captures everything needed.
@@ -131,11 +143,15 @@ void register_launcher(const std::string& label, const std::string& kernel_expr,
                        const char* rtc_source, const char* filename, TupleKeyType key,
                        int threads_per_cta, int dynamic_smem_bytes, int ctas_per_row,
                        bool needs_cooperative, int barrier_bytes_per_col,
-                       int workspace_bytes_per_col, int dgamma_part_bytes_per_col) {
+                       int workspace_bytes_per_col, int dgamma_part_bytes_per_col,
+                       StaticFallback<ParamsT> static_fallback) {
   auto closure = [label, kernel_expr, rtc_source, filename, threads_per_cta, dynamic_smem_bytes,
                   ctas_per_row, needs_cooperative, barrier_bytes_per_col,
-                  workspace_bytes_per_col, dgamma_part_bytes_per_col](
+                  workspace_bytes_per_col, dgamma_part_bytes_per_col, static_fallback](
                      LaunchParams<ParamsT>& launch_params, const bool configure_params) {
+    if (try_static_fallback(static_fallback, launch_params, configure_params)) {
+      return;
+    }
     auto& mgr = rtc::KernelManager::instance();
     if (!mgr.is_compiled(label)) {
       mgr.compile(label, kernel_expr, rtc_source, filename);
@@ -179,73 +195,6 @@ void register_launcher(const std::string& label, const std::string& kernel_expr,
   TeNormalizationRegistry<ParamsT>::registerFunction(key, std::move(closure));
 }
 
-// Backward "general" launcher additionally launches a finalize kernel after
-// the main kernel — host-side replicating the static path needs awareness of
-// that. Same dispatch shape but with a second kernel symbol.
-template <typename ParamsT>
-void register_bwd_general_launcher(const std::string& main_label,
-                                   const std::string& main_kernel_expr,
-                                   const std::string& finalize_label,
-                                   const std::string& finalize_kernel_expr,
-                                   const char* rtc_source, const char* filename, TupleKeyType key,
-                                   int threads_per_cta, int dynamic_smem_bytes,
-                                   int finalize_threads_per_cta, int finalize_ctas,
-                                   int hidden_size, int ctype_bytes, int warps_m) {
-  auto closure = [main_label, main_kernel_expr, finalize_label, finalize_kernel_expr, rtc_source,
-                  filename, threads_per_cta, dynamic_smem_bytes, finalize_threads_per_cta,
-                  finalize_ctas, hidden_size, ctype_bytes, warps_m](
-                     LaunchParams<ParamsT>& launch_params, const bool configure_params) {
-    auto& mgr = rtc::KernelManager::instance();
-    if (!mgr.is_compiled(main_label)) {
-      mgr.compile(main_label, main_kernel_expr, rtc_source, filename);
-    }
-    if (!mgr.is_compiled(finalize_label)) {
-      mgr.compile(finalize_label, finalize_kernel_expr, rtc_source, filename);
-    }
-
-    // ctas_per_col + ctas_per_row for "general" backward is computed exactly
-    // like the static launcher: ceil_div on hidden_size and on rows, capped by
-    // SM count × occupancy.
-    auto ceil_div = [](int x, int y) { return (x + y - 1) / y; };
-    const int rows = launch_params.params.rows;
-    const int cols = launch_params.params.cols;
-    int ctas_per_col = launch_params.params.ctas_per_col;
-    int ctas_per_row = launch_params.params.ctas_per_row;
-    if (configure_params) {
-      const int ctas_per_sm = mgr.occupancy_max_active_blocks_per_sm(main_label, threads_per_cta,
-                                                                     dynamic_smem_bytes);
-      const int max_ctas = launch_params.multiprocessorCount * ctas_per_sm;
-      ctas_per_row = ceil_div(cols, hidden_size);
-      ctas_per_col = std::min(ceil_div(rows, warps_m), max_ctas / std::max(ctas_per_row, 1));
-      launch_params.params.ctas_per_row = ctas_per_row;
-      launch_params.params.ctas_per_col = ctas_per_col;
-      if (ctas_per_row > 1) {
-        launch_params.barrier_bytes = 2 * ctas_per_col * sizeof(int);
-        launch_params.workspace_bytes =
-            ctas_per_col * warps_m * ctas_per_row * (ctype_bytes * 2) * 2;
-      }
-      launch_params.dgamma_part_bytes = ctas_per_col * cols * ctype_bytes;
-      return;
-    }
-
-    if (dynamic_smem_bytes >= 48 * 1024) {
-      mgr.set_function_attribute(main_label, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-                                 dynamic_smem_bytes);
-    }
-    const auto stream = launch_params.stream;
-    if (ctas_per_row == 1) {
-      mgr.launch(main_label, dim3(ctas_per_row * ctas_per_col), dim3(threads_per_cta),
-                 dynamic_smem_bytes, stream, launch_params.params);
-    } else {
-      mgr.launch_cooperative(main_label, dim3(ctas_per_row * ctas_per_col), dim3(threads_per_cta),
-                             dynamic_smem_bytes, stream, launch_params.params);
-    }
-    mgr.launch(finalize_label, dim3(finalize_ctas), dim3(finalize_threads_per_cta), 0, stream,
-               launch_params.params);
-  };
-  TeNormalizationRegistry<ParamsT>::registerFunction(key, std::move(closure));
-}
-
 }  // namespace
 
 // ============================================================================
@@ -253,7 +202,7 @@ void register_bwd_general_launcher(const std::string& main_label,
 // ============================================================================
 
 void register_ln_fwd_tuned(DType wt, DType it, DType ot, DType ct, int hidden, int cr, int wm,
-                           int wn, int bl) {
+                           int wn, int bl, StaticFallback<ForwardKernelParams> static_fallback) {
   const auto key = get_key(NVTE_Norm_Backend::Te, NVTE_Norm_Type::LayerNorm,
                            NVTE_Norm_Stage::Forward, wt, it, ot, ct, 0, hidden, false, true);
   const std::string label =
@@ -276,11 +225,11 @@ void register_ln_fwd_tuned(DType wt, DType it, DType ot, DType ct, int hidden, i
   register_launcher<ForwardKernelParams>(
       label, kernel_expr, string_code_normalization_layernorm_rtc_ln_fwd_kernel_cu,
       "ln_fwd_kernel.cu", key, threads_per_cta, smem_bytes, cr, /*needs_cooperative=*/cr > 1,
-      barrier_per_col, workspace_per_col, /*dgamma_part_bytes_per_col=*/0);
+      barrier_per_col, workspace_per_col, /*dgamma_part_bytes_per_col=*/0, static_fallback);
 }
 
 void register_ln_fwd_general(DType wt, DType it, DType ot, DType ct, int hidden, int wm, int wn,
-                             int bl) {
+                             int bl, StaticFallback<ForwardKernelParams> static_fallback) {
   const auto key = get_key(NVTE_Norm_Backend::Te, NVTE_Norm_Type::LayerNorm,
                            NVTE_Norm_Stage::Forward, wt, it, ot, ct, 0, hidden, false, false);
   const std::string label =
@@ -293,9 +242,12 @@ void register_ln_fwd_general(DType wt, DType it, DType ot, DType ct, int hidden,
       concat_strings("&::transformer_engine::normalization::ln_fwd_general_kernel<", traits_expr,
                      ">");
   const int threads_per_cta = wm * wn * 32;
-  const auto closure = [label, kernel_expr, threads_per_cta, hidden, wm, ct](
+  const auto closure = [label, kernel_expr, threads_per_cta, hidden, wm, ct, static_fallback](
                            LaunchParams<ForwardKernelParams>& launch_params,
                            const bool configure_params) {
+    if (try_static_fallback(static_fallback, launch_params, configure_params)) {
+      return;
+    }
     auto& mgr = rtc::KernelManager::instance();
     if (!mgr.is_compiled(label)) {
       mgr.compile(label, kernel_expr, string_code_normalization_layernorm_rtc_ln_fwd_kernel_cu,
@@ -339,7 +291,8 @@ void register_ln_fwd_general(DType wt, DType it, DType ot, DType ct, int hidden,
 // ============================================================================
 
 void register_rmsnorm_fwd_tuned(DType wt, DType it, DType ot, DType ct, int hidden, int cr, int wm,
-                                int wn, int bl) {
+                                int wn, int bl,
+                                StaticFallback<ForwardKernelParams> static_fallback) {
   const auto key = get_key(NVTE_Norm_Backend::Te, NVTE_Norm_Type::RMSNorm,
                            NVTE_Norm_Stage::Forward, wt, it, ot, ct, 0, hidden, false, true);
   const std::string label =
@@ -357,11 +310,12 @@ void register_rmsnorm_fwd_tuned(DType wt, DType it, DType ot, DType ct, int hidd
   register_launcher<ForwardKernelParams>(
       label, kernel_expr, string_code_normalization_rmsnorm_rtc_rmsnorm_fwd_kernel_cu,
       "rmsnorm_fwd_kernel.cu", key, threads_per_cta, smem_bytes, cr, /*needs_cooperative=*/cr > 1,
-      barrier_per_col, workspace_per_col, 0);
+      barrier_per_col, workspace_per_col, 0, static_fallback);
 }
 
 void register_rmsnorm_fwd_general(DType wt, DType it, DType ot, DType ct, int hidden, int wm,
-                                  int wn, int bl) {
+                                  int wn, int bl,
+                                  StaticFallback<ForwardKernelParams> static_fallback) {
   const auto key = get_key(NVTE_Norm_Backend::Te, NVTE_Norm_Type::RMSNorm,
                            NVTE_Norm_Stage::Forward, wt, it, ot, ct, 0, hidden, false, false);
   const std::string label =
@@ -372,9 +326,12 @@ void register_rmsnorm_fwd_general(DType wt, DType it, DType ot, DType ct, int hi
   const std::string kernel_expr = concat_strings(
       "&::transformer_engine::normalization::rmsnorm_fwd_general_kernel<", traits_expr, ">");
   const int threads_per_cta = wm * wn * 32;
-  const auto closure = [label, kernel_expr, threads_per_cta, hidden, wm, ct](
+  const auto closure = [label, kernel_expr, threads_per_cta, hidden, wm, ct, static_fallback](
                            LaunchParams<ForwardKernelParams>& launch_params,
                            const bool configure_params) {
+    if (try_static_fallback(static_fallback, launch_params, configure_params)) {
+      return;
+    }
     auto& mgr = rtc::KernelManager::instance();
     if (!mgr.is_compiled(label)) {
       mgr.compile(label, kernel_expr,
@@ -418,7 +375,8 @@ void register_rmsnorm_fwd_general(DType wt, DType it, DType ot, DType ct, int hi
 // ============================================================================
 
 void register_ln_bwd_tuned(DType wt, DType it, DType ot, DType ct, int hidden, int cr, int wm,
-                           int wn, int bl_main, int bl_final) {
+                           int wn, int bl_main, int bl_final,
+                           StaticFallback<BackwardKernelParams> static_fallback) {
   const auto key = get_key(NVTE_Norm_Backend::Te, NVTE_Norm_Type::LayerNorm,
                            NVTE_Norm_Stage::Backward, wt, it, ot, ct, 0, hidden, false, true);
   const std::string label =
@@ -458,9 +416,12 @@ void register_ln_bwd_tuned(DType wt, DType it, DType ot, DType ct, int hidden, i
 
   auto closure = [main_label, main_kexpr, finalize_label, finalize_kexpr, threads_per_cta,
                   smem_bytes, cr, barrier_per_col, workspace_per_col, dgamma_part_per_col,
-                  finalize_ctas, finalize_threads_per_cta](
+                  finalize_ctas, finalize_threads_per_cta, static_fallback](
                      LaunchParams<BackwardKernelParams>& launch_params,
                      const bool configure_params) {
+    if (try_static_fallback(static_fallback, launch_params, configure_params)) {
+      return;
+    }
     auto& mgr = rtc::KernelManager::instance();
     if (!mgr.is_compiled(main_label)) {
       mgr.compile(main_label, main_kexpr,
@@ -503,7 +464,8 @@ void register_ln_bwd_tuned(DType wt, DType it, DType ot, DType ct, int hidden, i
 }
 
 void register_ln_bwd_general(DType wt, DType it, DType ot, DType ct, int hidden, int wm, int wn,
-                             int bl_main, int bl_final) {
+                             int bl_main, int bl_final,
+                             StaticFallback<BackwardKernelParams> static_fallback) {
   const auto key = get_key(NVTE_Norm_Backend::Te, NVTE_Norm_Type::LayerNorm,
                            NVTE_Norm_Stage::Backward, wt, it, ot, ct, 0, hidden, false, false);
   const std::string label =
@@ -531,8 +493,12 @@ void register_ln_bwd_general(DType wt, DType it, DType ot, DType ct, int hidden,
 
   auto closure = [main_label, main_kexpr, finalize_label, finalize_kexpr, threads_per_cta, hidden,
                   wm, ctype_bytes, finalize_elts_n_per_cta, finalize_warps_n, finalize_warps_m,
-                  finalize_threads_per_warp](LaunchParams<BackwardKernelParams>& launch_params,
-                                              const bool configure_params) {
+                  finalize_threads_per_warp, static_fallback](
+                     LaunchParams<BackwardKernelParams>& launch_params,
+                     const bool configure_params) {
+    if (try_static_fallback(static_fallback, launch_params, configure_params)) {
+      return;
+    }
     auto& mgr = rtc::KernelManager::instance();
     if (!mgr.is_compiled(main_label)) {
       mgr.compile(main_label, main_kexpr,
@@ -582,7 +548,8 @@ void register_ln_bwd_general(DType wt, DType it, DType ot, DType ct, int hidden,
 // ============================================================================
 
 void register_rmsnorm_bwd_tuned(DType wt, DType it, DType ot, DType ct, int hidden, int cr, int wm,
-                                int wn, int bl_main, int bl_final, bool with_add) {
+                                int wn, int bl_main, int bl_final, bool with_add,
+                                StaticFallback<BackwardKernelParams> static_fallback) {
   const auto stage =
       with_add ? NVTE_Norm_Stage::BackwardAdd : NVTE_Norm_Stage::Backward;
   const auto key = get_key(NVTE_Norm_Backend::Te, NVTE_Norm_Type::RMSNorm, stage, wt, it, ot, ct, 0,
@@ -620,9 +587,12 @@ void register_rmsnorm_bwd_tuned(DType wt, DType it, DType ot, DType ct, int hidd
 
   auto closure = [main_label, main_kexpr, finalize_label, finalize_kexpr, threads_per_cta,
                   smem_bytes, cr, barrier_per_col, workspace_per_col, dgamma_part_per_col,
-                  finalize_ctas, finalize_threads_per_cta](
+                  finalize_ctas, finalize_threads_per_cta, static_fallback](
                      LaunchParams<BackwardKernelParams>& launch_params,
                      const bool configure_params) {
+    if (try_static_fallback(static_fallback, launch_params, configure_params)) {
+      return;
+    }
     auto& mgr = rtc::KernelManager::instance();
     if (!mgr.is_compiled(main_label)) {
       mgr.compile(main_label, main_kexpr,
@@ -667,7 +637,8 @@ void register_rmsnorm_bwd_tuned(DType wt, DType it, DType ot, DType ct, int hidd
 }
 
 void register_rmsnorm_bwd_general(DType wt, DType it, DType ot, DType ct, int hidden, int wm,
-                                  int wn, int bl_main, int bl_final, bool with_add) {
+                                  int wn, int bl_main, int bl_final, bool with_add,
+                                  StaticFallback<BackwardKernelParams> static_fallback) {
   const auto stage =
       with_add ? NVTE_Norm_Stage::BackwardAdd : NVTE_Norm_Stage::Backward;
   const auto key = get_key(NVTE_Norm_Backend::Te, NVTE_Norm_Type::RMSNorm, stage, wt, it, ot, ct, 0,
@@ -698,8 +669,12 @@ void register_rmsnorm_bwd_general(DType wt, DType it, DType ot, DType ct, int hi
 
   auto closure = [main_label, main_kexpr, finalize_label, finalize_kexpr, threads_per_cta, hidden,
                   wm, ctype_bytes, finalize_elts_n_per_cta, finalize_warps_n, finalize_warps_m,
-                  finalize_threads_per_warp](LaunchParams<BackwardKernelParams>& launch_params,
-                                              const bool configure_params) {
+                  finalize_threads_per_warp, static_fallback](
+                     LaunchParams<BackwardKernelParams>& launch_params,
+                     const bool configure_params) {
+    if (try_static_fallback(static_fallback, launch_params, configure_params)) {
+      return;
+    }
     auto& mgr = rtc::KernelManager::instance();
     if (!mgr.is_compiled(main_label)) {
       mgr.compile(main_label, main_kexpr,

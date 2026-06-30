@@ -29,8 +29,7 @@ static_assert(sizeof(uint16_t) == 2);
 static_assert(sizeof(uint32_t) == 4);
 static_assert(sizeof(uint64_t) == 8);
 // Minimal subset of <type_traits> used by the kernel headers. The full header
-// is not reliably available under NVRTC, so define just what the norm/transpose
-// device code references (std::is_same, std::conditional[_t]).
+// is not reliably available under NVRTC
 namespace std {
 template <class T, class U>
 struct is_same {
