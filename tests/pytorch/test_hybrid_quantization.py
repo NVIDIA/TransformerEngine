@@ -14,6 +14,9 @@ from transformer_engine.common import recipe
 from transformer_engine.pytorch.custom_recipes.quantization_factory_base import (
     nvfp4_quantizer_factory,
 )
+from transformer_engine.pytorch.custom_recipes.quantization_factory_zoo import (
+    mxfp8_fwd_nvfp4_bwd_quantizer_factory,
+)
 from transformer_engine.pytorch import (
     autocast,
     quantized_model_init,
@@ -3635,8 +3638,8 @@ class TestHybridUpdateWeightQuantizers:
 # Covers the supported (same-format) cases and the rejected (cross-format,
 # missing sub-storage, unsupported sub-quantizer) cases. The supported subset
 # is the first incremental hybrid integration with the distributed-optimizer
-# quantized-param all-gather flow. Cross-format support is deferred to a
-# follow-up; the tests below pin the NotImplementedError contract so the
+# quantized-param all-gather flow. Cross-format support is deferred to
+# follow-up #3158; the tests below pin the NotImplementedError contract so the
 # rejection messaging stays clear as the feature evolves.
 # ---------------------------------------------------------------------------
 
@@ -3735,7 +3738,7 @@ def _hybrid_recipe_fp8_current_row_delayed_col():
 
 
 def _hybrid_recipe_mxfp8():
-    """Same-format MXFP8 on both directions (rejected today; TODO)."""
+    """Same-format MXFP8 on both directions (rejected today; TODO #3158)."""
     return _hybrid_custom_recipe(
         row_factory=lambda: MXFP8Quantizer(tex.DType.kFloat8E4M3),
         col_factory=lambda: MXFP8Quantizer(tex.DType.kFloat8E4M3),
@@ -3744,7 +3747,7 @@ def _hybrid_recipe_mxfp8():
 
 
 def _hybrid_recipe_blockwise():
-    """Same-format Float8Blockwise on both directions (rejected today; TODO)."""
+    """Same-format Float8Blockwise on both directions (rejected today; TODO #3158)."""
     return _hybrid_custom_recipe(
         row_factory=lambda: Float8BlockQuantizer(
             fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True
@@ -4083,7 +4086,7 @@ class TestHybridQuantizeMasterWeights:
     # of which direction they appear in. See the per-direction rejection tests
     # below (``test_mxfp8_*_raises`` covers both rowwise and columnwise rejection
     # of MXFP8; ``test_nvfp4_*_raises`` and ``test_blockwise_*_raises`` similarly).
-    # The TODO block above ``_route_hybrid_to_buckets`` in tensor/utils.py
+    # The TODO #3158 block above ``_route_hybrid_to_buckets`` in tensor/utils.py
     # documents the upstream constraints (single-direction cast helper / kernel
     # support) whose unblocker drops per-block format support in for free.
 
@@ -4097,7 +4100,7 @@ class TestHybridQuantizeMasterWeights:
         ``model_weight`` has BOTH ``_rowwise_*`` and ``_columnwise_*`` populated
         (the underlying partial-cast kernel is bidirectional), while a hybrid
         sub-storage is single-direction by construction. See
-        ``TODO(hybrid-mxfp8-distopt)`` in tensor/utils.py for the unblocker shape.
+        ``TODO(#3158, hybrid-mxfp8-distopt)`` in tensor/utils.py for the unblocker shape.
         """
         from transformer_engine.pytorch.tensor.utils import quantize_master_weights
 
@@ -4143,7 +4146,7 @@ class TestHybridQuantizeMasterWeights:
         """NVFP4 in the rowwise sub-quantizer is rejected per-direction.
 
         The NVFP4 cast path is blocked on a pair of upstream constraints
-        documented in the TODO block above ``_route_hybrid_to_buckets`` in
+        documented in the TODO #3158 block above ``_route_hybrid_to_buckets`` in
         tensor/utils.py.
 
         NOTE: after PR #3027, single-direction 2D NVFP4 construction works,
@@ -4176,7 +4179,7 @@ class TestHybridQuantizeMasterWeights:
     )
     def test_blockwise_rowwise_raises(self):
         """Float8BlockQuantizer in the rowwise sub-quantizer is rejected
-        per-direction (no e2e factory uses it; TODO marker in tensor/utils.py).
+        per-direction (no e2e factory uses it; TODO #3158 marker in tensor/utils.py).
         """
         from transformer_engine.pytorch.tensor.utils import quantize_master_weights
 
@@ -5014,35 +5017,22 @@ class TestQuantizedParamsEquivalenceNVFP4(_QuantizedParamsEquivalenceBase):
 # ---------------------------------------------------------------------------
 
 
-# Module-level qfactories (picklable, required for checkpoint serialization).
+# Module-level qfactories give TE-to-TE quantized-param checkpoints a stable
+# importable reference for any pickled quantizer/recipe metadata. Portable BF16
+# checkpoint loading should not depend on importing these factories.
 
 
-def _checkpoint_hybrid_fp8_qfactory(role):
-    """Module-level qfactory (picklable) for checkpoint tests."""
-    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
-    if is_linear and role.tensor_type in ("input", "weight", "output"):
-        return HybridQuantizer(
-            rowwise_quantizer=Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
-            columnwise_quantizer=Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E4M3, device="cuda"
-            ),
-        )
-    if is_linear and role.tensor_type in ("grad_output", "grad_input"):
-        return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
-    return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
-
-
-@requires_fp8
+@requires_mxfp8_and_nvfp4
 class TestHybridCheckpoint:
     """Test state_dict save/load round-trips for models with hybrid quantized params."""
 
-    def _hybrid_fp8_recipe(self):
-        return recipe.CustomRecipe(qfactory=_checkpoint_hybrid_fp8_qfactory)
+    def _hybrid_checkpoint_recipe(self):
+        return recipe.CustomRecipe(qfactory=mxfp8_fwd_nvfp4_bwd_quantizer_factory)
 
     def test_state_dict_save_load_roundtrip(self):
         """state_dict → save → load → same model should produce identical outputs."""
         torch.manual_seed(42)
-        hybrid_recipe = self._hybrid_fp8_recipe()
+        hybrid_recipe = self._hybrid_checkpoint_recipe()
         with quantized_model_init(enabled=True, recipe=hybrid_recipe):
             model = Linear(128, 128, params_dtype=torch.bfloat16).cuda()
 
@@ -5066,7 +5056,7 @@ class TestHybridCheckpoint:
 
     def test_state_dict_contains_weight(self):
         """state_dict should contain the weight key."""
-        hybrid_recipe = self._hybrid_fp8_recipe()
+        hybrid_recipe = self._hybrid_checkpoint_recipe()
         with quantized_model_init(enabled=True, recipe=hybrid_recipe):
             model = Linear(128, 128, params_dtype=torch.bfloat16).cuda()
 
@@ -5080,7 +5070,7 @@ class TestHybridCheckpoint:
         model initialized with quantized_model_init.
         """
         torch.manual_seed(42)
-        hybrid_recipe = self._hybrid_fp8_recipe()
+        hybrid_recipe = self._hybrid_checkpoint_recipe()
 
         # Create BF16 model and get its state_dict
         ref_model = Linear(128, 128, params_dtype=torch.bfloat16).cuda()
@@ -5107,7 +5097,7 @@ class TestHybridCheckpoint:
         import os
 
         torch.manual_seed(42)
-        hybrid_recipe = self._hybrid_fp8_recipe()
+        hybrid_recipe = self._hybrid_checkpoint_recipe()
         with quantized_model_init(enabled=True, recipe=hybrid_recipe):
             model = Linear(128, 128, params_dtype=torch.bfloat16).cuda()
 
@@ -5140,7 +5130,7 @@ class TestHybridCheckpoint:
         import os
 
         torch.manual_seed(42)
-        hybrid_recipe = self._hybrid_fp8_recipe()
+        hybrid_recipe = self._hybrid_checkpoint_recipe()
         with quantized_model_init(enabled=True, recipe=hybrid_recipe):
             model = Linear(256, 256, params_dtype=torch.bfloat16).cuda()
 
@@ -5903,7 +5893,7 @@ class TestHybridFsdpRoundtrip:
 
     @pytest.mark.xfail(
         reason=(
-            "Hybrid FSDP2 does not support NVFP4 sub-storages yet; NVFP4 uses "
+            "Tracked by #3158: Hybrid FSDP2 does not support NVFP4 sub-storages yet; NVFP4 uses "
             "dedicated tensor hooks and does not implement the hybrid fsdp_buffer_fields protocol."
         )
     )
@@ -6407,7 +6397,7 @@ class TestHybridActivationRecompute:
     # / ``skip_fp8_weight_update`` correctly across the recompute phase,
     # which is why the ``te.checkpoint`` tests above pass bitwise.
     #
-    # Keeping the xfail'd tests here:
+    # Keeping the xfail'd tests here (tracked by #3158):
     #   1. pins the boundary — users hitting this failure get a clear
     #      diagnosis and pointer to ``te.checkpoint``;
     #   2. becomes a regression signal if the underlying cache-vs-
@@ -6426,7 +6416,7 @@ class TestHybridActivationRecompute:
             " incompatible with TE's weight-workspace cache: cache-miss"
             " on the first forward saves a different tensor count than"
             " cache-hit on recompute. Use te.checkpoint instead (tested"
-            " above)."
+            " above). Tracked by #3158."
         ),
     )
 

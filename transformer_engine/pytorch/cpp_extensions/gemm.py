@@ -136,11 +136,11 @@ def _unwrap_hybrid_B(tensor, layout):
     return tensor.columnwise_sub_storage
 
 
-def _materialize_high_precision(tensor):
+def _unwrap_identity_tensor(tensor):
     """Replace an :class:`IdentityTensorStorage` operand with its plain tensor.
 
     Identity (high-precision passthrough) operands carry an unquantized tensor;
-    materializing it here routes the matmul through the standard high-precision
+    unwrapping it here routes the matmul through the standard high-precision
     GEMM path. Non-identity operands pass through unchanged. Called after the
     hybrid unwrap, so a high-precision *direction* of a hybrid tensor is handled
     too.
@@ -154,7 +154,7 @@ def _reject_unsupported_output_quantizer(quantization_params):
     """Reject output quantizers that the native C++ GEMM path cannot convert."""
     if isinstance(quantization_params, (HybridQuantizer, IdentityQuantizer)):
         quantizer_name = type(quantization_params).__name__
-        # TODO(negvet): Lower HybridQuantizer output to its native rowwise
+        # TODO(#3158): Lower HybridQuantizer output to its native rowwise
         # sub-quantizer, and IdentityQuantizer output to an unquantized/no-op
         # path, once the returned tensor contract is defined for these boundary
         # roles.
@@ -191,8 +191,8 @@ def general_gemm(
     transa = layout[0] == "T"
     transb = layout[1] == "T"
 
-    A = _materialize_high_precision(_unwrap_hybrid_A(A, layout))
-    B = _materialize_high_precision(_unwrap_hybrid_B(B, layout))
+    A = _unwrap_identity_tensor(_unwrap_hybrid_A(A, layout))
+    B = _unwrap_identity_tensor(_unwrap_hybrid_B(B, layout))
 
     alpha = validate_gemm_scale(alpha, True)
     beta = validate_gemm_scale(beta, accumulate)
@@ -363,8 +363,8 @@ def general_grouped_gemm(
     """
     num_gemms = len(A)
 
-    A = [_materialize_high_precision(_unwrap_hybrid_A(a, layout)) for a in A]
-    B = [_materialize_high_precision(_unwrap_hybrid_B(b, layout)) for b in B]
+    A = [_unwrap_identity_tensor(_unwrap_hybrid_A(a, layout)) for a in A]
+    B = [_unwrap_identity_tensor(_unwrap_hybrid_B(b, layout)) for b in B]
 
     transa = layout[0] == "T"
     transb = layout[1] == "T"

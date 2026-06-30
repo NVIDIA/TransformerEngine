@@ -1162,7 +1162,7 @@ def _cast_master_weights_to_fp8_mxfp8_scaling(
 #   Not supported (raise NotImplementedError per-direction + TODO):
 #
 #     - MXFP8Quantizer as a hybrid sub-quantizer (any direction)
-#         TODO(hybrid-mxfp8-distopt): the distopt cast kernels
+#         TODO(#3158, hybrid-mxfp8-distopt): the distopt cast kernels
 #         (`tex.mxfp8_scaling_compute_partial_amax`, `tex.mxfp8_scaling_partial_cast`)
 #         are bidirectional — both rowwise and colwise outputs required — so they
 #         cannot ingest a single-direction hybrid sub-storage. (Unrelated to the
@@ -1173,7 +1173,7 @@ def _cast_master_weights_to_fp8_mxfp8_scaling(
 #         Also unlocks cross-format MXFP8 row + <other format> col.
 #
 #     - NVFP4Quantizer as a hybrid sub-quantizer (any direction)
-#         TODO(hybrid-nvfp4-distopt): load-bearing blocker is the kernel assertion
+#         TODO(#3158, hybrid-nvfp4-distopt): load-bearing blocker is the kernel assertion
 #         `return_identity || !use_2d_quantization` in
 #         `quantize_transpose_vector_blockwise_fp4.cu`, which rejects exactly the
 #         columnwise-only 2D configuration that `HybridQuantizer.__init__` produces
@@ -1190,7 +1190,7 @@ def _cast_master_weights_to_fp8_mxfp8_scaling(
 #         `row_sub`'s gathered rowwise).
 #
 #     - Float8BlockQuantizer as a hybrid sub-quantizer
-#         TODO(hybrid-fp8-blockwise): same shape as the NVFP4 secondary blocker —
+#         TODO(#3158, hybrid-fp8-blockwise): same shape as the NVFP4 secondary blocker —
 #         `_cast_master_weights_to_fp8_blockwise_scaling` writes only `_rowwise_data`
 #         with per-tensor post-AG `_create_columnwise()` that doesn't reach hybrid's
 #         separate col sub-storage. Unlike NVFP4, there is no kernel-level
@@ -1261,7 +1261,7 @@ def _route_hybrid_to_buckets(
         elif isinstance(sub_q, IdentityQuantizer):
             identity_params.append(entry)
         elif isinstance(sub_q, MXFP8Quantizer):
-            # TODO(hybrid-mxfp8-distopt): the distopt cast kernels are
+            # TODO(#3158, hybrid-mxfp8-distopt): the distopt cast kernels are
             # bidirectional, so a single-direction hybrid sub-storage cannot be
             # fed in. See top-of-file TODO block for the unblocker (single-
             # direction variants of the two distopt kernels).
@@ -1271,7 +1271,7 @@ def _route_hybrid_to_buckets(
                 "block above _route_hybrid_to_buckets for the unblocker shape."
             )
         elif isinstance(sub_q, NVFP4Quantizer):
-            # TODO(hybrid-nvfp4-distopt): load-bearing blocker is the kernel
+            # TODO(#3158, hybrid-nvfp4-distopt): load-bearing blocker is the kernel
             # assertion that rejects columnwise-only 2D NVFP4 — which is
             # exactly what hybrid's col sub-quantizer pin produces. Secondary
             # blocker (gated on the kernel fix) is the per-tensor post-AG
@@ -1283,7 +1283,7 @@ def _route_hybrid_to_buckets(
                 "block above _route_hybrid_to_buckets for details."
             )
         elif isinstance(sub_q, Float8BlockQuantizer):
-            # Pending hybrid-fp8-blockwise work: same shape as the NVFP4
+            # Pending hybrid-fp8-blockwise work (#3158): same shape as the NVFP4
             # secondary blocker (and only that one — no kernel-level construction
             # blocker for Block FP8). Python-side post-AG fix. See the
             # _route_hybrid_to_buckets design note above for details.

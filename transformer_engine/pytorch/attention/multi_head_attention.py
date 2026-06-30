@@ -58,7 +58,7 @@ def _infer_custom_dpa_scaling(recipe, dpa_name: str) -> Tuple[bool, bool]:
         qkv_quantizer = recipe.qfactory(
             QuantizerRole(module_type="dpa", tensor_type="qkv", name=dpa_name)
         )
-    except Exception:  # pragma: no cover - preserve existing fallback behavior
+    except Exception:  # pragma: no cover, pylint: disable=broad-exception-caught
         return False, False
 
     from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer

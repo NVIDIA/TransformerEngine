@@ -58,6 +58,13 @@ class HybridQuantizer(Quantizer):
             columnwise_source="rowwise_dequantized",
         )
 
+    In a ``CustomRecipe`` factory this can be combined with role-based
+    specialization. For example, a factory can return a ``HybridQuantizer`` only
+    for ``role.tensor_type == "weight"`` and use regular quantizers for inputs
+    and gradients. See
+    ``custom_recipes.quantization_factory_zoo.nvfp4_1d_double_quantized_weight_quantizer_factory``
+    for a weight-only double-quantization example.
+
     """
 
     _COLUMNWISE_SOURCES = ("original", "rowwise_dequantized")
@@ -81,6 +88,7 @@ class HybridQuantizer(Quantizer):
             ("columnwise", columnwise_quantizer),
         ):
             if isinstance(quantizer, QuantizerRequest):
+                # TODO(#3158): Support delayed-scaling requests inside hybrid sub-quantizers.
                 raise TypeError(
                     "HybridQuantizer does not support nested QuantizerRequest "
                     f"objects yet; got {type(quantizer).__name__} for the {role} "
@@ -158,11 +166,19 @@ class HybridQuantizer(Quantizer):
     @property
     def amax_reduction_group(self):
         """Amax-reduction group of the sub-quantizers, or ``None`` if unset."""
+        result = None
         for sub in (self.rowwise_quantizer, self.columnwise_quantizer):
             group = getattr(sub, "amax_reduction_group", None)
-            if group is not None:
-                return group
-        return None
+            if group is None:
+                continue
+            if result is None:
+                result = group
+            elif group is not result:
+                raise RuntimeError(
+                    "HybridQuantizer sub-quantizers have inconsistent "
+                    "amax_reduction_group values."
+                )
+        return result
 
     @amax_reduction_group.setter
     def amax_reduction_group(self, value) -> None:
@@ -311,7 +327,7 @@ class HybridQuantizer(Quantizer):
         (``False``) keeps the smaller, wgrad-ready columnwise shard
         saved — which is the more efficient memory choice.
 
-        TODO(negvet): Add native hybrid dispatch to
+        TODO(#3158): Add native hybrid dispatch to
         ``gather_along_first_dim`` to remove the BF16 detour.
 
         * **Scope.** Branch at the top of ``gather_along_first_dim`` that
@@ -351,7 +367,7 @@ class HybridQuantizer(Quantizer):
         return False
 
     def allows_save_original_input_for_backward(self) -> bool:
-        # TODO: Add an explicit recompute-from-original policy for deterministic
+        # TODO(#3158): Add an explicit recompute-from-original policy for deterministic
         # quantizers that can trade backward compute for saved activation memory.
         return self.columnwise_source == "original"
 
@@ -363,7 +379,7 @@ class HybridQuantizer(Quantizer):
         # We trust that users who write a CustomRecipe know what they're doing
         # with regard to per-operand scaling mode compatibility.
         #
-        # TODO(negvet): validate per-operand scaling-mode compatibility at
+        # TODO(#3158): validate per-operand scaling-mode compatibility at
         # recipe-build time instead of at cuBLAS-dispatch time. Concretely:
         #   1. Walk the qfactory outputs for a given module_type (``linear``,
         #      ``grouped_linear``, ``dpa``) — call the factory for each
@@ -626,7 +642,7 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
         format-specific padding (e.g. MXFP8 block-scale alignment) before the
         gather so concatenation along dim-0 is well-defined.
 
-        TODO(negvet): bandwidth optimization — pack both directions into a
+        TODO(#3158): bandwidth optimization — pack both directions into a
         single flat buffer sized ``max(row_bytes, col_bytes)`` (not
         ``row_bytes + col_bytes``) to halve comm volume for asymmetric format
         pairs. Planned implementation: a new per-sub-storage

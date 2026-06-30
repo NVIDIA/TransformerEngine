@@ -53,7 +53,7 @@ _HYBRID_RECIPE_CONFIGS = [
 ]
 
 _HYBRID_FLOAT8_BLOCK_FSDP2_XFAIL_REASON = (
-    "HybridFloat8BlockScaling + FSDP2 is not supported when dim-0 shards split "
+    "Tracked by #3158: HybridFloat8BlockScaling + FSDP2 is not supported when dim-0 shards split "
     "128-row Float8Block scale tiles. Each shard stores independently rounded "
     "scale rows, but the gathered tensor expects scale rows rounded from the "
     "global row count, so naively all-gathered scale buffers have the wrong shape."

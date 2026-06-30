@@ -1786,7 +1786,7 @@ class Linear(TransformerEngineBaseModule):
         # Hybrid (CustomRecipe) needs no SP amax-reduction setup today: its SP
         # activations are gathered in high precision and re-quantized whole, so
         # every rank already sees the same global amax.
-        # TODO(negvet): once native quantized all-gather lands (see
+        # TODO(#3158): once native quantized all-gather lands (see
         # supports_only_rowwise_all_gather / gather_along_first_dim) the SP path
         # quantizes per-shard, needing a hybrid branch here that mirrors the
         # current-scaling / NVFP4 SP reduction above:
