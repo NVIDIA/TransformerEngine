@@ -88,7 +88,7 @@ struct Max {
 template <typename T>
 __device__ __forceinline__ T WARP_SHFL_XOR_NATIVE(T value, int laneMask, int width = warpSize,
                                                   unsigned int mask = 0xffffffff) {
-#if CUDA_VERSION >= 9000
+#if defined(__CUDACC_RTC__) || CUDA_VERSION >= 9000
   return __shfl_xor_sync(mask, value, laneMask, width);
 #else
   return __shfl_xor(value, laneMask, width);
@@ -465,8 +465,8 @@ std::string make_softmax_rtc_label(const char *variant, const char *direction, i
 
 template <typename Type>
 std::string make_softmax_rtc_kernel_name(const char *kernel_name, int log2_elements) {
-  return concat_strings("&", kernel_name, "<", TypeInfo<Type>::name, ",", TypeInfo<Type>::name,
-                        ",float,", log2_elements, ">");
+  return concat_strings("&::transformer_engine::", kernel_name, "<", TypeInfo<Type>::name, ",",
+                        TypeInfo<Type>::name, ",float,", log2_elements, ">");
 }
 
 void throw_nvrtc_required(const char *variant) {

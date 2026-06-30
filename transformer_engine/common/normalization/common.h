@@ -52,10 +52,6 @@ struct LaunchParams {
   }
 };
 
-// KernelParamsBase / ForwardKernelParams / BackwardKernelParams /
-// BackwardAddKernelParams are defined in kernel_params.h, which is also
-// included unchanged by the NVRTC kernel sources for the norm RTC migration.
-
 enum class NVTE_Norm_Backend { Te, Cudnn };
 enum class NVTE_Norm_Stage { Forward, Backward, BackwardAdd };
 
