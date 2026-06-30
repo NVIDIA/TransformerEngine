@@ -88,9 +88,7 @@ def register_value_opaque_quantizer(cls: type) -> None:
     :class:`transformer_engine.pytorch.quantized_tensor.Quantizer`).
     """
     # ``register_opaque_type`` requires ``__fx_repr__`` to already exist on the
-    # class, so attach it before registering. Eager value semantics
-    # (``__eq__`` / ``__hash__`` / ``__fx_repr__``) work regardless of whether
-    # the opaque-object registration below succeeds.
+    # class, so attach it before registering.
     if "__fx_repr__" not in cls.__dict__:
         cls.__fx_repr__ = _quantizer_fx_repr
 
@@ -113,7 +111,4 @@ def register_value_opaque_quantizer(cls: type) -> None:
         # experimental opaque-object support.
         return
 
-    # Stamp the class only once torch actually knows it as an opaque value type,
-    # so ``is_value_opaque_quantizer`` never reports a quantizer as opaque when
-    # the registration was skipped or failed.
     setattr(cls, _VALUE_OPAQUE_FLAG, True)
