@@ -25,10 +25,6 @@ git submodule update --init --recursive
 # Install deps
 /opt/python/cp310-cp310/bin/pip install cmake pybind11[global] ninja setuptools wheel
 
-# Enable optional build features. cuSolverMp is provided by the build image
-# (see Dockerfile.x86 / Dockerfile.aarch), which also sets CUSOLVERMP_HOME.
-export NVTE_WITH_CUSOLVERMP=1
-
 if $BUILD_METAPACKAGE ; then
         cd /TransformerEngine
         NVTE_BUILD_METAPACKAGE=1 /opt/python/cp310-cp310/bin/python setup.py bdist_wheel 2>&1 | tee /wheelhouse/logs/metapackage.txt

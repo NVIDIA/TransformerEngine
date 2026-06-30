@@ -14,7 +14,7 @@ import subprocess
 import sys
 import platform
 from pathlib import Path
-from importlib.metadata import PackageNotFoundError, distribution, version as get_version
+from importlib.metadata import version as get_version
 from subprocess import CalledProcessError
 from typing import List, Optional, Tuple, Union
 
@@ -265,6 +265,37 @@ def cuda_archs() -> str:
     return archs
 
 
+def nccl_ep_enabled(archs: str = None) -> bool:
+    """Return True when NCCL EP should be compiled into this build.
+
+    Reads NVTE_WITH_NCCL_EP (default on). Auto-skips with a printed warning
+    when no arch >= 90 is targeted; raises RuntimeError if the flag was
+    explicitly set to 1 but no qualifying arch is present. Mirrors the same
+    logic in both TE/Common (setup.py) and TE/JAX (build_tools/jax.py) so a
+    single env var controls both sides consistently.
+    """
+    if archs is None:
+        archs = cuda_archs()
+    nccl_ep_env = os.getenv("NVTE_WITH_NCCL_EP")
+    nccl_ep_explicit = nccl_ep_env is not None
+    build_ep = bool(int(nccl_ep_env if nccl_ep_explicit else "1"))
+    if build_ep:
+        arch_tokens = [a.strip() for a in str(archs or "").split(";") if a.strip()]
+        has_hopper_or_newer = any(
+            t.lower() == "native" or (t.rstrip("af").isdigit() and int(t.rstrip("af")) >= 90)
+            for t in arch_tokens
+        )
+        if not has_hopper_or_newer:
+            if nccl_ep_explicit:
+                raise RuntimeError(
+                    f"NVTE_WITH_NCCL_EP=1 was set but NVTE_CUDA_ARCHS ('{archs}') "
+                    "contains no arch >= 90. NCCL EP requires Hopper or newer."
+                )
+            print(f"[NCCL EP] No arch >= 90 in NVTE_CUDA_ARCHS ('{archs}'); skipping build.")
+            build_ep = False
+    return build_ep
+
+
 def cuda_version() -> Tuple[int, ...]:
     """CUDA Toolkit version as a (major, minor) tuple.
 
@@ -292,15 +323,8 @@ def cuda_version() -> Tuple[int, ...]:
         version_str = get_version("nvidia-cuda-runtime-cu12")
         version_tuple = tuple(int(part) for part in version_str.split(".") if part.isdigit())
         return version_tuple
-    except PackageNotFoundError:
+    except importlib.metadata.PackageNotFoundError:
         raise RuntimeError("Could neither find NVCC executable nor CUDA runtime Python package.")
-
-
-def cusolvermp_pypi_package_name(cuda_major: Optional[int] = None) -> str:
-    """PyPI package providing cuSolverMp runtime libraries for a CUDA major version."""
-    if cuda_major is None:
-        cuda_major = cuda_version()[0]
-    return f"nvidia-cusolvermp-cu{cuda_major}"
 
 
 def get_frameworks() -> List[str]:
