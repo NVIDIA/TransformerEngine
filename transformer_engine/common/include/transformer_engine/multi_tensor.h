@@ -68,6 +68,28 @@ void nvte_multi_tensor_unscale_l2norm_cuda(int chunk_size, NVTETensor noop_flag,
                                            int per_tensor, int max_chunks_per_tensor,
                                            cudaStream_t stream);
 
+/*!  \brief Computes raw moments for a list of tensors.
+ *
+ * The returned rows contain count and raw sums of powers 1-4 for each tensor.
+ *
+ * \warning   This API is **experimental** and subject to change.
+ *
+ *  \param[in]     chunk_size              Number of tensor elements processed by a CUDA block.
+ *  \param[in]     noop_flag               If this single element tensor has non-zero value, kernel will exit immediately.
+ *  \param[in]     tensor_lists            2D array of input tensors.
+ *  \param[in]     num_tensor_lists        Size (dim0) of tensor_lists.
+ *  \param[in]     num_tensors_per_list    Size (dim1) of tensor_lists.
+ *  \param[in]     output_per_tensor       Fixed size auxilliary scratch space.
+ *  \param[out]    ret                     Raw-moment rows for each tensor.
+ *  \param[in]     max_chunks_per_tensor   Maximum number of chunks in any input tensor.
+ *  \param[in]     stream                  CUDA stream used for this operation.
+ */
+void nvte_multi_tensor_raw_moments_cuda(int chunk_size, NVTETensor noop_flag,
+                                        NVTETensor **tensor_lists, const size_t num_tensor_lists,
+                                        const size_t num_tensors_per_list,
+                                        NVTETensor output_per_tensor, NVTETensor ret,
+                                        int max_chunks_per_tensor, cudaStream_t stream);
+
 /*!  \brief Compute and apply gradient update to parameters for Adam optimizer.
  *
  * \warning   This API is **experimental** and subject to change.

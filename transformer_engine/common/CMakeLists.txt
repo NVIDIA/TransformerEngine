@@ -204,6 +204,7 @@ list(APPEND transformer_engine_cuda_sources
      common.cu
      multi_tensor/adam.cu
      multi_tensor/l2norm.cu
+     multi_tensor/raw_moments.cu
      multi_tensor/scale.cu
      multi_tensor/sgd.cu
      transpose/cast_transpose.cu
@@ -569,6 +570,7 @@ list(APPEND nvte_sources_with_fast_math fused_softmax/scaled_masked_softmax.cu
                                         multi_tensor/adam.cu
                                         multi_tensor/compute_scale.cu
                                         multi_tensor/l2norm.cu
+                                        multi_tensor/raw_moments.cu
                                         multi_tensor/scale.cu
                                         multi_tensor/sgd.cu
                                         fused_attn/flash_attn.cu
