@@ -429,15 +429,9 @@ class Quantizer(abc.ABC):
         return None
 
     def _check_value_has_no_process_group(self) -> None:
-        # A value quantizer is baked into the FX graph as a constant via its
-        # value key, which cannot carry live distributed state. Enforced here --
-        # the single point every value-materialization path (``__eq__`` /
-        # ``__hash__`` / ``__fx_repr__``) goes through -- so a custom
-        # ``__fx_repr__`` cannot bypass it. The only attribute that can hold a
-        # ProcessGroup is the deprecated ``amax_reduction_group`` (a scalar group
-        # excluded from the value key); reject it rather than silently dropping
-        # it -- otherwise a stored group would compare/hash equal to a groupless
-        # quantizer. Pass the reduction group per quantize call instead.
+        # A value quantizer cannot carry live distributed state into the FX
+        # graph; reject a stored ``amax_reduction_group`` and pass it per
+        # quantize call instead.
         if isinstance(getattr(self, "amax_reduction_group", None), dist_group_type):
             raise TypeError(
                 f"{type(self).__name__} cannot be used as a torch.compile value "
