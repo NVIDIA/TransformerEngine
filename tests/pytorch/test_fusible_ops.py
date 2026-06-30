@@ -19,6 +19,7 @@ import torch
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.ops as te_ops
+import transformer_engine.pytorch.ops.basic.batched_gemm as batched_gemm_module
 from transformer_engine.pytorch._extra_state import UNSAFE_PICKLE_EXTRA_STATE_ENV
 
 from transformer_engine.pytorch.ops.fused import (
@@ -1036,6 +1037,189 @@ class TestBasicOps:
             quantized_compute=quantization is not None,
             accumulate_into_main_grad=accumulate_into_main_grad,
         )
+
+    @pytest.mark.parametrize("batch_dim", (0, -2))
+    @pytest.mark.parametrize("quantized_compute", (False, True))
+    @pytest.mark.parametrize("quantized_weight", (False, True))
+    def test_batched_gemm(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        batch_dim: int,
+        quantized_compute: bool,
+        quantized_weight: bool,
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",
+    ) -> None:
+        """Strided batched GEMM with batch-major or interleaved activations."""
+        quantization = "mxfp8" if quantized_compute or quantized_weight else None
+        maybe_skip_quantization(quantization, device=device, dtype=dtype)
+
+        num_gemms, rows0, rows1 = 3, 3, 32
+        in_features, out_features = 160, 96
+        if batch_dim == 0:
+            input_shape = (num_gemms, rows0, rows1, in_features)
+            output_shape = (num_gemms, rows0, rows1, out_features)
+        else:
+            input_shape = (rows0, rows1, num_gemms, in_features)
+            output_shape = (rows0, rows1, num_gemms, out_features)
+
+        x_ref, x_test = make_reference_and_test_tensors(
+            input_shape,
+            quantization=quantization,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        w_ref, w_test = make_reference_and_test_tensors(
+            (num_gemms, out_features, in_features),
+            quantization=quantization,
+            test_dtype=dtype,
+            test_device=device,
+            quantizer_role=QuantizerRole(tensor_type="weight"),
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            output_shape,
+            quantization=quantization,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        if batch_dim == 0:
+            y_ref = torch.einsum("g...d,grd->g...r", x_ref, w_ref)
+        else:
+            y_ref = torch.einsum("...gd,grd->...gr", x_ref, w_ref)
+        y_ref.backward(dy_ref)
+
+        recipe = make_recipe(quantization)
+        with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
+            op = te_ops.BatchedGEMM(
+                num_gemms,
+                in_features,
+                out_features,
+                batch_dim=batch_dim,
+                device=device,
+                dtype=dtype,
+            )
+        with torch.no_grad():
+            op.weight.copy_(w_test)
+        if quantized_weight:
+            assert isinstance(op.weight, QuantizedTensor)
+            assert not op.weight._with_gemm_swizzled_scales
+        gemm_calls = []
+        original_strided_batched_gemm = batched_gemm_module.strided_batched_gemm
+
+        def capture_strided_batched_gemm(*args, **kwargs):
+            gemm_calls.append((kwargs["layout"], args[0], args[1]))
+            return original_strided_batched_gemm(*args, **kwargs)
+
+        monkeypatch.setattr(
+            batched_gemm_module,
+            "strided_batched_gemm",
+            capture_strided_batched_gemm,
+        )
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
+            y_test = op(x_test)
+        y_test.backward(dy_test)
+
+        assert tuple(y_test.shape) == output_shape
+        assert y_test.is_contiguous()
+        if quantized_compute or quantized_weight:
+            tols = quantization_tols(quantization)
+        else:
+            tols = dtype_tols(dtype)
+        assert_close(y_test, y_ref, **tols)
+        assert_close_grads(x_test, x_ref, **tols)
+        assert_close(op.weight.grad, w_ref.grad, **tols)
+
+        assert [layout for layout, _, _ in gemm_calls] == ["TN", "NN", "NT"]
+        if quantized_compute:
+
+            def assert_mxfp8_usage(tensor, *, rowwise: bool, columnwise: bool) -> None:
+                assert (tensor._rowwise_data is not None) == rowwise
+                assert (tensor._columnwise_data is not None) == columnwise
+
+            _, fprop_weight, fprop_input = gemm_calls[0]
+            _, dgrad_weight, dgrad_dy = gemm_calls[1]
+            _, wgrad_input, wgrad_dy = gemm_calls[2]
+            assert_mxfp8_usage(fprop_weight, rowwise=True, columnwise=True)
+            assert_mxfp8_usage(fprop_input, rowwise=True, columnwise=True)
+            assert_mxfp8_usage(dgrad_weight, rowwise=True, columnwise=True)
+            assert_mxfp8_usage(dgrad_dy, rowwise=True, columnwise=True)
+            assert_mxfp8_usage(wgrad_input, rowwise=True, columnwise=True)
+            assert_mxfp8_usage(wgrad_dy, rowwise=True, columnwise=True)
+            assert dgrad_weight is fprop_weight
+            assert wgrad_input is fprop_input
+            assert dgrad_dy is wgrad_dy
+            if quantized_weight:
+                assert fprop_weight is op.weight
+                assert not op.weight._with_gemm_swizzled_scales
+
+    def test_batched_gemm_quantized_weight_inference(self) -> None:
+        maybe_skip_quantization("mxfp8", device="cuda", dtype=torch.bfloat16)
+        recipe = make_recipe("mxfp8")
+        weight = torch.rand(2, 96, 160, device="cuda", dtype=torch.bfloat16)
+        x = torch.rand(96, 2, 160, device="cuda", dtype=torch.bfloat16)
+        reference = torch.einsum("...gd,grd->...gr", x, weight)
+
+        with torch.no_grad(), te.quantized_model_init(enabled=True, recipe=recipe):
+            op = te_ops.BatchedGEMM(2, 160, 96, device="cuda", dtype=torch.bfloat16)
+        op.requires_grad_(False)
+        with torch.no_grad():
+            op.weight.copy_(weight)
+        assert op.weight._rowwise_data is not None
+        assert op.weight._columnwise_data is None
+
+        with torch.no_grad(), te.autocast(enabled=True, recipe=recipe):
+            output = op(x)
+        assert_close(output, reference, **quantization_tols("mxfp8"))
+        assert not op.weight._with_gemm_swizzled_scales
+
+    def test_batched_gemm_quantized_weight_deferred_init(self) -> None:
+        maybe_skip_quantization("mxfp8", device="cuda", dtype=torch.bfloat16)
+        recipe = make_recipe("mxfp8")
+        with te.quantized_model_init(enabled=True, recipe=recipe):
+            op = te_ops.BatchedGEMM(2, 32, 32, device="meta", dtype=torch.bfloat16)
+        assert op.weight.device.type == "meta"
+        op.reset_parameters()
+
+        x = torch.randn(32, 2, 32, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        with te.autocast(enabled=True, recipe=recipe):
+            y = op(x)
+        y.sum().backward()
+
+        assert isinstance(op.weight, QuantizedTensor)
+        assert op.weight.device.type == "cuda"
+        assert op.weight.grad is not None
+        assert not op.weight._with_gemm_swizzled_scales
+
+    @pytest.mark.parametrize(
+        "quantization",
+        ("fp8_delayed_scaling", "fp8_current_scaling", "fp8_block_scaling", "nvfp4"),
+    )
+    def test_batched_gemm_rejects_non_mxfp8_recipe(self, quantization: str) -> None:
+        op = te_ops.BatchedGEMM(2, 32, 32, device="cuda", dtype=torch.bfloat16)
+        with pytest.raises(ValueError, match="only high-precision compute or the MXFP8 recipe"):
+            op.reset_recipe_state(recipe=make_recipe(quantization))
+
+    @pytest.mark.parametrize("backward_override", ("high_precision", "dequantized"))
+    def test_batched_gemm_rejects_backward_override(self, backward_override: str) -> None:
+        op = te_ops.BatchedGEMM(2, 32, 32, device="cuda", dtype=torch.bfloat16)
+        recipe = transformer_engine.common.recipe.MXFP8BlockScaling(
+            backward_override=backward_override
+        )
+        with pytest.raises(ValueError, match="does not support MXFP8 backward_override"):
+            op.reset_recipe_state(recipe=recipe)
+
+    def test_batched_gemm_rejects_unsupported_layout(self) -> None:
+        with pytest.raises(ValueError, match="batch_dim=0 or batch_dim=-2"):
+            te_ops.BatchedGEMM(2, 32, 32, batch_dim=1, device="cuda")
+
+        op = te_ops.BatchedGEMM(2, 32, 32, batch_dim=-2, device="cuda")
+        input_ = torch.empty(32, 2, 64, device="cuda")[:, :, ::2]
+        assert input_.shape == (32, 2, 32) and not input_.is_contiguous()
+        with pytest.raises(ValueError, match="contiguous input"):
+            op(input_)
 
     @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
     @pytest.mark.parametrize("quantization", _quantization_list)

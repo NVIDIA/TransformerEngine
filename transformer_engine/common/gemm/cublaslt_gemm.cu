@@ -93,6 +93,97 @@ struct GemmParam {
   int ldb = 0;  // B column strides
 };
 
+size_t CheckedSizeMul(size_t lhs, size_t rhs, const char *description) {
+  NVTE_CHECK(lhs == 0 || rhs <= std::numeric_limits<size_t>::max() / lhs,
+             "Integer overflow while calculating ", description, ".");
+  return lhs * rhs;
+}
+
+size_t CheckedSizeAdd(size_t lhs, size_t rhs, const char *description) {
+  NVTE_CHECK(rhs <= std::numeric_limits<size_t>::max() - lhs, "Integer overflow while calculating ",
+             description, ".");
+  return lhs + rhs;
+}
+
+size_t RoundUpToMultiple(size_t value, size_t multiple, const char *description) {
+  const size_t quotient = value / multiple + static_cast<size_t>(value % multiple != 0);
+  return CheckedSizeMul(quotient, multiple, description);
+}
+
+size_t GetStridedBatchSpan(int64_t rows, int64_t cols, int64_t leading_dim, int64_t batch_stride,
+                           int64_t batch_count, const char *name) {
+  NVTE_CHECK(leading_dim >= rows, "Strided batched GEMM ", name, " leading dimension ", leading_dim,
+             " is smaller than the matrix row count ", rows, ".");
+  const auto matrix_span = CheckedSizeAdd(
+      CheckedSizeMul(static_cast<size_t>(cols - 1), static_cast<size_t>(leading_dim), name),
+      static_cast<size_t>(rows), name);
+  return CheckedSizeAdd(
+      CheckedSizeMul(static_cast<size_t>(batch_count - 1), static_cast<size_t>(batch_stride), name),
+      matrix_span, name);
+}
+
+const transformer_engine::SimpleTensor &GetGemmDataBuffer(const transformer_engine::Tensor &tensor,
+                                                          const void *data_ptr, const char *name) {
+  if (data_ptr == tensor.data.dptr) {
+    return tensor.data;
+  }
+  if (data_ptr == tensor.columnwise_data.dptr) {
+    return tensor.columnwise_data;
+  }
+  NVTE_ERROR("Strided batched GEMM could not identify the selected ", name, " data buffer.");
+}
+
+const transformer_engine::SimpleTensor &GetGemmScaleBuffer(const transformer_engine::Tensor &tensor,
+                                                           const void *scale_ptr, bool *rowwise,
+                                                           const char *name) {
+  if (scale_ptr == tensor.scale_inv.dptr) {
+    *rowwise = true;
+    return tensor.scale_inv;
+  }
+  if (scale_ptr == tensor.columnwise_scale_inv.dptr) {
+    *rowwise = false;
+    return tensor.columnwise_scale_inv;
+  }
+  NVTE_ERROR("Strided batched GEMM could not identify the selected ", name, " scale buffer.");
+}
+
+void CheckStridedBatchBuffer(const transformer_engine::SimpleTensor &buffer, int64_t rows,
+                             int64_t cols, int64_t leading_dim, int64_t batch_stride,
+                             int64_t batch_count, const char *name) {
+  NVTE_CHECK(buffer.dptr != nullptr, "Strided batched GEMM ", name, " buffer is not allocated.");
+  const size_t required_span =
+      GetStridedBatchSpan(rows, cols, leading_dim, batch_stride, batch_count, name);
+  NVTE_CHECK(required_span <= buffer.numel(), "Strided batched GEMM ", name,
+             " buffer is too small for the requested layout (required span=", required_span,
+             " elements, available=", buffer.numel(), ").");
+}
+
+void CheckMXFP8BatchScaleBuffer(const transformer_engine::SimpleTensor &buffer, bool rowwise,
+                                size_t rows_per_batch, size_t features, size_t batch_count,
+                                const char *name) {
+  constexpr size_t block_size = 32;
+  size_t scale_rows = 0;
+  size_t scale_cols = 0;
+  if (rowwise) {
+    NVTE_CHECK(features % block_size == 0, "Strided batched GEMM ", name,
+               " row-wise scale feature count must be divisible by ", block_size, " (got ",
+               features, ").");
+    scale_rows = RoundUpToMultiple(rows_per_batch, 128, name);
+    scale_cols = RoundUpToMultiple(features / block_size, 4, name);
+  } else {
+    NVTE_CHECK(rows_per_batch % block_size == 0, "Strided batched GEMM ", name,
+               " column-wise scale row count must be divisible by ", block_size, " (got ",
+               rows_per_batch, ").");
+    scale_rows = RoundUpToMultiple(rows_per_batch / block_size, 4, name);
+    scale_cols = RoundUpToMultiple(features, 128, name);
+  }
+  const size_t expected_numel =
+      CheckedSizeMul(batch_count, CheckedSizeMul(scale_rows, scale_cols, name), name);
+  NVTE_CHECK(buffer.numel() == expected_numel, "Strided batched GEMM ", name,
+             " packed scale buffer has invalid size (expected ", expected_numel, ", got ",
+             buffer.numel(), ").");
+}
+
 /* Populate parameters for cuBLAS GEMM
  *
  * cuBLAS follows the BLAS convention of column-major ordering. This
@@ -871,6 +962,36 @@ void cublas_gemm_strided_batched(const Tensor *inputA, const Tensor *inputB, con
   const cudaDataType_t D_type = get_cuda_dtype(outputD->data.dtype);
   NVTE_CHECK(C_type == D_type,
              "Strided batched GEMM currently requires C and D to have the same dtype.");
+
+  const int64_t a_rows = param.transA == CUBLAS_OP_N ? m : k;
+  const int64_t a_cols = param.transA == CUBLAS_OP_N ? k : m;
+  const int64_t b_rows = param.transB == CUBLAS_OP_N ? k : n;
+  const int64_t b_cols = param.transB == CUBLAS_OP_N ? n : k;
+  CheckStridedBatchBuffer(GetGemmDataBuffer(*inputA, param.A, "A"), a_rows, a_cols, param.lda,
+                          stridea, batch_count, "A data");
+  CheckStridedBatchBuffer(GetGemmDataBuffer(*inputB, param.B, "B"), b_rows, b_cols, param.ldb,
+                          strideb, batch_count, "B data");
+  CheckStridedBatchBuffer(outputD->data, m, n, ldd, strided, batch_count, "D data");
+  CheckStridedBatchBuffer(inputC->data, m, n, ldc, stridec, batch_count, "C data");
+
+  if (use_mxfp8) {
+    bool a_scales_are_rowwise = false;
+    const auto &a_scale_buffer =
+        GetGemmScaleBuffer(*inputA, param.A_scale_inv, &a_scales_are_rowwise, "A");
+    const size_t a_scale_rows = static_cast<size_t>(a_scales_are_rowwise ? m : k);
+    const size_t a_scale_features = static_cast<size_t>(a_scales_are_rowwise ? k : m);
+    CheckMXFP8BatchScaleBuffer(a_scale_buffer, a_scales_are_rowwise, a_scale_rows, a_scale_features,
+                               static_cast<size_t>(batch_count), "A");
+
+    bool b_scales_are_rowwise = false;
+    const auto &b_scale_buffer =
+        GetGemmScaleBuffer(*inputB, param.B_scale_inv, &b_scales_are_rowwise, "B");
+    const size_t b_scale_rows = static_cast<size_t>(b_scales_are_rowwise ? n : k);
+    const size_t b_scale_features = static_cast<size_t>(b_scales_are_rowwise ? k : n);
+    CheckMXFP8BatchScaleBuffer(b_scale_buffer, b_scales_are_rowwise, b_scale_rows, b_scale_features,
+                               static_cast<size_t>(batch_count), "B");
+  }
+
   cublasLtHandle_t handle = cublasHandleManager::Instance().GetHandle();
 
   cublasLtMatmulDesc_t operationDesc = nullptr;
@@ -933,7 +1054,6 @@ void cublas_gemm_strided_batched(const Tensor *inputA, const Tensor *inputB, con
     NVTE_CHECK(
         inputB->with_gemm_swizzled_scales,
         "MXFP8 B scales for strided batched GEMM must be packed by batch and GEMM-swizzled.");
-
     fp8e8m0 *A_scale_inverse = reinterpret_cast<fp8e8m0 *>(param.A_scale_inv);
     fp8e8m0 *B_scale_inverse = reinterpret_cast<fp8e8m0 *>(param.B_scale_inv);
     NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,

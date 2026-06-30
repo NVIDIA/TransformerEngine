@@ -21,6 +21,7 @@ from .add_extra_input import AddExtraInput
 from .all_gather import AllGather
 from .all_reduce import AllReduce
 from .basic_linear import BasicLinear
+from .batched_gemm import BatchedGEMM
 from .bias import Bias
 from .constant_scale import ConstantScale
 from .dropout import Dropout
