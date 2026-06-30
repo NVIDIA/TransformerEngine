@@ -238,7 +238,7 @@ std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd(at::Tensor probs,
   return std::make_tuple(aux_loss, Const_buf);
 }
 
-std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd_tensor(
+std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd_graph_safe(
     at::Tensor probs, at::Tensor tokens_per_expert, at::Tensor total_num_tokens, int num_experts,
     int num_rows, int num_cols, int topk, float coeff) {
   TORCH_CHECK(topk > 0, "topk must be greater than 0");
@@ -261,10 +261,10 @@ std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd_tensor(
   auto aux_loss_cu = makeTransformerEngineTensor(aux_loss);
   auto Const_buf_cu = makeTransformerEngineTensor(Const_buf);
 
-  nvte_fused_moe_aux_loss_forward_tensor(probs_cu.data(), tokens_per_expert_cu.data(),
-                                         total_num_tokens_cu.data(), num_experts, num_rows,
-                                         num_cols, topk, coeff, aux_loss_cu.data(),
-                                         Const_buf_cu.data(), at::cuda::getCurrentCUDAStream());
+  nvte_fused_moe_aux_loss_forward_graph_safe(probs_cu.data(), tokens_per_expert_cu.data(),
+                                             total_num_tokens_cu.data(), num_experts, num_rows,
+                                             num_cols, topk, coeff, aux_loss_cu.data(),
+                                             Const_buf_cu.data(), at::cuda::getCurrentCUDAStream());
 
   return std::make_tuple(aux_loss, Const_buf);
 }

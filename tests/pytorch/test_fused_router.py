@@ -464,8 +464,8 @@ def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk, expert_multipl
 
 def test_fused_moe_aux_loss_cuda_graph_capture():
     """CUDA-graph-safe path: total_num_tokens is a device tensor whose value
-    changes between replays. The captured graph must observe the new value
-    via the device-side coefficient computation."""
+    changes between replays. Forward and backward must both observe the new
+    value via the device-side coefficient computation."""
     dtype = torch.float32
     num_tokens = 4096
     num_experts = 128
@@ -477,7 +477,7 @@ def test_fused_moe_aux_loss_cuda_graph_capture():
     probs = (
         torch.arange(-num_cols // 2, num_cols // 2, device="cuda", dtype=dtype) * 1e-2
     ).unsqueeze(0).repeat(num_tokens, 1) + offset.unsqueeze(1)
-    probs = probs.contiguous()
+    probs = probs.contiguous().requires_grad_(True)
     tokens_per_expert = torch.randint(1, 1000, (num_cols,), device="cuda", dtype=torch.int32)
 
     total_num_tokens_dev = torch.tensor(num_tokens, dtype=torch.int64, device="cuda")
@@ -487,7 +487,7 @@ def test_fused_moe_aux_loss_cuda_graph_capture():
     s.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(s):
         for _ in range(3):
-            _ = fused_moe_aux_loss(
+            warmup_out = fused_moe_aux_loss(
                 probs=probs,
                 tokens_per_expert=tokens_per_expert,
                 total_num_tokens=total_num_tokens_dev,
@@ -495,6 +495,8 @@ def test_fused_moe_aux_loss_cuda_graph_capture():
                 topk=topk,
                 coeff=coeff,
             )
+            torch.autograd.grad(warmup_out, probs)
+        del warmup_out
     torch.cuda.current_stream().wait_stream(s)
 
     g = torch.cuda.CUDAGraph()
@@ -507,6 +509,7 @@ def test_fused_moe_aux_loss_cuda_graph_capture():
             topk=topk,
             coeff=coeff,
         )
+        (grad_probs,) = torch.autograd.grad(out, probs)
 
     atol, rtol = _get_tolerances(dtype, num_cols)
     # Replay with several distinct token counts; the captured graph must pick
@@ -515,15 +518,18 @@ def test_fused_moe_aux_loss_cuda_graph_capture():
         total_num_tokens_dev.fill_(new_total)
         g.replay()
         torch.cuda.synchronize()
+        ref_probs = probs.detach().clone().requires_grad_(True)
         ref = aux_loss_pytorch(
-            probs=probs,
+            probs=ref_probs,
             tokens_per_expert=tokens_per_expert,
             total_num_tokens=new_total,
             topk=topk,
             num_experts=num_experts,
             moe_aux_loss_coeff=coeff,
         )
+        (ref_grad_probs,) = torch.autograd.grad(ref, ref_probs)
         torch.testing.assert_close(out, ref, atol=atol, rtol=rtol)
+        torch.testing.assert_close(grad_probs, ref_grad_probs, atol=atol, rtol=rtol)
 
 
 def _bytemap_to_bitmap_u8(bytemap: torch.Tensor) -> torch.Tensor:

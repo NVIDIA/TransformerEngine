@@ -55,7 +55,7 @@ std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd(at::Tensor probs,
                                                           int num_rows, int num_cols, int topk,
                                                           float coeff);
 
-std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd_tensor(
+std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd_graph_safe(
     at::Tensor probs, at::Tensor tokens_per_expert, at::Tensor total_num_tokens, int num_experts,
     int num_rows, int num_cols, int topk, float coeff);
 

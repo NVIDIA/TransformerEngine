@@ -215,19 +215,18 @@ void nvte_fused_moe_aux_loss_forward(const NVTETensor probs, const NVTETensor to
 
 /*! \brief Forward pass for auxiliary loss. Device-tensor total_num_tokens path:
  *  the coefficient is computed on device from a 0-dim int64 GPU tensor so its
- *  value stays dynamic across CUDA Graph replays. Adds one extra single-thread
- *  kernel launch versus the host-int path; prefer this only when the caller
- *  needs CUDA-graph-safe semantics.
+ *  value stays dynamic across CUDA Graph replays. Prefer this path when the
+ *  caller needs CUDA-graph-safe semantics with a dynamic token count.
  *
  *  \param[in]     total_num_tokens   0-dim int64 GPU tensor with the total token count.
  *  Other parameters as in :c:func:`nvte_fused_moe_aux_loss_forward`.
  */
-void nvte_fused_moe_aux_loss_forward_tensor(const NVTETensor probs,
-                                            const NVTETensor tokens_per_expert,
-                                            const NVTETensor total_num_tokens, int num_experts,
-                                            int num_rows, int num_cols, int topk, float coeff,
-                                            NVTETensor aux_loss, NVTETensor Const_buf,
-                                            cudaStream_t stream);
+void nvte_fused_moe_aux_loss_forward_graph_safe(const NVTETensor probs,
+                                                const NVTETensor tokens_per_expert,
+                                                const NVTETensor total_num_tokens, int num_experts,
+                                                int num_rows, int num_cols, int topk, float coeff,
+                                                NVTETensor aux_loss, NVTETensor Const_buf,
+                                                cudaStream_t stream);
 
 /*! \brief Backward pass for auxiliary loss.
  *

@@ -285,7 +285,7 @@ class FusedAuxLoss(torch.autograd.Function):
         num_rows = probs.size(0)
         num_cols = probs.size(1)
         if isinstance(total_num_tokens, torch.Tensor):
-            aux_loss, Const_buf = tex.fused_moe_aux_loss_fwd_tensor(
+            aux_loss, Const_buf = tex.fused_moe_aux_loss_fwd_graph_safe(
                 probs=probs,
                 tokens_per_expert=tokens_per_expert,
                 total_num_tokens=total_num_tokens,
@@ -344,9 +344,8 @@ def fused_moe_aux_loss(
         the total number of tokens used in the aux loss calculation. Pass a
         Python int for the fastest path (coefficient folded on the host).
         Pass a 0-dim int64 CUDA tensor when the call is captured into a
-        CUDA Graph and the value must stay dynamic across replays; this
-        path adds one extra single-thread kernel launch to compute the
-        coefficient on device.
+        CUDA Graph and the value must stay dynamic across replays; the
+        coefficient is computed on device by the main reduction kernel.
     num_experts : int
     topk : int
     coeff : float
