@@ -1636,7 +1636,7 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
   gemm_config.avg_m = config_.avg_m.value_or(compute_avg_first_dim(outputD));
   gemm_config.avg_n = config_.avg_n.value_or(compute_avg_last_dim(outputD));
   gemm_config.avg_k =
-      config_.avg_k.value_or(transa ? compute_avg_first_dim(inputA) : compute_avg_last_dim(inputA));
+      config_.avg_k.value_or(transa ? compute_avg_last_dim(inputA) : compute_avg_first_dim(inputA));
   gemm_config.sm_count = config_.sm_count;
   execute_grouped_gemm(workspace.setup_workspace, A_sel, B_sel, outputD->dtype(), num_tensors,
                        gemm_config, workspace.cublas_workspace_ptr, stream);
@@ -1784,9 +1784,8 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
   gemm_config.alpha_dptr = alpha_tensor->data.dptr;
   gemm_config.beta_dptr = beta_tensor->data.dptr;
   gemm_config.avg_m = config_.avg_m.value_or(compute_avg_first_dim(outputD));
-  gemm_config.avg_n =
-      config_.avg_n.value_or(transb ? compute_avg_first_dim(inputB) : compute_avg_last_dim(inputB));
-  gemm_config.avg_k = config_.avg_k.value_or(transa ? avg_first_dim : avg_last_dim);
+  gemm_config.avg_n = config_.avg_n.value_or(compute_avg_last_dim(outputD));
+  gemm_config.avg_k = config_.avg_k.value_or(transa ? avg_last_dim : avg_first_dim);
   gemm_config.sm_count = config_.sm_count;
   execute_grouped_gemm(workspace.setup_workspace, A_sel, B_sel, outputD->dtype(), num_tensors,
                        gemm_config, workspace.cublas_workspace_ptr, stream);
@@ -1869,8 +1868,10 @@ void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
   gemm_config.use_per_group_alpha_beta = use_per_group_alpha_beta;
   gemm_config.alpha_dptr = alpha_tensor->data.dptr;
   gemm_config.beta_dptr = beta_tensor->data.dptr;
+  // D is a discrete list here, so derive the heuristic dims from the grouped inputs instead.
   // out dim 0 is depended on B, out dim 1 is depended on A. So avg m hints should use B and
-  // avg n hints should use A.
+  // avg n hints should use A. The reduction dim K is A's last dim when transa, otherwise its
+  // first dim (cuBLAS views A transposed) -- matching nvte_grouped_gemm / _with_discrete_inputA.
   gemm_config.avg_m =
       config_.avg_m.value_or(transb ? compute_avg_last_dim(inputB) : compute_avg_first_dim(inputB));
   gemm_config.avg_n =
