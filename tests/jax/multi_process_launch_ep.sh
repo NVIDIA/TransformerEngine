@@ -32,6 +32,13 @@ if [ "${NUM_RUNS}" -lt 4 ]; then
   echo "NCCL EP requires at least 4 GPUs (found ${NUM_RUNS}); SKIPPING."
   exit 0
 fi
+
+# NCCL EP requires active NVLink P2P among ranks on the node.
+if ! nvidia-smi nvlink --status 2>/dev/null | grep -qE 'Link [0-9]+:.*GB/s'; then
+  echo "NVLink not detected on this platform — EP test requires NVLink; SKIPPING."
+  exit 0
+fi
+
 # Default test mesh is (2, 2); use exactly 4 ranks even on larger boxes.
 NUM_RUNS="${NVTE_TEST_EP_NUM_RANKS:-4}"
 

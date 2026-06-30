@@ -18,10 +18,10 @@ if [ "${DETECTED_GPUS}" -lt 4 ]; then
   exit 0
 fi
 
-# NCCL EP requires NVLink/NVSwitch between GPUs.
+# NCCL EP requires active NVLink P2P among ranks on the node.
 # On PCIe-only nodes (no NVLink) it falls back to the network
 # transport and deadlocks, so skip cleanly there.
-if ! nvidia-smi topo -m 2>/dev/null | grep -qE "\bNV[0-9]+\b"; then
+if ! nvidia-smi nvlink --status 2>/dev/null | grep -qE 'Link [0-9]+:.*GB/s'; then
   echo "No NVLink between GPUs (PCIe-only fabric); NCCL EP is unsupported here. SKIPPING."
   exit 0
 fi

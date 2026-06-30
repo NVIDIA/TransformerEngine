@@ -83,3 +83,42 @@ def _stride_from_shape(shape: list[int]):
     for d in reversed(shape[1:]):
         rstride.append(rstride[-1] * d)
     return list(reversed(rstride))
+
+
+def safe_quantized_repr(obj, cls_name, extras=None, error=None):
+    """Metadata-only repr fallback for quantized tensors whose data cannot be
+    materialized for any reason.
+
+    Each attribute access is guarded so that ``__repr__`` never raises.
+
+    Parameters
+    ----------
+    extras : dict, optional
+        Additional plain-Python (non-tensor) attributes to include, e.g.
+        ``{"is_2D_scaled": self._is_2D_scaled}``. Values are inserted after
+        ``fp8_dtype`` and before ``shape``.
+    error : BaseException, optional
+        The exception that triggered the fallback. When given, its type and
+        message are included in the ``data=`` field so that it is visible *why*
+        the data could not be materialized.
+    """
+    parts = []
+    fp8_dtype = getattr(obj, "_fp8_dtype", None)
+    if fp8_dtype is not None:
+        parts.append(f"fp8_dtype={fp8_dtype}")
+    if extras:
+        for key, value in extras.items():
+            parts.append(f"{key}={value}")
+    try:
+        parts.append(f"shape={tuple(obj.shape)}")
+    except Exception:  # pylint: disable=broad-except
+        pass
+    try:
+        parts.append(f"dtype={obj.dtype}")
+    except Exception:  # pylint: disable=broad-except
+        pass
+    if error is not None:
+        parts.append(f"data=<unmaterialized: {type(error).__name__}: {error}>")
+    else:
+        parts.append("data=<unmaterialized>")
+    return f"{cls_name}({', '.join(parts)})"

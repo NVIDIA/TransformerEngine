@@ -13,6 +13,10 @@
 
 #include <transformer_engine/ep.h>
 
+#include <algorithm>
+#include <cstddef>
+#include <cstring>
+
 #include "../util/logging.h"
 
 #if defined(NVTE_WITH_NCCL_EP)
@@ -24,18 +28,30 @@
 
 using transformer_engine::ep::EPBackend;
 
-void nvte_ep_initialize(void* ep_comm, NVTEEpGroupConfig group_config) {
-  NVTE_CHECK(ep_comm != nullptr, "ep_comm must not be null");
-  EPBackend::initialize(static_cast<ncclComm_t>(ep_comm), group_config);
-}
-
-void nvte_ep_shutdown(void) { EPBackend::shutdown(); }
-
-size_t nvte_ep_handle_mem_size(NVTEEpLayerConfig layer_cfg) {
-  return EPBackend::get().handle_mem_size(layer_cfg);
-}
-
 namespace {
+// Smallest accepted struct_size: covers the base (required) fields. Frozen;
+// never raise these. Later fields are read only when struct_size covers them.
+constexpr size_t kGroupConfigMinSize = offsetof(NVTEEpGroupConfig, zero_copy) + sizeof(int);
+constexpr size_t kLayerConfigMinSize =
+    offsetof(NVTEEpLayerConfig, dispatch_output_per_expert_alignment) + sizeof(size_t);
+
+// Copy a caller's versioned config into a full current-layout struct: fields
+// the caller did not provide stay zero, extra trailing fields are dropped.
+// struct_size 0 is read as the base layout. Requires a size_t struct_size
+// first member.
+template <typename Cfg>
+Cfg normalize_ep_config(const Cfg* user, size_t min_size, const char* name) {
+  NVTE_CHECK(user != nullptr, name, " must not be null");
+  const size_t want = (user->struct_size == 0) ? min_size : user->struct_size;
+  NVTE_CHECK(want >= min_size, name, ".struct_size (", user->struct_size,
+             ") is below the required minimum ", min_size,
+             "; zero-initialize the struct or set struct_size via NVTE_EP_*_CONFIG_INIT");
+  Cfg cfg{};
+  std::memcpy(&cfg, user, std::min(want, sizeof(Cfg)));
+  cfg.struct_size = sizeof(Cfg);
+  return cfg;
+}
+
 inline void* handle_mem_ptr(NVTETensor mem) {
   void* p = nvte_tensor_data(mem);
   NVTE_CHECK(p != nullptr, "handle_mem tensor data must not be null");
@@ -43,9 +59,25 @@ inline void* handle_mem_ptr(NVTETensor mem) {
 }
 }  // namespace
 
-void nvte_ep_prepare(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor token_counts,
-                     NVTEEpLayerConfig layer_cfg, cudaStream_t stream) {
-  EPBackend::get().prepare(handle_mem_ptr(handle_mem), topk_idx, token_counts, layer_cfg, stream);
+void nvte_ep_initialize(void* ep_comm, const NVTEEpGroupConfig* group_config) {
+  NVTE_CHECK(ep_comm != nullptr, "ep_comm must not be null");
+  NVTEEpGroupConfig cfg = normalize_ep_config(group_config, kGroupConfigMinSize, "group_config");
+  EPBackend::initialize(static_cast<ncclComm_t>(ep_comm), cfg);
+}
+
+void nvte_ep_shutdown(void) { EPBackend::shutdown(); }
+
+size_t nvte_ep_handle_mem_size(const NVTEEpLayerConfig* layer_cfg) {
+  NVTEEpLayerConfig cfg = normalize_ep_config(layer_cfg, kLayerConfigMinSize, "layer_cfg");
+  return EPBackend::get().handle_mem_size(cfg);
+}
+
+void nvte_ep_prepare(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor recv_tokens_per_expert,
+                     NVTETensor total_recv_tokens_per_rank, const NVTEEpLayerConfig* layer_cfg,
+                     cudaStream_t stream) {
+  NVTEEpLayerConfig cfg = normalize_ep_config(layer_cfg, kLayerConfigMinSize, "layer_cfg");
+  EPBackend::get().prepare(handle_mem_ptr(handle_mem), topk_idx, recv_tokens_per_expert,
+                           total_recv_tokens_per_rank, cfg, stream);
 }
 
 void nvte_ep_dispatch(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor tokens,
@@ -88,15 +120,18 @@ namespace {
 }
 }  // namespace
 
-void nvte_ep_initialize(void* /*ep_comm*/, NVTEEpGroupConfig /*group_config*/) { ep_not_built(); }
+void nvte_ep_initialize(void* /*ep_comm*/, const NVTEEpGroupConfig* /*group_config*/) {
+  ep_not_built();
+}
 
 void nvte_ep_shutdown(void) {}
 
-size_t nvte_ep_handle_mem_size(NVTEEpLayerConfig /*layer_cfg*/) { ep_not_built(); }
+size_t nvte_ep_handle_mem_size(const NVTEEpLayerConfig* /*layer_cfg*/) { ep_not_built(); }
 
 void nvte_ep_prepare(NVTETensor /*handle_mem*/, NVTETensor /*topk_idx*/,
-                     NVTETensor /*token_counts*/, NVTEEpLayerConfig /*layer_cfg*/,
-                     cudaStream_t /*stream*/) {
+                     NVTETensor /*recv_tokens_per_expert*/,
+                     NVTETensor /*total_recv_tokens_per_rank*/,
+                     const NVTEEpLayerConfig* /*layer_cfg*/, cudaStream_t /*stream*/) {
   ep_not_built();
 }
 

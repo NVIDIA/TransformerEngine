@@ -23,7 +23,7 @@ from ..utils import (
 
 from .storage.nvfp4_tensor_storage import NVFP4TensorStorage, _FromNVFP4Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
-from ._quantization_helpers import _IdentityFunc
+from ._quantization_helpers import _IdentityFunc, safe_quantized_repr
 
 aten = torch.ops.aten
 
@@ -409,7 +409,10 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         return instance
 
     def __repr__(self, *, tensor_contents=None):
-        return f"NVFP4Tensor, data={self.dequantize()})"
+        try:
+            return f"NVFP4Tensor, data={self.dequantize()})"
+        except Exception as exc:  # pylint: disable=broad-except
+            return safe_quantized_repr(self, "NVFP4Tensor", error=exc)
 
     def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """

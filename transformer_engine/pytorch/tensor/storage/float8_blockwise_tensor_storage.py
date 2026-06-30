@@ -12,6 +12,7 @@ import torch
 import transformer_engine_torch as tex
 
 from ...quantized_tensor import QuantizedTensorStorage, Quantizer
+from .._quantization_helpers import safe_quantized_repr
 
 from ...constants import TE_DType_To_Torch, DType
 
@@ -354,17 +355,25 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
             del _old_data
 
     def __repr__(self):
-        if self._rowwise_data is not None:
-            data = self.dequantize()
-            descriptor = "rowwise"
-        else:
-            data = self.dequantize()
-            descriptor = "columnwise"
-        return (
-            "Float8BlockwiseQTensorStorage("
-            f"fp8_dtype={self._fp8_dtype}, "
-            f"{descriptor}_scaled_data={data})"
-        )
+        try:
+            if self._rowwise_data is not None:
+                data = self.dequantize()
+                descriptor = "rowwise"
+            else:
+                data = self.dequantize()
+                descriptor = "columnwise"
+            return (
+                "Float8BlockwiseQTensorStorage("
+                f"fp8_dtype={self._fp8_dtype}, "
+                f"{descriptor}_scaled_data={data})"
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            return safe_quantized_repr(
+                self,
+                "Float8BlockwiseQTensorStorage",
+                extras={"is_2D_scaled": self._is_2D_scaled},
+                error=exc,
+            )
 
     def update_usage(
         self, rowwise_usage: Optional[bool] = None, columnwise_usage: Optional[bool] = None
