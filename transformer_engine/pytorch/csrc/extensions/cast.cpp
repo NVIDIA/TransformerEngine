@@ -984,6 +984,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
 
   const auto rowwise_usage = quantizer_cpp_list[0]->rowwise_usage;
   const bool row_scaled_nvfp4 = quantizer_cpp_list[0]->row_scaled_nvfp4;
+  const bool err_corrected_nvfp4 = quantizer_cpp_list[0]->err_corrected_nvfp4;
   const bool nvfp4_use_4over6 =
       quantizer_cpp_list[0]->nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
   const int nvfp4_e4m3_max = quantizer_cpp_list[0]->nvfp4_e4m3_max;
@@ -993,6 +994,8 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
     NVTE_CHECK(!columnwise_usage,
                "Row-scaled NVFP4 bulk allocation does not support columnwise usage.");
   }
+  NVTE_CHECK(!err_corrected_nvfp4,
+             "Error-corrected NVFP4 bulk/grouped quantization is not supported.");
   const auto scaling_mode = quantizer_cpp_list[0]->get_scaling_mode();
   const auto fp4_dtype = quantizer_cpp_list[0]->dtype;
 

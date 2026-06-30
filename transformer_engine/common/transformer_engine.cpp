@@ -847,6 +847,19 @@ void nvte_set_tensor_param_v2(NVTETensor tensor, NVTETensorParam param, const vo
       NVTE_CHECK(t.nvfp4_e4m3_max == 448 || t.nvfp4_e4m3_max == 256,
                  "Unsupported NVFP4 E4M3 max (got ", t.nvfp4_e4m3_max, ")");
       break;
+    case kNVTERowwiseDataErr: {
+      const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      t.data_err = *basic_tensor;
+      break;
+    }
+    case kNVTERowwiseScaleInvErr: {
+      const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      t.scale_inv_err = *basic_tensor;
+      break;
+    }
+    case kNVTEErrCorrectedNVFP4:
+      t.err_corrected_nvfp4 = static_cast<bool>(*reinterpret_cast<const uint8_t *>(buf));
+      break;
     default:
       NVTE_ERROR("Unsupported tensor parameter (", static_cast<int>(param), ")");
   }
@@ -932,6 +945,19 @@ void nvte_get_tensor_param_v2(const NVTETensor tensor, NVTETensorParam param, vo
       break;
     case kNVTENVFP4E4M3Max:
       std::memcpy(buf, &t->nvfp4_e4m3_max, attr_size);
+      break;
+    case kNVTERowwiseDataErr: {
+      NVTEBasicTensor *basic_tensor = reinterpret_cast<NVTEBasicTensor *>(buf);
+      *basic_tensor = static_cast<NVTEBasicTensor>(t->data_err);
+      break;
+    }
+    case kNVTERowwiseScaleInvErr: {
+      NVTEBasicTensor *basic_tensor = reinterpret_cast<NVTEBasicTensor *>(buf);
+      *basic_tensor = static_cast<NVTEBasicTensor>(t->scale_inv_err);
+      break;
+    }
+    case kNVTEErrCorrectedNVFP4:
+      *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->err_corrected_nvfp4);
       break;
     default:
       NVTE_ERROR("Unsupported tensor parameter (", static_cast<int>(param), ")");

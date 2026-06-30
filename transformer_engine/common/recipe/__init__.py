@@ -524,6 +524,10 @@ class NVFP4BlockScaling(Recipe):
              If set to `True`, forward activation quantizers emit row-scaled
              NVFP4 tensors. In this mode, rowwise ``amax`` metadata is stored
              as a vector with one FP32 value per tensor row.
+    err_corrected_activation : bool, default = False
+             If set to `True`, forward row-scaled activation quantizers also
+             emit a second NVFP4 representation of the BF16 quantization
+             residual. Forward GEMMs add the residual contribution in FP32.
     nvfp4_4over6 : {'none', 'weights', 'activations', 'all'}, default = 'none'
              Enable 4over6 adaptive NVFP4 block scaling for selected tensor
              scopes. For each selected FP4 block, quantization compares
@@ -551,6 +555,9 @@ class NVFP4BlockScaling(Recipe):
     )
     disable_2d_quantization: bool = os.getenv("NVTE_NVFP4_DISABLE_2D_QUANTIZATION", "0") == "1"
     row_scaled_activation: bool = os.getenv("NVTE_NVFP4_ROW_SCALED_ACTIVATION", "0") == "1"
+    err_corrected_activation: bool = (
+        os.getenv("NVTE_NVFP4_ERR_CORRECTED_ACTIVATION", "0") == "1"
+    )
     nvfp4_4over6: str = os.getenv("NVTE_NVFP4_4OVER6", "none")
     nvfp4_4over6_e4m3_use_256: str = os.getenv("NVTE_NVFP4_4OVER6_E4M3_USE_256", "all")
     nvfp4_4over6_err_mode: str = os.getenv("NVTE_NVFP4_4OVER6_ERR_MODE", "MAE").upper()
@@ -578,6 +585,15 @@ class NVFP4BlockScaling(Recipe):
         assert (
             self.nvfp4_4over6_err_mode in _NVFP4_4OVER6_ERR_MODES
         ), "NVTE_NVFP4_4OVER6_ERR_MODE must be one of: 'MAE', 'MSE'."
+        if self.err_corrected_activation and not self.row_scaled_activation:
+            raise ValueError(
+                "NVFP4 error-corrected activation quantization requires "
+                "row_scaled_activation=True."
+            )
+        if self.err_corrected_activation and self.nvfp4_4over6 in ("activations", "all"):
+            raise ValueError(
+                "NVFP4 error-corrected activation quantization does not support activation 4over6."
+            )
 
         # Quantization params
         # Note: RHT is currently only applied to column-wise usage so that
@@ -607,6 +623,7 @@ class NVFP4BlockScaling(Recipe):
             f"fp8_mha={self.fp8_mha}, "
             f"backward_override={self.backward_override}, "
             f"row_scaled_activation={self.row_scaled_activation}, "
+            f"err_corrected_activation={self.err_corrected_activation}, "
             f"nvfp4_4over6={self.nvfp4_4over6}, "
             f"nvfp4_4over6_e4m3_use_256={self.nvfp4_4over6_e4m3_use_256}, "
             f"nvfp4_4over6_err_mode={self.nvfp4_4over6_err_mode}, "

@@ -86,6 +86,10 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
     _columnwise_data: Optional[torch.Tensor]
     # Block scaling factors for row-scaled FP4 data
     _rowwise_scale_inv: torch.Tensor
+    # Packed FP4 representation of the BF16 primary-quantization residual
+    _rowwise_data_err: Optional[torch.Tensor]
+    # Block scaling factors for the error-correction FP4 data
+    _rowwise_scale_inv_err: Optional[torch.Tensor]
     # Block scaling factors for column-scaled FP4 data
     _columnwise_scale_inv: torch.Tensor
     # Input absolute maximum value (used to compute tensor scale for
@@ -104,6 +108,8 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
     _with_gemm_swizzled_scales: bool
     # Whether this NVFP4 tensor uses row-scaled amax metadata
     _row_scaled_nvfp4: bool
+    # Whether error-correction data and scales are populated
+    _err_corrected_nvfp4: bool
     # Whether this NVFP4 tensor uses 4over6 map-to-4/map-to-6 block selection
     _nvfp4_use_4over6: bool
     # Global E4M3 scale bound used by this NVFP4 tensor
@@ -123,6 +129,9 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         *args,
         fake_dtype: Optional[torch.dtype] = None,
         row_scaled_nvfp4: bool = False,
+        rowwise_data_err: Optional[torch.Tensor] = None,
+        rowwise_scale_inv_err: Optional[torch.Tensor] = None,
+        err_corrected_nvfp4: bool = False,
         nvfp4_use_4over6: bool = False,
         nvfp4_e4m3_max: int = 448,
         **kwargs,
@@ -143,6 +152,14 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         instance._amax_columnwise = amax_columnwise
         instance._with_gemm_swizzled_scales = with_gemm_swizzled_scales
         instance._row_scaled_nvfp4 = row_scaled_nvfp4
+        instance._rowwise_data_err = rowwise_data_err
+        instance._rowwise_scale_inv_err = rowwise_scale_inv_err
+        instance._err_corrected_nvfp4 = err_corrected_nvfp4
+        if err_corrected_nvfp4:
+            if not row_scaled_nvfp4:
+                raise ValueError("Error-corrected NVFP4 requires row-scaled metadata.")
+            if rowwise_data_err is None or rowwise_scale_inv_err is None:
+                raise ValueError("Error-corrected NVFP4 requires error data and block scales.")
         instance._nvfp4_use_4over6 = nvfp4_use_4over6
         instance._nvfp4_e4m3_max = nvfp4_e4m3_max if nvfp4_use_4over6 else 448
 
@@ -157,6 +174,8 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             self._columnwise_scale_inv,
             self._amax_rowwise,
             self._amax_columnwise,
+            self._rowwise_data_err,
+            self._rowwise_scale_inv_err,
         ):
             if t is not None:
                 t.data = _empty_tensor()
@@ -171,6 +190,8 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             raise RuntimeError("Scale layout mismatch in copy_from_storage")
         if self._row_scaled_nvfp4 != src._row_scaled_nvfp4:
             raise RuntimeError("Rowwise amax scaling mode mismatch in copy_from_storage")
+        if self._err_corrected_nvfp4 != src._err_corrected_nvfp4:
+            raise RuntimeError("NVFP4 error-correction mode mismatch in copy_from_storage")
         if self._nvfp4_use_4over6 != src._nvfp4_use_4over6:
             raise RuntimeError("NVFP4 4over6 mode mismatch in copy_from_storage")
         if self._nvfp4_e4m3_max != src._nvfp4_e4m3_max:
@@ -186,6 +207,8 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         _copy_optional(self._columnwise_scale_inv, src._columnwise_scale_inv)
         _copy_optional(self._amax_rowwise, src._amax_rowwise)
         _copy_optional(self._amax_columnwise, src._amax_columnwise)
+        _copy_optional(self._rowwise_data_err, src._rowwise_data_err)
+        _copy_optional(self._rowwise_scale_inv_err, src._rowwise_scale_inv_err)
 
     def get_metadata(self) -> Dict[str, Any]:
         """Get this tensor's metadata."""
@@ -200,6 +223,9 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             "quantizer": self._quantizer,
             "with_gemm_swizzled_scales": self._with_gemm_swizzled_scales,
             "row_scaled_nvfp4": self._row_scaled_nvfp4,
+            "rowwise_data_err": self._rowwise_data_err,
+            "rowwise_scale_inv_err": self._rowwise_scale_inv_err,
+            "err_corrected_nvfp4": self._err_corrected_nvfp4,
             "nvfp4_use_4over6": self._nvfp4_use_4over6,
             "nvfp4_e4m3_max": self._nvfp4_e4m3_max,
             "fake_dtype": self._dtype,
@@ -214,6 +240,8 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             self._columnwise_scale_inv,
             self._amax_rowwise,
             self._amax_columnwise,
+            self._rowwise_data_err,
+            self._rowwise_scale_inv_err,
         ]
         self._rowwise_data = None
         self._columnwise_data = None
@@ -221,6 +249,8 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         self._columnwise_scale_inv = None
         self._amax_rowwise = None
         self._amax_columnwise = None
+        self._rowwise_data_err = None
+        self._rowwise_scale_inv_err = None
         return tensors, self
 
     def restore_from_saved(
@@ -233,10 +263,14 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         self._columnwise_scale_inv = tensors[3]
         self._amax_rowwise = tensors[4]
         self._amax_columnwise = tensors[5]
-        return tensors[6:]
+        self._rowwise_data_err = tensors[6]
+        self._rowwise_scale_inv_err = tensors[7]
+        return tensors[8:]
 
     def get_data_tensors(self):
         """Get this Tensor's data."""
+        if self._rowwise_data_err is not None:
+            return self._rowwise_data, self._columnwise_data, self._rowwise_data_err
         return self._rowwise_data, self._columnwise_data
 
     def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
@@ -335,6 +369,13 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             fp4_dtype=self._fp4_dtype,
             with_gemm_swizzled_scales=self._with_gemm_swizzled_scales,
             row_scaled_nvfp4=self._row_scaled_nvfp4,
+            rowwise_data_err=(
+                self._rowwise_data_err.view(byte_shape)
+                if self._rowwise_data_err is not None
+                else None
+            ),
+            rowwise_scale_inv_err=self._rowwise_scale_inv_err,
+            err_corrected_nvfp4=self._err_corrected_nvfp4,
             nvfp4_use_4over6=self._nvfp4_use_4over6,
             nvfp4_e4m3_max=self._nvfp4_e4m3_max,
             fake_dtype=self._dtype,

@@ -1623,6 +1623,56 @@ def test_nvfp4_recipe_state_role_dispatch_backward():
         assert q.stochastic_rounding == nvfp4_recipe.fp4_quant_bwd_grad.stochastic_rounding
 
 
+def test_nvfp4_error_correction_is_forward_activation_only():
+    """Recipe opt-in is attached to forward activations, never weights or backward tensors."""
+    if not torch.cuda.is_available() or not te.is_nvfp4_available():
+        pytest.skip("NVFP4 unsupported on this device")
+
+    from transformer_engine.pytorch.quantization import NVFP4BlockScalingRecipeState
+
+    nvfp4_recipe = recipe.NVFP4BlockScaling(
+        disable_rht=True,
+        row_scaled_activation=True,
+        err_corrected_activation=True,
+    )
+    forward = NVFP4BlockScalingRecipeState(
+        nvfp4_recipe,
+        mode="forward",
+        num_quantizers=3,
+        roles=[
+            _nvfp4_role("input"),
+            _nvfp4_role("weight"),
+            _nvfp4_role("output"),
+        ],
+    ).make_quantizers()
+    assert [q.err_corrected_nvfp4 for q in forward] == [True, False, True]
+    assert [q.row_scaled_nvfp4 for q in forward] == [True, False, True]
+
+    backward = NVFP4BlockScalingRecipeState(
+        nvfp4_recipe,
+        mode="backward",
+        num_quantizers=2,
+        roles=[_nvfp4_role("grad_output"), _nvfp4_role("grad_input")],
+    ).make_quantizers()
+    assert all(not q.err_corrected_nvfp4 for q in backward)
+    assert all(not q.row_scaled_nvfp4 for q in backward)
+
+
+def test_nvfp4_error_correction_requires_row_scaled_activation():
+    with pytest.raises(ValueError, match="row_scaled_activation=True"):
+        recipe.NVFP4BlockScaling(
+            row_scaled_activation=False,
+            err_corrected_activation=True,
+        )
+    with pytest.raises(ValueError, match="does not support activation 4over6"):
+        recipe.NVFP4BlockScaling(
+            disable_rht=True,
+            row_scaled_activation=True,
+            err_corrected_activation=True,
+            nvfp4_4over6="activations",
+        )
+
+
 def test_nvfp4_recipe_state_positional_fallback_matches_explicit_roles():
     """``roles=None`` matches explicit ``[input, weight, output]`` slot-for-slot."""
     if not torch.cuda.is_available() or not te.is_nvfp4_available():

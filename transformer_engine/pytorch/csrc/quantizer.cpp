@@ -1884,6 +1884,7 @@ NVFP4Quantizer::NVFP4Quantizer(const py::handle& quantizer) : Quantizer(quantize
     NVTE_ERROR("Unsupported NVFP4 4over6 error mode: ", nvfp4_4over6_err_mode);
   }
   this->row_scaled_nvfp4 = quantizer.attr("row_scaled_nvfp4").cast<bool>();
+  this->err_corrected_nvfp4 = quantizer.attr("err_corrected_nvfp4").cast<bool>();
 
   // Get amax reduction group if needed for NVFP4 AG
   const bool with_amax_reduction = quantizer.attr("with_amax_reduction").cast<bool>();
@@ -1908,10 +1909,15 @@ void NVFP4Quantizer::set_quantization_params(TensorWrapper* tensor) const {
   auto columnwise_data = tensor->get_columnwise_data();
   columnwise_data.dtype = static_cast<NVTEDType>(this->dtype);
 
+  auto rowwise_data_err = tensor->get_rowwise_data_err();
+  rowwise_data_err.dtype = static_cast<NVTEDType>(this->dtype);
+
   tensor->set_rowwise_data(rowwise_data.data_ptr, static_cast<DType>(rowwise_data.dtype),
                            rowwise_data.shape);
   tensor->set_columnwise_data(columnwise_data.data_ptr, static_cast<DType>(columnwise_data.dtype),
                               columnwise_data.shape);
+  tensor->set_rowwise_data_err(rowwise_data_err.data_ptr,
+                               static_cast<DType>(rowwise_data_err.dtype), rowwise_data_err.shape);
 }
 
 bool NVFP4Quantizer::is_eligible_for_rht_cast_fusion(const std::vector<size_t>& shape,
@@ -1968,6 +1974,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
              "NVFP4 requires tensor dims that are divisible by ", NVFP4_BLOCK_SIZE,
              " (got shape=", shape, ")");
   const bool row_scaled_nvfp4 = this->row_scaled_nvfp4;
+  const bool err_corrected_nvfp4 = this->err_corrected_nvfp4;
   const bool nvfp4_use_4over6 = this->nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
   const int nvfp4_e4m3_max = this->nvfp4_e4m3_max;
   if (row_scaled_nvfp4) {
@@ -1975,11 +1982,18 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
     NVTE_CHECK(!columnwise_usage,
                "Row-scaled NVFP4 quantization does not support columnwise usage.");
   }
+  if (err_corrected_nvfp4) {
+    NVTE_CHECK(row_scaled_nvfp4, "Error-corrected NVFP4 quantization requires row-scaled NVFP4.");
+    NVTE_CHECK(dtype == DType::kBFloat16,
+               "Error-corrected NVFP4 quantization requires BF16 input.");
+    NVTE_CHECK(!nvfp4_use_4over6, "Error-corrected NVFP4 quantization does not support 4over6.");
+  }
   const auto rowwise_scale_inv_shape = get_scale_shape(shape, false);
   const auto columnwise_scale_inv_shape = get_scale_shape(shape, true);
 
   // Allocate tensors
   at::Tensor rowwise_data_tensor, rowwise_scale_inv_tensor, amax_rowwise;
+  at::Tensor rowwise_data_err_tensor, rowwise_scale_inv_err_tensor;
   at::Tensor columnwise_data_tensor, columnwise_scale_inv_tensor, amax_columnwise;
   const auto bit8_tensor_opts =
       at::TensorOptions().dtype(torch::kUInt8).device(device).pinned_memory(pin_memory);
@@ -1994,6 +2008,10 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
     // hadamard amax kernel will zero out pointer with ZeroAmaxKernel
     // nvte_compute_amax_with_config will zero out the pointer if needed
     amax_rowwise = at::empty({amax_rows}, bit32_tensor_opts);
+    if (err_corrected_nvfp4) {
+      rowwise_data_err_tensor = at::empty(convert_shape_for_fp4(shape_int64), bit8_tensor_opts);
+      rowwise_scale_inv_err_tensor = at::empty(scale_inv_shape_int64, bit8_tensor_opts);
+    }
   }
   if (columnwise_usage) {
     const std::vector<int64_t> scale_inv_shape_int64(columnwise_scale_inv_shape.begin(),
@@ -2021,6 +2039,8 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
   auto columnwise_scale_inv_py = py_cast(columnwise_scale_inv_tensor, columnwise_usage);
   auto amax_rowwise_py = py_cast(amax_rowwise, rowwise_usage);
   auto amax_columnwise_py = py_cast(amax_columnwise, columnwise_usage);
+  auto rowwise_data_err_py = py_cast(rowwise_data_err_tensor, err_corrected_nvfp4);
+  auto rowwise_scale_inv_err_py = py_cast(rowwise_scale_inv_err_tensor, err_corrected_nvfp4);
 
   // Construct Python NVFP4 tensor
   py::object out_py;
@@ -2037,6 +2057,9 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
     kwargs["quantizer"] = this->quantizer;
     kwargs["with_gemm_swizzled_scales"] = py::cast(with_gemm_swizzled_scales);
     kwargs["row_scaled_nvfp4"] = py::cast(row_scaled_nvfp4);
+    kwargs["rowwise_data_err"] = rowwise_data_err_py;
+    kwargs["rowwise_scale_inv_err"] = rowwise_scale_inv_err_py;
+    kwargs["err_corrected_nvfp4"] = py::cast(err_corrected_nvfp4);
     kwargs["nvfp4_use_4over6"] = py::cast(nvfp4_use_4over6);
     kwargs["nvfp4_e4m3_max"] = py::cast(nvfp4_e4m3_max);
     kwargs["fake_dtype"] = GetATenDType(dtype);
@@ -2069,6 +2092,9 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
     kwargs["with_gemm_swizzled_scales"] = py::cast(with_gemm_swizzled_scales);
     kwargs["device"] = py::cast(device);
     kwargs["row_scaled_nvfp4"] = py::cast(row_scaled_nvfp4);
+    kwargs["rowwise_data_err"] = rowwise_data_err_py;
+    kwargs["rowwise_scale_inv_err"] = rowwise_scale_inv_err_py;
+    kwargs["err_corrected_nvfp4"] = py::cast(err_corrected_nvfp4);
     kwargs["nvfp4_use_4over6"] = py::cast(nvfp4_use_4over6);
     kwargs["nvfp4_e4m3_max"] = py::cast(nvfp4_e4m3_max);
     py::tuple args(0);
@@ -2089,6 +2115,11 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
     out_cpp.set_rowwise_scale_inv(rowwise_scale_inv_tensor.data_ptr(), DType::kFloat8E4M3,
                                   rowwise_scale_inv_shape);
     out_cpp.set_amax(amax_rowwise.data_ptr(), DType::kFloat32, getTensorShape(amax_rowwise));
+    if (err_corrected_nvfp4) {
+      out_cpp.set_rowwise_data_err(rowwise_data_err_tensor.data_ptr(), DType::kFloat4E2M1, shape);
+      out_cpp.set_rowwise_scale_inv_err(rowwise_scale_inv_err_tensor.data_ptr(), DType::kFloat8E4M3,
+                                        getTensorShape(rowwise_scale_inv_err_tensor));
+    }
   }
   if (columnwise_usage) {
     // enforce 2D shape to avoid [S, B, H] shape and B and be 1
@@ -2104,6 +2135,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
   }
   out_cpp.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
   out_cpp.set_row_scaled_nvfp4(row_scaled_nvfp4);
+  out_cpp.set_err_corrected_nvfp4(err_corrected_nvfp4);
   out_cpp.set_nvfp4_e4m3_max(nvfp4_e4m3_max);
   this->set_quantization_params(&out_cpp);
 
@@ -2117,6 +2149,9 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
     const std::optional<at::Tensor>& precomputed_tensor_offsets, const size_t logical_first_dim,
     const size_t logical_last_dim) const {
   using namespace pybind11::literals;
+
+  NVTE_CHECK(!this->err_corrected_nvfp4,
+             "Error-corrected NVFP4 grouped quantization is not supported.");
 
   const auto tensor_offsets =
       resolve_grouped_tensor_offsets(num_tensors, first_dims, last_dims, precomputed_tensor_offsets,
@@ -2268,6 +2303,8 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
   };
   auto rowwise_data = get_tensor("_rowwise_data");
   auto rowwise_scale_inv = get_tensor("_rowwise_scale_inv");
+  auto rowwise_data_err = get_tensor("_rowwise_data_err");
+  auto rowwise_scale_inv_err = get_tensor("_rowwise_scale_inv_err");
   auto columnwise_data = get_tensor("_columnwise_data");
   auto columnwise_scale_inv = get_tensor("_columnwise_scale_inv");
   auto amax_rowwise = get_tensor("_amax_rowwise");
@@ -2295,6 +2332,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
   const bool with_gemm_swizzled_scales = nvfp4_emits_gemm_swizzled_scales(*this, shape);
 
   const bool row_scaled_nvfp4 = this->row_scaled_nvfp4;
+  const bool err_corrected_nvfp4 = this->err_corrected_nvfp4;
   const bool nvfp4_use_4over6 = this->nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
   const int nvfp4_e4m3_max = this->nvfp4_e4m3_max;
   if (row_scaled_nvfp4) {
@@ -2302,7 +2340,12 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
     NVTE_CHECK(!columnwise_usage,
                "Row-scaled NVFP4 quantization does not support columnwise usage.");
   }
+  if (err_corrected_nvfp4) {
+    NVTE_CHECK(row_scaled_nvfp4, "Error-corrected NVFP4 quantization requires row-scaled NVFP4.");
+    NVTE_CHECK(!nvfp4_use_4over6, "Error-corrected NVFP4 quantization does not support 4over6.");
+  }
   tensor.attr("_row_scaled_nvfp4") = row_scaled_nvfp4;
+  tensor.attr("_err_corrected_nvfp4") = err_corrected_nvfp4;
   tensor.attr("_with_gemm_swizzled_scales") = with_gemm_swizzled_scales;
   tensor.attr("_nvfp4_use_4over6") = py::cast(nvfp4_use_4over6);
   tensor.attr("_nvfp4_e4m3_max") = py::cast(nvfp4_e4m3_max);
@@ -2322,6 +2365,27 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
       const auto opts = at::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
       rowwise_scale_inv = at::empty(scale_inv_shape_int64, opts);
       tensor.attr("_rowwise_scale_inv") = *rowwise_scale_inv;
+    }
+    if (err_corrected_nvfp4) {
+      if (!rowwise_data_err) {
+        const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
+        const auto opts = at::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
+        rowwise_data_err = at::empty(convert_shape_for_fp4(shape_int64), opts);
+        tensor.attr("_rowwise_data_err") = *rowwise_data_err;
+      }
+      if (!rowwise_scale_inv_err) {
+        const auto scale_inv_shape = get_scale_shape(shape, false);
+        const std::vector<int64_t> scale_inv_shape_int64(scale_inv_shape.begin(),
+                                                         scale_inv_shape.end());
+        const auto opts = at::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
+        rowwise_scale_inv_err = at::empty(scale_inv_shape_int64, opts);
+        tensor.attr("_rowwise_scale_inv_err") = *rowwise_scale_inv_err;
+      }
+    } else {
+      rowwise_data_err.reset();
+      rowwise_scale_inv_err.reset();
+      tensor.attr("_rowwise_data_err") = py::none();
+      tensor.attr("_rowwise_scale_inv_err") = py::none();
     }
     const int64_t amax_rows = row_scaled_nvfp4 ? static_cast<int64_t>(flat_first_dim) : 1;
     if (!amax_rowwise || amax_rowwise->numel() != amax_rows) {
@@ -2344,6 +2408,10 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
       amax_rowwise.reset();
       tensor.attr("_amax_rowwise") = py::none();
     }
+    rowwise_data_err.reset();
+    rowwise_scale_inv_err.reset();
+    tensor.attr("_rowwise_data_err") = py::none();
+    tensor.attr("_rowwise_scale_inv_err") = py::none();
   }
 
   // Coerce column-wise data
@@ -2395,6 +2463,11 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
     out_cpp.set_rowwise_scale_inv(rowwise_scale_inv->data_ptr(), DType::kFloat8E4M3,
                                   getTensorShape(*rowwise_scale_inv));
     out_cpp.set_amax(amax_rowwise->data_ptr(), DType::kFloat32, getTensorShape(*amax_rowwise));
+    if (err_corrected_nvfp4) {
+      out_cpp.set_rowwise_data_err(rowwise_data_err->data_ptr(), DType::kFloat4E2M1, shape);
+      out_cpp.set_rowwise_scale_inv_err(rowwise_scale_inv_err->data_ptr(), DType::kFloat8E4M3,
+                                        getTensorShape(*rowwise_scale_inv_err));
+    }
   }
   if (columnwise_usage) {
     // enforce 2D shape to avoid [S, B, H] shape and B and be 1
@@ -2410,6 +2483,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
   }
   out_cpp.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
   out_cpp.set_row_scaled_nvfp4(row_scaled_nvfp4);
+  out_cpp.set_err_corrected_nvfp4(err_corrected_nvfp4);
   out_cpp.set_nvfp4_e4m3_max(nvfp4_e4m3_max);
   this->set_quantization_params(&out_cpp);
 
@@ -2554,6 +2628,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
   const auto [rows, cols] = get_2d_dims(input.shape());
 
   const bool row_scaled_nvfp4 = out.get_row_scaled_nvfp4();
+  const bool err_corrected_nvfp4 = out.get_err_corrected_nvfp4();
   if (row_scaled_nvfp4) {
     NVTE_CHECK(!this->with_rht, "Row-scaled NVFP4 quantization does not support RHT.");
     NVTE_CHECK(!this->with_2d_quantization,
@@ -2563,6 +2638,17 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
     NVTE_CHECK(!this->with_amax_reduction,
                "Row-scaled NVFP4 quantization does not support amax reduction.");
     NVTE_CHECK(cols % 16 == 0, "Row-scaled NVFP4 quantization requires last dim divisible by 16.");
+  }
+  if (err_corrected_nvfp4) {
+    NVTE_CHECK(row_scaled_nvfp4, "Error-corrected NVFP4 quantization requires row-scaled NVFP4.");
+    NVTE_CHECK(input.dtype() == DType::kBFloat16,
+               "Error-corrected NVFP4 quantization requires BF16 input.");
+    NVTE_CHECK(this->nvfp4_4over6_mode == kNVTENVFP44Over6Disabled,
+               "Error-corrected NVFP4 quantization does not support 4over6.");
+    NVTE_CHECK(out.get_rowwise_data_err().data_ptr != nullptr,
+               "Error-corrected NVFP4 output data must be allocated.");
+    NVTE_CHECK(out.get_rowwise_scale_inv_err().data_ptr != nullptr,
+               "Error-corrected NVFP4 output scales must be allocated.");
   }
 
   // Restriction for the RHT cast fusion kernel because we are using MMA hardware for computing RHT

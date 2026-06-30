@@ -90,6 +90,9 @@ enum NVTETensorParam {
    *  Standard NVFP4 uses 448; 4over6 may use 256 for map-to-4 headroom.
    */
   kNVTENVFP4E4M3Max = 9,
+  kNVTERowwiseDataErr = 10,     /*!< Error-correction FP4 data in rowwise layout */
+  kNVTERowwiseScaleInvErr = 11, /*!< Block scales for error-correction rowwise data */
+  kNVTEErrCorrectedNVFP4 = 12,  /*!< Whether an NVFP4 tensor carries error correction */
   kNVTENumTensorParams
 };
 
@@ -864,6 +867,17 @@ class TensorWrapper {
     return set_parameter(kNVTEColumnwiseAmax, dptr, type, shape);
   }
 
+  template <typename ShapeType>
+  TensorWrapper &set_rowwise_data_err(void *dptr, DType type, const ShapeType &shape) noexcept {
+    return set_parameter(kNVTERowwiseDataErr, dptr, type, shape);
+  }
+
+  template <typename ShapeType>
+  TensorWrapper &set_rowwise_scale_inv_err(void *dptr, DType type,
+                                           const ShapeType &shape) noexcept {
+    return set_parameter(kNVTERowwiseScaleInvErr, dptr, type, shape);
+  }
+
   void set_with_gemm_swizzled_scales(bool with_gemm_swizzled_scales) {
     const auto val = static_cast<uint8_t>(with_gemm_swizzled_scales);
     nvte_set_tensor_param_v2(tensor_, kNVTEWithGEMMSwizzledScales, &val, sizeof(val));
@@ -877,6 +891,11 @@ class TensorWrapper {
   void set_nvfp4_e4m3_max(int nvfp4_e4m3_max) {
     const auto val = nvfp4_e4m3_max;
     nvte_set_tensor_param_v2(tensor_, kNVTENVFP4E4M3Max, &val, sizeof(val));
+  }
+
+  void set_err_corrected_nvfp4(bool err_corrected_nvfp4) {
+    const auto val = static_cast<uint8_t>(err_corrected_nvfp4);
+    nvte_set_tensor_param_v2(tensor_, kNVTEErrCorrectedNVFP4, &val, sizeof(val));
   }
 
   // Parameter getters
@@ -909,6 +928,14 @@ class TensorWrapper {
     return get_parameter(kNVTEColumnwiseAmax);
   }
 
+  NVTEBasicTensor get_rowwise_data_err() const noexcept {
+    return get_parameter(kNVTERowwiseDataErr);
+  }
+
+  NVTEBasicTensor get_rowwise_scale_inv_err() const noexcept {
+    return get_parameter(kNVTERowwiseScaleInvErr);
+  }
+
   bool get_with_gemm_swizzled_scales() const {
     uint8_t val = 0;
     nvte_get_tensor_param_v2(tensor_, kNVTEWithGEMMSwizzledScales, &val, sizeof(val), nullptr);
@@ -925,6 +952,12 @@ class TensorWrapper {
     int val = 448;
     nvte_get_tensor_param_v2(tensor_, kNVTENVFP4E4M3Max, &val, sizeof(val), nullptr);
     return val;
+  }
+
+  bool get_err_corrected_nvfp4() const {
+    uint8_t val = 0;
+    nvte_get_tensor_param_v2(tensor_, kNVTEErrCorrectedNVFP4, &val, sizeof(val), nullptr);
+    return static_cast<bool>(val);
   }
 
   /*! \brief Get an underlying NVTETensor.
