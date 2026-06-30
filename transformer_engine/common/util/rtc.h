@@ -182,7 +182,8 @@ class KernelManager {
   void set_cache_config(const std::string &kernel_label, CUfunc_cache cache_config);
 
   /*! \brief Set a function attribute (e.g. cuFuncAttributeMaxDynamicSharedMemorySize). */
-  void set_function_attribute(const std::string &kernel_label, CUfunction_attribute attr, int value);
+  void set_function_attribute(const std::string &kernel_label, CUfunction_attribute attr,
+                              int value);
 
   /*! \brief Query cuOccupancyMaxActiveBlocksPerMultiprocessor for a compiled kernel. */
   int occupancy_max_active_blocks_per_sm(const std::string &kernel_label, int block_size,
@@ -190,8 +191,9 @@ class KernelManager {
 
   /*! \brief Cooperative launch wrapper (cuLaunchCooperativeKernel). */
   template <typename... ArgTs>
-  void launch_cooperative(const std::string &kernel_label, const dim3 grid_dim, const dim3 block_dim,
-                          unsigned int shared_mem_bytes, cudaStream_t stream, ArgTs &&...args) {
+  void launch_cooperative(const std::string &kernel_label, const dim3 grid_dim,
+                          const dim3 block_dim, unsigned int shared_mem_bytes, cudaStream_t stream,
+                          ArgTs &&...args) {
     const int device_id = cuda::current_device();
     const auto key = get_kernel_cache_key(kernel_label, device_id);
     NVTE_CHECK(kernel_cache_.count(key) > 0, "Attempted to launch RTC kernel before compilation");

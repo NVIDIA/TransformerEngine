@@ -6,6 +6,7 @@
 
 #ifdef __CUDACC_RTC__
 #include <cuda_fp16.h>
+
 #include "utils.cuh"
 #else
 #include <assert.h>
@@ -404,8 +405,8 @@ void call_kernel_scaled_aligned_causal_masked_softmax_forward(
     const input_t *src, const acc_t scale, const int microbatches, const int query_seq_len,
     const int key_seq_len) {
   scaled_aligned_causal_masked_softmax_warp_forward<input_t, output_t, acc_t, log2_elements>
-      <<<grid_size, block_size, shmem_size, stream>>>(dst, src, scale, microbatches, query_seq_len,
-                                                      key_seq_len);
+      <<<grid_size, block_size, shmem_size, stream> > >(dst, src, scale, microbatches,
+                                                        query_seq_len, key_seq_len);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -415,8 +416,8 @@ void call_kernel_scaled_aligned_causal_masked_softmax_backward(
     const input_t *grad, const input_t *output, const acc_t scale, const int microbatches,
     const int query_seq_len, const int key_seq_len) {
   scaled_aligned_causal_masked_softmax_warp_backward<input_t, output_t, acc_t, log2_elements>
-      <<<grid_size, block_size, 0, stream>>>(gradInput, grad, output, scale, microbatches,
-                                             query_seq_len, key_seq_len);
+      <<<grid_size, block_size, 0, stream> > >(gradInput, grad, output, scale, microbatches,
+                                               query_seq_len, key_seq_len);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 

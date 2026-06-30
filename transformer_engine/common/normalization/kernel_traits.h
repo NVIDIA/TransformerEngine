@@ -20,7 +20,7 @@ namespace normalization {
 #ifdef __CUDACC_RTC__
 // Under NVRTC the kernel sources do not include common.h (it pulls in cuDNN and
 // other host-only headers), so the dtype aliases that the RTC name expressions
-// reference are nototherwise visible (e.g. ::transformer_engine::normalization::fp16). 
+// reference are nototherwise visible (e.g. ::transformer_engine::normalization::fp16).
 // Mirror the definitions from common.h here for the RTC.
 // The underlying CUDA types come from utils.cuh (cuda_fp16/bf16/fp8 headers).
 using fp32 = float;

@@ -8,8 +8,8 @@
 #define TRANSFORMER_ENGINE_COMMON_LAYER_NORM_LN_BWD_KERNELS_CUH_
 
 #ifdef __CUDACC_RTC__
-#include "utils.cuh"
 #include "kernel_params.h"
+#include "utils.cuh"
 #else
 #include "../../utils.cuh"
 #include "../common.h"

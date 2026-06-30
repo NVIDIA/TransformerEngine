@@ -6,6 +6,7 @@
 
 #ifdef __CUDACC_RTC__
 #include <cuda_fp16.h>
+
 #include "utils.cuh"
 #else
 #include <assert.h>
@@ -510,82 +511,81 @@ void dispatch_scaled_softmax_forward(output_t *dst, const input_t *src, const in
       const std::string kernel_label =
           make_softmax_rtc_label<input_t>("scaled", "forward", log2_elements);
       if (!rtc_manager.is_compiled(kernel_label)) {
-        rtc_manager.compile(kernel_label,
-                            make_softmax_rtc_kernel_name<input_t>(
-                                "scaled_softmax_warp_forward", log2_elements),
-                            make_softmax_rtc_code<input_t>(log2_elements), kRtcSourceFile,
-                            {"--use_fast_math"});
+        rtc_manager.compile(
+            kernel_label,
+            make_softmax_rtc_kernel_name<input_t>("scaled_softmax_warp_forward", log2_elements),
+            make_softmax_rtc_code<input_t>(log2_elements), kRtcSourceFile, {"--use_fast_math"});
       }
       const acc_t rtc_scale = static_cast<acc_t>(scale);
-      rtc_manager.launch(kernel_label, blocks, threads, 0, stream, dst, src, rtc_scale,
-                         batch_count, key_seq_len);
+      rtc_manager.launch(kernel_label, blocks, threads, 0, stream, dst, src, rtc_scale, batch_count,
+                         key_seq_len);
     } else {
 #if NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX
-    // Launch code would be more elegant if C++ supported FOR CONSTEXPR
-    switch (log2_elements) {
-      case 0:  // 1
-        scaled_softmax_warp_forward<input_t, output_t, acc_t, 0>
-            <<<blocks, threads, 0, stream>>>(dst, src, scale, batch_count, key_seq_len);
-        break;
-      case 1:  // 2
-        scaled_softmax_warp_forward<input_t, output_t, acc_t, 1>
-            <<<blocks, threads, 0, stream>>>(dst, src, scale, batch_count, key_seq_len);
-        break;
-      case 2:  // 4
-        scaled_softmax_warp_forward<input_t, output_t, acc_t, 2>
-            <<<blocks, threads, 0, stream>>>(dst, src, scale, batch_count, key_seq_len);
-        break;
-      case 3:  // 8
-        scaled_softmax_warp_forward<input_t, output_t, acc_t, 3>
-            <<<blocks, threads, 0, stream>>>(dst, src, scale, batch_count, key_seq_len);
-        break;
-      case 4:  // 16
-        scaled_softmax_warp_forward<input_t, output_t, acc_t, 4>
-            <<<blocks, threads, 0, stream>>>(dst, src, scale, batch_count, key_seq_len);
-        break;
-      case 5:  // 32
-        scaled_softmax_warp_forward<input_t, output_t, acc_t, 5>
-            <<<blocks, threads, 0, stream>>>(dst, src, scale, batch_count, key_seq_len);
-        break;
-      case 6:  // 64
-        scaled_softmax_warp_forward<input_t, output_t, acc_t, 6>
-            <<<blocks, threads, 0, stream>>>(dst, src, scale, batch_count, key_seq_len);
-        break;
-      case 7:  // 128
-        scaled_softmax_warp_forward<input_t, output_t, acc_t, 7>
-            <<<blocks, threads, 0, stream>>>(dst, src, scale, batch_count, key_seq_len);
-        break;
-      case 8:  // 256
-        scaled_softmax_warp_forward<input_t, output_t, acc_t, 8>
-            <<<blocks, threads, 0, stream>>>(dst, src, scale, batch_count, key_seq_len);
-        break;
-      case 9:  // 512
-        scaled_softmax_warp_forward<input_t, output_t, acc_t, 9>
-            <<<blocks, threads, 0, stream>>>(dst, src, scale, batch_count, key_seq_len);
-        break;
-      case 10:  // 1024
-        scaled_softmax_warp_forward<input_t, output_t, acc_t, 10>
-            <<<blocks, threads, 0, stream>>>(dst, src, scale, batch_count, key_seq_len);
-        break;
-      case 11:  // 2048
-        scaled_softmax_warp_forward<input_t, output_t, acc_t, 11>
-            <<<blocks, threads, 0, stream>>>(dst, src, scale, batch_count, key_seq_len);
-        break;
-      case 12:  // 4096
-        scaled_softmax_warp_forward<input_t, output_t, acc_t, 12>
-            <<<blocks, threads, 0, stream>>>(dst, src, scale, batch_count, key_seq_len);
-        break;
-      case 13:  // 8192
-        scaled_softmax_warp_forward<input_t, output_t, acc_t, 13>
-            <<<blocks, threads, 0, stream>>>(dst, src, scale, batch_count, key_seq_len);
-        break;
-      case 14:  // 16384
-        scaled_softmax_warp_forward<input_t, output_t, acc_t, 14>
-            <<<blocks, threads, 0, stream>>>(dst, src, scale, batch_count, key_seq_len);
-        break;
-      default:
-        break;
-    }
+      // Launch code would be more elegant if C++ supported FOR CONSTEXPR
+      switch (log2_elements) {
+        case 0:  // 1
+          scaled_softmax_warp_forward<input_t, output_t, acc_t, 0>
+              <<<blocks, threads, 0, stream> > >(dst, src, scale, batch_count, key_seq_len);
+          break;
+        case 1:  // 2
+          scaled_softmax_warp_forward<input_t, output_t, acc_t, 1>
+              <<<blocks, threads, 0, stream> > >(dst, src, scale, batch_count, key_seq_len);
+          break;
+        case 2:  // 4
+          scaled_softmax_warp_forward<input_t, output_t, acc_t, 2>
+              <<<blocks, threads, 0, stream> > >(dst, src, scale, batch_count, key_seq_len);
+          break;
+        case 3:  // 8
+          scaled_softmax_warp_forward<input_t, output_t, acc_t, 3>
+              <<<blocks, threads, 0, stream> > >(dst, src, scale, batch_count, key_seq_len);
+          break;
+        case 4:  // 16
+          scaled_softmax_warp_forward<input_t, output_t, acc_t, 4>
+              <<<blocks, threads, 0, stream> > >(dst, src, scale, batch_count, key_seq_len);
+          break;
+        case 5:  // 32
+          scaled_softmax_warp_forward<input_t, output_t, acc_t, 5>
+              <<<blocks, threads, 0, stream> > >(dst, src, scale, batch_count, key_seq_len);
+          break;
+        case 6:  // 64
+          scaled_softmax_warp_forward<input_t, output_t, acc_t, 6>
+              <<<blocks, threads, 0, stream> > >(dst, src, scale, batch_count, key_seq_len);
+          break;
+        case 7:  // 128
+          scaled_softmax_warp_forward<input_t, output_t, acc_t, 7>
+              <<<blocks, threads, 0, stream> > >(dst, src, scale, batch_count, key_seq_len);
+          break;
+        case 8:  // 256
+          scaled_softmax_warp_forward<input_t, output_t, acc_t, 8>
+              <<<blocks, threads, 0, stream> > >(dst, src, scale, batch_count, key_seq_len);
+          break;
+        case 9:  // 512
+          scaled_softmax_warp_forward<input_t, output_t, acc_t, 9>
+              <<<blocks, threads, 0, stream> > >(dst, src, scale, batch_count, key_seq_len);
+          break;
+        case 10:  // 1024
+          scaled_softmax_warp_forward<input_t, output_t, acc_t, 10>
+              <<<blocks, threads, 0, stream> > >(dst, src, scale, batch_count, key_seq_len);
+          break;
+        case 11:  // 2048
+          scaled_softmax_warp_forward<input_t, output_t, acc_t, 11>
+              <<<blocks, threads, 0, stream> > >(dst, src, scale, batch_count, key_seq_len);
+          break;
+        case 12:  // 4096
+          scaled_softmax_warp_forward<input_t, output_t, acc_t, 12>
+              <<<blocks, threads, 0, stream> > >(dst, src, scale, batch_count, key_seq_len);
+          break;
+        case 13:  // 8192
+          scaled_softmax_warp_forward<input_t, output_t, acc_t, 13>
+              <<<blocks, threads, 0, stream> > >(dst, src, scale, batch_count, key_seq_len);
+          break;
+        case 14:  // 16384
+          scaled_softmax_warp_forward<input_t, output_t, acc_t, 14>
+              <<<blocks, threads, 0, stream> > >(dst, src, scale, batch_count, key_seq_len);
+          break;
+        default:
+          break;
+      }
 #else
       throw_nvrtc_required("scaled softmax forward");
 #endif
@@ -639,86 +639,86 @@ void dispatch_scaled_masked_softmax_forward(output_t *dst, const input_t *src, c
                          batch_count, key_seq_len, pad_batches);
     } else {
 #if NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX
-    // Launch code would be more elegant if C++ supported FOR CONSTEXPR
-    switch (log2_elements) {
-      case 0:  // 1
-        scaled_masked_softmax_warp_forward<input_t, output_t, acc_t, 0>
-            <<<blocks, threads, 0, stream>>>(dst, src, mask, scale, batch_count, key_seq_len,
-                                             pad_batches);
-        break;
-      case 1:  // 2
-        scaled_masked_softmax_warp_forward<input_t, output_t, acc_t, 1>
-            <<<blocks, threads, 0, stream>>>(dst, src, mask, scale, batch_count, key_seq_len,
-                                             pad_batches);
-        break;
-      case 2:  // 4
-        scaled_masked_softmax_warp_forward<input_t, output_t, acc_t, 2>
-            <<<blocks, threads, 0, stream>>>(dst, src, mask, scale, batch_count, key_seq_len,
-                                             pad_batches);
-        break;
-      case 3:  // 8
-        scaled_masked_softmax_warp_forward<input_t, output_t, acc_t, 3>
-            <<<blocks, threads, 0, stream>>>(dst, src, mask, scale, batch_count, key_seq_len,
-                                             pad_batches);
-        break;
-      case 4:  // 16
-        scaled_masked_softmax_warp_forward<input_t, output_t, acc_t, 4>
-            <<<blocks, threads, 0, stream>>>(dst, src, mask, scale, batch_count, key_seq_len,
-                                             pad_batches);
-        break;
-      case 5:  // 32
-        scaled_masked_softmax_warp_forward<input_t, output_t, acc_t, 5>
-            <<<blocks, threads, 0, stream>>>(dst, src, mask, scale, batch_count, key_seq_len,
-                                             pad_batches);
-        break;
-      case 6:  // 64
-        scaled_masked_softmax_warp_forward<input_t, output_t, acc_t, 6>
-            <<<blocks, threads, 0, stream>>>(dst, src, mask, scale, batch_count, key_seq_len,
-                                             pad_batches);
-        break;
-      case 7:  // 128
-        scaled_masked_softmax_warp_forward<input_t, output_t, acc_t, 7>
-            <<<blocks, threads, 0, stream>>>(dst, src, mask, scale, batch_count, key_seq_len,
-                                             pad_batches);
-        break;
-      case 8:  // 256
-        scaled_masked_softmax_warp_forward<input_t, output_t, acc_t, 8>
-            <<<blocks, threads, 0, stream>>>(dst, src, mask, scale, batch_count, key_seq_len,
-                                             pad_batches);
-        break;
-      case 9:  // 512
-        scaled_masked_softmax_warp_forward<input_t, output_t, acc_t, 9>
-            <<<blocks, threads, 0, stream>>>(dst, src, mask, scale, batch_count, key_seq_len,
-                                             pad_batches);
-        break;
-      case 10:  // 1024
-        scaled_masked_softmax_warp_forward<input_t, output_t, acc_t, 10>
-            <<<blocks, threads, 0, stream>>>(dst, src, mask, scale, batch_count, key_seq_len,
-                                             pad_batches);
-        break;
-      case 11:  // 2048
-        scaled_masked_softmax_warp_forward<input_t, output_t, acc_t, 11>
-            <<<blocks, threads, 0, stream>>>(dst, src, mask, scale, batch_count, key_seq_len,
-                                             pad_batches);
-        break;
-      case 12:  // 4096
-        scaled_masked_softmax_warp_forward<input_t, output_t, acc_t, 12>
-            <<<blocks, threads, 0, stream>>>(dst, src, mask, scale, batch_count, key_seq_len,
-                                             pad_batches);
-        break;
-      case 13:  // 8192
-        scaled_masked_softmax_warp_forward<input_t, output_t, acc_t, 13>
-            <<<blocks, threads, 0, stream>>>(dst, src, mask, scale, batch_count, key_seq_len,
-                                             pad_batches);
-        break;
-      case 14:  // 16384
-        scaled_masked_softmax_warp_forward<input_t, output_t, acc_t, 14>
-            <<<blocks, threads, 0, stream>>>(dst, src, mask, scale, batch_count, key_seq_len,
-                                             pad_batches);
-        break;
-      default:
-        break;
-    }
+      // Launch code would be more elegant if C++ supported FOR CONSTEXPR
+      switch (log2_elements) {
+        case 0:  // 1
+          scaled_masked_softmax_warp_forward<input_t, output_t, acc_t, 0>
+              <<<blocks, threads, 0, stream> > >(dst, src, mask, scale, batch_count, key_seq_len,
+                                                 pad_batches);
+          break;
+        case 1:  // 2
+          scaled_masked_softmax_warp_forward<input_t, output_t, acc_t, 1>
+              <<<blocks, threads, 0, stream> > >(dst, src, mask, scale, batch_count, key_seq_len,
+                                                 pad_batches);
+          break;
+        case 2:  // 4
+          scaled_masked_softmax_warp_forward<input_t, output_t, acc_t, 2>
+              <<<blocks, threads, 0, stream> > >(dst, src, mask, scale, batch_count, key_seq_len,
+                                                 pad_batches);
+          break;
+        case 3:  // 8
+          scaled_masked_softmax_warp_forward<input_t, output_t, acc_t, 3>
+              <<<blocks, threads, 0, stream> > >(dst, src, mask, scale, batch_count, key_seq_len,
+                                                 pad_batches);
+          break;
+        case 4:  // 16
+          scaled_masked_softmax_warp_forward<input_t, output_t, acc_t, 4>
+              <<<blocks, threads, 0, stream> > >(dst, src, mask, scale, batch_count, key_seq_len,
+                                                 pad_batches);
+          break;
+        case 5:  // 32
+          scaled_masked_softmax_warp_forward<input_t, output_t, acc_t, 5>
+              <<<blocks, threads, 0, stream> > >(dst, src, mask, scale, batch_count, key_seq_len,
+                                                 pad_batches);
+          break;
+        case 6:  // 64
+          scaled_masked_softmax_warp_forward<input_t, output_t, acc_t, 6>
+              <<<blocks, threads, 0, stream> > >(dst, src, mask, scale, batch_count, key_seq_len,
+                                                 pad_batches);
+          break;
+        case 7:  // 128
+          scaled_masked_softmax_warp_forward<input_t, output_t, acc_t, 7>
+              <<<blocks, threads, 0, stream> > >(dst, src, mask, scale, batch_count, key_seq_len,
+                                                 pad_batches);
+          break;
+        case 8:  // 256
+          scaled_masked_softmax_warp_forward<input_t, output_t, acc_t, 8>
+              <<<blocks, threads, 0, stream> > >(dst, src, mask, scale, batch_count, key_seq_len,
+                                                 pad_batches);
+          break;
+        case 9:  // 512
+          scaled_masked_softmax_warp_forward<input_t, output_t, acc_t, 9>
+              <<<blocks, threads, 0, stream> > >(dst, src, mask, scale, batch_count, key_seq_len,
+                                                 pad_batches);
+          break;
+        case 10:  // 1024
+          scaled_masked_softmax_warp_forward<input_t, output_t, acc_t, 10>
+              <<<blocks, threads, 0, stream> > >(dst, src, mask, scale, batch_count, key_seq_len,
+                                                 pad_batches);
+          break;
+        case 11:  // 2048
+          scaled_masked_softmax_warp_forward<input_t, output_t, acc_t, 11>
+              <<<blocks, threads, 0, stream> > >(dst, src, mask, scale, batch_count, key_seq_len,
+                                                 pad_batches);
+          break;
+        case 12:  // 4096
+          scaled_masked_softmax_warp_forward<input_t, output_t, acc_t, 12>
+              <<<blocks, threads, 0, stream> > >(dst, src, mask, scale, batch_count, key_seq_len,
+                                                 pad_batches);
+          break;
+        case 13:  // 8192
+          scaled_masked_softmax_warp_forward<input_t, output_t, acc_t, 13>
+              <<<blocks, threads, 0, stream> > >(dst, src, mask, scale, batch_count, key_seq_len,
+                                                 pad_batches);
+          break;
+        case 14:  // 16384
+          scaled_masked_softmax_warp_forward<input_t, output_t, acc_t, 14>
+              <<<blocks, threads, 0, stream> > >(dst, src, mask, scale, batch_count, key_seq_len,
+                                                 pad_batches);
+          break;
+        default:
+          break;
+      }
 #else
       throw_nvrtc_required("scaled masked softmax forward");
 #endif
@@ -770,86 +770,86 @@ void dispatch_scaled_masked_softmax_backward(output_t *grad_input, const input_t
                          batch_count, key_seq_len);
     } else {
 #if NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX
-    // Launch code would be more elegant if C++ supported FOR CONSTEXPR
-    switch (log2_elements) {
-      case 0:  // 1
-        scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 0>
-            <<<blocks, threads, 0, stream>>>(grad_input, grad, output, scale, batch_count,
-                                             key_seq_len);
-        break;
-      case 1:  // 2
-        scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 1>
-            <<<blocks, threads, 0, stream>>>(grad_input, grad, output, scale, batch_count,
-                                             key_seq_len);
-        break;
-      case 2:  // 4
-        scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 2>
-            <<<blocks, threads, 0, stream>>>(grad_input, grad, output, scale, batch_count,
-                                             key_seq_len);
-        break;
-      case 3:  // 8
-        scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 3>
-            <<<blocks, threads, 0, stream>>>(grad_input, grad, output, scale, batch_count,
-                                             key_seq_len);
-        break;
-      case 4:  // 16
-        scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 4>
-            <<<blocks, threads, 0, stream>>>(grad_input, grad, output, scale, batch_count,
-                                             key_seq_len);
-        break;
-      case 5:  // 32
-        scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 5>
-            <<<blocks, threads, 0, stream>>>(grad_input, grad, output, scale, batch_count,
-                                             key_seq_len);
-        break;
-      case 6:  // 64
-        scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 6>
-            <<<blocks, threads, 0, stream>>>(grad_input, grad, output, scale, batch_count,
-                                             key_seq_len);
-        break;
-      case 7:  // 128
-        scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 7>
-            <<<blocks, threads, 0, stream>>>(grad_input, grad, output, scale, batch_count,
-                                             key_seq_len);
-        break;
-      case 8:  // 256
-        scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 8>
-            <<<blocks, threads, 0, stream>>>(grad_input, grad, output, scale, batch_count,
-                                             key_seq_len);
-        break;
-      case 9:  // 512
-        scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 9>
-            <<<blocks, threads, 0, stream>>>(grad_input, grad, output, scale, batch_count,
-                                             key_seq_len);
-        break;
-      case 10:  // 1024
-        scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 10>
-            <<<blocks, threads, 0, stream>>>(grad_input, grad, output, scale, batch_count,
-                                             key_seq_len);
-        break;
-      case 11:  // 2048
-        scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 11>
-            <<<blocks, threads, 0, stream>>>(grad_input, grad, output, scale, batch_count,
-                                             key_seq_len);
-        break;
-      case 12:  // 4096
-        scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 12>
-            <<<blocks, threads, 0, stream>>>(grad_input, grad, output, scale, batch_count,
-                                             key_seq_len);
-        break;
-      case 13:  // 8192
-        scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 13>
-            <<<blocks, threads, 0, stream>>>(grad_input, grad, output, scale, batch_count,
-                                             key_seq_len);
-        break;
-      case 14:  // 16384
-        scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 14>
-            <<<blocks, threads, 0, stream>>>(grad_input, grad, output, scale, batch_count,
-                                             key_seq_len);
-        break;
-      default:
-        break;
-    }
+      // Launch code would be more elegant if C++ supported FOR CONSTEXPR
+      switch (log2_elements) {
+        case 0:  // 1
+          scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 0>
+              <<<blocks, threads, 0, stream> > >(grad_input, grad, output, scale, batch_count,
+                                                 key_seq_len);
+          break;
+        case 1:  // 2
+          scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 1>
+              <<<blocks, threads, 0, stream> > >(grad_input, grad, output, scale, batch_count,
+                                                 key_seq_len);
+          break;
+        case 2:  // 4
+          scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 2>
+              <<<blocks, threads, 0, stream> > >(grad_input, grad, output, scale, batch_count,
+                                                 key_seq_len);
+          break;
+        case 3:  // 8
+          scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 3>
+              <<<blocks, threads, 0, stream> > >(grad_input, grad, output, scale, batch_count,
+                                                 key_seq_len);
+          break;
+        case 4:  // 16
+          scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 4>
+              <<<blocks, threads, 0, stream> > >(grad_input, grad, output, scale, batch_count,
+                                                 key_seq_len);
+          break;
+        case 5:  // 32
+          scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 5>
+              <<<blocks, threads, 0, stream> > >(grad_input, grad, output, scale, batch_count,
+                                                 key_seq_len);
+          break;
+        case 6:  // 64
+          scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 6>
+              <<<blocks, threads, 0, stream> > >(grad_input, grad, output, scale, batch_count,
+                                                 key_seq_len);
+          break;
+        case 7:  // 128
+          scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 7>
+              <<<blocks, threads, 0, stream> > >(grad_input, grad, output, scale, batch_count,
+                                                 key_seq_len);
+          break;
+        case 8:  // 256
+          scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 8>
+              <<<blocks, threads, 0, stream> > >(grad_input, grad, output, scale, batch_count,
+                                                 key_seq_len);
+          break;
+        case 9:  // 512
+          scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 9>
+              <<<blocks, threads, 0, stream> > >(grad_input, grad, output, scale, batch_count,
+                                                 key_seq_len);
+          break;
+        case 10:  // 1024
+          scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 10>
+              <<<blocks, threads, 0, stream> > >(grad_input, grad, output, scale, batch_count,
+                                                 key_seq_len);
+          break;
+        case 11:  // 2048
+          scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 11>
+              <<<blocks, threads, 0, stream> > >(grad_input, grad, output, scale, batch_count,
+                                                 key_seq_len);
+          break;
+        case 12:  // 4096
+          scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 12>
+              <<<blocks, threads, 0, stream> > >(grad_input, grad, output, scale, batch_count,
+                                                 key_seq_len);
+          break;
+        case 13:  // 8192
+          scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 13>
+              <<<blocks, threads, 0, stream> > >(grad_input, grad, output, scale, batch_count,
+                                                 key_seq_len);
+          break;
+        case 14:  // 16384
+          scaled_masked_softmax_warp_backward<input_t, output_t, acc_t, 14>
+              <<<blocks, threads, 0, stream> > >(grad_input, grad, output, scale, batch_count,
+                                                 key_seq_len);
+          break;
+        default:
+          break;
+      }
 #else
       throw_nvrtc_required("scaled softmax backward");
 #endif

@@ -25,10 +25,10 @@
 // files (each is a couple of #include lines that pull in kernel_traits + the
 // matching kernel header); NVRTC then instantiates a specific
 // (Kernel_traits<W, I, O, C, …>) on demand via nvrtcAddNameExpression.
-#include "string_code_normalization_layernorm_rtc_ln_fwd_kernel_cu.h"
 #include "string_code_normalization_layernorm_rtc_ln_bwd_kernel_cu.h"
-#include "string_code_normalization_rmsnorm_rtc_rmsnorm_fwd_kernel_cu.h"
+#include "string_code_normalization_layernorm_rtc_ln_fwd_kernel_cu.h"
 #include "string_code_normalization_rmsnorm_rtc_rmsnorm_bwd_kernel_cu.h"
+#include "string_code_normalization_rmsnorm_rtc_rmsnorm_fwd_kernel_cu.h"
 
 namespace transformer_engine {
 namespace normalization {
@@ -117,8 +117,7 @@ int reducer_smem_bytes(DType ctype, int warps_m, int warps_n) {
 //   SMEM_BYTES       = DGRAD + WGRAD
 int bwd_smem_bytes(DType ctype, int hidden_size, int ctas_per_row, int warps_m, int warps_n) {
   const int dgrad = reducer_smem_bytes(ctype, warps_m, warps_n);
-  const int wgrad =
-      (ctas_per_row > 1) ? 0 : warps_m * hidden_size * byte_size_of(ctype);
+  const int wgrad = (ctas_per_row > 1) ? 0 : warps_m * hidden_size * byte_size_of(ctype);
   return dgrad + wgrad;
 }
 
@@ -146,9 +145,9 @@ void register_launcher(const std::string& label, const std::string& kernel_expr,
                        int workspace_bytes_per_col, int dgamma_part_bytes_per_col,
                        StaticFallback<ParamsT> static_fallback) {
   auto closure = [label, kernel_expr, rtc_source, filename, threads_per_cta, dynamic_smem_bytes,
-                  ctas_per_row, needs_cooperative, barrier_bytes_per_col,
-                  workspace_bytes_per_col, dgamma_part_bytes_per_col, static_fallback](
-                     LaunchParams<ParamsT>& launch_params, const bool configure_params) {
+                  ctas_per_row, needs_cooperative, barrier_bytes_per_col, workspace_bytes_per_col,
+                  dgamma_part_bytes_per_col, static_fallback](LaunchParams<ParamsT>& launch_params,
+                                                              const bool configure_params) {
     if (try_static_fallback(static_fallback, launch_params, configure_params)) {
       return;
     }
@@ -164,10 +163,8 @@ void register_launcher(const std::string& label, const std::string& kernel_expr,
       launch_params.params.ctas_per_col =
           launch_params.multiprocessorCount * ctas_per_sm / ctas_per_row;
       if (ctas_per_row > 1) {
-        launch_params.barrier_bytes =
-            barrier_bytes_per_col * launch_params.params.ctas_per_col;
-        launch_params.workspace_bytes =
-            workspace_bytes_per_col * launch_params.params.ctas_per_col;
+        launch_params.barrier_bytes = barrier_bytes_per_col * launch_params.params.ctas_per_col;
+        launch_params.workspace_bytes = workspace_bytes_per_col * launch_params.params.ctas_per_col;
       }
       if (dgamma_part_bytes_per_col > 0) {
         launch_params.dgamma_part_bytes =
@@ -210,16 +207,14 @@ void register_ln_fwd_tuned(DType wt, DType it, DType ot, DType ct, int hidden, i
                      ",o=", static_cast<int>(ot), ",c=", static_cast<int>(ct), ",h=", hidden,
                      ",cr=", cr, ",wm=", wm, ",wn=", wn, ",bl=", bl);
   const std::string traits_expr = kernel_traits_expr(wt, it, ot, ct, hidden, cr, wm, wn, bl);
-  const std::string kernel_expr =
-      concat_strings("&::transformer_engine::normalization::ln_fwd_tuned_kernel<", traits_expr,
-                     ">");
+  const std::string kernel_expr = concat_strings(
+      "&::transformer_engine::normalization::ln_fwd_tuned_kernel<", traits_expr, ">");
   const int threads_per_cta = wm * wn * 32;
   const int smem_bytes = stats_smem_bytes(ct, wm, wn);
   // tuned path multi-CTA workspace formula:
   //   barrier_bytes = 2 * ctas_per_col * sizeof(index_t == uint32_t == 4 bytes)
   //   workspace_bytes = ctas_per_col * WARPS_M * CTAS_PER_ROW * sizeof(stats_t) * 2
-  const int sizeof_stats_t =
-      (ct == DType::kFloat32) ? 8 : 4;  // float2 vs half2/bf162
+  const int sizeof_stats_t = (ct == DType::kFloat32) ? 8 : 4;  // float2 vs half2/bf162
   const int barrier_per_col = 2 * 4;
   const int workspace_per_col = wm * cr * sizeof_stats_t * 2;
   register_launcher<ForwardKernelParams>(
@@ -238,9 +233,8 @@ void register_ln_fwd_general(DType wt, DType it, DType ot, DType ct, int hidden,
                      ",wm=", wm, ",wn=", wn, ",bl=", bl);
   // "general" path always uses CTAS_PER_ROW=1 in the Kernel_traits.
   const std::string traits_expr = kernel_traits_expr(wt, it, ot, ct, hidden, 1, wm, wn, bl);
-  const std::string kernel_expr =
-      concat_strings("&::transformer_engine::normalization::ln_fwd_general_kernel<", traits_expr,
-                     ">");
+  const std::string kernel_expr = concat_strings(
+      "&::transformer_engine::normalization::ln_fwd_general_kernel<", traits_expr, ">");
   const int threads_per_cta = wm * wn * 32;
   const auto closure = [label, kernel_expr, threads_per_cta, hidden, wm, ct, static_fallback](
                            LaunchParams<ForwardKernelParams>& launch_params,
@@ -293,8 +287,8 @@ void register_ln_fwd_general(DType wt, DType it, DType ot, DType ct, int hidden,
 void register_rmsnorm_fwd_tuned(DType wt, DType it, DType ot, DType ct, int hidden, int cr, int wm,
                                 int wn, int bl,
                                 StaticFallback<ForwardKernelParams> static_fallback) {
-  const auto key = get_key(NVTE_Norm_Backend::Te, NVTE_Norm_Type::RMSNorm,
-                           NVTE_Norm_Stage::Forward, wt, it, ot, ct, 0, hidden, false, true);
+  const auto key = get_key(NVTE_Norm_Backend::Te, NVTE_Norm_Type::RMSNorm, NVTE_Norm_Stage::Forward,
+                           wt, it, ot, ct, 0, hidden, false, true);
   const std::string label =
       concat_strings("rmsnorm_fwd_tuned,w=", static_cast<int>(wt), ",i=", static_cast<int>(it),
                      ",o=", static_cast<int>(ot), ",c=", static_cast<int>(ct), ",h=", hidden,
@@ -316,8 +310,8 @@ void register_rmsnorm_fwd_tuned(DType wt, DType it, DType ot, DType ct, int hidd
 void register_rmsnorm_fwd_general(DType wt, DType it, DType ot, DType ct, int hidden, int wm,
                                   int wn, int bl,
                                   StaticFallback<ForwardKernelParams> static_fallback) {
-  const auto key = get_key(NVTE_Norm_Backend::Te, NVTE_Norm_Type::RMSNorm,
-                           NVTE_Norm_Stage::Forward, wt, it, ot, ct, 0, hidden, false, false);
+  const auto key = get_key(NVTE_Norm_Backend::Te, NVTE_Norm_Type::RMSNorm, NVTE_Norm_Stage::Forward,
+                           wt, it, ot, ct, 0, hidden, false, false);
   const std::string label =
       concat_strings("rmsnorm_fwd_general,w=", static_cast<int>(wt), ",i=", static_cast<int>(it),
                      ",o=", static_cast<int>(ot), ",c=", static_cast<int>(ct), ",h=", hidden,
@@ -334,8 +328,7 @@ void register_rmsnorm_fwd_general(DType wt, DType it, DType ot, DType ct, int hi
     }
     auto& mgr = rtc::KernelManager::instance();
     if (!mgr.is_compiled(label)) {
-      mgr.compile(label, kernel_expr,
-                  string_code_normalization_rmsnorm_rtc_rmsnorm_fwd_kernel_cu,
+      mgr.compile(label, kernel_expr, string_code_normalization_rmsnorm_rtc_rmsnorm_fwd_kernel_cu,
                   "rmsnorm_fwd_kernel.cu");
     }
     auto ceil_div = [](int x, int y) { return (x + y - 1) / y; };
@@ -344,8 +337,7 @@ void register_rmsnorm_fwd_general(DType wt, DType it, DType ot, DType ct, int hi
     int ctas_per_col = launch_params.params.ctas_per_col;
     int ctas_per_row = launch_params.params.ctas_per_row;
     if (configure_params) {
-      const int ctas_per_sm =
-          mgr.occupancy_max_active_blocks_per_sm(label, threads_per_cta, 0);
+      const int ctas_per_sm = mgr.occupancy_max_active_blocks_per_sm(label, threads_per_cta, 0);
       const int max_ctas = launch_params.multiprocessorCount * ctas_per_sm;
       ctas_per_row = ceil_div(cols, hidden);
       ctas_per_col = std::min(ceil_div(rows, wm), max_ctas / std::max(ctas_per_row, 1));
@@ -416,16 +408,16 @@ void register_ln_bwd_tuned(DType wt, DType it, DType ot, DType ct, int hidden, i
 
   auto closure = [main_label, main_kexpr, finalize_label, finalize_kexpr, threads_per_cta,
                   smem_bytes, cr, barrier_per_col, workspace_per_col, dgamma_part_per_col,
-                  finalize_ctas, finalize_threads_per_cta, static_fallback](
-                     LaunchParams<BackwardKernelParams>& launch_params,
-                     const bool configure_params) {
+                  finalize_ctas, finalize_threads_per_cta,
+                  static_fallback](LaunchParams<BackwardKernelParams>& launch_params,
+                                   const bool configure_params) {
     if (try_static_fallback(static_fallback, launch_params, configure_params)) {
       return;
     }
     auto& mgr = rtc::KernelManager::instance();
     if (!mgr.is_compiled(main_label)) {
-      mgr.compile(main_label, main_kexpr,
-                  string_code_normalization_layernorm_rtc_ln_bwd_kernel_cu, "ln_bwd_kernel.cu");
+      mgr.compile(main_label, main_kexpr, string_code_normalization_layernorm_rtc_ln_bwd_kernel_cu,
+                  "ln_bwd_kernel.cu");
     }
     if (!mgr.is_compiled(finalize_label)) {
       mgr.compile(finalize_label, finalize_kexpr,
@@ -435,8 +427,7 @@ void register_ln_bwd_tuned(DType wt, DType it, DType ot, DType ct, int hidden, i
       const int ctas_per_sm =
           mgr.occupancy_max_active_blocks_per_sm(main_label, threads_per_cta, smem_bytes);
       launch_params.params.ctas_per_row = cr;
-      launch_params.params.ctas_per_col =
-          launch_params.multiprocessorCount * ctas_per_sm / cr;
+      launch_params.params.ctas_per_col = launch_params.multiprocessorCount * ctas_per_sm / cr;
       if (cr > 1) {
         launch_params.barrier_bytes = barrier_per_col * launch_params.params.ctas_per_col;
         launch_params.workspace_bytes = workspace_per_col * launch_params.params.ctas_per_col;
@@ -454,8 +445,8 @@ void register_ln_bwd_tuned(DType wt, DType it, DType ot, DType ct, int hidden, i
       mgr.launch(main_label, dim3(ctas_per_col), dim3(threads_per_cta), smem_bytes, stream,
                  launch_params.params);
     } else {
-      mgr.launch_cooperative(main_label, dim3(cr * ctas_per_col), dim3(threads_per_cta),
-                             smem_bytes, stream, launch_params.params);
+      mgr.launch_cooperative(main_label, dim3(cr * ctas_per_col), dim3(threads_per_cta), smem_bytes,
+                             stream, launch_params.params);
     }
     mgr.launch(finalize_label, dim3(finalize_ctas), dim3(finalize_threads_per_cta), 0, stream,
                launch_params.params);
@@ -475,8 +466,8 @@ void register_ln_bwd_general(DType wt, DType it, DType ot, DType ct, int hidden,
   const std::string main_label = concat_strings(label, ",main");
   const std::string finalize_label = concat_strings(label, ",finalize");
   const std::string traits = kernel_traits_expr(wt, it, ot, ct, hidden, 1, wm, wn, bl_main);
-  const std::string main_kexpr = concat_strings(
-      "&::transformer_engine::normalization::ln_bwd_general_kernel<", traits, ">");
+  const std::string main_kexpr =
+      concat_strings("&::transformer_engine::normalization::ln_bwd_general_kernel<", traits, ">");
   // ln_bwd_finalize_general_kernel<weight_t, compute_t, WARPS_M_FINAL=4, WARPS_N_FINAL=1,
   //                                BYTES_PER_LDG_FINAL, THREADS_PER_WARP=32>
   const std::string finalize_kexpr =
@@ -493,16 +484,16 @@ void register_ln_bwd_general(DType wt, DType it, DType ot, DType ct, int hidden,
 
   auto closure = [main_label, main_kexpr, finalize_label, finalize_kexpr, threads_per_cta, hidden,
                   wm, ctype_bytes, finalize_elts_n_per_cta, finalize_warps_n, finalize_warps_m,
-                  finalize_threads_per_warp, static_fallback](
-                     LaunchParams<BackwardKernelParams>& launch_params,
-                     const bool configure_params) {
+                  finalize_threads_per_warp,
+                  static_fallback](LaunchParams<BackwardKernelParams>& launch_params,
+                                   const bool configure_params) {
     if (try_static_fallback(static_fallback, launch_params, configure_params)) {
       return;
     }
     auto& mgr = rtc::KernelManager::instance();
     if (!mgr.is_compiled(main_label)) {
-      mgr.compile(main_label, main_kexpr,
-                  string_code_normalization_layernorm_rtc_ln_bwd_kernel_cu, "ln_bwd_kernel.cu");
+      mgr.compile(main_label, main_kexpr, string_code_normalization_layernorm_rtc_ln_bwd_kernel_cu,
+                  "ln_bwd_kernel.cu");
     }
     if (!mgr.is_compiled(finalize_label)) {
       mgr.compile(finalize_label, finalize_kexpr,
@@ -550,17 +541,14 @@ void register_ln_bwd_general(DType wt, DType it, DType ot, DType ct, int hidden,
 void register_rmsnorm_bwd_tuned(DType wt, DType it, DType ot, DType ct, int hidden, int cr, int wm,
                                 int wn, int bl_main, int bl_final, bool with_add,
                                 StaticFallback<BackwardKernelParams> static_fallback) {
-  const auto stage =
-      with_add ? NVTE_Norm_Stage::BackwardAdd : NVTE_Norm_Stage::Backward;
+  const auto stage = with_add ? NVTE_Norm_Stage::BackwardAdd : NVTE_Norm_Stage::Backward;
   const auto key = get_key(NVTE_Norm_Backend::Te, NVTE_Norm_Type::RMSNorm, stage, wt, it, ot, ct, 0,
                            hidden, false, true);
   const std::string add_tag = with_add ? "_add" : "";
-  const std::string label = concat_strings("rmsnorm_bwd_tuned", add_tag, ",w=",
-                                            static_cast<int>(wt), ",i=", static_cast<int>(it),
-                                            ",o=", static_cast<int>(ot), ",c=",
-                                            static_cast<int>(ct), ",h=", hidden, ",cr=", cr,
-                                            ",wm=", wm, ",wn=", wn, ",bl=", bl_main,
-                                            ",blf=", bl_final);
+  const std::string label = concat_strings(
+      "rmsnorm_bwd_tuned", add_tag, ",w=", static_cast<int>(wt), ",i=", static_cast<int>(it),
+      ",o=", static_cast<int>(ot), ",c=", static_cast<int>(ct), ",h=", hidden, ",cr=", cr,
+      ",wm=", wm, ",wn=", wn, ",bl=", bl_main, ",blf=", bl_final);
   const std::string main_label = concat_strings(label, ",main");
   const std::string finalize_label = concat_strings(label, ",finalize");
   const std::string traits = kernel_traits_expr(wt, it, ot, ct, hidden, cr, wm, wn, bl_main);
@@ -572,9 +560,9 @@ void register_rmsnorm_bwd_tuned(DType wt, DType it, DType ot, DType ct, int hidd
       concat_strings("::transformer_engine::normalization::Kernel_traits_finalize<", hidden, ", ",
                      cpp_name_for(wt), ", ", cpp_name_for(it), ", ", cpp_name_for(ot), ", ",
                      cpp_name_for(ct), ", uint32_t, 1024, ", bl_final, ">");
-  const std::string finalize_kexpr = concat_strings(
-      "&::transformer_engine::normalization::rmsnorm_bwd_finalize_tuned_kernel<", finalize_traits,
-      ">");
+  const std::string finalize_kexpr =
+      concat_strings("&::transformer_engine::normalization::rmsnorm_bwd_finalize_tuned_kernel<",
+                     finalize_traits, ">");
   const int threads_per_cta = wm * wn * 32;
   const int smem_bytes = bwd_smem_bytes(ct, hidden, cr, wm, wn);
   const int sizeof_reduce_t = (ct == DType::kFloat32) ? 8 : 4;
@@ -587,9 +575,9 @@ void register_rmsnorm_bwd_tuned(DType wt, DType it, DType ot, DType ct, int hidd
 
   auto closure = [main_label, main_kexpr, finalize_label, finalize_kexpr, threads_per_cta,
                   smem_bytes, cr, barrier_per_col, workspace_per_col, dgamma_part_per_col,
-                  finalize_ctas, finalize_threads_per_cta, static_fallback](
-                     LaunchParams<BackwardKernelParams>& launch_params,
-                     const bool configure_params) {
+                  finalize_ctas, finalize_threads_per_cta,
+                  static_fallback](LaunchParams<BackwardKernelParams>& launch_params,
+                                   const bool configure_params) {
     if (try_static_fallback(static_fallback, launch_params, configure_params)) {
       return;
     }
@@ -608,8 +596,7 @@ void register_rmsnorm_bwd_tuned(DType wt, DType it, DType ot, DType ct, int hidd
       const int ctas_per_sm =
           mgr.occupancy_max_active_blocks_per_sm(main_label, threads_per_cta, smem_bytes);
       launch_params.params.ctas_per_row = cr;
-      launch_params.params.ctas_per_col =
-          launch_params.multiprocessorCount * ctas_per_sm / cr;
+      launch_params.params.ctas_per_col = launch_params.multiprocessorCount * ctas_per_sm / cr;
       if (cr > 1) {
         launch_params.barrier_bytes = barrier_per_col * launch_params.params.ctas_per_col;
         launch_params.workspace_bytes = workspace_per_col * launch_params.params.ctas_per_col;
@@ -627,8 +614,8 @@ void register_rmsnorm_bwd_tuned(DType wt, DType it, DType ot, DType ct, int hidd
       mgr.launch(main_label, dim3(ctas_per_col), dim3(threads_per_cta), smem_bytes, stream,
                  launch_params.params);
     } else {
-      mgr.launch_cooperative(main_label, dim3(cr * ctas_per_col), dim3(threads_per_cta),
-                             smem_bytes, stream, launch_params.params);
+      mgr.launch_cooperative(main_label, dim3(cr * ctas_per_col), dim3(threads_per_cta), smem_bytes,
+                             stream, launch_params.params);
     }
     mgr.launch(finalize_label, dim3(finalize_ctas), dim3(finalize_threads_per_cta), 0, stream,
                launch_params.params);
@@ -639,16 +626,14 @@ void register_rmsnorm_bwd_tuned(DType wt, DType it, DType ot, DType ct, int hidd
 void register_rmsnorm_bwd_general(DType wt, DType it, DType ot, DType ct, int hidden, int wm,
                                   int wn, int bl_main, int bl_final, bool with_add,
                                   StaticFallback<BackwardKernelParams> static_fallback) {
-  const auto stage =
-      with_add ? NVTE_Norm_Stage::BackwardAdd : NVTE_Norm_Stage::Backward;
+  const auto stage = with_add ? NVTE_Norm_Stage::BackwardAdd : NVTE_Norm_Stage::Backward;
   const auto key = get_key(NVTE_Norm_Backend::Te, NVTE_Norm_Type::RMSNorm, stage, wt, it, ot, ct, 0,
                            hidden, false, false);
   const std::string add_tag = with_add ? "_add" : "";
-  const std::string label = concat_strings("rmsnorm_bwd_general", add_tag, ",w=",
-                                            static_cast<int>(wt), ",i=", static_cast<int>(it),
-                                            ",o=", static_cast<int>(ot), ",c=",
-                                            static_cast<int>(ct), ",h=", hidden, ",wm=", wm,
-                                            ",wn=", wn, ",bl=", bl_main, ",blf=", bl_final);
+  const std::string label = concat_strings(
+      "rmsnorm_bwd_general", add_tag, ",w=", static_cast<int>(wt), ",i=", static_cast<int>(it),
+      ",o=", static_cast<int>(ot), ",c=", static_cast<int>(ct), ",h=", hidden, ",wm=", wm,
+      ",wn=", wn, ",bl=", bl_main, ",blf=", bl_final);
   const std::string main_label = concat_strings(label, ",main");
   const std::string finalize_label = concat_strings(label, ",finalize");
   const std::string traits = kernel_traits_expr(wt, it, ot, ct, hidden, 1, wm, wn, bl_main);
@@ -669,9 +654,9 @@ void register_rmsnorm_bwd_general(DType wt, DType it, DType ot, DType ct, int hi
 
   auto closure = [main_label, main_kexpr, finalize_label, finalize_kexpr, threads_per_cta, hidden,
                   wm, ctype_bytes, finalize_elts_n_per_cta, finalize_warps_n, finalize_warps_m,
-                  finalize_threads_per_warp, static_fallback](
-                     LaunchParams<BackwardKernelParams>& launch_params,
-                     const bool configure_params) {
+                  finalize_threads_per_warp,
+                  static_fallback](LaunchParams<BackwardKernelParams>& launch_params,
+                                   const bool configure_params) {
     if (try_static_fallback(static_fallback, launch_params, configure_params)) {
       return;
     }
