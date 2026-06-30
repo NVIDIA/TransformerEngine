@@ -161,7 +161,8 @@ __global__ void fused_moe_aux_loss_forward_kernel_graph_safe(
   const int warp_id = threadIdx.x / kThreadsPerWarp;
   const int lane_id = threadIdx.x % kThreadsPerWarp;
   if (warp_id == 0) {
-    CompType block_sum = warp_reduce_on_shmem<CompType, ReduceFuncType::SUM>(shmem_block, static_cast<int>(blockDim.x), lane_id);
+    CompType block_sum = warp_reduce_on_shmem<CompType, ReduceFuncType::SUM>(
+        shmem_block, static_cast<int>(blockDim.x), lane_id);
     if (lane_id == 0) {
       const float total_num_tokens = static_cast<float>(*total_num_tokens_ptr);
       const float C_coeff = (static_cast<float>(num_experts) * coeff) / static_cast<float>(topk) /
