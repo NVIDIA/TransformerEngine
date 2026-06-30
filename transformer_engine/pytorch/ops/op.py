@@ -14,6 +14,7 @@ from typing import Any, Optional
 import torch
 
 from transformer_engine.common.recipe import Recipe
+from .._extra_state import is_stateless_recipe, should_load_extra_state_pickle
 from ..quantization import (
     FP8GlobalStateManager,
     QuantizerRole,
@@ -590,11 +591,14 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
 
             # Quantizer state
             fp8_meta = self._fp8_metas[mode]
+            recipe = fp8_meta["recipe"]
+            if is_stateless_recipe(recipe):
+                continue
             state[mode] = {}
-            state[mode]["recipe"] = fp8_meta["recipe"]
+            state[mode]["recipe"] = recipe
 
             # Copy tensors to CPU and store
-            if state[mode]["recipe"].delayed():
+            if recipe.delayed():
                 if mode == "forward":
                     state[mode]["scale_fwd"] = to_cpu(fp8_meta["scaling_fwd"].scale)
                     state[mode]["amax_history_fwd"] = to_cpu(fp8_meta["scaling_fwd"].amax_history)
@@ -626,8 +630,12 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         if state is None or state.numel() == 0:
             return
 
-        # Deserialize state from byte tensor
-        state = pickle.loads(state.detach().numpy(force=True).tobytes())
+        # Deserialize state from byte tensor only when unsafe loading is enabled.
+        state_bytes = state.detach().numpy(force=True).tobytes()
+        context = self.__class__.__name__
+        if not should_load_extra_state_pickle(state_bytes, context):
+            return
+        state = pickle.loads(state_bytes)
         if state is None or len(state) == 0:
             return
 
@@ -697,10 +705,25 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
 class FusedOperation(FusibleOperation):
     """Compound tensor operation supported by the operation fuser
 
-    If the forward or backward passes are defined, they must be
-    functionally equivalent to the forward/backward passes of the
-    corresponding basic ops. This class should hold no parameters or
-    other state, but should access them from the basic ops.
+    A fused op corresponds to a run of basic ops. Depending on which
+    fusion pass produces it (see ``fuser.py``), the equivalence contract
+    differs:
+
+    - Forward-only or backward-only fused ops (from
+      ``register_forward_fusion`` / ``register_backward_fusion``): the
+      defined pass must be functionally equivalent to the corresponding
+      basic ops' pass, since the opposite pass may be fused
+      independently.
+    - Joint forward-backward fused ops (from
+      ``register_forward_backward_fusion``): the op implements both
+      ``fuser_forward`` and ``fuser_backward``, and only the pair must
+      be jointly equivalent to the basic ops' forward and backward. The
+      two halves need not be individually interchangeable, so the
+      forward may save state that only its own backward knows
+      how to consume.
+
+    This class should hold no parameters or other state, but should
+    access them from the basic ops.
 
     Parameters
     ----------

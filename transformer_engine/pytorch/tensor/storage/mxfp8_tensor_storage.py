@@ -13,6 +13,7 @@ import torch
 import transformer_engine_torch as tex
 
 from ...quantized_tensor import QuantizedTensorStorage, Quantizer
+from .._quantization_helpers import safe_quantized_repr
 
 from ...constants import TE_DType as torch_to_transformer_engine_dtype, DType
 
@@ -257,15 +258,18 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
         )
 
     def __repr__(self):
-        data_rowwise = self.dequantize()
+        try:
+            data_rowwise = self.dequantize()
 
-        return (
-            "MXFP8TensorStorage("
-            f"fp8_dtype={self._fp8_dtype}, "
-            f"rowwise_scaled_data={data_rowwise}"
-            f"rowwise_scale_inv={self._rowwise_scale_inv}, "
-            ")"
-        )
+            return (
+                "MXFP8TensorStorage("
+                f"fp8_dtype={self._fp8_dtype}, "
+                f"rowwise_scaled_data={data_rowwise}"
+                f"rowwise_scale_inv={self._rowwise_scale_inv}, "
+                ")"
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            return safe_quantized_repr(self, "MXFP8TensorStorage", error=exc)
 
     def update_usage(
         self,

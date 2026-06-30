@@ -640,9 +640,8 @@ def run_dpa_with_cp(
             cu_seqlens_q = get_cu_seqlens_on_cp_rank(
                 cu_seqlens_q, cu_seqlens_q_padded, world_size, rank, True, True
             )
-            num_pads_q = (cu_seqlens_q_padded - cu_seqlens_q)[1:] - (
-                cu_seqlens_q_padded - cu_seqlens_q
-            )[:-1]
+            cu_pads_q = cu_seqlens_q_padded - cu_seqlens_q
+            num_pads_q = cu_pads_q[1:] - cu_pads_q[:-1]
             cu_seqlens_kv_padded = cu_seqlens_kv_padded // world_size
             cu_seqlens_kv = get_cu_seqlens_on_cp_rank(
                 cu_seqlens_kv, cu_seqlens_kv_padded, world_size, rank, True, True
