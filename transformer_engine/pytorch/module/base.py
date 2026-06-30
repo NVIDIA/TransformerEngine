@@ -21,6 +21,12 @@ from torch.distributed.tensor import DTensor
 import transformer_engine_torch as tex
 
 from ._common import _ParameterInitMeta, noop_cat
+from .._extra_state import (
+    extra_state_pickle_advisory,
+    is_stateless_recipe,
+    should_load_extra_state_pickle,
+    unsafe_pickle_extra_state_enabled,
+)
 from ..quantization import (
     MXFP8BlockScalingRecipeState,
     DelayedScalingRecipeState,
@@ -557,6 +563,12 @@ def get_ub(name: str, use_fp8: bool):
     return _ub_communicators[key]
 
 
+@torch.compiler.assume_constant_result
+def get_ub_is_fp8(name: str, use_fp8: bool) -> bool:
+    """Query is_fp8_ubuf for a named UB communicator; treated as compile-time constant."""
+    return get_ub(name, use_fp8).is_fp8_ubuf()
+
+
 def destroy_ub():
     """Destroy all allocated userbuffer communicators."""
     global _ub_communicators, _ub_with_cublasmp, _ub_initialized
@@ -565,6 +577,9 @@ def destroy_ub():
     _ub_initialized = False
     global layers_atomic_ring_exchange
     layers_atomic_ring_exchange = []
+    # Compiled graphs may have baked is_fp8_ubuf() via assume_constant_result;
+    # reset so re-init with different settings doesn't read stale constants.
+    torch.compiler.reset()
 
 
 def fill_userbuffers_buffer_for_all_gather(
@@ -1063,8 +1078,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 return
             if recipe.custom() and isinstance(recipe_state, CustomRecipeState):
                 # Follow-up: Compare CustomRecipe/qfactory config here. qfactory changes made
-                # mid-training currently do not take effect because stale quantizers are reused.
-                return
+                # mid-training on the same recipe object currently do not take effect because
+                # stale quantizers are reused.
+                if recipe_state.recipe is recipe:
+                    return
 
         # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
         # 2 (grad_output and grad_input) for bwd
@@ -1286,9 +1303,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if not fp8_checkpoint:
             return torch.empty(0, dtype=torch.uint8)
 
+        recipe = self.fp8_meta["recipe"]
+        if is_stateless_recipe(recipe):
+            return torch.empty(0, dtype=torch.uint8)
+
         # Copy tensors to CPU and store
         state = {}
-        state["recipe"] = self.fp8_meta["recipe"]
+        state["recipe"] = recipe
         if _has_delayed_scaling_state(self.fp8_meta):
             state["scale_fwd"] = to_cpu(self.fp8_meta["scaling_fwd"].scale)
             state["amax_history_fwd"] = to_cpu(self.fp8_meta["scaling_fwd"].amax_history)
@@ -1318,16 +1339,21 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             return
 
         # Load state
+        context = self.__class__.__name__
         if isinstance(state, torch.Tensor):
-            # No FP8 is indicated by an empty tensor we don't need to unpickle.
+            # Empty extra state does not need pickle handling.
             if state.numel() == 0:
                 return
-            # Default format: byte tensor with pickled data
-            state = pickle.loads(state.detach().cpu().numpy().tobytes())
+            state_bytes = state.detach().cpu().numpy().tobytes()
+            if not should_load_extra_state_pickle(state_bytes, context):
+                return
+            state = pickle.loads(state_bytes)
         elif isinstance(state, io.BytesIO):
-            # Deprecated format with io.BytesIO
+            # Deprecated format with io.BytesIO. Treat it as unsafe pickle.
+            if not unsafe_pickle_extra_state_enabled():
+                raise RuntimeError(extra_state_pickle_advisory(context))
             state.seek(0)
-            state = torch.load(state, map_location="cuda")
+            state = torch.load(state, map_location="cuda", weights_only=False)
         else:
             raise RuntimeError("Unsupported checkpoint format.")
 
