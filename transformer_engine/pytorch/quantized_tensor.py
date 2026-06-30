@@ -24,19 +24,6 @@ from transformer_engine.pytorch.tensor._quantization_helpers import (
 )
 
 
-def _contains_process_group(value: Any) -> bool:
-    """Whether *value* is (or nests) a ``torch.distributed.ProcessGroup``.
-
-    Checks the value directly and one level of ``tuple``/``list`` nesting, which
-    covers the shapes a quantizer value field could plausibly take.
-    """
-    if isinstance(value, dist_group_type):
-        return True
-    if isinstance(value, (tuple, list)):
-        return any(_contains_process_group(item) for item in value)
-    return False
-
-
 # Custom ops that should pass through __torch_dispatch__ without unwrapping
 # QuantizedTensor subclasses (e.g. Float8Tensor). Register ops here that
 # handle quantized tensors internally.
@@ -446,18 +433,19 @@ class Quantizer(abc.ABC):
         # value key, which cannot carry live distributed state. Enforced here --
         # the single point every value-materialization path (``__eq__`` /
         # ``__hash__`` / ``__fx_repr__``) goes through -- so a custom
-        # ``__fx_repr__`` cannot bypass it. Reject any field holding a
-        # ProcessGroup (e.g. the deprecated ``amax_reduction_group``) rather than
-        # silently dropping it; pass the reduction group per quantize call.
-        for name, value in vars(self).items():
-            if _contains_process_group(value):
-                raise TypeError(
-                    f"{type(self).__name__} cannot be used as a torch.compile value "
-                    f"object: attribute {name!r} holds a torch.distributed.ProcessGroup, "
-                    "which is live distributed state and must not be baked into an FX "
-                    "graph. Pass the amax reduction group per quantize call instead of "
-                    "storing it on the quantizer."
-                )
+        # ``__fx_repr__`` cannot bypass it. The only attribute that can hold a
+        # ProcessGroup is the deprecated ``amax_reduction_group`` (a scalar group
+        # excluded from the value key); reject it rather than silently dropping
+        # it -- otherwise a stored group would compare/hash equal to a groupless
+        # quantizer. Pass the reduction group per quantize call instead.
+        if isinstance(getattr(self, "amax_reduction_group", None), dist_group_type):
+            raise TypeError(
+                f"{type(self).__name__} cannot be used as a torch.compile value "
+                "object: 'amax_reduction_group' holds a torch.distributed.ProcessGroup, "
+                "which is live distributed state and must not be baked into an FX "
+                "graph. Pass the amax reduction group per quantize call instead of "
+                "storing it on the quantizer."
+            )
 
     def _value_key(self) -> Tuple[Any, ...]:
         """Hashable, reproducible key identifying this quantizer's value.
