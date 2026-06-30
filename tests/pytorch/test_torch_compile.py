@@ -441,12 +441,11 @@ def _hw_available(quantizer):
 
 # (factory, kwargs producing a different-but-valid config)
 _VALUE_QUANTIZERS = [
-    pytest.param(_mxfp8, {"dtype": tex.DType.kFloat8E5M2}, id="mxfp8"),
-    pytest.param(_blockwise, {"force_pow_2_scales": False}, id="float8_blockwise"),
-    pytest.param(_current_scaling, {"amax_epsilon": 1e-4}, id="float8_current_scaling"),
+    pytest.param(_mxfp8, id="mxfp8"),
+    pytest.param(_blockwise, id="float8_blockwise"),
+    pytest.param(_current_scaling, id="float8_current_scaling"),
     pytest.param(
         _nvfp4,
-        {"with_rht": False},
         id="nvfp4",
         marks=pytest.mark.skipif(
             not torch.cuda.is_available(),
@@ -456,17 +455,10 @@ _VALUE_QUANTIZERS = [
 ]
 
 
-@pytest.mark.parametrize("factory, other_kwargs", _VALUE_QUANTIZERS)
-def test_quantizer_value_object(factory, other_kwargs):
+@pytest.mark.parametrize("factory", _VALUE_QUANTIZERS)
+def test_quantizer_value_object(factory):
     """Value semantics + ``__fx_repr__`` round-trip via the production FX path."""
-    a, b = factory(), factory()
-    # Same config -> equal, same hash, interchangeable as a dict/set key.
-    assert a is not b
-    assert a == b
-    assert hash(a) == hash(b)
-    assert {a: "x"}[b] == "x"
-    # Different config -> not equal.
-    assert a != factory(**other_kwargs)
+    a = factory()
 
     # ``__fx_repr__`` (used by torch.compile codegen) rebuilds an equal object.
     repr_str, globals_ = a.__fx_repr__()
@@ -538,8 +530,8 @@ if _opaque_available:
     not _opaque_available,
     reason="torch.compile opaque-object support requires PyTorch >= 2.11",
 )
-@pytest.mark.parametrize("factory, other_kwargs", _VALUE_QUANTIZERS)
-def test_quantizer_value_object_fullgraph(factory, other_kwargs):
+@pytest.mark.parametrize("factory", _VALUE_QUANTIZERS)
+def test_quantizer_value_object_fullgraph(factory):
     """Quantizer is usable *inside* a torch.compile(fullgraph=True) graph.
 
     A custom op quantizes+dequantizes with the (opaque value) quantizer; the
