@@ -21,10 +21,7 @@ fi
 # NCCL EP requires active NVLink P2P among ranks on the node.
 # On PCIe-only nodes (no NVLink) it falls back to the network
 # transport and deadlocks, so skip cleanly there.
-# Capture first: piping into grep -q closes the pipe early and SIGPIPEs
-# nvidia-smi, which under pipefail would falsely report "no NVLink".
-NVLINK_STATUS="$(nvidia-smi nvlink --status 2>/dev/null)"
-if ! grep -qE 'Link [0-9]+:.*GB/s' <<<"${NVLINK_STATUS}"; then
+if ! nvidia-smi nvlink --status 2>/dev/null | grep -qE 'Link [0-9]+:.*GB/s'; then
   echo "No NVLink between GPUs (PCIe-only fabric); NCCL EP is unsupported here. SKIPPING."
   exit 0
 fi
