@@ -60,7 +60,7 @@ static std::vector<T> generate_tokens(int rank, int num_tokens, int hidden_dim) 
   return v;
 }
 
-static std::vector<int32_t> expected_token_counts(
+static std::vector<int32_t> expected_recv_tokens_per_expert(
     int recv_rank, int num_processes, int num_tokens, int top_k,
     int num_experts, int num_local_experts) {
   int base = recv_rank * num_local_experts;
@@ -128,7 +128,7 @@ struct EPBuffers {
   DevBuf<int64_t>     topk_idx;
   DevBuf<float>       topk_weights;
   DevBuf<T>           tokens;
-  DevBuf<int32_t>     token_counts;
+  DevBuf<int32_t>     recv_tokens_per_expert;
   DevBuf<uint8_t>     handle_mem;
   DevBuf<T>           recv_tokens;
   DevBuf<float>       recv_topk_weights;
@@ -144,22 +144,26 @@ struct EPBuffers {
   size_t recv_capacity   = 0;
   int    top_k_          = 0;
   size_t alignment_      = 0;
+  NVTEEpLayerConfig layer_cfg_{};
 
   void alloc(int num_tokens, int top_k, int hidden_dim, int num_local_experts,
              int ep_size, int max_tokens_per_rank, size_t alignment = 0) {
     top_k_ = top_k;
     alignment_ = alignment;
+    layer_cfg_ = NVTE_EP_LAYER_CONFIG_INIT;
+    layer_cfg_.top_k = top_k;
+    layer_cfg_.dispatch_output_per_expert_alignment = alignment;
     recv_capacity = static_cast<size_t>(ep_size) * max_tokens_per_rank * 2;
 
     topk_idx.alloc(num_tokens * top_k);
     topk_weights.alloc(num_tokens * top_k);
     tokens.alloc(num_tokens * hidden_dim);
-    token_counts.alloc(num_local_experts);
+    recv_tokens_per_expert.alloc(num_local_experts);
     recv_tokens.alloc(recv_capacity * hidden_dim);
     recv_topk_weights.alloc(recv_capacity);
     result.alloc(num_tokens * hidden_dim);
 
-    handle_mem_size = nvte_ep_handle_mem_size(NVTEEpLayerConfig{top_k, alignment});
+    handle_mem_size = nvte_ep_handle_mem_size(&layer_cfg_);
     handle_mem.alloc(handle_mem_size);
 
     grad_result.alloc(num_tokens * hidden_dim);
@@ -174,25 +178,29 @@ struct EPBuffers {
 // expects.
 template <typename T = nv_bfloat16>
 struct EPTensors {
-  TensorWrapper topk_idx, topk_weights, token_counts, handle_mem, tokens;
+  TensorWrapper topk_idx, topk_weights, recv_tokens_per_expert, handle_mem, tokens;
   TensorWrapper recv_tokens, recv_topk_weights, result;
   TensorWrapper grad_result, grad_expert, grad_tokens;
   TensorWrapper g_recv_topk_weights, grad_topk_weights;
 
   int    top_k_     = 0;
   size_t alignment_ = 0;
+  NVTEEpLayerConfig layer_cfg_{};
 
   EPTensors(EPBuffers<T>& b, int num_tokens, int top_k, int hidden_dim,
             int num_local_experts) {
     top_k_ = top_k;
     alignment_ = b.alignment_;
+    layer_cfg_ = NVTE_EP_LAYER_CONFIG_INIT;
+    layer_cfg_.top_k = top_k;
+    layer_cfg_.dispatch_output_per_expert_alignment = b.alignment_;
     constexpr DType kTokDType = test::TypeInfo<T>::dtype;
     using Shape = std::vector<size_t>;
     topk_idx          = TensorWrapper(b.topk_idx.get(),
                             Shape{(size_t)num_tokens, (size_t)top_k}, DType::kInt64);
     topk_weights      = TensorWrapper(b.topk_weights.get(),
                             Shape{(size_t)num_tokens, (size_t)top_k}, DType::kFloat32);
-    token_counts      = TensorWrapper(b.token_counts.get(),
+    recv_tokens_per_expert      = TensorWrapper(b.recv_tokens_per_expert.get(),
                             Shape{(size_t)num_local_experts}, DType::kInt32);
     handle_mem        = TensorWrapper(b.handle_mem.get(),
                             Shape{b.handle_mem_size}, DType::kByte);
@@ -259,7 +267,7 @@ class EpOpTestBase : public ::testing::Test {
   template <typename T = nv_bfloat16>
   int read_total_recv(const EPBuffers<T>& buf) const {
     std::vector<int32_t> cnt(num_local_experts_);
-    NVTE_CHECK_CUDA(cudaMemcpy(cnt.data(), buf.token_counts.get(),
+    NVTE_CHECK_CUDA(cudaMemcpy(cnt.data(), buf.recv_tokens_per_expert.get(),
                               num_local_experts_ * sizeof(int32_t), cudaMemcpyDeviceToHost));
     int total = 0;
     for (int c : cnt) total += c;
@@ -300,7 +308,7 @@ TYPED_TEST(EPDispatchTest, PrepareAndDispatch) {
   cudaStream_t stream;
   NVTE_CHECK_CUDA(cudaStreamCreate(&stream));
 
-  ASSERT_NO_THROW(nvte_ep_prepare(t.handle_mem.data(), t.topk_idx.data(), t.token_counts.data(), NVTEEpLayerConfig{t.top_k_, t.alignment_}, stream));
+  ASSERT_NO_THROW(nvte_ep_prepare(t.handle_mem.data(), t.topk_idx.data(), t.recv_tokens_per_expert.data(), nullptr, &t.layer_cfg_, stream));
   ASSERT_NO_THROW(nvte_ep_dispatch(t.handle_mem.data(), t.topk_idx.data(),
                                    t.tokens.data(), NVTECommWindow{}, t.topk_weights.data(),
                                    NVTECommWindow{}, t.recv_tokens.data(), NVTECommWindow{},
@@ -309,9 +317,9 @@ TYPED_TEST(EPDispatchTest, PrepareAndDispatch) {
 
   // 1. Per-expert counts.
   std::vector<int32_t> got_counts(num_local_experts_);
-  NVTE_CHECK_CUDA(cudaMemcpy(got_counts.data(), buf.token_counts.get(),
+  NVTE_CHECK_CUDA(cudaMemcpy(got_counts.data(), buf.recv_tokens_per_expert.get(),
                         num_local_experts_ * sizeof(int32_t), cudaMemcpyDeviceToHost));
-  auto exp_counts = expected_token_counts(g_process_id, g_num_processes, num_tokens_, top_k_,
+  auto exp_counts = expected_recv_tokens_per_expert(g_process_id, g_num_processes, num_tokens_, top_k_,
                                           num_experts_, num_local_experts_);
   int total_recv = 0;
   for (int i = 0; i < num_local_experts_; ++i) {
@@ -379,7 +387,7 @@ TYPED_TEST(EPCombineTest, Combine) {
   cudaStream_t stream;
   NVTE_CHECK_CUDA(cudaStreamCreate(&stream));
 
-  ASSERT_NO_THROW(nvte_ep_prepare(t.handle_mem.data(), t.topk_idx.data(), t.token_counts.data(), NVTEEpLayerConfig{t.top_k_, t.alignment_}, stream));
+  ASSERT_NO_THROW(nvte_ep_prepare(t.handle_mem.data(), t.topk_idx.data(), t.recv_tokens_per_expert.data(), nullptr, &t.layer_cfg_, stream));
   ASSERT_NO_THROW(nvte_ep_dispatch(t.handle_mem.data(), t.topk_idx.data(),
                                    t.tokens.data(), NVTECommWindow{}, t.topk_weights.data(),
                                    NVTECommWindow{}, t.recv_tokens.data(), NVTECommWindow{},
@@ -426,7 +434,7 @@ TYPED_TEST(EPCombineBwdTest, CombineBwdCheck) {
   cudaStream_t stream;
   NVTE_CHECK_CUDA(cudaStreamCreate(&stream));
 
-  ASSERT_NO_THROW(nvte_ep_prepare(t.handle_mem.data(), t.topk_idx.data(), t.token_counts.data(), NVTEEpLayerConfig{t.top_k_, t.alignment_}, stream));
+  ASSERT_NO_THROW(nvte_ep_prepare(t.handle_mem.data(), t.topk_idx.data(), t.recv_tokens_per_expert.data(), nullptr, &t.layer_cfg_, stream));
   ASSERT_NO_THROW(nvte_ep_dispatch(t.handle_mem.data(), t.topk_idx.data(),
                                    t.tokens.data(), NVTECommWindow{}, t.topk_weights.data(),
                                    NVTECommWindow{}, t.recv_tokens.data(), NVTECommWindow{},
@@ -447,7 +455,7 @@ TYPED_TEST(EPCombineBwdTest, CombineBwdCheck) {
   int total_recv = this->template read_total_recv<Tok>(buf);
 
   std::vector<int32_t> cnt(num_local_experts_);
-  NVTE_CHECK_CUDA(cudaMemcpy(cnt.data(), buf.token_counts.get(),
+  NVTE_CHECK_CUDA(cudaMemcpy(cnt.data(), buf.recv_tokens_per_expert.get(),
                         num_local_experts_ * sizeof(int32_t), cudaMemcpyDeviceToHost));
   std::vector<Tok> h_ge(buf.recv_capacity * hidden_dim_);
   NVTE_CHECK_CUDA(cudaMemcpy(h_ge.data(), buf.grad_expert.get(),
@@ -495,7 +503,7 @@ TYPED_TEST(EPDispatchBwdTest, DispatchBwdCheck) {
   cudaStream_t stream;
   NVTE_CHECK_CUDA(cudaStreamCreate(&stream));
 
-  ASSERT_NO_THROW(nvte_ep_prepare(t.handle_mem.data(), t.topk_idx.data(), t.token_counts.data(), NVTEEpLayerConfig{t.top_k_, t.alignment_}, stream));
+  ASSERT_NO_THROW(nvte_ep_prepare(t.handle_mem.data(), t.topk_idx.data(), t.recv_tokens_per_expert.data(), nullptr, &t.layer_cfg_, stream));
   ASSERT_NO_THROW(nvte_ep_dispatch(t.handle_mem.data(), t.topk_idx.data(),
                                    t.tokens.data(), NVTECommWindow{}, t.topk_weights.data(),
                                    NVTECommWindow{}, t.recv_tokens.data(), NVTECommWindow{},
@@ -563,7 +571,7 @@ TYPED_TEST(EPDispatchBwdGradWeightsTest, RoundTrip) {
   cudaStream_t stream;
   NVTE_CHECK_CUDA(cudaStreamCreate(&stream));
 
-  ASSERT_NO_THROW(nvte_ep_prepare(t.handle_mem.data(), t.topk_idx.data(), t.token_counts.data(), NVTEEpLayerConfig{t.top_k_, t.alignment_}, stream));
+  ASSERT_NO_THROW(nvte_ep_prepare(t.handle_mem.data(), t.topk_idx.data(), t.recv_tokens_per_expert.data(), nullptr, &t.layer_cfg_, stream));
   NVTE_CHECK_CUDA(cudaMemsetAsync(buf.recv_topk_weights.get(), 0,
                              buf.recv_topk_weights.bytes(), stream));
   ASSERT_NO_THROW(nvte_ep_dispatch(t.handle_mem.data(), t.topk_idx.data(),
@@ -634,7 +642,7 @@ class EPPipelineTest : public EpOpTestBase, public ::testing::WithParamInterface
     cudaStream_t stream;
     NVTE_CHECK_CUDA(cudaStreamCreate(&stream));
 
-    ASSERT_NO_THROW(nvte_ep_prepare(t.handle_mem.data(), t.topk_idx.data(), t.token_counts.data(), NVTEEpLayerConfig{t.top_k_, t.alignment_}, stream));
+    ASSERT_NO_THROW(nvte_ep_prepare(t.handle_mem.data(), t.topk_idx.data(), t.recv_tokens_per_expert.data(), nullptr, &t.layer_cfg_, stream));
     ASSERT_NO_THROW(nvte_ep_dispatch(t.handle_mem.data(), t.topk_idx.data(),
                                      t.tokens.data(), NVTECommWindow{}, t.topk_weights.data(),
                                      NVTECommWindow{}, t.recv_tokens.data(), NVTECommWindow{},
@@ -759,7 +767,7 @@ TYPED_TEST(EPZeroCopyTest, IdentityAllSymm) {
   cudaStream_t stream;
   NVTE_CHECK_CUDA(cudaStreamCreate(&stream));
 
-  ASSERT_NO_THROW(nvte_ep_prepare(ref_t.handle_mem.data(), ref_t.topk_idx.data(), ref_t.token_counts.data(), NVTEEpLayerConfig{ref_t.top_k_, ref_t.alignment_}, stream));
+  ASSERT_NO_THROW(nvte_ep_prepare(ref_t.handle_mem.data(), ref_t.topk_idx.data(), ref_t.recv_tokens_per_expert.data(), nullptr, &ref_t.layer_cfg_, stream));
   ASSERT_NO_THROW(nvte_ep_dispatch(ref_t.handle_mem.data(), ref_t.topk_idx.data(),
                                    ref_t.tokens.data(), NVTECommWindow{}, ref_t.topk_weights.data(),
                                    NVTECommWindow{}, ref_t.recv_tokens.data(), NVTECommWindow{},
@@ -800,7 +808,7 @@ TYPED_TEST(EPZeroCopyTest, IdentityAllSymm) {
   sym_t.recv_tokens = TensorWrapper(sym_recv.ptr,
                           std::vector<size_t>{sym_buf.recv_capacity, (size_t)hidden_dim_}, kTokDType);
 
-  ASSERT_NO_THROW(nvte_ep_prepare(sym_t.handle_mem.data(), sym_t.topk_idx.data(), sym_t.token_counts.data(), NVTEEpLayerConfig{sym_t.top_k_, sym_t.alignment_}, stream));
+  ASSERT_NO_THROW(nvte_ep_prepare(sym_t.handle_mem.data(), sym_t.topk_idx.data(), sym_t.recv_tokens_per_expert.data(), nullptr, &sym_t.layer_cfg_, stream));
   ASSERT_NO_THROW(nvte_ep_dispatch(sym_t.handle_mem.data(), sym_t.topk_idx.data(),
                                    sym_t.tokens.data(), symm_window(sym_tokens),
                                    sym_t.topk_weights.data(), NVTECommWindow{},

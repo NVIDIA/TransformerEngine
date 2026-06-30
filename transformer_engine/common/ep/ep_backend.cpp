@@ -110,8 +110,8 @@ void EPBackend::validate_config(const NVTEEpGroupConfig& config) {
              "hidden_dim * sizeof(max_token_dtype) exceeds 4 GiB; got ", row_bytes, " bytes");
   NVTE_CHECK(config.num_experts % config.ep_size == 0, "num_experts (", config.num_experts,
              ") must be divisible by ep_size (", config.ep_size, ")");
-  NVTE_CHECK(config.max_num_sms >= 0, "max_num_sms must be >= 0 (0 = auto), got ",
-             config.max_num_sms);
+  NVTE_CHECK(config.num_comm_sms >= 0, "num_comm_sms must be >= 0 (0 = auto), got ",
+             config.num_comm_sms);
 
   const int sm = cuda::sm_arch();
   NVTE_CHECK(sm >= 90, "NCCL EP requires SM_90+ (Hopper or later), but current device is SM_", sm);
@@ -207,8 +207,8 @@ void EPBackend::init(ncclComm_t ep_comm, NVTEEpGroupConfig group_config) {
   cfg.rdma_buffer_size = NCCL_EP_AUTO;
   cfg.num_qp_per_rank = NCCL_EP_AUTO;
   cfg.num_channels = NCCL_EP_AUTO;
-  cfg.max_num_sms = group_config.max_num_sms > 0
-                        ? static_cast<unsigned int>(group_config.max_num_sms)
+  cfg.max_num_sms = group_config.num_comm_sms > 0
+                        ? static_cast<unsigned int>(group_config.num_comm_sms)
                         : NCCL_EP_AUTO;
   // Must be > 0; NCCL EP errors out on 0.
   cfg.max_recv_tokens_per_rank = static_cast<unsigned int>(group_config.max_recv_tokens_per_rank);
@@ -319,8 +319,11 @@ size_t EPBackend::handle_mem_size(NVTEEpLayerConfig layer_cfg) {
   return hm_size;
 }
 
-void EPBackend::prepare(void* handle_mem, const NVTETensor topk_idx, NVTETensor token_counts,
-                        NVTEEpLayerConfig layer_cfg, cudaStream_t stream) {
+void EPBackend::prepare(void* handle_mem, const NVTETensor topk_idx,
+                        NVTETensor recv_tokens_per_expert,
+                        NVTETensor /*total_recv_tokens_per_rank*/, NVTEEpLayerConfig layer_cfg,
+                        cudaStream_t stream) {
+  // total_recv_tokens_per_rank is a reserved placeholder; not yet populated.
   NVTE_CHECK(handle_mem != nullptr, "handle_mem must not be null");
   NVTE_CHECK(layer_cfg.top_k > 0, "top_k must be > 0, got ", layer_cfg.top_k);
   NVTE_CHECK(nvte_tensor_shape(topk_idx).ndim == 2, "topk_idx must be 2D [T, top_k]");
@@ -329,13 +332,15 @@ void EPBackend::prepare(void* handle_mem, const NVTETensor topk_idx, NVTETensor 
   ncclEpTensor_t nccl_topk_idx = make_nccl_ep_tensor(topk_idx, topk_idx_shape);
 
   // ncclEpUpdateHandle writes per-expert counts via expert_counters.
-  NVTEShape token_counts_shape;
-  ncclEpTensor_t token_counts_desc;
-  if (token_counts != nullptr) {
-    token_counts_desc = make_nccl_ep_tensor(token_counts, token_counts_shape);
+  NVTEShape recv_tokens_per_expert_shape;
+  ncclEpTensor_t recv_tokens_per_expert_desc;
+  if (recv_tokens_per_expert != nullptr) {
+    recv_tokens_per_expert_desc =
+        make_nccl_ep_tensor(recv_tokens_per_expert, recv_tokens_per_expert_shape);
   }
   ncclEpLayoutInfo_t layout_info = NCCL_EP_LAYOUT_INFO_INIT;
-  layout_info.expert_counters = (token_counts != nullptr) ? &token_counts_desc : nullptr;
+  layout_info.expert_counters =
+      (recv_tokens_per_expert != nullptr) ? &recv_tokens_per_expert_desc : nullptr;
 
   std::lock_guard<std::mutex> lock(mutex_);
   NVTE_CHECK(initialized_, "EPBackend not initialized");
