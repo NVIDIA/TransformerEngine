@@ -470,7 +470,7 @@ class FusedAttnRunner:
 
     def _check_configs(self):
         # TODO(rewang): probably adds this in is_fused_attn_available
-        # TDOD(KshitijLakhani): probably add/move this to is_fused_attn_available
+        # TODO(KshitijLakhani): probably add/move this to is_fused_attn_available
         if self.qkv_layout.is_thd() and not self.attn_mask_type.is_padding():
             pytest.skip("THD format requires padding masks.")
 
@@ -496,9 +496,10 @@ class FusedAttnRunner:
             )
         compute_capability = get_device_compute_capability(0)
         cudnn_version = get_cudnn_version()
-        # D=256 bprop on SM10x (cuDNN FE 1.24 / BE 9.23+) uses the deterministic algorithm path only,
-        # which rejects dBias, dropout, and ALiBi. It supports vanilla type of softmax only and allows SWA
-        # together with a causal mask only.
+        # D=256 bprop on SM10x uses the deterministic algorithm path only. BSHD support
+        # starts with cuDNN FE 1.24 / BE 9.23; THD execution-plan support starts with
+        # cuDNN FE 1.26 / BE 9.30. The kernel rejects dBias, dropout, and ALiBi, supports vanilla
+        # softmax only, and allows SWA together with a causal mask only.
         is_sm10x = 100 <= compute_capability < 110
         if self.is_training and is_sm10x and (self.head_dim_qk == 256 or self.head_dim_v == 256):
             if self.head_dim_qk != 256 or self.head_dim_v != 256:
@@ -506,10 +507,12 @@ class FusedAttnRunner:
                     "D=256 BWD on Blackwell only supports d_qk == d_v == 256;"
                     f" got d_qk={self.head_dim_qk}, d_v={self.head_dim_v}."
                 )
-            if cudnn_version < 92300:
+            required_cudnn_version = 93000 if self.qkv_layout.is_thd() else 92300
+            required_cudnn_version_label = "9.30" if self.qkv_layout.is_thd() else "9.23"
+            if cudnn_version < required_cudnn_version:
                 pytest.skip(
-                    "D=256 BWD on Blackwell requires cuDNN 9.23 or newer;"
-                    f" got cuDNN {cudnn_version}."
+                    f"D=256 BWD on Blackwell with {self.qkv_layout} requires cuDNN"
+                    f" {required_cudnn_version_label} or newer; got cuDNN {cudnn_version}."
                 )
             # TODO(KshitijLakhani): cuDNN FE can model bias input separately from dBias,
             # but TE does not yet plumb whether dBias is requested into the common backend selector.
@@ -1691,8 +1694,8 @@ class TestFusedAttn:
             QKVLayout.THD_THD_THD,
             id="2-1024-2048-12-6-128-64-BF16-CROSS-GQA-RAGGED_SEPARATE",
         ),
-        # D=256 deterministic backward on the SM100 dedicated SDPA bprop kernel
-        # (cuDNN FE 1.24 / BE 9.23+).
+        # D=256 deterministic backward on the SM100 dedicated SDPA bprop kernel.
+        # BSHD requires cuDNN FE 1.24 / BE 9.23+; THD requires cuDNN FE 1.26 / BE 9.30+.
         pytest.param(
             4,
             128,
@@ -1716,10 +1719,6 @@ class TestFusedAttn:
             jnp.float16,
             QKVLayout.THD_T2HD,
             id="4-128-128-16-16-256-256-FP16-SELF-RAGGED_KV_PACKED",
-            marks=pytest.mark.xfail(
-                reason="cuDNN 9.23 D=256 BWD currently does not build a THD execution plan.",
-                strict=True,
-            ),
         ),
     ],
 )

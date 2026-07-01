@@ -240,6 +240,9 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
   NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
   NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
+  const bool is_thd_layout = q_format == NVTE_QKV_Format::NVTE_THD ||
+                             kv_format == NVTE_QKV_Format::NVTE_THD ||
+                             qkv_format == NVTE_QKV_Format::NVTE_THD;
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   auto cudnn_runtime_version = cudnnGetVersion();
 
@@ -328,9 +331,10 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
           // 9.11: d_qk = 192, d_v = 128 + Blackwell + bprop + non-paged
           (head_dim_qk == 192 && head_dim_v == 128 && is_training && sm_arch_ >= 100 &&
            cudnn_runtime_version >= 91100) ||
-          // 9.23: d_qk = d_v = 256 + SM10x (cuDNN FE 1.24 / BE 9.23+) + bprop + non-paged
+          // 9.23: d_qk = d_v = 256 + SM10x (cuDNN FE 1.24 / BE 9.23+) + bprop + non-paged.
+          // THD layouts require cuDNN FE 1.26 / BE 9.30+ for execution-plan support.
           (head_dim_qk == 256 && head_dim_v == 256 && is_training && sm_arch_ >= 100 &&
-           sm_arch_ < 110 && cudnn_runtime_version >= 92300 &&
+           sm_arch_ < 110 && cudnn_runtime_version >= (is_thd_layout ? 93000 : 92300) &&
            layout_group != NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD &&
            // The FE forces this path onto the deterministic bprop algorithm, which on
            // Blackwell rejects dBias, dropout, and ALiBi (and supports vanilla softmax only).
