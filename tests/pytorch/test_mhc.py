@@ -461,6 +461,10 @@ def test_mhc_rmsnorm(cfg: MHCConfig, dtypes, has_norm_weight):
     torch.testing.assert_close(combined_H_res, fused_H_res, **tols)
 
 
+@pytest.mark.skipif(
+    not ENFORCE_DETERMINISTIC,
+    reason="Skipped when NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 due to atomic_add nondeterminism introducing too much error across multiple ops.",
+)
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
 @pytest.mark.parametrize("dtype", [torch.float32], ids=["fp32"])
 def test_mhc_fuse_grad_acc(cfg: MHCConfig, dtype):
