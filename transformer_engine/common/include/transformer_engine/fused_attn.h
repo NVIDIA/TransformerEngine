@@ -156,11 +156,9 @@ enum NVTE_Softmax_Type {
 enum NVTE_Fused_Attn_Backend {
   /*! No supported backend */
   NVTE_No_Backend = -1,
-  /*! cuDNN-based FP16/BF16 fused attention for <= 512 sequence length */
-  NVTE_F16_max512_seqlen = 0,
   /*! cuDNN-based FP16/BF16 fused attention for any sequence length */
   NVTE_F16_arbitrary_seqlen = 1,
-  /*! cuDNN-based FP8 fused attention for <= 512 sequence length */
+  /*! cuDNN-based FP8 fused attention */
   NVTE_FP8 = 2,
 };
 
@@ -233,16 +231,6 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *  - D = Dropout(S)
  *  - O = D * Transpose(V)
  *
- * Support Matrix:
-   \verbatim
-   | backend | precision |                qkv layout                   |           bias           |                 mask                  | dropout |  sequence length  | head_dim         |
-   |   0     | FP16/BF16 |     BS3HD,SB3HD,BSHD_BS2HD,SBHD_SB2HD       |   NO/POST_SCALE_BIAS     | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   | <= 512, % 64 == 0 |    64            |
-   |   1     | FP16/BF16 |          BS3HD,SB3HD,BSH3D,SBH3D            | NO/POST_SCALE_BIAS/ALIBI | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   |  > 512, % 64 == 0 | <= 128, % 8 == 0 |
-   |         |           | BSHD_BS2HD,BSHD_BSH2D,SBHD_SB2HD,SBHD_SBH2D |                          |                                       |         |                   |                  |
-   |         |           |       BSHD_BSHD_BSHD,SBHD_SBHD_SBHD         |                          |                                       |         |                   |                  |
-   |   2     |   FP8     |                 T3HD                        |          NO_BIAS         |               PADDING_MASK            |   Yes   | <= 512, % 64 == 0 |    64            |
-   \endverbatim
- *
  * Notes:
  *
  * Tensors `cu_seqlens_q_padded` and `cu_seqlens_kv_padded`
@@ -264,7 +252,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *  \param[in,out] S                         The S tensor.
  *  \param[out]    O                         The output O tensor.
  *  \param[out]    Aux_CTX_Tensors           Auxiliary output tensors when training,
- *                                           e.g. M, ZInv, rng_state.
+ *                                           e.g. softmax stats, optional Max, rng_state.
  *  \param[in]     cu_seqlens_q              Cumulative sequence lengths for Q, [batch_size + 1].
  *  \param[in]     cu_seqlens_kv             Cumulative sequence lengths for K and V, [batch_size + 1].
  *  \param[in]     cu_seqlens_q_padded       Cumulative sequence offsets for Q, [batch_size + 1].
@@ -311,16 +299,6 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
 
 /*! \brief Compute the backward of the dot product attention with separate Q, K and V.
  *
- * Support Matrix:
-   \verbatim
-   | backend | precision |                qkv layout                   |           bias           |                 mask                  | dropout |  sequence length  | head_dim         |
-   |   0     | FP16/BF16 |     BS3HD,SB3HD,BSHD_BS2HD,SBHD_SB2HD       |   NO/POST_SCALE_BIAS     | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   | <= 512, % 64 == 0 |    64            |
-   |   1     | FP16/BF16 |          BS3HD,SB3HD,BSH3D,SBH3D            | NO/POST_SCALE_BIAS/ALIBI | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   |  > 512, % 64 == 0 | <= 128, % 8 == 0 |
-   |         |           | BSHD_BS2HD,BSHD_BSH2D,SBHD_SB2HD,SBHD_SBH2D |                          |                                       |         |                   |                  |
-   |         |           |       BSHD_BSHD_BSHD,SBHD_SBHD_SBHD         |                          |                                       |         |                   |                  |
-   |   2     |   FP8     |                 T3HD                        |          NO_BIAS         |               PADDING_MASK            |   Yes   | <= 512, % 64 == 0 |    64            |
-   \endverbatim
- *
  * Notes:
  *
  * Tensors `cu_seqlens_q_padded` and `cu_seqlens_kv_padded`
@@ -342,7 +320,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
  *  \param[in]     S                         The S tensor.
  *  \param[in,out] dP                        The gradient of the P tensor.
  *  \param[in]     Aux_CTX_Tensors           Auxiliary tensors from context when in training mode,
- *                                           e.g. M, ZInv, rng_state.
+ *                                           e.g. softmax stats, optional Max, rng_state.
  *  \param[out]    dQ                        The gradient of the Q tensor.
  *  \param[out]    dK                        The gradient of the K tensor.
  *  \param[out]    dV                        The gradient of the V tensor.
@@ -554,6 +532,56 @@ void nvte_cp_thd_grad_correction(NVTETensor grad, const NVTETensor &grad_per_ste
 void nvte_cp_thd_get_partitioned_indices(const NVTETensor &cu_seqlens, NVTETensor output,
                                          int total_tokens, int world_size, int rank,
                                          cudaStream_t stream);
+
+/*!  \brief Reorder THD tensor from sequence order to dual-chunk CP rank order.
+ *
+ * Uses the padded THD sequence lengths to place each sequence's two CP chunks
+ * in the order consumed by each CP rank.
+ *
+ *  \param[in]     inp           Input THD tensor [total_tokens, ...].
+ *  \param[in]     cu_seqlens    Padded cumulative sequence lengths, [batch_size + 1], int32.
+ *  \param[out]    out           Output tensor, same shape/dtype as inp.
+ *  \param[in]     world_size    Context-parallel size.
+ *  \param[in]     total_tokens  Total padded tokens (= inp.shape[0]).
+ *  \param[in]     stream        CUDA stream used for this operation.
+ */
+void nvte_thd_sequence_order_to_cp_rank_order(const NVTETensor &inp, const NVTETensor &cu_seqlens,
+                                              NVTETensor out, int world_size, int total_tokens,
+                                              cudaStream_t stream);
+
+/*!  \brief Reorder THD tensor from dual-chunk CP rank order to sequence order.
+ *
+ * Uses the padded THD sequence lengths to restore each sequence's dual-chunk
+ * CP entries to sequence order.
+ *
+ *  \param[in]     inp           Input THD tensor [total_tokens, ...].
+ *  \param[in]     cu_seqlens    Padded cumulative sequence lengths, [batch_size + 1], int32.
+ *  \param[out]    out           Output tensor, same shape/dtype as inp.
+ *  \param[in]     world_size    Context-parallel size.
+ *  \param[in]     total_tokens  Total padded tokens (= inp.shape[0]).
+ *  \param[in]     stream        CUDA stream used for this operation.
+ */
+void nvte_thd_cp_rank_order_to_sequence_order(const NVTETensor &inp, const NVTETensor &cu_seqlens,
+                                              NVTETensor out, int world_size, int total_tokens,
+                                              cudaStream_t stream);
+
+/*!  \brief Copy valid token entries from a per-split THD tensor to a rank-local accumulator.
+ *
+ * For each dual-chunk CP step/split, copies each sequence's valid range at
+ * its padded THD token offsets and leaves padded entries untouched.
+ *
+ *  \param[in]     inp                 Per-split THD source tensor [total_tokens, ...].
+ *  \param[in]     cu_seqlens_padded   Padded cumulative sequence lengths, [batch_size + 1], int32.
+ *  \param[in]     cu_seqlens          Valid cumulative sequence lengths, [batch_size + 1], int32.
+ *  \param[in,out] out                 Rank-local accumulator, same shape/dtype as inp.
+ *  \param[in]     total_tokens        Total padded tokens (= inp.shape[0]).
+ *  \param[in]     stream              CUDA stream used for this operation.
+ */
+void nvte_thd_copy_valid_tokens_from_per_split_to_rank_local(const NVTETensor &inp,
+                                                             const NVTETensor &cu_seqlens_padded,
+                                                             const NVTETensor &cu_seqlens,
+                                                             NVTETensor out, int total_tokens,
+                                                             cudaStream_t stream);
 
 /*!  \brief Convert tensor from THD to BSHD format.
  *

@@ -4,7 +4,6 @@
 
 """Context Parallelism."""
 import os
-import itertools
 from typing import List, Union, Tuple
 import torch
 import transformer_engine_torch as tex
@@ -54,8 +53,32 @@ _seq_chunk_ids_cache_for_reordering_before_attn = {}
 _seq_chunk_ids_cache_for_reordering_after_attn = {}
 _softmax_offset_chunk_ids_cache = {}
 
+
 # Float8CurrentScaling: fused_attn_bwd takes O in FP8 by default, this flag allows it in F16
 _dpa_fp8_cs_o_in_f16 = os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1") == "1"
+
+
+def _reject_custom_recipe_under_cp(fp8, fp8_recipe):
+    """Fail fast when CustomRecipe meets context-parallel FP8 attention.
+
+    Single-device FP8 attention dispatch was migrated to read quantizer
+    instance types (see ``backends._qkv_quantizer_type`` and
+    ``utils.get_attention_quantizers``), which makes CustomRecipe work end
+    to end. The CP code path in this module still dispatches on
+    ``fp8_recipe.<predicate>()`` at ~90 sites; under CustomRecipe those
+    predicates all return False and the dispatch silently falls through to
+    incorrect tensor save / amax-reduction shapes. Until that migration
+    lands, surface the limitation here with a clear error rather than
+    failing later in C++ assertions or with silently-wrong gradients.
+    """
+    if fp8 and fp8_recipe is not None and fp8_recipe.custom():
+        raise NotImplementedError(
+            "CustomRecipe + Context Parallelism is not yet supported for FP8 "
+            "DotProductAttention. Either disable context parallelism, or use a "
+            "built-in FP8 recipe (DelayedScaling, Float8CurrentScaling, "
+            "MXFP8BlockScaling) for CP. The single-device CustomRecipe + DPA "
+            "path is supported."
+        )
 
 
 def get_bsh_dims(tensor_format):
@@ -272,14 +295,13 @@ def reorder_seq_chunks_for_a2a_after_attn(x, chunk_ids_for_a2a, seq_dim, cp_size
     return x
 
 
-def reorder_seq_chunks_before_a2a_after_attn_thd(x, cu_seqlens, cp_size, seq_dim=0):
+def thd_sequence_order_to_cp_rank_order(x, cu_seqlens, cp_size, seq_dim=0):
     """
-    Reorder sequence chunks for A2A communication that happens after attention
-    compute.
+    Reorder a THD tensor from sequence order to dual-chunk CP rank order.
 
     Args:
         x:              The input tensor to be reordered.
-        cu_seqlens:     The cumulative sequence lengths of the input tensor.
+        cu_seqlens:     The padded cumulative sequence lengths of the input tensor.
         cp_size:        The number of ranks participating in context parallelism.
         seq_dim:        The dimension in which to reorder.
 
@@ -298,10 +320,8 @@ def reorder_seq_chunks_before_a2a_after_attn_thd(x, cu_seqlens, cp_size, seq_dim
                           10., 11.,  3.,  4.,  3.,  4.,  3.,  4.,  6.,  7.,  8.,  9.]
 
 
-        This logic is similar to how the DualChunking is done to split the sequence
-        for each rank. Here, the indices of sequence chunks for all those ranks
-        are concatenated together. So the returned tensor ends up looking like as if
-        the chunks from all the ranks are concatenated together.
+        This follows the same dual-chunk CP partitioning used to split each sequence
+        across ranks. The output concatenates each rank's two chunks in CP rank order.
 
          e.g. [
                 0.,  7.,  0.,  7.,  0.,  7.,  0.,  1., 14., 15.,  # chunk on rank 0
@@ -310,43 +330,19 @@ def reorder_seq_chunks_before_a2a_after_attn_thd(x, cu_seqlens, cp_size, seq_dim
                 3.,  4.,  3.,  4.,  3.,  4.,  6.,  7.,  8.,  9.   # chunk on rank 3
              ]
     """
-    total_slices_of_any_sequence = 2 * cp_size
-    slice_sizes = (cu_seqlens[1:] - cu_seqlens[:-1]) // total_slices_of_any_sequence
-
-    indices = [
-        (
-            # 1st segment
-            torch.arange(
-                seq_start + (cp_rank * slice_size),
-                seq_start + ((cp_rank + 1) * slice_size),
-                device=cu_seqlens.device,
-            ),
-            # 2nd segment
-            torch.arange(
-                seq_start + ((total_slices_of_any_sequence - cp_rank - 1) * slice_size),
-                seq_start + ((total_slices_of_any_sequence - cp_rank) * slice_size),
-                device=cu_seqlens.device,
-            ),
-        )
-        for cp_rank in range(cp_size)
-        for slice_size, seq_start in zip(slice_sizes, cu_seqlens[:-1])
-    ]
-
-    # flatten the list of tuples to a list
-    indices = list(itertools.chain(*indices))
-    indices = torch.cat(indices)
-    return x.index_select(seq_dim, indices)
+    assert (
+        seq_dim == 0
+    ), "tex.thd_sequence_order_to_cp_rank_order operates on the leading THD token dimension"
+    return tex.thd_sequence_order_to_cp_rank_order(x, cu_seqlens, cp_size, x.shape[seq_dim])
 
 
-def reorder_seq_chunks_after_a2a_before_attn_thd(x, cu_seqlens, seq_chunk_ids, cp_size, seq_dim=0):
+def thd_cp_rank_order_to_sequence_order(x, cu_seqlens, cp_size, seq_dim=0):
     """
-    Reorder sequence chunks for A2A communication that happens before attention
-    compute.
+    Reorder a THD tensor from dual-chunk CP rank order to sequence order.
 
     Args:
         x:              The input tensor to be reordered.
-        cu_seqlens:     The cumulative sequence lengths of the input tensor.
-        seq_chunk_ids:  The sequence chunk ids of the input `x` which is to be reordered.
+        cu_seqlens:     The padded cumulative sequence lengths of the input tensor.
         cp_size:        The number of ranks participating in context parallelism.
         seq_dim:        The dimension in which to reorder.
 
@@ -358,15 +354,14 @@ def reorder_seq_chunks_after_a2a_before_attn_thd(x, cu_seqlens, seq_chunk_ids, c
                           1.,  6.,  2.,  3., 12., 13.,  2.,  5.,  2.,  5.,  2.,  5.,  4.,  5.,
                           10., 11.,  3.,  4.,  3.,  4.,  3.,  4.,  6.,  7.,  8.,  9.]
         cu_seqlens:     [ 0,  8, 16, 24, 40]
-        seq_chunk_ids:  [ 0, 2, 4, 6, 7, 5, 3, 1]
         cp_size:        4
 
         Returns:        [ 0.,  1.,  2.,  3.,  4.,  5.,  6.,  7.,  0.,  1.,  2.,  3.,  4.,  5.,
                           6.,  7.,  0.,  1.,  2.,  3.,  4.,  5.,  6.,  7.,  0.,  1.,  2.,  3.,
                           4.,  5.,  6.,  7.,  8.,  9., 10., 11., 12., 13., 14., 15.]
 
-        Note that the input sequences (x) are arranged after A2A communication as if DualChunked
-        chunks on all the ranks are concatenated together in the `seq_dim`.
+        Note that the input sequences (x) are arranged as if dual-chunk CP chunks on all
+        ranks are concatenated together in `seq_dim`.
 
         e.g. [
                 0.,  7.,  0.,  7.,  0.,  7.,  0.,  1., 14., 15.,  # chunk on rank 0
@@ -375,41 +370,18 @@ def reorder_seq_chunks_after_a2a_before_attn_thd(x, cu_seqlens, seq_chunk_ids, c
                 3.,  4.,  3.,  4.,  3.,  4.,  6.,  7.,  8.,  9.   # chunk on rank 3
              ]
 
-        Then the logic to serialize the sequences is:
-        1. For every sequence segment on any rank (denoted by `start` and `end`):
+        Then the logic to restore sequence order is:
+        1. For every sequence range on any rank (denoted by `start` and `end`):
             1a. For every chunk (in `chunk_id` and the total of those are twice as many as the number of CP ranks) :
                 1aa. The first `cp_size` number of chunks form the first half of the whole sequence. Get those indices.
                 1ab. The second `cp_size` number of chunks form the second half of the whole sequence. Get those indices.
             1b. Concatenate the indices of the first half and the second half.
         2. Reorder the entire input tensor by those indices.
     """
-
-    max_cum_seqlen_per_cp_rank = cu_seqlens[-1] // cp_size
-    cu_seqlens_on_any_cp_rank = cu_seqlens // cp_size
-
-    # Go through all the sequence segments (the sizes should be the same from all the ranks)
-    indices = [
-        torch.arange(
-            # Calculate 'left' boundary
-            (
-                start + max_cum_seqlen_per_cp_rank * (chunk_id // 2)
-                if loc < cp_size
-                else (start + end) // 2 + max_cum_seqlen_per_cp_rank * (chunk_id // 2)
-            ),
-            # Calculate 'right' boundary
-            (
-                (start + end) // 2 + max_cum_seqlen_per_cp_rank * (chunk_id // 2)
-                if loc < cp_size
-                else end + max_cum_seqlen_per_cp_rank * (chunk_id // 2)
-            ),
-            device=cu_seqlens.device,
-        )
-        for start, end in zip(cu_seqlens_on_any_cp_rank[:-1], cu_seqlens_on_any_cp_rank[1:])
-        for loc, chunk_id in enumerate(seq_chunk_ids)
-    ]
-
-    indices = torch.cat(indices)
-    return x.index_select(seq_dim, indices)
+    assert (
+        seq_dim == 0
+    ), "tex.thd_cp_rank_order_to_sequence_order operates on the leading THD token dimension"
+    return tex.thd_cp_rank_order_to_sequence_order(x, cu_seqlens, cp_size, x.shape[seq_dim])
 
 
 def flash_attn_a2a_communicate(
@@ -478,8 +450,8 @@ def flash_attn_a2a_communicate(
                         # [cp, t, h//cp, d] -> [cp*t, h//cp, d]
                         x = x.view(-1, *x.shape[2:])
                         # reorder the sequence chunks
-                        a2a_outputs[i - 2] = reorder_seq_chunks_after_a2a_before_attn_thd(
-                            x, cu_seqlens_padded, chunk_ids_for_a2a, cp_size
+                        a2a_outputs[i - 2] = thd_cp_rank_order_to_sequence_order(
+                            x, cu_seqlens_padded, cp_size
                         )
 
             if i < len(a2a_inputs):
@@ -524,7 +496,7 @@ def flash_attn_a2a_communicate(
                         else cu_seqlens_kv_padded
                     )
                     # reorder the sequence chunks
-                    x = reorder_seq_chunks_before_a2a_after_attn_thd(x, cu_seqlens_padded, cp_size)
+                    x = thd_sequence_order_to_cp_rank_order(x, cu_seqlens_padded, cp_size)
                     # [cp*t, h//cp, d] -> [cp, t, h//cp, d]
                     a2a_inputs[i] = x.view(cp_size, -1, *x.shape[-2:])
             if i > 1:
@@ -640,6 +612,8 @@ def get_fa_args(
     dq=None,
     dk=None,
     dv=None,
+    seqused_q=None,
+    seqused_k=None,
 ):
     """Get forward/backward arguments for flash-attn v2 and v3."""
     if use_flash_attn_3:
@@ -649,7 +623,9 @@ def get_fa_args(
                     *[None] * 4,  # k_new, v_new, qv, out
                     cu_seqlens_q,
                     cu_seqlens_kv,
-                    *[None] * 3,  # cu_seqlens_k_new, seqused_q, seqused_k
+                    None,  # cu_seqlens_k_new
+                    seqused_q,
+                    seqused_k,
                     max_seqlen_q,
                     max_seqlen_kv,
                     *[None]
@@ -667,8 +643,8 @@ def get_fa_args(
             return [
                 cu_seqlens_q,
                 cu_seqlens_kv,
-                None,  # sequed_q
-                None,  # sequed_k
+                seqused_q,
+                seqused_k,
                 max_seqlen_q,
                 max_seqlen_kv,
                 dq,
@@ -678,8 +654,8 @@ def get_fa_args(
         return [
             None,  # cu_seqlens_q
             None,  # cu_seqlens_kv
-            None,  # sequed_q
-            None,  # sequed_k
+            None,  # seqused_q
+            None,  # seqused_k
             max_seqlen_q,
             max_seqlen_kv,
             dq,
@@ -980,10 +956,7 @@ def cp_p2p_fwd_fused_attn(
     )
 
     if fp8:
-        if qkv_layout != "t3hd":
-            softmax_lse_per_step, rng_states = aux_ctx_tensors
-        else:
-            softmax_lse_per_step, _, rng_states = aux_ctx_tensors
+        softmax_lse_per_step, rng_states = aux_ctx_tensors
     else:
         softmax_lse_per_step, rng_states, *rest = aux_ctx_tensors
         attn_bias = rest[0] if len(rest) > 0 else None
@@ -1000,6 +973,9 @@ def cp_p2p_fwd_flash_attn(
     flash_attn_fwd,
     max_seqlen_q,
     max_seqlen_kv,
+    pad_between_seqs,
+    cu_seqlens_q_padded,
+    cu_seqlens_kv_padded,
     q_part,
     k_part,
     v_part,
@@ -1026,6 +1002,20 @@ def cp_p2p_fwd_flash_attn(
             fa_forward_kwargs["window_size_left"] = -1
             fa_forward_kwargs["window_size_right"] = -1
 
+    seqused_q = None
+    seqused_k = None
+    if pad_between_seqs and use_flash_attn_3 and qkv_format == "thd":
+        # Derive actual token counts per batch element from cu_seqlens
+        seqused_q = cu_seqlens_q_per_step[1:] - cu_seqlens_q_per_step[:-1]
+        seqused_k = cu_seqlens_kv_per_step[1:] - cu_seqlens_kv_per_step[:-1]
+        # Override cu_seqlens to padded layout for tensor memory layout
+        cu_seqlens_q_ = cu_seqlens_q_padded
+        cu_seqlens_kv_ = cu_seqlens_kv_padded
+        if section == "lower-triangle":
+            cu_seqlens_kv_ = cu_seqlens_kv_padded // 2
+        elif section == "upper-triangle":
+            cu_seqlens_q_ = cu_seqlens_q_padded // 2
+
     fa_forward_args_thd = get_fa_args(
         True,
         use_flash_attn_3,
@@ -1034,6 +1024,8 @@ def cp_p2p_fwd_flash_attn(
         cu_seqlens_kv=cu_seqlens_kv_,
         max_seqlen_q=max_seqlen_q_,
         max_seqlen_kv=max_seqlen_kv_,
+        seqused_q=seqused_q,
+        seqused_k=seqused_k,
     )
     fa_outputs = flash_attn_fwd(
         q_part,
@@ -1044,11 +1036,10 @@ def cp_p2p_fwd_flash_attn(
         **fa_forward_kwargs,
     )
     rng_states = None
-    if not fa_utils.v2_7_0_plus:
+    if not use_flash_attn_3 and not fa_utils.v2_7_0_plus:
         out_per_step = fa_outputs[4]
         softmax_lse_per_step = fa_outputs[5]
-        if not use_flash_attn_3:
-            rng_states = fa_outputs[7]
+        rng_states = fa_outputs[7]
     else:
         out_per_step = fa_outputs[0]
         softmax_lse_per_step = fa_outputs[1]
@@ -1169,17 +1160,7 @@ def cp_p2p_bwd_fused_attn(
     section,
 ):
     """Per-tile backward call of CP P2P with FusedAttention backend"""
-    if fp8:
-        if qkv_layout == "t3hd":
-            aux_tensors = [
-                softmax_lse,
-                softmax_lse,
-                rng_states[cp_size - step - 1],
-            ]
-        else:
-            aux_tensors = [softmax_lse, rng_states[cp_size - step - 1]]
-    else:
-        aux_tensors = [softmax_lse, rng_states[cp_size - step - 1]]
+    aux_tensors = [softmax_lse, rng_states[cp_size - step - 1]]
 
     max_seqlen_q_ = max_seqlen_q
     max_seqlen_kv_ = max_seqlen_kv
@@ -1195,17 +1176,7 @@ def cp_p2p_bwd_fused_attn(
         attn_mask_type_ = "padding" if "padding" in attn_mask_type else "no_mask"
     elif section == "upper-triangle":
         q_part, out_part, dout_part = [x.contiguous() for x in [q_part, out_part, dout_part]]
-        if fp8:
-            if qkv_layout == "t3hd":
-                aux_tensors = [
-                    softmax_lse_,
-                    softmax_lse_,
-                    rng_states[cp_size - step - 1],
-                ]
-            else:
-                aux_tensors = [softmax_lse_, rng_states[cp_size - step - 1]]
-        else:
-            aux_tensors = [softmax_lse_, rng_states[cp_size - step - 1]]
+        aux_tensors = [softmax_lse_, rng_states[cp_size - step - 1]]
 
         max_seqlen_q_ = max_seqlen_q // 2
         cu_seqlens_q_padded_ = None if cu_seqlens_q_padded is None else cu_seqlens_q_padded // 2
@@ -1297,6 +1268,9 @@ def cp_p2p_bwd_flash_attn(
     rng_states,
     softmax_lse,
     softmax_lse_,
+    pad_between_seqs,
+    cu_seqlens_q_padded,
+    cu_seqlens_kv_padded,
     q_part,
     k_part,
     v_part,
@@ -1305,7 +1279,10 @@ def cp_p2p_bwd_flash_attn(
     section,
 ):
     """Per-tile backward call of CP P2P with FlashAttention backend"""
-    dq, dk, dv = [torch.empty_like(x) for x in [q_part, k_part, v_part]]
+    if pad_between_seqs:
+        dq, dk, dv = [torch.zeros_like(x) for x in [q_part, k_part, v_part]]
+    else:
+        dq, dk, dv = [torch.empty_like(x) for x in [q_part, k_part, v_part]]
     if fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus:
         fa_backward_kwargs["window_size"] = (-1, -1)
     elif use_flash_attn_3 or fa_utils.v2_7_0_plus:
@@ -1330,17 +1307,33 @@ def cp_p2p_bwd_flash_attn(
         max_seqlen_q_ = max_seqlen_q // 2
         softmax_lse__ = softmax_lse_
 
+    seqused_q = None
+    seqused_k = None
+    cu_seqlens_q_bwd = cu_seqlens_q_per_step[cp_size - step - 1]
+    cu_seqlens_kv_bwd = cu_seqlens_kv_per_step[cp_size - step - 1]
+    if pad_between_seqs and use_flash_attn_3 and qkv_format == "thd":
+        seqused_q = cu_seqlens_q_bwd[1:] - cu_seqlens_q_bwd[:-1]
+        seqused_k = cu_seqlens_kv_bwd[1:] - cu_seqlens_kv_bwd[:-1]
+        cu_seqlens_q_bwd = cu_seqlens_q_padded
+        cu_seqlens_kv_bwd = cu_seqlens_kv_padded
+        if section == "lower-triangle":
+            cu_seqlens_kv_bwd = cu_seqlens_kv_padded // 2
+        elif section == "upper-triangle":
+            cu_seqlens_q_bwd = cu_seqlens_q_padded // 2
+
     fa_backward_args_thd = get_fa_args(
         False,
         use_flash_attn_3,
         qkv_format,
-        cu_seqlens_q=cu_seqlens_q_per_step[cp_size - step - 1],
-        cu_seqlens_kv=cu_seqlens_kv_per_step[cp_size - step - 1],
+        cu_seqlens_q=cu_seqlens_q_bwd,
+        cu_seqlens_kv=cu_seqlens_kv_bwd,
         max_seqlen_q=max_seqlen_q_,
         max_seqlen_kv=max_seqlen_kv_,
         dq=dq,
         dk=dk,
         dv=dv,
+        seqused_q=seqused_q,
+        seqused_k=seqused_k,
     )
     if use_flash_attn_3:
         fa_backward_kwargs["is_causal"] = causal_
@@ -1476,6 +1469,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
         if fp8_meta is not None and fp8_meta.get("local_recipes", None) is not None:
             fp8_recipe = fp8_meta["local_recipes"][0]
+        _reject_custom_recipe_under_cp(fp8, fp8_recipe)
         (
             QKV_quantizer,
             O_quantizer,
@@ -1483,7 +1477,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             dQKV_quantizer,
             dO_quantizer,
             dP_quantizer,
-        ) = dpa_utils.get_attention_quantizers(fp8, fp8_recipe, quantizers)
+        ) = dpa_utils.get_attention_quantizers(fp8, quantizers)
 
         # q, k, v a2a: gather s and split h
         # FP8DS/CS: Float8Tensor -> torch.uint8 -> Float8Tensor
@@ -1779,6 +1773,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             flash_attn_fwd,
                             max_seqlen_q,
                             max_seqlen_kv,
+                            pad_between_seqs,
+                            cu_seqlens_q_padded,
+                            cu_seqlens_kv_padded,
                         ]
 
                     # cp_size = 4:
@@ -1821,7 +1818,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             else:
                                 out_per_step[i], softmax_lse_per_step[i], rng_states[i] = (
                                     cp_p2p_fwd_flash_attn(
-                                        *flash_attn_inputs, *prepare_outputs, section
+                                        *flash_attn_inputs,
+                                        *prepare_outputs,
+                                        section,
                                     )
                                 )
                         elif i <= rank:
@@ -1848,7 +1847,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             else:
                                 out_per_step[i], softmax_lse_per_step[i], rng_states[i] = (
                                     cp_p2p_fwd_flash_attn(
-                                        *flash_attn_inputs, *prepare_outputs, section
+                                        *flash_attn_inputs,
+                                        *prepare_outputs,
+                                        section,
                                     )
                                 )
                         else:
@@ -1875,7 +1876,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             else:
                                 out_per_step[i], softmax_lse_per_step[i], rng_states[i] = (
                                     cp_p2p_fwd_flash_attn(
-                                        *flash_attn_inputs, *prepare_outputs, section
+                                        *flash_attn_inputs,
+                                        *prepare_outputs,
+                                        section,
                                     )
                                 )
                     else:
@@ -1900,7 +1903,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             ) = cp_p2p_fwd_fused_attn(*fused_attn_inputs, *prepare_outputs, section)
                         else:
                             out_per_step[i], softmax_lse_per_step[i], rng_states[i] = (
-                                cp_p2p_fwd_flash_attn(*flash_attn_inputs, *prepare_outputs, section)
+                                cp_p2p_fwd_flash_attn(
+                                    *flash_attn_inputs,
+                                    *prepare_outputs,
+                                    section,
+                                )
                             )
 
             # softmax_lse correction
@@ -2150,6 +2157,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         ctx.attn_bias_shape = None if attn_bias is None else attn_bias.shape
         ctx.deterministic = deterministic
         ctx.use_fused_attention = use_fused_attention
+        ctx.pad_between_seqs = pad_between_seqs
         ctx.softmax_lse_in_packed_format = softmax_lse_in_packed_format
         ctx.second_half_lse_seqlen = second_half_lse_seqlen
         ctx.fp8_meta = fp8_meta
@@ -2560,6 +2568,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     rng_states,
                     softmax_lse,
                     softmax_lse_,
+                    ctx.pad_between_seqs,
+                    cu_seqlens_q_padded,
+                    cu_seqlens_kv_padded,
                 ]
 
             # Reverse the steps in forward. In the cp_size x cp_size (i.e. GPU x step) matrix,
@@ -2575,7 +2586,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         )
                     else:
                         dq_, dk_, dv_ = cp_p2p_bwd_flash_attn(
-                            *flash_attn_inputs, *prepare_outputs, section
+                            *flash_attn_inputs,
+                            *prepare_outputs,
+                            section,
                         )
                 elif i >= (cp_size - rank - 1):
                     section = "lower-triangle"
@@ -2586,7 +2599,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         )
                     else:
                         dq_, dk_, dv_ = cp_p2p_bwd_flash_attn(
-                            *flash_attn_inputs, *prepare_outputs, section
+                            *flash_attn_inputs,
+                            *prepare_outputs,
+                            section,
                         )
                 else:
                     section = "upper-triangle"
@@ -2597,7 +2612,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         )
                     else:
                         dq_, dk_, dv_ = cp_p2p_bwd_flash_attn(
-                            *flash_attn_inputs, *prepare_outputs, section
+                            *flash_attn_inputs,
+                            *prepare_outputs,
+                            section,
                         )
             else:
                 section = "all"
@@ -2608,7 +2625,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     )
                 else:
                     dq_, dk_, dv_ = cp_p2p_bwd_flash_attn(
-                        *flash_attn_inputs, *prepare_outputs, section
+                        *flash_attn_inputs,
+                        *prepare_outputs,
+                        section,
                     )
 
             # dq, dk, dv are reduced across steps in higher precision
@@ -2921,13 +2940,23 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 def get_kv_seq_info_after_all_gather(
     local_chunk_id, cp_size, max_seqlen_q, max_seqlen_kv, window_size, causal
 ):
-    """Compute KV sequence index range and update window size after all-gather."""
+    """Return the visible KV range and adjusted window for one AG CP step.
+
+    bshd/sbhd slices K/V with ``kv_range``.  THD keeps full K/V and uses the end
+    bound as ``max_seqlen_kv`` because per-sequence visibility is passed through
+    ``cu_seqlens`` or ``seqused_k``.  ``adjusted_window`` compensates for
+    bottom-right alignment after KV trimming.
+
+    Returns:
+        Tuple of ``(kv_range, adjusted_window)``.
+    """
     local_chunk_end_idx = (local_chunk_id + 1) * max_seqlen_kv
     full_seq_end_idx = max_seqlen_kv * cp_size * 2
 
     if window_size is None:
         window_size = (-1, 0) if causal else (-1, -1)
 
+    # Right boundary: how far past chunk_end the kernel can see.
     if window_size[1] == -1:
         seq_end_idx = full_seq_end_idx
         window_size_right = -1
@@ -2935,6 +2964,7 @@ def get_kv_seq_info_after_all_gather(
         seq_end_idx = min(full_seq_end_idx, local_chunk_end_idx + window_size[1])
         window_size_right = local_chunk_end_idx + window_size[1] - seq_end_idx
 
+    # Left boundary: how far before chunk_end - q_len the kernel can see.
     if window_size[0] == -1:
         seq_start_idx = 0
         window_size_left = -1
@@ -2949,6 +2979,14 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
     """
     Attention implementation with context parallelism. KV all-gather between CP ranks is exposed.
     Refer section 3.3.2 of `The Llama 3 Herd of Models <https://arxiv.org/abs/2407.21783>`_.
+
+    THD all-gather needs separate tensor offsets and visible lengths.  After
+    K/V all-gather, each sequence occupies its padded offset in the reordered
+    buffer, while causal/SWA steps may expose only a prefix of valid tokens.
+    FusedAttention carries this split with ``cu_seqlens`` plus
+    ``cu_seqlens_padded``; FlashAttention v3 uses layout ``cu_seqlens`` plus
+    ``seqused_k``.  FlashAttention v2 cannot represent both values, so THD
+    all-gather is restricted to FusedAttention or FlashAttention v3.
     """
 
     @staticmethod
@@ -2959,9 +2997,11 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         k,
         v,
         cu_seqlens_q,
+        cu_seqlens_kv,
         max_seqlen_q,
         max_seqlen_kv,
         cu_seqlens_q_padded,
+        cu_seqlens_kv_padded,
         dropout_p,
         softmax_scale,
         qkv_format,
@@ -2975,6 +3015,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         cp_group,
         cp_stream,
         use_flash_attn_3,
+        pad_between_seqs,
         fp8,
         fp8_meta,
         quantizers,
@@ -2991,9 +3032,17 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
 
-        assert qkv_format != "thd", f"No support for cp_comm_type='all_gather' and {qkv_format=}."
+        causal = "causal" in attn_mask_type
+        padding = "padding" in attn_mask_type
+        if qkv_format == "thd":
+            # THD always uses padding mask types; per-step masks set internally
+            assert padding, f"THD format requires padding mask type, got {attn_mask_type}!"
+        # AG CP uses shorter per-step Q against longer KV, so causal masks need
+        # bottom-right alignment for both sliced and THD paths.
+        if use_fused_attention and causal and "bottom_right" not in attn_mask_type:
+            attn_mask_type = attn_mask_type + "_bottom_right"
         assert (
-            "padding" not in attn_mask_type
+            qkv_format == "thd" or "padding" not in attn_mask_type
         ), f"No support for cp_comm_type='all_gather' and {attn_mask_type=}."
         assert (
             attn_bias_type == "no_bias"
@@ -3043,11 +3092,24 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                 if fa_utils.v2_6_0_plus:
                     fa_forward_kwargs["softcap"] = 0.0
 
+        qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
+
+        if qkv_format == "thd":
+            # Save original global cu_seqlens before division
+            cu_seqlens_q_original = cu_seqlens_q.clone()
+            cu_seqlens_kv_original = cu_seqlens_kv.clone()
+        else:
+            seq_dim = qkv_format.index("s")
+            assert (
+                q.shape[seq_dim] % 2 == 0 and k.shape[seq_dim] % 2 == 0
+            ), "Sequence length per GPU needs to be divisible by 2!"
+
+        # Divide by 2*cp_size to get per-chunk values
         max_seqlen_q = max_seqlen_q // (2 * cp_size)
         max_seqlen_kv = max_seqlen_kv // (2 * cp_size)
-        if use_fused_attention or qkv_format == "thd":
+        if use_fused_attention and qkv_format != "thd":
             cu_seqlens_q = cu_seqlens_q // (2 * cp_size)
-        if cu_seqlens_q_padded is not None and qkv_format == "thd":
+        if qkv_format == "thd":
             cu_seqlens_q_padded = cu_seqlens_q_padded // (2 * cp_size)
         else:
             cu_seqlens_q_padded = None
@@ -3066,6 +3128,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
         if fp8_meta is not None and fp8_meta.get("local_recipes", None) is not None:
             fp8_recipe = fp8_meta["local_recipes"][0]
+        _reject_custom_recipe_under_cp(fp8, fp8_recipe)
         (
             QKV_quantizer,
             O_quantizer,
@@ -3073,7 +3136,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             dQKV_quantizer,
             dO_quantizer,
             dP_quantizer,
-        ) = dpa_utils.get_attention_quantizers(fp8, fp8_recipe, quantizers)
+        ) = dpa_utils.get_attention_quantizers(fp8, quantizers)
         fwd_nominal_dtype = q.dtype
         q_fp8, k_fp8, v_fp8 = (q, k, v) if is_input_fp8 else (None, None, None)
         q_f16, k_f16, v_f16 = (None, None, None) if is_input_fp8 else (q, k, v)
@@ -3095,34 +3158,48 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         orig_q_shape, _, orig_v_shape = q.shape, k.shape, v.shape
         orig_o_shape = orig_q_shape[:-1] + orig_v_shape[-1:]
 
-        # q, k, v:
-        # FP8DS/CS: torch.uint8
-        # MXFP8/F16: torch.float16 or torch.bfloat16
-        # reshape: split s
-        # [b, s, h, d] -> [b, 2, s//2, h, d]
-        # [s, b, h, d] -> [2, s//2, b, h, d]
-        q = q.view(
-            *q.shape[:seq_dim_qkv], 2, q.shape[seq_dim_qkv] // 2, *q.shape[(seq_dim_qkv + 1) :]
-        )
-        # s dim first for all-gather
-        # [b, s, h, d]/[s, b, h, d] -> [s, b, h, d]
-        k, v = [x.movedim(seq_dim_qkv, 0).contiguous() for x in [k, v]]
+        if qkv_format != "thd":
+            # q, k, v:
+            # FP8DS/CS: torch.uint8
+            # MXFP8/F16: torch.float16 or torch.bfloat16
+            # reshape: split s
+            # [b, s, h, d] -> [b, 2, s//2, h, d]
+            # [s, b, h, d] -> [2, s//2, b, h, d]
+            q = q.view(
+                *q.shape[:seq_dim_qkv], 2, q.shape[seq_dim_qkv] // 2, *q.shape[(seq_dim_qkv + 1) :]
+            )
+            # s dim first for all-gather
+            # [b, s, h, d]/[s, b, h, d] -> [s, b, h, d]
+            k, v = [x.movedim(seq_dim_qkv, 0).contiguous() for x in [k, v]]
 
-        # gather along s: [s, b, h, d] -> [cp, s, b, h, d]
+        # AllGather K/V across CP ranks
+        # gather along s or t: [s, b, h, d] -> [cp, s, b, h, d] or [t, h, d] -> [cp*t, h, d]
         k_ag, _ = gather_along_first_dim(k, cp_group)
         v_ag, _ = gather_along_first_dim(v, cp_group)
-        # split s:[cp, s, b, h, d] -> [cp*2, s//2, b, h, d]
-        k_ag = k_ag.view(2 * cp_size, k.shape[0] // 2, *k.shape[1:])
-        v_ag = v_ag.view(2 * cp_size, v.shape[0] // 2, *v.shape[1:])
-        # pick out specific chunks for each rank
-        chunk_ids_for_kv_ag = get_seq_chunk_ids_for_reordering_before_attn(cp_size, k.device)
-        k_ag = torch.index_select(k_ag, dim=0, index=chunk_ids_for_kv_ag)
-        v_ag = torch.index_select(v_ag, dim=0, index=chunk_ids_for_kv_ag)
-        # reshape/flatten: [cp*2, s//2, b, h, d] -> [cp*s, b, h, d]
-        k_ag = k_ag.view(-1, *k.shape[1:])
-        v_ag = v_ag.view(-1, *v.shape[1:])
+
+        if qkv_format == "thd":
+            # [cp*t, h, d] -> reorder to sequence order -> [t_full, h, d]
+            # The padded cu_seqlens are global sequence offsets. Reorder uses them to
+            # derive per-sequence chunk boundaries.
+            k_ag = thd_cp_rank_order_to_sequence_order(k_ag, cu_seqlens_kv_padded, cp_size)
+            v_ag = thd_cp_rank_order_to_sequence_order(v_ag, cu_seqlens_kv_padded, cp_size)
+        else:
+            # [cp, s, b, h, d] -> [cp*2, s//2, b, h, d]
+            k_ag = k_ag.view(2 * cp_size, k.shape[0] // 2, *k.shape[1:])
+            v_ag = v_ag.view(2 * cp_size, v.shape[0] // 2, *v.shape[1:])
+            chunk_ids_for_kv_ag = get_seq_chunk_ids_for_reordering_before_attn(cp_size, k.device)
+            k_ag = torch.index_select(k_ag, dim=0, index=chunk_ids_for_kv_ag)
+            v_ag = torch.index_select(v_ag, dim=0, index=chunk_ids_for_kv_ag)
+            # [cp*2, s//2, b, h, d] -> [cp*s, b, h, d]
+            k_ag = k_ag.view(-1, *k.shape[1:])
+            v_ag = v_ag.view(-1, *v.shape[1:])
+        # cp_stream is used for step 1 of the per-step loop and must wait until
+        # k_ag/v_ag preparation finishes on the current stream — otherwise step 1
+        # races against AG/reorder writes. Manifests at high cp_size where reorder
+        # is large enough to outlast cp_stream's launch (e.g. bucket128k @ cp=8).
         cp_stream.wait_stream(torch.cuda.current_stream())
 
+        # THD all_gather only reaches this path for f16/bf16 attention today.
         # q: [b, 2, s//2, h, d] or [2, s//2, b, h, d]
         # k: [s, b, h, d]
         # v: [s, b, h, d]
@@ -3143,17 +3220,144 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         out_per_step = [None, None]
         softmax_lse_per_step = [None, None]
         rng_states = [None, None]
+        # THD per-split kernels may leave padded entries untouched; valid-copy only
+        # writes valid token entries, so keep the final accumulator zero-initialized.
+        out = torch.zeros(o_shape, dtype=fwd_nominal_dtype, device=q.device)
         max_logit_per_step = [None, None]
         max_logit = None
 
+        # Pre-compute THD-specific per-step cu_seqlens
+        if qkv_format == "thd":
+            # Rank-level padded offsets (2 chunks per sequence on this rank)
+            cu_seqlens_q_padded_rank = cu_seqlens_q_padded * 2
+
+            # Per-step Q cu_seqlens (non-padded): different per step since different
+            # chunks may have different valid token counts for non-divisible seqlens.
+            thd_cu_seqlens_q_per_step = [
+                get_cu_seqlens_on_cp_rank(
+                    cu_seqlens_q_original,
+                    cu_seqlens_q_padded_rank,
+                    cp_size,
+                    rank,
+                    True,
+                    False,
+                ),
+                get_cu_seqlens_on_cp_rank(
+                    cu_seqlens_q_original,
+                    cu_seqlens_q_padded_rank,
+                    cp_size,
+                    rank,
+                    False,
+                    True,
+                ),
+            ]
+
+            # Per-step Q cu_seqlens_padded: offset-based approach — pass full Q tensor
+            # and vary cu_seqlens_q_padded to point kernel at the correct chunk.
+            # cuDNN uses back-padding (valid tokens at beginning of padded allocation).
+            padded_chunk_sizes_q = cu_seqlens_q_padded[1:] - cu_seqlens_q_padded[:-1]
+
+            # Step 0: kernel reads from start of each seq's 2-chunk allocation (first chunk)
+            # Step 1: kernel reads from midpoint of each seq's allocation (second chunk)
+            cu_seqlens_q_padded_step_1 = cu_seqlens_q_padded_rank.clone()
+            cu_seqlens_q_padded_step_1[:-1] += padded_chunk_sizes_q
+            thd_cu_seqlens_q_padded_per_step = [
+                cu_seqlens_q_padded_rank,
+                cu_seqlens_q_padded_step_1,
+            ]
+
+            thd_cu_seqlens_kv_per_step = [
+                cu_seqlens_kv_original.clone(),
+                cu_seqlens_kv_original.clone(),
+            ]
+
+            sliding_window_attn = (
+                window_size is not None and window_size != (-1, 0) and window_size != (-1, -1)
+            )
+            if causal or sliding_window_attn:
+                actual_seqlens_kv = cu_seqlens_kv_original[1:] - cu_seqlens_kv_original[:-1]
+                padded_chunk_sizes_kv = (cu_seqlens_kv_padded[1:] - cu_seqlens_kv_padded[:-1]) // (
+                    2 * cp_size
+                )
+                # Visible KV covers chunks 0..chunk_id so bottom-right alignment
+                # places this Q chunk at the right offset.
+                visible_padded = [
+                    padded_chunk_sizes_kv * (chunk_id + 1) for chunk_id in local_seq_chunk_ids
+                ]
+                # Right-window SWA extends visibility past the chunk boundary.
+                if window_size is not None and window_size[1] > 0:
+                    visible_padded = [vp + window_size[1] for vp in visible_padded]
+                visible_actual = [
+                    torch.minimum(actual_seqlens_kv, visible_padded_split)
+                    for visible_padded_split in visible_padded
+                ]
+                thd_cu_seqlens_kv_per_step = [
+                    torch.zeros_like(cu_seqlens_kv_original) for _ in range(2)
+                ]
+                # Adjust chunks for each step
+                thd_cu_seqlens_kv_per_step[0][1:] = visible_actual[0].cumsum(0)
+                thd_cu_seqlens_kv_per_step[1][1:] = visible_actual[1].cumsum(0)
+
         for i in range(len(local_seq_chunk_ids) + 1):
             if i < len(local_seq_chunk_ids):
+                # FA3 uses internal per-call workspace. Consecutive AG per-step
+                # calls are serialized on GPU streams so that workspace lifetimes
+                # do not overlap. FusedAttention keeps the existing per-step overlap.
+                if i > 0 and use_flash_attn_3:
+                    flash_attn_streams[i].wait_stream(flash_attn_streams[i - 1])
                 with torch.cuda.stream(flash_attn_streams[i]):
-                    # [b, 2, s//2, h, d] -> [b, s//2, h, d]
-                    # [2, s//2, b, h, d] -> [s//2, b, h, d]
-                    q_part = q.select(seq_dim_qkv, i).contiguous()
-                    kv_seq_range_per_step[i], window_size_per_step[i] = (
-                        get_kv_seq_info_after_all_gather(
+                    new_qkv_layout = qkv_layout
+                    qkv_scale_inv_format = None
+                    if qkv_format in ["bshd", "sbhd"]:
+                        # [b, 2, s//2, h, d] -> [b, s//2, h, d]
+                        # [2, s//2, b, h, d] -> [s//2, b, h, d]
+                        q_part = q.select(seq_dim_qkv, i).contiguous()
+                        kv_seq_range_per_step[i], window_size_per_step[i] = (
+                            get_kv_seq_info_after_all_gather(
+                                local_seq_chunk_ids[i],
+                                cp_size,
+                                max_seqlen_q,
+                                max_seqlen_kv,
+                                window_size,
+                                causal,
+                            )
+                        )
+                        seq_start_idx, seq_end_idx = (
+                            kv_seq_range_per_step[i][0],
+                            kv_seq_range_per_step[i][1],
+                        )
+                        max_seqlen_kv_ = seq_end_idx - seq_start_idx
+
+                        # select range: [s_range, b, h, d]
+                        k_part, v_part = [x[seq_start_idx:seq_end_idx] for x in [k_ag, v_ag]]
+                        # reshape to original format: [b, s_range, h, d] or [s_range, b, h, d]
+                        k_part, v_part = [
+                            x.movedim(0, seq_dim_qkv).contiguous() for x in [k_part, v_part]
+                        ]
+                        if use_fused_attention:
+                            cu_seqlens_kv_per_step[i] = dpa_utils.get_full_cu_seqlens(
+                                cu_seqlens_q.shape[0] - 1, max_seqlen_kv_, q.device
+                            )
+                            if fp8:
+                                if not fp8_recipe.mxfp8():
+                                    q_part, k_part, v_part = [
+                                        Float8Tensor.make_like(x, data=y, dtype=fwd_nominal_dtype)
+                                        for x, y in zip(
+                                            [q_fp8, k_fp8, v_fp8], [q_part, k_part, v_part]
+                                        )
+                                    ]
+                                else:
+                                    q_part, k_part, v_part, new_qkv_layout, qkv_scale_inv_format = (
+                                        combine_and_quantize(
+                                            qkv_layout, q_part, k_part, v_part, QKV_quantizer
+                                        )
+                                    )
+                    elif qkv_format == "thd":
+                        # THD passes full Q/KV; per-step cu_seqlens select chunks.
+                        q_part = q
+                        k_part = k_ag
+                        v_part = v_ag
+                        kv_range, window_size_per_step[i] = get_kv_seq_info_after_all_gather(
                             local_seq_chunk_ids[i],
                             cp_size,
                             max_seqlen_q,
@@ -3161,37 +3365,18 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             window_size,
                             causal,
                         )
-                    )
-                    seq_start_idx, seq_end_idx = (
-                        kv_seq_range_per_step[i][0],
-                        kv_seq_range_per_step[i][1],
-                    )
-                    max_seqlen_kv_ = seq_end_idx - seq_start_idx
-                    if use_fused_attention or qkv_format == "thd":
-                        cu_seqlens_kv_per_step[i] = dpa_utils.get_full_cu_seqlens(
-                            k.shape[1], max_seqlen_kv_, k.device
-                        )
-                    # select range: [s_range, b, h, d]
-                    k_part, v_part = [x[seq_start_idx:seq_end_idx] for x in [k_ag, v_ag]]
-                    # reshape to original format: [b, s_range, h, d] or [s_range, b, h, d]
-                    k_part, v_part = [
-                        x.movedim(0, seq_dim_qkv).contiguous() for x in [k_part, v_part]
-                    ]
+                        max_seqlen_kv_ = kv_range[1]
+                        cu_seqlens_kv_per_step[i] = thd_cu_seqlens_kv_per_step[i]
                     if use_fused_attention:
-                        new_qkv_layout = qkv_layout
-                        qkv_scale_inv_format = None
-                        if fp8:
-                            if not fp8_recipe.mxfp8():
-                                q_part, k_part, v_part = [
-                                    Float8Tensor.make_like(x, data=y, dtype=fwd_nominal_dtype)
-                                    for x, y in zip([q_fp8, k_fp8, v_fp8], [q_part, k_part, v_part])
-                                ]
-                            else:
-                                q_part, k_part, v_part, new_qkv_layout, qkv_scale_inv_format = (
-                                    combine_and_quantize(
-                                        qkv_layout, q_part, k_part, v_part, QKV_quantizer
-                                    )
-                                )
+                        # Set per-step parameters for THD vs bshd/sbhd
+                        if qkv_format == "thd":
+                            cu_seqlens_q_ = thd_cu_seqlens_q_per_step[i]
+                            cu_seqlens_q_padded_ = thd_cu_seqlens_q_padded_per_step[i]
+                            cu_seqlens_kv_padded_ = cu_seqlens_kv_padded
+                        else:
+                            cu_seqlens_q_ = cu_seqlens_q
+                            cu_seqlens_q_padded_ = cu_seqlens_q_padded
+                            cu_seqlens_kv_padded_ = cu_seqlens_kv_per_step[i]
                         (
                             out_per_step[i],
                             aux_ctx_tensors,
@@ -3200,7 +3385,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             is_training,
                             max_seqlen_q,
                             max_seqlen_kv_,
-                            cu_seqlens_q,
+                            cu_seqlens_q_,
                             cu_seqlens_kv_per_step[i],
                             q_part,
                             k_part,
@@ -3214,8 +3399,8 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             attn_mask_type=attn_mask_type,
                             attn_bias_type=attn_bias_type,
                             attn_bias=attn_bias,
-                            cu_seqlens_q_padded=cu_seqlens_q_padded,
-                            cu_seqlens_kv_padded=cu_seqlens_kv_per_step[i],
+                            cu_seqlens_q_padded=cu_seqlens_q_padded_,
+                            cu_seqlens_kv_padded=cu_seqlens_kv_padded_,
                             window_size=window_size_per_step[i],
                             return_max_logit=return_max_logit,
                             cuda_graph=is_graph_capturing(),
@@ -3223,10 +3408,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             **fp8_meta_kwargs,
                         )
                         if fp8:
-                            if qkv_layout != "t3hd":
-                                softmax_lse_per_step[i], rng_states[i] = aux_ctx_tensors
-                            else:
-                                softmax_lse_per_step[i], _, rng_states[i] = aux_ctx_tensors
+                            softmax_lse_per_step[i], rng_states[i] = aux_ctx_tensors
                         else:
                             softmax_lse_per_step[i], rng_states[i], *_ = aux_ctx_tensors
                         if return_max_logit:
@@ -3234,14 +3416,31 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         if fp8 and isinstance(out_per_step[i], QuantizedTensorStorage):
                             out_per_step[i] = out_per_step[i].dequantize(dtype=fwd_nominal_dtype)
                     else:
+                        seqused_q = None
+                        seqused_k = None
+                        fa_cu_seqlens_q = (
+                            thd_cu_seqlens_q_per_step[i] if qkv_format == "thd" else cu_seqlens_q
+                        )
+                        fa_cu_seqlens_kv = cu_seqlens_kv_per_step[i]
+                        if use_flash_attn_3 and qkv_format == "thd":
+                            seqused_q = (
+                                thd_cu_seqlens_q_per_step[i][1:] - thd_cu_seqlens_q_per_step[i][:-1]
+                            )
+                            seqused_k = (
+                                cu_seqlens_kv_per_step[i][1:] - cu_seqlens_kv_per_step[i][:-1]
+                            )
+                            fa_cu_seqlens_q = thd_cu_seqlens_q_padded_per_step[i]
+                            fa_cu_seqlens_kv = cu_seqlens_kv_padded
                         fa_forward_args_thd = get_fa_args(
                             True,
                             use_flash_attn_3,
                             qkv_format,
-                            cu_seqlens_q=cu_seqlens_q,
-                            cu_seqlens_kv=cu_seqlens_kv_per_step[i],
+                            cu_seqlens_q=fa_cu_seqlens_q,
+                            cu_seqlens_kv=fa_cu_seqlens_kv,
                             max_seqlen_q=max_seqlen_q,
                             max_seqlen_kv=max_seqlen_kv_,
+                            seqused_q=seqused_q,
+                            seqused_k=seqused_k,
                         )
                         if fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus:
                             fa_forward_kwargs["window_size"] = window_size_per_step[i]
@@ -3256,11 +3455,10 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             causal=causal,
                             **fa_forward_kwargs,
                         )
-                        if not fa_utils.v2_7_0_plus:
+                        if not use_flash_attn_3 and not fa_utils.v2_7_0_plus:
                             out_per_step[i] = fa_outputs[4]
                             softmax_lse_per_step[i] = fa_outputs[5]
-                            if not use_flash_attn_3:
-                                rng_states[i] = fa_outputs[7]
+                            rng_states[i] = fa_outputs[7]
                         else:
                             out_per_step[i] = fa_outputs[0]
                             softmax_lse_per_step[i] = fa_outputs[1]
@@ -3279,7 +3477,23 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         out_f16[:, i - 1].copy_(out_per_step[i - 1])
                     elif o_format == "sbhd":
                         out_f16[i - 1].copy_(out_per_step[i - 1])
+                    elif qkv_format == "thd":
+                        # Copy every sequence's valid token range from this split's output.
+                        # Each split writes to distinct positions.
+                        tex.thd_copy_valid_tokens_from_per_split_to_rank_local(
+                            out,
+                            out_per_step[i - 1],
+                            thd_cu_seqlens_q_padded_per_step[i - 1],
+                            thd_cu_seqlens_q_per_step[i - 1],
+                        )
+
                 if return_max_logit:
+                    # max_logit_per_step[i-1] was written on flash_attn_streams[i-1]
+                    # (cp_stream for i-1=1). The torch.maximum below runs on the
+                    # default stream, so without this wait the read can race with
+                    # the write. The post-loop wait_stream(cp_stream) is too late.
+                    # No-op when flash_attn_streams[i-1] is current_stream().
+                    torch.cuda.current_stream().wait_stream(flash_attn_streams[i - 1])
                     max_logit = torch.maximum(max_logit, max_logit_per_step[i - 1])
 
         torch.cuda.current_stream().wait_stream(cp_stream)
@@ -3290,10 +3504,13 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                 max_logit, op=torch.distributed.ReduceOp.MAX, group=cp_group
             )
 
-        # out_f16: fwd_nominal_dtype
-        # [b, 2, s//2, h, d] -> [b, s, h, d]
-        # [2, s//2, b, h, d] -> [s, b, h, d]
-        out_f16 = out_f16.view(orig_o_shape)
+        if qkv_format == "thd":
+            out_f16 = out
+        else:
+            # out_f16: fwd_nominal_dtype
+            # [b, 2, s//2, h, d] -> [b, s, h, d]
+            # [2, s//2, b, h, d] -> [s, b, h, d]
+            out_f16 = out_f16.view(orig_o_shape)
 
         # prepare for forward output and backward saves of out
         out_fp8 = None
@@ -3391,6 +3608,13 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         ctx.deterministic = deterministic
         ctx.use_fused_attention = use_fused_attention
         ctx.use_flash_attn_3 = use_flash_attn_3
+        ctx.pad_between_seqs = pad_between_seqs
+        ctx.window_size = window_size
+        if qkv_format == "thd":
+            ctx.max_seqlen_kv = max_seqlen_kv
+            ctx.cu_seqlens_kv_padded = cu_seqlens_kv_padded
+            ctx.thd_cu_seqlens_q_per_step = thd_cu_seqlens_q_per_step
+            ctx.thd_cu_seqlens_q_padded_per_step = thd_cu_seqlens_q_padded_per_step
         ctx.fp8_meta = fp8_meta
         ctx.is_input_fp8 = is_input_fp8
 
@@ -3498,7 +3722,11 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         # dq: fwd_nominal_dtype, [b, 2, s//2, h, d] or [2, s//2, b, h, d]
         # dk: fwd_nominal_dtype, [cp*s, b, h, d]
         # dv: fwd_nominal_dtype, [cp*s, b, h, d]
-        dq = torch.empty(ctx.q_shape, dtype=ctx.fwd_nominal_dtype, device=q.device)
+        dq = (
+            torch.zeros(ctx.q_shape, dtype=ctx.fwd_nominal_dtype, device=q.device)
+            if ctx.qkv_format == "thd"
+            else torch.empty(ctx.q_shape, dtype=ctx.fwd_nominal_dtype, device=q.device)
+        )
         dk = torch.zeros(
             (ctx.k_shape[0] * cp_size, *ctx.k_shape[1:]),
             dtype=ctx.fwd_nominal_dtype,
@@ -3518,19 +3746,30 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         # synchronize dkv update across steps
         dkv_update_done = torch.cuda.Event()
 
-        # gather k and v along s: [s, b, h, d] -> [cp, s, b, h, d]
+        # gather k and v along s or t: [s, b, h, d] -> [cp, s, b, h, d] or [t, h, d] -> [cp*t, h, d]
         k_ag, _ = gather_along_first_dim(k, ctx.cp_group)
         v_ag, _ = gather_along_first_dim(v, ctx.cp_group)
-        # split s: [cp, s, b, h, d] -> [cp*2, s//2, b, h, d]
-        k_ag = k_ag.view(2 * cp_size, k.shape[0] // 2, *k.shape[1:])
-        v_ag = v_ag.view(2 * cp_size, v.shape[0] // 2, *v.shape[1:])
-        # select appropriate chunks for each rank
-        chunk_ids_for_kv_ag = get_seq_chunk_ids_for_reordering_before_attn(cp_size, k.device)
-        k_ag = torch.index_select(k_ag, dim=0, index=chunk_ids_for_kv_ag)
-        v_ag = torch.index_select(v_ag, dim=0, index=chunk_ids_for_kv_ag)
-        # flatten: [cp*2, s//2, b, h, d] -> [cp*s, b, h, d]
-        k_ag = k_ag.view(-1, *k.shape[1:])
-        v_ag = v_ag.view(-1, *v.shape[1:])
+
+        if ctx.qkv_format == "thd":
+            cu_seqlens_kv_padded = ctx.cu_seqlens_kv_padded
+            thd_cu_seqlens_q_per_step = ctx.thd_cu_seqlens_q_per_step
+            # [cp*t, h, d] -> reorder to sequence order
+            # Use padded cu_seqlens (divisible by 2*cp_size) for correct reorder
+            k_ag = thd_cp_rank_order_to_sequence_order(k_ag, cu_seqlens_kv_padded, cp_size)
+            v_ag = thd_cp_rank_order_to_sequence_order(v_ag, cu_seqlens_kv_padded, cp_size)
+
+            thd_cu_seqlens_q_padded_per_step = ctx.thd_cu_seqlens_q_padded_per_step
+        else:
+            # split s: [cp, s, b, h, d] -> [cp*2, s//2, b, h, d]
+            k_ag = k_ag.view(2 * cp_size, k.shape[0] // 2, *k.shape[1:])
+            v_ag = v_ag.view(2 * cp_size, v.shape[0] // 2, *v.shape[1:])
+            # select appropriate chunks for each rank
+            chunk_ids_for_kv_ag = get_seq_chunk_ids_for_reordering_before_attn(cp_size, k.device)
+            k_ag = torch.index_select(k_ag, dim=0, index=chunk_ids_for_kv_ag)
+            v_ag = torch.index_select(v_ag, dim=0, index=chunk_ids_for_kv_ag)
+            # flatten: [cp*2, s//2, b, h, d] -> [cp*s, b, h, d]
+            k_ag = k_ag.view(-1, *k.shape[1:])
+            v_ag = v_ag.view(-1, *v.shape[1:])
         ctx.cp_stream.wait_stream(torch.cuda.current_stream())
 
         # set up flash_attn_bwd
@@ -3568,37 +3807,64 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         local_seq_chunk_ids = [rank, 2 * cp_size - rank - 1]
         for i in range(len(local_seq_chunk_ids) + 1):
             if i < len(local_seq_chunk_ids):
+                # FA3 uses internal per-call workspace. Consecutive AG per-step
+                # backward calls are serialized on GPU streams so that workspace
+                # lifetimes do not overlap. FusedAttention keeps the existing
+                # per-step overlap.
+                if i > 0 and ctx.use_flash_attn_3:
+                    flash_attn_streams[i].wait_stream(flash_attn_streams[i - 1])
                 with torch.cuda.stream(flash_attn_streams[i]):
-                    # [b, 2, s//2, h, d] -> [b, s//2, h, d]
-                    # [2, s//2, b, h, d] -> [s//2, b, h, d]
-                    q_part = q.select(seq_dim_qkv, i).contiguous()
-                    seq_start_idx, seq_end_idx = (
-                        kv_seq_range_per_step[i][0],
-                        kv_seq_range_per_step[i][1],
-                    )
-                    max_seqlen_kv = seq_end_idx - seq_start_idx
-                    # select range: [s_range, b, h, d]
-                    k_part, v_part = [x[seq_start_idx:seq_end_idx] for x in [k_ag, v_ag]]
-                    # reshape to original format: [b, s_range, h, d] or [s_range, b, h, d]
-                    k_part, v_part = [
-                        x.movedim(0, seq_dim_qkv).contiguous() for x in [k_part, v_part]
-                    ]
-                    # [b, 2, s//2, h, d] -> [b, s//2, h, d]
-                    # [2, s//2, b, h, d] -> [s//2, b, h, d]
-                    out_part = out.select(seq_dim_o, i).contiguous()
-                    dout_part = dout.select(seq_dim_o, i).contiguous()
+                    if ctx.qkv_format == "thd":
+                        # THD passes full Q/dout; per-step cu_seqlens select chunks.
+                        q_part = q
+                        k_part = k_ag
+                        v_part = v_ag
+                        kv_range, _ = get_kv_seq_info_after_all_gather(
+                            local_seq_chunk_ids[i],
+                            cp_size,
+                            ctx.max_seqlen_q,
+                            ctx.max_seqlen_kv,
+                            ctx.window_size,
+                            "causal" in ctx.attn_mask_type,
+                        )
+                        max_seqlen_kv = kv_range[1]
+                        out_part = out
+                        dout_part = dout
+                    else:
+                        # [b, 2, s//2, h, d] -> [b, s//2, h, d]
+                        # [2, s//2, b, h, d] -> [s//2, b, h, d]
+                        q_part = q.select(seq_dim_qkv, i).contiguous()
+                        seq_start_idx, seq_end_idx = (
+                            kv_seq_range_per_step[i][0],
+                            kv_seq_range_per_step[i][1],
+                        )
+                        max_seqlen_kv = seq_end_idx - seq_start_idx
+                        # select range: [s_range, b, h, d]
+                        k_part, v_part = [x[seq_start_idx:seq_end_idx] for x in [k_ag, v_ag]]
+                        # reshape to original format: [b, s_range, h, d] or [s_range, b, h, d]
+                        k_part, v_part = [
+                            x.movedim(0, seq_dim_qkv).contiguous() for x in [k_part, v_part]
+                        ]
+                        # [b, 2, s//2, h, d] -> [b, s//2, h, d]
+                        # [2, s//2, b, h, d] -> [s//2, b, h, d]
+                        out_part = out.select(seq_dim_o, i).contiguous()
+                        dout_part = dout.select(seq_dim_o, i).contiguous()
+
                     if ctx.use_fused_attention:
-                        if ctx.fp8 and ctx.qkv_layout == "t3hd":
-                            aux_ctx_tensors = [
-                                softmax_lse_per_step[i],
-                                softmax_lse_per_step[i],
-                                rng_states[i],
-                            ]
+                        # Set per-step parameters for THD
+                        if ctx.qkv_format == "thd":
+                            cu_seqlens_q_ = thd_cu_seqlens_q_per_step[i]
+                            cu_seqlens_q_padded_ = thd_cu_seqlens_q_padded_per_step[i]
+                            cu_seqlens_kv_padded_ = cu_seqlens_kv_padded
                         else:
-                            aux_ctx_tensors = [
-                                softmax_lse_per_step[i],
-                                rng_states[i],
-                            ]
+                            cu_seqlens_q_ = cu_seqlens_q
+                            cu_seqlens_q_padded_ = cu_seqlens_q_padded
+                            cu_seqlens_kv_padded_ = cu_seqlens_kv_per_step[i]
+
+                        aux_ctx_tensors = [
+                            softmax_lse_per_step[i],
+                            rng_states[i],
+                        ]
                         fused_attn_backend = tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
                         fp8_meta_kwargs = {}
                         new_qkv_layout = ctx.qkv_layout
@@ -3648,7 +3914,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         dq_per_step[i], dk_per_step[i], dv_per_step[i], *_ = fused_attn_bwd(
                             ctx.max_seqlen_q,
                             max_seqlen_kv,
-                            cu_seqlens_q,
+                            cu_seqlens_q_,
                             cu_seqlens_kv_per_step[i],
                             q_part,
                             k_part,
@@ -3658,8 +3924,8 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             ctx.fwd_nominal_dtype,
                             aux_ctx_tensors,
                             fused_attn_backend,
-                            cu_seqlens_q_padded=cu_seqlens_q_padded,
-                            cu_seqlens_kv_padded=cu_seqlens_kv_per_step[i],
+                            cu_seqlens_q_padded=cu_seqlens_q_padded_,
+                            cu_seqlens_kv_padded=cu_seqlens_kv_padded_,
                             attn_scale=ctx.softmax_scale,
                             dropout=ctx.dropout_p,
                             qkv_layout=new_qkv_layout,
@@ -3684,20 +3950,44 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                                 for x in [dq_per_step[i], dk_per_step[i], dv_per_step[i]]
                             ]
                     else:
-                        dq_per_step[i], dk_per_step[i], dv_per_step[i] = [
-                            torch.empty_like(x) for x in [q_part, k_part, v_part]
-                        ]
+                        if ctx.use_flash_attn_3 and ctx.qkv_format == "thd":
+                            dq_per_step[i], dk_per_step[i], dv_per_step[i] = [
+                                torch.zeros_like(x) for x in [q_part, k_part, v_part]
+                            ]
+                        else:
+                            dq_per_step[i], dk_per_step[i], dv_per_step[i] = [
+                                torch.empty_like(x) for x in [q_part, k_part, v_part]
+                            ]
+                        seqused_q = None
+                        seqused_k = None
+                        fa_cu_seqlens_q = (
+                            thd_cu_seqlens_q_per_step[i]
+                            if ctx.qkv_format == "thd"
+                            else cu_seqlens_q
+                        )
+                        fa_cu_seqlens_kv = cu_seqlens_kv_per_step[i]
+                        if ctx.use_flash_attn_3 and ctx.qkv_format == "thd":
+                            seqused_q = (
+                                thd_cu_seqlens_q_per_step[i][1:] - thd_cu_seqlens_q_per_step[i][:-1]
+                            )
+                            seqused_k = (
+                                cu_seqlens_kv_per_step[i][1:] - cu_seqlens_kv_per_step[i][:-1]
+                            )
+                            fa_cu_seqlens_q = thd_cu_seqlens_q_padded_per_step[i]
+                            fa_cu_seqlens_kv = cu_seqlens_kv_padded
                         fa_backward_args_thd = get_fa_args(
                             False,
                             ctx.use_flash_attn_3,
-                            ctx.dqkv_format,
-                            cu_seqlens_q=cu_seqlens_q,
-                            cu_seqlens_kv=cu_seqlens_kv_per_step[i],
+                            ctx.qkv_format,
+                            cu_seqlens_q=fa_cu_seqlens_q,
+                            cu_seqlens_kv=fa_cu_seqlens_kv,
                             max_seqlen_q=ctx.max_seqlen_q,
                             max_seqlen_kv=max_seqlen_kv,
                             dq=dq_per_step[i],
                             dk=dk_per_step[i],
                             dv=dv_per_step[i],
+                            seqused_q=seqused_q,
+                            seqused_k=seqused_k,
                         )
                         if not ctx.use_flash_attn_3:
                             fa_backward_kwargs["rng_state"] = rng_states[i]
@@ -3724,55 +4014,83 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             if i > 0:
                 # dq/dk/dv, dq_per_step/dk_per_step/dv_per_step: ctx.fwd_nominal_dtype
                 with torch.cuda.stream(flash_attn_streams[i - 1]):
-                    # dq: [b, 2, s//2, h, d] or [2, s//2, b, h, d]
-                    # dq_per_step[i]: [b, s//2, h, d] or [s//2, b, h, d]
-                    if ctx.dqkv_format == "bshd":
-                        dq[:, i - 1].copy_(dq_per_step[i - 1])
-                    elif ctx.dqkv_format == "sbhd":
-                        dq[i - 1].copy_(dq_per_step[i - 1])
-                    # dk/dv: [cp*s, b, h, d]
-                    # dk_per_step[i - 1]/dv_per_step[i - 1]: [s_range, b, h, d] or [b, s_range, h, d]
-                    # move s to first dim: [s_range, b, h, d]
-                    dk_per_step[i - 1], dv_per_step[i - 1] = [
-                        x.movedim(seq_dim_dqkv, 0).contiguous()
-                        for x in [dk_per_step[i - 1], dv_per_step[i - 1]]
-                    ]
-                    # wait until dkv update of last step is done
-                    if i > 1:
-                        flash_attn_streams[i - 1].wait_event(dkv_update_done)
-                    seq_start_idx, seq_end_idx = (
-                        kv_seq_range_per_step[i - 1][0],
-                        kv_seq_range_per_step[i - 1][1],
-                    )
-                    # add to dk/dv: [cp*s, b, h, d]
-                    dk[seq_start_idx:seq_end_idx].add_(dk_per_step[i - 1])
-                    dv[seq_start_idx:seq_end_idx].add_(dv_per_step[i - 1])
-                    if i < len(local_seq_chunk_ids):
-                        flash_attn_streams[i - 1].record_event(dkv_update_done)
+                    if ctx.qkv_format == "thd":
+                        # dQ: copy every sequence's valid token range from this split's dQ.
+                        tex.thd_copy_valid_tokens_from_per_split_to_rank_local(
+                            dq,
+                            dq_per_step[i - 1],
+                            thd_cu_seqlens_q_padded_per_step[i - 1],
+                            thd_cu_seqlens_q_per_step[i - 1],
+                        )
+                        # dK/dV: accumulate full packed tensors. Padded entries may accumulate,
+                        # but valid token entries are independent and only valid entries are
+                        # reordered after the per-step reductions.
+                        if i > 1:
+                            flash_attn_streams[i - 1].wait_event(dkv_update_done)
+                        dk.add_(dk_per_step[i - 1])
+                        dv.add_(dv_per_step[i - 1])
+                        if i < len(local_seq_chunk_ids):
+                            flash_attn_streams[i - 1].record_event(dkv_update_done)
+                    else:
+                        # dq: [b, 2, s//2, h, d] or [2, s//2, b, h, d]
+                        # dq_per_step[i]: [b, s//2, h, d] or [s//2, b, h, d]
+                        if ctx.dqkv_format == "bshd":
+                            dq[:, i - 1].copy_(dq_per_step[i - 1])
+                        elif ctx.dqkv_format == "sbhd":
+                            dq[i - 1].copy_(dq_per_step[i - 1])
+                        # dk/dv: [cp*s, b, h, d]
+                        # dk_per_step[i - 1]/dv_per_step[i - 1]: [s_range, b, h, d] or [b, s_range, h, d]
+                        # move s to first dim: [s_range, b, h, d]
+                        dk_per_step[i - 1], dv_per_step[i - 1] = [
+                            x.movedim(seq_dim_dqkv, 0).contiguous()
+                            for x in [dk_per_step[i - 1], dv_per_step[i - 1]]
+                        ]
+                        # wait until dkv update of last step is done
+                        if i > 1:
+                            flash_attn_streams[i - 1].wait_event(dkv_update_done)
+                        seq_start_idx, seq_end_idx = (
+                            kv_seq_range_per_step[i - 1][0],
+                            kv_seq_range_per_step[i - 1][1],
+                        )
+                        # add to dk/dv: [cp*s, b, h, d]
+                        dk[seq_start_idx:seq_end_idx].add_(dk_per_step[i - 1])
+                        dv[seq_start_idx:seq_end_idx].add_(dv_per_step[i - 1])
+                        if i < len(local_seq_chunk_ids):
+                            flash_attn_streams[i - 1].record_event(dkv_update_done)
 
         torch.cuda.current_stream().wait_stream(ctx.cp_stream)
 
-        # split s:[cp*s, b, h, d] -> [cp*2, s//2, b, h, d]
-        dk = dk.view(2 * cp_size, -1, *dk.shape[-3:])
-        dv = dv.view(2 * cp_size, -1, *dv.shape[-3:])
-        # put back together the right chunks for each rank
-        chunk_ids_for_kv_ag = get_seq_chunk_ids_for_reordering_after_attn(cp_size, dk.device)
-        dk = torch.index_select(dk, dim=0, index=chunk_ids_for_kv_ag)
-        dv = torch.index_select(dv, dim=0, index=chunk_ids_for_kv_ag)
-        # flatten: [cp*2, s//2, b, h, d] -> [cp*s, b, h, d]
-        dk = dk.view(-1, *dk.shape[-3:])
-        dv = dv.view(-1, *dv.shape[-3:])
-        # reduce scatter: [cp*s, b, h, d] -> [s, b, h, d]
-        dk, _ = reduce_scatter_along_first_dim(dk, ctx.cp_group)
-        dv, _ = reduce_scatter_along_first_dim(dv, ctx.cp_group)
+        if ctx.qkv_format == "thd":
+            # Reorder dK/dV from sequence order back to dual-chunk CP rank order,
+            # then reduce-scatter across CP ranks.
+            # Use padded cu_seqlens for correct slice boundaries.
+            dk = thd_sequence_order_to_cp_rank_order(dk, cu_seqlens_kv_padded, cp_size)
+            dv = thd_sequence_order_to_cp_rank_order(dv, cu_seqlens_kv_padded, cp_size)
+            dk, _ = reduce_scatter_along_first_dim(dk, ctx.cp_group)
+            dv, _ = reduce_scatter_along_first_dim(dv, ctx.cp_group)
+            # dQ is already [t_rank, h, d], no reshape needed
+        else:
+            # split s:[cp*s, b, h, d] -> [cp*2, s//2, b, h, d]
+            dk = dk.view(2 * cp_size, -1, *dk.shape[-3:])
+            dv = dv.view(2 * cp_size, -1, *dv.shape[-3:])
+            # put back together the right chunks for each rank
+            chunk_ids_for_kv_ag = get_seq_chunk_ids_for_reordering_after_attn(cp_size, dk.device)
+            dk = torch.index_select(dk, dim=0, index=chunk_ids_for_kv_ag)
+            dv = torch.index_select(dv, dim=0, index=chunk_ids_for_kv_ag)
+            # flatten: [cp*2, s//2, b, h, d] -> [cp*s, b, h, d]
+            dk = dk.view(-1, *dk.shape[-3:])
+            dv = dv.view(-1, *dv.shape[-3:])
+            # reduce scatter: [cp*s, b, h, d] -> [s, b, h, d]
+            dk, _ = reduce_scatter_along_first_dim(dk, ctx.cp_group)
+            dv, _ = reduce_scatter_along_first_dim(dv, ctx.cp_group)
 
-        # reshape to original format:
-        # dq: [b, 2, s//2, h, d] or [2, s//2, b, h, d] -> [b, s, h, d] or [s, b, h, d]
-        # dk: [s, b, h, d] -> [b, s, h, d] or [s, b, h, d]
-        # dv: [s, b, h, d] -> [b, s, h, d] or [s, b, h, d]
-        dq = dq.view(*dq.shape[:seq_dim_dqkv], -1, *dq.shape[(seq_dim_dqkv + 2) :])
-        dk = dk.movedim(0, seq_dim_dqkv).contiguous()
-        dv = dv.movedim(0, seq_dim_dqkv).contiguous()
+            # reshape to original format:
+            # dq: [b, 2, s//2, h, d] or [2, s//2, b, h, d] -> [b, s, h, d] or [s, b, h, d]
+            # dk: [s, b, h, d] -> [b, s, h, d] or [s, b, h, d]
+            # dv: [s, b, h, d] -> [b, s, h, d] or [s, b, h, d]
+            dq = dq.view(*dq.shape[:seq_dim_dqkv], -1, *dq.shape[(seq_dim_dqkv + 2) :])
+            dk = dk.movedim(0, seq_dim_dqkv).contiguous()
+            dv = dv.movedim(0, seq_dim_dqkv).contiguous()
 
         # quantize if necessary
         if ctx.fp8 and ctx.is_input_fp8:
@@ -3784,6 +4102,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             dq,
             dk,
             dv,
+            None,
+            None,
+            None,
             None,
             None,
             None,
@@ -3842,6 +4163,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         cp_group,
         cp_stream,
         quantizers,
+        pad_between_seqs,
         use_flash_attn_3,
         softmax_type,
         softmax_offset,
@@ -3937,13 +4259,14 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
         if fp8_meta is not None and fp8_meta.get("local_recipes", None) is not None:
             fp8_recipe = fp8_meta["local_recipes"][0]
+        _reject_custom_recipe_under_cp(fp8, fp8_recipe)
 
         fwd_nominal_dtype = q.dtype
         fused_attn_backend = None
         max_logit = None
 
         QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer = (
-            dpa_utils.get_attention_quantizers(fp8, fp8_recipe, quantizers)
+            dpa_utils.get_attention_quantizers(fp8, quantizers)
         )
 
         q_fp8, k_fp8, v_fp8 = (None, None, None)
@@ -4076,14 +4399,25 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                     out_f16 = out_.dequantize(dtype=fwd_nominal_dtype)
                 out_part = out_f16
         else:
+            seqused_q = None
+            seqused_k = None
+            fa_cu_seqlens_q = cu_seqlens_q
+            fa_cu_seqlens_kv = cu_seqlens_kv
+            if pad_between_seqs and use_flash_attn_3 and qkv_format == "thd":
+                seqused_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+                seqused_k = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
+                fa_cu_seqlens_q = cu_seqlens_q_padded
+                fa_cu_seqlens_kv = cu_seqlens_kv_padded
             fa_forward_args_thd = get_fa_args(
                 True,
                 use_flash_attn_3,
                 qkv_format,
-                cu_seqlens_q=cu_seqlens_q,
-                cu_seqlens_kv=cu_seqlens_kv,
+                cu_seqlens_q=fa_cu_seqlens_q,
+                cu_seqlens_kv=fa_cu_seqlens_kv,
                 max_seqlen_q=max_seqlen_q,
                 max_seqlen_kv=max_seqlen_kv,
+                seqused_q=seqused_q,
+                seqused_k=seqused_k,
             )
             fa_outputs = flash_attn_fwd(
                 q_part,
@@ -4093,9 +4427,9 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 causal=causal,
                 **fa_forward_kwargs,
             )
-            if not fa_utils.v2_7_0_plus:
+            if not use_flash_attn_3 and not fa_utils.v2_7_0_plus:
                 out_, softmax_lse = fa_outputs[4], fa_outputs[5]
-                rng_state = fa_outputs[7] if not use_flash_attn_3 else None
+                rng_state = fa_outputs[7]
             else:
                 out_, softmax_lse = fa_outputs[0], fa_outputs[1]
                 rng_state = fa_outputs[3] if not use_flash_attn_3 else None
@@ -4220,6 +4554,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         ctx.fwd_nominal_dtype = fwd_nominal_dtype
         ctx.fp8_recipe = fp8_recipe
         ctx.use_flash_attn_3 = use_flash_attn_3
+        ctx.pad_between_seqs = pad_between_seqs
         ctx.softmax_type = softmax_type
 
         ctx.dQKV_quantizer = dQKV_quantizer
@@ -4408,18 +4743,32 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 dq, dk, dv = [x._data for x in [dq, dk, dv]]
         else:
             softmax_lse, rng_state = aux_ctx_tensors
-            dq, dk, dv = [torch.empty_like(x) for x in [q, k, v]]
+            if ctx.pad_between_seqs:
+                dq, dk, dv = [torch.zeros_like(x) for x in [q, k, v]]
+            else:
+                dq, dk, dv = [torch.empty_like(x) for x in [q, k, v]]
+            seqused_q = None
+            seqused_k = None
+            fa_cu_seqlens_q = cu_seqlens_q
+            fa_cu_seqlens_kv = cu_seqlens_kv
+            if ctx.pad_between_seqs and ctx.use_flash_attn_3 and ctx.dqkv_format == "thd":
+                seqused_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+                seqused_k = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
+                fa_cu_seqlens_q = cu_seqlens_q_padded
+                fa_cu_seqlens_kv = cu_seqlens_kv_padded
             fa_backward_args_thd = get_fa_args(
                 False,
                 ctx.use_flash_attn_3,
                 ctx.dqkv_format,
-                cu_seqlens_q=cu_seqlens_q,
-                cu_seqlens_kv=cu_seqlens_kv,
+                cu_seqlens_q=fa_cu_seqlens_q,
+                cu_seqlens_kv=fa_cu_seqlens_kv,
                 max_seqlen_q=ctx.max_seqlen_q,
                 max_seqlen_kv=ctx.max_seqlen_kv,
                 dq=dq,
                 dk=dk,
                 dv=dv,
+                seqused_q=seqused_q,
+                seqused_k=seqused_k,
             )
             if not ctx.use_flash_attn_3:
                 fa_backward_kwargs["rng_state"] = rng_state
@@ -4516,6 +4865,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             None,
             None,
             d_bias,
+            None,
             None,
             None,
             None,
@@ -4722,13 +5072,12 @@ def attn_forward_func_with_cp(
         ]
         out = AttnFuncWithCPAndKVP2P.apply(*args)
     elif cp_comm_type == "all_gather":
-        args.pop(5)
-        args.pop(8)
         args += [
             window_size,
             cp_group,
             cp_stream,
             use_flash_attn_3,
+            pad_between_seqs,
             fp8,
             fp8_meta,
             quantizers,
@@ -4743,6 +5092,7 @@ def attn_forward_func_with_cp(
             cp_group,
             cp_stream,
             quantizers,
+            pad_between_seqs,
             use_flash_attn_3,
             softmax_type,
             softmax_offset,

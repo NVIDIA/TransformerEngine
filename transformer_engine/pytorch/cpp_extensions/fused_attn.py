@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Python interface for fused attention extensions"""
+
 import math
 from typing import Tuple, List, Union, Optional
 import torch
@@ -16,8 +17,7 @@ from transformer_engine_torch import (
     NVTE_Fused_Attn_Backend,
 )
 from ..quantized_tensor import Quantizer
-from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx
-
+from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx, DType
 
 __all__ = [
     "fused_attn_fwd",
@@ -26,12 +26,12 @@ __all__ = [
 
 
 TORCH_DType = {
-    tex.DType.kFloat8E4M3: torch.uint8,
-    tex.DType.kFloat8E5M2: torch.uint8,
-    tex.DType.kFloat16: torch.half,
-    tex.DType.kBFloat16: torch.bfloat16,
-    tex.DType.kFloat32: torch.float32,
-    tex.DType.kInt32: torch.int32,
+    DType.kFloat8E4M3: torch.uint8,
+    DType.kFloat8E5M2: torch.uint8,
+    DType.kFloat16: torch.half,
+    DType.kBFloat16: torch.bfloat16,
+    DType.kFloat32: torch.float32,
+    DType.kInt32: torch.int32,
 }
 
 QKVFormat = {
@@ -98,13 +98,12 @@ SoftmaxType = {
 }
 
 FusedAttnBackend = {
-    "F16_max512_seqlen": NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen,
     "F16_arbitrary_seqlen": NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
     "FP8": NVTE_Fused_Attn_Backend.NVTE_FP8,
     "No_Backend": NVTE_Fused_Attn_Backend.NVTE_No_Backend,
 }
 
-BACKEND_F16m512_FP8_THREADS_PER_CTA = 128
+BACKEND_FP8_THREADS_PER_CTA = 128
 BACKEND_F16arb_ELTS_PER_THREADS = 16
 
 META_QKV = FP8FwdTensorIdx.GEMM1_OUTPUT
@@ -174,7 +173,7 @@ def fused_attn_fwd(
                 input tensor K; shape sbhd, bshd or thd (see `qkv_layout` for details)
     v : torch.Tensor
                 input tensor V; shape sbhd, bshd or thd (see `qkv_layout` for details)
-    fake_dtype : tex.DType
+    fake_dtype : DType
                 data type of Q, K and V - in case of high precision, fake dtype in case of FP8;
                 in torch.dtype
     fused_attention_backend : tex.NVTE_Fused_Attn_Backend
@@ -249,22 +248,17 @@ def fused_attn_fwd(
                 if is_training is False, aux_ctx_tensors = None
 
                 softmax-related tensors:
-                    1. if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]
-                       softmax: torch.Tensor
-                           Softmax(Q*K.T)
-                           shape [batch_size, num_heads, max_seqlen_q, max_seqlen_kv], dtype float32
-                    2. if fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
+                    1. if fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
                        softmaxStats: torch.Tensor
                            log(sum(e^(x - max(x)))), where x=Q*K.T
                            shape [batch_size, num_heads, max_seqlen_q, 1], dtype float32
-                    3. if fused_attention_backend == FusedAttnBackend["FP8"]
-                       M: torch.Tensor
-                           max(Q*K.T)
+                       Max: torch.Tensor, only when return_max_logit is True
                            shape [batch_size, num_heads, max_seqlen_q, 1], dtype float32
-                       ZInv: torch.Tensor, only allocated for T3HD path
-                           1/sum(e^(x - max(x))), where x=Q*K.T
+                    2. if fused_attention_backend == FusedAttnBackend["FP8"]
+                       softmaxStats: torch.Tensor
+                           log(sum(e^(x - max(x)))), where x=Q*K.T
                            shape [batch_size, num_heads, max_seqlen_q, 1], dtype float32
-                rng_state: torch.Tensor, optional, if backend is not F16_max512_seqlen
+                rng_state: torch.Tensor
                     state of the random number generator;
                     [seed, offset], dtype uint64
     max_logit : if return_max_logit = True, shape [h] and same data type as O; otherwise None
@@ -299,24 +293,17 @@ def fused_attn_fwd(
             f" q.dtype={q.dtype}, backend={fused_attention_backend}."
         )
 
-    # BF16/FP16 fused attention API from fmha_v1 apex
-    if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
-        rng_elts_per_thread = (
-            max_seqlen_q * max_seqlen_kv + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1
-        ) // BACKEND_F16m512_FP8_THREADS_PER_CTA
-    # BF16/FP16 fused attention API from fmha_v2
-    elif fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
+    if fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
         rng_elts_per_thread = BACKEND_F16arb_ELTS_PER_THREADS
     # FP8 fused attention API from fmha_v2
     elif fused_attention_backend == FusedAttnBackend["FP8"]:
         rng_elts_per_thread = (
-            max_seqlen_q * max_seqlen_q + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1
-        ) // BACKEND_F16m512_FP8_THREADS_PER_CTA
+            max_seqlen_q * max_seqlen_q + BACKEND_FP8_THREADS_PER_CTA - 1
+        ) // BACKEND_FP8_THREADS_PER_CTA
     else:
         raise ValueError(f"Unsupported backend {fused_attention_backend}")
 
     # execute kernel
-
     output_tensors = tex.fused_attn_fwd(
         max_seqlen_q,
         max_seqlen_kv,
@@ -376,25 +363,18 @@ def fused_attn_fwd(
                 max_tensor = max_tensor.masked_fill(~valid, float("-inf"))
             elif max_tensor.ndim == 3:
                 if cu_seqlens_q_padded is not None:
-                    # For THD + pad_between_seqs=True + non-sm120 + cuDNN>9.6, Max tensor is [tq, h, 1]
-                    # and padding positions could be uninitialized. Exclude those padded positions when
-                    # computing max_logit.
+                    # Exclude padding; CP may pass nonzero padded offsets.
                     actual_seqlens = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).to(
                         device=max_tensor.device
                     )
-                    padded_seqlens = (cu_seqlens_q_padded[1:] - cu_seqlens_q_padded[:-1]).to(
-                        device=max_tensor.device
-                    )
-                    pad_lens = (padded_seqlens - actual_seqlens).to(device=max_tensor.device)
-                    b = pad_lens.shape[0]
-
-                    # Stack [actual, pad] per batch into counts: e.g. [3,1, 3,1, 2,2, 7,1]
-                    counts = torch.stack([actual_seqlens, pad_lens], dim=1).flatten()
-                    # Tile [T, F] per sequence: [T,F, T,F, T,F, T,F]
-                    values = torch.tensor([True, False], device=max_tensor.device).repeat(b)
-                    # Expand: T×3, F×1, T×3, F×1, T×2, F×2, T×7, F×1 → TTTF|TTTF|TTFF|TTTTTTTF
-                    valid = torch.repeat_interleave(values, counts)
-                    # Finally, replace invalid (F) positions with -inf
+                    tq = max_tensor.shape[0]
+                    starts = cu_seqlens_q_padded[:-1].to(device=max_tensor.device)
+                    ends = (starts + actual_seqlens).clamp(max=tq)
+                    delta = torch.zeros(tq + 1, dtype=torch.int32, device=max_tensor.device)
+                    updates = torch.ones_like(starts, dtype=torch.int32)
+                    delta.scatter_add_(0, starts.clamp(max=tq), updates)
+                    delta.scatter_add_(0, ends, -updates)
+                    valid = delta[:-1].cumsum(0) > 0
                     max_tensor = max_tensor.masked_fill(~valid.view(-1, 1, 1), float("-inf"))
 
         # Max -> max_logit [h]
@@ -467,12 +447,12 @@ def fused_attn_bwd(
     d_o : torch.Tensor
                 input tensor dO (gradient of O); same data type as Q, K and V;
                 same shape as Q
-    fake_dtype : tex.DType
+    fake_dtype : DType
                 data type of Q, K and V - in case of high precision, fake dtype in case of FP8;
                 in torch.dtype
     aux_ctx_tensors : List[torch.Tensor]
                 auxiliary output tensors of the forward pass when its is_training is True,
-                e.g. aux_ctx_tensors = [M, ZInv, rng_state]
+                e.g. aux_ctx_tensors = [S, Max, rng_state]
     fused_attention_backend : tex.NVTE_Fused_Attn_Backend
                 please see FusedAttention module for details on supported backends.
     cu_seqlens_q_padded : torch.Tensor, default = None
@@ -566,13 +546,12 @@ def fused_attn_bwd(
             f" q.dtype={q.dtype}, backend={fused_attention_backend}."
         )
 
-    if fused_attention_backend != FusedAttnBackend["F16_max512_seqlen"]:
-        if len(aux_ctx_tensors) < 1:
-            raise ValueError(
-                "aux_ctx_tensors must contain rng_state as its last element,"
-                f" but got len(aux_ctx_tensors)={len(aux_ctx_tensors)}"
-                f" for backend={fused_attention_backend}."
-            )
+    if len(aux_ctx_tensors) < 1:
+        raise ValueError(
+            "aux_ctx_tensors must contain rng_state as its last element,"
+            f" but got len(aux_ctx_tensors)={len(aux_ctx_tensors)}"
+            f" for backend={fused_attention_backend}."
+        )
 
     output_tensors = tex.fused_attn_bwd(
         max_seqlen_q,

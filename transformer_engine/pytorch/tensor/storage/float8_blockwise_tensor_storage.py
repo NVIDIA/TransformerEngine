@@ -6,15 +6,15 @@
 
 from __future__ import annotations
 import math
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, Union
 import torch
 
 import transformer_engine_torch as tex
-from transformer_engine_torch import DType as TE_DType
 
 from ...quantized_tensor import QuantizedTensorStorage, Quantizer
+from .._quantization_helpers import safe_quantized_repr
 
-from ...constants import TE_DType_To_Torch
+from ...constants import TE_DType_To_Torch, DType
 
 from ...utils import _empty_tensor
 
@@ -31,7 +31,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
     _rowwise_data: Optional[torch.Tensor]
     _columnwise_data: Optional[torch.Tensor]
     _quantizer: Quantizer
-    _fp8_dtype: TE_DType
+    _fp8_dtype: DType
     _rowwise_scale_inv: Optional[torch.Tensor]
     _columnwise_scale_inv: Optional[torch.Tensor]
     _is_2D_scaled: bool
@@ -42,7 +42,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         rowwise_scale_inv: Optional[torch.Tensor],
         columnwise_data: Optional[torch.Tensor],
         columnwise_scale_inv: Optional[torch.Tensor],
-        fp8_dtype: TE_DType,
+        fp8_dtype: Union[DType, tex.DType],
         quantizer: Quantizer,
         is_2D_scaled: bool,
         *args,
@@ -57,7 +57,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         instance._rowwise_data = rowwise_data
         instance._columnwise_data = columnwise_data
         instance._quantizer = quantizer.copy() if quantizer is not None else None
-        instance._fp8_dtype = fp8_dtype
+        instance._fp8_dtype = DType.cast(fp8_dtype)
         instance._rowwise_scale_inv = rowwise_scale_inv
         instance._columnwise_scale_inv = columnwise_scale_inv
         instance._is_2D_scaled = is_2D_scaled
@@ -355,17 +355,25 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
             del _old_data
 
     def __repr__(self):
-        if self._rowwise_data is not None:
-            data = self.dequantize()
-            descriptor = "rowwise"
-        else:
-            data = self.dequantize()
-            descriptor = "columnwise"
-        return (
-            "Float8BlockwiseQTensorStorage("
-            f"fp8_dtype={self._fp8_dtype}, "
-            f"{descriptor}_scaled_data={data})"
-        )
+        try:
+            if self._rowwise_data is not None:
+                data = self.dequantize()
+                descriptor = "rowwise"
+            else:
+                data = self.dequantize()
+                descriptor = "columnwise"
+            return (
+                "Float8BlockwiseQTensorStorage("
+                f"fp8_dtype={self._fp8_dtype}, "
+                f"{descriptor}_scaled_data={data})"
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            return safe_quantized_repr(
+                self,
+                "Float8BlockwiseQTensorStorage",
+                extras={"is_2D_scaled": self._is_2D_scaled},
+                error=exc,
+            )
 
     def update_usage(
         self, rowwise_usage: Optional[bool] = None, columnwise_usage: Optional[bool] = None

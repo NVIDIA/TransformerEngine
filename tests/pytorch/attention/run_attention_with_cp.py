@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 
+import copy
 import os
 import sys
 import logging
@@ -13,6 +14,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.context_parallel
 )
 from transformer_engine.pytorch.attention.dot_product_attention.utils import combine_and_quantize
 import transformer_engine_torch as tex
+from transformer_engine.pytorch import DType
 from test_attention_with_cp import model_configs_flash_attn, model_configs_fused_attn
 from transformer_engine.pytorch import (
     autocast,
@@ -29,6 +31,15 @@ from transformer_engine.common.recipe import (
 )
 from utils import ModelConfig, compare_and_assert
 
+# Pool mode (NVTE_CP_POOL_PG=1) only: shared CP collective groups, created once
+# per pool by run_attention_with_cp_pool.main() and reused across every case in
+# that pool. world_size and the rank set don't change per case, so re-creating
+# these per call would be wasted NCCL setup (~50-100 ms each). Single-shot
+# subprocess mode leaves these None / [] and run_dpa_with_cp creates/destroys
+# its own groups inline.
+_pool_cp_comm_group = None
+_pool_cp_comm_sub_groups: list = []
+
 dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
 
 
@@ -37,6 +48,7 @@ def generate_input_shapes(
     config: ModelConfig,
     world_size: int,
     kernel_backend: str,
+    fa_pad_between_seqs: str = "False",
 ):
     if qkv_format == "bshd":
         q_input_shape = (
@@ -105,9 +117,12 @@ def generate_input_shapes(
         ).cuda()
         cu_seqlens_q = torch.clone(cu_seqlens_q_padded)
 
-        # Since FlashAttention doesn't support pad b/w sequences, and FusedAttention does,
-        # cu_seqlens_q is updated to reflect non-padded lengths for FusedAttention only.
-        if kernel_backend == "FusedAttention":
+        # Generate padded data (cu_seqlens_q reflects non-padded lengths, so it
+        # differs from cu_seqlens_q_padded) for FusedAttention always, and for
+        # FlashAttention only when its test param requests it. DPA auto-detects
+        # pad_between_seqs downstream from the cu_seqlens_q vs cu_seqlens_q_padded
+        # mismatch.
+        if kernel_backend == "FusedAttention" or fa_pad_between_seqs == "True":
             cu_seqlens_q[1:] = seqlens_q.cumsum(0, dtype=torch.int32).cuda()
 
         # NOTE: In case of Cross-Attention, `cu_seqlens_kv` and `cu_seqlens_kv_padded`
@@ -186,6 +201,7 @@ def run_dpa_with_cp(
     scaling_mode="delayed",
     f16_O="False",
     is_training="True",
+    fa_pad_between_seqs="False",
     deterministic="False",
     log_level=logging.WARNING,
 ):
@@ -209,10 +225,13 @@ def run_dpa_with_cp(
     os.environ["NVTE_FUSED_ATTN"] = "0"
     if kernel_backend == "FlashAttention":
         os.environ["NVTE_FLASH_ATTN"] = "1"
-        config = model_configs_flash_attn[model]
+        # Deep-copy: the module-level dict is shared across pool cases; the
+        # THD branch below rewrites attn_mask_type in place, which would
+        # otherwise leak into subsequent cases reusing the same model key.
+        config = copy.deepcopy(model_configs_flash_attn[model])
     if kernel_backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
-        config = model_configs_fused_attn[model]
+        config = copy.deepcopy(model_configs_fused_attn[model])
     assert config.attn_mask_type in [
         "causal",
         "no_mask",
@@ -226,6 +245,9 @@ def run_dpa_with_cp(
     # set up distributed group
     rank = int(os.getenv("RANK", "0"))
     world_size = int(os.getenv("WORLD_SIZE", "1"))
+    # When NVTE_CP_POOL_PG=1, the pool runner owns the lifecycle of the main
+    # process group across many cases; here we only reuse it.
+    _pool_managed_pg = os.getenv("NVTE_CP_POOL_PG", "0") == "1"
     if dist.is_initialized():
         world_size = dist.get_world_size()
         rank = dist.get_rank()
@@ -234,25 +256,35 @@ def run_dpa_with_cp(
         device = rank % device_count
         torch.cuda.set_device(device)
     logging.info(f"[Rank {rank}] Setup: world_size {world_size}")
-    dist.init_process_group(backend="nccl", world_size=world_size, rank=rank)
+    if not _pool_managed_pg:
+        dist.init_process_group(backend="nccl", world_size=world_size, rank=rank)
 
-    # set up communication group for CP
+    # Set up communication group for CP. In pool mode, the pool worker has
+    # already pre-created world-scoped and a2a+p2p sub-groups once and stashed
+    # them in module-level pointers; we reuse those and the pool destroys them
+    # at shutdown. In single-shot mode we create them per call and destroy in
+    # the finally below.
     cp_comm_ranks = range(world_size)
     assert rank in cp_comm_ranks
-    cp_comm_group = dist.new_group(cp_comm_ranks, backend="nccl")
-    if cp_comm_type == "a2a+p2p":
-        assert world_size % 2 == 0, (
-            "{cp_comm_type=} requires world_size % 2 = 0 as it assumes the a2a level has cp_size"
-            " = 2."
-        )
-        cp_comm_sub_ranks = [range(i * 2, (i + 1) * 2) for i in range(world_size // 2)]
-        cp_comm_sub_ranks += [range(i, world_size, 2) for i in range(2)]
-        cp_comm_sub_groups = []
-        for sub_ranks in cp_comm_sub_ranks:
-            sub_group = dist.new_group(sub_ranks, backend="nccl")
-            if rank in sub_ranks:
-                cp_comm_sub_groups.append(sub_group)
-
+    _reusing_pool_groups = _pool_managed_pg and _pool_cp_comm_group is not None
+    cp_comm_group = None
+    cp_comm_sub_groups: list = []
+    if _reusing_pool_groups:
+        cp_comm_group = _pool_cp_comm_group
+        cp_comm_sub_groups = _pool_cp_comm_sub_groups if cp_comm_type == "a2a+p2p" else []
+    else:
+        cp_comm_group = dist.new_group(cp_comm_ranks, backend="nccl")
+        if cp_comm_type == "a2a+p2p":
+            assert world_size % 2 == 0, (
+                "{cp_comm_type=} requires world_size % 2 = 0 as it assumes the a2a level has"
+                " cp_size = 2."
+            )
+            cp_comm_sub_ranks = [range(i * 2, (i + 1) * 2) for i in range(world_size // 2)]
+            cp_comm_sub_ranks += [range(i, world_size, 2) for i in range(2)]
+            for sub_ranks in cp_comm_sub_ranks:
+                sub_group = dist.new_group(sub_ranks, backend="nccl")
+                if rank in sub_ranks:
+                    cp_comm_sub_groups.append(sub_group)
     if dtype == "fp8":
         if scaling_mode == "delayed":
             fp8_recipe = DelayedScaling(fp8_dpa=fp8_dpa, fp8_mha=fp8_mha)
@@ -288,7 +320,7 @@ def run_dpa_with_cp(
         cu_seqlens_kv,
         cu_seqlens_q_padded,
         cu_seqlens_kv_padded,
-    ) = generate_input_shapes(qkv_format, config, world_size, kernel_backend)
+    ) = generate_input_shapes(qkv_format, config, world_size, kernel_backend, fa_pad_between_seqs)
     q_orig = torch.clamp(torch.randn(q_input_shape, dtype=dtypes[dtype]), min=-1, max=1).cuda()
     k_orig = torch.clamp(torch.randn(k_input_shape, dtype=dtypes[dtype]), min=-1, max=1).cuda()
     v_orig = torch.clamp(torch.randn(v_input_shape, dtype=dtypes[dtype]), min=-1, max=1).cuda()
@@ -297,34 +329,34 @@ def run_dpa_with_cp(
     ).cuda()
     if scaling_mode == "delayed":
         qkv_quantizer = Float8Quantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=DType.kFloat8E4M3,
             scale=torch.tensor([1], dtype=torch.float32).cuda(),
             amax=torch.tensor([0], dtype=torch.float32).cuda(),
         )
         dout_quantizer = Float8Quantizer(
-            fp8_dtype=tex.DType.kFloat8E5M2,
+            fp8_dtype=DType.kFloat8E5M2,
             scale=torch.tensor([1], dtype=torch.float32).cuda(),
             amax=torch.tensor([0], dtype=torch.float32).cuda(),
         )
     if scaling_mode == "current":
         qkv_quantizer = Float8CurrentScalingQuantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=DType.kFloat8E4M3,
             device="cuda",
         )
         dout_quantizer = Float8CurrentScalingQuantizer(
-            fp8_dtype=tex.DType.kFloat8E5M2,
+            fp8_dtype=DType.kFloat8E5M2,
             device="cuda",
         )
     if scaling_mode == "mxfp8":
         qkv_quantizer = MXFP8Quantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=DType.kFloat8E4M3,
             rowwise=True,
             columnwise=True,
         )
         qkv_quantizer.optimize_for_gemm = True
         qkv_quantizer.internal = False
         dout_quantizer = MXFP8Quantizer(
-            fp8_dtype=tex.DType.kFloat8E5M2,
+            fp8_dtype=DType.kFloat8E5M2,
             rowwise=True,
             columnwise=True,
         )
@@ -531,11 +563,11 @@ def run_dpa_with_cp(
                 tensors_to_deq[i] = tensor.dequantize()
         if not fp8_bwd:
             tensors[0], tensors[5] = tensors_to_deq
-    for i, tensor in enumerate(tensors):
+    for tensor, name in zip(tensors, names):
         # dbias/dbias_ could be None, so skip check for it
         if tensor is not None:
-            assert torch.all(~torch.isnan(tensor)), f"{names[i]} contains NaN"
-            assert torch.all(~torch.isinf(tensor)), f"{names[i]} contains Inf"
+            assert torch.all(~torch.isnan(tensor)), f"{name} has nan values"
+            assert torch.all(~torch.isinf(tensor)), f"{name} has inf values"
     out, dq, dk, dv, dbias, out_, dq_, dk_, dv_, dbias_ = tensors
 
     ############  compare results between CP and no-CP ############
@@ -564,7 +596,10 @@ def run_dpa_with_cp(
                 seq_kv_size = dbias.shape[-1]
                 # Reshape to split seq_q dimension
                 dbias = dbias.view(
-                    *shape_before_seq, 2 * world_size, seq_q_size // (2 * world_size), seq_kv_size
+                    *shape_before_seq,
+                    2 * world_size,
+                    seq_q_size // (2 * world_size),
+                    seq_kv_size,
                 )
                 # Index select on the newly created dimension (now at position seq_q_dim)
                 dbias = dbias.index_select(seq_q_dim, seq_idx)
@@ -588,49 +623,59 @@ def run_dpa_with_cp(
         if is_training:
             dq, out = [x.index_select(0, seq_idx_q).contiguous() for x in [dq, out]]
             dk, dv = [x.index_select(0, seq_idx_kv).contiguous() for x in [dk, dv]]
-            dq_, dk_, dv_, out_ = [dq_, dk_, dv_, out_]
             cu_seqlens_q_padded = cu_seqlens_q_padded // world_size
             cu_seqlens_q = get_cu_seqlens_on_cp_rank(
                 cu_seqlens_q, cu_seqlens_q_padded, world_size, rank, True, True
             )
             cu_pads_q = cu_seqlens_q_padded - cu_seqlens_q
             num_pads_q = cu_pads_q[1:] - cu_pads_q[:-1]
-            for x in [dq, out, dq_, out_]:
-                assert torch.count_nonzero(x[cu_seqlens_q_padded[-1] :]).item() == 0
-                for b in range(config.batch_size):
-                    assert (
-                        num_pads_q[b] == 0
-                        or torch.count_nonzero(
-                            x[
-                                (cu_seqlens_q_padded[b + 1] - num_pads_q[b]) : cu_seqlens_q_padded[
-                                    b + 1
-                                ]
-                            ]
-                        ).item()
-                        == 0
-                    )
             cu_seqlens_kv_padded = cu_seqlens_kv_padded // world_size
             cu_seqlens_kv = get_cu_seqlens_on_cp_rank(
                 cu_seqlens_kv, cu_seqlens_kv_padded, world_size, rank, True, True
             )
-            cu_pads_kv = cu_seqlens_kv_padded - cu_seqlens_kv
-            num_pads_kv = cu_pads_kv[1:] - cu_pads_kv[:-1]
-            for x in [dk, dv, dk_, dv_]:
-                assert torch.count_nonzero(x[cu_seqlens_kv_padded[-1] :]).item() == 0
-                for b in range(config.batch_size):
-                    assert (
-                        num_pads_kv[b] == 0
-                        or torch.count_nonzero(
-                            x[
-                                (
-                                    cu_seqlens_kv_padded[b + 1] - num_pads_kv[b]
-                                ) : cu_seqlens_kv_padded[b + 1]
-                            ]
-                        ).item()
-                        == 0
+            num_pads_kv = (cu_seqlens_kv_padded - cu_seqlens_kv)[1:] - (
+                cu_seqlens_kv_padded - cu_seqlens_kv
+            )[:-1]
+            # FA3 leaves garbage at padding positions despite seqused_q/k (tile spillover).
+            # Forward out_ can't be pre-zeroed because FA3's custom op returns out_ as an
+            # output rather than mutating it in-place, triggering PyTorch's aliasing constraint.
+            # Backward dq/dk/dv CAN be pre-zeroed because FA3 marks them as mutated inputs.
+            if fa_pad_between_seqs == "True":
+                # out_ is a view inside the CP custom autograd Function, so in-place
+                # zeroing is blocked by PyTorch. Clone to break the view relationship.
+                out_ = out_.clone()
+                for x in [out, out_, dq]:
+                    for b in range(config.batch_size):
+                        x[
+                            cu_seqlens_q_padded[b + 1] - num_pads_q[b] : cu_seqlens_q_padded[b + 1]
+                        ] = 0.0
+                    x[cu_seqlens_q_padded[-1] :] = 0.0
+                for x in [dk, dv]:
+                    for b in range(config.batch_size):
+                        x[
+                            cu_seqlens_kv_padded[b + 1]
+                            - num_pads_kv[b] : cu_seqlens_kv_padded[b + 1]
+                        ] = 0.0
+                    x[cu_seqlens_kv_padded[-1] :] = 0.0
+                # Verify CP backward tensors have clean padding (pre-zeroed in context_parallel.py).
+                for xname, x, cu, np_ in [
+                    ("dq_", dq_, cu_seqlens_q_padded, num_pads_q),
+                    ("dk_", dk_, cu_seqlens_kv_padded, num_pads_kv),
+                    ("dv_", dv_, cu_seqlens_kv_padded, num_pads_kv),
+                ]:
+                    nnz = torch.count_nonzero(x[cu[-1] :]).item()
+                    assert nnz == 0, (
+                        f"{xname} has {nnz} nonzero values in tail padding — "
+                        "context_parallel.py should zero padding positions"
                     )
+                    for b in range(config.batch_size):
+                        if np_[b] > 0:
+                            nnz = torch.count_nonzero(x[cu[b + 1] - np_[b] : cu[b + 1]]).item()
+                            assert nnz == 0, (
+                                f"{xname} has {nnz} nonzero values in batch {b} padding — "
+                                "context_parallel.py should zero padding positions"
+                            )
         else:
-            # Forward-only: reshape only out/out_ for comparison
             out = out.index_select(0, seq_idx_q).contiguous()
             out_ = out_
 
@@ -754,7 +799,14 @@ def run_dpa_with_cp(
                         )
                 elif qkv_format == "thd":
                     compare_and_assert(
-                        t, tensors_cp[i], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol, is_fp8
+                        t,
+                        tensors_cp[i],
+                        names_no_cp[i],
+                        names_cp[i],
+                        atol,
+                        rtol,
+                        rmse_tol,
+                        is_fp8,
                     )
             else:
                 compare_and_assert(
@@ -762,8 +814,28 @@ def run_dpa_with_cp(
                 )
             logging.info(f"[Rank {rank}] CP vs no-CP: {names[i]} matches")
 
-    # destroy distribution group
-    dist.destroy_process_group()
+    # Teardown on the success path. Pool mode: cp_comm_group / cp_comm_sub_groups
+    # point at pool-shared groups owned by the pool runner (which destroys them
+    # at pool shutdown), and the main PG is also pool-owned — both branches
+    # below are no-ops. Single-shot mode: destroy what we created here. If the
+    # body above raises, we skip this — the subprocess dies at function return
+    # and NCCL releases the communicators with the process.
+    if not _reusing_pool_groups:
+        if cp_comm_group is not None:
+            try:
+                dist.destroy_process_group(cp_comm_group)
+            except Exception:
+                pass
+        for g in cp_comm_sub_groups:
+            try:
+                dist.destroy_process_group(g)
+            except Exception:
+                pass
+    if not _pool_managed_pg:
+        try:
+            dist.destroy_process_group()
+        except Exception:
+            pass
 
 
 def main(**kwargs):

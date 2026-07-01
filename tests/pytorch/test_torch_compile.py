@@ -26,17 +26,46 @@ from transformer_engine.pytorch.constants import FP8FwdTensorIdx, FP8BwdTensorId
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.ops.basic.basic_linear import BasicLinear
 from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer
+from transformer_engine.pytorch.quantization import QuantizerRole
 from transformer_engine.pytorch import (
     is_fp8_available,
     is_mxfp8_available,
     is_fp8_block_scaling_available,
     is_nvfp4_available,
 )
+from utils import recipe_id
 
 fp8_available, reason_for_no_fp8 = is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = is_mxfp8_available(return_reason=True)
 fp8_block_scaling_available = is_fp8_block_scaling_available()
 nvfp4_available = is_nvfp4_available()
+
+
+def nvfp4_row_scaled():
+    nvfp4_recipe = recipe.NVFP4BlockScaling(
+        disable_rht=True,
+        disable_stochastic_rounding=True,
+        disable_2d_quantization=True,
+        row_scaled_activation=True,
+        backward_override="dequantized",
+    )
+    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
+    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
+    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
+    return nvfp4_recipe
+
+
+def nvfp4_4over6():
+    nvfp4_recipe = recipe.NVFP4BlockScaling(
+        disable_rht=True,
+        disable_stochastic_rounding=True,
+        nvfp4_4over6="all",
+    )
+    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
+    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams(fp4_2d_quantization=True)
+    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
+    return nvfp4_recipe
+
 
 _all_recipes: list = []
 if fp8_available:
@@ -47,6 +76,8 @@ if mxfp8_available:
     _all_recipes.append(recipe.MXFP8BlockScaling())
 if nvfp4_available:
     _all_recipes.append(recipe.NVFP4BlockScaling())
+    _all_recipes.append(nvfp4_4over6())
+    _all_recipes.append(nvfp4_row_scaled())
 
 
 # ---------------------------------------------------------------------------
@@ -64,7 +95,7 @@ if _opaque_available:
         opaque value type so torch.compile can treat it as a baked-in constant."""
 
         def __init__(self, tag: str):
-            super().__init__(fp8_dtype=tex.DType.kFloat8E4M3, device=torch.device("cuda"))
+            super().__init__(fp8_dtype=te.DType.kFloat8E4M3, device=torch.device("cuda"))
             self.tag = tag
 
         def __eq__(self, other):
@@ -93,10 +124,25 @@ if _opaque_available:
     _Q = get_opaque_type_name(ToyQuantizer)
 
     def _make_qfactory(tag: str):
-        """Return a qfactory that produces ToyQuantizer instances tagged with *tag*."""
+        """Return a qfactory that produces ToyQuantizer instances tagged with *tag*.
 
-        def qfactory(role: str):
-            return ToyQuantizer(tag=f"{tag}:{role}")
+        The factory dispatches on ``QuantizerRole.tensor_type``; the roles are
+        supplied by :meth:`ToyLinear.get_quantizer_roles`.
+        """
+
+        quantizers = {
+            tensor_type: ToyQuantizer(tag=f"{tag}:{tensor_type}")
+            for tensor_type in (
+                "input",
+                "weight",
+                "output",
+                "grad_output",
+                "grad_input",
+            )
+        }
+
+        def qfactory(role: QuantizerRole):
+            return quantizers[role.tensor_type]
 
         return qfactory
 
@@ -121,6 +167,22 @@ if _opaque_available:
                 torch.empty(out_features, in_features, dtype=dtype, device=device)
             )
             torch.nn.init.normal_(self.weight)
+
+        def get_quantizer_roles(self, *, fwd: bool, num_quantizers: int):
+            # Supplying explicit roles keeps CustomRecipeState from emitting a
+            # warning (which would graph-break under fullgraph=True) and lets the
+            # qfactory dispatch per tensor slot. Order must match the module's
+            # quantizer array (FP8FwdTensorIdx / FP8BwdTensorIdx).
+            if fwd:
+                return [
+                    QuantizerRole(module_type="linear", tensor_type="input"),
+                    QuantizerRole(module_type="linear", tensor_type="weight"),
+                    QuantizerRole(module_type="linear", tensor_type="output"),
+                ]
+            return [
+                QuantizerRole(module_type="linear", tensor_type="grad_output"),
+                QuantizerRole(module_type="linear", tensor_type="grad_input"),
+            ]
 
         def _get_weight_tensors(self):
             return [self.weight]
@@ -303,7 +365,7 @@ def test_autocast_nested_custom():
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-@pytest.mark.parametrize("fp8_recipe", _all_recipes, ids=lambda r: type(r).__name__)
+@pytest.mark.parametrize("fp8_recipe", _all_recipes, ids=recipe_id)
 def test_autocast_sanity(fp8_recipe):
     """Smoke test: torch.nn.Linear inside a single te.autocast with each
     built-in recipe. Forward + backward under torch.compile(fullgraph=True)."""

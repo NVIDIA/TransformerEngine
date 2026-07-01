@@ -173,6 +173,7 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm_impl(
 
   // Filter out tensors that already have swizzled scales
   std::vector<TensorWrapper *> tensors_needing_swizzle;
+  tensors_needing_swizzle.reserve(tensors.size());
   for (auto &tensor : tensors) {
     if (!tensor.get_with_gemm_swizzled_scales()) {
       tensors_needing_swizzle.push_back(&tensor);
@@ -184,6 +185,7 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm_impl(
 
   // Determine buffer size needed for swizzled scales
   std::vector<size_t> output_scales_offsets;
+  output_scales_offsets.reserve(tensors_needing_swizzle.size());
   size_t output_scales_bytes = 0;
   for (auto &tensor : tensors_needing_swizzle) {
     const auto scales_nvte =
@@ -202,75 +204,80 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm_impl(
                                          transformer_engine::DType::kByte, false);
   uint8_t *output_scales_dptr = reinterpret_cast<uint8_t *>(getDataPtr(output_scales_pyt));
 
-  // Construct TE tensors with only scales
-  std::vector<transformer_engine::TensorWrapper> inputs_nvte, outputs_nvte;
-  for (size_t i = 0; i < tensors_needing_swizzle.size(); ++i) {
+  // Allocate input/output NVTETensors as a single batch. The first
+  // n_swizzle entries are inputs; the next n_swizzle are outputs.
+  const size_t n_swizzle = tensors_needing_swizzle.size();
+  MultiTensorWrapper nvte_tensors(2 * n_swizzle, scaling_mode);
+  NVTETensor *inputs_nvte = nvte_tensors.data();
+  NVTETensor *outputs_nvte = nvte_tensors.data() + n_swizzle;
+
+  auto set_param = [](NVTETensor t, NVTETensorParam param, void *dptr,
+                      transformer_engine::DType dtype, const NVTEShape &shape) {
+    NVTEBasicTensor data{dptr, static_cast<NVTEDType>(dtype), shape};
+    nvte_set_tensor_param_v2(t, param, &data, sizeof(data));
+  };
+
+  // Cache output scale dtype/shape per tensor so we can update the
+  // source TensorWrappers without re-reading from the output NVTETensors.
+  std::vector<transformer_engine::DType> output_scales_dtypes(n_swizzle);
+  std::vector<NVTEShape> output_scales_shapes(n_swizzle);
+
+  for (size_t i = 0; i < n_swizzle; ++i) {
     auto &tensor = *tensors_needing_swizzle[i];
-    inputs_nvte.emplace_back(scaling_mode);
-    outputs_nvte.emplace_back(scaling_mode);
-    auto &input_nvte = inputs_nvte.back();
-    auto &output_nvte = outputs_nvte.back();
-    output_nvte.set_with_gemm_swizzled_scales(true);
+    const uint8_t swizzled_flag = 1;
+    nvte_set_tensor_param_v2(outputs_nvte[i], kNVTEWithGEMMSwizzledScales, &swizzled_flag,
+                             sizeof(swizzled_flag));
     if (rowwise_usage) {
       const auto data_nvte = tensor.get_rowwise_data();
       const auto scales_nvte = tensor.get_rowwise_scale_inv();
       const auto data_dtype = static_cast<transformer_engine::DType>(data_nvte.dtype);
       const auto scales_dtype = static_cast<transformer_engine::DType>(scales_nvte.dtype);
-      input_nvte.set_rowwise_data(nullptr, data_dtype, data_nvte.shape);
-      input_nvte.set_rowwise_scale_inv(scales_nvte.data_ptr, scales_dtype, scales_nvte.shape);
-      output_nvte.set_rowwise_data(nullptr, data_dtype, data_nvte.shape);
-      output_nvte.set_rowwise_scale_inv(output_scales_dptr + output_scales_offsets[i], scales_dtype,
-                                        scales_nvte.shape);
+      output_scales_dtypes[i] = scales_dtype;
+      output_scales_shapes[i] = scales_nvte.shape;
+      set_param(inputs_nvte[i], kNVTERowwiseData, nullptr, data_dtype, data_nvte.shape);
+      set_param(inputs_nvte[i], kNVTERowwiseScaleInv, scales_nvte.data_ptr, scales_dtype,
+                scales_nvte.shape);
+      set_param(outputs_nvte[i], kNVTERowwiseData, nullptr, data_dtype, data_nvte.shape);
+      set_param(outputs_nvte[i], kNVTERowwiseScaleInv,
+                output_scales_dptr + output_scales_offsets[i], scales_dtype, scales_nvte.shape);
     } else {
       const auto data_nvte = tensor.get_columnwise_data();
       const auto scales_nvte = tensor.get_columnwise_scale_inv();
       const auto data_dtype = static_cast<transformer_engine::DType>(data_nvte.dtype);
       const auto scales_dtype = static_cast<transformer_engine::DType>(scales_nvte.dtype);
-      input_nvte.set_columnwise_data(nullptr, data_dtype, data_nvte.shape);
-      input_nvte.set_columnwise_scale_inv(scales_nvte.data_ptr, scales_dtype, scales_nvte.shape);
-      output_nvte.set_columnwise_data(nullptr, data_dtype, data_nvte.shape);
-      output_nvte.set_columnwise_scale_inv(output_scales_dptr + output_scales_offsets[i],
-                                           scales_dtype, scales_nvte.shape);
+      output_scales_dtypes[i] = scales_dtype;
+      output_scales_shapes[i] = scales_nvte.shape;
+      set_param(inputs_nvte[i], kNVTEColumnwiseData, nullptr, data_dtype, data_nvte.shape);
+      set_param(inputs_nvte[i], kNVTEColumnwiseScaleInv, scales_nvte.data_ptr, scales_dtype,
+                scales_nvte.shape);
+      set_param(outputs_nvte[i], kNVTEColumnwiseData, nullptr, data_dtype, data_nvte.shape);
+      set_param(outputs_nvte[i], kNVTEColumnwiseScaleInv,
+                output_scales_dptr + output_scales_offsets[i], scales_dtype, scales_nvte.shape);
     }
-  }
-
-  // Pack raw NVTETensors into vectors
-  std::vector<NVTETensor> inputs_nvte_raw, outputs_nvte_raw;
-  for (auto &tensor : inputs_nvte) {
-    inputs_nvte_raw.emplace_back(tensor.data());
-  }
-  for (auto &tensor : outputs_nvte) {
-    outputs_nvte_raw.emplace_back(tensor.data());
   }
 
   // Launch kernel
   NVTE_SCOPED_GIL_RELEASE({
     if (check_scale_inv_shapes) {
-      nvte_multi_tensor_swizzle_scaling_factors(inputs_nvte_raw.data(), outputs_nvte_raw.data(),
-                                                inputs_nvte_raw.size(),
+      nvte_multi_tensor_swizzle_scaling_factors(inputs_nvte, outputs_nvte, n_swizzle,
                                                 at::cuda::getCurrentCUDAStream());
     } else {
-      nvte_multi_tensor_swizzle_scaling_factors_unchecked(
-          inputs_nvte_raw.data(), outputs_nvte_raw.data(), inputs_nvte_raw.size(),
-          at::cuda::getCurrentCUDAStream());
+      nvte_multi_tensor_swizzle_scaling_factors_unchecked(inputs_nvte, outputs_nvte, n_swizzle,
+                                                          at::cuda::getCurrentCUDAStream());
     }
   });
 
   // Update tensors with swizzled scales
-  for (size_t i = 0; i < tensors_needing_swizzle.size(); ++i) {
+  for (size_t i = 0; i < n_swizzle; ++i) {
     auto &tensor = *tensors_needing_swizzle[i];
     reset_tensor_data(tensor, !rowwise_usage, !columnwise_usage);
     tensor.set_with_gemm_swizzled_scales(true);
     if (rowwise_usage) {
-      auto scales_nvte = outputs_nvte[i].get_rowwise_scale_inv();
-      const auto scales_dtype = static_cast<transformer_engine::DType>(scales_nvte.dtype);
-      tensor.set_rowwise_scale_inv(output_scales_dptr + output_scales_offsets[i], scales_dtype,
-                                   scales_nvte.shape);
+      tensor.set_rowwise_scale_inv(output_scales_dptr + output_scales_offsets[i],
+                                   output_scales_dtypes[i], output_scales_shapes[i]);
     } else {
-      auto scales_nvte = outputs_nvte[i].get_columnwise_scale_inv();
-      const auto scales_dtype = static_cast<transformer_engine::DType>(scales_nvte.dtype);
-      tensor.set_columnwise_scale_inv(output_scales_dptr + output_scales_offsets[i], scales_dtype,
-                                      scales_nvte.shape);
+      tensor.set_columnwise_scale_inv(output_scales_dptr + output_scales_offsets[i],
+                                      output_scales_dtypes[i], output_scales_shapes[i]);
     }
   }
 
@@ -301,22 +308,8 @@ at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapp
              "Input tensor must be a block scaling tensor");
 
   // Get tensor data
-  NVTEBasicTensor data;
-  size_t data_flat_first_dim = 1;
-  size_t data_flat_last_dim = 1;
-  if (rowwise) {
-    data = input.get_rowwise_data();
-    for (size_t i = 0; i < data.shape.ndim - 1; ++i) {
-      data_flat_first_dim *= data.shape.data[i];
-    }
-    data_flat_last_dim = data.shape.data[data.shape.ndim - 1];
-  } else {
-    data = input.get_columnwise_data();
-    data_flat_first_dim = data.shape.data[0];
-    for (size_t i = 1; i < data.shape.ndim; ++i) {
-      data_flat_last_dim *= data.shape.data[i];
-    }
-  }
+  NVTEBasicTensor data = rowwise ? input.get_rowwise_data() : input.get_columnwise_data();
+  const auto [data_flat_first_dim, data_flat_last_dim] = get_2d_dims(data.shape, !rowwise);
   NVTEShape data_shape{};
   data_shape.data[0] = data_flat_first_dim;
   data_shape.data[1] = data_flat_last_dim;
@@ -379,13 +372,6 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorW
   if (!swizzle_rowwise && !swizzle_columnwise) {
     return std::nullopt;
   }
-  const auto first_dims = input.get_first_dims();
-  const auto last_dims = input.get_last_dims();
-  if (first_dims.data_ptr != nullptr || last_dims.data_ptr != nullptr) {
-    NVTE_ERROR(
-        "Grouped GEMM swizzle requires uniform shapes for now (first_dims/last_dims must be "
-        "absent).");
-  }
 
   std::optional<at::Tensor> rowwise_scales_pyt;
   std::optional<at::Tensor> columnwise_scales_pyt;
@@ -403,16 +389,39 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorW
         tensor_offsets.data_ptr, static_cast<DType>(tensor_offsets.dtype), tensor_offsets.shape);
   }
 
+  // Per-tensor logical dimensions (uniform-shape grouped tensor).
+  const size_t num_tensors = input.num_tensors();
+  const auto logical_shape_nvte = input.logical_shape();
+  NVTE_CHECK(logical_shape_nvte.ndim >= 2,
+             "Grouped GEMM swizzle expects logical_shape with ndim >= 2.");
+  const size_t per_tensor_first_dim = logical_shape_nvte.data[0] / num_tensors;
+  const size_t per_tensor_last_dim = logical_shape_nvte.data[logical_shape_nvte.ndim - 1];
+  constexpr size_t kMxfp8BlockSize = 32;
+
+  // Output is always allocated in the per-tensor padded ("swizzle-ready") layout
+  // so the cuDNN grouped GEMM consumer sees the correct stride between experts.
+  // The swizzle kernel itself handles converting from the kernel-emitted compact
+  // layout (per-tensor first dim is the unpadded value) to this padded layout.
+  auto compute_padded_grouped_scale_shape = [&](bool rowwise) {
+    const size_t m = rowwise ? per_tensor_first_dim : per_tensor_last_dim;
+    const size_t k = rowwise ? per_tensor_last_dim : per_tensor_first_dim;
+    const size_t padded_m = ceildiv(m, size_t{128}) * 128;
+    const size_t padded_k = ceildiv(ceildiv(k, kMxfp8BlockSize), size_t{4}) * 4;
+    return std::vector<size_t>{num_tensors * padded_m, padded_k};
+  };
+
   if (swizzle_rowwise) {
     const auto data = input.get_rowwise_data();
     const auto data_dtype = static_cast<DType>(data.dtype);
     const auto scales_dtype = static_cast<DType>(row_scales.dtype);
     swizzle_input.set_rowwise_data(nullptr, data_dtype, data.shape);
     swizzle_input.set_rowwise_scale_inv(row_scales.data_ptr, scales_dtype, row_scales.shape);
-    rowwise_scales_pyt = allocateSpace(row_scales.shape, scales_dtype, false);
+    const auto padded_shape = compute_padded_grouped_scale_shape(/*rowwise=*/true);
+    rowwise_scales_pyt = allocateSpace(padded_shape, scales_dtype, false);
+    NVTEShape padded_shape_nvte = nvte_make_shape(padded_shape.data(), padded_shape.size());
     swizzle_output.set_rowwise_data(nullptr, data_dtype, data.shape);
     swizzle_output.set_rowwise_scale_inv(getDataPtr(*rowwise_scales_pyt), scales_dtype,
-                                         row_scales.shape);
+                                         padded_shape_nvte);
   }
   if (swizzle_columnwise) {
     const auto data = input.get_columnwise_data();
@@ -420,13 +429,16 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorW
     const auto scales_dtype = static_cast<DType>(col_scales.dtype);
     swizzle_input.set_columnwise_data(nullptr, data_dtype, data.shape);
     swizzle_input.set_columnwise_scale_inv(col_scales.data_ptr, scales_dtype, col_scales.shape);
-    columnwise_scales_pyt = allocateSpace(col_scales.shape, scales_dtype, false);
+    const auto padded_shape = compute_padded_grouped_scale_shape(/*rowwise=*/false);
+    columnwise_scales_pyt = allocateSpace(padded_shape, scales_dtype, false);
+    NVTEShape padded_shape_nvte = nvte_make_shape(padded_shape.data(), padded_shape.size());
     swizzle_output.set_columnwise_data(nullptr, data_dtype, data.shape);
     swizzle_output.set_columnwise_scale_inv(getDataPtr(*columnwise_scales_pyt), scales_dtype,
-                                            col_scales.shape);
+                                            padded_shape_nvte);
   }
 
   swizzle_output.set_with_gemm_swizzled_scales(true);
+
   NVTE_SCOPED_GIL_RELEASE({
     nvte_swizzle_grouped_scaling_factors(swizzle_input.data(), swizzle_output.data(),
                                          at::cuda::getCurrentCUDAStream());
@@ -434,12 +446,13 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorW
 
   if (swizzle_rowwise) {
     const auto scales_dtype = static_cast<DType>(row_scales.dtype);
-    input.set_rowwise_scale_inv(getDataPtr(*rowwise_scales_pyt), scales_dtype, row_scales.shape);
+    input.set_rowwise_scale_inv(getDataPtr(*rowwise_scales_pyt), scales_dtype,
+                                getTensorShape(*rowwise_scales_pyt));
   }
   if (swizzle_columnwise) {
     const auto scales_dtype = static_cast<DType>(col_scales.dtype);
     input.set_columnwise_scale_inv(getDataPtr(*columnwise_scales_pyt), scales_dtype,
-                                   col_scales.shape);
+                                   getTensorShape(*columnwise_scales_pyt));
   }
   input.set_with_gemm_swizzled_scales(true);
   return SwizzledGroupedScales{std::move(rowwise_scales_pyt), std::move(columnwise_scales_pyt)};

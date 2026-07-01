@@ -65,6 +65,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         input_: torch.Tensor,
         fuser: OperationFuser,
         basic_op_kwargs: list[dict[str, Any]],
+        set_output_requires_grad: bool,
         *params_and_extra_inputs: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         """Forward pass
@@ -79,6 +80,8 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             Container for the pipeline of operations to run
         basic_op_kwargs: list of dict
             Keyword arguments to BasicOperation
+        set_output_requires_grad: bool
+            Whether to set ``requires_grad`` flags on returned tensors
         *params_and_extra_inputs: torch.Tensor
             Other tensor inputs to include in autograd graph. Consists
             of parameter tensors, followed by extra operation inputs.
@@ -138,7 +141,8 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             )
             for idx, ys in zip(basic_op_idxs, fused_op_extra_outputs):
                 for y in ys:
-                    y.requires_grad_(idx >= fuser.first_op_requiring_backward)
+                    if set_output_requires_grad:
+                        y.requires_grad_(idx >= fuser.first_op_requiring_backward)
                 extra_outputs[idx] = ys
 
         # Flatten list of extra outputs
@@ -190,7 +194,8 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         for tensor in [x] + extra_outputs_flat:
             tensor._do_not_clear = True
 
-        x.requires_grad_(fuser.first_op_requiring_backward < fuser._num_basic_ops)
+        if set_output_requires_grad:
+            x.requires_grad_(fuser.first_op_requiring_backward < fuser._num_basic_ops)
 
         if extra_outputs_flat:
             return x, *extra_outputs_flat
@@ -293,6 +298,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             dx,  # input_
             None,  # fuser
             None,  # basic_op_kwargs
+            None,  # set_output_requires_grad
             *grad_params_flat,
             *grad_extra_inputs_flat,
         )
@@ -300,6 +306,12 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
 
 class OperationFuser:
     """Manages forward and backward passes for a pipeline of operations
+
+    Operations are fused with three passes (see ``register_*_fusion``):
+
+    1. Joint forward-backward fusions.
+    2. Forward-only fusions.
+    3. Backward-only fusions.
 
     Parameters
     ----------
@@ -309,6 +321,7 @@ class OperationFuser:
     """
 
     # Functions to perform operation fusion
+    forward_backward_fusion_functions: list[OperationFusionFunction] = []
     forward_fusion_functions: list[OperationFusionFunction] = []
     backward_fusion_functions: list[OperationFusionFunction] = []
 
@@ -346,19 +359,30 @@ class OperationFuser:
         self._basic_op_num_params = list(map(len, self._basic_op_params))
         self._flat_basic_op_params = sum(self._basic_op_params, [])
 
-    @classmethod
-    def _fuse_ops(
-        cls,
-        basic_ops: Sequence[BasicOperation],
+    @staticmethod
+    def _apply_fusions(
+        ops: Iterable[FusibleOperation],
         fusion_funcs: Iterable[OperationFusionFunction],
         recipe: Optional[Recipe],
-    ) -> list[tuple[FusibleOperation, list[int]]]:
-        """Apply operation fusions"""
-
-        # Apply op fusions
-        fused_ops = list(basic_ops)
+    ) -> list[FusibleOperation]:
+        """Apply a sequence of fusion functions to a list of ops"""
+        fused_ops = list(ops)
         for func in fusion_funcs:
             fused_ops = func(fused_ops, recipe=recipe)
+        return fused_ops
+
+    @staticmethod
+    def _map_to_basic_ops(
+        fused_ops: Sequence[FusibleOperation],
+        basic_ops: Sequence[BasicOperation],
+    ) -> list[tuple[FusibleOperation, list[int]]]:
+        """Map a fused op list back to basic op indices
+
+        Verifies that the fused ops expand to exactly ``basic_ops`` in
+        order, and annotates each (possibly fused) op with the indices
+        of the basic ops it covers.
+
+        """
 
         def raise_mismatch_error() -> None:
             """Throw error indicating invalid op fusion"""
@@ -375,13 +399,13 @@ class OperationFuser:
             if isinstance(op, FusedOperation):
                 idxs = []
                 for basic_op in op.basic_ops:
-                    if basic_op is not basic_ops[idx]:
+                    if idx >= len(basic_ops) or basic_op is not basic_ops[idx]:
                         raise_mismatch_error()
                     idxs.append(idx)
                     idx += 1
                 out.append((op, idxs))
             else:
-                if op is not basic_ops[idx]:
+                if idx >= len(basic_ops) or op is not basic_ops[idx]:
                     raise_mismatch_error()
                 out.append((op, [idx]))
                 idx += 1
@@ -443,16 +467,29 @@ class OperationFuser:
             for op in self._basic_ops:
                 op.pre_first_fuser_forward()
 
-        # Prepare basic op lists for fusions
-        self._forward_ops = OperationFuser._fuse_ops(
+        # Apply joint forward-backward fusions first
+        joint_ops = OperationFuser._apply_fusions(
             self._basic_ops,
-            OperationFuser.forward_fusion_functions,
+            OperationFuser.forward_backward_fusion_functions,
             recipe=recipe,
         )
-        self._backward_ops = OperationFuser._fuse_ops(
+
+        # Apply forward-only and backward-only fusions
+        self._forward_ops = OperationFuser._map_to_basic_ops(
+            OperationFuser._apply_fusions(
+                joint_ops,
+                OperationFuser.forward_fusion_functions,
+                recipe=recipe,
+            ),
             self._basic_ops,
-            OperationFuser.backward_fusion_functions,
-            recipe=recipe,
+        )
+        self._backward_ops = OperationFuser._map_to_basic_ops(
+            OperationFuser._apply_fusions(
+                joint_ops,
+                OperationFuser.backward_fusion_functions,
+                recipe=recipe,
+            ),
+            self._basic_ops,
         )
 
         # Save current fusion params
@@ -501,27 +538,43 @@ class OperationFuser:
             op.pre_fuser_forward(requires_grad=idx >= self.first_op_requiring_backward)
 
         # Fuser forward pass
-        if is_grad_enabled:
-            forward_func = _OperationFuserAutogradFunction.apply
-            args = []
-        else:
-            forward_func = _OperationFuserAutogradFunction.forward
-            args = [None]
-        args += (
+        # Note: We call forward directly when is_grad_enabled=False,
+        # which can expose non-leaf tensors to the inner ops. Avoid
+        # problems in this case by passing set_output_requires_grad=False.
+        args = (
             input,
             self,
             basic_op_kwargs,
+            is_grad_enabled,  # set_output_requires_grad
             *self._flat_basic_op_params,
             *extra_inputs,
         )
-        return forward_func(*args)
+
+        if not is_grad_enabled:
+            return _OperationFuserAutogradFunction.forward(None, *args)
+
+        return _OperationFuserAutogradFunction.apply(*args)
 
 
-def register_forward_fusion(
+def register_forward_backward_fusion(
     op_fusion_func: OperationFusionFunction,
     prepend: bool = False,
 ) -> None:
-    """Register function to perform operation fusion for forward pass.
+    """Register a joint forward-backward operation fusion.
+
+    A joint fusion replaces a run of basic ops with a single fused op
+    that implements *both* ``fuser_forward`` and ``fuser_backward``.
+    Unlike forward-only or backward-only fusions (see
+    ``register_forward_fusion`` / ``register_backward_fusion``), the two
+    halves need not be individually interchangeable with the unfused
+    ops; only the forward/backward pair must be jointly equivalent. This
+    lets the forward pass cooperate with its own backward, e.g. saving
+    state that only its backward knows how to handle.
+
+    Joint fusions are applied before the forward-only and backward-only
+    fusion passes, so a joint fused op is seen by both passes. The
+    forward-only and backward-only passes then fuse the remaining ops
+    independently.
 
     The fusion function should have the following signature:
 
@@ -536,7 +589,47 @@ def register_forward_fusion(
         them with fused operations.
     prepend: bool, default = ``False``
         Whether the operation fuser should apply this fusion function
-        first. The default is to apply it last.
+        first within the joint fusion pass. The default is to apply it
+        last.
+
+    """
+    if prepend:
+        OperationFuser.forward_backward_fusion_functions.insert(0, op_fusion_func)
+    else:
+        OperationFuser.forward_backward_fusion_functions.append(op_fusion_func)
+
+
+def register_forward_fusion(
+    op_fusion_func: OperationFusionFunction,
+    prepend: bool = False,
+) -> None:
+    """Register a forward-only operation fusion.
+
+    A forward-only fusion replaces a run of basic ops with a single
+    fused op that implements ``fuser_forward``. Because the backward
+    pass is fused independently (see ``register_backward_fusion``), the
+    fused op's forward must be interchangeable with the corresponding
+    basic ops' forward: it must produce the same output and save state in
+    each basic op's context that the unfused backward can consume. If the
+    forward and backward need to cooperate (e.g. the forward saving
+    reduced state that only a matching backward can handle), use
+    ``register_forward_backward_fusion`` instead.
+
+    The fusion function should have the following signature:
+
+    .. code-block:: python
+
+        func(ops, *, recipe) -> updated ops
+
+    Parameters
+    ----------
+    op_fusion_func: function
+        Function that takes a list of operations and may substitute
+        them with fused operations.
+    prepend: bool, default = ``False``
+        Whether the operation fuser should apply this fusion function
+        first within the forward fusion pass. The default is to apply it
+        last.
 
     """
     if prepend:
@@ -549,7 +642,17 @@ def register_backward_fusion(
     op_fusion_func: OperationFusionFunction,
     prepend: bool = False,
 ) -> None:
-    """Register function to perform operation fusion for backward pass.
+    """Register a backward-only operation fusion.
+
+    A backward-only fusion replaces a run of basic ops with a single
+    fused op that implements ``fuser_backward``. Because the forward
+    pass is fused independently (see ``register_forward_fusion``), the
+    fused op's backward must be interchangeable with the corresponding
+    basic ops' backward: it must consume the state saved in each basic
+    op's context by the unfused forward and produce the same gradients.
+    If the forward and backward need to cooperate (e.g. the forward
+    saving reduced state that only a matching backward can handle), use
+    ``register_forward_backward_fusion`` instead.
 
     The fusion function should have the following signature:
 
@@ -564,7 +667,8 @@ def register_backward_fusion(
         them with fused operations.
     prepend: bool, default = ``False``
         Whether the operation fuser should apply this fusion function
-        first. The default is to apply it last.
+        first within the backward fusion pass. The default is to apply it
+        last.
 
     """
     if prepend:

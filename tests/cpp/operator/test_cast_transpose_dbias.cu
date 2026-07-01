@@ -73,6 +73,7 @@ void performTest(const size_t N, const size_t H) {
 
   fillUniform(&input);
   setRandomScale(&output);
+  const float ref_scale = isFp8Type(otype) ? output.scale() : 1.0f;
 
   std::unique_ptr<OType[]> ref_output_c = std::make_unique<OType[]>(N*H);
   std::unique_ptr<OType[]> ref_output_t = std::make_unique<OType[]>(N*H);
@@ -80,7 +81,7 @@ void performTest(const size_t N, const size_t H) {
 
   CType ref_amax;
   compute_ref_cast_transpose_dbias(input.rowwise_cpu_dptr<IType>(),
-                                   output.scale(),
+                                   ref_scale,
                                    ref_output_c.get(),
                                    ref_output_t.get(),
                                    &ref_amax,
@@ -111,7 +112,7 @@ void performTest(const size_t N, const size_t H) {
   if (isFp8Type(otype)) {
     auto [atol_amax, rtol_amax] = getTolerances(DType::kFloat32);
     compareResults("amax", output.amax(), ref_amax, atol_amax, rtol_amax);
-    float ref_scale_inv = 1.f / output.scale();
+    float ref_scale_inv = 1.f / ref_scale;
     compareResults("scale_inv", output.rowwise_scale_inv(), ref_scale_inv, atol_amax, rtol_amax);
   }
   auto [atol, rtol] = getTolerances(otype);

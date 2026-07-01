@@ -169,9 +169,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       float gate_elt = static_cast<float>(in_gate_sh_curr[shmem_idx]);
       bool dgate_elt = true;  // gating is ideally an identity function
       if constexpr (std::is_same<ParamOP, ClampedSwiGLUParam>::value) {
-        // In case of GPT OSS, clamp the activation and gate values
-        dgate_elt = gate_elt <= p.limit && gate_elt >= -p.limit;  // Derivative of clamp
-        gate_elt = min(max(-p.limit, gate_elt), p.limit) + 1;
+        dgate_elt = gate_elt <= p.limit && gate_elt >= -p.limit;
+        gate_elt = min(max(-p.limit, gate_elt), p.limit) + p.glu_linear_offset;
       }
 
       if constexpr (IS_BWD) {

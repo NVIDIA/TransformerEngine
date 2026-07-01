@@ -5,6 +5,7 @@
 add_executable(test_operator
                test_cast.cu
                test_cast_current_scaling.cu
+               test_cast_current_scaling_grouped.cu
                test_cast_dbias.cu
                test_cast_dbias_dgelu.cu
                test_cast_gated_swiglu.cu
@@ -16,6 +17,7 @@ add_executable(test_operator
                test_cast_float8blockwise.cu
                test_dequantize_mxfp8.cu
                test_dequantize_mxfp8_grouped.cu
+               test_dequantize_nvfp4.cu
                test_transpose.cu
                test_cast_transpose.cu
                test_cast_transpose_current_scaling.cu

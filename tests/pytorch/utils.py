@@ -8,6 +8,7 @@ import logging
 import os
 import random
 import subprocess
+from collections.abc import Iterable
 from contextlib import contextmanager
 from typing import Optional, Sequence, Tuple, Dict, Any, List
 from packaging.version import Version as PkgVersion
@@ -16,9 +17,9 @@ import pytest
 import torch
 
 import transformer_engine
-import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch import InferenceParams, QuantizedTensor
+from transformer_engine.pytorch import DType
 from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     get_attention_backend,
@@ -27,6 +28,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     check_set_window_size,
 )
 from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
+from transformer_engine.pytorch.module.base import get_dummy_wgrad
 
 
 def str_to_dtype(dtype: str | torch.dtype) -> torch.dtype:
@@ -68,7 +70,7 @@ def str_to_dtype(dtype: str | torch.dtype) -> torch.dtype:
     return dtype
 
 
-def dtype_tols(dtype: torch.dtype | tex.DType) -> dict[str, float]:
+def dtype_tols(dtype: torch.dtype | DType) -> dict[str, float]:
     """Estimated numerical error for a datatype
 
     Based on tolerances for torch.testing.assert_close.
@@ -76,17 +78,17 @@ def dtype_tols(dtype: torch.dtype | tex.DType) -> dict[str, float]:
     """
 
     # Transformer Engine dtypes
-    if isinstance(dtype, tex.DType):
-        if dtype == tex.DType.kFloat4E2M1:
+    if isinstance(dtype, DType):
+        if dtype == DType.kFloat4E2M1:
             return dict(rtol=0.25, atol=0.125)  # epsilon = 0.25
         dtype = {
-            tex.DType.kByte: torch.uint8,
-            tex.DType.kInt32: torch.int32,
-            tex.DType.kFloat32: torch.float32,
-            tex.DType.kFloat16: torch.half,
-            tex.DType.kBFloat16: torch.bfloat16,
-            tex.DType.kFloat8E4M3: torch.float8_e4m3fn,
-            tex.DType.kFloat8E5M2: torch.float8_e5m2,
+            DType.kByte: torch.uint8,
+            DType.kInt32: torch.int32,
+            DType.kFloat32: torch.float32,
+            DType.kFloat16: torch.half,
+            DType.kBFloat16: torch.bfloat16,
+            DType.kFloat8E4M3: torch.float8_e4m3fn,
+            DType.kFloat8E5M2: torch.float8_e5m2,
         }[dtype]
 
     # PyTorch dtypes
@@ -111,12 +113,13 @@ def quantization_tols(name: str) -> dict[str, float]:
         "fp8",
         "fp8_delayed_scaling",
         "fp8_current_scaling",
+        "fp8_blockwise",
         "mxfp8",
         "mxfp8_block_scaling",
     ):
-        return dtype_tols(tex.DType.kFloat8E4M3)
-    if name == "nvfp4":
-        return dtype_tols(tex.DType.kFloat4E2M1)
+        return dtype_tols(DType.kFloat8E4M3)
+    if name in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht"):
+        return dtype_tols(DType.kFloat4E2M1)
     raise ValueError(f"Unsupported quantization scheme ({name})")
 
 
@@ -142,14 +145,35 @@ def make_recipe(name: Optional[str], **recipe_kwargs: Any) -> Optional[Recipe]:
         )
     if name == "fp8_block_scaling":
         return transformer_engine.common.recipe.Float8BlockScaling(**recipe_kwargs)
-    if name == "nvfp4":
-        return transformer_engine.common.recipe.NVFP4BlockScaling(
-            disable_rht=True,
-            disable_stochastic_rounding=True,
-            disable_2d_quantization=True,
-            **recipe_kwargs,
-        )
+    if name in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht"):
+        use_4over6 = name == "nvfp4_4over6"
+        kwargs = {
+            "disable_rht": name != "nvfp4_rht",
+            "disable_stochastic_rounding": True,
+            "disable_2d_quantization": not use_4over6,
+            "row_scaled_activation": name == "nvfp4_row_scaled",
+            "nvfp4_4over6": "all" if use_4over6 else "none",
+        }
+        kwargs.update(recipe_kwargs)
+        return transformer_engine.common.recipe.NVFP4BlockScaling(**kwargs)
     raise ValueError(f"Unsupported quantization scheme ({name})")
+
+
+def recipe_id(recipe: Optional[Recipe]) -> str:
+    """Readable pytest id for a quantization recipe."""
+    if not isinstance(recipe, Recipe):
+        return "None"
+    if recipe.nvfp4():
+        nvfp4_features = []
+        if recipe.row_scaled_activation:
+            nvfp4_features.append("RowScaled")
+        if recipe.nvfp4_4over6 != "none":
+            nvfp4_features.append("4Over6")
+        if not recipe.disable_rht:
+            nvfp4_features.append("RHT")
+        if nvfp4_features:
+            return f"NVFP4{''.join(nvfp4_features)}BlockScaling"
+    return type(recipe).__name__
 
 
 def skip_unsupported_backward_override(
@@ -158,6 +182,20 @@ def skip_unsupported_backward_override(
     backward_override: Optional[str],
 ) -> None:
     """Skip known unsupported layer/recipe/backward-override combinations used in tests."""
+    if (
+        quant_recipe is not None
+        and quant_recipe.nvfp4()
+        and getattr(quant_recipe, "row_scaled_activation", False)
+        and backward_override is None
+    ):
+        pytest.skip("Row-scaled NVFP4 does not support default quantized backward.")
+    if (
+        quant_recipe is not None
+        and quant_recipe.nvfp4()
+        and quant_recipe.nvfp4_4over6 != "none"
+        and layer_type == "grouped_linear"
+    ):
+        pytest.skip("NVFP4 4over6 currently does not support grouped quantization.")
     if backward_override is None:
         return
     if quant_recipe is None and backward_override is not None:
@@ -303,6 +341,8 @@ def get_available_attention_backends(
     fp8_meta: Optional[Dict[str, Any]] = None,
     is_training: bool = True,
     inference_params: Optional[InferenceParams] = None,
+    score_mod: bool = False,
+    score_mod_bprop: bool = False,
 ) -> Tuple[List, List]:
     """Check for all available attention backends that support a model configuration"""
 
@@ -364,6 +404,8 @@ def get_available_attention_backends(
             inference_params=inference_params,
             softmax_type=config.softmax_type,
             return_max_logit=config.return_max_logit,
+            has_score_mod=score_mod,
+            has_score_mod_bprop=score_mod_bprop,
             # allow all backends to pass so they can be used for testing;
             # check for FA3 availability later
             num_splits=1,
@@ -390,11 +432,11 @@ def get_available_attention_backends(
         _attention_backends["backend_selection_requires_update"] = False
         return available_backends, flash_attention_backend, fused_attention_backend
 
-    backends = {0: "F16_max512_seqlen", 1: "F16_arbitrary_seqlen", 2: "FP8"}
+    backends = {1: "F16_arbitrary_seqlen", 2: "FP8"}
     if AttentionLogging._is_logging_setup is False:
         AttentionLogging.setup_logging()
 
-    for i in range(3):
+    for i in backends:
         os.environ["NVTE_FUSED_ATTN_BACKEND"] = str(i)
         _attention_backends["backend_selection_requires_update"] = True
         available_backends, flash_attention_backend, fused_attention_backend = test()
@@ -477,3 +519,73 @@ def run_distributed(
             msg += f"\n--- stderr ---\n{stderr_tail}"
         raise AssertionError(msg)
     return result
+
+
+class MegatronTrainingHelper:
+    """Test-side stand-in for the Megatron-Core DDP / MegatronFSDP wrapper.
+    Megatron's DDP wrapper (and MegatronFSDP) owns the per-parameter
+    ``main_grad`` buffer and the ``overwrite_main_grad`` /
+    ``grad_added_to_main_grad`` attributes that coordinate
+    ``fuse_wgrad_accumulation`` with TE modules. These helpers reproduce the
+    relevant slice of that protocol so TE tests can exercise the
+    accumulate-into-``main_grad`` code path without pulling in the full
+    Megatron-Core dependency.
+    """
+
+    @staticmethod
+    def init_main_grad_buffers(
+        weight_params: Iterable[torch.nn.Parameter],
+        *,
+        fill_value: float,
+        overwrite_main_grad: bool,
+        zero_out_wgrad: bool = False,
+        dtype: torch.dtype = torch.float32,
+    ) -> None:
+        """Allocate ``main_grad`` and stamp the wrapper attributes on each
+        param, mirroring what the Megatron DDP/FSDP wrapper does before
+        backward."""
+        for wp in weight_params:
+            wp.main_grad = torch.full(wp.size(), fill_value, device=wp.device, dtype=dtype)
+            wp.overwrite_main_grad = overwrite_main_grad
+            wp.zero_out_wgrad = zero_out_wgrad
+            wp.grad_added_to_main_grad = False
+
+    @staticmethod
+    def verify_main_grad_accumulation(
+        weight_params: Iterable[torch.nn.Parameter],
+        *,
+        expected_main_grads: Iterable[torch.Tensor],
+        rtol: float = 0.0,
+        atol: float = 0.0,
+    ) -> None:
+        """Check that backward produced what the Megatron wrapper expects:
+        each ``main_grad`` matches ``expected_main_grads``,
+        ``grad_added_to_main_grad`` was flipped to ``True`` so the wrapper's
+        post-backward hooks won't double-accumulate, and ``param.grad`` was
+        replaced by the cached dummy tensor (so a wrapper hook that did
+        ``main_grad += grad`` would be a no-op rather than double-counting).
+        """
+        for wp, expected in zip(weight_params, expected_main_grads):
+            torch.testing.assert_close(wp.main_grad.to(expected), expected, rtol=rtol, atol=atol)
+
+            assert wp.grad_added_to_main_grad is True, (
+                "weight.grad_added_to_main_grad was not flipped to True; "
+                "the Megatron DDP/FSDP wrapper hook will double-accumulate."
+            )
+
+            # ``.grad`` should be the cached dummy tensor returned by
+            # ``get_dummy_wgrad`` -- shared storage, not the real wgrad.
+            expected_dummy = get_dummy_wgrad(list(wp.size()), wp.dtype)
+            assert (
+                wp.grad is not None
+            ), "weight.grad is None; the Megatron protocol expects a dummy tensor stand-in here."
+            assert wp.grad.data_ptr() == expected_dummy.data_ptr(), (
+                "weight.grad does not share storage with the cached dummy "
+                "wgrad; downstream wrapper hooks risk double-accumulating."
+            )
+            if getattr(wp, "zero_out_wgrad", False):
+                assert torch.all(wp.grad == 0), (
+                    "weight.zero_out_wgrad=True but the dummy weight.grad "
+                    "was not zeroed; downstream hooks reading .grad would "
+                    "see stale bytes from the previous step."
+                )
