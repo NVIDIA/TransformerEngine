@@ -6,6 +6,7 @@ import random
 import contextlib
 import pytest
 import os
+import copy
 import torch
 from typing import Optional, List
 from transformer_engine.pytorch.cpu_offload import (
@@ -18,14 +19,40 @@ from transformer_engine.pytorch.cpu_offload import (
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
-from utils import ModelConfig
-import transformer_engine_torch as tex
+from utils import ModelConfig, recipe_id, skip_unsupported_backward_override
 
 # Check supported quantization schemes
 fp8_available, _ = FP8GlobalStateManager.is_fp8_available()
 fp8_block_scaling_available, _ = FP8GlobalStateManager.is_fp8_block_scaling_available()
 mxfp8_available, _ = FP8GlobalStateManager.is_mxfp8_available()
 nvfp4_available, _ = FP8GlobalStateManager.is_nvfp4_available()
+
+
+def nvfp4_row_scaled():
+    nvfp4_recipe = recipe.NVFP4BlockScaling(
+        disable_rht=True,
+        disable_stochastic_rounding=True,
+        disable_2d_quantization=True,
+        row_scaled_activation=True,
+        backward_override="dequantized",
+    )
+    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
+    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
+    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
+    return nvfp4_recipe
+
+
+def nvfp4_4over6():
+    nvfp4_recipe = recipe.NVFP4BlockScaling(
+        disable_rht=True,
+        disable_stochastic_rounding=True,
+        nvfp4_4over6="all",
+    )
+    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
+    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams(fp4_2d_quantization=True)
+    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
+    return nvfp4_recipe
+
 
 quantization_recipes: List[Optional[recipe.Recipe]] = [None]
 if fp8_available:
@@ -36,6 +63,8 @@ if mxfp8_available:
     quantization_recipes.append(recipe.MXFP8BlockScaling())
 if nvfp4_available:
     quantization_recipes.append(recipe.NVFP4BlockScaling())
+    quantization_recipes.append(nvfp4_4over6())
+    quantization_recipes.append(nvfp4_row_scaled())
 
 
 model_config = {
@@ -156,26 +185,39 @@ class Utils:
             return tensor
         elif recipe.delayed():
             quantizer = te.tensor.float8_tensor.Float8Quantizer(
-                fp8_dtype=tex.DType.kFloat8E4M3,
+                fp8_dtype=te.DType.kFloat8E4M3,
                 scale=torch.tensor([1.0], device="cuda"),
                 amax=torch.tensor([1.0], device="cuda"),
             )
             return quantizer(tensor)
         elif recipe.float8_current_scaling():
             quantizer = te.tensor.float8_tensor.Float8CurrentScalingQuantizer(
-                fp8_dtype=tex.DType.kFloat8E4M3, device="cuda"
+                fp8_dtype=te.DType.kFloat8E4M3, device="cuda"
             )
             return quantizer(tensor)
         elif recipe.float8_block_scaling():
             quantizer = te.tensor.float8_blockwise_tensor.Float8BlockQuantizer(
-                fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True
+                fp8_dtype=te.DType.kFloat8E4M3, rowwise=True, columnwise=True
             )
             return quantizer(tensor)
         elif recipe.mxfp8():
-            quantizer = te.tensor.mxfp8_tensor.MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+            quantizer = te.tensor.mxfp8_tensor.MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)
             return quantizer(tensor)
         elif recipe.nvfp4():
-            quantizer = te.tensor.nvfp4_tensor.NVFP4Quantizer()
+            qparams = recipe.fp4_quant_fwd_inp
+            use_4over6 = False
+            if recipe.nvfp4_4over6 in ("activations", "all"):
+                use_4over6 = True
+            quantizer = te.tensor.nvfp4_tensor.NVFP4Quantizer(
+                rowwise=True,
+                columnwise=not recipe.row_scaled_activation,
+                with_rht=qparams.random_hadamard_transform,
+                with_post_rht_amax=qparams.random_hadamard_transform,
+                with_2d_quantization=qparams.fp4_2d_quantization,
+                stochastic_rounding=qparams.stochastic_rounding,
+                row_scaled_nvfp4=recipe.row_scaled_activation,
+                nvfp4_use_4over6=use_4over6,
+            )
             return quantizer(tensor)
 
     @staticmethod
@@ -190,9 +232,23 @@ class Utils:
         if tensor is None:
             return 0
         if isinstance(tensor, te.quantized_tensor.QuantizedTensorStorage):
-            return sum(Utils.get_tensor_size_mb(t) for t in tensor.get_data_tensors())
+            tensors = [
+                value for value in tensor.get_metadata().values() if isinstance(value, torch.Tensor)
+            ]
+            return sum(Utils.get_tensor_size_mb(t) for t in tensors)
         else:
             return tensor.numel() * tensor.element_size() / (1024**2)
+
+    @staticmethod
+    def get_saved_tensor_gpu_size_mb(tensor):
+        if tensor is None or isinstance(tensor, int):
+            return 0
+        if isinstance(tensor, tuple):
+            push_results, _ = tensor
+            return Utils.get_saved_tensor_gpu_size_mb(push_results)
+        if isinstance(tensor, list):
+            return sum(Utils.get_saved_tensor_gpu_size_mb(t) for t in tensor)
+        return Utils.get_tensor_size_mb(tensor)
 
     @staticmethod
     def memory_leak_check():
@@ -211,7 +267,7 @@ class Utils:
 
 class TestsOffloadableLayerState:
     @pytest.mark.parametrize("random_num_tensors", [True, False])
-    @pytest.mark.parametrize("recipe", quantization_recipes)
+    @pytest.mark.parametrize("recipe", quantization_recipes, ids=recipe_id)
     def test_general(self, random_num_tensors, recipe):
         """
         Test general functionality of DefaultOffloadSynchronizer - offload NUM_LAYERS-1 out of NUM_LAYERS layers,
@@ -288,7 +344,7 @@ class TestsOffloadableLayerState:
 
 class TestsDefaultOffloadSynchronizer:
     @pytest.mark.parametrize("random_num_tensors", [True, False])
-    @pytest.mark.parametrize("recipe", quantization_recipes)
+    @pytest.mark.parametrize("recipe", quantization_recipes, ids=recipe_id)
     def test_general(self, random_num_tensors, recipe):
         """
         Test general functionality of DefaultOffloadSynchronizer - offload NUM_LAYERS-1 out of NUM_LAYERS layers,
@@ -334,7 +390,7 @@ class TestsDefaultOffloadSynchronizer:
             offload_synchronizer.finish_part_of_bwd()
         torch.cuda.synchronize()
 
-    @pytest.mark.parametrize("recipe", quantization_recipes)
+    @pytest.mark.parametrize("recipe", quantization_recipes, ids=recipe_id)
     def test_memory(self, recipe):
         torch.cuda.synchronize()
         Utils.memory_leak_check()
@@ -362,11 +418,16 @@ class TestsDefaultOffloadSynchronizer:
             del tensor, tensor_id
         torch.cuda.synchronize()
 
+        resident_gpu_size = sum(
+            Utils.get_saved_tensor_gpu_size_mb(tensor_id) for tensor_id in tensor_ids
+        )
         if recipe is None:
             assert Utils.get_max_cuda_memory_mb() == pytest.approx(
-                init_cuda_memory + tensor_size, 0.1
+                init_cuda_memory + resident_gpu_size, 0.1
             )
-        assert Utils.get_cuda_memory_mb() == pytest.approx(init_cuda_memory + tensor_size, 0.1)
+        assert Utils.get_cuda_memory_mb() == pytest.approx(
+            init_cuda_memory + resident_gpu_size, 0.1
+        )
 
         for i in range(NUM_LAYERS - 1, -1, -1):
             offload_synchronizer.bwd_step(i)
@@ -384,7 +445,7 @@ class TestsDefaultOffloadSynchronizer:
             )
         assert Utils.get_cuda_memory_mb() == pytest.approx(init_cuda_memory, 0.1)
 
-    @pytest.mark.parametrize("recipe", quantization_recipes)
+    @pytest.mark.parametrize("recipe", quantization_recipes, ids=recipe_id)
     def test_multiple_tensor_offload(self, recipe):
         Utils.memory_leak_check()
         init_cpu_memory = Utils.get_cpu_memory_mb()
@@ -415,10 +476,15 @@ class TestsDefaultOffloadSynchronizer:
 
 class TestTELayers:
     @pytest.mark.parametrize("layer_type", Utils.get_layer_names())
-    @pytest.mark.parametrize("recipe", quantization_recipes)
-    def test_sanity(self, layer_type, recipe):
+    @pytest.mark.parametrize("recipe", quantization_recipes, ids=recipe_id)
+    @pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
+    def test_sanity(self, layer_type, recipe, backward_override):
         Utils.memory_leak_check()
 
+        skip_unsupported_backward_override(layer_type, recipe, backward_override)
+        if recipe is not None:
+            recipe = copy.deepcopy(recipe)
+            recipe.backward_override = backward_override
         # Skip ops-based layers with Float8BlockScaling recipe
         if (
             layer_type in ["linear_op", "layernorm_mlp_ops"]
@@ -457,9 +523,15 @@ class TestTELayers:
         del out, inp, layers
 
     @pytest.mark.parametrize("layer_type", Utils.get_layer_names())
-    @pytest.mark.parametrize("recipe", quantization_recipes)
-    def test_memory(self, layer_type, recipe):
+    @pytest.mark.parametrize("recipe", quantization_recipes, ids=recipe_id)
+    @pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
+    def test_memory(self, layer_type, recipe, backward_override):
         Utils.memory_leak_check()
+
+        skip_unsupported_backward_override(layer_type, recipe, backward_override)
+        if recipe is not None:
+            recipe = copy.deepcopy(recipe)
+            recipe.backward_override = backward_override
 
         # Skip ops-based layers with Float8BlockScaling recipe
         if (
@@ -524,7 +596,15 @@ class TestTELayers:
             out = out + 1
         out = sync_function(out)
         del inp
-        assert Utils.get_cuda_memory_mb() == pytest.approx(init_cuda_memory, 0.1)
+        if recipe is not None and recipe.nvfp4() and recipe.row_scaled_activation:
+            assert Utils.get_cuda_memory_mb() <= cuda_memory_no_offload
+        elif backward_override is None:
+            assert Utils.get_cuda_memory_mb() == pytest.approx(init_cuda_memory, 0.1)
+        else:
+            assert (
+                Utils.get_cuda_memory_mb() == pytest.approx(init_cuda_memory, 0.1)
+                or Utils.get_cuda_memory_mb() <= init_cuda_memory
+            )
         offloaded_memory_cpu = offload_ctx.offload_synchronizer.get_offloaded_total_size_mb()
 
         # This assertion verifies that the memory used by tensors on the CPU matches the memory saved from a layer.
@@ -536,9 +616,15 @@ class TestTELayers:
         out.sum().backward()
 
     @pytest.mark.parametrize("layer_type", Utils.get_layer_names())
-    @pytest.mark.parametrize("recipe", quantization_recipes)
-    def test_manual_synchronization(self, recipe, layer_type):
+    @pytest.mark.parametrize("recipe", quantization_recipes, ids=recipe_id)
+    @pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
+    def test_manual_synchronization(self, recipe, layer_type, backward_override):
         Utils.memory_leak_check()
+
+        skip_unsupported_backward_override(layer_type, recipe, backward_override)
+        if recipe is not None:
+            recipe = copy.deepcopy(recipe)
+            recipe.backward_override = backward_override
 
         # Skip ops-based layers with Float8BlockScaling recipe
         if (
@@ -599,7 +685,8 @@ class TestTELayers:
         out_1.sum().backward()
         out_2.sum().backward()
 
-    @pytest.mark.parametrize("recipe", quantization_recipes)
+    @pytest.mark.parametrize("recipe", quantization_recipes, ids=recipe_id)
+    @pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
     @pytest.mark.parametrize("layer_type", Utils.get_layer_names())
     @pytest.mark.parametrize("use_cuda_graphs", [True, False])
     @pytest.mark.parametrize("retain_pinned_cpu_buffers", [True, False])
@@ -607,11 +694,17 @@ class TestTELayers:
     def test_numerics(
         self,
         recipe,
+        backward_override,
         layer_type,
         use_cuda_graphs,
         backend,
         retain_pinned_cpu_buffers,
     ):
+        skip_unsupported_backward_override(layer_type, recipe, backward_override)
+        if recipe is not None:
+            recipe = copy.deepcopy(recipe)
+            recipe.backward_override = backward_override
+
         # Skip ops-based layers with Float8BlockScaling recipe
         if (
             layer_type in ["linear_op", "layernorm_mlp_ops"]

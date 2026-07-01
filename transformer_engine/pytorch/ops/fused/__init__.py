@@ -28,3 +28,10 @@ register_backward_fusion(BackwardLinearAdd.fuse_backward_ops)
 register_backward_fusion(BackwardLinearScale.fuse_backward_ops)
 register_backward_fusion(BackwardActivationBias.fuse_backward_ops)
 register_backward_fusion(BackwardAddRMSNorm.fuse_backward_ops)
+
+# Import experimental fusions
+# Note: Registration logic is non-trivial, so submodule handles it internally.
+from .grouped_mlp import (  # pylint: disable=wrong-import-position
+    GroupedMLP_CuTeGEMMGLU,
+    GroupedMLP_CuTeGEMMUnary,
+)

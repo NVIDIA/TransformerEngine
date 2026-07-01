@@ -4,6 +4,19 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <cudnn_frontend.h>
+
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <string_view>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
 #include "../extensions.h"
 #include "transformer_engine/fused_attn.h"
 #include "transformer_engine/transformer_engine.h"
@@ -28,7 +41,6 @@ NVTE_Fused_Attn_Backend GetFusedAttnBackend(
 /*
     NOTE: PrepareFusedAttnForwardAuxTensors unifies the auxiliary tensor pack logic from the fused
     attention forward kernels in:
-        - common/fused_attn/fused_attn_f16_max512_seqlen.cu lines 594-634 and 773-812
         - common/fused_attn/fused_attn_f16_arbitrary_seqlen.cu lines 1270-1281 and 1348-1359
 */
 void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t input_batch,
@@ -40,7 +52,6 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t
                                        void *bias_buf = nullptr,
                                        void *softmax_offset_buf = nullptr) {
   // all backends need softmax but expect different shapes/dtypes
-  // start with the max512 sequence length softmax shape/dtype and correct later
   tensor_pack->size = 1;
   NVTETensor &softmax_aux = tensor_pack->tensors[0];
   NVTEBasicTensor softmax_aux_data;
@@ -127,15 +138,6 @@ void PrepareFusedAttnBackwardAuxTensors(NVTETensorPack *tensor_pack, const size_
                                     q_max_seqlen, kv_max_seqlen, dtype, dummy_bias_type,
                                     dummy_backend, softmax_buf, rng_state_buf, bias_buf,
                                     softmax_offset_buf);
-
-  // correct softmax shape for max512 sequence length kernel
-  if (backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
-    NVTEBasicTensor softmax_aux_data =
-        nvte_get_tensor_param(tensor_pack->tensors[0], kNVTERowwiseData);
-    softmax_aux_data.shape.data[3] = kv_max_seqlen;  // {B,H,Qs,1} -> {B,H,Qs,Ks}
-    softmax_aux_data.dtype = static_cast<NVTEDType>(dtype);
-    nvte_set_tensor_param(&(tensor_pack->tensors[0]), kNVTERowwiseData, &softmax_aux_data);
-  }
 }
 
 pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
@@ -145,19 +147,28 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
     NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type, NVTE_QKV_Layout qkv_layout,
     DType dtype, bool is_training, size_t max_segments_per_seq, int64_t window_size_left,
     int64_t window_size_right, bool bottom_right_diagonal) {
-  auto q_shape = std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, qk_head_dim};
+  auto is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD;
+  auto q_shape = is_ragged
+                     ? std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, qk_head_dim}
+                     : std::vector<size_t>{input_batch, q_max_seqlen, attn_heads, qk_head_dim};
   auto q_tensor = TensorWrapper(nullptr, q_shape, dtype);
-  auto k_shape = std::vector<size_t>{input_batch * kv_max_seqlen, num_gqa_groups, qk_head_dim};
+  auto k_shape = is_ragged
+                     ? std::vector<size_t>{input_batch * kv_max_seqlen, num_gqa_groups, qk_head_dim}
+                     : std::vector<size_t>{input_batch, kv_max_seqlen, num_gqa_groups, qk_head_dim};
   auto k_tensor = TensorWrapper(nullptr, k_shape, dtype);
-  auto v_shape = std::vector<size_t>{input_batch * kv_max_seqlen, num_gqa_groups, v_head_dim};
+  auto v_shape = is_ragged
+                     ? std::vector<size_t>{input_batch * kv_max_seqlen, num_gqa_groups, v_head_dim}
+                     : std::vector<size_t>{input_batch, kv_max_seqlen, num_gqa_groups, v_head_dim};
   auto v_tensor = TensorWrapper(nullptr, v_shape, dtype);
+  auto o_shape = is_ragged ? std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, v_head_dim}
+                           : std::vector<size_t>{input_batch, q_max_seqlen, attn_heads, v_head_dim};
 
   auto bias_shape = std::vector<size_t>{bias_batch, bias_heads, q_max_seqlen, kv_max_seqlen};
   auto bias_tensor = TensorWrapper(nullptr, bias_shape, dtype);
 
   // F16 doesn't use this tensor
   auto s_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, dtype);
-  auto o_tensor = TensorWrapper(nullptr, q_shape, dtype);
+  auto o_tensor = TensorWrapper(nullptr, o_shape, dtype);
 
   auto dummy_rng_state_tensor = TensorWrapper(nullptr, std::vector<size_t>{2}, DType::kInt64);
   auto dummy_page_table_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, DType::kInt32);
@@ -168,7 +179,6 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
   nvte_tensor_pack_create(&aux_output_tensors);
 
   TensorWrapper query_workspace_tensor;
-  auto is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD;
   // It is a WAR to pre-create all possible cuDNN graph at the JIT compile time
   size_t max_num_segments = is_ragged ? input_batch * max_segments_per_seq : input_batch;
   size_t min_num_segments = input_batch;
@@ -191,9 +201,9 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
         q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(), ragged_offset_tensor.data(),
         ragged_offset_tensor.data(), dummy_page_table_tensor.data(), dummy_page_table_tensor.data(),
         dummy_rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen, is_training, false, false,
-        scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type, softmax_type,
-        window_size_left, window_size_right, bottom_right_diagonal, query_workspace_tensor.data(),
-        nullptr);
+        scaling_factor, dropout_probability, qkv_layout, nvte_get_q_format(qkv_layout),
+        NVTE_QKV_Format_NOT_SET, bias_type, mask_type, softmax_type, window_size_left,
+        window_size_right, bottom_right_diagonal, query_workspace_tensor.data(), nullptr);
   }
 
   nvte_tensor_pack_destroy(&aux_output_tensors);
@@ -257,7 +267,8 @@ static void FusedAttnForwardImpl(
 
   /* Output tensors */
   auto s_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, dtype);  // not used in F16
-  auto o_shape = std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, v_head_dim};
+  auto o_shape = is_ragged ? std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, v_head_dim}
+                           : std::vector<size_t>{input_batch, q_max_seqlen, attn_heads, v_head_dim};
   auto o_tensor = TensorWrapper(output, o_shape, dtype);
 
   /* Prepare RNG state */
@@ -285,9 +296,15 @@ static void FusedAttnForwardImpl(
   void *q_ptr = q;
   void *k_ptr = k;
   void *v_ptr = v;
-  auto q_shape = std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, qk_head_dim};
-  auto k_shape = std::vector<size_t>{input_batch * kv_max_seqlen, num_gqa_groups, qk_head_dim};
-  auto v_shape = std::vector<size_t>{input_batch * kv_max_seqlen, num_gqa_groups, v_head_dim};
+  auto q_shape = is_ragged
+                     ? std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, qk_head_dim}
+                     : std::vector<size_t>{input_batch, q_max_seqlen, attn_heads, qk_head_dim};
+  auto k_shape = is_ragged
+                     ? std::vector<size_t>{input_batch * kv_max_seqlen, num_gqa_groups, qk_head_dim}
+                     : std::vector<size_t>{input_batch, kv_max_seqlen, num_gqa_groups, qk_head_dim};
+  auto v_shape = is_ragged
+                     ? std::vector<size_t>{input_batch * kv_max_seqlen, num_gqa_groups, v_head_dim}
+                     : std::vector<size_t>{input_batch, kv_max_seqlen, num_gqa_groups, v_head_dim};
 
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
     // QKV packed in q: [batch*seqlen, 3, heads, dim]
@@ -328,8 +345,9 @@ static void FusedAttnForwardImpl(
       q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(), q_seq_offsets_tensor.data(),
       k_seq_offsets_tensor.data(), dummy_page_table_tensor.data(), dummy_page_table_tensor.data(),
       rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen, is_training, false, false,
-      scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type, softmax_type,
-      window_size_left, window_size_right, bottom_right_diagonal, workspace_tensor.data(), stream);
+      scaling_factor, dropout_probability, qkv_layout, nvte_get_q_format(qkv_layout),
+      NVTE_QKV_Format_NOT_SET, bias_type, mask_type, softmax_type, window_size_left,
+      window_size_right, bottom_right_diagonal, workspace_tensor.data(), stream);
 
   nvte_tensor_pack_destroy(&aux_output_tensors);
 }
@@ -418,17 +436,26 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type, NVTE_QKV_Layout qkv_layout,
     DType dtype, bool is_training, bool deterministic, size_t max_segments_per_seq,
     int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal) {
-  auto q_shape = std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, qk_head_dim};
+  auto is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD;
+  auto q_shape = is_ragged
+                     ? std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, qk_head_dim}
+                     : std::vector<size_t>{input_batch, q_max_seqlen, attn_heads, qk_head_dim};
   auto q_tensor = TensorWrapper(nullptr, q_shape, dtype);
   auto dq_tensor = TensorWrapper(nullptr, q_shape, dtype);
-  auto k_shape = std::vector<size_t>{input_batch * kv_max_seqlen, num_gqa_groups, qk_head_dim};
+  auto k_shape = is_ragged
+                     ? std::vector<size_t>{input_batch * kv_max_seqlen, num_gqa_groups, qk_head_dim}
+                     : std::vector<size_t>{input_batch, kv_max_seqlen, num_gqa_groups, qk_head_dim};
   auto k_tensor = TensorWrapper(nullptr, k_shape, dtype);
   auto dk_tensor = TensorWrapper(nullptr, k_shape, dtype);
-  auto v_shape = std::vector<size_t>{input_batch * kv_max_seqlen, num_gqa_groups, v_head_dim};
+  auto v_shape = is_ragged
+                     ? std::vector<size_t>{input_batch * kv_max_seqlen, num_gqa_groups, v_head_dim}
+                     : std::vector<size_t>{input_batch, kv_max_seqlen, num_gqa_groups, v_head_dim};
   auto v_tensor = TensorWrapper(nullptr, v_shape, dtype);
   auto dv_tensor = TensorWrapper(nullptr, v_shape, dtype);
 
-  auto output_shape = std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, v_head_dim};
+  auto output_shape = is_ragged
+                          ? std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, v_head_dim}
+                          : std::vector<size_t>{input_batch, q_max_seqlen, attn_heads, v_head_dim};
   auto doutput_tensor = TensorWrapper(nullptr, output_shape, dtype);
   auto output_tensor = TensorWrapper(nullptr, output_shape, dtype);
 
@@ -443,7 +470,6 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
 
   TensorWrapper query_workspace_tensor;
 
-  auto is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD;
   // It is a WAR to pre-create all possible cuDNN graph at the JIT compile time
   size_t max_num_segments = is_ragged ? input_batch * max_segments_per_seq : input_batch;
   size_t min_num_segments = input_batch;
@@ -469,18 +495,19 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     auto dummy_ragged_offset_tensor =
         TensorWrapper(nullptr, std::vector<size_t>{num_segments + 1}, DType::kInt32);
 
-    nvte_fused_attn_bwd(q_tensor.data(), k_tensor.data(), v_tensor.data(), output_tensor.data(),
-                        doutput_tensor.data(),
-                        s_tensor.data(),  // not used for F16
-                        s_tensor.data(),  // not used for F16
-                        &aux_input_tensors, dq_tensor.data(), dk_tensor.data(), dv_tensor.data(),
-                        dbias_tensor.data(), dummy_d_softmax_offset_tensor.data(),
-                        q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
-                        dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
-                        q_max_seqlen, kv_max_seqlen, scaling_factor, dropout_probability,
-                        qkv_layout, bias_type, mask_type, softmax_type, window_size_left,
-                        window_size_right, bottom_right_diagonal, deterministic, false,
-                        query_workspace_tensor.data(), nullptr);
+    nvte_fused_attn_bwd(
+        q_tensor.data(), k_tensor.data(), v_tensor.data(), output_tensor.data(),
+        doutput_tensor.data(),
+        s_tensor.data(),  // not used for F16
+        s_tensor.data(),  // not used for F16
+        &aux_input_tensors, dq_tensor.data(), dk_tensor.data(), dv_tensor.data(),
+        dbias_tensor.data(), dummy_d_softmax_offset_tensor.data(), q_cu_seqlens_tensor.data(),
+        kv_cu_seqlens_tensor.data(), dummy_ragged_offset_tensor.data(),
+        dummy_ragged_offset_tensor.data(), q_max_seqlen, kv_max_seqlen, scaling_factor,
+        dropout_probability, qkv_layout, nvte_get_q_format(qkv_layout),
+        nvte_get_q_format(qkv_layout), qkv_layout, NVTE_QKV_Format_NOT_SET, NVTE_QKV_Format_NOT_SET,
+        bias_type, mask_type, softmax_type, window_size_left, window_size_right,
+        bottom_right_diagonal, deterministic, false, query_workspace_tensor.data(), nullptr);
   }
 
   nvte_tensor_pack_destroy(&aux_input_tensors);
@@ -503,7 +530,9 @@ static void FusedAttnBackwardImpl(
   FUSED_ATTN_IMPL_COMMON_BLOCK;
 
   /* Input tensors */
-  auto output_shape = std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, v_head_dim};
+  auto output_shape = is_ragged
+                          ? std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, v_head_dim}
+                          : std::vector<size_t>{input_batch, q_max_seqlen, attn_heads, v_head_dim};
   auto output_tensor = TensorWrapper(output, output_shape, dtype);
   auto doutput_tensor = TensorWrapper(doutput, output_shape, dtype);
 
@@ -530,7 +559,7 @@ static void FusedAttnBackwardImpl(
                                      bias_heads, q_max_seqlen, kv_max_seqlen, dtype, backend,
                                      softmax_aux, rng_state, bias, softmax_offset);
 
-  /* Call the underly NVTE API */
+  /* Call the underlying NVTE API */
   // Prepare Q, K, V pointers and shapes based on layout
   void *q_ptr = q;
   void *k_ptr = k;
@@ -538,9 +567,15 @@ static void FusedAttnBackwardImpl(
   void *dq_ptr = dq;
   void *dk_ptr = dk;
   void *dv_ptr = dv;
-  auto q_shape = std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, qk_head_dim};
-  auto k_shape = std::vector<size_t>{input_batch * kv_max_seqlen, num_gqa_groups, qk_head_dim};
-  auto v_shape = std::vector<size_t>{input_batch * kv_max_seqlen, num_gqa_groups, v_head_dim};
+  auto q_shape = is_ragged
+                     ? std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, qk_head_dim}
+                     : std::vector<size_t>{input_batch, q_max_seqlen, attn_heads, qk_head_dim};
+  auto k_shape = is_ragged
+                     ? std::vector<size_t>{input_batch * kv_max_seqlen, num_gqa_groups, qk_head_dim}
+                     : std::vector<size_t>{input_batch, kv_max_seqlen, num_gqa_groups, qk_head_dim};
+  auto v_shape = is_ragged
+                     ? std::vector<size_t>{input_batch * kv_max_seqlen, num_gqa_groups, v_head_dim}
+                     : std::vector<size_t>{input_batch, kv_max_seqlen, num_gqa_groups, v_head_dim};
 
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
     // QKV packed in q: [batch*seqlen, 3, heads, dim]
@@ -596,17 +631,18 @@ static void FusedAttnBackwardImpl(
     }
   }
 
-  nvte_fused_attn_bwd(q_tensor.data(), k_tensor.data(), v_tensor.data(), output_tensor.data(),
-                      doutput_tensor.data(),
-                      s_tensor.data(),  // not used for F16
-                      s_tensor.data(),  // not used for F16
-                      &aux_input_tensors, dq_tensor.data(), dk_tensor.data(), dv_tensor.data(),
-                      dbias_tensor.data(), dsoftmax_offset_tensor.data(),
-                      q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
-                      q_seq_offsets_tensor.data(), k_seq_offsets_tensor.data(), q_max_seqlen,
-                      kv_max_seqlen, scaling_factor, dropout_probability, qkv_layout, bias_type,
-                      mask_type, softmax_type, window_size_left, window_size_right,
-                      bottom_right_diagonal, deterministic, false, workspace_tensor.data(), stream);
+  nvte_fused_attn_bwd(
+      q_tensor.data(), k_tensor.data(), v_tensor.data(), output_tensor.data(),
+      doutput_tensor.data(),
+      s_tensor.data(),  // not used for F16
+      s_tensor.data(),  // not used for F16
+      &aux_input_tensors, dq_tensor.data(), dk_tensor.data(), dv_tensor.data(), dbias_tensor.data(),
+      dsoftmax_offset_tensor.data(), q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
+      q_seq_offsets_tensor.data(), k_seq_offsets_tensor.data(), q_max_seqlen, kv_max_seqlen,
+      scaling_factor, dropout_probability, qkv_layout, nvte_get_q_format(qkv_layout),
+      nvte_get_q_format(qkv_layout), qkv_layout, NVTE_QKV_Format_NOT_SET, NVTE_QKV_Format_NOT_SET,
+      bias_type, mask_type, softmax_type, window_size_left, window_size_right,
+      bottom_right_diagonal, deterministic, false, workspace_tensor.data(), stream);
 
   nvte_tensor_pack_destroy(&aux_input_tensors);
 }
@@ -665,6 +701,244 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedAttnBackwardHandler, FusedAttnBackwardFFI,
                                   .Ret<Buffer_Type>()      // workspace
                                   .Attrs(),
                               FFI_CudaGraph_Traits);
+
+namespace {
+
+struct ScoreModScalarStorage {
+  alignas(16) std::array<uint8_t, 16> data{};
+  size_t size = 0;
+};
+
+struct ScoreModGraphCacheKey {
+  int device_id = 0;
+  int64_t hash0 = 0;
+  int64_t hash1 = 0;
+  int64_t frontend_version = 0;
+
+  bool operator==(const ScoreModGraphCacheKey &other) const {
+    return device_id == other.device_id && hash0 == other.hash0 && hash1 == other.hash1 &&
+           frontend_version == other.frontend_version;
+  }
+};
+
+struct ScoreModGraphCacheKeyHash {
+  size_t operator()(const ScoreModGraphCacheKey &key) const {
+    size_t seed = std::hash<int>{}(key.device_id);
+    auto combine = [&seed](int64_t value) {
+      // 64-bit golden ratio constant from boost::hash_combine to spread mixed keys.
+      seed ^= std::hash<int64_t>{}(value) + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+    };
+    combine(key.hash0);
+    combine(key.hash1);
+    combine(key.frontend_version);
+    return seed;
+  }
+};
+
+using ScoreModGraphPtr = std::shared_ptr<cudnn_frontend::graph::Graph>;
+
+std::unordered_map<ScoreModGraphCacheKey, ScoreModGraphPtr, ScoreModGraphCacheKeyHash> &
+getScoreModeGraphCache() {
+  static std::unordered_map<ScoreModGraphCacheKey, ScoreModGraphPtr, ScoreModGraphCacheKeyHash>
+      cache;
+  return cache;
+}
+
+std::mutex &getScoreModGraphCacheMutex() {
+  static std::mutex mutex;
+  return mutex;
+}
+
+struct ScoreModCudnnHandleCache {
+  std::unordered_map<int, cudnnHandle_t> handles;
+
+  cudnnHandle_t GetHandle() {
+    int device_id = 0;
+    NVTE_CHECK_CUDA(cudaGetDevice(&device_id));
+    auto it = handles.find(device_id);
+    if (it == handles.end()) {
+      cudnnHandle_t handle = nullptr;
+      NVTE_CHECK_CUDNN(cudnnCreate(&handle));
+      it = handles.emplace(device_id, handle).first;
+    }
+    return it->second;
+  }
+
+  ~ScoreModCudnnHandleCache() {
+    for (auto &[_, handle] : handles) {
+      cudnnDestroy(handle);
+    }
+  }
+};
+
+cudnnHandle_t GetScoreModCudnnHandle() {
+  static thread_local ScoreModCudnnHandleCache cache;
+  return cache.GetHandle();
+}
+
+ScoreModGraphCacheKey GetScoreModGraphCacheKey(Dictionary &attrs) {
+  const int64_t frontend_version = get_attr_value<int64_t>(attrs, "cudnn_frontend_version");
+  NVTE_CHECK(frontend_version == CUDNN_FRONTEND_VERSION,
+             "cuDNN frontend version mismatch for score_mod graph deserialization: graph was "
+             "serialized with Python cuDNN frontend version ",
+             frontend_version,
+             ", but Transformer Engine C++ was built with CUDNN_FRONTEND_VERSION ",
+             CUDNN_FRONTEND_VERSION, ".");
+
+  int device_id = 0;
+  NVTE_CHECK_CUDA(cudaGetDevice(&device_id));
+  return ScoreModGraphCacheKey{
+      device_id,
+      get_attr_value<int64_t>(attrs, "graph_hash0"),
+      get_attr_value<int64_t>(attrs, "graph_hash1"),
+      frontend_version,
+  };
+}
+
+ScoreModGraphPtr GetScoreModGraph(cudaStream_t stream, Dictionary &attrs) {
+  const auto key = GetScoreModGraphCacheKey(attrs);
+  {
+    std::lock_guard<std::mutex> lock(getScoreModGraphCacheMutex());
+    auto &cache = getScoreModeGraphCache();
+    auto it = cache.find(key);
+    if (it != cache.end()) {
+      return it->second;
+    }
+  }
+
+  const auto serialized_graph = get_attr_value<std::string_view>(attrs, "serialized_graph");
+  std::vector<uint8_t> serialized_data(serialized_graph.begin(), serialized_graph.end());
+
+  auto handle = GetScoreModCudnnHandle();
+  NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
+
+  auto graph = std::make_shared<cudnn_frontend::graph::Graph>();
+  auto status = graph->deserialize(handle, serialized_data);
+  NVTE_CHECK(status.is_good(),
+             "Failed to deserialize cuDNN score_mod SDPA graph: ", status.get_message());
+
+  std::lock_guard<std::mutex> lock(getScoreModGraphCacheMutex());
+  auto &cache = getScoreModeGraphCache();
+  auto it = cache.find(key);
+  if (it != cache.end()) {
+    return it->second;
+  }
+  cache.emplace(key, graph);
+  return graph;
+}
+
+Error_Type ExecuteScoreModGraph(cudaStream_t stream, Dictionary &attrs,
+                                const std::vector<void *> &input_ptrs,
+                                const std::vector<void *> &output_ptrs, void *workspace) {
+  auto graph = GetScoreModGraph(stream, attrs);
+  auto input_uids = get_attr_value<xla::ffi::Span<const int64_t>>(attrs, "input_uids");
+  auto output_uids = get_attr_value<xla::ffi::Span<const int64_t>>(attrs, "output_uids");
+  auto scalar_uids = get_attr_value<xla::ffi::Span<const int64_t>>(attrs, "scalar_uids");
+  auto scalar_sizes = get_attr_value<xla::ffi::Span<const int64_t>>(attrs, "scalar_sizes");
+  auto scalar_values = get_attr_value<xla::ffi::Span<const uint8_t>>(attrs, "scalar_values");
+
+  NVTE_CHECK(input_ptrs.size() == input_uids.size(), "cuDNN score_mod graph expected ",
+             input_uids.size(), " inputs but got ", input_ptrs.size());
+  NVTE_CHECK(output_ptrs.size() >= output_uids.size(), "cuDNN score_mod graph expected at least ",
+             output_uids.size(), " outputs but got ", output_ptrs.size());
+  NVTE_CHECK(scalar_uids.size() == scalar_sizes.size(),
+             "Mismatched score_mod scalar uid/value-size counts.");
+  NVTE_CHECK(scalar_values.size() == scalar_uids.size() * 16,
+             "Mismatched score_mod packed scalar value size.");
+
+  std::unordered_map<int64_t, void *> variant_pack;
+  for (size_t i = 0; i < input_uids.size(); ++i) {
+    variant_pack.emplace(input_uids[i], input_ptrs[i]);
+  }
+  for (size_t i = 0; i < output_uids.size(); ++i) {
+    variant_pack.emplace(output_uids[i], output_ptrs[i]);
+  }
+
+  std::vector<ScoreModScalarStorage> scalar_storage(scalar_uids.size());
+  for (size_t i = 0; i < scalar_uids.size(); ++i) {
+    NVTE_CHECK(scalar_sizes[i] >= 0 && scalar_sizes[i] <= 16,
+               "score_mod pass-by-value scalars must be at most 16 bytes.");
+    scalar_storage[i].size = static_cast<size_t>(scalar_sizes[i]);
+    std::copy_n(scalar_values.begin() + i * 16, 16, scalar_storage[i].data.begin());
+    variant_pack.emplace(scalar_uids[i], scalar_storage[i].data.data());
+  }
+
+  auto handle = GetScoreModCudnnHandle();
+  NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
+  auto status = graph->execute(handle, variant_pack, workspace);
+  NVTE_CHECK(status.is_good(),
+             "cuDNN score_mod SDPA graph execution failed: ", status.get_message());
+  return ffi_with_cuda_error_check();
+}
+
+void AppendRemainingBuffers(Variadic_Buffer_Type args, std::vector<void *> *ptrs) {
+  ptrs->reserve(ptrs->size() + args.size());
+  for (size_t i = 0; i < args.size(); ++i) {
+    auto maybe_buf = args.get<Buffer_Type>(i);
+    NVTE_CHECK(!maybe_buf.has_error(), "Failed to decode variadic score_mod input buffer.");
+    ptrs->push_back(maybe_buf.value().untyped_data());
+  }
+}
+
+}  // namespace
+
+Error_Type FusedAttnScoreModForwardFFI(cudaStream_t stream, Buffer_Type q_buf, Buffer_Type k_buf,
+                                       Buffer_Type v_buf, Variadic_Buffer_Type score_mod_args,
+                                       Result_Type output_buf, Result_Type stats_buf,
+                                       Result_Type workspace_buf, Dictionary attrs) {
+  std::vector<void *> input_ptrs = {q_buf.untyped_data(), k_buf.untyped_data(),
+                                    v_buf.untyped_data()};
+  AppendRemainingBuffers(score_mod_args, &input_ptrs);
+
+  std::vector<void *> output_ptrs = {output_buf->untyped_data(), stats_buf->untyped_data()};
+  return ExecuteScoreModGraph(stream, attrs, input_ptrs, output_ptrs,
+                              workspace_buf->untyped_data());
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedAttnScoreModForwardHandler, FusedAttnScoreModForwardFFI,
+                              FFI::Bind()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // q
+                                  .Arg<Buffer_Type>()      // k
+                                  .Arg<Buffer_Type>()      // v
+                                  .RemainingArgs()         // score_mod tensor operands
+                                  .Ret<Buffer_Type>()      // output
+                                  .Ret<Buffer_Type>()      // stats
+                                  .Ret<Buffer_Type>()      // workspace
+                                  .Attrs());
+
+Error_Type FusedAttnScoreModBackwardFFI(cudaStream_t stream, Buffer_Type q_buf, Buffer_Type k_buf,
+                                        Buffer_Type v_buf, Buffer_Type output_buf,
+                                        Buffer_Type doutput_buf, Buffer_Type stats_buf,
+                                        Variadic_Buffer_Type score_mod_args, Result_Type dq_buf,
+                                        Result_Type dk_buf, Result_Type dv_buf,
+                                        Result_Type workspace_buf, Dictionary attrs) {
+  std::vector<void *> input_ptrs = {q_buf.untyped_data(),       k_buf.untyped_data(),
+                                    v_buf.untyped_data(),       output_buf.untyped_data(),
+                                    doutput_buf.untyped_data(), stats_buf.untyped_data()};
+  AppendRemainingBuffers(score_mod_args, &input_ptrs);
+
+  std::vector<void *> output_ptrs = {dq_buf->untyped_data(), dk_buf->untyped_data(),
+                                     dv_buf->untyped_data()};
+  return ExecuteScoreModGraph(stream, attrs, input_ptrs, output_ptrs,
+                              workspace_buf->untyped_data());
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedAttnScoreModBackwardHandler, FusedAttnScoreModBackwardFFI,
+                              FFI::Bind()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // q
+                                  .Arg<Buffer_Type>()      // k
+                                  .Arg<Buffer_Type>()      // v
+                                  .Arg<Buffer_Type>()      // output
+                                  .Arg<Buffer_Type>()      // doutput
+                                  .Arg<Buffer_Type>()      // stats
+                                  .RemainingArgs()         // score_mod tensor operands
+                                  .Ret<Buffer_Type>()      // dq
+                                  .Ret<Buffer_Type>()      // dk
+                                  .Ret<Buffer_Type>()      // dv
+                                  .Ret<Buffer_Type>()      // workspace
+                                  .Attrs());
 
 }  // namespace jax
 }  // namespace transformer_engine

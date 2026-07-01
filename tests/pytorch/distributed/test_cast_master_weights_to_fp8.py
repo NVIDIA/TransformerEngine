@@ -10,6 +10,9 @@ import subprocess
 import sys
 import pathlib
 
+sys.path.append(str(pathlib.Path(__file__).resolve().parent.parent))
+from utils import run_distributed
+
 import pytest
 import torch
 from torch import nn
@@ -992,7 +995,7 @@ def run_parallel_nvfp4_partial_cast_test() -> None:
 @pytest.mark.parametrize("world_size", [2])
 def test_cast_master_weights_to_fp8(world_size: int) -> None:
     """Launch parallel job that runs parallel tests"""
-    python_exe = pathlib.Path(sys.executable).resolve()
+    python_exe = pathlib.Path(sys.executable)
     current_file = pathlib.Path(__file__).resolve()
     command = [
         python_exe,
@@ -1197,7 +1200,7 @@ def test_nvfp4_partial_cast_matches_full(world_size: int) -> None:
     if not available:
         pytest.skip(reason)
 
-    python_exe = pathlib.Path(sys.executable).resolve()
+    python_exe = pathlib.Path(sys.executable)
     current_file = pathlib.Path(__file__).resolve()
     command = [
         python_exe,
@@ -1207,7 +1210,7 @@ def test_nvfp4_partial_cast_matches_full(world_size: int) -> None:
         current_file,
         "--parallel-nvfp4-partial",
     ]
-    subprocess.run(command, check=True)
+    run_distributed(command)
 
 
 def test_single_gpu_partial_cast_vs_full():

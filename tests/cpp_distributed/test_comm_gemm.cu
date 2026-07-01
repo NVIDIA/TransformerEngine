@@ -4,6 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <cublasmp.h>
 #include <cuda.h>
 #include <gtest/gtest.h>
 #include <mpi.h>
@@ -105,10 +106,102 @@ std::vector<T> CopyMatrix(const std::vector<T>& data, size_t mstart, size_t nsta
 }
 
 template <typename T>
+std::vector<float> CastToFloat(const std::vector<T>& in) {
+  std::vector<float> out(in.size());
+  for (size_t i = 0; i < in.size(); ++i) {
+    out[i] = static_cast<float>(in[i]);
+  }
+  return out;
+}
+
+template <typename T>
+ncclDataType_t NcclDataType();
+
+template <>
+ncclDataType_t NcclDataType<test::fp16>() {
+  return ncclFloat16;
+}
+
+template <>
+ncclDataType_t NcclDataType<test::bf16>() {
+  return ncclBfloat16;
+}
+
+template <>
+ncclDataType_t NcclDataType<test::fp32>() {
+  return ncclFloat;
+}
+
+template <>
+ncclDataType_t NcclDataType<test::fp8e4m3>() {
+  return ncclFloat8e4m3;
+}
+
+template <>
+ncclDataType_t NcclDataType<test::fp8e5m2>() {
+  return ncclFloat8e5m2;
+}
+
+
+
+template <typename T>
+std::vector<T> AllGatherColsSharded(const std::vector<T>& local, int64_t rows, int64_t local_cols,
+                                    int64_t global_cols) {
+  std::vector<int64_t> cols_per_rank{};
+  int nranks{};
+  CHECK_MPI(MPI_Comm_size(MPI_COMM_WORLD, &nranks));
+  cols_per_rank.resize(nranks);
+  CHECK_MPI(MPI_Allgather(&local_cols, 1, MPI_INT64_T, cols_per_rank.data(), 1, MPI_INT64_T,
+                          MPI_COMM_WORLD));
+
+  std::vector<int> counts(nranks);
+  std::vector<int> displs(nranks, 0);
+  for (int r = 0; r < nranks; ++r) {
+    counts[r] = static_cast<int>(cols_per_rank[r] * rows * sizeof(T));
+    if (r > 0) displs[r] = displs[r - 1] + counts[r - 1];
+  }
+
+  std::vector<T> gathered(rows * global_cols);
+  CHECK_MPI(MPI_Allgatherv(local.data(), static_cast<int>(local.size() * sizeof(T)), MPI_BYTE,
+                           gathered.data(), counts.data(), displs.data(), MPI_BYTE,
+                           MPI_COMM_WORLD));
+  return gathered;
+}
+
+template <typename T>
+std::vector<T> AllGatherRowsSharded(const std::vector<T>& local, int64_t local_rows, int64_t cols,
+                                    int64_t global_rows) {
+  std::vector<int64_t> rows_per_rank{};
+  int nranks{};
+  CHECK_MPI(MPI_Comm_size(MPI_COMM_WORLD, &nranks));
+  rows_per_rank.resize(nranks);
+  CHECK_MPI(MPI_Allgather(&local_rows, 1, MPI_INT64_T, rows_per_rank.data(), 1, MPI_INT64_T,
+                          MPI_COMM_WORLD));
+
+  std::vector<int> counts(nranks);
+  std::vector<int> displs(nranks, 0);
+  for (int r = 0; r < nranks; ++r) {
+    counts[r] = static_cast<int>(rows_per_rank[r] * sizeof(T));
+    if (r > 0) displs[r] = displs[r - 1] + counts[r - 1];
+  }
+
+  std::vector<T> gathered(global_rows * cols);
+  for (int64_t col = 0; col < cols; ++col) {
+    const auto* send = reinterpret_cast<const uint8_t*>(local.data() + col * local_rows);
+    auto* recv = reinterpret_cast<uint8_t*>(gathered.data() + col * global_rows);
+    CHECK_MPI(MPI_Allgatherv(send, static_cast<int>(local_rows * sizeof(T)), MPI_BYTE, recv,
+                             counts.data(), displs.data(), MPI_BYTE, MPI_COMM_WORLD));
+  }
+  return gathered;
+}
+
+template <typename T>
 test::Tensor Make(size_t m, size_t n, float scale) {
   test::Tensor ret("", std::vector{n, m}, TypeInfo<T>::dtype);
-  ret.set_scale(scale);
-  ret.set_scale_inv(1.0 / scale);
+  if (test::isFp8Type(TypeInfo<T>::dtype)) {
+    ret.set_scale(scale);
+    ret.set_scale_inv(1.0 / scale);
+  }
   return ret;
 }
 
@@ -116,8 +209,10 @@ template <typename T>
 test::Tensor MakeFromData(const std::vector<T>& data, size_t mstart, size_t nstart, size_t msize,
                           size_t nsize, size_t ld, float scale) {
   test::Tensor ret("", std::vector{nsize, msize}, TypeInfo<T>::dtype);
-  ret.set_scale(scale);
-  ret.set_scale_inv(1.0 / scale);
+  if (test::isFp8Type(TypeInfo<T>::dtype)) {
+    ret.set_scale(scale);
+    ret.set_scale_inv(1.0 / scale);
+  }
   auto local = CopyMatrix(data, mstart, nstart, msize, nsize, ld);
   NVTE_CHECK_CUDA(cudaMemcpy(ret.rowwise_dptr(), local.data(), local.size() * sizeof local[0],
                              cudaMemcpyDefault));
@@ -144,6 +239,12 @@ struct Params {
 
 class CommGemmFixure : public ::testing::TestWithParam<Params> {
  protected:
+  enum class OverlapType {
+    kAllGather,
+    kReduceScatter,
+    kAllReduce,
+  };
+
   CommGemmFixure() {
     CHECK_MPI(MPI_Comm_size(MPI_COMM_WORLD, &nranks_));
     CHECK_MPI(MPI_Comm_rank(MPI_COMM_WORLD, &rank_));
@@ -176,6 +277,8 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
 
   virtual PatternDims DistributeTensors(int64_t m, int64_t n, int64_t k) = 0;
 
+  virtual OverlapType overlap_type() const = 0;
+
   virtual void CommGemm(int64_t m, int64_t n, int64_t k, const NVTETensor a, const NVTETensor b,
                         const NVTETensor d, const NVTETensor bias, const NVTETensor pre_act_out,
                         bool transa, bool transb, bool grad, bool accumulate, int comm_sm_count,
@@ -204,18 +307,10 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
     std::vector<BType> bdata(k * n);
     std::generate(bdata.begin(), bdata.end(),
                   [&rng, &dist, b_scale] { return static_cast<BType>(dist(rng) * b_scale); });
-    std::vector<BiasType> biasdata(m * n);
+    std::vector<BiasType> biasdata(m);
     std::generate(biasdata.begin(), biasdata.end(), [&rng, &dist, bias_scale] {
       return static_cast<BiasType>(dist(rng) * bias_scale);
     });
-
-    auto ga = transa ? MakeFromData<AType>(adata, 0, 0, k, m, k, a_scale)
-                     : MakeFromData<AType>(adata, 0, 0, m, k, m, a_scale);
-    auto gb = transb ? MakeFromData<BType>(bdata, 0, 0, n, k, n, b_scale)
-                     : MakeFromData<BType>(bdata, 0, 0, k, n, k, b_scale);
-    auto gbias = MakeFromData<BiasType>(biasdata, 0, 0, m, n, m, bias_scale);
-    auto gd = Make<DType>(m, n, d_scale);
-    auto gaux = Make<DType>(m, n, d_scale);
 
     auto dims = DistributeTensors(m, n, k);
     auto a = transa ? MakeFromData<AType>(adata, dims.a_rows_start, dims.a_cols_start,
@@ -226,8 +321,8 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
                                           dims.b_cols_num, dims.b_rows_num, n, b_scale)
                     : MakeFromData<BType>(bdata, dims.b_rows_start, dims.b_cols_start,
                                           dims.b_rows_num, dims.b_cols_num, k, b_scale);
-    auto bias = MakeFromData<BiasType>(biasdata, dims.d_rows_start, dims.d_cols_start,
-                                       dims.d_rows_num, dims.d_cols_num, m, bias_scale);
+    auto bias = MakeFromData<BiasType>(biasdata, dims.d_rows_start, 0, dims.d_rows_num, 1, m,
+                                       bias_scale);
     auto d = Make<DType>(dims.d_rows_num, dims.d_cols_num, d_scale);
     auto aux = Make<DType>(dims.d_rows_num, dims.d_cols_num, d_scale);
 
@@ -236,24 +331,88 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
     CommGemm(m, n, k, a.data(), b.data(), d.data(), bias.data(), aux.data(), transa, transb, grad,
              accumulate, 0 /*comm_sm_count*/, stream);
     auto workspace = Make<uint8_t>(1, 32 << 20, 1.0);
-    nvte_cublas_gemm(ga.data(), gb.data(), gd.data(), gbias.data(), gaux.data(), transa, transb,
-                     grad, workspace.data(), accumulate, false /* use_split_accumulator */,
-                     0 /* math_sm_count */, stream);
+
+    std::vector<float> out_golden{};
+    if (overlap_type() == OverlapType::kAllGather) {
+      // Build AG reference input by explicitly all-gathering the sharded input operand.
+      std::vector<BType> b_global_data{};
+      if (transb) {
+        auto b_local = CopyMatrix(bdata, dims.b_cols_start, dims.b_rows_start, dims.b_cols_num,
+                                  dims.b_rows_num, n);
+        b_global_data = AllGatherRowsSharded(b_local, dims.b_cols_num, k, n);
+      } else {
+        auto b_local = CopyMatrix(bdata, dims.b_rows_start, dims.b_cols_start, dims.b_rows_num,
+                                  dims.b_cols_num, k);
+        b_global_data = AllGatherColsSharded(b_local, k, dims.b_cols_num, n);
+      }
+
+      auto b_ref =
+          transb ? MakeFromData<BType>(b_global_data, 0, 0, n, k, n, b_scale)
+                 : MakeFromData<BType>(b_global_data, 0, 0, k, n, k, b_scale);
+      auto d_ref = Make<DType>(dims.d_rows_num, dims.d_cols_num, d_scale);
+      auto aux_ref = Make<DType>(dims.d_rows_num, dims.d_cols_num, d_scale);
+      nvte_cublas_gemm(a.data(), b_ref.data(), d_ref.data(), bias.data(), aux_ref.data(), transa,
+                       transb, grad, workspace.data(), accumulate,
+                       true /* use_split_accumulator */, 0 /* math_sm_count */, stream);
+
+      std::vector<DType> out_ref(dims.d_rows_num * dims.d_cols_num);
+      NVTE_CHECK_CUDA(cudaMemcpy(out_ref.data(), d_ref.rowwise_dptr(),
+                                 out_ref.size() * sizeof(out_ref[0]), cudaMemcpyDefault));
+      out_golden = CastToFloat(out_ref);
+    } else {
+      transformer_engine::TensorWrapper empty_bias(nullptr, std::vector<size_t>{0},
+                                                   TypeInfo<BiasType>::dtype);
+      auto d_partial = Make<DType>(m, n, d_scale);
+      auto aux_partial = Make<DType>(m, n, d_scale);
+      nvte_cublas_gemm(a.data(), b.data(), d_partial.data(), empty_bias.data(),
+                       aux_partial.data(), transa, transb, grad, workspace.data(), accumulate,
+                       true /* use_split_accumulator */, 0 /* math_sm_count */, stream);
+
+      std::vector<DType> partial_host(m * n);
+      NVTE_CHECK_CUDA(cudaMemcpy(partial_host.data(), d_partial.rowwise_dptr(),
+                                 partial_host.size() * sizeof(partial_host[0]),
+                                 cudaMemcpyDefault));
+      std::vector<float> partial_float = CastToFloat(partial_host);
+
+      auto d_partial_float = Make<float>(m, n, 1.0f);
+      NVTE_CHECK_CUDA(cudaMemcpy(d_partial_float.rowwise_dptr(), partial_float.data(),
+                                 partial_float.size() * sizeof(float), cudaMemcpyDefault));
+
+      std::vector<float> reduced;
+      if (overlap_type() == OverlapType::kReduceScatter) {
+        auto d_reduced_float = Make<float>(dims.d_rows_num, dims.d_cols_num, 1.0f);
+        CHECK_NCCL(ncclReduceScatter(d_partial_float.rowwise_dptr(), d_reduced_float.rowwise_dptr(),
+                                     dims.d_rows_num * dims.d_cols_num, ncclFloat, ncclSum,
+                                     comm_, stream));
+
+        reduced.resize(dims.d_rows_num * dims.d_cols_num);
+        NVTE_CHECK_CUDA(cudaMemcpy(reduced.data(), d_reduced_float.rowwise_dptr(),
+                                   reduced.size() * sizeof(float), cudaMemcpyDefault));
+      } else {
+        CHECK_NCCL(ncclAllReduce(d_partial_float.rowwise_dptr(), d_partial_float.rowwise_dptr(),
+                                 m * n, ncclFloat, ncclSum, comm_, stream));
+
+        reduced.resize(m * n);
+        NVTE_CHECK_CUDA(cudaMemcpy(reduced.data(), d_partial_float.rowwise_dptr(),
+                                   reduced.size() * sizeof(float), cudaMemcpyDefault));
+      }
+
+      for (size_t col = 0; col < dims.d_cols_num; ++col) {
+        for (size_t row = 0; row < m; ++row) {
+          reduced[col * m + row] += static_cast<float>(biasdata[row]);
+        }
+      }
+      out_golden = std::move(reduced);
+    }
+
     NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
     NVTE_CHECK_CUDA(cudaStreamDestroy(stream));
     std::vector<DType> out(dims.d_rows_num * dims.d_cols_num);
     NVTE_CHECK_CUDA(
         cudaMemcpy(out.data(), d.rowwise_dptr(), out.size() * sizeof out[0], cudaMemcpyDefault));
-    std::vector<DType> out_golden_global(m * n);
-    NVTE_CHECK_CUDA(cudaMemcpy(out_golden_global.data(), gd.rowwise_dptr(),
-                               out_golden_global.size() * sizeof out_golden_global[0],
-                               cudaMemcpyDefault));
-
-    auto out_golden = CopyMatrix(out_golden_global, dims.d_rows_start, dims.d_cols_start,
-                                 dims.d_rows_num, dims.d_cols_num, m);
     NVTE_CHECK(out.size() == out_golden.size());
     for (size_t i = 0; i < out.size(); ++i) {
-      EXPECT_NEAR(static_cast<float>(out[i]), static_cast<float>(out_golden[i]), tol * k);
+      EXPECT_NEAR(static_cast<float>(out[i]), out_golden[i], tol);
     }
   }
 
@@ -264,6 +423,8 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
 };
 
 struct AgGemm : public CommGemmFixure {
+  OverlapType overlap_type() const override { return OverlapType::kAllGather; }
+
   PatternDims DistributeTensors(int64_t m, int64_t n, int64_t k) override {
     auto a_cols_num = nvte_comm_gemm_numroc(ctx_, m);
     auto b_cols_num = nvte_comm_gemm_numroc(ctx_, n);
@@ -299,6 +460,8 @@ struct AgGemm : public CommGemmFixure {
 };
 
 struct GemmRs : public CommGemmFixure {
+  OverlapType overlap_type() const override { return OverlapType::kReduceScatter; }
+
   PatternDims DistributeTensors(int64_t m, int64_t n, int64_t k) override {
     auto rows_num = nvte_comm_gemm_numroc(ctx_, k);
     auto d_cols_num = nvte_comm_gemm_numroc(ctx_, n);
@@ -333,7 +496,10 @@ struct GemmRs : public CommGemmFixure {
   }
 };
 
+#if CUBLASMP_VERSION >= 900
 struct GemmAr : public CommGemmFixure {
+  OverlapType overlap_type() const override { return OverlapType::kAllReduce; }
+
   PatternDims DistributeTensors(int64_t m, int64_t n, int64_t k) override {
     auto rows_num = nvte_comm_gemm_numroc(ctx_, k);
 
@@ -364,6 +530,7 @@ struct GemmAr : public CommGemmFixure {
                          accumulate, comm_sm_count, stream, kNVTECommGemmAlgoDefault);
   }
 };
+#endif  // CUBLASMP_VERSION >= 900
 
 TEST_P(AgGemm, Gemm) {
   auto [a_type, b_type, d_type, transa, transb, m, n, k, tol] = GetParam();
@@ -385,6 +552,7 @@ TEST_P(GemmRs, Gemm) {
               d_type, DType, Run<AType, BType, DType, DType>(transa, transb, m, n, k, tol);)));
 }
 
+#if CUBLASMP_VERSION >= 900
 TEST_P(GemmAr, Gemm) {
   auto [a_type, b_type, d_type, transa, transb, m, n, k, tol] = GetParam();
   TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
@@ -394,6 +562,7 @@ TEST_P(GemmAr, Gemm) {
           TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
               d_type, DType, Run<AType, BType, DType, DType>(transa, transb, m, n, k, tol);)));
 }
+#endif  // CUBLASMP_VERSION >= 900
 
 std::string ParamSuffix(const testing::TestParamInfo<Params>& info) {
   const auto [a_type, b_type, d_type, transa, transb, m, n, k, _tol] = info.param;
@@ -427,35 +596,37 @@ INSTANTIATE_TEST_SUITE_P(AgGemm, AgGemm,
 
 INSTANTIATE_TEST_SUITE_P(GemmRs, GemmRs,
                          testing::Values(Params{DType::kFloat16, DType::kFloat16, DType::kFloat16,
-                                                false, false, 64, 128, 256, 5e-2},
+                                                false, false, 64, 128, 256, 7e-2},
                                          Params{DType::kFloat16, DType::kFloat16, DType::kFloat16,
-                                                false, true, 64, 128, 256, 5e-2},
+                                                false, true, 64, 128, 256, 7e-2},
                                          Params{DType::kFloat16, DType::kFloat16, DType::kFloat16,
-                                                true, false, 64, 128, 256, 5e-2},
+                                                true, false, 64, 128, 256, 7e-2},
                                          Params{DType::kBFloat16, DType::kBFloat16,
-                                                DType::kBFloat16, false, false, 64, 128, 256, 5e-2},
+                                                DType::kBFloat16, false, false, 64, 128, 256, 6e-1},
                                          Params{DType::kBFloat16, DType::kBFloat16,
-                                                DType::kBFloat16, false, true, 64, 128, 256, 5e-2},
+                                                DType::kBFloat16, false, true, 64, 128, 256, 6e-1},
                                          Params{DType::kBFloat16, DType::kBFloat16,
-                                                DType::kBFloat16, true, false, 64, 128, 256, 5e-2},
+                                                DType::kBFloat16, true, false, 64, 128, 256, 6e-1},
                                          Params{DType::kFloat8E4M3, DType::kFloat8E4M3,
-                                                DType::kFloat16, true, false, 64, 128, 256, 5e-2},
+                                                DType::kFloat16, true, false, 64, 128, 256, 1e-1},
                                          Params{DType::kFloat8E4M3, DType::kFloat8E5M2,
-                                                DType::kFloat16, true, false, 64, 128, 256, 5e-2},
+                                                DType::kFloat16, true, false, 64, 128, 256, 7e-2},
                                          Params{DType::kFloat8E5M2, DType::kFloat8E4M3,
-                                                DType::kFloat16, true, false, 64, 128, 256, 5e-2}),
+                                                DType::kFloat16, true, false, 64, 128, 256, 7e-2}),
                          &ParamSuffix);
 
+#if CUBLASMP_VERSION >= 900
 INSTANTIATE_TEST_SUITE_P(
     GemmAr, GemmAr,
     testing::Values(Params{DType::kFloat16, DType::kFloat16, DType::kFloat16, true, false, 64,
-                           64 * 4, 64 * 4, 5e-2},
+                           64 * 4, 64 * 4, 7e-2},
                     Params{DType::kBFloat16, DType::kBFloat16, DType::kBFloat16, true, false, 64,
-                           64 * 4, 64 * 4, 5e-2},
+                           64 * 4, 64 * 4, 6e-1},
                     Params{DType::kFloat8E5M2, DType::kFloat8E4M3, DType::kFloat16, true, false,
-                           128, 128 * 4, 128 * 4, 5e-2},
+                           128, 128 * 4, 128 * 4, 1.5e-1},
                     Params{DType::kFloat8E4M3, DType::kFloat8E5M2, DType::kFloat16, true, false,
-                           128, 128 * 4, 128 * 4, 5e-2},
+                           128, 128 * 4, 128 * 4, 1.5e-1},
                     Params{DType::kFloat8E4M3, DType::kFloat8E4M3, DType::kFloat16, true, false,
-                           128, 128 * 4, 128 * 4, 5e-2}),
+                           128, 128 * 4, 128 * 4, 1.5e-1}),
     &ParamSuffix);
+#endif  // CUBLASMP_VERSION >= 900

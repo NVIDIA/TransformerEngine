@@ -4,10 +4,12 @@
 
 from typing import Callable, Dict, Iterable, List, Tuple, Union
 import pytest
+import copy
 
 import torch
 from transformer_engine.pytorch import (
     DotProductAttention,
+    GroupedLinear,
     LayerNormLinear,
     LayerNormMLP,
     Linear,
@@ -19,17 +21,19 @@ from transformer_engine.pytorch import (
     is_fp8_available,
     is_fp8_block_scaling_available,
     is_mxfp8_available,
+    is_nvfp4_available,
     is_bf16_available,
 )
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.common import recipe
-from utils import ModelConfig, reset_rng_states
+from utils import ModelConfig, recipe_id, reset_rng_states, skip_unsupported_backward_override
 
 # Check if FP8 is supported.
 fp8_available = is_fp8_available()
 fp8_block_scaling_available = is_fp8_block_scaling_available()
 mxfp8_available = is_mxfp8_available()
+nvfp4_available = is_nvfp4_available()
 
 # Reset RNG states.
 reset_rng_states()
@@ -61,6 +65,32 @@ def nvfp4_rht_and_2d_quantization():
     return nvfp4_recipe
 
 
+def nvfp4_row_scaled():
+    nvfp4_recipe = recipe.NVFP4BlockScaling(
+        disable_rht=True,
+        disable_stochastic_rounding=True,
+        disable_2d_quantization=True,
+        row_scaled_activation=True,
+        backward_override="dequantized",
+    )
+    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
+    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
+    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
+    return nvfp4_recipe
+
+
+def nvfp4_4over6():
+    nvfp4_recipe = recipe.NVFP4BlockScaling(
+        disable_rht=True,
+        disable_stochastic_rounding=True,
+        nvfp4_4over6="all",
+    )
+    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
+    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams(fp4_2d_quantization=True)
+    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
+    return nvfp4_recipe
+
+
 def check_rht_usage(recipe: recipe.Recipe) -> bool:
     # if using RHT, we can only support bf16
     # check fp4_quant_fwd_inp, fp4_quant_fwd_weight, fp4_quant_bwd_grad
@@ -87,7 +117,10 @@ def get_nvfp4_inp_supported_dtypes(recipe: recipe.Recipe, dtype: torch.dtype) ->
 fp8_recipes = []
 if mxfp8_available:
     fp8_recipes.append(recipe.MXFP8BlockScaling())
+if nvfp4_available:
     fp8_recipes.append(nvfp4_rht_and_2d_quantization())
+    fp8_recipes.append(nvfp4_row_scaled())
+    fp8_recipes.append(nvfp4_4over6())
 if fp8_block_scaling_available:
     fp8_recipes.append(recipe.Float8BlockScaling())
 if fp8_available:
@@ -182,6 +215,38 @@ class _Sequential(torch.nn.Sequential):
         for module in self:
             x = module(x, **kwargs)
         return x
+
+
+class _GroupedLinearWrapper(torch.nn.Module):
+    """Adapt GroupedLinear to the [seqlen, batch, hidden] data used in this test.
+
+    GroupedLinear expects a 2D `[total_tokens, hidden]` input plus an `m_splits`
+    list, so this wrapper flattens the leading dims, splits the tokens evenly
+    across the GEMMs, and restores the original shape. It also forwards
+    `is_first_microbatch` so the FP8 weight-caching path is exercised under CUDA
+    graphs.
+    """
+
+    def __init__(self, hidden_size: int, num_gemms: int, params_dtype: torch.dtype) -> None:
+        super().__init__()
+        self.num_gemms = num_gemms
+        self.grouped_linear = GroupedLinear(
+            num_gemms,
+            hidden_size,
+            hidden_size,
+            device="cuda",
+            params_dtype=params_dtype,
+        )
+
+    def forward(self, input_: torch.Tensor, **kwargs) -> torch.Tensor:
+        seqlen, batch, hidden = input_.shape
+        x = input_.reshape(seqlen * batch, hidden)
+        total_tokens = x.shape[0]
+        assert total_tokens % self.num_gemms == 0, "tokens must split evenly across GEMMs"
+        split = total_tokens // self.num_gemms
+        m_splits = [split] * self.num_gemms
+        out = self.grouped_linear(x, m_splits, **kwargs)
+        return out.reshape(seqlen, batch, hidden)
 
 
 # Supported modules
@@ -283,6 +348,15 @@ def _test_cuda_graphs(
                 )
                 for _ in range(num_layers)
             ]
+        elif module == "grouped_linear":
+            modules = [
+                _GroupedLinearWrapper(
+                    model_config.hidden_size,
+                    num_gemms=2,
+                    params_dtype=dtype,
+                )
+                for _ in range(num_layers)
+            ]
         elif module == "linear_op":
             modules = [
                 te_ops.Sequential(
@@ -359,7 +433,8 @@ def _test_cuda_graphs(
 @pytest.mark.parametrize("module", _test_cuda_graphs_modules)
 @pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("fp8_params", (False, True))
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes + [None], ids=lambda r: type(r).__name__)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes + [None], ids=recipe_id)
+@pytest.mark.parametrize("backward_override", (None, "high_precision", "dequantized"))
 def test_make_graphed_callables(
     *,
     module: str,
@@ -368,10 +443,17 @@ def test_make_graphed_callables(
     dtype: torch.dtype,
     fp8_params: bool,
     fp8_recipe: recipe.Recipe,
+    backward_override: str,
     fp8_weight_caching: bool = False,
 ) -> None:
 
     fp8 = fp8_recipe is not None
+
+    skip_unsupported_backward_override(module, fp8_recipe, backward_override)
+    if fp8:
+        fp8_recipe = copy.deepcopy(fp8_recipe)
+        fp8_recipe.backward_override = backward_override
+
     if fp8_params and not fp8:
         pytest.skip("FP8 needed for FP8 parameters.")
     if fp8_weight_caching and not fp8:
@@ -381,6 +463,8 @@ def test_make_graphed_callables(
             f"Module not yet supported for {fp8_recipe.__class__.__name__} with CUDA graphs"
         )
     if fp8 and fp8_recipe.nvfp4():
+        if getattr(fp8_recipe, "row_scaled_activation", False) and module == "mha":
+            pytest.skip("Row-scaled NVFP4 CUDA graph coverage applies to GEMM modules.")
         if dtype not in get_nvfp4_inp_supported_dtypes(fp8_recipe, dtype):
             pytest.skip(
                 f"Input dtype {dtype} not supported for NVFP4 Recipe"
@@ -439,21 +523,70 @@ _test_make_graphed_callables_with_fp8_weight_caching_modules = [
 )
 @pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("fp8_params", (False, True))
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=lambda r: type(r).__name__)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=recipe_id)
+@pytest.mark.parametrize("backward_override", (None, "high_precision", "dequantized"))
 def test_make_graphed_callables_with_fp8_weight_caching(
     *,
     module: str,
     dtype: torch.dtype,
     fp8_params: bool,
     fp8_recipe: recipe.Recipe,
+    backward_override: str,
 ) -> None:
     test_make_graphed_callables(
         module=module,
         dtype=dtype,
         fp8_params=fp8_params,
         fp8_recipe=fp8_recipe,
+        backward_override=backward_override,
         fp8_weight_caching=True,
     )
+
+
+# Per-tensor FP8 recipes that support GroupedLinear FP8 weight caching.
+_grouped_linear_fp8_weight_caching_recipes = []
+if fp8_available:
+    _grouped_linear_fp8_weight_caching_recipes.append(recipe.DelayedScaling())
+    _grouped_linear_fp8_weight_caching_recipes.append(recipe.Float8CurrentScaling())
+
+
+@pytest.mark.skipif(not fp8_available, reason="FP8 is not supported")
+@pytest.mark.parametrize("dtype", dtypes)
+@pytest.mark.parametrize("fp8_params", (False, True))
+@pytest.mark.parametrize("fp8_recipe", _grouped_linear_fp8_weight_caching_recipes, ids=recipe_id)
+def test_make_graphed_callables_grouped_linear_with_fp8_weight_caching(
+    *,
+    dtype: torch.dtype,
+    fp8_params: bool,
+    fp8_recipe: recipe.Recipe,
+    model_config: str = "small",
+    num_layers: int = 3,
+) -> None:
+    """GroupedLinear must thread `is_first_microbatch` into the FP8 weight-update
+    skip tensor under CUDA graphs.
+
+    With `fp8_weight_caching` enabled, the graphed and non-graphed runs only match
+    when `skip_fp8_weight_update` is propagated for every microbatch. Before the
+    fix, GroupedLinear hardcoded it to `None`, so the cached FP8 weights diverged
+    from the eager reference. This regresses if that propagation is dropped again.
+    """
+    config = model_configs[model_config]
+    kwargs = dict(
+        module="grouped_linear",
+        model_config=config,
+        num_layers=num_layers,
+        dtype=dtype,
+        fp8=True,
+        fp8_params=fp8_params,
+        fp8_weight_caching=True,
+        fp8_recipe=fp8_recipe,
+    )
+    graph_outputs_full = _test_cuda_graphs(graph_mode="full", **kwargs)
+    graph_outputs_individual = _test_cuda_graphs(graph_mode="individual", **kwargs)
+    outputs = _test_cuda_graphs(graph_mode="none", **kwargs)
+
+    assert_all_equal(outputs, graph_outputs_full)
+    assert_all_equal(outputs, graph_outputs_individual)
 
 
 def generate_data_for_dot_product_attention(

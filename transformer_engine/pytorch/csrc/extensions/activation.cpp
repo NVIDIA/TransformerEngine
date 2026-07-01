@@ -42,8 +42,9 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
   } else if (detail::IsNVFP4Quantizers(quantizer.ptr())) {
     auto nvfp4_quantizer_cpp = dynamic_cast<NVFP4Quantizer*>(quantizer_cpp.get());
     NVTE_CHECK(nvfp4_quantizer_cpp != nullptr, "Could not cast to NVFP4 quantizer");
-    if (nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax) {
-      // Post-RHT amax is handled within NVFP4 quantizer
+    if (nvfp4_quantizer_cpp->row_scaled_nvfp4 ||
+        (nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax)) {
+      // Amax is handled within NVFP4 quantizer
       impl = Impl::UNFUSED;
     } else {
       impl = Impl::FUSED_ACTIVATION_AMAX_NVFP4;
@@ -86,7 +87,7 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
       {
         auto fp8_quantizer_cpp = dynamic_cast<Float8CurrentScalingQuantizer*>(quantizer_cpp.get());
         NVTE_CHECK(fp8_quantizer_cpp != nullptr, "Could not cast to FP8 current scaling quantizer");
-        auto [temp_nvte, _] =
+        auto [temp_nvte, _, amax_buf] =
             fp8_quantizer_cpp->create_unquantized_tensor_with_amax(output_shape, fake_dtype);
         NVTE_SCOPED_GIL_RELEASE({
           if constexpr (act_func == nullptr) {
@@ -96,7 +97,7 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
             act_func(input_nvte.data(), temp_nvte.data(), stream);
           }
         });
-        fp8_quantizer_cpp->quantize_with_amax(temp_nvte, out_nvte);
+        fp8_quantizer_cpp->quantize_with_amax(temp_nvte, out_nvte, amax_buf);
       }
       break;
     case Impl::FUSED_ACTIVATION_AMAX_NVFP4:
@@ -154,8 +155,9 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
   } else if (detail::IsNVFP4Quantizers(quantizer.ptr())) {
     auto nvfp4_quantizer_cpp = dynamic_cast<NVFP4Quantizer*>(quantizer_cpp.get());
     NVTE_CHECK(nvfp4_quantizer_cpp != nullptr, "Could not cast to NVFP4 quantizer");
-    if (nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax) {
-      // Post-RHT amax is handled within NVFP4 quantizer
+    if (nvfp4_quantizer_cpp->row_scaled_nvfp4 ||
+        (nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax)) {
+      // Amax is handled within NVFP4 quantizer
       impl = Impl::UNFUSED;
     } else {
       impl = Impl::FUSED_ACTIVATION_AMAX_NVFP4;
@@ -198,7 +200,7 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
       {
         auto fp8_quantizer_cpp = dynamic_cast<Float8CurrentScalingQuantizer*>(quantizer_cpp.get());
         NVTE_CHECK(fp8_quantizer_cpp != nullptr, "Could not cast to FP8 current scaling quantizer");
-        auto [temp_nvte, _] =
+        auto [temp_nvte, _, amax_buf] =
             fp8_quantizer_cpp->create_unquantized_tensor_with_amax(input_shape, fake_dtype);
         NVTE_SCOPED_GIL_RELEASE({
           if constexpr (dact_func == nullptr) {
@@ -208,7 +210,7 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
             dact_func(grad_output_nvte.data(), input_nvte.data(), temp_nvte.data(), stream);
           }
         });
-        fp8_quantizer_cpp->quantize_with_amax(temp_nvte, grad_input_nvte);
+        fp8_quantizer_cpp->quantize_with_amax(temp_nvte, grad_input_nvte, amax_buf);
       }
       break;
     case Impl::FUSED_ACTIVATION_AMAX_NVFP4:
@@ -328,13 +330,16 @@ py::object dswiglu(const at::Tensor& grad, const at::Tensor& input, py::handle q
 }
 
 /* clamped functions */
-py::object clamped_swiglu(const at::Tensor& input, py::handle quantizer, float limit, float alpha) {
-  return activation_helper<nullptr, nvte_clamped_swiglu>(input, quantizer, 2, limit, alpha);
+py::object clamped_swiglu(const at::Tensor& input, py::handle quantizer, float limit, float alpha,
+                          float glu_linear_offset) {
+  return activation_helper<nullptr, nvte_clamped_swiglu_v2>(input, quantizer, 2, limit, alpha,
+                                                            glu_linear_offset);
 }
 
 py::object clamped_dswiglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer,
-                           float limit, float alpha) {
-  return dactivation_helper<nullptr, nvte_clamped_dswiglu>(grad, input, quantizer, limit, alpha);
+                           float limit, float alpha, float glu_linear_offset) {
+  return dactivation_helper<nullptr, nvte_clamped_dswiglu_v2>(grad, input, quantizer, limit, alpha,
+                                                              glu_linear_offset);
 }
 
 }  // namespace pytorch

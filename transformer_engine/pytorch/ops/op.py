@@ -14,8 +14,10 @@ from typing import Any, Optional
 import torch
 
 from transformer_engine.common.recipe import Recipe
+from .._extra_state import is_stateless_recipe, should_load_extra_state_pickle
 from ..quantization import (
     FP8GlobalStateManager,
+    QuantizerRole,
     RecipeState,
     autocast,
 )
@@ -209,6 +211,17 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         """
         return 0
 
+    def get_quantizer_roles(
+        self, mode: str  # pylint: disable=unused-argument
+    ) -> Optional[list[QuantizerRole]]:
+        """Return an ordered list of :class:`QuantizerRole` for quantizers.
+
+        The returned list must be aligned with the internal quantizer ordering and
+        must have length ``num_quantizers(mode)`` for supported modes.
+        Returning ``None`` means "no explicit roles".
+        """
+        return None
+
     def get_input_quantizer(self) -> Optional[Quantizer]:
         if self.num_quantizers("forward") > 0:
             return self.get_quantizer("forward", 0)
@@ -268,10 +281,17 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                     )
 
                 # Construct quantization recipe state
-                recipe_state = RecipeState.create(
+                roles = self.get_quantizer_roles(mode)  # pylint: disable=assignment-from-none
+                if roles is not None:
+                    assert len(roles) == num_quantizers, (
+                        "Recipe roles must match number of quantizers "
+                        f"({len(roles)=} vs {num_quantizers=})"
+                    )
+                recipe_state = RecipeState.create(  # pylint: disable=assignment-from-none
                     recipe,
                     mode=mode,
                     num_quantizers=num_quantizers,
+                    roles=roles,
                 )
                 fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
                     forward=(mode == "forward"),
@@ -322,14 +342,15 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                         pos, buffer_key = self._fp8_metas[mode][
                             FP8GlobalStateManager.get_buffer_info()
                         ]
-                        if buffer_key in FP8GlobalStateManager.global_amax_buffer:
+                        qstate = FP8GlobalStateManager.quantization_state
+                        if buffer_key in qstate.global_amax_buffer:
                             assert (
-                                buffer_key in FP8GlobalStateManager.global_amax_history_buffer
+                                buffer_key in qstate.global_amax_history_buffer
                             ), "TE internal error during amax history change."
-                            FP8GlobalStateManager.global_amax_buffer[buffer_key][pos] = (
-                                recipe_state.amax_history[0]
-                            )
-                            FP8GlobalStateManager.global_amax_history_buffer[buffer_key][
+                            qstate.global_amax_buffer[buffer_key][pos] = recipe_state.amax_history[
+                                0
+                            ]
+                            qstate.global_amax_history_buffer[buffer_key][
                                 pos
                             ] = recipe_state.amax_history
 
@@ -570,11 +591,14 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
 
             # Quantizer state
             fp8_meta = self._fp8_metas[mode]
+            recipe = fp8_meta["recipe"]
+            if is_stateless_recipe(recipe):
+                continue
             state[mode] = {}
-            state[mode]["recipe"] = fp8_meta["recipe"]
+            state[mode]["recipe"] = recipe
 
             # Copy tensors to CPU and store
-            if state[mode]["recipe"].delayed():
+            if recipe.delayed():
                 if mode == "forward":
                     state[mode]["scale_fwd"] = to_cpu(fp8_meta["scaling_fwd"].scale)
                     state[mode]["amax_history_fwd"] = to_cpu(fp8_meta["scaling_fwd"].amax_history)
@@ -606,8 +630,12 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         if state is None or state.numel() == 0:
             return
 
-        # Deserialize state from byte tensor
-        state = pickle.loads(state.detach().numpy(force=True).tobytes())
+        # Deserialize state from byte tensor only when unsafe loading is enabled.
+        state_bytes = state.detach().numpy(force=True).tobytes()
+        context = self.__class__.__name__
+        if not should_load_extra_state_pickle(state_bytes, context):
+            return
+        state = pickle.loads(state_bytes)
         if state is None or len(state) == 0:
             return
 
@@ -677,10 +705,25 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
 class FusedOperation(FusibleOperation):
     """Compound tensor operation supported by the operation fuser
 
-    If the forward or backward passes are defined, they must be
-    functionally equivalent to the forward/backward passes of the
-    corresponding basic ops. This class should hold no parameters or
-    other state, but should access them from the basic ops.
+    A fused op corresponds to a run of basic ops. Depending on which
+    fusion pass produces it (see ``fuser.py``), the equivalence contract
+    differs:
+
+    - Forward-only or backward-only fused ops (from
+      ``register_forward_fusion`` / ``register_backward_fusion``): the
+      defined pass must be functionally equivalent to the corresponding
+      basic ops' pass, since the opposite pass may be fused
+      independently.
+    - Joint forward-backward fused ops (from
+      ``register_forward_backward_fusion``): the op implements both
+      ``fuser_forward`` and ``fuser_backward``, and only the pair must
+      be jointly equivalent to the basic ops' forward and backward. The
+      two halves need not be individually interchangeable, so the
+      forward may save state that only its own backward knows
+      how to consume.
+
+    This class should hold no parameters or other state, but should
+    access them from the basic ops.
 
     Parameters
     ----------

@@ -1,0 +1,1237 @@
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
+"""NVFP4 recipe reference implementation."""
+
+import dataclasses
+from typing import Optional, Tuple, Union
+
+import torch
+
+from transformer_engine.pytorch.custom_recipes import quantization
+from transformer_engine.pytorch.custom_recipes import utils
+from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage, Quantizer
+
+
+def nvfp4_ref_rht_2d_quantizer_factory(role):
+    """
+    Quantizer factory for NVFP4 recipe reference implementation (RHT and 2D quantization for weights).
+
+    Receives a :class:`~transformer_engine.pytorch.quantization.QuantizerRole`.
+
+    Usage with CustomRecipe and autocast::
+
+        custom_recipe = recipe.CustomRecipe(qfactory=nvfp4_ref_rht_2d_quantizer_factory)
+        with autocast(recipe=custom_recipe):
+            output = model(input)
+    """
+    is_weight_tensor_in_gemm = (
+        role is not None
+        and role.module_type in ("linear", "grouped_linear")
+        and role.tensor_type == "weight"
+    )
+    if is_weight_tensor_in_gemm:  # 2D quantization for weights in GEMM-based modules
+        return NVFP4QuantizerRef(
+            dtype=utils.Fp4Formats.E2M1,
+            quant_tile_shape=(16, 16),
+            pow_2_scales=False,
+            with_rht=False,
+        )
+    return NVFP4QuantizerRef(
+        dtype=utils.Fp4Formats.E2M1,
+        quant_tile_shape=(1, 16),
+        pow_2_scales=False,
+        with_rht=True,
+    )
+
+
+def cast_to_fp4x2(x):
+    """Quantize a tensor to FP4 E2M1 and store in a byte tensor"""
+
+    result = torch.zeros_like(x, dtype=torch.uint8)
+    result[(x >= 0.0) & (x <= 0.25)] = 0
+    result[(x > 0.25) & (x < 0.75)] = 1
+    result[(x >= 0.75) & (x <= 1.25)] = 2
+    result[(x > 1.25) & (x < 1.75)] = 3
+    result[(x >= 1.75) & (x <= 2.5)] = 4
+    result[(x > 2.5) & (x < 3.5)] = 5
+    result[(x >= 3.5) & (x <= 5.0)] = 6
+    result[x > 5.0] = 7
+
+    result[(x >= -0.25) & (x < -0.0)] = 8
+    result[(x < -0.25) & (x > -0.75)] = 9
+    result[(x <= -0.75) & (x >= -1.25)] = 10
+    result[(x < -1.25) & (x > -1.75)] = 11
+    result[(x <= -1.75) & (x >= -2.5)] = 12
+    result[(x < -2.5) & (x > -3.5)] = 13
+    result[(x <= -3.5) & (x >= -5.0)] = 14
+    result[x < -5.0] = 15
+
+    return result[:, ::2] + result[:, 1::2] * 16
+
+
+def cast_from_fp4x2(x, dq_dtype):
+    """Dequantize FP4 E2M1 tensor that has been represented in a byte tensor"""
+    fp4_values = torch.tensor(
+        [
+            0.0,
+            0.5,
+            1.0,
+            1.5,
+            2.0,
+            3.0,
+            4.0,
+            6.0,
+            -0.0,
+            -0.5,
+            -1.0,
+            -1.5,
+            -2.0,
+            -3.0,
+            -4.0,
+            -6.0,
+        ],
+        device=x.device,
+        dtype=dq_dtype,
+    )
+
+    # Convert to long integers for indexing
+    second_bit = torch.div(x, 16, rounding_mode="floor").to(torch.long)
+    first_bit = (x - second_bit * 16).to(torch.long)
+
+    # Use the long integers to index fp4_values
+    first_bit_values = fp4_values[first_bit]
+    second_bit_values = fp4_values[second_bit]
+
+    result = torch.zeros(
+        (first_bit_values.shape[0], first_bit_values.shape[1] * 2),
+        device=x.device,
+        dtype=dq_dtype,
+    )
+    result[:, ::2] = first_bit_values
+    result[:, 1::2] = second_bit_values
+
+    return result
+
+
+def cast_to_e8(decode_scale):
+    """Cast to a value that is representable in FP8 E8M0.
+
+    The result is in FP32, not FP8 E8M0.
+    """
+    max_exponent = torch.tensor(127, device=decode_scale.device, dtype=torch.float32)
+    exponent = torch.ceil(torch.log2(decode_scale))
+    exponent = torch.clamp(exponent, min=-max_exponent, max=max_exponent)
+
+    return torch.tensor(2.0, device=decode_scale.device, dtype=torch.float32) ** exponent
+
+
+def cast_to_e4m3(decode_scale, global_amax):
+    """Scale and cast to FP8 E4M3.
+
+    decode_scale is actually the encoding scaling factor. global_amax
+    can be any data tensor and not just the amax.
+
+    TODO(etsykunov): Make less unintuitive.
+    """
+    decode_scale = decode_scale * global_amax
+    FLOAT8_E4M3_MAX = torch.tensor(448.0, device=decode_scale.device, dtype=torch.float32)
+    decode_scale = torch.clamp(decode_scale, min=-FLOAT8_E4M3_MAX, max=FLOAT8_E4M3_MAX)
+    return decode_scale.to(torch.float8_e4m3fn)
+
+
+def high_precision_gemm_ref(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    out_dtype: torch.dtype,
+    accumulate: bool = False,
+    is_a_transposed: bool = False,
+    is_b_transposed: bool = False,
+    out: Optional[torch.Tensor] = None,
+    bias: Optional[torch.Tensor] = None,
+    scale_alpha: float = 1.0,
+) -> torch.Tensor:
+    """GEMM implementation with unquantized data"""
+    # Handle transpositions
+    mat1, mat2 = a, b
+    if is_a_transposed:
+        mat1 = a.T
+    if is_b_transposed:
+        mat2 = b.T
+
+    # Ensure dtype compatibility for torch.addmm
+    mat1 = mat1.to(out_dtype)
+    mat2 = mat2.to(out_dtype)
+
+    # Determine output shape
+    y_shape = (mat1.size(0), mat2.size(1))
+
+    if bias is not None:
+        if accumulate:
+            raise ValueError("Bias is not supported with accumulation")
+        bias = bias.to(out_dtype)
+        # With bias case
+        if out_dtype == torch.float32:
+            y_ref = torch.addmm(bias.repeat(mat1.size(0), 1), mat1, mat2, beta=1, alpha=1)
+        else:
+            y_ref = torch.addmm(bias, mat1, mat2, beta=1, alpha=scale_alpha)
+    else:
+        # Without bias case
+        if accumulate and out is not None:
+            y_ref = out.clone().to(out_dtype)
+        else:
+            y_ref = torch.zeros(y_shape, dtype=out_dtype, device=a.device)
+        torch.addmm(y_ref, mat1, mat2, beta=1, alpha=scale_alpha, out=y_ref)
+
+    return y_ref
+
+
+@dataclasses.dataclass
+class NVFP4TensorRef(QuantizedTensorStorage):
+    """NVFP4 tensor for middleware between Transformer Engine and Kitchen.
+
+    Custom container to hold quantization result, including quantized tensor, optional
+    transposed quantized tensor, and corresponding decoding scales.
+
+    data: torch.Tensor
+        the quantized tensor.
+    scale: torch.Tensor
+        the decoding scale for the quantized tensor. Shape depends on the scaling granularity.
+        - if scaling type is PER_TENSOR, it should be a 1D scalar tensor.
+    data_t: torch.Tensor
+        the transposed quantized tensor (computed lazily if needed).
+    scale_t: torch.Tensor
+        the decoding scale for the transposed quantized tensor.
+    dtype: torch.dtype
+        nominal tensor datatype.
+    device: torch.device
+        device of the tensor.
+    quant_dtype: Union[utils.Fp4Formats, torch.dtype]
+        low precision tensor datatype.
+    original_shape: Tuple[int, ...]
+        original shape of the tensor.
+    _quantizer: Quantizer
+        Builder class for quantized tensor.
+    """
+
+    data: Optional[torch.Tensor] = None
+    scale: Optional[torch.Tensor] = None
+    data_t: Optional[torch.Tensor] = None
+    scale_t: Optional[torch.Tensor] = None
+    global_amax_row: Optional[torch.Tensor] = None
+    global_amax_col: Optional[torch.Tensor] = None
+    nvfp4_use_4over6: bool = False
+    nvfp4_e4m3_max: int = 448
+
+    dtype: Optional[torch.dtype] = None
+    device: Optional[torch.device] = None
+    quant_dtype: Optional[Union[utils.Fp4Formats, torch.dtype]] = None
+    original_shape: Optional[Tuple[int, ...]] = None
+    _quantizer: Optional[Quantizer] = None
+
+    @property
+    def custom(self) -> bool:
+        """Flag to indicate this quantized tensor is custom."""
+        return True
+
+    def prepare_for_saving(
+        self,
+    ) -> Tuple[list[Optional[torch.Tensor]], QuantizedTensorStorage]:
+        """Prepare the quantization result for saving for backward"""
+        tensors = [self.data, self.data_t, self.scale, self.scale_t]
+        self.data = None
+        self.data_t = None
+        self.scale = None
+        self.scale_t = None
+        return tensors, self
+
+    def restore_from_saved(
+        self, tensors: list[Optional[torch.Tensor]]
+    ) -> list[Optional[torch.Tensor]]:
+        """Restore the quantization result from the saved tensors"""
+        self.data = tensors[0]
+        self.data_t = tensors[1]
+        self.scale = tensors[2]
+        self.scale_t = tensors[3]
+        return tensors[4:]
+
+    # Compatibility
+    @property
+    def _data(self):
+        return self.data
+
+    @_data.setter
+    def _data(self, value):
+        self.data = value
+
+    @property
+    def _scale_inv(self):
+        return self.scale
+
+    @_scale_inv.setter
+    def _scale_inv(self, value):
+        self.scale = value
+
+    def __repr__(self):
+        return (
+            f"{self.__class__.__name__}("
+            f"dtype={self.dtype}, "
+            f"device={self.device}, "
+            f"quant_dtype={self.quant_dtype}, "
+            f"original_shape={self.original_shape}"
+            ")"
+        )
+
+    def update_usage(
+        self,
+        rowwise_usage: Optional[bool] = None,
+        columnwise_usage: Optional[bool] = None,
+    ):
+        """Generate or remove quantized data based on provided usage."""
+        has_data = self.data is not None
+        has_data_transpose = self.data_t is not None
+        needs_data = has_data
+        needs_data_transpose = has_data_transpose
+
+        if rowwise_usage is not None:
+            needs_data = rowwise_usage
+        if columnwise_usage is not None:
+            needs_data_transpose = columnwise_usage
+
+        # Generate data that is required
+        if needs_data and not has_data:
+            raise RuntimeError("Cannot generate FP4 data, even from FP4 data transpose")
+        if needs_data_transpose and not has_data_transpose:
+            if not has_data:
+                raise RuntimeError("FP4 data is required to generate FP4 data transpose")
+            self._create_transpose()
+
+        # Delete data that is not required
+        if not needs_data:
+            self.data = None
+        if not needs_data_transpose:
+            self.data_t = None
+
+    def _create_transpose(self):
+        """Create transposed quantized tensor"""
+        if not self.data.is_contiguous():
+            self.data = self.data.contiguous()
+        self.data_t = self.data.t().contiguous()
+        self.scale_t = self.scale
+
+    def size(self, *args, **kwargs):  # pylint: disable=unused-argument
+        """Return the original tensor shape, not the internal packed data shape.
+
+        FP4 quantization packs two 4-bit values into each 8-bit value, which reduces
+        the second dimension by half. This method returns the logical shape that
+        users expect, not the internal packed storage shape.
+        """
+        if self.original_shape is None:
+            raise RuntimeError("NVFP4TensorRef.size() called but original_shape has not been set")
+        return torch.Size(self.original_shape)
+
+
+def get_wgrad_sign_vector() -> torch.Tensor:
+    """Hard-coded signs for Hadamard transform"""
+    return torch.tensor(
+        [1.0, 1.0, 1.0, -1.0, 1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, 1.0, -1.0, 1.0, -1.0, -1.0],
+        dtype=torch.float32,
+    )
+
+
+class NVFP4QuantizerRef(Quantizer):
+    """Reference implementation of NVFP4 quantizer"""
+
+    def __init__(
+        self,
+        dtype: utils.Fp4Formats,
+        rowwise: bool = True,
+        columnwise: bool = True,
+        pow_2_scales: bool = False,
+        eps: float = 0.0,
+        quant_tile_shape: Tuple[int, int] = (1, 16),
+        row_scaled_nvfp4: bool = False,
+        nvfp4_use_4over6: bool = False,
+        nvfp4_e4m3_max: int = 448,
+        nvfp4_4over6_err_mode: str = "MAE",
+        nvfp4_4over6_err_use_fast_math: bool = False,
+        with_rht: bool = False,
+        with_random_sign_mask: bool = True,
+    ):
+        nvfp4_4over6_err_mode = nvfp4_4over6_err_mode.upper()
+        if row_scaled_nvfp4:
+            if not rowwise:
+                raise ValueError("Row-scaled NVFP4 reference quantization requires rowwise usage.")
+            if columnwise:
+                raise ValueError(
+                    "Row-scaled NVFP4 reference quantization does not support columnwise usage."
+                )
+        if nvfp4_use_4over6:
+            if nvfp4_4over6_err_mode not in ("MAE", "MSE"):
+                raise ValueError(f"Unsupported NVFP4 4over6 error mode: {nvfp4_4over6_err_mode}.")
+            if pow_2_scales:
+                raise ValueError("4over6 is only supported for NVFP4 (non-pow2) mode.")
+            if quant_tile_shape not in ((1, 16), (16, 16)):
+                raise ValueError("4over6 reference quantization only supports 1x16 or 16x16 tiles.")
+        super().__init__(rowwise=rowwise, columnwise=columnwise)
+        self.internal = True
+
+        self.dtype = dtype
+        self.pow_2_scales = pow_2_scales
+        self.eps = eps
+        self.quant_tile_shape = quant_tile_shape
+        self.row_scaled_nvfp4 = row_scaled_nvfp4
+        self.nvfp4_use_4over6 = nvfp4_use_4over6
+        self.nvfp4_e4m3_max = nvfp4_e4m3_max if nvfp4_use_4over6 else 448
+        if self.nvfp4_e4m3_max not in (448, 256):
+            raise ValueError("nvfp4_e4m3_max must be 448 or 256.")
+        self.nvfp4_4over6_err_mode = nvfp4_4over6_err_mode
+        self.nvfp4_4over6_err_use_fast_math = nvfp4_4over6_err_use_fast_math
+        self.with_rht = with_rht
+        self.with_random_sign_mask = with_random_sign_mask
+
+    @property
+    def custom(self) -> bool:
+        """Flag to indicate this quantizer is custom."""
+        return True
+
+    @staticmethod
+    def _build_hadamard_matrix(
+        size: int, device: torch.device, dtype: torch.dtype, with_random_sign_mask: bool = True
+    ) -> torch.Tensor:
+        """Construct a Hadamard matrix of given power-of-two size with entries +-1.
+
+        Uses Sylvester construction to avoid SciPy dependency.
+        """
+        if (size & (size - 1)) != 0:
+            raise ValueError(f"Hadamard size must be a power of two, got {size}")
+        h = torch.ones((1, 1), device=device, dtype=torch.float32)
+        while h.shape[0] < size:
+            h = torch.cat(
+                [
+                    torch.cat([h, h], dim=1),
+                    torch.cat([h, -h], dim=1),
+                ],
+                dim=0,
+            )
+        if with_random_sign_mask:
+            sign_mat = get_wgrad_sign_vector().to(device) * torch.eye(
+                size, device=device, dtype=torch.float32
+            )
+            h = sign_mat @ h
+        return h.to(dtype)
+
+    def _apply_rht(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply randomized Hadamard transform without random signs (reference path).
+
+        This matches the reference used in tests: x_reshaped @ (H * (1/sqrt(g))).
+        """
+        # Only apply when enabled
+        if not self.with_rht:
+            return x
+
+        # RHT dimension equals the quantization tile length (NVFP4 uses 16)
+        rht_dim = self.quant_tile_shape[1]
+        if x.shape[-1] % rht_dim != 0:
+            raise ValueError(
+                f"Inner dimension {x.shape[-1]} must be divisible by hadamard dimension {rht_dim}"
+            )
+
+        # Build H and scale
+        H = self._build_hadamard_matrix(rht_dim, x.device, x.dtype, self.with_random_sign_mask)
+        scale = 1.0 / float(rht_dim) ** 0.5
+
+        # Perform blockwise transform along the last dimension
+        original_shape = x.shape
+        x_mat = x.contiguous().view(-1, rht_dim)
+        # Random sign matrix is identity in this reference (no sign flipping)
+        transform = H * scale
+        out = x_mat @ transform
+        return out.view(original_shape)
+
+    @staticmethod
+    def _recover_swizzled_scales(
+        swizzled_scale: bool, scale: torch.Tensor, m: int, n: int, block_length: int
+    ) -> torch.Tensor:
+        if not swizzled_scale:
+            return scale
+        rounded_m = utils.roundup_div(m, 128) * 128
+        scale_n = utils.roundup_div(n, block_length)
+        rounded_n = utils.roundup_div(scale_n, 4) * 4
+        # Recover swizzled scaling factor layout -> linear layout
+        tmp = torch.reshape(scale, (rounded_m // 128, rounded_n // 4, 32, 4, 4))
+        # after permutation, the layout is [rounded_m // 128, 4, 32, rounded_n // 4, 4]
+        tmp = torch.permute(tmp, (0, 3, 2, 1, 4))
+        result = torch.reshape(tmp, (rounded_m, rounded_n))
+        return result[:m, :scale_n]
+
+    @staticmethod
+    def _ref_nvfp4_4over6_fp16_candidate(q: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+        """Decode E2M1 x E4M3 with the kernel's FP16 product semantics."""
+        q_float = q.to(torch.float32)
+        q_sign = (q_float < 0).to(torch.int32)
+        q_sig = (torch.abs(q_float) * 2).to(torch.int32)
+
+        scale_code = scale.contiguous().view(torch.uint8).to(torch.int32)
+        scale_sign = scale_code >> 7
+        scale_exp_field = (scale_code >> 3) & 0xF
+        scale_mantissa = scale_code & 0x7
+        scale_sig = torch.where(scale_exp_field == 0, scale_mantissa, scale_mantissa + 8)
+        scale_exp2 = torch.where(scale_exp_field == 0, scale_exp_field - 9, scale_exp_field - 10)
+
+        product_sign = q_sign ^ scale_sign
+        product_sig = q_sig * scale_sig
+        product_exp2 = scale_exp2 - 1
+
+        log2_sig = torch.zeros_like(product_sig)
+        for threshold in (2, 4, 8, 16, 32, 64, 128, 256):
+            log2_sig = log2_sig + (product_sig >= threshold).to(torch.int32)
+
+        floor_exp = log2_sig + product_exp2
+        normal_bits = ((floor_exp + 15) << 10) | (
+            torch.bitwise_left_shift(product_sig, 10 - log2_sig) - 1024
+        )
+        subnormal_bits = torch.bitwise_left_shift(product_sig, product_exp2 + 24)
+        magnitude_bits = torch.where(floor_exp < -14, subnormal_bits, normal_bits)
+        prod_bits = (product_sign << 15) | magnitude_bits
+        prod_bits = torch.where(product_sig == 0, product_sign << 15, prod_bits)
+        prod_bits = torch.where(
+            (scale_code & 0x7F) == 0x7F,
+            torch.full_like(prod_bits, 0x7E00),
+            prod_bits,
+        )
+
+        sign_f32 = torch.where(
+            (prod_bits & 0x8000) != 0,
+            torch.tensor(-1.0, device=prod_bits.device, dtype=torch.float32),
+            torch.tensor(1.0, device=prod_bits.device, dtype=torch.float32),
+        )
+        fp16_exp = (prod_bits >> 10) & 0x1F
+        fp16_frac = prod_bits & 0x3FF
+        normal_f32 = torch.ldexp((fp16_frac + 1024).to(torch.float32), fp16_exp - 25)
+        subnormal_f32 = torch.ldexp(fp16_frac.to(torch.float32), fp16_exp - 24)
+        return sign_f32 * torch.where(fp16_exp == 0, subnormal_f32, normal_f32)
+
+    @staticmethod
+    def _sum_4over6_2d_error(err: torch.Tensor, tile_len_y: int) -> torch.Tensor:
+        """Reduce 16 row errors in the same tree order as the CUDA warp reduction."""
+        assert tile_len_y == 16, "NVFP4 4over6 2D error reduction expects 16 rows."
+        rows = err.view(err.shape[0] // tile_len_y, tile_len_y, err.shape[1], 1)
+        rows = rows.squeeze(-1)
+        rows = rows[:, 0:8, :] + rows[:, 8:16, :]
+        rows = rows[:, 0:4, :] + rows[:, 4:8, :]
+        rows = rows[:, 0:2, :] + rows[:, 2:4, :]
+        return (rows[:, 0, :] + rows[:, 1, :]).unsqueeze(-1)
+
+    @staticmethod
+    def _quantize_blockwise_4over6_reference(
+        x: torch.Tensor,
+        vec_max: torch.Tensor,
+        global_amax: torch.Tensor,
+        global_encode_scale: torch.Tensor,
+        global_decode_scale: torch.Tensor,
+        row_scaled_nvfp4: bool,
+        tile_len_y: int,
+        nvfp4_4over6_err_mode: str,
+        nvfp4_4over6_err_use_fast_math: bool,
+        nvfp4_e4m3_max: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Quantize NVFP4 with 4over6 candidate selection.
+
+        This mirrors the CUDA path: map-to-4 uses a 1.5x expanded E4M3 block scale,
+        MAE/MSE compute error in the original input domain by default, the
+        fast-math error path computes error in the E4M3-scaled FP16 product
+        domain, and ties choose map-to-6.
+        """
+        m, num_blocks, tile_len_x = x.shape
+        n = num_blocks * tile_len_x
+        FLOAT4_E2M1_MAX = torch.tensor(6.0, device=x.device, dtype=torch.float32)
+        FLOAT8_E4M3_MAX = torch.tensor(448.0, device=x.device, dtype=torch.float32)
+        GLOBAL_SCALE_E4M3_MAX = torch.tensor(
+            float(nvfp4_e4m3_max), device=x.device, dtype=torch.float32
+        )
+
+        decode_scale_base = torch.div(vec_max, FLOAT4_E2M1_MAX) * global_encode_scale
+        decode_scale_map4 = decode_scale_base * 1.5
+        decode_scale_map6 = decode_scale_base
+        decode_scale_map4 = torch.clamp(
+            decode_scale_map4, min=-FLOAT8_E4M3_MAX, max=FLOAT8_E4M3_MAX
+        ).to(torch.float8_e4m3fn)
+        decode_scale_map6 = torch.clamp(
+            decode_scale_map6, min=-FLOAT8_E4M3_MAX, max=FLOAT8_E4M3_MAX
+        ).to(torch.float8_e4m3fn)
+
+        fp32_max = torch.tensor(
+            torch.finfo(torch.float32).max,
+            device=decode_scale_map4.device,
+            dtype=torch.float32,
+        )
+        encode_scale_map4 = torch.min(
+            torch.div(1.0, decode_scale_map4.to(torch.float32) * global_decode_scale),
+            fp32_max,
+        )
+        encode_scale_map6 = torch.min(
+            torch.div(1.0, decode_scale_map6.to(torch.float32) * global_decode_scale),
+            fp32_max,
+        )
+
+        clipped_x_map4 = torch.clamp(
+            x.to(torch.float32) * encode_scale_map4,
+            -FLOAT4_E2M1_MAX,
+            FLOAT4_E2M1_MAX,
+        ).reshape(m, n)
+        clipped_x_map6 = torch.clamp(
+            x.to(torch.float32) * encode_scale_map6,
+            -FLOAT4_E2M1_MAX,
+            FLOAT4_E2M1_MAX,
+        ).reshape(m, n)
+        qx_map4 = cast_to_fp4x2(clipped_x_map4)
+        qx_map6 = cast_to_fp4x2(clipped_x_map6)
+
+        err_map4 = torch.zeros_like(vec_max)
+        err_map6 = torch.zeros_like(vec_max)
+        fp4_map4 = cast_from_fp4x2(qx_map4, torch.float32).view(m, num_blocks, tile_len_x)
+        fp4_map6 = cast_from_fp4x2(qx_map6, torch.float32).view(m, num_blocks, tile_len_x)
+        x_float = x.to(torch.float32)
+        if nvfp4_4over6_err_use_fast_math:
+            original_scaled = x_float * global_encode_scale
+            candidate_map4 = NVFP4QuantizerRef._ref_nvfp4_4over6_fp16_candidate(
+                fp4_map4, decode_scale_map4
+            )
+            candidate_map6 = NVFP4QuantizerRef._ref_nvfp4_4over6_fp16_candidate(
+                fp4_map6, decode_scale_map6
+            )
+            for idx in range(tile_len_x):
+                diff_map4 = candidate_map4[:, :, idx] - original_scaled[:, :, idx]
+                diff_map6 = candidate_map6[:, :, idx] - original_scaled[:, :, idx]
+                if nvfp4_4over6_err_mode == "MSE":
+                    err_map4 = err_map4 + (diff_map4 * diff_map4).unsqueeze(-1)
+                    err_map6 = err_map6 + (diff_map6 * diff_map6).unsqueeze(-1)
+                else:
+                    err_map4 = err_map4 + torch.abs(diff_map4).unsqueeze(-1)
+                    err_map6 = err_map6 + torch.abs(diff_map6).unsqueeze(-1)
+        else:
+            denom = FLOAT4_E2M1_MAX * GLOBAL_SCALE_E4M3_MAX
+            sf_map4 = decode_scale_map4.to(torch.float32).squeeze(-1)
+            sf_map6 = decode_scale_map6.to(torch.float32).squeeze(-1)
+            if row_scaled_nvfp4:
+                error_global_amax = global_amax.squeeze(-1)
+            else:
+                error_global_amax = global_amax
+            for idx in range(tile_len_x):
+                val_map4 = fp4_map4[:, :, idx] * sf_map4
+                val_map4 = val_map4 * error_global_amax
+                val_map4 = val_map4 / denom
+                diff_map4 = val_map4 - x_float[:, :, idx]
+                if nvfp4_4over6_err_mode == "MSE":
+                    err_map4 = err_map4 + (diff_map4 * diff_map4).unsqueeze(-1)
+                else:
+                    err_map4 = err_map4 + torch.abs(diff_map4).unsqueeze(-1)
+
+                val_map6 = fp4_map6[:, :, idx] * sf_map6
+                val_map6 = val_map6 * error_global_amax
+                val_map6 = val_map6 / denom
+                diff_map6 = val_map6 - x_float[:, :, idx]
+                if nvfp4_4over6_err_mode == "MSE":
+                    err_map6 = err_map6 + (diff_map6 * diff_map6).unsqueeze(-1)
+                else:
+                    err_map6 = err_map6 + torch.abs(diff_map6).unsqueeze(-1)
+        if tile_len_y == 1:
+            pick_map4 = err_map4 < err_map6
+        else:
+            err_map4_blocks = NVFP4QuantizerRef._sum_4over6_2d_error(err_map4, tile_len_y)
+            err_map6_blocks = NVFP4QuantizerRef._sum_4over6_2d_error(err_map6, tile_len_y)
+            pick_map4 = (err_map4_blocks < err_map6_blocks).repeat_interleave(tile_len_y, dim=0)
+        qx = torch.where(
+            pick_map4.expand(-1, -1, tile_len_x // 2),
+            qx_map4.view(m, num_blocks, tile_len_x // 2),
+            qx_map6.view(m, num_blocks, tile_len_x // 2),
+        ).reshape(m, n // 2)
+        decode_scale = torch.where(pick_map4, decode_scale_map4, decode_scale_map6).squeeze(-1)
+        return qx, decode_scale
+
+    @classmethod
+    def _quantize_blockwise_reference(
+        cls,
+        x: torch.Tensor,
+        global_amax: torch.Tensor,
+        tile_len_x: int,
+        tile_len_y: int,
+        *,
+        pow_2_scales: bool,
+        row_scaled_nvfp4: bool = False,
+        nvfp4_use_4over6: bool = False,
+        nvfp4_e4m3_max: int = 448,
+        nvfp4_4over6_err_mode: str = "MAE",
+        nvfp4_4over6_err_use_fast_math: bool = False,
+        eps: float,  # pylint: disable=unused-argument
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+
+        if x.ndim != 2:
+            raise ValueError(
+                f"_quantize_blockwise_reference expects a 2D tensor, got {x.ndim}D with shape"
+                f" {x.shape}"
+            )
+        using_2d_quantization = tile_len_x == 16 and tile_len_y == 16
+        m, n = x.shape
+        # Compute vec_max based on the original x (before reshape)
+        # For 1D quantization: amax over each row chunk of 16
+        # For 2D quantization: amax over each 16x16 block, but output shape is still (128, 8, 1), filled with block amax
+        if using_2d_quantization:
+            # x shape: (128, 128)
+            x_blocks = (
+                x.unfold(0, tile_len_y, tile_len_y)
+                .unfold(1, tile_len_x, tile_len_x)
+                .to(torch.float32)
+            )  # (8, 8, 16, 16)
+            block_amax = torch.amax(torch.abs(x_blocks), dim=(-1, -2))  # (8, 8)
+            # Now, expand to (128, 8, 1) by repeating each block_amax for 16 rows
+            vec_max = block_amax.repeat_interleave(tile_len_y, dim=0).unsqueeze(-1)  # (128, 8, 1)
+        else:
+            # x shape: (128, 128)
+            x_reshaped = x.view(m, n // tile_len_x, tile_len_x)  # (128, 8, 16)
+            vec_max = torch.amax(torch.abs(x_reshaped), dim=-1, keepdim=True).to(
+                torch.float32
+            )  # (128, 8, 1)
+        x = x.view(m, n // tile_len_x, tile_len_x)
+        FLOAT4_E2M1_MAX = torch.tensor(6.0, device=x.device, dtype=torch.float32)
+        FLOAT8_E4M3_MAX = torch.tensor(448.0, device=x.device, dtype=torch.float32)
+        global_scale_e4m3_max = float(nvfp4_e4m3_max if nvfp4_use_4over6 else 448)
+        GLOBAL_SCALE_E4M3_MAX = torch.tensor(
+            global_scale_e4m3_max, device=x.device, dtype=torch.float32
+        )
+        decode_scale = torch.div(vec_max, FLOAT4_E2M1_MAX)
+
+        if pow_2_scales:
+            decode_scale = cast_to_e8(decode_scale)
+            encode_scale = torch.div(
+                torch.tensor(1.0, device=x.device, dtype=torch.float32),
+                decode_scale.to(torch.float32),
+            )
+        else:
+            if row_scaled_nvfp4:
+                global_amax = global_amax.to(torch.float32).view(m, 1, 1)
+
+            global_encode_scale = torch.div(GLOBAL_SCALE_E4M3_MAX * FLOAT4_E2M1_MAX, global_amax)
+            global_encode_scale = torch.min(
+                global_encode_scale,
+                torch.tensor(
+                    torch.finfo(torch.float32).max,
+                    device=global_encode_scale.device,
+                    dtype=torch.float32,
+                ),
+            )
+            if global_encode_scale.numel() == 1:
+                if global_encode_scale == torch.tensor(0.0, device=x.device, dtype=torch.float32):
+                    global_encode_scale = torch.tensor(1.0, device=x.device, dtype=torch.float32)
+            else:
+                global_encode_scale = torch.where(
+                    global_encode_scale == 0.0,
+                    torch.ones_like(global_encode_scale),
+                    global_encode_scale,
+                )
+            global_decode_scale = torch.div(1.0, global_encode_scale)
+            if nvfp4_use_4over6:
+                # FourOverSix compares map-to-4 and map-to-6 candidates using
+                # the configured error mode, while keeping TE-style FP4
+                # quantization for each candidate.
+                return cls._quantize_blockwise_4over6_reference(
+                    x,
+                    vec_max,
+                    global_amax,
+                    global_encode_scale,
+                    global_decode_scale,
+                    row_scaled_nvfp4,
+                    tile_len_y,
+                    nvfp4_4over6_err_mode,
+                    nvfp4_4over6_err_use_fast_math,
+                    nvfp4_e4m3_max,
+                )
+
+            global_encode_scale_multiplier = global_encode_scale * torch.reciprocal(FLOAT4_E2M1_MAX)
+
+            # Match the kernel's default path: fold the FP4 reciprocal into the
+            # global scale multiplier, but keep the final reciprocal exact.
+            decode_scale = vec_max * global_encode_scale_multiplier
+            decode_scale = torch.min(
+                decode_scale,
+                torch.tensor(
+                    torch.finfo(torch.float32).max,
+                    device=decode_scale.device,
+                    dtype=torch.float32,
+                ),
+            )
+            decode_scale = torch.clamp(decode_scale, min=-FLOAT8_E4M3_MAX, max=FLOAT8_E4M3_MAX)
+            decode_scale = decode_scale.to(torch.float8_e4m3fn)
+
+            encode_scale = torch.min(
+                torch.div(1.0, decode_scale.to(torch.float32) * global_decode_scale),
+                torch.tensor(
+                    torch.finfo(torch.float32).max,
+                    device=decode_scale.device,
+                    dtype=torch.float32,
+                ),
+            )
+
+        scaled_x = x.to(torch.float32) * encode_scale
+
+        clipped_x = torch.clamp(scaled_x, -FLOAT4_E2M1_MAX, FLOAT4_E2M1_MAX).reshape(m, n)
+
+        return cast_to_fp4x2(clipped_x), decode_scale.squeeze(-1)
+
+    @staticmethod
+    def _pad_tensor(
+        tensor: torch.Tensor, row_divisor: Optional[int], col_divisor: Optional[int]
+    ) -> torch.Tensor:
+
+        if tensor.dim() != 2:
+            raise ValueError(
+                f"_pad_tensor only supports 2D tensors, got {tensor.dim()}D tensor with shape"
+                f" {tensor.shape}"
+            )
+        M, N = tensor.shape
+        padding_needed_rows = 0
+        padding_needed_cols = 0
+
+        if row_divisor is not None and M % row_divisor != 0:
+            padding_needed_rows = row_divisor - (M % row_divisor)
+        # Check and calculate column padding if col_divisor is provided
+        if col_divisor is not None and N % col_divisor != 0:
+            padding_needed_cols = col_divisor - (N % col_divisor)
+
+        # Return original tensor if no padding is needed
+        if padding_needed_rows == 0 and padding_needed_cols == 0:
+            return tensor
+
+        # pad the tensor
+        out = torch.nn.functional.pad(
+            tensor,
+            (0, padding_needed_cols, 0, padding_needed_rows),
+            mode="constant",
+            value=0.0,
+        ).contiguous()
+
+        return out
+
+    @staticmethod
+    def _rm_pad_tensor(tensor: torch.Tensor, original_size: tuple[int, ...]) -> torch.Tensor:
+
+        if tensor.dim() != 2:
+            raise ValueError(
+                f"_rm_pad_tensor only supports 2D tensors, got {tensor.dim()}D tensor with shape"
+                f" {tensor.shape}"
+            )
+        M, N = original_size
+        out = tensor[:M, :N].contiguous()
+        return out
+
+    def _quantize(self, tensor: torch.Tensor) -> Tuple[
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
+        torch.Tensor,
+        torch.Tensor,
+    ]:
+        """
+        Python implementation of microblock FP4 quantization.
+
+        Parameters
+        ----------
+        tensor : torch.Tensor
+            Input tensor to quantize (should be 2D)
+
+        Returns
+        -------
+        Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor], torch.Tensor]
+            (qx, sx, qx_t, sx_t, global_amax) where:
+            - qx: quantized data in row-major order (if rowwise_usage), None otherwise
+            - sx: scale tensor for qx (if rowwise_usage), None otherwise
+            - qx_t: quantized data in column-major order (if columnwise_usage), None otherwise
+            - sx_t: scale tensor for qx_t (if columnwise_usage), None otherwise
+            - global_amax_row, global_amax_col: global amax tensors
+        """
+        global_amax_col = None
+        if self.pow_2_scales:
+            if self.quant_tile_shape != (1, 32):
+                raise ValueError(
+                    f"MXFP4 only supports 1x32 tile shape, got {self.quant_tile_shape}"
+                )
+            if self.row_scaled_nvfp4:
+                raise ValueError("Row-scaled NVFP4 is only supported for NVFP4 (non-pow2) mode.")
+            # TODO(etsykunov): Fix bug where global_amax_row and
+            # global_amax_col are not defined
+            # global_amax = torch.empty(0, device=tensor.device, dtype=torch.float32)
+        else:
+            if self.quant_tile_shape not in ((1, 16), (16, 16)):
+                raise ValueError(
+                    f"NVFP4 only supports 1x16 or 16x16 tile shape, got {self.quant_tile_shape}"
+                )
+            # Prepare inputs once so we can reuse for both amax and quantization
+            # Row-input will always be the original input.
+            row_input = tensor
+            col_input = (
+                self._apply_rht(tensor.t().contiguous())
+                if self.with_rht
+                else tensor.t().contiguous()
+            )
+            if self.row_scaled_nvfp4:
+                if self.quant_tile_shape != (1, 16):
+                    raise ValueError(
+                        "Row-scaled NVFP4 only supports NVFP4 1x16 tile shape, "
+                        f"got {self.quant_tile_shape}"
+                    )
+                global_amax_row = torch.max(torch.abs(row_input), dim=1).values.to(torch.float32)
+                global_amax_col = global_amax_row
+            else:
+                # Compute amax for rowwise and columnwise paths separately
+                global_amax_row = torch.max(torch.abs(row_input)).to(torch.float32).view(1)
+                global_amax_col = (
+                    torch.max(torch.abs(col_input)).to(torch.float32).view(1)
+                    if self.columnwise_usage
+                    else global_amax_row
+                )
+
+        transpose_scales = False
+
+        M, N = tensor.shape
+        if self.rowwise_usage:
+            x_input = row_input
+            x_padded = self._pad_tensor(
+                x_input, row_divisor=self.quant_tile_shape[0], col_divisor=self.quant_tile_shape[1]
+            )
+
+            qx, sx = self._quantize_blockwise_reference(
+                x_padded,
+                global_amax_row,
+                self.quant_tile_shape[1],
+                self.quant_tile_shape[0],
+                pow_2_scales=self.pow_2_scales,
+                row_scaled_nvfp4=self.row_scaled_nvfp4,
+                nvfp4_use_4over6=self.nvfp4_use_4over6,
+                nvfp4_e4m3_max=self.nvfp4_e4m3_max,
+                nvfp4_4over6_err_mode=self.nvfp4_4over6_err_mode,
+                nvfp4_4over6_err_use_fast_math=self.nvfp4_4over6_err_use_fast_math,
+                eps=self.eps,
+            )
+            if transpose_scales:
+                sx = sx.T
+
+            qx = self._rm_pad_tensor(qx, (M, N // 2))
+
+        else:
+            qx = None
+            sx = None
+
+        if self.columnwise_usage:
+            x_t = col_input
+            x_t_padded = self._pad_tensor(
+                x_t, row_divisor=self.quant_tile_shape[0], col_divisor=self.quant_tile_shape[1]
+            )
+
+            qx_t, sx_t = self._quantize_blockwise_reference(
+                x_t_padded,
+                global_amax_col,
+                self.quant_tile_shape[1],
+                self.quant_tile_shape[0],
+                pow_2_scales=self.pow_2_scales,
+                nvfp4_use_4over6=self.nvfp4_use_4over6,
+                nvfp4_e4m3_max=self.nvfp4_e4m3_max,
+                nvfp4_4over6_err_mode=self.nvfp4_4over6_err_mode,
+                nvfp4_4over6_err_use_fast_math=self.nvfp4_4over6_err_use_fast_math,
+                eps=self.eps,
+            )
+
+            qx_t = self._rm_pad_tensor(qx_t, (N, M // 2))
+
+            if transpose_scales:
+                sx_t = sx_t.T
+        else:
+            qx_t = None
+            sx_t = None
+
+        return qx, sx, qx_t, sx_t, global_amax_row, global_amax_col
+
+    def quantize(
+        self,
+        tensor: torch.Tensor,
+        **kwargs,  # pylint: disable=unused-argument
+    ) -> NVFP4TensorRef:
+        # sanity checks
+        if tensor.dtype not in utils.HIGH_PRECISION_FLOAT_DTYPES:
+            raise TypeError(
+                f"Unsupported input dtype {tensor.dtype}, expected one of"
+                f" {utils.HIGH_PRECISION_FLOAT_DTYPES}"
+            )
+
+        # Make it work with 3D tensors
+        original_shape = tensor.shape
+        if tensor.ndim > 2:
+            tensor = tensor.view(-1, tensor.shape[-1])
+
+        qx, sx, qx_t, sx_t, global_amax_row, global_amax_col = self._quantize(tensor)
+
+        return NVFP4TensorRef(
+            data=qx,
+            scale=sx,
+            data_t=qx_t,
+            scale_t=sx_t,
+            global_amax_row=global_amax_row,
+            global_amax_col=global_amax_col,
+            nvfp4_use_4over6=self.nvfp4_use_4over6,
+            nvfp4_e4m3_max=self.nvfp4_e4m3_max,
+            dtype=tensor.dtype,
+            device=tensor.device,
+            quant_dtype=self.dtype,
+            _quantizer=self,
+            original_shape=original_shape,
+        )
+
+    def update_quantized(
+        self,
+        src: torch.Tensor,
+        dst: QuantizedTensorStorage,
+        *,
+        noop_flag: Optional[torch.Tensor] = None,
+    ) -> QuantizedTensorStorage:
+        """Update the quantized tensor with the given tensor in-place
+
+        Parameters
+        ----------
+        src: torch.Tensor
+            Source tensor to copy from
+        dst: QuantizedTensorStorage
+            Destination QuantizedTensorStorage to update
+        noop_flag: torch.Tensor, optional
+            float32 flag indicating whether to avoid performing update
+        """
+        # Handle noop flag
+        if noop_flag is not None and noop_flag.item() != 0:
+            return dst
+
+        # Make sure input is in expected format
+        if not src.is_contiguous():
+            src = src.contiguous()
+
+        # Store the original shape and reshape for processing
+        original_shape = src.shape
+        if src.ndim > 2:
+            src = src.view(-1, src.shape[-1])
+
+        qx, sx, qx_t, sx_t, global_amax_row, global_amax_col = self._quantize(src)
+
+        # Update the destination with new data
+        dst.data = qx
+        dst.scale = sx
+        dst.data_t = qx_t
+        dst.scale_t = sx_t
+        dst.global_amax_row = global_amax_row
+        dst.global_amax_col = global_amax_col
+        dst.nvfp4_use_4over6 = self.nvfp4_use_4over6
+        dst.nvfp4_e4m3_max = self.nvfp4_e4m3_max
+        dst.dtype = src.dtype
+        dst.quant_dtype = self.dtype
+        dst.original_shape = original_shape
+
+        return dst
+
+    @property
+    def supports_allgather_fp8(self) -> bool:
+        """Whether the tensor data can be all-gathered with an FP8 all-gather.
+
+        TODO(etsykunov): Confirm docstring is correct. Also, this API
+        seems too FP8-specific and should be reconsidered.
+        """
+        return False
+
+    def transpose_qresult(self, qresult: QuantizedTensorStorage) -> QuantizedTensorStorage:
+        """Convert row-wise data to column-wise data (?)
+
+        TODO(etsykunov): Confirm docstring is correct.
+        """
+        raise NotImplementedError("Transpose qresult is not implemented for FP4.")
+
+    @property
+    def supports_dequantize(self) -> bool:
+        """Whether quantized tensor can converted to high-precision tensor"""
+        return False
+
+    @property
+    def is_data_t_transposed_in_memory(self) -> bool:
+        """Whether column-wise data is stored in transposed layout.
+
+        TODO(etsykunov): Confirm docstring is correct.
+        """
+        raise NotImplementedError(
+            "NVFP4QuantizerRef.is_data_t_transposed_in_memory is not implemented for FP4"
+            " quantization"
+        )
+
+    def qgemm(
+        self,
+        qx: torch.Tensor,
+        qw: torch.Tensor,
+        m_params: quantization.MMParams,  # pylint: disable=unused-argument
+        out_dtype: torch.dtype,
+        sx: torch.Tensor,
+        sw: torch.Tensor,
+        bias: torch.Tensor | None = None,
+        out: torch.Tensor | None = None,
+        accumulate: bool = False,
+        gemm_type: quantization.GEMMType = quantization.GEMMType.FPROP,
+        qresult_x: QuantizedTensorStorage | None = None,
+        qresult_w: QuantizedTensorStorage | None = None,
+    ) -> torch.Tensor:
+        """Python implementation of microblock FP4 GEMM."""
+        if bias is not None:
+            raise ValueError("Bias is not supported in NVFP4QuantizerRef.qgemm")
+
+        high_precision_x = cast_from_fp4x2(qx, out_dtype)
+        high_precision_w = cast_from_fp4x2(qw, out_dtype)
+
+        if self.pow_2_scales:
+
+            if sx.dtype == torch.uint8:
+                # if scaling factor is stored in uint8 container
+                sx = torch.tensor(2.0, device=sx.device, dtype=torch.float32) ** (
+                    (
+                        sx.to(torch.float32)
+                        - torch.tensor(127, device=sx.device, dtype=torch.float32)
+                    )
+                )
+                sw = torch.tensor(2.0, device=sw.device, dtype=torch.float32) ** (
+                    (
+                        sw.to(torch.float32)
+                        - torch.tensor(127, device=sw.device, dtype=torch.float32)
+                    )
+                )
+            else:
+                # if scaling factor is torch.float8_e8m0fnu
+                sx = sx.to(torch.float32)
+                sw = sw.to(torch.float32)
+
+            alpha = torch.tensor(1.0, device=high_precision_x.device, dtype=torch.float32)
+
+        else:
+
+            if qresult_x is None:
+                raise ValueError(
+                    "qresult_x is required for non-pow_2_scales NVFP4 GEMM (needed for global_amax)"
+                )
+            if qresult_w is None:
+                raise ValueError(
+                    "qresult_w is required for non-pow_2_scales NVFP4 GEMM (needed for global_amax)"
+                )
+            if qresult_x.global_amax_row is None:
+                raise ValueError(
+                    "qresult_x.global_amax_row must be set for non-pow_2_scales NVFP4 GEMM"
+                )
+            if qresult_w.global_amax_col is None:
+                raise ValueError(
+                    "qresult_w.global_amax_col must be set for non-pow_2_scales NVFP4 GEMM"
+                )
+
+            sx = sx.to(torch.float32)
+            sw = sw.to(torch.float32)
+
+            qresult_x_nvfp4_use_4over6 = getattr(
+                qresult_x,
+                "nvfp4_use_4over6",
+                getattr(qresult_x, "_nvfp4_use_4over6", self.nvfp4_use_4over6),
+            )
+            qresult_w_nvfp4_use_4over6 = getattr(
+                qresult_w,
+                "nvfp4_use_4over6",
+                getattr(qresult_w, "_nvfp4_use_4over6", self.nvfp4_use_4over6),
+            )
+            qresult_x_e4m3_max = getattr(
+                qresult_x,
+                "nvfp4_e4m3_max",
+                getattr(qresult_x, "_nvfp4_e4m3_max", self.nvfp4_e4m3_max),
+            )
+            qresult_w_e4m3_max = getattr(
+                qresult_w,
+                "nvfp4_e4m3_max",
+                getattr(qresult_w, "_nvfp4_e4m3_max", self.nvfp4_e4m3_max),
+            )
+            if qresult_x_nvfp4_use_4over6:
+                fp8_max_x = float(qresult_x_e4m3_max)
+            else:
+                fp8_max_x = 448.0
+            if qresult_w_nvfp4_use_4over6:
+                fp8_max_w = float(qresult_w_e4m3_max)
+            else:
+                fp8_max_w = 448.0
+            factor = 6.0 * 6.0 * fp8_max_x * fp8_max_w
+
+            if gemm_type == quantization.GEMMType.WGRAD:
+                partial_alpha = qresult_x.global_amax_col * qresult_w.global_amax_col
+            else:
+                partial_alpha = qresult_x.global_amax_row * qresult_w.global_amax_row
+            if partial_alpha.numel() > 1 and partial_alpha.numel() == high_precision_x.shape[0]:
+                partial_alpha = partial_alpha.view(-1, 1)
+            else:
+                partial_alpha = partial_alpha.squeeze(-1)
+            alpha = torch.div(partial_alpha, factor)
+
+        M, K = high_precision_x.shape
+        N, K_w = high_precision_w.shape
+        if K != K_w:
+            raise ValueError(
+                f"K dimension mismatch between qx and qw: qx has K={K}, qw has K={K_w}"
+            )
+        if K % 32 != 0:
+            raise ValueError(f"K dimension must be divisible by 32, got K={K}")
+        if N % 8 != 0:
+            raise ValueError(f"N dimension must be divisible by 8, got N={N}")
+
+        block_length = 32 if self.pow_2_scales else 16
+
+        grid_k = K // block_length
+
+        if sx.shape != (M, K // block_length):
+            raise ValueError(
+                f"sx shape mismatch: expected ({M}, {K // block_length}), got {sx.shape}"
+            )
+        if sw.shape != (N, K // block_length):
+            raise ValueError(
+                f"sw shape mismatch: expected ({N}, {K // block_length}), got {sw.shape}"
+            )
+
+        y = torch.zeros(M, N, dtype=torch.float32, device=qx.device)
+
+        # below implementation is to match the FP4 tensor core implementation
+        # Each output element (i, j) is fp32 accumulation of (K // block_length) inner products
+        # Each inner product is sx * sw * (1, block_length) x (block_length, 1) with precision in fp32
+        # Then batch the computation in M, N dimension
+        for k in range(grid_k):
+            k_start = k * block_length
+            k_end = k_start + block_length
+
+            qx_block = high_precision_x[:, k_start:k_end].clone().contiguous()
+            qw_block = high_precision_w[:, k_start:k_end].clone().contiguous()
+
+            # Extract scaling factors for the current blocks
+            sx_block = sx[:, k]
+            sw_block = sw[:, k]
+
+            y += torch.outer(sx_block, sw_block) * high_precision_gemm_ref(
+                qx_block, qw_block, torch.float32, is_b_transposed=True
+            )
+
+        if not self.pow_2_scales and K > 0:
+            # only apply global scale for NVFP4 and non-empty cases
+            y = alpha * y
+
+        # accumulation happens at epilogue in float32
+        if accumulate:
+            if out is None:
+                raise ValueError("Output tensor must be provided for accumulation.")
+            y += out.to(torch.float32)
+        else:
+            if out is not None:
+                raise ValueError("Output tensor should be None when accumulate is False.")
+
+        y = y.to(out_dtype)
+        return y

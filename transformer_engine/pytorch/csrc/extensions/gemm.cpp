@@ -9,9 +9,7 @@
 #include <optional>
 #include <string>
 
-#include "../common.h"
 #include "../extensions.h"
-#include "common.h"
 #include "common/util/cuda_runtime.h"
 #include "common/util/system.h"
 #include "pybind.h"
@@ -41,12 +39,11 @@ bool is_low_precision(const DType type) {
 }
 
 std::vector<size_t> getGemmOutputShape(const NVTEShape& A_shape, const bool transa,
-                                       const NVTEShape& B_shape, const bool transb) {
+                                       const NVTEShape& B_shape, const bool transb,
+                                       size_t tp_size = 1, size_t tp_dim = 0) {
   // Flatten outer dims to get 2D matrices
-  const size_t A0 = A_shape.ndim > 0 ? product(A_shape, 0, A_shape.ndim - 1) : 1;
-  const size_t A1 = A_shape.ndim > 0 ? A_shape.data[A_shape.ndim - 1] : 1;
-  const size_t B0 = B_shape.ndim > 0 ? product(B_shape, 0, B_shape.ndim - 1) : 1;
-  const size_t B1 = B_shape.ndim > 0 ? B_shape.data[B_shape.ndim - 1] : 1;
+  const auto [A0, A1] = get_2d_dims(A_shape);
+  const auto [B0, B1] = get_2d_dims(B_shape);
 
   // Check matrix dims
   NVTE_CHECK((transa ? A1 : A0) == (transb ? B0 : B1), "Invalid matrix dimensions for GEMM (A=(",
@@ -56,21 +53,36 @@ std::vector<size_t> getGemmOutputShape(const NVTEShape& A_shape, const bool tran
   std::vector<size_t> ret;
   if (transb) {
     ret.emplace_back(B1);
-  } else {
+  } else if (tp_size == 1) {
     // Unflatten B0
     for (size_t i = 0; i < B_shape.ndim - 1; ++i) {
       ret.emplace_back(B_shape.data[i]);
     }
+  } else {
+    // Keep output tensor in 2D for comm+GEMM overlap
+    ret.emplace_back(B0);
   }
   if (transa) {
     ret.emplace_back(A0);
   } else {
     ret.emplace_back(A1);
   }
+
+  // Correct output dims for comm+GEMM overlap if needed
+  if (tp_size > 1) {
+    if (tp_dim == 0) {
+      // Outer dim is sharded, comm+GEMM overlap would need to do all-gather
+      ret[0] *= tp_size;
+    } else {
+      // Inner dim is sharded, comm+GEMM overlap would need to do reduce-scatter
+      ret[0] /= tp_size;
+    }
+  }
   return ret;
 }
 
-bool checkGemmShape(const std::vector<size_t>& expected, const NVTEShape& actual) {
+bool checkGemmShape(const std::vector<size_t>& expected, const NVTEShape& actual,
+                    size_t tp_size = 1, size_t tp_dim = 0) {
   if (expected.size() != actual.ndim) return false;
   for (size_t i = 0; i < expected.size(); ++i) {
     if (expected[i] != actual.data[i]) return false;
@@ -90,10 +102,13 @@ GroupedGemmConfig prepare_grouped_gemm_config(at::Tensor alpha, at::Tensor beta,
                                               at::Tensor workspace_setup,
                                               at::Tensor workspace_cublas, size_t num_tensors,
                                               int math_sm_count, bool use_split_accumulator) {
-  NVTE_CHECK(alpha.numel() == static_cast<int64_t>(num_tensors),
-             "Grouped GEMM expects alpha to have num_tensors elements.");
-  NVTE_CHECK(beta.numel() == static_cast<int64_t>(num_tensors),
-             "Grouped GEMM expects beta to have num_tensors elements.");
+  const bool per_group = (alpha.numel() == static_cast<int64_t>(num_tensors));
+  const bool scalar = (alpha.numel() == 1);
+  NVTE_CHECK(per_group || scalar, "Grouped GEMM expects alpha to have 1 or num_tensors (",
+             num_tensors, ") elements, got ", alpha.numel());
+  NVTE_CHECK(beta.numel() == alpha.numel(),
+             "Grouped GEMM expects beta to have the same number of elements as alpha (",
+             alpha.numel(), "), got ", beta.numel());
 
   GroupedGemmConfig grouped_gemm_config{
       makeTransformerEngineTensor(alpha),
@@ -153,11 +168,18 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
                                  A_tensor.scaling_mode() == NVTE_BLOCK_SCALING_2D ||
                                  B_tensor.scaling_mode() == NVTE_BLOCK_SCALING_1D ||
                                  B_tensor.scaling_mode() == NVTE_BLOCK_SCALING_2D;
-
+  // Get TP info for comm+GEMM overlap
+  size_t tp_size = 1;
+  size_t tp_dim = 0;
+  if (comm_overlap && !bulk_overlap && comm_overlap->with_cublasmp()) {
+    tp_size = comm_overlap->get_tp_size();
+    tp_dim = (comm_type.value() == CommOverlapType::AG) ? 0 : 1;
+  }
   // Check tensor dimensions
   const auto& A_shape = A_tensor.shape();
   const auto& B_shape = B_tensor.shape();
-  const auto& D_shape = detail::getGemmOutputShape(A_shape, transa, B_shape, transb);
+  const auto& D_shape =
+      detail::getGemmOutputShape(A_shape, transa, B_shape, transb, tp_size, tp_dim);
   NVTE_CHECK(A_shape.ndim >= 1, "Tensor A needs to have at least 1 dimension");
   NVTE_CHECK(B_shape.ndim >= 1, "Tensor B needs to have at least 1 dimension");
 
@@ -539,6 +561,10 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     te_pre_gelu_out_wrappers.emplace_back(std::move(te_pre_gelu_out));
   }
 
+  if (te_A_wrappers.empty()) {
+    return bias;
+  }
+
   // Keep the swizzled scaling factor tensors alive during the GEMM.
   std::vector<std::optional<at::Tensor>> swizzled_scale_inverses_list;
 
@@ -612,8 +638,9 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
 
 py::object te_general_grouped_gemm_for_grouped_tensor(
     py::handle A, bool transa, py::handle B, bool transb, py::handle D, py::object bias,
-    at::Tensor alpha, at::Tensor beta, at::Tensor workspace_setup, at::Tensor workspace_cublas,
-    bool use_split_accumulator, int math_sm_count) {
+    std::optional<at::Tensor> bias_scale, at::Tensor alpha, at::Tensor beta,
+    at::Tensor workspace_setup, at::Tensor workspace_cublas, bool use_split_accumulator,
+    int math_sm_count) {
   using namespace transformer_engine::pytorch::detail;
 
   init_extension();
@@ -637,8 +664,10 @@ py::object te_general_grouped_gemm_for_grouped_tensor(
   auto gemm_config = prepare_grouped_gemm_config(alpha, beta, workspace_setup, workspace_cublas,
                                                  num_tensors, math_sm_count, use_split_accumulator);
 
-  [[maybe_unused]] auto swizzled_scales_A = maybe_swizzle_grouped_tensor_for_gemm(grouped_A);
-  [[maybe_unused]] auto swizzled_scales_B = maybe_swizzle_grouped_tensor_for_gemm(grouped_B);
+  [[maybe_unused]] auto swizzled_scales_A =
+      maybe_swizzle_grouped_tensor(grouped_A, transa, !transa);
+  [[maybe_unused]] auto swizzled_scales_B =
+      maybe_swizzle_grouped_tensor(grouped_B, transb, !transb);
 
   NVTE_SCOPED_GIL_RELEASE({
     nvte_grouped_gemm(grouped_A.data(), transa, grouped_B.data(), transb, grouped_D.data(),
@@ -652,10 +681,18 @@ py::object te_general_grouped_gemm_for_grouped_tensor(
 
   if (!bias.is_none()) {
     auto grouped_bias = GroupedTensorFromPyTorchGroupedTensor(bias);
-    NVTE_SCOPED_GIL_RELEASE({
-      nvte_grouped_bias_add(grouped_D.data(), grouped_bias.data(),
-                            at::cuda::getCurrentCUDAStream());
-    });
+    if (bias_scale.has_value()) {
+      auto te_bias_scale = makeTransformerEngineTensor(*bias_scale);
+      NVTE_SCOPED_GIL_RELEASE({
+        nvte_grouped_scaled_bias_add(grouped_D.data(), grouped_bias.data(), te_bias_scale.data(),
+                                     at::cuda::getCurrentCUDAStream());
+      });
+    } else {
+      NVTE_SCOPED_GIL_RELEASE({
+        nvte_grouped_bias_add(grouped_D.data(), grouped_bias.data(),
+                              at::cuda::getCurrentCUDAStream());
+      });
+    }
   }
 
   return py::reinterpret_borrow<py::object>(D);
@@ -663,6 +700,7 @@ py::object te_general_grouped_gemm_for_grouped_tensor(
 
 py::object te_general_grouped_gemm_for_discrete_in(py::handle A, bool transa, py::handle B,
                                                    bool transb, py::handle D, py::object bias,
+                                                   std::optional<at::Tensor> bias_scale,
                                                    at::Tensor alpha, at::Tensor beta,
                                                    at::Tensor workspace_setup,
                                                    at::Tensor workspace_cublas,
@@ -704,7 +742,8 @@ py::object te_general_grouped_gemm_for_discrete_in(py::handle A, bool transa, py
   swizzled_scale_inverses_list.emplace_back(
       multi_tensor_swizzle_scales_for_gemm(te_A_wrappers, transa, !transa));
 
-  [[maybe_unused]] auto swizzled_scales_B = maybe_swizzle_grouped_tensor_for_gemm(grouped_B);
+  [[maybe_unused]] auto swizzled_scales_B =
+      maybe_swizzle_grouped_tensor(grouped_B, transb, !transb);
 
   NVTE_SCOPED_GIL_RELEASE({
     nvte_grouped_gemm_with_discrete_inputA(
@@ -719,10 +758,18 @@ py::object te_general_grouped_gemm_for_discrete_in(py::handle A, bool transa, py
 
   if (!bias.is_none()) {
     auto grouped_bias = GroupedTensorFromPyTorchGroupedTensor(bias);
-    NVTE_SCOPED_GIL_RELEASE({
-      nvte_grouped_bias_add(grouped_D.data(), grouped_bias.data(),
-                            at::cuda::getCurrentCUDAStream());
-    });
+    if (bias_scale.has_value()) {
+      auto te_bias_scale = makeTransformerEngineTensor(*bias_scale);
+      NVTE_SCOPED_GIL_RELEASE({
+        nvte_grouped_scaled_bias_add(grouped_D.data(), grouped_bias.data(), te_bias_scale.data(),
+                                     at::cuda::getCurrentCUDAStream());
+      });
+    } else {
+      NVTE_SCOPED_GIL_RELEASE({
+        nvte_grouped_bias_add(grouped_D.data(), grouped_bias.data(),
+                              at::cuda::getCurrentCUDAStream());
+      });
+    }
   }
 
   return py::reinterpret_borrow<py::object>(D);
@@ -730,6 +777,7 @@ py::object te_general_grouped_gemm_for_discrete_in(py::handle A, bool transa, py
 
 py::object te_general_grouped_gemm_for_discrete_out(py::handle A, bool transa, py::handle B,
                                                     bool transb, py::handle D, py::object bias,
+                                                    std::optional<at::Tensor> bias_scale,
                                                     at::Tensor alpha, at::Tensor beta,
                                                     at::Tensor workspace_setup,
                                                     at::Tensor workspace_cublas,
@@ -769,8 +817,10 @@ py::object te_general_grouped_gemm_for_discrete_out(py::handle A, bool transa, p
     te_D_vector.emplace_back(te_D_wrappers.back().data());
   }
 
-  [[maybe_unused]] auto swizzled_scales_A = maybe_swizzle_grouped_tensor_for_gemm(grouped_A);
-  [[maybe_unused]] auto swizzled_scales_B = maybe_swizzle_grouped_tensor_for_gemm(grouped_B);
+  [[maybe_unused]] auto swizzled_scales_A =
+      maybe_swizzle_grouped_tensor(grouped_A, transa, !transa);
+  [[maybe_unused]] auto swizzled_scales_B =
+      maybe_swizzle_grouped_tensor(grouped_B, transb, !transb);
 
   NVTE_SCOPED_GIL_RELEASE({
     nvte_grouped_gemm_with_discrete_out(
@@ -785,5 +835,4 @@ py::object te_general_grouped_gemm_for_discrete_out(py::handle A, bool transa, p
 
   return py::reinterpret_borrow<py::object>(D);
 }
-
 }  // namespace transformer_engine::pytorch

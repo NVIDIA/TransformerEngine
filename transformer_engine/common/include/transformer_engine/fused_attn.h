@@ -52,6 +52,8 @@ enum NVTE_QKV_Layout {
   NVTE_Paged_KV_SBHD_SBHD_SBHD = 22, /*!< Paged_KV_SBHD_SBHD_SBHD layout */
   NVTE_Paged_KV_THD_BSHD_BSHD = 23,  /*!< Paged_KV_THD_BSHD_BSHD layout */
   NVTE_Paged_KV_THD_SBHD_SBHD = 24,  /*!< Paged_KV_THD_SBHD_SBHD layout */
+  NVTE_BHSD_BHSD_BHSD = 25,          /*!< BHSD_BHSD_BHSD layout */
+  NVTE_QKV_Layout_NOT_SET,           /*!< Not set */
 };
 
 /*! \enum NVTE_QKV_Layout_Group
@@ -70,6 +72,8 @@ enum NVTE_QKV_Layout_Group {
   NVTE_HD_HD_HD = 4,
   /*! Paged_KV_HD_HD_HD QKV layouts, e.g. Paged_KV_BSHD_BSHD_BSHD, Paged_KV_THD_SBHD_SBHD */
   NVTE_Paged_KV_HD_HD_HD = 5,
+  /*! SD_SD_SD QKV layouts, e.g. BHSD_BHSD_BHSD */
+  NVTE_SD_SD_SD = 6,
 };
 
 /*! \enum NVTE_QKV_Format
@@ -90,6 +94,10 @@ enum NVTE_QKV_Format {
   NVTE_THD_2BSHD = 5,
   /*! THD format for Q and SBHD format for KV, i.e. THD_SBHD_SBHD, Paged_KV_THD_SBHD_SBHD */
   NVTE_THD_2SBHD = 6,
+  /*! BHSD QKV format, e.g. BHSD_BHSD_BHSD */
+  NVTE_BHSD = 7,
+  /*! Not set */
+  NVTE_QKV_Format_NOT_SET,
 };
 
 /*! \enum NVTE_Bias_Type
@@ -148,11 +156,9 @@ enum NVTE_Softmax_Type {
 enum NVTE_Fused_Attn_Backend {
   /*! No supported backend */
   NVTE_No_Backend = -1,
-  /*! cuDNN-based FP16/BF16 fused attention for <= 512 sequence length */
-  NVTE_F16_max512_seqlen = 0,
   /*! cuDNN-based FP16/BF16 fused attention for any sequence length */
   NVTE_F16_arbitrary_seqlen = 1,
-  /*! cuDNN-based FP8 fused attention for <= 512 sequence length */
+  /*! cuDNN-based FP8 fused attention */
   NVTE_FP8 = 2,
 };
 
@@ -225,16 +231,6 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *  - D = Dropout(S)
  *  - O = D * Transpose(V)
  *
- * Support Matrix:
-   \verbatim
-   | backend | precision |                qkv layout                   |           bias           |                 mask                  | dropout |  sequence length  | head_dim         |
-   |   0     | FP16/BF16 |     BS3HD,SB3HD,BSHD_BS2HD,SBHD_SB2HD       |   NO/POST_SCALE_BIAS     | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   | <= 512, % 64 == 0 |    64            |
-   |   1     | FP16/BF16 |          BS3HD,SB3HD,BSH3D,SBH3D            | NO/POST_SCALE_BIAS/ALIBI | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   |  > 512, % 64 == 0 | <= 128, % 8 == 0 |
-   |         |           | BSHD_BS2HD,BSHD_BSH2D,SBHD_SB2HD,SBHD_SBH2D |                          |                                       |         |                   |                  |
-   |         |           |       BSHD_BSHD_BSHD,SBHD_SBHD_SBHD         |                          |                                       |         |                   |                  |
-   |   2     |   FP8     |                 T3HD                        |          NO_BIAS         |               PADDING_MASK            |   Yes   | <= 512, % 64 == 0 |    64            |
-   \endverbatim
- *
  * Notes:
  *
  * Tensors `cu_seqlens_q_padded` and `cu_seqlens_kv_padded`
@@ -256,7 +252,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *  \param[in,out] S                         The S tensor.
  *  \param[out]    O                         The output O tensor.
  *  \param[out]    Aux_CTX_Tensors           Auxiliary output tensors when training,
- *                                           e.g. M, ZInv, rng_state.
+ *                                           e.g. softmax stats, optional Max, rng_state.
  *  \param[in]     cu_seqlens_q              Cumulative sequence lengths for Q, [batch_size + 1].
  *  \param[in]     cu_seqlens_kv             Cumulative sequence lengths for K and V, [batch_size + 1].
  *  \param[in]     cu_seqlens_q_padded       Cumulative sequence offsets for Q, [batch_size + 1].
@@ -274,6 +270,9 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *  \param[in]     attn_scale                Scaling factor for Q * K.T.
  *  \param[in]     dropout                   Dropout probability.
  *  \param[in]     qkv_layout                QKV tensors' layout.
+ *  \param[in]     o_format                  Output format.
+ *  \param[in]     qkv_scale_inv_format      Format of scale-inverse tensors for QKV;
+ *                                           if NVTE_QKV_Format_NOT_SET, inferred from qkv_layout.
  *  \param[in]     bias_type                 Bias type.
  *  \param[in]     attn_mask_type            Attention mask type.
  *  \param[in]     softmax_type              Attention softmax type.
@@ -292,22 +291,13 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          const NVTETensor page_table_v, const NVTETensor rng_state,
                          size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training,
                          bool return_max_logit, bool cuda_graph, float attn_scale, float dropout,
-                         NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
+                         NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format,
+                         NVTE_QKV_Format qkv_scale_inv_format, NVTE_Bias_Type bias_type,
                          NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
                          int64_t window_size_left, int64_t window_size_right,
                          bool bottom_right_diagonal, NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Compute the backward of the dot product attention with separate Q, K and V.
- *
- * Support Matrix:
-   \verbatim
-   | backend | precision |                qkv layout                   |           bias           |                 mask                  | dropout |  sequence length  | head_dim         |
-   |   0     | FP16/BF16 |     BS3HD,SB3HD,BSHD_BS2HD,SBHD_SB2HD       |   NO/POST_SCALE_BIAS     | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   | <= 512, % 64 == 0 |    64            |
-   |   1     | FP16/BF16 |          BS3HD,SB3HD,BSH3D,SBH3D            | NO/POST_SCALE_BIAS/ALIBI | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   |  > 512, % 64 == 0 | <= 128, % 8 == 0 |
-   |         |           | BSHD_BS2HD,BSHD_BSH2D,SBHD_SB2HD,SBHD_SBH2D |                          |                                       |         |                   |                  |
-   |         |           |       BSHD_BSHD_BSHD,SBHD_SBHD_SBHD         |                          |                                       |         |                   |                  |
-   |   2     |   FP8     |                 T3HD                        |          NO_BIAS         |               PADDING_MASK            |   Yes   | <= 512, % 64 == 0 |    64            |
-   \endverbatim
  *
  * Notes:
  *
@@ -330,7 +320,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
  *  \param[in]     S                         The S tensor.
  *  \param[in,out] dP                        The gradient of the P tensor.
  *  \param[in]     Aux_CTX_Tensors           Auxiliary tensors from context when in training mode,
- *                                           e.g. M, ZInv, rng_state.
+ *                                           e.g. softmax stats, optional Max, rng_state.
  *  \param[out]    dQ                        The gradient of the Q tensor.
  *  \param[out]    dK                        The gradient of the K tensor.
  *  \param[out]    dV                        The gradient of the V tensor.
@@ -347,6 +337,13 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
  *  \param[in]     attn_scale                Scaling factor for Q * K.T.
  *  \param[in]     dropout                   Dropout probability.
  *  \param[in]     qkv_layout                QKV tensors' layout.
+ *  \param[in]     o_format                  Output format.
+ *  \param[in]     do_format                 Output gradient's format.
+ *  \param[in]     dqkv_layout               QKV gradient tensors' layout.
+ *  \param[in]     qkv_scale_inv_format      Format of scale-inverse tensors for QKV;
+ *                                           if NVTE_QKV_Format_NOT_SET, inferred from qkv_layout.
+ *  \param[in]     do_scale_inv_format       Format of scale-inverse tensors for dO;
+ *                                           if NVTE_QKV_Format_NOT_SET, inferred from the output layout.
  *  \param[in]     bias_type                 Bias type.
  *  \param[in]     attn_mask_type            Attention mask type.
  *  \param[in]     softmax_type              Attention softmax type.
@@ -366,11 +363,13 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          const NVTETensor cu_seqlens_q_padded,
                          const NVTETensor cu_seqlens_kv_padded, size_t max_seqlen_q,
                          size_t max_seqlen_kv, float attn_scale, float dropout,
-                         NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-                         NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
-                         int64_t window_size_left, int64_t window_size_right,
-                         bool bottom_right_diagonal, bool deterministic, bool cuda_graph,
-                         NVTETensor workspace, cudaStream_t stream);
+                         NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format,
+                         NVTE_QKV_Format do_format, NVTE_QKV_Layout dqkv_layout,
+                         NVTE_QKV_Format qkv_scale_inv_format, NVTE_QKV_Format do_scale_inv_format,
+                         NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+                         NVTE_Softmax_Type softmax_type, int64_t window_size_left,
+                         int64_t window_size_right, bool bottom_right_diagonal, bool deterministic,
+                         bool cuda_graph, NVTETensor workspace, cudaStream_t stream);
 
 /*!  \brief Update the RNG state with the seed and calculated offset.
  *
@@ -534,6 +533,56 @@ void nvte_cp_thd_get_partitioned_indices(const NVTETensor &cu_seqlens, NVTETenso
                                          int total_tokens, int world_size, int rank,
                                          cudaStream_t stream);
 
+/*!  \brief Reorder THD tensor from sequence order to dual-chunk CP rank order.
+ *
+ * Uses the padded THD sequence lengths to place each sequence's two CP chunks
+ * in the order consumed by each CP rank.
+ *
+ *  \param[in]     inp           Input THD tensor [total_tokens, ...].
+ *  \param[in]     cu_seqlens    Padded cumulative sequence lengths, [batch_size + 1], int32.
+ *  \param[out]    out           Output tensor, same shape/dtype as inp.
+ *  \param[in]     world_size    Context-parallel size.
+ *  \param[in]     total_tokens  Total padded tokens (= inp.shape[0]).
+ *  \param[in]     stream        CUDA stream used for this operation.
+ */
+void nvte_thd_sequence_order_to_cp_rank_order(const NVTETensor &inp, const NVTETensor &cu_seqlens,
+                                              NVTETensor out, int world_size, int total_tokens,
+                                              cudaStream_t stream);
+
+/*!  \brief Reorder THD tensor from dual-chunk CP rank order to sequence order.
+ *
+ * Uses the padded THD sequence lengths to restore each sequence's dual-chunk
+ * CP entries to sequence order.
+ *
+ *  \param[in]     inp           Input THD tensor [total_tokens, ...].
+ *  \param[in]     cu_seqlens    Padded cumulative sequence lengths, [batch_size + 1], int32.
+ *  \param[out]    out           Output tensor, same shape/dtype as inp.
+ *  \param[in]     world_size    Context-parallel size.
+ *  \param[in]     total_tokens  Total padded tokens (= inp.shape[0]).
+ *  \param[in]     stream        CUDA stream used for this operation.
+ */
+void nvte_thd_cp_rank_order_to_sequence_order(const NVTETensor &inp, const NVTETensor &cu_seqlens,
+                                              NVTETensor out, int world_size, int total_tokens,
+                                              cudaStream_t stream);
+
+/*!  \brief Copy valid token entries from a per-split THD tensor to a rank-local accumulator.
+ *
+ * For each dual-chunk CP step/split, copies each sequence's valid range at
+ * its padded THD token offsets and leaves padded entries untouched.
+ *
+ *  \param[in]     inp                 Per-split THD source tensor [total_tokens, ...].
+ *  \param[in]     cu_seqlens_padded   Padded cumulative sequence lengths, [batch_size + 1], int32.
+ *  \param[in]     cu_seqlens          Valid cumulative sequence lengths, [batch_size + 1], int32.
+ *  \param[in,out] out                 Rank-local accumulator, same shape/dtype as inp.
+ *  \param[in]     total_tokens        Total padded tokens (= inp.shape[0]).
+ *  \param[in]     stream              CUDA stream used for this operation.
+ */
+void nvte_thd_copy_valid_tokens_from_per_split_to_rank_local(const NVTETensor &inp,
+                                                             const NVTETensor &cu_seqlens_padded,
+                                                             const NVTETensor &cu_seqlens,
+                                                             NVTETensor out, int total_tokens,
+                                                             cudaStream_t stream);
+
 /*!  \brief Convert tensor from THD to BSHD format.
  *
  * \warning   This API is **experimental** and subject to change.
@@ -584,8 +633,81 @@ void nvte_prepare_flash_attn_fwd(NVTETensor qkvi, NVTETensor qkv, cudaStream_t s
 void nvte_prepare_flash_attn_bwd(NVTETensor q, NVTETensor k, NVTETensor v, NVTETensor qkv,
                                  cudaStream_t stream);
 
+/*!  \brief Transpose multiple tensors from BSHD/SBHD to BHSD.
+ *
+ *  Each input tensor is 4D in BSHD or SBHD layout, and the corresponding output tensor
+ *  is 4D in BHSD layout. Output tensors are pre-allocated and may have a larger last dimension.
+ *
+ *  \param[in]     inputs           List of input tensors.
+ *  \param[in,out] outputs          List of output tensors.
+ *  \param[in]     num_tensors      Number of tensors in the list.
+ *  \param[in]     original_format  Original QKV format (NVTE_BSHD or NVTE_SBHD).
+ *  \param[in]     stream           CUDA stream.
+ */
+void nvte_multi_tensor_transpose_to_bhsd(NVTETensor *inputs, NVTETensor *outputs,
+                                         size_t num_tensors, NVTE_QKV_Format original_format,
+                                         cudaStream_t stream);
+
+/*!  \brief Pad the last dimension of multiple 2D tensors with zeros in one kernel launch.
+ *
+ *  Each tensor copies a row-major (rows, in_cols) input to a (rows, out_cols) output,
+ *  zero-filling the region [in_cols, out_cols) in every row.
+ *  Outputs must be pre-allocated with out_cols >= in_cols and matching dtype.
+ *
+ *  \param[in]     inputs       List of input tensors.
+ *  \param[in,out] outputs      List of output tensors.
+ *  \param[in]     num_tensors  Number of tensors in the list.
+ *  \param[in]     stream       CUDA stream.
+ */
+void nvte_multi_tensor_pad_last_dim(NVTETensor *inputs, NVTETensor *outputs, size_t num_tensors,
+                                    cudaStream_t stream);
+
 #ifdef __cplusplus
 }  // extern "C"
-#endif
+
+#include <array>
+#include <cstddef>
+#include <utility>
+
+/*! \brief Parses a QKV tensor shape into canonical (b, h, s, d, t) dimensions
+ *         and converts between QKV formats.
+ */
+class AttentionShape {
+ public:
+  inline AttentionShape(NVTE_QKV_Format fmt, const size_t *shape) : canonical_{} {
+    auto [ndim, order] = dim_order(fmt);
+    for (size_t i = 0; i < ndim; ++i) canonical_[order[i]] = shape[i];
+  }
+
+  size_t b() const { return canonical_[0]; }
+  size_t h() const { return canonical_[1]; }
+  size_t s() const { return canonical_[2]; }
+  size_t d() const { return canonical_[3]; }
+  size_t t() const { return canonical_[4]; }
+
+  inline void to_format(NVTE_QKV_Format dst_fmt, size_t *dst_shape) const {
+    auto [ndim, order] = dim_order(dst_fmt);
+    for (size_t i = 0; i < ndim; ++i) dst_shape[i] = canonical_[order[i]];
+  }
+
+ private:
+  static inline std::pair<size_t, std::array<int, 4>> dim_order(NVTE_QKV_Format fmt) {
+    switch (fmt) {
+      case NVTE_QKV_Format::NVTE_BSHD:
+        return {4, {0, 2, 1, 3}};  // b s h d
+      case NVTE_QKV_Format::NVTE_SBHD:
+        return {4, {2, 0, 1, 3}};  // s b h d
+      case NVTE_QKV_Format::NVTE_BHSD:
+        return {4, {0, 1, 2, 3}};  // b h s d
+      case NVTE_QKV_Format::NVTE_THD:
+        return {3, {4, 1, 3, -1}};  // t h d
+      default:
+        return {0, {}};
+    }
+  }
+  size_t canonical_[5] = {};
+};
+
+#endif  // __cplusplus
 
 #endif

@@ -7,6 +7,7 @@ from typing import Optional, List
 import torch
 import pytest
 import os
+import copy
 
 import transformer_engine
 import transformer_engine.pytorch as te
@@ -34,15 +35,15 @@ from transformer_engine.pytorch import (
     is_bf16_available,
 )
 from transformer_engine.common import recipe
-import transformer_engine_torch as tex
 from transformer_engine.pytorch.cpp_extensions import general_gemm
 from transformer_engine.pytorch.tensor.utils import replace_raw_data
-from utils import ModelConfig
+from utils import ModelConfig, recipe_id, skip_unsupported_backward_override
 
 # Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 fp8_block_scaling_available, _ = te.is_fp8_block_scaling_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
+nvfp4_available, _ = te.is_nvfp4_available(return_reason=True)
 
 # Record initial RNG state from script run.
 seed = 1234
@@ -92,10 +93,38 @@ def nvfp4_vanilla():
     return nvfp4_recipe
 
 
+def nvfp4_row_scaled():
+    nvfp4_recipe = recipe.NVFP4BlockScaling(
+        disable_rht=True,
+        disable_stochastic_rounding=True,
+        disable_2d_quantization=True,
+        row_scaled_activation=True,
+        backward_override="dequantized",
+    )
+    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
+    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
+    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
+    return nvfp4_recipe
+
+
+def nvfp4_4over6():
+    nvfp4_recipe = recipe.NVFP4BlockScaling(
+        disable_rht=True,
+        disable_stochastic_rounding=True,
+        nvfp4_4over6="all",
+    )
+    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
+    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams(fp4_2d_quantization=True)
+    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
+    return nvfp4_recipe
+
+
 fp8_recipes = []
 if mxfp8_available:
     fp8_recipes.append(recipe.MXFP8BlockScaling())
+if nvfp4_available:
     fp8_recipes.append(nvfp4_vanilla())  # TODO: fix check for this
+    fp8_recipes.append(nvfp4_4over6())
 if fp8_block_scaling_available:
     fp8_recipes.append(recipe.Float8BlockScaling())
 if fp8_available:
@@ -152,6 +181,18 @@ def check_grouped_weight(
     assert tuple(weight.shape) == (num_gemms, out_features, in_features), (
         "Grouped weight has unexpected shape. "
         f"Expected {(num_gemms, out_features, in_features)}, got {tuple(weight.shape)}"
+    )
+
+
+def check_grouped_bias(module: GroupedLinear, num_gemms: int, out_features: int):
+    """Verify GroupedLinear exposes one grouped bias parameter with shape [num_gemms, out_features]."""
+    bias_params = [(name, p) for name, p in module.named_parameters() if name == "bias"]
+    assert len(bias_params) == 1, f"Expected 1 grouped bias parameter, got {len(bias_params)}"
+    name, bias = bias_params[0]
+    assert name == "bias", f"Expected grouped parameter name 'bias', got {name}"
+    assert tuple(bias.shape) == (num_gemms, out_features), (
+        "Grouped bias has unexpected shape. "
+        f"Expected {(num_gemms, out_features)}, got {tuple(bias.shape)}"
     )
 
 
@@ -212,6 +253,7 @@ def _test_sanity_e2e_gradient_accumulation_fusion(block, dtype, config, fp8_reci
             continue
         elif "weight" in name and p.requires_grad:
             p.main_grad = torch.zeros_like(p)
+            p.grad_added_to_main_grad = False  # Should be set to True after backward
 
     use_fp8 = fp8_recipe is not None
     with autocast(enabled=use_fp8, recipe=fp8_recipe):
@@ -221,13 +263,19 @@ def _test_sanity_e2e_gradient_accumulation_fusion(block, dtype, config, fp8_reci
     torch.cuda.synchronize()
 
     failed_grads = []
+    failed_grad_added_flags = []
     for name, p in block.named_parameters():
         if "layer_norm_weight" in name:
             continue
         elif "weight" in name and p.requires_grad:
             if not torch.count_nonzero(p.main_grad) > 0:
                 failed_grads.append(name)
+            if not getattr(p, "grad_added_to_main_grad", False):
+                failed_grad_added_flags.append(name)
     assert len(failed_grads) == 0, f"Gradient not accumulated for {failed_grads}."
+    assert (
+        len(failed_grad_added_flags) == 0
+    ), f"grad_added_to_main_grad not set to True for {failed_grad_added_flags}."
 
 
 def _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad):
@@ -382,7 +430,12 @@ def test_sanity_normalization_amp(dtype, model, skip_wgrad, skip_dgrad, normaliz
 
 
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize(
+    "fp8_recipe",
+    fp8_recipes + ([nvfp4_row_scaled()] if nvfp4_available else []),
+    ids=recipe_id,
+)
+@pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
 @pytest.mark.parametrize("model", ["small", "weird"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
@@ -392,6 +445,7 @@ def test_sanity_normalization_amp(dtype, model, skip_wgrad, skip_dgrad, normaliz
 def test_sanity_layernorm_linear(
     dtype,
     fp8_recipe,
+    backward_override,
     model,
     skip_wgrad,
     zero_centered_gamma,
@@ -400,6 +454,11 @@ def test_sanity_layernorm_linear(
     microbatching,
 ):
     config = model_configs[model]
+
+    skip_unsupported_backward_override("layernorm_linear", fp8_recipe, backward_override)
+    if fp8_recipe is not None:
+        fp8_recipe = copy.deepcopy(fp8_recipe)
+        fp8_recipe.backward_override = backward_override
 
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
@@ -423,13 +482,25 @@ def test_sanity_layernorm_linear(
 
 
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize(
+    "fp8_recipe",
+    fp8_recipes + ([nvfp4_row_scaled()] if nvfp4_available else []),
+    ids=recipe_id,
+)
+@pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
 @pytest.mark.parametrize("model", ["small", "weird"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("skip_dgrad", all_boolean)
 @pytest.mark.parametrize("microbatching", all_boolean)
-def test_sanity_linear(dtype, fp8_recipe, model, skip_wgrad, skip_dgrad, microbatching):
+def test_sanity_linear(
+    dtype, fp8_recipe, backward_override, model, skip_wgrad, skip_dgrad, microbatching
+):
     config = model_configs[model]
+
+    skip_unsupported_backward_override("linear", fp8_recipe, backward_override)
+    if fp8_recipe is not None:
+        fp8_recipe = copy.deepcopy(fp8_recipe)
+        fp8_recipe.backward_override = backward_override
 
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
@@ -453,13 +524,25 @@ def test_sanity_linear(dtype, fp8_recipe, model, skip_wgrad, skip_dgrad, microba
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes_with_zero)
 @pytest.mark.parametrize("model", ["small", "weird"])
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize(
+    "fp8_recipe",
+    fp8_recipes + ([nvfp4_row_scaled()] if nvfp4_available else []),
+    ids=recipe_id,
+)
+@pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("use_bias", all_boolean)
-def test_sanity_linear_with_zero_tokens(dtype, bs, model, fp8_recipe, fp8_model_params, use_bias):
+def test_sanity_linear_with_zero_tokens(
+    dtype, bs, model, fp8_recipe, backward_override, fp8_model_params, use_bias
+):
     config = model_configs[model]
     ffn_hidden_size = 4 * config.hidden_size
     num_tokens = bs * config.max_seqlen_q
+
+    skip_unsupported_backward_override("linear", fp8_recipe, backward_override)
+    if fp8_recipe is not None:
+        fp8_recipe = copy.deepcopy(fp8_recipe)
+        fp8_recipe.backward_override = backward_override
 
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
@@ -486,7 +569,12 @@ def test_sanity_linear_with_zero_tokens(dtype, bs, model, fp8_recipe, fp8_model_
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes_with_zero)
 @pytest.mark.parametrize("model", ["small", "weird"])
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize(
+    "fp8_recipe",
+    fp8_recipes + ([nvfp4_row_scaled()] if nvfp4_available else []),
+    ids=recipe_id,
+)
+@pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("use_bias", all_boolean)
 @pytest.mark.parametrize("single_param", all_boolean)
@@ -497,6 +585,7 @@ def test_sanity_grouped_linear(
     bs,
     model,
     fp8_recipe,
+    backward_override,
     fp8_model_params,
     use_bias,
     single_param,
@@ -508,12 +597,23 @@ def test_sanity_grouped_linear(
     # Small batch size used to catch bug from https://github.com/NVIDIA/TransformerEngine/pull/1527.
     bs = bs * 16
     num_tokens = bs * config.max_seqlen_q * (num_gemms - 1)
+    if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0" and single_param:
+        pytest.skip("single parameter grouped linear requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
+    skip_unsupported_backward_override("grouped_linear", fp8_recipe, backward_override)
+    if fp8_recipe is not None:
+        fp8_recipe = copy.deepcopy(fp8_recipe)
+        fp8_recipe.backward_override = backward_override
 
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
             pytest.skip("Model config does not support FP8")
         if fp8_recipe.nvfp4():
-            pytest.skip("NVFP4 not supported for grouped linear")
+            if not getattr(fp8_recipe, "row_scaled_activation", False):
+                pytest.skip("NVFP4 not supported for grouped linear")
+            if single_param:
+                pytest.skip("Row-scaled NVFP4 does not support GroupedTensor grouped linear")
+            if dtype == torch.float16:
+                pytest.skip("FP16 output for NVFP4 not supported")
 
     use_fp8 = fp8_recipe is not None
     with quantized_model_init(enabled=use_fp8 and fp8_model_params, recipe=fp8_recipe):
@@ -523,13 +623,16 @@ def test_sanity_grouped_linear(
             ffn_hidden_size,
             bias=use_bias,
             params_dtype=dtype,
-            single_grouped_parameter=single_param,
+            single_grouped_weight=single_param,
+            single_grouped_bias=single_param,
         ).cuda()
 
-    # Verify grouped linear exposes a single grouped weight parameter.
+    # Verify grouped linear exposes a single grouped weight parameter(and bias when applicable).
     if fp8_recipe is None or not (fp8_recipe.delayed() or fp8_recipe.float8_current_scaling()):
         if single_param:
             check_grouped_weight(te_grouped_linear, num_gemms, ffn_hidden_size, config.hidden_size)
+            if use_bias:
+                check_grouped_bias(te_grouped_linear, num_gemms, ffn_hidden_size)
 
     inp_hidden_states = torch.randn(
         num_tokens, config.hidden_size, dtype=dtype, requires_grad=True
@@ -550,7 +653,7 @@ def test_sanity_grouped_linear(
 
 
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=recipe_id)
 @pytest.mark.parametrize("model", ["small", "weird"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
@@ -600,7 +703,7 @@ def test_sanity_layernorm_mlp(
 
 
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=recipe_id)
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("bias", all_boolean)
@@ -673,7 +776,7 @@ def test_sanity_gpt_126m():
 
 
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=recipe_id)
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("normalization", all_normalizations)
@@ -729,7 +832,7 @@ def test_sanity_bert_126m():
 
 
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=recipe_id)
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("normalization", all_normalizations)
@@ -785,7 +888,7 @@ def test_sanity_T5_126m():
 
 
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=recipe_id)
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 def test_sanity_amp_and_nvfuser(dtype, fp8_recipe, model, skip_wgrad):
@@ -818,7 +921,7 @@ def test_sanity_amp_and_nvfuser(dtype, fp8_recipe, model, skip_wgrad):
 
 
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=recipe_id)
 @pytest.mark.parametrize("model", ["small"])
 def test_sanity_drop_path(dtype, fp8_recipe, model):
     config = model_configs[model]
@@ -853,7 +956,7 @@ def test_sanity_drop_path(dtype, fp8_recipe, model):
 
 
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=recipe_id)
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 def test_sanity_fused_qkv_params(dtype, fp8_recipe, model, skip_wgrad):
@@ -889,7 +992,7 @@ def test_sanity_fused_qkv_params(dtype, fp8_recipe, model, skip_wgrad):
 
 
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=recipe_id)
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 def test_sanity_gradient_accumulation_fusion(dtype, fp8_recipe, model, skip_wgrad):
@@ -960,7 +1063,7 @@ def test_sanity_fp8_gemm_with_unalignment(N, datatype):
 
     scales = torch.ones(1).cuda().squeeze()
     amaxes = torch.ones(1).cuda().squeeze()
-    dtype = tex.DType.kFloat8E4M3
+    dtype = te.DType.kFloat8E4M3
     fp8_quantizer = Float8Quantizer(scales, amaxes, dtype)
 
     outp_type = datatype
@@ -984,7 +1087,7 @@ def test_replace_raw_data_for_float8tensor():
     torch.manual_seed(12345)
     torch.cuda.manual_seed(12345)
 
-    fp8_quantizer = Float8CurrentScalingQuantizer(fp8_dtype=tex.DType.kFloat8E4M3, device="cuda")
+    fp8_quantizer = Float8CurrentScalingQuantizer(fp8_dtype=te.DType.kFloat8E4M3, device="cuda")
     fp8_tensor = fp8_quantizer.make_empty([128, 128], dtype=torch.bfloat16, device="cuda")
     random_bf16_data = torch.randn(fp8_tensor.shape, dtype=torch.bfloat16, device="cuda")
     fp8_quantizer.update_quantized(random_bf16_data, fp8_tensor)

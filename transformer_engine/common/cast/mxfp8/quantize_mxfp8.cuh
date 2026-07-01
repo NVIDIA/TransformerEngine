@@ -498,6 +498,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     if constexpr (COLWISE_SCALING) {
       thread_partial_dbias = partial_dbias_colwise;
     } else {
+      ptx::cp_async_bulk_wait_group_read<0>();
+      __syncthreads();
       // Reusing dshmem (in_sh) as dbias buffer [HEIGHT x WIDTH]
       // HEIGHT = THREADS_Y
       // WIDTH = THREADS_X * (SCALE_DIM_X + 1)
@@ -551,6 +553,19 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   destroy_barriers<STAGES>(mbar, is_master_thread);
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
+
+// Zeroes out a scale buffer (used to clear padding of swizzled scales).
+static __global__ void __launch_bounds__(256)
+    zero_scales_kernel(uint8_t *const ptr, const size_t size_in_bytes, const float *noop) {
+  if (noop != nullptr && noop[0] == 1.0f) {
+    return;
+  }
+  const size_t stride = static_cast<size_t>(gridDim.x) * blockDim.x;
+  for (size_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < size_in_bytes; idx += stride) {
+    ptr[idx] = 0;
+  }
+}
+
 }  // namespace quantize_kernel
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
@@ -576,8 +591,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
   constexpr bool CAST_DBIAS_ONLY = IS_DBIAS && (!IS_DACT) && (!IS_ACT);
 
   // Tensor dimensions
-  const size_t rows = input.flat_first_dim();
-  const size_t cols = input.flat_last_dim();
+  const auto [rows, cols] = input.flat_2d_dims();
 
   // Tensor chunk handled by each CUDA block
   constexpr size_t CHUNK_DIM_Y = CAST_DBIAS_ONLY ? 128 : 64;
@@ -620,7 +634,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
 
   if constexpr (IS_DBIAS) {
     NVTE_CHECK(dbias->data.dtype == input.dtype(), "DBias must have the same type as input.");
-    NVTE_CHECK(dbias->data.shape == std::vector<size_t>{cols}, "Wrong shape of DBias.");
+    NVTE_CHECK(dbias->data.shape == Shape{cols}, "Wrong shape of DBias.");
     NVTE_CHECK(workspace != nullptr, "Workspace must be a tensor.");
 
     if (workspace->data.dptr == nullptr) {
@@ -641,15 +655,35 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
               with_gemm_swizzled_scales, WITH_GEMM_SWIZZLED_SCALES,
 
+              // The specialized rowwise cast-only kernel vectorizes full 128-element chunks.
+              // Shapes with a partial row tail (for example, N=48) must use the generic kernel,
+              // otherwise the last chunk reads/writes past the logical end of the row.
+              using rowwise_traits = specialized::CastTraits<IType, OType, true, false>;
+              using bidimensional_traits = specialized::CastTraits<IType, OType, true, true>;
+              constexpr size_t max_grid_dim_y = 65535;
+              const bool rowwise_specialized_grid_fits =
+                  ((rows + rowwise_traits::blockDimM - 1) / rowwise_traits::blockDimM) <=
+                  max_grid_dim_y;
+              const bool bidimensional_specialized_grid_fits =
+                  ((rows + bidimensional_traits::blockDIM::M - 1) /
+                   bidimensional_traits::blockDIM::M) <= max_grid_dim_y;
+
+              const bool is_full_rowwise_chunk = (cols % 128 == 0);
+              const bool scaling_type_has_specialized_support =
+                  (scaling_type == ScalingType::ROWWISE && is_full_rowwise_chunk &&
+                   rowwise_specialized_grid_fits) ||
+                  (scaling_type == ScalingType::BIDIMENSIONAL &&
+                   bidimensional_specialized_grid_fits);
+
               if (specialized::hasSpec<IS_DBIAS, IS_DACT, IS_ACT, IType, OType>() &&
-                  !WITH_GEMM_SWIZZLED_SCALES) {
+                  !WITH_GEMM_SWIZZLED_SCALES && scaling_type_has_specialized_support) {
                 switch (scaling_type) {
                   case ScalingType::ROWWISE: {
                     using traits = specialized::CastTraits<IType, OType, true, false>;
                     auto kernel = specialized::quantize_mxfp8_kernel_cast_only<traits>;
 
-                    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                         traits::smem);
+                    NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, traits::smem));
 
                     dim3 block(traits::threadLayout::num, traits::warpLayout::N,
                                traits::warpLayout::M);
@@ -662,16 +696,12 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
 
                     break;
                   }
-                  case ScalingType::COLWISE: {
-                    NVTE_WARN("Colwise scaling will fallback to original kernel.");
-                    break;
-                  }
                   case ScalingType::BIDIMENSIONAL: {
                     using traits = specialized::CastTraits<IType, OType, true, true>;
                     auto kernel = specialized::quantize_mxfp8_kernel_cast_only<traits>;
 
-                    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                         traits::smem);
+                    NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, traits::smem));
                     // TMA for loading, so that we don't need STS for transposing
                     alignas(64) CUtensorMap tensor_map_input{};
                     constexpr size_t input_type_bit_size = TypeInfo<IType>::size;
@@ -708,6 +738,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                     NVTE_ERROR("Invalid scaling type.");
                   }
                 }
+                NVTE_CHECK_CUDA(cudaGetLastError());
                 return;
               }
 
@@ -762,14 +793,28 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                 constexpr size_t TILE_DIM_X = 128;  // Tile dim in data buffer
                 constexpr size_t TILE_DIM_Y = 128;
                 if (cols % TILE_DIM_X != 0 || rows % TILE_DIM_Y != 0) {
+                  // Use a noop-aware zero kernel so that the clear is skipped
+                  // when quantization is a noop (e.g. FP8 weight caching).
+                  constexpr size_t zero_threads = 256;
                   if (use_rowwise_scaling) {
-                    NVTE_CHECK_CUDA(cudaMemsetAsync(output->scale_inv.dptr, 0,
-                                                    output->scale_inv.buffer_size_bytes(), stream));
+                    const size_t size_bytes = output->scale_inv.buffer_size_bytes();
+                    if (size_bytes > 0) {
+                      const size_t zero_blocks = DIVUP(size_bytes, zero_threads);
+                      zero_scales_kernel<<<zero_blocks, zero_threads, 0, stream>>>(
+                          reinterpret_cast<uint8_t *>(output->scale_inv.dptr), size_bytes,
+                          noop_ptr);
+                      NVTE_CHECK_CUDA(cudaGetLastError());
+                    }
                   }
                   if (use_colwise_scaling) {
-                    NVTE_CHECK_CUDA(
-                        cudaMemsetAsync(output->columnwise_scale_inv.dptr, 0,
-                                        output->columnwise_scale_inv.buffer_size_bytes(), stream));
+                    const size_t size_bytes = output->columnwise_scale_inv.buffer_size_bytes();
+                    if (size_bytes > 0) {
+                      const size_t zero_blocks = DIVUP(size_bytes, zero_threads);
+                      zero_scales_kernel<<<zero_blocks, zero_threads, 0, stream>>>(
+                          reinterpret_cast<uint8_t *>(output->columnwise_scale_inv.dptr),
+                          size_bytes, noop_ptr);
+                      NVTE_CHECK_CUDA(cudaGetLastError());
+                    }
                   }
                 }
               }
@@ -787,7 +832,6 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                       tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
                       workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise,
                       scale_stride_colwise);
-                  NVTE_CHECK_CUDA(cudaGetLastError());
                   break;
                 }
                 case ScalingType::COLWISE: {
@@ -802,7 +846,6 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                       tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
                       workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise,
                       scale_stride_colwise);
-                  NVTE_CHECK_CUDA(cudaGetLastError());
                   break;
                 }
                 case ScalingType::BIDIMENSIONAL: {
@@ -817,10 +860,9 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                       tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
                       workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise,
                       scale_stride_colwise);
-                  NVTE_CHECK_CUDA(cudaGetLastError());
                   break;
                 }
-              }
+              } NVTE_CHECK_CUDA(cudaGetLastError());
 
               if constexpr (IS_DBIAS) {
                 common::reduce_dbias<IType>(workspace_ptr, dbias, dbias_rows, dbias_cols, stream);

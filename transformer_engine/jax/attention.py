@@ -5,13 +5,12 @@
 from __future__ import annotations
 from enum import Enum
 from functools import partial
-from typing import Optional, Tuple, Union
+from typing import Any, Callable, Mapping, Optional, Tuple, Union
 import warnings
 
 from jax.ad_checkpoint import checkpoint_name
 import jax
 import jax.numpy as jnp
-from flax.linen import make_attention_mask
 
 from transformer_engine_jax import NVTE_Bias_Type
 from transformer_engine_jax import NVTE_Mask_Type
@@ -541,6 +540,149 @@ def run_length_fill(segment_ids) -> jnp.ndarray:
     return run_length_segment_id_shape.reshape(orig_shape)
 
 
+def _get_seqlens_offsets_thd(
+    segment_ids_q,
+    segment_ids_kv,
+    segment_pos_q,
+    segment_pos_kv,
+    attn_mask_type,
+    max_segments_per_seq,
+):
+    """O(T * max_segments_per_seq) replacement for the older O(T^2) mask-based slow path.
+    Returns (q_seqlen, kv_seqlen, q_offset, kv_offset) values to match the reference older mask-based path:
+        segment_mask         = make_attention_mask(q_ids, kv_ids, equal)
+        segment_mask_with_id = make_attention_mask(q_ids, kv_ids, equal * q_id)
+        attn_mask            = segment_mask AND (causal_or_brcm_or_none)
+        attn_mask_with_id    = where(attn_mask, segment_mask_with_id, 0)
+        row_ids              = reduce_max(attn_mask_with_id, axis=kv)   # [B, T_q]
+        col_ids              = reduce_max(attn_mask_with_id, axis=q)    # [B, T_kv]
+        seqlens/offsets      = bincount(...) / find_offsets(...)
+    The two reductions are expressed equivalently as per-segment aggregates:
+      - causal:     row_ids[q] = q_seg_id iff seg_pos_q[q] >= min(seg_pos_kv over same-seg KV)
+      - brcm:       row_ids[q] = q_seg_id iff (run_len_q - seg_pos_q) >=
+                                              min(run_len_kv - seg_pos_kv over same-seg KV)
+      - padding:    row_ids[q] = q_seg_id iff q_seg_id appears in KV
+    (and symmetrically for col_ids with max/<=).
+    """
+
+    # Example: For striping P2P causal attention (but this logic also applies for non-CP fused attn)
+    # pre-striping and sharding: segment_ids = [[1 1 1 1 2 2 2 2]], segment_pos = [[0 1 2 3 0 1 2 3]]
+    # post-striping and sharding (striped CP=2, Q from rank 0 × KV from rank 1, max_segments_per_seq=2):
+    #   segment_ids_q  = [1 1 2 2]   segment_pos_q  = [0 2 0 2]   → q_key  = [0 2 0 2]
+    #   segment_ids_kv = [1 1 2 2]   segment_pos_kv = [1 3 1 3]   → kv_key = [1 3 1 3]
+    # Q-side — kv_agg[s] = min(kv_key over same-seg KV), fill = max_fill_val = 5 (assumed to be large enough):
+    #   scatter (rows = kv tokens, cols = segs):
+    #     [5 1 5 / 5 3 5 / 5 5 1 / 5 5 3]  →  reduce min  →  kv_agg = [5 1 1]
+    #   q_ok = q_key >= kv_agg[seg_ids_q] = [0 2 0 2] >= [1 1 1 1] = [F T F T]
+    # KV-side — q_agg[s] = max(q_key over same-seg Q), fill = neg_fill_val = -1 (assumed to be small enough):
+    #   scatter: [-1 0 -1 / -1 2 -1 / -1 -1 0 / -1 -1 2]  →  reduce max  →  q_agg = [-1 2 2]
+    #   kv_ok = kv_key <= q_agg[seg_ids_kv] = [1 3 1 3] <= [2 2 2 2] = [T F T F]
+    # Outer combiner:
+    #   row_ids   = [0 1 0 2]   col_ids   = [1 0 2 0]
+    #   q_seqlen  = [1 1]       kv_seqlen = [1 1]
+    #   q_offset  = [1 3 -1]    kv_offset = [0 2 -1]
+    def _row_and_col_ids():
+        if attn_mask_type.is_bottom_right():
+            # BRCM: mask[q][kv] = (same seg) AND (q_key <= kv_key).
+            rl_q = run_length_fill(segment_ids_q)
+            rl_kv = run_length_fill(segment_ids_kv)
+            q_key = (rl_q - segment_pos_q).astype(jnp.int32)
+            kv_key = (rl_kv - segment_pos_kv).astype(jnp.int32)
+
+            # Use large positive and negative values as fill values for the KV keys and Q keys respectively
+            max_fill_val = jnp.asarray(jnp.iinfo(jnp.int32).max, dtype=jnp.int32)
+            neg_fill_val = jnp.asarray(-1, dtype=jnp.int32)
+            # Creates a one-hot encoding mask of the KV segment ids (size [B, T_kv, max_segments_per_seq+1])
+            # i.e. each row has only one True value, which is the segment id of the row.
+            kv_oh = jax.nn.one_hot(segment_ids_kv, max_segments_per_seq + 1, dtype=jnp.bool_)
+            # Mask the KV keys with the valid segment ids (size [B, T_kv, 1])
+            kv_key_masked = jnp.where(segment_ids_kv != 0, kv_key, neg_fill_val)[..., None]
+            # Scatter each KV key (i.e. seg pos) into it's own segment column
+            kv_agg = jnp.where(kv_oh, kv_key_masked, neg_fill_val)
+            kv_agg = jnp.max(kv_agg, axis=-2)
+            # Define causal relationship: Q is attended iff q_key <= max(kv_key over same-seg KV)
+            q_has_match = q_key <= jnp.take_along_axis(
+                kv_agg, segment_ids_q.astype(jnp.int32), axis=-1
+            )
+
+            # Symmetric to the Q case, but with KV and Q swapped
+            q_oh = jax.nn.one_hot(segment_ids_q, max_segments_per_seq + 1, dtype=jnp.bool_)
+            q_key_masked = jnp.where(segment_ids_q != 0, q_key, max_fill_val)[..., None]
+            q_agg = jnp.where(q_oh, q_key_masked, max_fill_val)
+            q_agg = jnp.min(q_agg, axis=-2)
+            # Define causal relationship: KV is attended iff kv_key >= min(q_key over same-seg Q)
+            kv_has_match = kv_key >= jnp.take_along_axis(
+                q_agg, segment_ids_kv.astype(jnp.int32), axis=-1
+            )
+        elif attn_mask_type.is_causal():
+            # CM: mask[q][kv] = (same_seg) AND (q_pos >= kv_pos).
+            q_key = segment_pos_q.astype(jnp.int32)
+            kv_key = segment_pos_kv.astype(jnp.int32)
+
+            # Use large positive and negative values as a fill value for the KV keys and Q keys respectively
+            max_fill_val = jnp.asarray(jnp.iinfo(jnp.int32).max, dtype=jnp.int32)
+            neg_fill_val = jnp.asarray(-1, dtype=jnp.int32)
+
+            # Creates a one-hot encoding mask of the KV segment ids (size [B, T_kv, max_segments_per_seq+1])
+            # i.e. each row has only one True value, which is the segment id of the row.
+            kv_oh = jax.nn.one_hot(segment_ids_kv, max_segments_per_seq + 1, dtype=jnp.bool_)
+            # Mask the KV keys with the valid segment ids (size [B, T_kv, 1])
+            kv_key_masked = jnp.where(segment_ids_kv != 0, kv_key, max_fill_val)[..., None]
+            # Scatter each KV key (i.e. seg pos) into it's own segment column
+            kv_agg = jnp.where(kv_oh, kv_key_masked, max_fill_val)
+            kv_agg = jnp.min(kv_agg, axis=-2)
+            # Define causal relationship: Q is attended iff q_key >= min(kv_key over same-seg KV)
+            q_has_match = q_key >= jnp.take_along_axis(
+                kv_agg, segment_ids_q.astype(jnp.int32), axis=-1
+            )
+
+            # Symmetric to the Q case, but with KV and Q swapped
+            q_oh = jax.nn.one_hot(segment_ids_q, max_segments_per_seq + 1, dtype=jnp.bool_)
+            q_key_masked = jnp.where(segment_ids_q != 0, q_key, neg_fill_val)[..., None]
+            q_agg = jnp.where(q_oh, q_key_masked, neg_fill_val)
+            q_agg = jnp.max(q_agg, axis=-2)
+            # Define causal relationship: KV is attended iff kv_key <= max(q_key over same-seg Q)
+            kv_has_match = kv_key <= jnp.take_along_axis(
+                q_agg, segment_ids_kv.astype(jnp.int32), axis=-1
+            )
+        else:
+            # Padding-only: row_ids[q] = q_seg_id iff q_seg_id is present in KV (and q not pad).
+            kv_seg_ids_present = jax.nn.one_hot(
+                segment_ids_kv, max_segments_per_seq + 1, dtype=jnp.bool_
+            ).any(axis=-2)
+            q_seg_ids_present = jax.nn.one_hot(
+                segment_ids_q, max_segments_per_seq + 1, dtype=jnp.bool_
+            ).any(axis=-2)
+            q_has_match = jnp.take_along_axis(
+                kv_seg_ids_present, segment_ids_q.astype(jnp.int32), axis=-1
+            ) & (segment_ids_q != 0)
+            kv_has_match = jnp.take_along_axis(
+                q_seg_ids_present, segment_ids_kv.astype(jnp.int32), axis=-1
+            ) & (segment_ids_kv != 0)
+
+        row_ids = jnp.where(q_has_match, segment_ids_q, 0).astype(jnp.int32)
+        col_ids = jnp.where(kv_has_match, segment_ids_kv, 0).astype(jnp.int32)
+        return row_ids, col_ids
+
+    row_ids, col_ids = _row_and_col_ids()
+
+    bincount_vmap = jax.vmap(partial(jnp.bincount, length=max_segments_per_seq + 1))
+    q_seqlen = bincount_vmap(row_ids)[..., 1:]
+    kv_seqlen = bincount_vmap(col_ids)[..., 1:]
+
+    def _find_offsets(x):
+        same_as_previous = jnp.logical_and(x[..., 1:] != x[..., :-1], x[..., 1:] != 0)
+        first_column = x[..., :1] != 0
+        boundaries = jnp.concatenate([first_column, same_as_previous], axis=-1)
+        return jax.vmap(partial(jnp.argwhere, size=(max_segments_per_seq + 1), fill_value=-1))(
+            boundaries
+        ).squeeze(-1)
+
+    q_offset = _find_offsets(row_ids)
+    kv_offset = _find_offsets(col_ids)
+    return q_seqlen, kv_seqlen, q_offset, kv_offset
+
+
 def _segment_ids_pos_to_seqlens_offsets(
     segment_ids_q,
     segment_ids_kv,
@@ -550,9 +692,52 @@ def _segment_ids_pos_to_seqlens_offsets(
     window_size,
     max_segments_per_seq,
 ):
+    """Compute per-segment seqlens and start offsets(currently only used for THD)
+    Given segment-id and segment-position tensors for Q and KV,
+    returns the four metadata tensors cuDNN needed for variable-length attention:
+        q_seqlen   : [..., max_segments_per_seq]     # valid Q tokens per segment
+        kv_seqlen  : [..., max_segments_per_seq]     # valid KV tokens per segment
+        q_offset   : [..., max_segments_per_seq + 1] # start index of each Q segment
+        kv_offset  : [..., max_segments_per_seq + 1] # start index of each KV segment
+
+    Args:
+        segment_ids_q:  int32 [..., T_q]  per-token segment id; 0 == padding
+        segment_ids_kv: int32 [..., T_kv] same convention as segment_ids_q
+        segment_pos_q:  int32 [..., T_q]  per-token position inside its segment
+        segment_pos_kv: int32 [..., T_kv] same convention as segment_pos_q
+        attn_mask_type: AttnMaskType. Selects the mask predicate used to decide
+                        which positions are valid (top-left causal vs
+                        bottom-right causal vs. padding-only)
+        window_size:    Optional sliding-window tuple ``(left, right)`` or None
+                        Used here only as a fast-path eligibility hint
+        max_segments_per_seq: maximum number of segments expected per row
+                              Used to size the bincount / argwhere outputs
+
+    Routing (only invoked for THD qkv_layout):
+        1. Fast path -- ``_segment_ids_pos_to_seqlens_offsets_fast_causal_path``.
+           O(T) per row. Counts all segment tokens via bincount on
+           segment_ids and trims at most one token per segment at the
+           boundary. Used for:
+             - top-left CAUSAL / PADDING_CAUSAL with ``window_size is None``
+             - SWA with ``window_size == (-1, -1)`` and not bottom-right
+           Bottom-right causal cross-attention is excluded: the boundary
+           trim leaves kv_seqlen short by one per active segment, which
+           shifts the BRCM bottom-right alignment by one KV per Q row.
+
+        2. Slow path -- ``_get_seqlens_offsets_thd``.
+           O(T * max_segments_per_seq) per row. Per-segment min/max
+           aggregation that is equivalent to the older O(T^2)
+           mask-based reference for top-left causal, bottom-right causal,
+           and padding-only masks. Required under ring attention where
+           ``segment_ids_q != segment_ids_kv`` in rotated steps.
+
+    Returns:
+        Tuple ``(q_seqlen, kv_seqlen, q_offset, kv_offset)`` with shapes as
+        above. Inactive segment slots are filled with 0 in seqlens and -1
+        in offsets.
+    """
     # TODO(mgoldfarb-nvidia): Consider an opt-in for arbitrary masking if needed here.
     # Computing the full mask is expensive due to quadratic expansion of Q * KV masking.
-
     # Assumptions for cudnn causal mask correctness.
     # 1. Segments are monotonic [4 4 4 0 0 5 5 5 6 6 0 0]
     # 2. No intra-segment padding, only inter-segment paddding allowed
@@ -561,82 +746,30 @@ def _segment_ids_pos_to_seqlens_offsets(
     #    0             x           x
     #    4   x         x x         x x
     #    8   x x       x x x       x x x
-    #
     # This fast path avoids expanding the mask to Q * KV matrix and instead allows us to
     # examine only O(Q+KV) elements.
+    # The fast causal path encodes TOP-LEFT causal semantics via
+    #   valid[q][kv] = (segment_pos_q >= segment_pos_kv)
+    # which is only equivalent to BRCM when s_q == s_kv (self-attention). For
+    # cross-attention (s_q != s_kv), BRCM diverges from top-left causal, so we
+    # must route bottom-right masks to the slow path.
 
-    # For seqlens and seqoffsets calculations, the intermediate(temp) attn_mask creation
-    # using the segment ids and pos along with mask type (causal or brcm) is sufficient.
-    # It does not need to involve SW for this mask's creation
-
-    # Currently, this function is only exercised for THD qkv_layout.
-
-    # TODO(KshitijLakhani): Try exercising the fast path for BRCM as well
-    if (attn_mask_type.is_causal() and window_size is None) or (
-        window_size == (-1, -1) and not attn_mask_type.is_bottom_right()
-    ):
+    # Fast path: O(T) per row.
+    if (
+        attn_mask_type.is_causal() and not attn_mask_type.is_bottom_right() and window_size is None
+    ) or (window_size == (-1, -1) and not attn_mask_type.is_bottom_right()):
         return _segment_ids_pos_to_seqlens_offsets_fast_causal_path(
             segment_ids_q, segment_ids_kv, segment_pos_q, segment_pos_kv, max_segments_per_seq
         )
-
-    # (1 = attend, 0 = masked)
-    segment_mask = make_attention_mask(
+    # Slow path: O(T * max_segments_per_seq) per row.
+    return _get_seqlens_offsets_thd(
         segment_ids_q,
         segment_ids_kv,
-        jnp.equal,
+        segment_pos_q,
+        segment_pos_kv,
+        attn_mask_type,
+        max_segments_per_seq,
     )
-    segment_mask_with_id = make_attention_mask(
-        segment_ids_q,
-        segment_ids_kv,
-        lambda x, y: jnp.equal(x, y) * x,
-    )
-    # TE JAX Attn expects the THD segments to have q_token <= kv_tokens so that a correct cross-attn type BRCM can be applied
-    attn_mask = segment_mask
-    if attn_mask_type.is_bottom_right():
-        run_length_out_q = run_length_fill(segment_ids_q)
-        run_length_out_kv = run_length_fill(segment_ids_kv)
-        # Example for brcm:
-        # run_length_out_q:  [3 3 3 0 4 4 4 4]
-        # segment_pos_q:     [0 1 2 3 0 1 2 3]
-        # segment_ids_q:     [1 1 1 0 2 2 2 2]
-        # run_length_out_kv: [4 4 4 4 0 0 10 10 10 10 10 10 10 10 10 10]
-        # segment_pos_kv:    [0 1 2 3 4 5 0 1 2 3 4 5 6 7 8 9]
-        # segment_ids_kv:    [1 1 1 1 0 0 2 2 2 2 2 2 2 2 2 2]
-        # brcm:            [[[1 1 0 0 0 0 1 1 1 1 1 1 1 1 0 0]
-        #                    [1 1 1 0 0 0 1 1 1 1 1 1 1 1 1 0]
-        #                    [1 1 1 1 0 0 1 1 1 1 1 1 1 1 1 1]
-        #                    [1 1 1 1 0 0 1 1 1 1 1 1 1 1 1 1]
-        #                    [1 0 0 0 0 0 1 1 1 1 1 1 1 0 0 0]
-        #                    [1 1 0 0 0 0 1 1 1 1 1 1 1 1 0 0]
-        #                    [1 1 1 0 0 0 1 1 1 1 1 1 1 1 1 0]
-        #                    [1 1 1 1 0 0 1 1 1 1 1 1 1 1 1 1]]]
-        # attn_mask(noswa):[[[1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
-        #                    [1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0]
-        #                    [1 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0]
-        #                    [0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
-        #                    [0 0 0 0 0 0 1 1 1 1 1 1 1 0 0 0]
-        #                    [0 0 0 0 0 0 1 1 1 1 1 1 1 1 0 0]
-        #                    [0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 0]
-        #                    [0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1]]]
-        bottom_right_causal_mask = make_attention_mask(
-            run_length_out_q - segment_pos_q,
-            run_length_out_kv - segment_pos_kv,
-            jnp.less_equal,
-        )
-        attn_mask = jnp.logical_and(segment_mask, bottom_right_causal_mask)
-    elif attn_mask_type.is_causal():
-        causal_mask = make_attention_mask(
-            segment_pos_q,
-            segment_pos_kv,
-            jnp.greater_equal,
-        )
-        attn_mask = jnp.logical_and(segment_mask, causal_mask)
-
-    attn_mask_with_id = jnp.where(attn_mask, segment_mask_with_id, 0)
-    q_seqlen, q_offset, kv_seqlen, kv_offset = _mask_to_seqlens_offset(
-        attn_mask_with_id, max_segments_per_seq
-    )
-    return q_seqlen, kv_seqlen, q_offset, kv_offset
 
 
 def _segment_ids_to_seqlens(segment_ids_q, segment_ids_kv, attn_mask_type):
@@ -855,14 +988,9 @@ class SequenceDescriptor:
         cls,
         segment_ids: Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]],
         segment_pos: Optional[Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]] = None,
-        *,
-        is_thd: bool,
-        is_segment_ids_reordered: bool,
     ) -> SequenceDescriptor:
         """
-        Experimental factory method for inputs with segment IDs and optional positions.
-        segment_pos = None to be used only for: BSHD with or without load balancing and,
-                                                THD without load balancing
+        Experimental factory method for inputs with segment IDs and positions.
         Args:
             segment_ids(Tuple(jnp.ndarray, jnp.ndarray)) = (q_segment_ids, kv_segment_ids):
                 - q_segment_ids (jnp.ndarray):
@@ -876,88 +1004,35 @@ class SequenceDescriptor:
                   The position inside each segment for query, with shape [batch, max_seqlen].
                 - kv_segment_pos (jnp.ndarray):
                   The position inside each segment for key, value, with shape [batch, max_seqlen].
-            is_thd(bool): If True, QKVLayout is of type THD, else it is BSHD
-            is_segment_ids_reordered(bool): If True, the segment ids have been reordered for load balancing.
-            Only THD with load balancing is expected to have this flag set to True
         Return:
             A SequenceDescriptor with segment_ids/segment_pos initialized.
         """
-        q_seg_ids, kv_seg_ids = cls._expand_to_pair(segment_ids)
-
-        # Using defaults : segment pos has to be generated.
+        # Examples (0 in segment_ids means padding):
+        # THD (three segments packed together in a sequence of length 16 with no intra-segment padding):
+        # segment_ids = [1, 1, 1, 2, 2, 3, 3, 3, 3, 3, 0, 0, 0, 0, 0, 0]
+        # segment_pos = [0, 1, 2, 0, 1, 0, 1, 2, 3, 4, 0, 0, 0, 0, 0, 0]
+        # THD (three segments packed together in a sequence of length 16 with intra-segment padding):
+        # segment_ids = [1, 1, 1, 2, 2, 3, 3, 3, 0, 0, 4, 4, 0, 0, 0, 0]
+        # segment_pos = [0, 1, 2, 0, 1, 0, 1, 2, 3, 4, 0, 1, 0, 0, 0, 0]
+        # BSHD (only one segment per sequence):
+        # segment_ids = [1, 1, 1, 1, 1, 1, 1, 0, 0]
+        # segment_pos = [0, 1, 2, 3, 4, 5, 6, 7, 8]
+        # TODO(@KshitijLakhani): Make segment_pos Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]] and remove below check (starting June 2026)
         if segment_pos is None:
-            # THD + load balanced segment_ids are not supported in this function
-            # BSHD + load balanced segment_ids are incorrect as BSHD handles reordering within the primitive itself
-            if is_segment_ids_reordered:
-                assert not is_thd, (
-                    f"{segment_pos=} default arg is not supported for load balanced reordered"
-                    " (Striped) THD inputs. Please pass the load balanced reordered segment_pos"
-                    " and segment_ids explicitly to {from_segment_ids_and_pos.__qualname__}"
-                    " using convenience function reorder_causal_load_balancing()"
-                )
-                assert is_thd, (
-                    f"{segment_pos=} default arg is not supported for load balanced reordered (Dual"
-                    " Chunk) BSHD inputs. BSHD segment_pos and segment_ids do not need to be load"
-                    " balanced reordered. The reordering for these is performed within the"
-                    " primitive"
-                )
+            raise ValueError(
+                "segment_pos is now required. Automatic segment_pos generation was removed because"
+                " it did not have sufficient context to generate a correct segment_pos across all"
+                " load-balancing and context-parallel strategies. Please generate the segment_pos"
+                " explicitly.See tests/jax/test_fused_attn.py generate_random_segment_ids_and_pos()"
+                " and generate_valid_segment_ids_and_pos()"
+            )
 
-            # Generate the default pos for THD and BSHD non-reordered segment_ids
-            def generate_default_pos(seg_ids):
-                if is_thd:
-                    batch_size, seq_size = seg_ids.shape
-                    # Assume that the first token belongs to a segment and is not a padded token
-                    first_is_segment = jnp.full((batch_size, 1), True, dtype=bool)
-                    # Get segment start positions
-                    segment_start = jnp.concatenate(
-                        [
-                            first_is_segment,
-                            (seg_ids[..., 1:] != seg_ids[..., :-1]) & (seg_ids[..., 1:] != 0),
-                        ],
-                        axis=-1,
-                    )
-                    # Get offset for location where new segment starts
-                    segment_start_idx = jax.vmap(lambda row: jnp.arange(row.size) * row)(
-                        segment_start
-                    )
-                    segment_start_offsets = jax.vmap(jnp.maximum.accumulate)(segment_start_idx)
-
-                    # Get the last non-zero index - after this everything is padding
-                    # (B,)
-                    last_nonzero_idx = jax.vmap(
-                        lambda segids_row: jnp.max(
-                            jnp.where(segids_row != 0, jnp.arange(seq_size), -1)
-                        )
-                    )(seg_ids)
-                    seg_pos_no_thd = jnp.arange(seq_size)
-                    # Get a mask which can be used to zero out all the padding at the end (after the non-zero index)
-                    mask = seg_pos_no_thd <= last_nonzero_idx[:, None]
-
-                    # Get the unmasked seg_pos for the THD sequence
-                    seg_pos = (
-                        jnp.broadcast_to(jnp.arange(seq_size), seg_ids.shape)
-                        - segment_start_offsets
-                    )
-
-                    # Use the mask to zero out the padding at the end (after the non-zero index)
-                    segment_pos = jax.vmap(
-                        lambda pos_row, mask_row: jnp.where(mask_row, pos_row, 0)
-                    )(seg_pos, mask)
-                    return segment_pos
-
-                seqlen = seg_ids.shape[-1]
-                return jnp.broadcast_to(jnp.arange(seqlen), seg_ids.shape)
-
-            q_seg_pos = generate_default_pos(q_seg_ids)
-            kv_seg_pos = generate_default_pos(kv_seg_ids)
-            segment_pos = (q_seg_pos, kv_seg_pos)
-        # Explicitly passed segment_pos
-        else:
-            segment_pos = cls._expand_to_pair(segment_pos)
+        q_seg_ids, kv_seg_ids = cls._expand_to_pair(segment_ids)
+        q_seg_pos, kv_seg_pos = cls._expand_to_pair(segment_pos)
 
         return cls(
             segment_ids=(q_seg_ids, kv_seg_ids),
-            segment_pos=segment_pos,
+            segment_pos=(q_seg_pos, kv_seg_pos),
         )
 
 
@@ -1316,10 +1391,63 @@ def _fused_attn_bwd_rule(
 _fused_attn.defvjp(_fused_attn_fwd_rule, _fused_attn_bwd_rule)
 
 
+@partial(jax.custom_vjp, nondiff_argnums=(3, 4))
+def _fused_attn_score_mod(
+    qkv: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray],
+    score_mod_tensors: Tuple[jnp.ndarray, ...],
+    score_mod_bprop_tensors: Tuple[jnp.ndarray, ...],
+    config,
+    context_checkpoint_name: str,
+):
+    output, _ = _fused_attn_score_mod_fwd_rule(
+        qkv,
+        score_mod_tensors,
+        score_mod_bprop_tensors,
+        config,
+        context_checkpoint_name,
+    )
+    return output
+
+
+def _fused_attn_score_mod_fwd_rule(
+    qkv,
+    score_mod_tensors,
+    score_mod_bprop_tensors,
+    config,
+    context_checkpoint_name,
+):
+    output, softmax_stats = tex.fused_attn_score_mod_fwd(qkv, score_mod_tensors, config)
+    output = checkpoint_name(output, context_checkpoint_name)
+    softmax_stats = checkpoint_name(softmax_stats, context_checkpoint_name)
+    return output, (qkv, score_mod_tensors, score_mod_bprop_tensors, output, softmax_stats)
+
+
+def _fused_attn_score_mod_bwd_rule(config, context_checkpoint_name, ctx, dz):
+    del context_checkpoint_name
+    qkv, score_mod_tensors, score_mod_bprop_tensors, output, softmax_stats = ctx
+    grad_qkv = tex.fused_attn_score_mod_bwd(
+        qkv,
+        output,
+        dz,
+        softmax_stats,
+        score_mod_tensors,
+        score_mod_bprop_tensors,
+        config,
+    )
+    return (
+        grad_qkv,
+        tuple(None for _ in score_mod_tensors),
+        tuple(None for _ in score_mod_bprop_tensors),
+    )
+
+
+_fused_attn_score_mod.defvjp(_fused_attn_score_mod_fwd_rule, _fused_attn_score_mod_bwd_rule)
+
+
 def fused_attn(
     qkv: Tuple[jnp.ndarray, ...],
     bias: Optional[jnp.ndarray],
-    sequence_descriptor: SequenceDescriptor,
+    sequence_descriptor: Optional[SequenceDescriptor],
     seed: Optional[jnp.ndarray],
     attn_bias_type: AttnBiasType,
     attn_mask_type: AttnMaskType,
@@ -1336,6 +1464,10 @@ def fused_attn(
     context_checkpoint_name: str = "context",
     softmax_offset: Optional[jnp.ndarray] = None,
     stripe_size: int | None = None,
+    score_mod: Optional[Callable] = None,
+    score_mod_bprop: Optional[Callable] = None,
+    score_mod_tensors: Optional[Mapping[str, Any]] = None,
+    score_mod_bprop_tensors: Optional[Mapping[str, Any]] = None,
 ):
     """
     Perform cuDNN fused attention.
@@ -1378,6 +1510,20 @@ def fused_attn(
             Currently, a stripe_size > 1 is only supported for CP + THD + Striped + AG, whereas a stripe_size=1
             is supported for both, CP + THD + Striped + AG and CP + THD + Striped + P2P(Ring)
             None indicates no striping strategy
+        score_mod (Optional[Callable]): Experimental cuDNN frontend score modification callback.
+            The callback is called as `score_mod(graph, score, tensors)` while building a
+            cuDNN frontend graph. When provided, this path only supports BSHD_BSHD_BSHD
+            layout and is mutually exclusive with masks, padding, bias, dropout, context
+            parallelism, sliding windows, and non-vanilla softmax.
+        score_mod_bprop (Optional[Callable]): Optional score modification backward callback,
+            called as `score_mod_bprop(graph, dscore, tensors)`. If omitted, cuDNN uses the
+            default backward behavior for the forward score modification graph.
+        score_mod_tensors (Optional[Mapping[str, Any]]): Additional tensors or Python/NumPy
+            scalars made available to `score_mod` through its `tensors` dictionary. Scalars
+            are represented as cuDNN pass-by-value tensors. Tensor entries are treated as
+            non-differentiable auxiliary inputs.
+        score_mod_bprop_tensors (Optional[Mapping[str, Any]]): Additional tensors or
+            Python/NumPy scalars made available to `score_mod_bprop`.
     Returns:
         (jnp.ndarray): The output tensor from the fused attention.
 
@@ -1410,6 +1556,53 @@ def fused_attn(
                              AttnBiasType.NO_BIAS, AttnMaskType.PADDING_CAUSAL_MASK,
                              QKVLayout.T3HD, 0.125, 0, True, 3)
     """
+    if score_mod is None:
+        score_mod_only_args = [
+            name
+            for name, value in (
+                ("score_mod_bprop", score_mod_bprop),
+                ("score_mod_tensors", score_mod_tensors),
+                ("score_mod_bprop_tensors", score_mod_bprop_tensors),
+            )
+            if value is not None
+        ]
+        if score_mod_only_args:
+            raise ValueError(f"{', '.join(score_mod_only_args)} require score_mod to be provided.")
+    else:
+        tex.validate_fused_attn_score_mod(
+            qkv,
+            bias,
+            sequence_descriptor,
+            seed,
+            attn_bias_type,
+            attn_mask_type,
+            qkv_layout,
+            softmax_type,
+            dropout_probability,
+            max_segments_per_seq,
+            window_size,
+            context_parallel_strategy,
+            context_parallel_causal_load_balanced,
+            context_parallel_axis,
+            softmax_offset,
+            stripe_size,
+        )
+        config, tensor_operands, bprop_tensor_operands = tex.make_fused_attn_score_mod_config(
+            score_mod,
+            score_mod_bprop,
+            score_mod_tensors,
+            score_mod_bprop_tensors,
+            scaling_factor,
+            is_training,
+        )
+        return _fused_attn_score_mod(
+            qkv,
+            tensor_operands,
+            bprop_tensor_operands,
+            config,
+            context_checkpoint_name,
+        )
+
     if sequence_descriptor is None or isinstance(sequence_descriptor, jnp.ndarray):
         warnings.warn(
             "Pass mask to fused_attn is deprecated, please use SequenceDescriptor instead. "
