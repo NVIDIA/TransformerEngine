@@ -4,6 +4,14 @@
 
 set -e
 
+# This test uses the MXFP8 recipe (--fp8-recipe mxfp8), which is only supported
+# on Blackwell (compute capability 10.0) and newer.
+DEVICE_ARCH=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -n 1 | sed 's/[^0-9]//g')
+if [[ -z "${DEVICE_ARCH}" || ${DEVICE_ARCH} -lt 100 ]]; then
+    echo "Skipping L1_pytorch_mcore_fsdp_integration: MXFP8 requires compute capability 10.0+ (Blackwell), detected compute_cap=${DEVICE_ARCH:-unknown}."
+    exit 0
+fi
+
 # Megatron-LM / Megatron-FSDP commit for main branch on Apr. 10, 2026.
 # Necessary to support wgrad accumulate fusion and Megatron-FSDP NCCL UBR,
 # and fixes decoupled_grad <> DistOpt usage in Megatron-LM.
