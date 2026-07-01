@@ -42,4 +42,8 @@ compile_commands.json
 tensor_dumps/
 artifacts/
 .DS_Store
-.claude/
+.agents
+.claude
+.codex
+AGENTS.md
+CLAUDE.md
