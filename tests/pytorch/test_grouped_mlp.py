@@ -1380,9 +1380,7 @@ class TestGroupedMLPFusedOp:
             x = x_base.detach().clone().requires_grad_(True)
             probs = probs_base.detach().clone().requires_grad_(True)
             with te.autocast(enabled=True, recipe=recipe):
-                y = module(
-                    x, split_sizes, probs, split_sizes, output=output, grad_input=grad_input
-                )
+                y = module(x, split_sizes, probs, split_sizes, output=output, grad_input=grad_input)
             y.backward(dy_base)
             return y, x.grad
 
