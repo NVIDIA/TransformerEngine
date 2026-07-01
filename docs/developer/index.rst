@@ -23,7 +23,7 @@ How to Use This Guide
   module. For building from source, see :doc:`/installation`. For running tests, see
   :doc:`testing`. For contributing guidelines, see ``CONTRIBUTING.rst`` at the repository
   root.
-- **Working on new quantization recipe**: See :doc:`quantization/index` for the 
+- **Working on new quantization recipe**: See :doc:`quantization/index` for the
   Quantizer/Storage/Tensor design and :doc:`cpp_core/type_system` for the underlying C/C++ types.
 - **Working on attention**: See :doc:`attention/index` for backend selection and kernel
   organization.

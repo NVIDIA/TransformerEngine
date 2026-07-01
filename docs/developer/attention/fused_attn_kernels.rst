@@ -38,13 +38,13 @@ Directory Structure
 .. code-block:: text
 
    fused_attn/
-   ├── fused_attn.h              # Internal C++ API
    ├── fused_attn.cpp            # C API implementation, backend dispatch
-   ├── fused_attn_f16_max512_seqlen.h/.cu  # cuDNN F16 (short sequences)
    ├── fused_attn_f16_arbitrary_seqlen.h/.cu  # cuDNN F16 (any sequence length)
    ├── fused_attn_fp8.h/.cu      # cuDNN FP8
-   ├── thd_utils.h               # THD layout utilities for CP
-   └── utils.h                   # Shared utilities
+   ├── flash_attn.cu             # FlashAttention-related helpers
+   ├── context_parallel.cu       # Context-parallel helper kernels
+   ├── kv_cache.cu               # KV-cache helper kernels
+   └── utils.cu/.h               # Shared utilities
 
 cuDNN Integration
 -----------------
@@ -104,12 +104,11 @@ produce different auxiliary tensors, they are passed through an ``NVTETensorPack
 
 Each sub-backend populates the pack differently:
 
-- **Sub-backend 0** (F16 max512): 1 tensor — ``S`` (full softmax intermediate).
 - **Sub-backend 1** (F16 arbitrary): 2+ tensors — ``Stats`` (log-sum-exp, always
   present), optionally ``Max`` (when ``return_max_logit=True``), ``rng_state``, and
   optionally ``Bias`` and ``SoftmaxOffset``.
-- **Sub-backend 2** (FP8): 3 tensors — ``M`` (row max), ``ZInv`` (inverse softmax
-  denominator), ``rng_state``.
+- **Sub-backend 2** (FP8): ``M`` (softmax statistics), ``rng_state``, and optionally
+  ``SoftmaxOffset`` for non-vanilla softmax.
 
 On the Python/pybind11 side (``pytorch/csrc/extensions/attention.cpp``), the forward call
 uses the two-pass pattern: the first call with empty tensors discovers the required shapes

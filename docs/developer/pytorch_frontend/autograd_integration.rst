@@ -110,9 +110,9 @@ TE supports activation recomputation (gradient checkpointing) at multiple granul
   function re-enters the ``autocast`` context during recomputation so that quantizers
   and FP8 state are correctly restored.
 - **Selective recompute**: Only recompute specific operations (e.g., the core attention
-  computation) while keeping other activations saved. The ``TransformerLayer`` module
-  provides an ``activation_checkpointing`` parameter that controls selective
-  recomputation.
+  computation) while keeping other activations saved. Pass
+  ``checkpoint_core_attention=True`` to ``TransformerLayer.forward()`` to recompute the
+  core attention operation during backward.
 
 FP8 Tensors in Autograd
 ------------------------

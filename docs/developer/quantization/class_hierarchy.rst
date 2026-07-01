@@ -197,8 +197,18 @@ A typical quantization lifecycle:
 
 .. code-block:: python
 
-   # 1. Create quantizer (usually done once per module)
-   quantizer = Float8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+   import torch
+   import transformer_engine.pytorch as te
+   from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
+
+   # 1. Create quantizer state (usually created by a module's recipe machinery)
+   scale = torch.ones(1, dtype=torch.float32, device="cuda")
+   amax = torch.zeros(1, dtype=torch.float32, device="cuda")
+   quantizer = Float8Quantizer(
+       scale=scale,
+       amax=amax,
+       fp8_dtype=te.DType.kFloat8E4M3,
+   )
    quantizer.set_usage(rowwise=True, columnwise=True)
 
    # 2. Quantize a tensor (returns QuantizedTensor for autograd)

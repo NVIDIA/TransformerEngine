@@ -26,7 +26,7 @@
   <!-- Title -->
   <text x="400" y="30" text-anchor="middle" class="title">Row-Parallel Linear</text>
 
-  <!-- Input X split into 4 rows -->
+  <!-- Input X split into 4 input-feature shards -->
   <text x="60" y="60" text-anchor="middle" class="label" font-weight="bold">Input X</text>
   <text x="60" y="75" text-anchor="middle" class="label-sm">(partitioned)</text>
 
@@ -48,7 +48,7 @@
   <line x1="110" y1="231" x2="145" y2="231" class="arrow"/>
   <line x1="110" y1="291" x2="145" y2="291" class="arrow"/>
 
-  <!-- Weight matrix W split into 4 rows -->
+  <!-- Weight matrix W split into 4 input-feature column shards -->
   <text x="200" y="60" text-anchor="middle" class="label" font-weight="bold">Weight W</text>
   <text x="200" y="75" text-anchor="middle" class="label-sm">(split along input dim)</text>
 

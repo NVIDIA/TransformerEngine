@@ -64,7 +64,7 @@
   <text x="350" y="218" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" fill="#2e7d32">Tiled, IO-aware algorithm</text>
   <line x1="270" y1="228" x2="430" y2="228" stroke="#a5d6a7" stroke-width="0.8"/>
   <text x="350" y="244" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" fill="#2e7d32">Ampere+, BF16 / FP16</text>
-  <text x="350" y="258" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" fill="#2e7d32">O(N) memory, no materialization</text>
+  <text x="350" y="258" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" fill="#2e7d32">FA2 / FA3 / FA4</text>
 
   <!-- Arch annotation -->
   <rect x="295" y="280" width="110" height="22" rx="4" fill="#fafafa" stroke="#a5d6a7" stroke-width="1"/>
@@ -78,7 +78,7 @@
   <line x1="590" y1="150" x2="590" y2="175" stroke="#1565c0" stroke-width="1.5" marker-end="url(#arrowBlue)"/>
 
   <!-- Fused sub-branch connector -->
-  <line x1="590" y1="180" x2="590" y2="320" stroke="#64b5f6" stroke-width="1.2"/>
+  <line x1="590" y1="180" x2="590" y2="280" stroke="#64b5f6" stroke-width="1.2"/>
 
   <!-- Sub-branch 3a: F16 Fused -->
   <line x1="590" y1="200" x2="560" y2="200" stroke="#64b5f6" stroke-width="1.2"/>
@@ -100,16 +100,6 @@
   <text x="490" y="325" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#1565c0">Hopper+ | SM90+</text>
   <text x="490" y="339" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#546e7a">Best FP8 performance</text>
 
-  <!-- Sub-branch 3c: Custom/THD -->
-  <line x1="590" y1="370" x2="560" y2="370" stroke="#64b5f6" stroke-width="1.2"/>
-  <line x1="590" y1="320" x2="590" y2="370" stroke="#64b5f6" stroke-width="1.2"/>
-  <rect x="420" y="354" width="140" height="36" rx="5" fill="#e3f2fd" stroke="#42a5f5" stroke-width="1.2"/>
-  <text x="490" y="376" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="#1565c0">Custom / THD</text>
-
-  <!-- THD details -->
-  <rect x="420" y="396" width="140" height="36" rx="4" fill="#fafafa" stroke="#bbdefb" stroke-width="0.8"/>
-  <text x="490" y="411" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#1565c0">Hopper+ | SM90+</text>
-  <text x="490" y="425" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#546e7a">CP-specific kernels</text>
 
   <!-- Legend -->
   <rect x="20" y="460" width="660" height="46" rx="6" fill="#f5f5f5" stroke="#e0e0e0" stroke-width="1"/>
@@ -120,5 +110,5 @@
   <text x="260" y="482" font-family="Arial, sans-serif" font-size="11" fill="#546e7a">FlashAttention</text>
   <rect x="380" y="470" width="14" height="14" rx="3" fill="#1565c0"/>
   <text x="400" y="482" font-family="Arial, sans-serif" font-size="11" fill="#546e7a">cuDNN Fused</text>
-  <text x="35" y="498" font-family="Arial, sans-serif" font-size="10" fill="#78909c">SM80 = Ampere (A100) | SM90 = Hopper (H100) | SM70 = Volta (V100)</text>
+  <text x="35" y="498" font-family="Arial, sans-serif" font-size="10" fill="#78909c">SM80 = Ampere | SM90 = Hopper | SM100/SM120 = Blackwell</text>
 </svg>

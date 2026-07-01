@@ -72,7 +72,7 @@ objects (see ``transformer_engine.cpp``). The pool has a fixed capacity of appro
 reuse. This means ``nvte_create_tensor()`` does not allocate memory — it retrieves an
 entry from the pool. If the pool is exhausted, an error is raised.
 
-``NVTETensor`` is populated via ``nvte_tensor_set()`` with ``NVTETensorParam`` keys:
+``NVTETensor`` is populated via ``nvte_set_tensor_param_v2()`` with ``NVTETensorParam`` keys:
 
 .. code-block:: c
 
@@ -85,6 +85,9 @@ entry from the pool. If the pool is exhausted, an error is raised.
        kNVTEColumnwiseScaleInv = 5,
        kNVTEColumnwiseAmax = 6,
        kNVTEWithGEMMSwizzledScales = 7,
+       kNVTERowScaledNVFP4 = 8,
+       kNVTENVFP4E4M3Max = 9,
+       kNVTENumTensorParams,
    };
 
 NVTEScalingMode
@@ -174,7 +177,7 @@ A lightweight internal tensor descriptor with implicit conversion to/from
 
    struct SimpleTensor {
        void *dptr;
-       std::vector<size_t> shape;
+       Shape shape;
        DType dtype;
 
        // Implicit conversion from NVTEBasicTensor
@@ -215,9 +218,11 @@ The main internal tensor type, composed of multiple ``SimpleTensor`` members:
      + scaling_mode : NVTEScalingMode
      + nvte_tensor : NVTETensor (opaque handle)
      + with_gemm_swizzled_scales : bool
+     + row_scaled_nvfp4 : bool
+     + nvfp4_e4m3_max : int
    Below, a smaller UML box for "SimpleTensor":
      + dptr : void*
-     + shape : vector<size_t>
+     + shape : Shape
      + dtype : DType
    Arrow from each SimpleTensor field in Tensor to the SimpleTensor box (composition).
 
@@ -235,6 +240,8 @@ The main internal tensor type, composed of multiple ``SimpleTensor`` members:
        NVTEScalingMode scaling_mode;
        NVTETensor nvte_tensor;          // Opaque handle for C API
        bool with_gemm_swizzled_scales;  // MXFP8/NVFP4 scale format flag
+       bool row_scaled_nvfp4;            // NVFP4 uses one amax per row
+       int nvfp4_e4m3_max;               // Global E4M3 scale bound (448 or 256)
    };
 
 This structure holds all the metadata needed for a quantized tensor. Not all fields are
@@ -244,6 +251,9 @@ dtypes. ``scale_inv`` has shape ``[1]`` for tensor scaling but a multi-element s
 block scaling modes. ``columnwise_data`` and ``columnwise_scale_inv`` are only populated
 when the tensor was quantized with columnwise usage enabled. Validation functions in
 ``transformer_engine.cpp`` (e.g., ``CheckScaleTensorShape``) enforce these constraints.
+For NVFP4, ``row_scaled_nvfp4`` changes ``amax`` from a per-tensor value to a per-row
+array, while ``nvfp4_e4m3_max`` records the scale bound used by both quantization and
+downstream consumers.
 
 .. _dtype-conversion-patterns:
 

@@ -16,12 +16,12 @@ Megatron-style column-parallel and row-parallel linear layers.
    :align: center
    :width: 70%
 
-   Column-parallel linear: input is broadcast, weight columns are split across GPUs.
+   Column-parallel linear: input is replicated, weight output-feature rows are split.
 
 ..
    Diagram description for ``column_parallel.svg``:
    Left: "Input X" (full tensor, same on all GPUs).
-   Center: Weight matrix W split vertically into W_0, W_1, W_2, W_3 (4 GPUs).
+   Center: Weight matrix W split along its output-feature rows across 4 GPUs.
    Each GPU computes Y_i = X @ W_i^T (partial output).
    Right: Partial outputs Y_0..Y_3 are concatenated (or kept split for next layer).
    Label: "All-gather input if needed; output is split along hidden dim"
@@ -30,12 +30,12 @@ Megatron-style column-parallel and row-parallel linear layers.
    :align: center
    :width: 70%
 
-   Row-parallel linear: input is split, weight rows are split, output is reduced.
+   Row-parallel linear: input and weight input-feature columns are split; output is reduced.
 
 ..
    Diagram description for ``row_parallel.svg``:
    Left: "Input X" split into X_0, X_1, X_2, X_3 (one per GPU).
-   Center: Weight matrix W split horizontally into W_0, W_1, W_2, W_3.
+   Center: Weight matrix W split along its input-feature columns across 4 GPUs.
    Each GPU computes Y_i = X_i @ W_i^T (partial result).
    Right: "All-reduce (or reduce-scatter)" to produce final output Y = sum(Y_i).
    Label: "Input is partitioned; output requires reduction"
@@ -54,8 +54,10 @@ Used for the **first** linear layer in a pair (e.g., QKV projection, MLP FC1):
        tp_group=tp_process_group,
    )
 
-**Forward**: Each GPU holds columns ``W[:, start:end]`` and computes partial output.
-If the input is not already partitioned, an all-gather collects the full input first.
+**Forward**: TE stores a linear weight as ``[out_features, in_features]``. Each GPU holds
+a shard ``W[start:end, :]`` along the output-feature dimension and computes the
+corresponding output shard. With sequence parallelism, the sequence-sharded input is
+all-gathered before the GEMM; otherwise the full input is already available on each rank.
 
 **Backward**: Gradient of the output is split; weight gradient is computed locally.
 Input gradient requires an all-reduce (or reduce-scatter with sequence parallelism).
@@ -75,10 +77,13 @@ MLP FC2):
        tp_group=tp_process_group,
    )
 
-**Forward**: Each GPU holds rows ``W[start:end, :]`` and computes a partial result.
-The partial results are summed via all-reduce (or reduce-scatter).
+**Forward**: Each GPU holds ``W[:, start:end]``, a shard along the input-feature
+dimension, and consumes the matching input shard. The partial results are summed via
+all-reduce (or reduce-scatter with sequence parallelism).
 
-**Backward**: Gradient is broadcast (or all-gathered); weight gradient is computed locally.
+**Backward**: The output gradient is already present on every rank in the non-SP case.
+With sequence parallelism it is all-gathered along the sequence dimension. Each rank
+then computes its local weight-gradient and input-gradient shards.
 
 Column + Row Pairing
 --------------------

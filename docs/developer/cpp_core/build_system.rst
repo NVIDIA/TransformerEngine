@@ -78,6 +78,8 @@ Key Environment Variables
      - Path to ccache binary (default: ``ccache``). E.g. ``sccache`` for CI.
    * - ``NVTE_BUILD_DEBUG``
      - Set to ``1`` to build C++ extensions with debug symbols
+   * - ``NVTE_WITH_NCCL_EP``
+     - Build NCCL-based expert-parallel support (default: ``1``; requires an sm90+ target)
 
 NVTE_CUDA_ARCHS
 ^^^^^^^^^^^^^^^^
@@ -101,15 +103,19 @@ For development, set this to only your target GPU to minimize build time:
 Git Submodules
 --------------
 
-The build requires two submodules in ``3rdparty/``:
+The repository uses four submodules in ``3rdparty/``:
 
 - **CUTLASS** (``3rdparty/cutlass``) — NVIDIA's CUDA Templates for Linear Algebra
   Subroutines. Used for custom GEMM kernels and attention kernels.
 - **cuDNN Frontend** (``3rdparty/cudnn-frontend``) — C++ frontend for cuDNN graph API.
   Used for fused attention and normalization.
+- **NCCL** (``3rdparty/nccl``) — Builds the static NCCL expert-parallel component when
+  ``NVTE_WITH_NCCL_EP=1`` and at least one target architecture is sm90 or newer. Set
+  ``NVTE_WITH_NCCL_EP=0`` to omit it.
+- **GoogleTest** (``3rdparty/googletest``) — Used by the C++ test suite.
 
-``setup.py`` automatically initializes these if they are missing, but manual setup is
-sometimes needed:
+``setup.py`` attempts to initialize every registered submodule unless
+``NVTE_SKIP_SUBMODULE_CHECKS_DURING_BUILD`` is set. Manual setup is sometimes needed:
 
 .. code-block:: bash
 

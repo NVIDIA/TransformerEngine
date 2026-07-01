@@ -86,24 +86,44 @@ stored as attributes:
    output = layer.apply(params, input)
 
 **Sharding via annotations**: Instead of ``parallel_mode`` constructor args, JAX modules
-use ``MeshResource`` and rely on XLA SPMD for communication:
+use logical axis annotations and a ``MeshResource`` set by ``global_shard_guard()`` or
+``autocast()``. Within an active JAX ``Mesh``, logical axis rules map those annotations
+to physical mesh axes, and XLA SPMD uses the mapping to insert communication:
 
 .. code-block:: python
+
+   import flax.linen as nn
+   import transformer_engine.jax.flax as te_jax
+   from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 
    layer = te_jax.DenseGeneral(
        features=3072,
-       mesh_resource=MeshResource(tp_resource="tp"),
+       kernel_axes=("input", "tp"),
    )
 
-**Quantization context**: Instead of ``autocast()``, JAX uses explicit quantizer
-arguments:
+   mesh_resource = MeshResource(tp_resource="tp")
+   axis_rules = te_jax.extend_logical_axis_rules((("input", None), ("tp", "tp")))
+   with global_shard_guard(mesh_resource), nn.logical_axis_rules(axis_rules):
+       params = layer.init(rng, input)
+       output = layer.apply(params, input)
+
+**Quantization context**: As in the PyTorch frontend, low-precision execution is selected
+with ``autocast()``. JAX modules create their quantizer sets from the active recipe;
+quantizers are not passed to ``Module.apply()`` explicitly:
 
 .. code-block:: python
 
-   output = layer.apply(
-       params, input,
-       quantizer=fp8_quantizer,
-   )
+   from transformer_engine.common.recipe import MXFP8BlockScaling
+   from transformer_engine.jax import autocast
+   from transformer_engine.jax.sharding import MeshResource
+
+   with autocast(
+       enabled=True,
+       recipe=MXFP8BlockScaling(),
+       mesh_resource=MeshResource(),
+   ):
+       params = layer.init(rng, input)
+       output = layer.apply(params, input)
 
 See Also
 --------

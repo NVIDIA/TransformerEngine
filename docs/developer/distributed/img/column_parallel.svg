@@ -35,24 +35,24 @@
   <line x1="130" y1="200" x2="175" y2="200" class="arrow"/>
   <text x="153" y="193" text-anchor="middle" class="label-sm">@</text>
 
-  <!-- Weight matrix W split into 4 columns -->
+  <!-- Weight matrix W split into 4 output-feature row shards -->
   <text x="280" y="68" text-anchor="middle" class="label" font-weight="bold">Weight W (split along output dim)</text>
 
   <!-- W0 -->
-  <rect x="185" y="80" width="47" height="240" rx="4" class="gpu0"/>
-  <text x="208" y="200" text-anchor="middle" class="label-white-sm" transform="rotate(-90 208 200)">W₀ (GPU 0)</text>
+  <rect x="185" y="80" width="194" height="58" rx="4" class="gpu0"/>
+  <text x="282" y="114" text-anchor="middle" class="label-white-sm">W₀ (GPU 0)</text>
 
   <!-- W1 -->
-  <rect x="234" y="80" width="47" height="240" rx="4" class="gpu1"/>
-  <text x="257" y="200" text-anchor="middle" class="label-white-sm" transform="rotate(-90 257 200)">W₁ (GPU 1)</text>
+  <rect x="185" y="140" width="194" height="58" rx="4" class="gpu1"/>
+  <text x="282" y="174" text-anchor="middle" class="label-white-sm">W₁ (GPU 1)</text>
 
   <!-- W2 -->
-  <rect x="283" y="80" width="47" height="240" rx="4" class="gpu2"/>
-  <text x="306" y="200" text-anchor="middle" class="label-white-sm" transform="rotate(-90 306 200)">W₂ (GPU 2)</text>
+  <rect x="185" y="200" width="194" height="58" rx="4" class="gpu2"/>
+  <text x="282" y="234" text-anchor="middle" class="label-white-sm">W₂ (GPU 2)</text>
 
   <!-- W3 -->
-  <rect x="332" y="80" width="47" height="240" rx="4" class="gpu3"/>
-  <text x="355" y="200" text-anchor="middle" class="label-white-sm" transform="rotate(-90 355 200)">W₃ (GPU 3)</text>
+  <rect x="185" y="260" width="194" height="60" rx="4" class="gpu3"/>
+  <text x="282" y="294" text-anchor="middle" class="label-white-sm">W₃ (GPU 3)</text>
 
   <!-- Arrow from W to computation -->
   <line x1="389" y1="200" x2="430" y2="200" class="arrow"/>

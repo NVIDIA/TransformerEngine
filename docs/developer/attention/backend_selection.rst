@@ -62,24 +62,26 @@ Environment Variables
      - ``0`` to disable cuDNN fused attention, ``1`` to enable (default: ``1``)
    * - ``NVTE_FLASH_ATTN``
      - ``0`` to disable FlashAttention, ``1`` to enable (default: ``1``)
-   * - ``NVTE_FUSED_ATTN_BACKEND``
-     - Force a specific cuDNN fused attention sub-backend by integer ID:
-       ``0`` = F16 max512, ``1`` = F16 arbitrary seqlen, ``2`` = FP8.
-       These correspond to the ``NVTE_Fused_Attn_Backend`` enum in ``fused_attn.h``.
+   * - ``NVTE_UNFUSED_ATTN``
+     - ``0`` to disable native PyTorch attention, ``1`` to enable (default: ``1``)
 
-Constructor Override
---------------------
+Selecting a Backend
+-------------------
 
-``DotProductAttention`` accepts a ``backend`` parameter:
+``DotProductAttention`` does not expose a constructor argument that forces one backend.
+To select a backend for debugging or testing, enable the desired backend and disable the
+other two before the module is first called. For example, to select FlashAttention:
 
 .. code-block:: python
 
-   attn = te.DotProductAttention(
-       num_attention_heads=32,
-       kv_channels=128,
-       attention_type="self",
-       backend="flash_attention",  # Force FlashAttention
-   )
+   import os
+
+   os.environ["NVTE_FLASH_ATTN"] = "1"
+   os.environ["NVTE_FUSED_ATTN"] = "0"
+   os.environ["NVTE_UNFUSED_ATTN"] = "0"
+
+The environment variables are read during backend selection. Set them before the first
+``DotProductAttention.forward()`` call because the selection result is cached.
 
 Feature Compatibility Matrix
 -----------------------------

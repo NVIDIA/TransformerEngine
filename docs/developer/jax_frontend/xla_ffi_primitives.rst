@@ -18,10 +18,13 @@ BasePrimitive
 ``BasePrimitive`` is the base class for all JAX TE primitives. It provides the machinery
 to:
 
-1. **Register** a custom call with XLA (both forward and backward).
+1. **Register** inner and outer JAX primitives and lower them to XLA FFI calls.
 2. **Define abstract evaluation** (shape/dtype inference without running the kernel).
-3. **Define the custom VJP** (JAX's equivalent of PyTorch's autograd backward).
+3. **Register eager and ``vmap`` behavior** for each primitive.
 4. **Handle sharding** (propagate partition specs through the operation).
+
+``BasePrimitive`` does not define autodiff rules. Higher-level JAX functions compose
+forward and backward primitives and expose the pair through ``jax.custom_vjp``.
 
 .. code-block:: python
 
@@ -69,7 +72,9 @@ When the JAX TE module is imported, each primitive:
 3. Registers ``lowering`` as the MLIR lowering rule (maps to XLA custom call via FFI).
 4. Registers ``batcher`` for ``jax.vmap`` support.
 5. Registers ``partition`` and ``shardy_sharding_rule`` for XLA SPMD.
-6. Backward is registered via ``jax.custom_vjp`` on the outer primitive.
+
+Higher-level functions such as ``dense.py::_dense`` and ``attention.py::fused_attn``
+register custom VJPs and call the corresponding primitives.
 
 Primitives can be selectively enabled/disabled via the ``NVTE_JAX_CUSTOM_CALLS``
 environment variable.

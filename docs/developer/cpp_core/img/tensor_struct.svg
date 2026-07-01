@@ -22,9 +22,9 @@
     <rect x="0" y="0" width="380" height="30" class="header-bg" rx="3" ry="3" />
     <rect x="0" y="15" width="380" height="15" class="header-bg" />
     <!-- Body -->
-    <rect x="0" y="30" width="380" height="270" class="body-bg" />
+    <rect x="0" y="30" width="380" height="316" class="body-bg" />
     <!-- Full border -->
-    <rect x="0" y="0" width="380" height="300" class="border" rx="3" ry="3" />
+    <rect x="0" y="0" width="380" height="346" class="border" rx="3" ry="3" />
     <!-- Separator -->
     <line x1="0" y1="30" x2="380" y2="30" stroke="#2C3E50" stroke-width="1.5" />
 
@@ -64,6 +64,11 @@
 
     <text x="12" y="273" class="field-text">+ with_gemm_swizzled_scales</text>
     <text x="220" y="273" class="type-text">: bool</text>
+    <text x="12" y="296" class="field-text">+ row_scaled_nvfp4</text>
+    <text x="220" y="296" class="type-text">: bool</text>
+
+    <text x="12" y="319" class="field-text">+ nvfp4_e4m3_max</text>
+    <text x="220" y="319" class="type-text">: int</text>
   </g>
 
   <!-- SimpleTensor struct box -->
@@ -86,7 +91,7 @@
     <text x="200" y="55" class="type-text">: void*</text>
 
     <text x="12" y="78" class="field-text">+ shape</text>
-    <text x="200" y="78" class="type-text">: vector&lt;size_t&gt;</text>
+    <text x="200" y="78" class="type-text">: Shape</text>
 
     <text x="12" y="101" class="field-text">+ dtype</text>
     <text x="200" y="101" class="type-text">: DType</text>
@@ -96,14 +101,14 @@
   <!-- Arrow 1: from center of Tensor bottom to SimpleTensor top -->
   <g>
     <!-- Main vertical line -->
-    <line x1="240" y1="320" x2="240" y2="370" class="arrow-line" />
+    <line x1="240" y1="366" x2="240" y2="390" class="arrow-line" />
     <!-- Horizontal line to SimpleTensor center -->
-    <line x1="240" y1="370" x2="350" y2="370" class="arrow-line" />
+    <line x1="240" y1="390" x2="350" y2="390" class="arrow-line" />
     <!-- Vertical line down to SimpleTensor -->
-    <line x1="350" y1="370" x2="350" y2="440" class="arrow-line" />
+    <line x1="350" y1="390" x2="350" y2="440" class="arrow-line" />
 
     <!-- Filled diamond at Tensor end (composition) -->
-    <polygon points="240,320 233,328 240,336 247,328" class="diamond" />
+    <polygon points="240,366 233,374 240,382 247,374" class="diamond" />
 
     <!-- Arrowhead at SimpleTensor end -->
     <polygon points="350,440 345,432 355,432" fill="#2C3E50" />

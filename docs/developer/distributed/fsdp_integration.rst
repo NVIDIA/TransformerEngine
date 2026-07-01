@@ -68,6 +68,10 @@ during weight all-gather. No explicit setup or registration is needed.
      - Gathers uint8 data + scale_inv. Handles amax reduction for current scaling.
    * - ``MXFP8Tensor``
      - Gathers data + scale_inv with padding/unpadding for block-aligned scales.
+   * - ``Float8BlockwiseQTensor``
+     - Supports 2D block scaling; 1D block scaling is not compatible with dim-0 all-gather.
+   * - ``NVFP4Tensor``
+     - Gathers rowwise data and scales, then derives columnwise data locally when needed.
 
 .. note::
 
@@ -174,9 +178,10 @@ Limitations
 - FP8 weight caching interacts with FSDP gather/scatter — weights may be re-quantized
   on each gather.
 - Mixed FSDP + TP configurations require careful process group setup.
-- ``fsdp_pre_all_gather`` / ``fsdp_post_all_gather`` are currently implemented only for
-  ``Float8Tensor`` and ``MXFP8Tensor``, not for ``Float8BlockwiseQTensor`` or
-  ``NVFP4Tensor``.
+- ``Float8BlockwiseQTensor`` FSDP2 support is limited to 2D block scaling.
+- ``NVFP4Tensor`` does not support FSDP2 with GEMM-swizzled scales. Columnwise usage
+  requires 2D quantization, and the flattened row count of each shard must be a multiple
+  of the NVFP4 block size.
 
 See Also
 --------

@@ -14,14 +14,15 @@ Entry Points
 
 **Location**: ``transformer_engine/jax/attention.py``
 
-The primary functions are:
+The primary public function is:
 
 - ``fused_attn()`` — Fused attention using cuDNN (equivalent to PyTorch's cuDNN fused
   backend).
-- ``fused_attn_fwd()`` / ``fused_attn_bwd()`` — Forward and backward primitives.
 
-These are JAX primitives registered via the XLA FFI mechanism
-(see :doc:`/developer/jax_frontend/xla_ffi_primitives`).
+It is a ``jax.custom_vjp`` function backed by the low-level ``fused_attn_fwd()`` and
+``fused_attn_bwd()`` wrappers in ``transformer_engine/jax/cpp_extensions/attention.py``.
+Those wrappers invoke JAX primitives registered through XLA FFI (see
+:doc:`/developer/jax_frontend/xla_ffi_primitives`).
 
 Differences from PyTorch
 -------------------------
@@ -54,14 +55,37 @@ Usage Example
 
 .. code-block:: python
 
-   from transformer_engine.jax.attention import fused_attn
+   import jax.numpy as jnp
+   from transformer_engine.jax.attention import (
+       AttnBiasType,
+       AttnMaskType,
+       AttnSoftmaxType,
+       QKVLayout,
+       SequenceDescriptor,
+       fused_attn,
+   )
+
+   batch, seqlen, heads, head_dim = 2, 128, 16, 64
+   qkv = jnp.zeros((batch, seqlen, 3, heads, head_dim), dtype=jnp.bfloat16)
+   sequence_descriptor = SequenceDescriptor.from_seqlens(
+       seqlens=(
+           jnp.full((batch,), seqlen),
+           jnp.full((batch,), seqlen),
+       )
+   )
 
    output = fused_attn(
-       query, key, value,
-       bias=attn_bias,
-       mask=attn_mask,
-       scaling_factor=1.0 / math.sqrt(head_dim),
-       is_training=True,
+       (qkv,),
+       None,  # bias
+       sequence_descriptor,
+       None,  # dropout seed; no dropout in this example
+       AttnBiasType.NO_BIAS,
+       AttnMaskType.CAUSAL_MASK,
+       QKVLayout.BS3HD,
+       AttnSoftmaxType.VANILLA_SOFTMAX,
+       head_dim**-0.5,
+       0.0,  # dropout probability
+       True,  # is_training
    )
 
 See Also

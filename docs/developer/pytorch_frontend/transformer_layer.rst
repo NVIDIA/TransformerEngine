@@ -19,7 +19,7 @@ Transformer implementation.
 QKV Weight Handling
 -------------------
 
-The ``fuse_qkv_params`` parameter (default ``True``) controls whether Q, K, and V
+The ``fuse_qkv_params`` parameter (default ``False``) controls whether Q, K, and V
 projections share a single fused weight tensor or use separate weights. When
 ``fuse_qkv_params=True``, the QKV projection is a single ``LayerNormLinear`` with output
 size ``3 * hidden_size`` (or adjusted for GQA), and the weight is split into Q, K, V

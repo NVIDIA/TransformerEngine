@@ -26,13 +26,11 @@ hardware, precision, and feature combinations.
      ├── "FlashAttention" — Tri Dao's flash-attn package (external)
      │     └── Ampere+, BF16/FP16, no cuDNN required
      └── "FusedAttention" — cuDNN graph API
-           ├── Sub-backend 0: "F16 max512" — seqlen ≤ 512, Ampere+
            ├── Sub-backend 1: "F16 arbitrary" — any seqlen, Ampere+
            └── Sub-backend 2: "FP8" — FP8 Q/K/V, Hopper+
 
 There are exactly three backends (Unfused, FlashAttention, FusedAttention).
-FusedAttention has three cuDNN sub-backends selected automatically based on precision
-and sequence length.
+FusedAttention has two cuDNN sub-backends selected automatically based on precision.
 
 Backend Details
 ---------------
@@ -58,11 +56,14 @@ FlashAttention
 ``transformer_engine/pytorch/attention/dot_product_attention/backends.py``
 
 Integrates Tri Dao's `flash-attn <https://github.com/Dao-AILab/flash-attention>`_
-package as an external dependency (not bundled). Two versions are supported:
+package as an external dependency (not bundled). Three versions are supported:
 
 - **FA2** (``flash_attn.flash_attn_interface``): Ampere and later (sm80+).
 - **FA3** (``flash_attn_3.flash_attn_interface``): Hopper only (sm90). Selected
   automatically when installed and running on sm90; disabled on other architectures.
+- **FA4** (``flash_attn.cute``): Ampere, Hopper, Blackwell datacenter, and Blackwell
+  GeForce architectures (sm80, sm90, sm100, and sm120). On Hopper, FA3 is preferred
+  over FA4 when both are installed.
 
 Version constraints are managed in ``FlashAttentionUtils`` in ``utils.py``.
 
@@ -99,9 +100,7 @@ Code flow:
    sub-backend implementation based on ``nvte_get_fused_attn_backend()``.
 4. **cuDNN graph builders** — one file per sub-backend:
 
-   - ``fused_attn_f16_max512_seqlen.cu`` — sub-backend 0 (legacy; only selected when
-     sub-backend 1 is unavailable due to older cuDNN or restrictive parameters)
-   - ``fused_attn_f16_arbitrary_seqlen.cu`` — sub-backend 1 (preferred for all F16 cases)
+   - ``fused_attn_f16_arbitrary_seqlen.cu`` — sub-backend 1 (F16/BF16)
    - ``fused_attn_fp8.cu`` — sub-backend 2
 
    Each builds a ``cudnn_frontend::graph::Graph``, configures SDPA attributes (masking,
