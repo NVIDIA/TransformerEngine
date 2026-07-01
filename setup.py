@@ -246,7 +246,6 @@ def build_nccl_ep_submodule() -> str:
         )
     gencode = " ".join(f"-gencode=arch=compute_{a},code=sm_{a}" for a in arch_list)
 
-    nproc = os.cpu_count() or 8
     env = os.environ.copy()
     env["NVCC_GENCODE"] = gencode
     # NCCL EP needs the core NCCL headers + libnccl.so; write NCCL EP build
@@ -269,7 +268,7 @@ def build_nccl_ep_submodule() -> str:
             )
         print(f"[NCCL EP] Building libnccl_ep.a (gencode='{gencode}')")
         subprocess.check_call(
-            ["make", "-j", str(nproc), "-C", "contrib/nccl_ep", "lib"],
+            ["make", "-j", "-C", "contrib/nccl_ep", "lib"],
             cwd=str(nccl_root),
             env=env,
         )
