@@ -412,7 +412,7 @@ class FusedTopkWithScoreFunctionBwdPrimitive(BasePrimitive):
         arg_infos,
         result_infos,
     ):
-        del result_infos, routing_map_format
+        del result_infos
         grad_spec = get_padded_spec(arg_infos[2])
         out_sharding = NamedSharding(mesh, PartitionSpec(*grad_spec))
         arg_shardings = (arg_infos[0].sharding, arg_infos[1].sharding, arg_infos[2].sharding)

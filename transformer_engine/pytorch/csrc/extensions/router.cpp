@@ -321,6 +321,37 @@ std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd(at::Tensor probs,
   return std::make_tuple(aux_loss, Const_buf);
 }
 
+std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd_graph_safe(
+    at::Tensor probs, at::Tensor tokens_per_expert, at::Tensor total_num_tokens, int num_experts,
+    int num_rows, int num_cols, int topk, float coeff) {
+  TORCH_CHECK(topk > 0, "topk must be greater than 0");
+  TORCH_CHECK(num_experts > 0, "num_experts must be greater than 0");
+  // Device-tensor path: keep total_num_tokens dynamic across CUDA Graph replays.
+  // Validate shape and dtype on the host; do not read its value (avoids a sync).
+  TORCH_CHECK(total_num_tokens.is_cuda(), "total_num_tokens must be a CUDA tensor");
+  TORCH_CHECK(total_num_tokens.numel() == 1,
+              "total_num_tokens must contain exactly one element; got ", total_num_tokens.numel());
+  TORCH_CHECK(total_num_tokens.scalar_type() == at::kLong, "total_num_tokens must be int64; got ",
+              total_num_tokens.scalar_type());
+
+  // Create the output tensor
+  at::Tensor aux_loss = at::empty({}, at::dtype(probs.scalar_type()).device(at::kCUDA));
+  at::Tensor Const_buf = at::empty({2}, at::dtype(at::kFloat).device(at::kCUDA));
+
+  auto probs_cu = makeTransformerEngineTensor(probs);
+  auto tokens_per_expert_cu = makeTransformerEngineTensor(tokens_per_expert);
+  auto total_num_tokens_cu = makeTransformerEngineTensor(total_num_tokens);
+  auto aux_loss_cu = makeTransformerEngineTensor(aux_loss);
+  auto Const_buf_cu = makeTransformerEngineTensor(Const_buf);
+
+  nvte_fused_moe_aux_loss_forward_graph_safe(probs_cu.data(), tokens_per_expert_cu.data(),
+                                             total_num_tokens_cu.data(), num_experts, num_rows,
+                                             num_cols, topk, coeff, aux_loss_cu.data(),
+                                             Const_buf_cu.data(), at::cuda::getCurrentCUDAStream());
+
+  return std::make_tuple(aux_loss, Const_buf);
+}
+
 at::Tensor fused_moe_aux_loss_bwd(at::Tensor Const_buf, at::Tensor tokens_per_expert, int num_rows,
                                   int num_cols, at::Tensor grad_aux_loss) {
   // Create the output tensor
