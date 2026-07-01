@@ -465,6 +465,10 @@ PackedMXFP8Operand pack_mxfp8_operand_scales(py::handle operand,
              ".");
 
   const int64_t matrix_numel = checked_mul(rows_per_batch, features, name);
+  const int64_t expected_data_numel = checked_mul(batch_count, matrix_numel, name);
+  NVTE_CHECK(data.numel() == expected_data_numel, "MXFP8 strided_batched_gemm ", name,
+             " data buffer has invalid size (expected ", expected_data_numel, ", got ",
+             data.numel(), ").");
   const int64_t interleaved_leading_dim = checked_mul(batch_count, features, name);
   const bool batch_major = leading_dim == features && batch_stride == matrix_numel;
   const bool interleaved = leading_dim == interleaved_leading_dim && batch_stride == features;
