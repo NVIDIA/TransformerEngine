@@ -6,9 +6,10 @@ set -e
 
 # This test uses the MXFP8 recipe (--fp8-recipe mxfp8), which is only supported
 # on Blackwell (compute capability 10.0) and newer.
-DEVICE_ARCH=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -n 1 | sed 's/[^0-9]//g')
+DEVICE_ARCH_RAW=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -n 1)
+DEVICE_ARCH=$(echo "${DEVICE_ARCH_RAW}" | sed 's/[^0-9]//g')
 if [[ -z "${DEVICE_ARCH}" || ${DEVICE_ARCH} -lt 100 ]]; then
-    echo "Skipping L1_pytorch_mcore_fsdp_integration: MXFP8 requires compute capability 10.0+ (Blackwell), detected compute_cap=${DEVICE_ARCH:-unknown}."
+    echo "Skipping L1_pytorch_mcore_fsdp_integration: MXFP8 requires compute capability 10.0+ (Blackwell), detected compute_cap=${DEVICE_ARCH_RAW:-unknown}."
     exit 0
 fi
 
