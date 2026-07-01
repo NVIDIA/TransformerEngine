@@ -1673,6 +1673,54 @@ def test_nvfp4_error_correction_requires_row_scaled_activation():
         )
 
 
+@pytest.mark.parametrize("bias", [False, True])
+def test_nvfp4_error_correction_is_batch_invariant(bias):
+    """Shared rows produce identical outputs when the surrounding batch changes."""
+    if not torch.cuda.is_available() or not te.is_nvfp4_available():
+        pytest.skip("NVFP4 unsupported on this device")
+
+    torch.manual_seed(0)
+    batch_sizes = (1, 2, 4)
+    sequence_length = 16
+    in_features = 128
+    out_features = 128
+    inp = torch.randn(
+        max(batch_sizes),
+        sequence_length,
+        in_features,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    model = Linear(
+        in_features,
+        out_features,
+        bias=bias,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+    ).eval()
+    nvfp4_recipe = recipe.NVFP4BlockScaling(
+        disable_rht=True,
+        row_scaled_activation=True,
+        err_corrected_activation=True,
+    )
+
+    outputs = {}
+    with torch.inference_mode():
+        for batch_size in batch_sizes:
+            with autocast(enabled=True, recipe=nvfp4_recipe):
+                outputs[batch_size] = model(inp[:batch_size]).clone()
+
+    reference = outputs[max(batch_sizes)]
+    for batch_size in batch_sizes:
+        assert torch.isfinite(outputs[batch_size]).all()
+        torch.testing.assert_close(
+            outputs[batch_size],
+            reference[:batch_size],
+            rtol=0,
+            atol=0,
+        )
+
+
 def test_nvfp4_recipe_state_positional_fallback_matches_explicit_roles():
     """``roles=None`` matches explicit ``[input, weight, output]`` slot-for-slot."""
     if not torch.cuda.is_available() or not te.is_nvfp4_available():

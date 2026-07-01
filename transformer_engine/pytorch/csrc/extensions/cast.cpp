@@ -80,7 +80,8 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
 
   // Post-quantize swizzle for quantizers whose kernel does not bake
   // the GEMM-swizzled scale layout in directly
-  if (quantizer_cpp->optimize_for_gemm && !output_cpp.get_with_gemm_swizzled_scales()) {
+  if (quantizer_cpp->optimize_for_gemm && !output_cpp.get_with_gemm_swizzled_scales() &&
+      !output_cpp.get_err_corrected_nvfp4()) {
     inplace_swizzle_scale_for_gemm(output_py);
   }
 
