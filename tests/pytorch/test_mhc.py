@@ -9,6 +9,7 @@ import torch.nn.functional as F
 
 from utils import reset_rng_states
 from transformer_engine.pytorch.triton.mhc import (
+    ENFORCE_DETERMINISTIC,
     mhc_fused_sinkhorn,
     mhc_fused_scale,
     mhc_fused_aggregate,
@@ -262,7 +263,12 @@ mhc_configs = [
 
 def get_tols(dtype):
     if dtype == torch.bfloat16:
+        # bf16 tolerance is limited by bf16 rounding so both deterministic and non-deterministic paths
+        # should use the same tols
         tols = dict(atol=2.5e-2, rtol=2.5e-2)
+    elif ENFORCE_DETERMINISTIC:
+        # Use a tighter tolerance for deterministic
+        tols = dict(atol=3e-3, rtol=3e-3)
     else:
         tols = dict(atol=5e-3, rtol=5e-3)
     return tols
@@ -467,9 +473,8 @@ def test_mhc_fuse_grad_acc(cfg: MHCConfig, dtype):
     N = 2 * n + n * n
     nC = n * C
 
-    # TODO(kainzhong): the larget tols here is because the fuse_grad_acc path accumulates multiple operators using atomic add
-    # which introduces randomness and the result is not deterministic. Use a smaller tols once the deterministic kernel is implemented.
-    tols = dict(atol=5e-2, rtol=5e-2)
+    # For non-deterministic tests, we use a looser tolerance since atomic add introduces greater error
+    tols = dict(atol=1e-4, rtol=1e-4) if ENFORCE_DETERMINISTIC else dict(atol=5e-2, rtol=5e-2)
     use_tf32 = False
 
     x = torch.randn(s, b, C, n, device="cuda", requires_grad=True, dtype=dtype)

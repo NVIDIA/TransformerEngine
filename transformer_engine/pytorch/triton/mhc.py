@@ -26,6 +26,8 @@ from transformer_engine.common.triton.mhc import (
 )
 from transformer_engine.pytorch.cpp_extensions.gemm import general_gemm
 
+ENFORCE_DETERMINISTIC = os.environ.get("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1") == "0"
+
 
 def _support_tma(x: torch.Tensor):
     # get_device_capability returns a (major, minor) tuple; TMA needs Hopper+ (major >= 9)
@@ -54,16 +56,17 @@ def _init_tma_allocator():
     _tma_allocator_initialized = True
 
 
-def check_deterministic(operator: str):
+def check_deterministic(operator: str, use_split_k: bool = False):
     """
-    Checks if the non-deterministic algorithm is allowed for the given operator. If not, raises an assertion error with instructions on how to allow it.
-    Since atomic add is used in this mHC implementation, it breaks the determinism guarantee due to non-associativity of floating point addition.
+    If the user enforces determinism (NVTE_ALLOW_NONDETERMINISTIC_ALGO=0), split-K/M/C reductions
+    are disallowed because they reduce via atomic add, which is non-associative in floating point.
+    The default (use_split_k=False) uses deterministic store/workspace reductions instead.
     """
-    allow_nondeterministic = os.environ.get("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1") == "1"
-    assert allow_nondeterministic, (
-        f"[{operator}]: This operation uses atomic add which violates determinism. Set"
-        " NVTE_ALLOW_NONDETERMINISTIC_ALGO=1 to allow this non-deterministic behavior."
-    )
+    if use_split_k:
+        assert not ENFORCE_DETERMINISTIC, (
+            f"[{operator}]: use_split_k=True uses atomic add which violates determinism. Either set"
+            " use_split_k=False or unset NVTE_ALLOW_NONDETERMINISTIC_ALGO=0."
+        )
 
 
 def mhc_generate_mix_and_aggregate(
@@ -74,6 +77,7 @@ def mhc_generate_mix_and_aggregate(
     norm_weight: Optional[torch.Tensor] = None,
     use_tf32: bool = True,
     fused_grad_x_acc_buffer: Optional[torch.Tensor] = None,
+    use_split_k: bool = False,
 ):
     """
     Generate the mix matrix H_pre, H_post, H_res and apply H_pre to x to aggregate n streams
@@ -134,7 +138,7 @@ def mhc_generate_mix_and_aggregate(
         H_res of shape (s, b, n, n), which will be used to mix the residual connection in `mhc_fused_expand_combine`
         with dtype float32
     """
-    check_deterministic("mhc_generate_mix_and_aggregate")
+    check_deterministic("mhc_generate_mix_and_aggregate", use_split_k)
     s, b, C, n = x.shape
     assert (
         n == 4
@@ -153,6 +157,7 @@ def mhc_generate_mix_and_aggregate(
         norm_weight=norm_weight,
         use_tf32=use_tf32,
         fused_grad_x_acc_buffer=fused_grad_x_acc_buffer,
+        use_split_k=use_split_k,
     )
     H_pre, H_post, H_res = mhc_fused_scale(H, alpha, beta, ms, n)
     H_res = mhc_fused_sinkhorn(H_res.view(s, b, n, n), n, recompute_hist=True, iters=20)
@@ -162,6 +167,7 @@ def mhc_generate_mix_and_aggregate(
         n,
         use_tf32=use_tf32,
         fused_grad_x_acc_buffer=fused_grad_x_acc_buffer,
+        use_split_k=use_split_k,
     )
     return out, H_post.view(s, b, n), H_res
 
@@ -249,7 +255,6 @@ def mhc_fused_scale(
 
     """
     assert n == 4, "Only n=4 is supported in this implementation"
-    check_deterministic("mhc_fused_scale")
     out = mHCScaleFusedOp.apply(H, alpha, beta, ms, n)
     h_pre = out[..., :n]
     h_post = out[..., n : 2 * n]
@@ -263,6 +268,7 @@ def mhc_fused_aggregate(
     n: int,
     use_tf32: bool = True,
     fused_grad_x_acc_buffer: Optional[torch.Tensor] = None,
+    use_split_k: bool = False,
 ):
     """
     Aggregate operation to merge n activation streams into one (see section 4.3.1 of the DeepSeek mHC paper):
@@ -302,8 +308,8 @@ def mhc_fused_aggregate(
         assert (
             fused_grad_x_acc_buffer.numel() == x.numel()
         ), "fused_grad_x_acc_buffer.numel() must match x.numel()"
-    check_deterministic("mhc_fused_aggregate")
-    out = mHCAggregateOp.apply(x, H_pre, n, use_tf32, fused_grad_x_acc_buffer)
+    check_deterministic("mhc_fused_aggregate", use_split_k)
+    out = mHCAggregateOp.apply(x, H_pre, n, use_tf32, fused_grad_x_acc_buffer, use_split_k)
     return out
 
 
@@ -316,6 +322,7 @@ def mhc_fused_expand_combine(
     n: int,
     use_tf32: bool = True,
     fused_grad_x_acc_buffer: Optional[torch.Tensor] = None,
+    use_split_k: bool = False,
 ):
     """
     Expand and combine operation for merging n hyper connections (see section 4.3.1 of the DeepSeek mHC paper):
@@ -365,7 +372,7 @@ def mhc_fused_expand_combine(
         assert (
             fused_grad_x_acc_buffer.numel() == x.numel()
         ), "fused_grad_x_acc_buffer.numel() must match x.numel()"
-    check_deterministic("mhc_fused_expand_combine")
+    check_deterministic("mhc_fused_expand_combine", use_split_k)
     out = mHCExpandCombineOp.apply(
         f,
         bias,
@@ -375,6 +382,7 @@ def mhc_fused_expand_combine(
         n,
         use_tf32,
         fused_grad_x_acc_buffer,
+        use_split_k,
     )
     return out
 
@@ -385,6 +393,7 @@ def mhc_fused_projection(
     use_tf32: bool = True,
     norm_weight: Optional[torch.Tensor] = None,
     fused_grad_x_acc_buffer: Optional[torch.Tensor] = None,
+    use_split_k: bool = False,
 ):
     """
     Fused projection operation to compute H matrices and mean square for RMSNorm (see eq. 14-15, section 4.3.1 of the DeepSeek mHC paper):
@@ -436,7 +445,7 @@ def mhc_fused_projection(
     assert (
         phi.shape[0] == 24
     ), "Currently only n=4 is supported, which means phi should have 24 in its first dimension"
-    check_deterministic("mhc_fused_projection")
+    check_deterministic("mhc_fused_projection", use_split_k)
     if fused_grad_x_acc_buffer is not None:
         assert (
             fused_grad_x_acc_buffer.dtype == torch.float32
@@ -444,7 +453,9 @@ def mhc_fused_projection(
         assert (
             fused_grad_x_acc_buffer.numel() == x.numel()
         ), "fused_grad_x_acc_buffer.numel() must match x.numel()"
-    H, ms = mHCProjectionOp.apply(x, phi, norm_weight, use_tf32, fused_grad_x_acc_buffer)
+    H, ms = mHCProjectionOp.apply(
+        x, phi, norm_weight, use_tf32, fused_grad_x_acc_buffer, use_split_k
+    )
     return H, ms
 
 
@@ -454,7 +465,9 @@ class mHCProjectionOp(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, x, phi, norm_weight=None, use_tf32=True, fused_grad_x_acc_buffer=None):
+    def forward(
+        ctx, x, phi, norm_weight=None, use_tf32=True, fused_grad_x_acc_buffer=None, use_split_k=False
+    ):
         """
         The forward pass of the fused projection operation. Computes H = x @ phi^T and the mean
         If norm_weight is provided, it will be absorbd by phi
@@ -497,6 +510,7 @@ class mHCProjectionOp(torch.autograd.Function):
         ctx.save_for_backward(x, phi, ms, norm_weight)
         ctx.phi_dtype = phi.dtype
         ctx.fused_grad_x_acc_buffer = fused_grad_x_acc_buffer
+        ctx.use_split_k = use_split_k
 
         if norm_weight is not None:
             phi = phi.to(torch.float32) * norm_weight.to(torch.float32)
@@ -532,6 +546,7 @@ class mHCProjectionOp(torch.autograd.Function):
             stride_norm_weight=1,
             BLOCK_SIZE_N=32,
             precision=precision,
+            USE_SPLIT_K=use_split_k,
             USE_TMA=use_tma,
         )
 
@@ -616,6 +631,7 @@ class mHCProjectionOp(torch.autograd.Function):
                 stride_grad_norm_weight=1,
                 BLOCK_SIZE_N=32,
                 precision="tf32" if ctx.use_tf32 else "ieee",
+                USE_SPLIT_M=ctx.use_split_k,
             )
 
             grad_phi = grad_phi.to(phi.dtype)
@@ -662,7 +678,7 @@ class mHCProjectionOp(torch.autograd.Function):
             HAS_NORM_WEIGHT=norm_weight is not None,
         )
 
-        return grad_x.to(x.dtype), grad_phi, grad_norm_weight, None, None
+        return grad_x.to(x.dtype), grad_phi, grad_norm_weight, None, None, None
 
 
 class mHCScaleFusedOp(torch.autograd.Function):
@@ -760,12 +776,28 @@ class mHCScaleFusedOp(torch.autograd.Function):
         grad_h = torch.zeros(
             (M, 32), device=grad_out.device, dtype=grad_out.dtype
         )  # Pad the grad_h to 32 in the last dimension
-        grad_alpha = torch.zeros((3,), device=grad_out.device, dtype=grad_out.dtype)
-        grad_beta_padded = torch.zeros((1, 32), device=grad_out.device, dtype=grad_out.dtype)
-        grad_beta = grad_beta_padded[
-            :, :N
-        ]  # Use only the first N elements for grad_beta, the rest are just padding
         grad_ms = torch.zeros((M,), device=grad_out.device, dtype=grad_out.dtype)
+
+        # grad_a and grad_b are reductions over the M dimension, which is split across grid blocks.
+        # scale_config fixes BLOCK_SIZE_M=128, so the grid over M is deterministic.
+        BLOCK_SIZE_M = 128
+        grid_m = triton.cdiv(M, BLOCK_SIZE_M)
+
+        if ENFORCE_DETERMINISTIC:
+            # Deterministic path: each block writes its partial to a workspace row; sum in torch.
+            grad_alpha = None
+            grad_beta_padded = None
+            grad_beta = None
+            ws_grad_a = torch.empty((grid_m, 4), device=grad_out.device, dtype=torch.float32)
+            ws_grad_b = torch.empty((grid_m, 32), device=grad_out.device, dtype=torch.float32)
+        else:
+            grad_alpha = torch.zeros((3,), device=grad_out.device, dtype=grad_out.dtype)
+            grad_beta_padded = torch.zeros((1, 32), device=grad_out.device, dtype=grad_out.dtype)
+            grad_beta = grad_beta_padded[
+                :, :N
+            ]  # Use only the first N elements for grad_beta, the rest are just padding
+            ws_grad_a = None
+            ws_grad_b = None
 
         # pylint: disable=unnecessary-lambda-assignment
         grid = lambda META: (triton.cdiv(M, META["BLOCK_SIZE_M"]),)
@@ -780,6 +812,8 @@ class mHCScaleFusedOp(torch.autograd.Function):
             grad_b_ptr=grad_beta,
             grad_ms_ptr=grad_ms,
             ms_ptr=ms,
+            ws_grad_a_ptr=ws_grad_a,
+            ws_grad_b_ptr=ws_grad_b,
             M=M,
             n=n,
             stride_grad_out_m=32,
@@ -797,7 +831,13 @@ class mHCScaleFusedOp(torch.autograd.Function):
             stride_ms=1,
             BLOCK_SIZE_N=32,
             eps=torch.finfo(ms.dtype).eps,
+            DETERMINISTIC=ENFORCE_DETERMINISTIC,
         )
+
+        if ENFORCE_DETERMINISTIC:
+            grad_alpha = ws_grad_a.sum(dim=0)[:3]  # Sum partials across blocks; first 3 are grad_a
+            grad_beta_padded = ws_grad_b.sum(dim=0, keepdim=True)  # Sum partials across blocks
+            grad_beta = grad_beta_padded[:, :N]
 
         return (
             grad_h,
@@ -978,7 +1018,7 @@ class mHCAggregateOp(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, x, H_pre, n, use_tf32=True, fused_grad_x_acc_buffer=None):
+    def forward(ctx, x, H_pre, n, use_tf32=True, fused_grad_x_acc_buffer=None, use_split_k=False):
         """
         The forward pass of the aggregate operation. Merges n activation streams into one by
         computing a weighted sum using H_pre:
@@ -1029,6 +1069,7 @@ class mHCAggregateOp(torch.autograd.Function):
         ctx.n = n
         ctx.use_tf32 = use_tf32
         ctx.fused_grad_x_acc_buffer = fused_grad_x_acc_buffer
+        ctx.use_split_k = use_split_k
 
         return out
 
@@ -1089,6 +1130,7 @@ class mHCAggregateOp(torch.autograd.Function):
             stride_grad_xCn=1,
             precision="tf32" if ctx.use_tf32 else "ieee",
             FUSE_GRAD_X_ACC=ctx.fused_grad_x_acc_buffer is not None,
+            USE_SPLIT_K=ctx.use_split_k,
         )
 
         grad_H_pre = grad_H_pre.to(H_pre.dtype)  # Cast back to the original dtype of H_pre
@@ -1096,7 +1138,7 @@ class mHCAggregateOp(torch.autograd.Function):
         if ctx.fused_grad_x_acc_buffer is not None:
             grad_x = None
 
-        return grad_x, grad_H_pre, None, None, None
+        return grad_x, grad_H_pre, None, None, None, None
 
 
 class mHCExpandCombineOp(torch.autograd.Function):
@@ -1105,7 +1147,9 @@ class mHCExpandCombineOp(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, f, bias, H_post, x, H_res, n, use_tf32=True, fused_grad_x_acc_buffer=None):
+    def forward(
+        ctx, f, bias, H_post, x, H_res, n, use_tf32=True, fused_grad_x_acc_buffer=None, use_split_k=False
+    ):
         """
         The forward pass of the expand and combine operation. Expands the sub-layer output f back
         to n streams using H_post, and combines with the residual connections using H_res:
@@ -1169,6 +1213,7 @@ class mHCExpandCombineOp(torch.autograd.Function):
         ctx.n = n
         ctx.have_bias = bias is not None
         ctx.fused_grad_x_acc_buffer = fused_grad_x_acc_buffer
+        ctx.use_split_k = use_split_k
         if bias is not None:
             ctx.save_for_backward(f, bias, H_post, x, H_res)
         else:
@@ -1220,8 +1265,16 @@ class mHCExpandCombineOp(torch.autograd.Function):
             H_res, dtype=torch.float32
         )  # We need to use atomic_add for this so we need higher precision
 
+        # grad_bias is a reduction over M. In deterministic mode each block writes its partial to a
+        # workspace row (reduced in torch); otherwise it is atomic-added into grad_bias directly.
+        # The deterministic (non-split) path fixes BLOCK_SIZE_M=4, so the grid over M is cdiv(M, 4).
+        grad_bias_ws = None
         if bias is not None:
             grad_bias = torch.zeros_like(bias, dtype=torch.float32)
+            if ENFORCE_DETERMINISTIC:
+                grad_bias_ws = torch.empty(
+                    (triton.cdiv(M, 4), C), device=grad_output.device, dtype=torch.float32
+                )
 
         # pylint: disable=unnecessary-lambda-assignment
         grid = lambda META: (
@@ -1239,6 +1292,7 @@ class mHCExpandCombineOp(torch.autograd.Function):
             grad_H_post_ptr=grad_H_post,
             grad_f_ptr=grad_f,
             grad_bias_ptr=grad_bias,
+            grad_bias_ws_ptr=grad_bias_ws,
             grad_H_res_ptr=grad_H_res,
             grad_x_ptr=grad_x,
             M=M,
@@ -1254,23 +1308,28 @@ class mHCExpandCombineOp(torch.autograd.Function):
             stride_grad_fm=C,
             stride_grad_fc=1,
             stride_grad_bias=1,
+            stride_grad_bias_ws_m=C,
+            stride_grad_bias_ws_c=1,
             stride_grad_xm=n * C,
             stride_grad_xCn=1,
             precision="tf32" if ctx.use_tf32 else "ieee",
             HAS_BIAS=bias is not None,
             FUSE_GRAD_X_ACC=ctx.fused_grad_x_acc_buffer is not None,
+            DETERMINISTIC=ENFORCE_DETERMINISTIC,
+            USE_SPLIT_K=ctx.use_split_k,
         )
-
-        # If no bias, replace the grad_bias placeholder with None
-        if bias is None:
-            grad_bias = None
 
         grad_H_post = grad_H_post.to(H_post.dtype)  # Cast back to the original dtype of H_post
         grad_H_res = grad_H_res.to(H_res.dtype)  # Cast back to the original dtype of H_res
-        if bias is not None:
+        if bias is None:
+            # If no bias, replace the grad_bias placeholder with None
+            grad_bias = None
+        elif ENFORCE_DETERMINISTIC:
+            grad_bias = grad_bias_ws.sum(dim=0).to(bias.dtype)  # Sum partials across blocks
+        else:
             grad_bias = grad_bias.to(bias.dtype)
 
         if ctx.fused_grad_x_acc_buffer is not None:
             grad_x = None
 
-        return grad_f, grad_bias, grad_H_post, grad_x, grad_H_res, None, None, None
+        return grad_f, grad_bias, grad_H_post, grad_x, grad_H_res, None, None, None, None

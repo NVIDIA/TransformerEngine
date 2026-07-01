@@ -15,6 +15,10 @@ import triton.language as tl
 MAX_GRID_DIM_Y = 65535  # Maximum grid dimension in Y direction for current CUDA architectures
 
 
+def align_to(x, alignment):
+    return ((x + alignment - 1) // alignment) * alignment
+
+
 def projection_config_fwd():
     block_m = [64, 128]
     block_k = [1024]
@@ -31,15 +35,49 @@ def projection_config_fwd():
                 num_stages=s,
             )
         )
-    if os.environ.get("NVTE_DISABLE_TRITON_AUTOTUNING", "0") == "1":
-        configs = configs[:1]
     return configs
+
+
+def projection_prune_fwd(configs, named_args, **kwargs):
+    USE_SPLIT_K = named_args.get("USE_SPLIT_K", kwargs.get("USE_SPLIT_K", None))
+
+    if USE_SPLIT_K:
+        pruned_configs = configs
+    else:
+        # Deterministic path: a single K block covers the whole reduction, so each program
+        # stores its result instead of atomic-adding across split-K blocks.
+        K = named_args.get("K", kwargs.get("K", None))
+        block_m = [8, 16, 64, 128]
+        block_k = align_to(K, 32)
+        step_k = [128, 256]
+        warps = [2, 4, 8]
+        stages = [2, 3, 4]
+
+        pruned_configs = []
+        for bm, sk, w, s in itertools.product(block_m, step_k, warps, stages):
+            pruned_configs.append(
+                triton.Config(
+                    {
+                        "BLOCK_SIZE_M": bm,
+                        "BLOCK_SIZE_K": block_k,
+                        "STEP_SIZE_K": sk,
+                    },
+                    num_warps=w,
+                    num_stages=s,
+                )
+            )
+    # Triton will skip calling prune function if the autotune returns only one config, which breaks the determinism override here
+    # So we need to apply NVTE_DISABLE_TRITON_AUTOTUNING in the pruner instead
+    if os.environ.get("NVTE_DISABLE_TRITON_AUTOTUNING", "0") == "1":
+        pruned_configs = pruned_configs[:1]
+    return pruned_configs
 
 
 @triton.autotune(
     configs=projection_config_fwd(),
-    key=["M", "K", "USE_TMA"],
+    key=["M", "K", "USE_TMA", "USE_SPLIT_K"],
     reset_to_zero=["h_ptr", "ms_ptr"],
+    prune_configs_by={"early_config_prune": projection_prune_fwd},
 )
 @triton.jit
 def _mhc_projection_fwd_fused(
@@ -64,6 +102,7 @@ def _mhc_projection_fwd_fused(
     STEP_SIZE_K: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     precision: tl.constexpr,
+    USE_SPLIT_K: tl.constexpr,  # If True, reduce over split-K blocks via atomic_add (non-deterministic); else a single K block stores its result.
     USE_TMA: tl.constexpr,  # If True, load x and phi via TMA tensor descriptors (Hopper+ only). Falls back to pointer-arith tl.load otherwise.
 ):
     pid_m = tl.program_id(axis=0)
@@ -141,14 +180,20 @@ def _mhc_projection_fwd_fused(
         )
 
     h_ptrs = h_ptr + offs_m[:, None] * stride_hm + offs_n_full[None, :] * stride_hn
-    tl.atomic_add(h_ptrs, h_acc, mask=mask_m[:, None], sem="relaxed")
+    if USE_SPLIT_K:
+        tl.atomic_add(h_ptrs, h_acc, mask=mask_m[:, None], sem="relaxed")
+    else:
+        tl.store(h_ptrs, h_acc, mask=mask_m[:, None])
 
     offs_ms = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     masks_ms = offs_ms < M
     offs_ms %= M
     ms_ptrs = ms_ptr + offs_ms * stride_ms
     ms = ms_acc / tl.cast(K, tl.float32)
-    tl.atomic_add(ms_ptrs, ms, mask=masks_ms, sem="relaxed")
+    if USE_SPLIT_K:
+        tl.atomic_add(ms_ptrs, ms, mask=masks_ms, sem="relaxed")
+    else:
+        tl.store(ms_ptrs, ms, mask=masks_ms)
 
 
 def projection_config_bwd_dx():
@@ -295,11 +340,34 @@ def projection_config_bwd_dphi():
 
 
 def projection_prune_bwd_dphi(configs, named_args, **kwargs):
+    USE_SPLIT_M = named_args.get("USE_SPLIT_M", kwargs.get("USE_SPLIT_M", None))
     M = named_args.get("M", kwargs.get("M", None))
+
+    if USE_SPLIT_M:
+        pruned_configs = configs
+    else:
+        # Deterministic path: a single M block covers the whole reduction, so each program
+        # stores grad_phi/grad_norm_weight instead of atomic-adding across split-M blocks.
+        block_k = [128]
+        block_m = align_to(M, 128)
+        step_m = [32]
+        warps = [4]
+        stages = [6, 7, 8]
+
+        pruned_configs = []
+        for bk, sm, w, s in itertools.product(block_k, step_m, warps, stages):
+            pruned_configs.append(
+                triton.Config(
+                    {"BLOCK_SIZE_M": block_m, "STEP_SIZE_M": sm, "BLOCK_SIZE_K": bk},
+                    num_warps=w,
+                    num_stages=s,
+                )
+            )
 
     pruned_configs = list(
         filter(
-            lambda config: triton.cdiv(M, config.kwargs["BLOCK_SIZE_M"]) <= MAX_GRID_DIM_Y, configs
+            lambda config: triton.cdiv(M, config.kwargs["BLOCK_SIZE_M"]) <= MAX_GRID_DIM_Y,
+            pruned_configs,
         )
     )
 
@@ -315,7 +383,7 @@ def projection_prune_bwd_dphi(configs, named_args, **kwargs):
 
 @triton.autotune(
     configs=projection_config_bwd_dphi(),
-    key=["M", "K"],
+    key=["M", "K", "USE_SPLIT_M"],
     reset_to_zero=["grad_phi_ptr", "grad_norm_weight_ptr"],
     prune_configs_by={"early_config_prune": projection_prune_bwd_dphi},
 )
@@ -346,6 +414,7 @@ def _mhc_projection_bwd_fused_dphi(
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     precision: tl.constexpr,
+    USE_SPLIT_M: tl.constexpr,  # If True, reduce over split-M blocks via atomic_add (non-deterministic); else a single M block stores its result.
 ):
     pid_k = tl.program_id(axis=0)
     pid_m = tl.program_id(axis=1)
@@ -419,13 +488,19 @@ def _mhc_projection_bwd_fused_dphi(
     )
     grad_norm_weight_ptrs = grad_norm_weight_ptr + offs_k * stride_grad_norm_weight
 
-    tl.atomic_add(
-        grad_phi_ptrs,
-        grad_phi,
-        mask=(offs_n_full[:, None] < N) & mask_k[None, :],
-        sem="relaxed",
-    )
-    tl.atomic_add(grad_norm_weight_ptrs, grad_norm_weight, mask=mask_k, sem="relaxed")
+    if USE_SPLIT_M:
+        tl.atomic_add(
+            grad_phi_ptrs,
+            grad_phi,
+            mask=(offs_n_full[:, None] < N) & mask_k[None, :],
+            sem="relaxed",
+        )
+        tl.atomic_add(grad_norm_weight_ptrs, grad_norm_weight, mask=mask_k, sem="relaxed")
+    else:
+        tl.store(
+            grad_phi_ptrs, grad_phi.to(phi.dtype), mask=(offs_n_full[:, None] < N) & mask_k[None, :]
+        )
+        tl.store(grad_norm_weight_ptrs, grad_norm_weight.to(norm_weight.dtype), mask=mask_k)
 
 
 def scale_config():
@@ -542,6 +617,8 @@ def _mhc_scale_bwd_fused(
     grad_b_ptr,  # (2n + n^2,)
     grad_ms_ptr,
     ms_ptr,  # (M,)
+    ws_grad_a_ptr,  # Temporary workspace for a with shape (grid, 4), or None if DETERMINISTIC is False
+    ws_grad_b_ptr,  # Temporary workspace for b with shape (grid, 32), or None if DETERMINISTIC is False
     M,
     n,
     stride_grad_out_m,
@@ -560,6 +637,7 @@ def _mhc_scale_bwd_fused(
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     eps: tl.constexpr,
+    DETERMINISTIC: tl.constexpr,  # If True, write per-block partials to a workspace (reduced in the wrapper) instead of atomic_add.
 ):
     pid = tl.program_id(0)
 
@@ -627,21 +705,38 @@ def _mhc_scale_bwd_fused(
     grad_h = tl.where((cols[None, :] >= n) & (cols[None, :] < 2 * n), grad_h_post, grad_h)
 
     grad_a = tl.sum(h * grad_h / rms[:, None], axis=0).to(a.dtype)
-    # Write grad_a[0:4].sum to grad_a_ptr[0], grad_a[4:8].sum to grad_a_ptr[1], and grad_a[8:24].sum to grad_a_ptr[2]
-    tl.atomic_add(grad_a_ptr, tl.where(cols[None, :] < n, grad_a, 0.0).sum(), sem="relaxed")
-    tl.atomic_add(
-        grad_a_ptr + stride_grad_a,
-        tl.where((cols[None, :] >= n) & (cols[None, :] < 2 * n), grad_a, 0.0).sum(),
-        sem="relaxed",
-    )
-    tl.atomic_add(
-        grad_a_ptr + 2 * stride_grad_a,
-        tl.where((cols[None, :] >= 2 * n) & (cols[None, :] < 2 * n + n * n), grad_a, 0.0).sum(),
-        sem="relaxed",
-    )
-
     grad_b = tl.sum(grad_h, axis=0).to(a.dtype)
-    tl.atomic_add(grad_b_ptr + cols * stride_grad_b, grad_b, mask=cols < N, sem="relaxed")
+
+    if DETERMINISTIC:
+        # Deterministic path: each block writes its partials to a workspace row; the wrapper
+        # sums across blocks. Avoids the non-associative atomic_add reduction over M.
+        ws_grad_a_ptrs = ws_grad_a_ptr + pid * 4
+        # Write grad_a[0:4].sum to ws[pid, 0], grad_a[4:8].sum to ws[pid, 1], grad_a[8:24].sum to ws[pid, 2]
+        tl.store(ws_grad_a_ptrs, tl.where(cols[None, :] < n, grad_a, 0.0).sum())
+        tl.store(
+            ws_grad_a_ptrs + 1,
+            tl.where((cols[None, :] >= n) & (cols[None, :] < 2 * n), grad_a, 0.0).sum(),
+        )
+        tl.store(
+            ws_grad_a_ptrs + 2,
+            tl.where((cols[None, :] >= 2 * n) & (cols[None, :] < 2 * n + n * n), grad_a, 0.0).sum(),
+        )
+        ws_grad_b_ptrs = ws_grad_b_ptr + pid * 32 + cols
+        tl.store(ws_grad_b_ptrs, grad_b, mask=cols < N)
+    else:
+        # Write grad_a[0:4].sum to grad_a_ptr[0], grad_a[4:8].sum to grad_a_ptr[1], and grad_a[8:24].sum to grad_a_ptr[2]
+        tl.atomic_add(grad_a_ptr, tl.where(cols[None, :] < n, grad_a, 0.0).sum(), sem="relaxed")
+        tl.atomic_add(
+            grad_a_ptr + stride_grad_a,
+            tl.where((cols[None, :] >= n) & (cols[None, :] < 2 * n), grad_a, 0.0).sum(),
+            sem="relaxed",
+        )
+        tl.atomic_add(
+            grad_a_ptr + 2 * stride_grad_a,
+            tl.where((cols[None, :] >= 2 * n) & (cols[None, :] < 2 * n + n * n), grad_a, 0.0).sum(),
+            sem="relaxed",
+        )
+        tl.atomic_add(grad_b_ptr + cols * stride_grad_b, grad_b, mask=cols < N, sem="relaxed")
 
     grad_rms = (tl.sum((-grad_h * h * a[None, :]), axis=1) / (rms * rms)).to(rms.dtype)
     grad_ms = grad_rms / (2 * rms)
@@ -1198,12 +1293,39 @@ def aggregate_config_bwd():
 
 
 def aggregate_prune_bwd(configs, named_args, **kwargs):
+    USE_SPLIT_K = named_args.get("USE_SPLIT_K", kwargs.get("USE_SPLIT_K", None))
     M = named_args.get("M", kwargs.get("M", None))
+
+    if USE_SPLIT_K:
+        pruned_configs = configs
+    else:
+        # Deterministic path: a single C block covers the whole reduction, so each program
+        # stores grad_H_pre instead of atomic-adding across split-C blocks.
+        C = named_args.get("C", kwargs.get("C", None))
+        block_m = [4]
+        block_c = align_to(C, 64)
+        step_c = [64]
+        warps = [1]
+        stages = [2, 3, 4]
+
+        pruned_configs = []
+        for bm, sc, w, s in itertools.product(block_m, step_c, warps, stages):
+            pruned_configs.append(
+                triton.Config(
+                    {
+                        "BLOCK_SIZE_M": bm,
+                        "BLOCK_SIZE_C": block_c,
+                        "STEP_SIZE_C": sc,
+                    },
+                    num_warps=w,
+                    num_stages=s,
+                )
+            )
 
     pruned_configs = list(
         filter(
             lambda config: triton.cdiv(M, config.kwargs["BLOCK_SIZE_M"]) <= MAX_GRID_DIM_Y,
-            configs,
+            pruned_configs,
         )
     )
 
@@ -1219,7 +1341,7 @@ def aggregate_prune_bwd(configs, named_args, **kwargs):
 
 @triton.autotune(
     configs=aggregate_config_bwd(),
-    key=["M", "C"],
+    key=["M", "C", "USE_SPLIT_K"],
     reset_to_zero=["grad_H_pre_ptr"],
     # When FUSE_GRAD_X_ACC=True the kernel does a read-modify-write on grad_x_ptr; without
     # restore_value the autotune timing trials accumulate onto the buffer and corrupt it.
@@ -1248,6 +1370,7 @@ def _mhc_aggregate_bwd(
     STEP_SIZE_C: tl.constexpr,
     precision: tl.constexpr,
     FUSE_GRAD_X_ACC: tl.constexpr,
+    USE_SPLIT_K: tl.constexpr,  # If True, reduce grad_H_pre over split-C blocks via atomic_add (non-deterministic); else store.
 ):
     """
     Forward:
@@ -1334,7 +1457,10 @@ def _mhc_aggregate_bwd(
     grad_H_pre = tl.reshape(grad_H_pre_acc, (BLOCK_SIZE_M * n,))  # (BLOCK_SIZE_M * n)
     offs_grad_H_pre = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
     grad_H_pre_ptrs = grad_H_pre_ptr + offs_grad_H_pre
-    tl.atomic_add(grad_H_pre_ptrs, grad_H_pre, mask=offs_grad_H_pre < M * n, sem="relaxed")
+    if USE_SPLIT_K:
+        tl.atomic_add(grad_H_pre_ptrs, grad_H_pre, mask=offs_grad_H_pre < M * n, sem="relaxed")
+    else:
+        tl.store(grad_H_pre_ptrs, grad_H_pre.to(H_pre.dtype), mask=offs_grad_H_pre < M * n)
 
 
 def expand_combine_config_fwd():
@@ -1507,12 +1633,39 @@ def expand_combine_config_bwd():
 
 
 def expand_combine_prune_bwd(configs, named_args, **kwargs):
+    USE_SPLIT_K = named_args.get("USE_SPLIT_K", kwargs.get("USE_SPLIT_K", None))
     M = named_args.get("M", kwargs.get("M", None))
+
+    if USE_SPLIT_K:
+        pruned_configs = configs
+    else:
+        # Deterministic path: a single C block covers the whole reduction, so each program
+        # stores grad_H_post/grad_H_res instead of atomic-adding across split-C blocks.
+        C = named_args.get("C", kwargs.get("C", None))
+        block_m = [4]
+        block_c = align_to(C, 32)
+        step_c = [32, 64, 128]
+        warps = [1, 2]
+        stages = [1, 2, 3, 4]
+
+        pruned_configs = []
+        for bm, sc, w, s in itertools.product(block_m, step_c, warps, stages):
+            pruned_configs.append(
+                triton.Config(
+                    {
+                        "BLOCK_SIZE_M": bm,
+                        "BLOCK_SIZE_C": block_c,
+                        "STEP_SIZE_C": sc,
+                    },
+                    num_warps=w,
+                    num_stages=s,
+                )
+            )
 
     pruned_configs = list(
         filter(
             lambda config: triton.cdiv(M, config.kwargs["BLOCK_SIZE_M"]) <= MAX_GRID_DIM_Y,
-            configs,
+            pruned_configs,
         )
     )
 
@@ -1528,7 +1681,7 @@ def expand_combine_prune_bwd(configs, named_args, **kwargs):
 
 @triton.autotune(
     configs=expand_combine_config_bwd(),
-    key=["M", "C"],
+    key=["M", "C", "DETERMINISTIC", "USE_SPLIT_K"],
     reset_to_zero=["grad_H_post_ptr", "grad_H_res_ptr", "grad_bias_ptr"],
     prune_configs_by={"early_config_prune": expand_combine_prune_bwd},
 )
@@ -1543,6 +1696,7 @@ def _mhc_expand_combine_bwd(
     grad_H_post_ptr,  # (M, n)
     grad_f_ptr,  # (M, C)
     grad_bias_ptr,  # (C,), or None if HAS_BIAS is False
+    grad_bias_ws_ptr,  # (grid_m, C), or None if HAS_BIAS is False or DETERMINISTIC is False
     grad_H_res_ptr,  # (M, n, n)
     grad_x_ptr,  # (M, C, n)
     M,
@@ -1558,6 +1712,8 @@ def _mhc_expand_combine_bwd(
     stride_grad_fm,
     stride_grad_fc,
     stride_grad_bias,  # Not used if HAS_BIAS is False
+    stride_grad_bias_ws_m,  # Not used if HAS_BIAS is False or DETERMINISTIC is False
+    stride_grad_bias_ws_c,  # Not used if HAS_BIAS is False or DETERMINISTIC is False
     stride_grad_xm,
     stride_grad_xCn,
     # Meta-parameters
@@ -1567,6 +1723,8 @@ def _mhc_expand_combine_bwd(
     precision: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     FUSE_GRAD_X_ACC: tl.constexpr,
+    DETERMINISTIC: tl.constexpr,  # If True, grad_bias partials go to a workspace (reduced in the wrapper) instead of atomic_add.
+    USE_SPLIT_K: tl.constexpr,  # If True, reduce grad_H_post/grad_H_res over split-C blocks via atomic_add; else store.
 ):
     """
     Each block
@@ -1730,8 +1888,16 @@ def _mhc_expand_combine_bwd(
         if HAS_BIAS:
             grad_bias = tl.sum(grad_f_acc, axis=0)  # (STEP_SIZE_C,)
             # This is reduction over M dimension, so it has nothing to do with whether we use split-C. It only depends on determinism or not.
-            grad_bias_ptrs = grad_bias_ptr + offs_c * stride_grad_bias
-            tl.atomic_add(grad_bias_ptrs, grad_bias, mask=mask_c, sem="relaxed")
+            if DETERMINISTIC:
+                grad_bias_ws_ptrs = (
+                    grad_bias_ws_ptr
+                    + pid_m * stride_grad_bias_ws_m
+                    + offs_c * stride_grad_bias_ws_c
+                )
+                tl.store(grad_bias_ws_ptrs, grad_bias, mask=mask_c)
+            else:
+                grad_bias_ptrs = grad_bias_ptr + offs_c * stride_grad_bias
+                tl.atomic_add(grad_bias_ptrs, grad_bias, mask=mask_c, sem="relaxed")
 
         # grad_x = grad_output @ H_res.T: (BLOCK_SIZE_M, STEP_SIZE_C, n) @ (BLOCK_SIZE_M, n, n) = (BLOCK_SIZE_M, n, STEP_SIZE_C)
         # The inner dim is n=4 which is too small for triton, so we will manually unroll the matmul
@@ -1769,10 +1935,14 @@ def _mhc_expand_combine_bwd(
     offs_grad_H_res = pid_m * BLOCK_SIZE_M * n * n + tl.arange(0, BLOCK_SIZE_M * n * n)
     grad_H_res_ptrs = grad_H_res_ptr + offs_grad_H_res
 
-    tl.atomic_add(grad_H_post_ptrs, grad_H_post, mask=offs_grad_H_post < M * n, sem="relaxed")
-    tl.atomic_add(
-        grad_H_res_ptrs,
-        grad_H_res.to(tl.float32),
-        mask=offs_grad_H_res < M * n * n,
-        sem="relaxed",
-    )
+    if USE_SPLIT_K:
+        tl.atomic_add(grad_H_post_ptrs, grad_H_post, mask=offs_grad_H_post < M * n, sem="relaxed")
+        tl.atomic_add(
+            grad_H_res_ptrs,
+            grad_H_res.to(tl.float32),
+            mask=offs_grad_H_res < M * n * n,
+            sem="relaxed",
+        )
+    else:
+        tl.store(grad_H_post_ptrs, grad_H_post.to(H_post.dtype), mask=offs_grad_H_post < M * n)
+        tl.store(grad_H_res_ptrs, grad_H_res.to(H_res.dtype), mask=offs_grad_H_res < M * n * n)
