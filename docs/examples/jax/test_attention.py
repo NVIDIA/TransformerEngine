@@ -82,8 +82,7 @@ def _assert_cp_result(strategy, stripe_size):
         jax.numpy.where(
             valid_tokens,
             jax.numpy.abs(
-                result["output"].astype(jax.numpy.float32)
-                - reference.astype(jax.numpy.float32)
+                result["output"].astype(jax.numpy.float32) - reference.astype(jax.numpy.float32)
             ),
             0.0,
         )

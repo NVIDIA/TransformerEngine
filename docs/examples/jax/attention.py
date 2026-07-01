@@ -190,9 +190,7 @@ def run_forward_backward(model, variables, input_qkv, output_grad, seq_desc=None
 def compare_te_to_baseline(input_qkv=qkv, output_grad=dout, seq_desc=sequence_descriptor):
     """Compare the TE example to the native baseline."""
 
-    loss_ref, grads_ref = run_forward_backward(
-        baseline, baseline_vars, input_qkv, output_grad
-    )
+    loss_ref, grads_ref = run_forward_backward(baseline, baseline_vars, input_qkv, output_grad)
     loss_te, grads_te = run_forward_backward(te_model, te_vars, input_qkv, output_grad, seq_desc)
     out_ref = baseline.apply(baseline_vars, input_qkv)
     out_te = te_model.apply(te_vars, input_qkv, sequence_descriptor=seq_desc, deterministic=False)
@@ -265,14 +263,9 @@ def run_mla_variant():
         sequence_descriptor=sequence_descriptor,
         deterministic=False,
     )
-    loss, grads = run_forward_backward(
-        mla_model, mla_vars, mla_qkv, mla_dout, sequence_descriptor
-    )
+    loss, grads = run_forward_backward(mla_model, mla_vars, mla_qkv, mla_dout, sequence_descriptor)
     jax.block_until_ready((out, loss, grads))
-    print(
-        "TE MLA-style BSHD: "
-        f"q/k head dim={mla_head_dim_qk}, v head dim={mla_head_dim_v}"
-    )
+    print(f"TE MLA-style BSHD: q/k head dim={mla_head_dim_qk}, v head dim={mla_head_dim_v}")
     print(f"Output shape={tuple(out.shape)}, dtype={out.dtype}")
     print(f"Grad shapes={[tuple(grad.shape) for grad in grads]}")
 
