@@ -5,6 +5,7 @@ import logging
 import os
 import sys
 import pathlib
+import copy
 from typing import Any, Dict, Tuple, Union
 
 import pytest
@@ -139,7 +140,7 @@ def test_dot_product_attention(
     tols = dict(atol=1e-3, rtol=1e-3)
     if dtype == torch.bfloat16:
         tols = dict(atol=1.5e-2, rtol=1.5e-2)
-    config = model_configs[model]
+    config = copy.deepcopy(model_configs[model])
     is_mla = config.head_dim_qk != config.head_dim_v
     is_mqa_gqa = config.num_heads != config.num_gqa_groups
     if qkv_layout is None:
@@ -371,9 +372,10 @@ def test_dpa_fa4_hdim256(dtype, model_configs, model):
     test_dot_product_attention(dtype, model_configs, model, False, None, False, False)
 
 
-# cuDNN FusedAttention D=256 bprop is supported on sm10x from cuDNN 9.23 (FE 1.24),
-# via the dedicated deterministic SDPA bprop kernel, which supports d_qk == d_v == 256 only,
-# vanilla type of softmax only, no dropout, no ALiBi, and (for non-causal masks) full-window attention only.
+# cuDNN FusedAttention D=256 bprop is supported on sm10x by the dedicated deterministic
+# SDPA bprop kernel. BSHD support starts with cuDNN FE 1.24 / BE 9.23; THD support starts
+# with cuDNN FE 1.26 / BE 9.30. The kernel supports d_qk == d_v == 256 only, vanilla softmax only,
+# no dropout, no ALiBi, and (for non-causal masks) full-window attention only.
 model_configs_fused_hdim256 = {
     # test: ModelConfig(b, sq, hq, dqk)  -> head_dim_v defaults to head_dim_qk (256)
     "fused_hd256_no_mask": ModelConfig(2, 512, 16, 256),
@@ -389,7 +391,6 @@ model_configs_fused_hdim256 = {
 }
 
 
-@pytest.mark.skipif(get_cudnn_version() < (9, 23, 0), reason="cuDNN 9.23+ is required.")
 @pytest.mark.skipif(
     device_compute_capability not in ((10, 0), (10, 3)),
     reason="cuDNN FusedAttention head_dim=256 backward is Blackwell server (SM100/SM103) only.",
@@ -397,9 +398,30 @@ model_configs_fused_hdim256 = {
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_fused_hdim256])
 @pytest.mark.parametrize("model", model_configs_fused_hdim256.keys())
-def test_dpa_fused_attn_hdim256(dtype, model_configs, model):
+@pytest.mark.parametrize(
+    "qkv_layout",
+    [
+        pytest.param(
+            "bshd_bs2hd",
+            id="BSHD_KV_PACKED",
+            marks=pytest.mark.skipif(
+                get_cudnn_version() < (9, 23, 0),
+                reason="cuDNN 9.23+ is required for BSHD D=256 fused-attn backward.",
+            ),
+        ),
+        pytest.param(
+            "thd_t2hd",
+            id="THD_KV_PACKED",
+            marks=pytest.mark.skipif(
+                get_cudnn_version() < (9, 30, 0),
+                reason="cuDNN 9.30+ is required for THD D=256 fused-attn backward.",
+            ),
+        ),
+    ],
+)
+def test_dpa_fused_attn_hdim256(dtype, model_configs, model, qkv_layout):
     """Test DotProductAttention with cuDNN FusedAttention: head_dim=256 backward on Blackwell"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False)
+    test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, False, False)
 
 
 model_configs_fa4_mla = {
