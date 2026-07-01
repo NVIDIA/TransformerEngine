@@ -7,10 +7,6 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_RMSNORM_RMSNORM_BWD_KERNELS_CUH_
 #define TRANSFORMER_ENGINE_COMMON_RMSNORM_RMSNORM_BWD_KERNELS_CUH_
 
-#ifndef __CUDACC_RTC__
-#include <type_traits>
-#endif
-
 #ifdef __CUDACC_RTC__
 #include "kernel_params.h"
 #include "utils.cuh"
@@ -25,7 +21,7 @@ namespace normalization {
 struct maybe_not_t {};
 
 template <typename T, bool Enabled>
-using maybe_t = std::conditional_t<Enabled, T, maybe_not_t>;
+using maybe_t = transformer_engine::rtc_detail::conditional_t<Enabled, T, maybe_not_t>;
 
 // dx and add share storage; `add` is positioned at the tail of the `dx`
 // storage via leading padding. NeedsPadding is false when dx_t and add_t are
