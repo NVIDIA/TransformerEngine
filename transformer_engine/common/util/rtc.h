@@ -13,6 +13,7 @@
 
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -32,6 +33,12 @@ namespace rtc {
  * the environment.
  */
 bool is_enabled();
+
+/*! \brief Header made available to an NVRTC program */
+struct Header {
+  const char *content;
+  const char *include_name;
+};
 
 /*! \brief Wrapper class for a runtime-compiled CUDA kernel */
 class Kernel {
@@ -136,10 +143,13 @@ class KernelManager {
    * \param[in] code         Kernel source code
    * \param[in] filename     Path to associate with source code,
    *                         primarily for debugging
+   * \param[in] extra_options Additional NVRTC compiler options
+   * \param[in] extra_headers Additional in-memory headers available to the program
    */
   void compile(const std::string &kernel_label, const std::string &kernel_name,
                const std::string &code, const std::string &filename,
-               const std::vector<std::string> &extra_options = {});
+               const std::vector<std::string> &extra_options = {},
+               const std::vector<Header> &extra_headers = {});
 
   /*! \brief Whether CUDA kernel has been compiled for CUDA device
    *
@@ -167,6 +177,7 @@ class KernelManager {
               unsigned int shared_mem_bytes, cudaStream_t stream, ArgTs &&...args) {
     const int device_id = cuda::current_device();
     const auto key = get_kernel_cache_key(kernel_label, device_id);
+    std::shared_lock<std::shared_mutex> lock_guard_(lock_);
     NVTE_CHECK(kernel_cache_.count(key) > 0, "Attempted to launch RTC kernel before compilation");
     kernel_cache_.at(key).launch(device_id, grid_dim, block_dim, shared_mem_bytes, stream,
                                  std::forward<ArgTs>(args)...);
@@ -196,6 +207,7 @@ class KernelManager {
                           ArgTs &&...args) {
     const int device_id = cuda::current_device();
     const auto key = get_kernel_cache_key(kernel_label, device_id);
+    std::shared_lock<std::shared_mutex> lock_guard_(lock_);
     NVTE_CHECK(kernel_cache_.count(key) > 0, "Attempted to launch RTC kernel before compilation");
     kernel_cache_.at(key).launch_cooperative(device_id, grid_dim, block_dim, shared_mem_bytes,
                                              stream, std::forward<ArgTs>(args)...);
@@ -204,8 +216,8 @@ class KernelManager {
  private:
   /*! \brief Compiled kernels */
   std::unordered_map<std::string, Kernel> kernel_cache_;
-  /*! \brief Mutex for thread-safe compilation */
-  std::mutex lock_;
+  /*! \brief Mutex for thread-safe cache access */
+  mutable std::shared_mutex lock_;
 
   KernelManager() = default;
   ~KernelManager() = default;

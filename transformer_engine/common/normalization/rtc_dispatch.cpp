@@ -15,6 +15,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "../util/cuda_driver.h"
 #include "../util/rtc.h"
@@ -25,8 +26,14 @@
 // files (each is a couple of #include lines that pull in kernel_traits + the
 // matching kernel header); NVRTC then instantiates a specific
 // (Kernel_traits<W, I, O, C, …>) on demand via nvrtcAddNameExpression.
+#include "string_code_normalization_kernel_params_h.h"
+#include "string_code_normalization_kernel_traits_h.h"
+#include "string_code_normalization_layernorm_ln_bwd_kernels_cuh.h"
+#include "string_code_normalization_layernorm_ln_fwd_kernels_cuh.h"
 #include "string_code_normalization_layernorm_rtc_ln_bwd_kernel_cu.h"
 #include "string_code_normalization_layernorm_rtc_ln_fwd_kernel_cu.h"
+#include "string_code_normalization_rmsnorm_rmsnorm_bwd_kernels_cuh.h"
+#include "string_code_normalization_rmsnorm_rmsnorm_fwd_kernels_cuh.h"
 #include "string_code_normalization_rmsnorm_rtc_rmsnorm_bwd_kernel_cu.h"
 #include "string_code_normalization_rmsnorm_rtc_rmsnorm_fwd_kernel_cu.h"
 
@@ -35,6 +42,24 @@ namespace normalization {
 namespace rtc_norm {
 
 namespace {
+
+const std::vector<rtc::Header>& norm_headers() {
+  static const std::vector<rtc::Header> headers = {
+      {string_code_normalization_kernel_params_h, "kernel_params.h"},
+      {string_code_normalization_kernel_traits_h, "kernel_traits.h"},
+      {string_code_normalization_layernorm_ln_fwd_kernels_cuh, "ln_fwd_kernels.cuh"},
+      {string_code_normalization_layernorm_ln_bwd_kernels_cuh, "ln_bwd_kernels.cuh"},
+      {string_code_normalization_rmsnorm_rmsnorm_fwd_kernels_cuh, "rmsnorm_fwd_kernels.cuh"},
+      {string_code_normalization_rmsnorm_rmsnorm_bwd_kernels_cuh, "rmsnorm_bwd_kernels.cuh"},
+  };
+  return headers;
+}
+
+void compile_norm_kernel(rtc::KernelManager& manager, const std::string& label,
+                         const std::string& kernel_expr, const char* rtc_source,
+                         const char* filename) {
+  manager.compile(label, kernel_expr, rtc_source, filename, {}, norm_headers());
+}
 
 // Map our DType enum onto the C++ type names used inside the norm RTC sources.
 // Aliases come from normalization/common.h (`using bf16 = nv_bfloat16;` etc.).
@@ -153,7 +178,7 @@ void register_launcher(const std::string& label, const std::string& kernel_expr,
     }
     auto& mgr = rtc::KernelManager::instance();
     if (!mgr.is_compiled(label)) {
-      mgr.compile(label, kernel_expr, rtc_source, filename);
+      compile_norm_kernel(mgr, label, kernel_expr, rtc_source, filename);
     }
 
     if (configure_params) {
@@ -244,8 +269,9 @@ void register_ln_fwd_general(DType wt, DType it, DType ot, DType ct, int hidden,
     }
     auto& mgr = rtc::KernelManager::instance();
     if (!mgr.is_compiled(label)) {
-      mgr.compile(label, kernel_expr, string_code_normalization_layernorm_rtc_ln_fwd_kernel_cu,
-                  "ln_fwd_kernel.cu");
+      compile_norm_kernel(mgr, label, kernel_expr,
+                          string_code_normalization_layernorm_rtc_ln_fwd_kernel_cu,
+                          "ln_fwd_kernel.cu");
     }
     auto ceil_div = [](int x, int y) { return (x + y - 1) / y; };
     const int rows = launch_params.params.rows;
@@ -328,8 +354,9 @@ void register_rmsnorm_fwd_general(DType wt, DType it, DType ot, DType ct, int hi
     }
     auto& mgr = rtc::KernelManager::instance();
     if (!mgr.is_compiled(label)) {
-      mgr.compile(label, kernel_expr, string_code_normalization_rmsnorm_rtc_rmsnorm_fwd_kernel_cu,
-                  "rmsnorm_fwd_kernel.cu");
+      compile_norm_kernel(mgr, label, kernel_expr,
+                          string_code_normalization_rmsnorm_rtc_rmsnorm_fwd_kernel_cu,
+                          "rmsnorm_fwd_kernel.cu");
     }
     auto ceil_div = [](int x, int y) { return (x + y - 1) / y; };
     const int rows = launch_params.params.rows;
@@ -416,12 +443,14 @@ void register_ln_bwd_tuned(DType wt, DType it, DType ot, DType ct, int hidden, i
     }
     auto& mgr = rtc::KernelManager::instance();
     if (!mgr.is_compiled(main_label)) {
-      mgr.compile(main_label, main_kexpr, string_code_normalization_layernorm_rtc_ln_bwd_kernel_cu,
-                  "ln_bwd_kernel.cu");
+      compile_norm_kernel(mgr, main_label, main_kexpr,
+                          string_code_normalization_layernorm_rtc_ln_bwd_kernel_cu,
+                          "ln_bwd_kernel.cu");
     }
     if (!mgr.is_compiled(finalize_label)) {
-      mgr.compile(finalize_label, finalize_kexpr,
-                  string_code_normalization_layernorm_rtc_ln_bwd_kernel_cu, "ln_bwd_kernel.cu");
+      compile_norm_kernel(mgr, finalize_label, finalize_kexpr,
+                          string_code_normalization_layernorm_rtc_ln_bwd_kernel_cu,
+                          "ln_bwd_kernel.cu");
     }
     if (configure_params) {
       const int ctas_per_sm =
@@ -492,12 +521,14 @@ void register_ln_bwd_general(DType wt, DType it, DType ot, DType ct, int hidden,
     }
     auto& mgr = rtc::KernelManager::instance();
     if (!mgr.is_compiled(main_label)) {
-      mgr.compile(main_label, main_kexpr, string_code_normalization_layernorm_rtc_ln_bwd_kernel_cu,
-                  "ln_bwd_kernel.cu");
+      compile_norm_kernel(mgr, main_label, main_kexpr,
+                          string_code_normalization_layernorm_rtc_ln_bwd_kernel_cu,
+                          "ln_bwd_kernel.cu");
     }
     if (!mgr.is_compiled(finalize_label)) {
-      mgr.compile(finalize_label, finalize_kexpr,
-                  string_code_normalization_layernorm_rtc_ln_bwd_kernel_cu, "ln_bwd_kernel.cu");
+      compile_norm_kernel(mgr, finalize_label, finalize_kexpr,
+                          string_code_normalization_layernorm_rtc_ln_bwd_kernel_cu,
+                          "ln_bwd_kernel.cu");
     }
     auto ceil_div = [](int x, int y) { return (x + y - 1) / y; };
     const int rows = launch_params.params.rows;
@@ -583,14 +614,14 @@ void register_rmsnorm_bwd_tuned(DType wt, DType it, DType ot, DType ct, int hidd
     }
     auto& mgr = rtc::KernelManager::instance();
     if (!mgr.is_compiled(main_label)) {
-      mgr.compile(main_label, main_kexpr,
-                  string_code_normalization_rmsnorm_rtc_rmsnorm_bwd_kernel_cu,
-                  "rmsnorm_bwd_kernel.cu");
+      compile_norm_kernel(mgr, main_label, main_kexpr,
+                          string_code_normalization_rmsnorm_rtc_rmsnorm_bwd_kernel_cu,
+                          "rmsnorm_bwd_kernel.cu");
     }
     if (!mgr.is_compiled(finalize_label)) {
-      mgr.compile(finalize_label, finalize_kexpr,
-                  string_code_normalization_rmsnorm_rtc_rmsnorm_bwd_kernel_cu,
-                  "rmsnorm_bwd_kernel.cu");
+      compile_norm_kernel(mgr, finalize_label, finalize_kexpr,
+                          string_code_normalization_rmsnorm_rtc_rmsnorm_bwd_kernel_cu,
+                          "rmsnorm_bwd_kernel.cu");
     }
     if (configure_params) {
       const int ctas_per_sm =
@@ -662,14 +693,14 @@ void register_rmsnorm_bwd_general(DType wt, DType it, DType ot, DType ct, int hi
     }
     auto& mgr = rtc::KernelManager::instance();
     if (!mgr.is_compiled(main_label)) {
-      mgr.compile(main_label, main_kexpr,
-                  string_code_normalization_rmsnorm_rtc_rmsnorm_bwd_kernel_cu,
-                  "rmsnorm_bwd_kernel.cu");
+      compile_norm_kernel(mgr, main_label, main_kexpr,
+                          string_code_normalization_rmsnorm_rtc_rmsnorm_bwd_kernel_cu,
+                          "rmsnorm_bwd_kernel.cu");
     }
     if (!mgr.is_compiled(finalize_label)) {
-      mgr.compile(finalize_label, finalize_kexpr,
-                  string_code_normalization_rmsnorm_rtc_rmsnorm_bwd_kernel_cu,
-                  "rmsnorm_bwd_kernel.cu");
+      compile_norm_kernel(mgr, finalize_label, finalize_kexpr,
+                          string_code_normalization_rmsnorm_rtc_rmsnorm_bwd_kernel_cu,
+                          "rmsnorm_bwd_kernel.cu");
     }
     auto ceil_div = [](int x, int y) { return (x + y - 1) / y; };
     const int rows = launch_params.params.rows;
