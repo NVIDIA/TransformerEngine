@@ -3446,8 +3446,9 @@ class TestSequentialModules:
         quantization: Optional[str],
         device: torch.device = "cuda",
         split_alignment: int = 256,
+        activation: str = "scaled_swiglu",
     ) -> None:
-        """GroupedLinear + ScaledSwiGLU + GroupedLinear"""
+        """GroupedLinear + scaled activation + GroupedLinear"""
 
         # Split sizes
         split_sizes = [split_alignment * (i) for i in range(group_size)]
@@ -3457,13 +3458,20 @@ class TestSequentialModules:
         # Make input shape
         in_shape = (split_sizes.sum().item(), hidden_size)
         out_shape = in_shape
-        fc1_out_features = 2 * hidden_size
+        if activation == "scaled_swiglu":
+            fc1_out_features = 2 * hidden_size
+        elif activation == "scaled_srelu":
+            fc1_out_features = hidden_size
+        else:
+            raise ValueError(f"Unexpected grouped MLP activation ({activation})")
 
         # Skip invalid configurations
         with_quantization = quantization is not None
         maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         if with_quantization and dtype not in (torch.bfloat16, torch.float16):
             pytest.skip("Quantized group GEMM is only supported with BF16/FP16")
+        if activation == "scaled_srelu" and quantization == "nvfp4_rht" and bias:
+            pytest.skip("NVFP4 RHT SReLU grouped MLP coverage is limited to no-bias")
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
@@ -3546,8 +3554,13 @@ class TestSequentialModules:
             fc1_out = torch.nn.functional.linear(
                 x, fc1_ws_ref[group_idx], bias=fc1_bs_ref[group_idx]
             )
-            act_in1, act_in2 = fc1_out.chunk(2, dim=-1)
-            act_out = torch.nn.functional.silu(act_in1) * act_in2
+            if activation == "scaled_swiglu":
+                act_in1, act_in2 = fc1_out.chunk(2, dim=-1)
+                act_out = torch.nn.functional.silu(act_in1) * act_in2
+            elif activation == "scaled_srelu":
+                act_out = torch.nn.functional.relu(fc1_out).square()
+            else:
+                raise ValueError(f"Unexpected grouped MLP activation ({activation})")
             fc2_in = act_out * probs[group_idx].unsqueeze(-1)
             y = torch.nn.functional.linear(fc2_in, fc2_ws_ref[group_idx])
             if bias:
@@ -3576,7 +3589,13 @@ class TestSequentialModules:
                 dtype=dtype,
                 scale_bias=bias,
             )
-            module = te.ops.Sequential(fc1, te_ops.ScaledSwiGLU(), fc2)
+            if activation == "scaled_swiglu":
+                activation_op = te_ops.ScaledSwiGLU()
+            elif activation == "scaled_srelu":
+                activation_op = te_ops.ScaledSReLU()
+            else:
+                raise ValueError(f"Unexpected grouped MLP activation ({activation})")
+            module = te.ops.Sequential(fc1, activation_op, fc2)
 
         # Copy weights
         with torch.no_grad():
@@ -3595,7 +3614,11 @@ class TestSequentialModules:
         y_test.backward(dy_test)
 
         # Loose tols for sanity checking
-        tols = {"rtol": 0.125, "atol": 0.25}
+        tols = (
+            quantization_tols(quantization)
+            if quantization is not None
+            else {"rtol": 0.125, "atol": 0.25}
+        )
 
         # Check values
         assert_close(y_test, y_ref, **tols)
@@ -3607,6 +3630,21 @@ class TestSequentialModules:
             if bias:
                 assert_close_grads(getattr(fc2, f"bias{group_idx}"), fc2_bs_ref[group_idx], **tols)
                 assert_close_grads(getattr(fc1, f"bias{group_idx}"), fc1_bs_ref[group_idx], **tols)
+
+    def test_grouped_mlp_nvfp4_rht_srelu(
+        self,
+        *,
+        device: torch.device = "cuda",
+    ) -> None:
+        """GroupedLinear + ScaledSReLU + GroupedLinear with NVFP4 RHT amax."""
+
+        self.test_grouped_mlp(
+            bias=False,
+            dtype=torch.bfloat16,
+            quantization="nvfp4_rht",
+            device=device,
+            activation="scaled_srelu",
+        )
 
 
 class TestCustomOps:
