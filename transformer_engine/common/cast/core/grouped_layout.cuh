@@ -374,14 +374,22 @@ __device__ __forceinline__ bool job_has_work(const JobDescriptor &job) {
   return job.rows != 0 && job.cols != 0;
 }
 
+__device__ __forceinline__ void linear_block_id_to_reverse_y_cta_coords(
+    const size_t block_id, const size_t work_blocks_X, const size_t work_blocks_Y,
+    int32_t &ctaid_X, int32_t &ctaid_Y) {
+  ctaid_X = static_cast<int32_t>(block_id % work_blocks_X);
+  ctaid_Y = static_cast<int32_t>(work_blocks_Y - 1 - block_id / work_blocks_X);
+}
+
 __device__ __forceinline__ void advance_to_next_job(bool &job_finished, int32_t &ctaid_X,
                                                     int32_t &ctaid_Y, size_t &static_next_block_id,
                                                     const size_t static_block_stride,
                                                     const size_t total_work_blocks,
-                                                    const size_t work_blocks_X) {
+                                                    const size_t work_blocks_X,
+                                                    const size_t work_blocks_Y) {
   if (static_next_block_id < total_work_blocks) {
-    ctaid_X = static_cast<int32_t>(static_next_block_id % work_blocks_X);
-    ctaid_Y = static_cast<int32_t>(static_next_block_id / work_blocks_X);
+    linear_block_id_to_reverse_y_cta_coords(static_next_block_id, work_blocks_X, work_blocks_Y,
+                                            ctaid_X, ctaid_Y);
     static_next_block_id += static_block_stride;
   } else {
     job_finished = true;
