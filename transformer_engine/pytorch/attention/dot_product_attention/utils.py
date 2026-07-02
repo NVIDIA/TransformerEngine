@@ -629,6 +629,12 @@ def get_attention_backend(
                 if cudnn_version < (9, 21, 0):
                     logger.debug("Disabling FusedAttention for MXFP8 with cuDNN < 9.21.0")
                     use_fused_attention = False
+                elif cudnn_version in ((9, 23, 0), (9, 23, 1)):
+                    # 9.23.0/9.23.1: known bugs with MXFP8 SDPA
+                    logger.debug(
+                        "Disabling FusedAttention for MXFP8 with cuDNN 9.23.0/9.23.1"
+                    )
+                    use_fused_attention = False
                 elif qkv_format == "thd":
                     logger.debug("Disabling FusedAttention for MXFP8 with qkv_format = thd")
                     use_fused_attention = False
