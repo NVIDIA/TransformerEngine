@@ -7,15 +7,13 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_LAYER_NORM_LN_FWD_KERNELS_CUH_
 #define TRANSFORMER_ENGINE_COMMON_LAYER_NORM_LN_FWD_KERNELS_CUH_
 
-#ifndef __CUDACC_RTC__
-#include <cfloat>
-#include <cstdio>
-#endif
-
 #ifdef __CUDACC_RTC__
 #include "kernel_params.h"
 #include "utils.cuh"
 #else
+#include <cfloat>
+#include <cstdio>
+
 #include "../../utils.cuh"
 #include "../common.h"
 #endif
