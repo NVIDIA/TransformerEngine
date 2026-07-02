@@ -379,8 +379,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 4) group_block_scaled_2d_tma
   for (int w = 1; w < kNumWarps; ++w) {
     block_amax = fmaxf(block_amax, warp_amaxes[w]);
   }
-  const CType scale =
-      compute_scale_from_types<IType, OType>(block_amax, epsilon, pow_2_scales);
+  const CType scale = compute_scale_from_types<IType, OType>(block_amax, epsilon, pow_2_scales);
 
   // The 2D colwise per-expert scale offset requires a CTA-cooperative prefix
   // sum in the VARYING_FIRST_DIM case, so compute it across all threads before
@@ -476,8 +475,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
                                     const size_t num_tensors, const size_t common_first_dim_blocks,
                                     const size_t K, const size_t total_row_blocks,
                                     const size_t R_total, const float epsilon,
-                                    const bool pow_2_scales,
-                                    const float* __restrict__ noop_ptr) {
+                                    const bool pow_2_scales, const float* __restrict__ noop_ptr) {
 #if __CUDA_ARCH__ >= 900 && __CUDA_ARCH__ < 1000
   if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) return;
 
@@ -532,8 +530,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     CType amax = compute_row_amax<IType, CType, kVec>(in_vec[it]);
     amax = subwarp_reduce_max_broadcast<kThreadsPerRow>(amax);
 
-    const CType scale =
-        compute_scale_from_types<IType, OType>(amax, epsilon, pow_2_scales);
+    const CType scale = compute_scale_from_types<IType, OType>(amax, epsilon, pow_2_scales);
     const CType scale_inv = 1.f / scale;
     if (thr_col == 0 && r_global < R_total) {
       // Per-expert layout: (blocks_X, roundup(M_t, 4)). Compute expert base
@@ -658,8 +655,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) group_block_scaled_1d_tma_ke
       CType amax = compute_row_amax<IType, CType, kVec>(in_vec);
       amax = subwarp_reduce_max_broadcast<kThreadsPerRowRW>(amax);
 
-      const CType scale =
-          compute_scale_from_types<IType, OType>(amax, epsilon, pow_2_scales);
+      const CType scale = compute_scale_from_types<IType, OType>(amax, epsilon, pow_2_scales);
       const CType scale_inv = 1.f / scale;
 
       const size_t r_global = global_row_base + row_local;
@@ -735,8 +731,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) group_block_scaled_1d_tma_ke
       }
       amax = subwarp_reduce_max_broadcast<kThreadsPerColCW>(amax);
 
-      const CType scale =
-          compute_scale_from_types<IType, OType>(amax, epsilon, pow_2_scales);
+      const CType scale = compute_scale_from_types<IType, OType>(amax, epsilon, pow_2_scales);
       const CType scale_inv = 1.f / scale;
 
       const size_t c_global = global_col_base + col_local;
