@@ -1444,7 +1444,9 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             if output_buffer is not None:
                 fc2_out = output_buffer
             else:
-                fc2_out = fc2_kernel_out["d_tensor"].permute(2, 0, 1).view(fc2_out_shape).contiguous()
+                fc2_out = (
+                    fc2_kernel_out["d_tensor"].permute(2, 0, 1).view(fc2_out_shape).contiguous()
+                )
 
         # Save state for backward pass
         if requires_grad:
