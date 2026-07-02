@@ -6,16 +6,12 @@
 
 from __future__ import annotations
 from collections.abc import Iterable, Iterator
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 
 from transformer_engine.pytorch.ops.op import FusibleOperation
 from transformer_engine.pytorch.ops.fuser import OperationFuser
-from transformer_engine.pytorch.ops._common import (
-    OUTPUT_BUFFER_KEY,
-    GRAD_INPUT_BUFFER_KEY,
-)
 
 
 class Sequential(torch.nn.Module):
@@ -172,77 +168,94 @@ class Sequential(torch.nn.Module):
         self,
         input: torch.Tensor,  # pylint: disable=redefined-builtin
         *extra_inputs: torch.Tensor,
-        output: Optional[torch.Tensor] = None,
-        grad_input: Optional[torch.Tensor] = None,
+        op_kwargs: Optional[dict[torch.nn.Module | int, dict[str, Any]]] = None,
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         """Forward pass.
 
-        output : optional preallocated buffer for the container's forward
-            output. Routed to the last op, which writes it in place; the
-            returned tensor aliases it. The last op must support it
-            (``GroupedLinear`` does).
-        grad_input : optional preallocated buffer for the gradient w.r.t.
-            the container's input. Routed to the first op's backward.
-
-        Only the boundary ops can receive a buffer; interior ops cannot be
-        targeted, as their outputs are internal activations.
+        op_kwargs : optional mapping from a contained op, keyed by module
+            or index, to extra keyword arguments forwarded to that op.
+            Only fusible operations can be targeted, for example to pass
+            preallocated output or grad input buffers to a grouped linear
+            or grouped MLP.
         """
 
         # Create module groups if needed
         if self._module_groups is None:
             self._module_groups = self._make_module_groups(self._modules.values())
 
-        first_group = self._module_groups[0] if self._module_groups else None
-        last_group = self._module_groups[-1] if self._module_groups else None
+        # Route op kwargs to each module group's basic ops
+        group_op_kwargs = self._resolve_op_kwargs(op_kwargs)
 
         # Forward pass for each module group
         x = input
         extra_outputs: list[torch.Tensor] = []
-        for module_group in self._module_groups:
+        for group_idx, module_group in enumerate(self._module_groups):
             if isinstance(module_group, OperationFuser):
                 xs, extra_inputs = (
                     (x,) + extra_inputs[: module_group.num_extra_inputs],
                     extra_inputs[module_group.num_extra_inputs :],
                 )
-                basic_op_kwargs = self._make_buffer_op_kwargs(
-                    module_group,
-                    output=output if module_group is last_group else None,
-                    grad_input=grad_input if module_group is first_group else None,
-                )
-                xs = module_group(*xs, basic_op_kwargs=basic_op_kwargs)
+                xs = module_group(*xs, basic_op_kwargs=group_op_kwargs[group_idx])
                 if isinstance(xs, tuple):
                     x, ys = xs[0], xs[1:]
                     extra_outputs.extend(ys)
                 else:
                     x = xs
             else:
-                if (module_group is last_group and output is not None) or (
-                    module_group is first_group and grad_input is not None
-                ):
-                    raise ValueError(
-                        "Caller-provided output/grad_input buffer requires the "
-                        "boundary op to be a fusible operation."
-                    )
                 x = module_group(x)
 
         if extra_outputs:
             return (x,) + tuple(extra_outputs)
         return x
 
-    @staticmethod
-    def _make_buffer_op_kwargs(
-        module_group: OperationFuser,
-        *,
-        output: Optional[torch.Tensor],
-        grad_input: Optional[torch.Tensor],
-    ) -> Optional[list[dict]]:
-        """Route caller buffers to the group's last (output) / first (grad_input) op."""
-        if output is None and grad_input is None:
-            return None
-        basic_ops = module_group._basic_ops  # pylint: disable=protected-access
-        kwargs: list[dict] = [{} for _ in basic_ops]
-        if grad_input is not None:
-            kwargs[0][GRAD_INPUT_BUFFER_KEY] = grad_input
-        if output is not None:
-            kwargs[-1][OUTPUT_BUFFER_KEY] = output
-        return kwargs
+    def _resolve_op_kwargs(
+        self,
+        op_kwargs: Optional[dict[torch.nn.Module | int, dict[str, Any]]],
+    ) -> list[Optional[list[dict[str, Any]]]]:
+        """Map per-op kwargs onto each module group's basic-op kwargs list."""
+        group_kwargs: list[Optional[list[dict[str, Any]]]] = [None] * len(self._module_groups)
+        if not op_kwargs:
+            return group_kwargs
+
+        # Normalize keys to module objects
+        modules = list(self._modules.values())
+        resolved: dict[int, dict[str, Any]] = {}
+        for key, kwargs in op_kwargs.items():
+            module = modules[key] if isinstance(key, int) else key
+            resolved[id(module)] = kwargs
+
+        # Walk modules alongside groups to locate each op's basic-op slot
+        group_idx = -1
+        in_fuser = False
+        basic_offset = 0
+        for module in modules:
+            if isinstance(module, FusibleOperation):
+                if not in_fuser:
+                    group_idx += 1
+                    in_fuser = True
+                    basic_offset = 0
+                num_basic_ops = len(module.basic_ops) if module.is_fused_op else 1
+                if id(module) in resolved:
+                    if num_basic_ops != 1:
+                        raise ValueError(
+                            "op_kwargs is not supported for a fused operation "
+                            "spanning multiple basic operations"
+                        )
+                    group = self._module_groups[group_idx]
+                    if group_kwargs[group_idx] is None:
+                        # pylint: disable-next=protected-access
+                        group_kwargs[group_idx] = [{} for _ in group._basic_ops]
+                    group_kwargs[group_idx][basic_offset] = resolved.pop(id(module))
+                basic_offset += num_basic_ops
+            else:
+                group_idx += 1
+                in_fuser = False
+                if id(module) in resolved:
+                    raise ValueError(
+                        "op_kwargs can only target fusible operations, "
+                        f"but got kwargs for {type(module).__name__}"
+                    )
+
+        if resolved:
+            raise ValueError("op_kwargs contains keys that are not in this Sequential")
+        return group_kwargs

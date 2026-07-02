@@ -19,6 +19,10 @@ from transformer_engine.pytorch.ops.fused.grouped_mlp import (
     _cudnn_frontend_supports_grouped_gemm_srelu,
     _cudnn_frontend_version_supported,
 )
+from transformer_engine.pytorch.ops._common import (
+    OUTPUT_BUFFER_KEY,
+    GRAD_INPUT_BUFFER_KEY,
+)
 from transformer_engine.pytorch import (
     QuantizedTensor,
     Float8CurrentScalingQuantizer,
@@ -1379,8 +1383,13 @@ class TestGroupedMLPFusedOp:
         def run(module, *, output=None, grad_input=None):
             x = x_base.detach().clone().requires_grad_(True)
             probs = probs_base.detach().clone().requires_grad_(True)
+            op_kwargs = {}
+            if grad_input is not None:
+                op_kwargs[module[0]] = {GRAD_INPUT_BUFFER_KEY: grad_input}
+            if output is not None:
+                op_kwargs[module[2]] = {OUTPUT_BUFFER_KEY: output}
             with te.autocast(enabled=True, recipe=recipe):
-                y = module(x, split_sizes, probs, split_sizes, output=output, grad_input=grad_input)
+                y = module(x, split_sizes, probs, split_sizes, op_kwargs=op_kwargs or None)
             y.backward(dy_base)
             return y, x.grad
 

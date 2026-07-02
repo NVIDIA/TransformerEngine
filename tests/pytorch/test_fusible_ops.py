@@ -19,6 +19,10 @@ import torch
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.ops as te_ops
+from transformer_engine.pytorch.ops._common import (
+    OUTPUT_BUFFER_KEY,
+    GRAD_INPUT_BUFFER_KEY,
+)
 from transformer_engine.pytorch._extra_state import UNSAFE_PICKLE_EXTRA_STATE_ENV
 
 from transformer_engine.pytorch.ops.fused import (
@@ -2244,7 +2248,15 @@ class TestBasicOps:
         out_buf = torch.full((num_tokens, out_features), sentinel, dtype=dtype, device=device)
         dgrad_buf = torch.full((num_tokens, in_features), sentinel, dtype=dtype, device=device)
         x_test = x.detach().clone().requires_grad_(True)
-        y = model(x_test, split_sizes, split_sizes, output=out_buf, grad_input=dgrad_buf)
+        y = model(
+            x_test,
+            split_sizes,
+            split_sizes,
+            op_kwargs={
+                model[0]: {GRAD_INPUT_BUFFER_KEY: dgrad_buf},
+                model[1]: {OUTPUT_BUFFER_KEY: out_buf},
+            },
+        )
 
         # Forward output aliases the last op's output buffer with no copy.
         assert y.data_ptr() == out_buf.data_ptr()
@@ -2260,7 +2272,13 @@ class TestBasicOps:
         # A buffer whose shape does not match the output is rejected.
         bad = torch.empty(num_tokens + 1, out_features, dtype=dtype, device=device)
         with pytest.raises(ValueError):
-            build()(x.detach(), split_sizes, split_sizes, output=bad)
+            model_bad = build()
+            model_bad(
+                x.detach(),
+                split_sizes,
+                split_sizes,
+                op_kwargs={model_bad[1]: {OUTPUT_BUFFER_KEY: bad}},
+            )
 
     @pytest.mark.parametrize("in_shape", ((71, 192), (5, 7, 128)))
     @pytest.mark.parametrize("input_requires_grad", (False, True))
