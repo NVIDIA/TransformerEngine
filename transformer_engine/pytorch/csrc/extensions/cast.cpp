@@ -500,6 +500,15 @@ py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
 
   auto quantizer_cpp = convert_quantizer(quantizer);
 
+  // MXFP8 carries no quantization knobs; FP8 block-scaling reads scale constraints
+  // off the quantizer, matching the forward group_quantize dispatch.
+  QuantizationConfigWrapper quant_config_cpp;
+  if (detail::IsFloat8BlockwiseQuantizers(quantizer.ptr())) {
+    auto *fp8_block_quantizer_cpp = static_cast<Float8BlockQuantizer *>(quantizer_cpp.get());
+    quant_config_cpp.set_force_pow_2_scales(fp8_block_quantizer_cpp->force_pow_2_scales);
+    quant_config_cpp.set_amax_epsilon(fp8_block_quantizer_cpp->amax_epsilon);
+  }
+
   auto grouped_input_tensor = GroupedTensorWrapper(num_tensors, logical_shape);
   grouped_input_tensor.set_rowwise_data(tensor.data_ptr(),
                                         GetTransformerEngineDType(tensor.scalar_type()),
@@ -530,7 +539,8 @@ py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
   auto stream = at::cuda::getCurrentCUDAStream();
   NVTE_SCOPED_GIL_RELEASE({
     nvte_group_quantize_dbias(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(),
-                              grouped_dbias.data(), workspace_nvte.data(), stream);
+                              grouped_dbias.data(), workspace_nvte.data(), quant_config_cpp,
+                              stream);
   });
   if (workspace_nvte.ndim() > 0 && workspace_nvte.numel() > 0) {
     at::Tensor workspace_torch = allocateSpace(workspace_nvte.shape(), workspace_nvte.dtype());
@@ -539,7 +549,8 @@ py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
   }
   NVTE_SCOPED_GIL_RELEASE({
     nvte_group_quantize_dbias(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(),
-                              grouped_dbias.data(), workspace_nvte.data(), stream);
+                              grouped_dbias.data(), workspace_nvte.data(), quant_config_cpp,
+                              stream);
   });
   return py::make_tuple(py::reinterpret_borrow<py::object>(grouped_output_py),
                         py::cast(std::move(dbias_torch)));

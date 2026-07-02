@@ -284,7 +284,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 4) group_block_scaled_2d_tma
     CType* __restrict__ scale_inv_t_base, const int64_t* __restrict__ tensor_offsets_ptr,
     const size_t num_tensors, const size_t common_first_dim_blocks, const size_t K,
     const size_t total_row_blocks, const size_t blocks_X, const size_t scale_stride_y,
-    const float epsilon, const float* __restrict__ noop_ptr, float* __restrict__ dbias_workspace) {
+    const float epsilon, const bool pow_2_scales, const float* __restrict__ noop_ptr,
+    float* __restrict__ dbias_workspace) {
 #if __CUDA_ARCH__ >= 900 && __CUDA_ARCH__ < 1000
   if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) return;
 
@@ -379,7 +380,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 4) group_block_scaled_2d_tma
     block_amax = fmaxf(block_amax, warp_amaxes[w]);
   }
   const CType scale =
-      compute_scale_from_types<IType, OType>(block_amax, epsilon, /*pow_2_scaling=*/false);
+      compute_scale_from_types<IType, OType>(block_amax, epsilon, pow_2_scales);
 
   // The 2D colwise per-expert scale offset requires a CTA-cooperative prefix
   // sum in the VARYING_FIRST_DIM case, so compute it across all threads before
@@ -475,6 +476,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
                                     const size_t num_tensors, const size_t common_first_dim_blocks,
                                     const size_t K, const size_t total_row_blocks,
                                     const size_t R_total, const float epsilon,
+                                    const bool pow_2_scales,
                                     const float* __restrict__ noop_ptr) {
 #if __CUDA_ARCH__ >= 900 && __CUDA_ARCH__ < 1000
   if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) return;
@@ -531,7 +533,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     amax = subwarp_reduce_max_broadcast<kThreadsPerRow>(amax);
 
     const CType scale =
-        compute_scale_from_types<IType, OType>(amax, epsilon, /*pow_2_scaling=*/false);
+        compute_scale_from_types<IType, OType>(amax, epsilon, pow_2_scales);
     const CType scale_inv = 1.f / scale;
     if (thr_col == 0 && r_global < R_total) {
       // Per-expert layout: (blocks_X, roundup(M_t, 4)). Compute expert base
@@ -572,8 +574,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock) group_block_scaled_1d_tma_ke
     CType* __restrict__ scale_inv_t_base, const int64_t* __restrict__ tensor_offsets_ptr,
     const size_t num_tensors, const size_t common_first_dim_blocks, const size_t K,
     const size_t total_row_blocks, const size_t blocks_X, const size_t scale_t_stride_aligned_K,
-    const size_t R_total, const float epsilon, const float* __restrict__ noop_ptr,
-    float* __restrict__ dbias_workspace) {
+    const size_t R_total, const float epsilon, const bool pow_2_scales,
+    const float* __restrict__ noop_ptr, float* __restrict__ dbias_workspace) {
 #if __CUDA_ARCH__ >= 900 && __CUDA_ARCH__ < 1000
   if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) return;
 
@@ -657,7 +659,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) group_block_scaled_1d_tma_ke
       amax = subwarp_reduce_max_broadcast<kThreadsPerRowRW>(amax);
 
       const CType scale =
-          compute_scale_from_types<IType, OType>(amax, epsilon, /*pow_2_scaling=*/false);
+          compute_scale_from_types<IType, OType>(amax, epsilon, pow_2_scales);
       const CType scale_inv = 1.f / scale;
 
       const size_t r_global = global_row_base + row_local;
@@ -734,7 +736,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) group_block_scaled_1d_tma_ke
       amax = subwarp_reduce_max_broadcast<kThreadsPerColCW>(amax);
 
       const CType scale =
-          compute_scale_from_types<IType, OType>(amax, epsilon, /*pow_2_scaling=*/false);
+          compute_scale_from_types<IType, OType>(amax, epsilon, pow_2_scales);
       const CType scale_inv = 1.f / scale;
 
       const size_t c_global = global_col_base + col_local;
@@ -814,7 +816,8 @@ inline GroupedBlockwiseLaunchInfo prepare_grouped_blockwise_launch(const Grouped
 // reports the [total_row_blocks, K] fp32 shape and returns without launching.
 inline void group_quantize_blockwise_2d(const GroupedTensor* input, GroupedTensor* output,
                                         const Tensor* noop, const float epsilon,
-                                        cudaStream_t stream, GroupedTensor* dbias = nullptr,
+                                        const bool pow_2_scales, cudaStream_t stream,
+                                        GroupedTensor* dbias = nullptr,
                                         Tensor* workspace = nullptr) {
   const int sm = transformer_engine::cuda::sm_arch();
   NVTE_CHECK(sm >= 90 && sm < 100,
@@ -883,7 +886,7 @@ inline void group_quantize_blockwise_2d(const GroupedTensor* input, GroupedTenso
                                      : nullptr,
                             info.tensor_offsets_d, info.num_tensors, info.common_first_dim_blocks,
                             info.K, info.total_row_blocks, info.blocks_X, scale_stride_y, epsilon,
-                            noop_ptr, dbias_workspace);
+                            pow_2_scales, noop_ptr, dbias_workspace);
                         if (dbias_workspace != nullptr) {
                           const ShapeRepresentation shape_rep =
                               info.same_both_dims ? ShapeRepresentation::SAME_BOTH_DIMS
@@ -907,7 +910,8 @@ inline void group_quantize_blockwise_2d(const GroupedTensor* input, GroupedTenso
 // per-tile column partial can be computed.
 inline void group_quantize_blockwise_1d(const GroupedTensor* input, GroupedTensor* output,
                                         const Tensor* noop, const float epsilon,
-                                        cudaStream_t stream, GroupedTensor* dbias = nullptr,
+                                        const bool pow_2_scales, cudaStream_t stream,
+                                        GroupedTensor* dbias = nullptr,
                                         Tensor* workspace = nullptr) {
   const int sm = transformer_engine::cuda::sm_arch();
   NVTE_CHECK(sm >= 90 && sm < 100,
@@ -967,7 +971,7 @@ inline void group_quantize_blockwise_1d(const GroupedTensor* input, GroupedTenso
                                   reinterpret_cast<CType*>(output->scale_inv.dptr),
                                   info.tensor_offsets_d, info.num_tensors,
                                   info.common_first_dim_blocks, info.K, info.total_row_blocks,
-                                  info.R_total, epsilon, noop_ptr);
+                                  info.R_total, epsilon, pow_2_scales, noop_ptr);
                         }
                       } else if constexpr (kRowwise || kColwise) {
                         // CW-only, BOTH, or RW-only WITH dbias: smem-cached TMA kernel.
@@ -998,7 +1002,7 @@ inline void group_quantize_blockwise_1d(const GroupedTensor* input, GroupedTenso
                                      : nullptr,
                             info.tensor_offsets_d, info.num_tensors, info.common_first_dim_blocks,
                             info.K, info.total_row_blocks, info.blocks_X, scale_t_stride_aligned_K,
-                            info.R_total, epsilon, noop_ptr, dbias_workspace);
+                            info.R_total, epsilon, pow_2_scales, noop_ptr, dbias_workspace);
                         if (dbias_workspace != nullptr) {
                           const ShapeRepresentation shape_rep =
                               info.same_both_dims ? ShapeRepresentation::SAME_BOTH_DIMS
