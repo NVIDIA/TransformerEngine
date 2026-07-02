@@ -18,9 +18,8 @@ from ..quantized_tensor import QuantizedTensorStorage
 from ..utils import canonicalize_dtype
 
 
-# Keys used to pass caller-provided I/O buffers through ``basic_op_kwargs``.
-# ``output`` targets an op's forward output, ``grad_input`` its backward
-# gradient w.r.t. input. See ``Sequential.forward``.
+# Keys for passing caller-provided output and grad-input buffers through
+# basic_op_kwargs. See Sequential.forward.
 OUTPUT_BUFFER_KEY = "output"
 GRAD_INPUT_BUFFER_KEY = "grad_input"
 

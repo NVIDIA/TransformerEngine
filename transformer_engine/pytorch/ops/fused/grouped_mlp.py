@@ -766,9 +766,9 @@ def fuse_grouped_mlp_ops(
 class _GroupedMLP_CuTeGEMMBase(FusedOperation):
     """Joint fused op for block-scaled GroupedLinear + activation + GroupedLinear.
 
-    MXFP8 uses CuTe DSL grouped-GEMM kernels via the cuDNN front-end. Caller
-    buffers (``output``, ``grad_input``) receive their result directly, except the
-    MXFP8 dgrad kernel, which has no output argument, thus copies into ``grad_input``.
+    MXFP8 uses CuTe DSL grouped-GEMM kernels via the cuDNN front-end. When
+    caller output/grad_input buffers are provided, the GEMMs write into them
+    directly.
 
     """
 
@@ -1297,7 +1297,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     tensor_offsets=fc2_x_tensor_offsets,
                 )
 
-            fc2_out_buf = torch.empty(fc2_out_shape, dtype=dtype, device=device)
+            fc2_out_buf = validate_or_alloc_output(output_buffer, fc2_out_shape, dtype, device)
             if (
                 num_groups == 1
                 and grouped_fc2_x.columnwise_data is not None
@@ -1325,9 +1325,9 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                         fc2_bias_packed.transpose(0, 1).contiguous().expand(in_shape[0], -1)
                     )
                     if fc2_scales is not None:
-                        fc2_out_buf = fc2_out_buf + token_bias * fc2_scales.view(-1, 1)
+                        fc2_out_buf += token_bias * fc2_scales.view(-1, 1)
                     else:
-                        fc2_out_buf = fc2_out_buf + token_bias
+                        fc2_out_buf += token_bias
             else:
                 fc2_out_grouped = GroupedTensorStorage(
                     shape=(in_shape[0], fc2_weight_shape[0]),
@@ -1430,20 +1430,21 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc2_quant_kwargs["b_dtype"] = torch.float8_e4m3fn
                 fc2_quant_kwargs["b_major"] = "k"
 
-            fc2_kernel_out = self.grouped_gemm_quant_kernel()(**fc2_quant_kwargs)
-            fc2_out = fc2_kernel_out["d_tensor"].permute(2, 0, 1).view(fc2_out_shape)
-            # The kernel output is non-contiguous and must be materialized. When a
-            # caller buffer is given, materialize into it directly (no extra copy).
-            if output_buffer is None:
-                fc2_out = fc2_out.contiguous()
+            if output_buffer is not None:
+                # Kernel writes directly into the caller buffer, so no copy.
+                output_buffer = validate_or_alloc_output(
+                    output_buffer, fc2_out_shape, dtype, device
+                )
+                fc2_quant_kwargs["d_tensor"] = output_buffer.as_strided(
+                    (in_shape[0], fc2_weight_shape[0], 1),
+                    (fc2_weight_shape[0], 1, in_shape[0] * fc2_weight_shape[0]),
+                )
 
-        # Route the forward output into the caller-provided buffer. This is free
-        # when the value above was materialized into it; otherwise it is copied.
-        if output_buffer is not None:
-            output_buffer = validate_or_alloc_output(output_buffer, fc2_out_shape, dtype, device)
-            if output_buffer.data_ptr() != fc2_out.data_ptr():
-                output_buffer.copy_(fc2_out)
-            fc2_out = output_buffer
+            fc2_kernel_out = self.grouped_gemm_quant_kernel()(**fc2_quant_kwargs)
+            if output_buffer is not None:
+                fc2_out = output_buffer
+            else:
+                fc2_out = fc2_kernel_out["d_tensor"].permute(2, 0, 1).view(fc2_out_shape).contiguous()
 
         # Save state for backward pass
         if requires_grad:
@@ -1975,7 +1976,6 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             in_shape = out_shape[:-1] + [fc1_weight_shape[1]]
 
             if use_nvfp4:
-                # GEMM writes straight into the caller buffer when provided.
                 grad_input = validate_or_alloc_output(grad_input_buffer, in_shape, dtype, device)
                 if num_groups == 1:
                     if fc1_op.single_grouped_weight:
@@ -2073,24 +2073,21 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     fc1_dgrad_kwargs["b_dtype"] = torch.float8_e4m3fn
                     fc1_dgrad_kwargs["b_major"] = "n"
 
-                fc1_dgrad_kernel_out = self.grouped_gemm_quant_kernel()(**fc1_dgrad_kwargs)
-                grad_input = fc1_dgrad_kernel_out["d_tensor"].view(in_shape)
-
-        # Route grad-input into the caller buffer. Only the MXFP8 dgrad kernel owns
-        # its output (no output argument), so it copies; any other path must have
-        # written the buffer in place.
-        if grad_input is not None and grad_input_buffer is not None:
-            grad_input_buffer = validate_or_alloc_output(
-                grad_input_buffer, grad_input.shape, dtype, device
-            )
-            if grad_input_buffer.data_ptr() != grad_input.data_ptr():
-                if isinstance(fc2_grad_output_quantizer, MXFP8Quantizer):
-                    grad_input_buffer.copy_(grad_input)
-                else:
-                    raise RuntimeError(
-                        "grad_input buffer was not written in place on the dgrad path."
+                if grad_input_buffer is not None:
+                    # Kernel writes directly into the caller buffer, so no copy.
+                    grad_input_buffer = validate_or_alloc_output(
+                        grad_input_buffer, in_shape, dtype, device
                     )
-            grad_input = grad_input_buffer
+                    fc1_dgrad_kwargs["d_tensor"] = grad_input_buffer.as_strided(
+                        (out_shape[0], fc1_weight_shape[1], 1),
+                        (fc1_weight_shape[1], 1, out_shape[0] * fc1_weight_shape[1]),
+                    )
+
+                fc1_dgrad_kernel_out = self.grouped_gemm_quant_kernel()(**fc1_dgrad_kwargs)
+                if grad_input_buffer is not None:
+                    grad_input = grad_input_buffer
+                else:
+                    grad_input = fc1_dgrad_kernel_out["d_tensor"].view(in_shape)
 
         # FC1 wgrad GEMM
         fc1_grad_params = _compute_grad_params(
