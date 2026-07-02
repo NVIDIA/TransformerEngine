@@ -1685,7 +1685,9 @@ class GroupedLinear(BasicOperation):
                     offsets=base_split_offsets,
                 )
             elif dbias_packed is None:
-                # BF16/FP16 path
+                # dbias was not fused into the grad-output quantization: either
+                # unquantized BF16/FP16 compute, or a quantized path where bgrad
+                # fusion did not apply (e.g. FP8 block scaling without a dgrad pass).
                 dbias_packed = compute_grouped_dbias(dy_2d, base_split_offsets, num_groups)
             if self.single_grouped_bias:
                 final_bias_grads = [dbias_packed.to(dtype=dtype)]

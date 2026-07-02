@@ -522,7 +522,10 @@ def general_grouped_gemm_for_grouped_tensor(
         return False
 
     if _is_fp8_blockwise(A) or _is_fp8_blockwise(B):
-        # FP8 block-scaling requires split accumulator
+        # The fused grouped FP8 block-scaling GEMM only supports split accumulation,
+        # so force it on and intentionally override any caller-supplied value. This
+        # matches the Float8BlockScaling recipe, which fixes use_split_accumulator=True
+        # for all of fprop/dgrad/wgrad, so no user-configurable setting is discarded.
         use_split_accumulator = True
 
     if is_discrete_out:
