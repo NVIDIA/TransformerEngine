@@ -460,7 +460,13 @@ class mHCProjectionOp(torch.autograd.Function):
 
     @staticmethod
     def forward(
-        ctx, x, phi, norm_weight=None, use_tf32=True, fused_grad_x_acc_buffer=None, use_split_k=False
+        ctx,
+        x,
+        phi,
+        norm_weight=None,
+        use_tf32=True,
+        fused_grad_x_acc_buffer=None,
+        use_split_k=False,
     ):
         """
         The forward pass of the fused projection operation. Computes H = x @ phi^T and the mean
@@ -1135,9 +1141,7 @@ class mHCExpandCombineOp(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(
-        ctx, f, bias, H_post, x, H_res, n, use_tf32=True, fused_grad_x_acc_buffer=None
-    ):
+    def forward(ctx, f, bias, H_post, x, H_res, n, use_tf32=True, fused_grad_x_acc_buffer=None):
         """
         The forward pass of the expand and combine operation. Expands the sub-layer output f back
         to n streams using H_post, and combines with the residual connections using H_res:
