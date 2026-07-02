@@ -1329,7 +1329,7 @@ class TestGroupedMLPFusedOp:
         device: torch.device = "cuda",
         group_size: int = 4,
         hidden_size: int = 256,
-        split_alignment: int = 128,
+        split_alignment: int = 256,
         glu_interleave_size: int = 32,
     ) -> None:
         """Caller-provided output/grad_input buffers on the fused MXFP8 grouped MLP."""
