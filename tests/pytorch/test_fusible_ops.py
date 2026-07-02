@@ -36,6 +36,7 @@ from transformer_engine.pytorch.ops.fused import (
 )
 from transformer_engine.pytorch import (
     QuantizedTensor,
+    Float8BlockQuantizer,
     Float8CurrentScalingQuantizer,
     Float8Quantizer,
     MXFP8Quantizer,
@@ -58,6 +59,9 @@ from utils import (
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
+fp8_block_scaling_available, reason_for_no_fp8_block_scaling = te.is_fp8_block_scaling_available(
+    return_reason=True
+)
 
 # Supported data types
 _dtypes: list[torch.dtype] = [torch.float32, torch.float16]
@@ -76,6 +80,11 @@ if mxfp8_available:
 if nvfp4_available:
     _quantization_list.append("nvfp4")
     _quantization_list.append("nvfp4_4over6")
+
+# GroupedLinear is currently the only basic op that supports FP8 block scaling.
+_grouped_linear_quantization_list: list[Optional[str]] = list(_quantization_list)
+if fp8_block_scaling_available:
+    _grouped_linear_quantization_list.append("fp8_block_scaling")
 
 
 @pytest.fixture(autouse=True, scope="function")
@@ -186,6 +195,18 @@ def make_reference_and_test_tensors(
         test = quantizer(test)
     elif quantization == "mxfp8":
         test = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)(test)
+    elif quantization == "fp8_block_scaling":
+        tensor_type = "input"
+        if quantizer_role is not None:
+            tensor_type = quantizer_role.tensor_type
+        # Match the Float8BlockScaling recipe defaults: 2D (128x128) blocks for
+        # weights, 1D (1x128) otherwise, with power-of-2 scales.
+        test = Float8BlockQuantizer(
+            fp8_dtype=te.DType.kFloat8E4M3,
+            rowwise=True,
+            columnwise=True,
+            block_scaling_dim=2 if tensor_type == "weight" else 1,
+        )(test)
     elif quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_rht"):
         tensor_type = "input"
         if quantizer_role is not None:
@@ -2067,7 +2088,7 @@ class TestBasicOps:
 
     @pytest.mark.parametrize("bias", (False, True))
     @pytest.mark.parametrize("dtype", _dtypes)
-    @pytest.mark.parametrize("quantization", _quantization_list)
+    @pytest.mark.parametrize("quantization", _grouped_linear_quantization_list)
     @pytest.mark.parametrize("quantized_compute", (False, True))
     @pytest.mark.parametrize("quantized_weight", (False, True))
     @pytest.mark.parametrize("input_requires_grad", (False, True))

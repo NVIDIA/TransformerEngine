@@ -13,6 +13,7 @@ from ..constants import TE_DType, DType
 from ..utils import get_sm_count, _empty_tensor
 
 from ..quantized_tensor import Quantizer
+from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from ..tensor.storage.grouped_tensor_storage import GroupedTensorStorage
 from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
@@ -473,6 +474,17 @@ def general_grouped_gemm_for_grouped_tensor(
         raise NotImplementedError("Row-scaled NVFP4 GroupedTensor GEMM is not supported yet.")
     if isinstance(out, GroupedTensorStorage) and out.row_scaled_nvfp4:
         raise NotImplementedError("Row-scaled NVFP4 GroupedTensor GEMM is not supported yet.")
+
+    def _is_fp8_blockwise(operand) -> bool:
+        if isinstance(operand, (list, tuple)):
+            return any(isinstance(t, Float8BlockwiseQTensorStorage) for t in operand)
+        if isinstance(operand, GroupedTensorStorage):
+            return isinstance(operand.quantizer, Float8BlockQuantizer)
+        return False
+
+    if _is_fp8_blockwise(A) or _is_fp8_blockwise(B):
+        # FP8 block-scaling requires split accumulator
+        use_split_accumulator = True
 
     if is_discrete_out:
         # wgrad case.

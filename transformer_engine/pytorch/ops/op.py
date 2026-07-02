@@ -183,6 +183,9 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
     num_extra_inputs: int = 0
     # Number of extra tensor outputs
     num_extra_outputs: int = 0
+    # Whether this operation supports the FP8 block-scaling recipe. Most basic
+    # ops have not been audited for it, so they opt in explicitly.
+    supports_float8_block_scaling: bool = False
 
     def __init__(self) -> None:
         super().__init__()
@@ -275,9 +278,9 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                 if num_quantizers == 0:
                     continue
 
-                if recipe.float8_block_scaling():
+                if recipe.float8_block_scaling() and not self.supports_float8_block_scaling:
                     raise NotImplementedError(
-                        "Fusible operations do not support FP8 block scaling recipe"
+                        f"{self.__class__.__name__} does not support FP8 block scaling recipe"
                     )
 
                 # Construct quantization recipe state

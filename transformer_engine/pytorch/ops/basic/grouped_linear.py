@@ -27,6 +27,7 @@ from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload, star
 from ...quantization import FP8GlobalStateManager, QuantizerRole, Recipe
 from ...quantized_tensor import QuantizedTensorStorage
 from ...tensor import (
+    Float8BlockQuantizer,
     Float8CurrentScalingQuantizer,
     MXFP8Quantizer,
     MXFP8Tensor,
@@ -123,6 +124,9 @@ class GroupedLinear(BasicOperation):
 
     # Operation expects input split sizes (and optionally scales tensor)
     num_extra_inputs: int = 1
+    # Grouped FP8 block-scaling quantize kernels and grouped GEMM support exist
+    # for this op (Hopper-only fused path; legacy flow elsewhere).
+    supports_float8_block_scaling: bool = True
 
     def __init__(
         self,
@@ -785,9 +789,11 @@ class GroupedLinear(BasicOperation):
         * FP8 per-tensor current scaling is backed by grouped current-scaling quantization
           (``tex.group_quantize``) and cuBLASLt grouped GEMM with per-batch scalar FP8 scaling,
           which are supported on Hopper (CC 9.0) and Blackwell (CC 10.x and 11.0).
-          Every other quantization recipe (fp8 delayed scaling, fp8 block scaling, ...)
-          falls back to the legacy flow because the corresponding grouped quantization kernels are
-          missing.
+        * FP8 block scaling runs the graph-safe flow on Hopper (CC 9.0) only, including
+          power-of-2 scales. On other architectures it falls back to the split-quantize
+          flow (emulated via MXFP8 GEMM on Blackwell).
+          Every other quantization recipe (fp8 delayed scaling, ...) falls back to the
+          legacy flow because the corresponding grouped quantization kernels are missing.
         * Unquantized compute supports BF16/FP16 on Hopper (CC 9.0) and Blackwell (CC 10.x and 11.0)
           -- FP32 is excluded because the cuBLASLt grouped GEMM doesn't support it.
         * Input/weight/grad_output quantizers are assumed to be of the same type, otherwise it
@@ -806,6 +812,13 @@ class GroupedLinear(BasicOperation):
                 ):
                     return False
                 return True
+            if all(isinstance(q, Float8BlockQuantizer) for q in input_quantizers):
+                # Grouped FP8 block-scaling quantize kernels and cuBLASLt grouped GEMM
+                # scale modes are Hopper-only. The graph-safe flow is default-on here
+                # (no env-var opt-in like the module layer), so on other architectures
+                # fall back to the split-quantize flow like the other unsupported
+                # recipe/arch combinations (on Blackwell it emulates via MXFP8 GEMM).
+                return get_device_compute_capability() < (10, 0)
             # MXFP8 and NVFP4 grouped quantization kernels require Blackwell.
             if not (10, 0) <= get_device_compute_capability() <= (11, 0):
                 return False
@@ -1632,11 +1645,12 @@ class GroupedLinear(BasicOperation):
             )
             grad_output_quantizer.optimize_for_gemm = True
 
-            if (
-                has_bias
-                and not self._scale_bias
-                and isinstance(grad_output_quantizer, MXFP8Quantizer)
-            ):
+            # The grouped FP8 block-scaling bgrad kernel computes dbias in the rowwise
+            # pass, so the fusion needs rowwise output (i.e. dgrad required).
+            fuse_bgrad = isinstance(grad_output_quantizer, MXFP8Quantizer) or (
+                isinstance(grad_output_quantizer, Float8BlockQuantizer) and ctx.input_requires_grad
+            )
+            if has_bias and not self._scale_bias and fuse_bgrad:
                 grouped_dy, dbias_packed = tex.bgrad_group_quantize(
                     dy_2d, grad_output_quantizer, num_groups, split_sizes
                 )
