@@ -225,6 +225,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("comm_overlap") = nullptr, py::arg("comm_type") = std::nullopt,
         py::arg("extra_output") = std::nullopt, py::arg("bulk_overlap") = false,
         py::arg("alpha") = 1.0f, py::arg("beta") = std::nullopt);
+  m.def("strided_batched_gemm", transformer_engine::pytorch::strided_batched_gemm,
+        "Compute experimental strided batched GEMM", py::arg("A"), py::arg("transA"), py::arg("B"),
+        py::arg("transB"), py::arg("D"), py::arg("workspace"), py::arg("workspace_size"),
+        py::arg("m"), py::arg("n"), py::arg("k"), py::arg("batch_count"), py::arg("lda"),
+        py::arg("stridea"), py::arg("ldb"), py::arg("strideb"), py::arg("ldd"), py::arg("strided"),
+        py::arg("accumulate"), py::arg("use_split_accumulator"), py::arg("math_sm_count"),
+        py::arg("alpha") = 1.0f, py::arg("beta") = std::nullopt);
   /* GLU (sigmoid gate) */
   m.def("glu", transformer_engine::pytorch::glu, "GLU activation", py::arg("input"),
         py::arg("quantizer"));
