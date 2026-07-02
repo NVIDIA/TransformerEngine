@@ -109,9 +109,9 @@ def to_float8_CS(
         quantizer.set_usage(rowwise=True, columnwise=False)
     return quantizer(tensor)
 
+
 def make_quantizer(quantization: str, device: torch.device = "cuda"):
-    """Construct a quantizer for the given quantization scheme.
-    """
+    """Construct a quantizer for the given quantization scheme."""
     if quantization in ("fp8", "fp8_delayed_scaling"):
         return Float8Quantizer(
             scale=torch.ones(1, dtype=torch.float32, device=device).squeeze(),
@@ -826,8 +826,7 @@ class TestQuantizedTensor:
         dtype: torch.dtype = torch.bfloat16,
         device: torch.device = "cuda",
     ) -> None:
-        """Autograd must survive a quantize -> dequantize round trip.
-        """
+        """Autograd must survive a quantize -> dequantize round trip."""
 
         quantizer = make_quantizer(quantization, device=device)
         x = torch.randn(list(shape), dtype=dtype, device=device, requires_grad=True)
