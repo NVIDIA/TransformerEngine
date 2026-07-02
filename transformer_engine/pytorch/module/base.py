@@ -319,7 +319,7 @@ def initialize_ub(
         "fc2_wgrad",
     ]
     layers_reduce_scatter_overlap = ["proj_fprop", "fc2_fprop", "qkv_wgrad", "fc1_wgrad"]
-    dgrad_reduce_scatter_overlap = ["qkv_dgrad", "fc1_dgrad"]
+    layers_dgrad_ag_and_rs = ["qkv_dgrad", "fc1_dgrad"]
 
     # Default overlap methods for layers
     methods = {
@@ -490,7 +490,7 @@ def initialize_ub(
 
     for quantization_mode, user_ub_cfg in zip(quantization_modes, ub_cfgs):
         if user_ub_cfg is not None:
-            for name in dgrad_reduce_scatter_overlap:
+            for name in layers_dgrad_ag_and_rs:
                 if (
                     name in user_ub_cfg
                     and "method" in user_ub_cfg[name]
@@ -523,7 +523,7 @@ def initialize_ub(
             methods["external"] = []
             external_gemm_to_overlap.clear()
 
-            for name in dgrad_reduce_scatter_overlap:
+            for name in layers_dgrad_ag_and_rs:
                 wgrad_name = name.replace("dgrad", "wgrad")
                 if name not in layers_reduce_scatter_overlap:
                     layers_reduce_scatter_overlap.append(name)
