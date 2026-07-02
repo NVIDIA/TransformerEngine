@@ -20,6 +20,7 @@ from build_tools.te_version import te_version
 from build_tools.utils import (
     cuda_archs,
     cuda_version,
+    cudnn_frontend_include_path,
     get_frameworks,
     remove_dups,
     min_python_version_str,
@@ -56,7 +57,10 @@ class TimedBdist(bdist_wheel):
 
 def setup_common_extension() -> CMakeExtension:
     """Setup CMake extension for common library"""
-    cmake_flags = ["-DCMAKE_CUDA_ARCHITECTURES={}".format(archs)]
+    cmake_flags = [
+        "-DCMAKE_CUDA_ARCHITECTURES={}".format(archs),
+        f"-DCUDNN_FRONTEND_INCLUDE_DIR={cudnn_frontend_include_path()}",
+    ]
     if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
         assert (
             os.getenv("MPI_HOME") is not None
