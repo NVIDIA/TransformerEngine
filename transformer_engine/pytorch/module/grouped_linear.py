@@ -55,7 +55,14 @@ from ..jit import no_torch_dynamo
 from ..cpu_offload import is_cpu_offload_enabled, mark_not_offload, start_offload
 from ..triton.grouped_dbias_dscales import compute_grouped_dbias
 
-from ..tensor import Float8CurrentScalingQuantizer, Float8Quantizer, MXFP8Quantizer, NVFP4Quantizer
+from ..tensor import (
+    Float8CurrentScalingQuantizer,
+    Float8Quantizer,
+    HybridQuantizer,
+    IdentityQuantizer,
+    MXFP8Quantizer,
+    NVFP4Quantizer,
+)
 from ..quantized_tensor import (
     QuantizedTensorStorage,
     Quantizer,
@@ -64,6 +71,208 @@ from ..quantized_tensor import (
 )
 from ...debug.pytorch.debug_quantization import DebugQuantizer
 from ...debug.pytorch.debug_state import TEDebugState
+
+
+def _uses_identity_quantizer(quantizer):
+    """Whether a quantizer, including a hybrid sub-quantizer, is Identity-backed."""
+    if quantizer is None:
+        return False
+    if isinstance(quantizer, IdentityQuantizer):
+        return True
+    if isinstance(quantizer, HybridQuantizer):
+        return _uses_identity_quantizer(quantizer.rowwise_quantizer) or _uses_identity_quantizer(
+            quantizer.columnwise_quantizer
+        )
+    return False
+
+
+def _has_identity_quantizer_list(quantizers):
+    """Whether any quantizer in a grouped list uses Identity."""
+    return any(_uses_identity_quantizer(q) for q in quantizers)
+
+
+def _identity_quantizer_signature(quantizer):
+    """Identity usage per GEMM direction: (rowwise, columnwise)."""
+    if isinstance(quantizer, HybridQuantizer):
+        return (
+            _uses_identity_quantizer(quantizer.rowwise_quantizer),
+            _uses_identity_quantizer(quantizer.columnwise_quantizer),
+        )
+    identity = isinstance(quantizer, IdentityQuantizer)
+    return (identity, identity)
+
+
+def _check_uniform_identity_quantizer_list(quantizers):
+    """Reject grouped lists that mix Identity-backed and quantized directions."""
+    signatures = [_identity_quantizer_signature(q) for q in quantizers]
+    if not any(rowwise or columnwise for rowwise, columnwise in signatures):
+        return
+    if all(signature == signatures[0] for signature in signatures):
+        return
+    raise ValueError(
+        "GroupedLinear quantizer list mixes Identity-backed and non-Identity-backed"
+        f" directions: {signatures}. This combination is not supported because"
+        " grouped GEMM requires a uniform scaling mode for every tensor in each"
+        " operand list. Make the CustomRecipe `qfactory` return Identity"
+        " consistently for every expert in the grouped operand, or return no"
+        " Identity quantizers for that operand."
+    )
+
+
+def _is_plain_identity_passthrough_list(quantizers, activation_dtype):
+    """Whether every quantizer is a plain Identity passthrough."""
+    return bool(quantizers) and all(
+        isinstance(q, IdentityQuantizer) and (q.dtype is None or q.dtype == activation_dtype)
+        for q in quantizers
+    )
+
+
+def _split_quantize_with_identity_fallback(
+    tensor,
+    m_splits,
+    quantizers,
+    activation_dtype,
+    *,
+    disable_bulk_allocation=False,
+):
+    """Split+quantize, avoiding native C++ split kernels for Identity quantizers."""
+    # No Identity anywhere: use the native grouped split+quantize kernel.
+    if not _has_identity_quantizer_list(quantizers):
+        return tex.split_quantize(
+            tensor,
+            m_splits,
+            quantizers,
+            disable_bulk_allocation=disable_bulk_allocation,
+        )
+
+    _check_uniform_identity_quantizer_list(quantizers)
+    tensor = cast_if_needed(tensor, activation_dtype)
+    # Plain all-Identity passthrough: match the native high-precision BF16 split path.
+    if _is_plain_identity_passthrough_list(quantizers, activation_dtype):
+        return torch.split(tensor, m_splits)
+
+    # Uniform Identity-backed wrappers still need per-split Python quantizer calls.
+    return [
+        quantizer(tensor_part) if quantizer is not None else tensor_part
+        for tensor_part, quantizer in zip(torch.split(tensor, m_splits), quantizers)
+    ]
+
+
+def _is_hybrid_quantizer_list(quantizers):
+    """Classify a GroupedLinear quantizer list as hybrid-uniform or plain-uniform.
+
+    Returns ``True`` when every non-``None`` entry is a ``HybridQuantizer``,
+    ``False`` when none are. Raises :class:`ValueError` on a mixed list.
+
+    Why it's a hard "or": neither dispatch branch at the call sites
+    supports a mixed list. ``tex.split_quantize`` (the plain path) does
+    not recognize ``HybridQuantizer``. :func:`_hybrid_split_quantize`
+    (the hybrid path) treats every entry as hybrid — it calls
+    ``q.rowwise_quantizer`` / ``q.columnwise_quantizer`` unconditionally,
+    which would ``AttributeError`` on a plain quantizer. Rejecting at
+    the classifier gives a clear actionable error instead of failing
+    deep inside a grouped C++ call.
+
+    Supporting mixed would require a per-element grouped kernel that
+    accepts a heterogeneous quantizer vector; no such kernel exists
+    today. If that becomes a real requirement (e.g. per-expert hybrid
+    recipes in MoE), implement element-wise fallback here rather than
+    silently masking the mismatch.
+    """
+    non_none = [q for q in quantizers if q is not None]
+    if not non_none:
+        return False
+    hybrid_count = sum(1 for q in non_none if isinstance(q, HybridQuantizer))
+    if hybrid_count == 0:
+        return False
+    # Reject a list mixing HybridQuantizer with None entries: ``_hybrid_split_quantize``
+    # subsequently iterates the *full* list with ``isinstance(q, HybridQuantizer)`` which
+    # would raise ``TypeError`` on the ``None`` entries. Forcing the list to be entirely
+    # non-``None`` before claiming "all hybrid" matches the dispatch's actual capability.
+    if hybrid_count == len(quantizers):
+        return True
+    raise ValueError(
+        "GroupedLinear quantizer list mixes HybridQuantizer and non-hybrid"
+        f" quantizers ({hybrid_count} hybrid,"
+        f" {len(non_none) - hybrid_count} non-hybrid,"
+        f" {len(quantizers) - len(non_none)} None). This combination is not"
+        " supported: neither `tex.split_quantize` nor `_hybrid_split_quantize`"
+        " can consume a heterogeneous list. Make the CustomRecipe `qfactory`"
+        " return a consistent type (all HybridQuantizer or all non-hybrid)"
+        " across every GEMM for the same role."
+    )
+
+
+def _hybrid_split_quantize(tensor, m_splits, quantizers, *, disable_bulk_allocation=False):
+    """Grouped split+quantize for an **all-hybrid** quantizer list.
+
+    Precondition: every ``q`` in ``quantizers`` is a ``HybridQuantizer``.
+    Enforce via :func:`_is_hybrid_quantizer_list` at the call site (or
+    the explicit assert below as a defense-in-depth).
+
+    Runs ``tex.split_quantize`` twice — once over the rowwise sub-
+    quantizers, once over the columnwise sub-quantizers — then zips
+    the two per-split results back into ``HybridQuantizedTensorStorage``
+    per GEMM. Two grouped C++ calls instead of ``2 * num_gemms``
+    ungrouped Python calls.
+    """
+    from ..tensor.storage.hybrid_tensor_storage import HybridQuantizedTensorStorage as HybridStorage
+
+    if not all(isinstance(q, HybridQuantizer) for q in quantizers):
+        raise TypeError(
+            "_hybrid_split_quantize requires every quantizer to be a"
+            " HybridQuantizer; callers must gate on _is_hybrid_quantizer_list."
+            f" Got types: {[type(q).__name__ for q in quantizers]}"
+        )
+
+    usage_signatures = [(q.rowwise_usage, q.columnwise_usage) for q in quantizers]
+    if not all(signature == usage_signatures[0] for signature in usage_signatures):
+        raise ValueError(
+            "GroupedLinear HybridQuantizer list has mixed parent usage flags "
+            f"{usage_signatures}. This is not supported by the grouped "
+            "split-quantize path; all experts for a grouped operand must "
+            "request the same rowwise/columnwise directions."
+        )
+    rowwise_enabled, columnwise_enabled = usage_signatures[0]
+
+    row_quantizers = [q.rowwise_quantizer for q in quantizers]
+    col_quantizers = [q.columnwise_quantizer for q in quantizers]
+
+    row_results = (
+        tex.split_quantize(
+            tensor,
+            m_splits,
+            row_quantizers,
+            disable_bulk_allocation=disable_bulk_allocation,
+        )
+        if rowwise_enabled
+        else [None] * len(quantizers)
+    )
+    col_results = (
+        tex.split_quantize(
+            tensor,
+            m_splits,
+            col_quantizers,
+            disable_bulk_allocation=disable_bulk_allocation,
+        )
+        if columnwise_enabled
+        else [None] * len(quantizers)
+    )
+
+    return [
+        HybridStorage(
+            rowwise_storage=row,
+            columnwise_storage=col,
+            quantizer=q,
+            fake_dtype=tensor.dtype,
+        )
+        for row, col, q in zip(
+            row_results,
+            col_results,
+            quantizers,
+        )
+    ]
+
 
 __all__ = ["GroupedLinear"]
 
@@ -445,6 +654,24 @@ class _GroupedLinear(torch.autograd.Function):
         biases = weights_and_biases[num_gemms:]
         device = inp.device
         weight_requires_grad = weights[0].requires_grad
+        backward_needs_input = is_grad_enabled and weight_requires_grad
+        if save_original_input and backward_needs_input:
+            disallowed_input_quantizer = next(
+                (
+                    q
+                    for q in input_quantizers
+                    if q is not None and not q.allows_save_original_input_for_backward()
+                ),
+                None,
+            )
+            if disallowed_input_quantizer is not None:
+                warnings.warn(
+                    "Ignoring save_original_input=True because the input quantizer requires "
+                    "the forward quantized activation for backward "
+                    f"({disallowed_input_quantizer}).",
+                    stacklevel=2,
+                )
+                save_original_input = False
 
         # Configure quantizers
         if save_original_input and isinstance(input_quantizers[0], Float8Quantizer):
@@ -493,6 +720,11 @@ class _GroupedLinear(torch.autograd.Function):
             for output_quantizer in output_quantizers:
                 output_quantizer.set_usage(rowwise=True, columnwise=False)
 
+        if fp8 and not debug:
+            _check_uniform_identity_quantizer_list(input_quantizers)
+            _check_uniform_identity_quantizer_list(weight_quantizers)
+            _check_uniform_identity_quantizer_list(grad_output_quantizers)
+
         # Initialize input tensors
         in_features = weights[0].size(-1)
         if inp.size(-1) != in_features:
@@ -540,11 +772,21 @@ class _GroupedLinear(torch.autograd.Function):
 
         inp_view = inp.reshape(-1, in_features)
         inputmats: list
-        if fp8 and not debug:
+        identity = _has_identity_quantizer_list(input_quantizers)
+        hybrid = False if identity else _is_hybrid_quantizer_list(input_quantizers)
+        if fp8 and not debug and not hybrid:
             # Disable bulk allocation when CPU offloading is active: offloading skips small
             # tensors (like scales), but bulk allocation shares storage across all tensors,
             # so if scales can't be offloaded, nothing in the group can be offloaded.
-            inputmats = tex.split_quantize(
+            inputmats = _split_quantize_with_identity_fallback(
+                inp_view,
+                m_splits,
+                input_quantizers,
+                activation_dtype,
+                disable_bulk_allocation=cpu_offloading,
+            )
+        elif fp8 and hybrid:
+            inputmats = _hybrid_split_quantize(
                 inp_view,
                 m_splits,
                 input_quantizers,
@@ -948,11 +1190,19 @@ class _GroupedLinear(torch.autograd.Function):
             grad_output_view = grad_output.contiguous().view(-1, grad_output.shape[-1])
             grad_output = [None] * ctx.num_gemms
             grad_biases = [None] * ctx.num_gemms
-            if ctx.fp8 and not ctx.debug:
+            grad_output_identity = _has_identity_quantizer_list(ctx.grad_output_quantizers)
+            grad_output_hybrid = (
+                False
+                if grad_output_identity
+                else _is_hybrid_quantizer_list(ctx.grad_output_quantizers)
+            )
+            if ctx.fp8 and not ctx.debug and not grad_output_hybrid:
                 if ctx.use_bias:
                     grad_output_mats = torch.split(grad_output_view, ctx.m_splits)
                     recipe = ctx.fp8_recipe
-                    if recipe.delayed() or recipe.float8_current_scaling() or recipe.mxfp8():
+                    if not grad_output_identity and (
+                        recipe.delayed() or recipe.float8_current_scaling() or recipe.mxfp8()
+                    ):
                         # Fused bias grad + quantize kernel
                         for i in range(ctx.num_gemms):
                             grad_biases[i], grad_output[i] = tex.bgrad_quantize(
@@ -963,18 +1213,31 @@ class _GroupedLinear(torch.autograd.Function):
                         # Unfused bias grad and multi-tensor quantize
                         for i in range(ctx.num_gemms):
                             grad_biases[i] = grad_output_mats[i].sum(dim=0)
-                        grad_output = tex.split_quantize(
+                        grad_output = _split_quantize_with_identity_fallback(
                             grad_output_view,
                             ctx.m_splits,
                             ctx.grad_output_quantizers,
+                            ctx.activation_dtype,
                         )
                 else:
                     # Multi-tensor quantize
-                    grad_output = tex.split_quantize(
+                    grad_output = _split_quantize_with_identity_fallback(
                         grad_output_view,
                         ctx.m_splits,
                         ctx.grad_output_quantizers,
+                        ctx.activation_dtype,
                     )
+            elif ctx.fp8 and grad_output_hybrid:
+                if ctx.use_bias:
+                    grad_output_mats = torch.split(grad_output_view, ctx.m_splits)
+                    for i in range(ctx.num_gemms):
+                        grad_biases[i] = grad_output_mats[i].sum(dim=0)
+                grad_output = _hybrid_split_quantize(
+                    grad_output_view,
+                    ctx.m_splits,
+                    ctx.grad_output_quantizers,
+                    disable_bulk_allocation=ctx.cpu_offloading,
+                )
             elif ctx.debug:
                 grad_output_mats = torch.split(grad_output_view, ctx.m_splits)
                 for i in range(ctx.num_gemms):
@@ -1083,8 +1346,24 @@ class _GroupedLinear(torch.autograd.Function):
                             else:
                                 input_quantizer.set_usage(rowwise=False, columnwise=True)
                     inputmats: list
-                    if ctx.fp8 and not ctx.debug:
-                        inputmats = tex.split_quantize(inp_view, ctx.m_splits, ctx.input_quantizers)
+                    input_identity = _has_identity_quantizer_list(ctx.input_quantizers)
+                    input_hybrid = (
+                        False if input_identity else _is_hybrid_quantizer_list(ctx.input_quantizers)
+                    )
+                    if ctx.fp8 and not ctx.debug and not input_hybrid:
+                        inputmats = _split_quantize_with_identity_fallback(
+                            inp_view,
+                            ctx.m_splits,
+                            ctx.input_quantizers,
+                            ctx.activation_dtype,
+                        )
+                    elif ctx.fp8 and input_hybrid:
+                        inputmats = _hybrid_split_quantize(
+                            inp_view,
+                            ctx.m_splits,
+                            ctx.input_quantizers,
+                            disable_bulk_allocation=ctx.cpu_offloading,
+                        )
                     elif ctx.debug:
                         inputmats = DebugQuantizer.multi_tensor_quantize(
                             inp_view,

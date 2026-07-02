@@ -5,11 +5,115 @@
 """Shared utility functions for FSDP2 distributed tests."""
 
 import transformer_engine.common.recipe
-from transformer_engine.pytorch import QuantizedTensor
+from transformer_engine.pytorch import HybridQuantizer, IdentityQuantizer, QuantizedTensor
+from transformer_engine.pytorch.custom_recipes.quantization_factory_base import (
+    current_scaling_quantizer_factory,
+    float8_block_scaling_quantizer_factory,
+    mxfp8_quantizer_factory,
+)
 
 
 def get_recipe_from_string(recipe):
     return getattr(transformer_engine.common.recipe, recipe)()
+
+
+def _hybrid_fp8_current_qfactory(role):
+    """FP8 current-scaling rowwise + FP8 current-scaling columnwise."""
+    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+    if is_linear and role.tensor_type in ("input", "weight", "output"):
+        return HybridQuantizer(
+            rowwise_quantizer=current_scaling_quantizer_factory(role),
+            columnwise_quantizer=current_scaling_quantizer_factory(role),
+        )
+    return current_scaling_quantizer_factory(role)
+
+
+def _hybrid_mxfp8_qfactory(role):
+    """MXFP8 rowwise + MXFP8 columnwise."""
+    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+    if is_linear and role.tensor_type in ("input", "weight", "output"):
+        return HybridQuantizer(
+            rowwise_quantizer=mxfp8_quantizer_factory(role),
+            columnwise_quantizer=mxfp8_quantizer_factory(role),
+        )
+    return mxfp8_quantizer_factory(role)
+
+
+def _hybrid_float8_block_qfactory(role):
+    """Float8 block-scaling rowwise + Float8 block-scaling columnwise."""
+    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+    if is_linear and role.tensor_type in ("input", "weight", "output"):
+        return HybridQuantizer(
+            rowwise_quantizer=float8_block_scaling_quantizer_factory(role),
+            columnwise_quantizer=float8_block_scaling_quantizer_factory(role),
+        )
+    return float8_block_scaling_quantizer_factory(role)
+
+
+def _hybrid_mixed_mxfp8_fp8_qfactory(role):
+    """MXFP8 rowwise + FP8 current columnwise (cross-format hybrid)."""
+    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+    if is_linear and role.tensor_type in ("input", "weight", "output"):
+        return HybridQuantizer(
+            rowwise_quantizer=mxfp8_quantizer_factory(role),
+            columnwise_quantizer=current_scaling_quantizer_factory(role),
+        )
+    return current_scaling_quantizer_factory(role)
+
+
+def _hybrid_fp8_current_identity_qfactory(role):
+    """FP8 current forward + high-precision backward via Identity."""
+    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+    if is_linear and role.tensor_type in ("input", "weight", "output"):
+        return HybridQuantizer(
+            rowwise_quantizer=current_scaling_quantizer_factory(role),
+            columnwise_quantizer=IdentityQuantizer(),
+        )
+    if is_linear and role.tensor_type in ("grad_output", "grad_input"):
+        return IdentityQuantizer()
+    return current_scaling_quantizer_factory(role)
+
+
+def _identity_qfactory(role):  # pylint: disable=unused-argument
+    """High-precision passthrough for every quantizer slot."""
+    return IdentityQuantizer()
+
+
+# The qfactories above are registered here as module-level functions (not
+# lambdas or closures) on purpose: DCP serializes ``CustomRecipe`` via
+# ``pickle``, and closure-based qfactories (or inner functions capturing state)
+# are not picklable. Keeping them at module scope lets them pickle by reference.
+# See ``run_fsdp2_fused_adam.py::test_hybrid_dcp_output_parity``.
+_HYBRID_QFACTORIES = {
+    "HybridFP8CurrentScaling": _hybrid_fp8_current_qfactory,
+    "HybridMXFP8": _hybrid_mxfp8_qfactory,
+    "HybridFloat8BlockScaling": _hybrid_float8_block_qfactory,
+    "HybridMixed_MXFP8_FP8": _hybrid_mixed_mxfp8_fp8_qfactory,
+    "HybridFP8CurrentScalingIdentity": _hybrid_fp8_current_identity_qfactory,
+    "Identity": _identity_qfactory,
+}
+
+
+def get_hybrid_recipe_from_string(recipe):
+    """Build a CustomRecipe wrapping a module-level (picklable) hybrid qfactory.
+
+    Each hybrid qfactory composes one or two role-aware base factories from
+    ``quantization_factory_base`` per direction; per-role behavior is delegated
+    to the base factory and the hybrid layer only decides the direction pairing.
+
+    Supported values:
+        "HybridFP8CurrentScaling" — FP8 current for both directions
+        "HybridMXFP8"             — MXFP8 for both directions
+        "HybridFloat8BlockScaling" — Float8 block scaling for both directions
+        "HybridMixed_MXFP8_FP8"   — MXFP8 rowwise + FP8 current columnwise
+        "HybridFP8CurrentScalingIdentity" — FP8 current forward + Identity backward
+        "Identity" — high-precision passthrough for every slot
+    """
+    if recipe not in _HYBRID_QFACTORIES:
+        raise ValueError(
+            f"Unknown hybrid recipe '{recipe}'. Supported: {sorted(_HYBRID_QFACTORIES.keys())}"
+        )
+    return transformer_engine.common.recipe.CustomRecipe(qfactory=_HYBRID_QFACTORIES[recipe])
 
 
 def save_custom_attrs(module):

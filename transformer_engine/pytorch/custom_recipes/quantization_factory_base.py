@@ -14,7 +14,7 @@ Usage (any factory)::
 
     from transformer_engine.common.recipe import CustomRecipe
     from transformer_engine.pytorch.quantization import autocast
-    from transformer_engine.pytorch.custom_recipes.quantization_recipes_base import (
+    from transformer_engine.pytorch.custom_recipes.quantization_factory_base import (
         nvfp4_quantizer_factory,
     )
 
@@ -30,6 +30,24 @@ from typing import Optional
 import torch
 from transformer_engine.pytorch.quantization import QuantizerRole
 from ..constants import DType
+
+
+def high_precision_factory(
+    role: Optional[QuantizerRole],  # pylint: disable=unused-argument
+) -> "IdentityQuantizer":
+    """Factory that runs all GEMMs in high precision (no quantization).
+
+    Returns an :class:`IdentityQuantizer` for every slot, so no tensor is
+    quantized.  This is the simplest base factory and a good starting point to
+    branch from: keep most roles in high precision and selectively override the
+    ones you want to quantize.
+
+    Dispatch logic:
+        * every role -> ``IdentityQuantizer`` (no quantization)
+    """
+    from transformer_engine.pytorch.tensor.identity_tensor import IdentityQuantizer
+
+    return IdentityQuantizer()
 
 
 def delayed_scaling_quantizer_factory(
@@ -146,6 +164,8 @@ def nvfp4_quantizer_factory(
     if is_weight:
         return NVFP4Quantizer(
             fp4_dtype=DType.kFloat4E2M1,
+            rowwise=True,
+            columnwise=True,
             with_rht=False,
             with_post_rht_amax=False,
             with_2d_quantization=True,

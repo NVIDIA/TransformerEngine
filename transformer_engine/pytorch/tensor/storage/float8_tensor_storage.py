@@ -193,12 +193,31 @@ class Float8TensorStorage(QuantizedTensorStorage):
 
     def view(self, shape: torch.Size):
         # pylint: disable=missing-function-docstring
-        out_data = self._data.view(shape)
+        out_data = self._data.view(shape) if self._data is not None else None
+        if out_data is not None:
+            out_shape = out_data.size()
+        else:
+            out_shape = torch.empty(tuple(self.size()), device="meta").view(shape).shape
         out_transpose = None if self._transpose_invalid else self._transpose
         if out_transpose is not None:
-            out_transpose_shape = out_transpose.size()
-            if out_transpose_shape[0] != shape[-1] or out_transpose_shape[1:] != shape[:-1]:
+            if len(out_shape) == 0:
+                view_shape_for_transpose = out_shape
+            else:
+                view_shape_for_transpose = torch.Size((out_shape[-1], *out_shape[:-1]))
+            if out_transpose.shape != view_shape_for_transpose:
+                if self._data is None:
+                    raise NotImplementedError(
+                        "Float8TensorStorage view with columnwise-only data is only "
+                        "supported when the requested shape preserves the columnwise layout"
+                    )
                 out_transpose = None
+            else:
+                out_transpose = out_transpose.view(*view_shape_for_transpose)
+        if self._data is None and out_transpose is None:
+            raise NotImplementedError(
+                "Float8TensorStorage view with columnwise-only data requires a valid "
+                "columnwise buffer"
+            )
 
         return Float8TensorStorage(
             data=out_data,
@@ -224,6 +243,10 @@ class Float8TensorStorage(QuantizedTensorStorage):
     def _create_transpose(self):
         """Update FP8 transpose cache"""
         data = self._data
+        # Columnwise-only Float8Tensors (e.g. hybrid quantization sub-storages)
+        # have _data=None — nothing to transpose.
+        if data is None:
+            return
         if not data.is_contiguous():
             data = data.contiguous()
         self._transpose = tex.fp8_transpose(data, self._fp8_dtype, out=self._transpose)
@@ -277,3 +300,49 @@ class Float8TensorStorage(QuantizedTensorStorage):
         else:
             usages["columnwise"] = self._transpose is not None and not self._transpose_invalid
         return usages
+
+    def fsdp_buffer_fields(self) -> Tuple[str, ...]:
+        """Fields gathered by FSDP2 for per-tensor FP8.
+
+        ``_scale_inv`` is a per-tensor scalar; it travels through the hook's
+        metadata tuple (mirroring :meth:`Float8Tensor.fsdp_pre_all_gather`).
+
+        Direction-aware: a vanilla Float8Tensor parameter has ``_data``
+        populated, but a columnwise-only sub-storage (used inside
+        ``HybridQuantizedTensor`` on Hopper / L40 where non-TN FP8 GEMM is
+        not natively supported) holds its quantized data in ``_transpose``
+        instead. Returning ``("_data",)`` unconditionally would have
+        ``fsdp_extract_buffers`` produce ``(None,)`` and FSDP2 would
+        all-gather a ``None`` tensor.
+
+        The per-sub-storage direction is fixed at construction (pinned by
+        ``HybridQuantizer.__init__`` via ``set_usage``), so this check is
+        stable across iterations even though it inspects the current
+        field state.
+        """
+        if self._data is not None:
+            return ("_data",)
+        if self._transpose is not None:
+            return ("_transpose",)
+        # Degenerate: fully empty storage. Fall back to ``_data`` so the
+        # base ``fsdp_extract_buffers`` returns ``(None,)`` — same surface
+        # the caller would have seen pre-direction-aware logic.
+        return ("_data",)
+
+    def fsdp_assign_gathered(
+        self,
+        gathered: Tuple[Optional[torch.Tensor], ...],
+        meta: Dict[str, Any],
+    ) -> None:
+        """Write gathered Float8 buffers back, refreshing ``_transpose_invalid``.
+
+        The base implementation just ``setattr``s the gathered tensors into
+        the named fields. For Float8 we additionally need to clear
+        ``_transpose_invalid`` when the gathered field is ``_transpose`` —
+        otherwise a freshly-gathered transpose buffer is treated as stale
+        on first use (see :attr:`_transpose_invalid` semantics in
+        ``update_usage`` / ``get_usages``).
+        """
+        super().fsdp_assign_gathered(gathered, meta)
+        if "_transpose" in meta["field_names"]:
+            self._transpose_invalid = False

@@ -74,6 +74,8 @@ from ..tensor.float8_tensor import (
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
+from ..tensor.hybrid_tensor import HybridQuantizer
+from ..tensor.identity_tensor import IdentityQuantizer
 from ._common import apply_normalization, set_quantizer_amax_reduction_group, WeightGradStore
 from ..cpu_offload import (
     is_cpu_offload_enabled,
@@ -413,12 +415,16 @@ class _LayerNormMLP(torch.autograd.Function):
         # for debug: : layernorm output = High precision to enable processing of this norm
 
         custom = is_custom(fc1_input_quantizer)
+        hybrid = isinstance(fc1_input_quantizer, HybridQuantizer)
+        identity = isinstance(fc1_input_quantizer, IdentityQuantizer)
         with_quantized_norm = (
             fp8
             and not debug
             and not return_layernorm_output
             and not return_layernorm_output_gathered
             and not custom
+            and not hybrid
+            and not identity
         )
 
         # Apply normalization
@@ -1471,7 +1477,10 @@ class _LayerNormMLP(torch.autograd.Function):
                 if ctx.fp8:
                     # TODO float8 blockwise current scaling (as well as custom quantizers) has no bgrad fusion for now
                     if (
-                        isinstance(ctx.fc1_grad_output_quantizer, Float8BlockQuantizer)
+                        isinstance(
+                            ctx.fc1_grad_output_quantizer,
+                            (Float8BlockQuantizer, IdentityQuantizer),
+                        )
                         or ctx.fp8_recipe.custom()
                     ):
                         fc1_bias_grad = dact.view(-1, dact.shape[-1]).sum(dim=0)
@@ -2176,6 +2185,15 @@ class LayerNormMLP(TransformerEngineBaseModule):
         recipe = FP8GlobalStateManager.get_fp8_recipe()
         if recipe.float8_current_scaling():
             self._customize_quantizers_float8_current_scaling(fwd, recipe)
+        # Hybrid (CustomRecipe) needs no SP amax-reduction setup today: its SP
+        # activations are gathered in high precision and re-quantized whole, so
+        # every rank already sees the same global amax.
+        # TODO(#3158): once native quantized all-gather lands (see
+        # supports_only_rowwise_all_gather / gather_along_first_dim) the SP path
+        # quantizes per-shard, needing a hybrid branch here that mirrors the
+        # current-scaling / NVFP4 SP reduction above:
+        #     elif recipe.custom():
+        #         ...  # enable SP amax reduction on the hybrid input/grad quantizer
 
     def get_quantizer_roles(
         self,
@@ -2482,7 +2500,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 rowwise=True,
                 columnwise=isinstance(
                     fc2_input_quantizer,
-                    (MXFP8Quantizer, Float8BlockQuantizer, NVFP4Quantizer),
+                    (MXFP8Quantizer, Float8BlockQuantizer, NVFP4Quantizer, HybridQuantizer),
                 ),
             )
             fc2_input_quantizer.internal = True

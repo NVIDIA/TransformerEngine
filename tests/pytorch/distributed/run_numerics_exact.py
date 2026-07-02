@@ -58,7 +58,7 @@ def get_nvfp4_quantizer_factory():
 
     Mirrors the canonical "branch on what we care about, default fall-through"
     pattern from
-    ``transformer_engine.pytorch.custom_recipes.quantization_recipes_base``;
+    ``transformer_engine.pytorch.custom_recipes.quantization_factory_base``;
     every slot gets a real :class:`NVFP4QuantizerRef` (``CustomRecipeState``
     rejects ``None`` returns).
 

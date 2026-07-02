@@ -74,6 +74,8 @@ from ..quantized_tensor import (
 )
 from ...debug.pytorch.debug_state import TEDebugState
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
+from ..tensor.hybrid_tensor import HybridQuantizer
+from ..tensor.identity_tensor import IdentityQuantizer
 from ..cpu_offload import (
     is_cpu_offload_enabled,
     start_offload,
@@ -230,6 +232,8 @@ class _LayerNormLinear(torch.autograd.Function):
         # Avoid quantized norm kernel if norm output will be returned
         # or if a gather of ln_out must be in high precision.
         custom = is_custom(input_quantizer)
+        hybrid = isinstance(input_quantizer, HybridQuantizer)
+        identity = isinstance(input_quantizer, IdentityQuantizer)
         with_quantized_norm = (
             fp8
             and not debug
@@ -237,6 +241,8 @@ class _LayerNormLinear(torch.autograd.Function):
             and not return_layernorm_output_gathered
             and backward_override is None
             and not custom  # TODO(negvet): and not FP8GlobalStateManager.get_fp8_recipe().custom()
+            and not hybrid
+            and not identity
         )
 
         # Apply normalization
@@ -1574,6 +1580,15 @@ class LayerNormLinear(TransformerEngineBaseModule):
         recipe = FP8GlobalStateManager.get_fp8_recipe()
         if recipe.float8_current_scaling():
             self._customize_quantizers_float8_current_scaling(fwd, recipe)
+        # Hybrid (CustomRecipe) needs no SP amax-reduction setup today: its SP
+        # activations are gathered in high precision and re-quantized whole, so
+        # every rank already sees the same global amax.
+        # TODO(#3158): once native quantized all-gather lands (see
+        # supports_only_rowwise_all_gather / gather_along_first_dim) the SP path
+        # quantizes per-shard, needing a hybrid branch here that mirrors the
+        # current-scaling / NVFP4 SP reduction above:
+        #     elif recipe.custom():
+        #         ...  # enable SP amax reduction on the hybrid input/grad quantizer
 
     def get_quantizer_roles(
         self,

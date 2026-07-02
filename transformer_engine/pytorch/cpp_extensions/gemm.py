@@ -17,6 +17,10 @@ from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTen
 from ..tensor.storage.grouped_tensor_storage import GroupedTensorStorage
 from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from ..tensor.utils import is_custom
+from ..tensor.hybrid_tensor import HybridQuantizer
+from ..tensor.identity_tensor import IdentityQuantizer
+from ..tensor.storage.hybrid_tensor_storage import HybridQuantizedTensorStorage
+from ..tensor.storage.identity_tensor_storage import IdentityTensorStorage
 from ..custom_recipes.gemm import custom_gemm
 from ...debug.pytorch.debug_quantization import DebugQuantizer
 
@@ -102,6 +106,65 @@ def _nvfp4_row_scaled_gemm_inputs(
     )
 
 
+def _unwrap_hybrid_A(tensor, layout):
+    """Extract the direction-appropriate native sub-storage for GEMM operand A.
+
+    Operand A's data direction is determined by its transpose flag (layout[0]):
+      T (transposed)     → rowwise sub-storage  (.data consumed by C++)
+      N (not-transposed) → columnwise sub-storage (.columnwise_data consumed by C++)
+    For non-hybrid tensors this is a no-op passthrough.
+    """
+    if not isinstance(tensor, HybridQuantizedTensorStorage):
+        return tensor
+    if layout[0] == "T":
+        return tensor.rowwise_sub_storage
+    return tensor.columnwise_sub_storage
+
+
+def _unwrap_hybrid_B(tensor, layout):
+    """Extract the direction-appropriate native sub-storage for GEMM operand B.
+
+    Operand B's data direction is determined by its transpose flag (layout[1]):
+      N (not-transposed) → rowwise sub-storage  (.data consumed by C++)
+      T (transposed)     → columnwise sub-storage (.columnwise_data consumed by C++)
+    For non-hybrid tensors this is a no-op passthrough.
+    """
+    if not isinstance(tensor, HybridQuantizedTensorStorage):
+        return tensor
+    if layout[1] == "N":
+        return tensor.rowwise_sub_storage
+    return tensor.columnwise_sub_storage
+
+
+def _unwrap_identity_tensor(tensor):
+    """Replace an :class:`IdentityTensorStorage` operand with its plain tensor.
+
+    Identity (high-precision passthrough) operands carry an unquantized tensor;
+    unwrapping it here routes the matmul through the standard high-precision
+    GEMM path. Non-identity operands pass through unchanged. Called after the
+    hybrid unwrap, so a high-precision *direction* of a hybrid tensor is handled
+    too.
+    """
+    if isinstance(tensor, IdentityTensorStorage):
+        return tensor.dequantize()
+    return tensor
+
+
+def _reject_unsupported_output_quantizer(quantization_params):
+    """Reject output quantizers that the native C++ GEMM path cannot convert."""
+    if isinstance(quantization_params, (HybridQuantizer, IdentityQuantizer)):
+        quantizer_name = type(quantization_params).__name__
+        # TODO(#3158): Lower HybridQuantizer output to its native rowwise
+        # sub-quantizer, and IdentityQuantizer output to an unquantized/no-op
+        # path, once the returned tensor contract is defined for these boundary
+        # roles.
+        raise NotImplementedError(
+            f"{quantizer_name} is not supported as a native GEMM output quantizer. "
+            "Return a TE-native quantizer for output/grad_input roles or disable "
+            "quantized GEMM output for this boundary."
+        )
+
+
 def general_gemm(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -127,6 +190,9 @@ def general_gemm(
     assert layout in ("TN", "NN", "NT"), f"GEMM layout {layout} not supported."
     transa = layout[0] == "T"
     transb = layout[1] == "T"
+
+    A = _unwrap_identity_tensor(_unwrap_hybrid_A(A, layout))
+    B = _unwrap_identity_tensor(_unwrap_hybrid_B(B, layout))
 
     alpha = validate_gemm_scale(alpha, True)
     beta = validate_gemm_scale(beta, accumulate)
@@ -172,6 +238,8 @@ def general_gemm(
         quantization_params = quantization_params.parent_quantizer
         A = A.get_tensor(not transa)
         B = B.get_tensor(transb)
+
+    _reject_unsupported_output_quantizer(quantization_params)
 
     # Use bfloat16 as default bias_dtype
     bias_dtype = TE_DType[torch.bfloat16 if bias is None else bias.dtype]
@@ -294,6 +362,9 @@ def general_grouped_gemm(
     TN layout Grouped GEMM with fp8 inputs.
     """
     num_gemms = len(A)
+
+    A = [_unwrap_identity_tensor(_unwrap_hybrid_A(a, layout)) for a in A]
+    B = [_unwrap_identity_tensor(_unwrap_hybrid_B(b, layout)) for b in B]
 
     transa = layout[0] == "T"
     transb = layout[1] == "T"

@@ -304,6 +304,19 @@ def _linear_forward_impl(
     # Configure tensor-parallel communication
     tp_world_size = get_distributed_world_size(tp_group)
     backward_needs_input = is_grad_enabled and weight.requires_grad
+    if (
+        save_original_input
+        and backward_needs_input
+        and input_quantizer is not None
+        and not input_quantizer.allows_save_original_input_for_backward()
+    ):
+        warnings.warn(
+            "Ignoring save_original_input=True because the input quantizer requires "
+            "the forward quantized activation for backward "
+            f"({input_quantizer}).",
+            stacklevel=2,
+        )
+        save_original_input = False
     with_input_all_gather_nccl = (
         parallel_mode == "column" and sequence_parallel and not ub_overlap_ag_fprop
     )
@@ -1772,6 +1785,15 @@ class Linear(TransformerEngineBaseModule):
         recipe = FP8GlobalStateManager.get_fp8_recipe()
         if recipe.float8_current_scaling():
             self._customize_quantizers_float8_current_scaling(fwd, recipe)
+        # Hybrid (CustomRecipe) needs no SP amax-reduction setup today: its SP
+        # activations are gathered in high precision and re-quantized whole, so
+        # every rank already sees the same global amax.
+        # TODO(#3158): once native quantized all-gather lands (see
+        # supports_only_rowwise_all_gather / gather_along_first_dim) the SP path
+        # quantizes per-shard, needing a hybrid branch here that mirrors the
+        # current-scaling / NVFP4 SP reduction above:
+        #     elif recipe.custom():
+        #         ...  # enable SP amax reduction on the hybrid input/grad quantizer
 
     def reset_parameters(self, defer_init=False):
         super().reset_parameters(defer_init=defer_init)
