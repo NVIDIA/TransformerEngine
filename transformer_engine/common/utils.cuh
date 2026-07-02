@@ -30,6 +30,37 @@ static_assert(sizeof(uint32_t) == 4);
 static_assert(sizeof(uint64_t) == 8);
 #endif
 
+// Minimal subset of <type_traits> used by RTC kernel headers. Keep these in a
+// project-owned namespace because adding primary templates to std is undefined.
+namespace transformer_engine {
+namespace rtc_detail {
+
+template <class T, class U>
+struct is_same {
+  static constexpr bool value = false;
+};
+template <class T>
+struct is_same<T, T> {
+  static constexpr bool value = true;
+};
+
+template <class T, class U>
+inline constexpr bool is_same_v = is_same<T, U>::value;
+
+template <bool B, class T, class F>
+struct conditional {
+  using type = T;
+};
+template <class T, class F>
+struct conditional<false, T, F> {
+  using type = F;
+};
+template <bool B, class T, class F>
+using conditional_t = typename conditional<B, T, F>::type;
+
+}  // namespace rtc_detail
+}  // namespace transformer_engine
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 constexpr uint32_t THREADS_PER_WARP = 32;
@@ -940,13 +971,13 @@ __device__ __forceinline__ float ordered_uint_to_float(unsigned int u) {
 
 template <typename T>
 __device__ __forceinline__ T abs_val(T val) {
-  if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+  if constexpr (rtc_detail::is_same_v<T, __nv_bfloat16>) {
 #if __CUDA_ARCH__ >= 800
     return __habs(val);
 #else
     return static_cast<__nv_bfloat16>(fabsf(static_cast<float>(val)));
 #endif
-  } else if constexpr (std::is_same_v<T, __half>) {
+  } else if constexpr (rtc_detail::is_same_v<T, __half>) {
     return __habs(val);
   } else {
     return fabsf(val);
@@ -955,13 +986,13 @@ __device__ __forceinline__ T abs_val(T val) {
 
 template <typename T>
 __device__ __forceinline__ T max_val(T a, T b) {
-  if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+  if constexpr (rtc_detail::is_same_v<T, __nv_bfloat16>) {
 #if __CUDA_ARCH__ >= 800
     return __hmax(a, b);
 #else
     return static_cast<__nv_bfloat16>(fmaxf(static_cast<float>(a), static_cast<float>(b)));
 #endif
-  } else if constexpr (std::is_same_v<T, __half>) {
+  } else if constexpr (rtc_detail::is_same_v<T, __half>) {
     return __hmax(a, b);
   } else {
     return fmaxf(a, b);

@@ -7,11 +7,16 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_RMSNORM_RMSNORM_FWD_KERNELS_CUH_
 #define TRANSFORMER_ENGINE_COMMON_RMSNORM_RMSNORM_FWD_KERNELS_CUH_
 
+#ifdef __CUDACC_RTC__
+#include "kernel_params.h"
+#include "utils.cuh"
+#else
 #include <cfloat>
 #include <cstdio>
 
 #include "../../utils.cuh"
 #include "../common.h"
+#endif
 
 namespace transformer_engine {
 namespace normalization {
@@ -139,7 +144,7 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_fwd_tuned_ke
   if (requires_amax) {
     amax = reduce_max<WARPS_M * WARPS_N>(amax, warp);
     if (threadIdx.x == 0) {
-      static_assert(std::is_same<compute_t, float>::value);
+      static_assert(transformer_engine::rtc_detail::is_same<compute_t, float>::value);
       atomicMaxFloat(reinterpret_cast<compute_t *>(params.amax), amax);
     }
   }
@@ -298,7 +303,7 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_fwd_general_
   if (requires_amax) {
     amax = reduce_max<WARPS_M * WARPS_N>(amax, warp);
     if (threadIdx.x == 0) {
-      static_assert(std::is_same<compute_t, float>::value);
+      static_assert(transformer_engine::rtc_detail::is_same<compute_t, float>::value);
       atomicMaxFloat(reinterpret_cast<compute_t *>(params.amax), amax);
     }
   }
