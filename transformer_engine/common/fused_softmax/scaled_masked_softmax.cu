@@ -5,13 +5,10 @@
  ************************************************************************/
 
 #ifdef __CUDACC_RTC__
-#include <cuda_fp16.h>
-
 #include "utils.cuh"
 #else
 #include <assert.h>
 #include <cuda.h>
-#include <cuda_fp16.h>
 #include <cuda_profiler_api.h>
 #include <cuda_runtime.h>
 #include <stdint.h>
