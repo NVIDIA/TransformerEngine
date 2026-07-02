@@ -16,6 +16,7 @@ from torch.utils._pytree import tree_map
 import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
+from transformer_engine.pytorch.constants import dist_group_type
 from transformer_engine.pytorch.tensor._quantization_helpers import (
     _QuantizeFunc,
     _IdentityFunc,
@@ -407,6 +408,73 @@ class Quantizer(abc.ABC):
             "rowwise": self.rowwise_usage,
             "columnwise": self.columnwise_usage,
         }
+
+    #: Attributes shared by every quantizer that take part in value identity.
+    _BASE_VALUE_FIELDS: Tuple[str, ...] = (
+        "rowwise_usage",
+        "columnwise_usage",
+        "internal",
+        "optimize_for_gemm",
+    )
+
+    def _value_fields(self) -> Optional[Tuple[str, ...]]:
+        """Subclass-specific value-defining attribute names, or ``None``.
+
+        Returning ``None`` (the default) means the quantizer cannot be represented as
+        a value opaque object and keeps identity-based equality/hashing.
+        This also means that passing such a quantizer as an argument to a custom op
+        causes a graph break under torch.compile, since it cannot be baked into the
+        FX graph as a constant.
+        """
+        return None
+
+    def _check_value_has_no_process_group(self) -> None:
+        # A value quantizer cannot carry live distributed state into the FX
+        # graph; reject a stored ``amax_reduction_group`` and pass it per
+        # quantize call instead.
+        if isinstance(getattr(self, "amax_reduction_group", None), dist_group_type):
+            raise TypeError(
+                f"{type(self).__name__} cannot be used as a torch.compile value "
+                "object: 'amax_reduction_group' holds a torch.distributed.ProcessGroup, "
+                "which is live distributed state and must not be baked into an FX "
+                "graph. Pass the amax reduction group per quantize call instead of "
+                "storing it on the quantizer."
+            )
+
+    def _value_key(self) -> Tuple[Any, ...]:
+        """Hashable, reproducible key identifying this quantizer's value.
+
+        Only valid for value quantizers (``_value_fields()`` is not ``None``).
+        """
+        fields = self._value_fields()  # pylint: disable=assignment-from-none
+        assert fields is not None, f"{type(self).__name__} is not a value quantizer"
+        self._check_value_has_no_process_group()
+        items = []
+        for name in self._BASE_VALUE_FIELDS + tuple(fields):
+            value = getattr(self, name)
+            if name == "dtype":
+                # ``DType`` is an ``IntEnum``; store the int so the key stays
+                # plain: hashable and ``repr``-reproducible for FX codegen.
+                value = int(value)
+            items.append((name, value))
+        return (type(self).__qualname__, tuple(items))
+
+    def __eq__(self, other: object) -> Any:
+        # Value quantizers compare by configuration; everything else keeps the
+        # default identity semantics (returning ``NotImplemented`` makes Python
+        # fall back to identity). ``_value_key`` rejects a stored ProcessGroup.
+        if self is other:
+            return True
+        if self._value_fields() is None or type(self) is not type(other):
+            return NotImplemented
+        if other._value_fields() is None:
+            return NotImplemented
+        return self._value_key() == other._value_key()
+
+    def __hash__(self) -> int:
+        if self._value_fields() is None:
+            return object.__hash__(self)
+        return hash(self._value_key())
 
 
 class QuantizedTensor(torch.Tensor):

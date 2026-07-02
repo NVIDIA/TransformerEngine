@@ -23,6 +23,7 @@ from ..utils import (
 
 from .storage.nvfp4_tensor_storage import NVFP4TensorStorage, _FromNVFP4Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
+from ..dynamo import register_value_opaque_quantizer
 from ._quantization_helpers import _IdentityFunc, safe_quantized_repr
 
 aten = torch.ops.aten
@@ -173,6 +174,7 @@ class NVFP4Quantizer(Quantizer):
         self.nvfp4_4over6_err_mode = nvfp4_4over6_err_mode.upper()
         if self.nvfp4_4over6_err_mode not in ("MAE", "MSE"):
             raise ValueError("nvfp4_4over6_err_mode must be 'MAE' or 'MSE'.")
+        self._with_random_sign_mask = with_random_sign_mask
         self.rht_matrix_random_sign_mask_t = get_random_sign_mask_for_rht(
             with_random_sign_mask, torch.cuda.current_device()
         )
@@ -183,6 +185,16 @@ class NVFP4Quantizer(Quantizer):
         state = self.__dict__.copy()
         state["amax_reduction_group"] = None
         return state
+
+    def _rebuild_derived_state(self) -> None:
+        """Restore the derived ``rht_matrix`` after value-key reconstruction.
+
+        ``rht_matrix`` is a ``torch.Tensor`` built from ``_with_random_sign_mask``
+        and the device, so it cannot be part of the (hashable) value key.
+        ``_rebuild_quantizer`` calls this hook to rebuild it; the ``lru_cache`` on
+        :func:`get_rht_matrix` makes an already-seen (flag, device) a cheap hit.
+        """
+        self.rht_matrix = get_rht_matrix(self._with_random_sign_mask, torch.cuda.current_device())
 
     def update_quantized(
         self,
@@ -332,6 +344,30 @@ class NVFP4Quantizer(Quantizer):
 
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         return NVFP4BlockScaling
+
+    def _value_fields(self) -> Tuple[str, ...]:
+        # ``amax_reduction_group`` is intentionally excluded: it is a deprecated
+        # process group, not a value (``_value_key`` rejects a stored group).
+        # ``rht_matrix_random_sign_mask_t`` is a device-independent int derived
+        # from ``_with_random_sign_mask``; kept in the key so the rebuilt
+        # quantizer carries it without recomputation.
+        return (
+            "dtype",
+            "with_rht",
+            "with_post_rht_amax",
+            "with_2d_quantization",
+            "stochastic_rounding",
+            "row_scaled_nvfp4",
+            "nvfp4_use_4over6",
+            "nvfp4_e4m3_max",
+            "nvfp4_4over6_err_mode",
+            "_with_random_sign_mask",
+            "rht_matrix_random_sign_mask_t",
+            "with_amax_reduction",
+        )
+
+
+register_value_opaque_quantizer(NVFP4Quantizer)
 
 
 class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):

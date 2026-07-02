@@ -24,14 +24,18 @@ import transformer_engine_torch as tex
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.constants import FP8FwdTensorIdx, FP8BwdTensorIdx
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
+from transformer_engine.pytorch.quantization import QuantizerRole
 from transformer_engine.pytorch.ops.basic.basic_linear import BasicLinear
 from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer
-from transformer_engine.pytorch.quantization import QuantizerRole
+from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 from transformer_engine.pytorch import (
     is_fp8_available,
     is_mxfp8_available,
     is_fp8_block_scaling_available,
     is_nvfp4_available,
+    Float8Quantizer,
+    Float8BlockQuantizer,
+    MXFP8Quantizer,
 )
 from utils import recipe_id
 
@@ -384,3 +388,168 @@ def test_autocast_sanity(fp8_recipe):
 
     out = compiled(inp)
     out.sum().backward()
+
+
+# ---------------------------------------------------------------------------
+# Value-opaque quantizers
+# ---------------------------------------------------------------------------
+
+
+def _mxfp8(dtype=tex.DType.kFloat8E4M3):
+    return MXFP8Quantizer(fp8_dtype=dtype)
+
+
+def _blockwise(force_pow_2_scales=True):
+    return Float8BlockQuantizer(
+        fp8_dtype=tex.DType.kFloat8E4M3,
+        rowwise=True,
+        columnwise=True,
+        force_pow_2_scales=force_pow_2_scales,
+    )
+
+
+def _current_scaling(amax_epsilon=0.0):
+    return Float8CurrentScalingQuantizer(
+        fp8_dtype=tex.DType.kFloat8E4M3,
+        device=torch.device("cpu"),
+        amax_epsilon=amax_epsilon,
+    )
+
+
+def _nvfp4(with_rht=True):
+    # Default with_rht=True so the quantize round-trip below exercises the
+    # derived ``rht_matrix`` tensor (the field most likely to be dropped on
+    # value-key reconstruction).
+    return NVFP4Quantizer(
+        fp4_dtype=tex.DType.kFloat4E2M1,
+        rowwise=True,
+        columnwise=True,
+        with_rht=with_rht,
+    )
+
+
+def _hw_available(quantizer):
+    """Whether this HW can actually run the quantize kernel for *quantizer*."""
+    if isinstance(quantizer, MXFP8Quantizer):
+        return mxfp8_available
+    if isinstance(quantizer, NVFP4Quantizer):
+        return nvfp4_available
+    if isinstance(quantizer, Float8BlockQuantizer):
+        return fp8_block_scaling_available
+    return fp8_available  # Float8CurrentScalingQuantizer
+
+
+# (factory, kwargs producing a different-but-valid config)
+_VALUE_QUANTIZERS = [
+    pytest.param(_mxfp8, id="mxfp8"),
+    pytest.param(_blockwise, id="float8_blockwise"),
+    pytest.param(_current_scaling, id="float8_current_scaling"),
+    pytest.param(
+        _nvfp4,
+        id="nvfp4",
+        marks=pytest.mark.skipif(
+            not torch.cuda.is_available(),
+            reason="NVFP4Quantizer requires CUDA to construct",
+        ),
+    ),
+]
+
+
+@pytest.mark.parametrize("factory", _VALUE_QUANTIZERS)
+def test_quantizer_value_object(factory):
+    """Value semantics + ``__fx_repr__`` round-trip via the production FX path."""
+    a = factory()
+
+    # ``__fx_repr__`` (used by torch.compile codegen) rebuilds an equal object.
+    repr_str, globals_ = a.__fx_repr__()
+    rebuilt = eval(repr_str, dict(globals_))  # pylint: disable=eval-used
+    assert rebuilt == a and rebuilt is not a
+    assert hash(rebuilt) == hash(a)
+
+    # The rebuilt quantizer must also *behave* identically, not just compare
+    # equal: equality only looks at the value key, so a field the kernel needs
+    # but that is absent from the key (e.g. NVFP4's derived ``rht_matrix``) would
+    # slip through the checks above and only blow up at quantize time. Run the
+    # real quantize kernel on both and require bit-exact results.
+    if torch.cuda.is_available() and _hw_available(a):
+        x = torch.randn(128, 256, dtype=torch.bfloat16, device="cuda")
+        torch.testing.assert_close(rebuilt(x).dequantize(), a(x).dequantize(), rtol=0.0, atol=0.0)
+
+
+def test_value_quantizer_rejects_process_group():
+    """A value quantizer holding a live ProcessGroup must refuse to be turned
+    into a value key / FX constant (raise), not silently drop the group."""
+    import torch.distributed as dist  # pylint: disable=import-outside-toplevel
+
+    created = not dist.is_initialized()
+    if created:
+        dist.init_process_group(backend="gloo", store=dist.HashStore(), rank=0, world_size=1)
+    try:
+        q = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        q.amax_reduction_group = dist.group.WORLD
+        # Every value-materialization path must reject it (hash, eq, __fx_repr__).
+        with pytest.raises(TypeError):
+            hash(q)
+        with pytest.raises(TypeError):
+            q.__fx_repr__()
+    finally:
+        if created:
+            dist.destroy_process_group()
+
+
+if _opaque_available:
+    # A minimal custom op taking a tensor and a value-opaque quantizer that
+    # quantizes + dequantizes inside it, one per production quantizer class.
+    # ``test_quantizer_value_object_fullgraph`` drives this under
+    # ``torch.compile(fullgraph=True)`` so the quantizer is used *inside* the
+    # graph -- proving the opaque-type registration took effect (a graph break
+    # would make ``fullgraph=True`` raise).
+    _qdq_lib = torch.library.Library("test_te_qdq", "DEF")
+    _QDQ_OPS = {}
+    for _qcls in (
+        MXFP8Quantizer,
+        Float8BlockQuantizer,
+        Float8CurrentScalingQuantizer,
+        NVFP4Quantizer,
+    ):
+        _op = f"qdq_{_qcls.__name__}"
+        _qdq_lib.define(f"{_op}(Tensor x, {get_opaque_type_name(_qcls)} q) -> Tensor")
+
+        @torch.library.impl(f"test_te_qdq::{_op}", "CompositeExplicitAutograd", lib=_qdq_lib)
+        def _qdq_impl(x, q):
+            return q(x).dequantize()
+
+        @torch.library.register_fake(f"test_te_qdq::{_op}", lib=_qdq_lib)
+        def _qdq_fake(x, q):
+            return torch.empty_like(x)
+
+        _QDQ_OPS[_qcls] = getattr(torch.ops.test_te_qdq, _op)
+
+
+@pytest.mark.skipif(
+    not _opaque_available,
+    reason="torch.compile opaque-object support requires PyTorch >= 2.11",
+)
+@pytest.mark.parametrize("factory", _VALUE_QUANTIZERS)
+def test_quantizer_value_object_fullgraph(factory):
+    """Quantizer is usable *inside* a torch.compile(fullgraph=True) graph.
+
+    A custom op quantizes+dequantizes with the (opaque value) quantizer; the
+    compiled result must match eager. ``fullgraph=True`` raises on any graph
+    break, so this proves the opaque-type registration actually took effect --
+    unlike merely passing the quantizer through.
+    """
+    q = factory()
+    if not (torch.cuda.is_available() and _hw_available(q)):
+        pytest.skip("format not supported on this HW")
+
+    op = _QDQ_OPS[type(q)]
+    x = torch.randn(128, 256, dtype=torch.bfloat16, device="cuda")
+
+    def fn(inp):
+        return op(inp, q)
+
+    ref = fn(x)
+    torch._dynamo.reset()
+    out = torch.compile(fn, fullgraph=True)(x)
+    torch.testing.assert_close(out, ref, rtol=0.0, atol=0.0)
