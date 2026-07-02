@@ -436,6 +436,24 @@ def _get_fp32_zeros_tensor(num_tensors: int, device: torch.device) -> torch.Tens
     return torch.zeros(num_tensors, dtype=torch.float32, device=device)
 
 
+@functools.lru_cache(maxsize=None)
+def _get_grouped_gemm_setup_workspace(device: int, num_tensors: int) -> torch.Tensor:
+    """Persistent setup workspace (per-group pointer/dim arrays) for grouped-tensor GEMM.
+
+    This must not be allocated per call: under CUDA-graph capture a per-call
+    allocation's block returns to the shared capture pool as soon as the Python
+    reference dies, so the forward and backward graphs can alias the same block
+    and the captured GEMM's pointer/dimension arrays get overwritten at replay.
+    Consecutive GEMMs reusing one workspace are ordered by the stream, matching
+    how the non-grouped path shares its cached cuBLAS workspace.
+    """
+    return torch.empty(
+        get_grouped_gemm_setup_workspace_size(num_tensors),
+        dtype=torch.uint8,
+        device=device,
+    )
+
+
 def general_grouped_gemm_for_grouped_tensor(
     A,
     B,
@@ -525,16 +543,10 @@ def general_grouped_gemm_for_grouped_tensor(
     if not alpha.is_cuda or not beta.is_cuda:
         raise ValueError("alpha and beta must be CUDA tensors.")
 
-    workspace_setup = torch.empty(
-        get_grouped_gemm_setup_workspace_size(num_tensors),
-        dtype=torch.uint8,
-        device=device,
-    )
-    workspace_cublas = torch.empty(
-        get_cublas_workspace_size_bytes(),
-        dtype=torch.uint8,
-        device=device,
-    )
+    workspace_setup = _get_grouped_gemm_setup_workspace(device.index, num_tensors)
+    # Shares the cached per-device workspace with the non-grouped GEMM path
+    # (persistent for the same CUDA-graph reason as the setup workspace).
+    workspace_cublas = get_cublas_workspace(device.index, False, False)
 
     sm_count = get_sm_count()
     sm_count = sm_count - int(os.getenv("NVTE_EXT_MARGIN_SM", str(sm_count)))
