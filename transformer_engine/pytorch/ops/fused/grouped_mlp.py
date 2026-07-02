@@ -43,11 +43,14 @@ from ..basic import (
 from ..fuser import register_forward_backward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
 from .._common import (
+    GRAD_INPUT_BUFFER_KEY,
+    OUTPUT_BUFFER_KEY,
     get_accumulate_flag_in_param,
     get_dummy_wgrads_for_params,
     get_main_grad_from_param,
     is_quantized_tensor,
     maybe_dequantize,
+    validate_or_alloc_output,
     view_main_grad_as_grouped_buffer,
 )
 
@@ -763,7 +766,9 @@ def fuse_grouped_mlp_ops(
 class _GroupedMLP_CuTeGEMMBase(FusedOperation):
     """Joint fused op for block-scaled GroupedLinear + activation + GroupedLinear.
 
-    Uses experimental CuTe DSL kernels from cuDNN front-end.
+    MXFP8 uses CuTe DSL grouped-GEMM kernels via the cuDNN front-end. When
+    caller output/grad_input buffers are provided, the GEMMs write into them
+    directly.
 
     """
 
@@ -873,6 +878,10 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         # Get basic operations
         fc1_op, _, fc2_op = self.basic_ops
         fc1_ctx, _activation_ctx, fc2_ctx = basic_op_ctxs
+
+        # Caller-provided buffers: FC2 forward output and FC1 backward grad-input.
+        output_buffer = basic_op_kwargs[-1].get(OUTPUT_BUFFER_KEY)
+        fc1_ctx.dgrad_out = basic_op_kwargs[0].get(GRAD_INPUT_BUFFER_KEY)
 
         # Tensor properties
         fc1_weight_shape = (fc1_op.out_features, fc1_op.in_features)
@@ -1288,7 +1297,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     tensor_offsets=fc2_x_tensor_offsets,
                 )
 
-            fc2_out_buf = torch.empty(fc2_out_shape, dtype=dtype, device=device)
+            fc2_out_buf = validate_or_alloc_output(output_buffer, fc2_out_shape, dtype, device)
             if (
                 num_groups == 1
                 and grouped_fc2_x.columnwise_data is not None
@@ -1316,9 +1325,9 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                         fc2_bias_packed.transpose(0, 1).contiguous().expand(in_shape[0], -1)
                     )
                     if fc2_scales is not None:
-                        fc2_out_buf = fc2_out_buf + token_bias * fc2_scales.view(-1, 1)
+                        fc2_out_buf += token_bias * fc2_scales.view(-1, 1)
                     else:
-                        fc2_out_buf = fc2_out_buf + token_bias
+                        fc2_out_buf += token_bias
             else:
                 fc2_out_grouped = GroupedTensorStorage(
                     shape=(in_shape[0], fc2_weight_shape[0]),
@@ -1421,8 +1430,23 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc2_quant_kwargs["b_dtype"] = torch.float8_e4m3fn
                 fc2_quant_kwargs["b_major"] = "k"
 
+            if output_buffer is not None:
+                # Kernel writes directly into the caller buffer, so no copy.
+                output_buffer = validate_or_alloc_output(
+                    output_buffer, fc2_out_shape, dtype, device
+                )
+                fc2_quant_kwargs["d_tensor"] = output_buffer.as_strided(
+                    (in_shape[0], fc2_weight_shape[0], 1),
+                    (fc2_weight_shape[0], 1, in_shape[0] * fc2_weight_shape[0]),
+                )
+
             fc2_kernel_out = self.grouped_gemm_quant_kernel()(**fc2_quant_kwargs)
-            fc2_out = fc2_kernel_out["d_tensor"].permute(2, 0, 1).view(fc2_out_shape).contiguous()
+            if output_buffer is not None:
+                fc2_out = output_buffer
+            else:
+                fc2_out = (
+                    fc2_kernel_out["d_tensor"].permute(2, 0, 1).view(fc2_out_shape).contiguous()
+                )
 
         # Save state for backward pass
         if requires_grad:
@@ -1949,11 +1973,12 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
 
         # FC1 dgrad GEMM
         grad_input = None
+        grad_input_buffer = getattr(fc1_ctx, "dgrad_out", None)
         if fc1_ctx.input_requires_grad:
             in_shape = out_shape[:-1] + [fc1_weight_shape[1]]
 
             if use_nvfp4:
-                grad_input = torch.empty(in_shape, dtype=dtype, device=device)
+                grad_input = validate_or_alloc_output(grad_input_buffer, in_shape, dtype, device)
                 if num_groups == 1:
                     if fc1_op.single_grouped_weight:
                         fc1_w_single = grouped_fc1_weight.split_into_quantized_tensors()[0]
@@ -2050,8 +2075,21 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     fc1_dgrad_kwargs["b_dtype"] = torch.float8_e4m3fn
                     fc1_dgrad_kwargs["b_major"] = "n"
 
+                if grad_input_buffer is not None:
+                    # Kernel writes directly into the caller buffer, so no copy.
+                    grad_input_buffer = validate_or_alloc_output(
+                        grad_input_buffer, in_shape, dtype, device
+                    )
+                    fc1_dgrad_kwargs["d_tensor"] = grad_input_buffer.as_strided(
+                        (out_shape[0], fc1_weight_shape[1], 1),
+                        (fc1_weight_shape[1], 1, out_shape[0] * fc1_weight_shape[1]),
+                    )
+
                 fc1_dgrad_kernel_out = self.grouped_gemm_quant_kernel()(**fc1_dgrad_kwargs)
-                grad_input = fc1_dgrad_kernel_out["d_tensor"].view(in_shape)
+                if grad_input_buffer is not None:
+                    grad_input = grad_input_buffer
+                else:
+                    grad_input = fc1_dgrad_kernel_out["d_tensor"].view(in_shape)
 
         # FC1 wgrad GEMM
         fc1_grad_params = _compute_grad_params(

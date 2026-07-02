@@ -43,11 +43,14 @@ from ...utils import (
     round_up_to_nearest_multiple,
 )
 from .._common import (
+    GRAD_INPUT_BUFFER_KEY,
+    OUTPUT_BUFFER_KEY,
     get_accumulate_flag_in_param,
     get_dummy_wgrads_for_params,
     get_main_grad_from_param,
     is_quantized_tensor,
     maybe_dequantize,
+    validate_or_alloc_output,
     view_main_grad_as_grouped_buffer,
 )
 from ..op import BasicOperation, OperationContext
@@ -980,6 +983,9 @@ class GroupedLinear(BasicOperation):
         if self._scale_bias:
             scales = basic_op_extra_inputs[0][1]
 
+        # Caller-provided output buffer (backward grad-input buffer is read in save_ctx).
+        out_buffer = basic_op_kwargs[0].get(OUTPUT_BUFFER_KEY)
+
         # Dispatch: graph-safe GroupedTensor flow whenever it can be used.
         # See ``_is_graph_safe_path_supported`` for the gating rationale --
         # in short it requires Hopper (SM90+) plus a supported dtype /
@@ -1004,6 +1010,7 @@ class GroupedLinear(BasicOperation):
                 input_requires_grad=input_requires_grad,
                 weight_requires_grad=weight_requires_grad,
                 device=device,
+                out_buffer=out_buffer,
             )
         else:
             out, tensors_to_save = self._fuser_forward_split_quantize(
@@ -1017,6 +1024,7 @@ class GroupedLinear(BasicOperation):
                 input_requires_grad=input_requires_grad,
                 weight_requires_grad=weight_requires_grad,
                 device=device,
+                out_buffer=out_buffer,
             )
 
         # Save tensors and autograd metadata on the basic-op context.
@@ -1105,6 +1113,8 @@ class GroupedLinear(BasicOperation):
             ctx.dtype = weight_param.dtype
         ctx.input_requires_grad = requires_grad[0]
         ctx.weight_requires_grad = requires_grad[0] and weight_param.requires_grad
+        # Caller-provided backward grad-input buffer.
+        ctx.dgrad_out = basic_op_kwargs[0].get(GRAD_INPUT_BUFFER_KEY)
 
     # ==================================================================
     # Legacy `tex.split_quantize` + `general_grouped_gemm` flow.
@@ -1123,6 +1133,7 @@ class GroupedLinear(BasicOperation):
         input_requires_grad: bool,
         weight_requires_grad: bool,
         device: torch.device,
+        out_buffer: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, tuple[Optional[torch.Tensor], ...]]:
         """Legacy ``tex.split_quantize`` + ``general_grouped_gemm`` flow."""
         num_groups = self.num_groups
@@ -1167,7 +1178,7 @@ class GroupedLinear(BasicOperation):
         # Allocate output tensor
         in_shape = list(input_.size())
         out_shape = in_shape[:-1] + [self.out_features]
-        out = torch.empty(out_shape, dtype=dtype, device=device)
+        out = validate_or_alloc_output(out_buffer, out_shape, dtype, device)
 
         # Perform GEMMs
         use_gemm_bias = has_bias and not self._scale_bias
@@ -1233,6 +1244,7 @@ class GroupedLinear(BasicOperation):
         input_requires_grad: bool,
         weight_requires_grad: bool,
         device: torch.device,
+        out_buffer: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, tuple[Optional[torch.Tensor], ...]]:
         """Graph-safe GroupedTensor forward path (pure compute).
         Returns ``(output, tensors_to_save)``. ``split_sizes``,
@@ -1293,7 +1305,7 @@ class GroupedLinear(BasicOperation):
 
         # Allocate output buffer and wrap as a GroupedTensor view.
         out_shape = original_shape[:-1] + [self.out_features]
-        out = torch.empty(out_shape, dtype=dtype, device=device)
+        out = validate_or_alloc_output(out_buffer, out_shape, dtype, device)
         grouped_out = GroupedTensorStorage(
             shape=(total_tokens, self.out_features),
             dtype=dtype,
@@ -1483,10 +1495,8 @@ class GroupedLinear(BasicOperation):
         if ctx.input_requires_grad:
             out_shape = list(grad_output.size())
             in_shape = out_shape[:-1] + [self.in_features]
-            grad_input = torch.empty(
-                in_shape,
-                dtype=ctx.dtype,
-                device=device,
+            grad_input = validate_or_alloc_output(
+                getattr(ctx, "dgrad_out", None), in_shape, ctx.dtype, device
             )
             general_grouped_gemm(
                 ws,
@@ -1662,7 +1672,9 @@ class GroupedLinear(BasicOperation):
         grad_input = None
         if ctx.input_requires_grad:
             grad_input_shape = list(grad_output.size())[:-1] + [self.in_features]
-            grad_input = torch.empty(grad_input_shape, dtype=dtype, device=device)
+            grad_input = validate_or_alloc_output(
+                getattr(ctx, "dgrad_out", None), grad_input_shape, dtype, device
+            )
             grouped_grad_input = GroupedTensorStorage(
                 shape=(total_tokens, self.in_features),
                 dtype=dtype,

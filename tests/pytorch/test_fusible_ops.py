@@ -19,6 +19,10 @@ import torch
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.ops as te_ops
+from transformer_engine.pytorch.ops._common import (
+    OUTPUT_BUFFER_KEY,
+    GRAD_INPUT_BUFFER_KEY,
+)
 from transformer_engine.pytorch._extra_state import UNSAFE_PICKLE_EXTRA_STATE_ENV
 
 from transformer_engine.pytorch.ops.fused import (
@@ -2195,6 +2199,86 @@ class TestBasicOps:
             assert_close_grads(getattr(op, f"weight{group_idx}"), ws_ref[group_idx], **tols)
             if bias:
                 assert_close_grads(getattr(op, f"bias{group_idx}"), bs_ref[group_idx], **tols)
+
+    def test_grouped_linear_caller_buffers(
+        self,
+        *,
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",
+    ) -> None:
+        """Caller output/grad_input buffers routed to the last/first op of a Sequential.
+
+        The chain has two GroupedLinears with distinct inner dims, so ``output``
+        can only fit the last op's output and ``grad_input`` only the first op's
+        dgrad -- a mis-route would fail the buffer's shape check.
+        """
+        group_size = 3
+        in_features, hidden, out_features = 128, 256, 64
+        split_sizes = torch.tensor([128, 256, 128], dtype=torch.int32, device=device)
+        num_tokens = int(split_sizes.sum())
+
+        torch.manual_seed(1234)
+        x = (0.1 * torch.randn(num_tokens, in_features, device=device)).to(dtype)
+        dy = (0.1 * torch.randn(num_tokens, out_features, device=device)).to(dtype)
+
+        def build() -> te_ops.Sequential:
+            fc1 = te_ops.GroupedLinear(
+                group_size, in_features, hidden, bias=False, device=device, dtype=dtype
+            )
+            fc2 = te_ops.GroupedLinear(
+                group_size, hidden, out_features, bias=False, device=device, dtype=dtype
+            )
+            return te_ops.Sequential(fc1, fc2)
+
+        # Reference: internal allocation.
+        model_ref = build()
+        x_ref = x.detach().clone().requires_grad_(True)
+        y_ref = model_ref(x_ref, split_sizes, split_sizes)
+        y_ref.backward(dy)
+
+        # Caller-provided buffers, same weights as the reference.
+        model = build()
+        with torch.no_grad():
+            for op_idx in range(2):
+                for i in range(group_size):
+                    getattr(model[op_idx], f"weight{i}").copy_(
+                        getattr(model_ref[op_idx], f"weight{i}")
+                    )
+        sentinel = 7.0
+        out_buf = torch.full((num_tokens, out_features), sentinel, dtype=dtype, device=device)
+        dgrad_buf = torch.full((num_tokens, in_features), sentinel, dtype=dtype, device=device)
+        x_test = x.detach().clone().requires_grad_(True)
+        y = model(
+            x_test,
+            split_sizes,
+            split_sizes,
+            op_kwargs={
+                model[0]: {GRAD_INPUT_BUFFER_KEY: dgrad_buf},
+                model[1]: {OUTPUT_BUFFER_KEY: out_buf},
+            },
+        )
+
+        # Forward output aliases the last op's output buffer with no copy.
+        assert y.data_ptr() == out_buf.data_ptr()
+        torch.testing.assert_close(y, y_ref, rtol=0, atol=0)
+
+        y.backward(dy)
+
+        # grad_input written into the first op's dgrad buffer.
+        assert not torch.all(dgrad_buf == sentinel)
+        torch.testing.assert_close(dgrad_buf, x_ref.grad, rtol=0, atol=0)
+        torch.testing.assert_close(x_test.grad, x_ref.grad, rtol=0, atol=0)
+
+        # A buffer whose shape does not match the output is rejected.
+        bad = torch.empty(num_tokens + 1, out_features, dtype=dtype, device=device)
+        with pytest.raises(ValueError):
+            model_bad = build()
+            model_bad(
+                x.detach(),
+                split_sizes,
+                split_sizes,
+                op_kwargs={model_bad[1]: {OUTPUT_BUFFER_KEY: bad}},
+            )
 
     @pytest.mark.parametrize("in_shape", ((71, 192), (5, 7, 128)))
     @pytest.mark.parametrize("input_requires_grad", (False, True))
