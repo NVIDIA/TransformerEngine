@@ -374,9 +374,11 @@ __device__ __forceinline__ bool job_has_work(const JobDescriptor &job) {
   return job.rows != 0 && job.cols != 0;
 }
 
-__device__ __forceinline__ void linear_block_id_to_reverse_y_cta_coords(
-    const size_t block_id, const size_t work_blocks_X, const size_t work_blocks_Y,
-    int32_t &ctaid_X, int32_t &ctaid_Y) {
+__device__ __forceinline__ void linear_block_id_to_reverse_y_cta_coords(const size_t block_id,
+                                                                        const size_t work_blocks_X,
+                                                                        const size_t work_blocks_Y,
+                                                                        int32_t &ctaid_X,
+                                                                        int32_t &ctaid_Y) {
   ctaid_X = static_cast<int32_t>(block_id % work_blocks_X);
   ctaid_Y = static_cast<int32_t>(work_blocks_Y - 1 - block_id / work_blocks_X);
 }
