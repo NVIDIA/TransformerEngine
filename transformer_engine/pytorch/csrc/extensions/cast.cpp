@@ -166,8 +166,7 @@ void multi_tensor_quantize_impl(const std::vector<TensorWrapper> &input_list,
     }
 
     if (blockwise_quantizer->dtype != first_blockwise_quantizer->dtype ||
-        blockwise_quantizer->force_pow_2_scales !=
-            first_blockwise_quantizer->force_pow_2_scales ||
+        blockwise_quantizer->force_pow_2_scales != first_blockwise_quantizer->force_pow_2_scales ||
         blockwise_quantizer->amax_epsilon != first_blockwise_quantizer->amax_epsilon ||
         blockwise_quantizer->all_gather_usage != first_blockwise_quantizer->all_gather_usage ||
         blockwise_quantizer->rowwise_usage != first_blockwise_quantizer->rowwise_usage ||

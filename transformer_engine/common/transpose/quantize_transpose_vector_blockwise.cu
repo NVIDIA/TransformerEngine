@@ -213,10 +213,9 @@ __device__ __forceinline__ void block_scaled_1d_cast_transpose_impl(
     constexpr int r_stride = kThreadsPerBlock / kNumThreadsLoad;  // stride in rows of shared memory
     constexpr int num_iterations = kTileDim / r_stride;
     const int c_s =
-        (threadIdx.x % kNumThreadsLoad) * (kNVecIn / kNVecSMem);  // Column in shared memory
-    int r_s = threadIdx.x / kNumThreadsLoad;                      // Row in shared memory
-    const size_t c_g =
-        tile_idx_x * kTileDim + c_s * kNVecSMem;                         // Column in global memory
+        (threadIdx.x % kNumThreadsLoad) * (kNVecIn / kNVecSMem);         // Column in shared memory
+    int r_s = threadIdx.x / kNumThreadsLoad;                             // Row in shared memory
+    const size_t c_g = tile_idx_x * kTileDim + c_s * kNVecSMem;          // Column in global memory
     size_t r_g = tile_idx_y * kTileDim + r_s;                            // Row in global memory
     const size_t stride_g = static_cast<size_t>(r_stride) * row_length;  // Stride in global memory
     const size_t num_ele = c_g < row_length ? min(static_cast<size_t>(kNVecIn), row_length - c_g)
@@ -259,10 +258,9 @@ __device__ __forceinline__ void block_scaled_1d_cast_transpose_impl(
         kThreadsPerBlock / kNumThreadsStore;  // stride in rows of shared memory
     constexpr int num_iterations = kTileDim / r_stride;
     const int c_s =
-        (threadIdx.x % kNumThreadsStore) * (kNVecOut / kNVecSMem);  // Column in shared memory
-    int r_s = threadIdx.x / kNumThreadsStore;                       // Row in shared memory
-    const size_t c_g =
-        tile_idx_x * kTileDim + c_s * kNVecSMem;                         // Column in global memory
+        (threadIdx.x % kNumThreadsStore) * (kNVecOut / kNVecSMem);       // Column in shared memory
+    int r_s = threadIdx.x / kNumThreadsStore;                            // Row in shared memory
+    const size_t c_g = tile_idx_x * kTileDim + c_s * kNVecSMem;          // Column in global memory
     size_t r_g = tile_idx_y * kTileDim + r_s;                            // Row in global memory
     const size_t stride_g = static_cast<size_t>(r_stride) * row_length;  // Stride in global memory
     const size_t num_ele = c_g < row_length ? min(static_cast<size_t>(kNVecOut), row_length - c_g)
@@ -351,9 +349,8 @@ __device__ __forceinline__ void block_scaled_1d_cast_transpose_impl(
     constexpr int num_iterations = kTileDim / (c_stride * kNVecSMem);
     const int r_s = (threadIdx.x % kNumThreadsStore) * kNVecOut;  // Row in shared memory
     int c_s = threadIdx.x / kNumThreadsStore;                     // Column in shared memory
-    size_t r_g =
-        tile_idx_x * kTileDim + c_s * kNVecSMem;                          // Row in global memory
-    const size_t c_g = tile_idx_y * kTileDim + r_s;                       // Column in global memory
+    size_t r_g = tile_idx_x * kTileDim + c_s * kNVecSMem;         // Row in global memory
+    const size_t c_g = tile_idx_y * kTileDim + r_s;               // Column in global memory
     const size_t stride_g =
         static_cast<size_t>(c_stride) * kNVecSMem * num_rows;  // Stride in global memory
     const size_t num_ele = c_g < num_rows ? min(static_cast<size_t>(kNVecOut), num_rows - c_g)
@@ -447,11 +444,10 @@ __device__ __forceinline__ void block_scaled_1d_cast_transpose_impl(
                   "num_iterations should be 1 for columnwise non-transpose case");
     const int thr_idx_in_warp = threadIdx.x % kThreadsPerWarp;
     const int warp_idx = threadIdx.x / kThreadsPerWarp;
-    const int r_s = thr_idx_in_warp * kThreadTileRow;               // Row in shared memory
-    int c_s = warp_idx * num_smem_reads;                            // Column in shared memory
-    size_t r_g = tile_idx_y * kTileDim + r_s;                       // Row in global memory
-    const size_t c_g =
-        tile_idx_x * kTileDim + c_s * kNVecSMem;                      // Column in global memory
+    const int r_s = thr_idx_in_warp * kThreadTileRow;            // Row in shared memory
+    int c_s = warp_idx * num_smem_reads;                         // Column in shared memory
+    size_t r_g = tile_idx_y * kTileDim + r_s;                    // Row in global memory
+    const size_t c_g = tile_idx_x * kTileDim + c_s * kNVecSMem;  // Column in global memory
     const size_t num_ele = c_g < row_length
                                ? min(static_cast<size_t>(kThreadTileCol), row_length - c_g)
                                : 0;  // For not aligned case
@@ -554,10 +550,12 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
 }
 
 template <bool kAligned, typename CType, typename IType, typename OType>
-__global__ void __launch_bounds__(kThreadsPerBlock) multi_block_scaled_1d_cast_transpose_kernel(
-    MultiBlockwiseQuantizeArgs args, const float epsilon,
-    FP8BlockwiseRowwiseOption rowwise_option, FP8BlockwiseColumnwiseOption columnwise_option,
-    const bool pow_2_scaling, const float* noop_ptr) {
+__global__ void __launch_bounds__(kThreadsPerBlock)
+    multi_block_scaled_1d_cast_transpose_kernel(MultiBlockwiseQuantizeArgs args,
+                                                const float epsilon,
+                                                FP8BlockwiseRowwiseOption rowwise_option,
+                                                FP8BlockwiseColumnwiseOption columnwise_option,
+                                                const bool pow_2_scaling, const float* noop_ptr) {
   // skip execution if noop
   if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) {
     return;
@@ -742,10 +740,9 @@ void quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor
 }
 
 void multi_quantize_transpose_vector_blockwise(
-    const std::vector<Tensor*>& input_list, std::vector<Tensor*>& output_list,
-    const float epsilon, FP8BlockwiseRowwiseOption rowwise_option,
-    FP8BlockwiseColumnwiseOption columnwise_option, const bool pow2_scale,
-    const SimpleTensor& noop_tensor, cudaStream_t stream) {
+    const std::vector<Tensor*>& input_list, std::vector<Tensor*>& output_list, const float epsilon,
+    FP8BlockwiseRowwiseOption rowwise_option, FP8BlockwiseColumnwiseOption columnwise_option,
+    const bool pow2_scale, const SimpleTensor& noop_tensor, cudaStream_t stream) {
   NVTE_API_CALL(multi_quantize_transpose_vector_blockwise);
 
   NVTE_CHECK(input_list.size() == output_list.size(),
@@ -800,12 +797,11 @@ void multi_quantize_transpose_vector_blockwise(
             output_dtype, OutputType,
             TRANSFORMER_ENGINE_SWITCH_CONDITION(
                 aligned, kAligned,
-                launch_multi_block_scaled_1d_cast_transpose_kernel<kAligned, InputType,
-                                                                   OutputType>(
+                launch_multi_block_scaled_1d_cast_transpose_kernel<kAligned, InputType, OutputType>(
                     args, epsilon, rowwise_option, columnwise_option, pow2_scale, noop_ptr,
                     stream);)  // kAligned
-        )                      // OutputType
-    )                          // InputType
+            )                  // OutputType
+        )                      // InputType
     reset_kernel_args(args);
   };
 
@@ -816,8 +812,8 @@ void multi_quantize_transpose_vector_blockwise(
     auto& scale_inv = output_list[tensor_id]->scale_inv;
     auto& scale_inv_t = output_list[tensor_id]->columnwise_scale_inv;
 
-    NVTE_CHECK(output_list[tensor_id]->scaling_mode == NVTE_BLOCK_SCALING_1D,
-               "Output tensor ", tensor_id, " must use 1D block scaling.");
+    NVTE_CHECK(output_list[tensor_id]->scaling_mode == NVTE_BLOCK_SCALING_1D, "Output tensor ",
+               tensor_id, " must use 1D block scaling.");
     NVTE_CHECK(input.dtype == input_dtype, "Input tensor types do not match.");
 
     const size_t row_length = input.shape.size() > 0 ? input.shape.at(input.shape.size() - 1) : 1u;
@@ -965,17 +961,16 @@ void nvte_multi_quantize_transpose_vector_blockwise(size_t num_tensors,
     return_columnwise |= output->has_columnwise_data();
   }
 
-  const bool compact = quant_config_cpp.float8_block_scale_tensor_format ==
-                       Float8BlockScaleTensorFormat::COMPACT;
+  const bool compact =
+      quant_config_cpp.float8_block_scale_tensor_format == Float8BlockScaleTensorFormat::COMPACT;
   const auto rowwise_option =
       return_rowwise ? (compact ? detail::FP8BlockwiseRowwiseOption::ROWWISE_COMPACT
                                 : detail::FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY)
                      : detail::FP8BlockwiseRowwiseOption::NONE;
   const auto columnwise_option =
-      return_columnwise
-          ? (compact ? detail::FP8BlockwiseColumnwiseOption::COLUMNWISE_COMPACT
-                     : detail::FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY)
-          : detail::FP8BlockwiseColumnwiseOption::NONE;
+      return_columnwise ? (compact ? detail::FP8BlockwiseColumnwiseOption::COLUMNWISE_COMPACT
+                                   : detail::FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY)
+                        : detail::FP8BlockwiseColumnwiseOption::NONE;
 
   detail::multi_quantize_transpose_vector_blockwise(
       input_list_, output_list_, quant_config_cpp.amax_epsilon, rowwise_option, columnwise_option,
