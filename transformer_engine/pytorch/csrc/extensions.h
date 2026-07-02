@@ -192,6 +192,29 @@ py::object te_general_grouped_gemm_for_discrete_out(py::handle A, bool transa, p
                                                     bool use_split_accumulator, int math_sm_count);
 
 /***************************************************************************************************
+ * Mega C++ grouped MLP
+ **************************************************************************************************/
+
+std::vector<at::Tensor> megacpp_grouped_mlp_forward(
+    const at::Tensor &input, at::ScalarType act_dtype, const at::Tensor &split_sizes,
+    py::handle fc1_weight, py::handle fc1_bias, py::handle fc2_weight, py::handle fc2_bias,
+    const std::optional<at::Tensor> &act_scales, const std::string &activation,
+    int64_t glu_interleave_size, double activation_limit, double activation_alpha,
+    double activation_glu_linear_offset, py::handle gemm_scratch);
+
+py::tuple megacpp_grouped_mlp_backward(
+    const at::Tensor &grad_output, at::ScalarType act_dtype, const at::Tensor &split_sizes,
+    const at::Tensor &x_offsets, const at::Tensor &fc1_offsets, const at::Tensor &fc2_offsets,
+    const at::Tensor &fc2_dy_offsets, const at::Tensor &base_offsets, const at::Tensor &x,
+    const at::Tensor &fc1_activation_input, const at::Tensor &fc2_x,
+    const std::optional<at::Tensor> &act_scales, py::handle fc1_weight, py::handle fc2_weight,
+    py::handle fc1_wgrad_output, bool fc1_compute_wgrad, bool fc1_accumulate_wgrad,
+    py::handle fc2_wgrad_output, bool fc2_compute_wgrad, bool fc2_accumulate_wgrad,
+    const std::string &activation, int64_t glu_interleave_size, double activation_limit,
+    double activation_alpha, double activation_glu_linear_offset, bool act_scales_requires_grad,
+    bool input_requires_grad, py::handle gemm_scratch);
+
+/***************************************************************************************************
  * Transpose
  **************************************************************************************************/
 
