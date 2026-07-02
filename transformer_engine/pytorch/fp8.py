@@ -30,6 +30,7 @@ from transformer_engine.common.recipe import (
     Float8CurrentScaling,
     Float8BlockScaling,
     NVFP4BlockScaling,
+    NVFP4PerTokenBlockScaling,
     CustomRecipe,
 )
 

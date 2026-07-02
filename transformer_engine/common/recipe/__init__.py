@@ -139,6 +139,14 @@ class Recipe:
         return issubclass(cls, NVFP4BlockScaling)
 
     @classmethod
+    def nvfp4_per_token(cls):
+        """Whether the given recipe is NVFP4 per-token cast (replaces the per-tensor 1A/2A paths)."""
+        # Defined as a class method so callers can switch on the recipe
+        # *type* (Recipe.nvfp4_per_token() called on the class itself)
+        # the same way they do for ``nvfp4()``.
+        return False
+
+    @classmethod
     def mxfp8(cls):
         """Whether the given recipe is MXFP8 block scaling."""
         return issubclass(cls, MXFP8BlockScaling)
@@ -550,6 +558,28 @@ class NVFP4BlockScaling(Recipe):
         os.getenv("NVTE_NVFP4_DISABLE_STOCHASTIC_ROUNDING", "0") == "1"
     )
     disable_2d_quantization: bool = os.getenv("NVTE_NVFP4_DISABLE_2D_QUANTIZATION", "0") == "1"
+    # Per-token only: opt INTO RHT. Per-token otherwise force-disables RHT (its
+    # per-row outer amax already mitigates the long-tail outliers RHT targets),
+    # but the per-token cast kernel DOES support RHT, so this flag lets callers
+    # turn it back on. Env-driven (NVTE_NVFP4_PER_TOKEN_RHT=1) so frameworks that
+    # only construct a default NVFP4BlockScaling (e.g. Megatron-Core) can flip it
+    # without code changes. No effect on the non-per-token path.
+    per_token_rht: bool = os.getenv("NVTE_NVFP4_PER_TOKEN_RHT", "0") == "1"
+    # Per-token only: opt INTO stochastic rounding. Per-token otherwise
+    # force-disables SR, but the per-token K2 encode kernel DOES implement SR
+    # (Philox-dithered FP4 cast), so this flag re-enables it on the bwd-grad
+    # quantizer (the default non-per-token recipe also applies SR to
+    # fp4_quant_bwd_grad only).
+    # Env-driven (NVTE_NVFP4_PER_TOKEN_SR=1) for the same reason as per_token_rht
+    # above. No effect on the non-per-token path.
+    per_token_sr: bool = os.getenv("NVTE_NVFP4_PER_TOKEN_SR", "0") == "1"
+    # Per-token only: quantize the forward WEIGHT with the per-tensor 2D cast
+    # (16x16 inner + scalar outer amax) instead of the per-token 1D cast, emitted in
+    # per-token layout so the per-token CUTLASS GEMM consumes it unchanged. 2D
+    # weight quant is transposition-invariant, so fwd (rowwise) and dgrad
+    # (columnwise) see the same weight, removing the 1D path's gradient bias.
+    # Env-driven (NVTE_NVFP4_PER_TOKEN_WEIGHT_2D=1); default off is byte-equal.
+    per_token_weight_2d: bool = os.getenv("NVTE_NVFP4_PER_TOKEN_WEIGHT_2D", "0") == "1"
     row_scaled_activation: bool = os.getenv("NVTE_NVFP4_ROW_SCALED_ACTIVATION", "0") == "1"
     nvfp4_4over6: str = os.getenv("NVTE_NVFP4_4OVER6", "none")
     nvfp4_4over6_e4m3_use_256: str = os.getenv("NVTE_NVFP4_4OVER6_E4M3_USE_256", "all")
@@ -563,7 +593,56 @@ class NVFP4BlockScaling(Recipe):
     fp8_mha: bool = False
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
 
+    @classmethod
+    def nvfp4_per_token(cls) -> bool:
+        """Whether this NVFP4 recipe runs the per-token cast + fused-EVT GEMM.
+
+        Two activation paths, both land here:
+
+        * Explicit recipe class ``NVFP4PerTokenBlockScaling`` overrides
+          this to return ``True`` unconditionally.
+        * Env-var ``NVTE_NVFP4_PER_TOKEN=1`` flips the *base*
+          ``NVFP4BlockScaling`` recipe into per-token mode WITHOUT any
+          recipe-class change. This lets frameworks that already build a
+          plain ``NVFP4BlockScaling`` (e.g. Megatron-core with
+          ``--fp8-recipe nvfp4``) opt into per-token purely from the
+          launch environment, no framework-side code edit.
+
+        NOTE: this only changes the *cast + GEMM dispatch* (the "routing").
+        It does NOT make per-token support features it lacks
+        (fuse_wgrad_accumulation / sequence-parallel single-direction
+        cast / comm-overlap / output-quant). Those still raise at runtime
+        regardless of how per-token was activated; the launcher must keep
+        them disabled until the per-token kernels grow that support.
+        """
+        return os.getenv("NVTE_NVFP4_PER_TOKEN", "0") == "1"
+
+    def _force_per_token_settings(self) -> None:
+        """Force-disable knobs that are mutually exclusive with per-token.
+
+        Shared by the explicit ``NVFP4PerTokenBlockScaling`` subclass and
+        the ``NVTE_NVFP4_PER_TOKEN=1`` env-var activation so the two
+        activation paths can never numerically diverge. Must run BEFORE
+        QParams construction so the forced values propagate into the
+        ``fp4_quant_*`` QParams below.
+        """
+        # RHT and SR are opt-in for per-token (both kernels support them); 2D /
+        # row_scaled / 4over6 stay hard-disabled (their per-token kernels are
+        # not implemented yet -- see NVFP4Quantizer ctor mutex).
+        object.__setattr__(self, "disable_rht", not self.per_token_rht)
+        object.__setattr__(self, "disable_stochastic_rounding", not self.per_token_sr)
+        object.__setattr__(self, "disable_2d_quantization", True)
+        object.__setattr__(self, "row_scaled_activation", False)
+        object.__setattr__(self, "nvfp4_4over6", "none")
+
     def __post_init__(self) -> None:
+        # Resolve per-token activation (recipe class OR env var) and force
+        # the mutex-incompatible knobs off BEFORE the asserts + QParams
+        # construction. ``self.nvfp4_per_token()`` dispatches
+        # polymorphically: True for the subclass, env-driven for the base.
+        if self.nvfp4_per_token():
+            self._force_per_token_settings()
+
         assert self.fp4_format == Format.E2M1, "Only E2M1 is supported for NVFP4 scaling"
         assert self.fp8_format == Format.E4M3, "Only E4M3 is supported for NVFP4 scaling"
         assert (
@@ -599,8 +678,15 @@ class NVFP4BlockScaling(Recipe):
         )
 
     def _make_repr(self) -> str:
+        # Surface per-token state even when activated via env var on the
+        # base recipe (otherwise a per-token run looks identical to a per-tensor
+        # run in logs, which is a debugging trap).
+        per_token_repr = "per_token=True, " if self.nvfp4_per_token() else ""
+        if self.nvfp4_per_token() and self.per_token_weight_2d:
+            per_token_repr += "per_token_weight_2d=True, "
         return (
             f"recipe_type={self.__class__.__name__}, "
+            f"{per_token_repr}"
             f"fp4_format={str(self.fp4_format).split('.')[1]}, "
             f"fp8_format={str(self.fp8_format).split('.')[1]}, "
             f"fp8_dpa={self.fp8_dpa}, "
@@ -614,6 +700,112 @@ class NVFP4BlockScaling(Recipe):
             f"fp4_quant_fwd_weight={self.fp4_quant_fwd_weight}, "
             f"fp4_quant_bwd_grad={self.fp4_quant_bwd_grad}, "
         )
+
+
+@dataclass(repr=False)
+class NVFP4PerTokenBlockScaling(NVFP4BlockScaling):
+    """
+    NVFP4 per-token cast variant that replaces the default per-tensor 1A
+    (single-tensor) and 2A (split_quantize) routes with the per-token
+    fast-path (K1 vector amax + K2 encode+swizzle, plus a fused EVT GEMM
+    that consumes per-row + per-col outer-amax vectors directly).
+
+    The cast emits NVFP4 tensors whose ``_amax_rowwise`` is a per-row
+    vector of length ``M`` and ``_amax_columnwise`` is a per-col vector
+    of length ``K``. cuBLASLt cannot consume these vector amaxes, so
+    downstream GEMM must dispatch to ``nvfp4_cutlass_per_token_gemm``;
+    ``general_gemm`` handles this routing automatically based on the
+    ``_per_token`` tensor flag.
+
+    Mutex constraints (enforced by both this recipe and the C++
+    ``NVFP4Quantizer`` constructor):
+      - ``disable_rht`` defaults True (per-token's per-row outer-amax
+        granularity already mitigates the long-tail outliers RHT was
+        added to flatten in the per-tensor NVFP4 path), but RHT is OPT-IN: set
+        ``per_token_rht=True`` to re-enable it. The per-token cast kernel
+        (``nvte_nvfp4_per_token_quantize``) supports RHT, and the C++
+        ``NVFP4Quantizer`` ctor does NOT mutex it (only requires
+        ``with_post_rht_amax=True``, which the quantizer factory sets
+        alongside ``with_rht``).
+      - ``disable_stochastic_rounding`` defaults True, but SR is OPT-IN:
+        set ``per_token_sr=True`` to re-enable it. The per-token K2 encode
+        kernel implements SR (Philox-dithered FP4 cast); when enabled it is
+        applied to the bwd-grad quantizer only (matching the default per-tensor
+        recipe, which only sets SR on ``fp4_quant_bwd_grad``). The C++
+        ``NVFP4Quantizer`` ctor
+        does NOT mutex it.
+      - ``disable_2d_quantization`` is forced True (2D quant is mutex
+        with per-token amax allocation).
+      - ``row_scaled_activation`` is forced False (the row-scaled
+        codepath has its own amax allocation that conflicts with
+        per-token vector amax).
+      - ``nvfp4_4over6`` is forced ``"none"`` (4over6 candidate
+        selection is mutex with per-token amax flow).
+
+    Parameters
+    ----------
+    per_token_rht : bool, default = False (env ``NVTE_NVFP4_PER_TOKEN_RHT``)
+        Opt into the random Hadamard transform on the forward activation
+        and backward gradient quantizers. Per-token disables RHT by
+        default (its per-row outer amax already mitigates the long-tail
+        outliers RHT targets).
+    per_token_sr : bool, default = False (env ``NVTE_NVFP4_PER_TOKEN_SR``)
+        Opt into stochastic rounding on the backward gradient quantizer
+        (the K2 encode kernel implements a Philox-dithered FP4 cast).
+        Per-token disables SR by default.
+    per_token_weight_2d : bool, default = False (env ``NVTE_NVFP4_PER_TOKEN_WEIGHT_2D``)
+        Quantize the forward weight with the per-tensor 2D cast (16x16
+        inner tile + scalar outer amax) emitted in per-token layout.
+        2D weight quantization is transposition-invariant, removing the
+        1D path's weight-gradient bias. Activations/gradients stay 1D.
+    backward_override : {None, 'high_precision', 'dequantized'}, default = None
+        Inherited from ``NVFP4BlockScaling``.
+
+    Notes
+    -----
+    The per-token forward path currently requires the unfused norm+amax
+    path. When training a model whose first GEMM consumes a fused
+    norm+quantize output (e.g. ``LayerNormLinear``), also set
+    ``NVTE_NORM_FWD_USE_CUDNN=1`` so the norm forward uses the unfused
+    implementation; the fused norm+amax path rejects per-token
+    quantizers at the C++ quantizer.
+
+    Per-token cast covers both forward and backward:
+
+      * fwd:  ``input`` / ``output`` / ``weight`` -> per-token cast +
+        fused-EVT CUTLASS GEMM (TN layout).
+      * bwd:  ``grad_output`` / ``grad_input`` -> per-token cast +
+        fused-EVT CUTLASS GEMM (NN layout for dgrad, NT layout for
+        wgrad). The kernel itself is layout-agnostic; the dispatch
+        in ``cpp_extensions/gemm.py:_nvfp4_per_token_gemm`` selects
+        rowwise vs columnwise quantized data + amax for each operand
+        so the contraction dim is contiguous in both kernel inputs.
+
+    Random Hadamard transform (``per_token_rht``) and stochastic
+    rounding (``per_token_sr``) are supported on the per-token path but
+    OFF by default; opt in via the constructor kwargs or env vars above.
+
+    Currently unsupported (with future work tickets):
+
+      * ``fuse_wgrad_accumulation=True`` -- the per-token kernel does
+        not yet support ``D += A @ B``; users must disable wgrad
+        accumulation when training with the per-token recipe.
+      * Output quantization in fwd/bwd (``output_quantizer``,
+        ``grad_input_quantizer``) -- fused EVT only emits bf16; a
+        post-cast wrapper is a future enhancement.
+      * Communication overlap and bulk overlap.
+    """
+
+    @classmethod
+    def nvfp4_per_token(cls) -> bool:  # noqa: D401 (single-line docstring is fine)
+        """Whether the given recipe class is NVFP4 per-token.
+
+        Always ``True`` for this explicit subclass (env-var independent).
+        The mutex-flag forcing + repr tagging are handled by the base
+        ``NVFP4BlockScaling.__post_init__`` / ``_make_repr``, which both
+        dispatch on ``self.nvfp4_per_token()``.
+        """
+        return True
 
 
 @dataclass(repr=False)

@@ -354,6 +354,17 @@ class NVFP4Quantizer : public Quantizer {
   int nvfp4_e4m3_max;
   // Whether tensors emitted by this quantizer use row-scaled NVFP4 metadata.
   bool row_scaled_nvfp4;
+  // Per-token NVFP4 cast flag (replaces the per-tensor 1A / 2A paths). When True,
+  // quantize_impl dispatches to nvte_nvfp4_per_token_quantize, split_quantize
+  // dispatches to nvte_group_nvfp4_per_token_quantize, and emitted tensors
+  // carry per-row + per-col vector amaxes (cuBLASLt cannot consume these;
+  // downstream GEMM must use nvfp4_cutlass_per_token_gemm).
+  bool per_token;
+  // Per-token weight only: quantize the forward weight with the per-tensor 2D
+  // cast (16x16 inner + scalar outer amax) re-dressed in per-token layout so the
+  // per-token CUTLASS GEMM reads it unchanged. Requires per_token; activation /
+  // gradient casts are unaffected. Implemented in NVFP4Quantizer::quantize_impl.
+  bool per_token_weight_2d;
 
   int rht_matrix_random_sign_mask_t;
   at::Tensor rht_matrix;

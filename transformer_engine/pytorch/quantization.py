@@ -1701,22 +1701,64 @@ class NVFP4BlockScalingRecipeState(RecipeState):
                         nvfp4_e4m3_max = 256
                 elif self.recipe.nvfp4_4over6_e4m3_use_256 == "none":
                     nvfp4_e4m3_max = 448
+            # Per-token recipe drives the new nvte_nvfp4_per_token_quantize
+            # cast for BOTH forward and backward quantizer slots:
+            #
+            #   forward:  input / output / weight  -> per-token cast
+            #   backward: grad_output / grad_input -> per-token cast
+            #
+            # Per-token bwd uses the same cast kernel as fwd (per-row + per-
+            # col vector amaxes) and dispatches dgrad/wgrad through the same
+            # nvte_nvfp4_cutlass_per_token_gemm by selecting rowwise vs
+            # columnwise quantized data + amax at the GEMM call site (see
+            # _nvfp4_per_token_gemm in cpp_extensions/gemm.py for the NN/NT
+            # layout dispatch table).
+            #
+            # The recipe's __post_init__ forced 2D / 4over6 / row_scaled off
+            # for per-token; RHT and SR are opt-in via recipe.per_token_rht /
+            # recipe.per_token_sr (both per-token kernels support them), so
+            # with_rht / stochastic_rounding below are gated on those flags
+            # rather than hard-forced off. SR, when enabled, lands on the
+            # bwd-grad quantizer only (the recipe sets qparams.stochastic_rounding
+            # on fp4_quant_bwd_grad alone, like the default per-tensor recipe).
+            per_token = self.recipe.nvfp4_per_token() and (
+                (self.mode == "forward" and tensor_type in ("input", "output", "weight"))
+                or (self.mode == "backward" and tensor_type in ("grad_output", "grad_input"))
+            )
+
+            # Per-token weight-2D (Route A): only the forward WEIGHT switches to
+            # the per-tensor 2D cast (16x16 inner + scalar outer) re-dressed in
+            # per-token layout; activation / gradient casts stay per-token 1D.
+            # The emitted weight tensor is transposition-invariant so fwd
+            # (rowwise) and dgrad (columnwise) consume the same quantized weight.
+            per_token_weight_2d = (
+                per_token
+                and tensor_type == "weight"
+                and getattr(self.recipe, "per_token_weight_2d", False)
+            )
+
             return NVFP4Quantizer(
                 fp4_dtype=self.dtype,
                 rowwise=True,
                 columnwise=True,
-                with_rht=qparams.random_hadamard_transform,
-                with_post_rht_amax=qparams.random_hadamard_transform,
-                with_2d_quantization=qparams.fp4_2d_quantization,
-                stochastic_rounding=qparams.stochastic_rounding,
+                with_rht=qparams.random_hadamard_transform
+                and (not per_token or self.recipe.per_token_rht),
+                with_post_rht_amax=qparams.random_hadamard_transform
+                and (not per_token or self.recipe.per_token_rht),
+                with_2d_quantization=qparams.fp4_2d_quantization and not per_token,
+                stochastic_rounding=qparams.stochastic_rounding
+                and (not per_token or self.recipe.per_token_sr),
                 row_scaled_nvfp4=(
-                    self.mode == "forward"
+                    not per_token
+                    and self.mode == "forward"
                     and tensor_type != "weight"
                     and self.recipe.row_scaled_activation
                 ),
-                nvfp4_use_4over6=nvfp4_use_4over6,
+                nvfp4_use_4over6=nvfp4_use_4over6 and not per_token,
                 nvfp4_e4m3_max=nvfp4_e4m3_max,
                 nvfp4_4over6_err_mode=self.recipe.nvfp4_4over6_err_mode,
+                per_token=per_token,
+                per_token_weight_2d=per_token_weight_2d,
             )
 
         if self.mode not in ("forward", "backward"):
