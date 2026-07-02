@@ -1293,34 +1293,27 @@ def aggregate_config_bwd():
 
 
 def aggregate_prune_bwd(configs, named_args, **kwargs):
-    USE_SPLIT_K = named_args.get("USE_SPLIT_K", kwargs.get("USE_SPLIT_K", None))
     M = named_args.get("M", kwargs.get("M", None))
+    C = named_args.get("C", kwargs.get("C", None))
+    block_m = [4]
+    block_c = align_to(C, 64)
+    step_c = [64]
+    warps = [1]
+    stages = [2, 3, 4]
 
-    if USE_SPLIT_K:
-        pruned_configs = configs
-    else:
-        # Deterministic path: a single C block covers the whole reduction, so each program
-        # stores grad_H_pre instead of atomic-adding across split-C blocks.
-        C = named_args.get("C", kwargs.get("C", None))
-        block_m = [4]
-        block_c = align_to(C, 64)
-        step_c = [64]
-        warps = [1]
-        stages = [2, 3, 4]
-
-        pruned_configs = []
-        for bm, sc, w, s in itertools.product(block_m, step_c, warps, stages):
-            pruned_configs.append(
-                triton.Config(
-                    {
-                        "BLOCK_SIZE_M": bm,
-                        "BLOCK_SIZE_C": block_c,
-                        "STEP_SIZE_C": sc,
-                    },
-                    num_warps=w,
-                    num_stages=s,
-                )
+    pruned_configs = []
+    for bm, sc, w, s in itertools.product(block_m, step_c, warps, stages):
+        pruned_configs.append(
+            triton.Config(
+                {
+                    "BLOCK_SIZE_M": bm,
+                    "BLOCK_SIZE_C": block_c,
+                    "STEP_SIZE_C": sc,
+                },
+                num_warps=w,
+                num_stages=s,
             )
+        )
 
     pruned_configs = list(
         filter(
@@ -1341,7 +1334,7 @@ def aggregate_prune_bwd(configs, named_args, **kwargs):
 
 @triton.autotune(
     configs=aggregate_config_bwd(),
-    key=["M", "C", "USE_SPLIT_K"],
+    key=["M", "C"],
     reset_to_zero=["grad_H_pre_ptr"],
     # When FUSE_GRAD_X_ACC=True the kernel does a read-modify-write on grad_x_ptr; without
     # restore_value the autotune timing trials accumulate onto the buffer and corrupt it.
@@ -1370,7 +1363,6 @@ def _mhc_aggregate_bwd(
     STEP_SIZE_C: tl.constexpr,
     precision: tl.constexpr,
     FUSE_GRAD_X_ACC: tl.constexpr,
-    USE_SPLIT_K: tl.constexpr,  # If True, reduce grad_H_pre over split-C blocks via atomic_add (non-deterministic); else store.
 ):
     """
     Forward:
@@ -1457,10 +1449,8 @@ def _mhc_aggregate_bwd(
     grad_H_pre = tl.reshape(grad_H_pre_acc, (BLOCK_SIZE_M * n,))  # (BLOCK_SIZE_M * n)
     offs_grad_H_pre = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
     grad_H_pre_ptrs = grad_H_pre_ptr + offs_grad_H_pre
-    if USE_SPLIT_K:
-        tl.atomic_add(grad_H_pre_ptrs, grad_H_pre, mask=offs_grad_H_pre < M * n, sem="relaxed")
-    else:
-        tl.store(grad_H_pre_ptrs, grad_H_pre.to(H_pre.dtype), mask=offs_grad_H_pre < M * n)
+    # A single C block covers the reduction, so no atomic_add is needed.
+    tl.store(grad_H_pre_ptrs, grad_H_pre.to(H_pre.dtype), mask=offs_grad_H_pre < M * n)
 
 
 def expand_combine_config_fwd():
@@ -1633,34 +1623,27 @@ def expand_combine_config_bwd():
 
 
 def expand_combine_prune_bwd(configs, named_args, **kwargs):
-    USE_SPLIT_K = named_args.get("USE_SPLIT_K", kwargs.get("USE_SPLIT_K", None))
     M = named_args.get("M", kwargs.get("M", None))
+    C = named_args.get("C", kwargs.get("C", None))
+    block_m = [4]
+    block_c = align_to(C, 32)
+    step_c = [32, 64, 128]
+    warps = [1, 2]
+    stages = [1, 2, 3, 4]
 
-    if USE_SPLIT_K:
-        pruned_configs = configs
-    else:
-        # Deterministic path: a single C block covers the whole reduction, so each program
-        # stores grad_H_post/grad_H_res instead of atomic-adding across split-C blocks.
-        C = named_args.get("C", kwargs.get("C", None))
-        block_m = [4]
-        block_c = align_to(C, 32)
-        step_c = [32, 64, 128]
-        warps = [1, 2]
-        stages = [1, 2, 3, 4]
-
-        pruned_configs = []
-        for bm, sc, w, s in itertools.product(block_m, step_c, warps, stages):
-            pruned_configs.append(
-                triton.Config(
-                    {
-                        "BLOCK_SIZE_M": bm,
-                        "BLOCK_SIZE_C": block_c,
-                        "STEP_SIZE_C": sc,
-                    },
-                    num_warps=w,
-                    num_stages=s,
-                )
+    pruned_configs = []
+    for bm, sc, w, s in itertools.product(block_m, step_c, warps, stages):
+        pruned_configs.append(
+            triton.Config(
+                {
+                    "BLOCK_SIZE_M": bm,
+                    "BLOCK_SIZE_C": block_c,
+                    "STEP_SIZE_C": sc,
+                },
+                num_warps=w,
+                num_stages=s,
             )
+        )
 
     pruned_configs = list(
         filter(
@@ -1681,7 +1664,7 @@ def expand_combine_prune_bwd(configs, named_args, **kwargs):
 
 @triton.autotune(
     configs=expand_combine_config_bwd(),
-    key=["M", "C", "DETERMINISTIC", "USE_SPLIT_K"],
+    key=["M", "C", "DETERMINISTIC"],
     reset_to_zero=["grad_H_post_ptr", "grad_H_res_ptr", "grad_bias_ptr"],
     prune_configs_by={"early_config_prune": expand_combine_prune_bwd},
 )
@@ -1724,7 +1707,6 @@ def _mhc_expand_combine_bwd(
     HAS_BIAS: tl.constexpr,
     FUSE_GRAD_X_ACC: tl.constexpr,
     DETERMINISTIC: tl.constexpr,  # If True, grad_bias partials go to a workspace (reduced in the wrapper) instead of atomic_add.
-    USE_SPLIT_K: tl.constexpr,  # If True, reduce grad_H_post/grad_H_res over split-C blocks via atomic_add; else store.
 ):
     """
     Each block
@@ -1935,14 +1917,6 @@ def _mhc_expand_combine_bwd(
     offs_grad_H_res = pid_m * BLOCK_SIZE_M * n * n + tl.arange(0, BLOCK_SIZE_M * n * n)
     grad_H_res_ptrs = grad_H_res_ptr + offs_grad_H_res
 
-    if USE_SPLIT_K:
-        tl.atomic_add(grad_H_post_ptrs, grad_H_post, mask=offs_grad_H_post < M * n, sem="relaxed")
-        tl.atomic_add(
-            grad_H_res_ptrs,
-            grad_H_res.to(tl.float32),
-            mask=offs_grad_H_res < M * n * n,
-            sem="relaxed",
-        )
-    else:
-        tl.store(grad_H_post_ptrs, grad_H_post.to(H_post.dtype), mask=offs_grad_H_post < M * n)
-        tl.store(grad_H_res_ptrs, grad_H_res.to(H_res.dtype), mask=offs_grad_H_res < M * n * n)
+    # A single C block covers the reduction, so no atomic_add is needed.
+    tl.store(grad_H_post_ptrs, grad_H_post.to(H_post.dtype), mask=offs_grad_H_post < M * n)
+    tl.store(grad_H_res_ptrs, grad_H_res.to(H_res.dtype), mask=offs_grad_H_res < M * n * n)

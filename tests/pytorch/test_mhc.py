@@ -558,12 +558,8 @@ def test_mhc_sinkhorn(cfg: MHCConfig, dtype, recompute):
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
-@pytest.mark.parametrize("use_split_k", [False, True], ids=["no_split_k", "split_k"])
-def test_mhc_aggregate(cfg: MHCConfig, dtype, use_split_k):
+def test_mhc_aggregate(cfg: MHCConfig, dtype):
     reset_rng_states()
-
-    if ENFORCE_DETERMINISTIC and use_split_k:
-        pytest.skip("Split-K is not deterministic, skip the test under deterministic mode")
 
     s, b, C, n = cfg.s, cfg.b, cfg.C, cfg.n
 
@@ -576,7 +572,7 @@ def test_mhc_aggregate(cfg: MHCConfig, dtype, use_split_k):
     H_pre_ref = H_pre.detach().clone().requires_grad_(True)
 
     ref_out = mhc_aggregate_ref(x_ref, H_pre_ref, n)
-    fused_out = mhc_fused_aggregate(x, H_pre, n, use_tf32=False, use_split_k=use_split_k)
+    fused_out = mhc_fused_aggregate(x, H_pre, n, use_tf32=False)
 
     torch.testing.assert_close(fused_out, ref_out, **tols)
 
@@ -590,12 +586,8 @@ def test_mhc_aggregate(cfg: MHCConfig, dtype, use_split_k):
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
 @pytest.mark.parametrize("with_bias", [True, False], ids=["with_bias", "no_bias"])
-@pytest.mark.parametrize("use_split_k", [False, True], ids=["no_split_k", "split_k"])
-def test_mhc_expand_combine(cfg: MHCConfig, dtype, with_bias, use_split_k):
+def test_mhc_expand_combine(cfg: MHCConfig, dtype, with_bias):
     reset_rng_states()
-
-    if ENFORCE_DETERMINISTIC and use_split_k:
-        pytest.skip("Split-K is not deterministic, skip the test under deterministic mode")
 
     s, b, C, n = cfg.s, cfg.b, cfg.C, cfg.n
 
@@ -616,9 +608,7 @@ def test_mhc_expand_combine(cfg: MHCConfig, dtype, with_bias, use_split_k):
     H_res_ref = H_res.detach().clone().requires_grad_(True)
 
     ref_out = mhc_expand_combine_ref(f_ref, bias_ref, H_post_ref, x_ref, H_res_ref, n)
-    fused_out = mhc_fused_expand_combine(
-        f, bias, H_post, x, H_res, n=n, use_tf32=False, use_split_k=use_split_k
-    )
+    fused_out = mhc_fused_expand_combine(f, bias, H_post, x, H_res, n=n, use_tf32=False)
 
     torch.testing.assert_close(fused_out, ref_out, **tols)
 
