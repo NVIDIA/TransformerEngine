@@ -28,7 +28,10 @@ endif()
 # Process GPU architectures
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 13.0)
-    set(CMAKE_CUDA_ARCHITECTURES 75 80 89 90 100 120)
+    set(CMAKE_CUDA_ARCHITECTURES 75 80 89 90 100 120 121)
+  elseif (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.9)
+    # SM_121 (GB10 consumer Blackwell) placed under >= 12.9; lower bound to be confirmed.
+    set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90 100 120 121)
   elseif (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
     set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90 100 120)
   else ()
@@ -80,6 +83,18 @@ if(NOT arch_120_index EQUAL -1)
     list(APPEND NVTE_SPECIFIC_ARCHS "120f")
   else()
     list(APPEND NVTE_SPECIFIC_ARCHS "120a")
+  endif()
+endif()
+
+# Check for architecture 121 (GB10 consumer Blackwell / DGX Spark)
+list(FIND CMAKE_CUDA_ARCHITECTURES "121" arch_121_index)
+if(NOT arch_121_index EQUAL -1)
+  list(REMOVE_ITEM CMAKE_CUDA_ARCHITECTURES "121")
+  list(APPEND NVTE_GENERIC_ARCHS "121")
+  if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.9)
+    list(APPEND NVTE_SPECIFIC_ARCHS "121f")
+  else()
+    list(APPEND NVTE_SPECIFIC_ARCHS "121a")
   endif()
 endif()
 
@@ -368,6 +383,18 @@ target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_
 target_include_directories(transformer_engine PRIVATE
                           ${CUTLASS_INCLUDE_DIR}
                           ${CUTLASS_TOOLS_INCLUDE_DIR})
+
+# NCCL headers are included in TE's public API (e.g. comm_gemm_overlap.h).
+# On pip-based CUDA installs (nvidia-nccl-* wheels) nccl.h is not in the
+# CUDA toolkit tree, so find it explicitly and add it to the build.
+find_path(NVTE_NCCL_INCLUDE_DIR
+          NAMES nccl.h
+          PATH_SUFFIXES include
+          QUIET)
+if(NVTE_NCCL_INCLUDE_DIR)
+    target_include_directories(transformer_engine PRIVATE ${NVTE_NCCL_INCLUDE_DIR})
+    message(STATUS "Found NCCL headers at: ${NVTE_NCCL_INCLUDE_DIR}")
+endif()
 
 # Compiling Userbuffers with native MPI bootstrapping requires linking against MPI
 option(NVTE_UB_WITH_MPI "Bootstrap Userbuffers with MPI" OFF)
