@@ -1,0 +1,13 @@
+# RING_OUTPUT_START
+THD CP Ring stripe_size=1:
+Mean time: 71.53654098510742 ms
+Ring output shape=(2, 65536, 128, 128), dtype=bfloat16
+Ring grad shapes=[(2, 65536, 128, 128), (2, 65536, 128, 128), (2, 65536, 128, 128)]
+# RING_OUTPUT_END
+
+# AG_OUTPUT_START
+THD CP AllGather stripe_size=4096:
+Mean time: 50.125694274902344 ms
+AllGather output shape=(2, 65536, 128, 128), dtype=bfloat16
+AllGather grad shapes=[(2, 65536, 128, 128), (2, 65536, 128, 128), (2, 65536, 128, 128)]
+# AG_OUTPUT_END
