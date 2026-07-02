@@ -507,20 +507,11 @@ class TestGroupedLinearOp:
             )
         # BF16/FP16 and FP8 per-tensor current scaling run on the Hopper grouped GEMM path,
         # FP8 block scaling is Hopper-only, and MXFP8/NVFP4 grouped quantization kernels
-        # require Blackwell (SM100+).
-        if quantization == "fp8_block_scaling":
-            # Under investigation: the graph-replayed FP8 block-scaling wgrad for the last
-            # expert diverges between replays in this test (the first replay is correct
-            # against a float64 reference; the reference step's replay is not). The effect
-            # depends on the process allocation history and has not been reproduced in a
-            # standalone equivalent of this flow. Note make_graphed_callables replaces
-            # module.forward in place, so the "eager" reference step here replays the same
-            # graphs. The eager ops path is covered by test_grouped_linear and graph capture
-            # by the module-path test in test_grouped_linear.py.
-            pytest.skip(
-                "FP8 block-scaling grouped wgrad diverges between graph replays;"
-                " under investigation."
-            )
+        # require Blackwell (SM100+). FP8 block-scaling grouped dgrad/wgrad previously
+        # shared one persistent cuBLAS workspace, which deadlocked (cuBLAS 13.6) or
+        # corrupted the last expert's wgrad (cuBLAS < 13.6) under CUDA-graph replay; the
+        # fix in _get_grouped_cublas_workspace (cpp_extensions/gemm.py) gives them distinct
+        # workspaces, so this test now runs on all supported cuBLAS versions.
         requires_blackwell = quantization is not None and quantization not in (
             "fp8_current_scaling",
             "fp8_block_scaling",

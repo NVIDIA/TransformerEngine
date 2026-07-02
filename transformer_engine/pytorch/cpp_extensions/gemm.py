@@ -454,6 +454,27 @@ def _get_grouped_gemm_setup_workspace(device: int, num_tensors: int) -> torch.Te
     )
 
 
+@functools.lru_cache(maxsize=None)
+def _get_grouped_cublas_workspace(device: int, slot: int) -> torch.Tensor:
+    """Persistent cuBLAS workspace for the grouped-tensor GEMM path, one per ``slot``.
+
+    dgrad (``slot`` 0) and wgrad (``slot`` 1) must NOT share a single cuBLAS
+    workspace. The grouped GEMM keeps a grid-synchronization flag in the first
+    bytes of the workspace (cuBLAS emits a memset that zeros it before each
+    matmul). When two grouped matmuls in a replayed CUDA graph share one
+    workspace, that flag is aliased, and the second matmul's cooperative kernel
+    deadlocks on its second replay with cuBLAS 13.6 (and corrupts the last
+    expert's wgrad on cuBLAS < 13.6) -- the two matmuls are strictly stream-
+    ordered, so this is shared-workspace reuse, not concurrent co-scheduling.
+    Giving each its own persistent buffer removes the hazard; each slot is a
+    single persistent allocation, so CUDA-graph capture safety is preserved.
+    These are dedicated to the grouped path and are intentionally not shared with
+    the non-grouped GEMM workspace.
+    """
+    assert slot in (0, 1), "grouped cuBLAS workspace slot must be 0 (dgrad/fwd) or 1 (wgrad)"
+    return torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device=device)
+
+
 def general_grouped_gemm_for_grouped_tensor(
     A,
     B,
@@ -544,9 +565,9 @@ def general_grouped_gemm_for_grouped_tensor(
         raise ValueError("alpha and beta must be CUDA tensors.")
 
     workspace_setup = _get_grouped_gemm_setup_workspace(device.index, num_tensors)
-    # Shares the cached per-device workspace with the non-grouped GEMM path
-    # (persistent for the same CUDA-graph reason as the setup workspace).
-    workspace_cublas = get_cublas_workspace(device.index, False, False)
+    # dgrad and wgrad must use distinct persistent cuBLAS workspaces: sharing one
+    # deadlocks under CUDA-graph replay on cuBLAS 13.6 (see _get_grouped_cublas_workspace).
+    workspace_cublas = _get_grouped_cublas_workspace(device.index, 1 if is_discrete_out else 0)
 
     sm_count = get_sm_count()
     sm_count = sm_count - int(os.getenv("NVTE_EXT_MARGIN_SM", str(sm_count)))
