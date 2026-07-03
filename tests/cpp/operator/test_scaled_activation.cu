@@ -271,7 +271,7 @@ TEST_P(ScaledActivationTest, ForwardBackward) {
   const auto compute_grad_scales = std::get<5>(GetParam());
 
   if (activation == ScaledActivationCase::kSReLU && interleave != 0) {
-    GTEST_SKIP() << "SReLU is not a GLU activation.";
+    GTEST_SKIP() << "Interleave has no meaning for SReLU.";
   }
   if (activation != ScaledActivationCase::kSReLU && interleave > 0 &&
       shape.second % static_cast<size_t>(interleave) != 0) {
