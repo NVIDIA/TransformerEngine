@@ -1134,4 +1134,3 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
     cublas_path();
   }
 }
-

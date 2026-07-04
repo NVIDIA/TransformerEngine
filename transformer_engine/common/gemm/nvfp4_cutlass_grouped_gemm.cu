@@ -36,6 +36,7 @@
 #include <vector>
 
 #include "../common.h"
+#include "../util/cuda_runtime.h"
 #include "../util/logging.h"
 #include "common/util/system.h"
 #include "cute/tensor.hpp"
@@ -175,30 +176,34 @@ struct PerTensorCfg {
   using ElementSFT = typename ElementA::ScaleFactorType;
 };
 
-// Query the SM count exactly once (cudaGetDeviceProperties is very slow).
-static int cached_sm_count() {
-  static int sm = cutlass::KernelHardwareInfo::query_device_multiprocessor_count(0);
-  return sm;
-}
-
 static inline size_t align256(size_t b) { return (b + 255) / 256 * 256; }
 
+// Upper bound on CUDA devices per process for the persistent-buffer cache below.
+// TE grouped GEMMs never span more devices than this in a single process.
+constexpr int kMaxCudaDevices = 16;
+
 // Process-persistent device buffers reused across launches, to avoid per-call
-// cudaMalloc/cudaFree churn. which=0 -> metadata scratch, which=1 -> CUTLASS
-// workspace. Assumes grouped GEMMs are issued serially on one stream (the TE
-// norm); the stream-ordered free on regrow keeps it safe under that assumption.
-static void *persistent_buffer(size_t bytes, cudaStream_t stream, int which) {
-  static void *bufs[2] = {nullptr, nullptr};
-  static size_t caps[2] = {0, 0};
-  if (bytes > caps[which]) {
-    if (bufs[which] != nullptr) {
-      NVTE_CHECK_CUDA(cudaFreeAsync(bufs[which], stream));
+// cudaMalloc/cudaFree churn. Keyed by CUDA device so a buffer allocated on one
+// device is never handed back while a different device is current (e.g. pipeline
+// parallelism with several ranks per process); cudaMallocAsync allocates on the
+// current device, which the caller sets to `device` before calling in. which=0
+// -> metadata scratch, which=1 -> CUTLASS workspace. Assumes grouped GEMMs are
+// issued serially on one stream per device (the TE norm); the stream-ordered
+// free on regrow keeps it safe under that assumption.
+static void *persistent_buffer(size_t bytes, cudaStream_t stream, int which, int device) {
+  static void *bufs[kMaxCudaDevices][2] = {};
+  static size_t caps[kMaxCudaDevices][2] = {};
+  NVTE_CHECK(0 <= device && device < kMaxCudaDevices,
+             "CUDA device id out of range for CUTLASS grouped GEMM persistent buffer cache");
+  if (bytes > caps[device][which]) {
+    if (bufs[device][which] != nullptr) {
+      NVTE_CHECK_CUDA(cudaFreeAsync(bufs[device][which], stream));
     }
     const size_t newcap = bytes + bytes / 2;  // slack to avoid frequent regrows
-    NVTE_CHECK_CUDA(cudaMallocAsync(&bufs[which], newcap, stream));
-    caps[which] = newcap;
+    NVTE_CHECK_CUDA(cudaMallocAsync(&bufs[device][which], newcap, stream));
+    caps[device][which] = newcap;
   }
-  return bufs[which];
+  return bufs[device][which];
 }
 
 // ---- Graph-safe device-array path (grouped-tensor / cublasLt grouped API) ----
@@ -250,6 +255,12 @@ static void run_impl_device(void **A_ptrs, void **B_ptrs, void **a_scale_inv_ptr
   using ProblemShape = typename Cfg::ProblemShape;
   using UnderlyingProblemShape = typename ProblemShape::UnderlyingProblemShape;
 
+  // Resolve the active device once; used to key the persistent buffers and to
+  // tell the CUTLASS scheduler which device it is running on. Do not assume
+  // device 0 -- in multi-GPU-per-process setups (e.g. pipeline parallelism) the
+  // current device may be non-zero.
+  const int device = transformer_engine::cuda::current_device();
+
   // Device scratch for the per-group metadata (built by the kernel below). Sized
   // only by G, which is static for a given grouped GEMM, so after warmup the
   // persistent buffer never regrows -> no alloc during CUDA-graph replay.
@@ -257,7 +268,7 @@ static void run_impl_device(void **A_ptrs, void **B_ptrs, void **a_scale_inv_ptr
       align256(G * sizeof(UnderlyingProblemShape)) + align256(G * sizeof(StrideA)) +
       align256(G * sizeof(StrideB)) + align256(G * sizeof(StrideC)) + align256(G * sizeof(StrideD)) +
       align256(G * sizeof(LayoutSFA)) + align256(G * sizeof(LayoutSFB));
-  uint8_t *scr = static_cast<uint8_t *>(persistent_buffer(need, stream, /*which=*/0));
+  uint8_t *scr = static_cast<uint8_t *>(persistent_buffer(need, stream, /*which=*/0, device));
   size_t off = 0;
   auto carve = [&](size_t bytes) {
     uint8_t *p = scr + off;
@@ -297,8 +308,8 @@ static void run_impl_device(void **A_ptrs, void **B_ptrs, void **a_scale_inv_ptr
   const bool per_group_beta = (beta_ptrs != nullptr);
 
   cutlass::KernelHardwareInfo hw_info;
-  hw_info.device_id = 0;
-  hw_info.sm_count = cached_sm_count();
+  hw_info.device_id = device;
+  hw_info.sm_count = transformer_engine::cuda::sm_count(device);
 
   typename Gemm::Arguments arguments;
   decltype(arguments.epilogue.thread) fusion_args;
@@ -329,7 +340,7 @@ static void run_impl_device(void **A_ptrs, void **B_ptrs, void **a_scale_inv_ptr
   size_t workspace_size = Gemm::get_workspace_size(arguments);
   void *workspace = nullptr;
   if (workspace_size > 0) {
-    workspace = persistent_buffer(workspace_size, stream, /*which=*/1);
+    workspace = persistent_buffer(workspace_size, stream, /*which=*/1, device);
   }
 
   Gemm gemm;

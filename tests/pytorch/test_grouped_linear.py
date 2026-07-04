@@ -2148,7 +2148,7 @@ def test_nvfp4_grouped_tensor_cutlass_matches_cublas(
     test = run(cutlass=True)
     for key in ref:
         abs_d, rel_d, _ = _diff(ref[key], test[key])
-        assert abs_d <= 5e-2 or rel_d <= 2e-2, (
+        assert abs_d <= 1e-2 or rel_d <= 5e-3, (
             f"{key}: cutlass vs cuBLAS diverged (max_abs={abs_d:.4g}, rel={rel_d:.4g})"
         )
 
@@ -2198,6 +2198,6 @@ def test_nvfp4_grouped_tensor_cutlass_cuda_graph_safe(monkeypatch):
     torch.cuda.synchronize()
 
     abs_d, rel_d, _ = _diff(out_eager, out_graph.float())
-    assert abs_d <= 5e-2 or rel_d <= 2e-2, (
+    assert abs_d <= 1e-2 or rel_d <= 5e-3, (
         f"graph vs eager diverged (max_abs={abs_d:.4g}, rel={rel_d:.4g})"
     )
