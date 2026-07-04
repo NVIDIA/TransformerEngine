@@ -20,8 +20,10 @@
 #include "../util/cuda_runtime.h"
 #include "../util/handle_manager.h"
 #include "../util/logging.h"
+#include "../util/system.h"
 #include "../util/vectorized_pointwise.h"
 #include "./config.h"
+#include "./nvfp4_cutlass_grouped_gemm.cuh"
 
 namespace {
 
@@ -1078,6 +1080,55 @@ inline void execute_grouped_gemm(const GroupedGemmSetupWorkspace &setup_workspac
                                    cublas_workspace_ptr, kGroupedGemmCublasWorkspaceSize, stream));
 }
 
+// Opt-in single-launch CUTLASS backend for the grouped-tensor path, selected by
+// NVTE_NVFP4_CUTLASS_GROUPED_GEMM. It is a drop-in alternative to
+// execute_grouped_gemm (cuBLAS) for per-tensor NVFP4 on Blackwell (SM100) and
+// consumes the exact same device-side setup_workspace arrays, so it inherits the
+// graph-safety of the GroupedTensor setup path. Returns true if it handled the
+// GEMM; false to fall back to cuBLAS. `accumulate` selects overwrite (beta=0) vs
+// in-place accumulate -- the forward entries pass false. Fused bias/gelu is not
+// handled here (the grouped-tensor path applies those separately).
+inline bool maybe_run_nvfp4_cutlass_grouped(const GroupedGemmSetupWorkspace &setup_workspace,
+                                            const GroupedOperandSelection &A_sel,
+                                            const GroupedOperandSelection &B_sel,
+                                            transformer_engine::DType d_dtype, size_t num_tensors,
+                                            bool with_beta, cudaStream_t stream) {
+  if (!transformer_engine::getenv<bool>("NVTE_NVFP4_CUTLASS_GROUPED_GEMM", false)) {
+    return false;
+  }
+  if (!transformer_engine::is_nvfp_scaling(A_sel.scaling_mode)) {
+    return false;
+  }
+  const int sm =
+      transformer_engine::cuda::sm_arch(transformer_engine::cuda::current_device());
+  if (!(sm >= 100 && sm < 110)) {
+    return false;  // CUTLASS NVFP4 grouped kernel is SM100 (Blackwell) only.
+  }
+  const bool bf16_out = d_dtype == transformer_engine::DType::kBFloat16;
+  const bool fp32_out = d_dtype == transformer_engine::DType::kFloat32;
+  if (!bf16_out && !fp32_out) {
+    return false;
+  }
+  if (with_beta && !fp32_out) {
+    return false;  // per-group beta (accumulate) into BF16 output is unsupported here.
+  }
+  // `with_beta` (the discrete-out / wgrad path, where C == D and beta is a device
+  // value) drives the epilogue in per-group-beta mode: D = alpha[g]*acc + beta[g]*C.
+  // The overwrite entries pass with_beta=false so C is never loaded.
+  //
+  // M (tokens) is dynamic/device; N and K are static. NVFP4 grouped quantization
+  // pads each group's token dim to 128, so per-group M satisfies the kernel's
+  // alignment by construction. alpha_ptrs already carries the per-group combined
+  // NVFP4 global scale (alpha * amax_A * amax_B * factor_inv) from the setup kernel.
+  transformer_engine::nvfp4_cutlass::run_grouped_per_tensor_gemm_grouped_tensor(
+      setup_workspace.A_ptrs, setup_workspace.B_ptrs, setup_workspace.a_scale_inv_ptrs,
+      setup_workspace.b_scale_inv_ptrs, setup_workspace.alpha_ptrs, setup_workspace.C_ptrs,
+      setup_workspace.D_ptrs, with_beta ? setup_workspace.beta_ptrs : nullptr,
+      setup_workspace.a_rows, setup_workspace.a_cols, setup_workspace.d_rows,
+      setup_workspace.d_cols, A_sel.trans, static_cast<int>(num_tensors), fp32_out, stream);
+  return true;
+}
+
 // Device helper: compute the element offset for tensor `idx` given shape metadata.
 // Three cases:
 //   1. Explicit per-tensor offset array provided  → use it directly.
@@ -1637,6 +1688,10 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
   gemm_config.avg_k =
       config_.avg_k.value_or(transa ? compute_avg_first_dim(inputA) : compute_avg_last_dim(inputA));
   gemm_config.sm_count = config_.sm_count;
+  if (maybe_run_nvfp4_cutlass_grouped(workspace.setup_workspace, A_sel, B_sel, outputD->dtype(),
+                                      num_tensors, /*with_beta=*/false, stream)) {
+    return;
+  }
   execute_grouped_gemm(workspace.setup_workspace, A_sel, B_sel, outputD->dtype(), num_tensors,
                        gemm_config, workspace.cublas_workspace_ptr, stream);
 }
@@ -1787,6 +1842,10 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
       config_.avg_n.value_or(transb ? compute_avg_first_dim(inputB) : compute_avg_last_dim(inputB));
   gemm_config.avg_k = config_.avg_k.value_or(transa ? avg_first_dim : avg_last_dim);
   gemm_config.sm_count = config_.sm_count;
+  if (maybe_run_nvfp4_cutlass_grouped(workspace.setup_workspace, A_sel, B_sel, outputD->dtype(),
+                                      num_tensors, /*with_beta=*/false, stream)) {
+    return;
+  }
   execute_grouped_gemm(workspace.setup_workspace, A_sel, B_sel, outputD->dtype(), num_tensors,
                        gemm_config, workspace.cublas_workspace_ptr, stream);
 }
@@ -1875,6 +1934,12 @@ void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
   gemm_config.avg_k =
       config_.avg_k.value_or(transa ? compute_avg_first_dim(inputA) : compute_avg_last_dim(inputA));
   gemm_config.sm_count = config_.sm_count;
+  // discrete-out (wgrad): C == D and accumulate is decided by the per-group
+  // device beta, so run in per-group-beta mode (with_beta=true).
+  if (maybe_run_nvfp4_cutlass_grouped(workspace.setup_workspace, A_sel, B_sel, d_dtype, num_tensors,
+                                      /*with_beta=*/true, stream)) {
+    return;
+  }
   execute_grouped_gemm(workspace.setup_workspace, A_sel, B_sel, d_dtype, num_tensors, gemm_config,
                        workspace.cublas_workspace_ptr, stream);
 }

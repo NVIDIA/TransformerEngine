@@ -57,6 +57,7 @@ from ..triton.grouped_dbias_dscales import compute_grouped_dbias
 
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
+from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ..quantized_tensor import (
     QuantizedTensorStorage,
     Quantizer,
@@ -121,12 +122,22 @@ class _GroupedLinear(torch.autograd.Function):
         if any(q is not None for q in output_quantizers):
             return False
         if fp8:
-            return (
-                activation_dtype in (torch.bfloat16, torch.float16)
-                and all(isinstance(q, MXFP8Quantizer) for q in input_quantizers)
+            if activation_dtype not in (torch.bfloat16, torch.float16):
+                return False
+            all_mxfp8 = (
+                all(isinstance(q, MXFP8Quantizer) for q in input_quantizers)
                 and all(isinstance(q, MXFP8Quantizer) for q in weight_quantizers)
                 and all(q is None or isinstance(q, MXFP8Quantizer) for q in grad_output_quantizers)
             )
+            # Per-tensor NVFP4 also flows through the single-launch GroupedTensor
+            # path: cuBLAS grouped GEMM by default, or the opt-in CUTLASS backend
+            # (NVTE_NVFP4_CUTLASS_GROUPED_GEMM=1). Both are graph-safe.
+            all_nvfp4 = (
+                all(isinstance(q, NVFP4Quantizer) for q in input_quantizers)
+                and all(isinstance(q, NVFP4Quantizer) for q in weight_quantizers)
+                and all(q is None or isinstance(q, NVFP4Quantizer) for q in grad_output_quantizers)
+            )
+            return all_mxfp8 or all_nvfp4
         return activation_dtype in (torch.bfloat16, torch.float16)
 
     @staticmethod

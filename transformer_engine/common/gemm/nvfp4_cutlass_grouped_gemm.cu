@@ -201,28 +201,40 @@ static void *persistent_buffer(size_t bytes, cudaStream_t stream, int which) {
   return bufs[which];
 }
 
-// Reusable pageable host staging buffer for the single batched H2D copy of all
-// per-group metadata. Pageable (not pinned) is intentional: cudaMemcpyAsync
-// stages pageable source into a driver buffer before returning, so the host
-// buffer can be safely overwritten by the next launch without extra sync.
-static void *persistent_host_buffer(size_t bytes) {
-  static std::vector<uint8_t> buf;
-  if (buf.size() < bytes) {
-    buf.resize(bytes + bytes / 2);
-  }
-  return buf.data();
+// ---- Graph-safe device-array path (grouped-tensor / cublasLt grouped API) ----
+//
+// Builds all per-group CUTLASS metadata on device from the dim arrays produced
+// by the shared GroupedTensor setup kernel, so there is no host<->device sync
+// and the launch is CUDA-graph capturable. Only the problem shape and the
+// block-scale layouts depend on the (dynamic) token dim M; the strides depend
+// only on the static N/K but are built here too to keep everything on device.
+template <typename Cfg>
+__global__ void build_grouped_metadata_kernel(
+    int G, const int *M_arr, const int *N_arr, const int *a_rows, const int *a_cols, bool a_trans,
+    typename Cfg::ProblemShape::UnderlyingProblemShape *problems, typename Cfg::StrideA *stride_A,
+    typename Cfg::StrideB *stride_B, typename Cfg::StrideC *stride_C, typename Cfg::StrideD *stride_D,
+    typename Cfg::LayoutSFA *layout_SFA, typename Cfg::LayoutSFB *layout_SFB) {
+  const int g = blockIdx.x * blockDim.x + threadIdx.x;
+  if (g >= G) return;
+  const int M = M_arr[g];  // cuBLAS d_cols == CUTLASS M (tokens)
+  const int N = N_arr[g];  // cuBLAS d_rows == CUTLASS N (out_features)
+  const int K = a_trans ? a_rows[g] : a_cols[g];  // contraction (hidden)
+  problems[g] = cute_::make_shape(M, N, K);
+  stride_A[g] = cutlass::make_cute_packed_stride(typename Cfg::StrideA{}, cute_::make_shape(M, K, 1));
+  stride_B[g] = cutlass::make_cute_packed_stride(typename Cfg::StrideB{}, cute_::make_shape(N, K, 1));
+  stride_C[g] = cutlass::make_cute_packed_stride(typename Cfg::StrideC{}, cute_::make_shape(M, N, 1));
+  stride_D[g] = cutlass::make_cute_packed_stride(typename Cfg::StrideD{}, cute_::make_shape(M, N, 1));
+  layout_SFA[g] = Cfg::Sm1xxBlkScaledConfig::tile_atom_to_shape_SFA(cute_::make_shape(M, N, K, 1));
+  layout_SFB[g] = Cfg::Sm1xxBlkScaledConfig::tile_atom_to_shape_SFB(cute_::make_shape(M, N, K, 1));
 }
 
-template <typename ElementOutT, bool kHasBias>
-static void run_impl(const std::vector<const void *> &a_data,
-                     const std::vector<const void *> &b_data,
-                     const std::vector<const void *> &a_sf, const std::vector<const void *> &b_sf,
-                     const std::vector<const float *> &alpha_ptrs,
-                     const std::vector<void *> &d_ptrs,
-                     const std::vector<const void *> &bias_ptrs, const std::vector<int> &Ms,
-                     const std::vector<int> &Ns, const std::vector<int> &Ks, bool accumulate,
-                     cudaStream_t stream) {
-  using Cfg = PerTensorCfg<ElementOutT, kHasBias>;
+template <typename ElementOutT>
+static void run_impl_device(void **A_ptrs, void **B_ptrs, void **a_scale_inv_ptrs,
+                            void **b_scale_inv_ptrs, float **alpha_ptrs, void **C_ptrs,
+                            void **D_ptrs, float **beta_ptrs, const int *a_rows, const int *a_cols,
+                            const int *d_rows, const int *d_cols, bool a_trans, int G,
+                            cudaStream_t stream) {
+  using Cfg = PerTensorCfg<ElementOutT, /*kHasBias=*/false>;
   using Gemm = typename Cfg::Gemm;
   using StrideA = typename Cfg::StrideA;
   using StrideB = typename Cfg::StrideB;
@@ -230,107 +242,59 @@ static void run_impl(const std::vector<const void *> &a_data,
   using StrideD = typename Cfg::StrideD;
   using LayoutSFA = typename Cfg::LayoutSFA;
   using LayoutSFB = typename Cfg::LayoutSFB;
-  using Sm1xxBlkScaledConfig = typename Cfg::Sm1xxBlkScaledConfig;
   using ElementADataT = typename Cfg::ElementADataT;
   using ElementBDataT = typename Cfg::ElementBDataT;
   using ElementSFT = typename Cfg::ElementSFT;
   using ElementC = typename Cfg::ElementC;
   using ElementD = typename Cfg::ElementD;
-  using ElementBias = typename Cfg::ElementBias;
   using ProblemShape = typename Cfg::ProblemShape;
+  using UnderlyingProblemShape = typename ProblemShape::UnderlyingProblemShape;
 
-  const int G = static_cast<int>(Ms.size());
-
-  // Host-side per-group metadata.
-  std::vector<typename ProblemShape::UnderlyingProblemShape> problems(G);
-  std::vector<StrideA> stride_A_h(G);
-  std::vector<StrideB> stride_B_h(G);
-  std::vector<StrideC> stride_C_h(G);
-  std::vector<StrideD> stride_D_h(G);
-  std::vector<LayoutSFA> layout_SFA_h(G);
-  std::vector<LayoutSFB> layout_SFB_h(G);
-
-  std::vector<const ElementADataT *> a_ptr_h(G);
-  std::vector<const ElementBDataT *> b_ptr_h(G);
-  std::vector<const ElementSFT *> sfa_ptr_h(G);
-  std::vector<const ElementSFT *> sfb_ptr_h(G);
-  std::vector<ElementD *> d_ptr_h(G);
-  // C source pointers. For accumulate, C == D (read-modify-write main_grad).
-  std::vector<const ElementC *> c_ptr_h(G);
-  // Per-group bias pointers (length N each). Only populated when kHasBias.
-  std::vector<const ElementBias *> bias_ptr_h(kHasBias ? G : 0);
-
-  for (int g = 0; g < G; ++g) {
-    const int M = Ms[g], N = Ns[g], K = Ks[g];
-    problems[g] = {M, N, K};
-    stride_A_h[g] = cutlass::make_cute_packed_stride(StrideA{}, {M, K, 1});
-    stride_B_h[g] = cutlass::make_cute_packed_stride(StrideB{}, {N, K, 1});
-    stride_C_h[g] = cutlass::make_cute_packed_stride(StrideC{}, {M, N, 1});
-    stride_D_h[g] = cutlass::make_cute_packed_stride(StrideD{}, {M, N, 1});
-    layout_SFA_h[g] = Sm1xxBlkScaledConfig::tile_atom_to_shape_SFA(cute_::make_shape(M, N, K, 1));
-    layout_SFB_h[g] = Sm1xxBlkScaledConfig::tile_atom_to_shape_SFB(cute_::make_shape(M, N, K, 1));
-
-    a_ptr_h[g] = reinterpret_cast<const ElementADataT *>(a_data[g]);
-    b_ptr_h[g] = reinterpret_cast<const ElementBDataT *>(b_data[g]);
-    sfa_ptr_h[g] = reinterpret_cast<const ElementSFT *>(a_sf[g]);
-    sfb_ptr_h[g] = reinterpret_cast<const ElementSFT *>(b_sf[g]);
-    d_ptr_h[g] = reinterpret_cast<ElementD *>(d_ptrs[g]);
-    c_ptr_h[g] = reinterpret_cast<const ElementC *>(d_ptrs[g]);
-    if constexpr (kHasBias) {
-      bias_ptr_h[g] = reinterpret_cast<const ElementBias *>(bias_ptrs[g]);
-    }
-  }
-
-  // Mirror all per-group metadata to device through ONE persistent scratch
-  // buffer with a single batched H2D copy.
-  const size_t need = align256(problems.size() * sizeof(problems[0])) +
-                      align256(stride_A_h.size() * sizeof(StrideA)) +
-                      align256(stride_B_h.size() * sizeof(StrideB)) +
-                      align256(stride_C_h.size() * sizeof(StrideC)) +
-                      align256(stride_D_h.size() * sizeof(StrideD)) +
-                      align256(layout_SFA_h.size() * sizeof(LayoutSFA)) +
-                      align256(layout_SFB_h.size() * sizeof(LayoutSFB)) +
-                      align256(a_ptr_h.size() * sizeof(a_ptr_h[0])) +
-                      align256(b_ptr_h.size() * sizeof(b_ptr_h[0])) +
-                      align256(sfa_ptr_h.size() * sizeof(sfa_ptr_h[0])) +
-                      align256(sfb_ptr_h.size() * sizeof(sfb_ptr_h[0])) +
-                      align256(d_ptr_h.size() * sizeof(d_ptr_h[0])) +
-                      align256(c_ptr_h.size() * sizeof(c_ptr_h[0])) +
-                      align256(alpha_ptrs.size() * sizeof(alpha_ptrs[0])) +
-                      align256(bias_ptr_h.size() * sizeof(const ElementBias *));
-
+  // Device scratch for the per-group metadata (built by the kernel below). Sized
+  // only by G, which is static for a given grouped GEMM, so after warmup the
+  // persistent buffer never regrows -> no alloc during CUDA-graph replay.
+  const size_t need =
+      align256(G * sizeof(UnderlyingProblemShape)) + align256(G * sizeof(StrideA)) +
+      align256(G * sizeof(StrideB)) + align256(G * sizeof(StrideC)) + align256(G * sizeof(StrideD)) +
+      align256(G * sizeof(LayoutSFA)) + align256(G * sizeof(LayoutSFB));
   uint8_t *scr = static_cast<uint8_t *>(persistent_buffer(need, stream, /*which=*/0));
-  uint8_t *hscr = static_cast<uint8_t *>(persistent_host_buffer(need));
   size_t off = 0;
-  auto put = [&](const auto &vec) {
-    using T = typename std::decay_t<decltype(vec)>::value_type;
-    const size_t bytes = vec.size() * sizeof(T);
-    T *p = reinterpret_cast<T *>(scr + off);
-    std::memcpy(hscr + off, vec.data(), bytes);
+  auto carve = [&](size_t bytes) {
+    uint8_t *p = scr + off;
     off += align256(bytes);
     return p;
   };
-  auto *problems_d = put(problems);
-  auto *stride_A_d = put(stride_A_h);
-  auto *stride_B_d = put(stride_B_h);
-  auto *stride_C_d = put(stride_C_h);
-  auto *stride_D_d = put(stride_D_h);
-  auto *layout_SFA_d = put(layout_SFA_h);
-  auto *layout_SFB_d = put(layout_SFB_h);
-  auto *a_ptr_d = put(a_ptr_h);
-  auto *b_ptr_d = put(b_ptr_h);
-  auto *sfa_ptr_d = put(sfa_ptr_h);
-  auto *sfb_ptr_d = put(sfb_ptr_h);
-  auto *d_ptr_d = put(d_ptr_h);
-  auto *c_ptr_d = put(c_ptr_h);
-  // Per-group second-level scale pointer array (consumed by alpha_ptr_array).
-  auto *alpha_ptr_array_d = put(alpha_ptrs);
-  // Per-group bias pointer array (only staged when kHasBias).
-  const ElementBias **bias_ptr_array_d = nullptr;
-  if constexpr (kHasBias) {
-    bias_ptr_array_d = put(bias_ptr_h);
+  auto *problems_d = reinterpret_cast<UnderlyingProblemShape *>(carve(G * sizeof(UnderlyingProblemShape)));
+  auto *stride_A_d = reinterpret_cast<StrideA *>(carve(G * sizeof(StrideA)));
+  auto *stride_B_d = reinterpret_cast<StrideB *>(carve(G * sizeof(StrideB)));
+  auto *stride_C_d = reinterpret_cast<StrideC *>(carve(G * sizeof(StrideC)));
+  auto *stride_D_d = reinterpret_cast<StrideD *>(carve(G * sizeof(StrideD)));
+  auto *layout_SFA_d = reinterpret_cast<LayoutSFA *>(carve(G * sizeof(LayoutSFA)));
+  auto *layout_SFB_d = reinterpret_cast<LayoutSFB *>(carve(G * sizeof(LayoutSFB)));
+
+  {
+    constexpr int kThreads = 128;
+    const int blocks = (G + kThreads - 1) / kThreads;
+    build_grouped_metadata_kernel<Cfg><<<blocks, kThreads, 0, stream>>>(
+        G, d_cols, d_rows, a_rows, a_cols, a_trans, problems_d, stride_A_d, stride_B_d, stride_C_d,
+        stride_D_d, layout_SFA_d, layout_SFB_d);
+    NVTE_CHECK_CUDA(cudaGetLastError());
   }
-  NVTE_CHECK_CUDA(cudaMemcpyAsync(scr, hscr, off, cudaMemcpyHostToDevice, stream));
+
+  // cuBLAS -> CUTLASS A/B swap: CUTLASS A := B operand, CUTLASS B := A operand.
+  // The pointer arrays are reinterpreted (void* and the typed element pointers
+  // are bit-identical); the underlying addresses are unchanged. C-style casts are
+  // used for the const-qualified targets because reinterpret_cast cannot add
+  // const across the extra pointer level (void** -> const T**).
+  auto *a_ptr_d = (const ElementADataT **)B_ptrs;         // NOLINT
+  auto *b_ptr_d = (const ElementBDataT **)A_ptrs;         // NOLINT
+  auto *sfa_ptr_d = (const ElementSFT **)b_scale_inv_ptrs;  // NOLINT
+  auto *sfb_ptr_d = (const ElementSFT **)a_scale_inv_ptrs;  // NOLINT
+  auto *d_ptr_d = reinterpret_cast<ElementD **>(D_ptrs);
+  auto *c_ptr_d = (const ElementC **)C_ptrs;              // NOLINT
+  const float *const *alpha_ptr_array_d = alpha_ptrs;
+  const float *const *beta_ptr_array_d = beta_ptrs;  // nullptr => overwrite
+  const bool per_group_beta = (beta_ptrs != nullptr);
 
   cutlass::KernelHardwareInfo hw_info;
   hw_info.device_id = 0;
@@ -338,34 +302,22 @@ static void run_impl(const std::vector<const void *> &a_data,
 
   typename Gemm::Arguments arguments;
   decltype(arguments.epilogue.thread) fusion_args;
-  if constexpr (kHasBias) {
-    // Hand-built EVT args (nested), matching BiasEVT's child order:
-    //   D = ElementOut( homogeneous_multiply_add(alpha[g], acc, bias[g]) ).
-    // alpha[g] via scalar_ptr_array; bias[g] via the ptr-array RowBroadcast
-    // (ptr_row, null_default, dRow). dRow == {} -> L-stride 0 since each
-    // bias_ptr_array[g] already points at group g's length-N bias base.
-    fusion_args = {
-        {/*scalars=*/{}, /*scalar_ptrs=*/{}, /*scalar_ptr_arrays=*/{alpha_ptr_array_d},
-         /*dScalar=*/{}},                          // alpha[g]
-        {},                                        // acc
-        {bias_ptr_array_d, ElementBias(0), {}},    // bias[g]
-        {}                                         // homogeneous_multiply_add
-    };
-  } else {
-    fusion_args.alpha = 1.0f;  // overridden per-group by alpha_ptr_array
-    // beta == 1 -> D = alpha[g]*acc + C (accumulate into main_grad); 0 -> overwrite.
-    fusion_args.beta = accumulate ? 1.0f : 0.0f;
-    fusion_args.alpha_ptr = nullptr;
-    fusion_args.beta_ptr = nullptr;
-    fusion_args.alpha_ptr_array = alpha_ptr_array_d;
-    fusion_args.beta_ptr_array = nullptr;
-    fusion_args.dAlpha = {cute_::_0{}, cute_::_0{}, 0};  // one scalar per group
-    fusion_args.dBeta = {cute_::_0{}, cute_::_0{}, 0};
-  }
+  fusion_args.alpha = 1.0f;  // overridden per-group by alpha_ptr_array
+  // Scalar beta is 0 for both modes; when per_group_beta the real beta[g] comes
+  // from beta_ptr_array (D = alpha[g]*acc + beta[g]*C). Overwrite keeps ptr_C
+  // null so C is never loaded regardless of beta.
+  fusion_args.beta = 0.0f;
+  fusion_args.alpha_ptr = nullptr;
+  fusion_args.beta_ptr = nullptr;
+  fusion_args.alpha_ptr_array = alpha_ptr_array_d;
+  fusion_args.beta_ptr_array = per_group_beta ? beta_ptr_array_d : nullptr;
+  fusion_args.dAlpha = {cute_::_0{}, cute_::_0{}, 0};  // one scalar per group
+  fusion_args.dBeta = {cute_::_0{}, cute_::_0{}, 0};
 
-  // ptr_C is only read when beta != 0 (no-bias accumulate); pass D's buffers so
-  // accumulate is in-place. The bias path is overwrite-only (no C source).
-  const ElementC **ptr_C = accumulate ? c_ptr_d : nullptr;
+  // ptr_C is read only in the per-group-beta (accumulate) mode; pass the C
+  // buffers (== D for in-place wgrad). Overwrite passes null so uninitialized D
+  // is never loaded.
+  const ElementC **ptr_C = per_group_beta ? c_ptr_d : nullptr;
 
   arguments = typename Gemm::Arguments{
       cutlass::gemm::GemmUniversalMode::kGrouped,
@@ -383,58 +335,45 @@ static void run_impl(const std::vector<const void *> &a_data,
   Gemm gemm;
   cutlass::Status status = gemm.can_implement(arguments);
   NVTE_CHECK(status == cutlass::Status::kSuccess,
-             "CUTLASS NVFP4 grouped per-tensor GEMM cannot implement: ",
+             "CUTLASS NVFP4 grouped per-tensor GEMM (grouped-tensor) cannot implement: ",
              cutlassGetStatusString(status), " (num_groups=", G, ")");
 
   status = gemm.initialize(arguments, workspace, stream);
   NVTE_CHECK(status == cutlass::Status::kSuccess,
-             "CUTLASS NVFP4 grouped per-tensor GEMM initialize failed: ",
+             "CUTLASS NVFP4 grouped per-tensor GEMM (grouped-tensor) initialize failed: ",
              cutlassGetStatusString(status));
 
   status = gemm.run(stream);
   NVTE_CHECK(status == cutlass::Status::kSuccess,
-             "CUTLASS NVFP4 grouped per-tensor GEMM run failed: ", cutlassGetStatusString(status));
+             "CUTLASS NVFP4 grouped per-tensor GEMM (grouped-tensor) run failed: ",
+             cutlassGetStatusString(status));
 }
 
-void run_grouped_per_tensor_gemm(const std::vector<const void *> &a_data,
-                                 const std::vector<const void *> &b_data,
-                                 const std::vector<const void *> &a_sf,
-                                 const std::vector<const void *> &b_sf,
-                                 const std::vector<const float *> &alpha_ptrs,
-                                 const std::vector<void *> &d_ptrs,
-                                 const std::vector<const void *> &bias_ptrs,
-                                 const std::vector<int> &Ms, const std::vector<int> &Ns,
-                                 const std::vector<int> &Ks, bool fp32_output, bool accumulate,
-                                 cudaStream_t stream) {
-  static const std::vector<const void *> kNoBias;
-  const bool has_bias = !bias_ptrs.empty();
-  if (has_bias) {
-    // Fused per-group bias is fprop-only: BF16 output, overwrite (no accumulate).
-    NVTE_CHECK(!fp32_output && !accumulate,
-               "CUTLASS NVFP4 grouped per-tensor GEMM: fused bias requires BF16 output and "
-               "overwrite (no accumulate).");
-    run_impl<cutlass::bfloat16_t, /*kHasBias=*/true>(a_data, b_data, a_sf, b_sf, alpha_ptrs, d_ptrs,
-                                                     bias_ptrs, Ms, Ns, Ks, accumulate, stream);
-  } else if (fp32_output) {
-    run_impl<float, /*kHasBias=*/false>(a_data, b_data, a_sf, b_sf, alpha_ptrs, d_ptrs, kNoBias, Ms,
-                                        Ns, Ks, accumulate, stream);
+void run_grouped_per_tensor_gemm_grouped_tensor(
+    void **A_ptrs, void **B_ptrs, void **a_scale_inv_ptrs, void **b_scale_inv_ptrs,
+    float **alpha_ptrs, void **C_ptrs, void **D_ptrs, float **beta_ptrs, const int *a_rows,
+    const int *a_cols, const int *d_rows, const int *d_cols, bool a_trans, int num_groups,
+    bool fp32_output, cudaStream_t stream) {
+  if (fp32_output) {
+    run_impl_device<float>(A_ptrs, B_ptrs, a_scale_inv_ptrs, b_scale_inv_ptrs, alpha_ptrs, C_ptrs,
+                           D_ptrs, beta_ptrs, a_rows, a_cols, d_rows, d_cols, a_trans, num_groups,
+                           stream);
   } else {
-    NVTE_CHECK(!accumulate,
-               "CUTLASS NVFP4 grouped per-tensor GEMM: accumulate requires FP32 output.");
-    run_impl<cutlass::bfloat16_t, /*kHasBias=*/false>(a_data, b_data, a_sf, b_sf, alpha_ptrs,
-                                                      d_ptrs, kNoBias, Ms, Ns, Ks, accumulate,
-                                                      stream);
+    NVTE_CHECK(beta_ptrs == nullptr,
+               "CUTLASS NVFP4 grouped per-tensor GEMM: per-group beta (accumulate) requires FP32 "
+               "output.");
+    run_impl_device<cutlass::bfloat16_t>(A_ptrs, B_ptrs, a_scale_inv_ptrs, b_scale_inv_ptrs,
+                                         alpha_ptrs, C_ptrs, D_ptrs, beta_ptrs, a_rows, a_cols,
+                                         d_rows, d_cols, a_trans, num_groups, stream);
   }
 }
 
 #else   // !CUTLASS_ARCH_MMA_SM100_SUPPORTED
 
-void run_grouped_per_tensor_gemm(const std::vector<const void *> &, const std::vector<const void *> &,
-                                 const std::vector<const void *> &, const std::vector<const void *> &,
-                                 const std::vector<const float *> &, const std::vector<void *> &,
-                                 const std::vector<const void *> &, const std::vector<int> &,
-                                 const std::vector<int> &, const std::vector<int> &, bool, bool,
-                                 cudaStream_t) {
+void run_grouped_per_tensor_gemm_grouped_tensor(void **, void **, void **, void **, float **,
+                                                void **, void **, float **, const int *,
+                                                const int *, const int *, const int *, bool, int,
+                                                bool, cudaStream_t) {
   NVTE_ERROR(
       "CUTLASS NVFP4 grouped per-tensor GEMM requires SM100 (Blackwell). Build with "
       "sm_100a/sm_100f.");

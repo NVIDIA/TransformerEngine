@@ -7,8 +7,9 @@
 /**
  * @file nvfp4_cutlass_grouped_gemm.cuh
  * @brief Single-launch CUTLASS grouped (MoE) GEMM for *per-tensor* NVFP4 on
- *        SM100 (Blackwell). Replaces the multi-stream cuBLASLt loop in the
- *        production NVFP4 grouped path with one CUTLASS ptr-array launch.
+ *        SM100 (Blackwell). Env-selectable (NVTE_NVFP4_CUTLASS_GROUPED_GEMM)
+ *        backend for the grouped-tensor grouped-GEMM path, replacing the
+ *        cuBLAS single-launch kernel with one CUTLASS ptr-array launch.
  *
  * Compared to the per-token grouped kernel, the per-tensor second-level scale
  * collapses to a single fp32 scalar per group
@@ -16,46 +17,49 @@
  * applied through the epilogue's per-group alpha_ptr_array (default
  * LinearCombination), so no vector row/col broadcast EVT is needed.
  *
- * The launcher takes raw device-pointer vectors so the TE-tensor / scale /
- * layout extraction (and the cuBLAS->CUTLASS A/B swap) lives in the dispatcher
- * in cublaslt_gemm.cu, reusing CanonicalizeGemmInput for parity with cuBLASLt.
+ * The launcher consumes device-side pointer / dim arrays (produced by the
+ * shared GroupedTensor setup kernel in cublaslt_grouped_gemm.cu) and performs
+ * the cuBLAS->CUTLASS A/B swap internally, so the whole launch is CUDA-graph
+ * capturable with no host<->device sync.
  */
 
 #pragma once
 
 #include <cuda_runtime_api.h>
 
-#include <vector>
-
 namespace transformer_engine {
 namespace nvfp4_cutlass {
 
-// Single-launch per-tensor NVFP4 grouped GEMM. CUTLASS computes, per group,
-//   D[g] = out_dtype(alpha[g] * (A[g] @ B[g]^T) + beta * C[g])
-// with A[g] row-major (M,K) FP4, B[g] col-major (N,K) FP4, D[g] row-major
-// (M,N). a_sf/b_sf are the swizzled e4m3 1x16 block-scale buffers for A/B.
-// alpha_ptrs[g] points to a single device fp32 holding the per-group global
-// second-level scale. M, N, K must be multiples of 128.
+// Graph-safe device-array entry for the grouped-tensor (cublasLt grouped) API.
 //
-// Output / accumulate / bias modes:
-//   * fp32_output == false -> BF16 output, overwrite (fprop / dgrad).
-//   * fp32_output == true  -> FP32 output (wgrad). With accumulate == true,
-//     beta = 1 and C == D, i.e. D (== main_grad) is read-modify-written
-//     in-place (Megatron wgrad fusion). accumulate requires fp32_output.
-//   * bias_ptrs non-empty -> fused per-group bias (fprop): each bias_ptrs[g]
-//     points to group g's length-N bias vector (D-element dtype), added in the
-//     epilogue (D[g] = alpha[g]*acc + bias[g]). Requires BF16 output and
-//     overwrite (no accumulate). Pass an empty vector when there is no bias.
-void run_grouped_per_tensor_gemm(const std::vector<const void *> &a_data,
-                                 const std::vector<const void *> &b_data,
-                                 const std::vector<const void *> &a_sf,
-                                 const std::vector<const void *> &b_sf,
-                                 const std::vector<const float *> &alpha_ptrs,
-                                 const std::vector<void *> &d_ptrs,
-                                 const std::vector<const void *> &bias_ptrs,
-                                 const std::vector<int> &Ms, const std::vector<int> &Ns,
-                                 const std::vector<int> &Ks, bool fp32_output, bool accumulate,
-                                 cudaStream_t stream);
+// Every per-group array already lives on device: they are the pointer / dim
+// arrays that the shared GroupedTensor setup kernel (launch_grouped_gemm_setup)
+// writes into GroupedGemmSetupWorkspace, derived on-device from the (possibly
+// dynamic) GroupedTensor offsets. This launcher therefore performs NO host<->
+// device sync and NO host-side pointer arithmetic, so it is CUDA-graph
+// capturable.
+//
+// Inputs use the cuBLAS operand convention (A/B/D as passed to execute_grouped_
+// gemm). The cuBLAS->CUTLASS A/B swap and the M/N/K derivation happen internally:
+//   CUTLASS A := B_ptrs (sfa := b_scale_inv_ptrs), CUTLASS B := A_ptrs
+//   (sfb := a_scale_inv_ptrs); M = d_cols, N = d_rows, K = a_trans ? a_rows :
+//   a_cols. alpha_ptrs holds the per-group global (second-level) NVFP4 scale.
+//
+// Accumulate / C source:
+//   * beta_ptrs == nullptr -> overwrite: D = alpha[g] * (A@B). No C is read
+//     (ptr_C = nullptr), matching the proven-safe LinearCombination overwrite
+//     path (C_ptrs is ignored, so uninitialized D is never loaded).
+//   * beta_ptrs != nullptr -> per-group beta: D = alpha[g]*(A@B) + beta[g]*C[g]
+//     with C := C_ptrs (== D for in-place wgrad accumulation). beta[g] lives on
+//     device; the epilogue's Sm90ScalarBroadcastPtrArray consumes it per group,
+//     so this stays graph-safe. Requires fp32 output.
+// Fused bias is not supported here (the grouped-tensor path applies bias via a
+// separate nvte_grouped_bias_add); callers must exclude the fused-bias case.
+void run_grouped_per_tensor_gemm_grouped_tensor(
+    void **A_ptrs, void **B_ptrs, void **a_scale_inv_ptrs, void **b_scale_inv_ptrs,
+    float **alpha_ptrs, void **C_ptrs, void **D_ptrs, float **beta_ptrs, const int *a_rows,
+    const int *a_cols, const int *d_rows, const int *d_cols, bool a_trans, int num_groups,
+    bool fp32_output, cudaStream_t stream);
 
 }  // namespace nvfp4_cutlass
 }  // namespace transformer_engine

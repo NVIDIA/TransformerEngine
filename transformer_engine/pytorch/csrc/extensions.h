@@ -163,17 +163,6 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     std::vector<at::Tensor> pre_gelu_out, bool grad, std::vector<at::Tensor> workspace,
     size_t workspaceSize, bool accumulate, bool use_split_accumulator, int math_sm_count);
 
-// Bench-only: precompute per-group alpha for a per-tensor NVFP4 grouped GEMM.
-at::Tensor nvfp4_grouped_per_tensor_compute_alpha(std::vector<py::handle> A, bool transa,
-                                                  std::vector<py::handle> B, bool transb);
-
-// Bench-only: single-launch per-tensor NVFP4 grouped GEMM with precomputed alpha
-// Times only the GEMM.
-void nvfp4_grouped_per_tensor_gemm(std::vector<py::handle> A, bool transa,
-                                   std::vector<py::handle> B, bool transb,
-                                   std::vector<at::Tensor> D, std::vector<at::Tensor> bias,
-                                   at::Tensor alpha, bool accumulate);
-
 py::object te_general_grouped_gemm_for_grouped_tensor(
     py::handle A, bool transa, py::handle B, bool transb, py::handle D, py::object bias,
     std::optional<at::Tensor> bias_scale, at::Tensor alpha, at::Tensor beta,
