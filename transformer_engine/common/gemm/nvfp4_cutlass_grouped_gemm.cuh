@@ -55,11 +55,13 @@ namespace nvfp4_cutlass {
 //     so this stays graph-safe. Requires fp32 output.
 // Fused bias is not supported here (the grouped-tensor path applies bias via a
 // separate nvte_grouped_bias_add); callers must exclude the fused-bias case.
-void run_grouped_per_tensor_gemm_grouped_tensor(
-    void **A_ptrs, void **B_ptrs, void **a_scale_inv_ptrs, void **b_scale_inv_ptrs,
-    float **alpha_ptrs, void **C_ptrs, void **D_ptrs, float **beta_ptrs, const int *a_rows,
-    const int *a_cols, const int *d_rows, const int *d_cols, bool a_trans, int num_groups,
-    bool fp32_output, cudaStream_t stream);
+void run_grouped_per_tensor_gemm_grouped_tensor(void **A_ptrs, void **B_ptrs,
+                                                void **a_scale_inv_ptrs, void **b_scale_inv_ptrs,
+                                                float **alpha_ptrs, void **C_ptrs, void **D_ptrs,
+                                                float **beta_ptrs, const int *a_rows,
+                                                const int *a_cols, const int *d_rows,
+                                                const int *d_cols, bool a_trans, int num_groups,
+                                                bool fp32_output, cudaStream_t stream);
 
 }  // namespace nvfp4_cutlass
 }  // namespace transformer_engine

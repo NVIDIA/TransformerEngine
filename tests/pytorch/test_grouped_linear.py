@@ -928,9 +928,7 @@ def test_grouped_gemm_cutlass_empty_groups(layout, monkeypatch):
 # file; the constants and _diff helper below are shared with them.
 # =============================================================================
 _NVFP4_CUTLASS_ENV = "NVTE_NVFP4_CUTLASS_GROUPED_GEMM"
-nvfp4_cutlass_grouped_available = (
-    nvfp4_available and torch.cuda.get_device_capability()[0] == 10
-)
+nvfp4_cutlass_grouped_available = nvfp4_available and torch.cuda.get_device_capability()[0] == 10
 
 
 def _diff(ref: torch.Tensor, test: torch.Tensor):
@@ -2113,7 +2111,12 @@ def test_nvfp4_grouped_tensor_cutlass_matches_cublas(
 
     torch.manual_seed(0)
     model = GroupedLinear(
-        num_gemms, K, N, bias=False, params_dtype=torch.bfloat16, device="cuda",
+        num_gemms,
+        K,
+        N,
+        bias=False,
+        params_dtype=torch.bfloat16,
+        device="cuda",
         fuse_wgrad_accumulation=fuse_wgrad_accumulation,
     ).eval()
     x = torch.randn(total_m, K, dtype=torch.bfloat16, device="cuda", requires_grad=True)
@@ -2148,9 +2151,9 @@ def test_nvfp4_grouped_tensor_cutlass_matches_cublas(
     test = run(cutlass=True)
     for key in ref:
         abs_d, rel_d, _ = _diff(ref[key], test[key])
-        assert abs_d <= 1e-2 or rel_d <= 5e-3, (
-            f"{key}: cutlass vs cuBLAS diverged (max_abs={abs_d:.4g}, rel={rel_d:.4g})"
-        )
+        assert (
+            abs_d <= 1e-2 or rel_d <= 5e-3
+        ), f"{key}: cutlass vs cuBLAS diverged (max_abs={abs_d:.4g}, rel={rel_d:.4g})"
 
 
 @pytest.mark.skipif(
@@ -2198,6 +2201,6 @@ def test_nvfp4_grouped_tensor_cutlass_cuda_graph_safe(monkeypatch):
     torch.cuda.synchronize()
 
     abs_d, rel_d, _ = _diff(out_eager, out_graph.float())
-    assert abs_d <= 1e-2 or rel_d <= 5e-3, (
-        f"graph vs eager diverged (max_abs={abs_d:.4g}, rel={rel_d:.4g})"
-    )
+    assert (
+        abs_d <= 1e-2 or rel_d <= 5e-3
+    ), f"graph vs eager diverged (max_abs={abs_d:.4g}, rel={rel_d:.4g})"

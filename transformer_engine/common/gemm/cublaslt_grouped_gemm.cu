@@ -1100,8 +1100,7 @@ inline bool maybe_run_nvfp4_cutlass_grouped(const GroupedGemmSetupWorkspace &set
   if (!transformer_engine::is_nvfp_scaling(A_sel.scaling_mode)) {
     return false;
   }
-  const int sm =
-      transformer_engine::cuda::sm_arch(transformer_engine::cuda::current_device());
+  const int sm = transformer_engine::cuda::sm_arch(transformer_engine::cuda::current_device());
   if (!(sm >= 100 && sm < 110)) {
     return false;  // CUTLASS NVFP4 grouped kernel is SM100 (Blackwell) only.
   }

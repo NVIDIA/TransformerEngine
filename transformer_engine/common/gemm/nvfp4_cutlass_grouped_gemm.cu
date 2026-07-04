@@ -26,8 +26,6 @@
 //     A/B swap). The EVT is passed straight to the CollectiveBuilder, so no
 //     custom FusionCallbacks specialization is required.
 
-#include "nvfp4_cutlass_grouped_gemm.cuh"
-
 #include <transformer_engine/transformer_engine.h>
 
 #include <cstdint>
@@ -57,6 +55,7 @@
 #include "cutlass/gemm/kernel/gemm_universal.hpp"
 #include "cutlass/numeric_types.h"
 #include "cutlass/util/packed_stride.hpp"
+#include "nvfp4_cutlass_grouped_gemm.cuh"
 
 namespace transformer_engine {
 namespace nvfp4_cutlass {
@@ -131,8 +130,8 @@ struct PerTensorCfg {
   // passed straight to the CollectiveBuilder, so no custom FusionCallbacks
   // specialization is needed.
   using BiasAlphaNode =
-      fusion::Sm90ScalarBroadcastPtrArray<ElementScale, cute_::Stride<cute_::_0, cute_::_0,
-                                                                      int64_t> >;
+      fusion::Sm90ScalarBroadcastPtrArray<ElementScale,
+                                          cute_::Stride<cute_::_0, cute_::_0, int64_t>>;
   using BiasNode =
       fusion::Sm90RowBroadcast<0, MmaTileShape, ElementBias *, ElementCompute,
                                cute_::Stride<cute_::_0, cute_::_1, int64_t>, AlignmentBias>;
@@ -140,10 +139,10 @@ struct PerTensorCfg {
       fusion::Sm90Compute<cutlass::homogeneous_multiply_add, ElementD, ElementCompute, kRoundStyle>,
       BiasAlphaNode, fusion::Sm90AccFetch, BiasNode>;  // alpha[g] * acc + bias[g]
 
-  using FusionOp = std::conditional_t<
-      kHasBias, BiasEVT,
-      cutlass::epilogue::fusion::LinearCombination<ElementD, ElementCompute, ElementC, ElementScale,
-                                                   kRoundStyle> >;
+  using FusionOp =
+      std::conditional_t<kHasBias, BiasEVT,
+                         cutlass::epilogue::fusion::LinearCombination<
+                             ElementD, ElementCompute, ElementC, ElementScale, kRoundStyle>>;
 
   using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
       ArchTag, OperatorClass, MmaTileShape, ClusterShape,
@@ -217,18 +216,23 @@ template <typename Cfg>
 __global__ void build_grouped_metadata_kernel(
     int G, const int *M_arr, const int *N_arr, const int *a_rows, const int *a_cols, bool a_trans,
     typename Cfg::ProblemShape::UnderlyingProblemShape *problems, typename Cfg::StrideA *stride_A,
-    typename Cfg::StrideB *stride_B, typename Cfg::StrideC *stride_C, typename Cfg::StrideD *stride_D,
-    typename Cfg::LayoutSFA *layout_SFA, typename Cfg::LayoutSFB *layout_SFB) {
+    typename Cfg::StrideB *stride_B, typename Cfg::StrideC *stride_C,
+    typename Cfg::StrideD *stride_D, typename Cfg::LayoutSFA *layout_SFA,
+    typename Cfg::LayoutSFB *layout_SFB) {
   const int g = blockIdx.x * blockDim.x + threadIdx.x;
   if (g >= G) return;
-  const int M = M_arr[g];  // cuBLAS d_cols == CUTLASS M (tokens)
-  const int N = N_arr[g];  // cuBLAS d_rows == CUTLASS N (out_features)
+  const int M = M_arr[g];                         // cuBLAS d_cols == CUTLASS M (tokens)
+  const int N = N_arr[g];                         // cuBLAS d_rows == CUTLASS N (out_features)
   const int K = a_trans ? a_rows[g] : a_cols[g];  // contraction (hidden)
   problems[g] = cute_::make_shape(M, N, K);
-  stride_A[g] = cutlass::make_cute_packed_stride(typename Cfg::StrideA{}, cute_::make_shape(M, K, 1));
-  stride_B[g] = cutlass::make_cute_packed_stride(typename Cfg::StrideB{}, cute_::make_shape(N, K, 1));
-  stride_C[g] = cutlass::make_cute_packed_stride(typename Cfg::StrideC{}, cute_::make_shape(M, N, 1));
-  stride_D[g] = cutlass::make_cute_packed_stride(typename Cfg::StrideD{}, cute_::make_shape(M, N, 1));
+  stride_A[g] =
+      cutlass::make_cute_packed_stride(typename Cfg::StrideA{}, cute_::make_shape(M, K, 1));
+  stride_B[g] =
+      cutlass::make_cute_packed_stride(typename Cfg::StrideB{}, cute_::make_shape(N, K, 1));
+  stride_C[g] =
+      cutlass::make_cute_packed_stride(typename Cfg::StrideC{}, cute_::make_shape(M, N, 1));
+  stride_D[g] =
+      cutlass::make_cute_packed_stride(typename Cfg::StrideD{}, cute_::make_shape(M, N, 1));
   layout_SFA[g] = Cfg::Sm1xxBlkScaledConfig::tile_atom_to_shape_SFA(cute_::make_shape(M, N, K, 1));
   layout_SFB[g] = Cfg::Sm1xxBlkScaledConfig::tile_atom_to_shape_SFB(cute_::make_shape(M, N, K, 1));
 }
@@ -264,10 +268,10 @@ static void run_impl_device(void **A_ptrs, void **B_ptrs, void **a_scale_inv_ptr
   // Device scratch for the per-group metadata (built by the kernel below). Sized
   // only by G, which is static for a given grouped GEMM, so after warmup the
   // persistent buffer never regrows -> no alloc during CUDA-graph replay.
-  const size_t need =
-      align256(G * sizeof(UnderlyingProblemShape)) + align256(G * sizeof(StrideA)) +
-      align256(G * sizeof(StrideB)) + align256(G * sizeof(StrideC)) + align256(G * sizeof(StrideD)) +
-      align256(G * sizeof(LayoutSFA)) + align256(G * sizeof(LayoutSFB));
+  const size_t need = align256(G * sizeof(UnderlyingProblemShape)) + align256(G * sizeof(StrideA)) +
+                      align256(G * sizeof(StrideB)) + align256(G * sizeof(StrideC)) +
+                      align256(G * sizeof(StrideD)) + align256(G * sizeof(LayoutSFA)) +
+                      align256(G * sizeof(LayoutSFB));
   uint8_t *scr = static_cast<uint8_t *>(persistent_buffer(need, stream, /*which=*/0, device));
   size_t off = 0;
   auto carve = [&](size_t bytes) {
@@ -275,7 +279,8 @@ static void run_impl_device(void **A_ptrs, void **B_ptrs, void **a_scale_inv_ptr
     off += align256(bytes);
     return p;
   };
-  auto *problems_d = reinterpret_cast<UnderlyingProblemShape *>(carve(G * sizeof(UnderlyingProblemShape)));
+  auto *problems_d =
+      reinterpret_cast<UnderlyingProblemShape *>(carve(G * sizeof(UnderlyingProblemShape)));
   auto *stride_A_d = reinterpret_cast<StrideA *>(carve(G * sizeof(StrideA)));
   auto *stride_B_d = reinterpret_cast<StrideB *>(carve(G * sizeof(StrideB)));
   auto *stride_C_d = reinterpret_cast<StrideC *>(carve(G * sizeof(StrideC)));
@@ -297,12 +302,12 @@ static void run_impl_device(void **A_ptrs, void **B_ptrs, void **a_scale_inv_ptr
   // are bit-identical); the underlying addresses are unchanged. C-style casts are
   // used for the const-qualified targets because reinterpret_cast cannot add
   // const across the extra pointer level (void** -> const T**).
-  auto *a_ptr_d = (const ElementADataT **)B_ptrs;         // NOLINT
-  auto *b_ptr_d = (const ElementBDataT **)A_ptrs;         // NOLINT
+  auto *a_ptr_d = (const ElementADataT **)B_ptrs;           // NOLINT
+  auto *b_ptr_d = (const ElementBDataT **)A_ptrs;           // NOLINT
   auto *sfa_ptr_d = (const ElementSFT **)b_scale_inv_ptrs;  // NOLINT
   auto *sfb_ptr_d = (const ElementSFT **)a_scale_inv_ptrs;  // NOLINT
   auto *d_ptr_d = reinterpret_cast<ElementD **>(D_ptrs);
-  auto *c_ptr_d = (const ElementC **)C_ptrs;              // NOLINT
+  auto *c_ptr_d = (const ElementC **)C_ptrs;  // NOLINT
   const float *const *alpha_ptr_array_d = alpha_ptrs;
   const float *const *beta_ptr_array_d = beta_ptrs;  // nullptr => overwrite
   const bool per_group_beta = (beta_ptrs != nullptr);
@@ -360,11 +365,13 @@ static void run_impl_device(void **A_ptrs, void **B_ptrs, void **a_scale_inv_ptr
              cutlassGetStatusString(status));
 }
 
-void run_grouped_per_tensor_gemm_grouped_tensor(
-    void **A_ptrs, void **B_ptrs, void **a_scale_inv_ptrs, void **b_scale_inv_ptrs,
-    float **alpha_ptrs, void **C_ptrs, void **D_ptrs, float **beta_ptrs, const int *a_rows,
-    const int *a_cols, const int *d_rows, const int *d_cols, bool a_trans, int num_groups,
-    bool fp32_output, cudaStream_t stream) {
+void run_grouped_per_tensor_gemm_grouped_tensor(void **A_ptrs, void **B_ptrs,
+                                                void **a_scale_inv_ptrs, void **b_scale_inv_ptrs,
+                                                float **alpha_ptrs, void **C_ptrs, void **D_ptrs,
+                                                float **beta_ptrs, const int *a_rows,
+                                                const int *a_cols, const int *d_rows,
+                                                const int *d_cols, bool a_trans, int num_groups,
+                                                bool fp32_output, cudaStream_t stream) {
   if (fp32_output) {
     run_impl_device<float>(A_ptrs, B_ptrs, a_scale_inv_ptrs, b_scale_inv_ptrs, alpha_ptrs, C_ptrs,
                            D_ptrs, beta_ptrs, a_rows, a_cols, d_rows, d_cols, a_trans, num_groups,

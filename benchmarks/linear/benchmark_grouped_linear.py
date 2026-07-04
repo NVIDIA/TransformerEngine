@@ -204,7 +204,9 @@ def _compare_measure_per_gemm(num_gemms, hidden, out, dtype, m_splits, nvfp4_rec
             torch.cuda.synchronize()
             total = 0.0
             for _ in range(iters):
-                total += _compare_run_gemm_iter(block, x, m_splits_t, nvfp4_recipe, role, timed=True)
+                total += _compare_run_gemm_iter(
+                    block, x, m_splits_t, nvfp4_recipe, role, timed=True
+                )
             return total / iters
 
         res[role] = (timed_backend(False), timed_backend(True))
@@ -217,7 +219,10 @@ def run_backend_compare_sweep(dtype, iters, warmup, seed):
     nvfp4_recipe = NVFP4BlockScaling()
     align = get_align_size_for_quantization(nvfp4_recipe)
 
-    print("per-GEMM ms/iter -- each cell is  cuBLAS / CUTLASS / speedup  (single-launch, lower ms is better)")
+    print(
+        "per-GEMM ms/iter -- each cell is  cuBLAS / CUTLASS / speedup  (single-launch, lower ms is"
+        " better)"
+    )
     gcol = 30
     hdr = (
         f"{'experts':<8}{'tokens':<8}{'hidden':<8}{'out':<7}{'dist':<12}"
@@ -320,9 +325,7 @@ def run_backend_compare_graph_sweep(dtype, iters, warmup, seed):
                 num_gemms, hidden, out, dtype, m_splits, nvfp4_recipe, iters, warmup, True
             )
             cell = f"{t_cublas:.3f}/{t_cutlass:.3f}/{t_cublas / t_cutlass:.2f}x"
-            print(
-                f"{num_gemms:<8}{tokens:<8}{hidden:<8}{out:<7}{dist:<12}{cell:>{scol}}"
-            )
+            print(f"{num_gemms:<8}{tokens:<8}{hidden:<8}{out:<7}{dist:<12}{cell:>{scol}}")
 
 
 def run_linear_multiple_steps(layer, x, m_splits, mode, gradient, run_num_steps=1, recipe=None):
