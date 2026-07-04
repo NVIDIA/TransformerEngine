@@ -1,18 +1,15 @@
 Setup, Build, and Run
 =====================
 
-A reproducible path from a clean checkout to a usable development build.
+This section will describe the path from a clean checkout to a development
+build that can be imported, exercised, and rebuilt efficiently.
 
-Planned coverage
-----------------
+.. toctree::
+   :maxdepth: 1
 
-* Prerequisites and supported development environments.
-* Dependency and toolchain setup.
-* Standard, optional, and framework-specific builds.
-* Editable builds and selecting a development build at runtime.
-* Build outputs and incremental rebuilds.
-* Import checks and representative smoke tests.
-* Build and setup troubleshooting.
-
-.. TODO: Establish canonical contributor commands while linking to the
-   authoritative installation and environment-variable references.
+   development_environment
+   unified_editable_build
+   split_distribution_builds
+   build_configuration
+   using_and_validating_builds
+   build_troubleshooting
