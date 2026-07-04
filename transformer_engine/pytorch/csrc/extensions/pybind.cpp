@@ -141,11 +141,11 @@ void init_router_bindings(pybind11::module &m) {
         py::arg("group_topk"), py::arg("scaling_factor"), py::arg("score_function"),
         py::arg("expert_bias"),
         py::arg("routing_map_format") = static_cast<int>(NVTE_ROUTING_MAP_FORMAT_BYTEMAP),
-        "Fused topk with score function fwd");
+        py::arg("topk_indices") = std::nullopt, "Fused topk with score function fwd");
   m.def("fused_topk_with_score_function_bwd", &fused_topk_with_score_function_bwd,
         py::arg("routing_map"), py::arg("intermediate_output"), py::arg("grad_probs"),
         py::arg("grad_logits"), py::arg("topk"), py::arg("use_pre_softmax"),
-        py::arg("scaling_factor"), py::arg("score_function"),
+        py::arg("scaling_factor"), py::arg("score_function"), py::arg("use_dense_indices") = false,
         py::arg("routing_map_format") = static_cast<int>(NVTE_ROUTING_MAP_FORMAT_BYTEMAP),
         "Fused topk with score function bwd");
   m.def("fused_score_for_moe_aux_loss_fwd", &fused_score_for_moe_aux_loss_fwd, py::arg("logits"),
@@ -158,7 +158,11 @@ void init_router_bindings(pybind11::module &m) {
   m.def("fused_moe_aux_loss_fwd", &fused_moe_aux_loss_fwd, py::arg("probs"),
         py::arg("tokens_per_expert"), py::arg("total_num_tokens"), py::arg("num_experts"),
         py::arg("num_rows"), py::arg("num_cols"), py::arg("topk"), py::arg("coeff"),
-        "Fused aux loss fwd");
+        "Fused aux loss fwd (host-int total_num_tokens, host-folded C_coeff)");
+  m.def("fused_moe_aux_loss_fwd_graph_safe", &fused_moe_aux_loss_fwd_graph_safe, py::arg("probs"),
+        py::arg("tokens_per_expert"), py::arg("total_num_tokens"), py::arg("num_experts"),
+        py::arg("num_rows"), py::arg("num_cols"), py::arg("topk"), py::arg("coeff"),
+        "Fused aux loss fwd (device-tensor total_num_tokens, CUDA-graph-safe)");
   m.def("fused_moe_aux_loss_bwd", &fused_moe_aux_loss_bwd, py::arg("Const_buf"),
         py::arg("tokens_per_expert"), py::arg("num_rows"), py::arg("num_cols"),
         py::arg("grad_aux_loss"), "Fused aux loss bwd");
@@ -169,7 +173,7 @@ void bind_quantize_with_amax_extensions(py::module_ &m) {
         py::arg("quantizer"), py::arg("rowwise_amax"), py::arg("columnwise_amax"));
   m.def("nvfp4_group_quantize_with_amax", nvfp4_group_quantize_with_amax, py::arg("tensor"),
         py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
-        py::arg("rowwise_amax"), py::arg("columnwise_amax"),
+        py::arg("last_dims") = py::none(), py::arg("rowwise_amax"), py::arg("columnwise_amax"),
         py::arg("tensor_offsets") = py::none());
 }
 
@@ -203,13 +207,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("dtype"), py::arg("device"), py::arg("pin_memory"));
   m.def("group_quantize", transformer_engine::pytorch::group_quantize, py::arg("tensor"),
         py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
-        py::arg("tensor_offsets") = py::none());
+        py::arg("last_dims") = py::none(), py::arg("tensor_offsets") = py::none(),
+        py::arg("noop_flag") = py::none());
   transformer_engine::pytorch::bind_quantize_with_amax_extensions(m);
   m.def("group_dequantize", transformer_engine::pytorch::group_dequantize,
         "Dequantize group tensor", py::arg("input"), py::arg("otype"));
   m.def("bgrad_group_quantize", transformer_engine::pytorch::bgrad_group_quantize,
         py::arg("tensor"), py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
-        py::arg("tensor_offsets") = py::none());
+        py::arg("last_dims") = py::none(), py::arg("tensor_offsets") = py::none());
   m.def("bgrad_quantize", transformer_engine::pytorch::bgrad_quantize,
         "Compute bias gradient and quantize", py::arg("input"), py::arg("quantizer"));
   m.def("generic_gemm", transformer_engine::pytorch::gemm, "Compute GEMM (matrix-matrix multiply)",
@@ -291,6 +296,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("dbias_dsrelu", transformer_engine::pytorch::dbias_dsrelu,
         "DSquaredReLU + DBias + Quantize", py::arg("grad"), py::arg("fwd_input"),
         py::arg("quantizer"));
+
+#ifdef NVTE_WITH_NCCL_EP
+  transformer_engine::pytorch::register_ep_bindings(m);
+#endif  // NVTE_WITH_NCCL_EP
 
   // Permutation functions
   m.def("moe_permute_fwd", transformer_engine::pytorch::moe_permute_fwd, "MOE permute FWD",
@@ -559,6 +568,18 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
   m.def("thd_get_partitioned_indices", &transformer_engine::pytorch::thd_get_partitioned_indices,
         "Generate partitioned indices for inputs in THD format",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("thd_sequence_order_to_cp_rank_order",
+        &transformer_engine::pytorch::thd_sequence_order_to_cp_rank_order,
+        "Reorder a THD tensor from sequence order to dual-chunk CP rank order",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("thd_cp_rank_order_to_sequence_order",
+        &transformer_engine::pytorch::thd_cp_rank_order_to_sequence_order,
+        "Reorder a THD tensor from dual-chunk CP rank order to sequence order",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("thd_copy_valid_tokens_from_per_split_to_rank_local",
+        &transformer_engine::pytorch::thd_copy_valid_tokens_from_per_split_to_rank_local,
+        "Copy valid THD token entries from a per-split tensor into a rank-local accumulator",
         py::call_guard<py::gil_scoped_release>());
 
   // nvshmem functions

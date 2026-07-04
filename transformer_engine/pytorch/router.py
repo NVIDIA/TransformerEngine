@@ -83,9 +83,10 @@ class FusedTopkScoreFunction(torch.autograd.Function):
         score_function: str,
         expert_bias: Optional[torch.Tensor],
         routing_map_format: int,
+        topk_indices: Optional[torch.Tensor],
     ):
         # pylint: disable=missing-function-docstring
-        probs, routing_map, intermediate_output = tex.fused_topk_with_score_function_fwd(
+        probs, routing_output, intermediate_output = tex.fused_topk_with_score_function_fwd(
             logits,
             topk,
             use_pre_softmax,
@@ -95,14 +96,21 @@ class FusedTopkScoreFunction(torch.autograd.Function):
             score_function,
             expert_bias,
             routing_map_format,
+            topk_indices,
         )
-        ctx.save_for_backward(routing_map, intermediate_output)
+        if topk_indices is not None:
+            routing_output = topk_indices
+        if topk_indices is not None:
+            ctx.mark_dirty(topk_indices)
+        ctx.mark_non_differentiable(routing_output)
+        ctx.save_for_backward(routing_output, intermediate_output)
         ctx.use_pre_softmax = use_pre_softmax
         ctx.topk = topk
         ctx.scaling_factor = scaling_factor
         ctx.score_function = score_function
         ctx.routing_map_format = routing_map_format
-        return probs, routing_map
+        ctx.use_dense_indices = topk_indices is not None
+        return probs, routing_output
 
     @staticmethod
     def backward(ctx, grad_probs, _):
@@ -120,9 +128,10 @@ class FusedTopkScoreFunction(torch.autograd.Function):
             ctx.use_pre_softmax,
             ctx.scaling_factor,
             ctx.score_function,
+            ctx.use_dense_indices,
             ctx.routing_map_format,
         )
-        return grad_logits, None, None, None, None, None, None, None, None
+        return grad_logits, None, None, None, None, None, None, None, None, None
 
 
 def fused_topk_with_score_function(
@@ -135,6 +144,7 @@ def fused_topk_with_score_function(
     score_function: str,
     expert_bias: Optional[torch.Tensor],
     routing_map_format: Union[str, RoutingMapFormat, int] = RoutingMapFormat.BYTEMAP,
+    topk_indices: Optional[torch.Tensor] = None,
 ):
     """
     Fused topk with score function router.
@@ -159,6 +169,9 @@ def fused_topk_with_score_function(
         ``RoutingMapFormat.BITMAP_U8`` returns a uint8[T, ceil(E/8)] tensor with
         bit ``(e % 8)`` of byte ``(e / 8)`` set when token ``t`` routes to expert
         ``e`` (LSB-first / little-endian packing along the expert axis).
+    topk_indices : torch.Tensor, optional
+        Optional output buffer with shape [num_tokens, topk]. When provided, its dtype
+        controls the dense index output dtype and the routing map is not materialized.
 
     Returns
     -------
@@ -166,7 +179,7 @@ def fused_topk_with_score_function(
         Same shape as ``logits``.
     routing_map : torch.Tensor
         Same leading dims as ``logits``; trailing dim and dtype depend on
-        routing_map_format:
+        routing_map_format, or dense top-k indices when topk_indices is provided:
         - BYTEMAP:   bool[*logits.shape[:-1], num_experts]
         - BITMAP_U8: uint8[*logits.shape[:-1], ceil(num_experts/8)]
           LSB-first bit-packed.
@@ -184,6 +197,7 @@ def fused_topk_with_score_function(
         score_function,
         expert_bias,
         routing_map_format,
+        topk_indices,
     )
 
 
@@ -266,7 +280,9 @@ def fused_compute_score_for_moe_aux_loss(
 
 class FusedAuxLoss(torch.autograd.Function):
     """
-    Fused MoE aux loss.
+    Fused MoE aux loss. ``total_num_tokens`` may be either a Python int
+    (host-folded coefficient, original fast path) or a 0-dim int64 CUDA
+    tensor (device-folded coefficient, CUDA-graph-safe path).
     """
 
     @staticmethod
@@ -274,7 +290,7 @@ class FusedAuxLoss(torch.autograd.Function):
         ctx,
         probs: torch.Tensor,
         tokens_per_expert: torch.Tensor,
-        total_num_tokens: int,
+        total_num_tokens: Union[int, torch.Tensor],
         num_experts: int,
         topk: int,
         coeff: float,
@@ -282,16 +298,28 @@ class FusedAuxLoss(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
         num_rows = probs.size(0)
         num_cols = probs.size(1)
-        aux_loss, Const_buf = tex.fused_moe_aux_loss_fwd(
-            probs=probs,
-            tokens_per_expert=tokens_per_expert,
-            total_num_tokens=total_num_tokens,
-            num_experts=num_experts,
-            num_rows=num_rows,
-            num_cols=num_cols,
-            topk=topk,
-            coeff=coeff,
-        )
+        if isinstance(total_num_tokens, torch.Tensor):
+            aux_loss, Const_buf = tex.fused_moe_aux_loss_fwd_graph_safe(
+                probs=probs,
+                tokens_per_expert=tokens_per_expert,
+                total_num_tokens=total_num_tokens,
+                num_experts=num_experts,
+                num_rows=num_rows,
+                num_cols=num_cols,
+                topk=topk,
+                coeff=coeff,
+            )
+        else:
+            aux_loss, Const_buf = tex.fused_moe_aux_loss_fwd(
+                probs=probs,
+                tokens_per_expert=tokens_per_expert,
+                total_num_tokens=int(total_num_tokens),
+                num_experts=num_experts,
+                num_rows=num_rows,
+                num_cols=num_cols,
+                topk=topk,
+                coeff=coeff,
+            )
         ctx.save_for_backward(Const_buf, tokens_per_expert)
         ctx.num_rows = num_rows
         ctx.num_cols = num_cols
@@ -314,7 +342,7 @@ class FusedAuxLoss(torch.autograd.Function):
 def fused_moe_aux_loss(
     probs: torch.Tensor,
     tokens_per_expert: torch.Tensor,
-    total_num_tokens: int,
+    total_num_tokens: Union[int, torch.Tensor],
     num_experts: int,
     topk: int,
     coeff: float,
@@ -326,8 +354,12 @@ def fused_moe_aux_loss(
     probs : torch.Tensor in fp32/bf16/fp16
     tokens_per_expert : torch.Tensor in int32/int64/fp32/bf16
         the number of tokens per expert.
-    total_num_tokens : int
-        the total number of tokens used in the aux loss calculation.
+    total_num_tokens : int or 0-dim int64 CUDA torch.Tensor
+        the total number of tokens used in the aux loss calculation. Pass a
+        Python int for the fastest path (coefficient folded on the host).
+        Pass a 0-dim int64 CUDA tensor when the call is captured into a
+        CUDA Graph and the value must stay dynamic across replays; the
+        coefficient is computed on device by the main reduction kernel.
     num_experts : int
     topk : int
     coeff : float

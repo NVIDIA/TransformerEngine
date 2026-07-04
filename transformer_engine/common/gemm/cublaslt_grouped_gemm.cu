@@ -230,7 +230,7 @@ struct GroupedGemmSetupWorkspace {
   }
 };
 
-inline bool grouped_gemm_supports_per_group_alpha_beta(int sm) { return sm >= 100; }
+inline bool grouped_gemm_supports_per_group_alpha_beta(int sm) { return sm >= 100 && sm <= 110; }
 
 inline size_t validate_grouped_gemm_inputs(
     size_t num_tensors, std::initializer_list<const transformer_engine::GroupedTensor *> inputs,
@@ -337,7 +337,8 @@ inline void check_grouped_gemm_requirements(const char *api_name) {
   const int sm = transformer_engine::cuda::sm_arch(current_device);
   const int cublas_ver = transformer_engine::cuda::cublas_version();
 #if CUBLAS_VERSION >= CUBLAS_GROUPED_GEMM_HOPPER_VERSION
-  NVTE_CHECK(sm >= 90, api_name, " requires Hopper (SM90) or newer architecture.");
+  NVTE_CHECK(sm >= 90 && sm <= 110, api_name,
+             " requires Hopper (SM90) or Blackwell (SM10x and SM110).");
   NVTE_CHECK(cublas_ver >= CUBLAS_GROUPED_GEMM_VERSION, api_name,
              " requires cuBLAS 13.3+, but run-time cuBLAS version is ", cublas_ver);
   if (sm < 100) {
@@ -346,7 +347,7 @@ inline void check_grouped_gemm_requirements(const char *api_name) {
                cublas_ver);
   }
 #else
-  NVTE_CHECK(sm >= 100, api_name, " requires Blackwell (SM100) or newer architecture.");
+  NVTE_CHECK(sm >= 100 && sm <= 110, api_name, " requires Blackwell (SM10x and SM110).");
   NVTE_CHECK(cublas_ver >= CUBLAS_GROUPED_GEMM_VERSION, api_name,
              " requires cuBLAS 13.3+, but run-time cuBLAS version is ", cublas_ver);
 #endif
@@ -402,7 +403,7 @@ inline void validate_fp8_block_grouped_gemm_support(const GroupedOperandSelectio
              "Grouped GEMM: A and B must both use FP8 block scaling or both not.");
   NVTE_CHECK(sm == 90,
              "Grouped GEMM: FP8 block scaling is only supported on Hopper (SM90); "
-             "use MXFP8 on Blackwell (SM100) or newer.");
+             "use MXFP8 on Blackwell (SM10x and SM110).");
 }
 
 inline bool is_compatible_grouped_scaling_mode(NVTEScalingMode a_mode, NVTEScalingMode b_mode) {
@@ -1618,7 +1619,7 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
   NVTE_API_CALL(nvte_grouped_gemm);
   using namespace transformer_engine;
 
-  // Grouped GEMM requires Blackwell (SM100) or newer with cuBLAS 13.3+,
+  // Grouped GEMM requires Blackwell (SM10x and SM110) with cuBLAS 13.3+,
   // or Hopper (SM90) with cuBLAS 13.4+.
   check_grouped_gemm_requirements("nvte_grouped_gemm");
 
@@ -1675,7 +1676,7 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
                             inputC->dtype(), outputD->dtype());
 
   // Compute average dimensions for heuristics
-  // K dimension: if transa, K is A's first dim; if not, K is A's last dim
+  // K dimension: if transa, K is A's last dim; if not, K is A's first dim
   // Use original inputA and transa for heuristics (not modified A_sel.trans)
   GroupedGemmConfig gemm_config;
   gemm_config.use_split_accumulator = config_.use_split_accumulator;
@@ -1683,10 +1684,12 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
   gemm_config.use_per_group_alpha_beta = use_per_group_alpha_beta;
   gemm_config.alpha_dptr = alpha_tensor->data.dptr;
   gemm_config.beta_dptr = beta_tensor->data.dptr;
-  gemm_config.avg_m = config_.avg_m.value_or(compute_avg_first_dim(outputD));
-  gemm_config.avg_n = config_.avg_n.value_or(compute_avg_last_dim(outputD));
+  // avg m = avg num of rows of D in column-major = avg last dim of D
+  // avg n = avg num of cols of D in column-major = avg first dim of D
+  gemm_config.avg_m = config_.avg_m.value_or(compute_avg_last_dim(outputD));
+  gemm_config.avg_n = config_.avg_n.value_or(compute_avg_first_dim(outputD));
   gemm_config.avg_k =
-      config_.avg_k.value_or(transa ? compute_avg_first_dim(inputA) : compute_avg_last_dim(inputA));
+      config_.avg_k.value_or(transa ? compute_avg_last_dim(inputA) : compute_avg_first_dim(inputA));
   gemm_config.sm_count = config_.sm_count;
   if (maybe_run_nvfp4_cutlass_grouped(workspace.setup_workspace, A_sel, B_sel, outputD->dtype(),
                                       num_tensors, /*with_beta=*/false, stream)) {
@@ -1705,7 +1708,7 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
   NVTE_API_CALL(nvte_grouped_gemm_with_discrete_inputA);
   using namespace transformer_engine;
 
-  // Grouped GEMM requires Blackwell (SM100) or newer with cuBLAS 13.3+,
+  // Grouped GEMM requires Blackwell (SM10x and SM110) with cuBLAS 13.3+,
   // or Hopper (SM90) with cuBLAS 13.4+.
   check_grouped_gemm_requirements("nvte_grouped_gemm_with_discrete_inputA");
 
@@ -1837,10 +1840,9 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
   gemm_config.use_per_group_alpha_beta = use_per_group_alpha_beta;
   gemm_config.alpha_dptr = alpha_tensor->data.dptr;
   gemm_config.beta_dptr = beta_tensor->data.dptr;
-  gemm_config.avg_m = config_.avg_m.value_or(compute_avg_first_dim(outputD));
-  gemm_config.avg_n =
-      config_.avg_n.value_or(transb ? compute_avg_first_dim(inputB) : compute_avg_last_dim(inputB));
-  gemm_config.avg_k = config_.avg_k.value_or(transa ? avg_first_dim : avg_last_dim);
+  gemm_config.avg_m = config_.avg_m.value_or(compute_avg_last_dim(outputD));
+  gemm_config.avg_n = config_.avg_n.value_or(compute_avg_first_dim(outputD));
+  gemm_config.avg_k = config_.avg_k.value_or(transa ? avg_last_dim : avg_first_dim);
   gemm_config.sm_count = config_.sm_count;
   if (maybe_run_nvfp4_cutlass_grouped(workspace.setup_workspace, A_sel, B_sel, outputD->dtype(),
                                       num_tensors, /*with_beta=*/false, stream)) {
@@ -1860,7 +1862,7 @@ void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
   NVTE_API_CALL(nvte_grouped_gemm_with_discrete_out);
   using namespace transformer_engine;
 
-  // Grouped GEMM requires Blackwell (SM100) or newer with cuBLAS 13.3+,
+  // Grouped GEMM requires Blackwell (SM10x and SM110) with cuBLAS 13.3+,
   // or Hopper (SM90) with cuBLAS 13.4+.
   check_grouped_gemm_requirements("nvte_grouped_gemm_with_discrete_out");
 
@@ -1927,12 +1929,16 @@ void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
   gemm_config.use_per_group_alpha_beta = use_per_group_alpha_beta;
   gemm_config.alpha_dptr = alpha_tensor->data.dptr;
   gemm_config.beta_dptr = beta_tensor->data.dptr;
+  // D is a discrete list here, so derive the heuristic dims from the grouped inputs instead.
+  // avg m (rows of D in column-major) is derived from A and avg n (cols of D) from B. The
+  // reduction dim K is A's last dim when transa, otherwise its first dim (cuBLAS views operands
+  // transposed) -- matching nvte_grouped_gemm / _with_discrete_inputA.
   gemm_config.avg_m =
-      config_.avg_m.value_or(transa ? compute_avg_last_dim(inputA) : compute_avg_first_dim(inputA));
+      config_.avg_m.value_or(transa ? compute_avg_first_dim(inputA) : compute_avg_last_dim(inputA));
   gemm_config.avg_n =
-      config_.avg_n.value_or(transb ? compute_avg_first_dim(inputB) : compute_avg_last_dim(inputB));
+      config_.avg_n.value_or(transb ? compute_avg_last_dim(inputB) : compute_avg_first_dim(inputB));
   gemm_config.avg_k =
-      config_.avg_k.value_or(transa ? compute_avg_first_dim(inputA) : compute_avg_last_dim(inputA));
+      config_.avg_k.value_or(transa ? compute_avg_last_dim(inputA) : compute_avg_first_dim(inputA));
   gemm_config.sm_count = config_.sm_count;
   // discrete-out (wgrad): C == D and accumulate is decided by the per-group
   // device beta, so run in per-group-beta mode (with_beta=true).

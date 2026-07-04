@@ -9,6 +9,7 @@
 
 #include <nccl.h>
 
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <optional>
@@ -34,12 +35,13 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fw
     at::Tensor logits, int topk, bool use_pre_softmax, std::optional<int> num_groups,
     std::optional<int> group_topk, std::optional<float> scaling_factor, std::string score_function,
     std::optional<at::Tensor> expert_bias,
-    int routing_map_format = static_cast<int>(NVTE_ROUTING_MAP_FORMAT_BYTEMAP));
+    int routing_map_format = static_cast<int>(NVTE_ROUTING_MAP_FORMAT_BYTEMAP),
+    std::optional<at::Tensor> topk_indices = std::nullopt);
 
 void fused_topk_with_score_function_bwd(
     at::Tensor routing_map, at::Tensor intermediate_output, at::Tensor grad_probs,
     at::Tensor grad_logits, int topk, bool use_pre_softmax, std::optional<float> scaling_factor,
-    std::string score_function,
+    std::string score_function, bool use_dense_indices = false,
     int routing_map_format = static_cast<int>(NVTE_ROUTING_MAP_FORMAT_BYTEMAP));
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_score_for_moe_aux_loss_fwd(
@@ -54,6 +56,10 @@ std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd(at::Tensor probs,
                                                           int total_num_tokens, int num_experts,
                                                           int num_rows, int num_cols, int topk,
                                                           float coeff);
+
+std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd_graph_safe(
+    at::Tensor probs, at::Tensor tokens_per_expert, at::Tensor total_num_tokens, int num_experts,
+    int num_rows, int num_cols, int topk, float coeff);
 
 at::Tensor fused_moe_aux_loss_bwd(at::Tensor Const_buf, at::Tensor tokens_per_expert, int num_rows,
                                   int num_cols, at::Tensor grad_aux_loss);
@@ -342,12 +348,14 @@ py::object nvfp4_quantize_with_amax(const at::Tensor &tensor, py::handle quantiz
 py::object dequantize(const py::handle &input, DType otype);
 
 py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const size_t num_tensors,
-                          std::optional<at::Tensor> first_dims,
-                          std::optional<at::Tensor> tensor_offsets);
+                          std::optional<at::Tensor> first_dims, std::optional<at::Tensor> last_dims,
+                          std::optional<at::Tensor> tensor_offsets,
+                          std::optional<at::Tensor> noop_flag);
 
 py::object nvfp4_group_quantize_with_amax(const at::Tensor &tensor, py::handle quantizer,
                                           const size_t num_tensors,
                                           std::optional<at::Tensor> first_dims,
+                                          std::optional<at::Tensor> last_dims,
                                           const at::Tensor &rowwise_amax,
                                           const at::Tensor &columnwise_amax,
                                           std::optional<at::Tensor> tensor_offsets);
@@ -356,6 +364,7 @@ py::object group_dequantize(const py::handle &input, DType otype);
 
 py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
                                 const size_t num_tensors, std::optional<at::Tensor> first_dims,
+                                std::optional<at::Tensor> last_dims,
                                 std::optional<at::Tensor> tensor_offsets);
 
 std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &tensor_list,
@@ -557,6 +566,16 @@ void thd_grad_correction(at::Tensor grad, const at::Tensor &grad_per_step,
 at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_tokens,
                                        int world_size, int rank);
 
+at::Tensor thd_sequence_order_to_cp_rank_order(const at::Tensor &inp, const at::Tensor &cu_seqlens,
+                                               int cp_size, int total_tokens);
+
+at::Tensor thd_cp_rank_order_to_sequence_order(const at::Tensor &inp, const at::Tensor &cu_seqlens,
+                                               int cp_size, int total_tokens);
+
+void thd_copy_valid_tokens_from_per_split_to_rank_local(at::Tensor out, const at::Tensor &inp,
+                                                        const at::Tensor &cu_seqlens_padded,
+                                                        const at::Tensor &cu_seqlens);
+
 /***************************************************************************************************
  * multi_tensor_* kernels
  **************************************************************************************************/
@@ -646,6 +665,42 @@ void inplace_multi_tensor_swizzle_scales_for_gemm_unchecked(std::vector<py::obje
                                                             bool columnwise_usage);
 
 void grouped_swizzle_for_gemm(py::handle &tensor, bool rowwise, bool columnwise);
+
+/***************************************************************************************************
+ * Expert Parallelism
+ **************************************************************************************************/
+
+// Borrows torch's NCCL host comm (``comm_ptr`` from ``ProcessGroupNCCL._comm_ptr()``).
+// ``group_name`` is the PG name used by the symm-mem window resolver.
+// ``zero_copy`` is forwarded into ``NVTEEpGroupConfig.zero_copy``.
+void ep_initialize(uintptr_t comm_ptr, const std::string &group_name, int64_t num_experts,
+                   int64_t max_tokens_per_rank, int64_t max_recv_tokens_per_rank,
+                   int64_t hidden_dim, int64_t max_num_sms, pybind11::object max_token_dtype,
+                   bool zero_copy);
+
+void ep_finalize();
+
+// Returns the zero-copy mode captured at ep_initialize.
+bool ep_get_zero_copy();
+
+// Returns the handle_mem byte size for the given layer config.
+int64_t ep_handle_mem_size(int64_t top_k, int64_t dispatch_output_per_expert_alignment);
+
+void ep_prepare(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor token_counts, int64_t top_k,
+                int64_t dispatch_output_per_expert_alignment);
+
+void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
+                 at::Tensor topk_weights, at::Tensor recv_tokens, at::Tensor recv_topk_weights);
+
+void ep_combine(at::Tensor handle_mem, at::Tensor expert_out, at::Tensor result);
+
+void ep_dispatch_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor g_recv_topk_weights,
+                     at::Tensor grad_tokens, at::Tensor grad_topk_weights);
+
+void ep_combine_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor grad_expert_out);
+
+// Registers the EP pybind functions on `m`. Defined under NVTE_WITH_NCCL_EP.
+void register_ep_bindings(pybind11::module_ &m);
 
 /***************************************************************************************************
  * NVSHMEM APIs

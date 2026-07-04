@@ -439,6 +439,79 @@ if (NVTE_WITH_CUSOLVERMP)
     message(STATUS "Using cuSolverMp at: ${CUSOLVERMP_DIR}")
 endif()
 
+# -- NCCL EP (on by default, HT mode only) ---------------------------------
+# Set -DNVTE_WITH_NCCL_EP=OFF (or NVTE_WITH_NCCL_EP=0 in setup.py) to
+# skip NCCL EP entirely - useful on older images whose system NCCL is below
+# the 2.30.4 EP minimum.
+option(NVTE_WITH_NCCL_EP "Build NCCL EP into libtransformer_engine.so" ON)
+if(NVTE_WITH_NCCL_EP)
+# SM>=90 and NCCL>=2.30.4 are gated at runtime in EPBackend::initialize.
+# -- NCCL EP headers --------------------------------------------------------
+# Headers + libs are produced by the in-tree 3rdparty/nccl submodule build
+# (auto-built by setup.py via build_nccl_ep_submodule).
+set(NCCL_EP_SUBMODULE_ROOT
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/nccl")
+set(NCCL_EP_INCLUDE_DIR "${NCCL_EP_SUBMODULE_ROOT}/build/include")
+if(NOT EXISTS "${NCCL_EP_INCLUDE_DIR}/nccl_ep.h")
+  message(FATAL_ERROR
+    "NCCL EP header not found at ${NCCL_EP_INCLUDE_DIR}/nccl_ep.h. "
+    "Run `git submodule update --init --recursive` and rebuild TE.")
+endif()
+message(STATUS "NCCL EP headers: ${NCCL_EP_INCLUDE_DIR}")
+
+# -- libnccl_ep.a -----------------------------------------------------------
+# Statically linked into libtransformer_engine.so. EPBackend::initialize checks
+# NCCL >= 2.30.4 before any nccl_ep call, so the newer NCCL symbols nccl_ep
+# imports stay unresolved (and harmless) under default ELF lazy binding when
+# the gate trips. LD_BIND_NOW environments lose this property.
+set(NCCL_EP_LIB_DIR "${NCCL_EP_SUBMODULE_ROOT}/build/lib")
+find_file(NCCL_EP_LIB
+    NAMES libnccl_ep.a
+    HINTS ${NCCL_EP_LIB_DIR}
+    NO_DEFAULT_PATH
+    REQUIRED)
+
+# -- NCCL core: nccl.h + libnccl.so -----------------------------------------
+# setup.py passes -DNCCL_INCLUDE_DIR; standalone CMake falls back to probing
+# well-known NCCL install prefixes.
+find_path(NCCL_INCLUDE_DIR nccl.h
+    HINTS /opt/nvidia/nccl/include /usr/local/nccl/include)
+if(NOT NCCL_INCLUDE_DIR)
+  message(FATAL_ERROR
+    "nccl.h not found. Pass -DNCCL_INCLUDE_DIR=<prefix>/include.")
+endif()
+if(NOT NCCL_LIB)
+  find_library(NCCL_LIB
+      NAMES nccl libnccl
+      PATH_SUFFIXES lib lib64
+      REQUIRED)
+endif()
+
+target_include_directories(transformer_engine PRIVATE
+    ${NCCL_EP_INCLUDE_DIR}
+    ${NCCL_INCLUDE_DIR})
+
+# libnccl.so direct symbols (ncclGetVersion etc.) come from libnccl_ep.a's
+# DT_NEEDED chain plus this TU's own references. CUDA::cuda_driver must follow
+# the static archive on the link line so --as-needed records libcuda.so.1.
+target_link_libraries(transformer_engine PUBLIC ${NCCL_LIB})
+target_link_libraries(transformer_engine PRIVATE
+    -Wl,--whole-archive ${NCCL_EP_LIB} -Wl,--no-whole-archive
+    CUDA::cuda_driver)
+
+target_sources(transformer_engine PRIVATE
+    ep/ep_backend.cpp
+    ep/ep_api.cpp)
+target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_NCCL_EP)
+
+message(STATUS "NCCL EP enabled (static link): ${NCCL_EP_LIB}")
+message(STATUS "NCCL EP include: ${NCCL_EP_INCLUDE_DIR}")
+else()
+  # NCCL EP off: ep_api.cpp's #else branch exports throwing nvte_ep_* stubs.
+  target_sources(transformer_engine PRIVATE ep/ep_api.cpp)
+  message(STATUS "NCCL EP disabled (NVTE_WITH_NCCL_EP=OFF) - using nvte_ep_* stubs")
+endif()
+
 # Number of philox4x32 rounds for stochastic rounding (build-time constant).
 set(NVTE_BUILD_NUM_PHILOX_ROUNDS_STR $ENV{NVTE_BUILD_NUM_PHILOX_ROUNDS})
 if (NOT NVTE_BUILD_NUM_PHILOX_ROUNDS_STR)
