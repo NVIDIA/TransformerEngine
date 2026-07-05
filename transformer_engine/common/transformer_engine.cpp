@@ -9,7 +9,9 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <climits>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -412,20 +414,18 @@ size_t GetTensorHandlePoolSizeMB(const char *env_var) {
   const size_t last = value.find_last_not_of(kWhitespace);
   NVTE_CHECK(first != std::string::npos, env_var, " must be a positive integer.");
 
-  size_t pool_size_mb = 0;
-  for (size_t i = first; i <= last; ++i) {
-    NVTE_CHECK(value[i] >= '0' && value[i] <= '9', env_var, " must be a positive integer, got \"",
-               value, "\".");
-    const size_t digit = static_cast<size_t>(value[i] - '0');
-    NVTE_CHECK(pool_size_mb <= (std::numeric_limits<size_t>::max() - digit) / 10, env_var,
-               " is too large.");
-    pool_size_mb = pool_size_mb * 10 + digit;
-  }
+  const char *begin = value.c_str() + first;
+  const char *expected_end = value.c_str() + last + 1;
+  errno = 0;
+  char *end = nullptr;
+  const uint64_t pool_size_mb = std::strtoul(begin, &end, 10);
 
-  NVTE_CHECK(pool_size_mb > 0, env_var, " must be a positive integer.");
+  NVTE_CHECK(value[first] >= '0' && value[first] <= '9' && end == expected_end && pool_size_mb > 0,
+             env_var, " must be a positive integer, got \"", value, "\".");
+  NVTE_CHECK(errno != ERANGE, env_var, " is too large.");
   NVTE_CHECK(pool_size_mb <= std::numeric_limits<size_t>::max() / kBytesPerMB, env_var,
              " is too large.");
-  return pool_size_mb;
+  return static_cast<size_t>(pool_size_mb);
 }
 
 size_t GetTensorHandlePoolCapacity(size_t pool_size_mb, size_t handle_size, const char *handle_name,
