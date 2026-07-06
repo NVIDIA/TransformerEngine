@@ -650,6 +650,8 @@ def test_sanity_grouped_linear(
     loss = out.sum()
     loss.backward()
     assert out.shape == (num_tokens, ffn_hidden_size)
+    if single_param:
+        assert te_grouped_linear.weight.grad is not None
 
 
 @pytest.mark.parametrize("dtype", param_types)
@@ -1152,6 +1154,78 @@ def test_quantized_model_init_high_precision_init_val():
     assert not hasattr(
         weight, "._high_precision_init_val"
     ), "clear_high_precision_init_val() not work"
+
+
+@pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+def test_grouped_linear_single_param_preserves_high_precision_init(monkeypatch):
+    """Packing MXFP8 weights preserves the values used to initialize optimizer masters."""
+    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+    init_value = 0.125
+
+    def init_method(tensor):
+        return torch.nn.init.constant_(tensor, init_value)
+
+    with quantized_model_init(
+        enabled=True,
+        recipe=recipe.MXFP8BlockScaling(),
+        preserve_high_precision_init_val=True,
+    ):
+        module = GroupedLinear(
+            num_gemms=3,
+            in_features=32,
+            out_features=64,
+            bias=False,
+            init_method=init_method,
+            params_dtype=torch.bfloat16,
+            single_grouped_weight=True,
+        ).cuda()
+
+    weight = module.weight
+    assert hasattr(weight, "get_high_precision_init_val")
+    assert hasattr(weight, "clear_high_precision_init_val")
+    high_precision_init = weight.get_high_precision_init_val()
+    assert high_precision_init.device.type == "cpu"
+    assert high_precision_init.shape == weight.shape
+    torch.testing.assert_close(
+        high_precision_init,
+        torch.full_like(high_precision_init, init_value),
+        rtol=0,
+        atol=0,
+    )
+
+    weight.clear_high_precision_init_val()
+    assert weight.get_high_precision_init_val() is None
+
+
+@pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+def test_grouped_linear_single_param_legacy_fused_wgrad(monkeypatch):
+    """Legacy GroupedLinear accumulates MXFP8 member wgrads into the grouped parent."""
+    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+    monkeypatch.setenv("NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM", "0")
+    dtype = torch.bfloat16
+
+    with quantized_model_init(enabled=True, recipe=recipe.MXFP8BlockScaling()):
+        module = GroupedLinear(
+            num_gemms=2,
+            in_features=32,
+            out_features=64,
+            bias=False,
+            params_dtype=dtype,
+            fuse_wgrad_accumulation=True,
+            single_grouped_weight=True,
+        ).cuda()
+
+    weight = module.weight
+    weight.main_grad = torch.zeros(weight.shape, dtype=dtype, device="cuda")
+    weight.grad_added_to_main_grad = False
+    inp = torch.randn(32, 32, dtype=dtype, device="cuda", requires_grad=True)
+
+    with autocast(enabled=True, recipe=recipe.MXFP8BlockScaling()):
+        module(inp, [16, 16]).sum().backward()
+
+    assert weight.grad_added_to_main_grad
+    assert weight.grad is not None
+    assert torch.count_nonzero(weight.main_grad).item() > 0
 
 
 def test_sanity_checkpointing_on_callables():

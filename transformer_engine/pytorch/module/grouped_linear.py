@@ -7,6 +7,7 @@
 from typing import Union, Optional, Callable, Tuple, List
 from itertools import chain
 import os
+from types import MethodType
 import warnings
 import weakref
 
@@ -66,6 +67,76 @@ from ...debug.pytorch.debug_quantization import DebugQuantizer
 from ...debug.pytorch.debug_state import TEDebugState
 
 __all__ = ["GroupedLinear"]
+
+
+def _get_high_precision_init_val(
+    grouped_weight: torch.Tensor,
+) -> Optional[torch.Tensor]:
+    """Return the pre-quantization initialization preserved on a grouped parameter."""
+    return getattr(grouped_weight, "_high_precision_init_val", None)
+
+
+def _clear_high_precision_init_val(grouped_weight: torch.Tensor) -> None:
+    """Release a grouped parameter's temporary high-precision initialization."""
+    if hasattr(grouped_weight, "_high_precision_init_val"):
+        del grouped_weight._high_precision_init_val
+
+
+class _GroupedWeightAutogradBridge(torch.autograd.Function):
+    """Connect cached per-GEMM views to their registered grouped parameter.
+
+    The legacy GroupedLinear autograd function consumes cached member tensors. Those
+    tensors are storage views, not registered parameters, so using them directly drops
+    the autograd edge to the grouped parent. This bridge makes the parent the autograd
+    input while preserving the member objects required by the grouped GEMM kernels.
+    """
+
+    @staticmethod
+    def forward(ctx, grouped_weight: torch.Tensor, fuse_wgrad_accumulation: bool):
+        ctx.grouped_weight_ref = weakref.ref(grouped_weight)
+        ctx.fuse_wgrad_accumulation = bool(fuse_wgrad_accumulation)
+        members = grouped_weight.quantized_tensors
+        if members is None:
+            members = grouped_weight.split_into_quantized_tensors()
+        return tuple(members)
+
+    @staticmethod
+    def backward(ctx, *member_grads):
+        grouped_weight = ctx.grouped_weight_ref()
+        if grouped_weight is None:
+            raise RuntimeError("Grouped weight was released before backward completed")
+
+        if ctx.fuse_wgrad_accumulation:
+            # GroupedLinear has already written each wgrad into a view of the parent's
+            # main_grad. Trigger the parent's accumulator/DDP hook with a zero dummy
+            # gradient and tell MCore not to add that dummy to main_grad.
+            if hasattr(grouped_weight, "grad_added_to_main_grad"):
+                grouped_weight.grad_added_to_main_grad = True
+            grouped_grad = torch.zeros(
+                tuple(grouped_weight.shape),
+                dtype=grouped_weight.dtype,
+                device=grouped_weight.device,
+            )
+        else:
+            members = grouped_weight.quantized_tensors
+            if members is None:
+                members = grouped_weight.split_into_quantized_tensors()
+            grouped_grad = torch.stack(
+                [
+                    (
+                        grad
+                        if grad is not None
+                        else torch.zeros(
+                            tuple(member.shape),
+                            dtype=grouped_weight.dtype,
+                            device=grouped_weight.device,
+                        )
+                    )
+                    for member, grad in zip(members, member_grads)
+                ],
+                dim=0,
+            )
+        return grouped_grad, None
 
 
 class _GroupedLinear(torch.autograd.Function):
@@ -1467,6 +1538,22 @@ class GroupedLinear(TransformerEngineBaseModule):
 
         weights = [getattr(self, f"weight{i}") for i in range(self.num_gemms)]
 
+        # TE preserves the original BF16/FP16 initialization on each quantized
+        # parameter so distributed optimizers can construct lossless FP32 masters.
+        # Packing the parameters must transfer those values to the new registered
+        # grouped parameter; otherwise its master is initialized by dequantizing
+        # MXFP8 and starts from a different value than the discrete-weight layout.
+        high_precision_init_vals = []
+        for weight in weights:
+            getter = getattr(weight, "get_high_precision_init_val", None)
+            high_precision_init_vals.append(getter() if callable(getter) else None)
+        if any(value is not None for value in high_precision_init_vals) and not all(
+            value is not None for value in high_precision_init_vals
+        ):
+            raise RuntimeError(
+                "Grouped weights have inconsistent high-precision initialization state"
+            )
+
         # Create the weight storage.
         grouped_weights = GroupedTensor.make_grouped_tensor_with_shapes(
             num_tensors=self.num_gemms,
@@ -1490,9 +1577,27 @@ class GroupedLinear(TransformerEngineBaseModule):
             and (weight_quantizers[0] is None or not weight_quantizers[0].internal)
         ):
             raise RuntimeError("Found internal quantizer with `single_grouped_weight=True`.")
+        grouped_parameter = torch.nn.Parameter(grouped_weights)
+        for member in grouped_parameter.quantized_tensors:
+            member.requires_grad_(grouped_parameter.requires_grad)
+        if all(value is not None for value in high_precision_init_vals):
+            grouped_parameter._high_precision_init_val = torch.stack(
+                high_precision_init_vals, dim=0
+            )
+            grouped_parameter.get_high_precision_init_val = MethodType(
+                _get_high_precision_init_val, grouped_parameter
+            )
+            grouped_parameter.clear_high_precision_init_val = MethodType(
+                _clear_high_precision_init_val, grouped_parameter
+            )
+            for weight in weights:
+                clear = getattr(weight, "clear_high_precision_init_val", None)
+                if callable(clear):
+                    clear()
+
         self.register_parameter(
             "weight",
-            torch.nn.Parameter(grouped_weights),
+            grouped_parameter,
             init_fn=self.init_method,
             get_rng_state_tracker=self.get_rng_state_tracker,
             fp8_meta_index=self._offsets["weight"],
@@ -1904,6 +2009,28 @@ class GroupedLinear(TransformerEngineBaseModule):
             if weight_tensors is None:
                 # TODO(ksivaman): Remove this after GEMM integration.
                 weight_tensors = grouped_weight.split_into_quantized_tensors()
+            if torch.is_grad_enabled() and grouped_weight.requires_grad:
+                weight_tensors = list(
+                    _GroupedWeightAutogradBridge.apply(grouped_weight, self.fuse_wgrad_accumulation)
+                )
+                # Quantized tensor subclasses preserve the cached wrapper's original
+                # requires_grad bit when a custom autograd Function returns an alias.
+                # The grouped parent is trainable, so make that state explicit on the
+                # bridged member outputs consumed by legacy GroupedLinear autograd.
+                for weight in weight_tensors:
+                    weight.requires_grad_(True)
+                if self.fuse_wgrad_accumulation:
+                    grouped_main_grad = getattr(grouped_weight, "main_grad", None)
+                    for index, weight in enumerate(weight_tensors):
+                        if grouped_main_grad is not None:
+                            weight.main_grad = grouped_main_grad[index]
+                        for attr in (
+                            "grad_added_to_main_grad",
+                            "overwrite_main_grad",
+                            "zero_out_wgrad",
+                        ):
+                            if hasattr(grouped_weight, attr):
+                                setattr(weight, attr, getattr(grouped_weight, attr))
         else:
             weight_tensors = [getattr(self, f"weight{i}") for i in range(self.num_gemms)]
         if not self.fp8 and any(isinstance(w, QuantizedTensorStorage) for w in weight_tensors):
