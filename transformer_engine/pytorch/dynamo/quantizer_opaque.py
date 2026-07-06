@@ -10,19 +10,22 @@ from typing import Any, Dict, Tuple
 from ..constants import DType
 
 
-# Registration marks the class with this attribute rather than recording it in a
-# module-level set. It looks odd but is a deliberate workaround: the check must
-# stay traceable when it runs inside a torch.compile graph -- Dynamo can bake a
-# ``getattr`` on the opaque quantizer into a constant, but cannot evaluate
-# ``type(q) in some_set`` (no equality/hash rules for the opaque class object),
-# which would graph-break under ``fullgraph=True``.
-_VALUE_OPAQUE_FLAG = "_te_compile_value_opaque"
+# Registration records the class *qualname* rather than the class object. The
+# check must stay traceable when it runs inside a torch.compile graph, and a
+# set of class objects would not be: once a class is registered as opaque,
+# Dynamo traces the class itself as ``OpaqueObjectClassVariable``, which
+# defines no equality rule, so ``type(q) in some_set`` falls back to an
+# iterate-and-compare polyfill that dies on ``is`` between two opaque class
+# variables -- a hard ``Unsupported`` error under ``fullgraph=True``.
+# ``type(q).__qualname__`` instead constant-folds to a plain string, and
+# string-in-set membership is traceable.
+_VALUE_OPAQUE_QUALNAMES: set = set()
 
 
 def is_value_opaque_quantizer(quantizer: Any) -> bool:
     """Whether *quantizer*'s class is registered as a torch.compile value-opaque
     type."""
-    return getattr(quantizer, _VALUE_OPAQUE_FLAG, False)
+    return type(quantizer).__qualname__ in _VALUE_OPAQUE_QUALNAMES
 
 
 def _rebuild_quantizer(cls: type, items: Tuple[Tuple[str, Any], ...]) -> Any:
@@ -111,4 +114,4 @@ def register_value_opaque_quantizer(cls: type) -> None:
         # experimental opaque-object support.
         return
 
-    setattr(cls, _VALUE_OPAQUE_FLAG, True)
+    _VALUE_OPAQUE_QUALNAMES.add(cls.__qualname__)

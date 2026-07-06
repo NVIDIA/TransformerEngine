@@ -24,18 +24,17 @@ import transformer_engine_torch as tex
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.constants import FP8FwdTensorIdx, FP8BwdTensorIdx
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
-from transformer_engine.pytorch.quantization import QuantizerRole
 from transformer_engine.pytorch.ops.basic.basic_linear import BasicLinear
 from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer
-from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
+from transformer_engine.pytorch.quantization import QuantizerRole
 from transformer_engine.pytorch import (
     is_fp8_available,
     is_mxfp8_available,
     is_fp8_block_scaling_available,
     is_nvfp4_available,
-    Float8Quantizer,
     Float8BlockQuantizer,
     MXFP8Quantizer,
+    NVFP4Quantizer,
 )
 from utils import recipe_id
 

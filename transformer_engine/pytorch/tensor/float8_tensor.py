@@ -389,8 +389,10 @@ class Float8CurrentScalingQuantizer(Quantizer):
 
     def _value_fields(self) -> Tuple[str, ...]:
         # ``amax_reduction_group`` is intentionally excluded: it is a deprecated
-        # process group (not a value). If one is actually stored, ``__fx_repr__``
-        # raises so it can never be baked into a torch.compile graph.
+        # process group, not a value. Quantizers that store one are rejected up
+        # front (``_value_key`` raises before anything is baked into a
+        # torch.compile graph), and ``_rebuild_quantizer`` restores the field
+        # as ``None`` on reconstruction.
         return ("dtype", "force_pow_2_scales", "amax_epsilon", "with_amax_reduction")
 
 

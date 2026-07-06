@@ -184,6 +184,9 @@ class MXFP8Quantizer(Quantizer):
         return MXFP8BlockScaling
 
 
+register_value_opaque_quantizer(MXFP8Quantizer)
+
+
 class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
     """Experimental tensor class with FP8 data
 
@@ -1065,6 +1068,3 @@ class _ReshapeFunc(torch.autograd.Function):
             )
             return dgrad, None
         return grad.view(ctx.shape), None
-
-
-register_value_opaque_quantizer(MXFP8Quantizer)
