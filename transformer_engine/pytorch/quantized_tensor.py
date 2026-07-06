@@ -469,35 +469,6 @@ class QuantizedTensor(torch.Tensor):
         """Set dtype property"""
         self._dtype = value
 
-    @property
-    def requires_grad(self) -> bool:
-        """
-        Return whether or not the tensor requires gradient.
-        Attribute access of custom tensors goes through an
-        expensive Pyobject lookup. Since requires_grad is set during
-        initialization and may be updated, we cache it in a member variable.
-        """
-        # Fallback to parent if not cached yet
-        if not hasattr(self, "_requires_grad"):
-            # pylint: disable=unnecessary-dunder-call
-            self._requires_grad = torch._C.TensorBase.requires_grad.__get__(self, type(self))
-        return self._requires_grad
-
-    @requires_grad.setter
-    def requires_grad(self, value: bool) -> None:
-        """Set requires_grad property so that autograd engine is aware of the change"""
-        # Update the cached value and call parent class method to ensure autograd engine is aware
-        self.requires_grad_(value)
-
-    def requires_grad_(self, requires_grad: bool = True) -> QuantizedTensor:
-        """Cache requires_grad property and call parent class method"""
-        # pylint: disable=missing-function-docstring
-        # Update the cached value
-        self._requires_grad = requires_grad
-        # Call parent class method to ensure autograd engine is aware
-        super().requires_grad_(requires_grad)
-        return self
-
     def _get_data(self) -> torch.Tensor:
         """Get tensor data property"""
         return super().data
@@ -763,13 +734,7 @@ class QuantizedTensor(torch.Tensor):
         out = super().__torch_dispatch__(func, types, args, kwargs)
         return out
 
-    @classmethod
-    def __torch_function__(cls, func, types, args=(), kwargs=None):
-        if kwargs is None:
-            kwargs = {}
-
-        # Do not force the QuantizedTensor type on the returned tensor
-        return torch._C._disabled_torch_function_impl(func, types, args, kwargs)
+    __torch_function__ = torch._C._disabled_torch_function_impl
 
     def contiguous(
         self, memory_format: torch.memory_format = torch.contiguous_format

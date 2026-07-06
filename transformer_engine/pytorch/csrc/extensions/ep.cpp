@@ -136,16 +136,17 @@ void ep_initialize(uintptr_t comm_ptr, const std::string& group_name, int64_t nu
   NVTE_CHECK(ncclCommCount(ep_comm, &ep_size) == ncclSuccess, "ncclCommCount failed");
   auto torch_dtype = max_token_dtype.cast<at::ScalarType>();
   NVTEEpGroupConfig cfg{
-      /*ep_size=*/ep_size,
-      /*num_experts=*/static_cast<int>(num_experts),
-      /*max_tokens_per_rank=*/static_cast<int>(max_tokens_per_rank),
-      /*max_recv_tokens_per_rank=*/static_cast<int>(max_recv_tokens_per_rank),
-      /*hidden_dim=*/static_cast<int>(hidden_dim),
-      /*max_num_sms=*/static_cast<int>(max_num_sms),
-      /*max_token_dtype=*/static_cast<NVTEDType>(GetTransformerEngineDType(torch_dtype)),
-      /*zero_copy=*/zero_copy ? 1 : 0,
+      .struct_size = sizeof(NVTEEpGroupConfig),
+      .ep_size = ep_size,
+      .num_experts = static_cast<int>(num_experts),
+      .max_tokens_per_rank = static_cast<int>(max_tokens_per_rank),
+      .max_recv_tokens_per_rank = static_cast<int>(max_recv_tokens_per_rank),
+      .hidden_dim = static_cast<int>(hidden_dim),
+      .num_comm_sms = static_cast<int>(max_num_sms),
+      .max_token_dtype = static_cast<NVTEDType>(GetTransformerEngineDType(torch_dtype)),
+      .zero_copy = zero_copy ? 1 : 0,
   };
-  nvte_ep_initialize(static_cast<void*>(ep_comm), cfg);
+  nvte_ep_initialize(static_cast<void*>(ep_comm), &cfg);
   g_zero_copy_enabled.store(zero_copy, std::memory_order_relaxed);
   g_ep_initialized = true;
   g_ep_group_name = group_name;
@@ -164,17 +165,18 @@ namespace {
 
 NVTEEpLayerConfig make_layer_cfg(int64_t top_k, int64_t dispatch_output_per_expert_alignment) {
   return NVTEEpLayerConfig{
-      /*top_k=*/static_cast<int>(top_k),
-      /*dispatch_output_per_expert_alignment=*/
-      static_cast<size_t>(dispatch_output_per_expert_alignment),
+      .struct_size = sizeof(NVTEEpLayerConfig),
+      .top_k = static_cast<int>(top_k),
+      .dispatch_output_per_expert_alignment =
+          static_cast<size_t>(dispatch_output_per_expert_alignment),
   };
 }
 
 }  // namespace
 
 int64_t ep_handle_mem_size(int64_t top_k, int64_t dispatch_output_per_expert_alignment) {
-  return static_cast<int64_t>(
-      nvte_ep_handle_mem_size(make_layer_cfg(top_k, dispatch_output_per_expert_alignment)));
+  auto layer_cfg = make_layer_cfg(top_k, dispatch_output_per_expert_alignment);
+  return static_cast<int64_t>(nvte_ep_handle_mem_size(&layer_cfg));
 }
 
 // ── Per-step ops ─────────────────────────────────────────────────────────────
@@ -194,8 +196,9 @@ void ep_prepare(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor token_cou
   auto handle_mem_te = makeTransformerEngineTensor(
       handle_mem.data_ptr(), Shape{static_cast<size_t>(handle_mem.numel())}, DType::kByte);
 
+  auto layer_cfg = make_layer_cfg(top_k, dispatch_output_per_expert_alignment);
   nvte_ep_prepare(handle_mem_te.data(), topk_idx_te.data(), token_counts_te.data(),
-                  make_layer_cfg(top_k, dispatch_output_per_expert_alignment), stream);
+                  /*total_recv_tokens_per_rank=*/nullptr, &layer_cfg, stream);
 }
 
 void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
