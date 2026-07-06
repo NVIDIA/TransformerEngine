@@ -409,9 +409,7 @@ class Quantizer(abc.ABC):
             "columnwise": self.columnwise_usage,
         }
 
-    # Flipped to True by ``register_value_opaque_quantizer``. Deliberately not
-    # annotated: value fields are derived from class annotations, and this
-    # switch is not part of the value.
+    # Flipped to True by ``register_value_opaque_quantizer``.
     _is_value_quantizer = False
 
     @classmethod
