@@ -206,9 +206,14 @@ class Float8CurrentScalingQuantizer(Quantizer):
 
     """FP8 datatype"""
     dtype: DType
-    """amax reduction options"""
+    """amax reduction options
+
+    The deprecated ``amax_reduction_group`` attribute is intentionally not
+    annotated: annotations define the torch.compile value key, and a process
+    group is not a value (``_value_key`` rejects a stored group;
+    ``_rebuild_quantizer`` restores the attribute as ``None``).
+    """
     with_amax_reduction: bool
-    amax_reduction_group: Optional[dist_group_type]
     """Options about how to quantize the tensor"""
     force_pow_2_scales: bool
     amax_epsilon: float
@@ -386,14 +391,6 @@ class Float8CurrentScalingQuantizer(Quantizer):
         Float8CurrentScalingQuantizer supports only rowwise all-gather
         """
         return True
-
-    def _value_fields(self) -> Tuple[str, ...]:
-        # ``amax_reduction_group`` is intentionally excluded: it is a deprecated
-        # process group, not a value. Quantizers that store one are rejected up
-        # front (``_value_key`` raises before anything is baked into a
-        # torch.compile graph), and ``_rebuild_quantizer`` restores the field
-        # as ``None`` on reconstruction.
-        return ("dtype", "force_pow_2_scales", "amax_epsilon", "with_amax_reduction")
 
 
 register_value_opaque_quantizer(Float8CurrentScalingQuantizer)

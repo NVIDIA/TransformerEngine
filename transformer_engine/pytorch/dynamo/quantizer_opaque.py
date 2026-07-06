@@ -78,18 +78,40 @@ def _quantizer_fx_repr(self: Any) -> Tuple[str, Dict[str, Any]]:
     )
 
 
+def _check_value_annotations(cls: type) -> None:
+    """Verify that every annotated field of *cls* can be part of a value key.
+
+    The value fields are derived from the class annotations (see
+    ``Quantizer._annotated_value_fields``), so derived tensors and process
+    groups must not be annotated. Checking annotation strings is enough: the
+    tensor modules use ``from __future__ import annotations``.
+    """
+    for klass in cls.__mro__:
+        for name, ann in klass.__dict__.get("__annotations__", {}).items():
+            ann = str(ann)
+            if "Tensor" in ann or "dist_group_type" in ann or "ProcessGroup" in ann:
+                raise TypeError(
+                    f"{cls.__name__} cannot be a torch.compile value quantizer: "
+                    f"annotated field {name!r} ({ann}) is not a plain value. "
+                    "Remove the annotation and rebuild the field in "
+                    "``_rebuild_derived_state`` instead."
+                )
+
+
 def register_value_opaque_quantizer(cls: type) -> None:
     """Register a tensorless quantizer class as a torch.compile value opaque type.
 
-    Attaches ``__fx_repr__`` and registers the class with
+    This is the opt-in point for value semantics: it flips
+    ``cls._is_value_quantizer`` (enabling config-based ``__eq__`` / ``__hash__``
+    with fields derived from the class annotations, see
+    :class:`transformer_engine.pytorch.quantized_tensor.Quantizer`), attaches
+    ``__fx_repr__`` and registers the class with
     ``torch._library.opaque_object``. Safe to call on any PyTorch build: on
-    versions without the opaque-object API it only attaches ``__fx_repr__``
-    (harmless), so Transformer Engine keeps importing and running in eager mode.
-
-    The quantizer class must already provide value ``__eq__`` / ``__hash__`` and
-    a non-``None`` ``_value_fields`` (see
-    :class:`transformer_engine.pytorch.quantized_tensor.Quantizer`).
+    versions without the opaque-object API the value semantics still apply,
+    only the torch.compile specialization is skipped.
     """
+    _check_value_annotations(cls)
+    cls._is_value_quantizer = True
     # ``register_opaque_type`` requires ``__fx_repr__`` to already exist on the
     # class, so attach it before registering.
     if "__fx_repr__" not in cls.__dict__:

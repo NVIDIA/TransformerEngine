@@ -118,9 +118,14 @@ class NVFP4Quantizer(Quantizer):
     """Random Hadamard Transform"""
     with_rht: bool
     with_post_rht_amax: bool
-    """amax reduction options"""
+    """amax reduction options
+
+    The deprecated ``amax_reduction_group`` attribute is intentionally not
+    annotated: annotations define the torch.compile value key, and a process
+    group is not a value (``_value_key`` rejects a stored group;
+    ``_rebuild_quantizer`` restores the attribute as ``None``).
+    """
     with_amax_reduction: bool
-    amax_reduction_group: Optional[dist_group_type]
 
     """2D block scaling, only applicable for weights."""
     with_2d_quantization: bool
@@ -137,9 +142,14 @@ class NVFP4Quantizer(Quantizer):
     """NVFP4 4over6 candidate-selection error mode."""
     nvfp4_4over6_err_mode: str
 
-    """RHT matrix random sign mask"""
-    rht_matrix_random_sign_mask_t: int
-    rht_matrix: torch.Tensor
+    """Whether the RHT sign mask is randomized.
+
+    The derived ``rht_matrix_random_sign_mask_t`` (int) and ``rht_matrix``
+    (tensor) attributes are intentionally not annotated: annotations define
+    the torch.compile value key, and both are rebuilt from this flag by
+    ``_rebuild_derived_state``.
+    """
+    with_random_sign_mask: bool
 
     def __init__(
         self,
@@ -174,11 +184,8 @@ class NVFP4Quantizer(Quantizer):
         self.nvfp4_4over6_err_mode = nvfp4_4over6_err_mode.upper()
         if self.nvfp4_4over6_err_mode not in ("MAE", "MSE"):
             raise ValueError("nvfp4_4over6_err_mode must be 'MAE' or 'MSE'.")
-        self._with_random_sign_mask = with_random_sign_mask
-        self.rht_matrix_random_sign_mask_t = get_random_sign_mask_for_rht(
-            with_random_sign_mask, torch.cuda.current_device()
-        )
-        self.rht_matrix = get_rht_matrix(with_random_sign_mask, torch.cuda.current_device())
+        self.with_random_sign_mask = with_random_sign_mask
+        self._rebuild_derived_state()
 
     def __getstate__(self):
         """Exclude unpicklable process group from serialized state."""
@@ -187,14 +194,19 @@ class NVFP4Quantizer(Quantizer):
         return state
 
     def _rebuild_derived_state(self) -> None:
-        """Restore the derived ``rht_matrix`` after value-key reconstruction.
+        """Build the derived RHT state (also used after value-key reconstruction).
 
-        ``rht_matrix`` is a ``torch.Tensor`` built from ``_with_random_sign_mask``
-        and the device, so it cannot be part of the (hashable) value key.
-        ``_rebuild_quantizer`` calls this hook to rebuild it; the ``lru_cache`` on
-        :func:`get_rht_matrix` makes an already-seen (flag, device) a cheap hit.
+        ``rht_matrix`` is a ``torch.Tensor`` and ``rht_matrix_random_sign_mask_t``
+        is derived from ``with_random_sign_mask``, so neither is part of the
+        (hashable) value key. ``__init__`` and ``_rebuild_quantizer`` both call
+        this hook; the ``lru_cache`` on the getters makes an already-seen
+        (flag, device) pair a cheap hit.
         """
-        self.rht_matrix = get_rht_matrix(self._with_random_sign_mask, torch.cuda.current_device())
+        device = torch.cuda.current_device()
+        self.rht_matrix_random_sign_mask_t = get_random_sign_mask_for_rht(
+            self.with_random_sign_mask, device
+        )
+        self.rht_matrix = get_rht_matrix(self.with_random_sign_mask, device)
 
     def update_quantized(
         self,
@@ -242,11 +254,10 @@ class NVFP4Quantizer(Quantizer):
             nvfp4_use_4over6=self.nvfp4_use_4over6,
             nvfp4_e4m3_max=self.nvfp4_e4m3_max,
             nvfp4_4over6_err_mode=self.nvfp4_4over6_err_mode,
+            with_random_sign_mask=self.with_random_sign_mask,
         )
         quantizer.internal = self.internal
         quantizer.optimize_for_gemm = self.optimize_for_gemm
-        quantizer.rht_matrix = self.rht_matrix
-        quantizer.rht_matrix_random_sign_mask_t = self.rht_matrix_random_sign_mask_t
 
         return quantizer
 
@@ -344,27 +355,6 @@ class NVFP4Quantizer(Quantizer):
 
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         return NVFP4BlockScaling
-
-    def _value_fields(self) -> Tuple[str, ...]:
-        # ``amax_reduction_group`` is intentionally excluded: it is a deprecated
-        # process group, not a value (``_value_key`` rejects a stored group).
-        # ``rht_matrix_random_sign_mask_t`` is a device-independent int derived
-        # from ``_with_random_sign_mask``; kept in the key so the rebuilt
-        # quantizer carries it without recomputation.
-        return (
-            "dtype",
-            "with_rht",
-            "with_post_rht_amax",
-            "with_2d_quantization",
-            "stochastic_rounding",
-            "row_scaled_nvfp4",
-            "nvfp4_use_4over6",
-            "nvfp4_e4m3_max",
-            "nvfp4_4over6_err_mode",
-            "_with_random_sign_mask",
-            "rht_matrix_random_sign_mask_t",
-            "with_amax_reduction",
-        )
 
 
 register_value_opaque_quantizer(NVFP4Quantizer)

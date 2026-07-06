@@ -70,9 +70,6 @@ class Float8BlockQuantizer(Quantizer):
 
         return quantizer
 
-    def _value_fields(self) -> Tuple[str, ...]:
-        return ("dtype", "block_len", "amax_epsilon", "force_pow_2_scales", "block_scaling_dim")
-
     def update_quantized(
         self,
         src: torch.Tensor,

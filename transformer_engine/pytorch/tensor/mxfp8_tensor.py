@@ -58,9 +58,6 @@ class MXFP8Quantizer(Quantizer):
 
         return quantizer
 
-    def _value_fields(self) -> Tuple[str, ...]:
-        return ("dtype",)
-
     def update_quantized(
         self,
         src: torch.Tensor,
