@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """This module provides predefined FP8 recipes."""
+
 from __future__ import annotations
 import abc
 import os
@@ -10,7 +11,6 @@ from enum import Enum
 from typing import Any, Literal, Optional, Union, Callable, NamedTuple
 from dataclasses import field
 from pydantic.dataclasses import dataclass
-
 
 _BACKWARD_OVERRIDES = (None, "high_precision", "dequantized")
 _NVFP4_4OVER6_SCOPES = ("none", "weights", "activations", "all")

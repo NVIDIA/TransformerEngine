@@ -17,7 +17,6 @@ from transformer_engine.common.recipe import Format, DelayedScaling
 
 from getting_started_utils_pytorch import DotProductAttention, speedometer
 
-
 # Configuration
 hidden_size = 4096
 sequence_length = 2048

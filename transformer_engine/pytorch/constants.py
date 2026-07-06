@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Enums for e2e transformer"""
+
 import enum
 from types import SimpleNamespace
 from typing import Union

@@ -13,7 +13,6 @@ from typing import Optional
 
 from ..common.recipe import Recipe
 
-
 UNSAFE_PICKLE_EXTRA_STATE_ENV = "NVTE_ALLOW_UNSAFE_PICKLE_EXTRA_STATE"
 
 _RECIPE_MODULE = "transformer_engine.common.recipe"

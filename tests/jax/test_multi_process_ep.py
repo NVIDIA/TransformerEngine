@@ -37,7 +37,6 @@ from transformer_engine.jax.cpp_extensions.ep import (
     get_ep_config,
 )
 
-
 # ── Test config ─────────────────────────────────────────────────────────────
 # NCCL EP requires NUM_LOCAL_EXPERTS*ep % 4 == 0 (TMA alignment in
 # device/hybridep_adapter.cu:511). With NUM_LOCAL_EXPERTS=2, ep must be even.

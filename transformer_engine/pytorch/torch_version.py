@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """PyTorch version utilities"""
+
 from __future__ import annotations
 import functools
 import torch

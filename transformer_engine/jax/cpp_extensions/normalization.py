@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for normalization"""
+
 import os
 import warnings
 import operator
@@ -39,7 +40,6 @@ from ..quantize import (
     ScalingMode,
     QuantizeLayout,
 )
-
 
 __all__ = [
     "layernorm_fwd",

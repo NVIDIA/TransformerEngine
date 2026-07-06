@@ -47,7 +47,6 @@ import transformer_engine.pytorch as te
 
 from fsdp2_utils import get_recipe_from_string, save_custom_attrs, restore_custom_attrs
 
-
 # ── Constants ────────────────────────────────────────────────────────
 HIDDEN_SIZE = 256
 FFN_HIDDEN_SIZE = 1024

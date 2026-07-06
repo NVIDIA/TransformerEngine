@@ -14,7 +14,6 @@ from transformer_engine.pytorch.router import (
     fused_topk_with_score_function,
 )
 
-
 SEED = 42
 
 

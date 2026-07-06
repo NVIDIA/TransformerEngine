@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """Randomized Hadamard Transform (RHT) utilities for JAX."""
+
 import jax.numpy as jnp
 
 

@@ -23,12 +23,10 @@ from transformer_engine.pytorch.ep import (
     _ep_dispatch_raw,
 )
 
-
 ZERO_COPY = os.environ.get("NVTE_EP_ZERO_COPY", "0") == "1"
 
 # Must come after the transformer_engine import so libtransformer_engine.so is loaded.
 import transformer_engine_torch as tex  # noqa: F401
-
 
 NUM_LOCAL_EXPERTS = 2
 HIDDEN_DIM = 32

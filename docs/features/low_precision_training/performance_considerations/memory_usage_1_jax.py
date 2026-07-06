@@ -10,7 +10,6 @@ import jax
 import jax.numpy as jnp
 from transformer_engine.jax.flax import DenseGeneral
 
-
 key = jax.random.PRNGKey(0)
 jax.clear_caches()
 

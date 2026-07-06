@@ -3,13 +3,13 @@
 # See LICENSE for license information.
 
 """Fused scaled masked softmax functions"""
+
 import os
 from typing import Callable, Tuple, Union, Optional
 import torch
 from torch import nn
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
-
 
 THREADS_PER_WARP = 32
 THREADS_PER_BLOCK = 128

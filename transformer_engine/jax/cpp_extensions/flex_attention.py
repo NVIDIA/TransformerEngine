@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """cuDNN frontend score_mod fused attention helpers."""
+
 import hashlib
 import importlib
 import inspect
@@ -17,7 +18,6 @@ import numpy as np
 from jax import ffi
 
 import transformer_engine_jax
-
 
 __all__ = [
     "FusedAttnScoreModHelper",

@@ -45,7 +45,6 @@ from transformer_engine.jax.quantize import (
 )
 from transformer_engine.jax.cpp_extensions.misc import get_min_device_compute_capability
 
-
 is_fp8_supported, reason = is_scaling_mode_supported(ScalingMode.DELAYED_TENSOR_SCALING)
 is_mxfp8_supported, reason = is_scaling_mode_supported(ScalingMode.MXFP8_1D_SCALING)
 is_nvfp4_supported, reason = is_scaling_mode_supported(ScalingMode.NVFP4_1D_SCALING)
