@@ -10,10 +10,11 @@ from typing import Any, Dict, Tuple
 from ..constants import DType
 
 
-# Registered classes are recorded by qualname because the check may run inside
-# a torch.compile'd region: a name-in-set test is traceable there, while a set
-# of opaque-registered class objects is not (Dynamo cannot compare opaque
-# classes, so ``type(q) in some_set`` graph-breaks under ``fullgraph=True``).
+# Qualnames of the registered quantizer classes. The set holds strings rather
+# than the classes themselves so that ``is_value_opaque_quantizer`` can be
+# called inside a ``torch.compile``'d function without a graph break: Dynamo
+# can evaluate ``type(q).__qualname__ in <set of strings>``, but not set
+# membership of a class registered as an opaque type.
 _VALUE_OPAQUE_QUALNAMES: set = set()
 
 
