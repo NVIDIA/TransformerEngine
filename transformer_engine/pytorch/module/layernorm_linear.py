@@ -30,7 +30,6 @@ from .base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
-from .base import maybe_wrap_gtp
 from ..quantization import FP8GlobalStateManager, QuantizerRole
 from ..utils import (
     assert_dim_for_fp8_exec,
@@ -1310,7 +1309,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
         delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
         name: Optional[str] = None,
-        gtp_remat_group: Optional[dist_group_type] = None,
     ) -> None:
         super().__init__(name)
 
@@ -1341,10 +1339,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
             self.set_tensor_parallel_group(tp_group)
         self.set_nccl_overlap_warning_if_tp()
 
-        if gtp_remat_group is None:
-            self.gtp_remat_size = 1
-        else:
-            self.gtp_remat_size = get_distributed_world_size(gtp_remat_group)
+        # GTP is attached post-init by Megatron (GTP-agnostic construction); Megatron overwrites
+        # this with the real shard count after __init__ for GTP-sharded weights.
+        self.gtp_remat_size = 1
 
         self.parallel_mode = parallel_mode
         assert (
@@ -1556,17 +1553,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         if with_fp8_params:
             self.init_fp8_metadata()
 
-        if gtp_remat_group is not None:
-            # Stashed before reset_parameters so the slice hook can see it.
-            self._gtp_group = gtp_remat_group
-            self._gtp_is_grouped = False
-
         self.reset_parameters(defer_init=device == "meta")
-
-        maybe_wrap_gtp(self, self.weight_names, gtp_remat_group)
-        if gtp_remat_group is not None:
-            # Free the full-size backing buffer; GTP replaced it with a sharded param.
-            del weight_tensor
 
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM
@@ -1729,11 +1716,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
         try:
             # Get concatenated weight and bias tensors
             weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
-
-            if self.gtp_remat_size > 1:
-                weight_tensor.setup(
-                    weight_quantizer=self._get_weight_quantizers(),
-                )
 
             quantizers = (
                 self._get_quantizers(fp8_output, fp8_grad, is_grad_enabled)

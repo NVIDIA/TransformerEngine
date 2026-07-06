@@ -992,17 +992,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 )
         else:
             if fc1_gtp_size > 1:
-                # Init per-shard quantizers once (quantize-then-gather).
-                if fc1_op.weight0._quantizer is None:
-                    fc1_op.weight0.setup(
-                        weight_quantizer=[
-                            fc1_op.get_quantizer("forward", 2 * idx + 1)
-                            for idx in range(num_groups)
-                        ]
-                    )
                 # All-gather the full per-expert weights (returns a list of N full tensors).
-                # TODO: pass in is_first_microbatch flag to skip redundant quantization after
-                # the first microbatch in each training step.
                 fc1_weights = fc1_op.weight0.batched_all_gather_and_prefetch(
                     fwd=True, skip_weight_cast=False, cast_noop_flag=None
                 )
@@ -1269,15 +1259,6 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 )
         else:
             if fc2_gtp_size > 1:
-                # Init per-shard quantizers once (quantize-then-gather); gated so the
-                # quantizer list isn't rebuilt every forward.
-                if fc2_op.weight0._quantizer is None:
-                    fc2_op.weight0.setup(
-                        weight_quantizer=[
-                            fc2_op.get_quantizer("forward", 2 * idx + 1)
-                            for idx in range(num_groups)
-                        ]
-                    )
                 # All-gather the full per-expert weights (returns a list of N full tensors).
                 fc2_weights = fc2_op.weight0.batched_all_gather_and_prefetch(
                     fwd=True, skip_weight_cast=False, cast_noop_flag=None

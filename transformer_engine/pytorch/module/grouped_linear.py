@@ -29,7 +29,6 @@ from .base import (
     _2X_ACC_WGRAD,
 )
 from ._common import WeightGradStore
-from .base import maybe_wrap_gtp
 from ..quantization import FP8GlobalStateManager, QuantizerRole
 from ..utils import (
     divide,
@@ -1315,7 +1314,6 @@ class GroupedLinear(TransformerEngineBaseModule):
         single_grouped_weight: bool = False,
         single_grouped_bias: bool = False,
         name: Optional[str] = None,
-        gtp_remat_group: Optional[dist_group_type] = None,
     ) -> None:
         super().__init__(name)
 
@@ -1371,10 +1369,9 @@ class GroupedLinear(TransformerEngineBaseModule):
                 "Because the TP communication is handled outside of this module."
             )
 
-        if gtp_remat_group is None:
-            self.gtp_remat_size = 1
-        else:
-            self.gtp_remat_size = get_distributed_world_size(gtp_remat_group)
+        # GTP is attached post-init by Megatron (GTP-agnostic construction); Megatron overwrites
+        # this with the real shard count after __init__ for GTP-sharded weights.
+        self.gtp_remat_size = 1
 
         self.parallel_mode = parallel_mode
         if self.parallel_mode not in GemmParallelModes:
@@ -1429,15 +1426,8 @@ class GroupedLinear(TransformerEngineBaseModule):
 
         self.weight_names = [f"weight{idx}" for idx in range(self.num_gemms)]
         is_meta = torch.device(device).type == "meta"
-        if gtp_remat_group is not None:
-            # Stashed before reset_parameters so the slice hook can see it;
-            # _gtp_is_grouped routes through the GroupedLinear finalize path.
-            self._gtp_group = gtp_remat_group
-            self._gtp_is_grouped = True
 
         self.reset_parameters(defer_init=is_meta)
-
-        maybe_wrap_gtp(self, self.weight_names, gtp_remat_group, is_grouped=True)
 
         if self.wgrad_store.delay_wgrad_compute():
             for name, param in self.named_parameters():
@@ -1787,11 +1777,6 @@ class GroupedLinear(TransformerEngineBaseModule):
         try:
             weight_tensors = self._get_weight_tensors()
             bias_tensors = self._get_bias_tensors()
-
-            if self.gtp_remat_size > 1:
-                weight_tensors[0].setup(
-                    weight_quantizer=self._get_weight_quantizers(),
-                )
 
             quantizers = self._get_quantizers() if not debug else self._get_debug_quantizers()
 
