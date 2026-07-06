@@ -5,7 +5,8 @@
 """Value-opaque quantizers for torch.compile."""
 
 from __future__ import annotations
-from typing import Any, Dict, Tuple
+import enum
+from typing import Any, Dict, Tuple, get_type_hints
 
 from ..constants import DType
 
@@ -86,20 +87,25 @@ def register_value_opaque_quantizer(cls: type) -> None:
     versions without the opaque-object API the value semantics still apply,
     only the torch.compile specialization is skipped.
 
-    Derived tensors and process groups must not be annotated (rebuild them in
-    ``_rebuild_derived_state`` instead); this is checked here at import time.
-    Checking annotation strings is enough: the tensor modules use
-    ``from __future__ import annotations``.
+    Only plain value types (``int``/``bool``/``float``/``str`` and enums) may
+    be annotated: anything else (derived tensors, process groups, containers)
+    cannot be hashed into the value key or rebuilt from its repr, so it must
+    be left unannotated and rebuilt in ``_rebuild_derived_state`` instead.
+    This runs once per class at import time, not in any hot path, so resolving
+    the annotation strings to real types is affordable.
     """
     fields = cls._annotated_fields()
-    for name, ann in fields.items():
-        ann = str(ann)
-        if "Tensor" in ann or "dist_group_type" in ann or "ProcessGroup" in ann:
+    resolved = get_type_hints(cls)
+    for name in fields:
+        typ = resolved[name]
+        if typ not in (int, bool, float, str) and not (
+            isinstance(typ, type) and issubclass(typ, enum.Enum)
+        ):
             raise TypeError(
                 f"{cls.__name__} cannot be a torch.compile value quantizer: "
-                f"annotated field {name!r} ({ann}) is not a plain value. "
-                "Remove the annotation and rebuild the field in "
-                "``_rebuild_derived_state`` instead."
+                f"annotated field {name!r} ({typ!r}) is not a plain value type "
+                "(int/bool/float/str/enum). Remove the annotation and rebuild "
+                "the field in ``_rebuild_derived_state`` instead."
             )
     cls._value_field_names = tuple(fields)
     # ``register_opaque_type`` requires ``__fx_repr__`` to already exist on the
