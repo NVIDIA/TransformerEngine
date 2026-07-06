@@ -40,14 +40,19 @@ STANDARD_QUANTIZE = "Quantize"
 HIGH_PRECISION = "High Precision"
 
 
-def _autoswitch_gemm_runtime_decision_active() -> bool:
-    """Return True when AutoswitchGemm needs per-GEMM final decisions this iteration."""
+def _autoswitch_gemm_runtime_decision_active(layer_name: Optional[str] = None) -> bool:
+    """Return True when AutoswitchGemm needs per-GEMM final decisions for this layer."""
     try:
         from transformer_engine.debug.features.autoswitch_gemm import (
             autoswitch_gemm_should_force_eager,
         )
 
-        return bool(autoswitch_gemm_should_force_eager(TEDebugState.get_iteration()))
+        return bool(
+            autoswitch_gemm_should_force_eager(
+                TEDebugState.get_iteration(),
+                layer_name=layer_name,
+            )
+        )
     except Exception:  # pylint: disable=broad-except
         return False
 
@@ -437,7 +442,9 @@ class DebugQuantizer(Quantizer):
         """Returns bool if there is at least one API call enabled."""
         if self.output_tensor:
             return self.inspect_tensor_enabled or self.rowwise_tensor_plan == API_CALL_MODIFY
-        if self.parent_quantizer is not None and _autoswitch_gemm_runtime_decision_active():
+        if self.parent_quantizer is not None and _autoswitch_gemm_runtime_decision_active(
+            self.layer_name
+        ):
             # AutoswitchGemm may need final precision decisions during the hold window even when
             # inspect_tensor is disabled for this non-sampling iteration.
             return True
