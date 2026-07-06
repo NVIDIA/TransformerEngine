@@ -80,6 +80,8 @@ class _GroupedWeightAutogradBridge(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, grouped_weight: torch.Tensor, fuse_wgrad_accumulation: bool):
+        # Backward only needs the parent's identity/attributes, not saved tensor values;
+        # use a weakref to avoid extending its lifetime or creating a reference cycle.
         ctx.grouped_weight_ref = weakref.ref(grouped_weight)
         ctx.fuse_wgrad_accumulation = bool(fuse_wgrad_accumulation)
         members = grouped_weight.quantized_tensors
