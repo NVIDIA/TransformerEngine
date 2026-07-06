@@ -418,12 +418,14 @@ def _current_scaling(amax_epsilon=0.0):
 def _nvfp4(with_rht=True):
     # Default with_rht=True so the quantize round-trip below exercises the
     # derived ``rht_matrix`` tensor (the field most likely to be dropped on
-    # value-key reconstruction).
+    # value-key reconstruction). Post-RHT amax is required by the kernel
+    # whenever RHT is on (pre-RHT amax is unsupported).
     return NVFP4Quantizer(
         fp4_dtype=tex.DType.kFloat4E2M1,
         rowwise=True,
         columnwise=True,
         with_rht=with_rht,
+        with_post_rht_amax=with_rht,
     )
 
 
