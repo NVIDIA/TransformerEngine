@@ -47,11 +47,11 @@ def projection_prune_fwd(configs, named_args, **kwargs):
         # Deterministic path: a single K block covers the whole reduction, so each program
         # stores its result instead of atomic-adding across split-K blocks.
         K = named_args.get("K", kwargs.get("K", None))
-        block_m = [8, 16, 64, 128]
+        block_m = [16, 64, 128]
         block_k = align_to(K, 32)
-        step_k = [128, 256]
-        warps = [2, 4, 8]
-        stages = [2, 3, 4]
+        step_k = [256]
+        warps = [2, 8]
+        stages = [3, 4]
 
         pruned_configs = []
         for bm, sk, w, s in itertools.product(block_m, step_k, warps, stages):
@@ -1161,10 +1161,10 @@ def _mhc_sinkhorn_bwd_fused(
 
 
 def aggregate_config_fwd():
-    block_m = [1, 2, 4]
-    block_c = [128, 256]
-    warps = [1, 2, 4]
-    stages = [1, 2, 3, 4]
+    block_m = [2, 4]
+    block_c = [256]
+    warps = [1, 2]
+    stages = [1, 2, 3]
 
     configs = []
     for m, c, w, s in itertools.product(block_m, block_c, warps, stages):
@@ -1274,25 +1274,17 @@ def _mhc_aggregate_fwd(
 
 
 def aggregate_config_bwd():
-    block_m = [1, 2, 4]
-    block_c = [64, 128, 256]
-    step_c = [32, 64]
-    warps = [1, 2, 4]
-    stages = [1, 2, 3, 4]
-
-    configs = []
-    for bm, bc, sc, w, s in itertools.product(block_m, block_c, step_c, warps, stages):
-        configs.append(
-            triton.Config(
-                {"BLOCK_SIZE_M": bm, "BLOCK_SIZE_C": bc, "STEP_SIZE_C": sc},
-                num_warps=w,
-                num_stages=s,
-            )
+    # The real configs are built in `aggregate_prune_bwd` (BLOCK_SIZE_C depends on C at runtime).
+    # Return a placeholder config so triton won't skip pruning which returns the real configs.
+    return [
+        triton.Config(
+            {"BLOCK_SIZE_M": 4, "BLOCK_SIZE_C": 256, "STEP_SIZE_C": 64}, num_warps=w, num_stages=2
         )
-    return configs
+        for w in (1, 2)
+    ]
 
 
-def aggregate_prune_bwd(configs, named_args, **kwargs):
+def aggregate_prune_bwd(_, named_args, **kwargs):
     M = named_args.get("M", kwargs.get("M", None))
     C = named_args.get("C", kwargs.get("C", None))
     block_m = [4]
@@ -1454,10 +1446,10 @@ def _mhc_aggregate_bwd(
 
 
 def expand_combine_config_fwd():
-    block_m = [1, 2, 4]
-    block_c = [128, 256]
+    block_m = [2, 4]
+    block_c = [256]
     warps = [1, 2]
-    stages = [1, 2, 3, 4]
+    stages = [1, 2, 3]
 
     configs = []
     for m, c, w, s in itertools.product(block_m, block_c, warps, stages):
@@ -1604,32 +1596,24 @@ def _mhc_expand_combine_fwd(
 
 
 def expand_combine_config_bwd():
-    block_m = [1, 2, 4]
-    block_c = [128, 256]
-    step_c = [32, 64]
-    warps = [1, 2]
-    stages = [1, 2, 3, 4]
-
-    configs = []
-    for m, c, sc, w, s in itertools.product(block_m, block_c, step_c, warps, stages):
-        configs.append(
-            triton.Config(
-                {"BLOCK_SIZE_M": m, "BLOCK_SIZE_C": c, "STEP_SIZE_C": sc},
-                num_warps=w,
-                num_stages=s,
-            )
+    # The real configs are built in `expand_combine_prune_bwd` (BLOCK_SIZE_C depends on C at runtime).
+    # Return a placeholder config so triton won't skip pruning which returns the real configs.
+    return [
+        triton.Config(
+            {"BLOCK_SIZE_M": 4, "BLOCK_SIZE_C": 256, "STEP_SIZE_C": 64}, num_warps=w, num_stages=2
         )
-    return configs
+        for w in (1, 2)
+    ]
 
 
-def expand_combine_prune_bwd(configs, named_args, **kwargs):
+def expand_combine_prune_bwd(_, named_args, **kwargs):
     M = named_args.get("M", kwargs.get("M", None))
     C = named_args.get("C", kwargs.get("C", None))
     block_m = [4]
     block_c = align_to(C, 32)
-    step_c = [32, 64, 128]
+    step_c = [64, 128]
     warps = [1, 2]
-    stages = [1, 2, 3, 4]
+    stages = [2, 3]
 
     pruned_configs = []
     for bm, sc, w, s in itertools.product(block_m, step_c, warps, stages):
