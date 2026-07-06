@@ -26,6 +26,10 @@ ffn_hidden_size = 16384
 num_attention_heads = 32
 dtype = torch.bfloat16
 
+# Note: FP8 current scaling with grouped linear (e.g., in GQA/MQA) may fail on
+# H100 (SM90) with certain cuBLAS versions. Use FP8 with delayed scaling or
+# disable graph capture if encountering cuBLAS grouped GEMM errors.
+
 # Create synthetic data
 x = torch.rand(sequence_length, batch_size, hidden_size).cuda().to(dtype=dtype)
 
