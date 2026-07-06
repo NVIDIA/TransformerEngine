@@ -300,21 +300,33 @@ def _load_cuda_library_from_python(lib_name: str, strict: bool = False):
 
 
 @functools.lru_cache(maxsize=None)
-def _load_cuda_library_from_system(lib_name: str):
+def _load_cuda_library_from_system(
+    lib_name: str,
+    include_env_paths: bool = True,
+    include_default_paths: bool = True,
+    include_linker_paths: bool = True,
+):
     """
     Attempts to load shared object file installed via system/cuda-toolkit.
 
     `lib_name`: Name of library to load without extension or `lib` prefix.
+    `include_env_paths`: Search paths set with environment variables.
+    `include_default_paths`: Search default system CUDA installation paths.
+    `include_linker_paths`: Search paths known to the dynamic linker.
     """
 
-    # Where to look for the shared lib in decreasing order of preference.
-    paths = (
-        os.environ.get(f"{lib_name.upper()}_HOME"),
-        os.environ.get(f"{lib_name.upper()}_PATH"),
-        os.environ.get("CUDA_HOME"),
-        os.environ.get("CUDA_PATH"),
-        "/usr/local/cuda",
-    )
+    paths = []
+    if include_env_paths:
+        paths.extend(
+            (
+                os.environ.get(f"{lib_name.upper()}_HOME"),
+                os.environ.get(f"{lib_name.upper()}_PATH"),
+                os.environ.get("CUDA_HOME"),
+                os.environ.get("CUDA_PATH"),
+            )
+        )
+    if include_default_paths:
+        paths.append("/usr/local/cuda")
 
     for path in paths:
         if path is None:
@@ -325,7 +337,10 @@ def _load_cuda_library_from_system(lib_name: str):
         if libs:
             return True, ctypes.CDLL(libs[0], mode=ctypes.RTLD_GLOBAL)
 
-    # Search in LD_LIBRARY_PATH.
+    # Search paths known to the dynamic linker.
+    if not include_linker_paths:
+        return False, None
+
     try:
         _lib_handle = ctypes.CDLL(f"lib{lib_name}{_get_sys_extension()}", mode=ctypes.RTLD_GLOBAL)
         return True, _lib_handle
@@ -337,12 +352,12 @@ def _load_cuda_library_from_system(lib_name: str):
 def _load_cuda_library(lib_name: str):
     """
     Load given shared library.
-    Prioritize loading from system/toolkit
-    before checking python packages.
     """
 
-    # Attempt to locate library in system.
-    found, handle = _load_cuda_library_from_system(lib_name)
+    # Preferred order: explicit user paths, active Python environment, implicit system fallback.
+    found, handle = _load_cuda_library_from_system(
+        lib_name, include_default_paths=False, include_linker_paths=False
+    )
     if found:
         return True, handle
 
@@ -350,6 +365,11 @@ def _load_cuda_library(lib_name: str):
     found, handle = _load_cuda_library_from_python(lib_name)
     if found:
         return False, handle
+
+    # Fall back to the default system installation and dynamic linker paths.
+    found, handle = _load_cuda_library_from_system(lib_name, include_env_paths=False)
+    if found:
+        return True, handle
 
     raise RuntimeError(f"{lib_name} shared object not found.")
 
