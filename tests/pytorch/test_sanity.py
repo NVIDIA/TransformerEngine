@@ -1158,43 +1158,81 @@ def test_quantized_model_init_high_precision_init_val():
 
 @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
 def test_grouped_linear_single_param_preserves_high_precision_init(monkeypatch):
-    """Packing MXFP8 weights preserves the values used to initialize optimizer masters."""
+    """Grouped MXFP8 and discrete weights produce identical FP32 master initialization."""
     monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
-    init_value = 0.125
+    num_gemms = 3
 
-    def init_method(tensor):
-        return torch.nn.init.constant_(tensor, init_value)
+    def make_module(single_grouped_weight):
+        torch.manual_seed(1234)
+        torch.cuda.manual_seed(1234)
+        with quantized_model_init(
+            enabled=True,
+            recipe=recipe.MXFP8BlockScaling(),
+            preserve_high_precision_init_val=True,
+        ):
+            return GroupedLinear(
+                num_gemms=num_gemms,
+                in_features=32,
+                out_features=64,
+                bias=False,
+                params_dtype=torch.bfloat16,
+                single_grouped_weight=single_grouped_weight,
+            ).cuda()
 
+    discrete_module = make_module(False)
+    grouped_module = make_module(True)
+    discrete_init_vals = [
+        getattr(discrete_module, f"weight{i}").get_high_precision_init_val()
+        for i in range(num_gemms)
+    ]
+    expected_grouped_init = torch.stack(discrete_init_vals, dim=0)
+
+    grouped_weight = grouped_module.weight
+    assert hasattr(grouped_weight, "get_high_precision_init_val")
+    assert hasattr(grouped_weight, "clear_high_precision_init_val")
+    grouped_init = grouped_weight.get_high_precision_init_val()
+    assert grouped_init.device.type == "cpu"
+    assert grouped_init.shape == grouped_weight.shape
+    torch.testing.assert_close(
+        grouped_init,
+        expected_grouped_init,
+        rtol=0,
+        atol=0,
+    )
+
+    # This is the exact layout consumed when constructing the FP32 optimizer master.
+    discrete_master = expected_grouped_init.float()
+    grouped_master = grouped_init.float()
+    torch.testing.assert_close(grouped_master, discrete_master, rtol=0, atol=0)
+
+    grouped_weight.clear_high_precision_init_val()
+    assert grouped_weight.get_high_precision_init_val() is None
+
+
+@pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+def test_grouped_linear_rejects_partial_high_precision_init(monkeypatch):
+    """Packing fails rather than mixing preserved and dequantized initialization."""
+    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
     with quantized_model_init(
         enabled=True,
         recipe=recipe.MXFP8BlockScaling(),
         preserve_high_precision_init_val=True,
     ):
         module = GroupedLinear(
-            num_gemms=3,
+            num_gemms=2,
             in_features=32,
             out_features=64,
             bias=False,
-            init_method=init_method,
             params_dtype=torch.bfloat16,
-            single_grouped_weight=True,
+            single_grouped_weight=False,
         ).cuda()
 
-    weight = module.weight
-    assert hasattr(weight, "get_high_precision_init_val")
-    assert hasattr(weight, "clear_high_precision_init_val")
-    high_precision_init = weight.get_high_precision_init_val()
-    assert high_precision_init.device.type == "cpu"
-    assert high_precision_init.shape == weight.shape
-    torch.testing.assert_close(
-        high_precision_init,
-        torch.full_like(high_precision_init, init_value),
-        rtol=0,
-        atol=0,
-    )
-
-    weight.clear_high_precision_init_val()
-    assert weight.get_high_precision_init_val() is None
+    module.weight0.clear_high_precision_init_val()
+    with pytest.raises(
+        RuntimeError,
+        match="inconsistent high-precision initialization state",
+    ):
+        module.make_grouped_weights()
 
 
 @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)

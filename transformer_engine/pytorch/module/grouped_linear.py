@@ -7,7 +7,6 @@
 from typing import Union, Optional, Callable, Tuple, List
 from itertools import chain
 import os
-from types import MethodType
 import warnings
 import weakref
 
@@ -28,6 +27,7 @@ from .base import (
     _2X_ACC_FPROP,
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
+    _attach_high_precision_init_val,
 )
 from ._common import WeightGradStore
 from ..quantization import FP8GlobalStateManager, QuantizerRole
@@ -67,19 +67,6 @@ from ...debug.pytorch.debug_quantization import DebugQuantizer
 from ...debug.pytorch.debug_state import TEDebugState
 
 __all__ = ["GroupedLinear"]
-
-
-def _get_high_precision_init_val(
-    grouped_weight: torch.Tensor,
-) -> Optional[torch.Tensor]:
-    """Return the pre-quantization initialization preserved on a grouped parameter."""
-    return getattr(grouped_weight, "_high_precision_init_val", None)
-
-
-def _clear_high_precision_init_val(grouped_weight: torch.Tensor) -> None:
-    """Release a grouped parameter's temporary high-precision initialization."""
-    if hasattr(grouped_weight, "_high_precision_init_val"):
-        del grouped_weight._high_precision_init_val
 
 
 class _GroupedWeightAutogradBridge(torch.autograd.Function):
@@ -1581,14 +1568,9 @@ class GroupedLinear(TransformerEngineBaseModule):
         for member in grouped_parameter.quantized_tensors:
             member.requires_grad_(grouped_parameter.requires_grad)
         if all(value is not None for value in high_precision_init_vals):
-            grouped_parameter._high_precision_init_val = torch.stack(
-                high_precision_init_vals, dim=0
-            )
-            grouped_parameter.get_high_precision_init_val = MethodType(
-                _get_high_precision_init_val, grouped_parameter
-            )
-            grouped_parameter.clear_high_precision_init_val = MethodType(
-                _clear_high_precision_init_val, grouped_parameter
+            _attach_high_precision_init_val(
+                grouped_parameter,
+                torch.stack(high_precision_init_vals, dim=0),
             )
             for weight in weights:
                 clear = getattr(weight, "clear_high_precision_init_val", None)
