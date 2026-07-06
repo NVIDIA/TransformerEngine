@@ -233,7 +233,8 @@ class NVFP4Quantizer(Quantizer):
             rowwise=self.rowwise_usage,
             columnwise=self.columnwise_usage,
             with_amax_reduction=self.with_amax_reduction,
-            amax_reduction_group=self.amax_reduction_group,
+            # Absent on quantizers rebuilt from a value key (deprecated field).
+            amax_reduction_group=getattr(self, "amax_reduction_group", None),
             with_rht=self.with_rht,
             with_post_rht_amax=self.with_post_rht_amax,
             with_2d_quantization=self.with_2d_quantization,

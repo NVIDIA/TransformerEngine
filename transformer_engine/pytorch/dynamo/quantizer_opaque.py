@@ -30,21 +30,20 @@ def _rebuild_quantizer(cls: type, items: Tuple[Tuple[str, Any], ...]) -> Any:
 
     Referenced by the ``__fx_repr__`` emitted for value-opaque quantizers; the
     generated FX code calls this to materialize the quantizer constant.
+
+    Only the value fields (plus derived state via ``_rebuild_derived_state``)
+    are restored. Non-value attributes such as the deprecated
+    ``amax_reduction_group`` are deliberately absent on the rebuilt quantizer,
+    so accessing them fails loudly unless set explicitly.
     """
     # Bypass ``__init__`` and restore the value attributes directly: the value
     # items already capture every value-defining field (including derived ones),
     # and the constructors have heterogeneous signatures / side effects.
     obj = cls.__new__(cls)
-    field_names = set()
     for name, value in items:
         if name == "dtype":
             value = DType.cast(value)
         object.__setattr__(obj, name, value)
-        field_names.add(name)
-    # The deprecated amax-reduction group is not a value field; initialize it to
-    # None so attribute access keeps working on the rebuilt quantizer.
-    if "with_amax_reduction" in field_names and not hasattr(obj, "amax_reduction_group"):
-        object.__setattr__(obj, "amax_reduction_group", None)
     # Restore non-value derived state that ``__init__`` would normally build but
     # that cannot live in the value key (e.g. NVFP4's ``rht_matrix`` tensor).
     finalize = getattr(obj, "_rebuild_derived_state", None)

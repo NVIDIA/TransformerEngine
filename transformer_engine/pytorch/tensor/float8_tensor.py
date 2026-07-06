@@ -257,7 +257,8 @@ class Float8CurrentScalingQuantizer(Quantizer):
             rowwise=self.rowwise_usage,
             columnwise=self.columnwise_usage,
             with_amax_reduction=self.with_amax_reduction,
-            amax_reduction_group=self.amax_reduction_group,
+            # Absent on quantizers rebuilt from a value key (deprecated field).
+            amax_reduction_group=getattr(self, "amax_reduction_group", None),
             force_pow_2_scales=self.force_pow_2_scales,
             amax_epsilon=self.amax_epsilon,
         )
