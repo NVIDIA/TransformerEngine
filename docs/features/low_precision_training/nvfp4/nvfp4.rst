@@ -207,6 +207,90 @@ NVFP4 all-gather is supported.
 
 *Figure 6. Quantization and all-gather flow for NVFP4 showing amax synchronization and hierarchical scaling.*
 
+Per-token NVFP4
+---------------
+
+The default ``NVFP4BlockScaling`` recipe computes a single per-tensor outer
+``amax`` (``s_global``) for each tensor. The **per-token** variant instead
+computes a per-row outer ``amax`` (length ``M``) for rowwise data and a per-col
+outer ``amax`` (length ``K``) for columnwise data, giving each token/row its own
+global scale. This finer outer-scale granularity can improve accuracy, and the
+per-token cast feeds a dedicated fused-EVT CUTLASS GEMM that consumes the vector
+outer ``amax`` directly (cuBLASLt cannot).
+
+There are two ways to select per-token, both equivalent:
+
+* **Explicit recipe class** ``NVFP4PerTokenBlockScaling`` (recommended for code
+  that constructs its own recipe).
+* **Environment variable** ``NVTE_NVFP4_PER_TOKEN=1`` on a plain
+  ``NVFP4BlockScaling``. This lets frameworks that only ever build a default
+  ``NVFP4BlockScaling`` (for example Megatron-Core) opt into per-token purely
+  from the launch environment, with no framework-side code change.
+
+.. code-block:: python
+
+   from transformer_engine.common.recipe import NVFP4PerTokenBlockScaling
+   import transformer_engine.pytorch as te
+
+   # RHT and SR are OFF by default on the per-token path; opt in as needed.
+   recipe = NVFP4PerTokenBlockScaling(per_token_rht=True, per_token_sr=True)
+   with te.fp8_autocast(enabled=True, fp8_recipe=recipe):
+       out = model(inp)
+
+**Differences from the per-tensor default**
+
+* RHT and stochastic rounding are **off by default** on the per-token path (the
+  per-row outer ``amax`` already mitigates the long-tail outliers RHT targets).
+  Opt in with ``per_token_rht=True`` / ``per_token_sr=True`` (env vars
+  :envvar:`NVTE_NVFP4_PER_TOKEN_RHT` / :envvar:`NVTE_NVFP4_PER_TOKEN_SR`).
+* 2D weight quantization is disabled by default. The per-token weight-2D route
+  (``per_token_weight_2d=True`` / :envvar:`NVTE_NVFP4_PER_TOKEN_WEIGHT_2D`)
+  quantizes the forward weight with the transposition-invariant 2D cast emitted
+  in per-token layout, removing the 1D weight-gradient bias.
+* ``row_scaled_activation`` and 4over6 are forced off (mutually exclusive with
+  the per-token amax layout).
+
+**Norm forward.** The per-token forward path uses the unfused norm+amax
+implementation. Its per-row/per-col outer amax is computed by the per-token
+cast's first kernel (K1, the amax pass), a per-row ``(M,)`` + per-col ``(K,)``
+vector that the fused norm+amax kernel (which only emits a scalar amax) cannot
+produce. This is selected automatically for per-token quantizers -- no
+``NVTE_NORM_FWD_USE_CUDNN=1`` needed.
+
+**Currently unsupported on the per-token path**: forward/backward output
+quantization, and communication/bulk overlap.
+
+Running per-token NVFP4 with Megatron-Core
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Megatron-Core builds a plain ``NVFP4BlockScaling`` for ``--fp4-format e2m1`` and
+has no CLI for per-token, so per-token is selected entirely through TE
+environment variables. A minimal launch looks like:
+
+.. code-block:: bash
+
+   # Select NVFP4 per-token via TE env vars (read at recipe construction).
+   export NVTE_NVFP4_PER_TOKEN=1
+   # Optional per-token knobs:
+   # export NVTE_NVFP4_PER_TOKEN_RHT=1
+   # export NVTE_NVFP4_PER_TOKEN_SR=1
+   # export NVTE_NVFP4_PER_TOKEN_WEIGHT_2D=1
+
+   python pretrain_gpt.py \
+       --transformer-impl transformer_engine \
+       --fp4-format e2m1 \
+       --no-gradient-accumulation-fusion \
+       ...   # remaining model / data / optimizer args
+
+Notes:
+
+* ``--no-gradient-accumulation-fusion`` is required because the per-token kernel
+  does not yet support fused wgrad accumulation.
+* To keep the first/last transformer layers in BF16, use Megatron's
+  ``--first-last-layers-bf16 --num-layers-at-start-in-bf16 N
+  --num-layers-at-end-in-bf16 M`` flags (those layers simply skip the FP4
+  autocast; the recipe is unchanged).
+
 Examples
 --------
 

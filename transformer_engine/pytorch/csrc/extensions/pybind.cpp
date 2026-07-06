@@ -415,6 +415,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("compute_amax", &transformer_engine::pytorch::compute_amax,
         "Compute absolute max value in tensor", py::arg("input"), py::arg("amax"),
         py::call_guard<py::gil_scoped_release>());
+  m.def("hadamard_transform_amax", &transformer_engine::pytorch::hadamard_transform_amax,
+        "K1 of the NVFP4Quantizer RHT+post_rht_amax path: rowwise (pre-RHT) + "
+        "columnwise (RHT(input.T)) amax in one launch. Bench-only entry.",
+        py::arg("input"), py::arg("rowwise_amax"), py::arg("columnwise_amax"),
+        py::arg("rht_matrix_random_sign_mask"), py::call_guard<py::gil_scoped_release>());
   m.def("fused_amax_and_scale_update_after_reduction",
         &transformer_engine::pytorch::fused_amax_and_scale_update_after_reduction,
         "Update amax history and FP8 scale/scale_inv after reduction",
@@ -463,6 +468,113 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("output_rowwise"), py::arg("output_colwise"), py::arg("scale_inv_rowwise"),
         py::arg("scale_inv_colwise"), py::arg("rows"), py::arg("cols"), py::arg("start_offset"),
         py::call_guard<py::gil_scoped_release>());
+  m.def("nvfp4_per_token_quantize", &transformer_engine::pytorch::nvfp4_per_token_quantize,
+        "NVFP4 per-token cast (composite K1 amax + K2 encode). "
+        "with_rht=True: 16-pt col-wise RHT in K1+K2; "
+        "with_swizzle=True: rowwise scale_inv in cuBLAS LT swizzled layout.",
+        py::arg("input"), py::arg("q_row"), py::arg("s_dec_row"), py::arg("row_amax"),
+        py::arg("q_col"), py::arg("s_dec_col"), py::arg("col_amax"), py::arg("rowwise"),
+        py::arg("columnwise"), py::arg("with_rht") = false,
+        py::arg("random_sign_mask_t") = static_cast<int64_t>(0xACE1),
+        py::arg("with_swizzle") = false, py::arg("with_sr") = false,
+        py::arg("rng_state") = std::nullopt);
+  m.def("nvfp4_per_token_amax", &transformer_engine::pytorch::nvfp4_per_token_amax,
+        "K1-only: per-row/per-col outer amax via TMA + atomicMax. Bench/diagnostic. "
+        "with_rht=True applies a 16-pt col-wise RHT before amax.",
+        py::arg("input"), py::arg("row_amax"), py::arg("col_amax"), py::arg("rowwise"),
+        py::arg("columnwise"), py::arg("with_rht") = false,
+        py::arg("random_sign_mask_t") = static_cast<int64_t>(0xACE1));
+  m.def("nvfp4_per_token_encode", &transformer_engine::pytorch::nvfp4_per_token_encode,
+        "K2-only: FP4 + e4m3 SF encode given pre-filled amax buffers. Bench/diagnostic. "
+        "with_rht=True requires col_amax produced by a K1 launch with the same mask; "
+        "with_swizzle=True writes rowwise scale_inv directly in the swizzled layout.",
+        py::arg("input"), py::arg("q_row"), py::arg("s_dec_row"), py::arg("row_amax"),
+        py::arg("q_col"), py::arg("s_dec_col"), py::arg("col_amax"), py::arg("rowwise"),
+        py::arg("columnwise"), py::arg("with_rht") = false,
+        py::arg("random_sign_mask_t") = static_cast<int64_t>(0xACE1),
+        py::arg("with_swizzle") = false, py::arg("with_sr") = false,
+        py::arg("rng_state") = std::nullopt);
+  m.def("nvfp4_cutlass_gemm", &transformer_engine::pytorch::nvfp4_cutlass_gemm,
+        "Stage-1 forked CUTLASS NVFP4 x NVFP4 -> BF16 GEMM with scalar (alpha, "
+        "beta) epilogue. Drop-in replacement for cuBLAS LT NVFP4. Pair with "
+        "nvfp4_per_token_post_scale to get a CUTLASS-based per-token GEMM. "
+        "a_sf_swizzled / b_sf_swizzled = true skip the internal swizzle for "
+        "bench parity with the cuBLAS LT path.",
+        py::arg("a_data"), py::arg("b_data"), py::arg("a_sf"), py::arg("b_sf"), py::arg("d"),
+        py::arg("m"), py::arg("n"), py::arg("k"), py::arg("alpha"), py::arg("beta"),
+        py::arg("a_sf_swizzled") = false, py::arg("b_sf_swizzled") = false);
+  m.def("nvfp4_cutlass_per_token_gemm", &transformer_engine::pytorch::nvfp4_cutlass_per_token_gemm,
+        "Forked CUTLASS NVFP4 GEMM with per-token rescale fused into the "
+        "epilogue: D = bf16(alpha_a[i] * alpha_b[j] * (A @ B^T)[i, j]). One "
+        "launch, no separate post-scale kernel. alpha_a (M,) and alpha_b (N,) "
+        "are fp32 outer-scale vectors. a_sf_swizzled / b_sf_swizzled = true "
+        "skip the internal swizzle for bench parity.",
+        py::arg("a_data"), py::arg("b_data"), py::arg("a_sf"), py::arg("b_sf"), py::arg("alpha_a"),
+        py::arg("alpha_b"), py::arg("d"), py::arg("m"), py::arg("n"), py::arg("k"),
+        py::arg("a_sf_swizzled") = false, py::arg("b_sf_swizzled") = false,
+        py::arg("accumulate") = false);
+  m.def("nvfp4_cutlass_grouped_per_token_gemm",
+        &transformer_engine::pytorch::nvfp4_cutlass_grouped_per_token_gemm,
+        "Grouped (MoE) CUTLASS NVFP4 per-token GEMM. One ptr-array launch over "
+        "all groups: D_g = alpha_a_g[i] * alpha_b_g[j] * (A_g @ B_g^T). "
+        "Each argument is a list of per-group tensors; alpha_a_g (M_g,) and "
+        "alpha_b_g (N_g,) are fp32 outer-scale vectors. SFs are swizzled per "
+        "group unless *_sf_swizzled is set. Empty experts must be filtered out. "
+        "d may be bf16 (overwrite) or fp32; accumulate=true (fp32 d) adds in place. "
+        "bias (optional) is a per-group fp32 (N_g,) vector fused into the epilogue "
+        "(fprop only; requires bf16 d).",
+        py::arg("a_data"), py::arg("b_data"), py::arg("a_sf"), py::arg("b_sf"), py::arg("alpha_a"),
+        py::arg("alpha_b"), py::arg("d"), py::arg("a_sf_swizzled") = false,
+        py::arg("b_sf_swizzled") = false, py::arg("accumulate") = false,
+        py::arg("bias") = std::vector<at::Tensor>());
+  m.def("nvfp4_per_token_post_scale", &transformer_engine::pytorch::nvfp4_per_token_post_scale,
+        "Apply d[i,j] *= row_amax_a[i] * row_amax_b[j] in-place on bf16 D.", py::arg("d"),
+        py::arg("row_amax_a"), py::arg("row_amax_b"));
+  m.def("nvfp4_per_token_swizzle_rowwise_sf",
+        &transformer_engine::pytorch::nvfp4_per_token_swizzle_rowwise_sf,
+        "Standalone rowwise SF swizzle (1 launch); mirrors prod's per-operand swizzle. "
+        "data (M, K/2) FP4; sf_in (M, K/16) M-major; sf_out (M, K/16) swizzled.",
+        py::arg("data"), py::arg("sf_in"), py::arg("sf_out"));
+  m.def("nvfp4_per_token_gemm", &transformer_engine::pytorch::nvfp4_per_token_gemm,
+        "E2E NVFP4 per-token GEMM: swizzle SFs -> cuBLAS LT -> row*col post-scale. "
+        "beta must be 0. a_sf_swizzled/b_sf_swizzled=True skips that operand's swizzle. "
+        "skip_post_scale=True is bench-only (isolates cuBLAS LT GEMM cost).",
+        py::arg("a_data"), py::arg("b_data"), py::arg("a_sf"), py::arg("b_sf"),
+        py::arg("a_row_amax"), py::arg("b_row_amax"), py::arg("d"), py::arg("workspace"),
+        py::arg("m"), py::arg("n"), py::arg("k"), py::arg("alpha"), py::arg("beta"),
+        py::arg("a_sf_swizzled") = false, py::arg("b_sf_swizzled") = false,
+        py::arg("skip_post_scale") = false);
+  m.def("nvfp4_per_tensor_gemm", &transformer_engine::pytorch::nvfp4_per_tensor_gemm,
+        "Skinny prod NVFP4 GEMM twin of nvfp4_per_token_gemm: per-tensor amaxes "
+        "folded into cuBLAS alpha, no trailing post-scale. Bench-only. "
+        "a_sf_swizzled/b_sf_swizzled=True skips that operand's swizzle.",
+        py::arg("a_data"), py::arg("b_data"), py::arg("a_sf"), py::arg("b_sf"), py::arg("a_amax"),
+        py::arg("b_amax"), py::arg("d"), py::arg("workspace"), py::arg("m"), py::arg("n"),
+        py::arg("k"), py::arg("alpha"), py::arg("beta"), py::arg("a_sf_swizzled") = false,
+        py::arg("b_sf_swizzled") = false);
+  m.def("nvfp4_per_token_group_quantize",
+        &transformer_engine::pytorch::nvfp4_per_token_group_quantize,
+        "Grouped (multi-tensor) NVFP4 per-token cast: K1 + K2 across <= 64 splits "
+        "of a single (sum_M, K) input. Byte-equal to a for-loop of single-tensor. "
+        "with_rht=True applies a 16-pt col-wise RHT in both K1 and K2.",
+        py::arg("input"), py::arg("split_sections"), py::arg("q_row_list"),
+        py::arg("s_dec_row_list"), py::arg("row_amax_list"), py::arg("q_col_list"),
+        py::arg("s_dec_col_list"), py::arg("col_amax_list"), py::arg("rowwise"),
+        py::arg("columnwise"), py::arg("with_rht") = false,
+        py::arg("random_sign_mask_t") = static_cast<int64_t>(0xACE1));
+  m.def("nvfp4_per_token_group_amax", &transformer_engine::pytorch::nvfp4_per_token_group_amax,
+        "K1-only variant of nvfp4_per_token_group_quantize: only fills amax slots. "
+        "with_rht / random_sign_mask_t must match the trailing cast launch.",
+        py::arg("input"), py::arg("split_sections"), py::arg("row_amax_list"),
+        py::arg("col_amax_list"), py::arg("rowwise"), py::arg("columnwise"),
+        py::arg("with_rht") = false, py::arg("random_sign_mask_t") = static_cast<int64_t>(0xACE1));
+  m.def("nvfp4_per_token_group_quantize_bulk",
+        &transformer_engine::pytorch::nvfp4_per_token_group_quantize_bulk,
+        "Bulk grouped quantize: allocates per-split buffers + view-slices inside "
+        "the binding (one pybind hop instead of 1 + 6N), then dispatches the K1+K2 "
+        "kernel. with_rht=True applies a 16-pt col-wise RHT in both K1 and K2.",
+        py::arg("input"), py::arg("split_sections"), py::arg("rowwise"), py::arg("columnwise"),
+        py::arg("with_rht") = false, py::arg("random_sign_mask_t") = static_cast<int64_t>(0xACE1));
   m.def("fused_multi_row_padding", &transformer_engine::pytorch::fused_multi_row_padding,
         "Fused Multi-tensor padding", py::call_guard<py::gil_scoped_release>());
   m.def("fused_multi_row_unpadding", &transformer_engine::pytorch::fused_multi_row_unpadding,

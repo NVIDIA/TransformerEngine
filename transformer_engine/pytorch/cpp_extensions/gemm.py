@@ -75,6 +75,471 @@ def _is_nvfp4_row_scaled_tensor(tensor: torch.Tensor) -> bool:
     return isinstance(tensor, NVFP4TensorStorage) and tensor._row_scaled_nvfp4
 
 
+def _is_nvfp4_per_token_tensor(tensor: torch.Tensor) -> bool:
+    """Whether tensor was produced by the NVFP4 per-token cast.
+
+    Per-token tensors carry per-row + per-col vector amaxes that cuBLASLt
+    cannot consume directly; ``general_gemm`` must route to the fused
+    per-token CUTLASS GEMM (``tex.nvfp4_cutlass_per_token_gemm``).
+    """
+    return isinstance(tensor, NVFP4TensorStorage) and getattr(tensor, "_per_token", False)
+
+
+def _nvfp4_per_token_select(
+    tensor: NVFP4TensorStorage,
+    *,
+    use_columnwise: bool,
+    side: str,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, bool]:
+    """Pick rowwise vs columnwise data / scale_inv / amax for one operand.
+
+    Returns ``(data, sf, amax, sf_swizzled)``. ``sf_swizzled`` is the
+    per-direction swizzle flag the kernel needs.
+
+    Note: the per-token quantize kernel only emits *rowwise* SFs in
+    swizzled layout; columnwise SFs are always linear. So whenever this
+    helper picks the columnwise side, ``sf_swizzled`` is forced ``False``
+    even if the tensor's flag advertises swizzle.
+    """
+    if use_columnwise:
+        data = tensor._columnwise_data
+        sf = tensor._columnwise_scale_inv
+        amax = tensor._amax_columnwise
+        if data is None:
+            raise RuntimeError(
+                f"NVFP4 per-token GEMM ({side}=columnwise) requires columnwise "
+                "data on the operand. Did the cast emit columnwise=True?"
+            )
+        sf_swizzled = False
+    else:
+        data = tensor._rowwise_data
+        sf = tensor._rowwise_scale_inv
+        amax = tensor._amax_rowwise
+        if data is None:
+            raise RuntimeError(
+                f"NVFP4 per-token GEMM ({side}=rowwise) requires rowwise "
+                "data on the operand. Did the cast emit rowwise=True?"
+            )
+        sf_swizzled = bool(getattr(tensor, "_with_gemm_swizzled_scales", False))
+    if amax is None:
+        raise RuntimeError(
+            f"NVFP4 per-token GEMM ({side}) requires the per-token amax "
+            "vector. Got None — was the tensor built with per_token=True?"
+        )
+    # Upstream stores the NVFP4 1x16 block scale_inv as ``torch.float8_e4m3fn``;
+    # the CUTLASS binding wants raw ``uint8`` bytes. e4m3 and uint8 are both 1
+    # byte with identical layout, so this is a zero-copy reinterpret. Tolerate
+    # either storage dtype (older builds emitted uint8 directly).
+    if sf is not None and sf.dtype != torch.uint8:
+        sf = sf.view(torch.uint8)
+    return data, sf, amax, sf_swizzled
+
+
+def _nvfp4_per_token_gemm(
+    A: NVFP4TensorStorage,
+    B: NVFP4TensorStorage,
+    *,
+    transa: bool,
+    transb: bool,
+    out: Optional[torch.Tensor],
+    out_dtype: Optional[torch.dtype],
+    bias: Optional[torch.Tensor],
+    grad: bool,
+    accumulate: bool,
+    gelu: bool,
+    quantization_params: Optional[Quantizer],
+    ub: Optional[Union[tex.CommOverlap, tex.CommOverlapP2P]],
+    extra_output: Optional[torch.Tensor],
+) -> torch.Tensor:
+    """Dispatch per-token NVFP4 GEMM via fused CUTLASS EVT path.
+
+    Replaces tex.generic_gemm for per-token NVFP4 tensors. The fused EVT
+    GEMM consumes per-row outer amax for kernel-A and per-col outer amax
+    for kernel-B, folding the (M,) * (N,) outer-scale vectors directly
+    into the bf16 epilogue. One launch, no separate post-scale pass.
+
+    Three TE layouts are supported, matching the three GEMM call sites
+    in pytorch/module/linear.py:
+
+    +--------+---------------+-------------------------+--------------------+
+    | layout | TE call site  | math                    | quant directions   |
+    +========+===============+=========================+====================+
+    | TN     | fwd           | D = X @ W.T (M, N)      | A.row + B.row      |
+    | NN     | dgrad         | dX = dY @ W (M, K)      | A.col + B.row      |
+    | NT     | wgrad         | dW = dY.T @ X (N, K)    | A.col + B.col      |
+    +--------+---------------+-------------------------+--------------------+
+
+    The kernel itself is fixed-shape — given (a, b) it computes
+    D = a @ b.T with kernel_M = a.shape[0], kernel_N = b.shape[0],
+    kernel_K = a.shape[-1] * 2. Each TE layout picks the right (rowwise
+    vs columnwise) view of A and B so the contraction dim is the
+    contiguous (inner) dim of both kernel operands. The per-token outer
+    amax used by the EVT swap accordingly: rowwise-data uses
+    ``_amax_rowwise``, columnwise-data uses ``_amax_columnwise``.
+
+    Layout details (TE convention is cuBLAS column-major, so the
+    operand passed as kernel-A actually corresponds to TE B; see
+    ``general_gemm`` and the bench script for verification):
+
+      * TN (fwd): kernel_a = B.rowwise (M, K); kernel_b = A.rowwise
+        (N, K). Contraction = K.
+      * NN (dgrad, output dX = (M, K)): kernel_a = B.rowwise
+        (M, N — dY rowwise); kernel_b = A.columnwise (K, N — W
+        columnwise, raw bytes are W.T rowwise). Contraction = N.
+      * NT (wgrad, output dW = (N, K)): kernel_a = B.columnwise
+        (N, M — dY columnwise); kernel_b = A.columnwise (K, M — X
+        columnwise). Contraction = M.
+
+    All three call the same CUTLASS kernel; the only thing that changes
+    is which (data, sf, amax) tuple of each tensor we hand in.
+    """
+    # Hard-fail unsupported config rather than silently degrade.
+    #
+    # accumulate=True (fuse_wgrad_accumulation) is supported only with a fp32
+    # output: te.Linear's wgrad target is the fp32 main_grad buffer, and the
+    # fused EVT computes D = main_grad + dW directly (beta=1). It is validated
+    # against the resolved output dtype further below (after `out` is known).
+    if gelu:
+        raise NotImplementedError("NVFP4 per-token GEMM does not yet support fused gelu.")
+    if ub is not None:
+        raise NotImplementedError("NVFP4 per-token GEMM does not yet support comm-overlap.")
+    if extra_output is not None:
+        raise NotImplementedError("NVFP4 per-token GEMM does not yet support extra_output.")
+    if quantization_params is not None:
+        # The fused EVT only emits bf16; output quantization would have
+        # to wrap the result in a separate post-cast (TODO).
+        raise NotImplementedError(
+            "NVFP4 per-token GEMM does not yet support output quantization. "
+            "Set the relevant grad_input_quantizer / output_quantizer to None."
+        )
+    if grad and bias is not None:
+        # In bwd path, `bias` is the cuBLAS-style fused-dbias accumulator,
+        # not a forward-style additive offset. The per-token kernel
+        # doesn't compute dbias internally, so silently broadcast-adding
+        # `bias` would corrupt dW / dX. te.Linear's NVFP4 wgrad call
+        # already passes bias=None when fp8=True, so this branch is
+        # defensive against future regressions.
+        raise NotImplementedError(
+            "NVFP4 per-token GEMM does not support fused dbias in bwd. "
+            "Compute grad_bias separately (e.g. dY.sum(dim=0)) and pass "
+            "bias=None to general_gemm in the bwd path."
+        )
+
+    # Resolve layout -> per-operand rowwise/columnwise selection.
+    #
+    # TE's layout strings ("TN" / "NN" / "NT") are written in cuBLAS
+    # column-major terms. Because torch row-major data is reinterpreted
+    # by cuBLAS as col-major (a torch (P, Q) row-major tensor is a (Q,P)
+    # col-major matrix), the rule that makes the kernel operand's
+    # contraction dim contiguous is:
+    #
+    #   transX = True  -> use X.rowwise    (X is consumed "as-is")
+    #   transX = False -> use X.columnwise (X is implicitly transposed)
+    #
+    # which gives this 3-row dispatch table (TT is not exercised by any
+    # current TE module and we reject it cleanly):
+    #
+    #   layout | TE site | (transa, transb) | A view  | B view  |
+    #   ------ + ------- + ---------------- + ------- + ------- +
+    #   TN     | fwd     | (T, N)           | rowwise | rowwise |
+    #   NN     | dgrad   | (N, N)           | colwise | rowwise |
+    #   NT     | wgrad   | (N, T)           | colwise | colwise |
+    #
+    # On top of this, the kernel takes a fixed pair (kernel_a, kernel_b)
+    # and computes D = kernel_a @ kernel_b^T. The TE-vs-kernel swap
+    # (kernel_a = TE B, kernel_b = TE A) is the same swap used by the
+    # row-scaled NVFP4 GEMM helper above.
+    if (transa, transb) == (True, False):
+        layout_label = "TN"
+        a_use_col, b_use_col = False, False
+    elif (transa, transb) == (False, False):
+        layout_label = "NN"
+        a_use_col, b_use_col = True, False
+    elif (transa, transb) == (False, True):
+        layout_label = "NT"
+        a_use_col, b_use_col = True, True
+    else:
+        raise NotImplementedError(
+            "NVFP4 per-token GEMM does not support TT layout "
+            f"(got transa={transa}, transb={transb})."
+        )
+
+    # Pick the (data, sf, amax) tuple from each tensor and the swizzle
+    # flag. _nvfp4_per_token_select hard-fails if the requested
+    # direction is missing or amax is None.
+    ka_data, ka_sf, ka_amax, a_sf_swizzled = _nvfp4_per_token_select(
+        B, use_columnwise=b_use_col, side="kernel_a (=TE B)"
+    )
+    kb_data, kb_sf, kb_amax, b_sf_swizzled = _nvfp4_per_token_select(
+        A, use_columnwise=a_use_col, side="kernel_b (=TE A)"
+    )
+
+    # Rowwise data can carry the activation's original N-D leading dims
+    # (e.g. byte-shape [batch, seq, K/2] for a 3D transformer activation,
+    # see NVFP4Tensor rowwise byte_shape = shape[:-1] + [shape[-1]//2]),
+    # while the per-token amax / SF were computed over the FLATTENED row
+    # count (batch*seq). Columnwise data is always already 2D
+    # ([feature, tokens/2]). Flatten any rowwise operand to 2D so the
+    # "shape[0] == kernel row-count" invariant below holds for N-D inputs
+    # too -- this is a contiguous reshape (no copy) and a no-op for the 2D
+    # case. ka = select(B, use_columnwise=b_use_col); kb = select(A,
+    # use_columnwise=a_use_col), so an operand is rowwise iff its
+    # *_use_col flag is False.
+    #
+    # We also capture kernel_a's original leading dims so the output is
+    # returned with the activation's N-D shape (e.g. [batch, seq, N]). The
+    # fwd GEMM output is NOT reshaped by te.Linear (it is returned as-is and
+    # fed straight into residual/bias adds), so prod's generic_gemm returns
+    # N-D and we must match. The kernel writes a flat (M, N) buffer, so we
+    # restore the leading dims afterward. Only the rowwise operand can be
+    # N-D; if kernel_a is columnwise (wgrad), the output is a 2D (N, K) grad
+    # and there is nothing to restore.
+    out_lead = None
+    if not b_use_col:
+        out_lead = tuple(ka_data.shape[:-1])
+        ka_data = ka_data.reshape(-1, ka_data.shape[-1])
+    if not a_use_col:
+        kb_data = kb_data.reshape(-1, kb_data.shape[-1])
+
+    # Recover (m_kernel, n_kernel, k_kernel) from data shapes. The kernel
+    # computes D = ka_data @ kb_data^T, so m_kernel = ka_data.shape[0],
+    # n_kernel = kb_data.shape[0], k_kernel (contraction dim) =
+    # ka_data.shape[-1] * 2 (rowwise_data is byte-packed, last dim = K/2).
+    M = ka_data.shape[0]
+    K = ka_data.shape[-1] * 2
+    N = kb_data.shape[0]
+    if kb_data.shape[-1] * 2 != K:
+        raise RuntimeError(
+            f"NVFP4 per-token GEMM K mismatch ({layout_label}): "
+            f"kernel_a K={K}, kernel_b K={kb_data.shape[-1] * 2}. "
+            "Likely operand misalignment between the two NVFP4 tensors."
+        )
+    if ka_amax.shape[0] != M or kb_amax.shape[0] != N:
+        raise RuntimeError(
+            f"NVFP4 per-token GEMM amax-vector mismatch ({layout_label}): "
+            f"ka_amax={tuple(ka_amax.shape)} (expected ({M},)), "
+            f"kb_amax={tuple(kb_amax.shape)} (expected ({N},))."
+        )
+
+    # Resolve the output dtype. The kernel emits bf16 (plain overwrite) or fp32.
+    # fp32 is used for wgrad fused into the fp32 main_grad buffer
+    # (fuse_wgrad_accumulation): a caller-provided `out` (main_grad) takes
+    # precedence over `out_dtype`, which TE's grouped/dense wgrad partials set to
+    # the activation dtype even when the real target is fp32 main_grad.
+    target_dtype = out.dtype if out is not None else (out_dtype or torch.bfloat16)
+    if target_dtype not in (torch.bfloat16, torch.float32):
+        raise NotImplementedError(
+            f"NVFP4 per-token GEMM only emits bf16 or fp32 (requested {target_dtype})."
+        )
+    if accumulate and target_dtype != torch.float32:
+        # accumulate writes D = C + dW in place; main_grad is fp32. A bf16
+        # accumulate target would lose the fp32 gradient accumulator.
+        raise NotImplementedError(
+            "NVFP4 per-token GEMM accumulate=True requires a float32 output "
+            f"(main_grad), got {target_dtype}."
+        )
+    if out is None:
+        out = torch.empty((M, N), dtype=target_dtype, device=ka_data.device)
+    elif out.numel() != M * N:
+        raise RuntimeError(
+            f"NVFP4 per-token GEMM output shape mismatch ({layout_label}): "
+            f"got out.shape={tuple(out.shape)} (numel={out.numel()}), "
+            f"expected ({M}, {N})."
+        )
+    else:
+        # A caller may hand in an N-D pre-allocated output (matching the
+        # activation's leading dims). The kernel writes a flat (M, N) buffer;
+        # view it 2D for the call. The view shares storage so writes land in
+        # the caller's tensor (requires contiguous out, which TE guarantees).
+        out = out.view(M, N)
+
+    # The fused EVT GEMM does its own SF swizzle internally if the SFs
+    # are not pre-swizzled. One launch total either way.
+    tex.nvfp4_cutlass_per_token_gemm(
+        ka_data,
+        kb_data,
+        ka_sf,
+        kb_sf,
+        ka_amax,
+        kb_amax,
+        out,
+        M,
+        N,
+        K,
+        a_sf_swizzled,
+        b_sf_swizzled,
+        accumulate,
+    )
+
+    if bias is not None:
+        # Forward path: bias is (N,) and we broadcast-add into each row
+        # post-GEMM. Negligible cost vs the GEMM. (grad=True with bias
+        # is rejected upstream; this branch only fires for fwd.)
+        out.add_(bias.to(dtype=out.dtype))
+
+    # Restore the activation's N-D leading dims (out is a flat (M, N) buffer
+    # for the kernel). A no-op when kernel_a was already 2D (out_lead is a
+    # 1-tuple) or columnwise (wgrad, out_lead is None). Shares storage, so
+    # a caller-provided N-D `out` is filled in place either way.
+    if out_lead is not None and len(out_lead) != 1:
+        out = out.view(*out_lead, N)
+
+    return out
+
+
+def _nvfp4_per_token_grouped_gemm(
+    A: List[NVFP4TensorStorage],
+    B: List[NVFP4TensorStorage],
+    out: List[torch.Tensor],
+    *,
+    transa: bool,
+    transb: bool,
+    m_splits: List[int],
+    single_output: bool,
+    accumulate: bool = False,
+    bias: Optional[List[torch.Tensor]] = None,
+) -> List[torch.Tensor]:
+    """Native grouped (MoE) per-token NVFP4 GEMM (one ptr-array CUTLASS launch).
+
+    Per-group analogue of ``_nvfp4_per_token_gemm``: applies the same
+    layout -> rowwise/columnwise operand selection and the kernel_a = TE B,
+    kernel_b = TE A swap to every group, then issues a single grouped launch
+    over all non-empty experts. Empty experts (``m_splits[g] == 0``) are
+    zeroed and excluded from the launch (the kernel requires M, N, K > 0).
+
+    Handles the plain D = alpha_a * alpha_b * (A @ B^T) path (bf16 output) and
+    the wgrad-accumulate path (accumulate=True, fp32 main_grad outputs:
+    D = main_grad + dW in place). gelu / output-quantization still route to the
+    per-expert fallback (rejected by the kernel).
+
+    bias (fprop only) is an optional per-expert list of (N,) tensors fused into
+    the epilogue: D_g += bias_g (added in fp32 before the bf16 cast). It requires
+    the bf16 overwrite path (mutually exclusive with accumulate).
+
+    accumulate=True requires every output view to be fp32 (the main_grad
+    buffers); the kernel computes beta=1 accumulation directly in the EVT.
+    """
+    if bias is not None:
+        assert not accumulate, "NVFP4 per-token grouped GEMM bias is fprop-only (no accumulate)."
+    # Same (transa, transb) -> rowwise/columnwise table as _nvfp4_per_token_gemm.
+    if (transa, transb) == (True, False):
+        layout_label = "TN"
+        a_use_col, b_use_col = False, False
+    elif (transa, transb) == (False, False):
+        layout_label = "NN"
+        a_use_col, b_use_col = True, False
+    elif (transa, transb) == (False, True):
+        layout_label = "NT"
+        a_use_col, b_use_col = True, True
+    else:
+        raise NotImplementedError(
+            "NVFP4 per-token grouped GEMM does not support TT layout "
+            f"(got transa={transa}, transb={transb})."
+        )
+
+    num_gemms = len(A)
+
+    # Resolve the per-group output views (single contiguous buffer sliced
+    # along the token/M dim, or one tensor per group).
+    if single_output:
+        assert m_splits is not None, "single_output grouped GEMM requires m_splits."
+        out_init = out[0]
+        out_views = []
+        start = 0
+        for size in m_splits:
+            out_views.append(out_init[start : start + size])
+            start += size
+    else:
+        out_init = None
+        out_views = out
+
+    # Collect per-group kernel operands for the non-empty experts.
+    a_data_l, b_data_l, a_sf_l, b_sf_l, alpha_a_l, alpha_b_l, d_l = ([] for _ in range(7))
+    bias_l: List[torch.Tensor] = []
+    a_sf_swz_seen: Optional[bool] = None
+    b_sf_swz_seen: Optional[bool] = None
+
+    for g in range(num_gemms):
+        # Empty expert: weight grad is the zero matrix; fwd/dgrad slice is
+        # empty. The CUTLASS kernel asserts M, N, K > 0, so handle here. Under
+        # accumulate (D += dW) a zero dW leaves main_grad unchanged, so we must
+        # NOT zero it; only the overwrite path writes the zero matrix.
+        if m_splits is not None and m_splits[g] == 0:
+            if out_views[g].numel() != 0 and not accumulate:
+                out_views[g].zero_()
+            continue
+
+        ka_data, ka_sf, ka_amax, a_sf_swz = _nvfp4_per_token_select(
+            B[g], use_columnwise=b_use_col, side="kernel_a (=TE B)"
+        )
+        kb_data, kb_sf, kb_amax, b_sf_swz = _nvfp4_per_token_select(
+            A[g], use_columnwise=a_use_col, side="kernel_b (=TE A)"
+        )
+
+        # Flatten any rowwise (possibly N-D) operand to 2D (no-op / no-copy
+        # for the already-2D grouped operands).
+        if not b_use_col:
+            ka_data = ka_data.reshape(-1, ka_data.shape[-1])
+        if not a_use_col:
+            kb_data = kb_data.reshape(-1, kb_data.shape[-1])
+
+        M = ka_data.shape[0]
+        K = ka_data.shape[-1] * 2
+        N = kb_data.shape[0]
+        if kb_data.shape[-1] * 2 != K:
+            raise RuntimeError(
+                f"NVFP4 per-token grouped GEMM K mismatch ({layout_label}, group {g}): "
+                f"kernel_a K={K}, kernel_b K={kb_data.shape[-1] * 2}."
+            )
+        if ka_amax.shape[0] != M or kb_amax.shape[0] != N:
+            raise RuntimeError(
+                f"NVFP4 per-token grouped GEMM amax mismatch ({layout_label}, group {g}): "
+                f"ka_amax={tuple(ka_amax.shape)} (exp ({M},)), "
+                f"kb_amax={tuple(kb_amax.shape)} (exp ({N},))."
+            )
+
+        # The SF swizzle flag must be uniform across groups (all share one
+        # quantizer state); the C++ wrapper takes a single flag per side.
+        if a_sf_swz_seen is None:
+            a_sf_swz_seen, b_sf_swz_seen = a_sf_swz, b_sf_swz
+        elif (a_sf_swz, b_sf_swz) != (a_sf_swz_seen, b_sf_swz_seen):
+            raise RuntimeError(
+                "NVFP4 per-token grouped GEMM requires a uniform SF-swizzle "
+                "state across all groups."
+            )
+
+        a_data_l.append(ka_data)
+        b_data_l.append(kb_data)
+        a_sf_l.append(ka_sf)
+        b_sf_l.append(kb_sf)
+        alpha_a_l.append(ka_amax)
+        alpha_b_l.append(kb_amax)
+        d_l.append(out_views[g].view(M, N))
+        if bias is not None:
+            # Kernel consumes an fp32 (N,) bias per group (mirrors the fp32 alpha
+            # arrays; the add happens in fp32 before the bf16 cast).
+            bias_l.append(bias[g].to(dtype=torch.float32).contiguous())
+
+    if a_data_l:
+        tex.nvfp4_cutlass_grouped_per_token_gemm(
+            a_data_l,
+            b_data_l,
+            a_sf_l,
+            b_sf_l,
+            alpha_a_l,
+            alpha_b_l,
+            d_l,
+            bool(a_sf_swz_seen),
+            bool(b_sf_swz_seen),
+            accumulate,
+            bias_l,
+        )
+
+    if single_output:
+        return out_init
+    return out
+
+
 def _nvfp4_row_scaled_gemm_inputs(
     A: NVFP4TensorStorage,
     B: NVFP4TensorStorage,
@@ -207,7 +672,34 @@ def general_gemm(
         "beta": beta,
     }
 
-    if not _is_nvfp4_row_scaled_tensor(A) and not _is_nvfp4_row_scaled_tensor(B):
+    # Per-token NVFP4 dispatches to fused EVT GEMM that consumes per-row
+    # (M,) and per-col (N,) outer-amax vectors directly. cuBLASLt cannot,
+    # so this MUST short-circuit before the row-scaled-or-generic fork.
+    if _is_nvfp4_per_token_tensor(A) or _is_nvfp4_per_token_tensor(B):
+        if not (_is_nvfp4_per_token_tensor(A) and _is_nvfp4_per_token_tensor(B)):
+            raise NotImplementedError(
+                "NVFP4 per-token GEMM requires both A and B to be per-token tensors. "
+                "Mixing per-token + prod NVFP4 in one GEMM is not supported."
+            )
+        out = _nvfp4_per_token_gemm(
+            A,
+            B,
+            transa=transa,
+            transb=transb,
+            out=out,
+            out_dtype=out_dtype,
+            bias=bias,
+            grad=grad,
+            accumulate=accumulate,
+            gelu=gelu,
+            quantization_params=quantization_params,
+            ub=ub,
+            extra_output=extra_output,
+        )
+        bias_grad = None
+        gelu_input = None
+        extra_output = None
+    elif not _is_nvfp4_row_scaled_tensor(A) and not _is_nvfp4_row_scaled_tensor(B):
         out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
     else:
         if _is_nvfp4_row_scaled_tensor(A):
@@ -319,6 +811,105 @@ def general_grouped_gemm(
         bias_dtype = TE_DType[grad_bias[0].dtype] if grad else TE_DType[bias[0].dtype]
     else:
         bias_dtype = TE_DType[torch.bfloat16]
+
+    # Per-token NVFP4 grouped GEMM. The plain D = alpha_a * alpha_b * (A @ B^T)
+    # path (bf16 out) and the wgrad-accumulate path (accumulate into fp32
+    # main_grad) are both served by a native single-launch CUTLASS grouped
+    # per-token kernel (_nvfp4_per_token_grouped_gemm). Cases the kernel can't
+    # fuse (bias / gelu / output quantization) fall through to a Python loop over
+    # per-shape `general_gemm` calls, which routes each shape to the same fused
+    # EVT GEMM (identical numerics, at the cost of num_gemms launch overhead).
+    if any(_is_nvfp4_per_token_tensor(t) for t in A) or any(
+        _is_nvfp4_per_token_tensor(t) for t in B
+    ):
+        for tensor in A:
+            if not _is_nvfp4_per_token_tensor(tensor):
+                raise NotImplementedError(
+                    "NVFP4 per-token grouped GEMM requires all A operands to be per-token."
+                )
+        for tensor in B:
+            if not _is_nvfp4_per_token_tensor(tensor):
+                raise NotImplementedError(
+                    "NVFP4 per-token grouped GEMM requires all B operands to be per-token."
+                )
+
+        # Native single-launch CUTLASS grouped per-token kernel. Serves the
+        # plain D = alpha_a * alpha_b * (A @ B^T) path (bf16 out), the fprop
+        # bias-fused path (bias added in the EVT epilogue), and the wgrad-
+        # accumulate path (accumulate=True with fp32 main_grad outputs:
+        # D = main_grad + dW via a beta=1 EVT). gelu / output-quantization fall
+        # through to the per-expert loop below.
+        _accumulate_native_ok = (not accumulate) or all(
+            o.numel() == 0 or o.dtype == torch.float32 for o in out
+        )
+        # Bias is fused only on the fprop overwrite path: forward (not grad), no
+        # accumulate. Backward dbias (grad=True) still uses the fallback.
+        _bias_native_ok = (not use_bias) or (not grad and not accumulate)
+        _native_ok = (
+            _accumulate_native_ok
+            and not gelu
+            and _bias_native_ok
+            and D_dtype is None
+            and all(qp is None for qp in quantization_params)
+        )
+        if _native_ok and not int(os.getenv("NVTE_NVFP4_PER_TOKEN_GROUPED_FALLBACK", "0")):
+            transa = layout[0] == "T"
+            transb = layout[1] == "T"
+            out = _nvfp4_per_token_grouped_gemm(
+                A,
+                B,
+                out,
+                transa=transa,
+                transb=transb,
+                m_splits=m_splits,
+                single_output=single_output,
+                accumulate=accumulate,
+                bias=bias if use_bias else None,
+            )
+            return out, grad_bias, gelu_input
+
+        if single_output:
+            assert (
+                m_splits is not None
+            ), "NVFP4 per-token grouped GEMM requires m_splits with single output."
+            out_init = out[0]
+            start_idx = 0
+            out_views = []
+            for i in range(num_gemms):
+                size = m_splits[i]
+                out_views.append(out_init[start_idx : start_idx + size])
+                start_idx += size
+        else:
+            out_views = out
+        for i in range(num_gemms):
+            if out_views[i].numel() == 0:
+                continue
+            # An expert that received 0 tokens this step has m_splits[i] == 0.
+            # The token count is the GEMM contraction dim for wgrad (layout NT)
+            # whose output is the weight grad [out, in] -> nonzero numel, so the
+            # numel guard above misses it and the per-token cutlass kernel would
+            # assert M > 0. Skip the launch; the empty-expert wgrad is the zero
+            # matrix (or a no-op add when accumulating into main_grad).
+            if m_splits is not None and m_splits[i] == 0:
+                if not accumulate:
+                    out_views[i].zero_()
+                continue
+            general_gemm(
+                A[i],
+                B[i],
+                quantization_params=quantization_params[i],
+                out_dtype=out_views[i].dtype,
+                out=out_views[i],
+                gelu=gelu,
+                accumulate=accumulate,
+                layout=layout,
+                bias=bias[i] if use_bias else None,
+                use_split_accumulator=use_split_accumulator,
+                grad=grad,
+            )
+        if single_output:
+            out = out_init
+        return out, grad_bias, gelu_input
 
     if any(_is_nvfp4_row_scaled_tensor(tensor) for tensor in A):
         raise NotImplementedError("Row-scaled NVFP4 grouped GEMM does not support row-scaled A.")

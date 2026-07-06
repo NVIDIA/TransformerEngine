@@ -439,6 +439,9 @@ at::Tensor scaled_aligned_causal_masked_softmax_backward(at::Tensor output_grads
 
 void compute_amax(const at::Tensor &tensor, at::Tensor &amax);
 
+void hadamard_transform_amax(const at::Tensor &tensor, at::Tensor &rowwise_amax,
+                             at::Tensor &columnwise_amax, int64_t rht_matrix_random_sign_mask);
+
 void fused_amax_and_scale_update_after_reduction(const at::Tensor &amax_reduction_buffer,
                                                  std::vector<at::Tensor> amax_histories,
                                                  std::vector<at::Tensor> scales,
@@ -475,6 +478,107 @@ void mxfp8_scaling_partial_cast(const at::Tensor &input, at::Tensor output_rowwi
                                 at::Tensor output_colwise, const at::Tensor &scale_inv_rowwise,
                                 const at::Tensor &scale_inv_colwise, int rows, int cols,
                                 size_t start_offset);
+
+// Stage-1 forked CUTLASS NVFP4 x NVFP4 -> BF16 GEMM with scalar (alpha, beta)
+// epilogue. Drop-in replacement for cuBLAS LT NVFP4 (the production path).
+// To get a CUTLASS per-token GEMM, pair this with nvte_nvfp4_per_token_post_scale
+// (same trick the cuBLAS LT per-token path uses). a_sf_swizzled / b_sf_swizzled
+// = true skip the corresponding internal swizzle and consume already-swizzled
+// SFs directly (apples-to-apples vs cuBLAS LT in --gemm-only).
+void nvfp4_cutlass_gemm(const at::Tensor &a_data, const at::Tensor &b_data, const at::Tensor &a_sf,
+                        const at::Tensor &b_sf, at::Tensor d, int64_t m, int64_t n, int64_t k,
+                        double alpha, double beta, bool a_sf_swizzled, bool b_sf_swizzled);
+
+// CUTLASS NVFP4 GEMM with per-token rescale fused into the epilogue:
+//   D[i, j] = alpha_a[i] * alpha_b[j] * (A @ B^T)[i, j]
+// One launch, no separate post-scale kernel. alpha_a / alpha_b are fp32
+// (M,) / (N,) outer-scale vectors. d may be bf16 (overwrite) or fp32;
+// accumulate=true (requires fp32 d) computes d += ... in place (wgrad fused
+// into a fp32 main_grad).
+void nvfp4_cutlass_per_token_gemm(const at::Tensor &a_data, const at::Tensor &b_data,
+                                  const at::Tensor &a_sf, const at::Tensor &b_sf,
+                                  const at::Tensor &alpha_a, const at::Tensor &alpha_b,
+                                  at::Tensor d, int64_t m, int64_t n, int64_t k, bool a_sf_swizzled,
+                                  bool b_sf_swizzled, bool accumulate);
+
+// Grouped (MoE) per-token NVFP4 GEMM. Each list holds one entry per group:
+//   D_g[i,j] = alpha_a_g[i] * alpha_b_g[j] * (A_g @ B_g^T)[i,j].
+// SF inner block scales are swizzled per group unless *_sf_swizzled is set.
+// Empty experts (M_g == 0) must be dropped by the caller. d may be bf16
+// (overwrite) or fp32; accumulate=true (requires fp32 d) computes d += ...
+// in place (wgrad fused into fp32 main_grad).
+void nvfp4_cutlass_grouped_per_token_gemm(
+    std::vector<at::Tensor> a_data, std::vector<at::Tensor> b_data, std::vector<at::Tensor> a_sf,
+    std::vector<at::Tensor> b_sf, std::vector<at::Tensor> alpha_a, std::vector<at::Tensor> alpha_b,
+    std::vector<at::Tensor> d, bool a_sf_swizzled, bool b_sf_swizzled, bool accumulate,
+    std::vector<at::Tensor> bias = {});
+
+// with_swizzle=true makes K2 write rowwise scale_inv in the cuBLAS LT
+// swizzled tile layout (skips the standalone nvte_swizzle_scaling_factors).
+// Has no effect on colwise scale_inv (rowwise-only for now).
+void nvfp4_per_token_quantize(const at::Tensor &input, at::Tensor q_row, at::Tensor s_dec_row,
+                              at::Tensor row_amax, at::Tensor q_col, at::Tensor s_dec_col,
+                              at::Tensor col_amax, bool rowwise, bool columnwise, bool with_rht,
+                              int64_t random_sign_mask_t, bool with_swizzle, bool with_sr,
+                              std::optional<at::Tensor> rng_state);
+
+void nvfp4_per_token_amax(const at::Tensor &input, at::Tensor row_amax, at::Tensor col_amax,
+                          bool rowwise, bool columnwise, bool with_rht, int64_t random_sign_mask_t);
+
+void nvfp4_per_token_encode(const at::Tensor &input, at::Tensor q_row, at::Tensor s_dec_row,
+                            at::Tensor row_amax, at::Tensor q_col, at::Tensor s_dec_col,
+                            at::Tensor col_amax, bool rowwise, bool columnwise, bool with_rht,
+                            int64_t random_sign_mask_t, bool with_swizzle, bool with_sr,
+                            std::optional<at::Tensor> rng_state);
+
+void nvfp4_per_token_post_scale(at::Tensor d, const at::Tensor &row_amax_a,
+                                const at::Tensor &row_amax_b);
+
+// Standalone rowwise-SF swizzle for one NVFP4 operand. One launch per call,
+// mirrors prod NVFP4 GEMM's per-operand swizzle. Used by --qs bench mode.
+void nvfp4_per_token_swizzle_rowwise_sf(const at::Tensor &data, const at::Tensor &sf_in,
+                                        at::Tensor sf_out);
+
+void nvfp4_per_token_gemm(const at::Tensor &a_data, const at::Tensor &b_data,
+                          const at::Tensor &a_sf, const at::Tensor &b_sf,
+                          const at::Tensor &a_row_amax, const at::Tensor &b_row_amax, at::Tensor d,
+                          const at::Tensor &workspace, int64_t m, int64_t n, int64_t k,
+                          double alpha, double beta, bool a_sf_swizzled, bool b_sf_swizzled,
+                          bool skip_post_scale = false);
+
+// Bench-only per-tensor twin of nvfp4_per_token_gemm: scalar amaxes folded
+// into cuBLAS LT alpha via the amax slot; no trailing post-scale.
+void nvfp4_per_tensor_gemm(const at::Tensor &a_data, const at::Tensor &b_data,
+                           const at::Tensor &a_sf, const at::Tensor &b_sf, const at::Tensor &a_amax,
+                           const at::Tensor &b_amax, at::Tensor d, const at::Tensor &workspace,
+                           int64_t m, int64_t n, int64_t k, double alpha, double beta,
+                           bool a_sf_swizzled, bool b_sf_swizzled);
+
+// with_rht=true applies a 16-pt RHT on the col direction in BOTH K1 and K2;
+// random_sign_mask_t low 16 bits = sign pattern (ignored when with_rht=false).
+void nvfp4_per_token_group_quantize(
+    const at::Tensor &input, const std::vector<int64_t> &split_sections,
+    std::vector<at::Tensor> q_row_list, std::vector<at::Tensor> s_dec_row_list,
+    std::vector<at::Tensor> row_amax_list, std::vector<at::Tensor> q_col_list,
+    std::vector<at::Tensor> s_dec_col_list, std::vector<at::Tensor> col_amax_list, bool rowwise,
+    bool columnwise, bool with_rht, int64_t random_sign_mask_t);
+
+// Amax-only variant of the grouped quantize. Useful for multi-rank training
+// where amax is allReduced before the cast pass. Caller must thread the
+// matching with_rht / mask into the subsequent cast launch.
+void nvfp4_per_token_group_amax(const at::Tensor &input, const std::vector<int64_t> &split_sections,
+                                std::vector<at::Tensor> row_amax_list,
+                                std::vector<at::Tensor> col_amax_list, bool rowwise,
+                                bool columnwise, bool with_rht, int64_t random_sign_mask_t);
+
+// Bulk grouped quantize: allocate-view-dispatch all in one pybind hop.
+// Returns 6 per-split vectors (q_row, s_dec_row_fp8, row_amax, q_col,
+// s_dec_col_fp8, col_amax); disabled directions return empty vectors.
+std::tuple<std::vector<at::Tensor>, std::vector<at::Tensor>, std::vector<at::Tensor>,
+           std::vector<at::Tensor>, std::vector<at::Tensor>, std::vector<at::Tensor>>
+nvfp4_per_token_group_quantize_bulk(const at::Tensor &input,
+                                    const std::vector<int64_t> &split_sections, bool rowwise,
+                                    bool columnwise, bool with_rht, int64_t random_sign_mask_t);
 
 /***************************************************************************************************
  * Rotary positional embedding

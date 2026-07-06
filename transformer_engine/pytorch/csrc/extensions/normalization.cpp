@@ -120,8 +120,16 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
     auto nvfp4_quantizer_cpp = dynamic_cast<NVFP4Quantizer *>(quantizer_cpp.get());
     NVTE_CHECK(nvfp4_quantizer_cpp != nullptr, "Could not cast to NVFP4 quantizer");
     if (nvfp4_quantizer_cpp->row_scaled_nvfp4 ||
-        (nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax)) {
-      // Amax is handled within NVFP4 quantizer
+        (nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax) ||
+        nvfp4_quantizer_cpp->per_token) {
+      // Amax is handled within the NVFP4 quantizer. Per-token's outer amax is a
+      // per-row (M,) + per-col (K,) vector computed by the per-token cast's K1
+      // amax kernel; the fused norm+amax kernel only emits a scalar amax, so
+      // per-token cannot use FUSED_NORM_AMAX_NVFP4 (quantize_with_amax asserts
+      // compute_amax). The UNFUSED path (norm in high precision, then the K1
+      // amax + K2 encode cast) is both the correct and natural route, so
+      // per-token selects it unconditionally -- no NVTE_NORM_FWD_USE_CUDNN=1
+      // workaround required.
       impl = Impl::UNFUSED;
     } else if (!transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN")) {
       // TE kernel supports amax output
@@ -357,8 +365,16 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
     auto nvfp4_quantizer_cpp = dynamic_cast<NVFP4Quantizer *>(quantizer_cpp.get());
     NVTE_CHECK(nvfp4_quantizer_cpp != nullptr, "Could not cast to NVFP4 quantizer");
     if (nvfp4_quantizer_cpp->row_scaled_nvfp4 ||
-        (nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax)) {
-      // Amax is handled within NVFP4 quantizer
+        (nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax) ||
+        nvfp4_quantizer_cpp->per_token) {
+      // Amax is handled within the NVFP4 quantizer. Per-token's outer amax is a
+      // per-row (M,) + per-col (K,) vector computed by the per-token cast's K1
+      // amax kernel; the fused norm+amax kernel only emits a scalar amax, so
+      // per-token cannot use FUSED_NORM_AMAX_NVFP4 (quantize_with_amax asserts
+      // compute_amax). The UNFUSED path (norm in high precision, then the K1
+      // amax + K2 encode cast) is both the correct and natural route, so
+      // per-token selects it unconditionally -- no NVTE_NORM_FWD_USE_CUDNN=1
+      // workaround required.
       impl = Impl::UNFUSED;
     } else if (!transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN")) {
       // TE kernel supports amax output
