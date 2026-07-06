@@ -409,28 +409,31 @@ class Quantizer(abc.ABC):
             "columnwise": self.columnwise_usage,
         }
 
-    # Flipped to True by ``register_value_opaque_quantizer``.
-    _is_value_quantizer = False
+    @classmethod
+    def _annotated_fields(cls) -> Dict[str, Any]:
+        """Annotated fields (name -> annotation) across the ``Quantizer`` MRO,
+        base first. The class annotations are the single source of truth for
+        what defines a quantizer's value."""
+        fields: Dict[str, Any] = {}
+        for klass in reversed(cls.__mro__):
+            if issubclass(klass, Quantizer):
+                fields.update(klass.__dict__.get("__annotations__", {}))
+        return fields
 
     def _value_fields(self) -> Optional[Tuple[str, ...]]:
         """Value-defining attribute names, or ``None``.
 
-        Derived from the class annotations across the MRO (base first), so the
-        annotations are the single source of truth for what defines a
-        quantizer's value; ``register_value_opaque_quantizer`` checks at import
-        time that no annotated field is a derived tensor or a process group.
+        Computed from the class annotations and stored on the class by
+        ``register_value_opaque_quantizer``, which also checks that no
+        annotated field is a derived tensor or a process group. Looked up in
+        the class's own ``__dict__`` so a subclass of a registered quantizer
+        does not silently inherit value semantics without registering itself.
         ``None`` (any class not registered) keeps identity-based
         equality/hashing and graph-breaks under torch.compile when passed to a
         custom op, since such a quantizer cannot be baked into the FX graph as
         a constant.
         """
-        if not self._is_value_quantizer:
-            return None
-        fields: Dict[str, None] = {}
-        for klass in reversed(type(self).__mro__):
-            if issubclass(klass, Quantizer):
-                fields.update(dict.fromkeys(klass.__dict__.get("__annotations__", {})))
-        return tuple(fields)
+        return type(self).__dict__.get("_value_field_names")
 
     def _check_value_has_no_process_group(self) -> None:
         # A value quantizer cannot carry live distributed state into the FX
@@ -469,9 +472,7 @@ class Quantizer(abc.ABC):
         # fall back to identity). ``_value_key`` rejects a stored ProcessGroup.
         if self is other:
             return True
-        if self._value_fields() is None or type(self) is not type(other):
-            return NotImplemented
-        if other._value_fields() is None:
+        if type(self) is not type(other) or self._value_fields() is None:
             return NotImplemented
         return self._value_key() == other._value_key()
 

@@ -136,8 +136,8 @@ class NVFP4Quantizer(Quantizer):
     """NVFP4 4over6 candidate-selection error mode."""
     nvfp4_4over6_err_mode: str
 
-    """Whether the RHT sign mask is randomized"""
-    with_random_sign_mask: bool
+    """RHT sign mask (0 when sign randomization is disabled)"""
+    rht_matrix_random_sign_mask_t: int
 
     def __init__(
         self,
@@ -172,7 +172,9 @@ class NVFP4Quantizer(Quantizer):
         self.nvfp4_4over6_err_mode = nvfp4_4over6_err_mode.upper()
         if self.nvfp4_4over6_err_mode not in ("MAE", "MSE"):
             raise ValueError("nvfp4_4over6_err_mode must be 'MAE' or 'MSE'.")
-        self.with_random_sign_mask = with_random_sign_mask
+        self.rht_matrix_random_sign_mask_t = get_random_sign_mask_for_rht(
+            with_random_sign_mask, torch.cuda.current_device()
+        )
         self._rebuild_derived_state()
 
     def __getstate__(self):
@@ -182,19 +184,17 @@ class NVFP4Quantizer(Quantizer):
         return state
 
     def _rebuild_derived_state(self) -> None:
-        """Build the derived RHT state (also used after value-key reconstruction).
+        """Build the derived ``rht_matrix`` (also used after value-key reconstruction).
 
-        ``rht_matrix`` is a ``torch.Tensor`` and ``rht_matrix_random_sign_mask_t``
-        is derived from ``with_random_sign_mask``, so neither is part of the
-        (hashable) value key. ``__init__`` and ``_rebuild_quantizer`` both call
-        this hook; the ``lru_cache`` on the getters makes an already-seen
-        (flag, device) pair a cheap hit.
+        ``rht_matrix`` is a ``torch.Tensor`` derived from the sign mask, so it
+        cannot be part of the (hashable) value key. ``__init__`` and
+        ``_rebuild_quantizer`` both call this hook; the ``lru_cache`` on
+        :func:`get_rht_matrix` makes an already-seen (flag, device) pair a
+        cheap hit.
         """
-        device = torch.cuda.current_device()
-        self.rht_matrix_random_sign_mask_t = get_random_sign_mask_for_rht(
-            self.with_random_sign_mask, device
+        self.rht_matrix = get_rht_matrix(
+            self.rht_matrix_random_sign_mask_t != 0, torch.cuda.current_device()
         )
-        self.rht_matrix = get_rht_matrix(self.with_random_sign_mask, device)
 
     def update_quantized(
         self,
@@ -242,7 +242,7 @@ class NVFP4Quantizer(Quantizer):
             nvfp4_use_4over6=self.nvfp4_use_4over6,
             nvfp4_e4m3_max=self.nvfp4_e4m3_max,
             nvfp4_4over6_err_mode=self.nvfp4_4over6_err_mode,
-            with_random_sign_mask=self.with_random_sign_mask,
+            with_random_sign_mask=self.rht_matrix_random_sign_mask_t != 0,
         )
         quantizer.internal = self.internal
         quantizer.optimize_for_gemm = self.optimize_for_gemm
