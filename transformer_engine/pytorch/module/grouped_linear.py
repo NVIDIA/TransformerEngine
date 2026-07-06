@@ -97,15 +97,16 @@ class _GroupedWeightAutogradBridge(torch.autograd.Function):
 
         if ctx.fuse_wgrad_accumulation:
             # GroupedLinear has already written each wgrad into a view of the parent's
-            # main_grad. Trigger the parent's accumulator/DDP hook with a zero dummy
-            # gradient and tell MCore not to add that dummy to main_grad.
+            # main_grad. Trigger the parent's accumulator/DDP hook with TE's cached
+            # dummy wgrad and tell MCore not to add that dummy to main_grad.
+            grouped_grad = None
             if hasattr(grouped_weight, "grad_added_to_main_grad"):
                 grouped_weight.grad_added_to_main_grad = True
-            grouped_grad = torch.zeros(
-                tuple(grouped_weight.shape),
-                dtype=grouped_weight.dtype,
-                device=grouped_weight.device,
-            )
+                grouped_grad = get_dummy_wgrad(
+                    list(grouped_weight.shape),
+                    grouped_weight.dtype,
+                    zero=getattr(grouped_weight, "zero_out_wgrad", False),
+                )
         else:
             members = grouped_weight.quantized_tensors
             if members is None:

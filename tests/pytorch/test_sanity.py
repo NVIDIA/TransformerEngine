@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 from typing import Optional, List
+from unittest import mock
 
 import torch
 import pytest
@@ -36,6 +37,7 @@ from transformer_engine.pytorch import (
 )
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.cpp_extensions import general_gemm
+from transformer_engine.pytorch.module import grouped_linear as grouped_linear_module
 from transformer_engine.pytorch.tensor.utils import replace_raw_data
 from utils import ModelConfig, recipe_id, skip_unsupported_backward_override
 
@@ -1258,12 +1260,18 @@ def test_grouped_linear_single_param_legacy_fused_wgrad(monkeypatch):
     weight.grad_added_to_main_grad = False
     inp = torch.randn(32, 32, dtype=dtype, device="cuda", requires_grad=True)
 
-    with autocast(enabled=True, recipe=recipe.MXFP8BlockScaling()):
-        module(inp, [16, 16]).sum().backward()
+    with mock.patch.object(
+        grouped_linear_module,
+        "get_dummy_wgrad",
+        wraps=grouped_linear_module.get_dummy_wgrad,
+    ) as dummy_wgrad:
+        with autocast(enabled=True, recipe=recipe.MXFP8BlockScaling()):
+            module(inp, [16, 16]).sum().backward()
 
     assert weight.grad_added_to_main_grad
     assert weight.grad is not None
     assert torch.count_nonzero(weight.main_grad).item() > 0
+    dummy_wgrad.assert_any_call(list(weight.shape), weight.dtype, zero=False)
 
 
 def test_sanity_checkpointing_on_callables():
