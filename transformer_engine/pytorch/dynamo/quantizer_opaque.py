@@ -82,7 +82,7 @@ def _check_value_annotations(cls: type) -> None:
     """Verify that every annotated field of *cls* can be part of a value key.
 
     The value fields are derived from the class annotations (see
-    ``Quantizer._annotated_value_fields``), so derived tensors and process
+    ``Quantizer._value_fields``), so derived tensors and process
     groups must not be annotated. Checking annotation strings is enough: the
     tensor modules use ``from __future__ import annotations``.
     """

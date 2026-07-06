@@ -412,35 +412,25 @@ class Quantizer(abc.ABC):
     # Flipped to True by ``register_value_opaque_quantizer``.
     _is_value_quantizer = False
 
-    @classmethod
-    def _annotated_value_fields(cls) -> Tuple[str, ...]:
-        """Value-defining attribute names, derived from class annotations.
-
-        Collects the annotated fields of every ``Quantizer`` class in the MRO
-        (base first), so the class annotations are the single source of truth
-        for what defines a quantizer's value. Fields that are not values
-        (derived tensors, process groups) must not be annotated;
-        ``register_value_opaque_quantizer`` enforces this at import time.
-        """
-        fields: Dict[str, None] = {}
-        for klass in reversed(cls.__mro__):
-            if issubclass(klass, Quantizer):
-                fields.update(dict.fromkeys(klass.__dict__.get("__annotations__", {})))
-        return tuple(fields)
-
     def _value_fields(self) -> Optional[Tuple[str, ...]]:
         """Value-defining attribute names, or ``None``.
 
-        ``None`` (any class not registered via
-        ``register_value_opaque_quantizer``) means the quantizer cannot be
-        represented as a value opaque object and keeps identity-based
-        equality/hashing. This also means that passing such a quantizer as an
-        argument to a custom op causes a graph break under torch.compile,
-        since it cannot be baked into the FX graph as a constant.
+        Derived from the class annotations across the MRO (base first), so the
+        annotations are the single source of truth for what defines a
+        quantizer's value; ``register_value_opaque_quantizer`` checks at import
+        time that no annotated field is a derived tensor or a process group.
+        ``None`` (any class not registered) keeps identity-based
+        equality/hashing and graph-breaks under torch.compile when passed to a
+        custom op, since such a quantizer cannot be baked into the FX graph as
+        a constant.
         """
         if not self._is_value_quantizer:
             return None
-        return self._annotated_value_fields()
+        fields: Dict[str, None] = {}
+        for klass in reversed(type(self).__mro__):
+            if issubclass(klass, Quantizer):
+                fields.update(dict.fromkeys(klass.__dict__.get("__annotations__", {})))
+        return tuple(fields)
 
     def _check_value_has_no_process_group(self) -> None:
         # A value quantizer cannot carry live distributed state into the FX
