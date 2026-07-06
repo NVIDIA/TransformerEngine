@@ -17,6 +17,7 @@ from .storage.float8_blockwise_tensor_storage import (
     _FromFloat8BlockwiseFunc,
 )
 from ..quantized_tensor import QuantizedTensor, Quantizer
+from ..dynamo import register_value_opaque_quantizer
 from ._quantization_helpers import _IdentityFunc, safe_quantized_repr
 from ..constants import DType
 from ..utils import devices_match, round_up_to_nearest_multiple
@@ -212,6 +213,9 @@ class Float8BlockQuantizer(Quantizer):
 
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         return Float8BlockScaling
+
+
+register_value_opaque_quantizer(Float8BlockQuantizer)
 
 
 class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
