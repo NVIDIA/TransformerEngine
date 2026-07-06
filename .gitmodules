@@ -10,3 +10,9 @@
 [submodule "3rdparty/nccl"]
 	path = 3rdparty/nccl
 	url = https://github.com/NVIDIA/nccl.git
+[submodule "dlfw-ci"]
+	path = dlfw-ci
+	url = ../../devops/dlfw-ci
+[submodule "te_ci_artifacts"]
+	path = te_ci_artifacts
+	url = ../te_ci_artifacts
