@@ -10,15 +10,10 @@ from typing import Any, Dict, Tuple
 from ..constants import DType
 
 
-# Registration records the class *qualname* rather than the class object. The
-# check must stay traceable when it runs inside a torch.compile graph, and a
-# set of class objects would not be: once a class is registered as opaque,
-# Dynamo traces the class itself as ``OpaqueObjectClassVariable``, which
-# defines no equality rule, so ``type(q) in some_set`` falls back to an
-# iterate-and-compare polyfill that dies on ``is`` between two opaque class
-# variables -- a hard ``Unsupported`` error under ``fullgraph=True``.
-# ``type(q).__qualname__`` instead constant-folds to a plain string, and
-# string-in-set membership is traceable.
+# Registered classes are recorded by qualname because the check may run inside
+# a torch.compile'd region: a name-in-set test is traceable there, while a set
+# of opaque-registered class objects is not (Dynamo cannot compare opaque
+# classes, so ``type(q) in some_set`` graph-breaks under ``fullgraph=True``).
 _VALUE_OPAQUE_QUALNAMES: set = set()
 
 
