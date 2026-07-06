@@ -118,13 +118,7 @@ class NVFP4Quantizer(Quantizer):
     """Random Hadamard Transform"""
     with_rht: bool
     with_post_rht_amax: bool
-    """amax reduction options
-
-    The deprecated ``amax_reduction_group`` attribute is intentionally not
-    annotated: annotations define the torch.compile value key, and a process
-    group is not a value (``_value_key`` rejects a stored group;
-    ``_rebuild_quantizer`` restores the attribute as ``None``).
-    """
+    """amax reduction options"""
     with_amax_reduction: bool
 
     """2D block scaling, only applicable for weights."""
@@ -142,13 +136,7 @@ class NVFP4Quantizer(Quantizer):
     """NVFP4 4over6 candidate-selection error mode."""
     nvfp4_4over6_err_mode: str
 
-    """Whether the RHT sign mask is randomized.
-
-    The derived ``rht_matrix_random_sign_mask_t`` (int) and ``rht_matrix``
-    (tensor) attributes are intentionally not annotated: annotations define
-    the torch.compile value key, and both are rebuilt from this flag by
-    ``_rebuild_derived_state``.
-    """
+    """Whether the RHT sign mask is randomized"""
     with_random_sign_mask: bool
 
     def __init__(

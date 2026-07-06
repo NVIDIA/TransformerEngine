@@ -206,13 +206,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
 
     """FP8 datatype"""
     dtype: DType
-    """amax reduction options
-
-    The deprecated ``amax_reduction_group`` attribute is intentionally not
-    annotated: annotations define the torch.compile value key, and a process
-    group is not a value (``_value_key`` rejects a stored group;
-    ``_rebuild_quantizer`` restores the attribute as ``None``).
-    """
+    """amax reduction options"""
     with_amax_reduction: bool
     """Options about how to quantize the tensor"""
     force_pow_2_scales: bool
