@@ -392,9 +392,7 @@ model_configs_fa4_mla = {
 @pytest.mark.parametrize("model", model_configs_fa4_mla.keys())
 def test_dpa_fa4_mla(dtype, model_configs, model):
     """Test DotProductAttention with FA4: MLA (head_dim_qk != head_dim_v)"""
-    test_dot_product_attention(
-        dtype, model_configs, model, False, "bshd_bshd_bshd", False, False
-    )
+    test_dot_product_attention(dtype, model_configs, model, False, "bshd_bshd_bshd", False, False)
 
 
 model_configs_fa4_swa = {
@@ -543,9 +541,7 @@ model_configs_softmax = {
 @pytest.mark.parametrize("model", model_configs_softmax.keys())
 def test_dpa_softmax(dtype, model_configs, model):
     """Test DotProductAttention module with different softmax types"""
-    test_dot_product_attention(
-        dtype, model_configs, model, True, "bshd_bshd_bshd", False, False
-    )
+    test_dot_product_attention(dtype, model_configs, model, True, "bshd_bshd_bshd", False, False)
 
 
 @pytest.mark.skipif(get_cudnn_version() < (9, 18, 0), reason="cuDNN 9.18.0+ is required.")
