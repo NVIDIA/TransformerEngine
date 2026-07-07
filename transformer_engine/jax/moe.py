@@ -843,7 +843,6 @@ def _moe_bwd_rule(
     mesh = _get_mesh()
     if mesh is None or mesh.empty:
         raise ValueError("moe(...) requires an active jax.sharding.Mesh.")
-    num_ep = mesh.shape[ep_axis]
     dp_size = 1
     for ax in data_parallelism_axes:
         dp_size *= mesh.shape[ax]
