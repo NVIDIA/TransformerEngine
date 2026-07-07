@@ -11,17 +11,20 @@ from importlib import metadata
 import transformer_engine.common
 
 
-# Plugin system: if NVTE_ENABLE_PLUGIN=1, replace cuda hardcodes and torch.cuda apis
-if os.environ.get("NVTE_ENABLE_PLUGIN", "0") == "1":
+# Plugin system: set NVTE_PLUGIN to the plugin module name to enable.
+# e.g. NVTE_PLUGIN=transformer_engine_plugin_fl
+_nvte_plugin = os.environ.get("NVTE_PLUGIN")
+if _nvte_plugin:
     try:
-        from transformer_engine_plugin_fl.patches import apply_patches
+        from importlib import import_module
 
-        apply_patches()
+        _patches = import_module(f"{_nvte_plugin}.patches")
+        _patches.apply_patches()
     except Exception as e:
         import warnings
 
         warnings.warn(
-            f"NVTE_ENABLE_PLUGIN=1 but plugin patch apply failed: {e}",
+            f"NVTE_PLUGIN={_nvte_plugin} but plugin patch apply failed: {e}",
             RuntimeWarning,
             stacklevel=1,
         )
