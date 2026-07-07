@@ -37,6 +37,10 @@ wait
 TE_PATH=$TE_PATH bash $TE_PATH/examples/jax/collective_gemm/run_test_cgemm.sh || test_fail "run_test_cgemm.sh"
 wait
 
+# NCCL EP example (ep_moe.py). Self-skips on <4 GPUs or platforms without NVLink.
+TE_PATH=$TE_PATH bash $TE_PATH/examples/jax/ep/run_test_ep.sh || test_fail "run_test_ep.sh"
+wait
+
 # MoE custom_vjp distributed suite. Runs one Python process per GPU
 # via tests/jax/run_multiprocess_moe_vjp.sh (mirrors the pattern in
 # examples/jax/encoder/run_test_multiprocessing_encoder.sh). Requires

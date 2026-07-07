@@ -30,7 +30,7 @@ from .base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
-from ._common import noop_cat, WeightGradStore
+from ._common import noop_cat, set_quantizer_amax_reduction_group, WeightGradStore
 from ..quantization import FP8GlobalStateManager, QuantizerRole
 from ..utils import (
     cast_if_needed,
@@ -289,6 +289,8 @@ def _linear_forward_impl(
     is_fsdp2 = args.is_fsdp2
     if backward_override == "high_precision":
         save_original_input = True
+    elif backward_override == "dequantized":
+        save_original_input = False
 
     # NVTX label for profiling
     nvtx_label = "transformer_engine._Linear.forward"
@@ -304,6 +306,12 @@ def _linear_forward_impl(
     backward_needs_input = is_grad_enabled and weight.requires_grad
     with_input_all_gather_nccl = (
         parallel_mode == "column" and sequence_parallel and not ub_overlap_ag_fprop
+    )
+
+    # Amax reduction group for the input quantizer (column-parallel sequence parallel)
+    set_quantizer_amax_reduction_group(
+        input_quantizer,
+        tp_group if (sequence_parallel and parallel_mode == "column") else None,
     )
 
     # Configure Userbuffers communication (comm+GEMM overlap)
@@ -747,6 +755,24 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
     grad_input_quantizer = args.grad_input_quantizer
     grad_weight_quantizer = args.grad_weight_quantizer
     grad_output_quantizer = args.grad_output_quantizer
+
+    # Amax reduction groups (sequence parallel): input for column-parallel, grad output for row-parallel
+    set_quantizer_amax_reduction_group(
+        input_quantizer,
+        (
+            bwd_args.tp_group
+            if (bwd_args.sequence_parallel and bwd_args.parallel_mode == "column")
+            else None
+        ),
+    )
+    set_quantizer_amax_reduction_group(
+        grad_output_quantizer,
+        (
+            bwd_args.tp_group
+            if (bwd_args.sequence_parallel and bwd_args.parallel_mode == "row")
+            else None
+        ),
+    )
 
     # NVTX label for profiling
     nvtx_label = "transformer_engine._Linear.backward"
@@ -1746,8 +1772,6 @@ class Linear(TransformerEngineBaseModule):
         recipe = FP8GlobalStateManager.get_fp8_recipe()
         if recipe.float8_current_scaling():
             self._customize_quantizers_float8_current_scaling(fwd, recipe)
-        elif recipe.nvfp4():
-            self._customize_quantizers_nvfp4(fwd, recipe)
 
     def reset_parameters(self, defer_init=False):
         super().reset_parameters(defer_init=defer_init)
@@ -2116,15 +2140,6 @@ class Linear(TransformerEngineBaseModule):
             self.quantizers["scaling_fwd"][
                 FP8FwdTensorIdx.GEMM1_WEIGHT
             ].amax_epsilon = recipe.fp8_quant_fwd_weight.amax_epsilon
-            # paralle related
-            if self.sequence_parallel and self.parallel_mode == "column":
-                # customize input_quantizer with amax reduction TP group
-                self.quantizers["scaling_fwd"][
-                    FP8FwdTensorIdx.GEMM1_INPUT
-                ].with_amax_reduction = True
-                self.quantizers["scaling_fwd"][
-                    FP8FwdTensorIdx.GEMM1_INPUT
-                ].amax_reduction_group = self.tp_group
         else:
             # set grad_output_quantizer with amax epsilon and power_2_scale
             self.quantizers["scaling_bwd"][
@@ -2133,37 +2148,6 @@ class Linear(TransformerEngineBaseModule):
             self.quantizers["scaling_bwd"][
                 FP8BwdTensorIdx.GRAD_OUTPUT1
             ].amax_epsilon = recipe.fp8_quant_bwd_grad.amax_epsilon
-            # parallel related
-            if self.sequence_parallel and self.parallel_mode == "row":
-                # customize grad_output_quantizer with amax reduction TP group
-                self.quantizers["scaling_bwd"][
-                    FP8BwdTensorIdx.GRAD_OUTPUT1
-                ].with_amax_reduction = True
-                self.quantizers["scaling_bwd"][
-                    FP8BwdTensorIdx.GRAD_OUTPUT1
-                ].amax_reduction_group = self.tp_group
-
-    def _customize_quantizers_nvfp4(self, fwd: bool, recipe: Recipe) -> None:
-        """Customize quantizers based on current scaling recipe + linear."""
-        assert recipe.nvfp4(), "Incorrect recipe."
-        if fwd:
-            if self.sequence_parallel and self.parallel_mode == "column":
-                # customize input_quantizer with amax reduction TP group
-                self.quantizers["scaling_fwd"][
-                    FP8FwdTensorIdx.GEMM1_INPUT
-                ].with_amax_reduction = True
-                self.quantizers["scaling_fwd"][
-                    FP8FwdTensorIdx.GEMM1_INPUT
-                ].amax_reduction_group = self.tp_group
-        else:
-            if self.sequence_parallel and self.parallel_mode == "row":
-                # customize grad_output_quantizer with amax reduction TP group
-                self.quantizers["scaling_bwd"][
-                    FP8BwdTensorIdx.GRAD_OUTPUT1
-                ].with_amax_reduction = True
-                self.quantizers["scaling_bwd"][
-                    FP8BwdTensorIdx.GRAD_OUTPUT1
-                ].amax_reduction_group = self.tp_group
 
     def _get_weight_quantizers(self) -> List[Quantizer]:
         """Get the weight quantizers of the module."""
