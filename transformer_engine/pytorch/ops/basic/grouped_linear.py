@@ -218,7 +218,12 @@ class GroupedLinear(BasicOperation):
         if not self.wgrad_store.delay_wgrad_compute():
             return
         if self.single_grouped_weight:
-            self.weight.skip_backward_post_hook = True
+            # A meta-device op may be created as a parameterless shell and have its
+            # grouped parent attached after construction. In that case there is no
+            # ``weight`` parameter to mark yet.
+            weight = self._parameters.get("weight")
+            if weight is not None:
+                weight.skip_backward_post_hook = True
         else:
             for group_idx in range(self.num_groups):
                 getattr(self, f"weight{group_idx}").skip_backward_post_hook = True
