@@ -199,9 +199,10 @@ def load_framework_extension(framework: str) -> None:
     if _nvte_plugin and framework == "torch":
         _original_module = sys.modules.get(module_name)
         try:
-            _plugin = importlib.import_module(_nvte_plugin)
-
+            # Register _nv alias BEFORE importing the plugin, because the
+            # plugin module may import transformer_engine_torch_nv at top level.
             sys.modules[module_name + "_nv"] = solib
+            _plugin = importlib.import_module(_nvte_plugin)
             _plugin.load_plugins()
         except Exception as e:
             # Rollback to pre-plugin state if plugin failed to fully initialize
