@@ -1,11 +1,11 @@
-"""Microbenchmark for the token-linear THD fused RoPE path.
+"""Microbenchmark for the THD linear-grid fused RoPE path.
 
 Holds the local packed-token count fixed and sweeps the number of packed
 sequences. For each point, measures forward and backward latency of the fused
 RoPE kernel under three regimes:
 
-  * forced-old:  ``NVTE_FUSED_ROPE_THD_TOKEN_LINEAR=0``
-  * forced-new:  ``NVTE_FUSED_ROPE_THD_TOKEN_LINEAR=1``
+  * forced-old:  ``NVTE_FUSED_ROPE_THD_LINEAR_GRID=0``
+  * forced-new:  ``NVTE_FUSED_ROPE_THD_LINEAR_GRID=1``
   * heuristic:   variable unset
 
 Outputs a CSV. Intended to be run on a single GPU; not distributed.
@@ -208,7 +208,7 @@ def main(argv: Iterable[str] | None = None) -> None:
                 )
 
             for mode, value in [("old", "0"), ("new", "1"), ("heuristic", None)]:
-                with env("NVTE_FUSED_ROPE_THD_TOKEN_LINEAR", value):
+                with env("NVTE_FUSED_ROPE_THD_LINEAR_GRID", value):
                     fwd_ms, full_ms = time_fwd_bwd(runner, iters=args.iters, warmup=args.warmup)
                 bwd_ms = full_ms - fwd_ms
                 rows.append(

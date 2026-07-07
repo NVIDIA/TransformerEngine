@@ -144,7 +144,7 @@ def test_fused_rope_thd(
     start_positions: bool,
     margin: int,
 ) -> None:
-    monkeypatch.setenv("NVTE_FUSED_ROPE_THD_TOKEN_LINEAR", "1")
+    monkeypatch.setenv("NVTE_FUSED_ROPE_THD_LINEAR_GRID", "1")
 
     device = torch.device("cuda:0")
     batch_size, head_num = 2, 64
@@ -554,7 +554,7 @@ def _make_packed_thd_cu_seqlens(
     ],
 )
 @pytest.mark.parametrize("start_positions", [False, True])
-def test_fused_rope_thd_token_linear_parity(
+def test_fused_rope_thd_linear_grid_parity(
     monkeypatch: pytest.MonkeyPatch,
     dtype: torch.dtype,
     hidden_size: int,
@@ -606,7 +606,7 @@ def test_fused_rope_thd_token_linear_parity(
     emb = rotary_pos_emb(int(cu_seqlens[-1].item()) + 32)
 
     def run(force_path: str) -> Tuple[torch.Tensor, torch.Tensor]:
-        monkeypatch.setenv("NVTE_FUSED_ROPE_THD_TOKEN_LINEAR", force_path)
+        monkeypatch.setenv("NVTE_FUSED_ROPE_THD_LINEAR_GRID", force_path)
         out = apply_rotary_pos_emb(
             t,
             emb,
