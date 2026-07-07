@@ -14,7 +14,7 @@ import subprocess
 import sys
 import platform
 from pathlib import Path
-from importlib.metadata import version as get_version
+from importlib.metadata import PackageNotFoundError, distribution, version as get_version
 from subprocess import CalledProcessError
 from typing import List, Optional, Tuple, Union
 
@@ -249,6 +249,26 @@ def get_cuda_include_dirs() -> Tuple[str, str]:
         for subdir in cuda_root.iterdir()
         if subdir.is_dir() and (subdir / "include").is_dir()
     ]
+
+
+@functools.lru_cache(maxsize=None)
+def cudnn_frontend_include_path() -> Path:
+    """Return the C++ include directory from nvidia-cudnn-frontend."""
+    package = "nvidia-cudnn-frontend"
+    try:
+        include_dir = Path(distribution(package).locate_file("include")).resolve()
+    except PackageNotFoundError as e:
+        raise RuntimeError(
+            f"{package} is required to build Transformer Engine. "
+            f"Install it with `pip install {package}`."
+        ) from e
+
+    header = include_dir / "cudnn_frontend.h"
+    if not header.is_file():
+        raise RuntimeError(
+            f"The {package} installation does not contain the expected header {header}."
+        )
+    return include_dir
 
 
 @functools.lru_cache(maxsize=None)
