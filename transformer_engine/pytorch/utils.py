@@ -12,6 +12,8 @@ from contextlib import nullcontext
 import numpy as np
 import torch
 
+from transformer_engine import te_device_type, te_platform
+
 from .torch_version import torch_version
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
@@ -43,7 +45,8 @@ def requires_grad(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
 @functools.lru_cache(maxsize=None)
 def _empty_tensor() -> torch.Tensor:
     """Get tensor with no entries and no data"""
-    return torch.Tensor().cuda()
+
+    return torch.Tensor().to(device=te_device_type())
 
 
 def clear_tensor_data(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
@@ -549,12 +552,12 @@ def canonicalize_device(device: Optional[torch.device | str]) -> torch.device:
     if device is None:
         # Use default CUDA device
         device = torch.get_default_device()
-        if device.type != "cuda":
-            device = torch.device("cuda", torch.cuda.current_device())
+        if device.type != te_device_type():
+            device = torch.device(te_device_type(),te_platform().current_device())
     elif not isinstance(device, torch.device):
         device = torch.device(device)
-    if device.type == "cuda" and device.index is None:
-        device = torch.device("cuda", torch.cuda.current_device())
+    if device.type == te_device_type() and device.index is None:
+        device = torch.device(te_device_type(), te_platform().current_device())
     return device
 
 
@@ -576,7 +579,7 @@ def devices_match(device1: torch.device, device2: torch.device) -> bool:
     device2 = torch.device(device2)
     if device1.type != device2.type:
         return False
-    if device1.type == "cuda":
+    if device1.type == te_device_type():
         index1 = device1.index
         index2 = device2.index
         if index1 == index2:
@@ -708,12 +711,12 @@ def canonicalize_process_group(
 def torch_get_autocast_gpu_dtype() -> torch.dtype:
     """Get PyTorch autocast GPU dtype."""
     if torch_version() >= (2, 4, 0):
-        return torch.get_autocast_dtype("cuda")
+        return torch.get_autocast_dtype(te_device_type())
     return torch.get_autocast_gpu_dtype()
 
 
 if torch_version() >= (2, 4, 0):
-    gpu_autocast_ctx = functools.partial(torch.amp.autocast, device_type="cuda")
+    gpu_autocast_ctx = functools.partial(torch.amp.autocast, device_type=te_device_type())
 else:
     gpu_autocast_ctx = torch.cuda.amp.autocast
 
@@ -812,7 +815,7 @@ def make_weak_ref(x):
     if isinstance(x, torch.Tensor):
         return (
             convert_to_torch_tensor(_WeakRefTensor(x.data_ptr(), x.dtype, x.shape))
-            if x.is_cuda
+            if x.device.type == te_device_type()
             else x
         )
     if isinstance(x, tuple):

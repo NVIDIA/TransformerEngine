@@ -14,6 +14,7 @@ from nvdlfw_inspect.utils import append_parent_docstring
 
 
 import transformer_engine_torch as tex
+from transformer_engine import te_device_type
 from transformer_engine.debug.features.api import TEConfigAPIMapper
 from transformer_engine.common.recipe import Format
 from transformer_engine.pytorch.tensor import Quantizer
@@ -30,7 +31,9 @@ def fake_quantize(tensor: torch.Tensor, fp8_format: tex.DType, out=None):
         torch.float16,
         torch.bfloat16,
     ), "[NVTORCH INSPECT ERROR] Unsupported tensor type."
-    assert tensor.is_cuda, "[NVTORCH INSPECT ERROR] Must be a GPU tensor."
+    assert (
+        tensor.device.type == te_device_type()
+    ), f"[NVTORCH INSPECT ERROR] Must be a {te_device_type()} tensor."
     assert fp8_format in {
         "FP8E4M3",
         "FP8E5M2",
