@@ -2783,8 +2783,18 @@ def combine_and_quantize(
     used_in_forward=True,
     used_in_backward=False,
     keep_same_data_and_scale_inv_format=False,
+    combined: Optional[torch.Tensor] = None,
 ):
-    """Combine Q, K, V tensors based on qkv_layout and quantize them together."""
+    """Combine Q, K, V tensors based on qkv_layout and quantize them together.
+
+    When ``combined`` is provided, it must be the caller's original packed buffer
+    matching the packed group in ``qkv_layout`` (the full QKV tensor for ``3``
+    layouts such as ``bs3hd``, or the KV tensor for ``2`` layouts such as
+    ``bshd_bs2hd``). It is then quantized directly instead of re-deriving the
+    packed buffer from the q/k/v views via ``combine_tensors`` (which rebuilds it
+    with a raw ``set_`` under a silent adjacency/interleave assumption). Ignored
+    for MXFP8 quantization.
+    """
     if isinstance(qkv_quantizer, MXFP8Quantizer):
         qkv_format, q_format, kv_format = get_qkv_format(qkv_layout)
         assert qkv_format in ("bshd", "sbhd"), (
@@ -2884,12 +2894,26 @@ def combine_and_quantize(
     match qkv_group:
         case 1:
             dim = qkv_layout.find("3")
-            qkv = combine_tensors([q, k, v], dim)
+            if combined is not None:
+                assert combined.shape[dim] == 3, (
+                    f"combined QKV tensor does not match qkv_layout {qkv_layout}: expected"
+                    f" size 3 at dim {dim}, got shape {tuple(combined.shape)}."
+                )
+                qkv = combined
+            else:
+                qkv = combine_tensors([q, k, v], dim)
             qkv_fp8 = qkv_quantizer(qkv)
             q_data, k_data, v_data = SplitAlongDim.apply(qkv_fp8._data, dim, [1, 1, 1], True)
         case 2:
             dim = qkv_layout.split("_")[1].find("2")
-            kv = combine_tensors([k, v], dim)
+            if combined is not None:
+                assert combined.shape[dim] == 2, (
+                    f"combined KV tensor does not match qkv_layout {qkv_layout}: expected"
+                    f" size 2 at dim {dim}, got shape {tuple(combined.shape)}."
+                )
+                kv = combined
+            else:
+                kv = combine_tensors([k, v], dim)
             tensors = [q, kv]
             num_tensors = len(tensors)
             shapes = [x.shape for x in tensors]
