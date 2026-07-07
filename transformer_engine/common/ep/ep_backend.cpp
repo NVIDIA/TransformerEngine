@@ -47,26 +47,50 @@ ncclDataType_t te_dtype_to_nccl_dtype(NVTEDType dtype) {
       return ncclFloat8e4m3;
     case kNVTEFloat8E5M2:
       return ncclFloat8e5m2;
+    case kNVTEFloat8E8M0:
+      return ncclUint8;
     default:
       NVTE_ERROR("Unsupported NVTEDType for NCCL dtype conversion: ", static_cast<int>(dtype));
   }
   return ncclFloat32;  // unreachable
 }
 
-// shape_out is caller-owned; desc.sizes aliases shape_out.data and must
-// outlive the NCCL EP call.
+// Which part of a TE tensor an NCCL descriptor points at: the data payload, or
+// (for block-scaled tensors) the rowwise scale-inverse that rides alongside it.
+enum class DescSource { kData, kScaleInv };
+
+// Build an NCCL descriptor for a TE tensor's data (kData) or its rowwise
+// scale-inverse (kScaleInv). shape_out is caller-owned; desc.sizes aliases
+// shape_out.data and must outlive the NCCL EP call. Uses the matching window
+// field (win.window / win.scale_window) when set, else the raw pointer.
 inline ncclEpTensor_t make_nccl_ep_tensor(const NVTETensor t, NVTEShape& shape_out,
-                                          const NVTECommWindow& win = {}) {
-  shape_out = nvte_tensor_shape(t);
+                                          const NVTECommWindow& win = {},
+                                          DescSource source = DescSource::kData) {
   ncclEpTensor_t desc = NCCL_EP_TENSOR_INIT;
+  void* raw_ptr = nullptr;
+  ncclWindow_t win_hdl = nullptr;
+  uint64_t win_offset = 0;
+  if (source == DescSource::kData) {
+    shape_out = nvte_tensor_shape(t);
+    desc.datatype = te_dtype_to_nccl_dtype(nvte_tensor_type(t));
+    raw_ptr = nvte_tensor_data(t);
+    win_hdl = win.window;
+    win_offset = win.offset;
+  } else {
+    const SimpleTensor& si = convertNVTETensorCheck(t)->scale_inv;
+    shape_out = nvte_make_shape(si.shape.data(), si.shape.size());
+    desc.datatype = te_dtype_to_nccl_dtype(static_cast<NVTEDType>(si.dtype));
+    raw_ptr = si.dptr;
+    win_hdl = win.scale_window;
+    win_offset = win.scale_offset;
+  }
   desc.ndim = shape_out.ndim;
   desc.sizes = shape_out.data;
-  desc.datatype = te_dtype_to_nccl_dtype(nvte_tensor_type(t));
-  if (win.window != nullptr) {
-    desc.win_hdl = win.window;
-    desc.win_offset = win.offset;
+  if (win_hdl != nullptr) {
+    desc.win_hdl = win_hdl;
+    desc.win_offset = win_offset;
   } else {
-    desc.data = nvte_tensor_data(t);
+    desc.data = raw_ptr;
     NVTE_CHECK(desc.data != nullptr || nvte_tensor_numel(t) == 0,
                "non-empty tensor data must not be null");
   }
@@ -412,16 +436,45 @@ void EPBackend::dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTE
         make_nccl_ep_tensor(recv_topk_weights, recv_topk_weights_shape, recv_topk_weights_win);
   }
 
+  // Block-scaled (e.g. MXFP8): route the per-token scale-inverse alongside the
+  // data. High-precision (bf16/fp16/fp32) and per-tensor FP8 payloads carry the
+  // default delayed scaling mode and skip this. Keys on is_block_scaling so
+  // NVFP4 can reuse this path later.
+  const NVTEScalingMode tokens_scaling_mode = nvte_tensor_scaling_mode(tokens);
+  const bool is_scaled = is_block_scaling(tokens_scaling_mode);
+  NVTEShape scales_in_shape, scales_out_shape;
+  ncclEpTensor_t nccl_scales_in = NCCL_EP_TENSOR_INIT, nccl_scales_out = NCCL_EP_TENSOR_INIT;
+  if (is_scaled) {
+    NVTE_CHECK(is_mxfp8_scaling(tokens_scaling_mode),
+               "EP dispatch supports MXFP8 block scaling only; got scaling mode ",
+               static_cast<int>(tokens_scaling_mode));
+    NVTE_CHECK(nvte_tensor_scaling_mode(recv_tokens) == tokens_scaling_mode,
+               "recv_tokens scaling mode must match tokens scaling mode");
+    nccl_scales_in =
+        make_nccl_ep_tensor(tokens, scales_in_shape, tokens_win, DescSource::kScaleInv);
+    nccl_scales_out =
+        make_nccl_ep_tensor(recv_tokens, scales_out_shape, recv_tokens_win, DescSource::kScaleInv);
+  } else {
+    NVTE_CHECK(!is_fp8_dtype(static_cast<DType>(tok_dtype)),
+               "EP dispatch of FP8 tokens requires a block scaling mode (e.g. MXFP8); "
+               "per-tensor (delayed) FP8 scaling is not supported");
+  }
+
   ncclEpDispatchInputs_t in_struct = NCCL_EP_DISPATCH_INPUTS_INIT;
   in_struct.tokens = &nccl_tokens_in;
   in_struct.topk_weights = is_forward ? &nccl_topk_weights_in : nullptr;
+  in_struct.scales = is_scaled ? &nccl_scales_in : nullptr;
 
   ncclEpDispatchOutputs_t out_struct = NCCL_EP_DISPATCH_OUTPUTS_INIT;
   out_struct.tokens = &nccl_tokens_out;
   out_struct.topk_weights = is_forward ? &nccl_topk_weights_out : nullptr;
+  out_struct.scales = is_scaled ? &nccl_scales_out : nullptr;
 
   ncclEpDispatchConfig_t dispatch_cfg = NCCL_EP_DISPATCH_CONFIG_INIT;
   dispatch_cfg.pass_direction = is_forward ? NCCL_EP_FWD_PASS : NCCL_EP_BWD_PASS;
+  // Block-scaled payloads forward the per-token scale-inverse; select the matching recipe.
+  dispatch_cfg.quantization_recipe =
+      is_scaled ? NCCL_EP_DISPATCH_QUANT_SCALES_FORWARD : NCCL_EP_DISPATCH_QUANT_NONE;
 
   std::lock_guard<std::mutex> lock(mutex_);
   NVTE_CHECK(initialized_, "EPBackend not initialized");
