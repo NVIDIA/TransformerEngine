@@ -288,14 +288,14 @@ def _ffn_fwd_per_shard(
     if apply_topk_weights_early:
         # Fold the per-token combine weights into the FFN intermediate;
         # the downstream wo GEMM is linear so this is equivalent to the
-        # late-weighting path, modulo elementwise op fusion gains. w_b is
-        # cast to intermediate.dtype so the multiply doesn't promote
-        # expert_outputs above the EP buffer's element width
-        # (ep_bootstrap rejects max_token_dtype != bf16, and the NCCL EP
-        # HT mega-buffer is sized for 2-byte slots accordingly).
+        # late-weighting path. Padded recv slots can contain uninitialized
+        # data, so overwrite inactive rows with literal zeros instead of
+        # relying on multiplication by a zero mask (IEEE NaN * 0 = NaN).
+        # ``w_b`` is cast to ``intermediate.dtype`` so the multiply doesn't
+        # promote expert_outputs above the EP buffer's element width.
         w_b = recv_w_flat[:, None].astype(intermediate.dtype)
-        mask_b = (recv_w_flat != 0).astype(intermediate.dtype)[:, None]
-        intermediate = intermediate * w_b * mask_b
+        active = (recv_w_flat != 0)[:, None]
+        intermediate = jnp.where(active, intermediate * w_b, jnp.zeros_like(intermediate))
 
     casted_intermediate = tex.grouped_quantize(
         intermediate, q_set.x, local_group_sizes, flatten_axis=-1
@@ -377,26 +377,35 @@ def _ffn_bwd_per_shard(
     act_fn = _convert_to_activation_function(activation_type)
     if apply_topk_weights_early:
         # intermediate' = intermediate * w * mask. Split the cotangent
-        # across both factors before the activation bwd consumes it.
-        # Cast w_b so the multiply stays in d_intermediate.dtype and
-        # d_sorted_x (downstream into ep_dispatch_bwd) stays bf16.
+        # across both factors before the activation bwd consumes it. Padded
+        # recv slots may still be NaN in the saved activation residuals, so
+        # use zero-filled residuals on inactive rows before the activation VJP.
         w_b = recv_w_flat[:, None].astype(d_intermediate.dtype)
-        mask_b = (recv_w_flat != 0).astype(d_intermediate.dtype)[:, None]
-        intermediate_unweighted = act_fn(gate_proj_out) * up_proj_out
+        active = (recv_w_flat != 0)[:, None]
+        gate_proj_for_bwd = jnp.where(active, gate_proj_out, jnp.zeros_like(gate_proj_out))
+        up_proj_for_bwd = jnp.where(active, up_proj_out, jnp.zeros_like(up_proj_out))
+        intermediate_unweighted = act_fn(gate_proj_for_bwd) * up_proj_for_bwd
         d_recv_w_from_intermediate = jnp.sum(
-            d_intermediate * intermediate_unweighted * mask_b, axis=-1
+            jnp.where(
+                active,
+                d_intermediate * intermediate_unweighted,
+                jnp.zeros_like(d_intermediate),
+            ),
+            axis=-1,
         ).astype(recv_w_flat.dtype)
-        d_intermediate = d_intermediate * w_b * mask_b
+        d_intermediate = jnp.where(active, d_intermediate * w_b, jnp.zeros_like(d_intermediate))
     else:
+        gate_proj_for_bwd = gate_proj_out
+        up_proj_for_bwd = up_proj_out
         d_recv_w_from_intermediate = jnp.zeros_like(recv_w_flat)
 
     # Activation bwd, symmetric with the fwd: silu' and the two
     # elementwise products run in the GEMM dtype (no fp32 island), so
     # the chain rule composes through at the same precision the wi/wo
     # GEMMs consume.
-    act_gp, dact_pullback = jax.vjp(act_fn, gate_proj_out)
+    act_gp, dact_pullback = jax.vjp(act_fn, gate_proj_for_bwd)
     d_up_proj_out = d_intermediate * act_gp
-    (d_gate_proj_out,) = dact_pullback(d_intermediate * up_proj_out)
+    (d_gate_proj_out,) = dact_pullback(d_intermediate * up_proj_for_bwd)
 
     # wi bwd (fused gate/up via concat). Mirror the fused fwd: pack the
     # gate/up cotangents along the trailing axis, run a single

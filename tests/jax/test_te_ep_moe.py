@@ -518,14 +518,10 @@ _CONFIGS = [
         dict(score_function="softmax"),
         id="softmax",
     ),
-    # TODO: re-add the apply_topk_weights_early=True config once the
-    # 0*NaN -> NaN leak from padded recv slots in the early-weighting
-    # multiply (intermediate * recv_w * mask) is debugged. Late
-    # weighting (combine-side) is unaffected and stays covered above.
-    # Note: align_size is no longer a user-facing parameter; it is
-    # hard-coded to _ALIGN_SIZE = 128 in moe.py. Re-add a distinct
-    # align-size config only if the constant is loosened, or a
-    # recipe-driven inference is added that selects a >128 alignment.
+    pytest.param(
+        dict(score_function="softmax", apply_topk_weights_early=True),
+        id="softmax-early-weighting",
+    ),
     pytest.param(
         dict(score_function="sigmoid"),
         id="sigmoid",
