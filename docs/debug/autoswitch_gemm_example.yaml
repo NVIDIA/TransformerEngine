@@ -50,9 +50,10 @@ log_tensor_stats_all:
       # This avoids quantize->dequantize conversion in runtime hooks.
       direct_high_precision_in_hold_window: True
 
-      # Optional: hold-window eager routing scope in CUDA graph mode.
-      # global: any triggered layer forces eager globally (default behavior)
-      # layer: only triggered layers force eager; others can stay on graphs
+      # Optional: hold-window precision scope.
+      # global: any triggered (layer, gemm) forces all GEMMs high precision
+      # layer: only triggered (layer, gemm) stays high precision
+      # In CUDA graph mode, this also controls eager routing scope.
       hold_window_scope: layer
 
       # Start sampling at step 10, then sample every 10 steps. A threshold

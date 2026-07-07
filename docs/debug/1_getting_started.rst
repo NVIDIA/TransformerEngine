@@ -267,10 +267,11 @@ Behavior summary:
    high-precision tensor plans on non-sampling hold-window iterations. This
    bypasses runtime quantize->dequantize conversion when high-precision source
    tensors are available.
-6. Set ``hold_window_scope`` to control eager routing scope during hold windows
-   in CUDA graph mode:
-   ``global`` (default) forces eager globally when any layer is in hold window,
-   while ``layer`` only forces eager for layers that have active hold windows.
+6. Set ``hold_window_scope`` to control hold-window precision scope:
+   ``global`` (default) forces all GEMMs to high precision if any
+   ``(layer, gemm)`` enters a hold window, while ``layer`` only forces
+   high precision for the triggered ``(layer, gemm)`` entries.
+   In CUDA graph mode, this setting also controls eager routing scope.
 7. When CUDA Graphs are used, sampling and high-precision windows must run in eager
    mode. Quantized windows can continue using CUDA Graphs if the training framework
    supports this routing. Megatron-LM support for this workflow depends on the

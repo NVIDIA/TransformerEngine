@@ -361,10 +361,11 @@ class AutoswitchGemm(TEConfigAPIMapper):
         that are available in high precision.
 
     hold_window_scope: str, default = "global"
-        Controls eager routing scope for hold-window iterations in CUDA graph mode.
-        ``global`` keeps current behavior (any triggered layer forces eager globally).
-        ``layer`` enables per-layer eager routing (only layers that triggered hold
-        windows force eager; other layers can stay on graph replay).
+        Controls hold-window precision scope.
+        ``global``: if any `(layer, gemm)` triggers a hold window, all GEMMs are
+        forced high precision in the hold window.
+        ``layer``: only triggered `(layer, gemm)` entries are forced high precision.
+        In CUDA graph mode, this setting is also used by eager/graph routing logic.
 
     freq/start_step/end_step/start_end_list: Optional
         Sampling controls for tensor inspection calls.
@@ -528,6 +529,16 @@ class AutoswitchGemm(TEConfigAPIMapper):
                 if key in config:
                     return self._config_bool(config, key, False)
         return autoswitch_gemm_logging_enabled()
+
+    @staticmethod
+    def _hold_window_scope(config: Optional[Dict]) -> str:
+        """Return hold-window scope from config, defaults to `global`."""
+        if not isinstance(config, dict):
+            return "global"
+        scope = str(config.get("hold_window_scope", "global")).strip().lower()
+        if scope not in {"global", "layer"}:
+            return "global"
+        return scope
 
     def _get_metrics_logger(self, config: Optional[Dict] = None) -> Optional[_AutoswitchGemmMetricLogger]:
         """Return initialized autoswitch metric logger if log dir is available."""
@@ -718,10 +729,13 @@ class AutoswitchGemm(TEConfigAPIMapper):
                 "direct_high_precision_in_hold_window",
                 self._DEFAULT_DIRECT_HIGH_PRECISION_IN_HOLD_WINDOW,
             )
+            disable_until_iter = state.disable_until_iter
+            if self._hold_window_scope(config) == "global":
+                disable_until_iter = _get_global_disable_until()
             if (
                 direct_high_precision_in_hold_window
                 and not self._is_sampling_iteration_for_config(config, iteration)
-                and iteration <= state.disable_until_iter
+                and iteration <= disable_until_iter
             ):
                 fp8_model_params_layer = self._layer_has_fp8_model_params.get(layer_name, False)
                 allow_fp8_model_params_fallback = self._config_bool(
@@ -783,7 +797,11 @@ class AutoswitchGemm(TEConfigAPIMapper):
 
         self._consume_new_metric_and_maybe_arm_switch(layer_name, gemm, iteration, config, state)
 
-        if iteration <= state.disable_until_iter:
+        disable_until_iter = state.disable_until_iter
+        if self._hold_window_scope(config) == "global":
+            disable_until_iter = _get_global_disable_until()
+
+        if iteration <= disable_until_iter:
             if final_decision and metric_logger is not None:
                 metric_logger.log_scalar(layer_name, gemm, "quantized_enabled", iteration, 0.0)
                 metric_logger.log_scalar(
@@ -791,12 +809,13 @@ class AutoswitchGemm(TEConfigAPIMapper):
                     gemm,
                     "disable_until_iter",
                     iteration,
-                    float(state.disable_until_iter),
+                    float(disable_until_iter),
                 )
             if self._logging_enabled(config):
                 debug_api.log_message(
                     f"Feature={self.__class__.__name__}: {gemm} forced high precision at"
-                    f" iter={iteration} (disable_until={state.disable_until_iter}).",
+                    f" iter={iteration} (disable_until={disable_until_iter},"
+                    f" scope={self._hold_window_scope(config)}).",
                     layer_name,
                     extra_cachable_args=(gemm, "high_precision"),
                 )
