@@ -190,9 +190,9 @@ class EpBuffer:
     )
 
     def _alloc_symm_buffers(self) -> None:
-        """Fill in buffer-owned symm-mem buffers the caller did not supply.
-        recv_topk_weights is always owned. In normal mode caller-supplied
-        tensors are kept as-is and the rest stay None (allocated in-flight)."""
+        """Fill in buffer-owned symm-mem buffers the caller did not supply. In normal
+        mode caller-supplied tensors are kept as-is and the rest stay None (allocated
+        in-flight)."""
         if not self.zero_copy:
             self.recv_topk_weights_symm_buf = None
             return
@@ -202,10 +202,11 @@ class EpBuffer:
             )
         rc, h = self.recv_capacity_per_rank, self.hidden_dim
         # Persistent across microbatches; keep resident under CPU offloading.
-        self.recv_topk_weights_symm_buf = symm_mem_alloc(
-            (rc,), torch.float32, _EP_GROUP, device=self.device
-        )
-        mark_not_offload(self.recv_topk_weights_symm_buf)
+        if self.recv_topk_weights_symm_buf is None:
+            self.recv_topk_weights_symm_buf = symm_mem_alloc(
+                (rc,), torch.float32, _EP_GROUP, device=self.device
+            )
+            mark_not_offload(self.recv_topk_weights_symm_buf)
         if self.recv_tokens_symm_buf is None:
             self.recv_tokens_symm_buf = symm_mem_alloc(
                 (rc, h), self.payload_dtype, _EP_GROUP, device=self.device
@@ -229,12 +230,15 @@ class EpBuffer:
         device: Optional[torch.device] = None,
         dispatch_recv_tokens: Optional[torch.Tensor] = None,
         combine_grad_expert_out: Optional[torch.Tensor] = None,
+        dispatch_recv_topk_weights: Optional[torch.Tensor] = None,
     ) -> None:
-        """Pass ``dispatch_recv_tokens`` (dispatch recv output) and/or
-        ``combine_grad_expert_out`` (combine backward grad target) to use caller-owned
-        buffers; the buffer then skips allocating them. Both must be symm-mem-backed
-        under zero-copy. Whatever is left None is buffer-owned (zero-copy) or allocated
-        in-flight (normal mode). recv_topk_weights is always owned by the buffer."""
+        """Pass ``dispatch_recv_tokens`` (dispatch recv output), ``combine_grad_expert_out``
+        (combine backward grad target), and/or ``dispatch_recv_topk_weights`` (dispatch recv
+        probs) to use caller-owned buffers; the buffer then skips allocating them. All must be
+        symm-mem-backed under zero-copy. Whatever is left None is buffer-owned (zero-copy) or
+        allocated in-flight (normal mode). Providing all three keeps construction collective-free
+        (nothing to allocate/rendezvous), so a fresh EpBuffer per dispatch stays CUDA-graph
+        capturable."""
         if device is None:
             device = torch.device("cuda", torch.cuda.current_device())
         alignment = int(alignment)
@@ -251,6 +255,7 @@ class EpBuffer:
         self.zero_copy = bool(tex.ep_get_zero_copy())
         self.recv_tokens_symm_buf = dispatch_recv_tokens
         self.grad_expert_out_symm_buf = combine_grad_expert_out
+        self.recv_topk_weights_symm_buf = dispatch_recv_topk_weights
 
         size_bytes = tex.ep_handle_mem_size(self.top_k, self.alignment)
         self.handle_mem = torch.empty(int(size_bytes), dtype=torch.uint8, device=device)
