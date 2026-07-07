@@ -975,6 +975,76 @@ at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_t
   return output;
 }
 
+at::Tensor thd_reorder_between_sequence_and_cp_rank_order(const at::Tensor &inp,
+                                                          const at::Tensor &cu_seqlens, int cp_size,
+                                                          bool cp_rank_to_sequence_order,
+                                                          int total_tokens) {
+  NVTE_CHECK(cu_seqlens.scalar_type() == at::ScalarType::Int);
+  NVTE_CHECK(cu_seqlens.dim() == 1);
+  NVTE_CHECK(cu_seqlens.size(0) >= 2);
+  NVTE_CHECK(cp_size > 0);
+  NVTE_CHECK(total_tokens > 0 && total_tokens % (cp_size * 2) == 0);
+  NVTE_CHECK(inp.dim() >= 1 && inp.size(0) == total_tokens);
+
+  auto inp_c = inp.contiguous();
+  at::Tensor out = at::empty_like(inp_c);
+
+  auto te_inp = makeTransformerEngineTensor(inp_c);
+  auto te_cu_seqlens = makeTransformerEngineTensor(cu_seqlens);
+  auto te_out = makeTransformerEngineTensor(out);
+
+  if (cp_rank_to_sequence_order) {
+    nvte_thd_cp_rank_order_to_sequence_order(te_inp.data(), te_cu_seqlens.data(), te_out.data(),
+                                             cp_size, total_tokens,
+                                             at::cuda::getCurrentCUDAStream());
+  } else {
+    nvte_thd_sequence_order_to_cp_rank_order(te_inp.data(), te_cu_seqlens.data(), te_out.data(),
+                                             cp_size, total_tokens,
+                                             at::cuda::getCurrentCUDAStream());
+  }
+
+  return out;
+}
+
+at::Tensor thd_sequence_order_to_cp_rank_order(const at::Tensor &inp, const at::Tensor &cu_seqlens,
+                                               int cp_size, int total_tokens) {
+  return thd_reorder_between_sequence_and_cp_rank_order(inp, cu_seqlens, cp_size, false,
+                                                        total_tokens);
+}
+
+at::Tensor thd_cp_rank_order_to_sequence_order(const at::Tensor &inp, const at::Tensor &cu_seqlens,
+                                               int cp_size, int total_tokens) {
+  return thd_reorder_between_sequence_and_cp_rank_order(inp, cu_seqlens, cp_size, true,
+                                                        total_tokens);
+}
+
+void thd_copy_valid_tokens_from_per_split_to_rank_local(at::Tensor out, const at::Tensor &inp,
+                                                        const at::Tensor &cu_seqlens_padded,
+                                                        const at::Tensor &cu_seqlens) {
+  NVTE_CHECK(cu_seqlens.scalar_type() == at::ScalarType::Int);
+  NVTE_CHECK(cu_seqlens_padded.scalar_type() == at::ScalarType::Int);
+  NVTE_CHECK(cu_seqlens.dim() == 1 && cu_seqlens_padded.dim() == 1);
+  NVTE_CHECK(cu_seqlens.size(0) >= 2);
+  NVTE_CHECK(cu_seqlens_padded.size(0) == cu_seqlens.size(0));
+  NVTE_CHECK(inp.dim() >= 1);
+  NVTE_CHECK(out.sizes() == inp.sizes() && out.scalar_type() == inp.scalar_type());
+  NVTE_CHECK(out.is_contiguous(),
+             "thd_copy_valid_tokens_from_per_split_to_rank_local output must be contiguous.");
+
+  auto inp_c = inp.contiguous();
+  auto cu_seqlens_padded_c = cu_seqlens_padded.contiguous();
+  auto cu_seqlens_c = cu_seqlens.contiguous();
+  int total_tokens = inp_c.size(0);
+  auto te_inp = makeTransformerEngineTensor(inp_c);
+  auto te_cu_seqlens_padded = makeTransformerEngineTensor(cu_seqlens_padded_c);
+  auto te_cu_seqlens = makeTransformerEngineTensor(cu_seqlens_c);
+  auto te_out = makeTransformerEngineTensor(out);
+
+  nvte_thd_copy_valid_tokens_from_per_split_to_rank_local(
+      te_inp.data(), te_cu_seqlens_padded.data(), te_cu_seqlens.data(), te_out.data(), total_tokens,
+      at::cuda::getCurrentCUDAStream());
+}
+
 /***************************************************************************************************
  * KV Cache: Convert a tensor from qkv_format = thd to qkv_format = bshd
  **************************************************************************************************/

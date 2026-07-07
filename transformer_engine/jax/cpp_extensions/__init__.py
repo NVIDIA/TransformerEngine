@@ -11,4 +11,5 @@ from .quantization import *
 from .softmax import *
 from .gemm import *
 from .router import *
+from .ep import *
 from .topk import *

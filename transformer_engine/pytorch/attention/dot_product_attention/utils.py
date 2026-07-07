@@ -629,6 +629,10 @@ def get_attention_backend(
                 if cudnn_version < (9, 21, 0):
                     logger.debug("Disabling FusedAttention for MXFP8 with cuDNN < 9.21.0")
                     use_fused_attention = False
+                elif cudnn_version in ((9, 23, 0), (9, 23, 1)):
+                    # 9.23.0/9.23.1: known bugs with MXFP8 SDPA
+                    logger.debug("Disabling FusedAttention for MXFP8 with cuDNN 9.23.0/9.23.1")
+                    use_fused_attention = False
                 elif qkv_format == "thd":
                     logger.debug("Disabling FusedAttention for MXFP8 with qkv_format = thd")
                     use_fused_attention = False
@@ -1159,7 +1163,7 @@ def get_attention_backend(
                 cp_comm_type,
             )
             use_fused_attention = False
-        elif qkv_format == "thd" and cp_comm_type in ["all_gather", "a2a+p2p"]:
+        elif qkv_format == "thd" and cp_comm_type in ["a2a+p2p"]:
             logger.debug(
                 "Disabling FusedAttention as it does not support context parallelism with THD"
                 " format and cp_comm_type = %s",

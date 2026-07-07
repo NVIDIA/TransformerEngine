@@ -385,6 +385,36 @@ inline AlphaBetaTensors make_alpha_beta(size_t num_gemms) {
 
 // Compare each tensor inside a grouped D buffer (with per-tensor offsets) against the
 // reference D_multi[i] tensors.
+// Capture `body(stream)` into a CUDA graph and replay it `n_replays` times, calling
+// `verify(iter)` after each launch+sync. Used to assert that the grouped GEMM kernels
+// are graph-safe (capture succeeds, replay is correct, and replays are deterministic).
+template <typename Body, typename Verify>
+inline void capture_and_replay_grouped_gemm(cudaStream_t stream, int n_replays,
+                                            Body&& body, Verify&& verify) {
+  // Warmup off-graph so cuBLASLt can initialize its internal heuristic / handle state
+  // outside capture (the very first matmul on a handle may do host-side setup that
+  // isn't capturable in some cuBLAS versions).
+  body(stream);
+  NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
+
+  NVTE_CHECK_CUDA(cudaStreamBeginCapture(stream, cudaStreamCaptureModeRelaxed));
+  body(stream);
+  cudaGraph_t graph;
+  NVTE_CHECK_CUDA(cudaStreamEndCapture(stream, &graph));
+
+  cudaGraphExec_t exec;
+  NVTE_CHECK_CUDA(cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0));
+
+  for (int i = 0; i < n_replays; ++i) {
+    NVTE_CHECK_CUDA(cudaGraphLaunch(exec, stream));
+    NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
+    verify(i);
+  }
+
+  NVTE_CHECK_CUDA(cudaGraphExecDestroy(exec));
+  NVTE_CHECK_CUDA(cudaGraphDestroy(graph));
+}
+
 inline void compare_grouped_d_to_multi(
     const GroupedBuffers& grouped_D,
     const std::vector<std::tuple<size_t, size_t, size_t>>& shapes,
@@ -649,6 +679,255 @@ void run_grouped_gemm_discrete_in_case(const TestParams& params) {
   compare_grouped_d_to_multi(grouped_D, shapes, ref.D_multi, "grouped_discrete_in_vs_multi");
 }
 
+// Graph-capture variant of run_grouped_gemm_case. Captures nvte_grouped_gemm on a
+// non-default stream and replays it twice, verifying outputs against the multi-tensor
+// reference after each replay. Asserts capture succeeds, replay is correct, and the
+// operation is deterministic across replays.
+void run_grouped_gemm_graph_case(const TestParams& params) {
+  if (auto reason = grouped_gemm_skip_reason(params); !reason.empty()) {
+    GTEST_SKIP() << reason;
+  }
+  auto ref = make_grouped_gemm_ref(params);
+  const auto& shapes = ref.shapes;
+  const size_t num_gemms = ref.num_gemms;
+
+  std::vector<Tensor*> A_views, B_views;
+  A_views.reserve(num_gemms);
+  B_views.reserve(num_gemms);
+  for (size_t i = 0; i < num_gemms; ++i) {
+    A_views.push_back(&ref.A_tensors[i]);
+    B_views.push_back(&ref.B_tensors[i]);
+  }
+  GroupedBuffers grouped_A = build_grouped_tensor(A_views, ref.A_tensors[0].scaling_mode());
+  GroupedBuffers grouped_B = build_grouped_tensor(B_views, ref.B_tensors[0].scaling_mode());
+
+  std::vector<Tensor> C_tensors, D_group_tensors;
+  C_tensors.reserve(num_gemms);
+  D_group_tensors.reserve(num_gemms);
+  for (size_t i = 0; i < num_gemms; ++i) {
+    const auto [M, N, K] = shapes[i];
+    (void)K;
+    if (!params.use_null_c) {
+      C_tensors.emplace_back(
+          Tensor("C" + std::to_string(i), std::vector<size_t>{M, N}, params.output_dtype));
+    }
+    D_group_tensors.emplace_back(
+        Tensor("D_group" + std::to_string(i), std::vector<size_t>{M, N}, params.output_dtype));
+  }
+
+  std::vector<Tensor*> C_views, D_views;
+  for (size_t i = 0; i < num_gemms; ++i) {
+    if (!params.use_null_c) C_views.push_back(&C_tensors[i]);
+    D_views.push_back(&D_group_tensors[i]);
+  }
+
+  std::optional<GroupedBuffers> grouped_C;
+  if (!params.use_null_c) {
+    grouped_C = build_grouped_tensor(C_views, NVTE_DELAYED_TENSOR_SCALING);
+  }
+  GroupedBuffers grouped_D = build_grouped_tensor(D_views, NVTE_DELAYED_TENSOR_SCALING);
+
+  AlphaBetaTensors ab = make_alpha_beta(num_gemms);
+  const size_t setup_ws_bytes = nvte_get_grouped_gemm_setup_workspace_size(num_gemms);
+  Tensor setup_ws("setup_ws", std::vector<size_t>{setup_ws_bytes}, DType::kByte);
+  Tensor cublas_ws("cublas_ws", std::vector<size_t>{kCublasWorkspaceBytes}, DType::kByte);
+  GroupedMatmulConfigWrapper grouped_config;
+  if (ref.use_split_accum) grouped_config.set_use_split_accumulator(true);
+
+  cudaStream_t stream;
+  NVTE_CHECK_CUDA(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+
+  auto body = [&](cudaStream_t s) {
+    for (auto& d : D_group_tensors) {
+      NVTE_CHECK_CUDA(cudaMemsetAsync(d.rowwise_dptr(), 0,
+                                      bytes(d.rowwise_shape(), d.dtype()), s));
+    }
+    nvte_grouped_gemm(grouped_A.get_handle(), params.transa, grouped_B.get_handle(),
+                      params.transb,
+                      params.use_null_c ? nullptr : grouped_C->get_handle(),
+                      grouped_D.get_handle(), ab.alpha.data(), ab.beta.data(),
+                      setup_ws.data(), cublas_ws.data(), grouped_config, s);
+  };
+
+  capture_and_replay_grouped_gemm(
+      stream, /*n_replays=*/2, body,
+      [&](int iter) {
+        const std::string tag = "grouped_graph_replay_" + std::to_string(iter);
+        compare_grouped_d_to_multi(grouped_D, shapes, ref.D_multi, tag.c_str());
+      });
+
+  NVTE_CHECK_CUDA(cudaStreamDestroy(stream));
+}
+
+// Graph-capture variant of run_grouped_gemm_discrete_out_case.
+void run_grouped_gemm_discrete_out_graph_case(const TestParams& params) {
+  if (auto reason = grouped_gemm_skip_reason(params); !reason.empty()) {
+    GTEST_SKIP() << reason;
+  }
+  auto ref = make_grouped_gemm_ref(params);
+  const auto& shapes = ref.shapes;
+  const size_t num_gemms = ref.num_gemms;
+
+  std::vector<Tensor*> A_views, B_views;
+  A_views.reserve(num_gemms);
+  B_views.reserve(num_gemms);
+  for (size_t i = 0; i < num_gemms; ++i) {
+    A_views.push_back(&ref.A_tensors[i]);
+    B_views.push_back(&ref.B_tensors[i]);
+  }
+  GroupedBuffers grouped_A = build_grouped_tensor(A_views, ref.A_tensors[0].scaling_mode());
+  GroupedBuffers grouped_B = build_grouped_tensor(B_views, ref.B_tensors[0].scaling_mode());
+
+  std::vector<Tensor> C_tensors, D_list_tensors;
+  C_tensors.reserve(num_gemms);
+  D_list_tensors.reserve(num_gemms);
+  for (size_t i = 0; i < num_gemms; ++i) {
+    const auto [M, N, K] = shapes[i];
+    (void)K;
+    if (!params.use_null_c) {
+      C_tensors.emplace_back(
+          Tensor("C" + std::to_string(i), std::vector<size_t>{M, N}, params.output_dtype));
+    }
+    D_list_tensors.emplace_back(
+        Tensor("D_list" + std::to_string(i), std::vector<size_t>{M, N}, params.output_dtype));
+  }
+
+  std::vector<NVTETensor> C_list_ptrs, D_list_ptrs;
+  if (!params.use_null_c) C_list_ptrs.reserve(num_gemms);
+  D_list_ptrs.reserve(num_gemms);
+  for (size_t i = 0; i < num_gemms; ++i) {
+    if (!params.use_null_c) C_list_ptrs.push_back(C_tensors[i].data());
+    D_list_ptrs.push_back(D_list_tensors[i].data());
+  }
+
+  AlphaBetaTensors ab = make_alpha_beta(num_gemms);
+  const size_t setup_ws_bytes = nvte_get_grouped_gemm_setup_workspace_size(num_gemms);
+  Tensor setup_ws("setup_ws", std::vector<size_t>{setup_ws_bytes}, DType::kByte);
+  Tensor cublas_ws("cublas_ws", std::vector<size_t>{kCublasWorkspaceBytes}, DType::kByte);
+  GroupedMatmulConfigWrapper grouped_config;
+  if (ref.use_split_accum) grouped_config.set_use_split_accumulator(true);
+
+  cudaStream_t stream;
+  NVTE_CHECK_CUDA(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+
+  auto body = [&](cudaStream_t s) {
+    for (auto& d : D_list_tensors) {
+      NVTE_CHECK_CUDA(cudaMemsetAsync(d.rowwise_dptr(), 0,
+                                      bytes(d.rowwise_shape(), d.dtype()), s));
+    }
+    nvte_grouped_gemm_with_discrete_out(
+        grouped_A.get_handle(), params.transa, grouped_B.get_handle(), params.transb,
+        params.use_null_c ? nullptr : C_list_ptrs.data(),
+        params.use_null_c ? 0 : num_gemms, D_list_ptrs.data(), num_gemms, ab.alpha.data(),
+        ab.beta.data(), setup_ws.data(), cublas_ws.data(), grouped_config, s);
+  };
+
+  auto verify = [&](int iter) {
+    const std::string tag = "discrete_out_graph_replay_" + std::to_string(iter);
+    for (size_t i = 0; i < num_gemms; ++i) {
+      D_list_tensors[i].to_cpu();
+      ref.D_multi[i].to_cpu();
+      auto [atol, rtol] = getTolerances(ref.D_multi[i].dtype());
+      switch (ref.D_multi[i].dtype()) {
+        case DType::kBFloat16:
+          compareResults(tag.c_str(), D_list_tensors[i],
+                         ref.D_multi[i].rowwise_cpu_dptr<bf16>(), true, atol, rtol);
+          break;
+        case DType::kFloat16:
+          compareResults(tag.c_str(), D_list_tensors[i],
+                         ref.D_multi[i].rowwise_cpu_dptr<fp16>(), true, atol, rtol);
+          break;
+        case DType::kFloat32:
+          compareResults(tag.c_str(), D_list_tensors[i],
+                         ref.D_multi[i].rowwise_cpu_dptr<float>(), true, atol, rtol);
+          break;
+        default:
+          NVTE_ERROR("Unsupported D dtype in test: " +
+                     std::to_string(static_cast<int>(ref.D_multi[i].dtype())));
+      }
+    }
+  };
+
+  capture_and_replay_grouped_gemm(stream, /*n_replays=*/2, body, verify);
+  NVTE_CHECK_CUDA(cudaStreamDestroy(stream));
+}
+
+// Graph-capture variant of run_grouped_gemm_discrete_in_case.
+void run_grouped_gemm_discrete_in_graph_case(const TestParams& params) {
+  if (auto reason = grouped_gemm_skip_reason(params); !reason.empty()) {
+    GTEST_SKIP() << reason;
+  }
+  auto ref = make_grouped_gemm_ref(params);
+  const auto& shapes = ref.shapes;
+  const size_t num_gemms = ref.num_gemms;
+
+  std::vector<Tensor*> B_views;
+  B_views.reserve(num_gemms);
+  for (size_t i = 0; i < num_gemms; ++i) B_views.push_back(&ref.B_tensors[i]);
+  GroupedBuffers grouped_B = build_grouped_tensor(B_views, ref.B_tensors[0].scaling_mode());
+
+  std::vector<Tensor> C_tensors, D_group_tensors;
+  C_tensors.reserve(num_gemms);
+  D_group_tensors.reserve(num_gemms);
+  for (size_t i = 0; i < num_gemms; ++i) {
+    const auto [M, N, K] = shapes[i];
+    (void)K;
+    if (!params.use_null_c) {
+      C_tensors.emplace_back(Tensor("C" + std::to_string(i),
+                                    std::vector<size_t>{M, N}, params.output_dtype));
+    }
+    D_group_tensors.emplace_back(Tensor("D_group" + std::to_string(i),
+                                        std::vector<size_t>{M, N}, params.output_dtype));
+  }
+
+  std::vector<Tensor*> C_views, D_views;
+  for (size_t i = 0; i < num_gemms; ++i) {
+    if (!params.use_null_c) C_views.push_back(&C_tensors[i]);
+    D_views.push_back(&D_group_tensors[i]);
+  }
+
+  std::optional<GroupedBuffers> grouped_C;
+  if (!params.use_null_c) {
+    grouped_C = build_grouped_tensor(C_views, NVTE_DELAYED_TENSOR_SCALING);
+  }
+  GroupedBuffers grouped_D = build_grouped_tensor(D_views, NVTE_DELAYED_TENSOR_SCALING);
+
+  AlphaBetaTensors ab = make_alpha_beta(num_gemms);
+  const size_t setup_ws_bytes = nvte_get_grouped_gemm_setup_workspace_size(num_gemms);
+  Tensor setup_ws("setup_ws", std::vector<size_t>{setup_ws_bytes}, DType::kByte);
+  Tensor cublas_ws("cublas_ws", std::vector<size_t>{kCublasWorkspaceBytes}, DType::kByte);
+
+  std::vector<NVTETensor> A_list_ptrs;
+  A_list_ptrs.reserve(num_gemms);
+  for (size_t i = 0; i < num_gemms; ++i) A_list_ptrs.push_back(ref.A_tensors[i].data());
+
+  GroupedMatmulConfigWrapper grouped_config;
+  if (ref.use_split_accum) grouped_config.set_use_split_accumulator(true);
+
+  cudaStream_t stream;
+  NVTE_CHECK_CUDA(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+
+  auto body = [&](cudaStream_t s) {
+    for (auto& d : D_group_tensors) {
+      NVTE_CHECK_CUDA(cudaMemsetAsync(d.rowwise_dptr(), 0,
+                                      bytes(d.rowwise_shape(), d.dtype()), s));
+    }
+    nvte_grouped_gemm_with_discrete_inputA(
+        A_list_ptrs.data(), num_gemms, params.transa, grouped_B.get_handle(), params.transb,
+        params.use_null_c ? nullptr : grouped_C->get_handle(), grouped_D.get_handle(),
+        ab.alpha.data(), ab.beta.data(), setup_ws.data(), cublas_ws.data(), grouped_config, s);
+  };
+
+  capture_and_replay_grouped_gemm(
+      stream, /*n_replays=*/2, body,
+      [&](int iter) {
+        const std::string tag = "discrete_in_graph_replay_" + std::to_string(iter);
+        compare_grouped_d_to_multi(grouped_D, shapes, ref.D_multi, tag.c_str());
+      });
+
+  NVTE_CHECK_CUDA(cudaStreamDestroy(stream));
+}
+
 class GroupedGemmTest : public ::testing::TestWithParam<TestParams> {};
 
 TEST_P(GroupedGemmTest, CompareWithMultiTensorGemm) {
@@ -661,6 +940,18 @@ TEST_P(GroupedGemmTest, CompareWithMultiTensorGemmDiscreteOut) {
 
 TEST_P(GroupedGemmTest, CompareWithMultiTensorGemmDiscreteIn) {
   run_grouped_gemm_discrete_in_case(GetParam());
+}
+
+TEST_P(GroupedGemmTest, CudaGraphCapture) {
+  run_grouped_gemm_graph_case(GetParam());
+}
+
+TEST_P(GroupedGemmTest, CudaGraphCaptureDiscreteOut) {
+  run_grouped_gemm_discrete_out_graph_case(GetParam());
+}
+
+TEST_P(GroupedGemmTest, CudaGraphCaptureDiscreteIn) {
+  run_grouped_gemm_discrete_in_graph_case(GetParam());
 }
 
 std::string MakeGroupedGemmTestName(const testing::TestParamInfo<GroupedGemmTest::ParamType>& info) {

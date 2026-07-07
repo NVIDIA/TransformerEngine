@@ -103,9 +103,10 @@ class _GroupedLinear(torch.autograd.Function):
         and be incompatible with CUDA Graphs.
 
         Supported Compute Capability (CC) and precisions:
-        * Hopper (CC 9.0): BF16/FP16.
-        * Blackwell (CC 10.x and 11.0): BF16/FP16/MXFP8/NVFP4 with RHT.
-        FP8 delayed / current scaling, and FP8 block scaling are not supported because the
+        * Hopper (CC 9.0): BF16/FP16 and FP8 per-tensor current scaling.
+        * Blackwell (CC 10.x and 11.0): BF16/FP16/MXFP8/NVFP4 with RHT and FP8
+          per-tensor current scaling.
+        FP8 delayed scaling and FP8 block scaling are not supported because the
         corresponding grouped quantization kernels are missing.
         Non-RHT NVFP4 falls back to the legacy path because graph-safe grouped quantization
         currently requires RHT.
@@ -133,6 +134,9 @@ class _GroupedLinear(torch.autograd.Function):
             return False
         # 5. Filter by quantization recipes.
         if fp8:
+            if all(isinstance(q, Float8CurrentScalingQuantizer) for q in input_quantizers):
+                return True
+            # MXFP8 and NVFP4 require Blackwell+.
             if not (10, 0) <= get_device_compute_capability() <= (11, 0):
                 return False
             return all(isinstance(q, MXFP8Quantizer) for q in input_quantizers) or all(
@@ -328,7 +332,9 @@ class _GroupedLinear(torch.autograd.Function):
 
         if is_grad_enabled:
             if weight_requires_grad:
-                if fp8:
+                # (For FP8 per tensor current scaling on Hopper --> Free Rowwise Data
+                # in backward pass)
+                if fp8 and grouped_x.columnwise_data is not None:
                     grouped_x.rowwise_data = None
                     grouped_x.scale_inv = None
             else:
@@ -431,6 +437,8 @@ class _GroupedLinear(torch.autograd.Function):
             backward_override = None
         if backward_override == "high_precision":
             save_original_input = True
+        elif backward_override == "dequantized":
+            save_original_input = False
 
         num_gemms = len(m_splits)
         weights = weights_and_biases[:num_gemms]
@@ -1918,8 +1926,16 @@ class GroupedLinear(TransformerEngineBaseModule):
             ]
             for i in range(self.num_gemms)
         ]
+        # Preswizzle the weights during quantization instead of lazily inside every GEMM.
+        # This wont work when primay weights are in fp8 because of 2 reasons
+        # 1. optimizer step updates would need to dequantize the weights. But swizzled weights
+        # currently dont support dequantization.
+        # 2. For FSDP2, quantized weight all-gather would need to be done in the
+        # unswizzled layout.
         for i in range(self.num_gemms):
             weight_quantizers[i].internal = not self.primary_weights_in_fp8
+            if not self.primary_weights_in_fp8:
+                weight_quantizers[i].optimize_for_gemm = True
         return weight_quantizers
 
     def _get_quantizers(self):
