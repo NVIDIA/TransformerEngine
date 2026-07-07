@@ -118,7 +118,7 @@ if get_device_compute_capability(0) < 100:
     )
 
 from transformer_engine.jax.flax import _MoEBlock as MoEBlock
-from transformer_engine.jax.moe import moe, record_ep_bootstrap_signature_for_moe
+from transformer_engine.jax.moe import _ALIGN_SIZE, moe, record_ep_bootstrap_signature_for_moe
 from transformer_engine.jax.ep import ep_bootstrap
 from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 
@@ -190,14 +190,15 @@ def _compute_worst_case_recv_pr():
     flattened total or ``ncclEpDispatch`` aborts with
     ``invalid argument`` at ``ep_backend.cpp:414``. The moe block
     computes ``recv_pr`` the same way (see ``moe.py``'s
-    ``natural_spe = num_ep * max_tokens_per_rank``); keeping the
-    bootstrap formula in lock-step here.
+    ``natural_spe = num_ep * max_tokens_per_rank`` rounded up to
+    ``_ALIGN_SIZE``); keeping the bootstrap formula in lock-step here.
     """
     num_procs = jax.device_count()
     num_local_experts = NUM_EXPERTS // EP_SIZE
     max_tokens_per_rank = (BATCH // num_procs) * SEQ
     natural_spe = EP_SIZE * max_tokens_per_rank
-    return num_local_experts * natural_spe
+    slots_per_expert = ((natural_spe + _ALIGN_SIZE - 1) // _ALIGN_SIZE) * _ALIGN_SIZE
+    return num_local_experts * slots_per_expert
 
 
 @pytest.fixture(scope="module")
@@ -361,7 +362,7 @@ def _make_block(
     aux_loss_coeff=0.0,
     use_expert_routing_bias=False,
     score_function="softmax",
-    bias_init=None,
+    expert_bias_init=None,
 ):
     kwargs = dict(
         num_experts=NUM_EXPERTS,
@@ -374,10 +375,10 @@ def _make_block(
         score_function=score_function,
         dtype=DTYPE,
     )
-    # Custom bias_init lets tests inject a non-zero expert_bias without
+    # Custom expert_bias_init lets tests inject a non-zero expert_bias without
     # poking variables['params'] post-init.
-    if bias_init is not None:
-        kwargs["bias_init"] = bias_init
+    if expert_bias_init is not None:
+        kwargs["expert_bias_init"] = expert_bias_init
     return MoEBlock(**kwargs)
 
 
@@ -540,7 +541,7 @@ _CONFIGS = [
         dict(
             score_function="sigmoid",
             use_expert_routing_bias=True,
-            bias_init=_strong_expert_bias_init,
+            expert_bias_init=_strong_expert_bias_init,
         ),
         id="sigmoid-bias-strong",
     ),
@@ -664,12 +665,12 @@ class TestTeEpMoeBackward:
         # fp32-promoted gate path back to bf16), finiteness, non-zero
         # AND numerical parity vs the pure-JAX reference d_x.
         grad_x_te_np = _to_global_numpy(grad_x_te, mesh)
-        assert grad_x_te.shape == x.shape, (
-            f"d_x shape {grad_x_te.shape} != x.shape {x.shape} [config={config}]"
-        )
-        assert grad_x_te.dtype == x.dtype, (
-            f"d_x dtype {grad_x_te.dtype} != x.dtype {x.dtype} [config={config}]"
-        )
+        assert (
+            grad_x_te.shape == x.shape
+        ), f"d_x shape {grad_x_te.shape} != x.shape {x.shape} [config={config}]"
+        assert (
+            grad_x_te.dtype == x.dtype
+        ), f"d_x dtype {grad_x_te.dtype} != x.dtype {x.dtype} [config={config}]"
         assert np.all(np.isfinite(grad_x_te_np)), f"d_x has NaN/Inf [config={config}]"
         assert np.any(grad_x_te_np != 0.0), f"d_x identically zero [config={config}]"
         np.testing.assert_allclose(

@@ -240,11 +240,13 @@ class _MoEBlock(TransformerEngineBase):
             )
         expert_bias = None
         if self.use_expert_routing_bias:
+            # The router logits are promoted to fp32 before fused top-k; keep
+            # the routing bias in the same dtype so it only affects selection.
             expert_bias = self.param(
                 "expert_bias",
                 nn.with_logical_partitioning(self.expert_bias_init, ("exp",)),
                 (self.num_experts,),
-                self.dtype,
+                jnp.float32,
             )
 
         ep_axis = get_active_resource_axis("ep_resource")
