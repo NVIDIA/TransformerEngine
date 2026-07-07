@@ -23,6 +23,7 @@ import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch.ops._common import (
     _cudnn_frontend_version_supported,
 )
+from transformer_engine.pytorch._extra_state import UNSAFE_PICKLE_EXTRA_STATE_ENV
 
 from transformer_engine.pytorch.ops.fused import (
     BackwardActivationBias,
@@ -3363,7 +3364,16 @@ class TestCheckpointing:
             )
         optim_load = torch.optim.SGD(model_load.parameters(), lr=0.25)
         state_dict = torch.load(io.BytesIO(checkpoint_bytes), weights_only=False)
-        model_load.load_state_dict(state_dict["model"])
+        old_unsafe_extra_state = os.environ.get(UNSAFE_PICKLE_EXTRA_STATE_ENV)
+        if quantization in ("fp8", "fp8_delayed_scaling"):
+            os.environ[UNSAFE_PICKLE_EXTRA_STATE_ENV] = "1"
+        try:
+            model_load.load_state_dict(state_dict["model"])
+        finally:
+            if old_unsafe_extra_state is None:
+                os.environ.pop(UNSAFE_PICKLE_EXTRA_STATE_ENV, None)
+            else:
+                os.environ[UNSAFE_PICKLE_EXTRA_STATE_ENV] = old_unsafe_extra_state
         optim_load.load_state_dict(state_dict["optim"])
 
         # Training steps with loaded model
