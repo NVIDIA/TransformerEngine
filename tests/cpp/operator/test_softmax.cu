@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <cmath>
 #include <memory>
+#include <string>
+#include <tuple>
 #include <vector>
 
 #include <transformer_engine/softmax.h>
@@ -79,14 +81,13 @@ void ref_upper_row(Type *out, const Type *in, int row, int cols, float scale) {
 }
 
 template <typename Type>
-void test_scaled_softmax(DType dtype) {
+void test_scaled_softmax(DType dtype, int cols) {
   using namespace test;
   constexpr int batches = 2;
   constexpr int heads = 2;
   constexpr int rows = 8;
-  constexpr int cols = 32;
   constexpr float scale = 0.7f;
-  constexpr size_t elements_total = batches * heads * rows * cols;
+  const size_t elements_total = batches * heads * rows * cols;
   Tensor input("input", std::vector<size_t>{batches, heads, rows, cols}, dtype);
   Tensor softmax("softmax", std::vector<size_t>{batches, heads, rows, cols}, dtype);
   Tensor grad("grad", std::vector<size_t>{batches, heads, rows, cols}, dtype);
@@ -113,14 +114,13 @@ void test_scaled_softmax(DType dtype) {
 }
 
 template <typename Type>
-void test_masked_softmax(DType dtype) {
+void test_masked_softmax(DType dtype, int cols) {
   using namespace test;
   constexpr int batches = 2;
   constexpr int heads = 2;
   constexpr int rows = 8;
-  constexpr int cols = 32;
   constexpr float scale = -0.3f;
-  constexpr size_t elements_total = batches * heads * rows * cols;
+  const size_t elements_total = batches * heads * rows * cols;
   Tensor input("input", std::vector<size_t>{batches, heads, rows, cols}, dtype);
   Tensor mask("mask", std::vector<size_t>{1, 1, rows, cols}, DType::kByte);
   Tensor softmax("softmax", std::vector<size_t>{batches, heads, rows, cols}, dtype);
@@ -155,12 +155,11 @@ void test_masked_softmax(DType dtype) {
 }
 
 template <typename Type>
-void test_upper_softmax(DType dtype) {
+void test_upper_softmax(DType dtype, int seq) {
   using namespace test;
   constexpr int attn_batches = 4;
-  constexpr int seq = 32;
   constexpr float scale = 1.2f;
-  constexpr size_t elements_total = attn_batches * seq * seq;
+  const size_t elements_total = attn_batches * seq * seq;
   Tensor input("input", std::vector<size_t>{attn_batches, seq, seq}, dtype);
   Tensor softmax("softmax", std::vector<size_t>{attn_batches, seq, seq}, dtype);
   Tensor grad("grad", std::vector<size_t>{attn_batches, seq, seq}, dtype);
@@ -198,37 +197,42 @@ void test_upper_softmax(DType dtype) {
 // TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT but uses the test harness's own fp16/bf16
 // aliases so we don't have to include common.h here -- doing so would make the
 // test's Tensor type ambiguous with transformer_engine::Tensor.
-#define SOFTMAX_TEST_DISPATCH_16BIT(dtype, fn)              \
-  switch (dtype) {                                          \
-    case DType::kFloat16:                                   \
-      fn<test::fp16>(dtype);                                \
-      break;                                                \
-    case DType::kBFloat16:                                  \
-      fn<test::bf16>(dtype);                                \
-      break;                                                \
-    default:                                                \
-      GTEST_FAIL() << "Unsupported 16-bit dtype for test";  \
+#define SOFTMAX_TEST_DISPATCH_16BIT(dtype, fn, cols)         \
+  switch (dtype) {                                           \
+    case DType::kFloat16:                                    \
+      fn<test::fp16>(dtype, cols);                           \
+      break;                                                 \
+    case DType::kBFloat16:                                   \
+      fn<test::bf16>(dtype, cols);                           \
+      break;                                                 \
+    default:                                                 \
+      GTEST_FAIL() << "Unsupported 16-bit dtype for test";   \
   }
 
-class SoftmaxApiTestSuite : public ::testing::TestWithParam<DType> {};
+using SoftmaxTestParams = std::tuple<DType, int>;
+
+class SoftmaxApiTestSuite : public ::testing::TestWithParam<SoftmaxTestParams> {};
 
 TEST_P(SoftmaxApiTestSuite, ScaledSoftmax) {
-  const DType dtype = GetParam();
-  SOFTMAX_TEST_DISPATCH_16BIT(dtype, test_scaled_softmax);
+  const auto [dtype, cols] = GetParam();
+  SOFTMAX_TEST_DISPATCH_16BIT(dtype, test_scaled_softmax, cols);
 }
 
 TEST_P(SoftmaxApiTestSuite, MaskedSoftmax) {
-  const DType dtype = GetParam();
-  SOFTMAX_TEST_DISPATCH_16BIT(dtype, test_masked_softmax);
+  const auto [dtype, cols] = GetParam();
+  SOFTMAX_TEST_DISPATCH_16BIT(dtype, test_masked_softmax, cols);
 }
 
 TEST_P(SoftmaxApiTestSuite, UpperTriangularSoftmax) {
-  const DType dtype = GetParam();
-  SOFTMAX_TEST_DISPATCH_16BIT(dtype, test_upper_softmax);
+  const auto [dtype, cols] = GetParam();
+  SOFTMAX_TEST_DISPATCH_16BIT(dtype, test_upper_softmax, cols);
 }
 
 INSTANTIATE_TEST_SUITE_P(OperatorTest, SoftmaxApiTestSuite,
-                         ::testing::Values(DType::kFloat16, DType::kBFloat16),
-                         [](const testing::TestParamInfo<DType> &info) {
-                           return test::typeName(info.param);
+                         ::testing::Combine(
+                             ::testing::Values(DType::kFloat16, DType::kBFloat16),
+                             ::testing::Values(32, 112, 1024)),
+                         [](const testing::TestParamInfo<SoftmaxTestParams> &info) {
+                           const auto [dtype, cols] = info.param;
+                           return test::typeName(dtype) + "_Cols" + std::to_string(cols);
                          });

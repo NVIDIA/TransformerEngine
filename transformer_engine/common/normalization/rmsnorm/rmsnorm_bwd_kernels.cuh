@@ -21,7 +21,7 @@ namespace normalization {
 struct maybe_not_t {};
 
 template <typename T, bool Enabled>
-using maybe_t = transformer_engine::rtc_detail::conditional_t<Enabled, T, maybe_not_t>;
+using maybe_t = transformer_engine::detail::conditional_t<Enabled, T, maybe_not_t>;
 
 // dx and add share storage; `add` is positioned at the tail of the `dx`
 // storage via leading padding. NeedsPadding is false when dx_t and add_t are

@@ -274,7 +274,7 @@ Kernel Configuration
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
-   :Description: Disable NVRTC (CUDA Runtime Compilation) support. When set to ``1``, runtime kernel compilation is disabled. Existing transpose operations select their static fallback automatically. NVRTC-migrated fused softmax and normalization paths require their corresponding ``NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX`` or ``NVTE_BUILD_LEGACY_STATIC_NORM`` CMake option to have been enabled when the library was built; otherwise they report that no static fallback is available.
+   :Description: Disable NVRTC (CUDA Runtime Compilation) support. When set to ``1``, runtime kernel compilation is disabled. Existing transpose operations select their static fallback automatically. Fused softmax and normalization paths require their corresponding ``NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX`` or ``NVTE_BUILD_LEGACY_STATIC_NORM`` CMake option to have been enabled when the library was built; otherwise no static fallback is available.
 
 .. envvar:: NVTE_USE_CUTLASS_GROUPED_GEMM
 
