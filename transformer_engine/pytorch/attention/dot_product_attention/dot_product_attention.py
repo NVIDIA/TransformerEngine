@@ -149,7 +149,7 @@ _dpa_fp8ds_reduce_amax = os.getenv("NVTE_DPA_FP8DS_REDUCE_AMAX", "1") == "1"
 
 
 # Plugin system: override FlashAttention and get_attention_backend if enabled
-if os.environ.get("NVTE_ENABLE_PLUGIN", "0") == "1":
+if os.environ.get("NVTE_PLUGIN"):
     _FlashAttentionNative = FlashAttention
     FlashAttention = getattr(tex, "flash_attention", _FlashAttentionNative)
     _plugin_get_attention_backend = getattr(tex, "get_attention_backend", None)
