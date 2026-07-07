@@ -1255,12 +1255,8 @@ class mHCExpandCombineOp(torch.autograd.Function):
 
         # Since triton's autotune will reset grad_bias pointer when tuning, we need an empty placeholder here
         grad_bias = torch.empty(1, device=grad_output.device, dtype=grad_output.dtype)
-        grad_H_post = torch.zeros_like(
-            H_post, dtype=torch.float32
-        )  # We need to use atomic_add for this so we need higher precision
-        grad_H_res = torch.zeros_like(
-            H_res, dtype=torch.float32
-        )  # We need to use atomic_add for this so we need higher precision
+        grad_H_post = torch.empty_like(H_post)
+        grad_H_res = torch.empty_like(H_res)
 
         # grad_bias is a reduction over M. In deterministic mode each block writes its partial to a
         # workspace row (reduced in torch); otherwise it is atomic-added into grad_bias directly.
