@@ -43,6 +43,10 @@ inline void CreateCublasHandle(cublasLtHandle_t *handle) {
 // FP8 block scaling support for grouped GEMM requires cuBLAS 13.4+
 #define CUBLAS_FP8_BLOCK_GROUPED_GEMM_VERSION 130400
 
+// FP8 tensor scaling (per-tensor current/delayed scaling) support for grouped GEMM
+// on Hopper (SM90) requires cuBLAS 13.5+
+#define CUBLAS_FP8_TENSOR_SCALING_GROUPED_GEMM_HOPPER_VERSION 130500
+
 // BF16 support for grouped GEMM requires cuBLAS 13.3+
 #define CUBLAS_GROUPED_GEMM_VERSION 130300
 
@@ -1054,6 +1058,14 @@ inline void execute_grouped_gemm(const GroupedGemmSetupWorkspace &setup_workspac
                                          setup_workspace.b_scale_inv_ptrs, A_sel.scaling_mode,
                                          B_sel.scaling_mode);
   } else if (config.use_fp8) {
+    const int sm = transformer_engine::cuda::sm_arch(transformer_engine::cuda::current_device());
+    if (sm < 100) {
+      NVTE_CHECK(transformer_engine::cuda::cublas_version() >=
+                     CUBLAS_FP8_TENSOR_SCALING_GROUPED_GEMM_HOPPER_VERSION,
+                 "FP8 tensor scaling grouped GEMM on Hopper (SM90) requires cuBLAS 13.5+, "
+                 "but run-time cuBLAS version is ",
+                 transformer_engine::cuda::cublas_version());
+    }
     set_fp8_scale_pointers(matmulDesc, setup_workspace.a_scale_inv_ptrs,
                            setup_workspace.b_scale_inv_ptrs);
   }
