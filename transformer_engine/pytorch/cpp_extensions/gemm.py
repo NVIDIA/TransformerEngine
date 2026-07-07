@@ -5,12 +5,11 @@
 """Python interface for GEMM extensions"""
 
 from typing import Iterable, Optional, Tuple, Union, List
-import ctypes
 import os
 import functools
 import torch
 import transformer_engine_torch as tex
-from ..constants import TE_DType
+from ..constants import TE_DType, DType
 from ..utils import get_sm_count, _empty_tensor
 
 from ..quantized_tensor import Quantizer
@@ -288,7 +287,7 @@ def general_grouped_gemm(
     bias: Optional[List[torch.Tensor]] = None,
     use_bias: bool = False,
     use_split_accumulator: bool = False,
-    D_dtype: Optional[tex.DType] = None,
+    D_dtype: Optional[DType] = None,
     single_output=False,
 ) -> Tuple[List[torch.Tensor], ...]:
     """
@@ -420,20 +419,8 @@ def general_grouped_gemm(
 
 @functools.lru_cache(maxsize=None)
 def get_grouped_gemm_setup_workspace_size(num_tensors: int) -> int:
-    """Return workspace size for grouped GEMM pointer setup.
-    Must match GroupedGemmSetupWorkspace::required_setup_size in cublaslt_grouped_gemm.cu.
-    """
-    ptr_bytes = ctypes.sizeof(ctypes.c_void_p)
-    int_bytes = ctypes.sizeof(ctypes.c_int)
-    ptr_size = num_tensors * ptr_bytes
-    int_size = num_tensors * int_bytes
-    k_ptr_alignment = 16
-    # Each pointer array is placed at a 16-byte-aligned offset (matching kPtrAlignment in C++).
-    # aligned_ptr_size = round_up(num_tensors * ptr_bytes, 16)
-    aligned_ptr_size = ((ptr_size + k_ptr_alignment - 1) // k_ptr_alignment) * k_ptr_alignment
-    size = 8 * aligned_ptr_size + 6 * int_size
-    alignment = 256
-    return ((size + alignment - 1) // alignment) * alignment
+    """Return workspace size for grouped GEMM pointer setup."""
+    return tex.get_grouped_gemm_setup_workspace_size(num_tensors)
 
 
 @functools.lru_cache(maxsize=None)
@@ -510,13 +497,18 @@ def general_grouped_gemm_for_grouped_tensor(
     rowwise = B.rowwise_data
     device = rowwise.device if rowwise is not None else B.columnwise_data.device
 
+    # Hopper (SM90) uses a single shared alpha/beta scalar;
+    # Blackwell+ (SM100) supports per-group alpha/beta arrays.
+    per_group = torch.cuda.get_device_capability() >= (10, 0)
+    num_alphabeta = num_tensors if per_group else 1
+
     if alpha is None:
-        alpha = _get_fp32_ones_tensor(num_tensors, device)
+        alpha = _get_fp32_ones_tensor(num_alphabeta, device)
     if beta is None:
         if accumulate:
-            beta = _get_fp32_ones_tensor(num_tensors, device)
+            beta = _get_fp32_ones_tensor(num_alphabeta, device)
         else:
-            beta = _get_fp32_zeros_tensor(num_tensors, device)
+            beta = _get_fp32_zeros_tensor(num_alphabeta, device)
 
     if not alpha.is_cuda or not beta.is_cuda:
         raise ValueError("alpha and beta must be CUDA tensors.")

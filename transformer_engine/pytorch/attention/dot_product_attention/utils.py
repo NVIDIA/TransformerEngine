@@ -7,7 +7,7 @@ Utils/Helper classes and methods for attention
 """
 import math
 import os
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
 import logging
 import functools
@@ -148,8 +148,11 @@ class FlashAttentionUtils:
     fa4_version = PkgVersion("0")
     use_v4 = False
     v4_installation_steps = """\
-pip install flash-attn-4==4.0.0b8 nvidia-cutlass-dsl[cu13]"""
+pip install flash-attn-4==4.0.0b11 nvidia-cutlass-dsl[cu13]"""
     v4_warning_printed = False
+    # Set by backends.py if FA4 is installed; calls flash_attn.cute.interface._validate_head_dims
+    # which raises AssertionError for unsupported (head_dim, head_dim_v) combinations.
+    v4_validate_head_dims: Callable = None
 
     @staticmethod
     def set_flash_attention_version():
@@ -260,6 +263,14 @@ class AttentionParams:
     softmax_scale : float, default = 1.0
         Pre-softmax attention scale. Plumbed through to the cuDNN graph cache key so that the
         backend probe builds the same execution graph the runtime call later reuses.
+    fp8_output : bool, default = False
+        Whether output is requested in FP8.
+    checkpoint_core_attention : bool, default = False
+        Whether core attention is recomputed during backward.
+    has_score_mod : bool, default = False
+        Whether a score_mod callback was provided.
+    has_score_mod_bprop : bool, default = False
+        Whether a score_mod bprop callback was provided.
     """
 
     qkv_type: Union[torch.Tensor, Float8Tensor] = torch.Tensor
@@ -294,6 +305,10 @@ class AttentionParams:
     cuda_graph: bool = False
     num_splits: int = 1
     softmax_scale: float = 1.0
+    fp8_output: bool = False
+    checkpoint_core_attention: bool = False
+    has_score_mod: bool = False
+    has_score_mod_bprop: bool = False
 
     def __eq__(self, other):
         """
@@ -309,7 +324,7 @@ class AttentionParams:
             if fname != "fp8_meta":
                 if sf != of:
                     return False
-            elif sf.get("recipe", None) != of.get("recipe", None):
+            elif (sf or {}).get("recipe", None) != (of or {}).get("recipe", None):
                 return False
         return True
 
@@ -373,6 +388,10 @@ def get_attention_backend(
     cuda_graph = attention_params.cuda_graph
     num_splits = attention_params.num_splits
     softmax_scale = attention_params.softmax_scale
+    fp8_output = attention_params.fp8_output
+    checkpoint_core_attention = attention_params.checkpoint_core_attention
+    has_score_mod = attention_params.has_score_mod
+    has_score_mod_bprop = attention_params.has_score_mod_bprop
 
     # Run config
     logger = logging.getLogger("DotProductAttention")
@@ -438,7 +457,7 @@ def get_attention_backend(
     # regardless of whether FA2 or FA3 is installed. If FA2 or FA3 is not installed but is
     # necessary for performance/functionality, a warning will be issued to prompt users to
     # install an appropriate FA version.
-    qkv_format, q_format, _ = get_qkv_format(qkv_layout, inference_params)
+    qkv_format, q_format, kv_format = get_qkv_format(qkv_layout, inference_params)
 
     # Filter: Environment variables
     use_flash_attention = int(os.getenv("NVTE_FLASH_ATTN", "1"))
@@ -458,6 +477,18 @@ def get_attention_backend(
         logger.debug("Disabling FusedAttention due to NVTE_FUSED_ATTN=0")
     if not use_unfused_attention:
         logger.debug("Disabling UnfusedDotProductAttention due to NVTE_UNFUSED_ATTN=0")
+
+    def _any_flash_attention_enabled() -> bool:
+        return bool(
+            use_flash_attention
+            or use_flash_attention_2
+            or use_flash_attention_3
+            or use_flash_attention_4
+        )
+
+    def _disable_all_flash_attention() -> None:
+        nonlocal use_flash_attention
+        use_flash_attention = False
 
     # Filter: Compute capability
     if device_compute_capability < (8, 0):
@@ -604,6 +635,10 @@ def get_attention_backend(
                 if cudnn_version < (9, 21, 0):
                     logger.debug("Disabling FusedAttention for MXFP8 with cuDNN < 9.21.0")
                     use_fused_attention = False
+                elif cudnn_version in ((9, 23, 0), (9, 23, 1)):
+                    # 9.23.0/9.23.1: known bugs with MXFP8 SDPA
+                    logger.debug("Disabling FusedAttention for MXFP8 with cuDNN 9.23.0/9.23.1")
+                    use_fused_attention = False
                 elif qkv_format == "thd":
                     logger.debug("Disabling FusedAttention for MXFP8 with qkv_format = thd")
                     use_fused_attention = False
@@ -653,11 +688,77 @@ def get_attention_backend(
             use_unfused_attention = False
             logger.debug("Disabling all backends for max_logit with FP8 attention")
 
+    # Filter: score_mod
+    if has_score_mod_bprop and not has_score_mod:
+        logger.debug("Disabling all backends because score_mod_bprop requires score_mod")
+        _disable_all_flash_attention()
+        use_fused_attention = False
+        use_unfused_attention = False
+    if has_score_mod:
+        if _any_flash_attention_enabled():
+            logger.debug("Disabling FlashAttention for score_mod")
+            _disable_all_flash_attention()
+        if use_unfused_attention:
+            logger.debug("Disabling UnfusedDotProductAttention for score_mod")
+            use_unfused_attention = False
+
+        score_mod_unsupported_reasons = []
+        if qkv_dtype not in [torch.float16, torch.bfloat16]:
+            score_mod_unsupported_reasons.append(
+                f"unsupported qkv_dtype = {qkv_dtype}; supported: torch.float16, torch.bfloat16"
+            )
+        if qkv_type is not torch.Tensor:
+            score_mod_unsupported_reasons.append(
+                f"unsupported qkv_type = {qkv_type}; supported: torch.Tensor"
+            )
+        if fp8:
+            score_mod_unsupported_reasons.append("FP8 DotProductAttention is enabled")
+        if fp8_output:
+            score_mod_unsupported_reasons.append("fp8_output is enabled")
+        if inference_params is not None:
+            score_mod_unsupported_reasons.append("KV caching is enabled")
+        if context_parallel:
+            score_mod_unsupported_reasons.append("context parallelism is enabled")
+        if "thd" in (qkv_format, q_format, kv_format):
+            score_mod_unsupported_reasons.append(
+                f"unsupported QKV format: q_format = {q_format}, kv_format = {kv_format}"
+            )
+        if pad_between_seqs:
+            score_mod_unsupported_reasons.append("pad_between_seqs is enabled")
+        if attn_mask_type != "no_mask":
+            score_mod_unsupported_reasons.append(f"attn_mask_type = {attn_mask_type}")
+        if window_size is not None and window_size != (-1, -1):
+            score_mod_unsupported_reasons.append(f"window_size = {window_size}")
+        if core_attention_bias_type != "no_bias":
+            score_mod_unsupported_reasons.append(
+                f"core_attention_bias_type = {core_attention_bias_type}"
+            )
+        if alibi_slopes_shape is not None:
+            score_mod_unsupported_reasons.append("ALiBi slopes were provided")
+        if softmax_type != "vanilla":
+            score_mod_unsupported_reasons.append(f"softmax_type = {softmax_type}")
+        if attention_dropout != 0.0:
+            score_mod_unsupported_reasons.append(f"attention_dropout = {attention_dropout}")
+        if return_max_logit:
+            score_mod_unsupported_reasons.append("return_max_logit is enabled")
+        if checkpoint_core_attention:
+            score_mod_unsupported_reasons.append("checkpoint_core_attention is enabled")
+        if cuda_graph:
+            score_mod_unsupported_reasons.append("CUDA graph capture is enabled")
+        if num_splits != 1:
+            score_mod_unsupported_reasons.append(f"num_splits = {num_splits}")
+        if score_mod_unsupported_reasons and use_fused_attention:
+            logger.debug(
+                "Disabling FusedAttention for score_mod because %s",
+                "; ".join(score_mod_unsupported_reasons),
+            )
+            use_fused_attention = False
+
     # Filter: KV cache
     # backend  | precision      |    KV cache     | architecture | qkv_format    | page_size
     # ---------------------------------------------------------------------------------------
     # Fused    | FP16/BF16      | non-paged/paged | sm80+        | bshd,sbhd,thd | >= 1
-    # Flash v2 | FP16/BF16      | non-paged/paged | sm80+        | bshd,sbhd,thd | >= 256
+    # Flash v2 | FP16/BF16      | non-paged/paged | sm80+        | bshd,sbhd,thd | % 256 == 0
     # Flash v3 | FP16/BF16      | non-paged/paged | sm90         | bshd,sbhd,thd | >= 1
     #          | FP8            | non-paged/paged | sm90         | thd           | >= 1
     # Flash v4 | FP16/BF16      | TODO            | sm80+        | bshd,sbhd,thd | TODO
@@ -697,9 +798,9 @@ def get_attention_backend(
                 use_fused_attention = False
                 use_unfused_attention = False
         if inference_params.is_paged:
-            if use_flash_attention_2 and inference_params.page_size < 256:
+            if use_flash_attention_2 and inference_params.page_size % 256 != 0:
                 if FlashAttentionUtils.is_installed:
-                    logger.debug("Disabling FlashAttention 2 for page size < 256")
+                    logger.debug("Disabling FlashAttention 2 for page size not divisible by 256")
                 use_flash_attention_2 = False
             if use_flash_attention_2:
                 if not FlashAttentionUtils.is_installed:
@@ -709,16 +810,22 @@ def get_attention_backend(
                         "Disabling FlashAttention 2 as paged attention requires flash-attn 2.5+"
                     )
                     use_flash_attention_2 = False
+        else:
+            # Non-paged KV cache still passes a block_table to FA2 for thd_2bshd support,
+            # and FA2 enforces page_size % 256 == 0 on the effective page size (max_seqlen_kv).
+            if use_flash_attention_2 and max_seqlen_kv % 256 != 0:
+                if FlashAttentionUtils.is_installed:
+                    logger.debug(
+                        "Disabling FlashAttention 2 for non-paged KV cache"
+                        " with max_seqlen_kv not divisible by 256"
+                    )
+                use_flash_attention_2 = False
         if use_flash_attention_4 and FlashAttentionUtils.v4_is_installed:
             logger.debug("Disabling FlashAttention 4 as it does not support KV cache.")
             use_flash_attention_4 = False
 
     # Filter: Head dimension
     if head_dim_qk != head_dim_v:
-        if use_flash_attention_2 and FlashAttentionUtils.is_installed:
-            logger.debug("Disabling FlashAttention 2 as it does not support MLA.")
-            use_flash_attention_2 = False
-
         qkv_layout_group = qkv_layout.replace("b", "").replace("s", "").replace("t", "")
         if use_fused_attention and qkv_layout_group != "hd_hd_hd":
             logger.debug(
@@ -740,25 +847,27 @@ def get_attention_backend(
                 )
             use_fused_attention = False
 
+    fa2_padded_head_dim = max(head_dim_qk, head_dim_v)
     if (  # pylint: disable=too-many-boolean-expressions
         use_flash_attention_2
         and FlashAttentionUtils.is_installed
         and (
-            head_dim_qk > 256
-            or head_dim_qk % 8 != 0
+            fa2_padded_head_dim > 256
+            or fa2_padded_head_dim % 8 != 0
             or (
-                head_dim_qk > 192
+                fa2_padded_head_dim > 192
                 and device_compute_capability not in ((8, 0), (9, 0), (10, 0), (12, 0))
             )
         )
     ):
         logger.debug(
             "Disabling FlashAttention 2 due to unsupported head_dim_qk and head_dim_v. "
-            "Supported: head_dim_qk = head_dim_v, head_dim_qk %%8 = 0, "
-            "head_dim_qk <= 256 (>192 requires sm80/90/100+). "
-            "Found: head_dim_qk = %s, head_dim_v = %s, on sm%s.",
+            "Supported after padding: padded head_dim %%8 = 0, padded head_dim <= 256 "
+            "(>192 requires sm80/90/100+). "
+            "Found: head_dim_qk = %s, head_dim_v = %s, padded head_dim = %s, on sm%s.",
             head_dim_qk,
             head_dim_v,
+            fa2_padded_head_dim,
             ".".join([str(i) for i in device_compute_capability]),
         )
         use_flash_attention_2 = False
@@ -798,21 +907,25 @@ def get_attention_backend(
             )
             use_flash_attention_3 = False
 
-    if use_flash_attention_4 and FlashAttentionUtils.v4_is_installed:
-        # FA4 head dimension support is architecture-dependent
-        # (matches _validate_head_dims in flash_attn.cute.interface):
-        #   SM90:      head_dim <= 256 and head_dim_v <= 256
-        #   SM100/110: head_dim <= 128 and head_dim_v <= 128,
-        #              OR DeepSeek MLA shape (head_dim=192, head_dim_v=128)
-        #   SM80/120:  constrained by shared memory (~256 max in practice)
-        _fa4_hdim_ok = True
-        if (10, 0) <= device_compute_capability < (12, 0):
-            _is_standard = head_dim_qk <= 128 and head_dim_v <= 128
-            _is_deepseek = head_dim_qk == 192 and head_dim_v == 128
-            _fa4_hdim_ok = _is_standard or _is_deepseek
-        else:
-            _fa4_hdim_ok = head_dim_qk <= 256 and head_dim_v <= 256
-        if not _fa4_hdim_ok:
+    if (
+        use_flash_attention_4
+        and FlashAttentionUtils.v4_is_installed
+        and FlashAttentionUtils.v4_validate_head_dims is not None
+    ):
+        # Defer to FA4's own _validate_head_dims to keep TE in sync with FA4 supported shapes
+        # (e.g., (256, 256) on SM100, (192, 128) DeepSeek, (64, 512) MLA-absorbed).
+        # The function asserts on unsupported combinations; SM80/SM120 have no validation branch
+        # in FA4 so the call passes through silently for those archs.
+        _fa4_alignment = 16 // torch.empty(0, dtype=qkv_dtype).element_size()
+        try:
+            # pylint: disable-next=not-callable
+            FlashAttentionUtils.v4_validate_head_dims(
+                head_dim_qk,
+                head_dim_v,
+                device_compute_capability[0],
+                _fa4_alignment,
+            )
+        except AssertionError:
             logger.debug(
                 "Disabling FlashAttention 4 due to unsupported head dimensions. "
                 "Found: head_dim_qk = %s, head_dim_v = %s, on sm%s.",
@@ -821,13 +934,33 @@ def get_attention_backend(
                 device_compute_capability[0] * 10 + device_compute_capability[1],
             )
             use_flash_attention_4 = False
-        # Workaround: SM100 backward kernel bug when MLA + 2CTA (head_dim_qk >= 128).
-        # FlashAttentionBackwardSm100 computes dK_reduce_ncol = gcd(32, tile_hdim // 2)
-        # based on Q/K head_dim but reuses it for dV TMEM load atoms. When
-        # (tile_hdimv // 2) % dK_reduce_ncol != 0, dV reads are misaligned.
-        # See: flash_attn/cute/flash_bwd_sm100.py, line ~262 and ~3890.
-        elif (
-            _fa4_hdim_ok
+        # flash-attn-4 4.0.0b11 validates (256, 256) on SM100, but its dedicated
+        # hd256 kernel diverges from the reference for cross-attention/decode-like
+        # shapes such as sq=1, skv=2048. Keep FA4 enabled for the self-attention
+        # hd256 path covered by the dedicated test, and fall back for cross-attn.
+        if (
+            use_flash_attention_4
+            and (10, 0) <= device_compute_capability < (12, 0)
+            and head_dim_qk == head_dim_v == 256
+            and max_seqlen_q != max_seqlen_kv
+        ):
+            logger.debug(
+                "Disabling FlashAttention 4 for SM100 head_dim=256 cross-attention. "
+                "Found: max_seqlen_q = %s, max_seqlen_kv = %s.",
+                max_seqlen_q,
+                max_seqlen_kv,
+            )
+            use_flash_attention_4 = False
+        # Workaround: SM100 backward kernel bug when MLA + 2CTA (head_dim_qk >= 128) for
+        # the standard (non-dedicated) kernel path. FlashAttentionBackwardSm100 computes
+        # dK_reduce_ncol = gcd(32, tile_hdim // 2) based on Q/K head_dim but reuses it for
+        # dV TMEM load atoms. When (tile_hdimv // 2) % dK_reduce_ncol != 0, dV reads are
+        # misaligned (e.g. dqk=128, dv=96 gives 48 % 32 != 0). The dedicated (256, 256)
+        # kernel uses its own tmem layout and is not affected.
+        # See: flash_attn/cute/flash_bwd_sm100.py ~L262 and ~L3890. Still present in
+        # flash-attn-4 4.0.0b11.
+        if (
+            use_flash_attention_4
             and is_training
             and head_dim_qk != head_dim_v
             and head_dim_qk >= 128
@@ -850,15 +983,18 @@ def get_attention_backend(
     if qkv_format == "thd":
         if pad_between_seqs:
             if (  # pylint: disable=too-many-boolean-expressions
-                (use_flash_attention_2 and FlashAttentionUtils.is_installed)
-                or (use_flash_attention_3 and FlashAttentionUtils.v3_is_installed)
-                or (use_flash_attention_4 and FlashAttentionUtils.v4_is_installed)
-            ):
+                use_flash_attention_2 and FlashAttentionUtils.is_installed
+            ) or (use_flash_attention_4 and FlashAttentionUtils.v4_is_installed):
                 logger.debug(
-                    "Disabling FlashAttention for qkv_format = thd when there is "
+                    "Disabling FlashAttention 2 and 4 for qkv_format = thd when there is "
                     "padding between sequences, i.e. [a, a, PAD, b, b, b, PAD, c, PAD]"
                 )
-            use_flash_attention = False
+            use_flash_attention_2 = False
+            use_flash_attention_4 = False
+            # FA3 supports pad_between_seqs via seqused_q/seqused_k
+            if use_unfused_attention:
+                logger.debug("Disabling UnfusedDotProductAttention for pad_between_seqs = True")
+            use_unfused_attention = False
         if device_compute_capability == (12, 0):
             if cudnn_version < (9, 18, 1):
                 if use_fused_attention:
@@ -1033,7 +1169,7 @@ def get_attention_backend(
                 cp_comm_type,
             )
             use_fused_attention = False
-        elif qkv_format == "thd" and cp_comm_type in ["all_gather", "a2a+p2p"]:
+        elif qkv_format == "thd" and cp_comm_type in ["a2a+p2p"]:
             logger.debug(
                 "Disabling FusedAttention as it does not support context parallelism with THD"
                 " format and cp_comm_type = %s",
@@ -1226,6 +1362,8 @@ def get_attention_backend(
     # Filter: cuDNN support
     fused_attention_backend = None
     if use_fused_attention:
+        # ``DType`` is implicitly convertible to ``transformer_engine::DType``
+        # on the C++ side, so pass it straight to the pybind function.
         q_type = TE_DType[qkv_dtype]
         kv_type = q_type
         o_type = q_type
@@ -1299,6 +1437,14 @@ def get_attention_backend(
             )
             use_fused_attention = False
             fused_attention_backend = None
+        elif has_score_mod and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]:
+            logger.debug(
+                "Disabling FusedAttention for score_mod because sub-backend %s is not "
+                "F16/BF16 arbitrary-seqlen",
+                int(fused_attention_backend),
+            )
+            use_fused_attention = False
+            fused_attention_backend = None
     # Filter: Determinism
     # backend                      | deterministic
     # ---------------------------------------------
@@ -1322,9 +1468,12 @@ def get_attention_backend(
             )
             use_flash_attention_2 = False
     if use_flash_attention_3 and deterministic and FlashAttentionUtils.v3_is_installed:
-        if head_dim_qk >= 256:
+        if is_training and max(head_dim_qk, head_dim_v) >= 256:
             logger.debug(
-                "Disabling FlashAttention 3 for deterministic execution with head_dim_qk >= 256."
+                "Disabling FlashAttention 3 for deterministic backward with"
+                " max(head_dim_qk, head_dim_v) >= 256. Found: head_dim_qk = %s, head_dim_v = %s.",
+                head_dim_qk,
+                head_dim_v,
             )
             use_flash_attention_3 = False
     if use_fused_attention and deterministic:

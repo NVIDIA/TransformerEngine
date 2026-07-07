@@ -124,7 +124,7 @@ model_configs_base = {
 @pytest.mark.parametrize("workspace_opt", [True, False])
 @pytest.mark.parametrize("qkv_layout", [None])
 @pytest.mark.parametrize("swa", [False])
-@pytest.mark.parametrize("pad_between_seqs", [False])
+@pytest.mark.parametrize("pad_between_seqs", [False, True])
 def test_dot_product_attention(
     dtype,
     model_configs,
@@ -157,6 +157,8 @@ def test_dot_product_attention(
 
     config.window_size = check_set_window_size(config.attn_mask_type, config.window_size)
     qkv_format = qkv_layout.replace("3", "").replace("2", "").split("_")[0]
+    if pad_between_seqs and qkv_format != "thd":
+        pytest.skip("pad_between_seqs only applies to THD format!")
     if qkv_format == "thd" and "padding" not in config.attn_mask_type:
         config.attn_mask_type = (
             "padding_" + config.attn_mask_type if config.attn_mask_type != "no_mask" else "padding"
@@ -194,19 +196,6 @@ def test_dot_product_attention(
             deterministic=_deterministic,
         )
         flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
-
-    # FlashAttention does not support pad_between_seqs, but _run_dot_product_attention
-    # mannually pads and unpads the input and output of FlashAttention for testing purposes
-    if (
-        pad_between_seqs
-        and FlashAttentionUtils.is_installed
-        and not (
-            config.max_seqlen_q != config.max_seqlen_kv
-            and config.attn_mask_type in ["causal", "padding_causal"]
-        )
-        and (config.window_size[0] == -1 or FlashAttentionUtils.v2_3_plus)
-    ):
-        flash_attn_supported = True
 
     # Skip if only unfused backend is supported
     if (len(fused_attn_backends) + flash_attn_supported + unfused_attn_supported) < 2:
@@ -355,12 +344,36 @@ model_configs_fa4_base = {
 @pytest.mark.skipif(
     not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
 )
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_fa4_base])
 @pytest.mark.parametrize("model", model_configs_fa4_base.keys())
 def test_dpa_fa4_base(dtype, model_configs, model):
-    """Test DotProductAttention with FA4: base configs, extended head dims, GQA, num_splits"""
+    """Test DotProductAttention with FA4: base configs, GQA, num_splits"""
+    test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False)
+
+
+# head_dim=256 is supported only on SM100 via FA4's dedicated kernel
+# (flash_attn/cute/sm100_hd256_2cta_fmha_*.py), available in flash-attn-4 > 4.0.0b10.
+# On other architectures, _validate_head_dims rejects (256, 256), FA4 is disabled, and
+# the test would silently fall back to another backend — defeating the purpose. Gate
+# explicitly so the CI signal is unambiguous.
+model_configs_fa4_hdim256 = {
+    "fa4_hdim256": ModelConfig(2, 1024, 8, 256, attn_mask_type="causal"),
+}
+
+
+@pytest.mark.skipif(
+    not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
+)
+@pytest.mark.skipif(
+    device_compute_capability not in ((10, 0), (10, 3)),
+    reason="FA4 head_dim=256 dedicated kernel is SM100/103-only.",
+)
+@pytest.mark.parametrize("dtype", param_types_lean)
+@pytest.mark.parametrize("model_configs", [model_configs_fa4_hdim256])
+@pytest.mark.parametrize("model", model_configs_fa4_hdim256.keys())
+def test_dpa_fa4_hdim256(dtype, model_configs, model):
+    """Test DotProductAttention with FA4: head_dim=256 dedicated kernel on SM100"""
     test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False)
 
 
@@ -380,7 +393,6 @@ model_configs_fa4_mla = {
 @pytest.mark.skipif(
     not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
 )
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_fa4_mla])
 @pytest.mark.parametrize("model", model_configs_fa4_mla.keys())
@@ -407,7 +419,6 @@ model_configs_fa4_swa = {
 @pytest.mark.skipif(
     not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
 )
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_fa4_swa])
 @pytest.mark.parametrize("model", model_configs_fa4_swa.keys())
@@ -431,7 +442,6 @@ model_configs_fa4_varlen = {
 @pytest.mark.skipif(
     not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
 )
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_fa4_varlen])
 @pytest.mark.parametrize("model", model_configs_fa4_varlen.keys())
@@ -457,7 +467,6 @@ model_configs_fa4_mask = {
 @pytest.mark.skipif(
     not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
 )
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_fa4_mask])
 @pytest.mark.parametrize("model", model_configs_fa4_mask.keys())
@@ -1301,12 +1310,12 @@ def _run_dot_product_attention(
         block.softmax_offset.requires_grad = True
 
     # Run a forward and backward pass
-    if backend in ["FlashAttention", "UnfusedDotProductAttention"]:
+    if backend in ["UnfusedDotProductAttention"]:
         q = inp_orig[0]
         k = inp_orig[1]
         v = inp_orig[2]
         d_out = out_grad_orig
-    if backend == "FusedAttention":
+    if backend in ["FusedAttention", "FlashAttention"]:
         q = inp[0]
         k = inp[1]
         v = inp[2]
@@ -1322,14 +1331,19 @@ def _run_dot_product_attention(
         max_seqlen_kv=config.max_seqlen_kv,
         cu_seqlens_q=cu_seqlens_q,
         cu_seqlens_kv=cu_seqlens_kv,
-        cu_seqlens_q_padded=cu_seqlens_q_after_pad if backend == "FusedAttention" else None,
-        cu_seqlens_kv_padded=cu_seqlens_kv_after_pad if backend == "FusedAttention" else None,
+        cu_seqlens_q_padded=(
+            cu_seqlens_q_after_pad if backend in ["FusedAttention", "FlashAttention"] else None
+        ),
+        cu_seqlens_kv_padded=(
+            cu_seqlens_kv_after_pad if backend in ["FusedAttention", "FlashAttention"] else None
+        ),
         attn_mask_type=config.attn_mask_type,
         checkpoint_core_attention=ckpt_attn,
         core_attention_bias_type=config.attn_bias_type,
         core_attention_bias=bias,
         alibi_slopes=alibi_slopes,
         fast_zero_fill=True,
+        pad_between_seqs=pad_between_seqs,
         # Only pass num_splits when exercising the FlashAttention path
         num_splits=config.num_splits if backend == "FlashAttention" else 1,
     )
@@ -1343,12 +1357,12 @@ def _run_dot_product_attention(
     if is_training and config.softmax_type != "vanilla":
         d_softmax_offset = block.softmax_offset.grad
 
-    if backend in ["FlashAttention", "UnfusedDotProductAttention"]:
+    if backend in ["UnfusedDotProductAttention"]:
         if is_training:
             return out, max_logit, (q.grad, k.grad, v.grad, d_softmax_offset)
         else:
             return out, max_logit, (None, None, None, d_softmax_offset)
-    if backend == "FusedAttention":
+    if backend in ["FusedAttention", "FlashAttention"]:
         if qkv_format == "thd" and pad_between_seqs:
             out_orig = torch.Tensor([]).to(device="cuda", dtype=dtype)
             if is_training:
@@ -1923,14 +1937,14 @@ model_configs_fp8_vs_f16 = {
     # test: ModelConfig(b, sq, hq, dqk)
     "fp8_9": ModelConfig(
         2,
-        4096,
+        2048,
         128,
         192,
         head_dim_v=128,
     ),
     "fp8_10": ModelConfig(
-        1,
-        4096,
+        2,
+        2048,
         128,
         192,
         head_dim_v=128,
@@ -1938,21 +1952,23 @@ model_configs_fp8_vs_f16 = {
     ),
     "fp8_11": ModelConfig(
         2,
-        4096,
+        2048,
         128,
         192,
         head_dim_v=128,
         attn_mask_type="causal_bottom_right",
     ),
-    "fp8_12": ModelConfig(2, 8192, 32, 128, num_gqa_groups=4, attn_mask_type="causal"),
-    "fp8_13": ModelConfig(2, 8192, 32, 128, attn_mask_type="causal", window_size=(128, 0)),
-    "fp8_14": ModelConfig(2, 8192, 64, 64, num_gqa_groups=8, attn_mask_type="causal"),
-    "fp8_15": ModelConfig(2, 8192, 64, 64, attn_mask_type="causal", window_size=(128, 0)),
+    "fp8_12": ModelConfig(1, 8192, 32, 128, num_gqa_groups=4, attn_mask_type="causal"),
+    "fp8_13": ModelConfig(
+        2, 8192, 32, 128, num_gqa_groups=4, attn_mask_type="causal", window_size=(128, 0)
+    ),
+    "fp8_14": ModelConfig(2, 4096, 64, 64, num_gqa_groups=8, attn_mask_type="causal"),
+    "fp8_15": ModelConfig(1, 8192, 64, 64, attn_mask_type="causal", window_size=(128, 0)),
     "fp8_16": ModelConfig(
-        2, 8192, 64, 64, num_gqa_groups=8, attn_mask_type="causal", softmax_type="learnable"
+        1, 8192, 64, 64, num_gqa_groups=8, attn_mask_type="causal", softmax_type="learnable"
     ),
     "fp8_17": ModelConfig(
-        2, 8192, 64, 64, attn_mask_type="causal", window_size=(128, 0), softmax_type="learnable"
+        2, 4096, 64, 64, attn_mask_type="causal", window_size=(128, 0), softmax_type="learnable"
     ),
     "fp8_18": ModelConfig(1, 8192, 32, 128, num_gqa_groups=4, attn_mask_type="padding"),
     "fp8_19": ModelConfig(2, 2048, 16, 128, attn_mask_type="padding_causal"),

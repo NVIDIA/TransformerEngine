@@ -40,6 +40,7 @@ namespace jax {
 struct ClampedSwigluConfig {
   float limit;
   float alpha;
+  float glu_linear_offset;
 };
 
 struct ActivationConfig {
@@ -147,6 +148,10 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnForwardHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnBackwardHandler);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnScoreModForwardHandler);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnScoreModBackwardHandler);
+
 std::tuple<NVTE_Fused_Attn_Backend, std::string> GetFusedAttnBackend(
     bool is_training, size_t batch_size, DType q_dtype, DType kv_dtype, DType o_dtype,
     DType do_dtype, DType dqkv_dtype, NVTEScalingMode scaling_mode, NVTE_QKV_Layout qkv_layout,
@@ -204,6 +209,28 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionBackwardHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedMoEAuxLossForwardHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedMoEAuxLossBackwardHandler);
 
+// Bootstrap EP (eager NCCL comm init); anchor released by ReleaseEpResources.
+// max_token_dtype is the NVTEDType enum value (int) for the widest token dtype
+// the group will dispatch.
+void SetEpBootstrapParams(pybind11::bytes unique_id_bytes, int ep_size, int rank_within_group,
+                          int num_experts, int max_tokens_per_rank, int max_recv_tokens_per_rank,
+                          int hidden_dim, int max_num_sms, int max_token_dtype);
+void ReleaseEpResources();
+// Return the handle_mem byte size for a layer config.
+size_t EpHandleMemSize(int top_k, size_t dispatch_output_per_expert_alignment);
+
+// EpInstanceState type_id / type_info capsules for jax.ffi.register_ffi_type.
+pybind11::capsule GetEpInstanceStateTypeIdCapsule();
+pybind11::capsule GetEpInstanceStateTypeInfoCapsule();
+
+// EP FFI handlers
+XLA_FFI_DECLARE_HANDLER_SYMBOL(EpInstantiateHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(EpPrepareHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(EpDispatchHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(EpCombineHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(EpDispatchBwdHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(EpCombineBwdHandler);
+
 // TopK
 XLA_FFI_DECLARE_HANDLER_SYMBOL(TopkHandler);
 pybind11::tuple GetTopkWorkspaceSizes(int batch_size, int seq_len, int k);
@@ -213,7 +240,8 @@ pybind11::tuple GetTopkWorkspaceSizes(int batch_size, int seq_len, int k);
 
 XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(transformer_engine::jax::ClampedSwigluConfig,
                                       ::xla::ffi::StructMember<float>("limit"),
-                                      ::xla::ffi::StructMember<float>("alpha"));
+                                      ::xla::ffi::StructMember<float>("alpha"),
+                                      ::xla::ffi::StructMember<float>("glu_linear_offset"));
 
 XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
     transformer_engine::jax::ActivationConfig,
@@ -256,6 +284,7 @@ XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
 // ENUM_ATTR and DICT_ATTR recoding need to be registered in the global namespace
 XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Scaling_Mode);
 XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Score_Function);
+XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Routing_Map_Format);
 XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Collective_Op);
 XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Quantize_Layout);
 

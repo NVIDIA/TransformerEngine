@@ -88,15 +88,12 @@ endif()
 set(NVTE_STANDARD_ARCHS ${CMAKE_CUDA_ARCHITECTURES})
 
 # cuDNN frontend API
-set(CUDNN_FRONTEND_INCLUDE_DIR
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/include")
-if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
+if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}/cudnn_frontend.h")
     message(FATAL_ERROR
-            "Could not find cuDNN frontend API at ${CUDNN_FRONTEND_INCLUDE_DIR}. "
-            "Try running 'git submodule update --init --recursive' "
-            "within the Transformer Engine source.")
+            "Could not find cudnn_frontend.h in ${CUDNN_FRONTEND_INCLUDE_DIR}. "
+            "Install nvidia-cudnn-frontend or set CUDNN_FRONTEND_INCLUDE_DIR.")
 endif()
-include(${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/cuDNN.cmake)
 
 set(CUTLASS_INCLUDE_DIR
   "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cutlass/include")
@@ -137,6 +134,40 @@ function(find_nccl_version OUT_VERSION OUT_INCLUDE_DIR)
       "${_nvte_nccl_major}.${_nvte_nccl_minor}.${_nvte_nccl_patch}"
       PARENT_SCOPE)
   set(${OUT_INCLUDE_DIR} "${_nvte_nccl_include_dir}" PARENT_SCOPE)
+endfunction()
+
+function(find_cublasmp_version OUT_VERSION OUT_INCLUDE_DIR SEARCH_DIR)
+  find_path(_nvte_cublasmp_include_dir
+            NAMES cublasmp.h
+            HINTS "${SEARCH_DIR}/include"
+            PATH_SUFFIXES include
+            REQUIRED)
+
+  file(STRINGS "${_nvte_cublasmp_include_dir}/cublasmp.h" _nvte_cublasmp_major_line
+       REGEX "^#define CUBLASMP_VER_MAJOR[ \t]+[0-9]+$")
+  file(STRINGS "${_nvte_cublasmp_include_dir}/cublasmp.h" _nvte_cublasmp_minor_line
+       REGEX "^#define CUBLASMP_VER_MINOR[ \t]+[0-9]+$")
+  file(STRINGS "${_nvte_cublasmp_include_dir}/cublasmp.h" _nvte_cublasmp_patch_line
+       REGEX "^#define CUBLASMP_VER_PATCH[ \t]+[0-9]+$")
+
+  string(REGEX REPLACE "^#define CUBLASMP_VER_MAJOR[ \t]+([0-9]+)$" "\\1"
+         _nvte_cublasmp_major "${_nvte_cublasmp_major_line}")
+  string(REGEX REPLACE "^#define CUBLASMP_VER_MINOR[ \t]+([0-9]+)$" "\\1"
+         _nvte_cublasmp_minor "${_nvte_cublasmp_minor_line}")
+  string(REGEX REPLACE "^#define CUBLASMP_VER_PATCH[ \t]+([0-9]+)$" "\\1"
+         _nvte_cublasmp_patch "${_nvte_cublasmp_patch_line}")
+
+  if ("${_nvte_cublasmp_major}" STREQUAL ""
+      OR "${_nvte_cublasmp_minor}" STREQUAL ""
+      OR "${_nvte_cublasmp_patch}" STREQUAL "")
+    message(FATAL_ERROR
+            "Failed to parse cuBLASMp version from ${_nvte_cublasmp_include_dir}/cublasmp.h")
+  endif()
+
+  set(${OUT_VERSION}
+      "${_nvte_cublasmp_major}.${_nvte_cublasmp_minor}.${_nvte_cublasmp_patch}"
+      PARENT_SCOPE)
+  set(${OUT_INCLUDE_DIR} "${_nvte_cublasmp_include_dir}" PARENT_SCOPE)
 endfunction()
 
 # Configure Transformer Engine library
@@ -194,6 +225,7 @@ list(APPEND transformer_engine_cuda_sources
      permutation/permutation.cu
      util/utils.cu
      util/padding.cu
+     util/splits_to_offsets.cu
      util/topk.cu
      swizzle/swizzle.cu
      swizzle/swizzle_block_scaling.cu
@@ -212,10 +244,22 @@ list(APPEND transformer_engine_cuda_sources
 list(APPEND transformer_engine_cuda_arch_specific_sources
      fused_attn/flash_attn.cu
      activation/gelu.cu
+     activation/gelu_dbias.cu
+     activation/gelu_grouped.cu
+     activation/gelu_grouped_dbias.cu
      activation/glu.cu
      activation/relu.cu
+     activation/relu_dbias.cu
+     activation/relu_grouped.cu
+     activation/relu_grouped_dbias.cu
      activation/swiglu.cu
+     activation/swiglu_dbias.cu
+     activation/swiglu_grouped.cu
+     activation/swiglu_grouped_dbias.cu
      cast/cast.cu
+     cast/cast_dbias.cu
+     cast/cast_grouped.cu
+     cast/cast_grouped_dbias.cu
      gemm/cutlass_grouped_gemm.cu
      hadamard_transform/group_hadamard_transform.cu
      hadamard_transform/graph_safe_group_hadamard_transform.cu
@@ -340,25 +384,36 @@ endif()
 
 option(NVTE_WITH_CUBLASMP "Use cuBLASMp for tensor parallel GEMMs" OFF)
 if (NVTE_WITH_CUBLASMP)
+
     target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_CUBLASMP)
     target_include_directories(transformer_engine PRIVATE ${CUBLASMP_DIR}/include)
     find_nccl_version(NCCL_VERSION NCCL_INCLUDE_DIR)
+    find_cublasmp_version(CUBLASMP_VERSION CUBLASMP_INCLUDE_DIR ${CUBLASMP_DIR})
     find_library(CUBLASMP_LIB
-                 NAMES cublasmp libcublasmp
+                 NAMES cublasmp libcublasmp.so libcublasmp.so.0
                  PATHS ${CUBLASMP_DIR}
-                 PATH_SUFFIXES lib
+                 PATH_SUFFIXES lib lib64 lib/aarch64-linux-gnu lib/sbsa-linux-gnu lib/x86_64-linux-gnu
                  REQUIRED)
     find_library(NCCL_LIB
                  NAMES nccl libnccl
                  PATH_SUFFIXES lib
                  REQUIRED)
-    if (NCCL_VERSION VERSION_LESS 2.29.0)
+    # cuBLASMp 0.8 is the first release with CUDA-graph-safe overlap algos,
+    # and NCCL 2.30 is the first release with graph-safe one-sided RMA
+    # primitives (ncclPutSignal/ncclWaitSignal) that those algos use.
+    if (CUBLASMP_VERSION VERSION_LESS 0.8.0)
       message(FATAL_ERROR
-              "NVTE_WITH_CUBLASMP requires NCCL >= 2.29.0, but found NCCL ${NCCL_VERSION} "
-              "in ${NCCL_INCLUDE_DIR}/nccl.h")
+              "NVTE_WITH_CUBLASMP requires cuBLASMp >= 0.8.0, but found cuBLASMp "
+              "${CUBLASMP_VERSION} in ${CUBLASMP_INCLUDE_DIR}/cublasmp.h")
+    endif()
+    if (NCCL_VERSION VERSION_LESS 2.30.0)
+      message(FATAL_ERROR
+              "NVTE_WITH_CUBLASMP requires NCCL >= 2.30.0 (for graph-capture-safe "
+              "one-sided RMA primitives used by cuBLASMp's overlap algorithms), but "
+              "found NCCL ${NCCL_VERSION} in ${NCCL_INCLUDE_DIR}/nccl.h")
     endif()
     target_link_libraries(transformer_engine PUBLIC ${NCCL_LIB} ${CUBLASMP_LIB})
-    message(STATUS "Using cuBLASMp at: ${CUBLASMP_DIR}")
+    message(STATUS "Using cuBLASMp ${CUBLASMP_VERSION} at: ${CUBLASMP_DIR}")
     message(STATUS "Using NCCL ${NCCL_VERSION} at: ${NCCL_LIB}")
 endif()
 
@@ -377,6 +432,79 @@ if (NVTE_WITH_CUSOLVERMP)
                  REQUIRED)
     target_link_libraries(transformer_engine PRIVATE ${NCCL_LIB} ${CUSOLVERMP_LIB})
     message(STATUS "Using cuSolverMp at: ${CUSOLVERMP_DIR}")
+endif()
+
+# -- NCCL EP (on by default, HT mode only) ---------------------------------
+# Set -DNVTE_WITH_NCCL_EP=OFF (or NVTE_WITH_NCCL_EP=0 in setup.py) to
+# skip NCCL EP entirely - useful on older images whose system NCCL is below
+# the 2.30.4 EP minimum.
+option(NVTE_WITH_NCCL_EP "Build NCCL EP into libtransformer_engine.so" ON)
+if(NVTE_WITH_NCCL_EP)
+# SM>=90 and NCCL>=2.30.4 are gated at runtime in EPBackend::initialize.
+# -- NCCL EP headers --------------------------------------------------------
+# Headers + libs are produced by the in-tree 3rdparty/nccl submodule build
+# (auto-built by setup.py via build_nccl_ep_submodule).
+set(NCCL_EP_SUBMODULE_ROOT
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/nccl")
+set(NCCL_EP_INCLUDE_DIR "${NCCL_EP_SUBMODULE_ROOT}/build/include")
+if(NOT EXISTS "${NCCL_EP_INCLUDE_DIR}/nccl_ep.h")
+  message(FATAL_ERROR
+    "NCCL EP header not found at ${NCCL_EP_INCLUDE_DIR}/nccl_ep.h. "
+    "Run `git submodule update --init --recursive` and rebuild TE.")
+endif()
+message(STATUS "NCCL EP headers: ${NCCL_EP_INCLUDE_DIR}")
+
+# -- libnccl_ep.a -----------------------------------------------------------
+# Statically linked into libtransformer_engine.so. EPBackend::initialize checks
+# NCCL >= 2.30.4 before any nccl_ep call, so the newer NCCL symbols nccl_ep
+# imports stay unresolved (and harmless) under default ELF lazy binding when
+# the gate trips. LD_BIND_NOW environments lose this property.
+set(NCCL_EP_LIB_DIR "${NCCL_EP_SUBMODULE_ROOT}/build/lib")
+find_file(NCCL_EP_LIB
+    NAMES libnccl_ep.a
+    HINTS ${NCCL_EP_LIB_DIR}
+    NO_DEFAULT_PATH
+    REQUIRED)
+
+# -- NCCL core: nccl.h + libnccl.so -----------------------------------------
+# setup.py passes -DNCCL_INCLUDE_DIR; standalone CMake falls back to probing
+# well-known NCCL install prefixes.
+find_path(NCCL_INCLUDE_DIR nccl.h
+    HINTS /opt/nvidia/nccl/include /usr/local/nccl/include)
+if(NOT NCCL_INCLUDE_DIR)
+  message(FATAL_ERROR
+    "nccl.h not found. Pass -DNCCL_INCLUDE_DIR=<prefix>/include.")
+endif()
+if(NOT NCCL_LIB)
+  find_library(NCCL_LIB
+      NAMES nccl libnccl
+      PATH_SUFFIXES lib lib64
+      REQUIRED)
+endif()
+
+target_include_directories(transformer_engine PRIVATE
+    ${NCCL_EP_INCLUDE_DIR}
+    ${NCCL_INCLUDE_DIR})
+
+# libnccl.so direct symbols (ncclGetVersion etc.) come from libnccl_ep.a's
+# DT_NEEDED chain plus this TU's own references. CUDA::cuda_driver must follow
+# the static archive on the link line so --as-needed records libcuda.so.1.
+target_link_libraries(transformer_engine PUBLIC ${NCCL_LIB})
+target_link_libraries(transformer_engine PRIVATE
+    -Wl,--whole-archive ${NCCL_EP_LIB} -Wl,--no-whole-archive
+    CUDA::cuda_driver)
+
+target_sources(transformer_engine PRIVATE
+    ep/ep_backend.cpp
+    ep/ep_api.cpp)
+target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_NCCL_EP)
+
+message(STATUS "NCCL EP enabled (static link): ${NCCL_EP_LIB}")
+message(STATUS "NCCL EP include: ${NCCL_EP_INCLUDE_DIR}")
+else()
+  # NCCL EP off: ep_api.cpp's #else branch exports throwing nvte_ep_* stubs.
+  target_sources(transformer_engine PRIVATE ep/ep_api.cpp)
+  message(STATUS "NCCL EP disabled (NVTE_WITH_NCCL_EP=OFF) - using nvte_ep_* stubs")
 endif()
 
 # Number of philox4x32 rounds for stochastic rounding (build-time constant).
@@ -447,9 +575,18 @@ list(APPEND nvte_sources_with_fast_math fused_softmax/scaled_masked_softmax.cu
 option(NVTE_BUILD_ACTIVATION_WITH_FAST_MATH "Compile activation kernels with --use_fast_math option" OFF)
 if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
   list(APPEND nvte_sources_with_fast_math activation/gelu.cu
+                                          activation/gelu_dbias.cu
+                                          activation/gelu_grouped.cu
+                                          activation/gelu_grouped_dbias.cu
                                           activation/glu.cu
                                           activation/relu.cu
-                                          activation/swiglu.cu)
+                                          activation/relu_dbias.cu
+                                          activation/relu_grouped.cu
+                                          activation/relu_grouped_dbias.cu
+                                          activation/swiglu.cu
+                                          activation/swiglu_dbias.cu
+                                          activation/swiglu_grouped.cu
+                                          activation/swiglu_grouped_dbias.cu)
 endif()
 
 foreach(cuda_source IN LISTS nvte_sources_with_fast_math)
