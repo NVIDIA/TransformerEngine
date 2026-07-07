@@ -94,6 +94,18 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     NVTE_CHECK(is_padding, "Paged attention requires padding mask!");
   }
 
+  // Newer versions of cuDNN SDPA can accept sequence lengths directly as a cumulative
+  // tensor, and can accept ragged offsets in arbitrary units (such as tokens) instead
+  // of elements. Take advantage of this if possible to avoid 2 extra kernel calls.
+  const bool use_direct_seqlens =
+      transformer_engine::getenv<bool>("NVTE_FUSED_ATTN_DIRECT_SEQLENS", true) &&
+      cudnn_runtime_version >= 92400 &&
+      // This extra restriction is needed because cuDNN frontend doesn't yet allow
+      // the combination of dropout and stats generation for the fprop unified engine,
+      // so any such request would always get routed to the old composite SDPA engine
+      // (which doesn't support cu_seqlens). Remove this restriction when possible.
+      !is_dropout;
+
   // keep original batch size because cu_seqlens are created with [b+1] shape
   int64_t actual_b = b;
   if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= 90600) {
@@ -103,14 +115,26 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     // so the check passes; ragged offset still provides variable-length boundaries.
     if (sm_arch_ != 120) {
       // replace batch size and maximum sequence lengths with maximum token counts
-      // for query and key/value so the graph is static within each quantization bucket
-      b = max_b;
+      // for query and key/value so the graph is static within each quantization bucket.
+      // With direct seqlens, keep the true batch size: cuDNN reads the user's
+      // [actual_b+1] cu_seqlens buffers, so a quantized batch would read out of bounds.
+      if (!use_direct_seqlens) {
+        b = max_b;
+      }
       s_q = is_ragged_q ? max_t_q : s_q;
       s_kv = is_ragged_kv ? max_t_kv : s_kv;
     }
   }
 
-  const DType ragged_offset_type = cudnn_runtime_version >= 90500 ? DType::kInt64 : DType::kInt32;
+  const DType ragged_offset_type =
+      use_direct_seqlens
+          ? DType::kInt32  // Direct cu_seqlens are given to us as int32, so keep it that way.
+          : (cudnn_runtime_version >= 90500 ? DType::kInt64 : DType::kInt32);
+
+  // Ragged offset multipliers (elements per token); shared with the legacy conversion
+  // kernel (cu_seqlens_padded_to_offsets) so the two paths cannot drift apart.
+  const RaggedOffsetMultipliers offset_mults(layout_group, h, hg, d_qk, d_v);
+
   bool generate_stats = true;  // Always return stats
   try {
     FADescriptor_v1 descriptor{
@@ -166,8 +190,8 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // S2
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // bias
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // softmax_offset
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // seq_q
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // seq_kv
+                   std::shared_ptr<fe::graph::Tensor_attributes>,   // seq_q / cu_seq_len_q
+                   std::shared_ptr<fe::graph::Tensor_attributes>,   // seq_kv / cu_seq_len_kv
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // page_table_k
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // page_table_v
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_q
@@ -231,6 +255,9 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                          .set_stride({1, 1, 1, 1})
                                          .set_data_type(get_cudnn_fe_dtype(ragged_offset_type)));
         Q->set_ragged_offset(offset_q);
+        if (use_direct_seqlens) {
+          Q->set_ragged_offset_multiplier(offset_mults.q);
+        }
       }
       K = mha_graph->tensor(fe::graph::Tensor_attributes().set_name("K").set_stride(k_stride));
       V = mha_graph->tensor(fe::graph::Tensor_attributes().set_name("V").set_stride(v_stride));
@@ -250,6 +277,10 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                          .set_data_type(get_cudnn_fe_dtype(ragged_offset_type)));
         K->set_dim({b, hg, s_kv, d_qk}).set_ragged_offset(offset_k);
         V->set_dim({b, hg, s_kv, d_v}).set_ragged_offset(offset_v);
+        if (use_direct_seqlens) {
+          K->set_ragged_offset_multiplier(offset_mults.k);
+          V->set_ragged_offset_multiplier(offset_mults.v);
+        }
       } else {
         K->set_dim({b, hg, s_kv, d_qk});
         V->set_dim({b, hg, s_kv, d_v});
@@ -293,17 +324,34 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       }
 
       if (is_padding) {
-        seq_q = mha_graph->tensor(fe::graph::Tensor_attributes()
-                                      .set_name("seq_q")
-                                      .set_dim({b, 1, 1, 1})
-                                      .set_stride({1, 1, 1, 1})
-                                      .set_data_type(fe::DataType_t::INT32));
-        seq_kv = mha_graph->tensor(fe::graph::Tensor_attributes()
-                                       .set_name("seq_kv")
-                                       .set_dim({b, 1, 1, 1})
-                                       .set_stride({1, 1, 1, 1})
-                                       .set_data_type(fe::DataType_t::INT32));
-        sdpa_options.set_padding_mask(is_padding).set_seq_len_q(seq_q).set_seq_len_kv(seq_kv);
+        if (use_direct_seqlens) {
+          // seq_q/seq_kv keep their tuple slots but hold (b+1)-shaped cu_seqlen tensors.
+          seq_q = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                        .set_name("cu_seq_len_q")
+                                        .set_dim({b + 1, 1, 1, 1})
+                                        .set_stride({1, 1, 1, 1})
+                                        .set_data_type(fe::DataType_t::INT32));
+          seq_kv = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                         .set_name("cu_seq_len_kv")
+                                         .set_dim({b + 1, 1, 1, 1})
+                                         .set_stride({1, 1, 1, 1})
+                                         .set_data_type(fe::DataType_t::INT32));
+          sdpa_options.set_padding_mask(is_padding)
+              .set_cu_seq_len_q(seq_q)
+              .set_cu_seq_len_kv(seq_kv);
+        } else {
+          seq_q = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                        .set_name("seq_q")
+                                        .set_dim({b, 1, 1, 1})
+                                        .set_stride({1, 1, 1, 1})
+                                        .set_data_type(fe::DataType_t::INT32));
+          seq_kv = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                         .set_name("seq_kv")
+                                         .set_dim({b, 1, 1, 1})
+                                         .set_stride({1, 1, 1, 1})
+                                         .set_data_type(fe::DataType_t::INT32));
+          sdpa_options.set_padding_mask(is_padding).set_seq_len_q(seq_q).set_seq_len_kv(seq_kv);
+        }
       }
 
       if (is_paged_kv) {
@@ -363,6 +411,9 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                     .set_data_type(fe::DataType_t::FLOAT));
         if (use_ragged_stats) {
           Max->set_stride({h * s_q, 1, h, 1}).set_ragged_offset(offset_stats);
+          if (use_direct_seqlens) {
+            Max->set_ragged_offset_multiplier(offset_mults.stats);
+          }
         } else {
           Max->set_stride({h * s_q, s_q, 1, 1});
         }
@@ -382,11 +433,17 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                          .set_stride({1, 1, 1, 1})
                                          .set_data_type(get_cudnn_fe_dtype(ragged_offset_type)));
         O->set_ragged_offset(offset_o);
+        if (use_direct_seqlens) {
+          O->set_ragged_offset_multiplier(offset_mults.o);
+        }
       }
 
       Stats->set_output(true).set_data_type(fe::DataType_t::FLOAT).set_dim({b, h, s_q, 1});
       if (is_ragged_q && cudnn_runtime_version >= 90600) {
         Stats->set_stride({h * s_q, 1, h, 1}).set_ragged_offset(offset_stats);
+        if (use_direct_seqlens) {
+          Stats->set_ragged_offset_multiplier(offset_mults.stats);
+        }
       } else {
         Stats->set_stride({h * s_q, s_q, 1, 1});
       }
@@ -437,18 +494,23 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     // Exit to request upper level API to allocate memory if needed
     // n.b. Care should be taken to align each of the added worksapce tensors to their type.
     // We do this by adding padding at the end of each separate allocation.
+    // With direct seqlens, no conversion workspace is needed: cuDNN consumes the
+    // user's cu_seqlens buffers as-is.
     auto plan_workspace_size = alignTo<16>(mha_graph->get_workspace_size());
     const size_t num_bytes_per_seqlen = alignTo<16>(b * sizeof(int32_t));
-    const size_t actual_seqlen_workspace_size = is_padding ? 2 * num_bytes_per_seqlen : 0;
     const size_t num_bytes_per_ragged_offset =
         alignTo<16>(((b + 1) * typeToNumBits(ragged_offset_type)) / 8);
+    size_t actual_seqlen_workspace_size = 0;
     size_t seqlen_offsets_workspace_size = 0;
-    if (is_ragged_q || is_ragged_kv) {
-      size_t count = 2 * (static_cast<size_t>(is_ragged_q) + static_cast<size_t>(is_ragged_kv));
-      if (use_ragged_stats) {
-        seqlen_offsets_workspace_size = (count + 1) * num_bytes_per_ragged_offset;
-      } else {
-        seqlen_offsets_workspace_size = count * num_bytes_per_ragged_offset;
+    if (!use_direct_seqlens) {
+      if (is_padding) {
+        actual_seqlen_workspace_size = 2 * num_bytes_per_seqlen;
+      }
+      if (is_ragged_q || is_ragged_kv) {
+        const size_t count =
+            2 * (static_cast<size_t>(is_ragged_q) + static_cast<size_t>(is_ragged_kv));
+        seqlen_offsets_workspace_size =
+            (use_ragged_stats ? count + 1 : count) * num_bytes_per_ragged_offset;
       }
     }
     if (workspace == nullptr) {
@@ -475,17 +537,22 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     }
 
     if (is_padding) {
-      constexpr size_t nthreads_per_block = 128;
-      const size_t grid = (b + nthreads_per_block - 1) / nthreads_per_block;
-      void *devActualSeqlenQ = static_cast<int8_t *>(workspace) + plan_workspace_size;
-      void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ) + num_bytes_per_seqlen;
-      cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
-          actual_b, b, static_cast<const int32_t *>(devPtrCuSeqlensQ),
-          static_cast<const int32_t *>(devPtrCuSeqlensKV), static_cast<int32_t *>(devActualSeqlenQ),
-          static_cast<int32_t *>(devActualSeqlenKV));
-      NVTE_CHECK_CUDA(cudaGetLastError());
-      variant_pack[seq_q] = devActualSeqlenQ;
-      variant_pack[seq_kv] = devActualSeqlenKV;
+      if (use_direct_seqlens) {
+        variant_pack[seq_q] = devPtrCuSeqlensQ;
+        variant_pack[seq_kv] = devPtrCuSeqlensKV;
+      } else {
+        constexpr size_t nthreads_per_block = 128;
+        const size_t grid = (b + nthreads_per_block - 1) / nthreads_per_block;
+        void *devActualSeqlenQ = static_cast<int8_t *>(workspace) + plan_workspace_size;
+        void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ) + num_bytes_per_seqlen;
+        cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
+            actual_b, b, static_cast<const int32_t *>(devPtrCuSeqlensQ),
+            static_cast<const int32_t *>(devPtrCuSeqlensKV),
+            static_cast<int32_t *>(devActualSeqlenQ), static_cast<int32_t *>(devActualSeqlenKV));
+        NVTE_CHECK_CUDA(cudaGetLastError());
+        variant_pack[seq_q] = devActualSeqlenQ;
+        variant_pack[seq_kv] = devActualSeqlenKV;
+      }
     }
 
     if (is_paged_kv) {
@@ -493,7 +560,22 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       variant_pack[page_table_v] = devPtrPageTableV;
     }
 
-    if (is_ragged_q || is_ragged_kv) {
+    if (use_direct_seqlens) {
+      // The token-unit cu_seqlens_padded buffers serve as the ragged offsets; the engine
+      // applies the per-tensor multipliers set at graph build time.
+      if (is_ragged_q) {
+        variant_pack[offset_q] = devPtrSeqOffsetsQ;
+        variant_pack[offset_o] = devPtrSeqOffsetsQ;
+      }
+      if (is_ragged_kv) {
+        void *devOffsetsKV = offset_mults.kv_from_q ? devPtrSeqOffsetsQ : devPtrSeqOffsetsKV;
+        variant_pack[offset_k] = devOffsetsKV;
+        variant_pack[offset_v] = devOffsetsKV;
+      }
+      if (use_ragged_stats) {
+        variant_pack[offset_stats] = devPtrSeqOffsetsQ;
+      }
+    } else if (is_ragged_q || is_ragged_kv) {
       constexpr size_t nthreads_per_block = 128;
       const size_t grid = (b + nthreads_per_block) / nthreads_per_block;
       void *devOffsets =
@@ -517,9 +599,8 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                       (static_cast<int>(is_ragged_q) + static_cast<int>(is_ragged_kv)) * 2 *
                           num_bytes_per_ragged_offset;
       }
-      const NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
       cu_seqlens_padded_to_offsets<<<grid, nthreads_per_block, 0, stream>>>(
-          layout_group, actual_b, b, h, hg, d_qk, d_v, static_cast<int32_t *>(devPtrSeqOffsetsQ),
+          offset_mults, actual_b, b, static_cast<int32_t *>(devPtrSeqOffsetsQ),
           static_cast<int32_t *>(devPtrSeqOffsetsKV), ragged_offset_type, devOffsetsQ, devOffsetsK,
           devOffsetsV, devOffsetsO, devOffsetsS);
       NVTE_CHECK_CUDA(cudaGetLastError());
@@ -1034,9 +1115,10 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                       (static_cast<int>(is_ragged_q) + static_cast<int>(is_ragged_kv)) * 2 *
                           num_bytes_per_ragged_offset;
       }
-      const NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
+      const RaggedOffsetMultipliers offset_mults(nvte_get_qkv_layout_group(qkv_layout), h, hg,
+                                                 d_qk, d_v);
       cu_seqlens_padded_to_offsets<<<grid, nthreads_per_block, 0, stream>>>(
-          layout_group, actual_b, b, h, hg, d_qk, d_v, static_cast<int32_t *>(devPtrSeqOffsetsQ),
+          offset_mults, actual_b, b, static_cast<int32_t *>(devPtrSeqOffsetsQ),
           static_cast<int32_t *>(devPtrSeqOffsetsKV), ragged_offset_type, devOffsetsQ, devOffsetsK,
           devOffsetsV, devOffsetsO, devOffsetsS);
       NVTE_CHECK_CUDA(cudaGetLastError());

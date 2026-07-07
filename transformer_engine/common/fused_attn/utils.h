@@ -309,14 +309,45 @@ struct FADescriptor_v1 {
   }
 };
 
+// Per-tensor scale factors relating cu_seqlens_padded (token units) to tensor-element
+// ragged offsets, as a function of the QKV layout group. Single source of truth shared
+// by the cu_seqlens_padded_to_offsets conversion kernel and the direct-seqlens path
+// (which passes them to cuDNN as ragged offset multipliers).
+struct RaggedOffsetMultipliers {
+  RaggedOffsetMultipliers(NVTE_QKV_Layout_Group layout_group, int64_t h, int64_t hg, int64_t d_qk,
+                          int64_t d_v)
+      : q(h * d_qk), k(hg * d_qk), v(hg * d_v), o(h * d_v), stats(h), kv_from_q(false) {
+    switch (layout_group) {
+      case NVTE_QKV_Layout_Group::NVTE_3HD:
+      case NVTE_QKV_Layout_Group::NVTE_H3D:
+        q = k = v = 3 * h * d_qk;
+        kv_from_q = true;
+        break;
+      case NVTE_QKV_Layout_Group::NVTE_HD_2HD:
+      case NVTE_QKV_Layout_Group::NVTE_HD_H2D:
+        k = v = 2 * hg * d_qk;
+        break;
+      default:
+        break;
+    }
+  }
+
+  int64_t q;
+  int64_t k;
+  int64_t v;
+  int64_t o;
+  int64_t stats;
+  // K/V offsets scale the Q-side cu_seqlens_padded (interleaved QKV layouts)
+  bool kv_from_q;
+};
+
 __global__ void cu_seqlens_to_actual_seqlens(int64_t actual_b, int64_t max_b,
                                              int32_t const *const q_cu_seqlens,
                                              int32_t const *const kv_cu_seqlens, int32_t *q_seqlens,
                                              int32_t *kv_seqlens);
 
-__global__ void cu_seqlens_padded_to_offsets(NVTE_QKV_Layout_Group layout_group, int64_t actual_b,
-                                             int64_t max_b, int64_t h, int64_t hg, int64_t d_qk,
-                                             int64_t d_v, const int32_t *cu_seqlens_q_padded,
+__global__ void cu_seqlens_padded_to_offsets(RaggedOffsetMultipliers mults, int64_t actual_b,
+                                             int64_t max_b, const int32_t *cu_seqlens_q_padded,
                                              const int32_t *cu_seqlens_kv_padded,
                                              DType offset_dtype, void *offsets_q, void *offsets_k,
                                              void *offsets_v, void *offsets_o, void *offsets_s);
