@@ -215,8 +215,6 @@ class Float8BlockQuantizer(Quantizer):
         pin_memory: bool = False,
     ) -> Float8BlockwiseQTensor:
         """Construct quantized tensor with uninitialized data"""
-        if device is None:
-            device = torch.device(te_device_type())
 
         tensor_kwargs = {
             "device": torch.device(te_device_type()) if device is None else device,
