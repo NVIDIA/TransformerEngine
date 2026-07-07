@@ -88,15 +88,12 @@ endif()
 set(NVTE_STANDARD_ARCHS ${CMAKE_CUDA_ARCHITECTURES})
 
 # cuDNN frontend API
-set(CUDNN_FRONTEND_INCLUDE_DIR
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/include")
-if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
+if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}/cudnn_frontend.h")
     message(FATAL_ERROR
-            "Could not find cuDNN frontend API at ${CUDNN_FRONTEND_INCLUDE_DIR}. "
-            "Try running 'git submodule update --init --recursive' "
-            "within the Transformer Engine source.")
+            "Could not find cudnn_frontend.h in ${CUDNN_FRONTEND_INCLUDE_DIR}. "
+            "Install nvidia-cudnn-frontend or set CUDNN_FRONTEND_INCLUDE_DIR.")
 endif()
-include(${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/cuDNN.cmake)
 
 set(CUTLASS_INCLUDE_DIR
   "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cutlass/include")
