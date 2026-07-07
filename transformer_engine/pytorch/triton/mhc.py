@@ -606,8 +606,14 @@ class mHCProjectionOp(torch.autograd.Function):
             )
 
             # For reduction over M, we should prefer parallelizing over M since it's likely to be better, unless determinism is enforced
-            grad_phi = torch.zeros_like(phi, dtype=torch.float32)
-            grad_norm_weight = torch.zeros_like(norm_weight, dtype=torch.float32)
+            if ctx.use_split_k:
+                # atomic_add accumulation needs zeroed fp32 accumulators
+                grad_phi = torch.zeros_like(phi, dtype=torch.float32)
+                grad_norm_weight = torch.zeros_like(norm_weight, dtype=torch.float32)
+            else:
+                # Otherwise we don't need zeroed fp32 buffer since we don't do atomic add in this path
+                grad_phi = torch.empty_like(phi)
+                grad_norm_weight = torch.empty_like(norm_weight)
 
             _mhc_projection_bwd_fused_dphi[grid](
                 x_ptr=x,  # (M, K)
