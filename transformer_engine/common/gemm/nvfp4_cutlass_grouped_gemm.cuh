@@ -55,13 +55,21 @@ namespace nvfp4_cutlass {
 //     so this stays graph-safe. Requires fp32 output.
 // Fused bias is not supported here (the grouped-tensor path applies bias via a
 // separate nvte_grouped_bias_add); callers must exclude the fused-bias case.
-void run_grouped_per_tensor_gemm_grouped_tensor(void **A_ptrs, void **B_ptrs,
-                                                void **a_scale_inv_ptrs, void **b_scale_inv_ptrs,
-                                                float **alpha_ptrs, void **C_ptrs, void **D_ptrs,
-                                                float **beta_ptrs, const int *a_rows,
-                                                const int *a_cols, const int *d_rows,
-                                                const int *d_cols, bool a_trans, int num_groups,
-                                                bool fp32_output, cudaStream_t stream);
+//
+// Workspace: the launcher performs NO device allocation. `workspace` /
+// `workspace_bytes` is a caller-provided scratch buffer (owned by the upstream
+// framework, e.g. PyTorch) from which both the on-device per-group metadata and
+// the CUTLASS GEMM workspace are carved; keeping allocation out of TE common is
+// what makes the launch CUDA-graph safe. The launcher NVTE_CHECKs it is large
+// enough. Reusing the grouped-GEMM cuBLAS workspace is valid because this path
+// replaces (and never runs alongside) the cuBLAS matmul.
+void run_nvfp4_graph_safe_grouped_gemm(void **A_ptrs, void **B_ptrs, void **a_scale_inv_ptrs,
+                                       void **b_scale_inv_ptrs, float **alpha_ptrs, void **C_ptrs,
+                                       void **D_ptrs, float **beta_ptrs, const int *a_rows,
+                                       const int *a_cols, const int *d_rows, const int *d_cols,
+                                       bool a_trans, int num_groups, bool fp32_output,
+                                       void *workspace, size_t workspace_bytes,
+                                       cudaStream_t stream);
 
 }  // namespace nvfp4_cutlass
 }  // namespace transformer_engine

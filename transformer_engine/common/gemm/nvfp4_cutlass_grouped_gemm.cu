@@ -177,34 +177,6 @@ struct PerTensorCfg {
 
 static inline size_t align256(size_t b) { return (b + 255) / 256 * 256; }
 
-// Upper bound on CUDA devices per process for the persistent-buffer cache below.
-// TE grouped GEMMs never span more devices than this in a single process.
-constexpr int kMaxCudaDevices = 16;
-
-// Process-persistent device buffers reused across launches, to avoid per-call
-// cudaMalloc/cudaFree churn. Keyed by CUDA device so a buffer allocated on one
-// device is never handed back while a different device is current (e.g. pipeline
-// parallelism with several ranks per process); cudaMallocAsync allocates on the
-// current device, which the caller sets to `device` before calling in. which=0
-// -> metadata scratch, which=1 -> CUTLASS workspace. Assumes grouped GEMMs are
-// issued serially on one stream per device (the TE norm); the stream-ordered
-// free on regrow keeps it safe under that assumption.
-static void *persistent_buffer(size_t bytes, cudaStream_t stream, int which, int device) {
-  static void *bufs[kMaxCudaDevices][2] = {};
-  static size_t caps[kMaxCudaDevices][2] = {};
-  NVTE_CHECK(0 <= device && device < kMaxCudaDevices,
-             "CUDA device id out of range for CUTLASS grouped GEMM persistent buffer cache");
-  if (bytes > caps[device][which]) {
-    if (bufs[device][which] != nullptr) {
-      NVTE_CHECK_CUDA(cudaFreeAsync(bufs[device][which], stream));
-    }
-    const size_t newcap = bytes + bytes / 2;  // slack to avoid frequent regrows
-    NVTE_CHECK_CUDA(cudaMallocAsync(&bufs[device][which], newcap, stream));
-    caps[device][which] = newcap;
-  }
-  return bufs[device][which];
-}
-
 // ---- Graph-safe device-array path (grouped-tensor / cublasLt grouped API) ----
 //
 // Builds all per-group CUTLASS metadata on device from the dim arrays produced
@@ -242,7 +214,7 @@ static void run_impl_device(void **A_ptrs, void **B_ptrs, void **a_scale_inv_ptr
                             void **b_scale_inv_ptrs, float **alpha_ptrs, void **C_ptrs,
                             void **D_ptrs, float **beta_ptrs, const int *a_rows, const int *a_cols,
                             const int *d_rows, const int *d_cols, bool a_trans, int G,
-                            cudaStream_t stream) {
+                            void *ext_workspace, size_t ext_workspace_bytes, cudaStream_t stream) {
   using Cfg = PerTensorCfg<ElementOutT, /*kHasBias=*/false>;
   using Gemm = typename Cfg::Gemm;
   using StrideA = typename Cfg::StrideA;
@@ -259,20 +231,24 @@ static void run_impl_device(void **A_ptrs, void **B_ptrs, void **a_scale_inv_ptr
   using ProblemShape = typename Cfg::ProblemShape;
   using UnderlyingProblemShape = typename ProblemShape::UnderlyingProblemShape;
 
-  // Resolve the active device once; used to key the persistent buffers and to
-  // tell the CUTLASS scheduler which device it is running on. Do not assume
-  // device 0 -- in multi-GPU-per-process setups (e.g. pipeline parallelism) the
-  // current device may be non-zero.
+  // Resolve the active device once to tell the CUTLASS scheduler which device it
+  // is running on. Do not assume device 0 -- in multi-GPU-per-process setups
+  // (e.g. pipeline parallelism) the current device may be non-zero.
   const int device = transformer_engine::cuda::current_device();
 
-  // Device scratch for the per-group metadata (built by the kernel below). Sized
-  // only by G, which is static for a given grouped GEMM, so after warmup the
-  // persistent buffer never regrows -> no alloc during CUDA-graph replay.
+  // Device scratch for the per-group metadata (built by the kernel below), carved
+  // from the front of the caller-provided workspace. Sized only by G, which is
+  // static for a given grouped GEMM, so no allocation happens here -> nothing to
+  // capture during CUDA-graph replay.
   const size_t need = align256(G * sizeof(UnderlyingProblemShape)) + align256(G * sizeof(StrideA)) +
                       align256(G * sizeof(StrideB)) + align256(G * sizeof(StrideC)) +
                       align256(G * sizeof(StrideD)) + align256(G * sizeof(LayoutSFA)) +
                       align256(G * sizeof(LayoutSFB));
-  uint8_t *scr = static_cast<uint8_t *>(persistent_buffer(need, stream, /*which=*/0, device));
+  NVTE_CHECK(need <= ext_workspace_bytes,
+             "CUTLASS NVFP4 grouped per-tensor GEMM: provided workspace too small for metadata "
+             "scratch (need ",
+             need, " bytes, have ", ext_workspace_bytes, ").");
+  uint8_t *scr = static_cast<uint8_t *>(ext_workspace);
   size_t off = 0;
   auto carve = [&](size_t bytes) {
     uint8_t *p = scr + off;
@@ -342,11 +318,15 @@ static void run_impl_device(void **A_ptrs, void **B_ptrs, void **a_scale_inv_ptr
       {fusion_args, ptr_C, stride_C_d, d_ptr_d, stride_D_d},
       hw_info};
 
-  size_t workspace_size = Gemm::get_workspace_size(arguments);
-  void *workspace = nullptr;
-  if (workspace_size > 0) {
-    workspace = persistent_buffer(workspace_size, stream, /*which=*/1, device);
-  }
+  // CUTLASS GEMM workspace is carved from the tail of the same caller-provided
+  // buffer (after the metadata scratch above). No allocation happens in TE
+  // common -- upstream (PyTorch) owns the buffer -- so this stays graph-safe.
+  const size_t workspace_size = Gemm::get_workspace_size(arguments);
+  off = align256(off);
+  NVTE_CHECK(off + workspace_size <= ext_workspace_bytes,
+             "CUTLASS NVFP4 grouped per-tensor GEMM: provided workspace too small (need ",
+             off + workspace_size, " bytes, have ", ext_workspace_bytes, ").");
+  void *cutlass_workspace = workspace_size > 0 ? static_cast<void *>(scr + off) : nullptr;
 
   Gemm gemm;
   cutlass::Status status = gemm.can_implement(arguments);
@@ -354,7 +334,7 @@ static void run_impl_device(void **A_ptrs, void **B_ptrs, void **a_scale_inv_ptr
              "CUTLASS NVFP4 grouped per-tensor GEMM (grouped-tensor) cannot implement: ",
              cutlassGetStatusString(status), " (num_groups=", G, ")");
 
-  status = gemm.initialize(arguments, workspace, stream);
+  status = gemm.initialize(arguments, cutlass_workspace, stream);
   NVTE_CHECK(status == cutlass::Status::kSuccess,
              "CUTLASS NVFP4 grouped per-tensor GEMM (grouped-tensor) initialize failed: ",
              cutlassGetStatusString(status));
@@ -365,33 +345,32 @@ static void run_impl_device(void **A_ptrs, void **B_ptrs, void **a_scale_inv_ptr
              cutlassGetStatusString(status));
 }
 
-void run_grouped_per_tensor_gemm_grouped_tensor(void **A_ptrs, void **B_ptrs,
-                                                void **a_scale_inv_ptrs, void **b_scale_inv_ptrs,
-                                                float **alpha_ptrs, void **C_ptrs, void **D_ptrs,
-                                                float **beta_ptrs, const int *a_rows,
-                                                const int *a_cols, const int *d_rows,
-                                                const int *d_cols, bool a_trans, int num_groups,
-                                                bool fp32_output, cudaStream_t stream) {
+void run_nvfp4_graph_safe_grouped_gemm(void **A_ptrs, void **B_ptrs, void **a_scale_inv_ptrs,
+                                       void **b_scale_inv_ptrs, float **alpha_ptrs, void **C_ptrs,
+                                       void **D_ptrs, float **beta_ptrs, const int *a_rows,
+                                       const int *a_cols, const int *d_rows, const int *d_cols,
+                                       bool a_trans, int num_groups, bool fp32_output,
+                                       void *workspace, size_t workspace_bytes,
+                                       cudaStream_t stream) {
   if (fp32_output) {
     run_impl_device<float>(A_ptrs, B_ptrs, a_scale_inv_ptrs, b_scale_inv_ptrs, alpha_ptrs, C_ptrs,
                            D_ptrs, beta_ptrs, a_rows, a_cols, d_rows, d_cols, a_trans, num_groups,
-                           stream);
+                           workspace, workspace_bytes, stream);
   } else {
     NVTE_CHECK(beta_ptrs == nullptr,
                "CUTLASS NVFP4 grouped per-tensor GEMM: per-group beta (accumulate) requires FP32 "
                "output.");
-    run_impl_device<cutlass::bfloat16_t>(A_ptrs, B_ptrs, a_scale_inv_ptrs, b_scale_inv_ptrs,
-                                         alpha_ptrs, C_ptrs, D_ptrs, beta_ptrs, a_rows, a_cols,
-                                         d_rows, d_cols, a_trans, num_groups, stream);
+    run_impl_device<cutlass::bfloat16_t>(
+        A_ptrs, B_ptrs, a_scale_inv_ptrs, b_scale_inv_ptrs, alpha_ptrs, C_ptrs, D_ptrs, beta_ptrs,
+        a_rows, a_cols, d_rows, d_cols, a_trans, num_groups, workspace, workspace_bytes, stream);
   }
 }
 
 #else   // !CUTLASS_ARCH_MMA_SM100_SUPPORTED
 
-void run_grouped_per_tensor_gemm_grouped_tensor(void **, void **, void **, void **, float **,
-                                                void **, void **, float **, const int *,
-                                                const int *, const int *, const int *, bool, int,
-                                                bool, cudaStream_t) {
+void run_nvfp4_graph_safe_grouped_gemm(void **, void **, void **, void **, float **, void **,
+                                       void **, float **, const int *, const int *, const int *,
+                                       const int *, bool, int, bool, void *, size_t, cudaStream_t) {
   NVTE_ERROR(
       "CUTLASS NVFP4 grouped per-tensor GEMM requires SM100 (Blackwell). Build with "
       "sm_100a/sm_100f.");

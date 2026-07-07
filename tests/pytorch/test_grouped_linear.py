@@ -2074,12 +2074,6 @@ def test_swizzle_scales_and_pack_ptrs_for_discrete_weights(
 # dispatches to (cuBLAS baseline vs CUTLASS). NVTE_GROUPED_LINEAR_USE_FUSED_
 # GROUPED_GEMM routes GroupedLinear onto that path. SM100-only.
 # =============================================================================
-def _nvfp4_grouped_recipe():
-    # Default recipe (RHT on): the graph-safe grouped NVFP4 quant kernel is only
-    # implemented for the RHT path, so disable_rht=True is not supported here.
-    return recipe.NVFP4BlockScaling()
-
-
 def _nvfp4_grouped_m_splits(num_gemms, dist):
     """128-aligned per-group token counts (per-tensor NVFP4 CUTLASS is %128)."""
     if dist == "balanced":
@@ -2103,7 +2097,9 @@ def test_nvfp4_grouped_tensor_cutlass_matches_cublas(
     wgrad is a backend bug. fuse_wgrad_accumulation=True (fp32 main_grad) is what
     routes wgrad through CUTLASS, mirroring Megatron training."""
     monkeypatch.setenv(_FUSED_GROUPED_GEMM_ENV, "1")
-    nvfp4_recipe = _nvfp4_grouped_recipe()
+    # Default recipe (RHT on): the graph-safe grouped NVFP4 quant kernel is only
+    # implemented for the RHT path, so disable_rht=True is not supported here.
+    nvfp4_recipe = recipe.NVFP4BlockScaling()
     K, N = 512, 512  # all dims %128 -> path eligible
     m_splits = _nvfp4_grouped_m_splits(num_gemms, dist)
     total_m = sum(m_splits)
@@ -2167,7 +2163,9 @@ def test_nvfp4_grouped_tensor_cutlass_cuda_graph_safe(monkeypatch):
     monkeypatch.setenv(_FUSED_GROUPED_GEMM_ENV, "1")
     monkeypatch.setenv(_NVFP4_CUTLASS_ENV, "1")
     FP8GlobalStateManager.reset()
-    nvfp4_recipe = _nvfp4_grouped_recipe()
+    # Default recipe (RHT on): the graph-safe grouped NVFP4 quant kernel is only
+    # implemented for the RHT path, so disable_rht=True is not supported here.
+    nvfp4_recipe = recipe.NVFP4BlockScaling()
     num_gemms, K, N = 3, 512, 512
     m_splits = [256, 128, 384]  # 128-aligned, unequal
     total_m = sum(m_splits)

@@ -1093,11 +1093,14 @@ inline bool maybe_run_nvfp4_cutlass_grouped(const GroupedGemmSetupWorkspace &set
                                             const GroupedOperandSelection &A_sel,
                                             const GroupedOperandSelection &B_sel,
                                             transformer_engine::DType d_dtype, size_t num_tensors,
-                                            bool with_beta, cudaStream_t stream) {
-  if (!transformer_engine::getenv<bool>("NVTE_NVFP4_CUTLASS_GROUPED_GEMM", false)) {
+                                            bool with_beta, void *cublas_workspace_ptr,
+                                            cudaStream_t stream) {
+  // Cheap operand check before the (more expensive) env-var lookup, so non-NVFP4
+  // recipes never pay the getenv cost.
+  if (!transformer_engine::is_nvfp_scaling(A_sel.scaling_mode)) {
     return false;
   }
-  if (!transformer_engine::is_nvfp_scaling(A_sel.scaling_mode)) {
+  if (!transformer_engine::getenv<bool>("NVTE_NVFP4_CUTLASS_GROUPED_GEMM", false)) {
     return false;
   }
   const int sm = transformer_engine::cuda::sm_arch(transformer_engine::cuda::current_device());
@@ -1120,12 +1123,17 @@ inline bool maybe_run_nvfp4_cutlass_grouped(const GroupedGemmSetupWorkspace &set
   // pads each group's token dim to 128, so per-group M satisfies the kernel's
   // alignment by construction. alpha_ptrs already carries the per-group combined
   // NVFP4 global scale (alpha * amax_A * amax_B * factor_inv) from the setup kernel.
-  transformer_engine::nvfp4_cutlass::run_grouped_per_tensor_gemm_grouped_tensor(
+  // Reuse the caller-provided cuBLAS grouped-GEMM workspace as scratch for the
+  // CUTLASS path (metadata + CUTLASS workspace are carved from it). This branch
+  // returns before execute_grouped_gemm, so that buffer is otherwise unused
+  // here; no allocation happens inside TE common, keeping the launch graph-safe.
+  transformer_engine::nvfp4_cutlass::run_nvfp4_graph_safe_grouped_gemm(
       setup_workspace.A_ptrs, setup_workspace.B_ptrs, setup_workspace.a_scale_inv_ptrs,
       setup_workspace.b_scale_inv_ptrs, setup_workspace.alpha_ptrs, setup_workspace.C_ptrs,
       setup_workspace.D_ptrs, with_beta ? setup_workspace.beta_ptrs : nullptr,
       setup_workspace.a_rows, setup_workspace.a_cols, setup_workspace.d_rows,
-      setup_workspace.d_cols, A_sel.trans, static_cast<int>(num_tensors), fp32_out, stream);
+      setup_workspace.d_cols, A_sel.trans, static_cast<int>(num_tensors), fp32_out,
+      cublas_workspace_ptr, kGroupedGemmCublasWorkspaceSize, stream);
   return true;
 }
 
@@ -1691,7 +1699,8 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
       config_.avg_k.value_or(transa ? compute_avg_last_dim(inputA) : compute_avg_first_dim(inputA));
   gemm_config.sm_count = config_.sm_count;
   if (maybe_run_nvfp4_cutlass_grouped(workspace.setup_workspace, A_sel, B_sel, outputD->dtype(),
-                                      num_tensors, /*with_beta=*/false, stream)) {
+                                      num_tensors, /*with_beta=*/false,
+                                      workspace.cublas_workspace_ptr, stream)) {
     return;
   }
   execute_grouped_gemm(workspace.setup_workspace, A_sel, B_sel, outputD->dtype(), num_tensors,
@@ -1844,7 +1853,8 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
   gemm_config.avg_k = config_.avg_k.value_or(transa ? avg_last_dim : avg_first_dim);
   gemm_config.sm_count = config_.sm_count;
   if (maybe_run_nvfp4_cutlass_grouped(workspace.setup_workspace, A_sel, B_sel, outputD->dtype(),
-                                      num_tensors, /*with_beta=*/false, stream)) {
+                                      num_tensors, /*with_beta=*/false,
+                                      workspace.cublas_workspace_ptr, stream)) {
     return;
   }
   execute_grouped_gemm(workspace.setup_workspace, A_sel, B_sel, outputD->dtype(), num_tensors,
@@ -1942,7 +1952,7 @@ void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
   // discrete-out (wgrad): C == D and accumulate is decided by the per-group
   // device beta, so run in per-group-beta mode (with_beta=true).
   if (maybe_run_nvfp4_cutlass_grouped(workspace.setup_workspace, A_sel, B_sel, d_dtype, num_tensors,
-                                      /*with_beta=*/true, stream)) {
+                                      /*with_beta=*/true, workspace.cublas_workspace_ptr, stream)) {
     return;
   }
   execute_grouped_gemm(workspace.setup_workspace, A_sel, B_sel, d_dtype, num_tensors, gemm_config,
