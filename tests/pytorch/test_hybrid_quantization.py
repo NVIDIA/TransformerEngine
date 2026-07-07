@@ -1874,6 +1874,165 @@ class TestAttentionFactoryNativeRecipeParity:
                 f"{case_name} MHA param grad {name}",
             )
 
+    def test_update_output_quantizer_roles_wires_independent_boundaries(self):
+        from transformer_engine.pytorch.quantization import QuantizerRole
+
+        model = te.MultiheadAttention(
+            self.hidden_size,
+            self.num_heads,
+            kv_channels=self.kv_channels,
+            attention_dropout=0.0,
+            attn_mask_type="no_mask",
+            params_dtype=torch.bfloat16,
+            bias=False,
+            qkv_format="sbhd",
+            name="mha",
+        ).cuda()
+        qkv = model.layernorm_qkv if model.input_layernorm else model.qkv
+
+        expected_qkv = QuantizerRole(
+            module_type="dpa",
+            tensor_type="qkv",
+            name=model.core_attention.name or "",
+        )
+        expected_do = QuantizerRole(
+            module_type="dpa",
+            tensor_type="do",
+            name=model.core_attention.name or "",
+        )
+        expected_o = QuantizerRole(
+            module_type="linear",
+            tensor_type="input",
+            name=model.proj.name or "",
+        )
+        expected_dqkv = QuantizerRole(
+            module_type="linear",
+            tensor_type="grad_output",
+            name=qkv.name or "",
+        )
+
+        def boundary_roles():
+            return (
+                qkv.output_quantizer_role,
+                model.proj.grad_input_quantizer_role,
+                model.core_attention.output_quantizer_role,
+                model.core_attention.grad_input_quantizer_role,
+            )
+
+        model._update_output_quantizer_roles(True, False, False)
+        assert boundary_roles() == (expected_qkv, None, None, None)
+
+        model._update_output_quantizer_roles(False, True, False)
+        assert boundary_roles() == (None, expected_do, None, None)
+
+        model._update_output_quantizer_roles(False, False, True)
+        assert boundary_roles() == (None, None, expected_o, expected_dqkv)
+
+        model._update_output_quantizer_roles(False, False, False)
+        assert boundary_roles() == (None, None, None, None)
+
+    def test_mxfp8_qfactory_uses_plain_bf16_mha_boundaries(self, monkeypatch):
+        """MXFP8 DPA stays internal; MHA boundary tensors remain plain BF16."""
+        if not mxfp8_available:
+            pytest.skip(f"MXFP8: {reason_for_no_mxfp8}")
+
+        from transformer_engine.pytorch.attention.dot_product_attention import (
+            backends as dpa_backends,
+        )
+        from transformer_engine.pytorch.custom_recipes.quantization_factory_zoo import (
+            nvfp4_linear_mxfp8_dpa_factory,
+        )
+        from transformer_engine.pytorch.utils import get_device_compute_capability
+
+        cc = get_device_compute_capability()
+        if cc < (9, 0) or cc >= (12, 0):
+            pytest.skip(f"FP8 attention not supported on sm{cc[0] * 10 + cc[1]}")
+
+        self._clear_native_dpa_recipe(monkeypatch)
+        torch.manual_seed(2401)
+        model = te.MultiheadAttention(
+            self.hidden_size,
+            self.num_heads,
+            kv_channels=self.kv_channels,
+            attention_dropout=0.0,
+            attn_mask_type="no_mask",
+            params_dtype=torch.bfloat16,
+            bias=False,
+            qkv_format="sbhd",
+            name="mha",
+        ).cuda()
+
+        boundary_tensors = {}
+        saved_dpa_tensors = {}
+        orig_prepare_for_saving = dpa_backends.prepare_for_saving
+
+        def _record_prepare_for_saving(*tensors, **kwargs):
+            saved_dpa_tensors["fp8_o"] = tensors[3]
+            saved_dpa_tensors["f16_o"] = tensors[7]
+            return orig_prepare_for_saving(*tensors, **kwargs)
+
+        monkeypatch.setattr(dpa_backends, "prepare_for_saving", _record_prepare_for_saving)
+
+        def _record_grad(name):
+            def _hook(grad):
+                boundary_tensors[name] = grad
+                return grad
+
+            return _hook
+
+        def _record_dpa_inputs(_module, inputs):
+            for name, tensor in zip(("q", "k", "v"), inputs[:3]):
+                boundary_tensors[name] = tensor
+                tensor.register_hook(_record_grad(f"d{name}"))
+
+        def _record_dpa_output(_module, _inputs, output):
+            boundary_tensors["o"] = output
+            output.register_hook(_record_grad("do"))
+
+        def _record_projection_input(_module, inputs):
+            boundary_tensors["proj_input"] = inputs[0]
+            boundary_tensors["o_is_proj_input"] = boundary_tensors["o"] is inputs[0]
+
+        handles = (
+            model.core_attention.register_forward_pre_hook(_record_dpa_inputs),
+            model.core_attention.register_forward_hook(_record_dpa_output),
+            model.proj.register_forward_pre_hook(_record_projection_input),
+        )
+
+        torch.manual_seed(2402)
+        inp = torch.randn(
+            self.seq_len,
+            self.batch,
+            self.hidden_size,
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        grad = torch.randn_like(inp)
+        qfactory_recipe = recipe.CustomRecipe(
+            qfactory=nvfp4_linear_mxfp8_dpa_factory,
+            fp8_dpa=True,
+        )
+        try:
+            self._run_mha_model(model, inp, grad, qfactory_recipe, seed=2403)
+        finally:
+            for handle in handles:
+                handle.remove()
+
+        assert boundary_tensors["o_is_proj_input"]
+        assert saved_dpa_tensors["fp8_o"] is None
+        saved_o = saved_dpa_tensors["f16_o"]
+        assert type(saved_o) is torch.Tensor
+        assert saved_o.dtype is torch.bfloat16
+        assert (
+            saved_o.untyped_storage().data_ptr()
+            == boundary_tensors["o"].untyped_storage().data_ptr()
+        )
+
+        for name in ("q", "k", "v", "o", "proj_input", "dq", "dk", "dv", "do"):
+            tensor = boundary_tensors[name]
+            assert type(tensor) is torch.Tensor, f"{name} is {type(tensor)}"
+            assert tensor.dtype is torch.bfloat16, f"{name} has dtype {tensor.dtype}"
+
 
 @pytest.mark.skipif(not fp8_block_scaling_available, reason=reason_for_no_fp8_block_scaling)
 class TestHybridGemmBitwiseIdenticalBlockFP8:

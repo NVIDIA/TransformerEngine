@@ -526,11 +526,11 @@ class MultiheadAttention(torch.nn.Module):
 
         1. ``qkv_fp8_output``  — **QKV linear → DPA (fwd)**: the QKV
            linear's ``output_quantizer_role`` is told its consumer is DPA.
-        2. ``proj_fp8_grad``   — **Proj linear ← DPA (bwd)**: proj's
-           ``grad_input_quantizer_role`` is told its producer is DPA.
+        2. ``proj_fp8_grad``   — **Proj linear → DPA (bwd)**: proj's
+           ``grad_input_quantizer_role`` is told its consumer is DPA.
         3. ``dpa_fp8_output``  — **DPA → Proj linear (fwd)**: DPA's
            ``output_quantizer_role`` is told its consumer is the proj linear.
-        4. ``dpa_fp8_output``  — **DPA ← QKV linear (bwd)**: DPA's
+        4. ``dpa_fp8_output``  — **DPA → QKV linear (bwd)**: DPA's
            ``grad_input_quantizer_role`` is told its consumer is QKV linear.
 
         When a flag is ``False`` the corresponding role is reset to ``None``
@@ -556,7 +556,7 @@ class MultiheadAttention(torch.nn.Module):
                 self.query_layer.output_quantizer_role = qkv_output_role
             self.key_value.output_quantizer_role = qkv_output_role
 
-        # ── Boundary 2 (bwd): Proj grad-input ← produced by DPA ──────────
+        # ── Boundary 2 (bwd): Proj grad-input (dO) → consumed by DPA ─────
         proj_grad_input_role = (
             QuantizerRole(module_type="dpa", tensor_type="do", name=dpa_name)
             if proj_fp8_grad
