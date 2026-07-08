@@ -391,86 +391,54 @@ def test_autocast_sanity(fp8_recipe):
 # ---------------------------------------------------------------------------
 
 
+# Scalars in AttentionParams must stay concrete: assume_constant_result cannot
+# convert symbolic scalars (dynamo's automatic dynamic would make changed ints
+# symbolic on recompilation). Specializing them is the intended behavior and
+# will be handled by assume_constant_result(specialize_args=True)
+# (pytorch#189042); until then pin them static explicitly.
+@torch._dynamo.config.patch(specialize_int=True, specialize_float=True, recompile_limit=32)
 def test_get_attention_backend_traceable(monkeypatch):
-    """get_attention_backend must trace under torch.compile(fullgraph=True),
-    i.e. without any graph break, and NVTE_* env var reads must be guarded so
-    that changing an env var triggers recompilation instead of silently
-    reusing a stale backend selection."""
+    """get_attention_backend must trace under torch.compile(fullgraph=True)
+    without graph breaks. The compiled selection must stay consistent with
+    eager when NVTE_* env vars flip (dynamo guards on os.environ) and when
+    attention params change, and the tex.get_fused_attn_backend probe must be
+    consulted at trace time only, with its baked result driving the
+    selection."""
     from transformer_engine.pytorch.attention.dot_product_attention import utils as dpa_utils
-
-    attention_params = dpa_utils.AttentionParams()
-
-    def fn(x):
-        (
-            use_flash_attention,
-            _,
-            use_fused_attention,
-            _,
-            use_unfused_attention,
-            _,
-        ) = dpa_utils.get_attention_backend(attention_params)
-        return (
-            x
-            + (1 if use_flash_attention else 0)
-            + (2 if use_fused_attention else 0)
-            + (4 if use_unfused_attention else 0)
-        )
-
-    # Dynamo only guards os.environ entries that exist at trace time (reads
-    # of absent keys are not guarded yet), so set the vars explicitly.
-    for env_var in ("NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN"):
-        monkeypatch.setenv(env_var, "1")
-
-    torch._dynamo.reset()
-    compiled = torch.compile(fn, fullgraph=True)
-
-    x = torch.zeros(8, device="cuda")
-    torch.testing.assert_close(compiled(x), fn(x))
-
-    # Flip env vars one by one: the compiled function must recompile (guards
-    # on os.environ) and keep matching eager.
-    for env_var in ("NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN", "NVTE_FLASH_ATTN"):
-        monkeypatch.setenv(env_var, "0")
-        torch.testing.assert_close(compiled(x), fn(x))
-        monkeypatch.setenv(env_var, "1")
-
-
-def test_get_attention_backend_fused_backend_constant(monkeypatch):
-    """The tex.get_fused_attn_backend call inside get_attention_backend is
-    wrapped with assume_constant_result. Check that under torch.compile it is
-    (1) invoked at trace time only (not on every run), (2) still consulted
-    (with correct results) when attention params change and dynamo turns the
-    changed ints into symbolic scalars via automatic dynamic, and (3) its
-    return value actually drives the backend selection (verified by
-    monkeypatching it to report no available sub-backend)."""
-    from transformer_engine.pytorch.attention.dot_product_attention import utils as dpa_utils
-
-    # Restrict candidates to FusedAttention vs UnfusedDotProductAttention so
-    # the selection outcome encodes the tex.get_fused_attn_backend result.
-    monkeypatch.setenv("NVTE_FLASH_ATTN", "0")
-    monkeypatch.setenv("NVTE_FUSED_ATTN", "1")
-    monkeypatch.setenv("NVTE_UNFUSED_ATTN", "1")
 
     def fn(x, params):
         (
             use_flash_attention,
             _,
             use_fused_attention,
-            _,
+            fused_attention_backend,
             use_unfused_attention,
             _,
         ) = dpa_utils.get_attention_backend(params)
+        # Encode the full selection (enabled backends + fused sub-backend) in
+        # the tensor value: without a tensor op dynamo skips the frame entirely
+        # (nothing gets compiled or guarded), and the output makes compiled vs
+        # eager selection directly comparable.
         return (
             x
             + (1 if use_flash_attention else 0)
             + (2 if use_fused_attention else 0)
             + (4 if use_unfused_attention else 0)
+            + (8 * int(fused_attention_backend) if fused_attention_backend is not None else 0)
         )
 
-    x = torch.zeros(8, device="cuda")
-    params = dpa_utils.AttentionParams()
-    if fn(x, params)[0].item() != 2.0:
-        pytest.skip("FusedAttention not available for the default attention params")
+    # Dynamo only guards os.environ entries that exist at trace time (reads of
+    # absent keys are not guarded yet), so set the vars explicitly.
+    for env_var, value in (
+        ("NVTE_FLASH_ATTN", "1"),
+        ("NVTE_FUSED_ATTN", "1"),
+        ("NVTE_UNFUSED_ATTN", "1"),
+        ("NVTE_FP8_DPA_BWD", "1"),
+        ("NVTE_DPA_FP8CS_O_in_F16", "1"),
+        ("NVTE_DPA_FP8_RECIPE", ""),
+        ("NVTE_UnfusedDPA_Emulate_FP8", "0"),
+    ):
+        monkeypatch.setenv(env_var, value)
 
     calls = []
     real_get_backend = tex.get_fused_attn_backend
@@ -483,9 +451,10 @@ def test_get_attention_backend_fused_backend_constant(monkeypatch):
 
     torch._dynamo.reset()
     compiled = torch.compile(fn, fullgraph=True)
+    x = torch.zeros(8, device="cuda")
+    params = dpa_utils.AttentionParams()
 
-    out = compiled(x, params)
-    torch.testing.assert_close(out, x + 2.0)
+    torch.testing.assert_close(compiled(x, params), fn(x, params))
     calls_after_trace = len(calls)
     assert calls_after_trace >= 1, "tex.get_fused_attn_backend not invoked during tracing"
 
@@ -493,12 +462,26 @@ def test_get_attention_backend_fused_backend_constant(monkeypatch):
     compiled(x, params)
     assert len(calls) == calls_after_trace
 
-    # Changing attention params: the changed ints (head_dim, seqlens) become
-    # symbolic scalars on recompilation (dynamo's automatic dynamic).
-    # assume_constant_result cannot convert symbolic scalars to constants and
-    # graph breaks on them, so this phase compiles without fullgraph and only
-    # requires that the selection stays correct (tex consulted again, eagerly).
-    compiled_dyn = torch.compile(fn)
+    # Flip env vars one by one: the compiled function must recompile (guards
+    # on os.environ) and keep matching eager.
+    for env_var in ("NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN", "NVTE_FLASH_ATTN"):
+        monkeypatch.setenv(env_var, "0")
+        torch.testing.assert_close(compiled(x, params), fn(x, params))
+        monkeypatch.setenv(env_var, "1")
+
+    # FP8 attention (fp8_dpa recipe): covers the FP8-only branch (run_config
+    # env reads, recipe filters, get_fp8_te_dtype). Flipping an FP8-only env
+    # var (emulation enables UnfusedDotProductAttention) must recompile too.
+    fp8_params = dpa_utils.AttentionParams(
+        fp8=True, fp8_meta={"recipe": recipe.DelayedScaling(fp8_dpa=True)}
+    )
+    torch.testing.assert_close(compiled(x, fp8_params), fn(x, fp8_params))
+    monkeypatch.setenv("NVTE_UnfusedDPA_Emulate_FP8", "1")
+    torch.testing.assert_close(compiled(x, fp8_params), fn(x, fp8_params))
+    monkeypatch.setenv("NVTE_UnfusedDPA_Emulate_FP8", "0")
+
+    # Changing attention params (ints, layout string, dtype) must recompile
+    # and consult the probe again, still with no graph break.
     for changed_params in (
         dpa_utils.AttentionParams(head_dim_qk=128, head_dim_v=128),
         dpa_utils.AttentionParams(max_seqlen_q=512, max_seqlen_kv=512),
@@ -506,14 +489,16 @@ def test_get_attention_backend_fused_backend_constant(monkeypatch):
         dpa_utils.AttentionParams(qkv_dtype=torch.float16),
     ):
         num_calls = len(calls)
-        out = compiled_dyn(x, changed_params)
+        out = compiled(x, changed_params)
         assert len(calls) > num_calls, f"tex not consulted for {changed_params}"
         torch.testing.assert_close(out, fn(x, changed_params))
 
-    # The baked result must drive the selection: report no fused sub-backend
-    # and expect UnfusedDotProductAttention instead of FusedAttention. Use a
-    # fresh frame: already-compiled frames keep the previously baked constant
-    # (assume_constant_result installs no guard on the wrapped function).
+    # The baked probe result must drive the selection: report no fused
+    # sub-backend and expect UnfusedDotProductAttention (flash disabled, so the
+    # outcome is deterministic). Use a fresh frame: already-compiled frames
+    # keep the previously baked constant (assume_constant_result installs no
+    # guard on the wrapped function).
+    monkeypatch.setenv("NVTE_FLASH_ATTN", "0")
     monkeypatch.setattr(
         dpa_utils.tex,
         "get_fused_attn_backend",
@@ -525,53 +510,3 @@ def test_get_attention_backend_fused_backend_constant(monkeypatch):
 
     compiled_no_backend = torch.compile(fn_no_backend, fullgraph=True)
     torch.testing.assert_close(compiled_no_backend(x, params), x + 4.0)
-
-
-def test_get_attention_backend_traceable_fp8(monkeypatch):
-    """Backend selection for FP8 attention (fp8_dpa recipes) must also trace
-    under torch.compile(fullgraph=True), including the FP8-only env var reads
-    and recipe filters, and the FP8 env vars must be guarded."""
-    from transformer_engine.pytorch.attention.dot_product_attention import utils as dpa_utils
-
-    for env_var, value in (
-        ("NVTE_FLASH_ATTN", "1"),
-        ("NVTE_FUSED_ATTN", "1"),
-        ("NVTE_UNFUSED_ATTN", "1"),
-        ("NVTE_FP8_DPA_BWD", "1"),
-        ("NVTE_DPA_FP8CS_O_in_F16", "1"),
-        ("NVTE_DPA_FP8_RECIPE", ""),
-        ("NVTE_UnfusedDPA_Emulate_FP8", "0"),
-    ):
-        monkeypatch.setenv(env_var, value)
-
-    attention_params = dpa_utils.AttentionParams(
-        fp8=True,
-        fp8_meta={"recipe": recipe.DelayedScaling(fp8_dpa=True)},
-    )
-
-    def fn(x):
-        (
-            use_flash_attention,
-            _,
-            use_fused_attention,
-            _,
-            use_unfused_attention,
-            _,
-        ) = dpa_utils.get_attention_backend(attention_params)
-        return (
-            x
-            + (1 if use_flash_attention else 0)
-            + (2 if use_fused_attention else 0)
-            + (4 if use_unfused_attention else 0)
-        )
-
-    torch._dynamo.reset()
-    compiled = torch.compile(fn, fullgraph=True)
-
-    x = torch.zeros(8, device="cuda")
-    torch.testing.assert_close(compiled(x), fn(x))
-
-    # FP8-only env var: allowing FP8 emulation enables UnfusedDotProductAttention,
-    # which must trigger recompilation (guard on os.environ) and match eager.
-    monkeypatch.setenv("NVTE_UnfusedDPA_Emulate_FP8", "1")
-    torch.testing.assert_close(compiled(x), fn(x))
