@@ -5,6 +5,7 @@
 """Python interface for fused attention extensions"""
 
 import math
+from enum import IntEnum
 from typing import Tuple, List, Union, Optional
 import torch
 import transformer_engine_torch as tex
@@ -97,11 +98,19 @@ SoftmaxType = {
     "learnable": NVTE_Softmax_Type.NVTE_LEARNABLE_SOFTMAX,
 }
 
-FusedAttnBackend = {
-    "F16_arbitrary_seqlen": NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
-    "FP8": NVTE_Fused_Attn_Backend.NVTE_FP8,
-    "No_Backend": NVTE_Fused_Attn_Backend.NVTE_No_Backend,
-}
+# Python-side mirror of tex.NVTE_Fused_Attn_Backend, generated at import time
+# so the values always match the C enum. Unlike the pybind enum, a plain-python
+# IntEnum is traceable by torch.compile: comparisons constant-fold cleanly and
+# instances safely cross the assume_constant_result boundary in
+# get_attention_backend. Lookup by name (FusedAttnBackend["FP8"]) works the
+# same way as with the dict this used to be.
+FusedAttnBackend = IntEnum(
+    "FusedAttnBackend",
+    {
+        name[len("NVTE_") :]: int(value)
+        for name, value in NVTE_Fused_Attn_Backend.__members__.items()
+    },
+)
 
 BACKEND_FP8_THREADS_PER_CTA = 128
 BACKEND_F16arb_ELTS_PER_THREADS = 16
@@ -124,7 +133,7 @@ def fused_attn_fwd(
     k: torch.Tensor,
     v: torch.Tensor,
     fake_dtype: torch.dtype,
-    fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
+    fused_attention_backend: FusedAttnBackend,
     attn_bias: torch.Tensor = None,
     cu_seqlens_q_padded: torch.Tensor = None,
     cu_seqlens_kv_padded: torch.Tensor = None,
@@ -176,7 +185,7 @@ def fused_attn_fwd(
     fake_dtype : DType
                 data type of Q, K and V - in case of high precision, fake dtype in case of FP8;
                 in torch.dtype
-    fused_attention_backend : tex.NVTE_Fused_Attn_Backend
+    fused_attention_backend : FusedAttnBackend
                 please see FusedAttention module for details on supported backends.
     attn_bias : torch.Tensor, default = None
                 input tensor Bias when attn_bias_type is "pre_scale_bias" or "post_scale_bias";
@@ -397,7 +406,7 @@ def fused_attn_bwd(
     d_o: torch.Tensor,
     fake_dtype: torch.dtype,
     aux_ctx_tensors: List[torch.Tensor],
-    fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
+    fused_attention_backend: FusedAttnBackend,
     cu_seqlens_q_padded: torch.Tensor = None,
     cu_seqlens_kv_padded: torch.Tensor = None,
     s_quantizer: Quantizer = None,
@@ -453,7 +462,7 @@ def fused_attn_bwd(
     aux_ctx_tensors : List[torch.Tensor]
                 auxiliary output tensors of the forward pass when its is_training is True,
                 e.g. aux_ctx_tensors = [S, Max, rng_state]
-    fused_attention_backend : tex.NVTE_Fused_Attn_Backend
+    fused_attention_backend : FusedAttnBackend
                 please see FusedAttention module for details on supported backends.
     cu_seqlens_q_padded : torch.Tensor, default = None
                 cumulative sequence offsets for Q; shape [batch_size + 1]

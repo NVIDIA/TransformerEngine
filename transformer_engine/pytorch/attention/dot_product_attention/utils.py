@@ -343,30 +343,18 @@ _no_op_logger = _NoOpLogger()
 
 
 @torch.compiler.assume_constant_result
-def _get_fused_attn_backend_int(*args):
+def _get_fused_attn_backend(*args):
     """
-    Wrapper for tex.get_fused_attn_backend returning the backend as a plain int.
-    The result only depends on the attention configuration (not on tensor
-    values), so it is marked with assume_constant_result to keep
-    get_attention_backend traceable by torch.compile without a graph break on
-    the C extension call. It returns an int rather than the pybind enum: an int
-    is a python literal that safely crosses the compile boundary, while
-    comparing a baked pybind enum object against module-level enum values
-    generates guards dynamo cannot evaluate.
+    Wrapper for tex.get_fused_attn_backend returning the backend as the
+    python-side FusedAttnBackend enum. The result only depends on the attention
+    configuration (not on tensor values), so it is marked with
+    assume_constant_result to keep get_attention_backend traceable by
+    torch.compile without a graph break on the C extension call. The pybind
+    enum is converted to FusedAttnBackend here: a python enum safely crosses
+    the compile boundary, while comparing a baked pybind enum object against
+    module-level enum values generates guards dynamo cannot evaluate.
     """
-    return int(tex.get_fused_attn_backend(*args))
-
-
-@torch.compiler.assume_constant_result
-def _fused_attn_backend_from_int(backend_int):
-    """Reconstruct the NVTE_Fused_Attn_Backend enum from its int value."""
-    return tex.NVTE_Fused_Attn_Backend(backend_int)
-
-
-# Plain-int values of the FusedAttnBackend enums, precomputed eagerly so that
-# backend comparisons inside get_attention_backend are traceable (see
-# _get_fused_attn_backend_int).
-_FUSED_ATTN_BACKEND_INT = {name: int(backend) for name, backend in FusedAttnBackend.items()}
+    return FusedAttnBackend(int(tex.get_fused_attn_backend(*args)))
 
 
 def get_attention_backend(
@@ -385,7 +373,7 @@ def get_attention_backend(
         Whether the `FlashAttention` backend has been selected.
     use_fused_attention : bool
         Whether the `FusedAttention` backend has been selected.
-    fused_attention_backend : tex.NVTE_Fused_Attn_Backend
+    fused_attention_backend : FusedAttnBackend
         If `use_fused_attention = True`, one of `FusedAttention` three sub-backends, else `None`.
     use_unfused_attention : bool
         Whether the `UnfusedDotProductAttention` backend has been selected.
@@ -1409,7 +1397,6 @@ def get_attention_backend(
             use_fused_attention = False
     # Filter: cuDNN support
     fused_attention_backend = None
-    fused_attention_backend_int = None
     if use_fused_attention:
         # ``DType`` is implicitly convertible to ``transformer_engine::DType``
         # on the C++ side, so pass it straight to the pybind function.
@@ -1422,7 +1409,7 @@ def get_attention_backend(
         # (dynamo's automatic dynamic on recompilation, or dynamic shapes);
         # assume_constant_result requires concrete values and currently graph
         # breaks on symbolic scalars.
-        fused_attention_backend_int = _get_fused_attn_backend_int(
+        fused_attention_backend = _get_fused_attn_backend(
             is_training,
             q_type,
             kv_type,
@@ -1443,24 +1430,18 @@ def get_attention_backend(
             cuda_graph,
             deterministic,
         )
-        fused_attention_backend = _fused_attn_backend_from_int(fused_attention_backend_int)
-        if fused_attention_backend_int == _FUSED_ATTN_BACKEND_INT["No_Backend"]:
+        if fused_attention_backend == FusedAttnBackend["No_Backend"]:
             logger.debug("Disabling FusedAttention as no backend supports the provided input")
             use_fused_attention = False
             fused_attention_backend = None
-            fused_attention_backend_int = None
-        elif (
-            has_score_mod
-            and fused_attention_backend_int != _FUSED_ATTN_BACKEND_INT["F16_arbitrary_seqlen"]
-        ):
+        elif has_score_mod and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]:
             logger.debug(
                 "Disabling FusedAttention for score_mod because sub-backend %s is not "
                 "F16/BF16 arbitrary-seqlen",
-                fused_attention_backend_int,
+                int(fused_attention_backend),
             )
             use_fused_attention = False
             fused_attention_backend = None
-            fused_attention_backend_int = None
     # Filter: Determinism
     # backend                      | deterministic
     # ---------------------------------------------
@@ -1502,9 +1483,8 @@ def get_attention_backend(
             )
             use_fused_attention = False
             fused_attention_backend = None
-            fused_attention_backend_int = None
         if (
-            fused_attention_backend_int == _FUSED_ATTN_BACKEND_INT["FP8"]
+            fused_attention_backend == FusedAttnBackend["FP8"]
             and is_training
             and (device_compute_capability < (9, 0) or cudnn_version < (9, 19, 0))
         ):
@@ -1514,9 +1494,8 @@ def get_attention_backend(
             )
             use_fused_attention = False
             fused_attention_backend = None
-            fused_attention_backend_int = None
         if (
-            fused_attention_backend_int == _FUSED_ATTN_BACKEND_INT["F16_arbitrary_seqlen"]
+            fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
             and is_training
             and (
                 device_compute_capability < (9, 0)
@@ -1527,7 +1506,6 @@ def get_attention_backend(
             logger.debug("Disabling FusedAttention for determinism reasons with post_scale_bias")
             use_fused_attention = False
             fused_attention_backend = None
-            fused_attention_backend_int = None
 
     # use_flash_attention may have been set above
     use_flash_attention_2 = use_flash_attention and use_flash_attention_2
