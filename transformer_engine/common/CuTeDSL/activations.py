@@ -22,8 +22,8 @@ def act_gelu(x: Float32) -> Float32:
     rather than the `tanh.approx.f32` PTX intrinsic — TE compiles activation
     kernels without `--use_fast_math` by default, so its `tanhf` is the
     IEEE-precise expansion."""
-    A = Float32(0.79788456)       # sqrt(2/π) truncated to TE's 8-digit literal
-    B = Float32(0.03567741)       # = sqrt(2/π) · 0.044715, same truncation
+    A = Float32(0.79788456)  # sqrt(2/π) truncated to TE's 8-digit literal
+    B = Float32(0.03567741)  # = sqrt(2/π) · 0.044715, same truncation
     return x * (Float32(0.5) + Float32(0.5) * cute.math.tanh(x * (A + B * x * x)))
 
 
@@ -45,15 +45,26 @@ def act_srelu(x: Float32) -> Float32:
     r = cute.arch.fmax(x, Float32(0.0))
     return r * r
 
+
 @dsl_user_op
 def dact_drelu(x: Float32, *, loc=None, ip=None) -> Float32:
     """drelu: x > 0 ? 1 : 0. Matches math.h `drelu` (NaN → 0 via ordered compare)."""
-    cond = mlir_arith.cmpf(mlir_arith.CmpFPredicate.OGT,
-                           x.ir_value(loc=loc, ip=ip),
-                           Float32(0.0).ir_value(loc=loc, ip=ip), loc=loc, ip=ip)
-    return Float32(mlir_arith.select(cond,
-                                     Float32(1.0).ir_value(loc=loc, ip=ip),
-                                     Float32(0.0).ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
+    cond = mlir_arith.cmpf(
+        mlir_arith.CmpFPredicate.OGT,
+        x.ir_value(loc=loc, ip=ip),
+        Float32(0.0).ir_value(loc=loc, ip=ip),
+        loc=loc,
+        ip=ip,
+    )
+    return Float32(
+        mlir_arith.select(
+            cond,
+            Float32(1.0).ir_value(loc=loc, ip=ip),
+            Float32(0.0).ir_value(loc=loc, ip=ip),
+            loc=loc,
+            ip=ip,
+        )
+    )
 
 
 def dact_dsrelu(x: Float32) -> Float32:
@@ -91,7 +102,6 @@ def dact_dgelu(x: Float32) -> Float32:
         Float32(0.79788456) * x * (Float32(1.0) + Float32(0.044715) * x * x),
         fastmath=False,
     )
-    return (Float32(0.5) * x
-            * ((Float32(1.0) - t * t) * (Float32(0.79788456) + Float32(0.1070322243) * x * x))
-            + Float32(0.5) * (Float32(1.0) + t))
-
+    return Float32(0.5) * x * (
+        (Float32(1.0) - t * t) * (Float32(0.79788456) + Float32(0.1070322243) * x * x)
+    ) + Float32(0.5) * (Float32(1.0) + t)

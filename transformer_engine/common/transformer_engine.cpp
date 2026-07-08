@@ -6,8 +6,6 @@
 
 #include <transformer_engine/transformer_engine.h>
 
-#include "tvm_ffi_bridge.h"
-
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -23,6 +21,7 @@
 #include "common.h"
 #include "common/util/cuda_runtime.h"
 #include "common/util/logging.h"
+#include "tvm_ffi_bridge.h"
 
 namespace transformer_engine {
 
@@ -1364,8 +1363,7 @@ NVTEShape nvte_get_grouped_tensor_logical_shape(const NVTEGroupedTensor tensor) 
   return t.logical_shape;
 }
 
-extern "C" __attribute__((visibility("default"))) void nvte_set_cutedsl_quant_backend(
-    int enabled) {
+extern "C" __attribute__((visibility("default"))) void nvte_set_cutedsl_quant_backend(int enabled) {
   // Runtime toggle of the CuTeDSL quantize backend, overriding the
   // NVTE_ENABLE_CUTEDSL_QUANT_BACKEND env default. Exported as a plain C
   // symbol so Python tests can call it via ctypes on libtransformer_engine.so

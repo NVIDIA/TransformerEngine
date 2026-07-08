@@ -124,8 +124,7 @@ void init_cutedsl_extension() {
   // dispatcher probes them via tvm::ffi::Function::GetGlobal and falls back to
   // the CUDA kernels when absent.
   auto cutedsl_module = py::module_::import("transformer_engine.common.CuTeDSL");
-  PyObject *register_fn =
-      PyObject_GetAttrString(cutedsl_module.ptr(), "register_cutedsl_backends");
+  PyObject *register_fn = PyObject_GetAttrString(cutedsl_module.ptr(), "register_cutedsl_backends");
   NVTE_CHECK(register_fn != nullptr,
              "Internal error: could not initialize pyTorch CuTeDSL extension.");
   Py_DECREF(register_fn);
