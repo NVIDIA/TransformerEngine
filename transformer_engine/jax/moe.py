@@ -228,7 +228,6 @@ def _ffn_fwd_per_shard(
     wo_bias: Optional[jnp.ndarray],
     *,
     num_local_experts: int,
-    slots_per_expert: int,
     activation_type: str,
     apply_topk_weights_early: bool,
 ):
@@ -249,7 +248,6 @@ def _ffn_fwd_per_shard(
     sorted_x = recv_tokens_local.reshape(-1, hidden)
     recv_w_flat = recv_topk_weights_local.reshape(-1)
     local_group_sizes = token_counts_local.reshape(-1).astype(jnp.int32)
-    del slots_per_expert  # not used since group_sizes is plumbed in dynamically
 
     wi_0 = wi_0.astype(sorted_x.dtype)
     wi_1 = wi_1.astype(sorted_x.dtype)
@@ -514,20 +512,20 @@ def _moe_fwd_rule(
 
     # Per-rank send capacity: B/num_procs rows x S tokens per rank.
     max_tokens_per_rank = (B // num_procs) * S
-    # Per-rank receive capacity. NCCL EP HT lays out the per-rank receive
-    # buffer as ``[num_local_experts, num_ep * max_tokens_per_rank, hidden]``
-    # (see nccl_ep.cc::init kernel buffer sizing + the LL combine assertion
-    # at nccl_ep.cc:2185 which spells out the same layout). The natural
-    # dropless K-expanded count
-    # ``ceil((B/dp)*S*K / num_local_experts)`` does NOT match: it ignores
-    # the worst-case where all of one EP group's tokens land on a single
-    # local expert. We must size to that worst case or NCCL EP's HT kernel
-    # rejects the dispatch buffer with ``invalid argument``.
-    natural_spe = num_ep * max_tokens_per_rank  # = (B // dp_size) * S
-    # NCCL EP requires each expert-major output block to be at least
-    # ``_ALIGN_SIZE`` (=128) tokens; see the constant's docstring.
-    slots_per_expert = ((natural_spe + _ALIGN_SIZE - 1) // _ALIGN_SIZE) * _ALIGN_SIZE
-    recv_pr = num_local_experts * slots_per_expert
+    # Per-rank receive capacity. NCCL EP HT expert-major lays out variable
+    # per-expert zones in one flat recv buffer, with each non-empty zone padded
+    # to ``dispatch_output_per_expert_alignment``.
+    tokens_per_ep_group = num_ep * max_tokens_per_rank
+    max_local_assignments = tokens_per_ep_group * min(K, num_local_experts)
+    max_nonempty_experts = min(num_local_experts, max_local_assignments)
+    padded_total_bound = max_local_assignments + (_ALIGN_SIZE - 1) * max_nonempty_experts
+    aligned_total_bound = (
+        (padded_total_bound + _ALIGN_SIZE - 1) // _ALIGN_SIZE
+    ) * _ALIGN_SIZE
+    per_expert_bound = num_local_experts * (
+        (tokens_per_ep_group + _ALIGN_SIZE - 1) // _ALIGN_SIZE
+    ) * _ALIGN_SIZE
+    recv_pr = min(per_expert_bound, aligned_total_bound)
 
     _te_ep_assert_compatible_bootstrap(
         num_experts=num_experts,
@@ -723,7 +721,6 @@ def _moe_fwd_rule(
             w1b,
             wob,
             num_local_experts=num_local_experts,
-            slots_per_expert=slots_per_expert,
             activation_type=activation_type,
             apply_topk_weights_early=apply_topk_weights_early,
         )

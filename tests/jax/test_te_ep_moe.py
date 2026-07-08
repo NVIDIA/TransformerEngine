@@ -183,22 +183,25 @@ AUX_RTOL = 1e-3
 def _compute_worst_case_recv_pr():
     """Per-rank recv buffer the bootstrap must reserve.
 
-    NCCL EP's HT path lays out the per-rank receive buffer as
-    ``[num_local_experts, ep_size * max_tokens_per_rank, hidden]``
-    (per the LL combine assertion at ``nccl_ep.cc:2185`` and the
-    HT IPC buffer sizing at ``nccl_ep.cc:415``). We must mirror that
-    flattened total or ``ncclEpDispatch`` aborts with
-    ``invalid argument`` at ``ep_backend.cpp:414``. The moe block
-    computes ``recv_pr`` the same way (see ``moe.py``'s
-    ``natural_spe = num_ep * max_tokens_per_rank`` rounded up to
-    ``_ALIGN_SIZE``); keeping the bootstrap formula in lock-step here.
+    NCCL EP HT expert-major uses one flat recv buffer with variable
+    per-expert zones. Each non-empty expert zone is padded to
+    ``_ALIGN_SIZE`` slots, so the reserve must cover the worst-case
+    total assignments plus independent per-zone padding.
     """
     num_procs = jax.device_count()
     num_local_experts = NUM_EXPERTS // EP_SIZE
     max_tokens_per_rank = (BATCH // num_procs) * SEQ
-    natural_spe = EP_SIZE * max_tokens_per_rank
-    slots_per_expert = ((natural_spe + _ALIGN_SIZE - 1) // _ALIGN_SIZE) * _ALIGN_SIZE
-    return num_local_experts * slots_per_expert
+    tokens_per_ep_group = EP_SIZE * max_tokens_per_rank
+    max_local_assignments = tokens_per_ep_group * min(TOPK, num_local_experts)
+    max_nonempty_experts = min(num_local_experts, max_local_assignments)
+    padded_total_bound = max_local_assignments + (_ALIGN_SIZE - 1) * max_nonempty_experts
+    aligned_total_bound = (
+        (padded_total_bound + _ALIGN_SIZE - 1) // _ALIGN_SIZE
+    ) * _ALIGN_SIZE
+    per_expert_bound = num_local_experts * (
+        (tokens_per_ep_group + _ALIGN_SIZE - 1) // _ALIGN_SIZE
+    ) * _ALIGN_SIZE
+    return min(per_expert_bound, aligned_total_bound)
 
 
 @pytest.fixture(scope="module")
