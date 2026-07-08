@@ -45,16 +45,17 @@ class EpResources {
     NVTE_CHECK_NCCL(ncclCommInitRank(&comm_, p.ep_size, uid, p.rank_within_group));
     // zero_copy=0: JAX EP path always stages payloads; the zero-copy fast path
     // requires NVTECommWindow-backed tensors, which JAX bindings don't expose.
-    NVTEEpGroupConfig cfg{.ep_size = p.ep_size,
+    NVTEEpGroupConfig cfg{.struct_size = sizeof(NVTEEpGroupConfig),
+                          .ep_size = p.ep_size,
                           .num_experts = p.num_experts,
                           .max_tokens_per_rank = p.max_tokens_per_rank,
                           .max_recv_tokens_per_rank = p.max_recv_tokens_per_rank,
                           .hidden_dim = p.hidden_dim,
-                          .max_num_sms = p.max_num_sms,
+                          .num_comm_sms = p.max_num_sms,
                           .max_token_dtype = p.max_token_dtype,
                           .zero_copy = 0};
     try {
-      nvte_ep_initialize(static_cast<void*>(comm_), cfg);
+      nvte_ep_initialize(static_cast<void*>(comm_), &cfg);
     } catch (...) {
       ncclCommDestroy(comm_);
       comm_ = nullptr;
@@ -162,8 +163,11 @@ void ReleaseEpResources() {
 }
 
 size_t EpHandleMemSize(int top_k, size_t dispatch_output_per_expert_alignment) {
-  NVTEEpLayerConfig layer_cfg{top_k, dispatch_output_per_expert_alignment};
-  return nvte_ep_handle_mem_size(layer_cfg);
+  NVTEEpLayerConfig layer_cfg{
+      .struct_size = sizeof(NVTEEpLayerConfig),
+      .top_k = top_k,
+      .dispatch_output_per_expert_alignment = dispatch_output_per_expert_alignment};
+  return nvte_ep_handle_mem_size(&layer_cfg);
 }
 
 pybind11::capsule GetEpInstanceStateTypeIdCapsule() {
@@ -192,7 +196,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpInstantiateHandler, EpInstantiateImpl, FFI::Bind
 // ── ep_prepare ────────────────────────────────────────────────────────────────
 
 Error_Type EpPrepareFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_Type topk_idx,
-                        Result_Type token_counts, Result_Type handle_mem, Result_Type workspace,
+                        Result_Type recv_tokens_per_expert, Result_Type handle_mem,
                         EpConfig config) {
   (void)ep_state;  // lifetime only.
   auto topk_dims = topk_idx.dimensions();
@@ -204,29 +208,22 @@ Error_Type EpPrepareFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_T
 
   std::vector<size_t> topk_shape = {product(topk_dims, 0, topk_dims.size() - 1),
                                     static_cast<size_t>(topk_dims.back())};
-  // NCCL EP currently requires int64 topk_idx; upcast int32 on-stream.
-  // TODO(phuong): drop once NCCL EP accepts int32.
-  void* topk_idx_data = topk_idx.untyped_data();
-  if (idx_etype == ::xla::ffi::DataType::S32) {
-    const size_t n = topk_shape[0] * topk_shape[1];
-    NVTE_CHECK(static_cast<size_t>(workspace->element_count()) >= n,
-               "workspace too small for int32 → int64 upcast: element_count=",
-               workspace->element_count(), " < required ", n);
-    int64_t* ws = reinterpret_cast<int64_t*>(workspace->untyped_data());
-    nvte_convert_int32_to_int64(reinterpret_cast<const int32_t*>(topk_idx_data), ws, n, stream);
-    topk_idx_data = ws;
-  }
-  auto topk_idx_ = TensorWrapper(topk_idx_data, topk_shape, DType::kInt64);
+  auto topk_idx_ = TensorWrapper(topk_idx.untyped_data(), topk_shape,
+                                 convert_ffi_datatype_to_te_dtype(idx_etype));
 
-  std::vector<size_t> tc_shape = {static_cast<size_t>(token_counts->element_count())};
-  auto token_counts_ = TensorWrapper(token_counts->untyped_data(), tc_shape, DType::kInt32);
+  std::vector<size_t> tc_shape = {static_cast<size_t>(recv_tokens_per_expert->element_count())};
+  auto recv_tokens_per_expert_ =
+      TensorWrapper(recv_tokens_per_expert->untyped_data(), tc_shape, DType::kInt32);
 
   std::vector<size_t> hm_shape = {static_cast<size_t>(handle_mem->element_count())};
   auto handle_mem_ = TensorWrapper(handle_mem->untyped_data(), hm_shape, DType::kByte);
 
-  NVTEEpLayerConfig layer_cfg{static_cast<int>(config.top_k),
-                              static_cast<size_t>(config.dispatch_output_per_expert_alignment)};
-  nvte_ep_prepare(handle_mem_.data(), topk_idx_.data(), token_counts_.data(), layer_cfg, stream);
+  NVTEEpLayerConfig layer_cfg{.struct_size = sizeof(NVTEEpLayerConfig),
+                              .top_k = static_cast<int>(config.top_k),
+                              .dispatch_output_per_expert_alignment =
+                                  static_cast<size_t>(config.dispatch_output_per_expert_alignment)};
+  nvte_ep_prepare(handle_mem_.data(), topk_idx_.data(), recv_tokens_per_expert_.data(),
+                  /*total_recv_tokens_per_rank=*/nullptr, &layer_cfg, stream);
   return ffi_with_cuda_error_check();
 }
 
@@ -235,9 +232,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpPrepareHandler, EpPrepareFFI,
                                   .Ctx<FFI_Stream_Type>()                     // stream
                                   .Ctx<::xla::ffi::State<EpInstanceState>>()  // EP state
                                   .Arg<Buffer_Type>()                         // topk_idx
-                                  .Ret<Buffer_Type>()                         // token_counts
-                                  .Ret<Buffer_Type>()                         // handle_mem
-                                  .Ret<Buffer_Type>()  // workspace (FFI scratch)
+                                  .Ret<Buffer_Type>()  // recv_tokens_per_expert
+                                  .Ret<Buffer_Type>()  // handle_mem
                                   .Attrs<EpConfig>(),
                               FFI_CudaGraph_Traits);
 
@@ -245,8 +241,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpPrepareHandler, EpPrepareFFI,
 
 Error_Type EpDispatchFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_Type handle_mem,
                          Buffer_Type topk_idx, Buffer_Type tokens, Buffer_Type topk_weights,
-                         Result_Type recv_tokens, Result_Type recv_topk_weights,
-                         Result_Type workspace, EpConfig config) {
+                         Result_Type recv_tokens, Result_Type recv_topk_weights, EpConfig config) {
   (void)ep_state;
   auto token_dims = tokens.dimensions();
   NVTE_CHECK(token_dims.size() >= 2,
@@ -265,19 +260,8 @@ Error_Type EpDispatchFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_
              ") must match topk_idx last dim (", idx_dims.back(), ")");
   std::vector<size_t> idx_shape = {product(idx_dims, 0, idx_dims.size() - 1),
                                    static_cast<size_t>(idx_dims.back())};
-  // NCCL EP currently requires int64 topk_idx; upcast int32 on-stream.
-  // TODO(phuong): drop once NCCL EP accepts int32.
-  void* topk_idx_data = topk_idx.untyped_data();
-  if (idx_etype == ::xla::ffi::DataType::S32) {
-    const size_t n = idx_shape[0] * idx_shape[1];
-    NVTE_CHECK(static_cast<size_t>(workspace->element_count()) >= n,
-               "workspace too small for int32 → int64 upcast: element_count=",
-               workspace->element_count(), " < required ", n);
-    int64_t* ws = reinterpret_cast<int64_t*>(workspace->untyped_data());
-    nvte_convert_int32_to_int64(reinterpret_cast<const int32_t*>(topk_idx_data), ws, n, stream);
-    topk_idx_data = ws;
-  }
-  auto topk_idx_ = TensorWrapper(topk_idx_data, idx_shape, DType::kInt64);
+  auto topk_idx_ = TensorWrapper(topk_idx.untyped_data(), idx_shape,
+                                 convert_ffi_datatype_to_te_dtype(idx_etype));
 
   const size_t T_flat = product(token_dims, 0, token_dims.size() - 1);
   const size_t H = static_cast<size_t>(token_dims.back());
@@ -328,7 +312,6 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpDispatchHandler, EpDispatchFFI,
                                   .Arg<Buffer_Type>()                         // topk_weights
                                   .Ret<Buffer_Type>()                         // recv_tokens
                                   .Ret<Buffer_Type>()                         // recv_topk_weights
-                                  .Ret<Buffer_Type>()  // workspace (FFI scratch)
                                   .Attrs<EpConfig>(),
                               FFI_CudaGraph_Traits);
 

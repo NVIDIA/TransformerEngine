@@ -1133,8 +1133,13 @@ class DotProductAttention(TransformerEngineBaseModule):
 
             Users can use environment variables :attr:`NVTE_FLASH_ATTN`, :attr:`NVTE_FUSED_ATTN`,
             and :attr:`NVTE_FUSED_ATTN_BACKEND` to control which DotProductAttention backend,
-            and FusedAttention backend if applicable, to use. Transformer Engine prioritizes
-            FlashAttention over FusedAttention and over UnfusedDotProductAttention.
+            and FusedAttention backend if applicable, to use. Transformer Engine first filters
+            backends by support for the runtime environment and input configuration, then applies
+            a performance-based preference order. On supported pre-Hopper GPUs, FlashAttention is
+            preferred over FusedAttention and UnfusedDotProductAttention when both optimized
+            backends are eligible. On Hopper and newer GPUs, including Blackwell, FusedAttention is
+            preferred over FlashAttention and UnfusedDotProductAttention when both optimized
+            backends are eligible.
             If FusedAttention is being used, users can also choose to switch to flash-attn's
             implementation for backward by setting :attr:`NVTE_FUSED_ATTN_USE_FAv2_BWD=1`
             (default: 0), because of the performance differences between various versions of
@@ -1632,16 +1637,24 @@ class DotProductAttention(TransformerEngineBaseModule):
                         False
                     ), "core_attention_bias must be in one of {bhss, 1hss, b1ss, 11ss, 111s} shapes"
 
-            # check if there is padding between sequences when qkv_format='thd'
+            # Default pad_between_seqs auto-detect. For THD, infer presence of
+            # inter-sequence padding from whether padded cu_seqlens were supplied --
+            # sync-free, and stable across eager and CUDA graph capture (the auto-detect
+            # must return the same value in both modes for backend selection to match).
+            # If padded cu_seqlens are the *same object* as the unpadded ones, no real
+            # inter-sequence padding exists (only THD tail padding) -- treat as False so
+            # FlashAttention v2/v4 remain eligible.
             if pad_between_seqs is None:
                 if qkv_format == "thd":
-                    pad_between_seqs = (
-                        cu_seqlens_q_padded is not None
-                        and not torch.equal(cu_seqlens_q_padded[:-1], cu_seqlens_q[:-1])
-                    ) or (
-                        cu_seqlens_kv_padded is not None
-                        and not torch.equal(cu_seqlens_kv_padded[:-1], cu_seqlens_kv[:-1])
-                    )
+                    if (
+                        cu_seqlens_q_padded is cu_seqlens_q
+                        and cu_seqlens_kv_padded is cu_seqlens_kv
+                    ):
+                        pad_between_seqs = False
+                    else:
+                        pad_between_seqs = (
+                            cu_seqlens_q_padded is not None or cu_seqlens_kv_padded is not None
+                        )
                 else:
                     pad_between_seqs = False
 

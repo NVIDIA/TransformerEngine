@@ -312,10 +312,13 @@ class _GroupedLinear(torch.autograd.Function):
         and be incompatible with CUDA Graphs.
 
         Supported Compute Capability (CC) and precisions:
-        * Hopper (CC 9.0): BF16/FP16.
-        * Blackwell (CC 10.x and 11.0): BF16/FP16/MXFP8/NVFP4 with RHT.
-        FP8 delayed / current scaling, and FP8 block scaling are not supported because the
+        * Hopper (CC 9.0): BF16/FP16 and FP8 per-tensor current scaling.
+        * Blackwell (CC 10.x and 11.0): BF16/FP16/MXFP8/NVFP4 with RHT and FP8
+          per-tensor current scaling.
+        FP8 delayed scaling and FP8 block scaling are not supported because the
         corresponding grouped quantization kernels are missing.
+        Grouped GEMM requires cuBLAS 13.3+ (13.4+ on Hopper, 13.5+ for FP8
+        per-tensor current scaling on Hopper); otherwise the legacy path is used.
         Non-RHT NVFP4 falls back to the legacy path because graph-safe grouped quantization
         currently requires RHT.
 
@@ -334,15 +337,27 @@ class _GroupedLinear(torch.autograd.Function):
             or save_original_input
         ):
             return False
-        # 3. Filter by compute capability
-        if not (9, 0) <= get_device_compute_capability() <= (11, 0):
+        # 3. Filter by compute capability and cuBLAS version
+        device_capability = get_device_compute_capability()
+        if not (9, 0) <= device_capability <= (11, 0):
+            return False
+        cublaslt_version = tex.get_cublasLt_version()
+        if cublaslt_version < 130300:
+            return False
+        if device_capability < (10, 0) and cublaslt_version < 130400:
             return False
         # 4. Output quantization is not supported.
         if any(q is not None for q in output_quantizers):
             return False
         # 5. Filter by quantization recipes.
         if fp8:
-            if not (10, 0) <= get_device_compute_capability() <= (11, 0):
+            if all(isinstance(q, Float8CurrentScalingQuantizer) for q in input_quantizers):
+                # FP8 per-tensor scaling grouped GEMM on Hopper requires cuBLAS 13.5+.
+                if device_capability < (10, 0) and cublaslt_version < 130500:
+                    return False
+                return True
+            # MXFP8 and NVFP4 require Blackwell+.
+            if not (10, 0) <= device_capability <= (11, 0):
                 return False
             return all(isinstance(q, MXFP8Quantizer) for q in input_quantizers) or all(
                 isinstance(q, NVFP4Quantizer) and q.with_rht for q in input_quantizers
@@ -537,7 +552,9 @@ class _GroupedLinear(torch.autograd.Function):
 
         if is_grad_enabled:
             if weight_requires_grad:
-                if fp8:
+                # (For FP8 per tensor current scaling on Hopper --> Free Rowwise Data
+                # in backward pass)
+                if fp8 and grouped_x.columnwise_data is not None:
                     grouped_x.rowwise_data = None
                     grouped_x.scale_inv = None
             else:
@@ -640,6 +657,8 @@ class _GroupedLinear(torch.autograd.Function):
             backward_override = None
         if backward_override == "high_precision":
             save_original_input = True
+        elif backward_override == "dequantized":
+            save_original_input = False
 
         num_gemms = len(m_splits)
         weights = weights_and_biases[:num_gemms]
