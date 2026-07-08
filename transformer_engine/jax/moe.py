@@ -746,16 +746,10 @@ def _moe_fwd_rule(
             out_partition_spec=out_partition_spec,
         )
     else:
-        # IEEE 754: NaN * 0 = NaN, so a multiplicative mask cannot kill
-        # the NaNs ep_dispatch_fwd leaves at padded slots of recv_tokens
-        # (they ride through the FFN into expert_outputs at the same
-        # padded positions): mean=NaN on expert_outputs[padded] then
-        # propagates into the combine output when the kernel's read
-        # pattern overlaps the padded region. Use jnp.where to overwrite
-        # padded positions with a literal 0 before combine.
+        # HT combine is unweighted; apply routing weights before calling it.
+        # Padded recv slots are ignored by combine via handle_mem metadata.
         w = recv_topk_weights[..., None].astype(expert_outputs.dtype)
-        mask_bool = (recv_topk_weights != 0)[..., None]
-        weighted = jnp.where(mask_bool, expert_outputs * w, jnp.zeros_like(expert_outputs))
+        weighted = expert_outputs * w
         output = tex.ep_combine_fwd(
             cfg,
             handle_mem,
@@ -867,11 +861,9 @@ def _moe_bwd_rule(
         d_expert_outputs = grad_pre_combine
         d_recv_w_from_combine = jnp.zeros_like(ctx.recv_topk_weights)
     else:
-        # Bwd mirror of the fwd mask: grad_pre_combine and ctx.expert_outputs
-        # both carry NaN at padded slots (ep_dispatch_fwd leaves uninit
-        # memory in recv_tokens, the FFN and combine_bwd propagate), and
-        # IEEE NaN * 0 = NaN, so jnp.where is needed to overwrite padded
-        # positions with literal zeros before the sum reduction.
+        # Reverse the late-weighting multiply. Padded expert-major rows are
+        # part of the physical grouped-GEMM ranges, so write literal zero
+        # cotangents for inactive rows instead of relying on NaN * 0.
         w = ctx.recv_topk_weights[..., None].astype(grad_pre_combine.dtype)
         mask_bool = (ctx.recv_topk_weights != 0)[..., None]
         d_expert_outputs = jnp.where(
