@@ -1629,6 +1629,18 @@ def fused_attn(
         if score_mod_only_args:
             raise ValueError(f"{', '.join(score_mod_only_args)} require score_mod to be provided.")
     else:
+        aux_return_args = [
+            name
+            for name, value in (
+                ("return_max_logit", return_max_logit),
+                ("return_softmax_aux", return_softmax_aux),
+            )
+            if value
+        ]
+        if aux_return_args:
+            raise ValueError(
+                f"{', '.join(aux_return_args)} are not supported with score_mod fused_attn."
+            )
         tex.validate_fused_attn_score_mod(
             qkv,
             bias,
