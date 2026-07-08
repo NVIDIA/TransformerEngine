@@ -1,3 +1,7 @@
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
 import cutlass
 from cutlass import Float32, Int64, Int32, Int16, Uint32
 from cutlass._mlir.dialects import arith as mlir_arith
