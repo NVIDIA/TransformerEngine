@@ -344,17 +344,10 @@ _no_op_logger = _NoOpLogger()
 
 @torch.compiler.assume_constant_result
 def _get_fused_attn_backend(*args):
-    """
-    Wrapper for tex.get_fused_attn_backend returning the backend as the
-    python-side FusedAttnBackend enum. The result only depends on the attention
-    configuration (not on tensor values), so it is marked with
-    assume_constant_result to keep get_attention_backend traceable by
-    torch.compile without a graph break on the C extension call. The pybind
-    enum is converted to FusedAttnBackend here: a python enum safely crosses
-    the compile boundary, while comparing a baked pybind enum object against
-    module-level enum values generates guards dynamo cannot evaluate.
-    """
-    return FusedAttnBackend(int(tex.get_fused_attn_backend(*args)))
+    """Constant-foldable tex.get_fused_attn_backend: the result depends only on
+    the attention config, and the python-side enum keeps it traceable by
+    torch.compile (see the FusedAttnBackend docstring)."""
+    return FusedAttnBackend.cast(tex.get_fused_attn_backend(*args))
 
 
 def get_attention_backend(
@@ -1571,21 +1564,19 @@ def get_attention_backend(
     if use_flash_attention_4:
         flash_attention_backend = FlashAttentionUtils.fa4_version
 
-    if not torch.compiler.is_compiling():
-        # int()/str() on the backend objects are not traceable by dynamo
-        logger.debug(
-            "Available backends = {FlashAttention=%s%s, FusedAttention=%s%s,"
-            " UnfusedDotProductAttention=%s}",
-            bool(available_backends[0]),
-            (f" ({str(flash_attention_backend)})" if flash_attention_backend is not None else ""),
-            bool(available_backends[1]),
-            (
-                f" (sub-backend {int(fused_attention_backend)})"
-                if fused_attention_backend is not None
-                else ""
-            ),
-            bool(available_backends[2]),
-        )
+    logger.debug(
+        "Available backends = {FlashAttention=%s%s, FusedAttention=%s%s,"
+        " UnfusedDotProductAttention=%s}",
+        bool(available_backends[0]),
+        (f" ({str(flash_attention_backend)})" if flash_attention_backend is not None else ""),
+        bool(available_backends[1]),
+        (
+            f" (sub-backend {int(fused_attention_backend)})"
+            if fused_attention_backend is not None
+            else ""
+        ),
+        bool(available_backends[2]),
+    )
 
     # Select FusedAttention for performance
     if use_flash_attention and use_fused_attention and device_compute_capability >= (9, 0):
@@ -1601,16 +1592,14 @@ def get_attention_backend(
         use_unfused_attention = False
     elif use_fused_attention:
         use_unfused_attention = False
-    if not torch.compiler.is_compiling():
-        # int()/str() on the backend objects are not traceable by dynamo
-        selected_backend = "NoBackend"
-        if use_flash_attention:
-            selected_backend = f"FlashAttention ({str(flash_attention_backend)})"
-        elif use_fused_attention:
-            selected_backend = f"FusedAttention (sub-backend {int(fused_attention_backend)})"
-        elif use_unfused_attention:
-            selected_backend = "UnfusedDotProductAttention"
-        logger.debug("Selected backend = %s.", selected_backend)
+    selected_backend = "NoBackend"
+    if use_flash_attention:
+        selected_backend = f"FlashAttention ({str(flash_attention_backend)})"
+    elif use_fused_attention:
+        selected_backend = f"FusedAttention (sub-backend {int(fused_attention_backend)})"
+    elif use_unfused_attention:
+        selected_backend = "UnfusedDotProductAttention"
+    logger.debug("Selected backend = %s.", selected_backend)
 
     return (
         use_flash_attention,
