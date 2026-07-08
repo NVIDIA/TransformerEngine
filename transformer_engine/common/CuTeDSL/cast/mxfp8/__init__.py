@@ -2,4 +2,6 @@
 #
 # See LICENSE for license information.
 
+"""CuTeDSL MXFP8 quantization kernels."""
+
 from . import quantize_mxfp8

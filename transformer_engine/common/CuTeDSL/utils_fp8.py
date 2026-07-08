@@ -2,13 +2,14 @@
 #
 # See LICENSE for license information.
 
+"""FP8 conversion helpers (f32<->fp8 e4m3/e5m2/e8m0, fused mul+cvt PTX wrappers) for the CuTeDSL kernels."""
+
 import logging
 import os
 import re
 
 import cutlass
-import cutlass.cute as cute
-from cutlass import Float32, Int64, Int32, Int16, Uint8, Uint32
+from cutlass import Float32, Int64, Int32, Int16, Uint32
 from cutlass._mlir.dialects import arith as mlir_arith
 from cutlass._mlir.dialects import llvm
 from cutlass.cutlass_dsl import T, dsl_user_op
@@ -323,12 +324,12 @@ def _target_arch_is_blackwell() -> bool:
         if arch:
             major_minor = re.search(r"(\d+)", arch).group(1)  # "120"
         else:
-            from cuda.core import Device
+            from cuda.core import Device  # pylint: disable=no-name-in-module
 
             major_minor = Device().arch  # compute capability as digits, e.g. "120"
         # Trailing digit is the minor version; the rest is the major version.
         return int(major_minor[:-1]) in (10, 11, 12)
-    except Exception as e:  # pragma: no cover - detection is best-effort
+    except Exception as e:  # pylint: disable=broad-except  # pragma: no cover - detection is best-effort
         logger.debug("e8m0 arch detection failed (%s); using software path", e)
         return False
 
