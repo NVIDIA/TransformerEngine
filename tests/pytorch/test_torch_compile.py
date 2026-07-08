@@ -393,9 +393,7 @@ def test_autocast_sanity(fp8_recipe):
 
 # Scalars in AttentionParams must stay concrete: assume_constant_result cannot
 # convert symbolic scalars (dynamo's automatic dynamic would make changed ints
-# symbolic on recompilation). Specializing them is the intended behavior and
-# will be handled by assume_constant_result(specialize_args=True)
-# (pytorch#189042); until then pin them static explicitly.
+# symbolic on recompilation), so pin them static explicitly.
 @torch._dynamo.config.patch(specialize_int=True, specialize_float=True, recompile_limit=32)
 def test_get_attention_backend_traceable(monkeypatch):
     """get_attention_backend must trace under torch.compile(fullgraph=True)

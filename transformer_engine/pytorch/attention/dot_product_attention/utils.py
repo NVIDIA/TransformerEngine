@@ -357,8 +357,7 @@ def _get_fused_attn_backend(
     the attention config, and the python-side enum keeps it traceable by
     torch.compile (see the FusedAttnBackend docstring). Layout/bias/mask/softmax
     are taken as their string keys and resolved to the pybind enums here, so
-    that every argument is a literal or a python enum — required for
-    assume_constant_result(specialize_args=True) to derive value guards."""
+    that every argument is a python literal or a python enum."""
     return FusedAttnBackend.cast(
         tex.get_fused_attn_backend(
             is_training,
@@ -1423,9 +1422,7 @@ def get_attention_backend(
             kv_type = q_type
         # NOTE: under torch.compile the numeric args below must not be symbolic
         # (assume_constant_result requires concrete values); ints/floats made
-        # dynamic by automatic dynamic currently graph break here. Once
-        # assume_constant_result(specialize_args=True) (pytorch#189042) is
-        # available, symbolic scalars will be specialized with a guard instead.
+        # dynamic by automatic dynamic currently graph break here.
         fused_attention_backend = _get_fused_attn_backend(
             is_training,
             q_type,
