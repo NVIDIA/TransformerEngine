@@ -400,7 +400,6 @@ DISTRIBUTED_CONTEXT_SELF_ATTN_D256_LAYOUTS_MASKS_WINDOWS = [
 ]
 
 
-
 class TestDistributedContextParallelSelfAttn:
     # TODO(KshitijLakhani): parametrize num_segments_per_seq for all CP tests
     def impl_test_context_parallel_attn(
@@ -692,6 +691,7 @@ class TestDistributedContextParallelSelfAttn:
             window_size=window_size,
             stripe_size=stripe_size,
         )
+
     # CP ring and all-gather tests for D=256
     # TODO(KshitijLakhani): Replace this with common-provided fused-attn disable reasons once
     # they can be surfaced to framework tests.
