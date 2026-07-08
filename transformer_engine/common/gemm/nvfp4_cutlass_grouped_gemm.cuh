@@ -60,9 +60,13 @@ namespace nvfp4_cutlass {
 // `workspace_bytes` is a caller-provided scratch buffer (owned by the upstream
 // framework, e.g. PyTorch) from which both the on-device per-group metadata and
 // the CUTLASS GEMM workspace are carved; keeping allocation out of TE common is
-// what makes the launch CUDA-graph safe. The launcher NVTE_CHECKs it is large
-// enough. Reusing the grouped-GEMM cuBLAS workspace is valid because this path
-// replaces (and never runs alongside) the cuBLAS matmul.
+// what makes the launch CUDA-graph safe. The required size is the per-group
+// metadata arrays plus Gemm::get_workspace_size (typically a few KB-MB for MoE
+// shapes); the launcher NVTE_CHECKs `workspace_bytes` is large enough. Callers
+// reuse the grouped-GEMM cuBLAS workspace for this: it is a different quantity
+// from the CUTLASS need (a fixed 32 MiB) but comfortably larger, and it is free
+// on this path because the CUTLASS backend replaces (and never runs alongside)
+// the cuBLAS matmul.
 void run_nvfp4_graph_safe_grouped_gemm(void **A_ptrs, void **B_ptrs, void **a_scale_inv_ptrs,
                                        void **b_scale_inv_ptrs, float **alpha_ptrs, void **C_ptrs,
                                        void **D_ptrs, float **beta_ptrs, const int *a_rows,
