@@ -519,12 +519,10 @@ def _moe_fwd_rule(
     max_local_assignments = tokens_per_ep_group * min(K, num_local_experts)
     max_nonempty_experts = min(num_local_experts, max_local_assignments)
     padded_total_bound = max_local_assignments + (_ALIGN_SIZE - 1) * max_nonempty_experts
-    aligned_total_bound = (
-        (padded_total_bound + _ALIGN_SIZE - 1) // _ALIGN_SIZE
-    ) * _ALIGN_SIZE
-    per_expert_bound = num_local_experts * (
-        (tokens_per_ep_group + _ALIGN_SIZE - 1) // _ALIGN_SIZE
-    ) * _ALIGN_SIZE
+    aligned_total_bound = ((padded_total_bound + _ALIGN_SIZE - 1) // _ALIGN_SIZE) * _ALIGN_SIZE
+    per_expert_bound = (
+        num_local_experts * ((tokens_per_ep_group + _ALIGN_SIZE - 1) // _ALIGN_SIZE) * _ALIGN_SIZE
+    )
     recv_pr = min(per_expert_bound, aligned_total_bound)
 
     _te_ep_assert_compatible_bootstrap(
