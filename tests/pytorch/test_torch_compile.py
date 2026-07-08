@@ -606,10 +606,13 @@ def _make_unfused_fp8_emulation_quantizers(recipe_name: str):
     return quantizers, fp8_meta
 
 
-def _run_unfused_fp8_emulation(qkv_layout: str, recipe_name: str, do_compile: bool):
+def _run_unfused_fp8_emulation(
+    qkv_layout: str, recipe_name: str, do_compile: bool, compile_mode: str = "default"
+):
     """Run unfused DPA with FP8 emulation eagerly, and optionally compare
     against torch.compile(fullgraph=True) on fresh leaf copies of the same
-    inputs."""
+    inputs. ``compile_mode="reduce-overhead"`` additionally captures the
+    compiled forward+backward into CUDA graphs."""
     dtype = torch.bfloat16
     module = _make_unfused_attention(dtype)
     quantizers, fp8_meta = _make_unfused_fp8_emulation_quantizers(recipe_name)
@@ -638,11 +641,13 @@ def _run_unfused_fp8_emulation(qkv_layout: str, recipe_name: str, do_compile: bo
         return
 
     torch._dynamo.reset()
-    compiled = torch.compile(fn, fullgraph=True)
-    for _ in range(2):
+    mode = None if compile_mode == "default" else compile_mode
+    compiled = torch.compile(fn, fullgraph=True, mode=mode)
+    for _ in range(3):
         q2, k2, v2 = (x.detach().clone().requires_grad_() for x in (q, k, v))
         out = compiled(q2, k2, v2, extra)
         out.sum().backward()
+        torch.cuda.synchronize()
     torch.testing.assert_close(out, out_ref)
     torch.testing.assert_close(q2.grad, q.grad)
     torch.testing.assert_close(k2.grad, k.grad)
@@ -662,12 +667,14 @@ def _run_unfused_fp8_emulation(qkv_layout: str, recipe_name: str, do_compile: bo
         ),
     ],
 )
-def test_unfused_dpa_fp8_emulation_torch_compile(recipe_name, qkv_layout):
+@pytest.mark.parametrize("compile_mode", ["default", "reduce-overhead"])
+def test_unfused_dpa_fp8_emulation_torch_compile(recipe_name, qkv_layout, compile_mode):
     """FP8-emulation path of UnfusedDotProductAttention under
     torch.compile(fullgraph=True): the te_fp8_emu::* custom ops take the
     value-opaque quantizers in-graph; compiled forward+backward must match
-    eager."""
-    _run_unfused_fp8_emulation(qkv_layout, recipe_name, do_compile=True)
+    eager. With "reduce-overhead" the graphs are captured and replayed via
+    inductor cudagraphs."""
+    _run_unfused_fp8_emulation(qkv_layout, recipe_name, do_compile=True, compile_mode=compile_mode)
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
