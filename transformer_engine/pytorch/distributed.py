@@ -1842,13 +1842,46 @@ def get_symmetric_memory_tensor(tensor_numel, tensor_dtype, tensor_device, tp_gr
     return msg
 
 
+_SYMM_MEM_POOL = None
+
+
+def _get_symm_mem_pool(device: torch.device, backend: str = "NCCL"):
+    """Process-wide torch MemPool backed by the symmetric-memory allocator, created once (each rank
+    drives one device). The pool/allocator captures the backend at creation and there is no per-pool
+    backend arg, so the (process-global) backend is always set before the pool is created. The
+    collective rendezvous cost is amortized across allocations (paid per new segment, not per buffer)."""
+    global _SYMM_MEM_POOL
+    if _SYMM_MEM_POOL is None:
+        symm_mem.set_backend(backend)
+        if hasattr(symm_mem, "get_mem_pool"):
+            _SYMM_MEM_POOL = symm_mem.get_mem_pool(device)
+        elif hasattr(torch.cuda, "MemPool") and hasattr(symm_mem, "get_mempool_allocator"):
+            _SYMM_MEM_POOL = torch.cuda.MemPool(symm_mem.get_mempool_allocator(device))
+        else:
+            raise RuntimeError(
+                "No symmetric-memory MemPool API available (need torch symm-mem get_mem_pool, or "
+                "torch.cuda.MemPool + get_mempool_allocator)."
+            )
+    return _SYMM_MEM_POOL
+
+
 def symm_mem_alloc(
     shape,
     dtype: torch.dtype,
     ep_group: dist_group_type,
     device: Optional[torch.device] = None,
+    use_pool: bool = False,
+    backend: str = "NCCL",
 ) -> torch.Tensor:
-    """Allocate and rendezvous a symm-mem buffer on ep_group. Collective on ep_group."""
+    """Allocate a symm-mem buffer on ep_group.
+
+    ``use_pool=False`` (default): freshly allocate and do one explicit collective ``rendezvous`` per
+    buffer, for caller-owned static buffers (fp8 zero-copy). ``use_pool=True``: allocate from a
+    process-wide symm-mem MemPool whose segments are auto-registered (implicit mempool), so no explicit
+    rendezvous is needed and torch manages the tensor lifecycle (freed back to the pool) — for
+    lifecycle-managed zero-copy, e.g. bf16, where the recv buffer is saved for backward and so cannot
+    be a shared static buffer. ``backend`` selects the symm-mem backend (default NCCL; for the pool it
+    is captured at pool creation)."""
     if device is None:
         device = torch.device("cuda", torch.cuda.current_device())
     if not HAS_TORCH_SYMMETRIC:
@@ -1856,10 +1889,15 @@ def symm_mem_alloc(
             "torch.distributed._symmetric_memory is unavailable; symm_mem_alloc "
             "requires PyTorch built with NCCL symm-mem support."
         )
-    if symm_mem.get_backend(device) != "NCCL":
-        symm_mem.set_backend("NCCL")
-    t = symm_mem.empty(*shape, dtype=dtype, device=device)
-    symm_mem.rendezvous(t, group=ep_group)
+    if use_pool:
+        pool = _get_symm_mem_pool(device, backend)
+        with torch.cuda.use_mem_pool(pool):
+            t = torch.empty(*shape, dtype=dtype, device=device)
+    else:
+        if symm_mem.get_backend(device) != backend:
+            symm_mem.set_backend(backend)
+        t = symm_mem.empty(*shape, dtype=dtype, device=device)
+        symm_mem.rendezvous(t, group=ep_group)
     return t
 
 

@@ -162,14 +162,8 @@ def ep_finalize() -> None:
 
 
 class EpBuffer:
-    """Per-microbatch EP layer state holding handle_mem and token_counts.
+    """Per-microbatch EP layer state: handle_mem, token_counts, and shape/dtype config.
     Use one EpBuffer per concurrently-in-flight call (e.g. per PP-1F1B microbatch).
-
-    In zero-copy mode the buffer owns the symm-mem buffers the one-sided path
-    requires: the dispatch recv outputs (recv_tokens, recv_topk_weights) and the
-    combine backward grad target. One set per buffer, so each layer/microbatch is
-    isolated. In normal mode these are None and allocated in-flight instead (recv
-    outputs in the dispatch forward, the combine grad in the backward).
     """
 
     __slots__ = (
@@ -184,39 +178,7 @@ class EpBuffer:
         "device",
         "token_counts",
         "zero_copy",
-        "recv_tokens_symm_buf",
-        "recv_topk_weights_symm_buf",
-        "grad_expert_out_symm_buf",
     )
-
-    def _alloc_symm_buffers(self) -> None:
-        """Fill in buffer-owned symm-mem buffers the caller did not supply. In normal
-        mode caller-supplied tensors are kept as-is and the rest stay None (allocated
-        in-flight)."""
-        if not self.zero_copy:
-            self.recv_topk_weights_symm_buf = None
-            return
-        if _EP_GROUP is None:
-            raise RuntimeError(
-                "ep_bootstrap must be called before constructing a zero-copy EpBuffer"
-            )
-        rc, h = self.recv_capacity_per_rank, self.hidden_dim
-        # Persistent across microbatches; keep resident under CPU offloading.
-        if self.recv_topk_weights_symm_buf is None:
-            self.recv_topk_weights_symm_buf = symm_mem_alloc(
-                (rc,), torch.float32, _EP_GROUP, device=self.device
-            )
-            mark_not_offload(self.recv_topk_weights_symm_buf)
-        if self.recv_tokens_symm_buf is None:
-            self.recv_tokens_symm_buf = symm_mem_alloc(
-                (rc, h), self.payload_dtype, _EP_GROUP, device=self.device
-            )
-            mark_not_offload(self.recv_tokens_symm_buf)
-        if self.grad_expert_out_symm_buf is None:
-            self.grad_expert_out_symm_buf = symm_mem_alloc(
-                (rc, h), self.payload_dtype, _EP_GROUP, device=self.device
-            )
-            mark_not_offload(self.grad_expert_out_symm_buf)
 
     def __init__(
         self,
@@ -228,17 +190,7 @@ class EpBuffer:
         alignment: int = 0,
         payload_dtype: torch.dtype = torch.bfloat16,
         device: Optional[torch.device] = None,
-        dispatch_recv_tokens: Optional[torch.Tensor] = None,
-        combine_grad_expert_out: Optional[torch.Tensor] = None,
-        dispatch_recv_topk_weights: Optional[torch.Tensor] = None,
     ) -> None:
-        """Pass ``dispatch_recv_tokens`` (dispatch recv output), ``combine_grad_expert_out``
-        (combine backward grad target), and/or ``dispatch_recv_topk_weights`` (dispatch recv
-        probs) to use caller-owned buffers; the buffer then skips allocating them. All must be
-        symm-mem-backed under zero-copy. Whatever is left None is buffer-owned (zero-copy) or
-        allocated in-flight (normal mode). Providing all three keeps construction collective-free
-        (nothing to allocate/rendezvous), so a fresh EpBuffer per dispatch stays CUDA-graph
-        capturable."""
         if device is None:
             device = torch.device("cuda", torch.cuda.current_device())
         alignment = int(alignment)
@@ -253,16 +205,12 @@ class EpBuffer:
         self.payload_dtype = payload_dtype
         self.device = device
         self.zero_copy = bool(tex.ep_get_zero_copy())
-        self.recv_tokens_symm_buf = dispatch_recv_tokens
-        self.grad_expert_out_symm_buf = combine_grad_expert_out
-        self.recv_topk_weights_symm_buf = dispatch_recv_topk_weights
 
         size_bytes = tex.ep_handle_mem_size(self.top_k, self.alignment)
         self.handle_mem = torch.empty(int(size_bytes), dtype=torch.uint8, device=device)
         self.token_counts = torch.empty(self.num_local_experts, dtype=torch.int32, device=device)
         # Persistent tensor; keep resident if activation CPU offloading is on.
         mark_not_offload(self.handle_mem)
-        self._alloc_symm_buffers()
 
 
 # torch.library custom ops (so they don't graph-break under torch.compile)
@@ -481,14 +429,15 @@ class _EpDispatch(torch.autograd.Function):
 class _EpCombine(torch.autograd.Function):
     """Autograd combine.
 
-    bwd scatters the expert_out grad into ``grad_symm_buf`` (EpBuffer-owned
-    symm-mem, one-sided) in zero-copy mode, or into a plain tensor allocated
-    in-flight here otherwise. The latter keeps allocation torch.compile /
-    CUDA-graph safe and lets autograd own the grad's lifetime.
+    bwd scatters the expert_out grad into ``grad_out``. When the caller supplies it
+    (mcore-managed mode) that buffer is used as-is; otherwise it is allocated on the
+    fly here — from the symm-mem pool in zero-copy mode (one-sided target), or a plain
+    tensor in normal mode (keeps allocation torch.compile / CUDA-graph safe and lets
+    autograd own the grad's lifetime).
 
-    ``grad_symm_buf`` is the backward's scatter target (an output it writes, never
-    reads), so it is stashed as a plain ctx attribute rather than via
-    save_for_backward, which would version-track a tensor we mutate.
+    ``grad_out`` is the backward's scatter target (an output it writes, never reads),
+    so it is stashed as a plain ctx attribute rather than via save_for_backward, which
+    would version-track a tensor we mutate.
     """
 
     @staticmethod
@@ -497,7 +446,7 @@ class _EpCombine(torch.autograd.Function):
         handle_mem: torch.Tensor,
         num_local_tokens: int,
         hidden_dim: int,
-        grad_symm_buf: Optional[torch.Tensor],
+        grad_out: Optional[torch.Tensor],
         expert_out: torch.Tensor,
     ):
         """Combine fwd; stashes the bwd grad target or expert_out shape to size it."""
@@ -505,8 +454,8 @@ class _EpCombine(torch.autograd.Function):
         result = torch.empty(num_local_tokens, hidden_dim, dtype=expert_out.dtype, device=device)
         torch.ops.transformer_engine_ep.combine(handle_mem, expert_out, result)
         ctx.save_for_backward(handle_mem)
-        ctx.grad_symm_buf = grad_symm_buf
-        if grad_symm_buf is None:
+        ctx.grad_out = grad_out
+        if grad_out is None:
             ctx.expert_out_shape = expert_out.shape
             ctx.expert_out_dtype = expert_out.dtype
             ctx.device = device
@@ -518,17 +467,17 @@ class _EpCombine(torch.autograd.Function):
         if not g_result.is_contiguous():
             g_result = g_result.contiguous()
         (handle_mem,) = ctx.saved_tensors
-        grad_expert_out = ctx.grad_symm_buf
+        grad_expert_out = ctx.grad_out
         if grad_expert_out is None:
-            grad_expert_out = torch.empty(
-                ctx.expert_out_shape, dtype=ctx.expert_out_dtype, device=ctx.device
+            grad_expert_out = _alloc_io(
+                ctx.expert_out_shape, ctx.expert_out_dtype, ctx.device, tex.ep_get_zero_copy()
             )
         torch.ops.transformer_engine_ep.combine_bwd(handle_mem, g_result, grad_expert_out)
         return (
             None,  # handle_mem
             None,  # num_local_tokens
             None,  # hidden_dim
-            None,  # grad_symm_buf
+            None,  # grad_out
             grad_expert_out,
         )
 
@@ -544,18 +493,33 @@ def _require_bf16(name: str, t: torch.Tensor) -> None:
         )
 
 
+def _alloc_io(shape, dtype: torch.dtype, device, zero_copy: bool) -> torch.Tensor:
+    """Allocate a dispatch/combine IO tensor the caller did not supply: from the symm-mem pool in
+    zero-copy mode (auto-registered segment, lifecycle managed by torch refcount), else plain."""
+    if zero_copy:
+        t = symm_mem_alloc(shape, dtype, _EP_GROUP, device=device, use_pool=True)
+        # symm-mem storage is non-resizable; exempt it from CPU activation offloading (which
+        # releases via storage.resize_(0)). Matters for bf16 recv_tokens (the saved activation).
+        mark_not_offload(t)
+        return t
+    return torch.empty(*shape, dtype=dtype, device=device)
+
+
 def ep_dispatch(
     buffer: EpBuffer,
     tokens: torch.Tensor,
     topk_idx: torch.Tensor,
     topk_weights: torch.Tensor,
+    *,
+    recv_tokens: Optional[torch.Tensor] = None,
+    recv_topk_weights: Optional[torch.Tensor] = None,
 ):
     """Prepare + dispatch with autograd. topk_idx must be int64.
 
-    recv_tokens comes from the EpBuffer (caller-supplied or buffer-owned under
-    zero-copy) or is allocated in-flight (normal mode). recv_topk_weights is always
-    owned by the buffer. Returns (recv_tokens, recv_topk_weights, token_counts);
-    token_counts is non-diff.
+    ``recv_tokens`` / ``recv_topk_weights`` are the dispatch recv outputs: pass caller-owned buffers
+    (mcore-managed mode; in zero-copy they must be symm-mem-backed) or leave them None to allocate on
+    the fly (zero-copy: symm-mem pool; normal: plain). Returns (recv_tokens, recv_topk_weights,
+    token_counts); token_counts is non-diff.
     """
     _require_bf16("tokens", tokens)
     if topk_weights.dtype is not torch.float32:
@@ -563,19 +527,17 @@ def ep_dispatch(
             f"topk_weights must be float32; got dtype={topk_weights.dtype}. "
             "Cast with topk_weights.float() before calling."
         )
-    recv_tokens = buffer.recv_tokens_symm_buf
     if recv_tokens is None:
-        recv_tokens = torch.empty(
-            buffer.recv_capacity_per_rank,
-            buffer.hidden_dim,
-            dtype=buffer.payload_dtype,
-            device=buffer.device,
+        recv_tokens = _alloc_io(
+            (buffer.recv_capacity_per_rank, buffer.hidden_dim),
+            buffer.payload_dtype,
+            buffer.device,
+            buffer.zero_copy,
         )
-    recv_topk_weights = (
-        buffer.recv_topk_weights_symm_buf
-        if buffer.zero_copy
-        else torch.empty(buffer.recv_capacity_per_rank, dtype=torch.float32, device=buffer.device)
-    )
+    if recv_topk_weights is None:
+        recv_topk_weights = _alloc_io(
+            (buffer.recv_capacity_per_rank,), torch.float32, buffer.device, buffer.zero_copy
+        )
     return _EpDispatch.apply(
         buffer.handle_mem,
         buffer.top_k,
@@ -594,22 +556,23 @@ def ep_combine(
     expert_out: torch.Tensor,
     *,
     num_local_tokens: Optional[int] = None,
+    grad_out: Optional[torch.Tensor] = None,
 ):
     """Combine with autograd; caller pre-applies topk weighting.
 
-    The backward scatters the expert_out grad into the EpBuffer grad target
-    (caller-supplied or buffer-owned under zero-copy), or a tensor allocated
-    in-flight (normal mode). Result shape is (num_local_tokens, buffer.hidden_dim);
-    defaults to buffer.max_tokens_per_rank rows.
+    ``expert_out`` is the combine input (always caller-supplied; in zero-copy it must be symm-mem-
+    backed). ``grad_out`` is the backward's grad target: pass a caller-owned buffer (mcore-managed
+    mode) or leave it None to allocate on the fly in the backward (zero-copy: symm-mem pool; normal:
+    plain). Result shape is (num_local_tokens, buffer.hidden_dim); defaults to
+    buffer.max_tokens_per_rank rows.
     """
     _require_bf16("expert_out", expert_out)
     if num_local_tokens is None:
         num_local_tokens = buffer.max_tokens_per_rank
-    grad_expert_out = buffer.grad_expert_out_symm_buf
     return _EpCombine.apply(
         buffer.handle_mem,
         num_local_tokens,
         buffer.hidden_dim,
-        grad_expert_out,
+        grad_out,
         expert_out,
     )
