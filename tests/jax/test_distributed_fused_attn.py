@@ -22,6 +22,7 @@ from test_fused_attn_score_mod import (
     _has_cudnn_frontend_python,
 )
 from utils import pytest_parametrize_wrapper
+from transformer_engine_jax import get_cudnn_version, get_device_compute_capability
 from transformer_engine.jax.attention import (
     is_fused_attn_kernel_available,
     AttnBiasType,
@@ -345,6 +346,60 @@ DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES = [
     pytest.param([4, 256, 16, 64], id="4-256xCPx2-16-64"),
 ]
 
+DISTRIBUTED_CONTEXT_SELF_ATTN_D256_DATA_SHAPES = {
+    "L0": [],
+    "L1": [[2, 128, 16, 256]],
+    "L2": [],
+}
+
+# Keep these as explicit tuples instead of independent layout/mask/window as:
+# BSHD CP uses CAUSAL_MASK, THD CP uses PADDING_CAUSAL_MASK, SWA is
+# only valid for THD, and stripe_size behavior is different for
+# BSHD vs THD in these tests. Splitting the axes would mostly add
+# invalid BSHD+SWA and THD+CAUSAL combinations that fail or skip.
+DISTRIBUTED_CONTEXT_SELF_ATTN_D256_LAYOUTS_MASKS_WINDOWS = [
+    # BSHD with different layouts, but same causal mask and no sliding window
+    pytest.param(
+        QKVLayout.BSHD_BS2HD,
+        AttnMaskType.CAUSAL_MASK,
+        (-1, -1),
+        id="BSHD_KVPACKED-CAUSAL-NO_SWA",
+    ),
+    pytest.param(
+        QKVLayout.BSHD_BSHD_BSHD,
+        AttnMaskType.CAUSAL_MASK,
+        (-1, -1),
+        id="BSHD_SEPARATE-CAUSAL-NO_SWA",
+    ),
+    # THD with different sliding window sizes, but same packed layout and padding causal mask
+    pytest.param(
+        QKVLayout.THD_T2HD,
+        AttnMaskType.PADDING_CAUSAL_MASK,
+        (-1, -1),
+        id="THD_KVPACKED-PADDING_CAUSAL-NO_SWA",
+    ),
+    pytest.param(
+        QKVLayout.THD_T2HD,
+        AttnMaskType.PADDING_CAUSAL_MASK,
+        (20, 0),
+        id="THD_KVPACKED-PADDING_CAUSAL-SWA",
+    ),
+    # THD with different sliding window sizes, but same separate layout and padding causal mask
+    pytest.param(
+        QKVLayout.THD_THD_THD,
+        AttnMaskType.PADDING_CAUSAL_MASK,
+        (-1, -1),
+        id="THD_SEPARATE-PADDING_CAUSAL-NO_SWA",
+    ),
+    pytest.param(
+        QKVLayout.THD_THD_THD,
+        AttnMaskType.PADDING_CAUSAL_MASK,
+        (20, 0),
+        id="THD_SEPARATE-PADDING_CAUSAL-SWA",
+    ),
+]
+
+
 
 class TestDistributedContextParallelSelfAttn:
     # TODO(KshitijLakhani): parametrize num_segments_per_seq for all CP tests
@@ -636,6 +691,118 @@ class TestDistributedContextParallelSelfAttn:
             use_scan_ring=use_scan,
             window_size=window_size,
             stripe_size=stripe_size,
+        )
+    # CP ring and all-gather tests for D=256
+    # TODO(KshitijLakhani): Replace this with common-provided fused-attn disable reasons once
+    # they can be surfaced to framework tests.
+    @staticmethod
+    def skip_if_d256_cp_unsupported(qkv_layout):
+        compute_capability = get_device_compute_capability(0)
+        if not 100 <= compute_capability < 110:
+            pytest.skip("D=256 CP fused attention is only enabled on Blackwell server GPUs.")
+
+        required_cudnn_version = 93000 if qkv_layout.is_thd() else 92300
+        required_cudnn_version_label = "9.30" if qkv_layout.is_thd() else "9.23"
+        if get_cudnn_version() < required_cudnn_version:
+            pytest.skip(
+                f"D=256 CP fused attention with {qkv_layout} requires cuDNN"
+                f" {required_cudnn_version_label} or newer."
+            )
+
+    @pytest_parametrize_wrapper(
+        "device_count,mesh_shape,mesh_axes,mesh_resource",
+        generate_context_parallel_configs_for_attn(),
+    )
+    @pytest_parametrize_wrapper(
+        "data_shape",
+        DISTRIBUTED_CONTEXT_SELF_ATTN_D256_DATA_SHAPES,
+    )
+    @pytest.mark.parametrize(
+        "dtype",
+        [pytest.param(jnp.float16, id="FP16"), pytest.param(jnp.bfloat16, id="BF16")],
+    )
+    @pytest.mark.parametrize(
+        "qkv_layout, attn_mask_type, window_size",
+        DISTRIBUTED_CONTEXT_SELF_ATTN_D256_LAYOUTS_MASKS_WINDOWS,
+    )
+    def test_context_parallel_ring_attn_d256(
+        self,
+        device_count,
+        mesh_shape,
+        mesh_axes,
+        mesh_resource,
+        data_shape,
+        dtype,
+        qkv_layout,
+        attn_mask_type,
+        window_size,
+    ):
+        """D=256 CP ring coverage."""
+        self.skip_if_d256_cp_unsupported(qkv_layout)
+
+        self.impl_test_context_parallel_attn(
+            device_count,
+            mesh_shape,
+            mesh_axes,
+            mesh_resource,
+            data_shape,
+            1,
+            attn_mask_type,
+            dtype,
+            qkv_layout,
+            True,
+            CPStrategy.RING,
+            use_scan_ring=False,
+            window_size=window_size,
+            stripe_size=1 if qkv_layout.is_thd() else None,
+        )
+
+    @pytest_parametrize_wrapper(
+        "device_count,mesh_shape,mesh_axes,mesh_resource",
+        generate_context_parallel_configs_for_attn(),
+    )
+    @pytest_parametrize_wrapper(
+        "data_shape",
+        DISTRIBUTED_CONTEXT_SELF_ATTN_D256_DATA_SHAPES,
+    )
+    @pytest.mark.parametrize(
+        "dtype",
+        [pytest.param(jnp.float16, id="FP16"), pytest.param(jnp.bfloat16, id="BF16")],
+    )
+    @pytest.mark.parametrize(
+        "qkv_layout, attn_mask_type, window_size",
+        DISTRIBUTED_CONTEXT_SELF_ATTN_D256_LAYOUTS_MASKS_WINDOWS,
+    )
+    def test_context_parallel_allgather_attn_d256(
+        self,
+        device_count,
+        mesh_shape,
+        mesh_axes,
+        mesh_resource,
+        data_shape,
+        dtype,
+        qkv_layout,
+        attn_mask_type,
+        window_size,
+    ):
+        """D=256 CP all-gather coverage."""
+        self.skip_if_d256_cp_unsupported(qkv_layout)
+
+        self.impl_test_context_parallel_attn(
+            device_count,
+            mesh_shape,
+            mesh_axes,
+            mesh_resource,
+            data_shape,
+            1,
+            attn_mask_type,
+            dtype,
+            qkv_layout,
+            True,
+            CPStrategy.ALL_GATHER,
+            window_size=window_size,
+            stripe_size=128 if qkv_layout.is_thd() else None,
+            num_segments_per_seq=5 if qkv_layout.is_thd() else None,
         )
 
 
