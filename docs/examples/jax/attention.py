@@ -126,6 +126,7 @@ baseline_vars = baseline.init(jax.random.PRNGKey(2026), qkv)
 class TEDotProductAttention(nn.Module):
     """Thin Flax wrapper around TE's DotProductAttention."""
 
+    num_query_heads: int
     num_kv_heads: int
     qk_head_dim: int = head_dim
     attn_mask_type: str = "causal"
@@ -143,7 +144,7 @@ class TEDotProductAttention(nn.Module):
         query, key, value = qkv_tensors
         return DotProductAttention(
             head_dim=self.qk_head_dim,
-            num_attention_heads=num_query_heads,
+            num_attention_heads=self.num_query_heads,
             num_gqa_groups=self.num_kv_heads,
             attn_mask_type=self.attn_mask_type,
             qkv_layout=self.qkv_layout,
@@ -159,7 +160,11 @@ class TEDotProductAttention(nn.Module):
         )
 
 
-te_model = TEDotProductAttention(num_kv_heads=num_kv_heads, window_size=window_size)
+te_model = TEDotProductAttention(
+    num_query_heads=num_query_heads,
+    num_kv_heads=num_kv_heads,
+    window_size=window_size,
+)
 te_vars = te_model.init(
     jax.random.PRNGKey(2026),
     qkv,
@@ -246,6 +251,7 @@ mla_q, mla_k, mla_v, mla_dout = create_qkv_inputs(
 mla_qkv = (mla_q, mla_k, mla_v)
 
 mla_model = TEDotProductAttention(
+    num_query_heads=num_query_heads,
     num_kv_heads=num_kv_heads,
     qk_head_dim=mla_head_dim_qk,
     window_size=None,
