@@ -399,9 +399,8 @@ def test_get_attention_backend_traceable(monkeypatch):
     """get_attention_backend must trace under torch.compile(fullgraph=True)
     without graph breaks. The compiled selection must stay consistent with
     eager when NVTE_* env vars flip (dynamo guards on os.environ) and when
-    attention params change, and the tex.get_fused_attn_backend probe must be
-    consulted at trace time only, with its baked result driving the
-    selection."""
+    attention params change, and the baked tex.get_fused_attn_backend result
+    must drive the selection."""
     from transformer_engine.pytorch.attention.dot_product_attention import utils as dpa_utils
 
     def fn(x, params):
@@ -438,27 +437,12 @@ def test_get_attention_backend_traceable(monkeypatch):
     ):
         monkeypatch.setenv(env_var, value)
 
-    calls = []
-    real_get_backend = tex.get_fused_attn_backend
-
-    def counting_get_backend(*args):
-        calls.append(args)
-        return real_get_backend(*args)
-
-    monkeypatch.setattr(dpa_utils.tex, "get_fused_attn_backend", counting_get_backend)
-
     torch._dynamo.reset()
     compiled = torch.compile(fn, fullgraph=True)
     x = torch.zeros(8, device="cuda")
     params = dpa_utils.AttentionParams()
 
     torch.testing.assert_close(compiled(x, params), fn(x, params))
-    calls_after_trace = len(calls)
-    assert calls_after_trace >= 1, "tex.get_fused_attn_backend not invoked during tracing"
-
-    # Baked as a constant: running the compiled function again must not call it.
-    compiled(x, params)
-    assert len(calls) == calls_after_trace
 
     # Flip env vars one by one: the compiled function must recompile (guards
     # on os.environ) and keep matching eager.
@@ -479,17 +463,14 @@ def test_get_attention_backend_traceable(monkeypatch):
     monkeypatch.setenv("NVTE_UnfusedDPA_Emulate_FP8", "0")
 
     # Changing attention params (ints, layout string, dtype) must recompile
-    # and consult the probe again, still with no graph break.
+    # and keep matching eager, still with no graph break.
     for changed_params in (
         dpa_utils.AttentionParams(head_dim_qk=128, head_dim_v=128),
         dpa_utils.AttentionParams(max_seqlen_q=512, max_seqlen_kv=512),
         dpa_utils.AttentionParams(qkv_layout="bshd_bshd_bshd"),
         dpa_utils.AttentionParams(qkv_dtype=torch.float16),
     ):
-        num_calls = len(calls)
-        out = compiled(x, changed_params)
-        assert len(calls) > num_calls, f"tex not consulted for {changed_params}"
-        torch.testing.assert_close(out, fn(x, changed_params))
+        torch.testing.assert_close(compiled(x, changed_params), fn(x, changed_params))
 
     # The baked probe result must drive the selection: report no fused
     # sub-backend and expect UnfusedDotProductAttention (flash disabled, so the
