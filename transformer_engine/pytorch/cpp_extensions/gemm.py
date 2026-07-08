@@ -459,10 +459,10 @@ def _get_grouped_cublas_workspace(device: int, slot: int) -> torch.Tensor:
     """Persistent cuBLAS workspace for the grouped-tensor GEMM path, one per ``slot``.
 
     wgrad (NT GEMM) and dgrad (NN GEMM) require workspace isolation in the backward pass
-    under graph-replay. Without it, DGRAD GEMM contaminates a grid-synchronization flag in the 
+    under graph-replay. Without it, DGRAD GEMM contaminates a grid-synchronization flag in the
     shared workspace and deadlocks WGRAD GEMM on the second replay. This can be deterministically
     reproduced in TE/PyTorch but not in TE/common, suggesting that the underlying C++/CUDA kernels
-    are sound and the issue likely stems from an unidentified hazardous interaction between CUDA 
+    are sound and the issue likely stems from an unidentified hazardous interaction between CUDA
     graph replay and PyTorch's caching allocator.
     """
     assert slot in (0, 1), "grouped cuBLAS workspace slot must be 0 (dgrad/fprop) or 1 (wgrad)"
