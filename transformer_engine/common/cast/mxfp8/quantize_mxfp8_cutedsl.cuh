@@ -154,6 +154,12 @@ inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config, const Tensor 
     return false;
   }
 
+  std::optional<tvm::ffi::Function> mxfp8_quant_func_opt =
+      tvm_ffi_bridge::TVMFFICentral::getInstance().lazyload_function(config);
+  if (!mxfp8_quant_func_opt.has_value()) {
+    return false;
+  }
+
   // When only WITH_DBIAS is true, we use a larger tile size (align with CUDA C++ implementation)
   const bool cast_dbias_only = config.with_dbias && !config.with_dact && !config.with_act;
   const size_t chunk_rows = cast_dbias_only ? 128 : 64;  // input rows reduced per CTA
@@ -169,12 +175,6 @@ inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config, const Tensor 
     workspace_tensor->data.shape = {workspace_rows, flat_n};
     workspace_tensor->data.dtype = DType::kFloat32;
     return true;
-  }
-
-  std::optional<tvm::ffi::Function> mxfp8_quant_func_opt =
-      tvm_ffi_bridge::TVMFFICentral::getInstance().lazyload_function(config);
-  if (!mxfp8_quant_func_opt.has_value()) {
-    return false;
   }
 
   // Zero out swizzled scale padding when the matrix isn't a multiple of the
