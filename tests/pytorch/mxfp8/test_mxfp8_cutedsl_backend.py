@@ -57,9 +57,10 @@ pytestmark = pytest.mark.skipif(not recipe_available, reason=reason_for_no_recip
 class Fusion(NamedTuple):
     """An ActivationType from the C++ test: its tex ops per ProcessingMethod and
     the activation desc used in the CuTeDSL config key."""
+
     name: str
-    act: Optional[Callable]         # CAST_ACT:        act(x, quantizer)
-    dact: Optional[Callable]        # CAST_DACT:       dact(grad, act_input, quantizer)
+    act: Optional[Callable]  # CAST_ACT:        act(x, quantizer)
+    dact: Optional[Callable]  # CAST_DACT:       dact(grad, act_input, quantizer)
     dbias_dact: Optional[Callable]  # CAST_DBIAS_DACT: dbias_dact(grad, act_input, quantizer)
     desc: str
 
@@ -162,8 +163,16 @@ def get_cfg_key(method, act, in_dtype, fp8_dtype, rowwise, colwise):
     elif with_dact:
         desc = f"d{act.desc}"
     flags = (rowwise, colwise, False, False, with_dbias, with_dact, with_act, False)
-    return ("cutedsl_mxfp8_" + DTYPE_TO_STR[in_dtype] + "_" + FP8_TO_STR[fp8_dtype] + "_"
-            + "_".join("1" if f else "0" for f in flags) + "_" + desc)
+    return (
+        "cutedsl_mxfp8_"
+        + DTYPE_TO_STR[in_dtype]
+        + "_"
+        + FP8_TO_STR[fp8_dtype]
+        + "_"
+        + "_".join("1" if f else "0" for f in flags)
+        + "_"
+        + desc
+    )
 
 
 def extract_quantized_output(out, rowwise, columnwise):
@@ -199,7 +208,9 @@ def run_test_case(method, act, shape, block_size, in_dtype, fp8_dtype):
 
     set_cutedsl_backend(True)
     try:
-        out_cutedsl, dbias_cutedsl = run_quantize(method, act, x, act_input, rowwise, columnwise, fp8_dtype)
+        out_cutedsl, dbias_cutedsl = run_quantize(
+            method, act, x, act_input, rowwise, columnwise, fp8_dtype
+        )
         cutedsl_output = extract_quantized_output(out_cutedsl, rowwise, columnwise)
     finally:
         set_cutedsl_backend(False)
@@ -216,9 +227,12 @@ def run_test_case(method, act, shape, block_size, in_dtype, fp8_dtype):
 
     tag = f"{method}/{act.name}/{M}x{N}/{DTYPE_TO_STR[in_dtype]}/{FP8_TO_STR[fp8_dtype]}"
     for name, cuda_bytes in cuda_output.items():
-        assert torch.equal(cutedsl_output[name], cuda_bytes), f"{tag}: {name} differ between backends"
+        assert torch.equal(
+            cutedsl_output[name], cuda_bytes
+        ), f"{tag}: {name} differ between backends"
     if dbias_cuda is not None:
         torch.testing.assert_close(dbias_cutedsl, dbias_cuda)
+
 
 # Test cases with only cast kernels (mirrors C++ test's OperatorTest_FusedCastMXFP8_CastOnly).
 @pytest.mark.parametrize("shape", MATRIX_SIZES, ids=get_shape_id)
