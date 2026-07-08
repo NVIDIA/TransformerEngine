@@ -12,9 +12,9 @@ can split activation memory and attention work across devices while
 Transformer Engine (TE) runs the required collectives inside the fused attention call.
 
 CP is most useful when sequence length is large enough that single-device
-attention becomes memory- or latency-limited. It is usually not worth adding for
-short sequences or small local batches where communication overhead can dominate
-the attention work.
+attention becomes memory- or latency-limited. It is usually not as performant
+as single GPU fused attention for short sequences or small local batches where
+communication overhead can dominate the attention work.
 
 **Prerequisite:** this example requires four GPUs.
 
@@ -127,14 +127,6 @@ keeping those sharding controls visible.
       :start-after: # AG_OUTPUT_START
       :end-before: # AG_OUTPUT_END
 
-
-Other attention knobs
----------------------
-
-CP supports a narrower set of feature combinations than non-CP attention. These
-examples intentionally use no bias, no dropout, and vanilla softmax. Enable other
-features one at a time and keep the CP strategy, layout, mask, and sequence
-descriptor choices explicit when debugging unsupported combinations.
 
 
 Next steps

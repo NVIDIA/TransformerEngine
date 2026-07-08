@@ -110,8 +110,9 @@ head dimension separately.
 Other attention knobs
 ---------------------
 
-The examples above intentionally stay focused. Other ``DotProductAttention``
-features are enabled through the same module arguments:
+The examples above represent a subset of attention features. Other
+``DotProductAttention`` features can be enabled through the same module
+arguments as below:
 
 * Dropout: set ``attention_dropout > 0``, call with ``deterministic=False``, and
   pass a Flax ``dropout`` RNG to ``apply``.
