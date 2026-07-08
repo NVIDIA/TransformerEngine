@@ -324,6 +324,34 @@ class AttentionParams:
         return True
 
 
+class _NoOpLogger:
+    """
+    Stand-in for the "DotProductAttention" logger used when get_attention_backend
+    is traced by torch.compile. logging.Logger methods are not traceable by dynamo
+    (they cause graph breaks), while this class's no-op methods are inlined away.
+    """
+
+    def debug(self, *args, **kwargs):
+        """No-op."""
+
+    def warning(self, *args, **kwargs):
+        """No-op."""
+
+
+_no_op_logger = _NoOpLogger()
+
+
+@torch.compiler.assume_constant_result
+def _get_fused_attn_backend(*args):
+    """
+    Wrapper for tex.get_fused_attn_backend. The result only depends on the
+    attention configuration (not on tensor values), so it is marked with
+    assume_constant_result to keep get_attention_backend traceable by
+    torch.compile without a graph break on the C extension call.
+    """
+    return tex.get_fused_attn_backend(*args)
+
+
 def get_attention_backend(
     attention_params: AttentionParams = None,
 ):
@@ -388,10 +416,15 @@ def get_attention_backend(
     has_score_mod_bprop = attention_params.has_score_mod_bprop
 
     # Run config
-    logger = logging.getLogger("DotProductAttention")
-    logger.setLevel(AttentionLogging._log_level)
-    if not logger.hasHandlers():
-        logger.addHandler(AttentionLogging._stream_handler)
+    if torch.compiler.is_compiling():
+        # logging.Logger methods graph-break under torch.compile; backend
+        # selection logs are only emitted in eager mode.
+        logger = _no_op_logger
+    else:
+        logger = logging.getLogger("DotProductAttention")
+        logger.setLevel(AttentionLogging._log_level)
+        if not logger.hasHandlers():
+            logger.addHandler(AttentionLogging._stream_handler)
     device_compute_capability = get_device_compute_capability()
     cudnn_version = get_cudnn_version()
     run_config = {
@@ -423,27 +456,27 @@ def get_attention_backend(
     # Add FP8 environment variables to config
     if fp8:
         # all FP8 recipes: 1: (FP8 fwd, FP8 bwd), 0: (FP8 fwd, F16 bwd)
-        run_config["NVTE_FP8_DPA_BWD"] = int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
+        run_config["NVTE_FP8_DPA_BWD"] = int(os.environ.get("NVTE_FP8_DPA_BWD", "1"))
         # Float8CurrentScaling: 1: use F16 O in bwd, 0: use FP8 O in bwd
-        run_config["NVTE_DPA_FP8CS_O_in_F16"] = int(os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1"))
+        run_config["NVTE_DPA_FP8CS_O_in_F16"] = int(os.environ.get("NVTE_DPA_FP8CS_O_in_F16", "1"))
         # switch recipe to "F16", "DelayedScaling", or "Float8CurrentScaling"
-        _dpa_fp8_recipe = os.getenv("NVTE_DPA_FP8_RECIPE", "")
+        _dpa_fp8_recipe = os.environ.get("NVTE_DPA_FP8_RECIPE", "")
         run_config["NVTE_DPA_FP8_RECIPE"] = _dpa_fp8_recipe
         if _dpa_fp8_recipe != "":
             # config new recipe if switched
-            run_config["NVTE_DPA_FP8_FORMAT"] = os.getenv("NVTE_DPA_FP8_FORMAT", "HYBRID")
-            run_config["NVTE_DPA_FP8DS_AMAX_ALGO"] = os.getenv(
+            run_config["NVTE_DPA_FP8_FORMAT"] = os.environ.get("NVTE_DPA_FP8_FORMAT", "HYBRID")
+            run_config["NVTE_DPA_FP8DS_AMAX_ALGO"] = os.environ.get(
                 "NVTE_DPA_FP8DS_AMAX_ALGO", "most_recent"
             )
             run_config["NVTE_DPA_FP8DS_AMAX_HISTLEN"] = int(
-                os.getenv("NVTE_DPA_FP8DS_AMAX_HISTLEN", "1")
+                os.environ.get("NVTE_DPA_FP8DS_AMAX_HISTLEN", "1")
             )
             run_config["NVTE_DPA_FP8DS_REDUCE_AMAX"] = int(
-                os.getenv("NVTE_DPA_FP8DS_REDUCE_AMAX", "1")
+                os.environ.get("NVTE_DPA_FP8DS_REDUCE_AMAX", "1")
             )
         # UnfusedDotProductAttention: 1: allow FP8 emulation, 0: do not allow
         run_config["NVTE_UnfusedDPA_Emulate_FP8"] = int(
-            os.getenv("NVTE_UnfusedDPA_Emulate_FP8", "0")
+            os.environ.get("NVTE_UnfusedDPA_Emulate_FP8", "0")
         )
     logger.debug("Running with config=%s", run_config)
 
@@ -454,13 +487,13 @@ def get_attention_backend(
     qkv_format, q_format, kv_format = get_qkv_format(qkv_layout, inference_params)
 
     # Filter: Environment variables
-    use_flash_attention = int(os.getenv("NVTE_FLASH_ATTN", "1"))
+    use_flash_attention = int(os.environ.get("NVTE_FLASH_ATTN", "1"))
     use_flash_attention_2 = use_flash_attention
     use_flash_attention_3 = use_flash_attention
     use_flash_attention_4 = use_flash_attention
     flash_attention_backend = None
-    use_fused_attention = int(os.getenv("NVTE_FUSED_ATTN", "1"))
-    use_unfused_attention = int(os.getenv("NVTE_UNFUSED_ATTN", "1"))
+    use_fused_attention = int(os.environ.get("NVTE_FUSED_ATTN", "1"))
+    use_unfused_attention = int(os.environ.get("NVTE_UNFUSED_ATTN", "1"))
     if not use_flash_attention_2 and FlashAttentionUtils.is_installed:
         logger.debug("Disabling FlashAttention 2 due to NVTE_FLASH_ATTN=0")
     if not use_flash_attention_3 and FlashAttentionUtils.v3_is_installed:
@@ -585,7 +618,8 @@ def get_attention_backend(
             use_flash_attention_3 = False
         if use_unfused_attention:
             allow_emulation = (
-                os.getenv("NVTE_UnfusedDPA_Emulate_FP8", "0") == "1" or is_in_onnx_export_mode()
+                os.environ.get("NVTE_UnfusedDPA_Emulate_FP8", "0") == "1"
+                or is_in_onnx_export_mode()
             )
             if not allow_emulation:
                 logger.debug("Disabling UnfusedDotProductAttention for FP8 attention")
@@ -1359,7 +1393,7 @@ def get_attention_backend(
         if fp8 and fp8_meta["recipe"].fp8_dpa:
             q_type = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             kv_type = q_type
-        fused_attention_backend = tex.get_fused_attn_backend(
+        fused_attention_backend = _get_fused_attn_backend(
             is_training,
             q_type,
             kv_type,
@@ -1385,11 +1419,13 @@ def get_attention_backend(
             use_fused_attention = False
             fused_attention_backend = None
         elif has_score_mod and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]:
-            logger.debug(
-                "Disabling FusedAttention for score_mod because sub-backend %s is not "
-                "F16/BF16 arbitrary-seqlen",
-                int(fused_attention_backend),
-            )
+            if not torch.compiler.is_compiling():
+                # int() on a pybind enum is not traceable by dynamo
+                logger.debug(
+                    "Disabling FusedAttention for score_mod because sub-backend %s is not "
+                    "F16/BF16 arbitrary-seqlen",
+                    int(fused_attention_backend),
+                )
             use_fused_attention = False
             fused_attention_backend = None
     # Filter: Determinism
@@ -1521,19 +1557,21 @@ def get_attention_backend(
     if use_flash_attention_4:
         flash_attention_backend = FlashAttentionUtils.fa4_version
 
-    logger.debug(
-        "Available backends = {FlashAttention=%s%s, FusedAttention=%s%s,"
-        " UnfusedDotProductAttention=%s}",
-        bool(available_backends[0]),
-        (f" ({str(flash_attention_backend)})" if flash_attention_backend is not None else ""),
-        bool(available_backends[1]),
-        (
-            f" (sub-backend {int(fused_attention_backend)})"
-            if fused_attention_backend is not None
-            else ""
-        ),
-        bool(available_backends[2]),
-    )
+    if not torch.compiler.is_compiling():
+        # int()/str() on the backend objects are not traceable by dynamo
+        logger.debug(
+            "Available backends = {FlashAttention=%s%s, FusedAttention=%s%s,"
+            " UnfusedDotProductAttention=%s}",
+            bool(available_backends[0]),
+            (f" ({str(flash_attention_backend)})" if flash_attention_backend is not None else ""),
+            bool(available_backends[1]),
+            (
+                f" (sub-backend {int(fused_attention_backend)})"
+                if fused_attention_backend is not None
+                else ""
+            ),
+            bool(available_backends[2]),
+        )
 
     # Select FusedAttention for performance
     if use_flash_attention and use_fused_attention and device_compute_capability >= (9, 0):
@@ -1549,14 +1587,16 @@ def get_attention_backend(
         use_unfused_attention = False
     elif use_fused_attention:
         use_unfused_attention = False
-    selected_backend = "NoBackend"
-    if use_flash_attention:
-        selected_backend = f"FlashAttention ({str(flash_attention_backend)})"
-    elif use_fused_attention:
-        selected_backend = f"FusedAttention (sub-backend {int(fused_attention_backend)})"
-    elif use_unfused_attention:
-        selected_backend = "UnfusedDotProductAttention"
-    logger.debug("Selected backend = %s.", selected_backend)
+    if not torch.compiler.is_compiling():
+        # int()/str() on the backend objects are not traceable by dynamo
+        selected_backend = "NoBackend"
+        if use_flash_attention:
+            selected_backend = f"FlashAttention ({str(flash_attention_backend)})"
+        elif use_fused_attention:
+            selected_backend = f"FusedAttention (sub-backend {int(fused_attention_backend)})"
+        elif use_unfused_attention:
+            selected_backend = "UnfusedDotProductAttention"
+        logger.debug("Selected backend = %s.", selected_backend)
 
     return (
         use_flash_attention,

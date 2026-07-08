@@ -384,3 +384,52 @@ def test_autocast_sanity(fp8_recipe):
 
     out = compiled(inp)
     out.sum().backward()
+
+
+# ---------------------------------------------------------------------------
+# get_attention_backend under torch.compile
+# ---------------------------------------------------------------------------
+
+
+def test_get_attention_backend_traceable(monkeypatch):
+    """get_attention_backend must trace under torch.compile(fullgraph=True),
+    i.e. without any graph break, and NVTE_* env var reads must be guarded so
+    that changing an env var triggers recompilation instead of silently
+    reusing a stale backend selection."""
+    from transformer_engine.pytorch.attention.dot_product_attention import utils as dpa_utils
+
+    attention_params = dpa_utils.AttentionParams()
+
+    def fn(x):
+        (
+            use_flash_attention,
+            _,
+            use_fused_attention,
+            _,
+            use_unfused_attention,
+            _,
+        ) = dpa_utils.get_attention_backend(attention_params)
+        return (
+            x
+            + (1 if use_flash_attention else 0)
+            + (2 if use_fused_attention else 0)
+            + (4 if use_unfused_attention else 0)
+        )
+
+    # Dynamo only guards os.environ entries that exist at trace time (reads
+    # of absent keys are not guarded yet), so set the vars explicitly.
+    for env_var in ("NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN"):
+        monkeypatch.setenv(env_var, "1")
+
+    torch._dynamo.reset()
+    compiled = torch.compile(fn, fullgraph=True)
+
+    x = torch.zeros(8, device="cuda")
+    torch.testing.assert_close(compiled(x), fn(x))
+
+    # Flip env vars one by one: the compiled function must recompile (guards
+    # on os.environ) and keep matching eager.
+    for env_var in ("NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN", "NVTE_FLASH_ATTN"):
+        monkeypatch.setenv(env_var, "0")
+        torch.testing.assert_close(compiled(x), fn(x))
+        monkeypatch.setenv(env_var, "1")
