@@ -5,14 +5,27 @@
 """Pytest entry points for the JAX attention tutorials."""
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
-import attention
-import attention_context_parallel as cp_attention
+from transformer_engine.jax.attention import (
+    AttnBiasType,
+    AttnMaskType,
+    AttnSoftmaxType,
+    QKVLayout,
+    is_fused_attn_kernel_available,
+)
+
+# Imports from ``attention`` and ``attention_context_parallel`` are intentionally
+# deferred into each test body. The tutorial modules create tensors and initialize
+# models at module scope; deferring imports lets pytest apply skip marks before
+# unsupported CI nodes allocate those examples.
 
 
 def test_bshd_gqa_swa_runs():
+    import attention
+
     out = attention.te_model.apply(
         attention.te_vars,
         attention.qkv,
@@ -25,14 +38,20 @@ def test_bshd_gqa_swa_runs():
 
 
 def test_bshd_gqa_swa_matches_baseline():
+    import attention
+
     attention.compare_te_to_baseline()
 
 
 def test_single_gpu_benchmark():
+    import attention
+
     attention.run_single_gpu_bench()
 
 
 def test_mla_variant_runs():
+    import attention
+
     out = attention.mla_model.apply(
         attention.mla_vars,
         attention.mla_qkv,
@@ -54,14 +73,41 @@ def test_mla_variant_runs():
     assert [grad.shape for grad in grads] == [x.shape for x in attention.mla_qkv]
 
 
-_cp_supported, _cp_reason = cp_attention.context_parallel_supported()
+def _context_parallel_supported():
+    cp_size = 4
+    if len(jax.devices()) < cp_size:
+        return False, f"needs {cp_size} GPUs"
+
+    has_kernel = is_fused_attn_kernel_available(
+        True,
+        jnp.bfloat16,
+        jnp.bfloat16,
+        QKVLayout.THD_THD_THD,
+        AttnBiasType.NO_BIAS,
+        AttnMaskType.PADDING_CAUSAL_MASK,
+        AttnSoftmaxType.VANILLA_SOFTMAX,
+        0.0,
+        128,
+        128,
+        65536,
+        65536,
+        128,
+        128,
+        (128, 0),
+    )
+    if not has_kernel:
+        return False, "no fused attention kernel for the THD SWA shape"
+    return True, ""
+
+
+_cp_supported, _cp_reason = _context_parallel_supported()
 requires_cp = pytest.mark.skipif(
     not _cp_supported,
     reason=f"context-parallel attention tutorial skipped: {_cp_reason}",
 )
 
 
-def _assert_cp_result(strategy, stripe_size):
+def _assert_cp_result(cp_attention, strategy, stripe_size):
     result = cp_attention.run_context_parallel_case(strategy, stripe_size)
     reference = cp_attention.run_reference_attention()
 
@@ -101,16 +147,30 @@ def _assert_cp_result(strategy, stripe_size):
 
 @requires_cp
 def test_multi_gpu_context_parallel_ring_case():
-    _assert_cp_result(cp_attention.CPStrategy.RING, cp_attention.ring_stripe_size)
+    import attention_context_parallel as cp_attention
+
+    _assert_cp_result(
+        cp_attention,
+        cp_attention.CPStrategy.RING,
+        cp_attention.ring_stripe_size,
+    )
 
 
 @requires_cp
 def test_multi_gpu_context_parallel_allgather_case():
-    _assert_cp_result(cp_attention.CPStrategy.ALL_GATHER, cp_attention.ag_stripe_size)
+    import attention_context_parallel as cp_attention
+
+    _assert_cp_result(
+        cp_attention,
+        cp_attention.CPStrategy.ALL_GATHER,
+        cp_attention.ag_stripe_size,
+    )
 
 
 @requires_cp
 def test_multi_gpu_context_parallel_benchmarks():
+    import attention_context_parallel as cp_attention
+
     cp_attention.run_context_parallel_bench(
         cp_attention.CPStrategy.RING,
         cp_attention.ring_stripe_size,
