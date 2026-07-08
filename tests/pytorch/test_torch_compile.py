@@ -433,3 +433,95 @@ def test_get_attention_backend_traceable(monkeypatch):
         monkeypatch.setenv(env_var, "0")
         torch.testing.assert_close(compiled(x), fn(x))
         monkeypatch.setenv(env_var, "1")
+
+
+def test_get_attention_backend_fused_backend_constant(monkeypatch):
+    """The tex.get_fused_attn_backend call inside get_attention_backend is
+    wrapped with assume_constant_result. Check that under torch.compile it is
+    (1) invoked at trace time only (not on every run), (2) still consulted
+    (with correct results) when attention params change and dynamo turns the
+    changed ints into symbolic scalars via automatic dynamic, and (3) its
+    return value actually drives the backend selection (verified by
+    monkeypatching it to report no available sub-backend)."""
+    from transformer_engine.pytorch.attention.dot_product_attention import utils as dpa_utils
+
+    # Restrict candidates to FusedAttention vs UnfusedDotProductAttention so
+    # the selection outcome encodes the tex.get_fused_attn_backend result.
+    monkeypatch.setenv("NVTE_FLASH_ATTN", "0")
+    monkeypatch.setenv("NVTE_FUSED_ATTN", "1")
+    monkeypatch.setenv("NVTE_UNFUSED_ATTN", "1")
+
+    def fn(x, params):
+        (
+            use_flash_attention,
+            _,
+            use_fused_attention,
+            _,
+            use_unfused_attention,
+            _,
+        ) = dpa_utils.get_attention_backend(params)
+        return (
+            x
+            + (1 if use_flash_attention else 0)
+            + (2 if use_fused_attention else 0)
+            + (4 if use_unfused_attention else 0)
+        )
+
+    x = torch.zeros(8, device="cuda")
+    params = dpa_utils.AttentionParams()
+    if fn(x, params)[0].item() != 2.0:
+        pytest.skip("FusedAttention not available for the default attention params")
+
+    calls = []
+    real_get_backend = tex.get_fused_attn_backend
+
+    def counting_get_backend(*args):
+        calls.append(args)
+        return real_get_backend(*args)
+
+    monkeypatch.setattr(dpa_utils.tex, "get_fused_attn_backend", counting_get_backend)
+
+    torch._dynamo.reset()
+    compiled = torch.compile(fn, fullgraph=True)
+
+    out = compiled(x, params)
+    torch.testing.assert_close(out, x + 2.0)
+    calls_after_trace = len(calls)
+    assert calls_after_trace >= 1, "tex.get_fused_attn_backend not invoked during tracing"
+
+    # Baked as a constant: running the compiled function again must not call it.
+    compiled(x, params)
+    assert len(calls) == calls_after_trace
+
+    # Changing attention params: the changed ints (head_dim, seqlens) become
+    # symbolic scalars on recompilation (dynamo's automatic dynamic).
+    # assume_constant_result cannot convert symbolic scalars to constants and
+    # graph breaks on them, so this phase compiles without fullgraph and only
+    # requires that the selection stays correct (tex consulted again, eagerly).
+    compiled_dyn = torch.compile(fn)
+    for changed_params in (
+        dpa_utils.AttentionParams(head_dim_qk=128, head_dim_v=128),
+        dpa_utils.AttentionParams(max_seqlen_q=512, max_seqlen_kv=512),
+        dpa_utils.AttentionParams(qkv_layout="bshd_bshd_bshd"),
+        dpa_utils.AttentionParams(qkv_dtype=torch.float16),
+    ):
+        num_calls = len(calls)
+        out = compiled_dyn(x, changed_params)
+        assert len(calls) > num_calls, f"tex not consulted for {changed_params}"
+        torch.testing.assert_close(out, fn(x, changed_params))
+
+    # The baked result must drive the selection: report no fused sub-backend
+    # and expect UnfusedDotProductAttention instead of FusedAttention. Use a
+    # fresh frame: already-compiled frames keep the previously baked constant
+    # (assume_constant_result installs no guard on the wrapped function).
+    monkeypatch.setattr(
+        dpa_utils.tex,
+        "get_fused_attn_backend",
+        lambda *args: dpa_utils.FusedAttnBackend["No_Backend"],
+    )
+
+    def fn_no_backend(x, params):
+        return fn(x, params)
+
+    compiled_no_backend = torch.compile(fn_no_backend, fullgraph=True)
+    torch.testing.assert_close(compiled_no_backend(x, params), x + 4.0)
