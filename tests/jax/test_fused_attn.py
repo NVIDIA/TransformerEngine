@@ -469,7 +469,6 @@ class FusedAttnRunner:
             return 1
 
     def _check_configs(self):
-        # TODO(rewang): probably adds this in is_fused_attn_available
         # TODO(KshitijLakhani): probably add/move this to is_fused_attn_available
         if self.qkv_layout.is_thd() and not self.attn_mask_type.is_padding():
             pytest.skip("THD format requires padding masks.")
