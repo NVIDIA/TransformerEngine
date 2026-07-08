@@ -1059,8 +1059,13 @@ class DotProductAttention(TransformerEngineBaseModule):
 
             Users can use environment variables :attr:`NVTE_FLASH_ATTN`, :attr:`NVTE_FUSED_ATTN`,
             and :attr:`NVTE_FUSED_ATTN_BACKEND` to control which DotProductAttention backend,
-            and FusedAttention backend if applicable, to use. Transformer Engine prioritizes
-            FlashAttention over FusedAttention and over UnfusedDotProductAttention.
+            and FusedAttention backend if applicable, to use. Transformer Engine first filters
+            backends by support for the runtime environment and input configuration, then applies
+            a performance-based preference order. On supported pre-Hopper GPUs, FlashAttention is
+            preferred over FusedAttention and UnfusedDotProductAttention when both optimized
+            backends are eligible. On Hopper and newer GPUs, including Blackwell, FusedAttention is
+            preferred over FlashAttention and UnfusedDotProductAttention when both optimized
+            backends are eligible.
             If FusedAttention is being used, users can also choose to switch to flash-attn's
             implementation for backward by setting :attr:`NVTE_FUSED_ATTN_USE_FAv2_BWD=1`
             (default: 0), because of the performance differences between various versions of

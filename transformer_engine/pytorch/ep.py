@@ -368,7 +368,7 @@ def _(*_args, **_kw):
 def ep_prepare(buffer: "EpBuffer", topk_idx: torch.Tensor) -> torch.Tensor:
     """AllGather the routing map; fills ``buffer.handle_mem`` and returns
     ``buffer.token_counts`` (int32, shape [num_local_experts]). topk_idx must
-    be int64.
+    be int32 or int64.
     """
     torch.ops.transformer_engine_ep.prepare(
         buffer.handle_mem, buffer.top_k, topk_idx, buffer.token_counts, buffer.alignment
@@ -545,7 +545,7 @@ def ep_dispatch(
     topk_idx: torch.Tensor,
     topk_weights: torch.Tensor,
 ):
-    """Prepare + dispatch with autograd. topk_idx must be int64.
+    """Prepare + dispatch with autograd. topk_idx must be int32 or int64.
 
     recv_tokens comes from the EpBuffer (caller-supplied or buffer-owned under
     zero-copy) or is allocated in-flight (normal mode). recv_topk_weights is always

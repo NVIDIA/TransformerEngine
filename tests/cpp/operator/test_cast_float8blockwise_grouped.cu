@@ -74,7 +74,8 @@ template <typename InputType, typename OutputType>
 void perform_test(ShapeRep shape_rep, BlockDim block_dim, ScalingDir dir,
                   const std::vector<size_t>& first_dims_h, size_t K,
                   bool force_pow_2_scales, float epsilon) {
-  if (getDeviceComputeCapability() < hopperComputeCapability) {
+  if (getDeviceComputeCapability() < hopperComputeCapability ||
+      getDeviceComputeCapability() >= blackwellComputeCapability) {
     GTEST_SKIP();
   }
 

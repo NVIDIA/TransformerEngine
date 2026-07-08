@@ -234,6 +234,8 @@ std::vector<std::tuple<size_t, size_t, size_t>> make_shapes(ShapeCase scase) {
 
 constexpr size_t kCublasGroupedGemmVersion = 130300;        // Blackwell-only grouped GEMM
 constexpr size_t kCublasGroupedGemmHopperVersion = 130400;  // adds Hopper support
+// FP8 per-tensor scaling grouped GEMM on Hopper requires cuBLAS 13.5+
+constexpr size_t kCublasFp8TensorScalingGroupedGemmHopperVersion = 130500;
 constexpr size_t kCublasWorkspaceBytes = 32ull * 1024 * 1024;
 
 inline std::string grouped_gemm_skip_reason(const TestParams& params) {
@@ -256,8 +258,15 @@ inline std::string grouped_gemm_skip_reason(const TestParams& params) {
     const bool is_blackwell_plus = cc >= blackwellComputeCapability;
     const bool fp8_block = is_fp8_block_recipe(params.recipe);
     if (!is_blackwell_plus && !fp8_block) {
-      return std::string(recipe_name(params.recipe)) +
-             " grouped GEMM requires Blackwell (SM100) or newer, " + cc_suffix;
+      if (params.recipe == InputRecipe::kFP8Current) {
+        if (cublas_ver < kCublasFp8TensorScalingGroupedGemmHopperVersion) {
+          return "FP8 per-tensor scaling grouped GEMM on Hopper (SM90) requires cuBLAS 13.5+, "
+                 "but run-time cuBLAS version is " + std::to_string(cublas_ver) + ".";
+        }
+      } else {
+        return std::string(recipe_name(params.recipe)) +
+               " grouped GEMM requires Blackwell (SM100) or newer, " + cc_suffix;
+      }
     }
     if (is_blackwell_plus && fp8_block) {
       return "FP8 block scaling grouped GEMM is only supported on Hopper (SM90), " + cc_suffix;

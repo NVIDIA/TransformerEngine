@@ -104,13 +104,12 @@ void check_symm_mem_required(const at::Tensor& t, const char* name) {
 #endif
 }
 
-// The backend only accepts int64 topk_idx. The PyTorch wrapper enforces this
-// at the boundary so the per-step ops don't need an upcast workspace.
-void check_topk_idx_int64(at::Tensor topk_idx) {
+// Validates topk_idx is int32 or int64 and returns the matching TE dtype.
+DType check_topk_idx_dtype(at::Tensor topk_idx) {
   NVTE_CHECK(topk_idx.is_contiguous(), "topk_idx must be contiguous");
-  NVTE_CHECK(topk_idx.scalar_type() == at::kLong,
-             "topk_idx must be int64; got dtype=", c10::toString(topk_idx.scalar_type()),
-             ". Cast with topk_idx.long() before calling.");
+  NVTE_CHECK(topk_idx.scalar_type() == at::kLong || topk_idx.scalar_type() == at::kInt,
+             "topk_idx must be int32 or int64; got dtype=", c10::toString(topk_idx.scalar_type()));
+  return GetTransformerEngineDType(topk_idx.scalar_type());
 }
 
 using Shape = std::vector<size_t>;
@@ -185,12 +184,12 @@ void ep_prepare(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor token_cou
                 int64_t dispatch_output_per_expert_alignment) {
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   NVTE_CHECK(topk_idx.dim() >= 2, "topk_idx must be at least 2D [..., top_k]");
-  check_topk_idx_int64(topk_idx);
+  auto idx_dtype = check_topk_idx_dtype(topk_idx);
   const size_t T_flat = topk_idx.numel() / topk_idx.size(-1);
   const size_t topk_n = static_cast<size_t>(topk_idx.size(-1));
 
   auto topk_idx_te =
-      makeTransformerEngineTensor(topk_idx.data_ptr(), Shape{T_flat, topk_n}, DType::kInt64);
+      makeTransformerEngineTensor(topk_idx.data_ptr(), Shape{T_flat, topk_n}, idx_dtype);
   auto token_counts_te = makeTransformerEngineTensor(
       token_counts.data_ptr(), Shape{static_cast<size_t>(token_counts.numel())}, DType::kInt32);
   auto handle_mem_te = makeTransformerEngineTensor(
@@ -208,7 +207,7 @@ void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
   NVTE_CHECK(topk_idx.dim() >= 2, "topk_idx must be at least 2D [..., top_k]");
   NVTE_CHECK(topk_weights.dim() >= 2, "topk_weights must be at least 2D [..., top_k]");
   NVTE_CHECK(recv_tokens.dim() >= 2, "recv_tokens must be at least 2D [..., recv_pr, H]");
-  check_topk_idx_int64(topk_idx);
+  auto idx_dtype = check_topk_idx_dtype(topk_idx);
   NVTE_CHECK(tokens.is_contiguous(), "tokens must be contiguous");
   NVTE_CHECK(topk_weights.is_contiguous(), "topk_weights must be contiguous");
   NVTE_CHECK(recv_tokens.is_contiguous(), "recv_tokens must be contiguous");
@@ -237,7 +236,7 @@ void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
   auto handle_mem_te = makeTransformerEngineTensor(
       handle_mem.data_ptr(), Shape{static_cast<size_t>(handle_mem.numel())}, DType::kByte);
   auto topk_idx_te =
-      makeTransformerEngineTensor(topk_idx.data_ptr(), Shape{T_flat, topk_n}, DType::kInt64);
+      makeTransformerEngineTensor(topk_idx.data_ptr(), Shape{T_flat, topk_n}, idx_dtype);
   auto tokens_te = makeTransformerEngineTensor(tokens.data_ptr(), Shape{T_flat, H}, tok_dtype);
   auto topk_w_te =
       makeTransformerEngineTensor(topk_weights.data_ptr(), Shape{T_flat, topk_n}, DType::kFloat32);
