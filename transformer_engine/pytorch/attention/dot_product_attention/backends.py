@@ -1715,6 +1715,29 @@ class FusedAttnFunc(torch.autograd.Function):
             dq = dq[..., : d_out.shape[-1]]
             dk = dk[..., : d_out.shape[-1]]
             dv = dv[..., : d_out.shape[-1]]
+            # Zero-fill positions beyond cu_seqlens_*_padded[-1] in dQ/dK/dV for THD.
+            # Use Q's padded boundary for dQ and KV's padded boundary for dK/dV.
+            # Sync-free `arange + mask` so capture and eager paths run the same code.
+            _qkv_format = ctx.qkv_layout.split("_")[0].replace("3", "").replace("2", "")
+            if _qkv_format == "thd":
+                if (
+                    cu_seqlens_q_padded is not None
+                    and isinstance(dq, torch.Tensor)
+                    and dq.shape[0] > 0
+                ):
+                    q_pad_mask = (
+                        torch.arange(dq.shape[0], device=dq.device) >= cu_seqlens_q_padded[-1]
+                    )
+                    dq[q_pad_mask] = 0
+                if cu_seqlens_kv_padded is not None:
+                    kv_actual_t = cu_seqlens_kv_padded[-1]
+                    for d_tensor in (dk, dv):
+                        if isinstance(d_tensor, torch.Tensor) and d_tensor.shape[0] > 0:
+                            kv_pad_mask = (
+                                torch.arange(d_tensor.shape[0], device=d_tensor.device)
+                                >= kv_actual_t
+                            )
+                            d_tensor[kv_pad_mask] = 0
         else:
             with get_nvtx_range_context("FusedAttnFunc.backward"):
                 # get nominal data type of dq, dk, dv

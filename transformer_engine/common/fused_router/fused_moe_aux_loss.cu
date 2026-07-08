@@ -132,6 +132,100 @@ void fused_moe_aux_loss_forward(const Tensor& probs, const Tensor& tokens_per_ex
               reinterpret_cast<float*>(Coeff_buf.data.dptr), stream);););
 }
 
+/* -------------------------------------------------------------------------
+ *  CUDA-graph-safe variant: total_num_tokens lives in a 0-dim int64 device
+ *  tensor whose value can change between graph replays. Each CTA's reduction
+ *  lane computes C_coeff directly from the device value. The first CTA also
+ *  writes C_coeff into Coeff_buf[0] for backward.
+ * ------------------------------------------------------------------------- */
+template <typename DataType, typename IndexType>
+__global__ void fused_moe_aux_loss_forward_kernel_graph_safe(
+    const DataType* probs, const IndexType* tokens_per_expert, const int64_t* total_num_tokens_ptr,
+    int num_experts, int num_rows, int num_cols, int topk, float coeff, float* Coeff_buf) {
+  // Reduction body matches the scalar-input kernel above.
+  CompType thread_sum = CompType(0);
+  for (int col = threadIdx.x; col < num_cols; col += blockDim.x) {
+    CompType col_sum = CompType(0);
+    for (int row = blockIdx.x; row < num_rows; row += gridDim.x) {
+      col_sum += CompType(probs[row * num_cols + col]);
+    }
+    col_sum *= CompType(tokens_per_expert[col]);
+    thread_sum += col_sum;
+  }
+
+  extern __shared__ float shmem[];
+  CompType* shmem_block = reinterpret_cast<CompType*>(shmem);
+  shmem_block[threadIdx.x] = thread_sum;
+  __syncthreads();
+
+  const int warp_id = threadIdx.x / kThreadsPerWarp;
+  const int lane_id = threadIdx.x % kThreadsPerWarp;
+  if (warp_id == 0) {
+    CompType block_sum = warp_reduce_on_shmem<CompType, ReduceFuncType::SUM>(
+        shmem_block, static_cast<int>(blockDim.x), lane_id);
+    if (lane_id == 0) {
+      const float total_num_tokens = static_cast<float>(*total_num_tokens_ptr);
+      const float C_coeff = (static_cast<float>(num_experts) * coeff) / static_cast<float>(topk) /
+                            total_num_tokens / total_num_tokens;
+      if (blockIdx.x == 0) {
+        Coeff_buf[0] = C_coeff;
+      }
+      atomicAdd(&Coeff_buf[1], static_cast<float>(block_sum * C_coeff));
+    }
+  }
+}
+
+template <typename DataType, typename IndexType>
+void fused_moe_aux_loss_forward_kernel_launcher_graph_safe(
+    const DataType* probs, const IndexType* tokens_per_expert, const int64_t* total_num_tokens_dev,
+    int num_experts, int num_rows, int num_cols, int topk, float coeff, DataType* aux_loss,
+    float* Coeff_buf, cudaStream_t stream) {
+  NVTE_CHECK(num_cols > 0, "num_cols must be positive, got ", num_cols);
+  NVTE_CHECK(num_experts > 0, "num_experts must be positive, got ", num_experts);
+  NVTE_CHECK(num_cols % num_experts == 0, "Number of input columns (", num_cols,
+             ") must be a multiple of number of experts (", num_experts, ").");
+
+  const int block_size = ((std::min(1024, num_cols) + static_cast<int>(kThreadsPerWarp) - 1) /
+                          static_cast<int>(kThreadsPerWarp)) *
+                         static_cast<int>(kThreadsPerWarp);
+  const int grid_size = cuda::sm_count() * 2;
+  const size_t smem_size = block_size * sizeof(CompType);
+  check_shared_memory_capacity_num_experts(smem_size, num_cols);
+
+  // Zero the float accumulator. The main kernel writes Coeff_buf[0] for backward.
+  NVTE_CHECK_CUDA(cudaMemsetAsync(Coeff_buf + 1, 0, sizeof(float), stream));
+  fused_moe_aux_loss_forward_kernel_graph_safe<DataType, IndexType>
+      <<<grid_size, block_size, smem_size, stream>>>(probs, tokens_per_expert, total_num_tokens_dev,
+                                                     num_experts, num_rows, num_cols, topk, coeff,
+                                                     Coeff_buf);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+
+  convert_accum_to_output<DataType><<<1, 1, 0, stream>>>(Coeff_buf, aux_loss);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
+
+void fused_moe_aux_loss_forward_graph_safe(const Tensor& probs, const Tensor& tokens_per_expert,
+                                           const Tensor& total_num_tokens, int num_experts,
+                                           int num_rows, int num_cols, int topk, float coeff,
+                                           Tensor& aux_loss, Tensor& Coeff_buf,
+                                           cudaStream_t stream) {
+  NVTE_CHECK(total_num_tokens.data.dtype == DType::kInt64,
+             "total_num_tokens must be a 0-dim int64 tensor; got dtype ",
+             static_cast<int>(total_num_tokens.data.dtype));
+  NVTE_CHECK(total_num_tokens.numel() == 1,
+             "total_num_tokens must contain exactly one element; got ", total_num_tokens.numel());
+  TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
+      probs.data.dtype, DataType,
+      TE_ROUTER_INDEX_TYPE_SWITCH_ALL(
+          tokens_per_expert.data.dtype, IndexType,
+          fused_moe_aux_loss_forward_kernel_launcher_graph_safe<DataType, IndexType>(
+              reinterpret_cast<DataType*>(probs.data.dptr),
+              reinterpret_cast<IndexType*>(tokens_per_expert.data.dptr),
+              reinterpret_cast<const int64_t*>(total_num_tokens.data.dptr), num_experts, num_rows,
+              num_cols, topk, coeff, reinterpret_cast<DataType*>(aux_loss.data.dptr),
+              reinterpret_cast<float*>(Coeff_buf.data.dptr), stream);););
+}
+
 template <typename DataType, typename IndexType>
 __global__ void fused_moe_aux_loss_backward_kernel(const float* Const_buf,
                                                    const IndexType* tokens_per_expert, int num_rows,
@@ -193,6 +287,20 @@ void nvte_fused_moe_aux_loss_forward(const NVTETensor probs, const NVTETensor to
       *convertNVTETensorCheck(probs), *convertNVTETensorCheck(tokens_per_expert), total_num_tokens,
       num_experts, num_rows, num_cols, topk, coeff, *convertNVTETensorCheck(aux_loss),
       *convertNVTETensorCheck(Coeff_buf), stream);
+}
+
+void nvte_fused_moe_aux_loss_forward_graph_safe(const NVTETensor probs,
+                                                const NVTETensor tokens_per_expert,
+                                                const NVTETensor total_num_tokens, int num_experts,
+                                                int num_rows, int num_cols, int topk, float coeff,
+                                                NVTETensor aux_loss, NVTETensor Coeff_buf,
+                                                cudaStream_t stream) {
+  NVTE_API_CALL(nvte_fused_moe_aux_loss_forward_graph_safe);
+  using namespace transformer_engine;
+  fused_router::fused_moe_aux_loss_forward_graph_safe(
+      *convertNVTETensorCheck(probs), *convertNVTETensorCheck(tokens_per_expert),
+      *convertNVTETensorCheck(total_num_tokens), num_experts, num_rows, num_cols, topk, coeff,
+      *convertNVTETensorCheck(aux_loss), *convertNVTETensorCheck(Coeff_buf), stream);
 }
 
 void nvte_fused_moe_aux_loss_backward(const NVTETensor Const_buf,
