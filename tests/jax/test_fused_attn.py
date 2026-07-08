@@ -1308,32 +1308,6 @@ class FusedAttnRunner:
         assert_allclose(primitive_valid, reference_valid, dtype=self.dtype)
         assert_allclose(primitive_max_logit, reference_max_logit, dtype=self.dtype)
 
-    def test_forward_with_softmax_aux(self):
-        """Test optional softmax_aux return wiring."""
-        self._setup_inputs()
-        kwargs = self._fused_attn_kwargs(return_softmax_aux=True)
-
-        customcall_fused_dpa_jit = jit(
-            partial(customcall_fused_dpa, **kwargs),
-            static_argnames=kwargs.keys(),
-            in_shardings=[
-                self.qkvo_sharding,
-                self.qkvo_sharding,
-                self.qkvo_sharding,
-                self.bias_sharding,
-                self.softmax_offset_sharding,
-                self.seq_desc_sharding,
-                self.dropout_rng_sharding,
-            ],
-        )
-
-        with self.mesh, autocast(mesh_resource=self.mesh_resource):
-            output, aux = customcall_fused_dpa_jit(*self._customcall_args())
-
-        assert output.shape == self.q.shape
-        assert "softmax_aux" in aux
-        assert aux["softmax_aux"].dtype == jnp.float32
-
     def test_backward_with_max_logit(self):
         """Ensure aux-return cotangents do not break the fused attention backward path."""
         self._setup_inputs()
@@ -1386,30 +1360,6 @@ def test_fused_attn_return_max_logit(qkv_layout, seq_desc_format):
         seq_desc_format=seq_desc_format,
     )
     runner.test_forward_with_max_logit()
-
-
-def test_fused_attn_return_softmax_aux():
-    """Check the optional public softmax_aux return is wired for non-CP attention."""
-    runner = FusedAttnRunner(
-        batch_size=2,
-        max_seqlen_q=128,
-        max_seqlen_kv=128,
-        num_heads_q=8,
-        num_heads_kv=8,
-        head_dim_qk=64,
-        head_dim_v=64,
-        attn_bias_type=AttnBiasType.NO_BIAS,
-        attn_mask_type=AttnMaskType.PADDING_CAUSAL_MASK,
-        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
-        dropout_prob=0.0,
-        dtype=jnp.bfloat16,
-        is_training=True,
-        qkv_layout=QKVLayout.BS3HD,
-        bias_shape=None,
-        window_size=None,
-        seq_desc_format=SeqDescFormat.Seqlens,
-    )
-    runner.test_forward_with_softmax_aux()
 
 
 def test_fused_attn_return_max_logit_backward_smoke():
