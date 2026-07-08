@@ -377,7 +377,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             raise ValueError(f"Unsupported {backend=}")
         softmax_aux_aval = q_aval.update(shape=softmax_shape, dtype=softmax_dtype)
         if config.return_max_logit:
-            if config.qkv_layout.is_thd() and get_cudnn_version() >= (9, 6, 0):
+            if FusedAttnFwdPrimitive._uses_thd_ragged_max_tensor(config):
                 max_tensor_shape = (*batch_shape, q_max_seqlen, attn_heads, 1)
             else:
                 max_tensor_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
@@ -678,6 +678,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         if not config.return_max_logit:
             return jnp.zeros((0,), dtype=output.dtype)
 
+        uses_thd_ragged_max_tensor = FusedAttnFwdPrimitive._uses_thd_ragged_max_tensor(config)
         if config.qkv_layout.is_thd() and max_tensor.ndim == 4:
             q_seqlen = jnp.where(q_seqlen > 0, q_seqlen, 0)
             q_seq_offsets = jnp.where(q_seq_offsets >= 0, q_seq_offsets, -1)
@@ -688,18 +689,27 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 & (token_idx < (q_seq_offsets[..., :-1, None] + q_seqlen[..., None])),
                 axis=-2,
             )
-            if max_tensor.shape[1] == output.shape[-3]:
+            if uses_thd_ragged_max_tensor:
                 max_tensor = jnp.where(valid[:, :, None, None], max_tensor, -jnp.inf)
             else:
                 max_tensor = jnp.where(valid[:, None, :, None], max_tensor, -jnp.inf)
 
         if max_tensor.ndim == 3:
             amax_dims = (0, 2)
-        elif config.qkv_layout.is_thd() and max_tensor.shape[1] == output.shape[-3]:
+        elif uses_thd_ragged_max_tensor:
             amax_dims = (0, 1, 3)
         else:
             amax_dims = (0, 2, 3)
         return jnp.max(max_tensor, axis=amax_dims).astype(output.dtype)
+
+    @staticmethod
+    def _uses_thd_ragged_max_tensor(config):
+        """Return whether cuDNN writes THD Max with BSH-like ragged-stats layout."""
+        return (
+            config.qkv_layout.is_thd()
+            and get_cudnn_version() >= (9, 6, 0)
+            and 120 not in get_all_device_compute_capability()
+        )
 
     @staticmethod
     def batcher(batched_args, batch_dims, *, config):
