@@ -384,11 +384,7 @@ def _ffn_bwd_per_shard(
         up_proj_for_bwd = jnp.where(active, up_proj_out, jnp.zeros_like(up_proj_out))
         intermediate_unweighted = act_fn(gate_proj_for_bwd) * up_proj_for_bwd
         d_recv_w_from_intermediate = jnp.sum(
-            jnp.where(
-                active,
-                d_intermediate * intermediate_unweighted,
-                jnp.zeros_like(d_intermediate),
-            ),
+            d_intermediate * intermediate_unweighted,
             axis=-1,
         ).astype(recv_w_flat.dtype)
         d_intermediate = jnp.where(active, d_intermediate * w_b, jnp.zeros_like(d_intermediate))
@@ -867,11 +863,7 @@ def _moe_bwd_rule(
         d_expert_outputs = jnp.where(
             mask_bool, grad_pre_combine * w, jnp.zeros_like(grad_pre_combine)
         )
-        d_recv_w_from_combine = jnp.where(
-            mask_bool,
-            grad_pre_combine * ctx.expert_outputs,
-            jnp.zeros_like(grad_pre_combine),
-        ).sum(axis=-1)
+        d_recv_w_from_combine = (grad_pre_combine * ctx.expert_outputs).sum(axis=-1)
         d_recv_w_from_combine = d_recv_w_from_combine.astype(ctx.recv_topk_weights.dtype)
 
     # ---------------- FFN bwd (per-shard via shard_map) ----------------
