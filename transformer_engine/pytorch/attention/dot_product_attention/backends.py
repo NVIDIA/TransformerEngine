@@ -469,7 +469,22 @@ class UnfusedDotProductAttention(torch.nn.Module):
         """Fast attribute set for non-parameter fields."""
         self.__dict__[name] = value
 
-    def forward(
+    def forward(self, *args, fp8_output: bool = False, **kwargs) -> torch.Tensor:
+        """Unfused attention fprop; see `_forward` for the argument list.
+
+        ``fp8_output=True`` returns a Float8Tensor, which cannot cross a
+        torch.compile graph boundary -- run the backend as an eager island.
+        """
+        if fp8_output:
+            return self._forward_eager(*args, fp8_output=True, **kwargs)
+        return self._forward(*args, fp8_output=False, **kwargs)
+
+    @no_torch_dynamo()
+    def _forward_eager(self, *args, **kwargs) -> torch.Tensor:
+        """Eager-only (dynamo-disabled) wrapper around `_forward`."""
+        return self._forward(*args, **kwargs)
+
+    def _forward(
         self,
         _alibi_cache: Dict[str, Any],
         query_layer: torch.Tensor,
