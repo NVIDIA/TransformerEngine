@@ -23,7 +23,8 @@ from ..utils import (
 
 from .storage.nvfp4_tensor_storage import NVFP4TensorStorage, _FromNVFP4Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
-from ._quantization_helpers import _IdentityFunc
+from ..dynamo import register_value_opaque_quantizer
+from ._quantization_helpers import _IdentityFunc, safe_quantized_repr
 
 aten = torch.ops.aten
 
@@ -119,7 +120,6 @@ class NVFP4Quantizer(Quantizer):
     with_post_rht_amax: bool
     """amax reduction options"""
     with_amax_reduction: bool
-    amax_reduction_group: Optional[dist_group_type]
 
     """2D block scaling, only applicable for weights."""
     with_2d_quantization: bool
@@ -136,9 +136,8 @@ class NVFP4Quantizer(Quantizer):
     """NVFP4 4over6 candidate-selection error mode."""
     nvfp4_4over6_err_mode: str
 
-    """RHT matrix random sign mask"""
+    """RHT sign mask (0 when sign randomization is disabled)"""
     rht_matrix_random_sign_mask_t: int
-    rht_matrix: torch.Tensor
 
     def __init__(
         self,
@@ -176,13 +175,26 @@ class NVFP4Quantizer(Quantizer):
         self.rht_matrix_random_sign_mask_t = get_random_sign_mask_for_rht(
             with_random_sign_mask, torch.cuda.current_device()
         )
-        self.rht_matrix = get_rht_matrix(with_random_sign_mask, torch.cuda.current_device())
+        self._rebuild_derived_state()
 
     def __getstate__(self):
         """Exclude unpicklable process group from serialized state."""
         state = self.__dict__.copy()
         state["amax_reduction_group"] = None
         return state
+
+    def _rebuild_derived_state(self) -> None:
+        """Build the derived ``rht_matrix`` (also used after value-key reconstruction).
+
+        ``rht_matrix`` is a ``torch.Tensor`` derived from the sign mask, so it
+        cannot be part of the (hashable) value key. ``__init__`` and
+        ``_rebuild_quantizer`` both call this hook; the ``lru_cache`` on
+        :func:`get_rht_matrix` makes an already-seen (flag, device) pair a
+        cheap hit.
+        """
+        self.rht_matrix = get_rht_matrix(
+            self.rht_matrix_random_sign_mask_t != 0, torch.cuda.current_device()
+        )
 
     def update_quantized(
         self,
@@ -221,7 +233,8 @@ class NVFP4Quantizer(Quantizer):
             rowwise=self.rowwise_usage,
             columnwise=self.columnwise_usage,
             with_amax_reduction=self.with_amax_reduction,
-            amax_reduction_group=self.amax_reduction_group,
+            # Absent on quantizers rebuilt from a value key (deprecated field).
+            amax_reduction_group=getattr(self, "amax_reduction_group", None),
             with_rht=self.with_rht,
             with_post_rht_amax=self.with_post_rht_amax,
             with_2d_quantization=self.with_2d_quantization,
@@ -230,11 +243,10 @@ class NVFP4Quantizer(Quantizer):
             nvfp4_use_4over6=self.nvfp4_use_4over6,
             nvfp4_e4m3_max=self.nvfp4_e4m3_max,
             nvfp4_4over6_err_mode=self.nvfp4_4over6_err_mode,
+            with_random_sign_mask=self.rht_matrix_random_sign_mask_t != 0,
         )
         quantizer.internal = self.internal
         quantizer.optimize_for_gemm = self.optimize_for_gemm
-        quantizer.rht_matrix = self.rht_matrix
-        quantizer.rht_matrix_random_sign_mask_t = self.rht_matrix_random_sign_mask_t
 
         return quantizer
 
@@ -334,6 +346,9 @@ class NVFP4Quantizer(Quantizer):
         return NVFP4BlockScaling
 
 
+register_value_opaque_quantizer(NVFP4Quantizer)
+
+
 class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
     """Quantized tensor class with FP4 data
 
@@ -409,7 +424,10 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         return instance
 
     def __repr__(self, *, tensor_contents=None):
-        return f"NVFP4Tensor, data={self.dequantize()})"
+        try:
+            return f"NVFP4Tensor, data={self.dequantize()})"
+        except Exception as exc:  # pylint: disable=broad-except
+            return safe_quantized_repr(self, "NVFP4Tensor", error=exc)
 
     def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """

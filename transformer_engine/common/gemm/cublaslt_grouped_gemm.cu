@@ -43,6 +43,10 @@ inline void CreateCublasHandle(cublasLtHandle_t *handle) {
 // FP8 block scaling support for grouped GEMM requires cuBLAS 13.4+
 #define CUBLAS_FP8_BLOCK_GROUPED_GEMM_VERSION 130400
 
+// FP8 tensor scaling (per-tensor current/delayed scaling) support for grouped GEMM
+// on Hopper (SM90) requires cuBLAS 13.5+
+#define CUBLAS_FP8_TENSOR_SCALING_GROUPED_GEMM_HOPPER_VERSION 130500
+
 // BF16 support for grouped GEMM requires cuBLAS 13.3+
 #define CUBLAS_GROUPED_GEMM_VERSION 130300
 
@@ -1054,6 +1058,14 @@ inline void execute_grouped_gemm(const GroupedGemmSetupWorkspace &setup_workspac
                                          setup_workspace.b_scale_inv_ptrs, A_sel.scaling_mode,
                                          B_sel.scaling_mode);
   } else if (config.use_fp8) {
+    const int sm = transformer_engine::cuda::sm_arch(transformer_engine::cuda::current_device());
+    if (sm < 100) {
+      NVTE_CHECK(transformer_engine::cuda::cublas_version() >=
+                     CUBLAS_FP8_TENSOR_SCALING_GROUPED_GEMM_HOPPER_VERSION,
+                 "FP8 tensor scaling grouped GEMM on Hopper (SM90) requires cuBLAS 13.5+, "
+                 "but run-time cuBLAS version is ",
+                 transformer_engine::cuda::cublas_version());
+    }
     set_fp8_scale_pointers(matmulDesc, setup_workspace.a_scale_inv_ptrs,
                            setup_workspace.b_scale_inv_ptrs);
   }
@@ -1625,7 +1637,7 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
                             inputC->dtype(), outputD->dtype());
 
   // Compute average dimensions for heuristics
-  // K dimension: if transa, K is A's first dim; if not, K is A's last dim
+  // K dimension: if transa, K is A's last dim; if not, K is A's first dim
   // Use original inputA and transa for heuristics (not modified A_sel.trans)
   GroupedGemmConfig gemm_config;
   gemm_config.use_split_accumulator = config_.use_split_accumulator;
@@ -1633,10 +1645,12 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
   gemm_config.use_per_group_alpha_beta = use_per_group_alpha_beta;
   gemm_config.alpha_dptr = alpha_tensor->data.dptr;
   gemm_config.beta_dptr = beta_tensor->data.dptr;
-  gemm_config.avg_m = config_.avg_m.value_or(compute_avg_first_dim(outputD));
-  gemm_config.avg_n = config_.avg_n.value_or(compute_avg_last_dim(outputD));
+  // avg m = avg num of rows of D in column-major = avg last dim of D
+  // avg n = avg num of cols of D in column-major = avg first dim of D
+  gemm_config.avg_m = config_.avg_m.value_or(compute_avg_last_dim(outputD));
+  gemm_config.avg_n = config_.avg_n.value_or(compute_avg_first_dim(outputD));
   gemm_config.avg_k =
-      config_.avg_k.value_or(transa ? compute_avg_first_dim(inputA) : compute_avg_last_dim(inputA));
+      config_.avg_k.value_or(transa ? compute_avg_last_dim(inputA) : compute_avg_first_dim(inputA));
   gemm_config.sm_count = config_.sm_count;
   execute_grouped_gemm(workspace.setup_workspace, A_sel, B_sel, outputD->dtype(), num_tensors,
                        gemm_config, workspace.cublas_workspace_ptr, stream);
@@ -1783,10 +1797,9 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
   gemm_config.use_per_group_alpha_beta = use_per_group_alpha_beta;
   gemm_config.alpha_dptr = alpha_tensor->data.dptr;
   gemm_config.beta_dptr = beta_tensor->data.dptr;
-  gemm_config.avg_m = config_.avg_m.value_or(compute_avg_first_dim(outputD));
-  gemm_config.avg_n =
-      config_.avg_n.value_or(transb ? compute_avg_first_dim(inputB) : compute_avg_last_dim(inputB));
-  gemm_config.avg_k = config_.avg_k.value_or(transa ? avg_first_dim : avg_last_dim);
+  gemm_config.avg_m = config_.avg_m.value_or(compute_avg_last_dim(outputD));
+  gemm_config.avg_n = config_.avg_n.value_or(compute_avg_first_dim(outputD));
+  gemm_config.avg_k = config_.avg_k.value_or(transa ? avg_last_dim : avg_first_dim);
   gemm_config.sm_count = config_.sm_count;
   execute_grouped_gemm(workspace.setup_workspace, A_sel, B_sel, outputD->dtype(), num_tensors,
                        gemm_config, workspace.cublas_workspace_ptr, stream);
@@ -1869,12 +1882,16 @@ void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
   gemm_config.use_per_group_alpha_beta = use_per_group_alpha_beta;
   gemm_config.alpha_dptr = alpha_tensor->data.dptr;
   gemm_config.beta_dptr = beta_tensor->data.dptr;
+  // D is a discrete list here, so derive the heuristic dims from the grouped inputs instead.
+  // avg m (rows of D in column-major) is derived from A and avg n (cols of D) from B. The
+  // reduction dim K is A's last dim when transa, otherwise its first dim (cuBLAS views operands
+  // transposed) -- matching nvte_grouped_gemm / _with_discrete_inputA.
   gemm_config.avg_m =
-      config_.avg_m.value_or(transa ? compute_avg_last_dim(inputA) : compute_avg_first_dim(inputA));
+      config_.avg_m.value_or(transa ? compute_avg_first_dim(inputA) : compute_avg_last_dim(inputA));
   gemm_config.avg_n =
-      config_.avg_n.value_or(transb ? compute_avg_first_dim(inputB) : compute_avg_last_dim(inputB));
+      config_.avg_n.value_or(transb ? compute_avg_last_dim(inputB) : compute_avg_first_dim(inputB));
   gemm_config.avg_k =
-      config_.avg_k.value_or(transa ? compute_avg_first_dim(inputA) : compute_avg_last_dim(inputA));
+      config_.avg_k.value_or(transa ? compute_avg_last_dim(inputA) : compute_avg_first_dim(inputA));
   gemm_config.sm_count = config_.sm_count;
   execute_grouped_gemm(workspace.setup_workspace, A_sel, B_sel, d_dtype, num_tensors, gemm_config,
                        workspace.cublas_workspace_ptr, stream);
