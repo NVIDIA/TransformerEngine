@@ -2,13 +2,15 @@
 #
 # See LICENSE for license information.
 
+"""Low-level CuTeDSL helpers: bitcast/fma/exp2 intrinsics, f32 packing, and the 16-bit (bf16/fp16) packed-op kit."""
+
+from types import SimpleNamespace
+
 import cutlass
-from cutlass import Float32, Int64, Int32, Int16, Uint32
+from cutlass import Float32, Int64, Int32, Int16
 from cutlass._mlir.dialects import arith as mlir_arith
 from cutlass._mlir.dialects import llvm
 from cutlass.cutlass_dsl import T, dsl_user_op
-
-from types import SimpleNamespace
 
 _CUTLASS_DTYPE_FROM_STR = {
     "fp32": cutlass.Float32,

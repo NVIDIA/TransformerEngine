@@ -16,21 +16,30 @@ Grid: (ceil(N / 64), ceil(M / 64))
 Each block processes a 64x64 chunk in 2 stages of 32x64 tiles loaded into
 shared memory.
 """
+# Local @cute.struct classes are SMEM-layout descriptors that need no docstrings.
+# pylint: disable=missing-class-docstring
+
 import logging
 import os
-
-from transformer_engine.common.CuTeDSL.utils import _bitcast_f32_to_i32, str_to_cutlass_dtype
-
 from typing import Optional, Type
 
 import cutlass
-import cutlass.cute as cute
-import cutlass.pipeline as pipeline
+from cutlass import cute
+from cutlass import pipeline
 from cutlass import Float32, Int16, Int32, Int64, Uint32, Uint8
-from cuda.bindings.driver import CUstream
-
+from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 import tvm_ffi
 
+from transformer_engine.common.CuTeDSL.utils import (
+    _bitcast_f32_to_i32,
+    str_to_cutlass_dtype,
+    is_packed16,
+    packed16_kit,
+    fabs_f32,
+    exp2f_rcp,
+    pack_f32x2,
+    unpack_i64_to_i32x2,
+)
 from transformer_engine.common.CuTeDSL.activations import (
     act_relu,
     act_gelu,
@@ -42,15 +51,6 @@ from transformer_engine.common.CuTeDSL.activations import (
     dact_dsilu,
     dact_dqgelu,
     dact_dgelu,
-)
-
-from transformer_engine.common.CuTeDSL.utils import (
-    is_packed16,
-    packed16_kit,
-    fabs_f32,
-    exp2f_rcp,
-    pack_f32x2,
-    unpack_i64_to_i32x2,
 )
 from transformer_engine.common.CuTeDSL.utils_fp8 import (
     get_cvt_f32_to_fp8_func,
@@ -121,6 +121,7 @@ def quantize_rowwise_mxfp8(
     WITH_DBIAS=False,  # rowwise-only dbias: accumulate per-column partials
     dbias_acc=None,  #  only needed when WITH_DBIAS is True
 ):
+    """Quantize one SMEM tile rowwise to MXFP8 (per-row 32-elt block scales); returns the tile amax."""
     tidx, _, _ = cute.arch.thread_idx()
 
     CTA_THREADS_Y = TILE_Y  # threads per column (rows per tile)
@@ -307,7 +308,7 @@ def quantize_colwise_mxfp8(
     FP8_DTYPE,
     SWIZZLE,
     TILE_X,
-    TILE_Y,
+    TILE_Y,  # pylint: disable=unused-argument  # kept for API symmetry with the rowwise path
     WITH_ACT=False,  # forward: apply activation to the element
     WITH_DACT=False,  # backward: out = grad · act'(act_input)
     sA_tile=None,  # (TILE_Y, TILE_X) activation-input smem tile (dact only)
@@ -316,6 +317,7 @@ def quantize_colwise_mxfp8(
     # (IType-truncated) values, so the rowwise pass can read
     # them instead of recomputing op
 ):
+    """Quantize one SMEM tile colwise to MXFP8 (per-column 32-elt block scales); returns (amax, dbias_partial)."""
     tidx, _, _ = cute.arch.thread_idx()
 
     _, tv_layout = cute.make_layout_tv(
@@ -637,7 +639,7 @@ class MXFP8QuantizeConfig:
                     "with_dact and with_act cannot be true at the same time since they are used for"
                     " different paths (bwd vs fwd)"
                 )
-            elif with_dact:
+            if with_dact:
                 if activation in SUPPORTED_DACTIVATIONS:
                     self.ACTIVATION = activation
                 else:
@@ -888,6 +890,7 @@ class MXFP8QuantizeKernel:
         tma_atom_act,
         tma_src_act,  # Activation derivative TMA atoms, or None if WITH_DACT is False
     ):
+        """Device entry: no-op the CTA when the noop flag is set, else run the quantize main loop."""
         cfg = self.cfg
         # If the noop tensor is not passed (compile-time check), or the noop tensor is not 1.0 (run-time check)
         # then we run the kernel for real. Otherwise, skip the quantization so this kernel becomes a no-op.
@@ -1563,6 +1566,7 @@ class MXFP8QuantizeSpecializedRowwiseKernel:
 
     @cute.kernel
     def kernel(self, mX, mO_row, mS_row, max_norm_rcp, DTYPE):
+        """Device entry for the specialized rowwise-only cast kernel (vectorized global loads/stores, no TMA)."""
         tidx, _, _ = cute.arch.thread_idx()
         bidx, bidy, _ = cute.arch.block_idx()
         M = mX.shape[0]
@@ -1710,6 +1714,7 @@ class MXFP8QuantizeSpecializedRowwiseKernel:
 
 
 class MXFP8QuantizeSpecializedBidimensionalKernel:
+    """Specialized cast-only rowwise+colwise MXFP8 kernel (swizzled TMA, one 32x32 tile per warp)."""
 
     _WARPS_PER_CTA = 2
     _THREADS_PER_CTA = _WARPS_PER_CTA * THREADS_PER_WARP
@@ -1818,6 +1823,7 @@ class MXFP8QuantizeSpecializedBidimensionalKernel:
         tma_atom_out_col,
         tma_dst_out_col,
     ):
+        """Device entry for the specialized bidimensional (rowwise+colwise) cast kernel."""
 
         bidx, bidy, _ = cute.arch.block_idx()
 
@@ -2255,11 +2261,12 @@ def get_mxfp8_quantization_function(
         # warning lets the C++ dispatcher's CUDA fallback be recognized as expected.
         logger.warning(
             "CuTeDSL MXFP8 backend does not support this config, "
-            f"falling back to the CUDA C++ kernel: {e}"
+            "falling back to the CUDA C++ kernel: %s",
+            e,
         )
         return False
 
-    logger.debug(f"Compiling CuTeDSL MXFP8 quantization kernel for {cfg}")
+    logger.debug("Compiling CuTeDSL MXFP8 quantization kernel for %s", cfg)
     compiled = compile_cutedsl_function_from_cfg(cfg)
     tvm_ffi.register_global_func(fn_name, compiled, override=True)
 

@@ -2,15 +2,18 @@
 #
 # See LICENSE for license information.
 
-import cutlass.cute as cute
+"""Elementwise activations and their derivatives (f32), bit-exact with common/util/math.h, for the CuTeDSL kernels."""
+
+from cutlass import cute
 from cutlass import Float32
 from cutlass._mlir.dialects import arith as mlir_arith
-from cutlass.cutlass_dsl import T, dsl_user_op
+from cutlass.cutlass_dsl import dsl_user_op
 
 from transformer_engine.common.CuTeDSL.utils import fma_f32
 
 
 def act_relu(x: Float32) -> Float32:
+    """ReLU: max(x, 0). Matches math.h `relu`."""
     return cute.arch.fmax(x, Float32(0.0))
 
 
