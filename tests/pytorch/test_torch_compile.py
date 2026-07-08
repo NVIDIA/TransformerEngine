@@ -525,3 +525,53 @@ def test_get_attention_backend_fused_backend_constant(monkeypatch):
 
     compiled_no_backend = torch.compile(fn_no_backend, fullgraph=True)
     torch.testing.assert_close(compiled_no_backend(x, params), x + 4.0)
+
+
+def test_get_attention_backend_traceable_fp8(monkeypatch):
+    """Backend selection for FP8 attention (fp8_dpa recipes) must also trace
+    under torch.compile(fullgraph=True), including the FP8-only env var reads
+    and recipe filters, and the FP8 env vars must be guarded."""
+    from transformer_engine.pytorch.attention.dot_product_attention import utils as dpa_utils
+
+    for env_var, value in (
+        ("NVTE_FLASH_ATTN", "1"),
+        ("NVTE_FUSED_ATTN", "1"),
+        ("NVTE_UNFUSED_ATTN", "1"),
+        ("NVTE_FP8_DPA_BWD", "1"),
+        ("NVTE_DPA_FP8CS_O_in_F16", "1"),
+        ("NVTE_DPA_FP8_RECIPE", ""),
+        ("NVTE_UnfusedDPA_Emulate_FP8", "0"),
+    ):
+        monkeypatch.setenv(env_var, value)
+
+    attention_params = dpa_utils.AttentionParams(
+        fp8=True,
+        fp8_meta={"recipe": recipe.DelayedScaling(fp8_dpa=True)},
+    )
+
+    def fn(x):
+        (
+            use_flash_attention,
+            _,
+            use_fused_attention,
+            _,
+            use_unfused_attention,
+            _,
+        ) = dpa_utils.get_attention_backend(attention_params)
+        return (
+            x
+            + (1 if use_flash_attention else 0)
+            + (2 if use_fused_attention else 0)
+            + (4 if use_unfused_attention else 0)
+        )
+
+    torch._dynamo.reset()
+    compiled = torch.compile(fn, fullgraph=True)
+
+    x = torch.zeros(8, device="cuda")
+    torch.testing.assert_close(compiled(x), fn(x))
+
+    # FP8-only env var: allowing FP8 emulation enables UnfusedDotProductAttention,
+    # which must trigger recompilation (guard on os.environ) and match eager.
+    monkeypatch.setenv("NVTE_UnfusedDPA_Emulate_FP8", "1")
+    torch.testing.assert_close(compiled(x), fn(x))
