@@ -25,6 +25,7 @@ from build_tools.utils import (
     remove_dups,
     min_python_version_str,
     nccl_ep_enabled,
+    get_max_jobs_for_parallel_build,
 )
 
 frameworks = get_frameworks()
@@ -250,7 +251,7 @@ def build_nccl_ep_submodule() -> str:
         )
     gencode = " ".join(f"-gencode=arch=compute_{a},code=sm_{a}" for a in arch_list)
 
-    nproc = os.cpu_count() or 8
+    nproc = get_max_jobs_for_parallel_build()
     env = os.environ.copy()
     env["NVCC_GENCODE"] = gencode
     # NCCL EP needs the core NCCL headers + libnccl.so; write NCCL EP build
