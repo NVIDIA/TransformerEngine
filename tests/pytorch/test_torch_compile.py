@@ -552,6 +552,132 @@ def test_unfused_dpa_torch_compile(qkv_layout):
         assert v.grad is not None
 
 
+def _make_unfused_fp8_emulation_quantizers(recipe_name: str):
+    """Build the ``quantizers`` dict + ``fp8_meta`` that
+    ``UnfusedDotProductAttention.forward(fp8=True, ...)`` expects, mimicking
+    what ``DotProductAttention.init_fp8_metadata`` produces for the recipe:
+    S/dP always get delayed-scaling quantizers (the forward reverts them to
+    current scaling when the recipe is CS)."""
+    from transformer_engine.pytorch.cpp_extensions.fused_attn import (
+        META_QKV,
+        META_O,
+        META_S,
+        META_DQKV,
+        META_DO,
+        META_DP,
+    )
+    from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
+    from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+
+    def ds(dtype):
+        return Float8Quantizer(
+            scale=torch.ones(1, device="cuda"),
+            amax=torch.zeros(1, device="cuda"),
+            fp8_dtype=dtype,
+        )
+
+    def cs(dtype):
+        return Float8CurrentScalingQuantizer(fp8_dtype=dtype, device=torch.device("cuda"))
+
+    def mx(dtype):
+        return MXFP8Quantizer(fp8_dtype=dtype)
+
+    fwd_dtype, bwd_dtype = tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2
+    if recipe_name == "delayed":
+        fp8_recipe = recipe.DelayedScaling()
+        fwd = {META_QKV: ds(fwd_dtype), META_O: ds(fwd_dtype), META_S: ds(fwd_dtype)}
+        bwd = {META_DQKV: ds(bwd_dtype), META_DO: ds(bwd_dtype), META_DP: ds(bwd_dtype)}
+    elif recipe_name == "current":
+        fp8_recipe = recipe.Float8CurrentScaling()
+        fwd = {META_QKV: cs(fwd_dtype), META_O: cs(fwd_dtype), META_S: ds(fwd_dtype)}
+        bwd = {META_DQKV: cs(bwd_dtype), META_DO: cs(bwd_dtype), META_DP: ds(bwd_dtype)}
+    elif recipe_name == "mxfp8":
+        fp8_recipe = recipe.MXFP8BlockScaling()
+        fwd = {META_QKV: mx(fwd_dtype), META_O: mx(fwd_dtype), META_S: mx(fwd_dtype)}
+        bwd = {META_DQKV: mx(bwd_dtype), META_DO: mx(bwd_dtype), META_DP: mx(bwd_dtype)}
+    else:
+        raise ValueError(recipe_name)
+
+    quantizers = {
+        "scaling_fwd": [fwd.get(i) for i in range(max(fwd) + 1)],
+        "scaling_bwd": [bwd.get(i) for i in range(max(bwd) + 1)],
+    }
+    fp8_meta = {"local_recipes": [fp8_recipe]}
+    return quantizers, fp8_meta
+
+
+def _run_unfused_fp8_emulation(qkv_layout: str, recipe_name: str, do_compile: bool):
+    """Run unfused DPA with FP8 emulation eagerly, and optionally compare
+    against torch.compile(fullgraph=True) on fresh leaf copies of the same
+    inputs."""
+    dtype = torch.bfloat16
+    module = _make_unfused_attention(dtype)
+    quantizers, fp8_meta = _make_unfused_fp8_emulation_quantizers(recipe_name)
+
+    def fn(q, k, v, extra):
+        return module(
+            _EMPTY_ALIBI_CACHE,
+            q,
+            k,
+            v,
+            qkv_layout=qkv_layout,
+            attn_mask_type="causal",
+            fp8=True,
+            fp8_meta=fp8_meta,
+            quantizers=quantizers,
+            **extra,
+        )
+
+    q, k, v, extra, _ = _make_unfused_qkv(qkv_layout, dtype, requires_grad=True)
+    out_ref = fn(q, k, v, extra)
+    out_ref.sum().backward()
+    assert torch.isfinite(out_ref).all()
+    assert q.grad is not None and k.grad is not None and v.grad is not None
+
+    if not do_compile:
+        return
+
+    torch._dynamo.reset()
+    compiled = torch.compile(fn, fullgraph=True)
+    for _ in range(2):
+        q2, k2, v2 = (x.detach().clone().requires_grad_() for x in (q, k, v))
+        out = compiled(q2, k2, v2, extra)
+        out.sum().backward()
+    torch.testing.assert_close(out, out_ref)
+    torch.testing.assert_close(q2.grad, q.grad)
+    torch.testing.assert_close(k2.grad, k.grad)
+    torch.testing.assert_close(v2.grad, v.grad)
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("qkv_layout", ["sbhd_sbhd_sbhd", "bshd_bshd_bshd"])
+@pytest.mark.parametrize(
+    "recipe_name",
+    [
+        pytest.param("current", id="float8_current_scaling"),
+        pytest.param(
+            "mxfp8",
+            id="mxfp8",
+            marks=pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8),
+        ),
+    ],
+)
+def test_unfused_dpa_fp8_emulation_torch_compile(recipe_name, qkv_layout):
+    """FP8-emulation path of UnfusedDotProductAttention under
+    torch.compile(fullgraph=True): the te_fp8_emu::* custom ops take the
+    value-opaque quantizers in-graph; compiled forward+backward must match
+    eager."""
+    _run_unfused_fp8_emulation(qkv_layout, recipe_name, do_compile=True)
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_unfused_dpa_fp8_emulation_delayed_scaling_eager():
+    """Delayed scaling is not supported under torch.compile (Float8Quantizer
+    carries tensor state and is not value-opaque); guard that the eager
+    emulation path still works after the custom-op refactor."""
+    _run_unfused_fp8_emulation("sbhd_sbhd_sbhd", "delayed", do_compile=False)
+
+
 # ---------------------------------------------------------------------------
 # Value-opaque quantizers
 # ---------------------------------------------------------------------------
