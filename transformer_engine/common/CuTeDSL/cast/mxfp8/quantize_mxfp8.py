@@ -16,6 +16,7 @@ Grid: (ceil(N / 64), ceil(M / 64))
 Each block processes a 64x64 chunk in 2 stages of 32x64 tiles loaded into
 shared memory.
 """
+
 # Local @cute.struct classes are SMEM-layout descriptors that need no docstrings.
 # pylint: disable=missing-class-docstring
 
@@ -2266,12 +2267,13 @@ def get_mxfp8_quantization_function(
         )
         return False
 
-    logger.debug(f"Compiling CuTeDSL MXFP8 quantization kernel for {cfg}")
+    logger.debug("Compiling CuTeDSL MXFP8 quantization kernel for %s", cfg)
     try:
         compiled = compile_cutedsl_function_from_cfg(cfg)
-    except Exception as e:
+    except Exception as e:  # pylint: disable=broad-exception-caught
         logger.warning(
-            f"CuTeDSL MXFP8 kernel compilation failed, falling back to the CUDA C++ kernel: {e}"
+            "CuTeDSL MXFP8 kernel compilation failed, falling back to the CUDA C++ kernel: %s",
+            e,
         )
         return False
     tvm_ffi.register_global_func(fn_name, compiled, override=True)
