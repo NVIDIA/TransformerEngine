@@ -197,6 +197,104 @@ def _trim_output(attn_out, num_attention_heads, padded_head_dim_v, orig_head_dim
     return attn_out[..., :orig_head_dim_v].reshape(*out_shape, -1)
 
 
+def _unpack_packed_qkv(
+    qkv_layer: Optional[torch.Tensor],
+    kv_layer: Optional[torch.Tensor],
+    query_layer: Optional[torch.Tensor],
+    key_layer: Optional[torch.Tensor],
+    value_layer: Optional[torch.Tensor],
+    qkv_format: str,
+    qkv_interleave_dim: int,
+    inference_params: Optional[InferenceParams],
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[str]]:
+    """Resolve declarative packed inputs into q/k/v.
+
+    Derives q/k/v as zero-copy views of the packed buffer (``qkv_layer`` or
+    ``kv_layer``) and constructs the exact layout string from the declaration.
+    The layout enum is truthful by construction, so no pointer-based detection
+    is needed downstream (this also covers thd and FP8 DPA).
+
+    Returns ``(query_layer, key_layer, value_layer, packed_tensor,
+    declared_qkv_layout)``; the last two are ``None`` when no packed input is
+    given.
+    """
+    if qkv_layer is None and kv_layer is None:
+        if query_layer is None or key_layer is None or value_layer is None:
+            raise ValueError(
+                "query_layer, key_layer and value_layer are required unless packed"
+                " inputs (qkv_layer or query_layer + kv_layer) are provided."
+            )
+        return query_layer, key_layer, value_layer, None, None
+
+    if qkv_layer is not None and kv_layer is not None:
+        raise ValueError("qkv_layer and kv_layer are mutually exclusive.")
+    if inference_params is not None:
+        raise ValueError(
+            "Packed inputs (qkv_layer/kv_layer) are not supported with KV caching"
+            " (inference_params); pass separate query/key/value tensors instead."
+        )
+    if qkv_interleave_dim not in (-3, -2):
+        raise ValueError(
+            "qkv_interleave_dim must be -3 (e.g. bs3hd) or -2 (e.g. bsh3d), got"
+            f" {qkv_interleave_dim}."
+        )
+
+    def _packed_layout(fmt: str, num: int) -> str:
+        # bshd + 3 @ -3 -> bs3hd; bshd + 3 @ -2 -> bsh3d; thd + 2 @ -2 -> th2d
+        pos = len(fmt) + qkv_interleave_dim + 1
+        return fmt[:pos] + str(num) + fmt[pos:]
+
+    if qkv_layer is not None:
+        if any(x is not None for x in (query_layer, key_layer, value_layer)):
+            raise ValueError(
+                "qkv_layer already packs Q, K and V: query_layer, key_layer and"
+                " value_layer must be None when qkv_layer is provided."
+            )
+        expected_rank = 4 if qkv_format == "thd" else 5
+        if qkv_layer.dim() != expected_rank:
+            raise ValueError(
+                f"qkv_layer must be a {expected_rank}D tensor for"
+                f" qkv_format={qkv_format!r}, got {qkv_layer.dim()}D."
+            )
+        if qkv_layer.shape[qkv_interleave_dim] != 3:
+            raise ValueError(
+                f"qkv_layer must have size 3 at dim {qkv_interleave_dim}"
+                f" (qkv_interleave_dim), got shape {tuple(qkv_layer.shape)}."
+            )
+        query_layer, key_layer, value_layer = (
+            qkv_layer.select(qkv_interleave_dim, i) for i in range(3)
+        )
+        return query_layer, key_layer, value_layer, qkv_layer, _packed_layout(qkv_format, 3)
+
+    if query_layer is None:
+        raise ValueError(
+            "kv_layer packs only K and V: query_layer is required when kv_layer" " is provided."
+        )
+    if key_layer is not None or value_layer is not None:
+        raise ValueError(
+            "kv_layer already packs K and V: key_layer and value_layer must be"
+            " None when kv_layer is provided."
+        )
+    if kv_layer.dim() != query_layer.dim() + 1:
+        raise ValueError(
+            f"kv_layer must have one more dimension than query_layer, got"
+            f" {kv_layer.dim()}D kv_layer and {query_layer.dim()}D query_layer."
+        )
+    if kv_layer.shape[qkv_interleave_dim] != 2:
+        raise ValueError(
+            f"kv_layer must have size 2 at dim {qkv_interleave_dim}"
+            f" (qkv_interleave_dim), got shape {tuple(kv_layer.shape)}."
+        )
+    key_layer, value_layer = (kv_layer.select(qkv_interleave_dim, i) for i in range(2))
+    return (
+        query_layer,
+        key_layer,
+        value_layer,
+        kv_layer,
+        f"{qkv_format}_{_packed_layout(qkv_format, 2)}",
+    )
+
+
 class DotProductAttention(TransformerEngineBaseModule):
     r"""Allows the model to jointly attend to information from different
     representation subspaces as described in the paper:
@@ -1275,85 +1373,18 @@ class DotProductAttention(TransformerEngineBaseModule):
             since e.g. ``h == 3`` would make the shapes ambiguous.
         """
 
-        # Declarative packed inputs: derive q/k/v as zero-copy views of the packed
-        # buffer and construct the exact layout string from the declaration. The
-        # layout enum is truthful by construction, so no pointer-based detection
-        # is needed downstream (this also covers thd and FP8 DPA).
-        packed_tensor = None
-        declared_qkv_layout = None
-        if qkv_layer is not None or kv_layer is not None:
-            if qkv_layer is not None and kv_layer is not None:
-                raise ValueError("qkv_layer and kv_layer are mutually exclusive.")
-            if inference_params is not None:
-                raise ValueError(
-                    "Packed inputs (qkv_layer/kv_layer) are not supported with KV caching"
-                    " (inference_params); pass separate query/key/value tensors instead."
-                )
-            if qkv_interleave_dim not in (-3, -2):
-                raise ValueError(
-                    "qkv_interleave_dim must be -3 (e.g. bs3hd) or -2 (e.g. bsh3d), got"
-                    f" {qkv_interleave_dim}."
-                )
-            packed_format = qkv_format if qkv_format is not None else self.qkv_format
-
-            def _packed_layout(fmt: str, num: int) -> str:
-                # bshd + 3 @ -3 -> bs3hd; bshd + 3 @ -2 -> bsh3d; thd + 2 @ -2 -> th2d
-                pos = len(fmt) + qkv_interleave_dim + 1
-                return fmt[:pos] + str(num) + fmt[pos:]
-
-            if qkv_layer is not None:
-                if any(x is not None for x in (query_layer, key_layer, value_layer)):
-                    raise ValueError(
-                        "qkv_layer already packs Q, K and V: query_layer, key_layer and"
-                        " value_layer must be None when qkv_layer is provided."
-                    )
-                expected_rank = 4 if packed_format == "thd" else 5
-                if qkv_layer.dim() != expected_rank:
-                    raise ValueError(
-                        f"qkv_layer must be a {expected_rank}D tensor for"
-                        f" qkv_format={packed_format!r}, got {qkv_layer.dim()}D."
-                    )
-                if qkv_layer.shape[qkv_interleave_dim] != 3:
-                    raise ValueError(
-                        f"qkv_layer must have size 3 at dim {qkv_interleave_dim}"
-                        f" (qkv_interleave_dim), got shape {tuple(qkv_layer.shape)}."
-                    )
-                query_layer, key_layer, value_layer = (
-                    qkv_layer.select(qkv_interleave_dim, i) for i in range(3)
-                )
-                packed_tensor = qkv_layer
-                declared_qkv_layout = _packed_layout(packed_format, 3)
-            else:
-                if query_layer is None:
-                    raise ValueError(
-                        "kv_layer packs only K and V: query_layer is required when kv_layer"
-                        " is provided."
-                    )
-                if key_layer is not None or value_layer is not None:
-                    raise ValueError(
-                        "kv_layer already packs K and V: key_layer and value_layer must be"
-                        " None when kv_layer is provided."
-                    )
-                if kv_layer.dim() != query_layer.dim() + 1:
-                    raise ValueError(
-                        f"kv_layer must have one more dimension than query_layer, got"
-                        f" {kv_layer.dim()}D kv_layer and {query_layer.dim()}D query_layer."
-                    )
-                if kv_layer.shape[qkv_interleave_dim] != 2:
-                    raise ValueError(
-                        f"kv_layer must have size 2 at dim {qkv_interleave_dim}"
-                        f" (qkv_interleave_dim), got shape {tuple(kv_layer.shape)}."
-                    )
-                key_layer, value_layer = (
-                    kv_layer.select(qkv_interleave_dim, i) for i in range(2)
-                )
-                packed_tensor = kv_layer
-                declared_qkv_layout = f"{packed_format}_{_packed_layout(packed_format, 2)}"
-        elif query_layer is None or key_layer is None or value_layer is None:
-            raise ValueError(
-                "query_layer, key_layer and value_layer are required unless packed"
-                " inputs (qkv_layer or query_layer + kv_layer) are provided."
+        query_layer, key_layer, value_layer, packed_tensor, declared_qkv_layout = (
+            _unpack_packed_qkv(
+                qkv_layer,
+                kv_layer,
+                query_layer,
+                key_layer,
+                value_layer,
+                qkv_format if qkv_format is not None else self.qkv_format,
+                qkv_interleave_dim,
+                inference_params,
             )
+        )
 
         with self.prepare_forward_ctx(
             query_layer,
