@@ -329,9 +329,8 @@ def _target_arch_is_blackwell() -> bool:
             major_minor = Device().arch  # compute capability as digits, e.g. "120"
         # Trailing digit is the minor version; the rest is the major version.
         return int(major_minor[:-1]) in (10, 11, 12)
-    except (
-        Exception
-    ) as e:  # pylint: disable=broad-except  # pragma: no cover - detection is best-effort
+    # Best-effort detection: any failure means "assume non-Blackwell software path".
+    except Exception as e:  # pylint: disable=broad-exception-caught
         logger.debug("e8m0 arch detection failed (%s); using software path", e)
         return False
 
