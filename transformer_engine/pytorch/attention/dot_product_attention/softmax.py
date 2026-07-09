@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Fused scaled masked softmax functions"""
+
 import os
 from typing import Callable, Optional
 import torch
@@ -10,12 +11,8 @@ from torch import nn
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
 
-
 THREADS_PER_WARP = 32
 THREADS_PER_BLOCK = 128
-
-
-_default_causal_mask = {}
 
 
 # ----------------------------- ScaledSoftmax -------------------------------
@@ -91,9 +88,7 @@ def scaled_masked_softmax_backward(
     output_grads: torch.Tensor, softmax_results: torch.Tensor, scale: float
 ) -> torch.Tensor:
     """Backward pass for ScaledMaskedSoftmax."""
-    return tex.scaled_masked_softmax_backward(
-        output_grads, softmax_results, scale
-    )
+    return tex.scaled_masked_softmax_backward(output_grads, softmax_results, scale)
 
 
 @scaled_masked_softmax_backward.register_fake
@@ -128,9 +123,7 @@ scaled_masked_softmax_forward.register_autograd(
 
 
 @torch.library.custom_op("te_softmax::scaled_upper_triang_masked_softmax_fwd", mutates_args=())
-def scaled_upper_triang_masked_softmax_forward(
-    inputs: torch.Tensor, scale: float
-) -> torch.Tensor:
+def scaled_upper_triang_masked_softmax_forward(inputs: torch.Tensor, scale: float) -> torch.Tensor:
     """Forward pass for ScaledUpperTriangMaskedSoftmax."""
     return tex.scaled_upper_triang_masked_softmax_forward(inputs, scale)
 
@@ -148,9 +141,7 @@ def scaled_upper_triang_masked_softmax_backward(
     output_grads: torch.Tensor, softmax_results: torch.Tensor, scale: float
 ) -> torch.Tensor:
     """Backward pass for ScaledUpperTriangMaskedSoftmax."""
-    return tex.scaled_upper_triang_masked_softmax_backward(
-        output_grads, softmax_results, scale
-    )
+    return tex.scaled_upper_triang_masked_softmax_backward(output_grads, softmax_results, scale)
 
 
 @scaled_upper_triang_masked_softmax_backward.register_fake
@@ -205,9 +196,7 @@ def scaled_aligned_causal_masked_softmax_backward(
     output_grads: torch.Tensor, softmax_results: torch.Tensor, scale: float
 ) -> torch.Tensor:
     """Backward pass for ScaledAlignedCausalMaskedSoftmax."""
-    return tex.scaled_aligned_causal_masked_softmax_backward(
-        output_grads, softmax_results, scale
-    )
+    return tex.scaled_aligned_causal_masked_softmax_backward(output_grads, softmax_results, scale)
 
 
 @scaled_aligned_causal_masked_softmax_backward.register_fake

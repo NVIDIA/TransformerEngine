@@ -5,6 +5,7 @@
 """
 Utils/Helper classes and methods for attention
 """
+
 import math
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -2197,12 +2198,11 @@ def _convert_bshd_to_thd_fake(
 ) -> torch.Tensor:
     del cu_seqlens
     h, d = bshd_tensor.shape[2], bshd_tensor.shape[3]
-    return torch.empty(
-        (num_tokens, h, d), dtype=bshd_tensor.dtype, device=bshd_tensor.device
-    )
+    return torch.empty((num_tokens, h, d), dtype=bshd_tensor.dtype, device=bshd_tensor.device)
 
 
 def _convert_thd_to_bshd_setup_context(ctx, inputs, output):
+    del output
     thd_tensor, cu_seqlens, _batch_size, _max_seqlen = inputs
     ctx.save_for_backward(cu_seqlens)
     ctx.num_tokens = thd_tensor.size(0)
@@ -2210,9 +2210,7 @@ def _convert_thd_to_bshd_setup_context(ctx, inputs, output):
 
 def _convert_thd_to_bshd_backward_wrapper(ctx, grad_bshd):
     (cu_seqlens,) = ctx.saved_tensors
-    grad_thd = torch.ops.te_attention.convert_bshd_to_thd(
-        grad_bshd, cu_seqlens, ctx.num_tokens
-    )
+    grad_thd = torch.ops.te_attention.convert_bshd_to_thd(grad_bshd, cu_seqlens, ctx.num_tokens)
     return grad_thd, None, None, None
 
 
@@ -2223,6 +2221,7 @@ _convert_thd_to_bshd_op.register_autograd(
 
 
 def _convert_bshd_to_thd_setup_context(ctx, inputs, output):
+    del output
     bshd_tensor, cu_seqlens, _num_tokens = inputs
     ctx.save_for_backward(cu_seqlens)
     ctx.batch_size = bshd_tensor.size(0)
@@ -2271,9 +2270,7 @@ class ConvertBSHDtoTHD:
     @staticmethod
     def apply(bshd_tensor, cu_seqlens, num_tokens):
         # pylint: disable=missing-function-docstring
-        return torch.ops.te_attention.convert_bshd_to_thd(
-            bshd_tensor, cu_seqlens, num_tokens
-        )
+        return torch.ops.te_attention.convert_bshd_to_thd(bshd_tensor, cu_seqlens, num_tokens)
 
 
 def get_qkv_format(

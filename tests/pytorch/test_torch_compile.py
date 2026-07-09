@@ -3,7 +3,6 @@
 # See LICENSE for license information.
 
 import abc
-import os
 
 import pytest
 import torch
@@ -391,7 +390,6 @@ def test_autocast_sanity(fp8_recipe):
 
     out = compiled(inp)
     out.sum().backward()
-
 
 
 _UNFUSED_DPA_CONFIG = dict(
