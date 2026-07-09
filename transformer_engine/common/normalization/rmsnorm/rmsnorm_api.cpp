@@ -60,8 +60,7 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
                "cuDNN does not currently support amax output for non quantized output");
   }
 
-  bool training =
-      is_tensor_scaling(z->scaling_mode) || (z->columnwise_data).dptr != nullptr;
+  bool training = is_tensor_scaling(z->scaling_mode) || (z->columnwise_data).dptr != nullptr;
 
   bool gamma_in_weight_dtype = false;
   if (cudnn_backend) {

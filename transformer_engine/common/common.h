@@ -83,7 +83,6 @@ inline bool is_tensor_scaling(const NVTEScalingMode &mode) {
 
 inline bool is_block_scaling(const NVTEScalingMode &mode) { return !is_tensor_scaling(mode); }
 
-
 inline bool is_nvfp4_scaling(const NVTEScalingMode &mode) { return mode == NVTE_NVFP4_1D_SCALING; }
 
 inline bool is_mxfp8_scaling(const NVTEScalingMode &mode) { return mode == NVTE_MXFP8_1D_SCALING; }

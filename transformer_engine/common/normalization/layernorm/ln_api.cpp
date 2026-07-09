@@ -85,8 +85,7 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
                                 mu->data.dptr, rsigma->data.dptr);
   }
 
-  bool training =
-      is_tensor_scaling(z->scaling_mode) || (z->columnwise_data).dptr != nullptr;
+  bool training = is_tensor_scaling(z->scaling_mode) || (z->columnwise_data).dptr != nullptr;
 
   auto plan = NormalizationPlanRegistry::getInstance().getNormalizationPlan(
       norm_backend, NVTE_Norm_Type::LayerNorm, NVTE_Norm_Stage::Forward,
