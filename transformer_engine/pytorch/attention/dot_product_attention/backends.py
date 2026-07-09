@@ -440,11 +440,9 @@ class UnfusedDotProductAttention(torch.nn.Module):
         if qkv_format == "thd":
             assert cu_seqlens_q is not None and cu_seqlens_kv is not None
             assert max_seqlen_q is not None and max_seqlen_kv is not None
-            # Capture token counts as plain (Sym)Ints from the THD inputs *before*
-            # we overwrite `query_layer` with the BSHD form. We thread `total_tokens_q`
-            # back into `ConvertBSHDtoTHD.apply` below so that it does not need to
-            # call `cu_seqlens_q[-1].item()` itself -- which under `torch.compile`
-            # would create an unbacked SymInt and break Inductor + cudagraphs.
+            # Token count for ConvertBSHDtoTHD below; deriving it there via
+            # cu_seqlens_q[-1].item() syncs with the GPU and breaks
+            # torch.compile+cudagraphs (unbacked SymInt).
             total_tokens_q = query_layer.shape[0]
             query_layer = ConvertTHDtoBSHD.apply(
                 query_layer,
