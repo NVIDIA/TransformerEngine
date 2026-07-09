@@ -513,7 +513,11 @@ class mHCProjectionOp(torch.autograd.Function):
         ctx.use_split_k = use_split_k
 
         if norm_weight is not None:
-            phi = phi.to(torch.float32) * norm_weight.to(torch.float32)
+            phi = phi * norm_weight.to(torch.float32)
+        elif not use_tf32 and x.dtype == torch.bfloat16 and phi.dtype == torch.bfloat16:
+            # tl.dot ignores input_precision when both operands are bf16 and always uses the
+            # bf16 MMA, Upcast phi so the dot becomes fp32 x fp32 and honors the tf32x3 precision selected below.
+            phi = phi.to(torch.float32)
 
         use_tma = _support_tma(x) and _tma_aligned(x) and _tma_aligned(phi)
         if use_tma:

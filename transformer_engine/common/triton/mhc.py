@@ -325,7 +325,7 @@ def projection_config_bwd_dphi():
     step_m = [32]
     block_k = [128, 256]
     warps = [2]
-    stages = [2, 3, 4]
+    stages = [4, 3, 2]
 
     configs = []
     for bm, sm, bk, w, s in itertools.product(block_m, step_m, block_k, warps, stages):
@@ -352,7 +352,9 @@ def projection_prune_bwd_dphi(configs, named_args, **kwargs):
         block_m = align_to(M, 128)
         step_m = [32]
         warps = [4]
-        stages = [6, 7, 8]
+        # Descending so that when autotuning is disabled (first config taken below), we pick
+        # the deepest pipeline that fits in shared memory. stages=2 fits on any supported GPU.
+        stages = [8, 6, 4, 2]
 
         pruned_configs = []
         for bk, sm, w, s in itertools.product(block_k, step_m, warps, stages):
@@ -364,12 +366,26 @@ def projection_prune_bwd_dphi(configs, named_args, **kwargs):
                 )
             )
 
-    pruned_configs = list(
-        filter(
-            lambda config: triton.cdiv(M, config.kwargs["BLOCK_SIZE_M"]) <= MAX_GRID_DIM_Y,
-            pruned_configs,
-        )
-    )
+    # Drop configs that exceed the grid Y limit or the device's shared memory
+    x = named_args.get("x_ptr", kwargs.get("x_ptr", None))
+    x_element_size = x.element_size() if x is not None else 4
+    max_shared_mem = triton.runtime.driver.active.utils.get_device_properties(
+        triton.runtime.driver.active.get_current_device()
+    )["max_shared_mem"]
+
+    def smem_bytes(config):
+        step_m = config.kwargs["STEP_SIZE_M"]
+        block_k = config.kwargs["BLOCK_SIZE_K"]
+        per_stage = step_m * (block_k * x_element_size + 32 * 4)
+        epilogue = 32 * block_k * 4 + block_k * 4
+        return config.num_stages * per_stage + epilogue
+
+    pruned_configs = [
+        config
+        for config in pruned_configs
+        if triton.cdiv(M, config.kwargs["BLOCK_SIZE_M"]) <= MAX_GRID_DIM_Y
+        and smem_bytes(config) <= max_shared_mem
+    ]
 
     if not pruned_configs:
         raise ValueError(f"M={M} exceeds the maximum supported M dimension for this kernel.")
