@@ -30,6 +30,7 @@ Transformer Engine documentation
 
    installation
    getting_started/index
+   support_matrix
    faq
 
 .. toctree::
