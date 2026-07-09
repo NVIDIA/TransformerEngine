@@ -18,18 +18,13 @@ THREADS_PER_BLOCK = 128
 _default_causal_mask = {}
 
 
-def _scale_to_tensor(scale: float) -> torch.Tensor:
-    """Wrap a Python float in a 0-D tensor expected by the tex kernels."""
-    return torch.tensor([scale])[0]
-
-
 # ----------------------------- ScaledSoftmax -------------------------------
 
 
 @torch.library.custom_op("te_softmax::scaled_softmax_fwd", mutates_args=())
 def scaled_softmax_forward(inputs: torch.Tensor, scale: float) -> torch.Tensor:
     """Forward pass for ScaledSoftmax."""
-    return tex.scaled_softmax_forward(inputs, _scale_to_tensor(scale))
+    return tex.scaled_softmax_forward(inputs, scale)
 
 
 @scaled_softmax_forward.register_fake
@@ -43,7 +38,7 @@ def scaled_softmax_backward(
     output_grads: torch.Tensor, softmax_results: torch.Tensor, scale: float
 ) -> torch.Tensor:
     """Backward pass for ScaledSoftmax."""
-    return tex.scaled_softmax_backward(output_grads, softmax_results, _scale_to_tensor(scale))
+    return tex.scaled_softmax_backward(output_grads, softmax_results, scale)
 
 
 @scaled_softmax_backward.register_fake
@@ -80,7 +75,7 @@ def scaled_masked_softmax_forward(
     inputs: torch.Tensor, mask: torch.Tensor, scale: float
 ) -> torch.Tensor:
     """Forward pass for ScaledMaskedSoftmax."""
-    return tex.scaled_masked_softmax_forward(inputs, mask, _scale_to_tensor(scale))
+    return tex.scaled_masked_softmax_forward(inputs, mask, scale)
 
 
 @scaled_masked_softmax_forward.register_fake
@@ -97,7 +92,7 @@ def scaled_masked_softmax_backward(
 ) -> torch.Tensor:
     """Backward pass for ScaledMaskedSoftmax."""
     return tex.scaled_masked_softmax_backward(
-        output_grads, softmax_results, _scale_to_tensor(scale)
+        output_grads, softmax_results, scale
     )
 
 
@@ -137,7 +132,7 @@ def scaled_upper_triang_masked_softmax_forward(
     inputs: torch.Tensor, scale: float
 ) -> torch.Tensor:
     """Forward pass for ScaledUpperTriangMaskedSoftmax."""
-    return tex.scaled_upper_triang_masked_softmax_forward(inputs, _scale_to_tensor(scale))
+    return tex.scaled_upper_triang_masked_softmax_forward(inputs, scale)
 
 
 @scaled_upper_triang_masked_softmax_forward.register_fake
@@ -154,7 +149,7 @@ def scaled_upper_triang_masked_softmax_backward(
 ) -> torch.Tensor:
     """Backward pass for ScaledUpperTriangMaskedSoftmax."""
     return tex.scaled_upper_triang_masked_softmax_backward(
-        output_grads, softmax_results, _scale_to_tensor(scale)
+        output_grads, softmax_results, scale
     )
 
 
@@ -194,7 +189,7 @@ def scaled_aligned_causal_masked_softmax_forward(
     inputs: torch.Tensor, scale: float
 ) -> torch.Tensor:
     """Forward pass for ScaledAlignedCausalMaskedSoftmax."""
-    return tex.scaled_aligned_causal_masked_softmax_forward(inputs, _scale_to_tensor(scale))
+    return tex.scaled_aligned_causal_masked_softmax_forward(inputs, scale)
 
 
 @scaled_aligned_causal_masked_softmax_forward.register_fake
@@ -211,7 +206,7 @@ def scaled_aligned_causal_masked_softmax_backward(
 ) -> torch.Tensor:
     """Backward pass for ScaledAlignedCausalMaskedSoftmax."""
     return tex.scaled_aligned_causal_masked_softmax_backward(
-        output_grads, softmax_results, _scale_to_tensor(scale)
+        output_grads, softmax_results, scale
     )
 
 
