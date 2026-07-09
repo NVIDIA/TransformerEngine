@@ -469,15 +469,15 @@ class UnfusedDotProductAttention(torch.nn.Module):
         """Fast attribute set for non-parameter fields."""
         self.__dict__[name] = value
 
-    def forward(self, *args, fp8_output: bool = False, **kwargs) -> torch.Tensor:
+    def forward(self, *args, fp8: bool = False, fp8_output: bool = False, **kwargs) -> torch.Tensor:
         """Unfused attention fprop; see `_forward` for the argument list.
 
-        ``fp8_output=True`` returns a Float8Tensor, which cannot cross a
-        torch.compile graph boundary -- run the backend as an eager island.
+        FP8 (emulation and/or Float8Tensor output) is not supported under
+        torch.compile -- run the backend as an eager island in that case.
         """
-        if fp8_output:
-            return self._forward_eager(*args, fp8_output=True, **kwargs)
-        return self._forward(*args, fp8_output=False, **kwargs)
+        if fp8 or fp8_output:
+            return self._forward_eager(*args, fp8=fp8, fp8_output=fp8_output, **kwargs)
+        return self._forward(*args, fp8=False, fp8_output=False, **kwargs)
 
     @no_torch_dynamo()
     def _forward_eager(self, *args, **kwargs) -> torch.Tensor:
@@ -634,10 +634,9 @@ class UnfusedDotProductAttention(torch.nn.Module):
 
         if fp8:
             # get fp8 recipe for DPA
+            fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
             if fp8_meta is not None and fp8_meta.get("local_recipes", None) is not None:
                 fp8_recipe = fp8_meta["local_recipes"][0]
-            else:
-                fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
             # get quantizers from DPA; all Nones if not fp8
             QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer = (
                 dpa_utils.get_attention_quantizers(fp8, quantizers)
