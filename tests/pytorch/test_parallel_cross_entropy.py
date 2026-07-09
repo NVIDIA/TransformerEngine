@@ -188,3 +188,48 @@ def test_non_contiguous_transposed_input():
     assert torch.allclose(
         loss_t, loss_c
     ), f"Non-contiguous transposed input gave wrong results: {loss_t} vs {loss_c}"
+
+
+def test_bfloat16_unreduced_external_grad():
+    """Apply per-token loss scaling before rounding the BF16 input gradient."""
+    logits = torch.zeros(2, 2, 3, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+    target = torch.tensor([[0, 1], [2, -100]], device="cuda")
+    logits_before = logits.detach().clone()
+    external_grad = torch.tensor([[0.01, 0.03], [0.1, 0.7]], device="cuda")
+    saved_tensors = []
+
+    def pack_hook(tensor):
+        saved_tensors.append(tensor)
+        return tensor
+
+    with torch.autograd.graph.saved_tensors_hooks(pack_hook, lambda tensor: tensor):
+        loss = parallel_cross_entropy(logits, target, 0.0, False, None)
+
+    assert len(saved_tensors) == 1
+    assert saved_tensors[0].dtype == torch.float32
+    torch.testing.assert_close(logits, logits_before, rtol=0.0, atol=0.0)
+    loss.backward(external_grad)
+
+    ref_logits = logits_before.float().requires_grad_()
+    ref_loss = torch.nn.functional.cross_entropy(
+        ref_logits.reshape(-1, ref_logits.size(-1)), target.reshape(-1), reduction="none"
+    ).reshape_as(target)
+    ref_loss.backward(external_grad)
+    expected_grad = ref_logits.grad.to(torch.bfloat16)
+
+    torch.testing.assert_close(logits.grad, expected_grad, rtol=0.0, atol=0.0)
+
+
+def test_bfloat16_loss_matches_float32_input():
+    """BF16 and exactly equivalent FP32 logits should produce nearly identical losses."""
+    torch.manual_seed(42)
+    logits = torch.randn(1, 64, 64000, dtype=torch.bfloat16, device="cuda")
+    target = torch.randint(0, logits.size(-1), logits.shape[:-1], device="cuda")
+
+    bf16_loss = parallel_cross_entropy(logits, target, 0.0, False, None)
+    fp32_loss = parallel_cross_entropy(logits.float(), target, 0.0, False, None)
+
+    # The input values are identical, but dtype-specialized Triton reductions may
+    # differ by a small number of FP32 rounding steps.
+    fp32_eps = torch.finfo(torch.float32).eps
+    torch.testing.assert_close(bf16_loss, fp32_loss, rtol=2 * fp32_eps, atol=2 * fp32_eps)
