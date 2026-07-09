@@ -101,9 +101,9 @@ def test_cached_weight_scale_pointers_stable(kind):
             ws._rowwise_scale_inv.data_ptr(),
             ws._columnwise_scale_inv.data_ptr(),
         )
-        assert ptrs_after == ptrs_before[name], (
-            f"cached weight workspace {name!r} reallocated scale buffers on weight update"
-        )
+        assert (
+            ptrs_after == ptrs_before[name]
+        ), f"cached weight workspace {name!r} reallocated scale buffers on weight update"
         assert getattr(ws, "_with_gemm_swizzled_scales", False)
 
 

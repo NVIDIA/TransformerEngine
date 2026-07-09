@@ -1312,8 +1312,8 @@ __global__ void __launch_bounds__(THREADS_NUM)
       // (e.g. via DIVUP) would ODR-use it and fail to compile in device code.
       const size_t col_length_t = rows / SCALE_DIM;
       for (size_t k = 0; k < count; ++k) {
-        const size_t off =
-            swizzle::gemm_swizzled_scale_idx(scales_offset_Y_t, scales_offset_X_t + k, col_length_t);
+        const size_t off = swizzle::gemm_swizzled_scale_idx(scales_offset_Y_t,
+                                                            scales_offset_X_t + k, col_length_t);
         scales_t_ptr[off] = out_colwise_scales_sh[scale_idx_sh + k];
       }
     } else {
@@ -1488,12 +1488,12 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
             if constexpr (use_2d_quantization) {
               if (with_gemm_swizzled_scales) {
                 kernel = quantize_transpose_nvfp4_2D_kernel<
-                    COMPUTE_ACTIVATIONS, ParamOP, OP, IType, USE_STOCHASTIC_ROUNDING, RETURN_ROWWISE,
-                    RETURN_TRANSPOSE, /*WITH_GEMM_SWIZZLED_SCALES=*/true>;
+                    COMPUTE_ACTIVATIONS, ParamOP, OP, IType, USE_STOCHASTIC_ROUNDING,
+                    RETURN_ROWWISE, RETURN_TRANSPOSE, /*WITH_GEMM_SWIZZLED_SCALES=*/true>;
               } else {
                 kernel = quantize_transpose_nvfp4_2D_kernel<
-                    COMPUTE_ACTIVATIONS, ParamOP, OP, IType, USE_STOCHASTIC_ROUNDING, RETURN_ROWWISE,
-                    RETURN_TRANSPOSE, /*WITH_GEMM_SWIZZLED_SCALES=*/false>;
+                    COMPUTE_ACTIVATIONS, ParamOP, OP, IType, USE_STOCHASTIC_ROUNDING,
+                    RETURN_ROWWISE, RETURN_TRANSPOSE, /*WITH_GEMM_SWIZZLED_SCALES=*/false>;
               }
             }
 
