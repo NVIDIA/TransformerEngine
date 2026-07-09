@@ -184,14 +184,17 @@ inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config, const Tensor 
   // TODO: see if it's possible to move this into the CuTeDSL host code so the padding is handled inside
   // the kernel launch so it's more flexible
   if (config.swizzled && (flat_m % 128 != 0 || flat_n % 128 != 0)) {
-    if (output_tensor->has_data()) {
-      NVTE_CHECK_CUDA(cudaMemsetAsync(output_tensor->scale_inv.dptr, 0,
-                                      output_tensor->scale_inv.buffer_size_bytes(), stream));
-    }
-    if (output_tensor->has_columnwise_data()) {
-      NVTE_CHECK_CUDA(cudaMemsetAsync(output_tensor->columnwise_scale_inv.dptr, 0,
-                                      output_tensor->columnwise_scale_inv.buffer_size_bytes(),
-                                      stream));
+    // If noop flag is set, skip zeroing out
+    if (noop_tensor != nullptr && noop_tensor->data.dptr != nullptr) {
+      if (output_tensor->has_data()) {
+        NVTE_CHECK_CUDA(cudaMemsetAsync(output_tensor->scale_inv.dptr, 0,
+                                        output_tensor->scale_inv.buffer_size_bytes(), stream));
+      }
+      if (output_tensor->has_columnwise_data()) {
+        NVTE_CHECK_CUDA(cudaMemsetAsync(output_tensor->columnwise_scale_inv.dptr, 0,
+                                        output_tensor->columnwise_scale_inv.buffer_size_bytes(),
+                                        stream));
+      }
     }
   }
 
