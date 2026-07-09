@@ -18,6 +18,7 @@
 #include "../../tvm_ffi_bridge.h"
 #include "../../util/math.h"
 #include "../core/common.cuh"  // dispatch::common::reduce_dbias
+#include "quantize_mxfp8.cuh"  // dispatch::mxfp8::quantize_kernel::zero_scales_kernel
 
 namespace transformer_engine {
 namespace cutedsl_backend {
@@ -177,23 +178,30 @@ inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config, const Tensor 
     return true;
   }
 
-  // Zero out swizzled scale padding when the matrix isn't a multiple of the
-  // 128x128 GEMM tile. The kernel writes only the meaningful scale region, so
-  // cuBLAS would otherwise read uninitialized padding.
-
-  // TODO: see if it's possible to move this into the CuTeDSL host code so the padding is handled inside
-  // the kernel launch so it's more flexible
+  // Zero out swizzled scales if padding is needed.
+  // Mirrors the CUDA C++ implementation in quantize_mxfp8.cuh. Skip when noop flag is set.
   if (config.swizzled && (flat_m % 128 != 0 || flat_n % 128 != 0)) {
-    // If noop flag is set, skip zeroing out
-    if (noop_tensor == nullptr || noop_tensor->data.dptr == nullptr) {
-      if (output_tensor->has_data()) {
-        NVTE_CHECK_CUDA(cudaMemsetAsync(output_tensor->scale_inv.dptr, 0,
-                                        output_tensor->scale_inv.buffer_size_bytes(), stream));
+    const float *noop_ptr = (noop_tensor != nullptr && noop_tensor->data.dptr != nullptr)
+                                ? reinterpret_cast<const float *>(noop_tensor->data.dptr)
+                                : nullptr;
+    constexpr size_t zero_threads = 256;
+    if (output_tensor->has_data()) {
+      const size_t size_bytes = output_tensor->scale_inv.buffer_size_bytes();
+      if (size_bytes > 0) {
+        const size_t zero_blocks = (size_bytes + zero_threads - 1) / zero_threads;
+        dispatch::mxfp8::quantize_kernel::zero_scales_kernel<<<zero_blocks, zero_threads, 0, stream>>>(
+            reinterpret_cast<uint8_t *>(output_tensor->scale_inv.dptr), size_bytes, noop_ptr);
+        NVTE_CHECK_CUDA(cudaGetLastError());
       }
-      if (output_tensor->has_columnwise_data()) {
-        NVTE_CHECK_CUDA(cudaMemsetAsync(output_tensor->columnwise_scale_inv.dptr, 0,
-                                        output_tensor->columnwise_scale_inv.buffer_size_bytes(),
-                                        stream));
+    }
+    if (output_tensor->has_columnwise_data()) {
+      const size_t size_bytes = output_tensor->columnwise_scale_inv.buffer_size_bytes();
+      if (size_bytes > 0) {
+        const size_t zero_blocks = (size_bytes + zero_threads - 1) / zero_threads;
+        dispatch::mxfp8::quantize_kernel::zero_scales_kernel<<<zero_blocks, zero_threads, 0, stream>>>(
+            reinterpret_cast<uint8_t *>(output_tensor->columnwise_scale_inv.dptr), size_bytes,
+            noop_ptr);
+        NVTE_CHECK_CUDA(cudaGetLastError());
       }
     }
   }
@@ -224,6 +232,7 @@ inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config, const Tensor 
                           &mWorkspace, static_cast<void *>(stream));
 
   // If WITH_DBIAS, reduce the workspace partial dbias in CUDA C++ for now.
+  // This will not be affected by the noop flag, which is aligned with the CUDA C++ implementation
   if (config.with_dbias) {
     const float *workspace_ptr = reinterpret_cast<const float *>(workspace_tensor->data.dptr);
     TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(

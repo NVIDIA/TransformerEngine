@@ -893,9 +893,9 @@ class MXFP8QuantizeKernel:
     ):
         """Device entry: no-op the CTA when the noop flag is set, else run the quantize main loop."""
         cfg = self.cfg
-        # If the noop tensor is not passed (compile-time check), or the noop tensor is not 1.0 (run-time check)
-        # then we run the kernel for real. Otherwise, skip the quantization so this kernel becomes a no-op.
-        if not cutlass.const_expr(cfg.WITH_NOOP) or mNoop[0] != Float32(1.0):
+        # If WITH_NOOP is True and no ACT / DACT fusion is involved, the kernel becomes a no-op
+        noop = cfg.WITH_NOOP and not cfg.WITH_ACT and not cfg.WITH_DACT
+        if not cutlass.const_expr(noop) or mNoop[0] != Float32(1.0):
             self._kernel_main(
                 mX,
                 mS_row,
