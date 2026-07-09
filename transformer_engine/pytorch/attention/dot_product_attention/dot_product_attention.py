@@ -238,6 +238,15 @@ def _unpack_packed_qkv(
             "qkv_interleave_dim must be -3 (e.g. bs3hd) or -2 (e.g. bsh3d), got"
             f" {qkv_interleave_dim}."
         )
+    packed = qkv_layer if qkv_layer is not None else kv_layer
+    # The declared layout describes the packed buffer's memory, so it must have
+    # stride 1 in its last dimension (the check get_qkv_layout would otherwise
+    # perform on the derived q/k/v views).
+    if packed.stride(-1) != 1:
+        raise ValueError(
+            "The packed tensor (qkv_layer/kv_layer) must have stride 1 in its last"
+            f" dimension, got strides {tuple(packed.stride())}."
+        )
 
     def _packed_layout(fmt: str, num: int) -> str:
         # bshd + 3 @ -3 -> bs3hd; bshd + 3 @ -2 -> bsh3d; thd + 2 @ -2 -> th2d

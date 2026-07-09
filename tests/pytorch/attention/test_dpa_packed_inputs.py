@@ -43,10 +43,21 @@ def _fused_backend_supported():
     try:
         q = torch.randn(_B, _S, _H, _D, dtype=_DTYPE, device="cuda")
         fused_attn_fwd(
-            True, _S, _S, _cu_seqlens(), _cu_seqlens(), q, q.clone(), q.clone(), _DTYPE,
+            True,
+            _S,
+            _S,
+            _cu_seqlens(),
+            _cu_seqlens(),
+            q,
+            q.clone(),
+            q.clone(),
+            _DTYPE,
             tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
-            dropout=0.0, qkv_layout="bshd_bshd_bshd", o_format="bshd",
-            attn_bias_type="no_bias", attn_mask_type="no_mask",
+            dropout=0.0,
+            qkv_layout="bshd_bshd_bshd",
+            o_format="bshd",
+            attn_bias_type="no_bias",
+            attn_mask_type="no_mask",
         )
         return True
     except Exception:
@@ -215,6 +226,8 @@ def test_dpa_packed_input_validation():
         dpa(qkv_layer=qkv, kv_layer=kv)
     with pytest.raises(ValueError, match="must have size 3 at dim"):
         dpa(qkv_layer=kv)  # 2 at the interleave dim, not 3
+    with pytest.raises(ValueError, match="stride 1 in its last"):
+        dpa(qkv_layer=qkv.transpose(-2, -1))  # declared layout would lie about memory
     with pytest.raises(ValueError, match="required unless packed"):
         dpa()
 
