@@ -97,7 +97,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
   // Newer versions of cuDNN SDPA can accept sequence lengths directly as a cumulative
   // tensor, and can accept ragged offsets in arbitrary units (such as tokens) instead
   // of elements. Take advantage of this if possible to avoid 2 extra kernel calls.
-  const bool use_direct_seqlens =
+  const bool use_cu_seqlens_directly =
       CUDNN_FRONTEND_VERSION >= 12500 &&
       // The frontend gates cu_seq_len support on min(compile-time, runtime) cuDNN
       // version, so we'll do the same.
@@ -118,9 +118,10 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     if (sm_arch_ != 120) {
       // replace batch size and maximum sequence lengths with maximum token counts
       // for query and key/value so the graph is static within each quantization bucket.
-      // With direct seqlens, keep the true batch size: cuDNN reads the user's
-      // [actual_b+1] cu_seqlens buffers, so a quantized batch would read out of bounds.
-      if (!use_direct_seqlens) {
+      // When passing cu_seqlens* directly to cuDNN SDPA, keep the true batch size:
+      // cuDNN reads the user's [actual_b+1] cu_seqlens buffers, so a quantized batch
+      // would read out of bounds.
+      if (!use_cu_seqlens_directly) {
         b = max_b;
       }
       s_q = is_ragged_q ? max_t_q : s_q;
@@ -129,8 +130,8 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
   }
 
   const DType ragged_offset_type =
-      use_direct_seqlens
-          ? DType::kInt32  // Direct cu_seqlens are given to us as int32, so keep it that way.
+      use_cu_seqlens_directly
+          ? DType::kInt32  // cu_seqlens* are given to us as int32; keep it that way.
           : (cudnn_runtime_version >= 90500 ? DType::kInt64 : DType::kInt32);
 
   // Ragged offset multipliers (elements per token); shared with the legacy conversion
@@ -257,7 +258,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                          .set_stride({1, 1, 1, 1})
                                          .set_data_type(get_cudnn_fe_dtype(ragged_offset_type)));
         Q->set_ragged_offset(offset_q);
-        if (use_direct_seqlens) {
+        if (use_cu_seqlens_directly) {
           Q->set_ragged_offset_multiplier(offset_mults.q);
         }
       }
@@ -279,7 +280,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                          .set_data_type(get_cudnn_fe_dtype(ragged_offset_type)));
         K->set_dim({b, hg, s_kv, d_qk}).set_ragged_offset(offset_k);
         V->set_dim({b, hg, s_kv, d_v}).set_ragged_offset(offset_v);
-        if (use_direct_seqlens) {
+        if (use_cu_seqlens_directly) {
           K->set_ragged_offset_multiplier(offset_mults.k);
           V->set_ragged_offset_multiplier(offset_mults.v);
         }
@@ -326,7 +327,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       }
 
       if (is_padding) {
-        if (use_direct_seqlens) {
+        if (use_cu_seqlens_directly) {
           // seq_q/seq_kv keep their tuple slots but hold (b+1)-shaped cu_seqlen tensors.
           seq_q = mha_graph->tensor(fe::graph::Tensor_attributes()
                                         .set_name("cu_seq_len_q")
@@ -413,7 +414,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                     .set_data_type(fe::DataType_t::FLOAT));
         if (use_ragged_stats) {
           Max->set_stride({h * s_q, 1, h, 1}).set_ragged_offset(offset_stats);
-          if (use_direct_seqlens) {
+          if (use_cu_seqlens_directly) {
             Max->set_ragged_offset_multiplier(offset_mults.stats);
           }
         } else {
@@ -435,7 +436,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                          .set_stride({1, 1, 1, 1})
                                          .set_data_type(get_cudnn_fe_dtype(ragged_offset_type)));
         O->set_ragged_offset(offset_o);
-        if (use_direct_seqlens) {
+        if (use_cu_seqlens_directly) {
           O->set_ragged_offset_multiplier(offset_mults.o);
         }
       }
@@ -443,7 +444,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       Stats->set_output(true).set_data_type(fe::DataType_t::FLOAT).set_dim({b, h, s_q, 1});
       if (use_ragged_stats) {
         Stats->set_stride({h * s_q, 1, h, 1}).set_ragged_offset(offset_stats);
-        if (use_direct_seqlens) {
+        if (use_cu_seqlens_directly) {
           Stats->set_ragged_offset_multiplier(offset_mults.stats);
         }
       } else {
@@ -496,15 +497,15 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     // Exit to request upper level API to allocate memory if needed
     // n.b. Care should be taken to align each of the added worksapce tensors to their type.
     // We do this by adding padding at the end of each separate allocation.
-    // With direct seqlens, no conversion workspace is needed: cuDNN consumes the
-    // user's cu_seqlens buffers as-is.
+    // When passing cu_seqlens* directly to cuDNN SDPA, no conversion workspace is
+    // needed: cuDNN consumes the user's cu_seqlens buffers as-is.
     auto plan_workspace_size = alignTo<16>(mha_graph->get_workspace_size());
     const size_t num_bytes_per_seqlen = alignTo<16>(b * sizeof(int32_t));
     const size_t num_bytes_per_ragged_offset =
         alignTo<16>(((b + 1) * typeToNumBits(ragged_offset_type)) / 8);
     size_t actual_seqlen_workspace_size = 0;
     size_t seqlen_offsets_workspace_size = 0;
-    if (!use_direct_seqlens) {
+    if (!use_cu_seqlens_directly) {
       if (is_padding) {
         actual_seqlen_workspace_size = 2 * num_bytes_per_seqlen;
       }
@@ -539,7 +540,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     }
 
     if (is_padding) {
-      if (use_direct_seqlens) {
+      if (use_cu_seqlens_directly) {
         variant_pack[seq_q] = devPtrCuSeqlensQ;
         variant_pack[seq_kv] = devPtrCuSeqlensKV;
       } else {
@@ -562,7 +563,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       variant_pack[page_table_v] = devPtrPageTableV;
     }
 
-    if (use_direct_seqlens) {
+    if (use_cu_seqlens_directly) {
       // The token-unit cu_seqlens_padded buffers serve as the ragged offsets; the engine
       // applies the per-tensor multipliers set at graph build time.
       if (is_ragged_q) {

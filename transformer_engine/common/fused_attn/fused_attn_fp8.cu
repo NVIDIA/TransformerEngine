@@ -65,7 +65,7 @@ void fused_attn_fp8_fwd_impl(
   // the F16 path, the FP8 path has no THD/ragged-offset support, so only the
   // cu_seqlens_to_actual_seqlens conversion applies here. Also note that the
   // needed versions of cuDNN backend and frontend are higher than for F16.)
-  const bool use_direct_seqlens =
+  const bool use_cu_seqlens_directly =
       // Frontend 1.26 supports fp8+cu_seqlens (for the C++ API).
       // Note: For the Python API, 1.27 is required.
       CUDNN_FRONTEND_VERSION >= 12600 &&
@@ -280,7 +280,7 @@ void fused_attn_fp8_fwd_impl(
       // }
 
       if (is_padding) {
-        if (use_direct_seqlens) {
+        if (use_cu_seqlens_directly) {
           // seq_q/seq_kv keep their tuple slots but hold (b+1)-shaped cu_seqlen tensors.
           seq_q = mha_graph->tensor(fe::graph::Tensor_attributes()
                                         .set_name("cu_seq_len_q")
@@ -415,9 +415,9 @@ void fused_attn_fp8_fwd_impl(
     auto plan_workspace_size = mha_graph->get_workspace_size();
 
     // Exit to request upper level API to allocate memory if needed.
-    // With direct seqlens, no conversion workspace is needed: cuDNN consumes the
-    // user's cu_seqlens buffers as-is.
-    size_t actual_seqlen_workspace_size = use_direct_seqlens ? 0 : 2 * b * sizeof(int32_t);
+    // When passing cu_seqlens* directly to cuDNN SDPA, no conversion workspace is
+    // needed: cuDNN consumes the user's cu_seqlens buffers as-is.
+    size_t actual_seqlen_workspace_size = use_cu_seqlens_directly ? 0 : 2 * b * sizeof(int32_t);
     if (workspace == nullptr) {
       *workspace_size = plan_workspace_size + actual_seqlen_workspace_size;
       return;
@@ -454,7 +454,7 @@ void fused_attn_fp8_fwd_impl(
     } */
 
     if (is_padding) {
-      if (use_direct_seqlens) {
+      if (use_cu_seqlens_directly) {
         variant_pack[seq_q] = devPtrcuSeqlensQ;
         variant_pack[seq_kv] = devPtrcuSeqlensKV;
       } else {
