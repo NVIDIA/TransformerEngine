@@ -441,7 +441,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       }
 
       Stats->set_output(true).set_data_type(fe::DataType_t::FLOAT).set_dim({b, h, s_q, 1});
-      if (is_ragged_q && cudnn_runtime_version >= 90600) {
+      if (use_ragged_stats) {
         Stats->set_stride({h * s_q, 1, h, 1}).set_ragged_offset(offset_stats);
         if (use_direct_seqlens) {
           Stats->set_ragged_offset_multiplier(offset_mults.stats);
@@ -1226,7 +1226,10 @@ void fused_attn_arbitrary_seqlen_fwd(
 
     Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     output_S->data.dptr = nullptr;
-    if (q_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) {
+    // sm120 does not use ragged stats: the graph declares a dense
+    // [b, h, s_q, 1] stats tensor, so allocate to match (same as Max below).
+    if ((q_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) &&
+        (sm_arch_ != 120)) {
       output_S->data.shape = {num_tokens_q, num_attn_heads, 1};
     } else {
       output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
