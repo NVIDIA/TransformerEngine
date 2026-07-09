@@ -2428,6 +2428,17 @@ def get_qkv_layout(
     if qkv_layout == "not_supported":
         raise RuntimeError("The provided qkv memory layout is not supported!")
 
+    if len(qkv_layout.split("_")) < 3:
+        # q/k/v were recognized as views of a packed buffer only by inspecting
+        # their data pointers, strides and storage offsets.
+        warnings.warn(
+            "Relying on pointer-based detection of packed q/k/v layouts"
+            f" (detected {qkv_layout!r}) is deprecated: pass the packed buffer"
+            " explicitly via qkv_layer/kv_layer (with qkv_interleave_dim) to"
+            " DotProductAttention instead.",
+            DeprecationWarning,
+        )
+
     if inference_params is not None and inference_params.is_paged:
         qkv_layout = "paged_kv_" + qkv_layout
 
