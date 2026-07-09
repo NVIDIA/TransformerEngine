@@ -189,8 +189,9 @@ inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config, const Tensor 
       const size_t size_bytes = output_tensor->scale_inv.buffer_size_bytes();
       if (size_bytes > 0) {
         const size_t zero_blocks = (size_bytes + zero_threads - 1) / zero_threads;
-        dispatch::mxfp8::quantize_kernel::zero_scales_kernel<<<zero_blocks, zero_threads, 0, stream>>>(
-            reinterpret_cast<uint8_t *>(output_tensor->scale_inv.dptr), size_bytes, noop_ptr);
+        dispatch::mxfp8::quantize_kernel::
+            zero_scales_kernel<<<zero_blocks, zero_threads, 0, stream>>>(
+                reinterpret_cast<uint8_t *>(output_tensor->scale_inv.dptr), size_bytes, noop_ptr);
         NVTE_CHECK_CUDA(cudaGetLastError());
       }
     }
@@ -198,9 +199,10 @@ inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config, const Tensor 
       const size_t size_bytes = output_tensor->columnwise_scale_inv.buffer_size_bytes();
       if (size_bytes > 0) {
         const size_t zero_blocks = (size_bytes + zero_threads - 1) / zero_threads;
-        dispatch::mxfp8::quantize_kernel::zero_scales_kernel<<<zero_blocks, zero_threads, 0, stream>>>(
-            reinterpret_cast<uint8_t *>(output_tensor->columnwise_scale_inv.dptr), size_bytes,
-            noop_ptr);
+        dispatch::mxfp8::quantize_kernel::
+            zero_scales_kernel<<<zero_blocks, zero_threads, 0, stream>>>(
+                reinterpret_cast<uint8_t *>(output_tensor->columnwise_scale_inv.dptr), size_bytes,
+                noop_ptr);
         NVTE_CHECK_CUDA(cudaGetLastError());
       }
     }
