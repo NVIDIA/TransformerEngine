@@ -411,6 +411,13 @@ def run_dpa_with_cp(
             cu_seqlens_kv=cu_seqlens_kv,
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+            # Test runner sets cu_seqlens_q == cu_seqlens_q_padded for the
+            # FlashAttention path, i.e. no inter-sequence padding. Declare this
+            # explicitly so the sync-free auto-detect (which conservatively
+            # picks True when padded cu_seqlens are present) does not disable FA.
+            pad_between_seqs=(
+                (kernel_backend != "FlashAttention") if qkv_format == "thd" else None
+            ),
             fp8_output=fp8_mha,
         )
         if config.return_max_logit:
@@ -528,6 +535,12 @@ def run_dpa_with_cp(
             cu_seqlens_kv=cu_seqlens_kv,
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+            # See note above (non-CP branch): same explicit declaration so
+            # FlashAttention isn't disabled by the conservative sync-free
+            # auto-detect when this test path constructs no inter-seq padding.
+            pad_between_seqs=(
+                (kernel_backend != "FlashAttention") if qkv_format == "thd" else None
+            ),
             fp8_output=fp8_mha,
         )
         if config.return_max_logit:

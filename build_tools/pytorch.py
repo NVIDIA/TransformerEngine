@@ -22,7 +22,16 @@ from typing import List
 
 def install_requirements() -> List[str]:
     """Install dependencies for TE/PyTorch extensions."""
-    return ["torch>=2.1", "einops", "onnxscript", "onnx", "packaging", "pydantic", "nvdlfw-inspect"]
+    return [
+        "torch>=2.1",
+        "einops",
+        "onnxscript",
+        "onnx",
+        "packaging",
+        "pydantic",
+        "nvdlfw-inspect",
+        "nvidia-cudnn-frontend>=1.25.0",
+    ]
 
 
 def test_requirements() -> List[str]:
