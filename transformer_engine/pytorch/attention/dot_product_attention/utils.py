@@ -2271,12 +2271,6 @@ class ConvertBSHDtoTHD:
     @staticmethod
     def apply(bshd_tensor, cu_seqlens, num_tokens):
         # pylint: disable=missing-function-docstring
-        # `num_tokens` (== `cu_seqlens[-1]`) is taken as an explicit argument
-        # rather than being read from `cu_seqlens[-1].item()` here, so that
-        # `torch.compile` does not introduce an unbacked SymInt for it. With an
-        # unbacked SymInt the Inductor partitioner emits `None` placeholders for
-        # output buffers, which `cudagraph_trees` then refuses (only
-        # `Tensor / int / Generator` allowed as graph inputs).
         return torch.ops.te_attention.convert_bshd_to_thd(
             bshd_tensor, cu_seqlens, num_tokens
         )
