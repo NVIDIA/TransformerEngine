@@ -276,7 +276,7 @@ def _unpack_packed_qkv(
 
     if query_layer is None:
         raise ValueError(
-            "kv_layer packs only K and V: query_layer is required when kv_layer" " is provided."
+            "kv_layer packs only K and V: query_layer is required when kv_layer is provided."
         )
     if key_layer is not None or value_layer is not None:
         raise ValueError(
