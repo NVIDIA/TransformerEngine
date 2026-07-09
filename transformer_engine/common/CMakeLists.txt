@@ -103,10 +103,8 @@ set(CUTLASS_TOOLS_INCLUDE_DIR
 # Python
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 
-# tvm-ffi: the quantize dispatch layer bridges to JIT-compiled CuTeDSL kernels
-# through tvm-ffi (see common/tvm_ffi_bridge.h). Locate the tvm_ffi package that
-# ships with the Python install and use its exported CMake config (provides the
-# tvm_ffi::shared imported target with headers + libtvm_ffi.so).
+# Find the tvm-ffi pip package and its path via a Python command.
+# Its header files are required to compile tvm_ffi_bridge.h.
 execute_process(
   COMMAND ${Python_EXECUTABLE} -c "import tvm_ffi.libinfo as li; print(li.find_cmake_path())"
   OUTPUT_VARIABLE TVM_FFI_CMAKE_DIR

@@ -361,7 +361,6 @@ if __name__ == "__main__":
             "core_cu13": [f"transformer_engine_cu13=={__version__}"],
             "pytorch": [f"transformer_engine_torch=={__version__}"],
             "jax": [f"transformer_engine_jax=={__version__}"],
-            "cutedsl": ["nvidia-cutlass-dsl>=4.2.0"],
         }
     else:
         install_requires, test_requires = setup_requirements()
