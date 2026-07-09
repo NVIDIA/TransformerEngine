@@ -198,142 +198,6 @@ def _qkv_quantizer_type(qkv_quantizer):
     raise TypeError(f"Unsupported FP8 attention QKV quantizer: {type(qkv_quantizer).__name__}")
 
 
-# ---------------------------------------------------------------------------
-# FP8 emulation roundtrips (quantize + dequantize)
-#
-# The roundtrips used by FP8EmulationFunc are registered as torch.library
-# custom ops taking the quantizer as a value-opaque argument (see
-# transformer_engine.pytorch.dynamo.quantizer_opaque), so that the FP8
-# emulation path of UnfusedDotProductAttention traces under torch.compile
-# without graph breaks. Ops exist only for the value-opaque quantizer classes
-# (Float8CurrentScalingQuantizer, MXFP8Quantizer); Float8Quantizer (delayed
-# scaling) carries scale/amax tensor state, is not value-opaque, and keeps the
-# plain eager path -- FP8 emulation with delayed scaling is not supported
-# under torch.compile.
-# ---------------------------------------------------------------------------
-
-
-def _fp8_emu_roundtrip_eager(tensor: torch.Tensor, quantizer) -> torch.Tensor:
-    """Quantize + dequantize a single tensor to emulate FP8."""
-    t_fp8 = quantizer(tensor)
-    return t_fp8.dequantize(dtype=tensor.dtype)
-
-
-def _fp8_emu_roundtrip_qkv_eager(q, k, v, quantizer, qkv_layout):
-    """Quantize + dequantize q/k/v jointly (matching fused-attention packing)
-    to emulate FP8. Returns tensors in the same (sbhd) layout as the inputs."""
-    q, k, v = q.contiguous(), k.contiguous(), v.contiguous()
-    q_fp8, k_fp8, v_fp8, new_qkv_layout, _ = combine_and_quantize(
-        qkv_layout,
-        q,
-        k,
-        v,
-        quantizer,
-        keep_same_data_and_scale_inv_format=True,
-    )
-    tensors = combine_and_dequantize(
-        new_qkv_layout, q_fp8, k_fp8, v_fp8, src_nominal_dtype=q.dtype
-    )
-    if isinstance(quantizer, MXFP8Quantizer):
-        # bhsd_bhsd_bhsd after combine_and_quantize; permute back to sbhd_sbhd_sbhd
-        tensors = [x.permute(2, 0, 1, 3).contiguous() for x in tensors]
-    # The dequantized q/k/v can be views into one combined buffer, but a custom
-    # op must not return tensors that alias its inputs or each other: clone any
-    # output whose storage was already seen. Storage identity is checked
-    # directly (rather than view metadata such as ``_base``, which is not
-    # populated under the torch-dispatch modes torch.compile runs the op with).
-    storages = {x.untyped_storage()._cdata for x in (q, k, v)}
-    outputs = []
-    for x in tensors:
-        if x.untyped_storage()._cdata in storages:
-            x = x.clone()
-        storages.add(x.untyped_storage()._cdata)
-        outputs.append(x)
-    return outputs[0], outputs[1], outputs[2]
-
-
-# quantizer class qualname -> (roundtrip op, roundtrip_qkv op)
-_FP8_EMU_OPS: Dict[str, Tuple[Callable, Callable]] = {}
-# Keep the Library object alive: its destructor would deregister the ops.
-_FP8_EMU_LIB = None
-
-
-def _register_fp8_emulation_ops() -> None:
-    """Register the te_fp8_emu::* custom ops for value-opaque quantizer classes.
-
-    No-op on PyTorch builds without the opaque-object API: the eager fallback
-    in `_fp8_emu_roundtrip` / `_fp8_emu_roundtrip_qkv` keeps emulation working,
-    only torch.compile support is lost.
-    """
-    global _FP8_EMU_LIB
-    try:
-        # pylint: disable=import-outside-toplevel
-        from torch._library.opaque_object import get_opaque_type_name
-    except (ImportError, AttributeError):
-        return
-
-    lib = _FP8_EMU_LIB = torch.library.Library("te_fp8_emu", "DEF")
-    for qcls in (Float8CurrentScalingQuantizer, MXFP8Quantizer):
-        try:
-            opaque_name = get_opaque_type_name(qcls)
-        except Exception:  # pylint: disable=broad-except
-            # Class not registered as an opaque type on this PyTorch build.
-            continue
-
-        op_name = f"roundtrip_{qcls.__name__}"
-        qkv_op_name = f"roundtrip_qkv_{qcls.__name__}"
-        lib.define(f"{op_name}(Tensor x, {opaque_name} quantizer) -> Tensor")
-        lib.define(
-            f"{qkv_op_name}(Tensor q, Tensor k, Tensor v, {opaque_name} quantizer,"
-            " str qkv_layout) -> (Tensor, Tensor, Tensor)"
-        )
-
-        torch.library.impl(f"te_fp8_emu::{op_name}", "CompositeExplicitAutograd", lib=lib)(
-            _fp8_emu_roundtrip_eager
-        )
-        torch.library.register_fake(f"te_fp8_emu::{op_name}", lib=lib)(
-            lambda x, quantizer: torch.empty_like(x, memory_format=torch.contiguous_format)
-        )
-        torch.library.impl(f"te_fp8_emu::{qkv_op_name}", "CompositeExplicitAutograd", lib=lib)(
-            _fp8_emu_roundtrip_qkv_eager
-        )
-        torch.library.register_fake(f"te_fp8_emu::{qkv_op_name}", lib=lib)(
-            lambda q, k, v, quantizer, qkv_layout: tuple(
-                torch.empty_like(x, memory_format=torch.contiguous_format) for x in (q, k, v)
-            )
-        )
-
-        _FP8_EMU_OPS[qcls.__qualname__] = (
-            getattr(torch.ops.te_fp8_emu, op_name),
-            getattr(torch.ops.te_fp8_emu, qkv_op_name),
-        )
-
-
-_register_fp8_emulation_ops()
-
-
-def _fp8_emu_roundtrip(tensor: torch.Tensor, quantizer) -> torch.Tensor:
-    """Single-tensor FP8 emulation roundtrip; uses the custom op when the
-    quantizer class has one (torch.compile-traceable), eager otherwise.
-
-    Dispatch keys on ``type(quantizer).__qualname__`` rather than the class
-    itself so it stays traceable for opaque quantizer arguments (same trick
-    as ``is_value_opaque_quantizer``)."""
-    ops = _FP8_EMU_OPS.get(type(quantizer).__qualname__)
-    if ops is not None:
-        return ops[0](tensor, quantizer)
-    return _fp8_emu_roundtrip_eager(tensor, quantizer)
-
-
-def _fp8_emu_roundtrip_qkv(q, k, v, quantizer, qkv_layout):
-    """Joint q/k/v FP8 emulation roundtrip; custom op when available, eager
-    otherwise."""
-    ops = _FP8_EMU_OPS.get(type(quantizer).__qualname__)
-    if ops is not None:
-        return ops[1](q, k, v, quantizer, qkv_layout)
-    return _fp8_emu_roundtrip_qkv_eager(q, k, v, quantizer, qkv_layout)
-
-
 class FP8EmulationFunc(torch.autograd.Function):
     """
     Emulate the effects of FP8 quantization on tensors. Used in UnfusedDotProductAttention as follows:
@@ -350,11 +214,28 @@ class FP8EmulationFunc(torch.autograd.Function):
             )
 
         if quantizer_name == "QKV_quantizer":
+            query_layer, key_layer, value_layer = [
+                x.contiguous() for x in [tensor1, tensor2, tensor3]
+            ]
             # always in sbhd_sbhd_sbhd shape at this point
-            tensors = _fp8_emu_roundtrip_qkv(tensor1, tensor2, tensor3, quantizer, qkv_layout)
+            q_fp8, k_fp8, v_fp8, qkv_layout, _ = combine_and_quantize(
+                qkv_layout,
+                query_layer,
+                key_layer,
+                value_layer,
+                quantizer,
+                keep_same_data_and_scale_inv_format=True,
+            )
+            tensors = combine_and_dequantize(
+                qkv_layout, q_fp8, k_fp8, v_fp8, src_nominal_dtype=query_layer.dtype
+            )
+            if isinstance(quantizer, MXFP8Quantizer):
+                # bhsd_bhsd_bhsd after combine_and_quantize; permute back to sbhd_sbhd_sbhd
+                tensors = [x.permute(2, 0, 1, 3).contiguous() for x in tensors]
         elif quantizer_name in ["S_quantizer", "O_quantizer"]:
             if quantizer is not None:
-                tensors = (_fp8_emu_roundtrip(tensor1, quantizer), tensor2, tensor3)
+                t_fp8 = quantizer(tensor1)
+                tensors = (t_fp8.dequantize(dtype=tensor1.dtype), tensor2, tensor3)
             else:
                 tensors = (tensor1, tensor2, tensor3)
         else:
@@ -369,12 +250,27 @@ class FP8EmulationFunc(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
         if ctx.quantizer_name in ["dO_quantizer", "dP_quantizer"]:
             if ctx.quantizer is not None:
-                tensors = _fp8_emu_roundtrip(grad1, ctx.quantizer), grad2, grad3
+                dt_fp8 = ctx.quantizer(grad1)
+                tensors = dt_fp8.dequantize(dtype=grad1.dtype), grad2, grad3
             else:
                 tensors = grad1, grad2, grad3
         elif ctx.quantizer_name == "dQKV_quantizer":
+            query_grad, key_grad, value_grad = [x.contiguous() for x in [grad1, grad2, grad3]]
             # always in sbhd_sbhd_sbhd shape at this point
-            tensors = _fp8_emu_roundtrip_qkv(grad1, grad2, grad3, ctx.quantizer, ctx.qkv_layout)
+            dq_fp8, dk_fp8, dv_fp8, new_qkv_layout, _ = combine_and_quantize(
+                ctx.qkv_layout,
+                query_grad,
+                key_grad,
+                value_grad,
+                ctx.quantizer,
+                keep_same_data_and_scale_inv_format=True,
+            )
+            tensors = combine_and_dequantize(
+                new_qkv_layout, dq_fp8, dk_fp8, dv_fp8, src_nominal_dtype=query_grad.dtype
+            )
+            if isinstance(ctx.quantizer, MXFP8Quantizer):
+                # bhsd_bhsd_bhsd after combine_and_quantize; permute back to sbhd_sbhd_sbhd
+                tensors = [x.permute(2, 0, 1, 3).contiguous() for x in tensors]
         else:
             tensors = grad1, grad2, grad3
         return tensors[0], tensors[1], tensors[2], None, None, None
