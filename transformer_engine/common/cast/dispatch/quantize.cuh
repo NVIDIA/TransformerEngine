@@ -17,7 +17,9 @@
 #include "../../transpose/cast_transpose.h"
 #include "../../util/vectorized_pointwise.h"
 #include "../core/common.cuh"
+#include "../fp8/group_quantize_fp8.cuh"
 #include "../fp8/quantize_fp8.cuh"
+#include "../fp8_blockwise/group_quantize_fp8_blockwise.cuh"
 #include "../mxfp8/group_quantize_mxfp8.cuh"
 #include "../mxfp8/quantize_mxfp8.cuh"
 #include "../nvfp4/group_quantize_transpose_nvfp4.cuh"
@@ -113,8 +115,13 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
                    "Row-scaled NVFP4 quantization does not produce columnwise output.");
         nvfp4::compute_rowwise_amax(*input_tensor, noop_tensor, output_tensor, stream);
       }
-      bool use_optimized_kernel = (dtype == DType::kBFloat16) && (rows % 32 == 0) &&
-                                  (cols % 32 == 0) && output_tensor->has_data();
+      // Columnwise-only is supported on the optimized path only for 2D scaling; rowwise-only and
+      // both-directions keep their existing routing. Columnwise-only 1D and non-bf16 fall back to
+      // quantize_transpose_vector_blockwise_fp4.
+      bool use_optimized_kernel =
+          (dtype == DType::kBFloat16) && (rows % 32 == 0) && (cols % 32 == 0) &&
+          (output_tensor->has_data() ||
+           (output_tensor->has_columnwise_data() && quant_config_cpp.nvfp4_2d_quantization));
 
       // Launch NVFP4 quantize kernel
       if (nvfp4_use_4over6) {
@@ -268,8 +275,13 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
                  "NVFP4 4over6 quantization does not support stochastic rounding.");
       NVTE_CHECK(!output_tensor->row_scaled_nvfp4,
                  "Backward NVFP4 quantization does not support row-scaled outputs.");
-      bool use_optimized_kernel = (dtype == DType::kBFloat16) && (rows % 32 == 0) &&
-                                  (cols % 32 == 0) && output_tensor->has_data();
+      // Columnwise-only is supported on the optimized path only for 2D scaling; rowwise-only and
+      // both-directions keep their existing routing. Columnwise-only 1D and non-bf16 fall back to
+      // quantize_transpose_vector_blockwise_fp4.
+      bool use_optimized_kernel =
+          (dtype == DType::kBFloat16) && (rows % 32 == 0) && (cols % 32 == 0) &&
+          (output_tensor->has_data() ||
+           (output_tensor->has_columnwise_data() && quant_config_cpp.nvfp4_2d_quantization));
 
       // Launch NVFP4 quantize kernel
       if (nvfp4_use_4over6) {
@@ -450,10 +462,35 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
 
   // Dispatch to quantization kernel depending on data format
   switch (scaling_mode) {
+    case NVTE_DELAYED_TENSOR_SCALING: {
+      fp8::group_quantize<IS_ACT, ParamOP, OP>(input_tensor, noop_tensor, output_tensor,
+                                               &quant_config_cpp, stream);
+      break;
+    }
     case NVTE_MXFP8_1D_SCALING: {
       mxfp8::group_quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
           input_tensor, activations_tensor, noop_tensor, output_tensor, dbias_tensor,
           workspace_tensor, &quant_config_cpp, stream);
+      break;
+    }
+    case NVTE_BLOCK_SCALING_1D: {
+      NVTE_CHECK(!IS_ACT, "IS_ACT is not implemented for grouped NVTE_BLOCK_SCALING_1D.");
+      NVTE_CHECK(!quant_config_cpp.force_pow_2_scales,
+                 "Fused grouped FP8 block-scaling quantize does not support "
+                 "force_pow_2_scales=True. Set force_pow_2_scales=False, or use the unfused "
+                 "split-quantize path (NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM=0).");
+      fp8_blockwise::group_quantize_blockwise_1d(input_tensor, output_tensor, noop_tensor,
+                                                 quant_config_cpp.amax_epsilon, stream);
+      break;
+    }
+    case NVTE_BLOCK_SCALING_2D: {
+      NVTE_CHECK(!IS_ACT, "IS_ACT is not implemented for grouped NVTE_BLOCK_SCALING_2D.");
+      NVTE_CHECK(!quant_config_cpp.force_pow_2_scales,
+                 "Fused grouped FP8 block-scaling quantize does not support "
+                 "force_pow_2_scales=True. Set force_pow_2_scales=False, or use the unfused "
+                 "split-quantize path (NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM=0).");
+      fp8_blockwise::group_quantize_blockwise_2d(input_tensor, output_tensor, noop_tensor,
+                                                 quant_config_cpp.amax_epsilon, stream);
       break;
     }
     default:
@@ -495,6 +532,28 @@ void group_quantize_bwd_helper(const NVTEGroupedTensor grad, const NVTEGroupedTe
       mxfp8::group_quantize<IS_DBIAS, IS_DACT, /*IS_ACT=*/false, ParamOP, OP>(
           grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor, workspace_tensor,
           &quant_config_cpp, stream);
+      break;
+    }
+    case NVTE_BLOCK_SCALING_1D:
+    case NVTE_BLOCK_SCALING_2D: {
+      NVTE_CHECK(!IS_DACT, "IS_DACT is not implemented for grouped FP8 block scaling.");
+      NVTE_CHECK(!quant_config_cpp.force_pow_2_scales,
+                 "Fused grouped FP8 block-scaling quantize does not support "
+                 "force_pow_2_scales=True. Set force_pow_2_scales=False, or use the unfused "
+                 "split-quantize path (NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM=0).");
+      // dbias is computed in-kernel and reduced per-expert inside group_quantize_blockwise_{1d,2d}
+      // (mirrors MXFP8); those also handle the two-call workspace sizing protocol.
+      GroupedTensor *dbias_arg = IS_DBIAS ? dbias_tensor : nullptr;
+      Tensor *workspace_arg = IS_DBIAS ? workspace_tensor : nullptr;
+      if (scaling_mode == NVTE_BLOCK_SCALING_1D) {
+        fp8_blockwise::group_quantize_blockwise_1d(grad_tensor, output_tensor, noop_tensor,
+                                                   quant_config_cpp.amax_epsilon, stream, dbias_arg,
+                                                   workspace_arg);
+      } else {
+        fp8_blockwise::group_quantize_blockwise_2d(grad_tensor, output_tensor, noop_tensor,
+                                                   quant_config_cpp.amax_epsilon, stream, dbias_arg,
+                                                   workspace_arg);
+      }
       break;
     }
     default:
