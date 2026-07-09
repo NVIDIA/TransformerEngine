@@ -66,7 +66,9 @@ void fused_attn_fp8_fwd_impl(
   // cu_seqlens_to_actual_seqlens conversion applies here. Also note that the
   // needed versions of cuDNN backend and frontend are higher than for F16.)
   const bool use_direct_seqlens =
-      CUDNN_FRONTEND_VERSION >= 12700 &&
+      // Frontend 1.26 supports fp8+cu_seqlens (for the C++ API).
+      // Note: For the Python API, 1.27 is required.
+      CUDNN_FRONTEND_VERSION >= 12600 &&
       // The frontend gates cu_seq_len support on min(compile-time, runtime) cuDNN
       // version, so we'll do the same.
       (CUDNN_VERSION >= 92500 && cudnn_runtime_version >= 92500) &&
