@@ -2266,8 +2266,15 @@ def get_mxfp8_quantization_function(
         )
         return False
 
-    logger.debug("Compiling CuTeDSL MXFP8 quantization kernel for %s", cfg)
-    compiled = compile_cutedsl_function_from_cfg(cfg)
+    logger.debug(f"Compiling CuTeDSL MXFP8 quantization kernel for {cfg}")
+    try:
+        compiled = compile_cutedsl_function_from_cfg(cfg)
+    except Exception as e:
+        logger.warning(
+            "CuTeDSL MXFP8 kernel compilation failed, "
+            f"falling back to the CUDA C++ kernel: {e}"
+        )
+        return False
     tvm_ffi.register_global_func(fn_name, compiled, override=True)
 
     return True
