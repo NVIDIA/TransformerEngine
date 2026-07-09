@@ -109,3 +109,82 @@ except FileNotFoundError as e:
             )
 
 __version__ = str(metadata.version("transformer_engine"))
+
+
+def test(verbose: bool = True) -> bool:
+    """Run smoke checks to verify the Transformer Engine installation.
+
+    Confirms the package is installed correctly and, when the PyTorch backend is
+    available, runs a minimal functional check on the current device. Checks that
+    need a GPU are skipped when no CUDA device is available, so the call is safe
+    to run anywhere as an installation sanity check.
+
+    Parameters
+    ----------
+    verbose : bool, default = True
+        Print the result of each check.
+
+    Returns
+    -------
+    bool
+        ``True`` if every executed check passed, ``False`` otherwise.
+    """
+    # ponytail: smoke test, not the full suite. Covers install integrity and a
+    # single PyTorch forward pass; deeper coverage stays in tests/ and qa/.
+    results = []
+
+    def _record(name: str, passed: bool, detail: str = "") -> None:
+        results.append(passed)
+        if verbose:
+            status = "PASS" if passed else "FAIL"
+            print(f"[{status}] {name}" + (f": {detail}" if detail else ""))
+
+    # Installation integrity (reuses the PyPI sanity check).
+    try:
+        from .common import sanity_checks_for_pypi_installation
+
+        sanity_checks_for_pypi_installation()
+        _record("installation", True, f"transformer_engine {__version__}")
+    except Exception as err:  # pylint: disable=broad-except
+        _record("installation", False, str(err))
+
+    # PyTorch backend, checked only if it is available. A backend that is present
+    # but fails at runtime is reported, not skipped.
+    try:
+        from . import pytorch as te
+    except (ImportError, FileNotFoundError):
+        # FileNotFoundError mirrors the module-level guard: torch is installed but
+        # the Transformer Engine PyTorch extension shared object is missing.
+        te = None
+    if te is not None:
+        try:
+            import torch
+
+            if not torch.cuda.is_available():
+                _record("pytorch", True, "imported; no CUDA device, GPU checks skipped")
+            else:
+                major, minor = te.get_device_compute_capability()
+                dtype = torch.bfloat16 if te.is_bf16_available() else torch.float16
+                with torch.no_grad():
+                    model = te.Linear(16, 16, params_dtype=dtype, device="cuda")
+                    out = model(torch.zeros(4, 16, dtype=dtype, device="cuda"))
+                if tuple(out.shape) != (4, 16):
+                    raise RuntimeError(f"unexpected output shape {tuple(out.shape)}")
+                formats = [
+                    name
+                    for name, available in (
+                        ("FP8", te.is_fp8_available()),
+                        ("MXFP8", te.is_mxfp8_available()),
+                        ("NVFP4", te.is_nvfp4_available()),
+                    )
+                    if available
+                ]
+                detail = f"sm_{major}{minor}, {dtype}, formats: {', '.join(formats) or 'none'}"
+                _record("pytorch", True, detail)
+        except Exception as err:  # pylint: disable=broad-except
+            _record("pytorch", False, str(err))
+
+    passed = all(results)
+    if verbose:
+        print(f"\n{sum(results)}/{len(results)} checks passed.")
+    return passed
