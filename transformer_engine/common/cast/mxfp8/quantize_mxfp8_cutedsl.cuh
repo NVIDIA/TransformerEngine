@@ -185,7 +185,7 @@ inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config, const Tensor 
   // the kernel launch so it's more flexible
   if (config.swizzled && (flat_m % 128 != 0 || flat_n % 128 != 0)) {
     // If noop flag is set, skip zeroing out
-    if (noop_tensor != nullptr && noop_tensor->data.dptr != nullptr) {
+    if (noop_tensor == nullptr || noop_tensor->data.dptr == nullptr) {
       if (output_tensor->has_data()) {
         NVTE_CHECK_CUDA(cudaMemsetAsync(output_tensor->scale_inv.dptr, 0,
                                         output_tensor->scale_inv.buffer_size_bytes(), stream));
