@@ -1113,6 +1113,64 @@ class TestGroupedMLPFusedOp:
             activation=activation,
         )
 
+    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    def test_single_grouped_weight_eval_preserves_columnwise_usage(
+        self,
+        *,
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",
+        group_size: int = 2,
+        hidden_size: int = 128,
+    ) -> None:
+        """Eager eval must not drop storage still used by captured training dgrad."""
+
+        if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
+            pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
+
+        split_sizes = torch.full(
+            (group_size,),
+            128,
+            dtype=torch.int64,
+            device=device,
+        )
+        num_tokens = int(split_sizes.sum())
+        recipe = make_recipe("mxfp8")
+
+        with te.quantized_model_init(enabled=True, recipe=recipe):
+            fc1 = te.ops.GroupedLinear(
+                group_size,
+                hidden_size,
+                2 * hidden_size,
+                device=device,
+                dtype=dtype,
+                single_grouped_weight=True,
+            )
+            fc2 = te.ops.GroupedLinear(
+                group_size,
+                hidden_size,
+                hidden_size,
+                device=device,
+                dtype=dtype,
+                single_grouped_weight=True,
+            )
+            module = te.ops.Sequential(
+                fc1,
+                te.ops.ScaledSwiGLU(glu_interleave_size=32),
+                fc2,
+            )
+
+        x = torch.randn(num_tokens, hidden_size, device=device, dtype=dtype, requires_grad=True)
+        probs = torch.ones(num_tokens, device=device, dtype=dtype)
+        with te.autocast(enabled=True, recipe=recipe):
+            module(x, split_sizes, probs, split_sizes)
+        assert fc1.weight.quantizer.columnwise_usage
+        assert fc2.weight.quantizer.columnwise_usage
+
+        with torch.no_grad(), te.autocast(enabled=True, recipe=recipe):
+            module(x.detach(), split_sizes, probs, split_sizes)
+        assert fc1.weight.quantizer.columnwise_usage
+        assert fc2.weight.quantizer.columnwise_usage
+
     @pytest.mark.parametrize("quantization", _grouped_mlp_quantization_list)
     @pytest.mark.parametrize("single_grouped_weight", (False, True))
     @pytest.mark.parametrize("accumulate_into_main_grad", (False, True))
