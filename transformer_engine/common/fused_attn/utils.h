@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <mutex>
+#include <tuple>
 
 #include "../common.h"
 #include "transformer_engine/fused_attn.h"
@@ -273,64 +274,63 @@ struct FADescriptor {
   }
 };
 
+// Cache key for cuDNN graph plans. All members must participate in equality / ordering;
+// adding a new field that affects graph identity is a single-line change here:
+// declare it with a sensible default, then add it once to `as_tuple()`.
 struct FADescriptor_v1 {
-  std::int64_t b;
-  std::int64_t h;
-  std::int64_t hg;
-  std::int64_t s_q;
-  std::int64_t s_kv;
-  std::int64_t d_qk;
-  std::int64_t d_v;
-  std::int64_t num_pages_k;
-  std::int64_t num_pages_v;
-  std::int64_t page_size_k;
-  std::int64_t page_size_v;
-  std::int64_t max_pages_per_seq_k;
-  std::int64_t max_pages_per_seq_v;
-  std::int64_t bias_b;
-  std::int64_t bias_h;
-  std::int64_t bias_sq;
-  std::int64_t bias_skv;
-  float attnScale;
-  bool isTraining;
-  float dropoutProbability;
-  NVTE_QKV_Layout qkv_layout;
-  NVTE_QKV_Format o_format;
-  NVTE_QKV_Format do_format;
-  NVTE_QKV_Layout dqkv_layout;
-  NVTE_QKV_Format qkv_scale_inv_format;
-  NVTE_QKV_Format do_scale_inv_format;
-  NVTE_Bias_Type bias_type;
-  NVTE_Mask_Type mask_type;
-  NVTE_Softmax_Type softmax_type;
-  std::int64_t window_size_left;
-  std::int64_t window_size_right;
-  bool bottom_right_diagonal;
-  bool deterministic;
-  cudnn_frontend::DataType_t qkv_tensor_type;
-  cudnn_frontend::DataType_t o_tensor_type;
-  cudnn_frontend::DataType_t do_tensor_type;
-  cudnn_frontend::DataType_t dqkv_tensor_type;
-  bool return_max_logit;
+  std::int64_t b = 0;
+  std::int64_t h = 0;
+  std::int64_t hg = 0;
+  std::int64_t s_q = 0;
+  std::int64_t s_kv = 0;
+  std::int64_t d_qk = 0;
+  std::int64_t d_v = 0;
+  std::int64_t num_pages_k = 0;
+  std::int64_t num_pages_v = 0;
+  std::int64_t page_size_k = 0;
+  std::int64_t page_size_v = 0;
+  std::int64_t max_pages_per_seq_k = 0;
+  std::int64_t max_pages_per_seq_v = 0;
+  std::int64_t bias_b = 0;
+  std::int64_t bias_h = 0;
+  std::int64_t bias_sq = 0;
+  std::int64_t bias_skv = 0;
+  float attnScale = 0.0f;
+  bool isTraining = false;
+  float dropoutProbability = 0.0f;
+  NVTE_QKV_Layout qkv_layout = NVTE_QKV_Layout_NOT_SET;
+  NVTE_QKV_Format o_format = NVTE_QKV_Format_NOT_SET;
+  NVTE_QKV_Format do_format = NVTE_QKV_Format_NOT_SET;
+  NVTE_QKV_Layout dqkv_layout = NVTE_QKV_Layout_NOT_SET;
+  NVTE_QKV_Format qkv_scale_inv_format = NVTE_QKV_Format_NOT_SET;
+  NVTE_QKV_Format do_scale_inv_format = NVTE_QKV_Format_NOT_SET;
+  NVTE_Bias_Type bias_type = NVTE_NO_BIAS;
+  NVTE_Mask_Type mask_type = NVTE_NO_MASK;
+  NVTE_Softmax_Type softmax_type = NVTE_VANILLA_SOFTMAX;
+  std::int64_t window_size_left = 0;
+  std::int64_t window_size_right = 0;
+  bool bottom_right_diagonal = false;
+  bool deterministic = false;
+  cudnn_frontend::DataType_t qkv_tensor_type = cudnn_frontend::DataType_t::NOT_SET;
+  cudnn_frontend::DataType_t o_tensor_type = cudnn_frontend::DataType_t::NOT_SET;
+  cudnn_frontend::DataType_t do_tensor_type = cudnn_frontend::DataType_t::NOT_SET;
+  cudnn_frontend::DataType_t dqkv_tensor_type = cudnn_frontend::DataType_t::NOT_SET;
+  bool return_max_logit = false;
 
-  bool operator<(const FADescriptor_v1 &rhs) const {
+  // Single source of truth for which fields participate in equality / ordering.
+  // When you add a new field above, append it here exactly once.
+  auto as_tuple() const {
     return std::tie(b, h, hg, s_q, s_kv, d_qk, d_v, num_pages_k, num_pages_v, page_size_k,
                     page_size_v, max_pages_per_seq_k, max_pages_per_seq_v, bias_b, bias_h, bias_sq,
                     bias_skv, attnScale, isTraining, dropoutProbability, qkv_layout, o_format,
-                    do_format, dqkv_layout, qkv_scale_inv_format, do_scale_inv_format, mask_type,
-                    softmax_type, window_size_left, window_size_right, bottom_right_diagonal,
-                    deterministic, bias_type, qkv_tensor_type, o_tensor_type, do_tensor_type,
-                    dqkv_tensor_type, return_max_logit) <
-           std::tie(rhs.b, rhs.h, rhs.hg, rhs.s_q, rhs.s_kv, rhs.d_qk, rhs.d_v, rhs.num_pages_k,
-                    rhs.num_pages_v, rhs.page_size_k, rhs.page_size_v, rhs.max_pages_per_seq_k,
-                    rhs.max_pages_per_seq_v, rhs.bias_b, rhs.bias_h, rhs.bias_sq, rhs.bias_skv,
-                    rhs.attnScale, rhs.isTraining, rhs.dropoutProbability, rhs.qkv_layout,
-                    rhs.o_format, rhs.do_format, rhs.dqkv_layout, rhs.qkv_scale_inv_format,
-                    rhs.do_scale_inv_format, rhs.mask_type, rhs.softmax_type, rhs.window_size_left,
-                    rhs.window_size_right, rhs.bottom_right_diagonal, rhs.deterministic,
-                    rhs.bias_type, rhs.qkv_tensor_type, rhs.o_tensor_type, rhs.do_tensor_type,
-                    rhs.dqkv_tensor_type, rhs.return_max_logit);
+                    do_format, dqkv_layout, qkv_scale_inv_format, do_scale_inv_format, bias_type,
+                    mask_type, softmax_type, window_size_left, window_size_right,
+                    bottom_right_diagonal, deterministic, qkv_tensor_type, o_tensor_type,
+                    do_tensor_type, dqkv_tensor_type, return_max_logit);
   }
+
+  bool operator<(const FADescriptor_v1 &rhs) const { return as_tuple() < rhs.as_tuple(); }
+  bool operator==(const FADescriptor_v1 &rhs) const { return as_tuple() == rhs.as_tuple(); }
 };
 
 __global__ void cu_seqlens_to_actual_seqlens(int64_t actual_b, int64_t max_b,
