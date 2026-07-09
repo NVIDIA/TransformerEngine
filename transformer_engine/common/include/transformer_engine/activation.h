@@ -377,7 +377,8 @@ void nvte_clamped_swiglu_v2(const NVTETensor input, NVTETensor output, float lim
  *  \param[in]     input                Input tensor of shape [N, H * 2].
  *  \param[in]     act_scales           Row-wise activation scales of shape [N].
  *  \param[in,out] output               Output tensor of shape [N, H].
- *  \param[in]     glu_interleave_size  GLU interleave chunk size, or 0 for non-interleaved layout.
+ *  \param[in]     glu_interleave_size  0 for non-interleaved layout; otherwise a positive
+ *                                      multiple of 32 that divides H.
  *  \param[in]     stream               CUDA stream used for the operation.
  */
 void nvte_scaled_swiglu(const NVTETensor input, const NVTETensor act_scales, NVTETensor output,
@@ -395,7 +396,8 @@ void nvte_scaled_swiglu(const NVTETensor input, const NVTETensor act_scales, NVT
  *  \param[in]     limit                Clipping limit.
  *  \param[in]     alpha                Activation sigmoid alpha.
  *  \param[in]     glu_linear_offset    Offset added to linear component after clamping.
- *  \param[in]     glu_interleave_size  GLU interleave chunk size, or 0 for non-interleaved layout.
+ *  \param[in]     glu_interleave_size  0 for non-interleaved layout; otherwise a positive
+ *                                      multiple of 32 that divides H.
  *  \param[in]     stream               CUDA stream used for the operation.
  */
 void nvte_scaled_clamped_swiglu(const NVTETensor input, const NVTETensor act_scales,
@@ -518,7 +520,8 @@ void nvte_clamped_dswiglu_v2(const NVTETensor grad, const NVTETensor input, NVTE
  *  \param[in]     act_scales           Row-wise activation scales of shape [N].
  *  \param[in,out] grad_input           Outgoing gradient of shape [N, H * 2].
  *  \param[in,out] grad_act_scales      Optional row-wise scale gradient of shape [N], or null.
- *  \param[in]     glu_interleave_size  GLU interleave chunk size, or 0 for non-interleaved layout.
+ *  \param[in]     glu_interleave_size  0 for non-interleaved layout; otherwise a positive
+ *                                      multiple of 32 that divides H.
  *  \param[in]     stream               CUDA stream used for the operation.
  */
 void nvte_scaled_dswiglu(const NVTETensor grad, const NVTETensor input, const NVTETensor act_scales,
@@ -538,7 +541,8 @@ void nvte_scaled_dswiglu(const NVTETensor grad, const NVTETensor input, const NV
  *  \param[in]     limit                Clipping limit.
  *  \param[in]     alpha                Activation sigmoid alpha.
  *  \param[in]     glu_linear_offset    Offset added to linear component after clamping.
- *  \param[in]     glu_interleave_size  GLU interleave chunk size, or 0 for non-interleaved layout.
+ *  \param[in]     glu_interleave_size  0 for non-interleaved layout; otherwise a positive
+ *                                      multiple of 32 that divides H.
  *  \param[in]     stream               CUDA stream used for the operation.
  */
 void nvte_scaled_clamped_dswiglu(const NVTETensor grad, const NVTETensor input,

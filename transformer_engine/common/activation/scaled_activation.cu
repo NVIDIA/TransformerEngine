@@ -72,10 +72,6 @@ enum class ScaledActivation {
   kSReLU,
 };
 
-__device__ __forceinline__ float sigmoid_from_float(const float x) {
-  return 1.0f / (1.0f + expf(-x));
-}
-
 template <ScaledActivation Act>
 __device__ __forceinline__ float gated_forward_value(const float act_in, const float gate_in,
                                                      const ClampedSwiGLUParam &param) {
@@ -92,10 +88,11 @@ template <ScaledActivation Act>
 __device__ __forceinline__ void gated_backward_values(const float act_in, const float gate_in,
                                                       const ClampedSwiGLUParam &param, float *dact,
                                                       float *dgate, float *unscaled) {
+  Empty empty = {};
   if constexpr (Act == ScaledActivation::kSwiGLU) {
-    const float sigmoid = sigmoid_from_float(act_in);
-    const float act = act_in * sigmoid;
-    const float dact_base = sigmoid + act_in * sigmoid * (1.0f - sigmoid);
+    const float sigmoid_value = sigmoid<float, float>(act_in, empty);
+    const float act = act_in * sigmoid_value;
+    const float dact_base = sigmoid_value + act_in * sigmoid_value * (1.0f - sigmoid_value);
     *unscaled = act * gate_in;
     *dact = dact_base * gate_in;
     *dgate = act;
@@ -104,10 +101,11 @@ __device__ __forceinline__ void gated_backward_values(const float act_in, const 
     const float gate = fminf(fmaxf(-param.limit, gate_in), param.limit) + param.glu_linear_offset;
     const bool dact_mask = act_in <= param.limit;
     const float clamped_act_in = fminf(act_in, param.limit);
-    const float sigmoid = sigmoid_from_float(param.alpha * clamped_act_in);
-    const float act = clamped_act_in * sigmoid;
-    const float dact_base =
-        dact_mask ? sigmoid + param.alpha * clamped_act_in * sigmoid * (1.0f - sigmoid) : 0.0f;
+    const float sigmoid_value = sigmoid<float, float>(param.alpha * clamped_act_in, empty);
+    const float act = clamped_act_in * sigmoid_value;
+    const float dact_base = dact_mask ? sigmoid_value + param.alpha * clamped_act_in *
+                                                            sigmoid_value * (1.0f - sigmoid_value)
+                                      : 0.0f;
     *unscaled = act * gate;
     *dact = dact_base * gate;
     *dgate = dgate_mask ? act : 0.0f;

@@ -27,7 +27,7 @@ enum class ScaledActivationCase {
   kSReLU,
 };
 
-constexpr float kClampedLimit = 1.3f;
+constexpr float kClampedLimit = 0.5f;
 constexpr float kClampedAlpha = 1.702f;
 constexpr float kClampedLinearOffset = 0.5f;
 
@@ -42,26 +42,6 @@ const char *activation_name(ScaledActivationCase activation) {
   }
   return "unknown";
 }
-
-inline float sigmoid(const float x) { return 1.0f / (1.0f + expf(-x)); }
-
-inline float qgelu_alpha(const float x, const float alpha) { return x * sigmoid(alpha * x); }
-
-inline float dqgelu_alpha(const float x, const float alpha) {
-  const float sig = sigmoid(alpha * x);
-  return alpha * x * sig * (1.0f - sig) + sig;
-}
-
-inline float silu_ref(const float x) { return x * sigmoid(x); }
-
-inline float dsilu_ref(const float x) {
-  const float sig = sigmoid(x);
-  return x * sig * (1.0f - sig) + sig;
-}
-
-inline float srelu_ref(const float x) { return x > 0.0f ? x * x : 0.0f; }
-
-inline float dsrelu_ref(const float x) { return fmaxf(0.0f, 2.0f * x); }
 
 inline void glu_indices(const size_t row, const size_t col, const size_t hidden,
                         const int64_t interleave, size_t *act_idx, size_t *linear_idx) {
@@ -78,39 +58,21 @@ inline void glu_indices(const size_t row, const size_t col, const size_t hidden,
   }
 }
 
-inline float gated_unscaled(const ScaledActivationCase activation, const float act_in,
-                            const float linear_in) {
-  switch (activation) {
-    case ScaledActivationCase::kSwiGLU:
-      return silu_ref(act_in) * linear_in;
-    case ScaledActivationCase::kClampedSwiGLU: {
-      const float act = qgelu_alpha(fminf(kClampedLimit, act_in), kClampedAlpha);
-      const float linear =
-          fminf(fmaxf(-kClampedLimit, linear_in), kClampedLimit) + kClampedLinearOffset;
-      return act * linear;
-    }
-    case ScaledActivationCase::kSReLU:
-      return srelu_ref(act_in);
-  }
-  return 0.0f;
-}
-
 inline void gated_grads(const ScaledActivationCase activation, const float act_in,
                         const float linear_in, float *dact, float *dlinear, float *unscaled) {
   switch (activation) {
     case ScaledActivationCase::kSwiGLU: {
-      const float act = silu_ref(act_in);
+      const float act = test::silu(act_in);
       *unscaled = act * linear_in;
-      *dact = dsilu_ref(act_in) * linear_in;
+      *dact = test::dsilu(act_in) * linear_in;
       *dlinear = act;
       return;
     }
     case ScaledActivationCase::kClampedSwiGLU: {
       const bool dlinear_mask = linear_in <= kClampedLimit && linear_in >= -kClampedLimit;
-      const float act = qgelu_alpha(fminf(kClampedLimit, act_in), kClampedAlpha);
+      const float act = test::qgelu(fminf(kClampedLimit, act_in));
       const float dact_base =
-          act_in <= kClampedLimit ? dqgelu_alpha(fminf(kClampedLimit, act_in), kClampedAlpha)
-                                  : 0.0f;
+          act_in <= kClampedLimit ? test::dqgelu(fminf(kClampedLimit, act_in)) : 0.0f;
       const float linear =
           fminf(fmaxf(-kClampedLimit, linear_in), kClampedLimit) + kClampedLinearOffset;
       *unscaled = act * linear;
@@ -119,8 +81,8 @@ inline void gated_grads(const ScaledActivationCase activation, const float act_i
       return;
     }
     case ScaledActivationCase::kSReLU:
-      *unscaled = srelu_ref(act_in);
-      *dact = dsrelu_ref(act_in);
+      *unscaled = test::srelu(act_in);
+      *dact = test::dsrelu(act_in);
       *dlinear = 0.0f;
       return;
   }
@@ -149,7 +111,6 @@ void compute_reference(ScaledActivationCase activation, const DataT *input, cons
         glu_indices(row, col, hidden, interleave, &act_idx, &linear_idx);
         const float act_in = static_cast<float>(input[act_idx]);
         const float linear_in = static_cast<float>(input[linear_idx]);
-        unscaled = gated_unscaled(activation, act_in, linear_in);
         gated_grads(activation, act_in, linear_in, &dact, &dlinear, &unscaled);
 
         const float scaled_grad = static_cast<float>(grad_output[out_idx]) * scale;
@@ -157,9 +118,9 @@ void compute_reference(ScaledActivationCase activation, const DataT *input, cons
         grad_input[linear_idx] = static_cast<DataT>(scaled_grad * dlinear);
       } else {
         const float x = static_cast<float>(input[out_idx]);
-        unscaled = srelu_ref(x);
+        unscaled = test::srelu(x);
         const float scaled_grad = static_cast<float>(grad_output[out_idx]) * scale;
-        grad_input[out_idx] = static_cast<DataT>(scaled_grad * dsrelu_ref(x));
+        grad_input[out_idx] = static_cast<DataT>(scaled_grad * test::dsrelu(x));
       }
 
       output[out_idx] = static_cast<DataT>(unscaled * scale);
