@@ -206,7 +206,7 @@ def _unpack_packed_qkv(
     qkv_format: str,
     qkv_interleave_dim: int,
     inference_params: Optional[InferenceParams],
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[str]]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[str]]:
     """Resolve declarative packed inputs into q/k/v.
 
     Derives q/k/v as zero-copy views of the packed buffer (``qkv_layer`` or
@@ -214,9 +214,8 @@ def _unpack_packed_qkv(
     The layout enum is truthful by construction, so no pointer-based detection
     is needed downstream (this also covers thd and FP8 DPA).
 
-    Returns ``(query_layer, key_layer, value_layer, packed_tensor,
-    declared_qkv_layout)``; the last two are ``None`` when no packed input is
-    given.
+    Returns ``(query_layer, key_layer, value_layer, declared_qkv_layout)``;
+    the layout is ``None`` when no packed input is given.
     """
     if qkv_layer is None and kv_layer is None:
         if query_layer is None or key_layer is None or value_layer is None:
@@ -224,7 +223,7 @@ def _unpack_packed_qkv(
                 "query_layer, key_layer and value_layer are required unless packed"
                 " inputs (qkv_layer or query_layer + kv_layer) are provided."
             )
-        return query_layer, key_layer, value_layer, None, None
+        return query_layer, key_layer, value_layer, None
 
     if qkv_layer is not None and kv_layer is not None:
         raise ValueError("qkv_layer and kv_layer are mutually exclusive.")
@@ -273,7 +272,7 @@ def _unpack_packed_qkv(
         query_layer, key_layer, value_layer = (
             qkv_layer.select(qkv_interleave_dim, i) for i in range(3)
         )
-        return query_layer, key_layer, value_layer, qkv_layer, _packed_layout(qkv_format, 3)
+        return query_layer, key_layer, value_layer, _packed_layout(qkv_format, 3)
 
     if query_layer is None:
         raise ValueError(
@@ -299,7 +298,6 @@ def _unpack_packed_qkv(
         query_layer,
         key_layer,
         value_layer,
-        kv_layer,
         f"{qkv_format}_{_packed_layout(qkv_format, 2)}",
     )
 
@@ -1382,17 +1380,15 @@ class DotProductAttention(TransformerEngineBaseModule):
             since e.g. ``h == 3`` would make the shapes ambiguous.
         """
 
-        query_layer, key_layer, value_layer, packed_tensor, declared_qkv_layout = (
-            _unpack_packed_qkv(
-                qkv_layer,
-                kv_layer,
-                query_layer,
-                key_layer,
-                value_layer,
-                qkv_format if qkv_format is not None else self.qkv_format,
-                qkv_interleave_dim,
-                inference_params,
-            )
+        query_layer, key_layer, value_layer, declared_qkv_layout = _unpack_packed_qkv(
+            qkv_layer,
+            kv_layer,
+            query_layer,
+            key_layer,
+            value_layer,
+            qkv_format if qkv_format is not None else self.qkv_format,
+            qkv_interleave_dim,
+            inference_params,
         )
 
         with self.prepare_forward_ctx(
@@ -1968,7 +1964,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                         inference_params=inference_params,
                         softmax_offset=softmax_offset,
                         fp8_output=fp8_output,
-                        packed_qkv=packed_tensor,
+                        packed_qkv=qkv_layer,
+                        packed_kv=kv_layer,
                     )
                 return self.fused_attention(
                     query_layer,
@@ -2004,7 +2001,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                     score_mod_bprop=score_mod_bprop,
                     score_mod_tensors=score_mod_tensors,
                     score_mod_bprop_tensors=score_mod_bprop_tensors,
-                    packed_qkv=packed_tensor,
+                    packed_qkv=qkv_layer,
+                    packed_kv=kv_layer,
                 )
 
             if use_unfused_attention:

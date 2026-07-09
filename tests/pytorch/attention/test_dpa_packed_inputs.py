@@ -268,7 +268,8 @@ def test_dpa_torch_compile_qkv_layer_no_pointer_graph_breaks(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 5. FP8 combine refactor: combined= path is bit-identical to combine_tensors path
+# 5. FP8 combine refactor: combined_qkv/combined_kv path is bit-identical to
+#    the combine_tensors path
 # ---------------------------------------------------------------------------
 
 
@@ -281,15 +282,15 @@ def _fp8_quantizer():
 
 
 def test_combine_and_quantize_combined_matches_views():
-    """Quantizing the caller's packed buffer directly (combined=) produces the same
-    _data bits and scale_inv as rebuilding the packed buffer from q/k/v views via
-    combine_tensors (the old set_-based path)."""
+    """Quantizing the caller's packed buffer directly (combined_qkv=) produces the
+    same _data bits and scale_inv as rebuilding the packed buffer from q/k/v views
+    via combine_tensors (the old set_-based path)."""
     torch.manual_seed(0)
     qkv = torch.randn(_B, _S, 3, _H, _D, dtype=_DTYPE, device="cuda")
     q, k, v = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]
 
     old = combine_and_quantize("bs3hd", q, k, v, _fp8_quantizer())
-    new = combine_and_quantize("bs3hd", q, k, v, _fp8_quantizer(), combined=qkv)
+    new = combine_and_quantize("bs3hd", q, k, v, _fp8_quantizer(), combined_qkv=qkv)
 
     assert old[3] == new[3] == "bs3hd"
     for name, x, y in zip(("q", "k", "v"), old[:3], new[:3]):
@@ -305,7 +306,7 @@ def test_combine_and_quantize_combined_kv_matches_views():
     k, v = kv[:, :, 0], kv[:, :, 1]
 
     old = combine_and_quantize("bshd_bs2hd", q, k, v, _fp8_quantizer())
-    new = combine_and_quantize("bshd_bs2hd", q, k, v, _fp8_quantizer(), combined=kv)
+    new = combine_and_quantize("bshd_bs2hd", q, k, v, _fp8_quantizer(), combined_kv=kv)
 
     for name, x, y in zip(("q", "k", "v"), old[:3], new[:3]):
         assert torch.equal(x._data, y._data), f"{name} fp8 bits differ"

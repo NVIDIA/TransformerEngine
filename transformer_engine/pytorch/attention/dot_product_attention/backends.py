@@ -1329,6 +1329,7 @@ class FusedAttnFunc(torch.autograd.Function):
         layer_number,
         return_max_logit,
         packed_qkv=None,
+        packed_kv=None,
     ):
         # pylint: disable=missing-function-docstring
 
@@ -1397,7 +1398,8 @@ class FusedAttnFunc(torch.autograd.Function):
                     v,
                     QKV_quantizer,
                     used_in_backward=is_training,
-                    combined=packed_qkv,
+                    combined_qkv=packed_qkv,
+                    combined_kv=packed_kv,
                 )
 
             # print quantizers
@@ -1905,6 +1907,7 @@ class FusedAttnFunc(torch.autograd.Function):
             None,
             None,
             None,  # packed_qkv
+            None,  # packed_kv
         )
 
 
@@ -2000,6 +2003,7 @@ class FusedAttention(torch.nn.Module):
         score_mod_tensors: Optional[Dict[str, torch.Tensor]] = None,
         score_mod_bprop_tensors: Optional[Dict[str, torch.Tensor]] = None,
         packed_qkv: Optional[torch.Tensor] = None,
+        packed_kv: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """fused attention fprop"""
         assert (
@@ -2220,6 +2224,7 @@ class FusedAttention(torch.nn.Module):
                     self.layer_number,
                     self.return_max_logit,
                     packed_qkv,
+                    packed_kv,
                 )
 
         if self.return_max_logit:
