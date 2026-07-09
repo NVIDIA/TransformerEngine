@@ -164,20 +164,33 @@ See :doc:`build_configuration` for their precedence and scope.
 Clean rebuilds
 --------------
 
-Start with an incremental rebuild. A clean build is appropriate after changing
-the CUDA toolkit, host compiler, framework ABI, target architectures, or
-native feature set, or when generated artifacts no longer agree with the
-configuration shown in the build log.
+CMake and Ninja normally handle incremental changes. However, a clean rebuild is
+needed when the generated build state refers to a toolchain or dependency that no
+longer exists.
 
-The safest diagnostic is to point CMake at a new empty directory rather than
-deleting the existing tree:
+Typical symptoms include:
+
+* Ninja reports that it cannot build a target because an old CUDA library,
+  such as a particular ``libcublas`` version, is missing and there is no rule
+  to produce it. This commonly happens after the CUDA installation is updated
+  from version X to version Y while the old absolute library path remains in
+  the build graph.
+* CMake continues to use a compiler or CUDA toolkit path that no longer
+  matches ``CUDA_HOME`` or ``PATH``.
+* CMake reports that the configured generator differs from the requested
+  generator.
+* An optional library was upgraded, removed, or moved, but Ninja still refers
+  to its previous headers or shared libraries.
+* Architecture or native feature settings changed and the generated targets
+  no longer agree with the current environment.
+
+In the case of build in the default location:
 
 .. code-block:: bash
 
-   export NVTE_CMAKE_BUILD_DIR="$(mktemp -d /tmp/te-cmake-build.XXXXXX)"
+   rm -rf build
    pip install -e . -v --no-build-isolation
 
-If that succeeds, the previous CMake tree was stale. Before removing generated
-files from the checkout, inspect ``git status --ignored`` and remove only
-known build artifacts. Do not remove or reset source files, submodule changes,
-or unrelated user work as part of a clean build.
+If ``NVTE_CMAKE_BUILD_DIR`` points outside ``build/``, verify its value and
+remove that directory instead. Removing the build directory does not clear the
+compiler cache, so ccache can still reuse compatible compilation results.
