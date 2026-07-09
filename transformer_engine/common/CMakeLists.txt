@@ -373,17 +373,8 @@ target_link_libraries(transformer_engine PUBLIC
                       CUDA::cudart
                       CUDNN::cudnn_all)
 
-# CuTeDSL quantize backend bridge. PRIVATE: tvm_ffi_bridge.h is an internal
-# header (not in the installed public include dir), so the symbols and headers
-# are only needed to compile transformer_engine itself, not by downstream
-# consumers. The INTERFACE include dirs of tvm_ffi::shared still apply to our
-# own TUs, which is what fixes the <tvm/ffi/*.h> not-found error.
 target_link_libraries(transformer_engine PRIVATE tvm_ffi::shared)
 
-# libtvm_ffi.so ships inside the tvm_ffi Python package (not a system lib dir),
-# so add its directory to the RPATH; otherwise the runtime loader can't satisfy
-# the DT_NEEDED on libtvm_ffi.so and dlopen fails with "cannot open shared
-# object file". Applied to both the build tree and the installed library.
 get_target_property(TVM_FFI_SHARED_LOCATION tvm_ffi::shared IMPORTED_LOCATION)
 get_filename_component(TVM_FFI_LIB_DIR "${TVM_FFI_SHARED_LOCATION}" DIRECTORY)
 set_property(TARGET transformer_engine APPEND PROPERTY BUILD_RPATH "${TVM_FFI_LIB_DIR}")
