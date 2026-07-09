@@ -15,13 +15,13 @@ understood.
    :maxdepth: 2
    :caption: Developer Guide
 
-   guide_overview
-   project_and_architecture
-   setup_build_and_run
-   development_workflow
-   testing_and_engineering_quality
-   implementation_architecture
-   extending_transformer_engine
-   maintainer_operations
-   design_decisions
-   reference
+   overview/index
+   project_and_architecture/index
+   setup_build_and_run/index
+   development_workflow/index
+   testing_and_engineering_quality/index
+   implementation_architecture/index
+   extending_transformer_engine/index
+   maintainer_operations/index
+   design_decisions/index
+   reference/index

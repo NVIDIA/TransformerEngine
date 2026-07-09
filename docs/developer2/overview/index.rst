@@ -24,23 +24,23 @@ that best matches what you are trying to do.
    * - Goal
      - Start with
    * - Prepare a first contribution
-     - :doc:`Setup, Build, and Run <setup_build_and_run>`, followed by
-       :doc:`Development Workflow <development_workflow>`
+     - :doc:`Setup, Build, and Run <../setup_build_and_run/index>`, followed by
+       :doc:`Development Workflow <../development_workflow/index>`
    * - Understand the codebase
-     - :doc:`Project and Architecture <project_and_architecture>`
+     - :doc:`Project and Architecture <../project_and_architecture/index>`
    * - Modify an existing subsystem
-     - :doc:`Implementation Architecture <implementation_architecture>`
+     - :doc:`Implementation Architecture <../implementation_architecture/index>`
    * - Add a new capability
-     - :doc:`Extending Transformer Engine <extending_transformer_engine>`
+     - :doc:`Extending Transformer Engine <../extending_transformer_engine/index>`
    * - Test a change or investigate a failure
      - :doc:`Testing and Engineering Quality
-       <testing_and_engineering_quality>`
+       <../testing_and_engineering_quality/index>`
    * - Understand why a durable design choice was made
-     - :doc:`Design Decisions <design_decisions>`
+     - :doc:`Design Decisions <../design_decisions/index>`
    * - Perform packaging, documentation, or release work
-     - :doc:`Maintainer Operations <maintainer_operations>`
+     - :doc:`Maintainer Operations <../maintainer_operations/index>`
    * - Find a command, term, support boundary, or external reference
-     - :doc:`Reference <reference>`
+     - :doc:`Reference <../reference/index>`
 
 How the documentation fits together
 -----------------------------------
