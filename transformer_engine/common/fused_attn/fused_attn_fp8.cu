@@ -63,10 +63,13 @@ void fused_attn_fp8_fwd_impl(
   // Newer versions of cuDNN SDPA can accept sequence lengths directly as a cumulative
   // tensor. Take advantage of this if possible to avoid 1 extra kernel call. (Unlike
   // the F16 path, the FP8 path has no THD/ragged-offset support, so only the
-  // cu_seqlens_to_actual_seqlens conversion applies here.)
+  // cu_seqlens_to_actual_seqlens conversion applies here. Also note that the
+  // needed versions of cuDNN backend and frontend are higher than for F16.)
   const bool use_direct_seqlens =
-      transformer_engine::getenv<bool>("NVTE_FUSED_ATTN_DIRECT_SEQLENS", true) &&
-      CUDNN_FRONTEND_VERSION >= 12600 && cudnn_runtime_version >= 92500 &&
+      CUDNN_FRONTEND_VERSION >= 12700 &&
+      // The frontend gates cu_seq_len support on min(compile-time, runtime) cuDNN
+      // version, so we'll do the same.
+      (CUDNN_VERSION >= 92500 && cudnn_runtime_version >= 92500) &&
       // This extra restriction is needed because cuDNN frontend doesn't yet allow
       // the combination of dropout and stats generation for the fprop unified engine,
       // so any such request would always get routed to the old composite SDPA engine

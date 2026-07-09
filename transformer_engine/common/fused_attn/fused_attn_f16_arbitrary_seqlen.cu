@@ -98,8 +98,10 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
   // tensor, and can accept ragged offsets in arbitrary units (such as tokens) instead
   // of elements. Take advantage of this if possible to avoid 2 extra kernel calls.
   const bool use_direct_seqlens =
-      transformer_engine::getenv<bool>("NVTE_FUSED_ATTN_DIRECT_SEQLENS", true) &&
-      cudnn_runtime_version >= 92400 &&
+      CUDNN_FRONTEND_VERSION >= 12500 &&
+      // The frontend gates cu_seq_len support on min(compile-time, runtime) cuDNN
+      // version, so we'll do the same.
+      (CUDNN_VERSION >= 92400 && cudnn_runtime_version >= 92400) &&
       // This extra restriction is needed because cuDNN frontend doesn't yet allow
       // the combination of dropout and stats generation for the fprop unified engine,
       // so any such request would always get routed to the old composite SDPA engine
