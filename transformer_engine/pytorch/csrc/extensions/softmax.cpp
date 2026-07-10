@@ -186,9 +186,9 @@ at::Tensor scaled_upper_triang_masked_softmax_backward(at::Tensor output_grads_,
   auto softmax_results_cu = makeTransformerEngineTensor(softmax_results);
   auto input_grads_cu = makeTransformerEngineTensor(input_grads);
 
-  nvte_scaled_upper_triang_masked_softmax_backward(
-      output_grads_cu.data(), softmax_results_cu.data(), input_grads_cu.data(), scale_factor,
-      at::cuda::getCurrentCUDAStream());
+  nvte_scaled_upper_triang_masked_softmax_backward(output_grads_cu.data(),
+                                                   softmax_results_cu.data(), input_grads_cu.data(),
+                                                   scale_factor, at::cuda::getCurrentCUDAStream());
 
   return input_grads;
 }
