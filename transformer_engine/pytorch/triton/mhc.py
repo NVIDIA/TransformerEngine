@@ -103,9 +103,6 @@ def mhc_generate_mix_and_aggregate(
     phi : torch.Tensor
         projection matrix of shape (N, nC), where N=2n+n*n (=24 for n=4), and nC is the hidden dimension after expansion (n times of C),
         dtype is torch.bfloat16 or torch.float32
-    norm_weight : torch.Tensor or None
-        optional, the weight for RMSNorm, of shape (K,), which is the learnable per-element affine parameters (gamma) applied to RMSNorm
-        dtype is torch.bfloat16 or torch.float32
     alpha : torch.Tensor
         scaling factor for H, of shape (3,), where
         alpha[0] is applied to H[:, 0:n] for H_pre
@@ -118,6 +115,9 @@ def mhc_generate_mix_and_aggregate(
         beta[0, n:2n] is applied to H[:, n:2n] for H_post
         beta[0, 2n:2n+n*n] is applied to H[:, 2n:2n+n*n] for H_res
         dtype is torch.bfloat16 or torch.float32
+    norm_weight : torch.Tensor or None
+        optional, the weight for RMSNorm, of shape (K,), which is the learnable per-element affine parameters (gamma) applied to RMSNorm
+        dtype is torch.bfloat16 or torch.float32
     use_tf32 : bool
         whether to use TF32 for matrix multiplications
     fused_grad_x_acc_buffer : Optional[torch.Tensor]
@@ -125,6 +125,9 @@ def mhc_generate_mix_and_aggregate(
         If not None, triton kernels will accumulate the gradient of x into this same buffer to avoid copying the gradient by PyTorch, which should be reused
         during the backward of mhc_fused_aggregate, mhc_fused_expand_combine and mhc_fused_projection operations
         Note: the buffer must have dtype float32, and it will be cast to the activation's dtype and be returned in mhc_fused_projection
+    use_split_k : bool
+        whether to use split-K reduction with atomic adds in the projection. Faster for large K, but
+        non-deterministic; requires NVTE_ALLOW_NONDETERMINISTIC_ALGO=1
 
     Returns
     -------
@@ -426,6 +429,9 @@ def mhc_fused_projection(
         If not None, triton kernels will accumulate the gradient of x into this same buffer to avoid copying the gradient by PyTorch.
         This optimization requires the operation order to be mhc_fused_projection -> mhc_fused_aggregate -> mhc_fused_expand_combine.
         Note: the buffer must have dtype float32, and it will be cast to the activation's dtype and be returned in mhc_fused_projection
+    use_split_k : bool
+        whether to use split-K reduction with atomic adds for the projection. Faster for large K, but
+        non-deterministic; requires NVTE_ALLOW_NONDETERMINISTIC_ALGO=1
 
     Returns
     -------
