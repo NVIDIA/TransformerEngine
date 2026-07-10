@@ -134,6 +134,7 @@ def test_dot_product_attention(
     qkv_layout,
     swa,
     pad_between_seqs,
+    declarative_packed=False,
 ):
     """Test DotProductAttention module"""
 
@@ -151,6 +152,8 @@ def test_dot_product_attention(
             qkv_layout = "bshd_bs2hd" if not is_mla and not is_mqa_gqa else "bshd_bshd_bshd"
     if "3" in qkv_layout and config.attn_type == "cross":
         pytest.skip("No need to test this layout for cross attention")
+    if declarative_packed and not any(c.isdigit() for c in qkv_layout):
+        pytest.skip("Declarative packed inputs only apply to packed qkv layouts.")
 
     if config.window_size == (-1, -1) and swa:
         config.window_size = [2, 2]
@@ -225,6 +228,7 @@ def test_dot_product_attention(
             workspace_opt,
             pad_between_seqs,
             is_training,
+            declarative_packed=declarative_packed,
         )
 
     # FlashAttention backend
@@ -238,6 +242,7 @@ def test_dot_product_attention(
             workspace_opt,
             pad_between_seqs,
             is_training,
+            declarative_packed=declarative_packed,
         )
 
     # Compare results
@@ -929,9 +934,26 @@ model_configs_layout = {
 @pytest.mark.parametrize("model_configs", [model_configs_layout])
 @pytest.mark.parametrize("model", model_configs_layout.keys())
 @pytest.mark.parametrize("qkv_layout", qkv_layouts)
-def test_dpa_qkv_layout(dtype, model_configs, model, qkv_layout):
-    """Test DotProductAttention module with different QKV layouts"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, False, False)
+@pytest.mark.parametrize(
+    "declarative", [pytest.param(False, id="views"), pytest.param(True, id="declarative")]
+)
+def test_dpa_qkv_layout(dtype, model_configs, model, qkv_layout, declarative):
+    """Test DotProductAttention module with different QKV layouts.
+
+    declarative=False passes q/k/v as views of the packed buffer (pointer-based
+    layout detection); declarative=True passes the packed buffer itself via
+    qkv_layer/kv_layer (declared layout, gradients on the packed buffer)."""
+    test_dot_product_attention(
+        dtype,
+        model_configs,
+        model,
+        False,
+        True,
+        qkv_layout,
+        False,
+        False,
+        declarative_packed=declarative,
+    )
 
 
 qkv_layouts_thd = ["t3hd", "th3d", "thd_t2hd", "thd_th2d", "thd_thd_thd"]
@@ -998,7 +1020,10 @@ model_configs_layout_thd = {
 @pytest.mark.parametrize("model_configs", [model_configs_layout_thd])
 @pytest.mark.parametrize("model", model_configs_layout_thd.keys())
 @pytest.mark.parametrize("qkv_layout", qkv_layouts_thd)
-def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout):
+@pytest.mark.parametrize(
+    "declarative", [pytest.param(False, id="views"), pytest.param(True, id="declarative")]
+)
+def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, declarative):
     """Test DotProductAttention module with different QKV layouts"""
     config = model_configs[model]
     if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
@@ -1006,14 +1031,30 @@ def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout):
     logging.info("[test_dpa_qkv_layout_thd]: pad_between_seqs = True")
     pad_between_seqs = True
     test_dot_product_attention(
-        dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs
+        dtype,
+        model_configs,
+        model,
+        False,
+        True,
+        qkv_layout,
+        False,
+        pad_between_seqs,
+        declarative_packed=declarative,
     )
     if get_cudnn_version() >= (9, 3, 0):
         logging.info("[test_dpa_qkv_layout_thd]: pad_between_seqs = False")
         # cuDNN 9.3.0+ is required to run pad_between_seqs = False/True in the same run
         pad_between_seqs = False
         test_dot_product_attention(
-            dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs
+            dtype,
+            model_configs,
+            model,
+            False,
+            True,
+            qkv_layout,
+            False,
+            pad_between_seqs,
+            declarative_packed=declarative,
         )
 
 
@@ -1026,8 +1067,14 @@ def _run_dot_product_attention(
     workspace_opt: bool,
     pad_between_seqs: bool,
     is_training: bool,
+    declarative_packed: bool = False,
 ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
-    """Run DotProductAttention module with one forward pass and one backward pass"""
+    """Run DotProductAttention module with one forward pass and one backward pass.
+
+    With declarative_packed=True (packed qkv_layout only), the packed buffer is
+    passed to DotProductAttention directly via qkv_layer/kv_layer instead of
+    slicing it into q/k/v views, and input gradients are read off the packed
+    buffer itself."""
     # Set RNG and environment varables
     reset_rng_states()
     os.environ["NVTE_FLASH_ATTN"] = "0"
@@ -1225,6 +1272,12 @@ def _run_dot_product_attention(
                 tensor_count = int(l)
                 split_dim = dim
                 break
+        if declarative_packed and split_dim != 0:
+            # The packed buffer is the autograd leaf; q/k/v below are non-leaf
+            # views of it, and DPA receives the buffer via qkv_layer/kv_layer.
+            tensor.requires_grad_()
+            packed_tensor = tensor
+            packed_interleave_dim = split_dim - tensor.dim()
         tensors = torch.split(tensor, 1, dim=split_dim) if split_dim != 0 else [tensor]
         tensors_orig = (
             torch.split(tensor_orig, 1, dim=split_dim) if split_dim != 0 else [tensor_orig]
@@ -1237,8 +1290,10 @@ def _run_dot_product_attention(
                 inp.append(tensors[j])
                 inp_orig.append(tensors_orig[j])
     for i in range(3):
-        inp[i].requires_grad = True
-        inp_orig[i].requires_grad = True
+        if inp[i].is_leaf:
+            inp[i].requires_grad = True
+        if inp_orig[i].is_leaf:
+            inp_orig[i].requires_grad = True
 
     # Create output gradient
     qkv_format_kv = "_".join(qkv_format)
@@ -1320,10 +1375,21 @@ def _run_dot_product_attention(
         k = inp[1]
         v = inp[2]
         d_out = out_grad
+    packed_kwargs = {}
+    if declarative_packed:
+        assert backend in ["FusedAttention", "FlashAttention"]
+        packed_kwargs["qkv_interleave_dim"] = packed_interleave_dim
+        if len(qkv_layout.split("_")) == 1:
+            packed_kwargs["qkv_layer"] = packed_tensor
+            q, k, v = None, None, None
+        else:
+            packed_kwargs["kv_layer"] = packed_tensor
+            k, v = None, None
     out = block(
         q,
         k,
         v,
+        **packed_kwargs,
         window_size=config.window_size,
         attention_mask=attention_mask,
         qkv_format=qkv_format,
@@ -1352,6 +1418,25 @@ def _run_dot_product_attention(
         out, max_logit = out
     if is_training:
         out.backward(d_out)
+
+    if is_training and declarative_packed:
+        # Input gradients live on the packed buffer; slice them back out (and
+        # wrap them in .grad holders) so the cross-backend comparisons below
+        # stay uniform with the separate-q/k/v path.
+        assert packed_tensor.grad is not None and packed_tensor.grad.shape == packed_tensor.shape
+
+        class _PackedGrad:
+            def __init__(self, grad):
+                self.grad = grad
+
+        packed_grads = [
+            _PackedGrad(packed_tensor.grad.select(packed_interleave_dim, j))
+            for j in range(packed_tensor.shape[packed_interleave_dim])
+        ]
+        if len(qkv_layout.split("_")) == 1:
+            q, k, v = packed_grads
+        else:
+            k, v = packed_grads
 
     d_softmax_offset = None
     if is_training and config.softmax_type != "vanilla":
@@ -3002,198 +3087,3 @@ class Custom_MHA_FP8(TransformerEngineBaseModule):
                 self.quantizers,
             )
         return out
-
-
-# ---------------------------------------------------------------------------
-# Declarative packed QKV/KV inputs (qkv_layer/kv_layer + qkv_interleave_dim)
-#
-# Instead of slicing a fused-projection buffer into q/k/v views (which TE then
-# reverse-engineers via pointer-based layout detection), callers can pass the
-# packed tensor directly. Q/K/V are derived as zero-copy views and the exact
-# layout string (e.g. bs3hd) is declared, not detected -- including for thd
-# and FP8 DPA.
-# ---------------------------------------------------------------------------
-
-_PACKED_B, _PACKED_S, _PACKED_H, _PACKED_D = 2, 128, 8, 64
-_PACKED_DTYPE = torch.bfloat16
-
-
-def _cu_seqlens():
-    return torch.arange(0, (_PACKED_B + 1) * _PACKED_S, _PACKED_S, dtype=torch.int32, device="cuda")
-
-
-def _fused_backend_supported():
-    try:
-        q = torch.randn(
-            _PACKED_B, _PACKED_S, _PACKED_H, _PACKED_D, dtype=_PACKED_DTYPE, device="cuda"
-        )
-        fused_attn_fwd(
-            True,
-            _PACKED_S,
-            _PACKED_S,
-            _cu_seqlens(),
-            _cu_seqlens(),
-            q,
-            q.clone(),
-            q.clone(),
-            _PACKED_DTYPE,
-            tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
-            dropout=0.0,
-            qkv_layout="bshd_bshd_bshd",
-            o_format="bshd",
-            attn_bias_type="no_bias",
-            attn_mask_type="no_mask",
-        )
-        return True
-    except Exception:
-        return False
-
-
-requires_fused = pytest.mark.skipif(
-    not (torch.cuda.is_available() and _fused_backend_supported()),
-    reason="F16_arbitrary_seqlen fused attention backend is not supported on this device",
-)
-
-
-def _force_backend(monkeypatch, backend):
-    """Force a single attention backend via env and invalidate the selection cache."""
-    flash, fused = {"flash": ("1", "0"), "fused": ("0", "1")}[backend]
-    monkeypatch.setenv("NVTE_FLASH_ATTN", flash)
-    monkeypatch.setenv("NVTE_FUSED_ATTN", fused)
-    monkeypatch.setenv("NVTE_UNFUSED_ATTN", "0")
-    if backend == "flash":
-        # flash-attn bwd uses atomics unless deterministic
-        monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "0")
-    _attention_backends["backend_selection_requires_update"] = True
-
-
-def _make_dpa(qkv_format, num_gqa_groups=None):
-    return DotProductAttention(
-        _PACKED_H,
-        _PACKED_D,
-        num_gqa_groups=num_gqa_groups,
-        attention_dropout=0.0,
-        qkv_format=qkv_format,
-        attn_mask_type="no_mask",
-    )
-
-
-def _assert_bit_exact(result, reference, names=("out", "dq", "dk", "dv")):
-    for name, x, y in zip(names, result, reference):
-        assert torch.equal(x.contiguous(), y.contiguous()), f"{name} differs"
-
-
-def _dpa_separate_baseline(qkv_format, num_gqa_groups=None):
-    """Fwd+bwd on contiguous separate q/k/v leaves; returns (out, dq, dk, dv)."""
-    hg = num_gqa_groups or _PACKED_H
-    torch.manual_seed(0)
-    q_shape = (
-        (_PACKED_B, _PACKED_S, _PACKED_H, _PACKED_D)
-        if qkv_format == "bshd"
-        else (_PACKED_S, _PACKED_B, _PACKED_H, _PACKED_D)
-    )
-    kv_shape = (
-        (_PACKED_B, _PACKED_S, hg, _PACKED_D)
-        if qkv_format == "bshd"
-        else (_PACKED_S, _PACKED_B, hg, _PACKED_D)
-    )
-    q = torch.randn(*q_shape, dtype=_PACKED_DTYPE, device="cuda")
-    k = torch.randn(*kv_shape, dtype=_PACKED_DTYPE, device="cuda")
-    v = torch.randn(*kv_shape, dtype=_PACKED_DTYPE, device="cuda")
-    q, k, v = [x.clone().requires_grad_() for x in (q, k, v)]
-    _attention_backends["backend_selection_requires_update"] = True
-    out = _make_dpa(qkv_format, num_gqa_groups)(q, k, v)
-    out.backward(torch.ones_like(out))
-    return out, q.grad, k.grad, v.grad
-
-
-# ---------------------------------------------------------------------------
-# 1. Dense eager equivalence (fused backend), fwd + input grads, bit-exact
-# ---------------------------------------------------------------------------
-
-
-@requires_fused
-@pytest.mark.parametrize(
-    "qkv_format, interleave_dim",
-    [
-        pytest.param("bshd", -3, id="bshd_qkv_dim-3"),  # (a) bs3hd
-        pytest.param("bshd", -2, id="bshd_qkv_dim-2"),  # (b) bsh3d (Megatron-style)
-        pytest.param("sbhd", -3, id="sbhd_qkv_dim-3"),  # (c) sb3hd
-    ],
-)
-def test_dpa_fused_qkv_layer_dense(monkeypatch, qkv_format, interleave_dim):
-    """qkv_layer packed input is bit-exact vs separate contiguous q/k/v, and grads
-    flow back into the packed tensor itself."""
-    _force_backend(monkeypatch, "fused")
-    reference = _dpa_separate_baseline(qkv_format)
-
-    torch.manual_seed(0)
-    q_shape = (
-        (_PACKED_B, _PACKED_S, _PACKED_H, _PACKED_D)
-        if qkv_format == "bshd"
-        else (_PACKED_S, _PACKED_B, _PACKED_H, _PACKED_D)
-    )
-    parts = [torch.randn(*q_shape, dtype=_PACKED_DTYPE, device="cuda") for _ in range(3)]
-    stack_dim = len(q_shape) + interleave_dim + 1  # -3 -> before h, -2 -> before d
-    qkv = torch.stack(parts, dim=stack_dim).requires_grad_()
-
-    _attention_backends["backend_selection_requires_update"] = True
-    out = _make_dpa(qkv_format)(qkv_layer=qkv, qkv_interleave_dim=interleave_dim)
-    out.backward(torch.ones_like(out))
-
-    assert qkv.grad is not None and qkv.grad.shape == qkv.shape
-    grads = [qkv.grad.select(stack_dim, i) for i in range(3)]
-    _assert_bit_exact((out, *grads), reference)
-
-
-@requires_fused
-@pytest.mark.parametrize(
-    "num_gqa_groups",
-    [pytest.param(None, id="mha_kv"), pytest.param(2, id="gqa_kv")],  # (d) and (e)
-)
-def test_dpa_fused_kv_layer_dense(monkeypatch, num_gqa_groups):
-    """kv_layer packed input (with separate query) is bit-exact vs separate
-    contiguous q/k/v; grads flow into the packed kv tensor."""
-    _force_backend(monkeypatch, "fused")
-    reference = _dpa_separate_baseline("bshd", num_gqa_groups)
-
-    hg = num_gqa_groups or _PACKED_H
-    torch.manual_seed(0)
-    q = torch.randn(_PACKED_B, _PACKED_S, _PACKED_H, _PACKED_D, dtype=_PACKED_DTYPE, device="cuda")
-    k = torch.randn(_PACKED_B, _PACKED_S, hg, _PACKED_D, dtype=_PACKED_DTYPE, device="cuda")
-    v = torch.randn(_PACKED_B, _PACKED_S, hg, _PACKED_D, dtype=_PACKED_DTYPE, device="cuda")
-    q = q.clone().requires_grad_()
-    kv = torch.stack([k, v], dim=2).requires_grad_()  # [b,s,2,hg,d]
-
-    _attention_backends["backend_selection_requires_update"] = True
-    out = _make_dpa("bshd", num_gqa_groups)(query_layer=q, kv_layer=kv)
-    out.backward(torch.ones_like(out))
-
-    assert kv.grad is not None and kv.grad.shape == kv.shape
-    _assert_bit_exact((out, q.grad, kv.grad[:, :, 0], kv.grad[:, :, 1]), reference)
-
-
-# ---------------------------------------------------------------------------
-# 2. Flash backend smoke
-# ---------------------------------------------------------------------------
-
-
-def test_dpa_flash_qkv_layer(monkeypatch):
-    """Flash backend: packed qkv_layer [b,s,3,h,d] is bit-exact vs separate."""
-    _force_backend(monkeypatch, "flash")
-    try:
-        reference = _dpa_separate_baseline("bshd")
-    except Exception as exc:
-        pytest.skip(f"flash attention backend not available: {exc}")
-
-    torch.manual_seed(0)
-    parts = [
-        torch.randn(_PACKED_B, _PACKED_S, _PACKED_H, _PACKED_D, dtype=_PACKED_DTYPE, device="cuda")
-        for _ in range(3)
-    ]
-    qkv = torch.stack(parts, dim=2).requires_grad_()
-    _attention_backends["backend_selection_requires_update"] = True
-    out = _make_dpa("bshd")(qkv_layer=qkv)
-    out.backward(torch.ones_like(out))
-    grads = [qkv.grad[:, :, i] for i in range(3)]
-    _assert_bit_exact((out, *grads), reference)
