@@ -1435,34 +1435,33 @@ def _run_dot_product_attention(
     if is_training:
         out.backward(d_out)
 
-    if is_training and declarative_packed:
-        # Input gradients live on the packed buffer; slice them back out (and
-        # wrap them in .grad holders) so the cross-backend comparisons below
-        # stay uniform with the separate-q/k/v path.
-        assert packed_tensor.grad is not None and packed_tensor.grad.shape == packed_tensor.shape
-
-        class _PackedGrad:
-            def __init__(self, grad):
-                self.grad = grad
-
-        packed_grads = [
-            _PackedGrad(packed_tensor.grad.select(packed_interleave_dim, j))
-            for j in range(packed_tensor.shape[packed_interleave_dim])
-        ]
-        if len(qkv_layout.split("_")) == 1:
-            q, k, v = packed_grads
+    q_grad, k_grad, v_grad = None, None, None
+    if is_training:
+        if declarative_packed:
+            # Input gradients live on the packed buffer; slice them back out so
+            # the cross-backend comparisons below stay uniform with the
+            # separate-q/k/v path.
+            assert (
+                packed_tensor.grad is not None and packed_tensor.grad.shape == packed_tensor.shape
+            )
+            packed_grads = [
+                packed_tensor.grad.select(packed_interleave_dim, j)
+                for j in range(packed_tensor.shape[packed_interleave_dim])
+            ]
+            if len(qkv_layout.split("_")) == 1:
+                q_grad, k_grad, v_grad = packed_grads
+            else:
+                q_grad = q.grad
+                k_grad, v_grad = packed_grads
         else:
-            k, v = packed_grads
+            q_grad, k_grad, v_grad = q.grad, k.grad, v.grad
 
     d_softmax_offset = None
     if is_training and config.softmax_type != "vanilla":
         d_softmax_offset = block.softmax_offset.grad
 
     if backend in ["UnfusedDotProductAttention"]:
-        if is_training:
-            return out, max_logit, (q.grad, k.grad, v.grad, d_softmax_offset)
-        else:
-            return out, max_logit, (None, None, None, d_softmax_offset)
+        return out, max_logit, (q_grad, k_grad, v_grad, d_softmax_offset)
     if backend in ["FusedAttention", "FlashAttention"]:
         if qkv_format == "thd" and pad_between_seqs:
             out_orig = torch.Tensor([]).to(device="cuda", dtype=dtype)
@@ -1482,13 +1481,13 @@ def _run_dot_product_attention(
                 out_orig = torch.cat([out_orig, out[valid_range_q[0] : valid_range_q[1]]], dim=0)
                 if is_training:
                     q_grad_orig = torch.cat(
-                        [q_grad_orig, q.grad[valid_range_q[0] : valid_range_q[1]]], dim=0
+                        [q_grad_orig, q_grad[valid_range_q[0] : valid_range_q[1]]], dim=0
                     )
                     k_grad_orig = torch.cat(
-                        [k_grad_orig, k.grad[valid_range_kv[0] : valid_range_kv[1]]], dim=0
+                        [k_grad_orig, k_grad[valid_range_kv[0] : valid_range_kv[1]]], dim=0
                     )
                     v_grad_orig = torch.cat(
-                        [v_grad_orig, v.grad[valid_range_kv[0] : valid_range_kv[1]]], dim=0
+                        [v_grad_orig, v_grad[valid_range_kv[0] : valid_range_kv[1]]], dim=0
                     )
             if is_training:
                 return (
@@ -1499,10 +1498,7 @@ def _run_dot_product_attention(
             else:
                 return out_orig, max_logit, (None, None, None, d_softmax_offset)
         else:
-            if is_training:
-                return out, max_logit, (q.grad, k.grad, v.grad, d_softmax_offset)
-            else:
-                return out, max_logit, (None, None, None, d_softmax_offset)
+            return out, max_logit, (q_grad, k_grad, v_grad, d_softmax_offset)
 
 
 model_configs_te_layer = {
