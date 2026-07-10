@@ -633,7 +633,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
   } catch (cudnn_frontend::cudnnException &e) {
     NVTE_ERROR(e.what());
   }
-}
+}  // NOLINT(readability/fn_size)
 
 void fused_attn_arbitrary_seqlen_bwd_impl(
     int64_t b, int64_t h, int64_t hg, int64_t s_q, int64_t s_kv, int64_t d_qk, int64_t d_v,
