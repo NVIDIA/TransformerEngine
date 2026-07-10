@@ -600,14 +600,15 @@ class DotProductAttention(TransformerEngineBaseModule):
                         across each CP sub-group (e.g., via NVLink), then exchanging KV with
                         p2p between sub-groups (e.g., via IBLink).
         thd_cp_partition : str, default = "per_document"
-                           THD token partition contract. ``"packed"`` applies mirrored chunks to
-                           the whole packed buffer and currently requires all-gather CP.
+                           THD token partition contract. ``"packed_super_sequence"`` applies
+                           mirrored chunks to the whole token buffer and currently requires
+                           all-gather CP.
         """
         self.cp_group = cp_group
         self.cp_global_ranks = cp_global_ranks
         self.cp_stream = cp_stream
         self.cp_comm_type = cp_comm_type
-        assert thd_cp_partition in ["per_document", "packed"]
+        assert thd_cp_partition in ["per_document", "packed_super_sequence"]
         self.thd_cp_partition = thd_cp_partition
 
     def init_fp8_metadata(self, num_gemms: int = 1) -> None:

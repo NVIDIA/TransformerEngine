@@ -5,6 +5,7 @@
 import copy
 import os
 import sys
+import time
 import logging
 from contextlib import nullcontext
 import torch
@@ -12,7 +13,7 @@ import torch.distributed as dist
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
     get_cu_seqlens_on_cp_rank,
     get_thd_partitioned_indices,
-    validate_packed_thd_metadata,
+    validate_super_sequence_thd_metadata,
 )
 from transformer_engine.pytorch.attention.dot_product_attention.utils import combine_and_quantize
 import transformer_engine_torch as tex
@@ -44,6 +45,18 @@ _pool_cp_comm_sub_groups: list = []
 
 dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
 
+uniform_thd_benchmark_configs = {
+    "uniform_4x128k": ModelConfig(
+        4, 131072, 32, 128, num_gqa_groups=8, attn_mask_type="causal"
+    ),
+    "uniform_8x64k": ModelConfig(
+        8, 65536, 32, 128, num_gqa_groups=8, attn_mask_type="causal"
+    ),
+    "uniform_16x32k": ModelConfig(
+        16, 32768, 32, 128, num_gqa_groups=8, attn_mask_type="causal"
+    ),
+}
+
 
 def generate_input_shapes(
     qkv_format: str,
@@ -52,6 +65,7 @@ def generate_input_shapes(
     kernel_backend: str,
     fa_pad_between_seqs: str = "False",
     thd_cp_partition: str = "per_document",
+    thd_seqlen_pattern: str = "random",
 ):
     if qkv_format == "bshd":
         q_input_shape = (
@@ -110,7 +124,17 @@ def generate_input_shapes(
         cu_seqlens_q_padded = None
         cu_seqlens_kv_padded = None
     elif qkv_format == "thd":
-        if thd_cp_partition == "packed":
+        if thd_seqlen_pattern == "max":
+            seqlens_q = torch.full(
+                [config.batch_size], config.max_seqlen_q, dtype=torch.int32
+            )
+            assert torch.all(seqlens_q.remainder(2 * world_size) == 0), (
+                "Matched uniform THD benchmarks require every sequence length "
+                "to be divisible by 2 * CP."
+            )
+            seqlens_q_padded = seqlens_q.clone()
+        elif thd_cp_partition == "packed_super_sequence":
+            assert thd_seqlen_pattern == "random"
             assert config.batch_size == 2
             seqlens_q_padded = torch.tensor(
                 [config.max_seqlen_q - 1, config.max_seqlen_q - (2 * world_size - 1)],
@@ -122,6 +146,7 @@ def generate_input_shapes(
             if fa_pad_between_seqs == "True":
                 seqlens_q -= torch.tensor([1, 2], dtype=torch.int32)
         else:
+            assert thd_seqlen_pattern == "random"
             seqlens_q = torch.randint(
                 0, config.max_seqlen_q + 1, [config.batch_size]
             ).to(torch.int32)
@@ -224,14 +249,24 @@ def run_dpa_with_cp(
     thd_cp_partition="per_document",
     deterministic="False",
     log_level=logging.WARNING,
+    benchmark="0",
+    thd_seqlen_pattern="random",
 ):
     """Test DotProductAttention module with context parallelism"""
+    torch.manual_seed(1234)
+    torch.cuda.manual_seed(1234)
     logging.root.setLevel(log_level)
-    assert thd_cp_partition in ["per_document", "packed"]
-    if thd_cp_partition == "packed":
+    assert thd_cp_partition in ["per_document", "packed_super_sequence"]
+    if thd_cp_partition == "packed_super_sequence":
         assert qkv_format == "thd" and cp_comm_type == "all_gather"
     # When is_training is False, gradient outputs are None.
     is_training = is_training == "True"
+    benchmark_iters = int(benchmark)
+    assert benchmark_iters >= 0
+    if benchmark_iters:
+        assert dtype == "bf16" and is_training
+        assert qkv_format == "thd" and kernel_backend == "FusedAttention"
+        assert cp_comm_type == "all_gather" and thd_seqlen_pattern == "max"
 
     # set up environment variables and config
     if deterministic == "True":
@@ -254,7 +289,12 @@ def run_dpa_with_cp(
         config = copy.deepcopy(model_configs_flash_attn[model])
     if kernel_backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
-        config = copy.deepcopy(model_configs_fused_attn[model])
+        configs = (
+            uniform_thd_benchmark_configs
+            if model in uniform_thd_benchmark_configs
+            else model_configs_fused_attn
+        )
+        config = copy.deepcopy(configs[model])
     assert config.attn_mask_type in [
         "causal",
         "no_mask",
@@ -350,14 +390,23 @@ def run_dpa_with_cp(
         kernel_backend,
         fa_pad_between_seqs,
         thd_cp_partition,
+        thd_seqlen_pattern,
     )
-    if thd_cp_partition == "packed":
-        validate_packed_thd_metadata(
+    if thd_cp_partition == "packed_super_sequence":
+        validate_super_sequence_thd_metadata(
             cu_seqlens_q,
             cu_seqlens_q_padded,
             q_input_shape[0],
             world_size,
         )
+    if qkv_format == "thd" and rank == 0:
+        effective_seqlens = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).cpu().tolist()
+        print(
+            f"BENCH_INPUT model={model} partition={thd_cp_partition} cp={world_size} "
+            f"seqlens={effective_seqlens} total_tokens={q_input_shape[0]}",
+            flush=True,
+        )
+    total_tokens = q_input_shape[0] if qkv_format == "thd" else None
     q_orig = torch.clamp(torch.randn(q_input_shape, dtype=dtypes[dtype]), min=-1, max=1).cuda()
     k_orig = torch.clamp(torch.randn(k_input_shape, dtype=dtypes[dtype]), min=-1, max=1).cuda()
     v_orig = torch.clamp(torch.randn(v_input_shape, dtype=dtypes[dtype]), min=-1, max=1).cuda()
@@ -400,7 +449,7 @@ def run_dpa_with_cp(
         dout_quantizer.optimize_for_gemm = True
         dout_quantizer.internal = False
     qkv_layout = "_".join([qkv_format] * 3)
-    q, k, v, dout = [x.clone().detach() for x in [q_orig, k_orig, v_orig, dout_orig]]
+    q, k, v, dout = [x.detach() for x in [q_orig, k_orig, v_orig, dout_orig]]
     if fp8_mha:
         q, k, v, qkv_layout, _ = combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer)
     for x in [q, k, v]:
@@ -478,11 +527,8 @@ def run_dpa_with_cp(
     logging.info(f"[Rank {rank}] Run with context parallelism")
 
     # set up inputs
-    q_, k_, v_, dout_, *rest = [
-        x.clone().detach()
-        for x in [q_orig, k_orig, v_orig, dout_orig] + ([] if bias is None else [bias])
-    ]
-    bias_ = rest[0] if len(rest) else None
+    q_, k_, v_, dout_ = [x.detach() for x in [q_orig, k_orig, v_orig, dout_orig]]
+    bias_ = bias.clone().detach() if bias is not None else None
     if qkv_format == "bshd" or qkv_format == "sbhd":
         seq_dim = qkv_format.index("s")
         q_, k_, v_, dout_ = [
@@ -521,6 +567,10 @@ def run_dpa_with_cp(
     else:
         assert False, f"{qkv_format} is an unsupported qkv_format!"
     q_, k_, v_, dout_ = [x.contiguous() for x in [q_, k_, v_, dout_]]
+    out = out.detach()
+    if max_logit is not None:
+        max_logit = max_logit.detach()
+    del q, k, v, dout, q_orig, k_orig, v_orig, dout_orig
     if scaling_mode == "delayed":
         qkv_quantizer.scale.fill_(1.0)
         qkv_quantizer.amax.fill_(0.0)
@@ -615,6 +665,38 @@ def run_dpa_with_cp(
         dq_, dk_, dv_, dbias_ = None, None, None, None
         d_softmax_offset_ = None
 
+    save_dir = os.environ.get("CP_PARTITION_SAVE_DIR")
+    if save_dir:
+        assert qkv_format == "thd" and thd_seqlen_pattern == "max"
+        os.makedirs(save_dir, exist_ok=True)
+        torch.save(
+            {
+                "out": out_.detach().cpu(),
+                "dq": dq_.detach().cpu() if dq_ is not None else None,
+                "dk": dk_.detach().cpu() if dk_ is not None else None,
+                "dv": dv_.detach().cpu() if dv_ is not None else None,
+                "seq_idx_q": seq_idx_q.detach().cpu(),
+                "seq_idx_kv": seq_idx_kv.detach().cpu(),
+                "total_tokens": total_tokens,
+                "cu_seqlens_q": cu_seqlens_q.detach().cpu(),
+                "cu_seqlens_q_padded": cu_seqlens_q_padded.detach().cpu(),
+                "partition": thd_cp_partition,
+                "cp_size": world_size,
+                "model": model,
+                "dtype": dtype,
+                "seed": 1234,
+                "thd_seqlen_pattern": thd_seqlen_pattern,
+            },
+            os.path.join(save_dir, f"rank{rank}.pt"),
+        )
+
+    benchmark_metadata = (
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        cu_seqlens_q_padded,
+        cu_seqlens_kv_padded,
+    )
+
     # get outputs
     tensors = [out, dq, dk, dv, dbias, out_, dq_, dk_, dv_, dbias_]
     names = ["out", "dq", "dk", "dv", "dbias", "out_cp", "dq_cp", "dk_cp", "dv_cp", "dbias_cp"]
@@ -690,8 +772,8 @@ def run_dpa_with_cp(
         else:
             out = out.index_select(0, seq_idx_q).contiguous()
 
-        if thd_cp_partition == "packed":
-            global_valid_mask = torch.zeros(q_orig.shape[0], dtype=torch.bool, device=q_orig.device)
+        if thd_cp_partition == "packed_super_sequence":
+            global_valid_mask = torch.zeros(total_tokens, dtype=torch.bool, device=out_.device)
             actual_seqlens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
             for seq_start, seq_len in zip(cu_seqlens_q_padded[:-1], actual_seqlens):
                 global_valid_mask[seq_start : seq_start + seq_len] = True
@@ -700,7 +782,7 @@ def run_dpa_with_cp(
             cp_tensors = [out_] + ([dq_, dk_, dv_] if is_training else [])
             for name, tensor in zip(["out_", "dq_", "dk_", "dv_"], cp_tensors):
                 nnz = torch.count_nonzero(tensor[~thd_valid_mask]).item()
-                assert nnz == 0, f"{name} has {nnz} nonzero values in packed THD padding"
+                assert nnz == 0, f"{name} has {nnz} nonzero values in THD super-sequence padding"
         elif is_training:
             cu_seqlens_q_padded = cu_seqlens_q_padded // world_size
             cu_seqlens_q = get_cu_seqlens_on_cp_rank(
@@ -891,6 +973,77 @@ def run_dpa_with_cp(
                     t, tensors_cp[i], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol, is_fp8
                 )
             logging.info(f"[Rank {rank}] CP vs no-CP: {names[i]} matches")
+
+    if benchmark_iters:
+        (
+            benchmark_cu_seqlens_q,
+            benchmark_cu_seqlens_kv,
+            benchmark_cu_seqlens_q_padded,
+            benchmark_cu_seqlens_kv_padded,
+        ) = benchmark_metadata
+
+        # Correctness tensors are not part of the timed workload. Release them
+        # before allocating the reusable benchmark leaves.
+        if thd_valid_mask is not None:
+            del cp_tensors
+        del tensors, tensors_cp, tensors_no_cp
+        del out, dq, dk, dv, dbias, out_, dq_, dk_, dv_, dbias_
+        del d_softmax_offset, d_softmax_offset_, max_logit, max_logit_
+        for tensor in [q_, k_, v_]:
+            tensor.grad = None
+
+        warmup_iters = 10
+        q_b, k_b, v_b = [x.detach().requires_grad_() for x in [q_, k_, v_]]
+        elapsed_ms = []
+        for iteration in range(warmup_iters + benchmark_iters):
+            for tensor in [q_b, k_b, v_b]:
+                tensor.grad = None
+            dist.barrier()
+            torch.cuda.synchronize()
+            start = time.perf_counter()
+            with fp8_context:
+                out_b = core_attn(
+                    q_b,
+                    k_b,
+                    v_b,
+                    core_attention_bias_type=config.attn_bias_type,
+                    core_attention_bias=bias_,
+                    cu_seqlens_q=benchmark_cu_seqlens_q,
+                    cu_seqlens_kv=benchmark_cu_seqlens_kv,
+                    cu_seqlens_q_padded=benchmark_cu_seqlens_q_padded,
+                    cu_seqlens_kv_padded=benchmark_cu_seqlens_kv_padded,
+                    pad_between_seqs=True,
+                    fp8_output=False,
+                )
+                if isinstance(out_b, tuple):
+                    out_b = out_b[0]
+                out_b.backward(dout_)
+            torch.cuda.synchronize()
+            local_ms = (time.perf_counter() - start) * 1000
+
+            # Aggregate outside the timed interval. Every rank reports the same
+            # per-iteration distributed latency sample.
+            global_ms = torch.tensor(local_ms, dtype=torch.float32, device=q_b.device)
+            dist.all_reduce(global_ms, op=dist.ReduceOp.MAX)
+            if iteration >= warmup_iters:
+                elapsed_ms.append(global_ms.item())
+            del out_b
+
+        ordered_ms = sorted(elapsed_ms)
+        middle = len(ordered_ms) // 2
+        median_ms = (
+            ordered_ms[middle]
+            if len(ordered_ms) % 2
+            else (ordered_ms[middle - 1] + ordered_ms[middle]) / 2
+        )
+        mean_ms = sum(elapsed_ms) / len(elapsed_ms)
+        print(
+            f"BENCH_RESULT rank={rank} model={model} partition={thd_cp_partition} "
+            f"cp={world_size} median_ms={median_ms:.3f} mean_ms={mean_ms:.3f} "
+            f"min_ms={min(elapsed_ms):.3f} max_ms={max(elapsed_ms):.3f} "
+            f"warmup={warmup_iters} iters={benchmark_iters}",
+            flush=True,
+        )
 
     # Teardown on the success path. Pool mode: cp_comm_group / cp_comm_sub_groups
     # point at pool-shared groups owned by the pool runner (which destroys them
