@@ -11,6 +11,8 @@ import torch
 import torch.distributed as dist
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
     get_cu_seqlens_on_cp_rank,
+    get_thd_partitioned_indices,
+    validate_packed_thd_metadata,
 )
 from transformer_engine.pytorch.attention.dot_product_attention.utils import combine_and_quantize
 import transformer_engine_torch as tex
@@ -49,6 +51,7 @@ def generate_input_shapes(
     world_size: int,
     kernel_backend: str,
     fa_pad_between_seqs: str = "False",
+    thd_cp_partition: str = "per_document",
 ):
     if qkv_format == "bshd":
         q_input_shape = (
@@ -107,8 +110,24 @@ def generate_input_shapes(
         cu_seqlens_q_padded = None
         cu_seqlens_kv_padded = None
     elif qkv_format == "thd":
-        seqlens_q = torch.randint(0, config.max_seqlen_q + 1, [config.batch_size]).to(torch.int32)
-        seqlens_q_padded = (seqlens_q + 2 * world_size - 1) // (world_size * 2) * (world_size * 2)
+        if thd_cp_partition == "packed":
+            assert config.batch_size == 2
+            seqlens_q_padded = torch.tensor(
+                [config.max_seqlen_q - 1, config.max_seqlen_q - (2 * world_size - 1)],
+                dtype=torch.int32,
+            )
+            assert torch.all(seqlens_q_padded.remainder(2 * world_size) != 0)
+            assert seqlens_q_padded.sum().remainder(2 * world_size) == 0
+            seqlens_q = seqlens_q_padded.clone()
+            if fa_pad_between_seqs == "True":
+                seqlens_q -= torch.tensor([1, 2], dtype=torch.int32)
+        else:
+            seqlens_q = torch.randint(
+                0, config.max_seqlen_q + 1, [config.batch_size]
+            ).to(torch.int32)
+            seqlens_q_padded = (
+                (seqlens_q + 2 * world_size - 1) // (world_size * 2) * (world_size * 2)
+            )
         cu_seqlens_q_padded = torch.cat(
             [
                 torch.zeros([1], dtype=torch.int32),
@@ -202,11 +221,15 @@ def run_dpa_with_cp(
     f16_O="False",
     is_training="True",
     fa_pad_between_seqs="False",
+    thd_cp_partition="per_document",
     deterministic="False",
     log_level=logging.WARNING,
 ):
     """Test DotProductAttention module with context parallelism"""
     logging.root.setLevel(log_level)
+    assert thd_cp_partition in ["per_document", "packed"]
+    if thd_cp_partition == "packed":
+        assert qkv_format == "thd" and cp_comm_type == "all_gather"
     # When is_training is False, gradient outputs are None.
     is_training = is_training == "True"
 
@@ -320,7 +343,21 @@ def run_dpa_with_cp(
         cu_seqlens_kv,
         cu_seqlens_q_padded,
         cu_seqlens_kv_padded,
-    ) = generate_input_shapes(qkv_format, config, world_size, kernel_backend, fa_pad_between_seqs)
+    ) = generate_input_shapes(
+        qkv_format,
+        config,
+        world_size,
+        kernel_backend,
+        fa_pad_between_seqs,
+        thd_cp_partition,
+    )
+    if thd_cp_partition == "packed":
+        validate_packed_thd_metadata(
+            cu_seqlens_q,
+            cu_seqlens_q_padded,
+            q_input_shape[0],
+            world_size,
+        )
     q_orig = torch.clamp(torch.randn(q_input_shape, dtype=dtypes[dtype]), min=-1, max=1).cuda()
     k_orig = torch.clamp(torch.randn(k_input_shape, dtype=dtypes[dtype]), min=-1, max=1).cuda()
     v_orig = torch.clamp(torch.randn(v_input_shape, dtype=dtypes[dtype]), min=-1, max=1).cuda()
@@ -463,11 +500,21 @@ def run_dpa_with_cp(
             x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim + 2) :]) for x in [q_, k_, v_, dout_]
         ]
     elif qkv_format == "thd":
-        seq_idx_q = tex.thd_get_partitioned_indices(
-            cu_seqlens_q_padded, q_.shape[0], world_size, rank
+        seq_idx_q = get_thd_partitioned_indices(
+            cu_seqlens_q_padded,
+            q_.shape[0],
+            world_size,
+            rank,
+            thd_cp_partition,
+            q_.device,
         )
-        seq_idx_kv = tex.thd_get_partitioned_indices(
-            cu_seqlens_kv_padded, k_.shape[0], world_size, rank
+        seq_idx_kv = get_thd_partitioned_indices(
+            cu_seqlens_kv_padded,
+            k_.shape[0],
+            world_size,
+            rank,
+            thd_cp_partition,
+            k_.device,
         )
         q_, dout_ = [x.index_select(0, seq_idx_q) for x in [q_, dout_]]
         k_, v_ = [x.index_select(0, seq_idx_kv) for x in [k_, v_]]
@@ -511,6 +558,7 @@ def run_dpa_with_cp(
         cp_comm_ranks,
         torch.cuda.Stream(),
         cp_comm_type,
+        thd_cp_partition=thd_cp_partition,
     )
     if config.softmax_type != "vanilla":
         core_attn.softmax_offset.grad.zero_()
@@ -539,7 +587,9 @@ def run_dpa_with_cp(
             # FlashAttention isn't disabled by the conservative sync-free
             # auto-detect when this test path constructs no inter-seq padding.
             pad_between_seqs=(
-                (kernel_backend != "FlashAttention") if qkv_format == "thd" else None
+                (kernel_backend != "FlashAttention" or fa_pad_between_seqs == "True")
+                if qkv_format == "thd"
+                else None
             ),
             fp8_output=fp8_mha,
         )
@@ -632,10 +682,26 @@ def run_dpa_with_cp(
                 *out_.shape[:seq_dim], 2, out_.shape[seq_dim] // 2, *out_.shape[(seq_dim + 1) :]
             )
 
-    elif qkv_format == "thd":
+    thd_valid_mask = None
+    if qkv_format == "thd":
         if is_training:
             dq, out = [x.index_select(0, seq_idx_q).contiguous() for x in [dq, out]]
             dk, dv = [x.index_select(0, seq_idx_kv).contiguous() for x in [dk, dv]]
+        else:
+            out = out.index_select(0, seq_idx_q).contiguous()
+
+        if thd_cp_partition == "packed":
+            global_valid_mask = torch.zeros(q_orig.shape[0], dtype=torch.bool, device=q_orig.device)
+            actual_seqlens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+            for seq_start, seq_len in zip(cu_seqlens_q_padded[:-1], actual_seqlens):
+                global_valid_mask[seq_start : seq_start + seq_len] = True
+            thd_valid_mask = global_valid_mask.index_select(0, seq_idx_q)
+
+            cp_tensors = [out_] + ([dq_, dk_, dv_] if is_training else [])
+            for name, tensor in zip(["out_", "dq_", "dk_", "dv_"], cp_tensors):
+                nnz = torch.count_nonzero(tensor[~thd_valid_mask]).item()
+                assert nnz == 0, f"{name} has {nnz} nonzero values in packed THD padding"
+        elif is_training:
             cu_seqlens_q_padded = cu_seqlens_q_padded // world_size
             cu_seqlens_q = get_cu_seqlens_on_cp_rank(
                 cu_seqlens_q, cu_seqlens_q_padded, world_size, rank, True, True
@@ -688,10 +754,6 @@ def run_dpa_with_cp(
                                 f"{xname} has {nnz} nonzero values in batch {b} padding — "
                                 "context_parallel.py should zero padding positions"
                             )
-        else:
-            out = out.index_select(0, seq_idx_q).contiguous()
-            out_ = out_
-
     atol, rtol, rmse_tol = get_tols(config, dtype)
     tensors_cp = [out_, dq_, dk_, dv_, dbias_, d_softmax_offset_, max_logit_]
     tensors_no_cp = [out, dq, dk, dv, dbias, d_softmax_offset, max_logit]
@@ -811,6 +873,9 @@ def run_dpa_with_cp(
                             is_fp8,
                         )
                 elif qkv_format == "thd":
+                    if thd_valid_mask is not None:
+                        t = t[thd_valid_mask]
+                        tensors_cp[i] = tensors_cp[i][thd_valid_mask]
                     compare_and_assert(
                         t,
                         tensors_cp[i],

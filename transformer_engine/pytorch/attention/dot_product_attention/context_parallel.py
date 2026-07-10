@@ -267,6 +267,153 @@ def get_seq_chunk_ids_for_reordering_after_attn(cp_size, device):
     return _seq_chunk_ids_cache_for_reordering_after_attn[(cp_size, device)]
 
 
+def get_packed_thd_partitioned_indices(total_tokens, cp_size, cp_rank, device=None):
+    """Return one rank's two chunks from a globally partitioned packed THD buffer."""
+    assert cp_size > 0 and 0 <= cp_rank < cp_size
+    assert total_tokens % (2 * cp_size) == 0, (
+        "Packed THD partitioning requires total_tokens to be divisible by 2 * cp_size."
+    )
+    chunk_size = total_tokens // (2 * cp_size)
+    first_start = cp_rank * chunk_size
+    second_start = (2 * cp_size - cp_rank - 1) * chunk_size
+    return torch.cat(
+        (
+            torch.arange(first_start, first_start + chunk_size, device=device),
+            torch.arange(second_start, second_start + chunk_size, device=device),
+        )
+    )
+
+
+def get_thd_partitioned_indices(
+    cu_seqlens_padded,
+    total_tokens,
+    cp_size,
+    cp_rank,
+    thd_cp_partition="per_document",
+    device=None,
+):
+    """Return THD token indices using the selected CP partition contract."""
+    assert thd_cp_partition in ["per_document", "packed"]
+    if thd_cp_partition == "packed":
+        validate_packed_thd_metadata(
+            cu_seqlens_padded,
+            cu_seqlens_padded,
+            total_tokens,
+            cp_size,
+        )
+        return get_packed_thd_partitioned_indices(total_tokens, cp_size, cp_rank, device)
+
+    total_chunks = 2 * cp_size
+    chunk_sizes = (cu_seqlens_padded[1:] - cu_seqlens_padded[:-1]) // total_chunks
+    indices = []
+    for chunk_size, seq_start in zip(chunk_sizes, cu_seqlens_padded[:-1]):
+        indices.extend(
+            (
+                torch.arange(
+                    seq_start + cp_rank * chunk_size,
+                    seq_start + (cp_rank + 1) * chunk_size,
+                    device=device,
+                ),
+                torch.arange(
+                    seq_start + (total_chunks - cp_rank - 1) * chunk_size,
+                    seq_start + (total_chunks - cp_rank) * chunk_size,
+                    device=device,
+                ),
+            )
+        )
+    return torch.cat(indices)
+
+
+def packed_thd_cp_rank_order_to_sequence_order(x, cp_size):
+    """Restore global packed-token order after gathering rank-local dual chunks."""
+    assert x.shape[0] % (2 * cp_size) == 0
+    chunk_ids = get_seq_chunk_ids_for_reordering_before_attn(cp_size, x.device)
+    return x.view(2 * cp_size, -1, *x.shape[1:]).index_select(0, chunk_ids).view_as(x)
+
+
+def packed_thd_sequence_order_to_cp_rank_order(x, cp_size):
+    """Arrange a global packed THD buffer in dual-chunk CP rank order."""
+    assert x.shape[0] % (2 * cp_size) == 0
+    chunk_ids = get_seq_chunk_ids_for_reordering_after_attn(cp_size, x.device)
+    return x.view(2 * cp_size, -1, *x.shape[1:]).index_select(0, chunk_ids).view_as(x)
+
+
+def validate_packed_thd_metadata(
+    cu_seqlens,
+    cu_seqlens_padded,
+    total_tokens,
+    cp_size,
+):
+    """Validate packed THD metadata once while producing rank-local inputs."""
+    assert cu_seqlens.shape == cu_seqlens_padded.shape
+    assert total_tokens % (2 * cp_size) == 0
+    assert cu_seqlens[0] == 0 and cu_seqlens_padded[0] == 0
+    assert cu_seqlens_padded[-1] == total_tokens
+    assert torch.all(cu_seqlens[1:] >= cu_seqlens[:-1])
+    assert torch.all(cu_seqlens_padded[1:] >= cu_seqlens_padded[:-1])
+    actual_seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+    padded_seqlens = cu_seqlens_padded[1:] - cu_seqlens_padded[:-1]
+    assert torch.all(actual_seqlens <= padded_seqlens)
+
+
+def get_packed_thd_causal_metadata(
+    cu_seqlens,
+    cu_seqlens_padded,
+    total_tokens,
+    cp_size,
+    cp_rank,
+):
+    """Build per-step THD metadata for global packed-buffer DualChunkSwap.
+
+    The packed buffer is the physical sharding unit. ``cu_seqlens`` remains the
+    logical document boundary, so each global chunk is represented as its
+    intersection with every document.
+    """
+    assert cp_size > 0 and 0 <= cp_rank < cp_size
+    assert cu_seqlens.shape == cu_seqlens_padded.shape
+    assert total_tokens % (2 * cp_size) == 0
+
+    chunk_size = total_tokens // (2 * cp_size)
+    chunk_ids = (cp_rank, 2 * cp_size - cp_rank - 1)
+    actual_seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+    doc_starts = cu_seqlens_padded[:-1]
+    valid_doc_ends = doc_starts + actual_seqlens
+
+    q_cu_seqlens_per_step = []
+    q_cu_seqlens_padded_per_step = []
+    kv_cu_seqlens_per_step = []
+    for step, chunk_id in enumerate(chunk_ids):
+        chunk_start = chunk_id * chunk_size
+        chunk_end = chunk_start + chunk_size
+
+        fragment_starts = torch.clamp(doc_starts, min=chunk_start, max=chunk_end)
+        fragment_ends = torch.clamp(valid_doc_ends, min=chunk_start, max=chunk_end)
+        fragment_seqlens = torch.clamp(fragment_ends - fragment_starts, min=0)
+
+        q_cu_seqlens = torch.zeros_like(cu_seqlens)
+        q_cu_seqlens[1:] = fragment_seqlens.cumsum(0)
+        q_cu_seqlens_per_step.append(q_cu_seqlens)
+
+        local_base = step * chunk_size
+        q_cu_seqlens_padded_per_step.append(
+            torch.clamp(cu_seqlens_padded, min=chunk_start, max=chunk_end)
+            - chunk_start
+            + local_base
+        )
+
+        visible_kv_seqlens = torch.clamp(chunk_end - doc_starts, min=0)
+        visible_kv_seqlens = torch.minimum(visible_kv_seqlens, actual_seqlens)
+        kv_cu_seqlens = torch.zeros_like(cu_seqlens)
+        kv_cu_seqlens[1:] = visible_kv_seqlens.cumsum(0)
+        kv_cu_seqlens_per_step.append(kv_cu_seqlens)
+
+    return (
+        q_cu_seqlens_per_step,
+        q_cu_seqlens_padded_per_step,
+        kv_cu_seqlens_per_step,
+    )
+
+
 @jit_fuser
 def reorder_seq_chunks_for_a2a_before_attn(x, chunk_ids_for_a2a, seq_dim, cp_size):
     """Reorder sequence chunk for A2A communication before attention compute."""
@@ -382,6 +529,20 @@ def thd_cp_rank_order_to_sequence_order(x, cu_seqlens, cp_size, seq_dim=0):
         seq_dim == 0
     ), "tex.thd_cp_rank_order_to_sequence_order operates on the leading THD token dimension"
     return tex.thd_cp_rank_order_to_sequence_order(x, cu_seqlens, cp_size, x.shape[seq_dim])
+
+
+def restore_thd_gathered_kv(x, cu_seqlens_padded, cp_size, thd_cp_partition):
+    """Restore gathered THD tokens to physical sequence order."""
+    if thd_cp_partition == "packed":
+        return packed_thd_cp_rank_order_to_sequence_order(x, cp_size)
+    return thd_cp_rank_order_to_sequence_order(x, cu_seqlens_padded, cp_size)
+
+
+def unrestore_thd_gathered_kv(x, cu_seqlens_padded, cp_size, thd_cp_partition):
+    """Arrange physical THD tokens for rank-ordered reduce-scatter."""
+    if thd_cp_partition == "packed":
+        return packed_thd_sequence_order_to_cp_rank_order(x, cp_size)
+    return thd_sequence_order_to_cp_rank_order(x, cu_seqlens_padded, cp_size)
 
 
 def flash_attn_a2a_communicate(
@@ -3056,6 +3217,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         fp8_meta,
         quantizers,
         fp8_output,
+        thd_cp_partition,
     ):
         # pylint: disable=missing-function-docstring
         nvtx_range_push("transformer_engine.AttnFuncWithCPAndKVAllGather.forward")
@@ -3073,6 +3235,29 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         if qkv_format == "thd":
             # THD always uses padding mask types; per-step masks set internally
             assert padding, f"THD format requires padding mask type, got {attn_mask_type}!"
+        packed_thd = thd_cp_partition == "packed"
+        assert thd_cp_partition in ["per_document", "packed"]
+        if packed_thd:
+            assert qkv_format == "thd"
+            assert use_fused_attention or use_flash_attn_3, (
+                "Packed THD partitioning requires FusedAttention or FlashAttention 3."
+            )
+            assert not (use_flash_attn_3 and pad_between_seqs), (
+                "Packed THD partitioning with FlashAttention 3 does not support padding yet."
+            )
+            assert causal and window_size == (-1, 0), (
+                "Packed THD partitioning currently supports full causal attention only."
+            )
+            assert not fp8, "Packed THD partitioning does not support FP8 yet."
+            assert not is_graph_capturing(), (
+                "Packed THD partitioning does not support CUDA graph capture yet."
+            )
+            assert q.shape[0] == k.shape[0] == v.shape[0], (
+                "Packed THD partitioning requires equal local Q/K/V physical lengths."
+            )
+            assert cu_seqlens_q is cu_seqlens_kv and (
+                cu_seqlens_q_padded is cu_seqlens_kv_padded
+            ), "Packed THD self-attention requires shared Q/KV sequence metadata tensors."
         # AG CP uses shorter per-step Q against longer KV, so causal masks need
         # bottom-right alignment for both sliced and THD paths.
         if use_fused_attention and causal and "bottom_right" not in attn_mask_type:
@@ -3140,14 +3325,18 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                 q.shape[seq_dim] % 2 == 0 and k.shape[seq_dim] % 2 == 0
             ), "Sequence length per GPU needs to be divisible by 2!"
 
-        # Divide by 2*cp_size to get per-chunk values
-        max_seqlen_q = max_seqlen_q // (2 * cp_size)
-        max_seqlen_kv = max_seqlen_kv // (2 * cp_size)
+        # Per-document DCS divides every sequence into 2*CP chunks. Packed DCS
+        # instead bounds Q by one global chunk and keeps full-document KV bounds.
+        if packed_thd:
+            max_seqlen_q = min(max_seqlen_q, q.shape[0] // 2)
+        else:
+            max_seqlen_q = max_seqlen_q // (2 * cp_size)
+            max_seqlen_kv = max_seqlen_kv // (2 * cp_size)
         if use_fused_attention and qkv_format != "thd":
             cu_seqlens_q = cu_seqlens_q // (2 * cp_size)
-        if qkv_format == "thd":
+        if qkv_format == "thd" and not packed_thd:
             cu_seqlens_q_padded = cu_seqlens_q_padded // (2 * cp_size)
-        else:
+        elif qkv_format != "thd":
             cu_seqlens_q_padded = None
         if use_fused_attention and attn_mask_type == "causal":
             attn_mask_type = attn_mask_type + "_bottom_right"
@@ -3215,10 +3404,12 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
 
         if qkv_format == "thd":
             # [cp*t, h, d] -> reorder to sequence order -> [t_full, h, d]
-            # The padded cu_seqlens are global sequence offsets. Reorder uses them to
-            # derive per-sequence chunk boundaries.
-            k_ag = thd_cp_rank_order_to_sequence_order(k_ag, cu_seqlens_kv_padded, cp_size)
-            v_ag = thd_cp_rank_order_to_sequence_order(v_ag, cu_seqlens_kv_padded, cp_size)
+            k_ag = restore_thd_gathered_kv(
+                k_ag, cu_seqlens_kv_padded, cp_size, thd_cp_partition
+            )
+            v_ag = restore_thd_gathered_kv(
+                v_ag, cu_seqlens_kv_padded, cp_size, thd_cp_partition
+            )
         else:
             # [cp, s, b, h, d] -> [cp*2, s//2, b, h, d]
             k_ag = k_ag.view(2 * cp_size, k.shape[0] // 2, *k.shape[1:])
@@ -3263,7 +3454,20 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         max_logit = None
 
         # Pre-compute THD-specific per-step cu_seqlens
-        if qkv_format == "thd":
+        if qkv_format == "thd" and packed_thd:
+            total_tokens_q = q.shape[0] * cp_size
+            (
+                thd_cu_seqlens_q_per_step,
+                thd_cu_seqlens_q_padded_per_step,
+                thd_cu_seqlens_kv_per_step,
+            ) = get_packed_thd_causal_metadata(
+                cu_seqlens_q_original,
+                cu_seqlens_q_padded,
+                total_tokens_q,
+                cp_size,
+                rank,
+            )
+        elif qkv_format == "thd":
             # Rank-level padded offsets (2 chunks per sequence on this rank)
             cu_seqlens_q_padded_rank = cu_seqlens_q_padded * 2
 
@@ -3334,6 +3538,11 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                 thd_cu_seqlens_kv_per_step[0][1:] = visible_actual[0].cumsum(0)
                 thd_cu_seqlens_kv_per_step[1][1:] = visible_actual[1].cumsum(0)
 
+        # Step 1 runs on cp_stream and consumes THD metadata produced above on
+        # the current stream. The earlier wait only covered K/V AG and reorder.
+        if qkv_format == "thd":
+            cp_stream.wait_stream(torch.cuda.current_stream())
+
         for i in range(len(local_seq_chunk_ids) + 1):
             if i < len(local_seq_chunk_ids):
                 # FA3 uses internal per-call workspace. Consecutive AG per-step
@@ -3393,15 +3602,19 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         q_part = q
                         k_part = k_ag
                         v_part = v_ag
-                        kv_range, window_size_per_step[i] = get_kv_seq_info_after_all_gather(
-                            local_seq_chunk_ids[i],
-                            cp_size,
-                            max_seqlen_q,
-                            max_seqlen_kv,
-                            window_size,
-                            causal,
-                        )
-                        max_seqlen_kv_ = kv_range[1]
+                        if packed_thd:
+                            window_size_per_step[i] = (-1, 0)
+                            max_seqlen_kv_ = max_seqlen_kv
+                        else:
+                            kv_range, window_size_per_step[i] = get_kv_seq_info_after_all_gather(
+                                local_seq_chunk_ids[i],
+                                cp_size,
+                                max_seqlen_q,
+                                max_seqlen_kv,
+                                window_size,
+                                causal,
+                            )
+                            max_seqlen_kv_ = kv_range[1]
                         cu_seqlens_kv_per_step[i] = thd_cu_seqlens_kv_per_step[i]
                     if use_fused_attention:
                         # Set per-step parameters for THD vs bshd/sbhd
@@ -3646,6 +3859,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         ctx.use_flash_attn_3 = use_flash_attn_3
         ctx.pad_between_seqs = pad_between_seqs
         ctx.window_size = window_size
+        ctx.thd_cp_partition = thd_cp_partition
         if qkv_format == "thd":
             ctx.max_seqlen_kv = max_seqlen_kv
             ctx.cu_seqlens_kv_padded = cu_seqlens_kv_padded
@@ -3790,9 +4004,12 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             cu_seqlens_kv_padded = ctx.cu_seqlens_kv_padded
             thd_cu_seqlens_q_per_step = ctx.thd_cu_seqlens_q_per_step
             # [cp*t, h, d] -> reorder to sequence order
-            # Use padded cu_seqlens (divisible by 2*cp_size) for correct reorder
-            k_ag = thd_cp_rank_order_to_sequence_order(k_ag, cu_seqlens_kv_padded, cp_size)
-            v_ag = thd_cp_rank_order_to_sequence_order(v_ag, cu_seqlens_kv_padded, cp_size)
+            k_ag = restore_thd_gathered_kv(
+                k_ag, cu_seqlens_kv_padded, cp_size, ctx.thd_cp_partition
+            )
+            v_ag = restore_thd_gathered_kv(
+                v_ag, cu_seqlens_kv_padded, cp_size, ctx.thd_cp_partition
+            )
 
             thd_cu_seqlens_q_padded_per_step = ctx.thd_cu_seqlens_q_padded_per_step
         else:
@@ -3855,15 +4072,18 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         q_part = q
                         k_part = k_ag
                         v_part = v_ag
-                        kv_range, _ = get_kv_seq_info_after_all_gather(
-                            local_seq_chunk_ids[i],
-                            cp_size,
-                            ctx.max_seqlen_q,
-                            ctx.max_seqlen_kv,
-                            ctx.window_size,
-                            "causal" in ctx.attn_mask_type,
-                        )
-                        max_seqlen_kv = kv_range[1]
+                        if ctx.thd_cp_partition == "packed":
+                            max_seqlen_kv = ctx.max_seqlen_kv
+                        else:
+                            kv_range, _ = get_kv_seq_info_after_all_gather(
+                                local_seq_chunk_ids[i],
+                                cp_size,
+                                ctx.max_seqlen_q,
+                                ctx.max_seqlen_kv,
+                                ctx.window_size,
+                                "causal" in ctx.attn_mask_type,
+                            )
+                            max_seqlen_kv = kv_range[1]
                         out_part = out
                         dout_part = dout
                     else:
@@ -4099,9 +4319,12 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         if ctx.qkv_format == "thd":
             # Reorder dK/dV from sequence order back to dual-chunk CP rank order,
             # then reduce-scatter across CP ranks.
-            # Use padded cu_seqlens for correct slice boundaries.
-            dk = thd_sequence_order_to_cp_rank_order(dk, cu_seqlens_kv_padded, cp_size)
-            dv = thd_sequence_order_to_cp_rank_order(dv, cu_seqlens_kv_padded, cp_size)
+            dk = unrestore_thd_gathered_kv(
+                dk, cu_seqlens_kv_padded, cp_size, ctx.thd_cp_partition
+            )
+            dv = unrestore_thd_gathered_kv(
+                dv, cu_seqlens_kv_padded, cp_size, ctx.thd_cp_partition
+            )
             dk, _ = reduce_scatter_along_first_dim(dk, ctx.cp_group)
             dv, _ = reduce_scatter_along_first_dim(dv, ctx.cp_group)
             # dQ is already [t_rank, h, d], no reshape needed
@@ -4138,6 +4361,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             dq,
             dk,
             dv,
+            None,
             None,
             None,
             None,
@@ -4952,14 +5176,22 @@ def attn_forward_func_with_cp(
     fp8_output=False,
     layer_number=1,
     return_max_logit=False,
+    thd_cp_partition="per_document",
 ) -> torch.Tensor:
     """
     Attention implementation with context parallelism (CP). CP partitions tensors along the sequence
     dimension, and by reducing the memory and computational pressure on each GPU, it enables long-context
-    LLMs in a distributed fashion. Transformer Engine's PyTorch CP implementation currently utilizes
-    the DualChunkSwap strategy to ensure load balancing across CP ranks. It is applied to all `attn_mask_type`s
-    and all `qkv_format`s, and it requires sequence lengths to be, or are padded to be, divisible by
-    (cp_size * 2). It also requires tokens to be re-ordered before entering this function.
+    LLMs in a distributed fashion. By default, Transformer Engine's PyTorch CP
+    implementation applies DualChunkSwap to each sequence independently. It requires
+    every sequence length to be, or be padded to be, divisible by (cp_size * 2), and
+    tokens must be re-ordered before entering this function.
+
+    Experimental ``thd_cp_partition="packed"`` applies the same mirrored two-chunk
+    assignment once to the whole physical THD buffer. Logical sequences remain isolated
+    by ``cu_seqlens``. This mode requires THD, all-gather, full causal self-attention, and
+    FusedAttention, or FlashAttention 3 without padding. Input producers must use the
+    same selector with :func:`get_batch_on_this_cp_rank` or
+    :func:`get_thd_partitioned_indices`.
 
     For qkv_format = {'bshd', 'sbhd'}, the token re-ordering is illustrated as below, for an example
     use case of s = 12, attn_mask_type = 'causal', and cp_size = 2. seq_pos indicates each token's position
@@ -5040,6 +5272,11 @@ def attn_forward_func_with_cp(
         "sbhd",
         "thd",
     ], f"Context parallelism does not support {qkv_format=}!"
+    assert thd_cp_partition in ["per_document", "packed"]
+    if thd_cp_partition == "packed":
+        assert qkv_format == "thd" and cp_comm_type == "all_gather", (
+            "Packed THD partitioning requires qkv_format='thd' and cp_comm_type='all_gather'."
+        )
     assert (
         qkv_format != "sbhd" or use_fused_attention
     ), "Context parallelism does not support FlashAttention backend with qkv_format = 'sbhd'!"
@@ -5118,6 +5355,7 @@ def attn_forward_func_with_cp(
             fp8_meta,
             quantizers,
             fp8_output,
+            thd_cp_partition,
         ]
         out = AttnFuncWithCPAndKVAllGather.apply(*args)
     elif cp_comm_type == "a2a":
@@ -5261,6 +5499,7 @@ def get_batch_on_this_cp_rank(
     position_ids_padded: torch.Tensor,
     cp_group: torch.distributed.ProcessGroup = None,
     qvk_format: str = "thd",
+    thd_cp_partition: str = "per_document",
 ):
     """Slice batch input along sequence dimension into multiple chunks for THD format.
 
@@ -5269,6 +5508,8 @@ def get_batch_on_this_cp_rank(
 
     Which are parallelized across GPUs in a context parallel group.
     This version works with variable-length sequences using cumulative sequence lengths.
+    ``thd_cp_partition="packed"`` chunks the complete physical THD buffer; the default
+    ``"per_document"`` chunks each padded sequence independently.
     """
     if qvk_format not in ["thd", "bshd", "sbhd"]:
         raise ValueError(f"Unsupported qvk_format: {qvk_format}!")
@@ -5277,12 +5518,6 @@ def get_batch_on_this_cp_rank(
         cp_size = torch.distributed.get_world_size(group=cp_group)
         if cp_size > 1:
             cp_rank = torch.distributed.get_rank(group=cp_group)
-
-            # Calculate the chunk sizes for each sequence
-            total_slices_of_any_sequence = 2 * cp_size
-            slice_sizes = (
-                cu_seqlens_padded[1:] - cu_seqlens_padded[:-1]
-            ) // total_slices_of_any_sequence
 
             # Process each tensor directly instead of using keys_to_change loop
             def process_tensor(val):
@@ -5316,29 +5551,15 @@ def get_batch_on_this_cp_rank(
                 else:
                     raise ValueError("Tensor must be at least 1D")
 
-                # On this particular rank, for each sequence, get two slices, one from the beginning
-                # and one from the end.
-                cp_rank_slices = []
-                for slice_size, seq_start in zip(slice_sizes, cu_seqlens_padded[:-1]):
-                    # 1st segment
-                    cp_rank_slices.append(
-                        torch.arange(
-                            seq_start + (cp_rank * slice_size),
-                            seq_start + ((cp_rank + 1) * slice_size),
-                            device=val.device,
-                        )
-                    )
-
-                    # 2nd segment
-                    cp_rank_slices.append(
-                        torch.arange(
-                            seq_start + ((total_slices_of_any_sequence - cp_rank - 1) * slice_size),
-                            seq_start + ((total_slices_of_any_sequence - cp_rank) * slice_size),
-                            device=val.device,
-                        )
-                    )
-
-                return val.index_select(current_seq_dim, torch.cat(cp_rank_slices))
+                cp_rank_indices = get_thd_partitioned_indices(
+                    cu_seqlens_padded,
+                    seq_len_val,
+                    cp_size,
+                    cp_rank,
+                    thd_cp_partition,
+                    val.device,
+                )
+                return val.index_select(current_seq_dim, cp_rank_indices)
 
             # Process each tensor directly
             input_ids_padded = process_tensor(input_ids_padded)

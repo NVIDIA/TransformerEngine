@@ -7,8 +7,13 @@
 import itertools
 import torch
 import unittest
+from transformer_engine.pytorch.attention.multi_head_attention import MultiheadAttention
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
+    get_packed_thd_causal_metadata,
     get_batch_on_this_cp_rank,
+    get_thd_partitioned_indices,
+    packed_thd_cp_rank_order_to_sequence_order,
+    packed_thd_sequence_order_to_cp_rank_order,
     pad_thd_sequences_for_cp,
     generate_positional_ids_for_cp,
 )
@@ -17,6 +22,83 @@ try:
     import transformer_engine_torch as tex
 except ImportError:
     tex = None
+
+
+class TestPackedTHDPartitioning(unittest.TestCase):
+    def test_partition_indices_apply_dual_chunk_swap_to_whole_buffer(self):
+        cu_seqlens_padded = torch.tensor([0, 6, 11, 16], dtype=torch.int32)
+        rank0 = get_thd_partitioned_indices(
+            cu_seqlens_padded, 16, 2, 0, thd_cp_partition="packed"
+        )
+        rank1 = get_thd_partitioned_indices(
+            cu_seqlens_padded, 16, 2, 1, thd_cp_partition="packed"
+        )
+
+        self.assertTrue(torch.equal(rank0, torch.tensor([0, 1, 2, 3, 12, 13, 14, 15])))
+        self.assertTrue(torch.equal(rank1, torch.tensor([4, 5, 6, 7, 8, 9, 10, 11])))
+
+        per_document = get_thd_partitioned_indices(torch.tensor([0, 8, 16]), 16, 2, 0)
+        self.assertTrue(
+            torch.equal(per_document, torch.tensor([0, 1, 6, 7, 8, 9, 14, 15]))
+        )
+
+    def test_rank_order_roundtrip_does_not_depend_on_document_boundaries(self):
+        sequence_order = torch.arange(16)
+        rank_order = packed_thd_sequence_order_to_cp_rank_order(sequence_order, 2)
+
+        self.assertTrue(
+            torch.equal(
+                rank_order,
+                torch.tensor([0, 1, 2, 3, 12, 13, 14, 15, 4, 5, 6, 7, 8, 9, 10, 11]),
+            )
+        )
+        self.assertTrue(
+            torch.equal(packed_thd_cp_rank_order_to_sequence_order(rank_order, 2), sequence_order)
+        )
+
+    def test_metadata_tracks_chunk_document_intersections(self):
+        # Padded document lengths [6, 5, 5] are not individually divisible by 2*CP.
+        cu_seqlens = torch.tensor([0, 5, 8, 12], dtype=torch.int32)
+        cu_seqlens_padded = torch.tensor([0, 6, 11, 16], dtype=torch.int32)
+
+        q_cu, q_cu_padded, kv_cu = get_packed_thd_causal_metadata(
+            cu_seqlens,
+            cu_seqlens_padded,
+            total_tokens=16,
+            cp_size=2,
+            cp_rank=0,
+        )
+
+        self.assertTrue(torch.equal(q_cu[0], torch.tensor([0, 4, 4, 4], dtype=torch.int32)))
+        self.assertTrue(torch.equal(q_cu[1], torch.tensor([0, 0, 0, 3], dtype=torch.int32)))
+        self.assertTrue(
+            torch.equal(q_cu_padded[0], torch.tensor([0, 4, 4, 4], dtype=torch.int32))
+        )
+        self.assertTrue(
+            torch.equal(q_cu_padded[1], torch.tensor([4, 4, 4, 8], dtype=torch.int32))
+        )
+        self.assertTrue(torch.equal(kv_cu[0], torch.tensor([0, 4, 4, 4], dtype=torch.int32)))
+        self.assertTrue(torch.equal(kv_cu[1], torch.tensor([0, 5, 8, 12], dtype=torch.int32)))
+
+
+class TestCPSetterCompatibility(unittest.TestCase):
+    def test_default_partition_preserves_four_argument_child_setter(self):
+        class LegacyChild:
+            called = False
+
+            def set_context_parallel_group(
+                self, cp_group, cp_global_ranks, cp_stream, cp_comm_type
+            ):
+                self.called = True
+
+        child = LegacyChild()
+
+        class Parent:
+            def modules(self):
+                return [self, child]
+
+        MultiheadAttention.set_context_parallel_group(Parent(), None, [], None)
+        self.assertTrue(child.called)
 
 
 class TestSequencePadding(unittest.TestCase):

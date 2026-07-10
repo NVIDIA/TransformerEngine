@@ -658,6 +658,7 @@ class MultiheadAttention(torch.nn.Module):
         cp_global_ranks: List[int],
         cp_stream: torch.cuda.Stream,
         cp_comm_type: str = "p2p",
+        thd_cp_partition: str = "per_document",
     ) -> None:
         """
         Set the context parallel attributes for the given
@@ -687,6 +688,9 @@ class MultiheadAttention(torch.nn.Module):
                       - ``"a2a+p2p"``: hierarchical CP implementation. First applying a2a to QKV
                         across each CP sub-group (e.g., via NVLink), then exchanging KV with
                         p2p between sub-groups (e.g., via IBLink).
+        thd_cp_partition : str, default = "per_document"
+                           THD token partition contract. ``"packed"`` applies mirrored chunks to
+                           the whole packed buffer and currently requires all-gather CP.
         """
         if isinstance(cp_group, dist_group_type):
             self.cp_size = get_distributed_world_size(cp_group)
@@ -710,7 +714,13 @@ class MultiheadAttention(torch.nn.Module):
             if index == 0:
                 continue
             if hasattr(child, "set_context_parallel_group"):
-                child.set_context_parallel_group(cp_group, cp_global_ranks, cp_stream, cp_comm_type)
+                args = (cp_group, cp_global_ranks, cp_stream, cp_comm_type)
+                if thd_cp_partition == "per_document":
+                    child.set_context_parallel_group(*args)
+                else:
+                    child.set_context_parallel_group(
+                        *args, thd_cp_partition=thd_cp_partition
+                    )
 
     def forward(
         self,
