@@ -368,6 +368,40 @@ def _(*_args, **_kw):
 
 
 @torch.library.custom_op(
+    f"{_LIB}::prepare_and_dispatch",
+    mutates_args=("recv_tokens", "recv_topk_weights", "token_counts"),
+    device_types="cuda",
+)
+def _prepare_and_dispatch_op(
+    handle_mem: torch.Tensor,
+    top_k: int,
+    alignment: int,
+    topk_idx: torch.Tensor,
+    tokens: torch.Tensor,
+    topk_weights: torch.Tensor,
+    recv_tokens: torch.Tensor,
+    recv_topk_weights: torch.Tensor,
+    token_counts: torch.Tensor,
+) -> None:
+    tex.ep_prepare_and_dispatch(
+        handle_mem,
+        topk_idx,
+        tokens,
+        topk_weights,
+        recv_tokens,
+        recv_topk_weights,
+        token_counts,
+        top_k,
+        alignment,
+    )
+
+
+@_prepare_and_dispatch_op.register_fake
+def _(*_args, **_kw):
+    return None
+
+
+@torch.library.custom_op(
     f"{_LIB}::combine",
     mutates_args=("result",),
     device_types="cuda",
@@ -472,6 +506,28 @@ def _ep_combine_raw(buffer: "EpBuffer", expert_out: torch.Tensor, result: torch.
 # autograd.Function wrappers
 
 
+def _dispatch_backward(ctx, g_recv_tokens, g_recv_topk_weights):
+    """Shared dispatch bwd: run dispatch_bwd and reshape grads to the fwd input layout."""
+    (handle_mem,) = ctx.saved_tensors
+    device = handle_mem.device
+    g_recv_tokens = g_recv_tokens.contiguous()
+    g_recv_topk_weights = g_recv_topk_weights.contiguous()
+    # Dispatch grad follows the recv grad's (high-precision) dtype; the quantizer's STE
+    # owns the fp8 boundary for scaled inputs.
+    grad_tokens = torch.empty(
+        ctx.tokens_T_flat, ctx.hidden_dim, dtype=g_recv_tokens.dtype, device=device
+    )
+    grad_topk_weights = torch.empty(ctx.topk_T_flat, ctx.top_k, dtype=torch.float32, device=device)
+    torch.ops.transformer_engine_ep.dispatch_bwd(
+        handle_mem,
+        g_recv_tokens,
+        g_recv_topk_weights,
+        grad_tokens,
+        grad_topk_weights,
+    )
+    return grad_tokens.view(ctx.tokens_shape), grad_topk_weights.view(ctx.topk_weights_shape)
+
+
 class _EpDispatch(torch.autograd.Function):
     """Autograd dispatch; caller runs prepare first. bwd uses user-supplied grad inputs as-is."""
 
@@ -538,7 +594,7 @@ class _EpDispatch(torch.autograd.Function):
         ctx.save_for_backward(handle_mem)
         ctx.tokens_shape = tokens.shape
         ctx.topk_weights_shape = topk_weights.shape
-        ctx.num_tokens = tokens_data.shape[0]
+        ctx.tokens_T_flat = tokens_data.shape[0]
         ctx.topk_T_flat = topk_weights.numel() // topk_weights.shape[-1]
         ctx.top_k = topk_weights.shape[-1]
         ctx.hidden_dim = hidden
@@ -561,36 +617,78 @@ class _EpDispatch(torch.autograd.Function):
     @staticmethod
     def backward(ctx, g_recv_tokens, g_recv_topk_weights):  # type: ignore[override]
         """Dispatch bwd; normalizes grad-input layout, otherwise passes through."""
-        (handle_mem,) = ctx.saved_tensors
-        device = handle_mem.device
-        g_recv_tokens = g_recv_tokens.contiguous()
-        g_recv_topk_weights = g_recv_topk_weights.contiguous()
-        # Dispatch grad follows the recv grad's (high-precision) dtype; the quantizer's STE
-        # owns the fp8 boundary for scaled inputs.
-        grad_tokens = torch.empty(
-            ctx.num_tokens, ctx.hidden_dim, dtype=g_recv_tokens.dtype, device=device
-        )
-        grad_topk_weights = torch.empty(
-            ctx.topk_T_flat, ctx.top_k, dtype=torch.float32, device=device
-        )
-        torch.ops.transformer_engine_ep.dispatch_bwd(
-            handle_mem,
-            g_recv_tokens,
-            g_recv_topk_weights,
-            grad_tokens,
-            grad_topk_weights,
-        )
+        grad_tokens, grad_topk_weights = _dispatch_backward(ctx, g_recv_tokens, g_recv_topk_weights)
         return (
             None,  # handle_mem
             None,  # recv_tokens
             None,  # recv_topk_weights
             None,  # topk_idx
-            grad_tokens.view(ctx.tokens_shape),
-            grad_topk_weights.view(ctx.topk_weights_shape),
+            grad_tokens,
+            grad_topk_weights,
             None,  # tokens_scale_inv (scales; non-differentiable)
             None,  # token_counts (per-expert counts; non-differentiable)
             None,  # num_recv_tokens (sizing scalar)
             None,  # payload_dtype (sizing scalar)
+        )
+
+
+class _EpPrepareAndDispatch(torch.autograd.Function):
+    """Autograd fused prepare+dispatch. The dispatch seeds routing and
+    writes the per-expert recv counts, so no separate prepare is needed. bwd uses
+    user-supplied grad inputs as-is."""
+
+    @staticmethod
+    def forward(  # type: ignore[override]
+        ctx,
+        handle_mem: torch.Tensor,
+        top_k: int,
+        alignment: int,
+        recv_tokens: torch.Tensor,
+        recv_topk_weights: torch.Tensor,
+        tokens_per_expert: torch.Tensor,
+        topk_idx: torch.Tensor,
+        tokens: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ):
+        """Fused prepare + dispatch fwd; the dispatch writes ``tokens_per_expert``."""
+        torch.ops.transformer_engine_ep.prepare_and_dispatch(
+            handle_mem,
+            top_k,
+            alignment,
+            topk_idx,
+            tokens,
+            topk_weights,
+            recv_tokens,
+            recv_topk_weights,
+            tokens_per_expert,
+        )
+        ctx.save_for_backward(handle_mem)
+        ctx.tokens_shape = tokens.shape
+        ctx.tokens_dtype = tokens.dtype
+        ctx.topk_weights_shape = topk_weights.shape
+        ctx.tokens_T_flat = tokens.numel() // tokens.shape[-1]
+        ctx.topk_T_flat = topk_weights.numel() // topk_weights.shape[-1]
+        ctx.top_k = topk_weights.shape[-1]
+        ctx.hidden_dim = tokens.shape[-1]
+        ctx.mark_non_differentiable(tokens_per_expert)
+        # Detach so the long-lived buffers aren't tracked as differentiable outputs;
+        # autograd re-attaches grad_fn pointing back at this Function.
+        return recv_tokens.detach(), recv_topk_weights.detach(), tokens_per_expert
+
+    @staticmethod
+    def backward(ctx, g_recv_tokens, g_recv_topk_weights, _g_tokens_per_expert):  # type: ignore[override]
+        """Dispatch bwd; normalizes grad-input layout, otherwise passes through."""
+        grad_tokens, grad_topk_weights = _dispatch_backward(ctx, g_recv_tokens, g_recv_topk_weights)
+        return (
+            None,  # handle_mem
+            None,  # top_k
+            None,  # alignment
+            None,  # recv_tokens
+            None,  # recv_topk_weights
+            None,  # tokens_per_expert
+            None,  # topk_idx
+            grad_tokens,
+            grad_topk_weights,
         )
 
 
@@ -811,6 +909,17 @@ def _make_grouped_mxfp8(data, scale_inv, token_counts, fp8_dtype, fake_dtype):
     )
 
 
+def _size_recv_buffers(buffer, rows, recv_tokens, recv_topk_weights):
+    """Allocate any dispatch recv output the caller did not supply, sized to ``rows``."""
+    if recv_tokens is None:
+        recv_tokens = _alloc_io(
+            (rows, buffer.hidden_dim), buffer.payload_dtype, buffer.device, buffer.zero_copy
+        )
+    if recv_topk_weights is None:
+        recv_topk_weights = _alloc_io((rows,), torch.float32, buffer.device, buffer.zero_copy)
+    return recv_tokens, recv_topk_weights
+
+
 def ep_dispatch(
     buffer: EpBuffer,
     tokens: torch.Tensor,
@@ -835,6 +944,10 @@ def ep_dispatch(
 
     Returns (recv_tokens, recv_topk_weights, tokens_per_expert); tokens_per_expert is non-diff. See
     ``buffer.total_recv_tokens`` for the per-step recv total.
+
+    bf16 non-eager uses the fused prepare+dispatch: the dispatch seeds routing and writes
+    tokens_per_expert in one call, with recv sized to ``recv_capacity_per_rank``. Eager mode
+    (host-synced recv-token total) and MXFP8 (scale routing) use a separate prepare + dispatch.
     """
     if topk_weights.dtype is not torch.float32:
         raise TypeError(
@@ -852,14 +965,8 @@ def ep_dispatch(
             "eager mode sizes the recv outputs from the per-step recv-token total "
             "and cannot use caller-supplied recv_tokens / recv_topk_weights"
         )
-
-    # Prepare (routing AllGather) up front so the recv outputs can be sized; in
-    # eager mode ep_prepare also host-syncs this step's recv-token total.
-    tokens_per_expert = ep_prepare(buffer, topk_idx)
-    num_recv_tokens = (
-        buffer._host_total_recv_tokens if buffer.eager else buffer.recv_capacity_per_rank
-    )
-
+    # MXFP8: quantize up front so the quantized tensor stays the autograd operand and grad
+    # reaches the pre-quant input; the dispatch then carves the recv buffers and routes scales.
     tokens_scale_inv = None
     if buffer.dispatch_fwd_quant_recipe is not None:
         from ..common.recipe import MXFP8BlockScaling
@@ -869,23 +976,46 @@ def ep_dispatch(
                 "EP block-scaled dispatch supports MXFP8BlockScaling only; got "
                 f"{type(buffer.dispatch_fwd_quant_recipe).__name__}."
             )
-        # Quantize here (not in forward) so the quantized tensor stays the autograd operand and grad
-        # reaches the pre-quant input; forward then carves the recv buffers and routes.
         tokens, tokens_scale_inv = _quantize_mxfp8(tokens)
 
-    recv_tokens, recv_topk_weights = _EpDispatch.apply(
+    # bf16 non-eager takes the fused prepare+dispatch fast path. Eager (host-synced recv-token
+    # total for sizing) and MXFP8 (scale routing) use a separate prepare + dispatch.
+    if buffer.eager or tokens_scale_inv is not None:
+        tokens_per_expert = ep_prepare(buffer, topk_idx)
+        num_recv_tokens = (
+            buffer._host_total_recv_tokens if buffer.eager else buffer.recv_capacity_per_rank
+        )
+        recv_tokens, recv_topk_weights = _EpDispatch.apply(
+            buffer.handle_mem,
+            recv_tokens,
+            recv_topk_weights,
+            topk_idx,
+            tokens,
+            topk_weights,
+            tokens_scale_inv,
+            tokens_per_expert,
+            num_recv_tokens,
+            buffer.payload_dtype,
+        )
+        return recv_tokens, recv_topk_weights, tokens_per_expert
+
+    # Non-eager bf16 (incl. drop_on_overflow): fused prepare+dispatch, recv outputs sized to
+    # recv_capacity_per_rank; the fused dispatch drops over-budget tokens when drop_on_overflow
+    # is enabled, otherwise traps on overflow.
+    recv_tokens, recv_topk_weights = _size_recv_buffers(
+        buffer, buffer.recv_capacity_per_rank, recv_tokens, recv_topk_weights
+    )
+    return _EpPrepareAndDispatch.apply(
         buffer.handle_mem,
+        buffer.top_k,
+        buffer.alignment,
         recv_tokens,
         recv_topk_weights,
+        buffer.tokens_per_expert,
         topk_idx,
         tokens,
         topk_weights,
-        tokens_scale_inv,
-        tokens_per_expert,
-        num_recv_tokens,
-        buffer.payload_dtype,
     )
-    return recv_tokens, recv_topk_weights, tokens_per_expert
 
 
 def ep_combine(

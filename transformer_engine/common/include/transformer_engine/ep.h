@@ -174,6 +174,36 @@ void nvte_ep_dispatch(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor tok
                       NVTECommWindow recv_tokens_win, NVTETensor recv_topk_weights,
                       NVTECommWindow recv_topk_weights_win, cudaStream_t stream);
 
+/*! \brief Fused prepare + dispatch.
+ *
+ *  Seeds handle_mem with this step's routing (as nvte_ep_prepare) and then
+ *  dispatches tokens (as nvte_ep_dispatch) in a single call. Per-expert recv
+ *  counts are produced by the dispatch and written to recv_tokens_per_expert;
+ *  they are not available before the dispatch returns. No separate
+ *  nvte_ep_prepare is needed.
+ *
+ *  \param[in]     handle_mem             uint8 routing-state buffer.
+ *  \param[in]     topk_idx               [T, top_k] int64 routing indices.
+ *  \param[in]     tokens                 [T, hidden_dim] input tokens.
+ *  \param[in]     tokens_win             Optional symmem window for tokens.
+ *  \param[in]     topk_weights           [T, top_k] float32 weights.
+ *  \param[in]     topk_weights_win       Optional symmem window for topk_weights.
+ *  \param[out]    recv_tokens            [recv_T, hidden_dim] received tokens.
+ *  \param[in]     recv_tokens_win        Optional symmem window for recv_tokens.
+ *  \param[out]    recv_topk_weights      [recv_T] float32 per-slot weights.
+ *  \param[in]     recv_topk_weights_win  Optional symmem window for recv_topk_weights.
+ *  \param[out]    recv_tokens_per_expert [num_local_experts] int32/int64 counts.
+ *  \param[in]     layer_cfg              Per-call layer configuration (struct_size set).
+ *  \param[in]     stream                 CUDA stream.
+ */
+void nvte_ep_prepare_and_dispatch(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor tokens,
+                                  NVTECommWindow tokens_win, NVTETensor topk_weights,
+                                  NVTECommWindow topk_weights_win, NVTETensor recv_tokens,
+                                  NVTECommWindow recv_tokens_win, NVTETensor recv_topk_weights,
+                                  NVTECommWindow recv_topk_weights_win,
+                                  NVTETensor recv_tokens_per_expert,
+                                  const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream);
+
 /*! \brief Scatter-sum expert outputs back to originating ranks.
  *
  *  Inverse of dispatch: the top_k destination slots for token t are summed
