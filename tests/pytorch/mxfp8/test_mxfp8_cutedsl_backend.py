@@ -2,30 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Cross-backend bit-exactness tests for the CuTeDSL MXFP8 quantize kernels.
-
-The case matrix mirrors tests/cpp/operator/test_cast_mxfp8.cu (same matrix
-sizes, block sizes, processing methods, activation types, dtypes and the three
-suite instantiations), but instead of a CPU reference each case quantizes the
-same input twice in this process -- once with the CUDA kernels and once with
-the CuTeDSL kernels -- by toggling the C++ dispatcher at runtime through
-``nvte_set_cutedsl_quant_backend`` (called via ctypes on the already-loaded
-libtransformer_engine.so). The results must match bit-for-bit: fp8 data bytes
-and e8m0 scale bytes (meaningful region only; the scale padding is
-uninitialized). dbias is compared in floating point instead: both backends
-reduce fp32 block partials with the same reduce_dbias kernel, but the partials
-are accumulated in different orders, so last-ulp differences are expected.
-
-Divergences from the C++ suite: only valid (ProcessingMethod, ActivationType)
-pairs are generated (the C++ test generates the full cross product and
-GTEST_SKIPs the mismatched half), non-32-divisible shapes are omitted (the
-dispatcher can never route them to CuTeDSL), and a missing kernel registration
-is a hard failure rather than a skip -- every generated config is one the
-backend must support. The toggle overrides NVTE_ENABLE_CUTEDSL_QUANT_BACKEND, so these tests
-behave the same regardless of the env var. CuTeDSL kernels JIT-compile on
-first use per config. The GEMM-swizzled scale layout is covered separately by
-test_mxfp8_quantize_swizzle_fusion.py.
-"""
+"""Cross-backend bit-exactness tests for the CuTeDSL MXFP8 quantize kernels."""
 
 import ctypes
 import os
