@@ -1365,9 +1365,8 @@ NVTEShape nvte_get_grouped_tensor_logical_shape(const NVTEGroupedTensor tensor) 
 
 extern "C" __attribute__((visibility("default"))) void nvte_set_cutedsl_quant_backend(int enabled) {
   // Runtime toggle of the CuTeDSL quantize backend, overriding the
-  // NVTE_ENABLE_CUTEDSL_QUANT_BACKEND env default. Exported as a plain C
-  // symbol so Python tests can call it via ctypes on libtransformer_engine.so
-  // and compare both backends within one process.
+  // NVTE_ENABLE_CUTEDSL_QUANT_BACKEND env default.
+  // Used for tests to compare the result of CuTeDSL and the original CUDA implementation.
   transformer_engine::tvm_ffi_bridge::TVMFFICentral::getInstance().set_cutedsl_backend_enabled(
       enabled != 0);
 }
