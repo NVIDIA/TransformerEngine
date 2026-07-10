@@ -35,6 +35,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     META_DP,
 )
 from transformer_engine.pytorch.attention.inference import InferenceParams
+from transformer_engine.pytorch.cpu_offload import is_cpu_offload_enabled
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
 from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Tensor,
@@ -2434,14 +2435,19 @@ def get_qkv_layout(
 
     if len(qkv_layout.split("_")) < 3:
         # q/k/v were recognized as views of a packed buffer only by inspecting
-        # their data pointers, strides and storage offsets.
-        warnings.warn(
-            "Relying on pointer-based detection of packed q/k/v layouts"
-            f" (detected {qkv_layout!r}) is deprecated: pass the packed buffer"
-            " explicitly via qkv_layer/kv_layer (with qkv_interleave_dim) to"
-            " DotProductAttention instead.",
-            DeprecationWarning,
-        )
+        # their data pointers, strides and storage offsets. Skip the nudge while
+        # CPU offloading is enabled: offloading forces MultiheadAttention onto
+        # its sliced-views fallback, so packed views reaching detection are
+        # expected there and the caller has no migration option.
+        if not is_cpu_offload_enabled():
+            warnings.warn(
+                "Relying on pointer-based detection of packed q/k/v layouts"
+                f" (detected {qkv_layout!r}) is deprecated: pass the packed buffer"
+                " explicitly via qkv_layer/kv_layer (with qkv_interleave_dim) to"
+                " DotProductAttention instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
     if inference_params is not None and inference_params.is_paged:
         qkv_layout = "paged_kv_" + qkv_layout

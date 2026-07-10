@@ -913,6 +913,7 @@ class MultiheadAttention(torch.nn.Module):
         packed_dpa_eligible = (
             rotary_pos_emb is None
             and self.q_norm is None
+            and self.k_norm is None
             and inference_params is None
             and not is_cpu_offload_enabled()
         )
