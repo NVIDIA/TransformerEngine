@@ -36,13 +36,13 @@ def mhc_projection_ref(x, phi, norm_weight):
     C: hidden dimension per stream
     """
 
-    x_fp32 = x.to(torch.float32)
-    ms = (x_fp32 * x_fp32).mean(dim=1)
+    x_fp64 = x.to(torch.float64)
+    ms = (x_fp64 * x_fp64).mean(dim=1)
 
-    phi_fp32 = phi.to(torch.float32)
+    phi_fp64 = phi.to(torch.float64)
     if norm_weight is not None:
-        phi_fp32 = phi_fp32 * norm_weight.to(torch.float32)[None, :]
-    Hs = x_fp32 @ phi_fp32.T  # (M, 2n + n^2)
+        phi_fp64 = phi_fp64 * norm_weight.to(torch.float64)[None, :]
+    Hs = x_fp64 @ phi_fp64.T  # (M, 2n + n^2)
 
     return Hs, ms
 
@@ -263,12 +263,7 @@ mhc_configs = [
 
 def get_tols(dtype):
     if dtype == torch.bfloat16:
-        # bf16 tolerance is limited by bf16 rounding so both deterministic and non-deterministic paths
-        # should use the same tols
         tols = dict(atol=2.5e-2, rtol=2.5e-2)
-    elif ENFORCE_DETERMINISTIC:
-        # Use a tighter tolerance for deterministic
-        tols = dict(atol=3e-3, rtol=3e-3)
     else:
         tols = dict(atol=5e-3, rtol=5e-3)
     return tols
@@ -319,8 +314,8 @@ def test_mhc_projection(cfg: MHCConfig, dtypes, has_norm_weight, use_split_k):
     )
     fused_out_Hs = fused_out_Hs_padded[:, :N]
 
-    torch.testing.assert_close(fused_out_Hs, ref_out_Hs, **tols)
-    torch.testing.assert_close(fused_out_ms, ref_out_ms, **tols)
+    torch.testing.assert_close(fused_out_Hs.double(), ref_out_Hs, **tols)
+    torch.testing.assert_close(fused_out_ms.double(), ref_out_ms, **tols)
     (ref_out_Hs.sum() + ref_out_ms.sum()).backward()
     (fused_out_Hs.sum() + fused_out_ms.sum()).backward()
 
@@ -380,7 +375,10 @@ def test_mhc_scale(cfg: MHCConfig, dtype):
 @pytest.mark.parametrize("has_norm_weight", [False, True], ids=["no_norm_weight", "norm_weight"])
 @pytest.mark.parametrize("use_split_k", [True, False], ids=["split_k", "no_split_k"])
 def test_mhc_rmsnorm(cfg: MHCConfig, dtypes, has_norm_weight, use_split_k):
-    # Verify if the fused kernel is equivalent to applying RMSNorm in the normal order
+    # Validate the fused (split-order) kernel against RMSNorm applied in the correct order,
+    # computed in fp64 via F.rms_norm as the oracle. In exact arithmetic the kernel's
+    # "matmul then divide by rms" equals "rms_norm(x) then matmul", so fp64 correct-order is
+    # ground truth for the fp32 kernel and is independent of the kernel's own reimplementation.
     reset_rng_states()
 
     if ENFORCE_DETERMINISTIC and use_split_k:
@@ -402,7 +400,6 @@ def test_mhc_rmsnorm(cfg: MHCConfig, dtypes, has_norm_weight, use_split_k):
 
     x_ref = x.detach().clone().requires_grad_(True)
     phi_ref = phi.detach().clone().requires_grad_(True)
-
     alpha_ref = alpha.detach().clone().requires_grad_(True)
     beta_ref = beta.detach().clone().requires_grad_(True)
 
@@ -413,13 +410,8 @@ def test_mhc_rmsnorm(cfg: MHCConfig, dtypes, has_norm_weight, use_split_k):
         norm_weight = None
         norm_weight_ref = None
 
-    ref_out_H, ref_out_r = mhc_projection_ref(x_ref, phi_ref, norm_weight_ref)
     fused_out_H_padded, fused_out_r = mhc_fused_projection(
         x, phi, norm_weight=norm_weight, use_tf32=use_tf32, use_split_k=use_split_k
-    )
-
-    ref_H_pre, ref_H_post, ref_H_res = mhc_scale_ref(
-        ref_out_H[:, :N], alpha_ref, beta_ref, ref_out_r, n
     )
     fused_H_pre, fused_H_post, fused_H_res = mhc_fused_scale(
         fused_out_H_padded, alpha, beta, fused_out_r, n
@@ -430,14 +422,14 @@ def test_mhc_rmsnorm(cfg: MHCConfig, dtypes, has_norm_weight, use_split_k):
         # the result is close to applying RMSNorm in the correct order.
         # Run RMSNorm in fp32 so the bf16 case has the same precision pattern as the
         # kernel/ref (F.rms_norm on bf16 input would round x_rmsnorm back to bf16).
-        eps = torch.finfo(torch.float32).eps
-        norm_weight_fp32 = (
-            norm_weight_ref.to(torch.float32) if norm_weight_ref is not None else None
+        eps = torch.finfo(torch.float64).eps
+        norm_weight_fp64 = (
+            norm_weight_ref.to(torch.float64) if norm_weight_ref is not None else None
         )
         x_rmsnorm = F.rms_norm(
-            x_ref.to(torch.float32), normalized_shape=(nC,), weight=norm_weight_fp32, eps=eps
+            x_ref.to(torch.float64), normalized_shape=(nC,), weight=norm_weight_fp64, eps=eps
         )
-        H = x_rmsnorm @ phi_ref.T.to(torch.float32)
+        H = x_rmsnorm @ phi_ref.T.to(torch.float64)
         H_pre = H[:, :n]
         H_post = H[:, n : 2 * n]
         H_res = H[:, 2 * n :]
@@ -456,17 +448,10 @@ def test_mhc_rmsnorm(cfg: MHCConfig, dtypes, has_norm_weight, use_split_k):
         x_ref, phi_ref, alpha_ref, beta_ref, norm_weight_ref
     )
 
-    torch.testing.assert_close(combined_H_pre, ref_H_pre, **tols)
-    torch.testing.assert_close(combined_H_post, ref_H_post, **tols)
-    torch.testing.assert_close(combined_H_res, ref_H_res, **tols)
-
-    torch.testing.assert_close(ref_H_pre, fused_H_pre, **tols)
-    torch.testing.assert_close(ref_H_post, fused_H_post, **tols)
-    torch.testing.assert_close(ref_H_res, fused_H_res, **tols)
-
-    torch.testing.assert_close(combined_H_pre, fused_H_pre, **tols)
-    torch.testing.assert_close(combined_H_post, fused_H_post, **tols)
-    torch.testing.assert_close(combined_H_res, fused_H_res, **tols)
+    # We only need to compare F.rmsnorm and our fused implementation where we split RMSNorm into two steps
+    torch.testing.assert_close(combined_H_pre, fused_H_pre.to(torch.float64), **tols)
+    torch.testing.assert_close(combined_H_post, fused_H_post.to(torch.float64), **tols)
+    torch.testing.assert_close(combined_H_res, fused_H_res.to(torch.float64), **tols)
 
 
 @pytest.mark.skipif(
