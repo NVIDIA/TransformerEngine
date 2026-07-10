@@ -8,6 +8,7 @@
  * EP pipeline tests: smallest-scope first.
  *
  *   EPDispatchTest/PrepareAndDispatch       : exact recv values + per-expert counts
+ *   EPOverflowTest/OverflowDrop             : drop_on_overflow clamps recv counts
  *   EPCombineTest/Combine                   : round-trip: out == top_k * tokens
  *   EPCombineBwdTest/CombineBwdCheck        : exact grad_expert values
  *   EPDispatchBwdTest/DispatchBwdCheck      : exact grad_tokens
@@ -303,17 +304,29 @@ TYPED_TEST(EPDispatchTest, PrepareAndDispatch) {
   this->template upload_inputs<Tok>(buf);
   EPTensors<Tok> t(buf, num_tokens_, top_k_, hidden_dim_, num_local_experts_);
 
-  NVTE_CHECK_CUDA(cudaMemset(buf.recv_tokens.get(), 0, buf.recv_tokens.bytes()));
-
   cudaStream_t stream;
   NVTE_CHECK_CUDA(cudaStreamCreate(&stream));
 
-  ASSERT_NO_THROW(nvte_ep_prepare(t.handle_mem.data(), t.topk_idx.data(), t.recv_tokens_per_expert.data(), nullptr, &t.layer_cfg_, stream));
-  ASSERT_NO_THROW(nvte_ep_dispatch(t.handle_mem.data(), t.topk_idx.data(),
-                                   t.tokens.data(), NVTECommWindow{}, t.topk_weights.data(),
-                                   NVTECommWindow{}, t.recv_tokens.data(), NVTECommWindow{},
-                                   t.recv_topk_weights.data(), NVTECommWindow{}, stream));
-  NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
+  // Run the same identity check for both dispatch entry points: the separate
+  // prepare + dispatch, and the fused prepare_and_dispatch (one call seeds
+  // routing and dispatches; the dispatch writes recv_tokens_per_expert).
+  for (bool fused : {false, true}) {
+   SCOPED_TRACE(fused ? "fused prepare_and_dispatch" : "separate prepare + dispatch");
+   NVTE_CHECK_CUDA(cudaMemset(buf.recv_tokens.get(), 0, buf.recv_tokens.bytes()));
+   if (fused) {
+     ASSERT_NO_THROW(nvte_ep_prepare_and_dispatch(
+         t.handle_mem.data(), t.topk_idx.data(), t.tokens.data(), NVTECommWindow{},
+         t.topk_weights.data(), NVTECommWindow{}, t.recv_tokens.data(), NVTECommWindow{},
+         t.recv_topk_weights.data(), NVTECommWindow{}, t.recv_tokens_per_expert.data(),
+         &t.layer_cfg_, stream));
+   } else {
+     ASSERT_NO_THROW(nvte_ep_prepare(t.handle_mem.data(), t.topk_idx.data(), t.recv_tokens_per_expert.data(), nullptr, &t.layer_cfg_, stream));
+     ASSERT_NO_THROW(nvte_ep_dispatch(t.handle_mem.data(), t.topk_idx.data(),
+                                      t.tokens.data(), NVTECommWindow{}, t.topk_weights.data(),
+                                      NVTECommWindow{}, t.recv_tokens.data(), NVTECommWindow{},
+                                      t.recv_topk_weights.data(), NVTECommWindow{}, stream));
+   }
+   NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
 
   // 1. Per-expert counts.
   std::vector<int32_t> got_counts(num_local_experts_);
@@ -363,7 +376,116 @@ TYPED_TEST(EPDispatchTest, PrepareAndDispatch) {
     EXPECT_NEAR(h_w[i], exp_w, 1e-6f) << "recv_topk_weights[" << i << "]";
 
   if (g_process_id == 0)
-    printf("  PrepareAndDispatch: passed (recv=%d, values + weights exact)\n", total_recv);
+    printf("  PrepareAndDispatch[%s]: passed (recv=%d, values + weights exact)\n",
+           fused ? "fused" : "separate", total_recv);
+  }
+
+  NVTE_CHECK_CUDA(cudaStreamDestroy(stream));
+}
+
+// =============================================================================
+// EPOverflowTest: drop_on_overflow clamps recv counts and completes.
+// =============================================================================
+
+template <typename T> class EPOverflowTest : public EpOpTestBase {
+ protected:
+  void TearDown() override {
+    if (g_ep_initialized) ep_reinitialize(/*zero_copy=*/0);
+  }
+};
+TYPED_TEST_SUITE(EPOverflowTest, EPBf16Only);
+
+// With drop_on_overflow and a recv budget below the routed total, dispatch keeps
+// the first recv_cap tokens (per-expert counts clamped on the cumulative sum)
+// and drops the rest instead of trapping. Covers both the separate prepare +
+// dispatch and the fused prepare_and_dispatch.
+TYPED_TEST(EPOverflowTest, OverflowDrop) {
+  using Tok = TypeParam;
+  EP_PULL_FIXTURE();
+
+  // Undersize the recv budget so balanced routing overflows it. HT requires the
+  // recv budget >= send budget, so lower both to the per-rank token count.
+  const int send_budget = num_tokens_;
+  const int recv_cap     = num_tokens_;
+  ep_reinitialize_drop(send_budget, recv_cap);
+
+  auto exp_counts = expected_recv_tokens_per_expert(g_process_id, g_num_processes, num_tokens_,
+                                          top_k_, num_experts_, num_local_experts_);
+  int pre_drop_total = 0;
+  for (int c : exp_counts) pre_drop_total += c;
+  ASSERT_GT(pre_drop_total, recv_cap)
+      << "test misconfigured: routing must overflow the recv budget";
+
+  EPBuffers<Tok> buf;
+  buf.alloc(num_tokens_, top_k_, hidden_dim_, num_local_experts_,
+            ep_size_, max_tokens_per_rank_);
+  this->template upload_inputs<Tok>(buf);
+  EPTensors<Tok> t(buf, num_tokens_, top_k_, hidden_dim_, num_local_experts_);
+
+  // Device scalar for the pre-drop recv total reported by prepare.
+  DevBuf<int32_t> total_recv_dev(1);
+  TensorWrapper total_recv(total_recv_dev.get(), std::vector<size_t>{1}, DType::kInt32);
+
+  auto exp_vals = expected_recv_values_sorted<Tok>(g_process_id, g_num_processes, num_tokens_,
+                                                   top_k_, num_experts_, num_local_experts_);
+
+  cudaStream_t stream;
+  NVTE_CHECK_CUDA(cudaStreamCreate(&stream));
+
+  for (bool fused : {false, true}) {
+   SCOPED_TRACE(fused ? "fused prepare_and_dispatch" : "separate prepare + dispatch");
+   NVTE_CHECK_CUDA(cudaMemset(buf.recv_tokens.get(), 0, buf.recv_tokens.bytes()));
+
+   if (fused) {
+     ASSERT_NO_THROW(nvte_ep_prepare_and_dispatch(
+         t.handle_mem.data(), t.topk_idx.data(), t.tokens.data(), NVTECommWindow{},
+         t.topk_weights.data(), NVTECommWindow{}, t.recv_tokens.data(), NVTECommWindow{},
+         t.recv_topk_weights.data(), NVTECommWindow{}, t.recv_tokens_per_expert.data(),
+         &t.layer_cfg_, stream));
+   } else {
+     ASSERT_NO_THROW(nvte_ep_prepare(t.handle_mem.data(), t.topk_idx.data(),
+                                     t.recv_tokens_per_expert.data(), total_recv.data(),
+                                     &t.layer_cfg_, stream));
+     ASSERT_NO_THROW(nvte_ep_dispatch(t.handle_mem.data(), t.topk_idx.data(),
+                                      t.tokens.data(), NVTECommWindow{}, t.topk_weights.data(),
+                                      NVTECommWindow{}, t.recv_tokens.data(), NVTECommWindow{},
+                                      t.recv_topk_weights.data(), NVTECommWindow{}, stream));
+   }
+   NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
+
+   // Per-expert counts are clamped so their sum is exactly the recv budget (the
+   // cumulative clamp), not the larger pre-drop total.
+   std::vector<int32_t> got_counts(num_local_experts_);
+   NVTE_CHECK_CUDA(cudaMemcpy(got_counts.data(), buf.recv_tokens_per_expert.get(),
+                         num_local_experts_ * sizeof(int32_t), cudaMemcpyDeviceToHost));
+   int kept = 0;
+   for (int c : got_counts) { EXPECT_GE(c, 0); kept += c; }
+   EXPECT_EQ(kept, recv_cap) << "kept token count must equal the recv budget";
+
+   // The separate path's prepare reports the true (pre-drop) recv total.
+   if (!fused) {
+     int32_t pre_drop = 0;
+     NVTE_CHECK_CUDA(cudaMemcpy(&pre_drop, total_recv_dev.get(), sizeof(int32_t),
+                           cudaMemcpyDeviceToHost));
+     EXPECT_EQ(pre_drop, pre_drop_total) << "prepare must report the pre-drop recv total";
+   }
+
+   // Every kept recv slot holds a real routed token value: no garbage past the
+   // clamp. Slabs are packed contiguously (alignment disabled).
+   std::vector<Tok> h_recv(buf.recv_capacity * hidden_dim_);
+   NVTE_CHECK_CUDA(cudaMemcpy(h_recv.data(), buf.recv_tokens.get(),
+                         h_recv.size() * sizeof(Tok), cudaMemcpyDeviceToHost));
+   size_t slot = 0;
+   for (int e = 0; e < num_local_experts_; ++e)
+     for (int i = 0; i < got_counts[e]; ++i, ++slot)
+       EXPECT_TRUE(std::binary_search(exp_vals.begin(), exp_vals.end(),
+                                      tok_to_float(h_recv[slot * hidden_dim_])))
+           << "kept recv slot " << slot << " is not a routed token value";
+
+   if (g_process_id == 0)
+     printf("  OverflowDrop[%s]: passed (kept=%d, pre-drop=%d)\n",
+            fused ? "fused" : "separate", kept, pre_drop_total);
+  }
 
   NVTE_CHECK_CUDA(cudaStreamDestroy(stream));
 }
