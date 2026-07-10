@@ -366,12 +366,14 @@ void EPBackend::prepare(void* handle_mem, const NVTETensor topk_idx,
   NVTE_CHECK_NCCL(ncclEpUpdateHandle(h, &nccl_topk_idx, &layout_info, stream));
 }
 
-void EPBackend::dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTETensor tokens,
-                         const NVTECommWindow& tokens_win, const NVTETensor topk_weights,
-                         const NVTECommWindow& topk_weights_win, NVTETensor recv_tokens,
-                         const NVTECommWindow& recv_tokens_win, NVTETensor recv_topk_weights,
-                         const NVTECommWindow& recv_topk_weights_win, cudaStream_t stream) {
-  NVTE_CHECK(handle_mem != nullptr, "handle_mem must not be null");
+void EPBackend::issue_dispatch_locked(ncclEpHandle_t handle, const NVTETensor topk_idx,
+                                      const NVTETensor tokens, const NVTECommWindow& tokens_win,
+                                      const NVTETensor topk_weights,
+                                      const NVTECommWindow& topk_weights_win,
+                                      NVTETensor recv_tokens, const NVTECommWindow& recv_tokens_win,
+                                      NVTETensor recv_topk_weights,
+                                      const NVTECommWindow& recv_topk_weights_win,
+                                      NVTETensor recv_tokens_per_expert, cudaStream_t stream) {
   NVTE_CHECK(nvte_tensor_shape(tokens).ndim == 2, "tokens must be 2D [T, hidden_dim]");
   NVTE_CHECK(nvte_tensor_shape(recv_tokens).ndim == 2,
              "recv_tokens must be 2D [recv_T, hidden_dim]");
@@ -423,11 +425,61 @@ void EPBackend::dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTE
   ncclEpDispatchConfig_t dispatch_cfg = NCCL_EP_DISPATCH_CONFIG_INIT;
   dispatch_cfg.pass_direction = is_forward ? NCCL_EP_FWD_PASS : NCCL_EP_BWD_PASS;
 
+  // Count mode: wire the caller's per-expert counts tensor so the dispatch
+  // writes recv counts. NULL leaves layout_info unset (non-count callers).
+  ncclEpLayoutInfo_t layout_info = NCCL_EP_LAYOUT_INFO_INIT;
+  NVTEShape recv_counts_shape;
+  ncclEpTensor_t recv_counts_desc;
+  const ncclEpLayoutInfo_t* layout_info_ptr = nullptr;
+  if (recv_tokens_per_expert != nullptr) {
+    recv_counts_desc = make_nccl_ep_tensor(recv_tokens_per_expert, recv_counts_shape);
+    layout_info.expert_counters = &recv_counts_desc;
+    layout_info_ptr = &layout_info;
+  }
+
+  NVTE_CHECK_NCCL(
+      ncclEpDispatch(handle, &in_struct, &out_struct, layout_info_ptr, &dispatch_cfg, stream));
+}
+
+void EPBackend::dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTETensor tokens,
+                         const NVTECommWindow& tokens_win, const NVTETensor topk_weights,
+                         const NVTECommWindow& topk_weights_win, NVTETensor recv_tokens,
+                         const NVTECommWindow& recv_tokens_win, NVTETensor recv_topk_weights,
+                         const NVTECommWindow& recv_topk_weights_win, cudaStream_t stream) {
+  NVTE_CHECK(handle_mem != nullptr, "handle_mem must not be null");
   std::lock_guard<std::mutex> lock(mutex_);
   NVTE_CHECK(initialized_, "EPBackend not initialized");
   ncclEpHandle_t h = lookup_handle_locked(handle_mem);
-  NVTE_CHECK_NCCL(ncclEpDispatch(h, &in_struct, &out_struct,
-                                 /*layout_info=*/nullptr, &dispatch_cfg, stream));
+  issue_dispatch_locked(h, topk_idx, tokens, tokens_win, topk_weights, topk_weights_win,
+                        recv_tokens, recv_tokens_win, recv_topk_weights, recv_topk_weights_win,
+                        /*recv_tokens_per_expert=*/nullptr, stream);
+}
+
+void EPBackend::prepare_and_dispatch(void* handle_mem, const NVTETensor topk_idx,
+                                     const NVTETensor tokens, const NVTECommWindow& tokens_win,
+                                     const NVTETensor topk_weights,
+                                     const NVTECommWindow& topk_weights_win, NVTETensor recv_tokens,
+                                     const NVTECommWindow& recv_tokens_win,
+                                     NVTETensor recv_topk_weights,
+                                     const NVTECommWindow& recv_topk_weights_win,
+                                     NVTETensor recv_tokens_per_expert, NVTEEpLayerConfig layer_cfg,
+                                     cudaStream_t stream) {
+  NVTE_CHECK(handle_mem != nullptr, "handle_mem must not be null");
+  NVTE_CHECK(layer_cfg.top_k > 0, "top_k must be > 0, got ", layer_cfg.top_k);
+  NVTE_CHECK(nvte_tensor_shape(topk_idx).ndim == 2, "topk_idx must be 2D [T, top_k]");
+
+  NVTEShape topk_idx_shape;
+  ncclEpTensor_t nccl_topk_idx = make_nccl_ep_tensor(topk_idx, topk_idx_shape);
+
+  std::lock_guard<std::mutex> lock(mutex_);
+  NVTE_CHECK(initialized_, "EPBackend not initialized");
+  ncclEpHandle_t h = prepare_handle_locked(handle_mem, layer_cfg);
+  // Count mode: UpdateHandle only seeds routing; the dispatch produces the
+  // per-expert recv counts into recv_tokens_per_expert.
+  NVTE_CHECK_NCCL(ncclEpUpdateHandle(h, &nccl_topk_idx, /*layout_info=*/nullptr, stream));
+  issue_dispatch_locked(h, topk_idx, tokens, tokens_win, topk_weights, topk_weights_win,
+                        recv_tokens, recv_tokens_win, recv_topk_weights, recv_topk_weights_win,
+                        recv_tokens_per_expert, stream);
 }
 
 void EPBackend::combine(void* handle_mem, const NVTETensor expert_out,
