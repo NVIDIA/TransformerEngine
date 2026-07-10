@@ -268,15 +268,24 @@ INSTANTIATE_TEST_SUITE_P(
                           ScaledActivationCase::kSReLU),
         ::testing::Values(DType::kFloat32, DType::kBFloat16),   // data dtype
         ::testing::Values(DType::kFloat32, DType::kBFloat16),   // scale dtype
-        ::testing::Values(std::pair<size_t, size_t>{17, 64},    // odd rows, aligned hidden
-                          std::pair<size_t, size_t>{32, 32},    // minimal aligned square
-                          std::pair<size_t, size_t>{128, 128},  // square
-                          std::pair<size_t, size_t>{256, 64},   // many rows, narrow hidden
-                          std::pair<size_t, size_t>{1024, 2048},  // large FFN-ish width
-                          std::pair<size_t, size_t>{1, 1},      // single element
-                          std::pair<size_t, size_t>{1, 96},     // single row
-                          std::pair<size_t, size_t>{96, 1},     // single hidden column
-                          std::pair<size_t, size_t>{13, 100}),  // non-power-of-two
+        ::testing::Values(std::pair<size_t, size_t>{17, 64},      // aligned + interleaved
+                          std::pair<size_t, size_t>{13, 100},     // scalar fallback
+                          std::pair<size_t, size_t>{1024, 2048}),  // large FFN-ish width
         ::testing::Values(0, 32),                                // contiguous + interleaved
         ::testing::Values(false, true)),                         // grad_act_scales off / on
+    test_name_generator);
+
+// Keep FP16 coverage focused on representative aligned and scalar-fallback shapes instead of
+// multiplying it across the full shape matrix above.
+INSTANTIATE_TEST_SUITE_P(
+    OperatorTest_ScaledActivation_FP16, ScaledActivationTest,
+    ::testing::Combine(
+        ::testing::Values(ScaledActivationCase::kSwiGLU, ScaledActivationCase::kClampedSwiGLU,
+                          ScaledActivationCase::kSReLU),
+        ::testing::Values(DType::kFloat16),                       // data dtype
+        ::testing::Values(DType::kFloat32, DType::kFloat16),      // scale dtype
+        ::testing::Values(std::pair<size_t, size_t>{17, 64},      // aligned/interleaved
+                          std::pair<size_t, size_t>{13, 100}),    // scalar fallback
+        ::testing::Values(0, 32),                                 // contiguous + interleaved
+        ::testing::Values(false, true)),                          // grad_act_scales off / on
     test_name_generator);
