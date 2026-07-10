@@ -21,7 +21,6 @@ from transformer_engine.common.recipe import (
     Float8CurrentScaling,
     MXFP8BlockScaling,
 )
-from transformer_engine.pytorch.utils import get_cudnn_version
 from transformer_engine.pytorch.quantization import (
     QuantizerRole,
     get_fp8_te_dtype,
@@ -557,25 +556,6 @@ class DotProductAttention(TransformerEngineBaseModule):
             not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
             or torch.are_deterministic_algorithms_enabled()
         )
-        # To use the workspace optimization path for determinism, please
-        # set NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT=1 for cuDNN >=8.9.5 and <9.0.0,
-        # and set NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 for cuDNN >=9.0.0.
-        cudnn_version = get_cudnn_version()
-        if (8, 9, 5) <= cudnn_version < (9, 0, 0):
-            if self.deterministic:
-                os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] = "1"
-
-            # CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT
-            # - unset:       enables workspace optimization when required workspace is <= 256MB
-            #                or when bias gradient needs to be computed
-            # - n:           enables workspace optimization when required workspace is <= n bytes
-            # - -1:          enables workspace optimization always
-            # - 0:           disables workspace optimization always
-            if "NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT" in os.environ:
-                if os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] == "0":
-                    os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "0"
-                if os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] == "1":
-                    os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "-1"
 
         assert attention_type in AttnTypes, f"attention_type {attention_type} not supported"
 
@@ -1167,16 +1147,17 @@ class DotProductAttention(TransformerEngineBaseModule):
 
             Users can use environment variables :attr:`NVTE_FLASH_ATTN`, :attr:`NVTE_FUSED_ATTN`,
             and :attr:`NVTE_FUSED_ATTN_BACKEND` to control which DotProductAttention backend,
-            and FusedAttention backend if applicable, to use. Transformer Engine prioritizes
-            FlashAttention over FusedAttention and over UnfusedDotProductAttention.
+            and FusedAttention backend if applicable, to use. Transformer Engine first filters
+            backends by support for the runtime environment and input configuration, then applies
+            a performance-based preference order. On supported pre-Hopper GPUs, FlashAttention is
+            preferred over FusedAttention and UnfusedDotProductAttention when both optimized
+            backends are eligible. On Hopper and newer GPUs, including Blackwell, FusedAttention is
+            preferred over FlashAttention and UnfusedDotProductAttention when both optimized
+            backends are eligible.
             If FusedAttention is being used, users can also choose to switch to flash-attn's
             implementation for backward by setting :attr:`NVTE_FUSED_ATTN_USE_FAv2_BWD=1`
             (default: 0), because of the performance differences between various versions of
-            flash-attn and FusedAttention. Further, :attr:`NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT`
-            can be used to enable (:attr:`1`) or disable (:attr:`0`) the workspace related
-            optimizations in FusedAttention. When unset, Transformer Engine determines the code path
-            based on its internal logic. These optimizations trade memory for performance
-            and should be used with care.
+            flash-attn and FusedAttention.
 
         .. note::
             .. _cu_seqlens note:
@@ -1710,16 +1691,24 @@ class DotProductAttention(TransformerEngineBaseModule):
                         False
                     ), "core_attention_bias must be in one of {bhss, 1hss, b1ss, 11ss, 111s} shapes"
 
-            # check if there is padding between sequences when qkv_format='thd'
+            # Default pad_between_seqs auto-detect. For THD, infer presence of
+            # inter-sequence padding from whether padded cu_seqlens were supplied --
+            # sync-free, and stable across eager and CUDA graph capture (the auto-detect
+            # must return the same value in both modes for backend selection to match).
+            # If padded cu_seqlens are the *same object* as the unpadded ones, no real
+            # inter-sequence padding exists (only THD tail padding) -- treat as False so
+            # FlashAttention v2/v4 remain eligible.
             if pad_between_seqs is None:
                 if qkv_format == "thd":
-                    pad_between_seqs = (
-                        cu_seqlens_q_padded is not None
-                        and not torch.equal(cu_seqlens_q_padded[:-1], cu_seqlens_q[:-1])
-                    ) or (
-                        cu_seqlens_kv_padded is not None
-                        and not torch.equal(cu_seqlens_kv_padded[:-1], cu_seqlens_kv[:-1])
-                    )
+                    if (
+                        cu_seqlens_q_padded is cu_seqlens_q
+                        and cu_seqlens_kv_padded is cu_seqlens_kv
+                    ):
+                        pad_between_seqs = False
+                    else:
+                        pad_between_seqs = (
+                            cu_seqlens_q_padded is not None or cu_seqlens_kv_padded is not None
+                        )
                 else:
                     pad_between_seqs = False
 

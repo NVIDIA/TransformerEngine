@@ -289,6 +289,8 @@ def _linear_forward_impl(
     is_fsdp2 = args.is_fsdp2
     if backward_override == "high_precision":
         save_original_input = True
+    elif backward_override == "dequantized":
+        save_original_input = False
 
     # NVTX label for profiling
     nvtx_label = "transformer_engine._Linear.forward"

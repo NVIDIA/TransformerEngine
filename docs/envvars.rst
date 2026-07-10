@@ -122,6 +122,19 @@ These environment variables control the behavior of Transformer Engine during ex
 Attention Backend Selection
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+Transformer Engine attention selects a backend in two stages. First, it filters the available
+backends by environment variables, GPU architecture, installed ``flash-attn`` and cuDNN versions,
+data type and FP8 recipe, training or inference mode, and the provided attention configuration.
+Then it applies a performance-based preference order among the remaining eligible backends.
+
+In PyTorch, the broad preference order is ``FlashAttention > FusedAttention >
+UnfusedDotProductAttention`` on supported pre-Hopper GPUs such as Ampere/Ada, and
+``FusedAttention > FlashAttention > UnfusedDotProductAttention`` on Hopper and newer GPUs,
+including Blackwell. In JAX, Transformer Engine uses cuDNN fused attention when
+``NVTE_FUSED_ATTN=1`` and an eligible cuDNN kernel is available; otherwise it falls back to the
+JAX-native implementation. See :doc:`examples/attention/attention` for a longer
+backend-selection overview.
+
 .. envvar:: NVTE_FLASH_ATTN
 
    :Type: ``int`` (0 or 1)
@@ -144,13 +157,7 @@ Attention Backend Selection
 
    :Type: ``int`` (1 or 2)
    :Default: Auto-selected
-   :Description: Force a specific FusedAttention backend. ``1`` = F16_arbitrary_seqlen (cuDNN, any seq len), ``2`` = FP8 backend. If not set, the backend is automatically selected based on the input configuration.
-
-.. envvar:: NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT
-
-   :Type: ``int`` (0 or 1)
-   :Default: Auto-determined
-   :Description: Control workspace-related optimizations in FusedAttention. ``0`` disables optimizations, ``1`` enables them. These optimizations trade memory for performance. When unset, Transformer Engine determines the code path based on internal logic. For deterministic behavior with cuDNN ≥8.9.5 and <9.0.0, this is automatically set to ``1``.
+   :Description: Request a cuDNN FusedAttention backend when that request is supported by the active fused-attention path. ``1`` = F16_arbitrary_seqlen (cuDNN, any seq len), ``2`` = FP8 backend. If not set, the backend is automatically selected based on the input configuration. BF16/FP16 attention uses sub-backend ``1`` when eligible. FP8 attention uses sub-backend ``2`` when FP8 DPA is enabled and supported by the architecture, cuDNN version, and input configuration.
 
 .. envvar:: NVTE_FUSED_ATTN_USE_FAv2_BWD
 

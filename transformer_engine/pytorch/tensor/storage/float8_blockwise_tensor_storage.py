@@ -12,10 +12,101 @@ import torch
 import transformer_engine_torch as tex
 
 from ...quantized_tensor import QuantizedTensorStorage, Quantizer
+from .._quantization_helpers import safe_quantized_repr
 
 from ...constants import TE_DType_To_Torch, DType
 
 from ...utils import _empty_tensor
+
+
+class _FromFloat8BlockwiseFunc(torch.autograd.Function):
+    """Cast from Float8 blockwise to other dtype"""
+
+    @staticmethod
+    def forward(
+        _ctx: Optional[torch.autograd.function.FunctionCtx],  # unused
+        tensor: Float8BlockwiseQTensorStorage,
+        dtype: Optional[torch.dtype] = None,
+    ) -> torch.Tensor:
+        # pylint: disable=missing-function-docstring
+        if dtype is None:
+            dtype = tensor._dtype
+
+        if tensor._rowwise_data is not None and tensor._rowwise_data.numel() == 0:
+            return torch.empty(tensor.size(), dtype=dtype, device=tensor.device)
+
+        block_len = 128
+        if not tensor._is_2D_scaled:
+            return tensor._dequantize_vectorwise(dtype=dtype)
+
+        def format_scale_as_logical_shape(q_K, scales, block_len):
+            # The GEMM for 2D blocks required padding in the scales.
+            derived_scale_k_shape = math.ceil(q_K / block_len)
+            _, scale_K = scales.shape
+            if derived_scale_k_shape == scale_K:
+                return scales
+            return scales[:, :derived_scale_k_shape].contiguous()
+
+        q_M, q_K = 1, 1
+        if tensor._rowwise_data is not None:
+            q = tensor._rowwise_data
+            scale_inv = tensor._rowwise_scale_inv
+            transpose_output = False
+            if len(q.shape) >= 1:
+                q_K = q.shape[-1]
+            for i in range(len(q.shape) - 1):
+                q_M *= q.shape[i]
+        else:
+            assert tensor._columnwise_data is not None, "No data to dequantize"
+            q = tensor._columnwise_data
+            scale_inv = tensor._columnwise_scale_inv
+            transpose_output = True
+            if len(q.shape) >= 1:
+                q_M = q.shape[0]
+            for i in range(1, len(q.shape)):
+                q_K *= q.shape[i]
+
+        orig_shape = q.shape
+        q = q.reshape(q_M, q_K)
+        formatted_scales = format_scale_as_logical_shape(q_K, scale_inv, block_len)
+        assert len(formatted_scales.shape) == 2
+        m_tiles, k_tiles = formatted_scales.shape
+        unpadded_m, unpadded_k = q_M, q_K
+        m_block_len = block_len
+        k_block_len = block_len
+        if q_M % m_block_len != 0 or q_K % k_block_len != 0:
+            m_pad_amount = (m_block_len - (q_M % m_block_len)) % m_block_len
+            k_pad_amount = (k_block_len - (q_K % k_block_len)) % k_block_len
+            q = torch.nn.functional.pad(
+                q, (0, k_pad_amount, 0, m_pad_amount), mode="constant", value=0
+            ).contiguous()
+        padded_M, padded_K = q.shape
+        q_tiled = q.reshape(m_tiles, m_block_len, k_tiles, k_block_len)
+
+        torch_q_dtype = TE_DType_To_Torch[tensor._fp8_dtype]
+
+        result = q_tiled.view(torch_q_dtype).to(torch.float32) * formatted_scales.view(
+            m_tiles, 1, k_tiles, 1
+        )
+        result = result.view(padded_M, padded_K).to(dtype)
+        if padded_M != unpadded_m or padded_K != unpadded_k:
+            result = result[:unpadded_m, :unpadded_k]
+        if len(orig_shape) == 0:
+            result = result.reshape([])
+        else:
+            result = result.reshape(*orig_shape).contiguous()
+        if transpose_output:
+            return tensor._transpose_dq_columnwise_output(result)
+        return result
+
+    @staticmethod
+    def backward(
+        _ctx: torch.autograd.function.FunctionCtx,  # unused
+        grad: torch.Tensor,
+    ) -> Tuple[Optional[torch.Tensor], ...]:
+        # pylint: disable=missing-function-docstring
+        # Assume that we want gradients in full precision
+        return grad, None
 
 
 class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
@@ -219,75 +310,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         """
         Construct plain PyTorch tensor from Float8BlockwiseQTensor
         """
-        if dtype is None:
-            dtype = self._dtype
-
-        if self._rowwise_data is not None and self._rowwise_data.numel() == 0:
-            return torch.empty(self.size(), dtype=dtype, device=self.device)
-
-        block_len = 128
-        if not self._is_2D_scaled:
-            return self._dequantize_vectorwise(dtype=dtype)
-
-        def format_scale_as_logical_shape(q_K, scales, block_len):
-            # The GEMM for 2D blocks required padding in the scales.
-            derived_scale_k_shape = math.ceil(q_K / block_len)
-            _, scale_K = scales.shape
-            if derived_scale_k_shape == scale_K:
-                return scales
-            return scales[:, :derived_scale_k_shape].contiguous()
-
-        q_M, q_K = 1, 1
-        if self._rowwise_data is not None:
-            q = self._rowwise_data
-            scale_inv = self._rowwise_scale_inv
-            transpose_output = False
-            if len(q.shape) >= 1:
-                q_K = q.shape[-1]
-            for i in range(len(q.shape) - 1):
-                q_M *= q.shape[i]
-        else:
-            assert self._columnwise_data is not None, "No data to dequantize"
-            q = self._columnwise_data
-            scale_inv = self._columnwise_scale_inv
-            transpose_output = True
-            if len(q.shape) >= 1:
-                q_M = q.shape[0]
-            for i in range(1, len(q.shape)):
-                q_K *= q.shape[i]
-
-        orig_shape = q.shape
-        q = q.reshape(q_M, q_K)
-        formatted_scales = format_scale_as_logical_shape(q_K, scale_inv, block_len)
-        assert len(formatted_scales.shape) == 2
-        m_tiles, k_tiles = formatted_scales.shape
-        unpadded_m, unpadded_k = q_M, q_K
-        m_block_len = block_len
-        k_block_len = block_len
-        if q_M % m_block_len != 0 or q_K % k_block_len != 0:
-            m_pad_amount = (m_block_len - (q_M % m_block_len)) % m_block_len
-            k_pad_amount = (k_block_len - (q_K % k_block_len)) % k_block_len
-            q = torch.nn.functional.pad(
-                q, (0, k_pad_amount, 0, m_pad_amount), mode="constant", value=0
-            ).contiguous()
-        padded_M, padded_K = q.shape
-        q_tiled = q.reshape(m_tiles, m_block_len, k_tiles, k_block_len)
-
-        torch_q_dtype = TE_DType_To_Torch[self._fp8_dtype]
-
-        result = q_tiled.view(torch_q_dtype).to(torch.float32) * formatted_scales.view(
-            m_tiles, 1, k_tiles, 1
-        )
-        result = result.view(padded_M, padded_K).to(dtype)
-        if padded_M != unpadded_m or padded_K != unpadded_k:
-            result = result[:unpadded_m, :unpadded_k]
-        if len(orig_shape) == 0:
-            result = result.reshape([])
-        else:
-            result = result.reshape(*orig_shape).contiguous()
-        if transpose_output:
-            return self._transpose_dq_columnwise_output(result)
-        return result
+        return _FromFloat8BlockwiseFunc.forward(None, self, dtype)
 
     def size(self, *args, **kwargs):
         # pylint: disable=missing-function-docstring
@@ -354,17 +377,25 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
             del _old_data
 
     def __repr__(self):
-        if self._rowwise_data is not None:
-            data = self.dequantize()
-            descriptor = "rowwise"
-        else:
-            data = self.dequantize()
-            descriptor = "columnwise"
-        return (
-            "Float8BlockwiseQTensorStorage("
-            f"fp8_dtype={self._fp8_dtype}, "
-            f"{descriptor}_scaled_data={data})"
-        )
+        try:
+            if self._rowwise_data is not None:
+                data = self.dequantize()
+                descriptor = "rowwise"
+            else:
+                data = self.dequantize()
+                descriptor = "columnwise"
+            return (
+                "Float8BlockwiseQTensorStorage("
+                f"fp8_dtype={self._fp8_dtype}, "
+                f"{descriptor}_scaled_data={data})"
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            return safe_quantized_repr(
+                self,
+                "Float8BlockwiseQTensorStorage",
+                extras={"is_2D_scaled": self._is_2D_scaled},
+                error=exc,
+            )
 
     def update_usage(
         self, rowwise_usage: Optional[bool] = None, columnwise_usage: Optional[bool] = None

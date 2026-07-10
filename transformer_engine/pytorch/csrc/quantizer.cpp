@@ -1154,6 +1154,14 @@ std::pair<GroupedTensorWrapper, py::object> Float8BlockQuantizer::create_grouped
     const size_t logical_last_dim) const {
   using namespace pybind11::literals;
 
+  // The fused grouped FP8 block-scaling path uses unconstrained FP32 scales and does not
+  // implement power-of-2 scaling. Reject force_pow_2_scales rather than silently ignoring it;
+  // the unfused per-tensor split-quantize path still honors it.
+  NVTE_CHECK(!force_pow_2_scales,
+             "Fused grouped FP8 block-scaling quantize does not support force_pow_2_scales=True. "
+             "Set force_pow_2_scales=False, or use the unfused split-quantize path "
+             "(NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM=0) which supports power-of-2 scales.");
+
   const auto tensor_offsets =
       resolve_grouped_tensor_offsets(num_tensors, first_dims, last_dims, precomputed_tensor_offsets,
                                      logical_first_dim, logical_last_dim);
@@ -1169,18 +1177,36 @@ std::pair<GroupedTensorWrapper, py::object> Float8BlockQuantizer::create_grouped
   std::optional<at::Tensor> columnwise_scale_inv;
   const std::vector<size_t> logical_shape_vec = {logical_first_dim, logical_last_dim};
 
+  // cuBLAS FP8 block-scaling grouped GEMM consumes each expert's scales from a
+  // contiguous per-expert sub-block in the COMPACT (no 128x4 swizzle) layout —
+  // VEC128_32F / BLK128x128_32F, unlike MXFP8/NVFP4 which require the swizzle.
+  // Per-tensor first dims are multiples of 128, so the per-expert padded sizes
+  // sum exactly to `get_scale_shape` of the logical total shape for 1D and
+  // 2D-rowwise. The only case where the per-expert sum can exceed the
+  // totals-based size is 2D columnwise (per-expert roundup(blocks_y_t, 4)),
+  // so reserve a small slack there. Sizing from totals (instead of reading
+  // first_dims on host) keeps allocation CUDA-graph-safe: no device->host copy.
+  constexpr size_t kBlockLen = 128;
+  const size_t blocks_X = ceildiv(logical_last_dim, kBlockLen);
+
+  auto grouped_scale_elems = [&](bool columnwise) -> int64_t {
+    const auto sh = get_scale_shape(logical_shape_vec, columnwise);
+    int64_t total = static_cast<int64_t>(product(sh));
+    if (columnwise && block_scaling_dim == 2 && num_tensors > 1) {
+      // sum_t roundup(blocks_y_t, 4) <= roundup(total_blocks_y, 4) + 4*(num_tensors-1).
+      total += static_cast<int64_t>(blocks_X * 4 * (num_tensors - 1));
+    }
+    return total;
+  };
+
   if (rowwise_usage) {
     rowwise_data = at::empty({total_elements}, uint8_opts);
-    const auto scale_shape = get_scale_shape(logical_shape_vec, false);
-    const int64_t total_scale_elements = static_cast<int64_t>(product(scale_shape));
-    rowwise_scale_inv = at::empty({total_scale_elements}, float_opts);
+    rowwise_scale_inv = at::empty({grouped_scale_elems(false)}, float_opts);
   }
 
   if (columnwise_usage) {
     columnwise_data = at::empty({total_elements}, uint8_opts);
-    const auto scale_shape = get_scale_shape(logical_shape_vec, true);
-    const int64_t total_scale_elements = static_cast<int64_t>(product(scale_shape));
-    columnwise_scale_inv = at::empty({total_scale_elements}, float_opts);
+    columnwise_scale_inv = at::empty({grouped_scale_elems(true)}, float_opts);
   }
 
   GroupedTensorWrapper out_cpp(num_tensors, logical_shape, this->get_scaling_mode());
@@ -1195,6 +1221,8 @@ std::pair<GroupedTensorWrapper, py::object> Float8BlockQuantizer::create_grouped
     out_cpp.set_columnwise_scale_inv(columnwise_scale_inv->data_ptr(), DType::kFloat32,
                                      getTensorShape(*columnwise_scale_inv));
   }
+  // FP8 block-scaling grouped GEMM reads compact scales; never swizzle.
+  out_cpp.set_with_gemm_swizzled_scales(false);
   if (first_dims.has_value()) {
     out_cpp.set_first_dims(first_dims->data_ptr(), DType::kInt64, getTensorShape(*first_dims));
   }
@@ -1431,7 +1459,7 @@ std::vector<size_t> Float8BlockQuantizer::get_scale_shape(const std::vector<size
     }
     scale_shape = {sinv0, sinv1};
   } else {
-    // columnwise scaling factor shape
+    // columnwise scaling factor shape (compact)
     size_t sinv0 = 0;
     size_t sinv1 = 0;
     if (block_scaling_dim == 2) {
@@ -1894,6 +1922,32 @@ bool NVFP4Quantizer::is_eligible_for_rht_cast_fusion(const std::vector<size_t>& 
          transformer_engine::cuda::sm_arch() <= 110;
 }
 
+bool NVFP4Quantizer::is_eligible_for_2d_swizzle_fusion(const std::vector<size_t>& shape) {
+  const auto [rows, cols] = get_2d_dims(shape);
+  return rows % 128 == 0 && cols % 128 == 0 && transformer_engine::cuda::sm_arch() >= 100 &&
+         transformer_engine::cuda::sm_arch() <= 110;
+}
+
+namespace {
+
+// Whether this quantizer should emit GEMM-swizzled scale factors directly from the
+// quantize kernel (RHT cast-fusion path or the plain 2D quantize path), avoiding the
+// standalone post-quantize swizzle pass.
+bool nvfp4_emits_gemm_swizzled_scales(const NVFP4Quantizer& q, const std::vector<size_t>& shape) {
+  if (!q.optimize_for_gemm) {
+    return false;
+  }
+  if (q.with_rht) {
+    return NVFP4Quantizer::is_eligible_for_rht_cast_fusion(shape);
+  }
+  // Plain (non-RHT) 2D quantize kernel can bake the swizzled layout for aligned shapes.
+  return q.with_2d_quantization && !q.row_scaled_nvfp4 &&
+         q.nvfp4_4over6_mode == kNVTENVFP44Over6Disabled &&
+         NVFP4Quantizer::is_eligible_for_2d_swizzle_fusion(shape);
+}
+
+}  // namespace
+
 std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
     const std::vector<size_t>& shape, DType dtype, std::optional<at::Device> device_opt,
     bool pin_memory) const {
@@ -1904,10 +1958,10 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
   const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
   const auto [flat_first_dim, flat_last_dim] = get_2d_dims(shape);
 
-  // Swizzled SF is only valid when the RHT cast-fusion path runs;
-  // other quantize paths reject it.
-  const bool with_gemm_swizzled_scales = this->optimize_for_gemm && this->with_rht &&
-                                         NVFP4Quantizer::is_eligible_for_rht_cast_fusion(shape);
+  // Swizzled SF is emitted directly by the RHT cast-fusion kernel or by the plain
+  // 2D quantize kernel (for aligned shapes); other quantize paths reject it and go
+  // through the standalone post-quantize swizzle pass instead.
+  const bool with_gemm_swizzled_scales = nvfp4_emits_gemm_swizzled_scales(*this, shape);
   NVTE_CHECK(flat_first_dim % NVFP4_BLOCK_SIZE == 0, "First dim for NVFP4 must be divisible by ",
              NVFP4_BLOCK_SIZE, " (got shape=", shape, ")");
   NVTE_CHECK(flat_last_dim % NVFP4_BLOCK_SIZE == 0,
@@ -2235,10 +2289,10 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
 
   const auto [flat_first_dim, flat_last_dim] = get_2d_dims(shape);
 
-  // Swizzled SF is only valid when the RHT cast-fusion path runs;
-  // other quantize paths reject it.
-  const bool with_gemm_swizzled_scales = this->optimize_for_gemm && this->with_rht &&
-                                         NVFP4Quantizer::is_eligible_for_rht_cast_fusion(shape);
+  // Swizzled SF is emitted directly by the RHT cast-fusion kernel or by the plain
+  // 2D quantize kernel (for aligned shapes); other quantize paths reject it and go
+  // through the standalone post-quantize swizzle pass instead.
+  const bool with_gemm_swizzled_scales = nvfp4_emits_gemm_swizzled_scales(*this, shape);
 
   const bool row_scaled_nvfp4 = this->row_scaled_nvfp4;
   const bool nvfp4_use_4over6 = this->nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;

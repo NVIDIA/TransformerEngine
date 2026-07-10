@@ -12,6 +12,7 @@ import torch
 import transformer_engine_torch as tex
 
 from ...quantized_tensor import QuantizedTensorStorage, Quantizer
+from .._quantization_helpers import safe_quantized_repr
 
 from ...constants import TE_DType as torch_to_transformer_engine_dtype, TE_DType_To_Torch, DType
 
@@ -209,13 +210,16 @@ class Float8TensorStorage(QuantizedTensorStorage):
         )
 
     def __repr__(self):
-        return (
-            "Float8TensorStorage("
-            f"fp8_dtype={self._fp8_dtype}, "
-            f"scale_inv={self._scale_inv.item()}, "
-            f"data={self.dequantize()}"
-            ")"
-        )
+        try:
+            return (
+                "Float8TensorStorage("
+                f"fp8_dtype={self._fp8_dtype}, "
+                f"scale_inv={self._scale_inv.item()}, "
+                f"data={self.dequantize()}"
+                ")"
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            return safe_quantized_repr(self, "Float8TensorStorage", error=exc)
 
     def _create_transpose(self):
         """Update FP8 transpose cache"""
