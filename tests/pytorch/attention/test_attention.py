@@ -934,25 +934,28 @@ model_configs_layout = {
 @pytest.mark.parametrize("model_configs", [model_configs_layout])
 @pytest.mark.parametrize("model", model_configs_layout.keys())
 @pytest.mark.parametrize("qkv_layout", qkv_layouts)
-@pytest.mark.parametrize(
-    "declarative", [pytest.param(False, id="views"), pytest.param(True, id="declarative")]
-)
-def test_dpa_qkv_layout(dtype, model_configs, model, qkv_layout, declarative):
-    """Test DotProductAttention module with different QKV layouts.
+def test_dpa_qkv_layout(dtype, model_configs, model, qkv_layout):
+    """Test DotProductAttention module with different QKV layouts"""
+    test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, False, False)
 
-    declarative=False passes q/k/v as views of the packed buffer (pointer-based
-    layout detection); declarative=True passes the packed buffer itself via
-    qkv_layer/kv_layer (declared layout, gradients on the packed buffer)."""
+
+qkv_layouts_packed = [l for l in qkv_layouts if any(c.isdigit() for c in l)]
+
+
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 5), reason="cuDNN 8.9.5+ is required.")
+@pytest.mark.parametrize("dtype", param_types_lean)
+@pytest.mark.parametrize("model_configs", [model_configs_layout])
+@pytest.mark.parametrize("model", ["layout_1_1", "layout_1_2"])
+@pytest.mark.parametrize("qkv_layout", qkv_layouts_packed)
+def test_dpa_qkv_layout_declarative(dtype, model_configs, model, qkv_layout):
+    """Declarative packed inputs: the packed buffer is passed to
+    DotProductAttention via qkv_layer/kv_layer (declared layout, gradients read
+    off the packed buffer) instead of q/k/v views + pointer-based detection.
+    Layout coverage is complete; the model-config dimension is trimmed to one
+    self-attention and one cross-attention config, since past the input
+    handling the backend code is identical to test_dpa_qkv_layout."""
     test_dot_product_attention(
-        dtype,
-        model_configs,
-        model,
-        False,
-        True,
-        qkv_layout,
-        False,
-        False,
-        declarative_packed=declarative,
+        dtype, model_configs, model, False, True, qkv_layout, False, False, declarative_packed=True
     )
 
 
@@ -1020,10 +1023,7 @@ model_configs_layout_thd = {
 @pytest.mark.parametrize("model_configs", [model_configs_layout_thd])
 @pytest.mark.parametrize("model", model_configs_layout_thd.keys())
 @pytest.mark.parametrize("qkv_layout", qkv_layouts_thd)
-@pytest.mark.parametrize(
-    "declarative", [pytest.param(False, id="views"), pytest.param(True, id="declarative")]
-)
-def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, declarative):
+def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, declarative_packed=False):
     """Test DotProductAttention module with different QKV layouts"""
     config = model_configs[model]
     if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
@@ -1039,7 +1039,7 @@ def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, declarative
         qkv_layout,
         False,
         pad_between_seqs,
-        declarative_packed=declarative,
+        declarative_packed=declarative_packed,
     )
     if get_cudnn_version() >= (9, 3, 0):
         logging.info("[test_dpa_qkv_layout_thd]: pad_between_seqs = False")
@@ -1054,8 +1054,24 @@ def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, declarative
             qkv_layout,
             False,
             pad_between_seqs,
-            declarative_packed=declarative,
+            declarative_packed=declarative_packed,
         )
+
+
+qkv_layouts_thd_packed = [l for l in qkv_layouts_thd if any(c.isdigit() for c in l)]
+
+
+@pytest.mark.skipif(get_cudnn_version() < (9, 0, 0), reason="cuDNN 9.0.0+ is required.")
+@pytest.mark.skipif(
+    get_device_compute_capability() < (9, 0), reason="THD is only supported on Hopper+."
+)
+@pytest.mark.parametrize("dtype", param_types_lean)
+@pytest.mark.parametrize("model_configs", [model_configs_layout_thd])
+@pytest.mark.parametrize("model", ["layout_0_0"])
+@pytest.mark.parametrize("qkv_layout", qkv_layouts_thd_packed)
+def test_dpa_qkv_layout_thd_declarative(dtype, model_configs, model, qkv_layout):
+    """Declarative packed thd inputs, see test_dpa_qkv_layout_declarative."""
+    test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, declarative_packed=True)
 
 
 def _run_dot_product_attention(
