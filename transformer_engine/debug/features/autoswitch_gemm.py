@@ -39,6 +39,28 @@ def _env_flag_enabled(name: str, default: bool = False) -> bool:
     return os.getenv(name, default_value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _metrics_logging_mode_from_config(config: Optional[Dict]) -> str:
+    """Parse log_metrics mode from config: off/info/debug."""
+    if not isinstance(config, dict) or "log_metrics" not in config:
+        return "off"
+
+    value = config.get("log_metrics", False)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"debug", "dbg"}:
+            return "debug"
+        if lowered in {"info", "1", "true", "yes", "on"}:
+            return "info"
+        if lowered in {"off", "0", "false", "no", "none"}:
+            return "off"
+        return "info" if lowered else "off"
+
+    if isinstance(value, bool):
+        return "info" if value else "off"
+
+    return "info" if bool(value) else "off"
+
+
 def _register_sampling_config(config: Dict) -> None:
     """Track AutoswitchGemm sampling schedules for runtime eager/graph routing."""
     global _AUTOSWITCH_LOGGING_ENABLED
@@ -53,7 +75,9 @@ def _register_sampling_config(config: Dict) -> None:
     if key not in _AUTOSWITCH_SAMPLING_CONFIG_KEYS:
         _AUTOSWITCH_SAMPLING_CONFIG_KEYS.add(key)
         _AUTOSWITCH_SAMPLING_CONFIGS.append(schedule)
-    if any(bool(config.get(key, False)) for key in ("log_metrics", "log_decisions", "verbose")):
+    if _metrics_logging_mode_from_config(config) != "off" or any(
+        bool(config.get(key, False)) for key in ("log_decisions", "verbose")
+    ):
         _AUTOSWITCH_LOGGING_ENABLED = True
 
     scope = str(config.get("hold_window_scope", "global")).strip().lower()
@@ -525,10 +549,38 @@ class AutoswitchGemm(TEConfigAPIMapper):
     def _logging_enabled(self, config: Optional[Dict] = None) -> bool:
         """Return True when verbose AutoswitchGemm logging is enabled."""
         if config is not None:
-            for key in ("log_metrics", "log_decisions", "verbose"):
+            if "log_metrics" in config and _metrics_logging_mode_from_config(config) != "off":
+                return True
+            for key in ("log_decisions", "verbose"):
                 if key in config:
                     return self._config_bool(config, key, False)
         return autoswitch_gemm_logging_enabled()
+
+    def _should_log_metrics(self, config: Optional[Dict], iteration: int) -> bool:
+        """Return whether scalar metrics should be emitted for this iteration."""
+        mode = _metrics_logging_mode_from_config(config)
+        if mode == "off":
+            return False
+        if mode == "debug":
+            if not isinstance(config, dict):
+                return False
+            return self._is_sampling_iteration_for_config(config, iteration)
+        return True
+
+    def _log_metric_scalar(
+        self,
+        metric_logger: Optional[_AutoswitchGemmMetricLogger],
+        config: Optional[Dict],
+        layer_name: str,
+        gemm: str,
+        metric_name: str,
+        iteration: int,
+        value: float,
+    ) -> None:
+        """Emit one scalar metric if enabled by log_metrics mode."""
+        if metric_logger is None or not self._should_log_metrics(config, iteration):
+            return
+        metric_logger.log_scalar(layer_name, gemm, metric_name, iteration, value)
 
     @staticmethod
     def _hold_window_scope(config: Optional[Dict]) -> str:
@@ -567,11 +619,24 @@ class AutoswitchGemm(TEConfigAPIMapper):
     ) -> None:
         """Store the latest quality metric for a `(layer, gemm)` pair."""
         metric_logger = self._get_metrics_logger(config)
-        if metric_logger is not None:
-            metric_logger.log_scalar(
-                layer_name, gemm, f"{tensor_name}_underflow_pct", iteration, underflow_pct
-            )
-            metric_logger.log_scalar(layer_name, gemm, f"{tensor_name}_mse", iteration, mse)
+        self._log_metric_scalar(
+            metric_logger,
+            config,
+            layer_name,
+            gemm,
+            f"{tensor_name}_underflow_pct",
+            iteration,
+            underflow_pct,
+        )
+        self._log_metric_scalar(
+            metric_logger,
+            config,
+            layer_name,
+            gemm,
+            f"{tensor_name}_mse",
+            iteration,
+            mse,
+        )
 
         key = (layer_name, gemm)
         entry = self._latest_metrics.get(key)
@@ -768,10 +833,18 @@ class AutoswitchGemm(TEConfigAPIMapper):
         ):
             state.disable_until_iter = -1
             _update_global_disable_until(layer_name, gemm, state.disable_until_iter)
-            if final_decision and metric_logger is not None:
-                metric_logger.log_scalar(layer_name, gemm, "quantized_enabled", iteration, 1.0)
-                metric_logger.log_scalar(
-                    layer_name, gemm, "switch_blocked_fp8_model_params", iteration, 1.0
+            if final_decision:
+                self._log_metric_scalar(
+                    metric_logger, config, layer_name, gemm, "quantized_enabled", iteration, 1.0
+                )
+                self._log_metric_scalar(
+                    metric_logger,
+                    config,
+                    layer_name,
+                    gemm,
+                    "switch_blocked_fp8_model_params",
+                    iteration,
+                    1.0,
                 )
             if self._logging_enabled(config):
                 debug_api.log_message(
@@ -783,9 +856,15 @@ class AutoswitchGemm(TEConfigAPIMapper):
             return True, iteration + 1
 
         if gemm in {"fprop", "dgrad"} and fp8_model_params_layer and allow_fp8_model_params_fallback:
-            if final_decision and metric_logger is not None:
-                metric_logger.log_scalar(
-                    layer_name, gemm, "fp8_model_params_dequantized_fallback", iteration, 1.0
+            if final_decision:
+                self._log_metric_scalar(
+                    metric_logger,
+                    config,
+                    layer_name,
+                    gemm,
+                    "fp8_model_params_dequantized_fallback",
+                    iteration,
+                    1.0,
                 )
             if self._logging_enabled(config):
                 debug_api.log_message(
@@ -802,9 +881,13 @@ class AutoswitchGemm(TEConfigAPIMapper):
             disable_until_iter = _get_global_disable_until()
 
         if iteration <= disable_until_iter:
-            if final_decision and metric_logger is not None:
-                metric_logger.log_scalar(layer_name, gemm, "quantized_enabled", iteration, 0.0)
-                metric_logger.log_scalar(
+            if final_decision:
+                self._log_metric_scalar(
+                    metric_logger, config, layer_name, gemm, "quantized_enabled", iteration, 0.0
+                )
+                self._log_metric_scalar(
+                    metric_logger,
+                    config,
                     layer_name,
                     gemm,
                     "disable_until_iter",
@@ -821,8 +904,10 @@ class AutoswitchGemm(TEConfigAPIMapper):
                 )
             return False, iteration + 1
 
-        if final_decision and metric_logger is not None:
-            metric_logger.log_scalar(layer_name, gemm, "quantized_enabled", iteration, 1.0)
+        if final_decision:
+            self._log_metric_scalar(
+                metric_logger, config, layer_name, gemm, "quantized_enabled", iteration, 1.0
+            )
         return True, iteration + 1
 
     @api_method
