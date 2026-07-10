@@ -284,7 +284,7 @@ def _unpack_packed_qkv(
         )
     if kv_layer.dim() != query_layer.dim() + 1:
         raise ValueError(
-            f"kv_layer must have one more dimension than query_layer, got"
+            "kv_layer must have one more dimension than query_layer, got"
             f" {kv_layer.dim()}D kv_layer and {query_layer.dim()}D query_layer."
         )
     if kv_layer.shape[qkv_interleave_dim] != 2:
