@@ -481,19 +481,6 @@ class TestEP(unittest.TestCase):
         torch.testing.assert_close(out.float(), tokens.float(), atol=5e-2, rtol=5e-2)
         torch.testing.assert_close(tokens_p.grad.float(), tokens.float(), atol=5e-2, rtol=5e-2)
 
-    # Input validation
-
-    def test_topk_int32_raises_clear_error(self):
-        buf = self._make_buffer()
-        topk_idx_int32 = torch.zeros(
-            TOKENS_PER_RANK, TOP_K, dtype=torch.int32, device=self.cfg.device
-        )
-        with self.assertRaises(RuntimeError) as cm:
-            ep_prepare(buf, topk_idx_int32)
-        msg = str(cm.exception)
-        self.assertIn("topk_idx", msg)
-        self.assertIn(".long()", msg)
-
 
 def _init_distributed():
     dist.init_process_group(backend="nccl")

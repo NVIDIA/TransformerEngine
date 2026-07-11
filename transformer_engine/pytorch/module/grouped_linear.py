@@ -108,6 +108,8 @@ class _GroupedLinear(torch.autograd.Function):
           per-tensor current scaling.
         FP8 delayed scaling and FP8 block scaling are not supported because the
         corresponding grouped quantization kernels are missing.
+        Grouped GEMM requires cuBLAS 13.3+ (13.4+ on Hopper, 13.5+ for FP8
+        per-tensor current scaling on Hopper); otherwise the legacy path is used.
         Non-RHT NVFP4 falls back to the legacy path because graph-safe grouped quantization
         currently requires RHT.
 
@@ -126,8 +128,14 @@ class _GroupedLinear(torch.autograd.Function):
             or save_original_input
         ):
             return False
-        # 3. Filter by compute capability
-        if not (9, 0) <= get_device_compute_capability() <= (11, 0):
+        # 3. Filter by compute capability and cuBLAS version
+        device_capability = get_device_compute_capability()
+        if not (9, 0) <= device_capability <= (11, 0):
+            return False
+        cublaslt_version = tex.get_cublasLt_version()
+        if cublaslt_version < 130300:
+            return False
+        if device_capability < (10, 0) and cublaslt_version < 130400:
             return False
         # 4. Output quantization is not supported.
         if any(q is not None for q in output_quantizers):
@@ -135,9 +143,12 @@ class _GroupedLinear(torch.autograd.Function):
         # 5. Filter by quantization recipes.
         if fp8:
             if all(isinstance(q, Float8CurrentScalingQuantizer) for q in input_quantizers):
+                # FP8 per-tensor scaling grouped GEMM on Hopper requires cuBLAS 13.5+.
+                if device_capability < (10, 0) and cublaslt_version < 130500:
+                    return False
                 return True
             # MXFP8 and NVFP4 require Blackwell+.
-            if not (10, 0) <= get_device_compute_capability() <= (11, 0):
+            if not (10, 0) <= device_capability <= (11, 0):
                 return False
             return all(isinstance(q, MXFP8Quantizer) for q in input_quantizers) or all(
                 isinstance(q, NVFP4Quantizer) and q.with_rht for q in input_quantizers

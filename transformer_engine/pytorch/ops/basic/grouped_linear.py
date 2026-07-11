@@ -793,8 +793,14 @@ class GroupedLinear(BasicOperation):
             return False
         if with_quantized_compute:
             # FP8 per-tensor current scaling runs on the Hopper and Blackwell grouped GEMM
-            # path; the compute-capability range was already checked above.
+            # path; the compute-capability range was already checked above. On Hopper it
+            # requires cuBLAS 13.5+; fall back to the legacy flow on older cuBLAS.
             if all(isinstance(q, Float8CurrentScalingQuantizer) for q in input_quantizers):
+                if (
+                    get_device_compute_capability() < (10, 0)
+                    and tex.get_cublasLt_version() < 130500
+                ):
+                    return False
                 return True
             # MXFP8 and NVFP4 grouped quantization kernels require Blackwell.
             if not (10, 0) <= get_device_compute_capability() <= (11, 0):

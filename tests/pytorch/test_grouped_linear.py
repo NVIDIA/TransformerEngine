@@ -1615,6 +1615,8 @@ def test_grouped_linear_grouped_tensor_path_matches_legacy(
     cublaslt_version = tex.get_cublasLt_version()
     if device_capability < (10, 0) and cublaslt_version < 130400:
         pytest.skip("Grouped GEMM on Hopper requires cuBLAS 13.4+.")
+    if is_current_scaling and device_capability < (10, 0) and cublaslt_version < 130500:
+        pytest.skip("FP8 per-tensor scaling grouped GEMM on Hopper requires cuBLAS 13.5+.")
     if cublaslt_version < 130300:
         pytest.skip("Grouped GEMM requires cuBLAS 13.3+.")
 
@@ -1926,6 +1928,8 @@ def test_grouped_linear_fused_path_cuda_graph_safe(fp8_recipe, bias, monkeypatch
     cublaslt_version = tex.get_cublasLt_version()
     if device_capability < (10, 0) and cublaslt_version < 130400:
         pytest.skip("Grouped GEMM on Hopper requires cuBLAS 13.4+.")
+    if is_current_scaling and device_capability < (10, 0) and cublaslt_version < 130500:
+        pytest.skip("FP8 per-tensor scaling grouped GEMM on Hopper requires cuBLAS 13.5+.")
     if cublaslt_version < 130300:
         pytest.skip("Grouped GEMM requires cuBLAS 13.3+.")
 

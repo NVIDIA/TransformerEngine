@@ -86,6 +86,11 @@ def _cudnn_frontend_supports_grouped_gemm_srelu() -> bool:
     return _cudnn_frontend_version_at_least("1.24.0")
 
 
+def _cudnn_frontend_supports_grouped_gemm_srelu_hadamard() -> bool:
+    """Check cuDNN frontend min version for grouped GEMM SReLU hadamard kernels."""
+    return _cudnn_frontend_version_at_least("1.26.0")
+
+
 def _nvidia_cudnn_frontend_supports_wgrad() -> bool:
     """Check cuDNN FE min version for grouped GEMM wgrad kernel."""
     return _cudnn_frontend_version_supported()
@@ -876,7 +881,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
         # Get basic operations
-        fc1_op, _, fc2_op = self.basic_ops
+        fc1_op, activation_op, fc2_op = self.basic_ops
         fc1_ctx, _activation_ctx, fc2_ctx = basic_op_ctxs
 
         # Caller-provided buffers: FC2 forward output and FC1 backward grad-input.
@@ -1160,17 +1165,23 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             fc1_alpha_tensor = alpha_tensor
 
         use_tmem_post_rht_amax = _use_tmem_post_rht_amax()
-        use_fc1_glu_hadamard = False
+        use_fc1_act_hadamard = False
+        use_fc1_act_hadamard_srelu = False
         use_nvfp4_rht_amax = (
             use_nvfp4
             and isinstance(fc2_input_quantizer, NVFP4Quantizer)
             and fc2_input_quantizer.with_rht
             and fc2_input_quantizer.with_post_rht_amax
         )
-        if use_nvfp4_rht_amax and self._cudnn_act_func == "swiglu":
-            kernel_getter = getattr(self, "grouped_gemm_glu_hadamard_kernel", None)
+        activation_is_srelu = isinstance(activation_op, ScaledSReLU)
+        activation_supports_hadamard = self._cudnn_act_func == "swiglu" or (
+            activation_is_srelu and _cudnn_frontend_supports_grouped_gemm_srelu_hadamard()
+        )
+        if use_nvfp4_rht_amax and activation_supports_hadamard:
+            kernel_getter = getattr(self, "grouped_gemm_act_hadamard_kernel", None)
             if kernel_getter is not None:
-                use_fc1_glu_hadamard = kernel_getter() is not None
+                use_fc1_act_hadamard = kernel_getter() is not None
+                use_fc1_act_hadamard_srelu = use_fc1_act_hadamard and activation_is_srelu
 
         fc1_activation_kwargs = {
             "a_tensor": fc1_x_data,
@@ -1187,9 +1198,11 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             "current_stream": current_stream,
             "use_dynamic_sched": True,
         }
-        if self._cudnn_act_func is not None:
+        if use_fc1_act_hadamard_srelu:
+            fc1_activation_kwargs["act_func"] = "srelu"
+        elif self._cudnn_act_func is not None:
             fc1_activation_kwargs["act_func"] = self._cudnn_act_func
-        if use_fc1_glu_hadamard:
+        if use_fc1_act_hadamard:
             fc1_activation_kwargs["use_tmem_post_rht_amax"] = use_tmem_post_rht_amax
         else:
             fc1_activation_kwargs["norm_const_tensor"] = fc1_norm_const_tensor
@@ -1243,8 +1256,8 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             fc1_activation_kwargs["b_dtype"] = data_dtype
             fc1_activation_kwargs["b_major"] = "k"
 
-        if use_fc1_glu_hadamard:
-            fc1_kernel_out = self.grouped_gemm_glu_hadamard_kernel()(**fc1_activation_kwargs)
+        if use_fc1_act_hadamard:
+            fc1_kernel_out = self.grouped_gemm_act_hadamard_kernel()(**fc1_activation_kwargs)
         else:
             fc1_kernel_out = self.grouped_gemm_activation_kernel()(**fc1_activation_kwargs)
 
@@ -1278,7 +1291,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             fc2_in = fc2_in.view(in_shape[0], fc2_weight_shape[1]).contiguous()
             fc2_input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
             fc2_input_quantizer.optimize_for_gemm = True
-            if use_fc1_glu_hadamard:
+            if use_fc1_act_hadamard:
                 grouped_fc2_x = _group_quantize_with_amax_for_grouped_mlp(
                     fc2_in,
                     fc2_input_quantizer,
@@ -2147,8 +2160,8 @@ class GroupedMLP_CuTeGEMMGLU(_GroupedMLP_CuTeGEMMBase):
 
     @classmethod
     @functools.lru_cache(maxsize=None)
-    def grouped_gemm_glu_hadamard_kernel(cls) -> Optional[Callable]:
-        """Fused grouped GEMM GLU kernel that also emits NVFP4 RHT amaxes."""
+    def grouped_gemm_act_hadamard_kernel(cls) -> Optional[Callable]:
+        """Fused grouped GEMM activation kernel that also emits NVFP4 RHT amaxes."""
         try:
             from cudnn import (
                 grouped_gemm_glu_hadamard_wrapper_sm100,
@@ -2183,6 +2196,22 @@ class GroupedMLP_CuTeGEMMUnary(_GroupedMLP_CuTeGEMMBase):
         from cudnn import grouped_gemm_srelu_wrapper_sm100  # pylint: disable=no-name-in-module
 
         return grouped_gemm_srelu_wrapper_sm100
+
+    @classmethod
+    @functools.lru_cache(maxsize=None)
+    def grouped_gemm_act_hadamard_kernel(cls) -> Optional[Callable]:
+        """Fused grouped GEMM activation kernel that also emits NVFP4 RHT amaxes."""
+        if not _cudnn_frontend_supports_grouped_gemm_srelu_hadamard():
+            return None
+
+        try:
+            from cudnn import (
+                grouped_gemm_glu_hadamard_wrapper_sm100,
+            )  # pylint: disable=no-name-in-module,import-outside-toplevel
+        except ImportError:
+            return None
+
+        return grouped_gemm_glu_hadamard_wrapper_sm100
 
     @classmethod
     @functools.lru_cache(maxsize=None)
