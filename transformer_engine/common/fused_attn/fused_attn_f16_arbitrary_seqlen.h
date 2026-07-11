@@ -16,33 +16,21 @@
 #include <string>
 
 #include "common/common.h"
+#include "config_and_params.h"
 #include "transformer_engine/fused_attn.h"
 
 namespace transformer_engine {
 void fused_attn_arbitrary_seqlen_fwd(
-    size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
-    size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, size_t num_tokens_q,
-    size_t num_tokens_kv, size_t num_pages_k, size_t num_pages_v, size_t page_size_k,
-    size_t page_size_v, size_t max_pages_per_seq_k, size_t max_pages_per_seq_v, bool is_training,
-    bool return_max_logit, float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,
-    NVTE_QKV_Format o_format, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
-    NVTE_Softmax_Type softmax_type, int64_t window_size_left, int64_t window_size_right,
-    bool bottom_right_diagonal, const Tensor *input_Q, const Tensor *input_K, const Tensor *input_V,
-    const Tensor *input_Bias, const Tensor *input_SoftmaxOffset, Tensor *output_O,
-    NVTETensorPack *Aux_CTX_Tensors, const Tensor *cu_seqlens_q, const Tensor *cu_seqlens_kv,
-    const Tensor *cu_seqlens_q_padded, const Tensor *cu_seqlens_kv_padded,
-    const Tensor *page_table_k, const Tensor *page_table_v, const Tensor *rng_state,
-    Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle);
+    const FusedAttnConfig &cfg, const Tensor *input_Q, const Tensor *input_K,
+    const Tensor *input_V, const Tensor *input_Bias, const Tensor *input_SoftmaxOffset,
+    Tensor *output_O, NVTETensorPack *Aux_CTX_Tensors, const Tensor *cu_seqlens_q,
+    const Tensor *cu_seqlens_kv, const Tensor *cu_seqlens_q_padded,
+    const Tensor *cu_seqlens_kv_padded, const Tensor *page_table_k, const Tensor *page_table_v,
+    const Tensor *rng_state, Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle);
 
 void fused_attn_arbitrary_seqlen_bwd(
-    size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
-    size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, size_t num_tokens_q,
-    size_t num_tokens_kv, float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,
-    NVTE_QKV_Format o_format, NVTE_QKV_Format do_format, NVTE_QKV_Layout dqkv_layout,
-    NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type,
-    int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal,
-    bool deterministic, const Tensor *input_Q, const Tensor *input_K, const Tensor *input_V,
-    const Tensor *input_O, const Tensor *input_dO, const Tensor *input_Bias,
+    const FusedAttnConfig &cfg, const Tensor *input_Q, const Tensor *input_K,
+    const Tensor *input_V, const Tensor *input_O, const Tensor *input_dO, const Tensor *input_Bias,
     const Tensor *input_SoftmaxOffset, Tensor *output_S, Tensor *output_dQ, Tensor *output_dK,
     Tensor *output_dV, Tensor *output_dBias, Tensor *output_dSoftmaxOffset,
     const Tensor *cu_seqlens_q, const Tensor *cu_seqlens_kv, const Tensor *cu_seqlens_q_padded,
@@ -52,12 +40,12 @@ void fused_attn_arbitrary_seqlen_bwd(
 // check if a given configuration is supported for F16/BF16 forward;
 // if it is, cache the graph built for this config, and return an empty string;
 // if not, return a diagnostic message in the form of a string.
-std::string is_supported_f16_fwd(const NVTEFusedAttnConfig *cfg, cudnnHandle_t handle);
+std::string is_supported_f16_fwd(const FusedAttnConfig &cfg, cudnnHandle_t handle);
 
 // check if a given configuration is supported for F16/BF16 backward;
 // if it is, cache the graph built for this config, and return an empty string;
 // if not, return a diagnostic message in the form of a string.
-std::string is_supported_f16_bwd(const NVTEFusedAttnConfig *cfg, cudnnHandle_t handle);
+std::string is_supported_f16_bwd(const FusedAttnConfig &cfg, cudnnHandle_t handle);
 
 }  // namespace transformer_engine
 

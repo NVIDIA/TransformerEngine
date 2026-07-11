@@ -17,10 +17,10 @@ from jax.experimental.custom_partitioning import SdyShardingRule
 
 import transformer_engine_jax
 from transformer_engine_jax import (
+    JAXX_Scaling_Mode,
     NVTE_Fused_Attn_Backend,
     NVTE_QKV_Format,
     NVTE_QKV_Layout,
-    NVTEScalingMode,
 )
 from transformer_engine.jax.attention import (
     AttnBiasType,
@@ -155,7 +155,7 @@ class FusedAttnHelper:
             q_type,
             q_type,
             q_type,
-            NVTEScalingMode.NVTE_INVALID_SCALING,
+            JAXX_Scaling_Mode.NO_SCALING,
             self.qkv_layout.value,
             NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET,
             NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET,

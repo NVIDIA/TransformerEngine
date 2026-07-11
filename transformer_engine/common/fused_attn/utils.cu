@@ -9,6 +9,8 @@
 
 #include "../common.h"
 #include "../cudnn_utils.h"
+#include "../util/cuda_runtime.h"
+#include "config_and_params.h"
 #include "transformer_engine/fused_attn.h"
 #include "utils.h"
 
@@ -633,6 +635,44 @@ __global__ void extract_seed_and_offset(int64_t *rng_state_ptr, bool captured, i
 }
 
 }  // namespace fused_attn
+
+FusedAttnConfig make_fused_attn_graph_cache_config(const FusedAttnConfig &cfg) {
+  FusedAttnConfig cache_cfg = cfg;
+
+  const int64_t s_q = static_cast<int64_t>(cache_cfg.max_seqlen_q);
+  const int64_t s_kv = static_cast<int64_t>(cache_cfg.max_seqlen_kv);
+  const bool is_padding =
+      (cache_cfg.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK) ||
+      (cache_cfg.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK) ||
+      (cache_cfg.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
+  const bool is_bottom_right =
+      (cache_cfg.attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK) ||
+      (cache_cfg.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
+  if (is_bottom_right && s_q == s_kv && !is_padding) {
+    cache_cfg.bottom_right_diagonal = false;
+  }
+
+  const NVTE_QKV_Format q_format = nvte_get_q_format(cache_cfg.qkv_layout);
+  const NVTE_QKV_Format kv_format = nvte_get_kv_format(cache_cfg.qkv_layout);
+  const bool is_ragged_q = (q_format == NVTE_QKV_Format::NVTE_THD);
+  const bool is_ragged_kv = (kv_format == NVTE_QKV_Format::NVTE_THD);
+  const auto cudnn_runtime_version = cudnnGetVersion();
+  const int device_id = cuda::current_device();
+  const int sm_arch_ = cuda::sm_arch(device_id);
+
+  if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= 90600 && sm_arch_ != 120) {
+    cache_cfg.batch_size = cache_cfg.bucketed_batch_size;
+    if (is_ragged_q) {
+      cache_cfg.max_seqlen_q = cache_cfg.bucketed_num_tokens_q;
+    }
+    if (is_ragged_kv) {
+      cache_cfg.max_seqlen_kv = cache_cfg.bucketed_num_tokens_kv;
+    }
+  }
+
+  return cache_cfg;
+}
+
 }  // namespace transformer_engine
 
 void nvte_extract_seed_and_offset(int64_t *rng_state_ptr, int captured, int64_t *seed_ptr,

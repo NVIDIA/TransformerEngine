@@ -196,91 +196,88 @@ NVTE_QKV_Format nvte_get_q_format(NVTE_QKV_Layout qkv_layout);
  */
 NVTE_QKV_Format nvte_get_kv_format(NVTE_QKV_Layout qkv_layout);
 
-/*! \struct NVTEFusedAttnConfig
- *  \brief Attention configuration.
+/*! \brief Opaque fused-attention configuration handle. */
+typedef void *NVTEFusedAttnConfig;
+
+/*! \enum NVTEFusedAttnConfigAttribute
+ *  \brief Attribute types for ``NVTEFusedAttnConfig``.
  *
- * Versioning rules:
- *  - ``struct_size`` MUST be set to ``sizeof(NVTEFusedAttnConfig)`` by the
- *    caller (use ``NVTE_FUSED_ATTN_CONFIG_INIT``).
- *  - New fields may only be appended at the end; existing fields are never
- *    reordered, removed, or resized. The library reads only fields that are
- *    in range according to ``struct_size`` and uses safe defaults otherwise.
+ *  New fields may only be appended at the end; existing fields are never
+ *  reordered, removed, or resized.
  */
-typedef struct NVTEFusedAttnConfig {
-  size_t struct_size; /*!< MUST equal sizeof(NVTEFusedAttnConfig). */
-  uint32_t reserved0; /*!< Padding for layout stability; set to 0. */
-  uint32_t reserved1; /*!< Padding for layout stability; set to 0. */
+enum NVTEFusedAttnConfigAttribute {
+  kNVTEFusedAttnConfigIsTraining = 0,
+  kNVTEFusedAttnConfigDeterministic,
+  kNVTEFusedAttnConfigCudaGraph,
+  kNVTEFusedAttnConfigReturnMaxLogit,
+  kNVTEFusedAttnConfigQKVLayout,
+  kNVTEFusedAttnConfigOFormat,
+  kNVTEFusedAttnConfigDOFormat,
+  kNVTEFusedAttnConfigDQKVLayout,
+  kNVTEFusedAttnConfigQKVScaleInvFormat,
+  kNVTEFusedAttnConfigDOScaleInvFormat,
+  kNVTEFusedAttnConfigBiasType,
+  kNVTEFusedAttnConfigAttnMaskType,
+  kNVTEFusedAttnConfigSoftmaxType,
+  kNVTEFusedAttnConfigScalingMode,
+  kNVTEFusedAttnConfigAttnScale,
+  kNVTEFusedAttnConfigDropout,
+  kNVTEFusedAttnConfigMaxSeqlenQ,
+  kNVTEFusedAttnConfigMaxSeqlenKV,
+  kNVTEFusedAttnConfigWindowSizeLeft,
+  kNVTEFusedAttnConfigWindowSizeRight,
+  kNVTEFusedAttnConfigBottomRightDiagonal,
+  kNVTEFusedAttnConfigQKVDtype,
+  kNVTEFusedAttnConfigODtype,
+  kNVTEFusedAttnConfigDODtype,
+  kNVTEFusedAttnConfigDQKVDtype,
+  kNVTEFusedAttnConfigBatchSize,
+  kNVTEFusedAttnConfigNumAttnHeads,
+  kNVTEFusedAttnConfigNumGqaGroups,
+  kNVTEFusedAttnConfigHeadDimQK,
+  kNVTEFusedAttnConfigHeadDimV,
+  kNVTEFusedAttnConfigNumPagesK,
+  kNVTEFusedAttnConfigNumPagesV,
+  kNVTEFusedAttnConfigPageSizeK,
+  kNVTEFusedAttnConfigPageSizeV,
+  kNVTEFusedAttnConfigMaxPagesPerSeqK,
+  kNVTEFusedAttnConfigMaxPagesPerSeqV,
+  kNVTEFusedAttnConfigBiasBatchSize,
+  kNVTEFusedAttnConfigBiasNumHeads,
+  kNVTEFusedAttnConfigBiasSeqlenQ,
+  kNVTEFusedAttnConfigBiasSeqlenKV,
+  kNVTEFusedAttnConfigNumTokensQ,
+  kNVTEFusedAttnConfigNumTokensKV,
+  kNVTEFusedAttnConfigBucketedBatchSize,
+  kNVTEFusedAttnConfigBucketedNumTokensQ,
+  kNVTEFusedAttnConfigBucketedNumTokensKV,
+  kNVTEFusedAttnConfigNumAttributes
+};
 
-  NVTE_QKV_Layout qkv_layout;           /*!< QKV tensors' layout. */
-  NVTE_QKV_Format o_format;             /*!< Output O tensor format. */
-  NVTE_QKV_Format do_format;            /*!< Output-grad dO tensor format (bwd). */
-  NVTE_QKV_Layout dqkv_layout;          /*!< Gradient dQKV tensor layout (bwd). */
-  NVTE_QKV_Format qkv_scale_inv_format; /*!< QKV scale_inv tensor format (FP8). */
-  NVTE_QKV_Format do_scale_inv_format;  /*!< dO scale_inv tensor format (FP8 bwd). */
-  NVTE_Bias_Type bias_type;             /*!< Attention bias type. */
-  NVTE_Mask_Type attn_mask_type;        /*!< Attention mask type. */
-  NVTE_Softmax_Type softmax_type;       /*!< Attention softmax type. */
-  NVTEScalingMode scaling_mode;         /*!< Scaling mode (e.g. delayed, MXFP8). */
-  float attn_scale;                     /*!< Pre-softmax attention scale factor. */
-  float dropout;                        /*!< Dropout probability. */
-  size_t max_seqlen_q;                  /*!< Max sequence length for Q. */
-  size_t max_seqlen_kv;                 /*!< Max sequence length for K, V. */
-  int64_t window_size_left;             /*!< Sliding window size (left half); -1 = unlimited. */
-  int64_t window_size_right;            /*!< Sliding window size (right half); -1 = unlimited. */
-  bool bottom_right_diagonal; /*!< Whether causal mask aligns to the bottom-right diagonal. */
-  bool cuda_graph;            /*!< Whether CUDA graph capture is enabled. */
-
-  NVTEDType qkv_dtype;   /*!< Data type of Tensors Q, K, V. Q and K/V must share a dtype. */
-  NVTEDType o_dtype;     /*!< Data type of Tensor O. */
-  NVTEDType do_dtype;    /*!< Data type of Tensor dO (bwd). */
-  NVTEDType dqkv_dtype;  /*!< Data type of Tensors dQ, dK, dV (bwd). */
-  size_t batch_size;     /*!< Batch size. */
-  size_t num_attn_heads; /*!< Number of heads in Q. */
-  size_t num_gqa_groups; /*!< Number of heads in K, V. */
-  size_t head_dim_qk;    /*!< Head dimension of Q, K. */
-  size_t head_dim_v;     /*!< Head dimension of V. */
-
-  size_t num_pages_k;         /*!< Total number of K cache pages. */
-  size_t num_pages_v;         /*!< Total number of V cache pages. */
-  size_t page_size_k;         /*!< Tokens per K cache page. */
-  size_t page_size_v;         /*!< Tokens per V cache page. */
-  size_t max_pages_per_seq_k; /*!< Max K pages per sequence in the batch. */
-  size_t max_pages_per_seq_v; /*!< Max V pages per sequence in the batch. */
-
-  size_t bias_batch_size; /*!< Bias broadcast dim for batch. */
-  size_t bias_num_heads;  /*!< Bias broadcast dim for heads. */
-  size_t bias_seqlen_q;   /*!< Bias broadcast dim for Q sequence length. */
-  size_t bias_seqlen_kv;  /*!< Bias broadcast dim for K/V sequence length. */
-
-  bool is_training;      /*!< Whether the model is in training mode. */
-  bool return_max_logit; /*!< Whether to produce Max along with Stats (fwd-only). */
-  bool deterministic;    /*!< Whether determinism is required (bwd-only). */
-} NVTEFusedAttnConfig;
-
-/*! \brief Default-initialize an ``NVTEFusedAttnConfig``.
+/*! \brief Create a default-initialized fused-attention configuration.
  *
- * Sets ``struct_size`` and the categorical fields (layouts, formats, masks,
- * window sizes, scaling mode) to safe NOT_SET / no-op defaults. Numeric and
- * tensor-derived fields, paged-KV shape, bias broadcast shape, and direction
- * flags all default to zero/false; callers must set the fields relevant to
- * their query.
+ *  Categorical fields (layouts, formats, masks, window sizes, scaling mode) are
+ *  set to safe NOT_SET / no-op defaults. Numeric and tensor-derived fields,
+ *  paged-KV shape, bias broadcast shape, and direction flags default to
+ *  zero/false; callers must set the fields relevant to their query.
+ *
+ *  \return A new configuration handle. Must be destroyed with
+ *          ``nvte_destroy_fused_attn_config()``.
  */
-#define NVTE_FUSED_ATTN_CONFIG_INIT                    \
-  {                                                    \
-      .struct_size = sizeof(NVTEFusedAttnConfig),      \
-      .qkv_layout = NVTE_QKV_Layout_NOT_SET,           \
-      .o_format = NVTE_QKV_Format_NOT_SET,             \
-      .do_format = NVTE_QKV_Format_NOT_SET,            \
-      .dqkv_layout = NVTE_QKV_Layout_NOT_SET,          \
-      .qkv_scale_inv_format = NVTE_QKV_Format_NOT_SET, \
-      .do_scale_inv_format = NVTE_QKV_Format_NOT_SET,  \
-      .bias_type = NVTE_NO_BIAS,                       \
-      .attn_mask_type = NVTE_NO_MASK,                  \
-      .softmax_type = NVTE_VANILLA_SOFTMAX,            \
-      .scaling_mode = NVTE_DELAYED_TENSOR_SCALING,     \
-      .window_size_left = -1,                          \
-      .window_size_right = -1,                         \
-  }
+NVTEFusedAttnConfig nvte_create_fused_attn_config(void);
+
+/*! \brief Destroy a fused-attention configuration handle. */
+void nvte_destroy_fused_attn_config(NVTEFusedAttnConfig config);
+
+/*! \brief Query an attribute in a fused-attention configuration. */
+void nvte_get_fused_attn_config_attribute(NVTEFusedAttnConfig config,
+                                          NVTEFusedAttnConfigAttribute attr, void *buf,
+                                          size_t size_in_bytes, size_t *size_written);
+
+/*! \brief Set an attribute in a fused-attention configuration. */
+void nvte_set_fused_attn_config_attribute(NVTEFusedAttnConfig config,
+                                          NVTEFusedAttnConfigAttribute attr, const void *buf,
+                                          size_t size_in_bytes);
 
 /*! \brief Get fused attention backend based on input parameters.
  *
@@ -290,9 +287,9 @@ typedef struct NVTEFusedAttnConfig {
  *  ``nvte_fused_attn_bwd`` to maintain a consistent signature between graph
  *  building and runtime calls.
  *
- *  \param[in]     cfg     Attention configuration. Must be initialized
- *                         with ``NVTE_FUSED_ATTN_CONFIG_INIT`` and have
- *                         ``cfg->struct_size`` set to ``sizeof(NVTEFusedAttnConfig)``.
+ *  \param[in]     cfg     Attention configuration created with
+ *                         ``nvte_create_fused_attn_config()`` (or the C++
+ *                         ``FusedAttnConfigWrapper``).
  *  \param[out]    message Empty on success, otherwise a diagnostic string describing
  *                         why the configuration was rejected. The string pointer
  *                         refers to a per-thread buffer owned by the library and
@@ -303,7 +300,7 @@ typedef struct NVTEFusedAttnConfig {
  *
  *  \return Backend able to execute this configuration, or ``NVTE_No_Backend`` if none.
  */
-NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(const NVTEFusedAttnConfig *cfg,
+NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig cfg,
                                                        const char **message);
 
 /*! \brief Get fused attention backend based on input parameters.
@@ -820,6 +817,246 @@ class AttentionShape {
     }
   }
   size_t canonical_[5] = {};
+};
+
+/*! \class FusedAttnConfigWrapper
+ *  \brief C++ helper for constructing an ``NVTEFusedAttnConfig``.
+ *
+ *  Owns an opaque ``NVTEFusedAttnConfig`` handle created via
+ *  ``nvte_create_fused_attn_config()``. Provides typed, chainable setters for
+ *  every field.
+ */
+class FusedAttnConfigWrapper {
+ public:
+  FusedAttnConfigWrapper() : cfg_{nvte_create_fused_attn_config()} {}
+
+  FusedAttnConfigWrapper(const FusedAttnConfigWrapper &) = delete;
+  FusedAttnConfigWrapper &operator=(const FusedAttnConfigWrapper &) = delete;
+
+  FusedAttnConfigWrapper(FusedAttnConfigWrapper &&other) noexcept : cfg_{other.cfg_} {
+    other.cfg_ = nullptr;
+  }
+
+  FusedAttnConfigWrapper &operator=(FusedAttnConfigWrapper &&other) noexcept {
+    if (this != &other) {
+      nvte_destroy_fused_attn_config(cfg_);
+      cfg_ = other.cfg_;
+      other.cfg_ = nullptr;
+    }
+    return *this;
+  }
+
+  ~FusedAttnConfigWrapper() {
+    if (cfg_ != nullptr) {
+      nvte_destroy_fused_attn_config(cfg_);
+    }
+  }
+
+  operator NVTEFusedAttnConfig() const noexcept { return cfg_; }
+  NVTEFusedAttnConfig get() const noexcept { return cfg_; }
+
+  FusedAttnConfigWrapper &set_is_training(bool val) noexcept {
+    const uint8_t u8_val = static_cast<uint8_t>(val);
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigIsTraining, &u8_val,
+                                         sizeof(u8_val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_deterministic(bool val) noexcept {
+    const uint8_t u8_val = static_cast<uint8_t>(val);
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigDeterministic, &u8_val,
+                                         sizeof(u8_val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_cuda_graph(bool val) noexcept {
+    const uint8_t u8_val = static_cast<uint8_t>(val);
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigCudaGraph, &u8_val,
+                                         sizeof(u8_val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_return_max_logit(bool val) noexcept {
+    const uint8_t u8_val = static_cast<uint8_t>(val);
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigReturnMaxLogit, &u8_val,
+                                         sizeof(u8_val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_qkv_layout(NVTE_QKV_Layout val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigQKVLayout, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_o_format(NVTE_QKV_Format val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigOFormat, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_do_format(NVTE_QKV_Format val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigDOFormat, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_dqkv_layout(NVTE_QKV_Layout val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigDQKVLayout, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_qkv_scale_inv_format(NVTE_QKV_Format val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigQKVScaleInvFormat, &val,
+                                         sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_do_scale_inv_format(NVTE_QKV_Format val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigDOScaleInvFormat, &val,
+                                         sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_bias_type(NVTE_Bias_Type val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigBiasType, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_attn_mask_type(NVTE_Mask_Type val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigAttnMaskType, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_softmax_type(NVTE_Softmax_Type val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigSoftmaxType, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_scaling_mode(NVTEScalingMode val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigScalingMode, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_attn_scale(float val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigAttnScale, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_dropout(float val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigDropout, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_max_seqlen_q(size_t val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigMaxSeqlenQ, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_max_seqlen_kv(size_t val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigMaxSeqlenKV, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_window_size_left(int64_t val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigWindowSizeLeft, &val,
+                                         sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_window_size_right(int64_t val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigWindowSizeRight, &val,
+                                         sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_bottom_right_diagonal(bool val) noexcept {
+    const uint8_t u8_val = static_cast<uint8_t>(val);
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigBottomRightDiagonal, &u8_val,
+                                         sizeof(u8_val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_qkv_dtype(NVTEDType val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigQKVDtype, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_o_dtype(NVTEDType val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigODtype, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_do_dtype(NVTEDType val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigDODtype, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_dqkv_dtype(NVTEDType val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigDQKVDtype, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_batch_size(size_t val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigBatchSize, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_num_attn_heads(size_t val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigNumAttnHeads, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_num_gqa_groups(size_t val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigNumGqaGroups, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_head_dim_qk(size_t val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigHeadDimQK, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_head_dim_v(size_t val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigHeadDimV, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_num_pages_k(size_t val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigNumPagesK, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_num_pages_v(size_t val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigNumPagesV, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_page_size_k(size_t val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigPageSizeK, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_page_size_v(size_t val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigPageSizeV, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_max_pages_per_seq_k(size_t val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigMaxPagesPerSeqK, &val,
+                                         sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_max_pages_per_seq_v(size_t val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigMaxPagesPerSeqV, &val,
+                                         sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_bias_batch_size(size_t val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigBiasBatchSize, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_bias_num_heads(size_t val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigBiasNumHeads, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_bias_seqlen_q(size_t val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigBiasSeqlenQ, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_bias_seqlen_kv(size_t val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigBiasSeqlenKV, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_num_tokens_q(size_t val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigNumTokensQ, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_num_tokens_kv(size_t val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigNumTokensKV, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_bucketed_batch_size(size_t val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigBucketedBatchSize, &val,
+                                         sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_bucketed_num_tokens_q(size_t val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigBucketedNumTokensQ, &val,
+                                         sizeof(val));
+    return *this;
+  }
+  FusedAttnConfigWrapper &set_bucketed_num_tokens_kv(size_t val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigBucketedNumTokensKV, &val,
+                                         sizeof(val));
+    return *this;
+  }
+
+ private:
+  NVTEFusedAttnConfig cfg_ = nullptr;
 };
 
 #endif  // __cplusplus

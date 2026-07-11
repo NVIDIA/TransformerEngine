@@ -181,6 +181,7 @@ list(APPEND transformer_engine_cpp_sources
      cudnn_utils.cpp
      transformer_engine.cpp
      fused_attn/fused_attn.cpp
+     fused_attn/config_and_params.cpp
      gemm/config.cpp
      normalization/common.cpp
      normalization/layernorm/ln_api.cpp
