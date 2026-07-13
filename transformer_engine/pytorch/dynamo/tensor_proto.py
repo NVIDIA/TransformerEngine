@@ -10,16 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
-
-
-def _contiguous_stride(shape: Tuple[int, ...]) -> Tuple[int, ...]:
-    """Row-major (contiguous) stride for ``shape``."""
-    stride: list = []
-    acc = 1
-    for dim in reversed(shape):
-        stride.append(acc)
-        acc *= dim
-    return tuple(reversed(stride))
+from torch._prims_common import make_contiguous_strides_for
 
 
 @dataclass
@@ -139,7 +130,9 @@ class TensorProto:
         ctx = self.create_metadata()
         inner = dict(zip(self.inner_names(), self.create_inner_tensors()))
         storage_cls = _STORAGE_REGISTRY[ctx["cls"]]
-        return storage_cls.__tensor_unflatten__(inner, ctx, shape, _contiguous_stride(shape))
+        return storage_cls.__tensor_unflatten__(
+            inner, ctx, shape, make_contiguous_strides_for(shape)
+        )
 
 
 def to_tensor_proto(tensor: Any) -> TensorProto:
