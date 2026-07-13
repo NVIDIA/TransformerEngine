@@ -55,6 +55,12 @@ from ..distributed import (
     _fsdp_scatter_tensors,
     _fsdp_gather_tensors,
 )
+from ..distributed_weight import (
+    is_distributed_weight,
+    materialize_weights_for_forward,
+    materialize_weights_for_backward,
+    finalize_weight_grads,
+)
 from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx, GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
@@ -145,7 +151,6 @@ class _LayerNormLinear(torch.autograd.Function):
             symmetric_ar_type,
             debug,
             is_fsdp2,
-            gtp_remat_size,
         ) = non_tensor_args
         if fp8:
             backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
@@ -301,13 +306,9 @@ class _LayerNormLinear(torch.autograd.Function):
         # Prepare weight tensor
         # ------------------------------------------------------
 
-        weight_gtp_sharded = weight
-        if gtp_remat_size > 1:
-            weight = weight.all_gather_and_prefetch(
-                fwd=True,
-                skip_weight_cast=is_first_microbatch is False,
-                cast_noop_flag=skip_fp8_weight_update,
-            )
+        weight_param = weight
+        if is_distributed_weight(weight):
+            weight = materialize_weights_for_forward([weight])[0]
             out_features = weight.shape[0]
 
         new_weight_workspace = None
@@ -500,11 +501,13 @@ class _LayerNormLinear(torch.autograd.Function):
             wt_save = weightmat
             if is_fsdp2 and weightmat is not weight:
                 wt_save = None
+            _is_dist_weight = is_distributed_weight(weight_param)
             tensors_to_save, tensor_objects = prepare_for_saving(
                 inputmat,
-                # GTP: save the sharded reference only; backward re-gathers it.
-                wt_save if gtp_remat_size == 1 else None,
-                weight if gtp_remat_size == 1 else weight_gtp_sharded,
+                # Distributed weight (e.g. GTP): save the sharded reference only;
+                # backward re-gathers it.
+                None if _is_dist_weight else wt_save,
+                weight_param if _is_dist_weight else weight,
                 bias,
                 ln_weight,
                 ln_out_to_save,
@@ -531,8 +534,8 @@ class _LayerNormLinear(torch.autograd.Function):
                 if hasattr(weight, "__fsdp_param__"):
                     # MCore FSDP creates main_grad lazily before backward
                     ctx.main_grad_func = weight.get_main_grad
-                elif gtp_remat_size > 1:
-                    ctx.main_grad_func = weight_gtp_sharded.get_wgrad_tensor
+                elif is_distributed_weight(weight_param):
+                    ctx.main_grad_func = weight_param.grad_buffer
                 else:
                     ctx.main_grad_func = lambda: weight.main_grad
             ctx.grad_input_quantizer = grad_input_quantizer
@@ -575,7 +578,6 @@ class _LayerNormLinear(torch.autograd.Function):
                     qstate.is_first_fp8_module = _first_fp8_module
             ctx.wgrad_store = wgrad_store
             ctx.debug = debug
-            ctx.gtp_remat_size = gtp_remat_size
 
             # backward overrides
             if backward_override is not None:
@@ -627,9 +629,8 @@ class _LayerNormLinear(torch.autograd.Function):
                 rsigma,
             ) = restore_from_func_ctx(ctx)
 
-            if ctx.gtp_remat_size > 1:
-                weight = saved_weight.all_gather_and_prefetch_bwd()
-
+            if is_distributed_weight(saved_weight):
+                weight = materialize_weights_for_backward([saved_weight])[0]
             # Restore from weakref to get original weight python object
             # (preserves attributes like main_grad, grad_added_to_main_grad, etc.)
             # Only needed when fuse_wgrad_accumulation is enabled.
@@ -647,7 +648,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 ), "weight was removed while fuse_wgrad_accumulation=True"
                 # Since main_grad can be modified inplace, it should not be a part of saved_tensors
                 main_grad = ctx.main_grad_func() if weight is not None else None
-                if main_grad is not None and ctx.gtp_remat_size == 1:
+                if main_grad is not None and not is_distributed_weight(saved_weight):
                     origin_weight.main_grad = main_grad
 
             # Gather intermediate/activation tensors if needed
@@ -982,8 +983,8 @@ class _LayerNormLinear(torch.autograd.Function):
                         use_split_accumulator = recipe.fp8_gemm_wgrad.use_split_accumulator
 
                 # Figure out whether to output wgrad GEMM directly into main grad
-                if ctx.gtp_remat_size > 1:
-                    # GTP: accumulation happens downstream in wgrad_reduce_scatter.
+                if is_distributed_weight(saved_weight):
+                    # Distributed weight (e.g. GTP): accumulation happens downstream in finalize.
                     accumulate_wgrad_into_param_main_grad = False
                 elif ctx.is_first_microbatch is not None:
                     accumulate_wgrad_into_param_main_grad = (
@@ -1057,8 +1058,8 @@ class _LayerNormLinear(torch.autograd.Function):
                     # Call wgrad GEMM now
                     wgrad, grad_bias_ = wgrad_gemm(ln_out_total, grad_output)
 
-                    if ctx.gtp_remat_size > 1:
-                        wgrad = saved_weight.wgrad_reduce_scatter(wgrad)
+                    if is_distributed_weight(saved_weight):
+                        wgrad = finalize_weight_grads([saved_weight], [wgrad])[0]
 
                     # Update grad bias if needed
                     if grad_bias is None:
@@ -1139,8 +1140,8 @@ class _LayerNormLinear(torch.autograd.Function):
 
         if ctx.requires_wgrad:
             # Handle custom DDP from mcore.
-            if ctx.gtp_remat_size > 1:
-                # GTP: skip — wgrad RS already produced the correct shard.
+            if is_distributed_weight(saved_weight):
+                # Distributed weight (e.g. GTP): skip — grad finalize already produced the shard.
                 pass
             elif ctx.fuse_wgrad_accumulation and hasattr(origin_weight, "grad_added_to_main_grad"):
                 origin_weight.grad_added_to_main_grad = True
@@ -1338,10 +1339,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
             self.tp_size = get_distributed_world_size(tp_group)
             self.set_tensor_parallel_group(tp_group)
         self.set_nccl_overlap_warning_if_tp()
-
-        # GTP is attached post-init by Megatron (GTP-agnostic construction); Megatron overwrites
-        # this with the real shard count after __init__ for GTP-sharded weights.
-        self.gtp_remat_size = 1
 
         self.parallel_mode = parallel_mode
         assert (
@@ -1787,7 +1784,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.symmetric_ar_type,
                 debug,
                 self.is_fsdp2,
-                self.gtp_remat_size,
             )
             out, ln_out, new_weight_workspace = fwd_fn(
                 *autograd_ctx,

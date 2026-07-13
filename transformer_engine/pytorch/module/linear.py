@@ -54,6 +54,12 @@ from ..distributed import (
     _fsdp_scatter_tensors,
     _fsdp_gather_tensors,
 )
+from ..distributed_weight import (
+    is_distributed_weight,
+    materialize_weights_for_forward,
+    materialize_weights_for_backward,
+    finalize_weight_grads,
+)
 from ..cpp_extensions import (
     general_gemm,
 )
@@ -155,9 +161,6 @@ class LinearFwdArgs:
     cpu_offloading: bool
     is_grad_enabled: bool
 
-    # --- Generalized tensor parallelism ---
-    gtp_remat_size: int = 1
-
 
 @dataclass(slots=True)
 class LinearBwdArgs:
@@ -226,9 +229,6 @@ class LinearBwdArgs:
     # --- Misc ---
     cpu_offloading: bool = False
     owns_input: bool = False
-
-    # --- Generalized tensor parallelism ---
-    gtp_remat_size: int = 1
 
     # --- Per-backward scratch state (populated inside _linear_backward) ---
     ub_obj_gradout: Optional[Any] = None
@@ -407,14 +407,11 @@ def _linear_forward_impl(
     # ------------------------------------------------------
     # Prepare weight tensor
     # ------------------------------------------------------
-    # GTP: rebind `weight` to the all-gathered tensor; `args.weight` keeps
-    # the GTPShardedParam reference for backward re-gather / wgrad RS.
-    if args.gtp_remat_size > 1:
-        weight = weight.all_gather_and_prefetch(
-            fwd=True,
-            skip_weight_cast=is_first_microbatch is False,
-            cast_noop_flag=args.skip_fp8_weight_update,
-        )
+    # Distributed weight (e.g. GTP): rebind `weight` to the all-gathered tensor;
+    # `args.weight` keeps the sharded-param reference for backward re-gather / grad
+    # finalize. No-op for a plain weight.
+    if is_distributed_weight(args.weight):
+        weight = materialize_weights_for_forward([args.weight])[0]
         # Refresh out_features from the gathered weight (captured sharded above, pre-gather).
         out_features = weight.shape[0]
 
@@ -604,8 +601,8 @@ def _linear_forward_impl(
         wt_save = weightmat
         if is_fsdp2 and weightmat is not weight:
             wt_save = None
-        # GTP: don't save the workspace; backward re-gathers it.
-        if args.gtp_remat_size > 1:
+        # Distributed weight (e.g. GTP): don't save the workspace; backward re-gathers it.
+        if is_distributed_weight(args.weight):
             wt_save = None
 
         # Dedup save slots that alias forward inputs; ``_linear_setup_ctx``
@@ -711,14 +708,13 @@ def _linear_setup_ctx(
         bwd_args.origin_weight_overwrites_main_grad = getattr(weight, "overwrite_main_grad", False)
         if hasattr(weight, "__fsdp_param__"):
             bwd_args.main_grad_func = weight.get_main_grad
-        elif fwd_args.gtp_remat_size > 1:
-            bwd_args.main_grad_func = weight.get_wgrad_tensor
+        elif is_distributed_weight(weight):
+            bwd_args.main_grad_func = weight.grad_buffer
         else:
             bwd_args.main_grad_func = lambda: weight.main_grad
 
     # Misc
     bwd_args.cpu_offloading = fwd_args.cpu_offloading
-    bwd_args.gtp_remat_size = fwd_args.gtp_remat_size
 
     if backward_override is not None:
         bwd_args.fp8 = False
@@ -785,7 +781,7 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
                 origin_weight_python_object is not None
             ), "weight was removed while fuse_wgrad_accumulation=True"
             main_grad = bwd_args.main_grad_func()
-            if bwd_args.gtp_remat_size == 1:
+            if not is_distributed_weight(bwd_args.saved_weight):
                 origin_weight_python_object.main_grad = main_grad
 
         # Gather intermediate/activation tensors if needed
@@ -957,10 +953,10 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
         dgrad = None
         dgrad_work = None
 
-        # GTP: re-gather the sharded weight; runs even when requires_dgrad=False
-        # so the prev_w prefetch is issued for the next layer's bwd.
-        if bwd_args.gtp_remat_size > 1:
-            weight_fp8 = saved_weight.all_gather_and_prefetch_bwd()
+        # Distributed weight (e.g. GTP): re-gather the sharded weight; runs even when
+        # requires_dgrad=False so the prev_w prefetch is issued for the next layer's bwd.
+        if is_distributed_weight(saved_weight):
+            weight_fp8 = materialize_weights_for_backward([saved_weight])[0]
 
         if bwd_args.requires_dgrad:
 
@@ -977,13 +973,13 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
                     bwd_args.weight_quantizer.set_usage(rowwise=True, columnwise=True)
                     weight_fp8 = bwd_args.weight_quantizer(saved_weight)
             elif (
-                bwd_args.gtp_remat_size > 1
+                is_distributed_weight(saved_weight)
                 and bwd_args.fp8
                 and bwd_args.weight_quantizer is not None
                 and not isinstance(weight_fp8, QuantizedTensorStorage)
             ):
-                # GTP re-gathered a BF16 weight (mxfp8-recipe layer kept BF16 for the AG): quantize
-                # with the layer quantizer so the dgrad operand isn't cast by the delayed recipe.
+                # Distributed weight re-gathered a BF16 weight: quantize with the layer quantizer
+                # so the dgrad operand isn't cast by the delayed recipe.
                 bwd_args.weight_quantizer.set_usage(rowwise=True, columnwise=True)
                 weight_fp8 = bwd_args.weight_quantizer(weight_fp8)
 
@@ -1180,8 +1176,8 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
                     use_split_accumulator = recipe.fp8_gemm_wgrad.use_split_accumulator
 
             # Figure out whether to output wgrad GEMM directly into main grad
-            if bwd_args.gtp_remat_size > 1:
-                # GTP: accumulation happens downstream in wgrad_reduce_scatter.
+            if is_distributed_weight(bwd_args.saved_weight):
+                # Distributed weight (e.g. GTP): accumulation happens downstream in finalize.
                 accumulate_wgrad_into_param_main_grad = False
             elif bwd_args.is_first_microbatch is not None:
                 accumulate_wgrad_into_param_main_grad = (
@@ -1259,10 +1255,10 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
                 # Call wgrad GEMM now
                 wgrad, grad_bias_ = wgrad_gemm(inputmat_total, grad_output)
 
-                # GTP: reduce-scatter the freshly computed wgrad (async; overlap
-                # with the next layer's bwd via the cascade).
-                if bwd_args.gtp_remat_size > 1:
-                    wgrad = saved_weight.wgrad_reduce_scatter(wgrad)
+                # Distributed weight (e.g. GTP): reduce-scatter the freshly computed wgrad
+                # (async; overlap with the next layer's bwd via the cascade).
+                if is_distributed_weight(saved_weight):
+                    wgrad = finalize_weight_grads([saved_weight], [wgrad])[0]
 
                 # Update grad bias if needed
                 if grad_bias is None:
@@ -1564,10 +1560,6 @@ class Linear(TransformerEngineBaseModule):
             self.tp_size = get_distributed_world_size(tp_group)
             self.set_tensor_parallel_group(tp_group)
         self.set_nccl_overlap_warning_if_tp()
-
-        # GTP is attached post-init by Megatron (GTP-agnostic construction); Megatron overwrites
-        # this with the real shard count after __init__ for GTP-sharded weights.
-        self.gtp_remat_size = 1
 
         self.parallel_mode = parallel_mode
         assert (
@@ -2004,8 +1996,6 @@ class Linear(TransformerEngineBaseModule):
                 # misc
                 cpu_offloading=is_cpu_offload_enabled(),
                 is_grad_enabled=is_grad_enabled,
-                # generalized tensor parallelism
-                gtp_remat_size=self.gtp_remat_size,
             )
             out, new_weight_workspace = linear_fn(
                 *autograd_ctx,
