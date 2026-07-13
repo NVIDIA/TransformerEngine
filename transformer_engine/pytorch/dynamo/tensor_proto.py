@@ -143,26 +143,14 @@ def to_tensor_proto(tensor: Any) -> TensorProto:
     ``QuantizedTensor``. A *bare* storage exposes its (fake) dtype via
     ``_dtype`` rather than ``.dtype``.
     """
-    from ..quantized_tensor import (  # pylint: disable=import-outside-toplevel
-        QuantizedTensorStorage,
-    )
-
     requires_grad = bool(getattr(tensor, "requires_grad", False))
-    if isinstance(tensor, QuantizedTensorStorage):
-        dtype = getattr(tensor, "dtype", None)
-        if dtype is None:
-            dtype = getattr(tensor, "_dtype", None)
-        return TensorProto(
-            shape=tuple(tensor.shape),
-            dtype=dtype,
-            quantizer=getattr(tensor, "_quantizer", None),
-            requires_grad=requires_grad,
-            device=tensor.device,
-        )
+    dtype = getattr(tensor, "dtype", None)
+    if dtype is None:
+        dtype = getattr(tensor, "_dtype", None)
     return TensorProto(
         shape=tuple(tensor.shape),
-        dtype=tensor.dtype,
-        quantizer=None,
+        dtype=dtype,
+        quantizer=getattr(tensor, "_quantizer", None),
         requires_grad=requires_grad,
         device=tensor.device,
     )
