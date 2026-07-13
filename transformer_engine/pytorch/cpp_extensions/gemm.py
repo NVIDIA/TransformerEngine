@@ -102,78 +102,32 @@ def _nvfp4_row_scaled_gemm_inputs(
     )
 
 
-def _ceil_div(a: int, b: int) -> int:
-    """Integer ceil division."""
-    return (a + b - 1) // b
-
-
-def _nvfp4_cudnn_scale_layout(scale: torch.Tensor, m: int, k: int) -> torch.Tensor:
-    """Pack compact NVFP4 scales into the cuDNN CuTe layout."""
-    m_tiles = _ceil_div(m, 128)
-    sf_k = _ceil_div(k, NVFP4_BLOCK_SCALING_SIZE)
-    k_tiles = _ceil_div(sf_k, 4)
-    compact = scale.view(torch.float8_e4m3fn)[: m_tiles * 128, : k_tiles * 4].contiguous()
-    logical_layout = compact.view(1, m_tiles, 4, 32, k_tiles, 4).permute(3, 2, 1, 5, 4, 0)
-    base = torch.empty(
-        (1, m_tiles, k_tiles, 32, 4, 4),
-        dtype=torch.float8_e4m3fn,
-        device=scale.device,
-    )
-    cudnn_layout = base.permute(3, 4, 1, 5, 2, 0)
-    cudnn_layout.copy_(logical_layout)
-    return cudnn_layout
-
-
-def _nvfp4_rowwise_data_logical_view(tensor: NVFP4TensorStorage) -> torch.Tensor:
-    """Return a logical FP4 rowwise data view with the packed buffer's data pointer."""
-    packed = tensor._rowwise_data
-    rows = int(tensor.size(0))
-    cols = int(tensor.size(1))
-    return torch.as_strided(packed, (rows, cols), (packed.stride(0), 0))
-
-
-def _cudnn_grouped_gemm_quant_for_row_scaled_nvfp4(
-    A: List[torch.Tensor],
-    B: List[torch.Tensor],
-    out: List[torch.Tensor],
+def _cudnn_row_scaled_nvfp4_grouped_gemm(
+    weights: List[NVFP4TensorStorage],
+    inputs: List[NVFP4TensorStorage],
+    outputs: List[torch.Tensor],
     *,
-    transa: bool,
-    transb: bool,
     m_splits: Optional[List[int]],
-    bias: List[torch.Tensor],
-    use_bias: bool,
+    bias: Optional[List[torch.Tensor]],
     single_output: bool,
-    accumulate: bool,
-    gelu: bool,
-    grad: bool,
-    use_split_accumulator: bool,
-) -> torch.Tensor:
-    """Use cuDNN grouped GEMM quant for row-scaled NVFP4 grouped GEMMs."""
-    if grad or gelu or accumulate or use_split_accumulator:
-        raise NotImplementedError(
-            "cuDNN row-scaled NVFP4 grouped GEMM supports fprop without GELU, "
-            "accumulation, or split accumulator only."
-        )
-    if not transa or transb:
-        raise NotImplementedError("cuDNN row-scaled NVFP4 grouped GEMM supports TN layout only.")
-    if not out or out[0].dtype not in (torch.bfloat16, torch.float16):
-        raise NotImplementedError(
-            "cuDNN row-scaled NVFP4 grouped GEMM supports BF16/FP16 outputs only."
-        )
-    if not all(isinstance(tensor, NVFP4TensorStorage) for tensor in A + B):
+) -> Union[torch.Tensor, List[torch.Tensor]]:
+    """Run tensor-scaled weights and row-scaled inputs with the cuDNN MoE kernel."""
+    num_gemms = len(weights)
+    if num_gemms == 0 or len(inputs) != num_gemms:
+        raise ValueError("Grouped GEMM requires matching non-empty weight and input lists.")
+    if not all(isinstance(tensor, NVFP4TensorStorage) for tensor in weights + inputs):
         raise TypeError("cuDNN row-scaled NVFP4 grouped GEMM requires NVFP4 inputs.")
-    if any(_is_nvfp4_row_scaled_tensor(tensor) for tensor in A):
+    if any(_is_nvfp4_row_scaled_tensor(tensor) for tensor in weights):
         raise NotImplementedError(
-            "cuDNN row-scaled NVFP4 grouped GEMM does not support row-scaled A."
+            "cuDNN row-scaled NVFP4 grouped GEMM requires tensor-scaled weights."
         )
-    if not all(_is_nvfp4_row_scaled_tensor(tensor) for tensor in B):
-        raise NotImplementedError("cuDNN row-scaled NVFP4 grouped GEMM requires row-scaled B.")
-    if any(getattr(tensor, "_nvfp4_use_4over6", False) for tensor in A + B):
+    if not all(_is_nvfp4_row_scaled_tensor(tensor) for tensor in inputs):
+        raise NotImplementedError("cuDNN row-scaled NVFP4 grouped GEMM requires row-scaled inputs.")
+    if any(getattr(tensor, "_nvfp4_use_4over6", False) for tensor in weights + inputs):
         raise NotImplementedError("cuDNN row-scaled NVFP4 grouped GEMM does not support 4over6.")
 
-    num_gemms = len(A)
     m_splits_list = (
-        list(m_splits) if m_splits is not None else [int(tensor.size(0)) for tensor in B]
+        list(m_splits) if m_splits is not None else [int(tensor.size(0)) for tensor in inputs]
     )
     if len(m_splits_list) != num_gemms:
         raise ValueError("m_splits length must match the number of grouped GEMMs.")
@@ -182,79 +136,101 @@ def _cudnn_grouped_gemm_quant_for_row_scaled_nvfp4(
             "cuDNN row-scaled NVFP4 grouped GEMM requires M multiples of 256."
         )
 
-    k = int(B[0].size(1))
-    n = int(A[0].size(0))
+    k = int(inputs[0].size(1))
+    n = int(weights[0].size(0))
     if k % 128 != 0 or n % 128 != 0:
         raise NotImplementedError(
             "cuDNN row-scaled NVFP4 grouped GEMM requires K and N multiples of 128."
         )
-    if any(tuple(tensor.size()) != (n, k) for tensor in A):
-        raise ValueError("All grouped GEMM A tensors must have the same (N, K) shape.")
+    if any(tuple(tensor.size()) != (n, k) for tensor in weights):
+        raise ValueError("All grouped GEMM weights must have the same (N, K) shape.")
     if any(
-        int(tensor.size(0)) != m or int(tensor.size(1)) != k for tensor, m in zip(B, m_splits_list)
+        int(tensor.size(0)) != m or int(tensor.size(1)) != k
+        for tensor, m in zip(inputs, m_splits_list)
     ):
-        raise ValueError("Grouped GEMM B tensor shapes must match m_splits and K.")
+        raise ValueError("Grouped GEMM input shapes must match m_splits and K.")
+    expected_output_rows = [sum(m_splits_list)] if single_output else m_splits_list
+    if len(outputs) != len(expected_output_rows) or any(
+        output.shape[-1] != n or output.numel() != m * n
+        for output, m in zip(outputs, expected_output_rows)
+    ):
+        raise ValueError("Grouped GEMM output shapes do not match m_splits and N.")
+    if outputs[0].dtype not in (torch.bfloat16, torch.float16) or any(
+        output.dtype != outputs[0].dtype for output in outputs
+    ):
+        raise NotImplementedError(
+            "cuDNN row-scaled NVFP4 grouped GEMM supports uniform BF16/FP16 outputs only."
+        )
+    if bias is not None and (
+        len(bias) != num_gemms
+        or any(tensor is None or tuple(tensor.size()) != (n,) for tensor in bias)
+    ):
+        raise ValueError("Grouped GEMM bias tensors must have shape (N,).")
 
-    import cudnn  # pylint: disable=import-outside-toplevel
+    from cudnn import (  # pylint: disable=import-outside-toplevel,no-name-in-module
+        grouped_gemm_quant_wrapper_sm100,
+    )
 
-    grouped_gemm_quant_wrapper_sm100 = cudnn.grouped_gemm_quant_wrapper_sm100
-
-    device = B[0]._rowwise_data.device
+    device = inputs[0]._rowwise_data.device
     total_m = sum(m_splits_list)
 
     a_data = torch.cat(
-        [tensor._rowwise_data.view(m, k // 2) for tensor, m in zip(B, m_splits_list)],
+        [tensor._rowwise_data.view(m, k // 2) for tensor, m in zip(inputs, m_splits_list)],
         dim=0,
     )
     a_tensor = a_data.view(torch.float4_e2m1fn_x2).unsqueeze(0).permute(1, 2, 0)
 
-    sf_cols = _ceil_div(_ceil_div(k, NVFP4_BLOCK_SCALING_SIZE), 4) * 4
-    sfa_compact = torch.cat(
-        [
-            tensor._rowwise_scale_inv.view(torch.float8_e4m3fn)[:m, :sf_cols]
-            for tensor, m in zip(B, m_splits_list)
-        ],
-        dim=0,
+    sfa_compact = torch.cat([tensor._rowwise_scale_inv for tensor in inputs], dim=0)
+    sfa_logical = sfa_compact.view(dtype=torch.float8_e4m3fn).view(
+        1,
+        total_m // 128,
+        4,
+        32,
+        k // (4 * NVFP4_BLOCK_SCALING_SIZE),
+        4,
     )
-    sfa_tensor = _nvfp4_cudnn_scale_layout(sfa_compact, total_m, k)
-
-    sfb_tensors = [_nvfp4_cudnn_scale_layout(tensor._rowwise_scale_inv, n, k) for tensor in A]
-    b_ptrs, sfb_ptrs, _sfb_keepalive = tex.get_device_pointer_for_data_and_scales(
-        [_nvfp4_rowwise_data_logical_view(tensor) for tensor in A],
-        sfb_tensors,
-        False,
-        True,
-        A[0]._fp4_dtype,
-    )
-
-    row_scale = []
-    for weight, activation in zip(A, B):
-        weight_amax = weight._amax_rowwise if transa else weight._amax_columnwise
-        if weight_amax is None or activation._amax_rowwise is None:
-            raise ValueError(
-                "Row-scaled NVFP4 grouped GEMM requires activation and weight amax metadata."
-            )
-        if weight_amax.numel() != 1:
-            raise ValueError("Row-scaled NVFP4 grouped GEMM requires tensor-scaled weights.")
-        activation_decode_scale = activation._amax_rowwise / (
-            float(activation._nvfp4_e4m3_max) * 6.0
-        )
-        weight_decode_scale = weight_amax / (float(weight._nvfp4_e4m3_max) * 6.0)
-        row_scale.append((activation_decode_scale * weight_decode_scale).to(dtype=torch.float32))
-    row_scale_tensor = torch.cat(row_scale).contiguous()
-
-    bias_tensor = None
-    if use_bias:
-        if any(tensor.numel() == 0 for tensor in bias):
-            raise ValueError("Bias tensors must be non-empty when use_bias=True.")
-        bias_tensor = torch.stack(bias, dim=0).transpose(0, 1)
-
-    padded_offsets = torch.tensor(
-        [sum(m_splits_list[: i + 1]) for i in range(num_gemms)],
-        dtype=torch.int32,
+    sfa_logical = sfa_logical.permute(3, 2, 1, 5, 4, 0)
+    sfa_storage = torch.empty(
+        (1, total_m // 128, k // (4 * NVFP4_BLOCK_SCALING_SIZE), 32, 4, 4),
+        dtype=torch.float8_e4m3fn,
         device=device,
     )
-    alpha_tensor = torch.ones(num_gemms, dtype=torch.float32, device=device)
+    sfa_tensor = sfa_storage.permute(3, 4, 1, 5, 2, 0)
+    sfa_tensor.copy_(sfa_logical)
+
+    b_ptrs, sfb_ptrs, _sfb_buffer = (
+        tex.grouped_mlp_experimental.swizzle_scales_and_pack_ptrs_for_discrete_weights(
+            [tensor._rowwise_data for tensor in weights],
+            [tensor._rowwise_scale_inv for tensor in weights],
+            "nvfp4",
+            device,
+        )
+    )
+
+    weight_amaxes = [tensor._amax_rowwise for tensor in weights]
+    input_amaxes = [tensor._amax_rowwise for tensor in inputs]
+    if any(amax is None or amax.numel() != 1 for amax in weight_amaxes):
+        raise ValueError("Row-scaled NVFP4 grouped GEMM requires tensor-scaled weights.")
+    if any(amax is None or amax.numel() != m for amax, m in zip(input_amaxes, m_splits_list)):
+        raise ValueError("Row-scaled NVFP4 grouped GEMM requires one input scale per row.")
+    alpha_tensor = torch.cat(
+        [
+            amax.view(-1) / (float(tensor._nvfp4_e4m3_max) * 6.0)
+            for tensor, amax in zip(weights, weight_amaxes)
+        ]
+    ).to(dtype=torch.float32)
+    row_scale_tensor = torch.cat(
+        [
+            amax.view(-1) / (float(tensor._nvfp4_e4m3_max) * 6.0)
+            for tensor, amax in zip(inputs, input_amaxes)
+        ]
+    ).to(dtype=torch.float32)
+
+    bias_tensor = None if bias is None else torch.stack(bias, dim=0).transpose(0, 1)
+
+    padded_offsets = torch.tensor(m_splits_list, dtype=torch.int32, device=device).cumsum(
+        0, dtype=torch.int32
+    )
     prob_tensor = torch.ones(total_m, 1, 1, dtype=torch.float32, device=device)
 
     result = grouped_gemm_quant_wrapper_sm100(
@@ -269,10 +245,10 @@ def _cudnn_grouped_gemm_quant_for_row_scaled_nvfp4(
         prob_tensor=prob_tensor,
         row_scale_tensor=row_scale_tensor,
         acc_dtype=torch.float32,
-        d_dtype=out[0].dtype,
+        d_dtype=outputs[0].dtype,
         cd_major="n",
         sf_vec_size=NVFP4_BLOCK_SCALING_SIZE,
-        discrete_col_sfd=True,
+        discrete_col_sfd=False,
         b_dtype=torch.float4_e2m1fn_x2,
         b_major="k",
         n=n,
@@ -282,14 +258,12 @@ def _cudnn_grouped_gemm_quant_for_row_scaled_nvfp4(
     d_tensor = result["d_tensor"].squeeze(-1)
 
     if single_output:
-        out[0].copy_(d_tensor)
-        return out[0]
+        outputs[0].view(total_m, n).copy_(d_tensor)
+        return outputs[0]
 
-    start = 0
-    for output, m in zip(out, m_splits_list):
-        output.copy_(d_tensor[start : start + m])
-        start += m
-    return out
+    for output, output_data in zip(outputs, d_tensor.split(m_splits_list)):
+        output.view(-1, n).copy_(output_data)
+    return outputs
 
 
 def general_gemm(
@@ -513,26 +487,31 @@ def general_grouped_gemm(
     if any(_is_nvfp4_row_scaled_tensor(tensor) for tensor in A):
         raise NotImplementedError("Row-scaled NVFP4 grouped GEMM does not support row-scaled A.")
     if any(_is_nvfp4_row_scaled_tensor(tensor) for tensor in B):
-        assert D_dtype is None, "Row-scaled NVFP4 grouped GEMM currently does not support D_dtype."
-        if single_output:
-            assert (
-                m_splits is not None
-            ), "Row-scaled NVFP4 grouped GEMM requires m_splits with single output."
+        if D_dtype is not None:
+            raise NotImplementedError(
+                "cuDNN row-scaled NVFP4 grouped GEMM does not support D_dtype."
+            )
+        if layout != "TN":
+            raise NotImplementedError(
+                "cuDNN row-scaled NVFP4 grouped GEMM supports TN layout only."
+            )
+        if grad or gelu or accumulate or use_split_accumulator:
+            raise NotImplementedError(
+                "cuDNN row-scaled NVFP4 grouped GEMM supports fprop without GELU, "
+                "accumulation, or split accumulator only."
+            )
+        if any(quantizer is not None for quantizer in quantization_params):
+            raise NotImplementedError(
+                "cuDNN row-scaled NVFP4 grouped GEMM does not support output quantization."
+            )
         return (
-            _cudnn_grouped_gemm_quant_for_row_scaled_nvfp4(
+            _cudnn_row_scaled_nvfp4_grouped_gemm(
                 A,
                 B,
                 out,
-                transa=transa,
-                transb=transb,
                 m_splits=m_splits,
-                bias=bias,
-                use_bias=use_bias,
+                bias=bias if use_bias else None,
                 single_output=single_output,
-                accumulate=accumulate,
-                gelu=gelu,
-                grad=grad,
-                use_split_accumulator=use_split_accumulator,
             ),
             grad_bias,
             gelu_input,
