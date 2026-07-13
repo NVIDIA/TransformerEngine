@@ -976,16 +976,13 @@ def get_attention_backend(
     # Filter: QKV layout
     if qkv_format == "thd":
         if pad_between_seqs:
-            if (  # pylint: disable=too-many-boolean-expressions
-                use_flash_attention_2 and FlashAttentionUtils.is_installed
-            ) or (use_flash_attention_4 and FlashAttentionUtils.v4_is_installed):
+            if use_flash_attention_2 and FlashAttentionUtils.is_installed:
                 logger.debug(
-                    "Disabling FlashAttention 2 and 4 for qkv_format = thd when there is "
+                    "Disabling FlashAttention 2 for qkv_format = thd when there is "
                     "padding between sequences, i.e. [a, a, PAD, b, b, b, PAD, c, PAD]"
                 )
             use_flash_attention_2 = False
-            use_flash_attention_4 = False
-            # FA3 supports pad_between_seqs via seqused_q/seqused_k
+            # FA3 and FA4 support pad_between_seqs via seqused_q/seqused_k.
             if use_unfused_attention:
                 logger.debug("Disabling UnfusedDotProductAttention for pad_between_seqs = True")
             use_unfused_attention = False

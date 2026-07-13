@@ -1352,6 +1352,26 @@ def _run_dot_product_attention(
             return out, max_logit, (None, None, None, d_softmax_offset)
     if backend in ["FusedAttention", "FlashAttention"]:
         if qkv_format == "thd" and pad_between_seqs:
+            tensors_and_boundaries = [("out", out, cu_seqlens_q_after_pad)]
+            if is_training:
+                tensors_and_boundaries.extend(
+                    [
+                        ("dq", q.grad, cu_seqlens_q_after_pad),
+                        ("dk", k.grad, cu_seqlens_kv_after_pad),
+                        ("dv", v.grad, cu_seqlens_kv_after_pad),
+                    ]
+                )
+            for tensor_name, tensor, cu_seqlens_after_pad in tensors_and_boundaries:
+                for i in range(1, config.batch_size + 1):
+                    pad_range = (
+                        cu_seqlens_after_pad[i] - pad_len[i - 1],
+                        cu_seqlens_after_pad[i],
+                    )
+                    assert torch.count_nonzero(tensor[pad_range[0] : pad_range[1]]).item() == 0, (
+                        f"{backend} left nonzero values in {tensor_name} padding for sequence "
+                        f"{i - 1}"
+                    )
+
             out_orig = torch.Tensor([]).to(device="cuda", dtype=dtype)
             if is_training:
                 q_grad_orig = torch.Tensor([]).to(device="cuda", dtype=dtype)
