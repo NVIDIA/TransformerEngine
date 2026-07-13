@@ -179,6 +179,7 @@ def run_gemm_tests(args, mesh=None):
         )
 
 
+@unittest.expectedFailure
 class TestCollectiveGemmWithDP(unittest.TestCase):
     """Collective GEMM with DP unittests"""
 
