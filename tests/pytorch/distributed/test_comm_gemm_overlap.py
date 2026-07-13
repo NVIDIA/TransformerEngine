@@ -173,6 +173,7 @@ def _run_layer_with_overlap(
         raise AssertionError(result.stderr.decode())
 
 
+@pytest.mark.xfail(reason="CUDA VMM is not supported yet on the Rubin containers.")
 @pytest.mark.parametrize("use_cublasmp", (False, True))
 @pytest.mark.parametrize("quantization", ("none", "fp8", "mxfp8"))
 @pytest.mark.parametrize("aggregate", (False, True))
@@ -184,6 +185,7 @@ def test_split_all_gather_overlaps(quantization, aggregate, use_cublasmp):
     _run_gemm_with_overlap("AG", False, True, False, aggregate, quantization, use_cublasmp)
 
 
+@pytest.mark.xfail(reason="CUDA VMM is not supported yet on the Rubin containers.")
 @pytest.mark.parametrize("use_cublasmp", (False, True))
 @pytest.mark.parametrize("quantization", ("none", "fp8", "mxfp8"))
 @pytest.mark.parametrize("p2p", (False, True))
@@ -195,6 +197,7 @@ def test_split_reduce_scatter_overlaps(quantization, p2p, use_cublasmp):
     _run_gemm_with_overlap("RS", False, p2p, False, False, quantization, use_cublasmp)
 
 
+@pytest.mark.xfail(reason="CUDA VMM is not supported yet on the Rubin containers.")
 @pytest.mark.parametrize(
     "comm_type, quantization, connections",
     [
@@ -231,6 +234,7 @@ def test_bulk_overlaps(comm_type, quantization, connections):
         _run_gemm_with_overlap(comm_type, True, False, False, False, quantization)
 
 
+@pytest.mark.xfail(reason="CUDA VMM is not supported yet on the Rubin containers.")
 @pytest.mark.parametrize("use_cublasmp", (False, True))
 @pytest.mark.parametrize(
     "fp8",
@@ -281,6 +285,7 @@ def test_layers_with_overlap_bf16(
     )
 
 
+@pytest.mark.xfail(reason="CUDA VMM is not supported yet on the Rubin containers.")
 @pytest.mark.parametrize("use_cublasmp", (False, True))
 @pytest.mark.parametrize(
     "quantization",
@@ -337,6 +342,7 @@ def test_layers_with_overlap_fp8(
     )
 
 
+@pytest.mark.xfail(reason="CUDA VMM is not supported yet on the Rubin containers.")
 @pytest.mark.parametrize("use_cublasmp", (False, True))
 @pytest.mark.parametrize(
     "fp8",
@@ -386,6 +392,7 @@ def test_multi_layer_with_overlap_bf16(
     )
 
 
+@pytest.mark.xfail(reason="CUDA VMM is not supported yet on the Rubin containers.")
 @pytest.mark.parametrize("use_cublasmp", (False, True))
 @pytest.mark.parametrize(
     "quantization",
