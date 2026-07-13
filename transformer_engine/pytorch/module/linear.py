@@ -976,6 +976,16 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
                 elif bwd_args.weight_quantizer is not None:
                     bwd_args.weight_quantizer.set_usage(rowwise=True, columnwise=True)
                     weight_fp8 = bwd_args.weight_quantizer(saved_weight)
+            elif (
+                bwd_args.gtp_remat_size > 1
+                and bwd_args.fp8
+                and bwd_args.weight_quantizer is not None
+                and not isinstance(weight_fp8, QuantizedTensorStorage)
+            ):
+                # GTP re-gathered a BF16 weight (mxfp8-recipe layer kept BF16 for the AG): quantize
+                # with the layer quantizer so the dgrad operand isn't cast by the delayed recipe.
+                bwd_args.weight_quantizer.set_usage(rowwise=True, columnwise=True)
+                weight_fp8 = bwd_args.weight_quantizer(weight_fp8)
 
             # Make sure required data is available
             if isinstance(grad_output, QuantizedTensorStorage):
