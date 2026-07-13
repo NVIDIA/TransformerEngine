@@ -29,7 +29,11 @@ from transformer_engine.pytorch.ops.basic.basic_linear import BasicLinear
 from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer
 from transformer_engine.pytorch.quantization import QuantizerRole
 from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
-from transformer_engine.pytorch.quantized_tensor import QuantizedTensor, _STORAGE_REGISTRY
+from transformer_engine.pytorch.quantized_tensor import (
+    QuantizedTensor,
+    Quantizer,
+    _STORAGE_REGISTRY,
+)
 from transformer_engine.pytorch.dynamo import TensorProto, to_tensor_proto
 from transformer_engine.pytorch import (
     is_fp8_available,
@@ -700,6 +704,134 @@ def test_storage_flatten_unflatten_roundtrip(factory, shape):
     assert _signature(rebuilt, flat_names) == before
     # The reconstructed tensor dequantizes to the same values.
     torch.testing.assert_close(rebuilt.dequantize(), expected, atol=0, rtol=0, equal_nan=True)
+
+
+_USAGE_COMBOS = [
+    pytest.param(True, True, id="rowwise_columnwise"),
+    pytest.param(True, False, id="rowwise_only"),
+    pytest.param(False, True, id="columnwise_only"),
+]
+
+
+@pytest.mark.parametrize("factory, shape", _PROTO_QUANTIZERS)
+@pytest.mark.parametrize("rowwise, columnwise", _USAGE_COMBOS)
+@pytest.mark.parametrize("internal", [False, True], ids=["wrapper", "internal"])
+def test_python_alloc_matches_cpp_make_empty(factory, shape, rowwise, columnwise, internal):
+    """Pure-Python allocation is interchangeable with the C++ allocation.
+
+    Builds the same quantized tensor twice: via ``Quantizer.make_empty``
+    (``tex.create_empty_quantized_tensor``, the C++ path) and via the Python
+    primitives ``_describe_buffers`` + ``create_metadata`` + ``alloc_tensors``
+    + ``__tensor_unflatten__`` (exactly what ``TensorProto.create_tensor``
+    does). Checks:
+
+    * structural parity -- same concrete class, buffer set, per-buffer
+      shape/dtype/device, logical shape/dtype and flatten context;
+    * functional parity -- the real C++ quantize kernel writes bit-identical
+      results into the Python-allocated buffers as into the C++-allocated
+      ones, proving the Python buffer description matches the layout
+      (padding/alignment) the kernels expect.
+    """
+
+    # Two independent, identically-configured quantizers so no state can leak
+    # between the two allocation paths.
+    def make_quantizer():
+        q = factory()
+        q.set_usage(rowwise=rowwise, columnwise=columnwise)
+        q.internal = internal
+        return q
+
+    q_ref = make_quantizer()
+    if not (torch.cuda.is_available() and _hw_available(q_ref)):
+        pytest.skip("format not supported on this HW")
+    q_py = make_quantizer()
+
+    ref = q_ref.make_empty(shape, dtype=torch.bfloat16, device="cuda")
+    py = _build_from_primitives(q_py, shape, torch.bfloat16, device="cuda")
+
+    # --- Structural parity ---
+    assert type(py) is type(ref)
+    ref_names, ref_ctx = ref.__tensor_flatten__()
+    py_names, py_ctx = py.__tensor_flatten__()
+    assert set(py_names) == set(ref_names)
+    for name in ref_names:
+        rbuf, pbuf = getattr(ref, name), getattr(py, name)
+        assert tuple(pbuf.shape) == tuple(rbuf.shape), name
+        assert pbuf.dtype == rbuf.dtype, name
+        assert pbuf.device == rbuf.device, name
+
+    # Logical shape / dtype (bare storages are not torch.Tensors: they expose
+    # size() and _dtype instead of .shape / .dtype).
+    if isinstance(ref, QuantizedTensor):
+        assert tuple(py.shape) == tuple(ref.shape) == tuple(shape)
+        assert py.dtype == ref.dtype == torch.bfloat16
+    else:
+        assert tuple(py.size()) == tuple(ref.size()) == tuple(shape)
+        # pylint: disable=protected-access
+        assert py._dtype == ref._dtype == torch.bfloat16
+
+    # Flatten context. The quantizer entry needs special handling: production
+    # quantizers get a value-based __eq__ from register_value_opaque_quantizer,
+    # but fall back to field-wise comparison for classes that don't define one
+    # (plain object.__eq__ is identity, which would spuriously fail).
+    assert set(py_ctx) == set(ref_ctx)
+    for key in ("cls", "is_tensor", "requires_grad"):
+        assert py_ctx[key] == ref_ctx[key], key
+    ref_kwargs, py_kwargs = ref_ctx["nontensor_kwargs"], py_ctx["nontensor_kwargs"]
+    assert set(py_kwargs) == set(ref_kwargs)
+    for key in ref_kwargs:
+        rv, pv = ref_kwargs[key], py_kwargs[key]
+        if isinstance(rv, Quantizer) or isinstance(pv, Quantizer):
+            assert type(pv) is type(rv), key
+            assert (pv.rowwise_usage, pv.columnwise_usage, pv.internal) == (
+                rv.rowwise_usage,
+                rv.columnwise_usage,
+                rv.internal,
+            ), key
+            if type(rv).__eq__ is not object.__eq__:
+                assert pv == rv, key
+        else:
+            assert pv == rv, key
+
+    # --- Functional parity: run the real C++ quantize kernel into both ---
+    x = torch.randn(*shape, dtype=torch.bfloat16, device="cuda")
+
+    def _quantize_into(quantizer, dst):
+        if internal:
+            # update_quantized() only accepts the wrapper classes; internal
+            # (bare storage) tensors are filled through the same underlying
+            # kernel binding directly.
+            tex.quantize(x, quantizer, dst, None)
+        else:
+            quantizer.update_quantized(x, dst)
+
+    # Some combos are rejected by the quantize kernel itself regardless of who
+    # allocated the tensor (e.g. FP8 current-scaling columnwise-only on
+    # TN-capable archs: there is no rowwise data buffer and
+    # nvte_compute_scale_from_amax asserts on it). Parity then means the
+    # Python-allocated tensor is rejected the same way -- not a silent skip.
+    try:
+        _quantize_into(q_ref, ref)
+    except RuntimeError:
+        with pytest.raises(RuntimeError):
+            _quantize_into(q_py, py)
+        return
+    _quantize_into(q_py, py)
+    for name in ref_names:
+        torch.testing.assert_close(
+            getattr(py, name), getattr(ref, name), rtol=0.0, atol=0.0, equal_nan=True
+        )
+
+    # Value check through dequantize(). Some layouts cannot dequantize at all
+    # (e.g. FP8 columnwise-only raises NotImplementedError) -- the C++-allocated
+    # reference defines what is supported, and when it raises, the bitwise
+    # buffer equality above already proves value parity.
+    try:
+        expected = ref.dequantize()
+    except NotImplementedError:
+        expected = None
+    if expected is not None:
+        torch.testing.assert_close(py.dequantize(), expected, rtol=0.0, atol=0.0)
 
 
 # ----- TensorProto -----
