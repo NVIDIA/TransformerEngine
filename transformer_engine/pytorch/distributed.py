@@ -1849,7 +1849,8 @@ def _get_symm_mem_pool(device: torch.device, backend: str = "NCCL"):
     """Process-wide torch MemPool backed by the symmetric-memory allocator, created once (each rank
     drives one device). The pool/allocator captures the backend at creation and there is no per-pool
     backend arg, so the (process-global) backend is always set before the pool is created. The
-    collective rendezvous cost is amortized across allocations (paid per new segment, not per buffer)."""
+    collective rendezvous cost is amortized across allocations (paid per new segment, not per buffer).
+    """
     global _SYMM_MEM_POOL
     if _SYMM_MEM_POOL is None:
         symm_mem.set_backend(backend)
