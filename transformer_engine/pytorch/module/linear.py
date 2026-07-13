@@ -619,9 +619,9 @@ def _linear_forward_impl(
             wt_alias = None
         elif wt_save is weight:
             wt_alias = "weight"
-        elif new_weight_workspace is not None and wt_save is new_weight_workspace:
+        elif wt_save is new_weight_workspace:
             wt_alias = "new_workspace"
-        elif args.weight_workspace is not None and wt_save is args.weight_workspace:
+        elif wt_save is args.weight_workspace:
             wt_alias = "weight_workspace"
         else:
             wt_alias = None
