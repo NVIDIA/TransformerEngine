@@ -146,8 +146,8 @@ def to_tensor_proto(tensor: Any) -> TensorProto:
     """Build a :class:`TensorProto` describing ``tensor``.
 
     Works for plain ``torch.Tensor`` and for ``QuantizedTensorStorage`` /
-    ``QuantizedTensor``. A *bare* storage exposes its shape via ``.size()`` and
-    its (fake) dtype via ``_dtype`` rather than ``.shape`` / ``.dtype``.
+    ``QuantizedTensor``. A *bare* storage exposes its (fake) dtype via
+    ``_dtype`` rather than ``.dtype``.
     """
     from ..quantized_tensor import (  # pylint: disable=import-outside-toplevel
         QuantizedTensorStorage,
@@ -155,14 +155,11 @@ def to_tensor_proto(tensor: Any) -> TensorProto:
 
     requires_grad = bool(getattr(tensor, "requires_grad", False))
     if isinstance(tensor, QuantizedTensorStorage):
-        shape = getattr(tensor, "shape", None)
-        if shape is None:
-            shape = tensor.size()
         dtype = getattr(tensor, "dtype", None)
         if dtype is None:
             dtype = getattr(tensor, "_dtype", None)
         return TensorProto(
-            shape=tuple(shape),
+            shape=tuple(tensor.shape),
             dtype=dtype,
             quantizer=getattr(tensor, "_quantizer", None),
             requires_grad=requires_grad,

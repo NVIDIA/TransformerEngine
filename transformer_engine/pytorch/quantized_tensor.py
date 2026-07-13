@@ -53,6 +53,20 @@ class QuantizedTensorStorage:
     _dtype: torch.dtype
     _quantizer: Optional[Quantizer]
 
+    @property
+    def shape(self) -> torch.Size:
+        """Logical tensor shape, valid on bare storages and wrapper tensors alike.
+
+        Wrapper subclasses (also ``torch.Tensor``) defer to the native tensor
+        shape (``size()`` on a bare storage may reconstruct the shape from the
+        columnwise buffer, which is not necessarily the outer shape); bare
+        storages derive it from ``size()``.
+        """
+        if isinstance(self, torch.Tensor):
+            # pylint: disable=unnecessary-dunder-call
+            return torch._C.TensorBase.shape.__get__(self, type(self))
+        return torch.Size(self.size())
+
     def update_usage(
         self,
         rowwise_usage: Optional[bool] = None,
