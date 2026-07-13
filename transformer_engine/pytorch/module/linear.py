@@ -310,13 +310,9 @@ def _linear_forward_impl(
     # Configure tensor-parallel communication
     tp_world_size = get_distributed_world_size(tp_group)
     # Use the requires-grad flags captured into ``args`` at op-call time rather
-    # than the live tensors': the fake impl (``_linear_forward_impl_fake``) keys
-    # the number of FP8 inner buffers it emits off ``args.*_requires_grad``, so
-    # the real impl must agree to keep the custom-op output arity stable. Under
-    # ``torch.compile`` with CUDA-graph trees (``mode="reduce-overhead"``) the
-    # static graph inputs are detached during capture, so live
-    # ``weight.requires_grad`` / ``inp.requires_grad`` flip to False mid-capture
-    # and would otherwise diverge from the fake (schema/arity mismatch).
+    # than the live tensors': under ``torch.compile`` the live flags are
+    # sometimes unreliable, and the fake impl keys its output arity off the
+    # same captured flags, so real and fake must agree.
     backward_needs_input = is_grad_enabled and args.weight_requires_grad
     with_input_all_gather_nccl = (
         parallel_mode == "column" and sequence_parallel and not ub_overlap_ag_fprop
