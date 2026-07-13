@@ -974,7 +974,7 @@ def get_attention_backend(
                 use_flash_attention_4 = False
 
     # Filter: QKV layout
-    if qkv_format == "thd":
+    if "thd" in (q_format, kv_format):
         if pad_between_seqs:
             if (  # pylint: disable=too-many-boolean-expressions
                 use_flash_attention_2 and FlashAttentionUtils.is_installed
@@ -1005,6 +1005,18 @@ def get_attention_backend(
                         qkv_layout,
                     )
                 use_fused_attention = False
+    # THD support on Ampere/Ada requires cuDNN 9.18.1+ ("SDPA backward with THD layout on
+    # RTX-PRO 6000 and Ampere-architecture GPUs"). Check q_format/kv_format, not just
+    # qkv_format, since KV-cache layouts (e.g. paged_kv_thd_bshd_bshd) have
+    # qkv_format = thd_2bshd.
+    if "thd" in (q_format, kv_format) and device_compute_capability < (9, 0):
+        if cudnn_version < (9, 18, 1):
+            if use_fused_attention:
+                logger.debug(
+                    "Disabling FusedAttention as q_format or kv_format = thd is not supported for"
+                    " compute capability < sm90 and cuDNN version < 9.18.1"
+                )
+            use_fused_attention = False
 
     # Filter: Dropout
     if attention_dropout != 0.0:
