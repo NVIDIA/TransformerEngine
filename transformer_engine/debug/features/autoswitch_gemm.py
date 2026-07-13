@@ -24,6 +24,7 @@ from transformer_engine.debug.features.utils import next_enabled_iter
 _AUTOSWITCH_FEATURE_INSTANCES = weakref.WeakSet()
 _AUTOSWITCH_SAMPLING_CONFIGS = []
 _AUTOSWITCH_SAMPLING_CONFIG_KEYS = set()
+_AUTOSWITCH_METRICS_LOG_MODES = set()
 _AUTOSWITCH_DISABLE_UNTIL_BY_GEMM = {}
 _AUTOSWITCH_CONFIG_FILE_LOADED = False
 _AUTOSWITCH_DISABLE_UNTIL_ENV = "NVTE_AUTOSWITCH_GEMM_DISABLE_UNTIL"
@@ -79,6 +80,9 @@ def _register_sampling_config(config: Dict) -> None:
         bool(config.get(key, False)) for key in ("log_decisions", "verbose")
     ):
         _AUTOSWITCH_LOGGING_ENABLED = True
+    metrics_mode = _metrics_logging_mode_from_config(config)
+    if metrics_mode != "off":
+        _AUTOSWITCH_METRICS_LOG_MODES.add(metrics_mode)
 
     scope = str(config.get("hold_window_scope", "global")).strip().lower()
     if scope not in {"global", "layer"}:
@@ -98,6 +102,18 @@ def _get_hold_window_scope() -> str:
 def autoswitch_gemm_logging_enabled() -> bool:
     """Return True when verbose AutoswitchGemm logging is globally enabled."""
     return _AUTOSWITCH_LOGGING_ENABLED or _env_flag_enabled(_AUTOSWITCH_LOGGING_ENV, False)
+
+
+def autoswitch_gemm_should_log_metric_iteration(iteration: int) -> bool:
+    """Return whether autoswitch metric logs should be emitted for this iteration."""
+    if not _AUTOSWITCH_SAMPLING_CONFIGS:
+        _register_sampling_configs_from_file()
+
+    if "info" in _AUTOSWITCH_METRICS_LOG_MODES:
+        return True
+    if "debug" in _AUTOSWITCH_METRICS_LOG_MODES:
+        return _is_sampling_iteration(iteration)
+    return False
 
 
 def _register_sampling_configs_from_file() -> None:
@@ -773,6 +789,41 @@ class AutoswitchGemm(TEConfigAPIMapper):
                 extra_cachable_args=(gemm, "switch"),
             )
 
+    def _log_sampling_metrics_for_decision(
+        self,
+        metric_logger: Optional[_AutoswitchGemmMetricLogger],
+        config: Optional[Dict],
+        layer_name: str,
+        gemm: str,
+        iteration: int,
+    ) -> None:
+        """Log sampled decision metrics in sampling iterations."""
+        if not isinstance(config, dict):
+            return
+        if not self._is_sampling_iteration_for_config(config, iteration):
+            return
+        metric = self._latest_metrics.get((layer_name, gemm))
+        if metric is None or int(metric.get("iteration", -1)) != iteration:
+            return
+        self._log_metric_scalar(
+            metric_logger,
+            config,
+            layer_name,
+            gemm,
+            "sampled_underflow_pct",
+            iteration,
+            float(metric["underflow_pct"]),
+        )
+        self._log_metric_scalar(
+            metric_logger,
+            config,
+            layer_name,
+            gemm,
+            "sampled_mse",
+            iteration,
+            float(metric["mse"]),
+        )
+
     @api_method
     def fp8_gemm_enabled(
         self,
@@ -875,6 +926,9 @@ class AutoswitchGemm(TEConfigAPIMapper):
                 )
 
         self._consume_new_metric_and_maybe_arm_switch(layer_name, gemm, iteration, config, state)
+        self._log_sampling_metrics_for_decision(
+            metric_logger, config, layer_name, gemm, iteration
+        )
 
         disable_until_iter = state.disable_until_iter
         if self._hold_window_scope(config) == "global":

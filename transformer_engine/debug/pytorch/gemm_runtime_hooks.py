@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 import os
-from datetime import datetime
 from typing import Optional
 
 import torch
@@ -249,6 +248,16 @@ def _log_final_gemm_decision(
     """Write final AutoswitchGemm decision to the autoswitch rank-local log."""
     if not _autoswitch_logging_enabled():
         return
+    try:
+        from transformer_engine.debug.features.autoswitch_gemm import (
+            _get_autoswitch_metric_logger,
+            autoswitch_gemm_should_log_metric_iteration,
+        )
+
+        if not autoswitch_gemm_should_log_metric_iteration(iteration):
+            return
+    except Exception:  # pylint: disable=broad-except
+        pass
     rank = os.getenv("RANK", "0")
     if rank != "0":
         return
@@ -261,12 +270,13 @@ def _log_final_gemm_decision(
     if not root_log_dir:
         return
 
-    log_dir = os.path.join(root_log_dir, "nvdlfw_inspect_autoswitchgemm_logs")
-    log_file = os.path.join(log_dir, f"nvdlfw_inspect_globalrank-{rank}.log")
-    os.makedirs(log_dir, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S,%f")[:-3]
-    message = (
-        f"{timestamp} - INFO - {layer_name}_{gemm_name}_final_decision "
+    metric_logger = _get_autoswitch_metric_logger()
+    if not metric_logger.ensure_initialized(root_log_dir):
+        return
+    if metric_logger.logger is None:
+        return
+    metric_logger.logger.info(
+        f"{layer_name}_{gemm_name}_final_decision "
         f"\t\t\t\t iteration={iteration:06d} "
         f"\t\t\t\t quantized_enabled={int(bool(quantized_enabled))} "
         f"requested_precision={requested_precision} "
@@ -274,8 +284,6 @@ def _log_final_gemm_decision(
         f"lhs_quantized={int(lhs_quantized)} "
         f"rhs_quantized={int(rhs_quantized)}"
     )
-    with open(log_file, mode="a", encoding="utf-8") as log:
-        log.write(message + "\n")
 
 
 def resolve_gemm_inputs_after_sampling(
