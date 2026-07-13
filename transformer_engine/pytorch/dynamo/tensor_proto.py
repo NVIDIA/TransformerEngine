@@ -52,10 +52,11 @@ class TensorProto:
         """Mirror ``QuantizedTensor.update_usage`` on the proto's buffer layout.
 
         Applied to the proto's own quantizer copy, so the shared (value-opaque)
-        quantizer is never mutated. No-op for plain (non-quantized) protos.
+        quantizer is never mutated. Raises on plain (non-quantized) protos --
+        a real plain ``torch.Tensor`` has no ``update_usage`` either.
         """
         if self.quantizer is None:
-            return
+            raise ValueError("update_usage called on a non-quantized TensorProto")
         self.quantizer.set_usage(rowwise=rowwise_usage, columnwise=columnwise_usage)
 
     def inner_names(self) -> Tuple[str, ...]:
