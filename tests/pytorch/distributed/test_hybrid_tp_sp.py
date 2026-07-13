@@ -12,7 +12,6 @@ import pytest
 import torch
 import transformer_engine.pytorch as te
 
-
 if torch.cuda.device_count() < 2:
     pytest.skip(
         "Distributed TP/SP tests need at least 2 GPUs.",
@@ -56,11 +55,13 @@ def test_hybrid_fp8_linear_vs_vanilla():
     _run_test("hybrid_fp8", "linear_vs_vanilla")
 
 
+@pytest.mark.skipif(not fp8_available, reason=f"FP8: {reason_for_no_fp8}")
 def test_hybrid_fp8_layernorm_linear_vs_vanilla():
     """Same-topology LayerNormLinear parity against vanilla FP8."""
     _run_test("hybrid_fp8", "layernorm_linear_vs_vanilla")
 
 
+@pytest.mark.skipif(not fp8_available, reason=f"FP8: {reason_for_no_fp8}")
 def test_hybrid_fp8_layernorm_mlp_vs_vanilla():
     """Same-topology LayerNormMLP parity against vanilla FP8."""
     _run_test("hybrid_fp8", "layernorm_mlp_vs_vanilla")
@@ -90,6 +91,7 @@ def test_hybrid_fp8_identity_linear():
     _run_test("hybrid_fp8_identity", "linear")
 
 
+@pytest.mark.skipif(not fp8_available, reason=f"FP8: {reason_for_no_fp8}")
 def test_identity_all_modules():
     """All-Identity TP/SP end-to-end coverage for every supported TE module."""
     _run_test("identity", "all")
@@ -111,10 +113,12 @@ def test_hybrid_mxfp8_linear_vs_vanilla():
     _run_test("hybrid_mxfp8", "linear_vs_vanilla")
 
 
+@pytest.mark.skipif(not mxfp8_available, reason=f"MXFP8: {reason_for_no_mxfp8}")
 def test_hybrid_mxfp8_layernorm_linear_vs_vanilla():
     _run_test("hybrid_mxfp8", "layernorm_linear_vs_vanilla")
 
 
+@pytest.mark.skipif(not mxfp8_available, reason=f"MXFP8: {reason_for_no_mxfp8}")
 def test_hybrid_mxfp8_layernorm_mlp_vs_vanilla():
     _run_test("hybrid_mxfp8", "layernorm_mlp_vs_vanilla")
 

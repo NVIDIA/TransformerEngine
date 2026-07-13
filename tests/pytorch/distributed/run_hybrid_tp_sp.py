@@ -34,7 +34,6 @@ TEST_ROOT = Path(__file__).parent.resolve()
 sys.path.insert(0, str(TEST_ROOT))
 from run_layer_with_overlap import _compare_tensors  # noqa: E402
 
-
 # ── Global state ─────────────────────────────────────────────────────
 
 SEQ_LEN = 32
@@ -236,9 +235,11 @@ def _match_param_sizes(dist_param, single_param):
     return single_param[tuple(indices)]
 
 
-def _check_outputs(output_single, output_dist, label="outputs"):
+def _check_outputs(output_single, output_dist, label="outputs", *, tolerances=None):
     failed = torch.tensor([0], dtype=torch.uint8, device="cuda")
-    f, info = _compare_tensors(label, output_dist, output_single, **_get_tolerances())
+    f, info = _compare_tensors(
+        label, output_dist, output_single, **(tolerances or _get_tolerances())
+    )
     if f:
         dist_print(info, src=WORLD_RANK, error=True)
     failed[0] = int(f)
@@ -246,20 +247,112 @@ def _check_outputs(output_single, output_dist, label="outputs"):
     assert not bool(failed.item()), f"{label}: numerical check failed on at least one rank"
 
 
-def _check_gradients(model_dist, model_single):
-    for i, ((name, pd), ps) in enumerate(
-        zip(model_dist.named_parameters(), model_single.parameters())
-    ):
-        if pd.grad is None or ps.grad is None:
+def _collective_assert(condition, label):
+    """Raise on every rank only after all ranks report structural status."""
+    failed = torch.tensor([not condition], dtype=torch.uint8, device="cuda")
+    if not condition:
+        dist_print(label, src=WORLD_RANK, error=True)
+    dist.all_reduce(failed, dist.ReduceOp.MAX, NCCL_WORLD)
+    assert not bool(failed.item()), f"{label}: failed on at least one rank"
+
+
+def _check_gradients(
+    model_dist, model_single, *, bitwise=False, reduce_replicated=False, tolerances=None
+):
+    """Compare every parameter gradient, including presence and parameter count.
+
+    Sequence-parallel replicated parameters accumulate a partial gradient on
+    each rank. ``reduce_replicated`` reconstructs their full reference gradient
+    without mutating the gradient held by the model.
+    """
+    dist_params = list(model_dist.named_parameters())
+    single_params = list(model_single.named_parameters())
+    local_counts = torch.tensor(
+        [len(dist_params), len(single_params)], dtype=torch.int64, device="cuda"
+    )
+    min_counts = local_counts.clone()
+    max_counts = local_counts.clone()
+    dist.all_reduce(min_counts, dist.ReduceOp.MIN, NCCL_WORLD)
+    dist.all_reduce(max_counts, dist.ReduceOp.MAX, NCCL_WORLD)
+    _collective_assert(
+        torch.equal(min_counts, max_counts) and len(dist_params) == len(single_params),
+        "parameter count mismatch: "
+        f"local distributed={len(dist_params)}, local single={len(single_params)}, "
+        f"global min={min_counts.tolist()}, global max={max_counts.tolist()}",
+    )
+    for i, ((name, pd), (single_name, ps)) in enumerate(zip(dist_params, single_params)):
+        _collective_assert(
+            name == single_name,
+            f"parameter {i} name mismatch: {name!r} != {single_name!r}",
+        )
+        local_presence = torch.tensor(
+            [pd.grad is not None, ps.grad is not None], dtype=torch.uint8, device="cuda"
+        )
+        min_presence = local_presence.clone()
+        max_presence = local_presence.clone()
+        dist.all_reduce(min_presence, dist.ReduceOp.MIN, NCCL_WORLD)
+        dist.all_reduce(max_presence, dist.ReduceOp.MAX, NCCL_WORLD)
+        _collective_assert(
+            torch.equal(min_presence, max_presence)
+            and local_presence[0].item() == local_presence[1].item(),
+            f"grad[{i}].{name}: gradient presence differs locally or across ranks: "
+            f"local={local_presence.tolist()}, global min={min_presence.tolist()}, "
+            f"global max={max_presence.tolist()}",
+        )
+        if pd.grad is None:
             continue
-        failed = torch.tensor([0], dtype=torch.uint8, device="cuda")
-        ps_grad = _match_param_sizes(pd.grad, ps.grad)
-        f, info = _compare_tensors(f"grad[{i}].{name}", pd.grad, ps_grad, **_get_tolerances())
-        if f:
-            dist_print(info, src=WORLD_RANK, error=True)
-        failed[0] = int(f)
-        dist.all_reduce(failed, dist.ReduceOp.MAX, NCCL_WORLD)
-        assert not bool(failed.item()), f"grad[{i}].{name}: failed on at least one rank"
+        pd_grad = pd.grad
+        local_reduce = torch.tensor(
+            [reduce_replicated and pd_grad.shape == ps.grad.shape],
+            dtype=torch.uint8,
+            device="cuda",
+        )
+        min_reduce = local_reduce.clone()
+        max_reduce = local_reduce.clone()
+        dist.all_reduce(min_reduce, dist.ReduceOp.MIN, NCCL_WORLD)
+        dist.all_reduce(max_reduce, dist.ReduceOp.MAX, NCCL_WORLD)
+        _collective_assert(
+            torch.equal(min_reduce, max_reduce),
+            f"grad[{i}].{name}: replicated-gradient reduction branch differs across ranks",
+        )
+        if local_reduce.item():
+            pd_grad = pd_grad.detach().clone()
+            dist.all_reduce(pd_grad, dist.ReduceOp.SUM, NCCL_WORLD)
+        ps_grad = _match_param_sizes(pd_grad, ps.grad)
+        label = f"grad[{i}].{name}"
+        if bitwise:
+            _check_bitwise(pd_grad, ps_grad, label)
+        else:
+            _check_outputs(ps_grad, pd_grad, label=label, tolerances=tolerances)
+
+
+def _check_input_gradient(inp_dist, inp_single, label, *, bitwise=False):
+    """Compare the local TP/SP input-gradient shard with its full reference."""
+    local_presence = torch.tensor(
+        [inp_dist.grad is not None, inp_single.grad is not None],
+        dtype=torch.uint8,
+        device="cuda",
+    )
+    min_presence = local_presence.clone()
+    max_presence = local_presence.clone()
+    dist.all_reduce(min_presence, dist.ReduceOp.MIN, NCCL_WORLD)
+    dist.all_reduce(max_presence, dist.ReduceOp.MAX, NCCL_WORLD)
+    _collective_assert(
+        torch.equal(min_presence, max_presence)
+        and local_presence[0].item() == local_presence[1].item(),
+        f"{label}: input-gradient presence differs locally or across ranks: "
+        f"local={local_presence.tolist()}, global min={min_presence.tolist()}, "
+        f"global max={max_presence.tolist()}",
+    )
+    _collective_assert(
+        inp_dist.grad is not None,
+        f"{label}: both input gradients are unexpectedly absent",
+    )
+    expected = _match_param_sizes(inp_dist.grad, inp_single.grad)
+    if bitwise:
+        _check_bitwise(inp_dist.grad, expected, label)
+    else:
+        _check_outputs(expected, inp_dist.grad, label=label)
 
 
 def _apply_models(model_single, model_dist, inp_single, inp_dist, **kwargs):
@@ -338,9 +431,12 @@ def _test_linear(parallel_mode, sequence_parallel, params_dtype=torch.bfloat16, 
         label=f"linear[{parallel_mode},sp={sequence_parallel},amax_stress={amax_stress}]",
     )
 
-    # Other configs need extra grad sync, matching run_numerics.py.
-    if parallel_mode == "column" or not sequence_parallel:
-        _check_gradients(model_dist, model_single)
+    _check_input_gradient(
+        inp_dist,
+        inp_single,
+        label=f"linear[{parallel_mode},sp={sequence_parallel},amax_stress={amax_stress}] dgrad",
+    )
+    _check_gradients(model_dist, model_single, reduce_replicated=sequence_parallel)
 
 
 def test_linear():
@@ -363,6 +459,8 @@ def vanilla_recipe():
         return te_recipe.MXFP8BlockScaling()
     if QUANTIZATION == "hybrid_nvfp4":
         return te_recipe.NVFP4BlockScaling()
+    if QUANTIZATION == "identity":
+        return None
     raise ValueError(f"No vanilla recipe for QUANTIZATION={QUANTIZATION!r}")
 
 
@@ -413,7 +511,7 @@ def _test_linear_vs_vanilla(parallel_mode, sequence_parallel, params_dtype=torch
             inp = inp[:, WORLD_RANK * split : (WORLD_RANK + 1) * split].clone()
         inp.requires_grad_()
 
-        with te.autocast(enabled=True, recipe=recipe):
+        with te.autocast(enabled=recipe is not None, recipe=recipe):
             out = model(inp)
         # Fixed, recipe-independent target so both backward graphs match.
         torch.manual_seed(54321)
@@ -431,9 +529,8 @@ def _test_linear_vs_vanilla(parallel_mode, sequence_parallel, params_dtype=torch
     # Same-topology fprop operands should match bitwise.
     _check_bitwise(out_h, out_v, f"{tag} forward")
 
-    # Skip backward bitwise when SP changes the gather path or NVFP4 consumes
-    # columnwise SR RNG differently. Loose TP/SP checks cover those cases.
-    if not sequence_parallel and not _backward_not_bitwise_comparable():
+    # NVFP4 backward consumes columnwise stochastic-rounding RNG differently.
+    if not _backward_not_bitwise_comparable():
         _check_bitwise(dinp_h, dinp_v, f"{tag} dgrad")
         assert len(wgrads_h) == len(wgrads_v), f"{tag}: weight-grad count mismatch"
         for i, (gh, gv) in enumerate(zip(wgrads_h, wgrads_v)):
@@ -443,7 +540,6 @@ def _test_linear_vs_vanilla(parallel_mode, sequence_parallel, params_dtype=torch
 def test_linear_vs_vanilla():
     # These recipes have no same-format vanilla bitwise target.
     if QUANTIZATION in (
-        "identity",
         "hybrid_mxfp8_nvfp4",
         "hybrid_fp8_identity",
         "hybrid_mxfp8_identity",
@@ -456,17 +552,20 @@ def test_linear_vs_vanilla():
 
 
 def _same_format_parity_supported():
-    return QUANTIZATION in ("hybrid_fp8", "hybrid_mxfp8")
+    return QUANTIZATION in ("hybrid_fp8", "hybrid_mxfp8", "identity")
 
 
 def _check_same_topology_parity(
-    out_h, dinp_h, model_h, out_v, dinp_v, model_v, tag, *, check_grads
+    out_h, dinp_h, model_h, out_v, dinp_v, model_v, tag, *, tolerances=None
 ):
-    # Larger modules may use different fused/unfused norm paths.
-    _check_outputs(out_v, out_h, label=f"{tag} forward")
-    if check_grads:
-        _check_outputs(dinp_v, dinp_h, label=f"{tag} dgrad")
-        _check_gradients(model_h, model_v)
+    check = (
+        _check_bitwise
+        if tolerances is None
+        else lambda a, e, label: _check_outputs(e, a, label=label, tolerances=tolerances)
+    )
+    check(out_h, out_v, f"{tag} forward")
+    check(dinp_h, dinp_v, f"{tag} dgrad")
+    _check_gradients(model_h, model_v, bitwise=tolerances is None, tolerances=tolerances)
 
 
 def _test_layernorm_linear_vs_vanilla(sequence_parallel, params_dtype=torch.bfloat16):
@@ -491,7 +590,7 @@ def _test_layernorm_linear_vs_vanilla(sequence_parallel, params_dtype=torch.bflo
         torch.cuda.manual_seed(45670)
         inp = torch.randn((BATCH_SIZE, HIDDEN_SIZE)).cuda().to(params_dtype)
         inp.requires_grad_()
-        with te.autocast(enabled=True, recipe=recipe_obj):
+        with te.autocast(enabled=recipe_obj is not None, recipe=recipe_obj):
             out = model(inp)
         torch.manual_seed(45671)
         torch.cuda.manual_seed(45671)
@@ -508,7 +607,6 @@ def _test_layernorm_linear_vs_vanilla(sequence_parallel, params_dtype=torch.bflo
         dinp_v,
         model_v,
         f"layernorm_linear_vs_vanilla[sp={sequence_parallel}]",
-        check_grads=not sequence_parallel,
     )
 
 
@@ -539,7 +637,7 @@ def _test_layernorm_mlp_vs_vanilla(sequence_parallel, params_dtype=torch.bfloat1
         torch.cuda.manual_seed(56780)
         inp = torch.randn((BATCH_SIZE, HIDDEN_SIZE)).cuda().to(params_dtype)
         inp.requires_grad_()
-        with te.autocast(enabled=True, recipe=recipe_obj):
+        with te.autocast(enabled=recipe_obj is not None, recipe=recipe_obj):
             out = model(inp)
         torch.manual_seed(56781)
         torch.cuda.manual_seed(56781)
@@ -556,7 +654,10 @@ def _test_layernorm_mlp_vs_vanilla(sequence_parallel, params_dtype=torch.bfloat1
         dinp_v,
         model_v,
         f"layernorm_mlp_vs_vanilla[sp={sequence_parallel}]",
-        check_grads=not sequence_parallel,
+        # Hybrid CustomRecipe disables quantized-norm fusion while the native
+        # recipe uses it. Both paths consume identical quantized GEMM operands,
+        # but the BF16 norm boundary can differ by one rounding step.
+        tolerances=(None if QUANTIZATION == "identity" else {"rtol": 2**-7, "atol": 2**-10}),
     )
 
 
@@ -602,6 +703,11 @@ def _test_layernorm_linear(sequence_parallel, params_dtype=torch.bfloat16):
 
     _loss_backward(out_single, out_dist)
     _check_outputs(out_single, out_dist, label=f"layernorm_linear[sp={sequence_parallel}]")
+
+    _check_input_gradient(
+        inp_dist, inp_single, label=f"layernorm_linear[sp={sequence_parallel}] dgrad"
+    )
+    _check_gradients(model_dist, model_single, reduce_replicated=sequence_parallel)
 
 
 def test_layernorm_linear():
@@ -649,9 +755,10 @@ def _test_layernorm_mlp(sequence_parallel, params_dtype=torch.bfloat16):
     _loss_backward(out_single, out_dist)
     _check_outputs(out_single, out_dist, label=f"layernorm_mlp[sp={sequence_parallel}]")
 
-    # SP grads need extra sync, matching run_numerics.py.
-    if not sequence_parallel:
-        _check_gradients(model_dist, model_single)
+    _check_input_gradient(
+        inp_dist, inp_single, label=f"layernorm_mlp[sp={sequence_parallel}] dgrad"
+    )
+    _check_gradients(model_dist, model_single, reduce_replicated=sequence_parallel)
 
 
 def test_layernorm_mlp():
@@ -711,9 +818,10 @@ def _test_transformer_layer(sequence_parallel, params_dtype=torch.bfloat16):
     _loss_backward(out_single, out_dist)
     _check_outputs(out_single, out_dist, label=f"transformer_layer[sp={sequence_parallel}]")
 
-    # SP grads need extra sync, matching run_numerics.py.
-    if not sequence_parallel:
-        _check_gradients(model_dist, model_single)
+    _check_input_gradient(
+        inp_dist, inp_single, label=f"transformer_layer[sp={sequence_parallel}] dgrad"
+    )
+    _check_gradients(model_dist, model_single, reduce_replicated=sequence_parallel)
 
 
 def test_transformer_layer():

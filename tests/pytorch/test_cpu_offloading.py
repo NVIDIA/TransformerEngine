@@ -866,44 +866,79 @@ class TestTELayers:
         ):
             param_offload.data.copy_(param_no_offload.data)
 
-        x = Utils.create_tensor(None)
+        x = Utils.create_tensor(None, requires_grad=True)
 
         if use_cuda_graphs:
             callable_offload = te.make_graphed_callables(
                 callable_offload,
                 (x,),
                 enabled=recipe is not None,
-                recipe=(Utils.create_recipe_ctx(recipe) if recipe is not None else None),
+                recipe=recipe,
             )
 
         # warm up (for example to compute sf for delayed scaling)
         for _ in range(4):
+            callable_offload.zero_grad(set_to_none=True)
+            callable_no_offload.zero_grad(set_to_none=True)
+            x.grad = None
             out = callable_offload(x)
             out.sum().backward()
+            x.grad = None
             out = callable_no_offload(x)
             out.sum().backward()
 
         callable_offload.zero_grad(set_to_none=True)
+        callable_no_offload.zero_grad(set_to_none=True)
+        x.grad = None
+        rng_state = torch.cuda.get_rng_state()
         out_offload = callable_offload(x)
         out_offload.sum().backward()
 
-        # save out and gradients
-        offload_outs = [out_offload]
+        # Clone before the no-offload pass. CUDA graphs may reuse static output
+        # buffers, and the comparison must cover computed values rather than
+        # aliases or unchanged parameters.
+        offload_out = out_offload.detach().clone()
+        assert x.grad is not None
+        offload_input_grad = x.grad.detach().clone()
+        offload_param_grads = []
         for param in callable_offload.parameters():
-            offload_outs.append(param.detach().clone())
+            assert param.grad is not None
+            offload_param_grads.append(param.grad.detach().clone())
 
         torch.cuda.reset_peak_memory_stats()
+        torch.cuda.set_rng_state(rng_state)
+        x.grad = None
         out_no_offload = callable_no_offload(x)
         out_no_offload.sum().backward()
 
-        # collect gradients
-        no_offload_outs = [out_no_offload]
+        no_offload_out = out_no_offload.detach().clone()
+        assert x.grad is not None
+        no_offload_input_grad = x.grad.detach().clone()
+        no_offload_param_grads = []
         for param in callable_no_offload.parameters():
-            no_offload_outs.append(param.detach().clone())
+            assert param.grad is not None
+            no_offload_param_grads.append(param.grad.detach().clone())
 
-        # check if tensors are the same
-        for i in range(len(offload_outs)):
-            assert torch.allclose(offload_outs[i], no_offload_outs[i]), f"Error in tensor {i}."
+        # CPU offload is byte-preserving transport. It must not alter forward
+        # results, input gradients, or any parameter gradient.
+        torch.testing.assert_close(offload_out, no_offload_out, rtol=0.0, atol=0.0)
+        torch.testing.assert_close(
+            offload_input_grad,
+            no_offload_input_grad,
+            rtol=0.0,
+            atol=0.0,
+        )
+        assert len(offload_param_grads) == len(no_offload_param_grads)
+        for index, (offload_grad, no_offload_grad) in enumerate(
+            zip(offload_param_grads, no_offload_param_grads)
+        ):
+            torch.testing.assert_close(
+                offload_grad,
+                no_offload_grad,
+                rtol=0.0,
+                atol=0.0,
+                msg=f"Parameter gradient {index} differs with CPU offload",
+            )
 
         torch.cuda.synchronize()
 

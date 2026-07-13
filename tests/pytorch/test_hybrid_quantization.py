@@ -106,6 +106,144 @@ def _make_hybrid_quantizer_fp4_row_fp8_col():
     )
 
 
+def _as_data_tensor_tuple(storage):
+    """Return a storage's raw buffers as a tuple without copying them."""
+    if storage is None:
+        return ()
+    tensors = storage.get_data_tensors()
+    return tensors if isinstance(tensors, tuple) else (tensors,)
+
+
+def _snapshot_storage_tensor_metadata(storage, *, clone=False):
+    """Capture every tensor-valued concrete-storage metadata field without mutation."""
+    if storage is None:
+        return None
+    metadata = storage.get_metadata()
+    tensor_metadata = {}
+    for name, value in metadata.items():
+        # Optional tensor fields are represented by ``None``. Including them
+        # makes missing rowwise/columnwise data, scales, and amax explicit.
+        if isinstance(value, torch.Tensor) or value is None:
+            snapshot_value = value.detach().clone() if clone and value is not None else value
+            if (
+                value is not None
+                and getattr(storage, "_is_2D_scaled", False)
+                and name in ("rowwise_scale_inv", "columnwise_scale_inv")
+            ):
+                # Float8Block 2D scales pad one tile dimension to a multiple
+                # of four. Kernels never initialize or consume that padding,
+                # and FSDP deliberately strips then zero-repads it. Canonicalize
+                # only those non-logical elements while still comparing the
+                # complete tensor field, shape, presence, and every valid scale.
+                snapshot_value = value.detach().clone()
+                m, n = storage._fsdp_logical_mn()
+                block_len = storage._FSDP_BLOCK_LEN
+                m_tiles = (m + block_len - 1) // block_len
+                n_tiles = (n + block_len - 1) // block_len
+                if name == "rowwise_scale_inv":
+                    snapshot_value[:, n_tiles:] = 0
+                else:
+                    snapshot_value[:, m_tiles:] = 0
+            tensor_metadata[name] = snapshot_value
+    return {
+        "storage_type": type(storage).__name__,
+        "tensor_metadata": tensor_metadata,
+    }
+
+
+def _assert_storage_data_exact(actual, expected, *, context):
+    """Assert every tensor-valued data/scale/amax metadata field exactly."""
+    _assert_nested_state_exact(
+        _snapshot_storage_tensor_metadata(actual),
+        _snapshot_storage_tensor_metadata(expected),
+        path=context,
+    )
+
+
+def _clone_nested_state(value):
+    """Clone tensors in nested checkpoint state so later steps cannot mutate snapshots."""
+    if isinstance(value, torch.Tensor):
+        return value.detach().clone()
+    if isinstance(value, dict):
+        return {key: _clone_nested_state(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_clone_nested_state(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_clone_nested_state(item) for item in value)
+    return value
+
+
+def _assert_nested_state_exact(actual, expected, *, path="state"):
+    """Recursively compare checkpoint state, using zero tolerance for tensors."""
+    if isinstance(expected, torch.Tensor):
+        assert isinstance(actual, torch.Tensor), f"{path}: expected Tensor, got {type(actual)}"
+        torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0, msg=path)
+        return
+    if isinstance(expected, dict):
+        assert isinstance(actual, dict), f"{path}: expected dict, got {type(actual)}"
+        assert actual.keys() == expected.keys(), f"{path}: dictionary keys differ"
+        for key in expected:
+            _assert_nested_state_exact(actual[key], expected[key], path=f"{path}.{key}")
+        return
+    if isinstance(expected, (list, tuple)):
+        assert isinstance(
+            actual, type(expected)
+        ), f"{path}: expected {type(expected).__name__}, got {type(actual).__name__}"
+        assert len(actual) == len(expected), f"{path}: sequence lengths differ"
+        for index, (actual_item, expected_item) in enumerate(zip(actual, expected)):
+            _assert_nested_state_exact(
+                actual_item,
+                expected_item,
+                path=f"{path}[{index}]",
+            )
+        return
+    assert actual == expected, f"{path}: {actual!r} != {expected!r}"
+
+
+def _assert_hybrid_tensor_exact(actual, expected, *, context):
+    """Compare both hybrid directions, including all metadata and native dequantization."""
+    for direction in ("rowwise", "columnwise"):
+        actual_storage = getattr(actual, f"{direction}_sub_storage")
+        expected_storage = getattr(expected, f"{direction}_sub_storage")
+        _assert_storage_data_exact(
+            actual_storage,
+            expected_storage,
+            context=f"{context} {direction}",
+        )
+        if expected_storage is None:
+            continue
+        try:
+            expected_dequantized = expected_storage.dequantize()
+        except NotImplementedError:
+            # Some direction-only formats (notably NVFP4 columnwise) expose
+            # bytes/scales for GEMM but intentionally do not dequantize.
+            continue
+        actual_dequantized = actual_storage.dequantize()
+        torch.testing.assert_close(
+            actual_dequantized,
+            expected_dequantized,
+            rtol=0.0,
+            atol=0.0,
+            msg=f"{context} {direction} dequantized value differs",
+        )
+
+
+def _snapshot_model_parameters(model):
+    """Capture normal values and all tensor metadata in both hybrid directions."""
+    snapshot = {}
+    for name, param in model.named_parameters():
+        if isinstance(param, HybridQuantizedTensor):
+            snapshot[name] = {
+                "rowwise": _snapshot_storage_tensor_metadata(param.rowwise_sub_storage, clone=True),
+                "columnwise": _snapshot_storage_tensor_metadata(
+                    param.columnwise_sub_storage, clone=True
+                ),
+            }
+        else:
+            snapshot[name] = param.detach().clone()
+    return snapshot
+
+
 class _CountingIdentityQuantizer(IdentityQuantizer):
     """Identity quantizer that counts quantize calls for regression tests."""
 
@@ -954,6 +1092,15 @@ class TestHybridSaveRestore:
 
     def test_save_restore_roundtrip(self, hybrid_tensor):
         dq_before = hybrid_tensor.dequantize()
+        expected_metadata = {
+            "rowwise": _snapshot_storage_tensor_metadata(
+                hybrid_tensor.rowwise_sub_storage, clone=True
+            ),
+            "columnwise": _snapshot_storage_tensor_metadata(
+                hybrid_tensor.columnwise_sub_storage, clone=True
+            ),
+        }
+        buffers_before = _as_data_tensor_tuple(hybrid_tensor)
         tensors, obj = hybrid_tensor.prepare_for_saving()
         assert isinstance(tensors, list)
         assert all(t is None or isinstance(t, torch.Tensor) for t in tensors)
@@ -963,7 +1110,20 @@ class TestHybridSaveRestore:
         assert len(remainder) == 0
 
         dq_after = hybrid_tensor.dequantize()
-        torch.testing.assert_close(dq_before, dq_after)
+        buffers_after = _as_data_tensor_tuple(hybrid_tensor)
+        assert len(buffers_after) == len(buffers_before)
+        for before, after in zip(buffers_before, buffers_after):
+            assert after is before, "Direct save/restore must reattach the exact saved buffer"
+        torch.testing.assert_close(dq_before, dq_after, rtol=0.0, atol=0.0)
+        for direction in ("rowwise", "columnwise"):
+            actual_metadata = _snapshot_storage_tensor_metadata(
+                getattr(hybrid_tensor, f"{direction}_sub_storage"), clone=False
+            )
+            _assert_nested_state_exact(
+                actual_metadata,
+                expected_metadata[direction],
+                path=f"save/restore {direction}",
+            )
 
     def test_save_clears_data(self, hybrid_tensor):
         tensors, obj = hybrid_tensor.prepare_for_saving()
@@ -1289,10 +1449,15 @@ class TestHybridGetDataTensors:
         hq = _make_hybrid_quantizer_fp8_row_fp4_col()
         result = hq.quantize(inp)
         data_tensors = result.get_data_tensors()
+        row_tensors = _as_data_tensor_tuple(result.rowwise_sub_storage)
+        col_tensors = _as_data_tensor_tuple(result.columnwise_sub_storage)
+
         assert isinstance(data_tensors, tuple)
-        assert len(data_tensors) > 0
-        has_non_none = any(t is not None for t in data_tensors)
-        assert has_non_none
+        assert row_tensors and col_tensors
+        assert len(data_tensors) == len(row_tensors) + len(col_tensors)
+        assert all(
+            actual is expected for actual, expected in zip(data_tensors, row_tensors + col_tensors)
+        ), "Hybrid get_data_tensors must concatenate both sub-storages in direction order"
 
 
 @requires_fp8_and_nvfp4
@@ -2634,94 +2799,62 @@ class TestHybridMixedWithNonHybrid:
       wgrad (NT): input columnwise must match grad_output columnwise
     """
 
+    @staticmethod
+    def _assert_native_fp8_parity(hybrid_role, *, seed):
+        torch.manual_seed(seed)
+        in_features, out_features, batch = 128, 128, 32
+        model_hybrid = Linear(in_features, out_features, params_dtype=torch.bfloat16).cuda()
+        model_native = Linear(in_features, out_features, params_dtype=torch.bfloat16).cuda()
+        model_native.load_state_dict(model_hybrid.state_dict())
+        base_input = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16)
+        grad_output = torch.randn(batch, out_features, device="cuda", dtype=torch.bfloat16)
+
+        def mixed_factory(role):
+            is_linear = role is not None and role.module_type in (
+                "linear",
+                "grouped_linear",
+            )
+            if is_linear and role.tensor_type == hybrid_role:
+                return HybridQuantizer(
+                    rowwise_quantizer=_make_fp8_quantizer(),
+                    columnwise_quantizer=_make_fp8_quantizer(),
+                )
+            if is_linear and role.tensor_type in ("grad_output", "grad_input"):
+                return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
+            return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
+
+        hybrid_result = _run_linear_forward_backward(
+            model_hybrid,
+            base_input,
+            grad_output,
+            recipe.CustomRecipe(qfactory=mixed_factory),
+            seed=seed + 100,
+        )
+        native_result = _run_linear_forward_backward(
+            model_native,
+            base_input,
+            grad_output,
+            recipe.Float8CurrentScaling(),
+            seed=seed + 100,
+        )
+        _assert_linear_results_exact(
+            hybrid_result,
+            native_result,
+            output=True,
+            input_grad=True,
+            param_grads=True,
+        )
+
     def test_hybrid_input_plain_weight_fwd_bwd(self):
         """Input is hybrid (FP8 row / FP8 col), weight + grad_output plain FP8.
 
         Wgrad columnwise: FP8 (input.col) × FP8 (grad_output.col) → compatible.
         """
-        torch.manual_seed(77)
-        in_features, out_features, batch = 128, 128, 32
-
-        model = Linear(in_features, out_features, params_dtype=torch.bfloat16).cuda()
-        inp = torch.randn(
-            batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True
-        )
-
-        def factory(role):
-            is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
-            if is_linear and role.tensor_type == "input":
-                return HybridQuantizer(
-                    rowwise_quantizer=_make_fp8_quantizer(),
-                    columnwise_quantizer=_make_fp8_quantizer(),
-                )
-            if is_linear and role.tensor_type == "weight":
-                return Float8CurrentScalingQuantizer(
-                    tex.DType.kFloat8E4M3,
-                    device="cuda",
-                )
-            if is_linear and role.tensor_type in ("grad_output", "grad_input"):
-                return Float8CurrentScalingQuantizer(
-                    tex.DType.kFloat8E5M2,
-                    device="cuda",
-                )
-            return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
-
-        mixed_recipe = recipe.CustomRecipe(qfactory=factory)
-        with autocast(enabled=True, recipe=mixed_recipe):
-            out = model(inp)
-
-        assert not torch.isnan(out).any()
-
-        loss = out.float().sum()
-        loss.backward()
-
-        assert inp.grad is not None
-        assert not torch.isnan(inp.grad).any()
-        for name, p in model.named_parameters():
-            assert p.grad is not None, f"Gradient for '{name}' is None"
+        self._assert_native_fp8_parity("input", seed=77)
 
     def test_plain_input_hybrid_weight_fwd_bwd(self):
         """Input is plain FP8, weight is hybrid (FP8 row / FP8 col)."""
-        torch.manual_seed(88)
-        in_features, out_features, batch = 128, 128, 32
-
-        model = Linear(in_features, out_features, params_dtype=torch.bfloat16).cuda()
-        inp = torch.randn(
-            batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True
-        )
-
-        def factory(role):
-            is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
-            if is_linear and role.tensor_type == "input":
-                return Float8CurrentScalingQuantizer(
-                    tex.DType.kFloat8E4M3,
-                    device="cuda",
-                )
-            if is_linear and role.tensor_type == "weight":
-                return HybridQuantizer(
-                    rowwise_quantizer=_make_fp8_quantizer(),
-                    columnwise_quantizer=_make_fp8_quantizer(),
-                )
-            if is_linear and role.tensor_type in ("grad_output", "grad_input"):
-                return Float8CurrentScalingQuantizer(
-                    tex.DType.kFloat8E5M2,
-                    device="cuda",
-                )
-            return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
-
-        mixed_recipe = recipe.CustomRecipe(qfactory=factory)
-        with autocast(enabled=True, recipe=mixed_recipe):
-            out = model(inp)
-
-        assert not torch.isnan(out).any()
-
-        loss = out.float().sum()
-        loss.backward()
-
-        assert inp.grad is not None
-        assert not torch.isnan(inp.grad).any()
-        for name, p in model.named_parameters():
-            assert p.grad is not None, f"Gradient for '{name}' is None"
+        self._assert_native_fp8_parity("weight", seed=88)
 
 
 # ---------------------------------------------------------------------------
@@ -2823,6 +2956,70 @@ def _build_cross_format_params():
     return params
 
 
+def _set_quantization_test_seed(seed):
+    """Reset every RNG that a quantizer or GEMM helper may consume."""
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
+def _run_linear_forward(model, base_input, fp8_recipe, *, seed):
+    """Run a deterministic forward pass and return a detached result."""
+    _set_quantization_test_seed(seed)
+    with torch.no_grad():
+        with autocast(enabled=True, recipe=fp8_recipe):
+            output = model(base_input)
+    return output.detach().clone()
+
+
+def _run_linear_forward_backward(model, base_input, grad_output, fp8_recipe, *, seed):
+    """Run Linear with an external gradient and capture every numerical result."""
+    model.zero_grad(set_to_none=True)
+    run_input = base_input.clone().detach().requires_grad_(True)
+    _set_quantization_test_seed(seed)
+    with autocast(enabled=True, recipe=fp8_recipe):
+        output = model(run_input)
+    output.backward(grad_output)
+    return (
+        output.detach().clone(),
+        run_input.grad.detach().clone(),
+        {
+            name: param.grad.detach().clone()
+            for name, param in model.named_parameters()
+            if param.grad is not None
+        },
+    )
+
+
+def _plain_linear_qfactory(operand_factory, grad_factory):
+    """Build a non-hybrid factory with role-correct operand and grad dtypes."""
+
+    def factory(role):
+        is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+        if is_linear and role.tensor_type in ("grad_output", "grad_input"):
+            return grad_factory()
+        return operand_factory()
+
+    return factory
+
+
+def _assert_linear_results_exact(actual, expected, *, output, input_grad, param_grads):
+    """Compare selected Linear results with zero tolerance."""
+    if output:
+        torch.testing.assert_close(actual[0], expected[0], rtol=0.0, atol=0.0)
+    if input_grad:
+        torch.testing.assert_close(actual[1], expected[1], rtol=0.0, atol=0.0)
+    if param_grads:
+        assert actual[2].keys() == expected[2].keys()
+        for name in actual[2]:
+            torch.testing.assert_close(
+                actual[2][name],
+                expected[2][name],
+                rtol=0.0,
+                atol=0.0,
+                msg=f"Parameter gradient {name!r} differs",
+            )
+
+
 class TestHybridCrossFormatParametrized:
     """Parametrized fwd+bwd over all stateless quantizer cross-format pairs."""
 
@@ -2831,53 +3028,73 @@ class TestHybridCrossFormatParametrized:
         torch.manual_seed(42)
         in_features, out_features, batch = 128, 128, 32
 
-        model = Linear(in_features, out_features, params_dtype=torch.bfloat16).cuda()
-        inp = torch.randn(
-            batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True
-        )
+        model_hybrid = Linear(in_features, out_features, params_dtype=torch.bfloat16).cuda()
+        model_fprop_ref = Linear(in_features, out_features, params_dtype=torch.bfloat16).cuda()
+        model_bwd_ref = Linear(in_features, out_features, params_dtype=torch.bfloat16).cuda()
+        model_fprop_ref.load_state_dict(model_hybrid.state_dict())
+        model_bwd_ref.load_state_dict(model_hybrid.state_dict())
+
+        base_input = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16)
+        grad_output = torch.randn(batch, out_features, device="cuda", dtype=torch.bfloat16)
 
         row_cfg = _QUANTIZER_CONFIGS[row_name]
         col_cfg = _QUANTIZER_CONFIGS[col_name]
-        make_row_e4m3 = row_cfg[0]
-        make_col_e4m3 = col_cfg[0]
+        make_row_operand = row_cfg[0]
+        make_row_grad = row_cfg[1] if row_cfg[1] is not None else row_cfg[0]
+        make_col_operand = col_cfg[0]
         make_col_grad = col_cfg[1] if col_cfg[1] is not None else col_cfg[0]
 
-        def factory(role):
-            if (
-                role is not None
-                and role.module_type in ("linear", "grouped_linear")
-                and role.tensor_type in ("input", "weight")
-            ):
+        def hybrid_factory(role):
+            is_linear = role is not None and role.module_type in (
+                "linear",
+                "grouped_linear",
+            )
+            if is_linear and role.tensor_type in ("input", "weight"):
                 return HybridQuantizer(
-                    rowwise_quantizer=make_row_e4m3(),
-                    columnwise_quantizer=make_col_e4m3(),
+                    rowwise_quantizer=make_row_operand(),
+                    columnwise_quantizer=make_col_operand(),
                 )
-            if (
-                role is not None
-                and role.module_type in ("linear", "grouped_linear")
-                and role.tensor_type in ("grad_output", "grad_input")
-            ):
+            if is_linear and role.tensor_type in ("grad_output", "grad_input"):
                 return make_col_grad()
-            return make_row_e4m3()
+            return make_row_operand()
 
-        mixed_recipe = recipe.CustomRecipe(qfactory=factory)
-        with autocast(enabled=True, recipe=mixed_recipe):
-            out = model(inp)
+        hybrid_recipe = recipe.CustomRecipe(qfactory=hybrid_factory)
+        fprop_ref_recipe = recipe.CustomRecipe(
+            qfactory=_plain_linear_qfactory(make_row_operand, make_row_grad)
+        )
+        bwd_ref_recipe = recipe.CustomRecipe(
+            qfactory=_plain_linear_qfactory(make_col_operand, make_col_grad)
+        )
 
-        assert out.shape == (batch, out_features)
-        assert not torch.isnan(out).any(), f"Output NaN ({row_name} row × {col_name} col)"
-        assert not torch.isinf(out).any(), f"Output Inf ({row_name} row × {col_name} col)"
+        hybrid_result = _run_linear_forward_backward(
+            model_hybrid,
+            base_input,
+            grad_output,
+            hybrid_recipe,
+            seed=1234,
+        )
+        fprop_ref = _run_linear_forward(
+            model_fprop_ref,
+            base_input,
+            fprop_ref_recipe,
+            seed=1234,
+        )
+        bwd_ref = _run_linear_forward_backward(
+            model_bwd_ref,
+            base_input,
+            grad_output,
+            bwd_ref_recipe,
+            seed=1234,
+        )
 
-        loss = out.float().sum()
-        loss.backward()
-
-        assert inp.grad is not None, "Input gradient is None"
-        assert not torch.isnan(inp.grad).any(), f"Input grad NaN ({row_name} row × {col_name} col)"
-        for name, p in model.named_parameters():
-            assert p.grad is not None, f"Gradient for '{name}' is None"
-            assert not torch.isnan(
-                p.grad
-            ).any(), f"Gradient for '{name}' NaN ({row_name} row × {col_name} col)"
+        torch.testing.assert_close(hybrid_result[0], fprop_ref, rtol=0.0, atol=0.0)
+        _assert_linear_results_exact(
+            hybrid_result,
+            bwd_ref,
+            output=False,
+            input_grad=True,
+            param_grads=True,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2947,8 +3164,9 @@ class TestHybridCpuOffloadPushPop:
 
         reloaded = self._run_roundtrip(hybrid)
 
+        _assert_hybrid_tensor_exact(reloaded, hybrid, context="CPU offload roundtrip")
         assert isinstance(reloaded, HybridQuantizedTensor)
-        torch.testing.assert_close(reloaded.dequantize(), expected)
+        torch.testing.assert_close(reloaded.dequantize(), expected, rtol=0.0, atol=0.0)
 
     @requires_fp8_and_nvfp4
     def test_push_pop_preserves_sub_storage_types(self):
@@ -2964,6 +3182,7 @@ class TestHybridCpuOffloadPushPop:
         reloaded = self._run_roundtrip(hybrid)
 
         assert isinstance(reloaded.rowwise_sub_storage, row_type)
+        _assert_hybrid_tensor_exact(reloaded, hybrid, context="CPU offload storage types")
         assert isinstance(reloaded.columnwise_sub_storage, col_type)
 
     @requires_fp8_and_nvfp4
@@ -2982,8 +3201,9 @@ class TestHybridCpuOffloadPushPop:
 
         assert isinstance(reloaded, HybridQuantizedTensor)
         assert reloaded.columnwise_sub_storage is None
+        _assert_hybrid_tensor_exact(reloaded, hybrid, context="CPU offload rowwise-only")
         assert reloaded.rowwise_sub_storage is not None
-        torch.testing.assert_close(reloaded.dequantize(), expected)
+        torch.testing.assert_close(reloaded.dequantize(), expected, rtol=0.0, atol=0.0)
 
     @requires_fp8_and_nvfp4
     def test_push_pop_with_columnwise_only(self):
@@ -3008,8 +3228,9 @@ class TestHybridCpuOffloadPushPop:
 
         assert isinstance(reloaded, HybridQuantizedTensor)
         assert reloaded.rowwise_sub_storage is None
+        _assert_hybrid_tensor_exact(reloaded, hybrid, context="CPU offload columnwise-only")
         assert reloaded.columnwise_sub_storage is not None
-        torch.testing.assert_close(reloaded.dequantize(), expected)
+        torch.testing.assert_close(reloaded.dequantize(), expected, rtol=0.0, atol=0.0)
 
     @requires_fp8_and_nvfp4
     def test_push_pop_roundtrip_does_not_leak_intermediate_buffers(self):
@@ -3063,130 +3284,118 @@ class TestHybridThreeFormats:
     grad_output is itself hybrid (FormatB row + FormatC col) when B ≠ C.
     """
 
-    def test_fp8_fprop_mxfp8_dgrad_nvfp4_wgrad(self):
-        """FP8 current (fprop) + MXFP8 (dgrad) + NVFP4 (wgrad)."""
-        torch.manual_seed(300)
+    @staticmethod
+    def _assert_three_format_routing(
+        make_fprop, make_dgrad, make_wgrad, *, seed, plain_grad_output=False
+    ):
         in_features, out_features, batch = 128, 128, 32
+        torch.manual_seed(seed)
+        model_hybrid = Linear(in_features, out_features, params_dtype=torch.bfloat16).cuda()
+        model_fprop_ref = Linear(in_features, out_features, params_dtype=torch.bfloat16).cuda()
+        model_dgrad_ref = Linear(in_features, out_features, params_dtype=torch.bfloat16).cuda()
+        model_wgrad_ref = Linear(in_features, out_features, params_dtype=torch.bfloat16).cuda()
+        state_dict = model_hybrid.state_dict()
+        model_fprop_ref.load_state_dict(state_dict)
+        model_dgrad_ref.load_state_dict(state_dict)
+        model_wgrad_ref.load_state_dict(state_dict)
 
-        model = Linear(in_features, out_features, params_dtype=torch.bfloat16).cuda()
-        inp = torch.randn(
-            batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True
-        )
+        base_input = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16)
+        grad_output = torch.randn(batch, out_features, device="cuda", dtype=torch.bfloat16)
 
-        def factory(role):
-            is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+        def hybrid_factory(role):
+            is_linear = role is not None and role.module_type in (
+                "linear",
+                "grouped_linear",
+            )
             if is_linear and role.tensor_type == "weight":
                 return HybridQuantizer(
-                    rowwise_quantizer=_make_fp8_quantizer(),
-                    columnwise_quantizer=_make_mxfp8_quantizer(),
+                    rowwise_quantizer=make_fprop(),
+                    columnwise_quantizer=make_dgrad(),
                 )
             if is_linear and role.tensor_type == "input":
                 return HybridQuantizer(
-                    rowwise_quantizer=_make_fp8_quantizer(),
-                    columnwise_quantizer=_make_nvfp4_quantizer(),
+                    rowwise_quantizer=make_fprop(),
+                    columnwise_quantizer=make_wgrad(),
                 )
             if is_linear and role.tensor_type in ("grad_output", "grad_input"):
+                if plain_grad_output:
+                    return make_dgrad()
                 return HybridQuantizer(
-                    rowwise_quantizer=_make_mxfp8_quantizer(),
-                    columnwise_quantizer=_make_nvfp4_quantizer(),
+                    rowwise_quantizer=make_dgrad(),
+                    columnwise_quantizer=make_wgrad(),
                 )
-            return _make_fp8_quantizer()
+            return make_fprop()
 
-        with autocast(enabled=True, recipe=recipe.CustomRecipe(qfactory=factory)):
-            out = model(inp)
+        hybrid_result = _run_linear_forward_backward(
+            model_hybrid,
+            base_input,
+            grad_output,
+            recipe.CustomRecipe(qfactory=hybrid_factory),
+            seed=seed + 100,
+        )
+        fprop_ref = _run_linear_forward(
+            model_fprop_ref,
+            base_input,
+            recipe.CustomRecipe(qfactory=_plain_linear_qfactory(make_fprop, make_fprop)),
+            seed=seed + 100,
+        )
+        dgrad_ref = _run_linear_forward_backward(
+            model_dgrad_ref,
+            base_input,
+            grad_output,
+            recipe.CustomRecipe(qfactory=_plain_linear_qfactory(make_dgrad, make_dgrad)),
+            seed=seed + 100,
+        )
+        wgrad_ref = _run_linear_forward_backward(
+            model_wgrad_ref,
+            base_input,
+            grad_output,
+            recipe.CustomRecipe(qfactory=_plain_linear_qfactory(make_wgrad, make_wgrad)),
+            seed=seed + 100,
+        )
 
-        assert out.shape == (batch, out_features)
-        assert not torch.isnan(out).any(), "Output contains NaN"
+        torch.testing.assert_close(hybrid_result[0], fprop_ref, rtol=0.0, atol=0.0)
+        torch.testing.assert_close(hybrid_result[1], dgrad_ref[1], rtol=0.0, atol=0.0)
+        torch.testing.assert_close(
+            hybrid_result[2]["weight"],
+            wgrad_ref[2]["weight"],
+            rtol=0.0,
+            atol=0.0,
+        )
+        torch.testing.assert_close(
+            hybrid_result[2]["bias"],
+            dgrad_ref[2]["bias"],
+            rtol=0.0,
+            atol=0.0,
+        )
 
-        loss = out.float().sum()
-        loss.backward()
-
-        assert inp.grad is not None, "Input gradient is None"
-        assert not torch.isnan(inp.grad).any(), "Input gradient contains NaN"
-        for name, p in model.named_parameters():
-            assert p.grad is not None, f"Gradient for '{name}' is None"
-            assert not torch.isnan(p.grad).any(), f"Gradient for '{name}' contains NaN"
+    def test_fp8_fprop_mxfp8_dgrad_nvfp4_wgrad(self):
+        """FP8 current (fprop) + MXFP8 (dgrad) + NVFP4 (wgrad)."""
+        self._assert_three_format_routing(
+            _make_fp8_quantizer,
+            _make_mxfp8_quantizer,
+            _make_nvfp4_quantizer,
+            seed=300,
+        )
 
     def test_nvfp4_fprop_fp8_dgrad_mxfp8_wgrad(self):
         """NVFP4 (fprop) + FP8 current (dgrad) + MXFP8 (wgrad)."""
-        torch.manual_seed(301)
-        in_features, out_features, batch = 128, 128, 32
-
-        model = Linear(in_features, out_features, params_dtype=torch.bfloat16).cuda()
-        inp = torch.randn(
-            batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True
+        self._assert_three_format_routing(
+            _make_nvfp4_quantizer,
+            _make_fp8_quantizer,
+            _make_mxfp8_quantizer,
+            seed=301,
         )
-
-        def factory(role):
-            is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
-            if is_linear and role.tensor_type == "weight":
-                return HybridQuantizer(
-                    rowwise_quantizer=_make_nvfp4_quantizer(),
-                    columnwise_quantizer=_make_fp8_quantizer(),
-                )
-            if is_linear and role.tensor_type == "input":
-                return HybridQuantizer(
-                    rowwise_quantizer=_make_nvfp4_quantizer(),
-                    columnwise_quantizer=_make_mxfp8_quantizer(),
-                )
-            if is_linear and role.tensor_type in ("grad_output", "grad_input"):
-                return HybridQuantizer(
-                    rowwise_quantizer=_make_fp8_quantizer(),
-                    columnwise_quantizer=_make_mxfp8_quantizer(),
-                )
-            return _make_nvfp4_quantizer()
-
-        with autocast(enabled=True, recipe=recipe.CustomRecipe(qfactory=factory)):
-            out = model(inp)
-
-        assert out.shape == (batch, out_features)
-        assert not torch.isnan(out).any(), "Output contains NaN"
-
-        loss = out.float().sum()
-        loss.backward()
-
-        assert inp.grad is not None, "Input gradient is None"
-        assert not torch.isnan(inp.grad).any(), "Input gradient contains NaN"
-        for name, p in model.named_parameters():
-            assert p.grad is not None, f"Gradient for '{name}' is None"
-            assert not torch.isnan(p.grad).any(), f"Gradient for '{name}' contains NaN"
 
     def test_same_dgrad_wgrad_reduces_to_plain_grad(self):
         """When dgrad format == wgrad format, grad_output can be a plain quantizer."""
-        torch.manual_seed(302)
-        in_features, out_features, batch = 128, 128, 32
-
-        model = Linear(in_features, out_features, params_dtype=torch.bfloat16).cuda()
-        inp = torch.randn(
-            batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True
+        self._assert_three_format_routing(
+            _make_nvfp4_quantizer,
+            _make_mxfp8_quantizer,
+            _make_mxfp8_quantizer,
+            plain_grad_output=True,
+            seed=302,
         )
-
-        def factory(role):
-            is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
-            if is_linear and role.tensor_type == "weight":
-                return HybridQuantizer(
-                    rowwise_quantizer=_make_nvfp4_quantizer(),
-                    columnwise_quantizer=_make_mxfp8_quantizer(),
-                )
-            if is_linear and role.tensor_type == "input":
-                return HybridQuantizer(
-                    rowwise_quantizer=_make_nvfp4_quantizer(),
-                    columnwise_quantizer=_make_mxfp8_quantizer(),
-                )
-            if is_linear and role.tensor_type in ("grad_output", "grad_input"):
-                return _make_mxfp8_quantizer()
-            return _make_nvfp4_quantizer()
-
-        with autocast(enabled=True, recipe=recipe.CustomRecipe(qfactory=factory)):
-            out = model(inp)
-
-        loss = out.float().sum()
-        loss.backward()
-
-        assert inp.grad is not None
-        assert not torch.isnan(inp.grad).any()
-        for name, p in model.named_parameters():
-            assert p.grad is not None, f"Gradient for '{name}' is None"
 
 
 # ---------------------------------------------------------------------------
@@ -3238,21 +3447,48 @@ class TestHybridAllModules:
     batch = 16
     seq_len = 8
 
-    def _run_fwd_bwd(self, model, inp):
-        hybrid_recipe = recipe.CustomRecipe(qfactory=_make_hybrid_fp8_factory())
-        with autocast(enabled=True, recipe=hybrid_recipe):
-            out = model(inp)
-        loss = out.float().sum()
-        loss.backward()
+    def _run_fwd_bwd(self, model, inp, *model_args, output_atol=0.0, param_atols=None):
+        """Compare same-format hybrid numerics against the native FP8 recipe."""
+        import copy
 
-        assert not torch.isnan(out).any(), "Output contains NaN"
-        assert not torch.isinf(out).any(), "Output contains Inf"
-        assert inp.grad is not None, "Input gradient is None"
-        assert not torch.isnan(inp.grad).any(), "Input gradient contains NaN"
-        for name, p in model.named_parameters():
-            if p.requires_grad:
-                assert p.grad is not None, f"Gradient for '{name}' is None"
-                assert not torch.isnan(p.grad).any(), f"Gradient for '{name}' contains NaN"
+        model_native = copy.deepcopy(model)
+        param_atols = {} if param_atols is None else param_atols
+        grad_output = torch.randn_like(inp)
+
+        def run(run_model, run_recipe):
+            run_model.zero_grad(set_to_none=True)
+            run_input = inp.detach().clone().requires_grad_(True)
+            _set_quantization_test_seed(3370)
+            with autocast(enabled=True, recipe=run_recipe):
+                output = run_model(run_input, *model_args)
+            output.backward(grad_output)
+            return (
+                output.detach().clone(),
+                run_input.grad.detach().clone(),
+                {
+                    name: param.grad.detach().clone()
+                    for name, param in run_model.named_parameters()
+                    if param.grad is not None
+                },
+            )
+
+        native_result = run(model_native, recipe.Float8CurrentScaling())
+        hybrid_result = run(
+            model,
+            recipe.CustomRecipe(qfactory=_make_hybrid_fp8_factory()),
+        )
+
+        torch.testing.assert_close(hybrid_result[0], native_result[0], rtol=0.0, atol=output_atol)
+        torch.testing.assert_close(hybrid_result[1], native_result[1], rtol=0.0, atol=0.0)
+        assert hybrid_result[2].keys() == native_result[2].keys()
+        for name in hybrid_result[2]:
+            torch.testing.assert_close(
+                hybrid_result[2][name],
+                native_result[2][name],
+                rtol=0.0,
+                atol=param_atols.get(name, 0.0),
+                msg=f"Parameter gradient {name!r} differs",
+            )
 
     def test_linear(self):
         torch.manual_seed(500)
@@ -3300,7 +3536,15 @@ class TestHybridAllModules:
             dtype=torch.bfloat16,
             requires_grad=True,
         )
-        self._run_fwd_bwd(model, inp)
+        # Native fuses LN+quantize while Hybrid takes the explicit quantize path.
+        # The only non-bitwise results are output (1 BF16 quantum here) and
+        # fc2_weight grad; all other gradients remain zero-tolerance checks.
+        self._run_fwd_bwd(
+            model,
+            inp,
+            output_atol=0.0009765625,
+            param_atols={"fc2_weight": 0.0234375},
+        )
 
     def test_grouped_linear(self):
         torch.manual_seed(504)
@@ -3322,20 +3566,7 @@ class TestHybridAllModules:
         rem = self.batch % num_gemms
         m_splits = [base + (1 if i < rem else 0) for i in range(num_gemms)]
 
-        hybrid_recipe = recipe.CustomRecipe(qfactory=_make_hybrid_fp8_factory())
-        with autocast(enabled=True, recipe=hybrid_recipe):
-            out = model(inp, m_splits)
-        loss = out.float().sum()
-        loss.backward()
-
-        assert not torch.isnan(out).any(), "Output contains NaN"
-        assert not torch.isinf(out).any(), "Output contains Inf"
-        assert inp.grad is not None, "Input gradient is None"
-        assert not torch.isnan(inp.grad).any(), "Input gradient contains NaN"
-        for name, p in model.named_parameters():
-            if p.requires_grad:
-                assert p.grad is not None, f"Gradient for '{name}' is None"
-                assert not torch.isnan(p.grad).any(), f"Gradient for '{name}' contains NaN"
+        self._run_fwd_bwd(model, inp, m_splits)
 
     def test_transformer_layer(self):
         torch.manual_seed(503)
@@ -3356,7 +3587,15 @@ class TestHybridAllModules:
             dtype=torch.bfloat16,
             requires_grad=True,
         )
-        self._run_fwd_bwd(model, inp)
+        # The LayerNormMLP submodule has the same fused-vs-explicit ordering.
+        # Keep dgrad and every other parameter exact; bound only the observed
+        # BF16 output and final projection-weight accumulation roundoff.
+        self._run_fwd_bwd(
+            model,
+            inp,
+            output_atol=0.015625,
+            param_atols={"layernorm_mlp.fc2_weight": 0.140625},
+        )
 
 
 @requires_fp8
@@ -3522,6 +3761,49 @@ class TestHybridGroupedLinearClassifier:
 
         with pytest.raises(ValueError, match="mixed parent usage flags"):
             _hybrid_split_quantize(tensor, [16, 16], quantizers)
+
+    @requires_fp8_and_nvfp4
+    @pytest.mark.xfail(
+        strict=True,
+        raises=AssertionError,
+        reason=(
+            "Production follow-up: GroupedLinear bulk split-quantize ignores "
+            "HybridQuantizer.columnwise_source"
+        ),
+    )
+    def test_hybrid_split_quantize_honors_rowwise_dequantized_source(self):
+        """Bulk split must match standalone HybridQuantizer provenance semantics."""
+        from transformer_engine.pytorch.module.grouped_linear import (
+            _hybrid_split_quantize,
+        )
+
+        torch.manual_seed(3598)
+        # NVFP4 grouped split-quantize requires each M split to be a multiple
+        # of 64; valid geometry ensures the xfail reaches provenance checking.
+        tensor = torch.randn(128, 128, dtype=torch.bfloat16, device="cuda")
+
+        def make_quantizer():
+            return HybridQuantizer(
+                rowwise_quantizer=_make_nvfp4_quantizer(),
+                columnwise_quantizer=_make_fp8_quantizer(),
+                columnwise_source="rowwise_dequantized",
+            )
+
+        actual = _hybrid_split_quantize(
+            tensor,
+            [64, 64],
+            [make_quantizer(), make_quantizer()],
+        )
+        expected = [
+            make_quantizer().quantize(part) for part in torch.split(tensor, [64, 64], dim=0)
+        ]
+
+        for index, (actual_part, expected_part) in enumerate(zip(actual, expected)):
+            _assert_storage_data_exact(
+                actual_part.columnwise_sub_storage,
+                expected_part.columnwise_sub_storage,
+                context=f"GroupedLinear split {index} columnwise provenance",
+            )
 
 
 # ===========================================================================
@@ -3691,10 +3973,10 @@ class TestHybridWeightWorkspaceCache:
 
         inp = torch.randn(32, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
         with autocast(enabled=True, recipe=hybrid_recipe):
-            out = model(inp)
+            out = model(inp, is_first_microbatch=True)
 
         assert out.shape == (32, 128)
-        assert not torch.isnan(out).any()
+        assert "weight" not in model._fp8_workspaces
 
     def test_bf16_weight_creates_hybrid_workspace(self):
         """When weight is BF16 and recipe produces HybridQuantizer, the workspace
@@ -3704,10 +3986,13 @@ class TestHybridWeightWorkspaceCache:
 
         inp = torch.randn(32, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
         with autocast(enabled=True, recipe=hybrid_recipe):
-            out = model(inp)
+            out = model(inp, is_first_microbatch=True)
 
         assert out.shape == (32, 128)
-        assert not torch.isnan(out).any()
+        workspace = model._fp8_workspaces.get("weight")
+        assert isinstance(workspace, HybridQuantizedTensorStorage)
+        assert workspace.rowwise_sub_storage is not None
+        assert workspace.columnwise_sub_storage is not None
 
     def test_workspace_cache_reuse_across_microbatches(self):
         """Cached hybrid workspace should be reused on 2nd+ microbatches."""
@@ -3718,12 +4003,16 @@ class TestHybridWeightWorkspaceCache:
         with autocast(enabled=True, recipe=hybrid_recipe):
             with torch.no_grad():
                 out1 = model(inp, is_first_microbatch=True)
+                workspace = model._fp8_workspaces["weight"]
+                buffers = _as_data_tensor_tuple(workspace)
                 out2 = model(inp, is_first_microbatch=False)
 
-        # Both should produce valid, identical results (same weight, same input)
-        assert not torch.isnan(out1).any()
-        assert not torch.isnan(out2).any()
-        torch.testing.assert_close(out1, out2)
+        assert isinstance(workspace, HybridQuantizedTensorStorage)
+        assert model._fp8_workspaces["weight"] is workspace
+        current_buffers = _as_data_tensor_tuple(workspace)
+        assert len(current_buffers) == len(buffers)
+        assert all(current is cached for current, cached in zip(current_buffers, buffers))
+        torch.testing.assert_close(out1, out2, rtol=0.0, atol=0.0)
 
     def test_workspace_cache_invalidation_on_usage_change(self):
         """If usage requirements change (e.g. inference→training), the cache
@@ -3736,17 +4025,26 @@ class TestHybridWeightWorkspaceCache:
         # First pass: inference (no columnwise needed)
         with torch.no_grad():
             with autocast(enabled=True, recipe=hybrid_recipe):
-                out_infer = model(inp, is_first_microbatch=True)
-        assert not torch.isnan(out_infer).any()
+                model(inp, is_first_microbatch=True)
+        inference_workspace = model._fp8_workspaces["weight"]
+        assert isinstance(inference_workspace, HybridQuantizedTensorStorage)
+        assert inference_workspace.rowwise_sub_storage is not None
+        assert inference_workspace.columnwise_sub_storage is None
 
         # Second pass: training (columnwise now needed for backward)
         with autocast(enabled=True, recipe=hybrid_recipe):
             out_train = model(inp, is_first_microbatch=True)
+        training_workspace = model._fp8_workspaces["weight"]
+
+        assert isinstance(training_workspace, HybridQuantizedTensorStorage)
+        assert training_workspace is not inference_workspace
+        assert training_workspace.rowwise_sub_storage is not None
+        assert training_workspace.columnwise_sub_storage is not None
+
         loss = out_train.float().sum()
         loss.backward()
 
         assert inp.grad is not None
-        assert not torch.isnan(inp.grad).any()
 
 
 # ---------------------------------------------------------------------------
@@ -4034,6 +4332,14 @@ class TestHybridQuantizeMasterWeights:
         quantizer.update_quantized(master.reshape(1, -1), temp)
         return temp._data.reshape(-1)
 
+    @staticmethod
+    def _logical_float8_bytes(storage):
+        """Return FP8 payload in the tensor's logical row-major order."""
+        if storage._data is not None:
+            return storage._data.reshape(-1)
+        assert storage._transpose is not None
+        return storage._transpose.transpose(-2, -1).contiguous().reshape(-1)
+
     def test_fp8_current_transpose_only_nonzero_offset(self):
         """Current-scaling distopt update handles Hopper-style columnwise storage.
 
@@ -4114,6 +4420,19 @@ class TestHybridQuantizeMasterWeights:
 
         assert weight._rowwise_storage is not None
         assert weight._columnwise_storage is not None
+        master_bf16 = master_flat.to(weight.dtype).reshape(weight.shape)
+        expected_row = weight._quantizer.rowwise_quantizer.copy().quantize(master_bf16)
+        expected_column = weight._quantizer.columnwise_quantizer.copy().quantize(master_bf16)
+        _assert_storage_data_exact(
+            weight._rowwise_storage,
+            expected_row,
+            context="full-master rowwise independent quantization",
+        )
+        _assert_storage_data_exact(
+            weight._columnwise_storage,
+            expected_column,
+            context="full-master columnwise independent quantization",
+        )
         dq_row = weight._rowwise_storage.dequantize(dtype=torch.float32)
         dq_col = weight._columnwise_storage.dequantize(dtype=torch.float32)
         # FP8 E4M3 round-trip; matches the loose tolerance the equivalent
@@ -4137,20 +4456,58 @@ class TestHybridQuantizeMasterWeights:
         weight, hp_master_full = _build_hybrid_linear_weight(64, 64, hybrid_recipe)
 
         half = hp_master_full.numel() // 2
-        hp_master_shard = hp_master_full.view(-1)[half:].contiguous()
+        # Negation preserves the shard amax while guaranteeing that this update
+        # is observable. The fixed seed puts the full-tensor amax in this shard,
+        # so the current-scaling factor must remain bitwise stable.
+        hp_master_shard = -hp_master_full.view(-1)[half:].contiguous()
         start_offset = half
+
+        before = {}
+        for direction, storage in (
+            ("rowwise", weight._rowwise_storage),
+            ("columnwise", weight._columnwise_storage),
+        ):
+            assert storage is not None
+            before[direction] = {
+                "bytes": self._logical_float8_bytes(storage).clone(),
+                "scale_inv": storage._scale_inv.clone(),
+                "dequantized": storage.dequantize(dtype=torch.float32).reshape(-1).clone(),
+            }
 
         quantize_master_weights([weight], [hp_master_shard], [start_offset], group=group)
         post_all_gather_processing([weight])
 
-        # The second-half slice (which the master shard covered) should match.
-        # The first-half slice was already written at quantized_model_init time
-        # from the same high-precision init val, so it should also match (modulo
-        # the second amax all-reduce shifting the per-tensor scale).
-        dq_row = weight._rowwise_storage.dequantize(dtype=torch.float32).view(-1)
-        dq_col = weight._columnwise_storage.dequantize(dtype=torch.float32).view(-1)
-        torch.testing.assert_close(dq_row[start_offset:], hp_master_shard, rtol=0.125, atol=0.1)
-        torch.testing.assert_close(dq_col[start_offset:], hp_master_shard, rtol=0.125, atol=0.1)
+        for direction, storage in (
+            ("rowwise", weight._rowwise_storage),
+            ("columnwise", weight._columnwise_storage),
+        ):
+            previous = before[direction]
+            actual_bytes = self._logical_float8_bytes(storage)
+            torch.testing.assert_close(storage._scale_inv, previous["scale_inv"], rtol=0, atol=0)
+            torch.testing.assert_close(
+                actual_bytes[:start_offset], previous["bytes"][:start_offset], rtol=0, atol=0
+            )
+            expected_shard_bytes = self._reference_fp8_bytes(
+                hp_master_shard.to(weight.dtype),
+                torch.reciprocal(storage._scale_inv),
+                weight.dtype,
+            )
+            torch.testing.assert_close(
+                actual_bytes[start_offset:], expected_shard_bytes, rtol=0, atol=0
+            )
+            assert not torch.equal(
+                actual_bytes[start_offset:], previous["bytes"][start_offset:]
+            ), f"{direction} updated shard unexpectedly retained every FP8 byte"
+            dequantized = storage.dequantize(dtype=torch.float32).reshape(-1)
+            torch.testing.assert_close(
+                dequantized[:start_offset],
+                previous["dequantized"][:start_offset],
+                rtol=0,
+                atol=0,
+            )
+            torch.testing.assert_close(
+                dequantized[start_offset:], hp_master_shard, rtol=0.125, atol=0.1
+            )
 
     def test_fp8_delayed_same_format_full_master(self):
         """Same-format delayed scaling on both directions. Both sub-storages
@@ -4329,6 +4686,27 @@ class TestHybridQuantizeMasterWeights:
         with pytest.raises(NotImplementedError, match="NVFP4Quantizer rowwise"):
             quantize_master_weights([weight], [master_flat], [0], group=group)
 
+    @pytest.mark.skipif(not nvfp4_available, reason=f"NVFP4: {reason_for_no_nvfp4}")
+    def test_nvfp4_columnwise_raises(self):
+        """NVFP4 in only the columnwise slot is rejected per-direction."""
+        from transformer_engine.pytorch.tensor.utils import quantize_master_weights
+
+        group = _ensure_single_rank_dp_group()
+        hybrid_recipe = _hybrid_custom_recipe(
+            row_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
+            col_factory=lambda: NVFP4Quantizer(
+                fp4_dtype=tex.DType.kFloat4E2M1, with_2d_quantization=True
+            ),
+            grad_factory=lambda: Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E5M2, device="cuda"
+            ),
+        )
+        weight, hp_master = _build_hybrid_linear_weight(64, 128, hybrid_recipe)
+        master_flat = hp_master.view(-1).contiguous()
+
+        with pytest.raises(NotImplementedError, match="NVFP4Quantizer columnwise"):
+            quantize_master_weights([weight], [master_flat], [0], group=group)
+
     @pytest.mark.skipif(
         not fp8_block_scaling_available,
         reason=f"Float8 block scaling: {reason_for_no_fp8_block_scaling}",
@@ -4345,6 +4723,33 @@ class TestHybridQuantizeMasterWeights:
         master_flat = hp_master.view(-1).contiguous()
 
         with pytest.raises(NotImplementedError, match="Float8BlockQuantizer rowwise"):
+            quantize_master_weights([weight], [master_flat], [0], group=group)
+
+    @pytest.mark.skipif(
+        not fp8_block_scaling_available,
+        reason=f"Float8 block scaling: {reason_for_no_fp8_block_scaling}",
+    )
+    def test_blockwise_columnwise_raises(self):
+        """Float8BlockQuantizer in only the columnwise slot is rejected."""
+        from transformer_engine.pytorch.tensor.utils import quantize_master_weights
+
+        group = _ensure_single_rank_dp_group()
+        hybrid_recipe = _hybrid_custom_recipe(
+            row_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
+            col_factory=lambda: Float8BlockQuantizer(
+                fp8_dtype=tex.DType.kFloat8E4M3,
+                rowwise=True,
+                columnwise=True,
+                block_scaling_dim=2,
+            ),
+            grad_factory=lambda: Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E5M2, device="cuda"
+            ),
+        )
+        weight, hp_master = _build_hybrid_linear_weight(128, 128, hybrid_recipe)
+        master_flat = hp_master.view(-1).contiguous()
+
+        with pytest.raises(NotImplementedError, match="Float8BlockQuantizer columnwise"):
             quantize_master_weights([weight], [master_flat], [0], group=group)
 
     def test_rowwise_only_fp8_current_full_master(self):
@@ -4373,6 +4778,14 @@ class TestHybridQuantizeMasterWeights:
 
         # Columnwise stays dropped (the cast must not silently revive it).
         assert weight._columnwise_storage is None
+        expected_row = weight._quantizer.rowwise_quantizer.copy().quantize(
+            master_flat.to(weight.dtype).reshape(weight.shape)
+        )
+        _assert_storage_data_exact(
+            weight._rowwise_storage,
+            expected_row,
+            context="rowwise-only full-master independent quantization",
+        )
         # Rowwise is populated and dequantizes close to the master.
         dq_row = weight._rowwise_storage.dequantize(dtype=torch.float32)
         torch.testing.assert_close(dq_row.reshape(-1), master_flat, rtol=0.125, atol=0.1)
@@ -4401,6 +4814,14 @@ class TestHybridQuantizeMasterWeights:
 
         # Rowwise stays dropped (the cast must not silently revive it).
         assert weight._rowwise_storage is None
+        expected_column = weight._quantizer.columnwise_quantizer.copy().quantize(
+            master_flat.to(weight.dtype).reshape(weight.shape)
+        )
+        _assert_storage_data_exact(
+            weight._columnwise_storage,
+            expected_column,
+            context="columnwise-only full-master independent quantization",
+        )
         # Columnwise is populated and dequantizes close to the master.
         dq_col = weight._columnwise_storage.dequantize(dtype=torch.float32)
         torch.testing.assert_close(dq_col.reshape(-1), master_flat, rtol=0.125, atol=0.1)
@@ -4530,20 +4951,13 @@ class TestHybridQuantizeInPlace:
         original = torch.randn(128, 128, dtype=torch.bfloat16, device="cuda")
         tensor = hq.quantize(original)
 
-        dq_before = tensor.dequantize().clone()
-
         # Update with different data
         new_data = torch.randn(128, 128, dtype=torch.bfloat16, device="cuda")
-        tensor.quantize_(new_data)
+        expected = hq.quantize(new_data)
+        result = tensor.quantize_(new_data)
 
-        dq_after = tensor.dequantize()
-
-        # Should be close to new data, not old data
-        diff_new = (dq_after.float() - new_data.float()).abs().mean()
-        diff_old = (dq_after.float() - original.float()).abs().mean()
-        assert (
-            diff_new < diff_old
-        ), f"After quantize_(), data is closer to old ({diff_old:.4f}) than new ({diff_new:.4f})"
+        assert result is tensor
+        _assert_hybrid_tensor_exact(tensor, expected, context="quantize_")
 
     def test_quantize_inplace_preserves_tensor_identity(self):
         """quantize_() should update in-place, not create a new tensor."""
@@ -4556,11 +4970,10 @@ class TestHybridQuantizeInPlace:
         original = torch.randn(128, 128, dtype=torch.bfloat16, device="cuda")
         tensor = hq.quantize(original)
 
-        tensor_id = id(tensor)
         new_data = torch.randn(128, 128, dtype=torch.bfloat16, device="cuda")
         result = tensor.quantize_(new_data)
 
-        assert id(tensor) == tensor_id, "quantize_() should return same object"
+        assert result is tensor, "quantize_() must return the object it updated"
 
     # noop_flag is a delayed-scaling feature; not tested here since
     # delayed scaling is out of scope for hybrid quantization.
@@ -5014,21 +5427,86 @@ class _QuantizedParamsEquivalenceBase:
             master_weights=True,
             master_weight_dtype=torch.float32,
         )
-        losses = []
-        for _ in range(num_steps):
+        trajectory = []
+        hybrid_metadata_trajectory = []
+        for step in range(num_steps):
             optimizer.zero_grad(set_to_none=True)
+            step_input = x.detach().clone().requires_grad_(True)
+            _set_quantization_test_seed(199 + step)
             with autocast(enabled=True, recipe=train_recipe):
-                output = model(x)
+                output = model(step_input)
             loss = torch.nn.functional.mse_loss(output, target)
-            losses.append(loss.item())
             loss.backward()
+            gradients = {
+                name: param.grad.detach().clone()
+                for name, param in model.named_parameters()
+                if param.grad is not None
+            }
+            pre_step_cuda_rng_state = torch.cuda.get_rng_state()
             optimizer.step()
-        master_params = [
-            optimizer.get_unscaled_state(p, "master_param")
-            for p in model.parameters()
-            if p.requires_grad
-        ]
-        return losses, master_params
+            post_step_cuda_rng_state = torch.cuda.get_rng_state()
+
+            hybrid_parameters = [
+                (name, param)
+                for name, param in model.named_parameters()
+                if isinstance(param, HybridQuantizedTensor)
+            ]
+            expected_storages = {}
+            torch.cuda.set_rng_state(pre_step_cuda_rng_state)
+            try:
+                for name, param in hybrid_parameters:
+                    master = optimizer.get_unscaled_state(param, "master_param")
+                    expected_storages[name] = (
+                        param._quantizer.rowwise_quantizer.copy().quantize(master),
+                        param._quantizer.columnwise_quantizer.copy().quantize(master),
+                    )
+            finally:
+                # The oracle must be observational only. Restore the state left
+                # by the real optimizer step after replaying NVFP4 stochastic
+                # rounding from its pre-step RNG state.
+                torch.cuda.set_rng_state(post_step_cuda_rng_state)
+
+            hybrid_metadata = {}
+            for name, param in hybrid_parameters:
+                expected_row, expected_column = expected_storages[name]
+                _assert_storage_data_exact(
+                    param.rowwise_sub_storage,
+                    expected_row,
+                    context=f"step {step} {name} rowwise writeback",
+                )
+                _assert_storage_data_exact(
+                    param.columnwise_sub_storage,
+                    expected_column,
+                    context=f"step {step} {name} columnwise writeback",
+                )
+                hybrid_metadata[name] = {
+                    "rowwise": _snapshot_storage_tensor_metadata(
+                        param.rowwise_sub_storage, clone=True
+                    ),
+                    "columnwise": _snapshot_storage_tensor_metadata(
+                        param.columnwise_sub_storage, clone=True
+                    ),
+                }
+            hybrid_metadata_trajectory.append(hybrid_metadata)
+            logical_parameters = {
+                name: (
+                    param.dequantize(dtype=torch.float32).detach().clone()
+                    if isinstance(param, QuantizedTensor)
+                    else param.detach().float().clone()
+                )
+                for name, param in model.named_parameters()
+            }
+            trajectory.append(
+                {
+                    "output": output.detach().clone(),
+                    "loss": loss.detach().clone(),
+                    "input_gradient": step_input.grad.detach().clone(),
+                    "parameter_gradients": gradients,
+                    "logical_parameters": logical_parameters,
+                    "optimizer": _clone_nested_state(optimizer.state_dict()),
+                }
+            )
+        return trajectory, hybrid_metadata_trajectory
 
     def _test_equivalence(self):
         model_ref, model_hyb = self._build_models()
@@ -5037,51 +5515,36 @@ class _QuantizedParamsEquivalenceBase:
         x = torch.randn(4, 32, self.hidden_size, dtype=torch.bfloat16, device="cuda")
         target = torch.randn_like(x)
 
-        torch.manual_seed(199)
-        torch.cuda.manual_seed_all(199)
-        losses_ref, masters_ref = self._run_training_loop(
+        ref_trajectory, ref_hybrid_metadata = self._run_training_loop(
             model_ref,
             self._vanilla_recipe(),
             x,
             target,
             self.num_steps,
         )
-        torch.manual_seed(199)
-        torch.cuda.manual_seed_all(199)
-        losses_hyb, masters_hyb = self._run_training_loop(
+        hybrid_trajectory, hybrid_metadata_trajectory = self._run_training_loop(
             model_hyb,
             self._hybrid_recipe(),
             x,
             target,
             self.num_steps,
         )
-
-        # Losses should be very close (same quantization, same training dynamics)
-        for i, (lr, lh) in enumerate(zip(losses_ref, losses_hyb)):
-            assert abs(lr - lh) < 0.1 * max(
-                abs(lr), 1e-6
-            ), f"Step {i}: loss diverged — vanilla={lr:.6f}, hybrid={lh:.6f}"
-
-        # Master weights should be close after training
-        for i, (mr, mh) in enumerate(zip(masters_ref, masters_hyb)):
-            torch.testing.assert_close(
-                mr,
-                mh,
-                rtol=1e-3,
-                atol=1e-3,
-                msg=f"Master weight {i} diverged after {self.num_steps} steps",
-            )
+        _assert_nested_state_exact(
+            hybrid_trajectory,
+            ref_trajectory,
+            path="same-format quantized-parameter trajectory",
+        )
+        assert all(not step_metadata for step_metadata in ref_hybrid_metadata)
+        assert len(hybrid_metadata_trajectory) == self.num_steps
+        for step_metadata in hybrid_metadata_trajectory:
+            assert step_metadata.keys() == {"weight"}
+            assert step_metadata["weight"]["rowwise"] is not None
+            assert step_metadata["weight"]["columnwise"] is not None
 
 
 @requires_fp8
 class TestQuantizedParamsEquivalenceFP8CurrentScaling(_QuantizedParamsEquivalenceBase):
-    """Vanilla Float8CurrentScaling vs hybrid FP8 current (same format both dirs).
-
-    Note: vanilla Float8Tensor params use the fused multi_tensor_adam_fp8
-    kernel in FusedAdam, while HybridQuantizedTensor falls to the FP32
-    master + quantize_() writeback path. These are numerically different
-    codepaths, so we use relaxed tolerances.
-    """
+    """Vanilla versus same-format hybrid FP8-current training parity."""
 
     def _vanilla_recipe(self):
         return recipe.Float8CurrentScaling()
@@ -5090,37 +5553,7 @@ class TestQuantizedParamsEquivalenceFP8CurrentScaling(_QuantizedParamsEquivalenc
         return recipe.CustomRecipe(qfactory=_hybrid_fp8_current_qfactory)
 
     def test_equivalence(self):
-        model_ref, model_hyb = self._build_models()
-
-        torch.manual_seed(99)
-        x = torch.randn(4, 32, self.hidden_size, dtype=torch.bfloat16, device="cuda")
-        target = torch.randn_like(x)
-
-        losses_ref, _ = self._run_training_loop(
-            model_ref,
-            self._vanilla_recipe(),
-            x,
-            target,
-            self.num_steps,
-        )
-        losses_hyb, _ = self._run_training_loop(
-            model_hyb,
-            self._hybrid_recipe(),
-            x,
-            target,
-            self.num_steps,
-        )
-
-        # Both should decrease (training works in both paths)
-        assert losses_ref[-1] < losses_ref[0], f"Vanilla loss didn't decrease: {losses_ref}"
-        assert losses_hyb[-1] < losses_hyb[0], f"Hybrid loss didn't decrease: {losses_hyb}"
-
-        # Losses should be in the same ballpark (different optimizer kernels
-        # cause small divergence that compounds over steps)
-        for i, (lr, lh) in enumerate(zip(losses_ref, losses_hyb)):
-            assert (
-                abs(lr - lh) / max(abs(lr), 1e-6) < 0.5
-            ), f"Step {i}: losses diverged too much — vanilla={lr:.6f}, hybrid={lh:.6f}"
+        self._test_equivalence()
 
 
 @pytest.mark.skipif(not mxfp8_available, reason=f"MXFP8: {reason_for_no_mxfp8}")
@@ -5208,7 +5641,7 @@ class TestHybridCheckpoint:
             with autocast(enabled=True, recipe=hybrid_recipe):
                 out_after = model2(inp)
 
-        torch.testing.assert_close(out_before, out_after)
+        torch.testing.assert_close(out_before, out_after, rtol=0.0, atol=0.0)
 
     def test_state_dict_contains_weight(self):
         """state_dict should contain the weight key."""
@@ -5276,79 +5709,104 @@ class TestHybridCheckpoint:
                 with autocast(enabled=True, recipe=hybrid_recipe):
                     out_after = model2(inp)
 
-            torch.testing.assert_close(out_before, out_after)
+            torch.testing.assert_close(out_before, out_after, rtol=0.0, atol=0.0)
         finally:
             os.unlink(tmp_path)
 
+    @staticmethod
+    def _checkpoint_training_step(model, optimizer, x, target, hybrid_recipe):
+        optimizer.zero_grad(set_to_none=True)
+        step_input = x.detach().clone().requires_grad_(True)
+        with autocast(enabled=True, recipe=hybrid_recipe):
+            output = model(step_input)
+        loss = torch.nn.functional.mse_loss(output, target)
+        loss.backward()
+        gradients = {
+            name: param.grad.detach().clone()
+            for name, param in model.named_parameters()
+            if param.grad is not None
+        }
+        optimizer.step()
+        return {
+            "output": output.detach().clone(),
+            "loss": loss.detach().clone(),
+            "input_gradient": step_input.grad.detach().clone(),
+            "gradients": gradients,
+            "parameters": _snapshot_model_parameters(model),
+            "optimizer": _clone_nested_state(optimizer.state_dict()),
+        }
+
     def test_checkpoint_resume_training(self):
         """Save mid-training, load into new model+optimizer, verify training continues."""
-        import tempfile
         import os
+        import tempfile
 
-        torch.manual_seed(42)
+        _set_quantization_test_seed(42)
         hybrid_recipe = self._hybrid_checkpoint_recipe()
         with quantized_model_init(enabled=True, recipe=hybrid_recipe):
             model = Linear(256, 256, params_dtype=torch.bfloat16).cuda()
-
         optimizer = te.optimizers.FusedAdam(
             model.parameters(),
             lr=1e-3,
             master_weights=True,
             master_weight_dtype=torch.float32,
         )
-
         x = torch.randn(4, 32, 256, dtype=torch.bfloat16, device="cuda")
         target = torch.randn_like(x)
 
-        # Train for a few steps
         for _ in range(3):
-            optimizer.zero_grad(set_to_none=True)
-            with autocast(enabled=True, recipe=hybrid_recipe):
-                output = model(x)
-            loss = torch.nn.functional.mse_loss(output, target)
-            loss.backward()
-            optimizer.step()
+            self._checkpoint_training_step(model, optimizer, x, target, hybrid_recipe)
 
-        loss_before_save = loss.item()
-
-        # Save checkpoint
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pt") as f:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pt") as checkpoint_file:
             torch.save(
                 {
                     "model": model.state_dict(),
                     "optimizer": optimizer.state_dict(),
+                    "cpu_rng_state": torch.get_rng_state(),
+                    "cuda_rng_state": torch.cuda.get_rng_state(),
                 },
-                f.name,
+                checkpoint_file.name,
             )
-            tmp_path = f.name
+            checkpoint_path = checkpoint_file.name
 
         try:
-            # Load into fresh model
+            uninterrupted = self._checkpoint_training_step(
+                model,
+                optimizer,
+                x,
+                target,
+                hybrid_recipe,
+            )
+
             with quantized_model_init(enabled=True, recipe=hybrid_recipe):
-                model2 = Linear(256, 256, params_dtype=torch.bfloat16).cuda()
-            optimizer2 = te.optimizers.FusedAdam(
-                model2.parameters(),
+                resumed_model = Linear(256, 256, params_dtype=torch.bfloat16).cuda()
+            resumed_optimizer = te.optimizers.FusedAdam(
+                resumed_model.parameters(),
                 lr=1e-3,
                 master_weights=True,
                 master_weight_dtype=torch.float32,
             )
+            checkpoint = torch.load(checkpoint_path, weights_only=False)
+            resumed_model.load_state_dict(checkpoint["model"])
+            resumed_optimizer.load_state_dict(checkpoint["optimizer"])
+            torch.set_rng_state(checkpoint["cpu_rng_state"])
+            torch.cuda.set_rng_state(checkpoint["cuda_rng_state"])
 
-            checkpoint = torch.load(tmp_path, weights_only=False)
-            model2.load_state_dict(checkpoint["model"])
-            optimizer2.load_state_dict(checkpoint["optimizer"])
+            resumed = self._checkpoint_training_step(
+                resumed_model,
+                resumed_optimizer,
+                x,
+                target,
+                hybrid_recipe,
+            )
 
-            # Continue training -- loss should not spike
-            optimizer2.zero_grad(set_to_none=True)
-            with autocast(enabled=True, recipe=hybrid_recipe):
-                output2 = model2(x)
-            loss_after_load = torch.nn.functional.mse_loss(output2, target).item()
-
-            assert loss_after_load <= loss_before_save * 1.5, (
-                f"Loss spiked after checkpoint resume: {loss_before_save:.4f} →"
-                f" {loss_after_load:.4f}"
+            _assert_nested_state_exact(
+                resumed,
+                uninterrupted,
+                path="checkpoint continuation",
             )
         finally:
-            os.unlink(tmp_path)
+            os.unlink(checkpoint_path)
 
 
 # ---------------------------------------------------------------------------
@@ -5553,6 +6011,10 @@ class TestHybridTorchDispatchFSDP2Ops:
         dim0 = hybrid_param.shape[0]
         chunk_size = dim0 // 2
         pieces = torch.split(hybrid_param, chunk_size, dim=0)
+        expected_rowwise = torch.split(hybrid_param.rowwise_sub_storage, chunk_size, dim=0)
+        expected_columnwise = torch.split(hybrid_param.columnwise_sub_storage, chunk_size, dim=0)
+        assert len(pieces) == len(expected_rowwise) == len(expected_columnwise)
+
         assert len(pieces) >= 2
         for piece in pieces:
             assert isinstance(
@@ -5560,13 +6022,26 @@ class TestHybridTorchDispatchFSDP2Ops:
             ), f"Expected HybridQuantizedTensor, got {type(piece).__name__}"
             assert piece.rowwise_sub_storage is not None
             assert piece.columnwise_sub_storage is not None
+        for index, (piece, expected_row, expected_column) in enumerate(
+            zip(pieces, expected_rowwise, expected_columnwise)
+        ):
+            _assert_storage_data_exact(
+                piece.rowwise_sub_storage,
+                expected_row,
+                context=f"split {index} rowwise",
+            )
+            _assert_storage_data_exact(
+                piece.columnwise_sub_storage,
+                expected_column,
+                context=f"split {index} columnwise",
+            )
 
         total_rows = sum(p.shape[0] for p in pieces)
         assert total_rows == dim0
 
         orig_deq = hybrid_param.dequantize()
         reassembled = torch.cat([p.dequantize() for p in pieces], dim=0)
-        torch.testing.assert_close(orig_deq, reassembled)
+        torch.testing.assert_close(orig_deq, reassembled, rtol=0.0, atol=0.0)
 
     def test_split_sub_storage_types_preserved(self, hybrid_param):
         """After split, sub-storage types must match the original."""
@@ -5628,16 +6103,18 @@ class TestHybridTorchDispatchFSDP2Ops:
 
         aten.copy_.default(dst, hybrid_param)
         dst_deq = dst.dequantize()
-        torch.testing.assert_close(src_deq, dst_deq)
+        torch.testing.assert_close(src_deq, dst_deq, rtol=0.0, atol=0.0)
+        _assert_hybrid_tensor_exact(dst, hybrid_param, context="hybrid copy_")
 
     def test_copy_from_bf16_to_hybrid(self, hybrid_param):
         """copy_ from BF16 into HybridQuantizedTensor triggers quantize_."""
         param = hybrid_param.detach()
         bf16_data = torch.randn_like(param.dequantize())
+        expected = param._quantizer.quantize(bf16_data)
         aten.copy_.default(param, bf16_data)
-        result_deq = param.dequantize()
         assert isinstance(param, HybridQuantizedTensor)
-        assert result_deq.shape == bf16_data.shape
+        _assert_hybrid_tensor_exact(param, expected, context="BF16 copy_")
+        torch.testing.assert_close(param.dequantize(), expected.dequantize(), rtol=0.0, atol=0.0)
 
     def test_new_zeros_returns_hybrid(self, hybrid_param):
         """new_zeros must return a usable HybridQuantizedTensor container.
@@ -5668,7 +6145,10 @@ class TestHybridTorchDispatchFSDP2Ops:
         # Functional contract: the container must be writable via copy_ from
         # another hybrid (how FSDP2 populates the buffer post-gather).
         aten.copy_.default(result, hybrid_param)
-        torch.testing.assert_close(result.dequantize(), hybrid_param.dequantize())
+        torch.testing.assert_close(
+            result.dequantize(), hybrid_param.dequantize(), rtol=0.0, atol=0.0
+        )
+        _assert_hybrid_tensor_exact(result, hybrid_param, context="new_zeros then copy_")
 
     def test_empty_like_returns_hybrid(self, hybrid_param):
         """empty_like must return a HybridQuantizedTensor."""
@@ -5686,7 +6166,10 @@ class TestHybridTorchDispatchFSDP2Ops:
             result, HybridQuantizedTensor
         ), f"Expected HybridQuantizedTensor, got {type(result).__name__}"
         assert result is not hybrid_param
-        torch.testing.assert_close(result.dequantize(), hybrid_param.dequantize())
+        torch.testing.assert_close(
+            result.dequantize(), hybrid_param.dequantize(), rtol=0.0, atol=0.0
+        )
+        _assert_hybrid_tensor_exact(result, hybrid_param, context="clone")
 
 
 # ---------------------------------------------------------------------------
@@ -5862,6 +6345,7 @@ class TestHybridFsdpPostAllGatherProtocol:
         assert (
             second_result is first_result
         ), "Buffer reuse: post_all_gather(out=prev) should return the same object"
+        _assert_hybrid_tensor_exact(second_result, hybrid_param, context="post-all-gather reuse")
 
     def test_post_all_gather_dequantize_matches_original(self, hybrid_param):
         """Reconstructed tensor should dequantize close to the original."""
@@ -5881,7 +6365,8 @@ class TestHybridFsdpPostAllGatherProtocol:
             out=None,
         )
         result_deq = result.dequantize()
-        torch.testing.assert_close(orig_deq, result_deq)
+        _assert_hybrid_tensor_exact(result, hybrid_param, context="post-all-gather")
+        torch.testing.assert_close(orig_deq, result_deq, rtol=0.0, atol=0.0)
 
     def test_post_all_gather_sub_storage_types_correct(self, hybrid_param):
         """Reconstructed tensor's sub-storages match the original types."""
@@ -5902,6 +6387,7 @@ class TestHybridFsdpPostAllGatherProtocol:
             out=None,
         )
         assert type(result.rowwise_sub_storage) is orig_row_type
+        _assert_hybrid_tensor_exact(result, hybrid_param, context="post-all-gather storage types")
         assert type(result.columnwise_sub_storage) is orig_col_type
 
 
@@ -5936,7 +6422,8 @@ class TestHybridFsdpRoundtrip:
             hybrid_param.dtype,
             out=None,
         )
-        torch.testing.assert_close(orig_deq, result.dequantize())
+        _assert_hybrid_tensor_exact(result, hybrid_param, context="FSDP roundtrip")
+        torch.testing.assert_close(orig_deq, result.dequantize(), rtol=0.0, atol=0.0)
 
     def test_pre_post_roundtrip_buffer_reuse_preserves_data(self, hybrid_param):
         """Second roundtrip with out=previous preserves data (iteration 2+ simulation)."""
@@ -5968,7 +6455,10 @@ class TestHybridFsdpRoundtrip:
             out=first_result,
         )
         assert second_result is first_result
-        torch.testing.assert_close(hybrid_param.dequantize(), second_result.dequantize())
+        torch.testing.assert_close(
+            hybrid_param.dequantize(), second_result.dequantize(), rtol=0.0, atol=0.0
+        )
+        _assert_hybrid_tensor_exact(second_result, hybrid_param, context="FSDP roundtrip reuse")
 
     def test_scale_refresh_across_iterations(self):
         """After a sharded optimizer-style requantize, iter-2+ gathers see the new scale.
@@ -6039,7 +6529,10 @@ class TestHybridFsdpRoundtrip:
         torch.testing.assert_close(
             hybrid_param.dequantize(),
             gathered_refreshed.dequantize(),
+            rtol=0.0,
+            atol=0.0,
         )
+        _assert_hybrid_tensor_exact(gathered_refreshed, hybrid_param, context="FSDP scale refresh")
         # And the magnitude really did change (sanity: this test would pass
         # vacuously if update_quantized didn't actually change anything).
         assert gathered_refreshed.dequantize().abs().max() > 10.0, (
@@ -6047,12 +6540,6 @@ class TestHybridFsdpRoundtrip:
             "weight; the scale-refresh invariant is not being exercised"
         )
 
-    @pytest.mark.xfail(
-        reason=(
-            "Tracked by #3158: Hybrid FSDP2 does not support NVFP4 sub-storages yet; NVFP4 uses "
-            "dedicated tensor hooks and does not implement the hybrid fsdp_buffer_fields protocol."
-        )
-    )
     def test_nvfp4_sub_storage_raises_on_pre_all_gather(self):
         """Hybrid FSDP2 with an NVFP4 sub-storage must raise a clear error.
 
@@ -6094,7 +6581,8 @@ class TestHybridFsdpRoundtrip:
             )
         msg = str(exc_info.value)
         assert "NVFP4Tensor" in msg
-        assert "hybrid_quantization_fsdp.md" in msg
+        assert "rowwise sub-storage" in msg
+        assert "Use a supported sub-quantizer" in msg
         assert "fsdp_buffer_fields" in msg
 
 
@@ -6127,7 +6615,8 @@ class TestHybridMakeLike:
         assert copy.shape == param.shape
         assert type(copy.rowwise_sub_storage) is type(param.rowwise_sub_storage)
         assert type(copy.columnwise_sub_storage) is type(param.columnwise_sub_storage)
-        torch.testing.assert_close(copy.dequantize(), param.dequantize())
+        _assert_hybrid_tensor_exact(copy, param, context="make_like")
+        torch.testing.assert_close(copy.dequantize(), param.dequantize(), rtol=0.0, atol=0.0)
 
     def test_make_like_is_independent(self):
         """make_like result should not share the same tensor identity."""

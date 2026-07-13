@@ -256,7 +256,15 @@ class TestIdentityQuantizerUnit:
             x, m_splits, cast_quantizers, activation_dtype=torch.bfloat16
         )
         assert all(isinstance(t, IdentityTensorStorage) for t in cast_out)
-        assert all(t.dequantize().dtype == torch.float32 for t in cast_out)
+        for actual, expected in zip(cast_out, torch.split(x, m_splits)):
+            dequantized = actual.dequantize()
+            assert dequantized.dtype == torch.float32
+            torch.testing.assert_close(
+                dequantized,
+                expected.to(torch.float32),
+                rtol=0.0,
+                atol=0.0,
+            )
 
     def test_grouped_split_rejects_mixed_identity_and_quantized_operands(self):
         from transformer_engine.pytorch.module.grouped_linear import (
@@ -465,17 +473,34 @@ class TestIdentityQuantizerUnit:
                 columnwise_quantizer=IdentityQuantizer(),
             )
 
+        torch.manual_seed(1701)
+        ref = te_ops.BasicLinear(16, 16, device="cuda", dtype=torch.bfloat16)
         custom_recipe = CustomRecipe(qfactory=qfactory)
+        torch.manual_seed(1702)
         with te.quantized_model_init(enabled=True, recipe=custom_recipe):
-            op = te_ops.BasicLinear(16, 16, device="cuda", dtype=torch.bfloat16)
+            test = te_ops.BasicLinear(16, 16, device="cuda", dtype=torch.bfloat16)
 
-        x = torch.randn(16, 16, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        with torch.no_grad():
+            test.weight.copy_(ref.weight)
+
+        torch.manual_seed(1703)
+        x = torch.randn(16, 16, device="cuda", dtype=torch.bfloat16)
+        x_ref = x.detach().clone().requires_grad_(True)
+        x_test = x.detach().clone().requires_grad_(True)
+
+        y_ref = ref(x_ref)
         with te.autocast(enabled=True, recipe=custom_recipe):
-            y = op(x)
-        y.sum().backward()
+            y_test = test(x_test)
 
-        assert isinstance(op.weight, HybridQuantizedTensor)
-        assert x.grad is not None
+        torch.manual_seed(1704)
+        grad_output = torch.randn_like(y_ref)
+        y_ref.backward(grad_output)
+        y_test.backward(grad_output)
+
+        assert isinstance(test.weight, HybridQuantizedTensor)
+        torch.testing.assert_close(y_test, y_ref, rtol=0.0, atol=0.0)
+        torch.testing.assert_close(x_test.grad, x_ref.grad, rtol=0.0, atol=0.0)
+        torch.testing.assert_close(test.weight.grad, ref.weight.grad, rtol=0.0, atol=0.0)
 
     @pytest.mark.parametrize(
         "qfactory",
@@ -493,14 +518,23 @@ class TestIdentityQuantizerUnit:
     def test_te_ops_quantize_then_gelu_accepts_identity_backed_tensors(self, qfactory):
         import transformer_engine.pytorch.ops as te_ops
 
-        model = te_ops.Sequential(te_ops.Quantize(forward=True), te_ops.GELU())
-        x = torch.randn(16, 16, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        ref = te_ops.GELU()
+        test = te_ops.Sequential(te_ops.Quantize(forward=True), te_ops.GELU())
+        x = torch.randn(16, 16, device="cuda", dtype=torch.bfloat16)
+        x_ref = x.detach().clone().requires_grad_(True)
+        x_test = x.detach().clone().requires_grad_(True)
 
+        y_ref = ref(x_ref)
         with te.autocast(enabled=True, recipe=CustomRecipe(qfactory=qfactory)):
-            y = model(x)
+            y_test = test(x_test)
 
-        assert isinstance(y, torch.Tensor)
-        assert y.shape == x.shape
+        torch.manual_seed(1801)
+        grad_output = torch.randn_like(y_ref)
+        y_ref.backward(grad_output)
+        y_test.backward(grad_output)
+
+        torch.testing.assert_close(y_test, y_ref, rtol=0.0, atol=0.0)
+        torch.testing.assert_close(x_test.grad, x_ref.grad, rtol=0.0, atol=0.0)
 
     def test_hybrid_fsdp_rejects_storage_only_sub_storages(self):
         row_quantizer = IdentityQuantizer()
@@ -560,7 +594,9 @@ class TestIdentityQuantizerUnit:
     def test_dtype_cast(self):
         x = torch.randn(4, 8, device="cuda", dtype=torch.float32)
         out = IdentityQuantizer(dtype=torch.bfloat16)(x)
-        assert out.dequantize().dtype == torch.bfloat16
+        dequantized = out.dequantize()
+        assert dequantized.dtype == torch.bfloat16
+        torch.testing.assert_close(dequantized, x.to(torch.bfloat16), rtol=0.0, atol=0.0)
 
     def test_update_usage_is_noop(self):
         x = torch.randn(4, 8, device="cuda", dtype=torch.bfloat16)
@@ -931,21 +967,13 @@ class TestIdentityTEModuleCoverage:
         y_ref, dx_ref, wg_ref = _fwd_bwd_module(module_name, ref, x, recipe=None)
         y_id, dx_id, wg_id = _fwd_bwd_module(module_name, test, x, recipe=recipe)
 
-        # Linear / LayerNormLinear / GroupedLinear route through the same HP
-        # math with Identity and should stay bitwise exact. Composite modules
-        # can select different fused/unfused BF16 kernel paths after prior FP8
-        # tests have warmed TE/CUDA state, so require tight BF16 numerical
-        # parity instead of order-dependent bitwise identity.
-        kwargs = (
-            {"rtol": 0.0, "atol": 0.0}
-            if module_name in ("Linear", "LayerNormLinear", "GroupedLinear")
-            else {"rtol": 2.0e-2, "atol": 8.0e-3}
-        )
-        torch.testing.assert_close(y_id, y_ref, **kwargs)
-        torch.testing.assert_close(dx_id, dx_ref, **kwargs)
+        # Identity is a high-precision passthrough. Entering the recipe context
+        # must not change any module's BF16 kernel selection or arithmetic.
+        torch.testing.assert_close(y_id, y_ref, rtol=0.0, atol=0.0)
+        torch.testing.assert_close(dx_id, dx_ref, rtol=0.0, atol=0.0)
         assert len(wg_id) == len(wg_ref)
         for g_id, g_ref in zip(wg_id, wg_ref):
-            torch.testing.assert_close(g_id, g_ref, **kwargs)
+            torch.testing.assert_close(g_id, g_ref, rtol=0.0, atol=0.0)
 
     @pytest.mark.skipif(not mxfp8_available, reason=f"MXFP8: {reason_for_no_mxfp8}")
     def test_grouped_linear_mxfp8_forward_identity_backward_matches_override(self):
@@ -1089,6 +1117,7 @@ _ZOO_DEQUANTIZED_MODULES = [
         "LayerNormMLP",
         marks=pytest.mark.xfail(
             reason="LayerNormMLP does not support built-in backward_override=dequantized",
+            raises=AssertionError,
             strict=True,
         ),
         id="layernorm_mlp",

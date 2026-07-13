@@ -44,11 +44,15 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
 import transformer_engine.pytorch as te
-from transformer_engine.pytorch import QuantizedTensor
+from transformer_engine.pytorch import HybridQuantizedTensor, QuantizedTensor
+from transformer_engine.pytorch.tensor import (
+    Float8BlockwiseQTensorStorage,
+    Float8TensorStorage,
+    MXFP8TensorStorage,
+)
 import transformer_engine.common.recipe
 
 from fsdp2_utils import get_recipe_from_string, save_custom_attrs, restore_custom_attrs
-
 
 HIDDEN_SIZE = 256
 FFN_HIDDEN_SIZE = 1024
@@ -158,6 +162,185 @@ def _get_dist_info():
     world_size = int(os.environ["WORLD_SIZE"])
     device = torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
     return world_size, device
+
+
+def _collective_assert(condition, message):
+    """Raise on every rank only after all ranks report structural status."""
+    failed = torch.tensor([not condition], dtype=torch.uint8, device="cuda")
+    if not condition:
+        print(f"[rank {dist.get_rank()}] {message}", flush=True)
+    dist.all_reduce(failed, dist.ReduceOp.MAX)
+    assert not bool(failed.item()), f"{message}: failed on at least one rank"
+
+
+def _collective_assert_same_shape(tensor, message):
+    """Check tensor ranks/shapes before entering a shape-sensitive collective."""
+    # Quantized parameter buffers in these tests are at most 2-D, but leave
+    # room for future formats without introducing object collectives.
+    layout = torch.full((9,), -1, dtype=torch.int64, device=tensor.device)
+    _collective_assert(tensor.ndim < layout.numel(), f"{message}: ndim={tensor.ndim}")
+    layout[0] = tensor.ndim
+    layout[1 : tensor.ndim + 1] = torch.tensor(
+        tensor.shape, dtype=torch.int64, device=tensor.device
+    )
+    min_layout = layout.clone()
+    max_layout = layout.clone()
+    dist.all_reduce(min_layout, dist.ReduceOp.MIN)
+    dist.all_reduce(max_layout, dist.ReduceOp.MAX)
+    _collective_assert(
+        torch.equal(min_layout, max_layout),
+        f"{message}: tensor shape differs across ranks",
+    )
+
+
+def _record_exact(errors, actual, expected, label):
+    """Record an exact mismatch without interrupting later distributed work."""
+    if actual is None or expected is None:
+        if actual is not expected:
+            errors.append(f"{label}: one tensor is None")
+        return
+    try:
+        torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+    except (AssertionError, TypeError) as exc:
+        errors.append(f"{label}: {exc}")
+
+
+def _raise_collective_errors(errors, context):
+    """Aggregate delayed exact failures after every rank finishes collectives."""
+    if errors:
+        print(f"[rank {dist.get_rank()}] {context}:\n" + "\n".join(errors), flush=True)
+    failed = torch.tensor([bool(errors)], dtype=torch.uint8, device="cuda")
+    dist.all_reduce(failed, dist.ReduceOp.MAX)
+    assert not bool(failed.item()), f"{context}: exact check failed on at least one rank"
+
+
+def _check_hybrid_direction_buffers(
+    local_sub,
+    full_sub,
+    expected_type,
+    *,
+    direction,
+    param_name,
+    world_size,
+    errors,
+):
+    """Compare one direction's gathered raw data, scale buffers, and metadata."""
+    _collective_assert(
+        isinstance(local_sub, expected_type),
+        f"{param_name}: {direction} local storage is {type(local_sub).__name__}, "
+        f"expected {expected_type.__name__}",
+    )
+    _collective_assert(
+        isinstance(full_sub, expected_type),
+        f"{param_name}: {direction} full storage is {type(full_sub).__name__}, "
+        f"expected {expected_type.__name__}",
+    )
+
+    local_buffers, local_meta = local_sub.fsdp_extract_buffers()
+    full_buffers, full_meta = full_sub.fsdp_extract_buffers()
+    local_count = torch.tensor([len(local_buffers)], dtype=torch.int64, device="cuda")
+    min_count = local_count.clone()
+    max_count = local_count.clone()
+    dist.all_reduce(min_count, dist.ReduceOp.MIN)
+    dist.all_reduce(max_count, dist.ReduceOp.MAX)
+    _collective_assert(
+        min_count.item() == max_count.item() == len(full_buffers),
+        f"{param_name}: {direction} buffer count mismatch: local={len(local_buffers)}, "
+        f"full={len(full_buffers)}, rank range=({min_count.item()}, {max_count.item()})",
+    )
+
+    expected_buffers = []
+    for buffer in local_buffers:
+        _collective_assert(
+            buffer is not None,
+            f"{param_name}: {direction} unexpectedly exposed a None FSDP buffer",
+        )
+        _collective_assert_same_shape(buffer, f"{param_name}: {direction} FSDP buffer")
+        gathered = [torch.zeros_like(buffer) for _ in range(world_size)]
+        dist.all_gather(gathered, buffer)
+        expected_buffers.append(torch.cat(gathered, dim=0))
+
+    for key in ("field_names", "direction"):
+        if key in local_meta or key in full_meta:
+            if local_meta.get(key) != full_meta.get(key):
+                errors.append(
+                    f"{param_name}: {direction} metadata {key!r} differs: "
+                    f"{full_meta.get(key)!r} != {local_meta.get(key)!r}"
+                )
+    for index, (actual, expected) in enumerate(zip(full_buffers, expected_buffers)):
+        field_names = local_meta.get("field_names", ())
+        field = field_names[index] if index < len(field_names) else f"buffer[{index}]"
+        _record_exact(errors, actual, expected, f"{param_name}: {direction} {field}")
+
+    # Per-tensor FP8 scale is metadata rather than an FSDP buffer. It must be
+    # identical on every shard and preserved on the reconstructed full tensor.
+    if isinstance(local_sub, Float8TensorStorage):
+        local_scale_inv = getattr(local_sub, "_scale_inv", None)
+        _collective_assert(
+            isinstance(local_scale_inv, torch.Tensor),
+            f"{param_name}: {direction} Float8 storage has no tensor _scale_inv",
+        )
+        local_scale = local_scale_inv.detach().clone()
+        _collective_assert_same_shape(local_scale, f"{param_name}: {direction} Float8 scale")
+        gathered_scales = [torch.zeros_like(local_scale) for _ in range(world_size)]
+        dist.all_gather(gathered_scales, local_scale)
+        for rank, scale in enumerate(gathered_scales[1:], start=1):
+            _record_exact(
+                errors,
+                scale,
+                gathered_scales[0],
+                f"{param_name}: {direction} scale rank {rank}",
+            )
+        _record_exact(
+            errors,
+            full_sub._scale_inv,
+            gathered_scales[0],
+            f"{param_name}: {direction} reconstructed scale",
+        )
+
+
+def _manual_reconstruct_hybrid(local, *, param_name, world_size):
+    """Run the Hybrid FSDP pre/post protocol on manually gathered raw buffers."""
+    _collective_assert(
+        isinstance(local, HybridQuantizedTensor),
+        f"{param_name}: local shard is {type(local).__name__}, expected HybridQuantizedTensor",
+    )
+    sharded_tensors, metadata = local.fsdp_pre_all_gather(
+        mesh=None,
+        orig_size=local.shape,
+        contiguous_orig_stride=None,
+        module=None,
+        mp_policy=None,
+    )
+    local_count = torch.tensor([len(sharded_tensors)], dtype=torch.int64, device=local.device)
+    min_count = local_count.clone()
+    max_count = local_count.clone()
+    dist.all_reduce(min_count, dist.ReduceOp.MIN)
+    dist.all_reduce(max_count, dist.ReduceOp.MAX)
+    _collective_assert(
+        min_count.item() == max_count.item() and min_count.item() > 0,
+        f"{param_name}: Hybrid FSDP buffer count range is ({min_count.item()}, {max_count.item()})",
+    )
+
+    gathered_outputs = []
+    for index, shard in enumerate(sharded_tensors):
+        _collective_assert(
+            shard is not None,
+            f"{param_name}: Hybrid FSDP buffer {index} is None",
+        )
+        _collective_assert_same_shape(shard, f"{param_name}: Hybrid FSDP buffer {index}")
+        gathered = [torch.zeros_like(shard) for _ in range(world_size)]
+        dist.all_gather(gathered, shard)
+        gathered_outputs.append(torch.cat(gathered, dim=0))
+
+    reconstructed, _ = local.fsdp_post_all_gather(
+        tuple(gathered_outputs), metadata, local.dtype, out=None
+    )
+    _collective_assert(
+        isinstance(reconstructed, HybridQuantizedTensor),
+        f"{param_name}: Hybrid FSDP reconstruction returned {type(reconstructed).__name__}",
+    )
+    return reconstructed
 
 
 def test_fused_adam_fp8_master_weights(recipe_name):
@@ -1150,7 +1333,8 @@ def test_fused_adam_hybrid_reshard_variants(hybrid_recipe_name):
     invoking ``fsdp_post_all_gather(out=...)`` twice per step -- while ``False``
     keeps the gathered copy alive through backward (one gather per step). The
     gathered quantized bytes are identical either way, so both schedules must
-    produce **bitwise-identical** loss trajectories.
+    produce bitwise-identical outputs, losses, input/parameter gradients,
+    master parameters, moments, and step counters.
 
     Strictly stronger than "loss decreased": it locks in that the hybrid
     all-gather hooks are schedule-invariant across both FSDP2 passes, and
@@ -1164,6 +1348,26 @@ def test_fused_adam_hybrid_reshard_variants(hybrid_recipe_name):
     # Shared, fixed input/target so the two schedules are compared on identical data.
     x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
     target = torch.randn_like(x)
+
+    def assert_exact(actual, expected, path):
+        if torch.is_tensor(expected):
+            torch.testing.assert_close(
+                actual,
+                expected,
+                rtol=0.0,
+                atol=0.0,
+                msg=lambda m: f"reshard schedule changed {path}: {m}",
+            )
+        elif isinstance(expected, dict):
+            assert actual.keys() == expected.keys(), f"{path}: keys differ"
+            for key in expected:
+                assert_exact(actual[key], expected[key], f"{path}.{key}")
+        elif isinstance(expected, (list, tuple)):
+            assert len(actual) == len(expected), f"{path}: lengths differ"
+            for index, (actual_item, expected_item) in enumerate(zip(actual, expected)):
+                assert_exact(actual_item, expected_item, f"{path}[{index}]")
+        else:
+            assert actual == expected, f"{path}: {actual!r} != {expected!r}"
 
     def run(reshard_after_forward):
         # Re-seed so both schedules get identical weight init from reset_parameters().
@@ -1180,29 +1384,53 @@ def test_fused_adam_hybrid_reshard_variants(hybrid_recipe_name):
             master_weights=True,
             master_weight_dtype=torch.float32,
         )
-        losses = []
+        run_x = x.detach().clone().requires_grad_()
+        artifacts = {
+            "outputs": [],
+            "losses": [],
+            "input_grads": [],
+            "param_grads": [],
+            "optimizer": [],
+        }
         for _ in range(NUM_STEPS):
             optimizer.zero_grad(set_to_none=True)
+            run_x.grad = None
             with te.autocast(enabled=True, recipe=hybrid_recipe):
-                output = model(x)
+                output = model(run_x)
+            artifacts["outputs"].append(output.detach().clone())
             loss = F.mse_loss(output, target)
-            losses.append(loss.item())
+            artifacts["losses"].append(loss.detach().clone())
             loss.backward()
+            artifacts["input_grads"].append(run_x.grad.detach().clone())
+            step_grads = []
+            for param in model.parameters():
+                grad = param.grad
+                if grad is not None:
+                    grad = grad.to_local() if isinstance(grad, DTensor) else grad
+                    grad = grad.detach().clone()
+                step_grads.append(grad)
+            artifacts["param_grads"].append(step_grads)
             optimizer.step()
-        return losses
+            step_state = []
+            for param in model.parameters():
+                param_state = {}
+                for key, value in optimizer.state[param].items():
+                    if torch.is_tensor(value):
+                        value = value.to_local() if isinstance(value, DTensor) else value
+                        value = value.detach().clone()
+                    param_state[key] = value
+                step_state.append(param_state)
+            artifacts["optimizer"].append(step_state)
+        return artifacts
 
-    losses_resharded = run(reshard_after_forward=True)  # re-gather in backward
-    losses_kept = run(reshard_after_forward=False)  # keep gathered weight through backward
+    artifacts_resharded = run(reshard_after_forward=True)  # re-gather in backward
+    artifacts_kept = run(reshard_after_forward=False)  # keep gathered weight through backward
 
-    # Both schedules must train (strictly monotonic decrease) ...
+    losses_resharded = [loss.item() for loss in artifacts_resharded["losses"]]
     assert all(
         losses_resharded[i + 1] < losses_resharded[i] for i in range(NUM_STEPS - 1)
     ), f"reshard_after_forward=True loss not strictly decreasing: {losses_resharded}"
-    # ... and be numerically identical, since reshard is a schedule, not a math change.
-    assert losses_resharded == losses_kept, (
-        "reshard_after_forward changed numerics (must be schedule-invariant): "
-        f"True={losses_resharded} vs False={losses_kept}"
-    )
+    assert_exact(artifacts_resharded, artifacts_kept, "training")
 
 
 def test_fused_adam_hybrid_bf16_vs_hybrid_parity(hybrid_recipe_name):
@@ -1288,10 +1516,11 @@ def test_fused_adam_hybrid_vs_base_recipe_parity(hybrid_recipe_name):
     """Same-format hybrid must match its vanilla recipe bitwise through the full
     FSDP2 + FusedAdam loop.
 
-    Forward output, weight gradients, and per-step loss are all asserted
-    bitwise-identical every iteration -- regression guard for the amax-reduction
-    fix. Uses a bare ``te.Linear`` stack (see ``_build_linear_parity_stack``) to
-    isolate GEMM-operand quantization.
+    Every output, loss, input/parameter gradient, master parameter, optimizer
+    moment, and step counter is asserted bitwise-identical -- a regression guard
+    for both amax reduction and master-weight requantization. Uses a bare
+    ``te.Linear`` stack (see ``_build_linear_parity_stack``) to isolate
+    GEMM-operand quantization.
     """
     if hybrid_recipe_name not in _HYBRID_TO_BASE_RECIPE:
         pytest.skip(
@@ -1310,6 +1539,18 @@ def test_fused_adam_hybrid_vs_base_recipe_parity(hybrid_recipe_name):
     target = torch.randn_like(x)
 
     def run_training(build_fn, recipe_for_autocast):
+        def snapshot_optimizer(model, optimizer):
+            snapshots = []
+            for param in model.parameters():
+                state = {}
+                for key, value in optimizer.state[param].items():
+                    if torch.is_tensor(value):
+                        value = value.to_local() if isinstance(value, DTensor) else value
+                        value = value.detach().clone()
+                    state[key] = value
+                snapshots.append(state)
+            return snapshots
+
         # Re-seed so both models get identical init from reset_parameters() (run
         # after sharding); with same-format quantization and a dropout-free loop
         # the full trajectory is then deterministic.
@@ -1322,18 +1563,22 @@ def test_fused_adam_hybrid_vs_base_recipe_parity(hybrid_recipe_name):
             master_weights=True,
             master_weight_dtype=torch.float32,
         )
-        first_output = None
+        run_x = x.detach().clone().requires_grad_()
+        outputs = []
         losses = []
+        input_grads = []
         grads_per_step = []
+        optimizer_states = []
         for step in range(NUM_STEPS):
             optimizer.zero_grad(set_to_none=True)
+            run_x.grad = None
             with te.autocast(enabled=True, recipe=recipe_for_autocast):
-                output = model(x)
-            if step == 0:
-                first_output = output.detach().clone()
+                output = model(run_x)
+            outputs.append(output.detach().clone())
             loss = F.mse_loss(output, target)
             losses.append(loss.detach().clone())
             loss.backward()
+            input_grads.append(run_x.grad.detach().clone())
             # Snapshot grad local shards before the optimizer consumes them
             # (p.grad is a DTensor under FSDP2) to assert backward parity directly.
             step_grads = []
@@ -1346,26 +1591,32 @@ def test_fused_adam_hybrid_vs_base_recipe_parity(hybrid_recipe_name):
                     step_grads.append(g.detach().clone())
             grads_per_step.append(step_grads)
             optimizer.step()
-        return first_output, losses, grads_per_step
+            optimizer_states.append(snapshot_optimizer(model, optimizer))
+        return outputs, losses, input_grads, grads_per_step, optimizer_states
 
     base_recipe = get_recipe_from_string(base_recipe_name)
     hybrid_recipe = get_hybrid_recipe_from_string(hybrid_recipe_name)
 
-    base_first, base_losses, base_grads = run_training(
+    base_outputs, base_losses, base_input_grads, base_grads, base_opt_states = run_training(
         lambda: _build_linear_parity_stack(base_recipe), base_recipe
     )
-    hybrid_first, hybrid_losses, hybrid_grads = run_training(
-        lambda: _build_linear_parity_stack(hybrid_recipe), hybrid_recipe
-    )
+    (
+        hybrid_outputs,
+        hybrid_losses,
+        hybrid_input_grads,
+        hybrid_grads,
+        hybrid_opt_states,
+    ) = run_training(lambda: _build_linear_parity_stack(hybrid_recipe), hybrid_recipe)
 
-    # (1) First forward: bitwise-identical (the core operand-equivalence check).
-    torch.testing.assert_close(
-        hybrid_first,
-        base_first,
-        rtol=0.0,
-        atol=0.0,
-        msg=lambda m: f"[{hybrid_recipe_name} vs {base_recipe_name}] first forward output not bitwise-identical (a same-format hybrid must match its vanilla recipe before any optimizer step): {m}",
-    )
+    # (1) Every forward: bitwise-identical before and after optimizer updates.
+    for step, (base_output, hybrid_output) in enumerate(zip(base_outputs, hybrid_outputs)):
+        torch.testing.assert_close(
+            hybrid_output,
+            base_output,
+            rtol=0.0,
+            atol=0.0,
+            msg=lambda m, s=step: f"[{hybrid_recipe_name} vs {base_recipe_name}] step {s} forward output not bitwise-identical: {m}",
+        )
 
     # (2) Every per-step loss: bitwise-identical across the whole optimizer loop.
     for step, (b_loss, h_loss) in enumerate(zip(base_losses, hybrid_losses)):
@@ -1378,6 +1629,15 @@ def test_fused_adam_hybrid_vs_base_recipe_parity(hybrid_recipe_name):
         )
 
     # (3) Backward: every weight-gradient shard at every step bitwise-identical
+    for step, (base_grad, hybrid_grad) in enumerate(zip(base_input_grads, hybrid_input_grads)):
+        torch.testing.assert_close(
+            hybrid_grad,
+            base_grad,
+            rtol=0.0,
+            atol=0.0,
+            msg=lambda m, s=step: f"[{hybrid_recipe_name} vs {base_recipe_name}] step {s} input gradient not bitwise-identical: {m}",
+        )
+
     #     (implied by the loss trajectory, but asserted directly to be explicit).
     for step, (b_step, h_step) in enumerate(zip(base_grads, hybrid_grads)):
         for i, (b_grad, h_grad) in enumerate(zip(b_step, h_step)):
@@ -1394,6 +1654,33 @@ def test_fused_adam_hybrid_vs_base_recipe_parity(hybrid_recipe_name):
                 atol=0.0,
                 msg=lambda m, s=step, i=i: f"[{hybrid_recipe_name} vs {base_recipe_name}] step {s} param {i} gradient not bitwise-identical to the vanilla recipe: {m}",
             )
+
+    # Optimizer continuation state: FP32 master params, moments, and counters.
+    assert len(base_opt_states) == len(hybrid_opt_states)
+    for step, (base_step, hybrid_step) in enumerate(zip(base_opt_states, hybrid_opt_states)):
+        assert len(base_step) == len(hybrid_step)
+        for param_idx, (base_state, hybrid_state) in enumerate(zip(base_step, hybrid_step)):
+            assert base_state.keys() == hybrid_state.keys(), (
+                f"[{hybrid_recipe_name} vs {base_recipe_name}] step {step} param {param_idx} "
+                f"optimizer state keys differ: {base_state.keys()} != {hybrid_state.keys()}"
+            )
+            for key in base_state:
+                base_value = base_state[key]
+                hybrid_value = hybrid_state[key]
+                if torch.is_tensor(base_value):
+                    torch.testing.assert_close(
+                        hybrid_value,
+                        base_value,
+                        rtol=0.0,
+                        atol=0.0,
+                        msg=lambda m, s=step, i=param_idx, k=key: f"[{hybrid_recipe_name} vs {base_recipe_name}] step {s} param {i} optimizer state {k!r} not bitwise-identical: {m}",
+                    )
+                else:
+                    assert hybrid_value == base_value, (
+                        f"[{hybrid_recipe_name} vs {base_recipe_name}] step {step} "
+                        f"param {param_idx} optimizer state {key!r} differs: "
+                        f"{hybrid_value!r} != {base_value!r}"
+                    )
 
 
 def test_fused_adam_hybrid_scale_uniform_across_shards(hybrid_recipe_name):
@@ -1418,29 +1705,32 @@ def test_fused_adam_hybrid_scale_uniform_across_shards(hybrid_recipe_name):
     model = _build_hybrid_model(hybrid_recipe)
     model = _shard_model(model, world_size)
 
-    checked = 0
+    checked = {"rowwise": 0, "columnwise": 0}
     for name, param in model.named_parameters():
         if not (
             isinstance(param, DTensor) and isinstance(param._local_tensor, HybridQuantizedTensor)
         ):
             continue
-        row_sub = param._local_tensor._rowwise_storage
-        scale_inv = getattr(row_sub, "_scale_inv", None) if row_sub is not None else None
-        if scale_inv is None:
-            continue
-        local_scale = scale_inv.detach().reshape(-1).clone()
-        gathered = [torch.zeros_like(local_scale) for _ in range(world_size)]
-        dist.all_gather(gathered, local_scale)
-        for r in range(1, world_size):
-            torch.testing.assert_close(
-                gathered[r],
-                gathered[0],
-                rtol=0.0,
-                atol=0.0,
-                msg=lambda m, n=name, r=r: f"{n}: rank {r} rowwise _scale_inv differs from rank 0 -- cross-shard amax reduction was not applied to the hybrid current-scaling weight: {m}",
-            )
-        checked += 1
-    assert checked > 0, "no hybrid current-scaling weights found to check"
+        for direction in checked:
+            sub_storage = getattr(param._local_tensor, f"_{direction}_storage")
+            scale_inv = getattr(sub_storage, "_scale_inv", None)
+            if scale_inv is None:
+                continue
+            local_scale = scale_inv.detach().reshape(-1).clone()
+            gathered = [torch.zeros_like(local_scale) for _ in range(world_size)]
+            dist.all_gather(gathered, local_scale)
+            for r in range(1, world_size):
+                torch.testing.assert_close(
+                    gathered[r],
+                    gathered[0],
+                    rtol=0.0,
+                    atol=0.0,
+                    msg=lambda m, n=name, r=r, d=direction: f"{n}: rank {r} {d} _scale_inv differs from rank 0 -- cross-shard amax reduction was not applied to the hybrid current-scaling weight: {m}",
+                )
+            checked[direction] += 1
+    assert all(
+        count > 0 for count in checked.values()
+    ), f"missing hybrid current-scaling directions: {checked}"
 
 
 def test_fused_adam_hybrid_identity_fp8_master_weights():
@@ -1551,19 +1841,24 @@ def test_fused_adam_hybrid_identity_fp8_master_weights():
 
 
 def test_fused_adam_hybrid_allgather_correctness(hybrid_recipe_name):
-    """Validate that FSDP2 all-gather + post-gather reconstruction produces
-    correct results by comparing ``unshard(param).dequantize()`` with a manual
-    all-gather of dequantized local shards.
+    """Validate both Hybrid directions through FSDP2 at raw-buffer precision.
 
-    For the stateless formats supported here (per-tensor FP8, MXFP8), FSDP2's
-    all-gather concatenates rowwise bytes along dim-0 and the per-block /
-    per-tensor scales follow the same concatenation. Dequantizing the gathered
-    bytes is therefore bitwise-identical to concatenating the dequantized
-    shards — the tolerance is effectively ``assert_equal``.
+    The rowwise and columnwise sub-storages are checked independently. Every
+    gathered data buffer, scale buffer, field layout, and per-tensor scale
+    metadata value must exactly match a manual dim-0 all-gather.
     """
-    from transformer_engine.pytorch import HybridQuantizedTensor
     from fsdp2_utils import get_hybrid_recipe_from_string
 
+    expected_types = {
+        "HybridFP8CurrentScaling": (Float8TensorStorage, Float8TensorStorage),
+        "HybridMXFP8": (MXFP8TensorStorage, MXFP8TensorStorage),
+        "HybridFloat8BlockScaling": (
+            Float8BlockwiseQTensorStorage,
+            Float8BlockwiseQTensorStorage,
+        ),
+        "HybridMixed_MXFP8_FP8": (MXFP8TensorStorage, Float8TensorStorage),
+    }
+    row_type, col_type = expected_types[hybrid_recipe_name]
     hybrid_recipe = get_hybrid_recipe_from_string(hybrid_recipe_name)
     world_size, device = _get_dist_info()
 
@@ -1574,34 +1869,53 @@ def test_fused_adam_hybrid_allgather_correctness(hybrid_recipe_name):
     with te.autocast(enabled=True, recipe=hybrid_recipe):
         _ = model(x)
 
-    checked = 0
-    for name, param in model.named_parameters():
-        if not (isinstance(param, DTensor) and isinstance(param._local_tensor, QuantizedTensor)):
-            continue
-        local_shard = param._local_tensor
+    params = [
+        (name, param)
+        for name, param in model.named_parameters()
+        if isinstance(param, DTensor) and isinstance(param._local_tensor, HybridQuantizedTensor)
+    ]
+    local_count = torch.tensor([len(params)], dtype=torch.int64, device=device)
+    min_count = local_count.clone()
+    max_count = local_count.clone()
+    dist.all_reduce(min_count, dist.ReduceOp.MIN)
+    dist.all_reduce(max_count, dist.ReduceOp.MAX)
+    _collective_assert(
+        min_count.item() == max_count.item() and min_count.item() > 0,
+        f"{hybrid_recipe_name}: Hybrid parameter count range is "
+        f"({min_count.item()}, {max_count.item()})",
+    )
 
-        local_deq = local_shard.dequantize().contiguous()
-        gathered_list = [torch.zeros_like(local_deq) for _ in range(world_size)]
-        dist.all_gather(gathered_list, local_deq)
-        manual_full = torch.cat(gathered_list, dim=0)
-
-        full_param = param.full_tensor()
-        if isinstance(full_param, QuantizedTensor):
-            fsdp_full_deq = full_param.dequantize()
-        else:
-            fsdp_full_deq = full_param.float()
-
-        # Stateless formats gather identical bytes -> exact match.
-        torch.testing.assert_close(
-            manual_full.float(),
-            fsdp_full_deq[: manual_full.shape[0]].float(),
-            msg=lambda m, n=name: f"Allgather mismatch for {n}: {m}",
-            rtol=0.0,
-            atol=0.0,
+    errors = []
+    for name, param in params:
+        local = param._local_tensor
+        reconstructed = _manual_reconstruct_hybrid(local, param_name=name, world_size=world_size)
+        public_full = param.full_tensor()
+        _record_exact(
+            errors,
+            public_full,
+            reconstructed.dequantize(),
+            f"{name}: public full_tensor vs Hybrid reconstruction",
         )
-        checked += 1
+        _check_hybrid_direction_buffers(
+            local._rowwise_storage,
+            reconstructed._rowwise_storage,
+            row_type,
+            direction="rowwise",
+            param_name=name,
+            world_size=world_size,
+            errors=errors,
+        )
+        _check_hybrid_direction_buffers(
+            local._columnwise_storage,
+            reconstructed._columnwise_storage,
+            col_type,
+            direction="columnwise",
+            param_name=name,
+            world_size=world_size,
+            errors=errors,
+        )
 
-    assert checked > 0, "No quantized DTensor params found to validate"
+    _raise_collective_errors(errors, f"{hybrid_recipe_name} raw Hybrid all-gather")
 
 
 def test_fused_adam_hybrid_mxfp8_awkward_shard_shape():
@@ -1665,39 +1979,149 @@ def test_fused_adam_hybrid_mxfp8_awkward_shard_shape():
             out = model(x)
         out.sum().backward()
 
-        # Compare dim-0 all-gather (bytes) with FSDP2's reconstruction.
-        for name, param in model.named_parameters():
-            if not (
-                isinstance(param, DTensor) and isinstance(param._local_tensor, QuantizedTensor)
-            ):
-                continue
-            local_shard = param._local_tensor
-            local_deq = local_shard.dequantize().contiguous()
-            gathered_list = [torch.zeros_like(local_deq) for _ in range(world_size)]
-            dist.all_gather(gathered_list, local_deq)
-            manual_full = torch.cat(gathered_list, dim=0)
+        col_type = MXFP8TensorStorage if recipe_name == "HybridMXFP8" else Float8TensorStorage
+        params = [
+            (name, param)
+            for name, param in model.named_parameters()
+            if isinstance(param, DTensor) and isinstance(param._local_tensor, HybridQuantizedTensor)
+        ]
+        local_count = torch.tensor([len(params)], dtype=torch.int64, device=device)
+        min_count = local_count.clone()
+        max_count = local_count.clone()
+        dist.all_reduce(min_count, dist.ReduceOp.MIN)
+        dist.all_reduce(max_count, dist.ReduceOp.MAX)
+        _collective_assert(
+            min_count.item() == max_count.item() and min_count.item() > 0,
+            f"{recipe_name}: awkward-shape Hybrid parameter count range is "
+            f"({min_count.item()}, {max_count.item()})",
+        )
 
-            full_param = param.full_tensor()
-            fsdp_full_deq = (
-                full_param.dequantize()
-                if isinstance(full_param, QuantizedTensor)
-                else full_param.float()
+        errors = []
+        for name, param in params:
+            local = param._local_tensor
+            label = f"{recipe_name}:{name}"
+            reconstructed = _manual_reconstruct_hybrid(
+                local, param_name=label, world_size=world_size
             )
+            public_full = param.full_tensor()
+            _record_exact(
+                errors,
+                public_full,
+                reconstructed.dequantize(),
+                f"{label}: public full_tensor vs Hybrid reconstruction",
+            )
+            _check_hybrid_direction_buffers(
+                local._rowwise_storage,
+                reconstructed._rowwise_storage,
+                MXFP8TensorStorage,
+                direction="rowwise",
+                param_name=label,
+                world_size=world_size,
+                errors=errors,
+            )
+            _check_hybrid_direction_buffers(
+                local._columnwise_storage,
+                reconstructed._columnwise_storage,
+                col_type,
+                direction="columnwise",
+                param_name=label,
+                world_size=world_size,
+                errors=errors,
+            )
+        _raise_collective_errors(errors, f"{recipe_name} awkward raw Hybrid all-gather")
 
-            torch.testing.assert_close(
-                manual_full.float(),
-                fsdp_full_deq[: manual_full.shape[0]].float(),
-                rtol=0.0,
-                atol=0.0,
-                msg=lambda m, n=name, r=recipe_name: f"[{r}] Allgather mismatch for {n} at awkward shard shape: {m}",
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=RuntimeError,
+    reason=(
+        "Tracked by #3158: gathering dim-0 shards that split a 128-row "
+        "Float8Block scale tile produces too many scale rows."
+    ),
+)
+def test_fused_adam_hybrid_float8_block_unaligned_shard_shape():
+    """Positive FSDP2 roundtrip for a shard that splits a 128-row scale tile."""
+    from transformer_engine.pytorch import fp8
+    from fsdp2_utils import get_hybrid_recipe_from_string
+
+    supported, reason = fp8.check_fp8_block_scaling_support()
+    if not supported:
+        pytest.skip(reason)
+
+    world_size, device = _get_dist_info()
+    if world_size != 2:
+        pytest.skip("test shape is defined for exactly two FSDP ranks")
+
+    in_features = 256
+    per_rank_out = 192
+    out_features = per_rank_out * world_size
+    assert out_features % 128 == 0
+    assert per_rank_out % 128 != 0
+
+    hybrid_recipe = get_hybrid_recipe_from_string("HybridFloat8BlockScaling")
+    with te.quantized_model_init(enabled=True, recipe=hybrid_recipe):
+        model = torch.nn.Sequential(
+            te.Linear(
+                in_features,
+                out_features,
+                params_dtype=torch.bfloat16,
+                device="meta",
             )
+        )
+    model = _shard_model(model, world_size)
+
+    x = torch.randn(128, in_features, dtype=torch.bfloat16, device=device)
+    with te.autocast(enabled=True, recipe=hybrid_recipe):
+        output = model(x)
+    output.sum().backward()
+
+    params = [
+        (name, param)
+        for name, param in model.named_parameters()
+        if isinstance(param, DTensor) and isinstance(param._local_tensor, HybridQuantizedTensor)
+    ]
+    local_count = torch.tensor([len(params)], dtype=torch.int64, device=device)
+    min_count = local_count.clone()
+    max_count = local_count.clone()
+    dist.all_reduce(min_count, dist.ReduceOp.MIN)
+    dist.all_reduce(max_count, dist.ReduceOp.MAX)
+    _collective_assert(
+        min_count.item() == max_count.item() and min_count.item() > 0,
+        "Float8Block unaligned Hybrid parameter count range is "
+        f"({min_count.item()}, {max_count.item()})",
+    )
+
+    errors = []
+    for name, param in params:
+        local = param._local_tensor
+        reconstructed = _manual_reconstruct_hybrid(local, param_name=name, world_size=world_size)
+        public_full = param.full_tensor()
+        _record_exact(
+            errors,
+            public_full,
+            reconstructed.dequantize(),
+            f"{name}: public full_tensor vs Hybrid reconstruction",
+        )
+        for direction in ("rowwise", "columnwise"):
+            _check_hybrid_direction_buffers(
+                getattr(local, f"_{direction}_storage"),
+                getattr(reconstructed, f"_{direction}_storage"),
+                Float8BlockwiseQTensorStorage,
+                direction=direction,
+                param_name=name,
+                world_size=world_size,
+                errors=errors,
+            )
+    _raise_collective_errors(errors, "Float8Block unaligned raw Hybrid all-gather")
 
 
 def test_hybrid_dcp_output_parity(hybrid_recipe_name):
-    """DCP save+load roundtrip: output after load matches output before save.
+    """DCP roundtrip and exact forked optimizer continuation.
 
-    Trains a hybrid model, saves with DCP, loads into fresh model,
-    and asserts forward output parity.
+    Trains and checkpoints a hybrid model plus FusedAdam, loads both into fresh
+    objects, and compares the identical next step against uninterrupted training:
+    output, loss, input/parameter gradients, master params, moments, counters,
+    and post-step output must all match bitwise.
     """
     import torch.distributed.checkpoint as dcp
 
@@ -1726,6 +2150,72 @@ def test_hybrid_dcp_output_parity(hybrid_recipe_name):
 
         x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
         target = torch.randn_like(x)
+        failures = []
+
+        def snapshot_optimizer(current_model, current_optimizer):
+            snapshots = []
+            for param in current_model.parameters():
+                state = {}
+                for key, value in current_optimizer.state[param].items():
+                    if torch.is_tensor(value):
+                        value = value.to_local() if isinstance(value, DTensor) else value
+                        value = value.detach().clone()
+                    state[key] = value
+                snapshots.append(state)
+            return snapshots
+
+        def check_optimizer_state(actual, expected, label):
+            if len(actual) != len(expected):
+                failures.append(
+                    f"{label}: parameter count differs: {len(actual)} != {len(expected)}"
+                )
+            for param_idx, (actual_state, expected_state) in enumerate(zip(actual, expected)):
+                if actual_state.keys() != expected_state.keys():
+                    failures.append(
+                        f"{label}: param {param_idx} state keys differ: "
+                        f"{actual_state.keys()} != {expected_state.keys()}"
+                    )
+                for key in actual_state.keys() & expected_state.keys():
+                    actual_value = actual_state[key]
+                    expected_value = expected_state[key]
+                    if torch.is_tensor(expected_value):
+                        _record_exact(
+                            failures,
+                            actual_value,
+                            expected_value,
+                            f"{label}: param {param_idx} optimizer state {key!r}",
+                        )
+                    elif actual_value != expected_value:
+                        failures.append(
+                            f"{label}: param {param_idx} optimizer state {key!r} differs: "
+                            f"{actual_value!r} != {expected_value!r}"
+                        )
+
+        def run_continuation_step(current_model, current_optimizer):
+            step_x = x.detach().clone().requires_grad_()
+            current_optimizer.zero_grad(set_to_none=True)
+            with te.autocast(enabled=True, recipe=hybrid_recipe):
+                step_output = current_model(step_x)
+            step_loss = F.mse_loss(step_output, target)
+            step_loss.backward()
+            step_grads = []
+            for param in current_model.parameters():
+                grad = param.grad
+                if grad is not None:
+                    grad = grad.to_local() if isinstance(grad, DTensor) else grad
+                    grad = grad.detach().clone()
+                step_grads.append(grad)
+            current_optimizer.step()
+            with torch.no_grad(), te.autocast(enabled=True, recipe=hybrid_recipe):
+                post_step_output = current_model(x).detach().clone()
+            return {
+                "output": step_output.detach().clone(),
+                "loss": step_loss.detach().clone(),
+                "input_grad": None if step_x.grad is None else step_x.grad.detach().clone(),
+                "param_grads": step_grads,
+                "optimizer": snapshot_optimizer(current_model, current_optimizer),
+                "post_step_output": post_step_output,
+            }
 
         for _ in range(NUM_STEPS):
             optimizer.zero_grad(set_to_none=True)
@@ -1743,6 +2233,7 @@ def test_hybrid_dcp_output_parity(hybrid_recipe_name):
             "optimizer": optimizer.state_dict(),
         }
         dcp.save(save_state, checkpoint_id=checkpoint_dir)
+        saved_optimizer_state = snapshot_optimizer(model, optimizer)
 
         model2 = _build_hybrid_model(hybrid_recipe)
         model2 = _shard_model(model2, world_size)
@@ -1769,14 +2260,56 @@ def test_hybrid_dcp_output_parity(hybrid_recipe_name):
         with torch.no_grad():
             with te.autocast(enabled=True, recipe=hybrid_recipe):
                 loaded_output = model2(x)
-
-        torch.testing.assert_close(
-            loaded_output,
-            ref_output,
-            rtol=0,
-            atol=0,
-            msg=lambda m: f"DCP roundtrip output mismatch: {m}",
+        check_optimizer_state(
+            snapshot_optimizer(model2, optimizer2),
+            saved_optimizer_state,
+            "DCP optimizer state immediately after load",
         )
+        _record_exact(failures, loaded_output, ref_output, "DCP roundtrip output")
+        _raise_collective_errors(failures, "DCP state immediately after load")
+        failures.clear()
+
+        # Fork from the checkpoint and execute the identical next step. This
+        # catches an ignored optimizer checkpoint even when model-only output
+        # parity succeeds immediately after load.
+        torch.manual_seed(9876)
+        torch.cuda.manual_seed(9876)
+        reference_step = run_continuation_step(model, optimizer)
+        torch.manual_seed(9876)
+        torch.cuda.manual_seed(9876)
+        resumed_step = run_continuation_step(model2, optimizer2)
+
+        for key in ("output", "loss", "input_grad", "post_step_output"):
+            _record_exact(
+                failures,
+                resumed_step[key],
+                reference_step[key],
+                f"DCP continuation {key}",
+            )
+
+        resumed_grads = resumed_step["param_grads"]
+        reference_grads = reference_step["param_grads"]
+        if len(resumed_grads) != len(reference_grads):
+            failures.append(
+                "DCP continuation parameter-gradient count differs: "
+                f"{len(resumed_grads)} != {len(reference_grads)}"
+            )
+        for param_idx, (resumed_grad, reference_grad) in enumerate(
+            zip(resumed_grads, reference_grads)
+        ):
+            _record_exact(
+                failures,
+                resumed_grad,
+                reference_grad,
+                f"DCP continuation param {param_idx} gradient",
+            )
+
+        check_optimizer_state(
+            resumed_step["optimizer"],
+            reference_step["optimizer"],
+            "DCP optimizer state after continuation",
+        )
+        _raise_collective_errors(failures, "DCP forked continuation")
     finally:
         dist.barrier()
         if rank == 0:
@@ -1806,9 +2339,7 @@ TESTS = {
         test_fused_adam_hybrid_identity_fp8_master_weights
     ),
     "fused_adam_hybrid_allgather_correctness": test_fused_adam_hybrid_allgather_correctness,
-    "fused_adam_hybrid_mxfp8_awkward_shard_shape": (
-        test_fused_adam_hybrid_mxfp8_awkward_shard_shape
-    ),
+    "fused_adam_hybrid_mxfp8_awkward_shard_shape": test_fused_adam_hybrid_mxfp8_awkward_shard_shape,
     "hybrid_dcp_output_parity": test_hybrid_dcp_output_parity,
 }
 

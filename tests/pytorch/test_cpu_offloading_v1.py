@@ -73,6 +73,10 @@ if fp8_available and mxfp8_available:
 if mxfp8_available and nvfp4_available:
     quantization_recipes.append(recipe.CustomRecipe(qfactory=_hybrid_mxfp8_nvfp4_qfactory))
 
+hybrid_quantization_recipes = [
+    item for item in quantization_recipes if item is not None and item.custom()
+]
+
 model_config = {
     "small": ModelConfig(8, 512, 8, 64, num_layers=5, eps=0.1),
 }
@@ -288,3 +292,93 @@ def test_cpu_offload(quantization_recipe: Optional[recipe.Recipe], model_name: s
     # in that case the memory-savings assertion above is the only check.
     if memory_from_cached_weights is not None:
         assert abs(memory_with_offload - memory_from_cached_weights) < EPSILON
+
+
+@pytest.mark.parametrize(
+    "quantization_recipe",
+    hybrid_quantization_recipes,
+    ids=[item.qfactory.__name__ for item in hybrid_quantization_recipes],
+)
+def test_hybrid_cpu_offload_numerics_exact(quantization_recipe: recipe.Recipe) -> None:
+    """V1 offload must preserve hybrid forward and backward values bitwise."""
+
+    def run(modules, inp, grad_output, *, cpu_offload):
+        if cpu_offload:
+            offload_context, sync_function = te.get_cpu_offload_context(
+                enabled=True,
+                num_layers=len(modules),
+                model_layers=len(modules) + 1,
+                offload_activations=True,
+                offload_weights=False,
+            )
+        else:
+            offload_context = contextlib.nullcontext()
+            sync_function = lambda tensor: tensor
+
+        out = inp
+        for module in modules:
+            with te.autocast(enabled=True, recipe=quantization_recipe), offload_context:
+                out = module(out)
+            out = sync_function(out)
+        # Commit the final offload group, mirroring the memory test above.
+        with offload_context:
+            out = out.clone()
+        out = sync_function(out)
+        out.backward(grad_output)
+
+        grads = {}
+        for module_index, module in enumerate(modules):
+            for name, param in module.named_parameters():
+                assert param.grad is not None
+                grads[f"{module_index}.{name}"] = param.grad.detach().clone()
+        assert inp.grad is not None
+        return out.detach().clone(), inp.grad.detach().clone(), grads
+
+    torch.manual_seed(9000)
+    reference_modules = [model_types["linear"]() for _ in range(2)]
+    torch.manual_seed(9001)
+    offload_modules = [model_types["linear"]() for _ in range(2)]
+    with torch.no_grad():
+        for offload_module, reference_module in zip(offload_modules, reference_modules):
+            for offload_param, reference_param in zip(
+                offload_module.parameters(), reference_module.parameters()
+            ):
+                offload_param.copy_(reference_param)
+
+    # V1 requires one pass to initialize cached quantized weight workspaces.
+    warmup_rng_state = torch.cuda.get_rng_state()
+    _warmup_model(offload_modules, quantization_recipe)
+    for module in offload_modules:
+        module.zero_grad(set_to_none=True)
+    torch.cuda.set_rng_state(warmup_rng_state)
+    _warmup_model(reference_modules, quantization_recipe)
+    for module in reference_modules:
+        module.zero_grad(set_to_none=True)
+
+    torch.manual_seed(9002)
+    x = torch.randn((8, SIZE, SIZE), device="cuda", dtype=torch.bfloat16)
+    grad_output = torch.randn_like(x)
+    x_offload = x.detach().clone().requires_grad_(True)
+    x_reference = x.detach().clone().requires_grad_(True)
+
+    # Replay identical stochastic-rounding/RHT randomness in both paths.
+    rng_state = torch.cuda.get_rng_state()
+    offload_out, offload_input_grad, offload_param_grads = run(
+        offload_modules, x_offload, grad_output, cpu_offload=True
+    )
+    torch.cuda.set_rng_state(rng_state)
+    reference_out, reference_input_grad, reference_param_grads = run(
+        reference_modules, x_reference, grad_output, cpu_offload=False
+    )
+
+    torch.testing.assert_close(offload_out, reference_out, rtol=0.0, atol=0.0)
+    torch.testing.assert_close(offload_input_grad, reference_input_grad, rtol=0.0, atol=0.0)
+    assert offload_param_grads.keys() == reference_param_grads.keys()
+    for name, reference_grad in reference_param_grads.items():
+        torch.testing.assert_close(
+            offload_param_grads[name],
+            reference_grad,
+            rtol=0.0,
+            atol=0.0,
+            msg=f"V1 CPU-offload parameter gradient mismatch for {name}",
+        )
