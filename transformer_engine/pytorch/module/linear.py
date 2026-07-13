@@ -1565,7 +1565,8 @@ def _linear_backward_impl_fake(
             "(fsdp_group is not None); use FSDP2 or MCore FSDP."
         )
 
-    weight = args.saved_weight if args.saved_weight is not None else args.weight_fp8
+    # The ``saved_weight`` slot is always aliased to the weight parameter.
+    weight = args.saved_weight
     out_dtype = args.activation_dtype
     out_features, in_features = weight.shape
 
