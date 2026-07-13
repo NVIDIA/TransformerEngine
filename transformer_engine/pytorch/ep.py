@@ -25,6 +25,7 @@ __all__ = [
     "ep_dispatch",
     "ep_combine",
     "symm_mem_alloc",
+    "is_symm_backed",
 ]
 
 
@@ -156,6 +157,22 @@ def ep_finalize() -> None:
     finally:
         _BOOTSTRAPPED = False
         _EP_GROUP = None
+
+
+def is_symm_backed(t: torch.Tensor) -> bool:
+    """Whether ``t`` is symm-mem-backed on the EP group. Prefer torch's local ``is_symm_mem_tensor``
+    when the build provides it (no collective, no exception); otherwise fall back to the rendezvous
+    probe the C++ ep kernel uses (``maybe_make_window``): cached for an already-registered tensor,
+    raises for a plain one."""
+    from torch.distributed import _symmetric_memory as _symm
+
+    if hasattr(_symm, "is_symm_mem_tensor"):
+        return bool(_symm.is_symm_mem_tensor(t))
+    try:
+        _symm.rendezvous(t, _EP_GROUP.group_name)
+        return True
+    except Exception:  # pylint: disable=broad-exception-caught
+        return False
 
 
 # Buffer
