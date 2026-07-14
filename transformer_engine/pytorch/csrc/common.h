@@ -406,6 +406,16 @@ class NVFP4Quantizer : public Quantizer {
   static bool is_eligible_for_rht_cast_fusion(const std::vector<size_t>& shape,
                                               bool for_grouped_kernel = false);
 
+  /*! @brief Whether a tensor of the given shape can have GEMM-swizzled scale
+   *  factors written directly by the (non-RHT) 2D NVFP4 quantize kernel.
+   *
+   *  The swizzled scale layout is tiled 128x4; requiring both flattened dims to
+   *  be multiples of 128 guarantees no padded scale tiles are needed for either
+   *  the rowwise or columnwise operand, so the standalone swizzle pass can be
+   *  skipped entirely.
+   */
+  static bool is_eligible_for_2d_swizzle_fusion(const std::vector<size_t>& shape);
+
  private:
   void quantize_with_rht_unfused_helper(const TensorWrapper& input, TensorWrapper& out,
                                         TensorWrapper& rht_output_t_cpp,
