@@ -213,6 +213,26 @@ class GroupedLinear(BasicOperation):
 
         self._apply_delay_wgrad_param_hooks()
 
+    def register_parameter(
+        self,
+        name: str,
+        param: Optional[torch.nn.Parameter],
+    ) -> None:
+        """Register a parameter and apply delayed-wgrad metadata when needed."""
+        super().register_parameter(name, param)
+
+        # A single-grouped-weight op may be constructed on the meta device and
+        # receive its grouped parent later. Mark that parent at attachment time,
+        # before DDP/FSDP inspects the parameter to install backward hooks.
+        if (
+            name == "weight"
+            and param is not None
+            and getattr(self, "single_grouped_weight", False)
+        ):
+            wgrad_store = getattr(self, "wgrad_store", None)
+            if wgrad_store is not None and wgrad_store.delay_wgrad_compute():
+                param.skip_backward_post_hook = True
+
     def _apply_delay_wgrad_param_hooks(self) -> None:
         """Set ``skip_backward_post_hook`` on weights when delaying wgrad (bias uses main backward)."""
         if not self.wgrad_store.delay_wgrad_compute():

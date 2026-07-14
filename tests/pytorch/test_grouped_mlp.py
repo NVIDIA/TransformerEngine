@@ -248,10 +248,10 @@ class TestGroupedLinearOp:
         # Mirror an external caller attaching the grouped parent after constructing
         # the parameterless shell, then verify delayed-wgrad metadata is applied.
         grouped_weight = torch.nn.Parameter(torch.empty(2, 16, 16, device="meta"))
+        assert not hasattr(grouped_weight, "skip_backward_post_hook")
         op.register_parameter("weight", grouped_weight)
         for group_idx in range(op.num_groups):
             op.register_parameter(f"weight{group_idx}", None)
-        op._apply_delay_wgrad_param_hooks()
 
         assert grouped_weight.skip_backward_post_hook
 
