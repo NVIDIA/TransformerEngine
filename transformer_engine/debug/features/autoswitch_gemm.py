@@ -487,10 +487,12 @@ class AutoswitchGemm(TEConfigAPIMapper):
         if "enabled" in processed_config:
             processed_config.pop("enabled")
 
-        # Register schedules/logging mode from original config. Processed per-API
-        # fragments may drop schedule fields and must not register synthetic
-        # default schedules (e.g., freq=1 every iteration).
-        _register_sampling_config(config_copy)
+        # Prefer file-backed config as the single source of truth for sampling/logging
+        # schedules. This avoids repeated per-API registrations drifting into
+        # synthetic defaults (e.g., freq=1 every iteration).
+        config_file = os.getenv("NVDFW_CONFIG_FILE")
+        if not config_file:
+            _register_sampling_config(config_copy)
         return True, processed_config
 
     def _infer_monitored_tensors(self, config: Dict) -> Set[str]:
