@@ -1493,21 +1493,17 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 start_offload(*activation_tensors)
                 mark_activation_offload(*activation_tensors)
 
-            # Save an internal layout for this joint fused op. The saved state is
-            # intentionally not compatible with the basic GroupedLinear backward.
-            # Distributed weight: save the small sharded params; backward col-AGs the layout.
+            fc1_weight_tensors = (
+                [grouped_fc1_weight] if fc1_op.single_grouped_weight else grouped_fc1_weight
+            )
+            fc2_weight_tensors = (
+                [grouped_fc2_weight] if fc2_op.single_grouped_weight else grouped_fc2_weight
+            )
+            # Save the joint op's internal layout; distributed weights save the small shards.
             if fc1_is_dist:
-                fc1_weight_tensors = [getattr(fc1_op, f"weight{idx}") for idx in range(num_groups)]
-            else:
-                fc1_weight_tensors = (
-                    [grouped_fc1_weight] if fc1_op.single_grouped_weight else grouped_fc1_weight
-                )
+                fc1_weight_tensors = fc1_weights
             if fc2_is_dist:
-                fc2_weight_tensors = [getattr(fc2_op, f"weight{idx}") for idx in range(num_groups)]
-            else:
-                fc2_weight_tensors = (
-                    [grouped_fc2_weight] if fc2_op.single_grouped_weight else grouped_fc2_weight
-                )
+                fc2_weight_tensors = fc2_weights
             fc1_ctx.save_for_backward(
                 split_sizes,
                 base_split_offsets,
@@ -1771,8 +1767,6 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 glu_clamp_min=self._cudnn_glu_clamp_min,
             )
 
-        # Distributed weight: forward gathered rowwise; col-AG the columnwise layout the dgrad
-        # needs, right before use (one weight live at a time).
         if is_distributed_weight(fc2_op.weight0):
             grouped_fc2_weight = materialize_weight_for_backward(fc2_op.weight0)
 
@@ -2000,6 +1994,9 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         if fc1_ctx.input_requires_grad:
             in_shape = out_shape[:-1] + [fc1_weight_shape[1]]
 
+            if is_distributed_weight(fc1_op.weight0):
+                grouped_fc1_weight = materialize_weight_for_backward(fc1_op.weight0)
+
             if use_nvfp4:
                 grad_input = torch.empty(in_shape, dtype=dtype, device=device)
                 if num_groups == 1:
@@ -2053,10 +2050,6 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     "discrete_col_sfd": True,
                     "use_dynamic_sched": True,
                 }
-
-                # Distributed weight: col-AG the columnwise FC1 dgrad layout (only when dgrad runs).
-                if is_distributed_weight(fc1_op.weight0):
-                    grouped_fc1_weight = materialize_weight_for_backward(fc1_op.weight0)
 
                 if fc1_op.single_grouped_weight:
                     # Clone and swizzle scales for GEMM

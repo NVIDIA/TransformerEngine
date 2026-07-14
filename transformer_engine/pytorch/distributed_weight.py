@@ -34,19 +34,15 @@ class DistributedWeight(Protocol):
 
     def materialize_group_for_forward(self) -> Any:
         """Return the tensor(s) to feed the forward GEMM (may all-gather shards)."""
-        ...
 
     def materialize_group_for_backward(self) -> Any:
         """Re-materialize the full weight(s) for the backward GEMMs."""
-        ...
 
     def finalize_group_grads(self, wgrads: Any) -> Any:
         """Post-process freshly computed weight grad(s) (e.g. reduce-scatter)."""
-        ...
 
     def grad_buffer(self) -> torch.Tensor:
         """The gradient accumulation buffer for this weight."""
-        ...
 
 
 def is_distributed_weight(weight: Any) -> bool:

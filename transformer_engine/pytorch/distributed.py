@@ -1293,13 +1293,11 @@ def _post_process_nvfp4_gather(
         handle = None
 
     # Fix the interleaved transposed data from gathering along first dim.
-    # In-place .copy_() (not `=` rebind) to keep the storage address stable
-    # for CUDA graph capture — replays see the same pointer they captured.
-    out._columnwise_scale_inv.copy_(_swap_first_dims(columnwise_scale_inv_interleaved, world_size))
-    out._columnwise_data.copy_(_swap_first_dims(columnwise_data_interleaved, world_size))
+    out._columnwise_scale_inv = _swap_first_dims(columnwise_scale_inv_interleaved, world_size)
+    out._columnwise_data = _swap_first_dims(columnwise_data_interleaved, world_size)
 
-    # Optionally pad the scaling inverse if needed (same in-place pattern).
-    out._columnwise_scale_inv.copy_(pad_columnwise_scale_inv(out._columnwise_scale_inv))
+    # Optionally pad the scaling inverse if needed.
+    out._columnwise_scale_inv = pad_columnwise_scale_inv(out._columnwise_scale_inv)
 
 
 @dataclass
@@ -1313,25 +1311,18 @@ class _NVFP4AllGatherAsyncHandle:
     async_handle: torch.distributed.Work
     _synchronized: bool = False
 
-    def post_process_nvfp4_gather(self) -> None:
-        """Fix interleaved transposed data + pad scale_inv after the async AG completes.
-
-        Idempotent: gated by ``_synchronized`` in :meth:`wait`.
-        """
-        _post_process_nvfp4_gather(
-            self.output,
-            self.columnwise_data_interleaved,
-            self.columnwise_scale_inv_interleaved,
-            self.world_size,
-        )
-
     def wait(self) -> None:
         """Wait for the async operation to complete and post-process the tensor."""
         if self._synchronized:
             return
         if self.async_handle is not None:
             self.async_handle.wait()
-        self.post_process_nvfp4_gather()
+        _post_process_nvfp4_gather(
+            self.output,
+            self.columnwise_data_interleaved,
+            self.columnwise_scale_inv_interleaved,
+            self.world_size,
+        )
         self._synchronized = True
 
 
@@ -1465,9 +1456,8 @@ def _all_gather_nvfp4(
                 group=process_group,
             )
 
-            # Transfer amax to output via in-place .copy_() so the storage
-            # address stays stable for CUDA graph capture.
-            out._amax_rowwise.copy_(inp._amax_rowwise)
+            # Transfer amax to output.
+            out._amax_rowwise = inp._amax_rowwise
 
         # Gather the transposed NVFP4 data along first dimension. Fix format later.
         if quantizer.columnwise_usage:
@@ -1516,7 +1506,7 @@ def _all_gather_nvfp4(
             )
 
             # Transfer amax to output.
-            out._amax_columnwise.copy_(inp._amax_columnwise)
+            out._amax_columnwise = inp._amax_columnwise
 
     handle = coalesced_handle if async_op else None
 
