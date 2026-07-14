@@ -224,11 +224,7 @@ class GroupedLinear(BasicOperation):
         # A single-grouped-weight op may be constructed on the meta device and
         # receive its grouped parent later. Mark that parent at attachment time,
         # before DDP/FSDP inspects the parameter to install backward hooks.
-        if (
-            name == "weight"
-            and param is not None
-            and getattr(self, "single_grouped_weight", False)
-        ):
+        if name == "weight" and param is not None and getattr(self, "single_grouped_weight", False):
             wgrad_store = getattr(self, "wgrad_store", None)
             if wgrad_store is not None and wgrad_store.delay_wgrad_compute():
                 param.skip_backward_post_hook = True
