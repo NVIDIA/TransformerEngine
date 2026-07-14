@@ -371,7 +371,11 @@ def _load_tvm_ffi_library() -> bool:
         ctypes.CDLL(li.find_libtvm_ffi(), mode=ctypes.RTLD_GLOBAL)
         return True
     except Exception as e:  # pylint: disable=broad-exception-caught
-        logging.warning("Failed to load tvm-ffi dynamic library for CuTeDSL backend: %s. Will fall back to default TE CUDA C++ kernels", e)
+        logging.warning(
+            "Failed to load tvm-ffi dynamic library for CuTeDSL backend: %s. Will fall back to"
+            " default TE CUDA C++ kernels",
+            e,
+        )
         return False
 
 
@@ -389,7 +393,11 @@ def _register_cutedsl_backends() -> bool:
         CuTeDSL.register_cutedsl_backends()
         return True
     except Exception as e:  # pylint: disable=broad-exception-caught
-        logging.warning("Failed to register CuTeDSL backends: %s. Will fall back to default TE CUDA C++ kernels", e)
+        logging.warning(
+            "Failed to register CuTeDSL backends: %s. Will fall back to default TE CUDA C++"
+            " kernels",
+            e,
+        )
         return False
 
 

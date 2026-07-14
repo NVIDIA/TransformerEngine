@@ -7,12 +7,11 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_TVM_FFI_BRIDGE_H_
 #define TRANSFORMER_ENGINE_COMMON_TVM_FFI_BRIDGE_H_
 
+#include <dlfcn.h>
 #include <tvm/ffi/any.h>
 #include <tvm/ffi/container/tensor.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/optional.h>
-
-#include <dlfcn.h>
 
 #include <atomic>
 #include <cstdint>
@@ -241,8 +240,9 @@ class TVMFFICentral {
                   "`bool retrieve_func_from_python(const std::string&) const`.");
     // libtvm_ffi.so absent -> backend disabled, no tvm::ffi symbol is touched.
     if (!tvm_ffi_available_) {
-      NVTE_WARN("Cannot dispatch to CuTeDSL kernels because libtvm_ffi.so is not successfully loaded."
-                " Will fall back to the default CUDA C++ kernels.");
+      NVTE_WARN(
+          "Cannot dispatch to CuTeDSL kernels because libtvm_ffi.so is not successfully loaded."
+          " Will fall back to the default CUDA C++ kernels.");
       return std::nullopt;
     }
     if (!cutedsl_backend_enabled_.load(std::memory_order_relaxed)) {
