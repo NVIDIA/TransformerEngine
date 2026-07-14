@@ -8,28 +8,18 @@
  * (act_scales[row]), do all math in fp32, and cast once at the store. The
  * backward path optionally also reduces the gradient of the per-row scale.
  *
- * The implementation consists of six __global__ kernels:
- *
- *   # | Kernel                                        | Activation             | Dir | grad_act_scales | Launch
- *  ---+-----------------------------------------------+------------------------+-----+-----------------+--------------------
- *   1 | scaled_gated_forward_kernel                   | SwiGLU / ClampedSwiGLU | fwd | --              | vectorized row segments
- *   2 | scaled_srelu_forward_kernel                   | SReLU (unary)          | fwd | --              | vectorized row grid
- *   3 | scaled_gated_backward_kernel                  | SwiGLU / ClampedSwiGLU | bwd | no              | vectorized row segments
- *   4 | scaled_srelu_backward_kernel                  | SReLU                  | bwd | no              | vectorized row grid
- *   5 | scaled_gated_backward_with_scale_grad_kernel  | SwiGLU / ClampedSwiGLU | bwd | yes             | one block/row, adaptive CTA
- *   6 | scaled_srelu_backward_with_scale_grad_kernel  | SReLU                  | bwd | yes             | one block/row, adaptive CTA
- *
- * The "with scale grad" variants compute
- * grad_act_scales[row] = sum_j dY * unscaled. This per-row reduction uses
- * one block per row with CTA size chosen from row vector count (warp-aligned,
- * capped at kReductionThreads). When grad_act_scales is null, the cheaper flat
- * elementwise grid is used instead.
+ * Public launch APIs are templated on ParamOP / ActOP / DActOP (same shape as
+ * gated_act_fn). Kernel definitions and explicit instantiations live in
+ * scaled_activation.cu.
  */
 
 #ifndef TRANSFORMER_ENGINE_COMMON_ACTIVATION_SCALED_ACTIVATION_H_
 #define TRANSFORMER_ENGINE_COMMON_ACTIVATION_SCALED_ACTIVATION_H_
 
+#include <transformer_engine/activation.h>
+
 #include "../common.h"
+#include "../util/math.h"
 #include "../util/vectorized_pointwise.h"
 #include "../utils.cuh"
 
@@ -40,7 +30,6 @@ namespace scaled_activation {
 constexpr int kThreads = unary_kernel_threads;
 constexpr int kReductionThreads = 256;
 constexpr int kReductionWarps = kReductionThreads / THREADS_PER_WARP;
-using WarpReducer = Reducer<float, 1, 1, 1>;
 
 // Pick a CTA size for one-block-per-row scale-grad: enough threads to cover
 // row_vectors, rounded up to a warp multiple, capped at kReductionThreads.
@@ -54,26 +43,6 @@ inline int choose_reduction_threads(const size_t row_vectors) {
     rounded = THREADS_PER_WARP;
   }
   return rounded;
-}
-
-// blockDim.x must be a multiple of warp size and <= kReductionThreads.
-__device__ __forceinline__ float block_reduce_sum(float value, float *smem) {
-  const int lane = threadIdx.x % THREADS_PER_WARP;
-  const int warp = threadIdx.x / THREADS_PER_WARP;
-  const int num_warps = blockDim.x / THREADS_PER_WARP;
-  Empty params = {};
-  WarpReducer reducer(params, /*bidm=*/0, /*bidn=*/0, /*warp_m=*/0, /*warp_n=*/0, lane,
-                      /*smem=*/nullptr);
-  Sum<float> sum;
-
-  value = reducer.reduce(value, sum);
-  if (lane == 0) {
-    smem[warp] = value;
-  }
-  __syncthreads();
-
-  value = threadIdx.x < num_warps ? smem[lane] : 0.0f;
-  return warp == 0 ? reducer.reduce(value, sum) : value;
 }
 
 template <typename... Ptrs>
@@ -90,6 +59,32 @@ Alignment row_vector_alignment(const size_t lead_dim, const int nvec, const Ptrs
 
 }  // namespace scaled_activation
 }  // namespace detail
+
+template <typename ParamOP, float (*ActOP)(float, const ParamOP &)>
+void launch_scaled_gated_forward(const NVTETensor input, const NVTETensor act_scales,
+                                 NVTETensor output, ParamOP param, int64_t glu_interleave_size,
+                                 cudaStream_t stream, const char *api_name);
+
+template <typename ParamOP, float (*ActOP)(float, const ParamOP &),
+          float (*DActOP)(float, const ParamOP &)>
+void launch_scaled_gated_backward(const NVTETensor grad, const NVTETensor input,
+                                  const NVTETensor act_scales, NVTETensor grad_input,
+                                  NVTETensor grad_act_scales, ParamOP param,
+                                  int64_t glu_interleave_size, cudaStream_t stream,
+                                  const char *api_name);
+
+template <typename ParamOP, float (*ActOP)(float, const ParamOP &)>
+void launch_scaled_unary_forward(const NVTETensor input, const NVTETensor act_scales,
+                                 NVTETensor output, ParamOP param, cudaStream_t stream,
+                                 const char *api_name);
+
+template <typename ParamOP, float (*ActOP)(float, const ParamOP &),
+          float (*DActOP)(float, const ParamOP &)>
+void launch_scaled_unary_backward(const NVTETensor grad, const NVTETensor input,
+                                  const NVTETensor act_scales, NVTETensor grad_input,
+                                  NVTETensor grad_act_scales, ParamOP param, cudaStream_t stream,
+                                  const char *api_name);
+
 }  // namespace transformer_engine
 
 #endif  // TRANSFORMER_ENGINE_COMMON_ACTIVATION_SCALED_ACTIVATION_H_
