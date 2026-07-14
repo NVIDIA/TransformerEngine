@@ -18,9 +18,10 @@ namespace {
 using namespace detail::scaled_activation;
 
 template <int nvec, typename InputT, typename ScaleT, typename OutputT>
-__global__ void scaled_srelu_forward_kernel(const InputT *input, const ScaleT *act_scales,
-                                            OutputT *output, const size_t rows, const size_t hidden,
-                                            const size_t num_vectors_per_row) {
+__global__ void __launch_bounds__(kThreads, 4) scaled_srelu_forward_kernel(
+    const InputT *__restrict__ input, const ScaleT *__restrict__ act_scales,
+    OutputT *__restrict__ output, const size_t rows, const size_t hidden,
+    const size_t num_vectors_per_row) {
   Empty empty = {};
   const size_t total_vectors = rows * num_vectors_per_row;
   for (size_t tid = blockIdx.x * blockDim.x + threadIdx.x; tid < total_vectors;
@@ -42,10 +43,10 @@ __global__ void scaled_srelu_forward_kernel(const InputT *input, const ScaleT *a
 }
 
 template <int nvec, typename GradT, typename InputT, typename ScaleT, typename OutputT>
-__global__ void scaled_srelu_backward_kernel(const GradT *grad_output, const InputT *input,
-                                             const ScaleT *act_scales, OutputT *grad_input,
-                                             const size_t rows, const size_t hidden,
-                                             const size_t num_vectors_per_row) {
+__global__ void __launch_bounds__(kThreads, 4) scaled_srelu_backward_kernel(
+    const GradT *__restrict__ grad_output, const InputT *__restrict__ input,
+    const ScaleT *__restrict__ act_scales, OutputT *__restrict__ grad_input, const size_t rows,
+    const size_t hidden, const size_t num_vectors_per_row) {
   Empty empty = {};
   const size_t total_vectors = rows * num_vectors_per_row;
   for (size_t tid = blockIdx.x * blockDim.x + threadIdx.x; tid < total_vectors;
@@ -70,9 +71,10 @@ __global__ void scaled_srelu_backward_kernel(const GradT *grad_output, const Inp
 
 template <int nvec, typename GradT, typename InputT, typename ScaleT, typename OutputT,
           typename GradScaleT>
-__global__ void scaled_srelu_backward_with_scale_grad_kernel(
-    const GradT *grad_output, const InputT *input, const ScaleT *act_scales, OutputT *grad_input,
-    GradScaleT *grad_act_scales, const size_t rows, const size_t hidden,
+__global__ void __launch_bounds__(kReductionThreads, 4) scaled_srelu_backward_with_scale_grad_kernel(
+    const GradT *__restrict__ grad_output, const InputT *__restrict__ input,
+    const ScaleT *__restrict__ act_scales, OutputT *__restrict__ grad_input,
+    GradScaleT *__restrict__ grad_act_scales, const size_t rows, const size_t hidden,
     const size_t num_vectors_per_row) {
   __shared__ float smem[kReductionWarps];
   const size_t row = blockIdx.x;
@@ -157,8 +159,8 @@ void launch_scaled_srelu_forward(const NVTETensor nvte_input, const NVTETensor n
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(input->data.dtype, InputT, {
     TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(act_scales->data.dtype, ScaleT, {
       TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(output->data.dtype, OutputT, {
-        constexpr int nvec =
-            sizeof(InputT) == sizeof(OutputT) ? 32 / static_cast<int>(sizeof(InputT)) : 1;
+        // Same element nvec for input/output; each uses its own vector type.
+        constexpr int nvec = 32 / static_cast<int>(sizeof(InputT));
         const auto input_ptr = reinterpret_cast<const InputT *>(input->data.dptr);
         const auto scale_ptr = reinterpret_cast<const ScaleT *>(act_scales->data.dptr);
         auto output_ptr = reinterpret_cast<OutputT *>(output->data.dptr);
@@ -202,9 +204,9 @@ void launch_scaled_srelu_backward(const NVTETensor nvte_grad_output, const NVTET
     TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(input->data.dtype, InputT, {
       TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(act_scales->data.dtype, ScaleT, {
         TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(grad_input->data.dtype, OutputT, {
-          constexpr int nvec = sizeof(GradT) == sizeof(InputT) && sizeof(InputT) == sizeof(OutputT)
-                                   ? 32 / static_cast<int>(sizeof(GradT))
-                                   : 1;
+          // Same element nvec across Grad/Input/Output; size by widest element.
+          constexpr int nvec =
+              32 / static_cast<int>(std::max({sizeof(GradT), sizeof(InputT), sizeof(OutputT)}));
           const auto grad_ptr = reinterpret_cast<const GradT *>(grad_output->data.dptr);
           const auto input_ptr = reinterpret_cast<const InputT *>(input->data.dptr);
           const auto scale_ptr = reinterpret_cast<const ScaleT *>(act_scales->data.dptr);

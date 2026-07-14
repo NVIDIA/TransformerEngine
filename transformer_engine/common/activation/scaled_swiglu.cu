@@ -95,11 +95,11 @@ __device__ __forceinline__ void gated_backward_values(const float act_in, const 
 }
 
 template <int nvec, typename InputT, typename ScaleT, typename OutputT, ScaledGatedActivation Act>
-__global__ void scaled_gated_forward_kernel(const InputT *input, const ScaleT *act_scales,
-                                            OutputT *output, const size_t rows, const size_t hidden,
-                                            const size_t segment_size, const size_t num_segments,
-                                            const size_t num_vectors_per_segment,
-                                            const ClampedSwiGLUParam param) {
+__global__ void __launch_bounds__(kThreads, 4) scaled_gated_forward_kernel(
+    const InputT *__restrict__ input, const ScaleT *__restrict__ act_scales,
+    OutputT *__restrict__ output, const size_t rows, const size_t hidden,
+    const size_t segment_size, const size_t num_segments, const size_t num_vectors_per_segment,
+    const ClampedSwiGLUParam param) {
   const size_t total_vectors = rows * num_segments * num_vectors_per_segment;
   for (size_t tid = blockIdx.x * blockDim.x + threadIdx.x; tid < total_vectors;
        tid += gridDim.x * blockDim.x) {
@@ -130,12 +130,11 @@ __global__ void scaled_gated_forward_kernel(const InputT *input, const ScaleT *a
 
 template <int nvec, typename GradT, typename InputT, typename ScaleT, typename OutputT,
           ScaledGatedActivation Act>
-__global__ void scaled_gated_backward_kernel(const GradT *grad_output, const InputT *input,
-                                             const ScaleT *act_scales, OutputT *grad_input,
-                                             const size_t rows, const size_t hidden,
-                                             const size_t segment_size, const size_t num_segments,
-                                             const size_t num_vectors_per_segment,
-                                             const ClampedSwiGLUParam param) {
+__global__ void __launch_bounds__(kThreads, 4) scaled_gated_backward_kernel(
+    const GradT *__restrict__ grad_output, const InputT *__restrict__ input,
+    const ScaleT *__restrict__ act_scales, OutputT *__restrict__ grad_input, const size_t rows,
+    const size_t hidden, const size_t segment_size, const size_t num_segments,
+    const size_t num_vectors_per_segment, const ClampedSwiGLUParam param) {
   const size_t total_vectors = rows * num_segments * num_vectors_per_segment;
   for (size_t tid = blockIdx.x * blockDim.x + threadIdx.x; tid < total_vectors;
        tid += gridDim.x * blockDim.x) {
@@ -178,10 +177,11 @@ __global__ void scaled_gated_backward_kernel(const GradT *grad_output, const Inp
 
 template <int nvec, typename GradT, typename InputT, typename ScaleT, typename OutputT,
           typename GradScaleT, ScaledGatedActivation Act>
-__global__ void scaled_gated_backward_with_scale_grad_kernel(
-    const GradT *grad_output, const InputT *input, const ScaleT *act_scales, OutputT *grad_input,
-    GradScaleT *grad_act_scales, const size_t rows, const size_t hidden, const size_t segment_size,
-    const size_t num_segments, const size_t num_vectors_per_segment,
+__global__ void __launch_bounds__(kReductionThreads, 4) scaled_gated_backward_with_scale_grad_kernel(
+    const GradT *__restrict__ grad_output, const InputT *__restrict__ input,
+    const ScaleT *__restrict__ act_scales, OutputT *__restrict__ grad_input,
+    GradScaleT *__restrict__ grad_act_scales, const size_t rows, const size_t hidden,
+    const size_t segment_size, const size_t num_segments, const size_t num_vectors_per_segment,
     const ClampedSwiGLUParam param) {
   __shared__ float smem[kReductionWarps];
   const size_t row = blockIdx.x;
@@ -302,8 +302,9 @@ void launch_scaled_gated_forward(const NVTETensor nvte_input, const NVTETensor n
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(input->data.dtype, InputT, {
     TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(act_scales->data.dtype, ScaleT, {
       TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(output->data.dtype, OutputT, {
-        constexpr int nvec =
-            sizeof(InputT) == sizeof(OutputT) ? 32 / static_cast<int>(sizeof(InputT)) : 1;
+        // Same element nvec for all tensors; each uses its own vector type.
+        // Do not require matching sizeof(InputT)/sizeof(OutputT).
+        constexpr int nvec = 32 / static_cast<int>(sizeof(InputT));
         const auto input_ptr = reinterpret_cast<const InputT *>(input->data.dptr);
         const auto scale_ptr = reinterpret_cast<const ScaleT *>(act_scales->data.dptr);
         auto output_ptr = reinterpret_cast<OutputT *>(output->data.dptr);
@@ -355,9 +356,11 @@ void launch_scaled_gated_backward(const NVTETensor nvte_grad_output, const NVTET
     TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(input->data.dtype, InputT, {
       TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(act_scales->data.dtype, ScaleT, {
         TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(grad_input->data.dtype, OutputT, {
-          constexpr int nvec = sizeof(GradT) == sizeof(InputT) && sizeof(InputT) == sizeof(OutputT)
-                                   ? 32 / static_cast<int>(sizeof(GradT))
-                                   : 1;
+          // Keep a single element nvec across Grad/Input/Output; each tensor
+          // uses its own vector type. Size by the widest element so every
+          // vector byte-width stays within BytesToType's supported sizes.
+          constexpr int nvec =
+              32 / static_cast<int>(std::max({sizeof(GradT), sizeof(InputT), sizeof(OutputT)}));
           const auto grad_ptr = reinterpret_cast<const GradT *>(grad_output->data.dptr);
           const auto input_ptr = reinterpret_cast<const InputT *>(input->data.dptr);
           const auto scale_ptr = reinterpret_cast<const ScaleT *>(act_scales->data.dptr);
