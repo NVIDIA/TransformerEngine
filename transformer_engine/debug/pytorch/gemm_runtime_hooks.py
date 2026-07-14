@@ -251,13 +251,17 @@ def _log_final_gemm_decision(
     try:
         from transformer_engine.debug.features.autoswitch_gemm import (
             _get_autoswitch_metric_logger,
-            autoswitch_gemm_should_log_metric_iteration,
+            autoswitch_gemm_should_log_final_decision,
         )
-
-        if not autoswitch_gemm_should_log_metric_iteration(iteration):
-            return
     except Exception:  # pylint: disable=broad-except
-        pass
+        return
+
+    try:
+        should_log_final_decision = autoswitch_gemm_should_log_final_decision(iteration)
+    except Exception:  # pylint: disable=broad-except
+        return
+    if not should_log_final_decision:
+        return
     rank = os.getenv("RANK", "0")
     if rank != "0":
         return

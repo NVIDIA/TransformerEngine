@@ -8,7 +8,7 @@ import copy
 import logging
 import os
 import weakref
-from typing import Dict, Optional, Set, Tuple
+from typing import Dict, Iterator, Optional, Set, Tuple
 
 import torch
 import torch.distributed as dist
@@ -24,6 +24,8 @@ from transformer_engine.debug.features.utils import next_enabled_iter
 _AUTOSWITCH_FEATURE_INSTANCES = weakref.WeakSet()
 _AUTOSWITCH_SAMPLING_CONFIGS = []
 _AUTOSWITCH_SAMPLING_CONFIG_KEYS = set()
+_AUTOSWITCH_METRIC_SAMPLING_CONFIGS = []
+_AUTOSWITCH_METRIC_SAMPLING_CONFIG_KEYS = set()
 _AUTOSWITCH_METRICS_LOG_MODES = set()
 _AUTOSWITCH_DISABLE_UNTIL_BY_GEMM = {}
 _AUTOSWITCH_CONFIG_FILE_LOADED = False
@@ -62,7 +64,20 @@ def _metrics_logging_mode_from_config(config: Optional[Dict]) -> str:
     return "info" if bool(value) else "off"
 
 
-def _register_sampling_config(config: Dict) -> None:
+def _iter_logging_configs(config: Dict) -> Iterator[Dict]:
+    """Yield AutoswitchGemm config fragments that may carry logging controls."""
+    yield config
+
+    parent_config = {key: value for key, value in config.items() if key != "gemms_struct"}
+    for gemm_config in config.get("gemms_struct", []) or []:
+        if not isinstance(gemm_config, dict):
+            continue
+        merged_config = copy.deepcopy(parent_config)
+        merged_config.update(gemm_config)
+        yield merged_config
+
+
+def _register_single_sampling_config(config: Dict) -> None:
     """Track AutoswitchGemm sampling schedules for runtime eager/graph routing."""
     global _AUTOSWITCH_LOGGING_ENABLED
     global _AUTOSWITCH_HOLD_WINDOW_SCOPE
@@ -76,19 +91,29 @@ def _register_sampling_config(config: Dict) -> None:
     if key not in _AUTOSWITCH_SAMPLING_CONFIG_KEYS:
         _AUTOSWITCH_SAMPLING_CONFIG_KEYS.add(key)
         _AUTOSWITCH_SAMPLING_CONFIGS.append(schedule)
-    if _metrics_logging_mode_from_config(config) != "off" or any(
+
+    metrics_mode = _metrics_logging_mode_from_config(config)
+    if metrics_mode != "off" or any(
         bool(config.get(key, False)) for key in ("log_decisions", "verbose")
     ):
         _AUTOSWITCH_LOGGING_ENABLED = True
-    metrics_mode = _metrics_logging_mode_from_config(config)
     if metrics_mode != "off":
         _AUTOSWITCH_METRICS_LOG_MODES.add(metrics_mode)
+        if key not in _AUTOSWITCH_METRIC_SAMPLING_CONFIG_KEYS:
+            _AUTOSWITCH_METRIC_SAMPLING_CONFIG_KEYS.add(key)
+            _AUTOSWITCH_METRIC_SAMPLING_CONFIGS.append(schedule)
 
     scope = str(config.get("hold_window_scope", "global")).strip().lower()
     if scope not in {"global", "layer"}:
         scope = "global"
     if scope == "layer":
         _AUTOSWITCH_HOLD_WINDOW_SCOPE = "layer"
+
+
+def _register_sampling_config(config: Dict) -> None:
+    """Track AutoswitchGemm sampling/logging schedules, including per-GEMM overrides."""
+    for logging_config in _iter_logging_configs(config):
+        _register_single_sampling_config(logging_config)
 
 
 def _get_hold_window_scope() -> str:
@@ -105,14 +130,24 @@ def autoswitch_gemm_logging_enabled() -> bool:
 
 
 def autoswitch_gemm_should_log_metric_iteration(iteration: int) -> bool:
-    """Return whether autoswitch metric logs should be emitted for this iteration."""
+    """Return whether autoswitch scalar metric logs should be emitted."""
+    if not _AUTOSWITCH_SAMPLING_CONFIGS:
+        _register_sampling_configs_from_file()
+
+    if _AUTOSWITCH_METRICS_LOG_MODES.intersection({"info", "debug"}):
+        return _is_metric_logging_sampling_iteration(iteration)
+    return False
+
+
+def autoswitch_gemm_should_log_final_decision(iteration: int) -> bool:
+    """Return whether AutoswitchGemm final-decision logs should be emitted."""
     if not _AUTOSWITCH_SAMPLING_CONFIGS:
         _register_sampling_configs_from_file()
 
     if "info" in _AUTOSWITCH_METRICS_LOG_MODES:
         return True
     if "debug" in _AUTOSWITCH_METRICS_LOG_MODES:
-        return _is_sampling_iteration(iteration)
+        return _is_metric_logging_sampling_iteration(iteration)
     return False
 
 
@@ -153,11 +188,9 @@ def _register_sampling_configs_from_file() -> None:
     _walk(config)
 
 
-def _is_sampling_iteration(iteration: int) -> bool:
-    """Return True if any AutoswitchGemm config samples on this iteration."""
-    if not _AUTOSWITCH_SAMPLING_CONFIGS:
-        _register_sampling_configs_from_file()
-    for schedule in _AUTOSWITCH_SAMPLING_CONFIGS:
+def _is_sampling_iteration_from_configs(iteration: int, sampling_configs) -> bool:
+    """Return True if any schedule in `sampling_configs` samples this iteration."""
+    for schedule in sampling_configs:
         run_current, _ = next_enabled_iter(
             schedule["start_step"],
             schedule["end_step"],
@@ -168,6 +201,20 @@ def _is_sampling_iteration(iteration: int) -> bool:
         if run_current:
             return True
     return False
+
+
+def _is_sampling_iteration(iteration: int) -> bool:
+    """Return True if any AutoswitchGemm config samples on this iteration."""
+    if not _AUTOSWITCH_SAMPLING_CONFIGS:
+        _register_sampling_configs_from_file()
+    return _is_sampling_iteration_from_configs(iteration, _AUTOSWITCH_SAMPLING_CONFIGS)
+
+
+def _is_metric_logging_sampling_iteration(iteration: int) -> bool:
+    """Return True if any log_metrics-enabled config samples on this iteration."""
+    if not _AUTOSWITCH_SAMPLING_CONFIGS:
+        _register_sampling_configs_from_file()
+    return _is_sampling_iteration_from_configs(iteration, _AUTOSWITCH_METRIC_SAMPLING_CONFIGS)
 
 
 def _update_global_disable_until(layer_name: str, gemm: str, disable_until_iter: int) -> None:
@@ -585,7 +632,9 @@ class AutoswitchGemm(TEConfigAPIMapper):
                 return False
             return self._is_sampling_iteration_for_config(config, iteration)
         if mode == "info":
-            return True
+            if not isinstance(config, dict):
+                return False
+            return self._is_sampling_iteration_for_config(config, iteration)
         # Fallback to globally registered logging mode when this per-API config
         # fragment does not carry `log_metrics`.
         return autoswitch_gemm_should_log_metric_iteration(iteration)
