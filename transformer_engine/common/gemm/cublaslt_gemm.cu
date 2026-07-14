@@ -93,6 +93,37 @@ struct GemmParam {
   int ldb = 0;  // B column strides
 };
 
+struct CublasLtDescriptorCleanup {
+  cublasLtMatmulDesc_t operation_desc = nullptr;
+  cublasLtMatrixLayout_t a_desc = nullptr;
+  cublasLtMatrixLayout_t b_desc = nullptr;
+  cublasLtMatrixLayout_t c_desc = nullptr;
+  cublasLtMatrixLayout_t d_desc = nullptr;
+  cublasLtMatmulPreference_t preference = nullptr;
+
+  ~CublasLtDescriptorCleanup() noexcept {
+    // Cleanup must not throw while unwinding an earlier cuBLASLt error.
+    if (preference != nullptr) {
+      static_cast<void>(cublasLtMatmulPreferenceDestroy(preference));
+    }
+    if (d_desc != nullptr) {
+      static_cast<void>(cublasLtMatrixLayoutDestroy(d_desc));
+    }
+    if (c_desc != nullptr) {
+      static_cast<void>(cublasLtMatrixLayoutDestroy(c_desc));
+    }
+    if (b_desc != nullptr) {
+      static_cast<void>(cublasLtMatrixLayoutDestroy(b_desc));
+    }
+    if (a_desc != nullptr) {
+      static_cast<void>(cublasLtMatrixLayoutDestroy(a_desc));
+    }
+    if (operation_desc != nullptr) {
+      static_cast<void>(cublasLtMatmulDescDestroy(operation_desc));
+    }
+  }
+};
+
 size_t CheckedSizeMul(size_t lhs, size_t rhs, const char *description) {
   NVTE_CHECK(lhs == 0 || rhs <= std::numeric_limits<size_t>::max() / lhs,
              "Integer overflow while calculating ", description, ".");
@@ -1009,9 +1040,13 @@ void cublas_gemm_strided_batched(const Tensor *inputA, const Tensor *inputB, con
 
   cublasLtHandle_t handle = cublasHandleManager::Instance().GetHandle();
 
-  cublasLtMatmulDesc_t operationDesc = nullptr;
-  cublasLtMatrixLayout_t Adesc = nullptr, Bdesc = nullptr, Cdesc = nullptr, Ddesc = nullptr;
-  cublasLtMatmulPreference_t preference = nullptr;
+  CublasLtDescriptorCleanup descriptors;
+  auto &operationDesc = descriptors.operation_desc;
+  auto &Adesc = descriptors.a_desc;
+  auto &Bdesc = descriptors.b_desc;
+  auto &Cdesc = descriptors.c_desc;
+  auto &Ddesc = descriptors.d_desc;
+  auto &preference = descriptors.preference;
   int returnedResults = 0;
   cublasLtMatmulHeuristicResult_t heuristicResult = {};
 
@@ -1133,13 +1168,6 @@ void cublas_gemm_strided_batched(const Tensor *inputA, const Tensor *inputB, con
   NVTE_CHECK_CUBLAS(cublasLtMatmul(handle, operationDesc, alpha, param.A, Adesc, param.B, Bdesc,
                                    beta, C, Cdesc, D, Ddesc, &heuristicResult.algo,
                                    aligned_workspace_ptr, workspaceSize, stream));
-
-  NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceDestroy(preference));
-  NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(Ddesc));
-  NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(Cdesc));
-  NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(Bdesc));
-  NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(Adesc));
-  NVTE_CHECK_CUBLAS(cublasLtMatmulDescDestroy(operationDesc));
 }
 
 }  // namespace transformer_engine
