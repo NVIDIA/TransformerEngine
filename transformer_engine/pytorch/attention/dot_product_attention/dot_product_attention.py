@@ -1537,32 +1537,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                     _alibi_cache["_alibi_slopes_require_update"] = True
                     _alibi_cache["_alibi_bias_require_update"] = True
 
-            # detect bias shape
-            core_attention_bias_shape = None
-            if core_attention_bias is not None:
-                if (
-                    core_attention_bias.shape[0] == batch_size
-                    and core_attention_bias.shape[1] == query_layer.shape[-2]
-                ):
-                    core_attention_bias_shape = "bhss"
-                elif (
-                    core_attention_bias.shape[0] == 1
-                    and core_attention_bias.shape[1] == query_layer.shape[-2]
-                ):
-                    core_attention_bias_shape = "1hss"
-                elif (
-                    core_attention_bias.shape[0] == batch_size and core_attention_bias.shape[1] == 1
-                ):
-                    core_attention_bias_shape = "b1ss"
-                elif core_attention_bias.shape[0] == 1 and core_attention_bias.shape[1] == 1:
-                    if core_attention_bias.shape[2] == 1:
-                        core_attention_bias_shape = "111s"
-                    else:
-                        core_attention_bias_shape = "11ss"
-                else:
-                    assert (
-                        False
-                    ), "core_attention_bias must be in one of {bhss, 1hss, b1ss, 11ss, 111s} shapes"
+            core_attention_bias_shape = (
+                tuple(core_attention_bias.shape)
+                if core_attention_bias_type != "no_bias" and core_attention_bias is not None
+                else None
+            )
 
             # Default pad_between_seqs auto-detect. For THD, infer presence of
             # inter-sequence padding from whether padded cu_seqlens were supplied --
@@ -1629,16 +1608,20 @@ class DotProductAttention(TransformerEngineBaseModule):
                 num_gqa_groups=num_gqa_groups,
                 max_seqlen_q=max_seqlen_q,
                 max_seqlen_kv=max_seqlen_kv,
+                num_tokens_q=(query_layer.shape[0] if q_format == "thd" else 0),
+                num_tokens_kv=(key_layer.shape[0] if kv_format == "thd" else 0),
                 head_dim_qk=head_dim_qk,
                 head_dim_v=head_dim_v,
                 attn_mask_type=attn_mask_type,
                 window_size=window_size,
                 bottom_right_diagonal=bottom_right_diagonal,
-                alibi_slopes_shape=alibi_slopes.shape if alibi_slopes is not None else None,
+                alibi_slopes_shape=alibi_slopes.shape if core_attention_bias_type == "alibi" and alibi_slopes is not None else None,
                 core_attention_bias_type=core_attention_bias_type,
                 core_attention_bias_shape=core_attention_bias_shape,
                 core_attention_bias_requires_grad=(
-                    core_attention_bias.requires_grad if core_attention_bias is not None else False
+                    core_attention_bias.requires_grad
+                    if core_attention_bias_type != "no_bias" and core_attention_bias is not None
+                    else False
                 ),
                 pad_between_seqs=pad_between_seqs,
                 attention_dropout=self.attention_dropout,

@@ -218,7 +218,6 @@ void fused_attn_fp8_fwd_impl(
       sdpa_options = fe::graph::SDPA_fp8_attributes()
                          .set_name("sdpa_fp8")
                          .set_generate_stats(true)
-                         .set_causal_mask(is_causal)
                          .set_attn_scale(attn_scale);
 
       fe::DiagonalAlignment_t const& diagonal_alignment =
@@ -233,6 +232,12 @@ void fused_attn_fp8_fwd_impl(
         if (window_size_right != -1) {
           sdpa_options.set_diagonal_band_right_bound(window_size_right);
         }
+      }
+      // Preferred replacement for the deprecated set_causal_mask: causal masking = diagonal
+      // alignment (set above) + a right band bound of 0, unless an explicit right bound was
+      // already applied above.
+      if (is_causal && !(cudnn_runtime_version >= 92100 && window_size_right != -1)) {
+        sdpa_options.set_diagonal_band_right_bound(0);
       }
 
       // sdpa_options.set_alibi_mask(is_alibi);
@@ -765,7 +770,6 @@ void fused_attn_fp8_bwd_impl(
       fe::graph::SDPA_fp8_backward_attributes sdpa_backward_options;
       sdpa_backward_options = fe::graph::SDPA_fp8_backward_attributes()
                                   .set_name("sdpa_fp8_backward")
-                                  .set_causal_mask(is_causal)
                                   .set_attn_scale(attn_scale);
 
       fe::DiagonalAlignment_t const& diagonal_alignment =
@@ -780,6 +784,12 @@ void fused_attn_fp8_bwd_impl(
         if (window_size_right != -1) {
           sdpa_backward_options.set_diagonal_band_right_bound(window_size_right);
         }
+      }
+      // Preferred replacement for the deprecated set_causal_mask: causal masking = diagonal
+      // alignment (set above) + a right band bound of 0, unless an explicit right bound was
+      // already applied above.
+      if (is_causal && !(cudnn_runtime_version >= 92100 && window_size_right != -1)) {
+        sdpa_backward_options.set_diagonal_band_right_bound(0);
       }
 
       // sdpa_backward_options.set_alibi_mask(is_alibi);

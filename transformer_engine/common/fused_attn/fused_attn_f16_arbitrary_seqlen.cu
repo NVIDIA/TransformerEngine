@@ -256,8 +256,6 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       sdpa_options = fe::graph::SDPA_attributes()
                          .set_name("flash_attention")
                          .set_generate_stats(generate_stats)
-                         .set_causal_mask(is_causal)
-                         .set_causal_mask_bottom_right(is_bottom_right)
                          .set_attn_scale(attn_scale);
 
       fe::DiagonalAlignment_t const &diagonal_alignment =
@@ -269,6 +267,10 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       }
       if (cudnn_runtime_version >= 90600 && window_size_right != -1) {
         sdpa_options.set_diagonal_band_right_bound(window_size_right);
+      } else if (is_causal || is_bottom_right) {
+        // Preferred replacement for the deprecated set_causal_mask[_bottom_right]: causal
+        // masking = diagonal alignment (set above) + a right band bound of 0.
+        sdpa_options.set_diagonal_band_right_bound(0);
       }
 
       sdpa_options.set_alibi_mask(is_alibi);
@@ -607,12 +609,6 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
   const int sm_arch_ = cuda::sm_arch(device_id);
   bool use_ragged_stats = is_ragged_q && cudnn_runtime_version >= 90600 && sm_arch_ != 120;
 
-  NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
-  bool is_paged_kv = (layout_group == NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD);
-  if (is_paged_kv) {
-    NVTE_CHECK(is_padding, "Paged attention requires padding mask!");
-  }
-
   // keep original batch size because cu_seqlens are created with [b+1] shape
   int64_t actual_b = b;
   if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= 90600) {
@@ -773,8 +769,6 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       fe::graph::SDPA_backward_attributes sdpa_backward_options;
       sdpa_backward_options = fe::graph::SDPA_backward_attributes()
                                   .set_name("flash_attention_backward")
-                                  .set_causal_mask(is_causal)
-                                  .set_causal_mask_bottom_right(is_bottom_right)
                                   .set_attn_scale(attn_scale);
 
       if (use_ragged_stats) {
@@ -794,6 +788,10 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       }
       if (cudnn_runtime_version >= 90600 && window_size_right != -1) {
         sdpa_backward_options.set_diagonal_band_right_bound(window_size_right);
+      } else if (is_causal || is_bottom_right) {
+        // Preferred replacement for the deprecated set_causal_mask[_bottom_right]: causal
+        // masking = diagonal alignment (set above) + a right band bound of 0.
+        sdpa_backward_options.set_diagonal_band_right_bound(0);
       }
 
       if (cudnn_runtime_version >= 90000) {
@@ -1077,16 +1075,8 @@ void fused_attn_arbitrary_seqlen_fwd(
   void *devPtrS1 = nullptr;
   void *devPtrS2 = nullptr;
   void *devPtrBias = nullptr;
-  size_t bias_b = 0;
-  size_t bias_h = 0;
-  size_t bias_sq = 0;
-  size_t bias_skv = 0;
   if ((bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) && (bias_type != NVTE_Bias_Type::NVTE_ALIBI)) {
     devPtrBias = input_Bias->data.dptr;
-    bias_b = input_Bias->data.shape[0];
-    bias_h = input_Bias->data.shape[1];
-    bias_sq = input_Bias->data.shape[2];
-    bias_skv = input_Bias->data.shape[3];
   }
   void *devPtrSoftmaxOffset = nullptr;
   if (softmax_type != NVTE_VANILLA_SOFTMAX) {
@@ -1105,12 +1095,6 @@ void fused_attn_arbitrary_seqlen_fwd(
 
   FusedAttnConfig graph_cfg = cfg;
   populate_fused_attn_config(&graph_cfg);
-  if ((bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) && (bias_type != NVTE_Bias_Type::NVTE_ALIBI)) {
-    graph_cfg.bias_batch_size = bias_b;
-    graph_cfg.bias_num_heads = bias_h;
-    graph_cfg.bias_seqlen_q = bias_sq;
-    graph_cfg.bias_seqlen_kv = bias_skv;
-  }
 
   size_t i = 0;
   if (Aux_CTX_Tensors->size == 0) {
@@ -1145,7 +1129,8 @@ void fused_attn_arbitrary_seqlen_fwd(
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
       Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
       output_bias->data.dptr = nullptr;
-      output_bias->data.shape = {bias_b, bias_h, bias_sq, bias_skv};
+      output_bias->data.shape = {graph_cfg.bias_batch_size, graph_cfg.bias_num_heads,
+                                 graph_cfg.bias_seqlen_q, graph_cfg.bias_seqlen_kv};
       output_bias->data.dtype = QKV_type;
     }
 
@@ -1226,27 +1211,13 @@ void fused_attn_arbitrary_seqlen_bwd(
   void *devPtrdO = input_dO->data.dptr;
   void *devPtrBias = nullptr;
   void *devPtrdBias = nullptr;
-  size_t bias_b = 0;
-  size_t bias_h = 0;
-  size_t bias_sq = 0;
-  size_t bias_skv = 0;
   if ((bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) && (bias_type != NVTE_Bias_Type::NVTE_ALIBI)) {
     devPtrBias = input_Bias->data.dptr;
     devPtrdBias = output_dBias->data.dptr;
-    bias_b = output_dBias->data.shape[0];
-    bias_h = output_dBias->data.shape[1];
-    bias_sq = output_dBias->data.shape[2];
-    bias_skv = output_dBias->data.shape[3];
   }
 
   FusedAttnConfig graph_cfg = cfg;
   populate_fused_attn_config(&graph_cfg);
-  if ((bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) && (bias_type != NVTE_Bias_Type::NVTE_ALIBI)) {
-    graph_cfg.bias_batch_size = bias_b;
-    graph_cfg.bias_num_heads = bias_h;
-    graph_cfg.bias_seqlen_q = bias_sq;
-    graph_cfg.bias_seqlen_kv = bias_skv;
-  }
 
   void *devPtrdQ = output_dQ->data.dptr;
   void *devPtrdK = output_dK->data.dptr;

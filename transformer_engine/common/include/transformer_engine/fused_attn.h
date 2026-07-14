@@ -202,55 +202,64 @@ typedef void *NVTEFusedAttnConfig;
 /*! \enum NVTEFusedAttnConfigAttribute
  *  \brief Attribute types for ``NVTEFusedAttnConfig``.
  *
- *  New fields may only be appended at the end; existing fields are never
- *  reordered, removed, or resized.
+ *  This enum is used to index the ``FusedAttnConfig`` struct. The order of its fields must match that of
+ *  the declaration fields and the ``attr_sizes`` array of that struct. New fields may only be appended
+ *  at the end, and existing fields are never to be reordered, removed, or resized.
  */
 enum NVTEFusedAttnConfigAttribute {
+  // basic attention knobs
   kNVTEFusedAttnConfigIsTraining = 0,
   kNVTEFusedAttnConfigDeterministic,
   kNVTEFusedAttnConfigCudaGraph,
   kNVTEFusedAttnConfigReturnMaxLogit,
+  kNVTEFusedAttnConfigAttnMaskType,
+  kNVTEFusedAttnConfigBiasType,
+  kNVTEFusedAttnConfigWindowSizeLeft,
+  kNVTEFusedAttnConfigWindowSizeRight,
+  kNVTEFusedAttnConfigBottomRightDiagonal,
+  kNVTEFusedAttnConfigSoftmaxType,
+  kNVTEFusedAttnConfigScalingMode,
+  kNVTEFusedAttnConfigDropout,
+  // data types
+  kNVTEFusedAttnConfigQKVDtype,
+  kNVTEFusedAttnConfigODtype,
+  kNVTEFusedAttnConfigDODtype,
+  kNVTEFusedAttnConfigDQKVDtype,
+  // data and scale layout
   kNVTEFusedAttnConfigQKVLayout,
   kNVTEFusedAttnConfigOFormat,
   kNVTEFusedAttnConfigDOFormat,
   kNVTEFusedAttnConfigDQKVLayout,
   kNVTEFusedAttnConfigQKVScaleInvFormat,
   kNVTEFusedAttnConfigDOScaleInvFormat,
-  kNVTEFusedAttnConfigBiasType,
-  kNVTEFusedAttnConfigAttnMaskType,
-  kNVTEFusedAttnConfigSoftmaxType,
-  kNVTEFusedAttnConfigScalingMode,
+  // attention scaling
   kNVTEFusedAttnConfigAttnScale,
-  kNVTEFusedAttnConfigDropout,
-  kNVTEFusedAttnConfigMaxSeqlenQ,
-  kNVTEFusedAttnConfigMaxSeqlenKV,
-  kNVTEFusedAttnConfigWindowSizeLeft,
-  kNVTEFusedAttnConfigWindowSizeRight,
-  kNVTEFusedAttnConfigBottomRightDiagonal,
-  kNVTEFusedAttnConfigQKVDtype,
-  kNVTEFusedAttnConfigODtype,
-  kNVTEFusedAttnConfigDODtype,
-  kNVTEFusedAttnConfigDQKVDtype,
+  // tensor dimensions
   kNVTEFusedAttnConfigBatchSize,
   kNVTEFusedAttnConfigNumAttnHeads,
   kNVTEFusedAttnConfigNumGqaGroups,
   kNVTEFusedAttnConfigHeadDimQK,
   kNVTEFusedAttnConfigHeadDimV,
+  kNVTEFusedAttnConfigMaxSeqlenQ,
+  kNVTEFusedAttnConfigMaxSeqlenKV,
+  kNVTEFusedAttnConfigNumTokensQ,
+  kNVTEFusedAttnConfigNumTokensKV,
+  // derived tensor dimensions
+  kNVTEFusedAttnConfigBucketedBatchSize,
+  kNVTEFusedAttnConfigBucketedNumTokensQ,
+  kNVTEFusedAttnConfigBucketedNumTokensKV,
+  // paged KV dimensions
   kNVTEFusedAttnConfigNumPagesK,
   kNVTEFusedAttnConfigNumPagesV,
   kNVTEFusedAttnConfigPageSizeK,
   kNVTEFusedAttnConfigPageSizeV,
   kNVTEFusedAttnConfigMaxPagesPerSeqK,
   kNVTEFusedAttnConfigMaxPagesPerSeqV,
+  // bias dimensions
   kNVTEFusedAttnConfigBiasBatchSize,
   kNVTEFusedAttnConfigBiasNumHeads,
   kNVTEFusedAttnConfigBiasSeqlenQ,
   kNVTEFusedAttnConfigBiasSeqlenKV,
-  kNVTEFusedAttnConfigNumTokensQ,
-  kNVTEFusedAttnConfigNumTokensKV,
-  kNVTEFusedAttnConfigBucketedBatchSize,
-  kNVTEFusedAttnConfigBucketedNumTokensQ,
-  kNVTEFusedAttnConfigBucketedNumTokensKV,
   kNVTEFusedAttnConfigNumAttributes
 };
 
@@ -278,6 +287,128 @@ void nvte_get_fused_attn_config_attribute(NVTEFusedAttnConfig config,
 void nvte_set_fused_attn_config_attribute(NVTEFusedAttnConfig config,
                                           NVTEFusedAttnConfigAttribute attr, const void *buf,
                                           size_t size_in_bytes);
+
+/*! \brief Opaque fused-attention forward-parameter handle. */
+typedef void *NVTEFusedAttnFwdParams;
+
+/*! \enum NVTEFusedAttnFwdParamsAttribute
+ *  \brief Attribute types for ``NVTEFusedAttnFwdParams``.
+ */
+enum NVTEFusedAttnFwdParamsAttribute {
+  kNVTEFusedAttnFwdParamsQ = 0,
+  kNVTEFusedAttnFwdParamsK,
+  kNVTEFusedAttnFwdParamsV,
+  kNVTEFusedAttnFwdParamsBias,
+  kNVTEFusedAttnFwdParamsSoftmaxOffset,
+  kNVTEFusedAttnFwdParamsCuSeqlensQ,
+  kNVTEFusedAttnFwdParamsCuSeqlensKV,
+  kNVTEFusedAttnFwdParamsCuSeqlensQPadded,
+  kNVTEFusedAttnFwdParamsCuSeqlensKVPadded,
+  kNVTEFusedAttnFwdParamsPageTableK,
+  kNVTEFusedAttnFwdParamsPageTableV,
+  kNVTEFusedAttnFwdParamsRngState,
+  kNVTEFusedAttnFwdParamsS,
+  kNVTEFusedAttnFwdParamsO,
+  kNVTEFusedAttnFwdParamsAuxCtxTensors,
+  kNVTEFusedAttnFwdParamsMaxSeqlenQ,
+  kNVTEFusedAttnFwdParamsMaxSeqlenKV,
+  kNVTEFusedAttnFwdParamsQKVLayout,
+  kNVTEFusedAttnFwdParamsOFormat,
+  kNVTEFusedAttnFwdParamsQKVScaleInvFormat,
+  kNVTEFusedAttnFwdParamsBiasType,
+  kNVTEFusedAttnFwdParamsAttnMaskType,
+  kNVTEFusedAttnFwdParamsSoftmaxType,
+  kNVTEFusedAttnFwdParamsAttnScale,
+  kNVTEFusedAttnFwdParamsDropout,
+  kNVTEFusedAttnFwdParamsWindowSizeLeft,
+  kNVTEFusedAttnFwdParamsWindowSizeRight,
+  kNVTEFusedAttnFwdParamsBottomRightDiagonal,
+  kNVTEFusedAttnFwdParamsIsTraining,
+  kNVTEFusedAttnFwdParamsReturnMaxLogit,
+  kNVTEFusedAttnFwdParamsCudaGraph,
+  kNVTEFusedAttnFwdParamsWorkspace,
+  kNVTEFusedAttnFwdParamsStream,
+  kNVTEFusedAttnFwdParamsNumAttributes
+};
+
+/*! \brief Create a default-initialized fused-attention forward-parameter object. */
+NVTEFusedAttnFwdParams nvte_create_fused_attn_fwd_params(void);
+
+/*! \brief Destroy a fused-attention forward-parameter handle. */
+void nvte_destroy_fused_attn_fwd_params(NVTEFusedAttnFwdParams params);
+
+/*! \brief Query an attribute in a fused-attention forward-parameter object. */
+void nvte_get_fused_attn_fwd_params_attribute(NVTEFusedAttnFwdParams params,
+                                            NVTEFusedAttnFwdParamsAttribute attr, void *buf,
+                                            size_t size_in_bytes, size_t *size_written);
+
+/*! \brief Set an attribute in a fused-attention forward-parameter object. */
+void nvte_set_fused_attn_fwd_params_attribute(NVTEFusedAttnFwdParams params,
+                                              NVTEFusedAttnFwdParamsAttribute attr, const void *buf,
+                                              size_t size_in_bytes);
+
+/*! \brief Opaque fused-attention backward-parameter handle. */
+typedef void *NVTEFusedAttnBwdParams;
+
+/*! \enum NVTEFusedAttnBwdParamsAttribute
+ *  \brief Attribute types for ``NVTEFusedAttnBwdParams``.
+ */
+enum NVTEFusedAttnBwdParamsAttribute {
+  kNVTEFusedAttnBwdParamsQ = 0,
+  kNVTEFusedAttnBwdParamsK,
+  kNVTEFusedAttnBwdParamsV,
+  kNVTEFusedAttnBwdParamsO,
+  kNVTEFusedAttnBwdParamsDO,
+  kNVTEFusedAttnBwdParamsS,
+  kNVTEFusedAttnBwdParamsDP,
+  kNVTEFusedAttnBwdParamsAuxCtxTensors,
+  kNVTEFusedAttnBwdParamsDQ,
+  kNVTEFusedAttnBwdParamsDK,
+  kNVTEFusedAttnBwdParamsDV,
+  kNVTEFusedAttnBwdParamsDBias,
+  kNVTEFusedAttnBwdParamsDSoftmaxOffset,
+  kNVTEFusedAttnBwdParamsCuSeqlensQ,
+  kNVTEFusedAttnBwdParamsCuSeqlensKV,
+  kNVTEFusedAttnBwdParamsCuSeqlensQPadded,
+  kNVTEFusedAttnBwdParamsCuSeqlensKVPadded,
+  kNVTEFusedAttnBwdParamsMaxSeqlenQ,
+  kNVTEFusedAttnBwdParamsMaxSeqlenKV,
+  kNVTEFusedAttnBwdParamsQKVLayout,
+  kNVTEFusedAttnBwdParamsOFormat,
+  kNVTEFusedAttnBwdParamsDOFormat,
+  kNVTEFusedAttnBwdParamsDQKVLayout,
+  kNVTEFusedAttnBwdParamsQKVScaleInvFormat,
+  kNVTEFusedAttnBwdParamsDOScaleInvFormat,
+  kNVTEFusedAttnBwdParamsBiasType,
+  kNVTEFusedAttnBwdParamsAttnMaskType,
+  kNVTEFusedAttnBwdParamsSoftmaxType,
+  kNVTEFusedAttnBwdParamsAttnScale,
+  kNVTEFusedAttnBwdParamsDropout,
+  kNVTEFusedAttnBwdParamsWindowSizeLeft,
+  kNVTEFusedAttnBwdParamsWindowSizeRight,
+  kNVTEFusedAttnBwdParamsBottomRightDiagonal,
+  kNVTEFusedAttnBwdParamsDeterministic,
+  kNVTEFusedAttnBwdParamsCudaGraph,
+  kNVTEFusedAttnBwdParamsWorkspace,
+  kNVTEFusedAttnBwdParamsStream,
+  kNVTEFusedAttnBwdParamsNumAttributes
+};
+
+/*! \brief Create a default-initialized fused-attention backward-parameter object. */
+NVTEFusedAttnBwdParams nvte_create_fused_attn_bwd_params(void);
+
+/*! \brief Destroy a fused-attention backward-parameter handle. */
+void nvte_destroy_fused_attn_bwd_params(NVTEFusedAttnBwdParams params);
+
+/*! \brief Query an attribute in a fused-attention backward-parameter object. */
+void nvte_get_fused_attn_bwd_params_attribute(NVTEFusedAttnBwdParams params,
+                                              NVTEFusedAttnBwdParamsAttribute attr, void *buf,
+                                              size_t size_in_bytes, size_t *size_written);
+
+/*! \brief Set an attribute in a fused-attention backward-parameter object. */
+void nvte_set_fused_attn_bwd_params_attribute(NVTEFusedAttnBwdParams params,
+                                              NVTEFusedAttnBwdParamsAttribute attr, const void *buf,
+                                              size_t size_in_bytes);
 
 /*! \brief Get fused attention backend based on input parameters.
  *
@@ -393,6 +524,12 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *  \param[in]     workspace                 Workspace tensor.
  *  \param[in]     stream                    CUDA stream used for this operation.
  */
+void nvte_fused_attn_fwd_v2(NVTEFusedAttnFwdParams params);
+
+/*! \brief Compute dot product attention with separate Q, K and V.
+ *
+ *  \deprecated This function has been deprecated in favor of nvte_fused_attn_fwd_v2.
+ */
 void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETensor V,
                          const NVTETensor Bias, const NVTETensor SoftmaxOffset, NVTETensor S,
                          NVTETensor O, NVTETensorPack *Aux_CTX_Tensors,
@@ -465,6 +602,12 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
  *  \param[in]     cuda_graph                Whether cuda graph capture is enabled or not.
  *  \param[in]     workspace                 Workspace tensor.
  *  \param[in]     stream                    CUDA stream used for this operation.
+ */
+void nvte_fused_attn_bwd_v2(NVTEFusedAttnBwdParams params);
+
+/*! \brief Compute the backward of the dot product attention with separate Q, K and V.
+ *
+ *  \deprecated This function has been deprecated in favor of nvte_fused_attn_bwd_v2.
  */
 void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETensor V,
                          const NVTETensor O, const NVTETensor dO, const NVTETensor S, NVTETensor dP,
@@ -1059,6 +1202,352 @@ class FusedAttnConfigWrapper {
   NVTEFusedAttnConfig cfg_ = nullptr;
 };
 
+/*! \class FusedAttnFwdParamsWrapper
+ *  \brief C++ helper for constructing an ``NVTEFusedAttnFwdParams``.
+ */
+class FusedAttnFwdParamsWrapper {
+ public:
+  FusedAttnFwdParamsWrapper() : params_{nvte_create_fused_attn_fwd_params()} {}
+  FusedAttnFwdParamsWrapper(const FusedAttnFwdParamsWrapper &) = delete;
+  FusedAttnFwdParamsWrapper &operator=(const FusedAttnFwdParamsWrapper &) = delete;
+  FusedAttnFwdParamsWrapper(FusedAttnFwdParamsWrapper &&other) noexcept : params_{other.params_} {
+    other.params_ = nullptr;
+  }
+  FusedAttnFwdParamsWrapper &operator=(FusedAttnFwdParamsWrapper &&other) noexcept {
+    if (this != &other) {
+      nvte_destroy_fused_attn_fwd_params(params_);
+      params_ = other.params_;
+      other.params_ = nullptr;
+    }
+    return *this;
+  }
+  ~FusedAttnFwdParamsWrapper() {
+    if (params_ != nullptr) {
+      nvte_destroy_fused_attn_fwd_params(params_);
+    }
+  }
+  operator NVTEFusedAttnFwdParams() const noexcept { return params_; }
+  NVTEFusedAttnFwdParams get() const noexcept { return params_; }
+  FusedAttnFwdParamsWrapper &set_Q(NVTETensor val) noexcept {
+    nvte_set_fused_attn_fwd_params_attribute(params_, kNVTEFusedAttnFwdParamsQ, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnFwdParamsWrapper &set_K(NVTETensor val) noexcept {
+    nvte_set_fused_attn_fwd_params_attribute(params_, kNVTEFusedAttnFwdParamsK, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnFwdParamsWrapper &set_V(NVTETensor val) noexcept {
+    nvte_set_fused_attn_fwd_params_attribute(params_, kNVTEFusedAttnFwdParamsV, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnFwdParamsWrapper &set_Bias(NVTETensor val) noexcept {
+    nvte_set_fused_attn_fwd_params_attribute(params_, kNVTEFusedAttnFwdParamsBias, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnFwdParamsWrapper &set_SoftmaxOffset(NVTETensor val) noexcept {
+    nvte_set_fused_attn_fwd_params_attribute(params_, kNVTEFusedAttnFwdParamsSoftmaxOffset, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnFwdParamsWrapper &set_cu_seqlens_q(NVTETensor val) noexcept {
+    nvte_set_fused_attn_fwd_params_attribute(params_, kNVTEFusedAttnFwdParamsCuSeqlensQ, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnFwdParamsWrapper &set_cu_seqlens_kv(NVTETensor val) noexcept {
+    nvte_set_fused_attn_fwd_params_attribute(params_, kNVTEFusedAttnFwdParamsCuSeqlensKV, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnFwdParamsWrapper &set_cu_seqlens_q_padded(NVTETensor val) noexcept {
+    nvte_set_fused_attn_fwd_params_attribute(params_, kNVTEFusedAttnFwdParamsCuSeqlensQPadded, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnFwdParamsWrapper &set_cu_seqlens_kv_padded(NVTETensor val) noexcept {
+    nvte_set_fused_attn_fwd_params_attribute(params_, kNVTEFusedAttnFwdParamsCuSeqlensKVPadded, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnFwdParamsWrapper &set_page_table_k(NVTETensor val) noexcept {
+    nvte_set_fused_attn_fwd_params_attribute(params_, kNVTEFusedAttnFwdParamsPageTableK, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnFwdParamsWrapper &set_page_table_v(NVTETensor val) noexcept {
+    nvte_set_fused_attn_fwd_params_attribute(params_, kNVTEFusedAttnFwdParamsPageTableV, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnFwdParamsWrapper &set_rng_state(NVTETensor val) noexcept {
+    nvte_set_fused_attn_fwd_params_attribute(params_, kNVTEFusedAttnFwdParamsRngState, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnFwdParamsWrapper &set_S(NVTETensor val) noexcept {
+    nvte_set_fused_attn_fwd_params_attribute(params_, kNVTEFusedAttnFwdParamsS, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnFwdParamsWrapper &set_O(NVTETensor val) noexcept {
+    nvte_set_fused_attn_fwd_params_attribute(params_, kNVTEFusedAttnFwdParamsO, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnFwdParamsWrapper &set_Aux_CTX_Tensors(NVTETensorPack * val) noexcept {
+    nvte_set_fused_attn_fwd_params_attribute(params_, kNVTEFusedAttnFwdParamsAuxCtxTensors, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnFwdParamsWrapper &set_max_seqlen_q(size_t val) noexcept {
+    nvte_set_fused_attn_fwd_params_attribute(params_, kNVTEFusedAttnFwdParamsMaxSeqlenQ, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnFwdParamsWrapper &set_max_seqlen_kv(size_t val) noexcept {
+    nvte_set_fused_attn_fwd_params_attribute(params_, kNVTEFusedAttnFwdParamsMaxSeqlenKV, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnFwdParamsWrapper &set_qkv_layout(NVTE_QKV_Layout val) noexcept {
+    nvte_set_fused_attn_fwd_params_attribute(params_, kNVTEFusedAttnFwdParamsQKVLayout, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnFwdParamsWrapper &set_o_format(NVTE_QKV_Format val) noexcept {
+    nvte_set_fused_attn_fwd_params_attribute(params_, kNVTEFusedAttnFwdParamsOFormat, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnFwdParamsWrapper &set_qkv_scale_inv_format(NVTE_QKV_Format val) noexcept {
+    nvte_set_fused_attn_fwd_params_attribute(params_, kNVTEFusedAttnFwdParamsQKVScaleInvFormat, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnFwdParamsWrapper &set_bias_type(NVTE_Bias_Type val) noexcept {
+    nvte_set_fused_attn_fwd_params_attribute(params_, kNVTEFusedAttnFwdParamsBiasType, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnFwdParamsWrapper &set_attn_mask_type(NVTE_Mask_Type val) noexcept {
+    nvte_set_fused_attn_fwd_params_attribute(params_, kNVTEFusedAttnFwdParamsAttnMaskType, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnFwdParamsWrapper &set_softmax_type(NVTE_Softmax_Type val) noexcept {
+    nvte_set_fused_attn_fwd_params_attribute(params_, kNVTEFusedAttnFwdParamsSoftmaxType, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnFwdParamsWrapper &set_attn_scale(float val) noexcept {
+    nvte_set_fused_attn_fwd_params_attribute(params_, kNVTEFusedAttnFwdParamsAttnScale, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnFwdParamsWrapper &set_dropout(float val) noexcept {
+    nvte_set_fused_attn_fwd_params_attribute(params_, kNVTEFusedAttnFwdParamsDropout, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnFwdParamsWrapper &set_window_size_left(int64_t val) noexcept {
+    nvte_set_fused_attn_fwd_params_attribute(params_, kNVTEFusedAttnFwdParamsWindowSizeLeft, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnFwdParamsWrapper &set_window_size_right(int64_t val) noexcept {
+    nvte_set_fused_attn_fwd_params_attribute(params_, kNVTEFusedAttnFwdParamsWindowSizeRight, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnFwdParamsWrapper &set_bottom_right_diagonal(bool val) noexcept {
+    const uint8_t u8_val = static_cast<uint8_t>(val);
+    nvte_set_fused_attn_fwd_params_attribute(params_, kNVTEFusedAttnFwdParamsBottomRightDiagonal, &u8_val, sizeof(u8_val));
+    return *this;
+  }
+  FusedAttnFwdParamsWrapper &set_is_training(bool val) noexcept {
+    const uint8_t u8_val = static_cast<uint8_t>(val);
+    nvte_set_fused_attn_fwd_params_attribute(params_, kNVTEFusedAttnFwdParamsIsTraining, &u8_val, sizeof(u8_val));
+    return *this;
+  }
+  FusedAttnFwdParamsWrapper &set_return_max_logit(bool val) noexcept {
+    const uint8_t u8_val = static_cast<uint8_t>(val);
+    nvte_set_fused_attn_fwd_params_attribute(params_, kNVTEFusedAttnFwdParamsReturnMaxLogit, &u8_val, sizeof(u8_val));
+    return *this;
+  }
+  FusedAttnFwdParamsWrapper &set_cuda_graph(bool val) noexcept {
+    const uint8_t u8_val = static_cast<uint8_t>(val);
+    nvte_set_fused_attn_fwd_params_attribute(params_, kNVTEFusedAttnFwdParamsCudaGraph, &u8_val, sizeof(u8_val));
+    return *this;
+  }
+  FusedAttnFwdParamsWrapper &set_workspace(NVTETensor val) noexcept {
+    nvte_set_fused_attn_fwd_params_attribute(params_, kNVTEFusedAttnFwdParamsWorkspace, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnFwdParamsWrapper &set_stream(cudaStream_t val) noexcept {
+    nvte_set_fused_attn_fwd_params_attribute(params_, kNVTEFusedAttnFwdParamsStream, &val, sizeof(val));
+    return *this;
+  }
+ private:
+  NVTEFusedAttnFwdParams params_ = nullptr;
+};
+
+/*! \class FusedAttnBwdParamsWrapper
+ *  \brief C++ helper for constructing an ``NVTEFusedAttnBwdParams``.
+ */
+class FusedAttnBwdParamsWrapper {
+ public:
+  FusedAttnBwdParamsWrapper() : params_{nvte_create_fused_attn_bwd_params()} {}
+  FusedAttnBwdParamsWrapper(const FusedAttnBwdParamsWrapper &) = delete;
+  FusedAttnBwdParamsWrapper &operator=(const FusedAttnBwdParamsWrapper &) = delete;
+  FusedAttnBwdParamsWrapper(FusedAttnBwdParamsWrapper &&other) noexcept : params_{other.params_} {
+    other.params_ = nullptr;
+  }
+  FusedAttnBwdParamsWrapper &operator=(FusedAttnBwdParamsWrapper &&other) noexcept {
+    if (this != &other) {
+      nvte_destroy_fused_attn_bwd_params(params_);
+      params_ = other.params_;
+      other.params_ = nullptr;
+    }
+    return *this;
+  }
+  ~FusedAttnBwdParamsWrapper() {
+    if (params_ != nullptr) {
+      nvte_destroy_fused_attn_bwd_params(params_);
+    }
+  }
+  operator NVTEFusedAttnBwdParams() const noexcept { return params_; }
+  NVTEFusedAttnBwdParams get() const noexcept { return params_; }
+  FusedAttnBwdParamsWrapper &set_Q(NVTETensor val) noexcept {
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsQ, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnBwdParamsWrapper &set_K(NVTETensor val) noexcept {
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsK, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnBwdParamsWrapper &set_V(NVTETensor val) noexcept {
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsV, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnBwdParamsWrapper &set_O(NVTETensor val) noexcept {
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsO, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnBwdParamsWrapper &set_dO(NVTETensor val) noexcept {
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsDO, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnBwdParamsWrapper &set_S(NVTETensor val) noexcept {
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsS, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnBwdParamsWrapper &set_dP(NVTETensor val) noexcept {
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsDP, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnBwdParamsWrapper &set_Aux_CTX_Tensors(const NVTETensorPack * val) noexcept {
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsAuxCtxTensors, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnBwdParamsWrapper &set_dQ(NVTETensor val) noexcept {
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsDQ, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnBwdParamsWrapper &set_dK(NVTETensor val) noexcept {
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsDK, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnBwdParamsWrapper &set_dV(NVTETensor val) noexcept {
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsDV, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnBwdParamsWrapper &set_dBias(NVTETensor val) noexcept {
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsDBias, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnBwdParamsWrapper &set_dSoftmaxOffset(NVTETensor val) noexcept {
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsDSoftmaxOffset, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnBwdParamsWrapper &set_cu_seqlens_q(NVTETensor val) noexcept {
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsCuSeqlensQ, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnBwdParamsWrapper &set_cu_seqlens_kv(NVTETensor val) noexcept {
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsCuSeqlensKV, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnBwdParamsWrapper &set_cu_seqlens_q_padded(NVTETensor val) noexcept {
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsCuSeqlensQPadded, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnBwdParamsWrapper &set_cu_seqlens_kv_padded(NVTETensor val) noexcept {
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsCuSeqlensKVPadded, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnBwdParamsWrapper &set_max_seqlen_q(size_t val) noexcept {
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsMaxSeqlenQ, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnBwdParamsWrapper &set_max_seqlen_kv(size_t val) noexcept {
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsMaxSeqlenKV, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnBwdParamsWrapper &set_qkv_layout(NVTE_QKV_Layout val) noexcept {
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsQKVLayout, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnBwdParamsWrapper &set_o_format(NVTE_QKV_Format val) noexcept {
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsOFormat, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnBwdParamsWrapper &set_do_format(NVTE_QKV_Format val) noexcept {
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsDOFormat, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnBwdParamsWrapper &set_dqkv_layout(NVTE_QKV_Layout val) noexcept {
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsDQKVLayout, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnBwdParamsWrapper &set_qkv_scale_inv_format(NVTE_QKV_Format val) noexcept {
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsQKVScaleInvFormat, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnBwdParamsWrapper &set_do_scale_inv_format(NVTE_QKV_Format val) noexcept {
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsDOScaleInvFormat, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnBwdParamsWrapper &set_bias_type(NVTE_Bias_Type val) noexcept {
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsBiasType, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnBwdParamsWrapper &set_attn_mask_type(NVTE_Mask_Type val) noexcept {
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsAttnMaskType, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnBwdParamsWrapper &set_softmax_type(NVTE_Softmax_Type val) noexcept {
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsSoftmaxType, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnBwdParamsWrapper &set_attn_scale(float val) noexcept {
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsAttnScale, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnBwdParamsWrapper &set_dropout(float val) noexcept {
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsDropout, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnBwdParamsWrapper &set_window_size_left(int64_t val) noexcept {
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsWindowSizeLeft, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnBwdParamsWrapper &set_window_size_right(int64_t val) noexcept {
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsWindowSizeRight, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnBwdParamsWrapper &set_bottom_right_diagonal(bool val) noexcept {
+    const uint8_t u8_val = static_cast<uint8_t>(val);
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsBottomRightDiagonal, &u8_val, sizeof(u8_val));
+    return *this;
+  }
+  FusedAttnBwdParamsWrapper &set_deterministic(bool val) noexcept {
+    const uint8_t u8_val = static_cast<uint8_t>(val);
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsDeterministic, &u8_val, sizeof(u8_val));
+    return *this;
+  }
+  FusedAttnBwdParamsWrapper &set_cuda_graph(bool val) noexcept {
+    const uint8_t u8_val = static_cast<uint8_t>(val);
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsCudaGraph, &u8_val, sizeof(u8_val));
+    return *this;
+  }
+  FusedAttnBwdParamsWrapper &set_workspace(NVTETensor val) noexcept {
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsWorkspace, &val, sizeof(val));
+    return *this;
+  }
+  FusedAttnBwdParamsWrapper &set_stream(cudaStream_t val) noexcept {
+    nvte_set_fused_attn_bwd_params_attribute(params_, kNVTEFusedAttnBwdParamsStream, &val, sizeof(val));
+    return *this;
+  }
+ private:
+  NVTEFusedAttnBwdParams params_ = nullptr;
+};
 #endif  // __cplusplus
 
 #endif
