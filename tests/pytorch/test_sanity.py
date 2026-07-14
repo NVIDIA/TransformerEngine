@@ -3,7 +3,6 @@
 # See LICENSE for license information.
 
 from typing import Optional, List
-from unittest import mock
 
 import torch
 import pytest
@@ -37,7 +36,6 @@ from transformer_engine.pytorch import (
 )
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.cpp_extensions import general_gemm
-from transformer_engine.pytorch.module import grouped_linear as grouped_linear_module
 from transformer_engine.pytorch.tensor.utils import replace_raw_data
 from utils import ModelConfig, recipe_id, skip_unsupported_backward_override
 
@@ -1238,40 +1236,78 @@ def test_grouped_linear_rejects_partial_high_precision_init(monkeypatch):
 
 
 @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
-def test_grouped_linear_single_param_legacy_fused_wgrad(monkeypatch):
-    """Legacy GroupedLinear accumulates MXFP8 member wgrads into the grouped parent."""
+@pytest.mark.parametrize("fuse_wgrad_accumulation", (False, True))
+def test_grouped_linear_single_param_legacy_wgrad_matches_discrete(
+    monkeypatch,
+    fuse_wgrad_accumulation,
+):
+    """Single-grouped and discrete MXFP8 weights produce identical legacy wgrads."""
     monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
     monkeypatch.setenv("NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM", "0")
     dtype = torch.bfloat16
+    num_gemms = 2
 
-    with quantized_model_init(enabled=True, recipe=recipe.MXFP8BlockScaling()):
-        module = GroupedLinear(
-            num_gemms=2,
-            in_features=32,
-            out_features=64,
-            bias=False,
-            params_dtype=dtype,
-            fuse_wgrad_accumulation=True,
-            single_grouped_weight=True,
-        ).cuda()
+    def make_module(single_grouped_weight):
+        torch.manual_seed(1234)
+        torch.cuda.manual_seed(1234)
+        with quantized_model_init(enabled=True, recipe=recipe.MXFP8BlockScaling()):
+            return GroupedLinear(
+                num_gemms=num_gemms,
+                in_features=32,
+                out_features=64,
+                bias=False,
+                params_dtype=dtype,
+                fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+                single_grouped_weight=single_grouped_weight,
+            ).cuda()
 
-    weight = module.weight
-    weight.main_grad = torch.zeros(weight.shape, dtype=dtype, device="cuda")
-    weight.grad_added_to_main_grad = False
-    inp = torch.randn(32, 32, dtype=dtype, device="cuda", requires_grad=True)
+    discrete_module = make_module(False)
+    grouped_module = make_module(True)
 
-    with mock.patch.object(
-        grouped_linear_module,
-        "get_dummy_wgrad",
-        wraps=grouped_linear_module.get_dummy_wgrad,
-    ) as dummy_wgrad:
+    if fuse_wgrad_accumulation:
+        for index in range(num_gemms):
+            weight = getattr(discrete_module, f"weight{index}")
+            weight.main_grad = torch.zeros(
+                tuple(weight.shape), dtype=weight.dtype, device=weight.device
+            )
+            weight.grad_added_to_main_grad = False
+        grouped_module.weight.main_grad = torch.zeros(
+            tuple(grouped_module.weight.shape),
+            dtype=grouped_module.weight.dtype,
+            device=grouped_module.weight.device,
+        )
+        grouped_module.weight.grad_added_to_main_grad = False
+
+    torch.manual_seed(5678)
+    torch.cuda.manual_seed(5678)
+    inp = torch.randn(64, 32, dtype=dtype, device="cuda")
+    grad_output = torch.randn(64, 64, dtype=dtype, device="cuda")
+
+    def run_backward(module):
+        module_input = inp.detach().clone().requires_grad_(True)
         with autocast(enabled=True, recipe=recipe.MXFP8BlockScaling()):
-            module(inp, [16, 16]).sum().backward()
+            output = module(module_input, [32, 32])
+        output.backward(grad_output)
 
-    assert weight.grad_added_to_main_grad
-    assert weight.grad is not None
-    assert torch.count_nonzero(weight.main_grad).item() > 0
-    dummy_wgrad.assert_any_call(list(weight.shape), weight.dtype, zero=False)
+    run_backward(discrete_module)
+    run_backward(grouped_module)
+
+    if fuse_wgrad_accumulation:
+        discrete_wgrads = [
+            getattr(discrete_module, f"weight{i}").main_grad for i in range(num_gemms)
+        ]
+        grouped_wgrad = grouped_module.weight.main_grad
+        assert grouped_module.weight.grad_added_to_main_grad
+    else:
+        discrete_wgrads = [
+            getattr(discrete_module, f"weight{i}").grad for i in range(num_gemms)
+        ]
+        grouped_wgrad = grouped_module.weight.grad
+
+    assert all(wgrad is not None for wgrad in discrete_wgrads)
+    assert grouped_wgrad is not None
+    discrete_wgrad = torch.stack(discrete_wgrads)
+    torch.testing.assert_close(grouped_wgrad, discrete_wgrad, rtol=0, atol=0)
 
 
 def test_sanity_checkpointing_on_callables():
