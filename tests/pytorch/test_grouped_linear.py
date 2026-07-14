@@ -1857,6 +1857,15 @@ def test_grouped_linear_fused_path_cuda_graph_safe(fp8_recipe, bias, monkeypatch
         params_dtype=dtype,
         device=device,
     )
+    reference_grouped_linear = GroupedLinear(
+        num_gemms,
+        in_features,
+        out_features,
+        bias=bias,
+        params_dtype=dtype,
+        device=device,
+    )
+    reference_grouped_linear.load_state_dict(grouped_linear.state_dict())
 
     static_x = torch.randn(total_tokens, in_features, dtype=dtype, device=device)
     static_x.requires_grad_(True)
@@ -1919,7 +1928,7 @@ def test_grouped_linear_fused_path_cuda_graph_safe(fp8_recipe, bias, monkeypatch
     expected_x = fresh_x.detach().clone().requires_grad_(True)
     expected_dy = fresh_dy.detach().clone()
     with autocast(enabled=use_fp8, recipe=fp8_recipe):
-        expected_out = grouped_linear(expected_x, static_m_splits)
+        expected_out = reference_grouped_linear(expected_x, static_m_splits)
     expected_out.backward(expected_dy)
 
     tols = dict(rtol=1e-2, atol=5e-3)
@@ -1927,7 +1936,7 @@ def test_grouped_linear_fused_path_cuda_graph_safe(fp8_recipe, bias, monkeypatch
         tols = dict(rtol=0.05, atol=0.05)
     torch.testing.assert_close(graph_out.float(), expected_out.float(), **tols)
     torch.testing.assert_close(graph_dx.float(), expected_x.grad.float(), **tols)
-    for graph_grad, param in zip(graph_param_grads, grouped_linear.parameters()):
+    for graph_grad, param in zip(graph_param_grads, reference_grouped_linear.parameters()):
         assert param.grad is not None
         torch.testing.assert_close(graph_grad.float(), param.grad.float(), **tols)
 
