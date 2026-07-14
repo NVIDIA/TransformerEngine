@@ -232,16 +232,17 @@ void launch_scaled_srelu_backward(const NVTETensor nvte_grad_output, const NVTET
           } else {
             TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(grad_act_scales->data.dtype, GradScaleT, {
               auto grad_act_scales_ptr = reinterpret_cast<GradScaleT *>(grad_act_scales->data.dptr);
+              const int reduction_threads = choose_reduction_threads(num_vectors);
               if (use_vector) {
                 scaled_srelu_backward_with_scale_grad_kernel<nvec, GradT, InputT, ScaleT, OutputT,
                                                              GradScaleT>
-                    <<<static_cast<int>(rows), kReductionThreads, 0, stream>>>(
+                    <<<static_cast<int>(rows), reduction_threads, 0, stream>>>(
                         grad_ptr, input_ptr, scale_ptr, grad_input_ptr, grad_act_scales_ptr, rows,
                         hidden, num_vectors);
               } else {
                 scaled_srelu_backward_with_scale_grad_kernel<1, GradT, InputT, ScaleT, OutputT,
                                                              GradScaleT>
-                    <<<static_cast<int>(rows), kReductionThreads, 0, stream>>>(
+                    <<<static_cast<int>(rows), reduction_threads, 0, stream>>>(
                         grad_ptr, input_ptr, scale_ptr, grad_input_ptr, grad_act_scales_ptr, rows,
                         hidden, hidden);
               }

@@ -16,12 +16,13 @@
  *   2 | scaled_srelu_forward_kernel                   | SReLU (unary)          | fwd | --              | vectorized row grid
  *   3 | scaled_gated_backward_kernel                  | SwiGLU / ClampedSwiGLU | bwd | no              | vectorized row segments
  *   4 | scaled_srelu_backward_kernel                  | SReLU                  | bwd | no              | vectorized row grid
- *   5 | scaled_gated_backward_with_scale_grad_kernel  | SwiGLU / ClampedSwiGLU | bwd | yes             | vectorized, one block per row
- *   6 | scaled_srelu_backward_with_scale_grad_kernel  | SReLU                  | bwd | yes             | vectorized, one block per row
+ *   5 | scaled_gated_backward_with_scale_grad_kernel  | SwiGLU / ClampedSwiGLU | bwd | yes             | one block/row, adaptive CTA
+ *   6 | scaled_srelu_backward_with_scale_grad_kernel  | SReLU                  | bwd | yes             | one block/row, adaptive CTA
  *
  * The "with scale grad" variants compute
- * grad_act_scales[row] = sum_j dY * unscaled. This per-row reduction requires
- * the one-block-per-row launch; when grad_act_scales is null, the cheaper flat
+ * grad_act_scales[row] = sum_j dY * unscaled. This per-row reduction uses
+ * one block per row with CTA size chosen from row vector count (warp-aligned,
+ * capped at kReductionThreads). When grad_act_scales is null, the cheaper flat
  * elementwise grid is used instead.
  */
 
@@ -41,9 +42,25 @@ constexpr int kReductionThreads = 256;
 constexpr int kReductionWarps = kReductionThreads / THREADS_PER_WARP;
 using WarpReducer = Reducer<float, 1, 1, 1>;
 
+// Pick a CTA size for one-block-per-row scale-grad: enough threads to cover
+// row_vectors, rounded up to a warp multiple, capped at kReductionThreads.
+inline int choose_reduction_threads(const size_t row_vectors) {
+  if (row_vectors >= static_cast<size_t>(kReductionThreads)) {
+    return kReductionThreads;
+  }
+  const int needed = static_cast<int>(row_vectors);
+  int rounded = (needed + THREADS_PER_WARP - 1) / THREADS_PER_WARP * THREADS_PER_WARP;
+  if (rounded < THREADS_PER_WARP) {
+    rounded = THREADS_PER_WARP;
+  }
+  return rounded;
+}
+
+// blockDim.x must be a multiple of warp size and <= kReductionThreads.
 __device__ __forceinline__ float block_reduce_sum(float value, float *smem) {
   const int lane = threadIdx.x % THREADS_PER_WARP;
   const int warp = threadIdx.x / THREADS_PER_WARP;
+  const int num_warps = blockDim.x / THREADS_PER_WARP;
   Empty params = {};
   WarpReducer reducer(params, /*bidm=*/0, /*bidn=*/0, /*warp_m=*/0, /*warp_n=*/0, lane,
                       /*smem=*/nullptr);
@@ -55,7 +72,7 @@ __device__ __forceinline__ float block_reduce_sum(float value, float *smem) {
   }
   __syncthreads();
 
-  value = threadIdx.x < kReductionWarps ? smem[lane] : 0.0f;
+  value = threadIdx.x < num_warps ? smem[lane] : 0.0f;
   return warp == 0 ? reducer.reduce(value, sum) : value;
 }
 
