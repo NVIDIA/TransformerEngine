@@ -95,11 +95,12 @@ __device__ __forceinline__ void gated_backward_values(const float act_in, const 
 }
 
 template <int nvec, typename InputT, typename ScaleT, typename OutputT, ScaledGatedActivation Act>
-__global__ void __launch_bounds__(kThreads, 4) scaled_gated_forward_kernel(
-    const InputT *__restrict__ input, const ScaleT *__restrict__ act_scales,
-    OutputT *__restrict__ output, const size_t rows, const size_t hidden,
-    const size_t segment_size, const size_t num_segments, const size_t num_vectors_per_segment,
-    const ClampedSwiGLUParam param) {
+__global__ void __launch_bounds__(kThreads, 4)
+    scaled_gated_forward_kernel(const InputT *__restrict__ input,
+                                const ScaleT *__restrict__ act_scales, OutputT *__restrict__ output,
+                                const size_t rows, const size_t hidden, const size_t segment_size,
+                                const size_t num_segments, const size_t num_vectors_per_segment,
+                                const ClampedSwiGLUParam param) {
   const size_t total_vectors = rows * num_segments * num_vectors_per_segment;
   for (size_t tid = blockIdx.x * blockDim.x + threadIdx.x; tid < total_vectors;
        tid += gridDim.x * blockDim.x) {
@@ -130,11 +131,14 @@ __global__ void __launch_bounds__(kThreads, 4) scaled_gated_forward_kernel(
 
 template <int nvec, typename GradT, typename InputT, typename ScaleT, typename OutputT,
           ScaledGatedActivation Act>
-__global__ void __launch_bounds__(kThreads, 4) scaled_gated_backward_kernel(
-    const GradT *__restrict__ grad_output, const InputT *__restrict__ input,
-    const ScaleT *__restrict__ act_scales, OutputT *__restrict__ grad_input, const size_t rows,
-    const size_t hidden, const size_t segment_size, const size_t num_segments,
-    const size_t num_vectors_per_segment, const ClampedSwiGLUParam param) {
+__global__ void __launch_bounds__(kThreads, 4)
+    scaled_gated_backward_kernel(const GradT *__restrict__ grad_output,
+                                 const InputT *__restrict__ input,
+                                 const ScaleT *__restrict__ act_scales,
+                                 OutputT *__restrict__ grad_input, const size_t rows,
+                                 const size_t hidden, const size_t segment_size,
+                                 const size_t num_segments, const size_t num_vectors_per_segment,
+                                 const ClampedSwiGLUParam param) {
   const size_t total_vectors = rows * num_segments * num_vectors_per_segment;
   for (size_t tid = blockIdx.x * blockDim.x + threadIdx.x; tid < total_vectors;
        tid += gridDim.x * blockDim.x) {
@@ -177,12 +181,13 @@ __global__ void __launch_bounds__(kThreads, 4) scaled_gated_backward_kernel(
 
 template <int nvec, typename GradT, typename InputT, typename ScaleT, typename OutputT,
           typename GradScaleT, ScaledGatedActivation Act>
-__global__ void __launch_bounds__(kReductionThreads, 4) scaled_gated_backward_with_scale_grad_kernel(
-    const GradT *__restrict__ grad_output, const InputT *__restrict__ input,
-    const ScaleT *__restrict__ act_scales, OutputT *__restrict__ grad_input,
-    GradScaleT *__restrict__ grad_act_scales, const size_t rows, const size_t hidden,
-    const size_t segment_size, const size_t num_segments, const size_t num_vectors_per_segment,
-    const ClampedSwiGLUParam param) {
+__global__ void __launch_bounds__(kReductionThreads, 4)
+    scaled_gated_backward_with_scale_grad_kernel(
+        const GradT *__restrict__ grad_output, const InputT *__restrict__ input,
+        const ScaleT *__restrict__ act_scales, OutputT *__restrict__ grad_input,
+        GradScaleT *__restrict__ grad_act_scales, const size_t rows, const size_t hidden,
+        const size_t segment_size, const size_t num_segments, const size_t num_vectors_per_segment,
+        const ClampedSwiGLUParam param) {
   __shared__ float smem[kReductionWarps];
   const size_t row = blockIdx.x;
   (void)rows;
