@@ -141,12 +141,14 @@ template <int nvec, bool ComputeScaleGrad, typename GradT, typename InputT, type
           typename OutputT, typename GradScaleT, typename ParamOP,
           float (*ActOP)(float, const ParamOP &), float (*DActOP)(float, const ParamOP &)>
 __global__ void __launch_bounds__(kReductionThreads, 4)
-    scaled_gated_backward_kernel(
-        const GradT *__restrict__ grad_output, const InputT *__restrict__ input,
-        const ScaleT *__restrict__ act_scales, OutputT *__restrict__ grad_input,
-        GradScaleT *__restrict__ grad_act_scales, const size_t rows, const size_t hidden,
-        const size_t segment_size, const size_t num_segments, const size_t num_vectors_per_segment,
-        const ParamOP param) {
+    scaled_gated_backward_kernel(const GradT *__restrict__ grad_output,
+                                 const InputT *__restrict__ input,
+                                 const ScaleT *__restrict__ act_scales,
+                                 OutputT *__restrict__ grad_input,
+                                 GradScaleT *__restrict__ grad_act_scales, const size_t rows,
+                                 const size_t hidden, const size_t segment_size,
+                                 const size_t num_segments, const size_t num_vectors_per_segment,
+                                 const ParamOP param) {
   __shared__ float smem[kReductionWarps];
   const size_t row = blockIdx.x;
   (void)rows;
@@ -235,11 +237,13 @@ template <int nvec, bool ComputeScaleGrad, typename GradT, typename InputT, type
           typename OutputT, typename GradScaleT, typename ParamOP,
           float (*ActOP)(float, const ParamOP &), float (*DActOP)(float, const ParamOP &)>
 __global__ void __launch_bounds__(kReductionThreads, 4)
-    scaled_unary_backward_kernel(
-        const GradT *__restrict__ grad_output, const InputT *__restrict__ input,
-        const ScaleT *__restrict__ act_scales, OutputT *__restrict__ grad_input,
-        GradScaleT *__restrict__ grad_act_scales, const size_t rows, const size_t hidden,
-        const size_t num_vectors_per_row, const ParamOP param) {
+    scaled_unary_backward_kernel(const GradT *__restrict__ grad_output,
+                                 const InputT *__restrict__ input,
+                                 const ScaleT *__restrict__ act_scales,
+                                 OutputT *__restrict__ grad_input,
+                                 GradScaleT *__restrict__ grad_act_scales, const size_t rows,
+                                 const size_t hidden, const size_t num_vectors_per_row,
+                                 const ParamOP param) {
   __shared__ float smem[kReductionWarps];
   const size_t row = blockIdx.x;
   (void)rows;
@@ -384,8 +388,7 @@ void launch_scaled_gated_forward(const NVTETensor nvte_input, const NVTETensor n
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(input->data.dtype, InputT, {
     TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(act_scales->data.dtype, ScaleT, {
       TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(output->data.dtype, OutputT, {
-        constexpr int nvec =
-            32 / static_cast<int>(std::max(sizeof(InputT), sizeof(OutputT)));
+        constexpr int nvec = 32 / static_cast<int>(std::max(sizeof(InputT), sizeof(OutputT)));
         const auto input_ptr = reinterpret_cast<const InputT *>(input->data.dptr);
         const auto scale_ptr = reinterpret_cast<const ScaleT *>(act_scales->data.dptr);
         auto output_ptr = reinterpret_cast<OutputT *>(output->data.dptr);
@@ -509,8 +512,7 @@ void launch_scaled_unary_forward(const NVTETensor nvte_input, const NVTETensor n
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(input->data.dtype, InputT, {
     TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(act_scales->data.dtype, ScaleT, {
       TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(output->data.dtype, OutputT, {
-        constexpr int nvec =
-            32 / static_cast<int>(std::max(sizeof(InputT), sizeof(OutputT)));
+        constexpr int nvec = 32 / static_cast<int>(std::max(sizeof(InputT), sizeof(OutputT)));
         const auto input_ptr = reinterpret_cast<const InputT *>(input->data.dptr);
         const auto scale_ptr = reinterpret_cast<const ScaleT *>(act_scales->data.dptr);
         auto output_ptr = reinterpret_cast<OutputT *>(output->data.dptr);
