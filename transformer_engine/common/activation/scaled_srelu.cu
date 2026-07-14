@@ -16,7 +16,7 @@ void nvte_scaled_srelu(const NVTETensor input, const NVTETensor act_scales, NVTE
   using namespace transformer_engine;
   Empty param = {};
   launch_scaled_unary_forward<Empty, srelu<fp32, fp32>>(input, act_scales, output, param, stream,
-                                                         "nvte_scaled_srelu");
+                                                        "nvte_scaled_srelu");
 }
 
 void nvte_scaled_dsrelu(const NVTETensor grad, const NVTETensor input, const NVTETensor act_scales,
