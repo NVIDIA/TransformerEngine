@@ -28,6 +28,8 @@ from .base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
     _attach_high_precision_init_val,
+    _clear_high_precision_init_val,
+    _get_high_precision_init_val,
 )
 from ._common import WeightGradStore
 from ..quantization import FP8GlobalStateManager, QuantizerRole
@@ -1533,10 +1535,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         # Packing the parameters must transfer those values to the new registered
         # grouped parameter; otherwise its master is initialized by dequantizing
         # MXFP8 and starts from a different value than the discrete-weight layout.
-        high_precision_init_vals = []
-        for weight in weights:
-            getter = getattr(weight, "get_high_precision_init_val", None)
-            high_precision_init_vals.append(getter() if callable(getter) else None)
+        high_precision_init_vals = [_get_high_precision_init_val(weight) for weight in weights]
         if any(value is not None for value in high_precision_init_vals) and not all(
             value is not None for value in high_precision_init_vals
         ):
@@ -1576,9 +1575,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 torch.stack(high_precision_init_vals, dim=0),
             )
             for weight in weights:
-                clear = getattr(weight, "clear_high_precision_init_val", None)
-                if callable(clear):
-                    clear()
+                _clear_high_precision_init_val(weight)
 
         self.register_parameter(
             "weight",
