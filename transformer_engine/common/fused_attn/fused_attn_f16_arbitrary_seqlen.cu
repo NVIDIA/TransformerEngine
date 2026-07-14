@@ -342,6 +342,10 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
           sdpa_options.set_padding_mask(is_padding)
               .set_cu_seq_len_q(seq_q)
               .set_cu_seq_len_kv(seq_kv);
+          // cu_seq_len (and the ragged offset multiplier) are unified-engine-only.
+          // Pin the implementation so an unsupported config fails with the unified
+          // engine's specific error instead of auto-selection's generic failure.
+          sdpa_options.set_implementation(fe::AttentionImplementation_t::UNIFIED);
         } else {
           seq_q = mha_graph->tensor(fe::graph::Tensor_attributes()
                                         .set_name("seq_q")
