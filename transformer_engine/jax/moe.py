@@ -232,14 +232,10 @@ def _pack_grouped_tensor(tensor):
     else:
         scale_inv = tensor.scale_inv
     first_dims = (
-        tensor.first_dims
-        if tensor.first_dims is not None
-        else jnp.empty((0,), dtype=jnp.int32)
+        tensor.first_dims if tensor.first_dims is not None else jnp.empty((0,), dtype=jnp.int32)
     )
     last_dims = (
-        tensor.last_dims
-        if tensor.last_dims is not None
-        else jnp.empty((0,), dtype=jnp.int32)
+        tensor.last_dims if tensor.last_dims is not None else jnp.empty((0,), dtype=jnp.int32)
     )
     return tensor.data, scale_inv, tensor.amax, first_dims, last_dims
 
@@ -346,9 +342,7 @@ def _ffn_fwd_per_shard(
     casted_sorted_x = tex.grouped_quantize(
         sorted_x, fc1_quantizer_set.x, local_group_sizes, flatten_axis=-1
     )
-    casted_wi = tex.grouped_quantize(
-        wi_combined, fc1_quantizer_set.kernel, flatten_axis=-1
-    )
+    casted_wi = tex.grouped_quantize(wi_combined, fc1_quantizer_set.kernel, flatten_axis=-1)
     combined_out = tex.grouped_gemm(
         casted_sorted_x.get_tensor(usage=TensorUsage.LHS),
         casted_wi.get_tensor(usage=TensorUsage.RHS),
