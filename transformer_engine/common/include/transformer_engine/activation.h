@@ -368,6 +368,41 @@ void nvte_clamped_swiglu(const NVTETensor input, NVTETensor output, float limit,
 void nvte_clamped_swiglu_v2(const NVTETensor input, NVTETensor output, float limit, float alpha,
                             float glu_linear_offset, cudaStream_t stream);
 
+/*! \brief Computes ScaledSwiGLU without materializing GLU deinterleave.
+ *
+ *  Computes output = SwiGLU(input) * act_scales[:, None].
+ *  If glu_interleave_size > 0, input is interpreted as interleaved
+ *  [activation_block, linear_block] chunks of that size.
+ *
+ *  \param[in]     input                Input tensor of shape [N, H * 2].
+ *  \param[in]     act_scales           Row-wise activation scales of shape [N].
+ *  \param[in,out] output               Output tensor of shape [N, H].
+ *  \param[in]     glu_interleave_size  GLU interleave chunk size, or 0 for non-interleaved layout.
+ *  \param[in]     stream               CUDA stream used for the operation.
+ */
+void nvte_scaled_swiglu(const NVTETensor input, const NVTETensor act_scales, NVTETensor output,
+                        int64_t glu_interleave_size, cudaStream_t stream);
+
+/*! \brief Computes ScaledClampedSwiGLU without materializing GLU deinterleave.
+ *
+ *  Computes output = ClampedSwiGLU(input) * act_scales[:, None].
+ *  This uses the same clamping, alpha, and linear-offset semantics as
+ *  nvte_clamped_swiglu_v2.
+ *
+ *  \param[in]     input                Input tensor of shape [N, H * 2].
+ *  \param[in]     act_scales           Row-wise activation scales of shape [N].
+ *  \param[in,out] output               Output tensor of shape [N, H].
+ *  \param[in]     limit                Clipping limit.
+ *  \param[in]     alpha                Activation sigmoid alpha.
+ *  \param[in]     glu_linear_offset    Offset added to linear component after clamping.
+ *  \param[in]     glu_interleave_size  GLU interleave chunk size, or 0 for non-interleaved layout.
+ *  \param[in]     stream               CUDA stream used for the operation.
+ */
+void nvte_scaled_clamped_swiglu(const NVTETensor input, const NVTETensor act_scales,
+                                NVTETensor output, float limit, float alpha,
+                                float glu_linear_offset, int64_t glu_interleave_size,
+                                cudaStream_t stream);
+
 /*! \brief Computes the gated ReLU activation of the input.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
  *         the block quantization (MXFP8) of the specified shape of the block will be used.
@@ -473,6 +508,45 @@ void nvte_clamped_dswiglu_v2(const NVTETensor grad, const NVTETensor input, NVTE
                              float limit, float alpha, float glu_linear_offset,
                              cudaStream_t stream);
 
+/*! \brief Computes ScaledSwiGLU backward without materializing GLU deinterleave.
+ *
+ *  The optional grad_act_scales tensor may be null. When present, it receives
+ *  sum(dY * SwiGLU(input), dim=-1).
+ *
+ *  \param[in]     grad                 Incoming gradient of shape [N, H].
+ *  \param[in]     input                Forward input tensor of shape [N, H * 2].
+ *  \param[in]     act_scales           Row-wise activation scales of shape [N].
+ *  \param[in,out] grad_input           Outgoing gradient of shape [N, H * 2].
+ *  \param[in,out] grad_act_scales      Optional row-wise scale gradient of shape [N], or null.
+ *  \param[in]     glu_interleave_size  GLU interleave chunk size, or 0 for non-interleaved layout.
+ *  \param[in]     stream               CUDA stream used for the operation.
+ */
+void nvte_scaled_dswiglu(const NVTETensor grad, const NVTETensor input, const NVTETensor act_scales,
+                         NVTETensor grad_input, NVTETensor grad_act_scales,
+                         int64_t glu_interleave_size, cudaStream_t stream);
+
+/*! \brief Computes ScaledClampedSwiGLU backward without materializing GLU deinterleave.
+ *
+ *  The optional grad_act_scales tensor may be null. When present, it receives
+ *  sum(dY * ClampedSwiGLU(input), dim=-1).
+ *
+ *  \param[in]     grad                 Incoming gradient of shape [N, H].
+ *  \param[in]     input                Forward input tensor of shape [N, H * 2].
+ *  \param[in]     act_scales           Row-wise activation scales of shape [N].
+ *  \param[in,out] grad_input           Outgoing gradient of shape [N, H * 2].
+ *  \param[in,out] grad_act_scales      Optional row-wise scale gradient of shape [N], or null.
+ *  \param[in]     limit                Clipping limit.
+ *  \param[in]     alpha                Activation sigmoid alpha.
+ *  \param[in]     glu_linear_offset    Offset added to linear component after clamping.
+ *  \param[in]     glu_interleave_size  GLU interleave chunk size, or 0 for non-interleaved layout.
+ *  \param[in]     stream               CUDA stream used for the operation.
+ */
+void nvte_scaled_clamped_dswiglu(const NVTETensor grad, const NVTETensor input,
+                                 const NVTETensor act_scales, NVTETensor grad_input,
+                                 NVTETensor grad_act_scales, float limit, float alpha,
+                                 float glu_linear_offset, int64_t glu_interleave_size,
+                                 cudaStream_t stream);
+
 /*! \brief Computes the gated ReLU activation gradient.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
  *         the block quantization (MXFP8) of the specified shape of the block will be used.
@@ -508,6 +582,33 @@ void nvte_dqgeglu(const NVTETensor grad, const NVTETensor input, NVTETensor outp
  */
 void nvte_dsreglu(const NVTETensor grad, const NVTETensor input, NVTETensor output,
                   cudaStream_t stream);
+
+/*! \brief Computes ScaledSReLU.
+ *
+ *  Computes output = SReLU(input) * act_scales[:, None].
+ *
+ *  \param[in]     input       Input tensor for activation.
+ *  \param[in]     act_scales  Row-wise activation scales of shape [N].
+ *  \param[in,out] output      Output tensor.
+ *  \param[in]     stream      CUDA stream used for the operation.
+ */
+void nvte_scaled_srelu(const NVTETensor input, const NVTETensor act_scales, NVTETensor output,
+                       cudaStream_t stream);
+
+/*! \brief Computes ScaledSReLU backward.
+ *
+ *  The optional grad_act_scales tensor may be null. When present, it receives
+ *  sum(dY * SReLU(input), dim=-1).
+ *
+ *  \param[in]     grad             Incoming gradient.
+ *  \param[in]     input            Forward input tensor.
+ *  \param[in]     act_scales       Row-wise activation scales of shape [N].
+ *  \param[in,out] grad_input       Outgoing input gradient.
+ *  \param[in,out] grad_act_scales  Optional row-wise scale gradient of shape [N], or null.
+ *  \param[in]     stream           CUDA stream used for the operation.
+ */
+void nvte_scaled_dsrelu(const NVTETensor grad, const NVTETensor input, const NVTETensor act_scales,
+                        NVTETensor grad_input, NVTETensor grad_act_scales, cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"

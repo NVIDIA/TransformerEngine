@@ -253,6 +253,7 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
      activation/relu_dbias.cu
      activation/relu_grouped.cu
      activation/relu_grouped_dbias.cu
+     activation/scaled_activation.cu
      activation/swiglu.cu
      activation/swiglu_dbias.cu
      activation/swiglu_grouped.cu
@@ -630,6 +631,7 @@ if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
                                           activation/relu_dbias.cu
                                           activation/relu_grouped.cu
                                           activation/relu_grouped_dbias.cu
+                                          activation/scaled_activation.cu
                                           activation/swiglu.cu
                                           activation/swiglu_dbias.cu
                                           activation/swiglu_grouped.cu
