@@ -23,7 +23,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y git python3.9 pip cudnn9-cuda-12
-          pip install cmake==3.21.0 pybind11[global] ninja
+          pip install cmake==3.21.0 pybind11[global] ninja "nvidia-cudnn-frontend>=1.25.0"
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
@@ -77,7 +77,7 @@ jobs:
           docker exec builder bash -c '\
             apt-get update && \
             apt-get install -y git python3.9 pip cudnn9-cuda-12 && \
-            pip install cmake torch ninja pydantic importlib-metadata>=1.0 packaging pybind11 numpy einops onnxscript && \
+            pip install cmake torch ninja pydantic importlib-metadata>=1.0 packaging pybind11 numpy einops onnxscript "nvidia-cudnn-frontend>=1.25.0" && \
             apt-get clean \
           '
 
@@ -96,7 +96,7 @@ jobs:
       options: --user root
     steps:
       - name: 'Dependencies'
-        run: pip install cmake==3.21.0 pybind11[global]
+        run: pip install cmake==3.21.0 pybind11[global] "nvidia-cudnn-frontend>=1.25.0"
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
@@ -148,7 +148,7 @@ jobs:
       - name: 'Dependencies'
         run: |
           docker exec builder bash -c '\
-            pip install cmake==3.21.0 pybind11[global] einops onnxscript && \
+            pip install cmake==3.21.0 pybind11[global] einops onnxscript "nvidia-cudnn-frontend>=1.25.0" && \
             pip install torch --no-cache-dir --index-url https://download.pytorch.org/whl/cu130
           '
       - name: 'Build'

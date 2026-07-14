@@ -1922,6 +1922,32 @@ bool NVFP4Quantizer::is_eligible_for_rht_cast_fusion(const std::vector<size_t>& 
          transformer_engine::cuda::sm_arch() <= 110;
 }
 
+bool NVFP4Quantizer::is_eligible_for_2d_swizzle_fusion(const std::vector<size_t>& shape) {
+  const auto [rows, cols] = get_2d_dims(shape);
+  return rows % 128 == 0 && cols % 128 == 0 && transformer_engine::cuda::sm_arch() >= 100 &&
+         transformer_engine::cuda::sm_arch() <= 110;
+}
+
+namespace {
+
+// Whether this quantizer should emit GEMM-swizzled scale factors directly from the
+// quantize kernel (RHT cast-fusion path or the plain 2D quantize path), avoiding the
+// standalone post-quantize swizzle pass.
+bool nvfp4_emits_gemm_swizzled_scales(const NVFP4Quantizer& q, const std::vector<size_t>& shape) {
+  if (!q.optimize_for_gemm) {
+    return false;
+  }
+  if (q.with_rht) {
+    return NVFP4Quantizer::is_eligible_for_rht_cast_fusion(shape);
+  }
+  // Plain (non-RHT) 2D quantize kernel can bake the swizzled layout for aligned shapes.
+  return q.with_2d_quantization && !q.row_scaled_nvfp4 &&
+         q.nvfp4_4over6_mode == kNVTENVFP44Over6Disabled &&
+         NVFP4Quantizer::is_eligible_for_2d_swizzle_fusion(shape);
+}
+
+}  // namespace
+
 std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
     const std::vector<size_t>& shape, DType dtype, std::optional<at::Device> device_opt,
     bool pin_memory) const {
@@ -1932,10 +1958,10 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
   const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
   const auto [flat_first_dim, flat_last_dim] = get_2d_dims(shape);
 
-  // Swizzled SF is only valid when the RHT cast-fusion path runs;
-  // other quantize paths reject it.
-  const bool with_gemm_swizzled_scales = this->optimize_for_gemm && this->with_rht &&
-                                         NVFP4Quantizer::is_eligible_for_rht_cast_fusion(shape);
+  // Swizzled SF is emitted directly by the RHT cast-fusion kernel or by the plain
+  // 2D quantize kernel (for aligned shapes); other quantize paths reject it and go
+  // through the standalone post-quantize swizzle pass instead.
+  const bool with_gemm_swizzled_scales = nvfp4_emits_gemm_swizzled_scales(*this, shape);
   NVTE_CHECK(flat_first_dim % NVFP4_BLOCK_SIZE == 0, "First dim for NVFP4 must be divisible by ",
              NVFP4_BLOCK_SIZE, " (got shape=", shape, ")");
   NVTE_CHECK(flat_last_dim % NVFP4_BLOCK_SIZE == 0,
@@ -2263,10 +2289,10 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
 
   const auto [flat_first_dim, flat_last_dim] = get_2d_dims(shape);
 
-  // Swizzled SF is only valid when the RHT cast-fusion path runs;
-  // other quantize paths reject it.
-  const bool with_gemm_swizzled_scales = this->optimize_for_gemm && this->with_rht &&
-                                         NVFP4Quantizer::is_eligible_for_rht_cast_fusion(shape);
+  // Swizzled SF is emitted directly by the RHT cast-fusion kernel or by the plain
+  // 2D quantize kernel (for aligned shapes); other quantize paths reject it and go
+  // through the standalone post-quantize swizzle pass instead.
+  const bool with_gemm_swizzled_scales = nvfp4_emits_gemm_swizzled_scales(*this, shape);
 
   const bool row_scaled_nvfp4 = this->row_scaled_nvfp4;
   const bool nvfp4_use_4over6 = this->nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
