@@ -12,6 +12,8 @@
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/optional.h>
 
+#include <dlfcn.h>
+
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
@@ -237,9 +239,15 @@ class TVMFFICentral {
     static_assert(detail::is_lazyloadable_config<Config>::value,
                   "Config must define `std::string to_key() const` and "
                   "`bool retrieve_func_from_python(const std::string&) const`.");
+    // libtvm_ffi.so absent -> backend disabled, no tvm::ffi symbol is touched.
+    if (!tvm_ffi_available_) {
+      NVTE_WARN("Cannot dispatch to CuTeDSL kernels because libtvm_ffi.so is not successfully loaded."
+                " Will fall back to the default CUDA C++ kernels.");
+      return std::nullopt;
+    }
     if (!cutedsl_backend_enabled_.load(std::memory_order_relaxed)) {
       if (warn_cutedsl_backend_not_chosen_) {
-        NVTE_WARN("TVM-FFI kernel for config `", cfg.to_key(),
+        NVTE_WARN("CuTeDSL kernel for config `", cfg.to_key(),
                   "` is not supported because the CuTeDSL backend is disabled. "
                   "Set NVTE_ENABLE_CUTEDSL_QUANT_BACKEND=1 to enable it.");
       }
@@ -280,8 +288,15 @@ class TVMFFICentral {
  private:
   ~TVMFFICentral() = default;
   TVMFFICentral()
-      : cutedsl_backend_enabled_(is_cutedsl_backend_enabled()),
+      : tvm_ffi_available_(load_tvm_ffi()),
+        cutedsl_backend_enabled_(is_cutedsl_backend_enabled()),
         warn_cutedsl_backend_not_chosen_(warn_if_cutedsl_backend_not_chosen()) {}
+
+  // Load all tvm-ffi symbols into the global namespace, which should be already loaded in common/__init__.py via ctypes.CDLL
+  // if user uses TE from a python environment. Otherwise, if user stays in C++ only without python, then CuTeDSL kernels
+  // will be unavailable either because we fail to load libtvm_ffi.so or CuTeDSL kernel entrypoints are not registered in Python.
+  // In either case, we will fall back to the default TE CUDA C++ kernels.
+  static bool load_tvm_ffi() { return dlopen("libtvm_ffi.so", RTLD_NOW | RTLD_GLOBAL) != nullptr; }
   TVMFFICentral(const TVMFFICentral &) = delete;
   TVMFFICentral &operator=(const TVMFFICentral &) = delete;
   TVMFFICentral(TVMFFICentral &&) = delete;
@@ -298,6 +313,7 @@ class TVMFFICentral {
     return flag != nullptr && flag[0] != '0';
   }
 
+  const bool tvm_ffi_available_;  // libtvm_ffi.so loaded; false disables the backend
   std::atomic<bool> cutedsl_backend_enabled_;
   const bool warn_cutedsl_backend_not_chosen_;
   std::shared_mutex mutex_;

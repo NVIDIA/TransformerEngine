@@ -119,18 +119,6 @@ void init_grouped_tensor_extension() {
              "Internal error: could not initialize pyTorch grouped tensor extension.");
 }
 
-void init_cutedsl_extension() {
-  // Registers the CuTeDSL kernel entrypoints as TVM-FFI globals; the C++
-  // dispatcher probes them via tvm::ffi::Function::GetGlobal and falls back to
-  // the CUDA kernels when absent.
-  auto cutedsl_module = py::module_::import("transformer_engine.common.CuTeDSL");
-  PyObject *register_fn = PyObject_GetAttrString(cutedsl_module.ptr(), "register_cutedsl_backends");
-  NVTE_CHECK(register_fn != nullptr,
-             "Internal error: could not initialize pyTorch CuTeDSL extension.");
-  Py_DECREF(register_fn);
-  cutedsl_module.attr("register_cutedsl_backends")();
-}
-
 void init_extension() {
   std::call_once(extension_init_flag, []() {
     init_float8_extension();
@@ -138,7 +126,6 @@ void init_extension() {
     init_float8blockwise_extension();
     init_nvfp4_extensions();
     init_grouped_tensor_extension();
-    init_cutedsl_extension();
   });
 }
 
