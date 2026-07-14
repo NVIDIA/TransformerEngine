@@ -163,8 +163,12 @@ inline FusedAttnConfig make_default_fused_attn_config() { return FusedAttnConfig
 void populate_fused_attn_config(FusedAttnConfig *cfg);
 
 // Normalize cfg into the graph-cache key form used by cuDNN graph caching (ragged bucketing,
-// bottom-right mask folding). Call after populate_fused_attn_config().
-FusedAttnConfig make_fused_attn_graph_cache_config(const FusedAttnConfig &cfg);
+// bottom-right mask folding). Call after populate_fused_attn_config(). Pass is_forward=true when
+// keying a forward graph and is_forward=false for a backward graph; each key drops the fields the
+// corresponding graph does not consume so it is not fragmented by them: a training forward key
+// drops the dO/dQKV dtypes and the (backward-only) deterministic flag, and a backward key drops
+// the (forward-only) return_max_logit flag.
+FusedAttnConfig make_fused_attn_graph_cache_config(const FusedAttnConfig &cfg, bool is_forward);
 
 inline const FusedAttnConfig *get_fused_attn_config(NVTEFusedAttnConfig config) {
   NVTE_CHECK(config != nullptr, "NVTEFusedAttnConfig must not be NULL.");

@@ -142,7 +142,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
 
   const DType ragged_offset_type = cudnn_runtime_version >= 90500 ? DType::kInt64 : DType::kInt32;
   bool generate_stats = true;  // Always return stats
-  const FusedAttnConfig cache_cfg = make_fused_attn_graph_cache_config(cfg);
+  const FusedAttnConfig cache_cfg = make_fused_attn_graph_cache_config(cfg, /*is_forward=*/true);
   try {
     namespace fe = cudnn_frontend;
     using graph_and_tensors =
@@ -625,7 +625,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
   // We choose between 32-bit and 64-bit offsets depending on need.
   // This allows us to support older cuDNN runtimes gracefully.
   const DType ragged_offset_type = cudnn_runtime_version >= 90500 ? DType::kInt64 : DType::kInt32;
-  const FusedAttnConfig cache_cfg = make_fused_attn_graph_cache_config(cfg);
+  const FusedAttnConfig cache_cfg = make_fused_attn_graph_cache_config(cfg, /*is_forward=*/false);
 
   try {
     namespace fe = cudnn_frontend;

@@ -37,7 +37,6 @@ void populate_fused_attn_config(FusedAttnConfig *cfg) {
   NVTE_CHECK(cfg != nullptr, "FusedAttnConfig must not be NULL.");
 
   const int64_t b = static_cast<int64_t>(cfg->batch_size);
-  const int64_t h = static_cast<int64_t>(cfg->num_attn_heads);
   const int64_t sq = static_cast<int64_t>(cfg->max_seqlen_q);
   const int64_t skv = static_cast<int64_t>(cfg->max_seqlen_kv);
 
@@ -45,7 +44,6 @@ void populate_fused_attn_config(FusedAttnConfig *cfg) {
   const NVTE_QKV_Format kv_format = nvte_get_kv_format(cfg->qkv_layout);
   const NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(cfg->qkv_layout);
   const bool is_paged_kv = (layout_group == NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD);
-  const bool has_bias = (cfg->bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
 
   const size_t num_tokens_q =
       cfg->num_tokens_q != 0 ? cfg->num_tokens_q : static_cast<size_t>(b * sq);
@@ -81,24 +79,9 @@ void populate_fused_attn_config(FusedAttnConfig *cfg) {
       cfg->max_pages_per_seq_v = 1;
     }
   }
-
-  if (has_bias) {
-    if (cfg->bias_batch_size == 0) {
-      cfg->bias_batch_size = static_cast<size_t>(b);
-    }
-    if (cfg->bias_num_heads == 0) {
-      cfg->bias_num_heads = static_cast<size_t>(h);
-    }
-    if (cfg->bias_seqlen_q == 0) {
-      cfg->bias_seqlen_q = static_cast<size_t>(sq);
-    }
-    if (cfg->bias_seqlen_kv == 0) {
-      cfg->bias_seqlen_kv = static_cast<size_t>(skv);
-    }
-  }
 }
 
-FusedAttnConfig make_fused_attn_graph_cache_config(const FusedAttnConfig &cfg) {
+FusedAttnConfig make_fused_attn_graph_cache_config(const FusedAttnConfig &cfg, bool is_forward) {
   FusedAttnConfig cache_cfg = cfg;
 
   const int64_t s_q = static_cast<int64_t>(cache_cfg.max_seqlen_q);
@@ -137,12 +120,28 @@ FusedAttnConfig make_fused_attn_graph_cache_config(const FusedAttnConfig &cfg) {
   cache_cfg.bucketed_batch_size = 1;
   cache_cfg.attn_scale = 1.0f;
 
+  // Drop from each graph's cache key the fields the graph does not actually consume, so a graph
+  // prewarmed by a backend probe (which may carry different values for those ignored fields, e.g.
+  // the framework get_attention_backend probe) is still reused at execution. The forward graph
+  // produces O (and optionally softmax stats / max logit) but never consumes the dO/dQKV dtypes or
+  // the backward-only determinism choice. The backward graph consumes dO/dQKV and honors
+  // determinism but never produces the forward max-logit output.
+  if (is_forward) {
+    if (cache_cfg.is_training) {
+      cache_cfg.do_dtype = kNVTEBFloat16;
+      cache_cfg.dqkv_dtype = kNVTEBFloat16;
+      cache_cfg.deterministic = false;
+    }
+  } else {
+    cache_cfg.return_max_logit = false;
+  }
+
   return cache_cfg;
 }
 
 FusedAttnConfig make_fused_attn_config(const FusedAttnFwdParams &params) {
   FusedAttnConfig cfg = make_default_fused_attn_config();
-  cfg.is_training = false;  // fwd-only probe; caller restores before dispatch
+  cfg.is_training = params.is_training;
   cfg.deterministic = false;
   cfg.cuda_graph = params.cuda_graph;
   cfg.return_max_logit = params.return_max_logit;

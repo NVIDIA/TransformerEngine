@@ -354,7 +354,7 @@ class FusedAttentionParams:
     window_size_right: int = -1
     bottom_right_diagonal: bool = True
     softmax_type: tex.NVTE_Softmax_Type = tex.NVTE_Softmax_Type.NVTE_VANILLA_SOFTMAX
-    scaling_mode: tex.NVTEScalingMode = tex.NVTEScalingMode.NVTE_INVALID_SCALING
+    scaling_mode: tex.NVTEScalingMode = tex.NVTEScalingMode.NVTE_DELAYED_TENSOR_SCALING
     dropout: float = 0.0
 
     # data types
@@ -1458,7 +1458,7 @@ def get_attention_backend(
         o_type = qkv_type
         do_type = qkv_type
         dqkv_type = qkv_type
-        scaling_mode = tex.NVTEScalingMode.NVTE_INVALID_SCALING
+        scaling_mode = tex.NVTEScalingMode.NVTE_DELAYED_TENSOR_SCALING
         qkv_scale_inv_format = None
         do_scale_inv_format = None
         if fp8 and fp8_meta["recipe"].fp8_dpa:

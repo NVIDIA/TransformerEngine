@@ -161,7 +161,8 @@ std::tuple<NVTE_Fused_Attn_Backend, std::string> GetFusedAttnBackend(
     float attn_scale, float dropout_probability, size_t q_attn_heads, size_t kv_attn_heads,
     size_t q_max_seqlen, size_t kv_max_seqlen, size_t qk_head_dim, size_t v_head_dim,
     int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal,
-    bool deterministic);
+    bool deterministic, size_t bias_batch, size_t bias_heads, size_t bias_seqlen_q,
+    size_t bias_seqlen_kv);
 
 pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
     size_t input_batch, size_t bias_batch, size_t q_max_seqlen, size_t kv_max_seqlen,

@@ -282,16 +282,45 @@ std::vector<py::object> fused_attn_fwd(
   // create workspace
   TensorWrapper workspace;
 
+  // build the parameter object
+  FusedAttnFwdParamsWrapper params;
+  params.set_Q(te_Q.data())
+      .set_K(te_K.data())
+      .set_V(te_V.data())
+      .set_Bias(te_Bias.data())
+      .set_SoftmaxOffset(te_SoftmaxOffset.data())
+      .set_S(te_S.data())
+      .set_O(te_O.data())
+      .set_Aux_CTX_Tensors(&nvte_aux_tensor_pack)
+      .set_cu_seqlens_q(te_cu_seqlens_q.data())
+      .set_cu_seqlens_kv(te_cu_seqlens_kv.data())
+      .set_cu_seqlens_q_padded(te_cu_seqlens_q_padded.data())
+      .set_cu_seqlens_kv_padded(te_cu_seqlens_kv_padded.data())
+      .set_page_table_k(te_page_table_k.data())
+      .set_page_table_v(te_page_table_v.data())
+      .set_rng_state(te_rng_state.data())
+      .set_max_seqlen_q(max_seqlen_q)
+      .set_max_seqlen_kv(max_seqlen_kv)
+      .set_is_training(is_training)
+      .set_return_max_logit(return_max_logit)
+      .set_cuda_graph(cuda_graph)
+      .set_attn_scale(attn_scale)
+      .set_dropout(p_dropout)
+      .set_qkv_layout(qkv_layout)
+      .set_o_format(o_format)
+      .set_qkv_scale_inv_format(qkv_scale_inv_format)
+      .set_bias_type(bias_type)
+      .set_attn_mask_type(attn_mask_type)
+      .set_softmax_type(softmax_type)
+      .set_window_size_left(window_size[0])
+      .set_window_size_right(window_size[1])
+      .set_bottom_right_diagonal(bottom_right_diagonal)
+      .set_stream(at::cuda::getCurrentCUDAStream());
+
   // populate tensors with appropriate shapes and dtypes
   NVTE_SCOPED_GIL_RELEASE({
-    nvte_fused_attn_fwd(
-        te_Q.data(), te_K.data(), te_V.data(), te_Bias.data(), te_SoftmaxOffset.data(), te_S.data(),
-        te_O.data(), &nvte_aux_tensor_pack, te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
-        te_cu_seqlens_q_padded.data(), te_cu_seqlens_kv_padded.data(), te_page_table_k.data(),
-        te_page_table_v.data(), te_rng_state.data(), max_seqlen_q, max_seqlen_kv, is_training,
-        return_max_logit, cuda_graph, attn_scale, p_dropout, qkv_layout, o_format,
-        qkv_scale_inv_format, bias_type, attn_mask_type, softmax_type, window_size[0],
-        window_size[1], bottom_right_diagonal, workspace.data(), at::cuda::getCurrentCUDAStream());
+    params.set_workspace(workspace.data());
+    nvte_fused_attn_fwd_v2(params);
   });
 
   // allocate memory for workspace and auxiliary output tensors
@@ -341,14 +370,8 @@ std::vector<py::object> fused_attn_fwd(
 
   // execute the kernel
   NVTE_SCOPED_GIL_RELEASE({
-    nvte_fused_attn_fwd(
-        te_Q.data(), te_K.data(), te_V.data(), te_Bias.data(), te_SoftmaxOffset.data(), te_S.data(),
-        te_O.data(), &nvte_aux_tensor_pack, te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
-        te_cu_seqlens_q_padded.data(), te_cu_seqlens_kv_padded.data(), te_page_table_k.data(),
-        te_page_table_v.data(), te_rng_state.data(), max_seqlen_q, max_seqlen_kv, is_training,
-        return_max_logit, cuda_graph, attn_scale, p_dropout, qkv_layout, o_format,
-        qkv_scale_inv_format, bias_type, attn_mask_type, softmax_type, window_size[0],
-        window_size[1], bottom_right_diagonal, workspace.data(), at::cuda::getCurrentCUDAStream());
+    params.set_workspace(workspace.data());
+    nvte_fused_attn_fwd_v2(params);
   });
 
   // destroy tensor wrappers, but not allocated memory
@@ -610,17 +633,49 @@ std::vector<py::object> fused_attn_bwd(
   // create workspace
   TensorWrapper workspace;
 
+  // build the parameter object
+  FusedAttnBwdParamsWrapper params;
+  params.set_Q(te_Q.data())
+      .set_K(te_K.data())
+      .set_V(te_V.data())
+      .set_O(te_O.data())
+      .set_dO(te_dO.data())
+      .set_S(te_S.data())
+      .set_dP(te_dP.data())
+      .set_Aux_CTX_Tensors(&nvte_aux_tensor_pack)
+      .set_dQ(te_dQ.data())
+      .set_dK(te_dK.data())
+      .set_dV(te_dV.data())
+      .set_dBias(te_dBias.data())
+      .set_dSoftmaxOffset(te_dSoftmaxOffset.data())
+      .set_cu_seqlens_q(te_cu_seqlens_q.data())
+      .set_cu_seqlens_kv(te_cu_seqlens_kv.data())
+      .set_cu_seqlens_q_padded(te_cu_seqlens_q_padded.data())
+      .set_cu_seqlens_kv_padded(te_cu_seqlens_kv_padded.data())
+      .set_max_seqlen_q(max_seqlen_q)
+      .set_max_seqlen_kv(max_seqlen_kv)
+      .set_attn_scale(attn_scale)
+      .set_dropout(p_dropout)
+      .set_qkv_layout(qkv_layout)
+      .set_o_format(o_format)
+      .set_do_format(do_format)
+      .set_dqkv_layout(dqkv_layout)
+      .set_qkv_scale_inv_format(qkv_scale_inv_format)
+      .set_do_scale_inv_format(do_scale_inv_format)
+      .set_bias_type(bias_type)
+      .set_attn_mask_type(attn_mask_type)
+      .set_softmax_type(softmax_type)
+      .set_window_size_left(window_size[0])
+      .set_window_size_right(window_size[1])
+      .set_bottom_right_diagonal(bottom_right_diagonal)
+      .set_deterministic(deterministic)
+      .set_cuda_graph(cuda_graph)
+      .set_stream(at::cuda::getCurrentCUDAStream());
+
   // populate tensors with appropriate shapes and dtypes
   NVTE_SCOPED_GIL_RELEASE({
-    nvte_fused_attn_bwd(
-        te_Q.data(), te_K.data(), te_V.data(), te_O.data(), te_dO.data(), te_S.data(), te_dP.data(),
-        &nvte_aux_tensor_pack, te_dQ.data(), te_dK.data(), te_dV.data(), te_dBias.data(),
-        te_dSoftmaxOffset.data(), te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
-        te_cu_seqlens_q_padded.data(), te_cu_seqlens_kv_padded.data(), max_seqlen_q, max_seqlen_kv,
-        attn_scale, p_dropout, qkv_layout, o_format, do_format, dqkv_layout, qkv_scale_inv_format,
-        do_scale_inv_format, bias_type, attn_mask_type, softmax_type, window_size[0],
-        window_size[1], bottom_right_diagonal, deterministic, cuda_graph, workspace.data(),
-        at::cuda::getCurrentCUDAStream());
+    params.set_workspace(workspace.data());
+    nvte_fused_attn_bwd_v2(params);
   });
 
   // allocate memory for workspace
@@ -630,15 +685,8 @@ std::vector<py::object> fused_attn_bwd(
 
   // execute kernel
   NVTE_SCOPED_GIL_RELEASE({
-    nvte_fused_attn_bwd(
-        te_Q.data(), te_K.data(), te_V.data(), te_O.data(), te_dO.data(), te_S.data(), te_dP.data(),
-        &nvte_aux_tensor_pack, te_dQ.data(), te_dK.data(), te_dV.data(), te_dBias.data(),
-        te_dSoftmaxOffset.data(), te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
-        te_cu_seqlens_q_padded.data(), te_cu_seqlens_kv_padded.data(), max_seqlen_q, max_seqlen_kv,
-        attn_scale, p_dropout, qkv_layout, o_format, do_format, dqkv_layout, qkv_scale_inv_format,
-        do_scale_inv_format, bias_type, attn_mask_type, softmax_type, window_size[0],
-        window_size[1], bottom_right_diagonal, deterministic, cuda_graph, workspace.data(),
-        at::cuda::getCurrentCUDAStream());
+    params.set_workspace(workspace.data());
+    nvte_fused_attn_bwd_v2(params);
   });
 
   // destroy tensor wrappers

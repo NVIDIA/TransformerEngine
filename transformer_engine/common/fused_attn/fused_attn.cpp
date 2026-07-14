@@ -348,13 +348,12 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     float dropout, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
     size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left,
     int64_t window_size_right, bool return_max_logit, bool cuda_graph, bool deterministic) {
-  (void)is_training;
   transformer_engine::FusedAttnConfig cfg = transformer_engine::make_default_fused_attn_config();
   cfg.qkv_layout = qkv_layout;
   cfg.bias_type = bias_type;
   cfg.attn_mask_type = attn_mask_type;
   cfg.softmax_type = softmax_type;
-  cfg.attn_scale = 1.0f;  // legacy default; matches the value pre-PR probes hardcoded
+  cfg.attn_scale = attn_scale;
   cfg.dropout = dropout;
   cfg.max_seqlen_q = max_seqlen_q;
   cfg.max_seqlen_kv = max_seqlen_kv;
@@ -363,13 +362,14 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   cfg.cuda_graph = cuda_graph;
   NVTE_CHECK(q_dtype == kv_dtype, "Q and KV must have the same data type.");
   cfg.qkv_dtype = q_dtype;
-  cfg.o_dtype = q_dtype;  // legacy: O dtype matches Q dtype
-  cfg.batch_size = 1;     // legacy: pre-PR probes assumed batch=1
+  cfg.o_dtype = q_dtype;
+  cfg.do_dtype = q_dtype;
+  cfg.dqkv_dtype = q_dtype;
   cfg.num_attn_heads = num_attn_heads;
   cfg.num_gqa_groups = num_gqa_groups;
   cfg.head_dim_qk = head_dim_qk;
   cfg.head_dim_v = head_dim_v;
-  cfg.is_training = false;  // legacy wrapper cannot express dO/dQKV dtypes; skip bwd probe
+  cfg.is_training = is_training;
   cfg.return_max_logit = return_max_logit;
   cfg.deterministic = deterministic;
   return nvte_get_fused_attn_backend_v2(reinterpret_cast<NVTEFusedAttnConfig>(&cfg),
@@ -484,14 +484,12 @@ void nvte_fused_attn_fwd_v2(NVTEFusedAttnFwdParams params) {
                                      /*message=*/nullptr);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
-    cfg.is_training = p.is_training;
     fused_attn_arbitrary_seqlen_fwd(cfg, input_Q, input_K, input_V, input_Bias, input_SoftmaxOffset,
                                     output_O, p.Aux_CTX_Tensors, input_cu_seqlens_q,
                                     input_cu_seqlens_kv, input_cu_seqlens_q_padded,
                                     input_cu_seqlens_kv_padded, input_page_table_k,
                                     input_page_table_v, input_rng_state, wkspace, p.stream, handle);
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_FP8) {
-    cfg.is_training = p.is_training;
     fused_attn_fp8_fwd(cfg, input_Q, input_K, input_V, input_SoftmaxOffset, input_output_S, output_O,
                        p.Aux_CTX_Tensors, input_cu_seqlens_q, input_cu_seqlens_kv, input_rng_state,
                        wkspace, p.stream, handle);
