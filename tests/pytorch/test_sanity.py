@@ -1299,9 +1299,7 @@ def test_grouped_linear_single_param_legacy_wgrad_matches_discrete(
         grouped_wgrad = grouped_module.weight.main_grad
         assert grouped_module.weight.grad_added_to_main_grad
     else:
-        discrete_wgrads = [
-            getattr(discrete_module, f"weight{i}").grad for i in range(num_gemms)
-        ]
+        discrete_wgrads = [getattr(discrete_module, f"weight{i}").grad for i in range(num_gemms)]
         grouped_wgrad = grouped_module.weight.grad
 
     assert all(wgrad is not None for wgrad in discrete_wgrads)
