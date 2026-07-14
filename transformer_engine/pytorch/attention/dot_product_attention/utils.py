@@ -385,11 +385,6 @@ class FusedAttentionParams:
     num_tokens_q: int = 0
     num_tokens_kv: int = 0
 
-    # derived tensor dimensions
-    bucketed_batch_size: int = 0
-    bucketed_num_tokens_q: int = 0
-    bucketed_num_tokens_kv: int = 0
-
     # paged KV dimensions
     num_pages_k: int = 0
     num_pages_v: int = 0

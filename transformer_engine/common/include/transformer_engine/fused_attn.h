@@ -244,10 +244,6 @@ enum NVTEFusedAttnConfigAttribute {
   kNVTEFusedAttnConfigMaxSeqlenKV,
   kNVTEFusedAttnConfigNumTokensQ,
   kNVTEFusedAttnConfigNumTokensKV,
-  // derived tensor dimensions
-  kNVTEFusedAttnConfigBucketedBatchSize,
-  kNVTEFusedAttnConfigBucketedNumTokensQ,
-  kNVTEFusedAttnConfigBucketedNumTokensKV,
   // paged KV dimensions
   kNVTEFusedAttnConfigNumPagesK,
   kNVTEFusedAttnConfigNumPagesV,
@@ -1180,21 +1176,6 @@ class FusedAttnConfigWrapper {
   }
   FusedAttnConfigWrapper &set_num_tokens_kv(size_t val) noexcept {
     nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigNumTokensKV, &val, sizeof(val));
-    return *this;
-  }
-  FusedAttnConfigWrapper &set_bucketed_batch_size(size_t val) noexcept {
-    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigBucketedBatchSize, &val,
-                                         sizeof(val));
-    return *this;
-  }
-  FusedAttnConfigWrapper &set_bucketed_num_tokens_q(size_t val) noexcept {
-    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigBucketedNumTokensQ, &val,
-                                         sizeof(val));
-    return *this;
-  }
-  FusedAttnConfigWrapper &set_bucketed_num_tokens_kv(size_t val) noexcept {
-    nvte_set_fused_attn_config_attribute(cfg_, kNVTEFusedAttnConfigBucketedNumTokensKV, &val,
-                                         sizeof(val));
     return *this;
   }
 

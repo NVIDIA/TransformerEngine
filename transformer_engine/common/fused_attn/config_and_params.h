@@ -48,7 +48,7 @@ struct FusedAttnConfig {
   NVTE_QKV_Format do_scale_inv_format = NVTE_QKV_Format_NOT_SET;
 
   // attention scaling
-  float attn_scale = 0.0f;
+  float attn_scale = 1.0f;
 
   // tensor dimensions
   size_t batch_size = 0;
@@ -61,7 +61,7 @@ struct FusedAttnConfig {
   size_t num_tokens_q = 0;
   size_t num_tokens_kv = 0;
 
-  // derived tensor dimensions
+  // derived tensor dimensions (internal only)
   size_t bucketed_batch_size = 0;
   size_t bucketed_num_tokens_q = 0;
   size_t bucketed_num_tokens_kv = 0;
@@ -118,10 +118,6 @@ struct FusedAttnConfig {
       sizeof(size_t),               // max_seqlen_kv
       sizeof(size_t),               // num_tokens_q
       sizeof(size_t),               // num_tokens_kv
-      // derived tensor dimensions
-      sizeof(size_t),               // bucketed_batch_size
-      sizeof(size_t),               // bucketed_num_tokens_q
-      sizeof(size_t),               // bucketed_num_tokens_kv
       // paged KV dimensions
       sizeof(size_t),               // num_pages_k
       sizeof(size_t),               // num_pages_v

@@ -135,7 +135,7 @@ FusedAttnConfig make_fused_attn_graph_cache_config(const FusedAttnConfig &cfg) {
   // cuDNN graph supports dynamic shapes for batch_size
   cache_cfg.batch_size = 1;
   cache_cfg.bucketed_batch_size = 1;
-  cache_cfg.attention_scale = 1.0f;
+  cache_cfg.attn_scale = 1.0f;
 
   return cache_cfg;
 }
@@ -315,15 +315,6 @@ void nvte_get_fused_attn_config_attribute(NVTEFusedAttnConfig config,
     case kNVTEFusedAttnConfigNumTokensKV:
       std::memcpy(buf, &cfg.num_tokens_kv, attr_size);
       break;
-    case kNVTEFusedAttnConfigBucketedBatchSize:
-      std::memcpy(buf, &cfg.bucketed_batch_size, attr_size);
-      break;
-    case kNVTEFusedAttnConfigBucketedNumTokensQ:
-      std::memcpy(buf, &cfg.bucketed_num_tokens_q, attr_size);
-      break;
-    case kNVTEFusedAttnConfigBucketedNumTokensKV:
-      std::memcpy(buf, &cfg.bucketed_num_tokens_kv, attr_size);
-      break;
     case kNVTEFusedAttnConfigNumPagesK:
       std::memcpy(buf, &cfg.num_pages_k, attr_size);
       break;
@@ -470,15 +461,6 @@ void nvte_set_fused_attn_config_attribute(NVTEFusedAttnConfig config,
       break;
     case kNVTEFusedAttnConfigNumTokensKV:
       std::memcpy(&cfg.num_tokens_kv, buf, attr_size);
-      break;
-    case kNVTEFusedAttnConfigBucketedBatchSize:
-      std::memcpy(&cfg.bucketed_batch_size, buf, attr_size);
-      break;
-    case kNVTEFusedAttnConfigBucketedNumTokensQ:
-      std::memcpy(&cfg.bucketed_num_tokens_q, buf, attr_size);
-      break;
-    case kNVTEFusedAttnConfigBucketedNumTokensKV:
-      std::memcpy(&cfg.bucketed_num_tokens_kv, buf, attr_size);
       break;
     case kNVTEFusedAttnConfigNumPagesK:
       std::memcpy(&cfg.num_pages_k, buf, attr_size);
