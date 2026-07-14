@@ -57,8 +57,8 @@ from ..distributed import (
 )
 from ..distributed_weight import (
     is_distributed_weight,
-    materialize_weights_for_forward,
-    materialize_weights_for_backward,
+    materialize_weight_for_forward,
+    materialize_weight_for_backward,
     finalize_weight_grads,
 )
 from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx, GemmParallelModes, dist_group_type
@@ -308,7 +308,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
         weight_param = weight
         if is_distributed_weight(weight):
-            weight = materialize_weights_for_forward([weight])[0]
+            weight = materialize_weight_for_forward(weight)[0]
             out_features = weight.shape[0]
 
         new_weight_workspace = None
@@ -630,7 +630,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ) = restore_from_func_ctx(ctx)
 
             if is_distributed_weight(saved_weight):
-                weight = materialize_weights_for_backward([saved_weight])[0]
+                weight = materialize_weight_for_backward(saved_weight)[0]
             # Restore from weakref to get original weight python object
             # (preserves attributes like main_grad, grad_added_to_main_grad, etc.)
             # Only needed when fuse_wgrad_accumulation is enabled.
@@ -1059,7 +1059,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     wgrad, grad_bias_ = wgrad_gemm(ln_out_total, grad_output)
 
                     if is_distributed_weight(saved_weight):
-                        wgrad = finalize_weight_grads([saved_weight], [wgrad])[0]
+                        wgrad = finalize_weight_grads(saved_weight, [wgrad])[0]
 
                     # Update grad bias if needed
                     if grad_bias is None:

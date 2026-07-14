@@ -56,8 +56,8 @@ from ..distributed import (
 )
 from ..distributed_weight import (
     is_distributed_weight,
-    materialize_weights_for_forward,
-    materialize_weights_for_backward,
+    materialize_weight_for_forward,
+    materialize_weight_for_backward,
     finalize_weight_grads,
 )
 from ..cpp_extensions import (
@@ -411,7 +411,7 @@ def _linear_forward_impl(
     # `args.weight` keeps the sharded-param reference for backward re-gather / grad
     # finalize. No-op for a plain weight.
     if is_distributed_weight(args.weight):
-        weight = materialize_weights_for_forward([args.weight])[0]
+        weight = materialize_weight_for_forward(args.weight)[0]
         # Refresh out_features from the gathered weight (captured sharded above, pre-gather).
         out_features = weight.shape[0]
 
@@ -956,7 +956,7 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
         # Distributed weight (e.g. GTP): re-gather the sharded weight; runs even when
         # requires_dgrad=False so the prev_w prefetch is issued for the next layer's bwd.
         if is_distributed_weight(saved_weight):
-            weight_fp8 = materialize_weights_for_backward([saved_weight])[0]
+            weight_fp8 = materialize_weight_for_backward(saved_weight)[0]
 
         if bwd_args.requires_dgrad:
 
@@ -1258,7 +1258,7 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
                 # Distributed weight (e.g. GTP): reduce-scatter the freshly computed wgrad
                 # (async; overlap with the next layer's bwd via the cascade).
                 if is_distributed_weight(saved_weight):
-                    wgrad = finalize_weight_grads([saved_weight], [wgrad])[0]
+                    wgrad = finalize_weight_grads(saved_weight, [wgrad])[0]
 
                 # Update grad bias if needed
                 if grad_bias is None:

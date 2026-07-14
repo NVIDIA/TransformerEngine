@@ -48,8 +48,8 @@ from ..distributed import (
 )
 from ..distributed_weight import (
     is_distributed_weight,
-    materialize_weights_for_forward,
-    materialize_weights_for_backward,
+    materialize_weight_for_forward,
+    materialize_weight_for_backward,
     finalize_weight_grads,
 )
 from ..cpp_extensions import (
@@ -446,7 +446,7 @@ class _GroupedLinear(torch.autograd.Function):
 
         weight_params = weights
         if is_distributed_weight(weights[0]):
-            weights = materialize_weights_for_forward(weights)
+            weights = materialize_weight_for_forward(weights[0])
 
         # Configure quantizers
         if save_original_input and isinstance(input_quantizers[0], Float8Quantizer):
@@ -1016,7 +1016,7 @@ class _GroupedLinear(torch.autograd.Function):
                 accumulate_wgrad_into_param_main_grad = ctx.fuse_wgrad_accumulation
 
             if is_distributed_weight(origin_weights[0]):
-                weights = materialize_weights_for_backward(origin_weights)
+                weights = materialize_weight_for_backward(origin_weights[0])
 
             if ctx.requires_dgrad:
                 dgrad_gemm_use_split_accumulator = _2X_ACC_DGRAD
@@ -1183,7 +1183,7 @@ class _GroupedLinear(torch.autograd.Function):
                     return wgrad
 
                 if is_distributed_weight(origin_weights[0]):
-                    wgrad_list = finalize_weight_grads(origin_weights, wgrad_list)
+                    wgrad_list = finalize_weight_grads(origin_weights[0], wgrad_list)
                 else:
                     wgrad_list = [
                         handle_custom_ddp_from_mcore(weight, main_grad, wgrad)

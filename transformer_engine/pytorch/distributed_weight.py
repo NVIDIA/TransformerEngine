@@ -16,8 +16,8 @@ import torch
 __all__ = [
     "DistributedWeight",
     "is_distributed_weight",
-    "materialize_weights_for_forward",
-    "materialize_weights_for_backward",
+    "materialize_weight_for_forward",
+    "materialize_weight_for_backward",
     "finalize_weight_grads",
 ]
 
@@ -54,34 +54,31 @@ def is_distributed_weight(weight: Any) -> bool:
     return bool(getattr(weight, "is_distributed_weight", False))
 
 
-def materialize_weights_for_forward(weights: List[Any]) -> List[Any]:
-    """Materialize a weight group for the forward GEMM. Delegates once to the leader (it may
-    coalesce) if distributed, else returns the weights unchanged. Always returns a list.
+def materialize_weight_for_forward(weight: Any) -> List[Any]:
+    """Materialize a (leader) weight for the forward GEMM. If distributed, delegate to it (it may
+    coalesce the whole group and return several tensors); else return it unchanged. Always a list.
     """
-    lead = weights[0]
-    if is_distributed_weight(lead):
-        out = lead.materialize_group_for_forward()
+    if is_distributed_weight(weight):
+        out = weight.materialize_group_for_forward()
         return list(out) if isinstance(out, (list, tuple)) else [out]
-    return list(weights)
+    return [weight]
 
 
-def materialize_weights_for_backward(weights: List[Any]) -> List[Any]:
-    """Backward counterpart of :func:`materialize_weights_for_forward`."""
-    lead = weights[0]
-    if is_distributed_weight(lead):
-        out = lead.materialize_group_for_backward()
+def materialize_weight_for_backward(weight: Any) -> List[Any]:
+    """Backward counterpart of :func:`materialize_weight_for_forward`."""
+    if is_distributed_weight(weight):
+        out = weight.materialize_group_for_backward()
         return list(out) if isinstance(out, (list, tuple)) else [out]
-    return list(weights)
+    return [weight]
 
 
-def finalize_weight_grads(weights: List[Any], wgrads: List[Any]) -> List[Any]:
-    """Post-process the weight grads of a homogeneous group.
+def finalize_weight_grads(weight: Any, wgrads: List[Any]) -> List[Any]:
+    """Post-process the weight grad(s) of a (leader) weight's group.
 
-    Delegates to the group leader when distributed (e.g. reduce-scatter);
-    otherwise returns ``wgrads`` unchanged.
+    Delegates to the weight when distributed (e.g. reduce-scatter); otherwise returns ``wgrads``
+    unchanged.
     """
-    lead = weights[0]
-    if is_distributed_weight(lead):
-        out = lead.finalize_group_grads(wgrads if len(wgrads) > 1 else wgrads[0])
+    if is_distributed_weight(weight):
+        out = weight.finalize_group_grads(wgrads if len(wgrads) > 1 else wgrads[0])
         return list(out) if isinstance(out, (list, tuple)) else [out]
     return list(wgrads)

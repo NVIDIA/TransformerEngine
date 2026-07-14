@@ -15,8 +15,8 @@ import torch
 from transformer_engine.pytorch.distributed_weight import (
     DistributedWeight,
     is_distributed_weight,
-    materialize_weights_for_forward,
-    materialize_weights_for_backward,
+    materialize_weight_for_forward,
+    materialize_weight_for_backward,
     finalize_weight_grads,
 )
 
@@ -72,7 +72,7 @@ def test_is_distributed_weight():
 def test_forward_noop_on_plain_tensor():
     """Plain weights pass through unchanged — the critical non-regression."""
     w = torch.nn.Parameter(torch.randn(4, 4))
-    out = materialize_weights_for_forward([w])
+    out = materialize_weight_for_forward(w)
     assert out == [w]
     assert out[0] is w
 
@@ -80,7 +80,7 @@ def test_forward_noop_on_plain_tensor():
 def test_forward_dispatches_single_weight():
     """Linear (N=1): dispatcher delegates and returns a length-1 list."""
     w = FakeDistributedWeight(group_size=1)
-    out = materialize_weights_for_forward([w])
+    out = materialize_weight_for_forward(w)
     assert isinstance(out, list) and len(out) == 1
     assert torch.equal(out[0], torch.zeros(2, 2))
     # The forward dispatcher owns the forward semantic; the leader is delegated to once.
@@ -90,7 +90,7 @@ def test_forward_dispatches_single_weight():
 def test_forward_dispatches_grouped_weights():
     """GroupedLinear (N=k): one coalesced call, full list returned."""
     w = FakeDistributedWeight(group_size=3)
-    out = materialize_weights_for_forward([w, w, w])
+    out = materialize_weight_for_forward(w)
     assert isinstance(out, list) and len(out) == 3
     # Leader was called exactly once (coalesced), not once per weight.
     assert len(w.calls) == 1
@@ -98,21 +98,21 @@ def test_forward_dispatches_grouped_weights():
 
 def test_backward_dispatch_and_noop():
     w = FakeDistributedWeight(group_size=2)
-    out = materialize_weights_for_backward([w, w])
+    out = materialize_weight_for_backward(w)
     assert len(out) == 2 and torch.equal(out[0], torch.full((2, 2), 10.0))
 
-    plain = [torch.zeros(2), torch.ones(2)]
-    assert materialize_weights_for_backward(plain) == plain
+    plain = torch.zeros(2)
+    assert materialize_weight_for_backward(plain) == [plain]
 
 
 def test_finalize_grads_dispatch_and_noop():
     w = FakeDistributedWeight(group_size=1)
     wgrads = [torch.zeros(2, 2)]
-    out = finalize_weight_grads([w], wgrads)
+    out = finalize_weight_grads(w, wgrads)
     assert len(out) == 1 and torch.equal(out[0], torch.full((2, 2), 100.0))
 
     # No-op path leaves the grads untouched.
-    plain_w = [torch.nn.Parameter(torch.zeros(2))]
+    plain_w = torch.nn.Parameter(torch.zeros(2))
     g = [torch.ones(2)]
     assert finalize_weight_grads(plain_w, g) == g
 

@@ -21,8 +21,8 @@ from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload, star
 from ...cpp_extensions import general_gemm, general_grouped_gemm_for_grouped_tensor
 from ...distributed_weight import (
     is_distributed_weight,
-    materialize_weights_for_forward,
-    materialize_weights_for_backward,
+    materialize_weight_for_forward,
+    materialize_weight_for_backward,
     finalize_weight_grads,
 )
 from ...module.base import _2X_ACC_WGRAD
@@ -636,7 +636,7 @@ def _compute_grad_params(
             # Distributed weight: reduce-scatter the full per-rank wgrads into each sharded
             # main_grad (also fires the Megatron grad-accum hook).
             if is_dist_weight:
-                finalize_weight_grads([weights[0]], w_list)
+                finalize_weight_grads(weights[0], w_list)
 
         # Need to return dummy wgrads for Megatron-LM wgrad fusion if grad is already added
         # (wgrad fusion, or the distributed-weight reduce-scatter above) so it doesn't double-add.
@@ -910,9 +910,9 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         fc2_is_dist = is_distributed_weight(fc2_weight_param)
         assert fc1_is_dist == fc2_is_dist, "FC1/FC2 must share one distributed-weight group."
         if fc1_is_dist:
-            assert not fc1_op.single_grouped_weight and not fc2_op.single_grouped_weight, (
-                "distributed-weight fused grouped-MLP requires single_grouped_weight=False."
-            )
+            assert (
+                not fc1_op.single_grouped_weight and not fc2_op.single_grouped_weight
+            ), "distributed-weight fused grouped-MLP requires single_grouped_weight=False."
             assert fc1_op.weight0.is_routed_expert and fc1_op.weight0.weight_list is not None
             assert fc2_op.weight0.is_routed_expert and fc2_op.weight0.weight_list is not None
 
@@ -994,11 +994,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     None,
                 )
         else:
-            if fc1_is_dist:
-                # All-gather the full per-expert weights (returns a list of N full tensors).
-                fc1_weights = materialize_weights_for_forward([fc1_op.weight0])
-            else:
-                fc1_weights = [getattr(fc1_op, f"weight{idx}") for idx in range(num_groups)]
+            fc1_weights = [getattr(fc1_op, f"weight{idx}") for idx in range(num_groups)]
             quantized_fc1_weights = []
             for idx, weight in enumerate(fc1_weights):
                 quantizer = fc1_op.get_quantizer("forward", 2 * idx + 1)
@@ -1008,6 +1004,40 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 else:
                     quantized_fc1_weights.append(weight)
             grouped_fc1_weight = quantized_fc1_weights
+        if fc1_is_dist:
+            grouped_fc1_weight = materialize_weight_for_forward(grouped_fc1_weight[0])
+
+        # Prepare FC2 grouped weight tensor for fused kernels.
+        if fc2_op.single_grouped_weight:
+            if not isinstance(fc2_op.weight, GroupedTensor):
+                raise RuntimeError(
+                    "FC2 expected GroupedTensor weight with single_grouped_weight=True."
+                )
+            if fc2_op.weight.quantizer is not None:
+                fc2_weight_quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
+                fc2_op.weight.quantizer = fc2_weight_quantizer
+                grouped_fc2_weight = fc2_op.weight
+            else:
+                if fc2_op.weight.rowwise_data is None:
+                    raise RuntimeError("FC2 grouped weight has no rowwise_data to quantize.")
+                fc2_weight_quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
+                grouped_fc2_weight = _group_quantize_for_grouped_mlp(
+                    fc2_op.weight.rowwise_data.view(fc2_op.weight.logical_shape),
+                    fc2_weight_quantizer,
+                    num_groups,
+                    None,
+                )
+        else:
+            fc2_weights = [getattr(fc2_op, f"weight{idx}") for idx in range(num_groups)]
+            quantized_fc2_weights = []
+            for idx, weight in enumerate(fc2_weights):
+                quantizer = fc2_op.get_quantizer("forward", 2 * idx + 1)
+                if not is_quantized_tensor(weight):
+                    quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
+                    quantized_fc2_weights.append(quantizer(weight))
+                else:
+                    quantized_fc2_weights.append(weight)
+            grouped_fc2_weight = quantized_fc2_weights
 
         # Some wrapper-copy paths may drop grouped storage metadata; enforce defaults.
         if isinstance(grouped_fc1_weight, GroupedTensor) and not hasattr(
@@ -1238,41 +1268,8 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         else:
             fc1_kernel_out = self.grouped_gemm_activation_kernel()(**fc1_activation_kwargs)
 
-        # Prepare FC2 grouped weight tensor for fused kernels.
-        if fc2_op.single_grouped_weight:
-            if not isinstance(fc2_op.weight, GroupedTensor):
-                raise RuntimeError(
-                    "FC2 expected GroupedTensor weight with single_grouped_weight=True."
-                )
-            if fc2_op.weight.quantizer is not None:
-                fc2_weight_quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
-                fc2_op.weight.quantizer = fc2_weight_quantizer
-                grouped_fc2_weight = fc2_op.weight
-            else:
-                if fc2_op.weight.rowwise_data is None:
-                    raise RuntimeError("FC2 grouped weight has no rowwise_data to quantize.")
-                fc2_weight_quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
-                grouped_fc2_weight = _group_quantize_for_grouped_mlp(
-                    fc2_op.weight.rowwise_data.view(fc2_op.weight.logical_shape),
-                    fc2_weight_quantizer,
-                    num_groups,
-                    None,
-                )
-        else:
-            if fc2_is_dist:
-                # All-gather the full per-expert weights (returns a list of N full tensors).
-                fc2_weights = materialize_weights_for_forward([fc2_op.weight0])
-            else:
-                fc2_weights = [getattr(fc2_op, f"weight{idx}") for idx in range(num_groups)]
-            quantized_fc2_weights = []
-            for idx, weight in enumerate(fc2_weights):
-                quantizer = fc2_op.get_quantizer("forward", 2 * idx + 1)
-                if not is_quantized_tensor(weight):
-                    quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
-                    quantized_fc2_weights.append(quantizer(weight))
-                else:
-                    quantized_fc2_weights.append(weight)
-            grouped_fc2_weight = quantized_fc2_weights
+        if fc2_is_dist:
+            grouped_fc2_weight = materialize_weight_for_forward(grouped_fc2_weight[0])
         if isinstance(grouped_fc2_weight, GroupedTensor) and not hasattr(
             grouped_fc2_weight, "_with_gemm_swizzled_scales"
         ):
@@ -1777,7 +1774,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         # Distributed weight: forward gathered rowwise; col-AG the columnwise layout the dgrad
         # needs, right before use (one weight live at a time).
         if is_distributed_weight(fc2_op.weight0):
-            grouped_fc2_weight = materialize_weights_for_backward([fc2_op.weight0])
+            grouped_fc2_weight = materialize_weight_for_backward(fc2_op.weight0)
 
         if fc2_op.single_grouped_weight:
             # Clone and swizzle scales for GEMM
@@ -2059,7 +2056,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
 
                 # Distributed weight: col-AG the columnwise FC1 dgrad layout (only when dgrad runs).
                 if is_distributed_weight(fc1_op.weight0):
-                    grouped_fc1_weight = materialize_weights_for_backward([fc1_op.weight0])
+                    grouped_fc1_weight = materialize_weight_for_backward(fc1_op.weight0)
 
                 if fc1_op.single_grouped_weight:
                     # Clone and swizzle scales for GEMM
