@@ -1044,13 +1044,15 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
 }  // namespace fused_attn
 
 using namespace transformer_engine::fused_attn;
-void fused_attn_arbitrary_seqlen_fwd(
-    const FusedAttnConfig &cfg, const Tensor *input_Q, const Tensor *input_K,
-    const Tensor *input_V, const Tensor *input_Bias, const Tensor *input_SoftmaxOffset,
-    Tensor *output_O, NVTETensorPack *Aux_CTX_Tensors, const Tensor *cu_seqlens_q,
-    const Tensor *cu_seqlens_kv, const Tensor *cu_seqlens_q_padded,
-    const Tensor *cu_seqlens_kv_padded, const Tensor *page_table_k, const Tensor *page_table_v,
-    const Tensor *rng_state, Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
+void fused_attn_arbitrary_seqlen_fwd(const FusedAttnConfig &cfg, const Tensor *input_Q,
+                                     const Tensor *input_K, const Tensor *input_V,
+                                     const Tensor *input_Bias, const Tensor *input_SoftmaxOffset,
+                                     Tensor *output_O, NVTETensorPack *Aux_CTX_Tensors,
+                                     const Tensor *cu_seqlens_q, const Tensor *cu_seqlens_kv,
+                                     const Tensor *cu_seqlens_q_padded,
+                                     const Tensor *cu_seqlens_kv_padded, const Tensor *page_table_k,
+                                     const Tensor *page_table_v, const Tensor *rng_state,
+                                     Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
   using namespace transformer_engine;
 
   const size_t batch = cfg.batch_size;
@@ -1191,14 +1193,16 @@ void fused_attn_arbitrary_seqlen_fwd(
   }
 }
 
-void fused_attn_arbitrary_seqlen_bwd(
-    const FusedAttnConfig &cfg, const Tensor *input_Q, const Tensor *input_K,
-    const Tensor *input_V, const Tensor *input_O, const Tensor *input_dO, const Tensor *input_Bias,
-    const Tensor *input_SoftmaxOffset, Tensor *output_S, Tensor *output_dQ, Tensor *output_dK,
-    Tensor *output_dV, Tensor *output_dBias, Tensor *output_dSoftmaxOffset,
-    const Tensor *cu_seqlens_q, const Tensor *cu_seqlens_kv, const Tensor *cu_seqlens_q_padded,
-    const Tensor *cu_seqlens_kv_padded, const Tensor *rng_state, Tensor *workspace,
-    cudaStream_t stream, cudnnHandle_t handle) {
+void fused_attn_arbitrary_seqlen_bwd(const FusedAttnConfig &cfg, const Tensor *input_Q,
+                                     const Tensor *input_K, const Tensor *input_V,
+                                     const Tensor *input_O, const Tensor *input_dO,
+                                     const Tensor *input_Bias, const Tensor *input_SoftmaxOffset,
+                                     Tensor *output_S, Tensor *output_dQ, Tensor *output_dK,
+                                     Tensor *output_dV, Tensor *output_dBias,
+                                     Tensor *output_dSoftmaxOffset, const Tensor *cu_seqlens_q,
+                                     const Tensor *cu_seqlens_kv, const Tensor *cu_seqlens_q_padded,
+                                     const Tensor *cu_seqlens_kv_padded, const Tensor *rng_state,
+                                     Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
   using namespace transformer_engine;
 
   const NVTE_Bias_Type bias_type = cfg.bias_type;

@@ -11,10 +11,10 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_CONFIG_AND_PARAMS_H_
 #define TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_CONFIG_AND_PARAMS_H_
 
+#include <tuple>
+
 #include "common/common.h"
 #include "transformer_engine/fused_attn.h"
-
-#include <tuple>
 
 namespace transformer_engine {
 
@@ -82,54 +82,54 @@ struct FusedAttnConfig {
 
   static constexpr size_t attr_sizes[] = {
       // basic attention knobs
-      sizeof(uint8_t),              // is_training
-      sizeof(uint8_t),              // deterministic
-      sizeof(uint8_t),              // cuda_graph
-      sizeof(uint8_t),              // return_max_logit
-      sizeof(NVTE_Mask_Type),       // attn_mask_type
-      sizeof(NVTE_Bias_Type),       // bias_type
-      sizeof(int64_t),              // window_size_left
-      sizeof(int64_t),              // window_size_right
-      sizeof(uint8_t),              // bottom_right_diagonal
-      sizeof(NVTE_Softmax_Type),    // softmax_type
-      sizeof(NVTEScalingMode),      // scaling_mode
-      sizeof(float),                // dropout
+      sizeof(uint8_t),            // is_training
+      sizeof(uint8_t),            // deterministic
+      sizeof(uint8_t),            // cuda_graph
+      sizeof(uint8_t),            // return_max_logit
+      sizeof(NVTE_Mask_Type),     // attn_mask_type
+      sizeof(NVTE_Bias_Type),     // bias_type
+      sizeof(int64_t),            // window_size_left
+      sizeof(int64_t),            // window_size_right
+      sizeof(uint8_t),            // bottom_right_diagonal
+      sizeof(NVTE_Softmax_Type),  // softmax_type
+      sizeof(NVTEScalingMode),    // scaling_mode
+      sizeof(float),              // dropout
       // data types
-      sizeof(NVTEDType),            // qkv_dtype
-      sizeof(NVTEDType),            // o_dtype
-      sizeof(NVTEDType),            // do_dtype
-      sizeof(NVTEDType),            // dqkv_dtype
+      sizeof(NVTEDType),  // qkv_dtype
+      sizeof(NVTEDType),  // o_dtype
+      sizeof(NVTEDType),  // do_dtype
+      sizeof(NVTEDType),  // dqkv_dtype
       // data and scale layout
-      sizeof(NVTE_QKV_Layout),      // qkv_layout
-      sizeof(NVTE_QKV_Format),      // o_format
-      sizeof(NVTE_QKV_Format),      // do_format
-      sizeof(NVTE_QKV_Layout),      // dqkv_layout
-      sizeof(NVTE_QKV_Format),      // qkv_scale_inv_format
-      sizeof(NVTE_QKV_Format),      // do_scale_inv_format
+      sizeof(NVTE_QKV_Layout),  // qkv_layout
+      sizeof(NVTE_QKV_Format),  // o_format
+      sizeof(NVTE_QKV_Format),  // do_format
+      sizeof(NVTE_QKV_Layout),  // dqkv_layout
+      sizeof(NVTE_QKV_Format),  // qkv_scale_inv_format
+      sizeof(NVTE_QKV_Format),  // do_scale_inv_format
       // attention scaling
-      sizeof(float),                // attn_scale
+      sizeof(float),  // attn_scale
       // tensor dimensions
-      sizeof(size_t),               // batch_size
-      sizeof(size_t),               // num_attn_heads
-      sizeof(size_t),               // num_gqa_groups
-      sizeof(size_t),               // head_dim_qk
-      sizeof(size_t),               // head_dim_v
-      sizeof(size_t),               // max_seqlen_q
-      sizeof(size_t),               // max_seqlen_kv
-      sizeof(size_t),               // num_tokens_q
-      sizeof(size_t),               // num_tokens_kv
+      sizeof(size_t),  // batch_size
+      sizeof(size_t),  // num_attn_heads
+      sizeof(size_t),  // num_gqa_groups
+      sizeof(size_t),  // head_dim_qk
+      sizeof(size_t),  // head_dim_v
+      sizeof(size_t),  // max_seqlen_q
+      sizeof(size_t),  // max_seqlen_kv
+      sizeof(size_t),  // num_tokens_q
+      sizeof(size_t),  // num_tokens_kv
       // paged KV dimensions
-      sizeof(size_t),               // num_pages_k
-      sizeof(size_t),               // num_pages_v
-      sizeof(size_t),               // page_size_k
-      sizeof(size_t),               // page_size_v
-      sizeof(size_t),               // max_pages_per_seq_k
-      sizeof(size_t),               // max_pages_per_seq_v
+      sizeof(size_t),  // num_pages_k
+      sizeof(size_t),  // num_pages_v
+      sizeof(size_t),  // page_size_k
+      sizeof(size_t),  // page_size_v
+      sizeof(size_t),  // max_pages_per_seq_k
+      sizeof(size_t),  // max_pages_per_seq_v
       // bias dimensions
-      sizeof(size_t),               // bias_batch_size
-      sizeof(size_t),               // bias_num_heads
-      sizeof(size_t),               // bias_seqlen_q
-      sizeof(size_t),               // bias_seqlen_kv
+      sizeof(size_t),  // bias_batch_size
+      sizeof(size_t),  // bias_num_heads
+      sizeof(size_t),  // bias_seqlen_q
+      sizeof(size_t),  // bias_seqlen_kv
   };
 
   bool operator<(const FusedAttnConfig &rhs) const {
@@ -139,10 +139,10 @@ struct FusedAttnConfig {
                     qkv_layout, o_format, do_format, dqkv_layout, qkv_scale_inv_format,
                     do_scale_inv_format, attn_scale, batch_size, num_attn_heads, num_gqa_groups,
                     head_dim_qk, head_dim_v, max_seqlen_q, max_seqlen_kv, num_tokens_q,
-                    num_tokens_kv, bucketed_batch_size, bucketed_num_tokens_q, bucketed_num_tokens_kv,
-                    num_pages_k, num_pages_v, page_size_k, page_size_v, max_pages_per_seq_k,
-                    max_pages_per_seq_v, bias_batch_size, bias_num_heads, bias_seqlen_q,
-                    bias_seqlen_kv) <
+                    num_tokens_kv, bucketed_batch_size, bucketed_num_tokens_q,
+                    bucketed_num_tokens_kv, num_pages_k, num_pages_v, page_size_k, page_size_v,
+                    max_pages_per_seq_k, max_pages_per_seq_v, bias_batch_size, bias_num_heads,
+                    bias_seqlen_q, bias_seqlen_kv) <
            std::tie(rhs.is_training, rhs.deterministic, rhs.cuda_graph, rhs.return_max_logit,
                     rhs.attn_mask_type, rhs.bias_type, rhs.window_size_left, rhs.window_size_right,
                     rhs.bottom_right_diagonal, rhs.softmax_type, rhs.scaling_mode, rhs.dropout,
@@ -216,39 +216,39 @@ struct FusedAttnFwdParams {
   cudaStream_t stream = nullptr;
 
   static constexpr size_t attr_sizes[] = {
-      sizeof(NVTETensor),        // Q
-      sizeof(NVTETensor),        // K
-      sizeof(NVTETensor),        // V
-      sizeof(NVTETensor),        // Bias
-      sizeof(NVTETensor),        // SoftmaxOffset
-      sizeof(NVTETensor),        // cu_seqlens_q
-      sizeof(NVTETensor),        // cu_seqlens_kv
-      sizeof(NVTETensor),        // cu_seqlens_q_padded
-      sizeof(NVTETensor),        // cu_seqlens_kv_padded
-      sizeof(NVTETensor),        // page_table_k
-      sizeof(NVTETensor),        // page_table_v
-      sizeof(NVTETensor),        // rng_state
-      sizeof(NVTETensor),        // S
-      sizeof(NVTETensor),        // O
-      sizeof(NVTETensorPack *),  // Aux_CTX_Tensors
-      sizeof(size_t),            // max_seqlen_q
-      sizeof(size_t),            // max_seqlen_kv
-      sizeof(NVTE_QKV_Layout),   // qkv_layout
-      sizeof(NVTE_QKV_Format),   // o_format
-      sizeof(NVTE_QKV_Format),   // qkv_scale_inv_format
-      sizeof(NVTE_Bias_Type),    // bias_type
-      sizeof(NVTE_Mask_Type),    // attn_mask_type
-      sizeof(NVTE_Softmax_Type), // softmax_type
-      sizeof(float),             // attn_scale
-      sizeof(float),             // dropout
-      sizeof(int64_t),           // window_size_left
-      sizeof(int64_t),           // window_size_right
-      sizeof(uint8_t),           // bottom_right_diagonal
-      sizeof(uint8_t),           // is_training
-      sizeof(uint8_t),           // return_max_logit
-      sizeof(uint8_t),           // cuda_graph
-      sizeof(NVTETensor),        // workspace
-      sizeof(cudaStream_t),      // stream
+      sizeof(NVTETensor),         // Q
+      sizeof(NVTETensor),         // K
+      sizeof(NVTETensor),         // V
+      sizeof(NVTETensor),         // Bias
+      sizeof(NVTETensor),         // SoftmaxOffset
+      sizeof(NVTETensor),         // cu_seqlens_q
+      sizeof(NVTETensor),         // cu_seqlens_kv
+      sizeof(NVTETensor),         // cu_seqlens_q_padded
+      sizeof(NVTETensor),         // cu_seqlens_kv_padded
+      sizeof(NVTETensor),         // page_table_k
+      sizeof(NVTETensor),         // page_table_v
+      sizeof(NVTETensor),         // rng_state
+      sizeof(NVTETensor),         // S
+      sizeof(NVTETensor),         // O
+      sizeof(NVTETensorPack *),   // Aux_CTX_Tensors
+      sizeof(size_t),             // max_seqlen_q
+      sizeof(size_t),             // max_seqlen_kv
+      sizeof(NVTE_QKV_Layout),    // qkv_layout
+      sizeof(NVTE_QKV_Format),    // o_format
+      sizeof(NVTE_QKV_Format),    // qkv_scale_inv_format
+      sizeof(NVTE_Bias_Type),     // bias_type
+      sizeof(NVTE_Mask_Type),     // attn_mask_type
+      sizeof(NVTE_Softmax_Type),  // softmax_type
+      sizeof(float),              // attn_scale
+      sizeof(float),              // dropout
+      sizeof(int64_t),            // window_size_left
+      sizeof(int64_t),            // window_size_right
+      sizeof(uint8_t),            // bottom_right_diagonal
+      sizeof(uint8_t),            // is_training
+      sizeof(uint8_t),            // return_max_logit
+      sizeof(uint8_t),            // cuda_graph
+      sizeof(NVTETensor),         // workspace
+      sizeof(cudaStream_t),       // stream
   };
 };
 

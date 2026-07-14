@@ -278,8 +278,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig confi
     return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
   }
 
-  const bool is_fp8 = (cfg.qkv_dtype == NVTEDType::kNVTEFloat8E4M3 ||
-                       cfg.qkv_dtype == NVTEDType::kNVTEFloat8E5M2);
+  const bool is_fp8 =
+      (cfg.qkv_dtype == NVTEDType::kNVTEFloat8E4M3 || cfg.qkv_dtype == NVTEDType::kNVTEFloat8E5M2);
   const bool is_f16_or_bf16 =
       (cfg.qkv_dtype == NVTEDType::kNVTEFloat16 || cfg.qkv_dtype == NVTEDType::kNVTEBFloat16);
 
@@ -490,9 +490,9 @@ void nvte_fused_attn_fwd_v2(NVTEFusedAttnFwdParams params) {
                                     input_cu_seqlens_kv_padded, input_page_table_k,
                                     input_page_table_v, input_rng_state, wkspace, p.stream, handle);
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_FP8) {
-    fused_attn_fp8_fwd(cfg, input_Q, input_K, input_V, input_SoftmaxOffset, input_output_S, output_O,
-                       p.Aux_CTX_Tensors, input_cu_seqlens_q, input_cu_seqlens_kv, input_rng_state,
-                       wkspace, p.stream, handle);
+    fused_attn_fp8_fwd(cfg, input_Q, input_K, input_V, input_SoftmaxOffset, input_output_S,
+                       output_O, p.Aux_CTX_Tensors, input_cu_seqlens_q, input_cu_seqlens_kv,
+                       input_rng_state, wkspace, p.stream, handle);
   } else {
     NVTE_ERROR("Invalid combination of data type and sequence length for fused attention. \n");
   }
@@ -514,7 +514,8 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          int64_t window_size_left, int64_t window_size_right,
                          bool bottom_right_diagonal, NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_fwd);
-  transformer_engine::FusedAttnFwdParams p = transformer_engine::make_default_fused_attn_fwd_params();
+  transformer_engine::FusedAttnFwdParams p =
+      transformer_engine::make_default_fused_attn_fwd_params();
   p.Q = Q;
   p.K = K;
   p.V = V;
@@ -639,12 +640,11 @@ void nvte_fused_attn_bwd_v2(NVTEFusedAttnBwdParams params) {
     if (p.softmax_type != NVTE_VANILLA_SOFTMAX) {
       input_SoftmaxOffset = convertNVTETensorCheck(p.Aux_CTX_Tensors->tensors[i++]);
     }
-    fused_attn_arbitrary_seqlen_bwd(cfg, input_Q, input_K, input_V, input_O, input_dO, input_Bias,
-                                    input_SoftmaxOffset, output_S, output_dQ, output_dK, output_dV,
-                                    output_dBias, output_dSoftmaxOffset, input_cu_seqlens_q,
-                                    input_cu_seqlens_kv, input_cu_seqlens_q_padded,
-                                    input_cu_seqlens_kv_padded, input_rng_state, wkspace, p.stream,
-                                    handle);
+    fused_attn_arbitrary_seqlen_bwd(
+        cfg, input_Q, input_K, input_V, input_O, input_dO, input_Bias, input_SoftmaxOffset,
+        output_S, output_dQ, output_dK, output_dV, output_dBias, output_dSoftmaxOffset,
+        input_cu_seqlens_q, input_cu_seqlens_kv, input_cu_seqlens_q_padded,
+        input_cu_seqlens_kv_padded, input_rng_state, wkspace, p.stream, handle);
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_FP8) {
     size_t i = 0;
     const Tensor *input_M = convertNVTETensorCheck(p.Aux_CTX_Tensors->tensors[i++]);
@@ -683,7 +683,8 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          int64_t window_size_right, bool bottom_right_diagonal, bool deterministic,
                          bool cuda_graph, NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_bwd);
-  transformer_engine::FusedAttnBwdParams p = transformer_engine::make_default_fused_attn_bwd_params();
+  transformer_engine::FusedAttnBwdParams p =
+      transformer_engine::make_default_fused_attn_bwd_params();
   p.Q = Q;
   p.K = K;
   p.V = V;

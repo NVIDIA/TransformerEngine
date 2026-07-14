@@ -202,8 +202,8 @@ void nvte_get_fused_attn_config_attribute(NVTEFusedAttnConfig config,
                                           size_t size_in_bytes, size_t *size_written) {
   using namespace transformer_engine;
 
-  NVTE_CHECK(attr < kNVTEFusedAttnConfigNumAttributes,
-             "Invalid NVTEFusedAttnConfigAttribute (got ", static_cast<int>(attr), ")");
+  NVTE_CHECK(attr < kNVTEFusedAttnConfigNumAttributes, "Invalid NVTEFusedAttnConfigAttribute (got ",
+             static_cast<int>(attr), ")");
   const auto &attr_size = FusedAttnConfig::attr_sizes[attr];
   if (size_written != nullptr) {
     *size_written = attr_size;
@@ -213,8 +213,8 @@ void nvte_get_fused_attn_config_attribute(NVTEFusedAttnConfig config,
   }
   NVTE_CHECK(size_in_bytes >= attr_size,
              "Buffer is too small for fused attention config attribute (attribute ",
-             static_cast<int>(attr), " needs ", attr_size, " bytes, but buffer has ",
-             size_in_bytes, " bytes)");
+             static_cast<int>(attr), " needs ", attr_size, " bytes, but buffer has ", size_in_bytes,
+             " bytes)");
 
   const auto &cfg = *get_fused_attn_config(config);
   switch (attr) {
@@ -354,13 +354,13 @@ void nvte_set_fused_attn_config_attribute(NVTEFusedAttnConfig config,
                                           size_t size_in_bytes) {
   using namespace transformer_engine;
 
-  NVTE_CHECK(attr < kNVTEFusedAttnConfigNumAttributes,
-             "Invalid NVTEFusedAttnConfigAttribute (got ", static_cast<int>(attr), ")");
+  NVTE_CHECK(attr < kNVTEFusedAttnConfigNumAttributes, "Invalid NVTEFusedAttnConfigAttribute (got ",
+             static_cast<int>(attr), ")");
   const auto &attr_size = FusedAttnConfig::attr_sizes[attr];
   NVTE_CHECK(size_in_bytes >= attr_size,
              "Buffer is too small for fused attention config attribute (attribute ",
-             static_cast<int>(attr), " needs ", attr_size, " bytes, but buffer has ",
-             size_in_bytes, " bytes)");
+             static_cast<int>(attr), " needs ", attr_size, " bytes, but buffer has ", size_in_bytes,
+             " bytes)");
   NVTE_CHECK(buf != nullptr, "Invalid buffer (got NULL)");
 
   auto &cfg = *get_fused_attn_config_mutable(config);
@@ -497,7 +497,6 @@ void nvte_set_fused_attn_config_attribute(NVTEFusedAttnConfig config,
 }
 
 NVTEFusedAttnFwdParams nvte_create_fused_attn_fwd_params() {
-
   return new transformer_engine::FusedAttnFwdParams(
       transformer_engine::make_default_fused_attn_fwd_params());
 }

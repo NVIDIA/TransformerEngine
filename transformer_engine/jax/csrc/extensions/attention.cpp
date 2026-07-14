@@ -351,13 +351,12 @@ static void FusedAttnForwardImpl(
 
   auto [backend, _fwd_msg] = GetFusedAttnBackend(
       is_training, input_batch, dtype, dtype, dtype, dtype, dtype, JAXX_Scaling_Mode::NO_SCALING,
-      qkv_layout,
-      NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET, NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET,
-      NVTE_QKV_Layout::NVTE_QKV_Layout_NOT_SET, NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET,
-      NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET, bias_type, mask_type, softmax_type, scaling_factor,
-      dropout_probability, attn_heads, num_gqa_groups, q_max_seqlen, kv_max_seqlen, qk_head_dim,
-      v_head_dim, window_size_left, window_size_right, bottom_right_diagonal, deterministic,
-      bias_batch, bias_heads, q_max_seqlen, kv_max_seqlen);
+      qkv_layout, NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET,
+      NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET, NVTE_QKV_Layout::NVTE_QKV_Layout_NOT_SET,
+      NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET, NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET, bias_type,
+      mask_type, softmax_type, scaling_factor, dropout_probability, attn_heads, num_gqa_groups,
+      q_max_seqlen, kv_max_seqlen, qk_head_dim, v_head_dim, window_size_left, window_size_right,
+      bottom_right_diagonal, deterministic, bias_batch, bias_heads, q_max_seqlen, kv_max_seqlen);
   nvte_populate_rng_state_async(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
 
   /* Auxiliary tensors (to be propagated to the backward pass later) */
@@ -683,13 +682,12 @@ static void FusedAttnBackwardImpl(
   nvte_tensor_pack_create(&aux_input_tensors);
   auto [backend, _bwd_msg] = GetFusedAttnBackend(
       is_training, input_batch, dtype, dtype, dtype, dtype, dtype, JAXX_Scaling_Mode::NO_SCALING,
-      qkv_layout,
-      NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET, NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET,
-      NVTE_QKV_Layout::NVTE_QKV_Layout_NOT_SET, NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET,
-      NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET, bias_type, mask_type, softmax_type, scaling_factor,
-      dropout_probability, attn_heads, num_gqa_groups, q_max_seqlen, kv_max_seqlen, qk_head_dim,
-      v_head_dim, window_size_left, window_size_right, bottom_right_diagonal, deterministic,
-      bias_batch, bias_heads, q_max_seqlen, kv_max_seqlen);
+      qkv_layout, NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET,
+      NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET, NVTE_QKV_Layout::NVTE_QKV_Layout_NOT_SET,
+      NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET, NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET, bias_type,
+      mask_type, softmax_type, scaling_factor, dropout_probability, attn_heads, num_gqa_groups,
+      q_max_seqlen, kv_max_seqlen, qk_head_dim, v_head_dim, window_size_left, window_size_right,
+      bottom_right_diagonal, deterministic, bias_batch, bias_heads, q_max_seqlen, kv_max_seqlen);
   PrepareFusedAttnBackwardAuxTensors(&aux_input_tensors, input_batch, bias_batch, attn_heads,
                                      bias_heads, q_max_seqlen, kv_max_seqlen, dtype, backend,
                                      softmax_aux, rng_state, bias, softmax_offset);

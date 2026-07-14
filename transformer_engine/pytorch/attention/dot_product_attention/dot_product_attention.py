@@ -1591,7 +1591,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                 attn_mask_type=attn_mask_type,
                 window_size=window_size,
                 bottom_right_diagonal=bottom_right_diagonal,
-                alibi_slopes_shape=alibi_slopes.shape if core_attention_bias_type == "alibi" and alibi_slopes is not None else None,
+                alibi_slopes_shape=(
+                    alibi_slopes.shape
+                    if core_attention_bias_type == "alibi" and alibi_slopes is not None
+                    else None
+                ),
                 core_attention_bias_type=core_attention_bias_type,
                 core_attention_bias_shape=core_attention_bias_shape,
                 core_attention_bias_requires_grad=(

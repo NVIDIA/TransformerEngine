@@ -164,7 +164,9 @@ class FusedAttnHelper:
         if self.attn_bias_type == AttnBiasType.POST_SCALE_BIAS:
             bias_batch = self.bias_batch if self.bias_batch is not None else self.batch_size
             bias_heads = self.bias_heads if self.bias_heads is not None else self.q_num_heads
-            bias_seqlen_q = self.bias_seqlen_q if self.bias_seqlen_q is not None else self.q_max_seqlen
+            bias_seqlen_q = (
+                self.bias_seqlen_q if self.bias_seqlen_q is not None else self.q_max_seqlen
+            )
             bias_seqlen_kv = (
                 self.bias_seqlen_kv if self.bias_seqlen_kv is not None else self.kv_max_seqlen
             )

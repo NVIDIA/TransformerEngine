@@ -16,13 +16,14 @@ namespace fused_attn {
 using namespace transformer_engine;
 
 // fused attention FWD FP8 with FE 1.0+
-void fused_attn_fp8_fwd_impl(
-    const FusedAttnConfig &cfg, void* devPtrQ, void* devPtrK, void* devPtrV,
-    void* devPtrSoftmaxOffset, void* devPtrM, void* devPtrO, void* devPtrDescaleQ,
-    void* devPtrDescaleK, void* devPtrDescaleV, void* devPtrDescaleS, void* devPtrScaleS,
-    void* devPtrScaleO,     void* devPtrAmaxO, void* devPtrAmaxS, void* devPtrcuSeqlensQ,
-    void* devPtrcuSeqlensKV, void* devPtrDropoutSeed, void* devPtrDropoutOffset,
-    void* workspace, size_t* workspace_size, cudaStream_t stream, cudnnHandle_t handle) {
+void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* devPtrK,
+                             void* devPtrV, void* devPtrSoftmaxOffset, void* devPtrM, void* devPtrO,
+                             void* devPtrDescaleQ, void* devPtrDescaleK, void* devPtrDescaleV,
+                             void* devPtrDescaleS, void* devPtrScaleS, void* devPtrScaleO,
+                             void* devPtrAmaxO, void* devPtrAmaxS, void* devPtrcuSeqlensQ,
+                             void* devPtrcuSeqlensKV, void* devPtrDropoutSeed,
+                             void* devPtrDropoutOffset, void* workspace, size_t* workspace_size,
+                             cudaStream_t stream, cudnnHandle_t handle) {
   using namespace transformer_engine;
   const auto cudnn_runtime_version = cudnnGetVersion();
 
@@ -435,7 +436,7 @@ void fused_attn_fp8_fwd_impl(
 
 // fused attention BWD FP8 with FE 1.0+
 void fused_attn_fp8_bwd_impl(
-    const FusedAttnConfig &cfg, void* devPtrQ, void* devPtrK, void* devPtrV, void* devPtrM,
+    const FusedAttnConfig& cfg, void* devPtrQ, void* devPtrK, void* devPtrV, void* devPtrM,
     void* devPtrO, void* devPtrdO, void* devPtrSoftmaxOffset, void* devPtrdQ, void* devPtrdK,
     void* devPtrdV, void* devPtrdSoftmaxOffset, void* devPtrDescaleQ, void* devPtrDescaleK,
     void* devPtrDescaleV, void* devPtrDescaleO, void* devPtrDescaledO, void* devPtrDescaleS,
@@ -1070,11 +1071,12 @@ void fused_attn_fp8_bwd_impl(
 }  // namespace fused_attn
 
 // fused attention FWD FP8 with separate Q, K, V
-void fused_attn_fp8_fwd(
-    const FusedAttnConfig &cfg, const Tensor* input_Q, const Tensor* input_K, const Tensor* input_V,
-    const Tensor* input_SoftmaxOffset, Tensor* input_output_S, Tensor* output_O,
-    NVTETensorPack* Aux_CTX_Tensors, const Tensor* cu_seqlens_q, const Tensor* cu_seqlens_kv,
-    const Tensor* rng_state, Tensor* workspace, cudaStream_t stream, cudnnHandle_t handle) {
+void fused_attn_fp8_fwd(const FusedAttnConfig& cfg, const Tensor* input_Q, const Tensor* input_K,
+                        const Tensor* input_V, const Tensor* input_SoftmaxOffset,
+                        Tensor* input_output_S, Tensor* output_O, NVTETensorPack* Aux_CTX_Tensors,
+                        const Tensor* cu_seqlens_q, const Tensor* cu_seqlens_kv,
+                        const Tensor* rng_state, Tensor* workspace, cudaStream_t stream,
+                        cudnnHandle_t handle) {
   using namespace transformer_engine;
 
   const size_t batch = cfg.batch_size;
@@ -1176,13 +1178,14 @@ void fused_attn_fp8_fwd(
   }
 }
 // fused attention BWD FP8 with separate Q, K, V
-void fused_attn_fp8_bwd(
-    const FusedAttnConfig &cfg, const Tensor* input_Q, const Tensor* input_K, const Tensor* input_V,
-    const Tensor* input_O, const Tensor* input_dO, const Tensor* input_dO_f16, const Tensor* input_M,
-    const Tensor* input_S, const Tensor* input_SoftmaxOffset, Tensor* input_output_dP,
-    const Tensor* output_dQ, const Tensor* output_dK, const Tensor* output_dV,
-    Tensor* output_dSoftmaxOffset, const Tensor* cu_seqlens_q, const Tensor* cu_seqlens_kv,
-    const Tensor* rng_state, Tensor* workspace, cudaStream_t stream, cudnnHandle_t handle) {
+void fused_attn_fp8_bwd(const FusedAttnConfig& cfg, const Tensor* input_Q, const Tensor* input_K,
+                        const Tensor* input_V, const Tensor* input_O, const Tensor* input_dO,
+                        const Tensor* input_dO_f16, const Tensor* input_M, const Tensor* input_S,
+                        const Tensor* input_SoftmaxOffset, Tensor* input_output_dP,
+                        const Tensor* output_dQ, const Tensor* output_dK, const Tensor* output_dV,
+                        Tensor* output_dSoftmaxOffset, const Tensor* cu_seqlens_q,
+                        const Tensor* cu_seqlens_kv, const Tensor* rng_state, Tensor* workspace,
+                        cudaStream_t stream, cudnnHandle_t handle) {
   using namespace transformer_engine;
 
   const NVTE_QKV_Layout dqkv_layout = cfg.dqkv_layout;
@@ -1268,11 +1271,12 @@ void fused_attn_fp8_bwd(
     fused_attn::fused_attn_fp8_bwd_impl(
         cfg, devPtrQ, devPtrK, devPtrV, devPtrM, devPtrO, devPtrdO, devPtrSoftmaxOffset, devPtrdQ,
         devPtrdK, devPtrdV, devPtrdSoftmaxOffset, devPtrDescaleQ, devPtrDescaleK, devPtrDescaleV,
-        devPtrDescaleO, devPtrDescaledO, devPtrDescaleS, devPtrDescaledP, devPtrScaleS, devPtrScaledP,
-        devPtrScaledQ, devPtrScaledK, devPtrScaledV, devPtrAmaxdP, devPtrAmaxdQ, devPtrAmaxdK,
-        devPtrAmaxdV, devPtrQ_t, devPtrK_t, devPtrdO_f16, devPtrdO_t, devPtrDescaleQ_t,
-        devPtrDescaleK_t, devPtrDescaledO_t, devPtrcuSeqlensQ, devPtrcuSeqlensKV, devPtrDropoutSeed,
-        devPtrDropoutOffset, workspace->data.dptr, &workspace_size, stream, handle);
+        devPtrDescaleO, devPtrDescaledO, devPtrDescaleS, devPtrDescaledP, devPtrScaleS,
+        devPtrScaledP, devPtrScaledQ, devPtrScaledK, devPtrScaledV, devPtrAmaxdP, devPtrAmaxdQ,
+        devPtrAmaxdK, devPtrAmaxdV, devPtrQ_t, devPtrK_t, devPtrdO_f16, devPtrdO_t,
+        devPtrDescaleQ_t, devPtrDescaleK_t, devPtrDescaledO_t, devPtrcuSeqlensQ, devPtrcuSeqlensKV,
+        devPtrDropoutSeed, devPtrDropoutOffset, workspace->data.dptr, &workspace_size, stream,
+        handle);
   } else {
     NVTE_ERROR("FP8 fused attention only supports dqkv_format=BSHD, SBHD, or BHSD.\n");
   }
@@ -1290,7 +1294,7 @@ void fused_attn_fp8_bwd(
   }
 }
 
-std::string is_supported_fp8_fwd(const FusedAttnConfig &cfg, cudnnHandle_t handle) {
+std::string is_supported_fp8_fwd(const FusedAttnConfig& cfg, cudnnHandle_t handle) {
   size_t workspace_size = 0;
   try {
     fused_attn::fused_attn_fp8_fwd_impl(
@@ -1312,7 +1316,7 @@ std::string is_supported_fp8_fwd(const FusedAttnConfig &cfg, cudnnHandle_t handl
   }
 }
 
-std::string is_supported_fp8_bwd(const FusedAttnConfig &cfg, cudnnHandle_t handle) {
+std::string is_supported_fp8_bwd(const FusedAttnConfig& cfg, cudnnHandle_t handle) {
   size_t workspace_size = 0;
   try {
     fused_attn::fused_attn_fp8_bwd_impl(
