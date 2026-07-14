@@ -433,7 +433,19 @@ if (NVTE_WITH_CUSOLVERMP)
                  NAMES nccl libnccl
                  PATH_SUFFIXES lib
                  REQUIRED)
-    target_link_libraries(transformer_engine PRIVATE ${NCCL_LIB} ${CUSOLVERMP_LIB})
+    # cuSolverMp depends on cuSOLVER, which in turn carries a link-time dependency
+    # on cuSPARSE (libcusolver.so -> NEEDED libcusparse.so.<major>). Link cuSPARSE
+    # explicitly here to satisfy the dependency instead of failing with an obscure
+    # "undefined reference to cusparse*" error at link time.
+    if (NOT CUDA_cusparse_LIBRARY)
+      message(FATAL_ERROR
+              "NVTE_WITH_CUSOLVERMP=ON requires cuSPARSE (a dependency of cuSOLVER / "
+              "cuSolverMp), but it was not found in the CUDA toolkit at "
+              "${CUDAToolkit_LIBRARY_DIR}. Install the cuSPARSE runtime and development "
+              "files (e.g. the libcusparse-dev package or the "
+              "nvidia-cusparse-cu${CUDAToolkit_VERSION_MAJOR} wheel) and rebuild.")
+    endif()
+    target_link_libraries(transformer_engine PRIVATE ${NCCL_LIB} ${CUSOLVERMP_LIB} CUDA::cusparse)
     message(STATUS "Using cuSolverMp at: ${CUSOLVERMP_DIR}")
 endif()
 
