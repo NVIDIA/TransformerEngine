@@ -292,6 +292,8 @@ class activation_recompute_forward(AbstractContextManager, ContextDecorator):
     def __exit__(self, *exc_details):
         global _FP8_ACTIVATION_RECOMPUTE_ENABLED, _FP8_ACTIVATION_RECOMPUTE_PHASE
         if self.activation_recompute and self.recompute_phase:
+            # Only recompute restores outer ownership. After the original forward, it must remain
+            # consumed or reserved so later checkpoint frames cannot claim it.
             qstate = FP8GlobalStateManager.quantization_state
             qstate.is_first_fp8_module = self._previous_is_first_fp8_module
         _FP8_ACTIVATION_RECOMPUTE_ENABLED = self._previous_recompute_enabled

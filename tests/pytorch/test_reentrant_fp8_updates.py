@@ -41,8 +41,7 @@ def test_delayed_scaling_updates_once_per_autocast(
     counts = {"forward": 0, "backward": 0}
     original_update = FP8GlobalStateManager.reduce_and_update_fp8_tensors
 
-    def counted_update(cls, forward=True):
-        del cls
+    def counted_update(_cls, forward=True):
         counts["forward" if forward else "backward"] += 1
         return original_update(forward=forward)
 
@@ -156,4 +155,4 @@ def test_reentrant_checkpoint_gradients_match_uncheckpointed():
     reference = run(checkpoint=False)
     checkpointed = run(checkpoint=True)
     for actual, expected in zip(checkpointed, reference):
-        torch.testing.assert_close(actual, expected, rtol=0.125, atol=0.0675)
+        torch.testing.assert_close(actual, expected, rtol=0.05, atol=0.01)
