@@ -170,7 +170,7 @@ class IdentityTensor(IdentityTensorStorage, QuantizedTensor):
 
     def detach(self) -> "IdentityTensor":
         # pylint: disable=missing-function-docstring
-        return IdentityTensor.make_like(self)
+        return self._wrap_data_view(self._hp_data.detach(), requires_grad=False)
 
     def clone(self) -> "IdentityTensor":
         # pylint: disable=missing-function-docstring
@@ -182,6 +182,8 @@ class IdentityTensor(IdentityTensorStorage, QuantizedTensor):
             quantizer=self._quantizer,
             requires_grad=self.requires_grad,
             device=self.device,
+            stride=data.stride(),
+            storage_offset=data.storage_offset(),
         )
 
     def contiguous(
@@ -230,15 +232,37 @@ class IdentityTensor(IdentityTensorStorage, QuantizedTensor):
             )
         return out, all_gather_outputs
 
-    def _wrap_data_view(self, data: torch.Tensor) -> "IdentityTensor":
+    def _wrap_data_view(
+        self, data: torch.Tensor, *, requires_grad: Optional[bool] = None
+    ) -> "IdentityTensor":
+        requires_grad = self.requires_grad if requires_grad is None else requires_grad
         return IdentityTensor(
             shape=data.shape,
             dtype=self.dtype,
             hp_data=data,
             quantizer=self._quantizer,
-            requires_grad=self.requires_grad,
+            requires_grad=requires_grad,
             device=data.device,
+            stride=data.stride(),
+            storage_offset=data.storage_offset(),
         )
+
+    @classmethod
+    def _delegate_view_op(cls, func, tensor, args, kwargs):
+        """Apply an alias-preserving view op to the held tensor and rewrap it."""
+
+        result = func(tensor._hp_data, *args[1:], **kwargs)
+
+        def _wrap(value):
+            if isinstance(value, torch.Tensor):
+                return tensor._wrap_data_view(value)
+            return value
+
+        if isinstance(result, tuple):
+            return tuple(_wrap(value) for value in result)
+        if isinstance(result, list):
+            return [_wrap(value) for value in result]
+        return _wrap(result)
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
@@ -251,51 +275,21 @@ class IdentityTensor(IdentityTensorStorage, QuantizedTensor):
         if func == aten.clone.default:
             return args[0].clone()
 
-        if func == aten.view.default:
-            tensor = args[0]
-            shape = args[1]
-            if list(shape) == list(tensor.shape):
-                return IdentityTensor.make_like(tensor)
-            return tensor._wrap_data_view(tensor._hp_data.view(*shape))
-
-        if func == aten.split.Tensor:
-            tensor = args[0]
-            split_size = args[1]
-            dim = kwargs.get("dim", args[2] if len(args) > 2 else 0)
-            return [
-                tensor._wrap_data_view(piece)
-                for piece in torch.split(tensor._hp_data, split_size, dim=dim)
-            ]
-
-        if func == aten.as_strided.default:
-            tensor = args[0]
-            shape = args[1]
-            strides = args[2]
-            storage_offset = kwargs.get("storage_offset", args[3] if len(args) > 3 else 0)
-            if (
-                tuple(shape) == tuple(tensor.shape)
-                and tuple(strides) == tuple(tensor.stride())
-                and storage_offset == tensor.storage_offset()
-            ):
-                return IdentityTensor.make_like(tensor)
-            return tensor._wrap_data_view(
-                torch.as_strided(tensor._hp_data, shape, strides, storage_offset)
-            )
-
-        if func == aten.slice.Tensor:
-            tensor = args[0]
-            dim = args[1]
-            start = args[2]
-            end = args[3]
-            step = args[4] if len(args) > 4 else 1
-            if start == 0 and end == tensor.size(dim) and step == 1:
-                return IdentityTensor.make_like(tensor)
-            return tensor._wrap_data_view(aten.slice.Tensor(tensor._hp_data, dim, start, end, step))
+        if func in (
+            aten.view.default,
+            aten.split.Tensor,
+            aten.as_strided.default,
+            aten.slice.Tensor,
+        ):
+            # Preserve optional arguments exactly; omitted as_strided offset
+            # means reuse the input view's current storage offset, not zero.
+            return cls._delegate_view_op(func, args[0], args, kwargs)
 
         if func == aten.copy_.default:
             dst, src = args[0], args[1]
-            if isinstance(dst, IdentityTensor) and isinstance(src, IdentityTensor):
-                dst._hp_data.copy_(src._hp_data, *args[2:], **kwargs)
+            if isinstance(dst, IdentityTensor):
+                src_data = src._hp_data if isinstance(src, IdentityTensor) else src
+                dst._hp_data.copy_(src_data, *args[2:], **kwargs)
                 return dst
 
         if func == aten.new_zeros.default:

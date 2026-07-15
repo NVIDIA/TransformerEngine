@@ -17,7 +17,6 @@ import torch.distributed as dist
 from torch import nn
 
 import transformer_engine.pytorch as te
-import transformer_engine_torch as tex
 from transformer_engine.common import recipe as te_recipe
 from transformer_engine.pytorch.custom_recipes.quantization_factory_base import (
     nvfp4_quantizer_factory,
@@ -55,11 +54,11 @@ LOSS_FN = nn.MSELoss()
 # Factories stay small; these tests target TP/SP plumbing.
 
 
-def _make_fp8_current_quantizer(*, fp8_dtype=tex.DType.kFloat8E4M3):
+def _make_fp8_current_quantizer(*, fp8_dtype=te.DType.kFloat8E4M3):
     return Float8CurrentScalingQuantizer(fp8_dtype=fp8_dtype, device="cuda")
 
 
-def _make_mxfp8_quantizer(*, fp8_dtype=tex.DType.kFloat8E4M3):
+def _make_mxfp8_quantizer(*, fp8_dtype=te.DType.kFloat8E4M3):
     return MXFP8Quantizer(fp8_dtype=fp8_dtype)
 
 
@@ -72,7 +71,7 @@ def _hybrid_fp8_qfactory(role):
             columnwise_quantizer=_make_fp8_current_quantizer(),
         )
     if is_linear and role.tensor_type in ("grad_output", "grad_input"):
-        return _make_fp8_current_quantizer(fp8_dtype=tex.DType.kFloat8E5M2)
+        return _make_fp8_current_quantizer(fp8_dtype=te.DType.kFloat8E5M2)
     return _make_fp8_current_quantizer()
 
 

@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterable, Literal, Optional, Tuple
 import torch
 
 from .storage.hybrid_tensor_storage import HybridQuantizedTensorStorage
+from .storage.identity_tensor_storage import IdentityTensorStorage
 from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantizer
 
 aten = torch.ops.aten
@@ -846,6 +847,52 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
             quantizer=tensor._quantizer,
         )
 
+    @staticmethod
+    def _new_zeroed_sub_storage(
+        sub_storage: QuantizedTensorStorage,
+        shape: torch.Size,
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+        pin_memory: bool,
+    ) -> QuantizedTensorStorage:
+        """Allocate and initialize a zero sub-storage without touching live state."""
+
+        try:
+            quantizer = sub_storage._get_quantizer().copy()
+            out = quantizer.make_empty(
+                shape,
+                dtype=dtype,
+                device=device,
+                requires_grad=False,
+                pin_memory=pin_memory,
+            )
+        except NotImplementedError as exc:
+            raise NotImplementedError(
+                "HybridQuantizedTensor.new_zeros cannot construct zero-initialized "
+                f"{type(sub_storage).__name__} storage"
+            ) from exc
+
+        if not isinstance(out, type(sub_storage)):
+            raise NotImplementedError(
+                "HybridQuantizedTensor.new_zeros did not preserve sub-storage format: "
+                f"expected {type(sub_storage).__name__}, got {type(out).__name__}"
+            )
+
+        buffers, storage = out.prepare_for_saving()
+        try:
+            with torch.no_grad():
+                for buffer in buffers:
+                    if buffer is not None:
+                        buffer.zero_()
+        finally:
+            leftover = storage.restore_from_saved(buffers)
+        if leftover:
+            raise RuntimeError(
+                f"{type(out).__name__}.restore_from_saved did not consume all buffers"
+            )
+        return out
+
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
         if kwargs is None:
@@ -1006,14 +1053,82 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
         # ── FSDP2: new_zeros ─────────────────────────────────────────
         if func == aten.new_zeros.default:
             tensor = args[0]
-            new_shape = args[1]
-            # FSDP2 allocates new_zeros buffers as all-gather destinations
-            # that are immediately overwritten by copy_. Use make_empty
-            # (uninitialized storage with the right container shape/fields).
-            return tensor._quantizer.make_empty(
-                new_shape,
-                dtype=tensor.dtype,
-                device=tensor.device,
+            new_shape = torch.Size(args[1])
+            if tensor._rowwise_storage is None and tensor._columnwise_storage is None:
+                raise RuntimeError(
+                    "HybridQuantizedTensor.new_zeros requires at least one present sub-storage"
+                )
+            dtype = kwargs.get("dtype") or tensor.dtype
+            device = torch.device(kwargs.get("device") or tensor.device)
+            layout = kwargs.get("layout")
+            pin_memory = bool(kwargs.get("pin_memory"))
+            if layout is not None and layout != torch.strided:
+                raise NotImplementedError(
+                    "HybridQuantizedTensor.new_zeros only supports torch.strided layout"
+                )
+
+            supported_quantized_dtypes = (torch.float32, torch.float16, torch.bfloat16)
+            for direction, sub_storage in (
+                ("rowwise", tensor._rowwise_storage),
+                ("columnwise", tensor._columnwise_storage),
+            ):
+                if sub_storage is None or isinstance(sub_storage, IdentityTensorStorage):
+                    continue
+                if dtype not in supported_quantized_dtypes:
+                    raise TypeError(
+                        "HybridQuantizedTensor.new_zeros only supports float32, float16, or "
+                        f"bfloat16 with a {direction} {type(sub_storage).__name__}; got {dtype}."
+                    )
+
+            row = (
+                cls._new_zeroed_sub_storage(
+                    tensor._rowwise_storage,
+                    new_shape,
+                    dtype=dtype,
+                    device=device,
+                    pin_memory=pin_memory,
+                )
+                if tensor._rowwise_storage is not None
+                else None
+            )
+            col = (
+                cls._new_zeroed_sub_storage(
+                    tensor._columnwise_storage,
+                    new_shape,
+                    dtype=dtype,
+                    device=device,
+                    pin_memory=pin_memory,
+                )
+                if tensor._columnwise_storage is not None
+                else None
+            )
+
+            # The source's parent usage flags are mutable and may no longer
+            # describe its surviving sub-storages. Give the result an isolated
+            # parent whose dynamic usage matches what was actually allocated;
+            # otherwise a later copy_ from a plain tensor can silently skip a
+            # present direction. Bind its children to copies of the newly
+            # allocated storage quantizers so their format/state stays coherent.
+            quantizer = tensor._quantizer.copy()
+            if row is not None:
+                quantizer.rowwise_quantizer = row._get_quantizer().copy()
+                quantizer.rowwise_quantizer.set_usage(rowwise=True, columnwise=False)
+            if col is not None:
+                quantizer.columnwise_quantizer = col._get_quantizer().copy()
+                quantizer.columnwise_quantizer.set_usage(rowwise=False, columnwise=True)
+            quantizer.set_usage(
+                rowwise=row is not None,
+                columnwise=col is not None,
+            )
+
+            return HybridQuantizedTensor(
+                shape=new_shape,
+                dtype=dtype,
+                rowwise_storage=row,
+                columnwise_storage=col,
+                quantizer=quantizer,
+                requires_grad=False,
+                device=device,
             )
 
         # ── FSDP2: clone ─────────────────────────────────────────────

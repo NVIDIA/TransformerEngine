@@ -30,7 +30,6 @@ class IdentityTensorStorage(QuantizedTensorStorage):
     """
 
     _hp_data: Optional[torch.Tensor]
-    _quantizer: Optional[Quantizer]
 
     def __new__(
         cls,
@@ -103,7 +102,9 @@ class IdentityTensorStorage(QuantizedTensorStorage):
         """Return the held high-precision tensor (no-op dequantization)."""
         if self._hp_data is None:
             raise RuntimeError("IdentityTensorStorage has no data to dequantize")
-        if dtype is not None and self._hp_data.dtype != dtype:
+        if dtype is None:
+            dtype = self._dtype
+        if self._hp_data.dtype != dtype:
             return self._hp_data.to(dtype)
         return self._hp_data
 

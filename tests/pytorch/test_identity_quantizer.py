@@ -268,11 +268,9 @@ class TestIdentityQuantizerUnit:
 
     def test_grouped_split_rejects_mixed_identity_and_quantized_operands(self):
         from transformer_engine.pytorch.module.grouped_linear import (
-            _split_quantize_with_identity_fallback,
+            _validate_grouped_quantizer_list,
         )
 
-        x = torch.empty(64, 64, dtype=torch.bfloat16)
-        m_splits = [32, 32]
         cases = [
             [IdentityQuantizer(), _mxfp8(tex.DType.kFloat8E4M3)],
             [
@@ -288,13 +286,8 @@ class TestIdentityQuantizerUnit:
         ]
 
         for quantizers in cases:
-            with pytest.raises(ValueError, match="mixes Identity-backed and non-Identity-backed"):
-                _split_quantize_with_identity_fallback(
-                    x,
-                    m_splits,
-                    quantizers,
-                    activation_dtype=torch.bfloat16,
-                )
+            with pytest.raises(ValueError, match="mix Identity-backed and quantized"):
+                _validate_grouped_quantizer_list(quantizers, operand_name="input")
 
     def test_hybrid_split_forwards_disable_bulk_allocation_to_both_directions(self, monkeypatch):
         import transformer_engine.pytorch.module.grouped_linear as grouped_linear
@@ -350,9 +343,9 @@ class TestIdentityQuantizerUnit:
         calls = []
 
         def fake_hybrid_split_quantize(
-            tensor, m_splits, quantizers, *, disable_bulk_allocation=False
+            tensor, m_splits, quantizers, *, disable_bulk_allocation=False, **kwargs
         ):
-            del tensor, m_splits, quantizers
+            del tensor, m_splits, quantizers, kwargs
             calls.append(disable_bulk_allocation)
             raise StopAfterFlagCapture("captured hybrid split kwargs")
 
@@ -387,7 +380,7 @@ class TestIdentityQuantizerUnit:
         x = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
         m_splits = torch.tensor([32, 32], device="cuda", dtype=torch.int32)
 
-        with pytest.raises(ValueError, match="mixes Identity-backed and non-Identity-backed"):
+        with pytest.raises(ValueError, match="mix Identity-backed and quantized"):
             with te.autocast(enabled=True, recipe=CustomRecipe(qfactory=qfactory)):
                 model(x, m_splits=m_splits)
 
@@ -598,6 +591,27 @@ class TestIdentityQuantizerUnit:
         assert dequantized.dtype == torch.bfloat16
         torch.testing.assert_close(dequantized, x.to(torch.bfloat16), rtol=0.0, atol=0.0)
 
+    def test_storage_dequantize_defaults_to_nominal_dtype(self):
+        payload = torch.randn(4, 8, dtype=torch.float32)
+        storage = IdentityTensorStorage(
+            hp_data=payload,
+            fake_dtype=torch.bfloat16,
+        )
+
+        default = storage.dequantize()
+        assert default.dtype == torch.bfloat16
+        torch.testing.assert_close(default, payload.to(torch.bfloat16), rtol=0.0, atol=0.0)
+
+        explicit = storage.dequantize(dtype=torch.float16)
+        assert explicit.dtype == torch.float16
+        torch.testing.assert_close(explicit, payload.to(torch.float16), rtol=0.0, atol=0.0)
+
+        same_dtype_storage = IdentityTensorStorage(
+            hp_data=payload,
+            fake_dtype=torch.float32,
+        )
+        assert same_dtype_storage.dequantize() is payload
+
     def test_update_usage_is_noop(self):
         x = torch.randn(4, 8, device="cuda", dtype=torch.bfloat16)
         q = IdentityQuantizer()
@@ -662,6 +676,85 @@ class TestIdentityQuantizerUnit:
         dst = IdentityQuantizer().make_empty(x.shape, dtype=x.dtype, device="cuda")
         dst.copy_(t)
         torch.testing.assert_close(dst.dequantize(), x, rtol=0.0, atol=0.0)
+
+    def test_view_ops_preserve_offsets_strides_and_aliasing(self):
+        base = torch.arange(24, device="cuda", dtype=torch.float32).reshape(6, 4)
+        tensor = IdentityQuantizer()(base)
+
+        sliced = torch.ops.aten.slice.Tensor(tensor, 0, 2, 6, 1)
+        omitted_offset = torch.ops.aten.as_strided.default(
+            sliced,
+            [2, 4],
+            [4, 1],
+        )
+        explicit_offset = torch.ops.aten.as_strided.default(
+            sliced,
+            [2, 4],
+            [4, 1],
+            0,
+        )
+        torch.testing.assert_close(omitted_offset.dequantize(), base[2:4], rtol=0.0, atol=0.0)
+        torch.testing.assert_close(explicit_offset.dequantize(), base[:2], rtol=0.0, atol=0.0)
+        assert sliced.storage_offset() == base[2:].storage_offset()
+        assert omitted_offset.storage_offset() == base[2:].storage_offset()
+        assert explicit_offset.storage_offset() == 0
+
+        noncontiguous = torch.ops.aten.slice.Tensor(tensor, 1, 0, 4, 2)
+        assert noncontiguous.stride() == base[:, ::2].stride()
+        assert noncontiguous.storage_offset() == base[:, ::2].storage_offset()
+        replacement = torch.full_like(base[:, ::2], -3)
+        noncontiguous.copy_(replacement)
+        torch.testing.assert_close(base[:, ::2], replacement, rtol=0.0, atol=0.0)
+
+        pieces = torch.split(tensor, 2, dim=0)
+        piece_value = torch.full_like(base[:2], 7)
+        pieces[0].copy_(piece_value)
+        torch.testing.assert_close(base[:2], piece_value, rtol=0.0, atol=0.0)
+
+    def test_detach_and_clone_preserve_view_metadata(self):
+        base = torch.arange(24, device="cuda", dtype=torch.float32).reshape(6, 4)
+        tensor = IdentityQuantizer()(base)
+
+        offset_view = torch.ops.aten.slice.Tensor(tensor, 0, 2, 6, 1)
+        detached = offset_view.detach()
+        assert detached.stride() == detached._hp_data.stride() == offset_view.stride()
+        assert detached.storage_offset() == detached._hp_data.storage_offset() == 8
+        replacement = torch.full_like(base[2:6], -5)
+        detached.copy_(replacement)
+        torch.testing.assert_close(base[2:6], replacement, rtol=0.0, atol=0.0)
+
+        base2 = torch.arange(24, device="cuda", dtype=torch.float32).reshape(6, 4)
+        tensor2 = IdentityQuantizer()(base2)
+        noncontiguous = torch.ops.aten.slice.Tensor(tensor2, 1, 0, 4, 2)
+        detached_noncontiguous = noncontiguous.detach()
+        assert detached_noncontiguous.stride() == detached_noncontiguous._hp_data.stride()
+        assert detached_noncontiguous.storage_offset() == 0
+
+        transposed = torch.ops.aten.as_strided.default(
+            tensor2,
+            [4, 6],
+            [1, 4],
+        )
+        cloned = transposed.clone()
+        assert cloned.stride() == cloned._hp_data.stride()
+        assert cloned.storage_offset() == cloned._hp_data.storage_offset()
+        torch.testing.assert_close(cloned.dequantize(), base2.as_strided((4, 6), (1, 4)))
+        original_snapshot = base2.clone()
+        cloned.copy_(torch.zeros_like(cloned.dequantize()))
+        torch.testing.assert_close(base2, original_snapshot, rtol=0.0, atol=0.0)
+
+    def test_copy_from_plain_and_identity_sources(self):
+        dst_data = torch.zeros(3, 4, device="cuda", dtype=torch.float32)
+        dst = IdentityQuantizer()(dst_data)
+
+        plain_src = torch.arange(12, device="cuda", dtype=torch.float32).reshape(3, 4)
+        assert dst.copy_(plain_src) is dst
+        torch.testing.assert_close(dst.dequantize(), plain_src, rtol=0.0, atol=0.0)
+
+        identity_src_data = plain_src.neg()
+        identity_src = IdentityQuantizer()(identity_src_data)
+        assert dst.copy_(identity_src) is dst
+        torch.testing.assert_close(dst.dequantize(), identity_src_data, rtol=0.0, atol=0.0)
 
     def test_fsdp_pre_post_all_gather_roundtrip(self):
         x = torch.randn(4, 8, device="cuda", dtype=torch.bfloat16)

@@ -464,6 +464,12 @@ class DotProductAttention(TransformerEngineBaseModule):
     ) -> None:
         super().__init__(name=name)
 
+        # Cache the native recipe labels inferred from custom DPA quantizers.
+        # ``init_fp8_metadata`` runs on every forward, while the quantizers only
+        # change when their recipe state is rebuilt.
+        self._custom_dpa_local_recipes_cache_key: Optional[Tuple[Any, ...]] = None
+        self._custom_dpa_local_recipes_cache: Optional[List[Recipe]] = None
+
         self.logger = logging.getLogger("DotProductAttention")
         self.logger.setLevel(attn_log._log_level)
         if not self.logger.hasHandlers():
@@ -703,11 +709,26 @@ class DotProductAttention(TransformerEngineBaseModule):
         fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
         if fp8_recipe.custom():
             super().init_fp8_metadata(num_gemms=num_gemms)
-            local_recipes = _infer_custom_dpa_local_recipes(
-                fp8_recipe, self.fp8_meta, self.quantizers
+            fwd_quantizers = self.quantizers.get("scaling_fwd", ())
+            cache_key = (
+                id(self.fp8_meta.get("scaling_fwd")),
+                tuple(id(quantizer) for quantizer in fwd_quantizers),
+                fp8_recipe.fp8_format,
+                fp8_recipe.fp8_dpa,
+                fp8_recipe.fp8_mha,
             )
-            if local_recipes is not None:
-                self.fp8_meta["local_recipes"] = local_recipes
+            if cache_key != self._custom_dpa_local_recipes_cache_key:
+                self._custom_dpa_local_recipes_cache = _infer_custom_dpa_local_recipes(
+                    fp8_recipe, self.fp8_meta, self.quantizers
+                )
+                self._custom_dpa_local_recipes_cache_key = cache_key
+
+            if self._custom_dpa_local_recipes_cache is None:
+                # Do not leave labels from an earlier supported quantizer
+                # family attached after a rebuild to an unsupported family.
+                self.fp8_meta.pop("local_recipes", None)
+            else:
+                self.fp8_meta["local_recipes"] = self._custom_dpa_local_recipes_cache
             return
 
         # switch/append recipe: fp8_recipe stays unchanged, but DPA.fp8_meta["recipe"] may be set to

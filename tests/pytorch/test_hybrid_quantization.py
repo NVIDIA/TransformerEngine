@@ -796,15 +796,16 @@ class TestHybridDequantize:
         hq.internal = False
 
 
-@requires_fp8_and_nvfp4
 class TestHybridUpdateUsage:
     """Test update_usage semantics and sub-storage cleanup."""
 
     @pytest.fixture
     def hybrid_tensor(self):
-        torch.manual_seed(42)
-        inp = torch.randn(128, 256, dtype=torch.bfloat16, device="cuda")
-        hq = _make_hybrid_quantizer_fp8_row_fp4_col()
+        inp = torch.randn(4, 8)
+        hq = HybridQuantizer(
+            rowwise_quantizer=IdentityQuantizer(),
+            columnwise_quantizer=IdentityQuantizer(),
+        )
         return hq.quantize(inp)
 
     def test_initial_usages(self, hybrid_tensor):
@@ -840,6 +841,43 @@ class TestHybridUpdateUsage:
         hybrid_tensor.update_usage(rowwise_usage=True, columnwise_usage=True)
         assert hybrid_tensor.rowwise_sub_storage is row_before
         assert hybrid_tensor.columnwise_sub_storage is col_before
+
+    def test_request_missing_columnwise_raises(self, hybrid_tensor):
+        hybrid_tensor.update_usage(columnwise_usage=False)
+
+        with pytest.raises(RuntimeError, match="no columnwise sub-storage"):
+            hybrid_tensor.update_usage(columnwise_usage=True)
+
+        assert hybrid_tensor.rowwise_sub_storage is not None
+        assert hybrid_tensor.columnwise_sub_storage is None
+
+    def test_request_missing_rowwise_raises(self, hybrid_tensor):
+        hybrid_tensor.update_usage(rowwise_usage=False)
+
+        with pytest.raises(RuntimeError, match="no rowwise sub-storage"):
+            hybrid_tensor.update_usage(rowwise_usage=True)
+
+        assert hybrid_tensor.rowwise_sub_storage is None
+        assert hybrid_tensor.columnwise_sub_storage is not None
+
+    def test_missing_direction_request_is_atomic(self, hybrid_tensor):
+        hybrid_tensor.update_usage(columnwise_usage=False)
+        row_before = hybrid_tensor.rowwise_sub_storage
+
+        with pytest.raises(RuntimeError, match="no columnwise sub-storage"):
+            hybrid_tensor.update_usage(rowwise_usage=False, columnwise_usage=True)
+
+        assert hybrid_tensor.rowwise_sub_storage is row_before
+        assert hybrid_tensor.columnwise_sub_storage is None
+
+    def test_none_preserves_missing_direction(self, hybrid_tensor):
+        hybrid_tensor.update_usage(columnwise_usage=False)
+        row_before = hybrid_tensor.rowwise_sub_storage
+
+        hybrid_tensor.update_usage(rowwise_usage=None, columnwise_usage=None)
+
+        assert hybrid_tensor.rowwise_sub_storage is row_before
+        assert hybrid_tensor.columnwise_sub_storage is None
 
     def test_repr_after_drop(self, hybrid_tensor):
         hybrid_tensor.update_usage(rowwise_usage=False)
@@ -1684,6 +1722,82 @@ class TestHybridGemmBitwiseIdenticalMXFP8:
                 f"Param {name!r} grad mismatch: max diff = "
                 f"{(p_ref.grad - p_qfactory.grad).abs().max().item()}"
             )
+
+
+@requires_fp8
+class TestCustomDPALocalRecipeCache:
+    """Custom-DPA native recipe labels track the quantizer rebuild."""
+
+    def test_inference_runs_once_per_quantizer_state_and_clears_stale_labels(self, monkeypatch):
+        from transformer_engine.pytorch.attention.dot_product_attention import (
+            dot_product_attention as dpa_module,
+        )
+        from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
+        from transformer_engine.pytorch.quantization import FP8GlobalStateManager
+
+        custom_recipe = recipe.CustomRecipe(qfactory=lambda _role: IdentityQuantizer())
+        monkeypatch.setattr(
+            FP8GlobalStateManager,
+            "get_fp8_recipe",
+            classmethod(lambda _cls: custom_recipe),
+        )
+
+        state = [object()]
+        quantizer = [object()]
+
+        def fake_base_init(module, num_gemms=1):  # pylint: disable=unused-argument
+            module.fp8_meta["scaling_fwd"] = state[0]
+            module.quantizers["scaling_fwd"] = [quantizer[0]]
+
+        monkeypatch.setattr(
+            TransformerEngineBaseModule,
+            "init_fp8_metadata",
+            fake_base_init,
+        )
+
+        inferred_labels = [recipe.MXFP8BlockScaling()]
+        mutated_recipe_labels = [recipe.MXFP8BlockScaling(fp8_mha=True)]
+        inference_results = iter((inferred_labels, mutated_recipe_labels, None))
+        inference_calls = 0
+
+        def fake_infer(*_args, **_kwargs):
+            nonlocal inference_calls
+            inference_calls += 1
+            return next(inference_results)
+
+        monkeypatch.setattr(dpa_module, "_infer_custom_dpa_local_recipes", fake_infer)
+
+        dpa = te.DotProductAttention(
+            num_attention_heads=2,
+            kv_channels=16,
+            attention_dropout=0.0,
+        )
+        dpa.init_fp8_metadata()
+        assert dpa.fp8_meta["local_recipes"] is inferred_labels
+        dpa.init_fp8_metadata()
+        assert inference_calls == 1
+        assert dpa.fp8_meta["local_recipes"] is inferred_labels
+
+        # Native labels also copy these mutable fields from CustomRecipe. They
+        # must refresh even when the quantizer generation itself is unchanged.
+        custom_recipe.fp8_mha = True
+        dpa.init_fp8_metadata()
+        assert inference_calls == 2
+        assert dpa.fp8_meta["local_recipes"] is mutated_recipe_labels
+        dpa.init_fp8_metadata()
+        assert inference_calls == 2
+        assert dpa.fp8_meta["local_recipes"] is mutated_recipe_labels
+
+        # A rebuilt recipe state/quantizer list invalidates the cache. If the
+        # new family has no native label, the old label must not survive.
+        state[0] = object()
+        quantizer[0] = object()
+        dpa.init_fp8_metadata()
+        assert inference_calls == 3
+        assert "local_recipes" not in dpa.fp8_meta
+        dpa.init_fp8_metadata()
+        assert inference_calls == 3
+        assert "local_recipes" not in dpa.fp8_meta
 
 
 @requires_fp8_and_nvfp4
@@ -3599,52 +3713,33 @@ class TestHybridAllModules:
 
 
 @requires_fp8
-class TestHybridGroupedLinearClassifier:
-    """Unit tests for ``grouped_linear._is_hybrid_quantizer_list``.
+class TestHybridGroupedLinearValidation:
+    """GroupedLinear generation-validation and split-dispatch coverage.
 
-    ``GroupedLinear`` dispatches its split-quantize between two mutually-
-    exclusive backends: ``tex.split_quantize`` (plain) and
-    ``_hybrid_split_quantize`` (all-hybrid). Neither can consume a mixed
-    list — ``tex.split_quantize`` doesn't recognise ``HybridQuantizer``,
-    and ``_hybrid_split_quantize`` calls ``q.rowwise_quantizer`` on every
-    element. Before the classifier was tightened, ``_has_hybrid_quantizer``
-    used ``any(...)`` semantics: a single hybrid entry in a mixed list
-    would route to ``_hybrid_split_quantize`` and raise ``AttributeError``
-    deep inside a grouped C++ call. These tests pin the new strict
-    classifier contract."""
+    Structural compatibility is validated once per real quantizer generation.
+    Steady-state dispatch reads the first expert after that uniformity check."""
 
-    def test_all_hybrid_returns_true(self):
+    @pytest.mark.parametrize(
+        "quantizers",
+        [
+            pytest.param(
+                [_make_hybrid_quantizer_fp8_row_fp4_col() for _ in range(3)],
+                id="hybrid",
+            ),
+            pytest.param([_make_fp8_quantizer() for _ in range(3)], id="plain"),
+            pytest.param([None, None, None], id="none"),
+        ],
+    )
+    def test_uniform_lists_validate(self, quantizers):
         from transformer_engine.pytorch.module.grouped_linear import (
-            _is_hybrid_quantizer_list,
+            _validate_grouped_quantizer_list,
         )
 
-        quantizers = [_make_hybrid_quantizer_fp8_row_fp4_col() for _ in range(3)]
-        assert _is_hybrid_quantizer_list(quantizers) is True
-
-    def test_all_plain_returns_false(self):
-        from transformer_engine.pytorch.module.grouped_linear import (
-            _is_hybrid_quantizer_list,
-        )
-
-        quantizers = [_make_fp8_quantizer() for _ in range(3)]
-        assert _is_hybrid_quantizer_list(quantizers) is False
-
-    def test_all_none_returns_false(self):
-        """No quantizers at all (BF16 path) — classifier returns False so
-        the caller takes the non-fp8 branch."""
-        from transformer_engine.pytorch.module.grouped_linear import (
-            _is_hybrid_quantizer_list,
-        )
-
-        assert _is_hybrid_quantizer_list([None, None, None]) is False
+        _validate_grouped_quantizer_list(quantizers, operand_name="input")
 
     def test_mixed_hybrid_and_plain_raises(self):
-        """The actual bug: a mixed list used to silently route to
-        ``_hybrid_split_quantize`` and crash with ``AttributeError`` on
-        ``plain_q.rowwise_quantizer``. Now it fails fast at the
-        classifier with a user-actionable error."""
         from transformer_engine.pytorch.module.grouped_linear import (
-            _is_hybrid_quantizer_list,
+            _validate_grouped_quantizer_list,
         )
 
         quantizers = [
@@ -3652,32 +3747,12 @@ class TestHybridGroupedLinearClassifier:
             _make_fp8_quantizer(),
             _make_hybrid_quantizer_fp8_row_fp4_col(),
         ]
-        with pytest.raises(ValueError) as exc_info:
-            _is_hybrid_quantizer_list(quantizers)
-        msg = str(exc_info.value)
-        # Error names both counts and points at the root cause so users
-        # can fix their ``qfactory`` without digging.
-        assert "mixes HybridQuantizer" in msg
-        assert "2 hybrid" in msg
-        assert "1 non-hybrid" in msg
-        assert "CustomRecipe" in msg and "qfactory" in msg
+        with pytest.raises(ValueError, match="mix HybridQuantizer and non-hybrid"):
+            _validate_grouped_quantizer_list(quantizers, operand_name="input")
 
     def test_none_plus_hybrid_raises(self):
-        """None entries mixed with HybridQuantizer must NOT classify as
-        all-hybrid: ``_hybrid_split_quantize`` would later iterate the
-        full list with ``isinstance(q, HybridQuantizer)`` and raise
-        ``TypeError`` on the ``None`` entry. The classifier rejects
-        upfront with a clear ValueError so users see a single,
-        actionable error.
-
-        In current TE flows ``CustomRecipeState.make_quantizers``
-        rejects ``None`` returns from ``qfactory``, so this combination
-        shouldn't actually arise — but if a future "intentional no-op"
-        ``IdentityQuantizer`` ever loosens that contract, this guard
-        prevents the silent crash.
-        """
         from transformer_engine.pytorch.module.grouped_linear import (
-            _is_hybrid_quantizer_list,
+            _validate_grouped_quantizer_list,
         )
 
         quantizers = [
@@ -3685,33 +3760,30 @@ class TestHybridGroupedLinearClassifier:
             None,
             _make_hybrid_quantizer_fp8_row_fp4_col(),
         ]
-        with pytest.raises(ValueError) as exc_info:
-            _is_hybrid_quantizer_list(quantizers)
-        msg = str(exc_info.value)
-        assert "mixes HybridQuantizer" in msg
-        assert "2 hybrid" in msg
-        assert "1 None" in msg
+        with pytest.raises(ValueError, match="mix None and concrete quantizers"):
+            _validate_grouped_quantizer_list(quantizers, operand_name="input")
 
-    def test_hybrid_split_quantize_rejects_plain_element(self):
-        """Defense-in-depth: even if a caller bypasses the classifier,
-        ``_hybrid_split_quantize`` itself asserts uniformity and raises
-        ``TypeError`` with a list of received types, rather than the
-        opaque ``AttributeError: 'Float8CurrentScalingQuantizer' object
-        has no attribute 'rowwise_quantizer'`` from the old code."""
+    def test_mixed_identity_dtype_raises(self):
         from transformer_engine.pytorch.module.grouped_linear import (
-            _hybrid_split_quantize,
+            _validate_grouped_quantizer_list,
         )
 
-        tensor = torch.randn(32, 128, dtype=torch.bfloat16, device="cuda")
         quantizers = [
-            _make_hybrid_quantizer_fp8_row_fp4_col(),
-            _make_fp8_quantizer(),  # Not hybrid — should trigger TypeError
+            IdentityQuantizer(dtype=torch.bfloat16),
+            IdentityQuantizer(dtype=torch.float16),
         ]
-        with pytest.raises(TypeError) as exc_info:
-            _hybrid_split_quantize(tensor, [16, 16], quantizers)
-        msg = str(exc_info.value)
-        assert "HybridQuantizer" in msg
-        assert "Float8CurrentScalingQuantizer" in msg
+        with pytest.raises(ValueError, match="incompatible plain backend configurations"):
+            _validate_grouped_quantizer_list(quantizers, operand_name="input")
+
+    def test_distinct_delayed_scaling_state_is_allowed(self):
+        from transformer_engine.pytorch.module.grouped_linear import (
+            _validate_grouped_quantizer_list,
+        )
+
+        quantizers = [_make_delayed_quantizer(), _make_delayed_quantizer()]
+        quantizers[1].scale.fill_(2.0)
+        quantizers[1].amax.fill_(3.0)
+        _validate_grouped_quantizer_list(quantizers, operand_name="input")
 
     @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
     @pytest.mark.parametrize(
@@ -3742,44 +3814,215 @@ class TestHybridGroupedLinearClassifier:
 
         assert [storage.get_usages() for storage in out] == [expected, expected]
 
-    @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-    def test_hybrid_split_quantize_rejects_mixed_parent_usage_flags(self):
-        from transformer_engine.pytorch.module.grouped_linear import (
-            _hybrid_split_quantize,
-        )
+    def test_columnwise_only_rowwise_dequantized_uses_transient_grouped_row(self, monkeypatch):
+        import transformer_engine.pytorch.module.grouped_linear as grouped_linear
 
+        real_split_quantize = grouped_linear.tex.split_quantize
+        calls = []
+
+        def tracked_split_quantize(tensor, m_splits, quantizers, **kwargs):
+            result = real_split_quantize(tensor, m_splits, quantizers, **kwargs)
+            calls.append((tensor, result))
+            return result
+
+        monkeypatch.setattr(grouped_linear.tex, "split_quantize", tracked_split_quantize)
         tensor = torch.randn(32, 128, dtype=torch.bfloat16, device="cuda")
         quantizers = [
             HybridQuantizer(
                 rowwise_quantizer=_make_fp8_quantizer(),
                 columnwise_quantizer=_make_fp8_quantizer(),
+                columnwise_source="rowwise_dequantized",
             )
             for _ in range(2)
         ]
-        quantizers[0].set_usage(rowwise=True, columnwise=False)
-        quantizers[1].set_usage(rowwise=True, columnwise=True)
+        for quantizer in quantizers:
+            quantizer.set_usage(rowwise=False, columnwise=True)
 
-        with pytest.raises(ValueError, match="mixed parent usage flags"):
-            _hybrid_split_quantize(tensor, [16, 16], quantizers)
+        out = grouped_linear._hybrid_split_quantize(tensor, [16, 16], quantizers)
+
+        assert len(calls) == 2
+        expected_columnwise_source = torch.cat(
+            [result.dequantize() for result in calls[0][1]], dim=0
+        )
+        torch.testing.assert_close(calls[1][0], expected_columnwise_source, rtol=0.0, atol=0.0)
+        assert calls[1][0] is not tensor
+        assert all(storage.rowwise_sub_storage is None for storage in out)
+        assert all(storage.columnwise_sub_storage is not None for storage in out)
+
+    def test_rowwise_only_skips_columnwise_quantization(self, monkeypatch):
+        import transformer_engine.pytorch.module.grouped_linear as grouped_linear
+
+        real_split_quantize = grouped_linear.tex.split_quantize
+        calls = []
+
+        def tracked_split_quantize(tensor, m_splits, quantizers, **kwargs):
+            calls.append(tensor)
+            return real_split_quantize(tensor, m_splits, quantizers, **kwargs)
+
+        monkeypatch.setattr(grouped_linear.tex, "split_quantize", tracked_split_quantize)
+        tensor = torch.randn(32, 128, dtype=torch.bfloat16, device="cuda")
+        quantizers = [
+            HybridQuantizer(
+                rowwise_quantizer=_make_fp8_quantizer(),
+                columnwise_quantizer=_make_fp8_quantizer(),
+                columnwise_source="rowwise_dequantized",
+            )
+            for _ in range(2)
+        ]
+        for quantizer in quantizers:
+            quantizer.set_usage(rowwise=True, columnwise=False)
+
+        out = grouped_linear._hybrid_split_quantize(tensor, [16, 16], quantizers)
+
+        assert calls == [tensor]
+        assert all(storage.rowwise_sub_storage is not None for storage in out)
+        assert all(storage.columnwise_sub_storage is None for storage in out)
+
+    def test_original_source_preserves_two_bulk_call_fast_path(self, monkeypatch):
+        import transformer_engine.pytorch.module.grouped_linear as grouped_linear
+
+        real_split_quantize = grouped_linear.tex.split_quantize
+        calls = []
+
+        def tracked_split_quantize(tensor, m_splits, quantizers, **kwargs):
+            calls.append(tensor)
+            return real_split_quantize(tensor, m_splits, quantizers, **kwargs)
+
+        monkeypatch.setattr(grouped_linear.tex, "split_quantize", tracked_split_quantize)
+        tensor = torch.randn(32, 128, dtype=torch.bfloat16, device="cuda")
+        quantizers = [
+            HybridQuantizer(
+                rowwise_quantizer=_make_fp8_quantizer(),
+                columnwise_quantizer=_make_fp8_quantizer(),
+                columnwise_source="original",
+            )
+            for _ in range(2)
+        ]
+
+        out = grouped_linear._hybrid_split_quantize(tensor, [16, 16], quantizers)
+
+        assert calls == [tensor, tensor]
+        assert all(storage.rowwise_sub_storage is not None for storage in out)
+        assert all(storage.columnwise_sub_storage is not None for storage in out)
+
+    def test_validation_rejects_mixed_columnwise_source_policies(self):
+        from transformer_engine.pytorch.module.grouped_linear import (
+            _validate_grouped_quantizer_list,
+        )
+
+        quantizers = [
+            HybridQuantizer(
+                rowwise_quantizer=_make_fp8_quantizer(),
+                columnwise_quantizer=_make_fp8_quantizer(),
+                columnwise_source=source,
+            )
+            for source in ("original", "rowwise_dequantized")
+        ]
+
+        with pytest.raises(ValueError, match="mixed columnwise source policies"):
+            _validate_grouped_quantizer_list(quantizers, operand_name="input")
+
+    def test_validation_rejects_same_family_config_mismatch(self):
+        from transformer_engine.pytorch.module.grouped_linear import (
+            _validate_grouped_quantizer_list,
+        )
+
+        quantizers = [_make_fp8_quantizer(), _make_fp8_quantizer()]
+        quantizers[1].force_pow_2_scales = True
+
+        with pytest.raises(
+            ValueError,
+            match="incompatible plain backend configurations",
+        ):
+            _validate_grouped_quantizer_list(quantizers, operand_name="input")
+
+    def test_validation_runs_only_with_quantizer_generation(self, monkeypatch):
+        import transformer_engine.pytorch.module.grouped_linear as grouped_linear
+
+        def make_qfactory(columnwise_source):
+            def qfactory(_role):
+                return HybridQuantizer(
+                    rowwise_quantizer=_make_fp8_quantizer(),
+                    columnwise_quantizer=_make_fp8_quantizer(),
+                    columnwise_source=columnwise_source,
+                )
+
+            return qfactory
+
+        model = GroupedLinear(2, 128, 128, bias=False, params_dtype=torch.bfloat16).cuda()
+        tensor = torch.randn(128, 128, dtype=torch.bfloat16, device="cuda")
+        m_splits = torch.tensor([64, 64], dtype=torch.int64)
+        original_recipe = recipe.CustomRecipe(qfactory=make_qfactory("original"))
+
+        real_validate = grouped_linear._validate_grouped_quantizer_list
+        validation_calls = []
+
+        def tracked_validate(quantizers, *, operand_name="operand"):
+            validation_calls.append((operand_name, id(quantizers[0])))
+            return real_validate(quantizers, operand_name=operand_name)
+
+        monkeypatch.setattr(
+            grouped_linear,
+            "_validate_grouped_quantizer_list",
+            tracked_validate,
+        )
+
+        with torch.no_grad(), autocast(enabled=True, recipe=original_recipe):
+            model(tensor, m_splits)
+        first_call_count = len(validation_calls)
+        first_generation = model._validated_quantizer_generations["scaling_fwd"]
+        assert first_call_count > 0
+
+        with torch.no_grad(), autocast(enabled=True, recipe=original_recipe):
+            model(tensor, m_splits)
+        assert len(validation_calls) == first_call_count
+        assert model._validated_quantizer_generations["scaling_fwd"] is first_generation
+
+        rebuilt_recipe = recipe.CustomRecipe(qfactory=make_qfactory("rowwise_dequantized"))
+        with torch.no_grad(), autocast(enabled=True, recipe=rebuilt_recipe):
+            model(tensor, m_splits)
+        rebuilt_generation = model._validated_quantizer_generations["scaling_fwd"]
+        assert len(validation_calls) > first_call_count
+        assert rebuilt_generation is not first_generation
+        assert rebuilt_generation[0].columnwise_source == "rowwise_dequantized"
+
+        input_count = 0
+
+        def mixed_source_qfactory(role):
+            nonlocal input_count
+            source = "original"
+            if role is not None and role.tensor_type == "input":
+                source = "original" if input_count == 0 else "rowwise_dequantized"
+                input_count += 1
+            return HybridQuantizer(
+                rowwise_quantizer=_make_fp8_quantizer(),
+                columnwise_quantizer=_make_fp8_quantizer(),
+                columnwise_source=source,
+            )
+
+        mixed_recipe = recipe.CustomRecipe(qfactory=mixed_source_qfactory)
+        # A failed generation is never marked validated. Base metadata can then
+        # early-return on retry, so the O(1) guard must validate it again.
+        for _ in range(2):
+            with pytest.raises(ValueError, match="mixed columnwise source policies"):
+                with torch.no_grad(), autocast(enabled=True, recipe=mixed_recipe):
+                    model(tensor, m_splits)
+            assert model._validated_quantizer_generations["scaling_fwd"] is rebuilt_generation
+
+        # Stale invalid recipe metadata must not affect the non-quantized path.
+        with torch.no_grad():
+            model(tensor, m_splits)
 
     @requires_fp8_and_nvfp4
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AssertionError,
-        reason=(
-            "Production follow-up: GroupedLinear bulk split-quantize ignores "
-            "HybridQuantizer.columnwise_source"
-        ),
-    )
     def test_hybrid_split_quantize_honors_rowwise_dequantized_source(self):
-        """Bulk split must match standalone HybridQuantizer provenance semantics."""
+        """NVFP4 column data must derive from the actual grouped row result."""
         from transformer_engine.pytorch.module.grouped_linear import (
             _hybrid_split_quantize,
         )
 
         torch.manual_seed(3598)
         # NVFP4 grouped split-quantize requires each M split to be a multiple
-        # of 64; valid geometry ensures the xfail reaches provenance checking.
+        # of 64.
         tensor = torch.randn(128, 128, dtype=torch.bfloat16, device="cuda")
 
         def make_quantizer():
@@ -3789,19 +4032,20 @@ class TestHybridGroupedLinearClassifier:
                 columnwise_source="rowwise_dequantized",
             )
 
+        quantizers = [make_quantizer(), make_quantizer()]
         actual = _hybrid_split_quantize(
             tensor,
             [64, 64],
-            [make_quantizer(), make_quantizer()],
+            quantizers,
         )
-        expected = [
-            make_quantizer().quantize(part) for part in torch.split(tensor, [64, 64], dim=0)
-        ]
 
-        for index, (actual_part, expected_part) in enumerate(zip(actual, expected)):
+        for index, (actual_part, quantizer) in enumerate(zip(actual, quantizers)):
+            expected_columnwise = quantizer.columnwise_quantizer.quantize(
+                actual_part.rowwise_sub_storage.dequantize()
+            )
             _assert_storage_data_exact(
                 actual_part.columnwise_sub_storage,
-                expected_part.columnwise_sub_storage,
+                expected_columnwise,
                 context=f"GroupedLinear split {index} columnwise provenance",
             )
 
@@ -5993,6 +6237,211 @@ class TestFloat8TransposeOnlySplit:
         ]
 
 
+class TestHybridNewZeros:
+    """Public new_zeros semantics independent of FSDP-specific allocation."""
+
+    @staticmethod
+    def _make_identity_hybrid():
+        quantizer = HybridQuantizer(
+            rowwise_quantizer=IdentityQuantizer(),
+            columnwise_quantizer=IdentityQuantizer(),
+        )
+        source = quantizer(torch.ones((4, 8), dtype=torch.bfloat16, device="cuda"))
+        return quantizer, source
+
+    @pytest.mark.parametrize(
+        "keep_rowwise,keep_columnwise",
+        [(True, True), (True, False), (False, True)],
+    )
+    def test_initializes_every_present_direction_and_preserves_kwargs(
+        self,
+        keep_rowwise,
+        keep_columnwise,
+    ):
+        quantizer, source = self._make_identity_hybrid()
+        if not keep_rowwise:
+            source.update_usage(rowwise_usage=False)
+        if not keep_columnwise:
+            source.update_usage(columnwise_usage=False)
+
+        # Direction selection must come from source storage, not mutable parent
+        # usage flags, and new_zeros must not change those flags.
+        quantizer.set_usage(rowwise=False, columnwise=False)
+        result = torch.ops.aten.new_zeros.default(
+            source,
+            [3, 5],
+            dtype=torch.float32,
+            device=source.device,
+        )
+
+        assert isinstance(result, HybridQuantizedTensor)
+        assert result.shape == torch.Size((3, 5))
+        assert result.dtype == torch.float32
+        assert result.device == source.device
+        assert (result.rowwise_sub_storage is not None) is keep_rowwise
+        assert (result.columnwise_sub_storage is not None) is keep_columnwise
+        assert quantizer.get_usages() == {"rowwise": False, "columnwise": False}
+        assert result._quantizer is not quantizer
+        assert result._quantizer.get_usages() == {
+            "rowwise": keep_rowwise,
+            "columnwise": keep_columnwise,
+        }
+
+        for sub_storage in (
+            result.rowwise_sub_storage,
+            result.columnwise_sub_storage,
+        ):
+            if sub_storage is not None:
+                torch.testing.assert_close(
+                    sub_storage.dequantize(),
+                    torch.zeros((3, 5), dtype=torch.float32, device=source.device),
+                    rtol=0.0,
+                    atol=0.0,
+                )
+
+        # A plain-source copy routes through the result's parent quantizer. It
+        # must update every allocated direction even though the source parent
+        # had both of its mutable usage flags disabled before new_zeros.
+        plain_source = torch.full((3, 5), 7.0, dtype=torch.float32, device=source.device)
+        result.copy_(plain_source)
+        for sub_storage in (
+            result.rowwise_sub_storage,
+            result.columnwise_sub_storage,
+        ):
+            if sub_storage is not None:
+                torch.testing.assert_close(
+                    sub_storage.dequantize(), plain_source, rtol=0.0, atol=0.0
+                )
+        assert quantizer.get_usages() == {"rowwise": False, "columnwise": False}
+
+    def test_identity_substorages_allow_integer_dtype(self):
+        _, source = self._make_identity_hybrid()
+        result = source.new_zeros((2, 3), dtype=torch.int32)
+
+        assert result.dtype == torch.int32
+        for sub_storage in (
+            result.rowwise_sub_storage,
+            result.columnwise_sub_storage,
+        ):
+            assert sub_storage.dequantize().dtype == torch.int32
+            assert torch.count_nonzero(sub_storage.dequantize()).item() == 0
+
+    @requires_fp8
+    @pytest.mark.parametrize("unsupported_dtype", (torch.int32, torch.float64, torch.bool))
+    def test_non_identity_substorage_rejects_unsupported_dtype(self, unsupported_dtype):
+        quantizer = HybridQuantizer(
+            rowwise_quantizer=_make_fp8_quantizer(),
+            columnwise_quantizer=_make_fp8_quantizer(),
+        )
+        source = quantizer(torch.ones((4, 8), dtype=torch.bfloat16, device="cuda"))
+
+        with pytest.raises(TypeError, match="new_zeros only supports"):
+            source.new_zeros((2, 3), dtype=unsupported_dtype)
+
+    def test_does_not_invoke_live_quantizers_or_consume_rng(self, monkeypatch):
+        quantizer, source = self._make_identity_hybrid()
+        cpu_rng_before = torch.get_rng_state().clone()
+        cuda_rng_before = torch.cuda.get_rng_state(source.device).clone()
+
+        def fail_live_make_empty(*args, **kwargs):
+            raise AssertionError("new_zeros invoked a live quantizer")
+
+        monkeypatch.setattr(quantizer, "make_empty", fail_live_make_empty)
+        monkeypatch.setattr(
+            source.rowwise_sub_storage._quantizer,
+            "make_empty",
+            fail_live_make_empty,
+        )
+        monkeypatch.setattr(
+            source.columnwise_sub_storage._quantizer,
+            "make_empty",
+            fail_live_make_empty,
+        )
+
+        result = source.new_zeros((2, 6))
+
+        assert isinstance(result, HybridQuantizedTensor)
+        assert torch.equal(torch.get_rng_state(), cpu_rng_before)
+        assert torch.equal(torch.cuda.get_rng_state(source.device), cuda_rng_before)
+
+    def test_rejects_empty_hybrid(self):
+        _, source = self._make_identity_hybrid()
+        source.update_usage(rowwise_usage=False, columnwise_usage=False)
+
+        with pytest.raises(RuntimeError, match="at least one present sub-storage"):
+            source.new_zeros((2, 6))
+
+    @requires_fp8_and_nvfp4
+    def test_initializes_nvfp4_data_scale_and_amax_buffers(self):
+        quantizer = _make_hybrid_quantizer_fp8_row_fp4_col()
+        source = quantizer(torch.randn((128, 256), dtype=torch.bfloat16, device="cuda"))
+
+        result = source.new_zeros(source.shape)
+
+        assert type(result.rowwise_sub_storage) is type(source.rowwise_sub_storage)
+        assert type(result.columnwise_sub_storage) is type(source.columnwise_sub_storage)
+        torch.testing.assert_close(
+            result.dequantize(),
+            torch.zeros_like(result.dequantize()),
+            rtol=0.0,
+            atol=0.0,
+        )
+        for sub_storage in (
+            result.rowwise_sub_storage,
+            result.columnwise_sub_storage,
+        ):
+            buffers, storage = sub_storage.prepare_for_saving()
+            try:
+                assert all(
+                    buffer is None or torch.count_nonzero(buffer).item() == 0 for buffer in buffers
+                )
+            finally:
+                assert storage.restore_from_saved(buffers) == []
+
+    @pytest.mark.skipif(
+        not fp8_block_scaling_available,
+        reason=f"Float8Blockwise: {reason_for_no_fp8_block_scaling}",
+    )
+    def test_initializes_float8_block_data_and_scale_buffers(self):
+        quantizer = HybridQuantizer(
+            rowwise_quantizer=Float8BlockQuantizer(
+                fp8_dtype=tex.DType.kFloat8E4M3,
+                rowwise=True,
+                columnwise=True,
+                block_scaling_dim=2,
+            ),
+            columnwise_quantizer=Float8BlockQuantizer(
+                fp8_dtype=tex.DType.kFloat8E4M3,
+                rowwise=True,
+                columnwise=True,
+                block_scaling_dim=2,
+            ),
+        )
+        source = quantizer(torch.randn((128, 256), dtype=torch.bfloat16, device="cuda"))
+
+        result = source.new_zeros(source.shape)
+
+        assert type(result.rowwise_sub_storage) is type(source.rowwise_sub_storage)
+        assert type(result.columnwise_sub_storage) is type(source.columnwise_sub_storage)
+        torch.testing.assert_close(
+            result.dequantize(),
+            torch.zeros_like(result.dequantize()),
+            rtol=0.0,
+            atol=0.0,
+        )
+        for sub_storage in (
+            result.rowwise_sub_storage,
+            result.columnwise_sub_storage,
+        ):
+            buffers, storage = sub_storage.prepare_for_saving()
+            try:
+                assert all(
+                    buffer is None or torch.count_nonzero(buffer).item() == 0 for buffer in buffers
+                )
+            finally:
+                assert storage.restore_from_saved(buffers) == []
+
+
 @requires_fp8
 class TestHybridTorchDispatchFSDP2Ops:
     """Test aten ops that FSDP2 relies on to preserve the HybridQuantizedTensor type.
@@ -6117,22 +6566,10 @@ class TestHybridTorchDispatchFSDP2Ops:
         torch.testing.assert_close(param.dequantize(), expected.dequantize(), rtol=0.0, atol=0.0)
 
     def test_new_zeros_returns_hybrid(self, hybrid_param):
-        """new_zeros must return a usable HybridQuantizedTensor container.
-
-        FSDP2 calls ``new_zeros`` only to allocate an all-gather destination
-        buffer that is immediately overwritten by ``copy_``; the initial
-        contents are never observed. The hybrid dispatch therefore delegates
-        to ``HybridQuantizer.make_empty`` (uninitialized bytes) rather than
-        quantizing a BF16 zeros temporary. This test asserts the contract
-        we actually depend on — correct container type / shape / sub-storage
-        presence, and the ability to copy into it and read back — NOT that
-        the raw dequantize value happens to be zero.
-        """
+        """new_zeros returns initialized storage that remains FSDP-copyable."""
         new_shape = list(hybrid_param.shape)
         result = aten.new_zeros.default(hybrid_param, new_shape)
 
-        # Structural contract: FSDP2 needs a HybridQuantizedTensor with both
-        # sub-storages populated so the gathered buffers have a destination.
         assert isinstance(
             result, HybridQuantizedTensor
         ), f"Expected HybridQuantizedTensor, got {type(result).__name__}"
@@ -6141,9 +6578,14 @@ class TestHybridTorchDispatchFSDP2Ops:
         assert result.columnwise_sub_storage is not None
         assert type(result.rowwise_sub_storage) is type(hybrid_param.rowwise_sub_storage)
         assert type(result.columnwise_sub_storage) is type(hybrid_param.columnwise_sub_storage)
+        torch.testing.assert_close(
+            result.dequantize(),
+            torch.zeros_like(result.dequantize()),
+            rtol=0.0,
+            atol=0.0,
+        )
 
-        # Functional contract: the container must be writable via copy_ from
-        # another hybrid (how FSDP2 populates the buffer post-gather).
+        # FSDP2 overwrites the initialized destination via copy_ after gather.
         aten.copy_.default(result, hybrid_param)
         torch.testing.assert_close(
             result.dequantize(), hybrid_param.dequantize(), rtol=0.0, atol=0.0
@@ -6543,10 +6985,9 @@ class TestHybridFsdpRoundtrip:
     def test_nvfp4_sub_storage_raises_on_pre_all_gather(self):
         """Hybrid FSDP2 with an NVFP4 sub-storage must raise a clear error.
 
-        Per the hybrid FSDP2 design (see ``hybrid_quantization_fsdp.md`` §9
-        Gap 5), NVFP4 FSDP2 support is not implemented yet — packed FP4 data
-        alignment for dim-0 splitting, columnwise dequant, and RHT cache
-        handling all need work. Until that lands, hybrid pre-all-gather must
+        NVIDIA/TransformerEngine#3158 tracks the missing NVFP4 FSDP2 support:
+        packed FP4 dim-0 alignment, columnwise dequantization, and RHT-cache
+        handling are not implemented. Until that lands, hybrid pre-all-gather must
         refuse an NVFP4 sub-storage cleanly via the ``fsdp_buffer_fields``
         protocol rather than silently producing wrong data.
 
@@ -6568,7 +7009,7 @@ class TestHybridFsdpRoundtrip:
         param = model.weight
 
         # Clean refusal: hybrid's pre_all_gather raises an NVFP4-specific
-        # message pointing to the design doc, not a generic
+        # message identifying the unsupported sub-storage protocol, not a generic
         # "NVFP4Tensor does not implement fsdp_buffer_fields" from deep inside
         # the base class.
         with pytest.raises(NotImplementedError) as exc_info:

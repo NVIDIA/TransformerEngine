@@ -75,6 +75,19 @@ class HybridQuantizedTensorStorage(QuantizedTensorStorage):
         rowwise_usage: Optional[bool] = None,
         columnwise_usage: Optional[bool] = None,
     ):
+        # A storage object cannot reconstruct a representation that has already
+        # been dropped. Validate every requested direction before mutating
+        # either one so mixed drop/enable requests are atomic.
+        if rowwise_usage and self._rowwise_storage is None:
+            raise RuntimeError(
+                "Requested rowwise usage, but HybridQuantizedTensorStorage "
+                "has no rowwise sub-storage"
+            )
+        if columnwise_usage and self._columnwise_storage is None:
+            raise RuntimeError(
+                "Requested columnwise usage, but HybridQuantizedTensorStorage "
+                "has no columnwise sub-storage"
+            )
         if rowwise_usage is not None and not rowwise_usage:
             self._rowwise_storage = None
         if columnwise_usage is not None and not columnwise_usage:

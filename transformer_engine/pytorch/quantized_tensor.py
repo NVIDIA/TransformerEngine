@@ -570,6 +570,7 @@ class QuantizedTensor(torch.Tensor):
         requires_grad: bool = False,
         device: Optional[torch.device] = None,
         stride: Optional[Iterable[int]] = None,
+        storage_offset: int = 0,
     ):
         if fake_dtype is not None and fake_dtype != dtype:
             raise ValueError(f"fake_dtype ({fake_dtype}) does not match dtype ({dtype})")
@@ -582,7 +583,7 @@ class QuantizedTensor(torch.Tensor):
             cls,
             shape,
             strides=stride,
-            storage_offset=0,
+            storage_offset=storage_offset,
             dtype=dtype,
             layout=torch.strided,
             requires_grad=requires_grad,

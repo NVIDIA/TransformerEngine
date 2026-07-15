@@ -19,7 +19,11 @@ from ..utils import canonicalize_process_group, devices_match
 from .storage.float8_tensor_storage import Float8TensorStorage, _FromFloat8Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ..dynamo import register_value_opaque_quantizer
-from ._quantization_helpers import _IdentityFunc, safe_quantized_repr
+from ._quantization_helpers import (
+    _IdentityFunc,
+    _resolve_view_shape,
+    safe_quantized_repr,
+)
 from ..constants import dist_group_type, DType
 
 aten = torch.ops.aten
@@ -36,11 +40,6 @@ _ops_to_preserve_subclass_in_fsdp2 = {
     torch.ops.aten.split.Tensor,
     torch.ops.aten.clone.default,
 }
-
-
-def _canonical_view_shape(input_shape: Iterable[int], shape: Iterable[int]) -> torch.Size:
-    """Resolve PyTorch view shape syntax, including ``-1`` inference."""
-    return torch.empty(tuple(input_shape), device="meta").view(*shape).shape
 
 
 def _columnwise_shape_for(rowwise_shape: Iterable[int]) -> torch.Size:
@@ -614,7 +613,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                 )
                 out_shape = out_data.size()
             else:
-                out_shape = _canonical_view_shape(tensor.shape, args[1:])
+                out_shape = _resolve_view_shape(tensor.shape, args[1:])
 
             out_transpose = None if tensor._transpose_invalid else tensor._transpose
             if out_transpose is not None:
@@ -1117,7 +1116,7 @@ class _ViewFunc(torch.autograd.Function):
             out_data = tensor._data.view(*shape)
             out_shape = out_data.size()
         else:
-            out_shape = _canonical_view_shape(tensor.shape, shape)
+            out_shape = _resolve_view_shape(tensor.shape, shape)
         out_transpose = None if tensor._transpose_invalid else tensor._transpose
         if out_transpose is not None:
             view_shape_for_transpose = _columnwise_shape_for(out_shape)

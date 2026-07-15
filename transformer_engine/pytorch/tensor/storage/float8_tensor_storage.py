@@ -12,7 +12,7 @@ import torch
 import transformer_engine_torch as tex
 
 from ...quantized_tensor import QuantizedTensorStorage, Quantizer
-from .._quantization_helpers import safe_quantized_repr
+from .._quantization_helpers import _resolve_view_shape, safe_quantized_repr
 
 from ...constants import TE_DType as torch_to_transformer_engine_dtype, TE_DType_To_Torch, DType
 
@@ -175,12 +175,15 @@ class Float8TensorStorage(QuantizedTensorStorage):
             dtype = self._dtype
         return _FromFloat8Func.forward(None, self, dtype)
 
-    def size(self, *args, **kwargs):
+    def size(self, dim: Optional[int] = None) -> Union[torch.Size, int]:
         # pylint: disable=missing-function-docstring
         if self._data is not None:
-            return self._data.size(*args, **kwargs)
-        size = self._transpose.size(*args, **kwargs)
-        return torch.Size([size[-1], math.prod(size[:-1])])
+            return self._data.size(dim)
+        transpose_size = self._transpose.size()
+        size = torch.Size([transpose_size[-1], math.prod(transpose_size[:-1])])
+        if dim is None:
+            return size
+        return size[dim]
 
     @property
     def device(self):
@@ -197,7 +200,7 @@ class Float8TensorStorage(QuantizedTensorStorage):
         if out_data is not None:
             out_shape = out_data.size()
         else:
-            out_shape = torch.empty(tuple(self.size()), device="meta").view(shape).shape
+            out_shape = _resolve_view_shape(self.size(), shape)
         out_transpose = None if self._transpose_invalid else self._transpose
         if out_transpose is not None:
             if len(out_shape) == 0:
