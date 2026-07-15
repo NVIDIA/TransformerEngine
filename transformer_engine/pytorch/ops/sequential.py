@@ -10,7 +10,7 @@ from typing import Any, Optional
 
 import torch
 
-from transformer_engine.pytorch.ops.op import FusibleOperation
+from transformer_engine.pytorch.ops.op import BasicOperation, FusibleOperation
 from transformer_engine.pytorch.ops.fuser import OperationFuser
 
 
@@ -217,45 +217,29 @@ class Sequential(torch.nn.Module):
         if not op_kwargs:
             return group_kwargs
 
-        # Normalize keys to module objects
-        modules = list(self._modules.values())
+        # Construct map from basic-op id to its kwarg dict
         resolved: dict[int, dict[str, Any]] = {}
         for key, kwargs in op_kwargs.items():
-            module = modules[key] if isinstance(key, int) else key
+            module = self[key] if isinstance(key, int) else key
+            if not isinstance(module, BasicOperation):
+                raise ValueError(
+                    f"Attempted to provide forward kwargs to {type(module).__name__}, but "
+                    "Sequential only allows providing forward kwargs to a BasicOperation."
+                )
             resolved[id(module)] = kwargs
 
-        # Walk modules alongside groups to locate each op's basic-op slot
-        group_idx = -1
-        in_fuser = False
-        basic_offset = 0
-        for module in modules:
-            if isinstance(module, FusibleOperation):
-                if not in_fuser:
-                    group_idx += 1
-                    in_fuser = True
-                    basic_offset = 0
-                num_basic_ops = len(module.basic_ops) if module.is_fused_op else 1
-                if id(module) in resolved:
-                    if num_basic_ops != 1:
-                        raise ValueError(
-                            "op_kwargs is not supported for a fused operation "
-                            "spanning multiple basic operations"
-                        )
-                    group = self._module_groups[group_idx]
-                    if group_kwargs[group_idx] is None:
-                        # pylint: disable-next=protected-access
-                        group_kwargs[group_idx] = [{} for _ in group._basic_ops]
-                    group_kwargs[group_idx][basic_offset] = resolved.pop(id(module))
-                basic_offset += num_basic_ops
-            else:
-                group_idx += 1
-                in_fuser = False
-                if id(module) in resolved:
-                    raise ValueError(
-                        "op_kwargs can only target fusible operations, "
-                        f"but got kwargs for {type(module).__name__}"
-                    )
+        # Slot each op's kwargs into its module group by matching basic-op identity
+        for group_idx, module_group in enumerate(self._module_groups):
+            if not isinstance(module_group, OperationFuser):
+                continue
+            # pylint: disable-next=protected-access
+            group_kwargs[group_idx] = [{} for _ in module_group._basic_ops]
+            # pylint: disable-next=protected-access
+            for idx, op in enumerate(module_group._basic_ops):
+                if id(op) in resolved:
+                    group_kwargs[group_idx][idx] = resolved.pop(id(op))
 
+        # Any keys left over target an op that is not in this Sequential
         if resolved:
             raise ValueError("op_kwargs contains keys that are not in this Sequential")
         return group_kwargs
