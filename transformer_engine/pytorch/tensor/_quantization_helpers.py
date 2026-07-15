@@ -30,9 +30,7 @@ def _resolve_view_shape(input_shape: Iterable[int], shape: Iterable[int]) -> tor
 
     # Avoid comparisons that specialize or guard SymInts. The meta fallback is
     # also useful for preserving PyTorch's type checking of non-integer dims.
-    if any(
-        not isinstance(dim, int) or isinstance(dim, bool) for dim in (*input_shape, *shape)
-    ):
+    if any(not isinstance(dim, int) or isinstance(dim, bool) for dim in (*input_shape, *shape)):
         return torch.empty(input_shape, device="meta").view(shape).shape
 
     input_numel = 1
