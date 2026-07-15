@@ -109,11 +109,33 @@ class TensorProto:
         inner = self.quantizer.alloc_tensors(tuple(self.shape), device=device)
         return [inner[name] for name in self.inner_names()]
 
+    def assemble(self, inner_tensors: List[torch.Tensor]) -> torch.Tensor:
+        """Rebuild the tensor from ready-made ``inner_tensors`` (in :meth:`inner_names`
+        order). Shared by :meth:`create_tensor` (fresh buffers) and the custom-op
+        boundary (buffers arriving from an op's flat ``Tensor[]`` payload).
+
+        Non-quantized protos are the single inner tensor as-is; quantized protos
+        are reassembled into the storage/wrapper via ``__tensor_unflatten__``.
+        """
+        if self.quantizer is None:
+            return inner_tensors[0]
+        from ..quantized_tensor import (  # pylint: disable=import-outside-toplevel
+            _STORAGE_REGISTRY,
+        )
+
+        shape = tuple(self.shape)
+        ctx = self.create_metadata()
+        inner = dict(zip(self.inner_names(), inner_tensors))
+        storage_cls = _STORAGE_REGISTRY[ctx["cls"]]
+        return storage_cls.__tensor_unflatten__(
+            inner, ctx, shape, make_contiguous_strides_for(shape)
+        )
+
     def create_tensor(self) -> torch.Tensor:
         """Materialize an (uninitialized) tensor matching this proto (traceable).
 
-        Quantized protos reassemble the :meth:`create_inner_tensors` buffers via
-        the storage's ``__tensor_unflatten__``.
+        Quantized protos reassemble freshly-allocated :meth:`create_inner_tensors`
+        buffers via :meth:`assemble`.
         """
         if self.quantizer is None:
             device = self.device if self.device is not None else torch.device("cuda")
@@ -123,17 +145,7 @@ class TensorProto:
                 device=device,
                 requires_grad=self.requires_grad,
             )
-        from ..quantized_tensor import (  # pylint: disable=import-outside-toplevel
-            _STORAGE_REGISTRY,
-        )
-
-        shape = tuple(self.shape)
-        ctx = self.create_metadata()
-        inner = dict(zip(self.inner_names(), self.create_inner_tensors()))
-        storage_cls = _STORAGE_REGISTRY[ctx["cls"]]
-        return storage_cls.__tensor_unflatten__(
-            inner, ctx, shape, make_contiguous_strides_for(shape)
-        )
+        return self.assemble(self.create_inner_tensors())
 
 
 def to_tensor_proto(tensor: Any) -> TensorProto:
