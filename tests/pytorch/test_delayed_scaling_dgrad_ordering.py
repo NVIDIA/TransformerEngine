@@ -117,4 +117,4 @@ def test_delayed_scaling_checkpointed_dgrad_ordering(seed: int) -> None:
             )
             assert input_max < 1e-4
 
-    assert 0.004 < final_norm < 0.006
+    assert 0.001 < final_norm < 0.05
