@@ -43,5 +43,12 @@ include_directories(${CMAKE_SOURCE_DIR})
 find_package(CUDAToolkit REQUIRED)
 include(${CMAKE_SOURCE_DIR}/../../transformer_engine/common/cmake/cuDNN.cmake)
 
+# When libtransformer_engine is built with NVTE_WITH_CUSOLVERMP it carries a
+# transitive link dependency on cuSPARSE (cuSolverMp -> cuSOLVER -> cuSPARSE).
+# Link cuSPARSE (when the toolkit provides it) into every test executable below so
+# that dependency resolves when linking against libtransformer_engine; expands to
+# nothing for builds where cuSPARSE is absent (e.g. cuSolverMp not enabled).
+link_libraries($<TARGET_NAME_IF_EXISTS:CUDA::cusparse>)
+
 add_subdirectory(operator)
 add_subdirectory(util)
