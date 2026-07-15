@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="400" viewBox="0 0 800 400">
+  <defs>
+    <style>
+      text { font-family: Arial, Helvetica, sans-serif; }
+      .title { font-size: 16px; font-weight: bold; fill: #1a1a2e; }
+      .subtitle { font-size: 14px; font-weight: bold; fill: #333; }
+      .label { font-size: 13px; fill: #1a1a2e; }
+      .label-sm { font-size: 11px; fill: #444; }
+      .label-white { font-size: 12px; fill: #fff; font-weight: bold; }
+      .label-white-sm { font-size: 11px; fill: #fff; }
+      .note { font-size: 11px; fill: #555; font-style: italic; }
+      .time-label { font-size: 12px; fill: #888; }
+      .comm-fill { fill: #1565C0; }
+      .compute-fill { fill: #2E7D32; }
+      .stream-label { font-size: 11px; fill: #666; font-weight: bold; }
+    </style>
+    <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#888"/>
+    </marker>
+    <marker id="arrowleft" markerWidth="8" markerHeight="6" refX="0" refY="3" orient="auto">
+      <polygon points="8 0, 0 3, 8 6" fill="#888"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="800" height="400" fill="#fff" rx="4"/>
+
+  <!-- Title -->
+  <text x="400" y="30" text-anchor="middle" class="title">Communication-GEMM Overlap (Split Pipelined)</text>
+
+  <!-- ===== WITHOUT OVERLAP ===== -->
+  <text x="30" y="70" class="subtitle">Without Overlap (Sequential)</text>
+
+  <!-- Timeline axis -->
+  <line x1="170" y1="110" x2="760" y2="110" stroke="#CCC" stroke-width="1"/>
+  <text x="160" y="114" text-anchor="end" class="stream-label">GPU</text>
+
+  <!-- All-gather block -->
+  <rect x="170" y="88" width="260" height="42" rx="5" class="comm-fill"/>
+  <text x="300" y="114" text-anchor="middle" class="label-white">All-gather</text>
+
+  <!-- GEMM block -->
+  <rect x="430" y="88" width="300" height="42" rx="5" class="compute-fill"/>
+  <text x="580" y="114" text-anchor="middle" class="label-white">GEMM</text>
+
+  <!-- Total time bracket -->
+  <line x1="170" y1="142" x2="170" y2="152" stroke="#888" stroke-width="1"/>
+  <line x1="730" y1="142" x2="730" y2="152" stroke="#888" stroke-width="1"/>
+  <line x1="170" y1="148" x2="730" y2="148" stroke="#888" stroke-width="1" marker-start="url(#arrowleft)" marker-end="url(#arrowhead)"/>
+  <text x="450" y="165" text-anchor="middle" class="time-label">Total time = comm + compute</text>
+
+  <!-- ===== WITH OVERLAP ===== -->
+  <text x="30" y="210" class="subtitle">With Overlap (Split Pipelined)</text>
+
+  <!-- Communication stream label -->
+  <text x="160" y="248" text-anchor="end" class="stream-label">Comm</text>
+  <text x="160" y="262" text-anchor="end" class="stream-label">stream</text>
+
+  <!-- Compute stream label -->
+  <text x="160" y="303" text-anchor="end" class="stream-label">Compute</text>
+  <text x="160" y="317" text-anchor="end" class="stream-label">stream</text>
+
+  <!-- Communication stream: AG chunks -->
+  <rect x="170" y="235" width="130" height="36" rx="4" class="comm-fill"/>
+  <text x="235" y="258" text-anchor="middle" class="label-white-sm">AG chunk 0</text>
+
+  <rect x="305" y="235" width="130" height="36" rx="4" class="comm-fill" opacity="0.82"/>
+  <text x="370" y="258" text-anchor="middle" class="label-white-sm">AG chunk 1</text>
+
+  <rect x="440" y="235" width="130" height="36" rx="4" class="comm-fill" opacity="0.65"/>
+  <text x="505" y="258" text-anchor="middle" class="label-white-sm">AG chunk 2</text>
+
+  <!-- Compute stream: GEMM chunks (offset by one chunk) -->
+  <rect x="305" y="290" width="130" height="36" rx="4" class="compute-fill"/>
+  <text x="370" y="313" text-anchor="middle" class="label-white-sm">GEMM 0</text>
+
+  <rect x="440" y="290" width="130" height="36" rx="4" class="compute-fill" opacity="0.82"/>
+  <text x="505" y="313" text-anchor="middle" class="label-white-sm">GEMM 1</text>
+
+  <rect x="575" y="290" width="130" height="36" rx="4" class="compute-fill" opacity="0.65"/>
+  <text x="640" y="313" text-anchor="middle" class="label-white-sm">GEMM 2</text>
+
+  <!-- Dependency arrows (dashed) from AG chunk to corresponding GEMM -->
+  <line x1="300" y1="271" x2="305" y2="290" stroke="#999" stroke-width="1" stroke-dasharray="3,2"/>
+  <line x1="435" y1="271" x2="440" y2="290" stroke="#999" stroke-width="1" stroke-dasharray="3,2"/>
+  <line x1="570" y1="271" x2="575" y2="290" stroke="#999" stroke-width="1" stroke-dasharray="3,2"/>
+
+  <!-- Overlap shading -->
+  <rect x="305" y="235" width="265" height="91" rx="0" fill="#FFEB3B" opacity="0.1"/>
+
+  <!-- Total time bracket -->
+  <line x1="170" y1="338" x2="170" y2="348" stroke="#888" stroke-width="1"/>
+  <line x1="705" y1="338" x2="705" y2="348" stroke="#888" stroke-width="1"/>
+  <line x1="170" y1="344" x2="705" y2="344" stroke="#888" stroke-width="1" marker-start="url(#arrowleft)" marker-end="url(#arrowhead)"/>
+  <text x="437" y="361" text-anchor="middle" class="time-label" font-size="13" font-weight="bold">Total time &#8776; max(comm, compute)</text>
+
+  <!-- Legend -->
+  <rect x="200" y="376" width="16" height="12" rx="2" class="comm-fill"/>
+  <text x="222" y="387" class="label-sm">Communication (all-gather)</text>
+  <rect x="430" y="376" width="16" height="12" rx="2" class="compute-fill"/>
+  <text x="452" y="387" class="label-sm">Compute (GEMM)</text>
+</svg>

@@ -1,0 +1,182 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="520" viewBox="0 0 820 520">
+  <defs>
+    <style>
+      text { font-family: Arial, Helvetica, sans-serif; }
+      .base-class { font-size: 11px; font-weight: bold; fill: #222; }
+      .subclass { font-size: 11px; fill: #333; }
+      .column-title { font-size: 14px; font-weight: bold; fill: #fff; }
+    </style>
+    <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#999"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="820" height="520" fill="#fff" rx="4"/>
+
+  <!-- Title -->
+  <text x="410" y="28" text-anchor="middle" font-size="16" font-weight="bold" fill="#222">Quantization Class Hierarchy</text>
+
+  <!-- ======================== -->
+  <!-- Column 1: Quantizer      -->
+  <!-- ======================== -->
+  <rect x="15" y="45" width="250" height="460" rx="8" fill="#e8f0fe" stroke="#b0c4de" stroke-width="1.5"/>
+  <rect x="15" y="45" width="250" height="30" rx="8" fill="#4a86c8"/>
+  <rect x="15" y="60" width="250" height="15" fill="#4a86c8"/>
+  <text x="140" y="66" text-anchor="middle" class="column-title">Quantizer (Builder)</text>
+
+  <!-- Base class -->
+  <rect x="35" y="90" width="210" height="38" rx="6" fill="#fff" stroke="#4a86c8" stroke-width="2"/>
+  <text x="140" y="110" text-anchor="middle" class="base-class">Quantizer</text>
+  <text x="140" y="123" text-anchor="middle" font-size="9" fill="#666" font-style="italic">abstract base</text>
+
+  <!-- Tree spine -->
+  <line x1="140" y1="128" x2="140" y2="148" stroke="#4a86c8" stroke-width="1.5"/>
+  <line x1="140" y1="148" x2="60" y2="148" stroke="#4a86c8" stroke-width="1.5"/>
+  <line x1="60" y1="148" x2="60" y2="460" stroke="#4a86c8" stroke-width="1.5"/>
+
+  <!-- Row 1: Float8Quantizer (y=170) -->
+  <line x1="60" y1="170" x2="75" y2="170" stroke="#4a86c8" stroke-width="1.5"/>
+  <rect x="75" y="153" width="170" height="34" rx="5" fill="#fff" stroke="#4a86c8" stroke-width="1.2"/>
+  <text x="160" y="174" text-anchor="middle" class="subclass">Float8Quantizer</text>
+
+  <!-- Row 1b: Float8CurrentScalingQuantizer (y=220) -->
+  <line x1="60" y1="220" x2="75" y2="220" stroke="#4a86c8" stroke-width="1.5"/>
+  <rect x="75" y="201" width="170" height="38" rx="5" fill="#fff" stroke="#4a86c8" stroke-width="1.2"/>
+  <text x="160" y="218" text-anchor="middle" class="subclass" font-size="10">Float8CurrentScaling</text>
+  <text x="160" y="232" text-anchor="middle" class="subclass" font-size="10">Quantizer</text>
+
+  <!-- Row 2: MXFP8Quantizer (y=290) -->
+  <line x1="60" y1="290" x2="75" y2="290" stroke="#4a86c8" stroke-width="1.5"/>
+  <rect x="75" y="273" width="170" height="34" rx="5" fill="#fff" stroke="#4a86c8" stroke-width="1.2"/>
+  <text x="160" y="294" text-anchor="middle" class="subclass">MXFP8Quantizer</text>
+
+  <!-- Row 3: Float8BlockQuantizer (y=360) -->
+  <line x1="60" y1="360" x2="75" y2="360" stroke="#4a86c8" stroke-width="1.5"/>
+  <rect x="75" y="343" width="170" height="34" rx="5" fill="#fff" stroke="#4a86c8" stroke-width="1.2"/>
+  <text x="160" y="364" text-anchor="middle" class="subclass">Float8BlockQuantizer</text>
+
+  <!-- Row 4: NVFP4Quantizer (y=430) -->
+  <line x1="60" y1="430" x2="75" y2="430" stroke="#4a86c8" stroke-width="1.5"/>
+  <rect x="75" y="413" width="170" height="34" rx="5" fill="#fff" stroke="#4a86c8" stroke-width="1.2"/>
+  <text x="160" y="434" text-anchor="middle" class="subclass">NVFP4Quantizer</text>
+
+  <!-- ======================== -->
+  <!-- Column 2: Storage        -->
+  <!-- ======================== -->
+  <rect x="285" y="45" width="250" height="460" rx="8" fill="#e8f5e9" stroke="#a5d6a7" stroke-width="1.5"/>
+  <rect x="285" y="45" width="250" height="30" rx="8" fill="#4caf50"/>
+  <rect x="285" y="60" width="250" height="15" fill="#4caf50"/>
+  <text x="410" y="66" text-anchor="middle" class="column-title">Storage (Internal)</text>
+
+  <!-- Base class -->
+  <rect x="300" y="90" width="220" height="38" rx="6" fill="#fff" stroke="#4caf50" stroke-width="2"/>
+  <text x="410" y="110" text-anchor="middle" class="base-class">QuantizedTensorStorage</text>
+  <text x="410" y="123" text-anchor="middle" font-size="9" fill="#666" font-style="italic">abstract base</text>
+
+  <!-- Tree spine -->
+  <line x1="410" y1="128" x2="410" y2="148" stroke="#4caf50" stroke-width="1.5"/>
+  <line x1="410" y1="148" x2="330" y2="148" stroke="#4caf50" stroke-width="1.5"/>
+  <line x1="330" y1="148" x2="330" y2="430" stroke="#4caf50" stroke-width="1.5"/>
+
+  <!-- Row 1: Float8TensorStorage (y=170, aligned with Float8Quantizer) -->
+  <line x1="330" y1="170" x2="345" y2="170" stroke="#4caf50" stroke-width="1.5"/>
+  <rect x="345" y="153" width="175" height="34" rx="5" fill="#fff" stroke="#4caf50" stroke-width="1.2"/>
+  <text x="432" y="174" text-anchor="middle" class="subclass">Float8TensorStorage</text>
+
+  <!-- Row 2: MXFP8TensorStorage (y=290, aligned with MXFP8Quantizer) -->
+  <line x1="330" y1="290" x2="345" y2="290" stroke="#4caf50" stroke-width="1.5"/>
+  <rect x="345" y="273" width="175" height="34" rx="5" fill="#fff" stroke="#4caf50" stroke-width="1.2"/>
+  <text x="432" y="294" text-anchor="middle" class="subclass">MXFP8TensorStorage</text>
+
+  <!-- Row 3: Float8BlockwiseQTensorStorage (y=360) -->
+  <line x1="330" y1="360" x2="345" y2="360" stroke="#4caf50" stroke-width="1.5"/>
+  <rect x="345" y="339" width="175" height="42" rx="5" fill="#fff" stroke="#4caf50" stroke-width="1.2"/>
+  <text x="432" y="358" text-anchor="middle" class="subclass" font-size="10">Float8BlockwiseQ</text>
+  <text x="432" y="372" text-anchor="middle" class="subclass" font-size="10">TensorStorage</text>
+
+  <!-- Row 4: NVFP4TensorStorage (y=430) -->
+  <line x1="330" y1="430" x2="345" y2="430" stroke="#4caf50" stroke-width="1.5"/>
+  <rect x="345" y="413" width="175" height="34" rx="5" fill="#fff" stroke="#4caf50" stroke-width="1.2"/>
+  <text x="432" y="434" text-anchor="middle" class="subclass">NVFP4TensorStorage</text>
+
+  <!-- ======================== -->
+  <!-- Column 3: Tensor         -->
+  <!-- ======================== -->
+  <rect x="555" y="45" width="250" height="460" rx="8" fill="#fff3e0" stroke="#ffcc80" stroke-width="1.5"/>
+  <rect x="555" y="45" width="250" height="30" rx="8" fill="#ef8c2c"/>
+  <rect x="555" y="60" width="250" height="15" fill="#ef8c2c"/>
+  <text x="680" y="66" text-anchor="middle" class="column-title">Tensor (PyTorch)</text>
+
+  <!-- Base class -->
+  <rect x="575" y="90" width="210" height="38" rx="6" fill="#fff" stroke="#ef8c2c" stroke-width="2"/>
+  <text x="680" y="110" text-anchor="middle" class="base-class">QuantizedTensor</text>
+  <text x="680" y="123" text-anchor="middle" font-size="9" fill="#666" font-style="italic">torch.Tensor subclass</text>
+
+  <!-- Tree spine -->
+  <line x1="680" y1="128" x2="680" y2="148" stroke="#ef8c2c" stroke-width="1.5"/>
+  <line x1="680" y1="148" x2="600" y2="148" stroke="#ef8c2c" stroke-width="1.5"/>
+  <line x1="600" y1="148" x2="600" y2="430" stroke="#ef8c2c" stroke-width="1.5"/>
+
+  <!-- Row 1: Float8Tensor (y=170) -->
+  <line x1="600" y1="170" x2="615" y2="170" stroke="#ef8c2c" stroke-width="1.5"/>
+  <rect x="615" y="153" width="170" height="34" rx="5" fill="#fff" stroke="#ef8c2c" stroke-width="1.2"/>
+  <text x="700" y="174" text-anchor="middle" class="subclass">Float8Tensor</text>
+
+  <!-- Row 2: MXFP8Tensor (y=290) -->
+  <line x1="600" y1="290" x2="615" y2="290" stroke="#ef8c2c" stroke-width="1.5"/>
+  <rect x="615" y="273" width="170" height="34" rx="5" fill="#fff" stroke="#ef8c2c" stroke-width="1.2"/>
+  <text x="700" y="294" text-anchor="middle" class="subclass">MXFP8Tensor</text>
+
+  <!-- Row 3: Float8BlockwiseQTensor (y=360) -->
+  <line x1="600" y1="360" x2="615" y2="360" stroke="#ef8c2c" stroke-width="1.5"/>
+  <rect x="615" y="343" width="170" height="34" rx="5" fill="#fff" stroke="#ef8c2c" stroke-width="1.2"/>
+  <text x="700" y="364" text-anchor="middle" class="subclass" font-size="10">Float8BlockwiseQTensor</text>
+
+  <!-- Row 4: NVFP4Tensor (y=430) -->
+  <line x1="600" y1="430" x2="615" y2="430" stroke="#ef8c2c" stroke-width="1.5"/>
+  <rect x="615" y="413" width="170" height="34" rx="5" fill="#fff" stroke="#ef8c2c" stroke-width="1.2"/>
+  <text x="700" y="434" text-anchor="middle" class="subclass">NVFP4Tensor</text>
+
+  <!-- ================================= -->
+  <!-- Dashed arrows: Quantizer -> Storage -->
+  <!-- ================================= -->
+  <!-- Float8Quantizer -> Float8TensorStorage (same row) -->
+  <line x1="245" y1="170" x2="345" y2="170" stroke="#999" stroke-width="1" stroke-dasharray="5,3" marker-end="url(#arrowhead)"/>
+
+  <!-- Float8CurrentScalingQuantizer -> Float8TensorStorage (diagonal up) -->
+  <path d="M 245 215 L 280 215 Q 295 215 295 200 L 295 170 L 345 170" stroke="#999" stroke-width="1" stroke-dasharray="5,3" fill="none" marker-end="url(#arrowhead)"/>
+
+  <!-- MXFP8Quantizer -> MXFP8TensorStorage (same row) -->
+  <line x1="245" y1="290" x2="345" y2="290" stroke="#999" stroke-width="1" stroke-dasharray="5,3" marker-end="url(#arrowhead)"/>
+
+  <!-- Float8BlockQuantizer -> Float8BlockwiseQTensorStorage (same row) -->
+  <line x1="245" y1="360" x2="345" y2="360" stroke="#999" stroke-width="1" stroke-dasharray="5,3" marker-end="url(#arrowhead)"/>
+
+  <!-- NVFP4Quantizer -> NVFP4TensorStorage (same row) -->
+  <line x1="245" y1="430" x2="345" y2="430" stroke="#999" stroke-width="1" stroke-dasharray="5,3" marker-end="url(#arrowhead)"/>
+
+  <!-- ================================= -->
+  <!-- Dashed arrows: Storage -> Tensor   -->
+  <!-- ================================= -->
+  <!-- Float8TensorStorage -> Float8Tensor -->
+  <line x1="520" y1="170" x2="615" y2="170" stroke="#999" stroke-width="1" stroke-dasharray="5,3" marker-end="url(#arrowhead)"/>
+
+  <!-- MXFP8TensorStorage -> MXFP8Tensor -->
+  <line x1="520" y1="290" x2="615" y2="290" stroke="#999" stroke-width="1" stroke-dasharray="5,3" marker-end="url(#arrowhead)"/>
+
+  <!-- Float8BlockwiseQTensorStorage -> Float8BlockwiseQTensor -->
+  <line x1="520" y1="360" x2="615" y2="360" stroke="#999" stroke-width="1" stroke-dasharray="5,3" marker-end="url(#arrowhead)"/>
+
+  <!-- NVFP4TensorStorage -> NVFP4Tensor -->
+  <line x1="520" y1="430" x2="615" y2="430" stroke="#999" stroke-width="1" stroke-dasharray="5,3" marker-end="url(#arrowhead)"/>
+
+  <!-- ================================= -->
+  <!-- Legend                              -->
+  <!-- ================================= -->
+  <line x1="30" y1="510" x2="60" y2="510" stroke="#999" stroke-width="1" stroke-dasharray="5,3" marker-end="url(#arrowhead)"/>
+  <text x="65" y="514" font-size="10" fill="#666">produces / wraps</text>
+
+  <!-- Note about Float8CurrentScaling sharing -->
+  <text x="280" y="240" text-anchor="middle" font-size="8.5" fill="#888" font-style="italic">shares Float8 storage</text>
+</svg>

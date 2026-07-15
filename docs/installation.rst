@@ -122,6 +122,15 @@ To build the C++ extensions with debug symbols, e.g. with the `-g` flag:
 
   NVTE_BUILD_DEBUG=1 pip3 install --no-build-isolation .
 
+To speed up repeated builds (e.g. during development), enable ccache:
+
+.. code-block:: bash
+
+  NVTE_USE_CCACHE=1 pip3 install --no-build-isolation .
+
+This uses `ccache` by default. To use a different binary (e.g. `sccache`), set
+`NVTE_CCACHE_BIN=sccache`.
+
 .. include:: ../README.rst
    :start-after: troubleshooting-begin-marker-do-not-remove
    :end-before: troubleshooting-end-marker-do-not-remove
