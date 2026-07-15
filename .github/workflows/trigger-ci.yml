@@ -60,6 +60,8 @@ jobs:
            || github.actor == 'kainzhong'
            || github.actor == 'cspades'
            || github.actor == 'jomitchellnv'
+           || github.actor == 'fheinecke'
+           || github.actor == 'janekb04'
          )
     steps:
       - name: Check if comment is issued by authorized person
