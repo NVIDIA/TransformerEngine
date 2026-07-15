@@ -16,7 +16,7 @@ import transformer_engine_torch as tex
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8Quantizer
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensor
 from ..constants import DType
-from .multi_tensor_apply import multi_tensor_applier
+from .multi_tensor_apply import filter_empty_tensor_lists, multi_tensor_applier
 
 
 def get_fp8_meta(fp8_tensor):
@@ -741,6 +741,10 @@ class FusedAdam(torch.optim.Optimizer):
                 # pylint: disable=cell-var-from-loop
                 inv_scale_arg = () if inv_scale is None else (inv_scale,)
                 out_dtype_arg = () if out_dtype is None else (out_dtype,)
+                # Empty tensor slots are no-ops for Adam. If every slot was removed,
+                # skip the C++ wrapper because it reads tensor_lists[0][0].
+                if not filter_empty_tensor_lists(tensor_lists):
+                    return
                 multi_tensor_applier(
                     adam_func,
                     self._dummy_overflow_buf,
