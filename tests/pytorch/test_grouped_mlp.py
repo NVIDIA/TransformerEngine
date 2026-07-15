@@ -19,7 +19,7 @@ from transformer_engine.pytorch.ops.fused.grouped_mlp import (
     _cudnn_frontend_supports_grouped_gemm_srelu,
     _cudnn_frontend_version_supported,
 )
-from transformer_engine.pytorch.ops._common import (
+from transformer_engine.pytorch.ops.basic.grouped_linear import (
     OUTPUT_BUFFER_KEY,
     GRAD_INPUT_BUFFER_KEY,
 )
@@ -1321,9 +1321,10 @@ class TestGroupedMLPFusedOp:
             torch.testing.assert_close(fc1_db_false, fc1_db_true, **bias_tols)
             torch.testing.assert_close(fc2_db_false, fc2_db_true, **bias_tols)
 
-    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    @pytest.mark.parametrize("quantization", ("mxfp8", "nvfp4_rht"))
     def test_grouped_mlp_caller_buffers(
         self,
+        quantization: str,
         *,
         dtype: torch.dtype = torch.bfloat16,
         device: torch.device = "cuda",
@@ -1332,9 +1333,13 @@ class TestGroupedMLPFusedOp:
         split_alignment: int = 256,
         glu_interleave_size: int = 32,
     ) -> None:
-        """Caller-provided output/grad_input buffers on the fused MXFP8 grouped MLP."""
+        """Caller-provided output/grad_input buffers on the fused MXFP8/NVFP4 grouped MLP."""
+        if quantization == "mxfp8" and not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
+        if quantization == "nvfp4_rht" and not nvfp4_available:
+            pytest.skip(reason_for_no_nvfp4)
         if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
-            pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
+            pytest.skip("Fused grouped MLP is not supported on this system")
 
         split_sizes = torch.tensor(
             [split_alignment * (i + 1) for i in range(group_size)],
@@ -1342,7 +1347,7 @@ class TestGroupedMLPFusedOp:
             device=device,
         )
         num_tokens = int(split_sizes.sum())
-        recipe = make_recipe("mxfp8")
+        recipe = make_recipe(quantization)
 
         x_base = torch.empty((num_tokens, hidden_size), device=device, dtype=dtype).uniform_(
             -0.25, 0.25

@@ -19,7 +19,7 @@ import torch
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.ops as te_ops
-from transformer_engine.pytorch.ops._common import (
+from transformer_engine.pytorch.ops.basic.grouped_linear import (
     OUTPUT_BUFFER_KEY,
     GRAD_INPUT_BUFFER_KEY,
 )

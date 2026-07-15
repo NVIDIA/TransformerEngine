@@ -1765,7 +1765,9 @@ class GroupedLinear(TransformerEngineBaseModule):
              aliases it with no copy. Must be a 2D, contiguous, non-grad tensor of shape
              [num_tokens, out_features] in the activation dtype. Only the first
              sum(m_splits) rows are written; any padded trailing rows are left unchanged.
-             Can be given independently of dgrad_out.
+             Can be given independently of dgrad_out. If the buffer is reused across
+             iterations, pass ``buffer.detach()`` so autograd does not set its
+             ``requires_grad`` (which would trip the non-grad check on the next call).
         dgrad_out : torch.Tensor, default = None
              Optional preallocated buffer for the backward input gradient, of shape
              [num_tokens, in_features] with the same constraints as out. Receives the

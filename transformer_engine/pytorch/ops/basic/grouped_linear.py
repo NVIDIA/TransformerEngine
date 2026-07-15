@@ -43,8 +43,6 @@ from ...utils import (
     round_up_to_nearest_multiple,
 )
 from .._common import (
-    GRAD_INPUT_BUFFER_KEY,
-    OUTPUT_BUFFER_KEY,
     get_accumulate_flag_in_param,
     get_dummy_wgrads_for_params,
     get_main_grad_from_param,
@@ -59,6 +57,12 @@ from ...triton.grouped_dbias_dscales import (
     compute_grouped_dbias,
     compute_grouped_dbias_dscales,
 )
+
+
+# Keys for passing caller-provided output and grad-input buffers to a grouped
+# linear (or fused grouped MLP) through Sequential's ``op_kwargs``.
+OUTPUT_BUFFER_KEY = "output"
+GRAD_INPUT_BUFFER_KEY = "grad_input"
 
 
 class GroupedLinear(BasicOperation):

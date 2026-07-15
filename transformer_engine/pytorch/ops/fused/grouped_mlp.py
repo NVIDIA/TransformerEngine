@@ -43,8 +43,6 @@ from ..basic import (
 from ..fuser import register_forward_backward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
 from .._common import (
-    GRAD_INPUT_BUFFER_KEY,
-    OUTPUT_BUFFER_KEY,
     get_accumulate_flag_in_param,
     get_dummy_wgrads_for_params,
     get_main_grad_from_param,
@@ -53,6 +51,7 @@ from .._common import (
     validate_or_alloc_output,
     view_main_grad_as_grouped_buffer,
 )
+from ..basic.grouped_linear import GRAD_INPUT_BUFFER_KEY, OUTPUT_BUFFER_KEY
 
 
 @functools.lru_cache(maxsize=None)
@@ -884,7 +883,18 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         fc1_op, activation_op, fc2_op = self.basic_ops
         fc1_ctx, _activation_ctx, fc2_ctx = basic_op_ctxs
 
-        # Caller-provided buffers: FC2 forward output and FC1 backward grad-input.
+        # Caller-provided buffers: FC2 forward output and FC1 backward grad-input. Guard against
+        # a buffer routed to the wrong op (output belongs on FC2, grad-input on FC1).
+        if OUTPUT_BUFFER_KEY in basic_op_kwargs[0]:
+            raise ValueError(
+                f"'{OUTPUT_BUFFER_KEY}' buffer can only be provided to FC2 (the last op) of "
+                "the fused grouped MLP, not FC1."
+            )
+        if GRAD_INPUT_BUFFER_KEY in basic_op_kwargs[-1]:
+            raise ValueError(
+                f"'{GRAD_INPUT_BUFFER_KEY}' buffer can only be provided to FC1 (the first op) of "
+                "the fused grouped MLP, not FC2."
+            )
         output_buffer = basic_op_kwargs[-1].get(OUTPUT_BUFFER_KEY)
         fc1_ctx.dgrad_out = basic_op_kwargs[0].get(GRAD_INPUT_BUFFER_KEY)
 
@@ -1443,23 +1453,15 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc2_quant_kwargs["b_dtype"] = torch.float8_e4m3fn
                 fc2_quant_kwargs["b_major"] = "k"
 
-            if output_buffer is not None:
-                # Kernel writes directly into the caller buffer, so no copy.
-                output_buffer = validate_or_alloc_output(
-                    output_buffer, fc2_out_shape, dtype, device
-                )
-                fc2_quant_kwargs["d_tensor"] = output_buffer.as_strided(
-                    (in_shape[0], fc2_weight_shape[0], 1),
-                    (fc2_weight_shape[0], 1, in_shape[0] * fc2_weight_shape[0]),
-                )
-
-            fc2_kernel_out = self.grouped_gemm_quant_kernel()(**fc2_quant_kwargs)
-            if output_buffer is not None:
-                fc2_out = output_buffer
-            else:
-                fc2_out = (
-                    fc2_kernel_out["d_tensor"].permute(2, 0, 1).view(fc2_out_shape).contiguous()
-                )
+            # Always allocate the output (the caller's buffer if provided, else a fresh one) and
+            # pass it as the kernel's d_tensor, so the kernel writes in place and the call is uniform.
+            output_buffer = validate_or_alloc_output(output_buffer, fc2_out_shape, dtype, device)
+            fc2_quant_kwargs["d_tensor"] = output_buffer.as_strided(
+                (in_shape[0], fc2_weight_shape[0], 1),
+                (fc2_weight_shape[0], 1, in_shape[0] * fc2_weight_shape[0]),
+            )
+            self.grouped_gemm_quant_kernel()(**fc2_quant_kwargs)
+            fc2_out = output_buffer
 
         # Save state for backward pass
         if requires_grad:
@@ -2088,21 +2090,17 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     fc1_dgrad_kwargs["b_dtype"] = torch.float8_e4m3fn
                     fc1_dgrad_kwargs["b_major"] = "n"
 
-                if grad_input_buffer is not None:
-                    # Kernel writes directly into the caller buffer, so no copy.
-                    grad_input_buffer = validate_or_alloc_output(
-                        grad_input_buffer, in_shape, dtype, device
-                    )
-                    fc1_dgrad_kwargs["d_tensor"] = grad_input_buffer.as_strided(
-                        (out_shape[0], fc1_weight_shape[1], 1),
-                        (fc1_weight_shape[1], 1, out_shape[0] * fc1_weight_shape[1]),
-                    )
-
-                fc1_dgrad_kernel_out = self.grouped_gemm_quant_kernel()(**fc1_dgrad_kwargs)
-                if grad_input_buffer is not None:
-                    grad_input = grad_input_buffer
-                else:
-                    grad_input = fc1_dgrad_kernel_out["d_tensor"].view(in_shape)
+                # Always allocate the grad-input (the caller's buffer if provided, else a fresh
+                # one) and pass it as the kernel's d_tensor, decoupling it from the kernel call.
+                grad_input_buffer = validate_or_alloc_output(
+                    grad_input_buffer, in_shape, dtype, device
+                )
+                fc1_dgrad_kwargs["d_tensor"] = grad_input_buffer.as_strided(
+                    (out_shape[0], fc1_weight_shape[1], 1),
+                    (fc1_weight_shape[1], 1, out_shape[0] * fc1_weight_shape[1]),
+                )
+                self.grouped_gemm_quant_kernel()(**fc1_dgrad_kwargs)
+                grad_input = grad_input_buffer
 
         # FC1 wgrad GEMM
         fc1_grad_params = _compute_grad_params(

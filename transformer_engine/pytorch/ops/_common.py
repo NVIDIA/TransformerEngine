@@ -18,12 +18,6 @@ from ..quantized_tensor import QuantizedTensorStorage
 from ..utils import canonicalize_dtype
 
 
-# Keys for passing caller-provided output and grad-input buffers through
-# basic_op_kwargs. See Sequential.forward.
-OUTPUT_BUFFER_KEY = "output"
-GRAD_INPUT_BUFFER_KEY = "grad_input"
-
-
 def validate_or_alloc_output(
     buffer: Optional[torch.Tensor],
     shape: tuple[int, ...] | list[int],
@@ -33,7 +27,10 @@ def validate_or_alloc_output(
     """Return the caller's output buffer, or allocate one if it is None.
 
     The buffer must be a contiguous, non-grad tensor matching the required
-    shape, dtype, and device. Validation reads host-side metadata only.
+    shape, dtype, and device. Validation reads host-side metadata only. If the
+    buffer is reused across iterations, pass ``buffer.detach()`` so autograd does
+    not set its ``requires_grad`` (which would trip the non-grad check here on the
+    next call).
     """
     shape = tuple(shape)
     if buffer is None:
