@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """Tests for cuDNN frontend score_mod fused attention."""
+
 from math import sqrt
 
 import jax
@@ -20,7 +21,6 @@ from transformer_engine.jax.cpp_extensions import make_fused_attn_score_mod_conf
 from transformer_engine.jax.flax import transformer as flax_transformer
 from transformer_engine_jax import get_device_compute_capability
 from test_fused_attn import FusedAttnRunner, SeqDescFormat
-
 
 _CONFIG_TEST_HEAD_DIM = 128
 _CONFIG_TEST_SCALING_FACTOR = 1.0 / sqrt(_CONFIG_TEST_HEAD_DIM)

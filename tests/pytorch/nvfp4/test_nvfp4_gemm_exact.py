@@ -12,7 +12,6 @@ from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grou
 from transformer_engine.pytorch.custom_recipes.quantization_ref_nvfp4 import NVFP4QuantizerRef
 from transformer_engine.pytorch.custom_recipes import utils
 
-
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
 
 

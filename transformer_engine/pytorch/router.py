@@ -13,11 +13,11 @@ Precision Notes:
 - Only cast to low-precision when necessary and the casting only happens in writing to
   global memory. For example, the gradient is required to have the same dtype as the input.
 """
+
 from typing import Optional, Union
 
 import torch
 import transformer_engine_torch as tex
-
 
 # Re-export the C++ enum NVTERoutingMapFormat under a friendlier Python name.
 # Members:

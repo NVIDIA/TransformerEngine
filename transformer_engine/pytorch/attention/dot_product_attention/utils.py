@@ -5,6 +5,7 @@
 """
 Utils/Helper classes and methods for attention
 """
+
 import math
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -396,8 +397,9 @@ def get_attention_backend(
     cudnn_version = get_cudnn_version()
     run_config = {
         "transformer_engine_version": te.__version__,
-        "compute_capability": "sm"
-        + str(10 * device_compute_capability[0] + device_compute_capability[1]),
+        "compute_capability": (
+            "sm" + str(10 * device_compute_capability[0] + device_compute_capability[1])
+        ),
         "cuda_version": torch.version.cuda,
         "flash_attn_version": (
             str(FlashAttentionUtils.version)

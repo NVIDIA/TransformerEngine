@@ -7,6 +7,7 @@ Dequantization utilities for TE/JAX.
 This module provides utilities for dequantizing tensors that have been quantized
 using various scaling modes, including delayed scaling and block scaling.
 """
+
 import math
 from dataclasses import dataclass
 from abc import ABC, abstractmethod
@@ -16,7 +17,6 @@ import jax.numpy as jnp
 
 from .scaling_modes import ScalingMode
 from .hadamard import apply_rht
-
 
 __all__ = ["ScalingModeToDequantizerMap"]
 

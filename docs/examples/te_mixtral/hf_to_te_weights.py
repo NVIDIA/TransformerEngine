@@ -26,7 +26,6 @@ import torch
 import torch.distributed as dist
 from transformers import MixtralConfig
 
-
 # Block size for the gate/up interleaved layout. Must match the
 # ``glu_interleave_size`` configured on ``ScaledSwiGLU`` in the MXFP8 MoE
 # block (see ``te_mixtral_mxfp8.py``).
@@ -143,12 +142,10 @@ def _copy_attention_and_layernorms(
 ) -> None:
     direct = {
         layer_prefix
-        + "input_layernorm.weight": layer_prefix
-        + "self_attention.layernorm_qkv.layer_norm_weight",
+        + "input_layernorm.weight": layer_prefix + "self_attention.layernorm_qkv.layer_norm_weight",
         layer_prefix + "self_attn.o_proj.weight": layer_prefix + "self_attention.proj.weight",
         layer_prefix
-        + "post_attention_layernorm.weight": layer_prefix
-        + "post_attention_layernorm.weight",
+        + "post_attention_layernorm.weight": layer_prefix + "post_attention_layernorm.weight",
     }
     for hf_key, te_key in direct.items():
         if hf_key in hf_state_dict and te_key in te_state_dict:

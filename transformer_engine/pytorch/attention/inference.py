@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Inference"""
+
 import logging
 from collections import OrderedDict, defaultdict
 from typing import Optional, List

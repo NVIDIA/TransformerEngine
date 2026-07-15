@@ -559,15 +559,21 @@ __device__ __forceinline__ void topk_and_mask(CompType *scores, int data_size, i
     using namespace transformer_engine;                                                   \
     case DType::kFloat32: {                                                               \
       using type = float;                                                                 \
-      { __VA_ARGS__ }                                                                     \
+      {                                                                                   \
+        __VA_ARGS__                                                                       \
+      }                                                                                   \
     } break;                                                                              \
     case DType::kFloat16: {                                                               \
       using type = fp16;                                                                  \
-      { __VA_ARGS__ }                                                                     \
+      {                                                                                   \
+        __VA_ARGS__                                                                       \
+      }                                                                                   \
     } break;                                                                              \
     case DType::kBFloat16: {                                                              \
       using type = bf16;                                                                  \
-      { __VA_ARGS__ }                                                                     \
+      {                                                                                   \
+        __VA_ARGS__                                                                       \
+      }                                                                                   \
     } break;                                                                              \
     default:                                                                              \
       NVTE_ERROR("Unsupported router probs dtype ", to_string(static_cast<DType>(dtype)), \
@@ -579,23 +585,33 @@ __device__ __forceinline__ void topk_and_mask(CompType *scores, int data_size, i
     using namespace transformer_engine;                                                   \
     case DType::kInt16: {                                                                 \
       using type = int16_t;                                                               \
-      { __VA_ARGS__ }                                                                     \
+      {                                                                                   \
+        __VA_ARGS__                                                                       \
+      }                                                                                   \
     } break;                                                                              \
     case DType::kInt32: {                                                                 \
       using type = int32_t;                                                               \
-      { __VA_ARGS__ }                                                                     \
+      {                                                                                   \
+        __VA_ARGS__                                                                       \
+      }                                                                                   \
     } break;                                                                              \
     case DType::kInt64: {                                                                 \
       using type = int64_t;                                                               \
-      { __VA_ARGS__ }                                                                     \
+      {                                                                                   \
+        __VA_ARGS__                                                                       \
+      }                                                                                   \
     } break;                                                                              \
     case DType::kBFloat16: {                                                              \
       using type = bf16;                                                                  \
-      { __VA_ARGS__ }                                                                     \
+      {                                                                                   \
+        __VA_ARGS__                                                                       \
+      }                                                                                   \
     } break;                                                                              \
     case DType::kFloat32: {                                                               \
       using type = float;                                                                 \
-      { __VA_ARGS__ }                                                                     \
+      {                                                                                   \
+        __VA_ARGS__                                                                       \
+      }                                                                                   \
     } break;                                                                              \
     default:                                                                              \
       NVTE_ERROR("Unsupported router index dtype ", to_string(static_cast<DType>(dtype)), \
@@ -608,15 +624,21 @@ __device__ __forceinline__ void topk_and_mask(CompType *scores, int data_size, i
     using namespace transformer_engine;                                                         \
     case DType::kInt16: {                                                                       \
       using type = int16_t;                                                                     \
-      { __VA_ARGS__ }                                                                           \
+      {                                                                                         \
+        __VA_ARGS__                                                                             \
+      }                                                                                         \
     } break;                                                                                    \
     case DType::kInt32: {                                                                       \
       using type = int32_t;                                                                     \
-      { __VA_ARGS__ }                                                                           \
+      {                                                                                         \
+        __VA_ARGS__                                                                             \
+      }                                                                                         \
     } break;                                                                                    \
     case DType::kInt64: {                                                                       \
       using type = int64_t;                                                                     \
-      { __VA_ARGS__ }                                                                           \
+      {                                                                                         \
+        __VA_ARGS__                                                                             \
+      }                                                                                         \
     } break;                                                                                    \
     default:                                                                                    \
       NVTE_ERROR("Unsupported dense router index dtype ", to_string(static_cast<DType>(dtype)), \

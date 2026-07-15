@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """Shared functions for the encoder tests"""
+
 from functools import lru_cache
 import os
 import pathlib

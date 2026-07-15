@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Linear API"""
+
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Tuple, Union, List
 from functools import reduce
@@ -1195,7 +1196,7 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
                 ),
                 "layout": "NT",
                 "out": main_grad if bwd_args.fuse_wgrad_accumulation else None,
-                "bias": (bias if (grad_bias is None and not bwd_args.fp8) else None),
+                "bias": bias if (grad_bias is None and not bwd_args.fp8) else None,
                 "use_split_accumulator": use_split_accumulator,
                 "grad": True,
                 "ub": ub_obj_wgrad,

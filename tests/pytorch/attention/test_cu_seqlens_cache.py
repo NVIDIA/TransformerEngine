@@ -9,7 +9,6 @@ from transformer_engine.pytorch import DotProductAttention
 from transformer_engine.pytorch.attention.dot_product_attention import utils as dpa_utils
 from transformer_engine.pytorch.utils import get_cudnn_version
 
-
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required.")
 
 

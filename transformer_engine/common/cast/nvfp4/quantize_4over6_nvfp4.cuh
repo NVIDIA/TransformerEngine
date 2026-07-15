@@ -43,11 +43,15 @@ namespace nvfp4 {
   switch (MODE) {                                                          \
     case kNVTENVFP44Over6MinMAE: {                                         \
       constexpr NVTENVFP44Over6Mode MODE_CONST = kNVTENVFP44Over6MinMAE;   \
-      { __VA_ARGS__ }                                                      \
+      {                                                                    \
+        __VA_ARGS__                                                        \
+      }                                                                    \
     } break;                                                               \
     case kNVTENVFP44Over6MinMSE: {                                         \
       constexpr NVTENVFP44Over6Mode MODE_CONST = kNVTENVFP44Over6MinMSE;   \
-      { __VA_ARGS__ }                                                      \
+      {                                                                    \
+        __VA_ARGS__                                                        \
+      }                                                                    \
     } break;                                                               \
     default: {                                                             \
       NVTE_ERROR("Unsupported NVFP4 4over6 mode.");                        \
@@ -57,11 +61,15 @@ namespace nvfp4 {
 #define TRANSFORMER_ENGINE_NVFP4_4OVER6_E4M3_MAX_SWITCH(E4M3_MAX_VALUE, E4M3_MAX_CONST, ...) \
   if ((E4M3_MAX_VALUE) == 256) {                                                             \
     constexpr int E4M3_MAX_CONST = 256;                                                      \
-    { __VA_ARGS__ }                                                                          \
+    {                                                                                        \
+      __VA_ARGS__                                                                            \
+    }                                                                                        \
   } else {                                                                                   \
     NVTE_CHECK((E4M3_MAX_VALUE) == 448, "Unsupported NVFP4 E4M3 max.");                      \
     constexpr int E4M3_MAX_CONST = 448;                                                      \
-    { __VA_ARGS__ }                                                                          \
+    {                                                                                        \
+      __VA_ARGS__                                                                            \
+    }                                                                                        \
   }
 
 namespace quantize_4over6_kernel {
