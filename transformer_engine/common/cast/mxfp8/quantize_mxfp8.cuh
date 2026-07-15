@@ -82,11 +82,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   constexpr bool IS_CACHED_ACT_OP = COMPUTE_ACTIVATIONS && ROWWISE_SCALING && COLWISE_SCALING;
 
-  const size_t block_offset_Y = blockIdx.y * CHUNK_DIM_Y;
+  const size_t block_id_Y = gridDim.y - 1 - blockIdx.y;
+  const size_t block_offset_Y = block_id_Y * CHUNK_DIM_Y;
   const size_t block_offset_X = blockIdx.x * CHUNK_DIM_X;
-  const size_t scales_block_offset_Y_rowwise = blockIdx.y * CHUNK_DIM_Y;
+  const size_t scales_block_offset_Y_rowwise = block_id_Y * CHUNK_DIM_Y;
   const size_t scales_block_offset_X_rowwise = blockIdx.x * CHUNK_DIM_X / SCALE_DIM_X;
-  const size_t scales_block_offset_Y_colwise = blockIdx.y * CHUNK_DIM_Y / SCALE_DIM_Y;
+  const size_t scales_block_offset_Y_colwise = block_id_Y * CHUNK_DIM_Y / SCALE_DIM_Y;
   const size_t scales_block_offset_X_colwise = blockIdx.x * CHUNK_DIM_X;
 
   const size_t tid_Y_rowwise = threadIdx.x / THREADS_X;
@@ -168,19 +169,24 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   int parity = 0;
 
   if constexpr (IS_DACT) {
-    copy_2d_to_sharedx2(&in_sh[0], &tensor_map_input, block_offset_X, block_offset_Y, &act_in_sh[0],
-                        &tensor_map_act_input, block_offset_X, block_offset_Y, shmem_buff_size,
-                        &mbar[0], is_master_thread);
+    const size_t first_stage_offset_Y = (STAGES - 1) * BUFF_DIM_Y;
+    const size_t global_offset_Y = block_offset_Y + first_stage_offset_Y;
+    copy_2d_to_sharedx2(&in_sh[0], &tensor_map_input, block_offset_X, global_offset_Y,
+                        &act_in_sh[0], &tensor_map_act_input, block_offset_X, global_offset_Y,
+                        shmem_buff_size, &mbar[0], is_master_thread);
   } else {
-    copy_2d_to_shared(&in_sh[0], &tensor_map_input, block_offset_X, block_offset_Y, shmem_buff_size,
-                      &mbar[0], is_master_thread);
+    const size_t first_stage_offset_Y = (STAGES - 1) * BUFF_DIM_Y;
+    const size_t global_offset_Y = block_offset_Y + first_stage_offset_Y;
+    copy_2d_to_shared(&in_sh[0], &tensor_map_input, block_offset_X, global_offset_Y,
+                      shmem_buff_size, &mbar[0], is_master_thread);
   }
 
 #pragma unroll
   for (int stage = 0; stage < STAGES; ++stage) {
     const size_t buff = stage % BUFFS_NUM;
     const size_t next_stage = stage + 1;
-    const size_t stage_offset_Y = stage * BUFF_DIM_Y;
+    const int logical_stage = static_cast<int>(STAGES) - 1 - stage;
+    const size_t stage_offset_Y = logical_stage * BUFF_DIM_Y;
 
     if (next_stage < STAGES) {
       // Wait for TMA transfer to have finished reading shared memory.
@@ -188,7 +194,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       ptx::cp_async_bulk_wait_group_read<1>();
 
       const size_t next_buff = next_stage % BUFFS_NUM;
-      const size_t next_stage_offset_Y = next_stage * BUFF_DIM_Y;
+      const int next_logical_stage = static_cast<int>(STAGES) - 1 - next_stage;
+      const size_t next_stage_offset_Y = next_logical_stage * BUFF_DIM_Y;
       const size_t global_offset_Y = block_offset_Y + next_stage_offset_Y;
       const size_t global_offset_X = block_offset_X;
       const size_t next_buff_offset = next_buff * BUFF_DIM;
@@ -267,7 +274,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       // 2. Compute E8M0 scaling factor
       const e8m0_t biased_exponent =
           ptx::float_to_e8m0(thread_amax * Quantized_Limits<OType>::max_norm_rcp);
-      const size_t global_scales_offset_Y = scales_offset_Y_colwise + stage;
+      const size_t global_scales_offset_Y = scales_offset_Y_colwise + logical_stage;
       const size_t global_scales_offset_X = scales_offset_X_colwise;
       size_t scale_idx;
       if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
@@ -531,7 +538,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       }
     }
     const int dbias_stride = cols;
-    const int dbias_offset_Y = blockIdx.y;
+    const int dbias_offset_Y = block_id_Y;
     const int dbias_offset_X = blockIdx.x * CHUNK_DIM_X + threadIdx.x;
     const int dbias_idx = dbias_offset_Y * dbias_stride + dbias_offset_X;
     const bool col_out_of_bounds_dbias = (dbias_offset_X >= cols);
