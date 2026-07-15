@@ -86,10 +86,8 @@ std::tuple<at::Tensor, at::Tensor> moe_unpermute_bwd(at::Tensor input_bwd, at::T
  * Attention
  **************************************************************************************************/
 
-// Returns (backend, reason). `reason` is empty on success, otherwise a diagnostic string
-// describing why the configuration was rejected when backend = NVTE_No_Backend.
 std::tuple<NVTE_Fused_Attn_Backend, std::string> get_fused_attn_backend(
-    py::object fused_attn_params);
+    const py::object &fused_attn_params);
 
 std::vector<py::object> fused_attn_fwd(
     size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training, float attn_scale, float p_dropout,

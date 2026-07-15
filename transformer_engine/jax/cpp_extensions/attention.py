@@ -130,9 +130,6 @@ class FusedAttnHelper:
     window_size: Tuple[int, int]
     bottom_right_diagonal: bool
     attn_scale: float = 1.0
-    # Actual POST_SCALE_BIAS operand dims (may be broadcast, e.g. 1). Left None when the caller does
-    # not know the bias shape (e.g. the config-level is_fused_attn_kernel_available API), in which
-    # case get_fused_attn_backend falls back to the full [b, h, sq, skv] representative shape.
     bias_batch: Optional[int] = None
     bias_heads: Optional[int] = None
     bias_seqlen_q: Optional[int] = None
@@ -151,27 +148,15 @@ class FusedAttnHelper:
         """Get the fused attention kernel backend.
 
         Returns a ``(backend, message)`` tuple. ``message`` is empty on success, otherwise a
-        diagnostic string describing why the configuration was rejected when backend = NVTE_No_Backend.
+        diagnostic string explaining why the configuration was rejected.
         """
         q_type = jax_dtype_to_te_dtype(self.q_dtype)
-        # The support probe builds a cuDNN graph, which for POST_SCALE_BIAS needs a concrete bias
-        # shape. Prefer the actual bias operand dims (threaded from the bias aval) so the probe keys
-        # and builds the exact graph execution uses, even for broadcast bias. When the caller does
-        # not know the shape (e.g. the config-level is_fused_attn_kernel_available API), fall back to
-        # the full [b, h, sq, skv] representative shape; backend support does not depend on the bias
-        # broadcast pattern. For other bias types there is no bias operand, so pass 0 to avoid
-        # fragmenting the graph-cache key.
+        bias_batch = bias_heads = bias_seqlen_q = bias_seqlen_kv = 0
         if self.attn_bias_type == AttnBiasType.POST_SCALE_BIAS:
-            bias_batch = self.bias_batch if self.bias_batch is not None else self.batch_size
-            bias_heads = self.bias_heads if self.bias_heads is not None else self.q_num_heads
-            bias_seqlen_q = (
-                self.bias_seqlen_q if self.bias_seqlen_q is not None else self.q_max_seqlen
-            )
-            bias_seqlen_kv = (
-                self.bias_seqlen_kv if self.bias_seqlen_kv is not None else self.kv_max_seqlen
-            )
-        else:
-            bias_batch = bias_heads = bias_seqlen_q = bias_seqlen_kv = 0
+            bias_batch = self.bias_batch
+            bias_heads = self.bias_heads
+            bias_seqlen_q = self.bias_seqlen_q
+            bias_seqlen_kv = self.bias_seqlen_kv
         return transformer_engine_jax.get_fused_attn_backend(
             self.is_training,
             self.batch_size,
@@ -395,19 +380,10 @@ class FusedAttnFwdPrimitive(BasePrimitive):
 
         # backend determines the softmax buffer shape/dtype
         input_batch = reduce(operator.mul, batch_shape)
-        # Thread the actual POST_SCALE_BIAS operand dims so the trace-time support probe keys and
-        # builds the exact cuDNN graph the runtime executes (incl. broadcast bias). Derive them the
-        # same way the lowering/execution does: the bias aval is [*batch, heads, sq, skv] where the
-        # leading batch dims may be >1 and are collapsed into a single bias_batch. Matching that
-        # computation keeps the prewarm and runtime graph-cache keys identical for any bias rank.
-        is_post_scale_bias = config.attn_bias_type == AttnBiasType.POST_SCALE_BIAS
-        if is_post_scale_bias:
-            *probe_bias_batch_shape, probe_bias_heads, probe_bias_seqlen_q, probe_bias_seqlen_kv = (
-                bias_aval.shape
-            )
-            probe_bias_batch = reduce(operator.mul, probe_bias_batch_shape)
-        else:
-            probe_bias_batch = probe_bias_heads = probe_bias_seqlen_q = probe_bias_seqlen_kv = None
+        bias_batch = bias_heads = bias_seqlen_q = bias_seqlen_kv = None
+        if config.attn_bias_type == AttnBiasType.POST_SCALE_BIAS:
+            *bias_batch_shape, bias_heads, bias_seqlen_q, bias_seqlen_kv = bias_aval.shape
+            bias_batch = reduce(operator.mul, bias_batch_shape)
         backend, message = FusedAttnHelper(
             config.is_training,
             input_batch,
@@ -427,10 +403,10 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             config.window_size,
             config.bottom_right_diagonal,
             attn_scale=float(config.scaling_factor),
-            bias_batch=probe_bias_batch,
-            bias_heads=probe_bias_heads,
-            bias_seqlen_q=probe_bias_seqlen_q,
-            bias_seqlen_kv=probe_bias_seqlen_kv,
+            bias_batch=bias_batch,
+            bias_heads=bias_heads,
+            bias_seqlen_q=bias_seqlen_q,
+            bias_seqlen_kv=bias_seqlen_kv,
         ).get_fused_attn_backend()
 
         if backend == NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:

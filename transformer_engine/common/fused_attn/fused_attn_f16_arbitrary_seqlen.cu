@@ -142,7 +142,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
 
   const DType ragged_offset_type = cudnn_runtime_version >= 90500 ? DType::kInt64 : DType::kInt32;
   bool generate_stats = true;  // Always return stats
-  const FusedAttnConfig cache_cfg = make_fused_attn_graph_cache_config(cfg, /*is_forward=*/true);
+  const FusedAttnConfig cache_cfg = cfg.make_cache_key(/*is_forward=*/true);
   try {
     namespace fe = cudnn_frontend;
     using graph_and_tensors =
@@ -625,7 +625,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
   // We choose between 32-bit and 64-bit offsets depending on need.
   // This allows us to support older cuDNN runtimes gracefully.
   const DType ragged_offset_type = cudnn_runtime_version >= 90500 ? DType::kInt64 : DType::kInt32;
-  const FusedAttnConfig cache_cfg = make_fused_attn_graph_cache_config(cfg, /*is_forward=*/false);
+  const FusedAttnConfig cache_cfg = cfg.make_cache_key(/*is_forward=*/false);
 
   try {
     namespace fe = cudnn_frontend;
@@ -1096,7 +1096,7 @@ void fused_attn_arbitrary_seqlen_fwd(const FusedAttnConfig &cfg, const Tensor *i
   void *devPtrPageTableV = page_table_v ? page_table_v->data.dptr : nullptr;
 
   FusedAttnConfig graph_cfg = cfg;
-  populate_fused_attn_config(&graph_cfg);
+  graph_cfg.derive();
 
   size_t i = 0;
   if (Aux_CTX_Tensors->size == 0) {
@@ -1221,7 +1221,7 @@ void fused_attn_arbitrary_seqlen_bwd(const FusedAttnConfig &cfg, const Tensor *i
   }
 
   FusedAttnConfig graph_cfg = cfg;
-  populate_fused_attn_config(&graph_cfg);
+  graph_cfg.derive();
 
   void *devPtrdQ = output_dQ->data.dptr;
   void *devPtrdK = output_dK->data.dptr;
@@ -1270,7 +1270,7 @@ void fused_attn_arbitrary_seqlen_bwd(const FusedAttnConfig &cfg, const Tensor *i
 
 std::string is_supported_f16_fwd(const FusedAttnConfig &cfg, cudnnHandle_t handle) {
   FusedAttnConfig graph_cfg = cfg;
-  populate_fused_attn_config(&graph_cfg);
+  graph_cfg.derive();
 
   size_t workspace_size = 0;
   try {
@@ -1294,7 +1294,7 @@ std::string is_supported_f16_fwd(const FusedAttnConfig &cfg, cudnnHandle_t handl
 
 std::string is_supported_f16_bwd(const FusedAttnConfig &cfg, cudnnHandle_t handle) {
   FusedAttnConfig graph_cfg = cfg;
-  populate_fused_attn_config(&graph_cfg);
+  graph_cfg.derive();
 
   size_t workspace_size = 0;
   try {

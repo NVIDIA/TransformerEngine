@@ -40,9 +40,7 @@ void mha_fill(const transformer_engine::TensorWrapper &self, const at::Tensor &s
 namespace transformer_engine::pytorch {
 
 // get the fused attention backend
-std::tuple<NVTE_Fused_Attn_Backend, std::string> get_fused_attn_backend(
-    py::object fused_attn_params) {
-  py::object &p = fused_attn_params;
+std::tuple<NVTE_Fused_Attn_Backend, std::string> get_fused_attn_backend(const py::object &p) {
   FusedAttnConfigWrapper cfg;
   cfg.set_is_training(p.attr("is_training").cast<bool>())
       .set_deterministic(p.attr("deterministic").cast<bool>())

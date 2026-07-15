@@ -82,7 +82,7 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
   NVTE_CHECK(!is_mxfp8 || cudnn_runtime_version >= 92100,
              "MXFP8 fused attention requires cuDNN 9.21.0 or later!");
 
-  const FusedAttnConfig cache_cfg = make_fused_attn_graph_cache_config(cfg, /*is_forward=*/true);
+  const FusedAttnConfig cache_cfg = cfg.make_cache_key(/*is_forward=*/true);
   try {
     namespace fe = cudnn_frontend;
     using graph_and_tensors =
@@ -515,7 +515,7 @@ void fused_attn_fp8_bwd_impl(
   bool is_O_in_F16 = (o_tensor_type == cudnn_frontend::DataType_t::HALF ||
                       o_tensor_type == cudnn_frontend::DataType_t::BFLOAT16);
 
-  const FusedAttnConfig cache_cfg = make_fused_attn_graph_cache_config(cfg, /*is_forward=*/false);
+  const FusedAttnConfig cache_cfg = cfg.make_cache_key(/*is_forward=*/false);
   try {
     namespace fe = cudnn_frontend;
     using graph_and_tensors =

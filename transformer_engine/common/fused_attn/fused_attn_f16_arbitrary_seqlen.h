@@ -43,12 +43,12 @@ void fused_attn_arbitrary_seqlen_bwd(const FusedAttnConfig &cfg, const Tensor *i
 
 // check if a given configuration is supported for F16/BF16 forward;
 // if it is, cache the graph built for this config, and return an empty string;
-// if not, return a diagnostic message in the form of a string.
+// if not, return a diagnostic message explaining why it is not supported.
 std::string is_supported_f16_fwd(const FusedAttnConfig &cfg, cudnnHandle_t handle);
 
 // check if a given configuration is supported for F16/BF16 backward;
 // if it is, cache the graph built for this config, and return an empty string;
-// if not, return a diagnostic message in the form of a string.
+// if not, return a diagnostic message explaining why it is not supported.
 std::string is_supported_f16_bwd(const FusedAttnConfig &cfg, cudnnHandle_t handle);
 
 }  // namespace transformer_engine

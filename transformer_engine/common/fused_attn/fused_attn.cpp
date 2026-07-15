@@ -348,7 +348,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     float dropout, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
     size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left,
     int64_t window_size_right, bool return_max_logit, bool cuda_graph, bool deterministic) {
-  transformer_engine::FusedAttnConfig cfg = transformer_engine::make_default_fused_attn_config();
+  transformer_engine::FusedAttnConfig cfg{};
   cfg.qkv_layout = qkv_layout;
   cfg.bias_type = bias_type;
   cfg.attn_mask_type = attn_mask_type;
@@ -396,89 +396,8 @@ void nvte_fused_attn_fwd_v2(NVTEFusedAttnFwdParams params) {
   Tensor *output_O = convertNVTETensorCheck(p.O);
   Tensor *wkspace = convertNVTETensor(p.workspace);
 
-  NVTE_QKV_Format q_format = nvte_get_q_format(p.qkv_layout);
-  NVTE_QKV_Format kv_format = nvte_get_kv_format(p.qkv_layout);
-  auto *q_dims = input_Q->data.shape.data();
-  auto *k_dims = input_K->data.shape.data();
-  auto *v_dims = input_V->scaling_mode != NVTE_MXFP8_1D_SCALING
-                     ? input_V->data.shape.data()
-                     : input_V->columnwise_data.shape.data();
-  AttentionShape q_shape(q_format, q_dims);
-  AttentionShape k_shape(kv_format, k_dims);
-  AttentionShape v_shape(kv_format, v_dims);
-  size_t b = q_shape.b(), h_q = q_shape.h(), d_qk = q_shape.d(), t_q = q_shape.t();
-  size_t h_kv = k_shape.h(), t_kv = k_shape.t(), d_v = v_shape.d();
-  if (q_format == NVTE_QKV_Format::NVTE_THD) {
-    b = input_cu_seqlens_q->data.shape[0] - 1;
-  } else if (kv_format == NVTE_QKV_Format::NVTE_THD) {
-    b = input_cu_seqlens_kv->data.shape[0] - 1;
-  }
-
-  int64_t num_pages_k = 0;
-  int64_t num_pages_v = 0;
-  int64_t page_size_k = 0;
-  int64_t page_size_v = 0;
-  int64_t max_pages_per_seq_k = 0;
-  int64_t max_pages_per_seq_v = 0;
-  if (input_page_table_k->data.dptr != nullptr) {
-    max_pages_per_seq_k = input_page_table_k->data.shape[1];
-  }
-  if (input_page_table_v->data.dptr != nullptr) {
-    max_pages_per_seq_v = input_page_table_v->data.shape[1];
-  }
-  NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(p.qkv_layout);
-  if (layout_group == NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD) {
-    NVTE_QKV_Format paged_kv_format = nvte_get_kv_format(p.qkv_layout);
-    if (paged_kv_format == NVTE_QKV_Format::NVTE_BSHD) {
-      num_pages_k = input_K->data.shape[0];
-      page_size_k = input_K->data.shape[1];
-      num_pages_v = input_V->data.shape[0];
-      page_size_v = input_V->data.shape[1];
-    } else if (paged_kv_format == NVTE_QKV_Format::NVTE_SBHD) {
-      num_pages_k = input_K->data.shape[1];
-      page_size_k = input_K->data.shape[0];
-      num_pages_v = input_V->data.shape[1];
-      page_size_v = input_V->data.shape[0];
-    }
-  }
-
   auto handle = cudnnExecutionPlanManager::Instance().GetHandle();
-  const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
-  const NVTEDType KV_type = static_cast<NVTEDType>(input_K->data.dtype);
-  NVTE_CHECK(Q_type == KV_type, "Q and KV must have the same data type.");
-  const NVTEDType O_type = static_cast<NVTEDType>(output_O->data.dtype);
-  const NVTEScalingMode scaling_mode = input_Q->scaling_mode;
-
-  size_t bias_b = 0, bias_h = 0, bias_sq = 0, bias_skv = 0;
-  if ((p.bias_type != NVTE_NO_BIAS) && (p.bias_type != NVTE_ALIBI) &&
-      input_Bias->data.dptr != nullptr && input_Bias->data.shape.size() >= 4) {
-    bias_b = input_Bias->data.shape[0];
-    bias_h = input_Bias->data.shape[1];
-    bias_sq = input_Bias->data.shape[2];
-    bias_skv = input_Bias->data.shape[3];
-  }
-
-  FusedAttnConfig cfg = make_fused_attn_config(p);
-  cfg.scaling_mode = scaling_mode;
-  cfg.qkv_dtype = Q_type;
-  cfg.o_dtype = O_type;
-  cfg.batch_size = b;
-  cfg.num_attn_heads = h_q;
-  cfg.num_gqa_groups = h_kv;
-  cfg.head_dim_qk = d_qk;
-  cfg.head_dim_v = d_v;
-  cfg.num_pages_k = static_cast<size_t>(num_pages_k);
-  cfg.num_pages_v = static_cast<size_t>(num_pages_v);
-  cfg.page_size_k = static_cast<size_t>(page_size_k);
-  cfg.page_size_v = static_cast<size_t>(page_size_v);
-  cfg.max_pages_per_seq_k = static_cast<size_t>(max_pages_per_seq_k);
-  cfg.max_pages_per_seq_v = static_cast<size_t>(max_pages_per_seq_v);
-  cfg.bias_batch_size = bias_b;
-  cfg.bias_num_heads = bias_h;
-  cfg.bias_seqlen_q = bias_sq;
-  cfg.bias_seqlen_kv = bias_skv;
-  cfg.num_tokens_q = t_q;
-  cfg.num_tokens_kv = t_kv;
+  FusedAttnConfig cfg = p.make_config();
   NVTE_Fused_Attn_Backend fused_attention_backend =
       nvte_get_fused_attn_backend_v2(reinterpret_cast<NVTEFusedAttnConfig>(&cfg),
                                      /*message=*/nullptr);
@@ -514,8 +433,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          int64_t window_size_left, int64_t window_size_right,
                          bool bottom_right_diagonal, NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_fwd);
-  transformer_engine::FusedAttnFwdParams p =
-      transformer_engine::make_default_fused_attn_fwd_params();
+  transformer_engine::FusedAttnFwdParams p{};
   p.Q = Q;
   p.K = K;
   p.V = V;
@@ -574,57 +492,8 @@ void nvte_fused_attn_bwd_v2(NVTEFusedAttnBwdParams params) {
   Tensor *output_dSoftmaxOffset = convertNVTETensorCheck(p.dSoftmaxOffset);
   Tensor *wkspace = convertNVTETensor(p.workspace);
 
-  NVTE_QKV_Format q_format = nvte_get_q_format(p.qkv_layout);
-  NVTE_QKV_Format kv_format = nvte_get_kv_format(p.qkv_layout);
-  auto *q_dims = input_Q->data.shape.data();
-  auto *k_dims = input_K->data.shape.data();
-  auto *v_dims = input_V->data.shape.data();
-  AttentionShape q_shape(q_format, q_dims);
-  AttentionShape k_shape(kv_format, k_dims);
-  AttentionShape v_shape(kv_format, v_dims);
-  size_t b = q_shape.b(), h_q = q_shape.h(), d_qk = q_shape.d(), t_q = q_shape.t();
-  size_t h_kv = k_shape.h(), t_kv = k_shape.t(), d_v = v_shape.d();
-  if (q_format == NVTE_QKV_Format::NVTE_THD) {
-    b = input_cu_seqlens_q->data.shape[0] - 1;
-  } else if (kv_format == NVTE_QKV_Format::NVTE_THD) {
-    b = input_cu_seqlens_kv->data.shape[0] - 1;
-  }
-
   auto handle = cudnnExecutionPlanManager::Instance().GetHandle();
-  const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
-  const NVTEDType KV_type = static_cast<NVTEDType>(input_K->data.dtype);
-  NVTE_CHECK(Q_type == KV_type, "Q and KV must have the same data type.");
-  const NVTEDType O_type = static_cast<NVTEDType>(input_O->data.dtype);
-  const NVTEDType dO_type = static_cast<NVTEDType>(input_dO->data.dtype);
-  const NVTEDType dQKV_type = static_cast<NVTEDType>(output_dQ->data.dtype);
-  const NVTEScalingMode scaling_mode = input_Q->scaling_mode;
-
-  size_t bias_b = 0, bias_h = 0, bias_sq = 0, bias_skv = 0;
-  if ((p.bias_type != NVTE_NO_BIAS) && (p.bias_type != NVTE_ALIBI) &&
-      output_dBias->data.shape.size() >= 4) {
-    bias_b = output_dBias->data.shape[0];
-    bias_h = output_dBias->data.shape[1];
-    bias_sq = output_dBias->data.shape[2];
-    bias_skv = output_dBias->data.shape[3];
-  }
-
-  FusedAttnConfig cfg = make_fused_attn_config(p);
-  cfg.scaling_mode = scaling_mode;
-  cfg.qkv_dtype = Q_type;
-  cfg.o_dtype = O_type;
-  cfg.do_dtype = dO_type;
-  cfg.dqkv_dtype = dQKV_type;
-  cfg.batch_size = b;
-  cfg.num_attn_heads = h_q;
-  cfg.num_gqa_groups = h_kv;
-  cfg.head_dim_qk = d_qk;
-  cfg.head_dim_v = d_v;
-  cfg.bias_batch_size = bias_b;
-  cfg.bias_num_heads = bias_h;
-  cfg.bias_seqlen_q = bias_sq;
-  cfg.bias_seqlen_kv = bias_skv;
-  cfg.num_tokens_q = t_q;
-  cfg.num_tokens_kv = t_kv;
+  FusedAttnConfig cfg = p.make_config();
   NVTE_Fused_Attn_Backend fused_attention_backend =
       nvte_get_fused_attn_backend_v2(reinterpret_cast<NVTEFusedAttnConfig>(&cfg),
                                      /*message=*/nullptr);
@@ -683,8 +552,7 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          int64_t window_size_right, bool bottom_right_diagonal, bool deterministic,
                          bool cuda_graph, NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_bwd);
-  transformer_engine::FusedAttnBwdParams p =
-      transformer_engine::make_default_fused_attn_bwd_params();
+  transformer_engine::FusedAttnBwdParams p{};
   p.Q = Q;
   p.K = K;
   p.V = V;

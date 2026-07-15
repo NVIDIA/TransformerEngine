@@ -35,11 +35,11 @@ void fused_attn_fp8_bwd(const FusedAttnConfig &cfg, const Tensor *input_Q, const
 
 // check if a given configuration is supported for FP8 forward;
 // if it is, cache the graph built for this config, and return an empty string;
-// if not, return a diagnostic message in the form of a string.
+// if not, return a diagnostic message explaining why it is not supported.
 std::string is_supported_fp8_fwd(const FusedAttnConfig &cfg, cudnnHandle_t handle);
 
 // check if a given configuration is supported for FP8 backward;
 // if it is, cache the graph built for this config, and return an empty string;
-// if not, return a diagnostic message in the form of a string.
+// if not, return a diagnostic message explaining why it is not supported.
 std::string is_supported_fp8_bwd(const FusedAttnConfig &cfg, cudnnHandle_t handle);
 }  // namespace transformer_engine

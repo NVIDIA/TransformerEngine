@@ -10,7 +10,6 @@
 #include "../common.h"
 #include "../cudnn_utils.h"
 #include "../util/cuda_runtime.h"
-#include "config_and_params.h"
 #include "transformer_engine/fused_attn.h"
 #include "utils.h"
 
@@ -635,7 +634,6 @@ __global__ void extract_seed_and_offset(int64_t *rng_state_ptr, bool captured, i
 }
 
 }  // namespace fused_attn
-
 }  // namespace transformer_engine
 
 void nvte_extract_seed_and_offset(int64_t *rng_state_ptr, int captured, int64_t *seed_ptr,

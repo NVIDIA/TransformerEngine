@@ -232,9 +232,7 @@ class AttentionParams:
     core_attention_bias_type : str, default = no_bias
         Attention bias type, {`no_bias`, `pre_scale_bias`, `post_scale_bias`, `alibi`}.
     core_attention_bias_shape : Optional[Tuple[int, int, int, int]], default = None
-        Broadcast shape of the `core_attention_bias` tensor as `(b, h, sq, skv)`. `None` when no
-        bias tensor is present. The broadcast pattern (`1hss`, `bhss`, etc.) is derived inside
-        `get_attention_backend`.
+        Attention bias shape, (b, h, sq, skv).
     core_attention_bias_requires_grad : bool, default = True
         Whether attention bias requires gradient.
     pad_between_seqs : bool, default = False
@@ -267,8 +265,7 @@ class AttentionParams:
     num_splits : int, default = 1
         The number of kernels to split attention to.
     softmax_scale : float, default = 1.0
-        Pre-softmax attention scale. Plumbed through to the cuDNN graph cache key so that the
-        backend probe builds the same execution graph the runtime call later reuses.
+        Pre-softmax attention scale.
     fp8_output : bool, default = False
         Whether output is requested in FP8.
     checkpoint_core_attention : bool, default = False
@@ -312,7 +309,7 @@ class AttentionParams:
     return_max_logit: bool = False
     cuda_graph: bool = False
     num_splits: int = 1
-    softmax_scale: float = 1.0
+    softmax_scale: float = 0.0
     fp8_output: bool = False
     checkpoint_core_attention: bool = False
     has_score_mod: bool = False
@@ -356,6 +353,7 @@ class FusedAttentionParams:
     softmax_type: tex.NVTE_Softmax_Type = tex.NVTE_Softmax_Type.NVTE_VANILLA_SOFTMAX
     scaling_mode: tex.NVTEScalingMode = tex.NVTEScalingMode.NVTE_DELAYED_TENSOR_SCALING
     dropout: float = 0.0
+    attn_scale: float = 1.0
 
     # data types
     qkv_dtype: DType = DType.kBFloat16
@@ -370,9 +368,6 @@ class FusedAttentionParams:
     dqkv_layout: tex.NVTE_QKV_Layout = tex.NVTE_QKV_Layout.NVTE_QKV_Layout_NOT_SET
     qkv_scale_inv_format: tex.NVTE_QKV_Format = tex.NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET
     do_scale_inv_format: tex.NVTE_QKV_Format = tex.NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET
-
-    # attention scaling
-    attn_scale: float = 0.0
 
     # tensor dimensions
     batch_size: int = 0
