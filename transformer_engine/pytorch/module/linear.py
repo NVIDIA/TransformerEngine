@@ -267,6 +267,7 @@ def _linear_forward_impl(
     """
 
     weight = args.weight
+    is_dist_weight = is_distributed_weight(args.weight)
     inp = args.inp
     bias = args.bias
     input_quantizer = args.input_quantizer
@@ -410,7 +411,7 @@ def _linear_forward_impl(
     # Distributed weight (e.g. GTP): rebind `weight` to the all-gathered tensor;
     # `args.weight` keeps the sharded-param reference for backward re-gather / grad
     # finalize. No-op for a plain weight.
-    if is_distributed_weight(args.weight):
+    if is_dist_weight:
         weight = materialize_weight_for_forward(args.weight)[0]
         # Refresh out_features from the gathered weight (captured sharded above, pre-gather).
         out_features = weight.shape[0]
@@ -602,7 +603,7 @@ def _linear_forward_impl(
         if is_fsdp2 and weightmat is not weight:
             wt_save = None
         # Distributed weight (e.g. GTP): don't save the workspace; backward re-gathers it.
-        if is_distributed_weight(args.weight):
+        if is_dist_weight:
             wt_save = None
 
         # Dedup save slots that alias forward inputs; ``_linear_setup_ctx``
@@ -755,6 +756,7 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
     inputmat = args.inputmat
     weight_fp8 = args.weight_fp8
     saved_weight = args.saved_weight
+    is_dist_weight = is_distributed_weight(saved_weight)
     bias = args.bias
     input_quantizer = args.input_quantizer
     weight_quantizer = args.weight_quantizer
@@ -781,7 +783,7 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
                 origin_weight_python_object is not None
             ), "weight was removed while fuse_wgrad_accumulation=True"
             main_grad = bwd_args.main_grad_func()
-            if not is_distributed_weight(bwd_args.saved_weight):
+            if not is_dist_weight:
                 origin_weight_python_object.main_grad = main_grad
 
         # Gather intermediate/activation tensors if needed
@@ -955,7 +957,7 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
 
         # Distributed weight (e.g. GTP): re-gather the sharded weight; runs even when
         # requires_dgrad=False so the prev_w prefetch is issued for the next layer's bwd.
-        if is_distributed_weight(saved_weight):
+        if is_dist_weight:
             weight_fp8 = materialize_weight_for_backward(saved_weight)[0]
 
         if bwd_args.requires_dgrad:
@@ -973,7 +975,7 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
                     bwd_args.weight_quantizer.set_usage(rowwise=True, columnwise=True)
                     weight_fp8 = bwd_args.weight_quantizer(saved_weight)
             elif (
-                is_distributed_weight(saved_weight)
+                is_dist_weight
                 and bwd_args.fp8
                 and bwd_args.weight_quantizer is not None
                 and not isinstance(weight_fp8, QuantizedTensorStorage)
@@ -1176,7 +1178,7 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
                     use_split_accumulator = recipe.fp8_gemm_wgrad.use_split_accumulator
 
             # Figure out whether to output wgrad GEMM directly into main grad
-            if is_distributed_weight(bwd_args.saved_weight):
+            if is_dist_weight:
                 # Distributed weight (e.g. GTP): accumulation happens downstream in finalize.
                 accumulate_wgrad_into_param_main_grad = False
             elif bwd_args.is_first_microbatch is not None:
@@ -1257,7 +1259,7 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
 
                 # Distributed weight (e.g. GTP): reduce-scatter the freshly computed wgrad
                 # (async; overlap with the next layer's bwd via the cascade).
-                if is_distributed_weight(saved_weight):
+                if is_dist_weight:
                     wgrad = finalize_weight_grads(saved_weight, [wgrad])[0]
 
                 # Update grad bias if needed

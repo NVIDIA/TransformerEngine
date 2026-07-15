@@ -1493,6 +1493,8 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 start_offload(*activation_tensors)
                 mark_activation_offload(*activation_tensors)
 
+            # Save an internal layout for this joint fused op. The saved state is
+            # intentionally not compatible with the basic GroupedLinear backward.
             fc1_weight_tensors = (
                 [grouped_fc1_weight] if fc1_op.single_grouped_weight else grouped_fc1_weight
             )

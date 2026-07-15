@@ -1334,7 +1334,7 @@ def _all_gather_nvfp4(
     quantizer: NVFP4Quantizer,
     out_shape: Optional[list[int]] = None,
     output_tensor=None,
-    grouped=False,
+    external_coalescing=False,
 ) -> tuple[NVFP4TensorStorage, Optional[torch.distributed.Work]]:
     """All-gather NVFP4 tensor along first dimension."""
 
@@ -1398,12 +1398,6 @@ def _all_gather_nvfp4(
         out = quantizer(out)
         return out, None
 
-    # Construct NVFP4 output tensor
-    if output_tensor is not None:
-        out = output_tensor
-    else:
-        out = quantizer.make_empty(out_shape, dtype=dtype, device=device)
-
     # Cast input tensor to NVFP4 with required data
     if not isinstance(inp, NVFP4TensorStorage):
         inp = quantizer(inp)
@@ -1416,19 +1410,25 @@ def _all_gather_nvfp4(
         )
         inp = quantizer(inp.dequantize(dtype=dtype))
 
-    if not grouped:
-        # Coalesce NCCL collectives for gathering data and scale inverses.
+    # Construct NVFP4 output tensor
+    if output_tensor is not None:
+        out = output_tensor
+    else:
+        out = quantizer.make_empty(out_shape, dtype=dtype, device=device)
+
+    # Coalesce NCCL collectives for gathering data and scale inverses.
+    if not external_coalescing:
         gather_coalescing_manager = torch.distributed._coalescing_manager(
             group=process_group,
             device=device,
             async_ops=async_op,
         )
     else:
+        # Caller owns an outer coalescing manager (managers cannot nest); step aside.
         gather_coalescing_manager = nullcontext()
 
     with gather_coalescing_manager as coalesced_handle:
         # Gather NVFP4 data for row-wise usage
-        out_columnwise_data = None
         if quantizer.rowwise_usage:
 
             # Remove padding from NVFP4 scale-inverses
@@ -1511,19 +1511,12 @@ def _all_gather_nvfp4(
     handle = coalesced_handle if async_op else None
 
     # Fixes interleaved data for transposed tensor/scale inv and pads scale inv if needed.
-    if quantizer.columnwise_usage:
-        if async_op or grouped:
-            # Defer post-processing: either the async op hasn't completed yet, or an
-            # external coalescing manager owns the NCCL ops and hasn't flushed them.
-            inner_handle = handle if async_op else None
-            handle = _NVFP4AllGatherAsyncHandle(
-                out, out_columnwise_data, out_scale_inv, world_size, inner_handle
-            )
-        else:
-            _post_process_nvfp4_gather(out, out_columnwise_data, out_scale_inv, world_size, handle)
-    else:
-        if handle is not None:
-            handle.output = out
+    if (async_op or external_coalescing) and quantizer.columnwise_usage:
+        handle = _NVFP4AllGatherAsyncHandle(
+            out, out_columnwise_data, out_scale_inv, world_size, handle
+        )
+    elif quantizer.columnwise_usage:
+        _post_process_nvfp4_gather(out, out_columnwise_data, out_scale_inv, world_size, handle)
 
     return out, handle
 
@@ -1536,7 +1529,7 @@ def _all_gather_mxfp8(
     quantizer: MXFP8Quantizer,
     out_shape: Optional[list[int]] = None,
     output_tensor: torch.Tensor = None,
-    grouped: bool = False,
+    external_coalescing: bool = False,
 ) -> tuple[MXFP8TensorStorage, Optional[torch.distributed.Work]]:
     """All-gather MXFP8 tensor along first dimension."""
 
@@ -1607,7 +1600,7 @@ def _all_gather_mxfp8(
     else:
         out = quantizer.make_empty(out_shape, dtype=dtype, device=device)
 
-    if not grouped:
+    if not external_coalescing:
         # Coalesce NCCL collectives for gathering data and scale inverses.
         gather_coalescing_manager = torch.distributed._coalescing_manager(
             group=process_group,
@@ -1615,6 +1608,7 @@ def _all_gather_mxfp8(
             async_ops=async_op,
         )
     else:
+        # Caller owns an outer coalescing manager (managers cannot nest); step aside.
         gather_coalescing_manager = nullcontext()
 
     with gather_coalescing_manager as coalesced_handle:
@@ -1674,10 +1668,16 @@ def gather_along_first_dim(
     async_op: bool = False,
     quantizer: Optional[Quantizer] = None,
     output_tensor: torch.Tensor = None,
-    grouped: bool = False,
+    external_coalescing: bool = False,
 ) -> tuple[torch.Tensor, Optional[torch.distributed.Work]]:
     """
     All-gather tensors and concatenate along first dimension.
+
+    ``external_coalescing``: composability flag for callers that batch several gathers into
+    one outer ``torch.distributed._coalescing_manager``. Coalescing managers cannot nest, so
+    when set this call skips opening its own manager and defers any post-gather fixup
+    (e.g. NVFP4 columnwise de-interleave) into the returned handle; ``handle.wait()`` completes
+    it once the outer manager has closed. Leave ``False`` for standalone gathers.
     """
 
     # Return immediately if no communication is required
@@ -1766,7 +1766,7 @@ def gather_along_first_dim(
             quantizer=quantizer,
             out_shape=out_shape,
             output_tensor=output_tensor,
-            grouped=grouped,
+            external_coalescing=external_coalescing,
         )
 
     # NVFP4 case
@@ -1782,7 +1782,7 @@ def gather_along_first_dim(
             quantizer=quantizer,
             out_shape=out_shape,
             output_tensor=output_tensor,
-            grouped=grouped,
+            external_coalescing=external_coalescing,
         )
 
     # High-precision communication for quantized tensors

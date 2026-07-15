@@ -305,12 +305,11 @@ class _LayerNormLinear(torch.autograd.Function):
         # ------------------------------------------------------
         # Prepare weight tensor
         # ------------------------------------------------------
-
-        weight_param = weight
-        if is_distributed_weight(weight):
+        origin_weight = weight
+        is_dist_weight = is_distributed_weight(origin_weight)
+        if is_dist_weight:
             weight = materialize_weight_for_forward(weight)[0]
             out_features = weight.shape[0]
-
         new_weight_workspace = None
         weightmat = weight
         is_weight_param_quantized = False
@@ -501,13 +500,15 @@ class _LayerNormLinear(torch.autograd.Function):
             wt_save = weightmat
             if is_fsdp2 and weightmat is not weight:
                 wt_save = None
-            _is_dist_weight = is_distributed_weight(weight_param)
+            # Distributed weight (e.g. GTP): don't save the gathered quantized workspace;
+            # backward re-gathers from the saved (sharded) weight and re-quantizes.
+            if is_dist_weight:
+                wt_save = None
+
             tensors_to_save, tensor_objects = prepare_for_saving(
                 inputmat,
-                # Distributed weight (e.g. GTP): save the sharded reference only;
-                # backward re-gathers it.
-                None if _is_dist_weight else wt_save,
-                weight_param if _is_dist_weight else weight,
+                wt_save,
+                origin_weight,
                 bias,
                 ln_weight,
                 ln_out_to_save,
@@ -534,8 +535,8 @@ class _LayerNormLinear(torch.autograd.Function):
                 if hasattr(weight, "__fsdp_param__"):
                     # MCore FSDP creates main_grad lazily before backward
                     ctx.main_grad_func = weight.get_main_grad
-                elif is_distributed_weight(weight_param):
-                    ctx.main_grad_func = weight_param.grad_buffer
+                elif is_dist_weight:
+                    ctx.main_grad_func = origin_weight.grad_buffer
                 else:
                     ctx.main_grad_func = lambda: weight.main_grad
             ctx.grad_input_quantizer = grad_input_quantizer
