@@ -245,12 +245,7 @@ class LinearBwdArgs:
 
 def _check_fp8_reduce_and_update():
     """Check if this is the first FP8 module (for backward reduce-and-update)."""
-    qstate = FP8GlobalStateManager.quantization_state
-    _first_fp8_module = qstate.is_first_fp8_module
-    result = FP8GlobalStateManager.is_first_fp8_module()
-    if in_fp8_activation_recompute_phase():
-        qstate.is_first_fp8_module = _first_fp8_module
-    return result
+    return FP8GlobalStateManager.is_first_fp8_module()
 
 
 def _linear_forward_impl(

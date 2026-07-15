@@ -238,6 +238,13 @@ def gather_split_1d_tensor(tensor: torch.Tensor, tp_group: dist_group_type) -> t
     return gathered
 
 
+@dataclass
+class _ActivationRecomputeState:
+    """FP8 state shared by a checkpoint's original forward and recompute."""
+
+    is_first_fp8_module: Optional[bool] = None
+
+
 class activation_recompute_forward(AbstractContextManager, ContextDecorator):
     """Context manager used to control the forward runtime behavior when executed
     under the `CheckpointFunction` function. For running FP8, the forward pass will
@@ -247,30 +254,48 @@ class activation_recompute_forward(AbstractContextManager, ContextDecorator):
     activations, followed by calculation of gradients using these values.
     """
 
-    _is_first_fp8_module: List = []
-
-    def __init__(self, activation_recompute: bool = False, recompute_phase: bool = False):
+    def __init__(
+        self,
+        activation_recompute: bool = False,
+        recompute_phase: bool = False,
+        state: Optional[_ActivationRecomputeState] = None,
+        reserve_first_fp8_module: bool = False,
+    ):
         super().__init__()
         self.activation_recompute = activation_recompute
         self.recompute_phase = recompute_phase
+        self.state = _ActivationRecomputeState() if state is None else state
+        self.reserve_first_fp8_module = reserve_first_fp8_module
 
     def __enter__(self):
         global _FP8_ACTIVATION_RECOMPUTE_ENABLED, _FP8_ACTIVATION_RECOMPUTE_PHASE
-        _FP8_ACTIVATION_RECOMPUTE_ENABLED = (
-            self.activation_recompute and FP8GlobalStateManager.is_fp8_enabled()
-        )
+        self._previous_recompute_enabled = _FP8_ACTIVATION_RECOMPUTE_ENABLED
+        self._previous_recompute_phase = _FP8_ACTIVATION_RECOMPUTE_PHASE
+        fp8_enabled = FP8GlobalStateManager.is_fp8_enabled()
+        _FP8_ACTIVATION_RECOMPUTE_ENABLED = self.activation_recompute and fp8_enabled
         _FP8_ACTIVATION_RECOMPUTE_PHASE = self.recompute_phase
 
         qstate = FP8GlobalStateManager.quantization_state
+        self._previous_is_first_fp8_module = qstate.is_first_fp8_module
         if self.activation_recompute and not self.recompute_phase:
-            activation_recompute_forward._is_first_fp8_module.append(qstate.is_first_fp8_module)
+            self.state.is_first_fp8_module = qstate.is_first_fp8_module
+            # Reentrant checkpoint forward runs under no_grad, so no module can
+            # consume backward-update ownership. Reserve it for this frame.
+            if self.reserve_first_fp8_module and fp8_enabled:
+                qstate.is_first_fp8_module = False
         if self.activation_recompute and self.recompute_phase:
-            qstate.is_first_fp8_module = activation_recompute_forward._is_first_fp8_module.pop(0)
+            if self.state.is_first_fp8_module is None:
+                raise RuntimeError("FP8 recompute state was not captured during forward")
+            qstate.is_first_fp8_module = self.state.is_first_fp8_module
+        return self
 
     def __exit__(self, *exc_details):
         global _FP8_ACTIVATION_RECOMPUTE_ENABLED, _FP8_ACTIVATION_RECOMPUTE_PHASE
-        _FP8_ACTIVATION_RECOMPUTE_ENABLED = False
-        _FP8_ACTIVATION_RECOMPUTE_PHASE = False
+        if self.activation_recompute and self.recompute_phase:
+            qstate = FP8GlobalStateManager.quantization_state
+            qstate.is_first_fp8_module = self._previous_is_first_fp8_module
+        _FP8_ACTIVATION_RECOMPUTE_ENABLED = self._previous_recompute_enabled
+        _FP8_ACTIVATION_RECOMPUTE_PHASE = self._previous_recompute_phase
 
 
 def is_fp8_activation_recompute_enabled() -> bool:
@@ -369,8 +394,14 @@ class _CheckpointFunction(torch.autograd.Function):
         # Preserve torch autocast context for the backward pass
         torch_gpu_amp_ctx, torch_cpu_amp_ctx = _get_active_autocast_contexts()
 
+        fp8_recompute_state = _ActivationRecomputeState()
         with torch.no_grad(), forward_ctx:
-            with activation_recompute_forward(activation_recompute=True, recompute_phase=False):
+            with activation_recompute_forward(
+                activation_recompute=True,
+                recompute_phase=False,
+                state=fp8_recompute_state,
+                reserve_first_fp8_module=True,
+            ):
                 outputs = run_function(*args, **kwargs)
 
         # Divide hidden states across model parallel group and only keep
@@ -395,6 +426,7 @@ class _CheckpointFunction(torch.autograd.Function):
         ctx.torch_cpu_amp_ctx = torch_cpu_amp_ctx
         ctx.fp8 = fp8
         ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
+        ctx.fp8_recompute_state = fp8_recompute_state
         ctx.kwargs = kwargs
 
         return outputs
@@ -436,9 +468,13 @@ class _CheckpointFunction(torch.autograd.Function):
         # Compute the forward pass.
         detached_inputs = detach_variable(inputs)
         with torch.enable_grad(), ctx.recompute_ctx, ctx.torch_gpu_amp_ctx, ctx.torch_cpu_amp_ctx, activation_recompute_forward(
-            activation_recompute=True, recompute_phase=True
+            activation_recompute=True,
+            recompute_phase=True,
+            state=ctx.fp8_recompute_state,
         ), autocast(
-            enabled=ctx.fp8, recipe=ctx.fp8_recipe
+            enabled=ctx.fp8,
+            recipe=ctx.fp8_recipe,
+            _recompute=True,
         ):
             outputs = ctx.run_function(*detached_inputs, **ctx.kwargs)
 
@@ -602,13 +638,16 @@ def use_reentrant_activation_recompute():
 
 def get_activation_recompute_contexts():
     """Returns context objects for the checkpointed forward pass and the forward recompute phase."""
+    state = _ActivationRecomputeState()
     forward_ctx = activation_recompute_forward(
         activation_recompute=True,
         recompute_phase=False,
+        state=state,
     )
     recompute_ctx = activation_recompute_forward(
         activation_recompute=True,
         recompute_phase=True,
+        state=state,
     )
     return forward_ctx, recompute_ctx
 
@@ -795,7 +834,9 @@ def checkpoint(
         with torch.autograd.enable_grad(), (
             te_recompute_ctx
         ), user_recompute_ctx, torch_gpu_amp_forward_ctx, torch_cpu_amp_forward_ctx, autocast(
-            enabled=fp8, recipe=fp8_recipe
+            enabled=fp8,
+            recipe=fp8_recipe,
+            _recompute=True,
         ):
             function(*args, **kwargs)
 
