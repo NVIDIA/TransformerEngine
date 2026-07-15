@@ -555,9 +555,7 @@ class NVFP4BlockScaling(Recipe):
     )
     disable_2d_quantization: bool = os.getenv("NVTE_NVFP4_DISABLE_2D_QUANTIZATION", "0") == "1"
     row_scaled_activation: bool = os.getenv("NVTE_NVFP4_ROW_SCALED_ACTIVATION", "0") == "1"
-    err_corrected_activation: bool = (
-        os.getenv("NVTE_NVFP4_ERR_CORRECTED_ACTIVATION", "0") == "1"
-    )
+    err_corrected_activation: bool = os.getenv("NVTE_NVFP4_ERR_CORRECTED_ACTIVATION", "0") == "1"
     nvfp4_4over6: str = os.getenv("NVTE_NVFP4_4OVER6", "none")
     nvfp4_4over6_e4m3_use_256: str = os.getenv("NVTE_NVFP4_4OVER6_E4M3_USE_256", "all")
     nvfp4_4over6_err_mode: str = os.getenv("NVTE_NVFP4_4OVER6_ERR_MODE", "MAE").upper()
@@ -587,8 +585,7 @@ class NVFP4BlockScaling(Recipe):
         ), "NVTE_NVFP4_4OVER6_ERR_MODE must be one of: 'MAE', 'MSE'."
         if self.err_corrected_activation and not self.row_scaled_activation:
             raise ValueError(
-                "NVFP4 error-corrected activation quantization requires "
-                "row_scaled_activation=True."
+                "NVFP4 error-corrected activation quantization requires row_scaled_activation=True."
             )
         if self.err_corrected_activation and self.nvfp4_4over6 in ("activations", "all"):
             raise ValueError(

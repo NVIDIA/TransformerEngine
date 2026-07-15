@@ -226,9 +226,7 @@ def check_quantization_nvfp4_versus_reference(
         else None
     )
     sx_err_ref = (
-        x_nvfp4_ref.scale_err.view(dtype=torch.uint8)
-        if x_nvfp4_ref.scale_err is not None
-        else None
+        x_nvfp4_ref.scale_err.view(dtype=torch.uint8) if x_nvfp4_ref.scale_err is not None else None
     )
 
     qx = unpack_fp4(qx)

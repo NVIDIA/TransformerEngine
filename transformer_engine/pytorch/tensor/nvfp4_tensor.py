@@ -1341,9 +1341,7 @@ class _ReshapeFunc(torch.autograd.Function):
                 device=grad.device,
                 row_scaled_nvfp4=grad._row_scaled_nvfp4,
                 rowwise_data_err=(
-                    grad._rowwise_data_err.reshape(
-                        list(ctx.shape[:-1]) + [ctx.shape[-1] // 2]
-                    )
+                    grad._rowwise_data_err.reshape(list(ctx.shape[:-1]) + [ctx.shape[-1] // 2])
                     if grad._rowwise_data_err is not None
                     else None
                 ),

@@ -946,9 +946,9 @@ class NVFP4QuantizerRef(Quantizer):
                     self.quant_tile_shape[1], dim=1
                 )
                 global_decode_scale = global_amax_row.view(M, 1) / (6.0 * 448.0)
-                primary_dequantized = (
-                    qx_dequantized * block_scales * global_decode_scale
-                ).to(torch.bfloat16)
+                primary_dequantized = (qx_dequantized * block_scales * global_decode_scale).to(
+                    torch.bfloat16
+                )
                 error = (row_input - primary_dequantized).to(torch.bfloat16)
                 error_padded = self._pad_tensor(
                     error,
@@ -1071,9 +1071,7 @@ class NVFP4QuantizerRef(Quantizer):
         if src.ndim > 2:
             src = src.view(-1, src.shape[-1])
 
-        qx, sx, qx_t, sx_t, global_amax_row, global_amax_col, qx_err, sx_err = self._quantize(
-            src
-        )
+        qx, sx, qx_t, sx_t, global_amax_row, global_amax_col, qx_err, sx_err = self._quantize(src)
 
         # Update the destination with new data
         dst.data = qx

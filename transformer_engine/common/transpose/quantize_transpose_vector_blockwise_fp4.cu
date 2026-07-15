@@ -321,11 +321,10 @@ template <bool kReturnIdentity, bool kReturnTranspose, bool kIsE8Scaling, bool k
 __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpose_kernel(
     const IType* const input, const float* global_amax, OType* const output_c,
     OType* const output_t, ScaleType* const tile_scales_inv_c, ScaleType* const tile_scales_inv_t,
-    OType* const output_err, ScaleType* const tile_scales_inv_err,
-    const size_t row_length, const size_t num_rows, const size_t scale_stride_x,
-    const size_t scale_stride_y, const size_t scale_t_stride_x, const size_t scale_t_stride_y,
-    const size_t kScaleBlockDim, const float epsilon, const size_t* rng_state,
-    const float* noop_ptr) {
+    OType* const output_err, ScaleType* const tile_scales_inv_err, const size_t row_length,
+    const size_t num_rows, const size_t scale_stride_x, const size_t scale_stride_y,
+    const size_t scale_t_stride_x, const size_t scale_t_stride_y, const size_t kScaleBlockDim,
+    const float epsilon, const size_t* rng_state, const float* noop_ptr) {
   constexpr int kNVecContainer = kNVecOut / kNFP4PerContainer;
   using SMemVec = Vec<IType, kNVecSMem>;
   using OVec = Vec<OType, kNVecContainer>;
@@ -578,9 +577,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
             float primary_dequantized_fp32 = q_values[j] * static_cast<float>(scale_inv);
             primary_dequantized_fp32 *= primary_global_decode_scale;
             const IType primary_dequantized = static_cast<IType>(primary_dequantized_fp32);
-            const float error =
-                static_cast<float>(smem_vec[smem_vec_idx].data.elt[smem_elt_idx]) -
-                static_cast<float>(primary_dequantized);
+            const float error = static_cast<float>(smem_vec[smem_vec_idx].data.elt[smem_elt_idx]) -
+                                static_cast<float>(primary_dequantized);
             residual[residual_offset + j] = static_cast<IType>(error);
           }
         }
@@ -593,17 +591,16 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
         for (int i = 0; i < kNVecOut; ++i) {
           error_amax = fmaxf(error_amax, fabsf(static_cast<float>(residual[i])));
         }
-        const ScaleType scale_inv_err_value = ComputeDecodeScaleFP4<ScaleType>(
-            error_amax, row_global_encode_scale_multiplier);
-        const float encode_scale_err = ComputeEncodeScaleFP4<ScaleType>(
-            scale_inv_err_value, row_global_decode_scale);
+        const ScaleType scale_inv_err_value =
+            ComputeDecodeScaleFP4<ScaleType>(error_amax, row_global_encode_scale_multiplier);
+        const float encode_scale_err =
+            ComputeEncodeScaleFP4<ScaleType>(scale_inv_err_value, row_global_decode_scale);
         if (write_scale_inv) {
           const size_t scale_row_idx = block_idx_y * kTileDim + r_s;
-          const size_t scale_col_idx =
-              block_idx_x * (kNumThreadsStore / kNumThreadsReduce) +
-              (threadIdx.x % kNumThreadsStore) / kNumThreadsReduce;
-          tile_scales_inv_err[scale_row_idx * scale_stride_y +
-                              scale_col_idx * scale_stride_x] = scale_inv_err_value;
+          const size_t scale_col_idx = block_idx_x * (kNumThreadsStore / kNumThreadsReduce) +
+                                       (threadIdx.x % kNumThreadsStore) / kNumThreadsReduce;
+          tile_scales_inv_err[scale_row_idx * scale_stride_y + scale_col_idx * scale_stride_x] =
+              scale_inv_err_value;
         }
 #pragma unroll
         for (int i = 0; i < kNVecOut / kNVecSMem; i += 2) {
@@ -613,10 +610,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
           const float2 error23 =
               make_float2(static_cast<float>(residual[2 * i + 2]) * encode_scale_err,
                           static_cast<float>(residual[2 * i + 3]) * encode_scale_err);
-          const __nv_fp4x4_e2m1 error_4x =
-              cvt_fp32_to_fp4_4x<false>(error01, error23, 0);
-          output_err_vec.data.elt[i] =
-              reinterpret_cast<const __nv_fp4x2_storage_t*>(&error_4x)[0];
+          const __nv_fp4x4_e2m1 error_4x = cvt_fp32_to_fp4_4x<false>(error01, error23, 0);
+          output_err_vec.data.elt[i] = reinterpret_cast<const __nv_fp4x2_storage_t*>(&error_4x)[0];
           output_err_vec.data.elt[i + 1] =
               reinterpret_cast<const __nv_fp4x2_storage_t*>(&error_4x)[1];
         }
@@ -877,8 +872,7 @@ void quantize_transpose_vector_blockwise_fp4(
              "Error-corrected NVFP4 quantization only supports deterministic rowwise output.");
   NVTE_CHECK(!err_corrected_nvfp4 || !swizzled_scale,
              "Error-corrected NVFP4 quantization requires compact block scales.");
-  NVTE_CHECK(!err_corrected_nvfp4 ||
-                 (output_err.dptr != nullptr && scale_inv_err.dptr != nullptr),
+  NVTE_CHECK(!err_corrected_nvfp4 || (output_err.dptr != nullptr && scale_inv_err.dptr != nullptr),
              "Error-corrected NVFP4 output data and scales must be allocated.");
   NVTE_CHECK(!err_corrected_nvfp4 || output_err.dtype == output.dtype,
              "Error-corrected NVFP4 primary and residual data types must match.");
@@ -973,41 +967,42 @@ void quantize_transpose_vector_blockwise_fp4(
                                       TRANSFORMER_ENGINE_SWITCH_CONDITION(
                                           err_corrected_nvfp4, kErrCorrectedNVFP4,
 
-                                      size_t smem_bytes = kSMemSize * sizeof(InputType);
-                                      auto kernel = block_scaled_1d_cast_transpose_kernel<
-                                          kReturnIdentity, kReturnTranspose, kPow2Scale, kAligned,
-                                          float, InputType, OutputType, ScaleType, kSwizzledScale,
-                                          kApplyStochasticRounding, kIs2DBlockScaling,
-                                          kRowScaledNVFP4, kErrCorrectedNVFP4>;
-                                      if (smem_bytes >= 48 * 1024) {
-                                        cudaError_t err = cudaFuncSetAttribute(
-                                            kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                            smem_bytes);
-                                        NVTE_CHECK(err == cudaSuccess,
-                                                   "Failed to set dynamic shared memory size.");
-                                      } kernel<<<grid, kThreadsPerBlock, smem_bytes,
-                                                 stream>>>(
-                                          reinterpret_cast<const InputType*>(input.dptr),
-                                          reinterpret_cast<const float*>(global_amax.dptr),
-                                          reinterpret_cast<OutputType*>(output.dptr),
-                                          reinterpret_cast<OutputType*>(output_t.dptr),
-                                          reinterpret_cast<ScaleType*>(scale_inv.dptr),
-                                          reinterpret_cast<ScaleType*>(scale_inv_t.dptr),
-                                          reinterpret_cast<OutputType*>(output_err.dptr),
-                                          reinterpret_cast<ScaleType*>(scale_inv_err.dptr),
-                                          row_length, num_rows, scale_stride_x, scale_stride_y,
-                                          scale_t_stride_x, scale_t_stride_y, kScaleBlockDim,
-                                          epsilon, rng_state,
-                                          noop_ptr);)  // kErrCorrectedNVFP4
-                                  )                    // kRowScaledNVFP4
-                              )                        // kIs2DBlockScaling
-                          )                            // kApplyStochasticRounding
-                      )                                // kSwizzledScale
-                  )                                    // kAligned
-              )                                        // kReturnTranspose
-          )                                            // kReturnIdentity
-      )                                                // OutputType
-  )                                                    // InputType
+                                          size_t smem_bytes = kSMemSize * sizeof(InputType);
+                                          auto kernel = block_scaled_1d_cast_transpose_kernel<
+                                              kReturnIdentity, kReturnTranspose, kPow2Scale,
+                                              kAligned, float, InputType, OutputType, ScaleType,
+                                              kSwizzledScale, kApplyStochasticRounding,
+                                              kIs2DBlockScaling, kRowScaledNVFP4,
+                                              kErrCorrectedNVFP4>;
+                                          if (smem_bytes >= 48 * 1024) {
+                                            cudaError_t err = cudaFuncSetAttribute(
+                                                kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                                smem_bytes);
+                                            NVTE_CHECK(err == cudaSuccess,
+                                                       "Failed to set dynamic shared memory size.");
+                                          } kernel<<<grid, kThreadsPerBlock, smem_bytes,
+                                                     stream>>>(
+                                              reinterpret_cast<const InputType*>(input.dptr),
+                                              reinterpret_cast<const float*>(global_amax.dptr),
+                                              reinterpret_cast<OutputType*>(output.dptr),
+                                              reinterpret_cast<OutputType*>(output_t.dptr),
+                                              reinterpret_cast<ScaleType*>(scale_inv.dptr),
+                                              reinterpret_cast<ScaleType*>(scale_inv_t.dptr),
+                                              reinterpret_cast<OutputType*>(output_err.dptr),
+                                              reinterpret_cast<ScaleType*>(scale_inv_err.dptr),
+                                              row_length, num_rows, scale_stride_x, scale_stride_y,
+                                              scale_t_stride_x, scale_t_stride_y, kScaleBlockDim,
+                                              epsilon, rng_state,
+                                              noop_ptr);)  // kErrCorrectedNVFP4
+                                      )                    // kRowScaledNVFP4
+                                  )                        // kIs2DBlockScaling
+                              )                            // kApplyStochasticRounding
+                          )                                // kSwizzledScale
+                      )                                    // kAligned
+                  )                                        // kReturnTranspose
+              )                                            // kReturnIdentity
+          )                                                // OutputType
+      )                                                    // InputType
 
   NVTE_CHECK_CUDA(cudaGetLastError());
 #else

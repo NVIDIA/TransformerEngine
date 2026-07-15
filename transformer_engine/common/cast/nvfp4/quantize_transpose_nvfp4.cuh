@@ -343,8 +343,8 @@ __global__ void __launch_bounds__(THREADS_NUM)
   IType *in_sh = reinterpret_cast<IType *>(dshmem);
   fp4e2m1x2 *out_data_sh = reinterpret_cast<fp4e2m1x2 *>(dshmem + in_mem);
   fp4e2m1x2 *out_t_data_sh = reinterpret_cast<fp4e2m1x2 *>(dshmem + in_mem + out_mem_rowwise_data);
-  fp4e2m1x2 *out_err_data_sh = reinterpret_cast<fp4e2m1x2 *>(
-      dshmem + in_mem + out_mem_rowwise_data + out_mem_colwise_data);
+  fp4e2m1x2 *out_err_data_sh =
+      reinterpret_cast<fp4e2m1x2 *>(dshmem + in_mem + out_mem_rowwise_data + out_mem_colwise_data);
 
   nvfp4_scale_t *out_rowwise_scales_sh = reinterpret_cast<nvfp4_scale_t *>(
       dshmem + in_mem + out_mem_rowwise_data + out_mem_colwise_data + out_mem_error_data);
@@ -681,7 +681,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
         }
         const float2 block_scale_inverse_2x{block_scale_inverse, block_scale_inverse};
 
-// 3. Scale elements
+        // 3. Scale elements
         IType residual[SCALE_DIM];
 #pragma unroll
         for (int w = 0; w < WAVES; ++w) {
@@ -719,8 +719,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
                       : 1.0f;
 #pragma unroll
               for (int j = 0; j < 4; ++j) {
-                float primary_dequantized_fp32 =
-                    q_values[j] * static_cast<float>(S_dec_b_fp8);
+                float primary_dequantized_fp32 = q_values[j] * static_cast<float>(S_dec_b_fp8);
                 primary_dequantized_fp32 *= primary_global_decode_scale;
                 const IType primary_dequantized = static_cast<IType>(primary_dequantized_fp32);
                 residual[w * PACK_SIZE + 4 * e + j] =
@@ -765,8 +764,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
             }
             const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM;
             const size_t swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
-            const size_t shmem_offset_rowwise =
-                shmem_offset_base_rowwise_out + swizzled_idx / 2;
+            const size_t shmem_offset_rowwise = shmem_offset_base_rowwise_out + swizzled_idx / 2;
             out_err.store_to(&out_err_data_sh[shmem_offset_rowwise]);
           }
         }
@@ -1452,9 +1450,9 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
              "Error-corrected NVFP4 quantization requires row scaling.");
   NVTE_CHECK(!err_corrected_nvfp4 || input.dtype() == DType::kBFloat16,
              "Error-corrected NVFP4 quantization requires BF16 input.");
-  NVTE_CHECK(!err_corrected_nvfp4 ||
-                 (output->has_data_err() && output->scale_inv_err.dptr != nullptr),
-             "Error-corrected NVFP4 data and scales must be allocated.");
+  NVTE_CHECK(
+      !err_corrected_nvfp4 || (output->has_data_err() && output->scale_inv_err.dptr != nullptr),
+      "Error-corrected NVFP4 data and scales must be allocated.");
   NVTE_CHECK(!err_corrected_nvfp4 || !with_gemm_swizzled_scales,
              "Error-corrected NVFP4 output must have scales in compact format.");
   if (return_transpose) {
@@ -1522,8 +1520,8 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
                          0, 4);
   }
   if (err_corrected_nvfp4) {
-    create_2D_tensor_map(tensor_map_output_err, output->data_err, rows, cols, BUFF_DIM_Y, BUFF_DIM_X,
-                         cols, 0, 4);
+    create_2D_tensor_map(tensor_map_output_err, output->data_err, rows, cols, BUFF_DIM_Y,
+                         BUFF_DIM_X, cols, 0, 4);
   }
   if (return_transpose) {
     create_2D_tensor_map(tensor_map_output_transpose, output->columnwise_data, cols, rows,
@@ -1564,8 +1562,8 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
                                        dshmem_size);
                   kernel<<<grid, block_size, dshmem_size, stream>>>(
                       tensor_map_input, tensor_map_output, tensor_map_output_transpose, scales_ptr,
-                      scales_transpose_ptr, noop_ptr, amax_rowwise_ptr, amax_colwise_ptr, rows, cols,
-                      scale_stride, scale_stride_transpose, rng_state);
+                      scales_transpose_ptr, noop_ptr, amax_rowwise_ptr, amax_colwise_ptr, rows,
+                      cols, scale_stride, scale_stride_transpose, rng_state);
                 } else {
                   auto kernel = quantize_transpose_nvfp4_2D_kernel<
                       COMPUTE_ACTIVATIONS, ParamOP, OP, IType, USE_STOCHASTIC_ROUNDING,
@@ -1574,20 +1572,21 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
                                        dshmem_size);
                   kernel<<<grid, block_size, dshmem_size, stream>>>(
                       tensor_map_input, tensor_map_output, tensor_map_output_transpose, scales_ptr,
-                      scales_transpose_ptr, noop_ptr, amax_rowwise_ptr, amax_colwise_ptr, rows, cols,
-                      scale_stride, scale_stride_transpose, rng_state);
+                      scales_transpose_ptr, noop_ptr, amax_rowwise_ptr, amax_colwise_ptr, rows,
+                      cols, scale_stride, scale_stride_transpose, rng_state);
                 }
               } else {
-                auto kernel = quantize_transpose_nvfp4_kernel<
-                    COMPUTE_ACTIVATIONS, ParamOP, OP, IType, USE_STOCHASTIC_ROUNDING,
-                    RETURN_TRANSPOSE, ROW_SCALED_NVFP4, ERR_CORRECTED_NVFP4>;
+                auto kernel =
+                    quantize_transpose_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
+                                                    USE_STOCHASTIC_ROUNDING, RETURN_TRANSPOSE,
+                                                    ROW_SCALED_NVFP4, ERR_CORRECTED_NVFP4>;
                 cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                      dshmem_size);
                 kernel<<<grid, block_size, dshmem_size, stream>>>(
                     tensor_map_input, tensor_map_output, tensor_map_output_transpose,
                     tensor_map_output_err, scales_ptr, scales_transpose_ptr, scales_err_ptr,
                     noop_ptr, amax_rowwise_ptr, amax_colwise_ptr, rows, cols, scale_stride,
-                scale_stride_transpose, rng_state);
+                    scale_stride_transpose, rng_state);
               }
             });
           });

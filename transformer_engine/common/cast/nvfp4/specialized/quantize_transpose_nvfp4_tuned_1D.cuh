@@ -342,7 +342,7 @@ __device__ __forceinline__ void rowwise_scaling(
       sSFrowwise[scales_offset_Y][scales_offset_X] = S_dec_b_fp8;
     }
 
-// Scale elements
+    // Scale elements
     IType residual[ELTS_PER_THREAD];
 #pragma unroll
     for (int w = 0; w < WAVES; ++w) {
@@ -380,9 +380,8 @@ __device__ __forceinline__ void rowwise_scaling(
           primary_dequantized_fp32 *= primary_global_decode_scale;
           const IType primary_dequantized = static_cast<IType>(primary_dequantized_fp32);
           const IType input_value = reinterpret_cast<const IType *>(&rIn[w])[e];
-          residual[w * PACK_SIZE + e] =
-              static_cast<IType>(static_cast<float>(input_value) -
-                                 static_cast<float>(primary_dequantized));
+          residual[w * PACK_SIZE + e] = static_cast<IType>(static_cast<float>(input_value) -
+                                                           static_cast<float>(primary_dequantized));
         }
       }
     }
@@ -398,8 +397,7 @@ __device__ __forceinline__ void rowwise_scaling(
       const nvfp4_scale_t S_dec_err_fp8 =
           compute_decoding_scaling_factor(error_amax, S_enc_rowwise_block);
       const scaling_coeff_type error_coefficient =
-          compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_err_fp8,
-                                                                 S_enc_rowwise_block);
+          compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_err_fp8, S_enc_rowwise_block);
       if (SF_storing_thread) {
         const int scales_offset_Y = stage_rowwise_scales_offset_Y + it * THREADS_Y_ROWWISE;
         const int scales_offset_X = stage_rowwise_scales_offset_X;
@@ -408,15 +406,13 @@ __device__ __forceinline__ void rowwise_scaling(
 #pragma unroll
       for (int w = 0; w < WAVES; ++w) {
         const uint64_t error03 = *reinterpret_cast<const uint64_t *>(&residual[w * PACK_SIZE]);
-        const uint64_t error47 =
-            *reinterpret_cast<const uint64_t *>(&residual[w * PACK_SIZE + 4]);
+        const uint64_t error47 = *reinterpret_cast<const uint64_t *>(&residual[w * PACK_SIZE + 4]);
         const uint32_t error_out_x8 =
-            ptx::mul_cvt_bf16_to_fp4_8x_round_to_nearest<scaling_coeff_type>(
-                error03, error47, error_coefficient);
+            ptx::mul_cvt_bf16_to_fp4_8x_round_to_nearest<scaling_coeff_type>(error03, error47,
+                                                                             error_coefficient);
         const int swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % ELTS_PER_THREAD;
         const int swizzled_idx = (swizzled_group_idx + thread_offset_X_rowwise) / 2;
-        ptx::st_shared_b32(&sOutErr[buff_out][it_offset_Y_rowwise][swizzled_idx],
-                           error_out_x8);
+        ptx::st_shared_b32(&sOutErr[buff_out][it_offset_Y_rowwise][swizzled_idx], error_out_x8);
       }
     }
   }
@@ -430,9 +426,9 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
     const __grid_constant__ CUtensorMap tensor_map_output_t,
     const __grid_constant__ CUtensorMap tensor_map_output_err, nvfp4_scale_t *const scales_ptr,
     nvfp4_scale_t *const scales_t_ptr, nvfp4_scale_t *const scales_err_ptr, const float *noop,
-    const float *const amax_rowwise_ptr,
-    const float *const amax_colwise_ptr, const size_t rows, const size_t cols,
-    const size_t scale_stride, const size_t scale_stride_t, const size_t *rng_state) {
+    const float *const amax_rowwise_ptr, const float *const amax_colwise_ptr, const size_t rows,
+    const size_t cols, const size_t scale_stride, const size_t scale_stride_t,
+    const size_t *rng_state) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   if (noop != nullptr && noop[0] == 1.0f) {
     return;
@@ -476,8 +472,8 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
   IType *sIn_ptr = reinterpret_cast<IType *>(dshmem);
   fp4e2m1x2 *sOut_ptr = reinterpret_cast<fp4e2m1x2 *>(dshmem + in_mem);
   fp4e2m1x2 *sOut_tr_ptr = reinterpret_cast<fp4e2m1x2 *>(dshmem + in_mem + out_mem_rowwise_data);
-  fp4e2m1x2 *sOutErr_ptr = reinterpret_cast<fp4e2m1x2 *>(
-      dshmem + in_mem + out_mem_rowwise_data + out_mem_colwise_data);
+  fp4e2m1x2 *sOutErr_ptr =
+      reinterpret_cast<fp4e2m1x2 *>(dshmem + in_mem + out_mem_rowwise_data + out_mem_colwise_data);
 
   auto &sIn = *reinterpret_cast<IType3D *>(sIn_ptr);
   auto &sOut = *reinterpret_cast<OType2x3D *>(sOut_ptr);
@@ -657,10 +653,10 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
 
       // NVFP4 Quantization
       rowwise_scaling<USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, ROW_SCALED_NVFP4,
-                      ERR_CORRECTED_NVFP4>(
-          sIn_ptr, sOut_ptr, sSFrowwise_ptr, sOutErr_ptr, sSFerr_ptr, S_enc_rowwise, stage_Y,
-          stage_X, buff_in, buff_out, amax_rowwise_ptr, block_offset_Y, rows, rng, random_uint4,
-          rnd_idx);
+                      ERR_CORRECTED_NVFP4>(sIn_ptr, sOut_ptr, sSFrowwise_ptr, sOutErr_ptr,
+                                           sSFerr_ptr, S_enc_rowwise, stage_Y, stage_X, buff_in,
+                                           buff_out, amax_rowwise_ptr, block_offset_Y, rows, rng,
+                                           random_uint4, rnd_idx);
 
       if constexpr (RETURN_TRANSPOSE) {
         colwise_scaling<USE_STOCHASTIC_ROUNDING, USE_FAST_MATH>(
@@ -809,9 +805,9 @@ inline void quantize_transpose_tuned_1D(const Tensor &input, const Tensor *noop,
              "Row-scaled NVFP4 quantization does not produce columnwise output.");
   NVTE_CHECK(!err_corrected_nvfp4 || row_scaled_nvfp4,
              "Error-corrected NVFP4 quantization requires row scaling.");
-  NVTE_CHECK(!err_corrected_nvfp4 ||
-                 (output->has_data_err() && output->scale_inv_err.dptr != nullptr),
-             "Error-corrected NVFP4 data and scales must be allocated.");
+  NVTE_CHECK(
+      !err_corrected_nvfp4 || (output->has_data_err() && output->scale_inv_err.dptr != nullptr),
+      "Error-corrected NVFP4 data and scales must be allocated.");
 
   if (return_transpose) {
     NVTE_CHECK(is_fp4_dtype(output->columnwise_data.dtype),
@@ -869,8 +865,8 @@ inline void quantize_transpose_tuned_1D(const Tensor &input, const Tensor *noop,
   create_2D_tensor_map(tensor_map_output, output->data, rows, cols, BUFF_DIM_Y, BUFF_DIM_X, cols, 0,
                        4);
   if (err_corrected_nvfp4) {
-    create_2D_tensor_map(tensor_map_output_err, output->data_err, rows, cols, BUFF_DIM_Y, BUFF_DIM_X,
-                         cols, 0, 4);
+    create_2D_tensor_map(tensor_map_output_err, output->data_err, rows, cols, BUFF_DIM_Y,
+                         BUFF_DIM_X, cols, 0, 4);
   }
   if (return_transpose) {
     create_2D_tensor_map(tensor_map_output_transpose, output->columnwise_data, cols, rows,
