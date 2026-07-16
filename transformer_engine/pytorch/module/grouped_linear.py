@@ -453,6 +453,8 @@ class _GroupedLinear(torch.autograd.Function):
         inp: torch.Tensor,
         m_splits: torch.Tensor,
         non_tensor_args: Tuple,
+        out: Optional[torch.Tensor],
+        dgrad_out: Optional[torch.Tensor],
         *weights_and_biases,
     ) -> Tuple[torch.Tensor, list]:
         # pylint: disable=missing-function-docstring
@@ -481,8 +483,6 @@ class _GroupedLinear(torch.autograd.Function):
             skip_fp8_weight_update,
             save_original_input,
             debug,
-            out,
-            dgrad_out,
         ) = non_tensor_args
         if fp8:
             backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
@@ -967,6 +967,8 @@ class _GroupedLinear(torch.autograd.Function):
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             None,  # m_splits
             None,  # non_tensor_args
+            None,  # out
+            None,  # dgrad_out
             *wgrad_list,
             *grad_biases,
         )
@@ -1242,6 +1244,8 @@ class _GroupedLinear(torch.autograd.Function):
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             None,  # m_splits
             None,  # non_tensor_args
+            None,  # out
+            None,  # dgrad_out
             *wgrad_list,
             *grad_biases,
         )
@@ -1869,11 +1873,16 @@ class GroupedLinear(TransformerEngineBaseModule):
                 skip_fp8_weight_update,
                 self.save_original_input,
                 debug,
-                out,
-                dgrad_out,
             )
             out, new_workspaces = linear_fn(
-                *autograd_ctx, inp, m_splits, non_tensor_args, *weight_tensors, *bias_tensors
+                *autograd_ctx,
+                inp,
+                m_splits,
+                non_tensor_args,
+                out,
+                dgrad_out,
+                *weight_tensors,
+                *bias_tensors,
             )
 
             if cache_weight:
