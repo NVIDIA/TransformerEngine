@@ -37,8 +37,7 @@ from flax import linen as nn
 # import P`` without a second jax.sharding import.
 from jax.sharding import PartitionSpec as P  # noqa: F401  # pylint: disable=unused-import
 
-from ..moe import PermutationBackend, moe
-from ..quantize import noop_quantizer_set
+from ..moe import moe
 from ..router import ScoreFunction
 from ..sharding import get_active_resource_axis
 from .module import TransformerEngineBase
@@ -50,7 +49,7 @@ Array = NewType("Array", jnp.ndarray)
 Initializer = Callable[[PRNGKey, Shape, DType], Array]
 
 
-__all__ = ["PermutationBackend", "_MoEBlock"]
+__all__ = ["_MoEBlock"]
 
 
 class _MoEBlock(TransformerEngineBase):
@@ -82,10 +81,11 @@ class _MoEBlock(TransformerEngineBase):
         Grouped top-k knobs (DeepSeek-style). ``None`` disables grouping.
     scaling_factor : float
         Multiplier on the routing weights.
-    use_expert_bias : bool
-        If ``True``, registers a per-expert routing bias (shape ``[E]``).
-        Only meaningful with ``score_function="sigmoid"``; the underlying
-        primitive validates the pairing.
+    use_expert_routing_bias : bool
+        If ``True``, registers a per-expert routing bias (shape ``[E]``)
+        used by the topk selection. Only meaningful with
+        ``score_function="sigmoid"``; the underlying primitive validates
+        the pairing.
     aux_loss_coeff : float
         If ``> 0``, return the MoE auxiliary load-balancing loss scalar
         in addition to the main output.
@@ -100,23 +100,27 @@ class _MoEBlock(TransformerEngineBase):
         replicated across non-EP axes within an EP group; set e.g.
         ``("fsdp",)`` for true FSDP-of-batch where each device owns a
         unique slice of the batch.
-    permutation_backend : PermutationBackend
-        ``PURE_JAX`` (default) or ``TRITON``.
-    _align_size : int
-        Per-expert group-size alignment (``0`` disables; required > 0
-        for quantized grouped GEMM). Internal knob; will be inferred
-        from the active quantization recipe in a follow-up PR.
+    apply_topk_weights_early : bool
+        If ``True``, multiply expert outputs by their top-k weights
+        *inside* each shard before ``ep_combine`` (saves one global
+        reduction at the cost of an extra broadcast). Default ``False``.
+
+    The per-expert dispatch-slot alignment is fixed internally at 128
+    tokens (see ``moe._ALIGN_SIZE``) -- the value required by NCCL EP
+    HT and satisfied by every current TE grouped-GEMM recipe -- and is
+    therefore not exposed as a per-instance knob.
 
     dtype : jnp.dtype
         Compute / parameter dtype.
     kernel_init, bias_init, expert_bias_init : Initializers.
-    use_bias : bool
-        Register per-expert FFN biases.
+    use_ffn_bias : bool
+        Register per-expert FFN biases (``wi_0_bias``, ``wi_1_bias``,
+        ``wo_bias``).
 
     Quantization is currently configured via the standard TE autocast
-    context (``fp8_autocast``/``with_quantizer_set``); per-call
-    quantizer sets can also be passed through ``__call__``'s
-    ``quantizer_sets`` keyword once we stabilise the recipe pipeline.
+    context (``fp8_autocast``/``with_quantizer_set``) and threaded
+    through ``moe()`` internally; this wrapper does not expose a
+    per-call ``quantizer_sets`` knob yet.
     """
 
     # Architecture
@@ -131,7 +135,7 @@ class _MoEBlock(TransformerEngineBase):
     num_groups: Optional[int] = None
     group_topk: Optional[int] = None
     scaling_factor: float = 1.0
-    use_expert_bias: bool = False
+    use_expert_routing_bias: bool = False
     aux_loss_coeff: float = 0.0
 
     # Sharding (logical axes)
@@ -143,16 +147,15 @@ class _MoEBlock(TransformerEngineBase):
     # Parallelism
     data_parallelism_axes: Tuple[str, ...] = ()
 
-    # Permutation
-    permutation_backend: PermutationBackend = PermutationBackend.PURE_JAX
-    _align_size: int = 0
+    # MoE knobs forwarded to ``moe()``
+    apply_topk_weights_early: bool = False
 
     # Dtypes / init / misc
     dtype: DType = jnp.float32
     kernel_init: Optional[Initializer] = None
     bias_init: Initializer = nn.initializers.zeros
     expert_bias_init: Initializer = nn.initializers.zeros
-    use_bias: bool = False
+    use_ffn_bias: bool = False
 
     def __post_init__(self):
         if self.kernel_init is None:
@@ -162,11 +165,6 @@ class _MoEBlock(TransformerEngineBase):
                 nn.initializers.variance_scaling(
                     1.0, "fan_in", "truncated_normal", dtype=self.dtype
                 ),
-            )
-        if not isinstance(self.permutation_backend, PermutationBackend):
-            raise TypeError(
-                "permutation_backend must be a PermutationBackend, got"
-                f" {self.permutation_backend!r}"
             )
         super().__post_init__()
 
@@ -221,7 +219,7 @@ class _MoEBlock(TransformerEngineBase):
             self.dtype,
         )
         wi_0_bias = wi_1_bias = wo_bias = None
-        if self.use_bias:
+        if self.use_ffn_bias:
             wi_0_bias = self.param(
                 "wi_0_bias",
                 nn.with_logical_partitioning(self.bias_init, ("exp", "mlp")),
@@ -241,12 +239,14 @@ class _MoEBlock(TransformerEngineBase):
                 self.dtype,
             )
         expert_bias = None
-        if self.use_expert_bias:
+        if self.use_expert_routing_bias:
+            # The router logits are promoted to fp32 before fused top-k; keep
+            # the routing bias in the same dtype so it only affects selection.
             expert_bias = self.param(
                 "expert_bias",
                 nn.with_logical_partitioning(self.expert_bias_init, ("exp",)),
                 (self.num_experts,),
-                self.dtype,
+                jnp.float32,
             )
 
         ep_axis = get_active_resource_axis("ep_resource")
@@ -270,15 +270,12 @@ class _MoEBlock(TransformerEngineBase):
             group_topk=self.group_topk,
             scaling_factor=self.scaling_factor,
             aux_loss_coeff=self.aux_loss_coeff,
-            permutation_backend=self.permutation_backend,
-            align_size=self._align_size,
-            gate_inside_vjp=True,
+            apply_topk_weights_early=self.apply_topk_weights_early,
             ep_axis=ep_axis,
             data_parallelism_axes=self.data_parallelism_axes,
             input_axes=self.input_axes,
             gate_kernel_axes=self.gate_kernel_axes,
             wi_kernel_axes=self.wi_kernel_axes,
             wo_kernel_axes=self.wo_kernel_axes,
-            quantizer_sets=(noop_quantizer_set, noop_quantizer_set, noop_quantizer_set),
             dtype=self.dtype,
         )

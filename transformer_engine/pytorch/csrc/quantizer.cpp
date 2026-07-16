@@ -4,6 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <cuda_runtime_api.h>
 #include <pybind.h>
 
 #include "common.h"
@@ -84,29 +85,79 @@ std::vector<T> convert_shape_for_fp4(const std::vector<T>& shape) {
   return ret;
 }
 
+/*! @brief Validate an optional 1D int64 CUDA grouped-tensor metadata tensor
+ *         (first_dims / last_dims / tensor_offsets) of a given expected length. */
+void check_grouped_metadata_tensor(const at::Tensor& metadata_tensor, const char* metadata_name,
+                                   const size_t expected_len) {
+  NVTE_CHECK(metadata_tensor.is_cuda(), metadata_name, " must be on CUDA.");
+  NVTE_CHECK(metadata_tensor.scalar_type() == at::kLong, metadata_name, " must have dtype int64.");
+  NVTE_CHECK(metadata_tensor.is_contiguous(), metadata_name, " must be contiguous.");
+  NVTE_CHECK(static_cast<size_t>(metadata_tensor.numel()) == expected_len, metadata_name,
+             " must have length ", expected_len, ".");
+}
+
 std::optional<at::Tensor> build_grouped_tensor_offsets(const size_t num_tensors,
                                                        const std::optional<at::Tensor>& first_dims,
+                                                       const std::optional<at::Tensor>& last_dims,
+                                                       const size_t logical_first_dim,
                                                        const size_t logical_last_dim) {
-  if (!first_dims.has_value()) {
+  if (!first_dims.has_value() && !last_dims.has_value()) {
     return std::nullopt;
   }
 
-  const auto& first_dims_tensor = first_dims.value();
-  NVTE_CHECK(first_dims_tensor.is_cuda(), "first_dims must be on CUDA.");
-  NVTE_CHECK(first_dims_tensor.scalar_type() == at::kLong, "first_dims must have dtype int64.");
-  NVTE_CHECK(static_cast<size_t>(first_dims_tensor.numel()) == num_tensors,
-             "first_dims must have length ", num_tensors, ".");
+  // Validate dims before the splits-to-offsets kernel reads them.
+  if (first_dims.has_value()) {
+    check_grouped_metadata_tensor(*first_dims, "first_dims", num_tensors);
+  }
+  if (last_dims.has_value()) {
+    check_grouped_metadata_tensor(*last_dims, "last_dims", num_tensors);
+  }
 
-  const int64_t logical_last_dim_i64 = static_cast<int64_t>(logical_last_dim);
-  const auto first_dims_contiguous = first_dims_tensor.contiguous();
-  auto tensor_offsets =
-      at::empty({static_cast<int64_t>(num_tensors) + 1}, first_dims_contiguous.options());
-  NVTE_SCOPED_GIL_RELEASE({
-    nvte_splits_to_offsets(static_cast<const int64_t*>(first_dims_contiguous.data_ptr()),
-                           static_cast<int64_t*>(tensor_offsets.data_ptr()), num_tensors,
-                           logical_last_dim_i64, at::cuda::getCurrentCUDAStream());
-  });
+  const at::TensorOptions options =
+      first_dims.has_value() ? first_dims->options() : last_dims->options();
+  auto tensor_offsets = at::empty({static_cast<int64_t>(num_tensors) + 1}, options);
+  if (first_dims.has_value() && last_dims.has_value()) {
+    auto first_dims_nvte = makeTransformerEngineTensor(*first_dims);
+    auto last_dims_nvte = makeTransformerEngineTensor(*last_dims);
+    auto tensor_offsets_nvte = makeTransformerEngineTensor(tensor_offsets);
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_splits_to_offsets_2d(first_dims_nvte.data(), last_dims_nvte.data(),
+                                tensor_offsets_nvte.data(), at::cuda::getCurrentCUDAStream());
+    });
+  } else if (first_dims.has_value()) {
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_splits_to_offsets(static_cast<const int64_t*>(first_dims->data_ptr()),
+                             static_cast<int64_t*>(tensor_offsets.data_ptr()), num_tensors,
+                             static_cast<int64_t>(logical_last_dim),
+                             at::cuda::getCurrentCUDAStream());
+    });
+  } else {
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_splits_to_offsets(static_cast<const int64_t*>(last_dims->data_ptr()),
+                             static_cast<int64_t*>(tensor_offsets.data_ptr()), num_tensors,
+                             static_cast<int64_t>(logical_first_dim),
+                             at::cuda::getCurrentCUDAStream());
+    });
+  }
   return tensor_offsets;
+}
+
+/*! @brief Validate grouped-tensor offset metadata and resolve the final offsets,
+ *         whether they are precomputed or built from first_dims/last_dims. */
+std::optional<at::Tensor> resolve_grouped_tensor_offsets(
+    const size_t num_tensors, const std::optional<at::Tensor>& first_dims,
+    const std::optional<at::Tensor>& last_dims,
+    const std::optional<at::Tensor>& precomputed_tensor_offsets, const size_t logical_first_dim,
+    const size_t logical_last_dim) {
+  // Precomputed offsets take priority; otherwise build them from first_dims/last_dims
+  // (which validates the dims internally).
+  if (precomputed_tensor_offsets.has_value()) {
+    // tensor_offsets uses a CSR-style prefix-sum layout with num_tensors+1 entries.
+    check_grouped_metadata_tensor(*precomputed_tensor_offsets, "tensor_offsets", num_tensors + 1);
+    return precomputed_tensor_offsets;
+  }
+  return build_grouped_tensor_offsets(num_tensors, first_dims, last_dims, logical_first_dim,
+                                      logical_last_dim);
 }
 
 at::TensorOptions grouped_tensor_data_options(const DType dtype) {
@@ -174,14 +225,14 @@ std::pair<TensorWrapper, py::object> NoneQuantizer::create_tensor(const std::vec
 std::pair<GroupedTensorWrapper, py::object> NoneQuantizer::create_grouped_tensor(
     const size_t num_tensors, const std::vector<size_t>& logical_shape, const DType dtype,
     py::object quantizer, const std::optional<at::Tensor>& first_dims,
+    const std::optional<at::Tensor>& last_dims,
     const std::optional<at::Tensor>& precomputed_tensor_offsets, const size_t logical_first_dim,
     const size_t logical_last_dim) const {
   using namespace pybind11::literals;
 
   const auto tensor_offsets =
-      precomputed_tensor_offsets.has_value()
-          ? precomputed_tensor_offsets
-          : build_grouped_tensor_offsets(num_tensors, first_dims, logical_last_dim);
+      resolve_grouped_tensor_offsets(num_tensors, first_dims, last_dims, precomputed_tensor_offsets,
+                                     logical_first_dim, logical_last_dim);
   const int64_t total_elements =
       static_cast<int64_t>(logical_first_dim) * static_cast<int64_t>(logical_last_dim);
 
@@ -207,6 +258,9 @@ std::pair<GroupedTensorWrapper, py::object> NoneQuantizer::create_grouped_tensor
   if (first_dims.has_value()) {
     out_cpp.set_first_dims(first_dims->data_ptr(), DType::kInt64, getTensorShape(*first_dims));
   }
+  if (last_dims.has_value()) {
+    out_cpp.set_last_dims(last_dims->data_ptr(), DType::kInt64, getTensorShape(*last_dims));
+  }
   if (tensor_offsets.has_value()) {
     out_cpp.set_tensor_offsets(tensor_offsets->data_ptr(), DType::kInt64,
                                getTensorShape(*tensor_offsets));
@@ -231,7 +285,7 @@ std::pair<GroupedTensorWrapper, py::object> NoneQuantizer::create_grouped_tensor
   kwargs["columnwise_amax"] = py::none();
   kwargs["scale"] = py::none();
   kwargs["first_dims"] = first_dims.has_value() ? py::cast(*first_dims) : py::none();
-  kwargs["last_dims"] = py::none();
+  kwargs["last_dims"] = last_dims.has_value() ? py::cast(*last_dims) : py::none();
   kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
   kwargs["with_gemm_swizzled_scales"] = py::cast(false);
   PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
@@ -380,14 +434,14 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
 std::pair<GroupedTensorWrapper, py::object> Float8Quantizer::create_grouped_tensor(
     const size_t num_tensors, const std::vector<size_t>& logical_shape, const DType dtype,
     py::object quantizer, const std::optional<at::Tensor>& first_dims,
+    const std::optional<at::Tensor>& last_dims,
     const std::optional<at::Tensor>& precomputed_tensor_offsets, const size_t logical_first_dim,
     const size_t logical_last_dim) const {
   using namespace pybind11::literals;
 
   const auto tensor_offsets =
-      precomputed_tensor_offsets.has_value()
-          ? precomputed_tensor_offsets
-          : build_grouped_tensor_offsets(num_tensors, first_dims, logical_last_dim);
+      resolve_grouped_tensor_offsets(num_tensors, first_dims, last_dims, precomputed_tensor_offsets,
+                                     logical_first_dim, logical_last_dim);
   const int64_t total_elements =
       static_cast<int64_t>(logical_first_dim) * static_cast<int64_t>(logical_last_dim);
 
@@ -425,6 +479,9 @@ std::pair<GroupedTensorWrapper, py::object> Float8Quantizer::create_grouped_tens
   if (first_dims.has_value()) {
     out_cpp.set_first_dims(first_dims->data_ptr(), DType::kInt64, getTensorShape(*first_dims));
   }
+  if (last_dims.has_value()) {
+    out_cpp.set_last_dims(last_dims->data_ptr(), DType::kInt64, getTensorShape(*last_dims));
+  }
   if (tensor_offsets.has_value()) {
     out_cpp.set_tensor_offsets(tensor_offsets->data_ptr(), DType::kInt64,
                                getTensorShape(*tensor_offsets));
@@ -449,7 +506,7 @@ std::pair<GroupedTensorWrapper, py::object> Float8Quantizer::create_grouped_tens
   kwargs["columnwise_amax"] = py::none();
   kwargs["scale"] = py::none();
   kwargs["first_dims"] = first_dims.has_value() ? py::cast(*first_dims) : py::none();
-  kwargs["last_dims"] = py::none();
+  kwargs["last_dims"] = last_dims.has_value() ? py::cast(*last_dims) : py::none();
   kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
   kwargs["with_gemm_swizzled_scales"] = py::cast(false);
   PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
@@ -693,14 +750,19 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
 std::pair<GroupedTensorWrapper, py::object> Float8CurrentScalingQuantizer::create_grouped_tensor(
     const size_t num_tensors, const std::vector<size_t>& logical_shape, const DType dtype,
     py::object quantizer, const std::optional<at::Tensor>& first_dims,
+    const std::optional<at::Tensor>& last_dims,
     const std::optional<at::Tensor>& precomputed_tensor_offsets, const size_t logical_first_dim,
     const size_t logical_last_dim) const {
   using namespace pybind11::literals;
 
+  // Group Quantize is not implemented for varying both dims yet.
+  NVTE_CHECK(!(first_dims.has_value() && last_dims.has_value()),
+             "FP8 current-scaling grouped quantization does not support varying both "
+             "first and last dimensions.");
+
   const auto tensor_offsets =
-      precomputed_tensor_offsets.has_value()
-          ? precomputed_tensor_offsets
-          : build_grouped_tensor_offsets(num_tensors, first_dims, logical_last_dim);
+      resolve_grouped_tensor_offsets(num_tensors, first_dims, last_dims, precomputed_tensor_offsets,
+                                     logical_first_dim, logical_last_dim);
   const int64_t total_elements =
       static_cast<int64_t>(logical_first_dim) * static_cast<int64_t>(logical_last_dim);
 
@@ -713,23 +775,31 @@ std::pair<GroupedTensorWrapper, py::object> Float8CurrentScalingQuantizer::creat
   std::optional<at::Tensor> columnwise_scale_inv;
   at::Tensor scale = at::empty({static_cast<int64_t>(num_tensors)}, float_opts);
   at::Tensor amax = at::empty({static_cast<int64_t>(num_tensors)}, float_opts);
+  const bool is_non_tn_fp8_gemm_supported = nvte_is_non_tn_fp8_gemm_supported();
+  const bool with_rowwise_data = rowwise_usage || is_non_tn_fp8_gemm_supported;
+  const bool with_columnwise_data = columnwise_usage && !is_non_tn_fp8_gemm_supported;
 
-  if (rowwise_usage) {
-    rowwise_data = at::empty({total_elements}, uint8_opts);
-    rowwise_scale_inv = at::empty({static_cast<int64_t>(num_tensors)}, float_opts);
+  // FP8 current scaling has a single per-tensor scale
+  std::optional<at::Tensor> scale_inv;
+  if (with_rowwise_data || with_columnwise_data) {
+    scale_inv = at::empty({static_cast<int64_t>(num_tensors)}, float_opts);
   }
-  if (columnwise_usage) {
+  if (with_rowwise_data) {
+    rowwise_data = at::empty({total_elements}, uint8_opts);
+    rowwise_scale_inv = scale_inv;
+  }
+  if (with_columnwise_data) {
     columnwise_data = at::empty({total_elements}, uint8_opts);
-    columnwise_scale_inv = at::empty({static_cast<int64_t>(num_tensors)}, float_opts);
+    columnwise_scale_inv = scale_inv;
   }
 
   GroupedTensorWrapper out_cpp(num_tensors, logical_shape, this->get_scaling_mode());
-  if (rowwise_usage) {
+  if (with_rowwise_data) {
     out_cpp.set_rowwise_data(rowwise_data->data_ptr(), this->dtype, getTensorShape(*rowwise_data));
     out_cpp.set_rowwise_scale_inv(rowwise_scale_inv->data_ptr(), DType::kFloat32,
                                   getTensorShape(*rowwise_scale_inv));
   }
-  if (columnwise_usage) {
+  if (with_columnwise_data) {
     out_cpp.set_columnwise_data(columnwise_data->data_ptr(), this->dtype,
                                 getTensorShape(*columnwise_data));
     out_cpp.set_columnwise_scale_inv(columnwise_scale_inv->data_ptr(), DType::kFloat32,
@@ -739,6 +809,9 @@ std::pair<GroupedTensorWrapper, py::object> Float8CurrentScalingQuantizer::creat
   out_cpp.set_amax(amax.data_ptr(), DType::kFloat32, getTensorShape(amax));
   if (first_dims.has_value()) {
     out_cpp.set_first_dims(first_dims->data_ptr(), DType::kInt64, getTensorShape(*first_dims));
+  }
+  if (last_dims.has_value()) {
+    out_cpp.set_last_dims(last_dims->data_ptr(), DType::kInt64, getTensorShape(*last_dims));
   }
   if (tensor_offsets.has_value()) {
     out_cpp.set_tensor_offsets(tensor_offsets->data_ptr(), DType::kInt64,
@@ -764,8 +837,9 @@ std::pair<GroupedTensorWrapper, py::object> Float8CurrentScalingQuantizer::creat
   kwargs["columnwise_amax"] = py::none();
   kwargs["scale"] = scale;
   kwargs["first_dims"] = first_dims.has_value() ? py::cast(*first_dims) : py::none();
-  kwargs["last_dims"] = py::none();
+  kwargs["last_dims"] = last_dims.has_value() ? py::cast(*last_dims) : py::none();
   kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
+  kwargs["offsets"] = py::none();
   kwargs["with_gemm_swizzled_scales"] = py::cast(false);
   PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
   if (result == nullptr) {
@@ -1075,14 +1149,22 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
 std::pair<GroupedTensorWrapper, py::object> Float8BlockQuantizer::create_grouped_tensor(
     const size_t num_tensors, const std::vector<size_t>& logical_shape, const DType dtype,
     py::object quantizer, const std::optional<at::Tensor>& first_dims,
+    const std::optional<at::Tensor>& last_dims,
     const std::optional<at::Tensor>& precomputed_tensor_offsets, const size_t logical_first_dim,
     const size_t logical_last_dim) const {
   using namespace pybind11::literals;
 
+  // The fused grouped FP8 block-scaling path uses unconstrained FP32 scales and does not
+  // implement power-of-2 scaling. Reject force_pow_2_scales rather than silently ignoring it;
+  // the unfused per-tensor split-quantize path still honors it.
+  NVTE_CHECK(!force_pow_2_scales,
+             "Fused grouped FP8 block-scaling quantize does not support force_pow_2_scales=True. "
+             "Set force_pow_2_scales=False, or use the unfused split-quantize path "
+             "(NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM=0) which supports power-of-2 scales.");
+
   const auto tensor_offsets =
-      precomputed_tensor_offsets.has_value()
-          ? precomputed_tensor_offsets
-          : build_grouped_tensor_offsets(num_tensors, first_dims, logical_last_dim);
+      resolve_grouped_tensor_offsets(num_tensors, first_dims, last_dims, precomputed_tensor_offsets,
+                                     logical_first_dim, logical_last_dim);
   const int64_t total_elements =
       static_cast<int64_t>(logical_first_dim) * static_cast<int64_t>(logical_last_dim);
 
@@ -1095,18 +1177,36 @@ std::pair<GroupedTensorWrapper, py::object> Float8BlockQuantizer::create_grouped
   std::optional<at::Tensor> columnwise_scale_inv;
   const std::vector<size_t> logical_shape_vec = {logical_first_dim, logical_last_dim};
 
+  // cuBLAS FP8 block-scaling grouped GEMM consumes each expert's scales from a
+  // contiguous per-expert sub-block in the COMPACT (no 128x4 swizzle) layout —
+  // VEC128_32F / BLK128x128_32F, unlike MXFP8/NVFP4 which require the swizzle.
+  // Per-tensor first dims are multiples of 128, so the per-expert padded sizes
+  // sum exactly to `get_scale_shape` of the logical total shape for 1D and
+  // 2D-rowwise. The only case where the per-expert sum can exceed the
+  // totals-based size is 2D columnwise (per-expert roundup(blocks_y_t, 4)),
+  // so reserve a small slack there. Sizing from totals (instead of reading
+  // first_dims on host) keeps allocation CUDA-graph-safe: no device->host copy.
+  constexpr size_t kBlockLen = 128;
+  const size_t blocks_X = ceildiv(logical_last_dim, kBlockLen);
+
+  auto grouped_scale_elems = [&](bool columnwise) -> int64_t {
+    const auto sh = get_scale_shape(logical_shape_vec, columnwise);
+    int64_t total = static_cast<int64_t>(product(sh));
+    if (columnwise && block_scaling_dim == 2 && num_tensors > 1) {
+      // sum_t roundup(blocks_y_t, 4) <= roundup(total_blocks_y, 4) + 4*(num_tensors-1).
+      total += static_cast<int64_t>(blocks_X * 4 * (num_tensors - 1));
+    }
+    return total;
+  };
+
   if (rowwise_usage) {
     rowwise_data = at::empty({total_elements}, uint8_opts);
-    const auto scale_shape = get_scale_shape(logical_shape_vec, false);
-    const int64_t total_scale_elements = static_cast<int64_t>(product(scale_shape));
-    rowwise_scale_inv = at::empty({total_scale_elements}, float_opts);
+    rowwise_scale_inv = at::empty({grouped_scale_elems(false)}, float_opts);
   }
 
   if (columnwise_usage) {
     columnwise_data = at::empty({total_elements}, uint8_opts);
-    const auto scale_shape = get_scale_shape(logical_shape_vec, true);
-    const int64_t total_scale_elements = static_cast<int64_t>(product(scale_shape));
-    columnwise_scale_inv = at::empty({total_scale_elements}, float_opts);
+    columnwise_scale_inv = at::empty({grouped_scale_elems(true)}, float_opts);
   }
 
   GroupedTensorWrapper out_cpp(num_tensors, logical_shape, this->get_scaling_mode());
@@ -1121,8 +1221,13 @@ std::pair<GroupedTensorWrapper, py::object> Float8BlockQuantizer::create_grouped
     out_cpp.set_columnwise_scale_inv(columnwise_scale_inv->data_ptr(), DType::kFloat32,
                                      getTensorShape(*columnwise_scale_inv));
   }
+  // FP8 block-scaling grouped GEMM reads compact scales; never swizzle.
+  out_cpp.set_with_gemm_swizzled_scales(false);
   if (first_dims.has_value()) {
     out_cpp.set_first_dims(first_dims->data_ptr(), DType::kInt64, getTensorShape(*first_dims));
+  }
+  if (last_dims.has_value()) {
+    out_cpp.set_last_dims(last_dims->data_ptr(), DType::kInt64, getTensorShape(*last_dims));
   }
   if (tensor_offsets.has_value()) {
     out_cpp.set_tensor_offsets(tensor_offsets->data_ptr(), DType::kInt64,
@@ -1148,7 +1253,7 @@ std::pair<GroupedTensorWrapper, py::object> Float8BlockQuantizer::create_grouped
   kwargs["columnwise_amax"] = py::none();
   kwargs["scale"] = py::none();
   kwargs["first_dims"] = first_dims.has_value() ? py::cast(*first_dims) : py::none();
-  kwargs["last_dims"] = py::none();
+  kwargs["last_dims"] = last_dims.has_value() ? py::cast(*last_dims) : py::none();
   kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
   kwargs["with_gemm_swizzled_scales"] = py::cast(false);
   PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
@@ -1354,7 +1459,7 @@ std::vector<size_t> Float8BlockQuantizer::get_scale_shape(const std::vector<size
     }
     scale_shape = {sinv0, sinv1};
   } else {
-    // columnwise scaling factor shape
+    // columnwise scaling factor shape (compact)
     size_t sinv0 = 0;
     size_t sinv1 = 0;
     if (block_scaling_dim == 2) {
@@ -1496,14 +1601,14 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
 std::pair<GroupedTensorWrapper, py::object> MXFP8Quantizer::create_grouped_tensor(
     const size_t num_tensors, const std::vector<size_t>& logical_shape, const DType dtype,
     py::object quantizer, const std::optional<at::Tensor>& first_dims,
+    const std::optional<at::Tensor>& last_dims,
     const std::optional<at::Tensor>& precomputed_tensor_offsets, const size_t logical_first_dim,
     const size_t logical_last_dim) const {
   using namespace pybind11::literals;
 
   const auto tensor_offsets =
-      precomputed_tensor_offsets.has_value()
-          ? precomputed_tensor_offsets
-          : build_grouped_tensor_offsets(num_tensors, first_dims, logical_last_dim);
+      resolve_grouped_tensor_offsets(num_tensors, first_dims, last_dims, precomputed_tensor_offsets,
+                                     logical_first_dim, logical_last_dim);
   const int64_t total_elements =
       static_cast<int64_t>(logical_first_dim) * static_cast<int64_t>(logical_last_dim);
 
@@ -1515,17 +1620,34 @@ std::pair<GroupedTensorWrapper, py::object> MXFP8Quantizer::create_grouped_tenso
   std::optional<at::Tensor> columnwise_scale_inv;
   const std::vector<size_t> logical_shape_vec = {logical_first_dim, logical_last_dim};
 
+  // For VARYING_BOTH_DIMS each tensor in the group must have its first and last
+  // dim be a multiple of 128 (grouped-kernel tile alignment). MXFP8 stores one
+  // E8M0 scale per MXFP8_BLOCK_SIZE (32) elements, so the 128-alignment
+  // guarantees the per-group scale counts tile evenly and the total scale count
+  // is simply scale_inv_numel = data_numel / MXFP8_BLOCK_SIZE (i.e. / 32).
+  const bool is_varying_both = first_dims.has_value() && last_dims.has_value();
+
   if (rowwise_usage) {
     rowwise_data = at::empty({total_elements}, uint8_opts);
-    const auto scale_shape = get_scale_shape(logical_shape_vec, false);
-    const int64_t total_scale_elements = static_cast<int64_t>(product(scale_shape));
+    int64_t total_scale_elements;
+    if (is_varying_both) {
+      total_scale_elements = total_elements / static_cast<int64_t>(MXFP8_BLOCK_SIZE);
+    } else {
+      const auto scale_shape = get_scale_shape(logical_shape_vec, false);
+      total_scale_elements = static_cast<int64_t>(product(scale_shape));
+    }
     rowwise_scale_inv = at::empty({total_scale_elements}, uint8_opts);
   }
 
   if (columnwise_usage) {
     columnwise_data = at::empty({total_elements}, uint8_opts);
-    const auto scale_shape = get_scale_shape(logical_shape_vec, true);
-    const int64_t total_scale_elements = static_cast<int64_t>(product(scale_shape));
+    int64_t total_scale_elements;
+    if (is_varying_both) {
+      total_scale_elements = total_elements / static_cast<int64_t>(MXFP8_BLOCK_SIZE);
+    } else {
+      const auto scale_shape = get_scale_shape(logical_shape_vec, true);
+      total_scale_elements = static_cast<int64_t>(product(scale_shape));
+    }
     columnwise_scale_inv = at::empty({total_scale_elements}, uint8_opts);
   }
 
@@ -1543,6 +1665,9 @@ std::pair<GroupedTensorWrapper, py::object> MXFP8Quantizer::create_grouped_tenso
   }
   if (first_dims.has_value()) {
     out_cpp.set_first_dims(first_dims->data_ptr(), DType::kInt64, getTensorShape(*first_dims));
+  }
+  if (last_dims.has_value()) {
+    out_cpp.set_last_dims(last_dims->data_ptr(), DType::kInt64, getTensorShape(*last_dims));
   }
   if (tensor_offsets.has_value()) {
     out_cpp.set_tensor_offsets(tensor_offsets->data_ptr(), DType::kInt64,
@@ -1570,7 +1695,7 @@ std::pair<GroupedTensorWrapper, py::object> MXFP8Quantizer::create_grouped_tenso
   kwargs["columnwise_amax"] = py::none();
   kwargs["scale"] = py::none();
   kwargs["first_dims"] = first_dims.has_value() ? py::cast(*first_dims) : py::none();
-  kwargs["last_dims"] = py::none();
+  kwargs["last_dims"] = last_dims.has_value() ? py::cast(*last_dims) : py::none();
   kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
   kwargs["with_gemm_swizzled_scales"] = this->optimize_for_gemm;
   PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
@@ -1797,6 +1922,32 @@ bool NVFP4Quantizer::is_eligible_for_rht_cast_fusion(const std::vector<size_t>& 
          transformer_engine::cuda::sm_arch() <= 110;
 }
 
+bool NVFP4Quantizer::is_eligible_for_2d_swizzle_fusion(const std::vector<size_t>& shape) {
+  const auto [rows, cols] = get_2d_dims(shape);
+  return rows % 128 == 0 && cols % 128 == 0 && transformer_engine::cuda::sm_arch() >= 100 &&
+         transformer_engine::cuda::sm_arch() <= 110;
+}
+
+namespace {
+
+// Whether this quantizer should emit GEMM-swizzled scale factors directly from the
+// quantize kernel (RHT cast-fusion path or the plain 2D quantize path), avoiding the
+// standalone post-quantize swizzle pass.
+bool nvfp4_emits_gemm_swizzled_scales(const NVFP4Quantizer& q, const std::vector<size_t>& shape) {
+  if (!q.optimize_for_gemm) {
+    return false;
+  }
+  if (q.with_rht) {
+    return NVFP4Quantizer::is_eligible_for_rht_cast_fusion(shape);
+  }
+  // Plain (non-RHT) 2D quantize kernel can bake the swizzled layout for aligned shapes.
+  return q.with_2d_quantization && !q.row_scaled_nvfp4 &&
+         q.nvfp4_4over6_mode == kNVTENVFP44Over6Disabled &&
+         NVFP4Quantizer::is_eligible_for_2d_swizzle_fusion(shape);
+}
+
+}  // namespace
+
 std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
     const std::vector<size_t>& shape, DType dtype, std::optional<at::Device> device_opt,
     bool pin_memory) const {
@@ -1807,10 +1958,10 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
   const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
   const auto [flat_first_dim, flat_last_dim] = get_2d_dims(shape);
 
-  // Swizzled SF is only valid when the RHT cast-fusion path runs;
-  // other quantize paths reject it.
-  const bool with_gemm_swizzled_scales = this->optimize_for_gemm && this->with_rht &&
-                                         NVFP4Quantizer::is_eligible_for_rht_cast_fusion(shape);
+  // Swizzled SF is emitted directly by the RHT cast-fusion kernel or by the plain
+  // 2D quantize kernel (for aligned shapes); other quantize paths reject it and go
+  // through the standalone post-quantize swizzle pass instead.
+  const bool with_gemm_swizzled_scales = nvfp4_emits_gemm_swizzled_scales(*this, shape);
   NVTE_CHECK(flat_first_dim % NVFP4_BLOCK_SIZE == 0, "First dim for NVFP4 must be divisible by ",
              NVFP4_BLOCK_SIZE, " (got shape=", shape, ")");
   NVTE_CHECK(flat_last_dim % NVFP4_BLOCK_SIZE == 0,
@@ -1962,14 +2113,14 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
 std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tensor(
     const size_t num_tensors, const std::vector<size_t>& logical_shape, const DType dtype,
     py::object quantizer, const std::optional<at::Tensor>& first_dims,
+    const std::optional<at::Tensor>& last_dims,
     const std::optional<at::Tensor>& precomputed_tensor_offsets, const size_t logical_first_dim,
     const size_t logical_last_dim) const {
   using namespace pybind11::literals;
 
   const auto tensor_offsets =
-      precomputed_tensor_offsets.has_value()
-          ? precomputed_tensor_offsets
-          : build_grouped_tensor_offsets(num_tensors, first_dims, logical_last_dim);
+      resolve_grouped_tensor_offsets(num_tensors, first_dims, last_dims, precomputed_tensor_offsets,
+                                     logical_first_dim, logical_last_dim);
   const int64_t total_elements =
       static_cast<int64_t>(logical_first_dim) * static_cast<int64_t>(logical_last_dim);
   NVTE_CHECK(total_elements % 2 == 0, "NVFP4 data size must be divisible by 2.");
@@ -2031,6 +2182,9 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
   if (first_dims.has_value()) {
     out_cpp.set_first_dims(first_dims->data_ptr(), DType::kInt64, getTensorShape(*first_dims));
   }
+  if (last_dims.has_value()) {
+    out_cpp.set_last_dims(last_dims->data_ptr(), DType::kInt64, getTensorShape(*last_dims));
+  }
   if (tensor_offsets.has_value()) {
     out_cpp.set_tensor_offsets(tensor_offsets->data_ptr(), DType::kInt64,
                                getTensorShape(*tensor_offsets));
@@ -2057,7 +2211,7 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
   kwargs["columnwise_amax"] = maybe_tensor_to_py(columnwise_amax);
   kwargs["scale"] = py::none();
   kwargs["first_dims"] = first_dims.has_value() ? py::cast(*first_dims) : py::none();
-  kwargs["last_dims"] = py::none();
+  kwargs["last_dims"] = last_dims.has_value() ? py::cast(*last_dims) : py::none();
   kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
   kwargs["with_gemm_swizzled_scales"] = this->optimize_for_gemm;
   kwargs["row_scaled_nvfp4"] = py::cast(row_scaled_nvfp4);
@@ -2135,10 +2289,10 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
 
   const auto [flat_first_dim, flat_last_dim] = get_2d_dims(shape);
 
-  // Swizzled SF is only valid when the RHT cast-fusion path runs;
-  // other quantize paths reject it.
-  const bool with_gemm_swizzled_scales = this->optimize_for_gemm && this->with_rht &&
-                                         NVFP4Quantizer::is_eligible_for_rht_cast_fusion(shape);
+  // Swizzled SF is emitted directly by the RHT cast-fusion kernel or by the plain
+  // 2D quantize kernel (for aligned shapes); other quantize paths reject it and go
+  // through the standalone post-quantize swizzle pass instead.
+  const bool with_gemm_swizzled_scales = nvfp4_emits_gemm_swizzled_scales(*this, shape);
 
   const bool row_scaled_nvfp4 = this->row_scaled_nvfp4;
   const bool nvfp4_use_4over6 = this->nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;

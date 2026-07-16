@@ -7,6 +7,7 @@
 #include "transformer_engine/cast.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -17,8 +18,11 @@
 
 #include "../extensions.h"
 #include "common.h"
+#include "common/common.h"
 #include "common/util/system.h"
 #include "pybind.h"
+#include "transformer_engine/multi_tensor.h"
+#include "transformer_engine/recipe.h"
 #include "transformer_engine/transformer_engine.h"
 
 namespace transformer_engine {
@@ -204,16 +208,85 @@ void group_quantize_nvfp4_impl(const GroupedTensorWrapper &grouped_input_tensor,
   });
 }
 
+float fp8_max_for_dtype(const DType dtype) {
+  if (!is_fp8_dtype(dtype)) {
+    NVTE_ERROR("Expected FP8 dtype for grouped current-scaling quantization, got ",
+               to_string(dtype), ".");
+  }
+  TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+      dtype, T, { return transformer_engine::detail::TypeExtrema<T>::max; });
+  return 0.0f;
+}
+
+// Computes per-group amax and scale/scale_inv for grouped FP8 current scaling.
+//
+// 1) nvte_group_compute_amax_with_config: per-group amax over the input tensor
+//    (current scaling -> amax is computed from this batch's inputs, never from
+//    history).
+// 2) Optional NCCL allreduce on the amax buffer (when DP/TP amax sync is on).
+// 3) nvte_group_compute_scale_from_amax: graph-safe per-group math kernel that
+//    derives scale = max_fp8 / amax and scale_inv = 1/scale per group in a
+//    single launch. It honors the config's no-op flag, so a skipped weight
+//    update (skip_fp8_weight_update) preserves the cached scale instead of
+//    recomputing it from a stale/uninitialized amax.
+//
+// After this returns, the per-group `scale` / `scale_inv` buffers are
+// populated and the actual cast/transpose is performed by `nvte_group_quantize`.
+void compute_grouped_fp8_current_scaling_amax_and_scale(
+    const GroupedTensorWrapper &grouped_input_tensor,
+    const GroupedTensorWrapper &grouped_output_tensor, const py::object &grouped_output_py,
+    Float8CurrentScalingQuantizer *quantizer_cpp, const std::optional<TensorWrapper> &noop_flag) {
+  QuantizationConfigWrapper quant_config;
+  quant_config.set_force_pow_2_scales(quantizer_cpp->force_pow_2_scales);
+  quant_config.set_amax_epsilon(quantizer_cpp->amax_epsilon);
+  if (noop_flag.has_value()) {
+    quant_config.set_noop_tensor(noop_flag->data());
+  }
+
+  auto stream = at::cuda::getCurrentCUDAStream();
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_group_compute_amax_with_config(grouped_input_tensor.data(), grouped_output_tensor.data(),
+                                        quant_config, stream);
+  });
+
+  if (quantizer_cpp->with_amax_reduction) {
+    // NCCL collectives require an at::Tensor; the amax buffer lives on the Python
+    // object (same allocation as the grouped tensor's amax), so fetch it only on
+    // this path.
+    auto amax = grouped_output_py.attr("amax").cast<at::Tensor>();
+    c10d::AllreduceOptions opts;
+    opts.reduceOp = c10d::ReduceOp::MAX;
+    std::vector<at::Tensor> tensors = {amax};
+    NVTE_SCOPED_GIL_RELEASE(
+        { quantizer_cpp->amax_reduction_group->allreduce(tensors, opts)->wait(); });
+  }
+
+  // Derive per-group scale/scale_inv from the (possibly reduced) amax. The same
+  // quant_config carries force_pow_2_scales/amax_epsilon and, crucially, the
+  // no-op flag, so the update is skipped on device when skip_fp8_weight_update is
+  // set -- preserving the cached scale instead of recomputing it from a
+  // stale/uninitialized amax. Buffers and the FP8 max are read from the grouped
+  // tensor inside the kernel launch.
+  NVTE_SCOPED_GIL_RELEASE(
+      { nvte_group_compute_scale_from_amax(grouped_output_tensor.data(), quant_config, stream); });
+}
+
 }  // namespace
 
-// NOTE: Only supports varying first dim.
 py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const size_t num_tensors,
-                          std::optional<at::Tensor> first_dims,
-                          std::optional<at::Tensor> tensor_offsets) {
+                          std::optional<at::Tensor> first_dims, std::optional<at::Tensor> last_dims,
+                          std::optional<at::Tensor> tensor_offsets,
+                          std::optional<at::Tensor> noop_flag) {
   using namespace transformer_engine::pytorch::detail;
   init_extension();
 
   NVTE_CHECK(tensor.dim() == 2, "Tensor must be 2D");
+
+  // No-op flag for CUDA graph weight caching (skip_fp8_weight_update).
+  std::optional<TensorWrapper> noop_flag_cpp;
+  if (noop_flag.has_value()) {
+    noop_flag_cpp = makeTransformerEngineTensor(*noop_flag);
+  }
 
   std::vector<size_t> logical_shape;
   for (const auto &d : tensor.sizes()) {
@@ -228,19 +301,22 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
 
   // Create input GroupedTensor.
   auto grouped_input_tensor = GroupedTensorWrapper(num_tensors, logical_shape);
-  grouped_input_tensor.set_rowwise_data(
-      tensor.data_ptr(), GetTransformerEngineDType(tensor.scalar_type()), getTensorShape(tensor));
+  grouped_input_tensor.set_rowwise_data(tensor.data_ptr(),
+                                        GetTransformerEngineDType(tensor.scalar_type()),
+                                        std::vector<size_t>{static_cast<size_t>(tensor.numel())});
 
   // Create output GroupedTensor.
   auto [grouped_output_tensor_cpp, grouped_output_py] = quantizer_cpp->create_grouped_tensor(
       num_tensors, logical_shape, GetTransformerEngineDType(tensor.scalar_type()),
-      py::reinterpret_borrow<py::object>(quantizer), first_dims, tensor_offsets, logical_first_dim,
-      logical_last_dim);
+      py::reinterpret_borrow<py::object>(quantizer), first_dims, last_dims, tensor_offsets,
+      logical_first_dim, logical_last_dim);
 
   // dispatch to scaling methods
   enum class GroupedQuantizationMode {
+    FP8_CURRENT_SCALING_GROUPED_QUANTIZE,
     MXFP8_GROUPED_QUANTIZE,
     NVFP4_GROUPED_QUANTIZE,
+    FP8_BLOCKWISE_GROUPED_QUANTIZE,
     INVALID_FOR_GROUPED_QUANTIZE
   };
   GroupedQuantizationMode grouped_quantization_mode =
@@ -249,6 +325,10 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
     grouped_quantization_mode = GroupedQuantizationMode::MXFP8_GROUPED_QUANTIZE;
   } else if (detail::IsNVFP4Quantizers(quantizer.ptr())) {
     grouped_quantization_mode = GroupedQuantizationMode::NVFP4_GROUPED_QUANTIZE;
+  } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
+    grouped_quantization_mode = GroupedQuantizationMode::FP8_CURRENT_SCALING_GROUPED_QUANTIZE;
+  } else if (detail::IsFloat8BlockwiseQuantizers(quantizer.ptr())) {
+    grouped_quantization_mode = GroupedQuantizationMode::FP8_BLOCKWISE_GROUPED_QUANTIZE;
   }
 
   if (empty_input_buffer) {
@@ -261,13 +341,45 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
   switch (grouped_quantization_mode) {
     case GroupedQuantizationMode::NVFP4_GROUPED_QUANTIZE: {
       // NVFP4 grouped quantization
+      NVTE_CHECK(!last_dims.has_value(),
+                 "group_quantize: varying last dim is not supported with NVFP4.");
       NVFP4Quantizer *nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());
       group_quantize_nvfp4_impl(grouped_input_tensor, grouped_output_tensor_cpp,
                                 nvfp4_quantizer_cpp, at::cuda::getCurrentCUDAStream(), true);
       break;
     }
+    case GroupedQuantizationMode::FP8_CURRENT_SCALING_GROUPED_QUANTIZE: {
+      auto *fp8_quantizer_cpp = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
+      compute_grouped_fp8_current_scaling_amax_and_scale(
+          grouped_input_tensor, grouped_output_tensor_cpp, grouped_output_py, fp8_quantizer_cpp,
+          noop_flag_cpp);
+      QuantizationConfigWrapper quant_config_cpp;
+      if (noop_flag_cpp.has_value()) {
+        quant_config_cpp.set_noop_tensor(noop_flag_cpp->data());
+      }
+      NVTE_SCOPED_GIL_RELEASE({
+        nvte_group_quantize(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(),
+                            quant_config_cpp, at::cuda::getCurrentCUDAStream());
+      });
+      break;
+    }
     case GroupedQuantizationMode::MXFP8_GROUPED_QUANTIZE: {
       QuantizationConfigWrapper quant_config_cpp;
+      if (noop_flag_cpp.has_value()) {
+        quant_config_cpp.set_noop_tensor(noop_flag_cpp->data());
+      }
+      NVTE_SCOPED_GIL_RELEASE({
+        nvte_group_quantize(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(),
+                            quant_config_cpp, at::cuda::getCurrentCUDAStream());
+      });
+      break;
+    }
+    case GroupedQuantizationMode::FP8_BLOCKWISE_GROUPED_QUANTIZE: {
+      Float8BlockQuantizer *fp8_block_quantizer_cpp =
+          static_cast<Float8BlockQuantizer *>(quantizer_cpp.get());
+      QuantizationConfigWrapper quant_config_cpp;
+      quant_config_cpp.set_force_pow_2_scales(fp8_block_quantizer_cpp->force_pow_2_scales);
+      quant_config_cpp.set_amax_epsilon(fp8_block_quantizer_cpp->amax_epsilon);
       NVTE_SCOPED_GIL_RELEASE({
         nvte_group_quantize(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(),
                             quant_config_cpp, at::cuda::getCurrentCUDAStream());
@@ -276,7 +388,9 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
     }
     case GroupedQuantizationMode::INVALID_FOR_GROUPED_QUANTIZE:
     default:
-      NVTE_ERROR("group_quantize: only support NVFP4 or MXFP8 quantizer.");
+      NVTE_ERROR(
+          "group_quantize: only supports MXFP8, NVFP4, Float8CurrentScalingQuantizer, or "
+          "Float8Blockwise quantizer.");
       break;
   }
 
@@ -286,6 +400,7 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
 py::object nvfp4_group_quantize_with_amax(const at::Tensor &tensor, py::handle quantizer,
                                           const size_t num_tensors,
                                           std::optional<at::Tensor> first_dims,
+                                          std::optional<at::Tensor> last_dims,
                                           const at::Tensor &rowwise_amax,
                                           const at::Tensor &columnwise_amax,
                                           std::optional<at::Tensor> tensor_offsets) {
@@ -293,6 +408,8 @@ py::object nvfp4_group_quantize_with_amax(const at::Tensor &tensor, py::handle q
   init_extension();
 
   NVTE_CHECK(tensor.dim() == 2, "Tensor must be 2D");
+  NVTE_CHECK(!last_dims.has_value(),
+             "nvfp4_group_quantize_with_amax: varying last dim is not supported with NVFP4.");
   NVTE_CHECK(rowwise_amax.is_cuda() && columnwise_amax.is_cuda(),
              "Precomputed amax tensors must be CUDA tensors.");
   NVTE_CHECK(
@@ -323,8 +440,8 @@ py::object nvfp4_group_quantize_with_amax(const at::Tensor &tensor, py::handle q
 
   auto [grouped_output_tensor_cpp, grouped_output_py] = quantizer_cpp->create_grouped_tensor(
       num_tensors, logical_shape, GetTransformerEngineDType(tensor.scalar_type()),
-      py::reinterpret_borrow<py::object>(quantizer), first_dims, tensor_offsets, logical_first_dim,
-      logical_last_dim);
+      py::reinterpret_borrow<py::object>(quantizer), first_dims, last_dims, tensor_offsets,
+      logical_first_dim, logical_last_dim);
 
   if (grouped_output_tensor_cpp.get_amax().data_ptr != nullptr) {
     grouped_output_tensor_cpp.set_amax(rowwise_amax.data_ptr(), DType::kFloat32,
@@ -358,11 +475,15 @@ py::object nvfp4_group_quantize_with_amax(const at::Tensor &tensor, py::handle q
 
 py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
                                 const size_t num_tensors, std::optional<at::Tensor> first_dims,
+                                std::optional<at::Tensor> last_dims,
                                 std::optional<at::Tensor> tensor_offsets) {
   using namespace transformer_engine::pytorch::detail;
   init_extension();
 
   NVTE_CHECK(tensor.dim() == 2, "Tensor must be 2D");
+  NVTE_CHECK(!last_dims.has_value(),
+             "bgrad_group_quantize: varying last dim is not supported because the underlying "
+             "MXFP8 dbias kernel requires a constant last dimension across grouped tensors.");
 
   std::vector<size_t> logical_shape;
   for (const auto &d : tensor.sizes()) {
@@ -373,19 +494,21 @@ py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
 
   bool empty_input_buffer = logical_first_dim == 0 || logical_last_dim == 0;
 
-  NVTE_CHECK(detail::IsMXFP8Quantizers(quantizer.ptr()),
-             "bgrad_group_quantize: only MXFP8 quantizer is supported.");
+  NVTE_CHECK(detail::IsMXFP8Quantizers(quantizer.ptr()) ||
+                 detail::IsFloat8BlockwiseQuantizers(quantizer.ptr()),
+             "bgrad_group_quantize: only MXFP8 and FP8 block-scaling quantizers are supported.");
 
   auto quantizer_cpp = convert_quantizer(quantizer);
 
   auto grouped_input_tensor = GroupedTensorWrapper(num_tensors, logical_shape);
-  grouped_input_tensor.set_rowwise_data(
-      tensor.data_ptr(), GetTransformerEngineDType(tensor.scalar_type()), getTensorShape(tensor));
+  grouped_input_tensor.set_rowwise_data(tensor.data_ptr(),
+                                        GetTransformerEngineDType(tensor.scalar_type()),
+                                        std::vector<size_t>{static_cast<size_t>(tensor.numel())});
 
   auto [grouped_output_tensor_cpp, grouped_output_py] = quantizer_cpp->create_grouped_tensor(
       num_tensors, logical_shape, GetTransformerEngineDType(tensor.scalar_type()),
-      py::reinterpret_borrow<py::object>(quantizer), first_dims, tensor_offsets, logical_first_dim,
-      logical_last_dim);
+      py::reinterpret_borrow<py::object>(quantizer), first_dims, last_dims, tensor_offsets,
+      logical_first_dim, logical_last_dim);
 
   if (empty_input_buffer) {
     at::Tensor dbias_torch =
@@ -473,19 +596,26 @@ py::object group_dequantize(const py::handle &input, transformer_engine::DType o
     NoneQuantizer q{py::none()};
     auto [out_cpp, out_py] =
         q.create_grouped_tensor(num_tensors, logical_shape, otype, py::none(), first_dims,
-                                tensor_offsets, logical_first_dim, logical_last_dim);
+                                last_dims, tensor_offsets, logical_first_dim, logical_last_dim);
     return py::reinterpret_borrow<py::object>(out_py);
   }
 
   // Build input GroupedTensorWrapper.
   // Data tensors are stored as flat 1D buffers; use the quantizer's dtype
   // (e.g. kFloat8E4M3) rather than the raw tensor scalar_type (uint8).
-  auto input_cpp = GroupedTensorWrapper(num_tensors, logical_shape, quantizer->get_scaling_mode());
+  const NVTEScalingMode scaling_mode = quantizer->get_scaling_mode();
+  const bool is_block_scaling =
+      (scaling_mode == NVTE_BLOCK_SCALING_1D || scaling_mode == NVTE_BLOCK_SCALING_2D);
+  const bool is_nvfp4 = (scaling_mode == NVTE_NVFP4_1D_SCALING);
+  const DType scale_dtype = is_block_scaling ? DType::kFloat32
+                            : is_nvfp4       ? DType::kFloat8E4M3
+                                             : DType::kFloat8E8M0;
+  auto input_cpp = GroupedTensorWrapper(num_tensors, logical_shape, scaling_mode);
   if (rowwise_data.has_value()) {
     input_cpp.set_rowwise_data(rowwise_data->data_ptr(), quantizer->dtype,
                                std::vector<size_t>{static_cast<size_t>(rowwise_data->numel())});
     if (rowwise_scale_inv.has_value()) {
-      input_cpp.set_rowwise_scale_inv(rowwise_scale_inv->data_ptr(), DType::kFloat8E8M0,
+      input_cpp.set_rowwise_scale_inv(rowwise_scale_inv->data_ptr(), scale_dtype,
                                       getTensorShape(*rowwise_scale_inv));
     }
   }
@@ -494,7 +624,7 @@ py::object group_dequantize(const py::handle &input, transformer_engine::DType o
         columnwise_data->data_ptr(), quantizer->dtype,
         std::vector<size_t>{static_cast<size_t>(columnwise_data->numel())});
     if (columnwise_scale_inv.has_value()) {
-      input_cpp.set_columnwise_scale_inv(columnwise_scale_inv->data_ptr(), DType::kFloat8E8M0,
+      input_cpp.set_columnwise_scale_inv(columnwise_scale_inv->data_ptr(), scale_dtype,
                                          getTensorShape(*columnwise_scale_inv));
     }
   }
@@ -512,7 +642,7 @@ py::object group_dequantize(const py::handle &input, transformer_engine::DType o
   // Create output GroupedTensor using NoneQuantizer.
   NoneQuantizer q{py::none()};
   auto [out_cpp, out_py] =
-      q.create_grouped_tensor(num_tensors, logical_shape, otype, py::none(), first_dims,
+      q.create_grouped_tensor(num_tensors, logical_shape, otype, py::none(), first_dims, last_dims,
                               tensor_offsets, logical_first_dim, logical_last_dim);
 
   NVTE_SCOPED_GIL_RELEASE({

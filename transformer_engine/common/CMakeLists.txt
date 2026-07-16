@@ -88,15 +88,12 @@ endif()
 set(NVTE_STANDARD_ARCHS ${CMAKE_CUDA_ARCHITECTURES})
 
 # cuDNN frontend API
-set(CUDNN_FRONTEND_INCLUDE_DIR
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/include")
-if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
+if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}/cudnn_frontend.h")
     message(FATAL_ERROR
-            "Could not find cuDNN frontend API at ${CUDNN_FRONTEND_INCLUDE_DIR}. "
-            "Try running 'git submodule update --init --recursive' "
-            "within the Transformer Engine source.")
+            "Could not find cudnn_frontend.h in ${CUDNN_FRONTEND_INCLUDE_DIR}. "
+            "Install nvidia-cudnn-frontend or set CUDNN_FRONTEND_INCLUDE_DIR.")
 endif()
-include(${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/cuDNN.cmake)
 
 set(CUTLASS_INCLUDE_DIR
   "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cutlass/include")
@@ -186,6 +183,7 @@ list(APPEND transformer_engine_cpp_sources
      fused_attn/fused_attn.cpp
      gemm/config.cpp
      normalization/common.cpp
+     normalization/rtc_dispatch.cpp
      normalization/layernorm/ln_api.cpp
      normalization/rmsnorm/rmsnorm_api.cpp
      util/cuda_driver.cpp
@@ -255,6 +253,9 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
      activation/relu_dbias.cu
      activation/relu_grouped.cu
      activation/relu_grouped_dbias.cu
+     activation/scaled_activation.cu
+     activation/scaled_srelu.cu
+     activation/scaled_swiglu.cu
      activation/swiglu.cu
      activation/swiglu_dbias.cu
      activation/swiglu_grouped.cu
@@ -437,6 +438,79 @@ if (NVTE_WITH_CUSOLVERMP)
     message(STATUS "Using cuSolverMp at: ${CUSOLVERMP_DIR}")
 endif()
 
+# -- NCCL EP (on by default, HT mode only) ---------------------------------
+# Set -DNVTE_WITH_NCCL_EP=OFF (or NVTE_WITH_NCCL_EP=0 in setup.py) to
+# skip NCCL EP entirely - useful on older images whose system NCCL is below
+# the 2.30.4 EP minimum.
+option(NVTE_WITH_NCCL_EP "Build NCCL EP into libtransformer_engine.so" ON)
+if(NVTE_WITH_NCCL_EP)
+# SM>=90 and NCCL>=2.30.4 are gated at runtime in EPBackend::initialize.
+# -- NCCL EP headers --------------------------------------------------------
+# Headers + libs are produced by the in-tree 3rdparty/nccl submodule build
+# (auto-built by setup.py via build_nccl_ep_submodule).
+set(NCCL_EP_SUBMODULE_ROOT
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/nccl")
+set(NCCL_EP_INCLUDE_DIR "${NCCL_EP_SUBMODULE_ROOT}/build/include")
+if(NOT EXISTS "${NCCL_EP_INCLUDE_DIR}/nccl_ep.h")
+  message(FATAL_ERROR
+    "NCCL EP header not found at ${NCCL_EP_INCLUDE_DIR}/nccl_ep.h. "
+    "Run `git submodule update --init --recursive` and rebuild TE.")
+endif()
+message(STATUS "NCCL EP headers: ${NCCL_EP_INCLUDE_DIR}")
+
+# -- libnccl_ep.a -----------------------------------------------------------
+# Statically linked into libtransformer_engine.so. EPBackend::initialize checks
+# NCCL >= 2.30.4 before any nccl_ep call, so the newer NCCL symbols nccl_ep
+# imports stay unresolved (and harmless) under default ELF lazy binding when
+# the gate trips. LD_BIND_NOW environments lose this property.
+set(NCCL_EP_LIB_DIR "${NCCL_EP_SUBMODULE_ROOT}/build/lib")
+find_file(NCCL_EP_LIB
+    NAMES libnccl_ep.a
+    HINTS ${NCCL_EP_LIB_DIR}
+    NO_DEFAULT_PATH
+    REQUIRED)
+
+# -- NCCL core: nccl.h + libnccl.so -----------------------------------------
+# setup.py passes -DNCCL_INCLUDE_DIR; standalone CMake falls back to probing
+# well-known NCCL install prefixes.
+find_path(NCCL_INCLUDE_DIR nccl.h
+    HINTS /opt/nvidia/nccl/include /usr/local/nccl/include)
+if(NOT NCCL_INCLUDE_DIR)
+  message(FATAL_ERROR
+    "nccl.h not found. Pass -DNCCL_INCLUDE_DIR=<prefix>/include.")
+endif()
+if(NOT NCCL_LIB)
+  find_library(NCCL_LIB
+      NAMES nccl libnccl
+      PATH_SUFFIXES lib lib64
+      REQUIRED)
+endif()
+
+target_include_directories(transformer_engine PRIVATE
+    ${NCCL_EP_INCLUDE_DIR}
+    ${NCCL_INCLUDE_DIR})
+
+# libnccl.so direct symbols (ncclGetVersion etc.) come from libnccl_ep.a's
+# DT_NEEDED chain plus this TU's own references. CUDA::cuda_driver must follow
+# the static archive on the link line so --as-needed records libcuda.so.1.
+target_link_libraries(transformer_engine PUBLIC ${NCCL_LIB})
+target_link_libraries(transformer_engine PRIVATE
+    -Wl,--whole-archive ${NCCL_EP_LIB} -Wl,--no-whole-archive
+    CUDA::cuda_driver)
+
+target_sources(transformer_engine PRIVATE
+    ep/ep_backend.cpp
+    ep/ep_api.cpp)
+target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_NCCL_EP)
+
+message(STATUS "NCCL EP enabled (static link): ${NCCL_EP_LIB}")
+message(STATUS "NCCL EP include: ${NCCL_EP_INCLUDE_DIR}")
+else()
+  # NCCL EP off: ep_api.cpp's #else branch exports throwing nvte_ep_* stubs.
+  target_sources(transformer_engine PRIVATE ep/ep_api.cpp)
+  message(STATUS "NCCL EP disabled (NVTE_WITH_NCCL_EP=OFF) - using nvte_ep_* stubs")
+endif()
+
 # Number of philox4x32 rounds for stochastic rounding (build-time constant).
 set(NVTE_BUILD_NUM_PHILOX_ROUNDS_STR $ENV{NVTE_BUILD_NUM_PHILOX_ROUNDS})
 if (NOT NVTE_BUILD_NUM_PHILOX_ROUNDS_STR)
@@ -481,12 +555,58 @@ make_string_header_from_file(transpose/rtc/transpose.cu
                              string_code_transpose_rtc_transpose_cu)
 make_string_header_from_file(transpose/rtc/swap_first_dims.cu
                              string_code_transpose_rtc_swap_first_dims_cu)
+make_string_header_from_file(fused_softmax/scaled_masked_softmax.cu
+                             string_code_fused_softmax_scaled_masked_softmax_cu)
+make_string_header_from_file(fused_softmax/scaled_upper_triang_masked_softmax.cu
+                             string_code_fused_softmax_scaled_upper_triang_masked_softmax_cu)
+make_string_header_from_file(fused_softmax/scaled_aligned_causal_masked_softmax.cu
+                             string_code_fused_softmax_scaled_aligned_causal_masked_softmax_cu)
 make_string_header_from_file(utils.cuh
                              string_code_utils_cuh)
 make_string_header_from_file(util/math.h
                              string_code_util_math_h)
+
+# Norm NVRTC bundled headers + RTC source files
+make_string_header_from_file(normalization/kernel_params.h
+                             string_code_normalization_kernel_params_h)
+make_string_header_from_file(normalization/kernel_traits.h
+                             string_code_normalization_kernel_traits_h)
+make_string_header_from_file(normalization/layernorm/ln_fwd_kernels.cuh
+                             string_code_normalization_layernorm_ln_fwd_kernels_cuh)
+make_string_header_from_file(normalization/layernorm/ln_bwd_kernels.cuh
+                             string_code_normalization_layernorm_ln_bwd_kernels_cuh)
+make_string_header_from_file(normalization/rmsnorm/rmsnorm_fwd_kernels.cuh
+                             string_code_normalization_rmsnorm_rmsnorm_fwd_kernels_cuh)
+make_string_header_from_file(normalization/rmsnorm/rmsnorm_bwd_kernels.cuh
+                             string_code_normalization_rmsnorm_rmsnorm_bwd_kernels_cuh)
+make_string_header_from_file(normalization/layernorm/rtc/ln_fwd_kernel.cu
+                             string_code_normalization_layernorm_rtc_ln_fwd_kernel_cu)
+make_string_header_from_file(normalization/layernorm/rtc/ln_bwd_kernel.cu
+                             string_code_normalization_layernorm_rtc_ln_bwd_kernel_cu)
+make_string_header_from_file(normalization/rmsnorm/rtc/rmsnorm_fwd_kernel.cu
+                             string_code_normalization_rmsnorm_rtc_rmsnorm_fwd_kernel_cu)
+make_string_header_from_file(normalization/rmsnorm/rtc/rmsnorm_bwd_kernel.cu
+                             string_code_normalization_rmsnorm_rtc_rmsnorm_bwd_kernel_cu)
 target_include_directories(transformer_engine PRIVATE
                            "${CMAKE_CURRENT_BINARY_DIR}/string_headers")
+
+option(NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX
+       "Also compile legacy static fused softmax kernels for NVTE_DISABLE_NVRTC fallback"
+       OFF)
+target_compile_definitions(transformer_engine
+                           PRIVATE
+                           NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX=$<BOOL:${NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX}>)
+
+# Default OFF: LayerNorm/RMSNorm require NVRTC. Set ON to additionally compile
+# the legacy static template instantiations, which are selected only when
+# NVTE_DISABLE_NVRTC=1 at runtime. This compiles all 556
+# REGISTER_NORM_LAUNCHER variants up front.
+option(NVTE_BUILD_LEGACY_STATIC_NORM
+       "Also compile static norm kernels for NVTE_DISABLE_NVRTC fallback"
+       OFF)
+target_compile_definitions(transformer_engine
+                           PRIVATE
+                           NVTE_BUILD_LEGACY_STATIC_NORM=$<BOOL:${NVTE_BUILD_LEGACY_STATIC_NORM}>)
 
 # Compiler options
 set(nvte_sources_with_fast_math)
@@ -513,6 +633,9 @@ if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
                                           activation/relu_dbias.cu
                                           activation/relu_grouped.cu
                                           activation/relu_grouped_dbias.cu
+                                          activation/scaled_activation.cu
+                                          activation/scaled_srelu.cu
+                                          activation/scaled_swiglu.cu
                                           activation/swiglu.cu
                                           activation/swiglu_dbias.cu
                                           activation/swiglu_grouped.cu
