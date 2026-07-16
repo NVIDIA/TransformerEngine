@@ -1863,9 +1863,16 @@ class GroupedGemmPrimitive(BasePrimitive):
             if len(bias_spec) > 0 and not spec_contains_axis(bias_spec, ep_axis):
                 bias_spec = (merge_axis_specs(bias_spec[0], ep_axis), *bias_spec[1:])
 
+        # A compound leading group dimension may use FSDP as the outer
+        # data-parallel axis (for example MoE groups ordered
+        # (fsdp, ep, local_expert)). In that case FSDP describes distinct
+        # groups, not a sharded RHS contracting dimension, and must remain
+        # on the group axis. Otherwise gather the FSDP-sharded RHS as usual.
+        fsdp_is_group_axis = spec_contains_axis(active_group_spec, fsdp_axis)
         gather_rhs_fsdp = (
             fsdp_axis is not None
             and not rhs_is_ragged
+            and not fsdp_is_group_axis
             and (
                 spec_contains_axis(rhs_data_spec, fsdp_axis)
                 or spec_contains_axis(rhs_scale_spec, fsdp_axis)
@@ -1882,6 +1889,11 @@ class GroupedGemmPrimitive(BasePrimitive):
             axis for axis in (gsr.dp_resource, gsr.fsdp_resource) if axis is not None
         )
         reduce_axis = common_spec_axis(lhs_data_spec, rhs_data_spec, reducible_axes)
+        # A common DP/FSDP group axis represents independent groups, not a
+        # partitioned contraction. Keep reductions for genuinely sharded
+        # contracting dimensions (including grouped wgrad), but not here.
+        if reduce_axis is not None and spec_contains_axis(active_group_spec, reduce_axis):
+            reduce_axis = None
         if reduce_axis is not None and gather_rhs_fsdp:
             reduce_axis = None
 
