@@ -8,6 +8,7 @@
 #include "../cudnn_utils.h"
 #include "../util/system.h"
 #include "fused_attn_fp8.h"
+#include "graph_debug.h"  // [GRAPH-DEBUG]
 #include "utils.h"
 
 namespace transformer_engine {
@@ -32,13 +33,13 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
   const cudnn_frontend::DataType_t o_tensor_type =
       get_cudnn_fe_dtype(static_cast<DType>(cfg.o_dtype));
 
-  int64_t b = static_cast<int64_t>(cfg.batch_size);
-  int64_t h = static_cast<int64_t>(cfg.num_attn_heads);
-  int64_t hg = static_cast<int64_t>(cfg.num_gqa_groups);
-  int64_t s_q = static_cast<int64_t>(cfg.max_seqlen_q);
-  int64_t s_kv = static_cast<int64_t>(cfg.max_seqlen_kv);
-  int64_t d_qk = static_cast<int64_t>(cfg.head_dim_qk);
-  int64_t d_v = static_cast<int64_t>(cfg.head_dim_v);
+  const int64_t b = static_cast<int64_t>(cfg.batch_size);
+  const int64_t h = static_cast<int64_t>(cfg.num_attn_heads);
+  const int64_t hg = static_cast<int64_t>(cfg.num_gqa_groups);
+  const int64_t s_q = static_cast<int64_t>(cfg.max_seqlen_q);
+  const int64_t s_kv = static_cast<int64_t>(cfg.max_seqlen_kv);
+  const int64_t d_qk = static_cast<int64_t>(cfg.head_dim_qk);
+  const int64_t d_v = static_cast<int64_t>(cfg.head_dim_v);
   const bool is_training = cfg.is_training;
   const float scaling_factor = cfg.attn_scale;
   const float dropout_probability = cfg.dropout;
@@ -82,7 +83,7 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
   NVTE_CHECK(!is_mxfp8 || cudnn_runtime_version >= 92100,
              "MXFP8 fused attention requires cuDNN 9.21.0 or later!");
 
-  const FusedAttnConfig cache_cfg = cfg.make_cache_key(/*is_forward=*/true);
+  const FusedAttnConfig cache_cfg = cfg.make_cache_key();
   try {
     namespace fe = cudnn_frontend;
     using graph_and_tensors =
@@ -234,10 +235,7 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
           sdpa_options.set_diagonal_band_right_bound(window_size_right);
         }
       }
-      // Preferred replacement for the deprecated set_causal_mask: causal masking = diagonal
-      // alignment (set above) + a right band bound of 0, unless an explicit right bound was
-      // already applied above.
-      if (is_causal && !(cudnn_runtime_version >= 92100 && window_size_right != -1)) {
+      if (is_causal) {
         sdpa_options.set_diagonal_band_right_bound(0);
       }
 
@@ -358,6 +356,7 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
           std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, Stats_tuple, bias_tuple,
                          softmax_offset_tuple, padding_tuple, dropout_tuple);
       cache.insert({descriptor, return_tuple});
+      fused_attn_graph_debug::note_fwd_build();  // [GRAPH-DEBUG]
 
       return return_tuple;
     };
@@ -374,6 +373,7 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
       *workspace_size = plan_workspace_size + actual_seqlen_workspace_size;
       return;
     }
+    fused_attn_graph_debug::note_fwd_exec();  // [GRAPH-DEBUG]
 
     // cuDNN stream check needs to be moved here to support dummy kernel calls with
     // null streams for sizing the cuDNN workspace.
@@ -459,13 +459,13 @@ void fused_attn_fp8_bwd_impl(
   const cudnn_frontend::DataType_t dqkv_tensor_type =
       get_cudnn_fe_dtype(static_cast<DType>(cfg.dqkv_dtype));
 
-  int64_t b = static_cast<int64_t>(cfg.batch_size);
-  int64_t h = static_cast<int64_t>(cfg.num_attn_heads);
-  int64_t hg = static_cast<int64_t>(cfg.num_gqa_groups);
-  int64_t s_q = static_cast<int64_t>(cfg.max_seqlen_q);
-  int64_t s_kv = static_cast<int64_t>(cfg.max_seqlen_kv);
-  int64_t d_qk = static_cast<int64_t>(cfg.head_dim_qk);
-  int64_t d_v = static_cast<int64_t>(cfg.head_dim_v);
+  const int64_t b = static_cast<int64_t>(cfg.batch_size);
+  const int64_t h = static_cast<int64_t>(cfg.num_attn_heads);
+  const int64_t hg = static_cast<int64_t>(cfg.num_gqa_groups);
+  const int64_t s_q = static_cast<int64_t>(cfg.max_seqlen_q);
+  const int64_t s_kv = static_cast<int64_t>(cfg.max_seqlen_kv);
+  const int64_t d_qk = static_cast<int64_t>(cfg.head_dim_qk);
+  const int64_t d_v = static_cast<int64_t>(cfg.head_dim_v);
   const float scaling_factor = cfg.attn_scale;
   const float dropout_probability = cfg.dropout;
   const NVTE_QKV_Layout qkv_layout = cfg.qkv_layout;
@@ -515,7 +515,7 @@ void fused_attn_fp8_bwd_impl(
   bool is_O_in_F16 = (o_tensor_type == cudnn_frontend::DataType_t::HALF ||
                       o_tensor_type == cudnn_frontend::DataType_t::BFLOAT16);
 
-  const FusedAttnConfig cache_cfg = cfg.make_cache_key(/*is_forward=*/false);
+  const FusedAttnConfig cache_cfg = cfg.make_cache_key();
   try {
     namespace fe = cudnn_frontend;
     using graph_and_tensors =
@@ -786,10 +786,7 @@ void fused_attn_fp8_bwd_impl(
           sdpa_backward_options.set_diagonal_band_right_bound(window_size_right);
         }
       }
-      // Preferred replacement for the deprecated set_causal_mask: causal masking = diagonal
-      // alignment (set above) + a right band bound of 0, unless an explicit right bound was
-      // already applied above.
-      if (is_causal && !(cudnn_runtime_version >= 92100 && window_size_right != -1)) {
+      if (is_causal) {
         sdpa_backward_options.set_diagonal_band_right_bound(0);
       }
 
@@ -962,6 +959,7 @@ void fused_attn_fp8_bwd_impl(
           std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, mxfp8_tensors_tuple,
                          bias_tuple, softmax_offset_tuple, padding_tuple, dropout_tuple);
       cache.insert({descriptor, return_tuple});
+      fused_attn_graph_debug::note_bwd_build();  // [GRAPH-DEBUG]
 
       return return_tuple;
     };
@@ -979,6 +977,7 @@ void fused_attn_fp8_bwd_impl(
       *workspace_size = plan_workspace_size + actual_seqlen_workspace_size;
       return;
     }
+    fused_attn_graph_debug::note_bwd_exec();  // [GRAPH-DEBUG]
 
     // cuDNN stream check needs to be moved here to support dummy kernel calls with
     // null streams for sizing the cuDNN workspace.
@@ -1153,11 +1152,14 @@ void fused_attn_fp8_fwd(const FusedAttnConfig& cfg, const Tensor* input_Q, const
 
   size_t workspace_size = 0;
 
+  FusedAttnConfig graph_cfg = cfg;
+  graph_cfg.derive();
+
   NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
   if ((qkv_format == NVTE_QKV_Format::NVTE_BSHD) || (qkv_format == NVTE_QKV_Format::NVTE_SBHD) ||
       (qkv_format == NVTE_QKV_Format::NVTE_BHSD)) {
     fused_attn::fused_attn_fp8_fwd_impl(
-        cfg, devPtrQ, devPtrK, devPtrV, devPtrSoftmaxOffset, devPtrM, devPtrO, devPtrDescaleQ,
+        graph_cfg, devPtrQ, devPtrK, devPtrV, devPtrSoftmaxOffset, devPtrM, devPtrO, devPtrDescaleQ,
         devPtrDescaleK, devPtrDescaleV, devPtrDescaleS, devPtrScaleS, devPtrScaleO, devPtrAmaxO,
         devPtrAmaxS, devPtrcuSeqlensQ, devPtrcuSeqlensKV, devPtrDropoutSeed, devPtrDropoutOffset,
         workspace->data.dptr, &workspace_size, stream, handle);
@@ -1265,15 +1267,18 @@ void fused_attn_fp8_bwd(const FusedAttnConfig& cfg, const Tensor* input_Q, const
 
   size_t workspace_size = 0;
 
+  FusedAttnConfig graph_cfg = cfg;
+  graph_cfg.derive();
+
   NVTE_QKV_Format dqkv_format = nvte_get_qkv_format(dqkv_layout);
   if ((dqkv_format == NVTE_QKV_Format::NVTE_BSHD) || (dqkv_format == NVTE_QKV_Format::NVTE_SBHD) ||
       (dqkv_format == NVTE_QKV_Format::NVTE_BHSD)) {
     fused_attn::fused_attn_fp8_bwd_impl(
-        cfg, devPtrQ, devPtrK, devPtrV, devPtrM, devPtrO, devPtrdO, devPtrSoftmaxOffset, devPtrdQ,
-        devPtrdK, devPtrdV, devPtrdSoftmaxOffset, devPtrDescaleQ, devPtrDescaleK, devPtrDescaleV,
-        devPtrDescaleO, devPtrDescaledO, devPtrDescaleS, devPtrDescaledP, devPtrScaleS,
-        devPtrScaledP, devPtrScaledQ, devPtrScaledK, devPtrScaledV, devPtrAmaxdP, devPtrAmaxdQ,
-        devPtrAmaxdK, devPtrAmaxdV, devPtrQ_t, devPtrK_t, devPtrdO_f16, devPtrdO_t,
+        graph_cfg, devPtrQ, devPtrK, devPtrV, devPtrM, devPtrO, devPtrdO, devPtrSoftmaxOffset,
+        devPtrdQ, devPtrdK, devPtrdV, devPtrdSoftmaxOffset, devPtrDescaleQ, devPtrDescaleK,
+        devPtrDescaleV, devPtrDescaleO, devPtrDescaledO, devPtrDescaleS, devPtrDescaledP,
+        devPtrScaleS, devPtrScaledP, devPtrScaledQ, devPtrScaledK, devPtrScaledV, devPtrAmaxdP,
+        devPtrAmaxdQ, devPtrAmaxdK, devPtrAmaxdV, devPtrQ_t, devPtrK_t, devPtrdO_f16, devPtrdO_t,
         devPtrDescaleQ_t, devPtrDescaleK_t, devPtrDescaledO_t, devPtrcuSeqlensQ, devPtrcuSeqlensKV,
         devPtrDropoutSeed, devPtrDropoutOffset, workspace->data.dptr, &workspace_size, stream,
         handle);
@@ -1295,10 +1300,13 @@ void fused_attn_fp8_bwd(const FusedAttnConfig& cfg, const Tensor* input_Q, const
 }
 
 std::string is_supported_fp8_fwd(const FusedAttnConfig& cfg, cudnnHandle_t handle) {
+  FusedAttnConfig graph_cfg = cfg;
+  graph_cfg.derive();
+
   size_t workspace_size = 0;
   try {
     fused_attn::fused_attn_fp8_fwd_impl(
-        cfg,
+        graph_cfg,
         /*devPtrQ=*/nullptr, /*devPtrK=*/nullptr, /*devPtrV=*/nullptr,
         /*devPtrSoftmaxOffset=*/nullptr, /*devPtrM=*/nullptr, /*devPtrO=*/nullptr,
         /*devPtrDescaleQ=*/nullptr, /*devPtrDescaleK=*/nullptr, /*devPtrDescaleV=*/nullptr,
@@ -1317,10 +1325,13 @@ std::string is_supported_fp8_fwd(const FusedAttnConfig& cfg, cudnnHandle_t handl
 }
 
 std::string is_supported_fp8_bwd(const FusedAttnConfig& cfg, cudnnHandle_t handle) {
+  FusedAttnConfig graph_cfg = cfg;
+  graph_cfg.derive();
+
   size_t workspace_size = 0;
   try {
     fused_attn::fused_attn_fp8_bwd_impl(
-        cfg,
+        graph_cfg,
         /*devPtrQ=*/nullptr, /*devPtrK=*/nullptr, /*devPtrV=*/nullptr, /*devPtrM=*/nullptr,
         /*devPtrO=*/nullptr, /*devPtrdO=*/nullptr, /*devPtrSoftmaxOffset=*/nullptr,
         /*devPtrdQ=*/nullptr, /*devPtrdK=*/nullptr, /*devPtrdV=*/nullptr,

@@ -78,7 +78,7 @@ void FusedAttnConfig::derive() {
   }
 }
 
-FusedAttnConfig FusedAttnConfig::make_cache_key(bool is_forward) const {
+FusedAttnConfig FusedAttnConfig::make_cache_key() const {
   FusedAttnConfig cache_cfg = *this;
 
   const int64_t s_q = static_cast<int64_t>(cache_cfg.max_seqlen_q);
@@ -139,6 +139,7 @@ FusedAttnConfig FusedAttnConfig::make_cache_key(bool is_forward) const {
 FusedAttnConfig FusedAttnFwdParams::make_config() const {
   const FusedAttnFwdParams &params = *this;
   FusedAttnConfig cfg{};
+  cfg.is_forward = true;
   cfg.is_training = params.is_training;
   cfg.deterministic = false;
   cfg.cuda_graph = params.cuda_graph;

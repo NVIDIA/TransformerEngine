@@ -17,6 +17,7 @@
 #include "../util/cuda_runtime.h"
 #include "../util/system.h"
 #include "fused_attn_f16_arbitrary_seqlen.h"
+#include "graph_debug.h"  // [GRAPH-DEBUG]
 #include "utils.h"
 
 #define Q_ID 1
@@ -61,12 +62,12 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       get_cudnn_fe_dtype(static_cast<DType>(cfg.qkv_dtype));
 
   int64_t b = static_cast<int64_t>(cfg.batch_size);
-  int64_t h = static_cast<int64_t>(cfg.num_attn_heads);
-  int64_t hg = static_cast<int64_t>(cfg.num_gqa_groups);
+  const int64_t h = static_cast<int64_t>(cfg.num_attn_heads);
+  const int64_t hg = static_cast<int64_t>(cfg.num_gqa_groups);
   int64_t s_q = static_cast<int64_t>(cfg.max_seqlen_q);
   int64_t s_kv = static_cast<int64_t>(cfg.max_seqlen_kv);
-  int64_t d_qk = static_cast<int64_t>(cfg.head_dim_qk);
-  int64_t d_v = static_cast<int64_t>(cfg.head_dim_v);
+  const int64_t d_qk = static_cast<int64_t>(cfg.head_dim_qk);
+  const int64_t d_v = static_cast<int64_t>(cfg.head_dim_v);
   int64_t bucketed_batch_size = static_cast<int64_t>(cfg.bucketed_batch_size);
   int64_t bucketed_num_tokens_q = static_cast<int64_t>(cfg.bucketed_num_tokens_q);
   int64_t bucketed_num_tokens_kv = static_cast<int64_t>(cfg.bucketed_num_tokens_kv);
@@ -142,7 +143,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
 
   const DType ragged_offset_type = cudnn_runtime_version >= 90500 ? DType::kInt64 : DType::kInt32;
   bool generate_stats = true;  // Always return stats
-  const FusedAttnConfig cache_cfg = cfg.make_cache_key(/*is_forward=*/true);
+  const FusedAttnConfig cache_cfg = cfg.make_cache_key();
   try {
     namespace fe = cudnn_frontend;
     using graph_and_tensors =
@@ -267,9 +268,8 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       }
       if (cudnn_runtime_version >= 90600 && window_size_right != -1) {
         sdpa_options.set_diagonal_band_right_bound(window_size_right);
-      } else if (is_causal || is_bottom_right) {
-        // Preferred replacement for the deprecated set_causal_mask[_bottom_right]: causal
-        // masking = diagonal alignment (set above) + a right band bound of 0.
+      }
+      if (is_causal || is_bottom_right) {
         sdpa_options.set_diagonal_band_right_bound(0);
       }
 
@@ -418,6 +418,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                          softmax_offset_tuple, padding_tuple, page_table_tuple, offset_qo_tuple,
                          offset_kv_tuple, offset_s_tuple, dropout_tuple);
       cache.insert({descriptor, return_tuple});
+      fused_attn_graph_debug::note_fwd_build();  // [GRAPH-DEBUG]
 
       return return_tuple;
     };
@@ -448,6 +449,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
           plan_workspace_size + actual_seqlen_workspace_size + seqlen_offsets_workspace_size;
       return;
     }
+    fused_attn_graph_debug::note_fwd_exec();  // [GRAPH-DEBUG]
 
     // cuDNN stream check needs to be moved here to support dummy kernel calls with
     // null streams for sizing the cuDNN workspace.
@@ -557,12 +559,12 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       get_cudnn_fe_dtype(static_cast<DType>(cfg.qkv_dtype));
 
   int64_t b = static_cast<int64_t>(cfg.batch_size);
-  int64_t h = static_cast<int64_t>(cfg.num_attn_heads);
-  int64_t hg = static_cast<int64_t>(cfg.num_gqa_groups);
+  const int64_t h = static_cast<int64_t>(cfg.num_attn_heads);
+  const int64_t hg = static_cast<int64_t>(cfg.num_gqa_groups);
   int64_t s_q = static_cast<int64_t>(cfg.max_seqlen_q);
   int64_t s_kv = static_cast<int64_t>(cfg.max_seqlen_kv);
-  int64_t d_qk = static_cast<int64_t>(cfg.head_dim_qk);
-  int64_t d_v = static_cast<int64_t>(cfg.head_dim_v);
+  const int64_t d_qk = static_cast<int64_t>(cfg.head_dim_qk);
+  const int64_t d_v = static_cast<int64_t>(cfg.head_dim_v);
   int64_t bucketed_batch_size = static_cast<int64_t>(cfg.bucketed_batch_size);
   int64_t bucketed_num_tokens_q = static_cast<int64_t>(cfg.bucketed_num_tokens_q);
   int64_t bucketed_num_tokens_kv = static_cast<int64_t>(cfg.bucketed_num_tokens_kv);
@@ -625,7 +627,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
   // We choose between 32-bit and 64-bit offsets depending on need.
   // This allows us to support older cuDNN runtimes gracefully.
   const DType ragged_offset_type = cudnn_runtime_version >= 90500 ? DType::kInt64 : DType::kInt32;
-  const FusedAttnConfig cache_cfg = cfg.make_cache_key(/*is_forward=*/false);
+  const FusedAttnConfig cache_cfg = cfg.make_cache_key();
 
   try {
     namespace fe = cudnn_frontend;
@@ -788,9 +790,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       }
       if (cudnn_runtime_version >= 90600 && window_size_right != -1) {
         sdpa_backward_options.set_diagonal_band_right_bound(window_size_right);
-      } else if (is_causal || is_bottom_right) {
-        // Preferred replacement for the deprecated set_causal_mask[_bottom_right]: causal
-        // masking = diagonal alignment (set above) + a right band bound of 0.
+      }
+      if (is_causal || is_bottom_right) {
         sdpa_backward_options.set_diagonal_band_right_bound(0);
       }
 
@@ -913,6 +914,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                          softmax_offset_tuple, padding_tuple, offset_qo_tuple,
                                          offset_kv_tuple, offset_s_tuple, dropout_tuple);
       cache.insert({descriptor, return_tuple});
+      fused_attn_graph_debug::note_bwd_build();  // [GRAPH-DEBUG]
 
       return return_tuple;
     };
@@ -943,6 +945,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
           plan_workspace_size + actual_seqlen_workspace_size + seqlen_offsets_workspace_size;
       return;
     }
+    fused_attn_graph_debug::note_bwd_exec();  // [GRAPH-DEBUG]
 
     // cuDNN stream check needs to be moved here to support dummy kernel calls with
     // null streams for sizing the cuDNN workspace.

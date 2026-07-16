@@ -340,7 +340,7 @@ class FusedAttentionParams:
     Attention parameters used by the `FusedAttention` backend.
     """
 
-    # basic attention knobs
+    # basic attention settings
     is_training: bool = True
     deterministic: bool = False
     cuda_graph: bool = False
@@ -355,13 +355,13 @@ class FusedAttentionParams:
     dropout: float = 0.0
     attn_scale: float = 1.0
 
-    # data types
+    # tensor types
     qkv_dtype: DType = DType.kBFloat16
     o_dtype: DType = DType.kBFloat16
     do_dtype: DType = DType.kBFloat16
     dqkv_dtype: DType = DType.kBFloat16
 
-    # data and scale layout
+    # tensor layouts
     qkv_layout: tex.NVTE_QKV_Layout = tex.NVTE_QKV_Layout.NVTE_QKV_Layout_NOT_SET
     o_format: tex.NVTE_QKV_Format = tex.NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET
     do_format: tex.NVTE_QKV_Format = tex.NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET
@@ -1429,8 +1429,9 @@ def get_attention_backend(
             fu_core_attention_bias_shape_type = "111s" if sq == 1 and max_seqlen_q != 1 else "11ss"
         else:
             raise ValueError(
-                f"core_attention_bias tensor must be in one of "
-                "{"bhss", "1hss", "b1ss", "11ss", "111s"} shapes. Found (b,h,sq,skv) = ({b},{h},{sq},{_skv})"
+                "core_attention_bias tensor must be in one of "
+                f'{{"bhss", "1hss", "b1ss", "11ss", "111s"}} shapes. '
+                f"Found (b,h,sq,skv) = ({b},{h},{sq},{_skv})"
             )
     if (
         use_fused_attention
@@ -1503,6 +1504,7 @@ def get_attention_backend(
             softmax_type=SoftmaxType[softmax_type],
             scaling_mode=scaling_mode,
             dropout=attention_dropout,
+            attn_scale=softmax_scale,
             qkv_dtype=qkv_type,
             o_dtype=o_type,
             do_dtype=do_type,
@@ -1513,7 +1515,6 @@ def get_attention_backend(
             dqkv_layout=QKVLayout[dqkv_layout],
             qkv_scale_inv_format=QKVFormat[qkv_scale_inv_format],
             do_scale_inv_format=QKVFormat[do_scale_inv_format],
-            attn_scale=softmax_scale,
             batch_size=batch_size,
             num_attn_heads=num_heads,
             num_gqa_groups=num_gqa_groups,

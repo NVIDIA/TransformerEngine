@@ -313,18 +313,17 @@ std::vector<py::object> fused_attn_fwd(
       .set_window_size_left(window_size[0])
       .set_window_size_right(window_size[1])
       .set_bottom_right_diagonal(bottom_right_diagonal)
+      .set_workspace(workspace.data())
       .set_stream(at::cuda::getCurrentCUDAStream());
 
   // populate tensors with appropriate shapes and dtypes
-  NVTE_SCOPED_GIL_RELEASE({
-    params.set_workspace(workspace.data());
-    nvte_fused_attn_fwd_v2(params);
-  });
+  NVTE_SCOPED_GIL_RELEASE({ nvte_fused_attn_fwd_v2(params); });
 
   // allocate memory for workspace and auxiliary output tensors
   auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
   workspace =
       makeTransformerEngineTensor(workspace_data.data_ptr(), workspace.shape(), workspace.dtype());
+  params.set_workspace(workspace.data());
 
   // output_tensors = [O, nvte_aux_tensor_pack.tensors]
   std::vector<py::object> output_tensors;
@@ -367,10 +366,7 @@ std::vector<py::object> fused_attn_fwd(
   }
 
   // execute the kernel
-  NVTE_SCOPED_GIL_RELEASE({
-    params.set_workspace(workspace.data());
-    nvte_fused_attn_fwd_v2(params);
-  });
+  NVTE_SCOPED_GIL_RELEASE({ nvte_fused_attn_fwd_v2(params); });
 
   // destroy tensor wrappers, but not allocated memory
   nvte_tensor_pack_destroy(&nvte_aux_tensor_pack);
@@ -668,24 +664,20 @@ std::vector<py::object> fused_attn_bwd(
       .set_bottom_right_diagonal(bottom_right_diagonal)
       .set_deterministic(deterministic)
       .set_cuda_graph(cuda_graph)
+      .set_workspace(workspace.data())
       .set_stream(at::cuda::getCurrentCUDAStream());
 
   // populate tensors with appropriate shapes and dtypes
-  NVTE_SCOPED_GIL_RELEASE({
-    params.set_workspace(workspace.data());
-    nvte_fused_attn_bwd_v2(params);
-  });
+  NVTE_SCOPED_GIL_RELEASE({ nvte_fused_attn_bwd_v2(params); });
 
   // allocate memory for workspace
   auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
   workspace =
       makeTransformerEngineTensor(workspace_data.data_ptr(), workspace.shape(), workspace.dtype());
+  params.set_workspace(workspace.data());
 
   // execute kernel
-  NVTE_SCOPED_GIL_RELEASE({
-    params.set_workspace(workspace.data());
-    nvte_fused_attn_bwd_v2(params);
-  });
+  NVTE_SCOPED_GIL_RELEASE({ nvte_fused_attn_bwd_v2(params); });
 
   // destroy tensor wrappers
   nvte_tensor_pack_destroy(&nvte_aux_tensor_pack);

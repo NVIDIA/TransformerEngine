@@ -13,7 +13,6 @@ import jax
 import jax.numpy as jnp
 
 from transformer_engine_jax import NVTE_Bias_Type
-from transformer_engine_jax import NVTE_Fused_Attn_Backend
 from transformer_engine_jax import NVTE_Mask_Type
 from transformer_engine_jax import NVTE_QKV_Layout
 from transformer_engine_jax import NVTE_QKV_Format
@@ -342,13 +341,17 @@ def is_fused_attn_kernel_available(
     head_dim_v,
     window_size: Optional[Tuple[int, int]] = None,
     bottom_right_diagonal: Optional[bool] = None,
-    return_reason: bool = False,
+    bias_batch: Optional[int] = None,
+    bias_heads: Optional[int] = None,
+    bias_seqlen_q: Optional[int] = None,
+    bias_seqlen_kv: Optional[int] = None,
 ):
     """
     To check whether the fused attention kernel is supported.
 
-    When ``return_reason`` is ``True``, returns ``(available, message)`` where ``message`` is
-    the diagnostic string for the reason why the fused attention kernel is not supported (empty on success).
+    For a ``POST_SCALE_BIAS`` config, pass the bias broadcast shape via ``bias_batch``,
+    ``bias_heads``, ``bias_seqlen_q``, and ``bias_seqlen_kv`` so the backend probe matches the
+    graph used at execution time.
     """
     window_size_tuple = (-1, -1) if window_size is None else window_size
 
@@ -376,13 +379,13 @@ def is_fused_attn_kernel_available(
             head_dim_v,
             window_size_tuple,
             bottom_right,
+            bias_batch=bias_batch,
+            bias_heads=bias_heads,
+            bias_seqlen_q=bias_seqlen_q,
+            bias_seqlen_kv=bias_seqlen_kv,
         )
 
     helper = make_helper(attn_mask_type)
-    if return_reason:
-        backend, message = helper.get_fused_attn_backend()
-        available = backend != NVTE_Fused_Attn_Backend.NVTE_No_Backend
-        return available, message
     return helper.is_fused_attn_kernel_available()
 
 

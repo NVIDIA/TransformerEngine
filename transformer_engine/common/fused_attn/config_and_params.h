@@ -19,7 +19,7 @@
 namespace transformer_engine {
 
 struct FusedAttnConfig {
-  // basic attention knobs
+  // basic attention settings
   bool is_training = true;
   bool deterministic = false;
   bool cuda_graph = false;
@@ -34,13 +34,13 @@ struct FusedAttnConfig {
   float dropout = 0.0f;
   float attn_scale = 1.0f;
 
-  // data types
+  // tensor types
   NVTEDType qkv_dtype = kNVTEBFloat16;
   NVTEDType o_dtype = kNVTEBFloat16;
   NVTEDType do_dtype = kNVTEBFloat16;
   NVTEDType dqkv_dtype = kNVTEBFloat16;
 
-  // data and scale layout
+  // tensor layouts
   NVTE_QKV_Layout qkv_layout = NVTE_QKV_Layout_NOT_SET;
   NVTE_QKV_Format o_format = NVTE_QKV_Format_NOT_SET;
   NVTE_QKV_Format do_format = NVTE_QKV_Format_NOT_SET;
@@ -64,6 +64,10 @@ struct FusedAttnConfig {
   size_t bucketed_num_tokens_q = 0;
   size_t bucketed_num_tokens_kv = 0;
 
+  // query control (internal only, excluded from attribute serialization, operator<,
+  // and the graph cache key since it is not a property of the cuDNN graph)
+  bool is_forward = false;
+
   // paged KV dimensions
   size_t num_pages_k = 0;
   size_t num_pages_v = 0;
@@ -79,7 +83,7 @@ struct FusedAttnConfig {
   size_t bias_seqlen_kv = 0;
 
   static constexpr size_t attr_sizes[] = {
-      // basic attention knobs
+      // basic attention settings
       sizeof(uint8_t),            // is_training
       sizeof(uint8_t),            // deterministic
       sizeof(uint8_t),            // cuda_graph
@@ -93,12 +97,12 @@ struct FusedAttnConfig {
       sizeof(NVTEScalingMode),    // scaling_mode
       sizeof(float),              // dropout
       sizeof(float),              // attn_scale
-      // data types
+      // tensor types
       sizeof(NVTEDType),  // qkv_dtype
       sizeof(NVTEDType),  // o_dtype
       sizeof(NVTEDType),  // do_dtype
       sizeof(NVTEDType),  // dqkv_dtype
-      // data and scale layout
+      // tensor layouts
       sizeof(NVTE_QKV_Layout),  // qkv_layout
       sizeof(NVTE_QKV_Format),  // o_format
       sizeof(NVTE_QKV_Format),  // do_format
@@ -162,8 +166,9 @@ struct FusedAttnConfig {
   // Return a normalized copy of this config to be used as a key for the cuDNN graph cache.
   // It drops fields that are invariant (e.g. batch_size) or irrelevant (e.g. dO/dQKV dtypes
   // and `deterministic` for forward, and `return_max_logit` for backward) to the corresponding graph.
-  // This helps avoid redundant graph builds and cache misses.
-  FusedAttnConfig make_cache_key(bool is_forward) const;
+  // This helps avoid redundant graph builds and cache misses. Forward vs. backward is taken from
+  // the `is_forward` member.
+  FusedAttnConfig make_cache_key() const;
 };
 
 inline const FusedAttnConfig *get_fused_attn_config(NVTEFusedAttnConfig config) {

@@ -5,6 +5,7 @@
 Wrapper module for Transformer related layers with FP8 support.
 """
 import functools
+import operator
 from enum import Enum
 from math import sqrt
 import os
@@ -20,6 +21,7 @@ from jax import nn as jax_nn
 from jax import random as jax_random
 from jax import lax, vmap
 from jax.ad_checkpoint import checkpoint_name
+from transformer_engine_jax import NVTE_Fused_Attn_Backend
 
 from .module import DenseGeneral, LayerNormDenseGeneral, LayerNormMLP
 from .module import LayerNorm, Softmax
@@ -30,9 +32,10 @@ from ..attention import (
     QKVLayout,
     SequenceDescriptor,
 )
-from ..attention import is_fused_attn_kernel_available, make_swa_mask, canonicalize_attn_mask_type
+from ..attention import make_swa_mask, canonicalize_attn_mask_type
 from ..attention import fused_attn
 from ..attention import CPStrategy
+from ..cpp_extensions import FusedAttnHelper
 from ..softmax import SoftmaxFusionType
 from ..sharding import num_of_devices
 from ..sharding import get_sharding_map_logic_axis_to_mesh_axis
@@ -797,7 +800,13 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             if not enable_fused_attn:
                 raise ValueError("score_mod requires fused attention, but NVTE_FUSED_ATTN=0.")
         kernel_qkv_layout = qkv_layout.to_separate() if score_mod_requested else qkv_layout
-        has_fused_attn_kernel, fused_attn_reject_reason = is_fused_attn_kernel_available(
+        # Thread the POST_SCALE_BIAS broadcast shape through so this pre-check probes the same
+        # cuDNN graph as the primitive does at trace time (see FusedAttnFwdPrimitive.abstract).
+        bias_batch = bias_heads = bias_seqlen_q = bias_seqlen_kv = None
+        if attn_bias_type == AttnBiasType.POST_SCALE_BIAS:
+            *bias_batch_shape, bias_heads, bias_seqlen_q, bias_seqlen_kv = bias.shape
+            bias_batch = functools.reduce(operator.mul, bias_batch_shape)
+        fused_attn_helper = FusedAttnHelper(
             # This needs to be fixed: TE-Jax has historically correlated training mode
             # with deterministic mode.
             not deterministic,
@@ -817,9 +826,15 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             seqlen_kv,
             head_dim_qk,
             head_dim_v,
-            self.window_size,
-            return_reason=True,
+            (-1, -1) if self.window_size is None else self.window_size,
+            attn_mask_type.is_bottom_right(),
+            bias_batch=bias_batch,
+            bias_heads=bias_heads,
+            bias_seqlen_q=bias_seqlen_q,
+            bias_seqlen_kv=bias_seqlen_kv,
         )
+        fused_attn_backend, fused_attn_reject_reason = fused_attn_helper.get_fused_attn_backend()
+        has_fused_attn_kernel = fused_attn_backend != NVTE_Fused_Attn_Backend.NVTE_No_Backend
         if score_mod_requested and not has_fused_attn_kernel:
             raise ValueError(
                 "score_mod requires fused attention, but no fused attention kernel is available."

@@ -299,7 +299,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig confi
       set_message(message, std::move(fwd_reason));
       return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
     }
-    if (cfg.is_training) {
+    if (cfg.is_training && !cfg.is_forward) {
       std::string bwd_reason = is_supported_fp8_bwd(cfg, handle);
       if (!bwd_reason.empty()) {
         set_message(message, std::move(bwd_reason));
@@ -324,7 +324,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig confi
       set_message(message, std::move(fwd_reason));
       return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
     }
-    if (cfg.is_training) {
+    if (cfg.is_training && !cfg.is_forward) {
       std::string bwd_reason = is_supported_f16_bwd(cfg, handle);
       if (!bwd_reason.empty()) {
         set_message(message, std::move(bwd_reason));
@@ -353,7 +353,6 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   cfg.bias_type = bias_type;
   cfg.attn_mask_type = attn_mask_type;
   cfg.softmax_type = softmax_type;
-  cfg.attn_scale = attn_scale;
   cfg.dropout = dropout;
   cfg.max_seqlen_q = max_seqlen_q;
   cfg.max_seqlen_kv = max_seqlen_kv;

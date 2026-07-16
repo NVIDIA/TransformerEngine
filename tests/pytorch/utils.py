@@ -361,9 +361,15 @@ def get_available_attention_backends(
         if config.bias_shape == "bhss":
             alibi_slopes_shape = [config.batch_size, config.num_heads]
 
-    core_attention_bias_shape = (
-        config.bias_shape if config.attn_bias_type == "post_scale_bias" else None
-    )
+    core_attention_bias_shape = None
+    if config.attn_bias_type == "post_scale_bias":
+        b_dim, h_dim, sq_dim, skv_dim = config.bias_shape
+        core_attention_bias_shape = (
+            config.batch_size if b_dim == "b" else 1,
+            config.num_heads if h_dim == "h" else 1,
+            config.max_seqlen_q if sq_dim == "s" else 1,
+            config.max_seqlen_kv if skv_dim == "s" else 1,
+        )
     core_attention_bias_requires_grad = False
     # d=256 is supported by cuDNN 9.0+ for inference but not training
     if (
@@ -372,7 +378,7 @@ def get_available_attention_backends(
         and config.head_dim_v <= 128
     ):
         # TODO(KshitijLakhani): Remove this guard when cuDNN starts support dbias calculation for bias shape 111s
-        if core_attention_bias_shape != "111s":
+        if config.bias_shape != "111s":
             core_attention_bias_requires_grad = True
 
     fused_attn_backends = []
