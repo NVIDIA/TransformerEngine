@@ -23,7 +23,9 @@ from transformer_engine_jax import (
     get_num_compute_streams,
     JAXX_Collective_Op,
     get_device_compute_capability,
+    nvte_built_with_cublasmp,
     initialize_cgemm_communicator,
+    is_collective_gemm_with_cublasmp,
     get_cgemm_num_max_streams,
     get_grouped_gemm_setup_workspace_size,
 )
@@ -245,6 +247,7 @@ def collective_gemm_bootstrap(
     num_sm_for_communication=2,
     use_ce=True,
     aggregate_all_gather=False,
+    use_cublasmp=False,
 ):
     """Initialize NCCL communicators for Collective GEMM operations.
 
@@ -283,6 +286,9 @@ def collective_gemm_bootstrap(
             Can improve performance by offloading memory operations. Default: True.
         aggregate_all_gather (bool, optional): Aggregate multiple small all-gather operations
             into larger ones for better efficiency. Default: False.
+        use_cublasmp (bool, optional): Use cuBLASMp backend for Collective GEMM overlap.
+            Requires Transformer Engine to be compiled with NVTE_WITH_CUBLASMP=1.
+            Default: False.
 
     Raises:
         AssertionError: If num_total_devices is not divisible by num_devices_per_process,
@@ -318,6 +324,24 @@ def collective_gemm_bootstrap(
         This function must be called after JAX distributed initialization
         and before any collective GEMM operations. Each process should call
         this function with its own unique process_id.
+
+        With the cuBLASMp backend, XLA command buffer capture must include
+        ``COLLECTIVES`` so that the NCCL calls inside cuBLASMp end up in the
+        same captured buffer as the CollectiveGemm custom call. Otherwise the
+        capture aborts with ``CUDA_ERROR_STREAM_CAPTURE_INVALIDATED``. Set the
+        flag before ``jax.distributed.initialize()``:
+
+            import os
+            os.environ["XLA_FLAGS"] = (
+                os.environ.get("XLA_FLAGS", "")
+                + " --xla_gpu_enable_command_buffer=+COLLECTIVES"
+            )
+
+        This is not required for non-overlapped collective GEMM (when
+        ``collective_op`` is ``CollectiveOp.NONE`` and JAX/XLA handles the
+        collective via its own graph-level optimization), nor for the
+        Userbuffers backend, which uses CUDA multicast APIs and async
+        memcpy on symmetric memory pointers that XLA already captures.
     """
 
     if not (num_devices_per_process == 1 and jax.local_device_count() == 1):
@@ -329,6 +353,12 @@ def collective_gemm_bootstrap(
         )
     if not 0 <= process_id < num_total_devices:
         raise ValueError(f"Invalid process_id={process_id}")
+    if use_cublasmp and not nvte_built_with_cublasmp():
+        raise RuntimeError(
+            "Collective GEMM with cuBLASMp backend was requested, but Transformer Engine "
+            "was not built with cuBLASMp support. Rebuild with NVTE_WITH_CUBLASMP=1 or "
+            "disable use_cublasmp."
+        )
     initialize_cgemm_communicator(
         num_total_devices,
         num_devices_per_process,
@@ -340,6 +370,7 @@ def collective_gemm_bootstrap(
         num_sm_for_communication,
         use_ce,
         aggregate_all_gather,
+        use_cublasmp,
     )
 
 
@@ -629,7 +660,11 @@ class GemmPrimitive(BasePrimitive):
         if scaling_mode.is_nvfp4_scaling:
             workspace_size += lhs_scale_inv.size + rhs_scale_inv.size
         if not collective_op.is_none:
-            workspace_size *= get_cgemm_num_max_streams()
+            if is_collective_gemm_with_cublasmp():
+                # cuBlasMp manages its own cuBlasLt workspaces per stream
+                workspace_size = 0
+            else:
+                workspace_size *= get_cgemm_num_max_streams()
         # cuBLAS workspace ptr must be 256 bytes aligned but JAX buffers are not
         # necessarily 256 bytes aligned, we add some padding to ensure alignment.
         workspace_size += 256
@@ -835,10 +870,10 @@ class GemmPrimitive(BasePrimitive):
         contracting_dims,
         scaling_mode,
         use_split_accumulator,
-        collective_op,
         transpose_batch_sequence,
         sequence_dim,
         is_outer,
+        collective_op,
     ):
         del transpose_batch_sequence, sequence_dim, is_outer
         if GemmPrimitive.outer_primitive is None:
@@ -1021,9 +1056,9 @@ class GemmPrimitive(BasePrimitive):
         lhs_scale_specs = rhs_scale_specs = (None,)
         if scaling_mode.is_1d_block_scaling():
             rhs_scale_specs = rhs_specs
-            # Set the seq spec to None to trigger AG the scales as TE/Common CGEMM does not handle
-            # scale collecting yet
-            if collective_op.is_all_gather:
+            # Set the seq spec to None to trigger AG the scales as TE/Common CGEMM w/ Userbuffers
+            # backend does not handle scale collecting yet (cuBLASMp backend does)
+            if collective_op.is_all_gather and not is_collective_gemm_with_cublasmp():
                 lhs_scale_specs = tuple(
                     None if i == sequence_dim else s for i, s in enumerate(lhs_specs)
                 )
@@ -2294,7 +2329,27 @@ def gemm(
     transpose_batch_sequence: bool, default = False
         Transpose the batch and sequence dimensions of the input tensor.
     collective_op: CollectiveOp, default = CollectiveOp.NONE
-        Collective operation type for collective GEMM.
+        Collective operation type for collective GEMM. When set to
+        ``CollectiveOp.ALL_GATHER`` or ``CollectiveOp.REDUCE_SCATTER``, the GEMM
+        is executed with communication overlap via the Userbuffers or cuBLASMp
+        backend (see :func:`collective_gemm_bootstrap`).
+
+        .. note::
+            Collective GEMM with communication overlap is captured into XLA
+            command buffers as a custom call. When executing with the cuBLASMp
+            backend, this captured graph spans NCCL collectives that XLA does not
+            include in command buffers by default, so add ``COLLECTIVES`` to the
+            enabled kinds before JAX initialization::
+
+                os.environ["XLA_FLAGS"] = (
+                    os.environ.get("XLA_FLAGS", "")
+                    + " --xla_gpu_enable_command_buffer=+COLLECTIVES"
+                )
+
+            Without this, capture aborts with
+            ``CUDA_ERROR_STREAM_CAPTURE_INVALIDATED``. Not required when
+            ``collective_op`` is ``CollectiveOp.NONE`` or when using the Userbuffers
+            backend instead of cuBLASMp.
 
     Returns
     -------

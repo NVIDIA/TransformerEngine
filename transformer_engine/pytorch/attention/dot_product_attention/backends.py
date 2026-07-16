@@ -53,6 +53,9 @@ from transformer_engine.pytorch.jit import no_torch_dynamo
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
     attn_forward_func_with_cp,
 )
+from transformer_engine.pytorch.attention.dot_product_attention.flex_attention import (
+    FusedAttentionWithScoreModFunc,
+)
 from transformer_engine.pytorch.attention.dot_product_attention.softmax import FusedScaleMaskSoftmax
 from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.cpu_offload import (
@@ -89,7 +92,6 @@ _flash_attn_fwd = None
 _flash_attn_bwd = None
 _flash_attn_varlen_fwd = None
 _flash_attn_varlen_bwd = None
-
 # Try to import Flash Attention v2
 try:
     fa_utils.version = PkgVersion(PkgVersion(get_pkg_version("flash-attn")).public)
@@ -1706,6 +1708,29 @@ class FusedAttnFunc(torch.autograd.Function):
             dq = dq[..., : d_out.shape[-1]]
             dk = dk[..., : d_out.shape[-1]]
             dv = dv[..., : d_out.shape[-1]]
+            # Zero-fill positions beyond cu_seqlens_*_padded[-1] in dQ/dK/dV for THD.
+            # Use Q's padded boundary for dQ and KV's padded boundary for dK/dV.
+            # Sync-free `arange + mask` so capture and eager paths run the same code.
+            _qkv_format = ctx.qkv_layout.split("_")[0].replace("3", "").replace("2", "")
+            if _qkv_format == "thd":
+                if (
+                    cu_seqlens_q_padded is not None
+                    and isinstance(dq, torch.Tensor)
+                    and dq.shape[0] > 0
+                ):
+                    q_pad_mask = (
+                        torch.arange(dq.shape[0], device=dq.device) >= cu_seqlens_q_padded[-1]
+                    )
+                    dq[q_pad_mask] = 0
+                if cu_seqlens_kv_padded is not None:
+                    kv_actual_t = cu_seqlens_kv_padded[-1]
+                    for d_tensor in (dk, dv):
+                        if isinstance(d_tensor, torch.Tensor) and d_tensor.shape[0] > 0:
+                            kv_pad_mask = (
+                                torch.arange(d_tensor.shape[0], device=d_tensor.device)
+                                >= kv_actual_t
+                            )
+                            d_tensor[kv_pad_mask] = 0
         else:
             with get_nvtx_range_context("FusedAttnFunc.backward"):
                 # get nominal data type of dq, dk, dv
@@ -1985,6 +2010,10 @@ class FusedAttention(torch.nn.Module):
         inference_params: Optional[InferenceParams] = None,
         softmax_offset: torch.Tensor = None,
         fp8_output: bool = False,
+        score_mod: Optional[Callable] = None,
+        score_mod_bprop: Optional[Callable] = None,
+        score_mod_tensors: Optional[Dict[str, torch.Tensor]] = None,
+        score_mod_bprop_tensors: Optional[Dict[str, torch.Tensor]] = None,
     ) -> torch.Tensor:
         """fused attention fprop"""
         assert (
@@ -2153,6 +2182,21 @@ class FusedAttention(torch.nn.Module):
                     layer_number=self.layer_number,
                     return_max_logit=self.return_max_logit,
                 )
+        elif score_mod is not None:
+            output = FusedAttentionWithScoreModFunc.apply(
+                self.training,
+                query_layer,
+                key_layer,
+                value_layer,
+                q_format,
+                kv_format,
+                self.softmax_scale,
+                score_mod,
+                score_mod_bprop,
+                score_mod_tensors,
+                score_mod_bprop_tensors,
+                self.deterministic,
+            )
         else:
             with self.attention_dropout_ctx():
                 output = FusedAttnFunc.apply(

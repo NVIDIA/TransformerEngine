@@ -7,10 +7,15 @@
 #ifndef TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_
 #define TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_
 
+#include <nccl.h>
+
+#include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <tuple>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -29,19 +34,21 @@ namespace transformer_engine::pytorch {
 std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fwd(
     at::Tensor logits, int topk, bool use_pre_softmax, std::optional<int> num_groups,
     std::optional<int> group_topk, std::optional<float> scaling_factor, std::string score_function,
-    std::optional<at::Tensor> expert_bias);
+    std::optional<at::Tensor> expert_bias,
+    int routing_map_format = static_cast<int>(NVTE_ROUTING_MAP_FORMAT_BYTEMAP),
+    std::optional<at::Tensor> topk_indices = std::nullopt);
 
-void fused_topk_with_score_function_bwd(int num_tokens, int num_experts, at::Tensor routing_map,
-                                        at::Tensor intermediate_output, at::Tensor grad_probs,
-                                        at::Tensor grad_logits, int topk, bool use_pre_softmax,
-                                        std::optional<float> scaling_factor,
-                                        std::string score_function);
+void fused_topk_with_score_function_bwd(
+    at::Tensor routing_map, at::Tensor intermediate_output, at::Tensor grad_probs,
+    at::Tensor grad_logits, int topk, bool use_pre_softmax, std::optional<float> scaling_factor,
+    std::string score_function, bool use_dense_indices = false,
+    int routing_map_format = static_cast<int>(NVTE_ROUTING_MAP_FORMAT_BYTEMAP));
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_score_for_moe_aux_loss_fwd(
-    at::Tensor logits, int topk, std::string score_function);
+    at::Tensor logits, int topk, std::string score_function,
+    int routing_map_format = static_cast<int>(NVTE_ROUTING_MAP_FORMAT_BYTEMAP));
 
-void fused_score_for_moe_aux_loss_bwd(int num_tokens, int num_experts,
-                                      at::Tensor intermediate_output, at::Tensor grad_probs,
+void fused_score_for_moe_aux_loss_bwd(at::Tensor intermediate_output, at::Tensor grad_scores,
                                       at::Tensor grad_logits, int topk, std::string score_function);
 
 std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd(at::Tensor probs,
@@ -49,6 +56,10 @@ std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd(at::Tensor probs,
                                                           int total_num_tokens, int num_experts,
                                                           int num_rows, int num_cols, int topk,
                                                           float coeff);
+
+std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd_graph_safe(
+    at::Tensor probs, at::Tensor tokens_per_expert, at::Tensor total_num_tokens, int num_experts,
+    int num_rows, int num_cols, int topk, float coeff);
 
 at::Tensor fused_moe_aux_loss_bwd(at::Tensor Const_buf, at::Tensor tokens_per_expert, int num_rows,
                                   int num_cols, at::Tensor grad_aux_loss);
@@ -330,15 +341,31 @@ py::object create_empty_quantized_tensor(py::handle quantizer, const std::vector
 py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::object &output,
                     std::optional<at::Tensor> noop_flag);
 
+py::object nvfp4_quantize_with_amax(const at::Tensor &tensor, py::handle quantizer,
+                                    const at::Tensor &rowwise_amax,
+                                    const at::Tensor &columnwise_amax);
+
 py::object dequantize(const py::handle &input, DType otype);
 
 py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const size_t num_tensors,
-                          std::optional<at::Tensor> first_dims);
+                          std::optional<at::Tensor> first_dims, std::optional<at::Tensor> last_dims,
+                          std::optional<at::Tensor> tensor_offsets,
+                          std::optional<at::Tensor> noop_flag);
+
+py::object nvfp4_group_quantize_with_amax(const at::Tensor &tensor, py::handle quantizer,
+                                          const size_t num_tensors,
+                                          std::optional<at::Tensor> first_dims,
+                                          std::optional<at::Tensor> last_dims,
+                                          const at::Tensor &rowwise_amax,
+                                          const at::Tensor &columnwise_amax,
+                                          std::optional<at::Tensor> tensor_offsets);
 
 py::object group_dequantize(const py::handle &input, DType otype);
 
 py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
-                                const size_t num_tensors, std::optional<at::Tensor> first_dims);
+                                const size_t num_tensors, std::optional<at::Tensor> first_dims,
+                                std::optional<at::Tensor> last_dims,
+                                std::optional<at::Tensor> tensor_offsets);
 
 std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &tensor_list,
                                               std::vector<py::handle> quantizer_list);
@@ -485,13 +512,35 @@ size_t get_cublasLt_version();
 
 size_t get_cudnn_version();
 
-std::vector<at::Tensor> convert_host_pointers_to_tensor(
-    std::vector<std::vector<at::Tensor>> tensor_lists);
-
-std::tuple<at::Tensor, at::Tensor, at::Tensor> get_device_pointer_for_data_and_scales(
-    std::vector<at::Tensor> data_tensors, std::vector<at::Tensor> scale_tensors, bool swizzle,
-    bool rowwise, transformer_engine::DType data_dtype);
 at::Tensor splits_to_offsets(const at::Tensor &first_dims, int64_t logical_last_dim);
+std::tuple<at::Tensor, std::vector<at::Tensor>> splits_to_offsets_multi(
+    const at::Tensor &split_sizes, const c10::Device &device, const std::vector<int64_t> &strides,
+    const std::vector<bool> &include_leading_zero, const std::vector<at::ScalarType> &dtypes,
+    bool bulk_allocate_outputs);
+
+at::Tensor copy_data_ptrs_to_device(const std::vector<at::Tensor> &tensors,
+                                    const c10::Device &device);
+
+/***************************************************************************************************
+ * Experimental helpers for the fused grouped MLP
+ *
+ * These primarily exist to support cuDNN CuTe DSL grouped GEMM
+ * kernels. Since those are unstable and under active development,
+ * these helpers should also be considered unstable.
+ **************************************************************************************************/
+
+namespace grouped_mlp_experimental {
+
+// Prepare discrete weight tensors for the cuDNN CuTe DSL grouped GEMM
+// kernel by swizzling scales and copying data and scale pointers to
+// device. All tensors must share a uniform shape and `swizzle_type`
+// must be one of "mxfp8_rowwise", "mxfp8_columnwise", or "nvfp4".
+// Returns {data_ptrs_device, scale_ptrs_device, swizzled_scales_buffer}.
+std::tuple<at::Tensor, at::Tensor, at::Tensor> swizzle_scales_and_pack_ptrs_for_discrete_weights(
+    const std::vector<at::Tensor> &data_tensors, const std::vector<at::Tensor> &scale_tensors,
+    const std::string &swizzle_type, const c10::Device &device);
+
+}  // namespace grouped_mlp_experimental
 
 /***************************************************************************************************
  * Support THD format for Context Parallel
@@ -516,6 +565,16 @@ void thd_grad_correction(at::Tensor grad, const at::Tensor &grad_per_step,
 
 at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_tokens,
                                        int world_size, int rank);
+
+at::Tensor thd_sequence_order_to_cp_rank_order(const at::Tensor &inp, const at::Tensor &cu_seqlens,
+                                               int cp_size, int total_tokens);
+
+at::Tensor thd_cp_rank_order_to_sequence_order(const at::Tensor &inp, const at::Tensor &cu_seqlens,
+                                               int cp_size, int total_tokens);
+
+void thd_copy_valid_tokens_from_per_split_to_rank_local(at::Tensor out, const at::Tensor &inp,
+                                                        const at::Tensor &cu_seqlens_padded,
+                                                        const at::Tensor &cu_seqlens);
 
 /***************************************************************************************************
  * multi_tensor_* kernels
@@ -608,6 +667,42 @@ void inplace_multi_tensor_swizzle_scales_for_gemm_unchecked(std::vector<py::obje
 void grouped_swizzle_for_gemm(py::handle &tensor, bool rowwise, bool columnwise);
 
 /***************************************************************************************************
+ * Expert Parallelism
+ **************************************************************************************************/
+
+// Borrows torch's NCCL host comm (``comm_ptr`` from ``ProcessGroupNCCL._comm_ptr()``).
+// ``group_name`` is the PG name used by the symm-mem window resolver.
+// ``zero_copy`` is forwarded into ``NVTEEpGroupConfig.zero_copy``.
+void ep_initialize(uintptr_t comm_ptr, const std::string &group_name, int64_t num_experts,
+                   int64_t max_tokens_per_rank, int64_t max_recv_tokens_per_rank,
+                   int64_t hidden_dim, int64_t max_num_sms, pybind11::object max_token_dtype,
+                   bool zero_copy);
+
+void ep_finalize();
+
+// Returns the zero-copy mode captured at ep_initialize.
+bool ep_get_zero_copy();
+
+// Returns the handle_mem byte size for the given layer config.
+int64_t ep_handle_mem_size(int64_t top_k, int64_t dispatch_output_per_expert_alignment);
+
+void ep_prepare(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor token_counts, int64_t top_k,
+                int64_t dispatch_output_per_expert_alignment);
+
+void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
+                 at::Tensor topk_weights, at::Tensor recv_tokens, at::Tensor recv_topk_weights);
+
+void ep_combine(at::Tensor handle_mem, at::Tensor expert_out, at::Tensor result);
+
+void ep_dispatch_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor g_recv_topk_weights,
+                     at::Tensor grad_tokens, at::Tensor grad_topk_weights);
+
+void ep_combine_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor grad_expert_out);
+
+// Registers the EP pybind functions on `m`. Defined under NVTE_WITH_NCCL_EP.
+void register_ep_bindings(pybind11::module_ &m);
+
+/***************************************************************************************************
  * NVSHMEM APIs
  **************************************************************************************************/
 
@@ -646,10 +741,18 @@ void newton_schulz(int64_t ctx_ptr, int64_t m, int64_t n, at::Tensor x, int64_t 
  **************************************************************************************************/
 
 class CommOverlapHelper : torch::CustomClassHolder {
+ public:
+  // Shared ownership of an ncclComm_t. The deleter calls ncclCommDestroy when
+  // the last reference (held by the helper and/or any CommOverlap consumers)
+  // is released, so the communicator outlives whichever owner is destroyed
+  // first.
+  using NcclCommSharedPtr = std::shared_ptr<std::remove_pointer<ncclComm_t>::type>;
+
  private:
   bool initialized{false};
   bool backend_is_nccl{false};
-  std::map<std::string, c10d::ProcessGroup *> pgs;
+  std::map<std::string, c10d::ProcessGroup *> torch_pgs;
+  std::map<std::string, NcclCommSharedPtr> nccl_comms;
 
  public:
   int myrank = -1;
@@ -670,16 +773,32 @@ class CommOverlapHelper : torch::CustomClassHolder {
                     ExtComm comm);
 
   void ub_barrier(ExtComm comm);
+
+  NcclCommSharedPtr get_nccl_comm(std::string comm_name);
 };
 
 class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOverlapBase {
+ private:
+  // Keeps the cuBLASMp NCCL communicator alive for the lifetime of this
+  // instance, independent of the CommOverlapHelper that created it.
+  CommOverlapHelper::NcclCommSharedPtr _nccl_comm;
+
  public:
   CommOverlap(const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
-              CommOverlapHelper *helper, int tp_size, int num_splits = 3,
+              CommOverlapHelper *helper, int tp_size, int num_splits = 4,
               int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int comm_cga_size = 2,
               int gemm_priority = 0, int comm_priority = 0, int num_comm_sm = 16,
               bool set_sm_margin = true, bool atomic_gemm = false,
               bool rs_overlap_first_gemm = false);
+
+  // cuBLASMp variant. `comm_type`, `buffer_shape`, and `buffer_dtype` size
+  // the construction-time warmup matmul that primes cuBLASMp's lazy NCCL
+  // window registrations and workspace allocation so subsequent matmuls
+  // (including those captured in CUDA graphs) avoid the unsafe lazy paths.
+  CommOverlap(CommOverlapHelper *helper, int tp_rank, int tp_size,
+              transformer_engine::CommOverlapType comm_type,
+              const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
+              int num_comm_sm = 16, bool atomic_gemm = false);
 
   ~CommOverlap() {}
 
@@ -694,14 +813,25 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
 };  // CommOverlap
 
 class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::CommOverlapP2PBase {
+ private:
+  // Keeps the cuBLASMp NCCL communicator alive for the lifetime of this
+  // instance, independent of the CommOverlapHelper that created it.
+  CommOverlapHelper::NcclCommSharedPtr _nccl_comm;
+
  public:
   CommOverlapP2P(const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
                  CommOverlapHelper *helper, int tp_size,
                  transformer_engine::CommOverlapType comm_type,
-                 int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int comm_cga_size = 2,
-                 int gemm_priority = 0, int comm_priority = 0, int num_comm_sm = 3,
-                 bool set_sm_margin = true, bool atomic_gemm = false, bool use_ce = true,
+                 int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int comm_cga_size = 1,
+                 int gemm_priority = 0, int comm_priority = 0, int num_comm_sm = 1,
+                 bool set_sm_margin = false, bool atomic_gemm = false, bool use_ce = true,
                  bool aggregate = false);
+
+  // cuBLASMp variant. See CommOverlap for the `comm_type`/buffer args.
+  CommOverlapP2P(CommOverlapHelper *helper, int tp_rank, int tp_size,
+                 transformer_engine::CommOverlapType comm_type,
+                 const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
+                 int num_comm_sm = 1, bool atomic_gemm = false);
 
   ~CommOverlapP2P() {}
 

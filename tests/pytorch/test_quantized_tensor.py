@@ -25,7 +25,6 @@ from transformer_engine.pytorch import (
 )
 
 from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
-import transformer_engine_torch as tex
 
 from references.ref_per_tensor_cs import ref_per_tensor_cs_cast
 from utils import assert_close
@@ -33,12 +32,12 @@ from utils import assert_close
 # PyTorch tensor dtypes
 _dtypes: List[torch.dtype] = [torch.float32, torch.float16, torch.bfloat16]
 # TE FP8 dtypes
-_fp8_dtypes: List[tex.DType] = [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2]
+_fp8_dtypes: List[te.DType] = [te.DType.kFloat8E4M3, te.DType.kFloat8E5M2]
 
 # Numerical tolerances with FP8 types
-_tols: Dict[tex.DType, Dict[str, float]] = {
-    tex.DType.kFloat8E4M3: dict(rtol=0.125, atol=0.0675),  # epsilon = 0.0625
-    tex.DType.kFloat8E5M2: dict(rtol=0.25, atol=0.125),  # epsilon = 0.125
+_tols: Dict[te.DType, Dict[str, float]] = {
+    te.DType.kFloat8E4M3: dict(rtol=0.125, atol=0.0675),  # epsilon = 0.0625
+    te.DType.kFloat8E5M2: dict(rtol=0.25, atol=0.125),  # epsilon = 0.125
 }
 
 
@@ -76,7 +75,7 @@ if nvfp4_available:
 # delayed scaling
 def to_float8(
     tensor: torch.Tensor,
-    fp8_dtype: tex.DType = tex.DType.kFloat8E4M3,
+    fp8_dtype: te.DType = te.DType.kFloat8E4M3,
     scale: float = 1.0,
 ) -> Float8Tensor:
     """Cast tensor to FP8"""
@@ -91,7 +90,7 @@ def to_float8(
 # current scaling
 def to_float8_CS(
     tensor: torch.Tensor,
-    fp8_dtype: tex.DType = tex.DType.kFloat8E4M3,
+    fp8_dtype: te.DType = te.DType.kFloat8E4M3,
     return_transpose: bool = False,
     force_pow_2_scales: bool = False,
     amax_epsilon: float = 0.0,
@@ -109,6 +108,42 @@ def to_float8_CS(
     else:
         quantizer.set_usage(rowwise=True, columnwise=False)
     return quantizer(tensor)
+
+
+def make_quantizer(quantization: str, device: torch.device = "cuda"):
+    """Construct a quantizer for the given quantization scheme."""
+    if quantization in ("fp8", "fp8_delayed_scaling"):
+        return Float8Quantizer(
+            scale=torch.ones(1, dtype=torch.float32, device=device).squeeze(),
+            amax=torch.zeros(1, dtype=torch.float32, device=device),
+            fp8_dtype=te.DType.kFloat8E4M3,
+        )
+    if quantization == "fp8_current_scaling":
+        return Float8CurrentScalingQuantizer(fp8_dtype=te.DType.kFloat8E4M3, device=device)
+    if quantization == "fp8_blockwise":
+        return Float8BlockQuantizer(
+            fp8_dtype=te.DType.kFloat8E4M3,
+            rowwise=True,
+            columnwise=True,
+            force_pow_2_scales=True,
+            amax_epsilon=0.0,
+            block_scaling_dim=1,
+        )
+    if quantization == "mxfp8":
+        return MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)
+    if quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
+        row_scaled_nvfp4 = quantization == "nvfp4_row_scaled"
+        return NVFP4Quantizer(
+            columnwise=not row_scaled_nvfp4,
+            with_rht=False,
+            with_post_rht_amax=False,
+            with_2d_quantization=False,
+            stochastic_rounding=False,
+            row_scaled_nvfp4=row_scaled_nvfp4,
+            with_random_sign_mask=False,
+            nvfp4_use_4over6=(quantization == "nvfp4_4over6"),
+        )
+    raise ValueError(f"Unsupported quantization scheme ({quantization})")
 
 
 @torch.no_grad()
@@ -140,45 +175,8 @@ def make_reference_and_test_tensors(
     if quantization is None:
         if test.data_ptr() == ref.data_ptr():
             test = test.clone()
-    elif quantization in ("fp8", "fp8_delayed_scaling"):
-        quantizer = Float8Quantizer(
-            scale=torch.ones(1, dtype=torch.float32, device=test_device).squeeze(),
-            amax=torch.zeros(1, dtype=torch.float32, device=test_device),
-            fp8_dtype=tex.DType.kFloat8E4M3,
-        )
-        test = quantizer(test)
-    elif quantization == "fp8_current_scaling":
-        quantizer = Float8CurrentScalingQuantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3,
-            device=test_device,
-        )
-        test = quantizer(test)
-    elif quantization == "fp8_blockwise":
-        quantizer = Float8BlockQuantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3,
-            rowwise=True,
-            columnwise=True,
-            force_pow_2_scales=True,
-            amax_epsilon=0.0,
-            block_scaling_dim=1,
-        )
-        test = quantizer(test)
-    elif quantization == "mxfp8":
-        test = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)(test)
-    elif quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
-        row_scaled_nvfp4 = quantization == "nvfp4_row_scaled"
-        test = NVFP4Quantizer(
-            columnwise=not row_scaled_nvfp4,
-            with_rht=False,
-            with_post_rht_amax=False,
-            with_2d_quantization=False,
-            stochastic_rounding=False,
-            row_scaled_nvfp4=row_scaled_nvfp4,
-            with_random_sign_mask=False,
-            nvfp4_use_4over6=(quantization == "nvfp4_4over6"),
-        )(test)
     else:
-        raise ValueError(f"Unsupported quantization scheme ({quantization})")
+        test = make_quantizer(quantization, device=test_device)(test)
 
     # Make sure reference and test tensors match each other
     ref.copy_(test.to(dtype=ref.dtype))
@@ -201,7 +199,7 @@ class TestFloat8Tensor:
     def test_constructor(
         self,
         dims: DimsType = 1,
-        fp8_dtype: tex.DType = tex.DType.kFloat8E4M3,
+        fp8_dtype: te.DType = te.DType.kFloat8E4M3,
         scale_inv: float = 0.375,
         dtype: torch.dtype = torch.float32,
     ) -> None:
@@ -220,7 +218,7 @@ class TestFloat8Tensor:
 
     def _test_quantize_dequantize(
         self,
-        fp8_dtype: tex.DType = tex.DType.kFloat8E4M3,
+        fp8_dtype: te.DType = te.DType.kFloat8E4M3,
         scale: float = 3.5,
         dtype: torch.dtype = torch.float32,
         dims: DimsType = 23,
@@ -245,7 +243,7 @@ class TestFloat8Tensor:
     @pytest.mark.parametrize("dtype", _dtypes)
     def test_quantize_dequantize_dtypes(
         self,
-        fp8_dtype: tex.DType,
+        fp8_dtype: te.DType,
         dtype: torch.dtype,
     ) -> None:
         self._test_quantize_dequantize(fp8_dtype=fp8_dtype, dtype=dtype)
@@ -262,7 +260,7 @@ class TestFloat8Tensor:
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("noop", [True, False])
     def test_quantize_dequantize_noop(
-        self, fp8_dtype: tex.DType, dtype: torch.dtype, noop: bool
+        self, fp8_dtype: te.DType, dtype: torch.dtype, noop: bool
     ) -> None:
         noop_tensor = torch.zeros(1, dtype=torch.float32, device="cuda")
         if noop:
@@ -287,7 +285,7 @@ class TestFloat8Tensor:
     def test_basic_ops(
         self,
         dims: DimsType = 23,
-        fp8_dtype: tex.DType = tex.DType.kFloat8E4M3,
+        fp8_dtype: te.DType = te.DType.kFloat8E4M3,
         scale: float = 3.5,
         dtype: torch.dtype = torch.float32,
     ) -> None:
@@ -323,7 +321,7 @@ class TestFloat8Tensor:
     def test_chunk_op(
         self,
         dims: DimsType,
-        fp8_dtype: tex.DType = tex.DType.kFloat8E4M3,
+        fp8_dtype: te.DType = te.DType.kFloat8E4M3,
         scale: float = 3.5,
         dtype: torch.dtype = torch.float32,
     ) -> None:
@@ -352,7 +350,7 @@ class TestFloat8Tensor:
     def test_inplace_ops(
         self,
         dims: DimsType = 23,
-        fp8_dtype: tex.DType = tex.DType.kFloat8E4M3,
+        fp8_dtype: te.DType = te.DType.kFloat8E4M3,
         scale: float = 3.5,
         dtype: torch.dtype = torch.float32,
     ) -> None:
@@ -390,7 +388,7 @@ class TestFloat8Tensor:
     def test_serialization(
         self,
         dims: DimsType = [2, 3, 5],
-        fp8_dtype: tex.DType = tex.DType.kFloat8E4M3,
+        fp8_dtype: te.DType = te.DType.kFloat8E4M3,
         scale: float = 0.5,
         dtype: torch.dtype = torch.float32,
     ):
@@ -490,7 +488,7 @@ class TestCurrentScalingFloat8Tensor:
     @pytest.mark.parametrize("amax_epsilon", [0.0, 1e-6], ids=str)
     def test_quantize(
         self,
-        fp8_dtype: tex.DType,
+        fp8_dtype: te.DType,
         dtype: torch.dtype,
         dims: DimsType,
         return_transpose: bool,
@@ -532,11 +530,11 @@ class TestCurrentScalingFloat8Tensor:
                 x_fp8._transpose, x_fp8_t_ref.view(torch.uint8), atol=0.0, rtol=0.0
             )
 
-    @pytest.mark.parametrize("fp8_dtype", [tex.DType.kFloat8E4M3], ids=str)
+    @pytest.mark.parametrize("fp8_dtype", [te.DType.kFloat8E4M3], ids=str)
     @pytest.mark.parametrize("dtype", [torch.bfloat16], ids=str)
     @pytest.mark.parametrize("dims", [[], 1, 311, [7, 11], [7, 5, 3], [2, 3, 5, 3]])
     def test_quantize_dequantize(
-        self, fp8_dtype: tex.DType, dtype: torch.dtype, dims: DimsType
+        self, fp8_dtype: te.DType, dtype: torch.dtype, dims: DimsType
     ) -> None:
         """Check numerical error when casting to FP8 and back"""
 
@@ -778,11 +776,11 @@ class TestQuantizedTensor:
             quantizer = Float8Quantizer(
                 scale=torch.ones(1, dtype=torch.float32, device=device).squeeze(),
                 amax=torch.zeros(1, dtype=torch.float32, device=device),
-                fp8_dtype=tex.DType.kFloat8E4M3,
+                fp8_dtype=te.DType.kFloat8E4M3,
             )
         elif quantization == "fp8_blockwise":
             quantizer = Float8BlockQuantizer(
-                fp8_dtype=tex.DType.kFloat8E4M3,
+                fp8_dtype=te.DType.kFloat8E4M3,
                 rowwise=True,
                 columnwise=True,
                 force_pow_2_scales=True,
@@ -790,7 +788,7 @@ class TestQuantizedTensor:
                 block_scaling_dim=1,
             )
         elif quantization == "mxfp8":
-            quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+            quantizer = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)
         elif quantization in ("nvfp4", "nvfp4_2d", "nvfp4_row_scaled", "nvfp4_4over6"):
             row_scaled_nvfp4 = quantization == "nvfp4_row_scaled"
             quantizer = NVFP4Quantizer(
@@ -819,6 +817,35 @@ class TestQuantizedTensor:
         assert q_x.shape == torch.Size(shape)
         assert_close(q_x, q_ref, rtol=0, atol=0)
 
+    @pytest.mark.parametrize("quantization", _quantization_list)
+    def test_quantize_dequantize_autograd(
+        self,
+        *,
+        quantization: str,
+        shape: Iterable[int] = (128, 128),
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",
+    ) -> None:
+        """Autograd must survive a quantize -> dequantize round trip."""
+
+        quantizer = make_quantizer(quantization, device=device)
+        x = torch.randn(list(shape), dtype=dtype, device=device, requires_grad=True)
+        # Quantize with autograd enabled: a grad_fn is attached to the output.
+        x_q = quantizer(x)
+        assert isinstance(x_q, QuantizedTensor)
+        assert x_q.grad_fn is not None, "quantized tensor is missing its grad_fn"
+        # requires_grad must reflect the attached grad_fn, not a stale cache.
+        assert x_q.requires_grad, (
+            "quantized tensor reports requires_grad=False despite having a "
+            "grad_fn (stale requires_grad cache)"
+        )
+
+        # Dequantize and take a loss; the gradient must reach the input.
+        (x_q.dequantize().float() ** 2).sum().backward()
+        assert (
+            x.grad is not None and x.grad.norm().item() > 0
+        ), "Gradient did not flow back to the input through quantize -> dequantize"
+
 
 @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
 class TestMXFP8Tensor:
@@ -835,7 +862,7 @@ class TestMXFP8Tensor:
     @pytest.mark.parametrize("dims", [[128, 128], [256, 256], [128, 256]])
     def test_mxfp8_dequantize_columnwise_only(
         self,
-        fp8_dtype: tex.DType,
+        fp8_dtype: te.DType,
         dtype: torch.dtype,
         dims: DimsType,
     ) -> None:
@@ -876,7 +903,7 @@ class TestMXFP8Tensor:
     @pytest.mark.parametrize("dims", [[128, 128], [256, 256]])
     def test_mxfp8_dequantize_columnwise_only_quantized_separately(
         self,
-        fp8_dtype: tex.DType,
+        fp8_dtype: te.DType,
         dims: DimsType,
     ) -> None:
         """Check dequantization of MXFP8 tensor quantized with columnwise only"""

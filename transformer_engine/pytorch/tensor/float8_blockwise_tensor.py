@@ -11,11 +11,15 @@ from typing import Any, Optional, Tuple, Union
 
 import torch
 import transformer_engine_torch as tex
-from transformer_engine_torch import DType as TE_DType
 from transformer_engine.common.recipe import Float8BlockScaling, Recipe
-from .storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
+from .storage.float8_blockwise_tensor_storage import (
+    Float8BlockwiseQTensorStorage,
+    _FromFloat8BlockwiseFunc,
+)
 from ..quantized_tensor import QuantizedTensor, Quantizer
-from ._quantization_helpers import _IdentityFunc
+from ..dynamo import register_value_opaque_quantizer
+from ._quantization_helpers import _IdentityFunc, safe_quantized_repr
+from ..constants import DType
 from ..utils import devices_match, round_up_to_nearest_multiple
 
 aten = torch.ops.aten
@@ -30,7 +34,7 @@ class Float8BlockQuantizer(Quantizer):
 
     """
 
-    dtype: TE_DType
+    dtype: DType
     block_len: int
     amax_epsilon: float
     force_pow_2_scales: bool
@@ -38,7 +42,7 @@ class Float8BlockQuantizer(Quantizer):
 
     def __init__(
         self,
-        fp8_dtype: TE_DType,
+        fp8_dtype: Union[DType, tex.DType],
         *,
         rowwise: bool,
         columnwise: bool,
@@ -47,7 +51,7 @@ class Float8BlockQuantizer(Quantizer):
         block_scaling_dim: int = 2,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
-        self.dtype = fp8_dtype
+        self.dtype = DType.cast(fp8_dtype)
         self.block_len = 128
         self.force_pow_2_scales = force_pow_2_scales
         self.amax_epsilon = amax_epsilon
@@ -211,6 +215,9 @@ class Float8BlockQuantizer(Quantizer):
         return Float8BlockScaling
 
 
+register_value_opaque_quantizer(Float8BlockQuantizer)
+
+
 class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
     """Tensor class with FP8 data quantized via NxN blocks or 1xN blocks.
 
@@ -230,8 +237,9 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
     columnwise_scale_inv : Optional[torch.Tensor]
           FP32 dequantization scales in GEMM format for dequantizing columnwise_data.
 
-    fp8_dtype : transformer_engine_torch.DType, default = kFloat8E4M3
-               FP8 format.
+    fp8_dtype : transformer_engine.pytorch.DType or transformer_engine_torch.DType,
+                optional, default = kFloat8E4M3. FP8 format. transformer_engine_torch.DType
+                is accepted for backward compatibility.
     quantizer : Quantizer - the Float8BlockQuantizer that quantized this tensor and
                holds configuration about quantization and dequantization modes.
     """
@@ -245,7 +253,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
         rowwise_scale_inv: Optional[torch.Tensor],
         columnwise_data: Optional[torch.Tensor],
         columnwise_scale_inv: Optional[torch.Tensor],
-        fp8_dtype: TE_DType,
+        fp8_dtype: DType,
         quantizer: Quantizer,
         is_2D_scaled: bool,
         **kwargs,
@@ -266,11 +274,19 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
         return instance
 
     def __repr__(self, *, tensor_contents=None):
-        return (
-            f"Float8BlockwiseQTensor(fp8_dtype={self._fp8_dtype},"
-            f" is_2D_scaled={self._is_2D_scaled},"
-            f" data={self.dequantize()})"
-        )
+        try:
+            return (
+                f"Float8BlockwiseQTensor(fp8_dtype={self._fp8_dtype},"
+                f" is_2D_scaled={self._is_2D_scaled},"
+                f" data={self.dequantize()})"
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            return safe_quantized_repr(
+                self,
+                "Float8BlockwiseQTensor",
+                extras={"is_2D_scaled": self._is_2D_scaled},
+                error=exc,
+            )
 
     def quantize_(
         self,
@@ -303,7 +319,9 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
             dequant_dtype = dtype
         else:
             dequant_dtype = self.dtype
-        return super().dequantize(dtype=dequant_dtype)
+        if torch.is_grad_enabled():
+            return _FromFloat8BlockwiseFunc.apply(self, dequant_dtype)
+        return _FromFloat8BlockwiseFunc.forward(None, self, dequant_dtype)
 
     def detach(self) -> Float8BlockwiseQTensor:
         # pylint: disable=missing-function-docstring
@@ -443,7 +461,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
         rowwise_scale_inv: torch.Tensor,
         columnwise_data: torch.Tensor,
         columnwise_scale_inv: torch.Tensor,
-        fp8_dtype: TE_DType,
+        fp8_dtype: DType,
         dtype: torch.dtype,
         quantizer: Quantizer,
         is_2D_scaled: bool,
@@ -667,7 +685,7 @@ def _make_float8_blockwise_tensor_in_reduce_ex(
     rowwise_scale_inv: torch.Tensor,
     columnwise_data: torch.Tensor,
     columnwise_scale_inv: torch.Tensor,
-    fp8_dtype: TE_DType,
+    fp8_dtype: DType,
     dtype: torch.dtype,
     quantizer: Quantizer,
     is_2D_scaled: bool,

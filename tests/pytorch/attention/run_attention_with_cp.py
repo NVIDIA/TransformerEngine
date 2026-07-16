@@ -14,6 +14,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.context_parallel
 )
 from transformer_engine.pytorch.attention.dot_product_attention.utils import combine_and_quantize
 import transformer_engine_torch as tex
+from transformer_engine.pytorch import DType
 from test_attention_with_cp import model_configs_flash_attn, model_configs_fused_attn
 from transformer_engine.pytorch import (
     autocast,
@@ -328,34 +329,34 @@ def run_dpa_with_cp(
     ).cuda()
     if scaling_mode == "delayed":
         qkv_quantizer = Float8Quantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=DType.kFloat8E4M3,
             scale=torch.tensor([1], dtype=torch.float32).cuda(),
             amax=torch.tensor([0], dtype=torch.float32).cuda(),
         )
         dout_quantizer = Float8Quantizer(
-            fp8_dtype=tex.DType.kFloat8E5M2,
+            fp8_dtype=DType.kFloat8E5M2,
             scale=torch.tensor([1], dtype=torch.float32).cuda(),
             amax=torch.tensor([0], dtype=torch.float32).cuda(),
         )
     if scaling_mode == "current":
         qkv_quantizer = Float8CurrentScalingQuantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=DType.kFloat8E4M3,
             device="cuda",
         )
         dout_quantizer = Float8CurrentScalingQuantizer(
-            fp8_dtype=tex.DType.kFloat8E5M2,
+            fp8_dtype=DType.kFloat8E5M2,
             device="cuda",
         )
     if scaling_mode == "mxfp8":
         qkv_quantizer = MXFP8Quantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=DType.kFloat8E4M3,
             rowwise=True,
             columnwise=True,
         )
         qkv_quantizer.optimize_for_gemm = True
         qkv_quantizer.internal = False
         dout_quantizer = MXFP8Quantizer(
-            fp8_dtype=tex.DType.kFloat8E5M2,
+            fp8_dtype=DType.kFloat8E5M2,
             rowwise=True,
             columnwise=True,
         )
@@ -410,6 +411,13 @@ def run_dpa_with_cp(
             cu_seqlens_kv=cu_seqlens_kv,
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+            # Test runner sets cu_seqlens_q == cu_seqlens_q_padded for the
+            # FlashAttention path, i.e. no inter-sequence padding. Declare this
+            # explicitly so the sync-free auto-detect (which conservatively
+            # picks True when padded cu_seqlens are present) does not disable FA.
+            pad_between_seqs=(
+                (kernel_backend != "FlashAttention") if qkv_format == "thd" else None
+            ),
             fp8_output=fp8_mha,
         )
         if config.return_max_logit:
@@ -527,6 +535,12 @@ def run_dpa_with_cp(
             cu_seqlens_kv=cu_seqlens_kv,
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+            # See note above (non-CP branch): same explicit declaration so
+            # FlashAttention isn't disabled by the conservative sync-free
+            # auto-detect when this test path constructs no inter-seq padding.
+            pad_between_seqs=(
+                (kernel_backend != "FlashAttention") if qkv_format == "thd" else None
+            ),
             fp8_output=fp8_mha,
         )
         if config.return_max_logit:
@@ -626,9 +640,8 @@ def run_dpa_with_cp(
             cu_seqlens_q = get_cu_seqlens_on_cp_rank(
                 cu_seqlens_q, cu_seqlens_q_padded, world_size, rank, True, True
             )
-            num_pads_q = (cu_seqlens_q_padded - cu_seqlens_q)[1:] - (
-                cu_seqlens_q_padded - cu_seqlens_q
-            )[:-1]
+            cu_pads_q = cu_seqlens_q_padded - cu_seqlens_q
+            num_pads_q = cu_pads_q[1:] - cu_pads_q[:-1]
             cu_seqlens_kv_padded = cu_seqlens_kv_padded // world_size
             cu_seqlens_kv = get_cu_seqlens_on_cp_rank(
                 cu_seqlens_kv, cu_seqlens_kv_padded, world_size, rank, True, True

@@ -5,17 +5,17 @@
 """Mixin class holding data specific for MXFP8Tensor"""
 
 from __future__ import annotations
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, Union
 from collections.abc import Iterable
 import math
 import torch
 
 import transformer_engine_torch as tex
-from transformer_engine_torch import DType as TE_DType
 
 from ...quantized_tensor import QuantizedTensorStorage, Quantizer
+from .._quantization_helpers import safe_quantized_repr
 
-from ...constants import TE_DType as torch_to_transformer_engine_dtype
+from ...constants import TE_DType as torch_to_transformer_engine_dtype, DType
 
 from ...utils import _empty_tensor
 
@@ -78,7 +78,7 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
     # Builder class for casting to MXFP8
     _quantizer: Optional[Quantizer]
     # FP8 data type
-    _fp8_dtype: TE_DType
+    _fp8_dtype: DType
     # Whether scaling factors are in the swizzled format expected by
     # GEMM
     _with_gemm_swizzled_scales: bool
@@ -89,7 +89,7 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
         rowwise_scale_inv: Optional[torch.Tensor],
         columnwise_data: Optional[torch.Tensor],
         columnwise_scale_inv: Optional[torch.Tensor],
-        fp8_dtype: TE_DType,
+        fp8_dtype: Union[DType, tex.DType],
         quantizer: Optional[Quantizer],
         with_gemm_swizzled_scales: bool,
         *args,
@@ -106,7 +106,7 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
         instance._rowwise_scale_inv = rowwise_scale_inv
         instance._columnwise_scale_inv = columnwise_scale_inv
         instance._quantizer = quantizer.copy() if quantizer is not None else None
-        instance._fp8_dtype = fp8_dtype
+        instance._fp8_dtype = DType.cast(fp8_dtype)
         instance._with_gemm_swizzled_scales = with_gemm_swizzled_scales
 
         return instance
@@ -258,15 +258,18 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
         )
 
     def __repr__(self):
-        data_rowwise = self.dequantize()
+        try:
+            data_rowwise = self.dequantize()
 
-        return (
-            "MXFP8TensorStorage("
-            f"fp8_dtype={self._fp8_dtype}, "
-            f"rowwise_scaled_data={data_rowwise}"
-            f"rowwise_scale_inv={self._rowwise_scale_inv}, "
-            ")"
-        )
+            return (
+                "MXFP8TensorStorage("
+                f"fp8_dtype={self._fp8_dtype}, "
+                f"rowwise_scaled_data={data_rowwise}"
+                f"rowwise_scale_inv={self._rowwise_scale_inv}, "
+                ")"
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            return safe_quantized_repr(self, "MXFP8TensorStorage", error=exc)
 
     def update_usage(
         self,

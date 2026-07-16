@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Python interface for fused attention extensions"""
+
 import math
 from typing import Tuple, List, Union, Optional
 import torch
@@ -16,8 +17,7 @@ from transformer_engine_torch import (
     NVTE_Fused_Attn_Backend,
 )
 from ..quantized_tensor import Quantizer
-from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx
-
+from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx, DType
 
 __all__ = [
     "fused_attn_fwd",
@@ -26,12 +26,12 @@ __all__ = [
 
 
 TORCH_DType = {
-    tex.DType.kFloat8E4M3: torch.uint8,
-    tex.DType.kFloat8E5M2: torch.uint8,
-    tex.DType.kFloat16: torch.half,
-    tex.DType.kBFloat16: torch.bfloat16,
-    tex.DType.kFloat32: torch.float32,
-    tex.DType.kInt32: torch.int32,
+    DType.kFloat8E4M3: torch.uint8,
+    DType.kFloat8E5M2: torch.uint8,
+    DType.kFloat16: torch.half,
+    DType.kBFloat16: torch.bfloat16,
+    DType.kFloat32: torch.float32,
+    DType.kInt32: torch.int32,
 }
 
 QKVFormat = {
@@ -173,7 +173,7 @@ def fused_attn_fwd(
                 input tensor K; shape sbhd, bshd or thd (see `qkv_layout` for details)
     v : torch.Tensor
                 input tensor V; shape sbhd, bshd or thd (see `qkv_layout` for details)
-    fake_dtype : tex.DType
+    fake_dtype : DType
                 data type of Q, K and V - in case of high precision, fake dtype in case of FP8;
                 in torch.dtype
     fused_attention_backend : tex.NVTE_Fused_Attn_Backend
@@ -304,7 +304,6 @@ def fused_attn_fwd(
         raise ValueError(f"Unsupported backend {fused_attention_backend}")
 
     # execute kernel
-
     output_tensors = tex.fused_attn_fwd(
         max_seqlen_q,
         max_seqlen_kv,
@@ -364,25 +363,18 @@ def fused_attn_fwd(
                 max_tensor = max_tensor.masked_fill(~valid, float("-inf"))
             elif max_tensor.ndim == 3:
                 if cu_seqlens_q_padded is not None:
-                    # For THD + pad_between_seqs=True + non-sm120 + cuDNN>9.6, Max tensor is [tq, h, 1]
-                    # and padding positions could be uninitialized. Exclude those padded positions when
-                    # computing max_logit.
+                    # Exclude padding; CP may pass nonzero padded offsets.
                     actual_seqlens = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).to(
                         device=max_tensor.device
                     )
-                    padded_seqlens = (cu_seqlens_q_padded[1:] - cu_seqlens_q_padded[:-1]).to(
-                        device=max_tensor.device
-                    )
-                    pad_lens = (padded_seqlens - actual_seqlens).to(device=max_tensor.device)
-                    b = pad_lens.shape[0]
-
-                    # Stack [actual, pad] per batch into counts: e.g. [3,1, 3,1, 2,2, 7,1]
-                    counts = torch.stack([actual_seqlens, pad_lens], dim=1).flatten()
-                    # Tile [T, F] per sequence: [T,F, T,F, T,F, T,F]
-                    values = torch.tensor([True, False], device=max_tensor.device).repeat(b)
-                    # Expand: T×3, F×1, T×3, F×1, T×2, F×2, T×7, F×1 → TTTF|TTTF|TTFF|TTTTTTTF
-                    valid = torch.repeat_interleave(values, counts)
-                    # Finally, replace invalid (F) positions with -inf
+                    tq = max_tensor.shape[0]
+                    starts = cu_seqlens_q_padded[:-1].to(device=max_tensor.device)
+                    ends = (starts + actual_seqlens).clamp(max=tq)
+                    delta = torch.zeros(tq + 1, dtype=torch.int32, device=max_tensor.device)
+                    updates = torch.ones_like(starts, dtype=torch.int32)
+                    delta.scatter_add_(0, starts.clamp(max=tq), updates)
+                    delta.scatter_add_(0, ends, -updates)
+                    valid = delta[:-1].cumsum(0) > 0
                     max_tensor = max_tensor.masked_fill(~valid.view(-1, 1, 1), float("-inf"))
 
         # Max -> max_logit [h]
@@ -455,7 +447,7 @@ def fused_attn_bwd(
     d_o : torch.Tensor
                 input tensor dO (gradient of O); same data type as Q, K and V;
                 same shape as Q
-    fake_dtype : tex.DType
+    fake_dtype : DType
                 data type of Q, K and V - in case of high precision, fake dtype in case of FP8;
                 in torch.dtype
     aux_ctx_tensors : List[torch.Tensor]

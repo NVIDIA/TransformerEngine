@@ -12,14 +12,14 @@ import warnings
 import torch
 from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
 import transformer_engine_torch as tex
-from transformer_engine_torch import DType as TE_DType
 
 from transformer_engine.common.recipe import MXFP8BlockScaling, Recipe
-from ..constants import MXFP8_BLOCK_SCALING_SIZE
+from ..constants import MXFP8_BLOCK_SCALING_SIZE, DType
 from ..utils import devices_match, round_up_to_nearest_multiple
 from .storage.mxfp8_tensor_storage import MXFP8TensorStorage, _FromMXFP8Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
-from ._quantization_helpers import _IdentityFunc
+from ..dynamo import register_value_opaque_quantizer
+from ._quantization_helpers import _IdentityFunc, safe_quantized_repr
 
 aten = torch.ops.aten
 
@@ -33,17 +33,17 @@ class MXFP8Quantizer(Quantizer):
 
     """
 
-    dtype: TE_DType
+    dtype: DType
 
     def __init__(
         self,
-        fp8_dtype: TE_DType,
+        fp8_dtype: Union[DType, tex.DType],
         *,
         rowwise: bool = True,
         columnwise: bool = True,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
-        self.dtype = fp8_dtype
+        self.dtype = DType.cast(fp8_dtype)
 
     def copy(self) -> MXFP8Quantizer:
         """Create shallow copy"""
@@ -148,7 +148,7 @@ class MXFP8Quantizer(Quantizer):
         data: torch.Tensor,
         scale_inv: torch.Tensor,
         fake_dtype: torch.dtype,
-        fp8_dtype: TE_DType = tex.DType.kFloat8E4M3,
+        fp8_dtype: DType = DType.kFloat8E4M3,
     ) -> MXFP8Tensor:
         """Create a new MXFP8Tensor from data and scale_inv."""
         return MXFP8Tensor(
@@ -181,6 +181,9 @@ class MXFP8Quantizer(Quantizer):
         return MXFP8BlockScaling
 
 
+register_value_opaque_quantizer(MXFP8Quantizer)
+
+
 class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
     """Experimental tensor class with FP8 data
 
@@ -193,8 +196,9 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
     ----------
     data : torch.Tensor
           Raw FP8 data in a uint8 tensor
-    fp8_dtype : transformer_engine_torch.DType, default = kFloat8E4M3
-               FP8 format.
+    fp8_dtype : transformer_engine.pytorch.DType or transformer_engine_torch.DType,
+                optional, default = kFloat8E4M3 FP8 format. transformer_engine_torch.DType
+                is accepted for backward compatibility.
     fp8_scale_inv : torch.Tensor
                    Reciprocal of the scaling factor applied when
                    casting to FP8, i.e. the scaling factor that must
@@ -214,7 +218,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         rowwise_scale_inv: Optional[torch.Tensor],
         columnwise_data: Optional[torch.Tensor],
         columnwise_scale_inv: Optional[torch.Tensor],
-        fp8_dtype: TE_DType,
+        fp8_dtype: DType,
         quantizer: Optional[Quantizer],
         with_gemm_swizzled_scales: bool,
         **kwargs,
@@ -233,7 +237,10 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         )
 
     def __repr__(self, *, tensor_contents=None):
-        return f"MXFP8Tensor(fp8_dtype={self._fp8_dtype}, data={self.dequantize()})"
+        try:
+            return f"MXFP8Tensor(fp8_dtype={self._fp8_dtype}, data={self.dequantize()})"
+        except Exception as exc:  # pylint: disable=broad-except
+            return safe_quantized_repr(self, "MXFP8Tensor", error=exc)
 
     def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """
@@ -727,7 +734,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         rowwise_scale_inv: torch.Tensor,
         columnwise_data: torch.Tensor,
         columnwise_scale_inv: torch.Tensor,
-        fp8_dtype: TE_DType,
+        fp8_dtype: DType,
         dtype: torch.dtype,
         shape: torch.Size,
         quantizer: Optional[Quantizer] = None,
@@ -849,7 +856,7 @@ def _make_mxfp8_tensor_in_reduce_ex(
     rowwise_scale_inv: torch.Tensor,
     columnwise_data: torch.Tensor,
     columnwise_scale_inv: torch.Tensor,
-    fp8_dtype: TE_DType,
+    fp8_dtype: DType,
     dtype: torch.dtype,
     shape: torch.Size,
     quantizer: Optional[Quantizer] = None,
