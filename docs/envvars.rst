@@ -141,6 +141,24 @@ backend-selection overview.
    :Default: ``1``
    :Description: Enable or disable FlashAttention backend for DotProductAttention. When set to ``0``, FlashAttention will not be used.
 
+.. envvar:: NVTE_FLASH_ATTN_V2
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``1``
+   :Description: Enable or disable FlashAttention 2 (the ``flash-attn`` package) for DotProductAttention, without affecting FlashAttention 3 or 4. When set to ``0``, FlashAttention 2 will not be used even if it is installed. Useful for pinning the FlashAttention version, e.g. so training-side attention runs the same kernel generation as an inference engine.
+
+.. envvar:: NVTE_FLASH_ATTN_V3
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``1``
+   :Description: Enable or disable FlashAttention 3 (the ``flash-attn-3`` package) for DotProductAttention, without affecting FlashAttention 2 or 4. When set to ``0``, FlashAttention 3 will not be used even if it is installed.
+
+.. envvar:: NVTE_FLASH_ATTN_V4
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``1``
+   :Description: Enable or disable FlashAttention 4 (the ``flash-attn-4`` package) for DotProductAttention, without affecting FlashAttention 2 or 3. When set to ``0``, FlashAttention 4 will not be used even if it is installed.
+
 .. envvar:: NVTE_FUSED_ATTN
 
    :Type: ``int`` (0 or 1)
@@ -274,7 +292,7 @@ Kernel Configuration
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
-   :Description: Disable NVRTC (CUDA Runtime Compilation) support. When set to ``1``, runtime kernel compilation is disabled. This can be useful in environments where NVRTC is not available or not desired.
+   :Description: Disable NVRTC (CUDA Runtime Compilation) support. When set to ``1``, runtime kernel compilation is disabled. Existing transpose operations select their static fallback automatically. Fused softmax and normalization paths require their corresponding ``NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX`` or ``NVTE_BUILD_LEGACY_STATIC_NORM`` CMake option to have been enabled when the library was built; otherwise no static fallback is available.
 
 .. envvar:: NVTE_USE_CUTLASS_GROUPED_GEMM
 
