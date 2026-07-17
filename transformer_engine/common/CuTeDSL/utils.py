@@ -4,6 +4,8 @@
 
 """Low-level CuTeDSL helpers: bitcast/fma/exp2 intrinsics, f32 packing, and the 16-bit (bf16/fp16) packed-op kit."""
 
+import functools
+import logging
 from types import SimpleNamespace
 
 import cutlass
@@ -18,6 +20,29 @@ _CUTLASS_DTYPE_FROM_STR = {
     "bf16": cutlass.BFloat16,
 }
 _STR_FROM_CUTLASS_DTYPE = {v: k for k, v in _CUTLASS_DTYPE_FROM_STR.items()}
+
+logger = logging.getLogger("transformer_engine.cutedsl.utils")
+
+
+@functools.lru_cache(maxsize=None)
+def device_compute_capability() -> tuple:
+    """(major, minor) of CUDA device 0, or (0, 0) if it can't be queried.
+
+    Used to pick per-arch kernel shapes at compile time. Device 0 stands in for
+    the whole node (homogeneous-GPU assumption, same as the CUTE_DSL_ARCH env)."""
+    from cuda.core import Device  # pylint: disable=no-name-in-module
+
+    major_minor = Device().arch  # compute capability as digits, e.g. "120"
+    return int(major_minor[:-1]), int(major_minor[-1]) if major_minor else (0, 0)
+
+
+@functools.lru_cache(maxsize=None)
+def is_device_blackwell() -> bool:
+    """Return True for the Blackwell family (SM 10.0 / 11.0 / 12.0)
+    This is a run-time check, not a compile-time check. It check if the current device is Blackwell architecture.
+    """
+    major, minor = device_compute_capability()
+    return (major == 10 and minor == 0) or (major == 11 and minor == 0) or (major == 12 and minor == 0)
 
 
 def str_to_cutlass_dtype(dtype_str: str):
