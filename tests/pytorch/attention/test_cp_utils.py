@@ -25,6 +25,33 @@ except ImportError:
 
 
 class TestSuperSequenceTHDPartitioning(unittest.TestCase):
+    def test_contiguous_partition_uses_one_equal_chunk_per_rank(self):
+        # Twelve tokens are divisible by CP4 but not by 2*CP4.
+        cu_seqlens_padded = torch.tensor([0, 5, 12])
+        rank0 = get_thd_partitioned_indices(
+            cu_seqlens_padded, 12, 4, 0, thd_cp_partition="packed_contiguous"
+        )
+        rank3 = get_thd_partitioned_indices(
+            cu_seqlens_padded, 12, 4, 3, thd_cp_partition="packed_contiguous"
+        )
+
+        self.assertTrue(torch.equal(rank0, torch.tensor([0, 1, 2])))
+        self.assertTrue(torch.equal(rank3, torch.tensor([9, 10, 11])))
+
+        sequence_order = torch.arange(12)
+        self.assertIs(
+            restore_thd_gathered_kv(
+                sequence_order, cu_seqlens_padded, 4, "packed_contiguous"
+            ),
+            sequence_order,
+        )
+        self.assertIs(
+            unrestore_thd_gathered_kv(
+                sequence_order, cu_seqlens_padded, 4, "packed_contiguous"
+            ),
+            sequence_order,
+        )
+
     def test_partition_indices_support_cpu_dataloader_inputs(self):
         cu_seqlens_padded = torch.tensor([0, 6, 11, 16])
         indices = get_thd_partitioned_indices(
@@ -116,6 +143,26 @@ class TestSuperSequenceTHDPartitioning(unittest.TestCase):
         )
         self.assertTrue(torch.equal(kv_cu[0], torch.tensor([0, 4, 4, 4], dtype=torch.int32)))
         self.assertTrue(torch.equal(kv_cu[1], torch.tensor([0, 5, 8, 12], dtype=torch.int32)))
+
+    def test_contiguous_metadata_emits_one_document_intersection_step(self):
+        cu_seqlens = torch.tensor([0, 5, 8, 12], dtype=torch.int32)
+        cu_seqlens_padded = torch.tensor([0, 6, 11, 16], dtype=torch.int32)
+
+        q_cu, q_cu_padded, kv_cu = get_super_sequence_thd_causal_metadata(
+            cu_seqlens,
+            cu_seqlens_padded,
+            total_tokens=16,
+            cp_size=2,
+            cp_rank=0,
+            chunks_per_rank=1,
+        )
+
+        self.assertEqual(len(q_cu), 1)
+        self.assertTrue(torch.equal(q_cu[0], torch.tensor([0, 5, 7, 7], dtype=torch.int32)))
+        self.assertTrue(
+            torch.equal(q_cu_padded[0], torch.tensor([0, 6, 8, 8], dtype=torch.int32))
+        )
+        self.assertTrue(torch.equal(kv_cu[0], torch.tensor([0, 5, 7, 7], dtype=torch.int32)))
 
 
 class TestCPSetterCompatibility(unittest.TestCase):

@@ -278,7 +278,11 @@ def _get_thd_partition_cu_seqlens(
     cu_seqlens_padded, total_tokens, thd_cp_partition, device=None
 ):
     """Return physical boundaries used by the THD partition CUDA kernels."""
-    assert thd_cp_partition in ["per_document", "packed_super_sequence"]
+    assert thd_cp_partition in [
+        "per_document",
+        "packed_super_sequence",
+        "packed_contiguous",
+    ]
     target_device = torch.device(device if device is not None else cu_seqlens_padded.device)
     if thd_cp_partition == "per_document":
         target_dtype = torch.int32 if target_device.type == "cuda" else cu_seqlens_padded.dtype
@@ -320,13 +324,29 @@ def get_thd_partitioned_indices(
     device=None,
 ):
     """Return THD token indices using the selected CP partition contract."""
-    assert thd_cp_partition in ["per_document", "packed_super_sequence"]
-    if thd_cp_partition == "packed_super_sequence":
+    assert thd_cp_partition in [
+        "per_document",
+        "packed_super_sequence",
+        "packed_contiguous",
+    ]
+    packed_contiguous = thd_cp_partition == "packed_contiguous"
+    if thd_cp_partition != "per_document":
         validate_super_sequence_thd_metadata(
             cu_seqlens_padded,
             cu_seqlens_padded,
             total_tokens,
             cp_size,
+            chunks_per_rank=1 if packed_contiguous else 2,
+        )
+    if packed_contiguous:
+        target_device = torch.device(device if device is not None else cu_seqlens_padded.device)
+        target_dtype = torch.int32 if target_device.type == "cuda" else cu_seqlens_padded.dtype
+        chunk_size = total_tokens // cp_size
+        return torch.arange(
+            cp_rank * chunk_size,
+            (cp_rank + 1) * chunk_size,
+            dtype=target_dtype,
+            device=target_device,
         )
     cu_seqlens_padded = _get_thd_partition_cu_seqlens(
         cu_seqlens_padded, total_tokens, thd_cp_partition, device
@@ -347,10 +367,12 @@ def validate_super_sequence_thd_metadata(
     cu_seqlens_padded,
     total_tokens,
     cp_size,
+    chunks_per_rank=2,
 ):
     """Validate THD super-sequence metadata once while producing rank-local inputs."""
     assert cu_seqlens.shape == cu_seqlens_padded.shape
-    assert total_tokens % (2 * cp_size) == 0
+    assert chunks_per_rank in [1, 2]
+    assert total_tokens % (chunks_per_rank * cp_size) == 0
     assert cu_seqlens[0] == 0 and cu_seqlens_padded[0] == 0
     assert cu_seqlens_padded[-1] == total_tokens
     assert torch.all(cu_seqlens[1:] >= cu_seqlens[:-1])
@@ -366,8 +388,9 @@ def get_super_sequence_thd_causal_metadata(
     total_tokens,
     cp_size,
     cp_rank,
+    chunks_per_rank=2,
 ):
-    """Build per-step THD metadata for super-sequence DualChunkSwap.
+    """Build per-step THD metadata for packed-buffer CP partitioning.
 
     The complete physical token buffer is the sharding unit. ``cu_seqlens``
     remains the logical document boundary, so each global chunk is represented
@@ -375,10 +398,16 @@ def get_super_sequence_thd_causal_metadata(
     """
     assert cp_size > 0 and 0 <= cp_rank < cp_size
     assert cu_seqlens.shape == cu_seqlens_padded.shape
-    assert total_tokens % (2 * cp_size) == 0
+    assert chunks_per_rank in [1, 2]
+    assert total_tokens % (chunks_per_rank * cp_size) == 0
 
-    chunk_size = total_tokens // (2 * cp_size)
-    chunk_ids = (cp_rank, 2 * cp_size - cp_rank - 1)
+    total_chunks = chunks_per_rank * cp_size
+    chunk_size = total_tokens // total_chunks
+    chunk_ids = (
+        (cp_rank,)
+        if chunks_per_rank == 1
+        else (cp_rank, total_chunks - cp_rank - 1)
+    )
     actual_seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
     doc_starts = cu_seqlens_padded[:-1]
     valid_doc_ends = doc_starts + actual_seqlens
@@ -537,6 +566,9 @@ def thd_cp_rank_order_to_sequence_order(x, cu_seqlens, cp_size, seq_dim=0):
 
 def restore_thd_gathered_kv(x, cu_seqlens_padded, cp_size, thd_cp_partition):
     """Restore gathered THD tokens to physical sequence order."""
+    if thd_cp_partition == "packed_contiguous":
+        # Rank r owns physical chunk r, so rank-major all-gather is already in sequence order.
+        return x
     cu_seqlens_padded = _get_thd_partition_cu_seqlens(
         cu_seqlens_padded, x.shape[0], thd_cp_partition, x.device
     )
@@ -545,6 +577,9 @@ def restore_thd_gathered_kv(x, cu_seqlens_padded, cp_size, thd_cp_partition):
 
 def unrestore_thd_gathered_kv(x, cu_seqlens_padded, cp_size, thd_cp_partition):
     """Arrange physical THD tokens for rank-ordered reduce-scatter."""
+    if thd_cp_partition == "packed_contiguous":
+        # Physical sequence order is also the rank-major reduce-scatter order for this policy.
+        return x
     cu_seqlens_padded = _get_thd_partition_cu_seqlens(
         cu_seqlens_padded, x.shape[0], thd_cp_partition, x.device
     )
@@ -3241,30 +3276,38 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         if qkv_format == "thd":
             # THD always uses padding mask types; per-step masks set internally
             assert padding, f"THD format requires padding mask type, got {attn_mask_type}!"
-        packed_super_sequence = thd_cp_partition == "packed_super_sequence"
-        assert thd_cp_partition in ["per_document", "packed_super_sequence"]
-        if packed_super_sequence:
+        packed_partition = thd_cp_partition in [
+            "packed_super_sequence",
+            "packed_contiguous",
+        ]
+        packed_contiguous = thd_cp_partition == "packed_contiguous"
+        assert thd_cp_partition in [
+            "per_document",
+            "packed_super_sequence",
+            "packed_contiguous",
+        ]
+        if packed_partition:
             assert qkv_format == "thd"
             assert use_fused_attention or use_flash_attn_3, (
-                "THD super-sequence partitioning requires FusedAttention or FlashAttention 3."
+                "Packed THD partitioning requires FusedAttention or FlashAttention 3."
             )
             assert not (use_flash_attn_3 and pad_between_seqs), (
-                "THD super-sequence partitioning with FlashAttention 3 does not support "
+                "Packed THD partitioning with FlashAttention 3 does not support "
                 "padding yet."
             )
             assert causal and window_size == (-1, 0), (
-                "THD super-sequence partitioning currently supports full causal attention only."
+                "Packed THD partitioning currently supports full causal attention only."
             )
-            assert not fp8, "THD super-sequence partitioning does not support FP8 yet."
+            assert not fp8, "Packed THD partitioning does not support FP8 yet."
             assert not is_graph_capturing(), (
-                "THD super-sequence partitioning does not support CUDA graph capture yet."
+                "Packed THD partitioning does not support CUDA graph capture yet."
             )
             assert q.shape[0] == k.shape[0] == v.shape[0], (
-                "THD super-sequence partitioning requires equal local Q/K/V physical lengths."
+                "Packed THD partitioning requires equal local Q/K/V physical lengths."
             )
             assert cu_seqlens_q is cu_seqlens_kv and (
                 cu_seqlens_q_padded is cu_seqlens_kv_padded
-            ), "THD super-sequence self-attention requires shared Q/KV sequence metadata tensors."
+            ), "Packed THD self-attention requires shared Q/KV sequence metadata tensors."
         # AG CP uses shorter per-step Q against longer KV, so causal masks need
         # bottom-right alignment for both sliced and THD paths.
         if use_fused_attention and causal and "bottom_right" not in attn_mask_type:
@@ -3284,10 +3327,11 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             "cp_comm_type='all_gather' only supports SWA through FusedAttention or FlashAttention"
             f" >= 2.3. Found {use_fused_attention=} and {fa_utils.v2_3_plus=}."
         )
-        assert q.shape[seq_dim_qkv] % 2 == 0 and k.shape[seq_dim_qkv] % 2 == 0, (
-            "cp_comm_type='all_gather' requires seq_len % 2 == 0 for Q, K, V. Found seq_len_q ="
-            f" {q.shape[seq_dim_qkv]}, seq_len_kv = {k.shape[seq_dim_qkv]}."
-        )
+        if not packed_contiguous:
+            assert q.shape[seq_dim_qkv] % 2 == 0 and k.shape[seq_dim_qkv] % 2 == 0, (
+                "cp_comm_type='all_gather' requires seq_len % 2 == 0 for Q, K, V. Found "
+                f"seq_len_q = {q.shape[seq_dim_qkv]}, seq_len_kv = {k.shape[seq_dim_qkv]}."
+            )
 
         flash_attn_fwd = None
         if not use_fused_attention:
@@ -3334,14 +3378,14 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
 
         # Per-document DCS divides every sequence into 2*CP chunks. Super-sequence
         # DCS instead bounds Q by one global chunk and keeps full-document KV bounds.
-        if packed_super_sequence:
-            max_seqlen_q = min(max_seqlen_q, q.shape[0] // 2)
+        if packed_partition:
+            max_seqlen_q = min(max_seqlen_q, q.shape[0] // (1 if packed_contiguous else 2))
         else:
             max_seqlen_q = max_seqlen_q // (2 * cp_size)
             max_seqlen_kv = max_seqlen_kv // (2 * cp_size)
         if use_fused_attention and qkv_format != "thd":
             cu_seqlens_q = cu_seqlens_q // (2 * cp_size)
-        if qkv_format == "thd" and not packed_super_sequence:
+        if qkv_format == "thd" and not packed_partition:
             cu_seqlens_q_padded = cu_seqlens_q_padded // (2 * cp_size)
         elif qkv_format != "thd":
             cu_seqlens_q_padded = None
@@ -3447,7 +3491,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         # create two streams to resolve wave quantization issue of Flash Attn in each step
         flash_attn_streams = [torch.cuda.current_stream(), cp_stream]
         # prepare per-step tensors
-        local_seq_chunk_ids = [rank, 2 * cp_size - rank - 1]
+        local_seq_chunk_ids = (
+            [rank] if packed_contiguous else [rank, 2 * cp_size - rank - 1]
+        )
         kv_seq_range_per_step = [None, None]
         window_size_per_step = [None, None]
         cu_seqlens_kv_per_step = [None, None]
@@ -3461,7 +3507,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         max_logit = None
 
         # Pre-compute THD-specific per-step cu_seqlens
-        if qkv_format == "thd" and packed_super_sequence:
+        if qkv_format == "thd" and packed_partition:
             total_tokens_q = q.shape[0] * cp_size
             (
                 thd_cu_seqlens_q_per_step,
@@ -3473,6 +3519,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                 total_tokens_q,
                 cp_size,
                 rank,
+                chunks_per_rank=1 if packed_contiguous else 2,
             )
         elif qkv_format == "thd":
             # Rank-level padded offsets (2 chunks per sequence on this rank)
@@ -3609,7 +3656,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         q_part = q
                         k_part = k_ag
                         v_part = v_ag
-                        if packed_super_sequence:
+                        if packed_partition:
                             window_size_per_step[i] = (-1, 0)
                             max_seqlen_kv_ = max_seqlen_kv
                         else:
@@ -4064,7 +4111,11 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                 if fa_utils.v2_6_0_plus:
                     fa_backward_kwargs["softcap"] = 0.0
 
-        local_seq_chunk_ids = [rank, 2 * cp_size - rank - 1]
+        local_seq_chunk_ids = (
+            [rank]
+            if ctx.thd_cp_partition == "packed_contiguous"
+            else [rank, 2 * cp_size - rank - 1]
+        )
         for i in range(len(local_seq_chunk_ids) + 1):
             if i < len(local_seq_chunk_ids):
                 # FA3 uses internal per-call workspace. Consecutive AG per-step
@@ -4079,7 +4130,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         q_part = q
                         k_part = k_ag
                         v_part = v_ag
-                        if ctx.thd_cp_partition == "packed_super_sequence":
+                        if ctx.thd_cp_partition != "per_document":
                             max_seqlen_kv = ctx.max_seqlen_kv
                         else:
                             kv_range, _ = get_kv_seq_info_after_all_gather(
@@ -5200,6 +5251,10 @@ def attn_forward_func_with_cp(
     producers must use the same selector with :func:`get_batch_on_this_cp_rank` or
     :func:`get_thd_partitioned_indices`.
 
+    Experimental ``thd_cp_partition="packed_contiguous"`` instead assigns one contiguous
+    physical-buffer chunk to each rank. It uses the same restricted attention surface but
+    trades mirrored causal load balance for one attention step per rank.
+
     For qkv_format = {'bshd', 'sbhd'}, the token re-ordering is illustrated as below, for an example
     use case of s = 12, attn_mask_type = 'causal', and cp_size = 2. seq_pos indicates each token's position
     in their corresponding sequence.
@@ -5279,10 +5334,14 @@ def attn_forward_func_with_cp(
         "sbhd",
         "thd",
     ], f"Context parallelism does not support {qkv_format=}!"
-    assert thd_cp_partition in ["per_document", "packed_super_sequence"]
-    if thd_cp_partition == "packed_super_sequence":
+    assert thd_cp_partition in [
+        "per_document",
+        "packed_super_sequence",
+        "packed_contiguous",
+    ]
+    if thd_cp_partition != "per_document":
         assert qkv_format == "thd" and cp_comm_type == "all_gather", (
-            "THD super-sequence partitioning requires qkv_format='thd' and "
+            "Packed THD partitioning requires qkv_format='thd' and "
             "cp_comm_type='all_gather'."
         )
     assert (
@@ -5517,7 +5576,8 @@ def get_batch_on_this_cp_rank(
     Which are parallelized across GPUs in a context parallel group.
     This version works with variable-length sequences using cumulative sequence lengths.
     ``thd_cp_partition="packed_super_sequence"`` chunks the complete physical THD
-    buffer; the default ``"per_document"`` chunks each padded sequence independently.
+    buffer with mirrored ownership; ``"packed_contiguous"`` assigns one contiguous
+    chunk per rank. The default ``"per_document"`` chunks each padded sequence independently.
     """
     if qvk_format not in ["thd", "bshd", "sbhd"]:
         raise ValueError(f"Unsupported qvk_format: {qvk_format}!")

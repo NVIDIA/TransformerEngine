@@ -602,13 +602,18 @@ class DotProductAttention(TransformerEngineBaseModule):
         thd_cp_partition : str, default = "per_document"
                            THD token partition contract. ``"packed_super_sequence"`` applies
                            mirrored chunks to the whole token buffer and currently requires
-                           all-gather CP.
+                           all-gather CP; ``"packed_contiguous"`` assigns one contiguous
+                           whole-buffer chunk per rank under the same restriction.
         """
         self.cp_group = cp_group
         self.cp_global_ranks = cp_global_ranks
         self.cp_stream = cp_stream
         self.cp_comm_type = cp_comm_type
-        assert thd_cp_partition in ["per_document", "packed_super_sequence"]
+        assert thd_cp_partition in [
+            "per_document",
+            "packed_super_sequence",
+            "packed_contiguous",
+        ]
         self.thd_cp_partition = thd_cp_partition
 
     def init_fp8_metadata(self, num_gemms: int = 1) -> None:
