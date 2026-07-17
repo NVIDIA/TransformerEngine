@@ -7,6 +7,7 @@
 #include "config_and_params.h"
 
 #include <cudnn.h>
+#include <cudnn_frontend_version.h>
 
 #include <cstring>
 
@@ -39,23 +40,37 @@ void FusedAttnConfig::derive() {
   const int64_t sq = static_cast<int64_t>(max_seqlen_q);
   const int64_t skv = static_cast<int64_t>(max_seqlen_kv);
 
-  const NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
-  const NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
+  // convenience fields
+  q_format = nvte_get_q_format(qkv_layout);
+  kv_format = nvte_get_kv_format(qkv_layout);
   const NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
-  const bool is_paged_kv = (layout_group == NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD);
+  is_paged_kv = (layout_group == NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD);
+  is_ragged_q = (q_format == NVTE_QKV_Format::NVTE_THD);
+  is_ragged_kv = (kv_format == NVTE_QKV_Format::NVTE_THD);
+  is_padding = (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK) ||
+               (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK) ||
+               (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
+  is_causal = (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK) ||
+              (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK);
+  is_causal_bottom_right = (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK) ||
+                    (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
 
+  // bucket the THD (ragged) batch and token counts
   const size_t tokens_q = num_tokens_q != 0 ? num_tokens_q : static_cast<size_t>(b * sq);
   const size_t tokens_kv = num_tokens_kv != 0 ? num_tokens_kv : static_cast<size_t>(b * skv);
-
-  // Bucket the THD (ragged) batch and token counts so the support probes and the runtime
-  // dispatch quantize into the same bucket, i.e. build and cache the same cuDNN graph.
-  const bool is_ragged_q = (q_format == NVTE_QKV_Format::NVTE_THD);
-  const bool is_ragged_kv = (kv_format == NVTE_QKV_Format::NVTE_THD);
   bucketed_batch_size =
       (is_ragged_q || is_ragged_kv) ? fused_attn::get_max_batch_size(batch_size) : 0;
   bucketed_num_tokens_q = is_ragged_q ? fused_attn::get_max_tokens(tokens_q) : 0;
   bucketed_num_tokens_kv = is_ragged_kv ? fused_attn::get_max_tokens(tokens_kv) : 0;
 
+  // use of cu_seqlens vs actual_seqlens
+  const size_t cudnn_runtime_version = cudnnGetVersion();
+  const bool is_dropout = is_training && dropout != 0.0f;
+  uses_cu_seqlens_directly = CUDNN_FRONTEND_VERSION >= 12500 &&
+                             (CUDNN_VERSION >= 92400 && cudnn_runtime_version >= 92400) &&
+                             !is_dropout;
+
+  // paged KV dimensions
   if (is_paged_kv) {
     if (num_pages_k == 0) {
       num_pages_k = static_cast<size_t>(b);
@@ -81,54 +96,52 @@ void FusedAttnConfig::derive() {
 FusedAttnConfig FusedAttnConfig::make_cache_key() const {
   FusedAttnConfig cache_cfg = *this;
 
-  const int64_t s_q = static_cast<int64_t>(cache_cfg.max_seqlen_q);
-  const int64_t s_kv = static_cast<int64_t>(cache_cfg.max_seqlen_kv);
-  const bool is_padding =
-      (cache_cfg.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK) ||
-      (cache_cfg.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK) ||
-      (cache_cfg.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
-  const bool is_bottom_right =
-      (cache_cfg.attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK) ||
-      (cache_cfg.attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
-  if (is_bottom_right && s_q == s_kv && !is_padding) {
+  // Normalize bottom_right_diagonal (the cuDNN diagonal alignment). The impl only turns it into a
+  // real causal band under `is_causal || is_causal_bottom_right` or a sliding window; otherwise the
+  // alignment is inert, so canonicalize it (like attn_scale) to false. This keeps the backend
+  // support probe (which passes a possibly-different brd, e.g. default false) and the real op on a
+  // single cached graph.
+  const bool has_window = cache_cfg.window_size_left != -1 || cache_cfg.window_size_right != -1;
+  if (!cache_cfg.is_causal && !cache_cfg.is_causal_bottom_right && !has_window) {
+    cache_cfg.bottom_right_diagonal = false;
+  } else if (cache_cfg.is_causal_bottom_right && cache_cfg.max_seqlen_q == cache_cfg.max_seqlen_kv &&
+             !cache_cfg.is_padding) {
+    // square bottom-right causal collapses to top-left causal (mirrors the impl).
     cache_cfg.bottom_right_diagonal = false;
   }
 
-  const NVTE_QKV_Format q_format = nvte_get_q_format(cache_cfg.qkv_layout);
-  const NVTE_QKV_Format kv_format = nvte_get_kv_format(cache_cfg.qkv_layout);
-  const bool is_ragged_q = (q_format == NVTE_QKV_Format::NVTE_THD);
-  const bool is_ragged_kv = (kv_format == NVTE_QKV_Format::NVTE_THD);
-  const auto cudnn_runtime_version = cudnnGetVersion();
-  const int device_id = cuda::current_device();
-  const int sm_arch_ = cuda::sm_arch(device_id);
-
-  if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= 90600 && sm_arch_ != 120) {
-    cache_cfg.batch_size = cache_cfg.bucketed_batch_size;
-    if (is_ragged_q) {
-      cache_cfg.max_seqlen_q = cache_cfg.bucketed_num_tokens_q;
-    }
-    if (is_ragged_kv) {
-      cache_cfg.max_seqlen_kv = cache_cfg.bucketed_num_tokens_kv;
+  // Bucket THD (ragged) batch and token counts
+  if (cache_cfg.is_ragged_q || cache_cfg.is_ragged_kv) {
+    const auto cudnn_runtime_version = cudnnGetVersion();
+    const int sm_arch_ = cuda::sm_arch(cuda::current_device());
+    if (cudnn_runtime_version >= 90600 && sm_arch_ != 120) {
+      if (cache_cfg.is_ragged_q) {
+        cache_cfg.max_seqlen_q = cache_cfg.bucketed_num_tokens_q;
+      }
+      if (cache_cfg.is_ragged_kv) {
+        cache_cfg.max_seqlen_kv = cache_cfg.bucketed_num_tokens_kv;
+      }
+      cache_cfg.num_tokens_q = 0;
+      cache_cfg.num_tokens_kv = 0;
+      const bool bucket_batch = !is_forward || !cache_cfg.uses_cu_seqlens_directly;
+      if (bucket_batch) {
+        cache_cfg.batch_size = cache_cfg.bucketed_batch_size;
+      }
     }
   }
 
-  // cuDNN graph supports dynamic shapes for batch_size
-  cache_cfg.batch_size = 1;
-  cache_cfg.bucketed_batch_size = 1;
+  // attn_scale is a pass-by-value graph input and different scales can share the same cached graph
   cache_cfg.attn_scale = 1.0f;
 
-  // Drop from each graph's cache key the fields the graph does not actually consume, so a graph
-  // prewarmed by a backend probe (which may carry different values for those ignored fields, e.g.
-  // the framework get_attention_backend probe) is still reused at execution. The forward graph
-  // produces O (and optionally softmax stats / max logit) but never consumes the dO/dQKV dtypes or
-  // the backward-only determinism choice. The backward graph consumes dO/dQKV and honors
-  // determinism but never produces the forward max-logit output.
+  // Restrict each direction's key to the fields its graph actually consumes, so
+  // no redundant graphs are built and no cache misses either
   if (is_forward) {
-    if (cache_cfg.is_training) {
-      cache_cfg.do_dtype = kNVTEBFloat16;
-      cache_cfg.dqkv_dtype = kNVTEBFloat16;
-      cache_cfg.deterministic = false;
-    }
+    cache_cfg.do_dtype = kNVTEBFloat16;
+    cache_cfg.dqkv_dtype = kNVTEBFloat16;
+    cache_cfg.do_format = NVTE_QKV_Format_NOT_SET;
+    cache_cfg.dqkv_layout = NVTE_QKV_Layout_NOT_SET;
+    cache_cfg.do_scale_inv_format = NVTE_QKV_Format_NOT_SET;
+    cache_cfg.deterministic = false;
   } else {
     cache_cfg.return_max_logit = false;
   }

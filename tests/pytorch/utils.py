@@ -311,9 +311,9 @@ class ModelConfig:
         self.attn_type = "self" if (self.max_seqlen_q == self.max_seqlen_kv) else "cross"
         self.bias_shape = bias_shape
         self.window_size = check_set_window_size(self.attn_mask_type, window_size)
-        self.bottom_right_diagonal = self.attn_mask_type in {
-            "causal_bottom_right",
-            "padding_causal_bottom_right",
+        self.bottom_right_diagonal = self.attn_mask_type not in {
+            "causal",
+            "padding_causal",
         }
         self.context_parallel = context_parallel
         self.cp_comm_type = cp_comm_type

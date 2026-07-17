@@ -59,15 +59,6 @@ struct FusedAttnConfig {
   size_t num_tokens_q = 0;
   size_t num_tokens_kv = 0;
 
-  // derived tensor dimensions (internal only)
-  size_t bucketed_batch_size = 0;
-  size_t bucketed_num_tokens_q = 0;
-  size_t bucketed_num_tokens_kv = 0;
-
-  // query control (internal only, excluded from attribute serialization, operator<,
-  // and the graph cache key since it is not a property of the cuDNN graph)
-  bool is_forward = false;
-
   // paged KV dimensions
   size_t num_pages_k = 0;
   size_t num_pages_v = 0;
@@ -81,6 +72,28 @@ struct FusedAttnConfig {
   size_t bias_num_heads = 0;
   size_t bias_seqlen_q = 0;
   size_t bias_seqlen_kv = 0;
+
+  // Internal-only fields: never part of attribute serialization, operator<, or the graph cache key.
+  // Filled by derive() or set by caller (i.e. is_forward). Added for convinence purposes and do not
+  // represent graph properties.
+
+  // Direction to build the cuDNN graph for; steers make_cache_key() normalization.
+  bool is_forward = false;
+  // THD batch/token counts; make_cache_key() folds these into batch_size/max_seqlen_*.
+  size_t bucketed_batch_size = 0;
+  size_t bucketed_num_tokens_q = 0;
+  size_t bucketed_num_tokens_kv = 0;
+  // Uses cu_seqlens or actual_seqlens.
+  bool uses_cu_seqlens_directly = false;
+  // Convinence fields to avoid recompute.
+  NVTE_QKV_Format q_format = NVTE_QKV_Format_NOT_SET;
+  NVTE_QKV_Format kv_format = NVTE_QKV_Format_NOT_SET;
+  bool is_ragged_q = false;
+  bool is_ragged_kv = false;
+  bool is_paged_kv = false;
+  bool is_padding = false;
+  bool is_causal = false;
+  bool is_causal_bottom_right = false;
 
   static constexpr size_t attr_sizes[] = {
       // basic attention settings
@@ -140,8 +153,7 @@ struct FusedAttnConfig {
                     dqkv_dtype, qkv_layout, o_format, do_format, dqkv_layout, qkv_scale_inv_format,
                     do_scale_inv_format, batch_size, num_attn_heads, num_gqa_groups,
                     head_dim_qk, head_dim_v, max_seqlen_q, max_seqlen_kv, num_tokens_q,
-                    num_tokens_kv, bucketed_batch_size, bucketed_num_tokens_q,
-                    bucketed_num_tokens_kv, num_pages_k, num_pages_v, page_size_k, page_size_v,
+                    num_tokens_kv, num_pages_k, num_pages_v, page_size_k, page_size_v,
                     max_pages_per_seq_k, max_pages_per_seq_v, bias_batch_size, bias_num_heads,
                     bias_seqlen_q, bias_seqlen_kv) <
            std::tie(rhs.is_training, rhs.deterministic, rhs.cuda_graph, rhs.return_max_logit,
@@ -152,8 +164,7 @@ struct FusedAttnConfig {
                     rhs.qkv_scale_inv_format, rhs.do_scale_inv_format, rhs.batch_size,
                     rhs.num_attn_heads,
                     rhs.num_gqa_groups, rhs.head_dim_qk, rhs.head_dim_v, rhs.max_seqlen_q,
-                    rhs.max_seqlen_kv, rhs.num_tokens_q, rhs.num_tokens_kv, rhs.bucketed_batch_size,
-                    rhs.bucketed_num_tokens_q, rhs.bucketed_num_tokens_kv, rhs.num_pages_k,
+                    rhs.max_seqlen_kv, rhs.num_tokens_q, rhs.num_tokens_kv, rhs.num_pages_k,
                     rhs.num_pages_v, rhs.page_size_k, rhs.page_size_v, rhs.max_pages_per_seq_k,
                     rhs.max_pages_per_seq_v, rhs.bias_batch_size, rhs.bias_num_heads,
                     rhs.bias_seqlen_q, rhs.bias_seqlen_kv);
@@ -164,10 +175,9 @@ struct FusedAttnConfig {
   void derive();
 
   // Return a normalized copy of this config to be used as a key for the cuDNN graph cache.
-  // It drops fields that are invariant (e.g. batch_size) or irrelevant (e.g. dO/dQKV dtypes
+  // It drops fields that are invariant (e.g. attn_scale) or irrelevant (e.g. dO/dQKV dtypes
   // and `deterministic` for forward, and `return_max_logit` for backward) to the corresponding graph.
-  // This helps avoid redundant graph builds and cache misses. Forward vs. backward is taken from
-  // the `is_forward` member.
+  // This helps avoid redundant graph builds and cache misses.
   FusedAttnConfig make_cache_key() const;
 };
 

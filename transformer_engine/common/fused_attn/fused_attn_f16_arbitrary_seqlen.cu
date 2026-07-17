@@ -83,7 +83,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
   int64_t bias_skv = static_cast<int64_t>(cfg.bias_seqlen_kv);
   const bool is_training = cfg.is_training;
   const bool return_max_logit = cfg.return_max_logit;
-  const float scaling_factor = cfg.attn_scale;
+  float scaling_factor = cfg.attn_scale;
   const float dropout_probability = cfg.dropout;
   const NVTE_QKV_Layout qkv_layout = cfg.qkv_layout;
   const NVTE_QKV_Format o_format = cfg.o_format;
@@ -98,29 +98,21 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
   bool is_alibi = (bias_type == NVTE_Bias_Type::NVTE_ALIBI);
   bool is_causal = ((mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK) ||
                     (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
-  bool is_bottom_right = ((mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK) ||
-                          (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK));
-  bool is_padding = ((mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK) ||
-                     (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK) ||
-                     (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK));
-  if (is_bottom_right && s_q == s_kv && !is_padding) {
-    is_causal = true;
-    is_bottom_right = false;
-    bottom_right_diagonal = false;
-  }
+  bool is_causal_bottom_right = cfg.is_causal_bottom_right;
+  bool is_padding = cfg.is_padding;
   bool is_softmax_offset = (softmax_type != NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX);
   bool is_dropout = (is_training && dropout_probability != 0.0f);
-  NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
-  NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
-  bool is_ragged_q = (q_format == NVTE_QKV_Format::NVTE_THD);
-  bool is_ragged_kv = (kv_format == NVTE_QKV_Format::NVTE_THD);
+  NVTE_QKV_Format q_format = cfg.q_format;
+  NVTE_QKV_Format kv_format = cfg.kv_format;
+  bool is_ragged_q = cfg.is_ragged_q;
+  bool is_ragged_kv = cfg.is_ragged_kv;
   const auto cudnn_runtime_version = cudnnGetVersion();
   const int device_id = cuda::current_device();
   const int sm_arch_ = cuda::sm_arch(device_id);
   bool use_ragged_stats = is_ragged_q && cudnn_runtime_version >= 90600 && sm_arch_ != 120;
 
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
-  bool is_paged_kv = (layout_group == NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD);
+  bool is_paged_kv = cfg.is_paged_kv;
   if (is_paged_kv) {
     NVTE_CHECK(is_padding, "Paged attention requires padding mask!");
   }
@@ -128,16 +120,9 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
   // Newer versions of cuDNN SDPA can accept sequence lengths directly as a cumulative
   // tensor, and can accept ragged offsets in arbitrary units (such as tokens) instead
   // of elements. Take advantage of this if possible to avoid 2 extra kernel calls.
-  const bool use_cu_seqlens_directly =
-      CUDNN_FRONTEND_VERSION >= 12500 &&
-      // The frontend gates cu_seq_len support on min(compile-time, runtime) cuDNN
-      // version, so we'll do the same.
-      (CUDNN_VERSION >= 92400 && cudnn_runtime_version >= 92400) &&
-      // This extra restriction is needed because cuDNN frontend doesn't yet allow
-      // the combination of dropout and stats generation for the fprop unified engine,
-      // so any such request would always get routed to the old composite SDPA engine
-      // (which doesn't support cu_seqlens). Remove this restriction when possible.
-      !is_dropout;
+  // Defined on FusedAttnConfig so make_cache_key() keys the graph on the matching batch
+  // handling (real batch here, bucketed batch on the legacy path); keep the two in sync.
+  const bool use_cu_seqlens_directly = cfg.uses_cu_seqlens_directly;
 
   // keep original batch size because cu_seqlens are created with [b+1] shape
   int64_t actual_b = b;
@@ -203,7 +188,15 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     auto get_graph = [&](CacheType &cache, const FusedAttnConfig &descriptor) -> graph_and_tensors {
       // if hit, return
       auto it = cache.find(descriptor);
-      if (it != cache.end()) {
+      bool cache_hit = (it != cache.end());                            // [GRAPH-DEBUG]
+      fused_attn_graph_debug::note_cache_lookup("fwd", cache_hit, cfg);  // [GRAPH-DEBUG]
+      if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= 90600 &&      // [GRAPH-DEBUG]
+          sm_arch_ != 120) {                                                     // [GRAPH-DEBUG]
+        fused_attn_graph_debug::note_thd_lookup(                                 // [GRAPH-DEBUG]
+            "fwd", cache_hit, !cache_hit || fused_attn_graph_debug::cache_disabled(),
+            /*legacy=*/!use_cu_seqlens_directly);                                // [GRAPH-DEBUG]
+      }                                                                          // [GRAPH-DEBUG]
+      if (cache_hit && !fused_attn_graph_debug::cache_disabled()) {     // [GRAPH-DEBUG]
         auto graph = it->second;
         return graph;
       }
@@ -303,7 +296,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       if (cudnn_runtime_version >= 90600 && window_size_right != -1) {
         sdpa_options.set_diagonal_band_right_bound(window_size_right);
       }
-      if (is_causal || is_bottom_right) {
+      if (is_causal || is_causal_bottom_right) {
         sdpa_options.set_diagonal_band_right_bound(0);
       }
 
@@ -660,7 +653,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
   int64_t bias_h = static_cast<int64_t>(cfg.bias_num_heads);
   int64_t bias_sq = static_cast<int64_t>(cfg.bias_seqlen_q);
   int64_t bias_skv = static_cast<int64_t>(cfg.bias_seqlen_kv);
-  const float scaling_factor = cfg.attn_scale;
+  float scaling_factor = cfg.attn_scale;
   const float dropout_probability = cfg.dropout;
   const NVTE_QKV_Layout qkv_layout = cfg.qkv_layout;
   const NVTE_QKV_Format o_format = cfg.o_format;
@@ -678,22 +671,14 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
   bool is_alibi = (bias_type == NVTE_Bias_Type::NVTE_ALIBI);
   bool is_causal = ((mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK) ||
                     (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
-  bool is_bottom_right = ((mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK) ||
-                          (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK));
-  bool is_padding = ((mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK) ||
-                     (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK) ||
-                     (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK));
-  if (is_bottom_right && s_q == s_kv && !is_padding) {
-    is_causal = true;
-    is_bottom_right = false;
-    bottom_right_diagonal = false;
-  }
+  bool is_causal_bottom_right = cfg.is_causal_bottom_right;
+  bool is_padding = cfg.is_padding;
   bool is_softmax_offset = (softmax_type != NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX);
   bool is_dropout = (dropout_probability != 0.0f);
-  NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
-  NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
-  bool is_ragged_q = (q_format == NVTE_QKV_Format::NVTE_THD);
-  bool is_ragged_kv = (kv_format == NVTE_QKV_Format::NVTE_THD);
+  NVTE_QKV_Format q_format = cfg.q_format;
+  NVTE_QKV_Format kv_format = cfg.kv_format;
+  bool is_ragged_q = cfg.is_ragged_q;
+  bool is_ragged_kv = cfg.is_ragged_kv;
   const auto cudnn_runtime_version = cudnnGetVersion();
   const int device_id = cuda::current_device();
   const int sm_arch_ = cuda::sm_arch(device_id);
@@ -752,7 +737,16 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
     auto get_graph = [&](CacheType &cache, const FusedAttnConfig &descriptor) -> graph_and_tensors {
       // if hit, return
       auto it = cache.find(descriptor);
-      if (it != cache.end()) {
+      bool cache_hit = (it != cache.end());                            // [GRAPH-DEBUG]
+      fused_attn_graph_debug::note_cache_lookup("bwd", cache_hit, cfg);  // [GRAPH-DEBUG]
+      if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= 90600 &&      // [GRAPH-DEBUG]
+          sm_arch_ != 120) {                                                     // [GRAPH-DEBUG]
+        // The backward impl has no cu_seqlens-directly path; it always buckets the batch.
+        fused_attn_graph_debug::note_thd_lookup(                                 // [GRAPH-DEBUG]
+            "bwd", cache_hit, !cache_hit || fused_attn_graph_debug::cache_disabled(),
+            /*legacy=*/true);                                                    // [GRAPH-DEBUG]
+      }                                                                          // [GRAPH-DEBUG]
+      if (cache_hit && !fused_attn_graph_debug::cache_disabled()) {     // [GRAPH-DEBUG]
         auto graph = it->second;
         return graph;
       }
@@ -879,7 +873,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       if (cudnn_runtime_version >= 90600 && window_size_right != -1) {
         sdpa_backward_options.set_diagonal_band_right_bound(window_size_right);
       }
-      if (is_causal || is_bottom_right) {
+      if (is_causal || is_causal_bottom_right) {
         sdpa_backward_options.set_diagonal_band_right_bound(0);
       }
 
@@ -1365,6 +1359,7 @@ void fused_attn_arbitrary_seqlen_bwd(const FusedAttnConfig &cfg, const Tensor *i
 
 std::string is_supported_f16_fwd(const FusedAttnConfig &cfg, cudnnHandle_t handle) {
   FusedAttnConfig graph_cfg = cfg;
+  graph_cfg.is_forward = true;
   graph_cfg.derive();
 
   size_t workspace_size = 0;
@@ -1389,6 +1384,7 @@ std::string is_supported_f16_fwd(const FusedAttnConfig &cfg, cudnnHandle_t handl
 
 std::string is_supported_f16_bwd(const FusedAttnConfig &cfg, cudnnHandle_t handle) {
   FusedAttnConfig graph_cfg = cfg;
+  graph_cfg.is_forward = false;
   graph_cfg.derive();
 
   size_t workspace_size = 0;

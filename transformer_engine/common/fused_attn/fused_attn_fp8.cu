@@ -41,7 +41,7 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
   const int64_t d_qk = static_cast<int64_t>(cfg.head_dim_qk);
   const int64_t d_v = static_cast<int64_t>(cfg.head_dim_v);
   const bool is_training = cfg.is_training;
-  const float scaling_factor = cfg.attn_scale;
+  float scaling_factor = cfg.attn_scale;
   const float dropout_probability = cfg.dropout;
   const NVTE_QKV_Layout qkv_layout = cfg.qkv_layout;
   const NVTE_QKV_Format o_format = cfg.o_format;
@@ -58,8 +58,8 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
   bool is_alibi = (bias_type == NVTE_Bias_Type::NVTE_ALIBI);
   bool is_causal = ((mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK) ||
                     (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
-  bool is_padding = ((mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK) ||
-                     (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
+  bool is_causal_bottom_right = cfg.is_causal_bottom_right;
+  bool is_padding = cfg.is_padding;
   bool is_dropout = (is_training && dropout_probability != 0.0f);
   bool is_softmax_offset = (softmax_type != NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX);
   auto bias_b = b;
@@ -134,7 +134,9 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
     auto get_graph = [&](CacheType& cache, const FusedAttnConfig& descriptor) -> graph_and_tensors {
       // if hit, return
       auto it = cache.find(descriptor);
-      if (it != cache.end()) {
+      bool cache_hit = (it != cache.end());                            // [GRAPH-DEBUG]
+      fused_attn_graph_debug::note_cache_lookup("fwd", cache_hit, cfg);  // [GRAPH-DEBUG]
+      if (cache_hit && !fused_attn_graph_debug::cache_disabled()) {     // [GRAPH-DEBUG]
         auto graph = it->second;
         return graph;
       }
@@ -197,10 +199,10 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
       } else if (is_mxfp8) {
         NVTE_QKV_Format q_scale_inv_format = (qkv_scale_inv_format != NVTE_QKV_Format_NOT_SET)
                                                  ? qkv_scale_inv_format
-                                                 : nvte_get_q_format(qkv_layout);
+                                                 : cfg.q_format;
         NVTE_QKV_Format kv_scale_inv_format = (qkv_scale_inv_format != NVTE_QKV_Format_NOT_SET)
                                                   ? qkv_scale_inv_format
-                                                  : nvte_get_kv_format(qkv_layout);
+                                                  : cfg.kv_format;
         std::vector<int64_t> q_scale_strides(4);
         std::vector<int64_t> k_scale_strides(4);
         std::vector<int64_t> v_scale_strides(4);
@@ -238,6 +240,7 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
       sdpa_options = fe::graph::SDPA_fp8_attributes()
                          .set_name("sdpa_fp8")
                          .set_generate_stats(true)
+                         .set_causal_mask(is_causal)
                          .set_attn_scale(attn_scale);
 
       fe::DiagonalAlignment_t const& diagonal_alignment =
@@ -253,7 +256,7 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
           sdpa_options.set_diagonal_band_right_bound(window_size_right);
         }
       }
-      if (is_causal) {
+      if (is_causal_bottom_right) {
         sdpa_options.set_diagonal_band_right_bound(0);
       }
 
@@ -512,7 +515,7 @@ void fused_attn_fp8_bwd_impl(
   const int64_t s_kv = static_cast<int64_t>(cfg.max_seqlen_kv);
   const int64_t d_qk = static_cast<int64_t>(cfg.head_dim_qk);
   const int64_t d_v = static_cast<int64_t>(cfg.head_dim_v);
-  const float scaling_factor = cfg.attn_scale;
+  float scaling_factor = cfg.attn_scale;
   const float dropout_probability = cfg.dropout;
   const NVTE_QKV_Layout qkv_layout = cfg.qkv_layout;
   const NVTE_QKV_Format o_format = cfg.o_format;
@@ -533,8 +536,8 @@ void fused_attn_fp8_bwd_impl(
   bool is_alibi = (bias_type == NVTE_Bias_Type::NVTE_ALIBI);
   bool is_causal = ((mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK) ||
                     (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
-  bool is_padding = ((mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK) ||
-                     (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
+  bool is_causal_bottom_right = cfg.is_causal_bottom_right;
+  bool is_padding = cfg.is_padding;
   bool is_dropout = (dropout_probability != 0.0f);
   bool is_softmax_offset = (softmax_type != NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX);
   auto bias_b = b;
@@ -615,7 +618,9 @@ void fused_attn_fp8_bwd_impl(
     auto get_graph = [&](CacheType& cache, const FusedAttnConfig& descriptor) -> graph_and_tensors {
       // if hit, return
       auto it = cache.find(descriptor);
-      if (it != cache.end()) {
+      bool cache_hit = (it != cache.end());                            // [GRAPH-DEBUG]
+      fused_attn_graph_debug::note_cache_lookup("bwd", cache_hit, cfg);  // [GRAPH-DEBUG]
+      if (cache_hit && !fused_attn_graph_debug::cache_disabled()) {     // [GRAPH-DEBUG]
         auto graph = it->second;
         return graph;
       }
@@ -712,8 +717,8 @@ void fused_attn_fp8_bwd_impl(
           scale_dV = mha_graph->tensor(1.0f);
         }
       } else if (is_mxfp8) {
-        NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
-        NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
+        NVTE_QKV_Format q_format = cfg.q_format;
+        NVTE_QKV_Format kv_format = cfg.kv_format;
         NVTE_QKV_Format q_scale_inv_format =
             (qkv_scale_inv_format != NVTE_QKV_Format_NOT_SET) ? qkv_scale_inv_format : q_format;
         NVTE_QKV_Format kv_scale_inv_format =
@@ -817,6 +822,7 @@ void fused_attn_fp8_bwd_impl(
       fe::graph::SDPA_fp8_backward_attributes sdpa_backward_options;
       sdpa_backward_options = fe::graph::SDPA_fp8_backward_attributes()
                                   .set_name("sdpa_fp8_backward")
+                                  .set_causal_mask(is_causal)
                                   .set_attn_scale(attn_scale);
 
       fe::DiagonalAlignment_t const& diagonal_alignment =
@@ -832,7 +838,7 @@ void fused_attn_fp8_bwd_impl(
           sdpa_backward_options.set_diagonal_band_right_bound(window_size_right);
         }
       }
-      if (is_causal) {
+      if (is_causal_bottom_right) {
         sdpa_backward_options.set_diagonal_band_right_bound(0);
       }
 
@@ -1347,6 +1353,7 @@ void fused_attn_fp8_bwd(const FusedAttnConfig& cfg, const Tensor* input_Q, const
 
 std::string is_supported_fp8_fwd(const FusedAttnConfig& cfg, cudnnHandle_t handle) {
   FusedAttnConfig graph_cfg = cfg;
+  graph_cfg.is_forward = true;
   graph_cfg.derive();
 
   size_t workspace_size = 0;
@@ -1372,6 +1379,7 @@ std::string is_supported_fp8_fwd(const FusedAttnConfig& cfg, cudnnHandle_t handl
 
 std::string is_supported_fp8_bwd(const FusedAttnConfig& cfg, cudnnHandle_t handle) {
   FusedAttnConfig graph_cfg = cfg;
+  graph_cfg.is_forward = false;
   graph_cfg.derive();
 
   size_t workspace_size = 0;
