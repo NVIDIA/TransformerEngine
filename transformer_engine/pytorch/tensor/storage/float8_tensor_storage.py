@@ -61,9 +61,7 @@ class _FromFloat8Func(torch.autograd.Function):
                 output = output.movedim(0, -1).contiguous()
             return output
 
-        raise RuntimeError(
-            "Float8TensorStorage has neither rowwise nor columnwise data"
-        )
+        raise RuntimeError("Float8TensorStorage has neither rowwise nor columnwise data")
 
     @staticmethod
     def backward(

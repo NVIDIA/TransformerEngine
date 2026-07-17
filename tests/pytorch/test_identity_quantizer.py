@@ -660,7 +660,6 @@ class TestIdentityQuantizerUnit:
         assert zeros.rowwise_sub_storage._hp_data.dtype == torch.bfloat16
         assert zeros.columnwise_sub_storage._hp_data.dtype == torch.float32
 
-
     def test_storage_dequantize_defaults_to_nominal_dtype(self):
         payload = torch.randn(4, 8, dtype=torch.float32)
         storage = IdentityTensorStorage(

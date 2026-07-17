@@ -615,7 +615,6 @@ class TestHybridColumnwiseSource:
 
         assert columnwise_src.dtype == input_tensor.dtype
 
-
     def test_columnwise_only_uses_transient_rowwise_source(self, input_tensor):
         hq = self._make_quantizer(columnwise_source="rowwise_dequantized")
         hq.set_usage(rowwise=False, columnwise=True)
@@ -6459,15 +6458,11 @@ class TestFloat8TransposeOnlySplit:
         assert isinstance(sliced, Float8Tensor)
         assert sliced._data is None
         assert sliced._transpose.shape == torch.Size((16, 6))
-        torch.testing.assert_close(
-            sliced.dequantize(), expected[2:8], rtol=0.0, atol=0.0
-        )
+        torch.testing.assert_close(sliced.dequantize(), expected[2:8], rtol=0.0, atol=0.0)
         assert isinstance(selected, Float8Tensor)
         assert selected._data is None
         assert selected._transpose.shape == torch.Size((12,))
-        torch.testing.assert_close(
-            selected.dequantize(), expected[:, 3], rtol=0.0, atol=0.0
-        )
+        torch.testing.assert_close(selected.dequantize(), expected[:, 3], rtol=0.0, atol=0.0)
 
     def test_as_strided_row_shard_preserves_transpose_only_payload(self):
         tensor, expected = self._make_valid_transpose_only_float8_tensor()
@@ -6477,9 +6472,7 @@ class TestFloat8TransposeOnlySplit:
         assert isinstance(shard, Float8Tensor)
         assert shard._data is None
         assert shard._transpose.shape == torch.Size((16, 5))
-        torch.testing.assert_close(
-            shard.dequantize(), expected[1:6], rtol=0.0, atol=0.0
-        )
+        torch.testing.assert_close(shard.dequantize(), expected[1:6], rtol=0.0, atol=0.0)
 
     def test_as_strided_falls_back_for_nonrepresentable_layout(self):
         tensor, expected = self._make_valid_transpose_only_float8_tensor()
@@ -6845,8 +6838,7 @@ class TestHybridTorchDispatchFSDP2Ops:
         dst = quantizer.quantize(torch.zeros_like(hybrid_param.dequantize()))
         src.update_usage(columnwise_usage=False)
         dst_before = tuple(
-            None if tensor is None else tensor.clone()
-            for tensor in _as_data_tensor_tuple(dst)
+            None if tensor is None else tensor.clone() for tensor in _as_data_tensor_tuple(dst)
         )
 
         with pytest.raises(
@@ -7483,9 +7475,7 @@ class TestHybridFloat8ColumnwiseOnlyHopperPath:
         assert len(buffers) == 1
         assert buffers[0].shape == out.shape
         assert buffers[0].is_contiguous()
-        torch.testing.assert_close(
-            buffers[0], out._transpose.movedim(0, -1).contiguous()
-        )
+        torch.testing.assert_close(buffers[0], out._transpose.movedim(0, -1).contiguous())
         assert metadata == {
             "field_names": ("_transpose",),
             "transport_layout": "columnwise_m_major",
@@ -7503,12 +7493,8 @@ class TestHybridFloat8ColumnwiseOnlyHopperPath:
         assert rebuilt._data is None
         assert rebuilt._transpose.shape == torch.Size((64, 64))
         assert not rebuilt._transpose_invalid
-        torch.testing.assert_close(
-            rebuilt._transpose, gathered.movedim(-1, 0).contiguous()
-        )
-        torch.testing.assert_close(
-            rebuilt.dequantize(), torch.cat((expected, expected), dim=0)
-        )
+        torch.testing.assert_close(rebuilt._transpose, gathered.movedim(-1, 0).contiguous())
+        torch.testing.assert_close(rebuilt.dequantize(), torch.cat((expected, expected), dim=0))
 
     def test_hybrid_fsdp_two_rank_gather_and_buffer_reuse(self):
         shards = [self._make_hybrid_shard(value) for value in (1.0, 2.0)]
@@ -7528,9 +7514,7 @@ class TestHybridFloat8ColumnwiseOnlyHopperPath:
         )
         expected = torch.cat((shards[0][1], shards[1][1]), dim=0)
 
-        rebuilt, _ = shards[0][0].fsdp_post_all_gather(
-            gathered, extracted[0][1], torch.bfloat16
-        )
+        rebuilt, _ = shards[0][0].fsdp_post_all_gather(gathered, extracted[0][1], torch.bfloat16)
 
         assert rebuilt.shape == torch.Size((64, 64))
         assert rebuilt._columnwise_storage.shape == torch.Size((64, 64))

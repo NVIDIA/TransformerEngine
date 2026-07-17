@@ -669,11 +669,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                     [transpose, t_dim] + list(args[2:]),
                     kwargs,
                 )
-                if (
-                    func == aten.select.int
-                    and dim == ndim - 1
-                    and transpose_slice.dim() > 1
-                ):
+                if func == aten.select.int and dim == ndim - 1 and transpose_slice.dim() > 1:
                     transpose_slice = transpose_slice.movedim(-1, 0).contiguous()
 
             if data_slice is not None:
@@ -786,9 +782,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                     storage_kwargs,
                 )
             if func_out is None and func_transposed_out is None:
-                raise RuntimeError(
-                    "Float8Tensor.new_zeros requires rowwise or columnwise data"
-                )
+                raise RuntimeError("Float8Tensor.new_zeros requires rowwise or columnwise data")
             scale_inv = tensor._scale_inv.detach().clone()
             reference = func_out if func_out is not None else func_transposed_out
             if scale_inv.device != reference.device:
@@ -1060,11 +1054,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         ``torch.load(weights_only=True)`` compatibility.
         """
         data_transpose = None
-        if (
-            self._data is None
-            and self._transpose is not None
-            and not self._transpose_invalid
-        ):
+        if self._data is None and self._transpose is not None and not self._transpose_invalid:
             data_transpose = self._transpose
         return (
             _make_float8_tensor_in_reduce_ex,
