@@ -689,10 +689,8 @@ class MultiheadAttention(torch.nn.Module):
                         across each CP sub-group (e.g., via NVLink), then exchanging KV with
                         p2p between sub-groups (e.g., via IBLink).
         thd_cp_partition : str, default = "per_document"
-                           THD token partition contract. ``"packed_super_sequence"`` applies
-                           mirrored chunks to the whole token buffer and currently requires
-                           all-gather CP; ``"packed_contiguous"`` assigns one contiguous
-                           whole-buffer chunk per rank under the same restriction.
+                           THD token partition contract. ``"packed_contiguous"`` assigns one
+                           contiguous whole-buffer chunk per rank and requires all-gather CP.
         """
         if isinstance(cp_group, dist_group_type):
             self.cp_size = get_distributed_world_size(cp_group)

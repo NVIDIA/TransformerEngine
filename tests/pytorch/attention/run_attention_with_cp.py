@@ -13,7 +13,7 @@ import torch.distributed as dist
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
     get_cu_seqlens_on_cp_rank,
     get_thd_partitioned_indices,
-    validate_super_sequence_thd_metadata,
+    validate_packed_contiguous_thd_metadata,
 )
 from transformer_engine.pytorch.attention.dot_product_attention.utils import combine_and_quantize
 import transformer_engine_torch as tex
@@ -127,10 +127,7 @@ def generate_input_shapes(
         cu_seqlens_q_padded = None
         cu_seqlens_kv_padded = None
     elif qkv_format == "thd":
-        packed_partition = thd_cp_partition in [
-            "packed_super_sequence",
-            "packed_contiguous",
-        ]
+        packed_contiguous = thd_cp_partition == "packed_contiguous"
         partition_divisor = (
             world_size if thd_cp_partition == "packed_contiguous" else 2 * world_size
         )
@@ -148,14 +145,14 @@ def generate_input_shapes(
             assert len(values) == config.batch_size
             assert all(0 < value <= config.max_seqlen_q for value in values)
             seqlens_q = torch.tensor(values, dtype=torch.int32)
-            if packed_partition:
+            if packed_contiguous:
                 seqlens_q_padded = seqlens_q.clone()
                 assert seqlens_q.sum().remainder(partition_divisor) == 0
             else:
                 seqlens_q_padded = (
                     (seqlens_q + 2 * world_size - 1) // (2 * world_size)
                 ) * (2 * world_size)
-        elif packed_partition:
+        elif packed_contiguous:
             assert thd_seqlen_pattern == "random"
             assert config.batch_size == 2
             seqlens_q_padded = torch.tensor(
@@ -278,13 +275,9 @@ def run_dpa_with_cp(
     torch.manual_seed(1234)
     torch.cuda.manual_seed(1234)
     logging.root.setLevel(log_level)
-    assert thd_cp_partition in [
-        "per_document",
-        "packed_super_sequence",
-        "packed_contiguous",
-    ]
-    packed_partition = thd_cp_partition != "per_document"
-    if packed_partition:
+    assert thd_cp_partition in ["per_document", "packed_contiguous"]
+    packed_contiguous = thd_cp_partition == "packed_contiguous"
+    if packed_contiguous:
         assert qkv_format == "thd" and cp_comm_type == "all_gather"
     # When is_training is False, gradient outputs are None.
     is_training = is_training == "True"
@@ -428,13 +421,12 @@ def run_dpa_with_cp(
         thd_cp_partition,
         thd_seqlen_pattern,
     )
-    if packed_partition:
-        validate_super_sequence_thd_metadata(
+    if packed_contiguous:
+        validate_packed_contiguous_thd_metadata(
             cu_seqlens_q,
             cu_seqlens_q_padded,
             q_input_shape[0],
             world_size,
-            chunks_per_rank=1 if thd_cp_partition == "packed_contiguous" else 2,
         )
     has_inter_sequence_padding = None
     if qkv_format == "thd":
@@ -805,7 +797,7 @@ def run_dpa_with_cp(
         else:
             out = out.index_select(0, seq_idx_q).contiguous()
 
-        if packed_partition:
+        if packed_contiguous:
             global_valid_mask = torch.zeros(total_tokens, dtype=torch.bool, device=out_.device)
             actual_seqlens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
             for seq_start, seq_len in zip(cu_seqlens_q_padded[:-1], actual_seqlens):

@@ -9,7 +9,7 @@ import torch
 import unittest
 from transformer_engine.pytorch.attention.multi_head_attention import MultiheadAttention
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
-    get_super_sequence_thd_causal_metadata,
+    get_packed_contiguous_thd_causal_metadata,
     get_batch_on_this_cp_rank,
     get_thd_partitioned_indices,
     pad_thd_sequences_for_cp,
@@ -24,7 +24,7 @@ except ImportError:
     tex = None
 
 
-class TestSuperSequenceTHDPartitioning(unittest.TestCase):
+class TestTHDPartitioning(unittest.TestCase):
     def test_contiguous_partition_uses_one_equal_chunk_per_rank(self):
         # Twelve tokens are divisible by CP4 but not by 2*CP4.
         cu_seqlens_padded = torch.tensor([0, 5, 12])
@@ -52,36 +52,18 @@ class TestSuperSequenceTHDPartitioning(unittest.TestCase):
             sequence_order,
         )
 
-    def test_partition_indices_support_cpu_dataloader_inputs(self):
-        cu_seqlens_padded = torch.tensor([0, 6, 11, 16])
-        indices = get_thd_partitioned_indices(
-            cu_seqlens_padded, 16, 2, 0, thd_cp_partition="packed_super_sequence"
-        )
-        self.assertTrue(torch.equal(indices, torch.tensor([0, 1, 2, 3, 12, 13, 14, 15])))
+    def test_packed_super_sequence_is_not_supported(self):
+        with self.assertRaises(AssertionError):
+            get_thd_partitioned_indices(
+                torch.tensor([0, 8]),
+                8,
+                2,
+                0,
+                thd_cp_partition="packed_super_sequence",
+            )
 
     @unittest.skipUnless(torch.cuda.is_available() and tex is not None, "CUDA extension required")
-    def test_partition_indices_apply_dual_chunk_swap_to_whole_buffer(self):
-        cu_seqlens_padded = torch.tensor([0, 6, 11, 16], dtype=torch.int32, device="cuda")
-        rank0 = get_thd_partitioned_indices(
-            cu_seqlens_padded, 16, 2, 0, thd_cp_partition="packed_super_sequence"
-        )
-        rank1 = get_thd_partitioned_indices(
-            cu_seqlens_padded, 16, 2, 1, thd_cp_partition="packed_super_sequence"
-        )
-
-        self.assertTrue(
-            torch.equal(
-                rank0,
-                torch.tensor([0, 1, 2, 3, 12, 13, 14, 15], dtype=torch.int32, device="cuda"),
-            )
-        )
-        self.assertTrue(
-            torch.equal(
-                rank1,
-                torch.tensor([4, 5, 6, 7, 8, 9, 10, 11], dtype=torch.int32, device="cuda"),
-            )
-        )
-
+    def test_per_document_partition_indices_support_cpu_metadata(self):
         per_document = get_thd_partitioned_indices(
             torch.tensor([0, 8, 16], dtype=torch.int32, device="cuda"), 16, 2, 0
         )
@@ -96,65 +78,16 @@ class TestSuperSequenceTHDPartitioning(unittest.TestCase):
         )
         self.assertTrue(torch.equal(mixed_device, per_document))
 
-    @unittest.skipUnless(torch.cuda.is_available() and tex is not None, "CUDA extension required")
-    def test_rank_order_roundtrip_does_not_depend_on_document_boundaries(self):
-        cu_seqlens_padded = torch.tensor([0, 6, 11, 16], dtype=torch.int32, device="cuda")
-        sequence_order = torch.arange(16 * 8, dtype=torch.float16, device="cuda").view(16, 8)
-        rank_order = unrestore_thd_gathered_kv(
-            sequence_order, cu_seqlens_padded, 2, "packed_super_sequence"
-        )
-
-        expected_indices = torch.tensor(
-            [0, 1, 2, 3, 12, 13, 14, 15, 4, 5, 6, 7, 8, 9, 10, 11],
-            device="cuda",
-        )
-        self.assertTrue(
-            torch.equal(rank_order, sequence_order.index_select(0, expected_indices))
-        )
-        self.assertTrue(
-            torch.equal(
-                restore_thd_gathered_kv(
-                    rank_order, cu_seqlens_padded, 2, "packed_super_sequence"
-                ),
-                sequence_order,
-            )
-        )
-
-    def test_metadata_tracks_chunk_document_intersections(self):
-        # Padded document lengths [6, 5, 5] are not individually divisible by 2*CP.
-        cu_seqlens = torch.tensor([0, 5, 8, 12], dtype=torch.int32)
-        cu_seqlens_padded = torch.tensor([0, 6, 11, 16], dtype=torch.int32)
-
-        q_cu, q_cu_padded, kv_cu = get_super_sequence_thd_causal_metadata(
-            cu_seqlens,
-            cu_seqlens_padded,
-            total_tokens=16,
-            cp_size=2,
-            cp_rank=0,
-        )
-
-        self.assertTrue(torch.equal(q_cu[0], torch.tensor([0, 4, 4, 4], dtype=torch.int32)))
-        self.assertTrue(torch.equal(q_cu[1], torch.tensor([0, 0, 0, 3], dtype=torch.int32)))
-        self.assertTrue(
-            torch.equal(q_cu_padded[0], torch.tensor([0, 4, 4, 4], dtype=torch.int32))
-        )
-        self.assertTrue(
-            torch.equal(q_cu_padded[1], torch.tensor([4, 4, 4, 8], dtype=torch.int32))
-        )
-        self.assertTrue(torch.equal(kv_cu[0], torch.tensor([0, 4, 4, 4], dtype=torch.int32)))
-        self.assertTrue(torch.equal(kv_cu[1], torch.tensor([0, 5, 8, 12], dtype=torch.int32)))
-
     def test_contiguous_metadata_emits_one_document_intersection_step(self):
         cu_seqlens = torch.tensor([0, 5, 8, 12], dtype=torch.int32)
         cu_seqlens_padded = torch.tensor([0, 6, 11, 16], dtype=torch.int32)
 
-        q_cu, q_cu_padded, kv_cu = get_super_sequence_thd_causal_metadata(
+        q_cu, q_cu_padded, kv_cu = get_packed_contiguous_thd_causal_metadata(
             cu_seqlens,
             cu_seqlens_padded,
             total_tokens=16,
             cp_size=2,
             cp_rank=0,
-            chunks_per_rank=1,
         )
 
         self.assertEqual(len(q_cu), 1)

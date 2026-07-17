@@ -703,12 +703,7 @@ def test_cp_with_fused_attention(
     get_device_compute_capability() < (9, 0), reason="FusedAttention THD requires sm90+."
 )
 @pytest.mark.parametrize("pad_between_seqs", [False, True])
-@pytest.mark.parametrize(
-    "thd_cp_partition", ["packed_super_sequence", "packed_contiguous"]
-)
-def test_cp_with_fused_attention_packed_partition(
-    cp_pool, pad_between_seqs, thd_cp_partition
-):
+def test_cp_with_fused_attention_packed_contiguous(cp_pool, pad_between_seqs):
     _submit(
         cp_pool(2),
         dtype="bf16",
@@ -716,7 +711,7 @@ def test_cp_with_fused_attention_packed_partition(
         qkv_format="thd",
         kernel_backend="FusedAttention",
         cp_comm_type="all_gather",
-        thd_cp_partition=thd_cp_partition,
+        thd_cp_partition="packed_contiguous",
         fa_pad_between_seqs=pad_between_seqs,
         deterministic=_deterministic,
         log_level=pytest_logging_level,
@@ -727,10 +722,7 @@ def test_cp_with_fused_attention_packed_partition(
     not FlashAttentionUtils.v3_is_installed or get_device_compute_capability() > (9, 0),
     reason="FlashAttention 3 on Hopper is required.",
 )
-@pytest.mark.parametrize(
-    "thd_cp_partition", ["packed_super_sequence", "packed_contiguous"]
-)
-def test_cp_with_flash_attention_packed_partition(cp_pool, thd_cp_partition):
+def test_cp_with_flash_attention_packed_contiguous(cp_pool):
     _submit(
         cp_pool(2),
         dtype="bf16",
@@ -738,7 +730,7 @@ def test_cp_with_flash_attention_packed_partition(cp_pool, thd_cp_partition):
         qkv_format="thd",
         kernel_backend="FlashAttention",
         cp_comm_type="all_gather",
-        thd_cp_partition=thd_cp_partition,
+        thd_cp_partition="packed_contiguous",
         fa_pad_between_seqs=False,
         deterministic=_deterministic,
         log_level=pytest_logging_level,
