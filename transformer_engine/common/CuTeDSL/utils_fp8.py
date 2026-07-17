@@ -5,8 +5,6 @@
 """FP8 conversion helpers (f32<->fp8 e4m3/e5m2/e8m0, fused mul+cvt PTX wrappers) for the CuTeDSL kernels."""
 
 import logging
-import os
-import re
 
 import cutlass
 from cutlass import Float32, Int64, Int32, Int16, Uint32
