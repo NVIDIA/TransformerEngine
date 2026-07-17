@@ -14,7 +14,11 @@ from cutlass._mlir.dialects import arith as mlir_arith
 from cutlass._mlir.dialects import llvm
 from cutlass.cutlass_dsl import T, dsl_user_op
 
-from transformer_engine.common.CuTeDSL.utils import FP32_MANTISSA_BITS, _bitcast_f32_to_i32, _target_arch_is_blackwell
+from transformer_engine.common.CuTeDSL.utils import (
+    FP32_MANTISSA_BITS,
+    _bitcast_f32_to_i32,
+    _target_arch_is_blackwell,
+)
 
 logger = logging.getLogger("transformer_engine.cutedsl.utils_fp8")
 
