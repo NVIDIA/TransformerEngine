@@ -1010,7 +1010,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     quantized_fc1_weights.append(weight)
             grouped_fc1_weight = quantized_fc1_weights
         if fc1_is_dist:
-            grouped_fc1_weight = materialize_weight_for_forward(grouped_fc1_weight[0])
+            grouped_fc1_weight = materialize_weight_for_forward(grouped_fc1_weight)
 
         # Prepare FC2 grouped weight tensor for fused kernels.
         if fc2_op.single_grouped_weight:
@@ -1282,7 +1282,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             fc1_kernel_out = self.grouped_gemm_activation_kernel()(**fc1_activation_kwargs)
 
         if fc2_is_dist:
-            grouped_fc2_weight = materialize_weight_for_forward(grouped_fc2_weight[0])
+            grouped_fc2_weight = materialize_weight_for_forward(grouped_fc2_weight)
         if isinstance(grouped_fc2_weight, GroupedTensor) and not hasattr(
             grouped_fc2_weight, "_with_gemm_swizzled_scales"
         ):

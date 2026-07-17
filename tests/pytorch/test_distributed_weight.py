@@ -10,6 +10,7 @@ a tiny in-repo ``FakeDistributedWeight`` stub standing in for a real implementer
 required: the whole contract lives in TE and is verified against the fake.
 """
 
+import pytest
 import torch
 
 from transformer_engine.pytorch.distributed_weight import (
@@ -57,6 +58,24 @@ class FakeDistributedWeight(torch.Tensor):
         return torch.full((2, 2), -1.0)
 
 
+class FakeNonTensorWeight:
+    """DistributedWeight-shaped object that is NOT a torch.Tensor (contract violation)."""
+
+    is_distributed_weight = True
+
+    def materialize_group_for_forward(self):
+        return torch.zeros(2, 2)
+
+    def materialize_group_for_backward(self, **kwargs):
+        return torch.zeros(2, 2)
+
+    def finalize_group_grads(self, wgrads, **kwargs):
+        return wgrads
+
+    def grad_buffer(self):
+        return torch.zeros(2, 2)
+
+
 def test_protocol_runtime_checkable():
     """A conforming object passes isinstance; a plain tensor does not."""
     assert isinstance(FakeDistributedWeight(), DistributedWeight)
@@ -69,6 +88,12 @@ def test_is_distributed_weight():
     assert not is_distributed_weight(torch.nn.Parameter(torch.zeros(2)))
 
 
+def test_non_tensor_implementer_rejected():
+    """Implementers must be torch.Tensor subclasses; a non-Tensor fails loudly."""
+    with pytest.raises(TypeError, match="torch.Tensor subclass"):
+        is_distributed_weight(FakeNonTensorWeight())
+
+
 def test_forward_noop_on_plain_tensor():
     """Plain weights pass through unchanged — the critical non-regression."""
     w = torch.nn.Parameter(torch.randn(4, 4))
@@ -77,48 +102,65 @@ def test_forward_noop_on_plain_tensor():
     assert out[0] is w
 
 
-def test_forward_dispatches_single_weight():
-    """Linear (N=1): dispatcher delegates and returns a length-1 list."""
-    w = FakeDistributedWeight(group_size=1)
+@pytest.mark.parametrize("group_size", [1, 3])
+def test_forward_dispatches(group_size):
+    """Linear (N=1) and GroupedLinear (N=k): one coalesced call, full list returned."""
+    w = FakeDistributedWeight(group_size=group_size)
     out = materialize_weight_for_forward(w)
-    assert isinstance(out, list) and len(out) == 1
-    assert torch.equal(out[0], torch.zeros(2, 2))
-    # The forward dispatcher owns the forward semantic; the leader is delegated to once.
+    assert isinstance(out, list) and len(out) == group_size
+    # Leader is delegated to exactly once (coalesced), not once per weight.
     assert w.calls == ["fwd"]
 
 
-def test_forward_dispatches_grouped_weights():
-    """GroupedLinear (N=k): one coalesced call, full list returned."""
-    w = FakeDistributedWeight(group_size=3)
-    out = materialize_weight_for_forward(w)
+def test_forward_accepts_weight_list():
+    """The dispatcher accepts the full per-expert list; the leader (index 0) coalesces it."""
+    leader = FakeDistributedWeight(group_size=3)
+    followers = [torch.zeros(2, 2), torch.zeros(2, 2)]
+    out = materialize_weight_for_forward([leader, *followers])
     assert isinstance(out, list) and len(out) == 3
-    # Leader was called exactly once (coalesced), not once per weight.
-    assert len(w.calls) == 1
+    # Leader delegated exactly once; the follower entries are not materialized separately.
+    assert leader.calls == ["fwd"]
 
 
-def test_backward_dispatch_and_noop():
-    w = FakeDistributedWeight(group_size=2)
+def test_forward_noop_on_plain_weight_list():
+    """A non-distributed weight list passes through unchanged (all N returned)."""
+    ws = [torch.nn.Parameter(torch.randn(2, 2)) for _ in range(3)]
+    out = materialize_weight_for_forward(ws)
+    assert out == ws
+
+
+@pytest.mark.parametrize("group_size", [1, 2])
+def test_backward_dispatches(group_size):
+    w = FakeDistributedWeight(group_size=group_size)
     out = materialize_weight_for_backward(w)
-    assert len(out) == 2 and torch.equal(out[0], torch.full((2, 2), 10.0))
+    assert len(out) == group_size
+    assert torch.equal(out[0], torch.full((2, 2), 10.0))
 
+
+def test_backward_accepts_weight_list():
+    """Backward dispatcher also accepts the full per-expert list; the leader coalesces it."""
+    leader = FakeDistributedWeight(group_size=2)
+    out = materialize_weight_for_backward([leader, torch.zeros(2, 2)])
+    assert isinstance(out, list) and len(out) == 2
+    assert torch.equal(out[0], torch.full((2, 2), 10.0))
+
+
+def test_backward_noop_on_plain_tensor():
     plain = torch.zeros(2)
     assert materialize_weight_for_backward(plain) == [plain]
 
 
-def test_finalize_grads_dispatch_and_noop():
-    w = FakeDistributedWeight(group_size=1)
-    wgrads = [torch.zeros(2, 2)]
+@pytest.mark.parametrize("group_size", [1, 2])
+def test_finalize_grads_dispatches(group_size):
+    w = FakeDistributedWeight(group_size=group_size)
+    wgrads = [torch.zeros(2, 2) for _ in range(group_size)]
     out = finalize_weight_grads(w, wgrads)
-    assert len(out) == 1 and torch.equal(out[0], torch.full((2, 2), 100.0))
+    assert len(out) == group_size
+    assert torch.equal(out[0], torch.full((2, 2), 100.0))
 
-    # No-op path leaves the grads untouched.
+
+def test_finalize_grads_noop_on_plain_tensor():
+    """No-op path leaves the grads untouched."""
     plain_w = torch.nn.Parameter(torch.zeros(2))
     g = [torch.ones(2)]
     assert finalize_weight_grads(plain_w, g) == g
-
-
-if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            fn()
-            print(f"{name}: PASS")

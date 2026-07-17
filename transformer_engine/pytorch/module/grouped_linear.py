@@ -466,7 +466,7 @@ class _GroupedLinear(torch.autograd.Function):
         origin_weights = weights
         is_dist_weight = is_distributed_weight(weights[0])
         if is_dist_weight:
-            weights = materialize_weight_for_forward(weights[0])
+            weights = materialize_weight_for_forward(weights)
 
         # Configure quantizers
         if save_original_input and isinstance(input_quantizers[0], Float8Quantizer):
@@ -1036,7 +1036,7 @@ class _GroupedLinear(torch.autograd.Function):
                 accumulate_wgrad_into_param_main_grad = ctx.fuse_wgrad_accumulation
 
             if is_dist_weight:
-                weights = materialize_weight_for_backward(origin_weights[0])
+                weights = materialize_weight_for_backward(origin_weights)
 
             if ctx.requires_dgrad:
                 dgrad_gemm_use_split_accumulator = _2X_ACC_DGRAD
@@ -1433,7 +1433,6 @@ class GroupedLinear(TransformerEngineBaseModule):
         if self.primary_weights_in_fp8:
             self.init_fp8_metadata(num_gemms=self.num_gemms)
 
-        self.weight_names = [f"weight{idx}" for idx in range(self.num_gemms)]
         is_meta = torch.device(device).type == "meta"
         self.reset_parameters(defer_init=is_meta)
 
