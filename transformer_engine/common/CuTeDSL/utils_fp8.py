@@ -314,9 +314,7 @@ def mul_i64_cvt_packed16x4_to_fp8x4(dtype, fp8_dtype: str, relu: bool = False):
 # Pick the appropriate float32 -> fp8e8m0 conversion function based on the target architecture.
 # Blackwell (SM >= 100) has a hardware instruction for this, while older architectures require a software implementation.
 cvt_f32_to_fp8e8m0 = (
-    cvt_f32_to_fp8e8m0_blackwell
-    if device_is_blackwell()
-    else cvt_f32_to_fp8e8m0_non_blackwell
+    cvt_f32_to_fp8e8m0_blackwell if device_is_blackwell() else cvt_f32_to_fp8e8m0_non_blackwell
 )
 
 
