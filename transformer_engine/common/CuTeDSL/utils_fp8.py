@@ -14,7 +14,7 @@ from cutlass._mlir.dialects import arith as mlir_arith
 from cutlass._mlir.dialects import llvm
 from cutlass.cutlass_dsl import T, dsl_user_op
 
-from transformer_engine.common.CuTeDSL.utils import FP32_MANTISSA_BITS, _bitcast_f32_to_i32
+from transformer_engine.common.CuTeDSL.utils import FP32_MANTISSA_BITS, _bitcast_f32_to_i32, _target_arch_is_blackwell
 
 logger = logging.getLogger("transformer_engine.cutedsl.utils_fp8")
 
@@ -305,34 +305,6 @@ def mul_i64_cvt_packed16x4_to_fp8x4(dtype, fp8_dtype: str, relu: bool = False):
     return _build_mul_i64_cvt_packed16x4_to_fp8x4(
         in_fmt, "e5m2" if fp8_dtype == "e5m2" else "e4m3", relu
     )
-
-
-def _target_arch_is_blackwell() -> bool:
-    """Return True for the Blackwell family (SM 10.0 / 11.0 / 12.0), which has the
-    cvt.*.ue8m0x2.f32 hardware instruction. This mirrors the CUDA reference's
-    ARCH_BLACKWELL_FAMILY gate (FamilySpecific<100/110/120> in
-    transformer_engine/common/util/ptx.cuh) -- a family check, since the
-    instruction is available across the family (verified on sm_120a) even though
-    e.g. tcgen05 is not.
-
-    The gate is the *compile target*, not the physical device, since that is what
-    decides whether the instruction codegens: CUTE_DSL_ARCH if set (what
-    cute.compile uses), else the current device's compute capability. Falls back
-    to the non-Blackwell software path if the arch can't be determined."""
-    try:
-        arch = os.getenv("CUTE_DSL_ARCH")  # e.g. "sm_120a", the explicit compile target
-        if arch:
-            major_minor = re.search(r"(\d+)", arch).group(1)  # "120"
-        else:
-            from cuda.core import Device  # pylint: disable=no-name-in-module
-
-            major_minor = Device().arch  # compute capability as digits, e.g. "120"
-        # Trailing digit is the minor version; the rest is the major version.
-        return int(major_minor[:-1]) in (10, 11, 12)
-    # Best-effort detection: any failure means "assume non-Blackwell software path".
-    except Exception as e:  # pylint: disable=broad-exception-caught
-        logger.debug("e8m0 arch detection failed (%s); using software path", e)
-        return False
 
 
 # Pick the appropriate float32 -> fp8e8m0 conversion function based on the target architecture.
