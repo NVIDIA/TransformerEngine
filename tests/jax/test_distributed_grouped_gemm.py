@@ -252,6 +252,49 @@ def test_grouped_gemm_rhs_weight_specs_gather_fsdp_but_preserve_ep():
     assert tuple(out_sharding[0].spec) == (None, None, None)
 
 
+def test_grouped_gemm_gathers_smaller_moe_rhs_across_fsdp_group_axis():
+    """A global MoE RHS has E groups while token counts have dp * E groups."""
+    mesh = _mesh()
+    arg_infos = (
+        _arg_info(mesh, (8192,), (None,)),
+        _arg_info(mesh, (0,), (None,)),
+        _arg_info(mesh, (32, 128, 64), (("fsdp", "expert"), None, None)),
+        _arg_info(mesh, (2048,), (("fsdp", "expert"),)),
+        _arg_info(mesh, (0,), (None,)),
+        _arg_info(mesh, (64,), (("fsdp", "expert"),)),
+        _arg_info(mesh, (0,), (None,)),
+        _arg_info(mesh, (0,), (None,)),
+        _arg_info(mesh, (0,), (None,)),
+        _arg_info(mesh, (64,), (("fsdp", "expert"),)),
+        _arg_info(mesh, (0,), (None,)),
+        _arg_info(mesh, (1,), (None,)),
+        _arg_info(mesh, (0,), (None,)),
+    )
+    with global_shard_guard(MeshResource(fsdp_resource="fsdp", ep_resource="expert")):
+        _, _, _, arg_shardings = GroupedGemmPrimitive.partition(
+            False,
+            False,
+            ScalingMode.NO_SCALING.value,
+            jnp.bfloat16,
+            False,
+            False,
+            False,
+            1,
+            1,
+            (64, 128, 64),
+            128,
+            64,
+            128,
+            64,
+            mesh,
+            arg_infos,
+            (),
+        )
+
+    assert tuple(arg_shardings[2].spec) == ("expert", None, None)
+    assert tuple(arg_shardings[3].spec) == ("expert",)
+
+
 def test_grouped_gemm_strips_unsupported_axes_preserves_dp_and_gathers_rhs_fsdp():
     mesh = _mesh_with_dp_tp()
     arg_infos = (

@@ -1865,14 +1865,27 @@ class GroupedGemmPrimitive(BasePrimitive):
 
         # A compound leading group dimension may use FSDP as the outer
         # data-parallel axis (for example MoE groups ordered
-        # (fsdp, ep, local_expert)). In that case FSDP describes distinct
-        # groups, not a sharded RHS contracting dimension, and must remain
-        # on the group axis. Otherwise gather the FSDP-sharded RHS as usual.
+        # (fsdp, ep, local_expert)). Normally that means FSDP describes
+        # distinct groups, not a sharded RHS contracting dimension. MoE
+        # model weights are the exception: their global expert-group axis
+        # is smaller than the active token-group array, so FSDP shards a
+        # shared RHS that must be gathered locally. Keep that gather inside
+        # this custom partitioning boundary, after grouped quantization.
         fsdp_is_group_axis = spec_contains_axis(active_group_spec, fsdp_axis)
+        active_group_count = next(
+            (info.shape[0] for info in grouped_dim_infos if info.size > 0),
+            None,
+        )
+        rhs_group_count = arg_infos[2].shape[0] if len(arg_infos[2].shape) > 0 else None
+        rhs_has_fewer_groups = (
+            active_group_count is not None
+            and rhs_group_count is not None
+            and rhs_group_count < active_group_count
+        )
         gather_rhs_fsdp = (
             fsdp_axis is not None
             and not rhs_is_ragged
-            and not fsdp_is_group_axis
+            and (not fsdp_is_group_axis or rhs_has_fewer_groups)
             and (
                 spec_contains_axis(rhs_data_spec, fsdp_axis)
                 or spec_contains_axis(rhs_scale_spec, fsdp_axis)

@@ -232,7 +232,6 @@ def _ffn_fwd_global(
     apply_topk_weights_early: bool,
     flat_token_sharding: NamedSharding,
     flat_group_sharding: NamedSharding,
-    grouped_weight_sharding: NamedSharding,
     grouped_bias_sharding: NamedSharding,
 ):
     """Run the FFN on global EP-dispatch buffers.
@@ -254,25 +253,27 @@ def _ffn_fwd_global(
     wi_1 = wi_1.astype(sorted_x.dtype)
     wo = wo.astype(sorted_x.dtype)
 
-    # Dispatch groups flatten in (dp, ep, local_expert) order. Broadcast
-    # each global expert parameter set over the outer DP dimension before
-    # flattening so the grouped weights have exactly the same ordering.
+    # Dispatch groups flatten in (dp, ep, local_expert) order. Keep the
+    # model weights in their original global [expert, ...] layout: grouped
+    # quantize must see the FSDP shard before grouped_gemm's custom
+    # partitioning gathers it. The grouped-GEMM partitioner maps that
+    # smaller RHS group axis onto the local dispatch groups after quantizing.
+    #
+    # Bias is the one exception. grouped_gemm's public bias contract is one
+    # row per global GEMM, so retain its inexpensive logical expansion here.
     num_groups = dp_size * num_ep * num_local_experts
 
-    def _broadcast_experts(value, sharding):
+    def _broadcast_bias(value):
         value = jnp.broadcast_to(
             value.reshape(1, num_ep, num_local_experts, *value.shape[1:]),
             (dp_size, num_ep, num_local_experts, *value.shape[1:]),
         ).reshape(num_groups, *value.shape[1:])
-        return jax.lax.with_sharding_constraint(value, sharding)
+        return jax.lax.with_sharding_constraint(value, grouped_bias_sharding)
 
-    wi_0 = _broadcast_experts(wi_0, grouped_weight_sharding)
-    wi_1 = _broadcast_experts(wi_1, grouped_weight_sharding)
-    wo = _broadcast_experts(wo, grouped_weight_sharding)
     if wi_0_bias is not None:
-        wi_0_bias = _broadcast_experts(wi_0_bias, grouped_bias_sharding)
-        wi_1_bias = _broadcast_experts(wi_1_bias, grouped_bias_sharding)
-        wo_bias = _broadcast_experts(wo_bias, grouped_bias_sharding)
+        wi_0_bias = _broadcast_bias(wi_0_bias)
+        wi_1_bias = _broadcast_bias(wi_1_bias)
+        wo_bias = _broadcast_bias(wo_bias)
 
     # Concat wi_0/wi_1 along the trailing axis (NOT stack on a new
     # axis). grouped_gemm requires the 3D (G, K, N) weight layout with
@@ -728,7 +729,6 @@ def _moe_fwd_rule(
         apply_topk_weights_early=apply_topk_weights_early,
         flat_token_sharding=flat_token_sharding,
         flat_group_sharding=flat_group_sharding,
-        grouped_weight_sharding=grouped_weight_sharding,
         grouped_bias_sharding=grouped_bias_sharding,
     )
     expert_outputs = jax.lax.with_sharding_constraint(expert_outputs, NamedSharding(mesh, ep3_spec))
@@ -907,9 +907,9 @@ def _moe_bwd_rule(
         grouped_bias_sharding=grouped_bias_sharding,
     )
 
-    # The forward broadcast introduced one expert-gradient group per DP
-    # replica, ordered (dp, ep, local_expert). Sum that outer dimension
-    # to recover the public parameter shapes [num_experts, ...].
+    # Wgrad has one expert-gradient group per outer data replica, ordered
+    # (dp, ep, local_expert). Sum that dimension to recover the public
+    # parameter shapes [num_experts, ...].
     def _fold_dp_groups(grad):
         return (
             grad.reshape(dp_size, num_ep, num_local_experts, *grad.shape[1:])
