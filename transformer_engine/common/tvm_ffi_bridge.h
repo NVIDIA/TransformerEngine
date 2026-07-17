@@ -112,13 +112,15 @@ inline DLDataType convert_to_dltype(NVTEDType type) {
       return DLDataType{kDLInt, 32, 1};
     case kNVTEInt64:
       return DLDataType{kDLInt, 64, 1};
-    // FP8 / E8M0 → raw 1-byte uint; the kernel interprets the bits.
+    // Native DLPack (>= 1.1) FP8 codes. TE's E4M3 is CUDA's finite __nv_fp8_e4m3,
+    // i.e. the "fn" variant (kDLFloat8_e4m3 would be the IEEE-style type with
+    // infinities); E8M0 scales are the unsigned, finite, single-NaN MX format.
     case kNVTEFloat8E4M3:
-      return DLDataType{kDLUInt, 8, 1};
+      return DLDataType{kDLFloat8_e4m3fn, 8, 1};
     case kNVTEFloat8E5M2:
-      return DLDataType{kDLUInt, 8, 1};
+      return DLDataType{kDLFloat8_e5m2, 8, 1};
     case kNVTEFloat8E8M0:
-      return DLDataType{kDLUInt, 8, 1};
+      return DLDataType{kDLFloat8_e8m0fnu, 8, 1};
     default:
       NVTE_ERROR("unsupported NVTEDType: ", static_cast<int>(type));
   }

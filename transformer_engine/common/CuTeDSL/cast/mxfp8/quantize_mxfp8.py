@@ -55,6 +55,7 @@ from transformer_engine.common.CuTeDSL.activations import (
     dact_dgelu,
 )
 from transformer_engine.common.CuTeDSL.utils_fp8 import (
+    as_byte_tensor,
     get_cvt_f32_to_fp8_func,
     cvt_f32_to_fp8e8m0,
     mul_i64_cvt_f32x4_to_fp8x4,
@@ -764,6 +765,14 @@ class MXFP8QuantizeKernel:
         max_norm_rcp = cfg.MAX_NORM_RCP
         num_scale_cols = N // MXFP8_BLOCK_SCALING_SIZE
         num_scale_rows = M // MXFP8_BLOCK_SCALING_SIZE
+
+        # The FFI boundary carries native FP8/E8M0 dtypes; the kernel works on bytes.
+        if cutlass.const_expr(cfg.ROWWISE):
+            mO_row = as_byte_tensor(mO_row)
+            mS_row = as_byte_tensor(mS_row)
+        if cutlass.const_expr(cfg.COLWISE):
+            mO_col = as_byte_tensor(mO_col)
+            mS_col = as_byte_tensor(mS_col)
 
         # If WITH_GEMM_SWIZZLED_SCALES is enabled, the output must satisfy cublas's swizzled layout
         # This is expressed as a CuTe layout applied to the output tensor so it can be transparent throughout the kernel implementation.
@@ -1554,6 +1563,10 @@ class MXFP8QuantizeSpecializedRowwiseKernel:
         M = mX.shape[0]
         N = mX.shape[1]
 
+        # The FFI boundary carries native FP8/E8M0 dtypes; the kernel works on bytes.
+        mO_row = as_byte_tensor(mO_row)
+        mS_row = as_byte_tensor(mS_row)
+
         grid = [
             cute.ceil_div(Int32(N), self._TILE_COLS),
             cute.ceil_div(M, self._TILE_ROWS),
@@ -1758,6 +1771,12 @@ class MXFP8QuantizeSpecializedBidimensionalKernel:
             )
         M = mX.shape[0]
         N = mX.shape[1]
+
+        # The FFI boundary carries native FP8/E8M0 dtypes; the kernel works on bytes.
+        mO_row = as_byte_tensor(mO_row)
+        mS_row = as_byte_tensor(mS_row)
+        mO_col = as_byte_tensor(mO_col)
+        mS_col = as_byte_tensor(mS_col)
 
         smem_tile_layout = cute.make_ordered_layout(
             (self._TILE_ROWS, self._TILE_COLS), order=(1, 0)
@@ -2181,13 +2200,17 @@ def compile_cutedsl_function_from_cfg(cfg):
     scale_rowwise_shape = (cute.sym_int32(divisibility=128), cute.sym_int32(divisibility=4))
     scale_colwise_shape = (cute.sym_int32(divisibility=4), cute.sym_int32(divisibility=128))
     ws_shape = (cute.sym_int32(), sym_N)  # (blocks_Y, N); N ties to input N
+    # Native FP8/E8M0 dtypes at the FFI boundary (matches the DLPack dtype the C++
+    # bridge sends); the kernels view these buffers as raw bytes internally.
+    out_dtype = cutlass.Float8E4M3FN if cfg.FP8_DTYPE == "e4m3" else cutlass.Float8E5M2
+    scale_dtype = cutlass.Float8E8M0FNU
 
     in_fake = cute.runtime.make_fake_compact_tensor(
         cfg.DTYPE, in_shape, stride_order=(1, 0), memspace=cute.AddressSpace.gmem, assumed_align=16
     )
     out_row_fake = (
         cute.runtime.make_fake_compact_tensor(
-            cute.Uint8,
+            out_dtype,
             out_shape,
             stride_order=(1, 0),
             memspace=cute.AddressSpace.gmem,
@@ -2198,7 +2221,7 @@ def compile_cutedsl_function_from_cfg(cfg):
     )
     scale_row_fake = (
         cute.runtime.make_fake_compact_tensor(
-            cute.Uint8,
+            scale_dtype,
             scale_rowwise_shape,
             stride_order=(1, 0),
             memspace=cute.AddressSpace.gmem,
@@ -2209,7 +2232,7 @@ def compile_cutedsl_function_from_cfg(cfg):
     )
     out_col_fake = (
         cute.runtime.make_fake_compact_tensor(
-            cute.Uint8,
+            out_dtype,
             out_shape,
             stride_order=(1, 0),
             memspace=cute.AddressSpace.gmem,
@@ -2220,7 +2243,7 @@ def compile_cutedsl_function_from_cfg(cfg):
     )
     scale_col_fake = (
         cute.runtime.make_fake_compact_tensor(
-            cute.Uint8,
+            scale_dtype,
             scale_colwise_shape,
             stride_order=(1, 0),
             memspace=cute.AddressSpace.gmem,
