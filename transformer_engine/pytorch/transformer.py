@@ -627,7 +627,8 @@ class TransformerLayer(torch.nn.Module):
         thd_cp_partition : str, default = "per_document"
                            THD token partition contract. ``"packed_super_sequence"`` applies
                            mirrored chunks to the whole token buffer and currently requires
-                           all-gather CP.
+                           all-gather CP; ``"packed_contiguous"`` assigns one contiguous
+                           whole-buffer chunk per rank under the same restriction.
         """
         # Deep iterate but skip self to avoid infinite recursion.
         for index, child in enumerate(self.modules()):
