@@ -37,7 +37,7 @@ def device_compute_capability() -> tuple:
 
 
 @functools.lru_cache(maxsize=None)
-def is_device_blackwell() -> bool:
+def device_is_blackwell() -> bool:
     """Return True for the Blackwell family (SM 10.0 / 11.0 / 12.0)
     This is a run-time check, not a compile-time check. It check if the current device is Blackwell architecture.
     """
