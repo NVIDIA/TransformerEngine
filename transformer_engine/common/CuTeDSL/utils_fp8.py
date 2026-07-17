@@ -21,9 +21,11 @@ from transformer_engine.common.CuTeDSL.utils import (
 
 logger = logging.getLogger("transformer_engine.cutedsl.utils_fp8")
 
+
 def as_byte_tensor(t):
     """View an FP8/E8M0 gmem tensor as raw bytes (the kernels build/store the bit patterns)."""
     return cute.make_tensor(cute.recast_ptr(t.iterator, dtype=Uint8), t.layout)
+
 
 @dsl_user_op
 def cvt_f32_to_fp8e4m3(val: Float32, *, loc=None, ip=None) -> Int32:
