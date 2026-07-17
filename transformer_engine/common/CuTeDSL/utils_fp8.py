@@ -17,7 +17,7 @@ from cutlass.cutlass_dsl import T, dsl_user_op
 from transformer_engine.common.CuTeDSL.utils import (
     FP32_MANTISSA_BITS,
     _bitcast_f32_to_i32,
-    _target_arch_is_blackwell,
+    device_is_blackwell,
 )
 
 logger = logging.getLogger("transformer_engine.cutedsl.utils_fp8")
@@ -315,7 +315,7 @@ def mul_i64_cvt_packed16x4_to_fp8x4(dtype, fp8_dtype: str, relu: bool = False):
 # Blackwell (SM >= 100) has a hardware instruction for this, while older architectures require a software implementation.
 cvt_f32_to_fp8e8m0 = (
     cvt_f32_to_fp8e8m0_blackwell
-    if _target_arch_is_blackwell()
+    if device_is_blackwell()
     else cvt_f32_to_fp8e8m0_non_blackwell
 )
 
