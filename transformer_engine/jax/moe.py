@@ -24,13 +24,10 @@ Sharding model
   view. Their custom partitioning rules handle per-shard execution,
   including EP placement and DP/FSDP gathers and reductions.
 
-Out-of-scope (for now)
-----------------------
-FP8 / MXFP8 quantizer sets are not yet wired on this path; turning
-them on requires recipe-aware residual handling for ``ScaledTensor``
-leaves. ``aux_loss_coeff`` and ``expert_bias`` are supported (the former
-forces a per-step all-gather over the routing-side logits, which lives
-off the critical path and overlaps with the dispatch collective).
+FC1 and FC2 use independent quantizer sets. The sets are differentiable
+``custom_vjp`` arguments and are returned by the backward rule so
+stateful recipes follow the same update semantics as the other TE MLPs.
+``aux_loss_coeff`` and ``expert_bias`` are also supported.
 """
 
 from functools import partial
@@ -44,6 +41,7 @@ from jax.sharding import NamedSharding, PartitionSpec as P
 
 from . import cpp_extensions as tex
 from .quantize import (
+    QuantizerSet,
     TensorUsage,
     noop_quantizer_set,
     with_sharding_constraint_by_logical_axes,
@@ -204,6 +202,7 @@ class _Ctx:
     casted_wo_rhs_trans: Any
     expert_outputs: jnp.ndarray
     local_group_sizes: jnp.ndarray
+    quantizer_sets: Any
     aux_const_buf: Any = None
     aux_tokens_per_expert: Any = None
     aux_saved_scores: Any = None
@@ -224,6 +223,7 @@ def _ffn_fwd_global(
     wi_0_bias: Optional[jnp.ndarray],
     wi_1_bias: Optional[jnp.ndarray],
     wo_bias: Optional[jnp.ndarray],
+    quantizer_sets: Tuple[QuantizerSet, QuantizerSet],
     *,
     dp_size: int,
     num_ep: int,
@@ -283,9 +283,13 @@ def _ffn_fwd_global(
         jnp.concatenate([wi_0_bias, wi_1_bias], axis=-1) if wi_0_bias is not None else None
     )
 
-    q_set = noop_quantizer_set
-    casted_sorted_x = tex.grouped_quantize(sorted_x, q_set.x, group_sizes, flatten_axis=-1)
-    casted_wi = tex.grouped_quantize(wi_combined, q_set.kernel, flatten_axis=-1)
+    fc1_quantizer_set, fc2_quantizer_set = quantizer_sets
+    casted_sorted_x = tex.grouped_quantize(
+        sorted_x, fc1_quantizer_set.x, group_sizes, flatten_axis=-1
+    )
+    casted_wi = tex.grouped_quantize(
+        wi_combined, fc1_quantizer_set.kernel, flatten_axis=-1
+    )
     combined_out = tex.grouped_gemm(
         casted_sorted_x.get_tensor(usage=TensorUsage.LHS),
         casted_wi.get_tensor(usage=TensorUsage.RHS),
@@ -294,8 +298,12 @@ def _ffn_fwd_global(
     )
     combined_out = jax.lax.with_sharding_constraint(combined_out, flat_token_sharding)
     gate_proj_out, up_proj_out = jnp.split(combined_out, 2, axis=-1)
-    casted_sorted_x_lhs_trans = casted_sorted_x.get_tensor(usage=TensorUsage.LHS_TRANS)
-    casted_wi_rhs_trans = casted_wi.get_tensor(usage=TensorUsage.RHS_TRANS)
+    casted_sorted_x_lhs_trans = casted_sorted_x.get_tensor(
+        usage=TensorUsage.LHS_TRANS
+    ).checkpoint(fc1_quantizer_set.x)
+    casted_wi_rhs_trans = casted_wi.get_tensor(usage=TensorUsage.RHS_TRANS).checkpoint(
+        fc1_quantizer_set.kernel
+    )
 
     # Activation inputs (gate_proj_out, up_proj_out) stay in the wi GEMM
     # output dtype; the activation output (`intermediate`) stays in the
@@ -318,8 +326,10 @@ def _ffn_fwd_global(
         active = (recv_w_flat != 0)[:, None]
         intermediate = jnp.where(active, intermediate * w_b, jnp.zeros_like(intermediate))
 
-    casted_intermediate = tex.grouped_quantize(intermediate, q_set.x, group_sizes, flatten_axis=-1)
-    casted_wo = tex.grouped_quantize(wo, q_set.kernel, flatten_axis=-1)
+    casted_intermediate = tex.grouped_quantize(
+        intermediate, fc2_quantizer_set.x, group_sizes, flatten_axis=-1
+    )
+    casted_wo = tex.grouped_quantize(wo, fc2_quantizer_set.kernel, flatten_axis=-1)
     expert_outputs = tex.grouped_gemm(
         casted_intermediate.get_tensor(usage=TensorUsage.LHS),
         casted_wo.get_tensor(usage=TensorUsage.RHS),
@@ -327,8 +337,12 @@ def _ffn_fwd_global(
         bias=wo_bias,
     )
     expert_outputs = jax.lax.with_sharding_constraint(expert_outputs, flat_token_sharding)
-    casted_intermediate_lhs_trans = casted_intermediate.get_tensor(usage=TensorUsage.LHS_TRANS)
-    casted_wo_rhs_trans = casted_wo.get_tensor(usage=TensorUsage.RHS_TRANS)
+    casted_intermediate_lhs_trans = casted_intermediate.get_tensor(
+        usage=TensorUsage.LHS_TRANS
+    ).checkpoint(fc2_quantizer_set.x)
+    casted_wo_rhs_trans = casted_wo.get_tensor(usage=TensorUsage.RHS_TRANS).checkpoint(
+        fc2_quantizer_set.kernel
+    )
 
     expert_outputs_3d = expert_outputs.reshape(*recv_tokens.shape[:-1], expert_outputs.shape[-1])
     group_sizes_nd = group_sizes.reshape(token_counts.shape)
@@ -354,6 +368,7 @@ def _ffn_bwd_global(
     casted_wo_rhs_trans,
     local_group_sizes: jnp.ndarray,
     recv_topk_weights: jnp.ndarray,
+    quantizer_sets: Tuple[QuantizerSet, QuantizerSet],
     *,
     activation_type: str,
     apply_topk_weights_early: bool,
@@ -375,14 +390,16 @@ def _ffn_bwd_global(
     d_eo_2d = jax.lax.with_sharding_constraint(d_eo_2d, flat_token_sharding)
     recv_w_flat = jax.lax.with_sharding_constraint(recv_w_flat, flat_group_sharding)
     group_sizes = jax.lax.with_sharding_constraint(group_sizes, flat_group_sharding)
-    q_set = noop_quantizer_set
+    fc1_quantizer_set, fc2_quantizer_set = quantizer_sets
     # cuBLAS grouped_gemm skips size_g == 0 groups without zero-filling
     # the output slice; mask 0-token-expert wgrads to zero so the
     # optimizer never sees uninit memory.
     wgrad_group_active = (group_sizes > 0)[:, None, None]
 
     # wo bwd
-    casted_d_eo = tex.grouped_quantize(d_eo_2d, q_set.dgrad, group_sizes, flatten_axis=-1)
+    casted_d_eo = tex.grouped_quantize(
+        d_eo_2d, fc2_quantizer_set.dgrad, group_sizes, flatten_axis=-1
+    )
     _casted_d_eo_lhs = casted_d_eo.get_tensor(usage=TensorUsage.LHS)
     _casted_d_eo_rhs = casted_d_eo.get_tensor(usage=TensorUsage.RHS)
     d_intermediate = tex.grouped_gemm(
@@ -438,7 +455,9 @@ def _ffn_bwd_global(
     # wgrad result back into d_wi_0 / d_wi_1 halves with jnp.split.
     d_combined = jnp.concatenate([d_gate_proj_out, d_up_proj_out], axis=-1)
     d_combined = jax.lax.with_sharding_constraint(d_combined, flat_token_sharding)
-    casted_d_combined = tex.grouped_quantize(d_combined, q_set.dgrad, group_sizes, flatten_axis=-1)
+    casted_d_combined = tex.grouped_quantize(
+        d_combined, fc1_quantizer_set.dgrad, group_sizes, flatten_axis=-1
+    )
     d_sorted_x = tex.grouped_gemm(
         casted_d_combined.get_tensor(usage=TensorUsage.LHS),
         casted_wi_rhs_trans,
@@ -492,6 +511,7 @@ def _moe_fwd_rule(
     wi_1_bias,
     wo_bias,
     expert_bias,
+    quantizer_sets,
     num_experts,
     num_experts_per_tok,
     activation_type,
@@ -700,6 +720,7 @@ def _moe_fwd_rule(
         wi_0_bias if has_bias else None,
         wi_1_bias if has_bias else None,
         wo_bias if has_bias else None,
+        quantizer_sets,
         dp_size=dp_size,
         num_ep=num_ep,
         num_local_experts=num_local_experts,
@@ -765,6 +786,7 @@ def _moe_fwd_rule(
         casted_wo_rhs_trans=casted_wo_rhs_trans,
         expert_outputs=expert_outputs,
         local_group_sizes=local_group_sizes,
+        quantizer_sets=quantizer_sets,
         aux_const_buf=aux_const_buf,
         aux_tokens_per_expert=aux_tokens_per_expert,
         aux_saved_scores=aux_saved_scores,
@@ -875,6 +897,7 @@ def _moe_bwd_rule(
         ctx.casted_wo_rhs_trans,
         ctx.local_group_sizes,
         ctx.recv_topk_weights,
+        ctx.quantizer_sets,
         activation_type=activation_type,
         apply_topk_weights_early=apply_topk_weights_early,
         has_bias=has_bias,
@@ -1003,6 +1026,7 @@ def _moe_bwd_rule(
         d_wi_1_bias if has_bias else None,
         d_wo_bias if has_bias else None,
         d_expert_bias,
+        ctx.quantizer_sets,
     )
 
 
@@ -1011,7 +1035,7 @@ def _moe_bwd_rule(
 # =============================================================================
 
 
-@partial(jax.custom_vjp, nondiff_argnums=tuple(range(9, 26)))
+@partial(jax.custom_vjp, nondiff_argnums=tuple(range(10, 27)))
 def _moe(
     x,
     gate_kernel,
@@ -1022,6 +1046,7 @@ def _moe(
     wi_1_bias,
     wo_bias,
     expert_bias,
+    quantizer_sets,
     num_experts,
     num_experts_per_tok,
     activation_type,
@@ -1050,6 +1075,7 @@ def _moe(
         wi_1_bias,
         wo_bias,
         expert_bias,
+        quantizer_sets,
         num_experts,
         num_experts_per_tok,
         activation_type,
@@ -1095,6 +1121,10 @@ def moe(
     scaling_factor: float = 1.0,
     aux_loss_coeff: float = 0.0,
     apply_topk_weights_early: bool = False,
+    quantizer_sets: Tuple[QuantizerSet, QuantizerSet] = (
+        noop_quantizer_set,
+        noop_quantizer_set,
+    ),
     ep_axis: str,
     data_parallelism_axes: Tuple[str, ...] = (),
     input_axes: Tuple[Optional[str], ...] = (),
@@ -1122,6 +1152,9 @@ def moe(
         all-gather over the routing-side logits is inserted so the
         ``fused_moe_aux_loss`` kernel sees a global ``[T_global, E]``
         view; this lives off the dispatch critical path.
+    quantizer_sets : Tuple[QuantizerSet, QuantizerSet]
+        Independent FC1 and FC2 quantizer sets. They are differentiable
+        custom-VJP arguments so recipe state is threaded through backward.
 
     Note that the per-expert dispatch-slot alignment is fixed internally
     at 128 tokens (``_ALIGN_SIZE``); see that constant's docstring for
@@ -1195,6 +1228,7 @@ def moe(
         wi_1_bias,
         wo_bias,
         expert_bias_arg,
+        quantizer_sets,
         num_experts,
         num_experts_per_tok,
         activation_type,

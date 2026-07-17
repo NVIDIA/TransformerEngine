@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 """Partitioning tests for grouped quantize and grouped GEMM."""
 
+import math
 from types import SimpleNamespace
 
 import jax
@@ -75,7 +76,27 @@ def _mxfp8_grouped_quantizer_set(n_groups):
     )
 
 
-def test_grouped_quantize_gathers_hidden_axis_for_block_scales():
+def test_grouped_quantize_large_abstract_shape_preserves_inferred_hidden_dim():
+    input_shape = (786432, 4096)
+    group_count = 64
+    outputs = GroupedQuantizePrimitive.abstract(
+        jax.core.ShapedArray(input_shape, jnp.bfloat16),
+        jax.core.ShapedArray((group_count,), jnp.float32),
+        jax.core.ShapedArray((group_count,), jnp.int32),
+        out_dtype=jnp.float8_e4m3fn,
+        scaling_mode=ScalingMode.MXFP8_1D_SCALING.value,
+        q_layout=QuantizeLayout.ROWWISE,
+        flatten_axis=-1,
+        scale_dtype=jnp.float8_e8m0fnu,
+        uniform_groups=False,
+    )
+
+    assert outputs[0].shape == input_shape
+    assert max(outputs[0].shape) < 2**31
+    assert math.prod(outputs[0].shape) == 3221225472
+
+
+def test_grouped_quantize_preserves_output_side_fsdp_for_uniform_kernel():
     mesh = _mesh()
     with global_shard_guard(MeshResource(fsdp_resource="fsdp", ep_resource="expert")):
         _, _, out_shardings, arg_shardings = GroupedQuantizePrimitive.partition(
@@ -84,23 +105,24 @@ def test_grouped_quantize_gathers_hidden_axis_for_block_scales():
             QuantizeLayout.ROWWISE,
             -1,
             jnp.float8_e8m0fnu,
+            True,
             mesh,
             (
-                _arg_info(mesh, (8, 128, 64), ("expert", None, "fsdp")),
+                _arg_info(mesh, (8, 128, 256), ("expert", None, "fsdp")),
                 _arg_info(mesh, (8,), ("expert",)),
                 _arg_info(mesh, (8,), ("expert",)),
             ),
             (),
         )
 
-    assert tuple(arg_shardings[0].spec) == ("expert", None, None)
+    assert tuple(arg_shardings[0].spec) == ("expert", None, "fsdp")
     specs = tuple(tuple(sharding.spec) for sharding in out_shardings)
-    assert _normalize_spec(specs[0]) == ("expert",)
-    assert _normalize_spec(specs[2]) == ("expert",)
+    assert _normalize_spec(specs[0]) == ("expert", None, "fsdp")
+    assert _normalize_spec(specs[2]) == ("expert", None, "fsdp")
     assert _normalize_spec(specs[4]) == ("expert",)
 
 
-def test_grouped_quantize_mxfp8_colwise_specs_gather_hidden_axis():
+def test_grouped_quantize_mxfp8_colwise_scale_tracks_output_side_fsdp():
     mesh = _mesh()
     with global_shard_guard(MeshResource(fsdp_resource="fsdp", ep_resource="expert")):
         _, _, out_shardings, arg_shardings = GroupedQuantizePrimitive.partition(
@@ -109,21 +131,22 @@ def test_grouped_quantize_mxfp8_colwise_specs_gather_hidden_axis():
             QuantizeLayout.ROWWISE_COLWISE,
             -1,
             jnp.float8_e8m0fnu,
+            True,
             mesh,
             (
-                _arg_info(mesh, (8, 128, 128), ("expert", None, "fsdp")),
+                _arg_info(mesh, (8, 128, 256), ("expert", None, "fsdp")),
                 _arg_info(mesh, (8,), ("expert",)),
                 _arg_info(mesh, (8,), ("expert",)),
             ),
             (),
         )
 
-    assert tuple(arg_shardings[0].spec) == ("expert", None, None)
+    assert tuple(arg_shardings[0].spec) == ("expert", None, "fsdp")
     specs = tuple(tuple(sharding.spec) for sharding in out_shardings)
-    assert _normalize_spec(specs[0]) == ("expert",)
-    assert _normalize_spec(specs[1]) == ("expert",)
-    assert _normalize_spec(specs[2]) == ("expert",)
-    assert _normalize_spec(specs[3]) == ("expert",)
+    assert _normalize_spec(specs[0]) == ("expert", None, "fsdp")
+    assert _normalize_spec(specs[1]) == ("expert", None, "fsdp")
+    assert _normalize_spec(specs[2]) == ("expert", None, "fsdp")
+    assert _normalize_spec(specs[3]) == ("expert", "fsdp", None)
     assert _normalize_spec(specs[4]) == ("expert",)
 
 
@@ -136,9 +159,10 @@ def test_grouped_quantize_preserves_row_side_fsdp_for_kernel():
             QuantizeLayout.ROWWISE,
             -1,
             jnp.float8_e8m0fnu,
+            True,
             mesh,
             (
-                _arg_info(mesh, (8, 128, 64), ("expert", "fsdp", None)),
+                _arg_info(mesh, (8, 256, 128), ("expert", "fsdp", None)),
                 _arg_info(mesh, (8,), ("expert",)),
                 _arg_info(mesh, (8,), ("expert",)),
             ),
@@ -147,11 +171,11 @@ def test_grouped_quantize_preserves_row_side_fsdp_for_kernel():
 
     assert tuple(arg_shardings[0].spec) == ("expert", "fsdp", None)
     specs = tuple(tuple(sharding.spec) for sharding in out_shardings)
-    assert _normalize_spec(specs[0]) == (("expert", "fsdp"),)
-    assert _normalize_spec(specs[2]) == (("expert", "fsdp"),)
+    assert _normalize_spec(specs[0]) == ("expert", "fsdp", None)
+    assert _normalize_spec(specs[2]) == ("expert", "fsdp", None)
 
 
-def test_grouped_quantize_strips_unsupported_axes_and_gathers_hidden_axes():
+def test_grouped_quantize_strips_unsupported_axes_and_preserves_supported_axes():
     mesh = _mesh_with_dp_tp()
     with jax.set_mesh(mesh), global_shard_guard(
         MeshResource(dp_resource="dp", tp_resource="tp", fsdp_resource="fsdp", ep_resource="expert")
@@ -163,22 +187,23 @@ def test_grouped_quantize_strips_unsupported_axes_and_gathers_hidden_axes():
                 QuantizeLayout.ROWWISE,
                 -1,
                 jnp.float8_e8m0fnu,
+                True,
                 mesh,
                 (
-                    _arg_info(mesh, (8, 128, 128), ("expert", "dp", ("fsdp", "tp"))),
+                    _arg_info(mesh, (8, 128, 256), ("expert", "dp", ("fsdp", "tp"))),
                     _arg_info(mesh, (8,), (("expert", "tp"),)),
                     _arg_info(mesh, (8,), (("expert", "tp"),)),
                 ),
                 (),
             )
 
-    assert tuple(arg_shardings[0].spec) == ("expert", "dp", None)
+    assert tuple(arg_shardings[0].spec) == ("expert", "dp", "fsdp")
     assert tuple(arg_shardings[1].spec) == ("expert",)
     assert tuple(arg_shardings[2].spec) == ("expert",)
 
     out_specs = tuple(tuple(sharding.spec) for sharding in out_shardings)
-    assert _normalize_spec(out_specs[0]) == (("expert", "dp"),)
-    assert _normalize_spec(out_specs[2]) == (("expert", "dp"),)
+    assert _normalize_spec(out_specs[0]) == ("expert", "dp", "fsdp")
+    assert _normalize_spec(out_specs[2]) == ("expert", "dp", "fsdp")
     assert _normalize_spec(out_specs[4]) == ("expert",)
     for spec in (*out_specs, *(tuple(sharding.spec) for sharding in arg_shardings)):
         assert not _spec_contains_axis(spec, "tp")
@@ -327,9 +352,10 @@ def test_grouped_partitioning_strips_arbitrary_unsupported_axis():
                     QuantizeLayout.ROWWISE,
                     -1,
                     jnp.float8_e8m0fnu,
+                    True,
                     mesh,
                     (
-                        _arg_info(mesh, (8, 128, 128), ("expert", "myaxis123", ("dp", "fsdp"))),
+                        _arg_info(mesh, (8, 128, 256), ("expert", "myaxis123", ("dp", "fsdp"))),
                         _arg_info(mesh, (8,), (("expert", "myaxis123"),)),
                         _arg_info(mesh, (8,), (("expert", "myaxis123"),)),
                     ),
@@ -374,11 +400,11 @@ def test_grouped_partitioning_strips_arbitrary_unsupported_axis():
                 gemm_result_infos,
             )
 
-    assert tuple(quantize_arg_shardings[0].spec) == ("expert", None, None)
+    assert tuple(quantize_arg_shardings[0].spec) == ("expert", None, ("dp", "fsdp"))
     assert tuple(quantize_arg_shardings[1].spec) == ("expert",)
     quantize_out_specs = tuple(tuple(sharding.spec) for sharding in quantize_out_shardings)
-    assert _normalize_spec(quantize_out_specs[0]) == ("expert",)
-    assert _normalize_spec(quantize_out_specs[2]) == ("expert",)
+    assert _normalize_spec(quantize_out_specs[0]) == ("expert", None, ("dp", "fsdp"))
+    assert _normalize_spec(quantize_out_specs[2]) == ("expert", None, ("dp", "fsdp"))
 
     assert tuple(gemm_arg_shardings[0].spec) == ("dp",)
     assert tuple(gemm_arg_shardings[2].spec) == ("expert",)
@@ -403,16 +429,17 @@ def test_grouped_partitioning_shardy_rules_smoke():
         QuantizeLayout.ROWWISE,
         -1,
         jnp.float8_e8m0fnu,
+        True,
         mesh,
         (
-            SimpleNamespace(shape=(8, 128, 64)),
+            SimpleNamespace(shape=(8, 128, 128)),
             SimpleNamespace(shape=(8,)),
             SimpleNamespace(shape=(8,)),
         ),
         (
-            SimpleNamespace(shape=(8 * 128 * 64,)),
+            SimpleNamespace(shape=(8, 128, 128)),
             SimpleNamespace(shape=(1,)),
-            SimpleNamespace(shape=(8 * 128 * 64,)),
+            SimpleNamespace(shape=(8, 1, 512)),
             SimpleNamespace(shape=(1,)),
             SimpleNamespace(shape=(8,)),
         ),
@@ -441,17 +468,25 @@ def test_grouped_partitioning_shardy_rules_smoke():
     assert gemm_rule is not None
 
 
-def test_grouped_dense_mxfp8_ep_fsdp_outside_shard_map_single_process():
+@pytest.mark.parametrize(
+    "weight_spec",
+    [
+        ("expert", "fsdp", None),
+        ("expert", None, "fsdp"),
+    ],
+    ids=("contracting-fsdp", "output-fsdp"),
+)
+def test_grouped_dense_mxfp8_ep_fsdp_outside_shard_map_single_process(weight_spec):
     mesh = _mesh()
     n_groups = 4
     group_tokens = 128
     hidden = 256
-    out_hidden = 128
+    out_hidden = 256
     x_shape = (n_groups * group_tokens, hidden)
     w_shape = (n_groups, hidden, out_hidden)
 
     x_sharding = NamedSharding(mesh, PartitionSpec("expert", None))
-    w_sharding = NamedSharding(mesh, PartitionSpec("expert", "fsdp", None))
+    w_sharding = NamedSharding(mesh, PartitionSpec(*weight_spec))
     group_sharding = NamedSharding(mesh, PartitionSpec("expert"))
     out_sharding = NamedSharding(mesh, PartitionSpec("expert", None))
 
@@ -496,8 +531,20 @@ def test_grouped_dense_mxfp8_ep_fsdp_outside_shard_map_single_process():
 
     assert tuple(out.sharding.spec) == ("expert", None)
     assert tuple(dx.sharding.spec) == ("expert", None)
-    assert tuple(dw.sharding.spec) == ("expert", "fsdp", None)
+    assert tuple(dw.sharding.spec) == weight_spec
     for value in (out, dx, dw):
         local_value = np.asarray(jax.device_get(value.addressable_data(0)))
         assert np.all(np.isfinite(local_value))
         assert np.any(local_value != 0.0)
+
+    x_global = np.asarray(jax.device_get(x)).reshape(n_groups, group_tokens, hidden)
+    w_global = np.asarray(jax.device_get(w))
+    reference = np.einsum(
+        "gth,gho->gto", x_global.astype(np.float32), w_global.astype(np.float32)
+    ).reshape(x_shape[0], out_hidden)
+    np.testing.assert_allclose(
+        np.asarray(jax.device_get(out)).astype(np.float32),
+        reference.astype(np.float32),
+        atol=5e-3,
+        rtol=5e-2,
+    )

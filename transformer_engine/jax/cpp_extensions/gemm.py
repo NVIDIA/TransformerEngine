@@ -2025,6 +2025,14 @@ class GroupedGemmPrimitive(BasePrimitive):
             additional_arg_0,
             additional_arg_1,
         ):
+            # Grouped quantization may expose rank-3 scale carriers so Shardy
+            # can gather expert and FSDP axes independently. At this point the
+            # requested local shardings/collectives have already been applied;
+            # the FFI consumes the same contiguous pre-swizzled bytes as 1D.
+            if lhs_scale_inv.ndim > 2:
+                lhs_scale_inv = lhs_scale_inv.reshape(-1)
+            if rhs_scale_inv.ndim > 2:
+                rhs_scale_inv = rhs_scale_inv.reshape(-1)
             (out,) = GroupedGemmPrimitive.impl(
                 lhs_data,
                 lhs_scale_inv,
