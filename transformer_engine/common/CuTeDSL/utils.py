@@ -42,7 +42,9 @@ def is_device_blackwell() -> bool:
     This is a run-time check, not a compile-time check. It check if the current device is Blackwell architecture.
     """
     major, minor = device_compute_capability()
-    return (major == 10 and minor == 0) or (major == 11 and minor == 0) or (major == 12 and minor == 0)
+    return (
+        (major == 10 and minor == 0) or (major == 11 and minor == 0) or (major == 12 and minor == 0)
+    )
 
 
 def str_to_cutlass_dtype(dtype_str: str):
