@@ -33,7 +33,7 @@ def device_compute_capability() -> tuple:
     from cuda.core import Device  # pylint: disable=no-name-in-module
 
     major_minor = Device().arch  # compute capability as digits, e.g. "120"
-    return int(major_minor[:-1]), int(major_minor[-1]) if major_minor else (0, 0)
+    return (int(major_minor[:-1]), int(major_minor[-1])) if major_minor else (0, 0)
 
 
 @functools.lru_cache(maxsize=None)
