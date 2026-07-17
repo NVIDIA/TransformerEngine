@@ -922,9 +922,7 @@ class MultiheadAttention(torch.nn.Module):
         # Custom fp8_mha boundaries were wired before DPA recipe-state setup so
         # querying its canonical QKV quantizer cannot trigger a second build.
         if not (fp8 and custom_recipe and fp8_mha and _dpa_fp8_recipe == ""):
-            self._update_output_quantizer_roles(
-                qkv_fp8_output, proj_fp8_grad, dpa_fp8_output
-            )
+            self._update_output_quantizer_roles(qkv_fp8_output, proj_fp8_grad, dpa_fp8_output)
 
         layernorm_output = None
         if self.attention_type == "self":

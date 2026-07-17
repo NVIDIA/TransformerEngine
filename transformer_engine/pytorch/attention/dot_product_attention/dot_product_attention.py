@@ -932,8 +932,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 name=self.name or "",
             )
             raise RuntimeError(
-                "DotProductAttention did not materialize the canonical QKV "
-                f"quantizer for {role}."
+                f"DotProductAttention did not materialize the canonical QKV quantizer for {role}."
             ) from exc
 
         if qkv_quantizer is self._qkv_capabilities_quantizer:
@@ -966,8 +965,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             name=self.name or "",
         )
         raise TypeError(
-            f"Unsupported CustomRecipe quantizer for {role}: "
-            f"{type(qkv_quantizer).__name__}."
+            f"Unsupported CustomRecipe quantizer for {role}: {type(qkv_quantizer).__name__}."
         )
 
     def set_meta_tensor(self, fwd: bool, recipe: Union[Recipe, List[Recipe]]) -> None:
