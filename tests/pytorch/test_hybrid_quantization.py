@@ -4,6 +4,7 @@
 
 """Tests for hybrid quantization (mixed rowwise/columnwise formats)."""
 
+import io
 import pytest
 import torch
 
@@ -605,6 +606,15 @@ class TestHybridColumnwiseSource:
         rowwise_dq = out.rowwise_sub_storage.dequantize()
         columnwise_dq = out.columnwise_sub_storage.dequantize()
         torch.testing.assert_close(columnwise_dq, rowwise_dq, rtol=0.0, atol=0.0)
+
+    def test_internal_rowwise_storage_preserves_input_dtype(self, input_tensor):
+        hq = self._make_quantizer(columnwise_source="rowwise_dequantized")
+        hq.rowwise_quantizer.internal = True
+
+        columnwise_src = hq._columnwise_src_from_rowwise(input_tensor, None)
+
+        assert columnwise_src.dtype == input_tensor.dtype
+
 
     def test_columnwise_only_uses_transient_rowwise_source(self, input_tensor):
         hq = self._make_quantizer(columnwise_source="rowwise_dequantized")
@@ -3964,12 +3974,45 @@ class TestHybridGroupedLinearValidation:
 
         assert len(calls) == 2
         expected_columnwise_source = torch.cat(
-            [result.dequantize() for result in calls[0][1]], dim=0
+            [result.dequantize(dtype=tensor.dtype) for result in calls[0][1]], dim=0
         )
         torch.testing.assert_close(calls[1][0], expected_columnwise_source, rtol=0.0, atol=0.0)
         assert calls[1][0] is not tensor
         assert all(storage.rowwise_sub_storage is None for storage in out)
         assert all(storage.columnwise_sub_storage is not None for storage in out)
+
+    @requires_nvfp4
+    @pytest.mark.parametrize("m_splits", ([128, 128], [0, 128]))
+    def test_nvfp4_rowwise_dequantized_preserves_source_dtype(self, monkeypatch, m_splits):
+        import transformer_engine.pytorch.module.grouped_linear as grouped_linear
+
+        real_split_quantize = grouped_linear.tex.split_quantize
+        input_dtypes = []
+
+        def tracked_split_quantize(tensor, splits, quantizers, **kwargs):
+            input_dtypes.append(tensor.dtype)
+            return real_split_quantize(tensor, splits, quantizers, **kwargs)
+
+        monkeypatch.setattr(grouped_linear.tex, "split_quantize", tracked_split_quantize)
+        tensor = torch.randn(
+            sum(m_splits),
+            128,
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        quantizers = [
+            HybridQuantizer(
+                rowwise_quantizer=_make_nvfp4_quantizer(),
+                columnwise_quantizer=_make_nvfp4_quantizer(),
+                columnwise_source="rowwise_dequantized",
+            )
+            for _ in m_splits
+        ]
+
+        out = grouped_linear._hybrid_split_quantize(tensor, m_splits, quantizers)
+
+        assert input_dtypes == [tensor.dtype, tensor.dtype]
+        assert len(out) == len(m_splits)
 
     def test_rowwise_only_skips_columnwise_quantization(self, monkeypatch):
         import transformer_engine.pytorch.module.grouped_linear as grouped_linear
@@ -6358,6 +6401,113 @@ class TestFloat8TransposeOnlySplit:
             (16, 2),
         ]
 
+    @staticmethod
+    def _make_valid_transpose_only_float8_tensor(shape=(12, 16)):
+        """Build transpose-only storage with known, numerically valid FP8 bytes."""
+        source = torch.randn(shape, dtype=torch.bfloat16, device="cuda")
+        rowwise_quantizer = Float8CurrentScalingQuantizer(
+            tex.DType.kFloat8E4M3,
+            device="cuda",
+            rowwise=True,
+            columnwise=False,
+        )
+        rowwise = rowwise_quantizer(source)
+        columnwise_quantizer = Float8CurrentScalingQuantizer(
+            tex.DType.kFloat8E4M3,
+            device="cuda",
+            rowwise=False,
+            columnwise=True,
+        )
+        tensor = Float8Tensor(
+            shape=shape,
+            dtype=torch.bfloat16,
+            data=None,
+            data_transpose=rowwise._data.movedim(-1, 0).contiguous(),
+            fp8_scale_inv=rowwise._scale_inv.detach().clone(),
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            quantizer=columnwise_quantizer,
+            requires_grad=False,
+            device="cuda",
+        )
+        return tensor, rowwise.dequantize()
+
+    @pytest.mark.parametrize("weights_only", (False, True))
+    def test_serialization_preserves_transpose_only_payload(self, weights_only):
+        tensor, expected = self._make_valid_transpose_only_float8_tensor()
+        buffer = io.BytesIO()
+
+        torch.save(tensor, buffer)
+        buffer.seek(0)
+        loaded = torch.load(buffer, weights_only=weights_only)
+
+        assert loaded._data is None
+        assert loaded._transpose_invalid is False
+        assert torch.equal(loaded._transpose, tensor._transpose)
+        torch.testing.assert_close(loaded.dequantize(), expected, rtol=0.0, atol=0.0)
+
+    def test_dequantize_from_transpose_only_payload(self):
+        tensor, expected = self._make_valid_transpose_only_float8_tensor()
+
+        torch.testing.assert_close(tensor.dequantize(), expected, rtol=0.0, atol=0.0)
+
+    def test_slice_and_select_preserve_transpose_only_payload(self):
+        tensor, expected = self._make_valid_transpose_only_float8_tensor()
+
+        sliced = tensor[2:8]
+        selected = torch.select(tensor, 1, 3)
+
+        assert isinstance(sliced, Float8Tensor)
+        assert sliced._data is None
+        assert sliced._transpose.shape == torch.Size((16, 6))
+        torch.testing.assert_close(
+            sliced.dequantize(), expected[2:8], rtol=0.0, atol=0.0
+        )
+        assert isinstance(selected, Float8Tensor)
+        assert selected._data is None
+        assert selected._transpose.shape == torch.Size((12,))
+        torch.testing.assert_close(
+            selected.dequantize(), expected[:, 3], rtol=0.0, atol=0.0
+        )
+
+    def test_as_strided_row_shard_preserves_transpose_only_payload(self):
+        tensor, expected = self._make_valid_transpose_only_float8_tensor()
+
+        shard = torch.as_strided(tensor, (5, 16), (16, 1), 16)
+
+        assert isinstance(shard, Float8Tensor)
+        assert shard._data is None
+        assert shard._transpose.shape == torch.Size((16, 5))
+        torch.testing.assert_close(
+            shard.dequantize(), expected[1:6], rtol=0.0, atol=0.0
+        )
+
+    def test_as_strided_falls_back_for_nonrepresentable_layout(self):
+        tensor, expected = self._make_valid_transpose_only_float8_tensor()
+
+        output = torch.as_strided(tensor, (16, 12), (1, 16), 0)
+
+        assert type(output) is torch.Tensor
+        reference = torch.as_strided(expected, (16, 12), (1, 16), 0)
+        torch.testing.assert_close(output, reference, rtol=0.0, atol=0.0)
+
+    def test_new_zeros_preserves_transpose_only_layout(self):
+        tensor, _ = self._make_valid_transpose_only_float8_tensor()
+
+        output = tensor.new_zeros((5, 16))
+
+        assert isinstance(output, Float8Tensor)
+        assert output.shape == torch.Size((5, 16))
+        assert output._data is None
+        assert output._transpose.shape == torch.Size((16, 5))
+        assert output._transpose.dtype == torch.uint8
+        assert torch.count_nonzero(output._transpose).item() == 0
+        torch.testing.assert_close(
+            output.dequantize(),
+            torch.zeros((5, 16), dtype=output.dtype, device=output.device),
+            rtol=0.0,
+            atol=0.0,
+        )
+
 
 class TestHybridNewZeros:
     """Public new_zeros semantics independent of FSDP-specific allocation."""
@@ -6625,6 +6775,18 @@ class TestHybridTorchDispatchFSDP2Ops:
             assert type(piece.rowwise_sub_storage) is orig_row_type
             assert type(piece.columnwise_sub_storage) is orig_col_type
 
+    @requires_mxfp8
+    def test_split_rejects_mxfp8_high_precision_fallback(self):
+        """Fail before wrapping unquantizable MXFP8 shards for Hybrid FSDP2."""
+        quantizer = HybridQuantizer(
+            rowwise_quantizer=MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
+            columnwise_quantizer=MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
+        )
+        tensor = quantizer(torch.randn(64, 64, dtype=torch.bfloat16, device="cuda"))
+
+        with pytest.raises(NotImplementedError, match="local shape.*divisible by 32"):
+            torch.split(tensor, 16, dim=0)
+
     def test_view_preserves_hybrid_type(self, hybrid_param):
         """view must return a HybridQuantizedTensor (used by FSDP2 reset_sharded_param)."""
         shape_2d = hybrid_param.shape
@@ -6676,6 +6838,30 @@ class TestHybridTorchDispatchFSDP2Ops:
         dst_deq = dst.dequantize()
         torch.testing.assert_close(src_deq, dst_deq, rtol=0.0, atol=0.0)
         _assert_hybrid_tensor_exact(dst, hybrid_param, context="hybrid copy_")
+
+    def test_copy_between_mismatched_usages_raises_atomically(self, hybrid_param):
+        quantizer = hybrid_param._quantizer.copy()
+        src = quantizer.quantize(torch.ones_like(hybrid_param.dequantize()))
+        dst = quantizer.quantize(torch.zeros_like(hybrid_param.dequantize()))
+        src.update_usage(columnwise_usage=False)
+        dst_before = tuple(
+            None if tensor is None else tensor.clone()
+            for tensor in _as_data_tensor_tuple(dst)
+        )
+
+        with pytest.raises(
+            NotImplementedError,
+            match="requires matching rowwise/columnwise usages",
+        ):
+            aten.copy_.default(dst, src)
+
+        dst_after = _as_data_tensor_tuple(dst)
+        assert len(dst_after) == len(dst_before)
+        for before, after in zip(dst_before, dst_after):
+            if before is None:
+                assert after is None
+            else:
+                torch.testing.assert_close(after, before, rtol=0.0, atol=0.0)
 
     def test_copy_from_bf16_to_hybrid(self, hybrid_param):
         """copy_ from BF16 into HybridQuantizedTensor triggers quantize_."""
@@ -7223,77 +7409,159 @@ requires_hopper_fp8 = pytest.mark.skipif(
 
 @requires_hopper_fp8
 class TestHybridFloat8ColumnwiseOnlyHopperPath:
-    """Float8TensorStorage columnwise-only sub-storage exercises the
-    ``_transpose`` field on Hopper. The FSDP2 buffer protocol must
-    recognize this layout.
-    """
+    """Hopper transpose-only Float8 uses an M-major FSDP transport layout."""
 
-    def _make_columnwise_only_float8_storage(self):
-        """Build a Float8TensorStorage in the layout a columnwise-only
-        hybrid sub-storage would have on Hopper: ``_data=None`` and
-        the actual quantized bytes in ``_transpose``.
-        """
-        q = Float8CurrentScalingQuantizer(
-            tex.DType.kFloat8E4M3,
-            device="cuda",
-            rowwise=False,
-            columnwise=True,
+    @staticmethod
+    def _make_columnwise_only_float8_storage(shape=(32, 64), value=1.0, quantizer=None):
+        source = torch.full(shape, value, device="cuda", dtype=torch.bfloat16)
+        byte_quantizer = Float8Quantizer(
+            scale=torch.ones(1, device="cuda", dtype=torch.float32),
+            amax=torch.zeros(1, device="cuda", dtype=torch.float32),
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            rowwise=True,
+            columnwise=False,
         )
-        src = torch.randn(64, 64, dtype=torch.bfloat16, device="cuda")
-        out = q(src)
-        # Columnwise-only Float8 on Hopper: _data is None, _transpose holds data
-        assert (
-            out._data is None
-        ), f"Test precondition failed: expected _data is None on Hopper, got {out._data}"
-        assert out._transpose is not None, "Test precondition failed: _transpose is None"
-        return out
+        rowwise = byte_quantizer(source)
+        if quantizer is None:
+            quantizer = Float8CurrentScalingQuantizer(
+                fp8_dtype=tex.DType.kFloat8E4M3,
+                device="cuda",
+                rowwise=False,
+                columnwise=True,
+            )
+        storage = Float8Tensor(
+            shape=shape,
+            dtype=source.dtype,
+            data=None,
+            data_transpose=rowwise._data.movedim(-1, 0).contiguous(),
+            fp8_scale_inv=rowwise._scale_inv.clone(),
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            quantizer=quantizer,
+            requires_grad=False,
+            device="cuda",
+        )
+        return storage, rowwise.dequantize()
 
-    def test_fsdp_buffer_fields_returns_transpose(self):
-        """``fsdp_buffer_fields`` must return ``("_transpose",)`` when
-        ``_data`` is ``None`` and ``_transpose`` is populated. The
-        unconditional ``("_data",)`` would have FSDP2 all-gather a
-        ``None`` tensor on Hopper hybrid + FSDP2.
-        """
-        storage = self._make_columnwise_only_float8_storage()
-        assert storage.fsdp_buffer_fields() == ("_transpose",)
+    @classmethod
+    def _make_hybrid_shard(cls, value):
+        quantizer = HybridQuantizer(
+            rowwise_quantizer=IdentityQuantizer(),
+            columnwise_quantizer=Float8CurrentScalingQuantizer(
+                fp8_dtype=tex.DType.kFloat8E4M3,
+                device="cuda",
+            ),
+        )
+        source = torch.full((32, 64), value, device="cuda", dtype=torch.bfloat16)
+        rowwise = quantizer.rowwise_quantizer(source)
+        columnwise, expected = cls._make_columnwise_only_float8_storage(
+            value=value, quantizer=quantizer.columnwise_quantizer
+        )
+        hybrid = HybridQuantizedTensor(
+            shape=source.shape,
+            dtype=source.dtype,
+            rowwise_storage=rowwise,
+            columnwise_storage=columnwise,
+            quantizer=quantizer,
+            requires_grad=False,
+            device="cuda",
+        )
+        return hybrid, expected
 
-    def test_fsdp_extract_buffers_returns_transpose_data(self):
-        """``fsdp_extract_buffers`` (default impl, reads named fields)
-        must return the actual ``_transpose`` tensor, not ``None``.
-        """
-        storage = self._make_columnwise_only_float8_storage()
-        buffers, meta = storage.fsdp_extract_buffers()
+    def test_columnwise_only_float8_fsdp_buffer_fields_returns_transpose(self):
+        out, _ = self._make_columnwise_only_float8_storage()
+
+        assert out._data is None
+        assert out._transpose is not None
+        assert not out._transpose_invalid
+        assert out.fsdp_buffer_fields() == ("_transpose",)
+
+    def test_columnwise_only_float8_fsdp_extract_uses_m_major_transport(self):
+        out, _ = self._make_columnwise_only_float8_storage()
+
+        buffers, metadata = out.fsdp_extract_buffers()
+
         assert len(buffers) == 1
-        assert buffers[0] is not None
-        assert buffers[0] is storage._transpose
-        assert meta["field_names"] == ("_transpose",)
+        assert buffers[0].shape == out.shape
+        assert buffers[0].is_contiguous()
+        torch.testing.assert_close(
+            buffers[0], out._transpose.movedim(0, -1).contiguous()
+        )
+        assert metadata == {
+            "field_names": ("_transpose",),
+            "transport_layout": "columnwise_m_major",
+        }
 
-    def test_fsdp_assign_gathered_resets_transpose_invalid(self):
-        """After the gathered transpose buffer is written back via
-        ``fsdp_assign_gathered``, ``_transpose_invalid`` must be False
-        — otherwise ``update_usage`` / ``get_usages`` would treat the
-        freshly gathered transpose as stale on first use.
-        """
-        storage = self._make_columnwise_only_float8_storage()
-        # Simulate stale state pre-gather
-        storage._transpose_invalid = True
-        new_transpose = torch.zeros_like(storage._transpose)
-        storage.fsdp_assign_gathered((new_transpose,), {"field_names": ("_transpose",)})
-        assert storage._transpose is new_transpose
-        assert storage._transpose_invalid is False
-        # And ``get_usages`` correctly reports columnwise-available
-        assert storage.get_usages()["columnwise"] is True
+    def test_columnwise_only_float8_fsdp_assign_restores_columnwise_layout(self):
+        out, expected = self._make_columnwise_only_float8_storage()
+        buffers, metadata = out.fsdp_extract_buffers()
+        gathered = torch.cat((buffers[0], buffers[0]), dim=0)
+        rebuilt = Float8Tensor.make_like(out, shape=gathered.shape)
+
+        rebuilt.fsdp_assign_gathered((gathered,), metadata)
+
+        assert rebuilt.shape == torch.Size((64, 64))
+        assert rebuilt._data is None
+        assert rebuilt._transpose.shape == torch.Size((64, 64))
+        assert not rebuilt._transpose_invalid
+        torch.testing.assert_close(
+            rebuilt._transpose, gathered.movedim(-1, 0).contiguous()
+        )
+        torch.testing.assert_close(
+            rebuilt.dequantize(), torch.cat((expected, expected), dim=0)
+        )
+
+    def test_hybrid_fsdp_two_rank_gather_and_buffer_reuse(self):
+        shards = [self._make_hybrid_shard(value) for value in (1.0, 2.0)]
+        extracted = [
+            shard.fsdp_pre_all_gather(
+                mesh=None,
+                orig_size=shard.shape,
+                contiguous_orig_stride=None,
+                module=None,
+                mp_policy=None,
+            )
+            for shard, _ in shards
+        ]
+        gathered = tuple(
+            torch.cat((extracted[0][0][i], extracted[1][0][i]), dim=0)
+            for i in range(len(extracted[0][0]))
+        )
+        expected = torch.cat((shards[0][1], shards[1][1]), dim=0)
+
+        rebuilt, _ = shards[0][0].fsdp_post_all_gather(
+            gathered, extracted[0][1], torch.bfloat16
+        )
+
+        assert rebuilt.shape == torch.Size((64, 64))
+        assert rebuilt._columnwise_storage.shape == torch.Size((64, 64))
+        assert rebuilt._columnwise_storage._data is None
+        assert rebuilt._columnwise_storage._transpose.shape == torch.Size((64, 64))
+        torch.testing.assert_close(rebuilt._columnwise_storage.dequantize(), expected)
+
+        reused, _ = shards[0][0].fsdp_post_all_gather(
+            gathered, extracted[0][1], torch.bfloat16, out=rebuilt
+        )
+        assert reused is rebuilt
+        assert reused._columnwise_storage._transpose.shape == torch.Size((64, 64))
+        torch.testing.assert_close(reused._columnwise_storage.dequantize(), expected)
 
     def test_fsdp_buffer_fields_falls_back_to_data_when_both_present(self):
-        """A normally-constructed Float8TensorStorage has ``_data``
-        populated; ``fsdp_buffer_fields`` should still prefer ``_data``
-        — direction-aware logic must not regress the vanilla path.
-        """
-        q = Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
-        src = torch.randn(64, 64, dtype=torch.bfloat16, device="cuda")
-        out = q(src)
+        quantizer = Float8CurrentScalingQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            device="cuda",
+        )
+        out = quantizer(torch.randn(32, 64, device="cuda", dtype=torch.bfloat16))
+
         assert out._data is not None
+        assert out._transpose is not None
         assert out.fsdp_buffer_fields() == ("_data",)
+        buffers, metadata = out.fsdp_extract_buffers()
+        assert len(buffers) == 1
+        assert buffers[0] is out._data
+        assert metadata == {
+            "field_names": ("_data",),
+            "transport_layout": "native",
+        }
 
 
 @requires_hopper_fp8

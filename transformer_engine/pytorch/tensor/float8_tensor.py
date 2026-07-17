@@ -646,17 +646,22 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         if func in (aten.slice.Tensor, aten.select.int):
             tensor = args[0]
             data = tensor._data
-            data_slice = data.__torch_dispatch__(
-                func,
-                types,
-                [data] + list(args[1:]),
-                kwargs,
-            )
+            data_slice = None
+            if data is not None:
+                data_slice = data.__torch_dispatch__(
+                    func,
+                    types,
+                    [data] + list(args[1:]),
+                    kwargs,
+                )
             transpose_slice = None
             if tensor._transpose is not None and not tensor._transpose_invalid:
                 transpose = tensor._transpose
-                ndim = data.dim()
+                ndim = tensor.dim()
+                if ndim == 0:
+                    return super().__torch_dispatch__(func, types, args, kwargs)
                 dim = args[1] if len(args) > 1 else 0
+                dim %= ndim
                 t_dim = 0 if dim == ndim - 1 else dim + 1
                 transpose_slice = transpose.__torch_dispatch__(
                     func,
@@ -664,11 +669,34 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                     [transpose, t_dim] + list(args[2:]),
                     kwargs,
                 )
+                if (
+                    func == aten.select.int
+                    and dim == ndim - 1
+                    and transpose_slice.dim() > 1
+                ):
+                    transpose_slice = transpose_slice.movedim(-1, 0).contiguous()
+
+            if data_slice is not None:
+                out_shape = data_slice.shape
+            else:
+                logical = torch.empty(tensor.shape, device="meta")
+                out_shape = func(logical, *args[1:], **(kwargs or {})).shape
+                if transpose_slice is None:
+                    raise RuntimeError(
+                        "Float8Tensor slice/select requires rowwise or columnwise data"
+                    )
+                expected_transpose_shape = _columnwise_shape_for(out_shape)
+                if transpose_slice.shape != expected_transpose_shape:
+                    raise RuntimeError(
+                        "Float8Tensor slice/select produced incompatible columnwise storage: "
+                        f"expected {tuple(expected_transpose_shape)}, got "
+                        f"{tuple(transpose_slice.shape)}"
+                    )
             return Float8Tensor.make_like(
                 tensor,
                 data=data_slice,
                 data_transpose=transpose_slice,
-                shape=data_slice.shape,
+                shape=out_shape,
             )
 
         # Related to FSDP2
@@ -734,12 +762,18 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             # create fresh new tensor with zeros.
             tensor = args[0]
             data = tensor._data
-            func_out = data.__torch_dispatch__(
-                func,
-                types,
-                [data] + list(args[1:]),
-                kwargs,
-            )
+            storage_kwargs = dict(kwargs or {})
+            output_dtype = storage_kwargs.pop("dtype", None) or tensor.dtype
+            storage_kwargs.pop("layout", None)
+            storage_kwargs.pop("requires_grad", None)
+            func_out = None
+            if data is not None:
+                func_out = data.__torch_dispatch__(
+                    func,
+                    types,
+                    [data] + list(args[1:]),
+                    storage_kwargs,
+                )
             func_transposed_out = None
             if tensor._transpose is not None and not tensor._transpose_invalid:
                 transpose = tensor._transpose
@@ -749,25 +783,71 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                     func,
                     types,
                     [transpose, t_shape] + list(args[2:]),
-                    kwargs,
+                    storage_kwargs,
+                )
+            if func_out is None and func_transposed_out is None:
+                raise RuntimeError(
+                    "Float8Tensor.new_zeros requires rowwise or columnwise data"
                 )
             scale_inv = tensor._scale_inv.detach().clone()
+            reference = func_out if func_out is not None else func_transposed_out
+            if scale_inv.device != reference.device:
+                scale_inv = scale_inv.to(reference.device)
             quantizer = tensor._quantizer  # Deep-copied in constructor
             out_tensor = Float8Tensor(
                 data=func_out,
-                shape=func_out.shape,
-                dtype=tensor.dtype,
+                shape=torch.Size(args[1]),
+                dtype=output_dtype,
                 fp8_dtype=tensor._fp8_dtype,
                 fp8_scale_inv=scale_inv,
                 data_transpose=func_transposed_out,
                 quantizer=quantizer,
-                device=tensor.device,
+                device=reference.device,
             )
             return out_tensor
 
         if func == torch.ops.aten.as_strided.default:
             tensor = args[0]
             data = tensor._data
+            if data is None:
+                size = torch.Size(args[1])
+                stride = tuple(args[2])
+                storage_offset = (kwargs or {}).get(
+                    "storage_offset",
+                    args[3] if len(args) > 3 else tensor.storage_offset(),
+                )
+                # A contiguous 2D row shard maps to a column slice in the
+                # persistent transpose and can remain a Float8Tensor.
+                has_valid_transpose = (
+                    tensor._transpose is not None and not tensor._transpose_invalid
+                )
+                is_contiguous_row_shard = (
+                    tensor.dim() == 2
+                    and tensor.shape[1] > 0
+                    and len(size) == 2
+                    and size[1] == tensor.shape[1]
+                    and stride == tuple(tensor.stride())
+                )
+                if (
+                    has_valid_transpose
+                    and is_contiguous_row_shard
+                    and storage_offset % tensor.shape[1] == 0
+                ):
+                    row_start = storage_offset // tensor.shape[1]
+                    row_end = row_start + size[0]
+                    if 0 <= row_start and row_end <= tensor.shape[0]:
+                        transpose_out = tensor._transpose[:, row_start:row_end]
+                        return Float8Tensor.make_like(
+                            tensor,
+                            data=None,
+                            data_transpose=transpose_out,
+                            shape=size,
+                        )
+
+                # Arbitrary logical strides are not generally affine views of
+                # transposed storage. Fall back explicitly to high precision.
+                return func(tensor.dequantize(), *args[1:], **(kwargs or {}))
+
             # Apply as_strided to the primary uint8 data
             func_out = data.__torch_dispatch__(
                 func,
@@ -979,9 +1059,23 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         with ``torch.serialization.add_safe_globals`` to keep
         ``torch.load(weights_only=True)`` compatibility.
         """
+        data_transpose = None
+        if (
+            self._data is None
+            and self._transpose is not None
+            and not self._transpose_invalid
+        ):
+            data_transpose = self._transpose
         return (
             _make_float8_tensor_in_reduce_ex,
-            (self._data, self._fp8_dtype, self._scale_inv, self.dtype, self.shape),
+            (
+                self._data,
+                self._fp8_dtype,
+                self._scale_inv,
+                self.dtype,
+                self.shape,
+                data_transpose,
+            ),
         )
 
     @classmethod
@@ -1077,11 +1171,12 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
 
 
 def _make_float8_tensor_in_reduce_ex(
-    data: torch.Tensor,
+    data: Optional[torch.Tensor],
     fp8_dtype: DType,
     fp8_scale_inv: torch.Tensor,
     dtype: torch.dtype,
     shape: torch.Size,
+    data_transpose: Optional[torch.Tensor] = None,
 ) -> Float8Tensor:
     """Reconstruct a ``Float8Tensor`` from its ``__reduce_ex__`` payload."""
     return Float8Tensor(
@@ -1090,7 +1185,12 @@ def _make_float8_tensor_in_reduce_ex(
         fp8_scale_inv=fp8_scale_inv,
         dtype=dtype,
         shape=shape,
-        device=data.device if data is not None else None,
+        data_transpose=data_transpose,
+        device=(
+            data.device
+            if data is not None
+            else data_transpose.device if data_transpose is not None else None
+        ),
     )
 
 

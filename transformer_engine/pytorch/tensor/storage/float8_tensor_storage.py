@@ -45,7 +45,25 @@ class _FromFloat8Func(torch.autograd.Function):
             # Cast from FP8
             return tex.dequantize(tensor, te_dtype)
 
-        raise NotImplementedError("Casting back from the transpose not implemented yet!")
+        if tensor._transpose is not None and not tensor._transpose_invalid:
+            # A columnwise-only tensor stores the logical last dimension first
+            # in its physical FP8 buffer. Dequantize that buffer as ordinary
+            # FP8 data, then restore logical row-major dimension order.
+            transpose_tensor = Float8TensorStorage(
+                data=tensor._transpose,
+                data_transpose=None,
+                fp8_scale_inv=tensor._scale_inv,
+                fp8_dtype=tensor._fp8_dtype,
+                fake_dtype=tensor._dtype,
+            )
+            output = _FromFloat8Func.forward(None, transpose_tensor, dtype)
+            if output.dim() > 0:
+                output = output.movedim(0, -1).contiguous()
+            return output
+
+        raise RuntimeError(
+            "Float8TensorStorage has neither rowwise nor columnwise data"
+        )
 
     @staticmethod
     def backward(
@@ -332,20 +350,61 @@ class Float8TensorStorage(QuantizedTensorStorage):
         # the caller would have seen pre-direction-aware logic.
         return ("_data",)
 
+    def fsdp_extract_buffers(
+        self,
+    ) -> Tuple[Tuple[Optional[torch.Tensor], ...], Dict[str, Any]]:
+        """Extract dim-0 gather-safe buffers for per-tensor Float8.
+
+        Rowwise ``_data`` is already M-major. A transpose-only Hopper/L40
+        payload is physically ``[N, *M]`` and cannot be gathered directly
+        because FSDP2 grows physical dimension 0. Move N back to the logical
+        last dimension and make the transport buffer contiguous so FSDP2 sees
+        ``[*M, N]``. :meth:`fsdp_assign_gathered` restores the persistent
+        columnwise layout after the collective.
+        """
+        names = self.fsdp_buffer_fields()
+        if names == ("_transpose",):
+            if self._transpose is None or self._transpose_invalid:
+                raise RuntimeError(
+                    "Float8TensorStorage cannot extract an invalid columnwise transpose"
+                )
+            transport = self._transpose
+            if transport.dim() > 0:
+                transport = transport.movedim(0, -1).contiguous()
+            return (transport,), {
+                "field_names": names,
+                "transport_layout": "columnwise_m_major",
+            }
+        buffers = tuple(getattr(self, name) for name in names)
+        return buffers, {"field_names": names, "transport_layout": "native"}
+
     def fsdp_assign_gathered(
         self,
         gathered: Tuple[Optional[torch.Tensor], ...],
         meta: Dict[str, Any],
     ) -> None:
-        """Write gathered Float8 buffers back, refreshing ``_transpose_invalid``.
-
-        The base implementation just ``setattr``s the gathered tensors into
-        the named fields. For Float8 we additionally need to clear
-        ``_transpose_invalid`` when the gathered field is ``_transpose`` —
-        otherwise a freshly-gathered transpose buffer is treated as stale
-        on first use (see :attr:`_transpose_invalid` semantics in
-        ``update_usage`` / ``get_usages``).
-        """
+        """Restore gathered Float8 buffers to their persistent layout."""
+        transport_layout = meta.get("transport_layout", "native")
+        if transport_layout == "columnwise_m_major":
+            if meta.get("field_names") != ("_transpose",) or len(gathered) != 1:
+                raise RuntimeError(
+                    "Float8TensorStorage got invalid metadata for columnwise FSDP transport"
+                )
+            (transport,) = gathered
+            if transport is None:
+                raise RuntimeError(
+                    "Float8TensorStorage got a None columnwise FSDP transport buffer"
+                )
+            self._data = None
+            if transport.dim() > 0:
+                transport = transport.movedim(-1, 0).contiguous()
+            self._transpose = transport
+            self._transpose_invalid = False
+            return
+        if transport_layout != "native":
+            raise RuntimeError(
+                f"Float8TensorStorage got unknown FSDP transport layout {transport_layout!r}"
+            )
         super().fsdp_assign_gathered(gathered, meta)
         if "_transpose" in meta["field_names"]:
             self._transpose_invalid = False

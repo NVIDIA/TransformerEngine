@@ -288,7 +288,10 @@ def _hybrid_split_quantize(
     if columnwise_enabled and columnwise_source == "rowwise_dequantized":
         # Assemble the exact grouped row results in split order. NVFP4 padding
         # and scale layout can differ from independently quantizing each split.
-        columnwise_src = torch.cat([result.dequantize() for result in row_results], dim=0)
+        columnwise_src = torch.cat(
+            [result.dequantize(dtype=tensor.dtype) for result in row_results],
+            dim=0,
+        )
     col_results = (
         tex.split_quantize(
             columnwise_src,
@@ -1874,6 +1877,21 @@ class GroupedLinear(TransformerEngineBaseModule):
             return
 
         weight_quantizers = self._get_weight_quantizers()
+        # TODO(#3158): Support Identity/Hybrid single grouped weights.
+        unsupported_quantizers = tuple(
+            type(quantizer).__name__
+            for quantizer in weight_quantizers
+            if isinstance(quantizer, (IdentityQuantizer, HybridQuantizer))
+        )
+        if unsupported_quantizers:
+            quantizer_names = ", ".join(dict.fromkeys(unsupported_quantizers))
+            raise NotImplementedError(
+                "GroupedLinear(single_grouped_weight=True) does not support "
+                f"{quantizer_names} weight quantizers yet. Set "
+                "single_grouped_weight=False or unset "
+                "NVTE_GROUPED_LINEAR_SINGLE_PARAM. See #3158."
+            )
+
         recipe = (
             weight_quantizers[0]._get_compatible_recipe()
             if weight_quantizers and weight_quantizers[0] is not None

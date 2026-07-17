@@ -591,6 +591,76 @@ class TestIdentityQuantizerUnit:
         assert dequantized.dtype == torch.bfloat16
         torch.testing.assert_close(dequantized, x.to(torch.bfloat16), rtol=0.0, atol=0.0)
 
+    def test_make_empty_honors_configured_dtype(self):
+        tensor = IdentityQuantizer(dtype=torch.float32).make_empty(
+            (4, 8),
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+
+        assert tensor.dtype == torch.float32
+        assert tensor._hp_data.dtype == torch.float32
+        assert tensor.dequantize().dtype == torch.float32
+
+    def test_update_quantized_synchronizes_dtype(self):
+        dst = IdentityQuantizer().make_empty(
+            (4, 8),
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        quantizer = IdentityQuantizer(dtype=torch.float32)
+
+        quantizer.update_quantized(torch.ones_like(dst._hp_data), dst)
+
+        assert dst.dtype == torch.float32
+        assert dst._hp_data.dtype == torch.float32
+        assert dst.dequantize().dtype == torch.float32
+
+    @pytest.mark.parametrize("noop", [0, 1])
+    def test_update_quantized_honors_noop(self, noop):
+        quantizer = IdentityQuantizer()
+        dst = quantizer(torch.full((4, 8), 3.0, device="cuda"))
+        src = torch.full((4, 8), 7.0, device="cuda")
+
+        quantizer.update_quantized(
+            src, dst, noop_flag=torch.tensor(noop, dtype=torch.float32, device="cuda")
+        )
+
+        expected = 3.0 if noop else 7.0
+        torch.testing.assert_close(dst.dequantize(), torch.full_like(src, expected))
+
+    @pytest.mark.skipif(not fp8_available, reason=f"FP8: {reason_for_no_fp8}")
+    def test_hybrid_update_honors_shared_noop(self):
+        quantizer = HybridQuantizer(
+            rowwise_quantizer=_fp8_cs(),
+            columnwise_quantizer=IdentityQuantizer(),
+        )
+        old = torch.full((32, 32), 3.0, dtype=torch.bfloat16, device="cuda")
+        dst = quantizer(old)
+        expected_row = dst._rowwise_storage.dequantize().clone()
+
+        quantizer.update_quantized(
+            torch.full_like(old, 7.0),
+            dst,
+            noop_flag=torch.ones(1, dtype=torch.float32, device="cuda"),
+        )
+
+        torch.testing.assert_close(dst._rowwise_storage.dequantize(), expected_row)
+        torch.testing.assert_close(dst._columnwise_storage.dequantize(), old)
+
+    def test_hybrid_new_zeros_preserves_identity_dtypes(self):
+        quantizer = HybridQuantizer(
+            rowwise_quantizer=IdentityQuantizer(dtype=torch.bfloat16),
+            columnwise_quantizer=IdentityQuantizer(dtype=torch.float32),
+        )
+        tensor = quantizer(torch.ones(4, 8, dtype=torch.bfloat16, device="cuda"))
+
+        zeros = tensor.new_zeros(tensor.shape)
+
+        assert zeros.rowwise_sub_storage._hp_data.dtype == torch.bfloat16
+        assert zeros.columnwise_sub_storage._hp_data.dtype == torch.float32
+
+
     def test_storage_dequantize_defaults_to_nominal_dtype(self):
         payload = torch.randn(4, 8, dtype=torch.float32)
         storage = IdentityTensorStorage(

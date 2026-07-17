@@ -193,7 +193,7 @@ class HybridQuantizer(Quantizer):
     ) -> torch.Tensor:
         if rowwise_result is None:
             rowwise_result = self.rowwise_quantizer.quantize(tensor)
-        return rowwise_result.dequantize()
+        return rowwise_result.dequantize(dtype=tensor.dtype)
 
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
         # Gate each sub-quantizer call on the parent usage flag. Sub-quantizers
@@ -984,6 +984,26 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
             if row_pieces is None and col_pieces is None:
                 return super().__torch_dispatch__(func, types, args, kwargs)
 
+            # TODO(#3158): Support Hybrid sub-storages that fall back to a
+            # high-precision tensor for an unquantizable local shard.
+            for direction, pieces in (
+                ("rowwise", row_pieces),
+                ("columnwise", col_pieces),
+            ):
+                if pieces is None:
+                    continue
+                for piece in pieces:
+                    if not isinstance(piece, QuantizedTensor):
+                        raise NotImplementedError(
+                            "HybridQuantizedTensor split produced a high-precision "
+                            f"{type(piece).__name__} for the {direction} sub-storage "
+                            f"with local shape {tuple(piece.shape)}. Hybrid FSDP2 does "
+                            "not support high-precision fallback children. MXFP8 FSDP "
+                            "shards must have a first dimension divisible by 32; adjust "
+                            "the sharding topology or disable Hybrid MXFP8 for this "
+                            "parameter. See #3158."
+                        )
+
             num_pieces = len(row_pieces) if row_pieces is not None else len(col_pieces)
             return [
                 HybridQuantizedTensor(
@@ -1044,6 +1064,15 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
         if func == aten.copy_.default:
             dst, src = args[0], args[1]
             if isinstance(dst, HybridQuantizedTensor) and isinstance(src, HybridQuantizedTensor):
+                dst_usages = dst.get_usages()
+                src_usages = src.get_usages()
+                if dst_usages != src_usages:
+                    raise NotImplementedError(
+                        "HybridQuantizedTensor.copy_ requires matching rowwise/columnwise "
+                        f"usages, but source has {src_usages} and destination has "
+                        f"{dst_usages}. Copy from a high-precision tensor instead."
+                    )
+
                 if dst._rowwise_storage is not None and src._rowwise_storage is not None:
                     aten.copy_.default(dst._rowwise_storage, src._rowwise_storage)
                 if dst._columnwise_storage is not None and src._columnwise_storage is not None:

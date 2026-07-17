@@ -106,10 +106,11 @@ class IdentityQuantizer(Quantizer):
         if device is None:
             device = torch.device("cuda")
         device = torch.device(device)
-        data = torch.empty(tuple(shape), dtype=dtype, device=device, pin_memory=pin_memory)
+        data_dtype = self.dtype if self.dtype is not None else dtype
+        data = torch.empty(tuple(shape), dtype=data_dtype, device=device, pin_memory=pin_memory)
         return IdentityTensor(
             data.shape,
-            dtype,
+            data_dtype,
             hp_data=data,
             quantizer=self,
             requires_grad=requires_grad,
@@ -121,7 +122,7 @@ class IdentityQuantizer(Quantizer):
         src: torch.Tensor,
         dst: QuantizedTensorStorage,
         *,
-        noop_flag: Optional[torch.Tensor] = None,  # pylint: disable=unused-argument
+        noop_flag: Optional[torch.Tensor] = None,
     ) -> QuantizedTensorStorage:
         if not isinstance(dst, IdentityTensorStorage):
             raise ValueError(
@@ -134,9 +135,15 @@ class IdentityQuantizer(Quantizer):
             and dst._hp_data.dtype == data.dtype
             and dst._hp_data.device == data.device
         ):
-            dst._hp_data.copy_(data)
+            if noop_flag is None:
+                dst._hp_data.copy_(data)
+            else:
+                torch.where(noop_flag == 0, data, dst._hp_data, out=dst._hp_data)
         else:
+            if noop_flag is not None and noop_flag.item() != 0:
+                return dst
             dst._hp_data = data.detach()
+        dst._dtype = data.dtype
         return dst
 
     def calibrate(self, tensor: torch.Tensor) -> None:
@@ -219,12 +226,23 @@ class IdentityTensor(IdentityTensorStorage, QuantizedTensor):
         """Rebuild IdentityTensor from the gathered high-precision buffer."""
         (data,) = all_gather_outputs
         (quantizer,) = metadata
+        logical_dtype = (
+            quantizer.dtype
+            if quantizer is not None and quantizer.dtype is not None
+            else param_dtype
+        )
+        if data.dtype != logical_dtype:
+            raise RuntimeError(
+                "IdentityTensor FSDP payload dtype does not match its logical dtype: "
+                f"payload={data.dtype}, logical={logical_dtype}."
+            )
         if out is not None:
             out._hp_data = data
+            out._dtype = logical_dtype
         else:
             out = IdentityTensor(
                 shape=data.shape,
-                dtype=param_dtype,
+                dtype=logical_dtype,
                 hp_data=data,
                 quantizer=quantizer,
                 requires_grad=False,

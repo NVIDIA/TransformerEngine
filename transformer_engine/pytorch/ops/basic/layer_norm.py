@@ -16,7 +16,7 @@ from transformer_engine_torch import layernorm_bwd, layernorm_fwd
 from ...constants import TE_DType
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...export import is_in_onnx_export_mode
-from ...tensor import Quantizer
+from ...tensor import HybridQuantizer, Quantizer
 from ...utils import (
     canonicalize_device,
     canonicalize_dtype,
@@ -182,6 +182,15 @@ class LayerNorm(BasicOperation):
     ) -> torch.Tensor:
         if is_in_onnx_export_mode():
             return self.op_onnx_forward(input_)
+
+        # TODO(#3158): Support producing both directional representations at
+        # the fused normalization boundary.
+        if isinstance(next_op_input_quantizer, HybridQuantizer):
+            raise NotImplementedError(
+                "te.ops.LayerNorm does not support HybridQuantizer output yet. "
+                "Use transformer_engine.pytorch.LayerNormMLP or a single-format "
+                "quantizer instead. See #3158."
+            )
 
         # Check tensor dims
         weight = self.weight
