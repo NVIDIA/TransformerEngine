@@ -33,6 +33,7 @@ import tvm_ffi
 
 from transformer_engine.common.CuTeDSL.utils import (
     _bitcast_f32_to_i32,
+    device_compute_capability,
     str_to_cutlass_dtype,
     is_packed16,
     packed16_kit,
@@ -421,7 +422,7 @@ def quantize_bidimensional_mxfp8_swizzled(
     sO_row_tile: cute.Tensor,  # 32x64 rowwise-output tile
     sO_col_tile: cute.Tensor,  # 32x64 colwise-output tile
     sS_row_tile: cute.Tensor,  # (32, 2) smem rowwise-scale staging tile (flushed in the epilogue)
-    mS_col_tile: cute.Tensor,  # (1, 64) colwise-scale tile for this data tile
+    sS_col_tile: cute.Tensor,  # (1, 64) smem colwise-scale staging tile (flushed in the epilogue)
     sColReduce_warp: cute.Tensor,  # (32,) SMEM fp32 columnwise scale reduction buffer for this warp
     WARPS_PER_CTA: cutlass.Constexpr,
     max_norm_rcp,
@@ -432,10 +433,12 @@ def quantize_bidimensional_mxfp8_swizzled(
     addressed through TV layouts: a warp = 32 lanes = 32 rows (lane == row), and each
     thread owns one 32-col row segment (its 32-col block) and one output column.
 
-    No bounds check: the caller only loops over valid tiles (`num_tiles`). A partial
-    tile's out-of-bounds warp still runs, but harmlessly -- it reads TMA zero-filled
-    smem, its output columns are masked by the caller's TMA store, and its scale writes
-    land in the tile's padding columns (always in-bounds of the sliced scale tile).
+    No bounds check: the caller only loops over valid tiles (`num_tiles`), and
+    M % 32 == 0 means a tile can only be partial along N. The partial tile's
+    out-of-bounds warp still runs, but harmlessly -- it reads TMA zero-filled smem,
+    its output columns are masked by the caller's TMA store, and its scale writes
+    (rowwise and colwise alike) go to staging slots whose flush targets are past-N
+    padding columns of the respective scale tensors.
     """
     mul_cvt4 = mul_i64_cvt_f32x4_to_fp8x4(fp8_dtype)
     mul_cvt4_elemwise = mul_f32x4_cvt_f32x4_to_fp8x4(fp8_dtype)
@@ -462,7 +465,7 @@ def quantize_bidimensional_mxfp8_swizzled(
     tXsO_row = cute.composition(sO_row_tile, tv_layout)[tidx, None]  # (32,) rowwise out
     tXsO_col = cute.composition(sO_col_tile, tv_layout)[tidx, None]  # (32,) colwise out
     tSsS_row_tile = cute.composition(sS_row_tile, tv_layout_rowwise_scale)[tidx, None]  # (1,)
-    tSmS_col_tile = cute.composition(mS_col_tile, tv_layout_colwise_scale)[tidx, None]  # (1,)
+    tSsS_col_tile = cute.composition(sS_col_tile, tv_layout_colwise_scale)[tidx, None]  # (1,)
 
     rO_row = cute.make_rmem_tensor(MXFP8_BLOCK_SCALING_SIZE, Uint8)
     rO_col = cute.make_rmem_tensor(MXFP8_BLOCK_SCALING_SIZE, Uint8)
@@ -516,7 +519,7 @@ def quantize_bidimensional_mxfp8_swizzled(
 
         # Compute the colwise scale factor (only handle the one that belongs to this thread / lane)
         col_exp = cvt_f32_to_fp8e8m0(sColReduce_warp[lane] * max_norm_rcp)
-        tSmS_col_tile[0] = Uint8(col_exp)
+        tSsS_col_tile[0] = Uint8(col_exp)
         sColReduce_warp[lane] = exp2f_rcp(col_exp)
         cute.arch.sync_warp()
 
@@ -563,7 +566,7 @@ def quantize_bidimensional_mxfp8_swizzled(
 
         # Compute the colwise scale factor (only handle the one that belongs to this thread / lane)
         col_exp = cvt_f32_to_fp8e8m0(sColReduce_warp[lane] * max_norm_rcp)
-        tSmS_col_tile[0] = Uint8(col_exp)  # colwise scale (this thread's column)
+        tSsS_col_tile[0] = Uint8(col_exp)  # colwise scale (this thread's column)
         sColReduce_warp[lane] = exp2f_rcp(col_exp)
         cute.arch.sync_warp()
 
@@ -1722,11 +1725,14 @@ class MXFP8QuantizeSpecializedBidimensionalKernel:
     # A warp handles a 32x32 tile
     _WARP_ROWS = MXFP8_BLOCK_SCALING_SIZE
     _WARP_COLS = MXFP8_BLOCK_SCALING_SIZE
-    # A CTA handles a two 32x32 warp tiles side-by-side, each handled by a warp
+    # A CTA handles a tile consisted two 32x32 warp subtiles side-by-side at a time, each handled by a warp
     _TILE_ROWS = _WARP_ROWS
     _TILE_COLS = _WARP_COLS * _WARPS_PER_CTA
-    _NUM_TILES = 4  # Each CTA handles 4 tiles side by side horizontally
+    _NUM_TILES = 4  # Each CTA handles 4 tiles in total side by side horizontally
     _NUM_STAGES = 2
+    # Rows and columns for the rowwise / columnwise scale factor tensor
+    _SCALE_ROWS = _TILE_ROWS // MXFP8_BLOCK_SCALING_SIZE
+    _SCALE_COLS = _TILE_COLS // MXFP8_BLOCK_SCALING_SIZE
 
     def __init__(self, cfg):
         self.cfg = cfg
@@ -1861,13 +1867,17 @@ class MXFP8QuantizeSpecializedBidimensionalKernel:
             sColReduce: cute.struct.Align[
                 cute.struct.MemRange[Float32, THREADS_PER_WARP * self._WARPS_PER_CTA], 16
             ]
-            # Staged rowwise scales for the whole CTA span (CUDA's sRowwiseScale)
+            # Staged rowwise scales for the whole CTA
             sScaleRow: cute.struct.Align[
                 cute.struct.MemRange[
                     Uint8,
                     self._TILE_ROWS * self._NUM_TILES * self._TILE_COLS // MXFP8_BLOCK_SCALING_SIZE,
                 ],
                 16,
+            ]
+            # Staged colwise scales for the whole CTA
+            sScaleCol: cute.struct.Align[
+                cute.struct.MemRange[Uint8, self._NUM_TILES * self._TILE_COLS], 16
             ]
 
         smem = cutlass.utils.SmemAllocator()
@@ -1887,24 +1897,42 @@ class MXFP8QuantizeSpecializedBidimensionalKernel:
             cute.make_layout((THREADS_PER_WARP, self._WARPS_PER_CTA), stride=(1, THREADS_PER_WARP))
         )
         # Reshape the rowwise scale SMEM buffer
-        _SCALE_COLS = (
-            self._TILE_COLS // MXFP8_BLOCK_SCALING_SIZE
-        )  # 2 Columns of a scale factor tile
-        # (32, (2, 4)) layout: 32 rows, 2 columns of scale factors, 4 tiles per CTA
         sScaleRow = storage.sScaleRow.get_tensor(
             cute.make_layout(
-                (self._TILE_ROWS, (_SCALE_COLS, self._NUM_TILES)),
-                stride=(self._NUM_TILES * _SCALE_COLS, (1, _SCALE_COLS)),
+                (self._TILE_ROWS, (self._SCALE_COLS, self._NUM_TILES)),
+                stride=(self._SCALE_COLS * self._NUM_TILES, (1, self._SCALE_COLS)),
             )
         )
-        # Zero the rowwise scale SMEM buffer
+        # Reshape the colwise scale SMEM buffer
+        sScaleCol = storage.sScaleCol.get_tensor(
+            cute.make_layout(
+                ((self._SCALE_ROWS, self._TILE_COLS), self._NUM_TILES),
+                stride=((0, 1), self._TILE_COLS),
+            )
+        )
+
+        # Zero the scale SMEM buffers so partial tiles / padding columns flush as 0.
         tidx, _, _ = cute.arch.thread_idx()
-        # View the rowwise scale SMEM fp8 tile (32, (2, 4)) as (32, 2) uint32 tile and use 64 threads to zero it
+        # View rowwise staging buffers as flat uint32 and stride the CTA over them.
+        _ROW_SCALE_WORDS = self._TILE_ROWS * self._SCALE_COLS * self._NUM_TILES // 4
         sScaleRow_u32 = cute.make_tensor(
             cute.recast_ptr(sScaleRow.iterator, dtype=Uint32),
-            cute.make_layout((self._TILE_ROWS * self._NUM_TILES * _SCALE_COLS // 4,), stride=(1,)),
+            cute.make_layout((_ROW_SCALE_WORDS,), stride=(1,)),
         )
-        sScaleRow_u32[tidx] = Uint32(0)
+        for i in cutlass.range_constexpr(cute.ceil_div(_ROW_SCALE_WORDS, self._THREADS_PER_CTA)):
+            slot = i * self._THREADS_PER_CTA + tidx
+            if slot < _ROW_SCALE_WORDS:
+                sScaleRow_u32[slot] = Uint32(0)
+        # View colwise staging buffers as flat uint32 and stride the CTA over them.
+        _COL_SCALE_WORDS = self._SCALE_ROWS * self._TILE_COLS * self._NUM_TILES // 4
+        sScaleCol_u32 = cute.make_tensor(
+            cute.recast_ptr(sScaleCol.iterator, dtype=Uint32),
+            cute.make_layout((_COL_SCALE_WORDS,), stride=(1,)),
+        )
+        for i in cutlass.range_constexpr(cute.ceil_div(_COL_SCALE_WORDS, self._THREADS_PER_CTA)):
+            slot = i * self._THREADS_PER_CTA + tidx
+            if slot < _COL_SCALE_WORDS:
+                sScaleCol_u32[slot] = Uint32(0)
 
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
         if warp_idx == 0:
@@ -1946,10 +1974,6 @@ class MXFP8QuantizeSpecializedBidimensionalKernel:
             tma_atom_out_col, 0, cute.make_layout(1), sO_col, gO_col_tiled
         )
 
-        mS_col = cute.zipped_divide(
-            mS_col, (self._TILE_ROWS // MXFP8_BLOCK_SCALING_SIZE, self._TILE_COLS)
-        )
-
         cute.arch.sync_threads()
 
         # Prologue: warp 0 prefetches up to NUM_STAGES tiles to fully fill the pipeline
@@ -1984,7 +2008,7 @@ class MXFP8QuantizeSpecializedBidimensionalKernel:
                 sO_row[None, stage_idx],
                 sO_col[None, stage_idx],
                 sScaleRow[None, (None, tile_idx)],
-                mS_col[(None, (bidy, tile_n_base + tile_idx))],
+                sScaleCol[(None, tile_idx)],
                 sColReduce[
                     None, warp_idx
                 ],  # Pick the per-warp colwise-reduce scratchpad for this warp
@@ -2029,51 +2053,89 @@ class MXFP8QuantizeSpecializedBidimensionalKernel:
                     mainloop_pipeline.producer_commit(prod_state)
                     prod_state.advance()
 
-        padded_cols = mS_row.shape[1]
-        if padded_cols % 8 == 0:
-            self._flush_scales_to_gmem(sScaleRow, mS_row, tidx, bidx, bidy, M, padded_cols, 8)
+        mS_row_N = mS_row.shape[1]
+        if mS_row_N % 8 == 0:
+            self._flush_rowwise_scales_to_gmem(sScaleRow, mS_row, tidx, bidx, bidy, M, mS_row_N, 8)
         else:
-            self._flush_scales_to_gmem(sScaleRow, mS_row, tidx, bidx, bidy, M, padded_cols, 4)
+            self._flush_rowwise_scales_to_gmem(sScaleRow, mS_row, tidx, bidx, bidy, M, mS_row_N, 4)
+        self._flush_colwise_scales_to_gmem(sScaleCol, mS_col, tidx, bidx, bidy)
 
         # Drain the final stores (their gmem writes must complete before the CTA exits).
         cute.arch.cp_async_bulk_wait_group(0, read=False)
 
     @cute.jit
-    def _flush_scales_to_gmem(
-        self, sScaleRow, mS_row, tidx, bidx, bidy, M, padded_cols, width: cutlass.Constexpr
+    def _flush_rowwise_scales_to_gmem(
+        self, sScaleRow, mS_row, tidx, bidx, bidy, M, mS_row_N, WIDTH: cutlass.Constexpr
     ):
-        """Flush the staged (32, 8) SMEM rowwise scale block to gmem using `width` bytes per store."""
+        """Flush the staged (TILE_ROWS, TILE_COLS / MXFP8_BLOCK_SCALING_SIZE * NUM_TILES) SMEM rowwise scale block to gmem
+        using `width` bytes per store"""
 
-        thread_rows = self._TILE_ROWS  # 32
-        thread_columns = (
-            self._NUM_TILES * self._TILE_COLS // MXFP8_BLOCK_SCALING_SIZE
-        )  # 4 * 64 // 32 = 8
-        active_thread_columns = thread_columns // width
+        ROWS = self._TILE_ROWS
+        COLS = self._NUM_TILES * self._SCALE_COLS
+        ACTIVE_THREAD_COLS = COLS // WIDTH
         _, tv_flush_layout = cute.make_layout_tv(
-            thr_layout=cute.make_layout(
-                (thread_rows, active_thread_columns), stride=(active_thread_columns, 1)
-            ),
-            val_layout=cute.make_layout((1, width), stride=(width, 1)),
+            thr_layout=cute.make_layout((ROWS, ACTIVE_THREAD_COLS), stride=(ACTIVE_THREAD_COLS, 1)),
+            val_layout=cute.make_layout((1, WIDTH), stride=(WIDTH, 1)),
         )
-        # sScaleRow: (32, (2, 4)) layout for 32 rows, 2 columns of scale factors, 4 tiles per CTA
-        # View it as a 2D tensor of shape (32, 8)
-        sScale = cute.make_tensor(
+        # View sScaleRow as a 2D tensor:
+        # (_TILE_ROWS, (_SCALE_COLS, _NUM_TILES)):(_NUM_TILES * _SCALE_COLS, (1, _SCALE_COLS)) ->
+        # (_TILE_ROWS, _SCALE_COLS * _NUM_TILES):(_NUM_TILES * _SCALE_COLS, 1)
+        sScaleRow2D = cute.make_tensor(
             sScaleRow.iterator,
-            cute.make_layout((thread_rows, thread_columns), stride=(thread_columns, 1)),
+            cute.make_layout((ROWS, COLS), stride=(COLS, 1)),
         )
         # Obtain the GMEM slice for the output rowwise scale factor for this CTA
-        mS_row_tile = cute.local_tile(mS_row, (thread_rows, thread_columns), (bidy, bidx))
-        # Only active threads are responsible for flushing the staged scales to gmem
-        if tidx < thread_rows * active_thread_columns:
-            # Find the position for this thread's vectorized store in the GMEM rowwise scale factor buffer
-            thread_y = bidy * thread_rows + tidx // active_thread_columns
-            thread_x = bidx * thread_columns + (tidx % active_thread_columns) * width
-            # Only copy if the thread's position is within the valid GMEM rowwise scale factor buffer
-            if thread_y < M and thread_x < padded_cols:
-                cute.autovec_copy(
-                    cute.composition(sScale, tv_flush_layout)[tidx, None],
-                    cute.composition(mS_row_tile, tv_flush_layout)[tidx, None],
-                )
+        mS_row_tile = cute.local_tile(mS_row, (ROWS, COLS), (bidy, bidx))
+        # Each flush slot stores one `WIDTH`-byte group; the CTA strides over the
+        # slots when there are more slots than threads.
+        TOTAL_ACTIVE = ROWS * ACTIVE_THREAD_COLS
+        # We may have more total active threads than threads in a CTA, so we do multiple waves of stores to flush the whole buffer
+        for wave in cutlass.range_constexpr(cute.ceil_div(TOTAL_ACTIVE, self._THREADS_PER_CTA)):
+            thread_idx = wave * self._THREADS_PER_CTA + tidx
+            if thread_idx < TOTAL_ACTIVE:
+                # Find the position for this slot's vectorized store in the GMEM rowwise scale factor buffer
+                thread_y = bidy * ROWS + thread_idx // ACTIVE_THREAD_COLS
+                thread_x = bidx * COLS + (thread_idx % ACTIVE_THREAD_COLS) * WIDTH
+                # Only copy if the slot's position is within the valid GMEM rowwise scale factor buffer
+                if thread_y < M and thread_x < mS_row_N:
+                    cute.autovec_copy(
+                        cute.composition(sScaleRow2D, tv_flush_layout)[thread_idx, None],
+                        cute.composition(mS_row_tile, tv_flush_layout)[thread_idx, None],
+                    )
+
+    @cute.jit
+    def _flush_colwise_scales_to_gmem(self, sScaleCol, mS_col, tidx, bidx, bidy):
+        """Flush the staged (TILE_ROWS / MXFP8_BLOCK_SCALING_SIZE, TILE_COLS*NUM_TILES) SMEM colwise scale block to gmem
+        using with 16-byte stores."""
+
+        ROWS = self._SCALE_ROWS
+        COLS = self._NUM_TILES * self._TILE_COLS
+        width = 16  # span and the gmem row pitch (mult of 128) are both 16B-aligned
+        mS_col_N = mS_col.shape[1]
+        # View sScaleCol as a 2D tensor:
+        # ((_SCALE_ROWS, TILE_COLS), NUM_TILES):((0, 1), TILE_COLS) ->
+        # (_SCALE_ROWS, TILE_COLS * NUM_TILES):(TILE_COLS * NUM_TILES, 1)
+        sScaleCol2D = cute.make_tensor(
+            cute.recast_ptr(sScaleCol.iterator, dtype=Uint8),
+            cute.make_layout((ROWS, COLS), stride=(0, 1)),
+        )
+        mS_col_tile = cute.local_tile(mS_col, (1, COLS), (bidy, bidx))
+        ACTIVE_THREAD_COLS = COLS // width
+        _, tv_flush = cute.make_layout_tv(
+            thr_layout=cute.make_layout((1, ACTIVE_THREAD_COLS), stride=(ACTIVE_THREAD_COLS, 1)),
+            val_layout=cute.make_layout((1, width), stride=(width, 1)),
+        )
+        TOTAL_ACTIVE = ROWS * ACTIVE_THREAD_COLS
+        # We may have more total active threads than threads in a CTA, so we do multiple waves of stores to flush the whole buffer
+        for wave in cutlass.range_constexpr(cute.ceil_div(TOTAL_ACTIVE, self._THREADS_PER_CTA)):
+            thread_idx = wave * self._THREADS_PER_CTA + tidx
+            if thread_idx < TOTAL_ACTIVE:
+                col = bidx * COLS + thread_idx * width
+                if col < mS_col_N:
+                    cute.autovec_copy(
+                        cute.composition(sScaleCol2D, tv_flush)[thread_idx, None],
+                        cute.composition(mS_col_tile, tv_flush)[thread_idx, None],
+                    )
 
 
 def get_kernel_class(cfg):
