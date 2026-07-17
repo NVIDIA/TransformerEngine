@@ -260,7 +260,17 @@ def get_default_recipe() -> Recipe:
 
 
 def get_align_size_for_quantization(recipe: Recipe) -> int:
-    """Get the alignment size for quantization."""
+    """Get the alignment used to pad grouped quantized operations.
+
+    Built-in recipes use their format requirement. Custom recipes use their
+    declarative ``quantization_alignment`` contract rather than invoking
+    ``qfactory``, since a factory may be stateful or role-dependent.
+    """
+    # TODO(#3158): Prefer module/role-specific alignment derived from canonical
+    # cached quantizers when that context is available. Keep the recipe-wide
+    # alignment as the conservative fallback for context-free callers.
+    if recipe.custom():
+        return recipe.quantization_alignment
     if recipe.mxfp8():
         return 32
     if recipe.nvfp4():

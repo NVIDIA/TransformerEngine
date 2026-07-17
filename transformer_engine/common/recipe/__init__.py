@@ -660,6 +660,14 @@ class CustomRecipe(Recipe):
         `high_precision` keeps original high-precision operands for backward,
         and `dequantized` dequantizes saved operands to the active high-precision
         compute dtype (e.g. BF16/FP16/FP32) for backward.
+    quantization_alignment : int, default = 128
+        Conservative recipe-wide fallback used by automatic padding for grouped operations.
+        This must be at least the largest alignment required by any quantizer
+        that ``qfactory`` may return for a grouped operation, across all roles
+        and module names. The default of 128 safely supports all current TE
+        formats. It can be lowered when the factory's full output space is known;
+        for example, a factory restricted to MXFP8 may use 32.
+        Automatic padding reads this value without invoking ``qfactory``.
     """
 
     qfactory: Callable[..., Any]
@@ -672,15 +680,19 @@ class CustomRecipe(Recipe):
     fp8_dpa: bool = False
     fp8_mha: bool = False
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
+    quantization_alignment: int = 128
 
     def __post_init__(self) -> None:
         assert (
             self.backward_override in _BACKWARD_OVERRIDES
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
+        if self.quantization_alignment <= 0:
+            raise ValueError("CustomRecipe quantization_alignment must be positive.")
 
     def _make_repr(self) -> str:
         return (
             f"recipe_type={self.__class__.__name__}, "
             f"qfactory={self.qfactory}, "
-            f"backward_override={self.backward_override}"
+            f"backward_override={self.backward_override}, "
+            f"quantization_alignment={self.quantization_alignment}"
         )
