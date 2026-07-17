@@ -252,6 +252,7 @@ def _log_final_gemm_decision(
         from transformer_engine.debug.features.autoswitch_gemm import (
             _get_autoswitch_metric_logger,
             autoswitch_gemm_should_log_final_decision,
+            autoswitch_gemm_log_iteration,
         )
     except Exception:  # pylint: disable=broad-except
         return
@@ -274,6 +275,7 @@ def _log_final_gemm_decision(
     if not root_log_dir:
         return
 
+    log_iteration = autoswitch_gemm_log_iteration(iteration)
     metric_logger = _get_autoswitch_metric_logger()
     if not metric_logger.ensure_initialized(root_log_dir):
         return
@@ -281,7 +283,7 @@ def _log_final_gemm_decision(
         return
     metric_logger.logger.info(
         f"{layer_name}_{gemm_name}_final_decision "
-        f"\t\t\t\t iteration={iteration:06d} "
+        f"\t\t\t\t iteration={log_iteration:06d} "
         f"\t\t\t\t quantized_enabled={int(bool(quantized_enabled))} "
         f"requested_precision={requested_precision} "
         f"precision={actual_precision} "

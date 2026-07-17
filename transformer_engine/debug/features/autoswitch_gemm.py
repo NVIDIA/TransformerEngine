@@ -34,12 +34,31 @@ _AUTOSWITCH_LOGGING_ENV = "NVTE_AUTOSWITCH_GEMM_LOGGING"
 _AUTOSWITCH_HOLD_WINDOW_SCOPE_ENV = "NVTE_AUTOSWITCH_GEMM_HOLD_WINDOW_SCOPE"
 _AUTOSWITCH_LOGGING_ENABLED = False
 _AUTOSWITCH_HOLD_WINDOW_SCOPE = "global"
+_ITERATION_OFFSET_ENV_NAMES = ("NVDFW_ITERATION_OFFSET", "NVTE_DEBUG_ITERATION_OFFSET")
 
 
 def _env_flag_enabled(name: str, default: bool = False) -> bool:
     """Interpret common boolean environment flag values."""
     default_value = "1" if default else "0"
     return os.getenv(name, default_value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def autoswitch_gemm_log_iteration(iteration: int) -> int:
+    """Return iteration value displayed in AutoswitchGemm logs.
+
+    nvdlfw_inspect iterations count calls to debug_api.step(), so resumed jobs
+    naturally start from zero. Keep scheduling on the raw counter, but allow
+    logs to show the checkpoint/global iteration with an optional offset.
+    """
+    for env_name in _ITERATION_OFFSET_ENV_NAMES:
+        value = os.getenv(env_name)
+        if value is None:
+            continue
+        try:
+            return iteration + int(value)
+        except ValueError:
+            return iteration
+    return iteration
 
 
 def _metrics_logging_mode_from_config(config: Optional[Dict]) -> str:
@@ -361,8 +380,9 @@ class _AutoswitchGemmMetricLogger:
         if self.logger is None:
             return
         metric_key = f"{layer_name}_{gemm}_{metric_name}"
+        log_iteration = autoswitch_gemm_log_iteration(iteration)
         self.logger.info(
-            f"{metric_key} \t\t\t\t iteration={iteration:06d} \t\t\t\t value={value:.8f}"
+            f"{metric_key} \t\t\t\t iteration={log_iteration:06d} \t\t\t\t value={value:.8f}"
         )
 
 
