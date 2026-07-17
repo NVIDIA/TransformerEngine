@@ -79,11 +79,11 @@ def _identity_qfactory(role):  # pylint: disable=unused-argument
     return IdentityQuantizer()
 
 
-# The qfactories above are registered here as module-level functions (not
-# lambdas or closures) on purpose: DCP serializes ``CustomRecipe`` via
-# ``pickle``, and closure-based qfactories (or inner functions capturing state)
-# are not picklable. Keeping them at module scope lets them pickle by reference.
-# See ``run_fsdp2_fused_adam.py::test_hybrid_dcp_output_parity``.
+# CustomRecipe has dynamic TE extra-state handling. Once FP8 state is
+# initialized, TE's get_extra_state() pickles the recipe on save, so
+# checkpoint-test qfactories must be module-level and picklable. On load,
+# payloads without delayed-scaling state are identified and ignored without
+# unpickling. See ``run_fsdp2_fused_adam.py::test_hybrid_dcp_output_parity``.
 _HYBRID_QFACTORIES = {
     "HybridFP8CurrentScaling": _hybrid_fp8_current_qfactory,
     "HybridMXFP8": _hybrid_mxfp8_qfactory,

@@ -127,8 +127,6 @@ def _plain_nvfp4_quantizer(*, row_scaled_nvfp4: bool = False):
 
     return NVFP4Quantizer(
         fp4_dtype=DType.kFloat4E2M1,
-        rowwise=True,
-        columnwise=True,
         with_rht=False,
         with_post_rht_amax=False,
         with_2d_quantization=False,

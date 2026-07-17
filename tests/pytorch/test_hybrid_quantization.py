@@ -1799,6 +1799,128 @@ class TestCustomDPALocalRecipeCache:
         assert inference_calls == 3
         assert "local_recipes" not in dpa.fp8_meta
 
+    @pytest.mark.parametrize(
+        "factory_name,expected",
+        [
+            ("current_scaling_quantizer_factory", (True, False)),
+            ("delayed_scaling_quantizer_factory", (False, False)),
+        ],
+    )
+    def test_qkv_capabilities_reuse_canonical_quantizer(self, factory_name, expected):
+        """Capability queries must not call qfactory outside recipe-state setup."""
+        from transformer_engine.pytorch.custom_recipes import quantization_factory_base
+
+        base_qfactory = getattr(quantization_factory_base, factory_name)
+        calls = []
+
+        def counting_qfactory(role):
+            calls.append(role)
+            # Model a factory with observable RNG state. An extra classification
+            # probe would consume another value and change subsequent results.
+            _ = torch.rand((), device="cuda")
+            return base_qfactory(role)
+
+        custom_recipe = recipe.CustomRecipe(
+            qfactory=counting_qfactory,
+            fp8_dpa=True,
+            fp8_mha=True,
+        )
+        dpa = te.DotProductAttention(
+            num_attention_heads=2,
+            kv_channels=16,
+            attention_dropout=0.0,
+            name="counted_dpa",
+        ).cuda()
+
+        with autocast(enabled=True, recipe=custom_recipe):
+            first = dpa.get_qkv_quantization_capabilities()
+            canonical_qkv = dpa._qkv_capabilities_quantizer
+            calls_after_first = len(calls)
+            second = dpa.get_qkv_quantization_capabilities()
+
+        assert first == expected
+        assert second == first
+        assert dpa._qkv_capabilities_quantizer is canonical_qkv
+        assert len(calls) == calls_after_first
+
+        # A recipe-state rebuild creates a new canonical slot and must
+        # invalidate the capability cache automatically.
+        def rebuilt_qfactory(role):
+            return counting_qfactory(role)
+
+        rebuilt_recipe = recipe.CustomRecipe(
+            qfactory=rebuilt_qfactory,
+            fp8_dpa=True,
+            fp8_mha=True,
+        )
+        with autocast(enabled=True, recipe=rebuilt_recipe):
+            rebuilt = dpa.get_qkv_quantization_capabilities()
+        rebuilt_qkv = dpa._qkv_capabilities_quantizer
+
+        assert rebuilt == first
+        assert rebuilt_qkv is not canonical_qkv
+        assert len(calls) > calls_after_first
+
+    @pytest.mark.parametrize("fp8_mha", [False, True])
+    def test_mha_forward_does_not_probe_qfactory(self, monkeypatch, fp8_mha):
+        """Repeated MHA forwards must not create discarded DPA quantizers."""
+        from transformer_engine.pytorch.attention import multi_head_attention as mha_module
+        from transformer_engine.pytorch.custom_recipes.quantization_factory_base import (
+            current_scaling_quantizer_factory,
+        )
+        from transformer_engine.pytorch.custom_recipes.quantization_factory_zoo import (
+            nvfp4_linear_fp8_dpa_factory,
+        )
+        from transformer_engine.pytorch.utils import get_device_compute_capability
+
+        cc = get_device_compute_capability()
+        if cc < (9, 0) or cc >= (12, 0):
+            pytest.skip(f"FP8 attention not supported on sm{cc[0] * 10 + cc[1]}")
+
+        monkeypatch.setattr(mha_module, "_dpa_fp8_recipe", "")
+        calls = []
+
+        def valid_fp8_dpa_qfactory(role):
+            is_dpa = role is not None and role.module_type == "dpa"
+            is_dpa_boundary = (
+                role is not None
+                and not role.module_type
+                and ("dpa_output" in role.name or "dpa_grad_input" in role.name)
+            )
+            if is_dpa or is_dpa_boundary:
+                return nvfp4_linear_fp8_dpa_factory(role)
+            return current_scaling_quantizer_factory(role)
+
+        def counting_qfactory(role):
+            calls.append(role)
+            _ = torch.rand((), device="cuda")
+            return valid_fp8_dpa_qfactory(role)
+
+        custom_recipe = recipe.CustomRecipe(
+            qfactory=counting_qfactory,
+            fp8_dpa=True,
+            fp8_mha=fp8_mha,
+        )
+        model = te.MultiheadAttention(
+            hidden_size=32,
+            num_attention_heads=2,
+            kv_channels=16,
+            attention_dropout=0.0,
+            attn_mask_type="no_mask",
+            params_dtype=torch.bfloat16,
+            bias=False,
+            qkv_format="sbhd",
+            name="counted_mha",
+        ).cuda()
+        inp = torch.randn(128, 2, 32, device="cuda", dtype=torch.bfloat16)
+
+        with torch.no_grad(), autocast(enabled=True, recipe=custom_recipe):
+            model(inp)
+            calls_after_first = len(calls)
+            model(inp)
+
+        assert len(calls) == calls_after_first
+
 
 @requires_fp8_and_nvfp4
 class TestAttentionFactoryNativeRecipeParity:

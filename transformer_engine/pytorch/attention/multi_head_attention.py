@@ -43,33 +43,6 @@ _dpa_fp8_recipe_dpa = os.getenv("NVTE_DPA_FP8_RECIPE_DPA", "0") == "1"
 _dpa_fp8_recipe_mha = os.getenv("NVTE_DPA_FP8_RECIPE_MHA", "0") == "1"
 
 
-def _infer_custom_dpa_scaling(recipe, dpa_name: str) -> Tuple[bool, bool]:
-    """Infer DPA quantizer family for CustomRecipe boundary decisions.
-
-    MultiheadAttention must decide boundary behavior before
-    DotProductAttention builds its per-slot quantizers. Built-in recipes expose
-    the DPA quantizer family through recipe predicates; CustomRecipe exposes it
-    only through the qfactory role contract, so probe the DPA QKV role.
-    """
-    if not recipe.custom() or not getattr(recipe, "fp8_dpa", False):
-        return False, False
-
-    try:
-        qkv_quantizer = recipe.qfactory(
-            QuantizerRole(module_type="dpa", tensor_type="qkv", name=dpa_name)
-        )
-    except Exception:  # pragma: no cover, pylint: disable=broad-exception-caught
-        return False, False
-
-    from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer
-    from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
-
-    return (
-        isinstance(qkv_quantizer, Float8CurrentScalingQuantizer),
-        isinstance(qkv_quantizer, MXFP8Quantizer),
-    )
-
-
 class MultiheadAttention(torch.nn.Module):
     r"""
     Multi-head Attention (MHA), including Query,
@@ -904,12 +877,19 @@ class MultiheadAttention(torch.nn.Module):
             fp8_mha = fp8_recipe.fp8_mha
             float8_current_scaling = fp8_recipe.float8_current_scaling()
             mxfp8_scaling = fp8_recipe.mxfp8()
-            if custom_recipe and fp8_dpa:
-                custom_float8_cs, custom_mxfp8 = _infer_custom_dpa_scaling(
-                    fp8_recipe, self.core_attention.name or ""
+            if fp8 and custom_recipe and fp8_mha:
+                # Wire every boundary this CustomRecipe may quantize before
+                # DPA materializes its recipe state. Some quantizer families
+                # disable the corresponding output below, but pre-wiring avoids
+                # rebuilding that state after inspecting its canonical QKV slot.
+                self._update_output_quantizer_roles(
+                    rotary_pos_emb is None,
+                    True,
+                    True,
                 )
-                float8_current_scaling = custom_float8_cs
-                mxfp8_scaling = custom_mxfp8
+                float8_current_scaling, mxfp8_scaling = (
+                    self.core_attention.get_qkv_quantization_capabilities()
+                )
         else:
             fp8_dpa = _dpa_fp8_recipe_dpa
             fp8_mha = _dpa_fp8_recipe_mha
@@ -939,7 +919,12 @@ class MultiheadAttention(torch.nn.Module):
         # 1. FP8CS recipe: produce F16 grads; again, due to cuBLAS limitation
         proj_fp8_grad = dpa_fp8_output and not float8_current_scaling
 
-        self._update_output_quantizer_roles(qkv_fp8_output, proj_fp8_grad, dpa_fp8_output)
+        # Custom fp8_mha boundaries were wired before DPA recipe-state setup so
+        # querying its canonical QKV quantizer cannot trigger a second build.
+        if not (fp8 and custom_recipe and fp8_mha and _dpa_fp8_recipe == ""):
+            self._update_output_quantizer_roles(
+                qkv_fp8_output, proj_fp8_grad, dpa_fp8_output
+            )
 
         layernorm_output = None
         if self.attention_type == "self":

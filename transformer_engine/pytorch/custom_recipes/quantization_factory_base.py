@@ -164,8 +164,6 @@ def nvfp4_quantizer_factory(
     if is_weight:
         return NVFP4Quantizer(
             fp4_dtype=DType.kFloat4E2M1,
-            rowwise=True,
-            columnwise=True,
             with_rht=False,
             with_post_rht_amax=False,
             with_2d_quantization=True,
@@ -176,8 +174,6 @@ def nvfp4_quantizer_factory(
     if is_grad:
         return NVFP4Quantizer(
             fp4_dtype=DType.kFloat4E2M1,
-            rowwise=True,
-            columnwise=True,
             with_rht=True,
             with_post_rht_amax=True,
             with_2d_quantization=False,
@@ -188,8 +184,6 @@ def nvfp4_quantizer_factory(
     # For input and unknown roles
     return NVFP4Quantizer(
         fp4_dtype=DType.kFloat4E2M1,
-        rowwise=True,
-        columnwise=True,
         with_rht=True,
         with_post_rht_amax=True,
         with_2d_quantization=False,
