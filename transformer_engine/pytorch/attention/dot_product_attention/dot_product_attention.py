@@ -727,7 +727,6 @@ class DotProductAttention(TransformerEngineBaseModule):
         self.cp_global_ranks = cp_global_ranks
         self.cp_stream = cp_stream
         self.cp_comm_type = cp_comm_type
-        self.thd_cp_partition = "per_document"
 
         self.hidden_size_per_attention_head_k = (
             kv_channels if isinstance(kv_channels, int) else kv_channels[0]
@@ -880,7 +879,6 @@ class DotProductAttention(TransformerEngineBaseModule):
         cp_global_ranks: List[int],
         cp_stream: torch.cuda.Stream,
         cp_comm_type: str = "p2p",
-        thd_cp_partition: str = "per_document",
     ) -> None:
         """
         Set the context parallel attributes for the given
@@ -910,16 +908,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                       - ``"a2a+p2p"``: hierarchical CP implementation. First applying a2a to QKV
                         across each CP sub-group (e.g., via NVLink), then exchanging KV with
                         p2p between sub-groups (e.g., via IBLink).
-        thd_cp_partition : str, default = "per_document"
-                           THD token partition contract. ``"packed_contiguous"`` assigns one
-                           contiguous whole-buffer chunk per rank and requires all-gather CP.
         """
         self.cp_group = cp_group
         self.cp_global_ranks = cp_global_ranks
         self.cp_stream = cp_stream
         self.cp_comm_type = cp_comm_type
-        assert thd_cp_partition in ["per_document", "packed_contiguous"]
-        self.thd_cp_partition = thd_cp_partition
 
     def init_fp8_metadata(self, num_gemms: int = 1) -> None:
         """
@@ -2229,7 +2222,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                     num_splits=num_splits,
                     cu_seqlens_q_padded=cu_seqlens_q_padded,
                     cu_seqlens_kv_padded=cu_seqlens_kv_padded,
-                    thd_cp_partition=self.thd_cp_partition,
                 )
                 if orig_qk_dim is not None and orig_qk_dim > orig_v_dim:
                     return _trim_output(attn_out, num_attention_heads, orig_qk_dim, orig_v_dim)
@@ -2284,7 +2276,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                         packed_qkv=qkv_layer,
                         packed_kv=kv_layer,
                         bf16_backward=bf16_backward,
-                        thd_cp_partition=self.thd_cp_partition,
                     )
                 return self.fused_attention(
                     query_layer,
@@ -2323,7 +2314,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                     packed_qkv=qkv_layer,
                     packed_kv=kv_layer,
                     bf16_backward=bf16_backward,
-                    thd_cp_partition=self.thd_cp_partition,
                 )
 
             if use_unfused_attention:
