@@ -283,6 +283,15 @@ def cp_pool():
         p.shutdown()
 
 
+@pytest.fixture
+def packed_contiguous_cp_pool(monkeypatch):
+    """Return an isolated CP2 pool with packed-contiguous THD enabled at process start."""
+    monkeypatch.setenv("NVTE_EXPERIMENTAL_CP_AG_THD_PACKED_CONTIGUOUS", "1")
+    pool = PoolWorker(2)
+    yield pool
+    pool.shutdown()
+
+
 def _submit(pool: PoolWorker, **kwargs) -> None:
     # run_dpa_with_cp expects all kwargs as strings (it does e.g.
     # `fp8_bwd == "True"`), matching the old argv-based path. Serialize
@@ -703,15 +712,16 @@ def test_cp_with_fused_attention(
     get_device_compute_capability() < (9, 0), reason="FusedAttention THD requires sm90+."
 )
 @pytest.mark.parametrize("pad_between_seqs", [False, True])
-def test_cp_with_fused_attention_packed_contiguous(cp_pool, pad_between_seqs):
+def test_cp_with_fused_attention_packed_contiguous(
+    packed_contiguous_cp_pool, pad_between_seqs
+):
     _submit(
-        cp_pool(2),
+        packed_contiguous_cp_pool,
         dtype="bf16",
         model="cp_2_0",
         qkv_format="thd",
         kernel_backend="FusedAttention",
         cp_comm_type="all_gather",
-        thd_cp_partition="packed_contiguous",
         fa_pad_between_seqs=pad_between_seqs,
         deterministic=_deterministic,
         log_level=pytest_logging_level,
@@ -722,15 +732,14 @@ def test_cp_with_fused_attention_packed_contiguous(cp_pool, pad_between_seqs):
     not FlashAttentionUtils.v3_is_installed or get_device_compute_capability() > (9, 0),
     reason="FlashAttention 3 on Hopper is required.",
 )
-def test_cp_with_flash_attention_packed_contiguous(cp_pool):
+def test_cp_with_flash_attention_packed_contiguous(packed_contiguous_cp_pool):
     _submit(
-        cp_pool(2),
+        packed_contiguous_cp_pool,
         dtype="bf16",
         model="cp_2_0",
         qkv_format="thd",
         kernel_backend="FlashAttention",
         cp_comm_type="all_gather",
-        thd_cp_partition="packed_contiguous",
         fa_pad_between_seqs=False,
         deterministic=_deterministic,
         log_level=pytest_logging_level,

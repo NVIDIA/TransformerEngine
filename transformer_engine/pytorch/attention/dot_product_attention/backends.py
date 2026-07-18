@@ -833,7 +833,6 @@ class FlashAttention(torch.nn.Module):
         num_splits: Optional[int] = 1,
         cu_seqlens_q_padded: Optional[torch.Tensor] = None,
         cu_seqlens_kv_padded: Optional[torch.Tensor] = None,
-        thd_cp_partition: str = "per_document",
     ) -> torch.Tensor:
         """flash-attn fprop"""
 
@@ -1056,7 +1055,6 @@ class FlashAttention(torch.nn.Module):
                     pad_between_seqs=pad_between_seqs,
                     use_flash_attn_3=use_flash_attn_3,
                     fp8_output=fp8_output,
-                    thd_cp_partition=thd_cp_partition,
                 )
         else:
             if is_cpu_offload_enabled():
@@ -2016,7 +2014,6 @@ class FusedAttention(torch.nn.Module):
         score_mod_bprop: Optional[Callable] = None,
         score_mod_tensors: Optional[Dict[str, torch.Tensor]] = None,
         score_mod_bprop_tensors: Optional[Dict[str, torch.Tensor]] = None,
-        thd_cp_partition: str = "per_document",
     ) -> torch.Tensor:
         """fused attention fprop"""
         assert (
@@ -2184,7 +2181,6 @@ class FusedAttention(torch.nn.Module):
                     fp8_output=fp8_output,
                     layer_number=self.layer_number,
                     return_max_logit=self.return_max_logit,
-                    thd_cp_partition=thd_cp_partition,
                 )
         elif score_mod is not None:
             output = FusedAttentionWithScoreModFunc.apply(

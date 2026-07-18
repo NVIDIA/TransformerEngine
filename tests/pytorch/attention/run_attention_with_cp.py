@@ -43,6 +43,8 @@ from utils import ModelConfig, compare_and_assert
 _pool_cp_comm_group = None
 _pool_cp_comm_sub_groups: list = []
 
+_PACKED_CONTIGUOUS_ENV = "NVTE_EXPERIMENTAL_CP_AG_THD_PACKED_CONTIGUOUS"
+
 dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
 
 uniform_thd_benchmark_configs = {
@@ -67,7 +69,6 @@ def generate_input_shapes(
     world_size: int,
     kernel_backend: str,
     fa_pad_between_seqs: str = "False",
-    thd_cp_partition: str = "per_document",
     thd_seqlen_pattern: str = "random",
 ):
     if qkv_format == "bshd":
@@ -127,10 +128,8 @@ def generate_input_shapes(
         cu_seqlens_q_padded = None
         cu_seqlens_kv_padded = None
     elif qkv_format == "thd":
-        packed_contiguous = thd_cp_partition == "packed_contiguous"
-        partition_divisor = (
-            world_size if thd_cp_partition == "packed_contiguous" else 2 * world_size
-        )
+        packed_contiguous = os.getenv(_PACKED_CONTIGUOUS_ENV, "0") == "1"
+        partition_divisor = world_size if packed_contiguous else 2 * world_size
         if thd_seqlen_pattern == "max":
             seqlens_q = torch.full(
                 [config.batch_size], config.max_seqlen_q, dtype=torch.int32
@@ -265,7 +264,6 @@ def run_dpa_with_cp(
     f16_O="False",
     is_training="True",
     fa_pad_between_seqs="False",
-    thd_cp_partition="per_document",
     deterministic="False",
     log_level=logging.WARNING,
     benchmark="0",
@@ -275,8 +273,8 @@ def run_dpa_with_cp(
     torch.manual_seed(1234)
     torch.cuda.manual_seed(1234)
     logging.root.setLevel(log_level)
-    assert thd_cp_partition in ["per_document", "packed_contiguous"]
-    packed_contiguous = thd_cp_partition == "packed_contiguous"
+    packed_contiguous = os.getenv(_PACKED_CONTIGUOUS_ENV, "0") == "1"
+    partition = "packed_contiguous" if packed_contiguous else "per_document"
     if packed_contiguous:
         assert qkv_format == "thd" and cp_comm_type == "all_gather"
     # When is_training is False, gradient outputs are None.
@@ -418,7 +416,6 @@ def run_dpa_with_cp(
         world_size,
         kernel_backend,
         fa_pad_between_seqs,
-        thd_cp_partition,
         thd_seqlen_pattern,
     )
     if packed_contiguous:
@@ -439,7 +436,7 @@ def run_dpa_with_cp(
     if qkv_format == "thd" and rank == 0:
         effective_seqlens = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).cpu().tolist()
         print(
-            f"BENCH_INPUT model={model} partition={thd_cp_partition} cp={world_size} "
+            f"BENCH_INPUT model={model} partition={partition} cp={world_size} "
             f"seqlens={effective_seqlens} logical_tokens={sum(effective_seqlens)} "
             f"physical_tokens={q_input_shape[0]}",
             flush=True,
@@ -583,16 +580,14 @@ def run_dpa_with_cp(
             q_.shape[0],
             world_size,
             rank,
-            thd_cp_partition,
-            q_.device,
+            device=q_.device,
         )
         seq_idx_kv = get_thd_partitioned_indices(
             cu_seqlens_kv_padded,
             k_.shape[0],
             world_size,
             rank,
-            thd_cp_partition,
-            k_.device,
+            device=k_.device,
         )
         q_, dout_ = [x.index_select(0, seq_idx_q) for x in [q_, dout_]]
         k_, v_ = [x.index_select(0, seq_idx_kv) for x in [k_, v_]]
@@ -640,7 +635,6 @@ def run_dpa_with_cp(
         cp_comm_ranks,
         torch.cuda.Stream(),
         cp_comm_type,
-        thd_cp_partition=thd_cp_partition,
     )
     if config.softmax_type != "vanilla":
         core_attn.softmax_offset.grad.zero_()
@@ -705,7 +699,7 @@ def run_dpa_with_cp(
                 "total_tokens": total_tokens,
                 "cu_seqlens_q": cu_seqlens_q.detach().cpu(),
                 "cu_seqlens_q_padded": cu_seqlens_q_padded.detach().cpu(),
-                "partition": thd_cp_partition,
+                "partition": partition,
                 "cp_size": world_size,
                 "model": model,
                 "dtype": dtype,
@@ -1074,7 +1068,7 @@ def run_dpa_with_cp(
         )
         mean_ms = sum(elapsed_ms) / len(elapsed_ms)
         print(
-            f"BENCH_RESULT rank={rank} model={model} partition={thd_cp_partition} "
+            f"BENCH_RESULT rank={rank} model={model} partition={partition} "
             f"cp={world_size} median_ms={median_ms:.3f} mean_ms={mean_ms:.3f} "
             f"min_ms={min(elapsed_ms):.3f} max_ms={max(elapsed_ms):.3f} "
             f"warmup={warmup_iters} iters={benchmark_iters}",
