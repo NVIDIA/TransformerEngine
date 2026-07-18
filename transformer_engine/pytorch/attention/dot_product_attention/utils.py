@@ -199,6 +199,9 @@ class AttentionParams:
         Type of query/key/value tensors, {`torch.Tensor`, `Float8Tensor`}.
     qkv_dtype : torch.dtype, default = torch.bfloat16
         Data type of query/key/value tensors.
+    nominal_dtype : Optional[torch.dtype], default = None
+        Model precision (F16/BF16) of the unquantized tensors (O, and dQ/dK/dV under
+        current/mxfp8) when `qkv_dtype` itself is FP8.
     qkv_layout : str, default = "sbh3d"
         Query/key/value tensor memory layout.
     batch_size : int, default = 1
@@ -245,7 +248,9 @@ class AttentionParams:
     cp_comm_type : str, default = "p2p"
         The communication type of context parallelism.
     cp_size : int, default = 1
-        The group size of context parallelism.
+        The (total) group size of context parallelism.
+    cp_size_a2a : int, default = 1
+        The all-to-all subgroup size when `cp_comm_type == "a2a+p2p"`.
     deterministic : bool, default = False
         Whether to run `DotProductAttention` with determinism or not.
     is_training : bool, default = True
@@ -278,6 +283,7 @@ class AttentionParams:
 
     qkv_type: Union[torch.Tensor, Float8Tensor] = torch.Tensor
     qkv_dtype: torch.dtype = torch.bfloat16
+    nominal_dtype: Optional[torch.dtype] = None
     qkv_layout: str = "sbh3d"
     batch_size: int = 1
     num_heads: int = 16
@@ -300,6 +306,7 @@ class AttentionParams:
     context_parallel: bool = False
     cp_comm_type: str = "p2p"
     cp_size: int = 1
+    cp_size_a2a: int = 1
     deterministic: bool = False
     is_training: bool = True
     fp8: bool = False
@@ -424,6 +431,7 @@ def get_attention_backend(
     # is shifted over to the caller of this function
     qkv_type = attention_params.qkv_type
     qkv_dtype = attention_params.qkv_dtype
+    nominal_dtype = attention_params.nominal_dtype
     qkv_layout = attention_params.qkv_layout
     batch_size = attention_params.batch_size
     num_heads = attention_params.num_heads
@@ -445,7 +453,8 @@ def get_attention_backend(
     attention_dropout = attention_params.attention_dropout
     context_parallel = attention_params.context_parallel
     cp_comm_type = attention_params.cp_comm_type
-    cp_size = attention_params.cp_size  # pylint: disable=unused-variable
+    cp_size = attention_params.cp_size
+    cp_size_a2a = attention_params.cp_size_a2a
     deterministic = attention_params.deterministic
     is_training = attention_params.is_training
     fp8 = attention_params.fp8
@@ -1448,39 +1457,18 @@ def get_attention_backend(
     # Filter: cuDNN support
     fused_attention_backend = None
     if use_fused_attention:
-        # ``DType`` is implicitly convertible to ``transformer_engine::DType``
-        # on the C++ side, so pass it straight to the pybind function.
-        qkv_type = TE_DType[qkv_dtype]
-        o_type = qkv_type
-        do_type = qkv_type
-        dqkv_type = qkv_type
-        scaling_mode = tex.NVTEScalingMode.NVTE_DELAYED_TENSOR_SCALING
-        qkv_scale_inv_format = None
-        do_scale_inv_format = None
-        if fp8 and fp8_meta["recipe"].fp8_dpa:
-            recipe = fp8_meta["recipe"]
-            qkv_type = get_fp8_te_dtype(recipe, fprop_tensor=True)
-            cs_o_in_f16 = os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1") == "1"
-            if recipe.mxfp8():
-                scaling_mode = tex.NVTEScalingMode.NVTE_MXFP8_1D_SCALING
-                o_type = TE_DType[torch.bfloat16]
-                do_type = TE_DType[torch.bfloat16]
-                dqkv_type = TE_DType[torch.bfloat16]
-                qkv_scale_inv_format = "bhsd"
-                do_scale_inv_format = "bhsd"
-            elif recipe.float8_current_scaling() and cs_o_in_f16:
-                scaling_mode = tex.NVTEScalingMode.NVTE_DELAYED_TENSOR_SCALING
-                o_type = TE_DType[torch.bfloat16]
-                do_type = TE_DType[torch.bfloat16]
-                dqkv_type = TE_DType[torch.bfloat16]
-            else:
-                scaling_mode = tex.NVTEScalingMode.NVTE_DELAYED_TENSOR_SCALING
-                o_type = qkv_type
-                do_type = o_type
-                dqkv_type = qkv_type
-        o_format = q_format
-        do_format = o_format
-        dqkv_layout = qkv_layout
+        recipe = fp8_meta["recipe"] if (fp8 and fp8_meta["recipe"].fp8_dpa) else None
+        cs_o_in_f16 = os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1") == "1"
+        spec = get_fused_attn_spec(
+            recipe, qkv_dtype, qkv_layout, cs_o_in_f16=cs_o_in_f16, nominal_dtype=nominal_dtype
+        )
+        qkv_type, o_type, do_type, dqkv_type = spec.qkv, spec.o, spec.do, spec.dqkv
+        scaling_mode = spec.scaling_mode
+        qkv_scale_inv_format = spec.scale_inv_format
+        do_scale_inv_format = spec.scale_inv_format
+        o_format = spec.o_format
+        do_format = spec.do_format
+        dqkv_layout = spec.dqkv_layout
         num_pages_k = num_pages_v = 0
         page_size_k = page_size_v = 0
         max_pages_per_seq_k = max_pages_per_seq_v = 0
@@ -1491,7 +1479,7 @@ def get_attention_backend(
         bias_batch_size = bias_num_heads = bias_seqlen_q = bias_seqlen_kv = 0
         if fu_core_attention_bias_shape is not None:
             bias_batch_size, bias_num_heads, bias_seqlen_q, bias_seqlen_kv = fu_core_attention_bias_shape
-        fused_attn_params = FusedAttentionParams(
+        base_fused_attn_kwargs = dict(
             is_training=is_training,
             deterministic=deterministic,
             cuda_graph=cuda_graph,
@@ -1509,7 +1497,7 @@ def get_attention_backend(
             o_dtype=o_type,
             do_dtype=do_type,
             dqkv_dtype=dqkv_type,
-            qkv_layout=QKVLayout[qkv_layout],
+            qkv_layout=QKVLayout[spec.qkv_layout],
             o_format=QKVFormat[o_format],
             do_format=QKVFormat[do_format],
             dqkv_layout=QKVLayout[dqkv_layout],
@@ -1535,15 +1523,65 @@ def get_attention_backend(
             bias_seqlen_q=bias_seqlen_q,
             bias_seqlen_kv=bias_seqlen_kv,
         )
-        fused_attention_backend, reject_message = tex.get_fused_attn_backend(fused_attn_params)
-        if fused_attention_backend == FusedAttnBackend["No_Backend"]:
-            logger.debug(
-                "Disabling FusedAttention: %s",
-                reject_message,
+
+        if context_parallel:
+            from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
+                cp_per_step_configs,
             )
-            use_fused_attention = False
-            fused_attention_backend = None
-        elif has_score_mod and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]:
+
+            per_step_configs = cp_per_step_configs(
+                cp_comm_type,
+                cp_size,
+                cp_size_a2a,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_kv=max_seqlen_kv,
+                num_heads=num_heads,
+                num_gqa_groups=num_gqa_groups,
+                attn_mask_type=attn_mask_type,
+                window_size=window_size,
+                bottom_right_diagonal=bottom_right_diagonal,
+            )
+        else:
+            per_step_configs = [None]
+
+        for step_config in per_step_configs:
+            fused_attn_kwargs = dict(base_fused_attn_kwargs)
+            if step_config is not None:
+                step_seqlen_q = step_config["max_seqlen_q"]
+                step_seqlen_kv = step_config["max_seqlen_kv"]
+                fused_attn_kwargs.update(
+                    attn_mask_type=AttnMaskType[step_config["attn_mask_type"]],
+                    max_seqlen_q=step_seqlen_q,
+                    max_seqlen_kv=step_seqlen_kv,
+                    num_attn_heads=step_config["num_attn_heads"],
+                    num_gqa_groups=step_config["num_gqa_groups"],
+                    window_size_left=step_config["window_size_left"],
+                    window_size_right=step_config["window_size_right"],
+                    bottom_right_diagonal=step_config["bottom_right_diagonal"],
+                )
+                if bias_seqlen_q != 1:
+                    fused_attn_kwargs["bias_seqlen_q"] = step_seqlen_q
+                if bias_seqlen_kv != 1:
+                    fused_attn_kwargs["bias_seqlen_kv"] = step_seqlen_kv
+            fused_attn_params = FusedAttentionParams(**fused_attn_kwargs)
+            fused_attention_backend, reject_message = tex.get_fused_attn_backend(fused_attn_params)
+            if fused_attention_backend == FusedAttnBackend["No_Backend"]:
+                logger.debug(
+                    "Disabling FusedAttention: %s%s",
+                    reject_message,
+                    f" (context-parallel per-step config {step_config})"
+                    if step_config is not None
+                    else "",
+                )
+                use_fused_attention = False
+                fused_attention_backend = None
+                break
+
+        if (
+            use_fused_attention
+            and has_score_mod
+            and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]
+        ):
             logger.debug(
                 "Disabling FusedAttention for score_mod because sub-backend %s is not "
                 "F16/BF16 arbitrary-seqlen",
@@ -2401,6 +2439,88 @@ def get_qkv_format(
         q_format = qkv_format
         kv_format = qkv_format
     return qkv_format, q_format, kv_format
+
+
+@dataclass(frozen=True)
+class FusedAttnSpec:
+    """Fused-attention spec for a given config.
+
+    Mirrors what `FusedAttnFunc` feeds `fused_attn_fwd`/`fused_attn_bwd` (backends.py),
+    so the availability probe (`get_attention_backend`) cannot drift from runtime.
+    """
+
+    scaling_mode: Any
+    qkv: Any
+    o: Any
+    do: Any
+    dqkv: Any
+    scale_inv_format: Optional[str]
+    qkv_layout: str
+    o_format: str
+    do_format: str
+    dqkv_layout: str
+
+
+def get_fused_attn_spec(recipe, qkv_dtype, qkv_layout, *, cs_o_in_f16, nominal_dtype=None):
+    """Resolve fused-attention specs, e.g. tensor dtypes, formats, for a given config.
+
+    `nominal_dtype` is the model precision (F16/BF16) of the tensors that stay unquantized in
+    FP8 attention (O, and dQ/dK/dV under current/mxfp8). It is only consulted when `qkv_dtype` itself is FP8.
+    """
+    q_format = get_qkv_format(qkv_layout)[1]
+    eff_qkv_layout = qkv_layout # FP16/BF16
+    if recipe is not None:
+        if not recipe.mxfp8():
+            # Delayed/current scaling
+            eff_qkv_layout = qkv_layout.replace("paged_kv_", "")
+        elif qkv_layout in ("bshd_bshd_bshd", "sbhd_sbhd_sbhd"):
+            eff_qkv_layout = qkv_layout  # MXFP8 fast path
+        else:
+            eff_qkv_layout = "bhsd_bhsd_bhsd"  # MXFP8 slow path
+    layout_kwargs = dict(
+        qkv_layout=eff_qkv_layout,
+        o_format=q_format,
+        do_format=q_format,
+        dqkv_layout=qkv_layout,
+    )
+
+    if qkv_dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+        ref = TE_DType[nominal_dtype if nominal_dtype is not None else torch.bfloat16]
+    else:
+        ref = TE_DType[qkv_dtype]
+
+    # FP16/BF16: every tensor is in model precision; scaling_mode is a placeholder
+    if recipe is None:
+        return FusedAttnSpec(
+            tex.NVTEScalingMode.NVTE_DELAYED_TENSOR_SCALING, ref, ref, ref, ref, None,
+            **layout_kwargs,
+        )
+
+    fprop_fp8 = get_fp8_te_dtype(recipe, fprop_tensor=True)
+    grad_fp8 = get_fp8_te_dtype(recipe, fprop_tensor=False)
+
+    # MXFP8 block scaling: Q/K/V/dO are in MXFP8; O/dQ/dK/dV stay in model precision
+    if recipe.mxfp8():
+        return FusedAttnSpec(
+            tex.NVTEScalingMode.NVTE_MXFP8_1D_SCALING, fprop_fp8, ref, grad_fp8, ref, "bhsd",
+            **layout_kwargs,
+        )
+
+    # FP8 current scaling: Q/K/V/dO are in FP8; O in model precision if `cs_o_in_f16` (default), otherwise FP8;
+    # dQ/dK/dV in model precision
+    if recipe.float8_current_scaling():
+        return FusedAttnSpec(
+            tex.NVTEScalingMode.NVTE_DELAYED_TENSOR_SCALING,
+            fprop_fp8, ref if cs_o_in_f16 else fprop_fp8, grad_fp8, ref, None,
+            **layout_kwargs,
+        )
+
+    # FP8 delayed scaling: Q/K/V/O are in FP8 (e.g. E4M3); dO/dQ/dK/dV in FP8 (e.g. E5M2)
+    return FusedAttnSpec(
+        tex.NVTEScalingMode.NVTE_DELAYED_TENSOR_SCALING,
+        fprop_fp8, fprop_fp8, grad_fp8, grad_fp8, None,
+        **layout_kwargs,
+    )
 
 
 def get_qkv_layout(

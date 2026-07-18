@@ -1449,11 +1449,14 @@ class DotProductAttention(TransformerEngineBaseModule):
 
             # adjust max_seqlen and cu_seqlens for CP
             cp_size = 1
+            cp_size_a2a = 1
             if isinstance(self.cp_group, dist_group_type):
                 cp_size = get_distributed_world_size(self.cp_group)
             elif isinstance(self.cp_group, list):
                 for group in self.cp_group:
                     cp_size *= get_distributed_world_size(group)
+                if self.cp_comm_type == "a2a+p2p" and len(self.cp_group) > 0:
+                    cp_size_a2a = get_distributed_world_size(self.cp_group[0])
             context_parallel = cp_size > 1
             if q_format in ["sbhd", "bshd"]:
                 max_seqlen_q *= cp_size
@@ -1608,6 +1611,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 context_parallel=context_parallel,
                 cp_comm_type=self.cp_comm_type,
                 cp_size=cp_size,
+                cp_size_a2a=cp_size_a2a,
                 deterministic=self.deterministic,
                 is_training=self.training,
                 fp8=self.fp8,

@@ -1784,6 +1784,7 @@ def test_dpa_fp8_extra_state(model, dtype):
     available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=torch.float8_e4m3fn,
+        nominal_dtype=dtype,
         qkv_layout="sb3hd",
         is_training=is_training,
         deterministic=_deterministic,
@@ -2014,6 +2015,7 @@ def test_mha_fp8_vs_f16(
     available_backends, _, _ = get_available_attention_backends(
         config,
         qkv_dtype=torch.float8_e4m3fn,
+        nominal_dtype=dtype,
         qkv_layout=qkv_format.replace("hd", "h3d"),
         fp8=True,
         fp8_meta=fp8_meta,
@@ -2271,6 +2273,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
     available_backends, _, _ = get_available_attention_backends(
         config,
         qkv_dtype=torch.float8_e4m3fn,
+        nominal_dtype=dtype,
         qkv_layout=qkv_layout,
         fp8=True,
         fp8_meta=fp8_meta,
@@ -2593,6 +2596,7 @@ def test_custom_mha_fp8_vs_f16(dtype, model):
     available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=torch.float8_e4m3fn,
+        nominal_dtype=dtype,
         qkv_layout="bs3hd",
         fp8=True,
         fp8_meta=fp8_meta,

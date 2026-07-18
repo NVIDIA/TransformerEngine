@@ -339,6 +339,7 @@ def get_available_attention_backends(
     config: ModelConfig,
     qkv_dtype: torch.dtype,
     qkv_layout: str,
+    nominal_dtype: Optional[torch.dtype] = None,
     pad_between_seqs: bool = False,
     deterministic: bool = False,
     fp8: bool = False,
@@ -347,6 +348,8 @@ def get_available_attention_backends(
     inference_params: Optional[InferenceParams] = None,
     score_mod: bool = False,
     score_mod_bprop: bool = False,
+    cp_size: int = 1,
+    cp_size_a2a: int = 1,
 ) -> Tuple[List, List]:
     """Check for all available attention backends that support a model configuration"""
 
@@ -389,6 +392,7 @@ def get_available_attention_backends(
     def test():
         attention_params = AttentionParams(
             qkv_dtype=qkv_dtype,
+            nominal_dtype=nominal_dtype,
             qkv_layout=qkv_layout,
             batch_size=config.batch_size,
             num_heads=config.num_heads,
@@ -408,6 +412,8 @@ def get_available_attention_backends(
             attention_dropout=config.dropout_p,
             context_parallel=config.context_parallel,
             cp_comm_type=config.cp_comm_type,
+            cp_size=cp_size,
+            cp_size_a2a=cp_size_a2a,
             deterministic=deterministic,
             fp8=fp8,
             fp8_meta=fp8_meta,
