@@ -4990,8 +4990,12 @@ def cp_per_step_configs(
         return [config(attn_mask_type, r_q, r_kv, heads, gqa, bottom_right_diagonal)]
     return [
         config(attn_mask_type, r_q, r_kv, heads, gqa, bottom_right_diagonal),  # diagonal
-        config(padding_or_no_mask, r_q, r_kv // 2, heads, gqa, bottom_right_diagonal),  # lower-triangle
-        config(padding_or_no_mask, r_q // 2, r_kv, heads, gqa, bottom_right_diagonal),  # upper-triangle
+        config(
+            padding_or_no_mask, r_q, r_kv // 2, heads, gqa, bottom_right_diagonal
+        ),  # lower-triangle
+        config(
+            padding_or_no_mask, r_q // 2, r_kv, heads, gqa, bottom_right_diagonal
+        ),  # upper-triangle
     ]
 
 

@@ -134,9 +134,9 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
     auto get_graph = [&](CacheType& cache, const FusedAttnConfig& descriptor) -> graph_and_tensors {
       // if hit, return
       auto it = cache.find(descriptor);
-      bool cache_hit = (it != cache.end());                            // [GRAPH-DEBUG]
+      bool cache_hit = (it != cache.end());                              // [GRAPH-DEBUG]
       fused_attn_graph_debug::note_cache_lookup("fwd", cache_hit, cfg);  // [GRAPH-DEBUG]
-      if (cache_hit && !fused_attn_graph_debug::cache_disabled()) {     // [GRAPH-DEBUG]
+      if (cache_hit && !fused_attn_graph_debug::cache_disabled()) {      // [GRAPH-DEBUG]
         auto graph = it->second;
         return graph;
       }
@@ -197,9 +197,8 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
           scale_o = mha_graph->tensor(1.0f);
         }
       } else if (is_mxfp8) {
-        NVTE_QKV_Format q_scale_inv_format = (qkv_scale_inv_format != NVTE_QKV_Format_NOT_SET)
-                                                 ? qkv_scale_inv_format
-                                                 : cfg.q_format;
+        NVTE_QKV_Format q_scale_inv_format =
+            (qkv_scale_inv_format != NVTE_QKV_Format_NOT_SET) ? qkv_scale_inv_format : cfg.q_format;
         NVTE_QKV_Format kv_scale_inv_format = (qkv_scale_inv_format != NVTE_QKV_Format_NOT_SET)
                                                   ? qkv_scale_inv_format
                                                   : cfg.kv_format;
@@ -618,9 +617,9 @@ void fused_attn_fp8_bwd_impl(
     auto get_graph = [&](CacheType& cache, const FusedAttnConfig& descriptor) -> graph_and_tensors {
       // if hit, return
       auto it = cache.find(descriptor);
-      bool cache_hit = (it != cache.end());                            // [GRAPH-DEBUG]
+      bool cache_hit = (it != cache.end());                              // [GRAPH-DEBUG]
       fused_attn_graph_debug::note_cache_lookup("bwd", cache_hit, cfg);  // [GRAPH-DEBUG]
-      if (cache_hit && !fused_attn_graph_debug::cache_disabled()) {     // [GRAPH-DEBUG]
+      if (cache_hit && !fused_attn_graph_debug::cache_disabled()) {      // [GRAPH-DEBUG]
         auto graph = it->second;
         return graph;
       }

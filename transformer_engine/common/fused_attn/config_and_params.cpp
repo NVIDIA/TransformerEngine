@@ -52,8 +52,9 @@ void FusedAttnConfig::derive() {
                (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
   is_causal = (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK) ||
               (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK);
-  is_causal_bottom_right = (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK) ||
-                    (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
+  is_causal_bottom_right =
+      (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK) ||
+      (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
 
   // bucket the THD (ragged) batch and token counts
   const size_t tokens_q = num_tokens_q != 0 ? num_tokens_q : static_cast<size_t>(b * sq);
@@ -104,8 +105,8 @@ FusedAttnConfig FusedAttnConfig::make_cache_key() const {
   const bool has_window = cache_cfg.window_size_left != -1 || cache_cfg.window_size_right != -1;
   if (!cache_cfg.is_causal && !cache_cfg.is_causal_bottom_right && !has_window) {
     cache_cfg.bottom_right_diagonal = false;
-  } else if (cache_cfg.is_causal_bottom_right && cache_cfg.max_seqlen_q == cache_cfg.max_seqlen_kv &&
-             !cache_cfg.is_padding) {
+  } else if (cache_cfg.is_causal_bottom_right &&
+             cache_cfg.max_seqlen_q == cache_cfg.max_seqlen_kv && !cache_cfg.is_padding) {
     // square bottom-right causal collapses to top-left causal (mirrors the impl).
     cache_cfg.bottom_right_diagonal = false;
   }

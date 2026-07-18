@@ -105,23 +105,24 @@ inline bool enabled() {
 }
 
 inline void dump(const char *event) {
-  std::fprintf(stderr,
-               "[GRAPH-DEBUG] %-10s | tid=%u | fwd built=%llu exec=%llu | bwd built=%llu exec=%llu\n",
-               event, thread_seq_id(), static_cast<unsigned long long>(fwd_built().load()),
-               static_cast<unsigned long long>(fwd_exec().load()),
-               static_cast<unsigned long long>(bwd_built().load()),
-               static_cast<unsigned long long>(bwd_exec().load()));
+  std::fprintf(
+      stderr,
+      "[GRAPH-DEBUG] %-10s | tid=%u | fwd built=%llu exec=%llu | bwd built=%llu exec=%llu\n", event,
+      thread_seq_id(), static_cast<unsigned long long>(fwd_built().load()),
+      static_cast<unsigned long long>(fwd_exec().load()),
+      static_cast<unsigned long long>(bwd_built().load()),
+      static_cast<unsigned long long>(bwd_exec().load()));
   std::fflush(stderr);
 }
 
 inline void dump_thd_summary() {
-  std::fprintf(
-      stderr,
-      "[GRAPH-DEBUG] THD-PATH   | legacy lookups=%llu builds=%llu | direct lookups=%llu builds=%llu\n",
-      static_cast<unsigned long long>(thd_legacy_lookup().load()),
-      static_cast<unsigned long long>(thd_legacy_build().load()),
-      static_cast<unsigned long long>(thd_direct_lookup().load()),
-      static_cast<unsigned long long>(thd_direct_build().load()));
+  std::fprintf(stderr,
+               "[GRAPH-DEBUG] THD-PATH   | legacy lookups=%llu builds=%llu | direct lookups=%llu "
+               "builds=%llu\n",
+               static_cast<unsigned long long>(thd_legacy_lookup().load()),
+               static_cast<unsigned long long>(thd_legacy_build().load()),
+               static_cast<unsigned long long>(thd_direct_lookup().load()),
+               static_cast<unsigned long long>(thd_direct_build().load()));
   std::fflush(stderr);
 }
 
@@ -182,32 +183,32 @@ inline void note_cache_lookup(const char *pass, bool hit, const FusedAttnConfig 
   register_summary_once();
   std::fprintf(
       stderr,
-      "[GRAPH-DEBUG] %-3s %-4s%s | tid=%u | train=%d det=%d cg=%d maxlogit=%d fwd=%d mask=%lld bias=%lld "
+      "[GRAPH-DEBUG] %-3s %-4s%s | tid=%u | train=%d det=%d cg=%d maxlogit=%d fwd=%d mask=%lld "
+      "bias=%lld "
       "wl=%lld wr=%lld brd=%d softmax=%lld scale_mode=%lld dropout=%g attn_scale=%g "
       "qkv_dt=%lld o_dt=%lld do_dt=%lld dqkv_dt=%lld qkv_lay=%lld o_fmt=%lld do_fmt=%lld "
       "dqkv_lay=%lld qkv_sif=%lld do_sif=%lld b=%lld h=%lld hg=%lld dqk=%lld dv=%lld sq=%lld "
       "skv=%lld tq=%lld tkv=%lld bb=%lld btq=%lld btkv=%lld npk=%lld npv=%lld psk=%lld psv=%lld "
       "mppk=%lld mppv=%lld bias_b=%lld bias_h=%lld bias_sq=%lld bias_skv=%lld\n",
-      pass, hit ? "HIT" : "MISS",
-      (hit && cache_disabled()) ? " [cache-disabled->rebuild]" : "", thread_seq_id(),
-      static_cast<int>(c.is_training),
-      static_cast<int>(c.deterministic), static_cast<int>(c.cuda_graph),
-      static_cast<int>(c.return_max_logit), static_cast<int>(c.is_forward),
-      static_cast<long long>(c.attn_mask_type), static_cast<long long>(c.bias_type),
-      static_cast<long long>(c.window_size_left), static_cast<long long>(c.window_size_right),
-      static_cast<int>(c.bottom_right_diagonal), static_cast<long long>(c.softmax_type),
-      static_cast<long long>(c.scaling_mode), static_cast<double>(c.dropout),
-      static_cast<double>(c.attn_scale), static_cast<long long>(c.qkv_dtype),
-      static_cast<long long>(c.o_dtype), static_cast<long long>(c.do_dtype),
-      static_cast<long long>(c.dqkv_dtype), static_cast<long long>(c.qkv_layout),
-      static_cast<long long>(c.o_format), static_cast<long long>(c.do_format),
-      static_cast<long long>(c.dqkv_layout), static_cast<long long>(c.qkv_scale_inv_format),
-      static_cast<long long>(c.do_scale_inv_format), static_cast<long long>(c.batch_size),
-      static_cast<long long>(c.num_attn_heads), static_cast<long long>(c.num_gqa_groups),
-      static_cast<long long>(c.head_dim_qk), static_cast<long long>(c.head_dim_v),
-      static_cast<long long>(c.max_seqlen_q), static_cast<long long>(c.max_seqlen_kv),
-      static_cast<long long>(c.num_tokens_q), static_cast<long long>(c.num_tokens_kv),
-      static_cast<long long>(c.bucketed_batch_size), static_cast<long long>(c.bucketed_num_tokens_q),
+      pass, hit ? "HIT" : "MISS", (hit && cache_disabled()) ? " [cache-disabled->rebuild]" : "",
+      thread_seq_id(), static_cast<int>(c.is_training), static_cast<int>(c.deterministic),
+      static_cast<int>(c.cuda_graph), static_cast<int>(c.return_max_logit),
+      static_cast<int>(c.is_forward), static_cast<long long>(c.attn_mask_type),
+      static_cast<long long>(c.bias_type), static_cast<long long>(c.window_size_left),
+      static_cast<long long>(c.window_size_right), static_cast<int>(c.bottom_right_diagonal),
+      static_cast<long long>(c.softmax_type), static_cast<long long>(c.scaling_mode),
+      static_cast<double>(c.dropout), static_cast<double>(c.attn_scale),
+      static_cast<long long>(c.qkv_dtype), static_cast<long long>(c.o_dtype),
+      static_cast<long long>(c.do_dtype), static_cast<long long>(c.dqkv_dtype),
+      static_cast<long long>(c.qkv_layout), static_cast<long long>(c.o_format),
+      static_cast<long long>(c.do_format), static_cast<long long>(c.dqkv_layout),
+      static_cast<long long>(c.qkv_scale_inv_format), static_cast<long long>(c.do_scale_inv_format),
+      static_cast<long long>(c.batch_size), static_cast<long long>(c.num_attn_heads),
+      static_cast<long long>(c.num_gqa_groups), static_cast<long long>(c.head_dim_qk),
+      static_cast<long long>(c.head_dim_v), static_cast<long long>(c.max_seqlen_q),
+      static_cast<long long>(c.max_seqlen_kv), static_cast<long long>(c.num_tokens_q),
+      static_cast<long long>(c.num_tokens_kv), static_cast<long long>(c.bucketed_batch_size),
+      static_cast<long long>(c.bucketed_num_tokens_q),
       static_cast<long long>(c.bucketed_num_tokens_kv), static_cast<long long>(c.num_pages_k),
       static_cast<long long>(c.num_pages_v), static_cast<long long>(c.page_size_k),
       static_cast<long long>(c.page_size_v), static_cast<long long>(c.max_pages_per_seq_k),

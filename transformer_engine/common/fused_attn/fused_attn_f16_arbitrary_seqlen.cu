@@ -188,15 +188,15 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     auto get_graph = [&](CacheType &cache, const FusedAttnConfig &descriptor) -> graph_and_tensors {
       // if hit, return
       auto it = cache.find(descriptor);
-      bool cache_hit = (it != cache.end());                            // [GRAPH-DEBUG]
-      fused_attn_graph_debug::note_cache_lookup("fwd", cache_hit, cfg);  // [GRAPH-DEBUG]
-      if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= 90600 &&      // [GRAPH-DEBUG]
-          sm_arch_ != 120) {                                                     // [GRAPH-DEBUG]
-        fused_attn_graph_debug::note_thd_lookup(                                 // [GRAPH-DEBUG]
+      bool cache_hit = (it != cache.end());                                   // [GRAPH-DEBUG]
+      fused_attn_graph_debug::note_cache_lookup("fwd", cache_hit, cfg);       // [GRAPH-DEBUG]
+      if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= 90600 &&  // [GRAPH-DEBUG]
+          sm_arch_ != 120) {                                                  // [GRAPH-DEBUG]
+        fused_attn_graph_debug::note_thd_lookup(                              // [GRAPH-DEBUG]
             "fwd", cache_hit, !cache_hit || fused_attn_graph_debug::cache_disabled(),
-            /*legacy=*/!use_cu_seqlens_directly);                                // [GRAPH-DEBUG]
-      }                                                                          // [GRAPH-DEBUG]
-      if (cache_hit && !fused_attn_graph_debug::cache_disabled()) {     // [GRAPH-DEBUG]
+            /*legacy=*/!use_cu_seqlens_directly);  // [GRAPH-DEBUG]
+      }  // [GRAPH-DEBUG]
+      if (cache_hit && !fused_attn_graph_debug::cache_disabled()) {  // [GRAPH-DEBUG]
         auto graph = it->second;
         return graph;
       }
@@ -737,16 +737,16 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
     auto get_graph = [&](CacheType &cache, const FusedAttnConfig &descriptor) -> graph_and_tensors {
       // if hit, return
       auto it = cache.find(descriptor);
-      bool cache_hit = (it != cache.end());                            // [GRAPH-DEBUG]
-      fused_attn_graph_debug::note_cache_lookup("bwd", cache_hit, cfg);  // [GRAPH-DEBUG]
-      if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= 90600 &&      // [GRAPH-DEBUG]
-          sm_arch_ != 120) {                                                     // [GRAPH-DEBUG]
+      bool cache_hit = (it != cache.end());                                   // [GRAPH-DEBUG]
+      fused_attn_graph_debug::note_cache_lookup("bwd", cache_hit, cfg);       // [GRAPH-DEBUG]
+      if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= 90600 &&  // [GRAPH-DEBUG]
+          sm_arch_ != 120) {                                                  // [GRAPH-DEBUG]
         // The backward impl has no cu_seqlens-directly path; it always buckets the batch.
-        fused_attn_graph_debug::note_thd_lookup(                                 // [GRAPH-DEBUG]
+        fused_attn_graph_debug::note_thd_lookup(  // [GRAPH-DEBUG]
             "bwd", cache_hit, !cache_hit || fused_attn_graph_debug::cache_disabled(),
-            /*legacy=*/true);                                                    // [GRAPH-DEBUG]
-      }                                                                          // [GRAPH-DEBUG]
-      if (cache_hit && !fused_attn_graph_debug::cache_disabled()) {     // [GRAPH-DEBUG]
+            /*legacy=*/true);  // [GRAPH-DEBUG]
+      }  // [GRAPH-DEBUG]
+      if (cache_hit && !fused_attn_graph_debug::cache_disabled()) {  // [GRAPH-DEBUG]
         auto graph = it->second;
         return graph;
       }

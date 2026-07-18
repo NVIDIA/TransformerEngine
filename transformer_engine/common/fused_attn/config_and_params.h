@@ -151,23 +151,22 @@ struct FusedAttnConfig {
                     bias_type, window_size_left, window_size_right, bottom_right_diagonal,
                     softmax_type, scaling_mode, dropout, attn_scale, qkv_dtype, o_dtype, do_dtype,
                     dqkv_dtype, qkv_layout, o_format, do_format, dqkv_layout, qkv_scale_inv_format,
-                    do_scale_inv_format, batch_size, num_attn_heads, num_gqa_groups,
-                    head_dim_qk, head_dim_v, max_seqlen_q, max_seqlen_kv, num_tokens_q,
-                    num_tokens_kv, num_pages_k, num_pages_v, page_size_k, page_size_v,
-                    max_pages_per_seq_k, max_pages_per_seq_v, bias_batch_size, bias_num_heads,
-                    bias_seqlen_q, bias_seqlen_kv) <
+                    do_scale_inv_format, batch_size, num_attn_heads, num_gqa_groups, head_dim_qk,
+                    head_dim_v, max_seqlen_q, max_seqlen_kv, num_tokens_q, num_tokens_kv,
+                    num_pages_k, num_pages_v, page_size_k, page_size_v, max_pages_per_seq_k,
+                    max_pages_per_seq_v, bias_batch_size, bias_num_heads, bias_seqlen_q,
+                    bias_seqlen_kv) <
            std::tie(rhs.is_training, rhs.deterministic, rhs.cuda_graph, rhs.return_max_logit,
                     rhs.attn_mask_type, rhs.bias_type, rhs.window_size_left, rhs.window_size_right,
                     rhs.bottom_right_diagonal, rhs.softmax_type, rhs.scaling_mode, rhs.dropout,
                     rhs.attn_scale, rhs.qkv_dtype, rhs.o_dtype, rhs.do_dtype, rhs.dqkv_dtype,
                     rhs.qkv_layout, rhs.o_format, rhs.do_format, rhs.dqkv_layout,
                     rhs.qkv_scale_inv_format, rhs.do_scale_inv_format, rhs.batch_size,
-                    rhs.num_attn_heads,
-                    rhs.num_gqa_groups, rhs.head_dim_qk, rhs.head_dim_v, rhs.max_seqlen_q,
-                    rhs.max_seqlen_kv, rhs.num_tokens_q, rhs.num_tokens_kv, rhs.num_pages_k,
-                    rhs.num_pages_v, rhs.page_size_k, rhs.page_size_v, rhs.max_pages_per_seq_k,
-                    rhs.max_pages_per_seq_v, rhs.bias_batch_size, rhs.bias_num_heads,
-                    rhs.bias_seqlen_q, rhs.bias_seqlen_kv);
+                    rhs.num_attn_heads, rhs.num_gqa_groups, rhs.head_dim_qk, rhs.head_dim_v,
+                    rhs.max_seqlen_q, rhs.max_seqlen_kv, rhs.num_tokens_q, rhs.num_tokens_kv,
+                    rhs.num_pages_k, rhs.num_pages_v, rhs.page_size_k, rhs.page_size_v,
+                    rhs.max_pages_per_seq_k, rhs.max_pages_per_seq_v, rhs.bias_batch_size,
+                    rhs.bias_num_heads, rhs.bias_seqlen_q, rhs.bias_seqlen_kv);
   }
 
   // Derive fields such as bucketed batch_size or num_tokens for THD, based on input fields
