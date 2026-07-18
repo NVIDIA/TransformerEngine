@@ -245,7 +245,7 @@ FusedAttnConfig FusedAttnFwdParams::make_config() const {
   cfg.num_tokens_kv = t_kv;
 
   if ((params.bias_type != NVTE_NO_BIAS) && (params.bias_type != NVTE_ALIBI) &&
-      input_Bias->data.dptr != nullptr && input_Bias->data.shape.size() >= 4) {
+      input_Bias->data.shape.size() >= 4) {
     cfg.bias_batch_size = input_Bias->data.shape[0];
     cfg.bias_num_heads = input_Bias->data.shape[1];
     cfg.bias_seqlen_q = input_Bias->data.shape[2];

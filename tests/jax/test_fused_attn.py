@@ -520,6 +520,18 @@ class FusedAttnRunner:
                 "is either BSHD_BSHD_BSHD or THD_THD_THD"
             )
 
+        bias_batch = bias_heads = bias_seqlen_q = bias_seqlen_kv = None
+        if self.attn_bias_type == AttnBiasType.POST_SCALE_BIAS:
+            if self.bias_shape == BiasShape._1HSS:
+                bias_batch, bias_heads = 1, self.num_heads_q
+            elif self.bias_shape == BiasShape._B1SS:
+                bias_batch, bias_heads = self.batch_size, 1
+            elif self.bias_shape == BiasShape._BHSS:
+                bias_batch, bias_heads = self.batch_size, self.num_heads_q
+            elif self.bias_shape == BiasShape._11SS:
+                bias_batch, bias_heads = 1, 1
+            bias_seqlen_q, bias_seqlen_kv = self.max_seqlen_q, self.max_seqlen_kv
+
         self.backend, message = FusedAttnHelper(
             self.is_training,
             self.batch_size,
@@ -538,6 +550,10 @@ class FusedAttnRunner:
             self.head_dim_v,
             (-1, -1) if self.window_size is None else self.window_size,
             self.attn_mask_type.is_bottom_right(),
+            bias_batch=bias_batch,
+            bias_heads=bias_heads,
+            bias_seqlen_q=bias_seqlen_q,
+            bias_seqlen_kv=bias_seqlen_kv,
         ).get_fused_attn_backend()
         if self.backend != NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
             pytest.skip(message)
