@@ -10,7 +10,6 @@
 
 #include "../common.h"
 #include "../util/logging.h"
-#include "../util/system.h"
 #include "../utils.cuh"
 
 namespace transformer_engine {
@@ -326,11 +325,9 @@ __global__ void fused_rope_thd_linear_grid_backward_kernel(
 }
 
 // Host-side dispatcher. Selects the THD linear-grid path when it would
-// eliminate a meaningful number of dead blocks. The environment variable
-// NVTE_FUSED_ROPE_THD_LINEAR_GRID overrides the heuristic for testing and
-// benchmarking: "0" forces the old kernel, "1" forces the new one. Read on
-// every call so tests can toggle it inside a single process.
+// eliminate a meaningful number of dead blocks.
 constexpr size_t kTHDLinearGridOverlaunchThreshold = 2;
+constexpr size_t kTHDLinearGridMinWastedBlocks = 65536;
 
 inline bool use_fused_rope_thd_linear_grid_launch(const NVTE_QKV_Format qkv_format,
                                                   const size_t legacy_grid_blocks,
@@ -339,17 +336,17 @@ inline bool use_fused_rope_thd_linear_grid_launch(const NVTE_QKV_Format qkv_form
   if (qkv_format != NVTE_QKV_Format::NVTE_THD) return false;
   if (linear_grid_blocks == 0) return false;
 
-  const int env_override = transformer_engine::getenv<int>("NVTE_FUSED_ROPE_THD_LINEAR_GRID", -1);
-  if (env_override == 0) return false;
-  if (env_override == 1) return true;
-
   // Heuristic: use the linear-grid path when the original THD grid,
-  // `dim3(s, b)`, would issue enough extra blocks to amortize one sequence
-  // lookup per useful token. The CP factor keeps the gate conservative because
-  // rows in the input shrink with context parallelism while the original
-  // `s * b` launch space does not.
-  return legacy_grid_blocks >
-         kTHDLinearGridOverlaunchThreshold * static_cast<size_t>(cp_size) * linear_grid_blocks;
+  // `dim3(s, b)`, has both enough relative and absolute block wastage to
+  // amortize one sequence lookup per useful token. The CP factor keeps the
+  // ratio gate conservative because rows in the input shrink with context
+  // parallelism while the original `s * b` launch space does not.
+  const bool meets_ratio =
+      legacy_grid_blocks >
+      kTHDLinearGridOverlaunchThreshold * static_cast<size_t>(cp_size) * linear_grid_blocks;
+  const size_t wasted_blocks =
+      legacy_grid_blocks > linear_grid_blocks ? legacy_grid_blocks - linear_grid_blocks : 0;
+  return meets_ratio && wasted_blocks >= kTHDLinearGridMinWastedBlocks;
 }
 
 template <typename scalar_t>

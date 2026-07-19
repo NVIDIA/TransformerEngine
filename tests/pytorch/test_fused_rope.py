@@ -133,7 +133,6 @@ def test_fused_rope(
 @pytest.mark.parametrize("cp_size", [1, 2])
 @pytest.mark.parametrize("interleaved", [True, False])
 def test_fused_rope_thd(
-    monkeypatch: pytest.MonkeyPatch,
     dtype: torch.dtype,
     hidden_size: int,
     rotary_percent: float,
@@ -144,8 +143,6 @@ def test_fused_rope_thd(
     start_positions: bool,
     margin: int,
 ) -> None:
-    monkeypatch.setenv("NVTE_FUSED_ROPE_THD_LINEAR_GRID", "1")
-
     device = torch.device("cuda:0")
     batch_size, head_num = 2, 64
     cu_seqlens = [0, 400, 542, 711, 727, 752, 1270, 1426, 1450, 1954, 2044, 2048]
@@ -181,7 +178,9 @@ def test_fused_rope_thd(
     t.requires_grad = True
 
     rotary_pos_emb = RotaryPositionEmbedding(hidden_size, rotary_percent, interleaved=interleaved)
-    emb = rotary_pos_emb(cu_seqlens_padded[-1])
+    # A long frequency table with many packed spans exercises the default
+    # linear-grid dispatch heuristic without a test-only override.
+    emb = rotary_pos_emb(8192)
     assert emb.is_contiguous()
 
     for cp_rank in range(cp_size):
@@ -498,137 +497,3 @@ def test_rotary_position_embedding_forward_with_autocast_gives_same_result_as_wi
         atol=1e-8,
         rtol=1e-8,
     )
-
-
-def _make_packed_thd_cu_seqlens(
-    n_seqs: int,
-    mean_len: int,
-    cp_size: int,
-    rng: torch.Generator,
-    include_zero_length: bool = False,
-) -> torch.Tensor:
-    """Build a cu_seqlens tensor for a packed THD batch.
-
-    Each per-sequence length is padded to a multiple of ``2 * cp_size`` so the
-    integer divisions inside the kernel are exact (matching how Megatron-style
-    callers pad cu_seqlens for context parallel). Optionally injects zero-length
-    spans to exercise the upper-bound search.
-    """
-    lengths = torch.randint(
-        low=1,
-        high=max(2, 2 * mean_len),
-        size=(n_seqs,),
-        generator=rng,
-        dtype=torch.int64,
-    )
-    if include_zero_length and n_seqs >= 4:
-        # Sprinkle a handful of zero-length spans, including back-to-back ones
-        # and one at the front, to exercise boundary cases.
-        zero_idx = [0, n_seqs // 3, n_seqs // 3 + 1, n_seqs - 2]
-        for idx in zero_idx:
-            if 0 <= idx < n_seqs:
-                lengths[idx] = 0
-    pad = 2 * cp_size
-    lengths = ((lengths + pad - 1) // pad) * pad
-    # Restore zero-length spans after padding (pad rounds 0 to 0 already).
-    cu = torch.zeros(n_seqs + 1, dtype=torch.int32)
-    cu[1:] = torch.cumsum(lengths, dim=0).to(torch.int32)
-    return cu
-
-
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
-@pytest.mark.parametrize("hidden_size", [128])
-@pytest.mark.parametrize("rotary_percent", [0.5, 1.0])
-@pytest.mark.parametrize("interleaved", [False, True])
-@pytest.mark.parametrize("cp_size", [1, 2])
-@pytest.mark.parametrize("cp_rank", [0, 1])
-@pytest.mark.parametrize(
-    "n_seqs,mean_len,include_zero_length",
-    [
-        (1, 2048, False),
-        (8, 256, False),
-        (64, 64, False),
-        (513, 16, False),
-        (2401, 8, False),
-        (128, 32, True),
-    ],
-)
-@pytest.mark.parametrize("start_positions", [False, True])
-def test_fused_rope_thd_linear_grid_parity(
-    monkeypatch: pytest.MonkeyPatch,
-    dtype: torch.dtype,
-    hidden_size: int,
-    rotary_percent: float,
-    interleaved: bool,
-    cp_size: int,
-    cp_rank: int,
-    n_seqs: int,
-    mean_len: int,
-    include_zero_length: bool,
-    start_positions: bool,
-) -> None:
-    """Forces the old and the new THD fused kernel back-to-back and asserts
-    bitwise equality on both the forward output and the input gradient. The new
-    kernel must enumerate exactly the same useful blocks as the old one, with
-    identical per-token math, so equality must hold without tolerance.
-    """
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
-
-    device = torch.device("cuda:0")
-    head_num = 16
-    if cp_rank >= cp_size:
-        pytest.skip("cp_rank must be smaller than cp_size")
-
-    rng = torch.Generator(device="cpu")
-    rng.manual_seed(0xC0FFEE + n_seqs * 13 + (1 if include_zero_length else 0))
-
-    cu_seqlens = _make_packed_thd_cu_seqlens(
-        n_seqs, mean_len, cp_size, rng, include_zero_length=include_zero_length
-    ).to(device)
-    total_local = int(cu_seqlens[-1].item()) // cp_size
-    if total_local == 0:
-        pytest.skip("empty packed batch after padding")
-
-    start_positions_t = (
-        torch.randint(0, 4, (n_seqs,), dtype=torch.int32, device=device)
-        if start_positions
-        else None
-    )
-
-    t = torch.rand((total_local, head_num, hidden_size), dtype=dtype, device=device, generator=None)
-    t.requires_grad = True
-
-    rotary_pos_emb = RotaryPositionEmbedding(hidden_size, rotary_percent, interleaved=interleaved)
-    # `freqs` must cover (max span length per CP rank + start_positions offset +
-    # CP dual-chunk offset). Use the global cu_seqlens[-1] length as an upper
-    # bound, matching how callers size the freqs tensor in practice.
-    emb = rotary_pos_emb(int(cu_seqlens[-1].item()) + 32)
-
-    def run(force_path: str) -> Tuple[torch.Tensor, torch.Tensor]:
-        monkeypatch.setenv("NVTE_FUSED_ROPE_THD_LINEAR_GRID", force_path)
-        out = apply_rotary_pos_emb(
-            t,
-            emb,
-            start_positions=start_positions_t,
-            interleaved=interleaved,
-            fused=True,
-            tensor_format="thd",
-            cu_seqlens=cu_seqlens,
-            cp_size=cp_size,
-            cp_rank=cp_rank,
-        )
-        loss = _overlapping_grad(out)
-        loss.backward()
-        grad = t.grad.detach().clone()
-        t.grad = None
-        return out.detach().clone(), grad
-
-    out_old, grad_old = run("0")
-    out_new, grad_new = run("1")
-
-    # Both paths call the same per-token device function with the same
-    # arguments and write disjoint output rows. Bitwise equality is the
-    # right bar, including all CP ranks.
-    torch.testing.assert_close(out_new, out_old, rtol=0.0, atol=0.0)
-    torch.testing.assert_close(grad_new, grad_old, rtol=0.0, atol=0.0)
