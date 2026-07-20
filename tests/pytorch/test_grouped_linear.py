@@ -920,6 +920,27 @@ def test_grouped_gemm_cutlass_empty_groups(layout, monkeypatch):
         torch.testing.assert_close(tensor, torch.zeros_like(tensor), rtol=0, atol=0)
 
 
+# =============================================================================
+# NVFP4 single-launch CUTLASS grouped GEMM (Blackwell / SM100). Opt-in via
+# NVTE_NVFP4_CUTLASS_GROUPED_GEMM inside the graph-safe grouped-tensor path
+# (general_grouped_gemm_for_grouped_tensor). Backend parity and graph-safety are
+# covered by the test_nvfp4_grouped_tensor_cutlass_* tests at the end of this
+# file; the constants and _diff helper below are shared with them.
+# =============================================================================
+_NVFP4_CUTLASS_ENV = "NVTE_NVFP4_CUTLASS_GROUPED_GEMM"
+nvfp4_cutlass_grouped_available = nvfp4_available and torch.cuda.get_device_capability()[0] == 10
+
+
+def _diff(ref: torch.Tensor, test: torch.Tensor):
+    """(max_abs, global_inf_norm_rel, ref_inf). The global rel (max_abs / ||ref||)
+    is robust to the near-zero output elements that make per-element rel explode."""
+    ref = ref.float()
+    test = test.float()
+    max_abs = (ref - test).abs().max().item()
+    ref_inf = ref.abs().max().item()
+    return max_abs, max_abs / max(ref_inf, 1e-6), ref_inf
+
+
 def _pack_grouped_tensor(grouped_tensor: GroupedTensor, tensors: List[torch.Tensor]) -> None:
     data = grouped_tensor.rowwise_data
     if data is None:
@@ -2153,3 +2174,140 @@ def test_swizzle_scales_and_pack_ptrs_for_discrete_weights(
         swizzled_scales_buffer,
         expected_swizzled_scales_buffer,
     )
+
+
+# =============================================================================
+# NVFP4 single-launch CUTLASS grouped GEMM through the graph-safe grouped-tensor
+# path. Both backends run through general_grouped_gemm_for_grouped_tensor;
+# NVTE_NVFP4_CUTLASS_GROUPED_GEMM only flips which single-launch kernel it
+# dispatches to (cuBLAS baseline vs CUTLASS). NVTE_GROUPED_LINEAR_USE_FUSED_
+# GROUPED_GEMM routes GroupedLinear onto that path. SM100-only.
+# =============================================================================
+def _nvfp4_grouped_m_splits(num_gemms, dist):
+    """128-aligned per-group token counts (per-tensor NVFP4 CUTLASS is %128)."""
+    if dist == "balanced":
+        return [256] * num_gemms
+    return [128 * ((i % 3) + 1) for i in range(num_gemms)]  # unequal, 128-aligned
+
+
+@pytest.mark.skipif(
+    not nvfp4_cutlass_grouped_available,
+    reason="NVFP4 CUTLASS grouped GEMM requires Blackwell (SM100) + NVFP4",
+)
+@pytest.mark.parametrize("num_gemms", [3, 8])
+@pytest.mark.parametrize("dist", ["balanced", "imbalanced"])
+@pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
+def test_nvfp4_grouped_tensor_cutlass_matches_cublas(
+    num_gemms, dist, fuse_wgrad_accumulation, monkeypatch
+):
+    """End-to-end GroupedLinear fwd+bwd on the grouped-tensor path: CUTLASS
+    backend (env=1) vs cuBLAS single-launch (env=0). Identical weights / x / dy
+    (RNG reset before each run) feed both, so any divergence in output, dgrad or
+    wgrad is a backend bug. fuse_wgrad_accumulation=True (fp32 main_grad) is what
+    routes wgrad through CUTLASS, mirroring Megatron training."""
+    monkeypatch.setenv(_FUSED_GROUPED_GEMM_ENV, "1")
+    # Default recipe (RHT on): the graph-safe grouped NVFP4 quant kernel is only
+    # implemented for the RHT path, so disable_rht=True is not supported here.
+    nvfp4_recipe = recipe.NVFP4BlockScaling()
+    K, N = 512, 512  # all dims %128 -> path eligible
+    m_splits = _nvfp4_grouped_m_splits(num_gemms, dist)
+    total_m = sum(m_splits)
+    m_splits_t = torch.tensor(m_splits, dtype=torch.int64, device="cuda")
+
+    torch.manual_seed(0)
+    model = GroupedLinear(
+        num_gemms,
+        K,
+        N,
+        bias=False,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+        fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+    ).eval()
+    x = torch.randn(total_m, K, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+    dy = torch.randn(total_m, N, dtype=torch.bfloat16, device="cuda")
+    init_mg = (
+        [torch.randn(N, K, dtype=torch.float32, device="cuda") for _ in range(num_gemms)]
+        if fuse_wgrad_accumulation
+        else None
+    )
+
+    def run(cutlass: bool):
+        monkeypatch.setenv(_NVFP4_CUTLASS_ENV, "1" if cutlass else "0")
+        reset_rng_states()  # identical quantization randoms in both runs
+        FP8GlobalStateManager.reset()
+        model.zero_grad(set_to_none=True)
+        if x.grad is not None:
+            x.grad = None
+        if fuse_wgrad_accumulation:
+            for i in range(num_gemms):
+                getattr(model, f"weight{i}").main_grad = init_mg[i].clone()
+        with autocast(enabled=True, recipe=nvfp4_recipe):
+            out = model(x, m_splits_t)
+        out.backward(dy)
+        snap = {"out": out.detach().float().clone(), "dgrad": x.grad.detach().float().clone()}
+        for i in range(num_gemms):
+            w = getattr(model, f"weight{i}")
+            g = w.main_grad if fuse_wgrad_accumulation else w.grad
+            snap[f"wgrad{i}"] = g.detach().float().clone()
+        return snap
+
+    ref = run(cutlass=False)
+    test = run(cutlass=True)
+    for key in ref:
+        abs_d, rel_d, _ = _diff(ref[key], test[key])
+        assert (
+            abs_d <= 1e-2 or rel_d <= 5e-3
+        ), f"{key}: cutlass vs cuBLAS diverged (max_abs={abs_d:.4g}, rel={rel_d:.4g})"
+
+
+@pytest.mark.skipif(
+    not nvfp4_cutlass_grouped_available,
+    reason="NVFP4 CUTLASS grouped GEMM requires Blackwell (SM100) + NVFP4",
+)
+def test_nvfp4_grouped_tensor_cutlass_cuda_graph_safe(monkeypatch):
+    """The CUTLASS backend on the grouped-tensor path is CUDA-graph capturable.
+    Split metadata is passed as a device int64 tensor (no host->device copy to
+    capture) and the captured forward must match eager."""
+    monkeypatch.setenv(_FUSED_GROUPED_GEMM_ENV, "1")
+    monkeypatch.setenv(_NVFP4_CUTLASS_ENV, "1")
+    FP8GlobalStateManager.reset()
+    # Default recipe (RHT on): the graph-safe grouped NVFP4 quant kernel is only
+    # implemented for the RHT path, so disable_rht=True is not supported here.
+    nvfp4_recipe = recipe.NVFP4BlockScaling()
+    num_gemms, K, N = 3, 512, 512
+    m_splits = [256, 128, 384]  # 128-aligned, unequal
+    total_m = sum(m_splits)
+    m_splits_t = torch.tensor(m_splits, dtype=torch.int64, device="cuda")
+
+    torch.manual_seed(0)
+    model = GroupedLinear(
+        num_gemms, K, N, bias=False, params_dtype=torch.bfloat16, device="cuda"
+    ).eval()
+    x = torch.randn(total_m, K, dtype=torch.bfloat16, device="cuda")
+
+    reset_rng_states()
+    with torch.no_grad(), autocast(enabled=True, recipe=nvfp4_recipe):
+        out_eager = model(x, m_splits_t).detach().float().clone()
+    torch.cuda.synchronize()
+
+    # Warmup on a side stream (required before capture).
+    s = torch.cuda.Stream()
+    s.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(s):
+        for _ in range(3):
+            with torch.no_grad(), autocast(enabled=True, recipe=nvfp4_recipe):
+                _ = model(x, m_splits_t)
+    torch.cuda.current_stream().wait_stream(s)
+
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        with torch.no_grad(), autocast(enabled=True, recipe=nvfp4_recipe):
+            out_graph = model(x, m_splits_t)
+    g.replay()
+    torch.cuda.synchronize()
+
+    abs_d, rel_d, _ = _diff(out_eager, out_graph.float())
+    assert (
+        abs_d <= 1e-2 or rel_d <= 5e-3
+    ), f"graph vs eager diverged (max_abs={abs_d:.4g}, rel={rel_d:.4g})"
