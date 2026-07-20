@@ -26,10 +26,7 @@ logger = logging.getLogger("transformer_engine.cutedsl.utils")
 
 @functools.lru_cache(maxsize=None)
 def device_compute_capability() -> tuple:
-    """(major, minor) of CUDA device 0, or (0, 0) if it can't be queried.
-
-    Used to pick per-arch kernel shapes at compile time. Device 0 stands in for
-    the whole node (homogeneous-GPU assumption, same as the CUTE_DSL_ARCH env)."""
+    """(major, minor) of CUDA device 0, or (0, 0) if it can't be queried."""
     from cuda.core import Device  # pylint: disable=no-name-in-module
 
     major_minor = Device().arch  # compute capability as digits, e.g. "120"
