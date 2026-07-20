@@ -2356,7 +2356,7 @@ def get_mxfp8_quantization_function(
     try:
         compiled = compile_cutedsl_function_from_cfg(cfg)
     except Exception as e:  # pylint: disable=broad-exception-caught
-        logger.warning(
+        logger.error(
             "CuTeDSL MXFP8 kernel compilation failed, falling back to the CUDA C++ kernel: %s",
             e,
         )
