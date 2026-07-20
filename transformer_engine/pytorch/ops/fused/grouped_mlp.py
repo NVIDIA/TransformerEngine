@@ -23,7 +23,7 @@ from ...module.base import _2X_ACC_WGRAD
 from ...quantization import Recipe
 from ...tensor import NVFP4Quantizer, NVFP4Tensor, NVFP4TensorStorage, Quantizer
 from ...tensor.grouped_tensor import GroupedTensor
-from ...tensor.mxfp8_tensor import MXFP8Quantizer
+from ...tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
 from ...tensor.storage.grouped_tensor_storage import GroupedTensorStorage
 from ...triton.grouped_dbias_dscales import compute_grouped_dbias_dscales
 from ...utils import (
@@ -95,15 +95,15 @@ def _nvidia_cudnn_frontend_supports_wgrad() -> bool:
     return _cudnn_frontend_version_supported()
 
 
-def _wrap_single_nvfp4_as_grouped(
+def _wrap_single_quantized_as_grouped(
     tensor: torch.Tensor,
-    quantized: NVFP4Tensor | NVFP4TensorStorage,
-    quantizer: NVFP4Quantizer,
+    quantized: MXFP8Tensor | NVFP4Tensor | NVFP4TensorStorage,
+    quantizer: MXFP8Quantizer | NVFP4Quantizer,
     split_sizes: Optional[torch.Tensor],
     *,
     tensor_offsets: Optional[torch.Tensor] = None,
 ) -> GroupedTensor:
-    """Wrap a single NVFP4 tensor in GroupedTensor storage."""
+    """Wrap a single quantized tensor in GroupedTensor storage."""
     with_gemm_swizzled_scales = quantized._with_gemm_swizzled_scales
     if quantizer.optimize_for_gemm:
         tex.swizzle_scales_for_gemm_(quantized)
@@ -113,8 +113,8 @@ def _wrap_single_nvfp4_as_grouped(
     rowwise_scale = quantized._rowwise_scale_inv
     columnwise_data = quantized._columnwise_data
     columnwise_scale = quantized._columnwise_scale_inv
-    amax = quantized._amax_rowwise
-    columnwise_amax = quantized._amax_columnwise
+    amax = getattr(quantized, "_amax_rowwise", None)
+    columnwise_amax = getattr(quantized, "_amax_columnwise", None)
 
     if split_sizes is None:
         split_sizes = torch.full((1,), tensor.shape[0], dtype=torch.int64, device=tensor.device)
@@ -122,19 +122,18 @@ def _wrap_single_nvfp4_as_grouped(
         split_sizes = split_sizes.to(dtype=torch.int64, device=tensor.device)
 
     m_dim = tensor.shape[0]
-    if rowwise_data is not None:
+    if isinstance(quantizer, NVFP4Quantizer) and rowwise_data is not None:
         k_dim = rowwise_data.shape[-1] * 2
-    elif columnwise_data is not None:
+    elif isinstance(quantizer, NVFP4Quantizer) and columnwise_data is not None:
         k_dim = columnwise_data.shape[0]
     else:
         k_dim = tensor.shape[-1]
 
     if tensor_offsets is None:
-        tensor_offsets = torch.cat(
-            [
-                torch.zeros(1, dtype=torch.int64, device=tensor.device),
-                torch.cumsum(split_sizes * k_dim, dim=0),
-            ],
+        tensor_offsets = torch.tensor(
+            [0, m_dim * k_dim],
+            dtype=torch.int64,
+            device=tensor.device,
         )
 
     return GroupedTensor(
@@ -164,7 +163,16 @@ def _group_quantize_for_grouped_mlp(
 ) -> GroupedTensor:
     """Quantize into grouped storage."""
 
-    if num_groups != 1 or not isinstance(quantizer, NVFP4Quantizer):
+    if num_groups != 1:
+        return tex.group_quantize(
+            tensor,
+            quantizer,
+            num_groups,
+            split_sizes,
+            tensor_offsets=tensor_offsets,
+        )
+
+    if not isinstance(quantizer, (MXFP8Quantizer, NVFP4Quantizer)):
         return tex.group_quantize(
             tensor,
             quantizer,
@@ -174,7 +182,7 @@ def _group_quantize_for_grouped_mlp(
         )
 
     quantized = tex.quantize(tensor, quantizer)
-    return _wrap_single_nvfp4_as_grouped(
+    return _wrap_single_quantized_as_grouped(
         tensor,
         quantized,
         quantizer,
@@ -217,7 +225,7 @@ def _group_quantize_with_amax_for_grouped_mlp(
     quantized = tex.nvfp4_quantize_with_amax(
         tensor, quantizer, rowwise_amax.view(-1)[:1], columnwise_amax.view(-1)[:1]
     )
-    return _wrap_single_nvfp4_as_grouped(
+    return _wrap_single_quantized_as_grouped(
         tensor,
         quantized,
         quantizer,
@@ -247,22 +255,29 @@ def _nvfp4_amax(
     return torch.cat([amax.view(-1) for amax in amaxes], dim=0)
 
 
-def _nvfp4_single_tensor_from_grouped(
+def _single_quantized_tensor_from_grouped(
     grouped: GroupedTensor,
-    quantizer: Optional[NVFP4Quantizer] = None,
+    quantizer: Optional[MXFP8Quantizer | NVFP4Quantizer] = None,
     *,
     fp4_dtype: Optional[torch.dtype] = None,
-) -> NVFP4Tensor:
-    """Build a single NVFP4Tensor view over a one-member grouped storage."""
+) -> MXFP8Tensor | NVFP4Tensor:
+    """Build a single quantized tensor view over a one-member grouped storage."""
     if quantizer is None:
         quantizer = grouped.quantizer
-    if not isinstance(quantizer, NVFP4Quantizer):
-        raise TypeError("Expected an NVFP4 GroupedTensor.")
+    if not isinstance(quantizer, (MXFP8Quantizer, NVFP4Quantizer)):
+        raise TypeError("Expected an MXFP8 or NVFP4 GroupedTensor.")
 
     shape = tuple(grouped.logical_shape)
+    if isinstance(quantizer, NVFP4Quantizer):
+        data_shape = quantizer.convert_shape_for_fp4(shape)
+        columnwise_shape = quantizer.convert_shape_for_fp4(quantizer.get_columnwise_shape(shape))
+    else:
+        data_shape = shape
+        columnwise_shape = quantizer.get_columnwise_shape(shape)
+
     rowwise_data = None
     if grouped.rowwise_data is not None:
-        rowwise_data = grouped.rowwise_data.view(quantizer.convert_shape_for_fp4(shape))
+        rowwise_data = grouped.rowwise_data.view(data_shape)
 
     rowwise_scale_inv = None
     if grouped.scale_inv is not None:
@@ -270,15 +285,26 @@ def _nvfp4_single_tensor_from_grouped(
 
     columnwise_data = None
     if grouped.columnwise_data is not None:
-        columnwise_shape = quantizer.get_columnwise_shape(shape)
-        columnwise_data = grouped.columnwise_data.view(
-            quantizer.convert_shape_for_fp4(columnwise_shape)
-        )
+        columnwise_data = grouped.columnwise_data.view(columnwise_shape)
 
     columnwise_scale_inv = None
     if grouped.columnwise_scale_inv is not None:
         columnwise_scale_inv = grouped.columnwise_scale_inv.view(
             quantizer.get_scale_shape(shape, True)
+        )
+
+    if isinstance(quantizer, MXFP8Quantizer):
+        return MXFP8Tensor(
+            shape=shape,
+            dtype=grouped.get_dtype(),
+            rowwise_data=rowwise_data,
+            rowwise_scale_inv=rowwise_scale_inv,
+            columnwise_data=columnwise_data,
+            columnwise_scale_inv=columnwise_scale_inv,
+            fp8_dtype=quantizer.dtype,
+            quantizer=quantizer,
+            requires_grad=False,
+            with_gemm_swizzled_scales=grouped._with_gemm_swizzled_scales,
         )
 
     return NVFP4Tensor(
@@ -335,7 +361,44 @@ def _use_tmem_post_rht_amax() -> bool:
     return os.environ.get("NVTE_CUTEDSL_FUSED_GROUPED_MLP_FC1_GLU_RHT_AMAX_TMEM", "0") == "1"
 
 
-def _nvfp4_single_group_wgrad_gemm(
+def _single_group_split_metadata(
+    num_tokens: int,
+    device: torch.device,
+    *,
+    fc1_in_features: int,
+    fc2_in_features: int,
+    fc2_out_features: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Create split/offset metadata for num_groups=1 without a GPU prefix-sum kernel."""
+    split_sizes = torch.tensor([num_tokens], dtype=torch.int64, device=device)
+    split_points = torch.tensor([num_tokens], dtype=torch.int32, device=device)
+    base_split_offsets = torch.tensor([0, num_tokens], dtype=torch.int64, device=device)
+    fc1_x_tensor_offsets = torch.tensor(
+        [0, num_tokens * fc1_in_features],
+        dtype=torch.int64,
+        device=device,
+    )
+    fc2_x_tensor_offsets = torch.tensor(
+        [0, num_tokens * fc2_in_features],
+        dtype=torch.int64,
+        device=device,
+    )
+    fc2_out_tensor_offsets = torch.tensor(
+        [0, num_tokens * fc2_out_features],
+        dtype=torch.int64,
+        device=device,
+    )
+    return (
+        split_sizes,
+        split_points,
+        base_split_offsets,
+        fc1_x_tensor_offsets,
+        fc2_x_tensor_offsets,
+        fc2_out_tensor_offsets,
+    )
+
+
+def _single_group_wgrad_gemm(
     grouped_x: GroupedTensor,
     grouped_dy: GroupedTensor,
     wgrad_output,
@@ -343,9 +406,9 @@ def _nvfp4_single_group_wgrad_gemm(
     weight_shape: tuple[int, int],
     accumulate: bool,
 ) -> None:
-    """Run one-group NVFP4 wgrad with regular GEMM instead of grouped GEMM."""
-    x_single = _nvfp4_single_tensor_from_grouped(grouped_x)
-    dy_single = _nvfp4_single_tensor_from_grouped(grouped_dy)
+    """Run one-group MXFP8/NVFP4 wgrad with regular GEMM instead of grouped GEMM."""
+    x_single = _single_quantized_tensor_from_grouped(grouped_x)
+    dy_single = _single_quantized_tensor_from_grouped(grouped_dy)
     if isinstance(wgrad_output, GroupedTensor):
         out = wgrad_output.rowwise_data.view(1, *weight_shape)[0]
     else:
@@ -607,11 +670,11 @@ def _compute_grad_params(
             num_groups == 1
             and isinstance(grouped_x, GroupedTensor)
             and isinstance(grouped_dy, GroupedTensor)
-            and isinstance(grouped_x.quantizer, NVFP4Quantizer)
-            and isinstance(grouped_dy.quantizer, NVFP4Quantizer)
+            and isinstance(grouped_x.quantizer, (MXFP8Quantizer, NVFP4Quantizer))
+            and isinstance(grouped_dy.quantizer, grouped_x.quantizer.__class__)
         ):
             gemm_fn = functools.partial(
-                _nvfp4_single_group_wgrad_gemm,
+                _single_group_wgrad_gemm,
                 weight_shape=weight_shape,
                 accumulate=accumulate_into_main_grad,
             )
@@ -868,6 +931,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             self._cudnn_geglu_alpha: float = activation._clamped.alpha
             self._cudnn_glu_clamp_max: float = activation._clamped.limit
             self._cudnn_glu_clamp_min: float = -activation._clamped.limit
+        self._single_group_split_metadata_cache = {}
 
     def fuser_forward(
         self,
@@ -945,20 +1009,48 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             raise ValueError(f"Expected {num_groups} splits, but got {int(split_sizes.numel())}.")
 
         # Prepare split metadata
-        split_sizes, (
-            split_points,
-            base_split_offsets,
-            fc1_x_tensor_offsets,
-            fc2_x_tensor_offsets,
-            fc2_out_tensor_offsets,
-        ) = tex.splits_to_offsets_multi(
-            split_sizes,
-            device,
-            strides=[1, 1, fc1_weight_shape[1], fc2_weight_shape[1], fc2_weight_shape[0]],
-            include_leading_zero=[False, True, True, True, True],
-            dtypes=[torch.int32, torch.int64, torch.int64, torch.int64, torch.int64],
-            bulk_allocate=True,
-        )
+        if num_groups == 1:
+            metadata_key = (
+                device.type,
+                device.index,
+                in_shape[0],
+                fc1_weight_shape[1],
+                fc2_weight_shape[1],
+                fc2_weight_shape[0],
+            )
+            if metadata_key not in self._single_group_split_metadata_cache:
+                self._single_group_split_metadata_cache[metadata_key] = (
+                    _single_group_split_metadata(
+                        in_shape[0],
+                        device,
+                        fc1_in_features=fc1_weight_shape[1],
+                        fc2_in_features=fc2_weight_shape[1],
+                        fc2_out_features=fc2_weight_shape[0],
+                    )
+                )
+            (
+                split_sizes,
+                split_points,
+                base_split_offsets,
+                fc1_x_tensor_offsets,
+                fc2_x_tensor_offsets,
+                fc2_out_tensor_offsets,
+            ) = self._single_group_split_metadata_cache[metadata_key]
+        else:
+            split_sizes, (
+                split_points,
+                base_split_offsets,
+                fc1_x_tensor_offsets,
+                fc2_x_tensor_offsets,
+                fc2_out_tensor_offsets,
+            ) = tex.splits_to_offsets_multi(
+                split_sizes,
+                device,
+                strides=[1, 1, fc1_weight_shape[1], fc2_weight_shape[1], fc2_weight_shape[0]],
+                include_leading_zero=[False, True, True, True, True],
+                dtypes=[torch.int32, torch.int64, torch.int64, torch.int64, torch.int64],
+                bulk_allocate=True,
+            )
 
         # Extract per-row activation probabilities from the middle op.
         scales = basic_op_extra_inputs[1][0]
@@ -1330,7 +1422,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     fc2_w_single = grouped_fc2_weight.split_into_quantized_tensors()[0]
                 else:
                     fc2_w_single = grouped_fc2_weight[0]
-                fc2_x_single = _nvfp4_single_tensor_from_grouped(
+                fc2_x_single = _single_quantized_tensor_from_grouped(
                     grouped_fc2_x,
                     fc2_input_quantizer,
                     fp4_dtype=fc2_w_single._fp4_dtype,
@@ -1999,7 +2091,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                         fc1_w_single = grouped_fc1_weight.split_into_quantized_tensors()[0]
                     else:
                         fc1_w_single = grouped_fc1_weight[0]
-                    fc1_dy_single = _nvfp4_single_tensor_from_grouped(grouped_fc1_dy)
+                    fc1_dy_single = _single_quantized_tensor_from_grouped(grouped_fc1_dy)
                     general_gemm(
                         fc1_w_single,
                         fc1_dy_single,
