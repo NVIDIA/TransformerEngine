@@ -10,6 +10,7 @@
 #include <cudnn_frontend_utils.h>
 
 #include <map>
+#include <mutex>  // [SHARED-CACHE]
 #include <vector>
 
 #include "../common.h"
@@ -182,23 +183,40 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                    std::shared_ptr<fe::graph::Tensor_attributes>>;  // dropout_offset
 
     using CacheType = std::map<FusedAttnConfig, graph_and_tensors>;
-    static thread_local CacheType sdpa_f16_fprop_cache;
+    // [SHARED-CACHE] Process-wide graph cache (was `static thread_local`) so a compiled graph
+    // is reused across threads instead of rebuilt per thread. Safe because cuDNN >= 9.0 allows
+    // concurrent execution of a shared plan and cudnn-frontend >= 1.25.0 has a thread-safe
+    // execute(); the static_asserts below fail the build loudly on an older toolkit.
+    static_assert(CUDNN_VERSION >= 91100,
+                  "[SHARED-CACHE] shared fused-attn graph cache requires cuDNN >= 9.11 "
+                  "(TE minimum supported cuDNN version)");
+    static_assert(CUDNN_FRONTEND_VERSION >= 12500,
+                  "[SHARED-CACHE] shared fused-attn graph cache requires cudnn-frontend >= 1.25.0");
+    static CacheType sdpa_f16_fprop_cache;
+    static std::mutex sdpa_f16_fprop_cache_mutex;
 
     // Get plan from cache if cache is available, otherwise create one
     auto get_graph = [&](CacheType &cache, const FusedAttnConfig &descriptor) -> graph_and_tensors {
-      // if hit, return
-      auto it = cache.find(descriptor);
-      bool cache_hit = (it != cache.end());                                   // [GRAPH-DEBUG]
-      fused_attn_graph_debug::note_cache_lookup("fwd", cache_hit, cfg);       // [GRAPH-DEBUG]
-      if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= 90600 &&  // [GRAPH-DEBUG]
-          sm_arch_ != 120) {                                                  // [GRAPH-DEBUG]
-        fused_attn_graph_debug::note_thd_lookup(                              // [GRAPH-DEBUG]
+      // [SHARED-CACHE] Lock only the map lookup; copy the entry out and release before building
+      // so concurrent first-misses on different keys build in parallel. graph->execute() runs
+      // unlocked after get_graph() returns; built graphs are shared across threads.
+      graph_and_tensors cached_graph{};
+      bool cache_hit = false;
+      {
+        std::lock_guard<std::mutex> shared_cache_lock(sdpa_f16_fprop_cache_mutex);
+        auto it = cache.find(descriptor);
+        cache_hit = (it != cache.end());
+        if (cache_hit) cached_graph = it->second;
+      }
+      fused_attn_graph_debug::note_cache_lookup("fwd", cache_hit, cfg);  // [GRAPH-DEBUG]
+      if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= 90600 &&      // [GRAPH-DEBUG]
+          sm_arch_ != 120) {                                                     // [GRAPH-DEBUG]
+        fused_attn_graph_debug::note_thd_lookup(                                 // [GRAPH-DEBUG]
             "fwd", cache_hit, !cache_hit || fused_attn_graph_debug::cache_disabled(),
-            /*legacy=*/!use_cu_seqlens_directly);  // [GRAPH-DEBUG]
-      }  // [GRAPH-DEBUG]
-      if (cache_hit && !fused_attn_graph_debug::cache_disabled()) {  // [GRAPH-DEBUG]
-        auto graph = it->second;
-        return graph;
+            /*legacy=*/!use_cu_seqlens_directly);                                // [GRAPH-DEBUG]
+      }                                                                          // [GRAPH-DEBUG]
+      if (cache_hit && !fused_attn_graph_debug::cache_disabled()) {     // [GRAPH-DEBUG]
+        return cached_graph;
       }
 
       // otherwise, build the op_graph and the plan. Then update cache
@@ -464,20 +482,32 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       auto dropout_tuple = is_dropout ? std::make_tuple(dropout_seed, dropout_offset)
                                       : std::make_tuple(nullptr, nullptr);
 
-      NVTE_CHECK_CUDNN_FE(mha_graph->validate());
-      NVTE_CHECK_CUDNN_FE(mha_graph->build_operation_graph(handle));
-      NVTE_CHECK_CUDNN_FE(mha_graph->create_execution_plans({fe::HeurMode_t::A}));
-      NVTE_CHECK_CUDNN_FE(mha_graph->check_support(handle));
-      NVTE_CHECK_CUDNN_FE(mha_graph->build_plans(handle));
+      GRAPH_DEBUG_TIME_STAGE(Validate, NVTE_CHECK_CUDNN_FE(mha_graph->validate()));  // [GRAPH-DEBUG]
+      GRAPH_DEBUG_TIME_STAGE(BuildOpGraph,  // [GRAPH-DEBUG]
+                             NVTE_CHECK_CUDNN_FE(mha_graph->build_operation_graph(handle)));
+      GRAPH_DEBUG_TIME_STAGE(CreatePlans,  // [GRAPH-DEBUG]
+                             NVTE_CHECK_CUDNN_FE(mha_graph->create_execution_plans({fe::HeurMode_t::A})));
+      GRAPH_DEBUG_TIME_STAGE(CheckSupport, NVTE_CHECK_CUDNN_FE(mha_graph->check_support()));  // [GRAPH-DEBUG] no-handle overload (handle version is deprecated)
+      GRAPH_DEBUG_TIME_STAGE(BuildPlans, NVTE_CHECK_CUDNN_FE(mha_graph->build_plans()));  // [GRAPH-DEBUG] no-handle overload (handle version is deprecated)
 
       auto return_tuple =
           std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, Stats_tuple, bias_tuple,
                          softmax_offset_tuple, padding_tuple, page_table_tuple, offset_qo_tuple,
                          offset_kv_tuple, offset_s_tuple, dropout_tuple);
-      cache.insert({descriptor, return_tuple});
       fused_attn_graph_debug::note_fwd_build();  // [GRAPH-DEBUG]
-
-      return return_tuple;
+      if (fused_attn_graph_debug::enabled()) {                                     // [GRAPH-DEBUG]
+        std::vector<uint8_t> serialized_graph;                                     // [GRAPH-DEBUG]
+        if (mha_graph->serialize(serialized_graph).is_good())                      // [GRAPH-DEBUG]
+          fused_attn_graph_debug::note_graph_size("fwd", serialized_graph.size());  // [GRAPH-DEBUG]
+      }                                                                            // [GRAPH-DEBUG]
+      // [SHARED-CACHE] Lock only for insert. If another thread inserted this key while we built,
+      // reuse theirs and discard ours so all threads share one graph (rare duplicate build).
+      {
+        std::lock_guard<std::mutex> shared_cache_lock(sdpa_f16_fprop_cache_mutex);
+        auto inserted = cache.insert({descriptor, return_tuple});
+        fused_attn_graph_debug::note_cache_size("fwd", cache.size());  // [GRAPH-DEBUG]
+        return fused_attn_graph_debug::cache_disabled() ? return_tuple : inserted.first->second;
+      }
     };
 
     auto [mha_graph, Q, K, V, attn_scale, O, S1, S2, bias, softmax_offset, seq_q, seq_kv,
@@ -731,24 +761,32 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                    std::shared_ptr<fe::graph::Tensor_attributes>>;  // dropout_offset
 
     using CacheType = std::map<FusedAttnConfig, graph_and_tensors>;
-    static thread_local CacheType sdpa_f16_bprop_cache;
+    static CacheType sdpa_f16_bprop_cache;         // [SHARED-CACHE] process-wide (was thread_local)
+    static std::mutex sdpa_f16_bprop_cache_mutex;  // [SHARED-CACHE]
 
     // Get plan from cache if cache is available, otherwise create one
     auto get_graph = [&](CacheType &cache, const FusedAttnConfig &descriptor) -> graph_and_tensors {
-      // if hit, return
-      auto it = cache.find(descriptor);
-      bool cache_hit = (it != cache.end());                                   // [GRAPH-DEBUG]
-      fused_attn_graph_debug::note_cache_lookup("bwd", cache_hit, cfg);       // [GRAPH-DEBUG]
-      if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= 90600 &&  // [GRAPH-DEBUG]
-          sm_arch_ != 120) {                                                  // [GRAPH-DEBUG]
+      // [SHARED-CACHE] Lock only the map lookup; copy the entry out and release before building
+      // so concurrent first-misses on different keys build in parallel. graph->execute() runs
+      // unlocked after get_graph() returns; built graphs are shared across threads.
+      graph_and_tensors cached_graph{};
+      bool cache_hit = false;
+      {
+        std::lock_guard<std::mutex> shared_cache_lock(sdpa_f16_bprop_cache_mutex);
+        auto it = cache.find(descriptor);
+        cache_hit = (it != cache.end());
+        if (cache_hit) cached_graph = it->second;
+      }
+      fused_attn_graph_debug::note_cache_lookup("bwd", cache_hit, cfg);  // [GRAPH-DEBUG]
+      if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= 90600 &&      // [GRAPH-DEBUG]
+          sm_arch_ != 120) {                                                     // [GRAPH-DEBUG]
         // The backward impl has no cu_seqlens-directly path; it always buckets the batch.
         fused_attn_graph_debug::note_thd_lookup(  // [GRAPH-DEBUG]
             "bwd", cache_hit, !cache_hit || fused_attn_graph_debug::cache_disabled(),
-            /*legacy=*/true);  // [GRAPH-DEBUG]
-      }  // [GRAPH-DEBUG]
-      if (cache_hit && !fused_attn_graph_debug::cache_disabled()) {  // [GRAPH-DEBUG]
-        auto graph = it->second;
-        return graph;
+            /*legacy=*/true);                                                    // [GRAPH-DEBUG]
+      }                                                                          // [GRAPH-DEBUG]
+      if (cache_hit && !fused_attn_graph_debug::cache_disabled()) {     // [GRAPH-DEBUG]
+        return cached_graph;
       }
 
       // otherwise, build the op_graph and the plan. Then update cache
@@ -986,19 +1024,31 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       auto dropout_tuple = is_dropout ? std::make_tuple(dropout_seed, dropout_offset)
                                       : std::make_tuple(nullptr, nullptr);
 
-      NVTE_CHECK_CUDNN_FE(mha_graph->validate());
-      NVTE_CHECK_CUDNN_FE(mha_graph->build_operation_graph(handle));
-      NVTE_CHECK_CUDNN_FE(mha_graph->create_execution_plans({fe::HeurMode_t::A}));
-      NVTE_CHECK_CUDNN_FE(mha_graph->check_support(handle));
-      NVTE_CHECK_CUDNN_FE(mha_graph->build_plans(handle));
+      GRAPH_DEBUG_TIME_STAGE(Validate, NVTE_CHECK_CUDNN_FE(mha_graph->validate()));  // [GRAPH-DEBUG]
+      GRAPH_DEBUG_TIME_STAGE(BuildOpGraph,  // [GRAPH-DEBUG]
+                             NVTE_CHECK_CUDNN_FE(mha_graph->build_operation_graph(handle)));
+      GRAPH_DEBUG_TIME_STAGE(CreatePlans,  // [GRAPH-DEBUG]
+                             NVTE_CHECK_CUDNN_FE(mha_graph->create_execution_plans({fe::HeurMode_t::A})));
+      GRAPH_DEBUG_TIME_STAGE(CheckSupport, NVTE_CHECK_CUDNN_FE(mha_graph->check_support()));  // [GRAPH-DEBUG] no-handle overload (handle version is deprecated)
+      GRAPH_DEBUG_TIME_STAGE(BuildPlans, NVTE_CHECK_CUDNN_FE(mha_graph->build_plans()));  // [GRAPH-DEBUG] no-handle overload (handle version is deprecated)
 
       auto return_tuple = std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, bias_tuple,
                                          softmax_offset_tuple, padding_tuple, offset_qo_tuple,
                                          offset_kv_tuple, offset_s_tuple, dropout_tuple);
-      cache.insert({descriptor, return_tuple});
       fused_attn_graph_debug::note_bwd_build();  // [GRAPH-DEBUG]
-
-      return return_tuple;
+      if (fused_attn_graph_debug::enabled()) {                                     // [GRAPH-DEBUG]
+        std::vector<uint8_t> serialized_graph;                                     // [GRAPH-DEBUG]
+        if (mha_graph->serialize(serialized_graph).is_good())                      // [GRAPH-DEBUG]
+          fused_attn_graph_debug::note_graph_size("bwd", serialized_graph.size());  // [GRAPH-DEBUG]
+      }                                                                            // [GRAPH-DEBUG]
+      // [SHARED-CACHE] Lock only for insert. If another thread inserted this key while we built,
+      // reuse theirs and discard ours so all threads share one graph (rare duplicate build).
+      {
+        std::lock_guard<std::mutex> shared_cache_lock(sdpa_f16_bprop_cache_mutex);
+        auto inserted = cache.insert({descriptor, return_tuple});
+        fused_attn_graph_debug::note_cache_size("bwd", cache.size());  // [GRAPH-DEBUG]
+        return fused_attn_graph_debug::cache_disabled() ? return_tuple : inserted.first->second;
+      }
     };
 
     auto [mha_graph, q, k, v, o, dO, stats, attn_scale, dQ, dK, dV, bias, dBias, softmax_offset,

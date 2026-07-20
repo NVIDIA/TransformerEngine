@@ -510,6 +510,7 @@ DType get_ragged_offset_dtype(NVTE_QKV_Layout_Group layout_group, int64_t num_at
 
 // quantize batch size
 size_t get_max_batch_size(size_t batch_size) {
+  if (batch_size == 0) return 0;  // guard: log2(0) = -inf, casting to size_t is UB
   size_t max_b = batch_size;
   size_t log2_b = ceil(log2(batch_size));
   // batch size is expected to be 10s-100s
@@ -528,6 +529,7 @@ size_t get_max_batch_size(size_t batch_size) {
 
 // quantize token count
 size_t get_max_tokens(size_t num_tokens) {
+  if (num_tokens == 0) return 0;  // guard: log2(0) = -inf, casting to size_t is UB
   // token count is expected to be 1k's-100k's
   // t = 0, ..., 1024   -> max_t = 1024
   // t = 1025, ..., 32k -> max_t = next power of 2
