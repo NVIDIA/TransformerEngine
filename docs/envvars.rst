@@ -119,6 +119,25 @@ Runtime Environment Variables
 
 These environment variables control the behavior of Transformer Engine during execution.
 
+General
+^^^^^^^
+
+.. envvar:: NVTE_TENSOR_HANDLE_POOL_SIZE_MB
+
+   :Type: ``int`` (positive integer)
+   :Default: ``20``
+   :Description: Size in MiB of the internal ``NVTETensor`` handle pool. Increase this
+                 value if an application legitimately creates more tensor handles than
+                 the default pool can hold.
+
+.. envvar:: NVTE_GROUPED_TENSOR_HANDLE_POOL_SIZE_MB
+
+   :Type: ``int`` (positive integer)
+   :Default: ``20``
+   :Description: Size in MiB of the internal ``NVTEGroupedTensor`` handle pool. Increase
+                 this value if an application legitimately creates more grouped tensor
+                 handles than the default pool can hold.
+
 Attention Backend Selection
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
