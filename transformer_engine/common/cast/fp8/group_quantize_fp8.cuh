@@ -1100,12 +1100,15 @@ void group_quantize(const GroupedTensor *input, const Tensor *noop, GroupedTenso
                     const size_t rows_per_tensor = first_logical_dim / num_tensors;
                     if constexpr (SCALING_TYPE == ScalingType::ROWWISE) {
                       constexpr size_t flat_nvec = ROWWISE_FLAT_LOAD_SIZE_BYTES / sizeof(IType);
-                      using IVecT = Vec<IType, flat_nvec>;
-                      using OVecT = Vec<OType, flat_nvec>;
+                      // nvcc 13.0 fails to parse `using` type aliases inside this
+                      // macro-expanded block in some TUs (activation/glu.cu); use
+                      // the equivalent byte counts (Vec<T, N>::BYTES == N * sizeof(T)).
+                      constexpr size_t flat_in_vec_bytes = flat_nvec * sizeof(IType);
+                      constexpr size_t flat_out_vec_bytes = flat_nvec * sizeof(OType);
                       const size_t elems_per_tensor = rows_per_tensor * last_logical_dim;
                       const bool flat_aligned =
-                          reinterpret_cast<uintptr_t>(input->data.dptr) % IVecT::BYTES == 0 &&
-                          reinterpret_cast<uintptr_t>(output->data.dptr) % OVecT::BYTES == 0;
+                          reinterpret_cast<uintptr_t>(input->data.dptr) % flat_in_vec_bytes == 0 &&
+                          reinterpret_cast<uintptr_t>(output->data.dptr) % flat_out_vec_bytes == 0;
                       if (elems_per_tensor % flat_nvec == 0 && flat_aligned) {
                         const size_t vecs_per_tensor = elems_per_tensor / flat_nvec;
                         const dim3 flat_block(ROWWISE_FLAT_THREADS);
@@ -1156,12 +1159,15 @@ void group_quantize(const GroupedTensor *input, const Tensor *noop, GroupedTenso
                     if constexpr (SCALING_TYPE == ScalingType::ROWWISE) {
                       const size_t total_elements = first_logical_dim * last_logical_dim;
                       constexpr size_t flat_nvec = ROWWISE_FLAT_LOAD_SIZE_BYTES / sizeof(IType);
-                      using IVecT = Vec<IType, flat_nvec>;
-                      using OVecT = Vec<OType, flat_nvec>;
+                      // nvcc 13.0 fails to parse `using` type aliases inside this
+                      // macro-expanded block in some TUs (activation/glu.cu); use
+                      // the equivalent byte counts (Vec<T, N>::BYTES == N * sizeof(T)).
+                      constexpr size_t flat_in_vec_bytes = flat_nvec * sizeof(IType);
+                      constexpr size_t flat_out_vec_bytes = flat_nvec * sizeof(OType);
                       const bool flat_aligned =
                           last_logical_dim % flat_nvec == 0 &&
-                          reinterpret_cast<uintptr_t>(input->data.dptr) % IVecT::BYTES == 0 &&
-                          reinterpret_cast<uintptr_t>(output->data.dptr) % OVecT::BYTES == 0;
+                          reinterpret_cast<uintptr_t>(input->data.dptr) % flat_in_vec_bytes == 0 &&
+                          reinterpret_cast<uintptr_t>(output->data.dptr) % flat_out_vec_bytes == 0;
                       // Only vector-aligned inputs are supported. A non-multiple
                       // row length or a misaligned base pointer would force
                       // uncoalesced scalar access, which we deliberately do not

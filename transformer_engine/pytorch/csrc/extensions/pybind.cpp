@@ -158,7 +158,11 @@ void init_router_bindings(pybind11::module &m) {
   m.def("fused_moe_aux_loss_fwd", &fused_moe_aux_loss_fwd, py::arg("probs"),
         py::arg("tokens_per_expert"), py::arg("total_num_tokens"), py::arg("num_experts"),
         py::arg("num_rows"), py::arg("num_cols"), py::arg("topk"), py::arg("coeff"),
-        "Fused aux loss fwd");
+        "Fused aux loss fwd (host-int total_num_tokens, host-folded C_coeff)");
+  m.def("fused_moe_aux_loss_fwd_graph_safe", &fused_moe_aux_loss_fwd_graph_safe, py::arg("probs"),
+        py::arg("tokens_per_expert"), py::arg("total_num_tokens"), py::arg("num_experts"),
+        py::arg("num_rows"), py::arg("num_cols"), py::arg("topk"), py::arg("coeff"),
+        "Fused aux loss fwd (device-tensor total_num_tokens, CUDA-graph-safe)");
   m.def("fused_moe_aux_loss_bwd", &fused_moe_aux_loss_bwd, py::arg("Const_buf"),
         py::arg("tokens_per_expert"), py::arg("num_rows"), py::arg("num_cols"),
         py::arg("grad_aux_loss"), "Fused aux loss bwd");
@@ -712,6 +716,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                        int num_max_streams, int comm_cga_size, int gemm_priority, int comm_priority,
                        int num_comm_sm, bool set_sm_margin, bool atomic_gemm,
                        bool rs_overlap_first_gemm) {
+             // Release the GIL only around the native construction (blocking collectives) to avoid
+             // tripping pybind11's inc_ref/dec_ref GIL assertions.
+             py::gil_scoped_release nogil;
              if (use_cublasmp) {
                return std::make_shared<CommOverlap>(helper, helper->mylocal, tp_size, comm_type,
                                                     buffer_shape, buffer_dtype, num_comm_sm,
@@ -722,8 +729,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                  comm_cga_size, gemm_priority, comm_priority, num_comm_sm, set_sm_margin,
                  atomic_gemm, rs_overlap_first_gemm);
            }),
-           py::call_guard<py::gil_scoped_release>(), py::arg("buffer_shape"),
-           py::arg("buffer_dtype"), py::arg("helper"), py::arg("tp_size"),
+           py::arg("buffer_shape"), py::arg("buffer_dtype"), py::arg("helper"), py::arg("tp_size"),
            py::arg("use_cublasmp") = false,
            py::arg("comm_type") = transformer_engine::CommOverlapType::RS,
            py::arg("num_splits") = 4, py::arg("num_max_streams") = NVTE_COMM_OVERLAP_MAX_STREAMS,
@@ -747,6 +753,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                        int comm_cga_size, int gemm_priority, int comm_priority, int num_comm_sm,
                        bool set_sm_margin, bool atomic_gemm, bool use_ce, bool aggregate,
                        bool use_cublasmp) {
+             // Release the GIL only around the native construction (blocking collectives) to avoid
+             // tripping pybind11's inc_ref/dec_ref GIL assertions.
+             py::gil_scoped_release nogil;
              if (use_cublasmp) {
                return std::make_shared<CommOverlapP2P>(helper, helper->mylocal, tp_size, comm_type,
                                                        buffer_shape, buffer_dtype, num_comm_sm,
@@ -757,12 +766,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                                                      gemm_priority, comm_priority, num_comm_sm,
                                                      set_sm_margin, atomic_gemm, use_ce, aggregate);
            }),
-           py::call_guard<py::gil_scoped_release>(), py::arg("buffer_shape"),
-           py::arg("buffer_dtype"), py::arg("helper"), py::arg("tp_size"), py::arg("comm_type"),
-           py::arg("num_max_streams") = NVTE_COMM_OVERLAP_MAX_STREAMS, py::arg("comm_cga_size") = 1,
-           py::arg("gemm_priority") = 0, py::arg("comm_priority") = 0, py::arg("num_comm_sm") = 1,
-           py::arg("set_sm_margin") = false, py::arg("atomic_gemm") = false,
-           py::arg("use_ce") = true, py::arg("aggregate") = false, py::arg("use_cublasmp") = false)
+           py::arg("buffer_shape"), py::arg("buffer_dtype"), py::arg("helper"), py::arg("tp_size"),
+           py::arg("comm_type"), py::arg("num_max_streams") = NVTE_COMM_OVERLAP_MAX_STREAMS,
+           py::arg("comm_cga_size") = 1, py::arg("gemm_priority") = 0, py::arg("comm_priority") = 0,
+           py::arg("num_comm_sm") = 1, py::arg("set_sm_margin") = false,
+           py::arg("atomic_gemm") = false, py::arg("use_ce") = true, py::arg("aggregate") = false,
+           py::arg("use_cublasmp") = false)
       .def("copy_into_buffer",
            static_cast<void (CommOverlapP2P::*)(const at::Tensor &, bool)>(
                &CommOverlapP2P::copy_into_buffer),
