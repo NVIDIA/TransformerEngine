@@ -45,12 +45,30 @@ from transformer_engine.pytorch.cpp_extensions.gemm import (
     _unwrap_hybrid_A,
     _unwrap_hybrid_B,
 )
+from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
 
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 fp8_block_scaling_available, reason_for_no_fp8_block_scaling = te.is_fp8_block_scaling_available(
     return_reason=True
+)
+
+_COLUMNWISE_ONLY_PER_TENSOR_FP8_ERROR = (
+    "Columnwise-only per-tensor FP8 quantization is not implemented"
+)
+
+_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8 = pytest.mark.xfail(
+    condition=not is_non_tn_fp8_gemm_supported(),
+    raises=pytest.RaisesExc(
+        NotImplementedError,
+        match=_COLUMNWISE_ONLY_PER_TENSOR_FP8_ERROR,
+    ),
+    strict=True,
+    reason=(
+        "Hopper does not yet support columnwise-only per-tensor FP8 quantization; "
+        "tracked by NVIDIA/TransformerEngine#3158"
+    ),
 )
 
 requires_fp8 = pytest.mark.skipif(
@@ -1008,6 +1026,7 @@ class TestHybridClear:
 
 
 @requires_fp8
+@_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
 class TestHybridTensorShapeOps:
     """Shape ops that preserve supported Hybrid sub-storages."""
 
@@ -1530,6 +1549,7 @@ class TestHybridDeviceAndSize:
 
 
 @requires_fp8
+@_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
 class TestHybridGemmBitwiseIdentical:
     """Hybrid quantizer with same FP8 format in both directions must produce
     bitwise-identical results to the vanilla Float8CurrentScaling recipe."""
@@ -1876,6 +1896,7 @@ class TestCustomDPALocalRecipeCache:
         from transformer_engine.pytorch.attention import multi_head_attention as mha_module
         from transformer_engine.pytorch.custom_recipes.quantization_factory_base import (
             current_scaling_quantizer_factory,
+            delayed_scaling_quantizer_factory,
         )
         from transformer_engine.pytorch.custom_recipes.quantization_factory_zoo import (
             nvfp4_linear_fp8_dpa_factory,
@@ -1887,9 +1908,15 @@ class TestCustomDPALocalRecipeCache:
             pytest.skip(f"FP8 attention not supported on sm{cc[0] * 10 + cc[1]}")
 
         monkeypatch.setattr(mha_module, "_dpa_fp8_recipe", "")
+        monkeypatch.setenv("NVTE_UnfusedDPA_Emulate_FP8", "1")
         calls = []
 
         def valid_fp8_dpa_qfactory(role):
+            # Hopper FP8 attention supports DelayedScaling. Use it for the
+            # complete MHA recipe so that all requests share one coherent
+            # delayed-scaling state, including the DPA boundary tensors.
+            if cc < (10, 0):
+                return delayed_scaling_quantizer_factory(role)
             is_dpa = role is not None and role.module_type == "dpa"
             is_dpa_boundary = (
                 role is not None
@@ -1911,9 +1938,9 @@ class TestCustomDPALocalRecipeCache:
             fp8_mha=fp8_mha,
         )
         model = te.MultiheadAttention(
-            hidden_size=32,
+            hidden_size=128,
             num_attention_heads=2,
-            kv_channels=16,
+            kv_channels=64,
             attention_dropout=0.0,
             attn_mask_type="no_mask",
             params_dtype=torch.bfloat16,
@@ -1921,7 +1948,7 @@ class TestCustomDPALocalRecipeCache:
             qkv_format="sbhd",
             name="counted_mha",
         ).cuda()
-        inp = torch.randn(128, 2, 32, device="cuda", dtype=torch.bfloat16)
+        inp = torch.randn(128, 2, 128, device="cuda", dtype=torch.bfloat16)
 
         with torch.no_grad(), autocast(enabled=True, recipe=custom_recipe):
             model(inp)
@@ -2792,6 +2819,7 @@ class TestUnwrapHybridDirection:
 
 
 @requires_fp8
+@_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
 class TestHybridBiasGradient:
     """Verify bias gradients are computed correctly with HybridQuantizer.
 
@@ -3034,6 +3062,7 @@ class TestHybridReversedDirection:
 
 
 @requires_fp8
+@_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
 class TestHybridMixedWithNonHybrid:
     """Only one operand is hybrid; the other uses a plain TE quantizer.
 
@@ -3168,6 +3197,22 @@ _QUANTIZER_CONFIGS = {
 }
 
 
+def _make_role_aware_quantizer(factory, role):
+    """Construct a quantizer with the standard Block-FP8 GEMM geometry."""
+    quantizer = factory()
+    if isinstance(quantizer, Float8BlockQuantizer):
+        is_weight = (
+            role is not None
+            and role.module_type in ("linear", "grouped_linear")
+            and role.tensor_type == "weight"
+        )
+        # Match Float8BlockScaling: 2D blocks for weights, 1D blocks for
+        # activations and gradients. A GEMM cannot consume 2D-scaled inputs
+        # on both sides.
+        quantizer.block_scaling_dim = 2 if is_weight else 1
+    return quantizer
+
+
 def _build_cross_format_params():
     """Build parametrize list for all stateless cross-format hybrid combos."""
     combos = [
@@ -3197,6 +3242,8 @@ def _build_cross_format_params():
         marks = []
         if hw_skip:
             marks.append(pytest.mark.skipif(True, reason=hw_reason or "N/A"))
+        if col == "fp8_current":
+            marks.append(_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8)
         params.append(pytest.param(row, col, id=f"{row}_row_x_{col}_col", marks=marks))
     return params
 
@@ -3241,8 +3288,8 @@ def _plain_linear_qfactory(operand_factory, grad_factory):
     def factory(role):
         is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
         if is_linear and role.tensor_type in ("grad_output", "grad_input"):
-            return grad_factory()
-        return operand_factory()
+            return _make_role_aware_quantizer(grad_factory, role)
+        return _make_role_aware_quantizer(operand_factory, role)
 
     return factory
 
@@ -3296,12 +3343,12 @@ class TestHybridCrossFormatParametrized:
             )
             if is_linear and role.tensor_type in ("input", "weight"):
                 return HybridQuantizer(
-                    rowwise_quantizer=make_row_operand(),
-                    columnwise_quantizer=make_col_operand(),
+                    rowwise_quantizer=_make_role_aware_quantizer(make_row_operand, role),
+                    columnwise_quantizer=_make_role_aware_quantizer(make_col_operand, role),
                 )
             if is_linear and role.tensor_type in ("grad_output", "grad_input"):
-                return make_col_grad()
-            return make_row_operand()
+                return _make_role_aware_quantizer(make_col_grad, role)
+            return _make_role_aware_quantizer(make_row_operand, role)
 
         hybrid_recipe = recipe.CustomRecipe(qfactory=hybrid_factory)
         fprop_ref_recipe = recipe.CustomRecipe(
@@ -3679,6 +3726,7 @@ def _make_hybrid_fp8_factory():
 
 
 @requires_fp8
+@_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
 class TestHybridAllModules:
     """Hybrid quantization through all TE module types (not just Linear).
 
@@ -3800,16 +3848,16 @@ class TestHybridAllModules:
             self.ffn_hidden_size,
             params_dtype=torch.bfloat16,
         ).cuda()
+        # Hopper FP8 grouped wgrad uses each expert's token count as a
+        # leading dimension, which cuBLAS requires to be divisible by 16.
+        m_splits = [16] * num_gemms
         inp = torch.randn(
-            self.batch,
+            sum(m_splits),
             self.hidden_size,
             device="cuda",
             dtype=torch.bfloat16,
             requires_grad=True,
         )
-        base = self.batch // num_gemms
-        rem = self.batch % num_gemms
-        m_splits = [base + (1 if i < rem else 0) for i in range(num_gemms)]
 
         self._run_fwd_bwd(model, inp, m_splits)
 
@@ -3921,8 +3969,18 @@ class TestHybridGroupedLinearValidation:
         ("usage", "expected"),
         [
             pytest.param((True, False), {"rowwise": True, "columnwise": False}, id="rowwise"),
-            pytest.param((False, True), {"rowwise": False, "columnwise": True}, id="columnwise"),
-            pytest.param((True, True), {"rowwise": True, "columnwise": True}, id="both"),
+            pytest.param(
+                (False, True),
+                {"rowwise": False, "columnwise": True},
+                id="columnwise",
+                marks=_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8,
+            ),
+            pytest.param(
+                (True, True),
+                {"rowwise": True, "columnwise": True},
+                id="both",
+                marks=_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8,
+            ),
         ],
     )
     def test_hybrid_split_quantize_respects_parent_usage_flags(self, usage, expected):
@@ -3945,6 +4003,7 @@ class TestHybridGroupedLinearValidation:
 
         assert [storage.get_usages() for storage in out] == [expected, expected]
 
+    @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_columnwise_only_rowwise_dequantized_uses_transient_grouped_row(self, monkeypatch):
         import transformer_engine.pytorch.module.grouped_linear as grouped_linear
 
@@ -4042,6 +4101,7 @@ class TestHybridGroupedLinearValidation:
         assert all(storage.rowwise_sub_storage is not None for storage in out)
         assert all(storage.columnwise_sub_storage is None for storage in out)
 
+    @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_original_source_preserves_two_bulk_call_fast_path(self, monkeypatch):
         import transformer_engine.pytorch.module.grouped_linear as grouped_linear
 
@@ -4240,12 +4300,12 @@ def _hybrid_custom_recipe(row_factory, col_factory, grad_factory=None):
         is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
         if is_linear and role.tensor_type in ("input", "weight", "output"):
             return HybridQuantizer(
-                rowwise_quantizer=row_factory(),
-                columnwise_quantizer=col_factory(),
+                rowwise_quantizer=_make_role_aware_quantizer(row_factory, role),
+                columnwise_quantizer=_make_role_aware_quantizer(col_factory, role),
             )
         if is_linear and role.tensor_type in ("grad_output", "grad_input"):
-            return grad_factory()
-        return row_factory()
+            return _make_role_aware_quantizer(grad_factory, role)
+        return _make_role_aware_quantizer(row_factory, role)
 
     return recipe.CustomRecipe(qfactory=qfactory)
 
@@ -4256,6 +4316,7 @@ def _hybrid_custom_recipe(row_factory, col_factory, grad_factory=None):
 
 
 @requires_fp8
+@_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
 class TestHybridQuantizedModelInit:
     """Verify that quantized_model_init with a hybrid CustomRecipe produces
     HybridQuantizedTensor parameters."""
@@ -4372,6 +4433,7 @@ class TestHybridWeightWorkspaceCache:
             ),
         )
 
+    @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_quantized_param_skips_workspace(self):
         """When weight is already a HybridQuantizedTensor (quantized params),
         get_weight_workspace should return it directly without creating a workspace."""
@@ -4386,6 +4448,7 @@ class TestHybridWeightWorkspaceCache:
         assert out.shape == (32, 128)
         assert "weight" not in model._fp8_workspaces
 
+    @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_bf16_weight_creates_hybrid_workspace(self):
         """When weight is BF16 and recipe produces HybridQuantizer, the workspace
         should be a HybridQuantizedTensor."""
@@ -4422,6 +4485,7 @@ class TestHybridWeightWorkspaceCache:
         assert all(current is cached for current, cached in zip(current_buffers, buffers))
         torch.testing.assert_close(out1, out2, rtol=0.0, atol=0.0)
 
+    @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_workspace_cache_invalidation_on_usage_change(self):
         """If usage requirements change (e.g. inference→training), the cache
         should be invalidated and a fresh workspace created."""
@@ -4461,6 +4525,7 @@ class TestHybridWeightWorkspaceCache:
 
 
 @requires_fp8
+@_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
 class TestHybridUpdateWeightQuantizers:
     """Test that quantizer refresh propagates correctly to hybrid sub-quantizers."""
 
@@ -4806,6 +4871,7 @@ class TestHybridQuantizeMasterWeights:
 
     # ---------- Positive tests (same-format) ----------
 
+    @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_fp8_current_same_format_full_master(self):
         """Full master (start_offset=0) routes both sub-storages through the
         existing per-format current-scaling helper. Verifies both directions
@@ -4848,6 +4914,7 @@ class TestHybridQuantizeMasterWeights:
         torch.testing.assert_close(dq_row.reshape(-1), master_flat, rtol=0.125, atol=0.1)
         torch.testing.assert_close(dq_col.reshape(-1), master_flat, rtol=0.125, atol=0.1)
 
+    @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_fp8_current_nonzero_start_offset(self):
         """Mimic DP-sharded master: master covers logical elements
         [start_offset, start_offset + master.numel()) of the full model weight.
@@ -4917,6 +4984,7 @@ class TestHybridQuantizeMasterWeights:
                 dequantized[start_offset:], hp_master_shard, rtol=0.125, atol=0.1
             )
 
+    @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_fp8_delayed_same_format_full_master(self):
         """Same-format delayed scaling on both directions. Both sub-storages
         route into the delayed-scaling bucket as independent entries; the
@@ -4943,6 +5011,7 @@ class TestHybridQuantizeMasterWeights:
         torch.testing.assert_close(dq_row.reshape(-1), master_flat, rtol=0.125, atol=0.1)
         torch.testing.assert_close(dq_col.reshape(-1), master_flat, rtol=0.125, atol=0.1)
 
+    @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_fp8_delayed_row_current_col_full_master(self):
         """Cross-format per-tensor Float8: delayed row + current col.
 
@@ -4973,6 +5042,7 @@ class TestHybridQuantizeMasterWeights:
         torch.testing.assert_close(dq_row.reshape(-1), master_flat, rtol=0.125, atol=0.1)
         torch.testing.assert_close(dq_col.reshape(-1), master_flat, rtol=0.125, atol=0.1)
 
+    @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_fp8_current_row_delayed_col_full_master(self):
         """Cross-format per-tensor Float8: current row + delayed col.
 
@@ -5160,6 +5230,7 @@ class TestHybridQuantizeMasterWeights:
         with pytest.raises(NotImplementedError, match="Float8BlockQuantizer columnwise"):
             quantize_master_weights([weight], [master_flat], [0], group=group)
 
+    @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_rowwise_only_fp8_current_full_master(self):
         """Single-direction hybrid: columnwise dropped via update_usage.
 
@@ -5198,6 +5269,7 @@ class TestHybridQuantizeMasterWeights:
         dq_row = weight._rowwise_storage.dequantize(dtype=torch.float32)
         torch.testing.assert_close(dq_row.reshape(-1), master_flat, rtol=0.125, atol=0.1)
 
+    @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_columnwise_only_fp8_current_full_master(self):
         """Single-direction hybrid: rowwise dropped via update_usage.
 
@@ -5234,6 +5306,7 @@ class TestHybridQuantizeMasterWeights:
         dq_col = weight._columnwise_storage.dequantize(dtype=torch.float32)
         torch.testing.assert_close(dq_col.reshape(-1), master_flat, rtol=0.125, atol=0.1)
 
+    @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_both_sub_storages_none_raises(self):
         """Both sub-storages dropped via update_usage — nothing left to cast.
 
@@ -5257,6 +5330,7 @@ class TestHybridQuantizeMasterWeights:
 
 
 @requires_fp8
+@_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
 class TestHybridPostAllGatherProcessing:
     """Hybrid branch of `post_all_gather_processing` is exercised indirectly by
     the positive `TestHybridQuantizeMasterWeights` tests; the case below pins
@@ -5296,6 +5370,7 @@ class TestHybridPostAllGatherProcessing:
 
 
 @requires_fp8
+@_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
 class TestHybridRecipeCorrespondence:
     """Test _check_weight_tensor_recipe_correspondence with hybrid params."""
 
@@ -5340,6 +5415,7 @@ class TestHybridRecipeCorrespondence:
 
 
 @requires_fp8
+@_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
 class TestHybridQuantizeInPlace:
     """Test in-place re-quantization (quantize_) for HybridQuantizedTensor.
 
@@ -5393,6 +5469,7 @@ class TestHybridQuantizeInPlace:
 
 
 @requires_fp8
+@_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
 class TestHybridFusedAdam:
     """Test FusedAdam optimizer with HybridQuantizedTensor parameters."""
 
@@ -5495,6 +5572,7 @@ class TestHybridFusedAdam:
 
 
 @requires_fp8
+@_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
 class TestHybridQuantizedParamsEndToEnd:
     """Full training loop: quantized_model_init + autocast fwd + bwd + FusedAdam.step()."""
 
@@ -5951,6 +6029,7 @@ class _QuantizedParamsEquivalenceBase:
 
 
 @requires_fp8
+@_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
 class TestQuantizedParamsEquivalenceFP8CurrentScaling(_QuantizedParamsEquivalenceBase):
     """Vanilla versus same-format hybrid FP8-current training parity."""
 
@@ -6251,7 +6330,11 @@ def _mxfp8_factory():
 
 
 _dispatch_configs = [
-    pytest.param("fp8_fp8", id="same-format-fp8"),
+    pytest.param(
+        "fp8_fp8",
+        id="same-format-fp8",
+        marks=_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8,
+    ),
 ]
 if mxfp8_available:
     _dispatch_configs.append(pytest.param("mxfp8_mxfp8", id="same-format-mxfp8"))
@@ -6592,6 +6675,7 @@ class TestHybridNewZeros:
             assert torch.count_nonzero(sub_storage.dequantize()).item() == 0
 
     @requires_fp8
+    @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     @pytest.mark.parametrize("unsupported_dtype", (torch.int32, torch.float64, torch.bool))
     def test_non_identity_substorage_rejects_unsupported_dtype(self, unsupported_dtype):
         quantizer = HybridQuantizer(
@@ -6934,7 +7018,13 @@ def _make_fsdp_protocol_param(config_name):
     return model.weight
 
 
-_fsdp_protocol_configs = [pytest.param("fp8_fp8", id="same-format")]
+_fsdp_protocol_configs = [
+    pytest.param(
+        "fp8_fp8",
+        id="same-format",
+        marks=_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8,
+    )
+]
 if mxfp8_available:
     _fsdp_protocol_configs.append(pytest.param("mxfp8_fp8", id="mixed-mxfp8-fp8"))
 if fp8_block_scaling_available:
@@ -7202,6 +7292,7 @@ class TestHybridFsdpRoundtrip:
         )
         _assert_hybrid_tensor_exact(second_result, hybrid_param, context="FSDP roundtrip reuse")
 
+    @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_scale_refresh_across_iterations(self):
         """After a sharded optimizer-style requantize, iter-2+ gathers see the new scale.
 
@@ -7333,6 +7424,7 @@ class TestHybridFsdpRoundtrip:
 
 
 @requires_fp8
+@_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
 class TestHybridMakeLike:
     """Test that make_like produces correct copies for __torch_dispatch__ usage."""
 
@@ -7385,8 +7477,6 @@ class TestHybridMakeLike:
 #
 # Skip on Blackwell where the C++ kernel always populates ``_data`` and
 # the columnwise-only Float8 path doesn't exercise ``_transpose``.
-
-from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported  # noqa: E402
 
 requires_hopper_fp8 = pytest.mark.skipif(
     is_non_tn_fp8_gemm_supported() or not fp8_available,
@@ -7549,6 +7639,58 @@ class TestHybridFloat8ColumnwiseOnlyHopperPath:
 
 
 @requires_hopper_fp8
+class TestPerTensorFloat8ColumnwiseOnlyGuard:
+    """Per-tensor FP8 cannot yet emit only the physical transpose."""
+
+    @staticmethod
+    def _make_quantizer(scaling):
+        if scaling == "current":
+            return Float8CurrentScalingQuantizer(
+                fp8_dtype=tex.DType.kFloat8E4M3,
+                device="cuda",
+                rowwise=False,
+                columnwise=True,
+            )
+        return Float8Quantizer(
+            scale=torch.ones(1, device="cuda", dtype=torch.float32),
+            amax=torch.zeros(1, device="cuda", dtype=torch.float32),
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            rowwise=False,
+            columnwise=True,
+        )
+
+    @pytest.mark.parametrize("scaling", ("current", "delayed"))
+    def test_initial_quantize_raises_not_implemented(self, scaling):
+        quantizer = self._make_quantizer(scaling)
+        source = torch.randn(32, 64, device="cuda", dtype=torch.bfloat16)
+
+        with pytest.raises(
+            NotImplementedError,
+            match="Columnwise-only per-tensor FP8 quantization is not implemented",
+        ):
+            quantizer(source)
+
+    @pytest.mark.parametrize("scaling", ("current", "delayed"))
+    def test_update_quantized_raises_not_implemented(self, scaling):
+        quantizer = self._make_quantizer(scaling)
+        source = torch.randn(32, 64, device="cuda", dtype=torch.bfloat16)
+        output = quantizer.make_empty(
+            source.shape,
+            dtype=source.dtype,
+            device=source.device,
+        )
+        assert output._data is None
+        assert output._transpose is not None
+
+        with pytest.raises(
+            NotImplementedError,
+            match="Columnwise-only per-tensor FP8 quantization is not implemented",
+        ):
+            quantizer.update_quantized(source, output)
+
+
+@requires_hopper_fp8
+@_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
 class TestHybridFsdpPostAllGatherUpdateUsage:
     """``HybridQuantizedTensor.fsdp_post_all_gather`` must call
     ``update_usage`` on each sub-storage after writing gathered data
@@ -7774,6 +7916,7 @@ class TestHybridActivationRecompute:
 
     # ----- te.checkpoint, reentrant ---------------------------------
 
+    @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_te_checkpoint_reentrant_linear_fp8_bitwise(self):
         """te.checkpoint(use_reentrant=True) around te.Linear with
         same-format FP8 hybrid → bitwise parity with non-recompute.
@@ -7806,6 +7949,7 @@ class TestHybridActivationRecompute:
 
     # ----- te.checkpoint, non-reentrant -----------------------------
 
+    @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_te_checkpoint_non_reentrant_linear_fp8_bitwise(self):
         """te.checkpoint(use_reentrant=False) — the saved-tensors-hooks
         path. Different recompute infra (``_checkpoint_hook``) than the
@@ -7868,19 +8012,34 @@ class TestHybridActivationRecompute:
     # weight-workspace caching hits it under vanilla torch checkpoint),
     # but hybrid amplifies and surfaces it via the 2x sub-storage count.
 
+    _TORCH_CHECKPOINT_FP8_XFAIL = pytest.mark.xfail(
+        raises=(
+            pytest.RaisesExc(
+                NotImplementedError,
+                match=_COLUMNWISE_ONLY_PER_TENSOR_FP8_ERROR,
+            )
+            if not is_non_tn_fp8_gemm_supported()
+            else torch.utils.checkpoint.CheckpointError
+        ),
+        strict=True,
+        reason=(
+            "On Hopper, same-format FP8 hybrid reaches the unsupported columnwise-only "
+            "per-tensor quantization guard before checkpointing. On architectures that "
+            "support non-TN FP8 GEMMs, vanilla torch.utils.checkpoint(use_reentrant=False) "
+            "is incompatible with TE's weight-workspace cache. Tracked by #3158."
+        ),
+    )
+
     _TORCH_CHECKPOINT_CACHE_XFAIL = pytest.mark.xfail(
         raises=torch.utils.checkpoint.CheckpointError,
         strict=True,
         reason=(
-            "Vanilla torch.utils.checkpoint(use_reentrant=False) is"
-            " incompatible with TE's weight-workspace cache: cache-miss"
-            " on the first forward saves a different tensor count than"
-            " cache-hit on recompute. Use te.checkpoint instead (tested"
-            " above). Tracked by #3158."
+            "Vanilla torch.utils.checkpoint(use_reentrant=False) is incompatible "
+            "with TE's weight-workspace cache. Tracked by #3158."
         ),
     )
 
-    @_TORCH_CHECKPOINT_CACHE_XFAIL
+    @_TORCH_CHECKPOINT_FP8_XFAIL
     def test_torch_checkpoint_non_reentrant_linear_fp8_bitwise(self):
         """Vanilla ``torch.utils.checkpoint.checkpoint`` without TE wrapper
         around a hybrid-quantized te.Linear.
@@ -7931,6 +8090,7 @@ class TestHybridActivationRecompute:
 
     # ----- TransformerLayer -----------------------------------------
 
+    @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_te_checkpoint_reentrant_transformer_layer_fp8(self):
         """te.checkpoint(reentrant) around a full TransformerLayer under
         hybrid FP8. Exercises LayerNormLinear + DPA + LayerNormMLP in one
@@ -7953,6 +8113,7 @@ class TestHybridActivationRecompute:
         test = self._run_transformer_layer(self._same_format_fp8_recipe(), checkpoint_fn=fn)
         _assert_outputs_bitwise_equal(ref, test, "te.checkpoint(reentrant) TransformerLayer FP8")
 
+    @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_te_checkpoint_non_reentrant_transformer_layer_fp8(self):
         """Same TransformerLayer setup but through the non-reentrant
         saved-tensors-hooks recompute path. Same bitwise-equality
@@ -7970,6 +8131,7 @@ class TestHybridActivationRecompute:
 
     # ----- quantized_model_init + recompute -------------------------
 
+    @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_te_checkpoint_reentrant_quantized_model_init_fp8_bitwise(self):
         """Combine ``quantized_model_init`` (persistent
         HybridQuantizedTensor weights) with activation recompute —
@@ -8046,6 +8208,7 @@ class TestHybridActivationRecompute:
         out.float().sum().backward()
         return _collect_outputs(out, inp, model)
 
+    @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_te_checkpoint_reentrant_grouped_linear_fp8_bitwise(self):
         """GroupedLinear + te.checkpoint(reentrant) under same-format FP8
         hybrid. Exercises the MoE ``_hybrid_split_quantize`` + list-of-
@@ -8059,6 +8222,7 @@ class TestHybridActivationRecompute:
         test = self._run_grouped_linear(self._same_format_fp8_recipe(), checkpoint_fn=fn)
         _assert_outputs_bitwise_equal(ref, test, "te.checkpoint(reentrant) GroupedLinear FP8")
 
+    @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_te_checkpoint_non_reentrant_grouped_linear_fp8_bitwise(self):
         """Same GroupedLinear recompute setup but through the non-
         reentrant saved-tensors-hooks path — verifies that the list of
@@ -8075,6 +8239,7 @@ class TestHybridActivationRecompute:
 
     # ----- Selective attention recompute ----------------------------
 
+    @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_selective_attention_recompute_transformer_layer_fp8_bitwise(self):
         """``TransformerLayer(..., checkpoint_core_attention=True)`` —
         the Megatron default memory-savings pattern.
@@ -8132,8 +8297,18 @@ class TestHybridActivationRecompute:
     @pytest.mark.parametrize(
         "format_name,reentrant",
         [
-            pytest.param("fp8_current", True, id="fp8_current-reentrant"),
-            pytest.param("fp8_current", False, id="fp8_current-nonreentrant"),
+            pytest.param(
+                "fp8_current",
+                True,
+                id="fp8_current-reentrant",
+                marks=_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8,
+            ),
+            pytest.param(
+                "fp8_current",
+                False,
+                id="fp8_current-nonreentrant",
+                marks=_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8,
+            ),
             pytest.param(
                 "mxfp8",
                 True,
@@ -8228,6 +8403,7 @@ class TestHybridActivationRecompute:
 
     # ----- save_for_backward round-trip (unit-level) ----------------
 
+    @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_prepare_restore_roundtrip_is_identity(self):
         """Unit-level guarantee: the
         ``prepare_for_saving`` / ``restore_from_saved`` chain used by

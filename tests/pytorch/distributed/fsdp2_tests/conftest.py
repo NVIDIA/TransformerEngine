@@ -14,6 +14,7 @@ import pytest
 import torch
 import torch.distributed as dist
 from transformer_engine.pytorch import fp8
+from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
 
 # Ensure the correct CUDA device is active before _parametrize_recipes()
 # runs at collection time, since the session-scoped dist_init fixture
@@ -68,6 +69,20 @@ def _parametrize_hybrid_recipes():
     for name, check_fn in _HYBRID_RECIPE_CONFIGS:
         supported, reason = check_fn()
         marks = [pytest.mark.skipif(not supported, reason=reason)]
+        if name == "HybridFP8CurrentScaling" and not is_non_tn_fp8_gemm_supported():
+            marks.append(
+                pytest.mark.xfail(
+                    raises=pytest.RaisesExc(
+                        NotImplementedError,
+                        match="Columnwise-only per-tensor FP8 quantization is not implemented",
+                    ),
+                    strict=True,
+                    reason=(
+                        "Hopper does not yet support columnwise-only per-tensor FP8 "
+                        "quantization; tracked by NVIDIA/TransformerEngine#3158"
+                    ),
+                )
+            )
         params.append(pytest.param(name, id=name, marks=marks))
     return params
 

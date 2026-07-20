@@ -508,6 +508,13 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         names = self.fsdp_buffer_fields()
         block_len = self._FSDP_BLOCK_LEN
         m, n = self._fsdp_logical_mn()
+        if m % block_len != 0:
+            raise RuntimeError(
+                "FSDP2 cannot all-gather a 2-D Float8BlockwiseQTensor whose "
+                f"local flattened M dimension ({m}) is not a multiple of {block_len}; "
+                "the shard boundary splits a block-scale tile. Choose aligned shard "
+                "boundaries or use a supported non-blockwise recipe."
+            )
         m_tiles = (m + block_len - 1) // block_len
         last_tiles = (n + block_len - 1) // block_len
 
@@ -552,6 +559,27 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         block_len = self._FSDP_BLOCK_LEN
         direction = meta["direction"]
         data, scale = gathered
+        if direction not in ("rowwise", "columnwise"):
+            raise RuntimeError(f"Invalid Float8Block FSDP gather direction: {direction!r}")
+        if data is None or scale is None:
+            raise RuntimeError(
+                "Float8Block FSDP gathered data and scale buffers must both be present."
+            )
+
+        m_full = 1
+        for dim in data.shape[:-1]:
+            m_full *= dim
+        last_dim = data.size(-1) if data.dim() > 0 else 1
+        expected_scale_shape = (
+            (m_full + block_len - 1) // block_len,
+            (last_dim + block_len - 1) // block_len,
+        )
+        if tuple(scale.shape) != expected_scale_shape:
+            raise RuntimeError(
+                "Float8Block FSDP gathered scale geometry does not match gathered data: "
+                f"got scale shape {tuple(scale.shape)}, expected {expected_scale_shape} "
+                f"for gathered data shape {tuple(data.shape)}."
+            )
 
         if direction == "rowwise":
             last_dim = data.size(-1)

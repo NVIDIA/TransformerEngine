@@ -1935,6 +1935,10 @@ def test_fused_adam_hybrid_mxfp8_awkward_shard_shape():
     """
     from fsdp2_utils import get_hybrid_recipe_from_string
 
+    supported, reason = te.is_mxfp8_available(return_reason=True)
+    if not supported:
+        pytest.skip(f"MXFP8: {reason}")
+
     world_size, device = _get_dist_info()
 
     # FSDP2 shards a Linear weight of shape (out_features, in_features) along
@@ -2031,16 +2035,8 @@ def test_fused_adam_hybrid_mxfp8_awkward_shard_shape():
         _raise_collective_errors(errors, f"{recipe_name} awkward raw Hybrid all-gather")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=RuntimeError,
-    reason=(
-        "Tracked by #3158: gathering dim-0 shards that split a 128-row "
-        "Float8Block scale tile produces too many scale rows."
-    ),
-)
 def test_fused_adam_hybrid_float8_block_unaligned_shard_shape():
-    """Positive FSDP2 roundtrip for a shard that splits a 128-row scale tile."""
+    """Unaligned local shards are rejected before gathering incompatible scale tiles."""
     from transformer_engine.pytorch import fp8
     from fsdp2_utils import get_hybrid_recipe_from_string
 
@@ -2071,48 +2067,12 @@ def test_fused_adam_hybrid_float8_block_unaligned_shard_shape():
     model = _shard_model(model, world_size)
 
     x = torch.randn(128, in_features, dtype=torch.bfloat16, device=device)
-    with te.autocast(enabled=True, recipe=hybrid_recipe):
-        output = model(x)
-    output.sum().backward()
-
-    params = [
-        (name, param)
-        for name, param in model.named_parameters()
-        if isinstance(param, DTensor) and isinstance(param._local_tensor, HybridQuantizedTensor)
-    ]
-    local_count = torch.tensor([len(params)], dtype=torch.int64, device=device)
-    min_count = local_count.clone()
-    max_count = local_count.clone()
-    dist.all_reduce(min_count, dist.ReduceOp.MIN)
-    dist.all_reduce(max_count, dist.ReduceOp.MAX)
-    _collective_assert(
-        min_count.item() == max_count.item() and min_count.item() > 0,
-        "Float8Block unaligned Hybrid parameter count range is "
-        f"({min_count.item()}, {max_count.item()})",
-    )
-
-    errors = []
-    for name, param in params:
-        local = param._local_tensor
-        reconstructed = _manual_reconstruct_hybrid(local, param_name=name, world_size=world_size)
-        public_full = param.full_tensor()
-        _record_exact(
-            errors,
-            public_full,
-            reconstructed.dequantize(),
-            f"{name}: public full_tensor vs Hybrid reconstruction",
-        )
-        for direction in ("rowwise", "columnwise"):
-            _check_hybrid_direction_buffers(
-                getattr(local, f"_{direction}_storage"),
-                getattr(reconstructed, f"_{direction}_storage"),
-                Float8BlockwiseQTensorStorage,
-                direction=direction,
-                param_name=name,
-                world_size=world_size,
-                errors=errors,
-            )
-    _raise_collective_errors(errors, "Float8Block unaligned raw Hybrid all-gather")
+    with pytest.raises(
+        RuntimeError,
+        match="local flattened M dimension.*not a multiple of 128",
+    ):
+        with te.autocast(enabled=True, recipe=hybrid_recipe):
+            model(x)
 
 
 def test_hybrid_dcp_output_parity(hybrid_recipe_name):

@@ -29,12 +29,30 @@ from transformer_engine.pytorch.tensor.identity_tensor import IdentityTensor
 from transformer_engine.pytorch.tensor.storage.identity_tensor_storage import (
     IdentityTensorStorage,
 )
+from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
 
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
 fp8_block_scaling_available, reason_for_no_fp8_block_scaling = te.is_fp8_block_scaling_available(
     return_reason=True
+)
+
+_COLUMNWISE_ONLY_PER_TENSOR_FP8_ERROR = (
+    "Columnwise-only per-tensor FP8 quantization is not implemented"
+)
+
+_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8 = pytest.mark.xfail(
+    condition=not is_non_tn_fp8_gemm_supported(),
+    raises=pytest.RaisesExc(
+        NotImplementedError,
+        match=_COLUMNWISE_ONLY_PER_TENSOR_FP8_ERROR,
+    ),
+    strict=True,
+    reason=(
+        "Hopper does not yet support columnwise-only per-tensor FP8 quantization; "
+        "tracked by NVIDIA/TransformerEngine#3158"
+    ),
 )
 
 
@@ -935,6 +953,7 @@ class TestIdentityQuantizerUnit:
         torch.testing.assert_close(weight.dequantize(), expected, rtol=0.0, atol=0.0)
 
     @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+    @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_quantize_master_weights_hybrid_identity_fp8_current(self):
         from transformer_engine.pytorch.tensor.utils import (
             post_all_gather_processing,
@@ -1529,6 +1548,7 @@ class TestIdentityLinear:
         for g_id, g_ref in zip(wg_id, wg_ref):
             torch.testing.assert_close(g_id, g_ref, rtol=0.0, atol=0.0)
 
+    @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_fwd_hp_bwd_fp8_forward_bitwise(self):
         """High-precision forward must be bitwise-equal to BF16 forward; the
         backward runs in FP8 (finite, close to BF16 within a loose tolerance)."""

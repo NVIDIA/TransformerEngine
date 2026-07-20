@@ -17,6 +17,26 @@ namespace transformer_engine::pytorch {
 
 namespace {
 
+/*! @brief Reject unsupported columnwise-only per-tensor FP8 quantization
+ *
+ * Per-tensor FP8 uses the legacy cast-transpose kernel whenever columnwise
+ * output is requested. That kernel requires both rowwise and columnwise
+ * output buffers, so a transpose-only output cannot be produced without an
+ * otherwise-unused rowwise allocation and write. Keep this limitation
+ * explicit until the kernel supports independently selecting its outputs.
+ */
+void check_per_tensor_fp8_quantize_output(const TensorWrapper& output) {
+  const auto rowwise_data = output.get_rowwise_data();
+  const auto columnwise_data = output.get_columnwise_data();
+  if (rowwise_data.data_ptr == nullptr && columnwise_data.data_ptr != nullptr) {
+    PyErr_SetString(
+        PyExc_NotImplementedError,
+        "Columnwise-only per-tensor FP8 quantization is not implemented; "
+        "the cast-transpose kernel requires rowwise output storage.");
+    throw py::error_already_set();
+  }
+}
+
 /*! @brief Resolve an optional device to a concrete CUDA device
  *
  * If no device is provided, uses the current CUDA device.
@@ -615,6 +635,7 @@ void Float8Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
   if (input.numel() == 0) {
     return;
   }
+  check_per_tensor_fp8_quantize_output(out);
   QuantizationConfigWrapper quant_config;
   if (noop_flag) {
     quant_config.set_noop_tensor(noop_flag->data());
@@ -975,6 +996,7 @@ void Float8CurrentScalingQuantizer::quantize_impl(const TensorWrapper& input, Te
     out.set_scale(nullptr, DType::kFloat32, out.defaultShape);
     return;
   }
+  check_per_tensor_fp8_quantize_output(out);
 
   // Quantization configs
   QuantizationConfigWrapper quant_config;

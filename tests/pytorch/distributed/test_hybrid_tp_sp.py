@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 import torch
 import transformer_engine.pytorch as te
+from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
 
 if torch.cuda.device_count() < 2:
     pytest.skip(
@@ -25,6 +26,15 @@ nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
 TEST_ROOT = Path(__file__).parent.resolve()
 NUM_PROCS = min(2, torch.cuda.device_count())
 LAUNCH_CMD = ["torchrun", f"--nproc_per_node={NUM_PROCS}"]
+
+xfail_hopper_columnwise_per_tensor_fp8 = pytest.mark.xfail(
+    condition=not is_non_tn_fp8_gemm_supported(),
+    strict=True,
+    reason=(
+        "Hopper does not yet support columnwise-only per-tensor FP8 quantization; "
+        "tracked by NVIDIA/TransformerEngine#3158"
+    ),
+)
 
 
 def _run_test(quantization: str, test: str = "all"):
@@ -44,42 +54,49 @@ def _run_test(quantization: str, test: str = "all"):
 
 
 @pytest.mark.skipif(not fp8_available, reason=f"FP8: {reason_for_no_fp8}")
+@xfail_hopper_columnwise_per_tensor_fp8
 def test_hybrid_fp8_linear():
     """Linear TP/SP coverage for hybrid FP8 current scaling."""
     _run_test("hybrid_fp8", "linear")
 
 
 @pytest.mark.skipif(not fp8_available, reason=f"FP8: {reason_for_no_fp8}")
+@xfail_hopper_columnwise_per_tensor_fp8
 def test_hybrid_fp8_linear_vs_vanilla():
     """Same-topology Linear parity against Float8CurrentScaling."""
     _run_test("hybrid_fp8", "linear_vs_vanilla")
 
 
 @pytest.mark.skipif(not fp8_available, reason=f"FP8: {reason_for_no_fp8}")
+@xfail_hopper_columnwise_per_tensor_fp8
 def test_hybrid_fp8_layernorm_linear_vs_vanilla():
     """Same-topology LayerNormLinear parity against vanilla FP8."""
     _run_test("hybrid_fp8", "layernorm_linear_vs_vanilla")
 
 
 @pytest.mark.skipif(not fp8_available, reason=f"FP8: {reason_for_no_fp8}")
+@xfail_hopper_columnwise_per_tensor_fp8
 def test_hybrid_fp8_layernorm_mlp_vs_vanilla():
     """Same-topology LayerNormMLP parity against vanilla FP8."""
     _run_test("hybrid_fp8", "layernorm_mlp_vs_vanilla")
 
 
 @pytest.mark.skipif(not fp8_available, reason=f"FP8: {reason_for_no_fp8}")
+@xfail_hopper_columnwise_per_tensor_fp8
 def test_hybrid_fp8_layernorm_linear():
     """LayerNormLinear TP/SP coverage for hybrid FP8."""
     _run_test("hybrid_fp8", "layernorm_linear")
 
 
 @pytest.mark.skipif(not fp8_available, reason=f"FP8: {reason_for_no_fp8}")
+@xfail_hopper_columnwise_per_tensor_fp8
 def test_hybrid_fp8_layernorm_mlp():
     """LayerNormMLP TP/SP coverage for hybrid FP8."""
     _run_test("hybrid_fp8", "layernorm_mlp")
 
 
 @pytest.mark.skipif(not fp8_available, reason=f"FP8: {reason_for_no_fp8}")
+@xfail_hopper_columnwise_per_tensor_fp8
 def test_hybrid_fp8_transformer_layer():
     """TransformerLayer TP/SP coverage for hybrid FP8."""
     _run_test("hybrid_fp8", "transformer_layer")
