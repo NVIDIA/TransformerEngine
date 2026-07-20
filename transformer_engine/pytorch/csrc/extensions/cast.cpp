@@ -276,7 +276,7 @@ void compute_grouped_fp8_current_scaling_amax_and_scale(
 py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const size_t num_tensors,
                           std::optional<at::Tensor> first_dims, std::optional<at::Tensor> last_dims,
                           std::optional<at::Tensor> tensor_offsets,
-                          std::optional<at::Tensor> noop_flag) {
+                          std::optional<at::Tensor> noop_flag, const py::object &output) {
   using namespace transformer_engine::pytorch::detail;
   init_extension();
 
@@ -305,11 +305,34 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
                                         GetTransformerEngineDType(tensor.scalar_type()),
                                         std::vector<size_t>{static_cast<size_t>(tensor.numel())});
 
-  // Create output GroupedTensor.
-  auto [grouped_output_tensor_cpp, grouped_output_py] = quantizer_cpp->create_grouped_tensor(
-      num_tensors, logical_shape, GetTransformerEngineDType(tensor.scalar_type()),
-      py::reinterpret_borrow<py::object>(quantizer), first_dims, last_dims, tensor_offsets,
-      logical_first_dim, logical_last_dim);
+  // Create a GroupedTensor or reuse an existing destination. Reusing the destination is
+  // required for weight caching and CUDA graph replay because captured GEMMs retain the
+  // original data and scale pointers.
+  py::object grouped_output_py;
+  auto grouped_output_tensor_cpp = [&]() -> GroupedTensorWrapper {
+    if (!output.is_none()) {
+      NVTE_CHECK(!first_dims.has_value() && !last_dims.has_value() && !tensor_offsets.has_value(),
+                 "group_quantize: output reuse currently requires uniform tensor shapes.");
+      NVTE_CHECK(output.attr("num_tensors").cast<size_t>() == num_tensors,
+                 "group_quantize: output has a different number of tensors.");
+      NVTE_CHECK(output.attr("logical_shape").cast<std::vector<size_t>>() == logical_shape,
+                 "group_quantize: output has an incompatible logical shape.");
+      py::object output_quantizer = output.attr("quantizer");
+      NVTE_CHECK(!output_quantizer.is_none(),
+                 "group_quantize: output must have quantized storage.");
+      NVTE_CHECK(output_quantizer.is(quantizer),
+                 "group_quantize: output must have been created by the same quantizer.");
+      grouped_output_py = output;
+      return GroupedTensorFromPyTorchGroupedTensor(output);
+    }
+
+    auto result = quantizer_cpp->create_grouped_tensor(
+        num_tensors, logical_shape, GetTransformerEngineDType(tensor.scalar_type()),
+        py::reinterpret_borrow<py::object>(quantizer), first_dims, last_dims, tensor_offsets,
+        logical_first_dim, logical_last_dim);
+    grouped_output_py = std::move(result.second);
+    return std::move(result.first);
+  }();
 
   // dispatch to scaling methods
   enum class GroupedQuantizationMode {
