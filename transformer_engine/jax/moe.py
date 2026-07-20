@@ -386,11 +386,6 @@ def _ffn_bwd_global(
     recv_w_flat = jax.lax.with_sharding_constraint(recv_w_flat, flat_group_sharding)
     group_sizes = jax.lax.with_sharding_constraint(group_sizes, flat_group_sharding)
     fc1_quantizer_set, fc2_quantizer_set = quantizer_sets
-    # cuBLAS grouped_gemm skips size_g == 0 groups without zero-filling
-    # the output slice; mask 0-token-expert wgrads to zero so the
-    # optimizer never sees uninit memory.
-    wgrad_group_active = (group_sizes > 0)[:, None, None]
-
     # wo bwd
     casted_d_eo = tex.grouped_quantize(
         d_eo_2d, fc2_quantizer_set.dgrad, group_sizes, flatten_axis=-1
@@ -408,7 +403,6 @@ def _ffn_bwd_global(
         _casted_d_eo_rhs,
         contracting_dims=((0,), (0,)),
     )
-    d_wo = jnp.where(wgrad_group_active, d_wo, jnp.zeros_like(d_wo))
     d_wo = jax.lax.with_sharding_constraint(d_wo, grouped_weight_sharding)
     d_wo_bias = tex.grouped_dbias(d_eo_2d, group_sizes) if has_bias else None
     if has_bias:
@@ -416,20 +410,17 @@ def _ffn_bwd_global(
 
     act_fn = _convert_to_activation_function(activation_type)
     if apply_topk_weights_early:
-        # intermediate' = intermediate * w * mask. Split the cotangent
-        # across both factors before the activation bwd consumes it. Padded
-        # recv slots may still be NaN in the saved activation residuals, so
-        # use zero-filled residuals on inactive rows before the activation VJP.
+        # intermediate' = intermediate * w. The subsequent dgrad and EP
+        # operations consume group_sizes, so they skip padded ragged rows.
         w_b = recv_w_flat[:, None].astype(d_intermediate.dtype)
-        active = (recv_w_flat != 0)[:, None]
-        gate_proj_for_bwd = jnp.where(active, gate_proj_out, jnp.zeros_like(gate_proj_out))
-        up_proj_for_bwd = jnp.where(active, up_proj_out, jnp.zeros_like(up_proj_out))
-        intermediate_unweighted = act_fn(gate_proj_for_bwd) * up_proj_for_bwd
+        gate_proj_for_bwd = gate_proj_out
+        up_proj_for_bwd = up_proj_out
+        intermediate_unweighted = act_fn(gate_proj_out) * up_proj_out
         d_recv_w_from_intermediate = jnp.sum(
             d_intermediate * intermediate_unweighted,
             axis=-1,
         ).astype(recv_w_flat.dtype)
-        d_intermediate = jnp.where(active, d_intermediate * w_b, jnp.zeros_like(d_intermediate))
+        d_intermediate = d_intermediate * w_b
     else:
         gate_proj_for_bwd = gate_proj_out
         up_proj_for_bwd = up_proj_out
@@ -464,7 +455,6 @@ def _ffn_bwd_global(
         casted_d_combined.get_tensor(usage=TensorUsage.RHS),
         contracting_dims=((0,), (0,)),
     )
-    d_wi_combined = jnp.where(wgrad_group_active, d_wi_combined, jnp.zeros_like(d_wi_combined))
     d_wi_combined = jax.lax.with_sharding_constraint(d_wi_combined, grouped_weight_sharding)
     d_wi_0, d_wi_1 = jnp.split(d_wi_combined, 2, axis=-1)
     if has_bias:
@@ -860,14 +850,10 @@ def _moe_bwd_rule(
         d_expert_outputs = grad_pre_combine
         d_recv_w_from_combine = jnp.zeros_like(ctx.recv_topk_weights)
     else:
-        # Reverse the late-weighting multiply. Padded expert-major rows are
-        # part of the physical grouped-GEMM ranges, so write literal zero
-        # cotangents for inactive rows instead of relying on NaN * 0.
+        # Reverse the late-weighting multiply. The subsequent dgrad and EP
+        # operations consume group_sizes, so they skip padded ragged rows.
         w = ctx.recv_topk_weights[..., None].astype(grad_pre_combine.dtype)
-        mask_bool = (ctx.recv_topk_weights != 0)[..., None]
-        d_expert_outputs = jnp.where(
-            mask_bool, grad_pre_combine * w, jnp.zeros_like(grad_pre_combine)
-        )
+        d_expert_outputs = grad_pre_combine * w
         d_recv_w_from_combine = (grad_pre_combine * ctx.expert_outputs).sum(axis=-1)
         d_recv_w_from_combine = d_recv_w_from_combine.astype(ctx.recv_topk_weights.dtype)
 
