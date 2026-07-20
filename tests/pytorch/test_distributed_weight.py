@@ -150,6 +150,12 @@ def test_backward_noop_on_plain_tensor():
     assert materialize_weight_for_backward(plain) == [plain]
 
 
+def test_backward_noop_on_plain_weight_list():
+    """A non-distributed weight list passes through unchanged (all N returned)."""
+    ws = [torch.nn.Parameter(torch.randn(2, 2)) for _ in range(3)]
+    assert materialize_weight_for_backward(ws) == ws
+
+
 @pytest.mark.parametrize("group_size", [1, 2])
 def test_finalize_grads_dispatches(group_size):
     w = FakeDistributedWeight(group_size=group_size)

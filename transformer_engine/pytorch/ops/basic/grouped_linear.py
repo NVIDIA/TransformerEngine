@@ -51,6 +51,12 @@ from .._common import (
     view_main_grad_as_grouped_buffer,
 )
 from ..op import BasicOperation, OperationContext
+from ...distributed_weight import (
+    finalize_weight_grads,
+    is_distributed_weight,
+    materialize_weight_for_backward,
+    materialize_weight_for_forward,
+)
 from ...tensor import GroupedTensor, GroupedTensorStorage
 from ...triton.grouped_dbias_dscales import (
     compute_grouped_dbias,
@@ -898,6 +904,26 @@ class GroupedLinear(BasicOperation):
             return [self.weight]
         return [getattr(self, f"weight{idx}") for idx in range(self.num_groups)]
 
+    def _forward_weight_list(self) -> list[torch.Tensor]:
+        """Per-expert forward weights, materialized (all-gathered) when distributed."""
+        weights = [getattr(self, f"weight{idx}") for idx in range(self.num_groups)]
+        if is_distributed_weight(weights[0]):
+            weights = materialize_weight_for_forward(weights)
+        return weights
+
+    def _backward_weight_setup(self):
+        """Return ``(origin_weights, is_dist_weight, dgrad_weights)``; dgrad weights are the
+        re-materialized (all-gathered) weights when distributed, else ``None``."""
+        origin_weights = self._get_weight_tensors()
+        is_dist_weight = is_distributed_weight(origin_weights[0])
+        dgrad_weights = materialize_weight_for_backward(origin_weights) if is_dist_weight else None
+        return origin_weights, is_dist_weight, dgrad_weights
+
+    def _is_distributed_weight(self) -> bool:
+        """Whether this op's weights are distributed (materialized per fwd/bwd, not saved)."""
+        leader = self.weight if self.single_grouped_weight else self.weight0
+        return is_distributed_weight(leader)
+
     def _get_grouped_bias_for_gemm(
         self,
         dtype: torch.dtype,
@@ -1143,7 +1169,7 @@ class GroupedLinear(BasicOperation):
             if weights is None:
                 weights = self.weight.split_into_quantized_tensors()
         else:
-            weights = [getattr(self, f"weight{idx}") for idx in range(num_groups)]
+            weights = self._forward_weight_list()  # materialized when distributed
         bs = None
         if has_bias:
             bs = self._get_bias_tensors(dtype)
@@ -1198,7 +1224,8 @@ class GroupedLinear(BasicOperation):
                 out_splits[i].add_(bs[i].unsqueeze(0) * scales_splits[i].unsqueeze(-1))
 
         # Prepare weight tensors for backward pass
-        if not input_requires_grad:
+        # Distributed weights are re-materialized in backward, so we never save the gathered weight
+        if not input_requires_grad or self._is_distributed_weight():
             ws = [None] * num_groups
         elif with_quantized_compute:
             for w, weight_param in zip(ws, weights):
@@ -1290,7 +1317,7 @@ class GroupedLinear(BasicOperation):
         else:
             # Discrete weights
             grouped_weights = self._get_discrete_weights_for_gemm(
-                [getattr(self, f"weight{idx}") for idx in range(num_groups)],
+                self._forward_weight_list(),
                 weight_quantizers,
                 columnwise_usage=input_requires_grad,
                 with_quantized_compute=with_quantized_compute,
@@ -1333,7 +1360,8 @@ class GroupedLinear(BasicOperation):
             bias_scale=bias_scale,
         )
 
-        if not input_requires_grad:
+        # Distributed weights are re-materialized in backward, so never save the gathered weight.
+        if not input_requires_grad or self._is_distributed_weight():
             grouped_weights = None if self.single_grouped_weight else [None] * num_groups
 
         if not weight_requires_grad:
@@ -1393,7 +1421,7 @@ class GroupedLinear(BasicOperation):
     ]:
         num_groups = self.num_groups
         has_bias = self.has_bias
-        weights = self._get_weight_tensors()
+        weights, is_dist_weight, dist_dgrad_weights = self._backward_weight_setup()
         device = weights[0].device
 
         # Saved tensors from forward pass. Layout:
@@ -1445,7 +1473,8 @@ class GroupedLinear(BasicOperation):
             grad_biases = [dbias_packed[idx].to(dtype=ctx.dtype) for idx in range(num_groups)]
 
         # Initialize grad weight buffers.
-        accumulate_into_main_grad = self._accumulate_into_main_grad
+        # Distributed weights reduce their own grads (finalize); never accumulate into main_grad.
+        accumulate_into_main_grad = self._accumulate_into_main_grad and not is_dist_weight
         grad_weights = [None] * num_groups
         final_weight_grads: list[Optional[torch.Tensor]] = (
             [None] if self.single_grouped_weight else [None] * num_groups
@@ -1495,7 +1524,7 @@ class GroupedLinear(BasicOperation):
                 device=device,
             )
             general_grouped_gemm(
-                ws,
+                dist_dgrad_weights if is_dist_weight else ws,
                 dys,
                 [grad_input],
                 [None] * num_groups,  # quantization_params
@@ -1540,11 +1569,15 @@ class GroupedLinear(BasicOperation):
         if not delay_wgrad:
             clear_tensor_data(*xs)
 
+        # Distributed weights: finalize (e.g. reduce-scatter) the freshly computed wgrads per shard.
+        if ctx.weight_requires_grad and is_dist_weight:
+            assert not delay_wgrad, "delayed wgrad unsupported with distributed weights."
+            final_weight_grads = finalize_weight_grads(weights[0], grad_weights)
         # Megatron-LM wgrad fusion: regardless of overwrite vs. accumulate,
         # signal that ``main_grad`` already carries the wgrad and replace
         # ``.grad`` with a dummy so DDP/FSDP hooks won't add ``.grad`` into
         # ``main_grad`` again.
-        if ctx.weight_requires_grad and self._accumulate_into_main_grad:
+        elif ctx.weight_requires_grad and self._accumulate_into_main_grad:
             final_weight_grads = get_dummy_wgrads_for_params(weights)
         elif ctx.weight_requires_grad and delay_wgrad:
             final_weight_grads = [None] if self.single_grouped_weight else [None] * num_groups
@@ -1578,7 +1611,7 @@ class GroupedLinear(BasicOperation):
     ]:
         num_groups = self.num_groups
         has_bias = self.has_bias
-        weights = self._get_weight_tensors()
+        weights, is_dist_weight, dist_dgrad_weights = self._backward_weight_setup()
         device = weights[0].device
         dtype = ctx.dtype
 
@@ -1679,7 +1712,7 @@ class GroupedLinear(BasicOperation):
                 tensor_offsets=base_split_offsets * self.in_features,
             )
             general_grouped_gemm_for_grouped_tensor(
-                ws,
+                dist_dgrad_weights if is_dist_weight else ws,
                 grouped_dy,
                 grouped_grad_input,
                 layout="NN",
@@ -1725,7 +1758,8 @@ class GroupedLinear(BasicOperation):
                 final_weight_grads[0] = grouped_wgrad.rowwise_data.view(num_groups, *weight_shape)
                 wgrad_output = grouped_wgrad
             else:
-                if self._accumulate_into_main_grad:
+                # Distributed weights finalize wgrads (below); never accumulate into main_grad.
+                if self._accumulate_into_main_grad and not is_dist_weight:
                     final_weight_grads = [
                         get_main_grad_from_param(w, op_label="GroupedLinear") for w in weights
                     ]
@@ -1755,11 +1789,15 @@ class GroupedLinear(BasicOperation):
             else:
                 wgrad_gemm(grouped_x, grouped_dy, wgrad_output)
 
+        # Distributed weights: finalize (e.g. reduce-scatter) the freshly computed wgrads per shard.
+        if ctx.weight_requires_grad and is_dist_weight:
+            assert not delay_wgrad, "delayed wgrad unsupported with distributed weights."
+            final_weight_grads = finalize_weight_grads(weights[0], final_weight_grads)
         # Megatron-LM wgrad fusion: regardless of overwrite vs. accumulate,
         # signal that ``main_grad`` already carries the wgrad and replace
         # ``.grad`` with a dummy so DDP/FSDP hooks won't add ``.grad`` into
         # ``main_grad`` again.
-        if ctx.weight_requires_grad and self._accumulate_into_main_grad:
+        elif ctx.weight_requires_grad and self._accumulate_into_main_grad:
             final_weight_grads = get_dummy_wgrads_for_params(weights)
         elif ctx.weight_requires_grad and delay_wgrad:
             final_weight_grads = [None] if self.single_grouped_weight else [None] * num_groups

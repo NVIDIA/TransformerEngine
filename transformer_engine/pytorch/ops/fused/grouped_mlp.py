@@ -1782,8 +1782,9 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 glu_clamp_min=self._cudnn_glu_clamp_min,
             )
 
-        if is_distributed_weight(fc2_op.weight0):
-            grouped_fc2_weight = materialize_weight_for_backward(fc2_op.weight0)
+        fc2_leader = fc2_op.weight if fc2_op.single_grouped_weight else fc2_op.weight0
+        if is_distributed_weight(fc2_leader):
+            grouped_fc2_weight = materialize_weight_for_backward(fc2_leader)
 
         if fc2_op.single_grouped_weight:
             # Clone and swizzle scales for GEMM
@@ -2009,8 +2010,9 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         if fc1_ctx.input_requires_grad:
             in_shape = out_shape[:-1] + [fc1_weight_shape[1]]
 
-            if is_distributed_weight(fc1_op.weight0):
-                grouped_fc1_weight = materialize_weight_for_backward(fc1_op.weight0)
+            fc1_leader = fc1_op.weight if fc1_op.single_grouped_weight else fc1_op.weight0
+            if is_distributed_weight(fc1_leader):
+                grouped_fc1_weight = materialize_weight_for_backward(fc1_leader)
 
             if use_nvfp4:
                 grad_input = torch.empty(in_shape, dtype=dtype, device=device)
