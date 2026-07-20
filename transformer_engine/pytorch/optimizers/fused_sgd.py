@@ -12,7 +12,7 @@ import torch
 from torch.optim.optimizer import Optimizer, required
 
 import transformer_engine_torch as tex
-from .multi_tensor_apply import filter_empty_tensor_lists, multi_tensor_applier
+from .multi_tensor_apply import multi_tensor_applier
 
 
 class FusedSGD(Optimizer):
@@ -295,22 +295,19 @@ class FusedSGD(Optimizer):
             for _, (launch_set, first_run) in enumerate(zip(launch_sets, first_runs)):
                 assert len(launch_set[0]) == len(launch_set[1])
                 assert len(launch_set[0]) == len(launch_set[2])
-                # Empty tensor slots are no-ops for SGD. If every slot was removed,
-                # skip the C++ wrapper because it reads tensor_lists[0][0].
-                if filter_empty_tensor_lists(launch_set):
-                    multi_tensor_applier(
-                        self.multi_tensor_sgd,
-                        self._dummy_overflow_buf,
-                        launch_set,
-                        weight_decay,
-                        momentum,
-                        dampening,
-                        group["lr"],
-                        nesterov,
-                        first_run,
-                        self.wd_after_momentum,
-                        1.0 / self.most_recent_scale,
-                    )
+                multi_tensor_applier(
+                    self.multi_tensor_sgd,
+                    self._dummy_overflow_buf,
+                    launch_set,
+                    weight_decay,
+                    momentum,
+                    dampening,
+                    group["lr"],
+                    nesterov,
+                    first_run,
+                    self.wd_after_momentum,
+                    1.0 / self.most_recent_scale,
+                )
 
         self.most_recent_scale = 1.0
         self.scale_set_by_backward = False
