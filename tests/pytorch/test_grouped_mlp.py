@@ -23,6 +23,10 @@ from transformer_engine.pytorch.ops.basic.grouped_linear import (
     OUTPUT_BUFFER_KEY,
     GRAD_INPUT_BUFFER_KEY,
 )
+from transformer_engine.pytorch.ops.fused.grouped_linear_activation import (
+    BackwardGroupedLinearScaledActivation,
+    ForwardScaledActivationGroupedLinear,
+)
 from transformer_engine.pytorch import (
     QuantizedTensor,
     Float8CurrentScalingQuantizer,
@@ -71,6 +75,15 @@ if mxfp8_available:
     _grouped_mlp_quantization_list.append("mxfp8")
 if nvfp4_available:
     _grouped_mlp_quantization_list.append("nvfp4_rht")
+
+# Quantization recipes for ScaledActivation + GroupedLinear fusion
+_grouped_mlp_act_grouped_linear_quantization_list: list[str] = []
+if fp8_available:
+    _grouped_mlp_act_grouped_linear_quantization_list.append("fp8_current_scaling")
+if mxfp8_available:
+    _grouped_mlp_act_grouped_linear_quantization_list.append("mxfp8")
+if nvfp4_available:
+    _grouped_mlp_act_grouped_linear_quantization_list.append("nvfp4_rht")
 
 
 @pytest.fixture(autouse=True, scope="function")
@@ -999,14 +1012,15 @@ class TestGroupedMLPFusedOp:
                 and glu_interleave_size is None
             )
         )
+        forward_ops = module._module_groups[0]._forward_ops
+        backward_ops = module._module_groups[0]._backward_ops
+        full_grouped_mlp_fusion = False
         if expected_grouped_mlp_fusion:
             if activation_is_glu:
                 fused_cls = te.ops.fused.GroupedMLP_CuTeGEMMGLU
             else:
                 fused_cls = te.ops.fused.GroupedMLP_CuTeGEMMUnary
             if fused_cls.is_supported():
-                forward_ops = module._module_groups[0]._forward_ops
-                backward_ops = module._module_groups[0]._backward_ops
                 assert len(forward_ops) == 1
                 assert len(backward_ops) == 1
                 assert isinstance(
@@ -1014,6 +1028,22 @@ class TestGroupedMLPFusedOp:
                     fused_cls,
                 )
                 assert backward_ops[0][0] is forward_ops[0][0]
+                full_grouped_mlp_fusion = True
+
+        # When the full FC1 + activation + FC2 fusion is unavailable, verify
+        # that ScaledActivation + GroupedLinear fusions cover both boundaries
+        # whenever grouped quantized compute is supported.
+        act_grouped_linear_fusion_expected = (
+            not full_grouped_mlp_fusion
+            and te.ops.fused.act_grouped_linear_fusion_supported(fc2, module[1], recipe)
+            and te.ops.fused.act_grouped_linear_fusion_supported(fc1, module[1], recipe)
+        )
+        assert any(
+            isinstance(op, ForwardScaledActivationGroupedLinear) for op, _ in forward_ops
+        ) == act_grouped_linear_fusion_expected
+        assert any(
+            isinstance(op, BackwardGroupedLinearScaledActivation) for op, _ in backward_ops
+        ) == act_grouped_linear_fusion_expected
 
         # Loose tols for sanity checking
         tols = {"rtol": 0.125, "atol": 0.25}
@@ -1075,6 +1105,25 @@ class TestGroupedMLPFusedOp:
         elif single_grouped_weight:
             assert_close(fc1.weight.grad, fc1_w_ref_grad, **tols)
             assert_close(fc2.weight.grad, fc2_w_ref_grad, **tols)
+
+    @pytest.mark.parametrize("quantization", _grouped_mlp_act_grouped_linear_quantization_list)
+    def test_grouped_mlp_act_grouped_linear_fusion(
+        self,
+        *,
+        quantization: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Exercise ScaledActivation + GroupedLinear fusion without the full CuTe DSL MLP fusion."""
+        monkeypatch.setenv("NVTE_CUTEDSL_FUSED_GROUPED_MLP", "0")
+        self.test_grouped_mlp(
+            group_size=2,
+            bias=False,
+            hidden_size=128,
+            quantization=quantization,
+            single_grouped_weight=False,
+            split_alignment=128,
+            activation="scaled_swiglu",
+        )
 
     @pytest.mark.parametrize("bias", (False, True))
     @pytest.mark.parametrize("quantization", _grouped_mlp_quantization_list)
