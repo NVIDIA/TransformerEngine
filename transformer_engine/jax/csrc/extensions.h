@@ -117,12 +117,15 @@ pybind11::tuple GetNormBackwardWorkspaceSizes(size_t batch_size, size_t hidden_s
 
 // Quantization
 XLA_FFI_DECLARE_HANDLER_SYMBOL(DBiasQuantizeHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(DBiasQuantizeInitializeHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedQuantizeHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedQuantizeV2Handler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedQuantizeV2InitializeHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(DequantizeHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(DequantizeInitializeHandler);
 
 pybind11::tuple GetDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                DType in_dtype, DType out_dtype, DType scale_dtype,
@@ -131,21 +134,29 @@ pybind11::tuple GetDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hidden_
 
 // Softmax
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledSoftmaxForwardHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledSoftmaxForwardInitializeHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledSoftmaxBackwardHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledSoftmaxBackwardInitializeHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledMaskedSoftmaxForwardHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledMaskedSoftmaxForwardInitializeHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledMaskedSoftmaxBackwardHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledMaskedSoftmaxBackwardInitializeHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledUpperTriangMaskedSoftmaxForwardHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledUpperTriangMaskedSoftmaxForwardInitializeHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledUpperTriangMaskedSoftmaxBackwardHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledUpperTriangMaskedSoftmaxBackwardInitializeHandler);
 
 // Attention
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnForwardHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnForwardInitializeHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnBackwardHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnBackwardInitializeHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnScoreModForwardHandler);
 
@@ -176,7 +187,9 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
 
 // GEMM
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GemmHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(GemmInitializeHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GemmV2Handler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(GemmV2InitializeHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(CollectiveGemmInitHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GemmInitV2Handler);
 
@@ -184,6 +197,7 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(GemmInitV2Handler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmD2HGroupSizesHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmV2Handler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmV2InitializeHandler);
 
 // Amax
 XLA_FFI_DECLARE_HANDLER_SYMBOL(RHTAmaxCalculationInitializeHandler);
@@ -200,9 +214,13 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(CublasHandleInitHandler);
 
 // Router
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionForwardHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionForwardInitializeHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionBackwardHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionBackwardInitializeHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedMoEAuxLossForwardHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedMoEAuxLossForwardInitializeHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedMoEAuxLossBackwardHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedMoEAuxLossBackwardInitializeHandler);
 
 // Bootstrap EP (eager NCCL comm init); anchor released by ReleaseEpResources.
 // max_token_dtype is the NVTEDType enum value (int) for the widest token dtype
@@ -228,6 +246,7 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(EpCombineBwdHandler);
 
 // TopK
 XLA_FFI_DECLARE_HANDLER_SYMBOL(TopkHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(TopkInitializeHandler);
 pybind11::tuple GetTopkWorkspaceSizes(int batch_size, int seq_len, int k);
 
 }  // namespace jax

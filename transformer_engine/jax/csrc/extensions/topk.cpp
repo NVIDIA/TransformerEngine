@@ -76,6 +76,23 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(TopkHandler, TopkFFI,
                                   .Attr<int64_t>("k_value"),
                               FFI_CudaGraph_Traits);
 
+Error_Type TopkInitializeFFI(cudaStream_t stream, Buffer_Type keys_in_buf, Buffer_Type lengths_buf,
+                             Result_Type keys_out_buf, Result_Type indices_out_buf,
+                             Result_Type workspace_buf, int64_t k_value) {
+  return wrapInStreamCapture(std::function(TopkFFI), stream, keys_in_buf, lengths_buf, keys_out_buf,
+                             indices_out_buf, workspace_buf, k_value);
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(TopkInitializeHandler, TopkInitializeFFI,
+                              FFI::Bind<FFI_Initialize>()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // keys_in
+                                  .Arg<Buffer_Type>()      // lengths
+                                  .Ret<Buffer_Type>()      // keys_out
+                                  .Ret<Buffer_Type>()      // indices_out
+                                  .Ret<Buffer_Type>()      // workspace
+                                  .Attr<int64_t>("k_value"));
+
 // ---------------------------------------------------------------------------
 // Workspace-size query exposed to Python
 // ---------------------------------------------------------------------------
