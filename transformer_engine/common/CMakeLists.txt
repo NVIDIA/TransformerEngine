@@ -265,6 +265,7 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
      cast/cast_grouped.cu
      cast/cast_grouped_dbias.cu
      gemm/cutlass_grouped_gemm.cu
+     gemm/nvfp4_cutlass_grouped_gemm.cu
      hadamard_transform/group_hadamard_transform.cu
      hadamard_transform/graph_safe_group_hadamard_transform.cu
      hadamard_transform/hadamard_transform.cu
@@ -346,6 +347,7 @@ set_property(
 # CUTLASS kernels could cause hang in debug build
 set(CUTLASS_KERNEL_SOURCES
     gemm/cutlass_grouped_gemm.cu
+    gemm/nvfp4_cutlass_grouped_gemm.cu
     hadamard_transform/group_hadamard_transform_cast_fusion.cu
     hadamard_transform/group_row_cast_col_hadamard_transform_cast_fusion.cu
     hadamard_transform/hadamard_transform_cast_fusion.cu)

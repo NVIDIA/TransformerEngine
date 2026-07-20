@@ -298,6 +298,54 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
                             bool accumulate, bool use_split_accumulator, int math_sm_count,
                             cudaStream_t stream);
 
+/*! \brief Compute the per-group second-level scale (alpha) for a per-tensor NVFP4 grouped GEMM.
+ *
+ * Benchmark-only helper. Mirrors the per-expert alpha computation that the
+ * production dispatch (nvte_multi_tensor_gemm, NVTE_NVFP4_CUTLASS_GROUPED_GEMM
+ * path) performs inline, but lets a caller run it ONCE outside a timed region so
+ * that nvte_nvfp4_grouped_per_tensor_gemm can be timed in isolation (matching the
+ * pure-GEMM timing methodology used for the per-token kernel). NOT used by the
+ * production path, which always recomputes alpha to stay bit-for-bit with cuBLASLt.
+ *
+ *  \param[in]  A          List of A matrices (per-tensor NVFP4).
+ *  \param[in]  B          List of B matrices (per-tensor NVFP4).
+ *  \param[in]  num_gemms  Number of GEMMs in the group.
+ *  \param[in]  transa     Whether A matrices are transposed (cuBLAS convention).
+ *  \param[in]  transb     Whether B matrices are transposed (cuBLAS convention).
+ *  \param[out] alpha      Device buffer of num_gemms float32; alpha[g] is written for non-empty
+ *                         groups. Slots for empty (0-token) groups are left untouched.
+ *  \param[in]  stream     CUDA stream.
+ */
+void nvte_nvfp4_grouped_per_tensor_compute_alpha(const NVTETensor *A, const NVTETensor *B,
+                                                 const int num_gemms, bool transa, bool transb,
+                                                 float *alpha, cudaStream_t stream);
+
+/*! \brief Single-launch per-tensor NVFP4 grouped GEMM with a precomputed alpha.
+ *
+ * Benchmark-only helper. Equivalent to the NVTE_NVFP4_CUTLASS_GROUPED_GEMM branch
+ * of nvte_multi_tensor_gemm, but takes a caller-provided per-group alpha buffer
+ * (no per-expert recompute, no temporary allocation) so that ONLY the CUTLASS
+ * grouped-GEMM launch is timed. The scaling factors of A/B must already be in the
+ * GEMM-swizzled layout (e.g. via the pytorch multi_tensor_swizzle_scales_for_gemm_
+ * helper), exactly as the production grouped-GEMM wrapper arranges before calling
+ * nvte_multi_tensor_gemm. Empty (0-token) groups schedule 0 tiles and are skipped.
+ *
+ *  \param[in]     A           List of A matrices (per-tensor NVFP4, swizzled scales).
+ *  \param[in]     B           List of B matrices (per-tensor NVFP4, swizzled scales).
+ *  \param[in,out] D           List of output matrices (BF16 or FP32).
+ *  \param[in]     bias        List of per-group bias tensors, or NULL for no bias.
+ *  \param[in]     num_gemms   Number of GEMMs in the group.
+ *  \param[in]     transa      Whether A matrices are transposed (cuBLAS convention).
+ *  \param[in]     transb      Whether B matrices are transposed (cuBLAS convention).
+ *  \param[in]     accumulate  Whether to accumulate into D in place (requires FP32 output).
+ *  \param[in]     alpha       Device buffer of num_gemms float32 second-level scales.
+ *  \param[in]     stream      CUDA stream.
+ */
+void nvte_nvfp4_grouped_per_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
+                                        const NVTETensor *bias, const int num_gemms, bool transa,
+                                        bool transb, bool accumulate, const float *alpha,
+                                        cudaStream_t stream);
+
 /*! \brief Return the required size in bytes for the setup workspace of grouped GEMM.
  *
  * The setup workspace stores pointer arrays and per-matrix dimension arrays used
