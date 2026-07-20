@@ -768,6 +768,62 @@ class _PrepareQKVForFA(torch.autograd.Function):
         return dq, dk, dv
 
 
+def _get_thd_valid_token_mask(
+    cu_seqlens: torch.Tensor,
+    cu_seqlens_padded: torch.Tensor,
+    total_tokens: int,
+) -> torch.Tensor:
+    """Build a mask for valid tokens in a physically padded THD tensor.
+
+    ``cu_seqlens`` contains the cumulative valid lengths, while
+    ``cu_seqlens_padded`` contains the physical sequence boundaries in the
+    input tensor. Padding is always at the end of each physical sequence.
+    """
+    num_sequences = cu_seqlens.numel() - 1
+    assert num_sequences > 0
+    assert cu_seqlens_padded.numel() == cu_seqlens.numel()
+
+    token_idx = torch.arange(
+        total_tokens,
+        dtype=cu_seqlens_padded.dtype,
+        device=cu_seqlens_padded.device,
+    )
+    physical_ends = cu_seqlens_padded[1:]
+    seq_idx = torch.searchsorted(physical_ends, token_idx, right=True)
+    valid_seq = seq_idx < num_sequences
+    seq_idx = seq_idx.clamp(max=num_sequences - 1)
+    physical_starts = cu_seqlens_padded[:-1].gather(0, seq_idx)
+    valid_lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).gather(0, seq_idx)
+    return (
+        valid_seq & (token_idx >= physical_starts) & (token_idx - physical_starts < valid_lengths)
+    )
+
+
+def _mask_thd_padding(tensor: torch.Tensor, valid_token_mask: torch.Tensor) -> torch.Tensor:
+    """Return ``tensor`` with invalid THD token rows zeroed."""
+    mask = valid_token_mask.view(valid_token_mask.shape[0], *([1] * (tensor.ndim - 1)))
+    return tensor.masked_fill(~mask, 0)
+
+
+class _MaskTHDPaddingGrad(torch.autograd.Function):
+    """Identity in forward and zero THD padding rows in backward.
+
+    FA3 and FA4 may leave unwritten padding rows in their gradient buffers.
+    Applying this identity to Q/K/V avoids an extra forward copy while
+    guaranteeing that those rows are zero before gradients reach the caller.
+    """
+
+    @staticmethod
+    def forward(ctx, tensor: torch.Tensor, valid_token_mask: torch.Tensor) -> torch.Tensor:
+        ctx.save_for_backward(valid_token_mask)
+        return tensor
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        (valid_token_mask,) = ctx.saved_tensors
+        return _mask_thd_padding(grad_output, valid_token_mask), None
+
+
 class FlashAttention(torch.nn.Module):
     """Dot product attention, using HazyResearch flash-attn package:
     https://github.com/Dao-AILab/flash-attention
@@ -1015,6 +1071,21 @@ class FlashAttention(torch.nn.Module):
         use_flash_attn_3 = (
             flash_attention_backend is not None and flash_attention_backend.major == 3
         )
+        q_valid_token_mask = None
+        if pad_between_seqs and qkv_format == "thd" and not context_parallel:
+            assert cu_seqlens_q_padded is not None and cu_seqlens_kv_padded is not None, (
+                "cu_seqlens_q_padded and cu_seqlens_kv_padded are required when "
+                "pad_between_seqs=True"
+            )
+            q_valid_token_mask = _get_thd_valid_token_mask(
+                cu_seqlens_q, cu_seqlens_q_padded, query_layer.shape[0]
+            )
+            kv_valid_token_mask = _get_thd_valid_token_mask(
+                cu_seqlens_kv, cu_seqlens_kv_padded, key_layer.shape[0]
+            )
+            query_layer = _MaskTHDPaddingGrad.apply(query_layer, q_valid_token_mask)
+            key_layer = _MaskTHDPaddingGrad.apply(key_layer, kv_valid_token_mask)
+            value_layer = _MaskTHDPaddingGrad.apply(value_layer, kv_valid_token_mask)
         if context_parallel and all(
             not isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer]
         ):
@@ -1113,10 +1184,21 @@ class FlashAttention(torch.nn.Module):
                     if inference_params is None:
                         fa_4_optional_forward_kwargs["deterministic"] = self.deterministic
                     if func is flash_attn_varlen_func_v4:
-                        fa_4_optional_forward_kwargs["cu_seqlens_q"] = cu_seqlens_q
-                        fa_4_optional_forward_kwargs["cu_seqlens_k"] = cu_seqlens_kv
+                        fa_4_optional_forward_kwargs["cu_seqlens_q"] = (
+                            cu_seqlens_q_padded if pad_between_seqs else cu_seqlens_q
+                        )
+                        fa_4_optional_forward_kwargs["cu_seqlens_k"] = (
+                            cu_seqlens_kv_padded if pad_between_seqs else cu_seqlens_kv
+                        )
                         fa_4_optional_forward_kwargs["max_seqlen_q"] = max_seqlen_q
                         fa_4_optional_forward_kwargs["max_seqlen_k"] = max_seqlen_kv
+                        if pad_between_seqs:
+                            fa_4_optional_forward_kwargs["seqused_q"] = (
+                                cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+                            )
+                            fa_4_optional_forward_kwargs["seqused_k"] = (
+                                cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
+                            )
                     output = func(
                         query_layer,
                         key_layer,
@@ -1127,6 +1209,8 @@ class FlashAttention(torch.nn.Module):
                     )
                     if isinstance(output, (List, Tuple)):
                         output = output[0]
+                    if q_valid_token_mask is not None:
+                        output = _mask_thd_padding(output, q_valid_token_mask)
                 elif not use_flash_attn_3:
                     fa_optional_forward_kwargs = {}
                     if fa_utils.v2_3_plus:
@@ -1238,6 +1322,8 @@ class FlashAttention(torch.nn.Module):
 
                     if fp8:
                         output = output.to(dtype=torch_orig_dtype)
+                    if q_valid_token_mask is not None:
+                        output = _mask_thd_padding(output, q_valid_token_mask)
                     if fp8 and fp8_output:
                         O_quantizer = quantizers["scaling_fwd"][META_O]
                         output = O_quantizer(output)
