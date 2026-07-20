@@ -64,7 +64,7 @@ def init():
     yield
 
 
-@partial(jax.jit, static_argnums=(6, 7, 8, 9, 11, 12))
+@partial(jax.jit, static_argnums=(6, 7, 8, 9, 11, 12, 13))
 def general_dot_product_attention(
     query: ArrayLike,
     key: ArrayLike,
