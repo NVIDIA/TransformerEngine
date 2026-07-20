@@ -266,6 +266,26 @@ bool mxfp8_quantize_cutedsl(const Tensor *input_tensor, const Tensor *act_input_
                                   /*with_act=*/IS_ACT,
                                   /*with_noop=*/with_noop,
                                   /*activation=*/Fused::activation};
+    checkCuDriverContext(stream);
+    // Sanity checks, mirroring mxfp8::quantize in quantize_mxfp8.cuh
+    if (config.rowwise) {
+      NVTE_CHECK(output_tensor->scale_inv.dptr != nullptr, "Scaling tensor must be allocated");
+    }
+    if (config.colwise) {
+      NVTE_CHECK(output_tensor->columnwise_scale_inv.dptr != nullptr,
+                 "Columnwise scaling tensor must be allocated");
+    }
+    if (noop_tensor != nullptr) {
+      CheckNoopTensor(*noop_tensor, "cast_noop");
+    }
+    if constexpr (IS_DBIAS) {
+      NVTE_CHECK(dbias_tensor != nullptr, "DBias must be a tensor.");
+      NVTE_CHECK(dbias_tensor->data.dtype == input_tensor->dtype(),
+                 "DBias must have the same type as input.");
+      NVTE_CHECK(dbias_tensor->data.shape == Shape{input_tensor->flat_last_dim()},
+                 "Wrong shape of DBias.");
+      NVTE_CHECK(workspace_tensor != nullptr, "Workspace must be a tensor.");
+    }
     return mxfp8_quantize_cutedsl(config, input_tensor, act_input_tensor, noop_tensor,
                                   output_tensor, dbias_tensor, workspace_tensor, stream);
   }
