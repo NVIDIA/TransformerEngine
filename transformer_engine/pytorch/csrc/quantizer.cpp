@@ -29,10 +29,9 @@ void check_per_tensor_fp8_quantize_output(const TensorWrapper& output) {
   const auto rowwise_data = output.get_rowwise_data();
   const auto columnwise_data = output.get_columnwise_data();
   if (rowwise_data.data_ptr == nullptr && columnwise_data.data_ptr != nullptr) {
-    PyErr_SetString(
-        PyExc_NotImplementedError,
-        "Columnwise-only per-tensor FP8 quantization is not implemented; "
-        "the cast-transpose kernel requires rowwise output storage.");
+    PyErr_SetString(PyExc_NotImplementedError,
+                    "Columnwise-only per-tensor FP8 quantization is not implemented; "
+                    "the cast-transpose kernel requires rowwise output storage.");
     throw py::error_already_set();
   }
 }
