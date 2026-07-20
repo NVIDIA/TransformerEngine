@@ -891,7 +891,7 @@ def test_make_graphed_callables_can_skip_returned_parameter_grad_clone() -> None
     model = make_graphed_callables(
         model,
         (generate_data(model_config, dtype, warmup=True, requires_grad=False),),
-        _clone_param_grads_on_return=False,
+        clone_param_grads_on_return=False,
     )
 
     seen_grads = []
@@ -1015,7 +1015,7 @@ def _test_cuda_graphs_with_interleaved_pipeline_parallelism(
             allow_unused_input=True,
             _order=layer_order,
             _reuse_graph_input_output_buffers=reuse_graph_input_output_buffers,
-            _clone_param_grads_on_return=clone_param_grads_on_return,
+            clone_param_grads_on_return=clone_param_grads_on_return,
         )
         layer_forwards = {
             (i // num_microbatches, i % num_microbatches): forward

@@ -108,7 +108,7 @@ def _make_graphed_callables(
     pool: Optional[Tuple[int, ...]] = None,
     retain_graph_in_backward: bool = False,
     _reuse_graph_input_output_buffers: bool = False,
-    _clone_param_grads_on_return: bool = True,
+    clone_param_grads_on_return: bool = True,
     pre_warmup_hook: Optional[Callable] = None,
     post_warmup_hook: Optional[Callable] = None,
 ) -> SingleOrTuple[Callable]:
@@ -405,7 +405,7 @@ def _make_graphed_callables(
 
     def _returned_param_grad_clone_slots(static_grad_inputs, module_params):
         """Snapshot static grad slots that need clones before returning from Graphed.backward."""
-        if not _clone_param_grads_on_return:
+        if not clone_param_grads_on_return:
             return (False,) * len(static_grad_inputs)
         module_param_start = len(static_grad_inputs) - len(module_params)
         return tuple(
@@ -1197,7 +1197,7 @@ def make_graphed_callables(
     pool: Optional[Tuple[int, ...]] = None,
     retain_graph_in_backward: bool = False,
     _reuse_graph_input_output_buffers: bool = False,
-    _clone_param_grads_on_return: bool = True,
+    clone_param_grads_on_return: bool = True,
     pre_warmup_hook: Optional[Callable] = None,
     post_warmup_hook: Optional[Callable] = None,
 ) -> Union[Callable, Tuple[Callable, ...]]:
@@ -1238,7 +1238,7 @@ def make_graphed_callables(
         graphs. Only supported with Mcore interleaved pipeline parallelism, i.e.
         when `_order` is provided. All callables in `modules` are assumed to have
         inputs and outputs with the same dtype and shape.
-    _clone_param_grads_on_return: bool, default = True
+    clone_param_grads_on_return: bool, default = True
         Clone parameter gradients before returning them from CUDA graph replay.
         Disabling this avoids the extra clone/copy and may improve performance,
         but returned parameter gradients will alias CUDA graph static gradient
@@ -1442,7 +1442,7 @@ def make_graphed_callables(
         pool=pool,
         retain_graph_in_backward=retain_graph_in_backward,
         _reuse_graph_input_output_buffers=_reuse_graph_input_output_buffers,
-        _clone_param_grads_on_return=_clone_param_grads_on_return,
+        clone_param_grads_on_return=clone_param_grads_on_return,
         pre_warmup_hook=pre_warmup_hook,
         post_warmup_hook=post_warmup_hook,
     )
