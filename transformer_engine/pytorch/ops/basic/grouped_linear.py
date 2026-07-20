@@ -1570,14 +1570,15 @@ class GroupedLinear(BasicOperation):
             clear_tensor_data(*xs)
 
         # Distributed weights: finalize (e.g. reduce-scatter) the freshly computed wgrads per shard.
+        # Return discarded (see finalize_weight_grads); the dummy is returned below instead.
         if ctx.weight_requires_grad and is_dist_weight:
             assert not delay_wgrad, "delayed wgrad unsupported with distributed weights."
-            final_weight_grads = finalize_weight_grads(weights[0], grad_weights)
+            finalize_weight_grads(weights, grad_weights)
         # Megatron-LM wgrad fusion: regardless of overwrite vs. accumulate,
         # signal that ``main_grad`` already carries the wgrad and replace
         # ``.grad`` with a dummy so DDP/FSDP hooks won't add ``.grad`` into
         # ``main_grad`` again.
-        elif ctx.weight_requires_grad and self._accumulate_into_main_grad:
+        if ctx.weight_requires_grad and (is_dist_weight or self._accumulate_into_main_grad):
             final_weight_grads = get_dummy_wgrads_for_params(weights)
         elif ctx.weight_requires_grad and delay_wgrad:
             final_weight_grads = [None] if self.single_grouped_weight else [None] * num_groups
@@ -1790,14 +1791,15 @@ class GroupedLinear(BasicOperation):
                 wgrad_gemm(grouped_x, grouped_dy, wgrad_output)
 
         # Distributed weights: finalize (e.g. reduce-scatter) the freshly computed wgrads per shard.
+        # Return discarded (see finalize_weight_grads); the dummy is returned below instead.
         if ctx.weight_requires_grad and is_dist_weight:
             assert not delay_wgrad, "delayed wgrad unsupported with distributed weights."
-            final_weight_grads = finalize_weight_grads(weights[0], final_weight_grads)
+            finalize_weight_grads(weights, final_weight_grads)
         # Megatron-LM wgrad fusion: regardless of overwrite vs. accumulate,
         # signal that ``main_grad`` already carries the wgrad and replace
         # ``.grad`` with a dummy so DDP/FSDP hooks won't add ``.grad`` into
         # ``main_grad`` again.
-        elif ctx.weight_requires_grad and self._accumulate_into_main_grad:
+        if ctx.weight_requires_grad and (is_dist_weight or self._accumulate_into_main_grad):
             final_weight_grads = get_dummy_wgrads_for_params(weights)
         elif ctx.weight_requires_grad and delay_wgrad:
             final_weight_grads = [None] if self.single_grouped_weight else [None] * num_groups

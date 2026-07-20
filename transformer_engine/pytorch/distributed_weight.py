@@ -42,7 +42,12 @@ class DistributedWeight(Protocol):
         """Re-materialize the full weight(s) for the backward GEMMs."""
 
     def finalize_group_grads(self, wgrads: Any) -> Any:
-        """Post-process freshly computed weight grad(s) (e.g. reduce-scatter)."""
+        """Post-process freshly computed weight grad(s) (e.g. reduce-scatter).
+
+        May consume ``wgrads`` in-place -- reduce-scatter into ``main_grad`` and set
+        ``grad_added_to_main_grad`` -- returning a dummy grad (or ``None`` for an async collective)
+        that callers use as the parameter grad(s) or discard.
+        """
 
     def grad_buffer(self) -> torch.Tensor:
         """The gradient accumulation buffer for this weight."""
@@ -96,13 +101,17 @@ def materialize_weight_for_backward(weights: Any) -> List[Any]:
     return list(weights)
 
 
-def finalize_weight_grads(weight: Any, wgrads: List[Any]) -> List[Any]:
-    """Post-process the weight grad(s) of a (leader) weight's group.
+def finalize_weight_grads(weights: Any, wgrads: List[Any]) -> List[Any]:
+    """Finalize a weight group's grad(s), mirroring :func:`materialize_weight_for_backward`.
 
-    Delegates to the weight when distributed (e.g. reduce-scatter); otherwise returns ``wgrads``
-    unchanged.
+    Delegates to the leader's :meth:`DistributedWeight.finalize_group_grads` (which defines the
+    in-place / dummy / async-``None`` return contract); returns ``wgrads`` unchanged when not
+    distributed.
     """
-    if is_distributed_weight(weight):
-        out = weight.finalize_group_grads(wgrads if len(wgrads) > 1 else wgrads[0])
+    if not isinstance(weights, (list, tuple)):
+        weights = [weights]
+    leader = weights[0]
+    if is_distributed_weight(leader):
+        out = leader.finalize_group_grads(wgrads if len(wgrads) > 1 else wgrads[0])
         return list(out) if isinstance(out, (list, tuple)) else [out]
     return list(wgrads)

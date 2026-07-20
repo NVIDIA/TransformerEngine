@@ -1203,7 +1203,7 @@ class _GroupedLinear(torch.autograd.Function):
                     return wgrad
 
                 if is_dist_weight:
-                    wgrad_list = finalize_weight_grads(origin_weights[0], wgrad_list)
+                    wgrad_list = finalize_weight_grads(origin_weights, wgrad_list)
                 else:
                     wgrad_list = [
                         handle_custom_ddp_from_mcore(weight, main_grad, wgrad)

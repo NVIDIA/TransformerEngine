@@ -638,10 +638,10 @@ def _compute_grad_params(
             fc_op.wgrad_store.put([grouped_x, grouped_dy, wgrad_output], gemm_fn)
         else:
             gemm_fn(grouped_x, grouped_dy, wgrad_output)
-            # Distributed weight: reduce-scatter the full per-rank wgrads into each sharded
-            # main_grad (also fires the Megatron grad-accum hook).
+            # Distributed weight: reduce-scatter the wgrads into main_grad.
+            # Return discarded (see finalize_weight_grads); dummy wgrads returned below.
             if is_dist_weight:
-                finalize_weight_grads(weights[0], w_list)
+                finalize_weight_grads(weights, w_list)
 
         # Need to return dummy wgrads for Megatron-LM wgrad fusion if grad is already added
         # (wgrad fusion, or the distributed-weight reduce-scatter above) so it doesn't double-add.
