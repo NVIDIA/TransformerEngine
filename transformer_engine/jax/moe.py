@@ -318,14 +318,8 @@ def _ffn_fwd_global(
     if apply_topk_weights_early:
         # Fold the per-token combine weights into the FFN intermediate;
         # the downstream wo GEMM is linear so this is equivalent to the
-        # late-weighting path. Padded recv slots can contain uninitialized
-        # data, so overwrite inactive rows with literal zeros instead of
-        # relying on multiplication by a zero mask (IEEE NaN * 0 = NaN).
-        # ``w_b`` is cast to ``intermediate.dtype`` so the multiply doesn't
-        # promote expert_outputs above the EP buffer's element width.
-        w_b = recv_w_flat[:, None].astype(intermediate.dtype)
-        active = (recv_w_flat != 0)[:, None]
-        intermediate = jnp.where(active, intermediate * w_b, jnp.zeros_like(intermediate))
+        # late-weighting path. Grouped GEMM skips padding automatically.
+        intermediate = intermediate * recv_w_flat[:, None].astype(intermediate.dtype)
 
     casted_intermediate = tex.grouped_quantize(
         intermediate, fc2_quantizer_set.x, group_sizes, flatten_axis=-1
