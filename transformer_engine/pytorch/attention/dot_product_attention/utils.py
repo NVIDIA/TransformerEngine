@@ -978,13 +978,12 @@ def get_attention_backend(
         if pad_between_seqs:
             if (  # pylint: disable=too-many-boolean-expressions
                 use_flash_attention_2 and FlashAttentionUtils.is_installed
-            ) or (use_flash_attention_4 and FlashAttentionUtils.v4_is_installed):
+            ):
                 logger.debug(
-                    "Disabling FlashAttention 2 and 4 for qkv_format = thd when there is "
+                    "Disabling FlashAttention 2 for qkv_format = thd when there is "
                     "padding between sequences, i.e. [a, a, PAD, b, b, b, PAD, c, PAD]"
                 )
             use_flash_attention_2 = False
-            use_flash_attention_4 = False
             # FA3 supports pad_between_seqs via seqused_q/seqused_k
             if use_unfused_attention:
                 logger.debug("Disabling UnfusedDotProductAttention for pad_between_seqs = True")
@@ -1076,9 +1075,14 @@ def get_attention_backend(
             "Disabling UnfusedDotProductAttention as it does not support context parallelism"
         )
         use_unfused_attention = False
-    if context_parallel and use_flash_attention_4 and FlashAttentionUtils.v4_is_installed:
-        logger.debug("Disabling FlashAttention 4 as it does not support context parallelism yet")
-        use_flash_attention_4 = False
+    if context_parallel and use_flash_attention_4:
+        fa4_cp_supported = cp_comm_type in ["p2p", "all_gather", "a2a"]
+        if not fa4_cp_supported:
+            logger.debug(
+                "Disabling FlashAttention 4 for context parallelism with cp_comm_type = %s",
+                cp_comm_type,
+            )
+            use_flash_attention_4 = False
     if context_parallel and (
         use_flash_attention_2 or use_flash_attention_3 or use_flash_attention_4
     ):
