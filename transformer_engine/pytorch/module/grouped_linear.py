@@ -1921,10 +1921,19 @@ class GroupedLinear(TransformerEngineBaseModule):
         with get_nvtx_range_context("_GroupedLinear_wgrad"):
             (_, grad_biases_, _), tensor_list = self.wgrad_store.pop()
             wgrad_list = tensor_list[2]
-            weight_params = self._get_weight_tensors()
             if not self.fuse_wgrad_accumulation:
-                for i in range(self.num_gemms):
-                    weight_params[i].grad = wgrad_list[i].to(weight_params[i].dtype)
+                if self.single_grouped_weight:
+                    # Write straight to the registered grouped parameter's .grad. Do NOT
+                    # route through _get_weight_tensors(): in this grad-enabled scope it
+                    # returns ephemeral _GroupedWeightAutogradBridge outputs, so assigning
+                    # .grad there is discarded and the optimizer never sees the gradient.
+                    self.weight.grad = torch.stack(
+                        [wgrad.to(self.weight.dtype) for wgrad in wgrad_list], dim=0
+                    )
+                else:
+                    for i in range(self.num_gemms):
+                        weight_i = getattr(self, f"weight{i}")
+                        weight_i.grad = wgrad_list[i].to(weight_i.dtype)
             has_grad_biases = [
                 grad_bias is not None and grad_bias.numel() != 0 for grad_bias in grad_biases_
             ]
@@ -2013,6 +2022,14 @@ class GroupedLinear(TransformerEngineBaseModule):
                         ):
                             if hasattr(grouped_weight, attr):
                                 setattr(weight, attr, getattr(grouped_weight, attr))
+            else:
+                # Bridge skipped (inference, or the grouped weight was frozen after
+                # construction). The cached members keep the requires_grad bit set at
+                # construction time, so sync them to the parent; otherwise a frozen
+                # grouped weight still makes legacy GroupedLinear autograd build and
+                # retain a wgrad graph for a parameter that should receive no gradient.
+                for weight in weight_tensors:
+                    weight.requires_grad_(grouped_weight.requires_grad)
         else:
             weight_tensors = [getattr(self, f"weight{i}") for i in range(self.num_gemms)]
         if not self.fp8 and any(isinstance(w, QuantizedTensorStorage) for w in weight_tensors):
