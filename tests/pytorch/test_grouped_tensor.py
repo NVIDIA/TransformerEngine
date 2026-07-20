@@ -1204,6 +1204,147 @@ class TestGroupedTensor:
         for exp, got in zip(expected_tensors, static_tensors):
             assert torch.equal(got, exp)
 
+    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    def test_group_quantize_reuses_destination_and_honors_noop(self) -> None:
+        """Verify the in-place and graph-safe contracts of grouped MXFP8 quantization.
+
+        A captured training graph records the addresses of all MXFP8 weight storage, not just
+        the Python ``GroupedTensor`` object. Re-quantizing an updated BF16 weight must therefore
+        refresh the existing FP8 payloads and scales without replacing any allocation. During
+        graph replay, ``noop_flag`` must additionally allow the captured quantization kernel to
+        execute as a no-op on microbatches that should reuse the cached weight.
+        """
+        num_tensors = 2
+        # Treat two contiguous [256, 256] matrices as one grouped BF16 source. These dimensions
+        # satisfy the MXFP8 block-alignment requirements in both rowwise and columnwise layouts.
+        shape = (num_tensors * 256, 256)
+        quantizer = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)
+
+        # Forward GEMM consumes rowwise weight storage, while backward dgrad consumes columnwise
+        # storage. Both representations and both scale tensors must be updated and kept stable.
+        quantizer.set_usage(rowwise=True, columnwise=True)
+        # Store the quantized output in GEMM-ready (swizzled) scale layout. This makes the test
+        # cover the exact destination format used by cached MXFP8 model weights.
+        quantizer.optimize_for_gemm = True
+
+        # The first call owns allocation: it creates the persistent destination that subsequent
+        # optimizer updates and CUDA graph replays must modify in place.
+        source = torch.randn(shape, dtype=torch.bfloat16, device="cuda")
+        output = tex.group_quantize(source, quantizer, num_tensors, None)
+
+        # CUDA graphs retain these raw addresses. Object identity alone is insufficient because
+        # replacing one internal payload or scale allocation would leave the graph with a stale
+        # pointer even if ``output`` remained the same Python object.
+        pointers = (
+            output.rowwise_data.data_ptr(),
+            output.columnwise_data.data_ptr(),
+            output.scale_inv.data_ptr(),
+            output.columnwise_scale_inv.data_ptr(),
+        )
+
+        # Eager in-place update: quantize new BF16 values into the previously allocated output.
+        # An independently allocated quantization provides the numerical reference.
+        updated_source = source + 1
+        updated = tex.group_quantize(
+            updated_source,
+            quantizer,
+            num_tensors,
+            None,
+            output=output,
+        )
+        reference = tex.group_quantize(updated_source, quantizer, num_tensors, None)
+
+        # The API must return the caller-provided destination and preserve every captured address.
+        assert updated is output
+        assert pointers == (
+            output.rowwise_data.data_ptr(),
+            output.columnwise_data.data_ptr(),
+            output.scale_inv.data_ptr(),
+            output.columnwise_scale_inv.data_ptr(),
+        )
+
+        # In-place quantization must still produce exactly the same FP8 bytes and scales as a
+        # normal allocating call, for both GEMM orientations.
+        assert torch.equal(output.rowwise_data, reference.rowwise_data)
+        assert torch.equal(output.columnwise_data, reference.columnwise_data)
+        assert torch.equal(output.scale_inv, reference.scale_inv)
+        assert torch.equal(output.columnwise_scale_inv, reference.columnwise_scale_inv)
+
+        # Eager no-op: a nonzero device flag tells the kernel to preserve the cached destination.
+        # Clone all four buffers so this checks payloads and metadata independently.
+        old_buffers = (
+            output.rowwise_data.clone(),
+            output.columnwise_data.clone(),
+            output.scale_inv.clone(),
+            output.columnwise_scale_inv.clone(),
+        )
+        noop = torch.ones(1, dtype=torch.float32, device="cuda")
+
+        # The source is deliberately different. If the kernel ignores ``noop_flag``, at least
+        # one payload or scale tensor below will change and expose the failure.
+        tex.group_quantize(
+            updated_source * 2,
+            quantizer,
+            num_tensors,
+            None,
+            noop_flag=noop,
+            output=output,
+        )
+        assert torch.equal(output.rowwise_data, old_buffers[0])
+        assert torch.equal(output.columnwise_data, old_buffers[1])
+        assert torch.equal(output.scale_inv, old_buffers[2])
+        assert torch.equal(output.columnwise_scale_inv, old_buffers[3])
+
+        # Capture one fixed launch. ``graph_source``, ``noop``, and ``output`` keep stable device
+        # addresses; replay changes only their contents. This is how weight caching works when
+        # different microbatches replay the same CUDA graph.
+        graph_source = updated_source.clone()
+        # zero means "perform quantization"; nonzero means "leave destination untouched".
+        noop.zero_()
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            tex.group_quantize(
+                graph_source,
+                quantizer,
+                num_tensors,
+                None,
+                noop_flag=noop,
+                output=output,
+            )
+
+        # Replay with new source contents and noop=0. The captured kernel must refresh the same
+        # destination allocations, and the result must equal a fresh eager quantization.
+        graph_source.copy_(source - 1)
+        noop.zero_()
+        graph.replay()
+        torch.cuda.synchronize()
+        reference = tex.group_quantize(graph_source, quantizer, num_tensors, None)
+        assert torch.equal(output.rowwise_data, reference.rowwise_data)
+        assert torch.equal(output.columnwise_data, reference.columnwise_data)
+        assert torch.equal(output.scale_inv, reference.scale_inv)
+        assert torch.equal(output.columnwise_scale_inv, reference.columnwise_scale_inv)
+
+        # Snapshot the successfully refreshed cache before testing the captured no-op branch.
+        old_buffers = (
+            output.rowwise_data.clone(),
+            output.columnwise_data.clone(),
+            output.scale_inv.clone(),
+            output.columnwise_scale_inv.clone(),
+        )
+
+        # Replay the exact same captured graph with different source data but noop=1. The launch
+        # still occurs, which is required for CUDA graph structural consistency, but the kernel
+        # must not mutate any cached FP8 payload or scale buffer.
+        graph_source.copy_(source + 2)
+        noop.fill_(1)
+        graph.replay()
+        torch.cuda.synchronize()
+        assert torch.equal(output.rowwise_data, old_buffers[0])
+        assert torch.equal(output.columnwise_data, old_buffers[1])
+        assert torch.equal(output.scale_inv, old_buffers[2])
+        assert torch.equal(output.columnwise_scale_inv, old_buffers[3])
+
     @pytest.mark.parametrize("block_scaling_dim", [1, 2], ids=["1D", "2D"])
     @pytest.mark.parametrize("direction", ["rowwise", "columnwise"])
     @pytest.mark.skipif(
