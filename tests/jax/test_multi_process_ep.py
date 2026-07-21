@@ -28,8 +28,15 @@ import jax.numpy as jnp
 import numpy as np
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
+from utils import is_devices_enough
 from transformer_engine.jax.sharding import MeshResource, global_shard_guard
-from transformer_engine.jax.ep import EpLayerConfig, ep_bootstrap, ep_dispatch, ep_combine
+from transformer_engine.jax.ep import (
+    EpLayerConfig,
+    ep_bootstrap,
+    ep_dispatch,
+    ep_combine,
+    _ep_domain_for_rank,
+)
 from transformer_engine.jax.cpp_extensions.ep import (
     ep_prepare,
     ep_dispatch_fwd,
@@ -710,6 +717,32 @@ class TestEP(unittest.TestCase):
             hlo = compiled.as_text()
             for op in ("all-gather-start", "all-to-all", "collective-permute"):
                 self.assertEqual(hlo.count(op), 0, f"unexpected XLA {op} in bwd HLO:\n{hlo}")
+
+
+# ── EP domain grouping (single-process; runs under plain pytest) ─────────────
+
+
+class TestEpDomainGrouping(unittest.TestCase):
+    """EP domains group ranks sharing all non-ep coords, so an orthogonal tp
+    axis splits the world into one EP domain per tp coordinate."""
+
+    @unittest.skipUnless(is_devices_enough(8), "requires 8 devices")
+    def test_ep_tp_splits_domains(self):
+        # ep=4, tp=2: tp must yield 2 EP domains, each a fixed tp coordinate.
+        mesh = Mesh(np.asarray(jax.devices()[:8]).reshape(4, 2), ("expert", "tensor"))
+        # Single host shares one process_index; inject row-major ranks to mimic
+        # one device per process.
+        order = {int(d.id): i for i, d in enumerate(mesh.devices.reshape(-1))}
+        d2r = lambda d: order[int(d.id)]
+
+        domains = {}
+        for rank in range(8):
+            root, col, ndom = _ep_domain_for_rank(mesh, "expert", rank, device_to_rank=d2r)
+            self.assertEqual(ndom, 2)  # every rank must agree on the domain count
+            domains.setdefault(root, {})[col] = rank
+        domains = {root: [m[c] for c in sorted(m)] for root, m in domains.items()}
+
+        self.assertEqual(domains, {0: [0, 2, 4, 6], 1: [1, 3, 5, 7]})
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────
