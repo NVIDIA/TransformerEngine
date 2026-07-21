@@ -421,7 +421,7 @@ model_configs_fused_hdim256 = {
 )
 def test_dpa_fused_attn_hdim256(dtype, model_configs, model, qkv_layout):
     """Test DotProductAttention with cuDNN FusedAttention: head_dim=256 backward on Blackwell"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, False, False)
+    test_dot_product_attention(dtype, model_configs, model, False, qkv_layout, False, False)
 
 
 model_configs_fa4_mla = {
