@@ -1837,9 +1837,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 grad_output_quantizers,
             ) = quantizers
             if not debug:
-                for weight_quantizer, weight_tensor in zip(
-                    weight_quantizers, weight_tensors
-                ):
+                for weight_quantizer, weight_tensor in zip(weight_quantizers, weight_tensors):
                     if weight_quantizer is not None:
                         self._configure_weight_quantizer_optimize_for_gemm(
                             weight_quantizer, weight_tensor

@@ -1721,9 +1721,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 grad_output_quantizer,
             ) = quantizers
             if weight_quantizer is not None and not debug:
-                self._configure_weight_quantizer_optimize_for_gemm(
-                    weight_quantizer, weight_tensor
-                )
+                self._configure_weight_quantizer_optimize_for_gemm(weight_quantizer, weight_tensor)
 
             if is_grad_enabled:
                 fwd_fn = _LayerNormLinear.apply
