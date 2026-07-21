@@ -105,6 +105,9 @@ find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 
 find_path(NCCL_INCLUDE_DIR
             NAMES nccl.h
+          HINTS "${Python_SITEARCH}/nvidia/nccl"
+                "/opt/nvidia/nccl"
+                "/usr/local/nccl"
             PATH_SUFFIXES include
             REQUIRED)
 
