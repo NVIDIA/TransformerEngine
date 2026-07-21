@@ -4802,6 +4802,64 @@ class TestHybridQuantizeMasterWeights:
         quantizer.update_quantized(master.reshape(1, -1), temp)
         return temp._data.reshape(-1)
 
+    def test_fp8_current_original_partial_master_raises(self):
+        """Reject an independently sourced Hybrid column from a partial master shard.
+
+        A one-payload distributed optimizer only communicates the rowwise payload.
+        Re-creating an independently quantized column from a partial master shard can
+        therefore produce a different value after checkpoint resume. Construct the
+        Hopper transpose-only column explicitly so this safety regression does not
+        depend on columnwise-only kernel support.
+        """
+        from transformer_engine.pytorch.tensor.utils import quantize_master_weights
+
+        shape = (4, 8)
+        row_quantizer = Float8CurrentScalingQuantizer(
+            tex.DType.kFloat8E4M3,
+            device="cuda",
+            rowwise=True,
+            columnwise=False,
+        )
+        col_quantizer = Float8CurrentScalingQuantizer(
+            tex.DType.kFloat8E4M3,
+            device="cuda",
+            rowwise=False,
+            columnwise=True,
+        )
+        quantizer = HybridQuantizer(
+            rowwise_quantizer=row_quantizer,
+            columnwise_quantizer=col_quantizer,
+            columnwise_source="original",
+        )
+
+        source = torch.randn(shape, dtype=torch.bfloat16, device="cuda")
+        rowwise = row_quantizer(source)
+        columnwise = self._make_transpose_only_float8_weight(shape, col_quantizer)
+        weight = HybridQuantizedTensor(
+            shape=shape,
+            dtype=source.dtype,
+            rowwise_storage=rowwise,
+            columnwise_storage=columnwise,
+            quantizer=quantizer,
+            requires_grad=False,
+            device="cuda",
+        )
+        master_shard = source.reshape(-1)[shape[-1] :].float().contiguous()
+
+        with pytest.raises(
+            ValueError,
+            match=(
+                "partial master shard.*columnwise_source='original'.*"
+                "columnwise_source='rowwise_dequantized'"
+            ),
+        ):
+            quantize_master_weights(
+                [weight],
+                [master_shard],
+                [shape[-1]],
+                group=None,
+            )
+
     def test_fp8_current_fsdp_transpose_only_raises_before_mutation(self):
         """Reject Hopper FSDP updates that would materialize rowwise column storage."""
         from transformer_engine.pytorch.tensor.utils import quantize_master_weights
@@ -4979,76 +5037,6 @@ class TestHybridQuantizeMasterWeights:
         # native-FP8-current test uses (e.g. test_dequantize_close_to_original).
         torch.testing.assert_close(dq_row.reshape(-1), master_flat, rtol=0.125, atol=0.1)
         torch.testing.assert_close(dq_col.reshape(-1), master_flat, rtol=0.125, atol=0.1)
-
-    @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
-    def test_fp8_current_nonzero_start_offset(self):
-        """Mimic DP-sharded master: master covers logical elements
-        [start_offset, start_offset + master.numel()) of the full model weight.
-        Verifies that the shared logical start_offset is honored by both
-        sub-storages' per-format routings.
-        """
-        from transformer_engine.pytorch.tensor.utils import (
-            quantize_master_weights,
-            post_all_gather_processing,
-        )
-
-        group = _ensure_single_rank_dp_group()
-        hybrid_recipe = _hybrid_recipe_fp8_current()
-        weight, hp_master_full = _build_hybrid_linear_weight(64, 64, hybrid_recipe)
-
-        half = hp_master_full.numel() // 2
-        # Negation preserves the shard amax while guaranteeing that this update
-        # is observable. The fixed seed puts the full-tensor amax in this shard,
-        # so the current-scaling factor must remain bitwise stable.
-        hp_master_shard = -hp_master_full.view(-1)[half:].contiguous()
-        start_offset = half
-
-        before = {}
-        for direction, storage in (
-            ("rowwise", weight._rowwise_storage),
-            ("columnwise", weight._columnwise_storage),
-        ):
-            assert storage is not None
-            before[direction] = {
-                "bytes": self._logical_float8_bytes(storage).clone(),
-                "scale_inv": storage._scale_inv.clone(),
-                "dequantized": storage.dequantize(dtype=torch.float32).reshape(-1).clone(),
-            }
-
-        quantize_master_weights([weight], [hp_master_shard], [start_offset], group=group)
-        post_all_gather_processing([weight])
-
-        for direction, storage in (
-            ("rowwise", weight._rowwise_storage),
-            ("columnwise", weight._columnwise_storage),
-        ):
-            previous = before[direction]
-            actual_bytes = self._logical_float8_bytes(storage)
-            torch.testing.assert_close(storage._scale_inv, previous["scale_inv"], rtol=0, atol=0)
-            torch.testing.assert_close(
-                actual_bytes[:start_offset], previous["bytes"][:start_offset], rtol=0, atol=0
-            )
-            expected_shard_bytes = self._reference_fp8_bytes(
-                hp_master_shard.to(weight.dtype),
-                torch.reciprocal(storage._scale_inv),
-                weight.dtype,
-            )
-            torch.testing.assert_close(
-                actual_bytes[start_offset:], expected_shard_bytes, rtol=0, atol=0
-            )
-            assert not torch.equal(
-                actual_bytes[start_offset:], previous["bytes"][start_offset:]
-            ), f"{direction} updated shard unexpectedly retained every FP8 byte"
-            dequantized = storage.dequantize(dtype=torch.float32).reshape(-1)
-            torch.testing.assert_close(
-                dequantized[:start_offset],
-                previous["dequantized"][:start_offset],
-                rtol=0,
-                atol=0,
-            )
-            torch.testing.assert_close(
-                dequantized[start_offset:], hp_master_shard, rtol=0.125, atol=0.1
-            )
 
     @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_fp8_delayed_same_format_full_master(self):

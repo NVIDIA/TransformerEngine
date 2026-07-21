@@ -250,11 +250,20 @@ def quantize_master_weights(
         use_fsdp_shard_model_weights = True
     # Validate the entire batch before clearing initialization state or
     # populating any per-format work buckets.
-    for model_weight, fsdp_shard_model_weight in zip(model_weights, fsdp_shard_model_weights):
+    for model_weight, master_weight, start_offset, fsdp_shard_model_weight in zip(
+        model_weights, master_weights, start_offsets, fsdp_shard_model_weights
+    ):
         _validate_fp8_current_scaling_fsdp_hopper_policy(
             model_weight,
             fsdp_shard_model_weight,
         )
+        if isinstance(model_weight, HybridQuantizedTensor):
+            _validate_hybrid_partial_master_policy(
+                model_weight,
+                master_weight,
+                start_offset,
+                fsdp_shard_model_weight,
+            )
 
     for model_weight, master_weight, start_offset, fsdp_shard_model_weight in zip(
         model_weights, master_weights, start_offsets, fsdp_shard_model_weights
@@ -1244,6 +1253,45 @@ def _validate_fp8_current_scaling_fsdp_hopper_policy(
                 "Columnwise-only per-tensor FP8 quantization is not implemented for "
                 "FSDP current-scaling updates on this architecture."
             )
+
+
+def _validate_hybrid_partial_master_policy(
+    model_weight,
+    master_weight,
+    start_offset,
+    fsdp_shard_model_weight,
+):
+    """Reject an unsafe independently sourced Hybrid column before distopt mutation."""
+    row_sub = model_weight._rowwise_storage
+    col_sub = model_weight._columnwise_storage
+    quantizer = model_weight._get_quantizer()
+    if (
+        master_weight is None
+        or row_sub is None
+        or col_sub is None
+        or quantizer.columnwise_source != "original"
+    ):
+        return
+
+    shard_has_both_directions = (
+        isinstance(fsdp_shard_model_weight, HybridQuantizedTensor)
+        and fsdp_shard_model_weight._rowwise_storage is not None
+        and fsdp_shard_model_weight._columnwise_storage is not None
+    )
+    if shard_has_both_directions:
+        return
+
+    end_offset = _validate_flat_fragment(model_weight, master_weight, start_offset)
+    if start_offset == 0 and end_offset == model_weight.numel():
+        return
+
+    raise ValueError(
+        "quantize_master_weights cannot update a two-direction "
+        "HybridQuantizedTensor from a partial master shard when "
+        "columnwise_source='original': the one-payload distributed-optimizer "
+        "path cannot preserve an independently quantized columnwise value. "
+        "Use columnwise_source='rowwise_dequantized' or provide full-master data."
+    )
 
 
 def _route_hybrid_to_buckets(
