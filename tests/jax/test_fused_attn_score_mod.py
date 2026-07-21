@@ -537,7 +537,7 @@ def test_dot_product_attention_plumbs_score_mod_to_fused_attn(monkeypatch):
     assert captured["attn_bias_type"] is AttnBiasType.NO_BIAS
     assert captured["qkv_layout"] is QKVLayout.BSHD_BSHD_BSHD
     assert captured["softmax_type"] is AttnSoftmaxType.VANILLA_SOFTMAX
-    assert captured["kernel_checks"][0][0][3] is QKVLayout.BSHD_BSHD_BSHD
+    assert captured["kernel_checks"][0][0][4] is QKVLayout.BSHD_BSHD_BSHD
 
 
 def test_dot_product_attention_unpacks_packed_score_mod_to_separate_layout(monkeypatch):
@@ -561,7 +561,7 @@ def test_dot_product_attention_unpacks_packed_score_mod_to_separate_layout(monke
     assert captured["qkv"][0].shape == (1, 8, 1, 16)
     assert captured["qkv_layout"] is QKVLayout.BSHD_BSHD_BSHD
     assert captured["score_mod"] is _identity_score_mod
-    assert captured["kernel_checks"][0][0][3] is QKVLayout.BSHD_BSHD_BSHD
+    assert captured["kernel_checks"][0][0][4] is QKVLayout.BSHD_BSHD_BSHD
 
 
 def test_multi_head_attention_plumbs_score_mod_to_dot_product_attention(monkeypatch):
