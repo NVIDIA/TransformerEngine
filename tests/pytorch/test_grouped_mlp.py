@@ -232,6 +232,33 @@ def make_reference_and_test_tensors(
 class TestGroupedLinearOp:
     """Tests for advanced features with grouped linear basic op"""
 
+    def test_meta_single_grouped_weight_with_delayed_wgrad(self, monkeypatch) -> None:
+        """A deferred op shell must not access its grouped parent before it is attached."""
+        monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+
+        op = te.ops.GroupedLinear(
+            2,
+            16,
+            16,
+            device="meta",
+            dtype=torch.bfloat16,
+            single_grouped_weight=True,
+            delay_wgrad_compute=True,
+        )
+
+        assert op._parameters.get("weight") is None
+        assert op.weight0.device.type == "meta"
+
+        # Mirror an external caller attaching the grouped parent after constructing
+        # the parameterless shell, then verify delayed-wgrad metadata is applied.
+        grouped_weight = torch.nn.Parameter(torch.empty(2, 16, 16, device="meta"))
+        assert not hasattr(grouped_weight, "skip_backward_post_hook")
+        op.register_parameter("weight", grouped_weight)
+        for group_idx in range(op.num_groups):
+            op.register_parameter(f"weight{group_idx}", None)
+
+        assert grouped_weight.skip_backward_post_hook
+
     @pytest.mark.parametrize("bias", (False, True))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("quantization", _quantization_list)
