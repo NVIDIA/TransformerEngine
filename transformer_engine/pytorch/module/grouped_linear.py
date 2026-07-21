@@ -1531,7 +1531,9 @@ class GroupedLinear(TransformerEngineBaseModule):
                  when set to ``True``, this module will not apply the additive bias itself, but
                  instead return the bias value during the forward pass together with the
                  output of the linear transformation :math:`y = xA^T`. This is useful when
-                 the bias addition can be fused to subsequent operations.
+                 the bias addition can be fused to subsequent operations. A single grouped
+                 bias is returned as its packed ``GroupedTensor`` parameter; discrete biases
+                 are returned as a list of per-GEMM tensors.
     params_dtype : torch.dtype, default = torch.get_default_dtype()
                   it controls the type used to allocate the initial parameters. Useful when
                   the model is trained with lower precision and the original FP32 parameters
@@ -2105,7 +2107,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         try:
             weight_tensors = self._get_weight_tensors()
             bias_tensors = self._get_bias_tensors()
-            use_grouped_bias = self.use_bias and self.single_grouped_bias and not self.return_bias
+            use_grouped_bias = self.use_bias and self.single_grouped_bias
 
             quantizers = self._get_quantizers() if not debug else self._get_debug_quantizers()
 
@@ -2196,6 +2198,8 @@ class GroupedLinear(TransformerEngineBaseModule):
             self.end_forward()
 
         if self.return_bias:
+            if use_grouped_bias:
+                return out, bias_tensors[0]
             return out, [cast_if_needed(b, self.activation_dtype) for b in bias_tensors]
         return out
 
@@ -2292,23 +2296,24 @@ class GroupedLinear(TransformerEngineBaseModule):
         return weight_tensors
 
     def _get_bias_tensors(self) -> List[torch.Tensor]:
-        """Get grouped compute bias or per-GEMM biases for ``return_bias=True``."""
+        """Get bias parameters in their registered grouped or per-GEMM layout.
+
+        A single grouped bias remains one packed GroupedTensor. When return_bias=True,
+        an upper-level framework such as MCore must apply that packed bias accordingly;
+        Discrete bias parameters retain the existing list-of-per-GEMM contract.
+
+        Example with 2 experts, 128 output features:
+
+            single grouped bias:
+              GroupedTensor shape = [2, 128] -> [grouped_bias]
+
+            discrete biases:
+              bias0 [128] + bias1 [128] -> [bias0, bias1]
+        """
         grouped_bias = getattr(self, "bias", None)
-        if grouped_bias is None:
-            return [getattr(self, f"bias{i}") for i in range(self.num_gemms)]
-
-        # When bias is enabled, apply_bias and return_bias select mutually exclusive paths:
-        # apply_bias=True passes the grouped parent to GEMM, while return_bias=True leaves bias
-        # addition to the caller and preserves the public list-of-per-GEMM-biases contract.
-        if not self.return_bias:
-            # Here apply_bias=True, so the grouped-tensor GEMM consumes the parent directly.
+        if grouped_bias is not None:
             return [grouped_bias]
-
-        # Here apply_bias=False; expose views only for return, not for grouped GEMM compute.
-        parts = grouped_bias.quantized_tensors
-        if parts is None:
-            parts = grouped_bias.split_into_quantized_tensors()
-        return [part.reshape(-1) for part in parts]
+        return [getattr(self, f"bias{i}") for i in range(self.num_gemms)]
 
     def _get_weight_quantizers(self) -> List[Quantizer]:
         """Get the weight quantizers of the module."""

@@ -2143,6 +2143,79 @@ def test_grouped_linear_grouped_tensor_path_single_grouped_bias_delay_wgrad(monk
     grouped_linear.backward_dw()
 
 
+def test_grouped_linear_returns_single_grouped_bias_parameter(monkeypatch):
+    """return_bias preserves the grouped parent and accumulates dbias into it.
+
+    This mirrors how MCore applies a returned MoE bias::
+
+        x -> GroupedLinear (bias not applied) -> output
+                                                   +
+        grouped bias [2, 128]
+                 |
+                 +-> repeat_interleave([256, 256])
+                       -> per-token bias [512, 128]
+                              |
+                              * routing probabilities
+                              |
+                              +-> loss.backward() -> grouped bias.grad
+
+    Since the loss sums every output feature, each feature of expert ``i`` receives
+    ``sum(probs_for_expert_i)``. The identity assertion also ensures that TE returns the
+    registered grouped parent rather than copied or split bias tensors.
+    """
+    _require_native_grouped_tensor_gemm()
+    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+
+    dtype = torch.bfloat16
+    num_gemms = 2
+    in_features = 128
+    out_features = 128
+    m_splits = torch.tensor([256, 256], dtype=torch.int64, device="cuda")
+    total_tokens = 512
+    grouped_linear = GroupedLinear(
+        num_gemms,
+        in_features,
+        out_features,
+        bias=True,
+        return_bias=True,
+        params_dtype=dtype,
+        device="cuda",
+        single_grouped_weight=False,
+        single_grouped_bias=True,
+        grouped_gemm_backend="grouped_tensor",
+    )
+
+    x = torch.randn(
+        total_tokens,
+        in_features,
+        dtype=dtype,
+        device="cuda",
+        requires_grad=True,
+    )
+    probs = torch.rand(total_tokens, dtype=dtype, device="cuda")
+    output, returned_bias = grouped_linear(x, m_splits)
+
+    assert returned_bias is grouped_linear.bias
+    assert returned_bias.shape == (num_gemms, out_features)
+
+    bias_per_token = torch.repeat_interleave(
+        returned_bias,
+        m_splits,
+        dim=0,
+        output_size=total_tokens,
+    )
+    (output + bias_per_token * probs.unsqueeze(-1)).sum().backward()
+
+    # For token t and output feature j, the externally applied bias contributes
+    # bias[expert(t), j] * probs[t] to the summed loss. Therefore every bias feature for
+    # expert e receives sum(probs[t]) over that expert's token range. m_splits places the
+    # first 256 tokens on expert 0 and the remaining 256 tokens on expert 1.
+    expected_dbias = torch.stack(
+        (probs[:256].sum(), probs[256:].sum()),
+    ).unsqueeze(-1).expand(num_gemms, out_features)
+    torch.testing.assert_close(grouped_linear.bias.grad.float(), expected_dbias.float())
+
+
 @pytest.mark.parametrize("use_fused_path", [False, True], ids=["legacy", "grouped_tensor"])
 @pytest.mark.parametrize("supply", ["out", "dgrad_out", "both"])
 def test_grouped_linear_caller_output_buffers(use_fused_path, supply, monkeypatch):
