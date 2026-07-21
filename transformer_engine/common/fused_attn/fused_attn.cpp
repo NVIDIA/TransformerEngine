@@ -279,6 +279,12 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig confi
     return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
   }
 
+  // cuDNN does not support pre-scale bias
+  if (cfg.bias_type == NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS) {
+    set_message(message, "Fused attention does not support pre-scale bias.");
+    return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
+  }
+
   const bool is_fp8 =
       (cfg.qkv_dtype == NVTEDType::kNVTEFloat8E4M3 || cfg.qkv_dtype == NVTEDType::kNVTEFloat8E5M2);
   const bool is_f16_or_bf16 =
