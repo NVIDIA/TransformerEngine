@@ -19,6 +19,64 @@
 namespace transformer_engine {
 namespace fused_attn {
 
+// Single source of truth for the graph-cache-relevant fields of FusedAttnConfig, in the SAME order
+// as NVTEFusedAttnConfigAttribute / attr_sizes[]. Each row is
+//   X(member, wire_type, printf_fmt, printf_cast, debug_label)
+// where wire_type is the field's 1-byte-exact serialization type (bool is serialized as uint8_t),
+// and printf_fmt / printf_cast / debug_label drive the [FUSED-ATTN-CACHE] debug dump. operator<,
+// attr_sizes[], and that debug dump are all generated from this one list so they cannot drift apart.
+// When adding/removing a cache-relevant field, edit ONLY this list -- and the public
+// NVTEFusedAttnConfigAttribute enum, whose entry count the static_assert below cross-checks.
+#define TE_FUSED_ATTN_CACHE_KEY_FIELDS(X)                                     \
+  /* basic attention settings */                                         \
+  X(is_training, uint8_t, "%d", int, "train")                            \
+  X(deterministic, uint8_t, "%d", int, "det")                            \
+  X(cuda_graph, uint8_t, "%d", int, "cg")                                \
+  X(return_max_logit, uint8_t, "%d", int, "maxlogit")                    \
+  X(attn_mask_type, NVTE_Mask_Type, "%lld", long long, "mask")           \
+  X(bias_type, NVTE_Bias_Type, "%lld", long long, "bias")                \
+  X(window_size_left, int64_t, "%lld", long long, "wl")                  \
+  X(window_size_right, int64_t, "%lld", long long, "wr")                 \
+  X(bottom_right_diagonal, uint8_t, "%d", int, "brd")                    \
+  X(softmax_type, NVTE_Softmax_Type, "%lld", long long, "softmax")       \
+  X(scaling_mode, NVTEScalingMode, "%lld", long long, "scale_mode")      \
+  X(dropout, float, "%g", double, "dropout")                             \
+  X(attn_scale, float, "%g", double, "attn_scale")                       \
+  /* tensor types */                                                     \
+  X(qkv_dtype, NVTEDType, "%lld", long long, "qkv_dt")                   \
+  X(o_dtype, NVTEDType, "%lld", long long, "o_dt")                       \
+  X(do_dtype, NVTEDType, "%lld", long long, "do_dt")                     \
+  X(dqkv_dtype, NVTEDType, "%lld", long long, "dqkv_dt")                 \
+  /* tensor layouts */                                                   \
+  X(qkv_layout, NVTE_QKV_Layout, "%lld", long long, "qkv_lay")           \
+  X(o_format, NVTE_QKV_Format, "%lld", long long, "o_fmt")               \
+  X(do_format, NVTE_QKV_Format, "%lld", long long, "do_fmt")             \
+  X(dqkv_layout, NVTE_QKV_Layout, "%lld", long long, "dqkv_lay")         \
+  X(qkv_scale_inv_format, NVTE_QKV_Format, "%lld", long long, "qkv_sif") \
+  X(do_scale_inv_format, NVTE_QKV_Format, "%lld", long long, "do_sif")   \
+  /* tensor dimensions */                                                \
+  X(batch_size, size_t, "%lld", long long, "b")                          \
+  X(num_attn_heads, size_t, "%lld", long long, "h")                      \
+  X(num_gqa_groups, size_t, "%lld", long long, "hg")                     \
+  X(head_dim_qk, size_t, "%lld", long long, "dqk")                       \
+  X(head_dim_v, size_t, "%lld", long long, "dv")                         \
+  X(max_seqlen_q, size_t, "%lld", long long, "sq")                       \
+  X(max_seqlen_kv, size_t, "%lld", long long, "skv")                     \
+  X(num_tokens_q, size_t, "%lld", long long, "tq")                       \
+  X(num_tokens_kv, size_t, "%lld", long long, "tkv")                     \
+  /* paged KV dimensions */                                              \
+  X(num_pages_k, size_t, "%lld", long long, "npk")                       \
+  X(num_pages_v, size_t, "%lld", long long, "npv")                       \
+  X(page_size_k, size_t, "%lld", long long, "psk")                       \
+  X(page_size_v, size_t, "%lld", long long, "psv")                       \
+  X(max_pages_per_seq_k, size_t, "%lld", long long, "mppk")              \
+  X(max_pages_per_seq_v, size_t, "%lld", long long, "mppv")              \
+  /* bias dimensions */                                                  \
+  X(bias_batch_size, size_t, "%lld", long long, "bias_b")                \
+  X(bias_num_heads, size_t, "%lld", long long, "bias_h")                 \
+  X(bias_seqlen_q, size_t, "%lld", long long, "bias_sq")                 \
+  X(bias_seqlen_kv, size_t, "%lld", long long, "bias_skv")
+
 struct FusedAttnConfig {
   // basic attention settings
   bool is_training = true;
@@ -96,78 +154,27 @@ struct FusedAttnConfig {
   bool is_causal = false;
   bool is_causal_bottom_right = false;
 
+  // Generated from TE_FUSED_ATTN_CACHE_KEY_FIELDS so the per-attribute serialized sizes stay in lockstep
+  // with the field list (and, via the static_assert below, with NVTEFusedAttnConfigAttribute).
   static constexpr size_t attr_sizes[] = {
-      // basic attention settings
-      sizeof(uint8_t),            // is_training
-      sizeof(uint8_t),            // deterministic
-      sizeof(uint8_t),            // cuda_graph
-      sizeof(uint8_t),            // return_max_logit
-      sizeof(NVTE_Mask_Type),     // attn_mask_type
-      sizeof(NVTE_Bias_Type),     // bias_type
-      sizeof(int64_t),            // window_size_left
-      sizeof(int64_t),            // window_size_right
-      sizeof(uint8_t),            // bottom_right_diagonal
-      sizeof(NVTE_Softmax_Type),  // softmax_type
-      sizeof(NVTEScalingMode),    // scaling_mode
-      sizeof(float),              // dropout
-      sizeof(float),              // attn_scale
-      // tensor types
-      sizeof(NVTEDType),  // qkv_dtype
-      sizeof(NVTEDType),  // o_dtype
-      sizeof(NVTEDType),  // do_dtype
-      sizeof(NVTEDType),  // dqkv_dtype
-      // tensor layouts
-      sizeof(NVTE_QKV_Layout),  // qkv_layout
-      sizeof(NVTE_QKV_Format),  // o_format
-      sizeof(NVTE_QKV_Format),  // do_format
-      sizeof(NVTE_QKV_Layout),  // dqkv_layout
-      sizeof(NVTE_QKV_Format),  // qkv_scale_inv_format
-      sizeof(NVTE_QKV_Format),  // do_scale_inv_format
-      // tensor dimensions
-      sizeof(size_t),  // batch_size
-      sizeof(size_t),  // num_attn_heads
-      sizeof(size_t),  // num_gqa_groups
-      sizeof(size_t),  // head_dim_qk
-      sizeof(size_t),  // head_dim_v
-      sizeof(size_t),  // max_seqlen_q
-      sizeof(size_t),  // max_seqlen_kv
-      sizeof(size_t),  // num_tokens_q
-      sizeof(size_t),  // num_tokens_kv
-      // paged KV dimensions
-      sizeof(size_t),  // num_pages_k
-      sizeof(size_t),  // num_pages_v
-      sizeof(size_t),  // page_size_k
-      sizeof(size_t),  // page_size_v
-      sizeof(size_t),  // max_pages_per_seq_k
-      sizeof(size_t),  // max_pages_per_seq_v
-      // bias dimensions
-      sizeof(size_t),  // bias_batch_size
-      sizeof(size_t),  // bias_num_heads
-      sizeof(size_t),  // bias_seqlen_q
-      sizeof(size_t),  // bias_seqlen_kv
+#define TE_FUSED_ATTN_CACHE_KEY_FIELD_SIZE(member, wire, fmt, cast, label) sizeof(wire),
+      TE_FUSED_ATTN_CACHE_KEY_FIELDS(TE_FUSED_ATTN_CACHE_KEY_FIELD_SIZE)
+#undef TE_FUSED_ATTN_CACHE_KEY_FIELD_SIZE
   };
 
+  // Tuple of all cache-relevant fields, generated from TE_FUSED_ATTN_CACHE_KEY_FIELDS. The trailing 0
+  // sentinel absorbs the macro's trailing comma; it is identical on both operands so it never
+  // affects ordering. Used by operator< so the comparison can never omit a field.
+  auto cache_key_tuple() const {
+    return std::make_tuple(
+#define TE_FUSED_ATTN_CACHE_KEY_FIELD_VALUE(member, wire, fmt, cast, label) member,
+        TE_FUSED_ATTN_CACHE_KEY_FIELDS(TE_FUSED_ATTN_CACHE_KEY_FIELD_VALUE)
+#undef TE_FUSED_ATTN_CACHE_KEY_FIELD_VALUE
+        0);
+  }
+
   bool operator<(const FusedAttnConfig &rhs) const {
-    return std::tie(is_training, deterministic, cuda_graph, return_max_logit, attn_mask_type,
-                    bias_type, window_size_left, window_size_right, bottom_right_diagonal,
-                    softmax_type, scaling_mode, dropout, attn_scale, qkv_dtype, o_dtype, do_dtype,
-                    dqkv_dtype, qkv_layout, o_format, do_format, dqkv_layout, qkv_scale_inv_format,
-                    do_scale_inv_format, batch_size, num_attn_heads, num_gqa_groups, head_dim_qk,
-                    head_dim_v, max_seqlen_q, max_seqlen_kv, num_tokens_q, num_tokens_kv,
-                    num_pages_k, num_pages_v, page_size_k, page_size_v, max_pages_per_seq_k,
-                    max_pages_per_seq_v, bias_batch_size, bias_num_heads, bias_seqlen_q,
-                    bias_seqlen_kv) <
-           std::tie(rhs.is_training, rhs.deterministic, rhs.cuda_graph, rhs.return_max_logit,
-                    rhs.attn_mask_type, rhs.bias_type, rhs.window_size_left, rhs.window_size_right,
-                    rhs.bottom_right_diagonal, rhs.softmax_type, rhs.scaling_mode, rhs.dropout,
-                    rhs.attn_scale, rhs.qkv_dtype, rhs.o_dtype, rhs.do_dtype, rhs.dqkv_dtype,
-                    rhs.qkv_layout, rhs.o_format, rhs.do_format, rhs.dqkv_layout,
-                    rhs.qkv_scale_inv_format, rhs.do_scale_inv_format, rhs.batch_size,
-                    rhs.num_attn_heads, rhs.num_gqa_groups, rhs.head_dim_qk, rhs.head_dim_v,
-                    rhs.max_seqlen_q, rhs.max_seqlen_kv, rhs.num_tokens_q, rhs.num_tokens_kv,
-                    rhs.num_pages_k, rhs.num_pages_v, rhs.page_size_k, rhs.page_size_v,
-                    rhs.max_pages_per_seq_k, rhs.max_pages_per_seq_v, rhs.bias_batch_size,
-                    rhs.bias_num_heads, rhs.bias_seqlen_q, rhs.bias_seqlen_kv);
+    return cache_key_tuple() < rhs.cache_key_tuple();
   }
 
   // Derive fields such as bucketed batch_size or num_tokens for THD, based on input fields
@@ -180,6 +187,14 @@ struct FusedAttnConfig {
   // This helps avoid redundant graph builds and cache misses.
   FusedAttnConfig make_cache_key() const;
 };
+
+// Cross-check the generated field list against the public attribute enum: if a cache-relevant field
+// is added to TE_FUSED_ATTN_CACHE_KEY_FIELDS without a matching NVTEFusedAttnConfigAttribute entry (or
+// vice versa), this fails to compile instead of silently corrupting attribute (de)serialization.
+static_assert(sizeof(FusedAttnConfig::attr_sizes) / sizeof(FusedAttnConfig::attr_sizes[0]) ==
+                  kNVTEFusedAttnConfigNumAttributes,
+              "TE_FUSED_ATTN_CACHE_KEY_FIELDS is out of sync with NVTEFusedAttnConfigAttribute; "
+              "update both together.");
 
 inline const FusedAttnConfig *get_fused_attn_config(NVTEFusedAttnConfig config) {
   NVTE_CHECK(config != nullptr, "NVTEFusedAttnConfig must not be NULL.");

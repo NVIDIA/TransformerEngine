@@ -209,40 +209,24 @@ inline bool cache_disabled() {
 inline void note_cache_lookup(const char *pass, bool hit, const FusedAttnConfig &c) {
   if (!enabled()) return;
   register_summary_once();
+  // The cache-key portion of this line is generated from TE_FUSED_ATTN_CACHE_KEY_FIELDS, so it can never
+  // drift from operator< / attr_sizes. The internal-only fields that are NOT part of the cache key
+  // (is_forward, and the bucketed THD counts that make_cache_key() folds away) are appended
+  // explicitly at the end -- they are still worth printing to diagnose a wrongly-reused graph.
+#define TE_FUSED_ATTN_CACHE_KEY_FIELD_FMT(member, wire, fmt, cast, label) label "=" fmt " "
+#define TE_FUSED_ATTN_CACHE_KEY_FIELD_ARG(member, wire, fmt, cast, label) , static_cast<cast>(c.member)
   std::fprintf(
       stderr,
-      "[FUSED-ATTN-CACHE] %-3s %-4s%s | tid=%u | train=%d det=%d cg=%d maxlogit=%d fwd=%d mask=%lld bias=%lld "
-      "wl=%lld wr=%lld brd=%d softmax=%lld scale_mode=%lld dropout=%g attn_scale=%g "
-      "qkv_dt=%lld o_dt=%lld do_dt=%lld dqkv_dt=%lld qkv_lay=%lld o_fmt=%lld do_fmt=%lld "
-      "dqkv_lay=%lld qkv_sif=%lld do_sif=%lld b=%lld h=%lld hg=%lld dqk=%lld dv=%lld sq=%lld "
-      "skv=%lld tq=%lld tkv=%lld bb=%lld btq=%lld btkv=%lld npk=%lld npv=%lld psk=%lld psv=%lld "
-      "mppk=%lld mppv=%lld bias_b=%lld bias_h=%lld bias_sq=%lld bias_skv=%lld\n",
+      "[FUSED-ATTN-CACHE] %-3s %-4s%s | tid=%u | " TE_FUSED_ATTN_CACHE_KEY_FIELDS(
+          TE_FUSED_ATTN_CACHE_KEY_FIELD_FMT) "fwd=%d bb=%lld btq=%lld btkv=%lld\n",
       pass, hit ? "HIT" : "MISS",
-      (hit && cache_disabled()) ? " [cache-disabled->rebuild]" : "", thread_seq_id(),
-      static_cast<int>(c.is_training),
-      static_cast<int>(c.deterministic), static_cast<int>(c.cuda_graph),
-      static_cast<int>(c.return_max_logit), static_cast<int>(c.is_forward),
-      static_cast<long long>(c.attn_mask_type), static_cast<long long>(c.bias_type),
-      static_cast<long long>(c.window_size_left), static_cast<long long>(c.window_size_right),
-      static_cast<int>(c.bottom_right_diagonal), static_cast<long long>(c.softmax_type),
-      static_cast<long long>(c.scaling_mode), static_cast<double>(c.dropout),
-      static_cast<double>(c.attn_scale), static_cast<long long>(c.qkv_dtype),
-      static_cast<long long>(c.o_dtype), static_cast<long long>(c.do_dtype),
-      static_cast<long long>(c.dqkv_dtype), static_cast<long long>(c.qkv_layout),
-      static_cast<long long>(c.o_format), static_cast<long long>(c.do_format),
-      static_cast<long long>(c.dqkv_layout), static_cast<long long>(c.qkv_scale_inv_format),
-      static_cast<long long>(c.do_scale_inv_format), static_cast<long long>(c.batch_size),
-      static_cast<long long>(c.num_attn_heads), static_cast<long long>(c.num_gqa_groups),
-      static_cast<long long>(c.head_dim_qk), static_cast<long long>(c.head_dim_v),
-      static_cast<long long>(c.max_seqlen_q), static_cast<long long>(c.max_seqlen_kv),
-      static_cast<long long>(c.num_tokens_q), static_cast<long long>(c.num_tokens_kv),
-      static_cast<long long>(c.bucketed_batch_size), static_cast<long long>(c.bucketed_num_tokens_q),
-      static_cast<long long>(c.bucketed_num_tokens_kv), static_cast<long long>(c.num_pages_k),
-      static_cast<long long>(c.num_pages_v), static_cast<long long>(c.page_size_k),
-      static_cast<long long>(c.page_size_v), static_cast<long long>(c.max_pages_per_seq_k),
-      static_cast<long long>(c.max_pages_per_seq_v), static_cast<long long>(c.bias_batch_size),
-      static_cast<long long>(c.bias_num_heads), static_cast<long long>(c.bias_seqlen_q),
-      static_cast<long long>(c.bias_seqlen_kv));
+      (hit && cache_disabled()) ? " [cache-disabled->rebuild]" : "",
+      thread_seq_id() TE_FUSED_ATTN_CACHE_KEY_FIELDS(TE_FUSED_ATTN_CACHE_KEY_FIELD_ARG),
+      static_cast<int>(c.is_forward), static_cast<long long>(c.bucketed_batch_size),
+      static_cast<long long>(c.bucketed_num_tokens_q),
+      static_cast<long long>(c.bucketed_num_tokens_kv));
+#undef TE_FUSED_ATTN_CACHE_KEY_FIELD_FMT
+#undef TE_FUSED_ATTN_CACHE_KEY_FIELD_ARG
   std::fflush(stderr);
 }
 
