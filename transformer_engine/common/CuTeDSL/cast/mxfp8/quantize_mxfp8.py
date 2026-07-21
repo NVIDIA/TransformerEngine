@@ -742,13 +742,12 @@ class MXFP8QuantizeKernel:
         if cast_dbias_only:
             self._NUM_TILES = 4  # Each CTA handles 4 tiles stacked vertically
             self._THREADS_PER_CTA = 128
-            self._TILE_COLS = 128
-            self._TILE_ROWS = 32
         else:
             self._NUM_TILES = 2  # Each CTA handles 2 tiles stacked vertically
             self._THREADS_PER_CTA = 64
-            self._TILE_COLS = 64
-            self._TILE_ROWS = 32
+        # Each thread handles a (1, MXFP8_BLOCK_SCALING_SIZE) chunk
+        self._TILE_COLS = self._THREADS_PER_CTA
+        self._TILE_ROWS = MXFP8_BLOCK_SCALING_SIZE
         self._NUM_WARPS = self._THREADS_PER_CTA // 32
         # We prefer to do dbias reduction in colwise which is easier (no cross-thread reduction needed).
         # Only do rowwise reduction when we don't quantize columnwisely when WITH_DBIAS is True.
