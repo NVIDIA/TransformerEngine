@@ -112,11 +112,9 @@ def _run_step(module, x, is_first_microbatch, recipe, m_splits):
 @pytest.mark.parametrize("layer_type", _LAYER_TYPES)
 @pytest.mark.parametrize("recipe_cls", _SWIZZLING_RECIPES)
 def test_weight_swizzling_with_workspace_caching(layer_type, recipe_cls):
-    """Caching the quantized weight across microbatches must pre-swizzle its
-    scales: the weight quantizer enables ``optimize_for_gemm`` and the cached
-    workspace carries ``_with_gemm_swizzled_scales``.
-
-    Generic across every swizzling recipe (MXFP8, NVFP4) and module type.
+    """When direct swizzle fusion is supported, cached weights must pre-swizzle scales.
+    Generic across every swizzling recipe (MXFP8, NVFP4) and module type. Uses
+    128-aligned weight shapes so NVFP4 2D swizzle fusion is eligible.
     """
     torch.manual_seed(1234)
     device = "cuda"
@@ -188,6 +186,54 @@ def test_weight_swizzling_with_primary_fp8_weights(layer_type, recipe_cls):
         assert (
             w._with_gemm_swizzled_scales is False
         ), "quantized_model_init weight parameter must not have GEMM-swizzled scales"
+
+
+@pytest.mark.parametrize("layer_type", ["Linear", "LayerNormLinear", "GroupedLinear"])
+@pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
+def test_weight_optimize_for_gemm_disabled_without_swizzle_fusion(layer_type):
+    """NVFP4 weights that cannot use in-kernel swizzle fusion must keep compact cached scales."""
+    torch.manual_seed(1234)
+    device = "cuda"
+    # Valid for NVFP4 quantization, but not aligned to 128x128 swizzle tiles.
+    in_features, out_features = 1056, 1056
+    batch = 512
+    num_gemms = 2 if layer_type == "GroupedLinear" else 1
+    m_splits = _grouped_m_splits(layer_type, batch, num_gemms)
+    recipe = NVFP4BlockScaling(disable_stochastic_rounding=True)
+
+    module = _make_module(layer_type, in_features, out_features, device, num_gemms)
+    x = torch.randn(batch, in_features, dtype=torch.bfloat16, device=device, requires_grad=True)
+
+    weight_quantizers = _forward_backward(module, x, True, recipe, m_splits)
+
+    for weight_quantizer in weight_quantizers:
+        assert weight_quantizer is not None
+        assert weight_quantizer.optimize_for_gemm is False
+
+    for _, ws in module._fp8_workspaces.items():
+        assert getattr(ws, "_with_gemm_swizzled_scales", False) is False
+
+
+@pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
+def test_weight_optimize_for_gemm_disabled_without_nvfp4_2d_quantization():
+    """NVFP4 weights with 2D quantization disabled cannot preswizzle at quantize time."""
+    torch.manual_seed(1234)
+    device = "cuda"
+    in_features, out_features = 1024, 1024
+    batch = 512
+    recipe = NVFP4BlockScaling(
+        disable_stochastic_rounding=True,
+        disable_2d_quantization=True,
+    )
+
+    module = te.Linear(in_features, out_features, bias=True, params_dtype=torch.bfloat16).to(device)
+    x = torch.randn(batch, in_features, dtype=torch.bfloat16, device=device, requires_grad=True)
+
+    weight_quantizers = _forward_backward(module, x, True, recipe, None)
+
+    assert weight_quantizers[0].optimize_for_gemm is False
+    for _, ws in module._fp8_workspaces.items():
+        assert getattr(ws, "_with_gemm_swizzled_scales", False) is False
 
 
 @pytest.mark.parametrize("layer_type", _LAYER_TYPES)

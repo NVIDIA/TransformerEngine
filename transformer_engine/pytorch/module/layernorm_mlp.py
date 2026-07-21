@@ -46,6 +46,7 @@ from ..utils import (
     cast_if_needed,
     assert_dim_for_fp8_exec,
     clear_tensor_data,
+    get_device_compute_capability,
     requires_grad,
     needs_quantized_gemm,
     get_nvtx_range_context,
@@ -2337,6 +2338,15 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc1_weight, fc2_weight = self._get_weight_tensors()
             fc1_bias = self.fc1_bias if self.use_bias else None
             fc2_bias = self.fc2_bias if self.use_bias else None
+            if not debug:
+                if fc1_weight_quantizer is not None:
+                    self._configure_weight_quantizer_optimize_for_gemm(
+                        fc1_weight_quantizer, fc1_weight
+                    )
+                if fc2_weight_quantizer is not None:
+                    self._configure_weight_quantizer_optimize_for_gemm(
+                        fc2_weight_quantizer, fc2_weight
+                    )
             if not self.fp8:
                 if isinstance(fc1_weight, Float8Tensor):
                     fc1_weight = fc1_weight.dequantize()
@@ -2713,18 +2723,36 @@ class LayerNormMLP(TransformerEngineBaseModule):
         fc1_weight_quantizer.internal = True
         fc2_weight_quantizer = self.quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM2_WEIGHT]
         fc2_weight_quantizer.internal = True
-        # Weight scale factors must be GEMM-swizzled before cuBLAS/CUTLASS can
-        # consume them. Pre-swizzle once at quantize time (persisted on the cached
-        # workspace when the weight is cached) instead of lazily inside every GEMM.
-        # No-op for recipes whose scales don't need swizzling (e.g. per-tensor FP8).
-        # The exception is quantized_model_init, where the weight parameter is
-        # itself quantized and gets all-gathered (FSDP2) and optimizer-updated in
-        # its unswizzled layout; swizzling would break the all-gather and the
-        # dequantize-on-update, so leave the quantizer state untouched.
-        if not self.primary_weights_in_fp8:
-            fc1_weight_quantizer.optimize_for_gemm = True
-            fc2_weight_quantizer.optimize_for_gemm = True
         return [fc1_weight_quantizer, fc2_weight_quantizer]
+
+    def _configure_weight_quantizer_optimize_for_gemm(
+        self,
+        quantizer: Quantizer,
+        weight: torch.Tensor,
+    ) -> None:
+        """Configure preswizzling for the single-tensor weight quantize kernel."""
+        if self.primary_weights_in_fp8:
+            quantizer.optimize_for_gemm = False
+            return
+        if not isinstance(quantizer, NVFP4Quantizer):
+            quantizer.optimize_for_gemm = True
+            return
+
+        rows, cols = weight.numel() // weight.shape[-1], weight.shape[-1]
+        capability = get_device_compute_capability()
+        arch_supported = (10, 0) <= capability <= (11, 0)
+        if quantizer.with_rht:
+            enabled = arch_supported and rows % 64 == 0 and cols % 128 == 0
+        else:
+            enabled = (
+                arch_supported
+                and quantizer.with_2d_quantization
+                and not quantizer.row_scaled_nvfp4
+                and not quantizer.nvfp4_use_4over6
+                and rows % 128 == 0
+                and cols % 128 == 0
+            )
+        quantizer.optimize_for_gemm = enabled
 
     def backward_dw(self):
         """

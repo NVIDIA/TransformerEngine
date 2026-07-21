@@ -39,6 +39,7 @@ from ..utils import (
     init_method_constant,
     needs_quantized_gemm,
     assert_dim_for_fp8_exec,
+    get_device_compute_capability,
     nvtx_range_pop,
     nvtx_range_push,
     get_nvtx_range_context,
@@ -70,6 +71,7 @@ from ..quantized_tensor import (
 )
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
+from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ..tensor.utils import clear_columnwise_cache, is_custom
 from ..export import is_in_onnx_export_mode, assert_warmed_up
 from ..cpu_offload import (
@@ -1868,6 +1870,10 @@ class Linear(TransformerEngineBaseModule):
                 grad_weight_quantizer,
                 grad_output_quantizer,
             ) = quantizers
+            if weight_quantizer is not None and not debug:
+                self._configure_weight_quantizer_optimize_for_gemm(
+                    weight_quantizer, weight_tensor
+                )
 
             if is_grad_enabled:
                 linear_fn = _Linear.apply
@@ -2155,12 +2161,33 @@ class Linear(TransformerEngineBaseModule):
             return [None]
         weight_quantizer = self.quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM1_WEIGHT]
         weight_quantizer.internal = True
-        # Preswizzle the weights during quantization instead of lazily inside every GEMM.
-        # This wont work when primay weights are in fp8 because of 2 reasons
-        # 1. optimizer step updates would need to dequantize the weights. But swizzled weights
-        # currently dont support dequantization.
-        # 2. For FSDP2, quantized weight all-gather would need to be done in the
-        # unswizzled layout.
-        if not self.primary_weights_in_fp8:
-            weight_quantizer.optimize_for_gemm = True
         return [weight_quantizer]
+
+    def _configure_weight_quantizer_optimize_for_gemm(
+        self,
+        quantizer: Quantizer,
+        weight: torch.Tensor,
+    ) -> None:
+        """Configure preswizzling for the single-tensor weight quantize kernel."""
+        if self.primary_weights_in_fp8:
+            quantizer.optimize_for_gemm = False
+            return
+        if not isinstance(quantizer, NVFP4Quantizer):
+            quantizer.optimize_for_gemm = True
+            return
+
+        rows, cols = weight.numel() // weight.shape[-1], weight.shape[-1]
+        capability = get_device_compute_capability()
+        arch_supported = (10, 0) <= capability <= (11, 0)
+        if quantizer.with_rht:
+            enabled = arch_supported and rows % 64 == 0 and cols % 128 == 0
+        else:
+            enabled = (
+                arch_supported
+                and quantizer.with_2d_quantization
+                and not quantizer.row_scaled_nvfp4
+                and not quantizer.nvfp4_use_4over6
+                and rows % 128 == 0
+                and cols % 128 == 0
+            )
+        quantizer.optimize_for_gemm = enabled
