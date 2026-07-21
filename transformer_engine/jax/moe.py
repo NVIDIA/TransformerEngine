@@ -286,7 +286,11 @@ def _ffn_fwd_global(
 
     fc1_quantizer_set, fc2_quantizer_set = quantizer_sets
     casted_sorted_x = tex.grouped_quantize(
-        sorted_x, fc1_quantizer_set.x, group_sizes, flatten_axis=-1
+        sorted_x,
+        fc1_quantizer_set.x,
+        group_sizes,
+        flatten_axis=-1,
+        ragged_scale_sharding=flat_token_sharding,
     )
     casted_wi = tex.grouped_quantize(
         wi_combined, fc1_quantizer_set.kernel, flatten_axis=-1
@@ -322,7 +326,11 @@ def _ffn_fwd_global(
         intermediate = intermediate * recv_w_flat[:, None].astype(intermediate.dtype)
 
     casted_intermediate = tex.grouped_quantize(
-        intermediate, fc2_quantizer_set.x, group_sizes, flatten_axis=-1
+        intermediate,
+        fc2_quantizer_set.x,
+        group_sizes,
+        flatten_axis=-1,
+        ragged_scale_sharding=flat_token_sharding,
     )
     casted_wo = tex.grouped_quantize(wo, fc2_quantizer_set.kernel, flatten_axis=-1)
     expert_outputs = tex.grouped_gemm(
@@ -388,7 +396,11 @@ def _ffn_bwd_global(
     fc1_quantizer_set, fc2_quantizer_set = quantizer_sets
     # wo bwd
     casted_d_eo = tex.grouped_quantize(
-        d_eo_2d, fc2_quantizer_set.dgrad, group_sizes, flatten_axis=-1
+        d_eo_2d,
+        fc2_quantizer_set.dgrad,
+        group_sizes,
+        flatten_axis=-1,
+        ragged_scale_sharding=flat_token_sharding,
     )
     _casted_d_eo_lhs = casted_d_eo.get_tensor(usage=TensorUsage.LHS)
     _casted_d_eo_rhs = casted_d_eo.get_tensor(usage=TensorUsage.RHS)
@@ -442,7 +454,11 @@ def _ffn_bwd_global(
     d_combined = jnp.concatenate([d_gate_proj_out, d_up_proj_out], axis=-1)
     d_combined = jax.lax.with_sharding_constraint(d_combined, flat_token_sharding)
     casted_d_combined = tex.grouped_quantize(
-        d_combined, fc1_quantizer_set.dgrad, group_sizes, flatten_axis=-1
+        d_combined,
+        fc1_quantizer_set.dgrad,
+        group_sizes,
+        flatten_axis=-1,
+        ragged_scale_sharding=flat_token_sharding,
     )
     d_sorted_x = tex.grouped_gemm(
         casted_d_combined.get_tensor(usage=TensorUsage.LHS),

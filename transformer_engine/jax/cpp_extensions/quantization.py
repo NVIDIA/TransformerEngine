@@ -1638,6 +1638,7 @@ def grouped_quantize(
     quantizer: GroupedQuantizer,
     group_sizes: jnp.ndarray = None,
     flatten_axis: int = -1,
+    ragged_scale_sharding: NamedSharding | None = None,
 ) -> Union[GroupedScaledTensor1x, GroupedNoScaleTensor]:
     """Quantize a tensor in grouped manner.
 
@@ -1650,6 +1651,8 @@ def grouped_quantize(
         quantizer: The quantizer to use for quantization
         group_sizes: Array of ints containing the size of each group (default: None)
         flatten_axis: The axis along which the tensor could be flattened to 2D (default: -1)
+        ragged_scale_sharding: Data sharding to preserve for flat ragged scale buffers.
+            Its first partition-spec entry is applied to each scale buffer.
 
     Returns:
         A GroupedScaledTensor1x containing the quantized data
@@ -1734,6 +1737,27 @@ def grouped_quantize(
     # is shared between rowwise and colwise
     if is_tensor_scaling and quantizer.q_layout.is_rowwise_colwise or apply_colwise_war:
         colwise_scale_inv = rowwise_scale_inv
+
+    if ragged_scale_sharding is not None:
+        if ragged_first_dims is None:
+            raise ValueError("ragged_scale_sharding requires explicit group_sizes")
+        if not quantizer.scaling_mode.is_block_scaling:
+            raise ValueError("ragged_scale_sharding requires block scaling")
+        data_spec = ragged_scale_sharding.spec
+        if len(data_spec) == 0:
+            raise ValueError("ragged_scale_sharding must have a token/group dimension")
+        scale_sharding = NamedSharding(
+            ragged_scale_sharding.mesh,
+            PartitionSpec(data_spec[0]),
+        )
+        if q_layout.has_rowwise:
+            rowwise_scale_inv = jax.lax.with_sharding_constraint(
+                rowwise_scale_inv, scale_sharding
+            )
+        if q_layout.has_colwise:
+            colwise_scale_inv = jax.lax.with_sharding_constraint(
+                colwise_scale_inv, scale_sharding
+            )
 
     # TODO(Phuong): store the whole updated_amax in the grouped_quantize instead?
     if quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
