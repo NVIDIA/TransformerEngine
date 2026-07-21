@@ -217,8 +217,7 @@ def _ffn_fwd_global(
     recv_tokens: jnp.ndarray,
     recv_topk_weights: jnp.ndarray,
     token_counts: jnp.ndarray,
-    wi_0: jnp.ndarray,
-    wi_1: jnp.ndarray,
+    wi: jnp.ndarray,
     wo: jnp.ndarray,
     wi_0_bias: Optional[jnp.ndarray],
     wi_1_bias: Optional[jnp.ndarray],
@@ -249,8 +248,7 @@ def _ffn_fwd_global(
     recv_w_flat = jax.lax.with_sharding_constraint(recv_w_flat, flat_group_sharding)
     group_sizes = jax.lax.with_sharding_constraint(group_sizes, flat_group_sharding)
 
-    wi_0 = wi_0.astype(sorted_x.dtype)
-    wi_1 = wi_1.astype(sorted_x.dtype)
+    wi = wi.astype(sorted_x.dtype)
     wo = wo.astype(sorted_x.dtype)
 
     # Dispatch groups flatten in (dp, ep, local_expert) order. Keep the
@@ -275,11 +273,8 @@ def _ffn_fwd_global(
         wi_1_bias = _broadcast_bias(wi_1_bias)
         wo_bias = _broadcast_bias(wo_bias)
 
-    # Concat wi_0/wi_1 along the trailing axis (NOT stack on a new
-    # axis). grouped_gemm requires the 3D (G, K, N) weight layout with
-    # contracting_dims=((1,), (1,)); a 4D stack variant walks off the
-    # end of the RHS and returns NaN.
-    wi_combined = jnp.concatenate([wi_0, wi_1], axis=-1)
+    # ``wi`` is stored in its gated-SwiGLU layout [expert, hidden, 2*mlp].
+    # Keeping it contiguous lets grouped quantize/GEMM consume it directly.
     wi_combined_bias = (
         jnp.concatenate([wi_0_bias, wi_1_bias], axis=-1) if wi_0_bias is not None else None
     )
@@ -293,7 +288,7 @@ def _ffn_fwd_global(
         ragged_scale_sharding=flat_token_sharding,
     )
     casted_wi = tex.grouped_quantize(
-        wi_combined, fc1_quantizer_set.kernel, flatten_axis=-1
+        wi, fc1_quantizer_set.kernel, flatten_axis=-1
     )
     combined_out = tex.grouped_gemm(
         casted_sorted_x.get_tensor(usage=TensorUsage.LHS),
@@ -385,7 +380,7 @@ def _ffn_bwd_global(
 
     Mirrors :func:`_ffn_fwd_global`. Returns
     ``(d_sorted_x [num_procs, recv_pr, H], d_recv_w [num_procs, recv_pr],
-    d_wi_0, d_wi_1, d_wo, d_wi_0_bias, d_wi_1_bias, d_wo_bias)``.
+    d_wi, d_wo, d_wi_0_bias, d_wi_1_bias, d_wo_bias)``.
     """
     group_sizes = local_group_sizes.reshape(-1).astype(jnp.int32)
     d_eo_2d = d_expert_outputs.reshape(-1, d_expert_outputs.shape[-1])
@@ -450,7 +445,7 @@ def _ffn_bwd_global(
     # gate/up cotangents along the trailing axis, run a single
     # grouped_quantize + two grouped_gemm pair (one dgrad, one wgrad)
     # against the fused casted_wi_rhs_trans residual, then split the
-    # wgrad result back into d_wi_0 / d_wi_1 halves with jnp.split.
+    # wgrad result remains in the contiguous gated-SwiGLU ``wi`` layout.
     d_combined = jnp.concatenate([d_gate_proj_out, d_up_proj_out], axis=-1)
     d_combined = jax.lax.with_sharding_constraint(d_combined, flat_token_sharding)
     casted_d_combined = tex.grouped_quantize(
@@ -472,7 +467,6 @@ def _ffn_bwd_global(
         contracting_dims=((0,), (0,)),
     )
     d_wi_combined = jax.lax.with_sharding_constraint(d_wi_combined, grouped_weight_sharding)
-    d_wi_0, d_wi_1 = jnp.split(d_wi_combined, 2, axis=-1)
     if has_bias:
         d_wi_combined_bias = tex.grouped_dbias(d_combined, group_sizes)
         d_wi_combined_bias = jax.lax.with_sharding_constraint(
@@ -488,8 +482,7 @@ def _ffn_bwd_global(
     return (
         d_sorted_x_3d,
         d_recv_w_3d,
-        d_wi_0,
-        d_wi_1,
+        d_wi_combined,
         d_wo,
         d_wi_0_bias,
         d_wi_1_bias,
@@ -505,8 +498,7 @@ def _ffn_bwd_global(
 def _moe_fwd_rule(
     x,
     gate_kernel,
-    wi_0,
-    wi_1,
+    wi,
     wo,
     wi_0_bias,
     wi_1_bias,
@@ -715,8 +707,7 @@ def _moe_fwd_rule(
         recv_tokens,
         recv_topk_weights,
         token_counts,
-        wi_0,
-        wi_1,
+        wi,
         wo,
         wi_0_bias if has_bias else None,
         wi_1_bias if has_bias else None,
@@ -877,8 +868,7 @@ def _moe_bwd_rule(
     (
         d_sorted_x,
         d_recv_w_from_intermediate,
-        d_wi_0,
-        d_wi_1,
+        d_wi,
         d_wo,
         d_wi_0_bias,
         d_wi_1_bias,
@@ -913,8 +903,7 @@ def _moe_bwd_rule(
             .reshape(num_experts, *grad.shape[1:])
         )
 
-    d_wi_0 = _fold_dp_groups(d_wi_0)
-    d_wi_1 = _fold_dp_groups(d_wi_1)
+    d_wi = _fold_dp_groups(d_wi)
     d_wo = _fold_dp_groups(d_wo)
     if has_bias:
         d_wi_0_bias = _fold_dp_groups(d_wi_0_bias)
@@ -996,8 +985,7 @@ def _moe_bwd_rule(
     # optimizers see consistent shardings.
     d_x = with_sharding_constraint_by_logical_axes(d_x, input_axes)
     d_gate_kernel = with_sharding_constraint_by_logical_axes(d_gate_kernel, gate_kernel_axes)
-    d_wi_0 = with_sharding_constraint_by_logical_axes(d_wi_0, wi_kernel_axes)
-    d_wi_1 = with_sharding_constraint_by_logical_axes(d_wi_1, wi_kernel_axes)
+    d_wi = with_sharding_constraint_by_logical_axes(d_wi, wi_kernel_axes)
     d_wo = with_sharding_constraint_by_logical_axes(d_wo, wo_kernel_axes)
     if has_bias:
         wi_bias_axes = (wi_kernel_axes[0], *wi_kernel_axes[2:])
@@ -1015,8 +1003,7 @@ def _moe_bwd_rule(
     return (
         d_x,
         d_gate_kernel,
-        d_wi_0,
-        d_wi_1,
+        d_wi,
         d_wo,
         d_wi_0_bias if has_bias else None,
         d_wi_1_bias if has_bias else None,
@@ -1031,12 +1018,11 @@ def _moe_bwd_rule(
 # =============================================================================
 
 
-@partial(jax.custom_vjp, nondiff_argnums=tuple(range(10, 27)))
+@partial(jax.custom_vjp, nondiff_argnums=tuple(range(9, 26)))
 def _moe(
     x,
     gate_kernel,
-    wi_0,
-    wi_1,
+    wi,
     wo,
     wi_0_bias,
     wi_1_bias,
@@ -1064,8 +1050,7 @@ def _moe(
     primal, _ = _moe_fwd_rule(
         x,
         gate_kernel,
-        wi_0,
-        wi_1,
+        wi,
         wo,
         wi_0_bias,
         wi_1_bias,
@@ -1099,8 +1084,7 @@ _moe.defvjp(_moe_fwd_rule, _moe_bwd_rule)
 def moe(
     x: jnp.ndarray,
     gate_kernel: jnp.ndarray,
-    wi_0: jnp.ndarray,
-    wi_1: jnp.ndarray,
+    wi: jnp.ndarray,
     wo: jnp.ndarray,
     wi_0_bias: Optional[jnp.ndarray] = None,
     wi_1_bias: Optional[jnp.ndarray] = None,
@@ -1217,8 +1201,7 @@ def moe(
     output, aux_loss = _moe(
         x,
         gate_kernel,
-        wi_0,
-        wi_1,
+        wi,
         wo,
         wi_0_bias,
         wi_1_bias,
