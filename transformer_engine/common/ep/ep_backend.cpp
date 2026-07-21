@@ -94,8 +94,15 @@ void EPBackend::validate_config(const NVTEEpGroupConfig& config) {
   NVTE_CHECK(config.num_experts > 0, "num_experts must be positive, got ", config.num_experts);
   NVTE_CHECK(config.max_tokens_per_rank > 0, "max_tokens_per_rank must be positive, got ",
              config.max_tokens_per_rank);
-  NVTE_CHECK(config.max_recv_tokens_per_rank > 0, "max_recv_tokens_per_rank must be positive, got ",
+  // 0 selects eager mode (NCCL_EP_AUTO); any explicit budget must be positive.
+  NVTE_CHECK(config.max_recv_tokens_per_rank >= 0,
+             "max_recv_tokens_per_rank must be non-negative, got ",
              config.max_recv_tokens_per_rank);
+  NVTE_CHECK(!(config.zero_copy && config.max_recv_tokens_per_rank == 0),
+             "zero-copy and eager (max_recv_tokens_per_rank = 0) modes are mutually exclusive");
+  NVTE_CHECK(!(config.drop_on_overflow && config.max_recv_tokens_per_rank == 0),
+             "drop_on_overflow (overflow drop) is not supported in eager mode "
+             "(max_recv_tokens_per_rank = 0)");
   NVTE_CHECK(config.hidden_dim > 0, "hidden_dim must be positive, got ", config.hidden_dim);
   NVTE_CHECK(config.max_token_dtype >= 0 && config.max_token_dtype < kNVTENumTypes,
              "max_token_dtype out of range, got ", static_cast<int>(config.max_token_dtype));
@@ -210,9 +217,14 @@ void EPBackend::init(ncclComm_t ep_comm, NVTEEpGroupConfig group_config) {
   cfg.max_num_sms = group_config.num_comm_sms > 0
                         ? static_cast<unsigned int>(group_config.num_comm_sms)
                         : NCCL_EP_AUTO;
-  // Must be > 0; NCCL EP errors out on 0.
+  // 0 = NCCL_EP_AUTO, which enables eager mode (recv buffers sized per routing).
   cfg.max_recv_tokens_per_rank = static_cast<unsigned int>(group_config.max_recv_tokens_per_rank);
   cfg.zero_copy = group_config.zero_copy ? NCCL_EP_ZERO_COPY_ON : NCCL_EP_ZERO_COPY_OFF;
+  // Upper bound on per-token top-k; required for eager mode with the
+  // expert-major layout, where NCCL EP sizes internal buffers from it.
+  cfg.num_topk = static_cast<unsigned int>(group_config.num_topk);
+  cfg.overflow_policy =
+      group_config.drop_on_overflow ? NCCL_EP_OVERFLOW_DROP : NCCL_EP_OVERFLOW_AUTO;
 
   NVTE_CHECK_NCCL(ncclEpCreateGroup(&ep_group_, ep_comm, &cfg));
 
@@ -320,10 +332,8 @@ size_t EPBackend::handle_mem_size(NVTEEpLayerConfig layer_cfg) {
 }
 
 void EPBackend::prepare(void* handle_mem, const NVTETensor topk_idx,
-                        NVTETensor recv_tokens_per_expert,
-                        NVTETensor /*total_recv_tokens_per_rank*/, NVTEEpLayerConfig layer_cfg,
-                        cudaStream_t stream) {
-  // total_recv_tokens_per_rank is a reserved placeholder; not yet populated.
+                        NVTETensor recv_tokens_per_expert, NVTETensor total_recv_tokens_per_rank,
+                        NVTEEpLayerConfig layer_cfg, cudaStream_t stream) {
   NVTE_CHECK(handle_mem != nullptr, "handle_mem must not be null");
   NVTE_CHECK(layer_cfg.top_k > 0, "top_k must be > 0, got ", layer_cfg.top_k);
   NVTE_CHECK(nvte_tensor_shape(topk_idx).ndim == 2, "topk_idx must be 2D [T, top_k]");
@@ -331,16 +341,24 @@ void EPBackend::prepare(void* handle_mem, const NVTETensor topk_idx,
   NVTEShape topk_idx_shape;
   ncclEpTensor_t nccl_topk_idx = make_nccl_ep_tensor(topk_idx, topk_idx_shape);
 
-  // ncclEpUpdateHandle writes per-expert counts via expert_counters.
+  // ncclEpUpdateHandle writes per-expert counts via expert_counters and, when
+  // provided, the scalar padded recv-slot total via recv_total_counter.
   NVTEShape recv_tokens_per_expert_shape;
   ncclEpTensor_t recv_tokens_per_expert_desc;
   if (recv_tokens_per_expert != nullptr) {
     recv_tokens_per_expert_desc =
         make_nccl_ep_tensor(recv_tokens_per_expert, recv_tokens_per_expert_shape);
   }
+  NVTEShape total_recv_shape;
+  ncclEpTensor_t total_recv_desc;
+  if (total_recv_tokens_per_rank != nullptr) {
+    total_recv_desc = make_nccl_ep_tensor(total_recv_tokens_per_rank, total_recv_shape);
+  }
   ncclEpLayoutInfo_t layout_info = NCCL_EP_LAYOUT_INFO_INIT;
   layout_info.expert_counters =
       (recv_tokens_per_expert != nullptr) ? &recv_tokens_per_expert_desc : nullptr;
+  layout_info.recv_total_counter =
+      (total_recv_tokens_per_rank != nullptr) ? &total_recv_desc : nullptr;
 
   std::lock_guard<std::mutex> lock(mutex_);
   NVTE_CHECK(initialized_, "EPBackend not initialized");

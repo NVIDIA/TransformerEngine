@@ -125,7 +125,7 @@ bool ep_get_zero_copy() { return g_zero_copy_enabled.load(std::memory_order_rela
 void ep_initialize(uintptr_t comm_ptr, const std::string& group_name, int64_t num_experts,
                    int64_t max_tokens_per_rank, int64_t max_recv_tokens_per_rank,
                    int64_t hidden_dim, int64_t max_num_sms, pybind11::object max_token_dtype,
-                   bool zero_copy) {
+                   bool zero_copy, int64_t max_num_topk, bool drop_on_overflow) {
   NVTE_CHECK(!group_name.empty(), "group_name must be non-empty (used for symm-mem lookup)");
   NVTE_CHECK(comm_ptr != 0, "comm_ptr must be non-null (torch NCCL host comm pointer)");
   NVTE_CHECK(!g_ep_initialized, "ep_initialize called twice without ep_finalize");
@@ -144,6 +144,8 @@ void ep_initialize(uintptr_t comm_ptr, const std::string& group_name, int64_t nu
       .num_comm_sms = static_cast<int>(max_num_sms),
       .max_token_dtype = static_cast<NVTEDType>(GetTransformerEngineDType(torch_dtype)),
       .zero_copy = zero_copy ? 1 : 0,
+      .num_topk = static_cast<int>(max_num_topk),
+      .drop_on_overflow = drop_on_overflow ? 1 : 0,
   };
   // Release the GIL only around the native init. It must stay held while pybind11 casts
   // the ``max_token_dtype`` object above and destroys the by-value ``pybind11::object``
@@ -187,23 +189,30 @@ int64_t ep_handle_mem_size(int64_t top_k, int64_t dispatch_output_per_expert_ali
 // ── Per-step ops ─────────────────────────────────────────────────────────────
 
 void ep_prepare(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor token_counts, int64_t top_k,
-                int64_t dispatch_output_per_expert_alignment) {
+                int64_t dispatch_output_per_expert_alignment, at::Tensor total_recv) {
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   NVTE_CHECK(topk_idx.dim() >= 2, "topk_idx must be at least 2D [..., top_k]");
   auto idx_dtype = check_topk_idx_dtype(topk_idx);
+  // NCCL EP requires all prepare int output counters to share a dtype.
+  NVTE_CHECK(token_counts.scalar_type() == at::kLong, "token_counts must be int64");
+  NVTE_CHECK(total_recv.scalar_type() == at::kLong, "total_recv must be int64");
   const size_t T_flat = topk_idx.numel() / topk_idx.size(-1);
   const size_t topk_n = static_cast<size_t>(topk_idx.size(-1));
 
   auto topk_idx_te =
       makeTransformerEngineTensor(topk_idx.data_ptr(), Shape{T_flat, topk_n}, idx_dtype);
   auto token_counts_te = makeTransformerEngineTensor(
-      token_counts.data_ptr(), Shape{static_cast<size_t>(token_counts.numel())}, DType::kInt32);
+      token_counts.data_ptr(), Shape{static_cast<size_t>(token_counts.numel())}, DType::kInt64);
   auto handle_mem_te = makeTransformerEngineTensor(
       handle_mem.data_ptr(), Shape{static_cast<size_t>(handle_mem.numel())}, DType::kByte);
+  // [1] int64 scalar recv-slot total; lets the caller size dispatch outputs
+  // (eager) or detect overflow past recv_capacity_per_rank (graph mode).
+  auto total_recv_te = makeTransformerEngineTensor(
+      total_recv.data_ptr(), Shape{static_cast<size_t>(total_recv.numel())}, DType::kInt64);
 
   auto layer_cfg = make_layer_cfg(top_k, dispatch_output_per_expert_alignment);
   nvte_ep_prepare(handle_mem_te.data(), topk_idx_te.data(), token_counts_te.data(),
-                  /*total_recv_tokens_per_rank=*/nullptr, &layer_cfg, stream);
+                  total_recv_te.data(), &layer_cfg, stream);
 }
 
 void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
@@ -372,14 +381,17 @@ void register_ep_bindings(pybind11::module_& m) {
         "Initialize the EP backend; borrows torch's NCCL comm pointed to by ``comm_ptr``.",
         py::arg("comm_ptr"), py::arg("group_name"), py::arg("num_experts"),
         py::arg("max_tokens_per_rank"), py::arg("max_recv_tokens_per_rank"), py::arg("hidden_dim"),
-        py::arg("max_num_sms") = 0, py::arg("max_token_dtype"), py::arg("zero_copy") = false);
+        py::arg("max_num_sms") = 0, py::arg("max_token_dtype"), py::arg("zero_copy") = false,
+        py::arg("max_num_topk") = 0, py::arg("drop_on_overflow") = false);
   m.def("ep_finalize", &ep_finalize, "Tear down the EP backend. Idempotent.",
         py::call_guard<py::gil_scoped_release>());
   m.def("ep_get_zero_copy", &ep_get_zero_copy, "Return the current EP zero-copy toggle state.");
   m.def("ep_handle_mem_size", &ep_handle_mem_size,
         "Return the handle_mem byte size for the given layer config.", py::arg("top_k"),
         py::arg("dispatch_output_per_expert_alignment") = 0);
-  m.def("ep_prepare", &ep_prepare, "EP prepare", py::call_guard<py::gil_scoped_release>());
+  m.def("ep_prepare", &ep_prepare, "EP prepare", py::arg("handle_mem"), py::arg("topk_idx"),
+        py::arg("token_counts"), py::arg("top_k"), py::arg("dispatch_output_per_expert_alignment"),
+        py::arg("total_recv"), py::call_guard<py::gil_scoped_release>());
   m.def("ep_dispatch", &ep_dispatch, "EP dispatch", py::call_guard<py::gil_scoped_release>());
   m.def("ep_combine", &ep_combine, "EP combine", py::call_guard<py::gil_scoped_release>());
   m.def("ep_dispatch_bwd", &ep_dispatch_bwd, "EP dispatch backward",
