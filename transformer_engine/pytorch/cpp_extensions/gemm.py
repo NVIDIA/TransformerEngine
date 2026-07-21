@@ -455,17 +455,19 @@ def _get_grouped_gemm_setup_workspace(device: int, num_tensors: int) -> torch.Te
 
 
 @functools.lru_cache(maxsize=None)
-def _get_grouped_cublas_workspace(device: int, slot: int) -> torch.Tensor:
-    """Persistent cuBLAS workspace for the grouped-tensor GEMM path, one per ``slot``.
+def _get_grouped_cublas_workspace(device: int, layout: str) -> torch.Tensor:
+    """Persistent cuBLAS workspace for the grouped-tensor GEMM path, one per GEMM layout.
 
-    wgrad (NT GEMM) and dgrad (NN GEMM) require workspace isolation in the backward pass
-    under graph-replay. Without it, DGRAD GEMM contaminates a grid-synchronization flag in the
-    shared workspace and deadlocks WGRAD GEMM on the second replay. This can be deterministically
-    reproduced in TE/PyTorch but not in TE/common, suggesting that the underlying C++/CUDA kernels
-    are sound and the issue likely stems from an unidentified hazardous interaction between CUDA
-    graph replay and PyTorch's caching allocator.
+    Two grouped-tensor GEMMs that share a single cuBLAS workspace can deadlock on the
+    second CUDA-graph replay: the grouped kernels interact through the shared workspace
+    and the second matmul hangs. It is deterministic per graph geometry and reproduces
+    on cuBLAS 13.5/13.6/13.7 (i.e. not fixed upstream as of 13.7); giving each GEMM its
+    own persistent workspace avoids it. The backward wgrad (NT) is the case seen in TE,
+    but fprop (TN) and dgrad (NN) have also been reported to conflict, so we isolate by
+    layout: TN, NN, and NT each get a distinct persistent workspace. Each is a single
+    persistent allocation, so CUDA-graph capture safety is preserved.
     """
-    assert slot in (0, 1), "grouped cuBLAS workspace slot must be 0 (dgrad/fprop) or 1 (wgrad)"
+    assert layout in ("TN", "NN", "NT"), f"unexpected grouped GEMM layout {layout}"
     return torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device=device)
 
 
@@ -562,13 +564,11 @@ def general_grouped_gemm_for_grouped_tensor(
         raise ValueError("alpha and beta must be CUDA tensors.")
 
     workspace_setup = _get_grouped_gemm_setup_workspace(device.index, num_tensors)
-    # dgrad and wgrad must use distinct persistent cuBLAS workspaces: sharing one
-    # deadlocks under CUDA-graph replay on cuBLAS 13.6 (see _get_grouped_cublas_workspace).
-    # wgrad is the NT GEMM (transb=True); key the slot on the layout rather than on
-    # out-discreteness. A wgrad into a single grouped weight-grad (single_grouped_weight)
-    # has a GroupedTensor out, not a list, so an is_discrete_out proxy would collide it
-    # with dgrad on slot 0. fprop (TN) and dgrad (NN) can share slot 0; only NT is isolated.
-    workspace_cublas = _get_grouped_cublas_workspace(device.index, 1 if transb else 0)
+    # Each grouped-GEMM layout gets its own persistent cuBLAS workspace: two grouped
+    # GEMMs sharing one workspace deadlock under CUDA-graph replay (see
+    # _get_grouped_cublas_workspace). wgrad (NT) is the case seen in TE; fprop (TN) and
+    # dgrad (NN) have also been reported to conflict, so all three layouts are isolated.
+    workspace_cublas = _get_grouped_cublas_workspace(device.index, layout)
 
     sm_count = get_sm_count()
     sm_count = sm_count - int(os.getenv("NVTE_EXT_MARGIN_SM", str(sm_count)))

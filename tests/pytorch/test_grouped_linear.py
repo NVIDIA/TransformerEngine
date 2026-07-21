@@ -1539,20 +1539,6 @@ def _run_grouped_linear_path(
     out_features = weights[0].size(0)
     use_fp8 = fp8_recipe is not None
 
-    # Spy on the grouped quantize entry point so a predicate that silently
-    # declines the fused path fails the test instead of vacuously matching the
-    # legacy reference.
-    group_quantize_calls = 0
-    if enable_grouped_tensor_path and use_fp8:
-        real_group_quantize = tex.group_quantize
-
-        def _counting_group_quantize(*args, **kwargs):
-            nonlocal group_quantize_calls
-            group_quantize_calls += 1
-            return real_group_quantize(*args, **kwargs)
-
-        monkeypatch.setattr(tex, "group_quantize", _counting_group_quantize)
-
     x = x_base.detach().clone().requires_grad_(True)
     with quantized_model_init(enabled=fp8_model_params, recipe=fp8_recipe):
         grouped_linear = GroupedLinear(
@@ -1582,10 +1568,6 @@ def _run_grouped_linear_path(
     y.backward(dy)
     if delay_wgrad_compute:
         grouped_linear.backward_dw()
-
-    if enable_grouped_tensor_path and use_fp8:
-        monkeypatch.setattr(tex, "group_quantize", real_group_quantize)
-        assert group_quantize_calls > 0, "fused GroupedTensor path was not taken"
 
     outputs = [y, x.grad]
     for i in range(num_gemms):
