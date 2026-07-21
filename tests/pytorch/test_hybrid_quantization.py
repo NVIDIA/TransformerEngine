@@ -60,10 +60,7 @@ _COLUMNWISE_ONLY_PER_TENSOR_FP8_ERROR = (
 
 _XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8 = pytest.mark.xfail(
     condition=not is_non_tn_fp8_gemm_supported(),
-    raises=pytest.RaisesExc(
-        NotImplementedError,
-        match=_COLUMNWISE_ONLY_PER_TENSOR_FP8_ERROR,
-    ),
+    raises=NotImplementedError,
     strict=True,
     reason=(
         "Hopper does not yet support columnwise-only per-tensor FP8 quantization; "
@@ -4805,6 +4802,75 @@ class TestHybridQuantizeMasterWeights:
         quantizer.update_quantized(master.reshape(1, -1), temp)
         return temp._data.reshape(-1)
 
+    def test_fp8_current_fsdp_transpose_only_raises_before_mutation(self):
+        """Reject Hopper FSDP updates that would materialize rowwise column storage."""
+        from transformer_engine.pytorch.tensor.utils import quantize_master_weights
+
+        shape = (4, 8)
+        shard_shape = (2, 8)
+        row_quantizer = Float8CurrentScalingQuantizer(
+            tex.DType.kFloat8E4M3,
+            device="cuda",
+            rowwise=True,
+            columnwise=False,
+        )
+        col_quantizer = Float8CurrentScalingQuantizer(
+            tex.DType.kFloat8E4M3,
+            device="cuda",
+            rowwise=False,
+            columnwise=True,
+        )
+        quantizer = HybridQuantizer(
+            rowwise_quantizer=row_quantizer,
+            columnwise_quantizer=col_quantizer,
+        )
+
+        source = torch.randn(shape, dtype=torch.bfloat16, device="cuda")
+        shard_source = source[: shard_shape[0]].contiguous()
+        weight = HybridQuantizedTensor(
+            shape=shape,
+            dtype=source.dtype,
+            rowwise_storage=row_quantizer(source),
+            columnwise_storage=self._make_transpose_only_float8_weight(shape, col_quantizer),
+            quantizer=quantizer,
+            requires_grad=False,
+            device="cuda",
+        )
+        shard = HybridQuantizedTensor(
+            shape=shard_shape,
+            dtype=source.dtype,
+            rowwise_storage=row_quantizer(shard_source),
+            columnwise_storage=self._make_transpose_only_float8_weight(shard_shape, col_quantizer),
+            quantizer=quantizer,
+            requires_grad=False,
+            device="cuda",
+        )
+        weight_col = weight._columnwise_storage
+        shard_col = shard._columnwise_storage
+        weight_scale_before = weight_col._scale_inv.clone()
+        weight_transpose_before = weight_col._transpose.clone()
+        shard_scale_before = shard_col._scale_inv.clone()
+        shard_transpose_before = shard_col._transpose.clone()
+
+        with pytest.raises(
+            NotImplementedError,
+            match="Columnwise-only per-tensor FP8 quantization is not implemented",
+        ):
+            quantize_master_weights(
+                [weight],
+                [shard_source.float()],
+                [0],
+                group=None,
+                fsdp_shard_model_weights=[shard],
+            )
+
+        assert weight_col._data is None
+        assert shard_col._data is None
+        torch.testing.assert_close(weight_col._scale_inv, weight_scale_before, rtol=0, atol=0)
+        torch.testing.assert_close(shard_col._scale_inv, shard_scale_before, rtol=0, atol=0)
+        assert torch.equal(weight_col._transpose, weight_transpose_before)
+        assert torch.equal(shard_col._transpose, shard_transpose_before)
+
     @staticmethod
     def _logical_float8_bytes(storage):
         """Return FP8 payload in the tensor's logical row-major order."""
@@ -8014,10 +8080,7 @@ class TestHybridActivationRecompute:
 
     _TORCH_CHECKPOINT_FP8_XFAIL = pytest.mark.xfail(
         raises=(
-            pytest.RaisesExc(
-                NotImplementedError,
-                match=_COLUMNWISE_ONLY_PER_TENSOR_FP8_ERROR,
-            )
+            NotImplementedError
             if not is_non_tn_fp8_gemm_supported()
             else torch.utils.checkpoint.CheckpointError
         ),

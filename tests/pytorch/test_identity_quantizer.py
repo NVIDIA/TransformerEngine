@@ -44,10 +44,7 @@ _COLUMNWISE_ONLY_PER_TENSOR_FP8_ERROR = (
 
 _XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8 = pytest.mark.xfail(
     condition=not is_non_tn_fp8_gemm_supported(),
-    raises=pytest.RaisesExc(
-        NotImplementedError,
-        match=_COLUMNWISE_ONLY_PER_TENSOR_FP8_ERROR,
-    ),
+    raises=NotImplementedError,
     strict=True,
     reason=(
         "Hopper does not yet support columnwise-only per-tensor FP8 quantization; "

@@ -248,6 +248,13 @@ def quantize_master_weights(
         fsdp_shard_model_weights = [None] * len(model_weights)
     else:
         use_fsdp_shard_model_weights = True
+    # Validate the entire batch before clearing initialization state or
+    # populating any per-format work buckets.
+    for model_weight, fsdp_shard_model_weight in zip(model_weights, fsdp_shard_model_weights):
+        _validate_fp8_current_scaling_fsdp_hopper_policy(
+            model_weight,
+            fsdp_shard_model_weight,
+        )
 
     for model_weight, master_weight, start_offset, fsdp_shard_model_weight in zip(
         model_weights, master_weights, start_offsets, fsdp_shard_model_weights
@@ -1201,6 +1208,42 @@ def _cast_master_weights_to_fp8_mxfp8_scaling(
 #         no C++ work needed.
 #
 # ---------------------------------------------------------------------------------------------
+
+
+def _validate_fp8_current_scaling_fsdp_hopper_policy(
+    model_weight,
+    fsdp_shard_model_weight,
+):
+    """Reject unsupported transpose-only current-scaling FSDP updates on Hopper.
+
+    The FSDP shard path can receive a ``Float8Tensor`` and pass it directly to
+    ``Float8Quantizer.update_quantized``. On Hopper, doing that for a
+    columnwise-only current-scaling tensor materializes rowwise ``_data`` and
+    violates the direction pinned by ``HybridQuantizer``. Reject the whole
+    batch before any scale, cache, or storage mutation instead.
+    """
+    if fsdp_shard_model_weight is None or is_non_tn_fp8_gemm_supported():
+        return
+
+    if isinstance(model_weight, HybridQuantizedTensor):
+        quantizer = model_weight._get_quantizer()
+        candidates = (
+            (model_weight._rowwise_storage, quantizer.rowwise_quantizer),
+            (model_weight._columnwise_storage, quantizer.columnwise_quantizer),
+        )
+    else:
+        candidates = ((model_weight, model_weight._get_quantizer()),)
+
+    for storage, quantizer in candidates:
+        if (
+            storage is not None
+            and isinstance(quantizer, Float8CurrentScalingQuantizer)
+            and _is_float8_transpose_only(storage)
+        ):
+            raise NotImplementedError(
+                "Columnwise-only per-tensor FP8 quantization is not implemented for "
+                "FSDP current-scaling updates on this architecture."
+            )
 
 
 def _route_hybrid_to_buckets(

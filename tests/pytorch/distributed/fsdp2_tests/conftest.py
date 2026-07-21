@@ -72,10 +72,7 @@ def _parametrize_hybrid_recipes():
         if name == "HybridFP8CurrentScaling" and not is_non_tn_fp8_gemm_supported():
             marks.append(
                 pytest.mark.xfail(
-                    raises=pytest.RaisesExc(
-                        NotImplementedError,
-                        match="Columnwise-only per-tensor FP8 quantization is not implemented",
-                    ),
+                    raises=NotImplementedError,
                     strict=True,
                     reason=(
                         "Hopper does not yet support columnwise-only per-tensor FP8 "

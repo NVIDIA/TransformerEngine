@@ -367,7 +367,7 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
                 if t.size(0) != flattened_in_shape0:
                     t = t[:flattened_in_shape0]
             elif name == "_columnwise_scale_inv" and t is not None:
-                expected = flattened_in_shape0 // MXFP8_BLOCK_SCALING_SIZE
+                expected = math.ceil(flattened_in_shape0 / MXFP8_BLOCK_SCALING_SIZE)
                 if t.size(0) != expected:
                     t = t[:expected]
             buffers.append(t)
