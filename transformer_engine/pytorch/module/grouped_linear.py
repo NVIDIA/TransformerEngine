@@ -27,6 +27,9 @@ from .base import (
     _2X_ACC_FPROP,
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
+    _attach_high_precision_init_val,
+    _clear_high_precision_init_val,
+    _get_high_precision_init_val,
 )
 from ._common import WeightGradStore
 from ..quantization import FP8GlobalStateManager, QuantizerRole
@@ -1586,6 +1589,19 @@ class GroupedLinear(TransformerEngineBaseModule):
 
         weights = [getattr(self, f"weight{i}") for i in range(self.num_gemms)]
 
+        # TE preserves the original BF16/FP16 initialization on each quantized
+        # parameter so distributed optimizers can construct lossless FP32 masters.
+        # Packing the parameters must transfer those values to the new registered
+        # grouped parameter; otherwise its master is initialized by dequantizing
+        # MXFP8 and starts from a different value than the discrete-weight layout.
+        high_precision_init_vals = [_get_high_precision_init_val(weight) for weight in weights]
+        if any(value is not None for value in high_precision_init_vals) and not all(
+            value is not None for value in high_precision_init_vals
+        ):
+            raise RuntimeError(
+                "Grouped weights have inconsistent high-precision initialization state"
+            )
+
         # Create the weight storage.
         grouped_weights = GroupedTensor.make_grouped_tensor_with_shapes(
             num_tensors=self.num_gemms,
@@ -1609,9 +1625,18 @@ class GroupedLinear(TransformerEngineBaseModule):
             and (weight_quantizers[0] is None or not weight_quantizers[0].internal)
         ):
             raise RuntimeError("Found internal quantizer with `single_grouped_weight=True`.")
+        grouped_parameter = torch.nn.Parameter(grouped_weights)
+        if all(value is not None for value in high_precision_init_vals):
+            _attach_high_precision_init_val(
+                grouped_parameter,
+                torch.stack(high_precision_init_vals, dim=0),
+            )
+            for weight in weights:
+                _clear_high_precision_init_val(weight)
+
         self.register_parameter(
             "weight",
-            torch.nn.Parameter(grouped_weights),
+            grouped_parameter,
             init_fn=self.init_method,
             get_rng_state_tracker=self.get_rng_state_tracker,
             fp8_meta_index=self._offsets["weight"],
