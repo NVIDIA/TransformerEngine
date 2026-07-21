@@ -247,6 +247,7 @@ void set_message(const char **message, std::string reason) {
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig config,
                                                        const char **message) {
   using namespace transformer_engine;
+  using namespace transformer_engine::fused_attn;
   const FusedAttnConfig &cfg = *get_fused_attn_config(config);
   set_message(message, "");
 
@@ -348,7 +349,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     float dropout, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
     size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left,
     int64_t window_size_right, bool return_max_logit, bool cuda_graph, bool deterministic) {
-  transformer_engine::FusedAttnConfig cfg{};
+  transformer_engine::fused_attn::FusedAttnConfig cfg{};
   cfg.qkv_layout = qkv_layout;
   cfg.bias_type = bias_type;
   cfg.attn_mask_type = attn_mask_type;
@@ -378,6 +379,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
 void nvte_fused_attn_fwd_v2(NVTEFusedAttnFwdParams params) {
   NVTE_API_CALL(nvte_fused_attn_fwd_v2);
   using namespace transformer_engine;
+  using namespace transformer_engine::fused_attn;
   const FusedAttnFwdParams &p = *get_fused_attn_fwd_params(params);
   const Tensor *input_cu_seqlens_q = convertNVTETensorCheck(p.cu_seqlens_q);
   const Tensor *input_cu_seqlens_kv = convertNVTETensorCheck(p.cu_seqlens_kv);
@@ -432,7 +434,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          int64_t window_size_left, int64_t window_size_right,
                          bool bottom_right_diagonal, NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_fwd);
-  transformer_engine::FusedAttnFwdParams p{};
+  transformer_engine::fused_attn::FusedAttnFwdParams p{};
   p.Q = Q;
   p.K = K;
   p.V = V;
@@ -472,6 +474,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
 void nvte_fused_attn_bwd_v2(NVTEFusedAttnBwdParams params) {
   NVTE_API_CALL(nvte_fused_attn_bwd_v2);
   using namespace transformer_engine;
+  using namespace transformer_engine::fused_attn;
   const FusedAttnBwdParams &p = *get_fused_attn_bwd_params(params);
   const Tensor *input_cu_seqlens_q = convertNVTETensorCheck(p.cu_seqlens_q);
   const Tensor *input_cu_seqlens_kv = convertNVTETensorCheck(p.cu_seqlens_kv);
@@ -551,7 +554,7 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          int64_t window_size_right, bool bottom_right_diagonal, bool deterministic,
                          bool cuda_graph, NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_bwd);
-  transformer_engine::FusedAttnBwdParams p{};
+  transformer_engine::fused_attn::FusedAttnBwdParams p{};
   p.Q = Q;
   p.K = K;
   p.V = V;

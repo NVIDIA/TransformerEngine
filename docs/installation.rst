@@ -14,7 +14,7 @@ Prerequisites
 1. Linux x86_64
 2. `CUDA 12.1+ (12.8+ for Blackwell support) <https://developer.nvidia.com/cuda-downloads>`__
 3. |driver link|_ supporting CUDA 12.1 or later.
-4. `cuDNN 9.11 <https://developer.nvidia.com/cudnn>`__ or later.
+4. `cuDNN 9.3 <https://developer.nvidia.com/cudnn>`__ or later.
 
 If the CUDA Toolkit headers are not available at runtime in a standard
 installation path, e.g. within `CUDA_HOME`, set

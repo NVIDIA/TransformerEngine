@@ -5,13 +5,13 @@
  ************************************************************************/
 
 #include <mutex>  // [SHARED-CACHE]
-#include <vector>  // [GRAPH-DEBUG] serialized-size probe
+#include <vector>  // [FUSED-ATTN-CACHE] serialized-size probe
 
 #include "../common.h"
 #include "../cudnn_utils.h"
 #include "../util/system.h"
 #include "fused_attn_fp8.h"
-#include "graph_debug.h"  // [GRAPH-DEBUG]
+#include "graph_cache_debug.h"  // [FUSED-ATTN-CACHE]
 #include "utils.h"
 
 namespace transformer_engine {
@@ -65,10 +65,6 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
   bool is_padding = cfg.is_padding;
   bool is_dropout = (is_training && dropout_probability != 0.0f);
   bool is_softmax_offset = (softmax_type != NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX);
-  auto bias_b = b;
-  auto bias_h = h;
-  auto bias_sq = s_q;
-  auto bias_skv = s_kv;
   NVTE_CHECK(~is_bias, "FP8 fused attention does not support pre/post_scale_bias yet!");
   NVTE_CHECK(~is_alibi, "FP8 fused attention does not support ALiBi yet!");
   bool is_delayed_scaling = (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) &&
@@ -134,12 +130,7 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
     // [SHARED-CACHE] Process-wide graph cache (was `static thread_local`) so a compiled graph
     // is reused across threads instead of rebuilt per thread. Safe because cuDNN >= 9.0 allows
     // concurrent execution of a shared plan and cudnn-frontend >= 1.25.0 has a thread-safe
-    // execute(); the static_asserts below fail the build loudly on an older toolkit.
-    static_assert(CUDNN_VERSION >= 91100,
-                  "[SHARED-CACHE] shared fused-attn graph cache requires cuDNN >= 9.11 "
-                  "(TE minimum supported cuDNN version)");
-    static_assert(CUDNN_FRONTEND_VERSION >= 12500,
-                  "[SHARED-CACHE] shared fused-attn graph cache requires cudnn-frontend >= 1.25.0");
+    // execute(). The TE minimum-cuDNN-version bump that formalizes this requirement is a follow-up PR.
     static CacheType sdpa_fp8_fprop_cache;
     static std::mutex sdpa_fp8_fprop_cache_mutex;
 
@@ -156,8 +147,8 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
         cache_hit = (it != cache.end());
         if (cache_hit) cached_graph = it->second;
       }
-      fused_attn_graph_debug::note_cache_lookup("fwd", cache_hit, cfg);  // [GRAPH-DEBUG]
-      if (cache_hit && !fused_attn_graph_debug::cache_disabled()) {     // [GRAPH-DEBUG]
+      graph_cache_debug::note_cache_lookup("fwd", cache_hit, cfg);  // [FUSED-ATTN-CACHE]
+      if (cache_hit && !graph_cache_debug::cache_disabled()) {     // [FUSED-ATTN-CACHE]
         return cached_graph;
       }
 
@@ -408,29 +399,21 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
       auto dropout_tuple = is_dropout ? std::make_tuple(dropout_seed, dropout_offset)
                                       : std::make_tuple(nullptr, nullptr);
 
-      GRAPH_DEBUG_TIME_STAGE(Validate, NVTE_CHECK_CUDNN_FE(mha_graph->validate()));  // [GRAPH-DEBUG]
-      GRAPH_DEBUG_TIME_STAGE(BuildOpGraph,  // [GRAPH-DEBUG]
-                             NVTE_CHECK_CUDNN_FE(mha_graph->build_operation_graph(handle)));
-      GRAPH_DEBUG_TIME_STAGE(CreatePlans,  // [GRAPH-DEBUG]
-                             NVTE_CHECK_CUDNN_FE(mha_graph->create_execution_plans({fe::HeurMode_t::A})));
-      GRAPH_DEBUG_TIME_STAGE(CheckSupport, NVTE_CHECK_CUDNN_FE(mha_graph->check_support()));  // [GRAPH-DEBUG] no-handle overload (handle version is deprecated)
-      GRAPH_DEBUG_TIME_STAGE(BuildPlans, NVTE_CHECK_CUDNN_FE(mha_graph->build_plans()));  // [GRAPH-DEBUG] no-handle overload (handle version is deprecated)
+      NVTE_CHECK_CUDNN_FE(mha_graph->validate());
+      NVTE_CHECK_CUDNN_FE(mha_graph->build_operation_graph(handle));
+      NVTE_CHECK_CUDNN_FE(mha_graph->create_execution_plans({fe::HeurMode_t::A}));
+      NVTE_CHECK_CUDNN_FE(mha_graph->check_support());  // no-handle overload (handle version is deprecated)
+      NVTE_CHECK_CUDNN_FE(mha_graph->build_plans());    // no-handle overload (handle version is deprecated)
       auto return_tuple =
           std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, Stats_tuple, bias_tuple,
                          softmax_offset_tuple, padding_tuple, dropout_tuple);
-      fused_attn_graph_debug::note_fwd_build();  // [GRAPH-DEBUG]
-      if (fused_attn_graph_debug::enabled()) {                                     // [GRAPH-DEBUG]
-        std::vector<uint8_t> serialized_graph;                                     // [GRAPH-DEBUG]
-        if (mha_graph->serialize(serialized_graph).is_good())                      // [GRAPH-DEBUG]
-          fused_attn_graph_debug::note_graph_size("fwd", serialized_graph.size());  // [GRAPH-DEBUG]
-      }                                                                            // [GRAPH-DEBUG]
+      graph_cache_debug::note_fwd_build();  // [FUSED-ATTN-CACHE]
       // [SHARED-CACHE] Lock only for insert. If another thread inserted this key while we built,
       // reuse theirs and discard ours so all threads share one graph (rare duplicate build).
       {
         std::lock_guard<std::mutex> shared_cache_lock(sdpa_fp8_fprop_cache_mutex);
         auto inserted = cache.insert({descriptor, return_tuple});
-        fused_attn_graph_debug::note_cache_size("fwd", cache.size());  // [GRAPH-DEBUG]
-        return fused_attn_graph_debug::cache_disabled() ? return_tuple : inserted.first->second;
+        return graph_cache_debug::cache_disabled() ? return_tuple : inserted.first->second;
       }
     };
 
@@ -448,7 +431,7 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
       *workspace_size = plan_workspace_size + actual_seqlen_workspace_size;
       return;
     }
-    fused_attn_graph_debug::note_fwd_exec();  // [GRAPH-DEBUG]
+    graph_cache_debug::note_fwd_exec();  // [FUSED-ATTN-CACHE]
 
     // cuDNN stream check needs to be moved here to support dummy kernel calls with
     // null streams for sizing the cuDNN workspace.
@@ -571,10 +554,6 @@ void fused_attn_fp8_bwd_impl(
   bool is_padding = cfg.is_padding;
   bool is_dropout = (dropout_probability != 0.0f);
   bool is_softmax_offset = (softmax_type != NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX);
-  auto bias_b = b;
-  auto bias_h = h;
-  auto bias_sq = s_q;
-  auto bias_skv = s_kv;
   NVTE_CHECK(~is_bias, "FP8 fused attention does not support pre/post_scale_bias yet!");
   NVTE_CHECK(~is_alibi, "FP8 fused attention does not support ALiBi yet!");
   bool is_delayed_scaling = (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) &&
@@ -659,8 +638,8 @@ void fused_attn_fp8_bwd_impl(
         cache_hit = (it != cache.end());
         if (cache_hit) cached_graph = it->second;
       }
-      fused_attn_graph_debug::note_cache_lookup("bwd", cache_hit, cfg);  // [GRAPH-DEBUG]
-      if (cache_hit && !fused_attn_graph_debug::cache_disabled()) {     // [GRAPH-DEBUG]
+      graph_cache_debug::note_cache_lookup("bwd", cache_hit, cfg);  // [FUSED-ATTN-CACHE]
+      if (cache_hit && !graph_cache_debug::cache_disabled()) {     // [FUSED-ATTN-CACHE]
         return cached_graph;
       }
 
@@ -1040,30 +1019,22 @@ void fused_attn_fp8_bwd_impl(
       auto dropout_tuple = is_dropout ? std::make_tuple(dropout_seed, dropout_offset)
                                       : std::make_tuple(nullptr, nullptr);
 
-      GRAPH_DEBUG_TIME_STAGE(Validate, NVTE_CHECK_CUDNN_FE(mha_graph->validate()));  // [GRAPH-DEBUG]
-      GRAPH_DEBUG_TIME_STAGE(BuildOpGraph,  // [GRAPH-DEBUG]
-                             NVTE_CHECK_CUDNN_FE(mha_graph->build_operation_graph(handle)));
-      GRAPH_DEBUG_TIME_STAGE(CreatePlans,  // [GRAPH-DEBUG]
-                             NVTE_CHECK_CUDNN_FE(mha_graph->create_execution_plans({fe::HeurMode_t::A})));
-      GRAPH_DEBUG_TIME_STAGE(CheckSupport, NVTE_CHECK_CUDNN_FE(mha_graph->check_support()));  // [GRAPH-DEBUG] no-handle overload (handle version is deprecated)
-      GRAPH_DEBUG_TIME_STAGE(BuildPlans, NVTE_CHECK_CUDNN_FE(mha_graph->build_plans()));  // [GRAPH-DEBUG] no-handle overload (handle version is deprecated)
+      NVTE_CHECK_CUDNN_FE(mha_graph->validate());
+      NVTE_CHECK_CUDNN_FE(mha_graph->build_operation_graph(handle));
+      NVTE_CHECK_CUDNN_FE(mha_graph->create_execution_plans({fe::HeurMode_t::A}));
+      NVTE_CHECK_CUDNN_FE(mha_graph->check_support());  // no-handle overload (handle version is deprecated)
+      NVTE_CHECK_CUDNN_FE(mha_graph->build_plans());    // no-handle overload (handle version is deprecated)
 
       auto return_tuple =
           std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, mxfp8_tensors_tuple,
                          bias_tuple, softmax_offset_tuple, padding_tuple, dropout_tuple);
-      fused_attn_graph_debug::note_bwd_build();  // [GRAPH-DEBUG]
-      if (fused_attn_graph_debug::enabled()) {                                     // [GRAPH-DEBUG]
-        std::vector<uint8_t> serialized_graph;                                     // [GRAPH-DEBUG]
-        if (mha_graph->serialize(serialized_graph).is_good())                      // [GRAPH-DEBUG]
-          fused_attn_graph_debug::note_graph_size("bwd", serialized_graph.size());  // [GRAPH-DEBUG]
-      }                                                                            // [GRAPH-DEBUG]
+      graph_cache_debug::note_bwd_build();  // [FUSED-ATTN-CACHE]
       // [SHARED-CACHE] Lock only for insert. If another thread inserted this key while we built,
       // reuse theirs and discard ours so all threads share one graph (rare duplicate build).
       {
         std::lock_guard<std::mutex> shared_cache_lock(sdpa_fp8_bprop_cache_mutex);
         auto inserted = cache.insert({descriptor, return_tuple});
-        fused_attn_graph_debug::note_cache_size("bwd", cache.size());  // [GRAPH-DEBUG]
-        return fused_attn_graph_debug::cache_disabled() ? return_tuple : inserted.first->second;
+        return graph_cache_debug::cache_disabled() ? return_tuple : inserted.first->second;
       }
     };
     auto [mha_graph, Q, K, V, O, Stats, dO, attn_scale, descale_q, descale_k, descale_v, descale_o,
@@ -1080,7 +1051,7 @@ void fused_attn_fp8_bwd_impl(
       *workspace_size = plan_workspace_size + actual_seqlen_workspace_size;
       return;
     }
-    fused_attn_graph_debug::note_bwd_exec();  // [GRAPH-DEBUG]
+    graph_cache_debug::note_bwd_exec();  // [FUSED-ATTN-CACHE]
 
     // cuDNN stream check needs to be moved here to support dummy kernel calls with
     // null streams for sizing the cuDNN workspace.
@@ -1171,6 +1142,8 @@ void fused_attn_fp8_bwd_impl(
 }  // NOLINT(readability/fn_size)
 
 }  // namespace fused_attn
+
+using namespace transformer_engine::fused_attn;
 
 // fused attention FWD FP8 with separate Q, K, V
 void fused_attn_fp8_fwd(const FusedAttnConfig& cfg, const Tensor* input_Q, const Tensor* input_K,

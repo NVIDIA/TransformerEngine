@@ -171,17 +171,23 @@ backend-selection overview.
    :Default: ``1``
    :Description: Enable or disable UnfusedDotProductAttention backend (native PyTorch). When set to ``0``, UnfusedDotProductAttention will not be used.
 
-.. envvar:: NVTE_FUSED_ATTN_BACKEND
-
-   :Type: ``int`` (1 or 2)
-   :Default: Auto-selected
-   :Description: Request a cuDNN FusedAttention backend when that request is supported by the active fused-attention path. ``1`` = F16_arbitrary_seqlen (cuDNN, any seq len), ``2`` = FP8 backend. If not set, the backend is automatically selected based on the input configuration. BF16/FP16 attention uses sub-backend ``1`` when eligible. FP8 attention uses sub-backend ``2`` when FP8 DPA is enabled and supported by the architecture, cuDNN version, and input configuration.
-
 .. envvar:: NVTE_FUSED_ATTN_USE_FAv2_BWD
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
    :Description: When using FusedAttention, use FlashAttention-2 implementation for the backward pass instead of the cuDNN implementation. This can be useful due to performance differences between various versions of flash-attn and FusedAttention.
+
+.. envvar:: NVTE_FUSED_ATTN_CACHE_DEBUG
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Enable diagnostic logging for the cuDNN FusedAttention graph cache. When set to ``1``, prints to stderr (prefixed ``[FUSED-ATTN-CACHE]``) a per-lookup HIT/MISS line with the full graph-cache key, a BUILD line whenever a new graph is constructed, and a SUMMARY of graph builds vs. executions at process exit. Useful for diagnosing redundant graph rebuilds or stale-cache reuse. Has negligible overhead when unset.
+
+.. envvar:: NVTE_FUSED_ATTN_DISABLE_CACHE
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Bypass the cuDNN FusedAttention graph cache, rebuilding a fresh graph on every forward/backward call. Intended for debugging stale-cache reuse only: it forces expensive graph recompilation on every call and must not be used in production. If a run that fails with the cache enabled passes with it disabled, the bug is stale-cache reuse (an incomplete cache key). Pairs with :envvar:`NVTE_FUSED_ATTN_CACHE_DEBUG` for inspecting each rebuild.
 
 .. envvar:: NVTE_ALLOW_NONDETERMINISTIC_ALGO
 

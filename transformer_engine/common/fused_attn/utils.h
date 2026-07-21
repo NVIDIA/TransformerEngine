@@ -4,12 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#ifndef TRANSFORMER_ENGINE_FUSED_ATTN_UTILS_H_
-#define TRANSFORMER_ENGINE_FUSED_ATTN_UTILS_H_
-
-#include <cudnn.h>
-#include <cudnn_frontend.h>
-#include <cudnn_frontend_utils.h>
+#ifndef TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_UTILS_H_
+#define TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_UTILS_H_
 
 #include <cstdint>
 #include <mutex>
@@ -223,32 +219,6 @@ inline void generateMatrixStridesWithLayout(int64_t b, int64_t h, int64_t hg, in
 void generateMatrixStrides(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
                            int64_t *strideA, NVTE_QKV_Layout layout, NVTE_QKV_Matrix matrix);
 
-bool allowAllConfig(cudnnBackendDescriptor_t engine_config);
-
-cudnn_frontend::Tensor tensor_create(cudnnDataType_t type, int64_t id, int64_t const *dim,
-                                     int64_t const *stride, bool is_virtual, bool is_value);
-
-cudnn_frontend::Tensor tensor_create_with_offset(
-    cudnnDataType_t type, int64_t id, int64_t const *dim, int64_t const *stride, bool is_virtual,
-    bool is_value, std::shared_ptr<cudnn_frontend::Tensor> raggedOffset);
-
-cudnn_frontend::PointWiseDesc pw_desc_create(cudnnDataType_t type, cudnnPointwiseMode_t mode);
-
-cudnn_frontend::Operation unary_pw_op_create(cudnn_frontend::Tensor const &xDesc,
-                                             cudnn_frontend::Tensor const &yDesc,
-                                             cudnn_frontend::PointWiseDesc const &pwDesc);
-
-cudnn_frontend::Operation binary_pw_op_create(cudnn_frontend::Tensor const &xDesc,
-                                              cudnn_frontend::Tensor const &bDesc,
-                                              cudnn_frontend::Tensor const &yDesc,
-                                              cudnn_frontend::PointWiseDesc const &pwDesc);
-
-cudnn_frontend::Operation ternary_pw_op_create(cudnn_frontend::Tensor const &xDesc,
-                                               cudnn_frontend::Tensor const &bDesc,
-                                               cudnn_frontend::Tensor const &tDesc,
-                                               cudnn_frontend::Tensor const &yDesc,
-                                               cudnn_frontend::PointWiseDesc const &pwDesc);
-
 // Per-tensor scale factors relating cu_seqlens_padded (token units) to tensor-element
 // ragged offsets, as a function of the QKV layout group. Single source of truth shared
 // by the cu_seqlens_padded_to_offsets conversion kernel and the direct-seqlens path
@@ -334,4 +304,4 @@ uint32_t GetRuntimeNumSegments(void *cu_seqlen, void *workspace, size_t len, cud
 }  // namespace fused_attn
 }  // namespace transformer_engine
 
-#endif
+#endif  // TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_UTILS_H_

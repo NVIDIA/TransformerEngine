@@ -13,17 +13,8 @@ if (CMAKE_BUILD_TYPE STREQUAL "Debug")
 endif()
 
 # Hide non-necessary symbols in shared object.
-# [GRAPH-DEBUG] -DNVTE_GRAPH_DEBUG_SYMBOLS=ON keeps + exports internal symbols so
-# backtrace_symbols() in fused_attn/graph_debug.h can name fused-attn frames. Remove after
-# verification (revert to the two unconditional --version-script lines).
-option(NVTE_GRAPH_DEBUG_SYMBOLS "Export all symbols for readable backtraces" OFF)
-if (NOT NVTE_GRAPH_DEBUG_SYMBOLS)
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version")
-  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version")
-else()
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -rdynamic -Wl,--export-dynamic")
-  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler -rdynamic -Wl,--export-dynamic")
-endif()
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version")
 
 # Transformer Engine library
 project(transformer_engine LANGUAGES CUDA CXX)

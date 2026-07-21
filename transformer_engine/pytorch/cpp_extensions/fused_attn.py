@@ -303,12 +303,6 @@ def fused_attn_fwd(
     else:
         raise ValueError(f"Unsupported backend {fused_attention_backend}")
 
-    # [GRAPH-DEBUG] Trace the Python caller of the actual fwd kernel (maps to the C++ execution
-    # "fwd HIT|MISS" line + note_fwd_exec). Remove after verification.
-    from transformer_engine.pytorch.attention.dot_product_attention import graph_debug
-
-    graph_debug.pytrace("fused_attn_fwd (execute)")
-
     # execute kernel
     output_tensors = tex.fused_attn_fwd(
         max_seqlen_q,
@@ -558,12 +552,6 @@ def fused_attn_bwd(
             f" but got len(aux_ctx_tensors)={len(aux_ctx_tensors)}"
             f" for backend={fused_attention_backend}."
         )
-
-    # [GRAPH-DEBUG] Trace the Python caller of the actual bwd kernel (maps to the C++ execution
-    # "bwd HIT|MISS" line + note_bwd_exec). Remove after verification.
-    from transformer_engine.pytorch.attention.dot_product_attention import graph_debug
-
-    graph_debug.pytrace("fused_attn_bwd (execute)")
 
     output_tensors = tex.fused_attn_bwd(
         max_seqlen_q,

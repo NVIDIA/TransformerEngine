@@ -17,6 +17,7 @@
 #include "transformer_engine/fused_attn.h"
 
 namespace transformer_engine {
+namespace fused_attn {
 
 struct FusedAttnConfig {
   // basic attention settings
@@ -374,6 +375,7 @@ inline FusedAttnBwdParams *get_fused_attn_bwd_params_mutable(NVTEFusedAttnBwdPar
   return reinterpret_cast<FusedAttnBwdParams *>(params);
 }
 
+}  // namespace fused_attn
 }  // namespace transformer_engine
 
 #endif  // TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_CONFIG_AND_PARAMS_H_

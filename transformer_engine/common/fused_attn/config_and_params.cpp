@@ -29,11 +29,11 @@ void uint8_to_bool(const void *in, bool &out) {
 namespace transformer_engine {
 
 namespace fused_attn {
+
 // Forward declarations from fused_attn/utils.h. Declared here to avoid pulling the heavy
 // cuDNN frontend header into this plain C++ translation unit.
 size_t get_max_batch_size(size_t batch_size);
 size_t get_max_tokens(size_t num_tokens);
-}  // namespace fused_attn
 
 void FusedAttnConfig::derive() {
   const int64_t b = static_cast<int64_t>(batch_size);
@@ -332,20 +332,22 @@ FusedAttnConfig FusedAttnBwdParams::make_config() const {
   return cfg;
 }
 
+}  // namespace fused_attn
 }  // namespace transformer_engine
 
 NVTEFusedAttnConfig nvte_create_fused_attn_config() {
-  return new transformer_engine::FusedAttnConfig{};
+  return new transformer_engine::fused_attn::FusedAttnConfig{};
 }
 
 void nvte_destroy_fused_attn_config(NVTEFusedAttnConfig config) {
-  delete transformer_engine::get_fused_attn_config_mutable(config);
+  delete transformer_engine::fused_attn::get_fused_attn_config_mutable(config);
 }
 
 void nvte_get_fused_attn_config_attribute(NVTEFusedAttnConfig config,
                                           NVTEFusedAttnConfigAttribute attr, void *buf,
                                           size_t size_in_bytes, size_t *size_written) {
   using namespace transformer_engine;
+  using namespace transformer_engine::fused_attn;
 
   NVTE_CHECK(attr < kNVTEFusedAttnConfigNumAttributes, "Invalid NVTEFusedAttnConfigAttribute (got ",
              static_cast<int>(attr), ")");
@@ -498,6 +500,7 @@ void nvte_set_fused_attn_config_attribute(NVTEFusedAttnConfig config,
                                           NVTEFusedAttnConfigAttribute attr, const void *buf,
                                           size_t size_in_bytes) {
   using namespace transformer_engine;
+  using namespace transformer_engine::fused_attn;
 
   NVTE_CHECK(attr < kNVTEFusedAttnConfigNumAttributes, "Invalid NVTEFusedAttnConfigAttribute (got ",
              static_cast<int>(attr), ")");
@@ -642,17 +645,18 @@ void nvte_set_fused_attn_config_attribute(NVTEFusedAttnConfig config,
 }
 
 NVTEFusedAttnFwdParams nvte_create_fused_attn_fwd_params() {
-  return new transformer_engine::FusedAttnFwdParams{};
+  return new transformer_engine::fused_attn::FusedAttnFwdParams{};
 }
 
 void nvte_destroy_fused_attn_fwd_params(NVTEFusedAttnFwdParams params) {
-  delete transformer_engine::get_fused_attn_fwd_params_mutable(params);
+  delete transformer_engine::fused_attn::get_fused_attn_fwd_params_mutable(params);
 }
 
 void nvte_get_fused_attn_fwd_params_attribute(NVTEFusedAttnFwdParams params,
                                               NVTEFusedAttnFwdParamsAttribute attr, void *buf,
                                               size_t size_in_bytes, size_t *size_written) {
   using namespace transformer_engine;
+  using namespace transformer_engine::fused_attn;
   NVTE_CHECK(attr < kNVTEFusedAttnFwdParamsNumAttributes,
              "Invalid NVTEFusedAttnFwdParamsAttribute (got ", static_cast<int>(attr), ")");
   const auto &attr_size = FusedAttnFwdParams::attr_sizes[attr];
@@ -774,6 +778,7 @@ void nvte_set_fused_attn_fwd_params_attribute(NVTEFusedAttnFwdParams params,
                                               NVTEFusedAttnFwdParamsAttribute attr, const void *buf,
                                               size_t size_in_bytes) {
   using namespace transformer_engine;
+  using namespace transformer_engine::fused_attn;
   NVTE_CHECK(attr < kNVTEFusedAttnFwdParamsNumAttributes,
              "Invalid NVTEFusedAttnFwdParamsAttribute (got ", static_cast<int>(attr), ")");
   const auto &attr_size = FusedAttnFwdParams::attr_sizes[attr];
@@ -887,17 +892,18 @@ void nvte_set_fused_attn_fwd_params_attribute(NVTEFusedAttnFwdParams params,
 }
 
 NVTEFusedAttnBwdParams nvte_create_fused_attn_bwd_params() {
-  return new transformer_engine::FusedAttnBwdParams{};
+  return new transformer_engine::fused_attn::FusedAttnBwdParams{};
 }
 
 void nvte_destroy_fused_attn_bwd_params(NVTEFusedAttnBwdParams params) {
-  delete transformer_engine::get_fused_attn_bwd_params_mutable(params);
+  delete transformer_engine::fused_attn::get_fused_attn_bwd_params_mutable(params);
 }
 
 void nvte_get_fused_attn_bwd_params_attribute(NVTEFusedAttnBwdParams params,
                                               NVTEFusedAttnBwdParamsAttribute attr, void *buf,
                                               size_t size_in_bytes, size_t *size_written) {
   using namespace transformer_engine;
+  using namespace transformer_engine::fused_attn;
   NVTE_CHECK(attr < kNVTEFusedAttnBwdParamsNumAttributes,
              "Invalid NVTEFusedAttnBwdParamsAttribute (got ", static_cast<int>(attr), ")");
   const auto &attr_size = FusedAttnBwdParams::attr_sizes[attr];
@@ -1031,6 +1037,7 @@ void nvte_set_fused_attn_bwd_params_attribute(NVTEFusedAttnBwdParams params,
                                               NVTEFusedAttnBwdParamsAttribute attr, const void *buf,
                                               size_t size_in_bytes) {
   using namespace transformer_engine;
+  using namespace transformer_engine::fused_attn;
   NVTE_CHECK(attr < kNVTEFusedAttnBwdParamsNumAttributes,
              "Invalid NVTEFusedAttnBwdParamsAttribute (got ", static_cast<int>(attr), ")");
   const auto &attr_size = FusedAttnBwdParams::attr_sizes[attr];

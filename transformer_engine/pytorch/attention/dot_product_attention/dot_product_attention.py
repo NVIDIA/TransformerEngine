@@ -63,7 +63,14 @@ from transformer_engine.pytorch.attention.dot_product_attention.backends import 
 # Setup Attention Logging
 attn_log.setup_logging()
 
-# Global vars for available attention backends and ALiBi cache
+# Global vars for available attention backends and ALiBi cache.
+#
+# `_attention_backends` holds the most-recently-selected backend result plus the
+# `backend_selection_requires_update` flag. The flag is the public invalidation signal: external
+# callers (e.g. the test suite) set it to True to force a full re-selection, typically because they
+# changed an NVTE_* environment toggle that is not captured by AttentionParams. This dict is kept
+# for backward compatibility (its shape and the flag are part of the de-facto public API); the
+# actual multi-entry caching lives in `_attention_backend_cache` below.
 _attention_backends = {
     "attention_params": None,
     "use_flash_attention": None,
@@ -73,6 +80,87 @@ _attention_backends = {
     "use_unfused_attention": None,
     "backend_selection_requires_update": False,
 }
+
+# LRU cache of backend-selection results, so that alternating between a handful of configs in the
+# same run does not repay get_attention_backend() on every switch (the previous single-slot cache
+# thrashed whenever two or more configs interleaved). AttentionParams is unhashable -- it holds
+# dicts/lists/tensors and its custom __eq__ disables __hash__ -- so we cannot use it as a dict key.
+# Instead we keep an insertion-ordered list of {"attention_params", "env_key", <result fields>} and
+# linear-scan. Capacity is small (10), so the scan is negligible next to a real selection.
+#
+# The cache identity is (env_key, attention_params). env_key captures the NVTE_* environment toggles
+# that get_attention_backend() reads at call time but that AttentionParams does not encode. Including
+# it means flipping any such toggle naturally misses and re-selects, so callers do NOT need to
+# manually invalidate after changing the environment. Setting
+# _attention_backends["backend_selection_requires_update"] = True still hard-clears the whole cache
+# for anyone who wants to start completely afresh (e.g. after changing GPU/arch mid-process).
+_ATTENTION_BACKEND_RESULT_KEYS = (
+    "use_flash_attention",
+    "flash_attention_backend",
+    "use_fused_attention",
+    "fused_attention_backend",
+    "use_unfused_attention",
+)
+_ATTENTION_BACKEND_CACHE_MAXSIZE = 10
+_attention_backend_cache = []
+
+# Explicit allow-list of the NVTE_* toggles that steer get_attention_backend(). We deliberately do
+# NOT snapshot the whole NVTE_* namespace: unrelated toggles (determinism, non-attention modules like
+# Linear, debug/logging, etc.) would otherwise needlessly invalidate cached selections.
+#
+# IMPORTANT: keep this in sync with the os.getenv(...) reads inside
+# dot_product_attention/utils.py::get_attention_backend(). If that function begins consulting a new
+# NVTE_* toggle that is not listed here, the cache can return a stale (wrong) backend selection.
+_ATTENTION_BACKEND_ENV_VARS = (
+    "NVTE_FLASH_ATTN",
+    "NVTE_FLASH_ATTN_V2",
+    "NVTE_FLASH_ATTN_V3",
+    "NVTE_FLASH_ATTN_V4",
+    "NVTE_FUSED_ATTN",
+    "NVTE_UNFUSED_ATTN",
+    "NVTE_FP8_DPA_BWD",
+    "NVTE_DPA_FP8CS_O_in_F16",
+    "NVTE_DPA_FP8_RECIPE",
+    "NVTE_DPA_FP8_FORMAT",
+    "NVTE_DPA_FP8DS_AMAX_ALGO",
+    "NVTE_DPA_FP8DS_AMAX_HISTLEN",
+    "NVTE_DPA_FP8DS_REDUCE_AMAX",
+    "NVTE_UnfusedDPA_Emulate_FP8",
+)
+
+
+def _attention_env_key():
+    """Snapshot of the selection-relevant NVTE_* toggles (see _ATTENTION_BACKEND_ENV_VARS).
+
+    These influence get_attention_backend() but are not captured by AttentionParams, so they must be
+    part of the cache identity to avoid returning a result computed under a different environment. A
+    value of None means the variable is unset (i.e. get_attention_backend() would use its default).
+    """
+    return tuple(os.environ.get(name) for name in _ATTENTION_BACKEND_ENV_VARS)
+
+
+def _attention_backend_cache_lookup(attention_params, env_key):
+    """Return the cached result dict matching ``(env_key, attention_params)`` (promoted to MRU)."""
+    for i, entry in enumerate(_attention_backend_cache):
+        # Compare the cheap env_key tuple before the per-field AttentionParams.__eq__.
+        if entry["env_key"] == env_key and entry["attention_params"] == attention_params:
+            if i != len(_attention_backend_cache) - 1:
+                _attention_backend_cache.append(_attention_backend_cache.pop(i))
+            return entry
+    return None
+
+
+def _attention_backend_cache_store(attention_params, env_key, result):
+    """Insert/refresh the entry for ``(env_key, attention_params)`` as MRU and evict beyond capacity."""
+    for i, entry in enumerate(_attention_backend_cache):
+        if entry["env_key"] == env_key and entry["attention_params"] == attention_params:
+            _attention_backend_cache.pop(i)
+            break
+    entry = {"attention_params": attention_params, "env_key": env_key, **result}
+    _attention_backend_cache.append(entry)
+    while len(_attention_backend_cache) > _ATTENTION_BACKEND_CACHE_MAXSIZE:
+        _attention_backend_cache.pop(0)
+    return entry
 
 _alibi_cache = {
     "_num_heads": None,
@@ -1039,8 +1127,8 @@ class DotProductAttention(TransformerEngineBaseModule):
         .. note::
 
             Users can use environment variables :attr:`NVTE_FLASH_ATTN`, :attr:`NVTE_FUSED_ATTN`,
-            and :attr:`NVTE_FUSED_ATTN_BACKEND` to control which DotProductAttention backend,
-            and FusedAttention backend if applicable, to use. Transformer Engine first filters
+            and :attr:`NVTE_UNFUSED_ATTN` to control which DotProductAttention backend to use.
+            Transformer Engine first filters
             backends by support for the runtime environment and input configuration, then applies
             a performance-based preference order. On supported pre-Hopper GPUs, FlashAttention is
             preferred over FusedAttention and UnfusedDotProductAttention when both optimized
@@ -1635,13 +1723,17 @@ class DotProductAttention(TransformerEngineBaseModule):
                 use_fused_attention = False
                 use_unfused_attention = True
             else:
-                if (
-                    _attention_backends["attention_params"] is None
-                    or attention_params != _attention_backends["attention_params"]
-                ):
-                    _attention_backends["attention_params"] = attention_params
-                    _attention_backends["backend_selection_requires_update"] = True
+                # A forced update hard-clears the entire cache. This is optional now that the
+                # cache identity includes the NVTE_* environment (so env changes miss on their own);
+                # it remains as an explicit "start completely afresh" hook (e.g. after changing
+                # GPU/arch mid-process) for callers who want it.
                 if _attention_backends["backend_selection_requires_update"]:
+                    _attention_backend_cache.clear()
+                    _attention_backends["backend_selection_requires_update"] = False
+
+                env_key = _attention_env_key()
+                cached = _attention_backend_cache_lookup(attention_params, env_key)
+                if cached is None:
                     (
                         use_flash_attention,
                         flash_attention_backend,
@@ -1650,14 +1742,17 @@ class DotProductAttention(TransformerEngineBaseModule):
                         use_unfused_attention,
                         _,
                     ) = dpa_utils.get_attention_backend(attention_params)
-                    # Set global _attention_backends var using return value
-                    # from get_attention_backend()
-                    _attention_backends["use_flash_attention"] = use_flash_attention
-                    _attention_backends["flash_attention_backend"] = flash_attention_backend
-                    _attention_backends["use_fused_attention"] = use_fused_attention
-                    _attention_backends["fused_attention_backend"] = fused_attention_backend
-                    _attention_backends["use_unfused_attention"] = use_unfused_attention
-                    _attention_backends["backend_selection_requires_update"] = False
+                    cached = _attention_backend_cache_store(
+                        attention_params,
+                        env_key,
+                        {
+                            "use_flash_attention": use_flash_attention,
+                            "flash_attention_backend": flash_attention_backend,
+                            "use_fused_attention": use_fused_attention,
+                            "fused_attention_backend": fused_attention_backend,
+                            "use_unfused_attention": use_unfused_attention,
+                        },
+                    )
                     if use_flash_attention:
                         self.logger.info(
                             "Running with FlashAttention backend (version %s)",
@@ -1671,11 +1766,17 @@ class DotProductAttention(TransformerEngineBaseModule):
                     elif use_unfused_attention:
                         self.logger.info("Running with UnfusedDotProductAttention backend")
                 else:
-                    use_flash_attention = _attention_backends["use_flash_attention"]
-                    flash_attention_backend = _attention_backends["flash_attention_backend"]
-                    use_fused_attention = _attention_backends["use_fused_attention"]
-                    fused_attention_backend = _attention_backends["fused_attention_backend"]
-                    use_unfused_attention = _attention_backends["use_unfused_attention"]
+                    use_flash_attention = cached["use_flash_attention"]
+                    flash_attention_backend = cached["flash_attention_backend"]
+                    use_fused_attention = cached["use_fused_attention"]
+                    fused_attention_backend = cached["fused_attention_backend"]
+                    use_unfused_attention = cached["use_unfused_attention"]
+
+                # Mirror the active selection into the legacy single-slot dict so its public shape
+                # (and any external readers) keep working as before.
+                _attention_backends["attention_params"] = attention_params
+                for _key in _ATTENTION_BACKEND_RESULT_KEYS:
+                    _attention_backends[_key] = cached[_key]
 
             # raise exception if no backend is available
             if sum([use_flash_attention, use_fused_attention, use_unfused_attention]) == 0:

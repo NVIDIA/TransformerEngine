@@ -426,11 +426,6 @@ def get_attention_backend(
         All available backends that could support the provided input. A list of Booleans
         in the form of [use_flash_attention, use_fused_attention, use_unfused_attention].
     """
-    # [GRAPH-DEBUG] Trace the Python caller that triggers a fused-attn backend query (maps to the
-    # C++ support-check "fwd/bwd HIT|MISS" lines from is_supported_f16_*). Remove after verification.
-    from transformer_engine.pytorch.attention.dot_product_attention import graph_debug
-
-    graph_debug.pytrace("get_attention_backend")
     # NOTE: As part of refactoring attention.py, populating the _attention_backends cache in attention
     # is no longer performed at the end of get_attention_backend(), but the responsibility of doing so
     # is shifted over to the caller of this function

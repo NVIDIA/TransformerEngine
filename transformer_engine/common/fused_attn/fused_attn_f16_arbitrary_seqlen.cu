@@ -18,34 +18,8 @@
 #include "../util/cuda_runtime.h"
 #include "../util/system.h"
 #include "fused_attn_f16_arbitrary_seqlen.h"
-#include "graph_debug.h"  // [GRAPH-DEBUG]
+#include "graph_cache_debug.h"  // [FUSED-ATTN-CACHE]
 #include "utils.h"
-
-#define Q_ID 1
-#define K_ID 2
-#define V_ID 3
-#define O_ID 4
-#define S_ID 5
-#define B_ID 6
-#define D_CONST_ID 7
-#define S_CONST_ID 8
-#define Q_SEQLEN_ID 9
-#define K_SEQLEN_ID 10
-#define dQ_ID 11
-#define dK_ID 12
-#define dV_ID 13
-#define dO_ID 14
-#define MASK_VAL_ID 15
-#define dS_ID 16
-#define D_SEED_ID 17
-#define D_OFFSET_ID 18
-#define S_STATS_ID 19
-#define S_SUM_ID 20
-#define SCALE_PROB 21
-#define K_TRANSPOSE_ID 22
-#define dQ_ACCUM_ID 23
-
-#define VIRTUAL_ID 30
 
 namespace transformer_engine {
 namespace fused_attn {
@@ -87,7 +61,6 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
   float scaling_factor = cfg.attn_scale;
   const float dropout_probability = cfg.dropout;
   const NVTE_QKV_Layout qkv_layout = cfg.qkv_layout;
-  const NVTE_QKV_Format o_format = cfg.o_format;
   const NVTE_Bias_Type bias_type = cfg.bias_type;
   const NVTE_Mask_Type mask_type = cfg.attn_mask_type;
   const NVTE_Softmax_Type softmax_type = cfg.softmax_type;
@@ -103,8 +76,6 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
   bool is_padding = cfg.is_padding;
   bool is_softmax_offset = (softmax_type != NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX);
   bool is_dropout = (is_training && dropout_probability != 0.0f);
-  NVTE_QKV_Format q_format = cfg.q_format;
-  NVTE_QKV_Format kv_format = cfg.kv_format;
   bool is_ragged_q = cfg.is_ragged_q;
   bool is_ragged_kv = cfg.is_ragged_kv;
   const auto cudnn_runtime_version = cudnnGetVersion();
@@ -186,12 +157,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     // [SHARED-CACHE] Process-wide graph cache (was `static thread_local`) so a compiled graph
     // is reused across threads instead of rebuilt per thread. Safe because cuDNN >= 9.0 allows
     // concurrent execution of a shared plan and cudnn-frontend >= 1.25.0 has a thread-safe
-    // execute(); the static_asserts below fail the build loudly on an older toolkit.
-    static_assert(CUDNN_VERSION >= 91100,
-                  "[SHARED-CACHE] shared fused-attn graph cache requires cuDNN >= 9.11 "
-                  "(TE minimum supported cuDNN version)");
-    static_assert(CUDNN_FRONTEND_VERSION >= 12500,
-                  "[SHARED-CACHE] shared fused-attn graph cache requires cudnn-frontend >= 1.25.0");
+    // execute(). The TE minimum-cuDNN-version bump that formalizes this requirement is a follow-up PR.
     static CacheType sdpa_f16_fprop_cache;
     static std::mutex sdpa_f16_fprop_cache_mutex;
 
@@ -208,14 +174,14 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         cache_hit = (it != cache.end());
         if (cache_hit) cached_graph = it->second;
       }
-      fused_attn_graph_debug::note_cache_lookup("fwd", cache_hit, cfg);  // [GRAPH-DEBUG]
-      if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= 90600 &&      // [GRAPH-DEBUG]
-          sm_arch_ != 120) {                                                     // [GRAPH-DEBUG]
-        fused_attn_graph_debug::note_thd_lookup(                                 // [GRAPH-DEBUG]
-            "fwd", cache_hit, !cache_hit || fused_attn_graph_debug::cache_disabled(),
-            /*legacy=*/!use_cu_seqlens_directly);                                // [GRAPH-DEBUG]
-      }                                                                          // [GRAPH-DEBUG]
-      if (cache_hit && !fused_attn_graph_debug::cache_disabled()) {     // [GRAPH-DEBUG]
+      graph_cache_debug::note_cache_lookup("fwd", cache_hit, cfg);  // [FUSED-ATTN-CACHE]
+      if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= 90600 &&      // [FUSED-ATTN-CACHE]
+          sm_arch_ != 120) {                                                     // [FUSED-ATTN-CACHE]
+        graph_cache_debug::note_thd_lookup(                                 // [FUSED-ATTN-CACHE]
+            "fwd", cache_hit, !cache_hit || graph_cache_debug::cache_disabled(),
+            /*legacy=*/!use_cu_seqlens_directly);                                // [FUSED-ATTN-CACHE]
+      }                                                                          // [FUSED-ATTN-CACHE]
+      if (cache_hit && !graph_cache_debug::cache_disabled()) {     // [FUSED-ATTN-CACHE]
         return cached_graph;
       }
 
@@ -482,31 +448,23 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       auto dropout_tuple = is_dropout ? std::make_tuple(dropout_seed, dropout_offset)
                                       : std::make_tuple(nullptr, nullptr);
 
-      GRAPH_DEBUG_TIME_STAGE(Validate, NVTE_CHECK_CUDNN_FE(mha_graph->validate()));  // [GRAPH-DEBUG]
-      GRAPH_DEBUG_TIME_STAGE(BuildOpGraph,  // [GRAPH-DEBUG]
-                             NVTE_CHECK_CUDNN_FE(mha_graph->build_operation_graph(handle)));
-      GRAPH_DEBUG_TIME_STAGE(CreatePlans,  // [GRAPH-DEBUG]
-                             NVTE_CHECK_CUDNN_FE(mha_graph->create_execution_plans({fe::HeurMode_t::A})));
-      GRAPH_DEBUG_TIME_STAGE(CheckSupport, NVTE_CHECK_CUDNN_FE(mha_graph->check_support()));  // [GRAPH-DEBUG] no-handle overload (handle version is deprecated)
-      GRAPH_DEBUG_TIME_STAGE(BuildPlans, NVTE_CHECK_CUDNN_FE(mha_graph->build_plans()));  // [GRAPH-DEBUG] no-handle overload (handle version is deprecated)
+      NVTE_CHECK_CUDNN_FE(mha_graph->validate());
+      NVTE_CHECK_CUDNN_FE(mha_graph->build_operation_graph(handle));
+      NVTE_CHECK_CUDNN_FE(mha_graph->create_execution_plans({fe::HeurMode_t::A}));
+      NVTE_CHECK_CUDNN_FE(mha_graph->check_support());  // no-handle overload (handle version is deprecated)
+      NVTE_CHECK_CUDNN_FE(mha_graph->build_plans());    // no-handle overload (handle version is deprecated)
 
       auto return_tuple =
           std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, Stats_tuple, bias_tuple,
                          softmax_offset_tuple, padding_tuple, page_table_tuple, offset_qo_tuple,
                          offset_kv_tuple, offset_s_tuple, dropout_tuple);
-      fused_attn_graph_debug::note_fwd_build();  // [GRAPH-DEBUG]
-      if (fused_attn_graph_debug::enabled()) {                                     // [GRAPH-DEBUG]
-        std::vector<uint8_t> serialized_graph;                                     // [GRAPH-DEBUG]
-        if (mha_graph->serialize(serialized_graph).is_good())                      // [GRAPH-DEBUG]
-          fused_attn_graph_debug::note_graph_size("fwd", serialized_graph.size());  // [GRAPH-DEBUG]
-      }                                                                            // [GRAPH-DEBUG]
+      graph_cache_debug::note_fwd_build();  // [FUSED-ATTN-CACHE]
       // [SHARED-CACHE] Lock only for insert. If another thread inserted this key while we built,
       // reuse theirs and discard ours so all threads share one graph (rare duplicate build).
       {
         std::lock_guard<std::mutex> shared_cache_lock(sdpa_f16_fprop_cache_mutex);
         auto inserted = cache.insert({descriptor, return_tuple});
-        fused_attn_graph_debug::note_cache_size("fwd", cache.size());  // [GRAPH-DEBUG]
-        return fused_attn_graph_debug::cache_disabled() ? return_tuple : inserted.first->second;
+        return graph_cache_debug::cache_disabled() ? return_tuple : inserted.first->second;
       }
     };
 
@@ -541,7 +499,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
           plan_workspace_size + actual_seqlen_workspace_size + seqlen_offsets_workspace_size;
       return;
     }
-    fused_attn_graph_debug::note_fwd_exec();  // [GRAPH-DEBUG]
+    graph_cache_debug::note_fwd_exec();  // [FUSED-ATTN-CACHE]
 
     // cuDNN stream check needs to be moved here to support dummy kernel calls with
     // null streams for sizing the cuDNN workspace.
@@ -686,9 +644,6 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
   float scaling_factor = cfg.attn_scale;
   const float dropout_probability = cfg.dropout;
   const NVTE_QKV_Layout qkv_layout = cfg.qkv_layout;
-  const NVTE_QKV_Format o_format = cfg.o_format;
-  const NVTE_QKV_Format do_format = cfg.do_format;
-  const NVTE_QKV_Layout dqkv_layout = cfg.dqkv_layout;
   const NVTE_Bias_Type bias_type = cfg.bias_type;
   const NVTE_Mask_Type mask_type = cfg.attn_mask_type;
   const NVTE_Softmax_Type softmax_type = cfg.softmax_type;
@@ -705,8 +660,6 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
   bool is_padding = cfg.is_padding;
   bool is_softmax_offset = (softmax_type != NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX);
   bool is_dropout = (dropout_probability != 0.0f);
-  NVTE_QKV_Format q_format = cfg.q_format;
-  NVTE_QKV_Format kv_format = cfg.kv_format;
   bool is_ragged_q = cfg.is_ragged_q;
   bool is_ragged_kv = cfg.is_ragged_kv;
   const auto cudnn_runtime_version = cudnnGetVersion();
@@ -777,15 +730,15 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
         cache_hit = (it != cache.end());
         if (cache_hit) cached_graph = it->second;
       }
-      fused_attn_graph_debug::note_cache_lookup("bwd", cache_hit, cfg);  // [GRAPH-DEBUG]
-      if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= 90600 &&      // [GRAPH-DEBUG]
-          sm_arch_ != 120) {                                                     // [GRAPH-DEBUG]
+      graph_cache_debug::note_cache_lookup("bwd", cache_hit, cfg);  // [FUSED-ATTN-CACHE]
+      if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= 90600 &&      // [FUSED-ATTN-CACHE]
+          sm_arch_ != 120) {                                                     // [FUSED-ATTN-CACHE]
         // The backward impl has no cu_seqlens-directly path; it always buckets the batch.
-        fused_attn_graph_debug::note_thd_lookup(  // [GRAPH-DEBUG]
-            "bwd", cache_hit, !cache_hit || fused_attn_graph_debug::cache_disabled(),
-            /*legacy=*/true);                                                    // [GRAPH-DEBUG]
-      }                                                                          // [GRAPH-DEBUG]
-      if (cache_hit && !fused_attn_graph_debug::cache_disabled()) {     // [GRAPH-DEBUG]
+        graph_cache_debug::note_thd_lookup(  // [FUSED-ATTN-CACHE]
+            "bwd", cache_hit, !cache_hit || graph_cache_debug::cache_disabled(),
+            /*legacy=*/true);                                                    // [FUSED-ATTN-CACHE]
+      }                                                                          // [FUSED-ATTN-CACHE]
+      if (cache_hit && !graph_cache_debug::cache_disabled()) {     // [FUSED-ATTN-CACHE]
         return cached_graph;
       }
 
@@ -1024,30 +977,22 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       auto dropout_tuple = is_dropout ? std::make_tuple(dropout_seed, dropout_offset)
                                       : std::make_tuple(nullptr, nullptr);
 
-      GRAPH_DEBUG_TIME_STAGE(Validate, NVTE_CHECK_CUDNN_FE(mha_graph->validate()));  // [GRAPH-DEBUG]
-      GRAPH_DEBUG_TIME_STAGE(BuildOpGraph,  // [GRAPH-DEBUG]
-                             NVTE_CHECK_CUDNN_FE(mha_graph->build_operation_graph(handle)));
-      GRAPH_DEBUG_TIME_STAGE(CreatePlans,  // [GRAPH-DEBUG]
-                             NVTE_CHECK_CUDNN_FE(mha_graph->create_execution_plans({fe::HeurMode_t::A})));
-      GRAPH_DEBUG_TIME_STAGE(CheckSupport, NVTE_CHECK_CUDNN_FE(mha_graph->check_support()));  // [GRAPH-DEBUG] no-handle overload (handle version is deprecated)
-      GRAPH_DEBUG_TIME_STAGE(BuildPlans, NVTE_CHECK_CUDNN_FE(mha_graph->build_plans()));  // [GRAPH-DEBUG] no-handle overload (handle version is deprecated)
+      NVTE_CHECK_CUDNN_FE(mha_graph->validate());
+      NVTE_CHECK_CUDNN_FE(mha_graph->build_operation_graph(handle));
+      NVTE_CHECK_CUDNN_FE(mha_graph->create_execution_plans({fe::HeurMode_t::A}));
+      NVTE_CHECK_CUDNN_FE(mha_graph->check_support());  // no-handle overload (handle version is deprecated)
+      NVTE_CHECK_CUDNN_FE(mha_graph->build_plans());    // no-handle overload (handle version is deprecated)
 
       auto return_tuple = std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, bias_tuple,
                                          softmax_offset_tuple, padding_tuple, offset_qo_tuple,
                                          offset_kv_tuple, offset_s_tuple, dropout_tuple);
-      fused_attn_graph_debug::note_bwd_build();  // [GRAPH-DEBUG]
-      if (fused_attn_graph_debug::enabled()) {                                     // [GRAPH-DEBUG]
-        std::vector<uint8_t> serialized_graph;                                     // [GRAPH-DEBUG]
-        if (mha_graph->serialize(serialized_graph).is_good())                      // [GRAPH-DEBUG]
-          fused_attn_graph_debug::note_graph_size("bwd", serialized_graph.size());  // [GRAPH-DEBUG]
-      }                                                                            // [GRAPH-DEBUG]
+      graph_cache_debug::note_bwd_build();  // [FUSED-ATTN-CACHE]
       // [SHARED-CACHE] Lock only for insert. If another thread inserted this key while we built,
       // reuse theirs and discard ours so all threads share one graph (rare duplicate build).
       {
         std::lock_guard<std::mutex> shared_cache_lock(sdpa_f16_bprop_cache_mutex);
         auto inserted = cache.insert({descriptor, return_tuple});
-        fused_attn_graph_debug::note_cache_size("bwd", cache.size());  // [GRAPH-DEBUG]
-        return fused_attn_graph_debug::cache_disabled() ? return_tuple : inserted.first->second;
+        return graph_cache_debug::cache_disabled() ? return_tuple : inserted.first->second;
       }
     };
 
@@ -1077,7 +1022,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
           plan_workspace_size + actual_seqlen_workspace_size + seqlen_offsets_workspace_size;
       return;
     }
-    fused_attn_graph_debug::note_bwd_exec();  // [GRAPH-DEBUG]
+    graph_cache_debug::note_bwd_exec();  // [FUSED-ATTN-CACHE]
 
     // cuDNN stream check needs to be moved here to support dummy kernel calls with
     // null streams for sizing the cuDNN workspace.
@@ -1193,11 +1138,7 @@ void fused_attn_arbitrary_seqlen_fwd(const FusedAttnConfig &cfg, const Tensor *i
 
   const size_t batch = cfg.batch_size;
   const size_t num_attn_heads = cfg.num_attn_heads;
-  const size_t num_gqa_groups = cfg.num_gqa_groups;
   const size_t max_seqlen_q = cfg.max_seqlen_q;
-  const size_t max_seqlen_kv = cfg.max_seqlen_kv;
-  const size_t head_dim_qk = cfg.head_dim_qk;
-  const size_t head_dim_v = cfg.head_dim_v;
   const size_t num_tokens_q = cfg.num_tokens_q;
   const bool return_max_logit = cfg.return_max_logit;
   const NVTE_QKV_Layout qkv_layout = cfg.qkv_layout;
