@@ -177,18 +177,6 @@ backend-selection overview.
    :Default: ``0``
    :Description: When using FusedAttention, use FlashAttention-2 implementation for the backward pass instead of the cuDNN implementation. This can be useful due to performance differences between various versions of flash-attn and FusedAttention.
 
-.. envvar:: NVTE_FUSED_ATTN_CACHE_DEBUG
-
-   :Type: ``int`` (0 or 1)
-   :Default: ``0``
-   :Description: Enable diagnostic logging for the cuDNN FusedAttention graph cache. When set to ``1``, prints to stderr (prefixed ``[FUSED-ATTN-CACHE]``) a per-lookup HIT/MISS line with the full graph-cache key, a BUILD line whenever a new graph is constructed, and a SUMMARY of graph builds vs. executions at process exit. Useful for diagnosing redundant graph rebuilds or stale-cache reuse. Has negligible overhead when unset.
-
-.. envvar:: NVTE_FUSED_ATTN_DISABLE_CACHE
-
-   :Type: ``int`` (0 or 1)
-   :Default: ``0``
-   :Description: Bypass the cuDNN FusedAttention graph cache, rebuilding a fresh graph on every forward/backward call. Intended for debugging stale-cache reuse only: it forces expensive graph recompilation on every call and must not be used in production. If a run that fails with the cache enabled passes with it disabled, the bug is stale-cache reuse (an incomplete cache key). Pairs with :envvar:`NVTE_FUSED_ATTN_CACHE_DEBUG` for inspecting each rebuild.
-
 .. envvar:: NVTE_ALLOW_NONDETERMINISTIC_ALGO
 
    :Type: ``int`` (0 or 1)

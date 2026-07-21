@@ -10,7 +10,7 @@
 #include <cudnn_frontend_utils.h>
 
 #include <map>
-#include <mutex>  // [SHARED-CACHE]
+#include <mutex>
 #include <vector>
 
 #include "../common.h"
@@ -18,7 +18,6 @@
 #include "../util/cuda_runtime.h"
 #include "../util/system.h"
 #include "fused_attn_f16_arbitrary_seqlen.h"
-#include "graph_cache_debug.h"  // [FUSED-ATTN-CACHE]
 #include "utils.h"
 
 namespace transformer_engine {
@@ -174,14 +173,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         cache_hit = (it != cache.end());
         if (cache_hit) cached_graph = it->second;
       }
-      graph_cache_debug::note_cache_lookup("fwd", cache_hit, cfg);  // [FUSED-ATTN-CACHE]
-      if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= 90600 &&      // [FUSED-ATTN-CACHE]
-          sm_arch_ != 120) {                                                     // [FUSED-ATTN-CACHE]
-        graph_cache_debug::note_thd_lookup(                                 // [FUSED-ATTN-CACHE]
-            "fwd", cache_hit, !cache_hit || graph_cache_debug::cache_disabled(),
-            /*legacy=*/!use_cu_seqlens_directly);                                // [FUSED-ATTN-CACHE]
-      }                                                                          // [FUSED-ATTN-CACHE]
-      if (cache_hit && !graph_cache_debug::cache_disabled()) {     // [FUSED-ATTN-CACHE]
+      if (cache_hit) {
         return cached_graph;
       }
 
@@ -458,13 +450,12 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
           std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, Stats_tuple, bias_tuple,
                          softmax_offset_tuple, padding_tuple, page_table_tuple, offset_qo_tuple,
                          offset_kv_tuple, offset_s_tuple, dropout_tuple);
-      graph_cache_debug::note_fwd_build();  // [FUSED-ATTN-CACHE]
       // [SHARED-CACHE] Lock only for insert. If another thread inserted this key while we built,
       // reuse theirs and discard ours so all threads share one graph (rare duplicate build).
       {
         std::lock_guard<std::mutex> shared_cache_lock(sdpa_f16_fprop_cache_mutex);
         auto inserted = cache.insert({descriptor, return_tuple});
-        return graph_cache_debug::cache_disabled() ? return_tuple : inserted.first->second;
+        return inserted.first->second;
       }
     };
 
@@ -499,7 +490,6 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
           plan_workspace_size + actual_seqlen_workspace_size + seqlen_offsets_workspace_size;
       return;
     }
-    graph_cache_debug::note_fwd_exec();  // [FUSED-ATTN-CACHE]
 
     // cuDNN stream check needs to be moved here to support dummy kernel calls with
     // null streams for sizing the cuDNN workspace.
@@ -730,15 +720,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
         cache_hit = (it != cache.end());
         if (cache_hit) cached_graph = it->second;
       }
-      graph_cache_debug::note_cache_lookup("bwd", cache_hit, cfg);  // [FUSED-ATTN-CACHE]
-      if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= 90600 &&      // [FUSED-ATTN-CACHE]
-          sm_arch_ != 120) {                                                     // [FUSED-ATTN-CACHE]
-        // The backward impl has no cu_seqlens-directly path; it always buckets the batch.
-        graph_cache_debug::note_thd_lookup(  // [FUSED-ATTN-CACHE]
-            "bwd", cache_hit, !cache_hit || graph_cache_debug::cache_disabled(),
-            /*legacy=*/true);                                                    // [FUSED-ATTN-CACHE]
-      }                                                                          // [FUSED-ATTN-CACHE]
-      if (cache_hit && !graph_cache_debug::cache_disabled()) {     // [FUSED-ATTN-CACHE]
+      if (cache_hit) {
         return cached_graph;
       }
 
@@ -986,13 +968,12 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       auto return_tuple = std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, bias_tuple,
                                          softmax_offset_tuple, padding_tuple, offset_qo_tuple,
                                          offset_kv_tuple, offset_s_tuple, dropout_tuple);
-      graph_cache_debug::note_bwd_build();  // [FUSED-ATTN-CACHE]
       // [SHARED-CACHE] Lock only for insert. If another thread inserted this key while we built,
       // reuse theirs and discard ours so all threads share one graph (rare duplicate build).
       {
         std::lock_guard<std::mutex> shared_cache_lock(sdpa_f16_bprop_cache_mutex);
         auto inserted = cache.insert({descriptor, return_tuple});
-        return graph_cache_debug::cache_disabled() ? return_tuple : inserted.first->second;
+        return inserted.first->second;
       }
     };
 
@@ -1022,7 +1003,6 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
           plan_workspace_size + actual_seqlen_workspace_size + seqlen_offsets_workspace_size;
       return;
     }
-    graph_cache_debug::note_bwd_exec();  // [FUSED-ATTN-CACHE]
 
     // cuDNN stream check needs to be moved here to support dummy kernel calls with
     // null streams for sizing the cuDNN workspace.

@@ -4,14 +4,13 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <mutex>  // [SHARED-CACHE]
-#include <vector>  // [FUSED-ATTN-CACHE] serialized-size probe
+#include <mutex>
+#include <vector>
 
 #include "../common.h"
 #include "../cudnn_utils.h"
 #include "../util/system.h"
 #include "fused_attn_fp8.h"
-#include "graph_cache_debug.h"  // [FUSED-ATTN-CACHE]
 #include "utils.h"
 
 namespace transformer_engine {
@@ -147,8 +146,7 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
         cache_hit = (it != cache.end());
         if (cache_hit) cached_graph = it->second;
       }
-      graph_cache_debug::note_cache_lookup("fwd", cache_hit, cfg);  // [FUSED-ATTN-CACHE]
-      if (cache_hit && !graph_cache_debug::cache_disabled()) {     // [FUSED-ATTN-CACHE]
+      if (cache_hit) {
         return cached_graph;
       }
 
@@ -407,13 +405,12 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
       auto return_tuple =
           std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, Stats_tuple, bias_tuple,
                          softmax_offset_tuple, padding_tuple, dropout_tuple);
-      graph_cache_debug::note_fwd_build();  // [FUSED-ATTN-CACHE]
       // [SHARED-CACHE] Lock only for insert. If another thread inserted this key while we built,
       // reuse theirs and discard ours so all threads share one graph (rare duplicate build).
       {
         std::lock_guard<std::mutex> shared_cache_lock(sdpa_fp8_fprop_cache_mutex);
         auto inserted = cache.insert({descriptor, return_tuple});
-        return graph_cache_debug::cache_disabled() ? return_tuple : inserted.first->second;
+        return inserted.first->second;
       }
     };
 
@@ -431,7 +428,6 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
       *workspace_size = plan_workspace_size + actual_seqlen_workspace_size;
       return;
     }
-    graph_cache_debug::note_fwd_exec();  // [FUSED-ATTN-CACHE]
 
     // cuDNN stream check needs to be moved here to support dummy kernel calls with
     // null streams for sizing the cuDNN workspace.
@@ -638,8 +634,7 @@ void fused_attn_fp8_bwd_impl(
         cache_hit = (it != cache.end());
         if (cache_hit) cached_graph = it->second;
       }
-      graph_cache_debug::note_cache_lookup("bwd", cache_hit, cfg);  // [FUSED-ATTN-CACHE]
-      if (cache_hit && !graph_cache_debug::cache_disabled()) {     // [FUSED-ATTN-CACHE]
+      if (cache_hit) {
         return cached_graph;
       }
 
@@ -1028,13 +1023,12 @@ void fused_attn_fp8_bwd_impl(
       auto return_tuple =
           std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, mxfp8_tensors_tuple,
                          bias_tuple, softmax_offset_tuple, padding_tuple, dropout_tuple);
-      graph_cache_debug::note_bwd_build();  // [FUSED-ATTN-CACHE]
       // [SHARED-CACHE] Lock only for insert. If another thread inserted this key while we built,
       // reuse theirs and discard ours so all threads share one graph (rare duplicate build).
       {
         std::lock_guard<std::mutex> shared_cache_lock(sdpa_fp8_bprop_cache_mutex);
         auto inserted = cache.insert({descriptor, return_tuple});
-        return graph_cache_debug::cache_disabled() ? return_tuple : inserted.first->second;
+        return inserted.first->second;
       }
     };
     auto [mha_graph, Q, K, V, O, Stats, dO, attn_scale, descale_q, descale_k, descale_v, descale_o,
@@ -1051,7 +1045,6 @@ void fused_attn_fp8_bwd_impl(
       *workspace_size = plan_workspace_size + actual_seqlen_workspace_size;
       return;
     }
-    graph_cache_debug::note_bwd_exec();  // [FUSED-ATTN-CACHE]
 
     // cuDNN stream check needs to be moved here to support dummy kernel calls with
     // null streams for sizing the cuDNN workspace.
