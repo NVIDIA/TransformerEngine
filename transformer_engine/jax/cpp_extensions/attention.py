@@ -70,17 +70,12 @@ _NVTE_DEBUG_LEVEL = int(os.getenv("NVTE_DEBUG_LEVEL", "0"))
 
 
 class AttentionLogging:
-    """Manage logging for the JAX attention module.
-
-    Mirrors the PyTorch attention logging so that ``NVTE_DEBUG=1`` combined with
-    ``NVTE_DEBUG_LEVEL=1/2`` surfaces fused-attention backend-selection diagnostics
-    (e.g. why a configuration was rejected by cuDNN).
-    """
+    """Logging for the JAX attention module"""
 
     _log_level = _NVTE_DEBUG * _NVTE_DEBUG_LEVEL
     _formatter = logging.Formatter("[%(levelname)-8s | %(name)-19s]: %(message)s")
     _stream_handler = logging.StreamHandler()
-    fa_logger = logging.getLogger(__name__)
+    logger = logging.getLogger(__name__)
     _is_logging_setup = False
 
     @staticmethod
@@ -93,9 +88,9 @@ class AttentionLogging:
             AttentionLogging._log_level if AttentionLogging._log_level in [0, 1, 2] else 2
         ]
         AttentionLogging._stream_handler.setFormatter(AttentionLogging._formatter)
-        AttentionLogging.fa_logger.setLevel(AttentionLogging._log_level)
-        if not AttentionLogging.fa_logger.hasHandlers():
-            AttentionLogging.fa_logger.addHandler(AttentionLogging._stream_handler)
+        AttentionLogging.logger.setLevel(AttentionLogging._log_level)
+        if not AttentionLogging.logger.hasHandlers():
+            AttentionLogging.logger.addHandler(AttentionLogging._stream_handler)
         AttentionLogging._is_logging_setup = True
 
 
@@ -185,8 +180,7 @@ class FusedAttnHelper:
 
         When ``NVTE_DEBUG=1``, ``NVTE_DEBUG_LEVEL=1`` logs the outcome (the selected backend, or
         that no fused backend is available), and ``NVTE_DEBUG_LEVEL=2`` additionally logs the
-        resolved config and the reason fused attention was rejected. This mirrors the PyTorch
-        attention logging (level 1 = outcome, level 2 = why).
+        resolved config and the reason fused attention was rejected.
         """
         q_type = jax_dtype_to_te_dtype(self.q_dtype)
         bias_batch = bias_heads = bias_seqlen_q = bias_seqlen_kv = 0
@@ -231,11 +225,8 @@ class FusedAttnHelper:
             bias_seqlen_kv,
         )
 
-        # Mirror the PyTorch attention logging semantics:
-        #   level 1 (INFO)  -> the outcome (which backend was selected, or that none was)
-        #   level 2 (DEBUG) -> the "why": the resolved config and the rejection reason
         AttentionLogging.setup_logging()
-        logger = AttentionLogging.fa_logger
+        logger = AttentionLogging.logger
         logger.debug("Running fused attention backend selection with config=%s", self)
         if backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
             logger.info("No fused attention backend available; falling back to unfused attention.")

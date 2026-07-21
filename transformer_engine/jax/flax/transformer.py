@@ -831,8 +831,6 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             bias_seqlen_q=bias_seqlen_q,
             bias_seqlen_kv=bias_seqlen_kv,
         )
-        # get_fused_attn_backend() logs the rejection reason under NVTE_DEBUG, so the
-        # warning below only reports the (unique) configuration and points there for details.
         fused_attn_backend, _ = fused_attn_helper.get_fused_attn_backend()
         has_fused_attn_kernel = fused_attn_backend != NVTE_Fused_Attn_Backend.NVTE_No_Backend
         if score_mod_requested and not has_fused_attn_kernel:
@@ -845,7 +843,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         if enable_fused_attn and not has_fused_attn_kernel:
             warnings.warn(
                 "Falling back to the unfused attention backend as fused attention does not"
-                f" support this config. Reason: {reason}\n"
+                f" support this config. Set NVTE_DEBUG=1 and NVTE_DEBUG_LEVEL=2 to see the detailed rejection reason.\n"
             )
 
         dropout_rng = None
