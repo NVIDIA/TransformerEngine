@@ -168,6 +168,10 @@ def is_symm_backed(t: torch.Tensor) -> bool:
 
     if hasattr(_symm, "is_symm_mem_tensor"):
         return bool(_symm.is_symm_mem_tensor(t))
+    if _EP_GROUP is None:
+        raise RuntimeError(
+            "is_symm_backed called before ensure_nccl_ep_bootstrapped(); no EP group registered."
+        )
     try:
         _symm.rendezvous(t, _EP_GROUP.group_name)
         return True

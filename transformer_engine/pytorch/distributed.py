@@ -1843,6 +1843,7 @@ def get_symmetric_memory_tensor(tensor_numel, tensor_dtype, tensor_device, tp_gr
 
 
 _SYMM_MEM_POOL = None
+_SYMM_MEM_POOL_BACKEND = None
 
 
 def _get_symm_mem_pool(device: torch.device, backend: str = "NCCL"):
@@ -1851,9 +1852,10 @@ def _get_symm_mem_pool(device: torch.device, backend: str = "NCCL"):
     backend arg, so the (process-global) backend is always set before the pool is created. The
     collective rendezvous cost is amortized across allocations (paid per new segment, not per buffer).
     """
-    global _SYMM_MEM_POOL
+    global _SYMM_MEM_POOL, _SYMM_MEM_POOL_BACKEND
     if _SYMM_MEM_POOL is None:
         symm_mem.set_backend(backend)
+        _SYMM_MEM_POOL_BACKEND = backend
         if hasattr(symm_mem, "get_mem_pool"):
             _SYMM_MEM_POOL = symm_mem.get_mem_pool(device)
         elif hasattr(torch.cuda, "MemPool") and hasattr(symm_mem, "get_mempool_allocator"):
@@ -1863,6 +1865,11 @@ def _get_symm_mem_pool(device: torch.device, backend: str = "NCCL"):
                 "No symmetric-memory MemPool API available (need torch symm-mem get_mem_pool, or "
                 "torch.cuda.MemPool + get_mempool_allocator)."
             )
+    elif backend != _SYMM_MEM_POOL_BACKEND:
+        raise RuntimeError(
+            f"symm-mem pool already created with backend {_SYMM_MEM_POOL_BACKEND!r}; "
+            f"cannot switch to {backend!r}"
+        )
     return _SYMM_MEM_POOL
 
 
