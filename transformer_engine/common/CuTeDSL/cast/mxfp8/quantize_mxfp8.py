@@ -33,7 +33,6 @@ import tvm_ffi
 
 from transformer_engine.common.CuTeDSL.utils import (
     _bitcast_f32_to_i32,
-    device_compute_capability,
     str_to_cutlass_dtype,
     is_packed16,
     packed16_kit,
@@ -1700,14 +1699,7 @@ class MXFP8QuantizeSpecializedRowwiseKernel:
                 )
             cute.autovec_copy(rO_thread, mO_thread)
 
-        # Cooperative wide flush of the staged scales: the first CTA_Y*(CTA_X/G)
-        # threads each store one G-wide group, the rest idle. Pick the widest store
-        # the runtime row pitch allows (mirrors CUDA's PreferredDataType + runtime
-        # check): uint4 (16 scale bytes) when padded_cols % 16 == 0, else uint32
-        # (4 bytes, always safe since padded_cols is a multiple of 4). A group never
-        # straddles the allocation boundary (base and padded_cols are both multiples
-        # of G), so flush a group iff its first column is in-allocation. Zeroed
-        # padding columns flush as 0.
+        # Cooperative wide flush of the staged scales where padding columns flush as 0.
         if cutlass.const_expr(self._STASH_SCALE_TO_SMEM):
             cute.arch.sync_threads()
             padded_cols = mS_row.shape[1]
