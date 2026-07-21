@@ -19,6 +19,7 @@ from transformer_engine.pytorch.ep import (
     ep_dispatch,
     ep_combine,
     symm_mem_alloc,
+    is_symm_backed,
     _ep_combine_raw,
     _ep_dispatch_raw,
 )
@@ -155,13 +156,7 @@ class TestEP(unittest.TestCase):
         ):
             self.skipTest("not exercised in zero-copy mode")
 
-    def _make_buffer(
-        self,
-        alignment=0,
-        top_k=TOP_K,
-        dispatch_recv_tokens=None,
-        combine_grad_expert_out=None,
-    ):
+    def _make_buffer(self, alignment=0, top_k=TOP_K):
         return EpBuffer(
             top_k=top_k,
             max_tokens_per_rank=TOKENS_PER_RANK,
@@ -169,8 +164,6 @@ class TestEP(unittest.TestCase):
             hidden_dim=HIDDEN_DIM,
             num_local_experts=NUM_LOCAL_EXPERTS,
             alignment=alignment,
-            dispatch_recv_tokens=dispatch_recv_tokens,
-            combine_grad_expert_out=combine_grad_expert_out,
         )
 
     def _expert_out(self, expert_out):
@@ -253,10 +246,10 @@ class TestEP(unittest.TestCase):
             ]
         for label, recv_tokens in cases:
             with self.subTest(case=label):
-                buf = self._make_buffer(dispatch_recv_tokens=recv_tokens)
+                buf = self._make_buffer()
                 topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
                 tokens_p = tokens.detach().clone().requires_grad_(True)
-                rt, rw, _tc = ep_dispatch(buf, tokens_p, topk_idx, w)
+                rt, rw, _tc = ep_dispatch(buf, tokens_p, topk_idx, w, recv_tokens=recv_tokens)
                 if recv_tokens is not None:  # caller-supplied recv_tokens must be used in place
                     self.assertEqual(rt.data_ptr(), recv_tokens.data_ptr())
                 rt = self._stage_grad_symm(rt)
@@ -269,20 +262,17 @@ class TestEP(unittest.TestCase):
 
     @_zero_copy_test_include
     def test_caller_provides_dispatch_recv_tokens(self):
-        """Caller-supplied recv_tokens: EpBuffer adopts it (recv_topk_weights stays
-        owned) and ep_dispatch returns a view of the caller's buffer."""
+        """Caller-supplied recv_tokens (symm-mem-backed in zero-copy): ep_dispatch
+        writes into it and returns a view of the caller's buffer."""
         if ZERO_COPY:
             rc = self.cfg.recv_capacity_per_rank
             rt_buf = symm_mem_alloc((rc, HIDDEN_DIM), torch.bfloat16, self.ep_group)
         else:
             rt_buf, _rw_buf, _ = self._make_raw_recv()
-        buf = self._make_buffer(dispatch_recv_tokens=rt_buf)
-        self.assertEqual(buf.recv_tokens_symm_buf.data_ptr(), rt_buf.data_ptr())
-        if ZERO_COPY:  # recv_topk_weights is always buffer-owned in zero-copy
-            self.assertIsNotNone(buf.recv_topk_weights_symm_buf)
+        buf = self._make_buffer()
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
         tokens_p = tokens.detach().clone().requires_grad_(True)
-        rt, rw, _ = ep_dispatch(buf, tokens_p, topk_idx, w)
+        rt, rw, _ = ep_dispatch(buf, tokens_p, topk_idx, w, recv_tokens=rt_buf)
         self.assertEqual(rt.data_ptr(), rt_buf.data_ptr())
         rt = self._stage_grad_symm(rt)
         rw = self._stage_grad_symm(rw)
@@ -294,22 +284,45 @@ class TestEP(unittest.TestCase):
 
     @_zero_copy_test_include
     def test_caller_provides_grad_expert_out(self):
-        """Caller-supplied grad_expert_out: EpBuffer adopts it as the combine
-        backward grad target (symm-mem under zero-copy)."""
+        """Caller-supplied grad_out (symm-mem-backed in zero-copy): ep_combine's
+        backward scatters the expert-out grad into it."""
         rc = self.cfg.recv_capacity_per_rank
         if ZERO_COPY:
             gbuf = symm_mem_alloc((rc, HIDDEN_DIM), torch.bfloat16, self.ep_group)
         else:
             gbuf = torch.empty(rc, HIDDEN_DIM, dtype=torch.bfloat16, device=self.cfg.device)
-        buf = self._make_buffer(combine_grad_expert_out=gbuf)
-        self.assertEqual(buf.grad_expert_out_symm_buf.data_ptr(), gbuf.data_ptr())
+        gbuf.zero_()
+        buf = self._make_buffer()
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
         tokens_p = tokens.detach().clone().requires_grad_(True)
         recv_t, recv_w, _ = ep_dispatch(buf, tokens_p, topk_idx, w)
         recv_t = self._stage_grad_symm(recv_t)
         recv_w = self._stage_grad_symm(recv_w)
         expert_out = self._expert_out(self._weighted(recv_t, recv_w))
-        out = ep_combine(buf, expert_out)
+        out = ep_combine(buf, expert_out, grad_out=gbuf)
+        (0.5 * (out.float() ** 2).sum()).backward()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(out.float(), tokens.float(), atol=5e-2, rtol=5e-2)
+        torch.testing.assert_close(tokens_p.grad.float(), tokens.float(), atol=5e-2, rtol=5e-2)
+        # the caller-owned buffer was used as the combine-bwd scatter target
+        self.assertGreater(gbuf.abs().sum().item(), 0.0)
+
+    @_zero_copy_test_include
+    def test_zero_copy_pool_auto_alloc(self):
+        """Zero-copy with recv/grad left None: ep_dispatch/ep_combine allocate their IO
+        tensors from the symm-mem pool (is_symm_backed). This is the primary mcore
+        path — mcore hands no caller buffers, TE pools them on the fly."""
+        if not ZERO_COPY:
+            self.skipTest("zero-copy pool auto-alloc only")
+        buf = self._make_buffer()
+        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        tokens_p = tokens.detach().clone().requires_grad_(True)
+        recv_t, recv_w, _ = ep_dispatch(buf, tokens_p, topk_idx, w)  # recv_tokens=None -> pool
+        self.assertTrue(is_symm_backed(recv_t))  # dispatch recv came from the symm-mem pool
+        recv_t = self._stage_grad_symm(recv_t)
+        recv_w = self._stage_grad_symm(recv_w)
+        expert_out = self._expert_out(self._weighted(recv_t, recv_w))
+        out = ep_combine(buf, expert_out)  # grad_out=None -> bwd allocs the grad from the pool
         (0.5 * (out.float() ** 2).sum()).backward()
         torch.cuda.synchronize()
         torch.testing.assert_close(out.float(), tokens.float(), atol=5e-2, rtol=5e-2)
