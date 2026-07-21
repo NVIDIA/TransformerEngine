@@ -100,6 +100,7 @@ def _uniform_mxfp8_scale_carrier_specs(x_spec, flatten_axis):
         (group_spec, column_spec, row_spec),
     )
 
+
 def _normalize_flatten_axis(flatten_axis, ndim):
     return flatten_axis + ndim if flatten_axis < 0 else flatten_axis
 
@@ -1751,13 +1752,9 @@ def grouped_quantize(
             PartitionSpec(data_spec[0]),
         )
         if q_layout.has_rowwise:
-            rowwise_scale_inv = jax.lax.with_sharding_constraint(
-                rowwise_scale_inv, scale_sharding
-            )
+            rowwise_scale_inv = jax.lax.with_sharding_constraint(rowwise_scale_inv, scale_sharding)
         if q_layout.has_colwise:
-            colwise_scale_inv = jax.lax.with_sharding_constraint(
-                colwise_scale_inv, scale_sharding
-            )
+            colwise_scale_inv = jax.lax.with_sharding_constraint(colwise_scale_inv, scale_sharding)
 
     # TODO(Phuong): store the whole updated_amax in the grouped_quantize instead?
     if quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:

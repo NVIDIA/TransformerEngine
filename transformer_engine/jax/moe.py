@@ -287,9 +287,7 @@ def _ffn_fwd_global(
         flatten_axis=-1,
         ragged_scale_sharding=flat_token_sharding,
     )
-    casted_wi = tex.grouped_quantize(
-        wi, fc1_quantizer_set.kernel, flatten_axis=-1
-    )
+    casted_wi = tex.grouped_quantize(wi, fc1_quantizer_set.kernel, flatten_axis=-1)
     combined_out = tex.grouped_gemm(
         casted_sorted_x.get_tensor(usage=TensorUsage.LHS),
         casted_wi.get_tensor(usage=TensorUsage.RHS),
@@ -298,9 +296,9 @@ def _ffn_fwd_global(
     )
     combined_out = jax.lax.with_sharding_constraint(combined_out, flat_token_sharding)
     gate_proj_out, up_proj_out = jnp.split(combined_out, 2, axis=-1)
-    casted_sorted_x_lhs_trans = casted_sorted_x.get_tensor(
-        usage=TensorUsage.LHS_TRANS
-    ).checkpoint(fc1_quantizer_set.x)
+    casted_sorted_x_lhs_trans = casted_sorted_x.get_tensor(usage=TensorUsage.LHS_TRANS).checkpoint(
+        fc1_quantizer_set.x
+    )
     casted_wi_rhs_trans = casted_wi.get_tensor(usage=TensorUsage.RHS_TRANS).checkpoint(
         fc1_quantizer_set.kernel
     )
