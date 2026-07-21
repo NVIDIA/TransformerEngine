@@ -36,6 +36,7 @@ from transformer_engine.jax.cpp_extensions.ep import (
     ep_combine_fwd,
     get_ep_config,
 )
+from transformer_engine.jax.version_utils import is_collective_stream_supported
 
 
 # ── Test config ─────────────────────────────────────────────────────────────
@@ -660,6 +661,10 @@ class TestEP(unittest.TestCase):
             expected = (("dp", "ep"),) if self.dp > 1 else ("ep",)
             self.assertEqual(tuple(compiled.output_shardings.spec), expected)
 
+    @unittest.skipUnless(
+        is_collective_stream_supported(),
+        "JAX/XLA lacks the gpu_stream:collective annotation (openxla/xla#39604)",
+    )
     def test_z_dispatch_combine_on_collective_stream(self):
         """Every EP FFI custom call must carry the collective-stream annotation
         so XLA schedules them on the collective stream instead of overlapping

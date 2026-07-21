@@ -19,16 +19,23 @@ from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
 from jax import dtypes, ffi
-from jax.experimental.compute_on import compute_on
 from jax.sharding import NamedSharding, PartitionSpec
 
 import transformer_engine_jax
 from .base import BasePrimitive, register_primitive
 from ..sharding import global_mesh_resource, get_mesh_axis_size
+from ..version_utils import is_collective_stream_supported
 
-# Pin EP collectives to XLA's high-priority collective stream so the scheduler
-# serializes them with native collectives instead of overlapping them.
-_EP_COLLECTIVE_STREAM = "gpu_stream:collective"
+
+def _on_collective_stream(func):
+    """Pin ``func``'s ops to XLA's collective stream so the scheduler serializes
+    them with native collectives. No-op on JAX that lacks the annotation."""
+    if not is_collective_stream_supported():
+        return func
+    from jax.experimental.compute_on import compute_on
+
+    return compute_on("gpu_stream:collective")(func)
+
 
 __all__ = [
     "EpConfig",
@@ -899,7 +906,7 @@ register_primitive(EpCombineBwdPrimitive)
 # ── Public-ish helpers (used by jax/ep.py) ──────────────────────────────────
 
 
-@compute_on(_EP_COLLECTIVE_STREAM)
+@_on_collective_stream
 def ep_prepare(cfg: EpLayerConfig, topk_idx):
     """Exchange routing metadata for ``cfg``; return ``(token_counts, handle_mem)``."""
     return EpPreparePrimitive.outer_primitive.bind(
@@ -910,7 +917,7 @@ def ep_prepare(cfg: EpLayerConfig, topk_idx):
     )
 
 
-@compute_on(_EP_COLLECTIVE_STREAM)
+@_on_collective_stream
 def ep_dispatch_fwd(
     cfg: EpLayerConfig, handle_mem, topk_idx, tokens, topk_weights, recv_capacity_per_rank
 ):
@@ -927,7 +934,7 @@ def ep_dispatch_fwd(
     )
 
 
-@compute_on(_EP_COLLECTIVE_STREAM)
+@_on_collective_stream
 def ep_combine_fwd(
     cfg: EpLayerConfig, handle_mem, expert_out, num_local_tokens, out_partition_spec=None
 ):
@@ -943,7 +950,7 @@ def ep_combine_fwd(
     )
 
 
-@compute_on(_EP_COLLECTIVE_STREAM)
+@_on_collective_stream
 def ep_dispatch_bwd(
     cfg: EpLayerConfig,
     handle_mem,
@@ -965,7 +972,7 @@ def ep_dispatch_bwd(
     )
 
 
-@compute_on(_EP_COLLECTIVE_STREAM)
+@_on_collective_stream
 def ep_combine_bwd(cfg: EpLayerConfig, handle_mem, grad, recv_capacity_per_rank):
     """Backward of combine; returns grad_expert_out [num_procs, recv_capacity_per_rank, H]."""
     return EpCombineBwdPrimitive.outer_primitive.bind(
