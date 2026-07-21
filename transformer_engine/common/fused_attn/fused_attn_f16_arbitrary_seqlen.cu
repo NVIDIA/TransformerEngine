@@ -91,8 +91,6 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
   // Newer versions of cuDNN SDPA can accept sequence lengths directly as a cumulative
   // tensor, and can accept ragged offsets in arbitrary units (such as tokens) instead
   // of elements. Take advantage of this if possible to avoid 2 extra kernel calls.
-  // Defined on FusedAttnConfig so make_cache_key() keys the graph on the matching batch
-  // handling (real batch here, bucketed batch on the legacy path); keep the two in sync.
   const bool use_cu_seqlens_directly = cfg.uses_cu_seqlens_directly;
 
   // keep original batch size because cu_seqlens are created with [b+1] shape
@@ -153,18 +151,14 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                    std::shared_ptr<fe::graph::Tensor_attributes>>;  // dropout_offset
 
     using CacheType = std::map<FusedAttnConfig, graph_and_tensors>;
-    // [SHARED-CACHE] Process-wide graph cache (was `static thread_local`) so a compiled graph
-    // is reused across threads instead of rebuilt per thread. Safe because cuDNN >= 9.0 allows
-    // concurrent execution of a shared plan and cudnn-frontend >= 1.25.0 has a thread-safe
-    // execute(). The TE minimum-cuDNN-version bump that formalizes this requirement is a follow-up PR.
+    // Process-wide graph cache so a compiled graph is reused across threads instead of rebuilt per thread.
+    // Safe because cuDNN >= 9.0 allows concurrent execution of a shared plan and cudnn-frontend >= 1.25.0 has a thread-safe execute().
     static CacheType sdpa_f16_fprop_cache;
     static std::mutex sdpa_f16_fprop_cache_mutex;
 
     // Get plan from cache if cache is available, otherwise create one
     auto get_graph = [&](CacheType &cache, const FusedAttnConfig &descriptor) -> graph_and_tensors {
-      // [SHARED-CACHE] Lock only the map lookup; copy the entry out and release before building
-      // so concurrent first-misses on different keys build in parallel. graph->execute() runs
-      // unlocked after get_graph() returns; built graphs are shared across threads.
+      // Lock the map lookup, not the build, so different graphs can build in parallel
       graph_and_tensors cached_graph{};
       bool cache_hit = false;
       {
@@ -443,15 +437,15 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       NVTE_CHECK_CUDNN_FE(mha_graph->validate());
       NVTE_CHECK_CUDNN_FE(mha_graph->build_operation_graph(handle));
       NVTE_CHECK_CUDNN_FE(mha_graph->create_execution_plans({fe::HeurMode_t::A}));
-      NVTE_CHECK_CUDNN_FE(mha_graph->check_support());  // no-handle overload (handle version is deprecated)
-      NVTE_CHECK_CUDNN_FE(mha_graph->build_plans());    // no-handle overload (handle version is deprecated)
+      NVTE_CHECK_CUDNN_FE(mha_graph->check_support());
+      NVTE_CHECK_CUDNN_FE(mha_graph->build_plans());
 
       auto return_tuple =
           std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, Stats_tuple, bias_tuple,
                          softmax_offset_tuple, padding_tuple, page_table_tuple, offset_qo_tuple,
                          offset_kv_tuple, offset_s_tuple, dropout_tuple);
-      // [SHARED-CACHE] Lock only for insert. If another thread inserted this key while we built,
-      // reuse theirs and discard ours so all threads share one graph (rare duplicate build).
+      // Lock the insert. If another thread inserted a graph for the same key while we were building,
+      // use their graph (it's the same as ours) and discard our graph.
       {
         std::lock_guard<std::mutex> shared_cache_lock(sdpa_f16_fprop_cache_mutex);
         auto inserted = cache.insert({descriptor, return_tuple});
@@ -704,14 +698,12 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                    std::shared_ptr<fe::graph::Tensor_attributes>>;  // dropout_offset
 
     using CacheType = std::map<FusedAttnConfig, graph_and_tensors>;
-    static CacheType sdpa_f16_bprop_cache;         // [SHARED-CACHE] process-wide (was thread_local)
-    static std::mutex sdpa_f16_bprop_cache_mutex;  // [SHARED-CACHE]
+    static CacheType sdpa_f16_bprop_cache;
+    static std::mutex sdpa_f16_bprop_cache_mutex;
 
     // Get plan from cache if cache is available, otherwise create one
     auto get_graph = [&](CacheType &cache, const FusedAttnConfig &descriptor) -> graph_and_tensors {
-      // [SHARED-CACHE] Lock only the map lookup; copy the entry out and release before building
-      // so concurrent first-misses on different keys build in parallel. graph->execute() runs
-      // unlocked after get_graph() returns; built graphs are shared across threads.
+      // Lock the map lookup, not the build, so different graphs can build in parallel
       graph_and_tensors cached_graph{};
       bool cache_hit = false;
       {
@@ -962,14 +954,14 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       NVTE_CHECK_CUDNN_FE(mha_graph->validate());
       NVTE_CHECK_CUDNN_FE(mha_graph->build_operation_graph(handle));
       NVTE_CHECK_CUDNN_FE(mha_graph->create_execution_plans({fe::HeurMode_t::A}));
-      NVTE_CHECK_CUDNN_FE(mha_graph->check_support());  // no-handle overload (handle version is deprecated)
-      NVTE_CHECK_CUDNN_FE(mha_graph->build_plans());    // no-handle overload (handle version is deprecated)
+      NVTE_CHECK_CUDNN_FE(mha_graph->check_support());
+      NVTE_CHECK_CUDNN_FE(mha_graph->build_plans());
 
       auto return_tuple = std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, bias_tuple,
                                          softmax_offset_tuple, padding_tuple, offset_qo_tuple,
                                          offset_kv_tuple, offset_s_tuple, dropout_tuple);
-      // [SHARED-CACHE] Lock only for insert. If another thread inserted this key while we built,
-      // reuse theirs and discard ours so all threads share one graph (rare duplicate build).
+      // Lock the insert. If another thread inserted a graph for the same key while we were building,
+      // use their graph (it's the same as ours) and discard our graph.
       {
         std::lock_guard<std::mutex> shared_cache_lock(sdpa_f16_bprop_cache_mutex);
         auto inserted = cache.insert({descriptor, return_tuple});

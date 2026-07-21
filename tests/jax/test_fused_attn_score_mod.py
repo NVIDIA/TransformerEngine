@@ -404,7 +404,10 @@ def _install_fake_flax_fused_attn(monkeypatch, *, kernel_available=True):
         def get_fused_attn_backend(self):
             if kernel_available:
                 return NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen, ""
-            return NVTE_Fused_Attn_Backend.NVTE_No_Backend, "fake: no backend"
+            return (
+                NVTE_Fused_Attn_Backend.NVTE_No_Backend,
+                "fake FusedAttnHelper: no fused attention backend available for this configuration",
+            )
 
     def fake_fused_attn(
         qkv,

@@ -399,9 +399,9 @@ void nvte_fused_attn_fwd_v2(NVTEFusedAttnFwdParams params) {
 
   auto handle = cudnnExecutionPlanManager::Instance().GetHandle();
   FusedAttnConfig cfg = p.make_config();
-  NVTE_Fused_Attn_Backend fused_attention_backend =
-      nvte_get_fused_attn_backend_v2(reinterpret_cast<NVTEFusedAttnConfig>(&cfg),
-                                     /*message=*/nullptr);
+  const char *fused_attn_reject_reason = nullptr;
+  NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend_v2(
+      reinterpret_cast<NVTEFusedAttnConfig>(&cfg), &fused_attn_reject_reason);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
     fused_attn_arbitrary_seqlen_fwd(cfg, input_Q, input_K, input_V, input_Bias, input_SoftmaxOffset,
@@ -414,7 +414,11 @@ void nvte_fused_attn_fwd_v2(NVTEFusedAttnFwdParams params) {
                        output_O, p.Aux_CTX_Tensors, input_cu_seqlens_q, input_cu_seqlens_kv,
                        input_rng_state, wkspace, p.stream, handle);
   } else {
-    NVTE_ERROR("Invalid combination of data type and sequence length for fused attention. \n");
+    const char *reject_reason =
+        (fused_attn_reject_reason != nullptr && fused_attn_reject_reason[0] != '\0')
+            ? fused_attn_reject_reason
+            : "no cuDNN fused-attention backend supports the requested parameters";
+    NVTE_ERROR("Fused attention is not supported for this configuration: ", reject_reason);
   }
 }
 
@@ -496,9 +500,9 @@ void nvte_fused_attn_bwd_v2(NVTEFusedAttnBwdParams params) {
 
   auto handle = cudnnExecutionPlanManager::Instance().GetHandle();
   FusedAttnConfig cfg = p.make_config();
-  NVTE_Fused_Attn_Backend fused_attention_backend =
-      nvte_get_fused_attn_backend_v2(reinterpret_cast<NVTEFusedAttnConfig>(&cfg),
-                                     /*message=*/nullptr);
+  const char *fused_attn_reject_reason = nullptr;
+  NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend_v2(
+      reinterpret_cast<NVTEFusedAttnConfig>(&cfg), &fused_attn_reject_reason);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
     size_t i = 0;
@@ -533,7 +537,11 @@ void nvte_fused_attn_bwd_v2(NVTEFusedAttnBwdParams params) {
                        output_dV, output_dSoftmaxOffset, input_cu_seqlens_q, input_cu_seqlens_kv,
                        input_rng_state, wkspace, p.stream, handle);
   } else {
-    NVTE_ERROR("Invalid combination of data type and sequence length for fused attention. \n");
+    const char *reject_reason =
+        (fused_attn_reject_reason != nullptr && fused_attn_reject_reason[0] != '\0')
+            ? fused_attn_reject_reason
+            : "no cuDNN fused-attention backend supports the requested parameters";
+    NVTE_ERROR("Fused attention is not supported for this configuration: ", reject_reason);
   }
 }
 

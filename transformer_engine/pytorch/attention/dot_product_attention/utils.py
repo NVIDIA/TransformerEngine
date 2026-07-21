@@ -1530,7 +1530,7 @@ def get_attention_backend(
             bias_seqlen_q=bias_seqlen_q,
             bias_seqlen_kv=bias_seqlen_kv,
         )
-
+        # Context-parallel per-step configs
         if context_parallel:
             from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
                 cp_per_step_configs,
@@ -2471,11 +2471,7 @@ class FusedAttnSpec:
 
 
 def get_fused_attn_spec(recipe, qkv_dtype, qkv_layout, *, cs_o_in_f16, nominal_dtype=None):
-    """Resolve fused-attention specs, e.g. tensor dtypes, formats, for a given config.
-
-    `nominal_dtype` is the model precision (F16/BF16) of the tensors that stay unquantized in
-    FP8 attention (O, and dQ/dK/dV under current/mxfp8). It is only consulted when `qkv_dtype` itself is FP8.
-    """
+    """Resolve fused-attention specs, e.g. tensor dtypes, formats, for a given config"""
     q_format = get_qkv_format(qkv_layout)[1]
     eff_qkv_layout = qkv_layout  # FP16/BF16
     if recipe is not None:

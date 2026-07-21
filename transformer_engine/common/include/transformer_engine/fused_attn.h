@@ -8,8 +8,8 @@
  *  \brief Enums and functions for fused attention.
  */
 
-#ifndef TRANSFORMER_ENGINE_FUSED_ATTN_FP8_H_
-#define TRANSFORMER_ENGINE_FUSED_ATTN_FP8_H_
+#ifndef TRANSFORMER_ENGINE_FUSED_ATTN_H_
+#define TRANSFORMER_ENGINE_FUSED_ATTN_H_
 
 #include <cudnn.h>
 
@@ -468,6 +468,16 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
 
 /*! \brief Compute dot product attention with separate Q, K and V.
  *
+ *  All inputs and outputs are carried by the opaque \p params handle. Create it with ``nvte_create_fused_attn_fwd_params()``,
+ *  populate it with ``nvte_set_fused_attn_fwd_params_attribute()`` (or ``FusedAttnFwdParamsWrapper``) setters, and
+ *  destroy it with ``nvte_destroy_fused_attn_fwd_params()``.
+ *
+ *  \param[in,out] params                    Opaque fused-attention forward-parameter handle.
+ */
+void nvte_fused_attn_fwd_v2(NVTEFusedAttnFwdParams params);
+
+/*! \brief Compute dot product attention with separate Q, K and V.
+ *
  * Computes:
  *  - P = Q * Transpose(K) + Bias
  *  - S = ScaleMaskSoftmax(P)
@@ -541,16 +551,6 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
                          int64_t window_size_left, int64_t window_size_right,
                          bool bottom_right_diagonal, NVTETensor workspace, cudaStream_t stream);
-
-/*! \brief Compute dot product attention with separate Q, K and V.
- *
- *  All inputs and outputs are carried by the opaque \p params handle. Create it with ``nvte_create_fused_attn_fwd_params()``,
- *  populate it with ``nvte_set_fused_attn_fwd_params_attribute()`` (or ``FusedAttnFwdParamsWrapper``) setters, and
- *  destroy it with ``nvte_destroy_fused_attn_fwd_params()``.
- *
- *  \param[in,out] params                    Opaque fused-attention forward-parameter handle.
- */
-void nvte_fused_attn_fwd_v2(NVTEFusedAttnFwdParams params);
 
 /*! \brief Compute the backward of the dot product attention with separate Q, K and V.
  *
@@ -1139,8 +1139,8 @@ class FusedAttnConfigWrapper {
   }
 
  private:
-  // Common implementation for every setter: copy the value to a local, forward
-  // its address and size to the C API, and return *this for chaining.
+  // Common implementation for every setter: copy the value to a local variable,
+  // forward its address and size to the C API, and return *this for chaining.
   template <typename T>
   FusedAttnConfigWrapper &set_attr(NVTEFusedAttnConfigAttribute attr, T val) noexcept {
     nvte_set_fused_attn_config_attribute(cfg_, attr, &val, sizeof(val));
@@ -1287,8 +1287,8 @@ class FusedAttnFwdParamsWrapper {
   }
 
  private:
-  // Common implementation for every setter: copy the value to a local, forward
-  // its address and size to the C API, and return *this for chaining.
+  // Common implementation for every setter: copy the value to a local variable,
+  // forward its address and size to the C API, and return *this for chaining.
   template <typename T>
   FusedAttnFwdParamsWrapper &set_attr(NVTEFusedAttnFwdParamsAttribute attr, T val) noexcept {
     nvte_set_fused_attn_fwd_params_attribute(params_, attr, &val, sizeof(val));
@@ -1447,8 +1447,8 @@ class FusedAttnBwdParamsWrapper {
   }
 
  private:
-  // Common implementation for every setter: copy the value to a local, forward
-  // its address and size to the C API, and return *this for chaining.
+  // Common implementation for every setter: copy the value to a local variable,
+  // forward its address and size to the C API, and return *this for chaining.
   template <typename T>
   FusedAttnBwdParamsWrapper &set_attr(NVTEFusedAttnBwdParamsAttribute attr, T val) noexcept {
     nvte_set_fused_attn_bwd_params_attribute(params_, attr, &val, sizeof(val));

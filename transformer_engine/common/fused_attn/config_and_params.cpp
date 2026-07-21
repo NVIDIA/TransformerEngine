@@ -30,8 +30,7 @@ namespace transformer_engine {
 
 namespace fused_attn {
 
-// Forward declarations from fused_attn/utils.h. Declared here to avoid pulling the heavy
-// cuDNN frontend header into this plain C++ translation unit.
+// Forward declarations
 size_t get_max_batch_size(size_t batch_size);
 size_t get_max_tokens(size_t num_tokens);
 
@@ -97,17 +96,12 @@ void FusedAttnConfig::derive() {
 FusedAttnConfig FusedAttnConfig::make_cache_key() const {
   FusedAttnConfig cache_cfg = *this;
 
-  // Normalize bottom_right_diagonal (the cuDNN diagonal alignment). The impl only turns it into a
-  // real causal band under `is_causal || is_causal_bottom_right` or a sliding window; otherwise the
-  // alignment is inert, so canonicalize it (like attn_scale) to false. This keeps the backend
-  // support probe (which passes a possibly-different brd, e.g. default false) and the real op on a
-  // single cached graph.
+  // Normalize bottom_right_diagonal
   const bool has_window = cache_cfg.window_size_left != -1 || cache_cfg.window_size_right != -1;
   if (!cache_cfg.is_causal && !cache_cfg.is_causal_bottom_right && !has_window) {
     cache_cfg.bottom_right_diagonal = false;
   } else if (cache_cfg.is_causal_bottom_right &&
              cache_cfg.max_seqlen_q == cache_cfg.max_seqlen_kv && !cache_cfg.is_padding) {
-    // square bottom-right causal collapses to top-left causal (mirrors the impl).
     cache_cfg.bottom_right_diagonal = false;
   }
 

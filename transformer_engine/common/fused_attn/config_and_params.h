@@ -5,7 +5,7 @@
  ************************************************************************/
 
 /*! \file config_and_params.h
- *  \brief Internal backing objects for fused-attention config and parameter handles.
+ *  \brief Internal objects for fused-attention config and parameter handles.
  */
 
 #ifndef TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_CONFIG_AND_PARAMS_H_
@@ -76,7 +76,7 @@ struct FusedAttnConfig {
 
   // Internal-only fields: never part of attribute serialization, operator<, or the graph cache key.
   // Filled by derive() or set by caller (i.e. is_forward). Added for convinence purposes and do not
-  // represent graph properties.
+  // represent any graph properties.
 
   // Direction to build the cuDNN graph for; steers make_cache_key() normalization.
   bool is_forward = false;

@@ -136,11 +136,7 @@ class FusedAttnHelper:
     bias_seqlen_kv: Optional[int] = None
 
     def is_fused_attn_kernel_available(self):
-        """Check if there is available fused attention kernel.
-
-        Use ``get_fused_attn_backend()`` directly to also get the diagnostic message
-        explaining why a configuration was rejected.
-        """
+        """Check if there is available fused attention kernel"""
         backend, _ = self.get_fused_attn_backend()
         return backend != NVTE_Fused_Attn_Backend.NVTE_No_Backend
 

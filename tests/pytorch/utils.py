@@ -453,10 +453,6 @@ def get_available_attention_backends(
     if AttentionLogging._is_logging_setup is False:
         AttentionLogging.setup_logging()
 
-    # F16_arbitrary_seqlen and FP8 are mutually exclusive for a given config (selected by the
-    # FP8/dtype gate), so a single probe returns the one applicable fused sub-backend. The old
-    # loop force-set NVTE_FUSED_ATTN_BACKEND per sub-backend, but the refactored backend selection
-    # no longer reads that env var, so the forcing was inert (and leaked the env var).
     _attention_backends["backend_selection_requires_update"] = True
     available_backends, flash_attention_backend, fused_attention_backend = test()
     if fused_attention_backend in (FusedAttnBackend[name] for name in backends.values()):

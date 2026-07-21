@@ -800,8 +800,6 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             if not enable_fused_attn:
                 raise ValueError("score_mod requires fused attention, but NVTE_FUSED_ATTN=0.")
         kernel_qkv_layout = qkv_layout.to_separate() if score_mod_requested else qkv_layout
-        # Thread the POST_SCALE_BIAS broadcast shape through so this pre-check probes the same
-        # cuDNN graph as the primitive does at trace time (see FusedAttnFwdPrimitive.abstract).
         bias_batch = bias_heads = bias_seqlen_q = bias_seqlen_kv = None
         if attn_bias_type == AttnBiasType.POST_SCALE_BIAS:
             *bias_batch_shape, bias_heads, bias_seqlen_q, bias_seqlen_kv = bias.shape
@@ -846,8 +844,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             reason = fused_attn_reject_reason or "(no diagnostic message available)"
             warnings.warn(
                 "Falling back to the unfused attention backend as fused attention does not"
-                f" support:\n{qkv_layout=}\n{attn_bias_type=}\n{attn_mask_type=}\n{self.attention_dropout=}\n{self.num_attention_heads=}\n{self.window_size=}\n{self.num_gqa_groups=}\n{seqlen_q=}\n{seqlen_kv=}\n{head_dim_qk=}\n{head_dim_v=}\nReason"
-                f" for this rejection: {reason}\n"
+                f" support this config. Reason: {reason}\n"
             )
 
         dropout_rng = None

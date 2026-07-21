@@ -348,10 +348,6 @@ def is_fused_attn_kernel_available(
 ):
     """
     To check whether the fused attention kernel is supported.
-
-    For a ``POST_SCALE_BIAS`` config, pass the bias broadcast shape via ``bias_batch``,
-    ``bias_heads``, ``bias_seqlen_q``, and ``bias_seqlen_kv`` so the backend probe matches the
-    graph used at execution time.
     """
     window_size_tuple = (-1, -1) if window_size is None else window_size
 
