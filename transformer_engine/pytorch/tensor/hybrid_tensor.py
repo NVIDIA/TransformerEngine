@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Tensor class with hybrid quantized data (different formats for rowwise vs columnwise)"""
+"""Tensor and quantizer classes for composed rowwise and columnwise representations."""
 
 from __future__ import annotations
 from typing import Any, Dict, Iterable, Literal, Optional, Tuple
@@ -17,11 +17,13 @@ aten = torch.ops.aten
 
 
 class HybridQuantizer(Quantizer):
-    """Quantizer that composes two existing quantizers for different directions.
+    """Quantizer that composes rowwise and columnwise representations.
 
-    Performs two-pass quantization: the rowwise_quantizer produces rowwise
-    quantized data and the columnwise_quantizer produces columnwise quantized
-    data. The results are wrapped in a HybridQuantizedTensor.
+    When both representations are requested, applies ``rowwise_quantizer`` to
+    produce the rowwise representation and ``columnwise_quantizer`` to produce
+    the columnwise representation. The results are wrapped in a
+    ``HybridQuantizedTensor``. The children may use the same or different
+    Transformer Engine formats, or custom ``Quantizer`` implementations.
 
     Parameters
     ----------
@@ -37,21 +39,23 @@ class HybridQuantizer(Quantizer):
 
     Notes
     -----
+    Rowwise and columnwise describe storage and GEMM orientations. Whether a
+    representation is consumed in the forward or backward pass depends on the
+    tensor's role in the operation.
+
     ``HybridQuantizer`` pins each sub-quantizer to its designated direction by
     mutating its usage flags, so it takes ownership of the supplied quantizer
     instances. The rowwise and columnwise quantizers must be distinct objects.
     If both directions need shared state, construct two quantizer instances that
     reference the same external state object.
 
-    Reusing a sub-quantizer instance across multiple ``HybridQuantizer`` objects
-    is unsupported by contract. Catching that robustly would require copying or
-    ownership tracking, both of which are more intrusive, so only the direct
-    rowwise/columnwise aliasing case is enforced.
+    Each ``HybridQuantizer`` must receive its own sub-quantizer instances; do not
+    reuse a sub-quantizer instance across multiple ``HybridQuantizer`` objects.
 
     Example
     -------
-    MXFP8 forward plus high-precision backward from the rowwise-dequantized
-    forward value can be expressed as::
+    MXFP8 rowwise data plus a high-precision columnwise representation derived
+    from the rowwise value can be expressed as::
 
         HybridQuantizer(
             rowwise_quantizer=mxfp8_quantizer,
@@ -405,11 +409,12 @@ class HybridQuantizer(Quantizer):
 
 
 class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
-    """Quantized tensor holding data in two different formats per direction.
+    """Tensor holding independently produced rowwise and columnwise representations.
 
-    The tensor presents as having a standard, higher-precision dtype, but
-    internally stores rowwise data in one quantized format and columnwise
-    data in another.
+    The tensor presents as having a standard logical dtype, but
+    internally stores representations produced by the two sub-quantizers.
+    These may use the same format, different formats, or a high-precision
+    representation such as ``IdentityTensorStorage``.
 
     Parameters
     ----------
@@ -417,10 +422,10 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
         Tensor dimensions.
     dtype : torch.dtype
         Nominal tensor datatype.
-    rowwise_storage : QuantizedTensorStorage
-        Sub-storage for rowwise quantized data.
-    columnwise_storage : QuantizedTensorStorage
-        Sub-storage for columnwise quantized data.
+    rowwise_storage : QuantizedTensorStorage, optional
+        Sub-storage for the rowwise representation.
+    columnwise_storage : QuantizedTensorStorage, optional
+        Sub-storage for the columnwise representation.
     quantizer : HybridQuantizer
         Parent hybrid quantizer that owns the rowwise and columnwise sub-quantizers.
     requires_grad : bool, default = False

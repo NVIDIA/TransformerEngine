@@ -3,12 +3,12 @@
 # See LICENSE for license information.
 
 """
-Quantizer factory examples using real silicon quantizers.
+Quantizer factory examples using native Transformer Engine quantizers.
 
-Each factory below replicates the behaviour of built-in TE recipe but via the
-``CustomRecipe`` + ``qfactory`` interface.  This is useful when you want to
-start from a known-good recipe and then selectively override quantizer settings
-for specific layers / tensor types.
+For TE ``Linear`` and ``GroupedLinear`` roles, each factory below mirrors the
+nominal defaults of a built-in recipe through the ``CustomRecipe`` +
+``qfactory`` interface. This provides a built-in-equivalent starting point for
+selectively overriding quantizer settings for specific layers or tensor types.
 
 Usage (any factory)::
 
@@ -87,8 +87,8 @@ def current_scaling_quantizer_factory(
     return Float8CurrentScalingQuantizer(
         fp8_dtype=fp8_dtype,
         device=torch.device("cuda"),
-        force_pow_2_scales=False,  # constrain scale to powers of 2
-        amax_epsilon=0.0,  # clamp amax from below to avoid div-by-zero
+        force_pow_2_scales=False,
+        amax_epsilon=0.0,
     )
 
 
@@ -131,7 +131,7 @@ def float8_block_scaling_quantizer_factory(
         fp8_dtype=DType.kFloat8E4M3,
         rowwise=True,
         columnwise=True,
-        amax_epsilon=0.0,  # clamp amax from below to avoid div-by-zero
+        amax_epsilon=0.0,
         force_pow_2_scales=True,
         block_scaling_dim=block_scaling_dim,  # 1 = 1D (1×128), 2 = 2D (128×128)
     )

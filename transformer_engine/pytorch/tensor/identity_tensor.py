@@ -4,12 +4,13 @@
 
 """High-precision passthrough quantizer and tensor.
 
-``IdentityQuantizer`` is a no-op "quantizer": it keeps the input tensor in its
-original high precision instead of casting to a low-precision format. It exists
-so the ``CustomRecipe`` + ``qfactory`` machinery can express *unquantized*
-tensors and, composed inside a :class:`HybridQuantizer`, *unquantized
-directions* (e.g. high-precision forward + quantized backward, or vice versa)
-without scattering ``None``/``isinstance`` special-cases across the modules.
+``IdentityQuantizer`` stores a tensor directly without a low-precision encoding,
+preserving the input dtype by default. It exists so the ``CustomRecipe`` +
+``qfactory`` machinery can express *high-precision* tensors and, composed inside
+a :class:`HybridQuantizer`, *high-precision directions* without scattering
+``None``/``isinstance`` special-cases across the modules. Here high precision
+means the held compute dtype, typically BF16, FP16, or FP32; it does not mean
+FP32 specifically.
 """
 
 from __future__ import annotations
@@ -23,11 +24,12 @@ from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantize
 
 
 class IdentityQuantizer(Quantizer):
-    """Quantizer that performs no quantization (high-precision passthrough).
+    """Quantizer that produces a high-precision passthrough representation.
 
     Returns an :class:`IdentityTensorStorage` (or :class:`IdentityTensor`)
-    wrapping the original high-precision tensor. ``general_gemm`` materializes
-    it back to a plain tensor, so any GEMM consuming it runs in high precision.
+    holding the tensor directly, without a low-precision encoding.
+    ``general_gemm`` materializes it as a plain tensor, so a GEMM consumes it
+    in the held dtype.
 
     Parameters
     ----------
@@ -161,7 +163,7 @@ class IdentityTensor(IdentityTensorStorage, QuantizedTensor):
     """High-precision passthrough tensor produced by :class:`IdentityQuantizer`.
 
     Presents as a standard tensor of its nominal dtype; internally it just
-    holds the original high-precision data (no quantization).
+    holds data directly in that dtype, without a low-precision encoding.
     """
 
     def __repr__(self, *, tensor_contents=None):

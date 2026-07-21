@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Mixin class holding data specific for HybridQuantizedTensor"""
+"""Storage class for composed rowwise and columnwise representations."""
 
 from __future__ import annotations
 from collections.abc import Iterable
@@ -14,11 +14,12 @@ from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 
 
 class HybridQuantizedTensorStorage(QuantizedTensorStorage):
-    """Storage that composes two QuantizedTensorStorage instances.
+    """Storage that composes rowwise and columnwise sub-storages.
 
-    One sub-storage provides rowwise quantized data and the other provides
-    columnwise quantized data. This enables mixed-precision quantization
-    where, for example, rowwise data is FP8 and columnwise data is FP4.
+    One sub-storage provides the rowwise representation and the other provides
+    the columnwise representation. Either may be absent when that direction is
+    not needed. The sub-storages may use different formats or include an
+    high-precision representation such as ``IdentityTensorStorage``.
 
     """
 

@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Mixin class holding data for IdentityTensor (high-precision passthrough)."""
+"""Storage class for a high-precision IdentityTensor representation."""
 
 from __future__ import annotations
 from typing import Any, Dict, Optional, Tuple
@@ -14,14 +14,13 @@ from ...utils import _empty_tensor
 
 
 class IdentityTensorStorage(QuantizedTensorStorage):
-    """Passthrough storage that holds a high-precision (unquantized) tensor.
+    """Passthrough storage that holds a high-precision tensor directly.
 
     Produced by :class:`IdentityQuantizer`. It implements the
     ``QuantizedTensorStorage`` interface so it can flow through the same
     module / GEMM / save-for-backward / FSDP machinery as the real quantized
-    storages, but it performs no quantization: it simply carries the original
-    high-precision tensor. ``general_gemm`` materializes it back to that plain
-    tensor (so the matmul runs in high precision).
+    storages, but it uses no low-precision encoding. ``general_gemm``
+    materializes it as a plain tensor in the held dtype.
 
     The data is direction-agnostic -- the same tensor serves both the rowwise
     and columnwise directions (the GEMM transposes via its layout flags), so a
@@ -99,7 +98,7 @@ class IdentityTensorStorage(QuantizedTensorStorage):
         raise ValueError("No data to get, both rowwise_data and columnwise_data are False")
 
     def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
-        """Return the held high-precision tensor (no-op dequantization)."""
+        """Return the held high-precision tensor, casting when requested."""
         if self._hp_data is None:
             raise RuntimeError("IdentityTensorStorage has no data to dequantize")
         if dtype is None:

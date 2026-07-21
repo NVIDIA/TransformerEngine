@@ -4860,6 +4860,10 @@ class TestHybridQuantizeMasterWeights:
                 group=None,
             )
 
+    @pytest.mark.skipif(
+        is_non_tn_fp8_gemm_supported(),
+        reason="Hopper-only: Blackwell supports columnwise per-tensor FP8 FSDP updates",
+    )
     def test_fp8_current_fsdp_transpose_only_raises_before_mutation(self):
         """Reject Hopper FSDP updates that would materialize rowwise column storage."""
         from transformer_engine.pytorch.tensor.utils import quantize_master_weights

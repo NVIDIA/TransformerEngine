@@ -10,9 +10,20 @@ building blocks.  They demonstrate how to use the ``CustomRecipe`` + ``qfactory`
 interface to apply *different* quantization recipes to different
 module/tensor types/instances within the same model, and how to use
 ``HybridQuantizer`` when rowwise and columnwise tensor directions should use
-different formats or sources.
+different representations or sources.
 
-Factories are ordered from conservative to more aggressive quantization.
+Within the Linear/GroupedLinear and RL-oriented families, examples are roughly
+ordered by increasingly aggressive forward quantization. This is an
+organizational convention, not an expected accuracy or performance ranking.
+These factories demonstrate what can be composed; they are not necessarily
+tuned for end-to-end performance.
+
+When the columnwise/backward representation is higher precision than
+the rowwise/forward representation, consider
+``columnwise_source="rowwise_dequantized"`` as a starting point. It constructs
+backward operands from the value obtained during forward quantization,
+improving forward/backward representation consistency.
+Note: dequantization does not recover information discarded during forward quantization.
 
 Organization:
     * Linear / grouped-linear recipes (pre-training). Favor more precision
@@ -25,12 +36,11 @@ Organization:
 
     Use these with caution.  These are **not** official, supported recipes
     provided by Transformer Engine -- they are illustrative examples meant to
-    inspire your own experiments, not drop-in production defaults.  While most
-    of the factories here are grounded in some evidence or rationale (see the
-    per-factory docstrings), they have not been broadly validated for accuracy,
-    convergence, or performance across models and hardware.  Treat them as
-    starting points: benchmark and verify on your own workload before relying on
-    any of them.
+    inspire your own experiments, not drop-in production defaults. Most include
+    a motivating rationale in their per-factory docstrings, but they have not
+    been broadly validated for accuracy, convergence, or performance across
+    models and hardware. Treat them as starting points: benchmark and verify on
+    your own workload before relying on any of them.
 
 Usage::
 
@@ -63,7 +73,6 @@ from typing import Optional
 from transformer_engine.pytorch.quantization import QuantizerRole
 from ..constants import DType
 from .quantization_factory_base import mxfp8_quantizer_factory, nvfp4_quantizer_factory
-
 
 # -----------------------------------------------------------------------------
 # Linear / GroupedLinear Recipes (pre-training)
@@ -209,52 +218,6 @@ def mxfp8_fwd_dequantized_bwd_quantizer_factory(
     return mxfp8_quantizer_factory(role)
 
 
-def nvfp4_row_scaled_fwd_dequantized_bwd_quantizer_factory(
-    role: Optional[QuantizerRole],
-):
-    """Quantizer factory: row-scaled NVFP4 forward, dequantized backward.
-
-    This expresses the linear/grouped-linear equivalent of
-    ``NVFP4BlockScaling(row_scaled_activation=True,
-    backward_override="dequantized")`` through per-direction quantizers:
-
-        * ``input`` ->
-          ``Hybrid(rowwise=row-scaled NVFP4, columnwise=Identity,
-          columnwise_source="rowwise_dequantized")``
-        * ``weight`` ->
-          ``Hybrid(rowwise=plain NVFP4, columnwise=Identity,
-          columnwise_source="rowwise_dequantized")``
-        * ``grad_output`` -> ``IdentityQuantizer``
-        * everything else -> plain NVFP4
-
-    Row-scaled NVFP4 is fprop-only, so the forward quantizers avoid RHT,
-    stochastic rounding, and 2D scaling.
-
-    This recipe targets RL-style training use cases and builds on
-    NVIDIA/TransformerEngine#2931, which introduced row-scaled NVFP4:
-    https://github.com/NVIDIA/TransformerEngine/pull/2931
-    """
-    from transformer_engine.pytorch.tensor.hybrid_tensor import HybridQuantizer
-    from transformer_engine.pytorch.tensor.identity_tensor import IdentityQuantizer
-
-    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
-    if is_linear and role.tensor_type == "input":
-        return HybridQuantizer(
-            rowwise_quantizer=_plain_nvfp4_quantizer(row_scaled_nvfp4=True),
-            columnwise_quantizer=IdentityQuantizer(),
-            columnwise_source="rowwise_dequantized",
-        )
-    if is_linear and role.tensor_type == "weight":
-        return HybridQuantizer(
-            rowwise_quantizer=_plain_nvfp4_quantizer(),
-            columnwise_quantizer=IdentityQuantizer(),
-            columnwise_source="rowwise_dequantized",
-        )
-    if is_linear and role.tensor_type == "grad_output":
-        return IdentityQuantizer()
-    return _plain_nvfp4_quantizer()
-
-
 def nvfp4_row_scaled_fwd_dequantized_mxfp8_bwd_quantizer_factory(
     role: Optional[QuantizerRole],
 ):
@@ -316,6 +279,52 @@ def nvfp4_row_scaled_fwd_dequantized_mxfp8_bwd_quantizer_factory(
     return mxfp8_quantizer_factory(role)
 
 
+def nvfp4_row_scaled_fwd_dequantized_bwd_quantizer_factory(
+    role: Optional[QuantizerRole],
+):
+    """Quantizer factory: row-scaled NVFP4 forward, dequantized backward.
+
+    This expresses a linear/grouped-linear variant of
+    ``NVFP4BlockScaling(row_scaled_activation=True,
+    backward_override="dequantized")`` through per-direction quantizers:
+
+        * ``input`` ->
+          ``Hybrid(rowwise=row-scaled NVFP4, columnwise=Identity,
+          columnwise_source="rowwise_dequantized")``
+        * ``weight`` ->
+          ``Hybrid(rowwise=plain NVFP4, columnwise=Identity,
+          columnwise_source="rowwise_dequantized")``
+        * ``grad_output`` -> ``IdentityQuantizer``
+        * everything else -> plain NVFP4
+
+    Row-scaled NVFP4 is fprop-only, so the forward quantizers avoid RHT,
+    stochastic rounding, and 2D scaling.
+
+    This recipe targets RL-style training use cases and builds on
+    NVIDIA/TransformerEngine#2931, which introduced row-scaled NVFP4:
+    https://github.com/NVIDIA/TransformerEngine/pull/2931
+    """
+    from transformer_engine.pytorch.tensor.hybrid_tensor import HybridQuantizer
+    from transformer_engine.pytorch.tensor.identity_tensor import IdentityQuantizer
+
+    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+    if is_linear and role.tensor_type == "input":
+        return HybridQuantizer(
+            rowwise_quantizer=_plain_nvfp4_quantizer(row_scaled_nvfp4=True),
+            columnwise_quantizer=IdentityQuantizer(),
+            columnwise_source="rowwise_dequantized",
+        )
+    if is_linear and role.tensor_type == "weight":
+        return HybridQuantizer(
+            rowwise_quantizer=_plain_nvfp4_quantizer(),
+            columnwise_quantizer=IdentityQuantizer(),
+            columnwise_source="rowwise_dequantized",
+        )
+    if is_linear and role.tensor_type == "grad_output":
+        return IdentityQuantizer()
+    return _plain_nvfp4_quantizer()
+
+
 # -----------------------------------------------------------------------------
 # Linear + Attention Recipes
 # -----------------------------------------------------------------------------
@@ -329,24 +338,22 @@ def nvfp4_linear_fp8_dpa_factory(
     This factory demonstrates how to use ``CustomRecipe`` with ``fp8_dpa=True``
     to combine NVFP4 quantization for linear layers with FP8 attention.
 
-    DPA tensor types (``role.module_type == "dpa"``):
+    DPA-owned tensor types (``role.module_type == "dpa"``):
 
     =========== ============================================================
     tensor_type Description
     =========== ============================================================
     ``"qkv"``  Query, Key, Value inputs to the first attention GEMM
     ``"s"``    Softmax output (S = softmax(Q·K^T)), fed into the second GEMM
-    ``"o"``    Attention output (O = S·V)
     ``"do"``   Gradient of the attention output (dO), backward input
     ``"dp"``   Gradient of the softmax output (dP = dO·V^T), backward
-    ``"dqkv"`` Gradient flowing back to Q, K, V
     =========== ============================================================
 
     Dispatch logic:
         * ``role.module_type == "dpa"`` with ``tensor_type in ("s", "dp")``
-          -> FP8 delayed scaling (HYBRID, most_recent, history length 1)
+          -> FP8 delayed scaling (``Format.HYBRID``, most_recent, history length 1)
         * other DPA roles
-          -> FP8 current scaling (HYBRID: E4M3 fwd, E5M2 bwd)
+          -> FP8 current scaling (``Format.HYBRID``: E4M3 fwd, E5M2 bwd)
         * DPA boundary hints (``"dpa_output"`` / ``"dpa_grad_input"`` in ``role.name``)
           -> FP8 current scaling placeholder.  The fused attention kernel requires
           FP8-compatible quantizers in all DPA slots, even when the output is
@@ -413,21 +420,20 @@ def nvfp4_linear_mxfp8_dpa_factory(
     ``NVTE_DPA_FP8_RECIPE="MXFP8BlockScaling"`` env override that the
     built-in recipes would otherwise need is unnecessary.
 
-    DPA tensor types (``role.module_type == "dpa"``):
+    DPA-owned tensor types (``role.module_type == "dpa"``):
 
     =========== ============================================================
     tensor_type Description
     =========== ============================================================
     ``"qkv"``  Query, Key, Value inputs to the first attention GEMM
     ``"s"``    Softmax output (S = softmax(Q·K^T)), fed into the second GEMM
-    ``"o"``    Attention output (O = S·V)
     ``"do"``   Gradient of the attention output (dO), backward input
     ``"dp"``   Gradient of the softmax output (dP = dO·V^T), backward
-    ``"dqkv"`` Gradient flowing back to Q, K, V
     =========== ============================================================
 
     Dispatch logic:
-        * ``role.module_type == "dpa"`` -> MXFP8 (HYBRID: E4M3 fwd, E5M2 bwd)
+        * ``role.module_type == "dpa"`` -> MXFP8
+          (``Format.HYBRID``: E4M3 fwd, E5M2 bwd)
           The MXFP8 fused-attention kernel handles the S/dP slots
           internally, so any quantizer returned for those roles is later
           nulled out by ``get_attention_quantizers``.  Returning MXFP8 is
