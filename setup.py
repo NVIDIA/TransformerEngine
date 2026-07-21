@@ -207,8 +207,8 @@ def _discover_nccl_home() -> str:
 
 
 def build_nccl_ep_submodule() -> str:
-    """Build libnccl_ep.a from the 3rdparty/nccl submodule and return NCCL_HOME."""
-    nccl_root = current_file_path / "3rdparty" / "nccl"
+    """Build libnccl_ep.a from the 3rdparty/nccl-extensions submodule and return NCCL_HOME."""
+    nccl_root = current_file_path / "3rdparty" / "nccl-extensions"
     if not (nccl_root / "nccl_ep" / "Makefile").exists():
         raise RuntimeError(
             f"NCCL EP submodule not found at {nccl_root}. "
