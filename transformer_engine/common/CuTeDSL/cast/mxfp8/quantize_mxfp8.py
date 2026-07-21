@@ -20,9 +20,10 @@ shared memory.
 # Local @cute.struct classes are SMEM-layout descriptors that need no docstrings.
 # pylint: disable=missing-class-docstring
 
+import abc
 import logging
 import os
-from typing import Optional, Type
+from typing import Any, Dict, Optional, Type
 
 import cutlass
 from cutlass import cute
@@ -718,7 +719,40 @@ class MXFP8QuantizeConfig:
     __repr__ = __str__
 
 
-class MXFP8QuantizeKernel:
+class MXFP8QuantizeKernelBase(abc.ABC):
+    """Base class for MXFP8 quantize kernels."""
+
+    def __init__(self, cfg: MXFP8QuantizeConfig, tuneable_cfgs: Optional[Dict[str, Any]] = None):
+        """
+        Initialize the kernel with the given configuration and optional tunable parameters.
+        """
+        self.cfg = cfg
+        # Set the tunable configs as attributes of the kernel instance
+        for name, value in (tuneable_cfgs or {}).items():
+            setattr(self, name, value)
+
+    @abc.abstractmethod
+    def __call__(
+        self,
+        mX: cute.Tensor,
+        mO_row: Optional[cute.Tensor],
+        mS_row: Optional[cute.Tensor],
+        mO_col: Optional[cute.Tensor],
+        mS_col: Optional[cute.Tensor],
+        mAmax: Optional[cute.Tensor],
+        mNoop: Optional[cute.Tensor],
+        mDActInput: Optional[cute.Tensor],
+        mWorkspace: Optional[cute.Tensor],
+        stream: CUstream,
+    ):
+        """
+        Compiled kernel entrypoint (decorate with @cute.jit).
+        All MXFP8 quantize kernels must implement this interface because this is our C++ call site's contract in `quantize_mxfp8_cutedsl.cuh`.
+        C++ call site will pass the arguments in this exact order via tvm-ffi and the kernel must accept them even if they are not used.
+        """
+
+
+class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
     """The MXFP8 quantization kernel that mirrors the standard (non-specialized) MXFP8 CUDA C++ quantization kernel
     with multiple fusions (activation, dbias, etc.).
     `__call__` method is the entrypoint which is AOT compiled. `self` will be captured so it's fixed per compiled kernel
@@ -730,20 +764,29 @@ class MXFP8QuantizeKernel:
     _WAVES = MXFP8_BLOCK_SCALING_SIZE // _PACK_SIZE
     _TOTAL_BANKS_WIDTH = (32 * 4) // 1  # 32 banks × 4 bytes, in bytes (uint8 stride)
     _THREADS_PER_BANK = _TOTAL_BANKS_WIDTH // MXFP8_BLOCK_SCALING_SIZE  # 4 threads per bank
-    _NUM_STAGES = 2  # The pipeline depth is always 2
 
-    def __init__(self, cfg):
-        self.cfg = cfg
+    def __init__(
+        self,
+        cfg,
+        tuneable_cfgs = {
+            "_NUM_STAGES": 2,
+            "_NUM_TILES_STANDARD": 2,
+            "_NUM_TILES_DBIAS_ONLY": 4,
+            "_THREADS_PER_CTA_STANDARD": 64,
+            "_THREADS_PER_CTA_DBIAS_ONLY": 128
+        }
+    ):
+        super().__init__(cfg, tuneable_cfgs)
         # Cast + dbias with no activation gets the larger tile (CUDA CAST_DBIAS_ONLY).
         cast_dbias_only = cfg.WITH_DBIAS and not cfg.WITH_DACT and not cfg.WITH_ACT
         # Use a different tile size for dbias only config
         # No matter what tile size we use, each thread always handles a (1, MXFP8_BLOCK_SCALING_SIZE) chunk
         if cast_dbias_only:
-            self._NUM_TILES = 4  # Each CTA handles 4 tiles stacked vertically
-            self._THREADS_PER_CTA = 128
+            self._NUM_TILES = self._NUM_TILES_DBIAS_ONLY  # Each CTA handles 4 tiles stacked vertically
+            self._THREADS_PER_CTA = self._THREADS_PER_CTA_DBIAS_ONLY
         else:
-            self._NUM_TILES = 2  # Each CTA handles 2 tiles stacked vertically
-            self._THREADS_PER_CTA = 64
+            self._NUM_TILES = self._NUM_TILES_STANDARD  # Each CTA handles 2 tiles stacked vertically
+            self._THREADS_PER_CTA = self._THREADS_PER_CTA_STANDARD
         # Each thread handles a (1, MXFP8_BLOCK_SCALING_SIZE) chunk
         self._TILE_COLS = self._THREADS_PER_CTA
         self._TILE_ROWS = MXFP8_BLOCK_SCALING_SIZE
@@ -1537,21 +1580,26 @@ class MXFP8QuantizeKernel:
         )
 
 
-class MXFP8QuantizeSpecializedRowwiseKernel:
+class MXFP8QuantizeSpecializedRowwiseKernel(MXFP8QuantizeKernelBase):
     """Specialized cast-only ROWWISE-only MXFP8 kernel. Requires N % 128 == 0 (full vectorizable column chunks).
 
     Plain rowwise-only quantize. Each thread owns one 32-element MXFP8 chunk and
     uses vectorized global loads/stores (no TMA used)."""
 
-    _TILE_ROWS = 4
-    _TILE_COLS = 1024
-    _THREADS_PER_CTA = 128
-
-    def __init__(self, cfg):
-        self.cfg = cfg
-        # If True, then this kernel will first write each thread's scale byte to a shared memory buffer,
-        # then utilize vectorized store to flush the buffer to global memory.
-        self._STASH_SCALE_TO_SMEM = True  # Hardcode to true for now
+    def __init__(
+        self,
+        cfg,
+        tuneable_cfgs = {
+            "_TILE_ROWS": 4,
+            "_TILE_COLS": 1024,
+            # If True, then this kernel will first write each thread's scale byte to a shared
+            # memory buffer, then utilize vectorized store to flush the buffer to global memory.
+            "_STASH_SCALE_TO_SMEM": True,
+        }
+    ):
+        super().__init__(cfg, tuneable_cfgs)
+        # Invariant: one thread per 32-elt scale block.
+        self._THREADS_PER_CTA = self._TILE_ROWS * self._TILE_COLS // MXFP8_BLOCK_SCALING_SIZE
 
     @cute.jit
     def __call__(
@@ -1736,7 +1784,7 @@ class MXFP8QuantizeSpecializedRowwiseKernel:
                 )
 
 
-class MXFP8QuantizeSpecializedBidimensionalKernel:
+class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
     """Specialized cast-only rowwise+colwise MXFP8 kernel (swizzled TMA, one 32x32 tile per warp)."""
 
     _WARPS_PER_CTA = 2
@@ -1747,17 +1795,22 @@ class MXFP8QuantizeSpecializedBidimensionalKernel:
     # A CTA handles a tile consisted two 32x32 warp subtiles side-by-side at a time, each handled by a warp
     _TILE_ROWS = _WARP_ROWS
     _TILE_COLS = _WARP_COLS * _WARPS_PER_CTA
-    _NUM_STAGES = 2
-    _NUM_TILES_X = 4
-    _NUM_TILES_Y = 1
-    _NUM_TILES = _NUM_TILES_X * _NUM_TILES_Y
 
     # Rows and columns for the rowwise / columnwise scale factor tensor
     _SCALE_ROWS = _TILE_ROWS // MXFP8_BLOCK_SCALING_SIZE
     _SCALE_COLS = _TILE_COLS // MXFP8_BLOCK_SCALING_SIZE
 
-    def __init__(self, cfg):
-        self.cfg = cfg
+    def __init__(
+        self,
+        cfg,
+        tuneable_cfgs = {
+            "_NUM_TILES_X": 4,
+            "_NUM_TILES_Y": 1,
+            "_NUM_STAGES": 2,
+        }
+    ):
+        super().__init__(cfg, tuneable_cfgs)
+        self._NUM_TILES = self._NUM_TILES_X * self._NUM_TILES_Y
 
     @cute.jit
     def __call__(
