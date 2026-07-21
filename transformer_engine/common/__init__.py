@@ -15,7 +15,7 @@ import platform
 import subprocess
 import sys
 import sysconfig
-from typing import Optional, Tuple
+from typing import Iterable, Optional, Tuple
 
 
 @functools.lru_cache(maxsize=None)
@@ -299,57 +299,77 @@ def _load_cuda_library_from_python(lib_name: str, strict: bool = False):
     return path_found, ctypes_handles
 
 
+def _try_load_library_from_paths(file_name: str, paths: Iterable[str]) -> Optional[ctypes.CDLL]:
+    """Try loading a library from a sequence of filesystem paths."""
+    for path in paths:
+        libs = glob.glob(f"{path}/**/{file_name}*", recursive=True)
+        libs = [lib for lib in libs if "stub" not in lib]
+        libs.sort(reverse=True, key=os.path.basename)
+        if libs:
+            return ctypes.CDLL(libs[0], mode=ctypes.RTLD_GLOBAL)
+    return None
+
+
 @functools.lru_cache(maxsize=None)
-def _load_cuda_library_from_system(lib_name: str):
-    """
-    Attempts to load shared object file installed via system/cuda-toolkit.
-
-    `lib_name`: Name of library to load without extension or `lib` prefix.
-    """
-
-    # Where to look for the shared lib in decreasing order of preference.
-    paths = (
+def _try_load_cuda_library_from_envvars(lib_name: str) -> Optional[ctypes.CDLL]:
+    """Try loading a CUDA library from paths configured by environment variables."""
+    paths = [
         os.environ.get(f"{lib_name.upper()}_HOME"),
         os.environ.get(f"{lib_name.upper()}_PATH"),
         os.environ.get("CUDA_HOME"),
         os.environ.get("CUDA_PATH"),
-        "/usr/local/cuda",
+    ]
+    paths = [path for path in paths if path is not None]
+    return _try_load_library_from_paths(
+        f"lib{lib_name}{_get_sys_extension()}",
+        paths,
     )
 
-    for path in paths:
-        if path is None:
-            continue
-        libs = glob.glob(f"{path}/**/lib{lib_name}{_get_sys_extension()}*", recursive=True)
-        libs = [lib for lib in libs if "stub" not in lib]
-        libs.sort(reverse=True, key=os.path.basename)
-        if libs:
-            return True, ctypes.CDLL(libs[0], mode=ctypes.RTLD_GLOBAL)
 
-    # Search in LD_LIBRARY_PATH.
+@functools.lru_cache(maxsize=None)
+def _try_load_cuda_library_from_default_path(lib_name: str) -> Optional[ctypes.CDLL]:
+    """Try loading a CUDA library from the default toolkit installation path."""
+    return _try_load_library_from_paths(
+        f"lib{lib_name}{_get_sys_extension()}",
+        ["/usr/local/cuda"],
+    )
+
+
+def _try_load_library_from_dynamic_linker(file_name: str) -> Optional[ctypes.CDLL]:
+    """Try loading a library from paths known to the dynamic linker."""
     try:
-        _lib_handle = ctypes.CDLL(f"lib{lib_name}{_get_sys_extension()}", mode=ctypes.RTLD_GLOBAL)
-        return True, _lib_handle
+        return ctypes.CDLL(file_name, mode=ctypes.RTLD_GLOBAL)
     except OSError:
-        return False, None
+        return None
 
 
 @functools.lru_cache(maxsize=None)
 def _load_cuda_library(lib_name: str):
     """
     Load given shared library.
-    Prioritize loading from system/toolkit
-    before checking python packages.
+    Prioritize explicit system paths, then python packages, then system defaults.
     """
 
-    # Attempt to locate library in system.
-    found, handle = _load_cuda_library_from_system(lib_name)
-    if found:
+    file_name = f"lib{lib_name}{_get_sys_extension()}"
+
+    # Attempt to locate library in explicitly configured system paths.
+    handle = _try_load_cuda_library_from_envvars(lib_name)
+    if handle is not None:
         return True, handle
 
     # Attempt to locate library in Python dist-packages.
     found, handle = _load_cuda_library_from_python(lib_name)
     if found:
         return False, handle
+
+    # Fall back to the default system installation and dynamic linker paths.
+    handle = _try_load_cuda_library_from_default_path(lib_name)
+    if handle is not None:
+        return True, handle
+
+    handle = _try_load_library_from_dynamic_linker(file_name)
+    if handle is not None:
+        return True, handle
 
     raise RuntimeError(f"{lib_name} shared object not found.")
 
