@@ -470,6 +470,15 @@ def test_distributed_hybrid(hybrid_recipe_name):
     torch.manual_seed(42)
     torch.cuda.manual_seed(42)
 
+    # Float8 block scaling requires every local FSDP shard's flattened M
+    # dimension to contain whole 128-row scale tiles. Keep the historical
+    # 512-wide model on up to four ranks, and scale it for larger worlds so
+    # the projection, fused-QKV, and MLP output dimensions all stay aligned.
+    shard_alignment = 128 * world_size
+    hidden_size = ((512 + shard_alignment - 1) // shard_alignment) * shard_alignment
+    ffn_hidden_size = 4 * hidden_size
+    assert hidden_size % shard_alignment == 0
+
     kwargs = dict(
         fuse_qkv_params=True,
         params_dtype=torch.bfloat16,
@@ -479,7 +488,7 @@ def test_distributed_hybrid(hybrid_recipe_name):
     )
     with te.quantized_model_init(enabled=True, recipe=hybrid_recipe):
         model = torch.nn.Sequential(
-            *[te.TransformerLayer(512, 2048, 8, **kwargs) for _ in range(2)]
+            *[te.TransformerLayer(hidden_size, ffn_hidden_size, 8, **kwargs) for _ in range(2)]
         )
 
     custom_attrs = save_custom_attrs(model)
@@ -505,8 +514,8 @@ def test_distributed_hybrid(hybrid_recipe_name):
 
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
-    input_data = torch.randn(128, 16, 512, device=device, dtype=torch.bfloat16)
-    target = torch.randn(128, 16, 512, device=device, dtype=torch.bfloat16)
+    input_data = torch.randn(128, 16, hidden_size, device=device, dtype=torch.bfloat16)
+    target = torch.randn(128, 16, hidden_size, device=device, dtype=torch.bfloat16)
 
     losses = []
     for iteration in range(3):
@@ -625,8 +634,11 @@ def test_distributed_hybrid_reshard_after_forward(hybrid_recipe_name):
     torch.manual_seed(42)
     torch.cuda.manual_seed(42)
 
-    in_features = 512
+    # Keep dim-0 FSDP shards aligned to Float8 block scaling's 128-row tiles.
+    shard_alignment = 128 * world_size
+    in_features = ((512 + shard_alignment - 1) // shard_alignment) * shard_alignment
     out_features = in_features * 3
+    assert in_features % shard_alignment == 0
     with te.quantized_model_init(enabled=True, recipe=hybrid_recipe):
         model = te.LayerNormLinear(
             in_features,

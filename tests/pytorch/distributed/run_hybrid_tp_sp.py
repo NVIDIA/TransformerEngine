@@ -871,7 +871,8 @@ def main(argv=None):
     parser.add_argument(
         "--test",
         type=str,
-        default="all",
+        nargs="+",
+        default=["all"],
         choices=[
             "all",
             "linear",
@@ -882,7 +883,7 @@ def main(argv=None):
             "layernorm_mlp",
             "transformer_layer",
         ],
-        help="Run only the named test (speeds up iterative debugging)",
+        help="Run one or more named tests in the same distributed process group",
     )
     args = parser.parse_args(argv)
     QUANTIZATION = args.quantization
@@ -896,10 +897,12 @@ def main(argv=None):
         "layernorm_mlp": test_layernorm_mlp,
         "transformer_layer": test_transformer_layer,
     }
-    if args.test == "all":
+    if "all" in args.test:
+        if len(args.test) != 1:
+            parser.error("--test all cannot be combined with named tests")
         tests_to_run = list(test_map.values())
     else:
-        tests_to_run = [test_map[args.test]]
+        tests_to_run = [test_map[name] for name in args.test]
 
     for test_fn in tests_to_run:
         dist_print(f"=== Starting {test_fn.__name__} ===")
