@@ -1004,7 +1004,13 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     "FC1 expected GroupedTensor weight with single_grouped_weight=True."
                 )
             if fc1_op.weight.quantizer is not None:
-                fc1_weight_quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
+                # Full-iteration CUDA graph replay does not rerun this Python metadata
+                # update. Remember that a grad-enabled forward requested columnwise
+                # storage so eager eval cannot drop buffers still used by captured dgrad.
+                fc1_weight_quantizer.set_usage(
+                    rowwise=True,
+                    columnwise=input_requires_grad or fc1_weight_quantizer.columnwise_usage,
+                )
                 fc1_op.weight.quantizer = fc1_weight_quantizer
                 grouped_fc1_weight = fc1_op.weight
             else:
@@ -1038,7 +1044,10 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     "FC2 expected GroupedTensor weight with single_grouped_weight=True."
                 )
             if fc2_op.weight.quantizer is not None:
-                fc2_weight_quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
+                fc2_weight_quantizer.set_usage(
+                    rowwise=True,
+                    columnwise=input_requires_grad or fc2_weight_quantizer.columnwise_usage,
+                )
                 fc2_op.weight.quantizer = fc2_weight_quantizer
                 grouped_fc2_weight = fc2_op.weight
             else:
