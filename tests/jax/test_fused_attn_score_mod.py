@@ -17,6 +17,7 @@ from transformer_engine.jax.attention import (
     QKVLayout,
 )
 from transformer_engine.jax.cpp_extensions import make_fused_attn_score_mod_config
+from transformer_engine.jax.cpp_extensions.attention import FusedAttnHelper
 from transformer_engine.jax.flax import transformer as flax_transformer
 from transformer_engine_jax import get_device_compute_capability, NVTE_Fused_Attn_Backend
 from test_fused_attn import FusedAttnRunner, SeqDescFormat
@@ -762,3 +763,102 @@ def test_fused_attn_score_mod_softcap_with_bprop():
     ScoreModFusedAttnRunner.require_cudnn_frontend()
     runner = ScoreModFusedAttnRunner.softcap(1, 16, 2, 64, jnp.float16)
     runner.test_backward()
+
+
+def _rejected_fused_attn_helper():
+    """A FusedAttnHelper config the backend always rejects (pre-scale bias).
+
+    pre-scale bias is rejected by a TE-side guard in nvte_get_fused_attn_backend_v2
+    before any cuDNN probe, so this is hardware- and cuDNN-version-independent.
+    """
+    return FusedAttnHelper(
+        is_training=True,
+        batch_size=1,
+        q_dtype=jnp.float16,
+        kv_dtype=jnp.float16,
+        qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
+        attn_bias_type=AttnBiasType.PRE_SCALE_BIAS,
+        attn_mask_type=AttnMaskType.NO_MASK,
+        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+        dropout_probability=0.0,
+        q_num_heads=2,
+        kv_num_heads=2,
+        q_max_seqlen=128,
+        kv_max_seqlen=128,
+        head_dim_qk=128,
+        head_dim_v=128,
+        window_size=(-1, -1),
+        bottom_right_diagonal=False,
+    )
+
+
+def test_fused_attn_backend_reject_message_bubbles_up(capsys):
+    """The C++ backend reject reason propagates to Python and reads sensibly.
+
+    Run with `-s` to eyeball the message:
+      pytest tests/jax/test_fused_attn_score_mod.py -s \
+        -k test_fused_attn_backend_reject_message_bubbles_up
+    """
+    helper = _rejected_fused_attn_helper()
+    backend, message = helper.get_fused_attn_backend()
+
+    with capsys.disabled():
+        print(f"\nbackend={backend!r}\nreject_message={message!r}\n")
+
+    assert backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend
+    assert message, "expected a non-empty diagnostic when the config is rejected"
+    assert "pre-scale bias" in message.lower()
+
+
+def _cudnn_rejected_fused_attn_helper():
+    """A FusedAttnHelper config rejected by the cuDNN is_supported_* probe (not a TE-side guard).
+
+    head_dim=129 is not a multiple of 8, which cuDNN's fused SDPA rejects on every architecture.
+    This config passes all TE-side guards, so the diagnostic originates from the cuDNN graph-build
+    exception surfaced via is_supported_f16_fwd(). The exact wording is cuDNN-version dependent.
+    """
+    return FusedAttnHelper(
+        is_training=True,
+        batch_size=1,
+        q_dtype=jnp.float16,
+        kv_dtype=jnp.float16,
+        qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
+        attn_bias_type=AttnBiasType.NO_BIAS,
+        attn_mask_type=AttnMaskType.NO_MASK,
+        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+        dropout_probability=0.0,
+        q_num_heads=2,
+        kv_num_heads=2,
+        q_max_seqlen=128,
+        kv_max_seqlen=128,
+        head_dim_qk=129,
+        head_dim_v=129,
+        window_size=(-1, -1),
+        bottom_right_diagonal=False,
+    )
+
+
+@pytest.mark.skipif(
+    get_device_compute_capability(0) < 80,
+    reason="cuDNN fused attention (and its reject path) requires sm80+",
+)
+def test_fused_attn_backend_cudnn_reject_message_bubbles_up(capsys):
+    """A cuDNN-level rejection (is_supported_* probe) propagates to Python and reads sensibly.
+
+    Unlike the pre-scale-bias test, this exercises the cuDNN graph-build failure path rather than a
+    TE-side guard, so the message text is arch/cuDNN-version dependent and only loosely asserted.
+
+    Run with `-s` to eyeball the message:
+      pytest tests/jax/test_fused_attn_score_mod.py -s \
+        -k test_fused_attn_backend_cudnn_reject_message_bubbles_up
+    """
+    helper = _cudnn_rejected_fused_attn_helper()
+    backend, message = helper.get_fused_attn_backend()
+
+    with capsys.disabled():
+        print(f"\nbackend={backend!r}\nreject_message={message!r}\n")
+
+    assert backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend
+    assert message, "expected a non-empty diagnostic when the config is rejected"
+    # Not a TE-side guard message -- confirms the reason came from the cuDNN probe path.
+    assert "pre-scale bias" not in message.lower()

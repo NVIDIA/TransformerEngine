@@ -831,7 +831,9 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             bias_seqlen_q=bias_seqlen_q,
             bias_seqlen_kv=bias_seqlen_kv,
         )
-        fused_attn_backend, fused_attn_reject_reason = fused_attn_helper.get_fused_attn_backend()
+        # get_fused_attn_backend() logs the rejection reason under NVTE_DEBUG, so the
+        # warning below only reports the (unique) configuration and points there for details.
+        fused_attn_backend, _ = fused_attn_helper.get_fused_attn_backend()
         has_fused_attn_kernel = fused_attn_backend != NVTE_Fused_Attn_Backend.NVTE_No_Backend
         if score_mod_requested and not has_fused_attn_kernel:
             raise ValueError(
@@ -841,7 +843,6 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         use_fused_attn = enable_fused_attn and has_fused_attn_kernel
 
         if enable_fused_attn and not has_fused_attn_kernel:
-            reason = fused_attn_reject_reason or "(no diagnostic message available)"
             warnings.warn(
                 "Falling back to the unfused attention backend as fused attention does not"
                 f" support this config. Reason: {reason}\n"

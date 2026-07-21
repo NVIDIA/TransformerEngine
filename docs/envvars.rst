@@ -403,13 +403,13 @@ Debugging and Profiling
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
-   :Description: Enable debug mode. When set to ``1``, enables verbose debug output and additional checks in attention operations.
+   :Description: Enable debug mode. When set to ``1``, enables verbose debug output and additional checks in attention operations. Acts as the master switch for the attention backend-selection diagnostics gated by :envvar:`NVTE_DEBUG_LEVEL` (applies to both the PyTorch and JAX fused-attention backends).
 
 .. envvar:: NVTE_DEBUG_LEVEL
 
    :Type: ``int`` (0, 1, or 2)
    :Default: ``0``
-   :Description: Debug verbosity level. Higher values enable more verbose debug output. Only effective when :envvar:`NVTE_DEBUG` is set to ``1``.
+   :Description: Debug verbosity level. Higher values enable more verbose debug output. Only effective when :envvar:`NVTE_DEBUG` is set to ``1``. For fused attention, ``1`` logs the outcome (the selected backend, or that none is available) and ``2`` additionally logs the resolved config and the reason fused attention was rejected. This matches the PyTorch attention logging (level 1 = outcome, level 2 = why).
 
 .. envvar:: NVTE_PRINT_LAYER_NUMBER
 

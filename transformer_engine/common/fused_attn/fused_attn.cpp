@@ -234,6 +234,7 @@ thread_local std::string fused_attn_backend_message_buffer;
 
 // Stash `reason` in the thread-local buffer and, if the caller asked for a diagnostic,
 // publish a NUL-terminated pointer to it via `*message`. Safe to call with `message == nullptr`.
+// NOTE: this overwrites (does not append to) the buffer, so only the last-set reason survives.
 void set_message(const char **message, std::string reason) {
   fused_attn_backend_message_buffer = std::move(reason);
   if (message != nullptr) {
@@ -244,6 +245,13 @@ void set_message(const char **message, std::string reason) {
 }  // namespace
 
 // select a backend for fused attention
+//
+// Diagnostic (`message`) semantics: FIRST-FAILURE, not accumulative. The checks below are a
+// linear chain of `if (bad) { set_message(...); return NVTE_No_Backend; }` guards, so on
+// rejection `message` holds only the first failing reason; later guards never run. Likewise the
+// fwd probe short-circuits the bwd probe, and the cuDNN-side is_supported_* probes themselves
+// report only the first exception they hit. If a config violates several constraints at once,
+// callers see just one of them (fix it and re-run to surface the next).
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig config,
                                                        const char **message) {
   using namespace transformer_engine;

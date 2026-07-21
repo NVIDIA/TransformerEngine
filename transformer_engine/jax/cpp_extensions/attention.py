@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for attention"""
+import logging
 import operator
 import os
 import warnings
@@ -60,6 +61,42 @@ __all__ = [
     "fused_attn_fwd",
     "fused_attn_bwd",
 ]
+
+
+# NVTE_DEBUG = 0/1 # disables/enables debug mode, default = 0
+_NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
+# NVTE_DEBUG_LEVEL = 0/1/2 # enables increasingly verbose debug messages, default = 0
+_NVTE_DEBUG_LEVEL = int(os.getenv("NVTE_DEBUG_LEVEL", "0"))
+
+
+class AttentionLogging:
+    """Manage logging for the JAX attention module.
+
+    Mirrors the PyTorch attention logging so that ``NVTE_DEBUG=1`` combined with
+    ``NVTE_DEBUG_LEVEL=1/2`` surfaces fused-attention backend-selection diagnostics
+    (e.g. why a configuration was rejected by cuDNN).
+    """
+
+    _log_level = _NVTE_DEBUG * _NVTE_DEBUG_LEVEL
+    _formatter = logging.Formatter("[%(levelname)-8s | %(name)-19s]: %(message)s")
+    _stream_handler = logging.StreamHandler()
+    fa_logger = logging.getLogger(__name__)
+    _is_logging_setup = False
+
+    @staticmethod
+    def setup_logging():
+        """Set up log levels, logger and handlers (idempotent)."""
+        if AttentionLogging._is_logging_setup:
+            return
+        _log_levels = {0: logging.WARNING, 1: logging.INFO, 2: logging.DEBUG}
+        AttentionLogging._log_level = _log_levels[
+            AttentionLogging._log_level if AttentionLogging._log_level in [0, 1, 2] else 2
+        ]
+        AttentionLogging._stream_handler.setFormatter(AttentionLogging._formatter)
+        AttentionLogging.fa_logger.setLevel(AttentionLogging._log_level)
+        if not AttentionLogging.fa_logger.hasHandlers():
+            AttentionLogging.fa_logger.addHandler(AttentionLogging._stream_handler)
+        AttentionLogging._is_logging_setup = True
 
 
 @partial(
@@ -145,6 +182,11 @@ class FusedAttnHelper:
 
         Returns a ``(backend, message)`` tuple. ``message`` is empty on success, otherwise a
         diagnostic string explaining why the configuration was rejected.
+
+        When ``NVTE_DEBUG=1``, ``NVTE_DEBUG_LEVEL=1`` logs the outcome (the selected backend, or
+        that no fused backend is available), and ``NVTE_DEBUG_LEVEL=2`` additionally logs the
+        resolved config and the reason fused attention was rejected. This mirrors the PyTorch
+        attention logging (level 1 = outcome, level 2 = why).
         """
         q_type = jax_dtype_to_te_dtype(self.q_dtype)
         bias_batch = bias_heads = bias_seqlen_q = bias_seqlen_kv = 0
@@ -153,7 +195,7 @@ class FusedAttnHelper:
             bias_heads = self.bias_heads
             bias_seqlen_q = self.bias_seqlen_q
             bias_seqlen_kv = self.bias_seqlen_kv
-        return transformer_engine_jax.get_fused_attn_backend(
+        backend, message = transformer_engine_jax.get_fused_attn_backend(
             self.is_training,
             self.batch_size,
             q_type,
@@ -188,6 +230,24 @@ class FusedAttnHelper:
             bias_seqlen_q,
             bias_seqlen_kv,
         )
+
+        # Mirror the PyTorch attention logging semantics:
+        #   level 1 (INFO)  -> the outcome (which backend was selected, or that none was)
+        #   level 2 (DEBUG) -> the "why": the resolved config and the rejection reason
+        AttentionLogging.setup_logging()
+        logger = AttentionLogging.fa_logger
+        logger.debug("Running fused attention backend selection with config=%s", self)
+        if backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
+            logger.info("No fused attention backend available; falling back to unfused attention.")
+            logger.debug(
+                "Reason fused attention was rejected: %s",
+                message or "(no diagnostic message available)",
+            )
+        else:
+            logger.info("Selected fused attention backend: %s", backend)
+            if message:
+                logger.debug("Fused attention backend diagnostic message: %s", message)
+        return backend, message
 
     @staticmethod
     def is_non_deterministic_allowed():
