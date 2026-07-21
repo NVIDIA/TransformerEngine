@@ -19,7 +19,6 @@ Launch via tests/jax/multi_process_launch_ep.sh (one process per GPU).
 """
 
 import os
-import re
 import sys
 import unittest
 
