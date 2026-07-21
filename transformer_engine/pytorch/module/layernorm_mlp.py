@@ -46,7 +46,6 @@ from ..utils import (
     cast_if_needed,
     assert_dim_for_fp8_exec,
     clear_tensor_data,
-    get_device_compute_capability,
     requires_grad,
     needs_quantized_gemm,
     get_nvtx_range_context,
@@ -2724,35 +2723,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
         fc2_weight_quantizer = self.quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM2_WEIGHT]
         fc2_weight_quantizer.internal = True
         return [fc1_weight_quantizer, fc2_weight_quantizer]
-
-    def _configure_weight_quantizer_optimize_for_gemm(
-        self,
-        quantizer: Quantizer,
-        weight: torch.Tensor,
-    ) -> None:
-        """Configure preswizzling for the single-tensor weight quantize kernel."""
-        if self.primary_weights_in_fp8:
-            quantizer.optimize_for_gemm = False
-            return
-        if not isinstance(quantizer, NVFP4Quantizer):
-            quantizer.optimize_for_gemm = True
-            return
-
-        rows, cols = weight.numel() // weight.shape[-1], weight.shape[-1]
-        capability = get_device_compute_capability()
-        arch_supported = (10, 0) <= capability <= (11, 0)
-        if quantizer.with_rht:
-            enabled = arch_supported and rows % 64 == 0 and cols % 128 == 0
-        else:
-            enabled = (
-                arch_supported
-                and quantizer.with_2d_quantization
-                and not quantizer.row_scaled_nvfp4
-                and not quantizer.nvfp4_use_4over6
-                and rows % 128 == 0
-                and cols % 128 == 0
-            )
-        quantizer.optimize_for_gemm = enabled
 
     def backward_dw(self):
         """

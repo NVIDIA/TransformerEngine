@@ -58,6 +58,7 @@ from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from ..utils import (
     is_non_tn_fp8_gemm_supported,
     torch_get_autocast_gpu_dtype,
+    get_device_compute_capability,
     get_nvtx_range_context,
     nvtx_range_push,
     nvtx_range_pop,
@@ -1206,6 +1207,45 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         raise NotImplementedError(
             f"{self.__class__.__name__} class does not implement _get_weight_quantizers function"
         )
+
+    def _configure_weight_quantizer_optimize_for_gemm(
+        self,
+        quantizer: Quantizer,
+        weight: torch.Tensor,
+    ) -> None:
+        """Configure preswizzling for the single-tensor weight quantize kernel.
+
+        When ``optimize_for_gemm`` is enabled, scale-factor swizzling is fused into
+        weight quantization instead of being done lazily inside every GEMM.
+        This is disabled when primary weights are already quantized (dequant and
+        FSDP2 all-gather expect the unswizzled layout). For NVFP4, it is only
+        enabled for shapes/architectures where the fused swizzle+quantize kernel
+        is supported. Weight quantization always uses the single-tensor kernel
+        (including GroupedLinear's cached weights), so NVFP4 RHT eligibility uses
+        that kernel's 64-row alignment.
+        """
+        if self.primary_weights_in_fp8:
+            quantizer.optimize_for_gemm = False
+            return
+        if not isinstance(quantizer, NVFP4Quantizer):
+            quantizer.optimize_for_gemm = True
+            return
+
+        rows, cols = weight.numel() // weight.shape[-1], weight.shape[-1]
+        capability = get_device_compute_capability()
+        arch_supported = (10, 0) <= capability <= (11, 0)
+        if quantizer.with_rht:
+            enabled = arch_supported and rows % 64 == 0 and cols % 128 == 0
+        else:
+            enabled = (
+                arch_supported
+                and quantizer.with_2d_quantization
+                and not quantizer.row_scaled_nvfp4
+                and not quantizer.nvfp4_use_4over6
+                and rows % 128 == 0
+                and cols % 128 == 0
+            )
+        quantizer.optimize_for_gemm = enabled
 
     def init_fp8_meta_tensors(self, recipe: Recipe) -> None:
         """Init scales and amaxes."""

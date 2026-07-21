@@ -37,7 +37,6 @@ from ..utils import (
     cast_if_needed,
     clear_tensor_data,
     divide,
-    get_device_compute_capability,
     get_default_init_method,
     init_method_constant,
     nvtx_range_pop,
@@ -73,7 +72,6 @@ from ..quantized_tensor import (
     prepare_for_saving,
     restore_from_func_ctx,
 )
-from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ...debug.pytorch.debug_state import TEDebugState
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..cpu_offload import (
@@ -1974,32 +1972,3 @@ class LayerNormLinear(TransformerEngineBaseModule):
         weight_quantizer = self.quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM1_WEIGHT]
         weight_quantizer.internal = True
         return [weight_quantizer]
-
-    def _configure_weight_quantizer_optimize_for_gemm(
-        self,
-        quantizer: Quantizer,
-        weight: torch.Tensor,
-    ) -> None:
-        """Configure preswizzling for the single-tensor weight quantize kernel."""
-        if self.primary_weights_in_fp8:
-            quantizer.optimize_for_gemm = False
-            return
-        if not isinstance(quantizer, NVFP4Quantizer):
-            quantizer.optimize_for_gemm = True
-            return
-
-        rows, cols = weight.numel() // weight.shape[-1], weight.shape[-1]
-        capability = get_device_compute_capability()
-        arch_supported = (10, 0) <= capability <= (11, 0)
-        if quantizer.with_rht:
-            enabled = arch_supported and rows % 64 == 0 and cols % 128 == 0
-        else:
-            enabled = (
-                arch_supported
-                and quantizer.with_2d_quantization
-                and not quantizer.row_scaled_nvfp4
-                and not quantizer.nvfp4_use_4over6
-                and rows % 128 == 0
-                and cols % 128 == 0
-            )
-        quantizer.optimize_for_gemm = enabled
