@@ -2210,9 +2210,13 @@ def test_grouped_linear_returns_single_grouped_bias_parameter(monkeypatch):
     # bias[expert(t), j] * probs[t] to the summed loss. Therefore every bias feature for
     # expert e receives sum(probs[t]) over that expert's token range. m_splits places the
     # first 256 tokens on expert 0 and the remaining 256 tokens on expert 1.
-    expected_dbias = torch.stack(
-        (probs[:256].sum(), probs[256:].sum()),
-    ).unsqueeze(-1).expand(num_gemms, out_features)
+    expected_dbias = (
+        torch.stack(
+            (probs[:256].sum(), probs[256:].sum()),
+        )
+        .unsqueeze(-1)
+        .expand(num_gemms, out_features)
+    )
     torch.testing.assert_close(grouped_linear.bias.grad.float(), expected_dbias.float())
 
 
