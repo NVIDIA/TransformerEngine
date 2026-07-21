@@ -12,10 +12,6 @@ if (CMAKE_BUILD_TYPE STREQUAL "Debug")
   set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -g -G")
 endif()
 
-# Hide non-necessary symbols in shared object.
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version")
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version")
-
 # Transformer Engine library
 project(transformer_engine LANGUAGES CUDA CXX)
 
@@ -333,6 +329,14 @@ foreach(cuda_source IN LISTS transformer_engine_cuda_arch_specific_sources)
 endforeach()
 
 add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
+
+# This is TE-specific and should not apply to all targets
+target_link_options(
+  transformer_engine
+  PRIVATE
+  "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version"
+)
+
 # Disable CMake's automatic architecture flag injection.
 # All architectures are handled explicitly via per-source COMPILE_OPTIONS
 # using NVTE_STANDARD_ARCHS, NVTE_GENERIC_ARCHS, and NVTE_SPECIFIC_ARCHS above.
