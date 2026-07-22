@@ -1038,12 +1038,14 @@ class TestGroupedMLPFusedOp:
             and te.ops.fused.act_grouped_linear_fusion_supported(fc2, module[1], recipe)
             and te.ops.fused.act_grouped_linear_fusion_supported(fc1, module[1], recipe)
         )
-        assert any(
-            isinstance(op, ForwardScaledActivationGroupedLinear) for op, _ in forward_ops
-        ) == act_grouped_linear_fusion_expected
-        assert any(
-            isinstance(op, BackwardGroupedLinearScaledActivation) for op, _ in backward_ops
-        ) == act_grouped_linear_fusion_expected
+        assert (
+            any(isinstance(op, ForwardScaledActivationGroupedLinear) for op, _ in forward_ops)
+            == act_grouped_linear_fusion_expected
+        )
+        assert (
+            any(isinstance(op, BackwardGroupedLinearScaledActivation) for op, _ in backward_ops)
+            == act_grouped_linear_fusion_expected
+        )
 
         # Loose tols for sanity checking
         tols = {"rtol": 0.125, "atol": 0.25}

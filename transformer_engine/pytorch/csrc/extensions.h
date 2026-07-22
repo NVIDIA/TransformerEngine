@@ -327,8 +327,7 @@ py::tuple grouped_scaled_clamped_dswiglu(const at::Tensor &grad, const at::Tenso
 py::tuple grouped_scaled_dsrelu(const at::Tensor &grad, const at::Tensor &input,
                                 const at::Tensor &act_scales, py::handle quantizer,
                                 const size_t num_tensors, std::optional<at::Tensor> first_dims,
-                                std::optional<at::Tensor> tensor_offsets,
-                                bool compute_scale_grad);
+                                std::optional<at::Tensor> tensor_offsets, bool compute_scale_grad);
 /***************************************************************************************************
  * LayerNorm
  **************************************************************************************************/

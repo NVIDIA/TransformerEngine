@@ -1292,10 +1292,7 @@ class GroupedLinear(BasicOperation):
         if grouped_input is not None:
             total_tokens, in_features = grouped_input.logical_shape
             expected_quantizer = input_quantizers[0] if with_quantized_compute else None
-            if (
-                grouped_input.quantizer is not expected_quantizer
-                or in_features != self.in_features
-            ):
+            if grouped_input.quantizer is not expected_quantizer or in_features != self.in_features:
                 raise ValueError(
                     "GroupedLinear received an incompatible grouped input "
                     f"(quantizer={grouped_input.quantizer}, "
@@ -1661,7 +1658,6 @@ class GroupedLinear(BasicOperation):
         else:
             ws, saved_tensors = saved_tensors[:num_groups], saved_tensors[num_groups:]
 
-
         # Keep the dense high-precision grad for bias-gradient computation while
         # optionally using a pre-quantized grouped view for the grouped GEMMs.
         dy_2d = grad_output.reshape(-1, self.out_features)
@@ -1673,14 +1669,10 @@ class GroupedLinear(BasicOperation):
         # Optionally get dbias if fusion is available with bgrad_group_quantize.
         dbias_packed = None
         if grouped_grad_output is not None:
-            expected_quantizer = (
-                ctx.grad_output_quantizers[0] if with_quantized_compute else None
-            )
-            if (
-                grouped_grad_output.quantizer is not expected_quantizer
-                or tuple(grouped_grad_output.logical_shape)
-                != (total_tokens, self.out_features)
-            ):
+            expected_quantizer = ctx.grad_output_quantizers[0] if with_quantized_compute else None
+            if grouped_grad_output.quantizer is not expected_quantizer or tuple(
+                grouped_grad_output.logical_shape
+            ) != (total_tokens, self.out_features):
                 raise ValueError(
                     "GroupedLinear received an incompatible grouped grad_output "
                     f"(quantizer={grouped_grad_output.quantizer}, "

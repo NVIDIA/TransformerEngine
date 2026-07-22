@@ -61,9 +61,7 @@ def _grouped_scaled_activation(
             clamped.glu_linear_offset,
             int(activation.glu_interleave_size or 0),
         )
-    return tex.grouped_scaled_srelu(
-        x, s, quantizer, num_groups, split_sizes, tensor_offsets
-    )
+    return tex.grouped_scaled_srelu(x, s, quantizer, num_groups, split_sizes, tensor_offsets)
 
 
 def _grouped_scaled_dactivation(
@@ -196,8 +194,7 @@ class ForwardScaledActivationGroupedLinear(FusedOperation):
         )
 
         input_quantizers = [
-            linear.get_quantizer("forward", 2 * group_idx)
-            for group_idx in range(linear.num_groups)
+            linear.get_quantizer("forward", 2 * group_idx) for group_idx in range(linear.num_groups)
         ]
         weight_quantizers = [
             linear.get_quantizer("forward", 2 * group_idx + 1)

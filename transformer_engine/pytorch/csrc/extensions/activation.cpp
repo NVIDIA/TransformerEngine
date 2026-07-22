@@ -362,14 +362,13 @@ py::object grouped_scaled_activation_helper(const at::Tensor& input, const at::T
   const TensorWrapper& input_nvte = makeTransformerEngineTensor(input_tensor);
   const TensorWrapper& scales_nvte = makeTransformerEngineTensor(scales_tensor);
 
-  auto output =
-      at::empty({input.size(0), input.size(1) / shape_divisor}, input_tensor.options());
+  auto output = at::empty({input.size(0), input.size(1) / shape_divisor}, input_tensor.options());
   const TensorWrapper& output_nvte = makeTransformerEngineTensor(output);
 
   auto stream = at::cuda::getCurrentCUDAStream();
   NVTE_SCOPED_GIL_RELEASE({
-    act_func(input_nvte.data(), scales_nvte.data(), output_nvte.data(),
-             std::forward<Args>(args)..., stream);
+    act_func(input_nvte.data(), scales_nvte.data(), output_nvte.data(), std::forward<Args>(args)...,
+             stream);
   });
 
   if (quantizer.is_none()) {
@@ -419,9 +418,8 @@ py::tuple grouped_scaled_dactivation_helper(const at::Tensor& grad, const at::Te
   // it (e.g. bias gradient) without a lossy dequantize.
   py::object grad_input_out = py::cast(grad_input);
   if (!quantizer.is_none()) {
-    grad_input_out =
-        group_quantize(grad_input, quantizer, num_tensors, first_dims, std::nullopt, tensor_offsets,
-                       std::nullopt);
+    grad_input_out = group_quantize(grad_input, quantizer, num_tensors, first_dims, std::nullopt,
+                                    tensor_offsets, std::nullopt);
   }
   return py::make_tuple(grad_input_out, py::cast(grad_input),
                         compute_scale_grad ? py::cast(grad_scales) : py::none());
@@ -482,11 +480,10 @@ py::tuple grouped_scaled_clamped_dswiglu(const at::Tensor& grad, const at::Tenso
 py::tuple grouped_scaled_dsrelu(const at::Tensor& grad, const at::Tensor& input,
                                 const at::Tensor& act_scales, py::handle quantizer,
                                 const size_t num_tensors, std::optional<at::Tensor> first_dims,
-                                std::optional<at::Tensor> tensor_offsets,
-                                bool compute_scale_grad) {
-  return grouped_scaled_dactivation_helper<nvte_scaled_dsrelu>(
-      grad, input, act_scales, quantizer, num_tensors, first_dims, tensor_offsets,
-      compute_scale_grad);
+                                std::optional<at::Tensor> tensor_offsets, bool compute_scale_grad) {
+  return grouped_scaled_dactivation_helper<nvte_scaled_dsrelu>(grad, input, act_scales, quantizer,
+                                                               num_tensors, first_dims,
+                                                               tensor_offsets, compute_scale_grad);
 }
 
 }  // namespace pytorch
