@@ -450,8 +450,8 @@ def _get_grouped_gemm_setup_workspace(device: int, num_tensors: int) -> torch.Te
 def _get_grouped_cublas_workspace(device: int, layout: str) -> torch.Tensor:
     """Persistent cuBLAS workspace for the grouped-tensor GEMM path, one per GEMM layout.
 
-    Grouped cuBlasLt GEMM kernels in cuBLAS versions <= 13.7 leave behind stale descriptors in the 
-    workspace that cause back-to-back GEMM kernels to crash/deadlock on 2nd CUDA-graph replay. As a 
+    Grouped cuBlasLt GEMM kernels in cuBLAS versions <= 13.7 leave behind stale descriptors in the
+    workspace that cause back-to-back GEMM kernels to crash/deadlock on 2nd CUDA-graph replay. As a
     workaround, we allocate a different workspace for each GEMM layout (TN, NN, NT) to avoid
     contamination between subsequent GEMM calls (when there is no other graph node between GEMM
     kernels).
