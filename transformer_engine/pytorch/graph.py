@@ -36,6 +36,12 @@ _IS_GRAPH_CAPTURING = False
 
 _T = TypeVar("_T")
 SingleOrTuple = Union[_T, Tuple[_T, ...]]
+_CAPTURE_TIME_HOOK_NAMES = (
+    "forward_pre_hooks",
+    "forward_hooks",
+    "backward_pre_hooks",
+    "backward_hooks",
+)
 
 
 def set_capture_start() -> None:
@@ -96,9 +102,50 @@ def _graph_context_wrapper(*args, **kwargs):
         gc.enable()
 
 
+def _canonicalize_capture_time_hooks(
+    num_callables: int,
+    capture_time_hooks: Optional[List[Optional[Dict[str, Dict]]]],
+) -> List[Dict[str, Dict]]:
+    """Fill defaults in capture_time_hooks."""
+    if capture_time_hooks is None:
+        capture_time_hooks = [None] * num_callables
+    if len(capture_time_hooks) != num_callables:
+        raise ValueError(
+            f"capture_time_hooks has {len(capture_time_hooks)} entries, "
+            f"but there are {num_callables} callables."
+        )
+
+    canonicalized = []
+    for callable_idx in range(num_callables):
+        hooks = capture_time_hooks[callable_idx]
+        if hooks is None:
+            hooks = {}
+        unexpected_keys = set(hooks.keys()) - set(_CAPTURE_TIME_HOOK_NAMES)
+        if unexpected_keys:
+            raise ValueError(f"Found unexpected keys in capture_time_hooks ({unexpected_keys}).")
+        canonicalized.append(
+            {hook_name: hooks.get(hook_name, {}) for hook_name in _CAPTURE_TIME_HOOK_NAMES}
+        )
+
+    return canonicalized
+
+
+def _run_capture_time_hooks(
+    capture_time_hooks: List[Dict[str, Dict]],
+    callable_idx: int,
+    hook_name: str,
+    module: torch.nn.Module,
+) -> None:
+    """Run non-capturable hooks outside CUDA graph capture."""
+    for hook in capture_time_hooks[callable_idx][hook_name].values():
+        if hook(module) is not None:
+            raise RuntimeError(f"capture_time_hooks {hook_name} must not return a value.")
+
+
 def _make_graphed_callables(
     callables: SingleOrTuple[Callable],
     sample_args: SingleOrTuple[Tuple[torch.Tensor, ...]],
+    *,
     num_warmup_iters: int = 3,
     allow_unused_input: bool = False,
     cache_quantized_params: bool = False,
@@ -110,7 +157,7 @@ def _make_graphed_callables(
     _reuse_graph_input_output_buffers: bool = False,
     pre_warmup_hook: Optional[Callable] = None,
     post_warmup_hook: Optional[Callable] = None,
-    capture_time_hooks: Optional[List[Optional[Dict[str, Dict]]]] = None,
+    capture_time_hooks: List[Dict[str, Dict]],
 ) -> SingleOrTuple[Callable]:
     """
     Helper method for `make_graphed_callables`
@@ -370,12 +417,6 @@ def _make_graphed_callables(
                 + "for each callable must contain only Tensors. Other types are not allowed."
             )
 
-    if capture_time_hooks is not None and len(capture_time_hooks) != len(callables):
-        raise ValueError(
-            f"capture_time_hooks has {len(capture_time_hooks)} entries but there are "
-            f"{len(callables)} callables"
-        )
-
     # If a callable is an nn.Module, its graph's full input surface is the args the user explicitly
     # passes to forward (ie, its sample_args) AND the module's parameter attributes.
     # Note: These per_callable_* variables are not actually
@@ -493,22 +534,7 @@ def _make_graphed_callables(
                 else:
                     visited_te_modules[func_idx].update(modules)
 
-        if capture_time_hooks is not None and capture_time_hooks[callable_idx] is not None:
-            _hooks = capture_time_hooks[callable_idx]
-            _pre_fwd_with_kwargs = _hooks.get("forward_pre_hooks_with_kwargs", {})
-            for hook_id, hook in _hooks.get("forward_pre_hooks", {}).items():
-                if hook_id in _pre_fwd_with_kwargs:
-                    if hook(func, args, kwargs) is not None:
-                        raise RuntimeError(
-                            "capture_time_hooks forward_pre_hooks must not return a value "
-                            "(args/kwargs must not be modified via hook return)"
-                        )
-                else:
-                    if hook(func, args) is not None:
-                        raise RuntimeError(
-                            "capture_time_hooks forward_pre_hooks must not return a value "
-                            "(args must not be modified via hook return)"
-                        )
+        _run_capture_time_hooks(capture_time_hooks, callable_idx, "forward_pre_hooks", func)
 
         hooks = []
         for module in func.modules():
@@ -517,22 +543,7 @@ def _make_graphed_callables(
         for hook in hooks:
             hook.remove()
 
-        if capture_time_hooks is not None and capture_time_hooks[callable_idx] is not None:
-            _hooks = capture_time_hooks[callable_idx]
-            _fwd_with_kwargs = _hooks.get("forward_hooks_with_kwargs", {})
-            for hook_id, hook in _hooks.get("forward_hooks", {}).items():
-                if hook_id in _fwd_with_kwargs:
-                    if hook(func, args, kwargs, outputs) is not None:
-                        raise RuntimeError(
-                            "capture_time_hooks forward_hooks must not return a value "
-                            "(output must not be modified via hook return)"
-                        )
-                else:
-                    if hook(func, args, outputs) is not None:
-                        raise RuntimeError(
-                            "capture_time_hooks forward_hooks must not return a value "
-                            "(output must not be modified via hook return)"
-                        )
+        _run_capture_time_hooks(capture_time_hooks, callable_idx, "forward_hooks", func)
 
         outputs, _ = _tree_flatten(outputs)
         return outputs
@@ -545,33 +556,13 @@ def _make_graphed_callables(
         outputs_requiring_grad = tuple(o for o in outputs if o is not None and o.requires_grad)
         grad_outputs = tuple(torch.empty_like(o) for o in outputs_requiring_grad)
 
-        if (
-            capture_time_hooks is not None
-            and capture_time_hooks[callable_idx] is not None
-            and "backward_pre_hooks" in capture_time_hooks[callable_idx]
-        ):
-            for hook in capture_time_hooks[callable_idx]["backward_pre_hooks"].values():
-                if hook(func, grad_outputs) is not None:
-                    raise RuntimeError(
-                        "capture_time_hooks backward_pre_hooks must not return a value "
-                        "(grad_output must not be modified via hook return)"
-                    )
+        _run_capture_time_hooks(capture_time_hooks, callable_idx, "backward_pre_hooks", func)
 
         with _none_grad_context_wrapper(inputs):
             torch.autograd.backward(outputs_requiring_grad, grad_tensors=grad_outputs)
             grad_inputs = tuple(input.grad for input in inputs)
 
-        if (
-            capture_time_hooks is not None
-            and capture_time_hooks[callable_idx] is not None
-            and "backward_hooks" in capture_time_hooks[callable_idx]
-        ):
-            for hook in capture_time_hooks[callable_idx]["backward_hooks"].values():
-                if hook(func, grad_inputs, grad_outputs) is not None:
-                    raise RuntimeError(
-                        "capture_time_hooks backward_hooks must not return a value "
-                        "(grad_input must not be modified via hook return)"
-                    )
+        _run_capture_time_hooks(capture_time_hooks, callable_idx, "backward_hooks", func)
 
         # Filter module params that get None grad from grad_inputs and remove them
         # from static_input_surface. This is to ensure that the backward hooks
@@ -702,50 +693,22 @@ def _make_graphed_callables(
                     kwargs = sample_kwargs[per_callable_fwd_idx]
                     fwd_graph = fwd_graphs[per_callable_fwd_idx]
 
-                    # Call pre_forward hooks before forward graph capture (outside capture context)
-                    if (
-                        capture_time_hooks is not None
-                        and capture_time_hooks[callable_idx] is not None
-                    ):
-                        _hooks = capture_time_hooks[callable_idx]
-                        _pre_fwd_with_kwargs = _hooks.get("forward_pre_hooks_with_kwargs", {})
-                        for hook_id, hook in _hooks.get("forward_pre_hooks", {}).items():
-                            if hook_id in _pre_fwd_with_kwargs:
-                                if hook(func, args, kwargs) is not None:
-                                    raise RuntimeError(
-                                        "capture_time_hooks forward_pre_hooks must not return a"
-                                        " value (args/kwargs must not be modified via hook return)"
-                                    )
-                            else:
-                                if hook(func, args) is not None:
-                                    raise RuntimeError(
-                                        "capture_time_hooks forward_pre_hooks must not return a"
-                                        " value (args must not be modified via hook return)"
-                                    )
+                    _run_capture_time_hooks(
+                        capture_time_hooks,
+                        callable_idx,
+                        "forward_pre_hooks",
+                        func,
+                    )
 
                     with _graph_context_wrapper(fwd_graph, pool=mempool):
                         outputs = func(*args, **kwargs)
 
-                    # Call forward hooks after forward graph capture (outside capture context)
-                    if (
-                        capture_time_hooks is not None
-                        and capture_time_hooks[callable_idx] is not None
-                    ):
-                        _hooks = capture_time_hooks[callable_idx]
-                        _fwd_with_kwargs = _hooks.get("forward_hooks_with_kwargs", {})
-                        for hook_id, hook in _hooks.get("forward_hooks", {}).items():
-                            if hook_id in _fwd_with_kwargs:
-                                if hook(func, args, kwargs, outputs) is not None:
-                                    raise RuntimeError(
-                                        "capture_time_hooks forward_hooks must not return a value "
-                                        "(output must not be modified via hook return)"
-                                    )
-                            else:
-                                if hook(func, args, outputs) is not None:
-                                    raise RuntimeError(
-                                        "capture_time_hooks forward_hooks must not return a value "
-                                        "(output must not be modified via hook return)"
-                                    )
+                    _run_capture_time_hooks(
+                        capture_time_hooks,
+                        callable_idx,
+                        "forward_hooks",
+                        func,
+                    )
 
                     flatten_outputs, spec = _tree_flatten(outputs)
                     per_callable_static_outputs[per_callable_fwd_idx] = tuple(flatten_outputs)
@@ -844,22 +807,12 @@ def _make_graphed_callables(
                             for o in static_outputs
                         )
                     if is_training:
-                        # Call pre_backward hooks before backward graph capture (outside capture context)
-                        if (
-                            capture_time_hooks is not None
-                            and capture_time_hooks[callable_idx] is not None
-                            and "backward_pre_hooks" in capture_time_hooks[callable_idx]
-                        ):
-                            # Get the callable module for this backward index
-                            callable_module = graph_callables[per_callable_bwd_idx]
-                            for hook in capture_time_hooks[callable_idx][
-                                "backward_pre_hooks"
-                            ].values():
-                                if hook(callable_module, static_grad_outputs) is not None:
-                                    raise RuntimeError(
-                                        "capture_time_hooks backward_pre_hooks must not return a"
-                                        " value (grad_output must not be modified via hook return)"
-                                    )
+                        _run_capture_time_hooks(
+                            capture_time_hooks,
+                            callable_idx,
+                            "backward_pre_hooks",
+                            callables[callable_idx],
+                        )
 
                         inputs = tuple(i for i in static_input_surface if i.requires_grad)
                         with _none_grad_context_wrapper(inputs), _graph_context_wrapper(
@@ -874,23 +827,12 @@ def _make_graphed_callables(
                             )
                             grad_inputs = tuple(input.grad for input in inputs)
 
-                        # Call backward hooks after backward graph capture (outside capture context)
-                        if (
-                            capture_time_hooks is not None
-                            and capture_time_hooks[callable_idx] is not None
-                            and "backward_hooks" in capture_time_hooks[callable_idx]
-                        ):
-                            # Get the callable module for this backward index
-                            callable_module = graph_callables[per_callable_bwd_idx]
-                            for hook in capture_time_hooks[callable_idx]["backward_hooks"].values():
-                                if (
-                                    hook(callable_module, grad_inputs, static_grad_outputs)
-                                    is not None
-                                ):
-                                    raise RuntimeError(
-                                        "capture_time_hooks backward_hooks must not return a value "
-                                        "(grad_input must not be modified via hook return)"
-                                    )
+                        _run_capture_time_hooks(
+                            capture_time_hooks,
+                            callable_idx,
+                            "backward_hooks",
+                            callables[callable_idx],
+                        )
 
                     # Constructs a tuple suitable for returning from Graphed.backward:
                     # Pads out the actually-needed grads with Nones in gradient slots for inputs
@@ -949,45 +891,13 @@ def _make_graphed_callables(
         for func_idx, (func, args, kwargs, fwd_graph) in enumerate(
             zip(callables, sample_args, sample_kwargs, fwd_graphs)
         ):
-            # Call pre_forward hooks before forward graph capture (outside capture context)
-            if capture_time_hooks is not None and capture_time_hooks[func_idx] is not None:
-                _hooks = capture_time_hooks[func_idx]
-                _pre_fwd_with_kwargs = _hooks.get("forward_pre_hooks_with_kwargs", {})
-                for hook_id, hook in _hooks.get("forward_pre_hooks", {}).items():
-                    if hook_id in _pre_fwd_with_kwargs:
-                        if hook(func, args, kwargs) is not None:
-                            raise RuntimeError(
-                                "capture_time_hooks forward_pre_hooks must not return a value "
-                                "(args/kwargs must not be modified via hook return)"
-                            )
-                    else:
-                        if hook(func, args) is not None:
-                            raise RuntimeError(
-                                "capture_time_hooks forward_pre_hooks must not return a value "
-                                "(args must not be modified via hook return)"
-                            )
+            _run_capture_time_hooks(capture_time_hooks, func_idx, "forward_pre_hooks", func)
 
             with _graph_context_wrapper(fwd_graph, pool=mempool):
                 outputs = func(*args, **kwargs)
             graph_callables[func_idx] = func
 
-            # Call forward hooks after forward graph capture (outside capture context)
-            if capture_time_hooks is not None and capture_time_hooks[func_idx] is not None:
-                _hooks = capture_time_hooks[func_idx]
-                _fwd_with_kwargs = _hooks.get("forward_hooks_with_kwargs", {})
-                for hook_id, hook in _hooks.get("forward_hooks", {}).items():
-                    if hook_id in _fwd_with_kwargs:
-                        if hook(func, args, kwargs, outputs) is not None:
-                            raise RuntimeError(
-                                "capture_time_hooks forward_hooks must not return a value "
-                                "(output must not be modified via hook return)"
-                            )
-                    else:
-                        if hook(func, args, outputs) is not None:
-                            raise RuntimeError(
-                                "capture_time_hooks forward_hooks must not return a value "
-                                "(output must not be modified via hook return)"
-                            )
+            _run_capture_time_hooks(capture_time_hooks, func_idx, "forward_hooks", func)
 
             flatten_outputs, spec = _tree_flatten(outputs)
             per_callable_static_outputs.append(tuple(flatten_outputs))
@@ -1003,25 +913,17 @@ def _make_graphed_callables(
             reversed(bwd_dw_graphs),
             reversed(range(len(per_callable_static_input_surfaces))),
         ):
-            # For now, assumes all static_outputs require grad
             static_grad_outputs = tuple(
                 torch.empty_like(o) if o is not None and o.requires_grad else None
                 for o in static_outputs
             )
             if is_training:
-                # Call pre_backward hooks before backward graph capture (outside capture context)
-                if (
-                    capture_time_hooks is not None
-                    and capture_time_hooks[bwd_idx] is not None
-                    and "backward_pre_hooks" in capture_time_hooks[bwd_idx]
-                ):
-                    callable_module = graph_callables[bwd_idx]
-                    for hook in capture_time_hooks[bwd_idx]["backward_pre_hooks"].values():
-                        if hook(callable_module, static_grad_outputs) is not None:
-                            raise RuntimeError(
-                                "capture_time_hooks backward_pre_hooks must not return a value "
-                                "(grad_output must not be modified via hook return)"
-                            )
+                _run_capture_time_hooks(
+                    capture_time_hooks,
+                    bwd_idx,
+                    "backward_pre_hooks",
+                    callables[bwd_idx],
+                )
 
                 inputs = tuple(i for i in static_input_surface if i.requires_grad)
                 with _none_grad_context_wrapper(inputs), _graph_context_wrapper(
@@ -1034,19 +936,12 @@ def _make_graphed_callables(
                     )
                     grad_inputs = tuple(input.grad for input in inputs)
 
-                # Call backward hooks after backward graph capture (outside capture context)
-                if (
-                    capture_time_hooks is not None
-                    and capture_time_hooks[bwd_idx] is not None
-                    and "backward_hooks" in capture_time_hooks[bwd_idx]
-                ):
-                    callable_module = graph_callables[bwd_idx]
-                    for hook in capture_time_hooks[bwd_idx]["backward_hooks"].values():
-                        if hook(callable_module, grad_inputs, static_grad_outputs) is not None:
-                            raise RuntimeError(
-                                "capture_time_hooks backward_hooks must not return a value "
-                                "(grad_input must not be modified via hook return)"
-                            )
+                _run_capture_time_hooks(
+                    capture_time_hooks,
+                    bwd_idx,
+                    "backward_hooks",
+                    callables[bwd_idx],
+                )
 
                 if need_bwd_dw_graph[bwd_idx]:
                     with _graph_context_wrapper(bwd_dw_graph, pool=mempool):
@@ -1458,27 +1353,13 @@ def make_graphed_callables(
                    capture context so they are **not** recorded into the graph and will
                    **not** be replayed. Use this for operations that are inherently
                    non-capturable but essential for correct module execution, such as
-                   CPU-side state updates. All the hooks must return None, meaning that
-                   modifying tensors is not supported. Any attempt to return a non-None
-                   value will raise ``RuntimeError``.
+                   CPU-side state updates. All hooks must have signature ``hook(module)``
+                   and must return ``None``. Any non-``None`` return value raises
+                   ``RuntimeError``.
                    Each element corresponds to one callable and is a dict with any subset
-                   of the following keys (names mirror PyTorch's ``nn.Module`` hook
-                   attributes):
-                   - ``"forward_pre_hooks"``: ``{hook_id: hook_fn}`` dict of *all* pre-forward
-                     hooks (both plain and with-kwargs). Plain signature: ``hook(module, args)``.
-                     With-kwargs signature: ``hook(module, args, kwargs)``.
-                   - ``"forward_pre_hooks_with_kwargs"``: ``{hook_id: True}`` flag set marking
-                     which entries in ``"forward_pre_hooks"`` should be called with kwargs.
-                   - ``"forward_hooks"``: ``{hook_id: hook_fn}`` dict of *all* post-forward
-                     hooks (both plain and with-kwargs). Plain signature:
-                     ``hook(module, args, output)``. With-kwargs signature:
-                     ``hook(module, args, kwargs, output)``.
-                   - ``"forward_hooks_with_kwargs"``: ``{hook_id: True}`` flag set marking
-                     which entries in ``"forward_hooks"`` should be called with kwargs.
-                   - ``"backward_pre_hooks"``: ``{hook_id: hook_fn}`` dict of hooks called
-                     *before* the backward pass. Signature: ``hook(module, grad_output)``.
-                   - ``"backward_hooks"``: ``{hook_id: hook_fn}`` dict of hooks called *after*
-                     the backward pass. Signature: ``hook(module, grad_input, grad_output)``.
+                   of these keys: ``"forward_pre_hooks"``, ``"forward_hooks"``,
+                   ``"backward_pre_hooks"``, and ``"backward_hooks"``. Each value is a
+                   ``{hook_id: hook_fn}`` dict.
 
     Quantization parameters
     -----------------------
@@ -1608,6 +1489,12 @@ def make_graphed_callables(
     elif not any(enabled):
         recipe = None
     module_uses_fp8 = dict(zip((id(m) for m in modules), enabled))
+
+    # Canonicalize capture_time_hooks kwarg.
+    capture_time_hooks = _canonicalize_capture_time_hooks(
+        len(modules),
+        capture_time_hooks,
+    )
 
     # Store FP8 tensors to reset later.
     saved_fp8_tensors = save_fp8_tensors(modules, recipe=recipe)
