@@ -4,8 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "../extensions.h"
 #include "../../../common/util/cuda_driver.h"
+#include "../extensions.h"
 
 #ifdef NVTE_ENABLE_NVSHMEM
 #include <nvshmem.h>
@@ -29,22 +29,21 @@ namespace {
 
 std::array<std::atomic<int64_t>, 4> cp_global_grad_return_epochs{};
 
-at::Tensor cp_grad_return_slot(const at::Tensor &buffer, const at::Tensor &reference,
-                               int cp_size, int writer_rank, const char *name) {
-  NVTE_CHECK(buffer.defined() && buffer.dim() == reference.dim() + 1,
-             name, " must have shape [CP, S, B, H, D].");
+at::Tensor cp_grad_return_slot(const at::Tensor &buffer, const at::Tensor &reference, int cp_size,
+                               int writer_rank, const char *name) {
+  NVTE_CHECK(buffer.defined() && buffer.dim() == reference.dim() + 1, name,
+             " must have shape [CP, S, B, H, D].");
   NVTE_CHECK(buffer.size(0) == cp_size, name, " leading dimension must equal CP size.");
   for (int dim = 0; dim < reference.dim(); ++dim) {
-    NVTE_CHECK(buffer.size(dim + 1) == reference.size(dim),
-               name, " trailing dimensions must match local K/V.");
+    NVTE_CHECK(buffer.size(dim + 1) == reference.size(dim), name,
+               " trailing dimensions must match local K/V.");
   }
   return buffer.select(0, writer_rank);
 }
 
 at::Tensor cp_epoch_slot(const at::Tensor &epochs, int writer_rank, const char *name) {
-  NVTE_CHECK(epochs.is_cuda() && epochs.scalar_type() == torch::kInt32 &&
-                 epochs.is_contiguous() && epochs.dim() == 1 &&
-                 epochs.size(0) > writer_rank,
+  NVTE_CHECK(epochs.is_cuda() && epochs.scalar_type() == torch::kInt32 && epochs.is_contiguous() &&
+                 epochs.dim() == 1 && epochs.size(0) > writer_rank,
              name, " must be a contiguous CUDA int32 vector indexed by writer rank.");
   return epochs.select(0, writer_rank);
 }
@@ -54,22 +53,21 @@ void cp_stream_write_epoch(const at::Tensor &epochs, int writer_rank, int64_t ep
              "CP gradient epoch must fit in int32.");
   at::Tensor slot = cp_epoch_slot(epochs, writer_rank, "peer_grad_committed_epoch");
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  NVTE_CHECK_CUDA_DRIVER(cuStreamWriteValue32(
-      reinterpret_cast<CUstream>(stream), reinterpret_cast<CUdeviceptr>(slot.data_ptr()),
-      static_cast<cuuint32_t>(epoch), 0));
+  NVTE_CHECK_CUDA_DRIVER(cuStreamWriteValue32(reinterpret_cast<CUstream>(stream),
+                                              reinterpret_cast<CUdeviceptr>(slot.data_ptr()),
+                                              static_cast<cuuint32_t>(epoch), 0));
 }
 
 void cp_stream_wait_epochs(const at::Tensor &epochs, int cp_size, int64_t epoch) {
-  NVTE_CHECK(epochs.is_cuda() && epochs.scalar_type() == torch::kInt32 &&
-                 epochs.is_contiguous() && epochs.dim() == 1 && epochs.size(0) == cp_size,
+  NVTE_CHECK(epochs.is_cuda() && epochs.scalar_type() == torch::kInt32 && epochs.is_contiguous() &&
+                 epochs.dim() == 1 && epochs.size(0) == cp_size,
              "grad_committed_epoch must be a contiguous CUDA int32 vector of CP size.");
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   const auto *base = epochs.data_ptr<int32_t>();
   for (int source = 0; source < cp_size; ++source) {
     NVTE_CHECK_CUDA_DRIVER(cuStreamWaitValue32(
-        reinterpret_cast<CUstream>(stream),
-        reinterpret_cast<CUdeviceptr>(base + source), static_cast<cuuint32_t>(epoch),
-        CU_STREAM_WAIT_VALUE_GEQ));
+        reinterpret_cast<CUstream>(stream), reinterpret_cast<CUdeviceptr>(base + source),
+        static_cast<cuuint32_t>(epoch), CU_STREAM_WAIT_VALUE_GEQ));
   }
 }
 
@@ -178,8 +176,7 @@ void nvshmem_send_on_current_stream(torch::Tensor src, torch::Tensor dst, int pe
 
 std::vector<at::Tensor> nvshmem_cp_global_grad_return_execute(
     at::Tensor dk_global, at::Tensor dv_global, at::Tensor key, at::Tensor value,
-    at::Tensor grad_key_return, at::Tensor grad_value_return,
-    at::Tensor grad_committed_epoch,
+    at::Tensor grad_key_return, at::Tensor grad_value_return, at::Tensor grad_committed_epoch,
     const std::vector<at::Tensor> &peer_grad_key_returns,
     const std::vector<at::Tensor> &peer_grad_value_returns,
     const std::vector<at::Tensor> &peer_grad_committed_epochs, int cp_size, int rank) {
@@ -205,10 +202,10 @@ std::vector<at::Tensor> nvshmem_cp_global_grad_return_execute(
   cp_grad_return_slot(grad_value_return, value, cp_size, rank, "grad_value_return");
   const int64_t half = key.size(0) / 2;
   for (int owner = 0; owner < cp_size; ++owner) {
-    at::Tensor key_slot = cp_grad_return_slot(
-        peer_grad_key_returns[owner], key, cp_size, rank, "peer_grad_key_return");
-    at::Tensor value_slot = cp_grad_return_slot(
-        peer_grad_value_returns[owner], value, cp_size, rank, "peer_grad_value_return");
+    at::Tensor key_slot = cp_grad_return_slot(peer_grad_key_returns[owner], key, cp_size, rank,
+                                              "peer_grad_key_return");
+    at::Tensor value_slot = cp_grad_return_slot(peer_grad_value_returns[owner], value, cp_size,
+                                                rank, "peer_grad_value_return");
     key_slot.narrow(0, 0, half).copy_(dk_global.narrow(0, owner * half, half));
     key_slot.narrow(0, half, half).copy_(dk_global.narrow(0, (7 - owner) * half, half));
     value_slot.narrow(0, 0, half).copy_(dv_global.narrow(0, owner * half, half));

@@ -123,8 +123,7 @@ std::vector<py::object> fused_attn_bwd(
 
 std::vector<at::Tensor> nvshmem_cp_global_grad_return_execute(
     at::Tensor dk_global, at::Tensor dv_global, at::Tensor key, at::Tensor value,
-    at::Tensor grad_key_return, at::Tensor grad_value_return,
-    at::Tensor grad_committed_epoch,
+    at::Tensor grad_key_return, at::Tensor grad_value_return, at::Tensor grad_committed_epoch,
     const std::vector<at::Tensor> &peer_grad_key_returns,
     const std::vector<at::Tensor> &peer_grad_value_returns,
     const std::vector<at::Tensor> &peer_grad_committed_epochs, int cp_size, int rank);
