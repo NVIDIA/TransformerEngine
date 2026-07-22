@@ -228,8 +228,8 @@ NVTE_QKV_Format nvte_get_kv_format(NVTE_QKV_Layout qkv_layout) {
 
 namespace {
 
-// per-thread storage for the diagnostic string
-// re-used (cleared + re-populated) on every call to nvte_get_fused_attn_backend_v2 on this thread
+// The per-thread storage for the diagnostic string; it's re-used (cleared + re-populated)
+// on every call to nvte_get_fused_attn_backend_v2 on the same thread.
 thread_local std::string fused_attn_backend_message_buffer;
 
 // Stash `reason` in the thread-local buffer and, if the caller asked for a diagnostic,
@@ -243,8 +243,7 @@ void set_message(const char **message, std::string reason) {
 
 }  // namespace
 
-// select a backend for fused attention
-// the diagnostic message is based on the first failure, not cumulative
+// select a backend for fused attention; the diagnostic message is based on the first failure, not cumulative.
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig config,
                                                        const char **message) {
   using namespace transformer_engine;
@@ -346,10 +345,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig confi
   return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
 }
 
-// Deprecated: thin wrapper preserving the historical narrow signature. New callers should
-// construct an NVTEFusedAttnConfig and call nvte_get_fused_attn_backend_v2 directly to access
-// the additional fields (attn_scale, format/layout fields, scaling_mode, paged-KV/bias shape,
-// dO/dQKV dtypes, etc.) that this wrapper cannot express.
+// select a backend for fused attention
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     bool is_training, NVTEDType q_dtype, NVTEDType kv_dtype, NVTE_QKV_Layout qkv_layout,
     NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
@@ -379,10 +375,23 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   cfg.is_training = is_training;
   cfg.return_max_logit = return_max_logit;
   cfg.deterministic = deterministic;
+  // fill in missing fields so it doesn't always return NVTE_No_Backend
+  cfg.batch_size = 1;
+  cfg.o_format = nvte_get_q_format(qkv_layout);
+  cfg.do_format = cfg.o_format;
+  cfg.dqkv_layout = qkv_layout;
+  if (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS) {
+    cfg.bias_batch_size = cfg.batch_size;
+    cfg.bias_num_heads = num_attn_heads;
+    cfg.bias_seqlen_q = max_seqlen_q;
+    cfg.bias_seqlen_kv = max_seqlen_kv;
+  }
+
   return nvte_get_fused_attn_backend_v2(reinterpret_cast<NVTEFusedAttnConfig>(&cfg),
                                         /*message=*/nullptr);
 }
 
+// fused attention forward
 void nvte_fused_attn_fwd_v2(NVTEFusedAttnFwdParams params) {
   NVTE_API_CALL(nvte_fused_attn_fwd_v2);
   using namespace transformer_engine;
@@ -482,6 +491,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   nvte_fused_attn_fwd_v2(reinterpret_cast<NVTEFusedAttnFwdParams>(&p));
 }
 
+// fused attention backward
 void nvte_fused_attn_bwd_v2(NVTEFusedAttnBwdParams params) {
   NVTE_API_CALL(nvte_fused_attn_bwd_v2);
   using namespace transformer_engine;
@@ -515,7 +525,7 @@ void nvte_fused_attn_bwd_v2(NVTEFusedAttnBwdParams params) {
     size_t i = 0;
     Tensor *output_S = convertNVTETensorCheck(p.Aux_CTX_Tensors->tensors[i++]);
     Tensor *input_rng_state = convertNVTETensorCheck(p.Aux_CTX_Tensors->tensors[i++]);
-    Tensor *input_Bias, *input_SoftmaxOffset;
+    Tensor *input_Bias = nullptr, *input_SoftmaxOffset = nullptr;
     if ((p.bias_type != NVTE_NO_BIAS) && (p.bias_type != NVTE_ALIBI)) {
       input_Bias = convertNVTETensorCheck(p.Aux_CTX_Tensors->tensors[i++]);
     }

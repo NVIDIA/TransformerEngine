@@ -413,20 +413,20 @@ void nvte_set_fused_attn_bwd_params_attribute(NVTEFusedAttnBwdParams params,
                                               NVTEFusedAttnBwdParamsAttribute attr, const void *buf,
                                               size_t size_in_bytes);
 
-/*! \brief Get fused-attention backend based on input parameters.
+/*! \brief Get fused-attention backend based on user configuration.
  *
- *  This function runs cuDNN frontend's support surface checks, builds cuDNN graphs,
- *  and caches them if the build is successful.
+ *  This function passes the user configuration to cuDNN frontend, runs its support checks,
+ *  attempts to build the necessary graphs, and if successful, caches the graphs (if not, returns
+ *  ``NVTE_No_Backend``).
  *
  *  \param[in]     cfg     Fused-attention configuration created by
  *                         ``nvte_create_fused_attn_config()``.
  *  \param[out]    message If cuDNN graphs are built successfully, an empty string;
- *                         if not, a diagnostic message with the reason for rejection.
- *                         Pass NULL to skip diagnostics.
- *                         The string pointer refers to a per-thread buffer owned by
- *                         the library and remains valid only until the next call to
- *                         ``nvte_get_fused_attn_backend_v2`` on the same thread.
- *                         Callers that need to retain the message across further calls
+ *                         if not, a diagnostic message explaining why there is no support.
+ *                         Pass NULL to skip the diagnostics. Note that the string pointer
+ *                         refers to a per-thread buffer owned by the library and remains valid
+ *                         only until the next call to ``nvte_get_fused_attn_backend_v2`` on the
+ *                         same thread. Callers that need to retain the message across further calls
  *                         must copy it.
  *
  *  \return Fused-attention backend, ``NVTE_F16_arbitrary_seqlen`` or ``NVTE_FP8``,
@@ -458,6 +458,13 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig cfg,
  *  \param[in]     deterministic       Whether determinism is required or not.
  *
  *  \deprecated This function has been deprecated in favor of nvte_get_fused_attn_backend_v2.
+ *
+ *  \note nvte_get_fused_attn_backend has a narrower signature than nvte_get_fused_attn_backend_v2,
+ *        and it fills the fields that it cannot express with default values. For example, it sets
+ *        batch_size = 1, derives output/gradient formats from qkv_layout, assumes a standard
+ *        bias shape [b, h, sq, skv] for NVTE_POST_SCALE_BIAS, uses delayed scaling for all FP8,
+ *        and does not support paged-KV attention. Users who need more precise control should
+ *        use nvte_get_fused_attn_backend_v2 directly.
  */
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     bool is_training, NVTEDType q_dtype, NVTEDType kv_dtype, NVTE_QKV_Layout qkv_layout,
@@ -466,10 +473,11 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left,
     int64_t window_size_right, bool return_max_logit, bool cuda_graph, bool deterministic);
 
-/*! \brief Compute dot product attention with separate Q, K and V.
+/*! \brief Compute dot product attention with Q, K, and V.
  *
- *  All inputs and outputs are carried by the opaque \p params handle. Create it with ``nvte_create_fused_attn_fwd_params()``,
- *  populate it with ``nvte_set_fused_attn_fwd_params_attribute()`` (or ``FusedAttnFwdParamsWrapper``) setters, and
+ *  All inputs and outputs are carried by the opaque \p params handle. Create it with
+ *  ``nvte_create_fused_attn_fwd_params()``, populate it with
+ *  ``nvte_set_fused_attn_fwd_params_attribute()`` (or ``FusedAttnFwdParamsWrapper``) setters, and
  *  destroy it with ``nvte_destroy_fused_attn_fwd_params()``.
  *
  *  \param[in,out] params                    Opaque fused-attention forward-parameter handle.
@@ -552,10 +560,11 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          int64_t window_size_left, int64_t window_size_right,
                          bool bottom_right_diagonal, NVTETensor workspace, cudaStream_t stream);
 
-/*! \brief Compute the backward of the dot product attention with separate Q, K and V.
+/*! \brief Compute the backward of the dot product attention with Q, K and V.
  *
- *  All inputs and outputs are carried by the opaque \p params handle. Create it with ``nvte_create_fused_attn_bwd_params()``,
- *  populate it with ``nvte_set_fused_attn_bwd_params_attribute()`` (or ``FusedAttnBwdParamsWrapper``) setters, and
+ *  All inputs and outputs are carried by the opaque \p params handle. Create it with
+ *  ``nvte_create_fused_attn_bwd_params()``, populate it with
+ *  ``nvte_set_fused_attn_bwd_params_attribute()`` (or ``FusedAttnBwdParamsWrapper``) setters, and
  *  destroy it with ``nvte_destroy_fused_attn_bwd_params()``.
  *
  *  \param[in,out] params                    Opaque fused-attention backward-parameter handle.
