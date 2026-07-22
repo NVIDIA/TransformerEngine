@@ -722,12 +722,12 @@ class MXFP8QuantizeConfig:
 class MXFP8QuantizeKernelBase(abc.ABC):
     """Base class for MXFP8 quantize kernels."""
 
-    def __init__(self, cfg: MXFP8QuantizeConfig, tuneable_cfgs: Optional[Dict[str, Any]] = None):
-        """
-        Initialize the kernel with the given configuration and optional tunable parameters.
-        """
+    def __init__(self, cfg: MXFP8QuantizeConfig):
+        """Initialize the kernel with the given configuration and optional tunable parameters."""
         self.cfg = cfg
-        # Set the tunable configs as attributes of the kernel instance
+
+    def override_tuneable_configs(self, tuneable_cfgs: Optional[dict] = None):
+        """Set the tunable configs as attributes of the kernel instance."""
         for name, value in (tuneable_cfgs or {}).items():
             setattr(self, name, value)
 
@@ -765,32 +765,8 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
     _TOTAL_BANKS_WIDTH = (32 * 4) // 1  # 32 banks × 4 bytes, in bytes (uint8 stride)
     _THREADS_PER_BANK = _TOTAL_BANKS_WIDTH // MXFP8_BLOCK_SCALING_SIZE  # 4 threads per bank
 
-    def __init__(
-        self,
-        cfg,
-        tuneable_cfgs = {
-            "_NUM_STAGES": 2,
-            "_NUM_TILES_STANDARD": 2,
-            "_NUM_TILES_DBIAS_ONLY": 4,
-            "_THREADS_PER_CTA_STANDARD": 64,
-            "_THREADS_PER_CTA_DBIAS_ONLY": 128
-        }
-    ):
-        super().__init__(cfg, tuneable_cfgs)
-        # Cast + dbias with no activation gets the larger tile (CUDA CAST_DBIAS_ONLY).
-        cast_dbias_only = cfg.WITH_DBIAS and not cfg.WITH_DACT and not cfg.WITH_ACT
-        # Use a different tile size for dbias only config
-        # No matter what tile size we use, each thread always handles a (1, MXFP8_BLOCK_SCALING_SIZE) chunk
-        if cast_dbias_only:
-            self._NUM_TILES = self._NUM_TILES_DBIAS_ONLY  # Each CTA handles 4 tiles stacked vertically
-            self._THREADS_PER_CTA = self._THREADS_PER_CTA_DBIAS_ONLY
-        else:
-            self._NUM_TILES = self._NUM_TILES_STANDARD  # Each CTA handles 2 tiles stacked vertically
-            self._THREADS_PER_CTA = self._THREADS_PER_CTA_STANDARD
-        # Each thread handles a (1, MXFP8_BLOCK_SCALING_SIZE) chunk
-        self._TILE_COLS = self._THREADS_PER_CTA
-        self._TILE_ROWS = MXFP8_BLOCK_SCALING_SIZE
-        self._NUM_WARPS = self._THREADS_PER_CTA // 32
+    def __init__(self, cfg):
+        super().__init__(cfg)
         # We prefer to do dbias reduction in colwise which is easier (no cross-thread reduction needed).
         # Only do rowwise reduction when we don't quantize columnwisely when WITH_DBIAS is True.
         self.DBIAS_REDUCTION_COLWISE = cfg.WITH_DBIAS and cfg.COLWISE
@@ -831,9 +807,34 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
             cute.Tensor
         ],  # Workspace for the dbias reduction, only used when WITH_DBIAS is True
         stream: CUstream,
+        # This kernel allows these parameters to be tuned for performance.
+        TUNEABLE_CFGS:  cutlass.Constexpr = {
+            "_NUM_STAGES": 2,
+            "_NUM_TILES_STANDARD": 2,
+            "_NUM_TILES_DBIAS_ONLY": 4,
+            "_THREADS_PER_CTA_STANDARD": 64,
+            "_THREADS_PER_CTA_DBIAS_ONLY": 128
+        }
     ):
         if cutlass.const_expr(CUTEDSL_DEBUG_LOGGING):
             cute.printf(f"[CuTeDSL] MXFP8QuantizeKernel.__call__() with config: {self.cfg}\n")
+
+        self.override_tuneable_configs(TUNEABLE_CFGS)
+        # Cast + dbias with no activation gets the larger tile (CUDA CAST_DBIAS_ONLY).
+        cast_dbias_only = cfg.WITH_DBIAS and not cfg.WITH_DACT and not cfg.WITH_ACT
+        # Use a different tile size for dbias only config
+        # No matter what tile size we use, each thread always handles a (1, MXFP8_BLOCK_SCALING_SIZE) chunk
+        if cast_dbias_only:
+            self._NUM_TILES = self._NUM_TILES_DBIAS_ONLY  # Each CTA handles 4 tiles stacked vertically
+            self._THREADS_PER_CTA = self._THREADS_PER_CTA_DBIAS_ONLY
+        else:
+            self._NUM_TILES = self._NUM_TILES_STANDARD  # Each CTA handles 2 tiles stacked vertically
+            self._THREADS_PER_CTA = self._THREADS_PER_CTA_STANDARD
+        # Each thread handles a (1, MXFP8_BLOCK_SCALING_SIZE) chunk
+        self._TILE_COLS = self._THREADS_PER_CTA
+        self._TILE_ROWS = MXFP8_BLOCK_SCALING_SIZE
+        self._NUM_WARPS = self._THREADS_PER_CTA // 32
+
 
         M = mX.shape[0]
         N = mX.shape[1]
@@ -1586,20 +1587,8 @@ class MXFP8QuantizeSpecializedRowwiseKernel(MXFP8QuantizeKernelBase):
     Plain rowwise-only quantize. Each thread owns one 32-element MXFP8 chunk and
     uses vectorized global loads/stores (no TMA used)."""
 
-    def __init__(
-        self,
-        cfg,
-        tuneable_cfgs = {
-            "_TILE_ROWS": 4,
-            "_TILE_COLS": 1024,
-            # If True, then this kernel will first write each thread's scale byte to a shared
-            # memory buffer, then utilize vectorized store to flush the buffer to global memory.
-            "_STASH_SCALE_TO_SMEM": True,
-        }
-    ):
-        super().__init__(cfg, tuneable_cfgs)
-        # Invariant: one thread per 32-elt scale block.
-        self._THREADS_PER_CTA = self._TILE_ROWS * self._TILE_COLS // MXFP8_BLOCK_SCALING_SIZE
+    def __init__(self, cfg):
+        super().__init__(cfg)
 
     @cute.jit
     def __call__(
@@ -1614,12 +1603,24 @@ class MXFP8QuantizeSpecializedRowwiseKernel(MXFP8QuantizeKernelBase):
         mDActInput: Optional[cute.Tensor],  # Unused, kept for API compatibility
         mWorkspace: Optional[cute.Tensor],  # Unused, kept for API compatibility
         stream: CUstream,
+        # This kernel allows these parameters to be tuned for performance.
+        TUNEABLE_CFGS: cutlass.Constexpr = {
+            "_TILE_ROWS": 4,
+            "_TILE_COLS": 1024,
+            # If True, then this kernel will first write each thread's scale byte to a shared
+            # memory buffer, then utilize vectorized store to flush the buffer to global memory.
+            "_STASH_SCALE_TO_SMEM": True,
+        }
     ):
         if cutlass.const_expr(CUTEDSL_DEBUG_LOGGING):
             cute.printf(
                 "[CuTeDSL] MXFP8QuantizeSpecializedRowwiseKernel.__call__() with config:"
                 f" {self.cfg}\n"
             )
+
+        super().override_tuneable_configs(TUNEABLE_CFGS)
+        # One thread per 32 elements scale block.
+        self._THREADS_PER_CTA = self._TILE_ROWS * self._TILE_COLS // MXFP8_BLOCK_SCALING_SIZE
 
         M = mX.shape[0]
         N = mX.shape[1]
@@ -1800,17 +1801,8 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
     _SCALE_ROWS = _TILE_ROWS // MXFP8_BLOCK_SCALING_SIZE
     _SCALE_COLS = _TILE_COLS // MXFP8_BLOCK_SCALING_SIZE
 
-    def __init__(
-        self,
-        cfg,
-        tuneable_cfgs = {
-            "_NUM_TILES_X": 4,
-            "_NUM_TILES_Y": 1,
-            "_NUM_STAGES": 2,
-        }
-    ):
-        super().__init__(cfg, tuneable_cfgs)
-        self._NUM_TILES = self._NUM_TILES_X * self._NUM_TILES_Y
+    def __init__(self, cfg):
+        super().__init__(cfg)
 
     @cute.jit
     def __call__(
@@ -1825,12 +1817,24 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
         mDActInput: Optional[cute.Tensor],
         mWorkspace: Optional[cute.Tensor],
         stream: CUstream,
+        # This kernel allows these parameters to be tuned for performance.
+        # Constexpr: baked at compile time; an unannotated dict would be
+        # flattened into runtime scalar arguments instead.
+        TUNEABLE_CFGS: cutlass.Constexpr = {
+            "_NUM_TILES_X": 4,
+            "_NUM_TILES_Y": 1,
+            "_NUM_STAGES": 2,
+        }
     ):
         if cutlass.const_expr(CUTEDSL_DEBUG_LOGGING):
             cute.printf(
                 "[CuTeDSL] MXFP8QuantizeSpecializedBidimensionalKernel.__call__() with config:"
                 f" {self.cfg}\n"
             )
+
+        super().override_tuneable_configs(TUNEABLE_CFGS)
+        self._NUM_TILES = self._NUM_TILES_X * self._NUM_TILES_Y
+
         M = mX.shape[0]
         N = mX.shape[1]
 
