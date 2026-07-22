@@ -99,6 +99,39 @@ __launch_bounds__(BLOCK_SIZE)
 #endif
 }
 
+template <typename IType, int BLOCK_SIZE>
+__global__ void
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+__launch_bounds__(BLOCK_SIZE)
+#endif
+    compute_columnwise_amax_kernel(const int num_rows, const int num_cols,
+                                   const IType *__restrict__ input,
+                                   float *__restrict__ output_columnwise_amax,
+                                   const float *__restrict__ noop) {
+#if !defined(__CUDA_ARCH__) || (__CUDA_ARCH__ < 1000)
+  NVTE_DEVICE_ERROR("SM 10.0+ is required.");
+#else
+  if (noop != nullptr && noop[0] == 1.0f) {
+    return;
+  }
+
+  const int col_idx = blockIdx.x;
+  if (col_idx >= num_cols) return;
+
+  float thread_max = 0.0f;
+  for (int row_idx = threadIdx.x; row_idx < num_rows; row_idx += BLOCK_SIZE) {
+    thread_max =
+        fmaxf(thread_max, fabsf(static_cast<float>(input[row_idx * num_cols + col_idx])));
+  }
+  const float col_amax =
+      reduce_max<BLOCK_SIZE / THREADS_PER_WARP>(thread_max, threadIdx.x / THREADS_PER_WARP);
+
+  if (threadIdx.x == 0) {
+    output_columnwise_amax[col_idx] = col_amax;
+  }
+#endif
+}
+
 template <typename IType>
 void launch_compute_rowwise_amax(const int num_rows, const int num_cols, const IType *input,
                                  float *output_rowwise_amax, cudaStream_t stream,
@@ -110,6 +143,20 @@ void launch_compute_rowwise_amax(const int num_rows, const int num_cols, const I
 
   compute_rowwise_amax_kernel<IType, ROWWISE_AMAX_BLOCK_SIZE>
       <<<grid, block, 0, stream>>>(num_rows, num_cols, input, output_rowwise_amax, noop);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
+
+template <typename IType>
+void launch_compute_columnwise_amax(const int num_rows, const int num_cols, const IType *input,
+                                    float *output_columnwise_amax, cudaStream_t stream,
+                                    const float *noop = nullptr) {
+  if (num_rows == 0 || num_cols == 0) return;
+
+  dim3 grid(num_cols);
+  dim3 block(ROWWISE_AMAX_BLOCK_SIZE);
+
+  compute_columnwise_amax_kernel<IType, ROWWISE_AMAX_BLOCK_SIZE>
+      <<<grid, block, 0, stream>>>(num_rows, num_cols, input, output_columnwise_amax, noop);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -145,6 +192,40 @@ inline void compute_rowwise_amax(const Tensor &input, const Tensor *noop, Tensor
     const auto *input_ptr = reinterpret_cast<const float *>(input.data.dptr);
     launch_compute_rowwise_amax<float>(static_cast<int>(rows), static_cast<int>(cols), input_ptr,
                                        amax_ptr, stream, noop_ptr);
+  } else {
+    NVTE_ERROR(
+        "Unsupported input dtype for row-scaled NVFP4 quantization. "
+        "Expected BFloat16, Float16, or Float32.");
+  }
+#else
+  NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
+#endif  // FP4_TYPE_SUPPORTED
+}
+
+inline void compute_columnwise_amax(const Tensor &input, const Tensor *noop, Tensor *output,
+                                    cudaStream_t stream) {
+#if FP4_TYPE_SUPPORTED
+  using namespace rowwise_amax_kernel;
+
+  const auto [rows, cols] = input.flat_2d_dims();
+  auto *amax_ptr = reinterpret_cast<float *>(output->columnwise_amax.dptr);
+  NVTE_CHECK(amax_ptr != nullptr, "Row-scaled columnwise amax tensor must be allocated.");
+  NVTE_CHECK(output->columnwise_amax.numel() == cols, "Row-scaled columnwise amax must have ", cols,
+             " entries, got ", output->columnwise_amax.shape, ".");
+
+  const auto *noop_ptr = reinterpret_cast<const float *>(noop->data.dptr);
+  if (input.dtype() == DType::kBFloat16) {
+    const auto *input_ptr = reinterpret_cast<const __nv_bfloat16 *>(input.data.dptr);
+    launch_compute_columnwise_amax<__nv_bfloat16>(
+        static_cast<int>(rows), static_cast<int>(cols), input_ptr, amax_ptr, stream, noop_ptr);
+  } else if (input.dtype() == DType::kFloat16) {
+    const auto *input_ptr = reinterpret_cast<const half *>(input.data.dptr);
+    launch_compute_columnwise_amax<half>(static_cast<int>(rows), static_cast<int>(cols), input_ptr,
+                                         amax_ptr, stream, noop_ptr);
+  } else if (input.dtype() == DType::kFloat32) {
+    const auto *input_ptr = reinterpret_cast<const float *>(input.data.dptr);
+    launch_compute_columnwise_amax<float>(static_cast<int>(rows), static_cast<int>(cols), input_ptr,
+                                          amax_ptr, stream, noop_ptr);
   } else {
     NVTE_ERROR(
         "Unsupported input dtype for row-scaled NVFP4 quantization. "

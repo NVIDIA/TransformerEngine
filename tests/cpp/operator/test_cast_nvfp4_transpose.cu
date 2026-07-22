@@ -1143,6 +1143,138 @@ std::vector<ActivationType> Activation_types = {
     ActivationType::Identity
 };
 
+// Element-level FP4 code differences between two compact NVFP4 buffers of the
+// same logical (rows, cols) shape (cols must be even; FP4 is packed 2/byte).
+inline size_t count_nvfp4_code_mismatches(const fp4e2m1* test_data, const fp4e2m1* ref_data,
+                                          int rows, int cols) {
+    size_t mismatches = 0;
+    for (int i = 0; i < rows; ++i) {
+        for (int j = 0; j < cols; j += 2) {
+            const int idx = i * cols + j;
+            const double2 t = cvt_fp4x2_to_double2(*reinterpret_cast<const fp4e2m1x2*>(&test_data[idx / 2]));
+            const double2 r = cvt_fp4x2_to_double2(*reinterpret_cast<const fp4e2m1x2*>(&ref_data[idx / 2]));
+            if (t.x != r.x) ++mismatches;
+            if (t.y != r.y) ++mismatches;
+        }
+    }
+    return mismatches;
+}
+
+// Row-scaled transpose NVFP4 cast: emits rowwise (per-row amax) and columnwise
+// (per-col amax) NVFP4 outputs in one pass. Cross-validated against the merged
+// row-scaled 1D kernel (PR #2931, NVFP4ScalingMode::RowScaled1D): rowwise vs
+// RowScaled1D(input), columnwise vs RowScaled1D(input^T). Amaxes and FP8 block
+// scales must match bitwise; FP4 codes may differ only at rounding-midpoint
+// ties (< 0.1%). bf16 input, rows/cols multiples of 128.
+template <typename InputType>
+void performTestRowScaledTranspose(const std::vector<size_t>& shape) {
+    using namespace test;
+
+    const DType itype = TypeInfo<InputType>::dtype;
+    const DType otype = DType::kFloat4E2M1;
+    const size_t rows = first_dimension(shape);
+    const size_t cols = last_dimension(shape);
+
+    Tensor input("input", shape, itype);
+    fillCase<fp32>(&input, InputsFillCase::uniform);
+
+    // System under test: row-scaled NVFP4 with both directions requested in one
+    // call. The transpose kernel is selected by the generic nvte_quantize_v2
+    // dispatch when a row-scaled tensor (set_row_scaled_nvfp4) also allocates a
+    // columnwise output -- no dedicated config flag.
+    Tensor output("output", shape, otype, /*rowwise=*/true, /*columnwise=*/true,
+                  NVTE_NVFP4_1D_SCALING);
+    // Marking the tensor row-scaled with a columnwise output allocated selects the
+    // transpose kernel and sizes the per-row (rowwise) and per-col (columnwise)
+    // amax vectors (default is a single scalar amax).
+    output.set_row_scaled_nvfp4(true);
+    QuantizationConfigWrapper quant_config;
+    quant_config.set_stochastic_rounding(false);
+    nvte_quantize_v2(input.data(), output.data(), quant_config, 0);
+
+    // Reference (rowwise direction): trusted row-scaled 1D kernel on the input.
+    Tensor ref_row("ref_row", shape, otype, /*rowwise=*/true, /*columnwise=*/false,
+                   NVTE_NVFP4_1D_SCALING);
+    ref_row.set_row_scaled_nvfp4(true);
+    QuantizationConfigWrapper ref_config;
+    ref_config.set_stochastic_rounding(false);
+    nvte_quantize_v2(input.data(), ref_row.data(), ref_config, 0);
+
+    // Reference (columnwise direction): trusted row-scaled 1D kernel on input^T.
+    input.to_cpu();
+    std::vector<InputType> input_t_host =
+        create_transpose(input.rowwise_cpu_dptr<InputType>(), rows, cols);
+    const std::vector<size_t> shape_t = {cols, rows};
+    Tensor input_t("input_t", shape_t, itype);
+    std::copy(input_t_host.begin(), input_t_host.end(), input_t.rowwise_cpu_dptr<InputType>());
+    input_t.from_cpu();
+    Tensor ref_col("ref_col", shape_t, otype, /*rowwise=*/true, /*columnwise=*/false,
+                   NVTE_NVFP4_1D_SCALING);
+    ref_col.set_row_scaled_nvfp4(true);
+    nvte_quantize_v2(input_t.data(), ref_col.data(), ref_config, 0);
+
+    cudaDeviceSynchronize();
+    ASSERT_EQ(cudaGetLastError(), cudaSuccess) << cudaGetErrorString(cudaGetLastError());
+
+    output.to_cpu();
+    ref_row.to_cpu();
+    ref_col.to_cpu();
+
+    // FP4 codes must match the trusted kernel except at rounding-midpoint ties.
+    // Cap the tolerated disagreement well below what a real bug would produce.
+    constexpr double kMaxCodeMismatchRate = 5e-3;  // 0.5% (observed < 0.1%)
+    const size_t row_mismatches = count_nvfp4_code_mismatches(
+        output.rowwise_cpu_dptr<fp4e2m1>(), ref_row.rowwise_cpu_dptr<fp4e2m1>(),
+        static_cast<int>(rows), static_cast<int>(cols));
+    EXPECT_LT(static_cast<double>(row_mismatches) / static_cast<double>(rows * cols),
+              kMaxCodeMismatchRate)
+        << "rowwise FP4 disagreement " << row_mismatches << "/" << (rows * cols);
+    const size_t col_mismatches = count_nvfp4_code_mismatches(
+        output.columnwise_cpu_dptr<fp4e2m1>(), ref_col.rowwise_cpu_dptr<fp4e2m1>(),
+        static_cast<int>(cols), static_cast<int>(rows));
+    EXPECT_LT(static_cast<double>(col_mismatches) / static_cast<double>(cols * rows),
+              kMaxCodeMismatchRate)
+        << "columnwise FP4 disagreement " << col_mismatches << "/" << (cols * rows);
+
+    // FP8 e4m3 block scale factors must match (compact layout on both sides).
+    const std::array<size_t, 4> sd = get_scale_tensor_dims(rows, cols, 1, 16);
+    const std::array<size_t, 4> sd_t = get_scale_tensor_dims(cols, rows, 1, 16);
+    size_t scale_mismatches = 0;
+    compare_scaling_factors<fp8e4m3>("rowwise_scales",
+                                     output.rowwise_cpu_scale_inv_ptr<fp8e4m3>(),
+                                     ref_row.rowwise_cpu_scale_inv_ptr<fp8e4m3>(),
+                                     sd[0], sd[1], sd[3], scale_mismatches);
+    compare_scaling_factors<fp8e4m3>("columnwise_scales",
+                                     output.columnwise_cpu_scale_inv_ptr<fp8e4m3>(),
+                                     ref_col.rowwise_cpu_scale_inv_ptr<fp8e4m3>(),
+                                     sd_t[0], sd_t[1], sd_t[3], scale_mismatches);
+    ASSERT_EQ(scale_mismatches, 0u);
+
+    // Per-row / per-col amaxes must match the reference amaxes exactly.
+    ASSERT_EQ(output.rowwise_amax_size(), rows);
+    const float* row_amax = output.cpu_rowwise_amax_ptr<float>();
+    const float* ref_row_amax = ref_row.cpu_rowwise_amax_ptr<float>();
+    for (size_t i = 0; i < rows; ++i) {
+        ASSERT_EQ(row_amax[i], ref_row_amax[i]) << "rowwise amax mismatch at row " << i;
+    }
+    const float* col_amax = output.cpu_columnwise_amax_ptr<float>();
+    const float* ref_col_amax = ref_col.cpu_rowwise_amax_ptr<float>();
+    for (size_t j = 0; j < cols; ++j) {
+        ASSERT_EQ(col_amax[j], ref_col_amax[j]) << "columnwise amax mismatch at col " << j;
+    }
+}
+
+// Row-scaled transpose requires 128-aligned rows and cols (bf16 only).
+std::vector<std::vector<size_t>> row_scaled_transpose_dims = {
+    {128, 128},
+    {256, 256},
+    {128, 256},
+    {256, 512},
+    {512, 512},
+    {384, 1024},
+    {2048, 256},
+};
+
 }  // namespace
 
 class FusedCastTransposeNVFP4TestSuite : public ::testing::TestWithParam
@@ -1317,6 +1449,28 @@ INSTANTIATE_TEST_SUITE_P(
         std::vector<size_t>{384, 1024},
         std::vector<size_t>{2048, 256}),
     [](const testing::TestParamInfo<CastNVFP4ColumnwiseOnly2DTestSuite::ParamType>& info) {
+        std::string name;
+        for (const auto& s : info.param) {
+            name += "X" + std::to_string(s);
+        }
+        return name;
+    });
+
+class CastNVFP4RowScaledTransposeTestSuite : public ::testing::TestWithParam<std::vector<size_t>> {};
+
+TEST_P(CastNVFP4RowScaledTransposeTestSuite, MatchesRowScaledReference) {
+    // The row-scaled transpose NVFP4 cast kernel requires Blackwell.
+    if (getDeviceComputeCapability() < blackwellComputeCapability) {
+        GTEST_SKIP();
+    }
+    performTestRowScaledTranspose<bf16>(GetParam());
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    OperatorTest,
+    CastNVFP4RowScaledTransposeTestSuite,
+    ::testing::ValuesIn(row_scaled_transpose_dims),
+    [](const testing::TestParamInfo<CastNVFP4RowScaledTransposeTestSuite::ParamType>& info) {
         std::string name;
         for (const auto& s : info.param) {
             name += "X" + std::to_string(s);
