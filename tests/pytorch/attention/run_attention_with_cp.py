@@ -18,7 +18,7 @@ from transformer_engine.pytorch import DType
 from test_attention_with_cp import (
     model_configs_flash_attn,
     model_configs_fused_attn,
-    model_configs_fused_attn_hdim256,
+    model_configs_fused_attn_d256,
 )
 from transformer_engine.pytorch import (
     autocast,
@@ -237,8 +237,8 @@ def run_dpa_with_cp(
         os.environ["NVTE_FUSED_ATTN"] = "1"
         if model in model_configs_fused_attn:
             config = copy.deepcopy(model_configs_fused_attn[model])
-        elif model in model_configs_fused_attn_hdim256:
-            config = copy.deepcopy(model_configs_fused_attn_hdim256[model])
+        elif model in model_configs_fused_attn_d256:
+            config = copy.deepcopy(model_configs_fused_attn_d256[model])
         else:
             assert False, f"{model=} is not a known FusedAttention CP config!"
     assert config.attn_mask_type in [
