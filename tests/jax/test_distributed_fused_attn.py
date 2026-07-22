@@ -701,8 +701,8 @@ class TestDistributedContextParallelSelfAttn:
         if not 100 <= compute_capability < 110:
             pytest.skip("D=256 CP fused attention is only enabled on Blackwell server GPUs.")
 
-        required_cudnn_version = 93000 if qkv_layout.is_thd() else 92300
-        required_cudnn_version_label = "9.30" if qkv_layout.is_thd() else "9.23"
+        required_cudnn_version = 92500 if qkv_layout.is_thd() else 92300
+        required_cudnn_version_label = "9.25" if qkv_layout.is_thd() else "9.23"
         if get_cudnn_version() < required_cudnn_version:
             pytest.skip(
                 f"D=256 CP fused attention with {qkv_layout} requires cuDNN"

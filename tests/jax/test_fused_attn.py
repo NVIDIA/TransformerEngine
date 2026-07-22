@@ -497,7 +497,7 @@ class FusedAttnRunner:
         cudnn_version = get_cudnn_version()
         # D=256 bprop on SM10x uses the deterministic algorithm path only. BSHD support
         # starts with cuDNN FE 1.24 / BE 9.23; THD execution-plan support starts with
-        # cuDNN FE 1.26 / BE 9.30. The kernel rejects dBias, dropout, and ALiBi, supports vanilla
+        # cuDNN FE 1.26 / BE 9.25. The kernel rejects dBias, dropout, and ALiBi, supports vanilla
         # softmax only, and allows SWA together with a causal mask only.
         is_sm10x = 100 <= compute_capability < 110
         if self.is_training and is_sm10x and (self.head_dim_qk == 256 or self.head_dim_v == 256):
@@ -506,8 +506,8 @@ class FusedAttnRunner:
                     "D=256 BWD on Blackwell only supports d_qk == d_v == 256;"
                     f" got d_qk={self.head_dim_qk}, d_v={self.head_dim_v}."
                 )
-            required_cudnn_version = 93000 if self.qkv_layout.is_thd() else 92300
-            required_cudnn_version_label = "9.30" if self.qkv_layout.is_thd() else "9.23"
+            required_cudnn_version = 92500 if self.qkv_layout.is_thd() else 92300
+            required_cudnn_version_label = "9.25" if self.qkv_layout.is_thd() else "9.23"
             if cudnn_version < required_cudnn_version:
                 pytest.skip(
                     f"D=256 BWD on Blackwell with {self.qkv_layout} requires cuDNN"
@@ -1694,7 +1694,7 @@ class TestFusedAttn:
             id="2-1024-2048-12-6-128-64-BF16-CROSS-GQA-RAGGED_SEPARATE",
         ),
         # D=256 deterministic backward on the SM100 dedicated SDPA bprop kernel.
-        # BSHD requires cuDNN FE 1.24 / BE 9.23+; THD requires cuDNN FE 1.26 / BE 9.30+.
+        # BSHD requires cuDNN FE 1.24 / BE 9.23+; THD requires cuDNN FE 1.26 / BE 9.25+.
         pytest.param(
             4,
             128,

@@ -374,7 +374,7 @@ def test_dpa_fa4_hdim256(dtype, model_configs, model):
 
 # cuDNN FusedAttention D=256 bprop is supported on sm10x by the dedicated deterministic
 # SDPA bprop kernel. BSHD support starts with cuDNN FE 1.24 / BE 9.23; THD support starts
-# with cuDNN FE 1.26 / BE 9.30. The kernel supports d_qk == d_v == 256 only, vanilla softmax only,
+# with cuDNN FE 1.26 / BE 9.25. The kernel supports d_qk == d_v == 256 only, vanilla softmax only,
 # no dropout, no ALiBi, and (for non-causal masks) full-window attention only.
 model_configs_fused_d256 = {
     # test: ModelConfig(b, sq, hq, dqk)  -> head_dim_v defaults to head_dim_qk (256)
@@ -413,8 +413,8 @@ model_configs_fused_d256 = {
             "thd_t2hd",
             id="THD_KV_PACKED",
             marks=pytest.mark.skipif(
-                get_cudnn_version() < (9, 30, 0),
-                reason="cuDNN 9.30+ is required for THD D=256 fused-attn backward.",
+                get_cudnn_version() < (9, 25, 0),
+                reason="cuDNN 9.25+ is required for THD D=256 fused-attn backward.",
             ),
         ),
     ],

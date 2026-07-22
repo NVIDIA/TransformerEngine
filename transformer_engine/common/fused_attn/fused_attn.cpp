@@ -331,9 +331,9 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
           (head_dim_qk == 192 && head_dim_v == 128 && is_training && sm_arch_ >= 100 &&
            cudnn_runtime_version >= 91100) ||
           // 9.23: d_qk = d_v = 256 + SM10x (cuDNN FE 1.24 / BE 9.23+) + bprop + non-paged.
-          // THD layouts require cuDNN FE 1.26 / BE 9.30+ for execution-plan support.
+          // THD layouts require cuDNN FE 1.26 / BE 9.25+ for execution-plan support.
           (head_dim_qk == 256 && head_dim_v == 256 && is_training && sm_arch_ >= 100 &&
-           sm_arch_ < 110 && cudnn_runtime_version >= (is_thd_layout ? 93000 : 92300) &&
+           sm_arch_ < 110 && cudnn_runtime_version >= (is_thd_layout ? 92500 : 92300) &&
            layout_group != NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD &&
            // The FE forces this path onto the deterministic bprop algorithm, which on
            // Blackwell rejects dBias, dropout, and ALiBi (and supports vanilla softmax only).
