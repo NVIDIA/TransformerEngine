@@ -120,8 +120,7 @@ __launch_bounds__(BLOCK_SIZE)
 
   float thread_max = 0.0f;
   for (int row_idx = threadIdx.x; row_idx < num_rows; row_idx += BLOCK_SIZE) {
-    thread_max =
-        fmaxf(thread_max, fabsf(static_cast<float>(input[row_idx * num_cols + col_idx])));
+    thread_max = fmaxf(thread_max, fabsf(static_cast<float>(input[row_idx * num_cols + col_idx])));
   }
   const float col_amax =
       reduce_max<BLOCK_SIZE / THREADS_PER_WARP>(thread_max, threadIdx.x / THREADS_PER_WARP);
@@ -216,8 +215,8 @@ inline void compute_columnwise_amax(const Tensor &input, const Tensor *noop, Ten
   const auto *noop_ptr = reinterpret_cast<const float *>(noop->data.dptr);
   if (input.dtype() == DType::kBFloat16) {
     const auto *input_ptr = reinterpret_cast<const __nv_bfloat16 *>(input.data.dptr);
-    launch_compute_columnwise_amax<__nv_bfloat16>(
-        static_cast<int>(rows), static_cast<int>(cols), input_ptr, amax_ptr, stream, noop_ptr);
+    launch_compute_columnwise_amax<__nv_bfloat16>(static_cast<int>(rows), static_cast<int>(cols),
+                                                  input_ptr, amax_ptr, stream, noop_ptr);
   } else if (input.dtype() == DType::kFloat16) {
     const auto *input_ptr = reinterpret_cast<const half *>(input.data.dptr);
     launch_compute_columnwise_amax<half>(static_cast<int>(rows), static_cast<int>(cols), input_ptr,

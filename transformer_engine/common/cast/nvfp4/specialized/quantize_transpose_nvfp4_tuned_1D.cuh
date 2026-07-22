@@ -185,15 +185,11 @@ compute_nvfp4_scaling_coefficient<bf16>(const nvfp4_scale_t S_dec_block, const f
 }
 
 template <bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH, bool ROW_SCALED_NVFP4>
-__device__ __forceinline__ void colwise_scaling(const IType *__restrict__ sIn_ptr,
-                                                fp4e2m1x2 *__restrict__ sOut_tr_ptr,
-                                                nvfp4_scale_t *__restrict__ sSFcolwise_ptr,
-                                                const float S_enc_colwise, const int stage_Y,
-                                                const int stage_X, const int buff_in,
-                                                const int buff_out_tr,
-                                                const float *amax_colwise_ptr,
-                                                const size_t col_offset, const size_t cols,
-                                                RNG_t &rng, uint4 &random_uint4, int &rnd_idx) {
+__device__ __forceinline__ void colwise_scaling(
+    const IType *__restrict__ sIn_ptr, fp4e2m1x2 *__restrict__ sOut_tr_ptr,
+    nvfp4_scale_t *__restrict__ sSFcolwise_ptr, const float S_enc_colwise, const int stage_Y,
+    const int stage_X, const int buff_in, const int buff_out_tr, const float *amax_colwise_ptr,
+    const size_t col_offset, const size_t cols, RNG_t &rng, uint4 &random_uint4, int &rnd_idx) {
   using scaling_coeff_type = typename SCALING_COEFFICIENT_TYPE<USE_FAST_MATH>::type;
 
   const auto &sIn2x = *reinterpret_cast<const IType2x3D *>(sIn_ptr);
@@ -235,8 +231,7 @@ __device__ __forceinline__ void colwise_scaling(const IType *__restrict__ sIn_pt
   for (int w = 0; w < 2; ++w) {
     float S_enc_colwise_block = S_enc_colwise;
     if constexpr (ROW_SCALED_NVFP4) {
-      const size_t col_idx =
-          col_offset + stage_X * TILE_DIM_X + thread_offset_X_colwise + w;
+      const size_t col_idx = col_offset + stage_X * TILE_DIM_X + thread_offset_X_colwise + w;
       S_enc_colwise_block =
           col_idx < cols ? core::compute_global_encode_scaling_factor_FP4(amax_colwise_ptr[col_idx])
                          : 1.0f;
@@ -248,8 +243,7 @@ __device__ __forceinline__ void colwise_scaling(const IType *__restrict__ sIn_pt
     sSFcolwise[scale_tr_offset_Y + w][scale_tr_offset_X] = S_dec_b_fp8;
 
     const scaling_coeff_type SFcoefficient =
-        compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8,
-                                                               S_enc_colwise_block);
+        compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_colwise_block);
 
     // Scale elements
     __align__(8) uint32_t rOut[SCALE_DIM / 8];

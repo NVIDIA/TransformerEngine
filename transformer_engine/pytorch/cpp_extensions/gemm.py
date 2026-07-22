@@ -234,8 +234,8 @@ def general_gemm(
         ), "Row-scaled NVFP4 GEMM currently requires NVFP4 B."
         # Reuse the per-tensor GEMM and apply selected row/column global scales
         # to the FP32 output. This extends #2931 without a dedicated GEMM kernel.
-        gemm_A, gemm_B, output_row_scales, output_col_scales = (
-            _nvfp4_row_scaled_gemm_inputs(A, B, transa=transa, transb=transb)
+        gemm_A, gemm_B, output_row_scales, output_col_scales = _nvfp4_row_scaled_gemm_inputs(
+            A, B, transa=transa, transb=transb
         )
 
         requested_out, requested_out_dtype = out, out_dtype
