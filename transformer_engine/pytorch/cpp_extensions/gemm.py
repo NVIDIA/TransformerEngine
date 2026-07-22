@@ -438,15 +438,7 @@ def _get_fp32_zeros_tensor(num_tensors: int, device: torch.device) -> torch.Tens
 
 @functools.lru_cache(maxsize=None)
 def _get_grouped_gemm_setup_workspace(device: int, num_tensors: int) -> torch.Tensor:
-    """Persistent setup workspace (per-group pointer/dim arrays) for grouped-tensor GEMM.
-
-    This must not be allocated per call: under CUDA-graph capture a per-call
-    allocation's block returns to the shared capture pool as soon as the Python
-    reference dies, so the forward and backward graphs can alias the same block
-    and the captured GEMM's pointer/dimension arrays get overwritten at replay.
-    Consecutive GEMMs reusing one workspace are ordered by the stream, matching
-    how the non-grouped path shares its cached cuBLAS workspace.
-    """
+    """Persistent setup workspace (per-group pointer/dim arrays) for grouped-tensor GEMM."""
     return torch.empty(
         get_grouped_gemm_setup_workspace_size(num_tensors),
         dtype=torch.uint8,
@@ -458,14 +450,11 @@ def _get_grouped_gemm_setup_workspace(device: int, num_tensors: int) -> torch.Te
 def _get_grouped_cublas_workspace(device: int, layout: str) -> torch.Tensor:
     """Persistent cuBLAS workspace for the grouped-tensor GEMM path, one per GEMM layout.
 
-    Two grouped-tensor GEMMs that share a single cuBLAS workspace can deadlock on the
-    second CUDA-graph replay: the grouped kernels interact through the shared workspace
-    and the second matmul hangs. It is deterministic per graph geometry and reproduces
-    on cuBLAS 13.5/13.6/13.7 (i.e. not fixed upstream as of 13.7); giving each GEMM its
-    own persistent workspace avoids it. The backward wgrad (NT) is the case seen in TE,
-    but fprop (TN) and dgrad (NN) have also been reported to conflict, so we isolate by
-    layout: TN, NN, and NT each get a distinct persistent workspace. Each is a single
-    persistent allocation, so CUDA-graph capture safety is preserved.
+    Grouped cuBlasLt GEMM kernels in cuBLAS versions <= 13.7 leave behind stale descriptors in the 
+    workspace that cause back-to-back GEMM kernels to crash/deadlock on 2nd CUDA-graph replay. As a 
+    workaround, we allocate a different workspace for each GEMM layout (TN, NN, NT) to avoid
+    contamination between subsequent GEMM calls (when there is no other graph node between GEMM
+    kernels).
     """
     assert layout in ("TN", "NN", "NT"), f"unexpected grouped GEMM layout {layout}"
     return torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device=device)
@@ -565,7 +554,7 @@ def general_grouped_gemm_for_grouped_tensor(
 
     workspace_setup = _get_grouped_gemm_setup_workspace(device.index, num_tensors)
     # Each grouped-GEMM layout gets its own persistent cuBLAS workspace: two grouped
-    # GEMMs sharing one workspace deadlock under CUDA-graph replay (see
+    # GEMMs sharing one workspace can deadlock under CUDA-graph replay (see
     # _get_grouped_cublas_workspace). wgrad (NT) is the case seen in TE; fprop (TN) and
     # dgrad (NN) have also been reported to conflict, so all three layouts are isolated.
     workspace_cublas = _get_grouped_cublas_workspace(device.index, layout)
