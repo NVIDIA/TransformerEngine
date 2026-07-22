@@ -212,61 +212,14 @@ def shard_model_with_fsdp2(model, mesh):
 
 
 @torch.no_grad()
-def _check_fp8_fsdp2_allgather(model):
-    # Do manual allgather in fp32 and match against fp8 allgather done
-    # with fsdp2
-    # FP32 manual weight allgather
-    fp32_allgathered_params = {}
-    for name, param in model.named_parameters():
-        assert isinstance(param, DTensor)
-        local_tensor = param._local_tensor
-        device_mesh = param.device_mesh
-        dist_group = (
-            device_mesh.get_group(mesh_dim="shard")
-            if device_mesh.ndim > 1
-            else device_mesh.get_group()
-        )
-        # Perform manual allgather on local_tensor. zeros_like will create hp tensor since
-        # torch_dispatch for local_tensor will go down the dequantization route.
-        gathered_tensor = [
-            torch.zeros_like(local_tensor) for _ in range(dist.get_world_size(group=dist_group))
-        ]
-        dist.all_gather(gathered_tensor, local_tensor.dequantize(), group=dist_group)
-        full_tensor = torch.cat(gathered_tensor, dim=0)
-        fp32_allgathered_params[name] = full_tensor
-    # FP8 allgather using FSDP2
-    for module in model.modules():
-        # Not all modules are wrapped/sharded with FSDP2.
-        if hasattr(module, "unshard"):
-            module.unshard()
-    # Make sure allgathered parameters match exactly
-    for name, param in model.named_parameters():
-        # NVFP4 scale unpad/repad through FSDP2 introduces small numerical
-        # differences vs the manual dequantize-then-allgather path.
-        if isinstance(param, NVFP4Tensor):
-            tols = dict(atol=5e-4, rtol=5e-3)
-        else:
-            tols = {}
-        torch.testing.assert_close(param.dequantize(), fp32_allgathered_params[name], **tols)
-    # Revert model to original sharded state
-    for module in model.modules():
-        # Not all modules are wrapped/sharded with FSDP2.
-        if hasattr(module, "reshard"):
-            module.reshard()
+def _check_fp8_fsdp2_allgather(model, *, tols=None):
+    """Compare FSDP2's quantized all-gather against a manual HP all-gather.
 
-
-@torch.no_grad()
-def _check_hybrid_fsdp2_allgather(model):
-    """All-gather correctness for hybrid quantized params under FSDP2.
-
-    Mirrors :func:`_check_fp8_fsdp2_allgather` but for hybrid params: compares
-    FSDP2's quantized all-gather (``unshard`` -> ``dequantize``) against a manual
-    fp32 dequantize-then-allgather of the local shards. This is self-referential
-    (no vanilla reference model), so it is robust to the norm-fusion difference
-    between hybrid and vanilla recipes -- hybrid auto-disables ``with_quantized_norm``
-    while vanilla fuses, so a hybrid-vs-vanilla comparison would not match.
+    ``tols=None`` preserves the format-specific defaults used by the original
+    FP8 checker. Callers for other quantized tensor compositions can provide a
+    single tolerance dictionary that applies to every parameter.
     """
-    # Manual fp32 weight allgather of the (possibly hybrid) local shards.
+    # Manual high-precision weight all-gather.
     fp32_allgathered_params = {}
     for name, param in model.named_parameters():
         assert isinstance(param, DTensor)
@@ -277,25 +230,36 @@ def _check_hybrid_fsdp2_allgather(model):
             if device_mesh.ndim > 1
             else device_mesh.get_group()
         )
-        # ``dequantize`` is a no-op on plain (non-quantized) bf16 params such as
-        # LayerNorm weights/biases, and dequantizes hybrid sub-storages otherwise.
+        # Materialize high precision explicitly so this also works for composite
+        # quantized tensors such as HybridQuantizedTensor.
         local_hp = local_tensor.dequantize()
         gathered_tensor = [
             torch.zeros_like(local_hp) for _ in range(dist.get_world_size(group=dist_group))
         ]
         dist.all_gather(gathered_tensor, local_hp, group=dist_group)
-        fp32_allgathered_params[name] = torch.cat(gathered_tensor, dim=0)
-    # Quantized allgather via FSDP2.
+        full_tensor = torch.cat(gathered_tensor, dim=0)
+        fp32_allgathered_params[name] = full_tensor
+    # Quantized all-gather using FSDP2.
     for module in model.modules():
+        # Not all modules are wrapped/sharded with FSDP2.
         if hasattr(module, "unshard"):
             module.unshard()
-    # Hybrid sub-storages (e.g. MXFP8 scale unpad/repad through FSDP2) can introduce
-    # small numerical differences vs the manual dequantize-then-allgather path.
-    tols = dict(atol=5e-4, rtol=5e-3)
+    # Make sure all-gathered parameters match.
     for name, param in model.named_parameters():
-        torch.testing.assert_close(param.dequantize(), fp32_allgathered_params[name], **tols)
+        if tols is not None:
+            param_tols = tols
+        elif isinstance(param, NVFP4Tensor):
+            # NVFP4 scale unpad/repad through FSDP2 introduces small numerical
+            # differences vs the manual dequantize-then-allgather path.
+            param_tols = dict(atol=5e-4, rtol=5e-3)
+        else:
+            param_tols = {}
+        torch.testing.assert_close(
+            param.dequantize(), fp32_allgathered_params[name], **param_tols
+        )
     # Revert model to original sharded state.
     for module in model.modules():
+        # Not all modules are wrapped/sharded with FSDP2.
         if hasattr(module, "reshard"):
             module.reshard()
 
@@ -512,7 +476,8 @@ def test_distributed_hybrid(hybrid_recipe_name):
     hybrid_count = _hybrid_param_count()
     assert hybrid_count > 0, "No HybridQuantizedTensor local tensors after sharding"
 
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    optimizer_lr = 1e-3 if hidden_size <= 512 else 1e-4
+    optimizer = optim.Adam(model.parameters(), lr=optimizer_lr)
 
     input_data = torch.randn(128, 16, hidden_size, device=device, dtype=torch.bfloat16)
     target = torch.randn(128, 16, hidden_size, device=device, dtype=torch.bfloat16)
@@ -542,7 +507,9 @@ def test_distributed_hybrid(hybrid_recipe_name):
     ), "HybridQuantizedTensor params lost their quantized type after optimizer.step()"
 
     # FSDP2 quantized all-gather must match a manual fp32 dequant-then-allgather.
-    _check_hybrid_fsdp2_allgather(model)
+    # Hybrid sub-storages (e.g. MXFP8 scale unpad/repad through FSDP2) can
+    # introduce small differences vs the manual dequantize-then-allgather path.
+    _check_fp8_fsdp2_allgather(model, tols=dict(atol=5e-4, rtol=5e-3))
 
 
 def test_distributed_hybrid_identity_all():
@@ -615,7 +582,7 @@ def test_distributed_hybrid_identity_all():
         _identity_param_count() == identity_count
     ), "IdentityTensor params lost their quantized type after optimizer.step()"
 
-    _check_hybrid_fsdp2_allgather(model)
+    _check_fp8_fsdp2_allgather(model, tols={})
 
 
 def test_distributed_hybrid_reshard_after_forward(hybrid_recipe_name):

@@ -11,10 +11,10 @@ import pytest
 import torch
 
 import transformer_engine.pytorch as te
-import transformer_engine_torch as tex
 from transformer_engine.common import recipe
-from transformer_engine.pytorch.custom_recipes.quantization_factory_base import (
-    nvfp4_quantizer_factory,
+from hybrid_quantization_utils import (
+    hybrid_fp8_mxfp8_qfactory,
+    hybrid_mxfp8_nvfp4_qfactory,
 )
 from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
 from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
@@ -26,52 +26,13 @@ mxfp8_available = te.is_mxfp8_available()
 nvfp4_available = te.is_nvfp4_available()
 
 
-def _hybrid_fp8_mxfp8_qfactory(role):
-    """Hybrid CustomRecipe factory: FP8 current-scaling rowwise + MXFP8 columnwise.
-
-    Forward roles get a HybridQuantizer; backward/grad roles get a plain
-    MXFP8 quantizer so dgrad/wgrad GEMMs see a single scaling mode per
-    operand pair. Catch-all returns plain FP8 for non-linear roles
-    (layernorm_linear, layernorm_mlp, multihead_attention, transformer_layer).
-    """
-    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
-    if is_linear and role.tensor_type in ("input", "weight", "output"):
-        return te.HybridQuantizer(
-            rowwise_quantizer=te.Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E4M3, device="cuda"
-            ),
-            columnwise_quantizer=te.MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
-        )
-    if is_linear and role.tensor_type in ("grad_output", "grad_input"):
-        return te.MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E5M2)
-    return te.Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
-
-
-def _hybrid_mxfp8_nvfp4_qfactory(role):
-    """Hybrid CustomRecipe factory: MXFP8 rowwise + NVFP4 columnwise.
-
-    Mirrors the ``mxfp8_fwd_nvfp4_bwd_quantizer_factory`` headline recipe
-    from ``custom_recipes/quantization_factory_zoo.py``. grad_output uses plain
-    NVFP4 (both directions) so wgrad's columnwise operand matches.
-    """
-    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
-    if is_linear and role.tensor_type in ("input", "weight", "output"):
-        return te.HybridQuantizer(
-            rowwise_quantizer=te.MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
-            columnwise_quantizer=nvfp4_quantizer_factory(role),
-        )
-    if is_linear and role.tensor_type in ("grad_output", "grad_input"):
-        return nvfp4_quantizer_factory(role)
-    return te.MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
-
-
 quantization_recipes: Optional[recipe.Recipe] = [None]
 if fp8_available:
     quantization_recipes.extend((recipe.Float8CurrentScaling(), recipe.DelayedScaling()))
 if fp8_available and mxfp8_available:
-    quantization_recipes.append(recipe.CustomRecipe(qfactory=_hybrid_fp8_mxfp8_qfactory))
+    quantization_recipes.append(recipe.CustomRecipe(qfactory=hybrid_fp8_mxfp8_qfactory))
 if mxfp8_available and nvfp4_available:
-    quantization_recipes.append(recipe.CustomRecipe(qfactory=_hybrid_mxfp8_nvfp4_qfactory))
+    quantization_recipes.append(recipe.CustomRecipe(qfactory=hybrid_mxfp8_nvfp4_qfactory))
 
 hybrid_quantization_recipes = [
     item for item in quantization_recipes if item is not None and item.custom()

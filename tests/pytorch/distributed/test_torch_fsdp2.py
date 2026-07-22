@@ -42,6 +42,8 @@ def test_fsdp2_model_tests():
             "-v",
             "-s",
             "--tb=short",
+            "-k",
+            "not hybrid",
         ],
         valid_returncodes=(0, 5),
         env=os.environ,

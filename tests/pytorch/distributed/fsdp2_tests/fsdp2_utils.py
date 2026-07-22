@@ -5,78 +5,20 @@
 """Shared utility functions for FSDP2 distributed tests."""
 
 import transformer_engine.common.recipe
-from transformer_engine.pytorch import HybridQuantizer, IdentityQuantizer, QuantizedTensor
-from transformer_engine.pytorch.custom_recipes.quantization_factory_base import (
-    current_scaling_quantizer_factory,
-    float8_block_scaling_quantizer_factory,
-    mxfp8_quantizer_factory,
+from transformer_engine.pytorch import QuantizedTensor
+
+from hybrid_quantization_utils import (
+    hybrid_float8_block_qfactory,
+    hybrid_fp8_current_identity_qfactory,
+    hybrid_fp8_current_qfactory,
+    hybrid_mixed_mxfp8_fp8_qfactory,
+    hybrid_mxfp8_qfactory,
+    identity_qfactory,
 )
 
 
 def get_recipe_from_string(recipe):
     return getattr(transformer_engine.common.recipe, recipe)()
-
-
-def _hybrid_fp8_current_qfactory(role):
-    """FP8 current-scaling rowwise + FP8 current-scaling columnwise."""
-    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
-    if is_linear and role.tensor_type in ("input", "weight", "output"):
-        return HybridQuantizer(
-            rowwise_quantizer=current_scaling_quantizer_factory(role),
-            columnwise_quantizer=current_scaling_quantizer_factory(role),
-        )
-    return current_scaling_quantizer_factory(role)
-
-
-def _hybrid_mxfp8_qfactory(role):
-    """MXFP8 rowwise + MXFP8 columnwise."""
-    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
-    if is_linear and role.tensor_type in ("input", "weight", "output"):
-        return HybridQuantizer(
-            rowwise_quantizer=mxfp8_quantizer_factory(role),
-            columnwise_quantizer=mxfp8_quantizer_factory(role),
-        )
-    return mxfp8_quantizer_factory(role)
-
-
-def _hybrid_float8_block_qfactory(role):
-    """Float8 block-scaling rowwise + Float8 block-scaling columnwise."""
-    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
-    if is_linear and role.tensor_type in ("input", "weight", "output"):
-        return HybridQuantizer(
-            rowwise_quantizer=float8_block_scaling_quantizer_factory(role),
-            columnwise_quantizer=float8_block_scaling_quantizer_factory(role),
-        )
-    return float8_block_scaling_quantizer_factory(role)
-
-
-def _hybrid_mixed_mxfp8_fp8_qfactory(role):
-    """MXFP8 rowwise + FP8 current columnwise (cross-format hybrid)."""
-    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
-    if is_linear and role.tensor_type in ("input", "weight", "output"):
-        return HybridQuantizer(
-            rowwise_quantizer=mxfp8_quantizer_factory(role),
-            columnwise_quantizer=current_scaling_quantizer_factory(role),
-        )
-    return current_scaling_quantizer_factory(role)
-
-
-def _hybrid_fp8_current_identity_qfactory(role):
-    """FP8 current forward + high-precision backward via Identity."""
-    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
-    if is_linear and role.tensor_type in ("input", "weight", "output"):
-        return HybridQuantizer(
-            rowwise_quantizer=current_scaling_quantizer_factory(role),
-            columnwise_quantizer=IdentityQuantizer(),
-        )
-    if is_linear and role.tensor_type in ("grad_output", "grad_input"):
-        return IdentityQuantizer()
-    return current_scaling_quantizer_factory(role)
-
-
-def _identity_qfactory(role):  # pylint: disable=unused-argument
-    """High-precision passthrough for every quantizer slot."""
-    return IdentityQuantizer()
 
 
 # CustomRecipe has dynamic TE extra-state handling. Once FP8 state is
@@ -85,12 +27,12 @@ def _identity_qfactory(role):  # pylint: disable=unused-argument
 # payloads without delayed-scaling state are identified and ignored without
 # unpickling. See ``run_fsdp2_fused_adam.py::test_hybrid_dcp_output_parity``.
 _HYBRID_QFACTORIES = {
-    "HybridFP8CurrentScaling": _hybrid_fp8_current_qfactory,
-    "HybridMXFP8": _hybrid_mxfp8_qfactory,
-    "HybridFloat8BlockScaling": _hybrid_float8_block_qfactory,
-    "HybridMixed_MXFP8_FP8": _hybrid_mixed_mxfp8_fp8_qfactory,
-    "HybridFP8CurrentScalingIdentity": _hybrid_fp8_current_identity_qfactory,
-    "Identity": _identity_qfactory,
+    "HybridFP8CurrentScaling": hybrid_fp8_current_qfactory,
+    "HybridMXFP8": hybrid_mxfp8_qfactory,
+    "HybridFloat8BlockScaling": hybrid_float8_block_qfactory,
+    "HybridMixed_MXFP8_FP8": hybrid_mixed_mxfp8_fp8_qfactory,
+    "HybridFP8CurrentScalingIdentity": hybrid_fp8_current_identity_qfactory,
+    "Identity": identity_qfactory,
 }
 
 

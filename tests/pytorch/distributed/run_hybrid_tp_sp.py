@@ -10,7 +10,6 @@ import argparse
 import datetime
 import os
 import sys
-from pathlib import Path
 
 import torch
 import torch.distributed as dist
@@ -18,20 +17,17 @@ from torch import nn
 
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe as te_recipe
-from transformer_engine.pytorch.custom_recipes.quantization_factory_base import (
-    nvfp4_quantizer_factory,
-)
-from transformer_engine.pytorch import (
-    Float8CurrentScalingQuantizer,
-    HybridQuantizer,
-    IdentityQuantizer,
-    MXFP8Quantizer,
-)
 
-# Sibling helper shared with distributed numerics tests.
-TEST_ROOT = Path(__file__).parent.resolve()
-sys.path.insert(0, str(TEST_ROOT))
-from run_layer_with_overlap import _compare_tensors  # noqa: E402
+from hybrid_quantization_utils import (
+    hybrid_fp8_current_e5m2_grads_qfactory,
+    hybrid_fp8_current_identity_qfactory,
+    hybrid_mxfp8_identity_qfactory,
+    hybrid_mxfp8_qfactory,
+    hybrid_nvfp4_qfactory,
+    hybrid_tp_mxfp8_nvfp4_qfactory,
+    identity_qfactory,
+)
+from distributed.run_layer_with_overlap import _compare_tensors
 
 # ── Global state ─────────────────────────────────────────────────────
 
@@ -49,110 +45,22 @@ QUANTIZATION = None
 LOSS_FN = nn.MSELoss()
 
 
-# ── Hybrid recipe factories ──────────────────────────────────────────
-#
-# Factories stay small; these tests target TP/SP plumbing.
-
-
-def _make_fp8_current_quantizer(*, fp8_dtype=te.DType.kFloat8E4M3):
-    return Float8CurrentScalingQuantizer(fp8_dtype=fp8_dtype, device="cuda")
-
-
-def _make_mxfp8_quantizer(*, fp8_dtype=te.DType.kFloat8E4M3):
-    return MXFP8Quantizer(fp8_dtype=fp8_dtype)
-
-
-def _hybrid_fp8_qfactory(role):
-    """FP8 current scaling; backward operands use E5M2."""
-    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
-    if is_linear and role.tensor_type in ("input", "weight", "output"):
-        return HybridQuantizer(
-            rowwise_quantizer=_make_fp8_current_quantizer(),
-            columnwise_quantizer=_make_fp8_current_quantizer(),
-        )
-    if is_linear and role.tensor_type in ("grad_output", "grad_input"):
-        return _make_fp8_current_quantizer(fp8_dtype=te.DType.kFloat8E5M2)
-    return _make_fp8_current_quantizer()
-
-
-def _hybrid_mxfp8_qfactory(role):
-    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
-    if is_linear and role.tensor_type in ("input", "weight", "output"):
-        return HybridQuantizer(
-            rowwise_quantizer=_make_mxfp8_quantizer(),
-            columnwise_quantizer=_make_mxfp8_quantizer(),
-        )
-    return _make_mxfp8_quantizer()
-
-
-def _hybrid_fp8_identity_qfactory(role):
-    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
-    if is_linear and role.tensor_type in ("input", "weight", "output"):
-        return HybridQuantizer(
-            rowwise_quantizer=_make_fp8_current_quantizer(),
-            columnwise_quantizer=IdentityQuantizer(),
-        )
-    if is_linear and role.tensor_type in ("grad_output", "grad_input"):
-        return IdentityQuantizer()
-    return _make_fp8_current_quantizer()
-
-
-def _hybrid_mxfp8_identity_qfactory(role):
-    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
-    if is_linear and role.tensor_type in ("input", "weight", "output"):
-        return HybridQuantizer(
-            rowwise_quantizer=_make_mxfp8_quantizer(),
-            columnwise_quantizer=IdentityQuantizer(),
-        )
-    if is_linear and role.tensor_type in ("grad_output", "grad_input"):
-        return IdentityQuantizer()
-    return _make_mxfp8_quantizer()
-
-
-def _identity_qfactory(role):  # pylint: disable=unused-argument
-    return IdentityQuantizer()
-
-
-def _hybrid_nvfp4_qfactory(role):
-    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
-    if is_linear and role.tensor_type in ("input", "weight", "output"):
-        return HybridQuantizer(
-            rowwise_quantizer=nvfp4_quantizer_factory(role),
-            columnwise_quantizer=nvfp4_quantizer_factory(role),
-        )
-    if is_linear and role.tensor_type in ("grad_output", "grad_input"):
-        return nvfp4_quantizer_factory(role)
-    return nvfp4_quantizer_factory(role)
-
-
-def _hybrid_mxfp8_nvfp4_qfactory(role):
-    """Cross-format recipe: MXFP8 rowwise, NVFP4 columnwise."""
-    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
-    if is_linear and role.tensor_type in ("grad_output", "grad_input"):
-        return nvfp4_quantizer_factory(role)
-    # Forward/boundary roles keep both formats available.
-    return HybridQuantizer(
-        rowwise_quantizer=_make_mxfp8_quantizer(),
-        columnwise_quantizer=nvfp4_quantizer_factory(role),
-    )
-
-
 def hybrid_recipe():
     """Return a fresh CustomRecipe for the selected test recipe."""
     if QUANTIZATION == "hybrid_fp8":
-        return te_recipe.CustomRecipe(qfactory=_hybrid_fp8_qfactory)
+        return te_recipe.CustomRecipe(qfactory=hybrid_fp8_current_e5m2_grads_qfactory)
     if QUANTIZATION == "hybrid_mxfp8":
-        return te_recipe.CustomRecipe(qfactory=_hybrid_mxfp8_qfactory)
+        return te_recipe.CustomRecipe(qfactory=hybrid_mxfp8_qfactory)
     if QUANTIZATION == "hybrid_fp8_identity":
-        return te_recipe.CustomRecipe(qfactory=_hybrid_fp8_identity_qfactory)
+        return te_recipe.CustomRecipe(qfactory=hybrid_fp8_current_identity_qfactory)
     if QUANTIZATION == "hybrid_mxfp8_identity":
-        return te_recipe.CustomRecipe(qfactory=_hybrid_mxfp8_identity_qfactory)
+        return te_recipe.CustomRecipe(qfactory=hybrid_mxfp8_identity_qfactory)
     if QUANTIZATION == "identity":
-        return te_recipe.CustomRecipe(qfactory=_identity_qfactory)
+        return te_recipe.CustomRecipe(qfactory=identity_qfactory)
     if QUANTIZATION == "hybrid_nvfp4":
-        return te_recipe.CustomRecipe(qfactory=_hybrid_nvfp4_qfactory)
+        return te_recipe.CustomRecipe(qfactory=hybrid_nvfp4_qfactory)
     if QUANTIZATION == "hybrid_mxfp8_nvfp4":
-        return te_recipe.CustomRecipe(qfactory=_hybrid_mxfp8_nvfp4_qfactory)
+        return te_recipe.CustomRecipe(qfactory=hybrid_tp_mxfp8_nvfp4_qfactory)
     raise ValueError(f"Unknown hybrid QUANTIZATION={QUANTIZATION!r}")
 
 

@@ -472,6 +472,7 @@ class TestIdentityQuantizerUnit:
         assert out.columnwise_quantizer.rowwise_usage is False
         assert out.columnwise_quantizer.columnwise_usage is True
 
+    @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
     def test_te_ops_basic_linear_accepts_hybrid_identity_quantized_weight(self):
         import transformer_engine.pytorch.ops as te_ops
 
@@ -523,6 +524,7 @@ class TestIdentityQuantizerUnit:
             ),
         ],
     )
+    @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
     def test_te_ops_quantize_then_gelu_accepts_identity_backed_tensors(self, qfactory):
         import transformer_engine.pytorch.ops as te_ops
 
@@ -980,13 +982,13 @@ class TestIdentityQuantizerUnit:
 # ── te.Linear integration ────────────────────────────────────────────
 
 
-def _make_linears(in_f, out_f, seed=1234, dtype=torch.bfloat16):
+def _make_linears(in_f, out_f, seed=1234, dtype=torch.bfloat16, bias=True):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    ref = te.Linear(in_f, out_f, params_dtype=dtype).cuda()
+    ref = te.Linear(in_f, out_f, bias=bias, params_dtype=dtype).cuda()
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    test = te.Linear(in_f, out_f, params_dtype=dtype).cuda()
+    test = te.Linear(in_f, out_f, bias=bias, params_dtype=dtype).cuda()
     with torch.no_grad():
         for p_test, p_ref in zip(test.parameters(), ref.parameters()):
             p_test.copy_(p_ref)
@@ -1062,19 +1064,25 @@ _IDENTITY_MODULE_NAMES = (
 )
 
 
-def _make_identity_module(module_name, seed=1234, dtype=torch.bfloat16):
+def _make_identity_module(module_name, seed=1234, dtype=torch.bfloat16, bias=True):
     hidden_size = 64
     ffn_hidden_size = 128
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     if module_name == "Linear":
-        return te.Linear(hidden_size, hidden_size, params_dtype=dtype).cuda()
+        return te.Linear(hidden_size, hidden_size, bias=bias, params_dtype=dtype).cuda()
     if module_name == "LayerNormLinear":
-        return te.LayerNormLinear(hidden_size, hidden_size, params_dtype=dtype).cuda()
+        return te.LayerNormLinear(
+            hidden_size, hidden_size, bias=bias, params_dtype=dtype
+        ).cuda()
     if module_name == "LayerNormMLP":
-        return te.LayerNormMLP(hidden_size, ffn_hidden_size, params_dtype=dtype).cuda()
+        return te.LayerNormMLP(
+            hidden_size, ffn_hidden_size, bias=bias, params_dtype=dtype
+        ).cuda()
     if module_name == "GroupedLinear":
-        return te.GroupedLinear(2, hidden_size, hidden_size, params_dtype=dtype).cuda()
+        return te.GroupedLinear(
+            2, hidden_size, hidden_size, bias=bias, params_dtype=dtype
+        ).cuda()
     if module_name == "TransformerLayer":
         return te.TransformerLayer(
             hidden_size,
@@ -1082,14 +1090,15 @@ def _make_identity_module(module_name, seed=1234, dtype=torch.bfloat16):
             4,
             hidden_dropout=0.0,
             attention_dropout=0.0,
+            bias=bias,
             params_dtype=dtype,
         ).cuda()
     raise ValueError(module_name)
 
 
-def _make_identity_module_pair(module_name, seed=1234, dtype=torch.bfloat16):
-    ref = _make_identity_module(module_name, seed=seed, dtype=dtype)
-    test = _make_identity_module(module_name, seed=seed + 1, dtype=dtype)
+def _make_identity_module_pair(module_name, seed=1234, dtype=torch.bfloat16, bias=True):
+    ref = _make_identity_module(module_name, seed=seed, dtype=dtype, bias=bias)
+    test = _make_identity_module(module_name, seed=seed + 1, dtype=dtype, bias=bias)
     with torch.no_grad():
         for p_test, p_ref in zip(test.parameters(), ref.parameters()):
             p_test.copy_(p_ref)
@@ -1138,7 +1147,11 @@ class TestIdentityTEModuleCoverage:
         ],
     )
     def test_identity_recipe_matches_bf16_bitwise(self, module_name, qfactory):
-        ref, test = _make_identity_module_pair(module_name, seed=7300)
+        # Keep the GEMM topology identical. Identity-backed grad-output uses an
+        # unfused bgrad path, while the plain BF16 path may fuse bgrad with
+        # wgrad. Those mathematically equivalent kernels need not accumulate
+        # wgrad in the same order on every architecture.
+        ref, test = _make_identity_module_pair(module_name, seed=7300, bias=False)
         x = _identity_module_input(module_name)
         recipe = CustomRecipe(qfactory=qfactory)
 
@@ -1530,10 +1543,34 @@ class TestIdentityLinear:
         torch.manual_seed(7)
         return torch.randn(self.BATCH, self.IN_F, device="cuda", dtype=torch.bfloat16)
 
+    @pytest.mark.parametrize(
+        "qfactory",
+        [
+            pytest.param(identity_all_factory, id="plain_identity"),
+            pytest.param(hybrid_all_identity_factory, id="hybrid_identity"),
+        ],
+    )
+    def test_identity_bias_path_matches_bf16_bitwise(self, qfactory):
+        """The unfused Identity bgrad path must preserve exact bias semantics.
+
+        Weight-gradient bitwise parity is covered with ``bias=False`` so both
+        sides use the same GEMM topology. This bias-enabled test separately
+        locks output, input-gradient, and bias-gradient parity to zero tolerance.
+        """
+        ref, test = _make_linears(self.IN_F, self.OUT_F, bias=True)
+        x = self._input()
+
+        y_ref, dx_ref, _ = _fwd_bwd(ref, x, recipe=None)
+        y_id, dx_id, _ = _fwd_bwd(test, x, recipe=CustomRecipe(qfactory=qfactory))
+
+        torch.testing.assert_close(y_id, y_ref, rtol=0.0, atol=0.0)
+        torch.testing.assert_close(dx_id, dx_ref, rtol=0.0, atol=0.0)
+        torch.testing.assert_close(test.bias.grad, ref.bias.grad, rtol=0.0, atol=0.0)
+
     def test_whole_layer_hp_matches_bf16_bitwise(self):
         """Identity for every slot => all GEMMs high precision => bitwise-equal
         to a plain BF16 te.Linear (no autocast)."""
-        ref, test = _make_linears(self.IN_F, self.OUT_F)
+        ref, test = _make_linears(self.IN_F, self.OUT_F, bias=False)
         x = self._input()
 
         y_ref, dx_ref, wg_ref = _fwd_bwd(ref, x, recipe=None)
@@ -1598,7 +1635,7 @@ class TestIdentityLinear:
         plain BF16 te.Linear. Complements the non-hybrid whole-layer-HP test: this
         exercises HybridQuantizedTensor with Identity sub-storages in both
         directions and the per-operand unwrap of every GEMM."""
-        ref, test = _make_linears(self.IN_F, self.OUT_F)
+        ref, test = _make_linears(self.IN_F, self.OUT_F, bias=False)
         x = self._input()
 
         y_ref, dx_ref, wg_ref = _fwd_bwd(ref, x, recipe=None)
@@ -1622,7 +1659,7 @@ class TestIdentityLinear:
         grad = Identity); the reference uses the global ``backward_override`` knob.
         Identical forward FP8 + identical original HP backward operands => bitwise.
         """
-        ref, test = _make_linears(self.IN_F, self.OUT_F)
+        ref, test = _make_linears(self.IN_F, self.OUT_F, bias=False)
         x = self._input()
 
         y_bo, dx_bo, wg_bo = _fwd_bwd(
@@ -1646,7 +1683,7 @@ class TestIdentityLinear:
         the hybrid path stores Identity columnwise data sourced from the rowwise
         dequantized value and uses Identity grad tensors.
         """
-        ref, test = _make_linears(self.IN_F, self.OUT_F)
+        ref, test = _make_linears(self.IN_F, self.OUT_F, bias=False)
         x = self._input()
 
         y_bo, dx_bo, wg_bo = _fwd_bwd(
@@ -1668,7 +1705,7 @@ class TestIdentityLinear:
         """Multi-step SGD: an all-Identity recipe must track a plain BF16
         te.Linear bitwise across optimizer steps (no drift from workspace caching
         or any hidden state)."""
-        ref, test = _make_linears(self.IN_F, self.OUT_F)
+        ref, test = _make_linears(self.IN_F, self.OUT_F, bias=False)
         opt_ref = torch.optim.SGD(ref.parameters(), lr=0.1)
         opt_test = torch.optim.SGD(test.parameters(), lr=0.1)
         recipe = CustomRecipe(qfactory=identity_all_factory)
@@ -1770,7 +1807,7 @@ class TestIdentityLinear:
     @pytest.mark.parametrize("use_reentrant", [True, False])
     def test_identity_activation_recompute_matches_bf16_bitwise(self, use_reentrant):
         """All-Identity recompute should be exactly the BF16 no-checkpoint path."""
-        ref, test = _make_linears(self.IN_F, self.OUT_F, seed=4242)
+        ref, test = _make_linears(self.IN_F, self.OUT_F, seed=4242, bias=False)
         recipe = CustomRecipe(qfactory=identity_all_factory)
         x = self._input()
 
