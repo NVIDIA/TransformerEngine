@@ -36,6 +36,7 @@ from transformer_engine.jax.cpp_extensions.ep import (
     ep_combine_fwd,
     get_ep_config,
 )
+from transformer_engine.jax.version_utils import is_collective_stream_supported
 
 
 # ── Test config ─────────────────────────────────────────────────────────────
@@ -659,6 +660,55 @@ class TestEP(unittest.TestCase):
             # JAX collapses size-1 mesh axes, so dp=1 reduces ("dp","ep") to "ep".
             expected = (("dp", "ep"),) if self.dp > 1 else ("ep",)
             self.assertEqual(tuple(compiled.output_shardings.spec), expected)
+
+    @unittest.skipUnless(
+        is_collective_stream_supported(),
+        "JAX/XLA lacks the gpu_stream:collective annotation (openxla/xla#39604)",
+    )
+    def test_z_dispatch_combine_on_collective_stream(self):
+        """Every EP FFI custom call must carry the collective-stream annotation
+        so XLA schedules them on the collective stream instead of overlapping
+        them with other collectives."""
+        T_dp, tokens, topk_idx, topk_w = self._make_random_inputs()
+        dp_spec = PartitionSpec(("dp", "ep"), None)
+        ep_spec_3d = PartitionSpec(("dp", "ep"), None, None)
+        ep_spec_2d = PartitionSpec(("dp", "ep"), None)
+
+        with self.mesh, global_shard_guard(self.mr):
+
+            @jax.jit
+            def run(idx, toks, w):
+                idx = jax.lax.with_sharding_constraint(idx, NamedSharding(self.mesh, dp_spec))
+                toks = jax.lax.with_sharding_constraint(toks, NamedSharding(self.mesh, dp_spec))
+                w = jax.lax.with_sharding_constraint(w, NamedSharding(self.mesh, dp_spec))
+                recv_t, recv_w, hm, tc = ep_dispatch(
+                    self.hk, idx, toks, w, self.recv_capacity_per_rank
+                )
+                recv_t = jax.lax.with_sharding_constraint(
+                    recv_t, NamedSharding(self.mesh, ep_spec_3d)
+                )
+                recv_w = jax.lax.with_sharding_constraint(
+                    recv_w, NamedSharding(self.mesh, ep_spec_2d)
+                )
+                weighted = self._preweight_expert_out(recv_t, recv_w)
+                out = ep_combine(self.hk, hm, tc, weighted, T_dp, out_sharding=(("dp", "ep"), None))
+                return jax.lax.with_sharding_constraint(out, NamedSharding(self.mesh, dp_spec))
+
+            hlo = run.lower(topk_idx, tokens, topk_w).compile().as_text()
+
+        # Every te_ep_* FFI custom call must carry the collective-stream
+        # annotation so XLA places it on the collective stream.
+        ep_lines = [l for l in hlo.splitlines() if 'custom_call_target="te_ep_' in l]
+        self.assertTrue(ep_lines, f"no te_ep_* custom calls in compiled HLO:\n{hlo}")
+        missing = [
+            l.strip()[:200]
+            for l in ep_lines
+            if '_xla_stream_annotation="collective"' not in l.replace(" ", "")
+        ]
+        self.assertFalse(
+            missing,
+            "te_ep_* custom calls missing collective-stream annotation:\n" + "\n".join(missing),
+        )
 
     def test_z_no_unexpected_reshard_in_hlo_bwd(self):
         """Compiled bwd HLO must not insert XLA collectives outside the EP FFI."""

@@ -404,6 +404,12 @@ class Float8BlockScaling(Recipe):
     NOTE: To relax the default constraint that scales be powers of 2, set env variable
     NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1 to override it for the recipe defaults.
 
+    NOTE: FP8 block scaling requires split accumulation for numerical accuracy, so
+    ``fp8_gemm_fprop``/``fp8_gemm_dgrad``/``fp8_gemm_wgrad`` all fix
+    ``use_split_accumulator=True`` (enforced in ``__post_init__``). The fused grouped
+    GEMM path (GroupedLinear) always uses split accumulation for FP8 block scaling and
+    ignores any caller- or recipe-supplied ``use_split_accumulator`` value.
+
     Parameters
     ----------
     fp8_format : {Format.E4M3, Format.HYBRID}, default = Format.E4M3
