@@ -2339,12 +2339,12 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc2_bias = self.fc2_bias if self.use_bias else None
             if not debug:
                 if fc1_weight_quantizer is not None:
-                    fc1_weight_quantizer.optimize_for_gemm = (
-                        self._enable_weight_preswizzle(fc1_weight_quantizer, fc1_weight)
+                    fc1_weight_quantizer.optimize_for_gemm = self._enable_weight_preswizzle(
+                        fc1_weight_quantizer, fc1_weight
                     )
                 if fc2_weight_quantizer is not None:
-                    fc2_weight_quantizer.optimize_for_gemm = (
-                        self._enable_weight_preswizzle(fc2_weight_quantizer, fc2_weight)
+                    fc2_weight_quantizer.optimize_for_gemm = self._enable_weight_preswizzle(
+                        fc2_weight_quantizer, fc2_weight
                     )
             if not self.fp8:
                 if isinstance(fc1_weight, Float8Tensor):
