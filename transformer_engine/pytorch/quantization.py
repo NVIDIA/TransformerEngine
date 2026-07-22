@@ -1065,9 +1065,7 @@ class autocast:
             FP8GlobalStateManager.set_autocast_state(self._fp8_state)
             if nested_autocast:
                 qstate = FP8GlobalStateManager.quantization_state
-                qstate.is_first_fp8_module = (
-                    qstate.is_first_fp8_module and live_is_first_fp8_module
-                )
+                qstate.is_first_fp8_module = qstate.is_first_fp8_module and live_is_first_fp8_module
             FP8GlobalStateManager.autocast_exit(
                 self._enabled,
                 _graph=self._graph,

@@ -113,9 +113,7 @@ def run_recovery(update_counter: UpdateCounter) -> None:
     layer = make_linear()
     inp = make_input()
     recipe = DelayedScaling(fp8_format=Format.HYBRID)
-    with torch.autocast("cuda", dtype=torch.bfloat16), te.autocast(
-        enabled=True, recipe=recipe
-    ):
+    with torch.autocast("cuda", dtype=torch.bfloat16), te.autocast(enabled=True, recipe=recipe):
         loss = layer(inp).float().square().mean()
     loss.backward()
     torch.cuda.synchronize()
@@ -130,9 +128,7 @@ def test_nested_autocast_does_not_revive_consumed_owner(update_counter):
     layers = torch.nn.ModuleList([make_linear(), make_linear()])
     inp = make_input()
     recipe = DelayedScaling(fp8_format=Format.HYBRID)
-    with torch.autocast("cuda", dtype=torch.bfloat16), te.autocast(
-        enabled=True, recipe=recipe
-    ):
+    with torch.autocast("cuda", dtype=torch.bfloat16), te.autocast(enabled=True, recipe=recipe):
         with te.autocast(enabled=True, recipe=recipe):
             out = layers[0](inp)
         loss = layers[1](out).float().square().mean()
@@ -154,9 +150,7 @@ def test_nested_autocast_inside_checkpoint_has_one_owner(update_counter, use_ree
             value = layers[0](value)
         return layers[1](value)
 
-    with torch.autocast("cuda", dtype=torch.bfloat16), te.autocast(
-        enabled=True, recipe=recipe
-    ):
+    with torch.autocast("cuda", dtype=torch.bfloat16), te.autocast(enabled=True, recipe=recipe):
         loss = te.checkpoint(body, inp, use_reentrant=use_reentrant).float().square().mean()
     loss.backward()
     torch.cuda.synchronize()
@@ -173,9 +167,7 @@ def test_original_forward_exception_restores_owner(update_counter):
     def fail(_value):
         raise RuntimeError("intentional original-forward failure")
 
-    with torch.autocast("cuda", dtype=torch.bfloat16), te.autocast(
-        enabled=True, recipe=recipe
-    ):
+    with torch.autocast("cuda", dtype=torch.bfloat16), te.autocast(enabled=True, recipe=recipe):
         with pytest.raises(RuntimeError, match="intentional original-forward failure"):
             te.checkpoint(fail, inp, use_reentrant=True)
         loss = recovery(inp).float().square().mean()
@@ -213,14 +205,17 @@ def test_recompute_body_exception_restores_state(update_counter):
             raise RuntimeError("intentional recompute failure")
         return result
 
-    with torch.autocast("cuda", dtype=torch.bfloat16), te.autocast(
-        enabled=True, recipe=recipe
-    ):
-        loss = te.checkpoint(
-            fail_during_recompute,
-            failed_input,
-            use_reentrant=True,
-        ).float().square().mean()
+    with torch.autocast("cuda", dtype=torch.bfloat16), te.autocast(enabled=True, recipe=recipe):
+        loss = (
+            te.checkpoint(
+                fail_during_recompute,
+                failed_input,
+                use_reentrant=True,
+            )
+            .float()
+            .square()
+            .mean()
+        )
     with pytest.raises(RuntimeError, match="intentional recompute failure"):
         loss.backward()
     assert_global_state_restored()
