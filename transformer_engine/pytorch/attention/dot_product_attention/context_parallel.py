@@ -4942,16 +4942,16 @@ def cp_per_step_configs(
     window_left, window_right = window_size
 
     def config(mask, s_q, s_kv, heads, gqa, bottom_right):
-        return dict(
-            attn_mask_type=mask,
-            max_seqlen_q=s_q,
-            max_seqlen_kv=s_kv,
-            num_attn_heads=heads,
-            num_gqa_groups=gqa,
-            window_size_left=window_left,
-            window_size_right=window_right,
-            bottom_right_diagonal=bottom_right,
-        )
+        return {
+            "attn_mask_type": mask,
+            "max_seqlen_q": s_q,
+            "max_seqlen_kv": s_kv,
+            "num_attn_heads": heads,
+            "num_gqa_groups": gqa,
+            "window_size_left": window_left,
+            "window_size_right": window_right,
+            "bottom_right_diagonal": bottom_right,
+        }
 
     if cp_comm_type == "a2a":
         # split heads across the cp ranks

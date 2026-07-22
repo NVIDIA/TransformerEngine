@@ -1486,50 +1486,50 @@ def get_attention_backend(
             bias_batch_size, bias_num_heads, bias_seqlen_q, bias_seqlen_kv = (
                 fu_core_attention_bias_shape
             )
-        base_fused_attn_kwargs = dict(
-            is_training=is_training,
-            deterministic=deterministic,
-            cuda_graph=cuda_graph,
-            return_max_logit=return_max_logit,
-            attn_mask_type=AttnMaskType[attn_mask_type],
-            bias_type=AttnBiasType[fu_core_attention_bias_type],
-            window_size_left=window_size[0],
-            window_size_right=window_size[1],
-            bottom_right_diagonal=bottom_right_diagonal,
-            softmax_type=SoftmaxType[softmax_type],
-            scaling_mode=scaling_mode,
-            dropout=attention_dropout,
-            attn_scale=softmax_scale,
-            qkv_dtype=qkv_type,
-            o_dtype=o_type,
-            do_dtype=do_type,
-            dqkv_dtype=dqkv_type,
-            qkv_layout=QKVLayout[spec.qkv_layout],
-            o_format=QKVFormat[o_format],
-            do_format=QKVFormat[do_format],
-            dqkv_layout=QKVLayout[dqkv_layout],
-            qkv_scale_inv_format=QKVFormat[qkv_scale_inv_format],
-            do_scale_inv_format=QKVFormat[do_scale_inv_format],
-            batch_size=batch_size,
-            num_attn_heads=num_heads,
-            num_gqa_groups=num_gqa_groups,
-            head_dim_qk=head_dim_qk,
-            head_dim_v=head_dim_v,
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_kv=max_seqlen_kv,
-            num_tokens_q=num_tokens_q,
-            num_tokens_kv=num_tokens_kv,
-            num_pages_k=num_pages_k,
-            num_pages_v=num_pages_v,
-            page_size_k=page_size_k,
-            page_size_v=page_size_v,
-            max_pages_per_seq_k=max_pages_per_seq_k,
-            max_pages_per_seq_v=max_pages_per_seq_v,
-            bias_batch_size=bias_batch_size,
-            bias_num_heads=bias_num_heads,
-            bias_seqlen_q=bias_seqlen_q,
-            bias_seqlen_kv=bias_seqlen_kv,
-        )
+        base_fused_attn_kwargs = {
+            "is_training": is_training,
+            "deterministic": deterministic,
+            "cuda_graph": cuda_graph,
+            "return_max_logit": return_max_logit,
+            "attn_mask_type": AttnMaskType[attn_mask_type],
+            "bias_type": AttnBiasType[fu_core_attention_bias_type],
+            "window_size_left": window_size[0],
+            "window_size_right": window_size[1],
+            "bottom_right_diagonal": bottom_right_diagonal,
+            "softmax_type": SoftmaxType[softmax_type],
+            "scaling_mode": scaling_mode,
+            "dropout": attention_dropout,
+            "attn_scale": softmax_scale,
+            "qkv_dtype": qkv_type,
+            "o_dtype": o_type,
+            "do_dtype": do_type,
+            "dqkv_dtype": dqkv_type,
+            "qkv_layout": QKVLayout[spec.qkv_layout],
+            "o_format": QKVFormat[o_format],
+            "do_format": QKVFormat[do_format],
+            "dqkv_layout": QKVLayout[dqkv_layout],
+            "qkv_scale_inv_format": QKVFormat[qkv_scale_inv_format],
+            "do_scale_inv_format": QKVFormat[do_scale_inv_format],
+            "batch_size": batch_size,
+            "num_attn_heads": num_heads,
+            "num_gqa_groups": num_gqa_groups,
+            "head_dim_qk": head_dim_qk,
+            "head_dim_v": head_dim_v,
+            "max_seqlen_q": max_seqlen_q,
+            "max_seqlen_kv": max_seqlen_kv,
+            "num_tokens_q": num_tokens_q,
+            "num_tokens_kv": num_tokens_kv,
+            "num_pages_k": num_pages_k,
+            "num_pages_v": num_pages_v,
+            "page_size_k": page_size_k,
+            "page_size_v": page_size_v,
+            "max_pages_per_seq_k": max_pages_per_seq_k,
+            "max_pages_per_seq_v": max_pages_per_seq_v,
+            "bias_batch_size": bias_batch_size,
+            "bias_num_heads": bias_num_heads,
+            "bias_seqlen_q": bias_seqlen_q,
+            "bias_seqlen_kv": bias_seqlen_kv,
+        }
         # Context-parallel per-step configs
         if context_parallel:
             from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
@@ -2482,12 +2482,12 @@ def get_fused_attn_spec(recipe, qkv_dtype, qkv_layout, *, cs_o_in_f16, nominal_d
             eff_qkv_layout = qkv_layout  # MXFP8 fast path
         else:
             eff_qkv_layout = "bhsd_bhsd_bhsd"  # MXFP8 slow path
-    layout_kwargs = dict(
-        qkv_layout=eff_qkv_layout,
-        o_format=q_format,
-        do_format=q_format,
-        dqkv_layout=qkv_layout,
-    )
+    layout_kwargs = {
+        "qkv_layout": eff_qkv_layout,
+        "o_format": q_format,
+        "do_format": q_format,
+        "dqkv_layout": qkv_layout,
+    }
 
     if qkv_dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
         ref = TE_DType[nominal_dtype if nominal_dtype is not None else torch.bfloat16]

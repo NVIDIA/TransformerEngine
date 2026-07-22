@@ -842,9 +842,9 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
 
         if enable_fused_attn and not has_fused_attn_kernel:
             warnings.warn(
-                f"Falling back to the unfused attention backend as fused attention does not support"
-                f" this config. Set NVTE_DEBUG=1 and NVTE_DEBUG_LEVEL=2 to see the detailed"
-                f" rejection reason.\n"
+                "Falling back to the unfused attention backend as fused attention does not support"
+                " this config. Set NVTE_DEBUG=1 and NVTE_DEBUG_LEVEL=2 to see the detailed"
+                " rejection reason.\n"
             )
 
         dropout_rng = None
