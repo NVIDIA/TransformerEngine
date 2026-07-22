@@ -726,8 +726,12 @@ class TestEpDomainGrouping(unittest.TestCase):
     """EP domains group ranks sharing all non-ep coords, so an orthogonal tp
     axis splits the world into one EP domain per tp coordinate."""
 
-    @unittest.skipUnless(is_devices_enough(8), "requires 8 devices")
     def test_ep_tp_splits_domains(self):
+        # Gate on device count inside the test: calling jax.devices() at
+        # class-definition time would initialize the XLA backend before
+        # jax.distributed.initialize().
+        if not is_devices_enough(8):
+            self.skipTest("requires 8 devices")
         # ep=4, tp=2: tp must yield 2 EP domains, each a fixed tp coordinate.
         mesh = Mesh(np.asarray(jax.devices()[:8]).reshape(4, 2), ("expert", "tensor"))
         # Single host shares one process_index; inject row-major ranks to mimic
@@ -765,12 +769,14 @@ if __name__ == "__main__":
     )
 
     loader = unittest.TestLoader()
+    test_cases = (TestEP, TestEpDomainGrouping)
     target = os.environ.get("TARGET_TEST")
     if target:
         name = target.split(".")[-1]
-        suite = loader.loadTestsFromName(name, TestEP)
+        cls = next((c for c in test_cases if hasattr(c, name)), TestEP)
+        suite = loader.loadTestsFromName(name, cls)
     else:
-        suite = loader.loadTestsFromTestCase(TestEP)
+        suite = unittest.TestSuite(loader.loadTestsFromTestCase(c) for c in test_cases)
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)
     sys.exit(0 if result.wasSuccessful() else 1)
