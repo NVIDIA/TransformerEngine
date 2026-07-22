@@ -5,6 +5,7 @@
  ************************************************************************/
 
 #include "../extensions.h"
+#include "../../../common/util/cuda_driver.h"
 
 #ifdef NVTE_ENABLE_NVSHMEM
 #include <nvshmem.h>
@@ -17,7 +18,62 @@
 #include <torch/cuda.h>
 #include <torch/extension.h>
 
+#include <array>
+#include <atomic>
+#include <cstdint>
+#include <limits>
+
 namespace transformer_engine::pytorch {
+
+namespace {
+
+std::array<std::atomic<int64_t>, 4> cp_global_grad_return_epochs{};
+
+at::Tensor cp_grad_return_slot(const at::Tensor &buffer, const at::Tensor &reference,
+                               int cp_size, int writer_rank, const char *name) {
+  NVTE_CHECK(buffer.defined() && buffer.dim() == reference.dim() + 1,
+             name, " must have shape [CP, S, B, H, D].");
+  NVTE_CHECK(buffer.size(0) == cp_size, name, " leading dimension must equal CP size.");
+  for (int dim = 0; dim < reference.dim(); ++dim) {
+    NVTE_CHECK(buffer.size(dim + 1) == reference.size(dim),
+               name, " trailing dimensions must match local K/V.");
+  }
+  return buffer.select(0, writer_rank);
+}
+
+at::Tensor cp_epoch_slot(const at::Tensor &epochs, int writer_rank, const char *name) {
+  NVTE_CHECK(epochs.is_cuda() && epochs.scalar_type() == torch::kInt32 &&
+                 epochs.is_contiguous() && epochs.dim() == 1 &&
+                 epochs.size(0) > writer_rank,
+             name, " must be a contiguous CUDA int32 vector indexed by writer rank.");
+  return epochs.select(0, writer_rank);
+}
+
+void cp_stream_write_epoch(const at::Tensor &epochs, int writer_rank, int64_t epoch) {
+  NVTE_CHECK(epoch > 0 && epoch <= static_cast<int64_t>(std::numeric_limits<int32_t>::max()),
+             "CP gradient epoch must fit in int32.");
+  at::Tensor slot = cp_epoch_slot(epochs, writer_rank, "peer_grad_committed_epoch");
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  NVTE_CHECK_CUDA_DRIVER(cuStreamWriteValue32(
+      reinterpret_cast<CUstream>(stream), reinterpret_cast<CUdeviceptr>(slot.data_ptr()),
+      static_cast<cuuint32_t>(epoch), 0));
+}
+
+void cp_stream_wait_epochs(const at::Tensor &epochs, int cp_size, int64_t epoch) {
+  NVTE_CHECK(epochs.is_cuda() && epochs.scalar_type() == torch::kInt32 &&
+                 epochs.is_contiguous() && epochs.dim() == 1 && epochs.size(0) == cp_size,
+             "grad_committed_epoch must be a contiguous CUDA int32 vector of CP size.");
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const auto *base = epochs.data_ptr<int32_t>();
+  for (int source = 0; source < cp_size; ++source) {
+    NVTE_CHECK_CUDA_DRIVER(cuStreamWaitValue32(
+        reinterpret_cast<CUstream>(stream),
+        reinterpret_cast<CUdeviceptr>(base + source), static_cast<cuuint32_t>(epoch),
+        CU_STREAM_WAIT_VALUE_GEQ));
+  }
+}
+
+}  // namespace
 
 void init_nvshmem_backend(c10d::ProcessGroup *process_group) {
 #ifdef NVTE_ENABLE_NVSHMEM
@@ -119,6 +175,61 @@ void nvshmem_send_on_current_stream(torch::Tensor src, torch::Tensor dst, int pe
       "distributed process groups when TE is compiled with NVTE_ENABLE_NVSHMEM=1!");
 #endif
 }
+
+std::vector<at::Tensor> nvshmem_cp_global_grad_return_execute(
+    at::Tensor dk_global, at::Tensor dv_global, at::Tensor key, at::Tensor value,
+    at::Tensor grad_key_return, at::Tensor grad_value_return,
+    at::Tensor grad_committed_epoch,
+    const std::vector<at::Tensor> &peer_grad_key_returns,
+    const std::vector<at::Tensor> &peer_grad_value_returns,
+    const std::vector<at::Tensor> &peer_grad_committed_epochs, int cp_size, int rank) {
+  NVTE_CHECK(cp_size == 4 && rank >= 0 && rank < cp_size,
+             "NVSHMEM global gradient return currently requires CP=4.");
+  NVTE_CHECK(key.is_cuda() && value.is_cuda() && dk_global.is_cuda() && dv_global.is_cuda(),
+             "NVSHMEM global gradient return requires CUDA tensors.");
+  NVTE_CHECK(key.sizes() == value.sizes() && dk_global.sizes() == dv_global.sizes(),
+             "K/V and global dK/dV pairs must have matching shapes.");
+  NVTE_CHECK(dk_global.dim() == key.dim() && dk_global.size(0) == key.size(0) * cp_size,
+             "Global dK/dV sequence length must be CP times local K/V sequence length.");
+  for (int dim = 1; dim < key.dim(); ++dim) {
+    NVTE_CHECK(dk_global.size(dim) == key.size(dim),
+               "Global dK/dV non-sequence dimensions must match local K/V.");
+  }
+  NVTE_CHECK(key.size(0) % 2 == 0, "Local K/V sequence length must be even.");
+  NVTE_CHECK(static_cast<int>(peer_grad_key_returns.size()) == cp_size &&
+                 static_cast<int>(peer_grad_value_returns.size()) == cp_size &&
+                 static_cast<int>(peer_grad_committed_epochs.size()) == cp_size,
+             "Expected one symmetric gradient and epoch view per CP owner.");
+
+  cp_grad_return_slot(grad_key_return, key, cp_size, rank, "grad_key_return");
+  cp_grad_return_slot(grad_value_return, value, cp_size, rank, "grad_value_return");
+  const int64_t half = key.size(0) / 2;
+  for (int owner = 0; owner < cp_size; ++owner) {
+    at::Tensor key_slot = cp_grad_return_slot(
+        peer_grad_key_returns[owner], key, cp_size, rank, "peer_grad_key_return");
+    at::Tensor value_slot = cp_grad_return_slot(
+        peer_grad_value_returns[owner], value, cp_size, rank, "peer_grad_value_return");
+    key_slot.narrow(0, 0, half).copy_(dk_global.narrow(0, owner * half, half));
+    key_slot.narrow(0, half, half).copy_(dk_global.narrow(0, (7 - owner) * half, half));
+    value_slot.narrow(0, 0, half).copy_(dv_global.narrow(0, owner * half, half));
+    value_slot.narrow(0, half, half).copy_(dv_global.narrow(0, (7 - owner) * half, half));
+  }
+
+  const int64_t epoch = cp_global_grad_return_epochs[rank].fetch_add(1) + 1;
+  for (int owner = 0; owner < cp_size; ++owner) {
+    cp_stream_write_epoch(peer_grad_committed_epochs[owner], rank, epoch);
+  }
+  cp_stream_wait_epochs(grad_committed_epoch, cp_size, epoch);
+
+  at::Tensor dk = grad_key_return.select(0, 0).clone();
+  at::Tensor dv = grad_value_return.select(0, 0).clone();
+  for (int source = 1; source < cp_size; ++source) {
+    dk.add_(grad_key_return.select(0, source));
+    dv.add_(grad_value_return.select(0, source));
+  }
+  return {dk.to(key.scalar_type()), dv.to(value.scalar_type())};
+}
+
 void nvshmem_finalize() {
 #ifdef NVTE_ENABLE_NVSHMEM
   nvshmem_finalize();

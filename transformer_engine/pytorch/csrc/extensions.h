@@ -121,6 +121,14 @@ std::vector<py::object> fused_attn_bwd(
     const std::optional<at::Tensor> cu_seqlens_kv_padded, py::handle s_quantizer,
     py::handle dp_quantizer, py::handle dqkv_quantizer, bool cuda_graph);
 
+std::vector<at::Tensor> nvshmem_cp_global_grad_return_execute(
+    at::Tensor dk_global, at::Tensor dv_global, at::Tensor key, at::Tensor value,
+    at::Tensor grad_key_return, at::Tensor grad_value_return,
+    at::Tensor grad_committed_epoch,
+    const std::vector<at::Tensor> &peer_grad_key_returns,
+    const std::vector<at::Tensor> &peer_grad_value_returns,
+    const std::vector<at::Tensor> &peer_grad_committed_epochs, int cp_size, int rank);
+
 at::Tensor fa_prepare_fwd(at::Tensor qkvi);
 at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);
 
