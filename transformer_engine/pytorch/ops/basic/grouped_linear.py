@@ -48,14 +48,27 @@ from .._common import (
     get_main_grad_from_param,
     is_quantized_tensor,
     maybe_dequantize,
+    validate_or_alloc_output,
     view_main_grad_as_grouped_buffer,
 )
 from ..op import BasicOperation, OperationContext
+from ...distributed_weight import (
+    finalize_weight_grads,
+    is_distributed_weight,
+    materialize_weight_for_backward,
+    materialize_weight_for_forward,
+)
 from ...tensor import GroupedTensor, GroupedTensorStorage
 from ...triton.grouped_dbias_dscales import (
     compute_grouped_dbias,
     compute_grouped_dbias_dscales,
 )
+
+
+# Keys for passing caller-provided output and grad-input buffers to a grouped
+# linear (or fused grouped MLP) through Sequential's ``op_kwargs``.
+OUTPUT_BUFFER_KEY = "output"
+GRAD_INPUT_BUFFER_KEY = "grad_input"
 
 
 class GroupedLinear(BasicOperation):
@@ -898,6 +911,26 @@ class GroupedLinear(BasicOperation):
             return [self.weight]
         return [getattr(self, f"weight{idx}") for idx in range(self.num_groups)]
 
+    def _forward_weight_list(self) -> list[torch.Tensor]:
+        """Per-expert forward weights, materialized (all-gathered) when distributed."""
+        weights = [getattr(self, f"weight{idx}") for idx in range(self.num_groups)]
+        if is_distributed_weight(weights[0]):
+            weights = materialize_weight_for_forward(weights)
+        return weights
+
+    def _backward_weight_setup(self):
+        """Return ``(origin_weights, is_dist_weight, dgrad_weights)``; dgrad weights are the
+        re-materialized (all-gathered) weights when distributed, else ``None``."""
+        origin_weights = self._get_weight_tensors()
+        is_dist_weight = is_distributed_weight(origin_weights[0])
+        dgrad_weights = materialize_weight_for_backward(origin_weights) if is_dist_weight else None
+        return origin_weights, is_dist_weight, dgrad_weights
+
+    def _is_distributed_weight(self) -> bool:
+        """Whether this op's weights are distributed (materialized per fwd/bwd, not saved)."""
+        leader = self.weight if self.single_grouped_weight else self.weight0
+        return is_distributed_weight(leader)
+
     def _get_grouped_bias_for_gemm(
         self,
         dtype: torch.dtype,
@@ -986,6 +1019,9 @@ class GroupedLinear(BasicOperation):
         if self._scale_bias:
             scales = basic_op_extra_inputs[0][1]
 
+        # Caller-provided output buffer (backward grad-input buffer is read in save_ctx).
+        out_buffer = basic_op_kwargs[0].get(OUTPUT_BUFFER_KEY)
+
         # Dispatch: graph-safe GroupedTensor flow whenever it can be used.
         # See ``_is_graph_safe_path_supported`` for the gating rationale --
         # in short it requires Hopper (SM90+) plus a supported dtype /
@@ -1010,6 +1046,7 @@ class GroupedLinear(BasicOperation):
                 input_requires_grad=input_requires_grad,
                 weight_requires_grad=weight_requires_grad,
                 device=device,
+                out_buffer=out_buffer,
             )
         else:
             out, tensors_to_save = self._fuser_forward_split_quantize(
@@ -1023,6 +1060,7 @@ class GroupedLinear(BasicOperation):
                 input_requires_grad=input_requires_grad,
                 weight_requires_grad=weight_requires_grad,
                 device=device,
+                out_buffer=out_buffer,
             )
 
         # Save tensors and autograd metadata on the basic-op context.
@@ -1111,6 +1149,8 @@ class GroupedLinear(BasicOperation):
             ctx.dtype = weight_param.dtype
         ctx.input_requires_grad = requires_grad[0]
         ctx.weight_requires_grad = requires_grad[0] and weight_param.requires_grad
+        # Caller-provided backward grad-input buffer.
+        ctx.dgrad_out = basic_op_kwargs[0].get(GRAD_INPUT_BUFFER_KEY)
 
     # ==================================================================
     # Legacy `tex.split_quantize` + `general_grouped_gemm` flow.
@@ -1129,6 +1169,7 @@ class GroupedLinear(BasicOperation):
         input_requires_grad: bool,
         weight_requires_grad: bool,
         device: torch.device,
+        out_buffer: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, tuple[Optional[torch.Tensor], ...]]:
         """Legacy ``tex.split_quantize`` + ``general_grouped_gemm`` flow."""
         num_groups = self.num_groups
@@ -1143,7 +1184,7 @@ class GroupedLinear(BasicOperation):
             if weights is None:
                 weights = self.weight.split_into_quantized_tensors()
         else:
-            weights = [getattr(self, f"weight{idx}") for idx in range(num_groups)]
+            weights = self._forward_weight_list()  # materialized when distributed
         bs = None
         if has_bias:
             bs = self._get_bias_tensors(dtype)
@@ -1173,7 +1214,7 @@ class GroupedLinear(BasicOperation):
         # Allocate output tensor
         in_shape = list(input_.size())
         out_shape = in_shape[:-1] + [self.out_features]
-        out = torch.empty(out_shape, dtype=dtype, device=device)
+        out = validate_or_alloc_output(out_buffer, out_shape, dtype, device)
 
         # Perform GEMMs
         use_gemm_bias = has_bias and not self._scale_bias
@@ -1198,7 +1239,8 @@ class GroupedLinear(BasicOperation):
                 out_splits[i].add_(bs[i].unsqueeze(0) * scales_splits[i].unsqueeze(-1))
 
         # Prepare weight tensors for backward pass
-        if not input_requires_grad:
+        # Distributed weights are re-materialized in backward, so we never save the gathered weight
+        if not input_requires_grad or self._is_distributed_weight():
             ws = [None] * num_groups
         elif with_quantized_compute:
             for w, weight_param in zip(ws, weights):
@@ -1239,6 +1281,7 @@ class GroupedLinear(BasicOperation):
         input_requires_grad: bool,
         weight_requires_grad: bool,
         device: torch.device,
+        out_buffer: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, tuple[Optional[torch.Tensor], ...]]:
         """Graph-safe GroupedTensor forward path (pure compute).
         Returns ``(output, tensors_to_save)``. ``split_sizes``,
@@ -1290,7 +1333,7 @@ class GroupedLinear(BasicOperation):
         else:
             # Discrete weights
             grouped_weights = self._get_discrete_weights_for_gemm(
-                [getattr(self, f"weight{idx}") for idx in range(num_groups)],
+                self._forward_weight_list(),
                 weight_quantizers,
                 columnwise_usage=input_requires_grad,
                 with_quantized_compute=with_quantized_compute,
@@ -1299,7 +1342,7 @@ class GroupedLinear(BasicOperation):
 
         # Allocate output buffer and wrap as a GroupedTensor view.
         out_shape = original_shape[:-1] + [self.out_features]
-        out = torch.empty(out_shape, dtype=dtype, device=device)
+        out = validate_or_alloc_output(out_buffer, out_shape, dtype, device)
         grouped_out = GroupedTensorStorage(
             shape=(total_tokens, self.out_features),
             dtype=dtype,
@@ -1333,7 +1376,8 @@ class GroupedLinear(BasicOperation):
             bias_scale=bias_scale,
         )
 
-        if not input_requires_grad:
+        # Distributed weights are re-materialized in backward, so never save the gathered weight.
+        if not input_requires_grad or self._is_distributed_weight():
             grouped_weights = None if self.single_grouped_weight else [None] * num_groups
 
         if not weight_requires_grad:
@@ -1393,7 +1437,7 @@ class GroupedLinear(BasicOperation):
     ]:
         num_groups = self.num_groups
         has_bias = self.has_bias
-        weights = self._get_weight_tensors()
+        weights, is_dist_weight, dist_dgrad_weights = self._backward_weight_setup()
         device = weights[0].device
 
         # Saved tensors from forward pass. Layout:
@@ -1445,7 +1489,8 @@ class GroupedLinear(BasicOperation):
             grad_biases = [dbias_packed[idx].to(dtype=ctx.dtype) for idx in range(num_groups)]
 
         # Initialize grad weight buffers.
-        accumulate_into_main_grad = self._accumulate_into_main_grad
+        # Distributed weights reduce their own grads (finalize); never accumulate into main_grad.
+        accumulate_into_main_grad = self._accumulate_into_main_grad and not is_dist_weight
         grad_weights = [None] * num_groups
         final_weight_grads: list[Optional[torch.Tensor]] = (
             [None] if self.single_grouped_weight else [None] * num_groups
@@ -1489,13 +1534,11 @@ class GroupedLinear(BasicOperation):
         if ctx.input_requires_grad:
             out_shape = list(grad_output.size())
             in_shape = out_shape[:-1] + [self.in_features]
-            grad_input = torch.empty(
-                in_shape,
-                dtype=ctx.dtype,
-                device=device,
+            grad_input = validate_or_alloc_output(
+                getattr(ctx, "dgrad_out", None), in_shape, ctx.dtype, device
             )
             general_grouped_gemm(
-                ws,
+                dist_dgrad_weights if is_dist_weight else ws,
                 dys,
                 [grad_input],
                 [None] * num_groups,  # quantization_params
@@ -1540,11 +1583,16 @@ class GroupedLinear(BasicOperation):
         if not delay_wgrad:
             clear_tensor_data(*xs)
 
+        # Distributed weights: finalize (e.g. reduce-scatter) the freshly computed wgrads per shard.
+        # Return discarded (see finalize_weight_grads); the dummy is returned below instead.
+        if ctx.weight_requires_grad and is_dist_weight:
+            assert not delay_wgrad, "delayed wgrad unsupported with distributed weights."
+            finalize_weight_grads(weights, grad_weights)
         # Megatron-LM wgrad fusion: regardless of overwrite vs. accumulate,
         # signal that ``main_grad`` already carries the wgrad and replace
         # ``.grad`` with a dummy so DDP/FSDP hooks won't add ``.grad`` into
         # ``main_grad`` again.
-        if ctx.weight_requires_grad and self._accumulate_into_main_grad:
+        if ctx.weight_requires_grad and (is_dist_weight or self._accumulate_into_main_grad):
             final_weight_grads = get_dummy_wgrads_for_params(weights)
         elif ctx.weight_requires_grad and delay_wgrad:
             final_weight_grads = [None] if self.single_grouped_weight else [None] * num_groups
@@ -1578,7 +1626,7 @@ class GroupedLinear(BasicOperation):
     ]:
         num_groups = self.num_groups
         has_bias = self.has_bias
-        weights = self._get_weight_tensors()
+        weights, is_dist_weight, dist_dgrad_weights = self._backward_weight_setup()
         device = weights[0].device
         dtype = ctx.dtype
 
@@ -1668,7 +1716,9 @@ class GroupedLinear(BasicOperation):
         grad_input = None
         if ctx.input_requires_grad:
             grad_input_shape = list(grad_output.size())[:-1] + [self.in_features]
-            grad_input = torch.empty(grad_input_shape, dtype=dtype, device=device)
+            grad_input = validate_or_alloc_output(
+                getattr(ctx, "dgrad_out", None), grad_input_shape, dtype, device
+            )
             grouped_grad_input = GroupedTensorStorage(
                 shape=(total_tokens, self.in_features),
                 dtype=dtype,
@@ -1679,7 +1729,7 @@ class GroupedLinear(BasicOperation):
                 tensor_offsets=base_split_offsets * self.in_features,
             )
             general_grouped_gemm_for_grouped_tensor(
-                ws,
+                dist_dgrad_weights if is_dist_weight else ws,
                 grouped_dy,
                 grouped_grad_input,
                 layout="NN",
@@ -1725,7 +1775,8 @@ class GroupedLinear(BasicOperation):
                 final_weight_grads[0] = grouped_wgrad.rowwise_data.view(num_groups, *weight_shape)
                 wgrad_output = grouped_wgrad
             else:
-                if self._accumulate_into_main_grad:
+                # Distributed weights finalize wgrads (below); never accumulate into main_grad.
+                if self._accumulate_into_main_grad and not is_dist_weight:
                     final_weight_grads = [
                         get_main_grad_from_param(w, op_label="GroupedLinear") for w in weights
                     ]
@@ -1755,11 +1806,16 @@ class GroupedLinear(BasicOperation):
             else:
                 wgrad_gemm(grouped_x, grouped_dy, wgrad_output)
 
+        # Distributed weights: finalize (e.g. reduce-scatter) the freshly computed wgrads per shard.
+        # Return discarded (see finalize_weight_grads); the dummy is returned below instead.
+        if ctx.weight_requires_grad and is_dist_weight:
+            assert not delay_wgrad, "delayed wgrad unsupported with distributed weights."
+            finalize_weight_grads(weights, final_weight_grads)
         # Megatron-LM wgrad fusion: regardless of overwrite vs. accumulate,
         # signal that ``main_grad`` already carries the wgrad and replace
         # ``.grad`` with a dummy so DDP/FSDP hooks won't add ``.grad`` into
         # ``main_grad`` again.
-        if ctx.weight_requires_grad and self._accumulate_into_main_grad:
+        if ctx.weight_requires_grad and (is_dist_weight or self._accumulate_into_main_grad):
             final_weight_grads = get_dummy_wgrads_for_params(weights)
         elif ctx.weight_requires_grad and delay_wgrad:
             final_weight_grads = [None] if self.single_grouped_weight else [None] * num_groups

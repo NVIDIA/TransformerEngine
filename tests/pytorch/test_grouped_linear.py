@@ -1499,6 +1499,9 @@ _ALL_BOOLEAN = all_boolean
 _fp8_available, _reason_for_no_fp8 = fp8_available, reason_for_no_fp8
 _mxfp8_available, _reason_for_no_mxfp8 = mxfp8_available, reason_for_no_mxfp8
 _nvfp4_available, _reason_for_no_nvfp4 = nvfp4_available, reason_for_no_nvfp4
+_fp8_block_scaling_available, _reason_for_no_fp8_block_scaling = te.is_fp8_block_scaling_available(
+    return_reason=True
+)
 
 
 @pytest.fixture(autouse=True)
@@ -1590,8 +1593,14 @@ def _run_grouped_linear_path(
             recipe.NVFP4BlockScaling(disable_stochastic_rounding=True),
             marks=pytest.mark.skipif(not _nvfp4_available, reason=_reason_for_no_nvfp4),
         ),
+        pytest.param(
+            recipe.Float8BlockScaling(),
+            marks=pytest.mark.skipif(
+                not _fp8_block_scaling_available, reason=_reason_for_no_fp8_block_scaling
+            ),
+        ),
     ],
-    ids=["bf16", "fp8_current_scaling", "mxfp8", "nvfp4"],
+    ids=["bf16", "fp8_current_scaling", "mxfp8", "nvfp4", "fp8_block_scaling"],
 )
 @pytest.mark.parametrize("bias", _ALL_BOOLEAN)
 @pytest.mark.parametrize("fp8_model_params", _ALL_BOOLEAN)
@@ -1605,10 +1614,13 @@ def test_grouped_linear_grouped_tensor_path_matches_legacy(
         pytest.skip(
             "GroupedTensor grouped GEMM path requires Hopper (SM90) or Blackwell (SM10x and SM110)."
         )
-    # MXFP8/NVFP4 grouped quantization kernels require Blackwell, but FP8 per-tensor
-    # current scaling also runs on the Hopper grouped GEMM path.
+    # MXFP8/NVFP4 grouped quantization kernels require Blackwell; FP8 per-tensor
+    # current scaling runs on Hopper and Blackwell; FP8 block scaling is Hopper-only.
     is_current_scaling = use_fp8 and fp8_recipe.float8_current_scaling()
-    if use_fp8 and not is_current_scaling and device_capability < (10, 0):
+    is_block_scaling = use_fp8 and fp8_recipe.float8_block_scaling()
+    if is_block_scaling and not (9, 0) <= device_capability < (10, 0):
+        pytest.skip("Fused grouped FP8 block-scaling requires Hopper (SM90).")
+    if use_fp8 and not is_current_scaling and not is_block_scaling and device_capability < (10, 0):
         pytest.skip(
             "Quantized GroupedTensor grouped GEMM path (MXFP8/NVFP4) requires Blackwell (SM100+)."
         )
@@ -1708,6 +1720,102 @@ def test_grouped_linear_grouped_tensor_path_single_grouped_bias_delay_wgrad(monk
     y = grouped_linear(x, m_splits)
     y.backward(dy)
     grouped_linear.backward_dw()
+
+
+@pytest.mark.parametrize("use_fused_path", [False, True], ids=["legacy", "grouped_tensor"])
+@pytest.mark.parametrize("supply", ["out", "dgrad_out", "both"])
+def test_grouped_linear_caller_output_buffers(use_fused_path, supply, monkeypatch):
+    """Caller-provided forward out and/or backward dgrad_out buffers.
+
+    Checks that a supplied buffer is written in place (bit-for-bit vs internal allocation)
+    and, on the fused path with a padded input, that only the valid rows are touched.
+    """
+    if use_fused_path:
+        device_capability = torch.cuda.get_device_capability()
+        if not (9, 0) <= device_capability <= (11, 0):
+            pytest.skip(
+                "GroupedTensor grouped GEMM path requires Hopper (SM90) or Blackwell"
+                " (SM10x and SM110)."
+            )
+        cublaslt_version = tex.get_cublasLt_version()
+        if device_capability < (10, 0) and cublaslt_version < 130400:
+            pytest.skip("Grouped GEMM on Hopper requires cuBLAS 13.4+.")
+        if cublaslt_version < 130300:
+            pytest.skip("Grouped GEMM requires cuBLAS 13.3+.")
+
+    monkeypatch.setenv(_FUSED_GROUPED_GEMM_ENV, "1" if use_fused_path else "0")
+    give_out = supply in ("out", "both")
+    give_dgrad = supply in ("dgrad_out", "both")
+
+    dtype = torch.bfloat16
+    num_gemms = 3
+    in_features = 128
+    out_features = 128
+    m_splits_list = [64, 96, 80]
+    valid_tokens = sum(m_splits_list)  # 240
+    # The fused path supports a padded input; the legacy path requires tight packing.
+    num_rows = valid_tokens + (80 if use_fused_path else 0)
+    m_splits = (
+        torch.tensor(m_splits_list, dtype=torch.int64, device="cuda")
+        if use_fused_path
+        else m_splits_list
+    )
+
+    torch.manual_seed(1234)
+    x_base = (0.1 * torch.randn(num_rows, in_features, device="cuda")).to(dtype)
+    dy = torch.zeros(num_rows, out_features, dtype=dtype, device="cuda")
+    dy[:valid_tokens] = (0.1 * torch.randn(valid_tokens, out_features, device="cuda")).to(dtype)
+
+    grouped_linear = GroupedLinear(
+        num_gemms,
+        in_features,
+        out_features,
+        bias=False,
+        params_dtype=dtype,
+        device="cuda",
+    )
+
+    # Reference: internal allocation.
+    x_ref = x_base.detach().clone().requires_grad_(True)
+    y_ref = grouped_linear(x_ref, m_splits)
+    y_ref.backward(dy)
+
+    # Caller-provided buffers with a sentinel-filled tail (only the requested ones).
+    sentinel = 7.0
+    out_buf = (
+        torch.full((num_rows, out_features), sentinel, dtype=dtype, device="cuda")
+        if give_out
+        else None
+    )
+    dgrad_buf = (
+        torch.full((num_rows, in_features), sentinel, dtype=dtype, device="cuda")
+        if give_dgrad
+        else None
+    )
+    x = x_base.detach().clone().requires_grad_(True)
+    y = grouped_linear(x, m_splits, out=out_buf, dgrad_out=dgrad_buf)
+
+    if give_out:
+        # Forward output is the caller buffer itself (no copy); padded tail untouched.
+        assert y.data_ptr() == out_buf.data_ptr()
+        assert tuple(y.shape) == (num_rows, out_features)
+        assert torch.all(out_buf[valid_tokens:] == sentinel)
+    torch.testing.assert_close(y[:valid_tokens], y_ref[:valid_tokens], rtol=0, atol=0)
+
+    y.backward(dy)
+
+    if give_dgrad:
+        # dgrad written into the caller buffer; padded tail untouched.
+        assert torch.all(dgrad_buf[valid_tokens:] == sentinel)
+        torch.testing.assert_close(
+            dgrad_buf[:valid_tokens], x_ref.grad[:valid_tokens], rtol=0, atol=0
+        )
+    torch.testing.assert_close(x.grad[:valid_tokens], x_ref.grad[:valid_tokens], rtol=0, atol=0)
+
+    # A buffer whose row count does not match the input rows is rejected.
+    bad_out = torch.empty(num_rows + 1, out_features, dtype=dtype, device="cuda")
+    with pytest.raises(ValueError):
+        grouped_linear(x, m_splits, out=bad_out)
 
 
 @pytest.mark.skipif(not _nvfp4_available, reason=_reason_for_no_nvfp4)
@@ -1810,8 +1918,14 @@ def test_grouped_linear_grouped_tensor_path_skips_non_rht_nvfp4(monkeypatch):
             recipe.NVFP4BlockScaling(disable_stochastic_rounding=True),
             marks=pytest.mark.skipif(not _nvfp4_available, reason=_reason_for_no_nvfp4),
         ),
+        pytest.param(
+            recipe.Float8BlockScaling(),
+            marks=pytest.mark.skipif(
+                not _fp8_block_scaling_available, reason=_reason_for_no_fp8_block_scaling
+            ),
+        ),
     ],
-    ids=["bf16", "fp8_current_scaling", "mxfp8", "nvfp4"],
+    ids=["bf16", "fp8_current_scaling", "mxfp8", "nvfp4", "fp8_block_scaling"],
 )
 @pytest.mark.parametrize("bias", _ALL_BOOLEAN)
 def test_grouped_linear_fused_path_cuda_graph_safe(fp8_recipe, bias, monkeypatch):
@@ -1822,10 +1936,13 @@ def test_grouped_linear_fused_path_cuda_graph_safe(fp8_recipe, bias, monkeypatch
         pytest.skip(
             "GroupedTensor grouped GEMM path requires Hopper (SM90) or Blackwell (SM10x and SM110)."
         )
-    # MXFP8/NVFP4 grouped quantization kernels require Blackwell, but FP8 per-tensor
-    # current scaling also runs on the Hopper grouped GEMM path.
+    # MXFP8/NVFP4 grouped quantization kernels require Blackwell; FP8 per-tensor
+    # current scaling runs on Hopper and Blackwell; FP8 block scaling is Hopper-only.
     is_current_scaling = use_fp8 and fp8_recipe.float8_current_scaling()
-    if use_fp8 and not is_current_scaling and device_capability < (10, 0):
+    is_block_scaling = use_fp8 and fp8_recipe.float8_block_scaling()
+    if is_block_scaling and not (9, 0) <= device_capability < (10, 0):
+        pytest.skip("Fused grouped FP8 block-scaling requires Hopper (SM90).")
+    if use_fp8 and not is_current_scaling and not is_block_scaling and device_capability < (10, 0):
         pytest.skip(
             "Quantized GroupedTensor grouped GEMM path (MXFP8/NVFP4) requires Blackwell (SM100+)."
         )
@@ -1857,6 +1974,15 @@ def test_grouped_linear_fused_path_cuda_graph_safe(fp8_recipe, bias, monkeypatch
         params_dtype=dtype,
         device=device,
     )
+    reference_grouped_linear = GroupedLinear(
+        num_gemms,
+        in_features,
+        out_features,
+        bias=bias,
+        params_dtype=dtype,
+        device=device,
+    )
+    reference_grouped_linear.load_state_dict(grouped_linear.state_dict())
 
     static_x = torch.randn(total_tokens, in_features, dtype=dtype, device=device)
     static_x.requires_grad_(True)
@@ -1919,7 +2045,7 @@ def test_grouped_linear_fused_path_cuda_graph_safe(fp8_recipe, bias, monkeypatch
     expected_x = fresh_x.detach().clone().requires_grad_(True)
     expected_dy = fresh_dy.detach().clone()
     with autocast(enabled=use_fp8, recipe=fp8_recipe):
-        expected_out = grouped_linear(expected_x, static_m_splits)
+        expected_out = reference_grouped_linear(expected_x, static_m_splits)
     expected_out.backward(expected_dy)
 
     tols = dict(rtol=1e-2, atol=5e-3)
@@ -1927,9 +2053,27 @@ def test_grouped_linear_fused_path_cuda_graph_safe(fp8_recipe, bias, monkeypatch
         tols = dict(rtol=0.05, atol=0.05)
     torch.testing.assert_close(graph_out.float(), expected_out.float(), **tols)
     torch.testing.assert_close(graph_dx.float(), expected_x.grad.float(), **tols)
-    for graph_grad, param in zip(graph_param_grads, grouped_linear.parameters()):
+    for graph_grad, param in zip(graph_param_grads, reference_grouped_linear.parameters()):
         assert param.grad is not None
         torch.testing.assert_close(graph_grad.float(), param.grad.float(), **tols)
+
+
+@pytest.mark.skipif(not _fp8_block_scaling_available, reason=_reason_for_no_fp8_block_scaling)
+@pytest.mark.skipif(
+    not (10, 0) <= torch.cuda.get_device_capability() <= (11, 0),
+    reason="Error path only triggers on Blackwell (SM100/SM110).",
+)
+def test_grouped_linear_fused_path_fp8_block_scaling_blackwell_error(monkeypatch):
+    """FP8BS + fused env var on Blackwell must raise, not silently fall back."""
+    monkeypatch.setenv(_FUSED_GROUPED_GEMM_ENV, "1")
+    FP8GlobalStateManager.reset()
+    dtype = torch.bfloat16
+    grouped_linear = GroupedLinear(2, 128, 128, bias=False, params_dtype=dtype, device="cuda")
+    x = torch.randn(256, 128, device="cuda", dtype=dtype, requires_grad=True)
+    m_splits = torch.tensor([128, 128], dtype=torch.int64, device="cuda")
+    with pytest.raises(RuntimeError, match="Hopper-only"):
+        with autocast(enabled=True, recipe=recipe.Float8BlockScaling()):
+            grouped_linear(x, m_splits)
 
 
 @pytest.mark.parametrize("swizzle_type", ["mxfp8_rowwise", "mxfp8_columnwise", "nvfp4"])

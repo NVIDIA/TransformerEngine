@@ -19,6 +19,12 @@ import transformer_engine_torch as tex
 from ...constants import MXFP8_BLOCK_SCALING_SIZE, NVFP4_BLOCK_SCALING_SIZE
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload, start_offload
 from ...cpp_extensions import general_gemm, general_grouped_gemm_for_grouped_tensor
+from ...distributed_weight import (
+    is_distributed_weight,
+    materialize_weight_for_forward,
+    materialize_weight_for_backward,
+    finalize_weight_grads,
+)
 from ...module.base import _2X_ACC_WGRAD
 from ...quantization import Recipe
 from ...tensor import NVFP4Quantizer, NVFP4Tensor, NVFP4TensorStorage, Quantizer
@@ -48,8 +54,10 @@ from .._common import (
     get_main_grad_from_param,
     is_quantized_tensor,
     maybe_dequantize,
+    validate_or_alloc_output,
     view_main_grad_as_grouped_buffer,
 )
+from ..basic.grouped_linear import GRAD_INPUT_BUFFER_KEY, OUTPUT_BUFFER_KEY
 
 
 @functools.lru_cache(maxsize=None)
@@ -81,6 +89,11 @@ def _cudnn_frontend_geglu_runtime_params() -> bool:
 def _cudnn_frontend_supports_grouped_gemm_srelu() -> bool:
     """Check cuDNN frontend min version for grouped GEMM SReLU kernels."""
     return _cudnn_frontend_version_at_least("1.24.0")
+
+
+def _cudnn_frontend_supports_grouped_gemm_srelu_hadamard() -> bool:
+    """Check cuDNN frontend min version for grouped GEMM SReLU hadamard kernels."""
+    return _cudnn_frontend_version_at_least("1.26.0")
 
 
 def _nvidia_cudnn_frontend_supports_wgrad() -> bool:
@@ -534,6 +547,7 @@ def _compute_grad_params(
     wgrad_output = None
     op_label = f"Grouped MLP fused backward ({label})" if label else "Grouped MLP fused backward"
     weights = fc_op._get_weight_tensors()
+    is_dist_weight = is_distributed_weight(weights[0])
     if fc_op.single_grouped_weight:
         w_list = [None]
         if ctx.weight_requires_grad:
@@ -566,7 +580,9 @@ def _compute_grad_params(
     else:
         w_list = [None] * num_groups
         if ctx.weight_requires_grad:
-            if fc_op._accumulate_into_main_grad:
+            # Distributed weight: the GEMM produces full-sized wgrads but main_grad is sharded,
+            # so use a full-sized scratch buffer (the reduce-scatter below lands it in main_grad).
+            if fc_op._accumulate_into_main_grad and not is_dist_weight:
                 w_list = [get_main_grad_from_param(w, op_label=op_label) for w in weights]
                 accumulate_into_main_grad = get_accumulate_flag_in_param(weights[0])
             else:
@@ -582,6 +598,10 @@ def _compute_grad_params(
     if ctx.weight_requires_grad:
         # Launch or defer the GEMM
         delay_wgrad = fc_op.wgrad_store is not None and fc_op.wgrad_store.delay_wgrad_compute()
+        if is_dist_weight and delay_wgrad:
+            raise RuntimeError(
+                "distributed-weight fused grouped-MLP requires delay_wgrad_compute=False."
+            )
         if cudnn_wgrad_kernel_fn is not None:
             offsets = offsets if offsets.dtype == torch.int32 else offsets.to(dtype=torch.int32)
             gemm_fn = functools.partial(
@@ -620,9 +640,14 @@ def _compute_grad_params(
             fc_op.wgrad_store.put([grouped_x, grouped_dy, wgrad_output], gemm_fn)
         else:
             gemm_fn(grouped_x, grouped_dy, wgrad_output)
+            # Distributed weight: reduce-scatter the wgrads into main_grad.
+            # Return discarded (see finalize_weight_grads); dummy wgrads returned below.
+            if is_dist_weight:
+                finalize_weight_grads(weights, w_list)
 
         # Need to return dummy wgrads for Megatron-LM wgrad fusion if grad is already added
-        if fc_op._accumulate_into_main_grad:
+        # (wgrad fusion, or the distributed-weight reduce-scatter above) so it doesn't double-add.
+        if fc_op._accumulate_into_main_grad or is_dist_weight:
             w_list = get_dummy_wgrads_for_params(weights)
         elif delay_wgrad:
             w_list = [None] if fc_op.single_grouped_weight else [None] * num_groups
@@ -763,7 +788,9 @@ def fuse_grouped_mlp_ops(
 class _GroupedMLP_CuTeGEMMBase(FusedOperation):
     """Joint fused op for block-scaled GroupedLinear + activation + GroupedLinear.
 
-    Uses experimental CuTe DSL kernels from cuDNN front-end.
+    MXFP8 uses CuTe DSL grouped-GEMM kernels via the cuDNN front-end. When
+    caller output/grad_input buffers are provided, the GEMMs write into them
+    directly.
 
     """
 
@@ -871,8 +898,23 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
         # Get basic operations
-        fc1_op, _, fc2_op = self.basic_ops
+        fc1_op, activation_op, fc2_op = self.basic_ops
         fc1_ctx, _activation_ctx, fc2_ctx = basic_op_ctxs
+
+        # Caller-provided buffers: FC2 forward output and FC1 backward grad-input. Guard against
+        # a buffer routed to the wrong op (output belongs on FC2, grad-input on FC1).
+        if OUTPUT_BUFFER_KEY in basic_op_kwargs[0]:
+            raise ValueError(
+                f"'{OUTPUT_BUFFER_KEY}' buffer can only be provided to FC2 (the last op) of "
+                "the fused grouped MLP, not FC1."
+            )
+        if GRAD_INPUT_BUFFER_KEY in basic_op_kwargs[-1]:
+            raise ValueError(
+                f"'{GRAD_INPUT_BUFFER_KEY}' buffer can only be provided to FC1 (the first op) of "
+                "the fused grouped MLP, not FC2."
+            )
+        output_buffer = basic_op_kwargs[-1].get(OUTPUT_BUFFER_KEY)
+        fc1_ctx.dgrad_out = basic_op_kwargs[0].get(GRAD_INPUT_BUFFER_KEY)
 
         # Tensor properties
         fc1_weight_shape = (fc1_op.out_features, fc1_op.in_features)
@@ -885,6 +927,19 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         num_groups = fc1_op.num_groups
         fc1_weight_param = fc1_op.weight if fc1_op.single_grouped_weight else fc1_op.weight0
         fc2_weight_param = fc2_op.weight if fc2_op.single_grouped_weight else fc2_op.weight0
+
+        # Distributed weight: expert weights are sharded 1/N along out_features; the fused kernels
+        # read the full shape, so all-gather the full weight first. A plain weight is a no-op.
+        fc1_is_dist = is_distributed_weight(fc1_weight_param)
+        fc2_is_dist = is_distributed_weight(fc2_weight_param)
+        assert fc1_is_dist == fc2_is_dist, "FC1/FC2 must share one distributed-weight group."
+        if fc1_is_dist:
+            assert (
+                not fc1_op.single_grouped_weight and not fc2_op.single_grouped_weight
+            ), "distributed-weight fused grouped-MLP requires single_grouped_weight=False."
+            assert fc1_op.weight0.is_routed_expert and fc1_op.weight0.weight_list is not None
+            assert fc2_op.weight0.is_routed_expert and fc2_op.weight0.weight_list is not None
+
         device = fc1_weight_param.device
         if torch.is_autocast_enabled():
             dtype = torch.get_autocast_dtype("cuda")
@@ -973,6 +1028,8 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 else:
                     quantized_fc1_weights.append(weight)
             grouped_fc1_weight = quantized_fc1_weights
+        if fc1_is_dist:
+            grouped_fc1_weight = materialize_weight_for_forward(grouped_fc1_weight)
 
         # Prepare FC2 grouped weight tensor for fused kernels.
         if fc2_op.single_grouped_weight:
@@ -1011,10 +1068,6 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             grouped_fc1_weight, "_with_gemm_swizzled_scales"
         ):
             grouped_fc1_weight._with_gemm_swizzled_scales = False
-        if isinstance(grouped_fc2_weight, GroupedTensor) and not hasattr(
-            grouped_fc2_weight, "_with_gemm_swizzled_scales"
-        ):
-            grouped_fc2_weight._with_gemm_swizzled_scales = False
 
         # Group-quantize input tensor and convert dtypes if needed
         fc1_input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
@@ -1151,17 +1204,23 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             fc1_alpha_tensor = alpha_tensor
 
         use_tmem_post_rht_amax = _use_tmem_post_rht_amax()
-        use_fc1_glu_hadamard = False
+        use_fc1_act_hadamard = False
+        use_fc1_act_hadamard_srelu = False
         use_nvfp4_rht_amax = (
             use_nvfp4
             and isinstance(fc2_input_quantizer, NVFP4Quantizer)
             and fc2_input_quantizer.with_rht
             and fc2_input_quantizer.with_post_rht_amax
         )
-        if use_nvfp4_rht_amax and self._cudnn_act_func == "swiglu":
-            kernel_getter = getattr(self, "grouped_gemm_glu_hadamard_kernel", None)
+        activation_is_srelu = isinstance(activation_op, ScaledSReLU)
+        activation_supports_hadamard = self._cudnn_act_func == "swiglu" or (
+            activation_is_srelu and _cudnn_frontend_supports_grouped_gemm_srelu_hadamard()
+        )
+        if use_nvfp4_rht_amax and activation_supports_hadamard:
+            kernel_getter = getattr(self, "grouped_gemm_act_hadamard_kernel", None)
             if kernel_getter is not None:
-                use_fc1_glu_hadamard = kernel_getter() is not None
+                use_fc1_act_hadamard = kernel_getter() is not None
+                use_fc1_act_hadamard_srelu = use_fc1_act_hadamard and activation_is_srelu
 
         fc1_activation_kwargs = {
             "a_tensor": fc1_x_data,
@@ -1178,9 +1237,11 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             "current_stream": current_stream,
             "use_dynamic_sched": True,
         }
-        if self._cudnn_act_func is not None:
+        if use_fc1_act_hadamard_srelu:
+            fc1_activation_kwargs["act_func"] = "srelu"
+        elif self._cudnn_act_func is not None:
             fc1_activation_kwargs["act_func"] = self._cudnn_act_func
-        if use_fc1_glu_hadamard:
+        if use_fc1_act_hadamard:
             fc1_activation_kwargs["use_tmem_post_rht_amax"] = use_tmem_post_rht_amax
         else:
             fc1_activation_kwargs["norm_const_tensor"] = fc1_norm_const_tensor
@@ -1234,10 +1295,17 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             fc1_activation_kwargs["b_dtype"] = data_dtype
             fc1_activation_kwargs["b_major"] = "k"
 
-        if use_fc1_glu_hadamard:
-            fc1_kernel_out = self.grouped_gemm_glu_hadamard_kernel()(**fc1_activation_kwargs)
+        if use_fc1_act_hadamard:
+            fc1_kernel_out = self.grouped_gemm_act_hadamard_kernel()(**fc1_activation_kwargs)
         else:
             fc1_kernel_out = self.grouped_gemm_activation_kernel()(**fc1_activation_kwargs)
+
+        if fc2_is_dist:
+            grouped_fc2_weight = materialize_weight_for_forward(grouped_fc2_weight)
+        if isinstance(grouped_fc2_weight, GroupedTensor) and not hasattr(
+            grouped_fc2_weight, "_with_gemm_swizzled_scales"
+        ):
+            grouped_fc2_weight._with_gemm_swizzled_scales = False
 
         # Unpack kernel outputs
         # Note: Fused kernel outputs tensors with non-contiguous
@@ -1269,7 +1337,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             fc2_in = fc2_in.view(in_shape[0], fc2_weight_shape[1]).contiguous()
             fc2_input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
             fc2_input_quantizer.optimize_for_gemm = True
-            if use_fc1_glu_hadamard:
+            if use_fc1_act_hadamard:
                 grouped_fc2_x = _group_quantize_with_amax_for_grouped_mlp(
                     fc2_in,
                     fc2_input_quantizer,
@@ -1288,7 +1356,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     tensor_offsets=fc2_x_tensor_offsets,
                 )
 
-            fc2_out_buf = torch.empty(fc2_out_shape, dtype=dtype, device=device)
+            fc2_out_buf = validate_or_alloc_output(output_buffer, fc2_out_shape, dtype, device)
             if (
                 num_groups == 1
                 and grouped_fc2_x.columnwise_data is not None
@@ -1316,9 +1384,9 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                         fc2_bias_packed.transpose(0, 1).contiguous().expand(in_shape[0], -1)
                     )
                     if fc2_scales is not None:
-                        fc2_out_buf = fc2_out_buf + token_bias * fc2_scales.view(-1, 1)
+                        fc2_out_buf += token_bias * fc2_scales.view(-1, 1)
                     else:
-                        fc2_out_buf = fc2_out_buf + token_bias
+                        fc2_out_buf += token_bias
             else:
                 fc2_out_grouped = GroupedTensorStorage(
                     shape=(in_shape[0], fc2_weight_shape[0]),
@@ -1421,8 +1489,15 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc2_quant_kwargs["b_dtype"] = torch.float8_e4m3fn
                 fc2_quant_kwargs["b_major"] = "k"
 
-            fc2_kernel_out = self.grouped_gemm_quant_kernel()(**fc2_quant_kwargs)
-            fc2_out = fc2_kernel_out["d_tensor"].permute(2, 0, 1).view(fc2_out_shape).contiguous()
+            # Always allocate the output (the caller's buffer if provided, else a fresh one) and
+            # pass it as the kernel's d_tensor, so the kernel writes in place and the call is uniform.
+            output_buffer = validate_or_alloc_output(output_buffer, fc2_out_shape, dtype, device)
+            fc2_quant_kwargs["d_tensor"] = output_buffer.as_strided(
+                (in_shape[0], fc2_weight_shape[0], 1),
+                (fc2_weight_shape[0], 1, in_shape[0] * fc2_weight_shape[0]),
+            )
+            self.grouped_gemm_quant_kernel()(**fc2_quant_kwargs)
+            fc2_out = output_buffer
 
         # Save state for backward pass
         if requires_grad:
@@ -1465,6 +1540,11 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             fc2_weight_tensors = (
                 [grouped_fc2_weight] if fc2_op.single_grouped_weight else grouped_fc2_weight
             )
+            # Save the joint op's internal layout; distributed weights save the small shards.
+            if fc1_is_dist:
+                fc1_weight_tensors = fc1_weights
+            if fc2_is_dist:
+                fc2_weight_tensors = fc2_weights
             fc1_ctx.save_for_backward(
                 split_sizes,
                 base_split_offsets,
@@ -1728,6 +1808,10 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 glu_clamp_min=self._cudnn_glu_clamp_min,
             )
 
+        fc2_leader = fc2_op.weight if fc2_op.single_grouped_weight else fc2_op.weight0
+        if is_distributed_weight(fc2_leader):
+            grouped_fc2_weight = materialize_weight_for_backward(fc2_leader)
+
         if fc2_op.single_grouped_weight:
             # Clone and swizzle scales for GEMM
             fc2_weight_for_gemm = grouped_fc2_weight.copy()
@@ -1949,11 +2033,16 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
 
         # FC1 dgrad GEMM
         grad_input = None
+        grad_input_buffer = getattr(fc1_ctx, "dgrad_out", None)
         if fc1_ctx.input_requires_grad:
             in_shape = out_shape[:-1] + [fc1_weight_shape[1]]
 
+            fc1_leader = fc1_op.weight if fc1_op.single_grouped_weight else fc1_op.weight0
+            if is_distributed_weight(fc1_leader):
+                grouped_fc1_weight = materialize_weight_for_backward(fc1_leader)
+
             if use_nvfp4:
-                grad_input = torch.empty(in_shape, dtype=dtype, device=device)
+                grad_input = validate_or_alloc_output(grad_input_buffer, in_shape, dtype, device)
                 if num_groups == 1:
                     if fc1_op.single_grouped_weight:
                         fc1_w_single = grouped_fc1_weight.split_into_quantized_tensors()[0]
@@ -2050,8 +2139,17 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     fc1_dgrad_kwargs["b_dtype"] = torch.float8_e4m3fn
                     fc1_dgrad_kwargs["b_major"] = "n"
 
-                fc1_dgrad_kernel_out = self.grouped_gemm_quant_kernel()(**fc1_dgrad_kwargs)
-                grad_input = fc1_dgrad_kernel_out["d_tensor"].view(in_shape)
+                # Always allocate the grad-input (the caller's buffer if provided, else a fresh
+                # one) and pass it as the kernel's d_tensor, decoupling it from the kernel call.
+                grad_input_buffer = validate_or_alloc_output(
+                    grad_input_buffer, in_shape, dtype, device
+                )
+                fc1_dgrad_kwargs["d_tensor"] = grad_input_buffer.as_strided(
+                    (out_shape[0], fc1_weight_shape[1], 1),
+                    (fc1_weight_shape[1], 1, out_shape[0] * fc1_weight_shape[1]),
+                )
+                self.grouped_gemm_quant_kernel()(**fc1_dgrad_kwargs)
+                grad_input = grad_input_buffer
 
         # FC1 wgrad GEMM
         fc1_grad_params = _compute_grad_params(
@@ -2109,8 +2207,8 @@ class GroupedMLP_CuTeGEMMGLU(_GroupedMLP_CuTeGEMMBase):
 
     @classmethod
     @functools.lru_cache(maxsize=None)
-    def grouped_gemm_glu_hadamard_kernel(cls) -> Optional[Callable]:
-        """Fused grouped GEMM GLU kernel that also emits NVFP4 RHT amaxes."""
+    def grouped_gemm_act_hadamard_kernel(cls) -> Optional[Callable]:
+        """Fused grouped GEMM activation kernel that also emits NVFP4 RHT amaxes."""
         try:
             from cudnn import (
                 grouped_gemm_glu_hadamard_wrapper_sm100,
@@ -2145,6 +2243,22 @@ class GroupedMLP_CuTeGEMMUnary(_GroupedMLP_CuTeGEMMBase):
         from cudnn import grouped_gemm_srelu_wrapper_sm100  # pylint: disable=no-name-in-module
 
         return grouped_gemm_srelu_wrapper_sm100
+
+    @classmethod
+    @functools.lru_cache(maxsize=None)
+    def grouped_gemm_act_hadamard_kernel(cls) -> Optional[Callable]:
+        """Fused grouped GEMM activation kernel that also emits NVFP4 RHT amaxes."""
+        if not _cudnn_frontend_supports_grouped_gemm_srelu_hadamard():
+            return None
+
+        try:
+            from cudnn import (
+                grouped_gemm_glu_hadamard_wrapper_sm100,
+            )  # pylint: disable=no-name-in-module,import-outside-toplevel
+        except ImportError:
+            return None
+
+        return grouped_gemm_glu_hadamard_wrapper_sm100
 
     @classmethod
     @functools.lru_cache(maxsize=None)

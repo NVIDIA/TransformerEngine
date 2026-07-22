@@ -368,6 +368,7 @@ struct TestConfig {
   ScalingDir dir;
   std::vector<size_t> first_dims;
   size_t K;
+  bool force_pow_2_scales;
 };
 
 class GroupedFP8BlockwiseTestSuite : public ::testing::TestWithParam<TestConfig> {};
@@ -375,7 +376,7 @@ class GroupedFP8BlockwiseTestSuite : public ::testing::TestWithParam<TestConfig>
 TEST_P(GroupedFP8BlockwiseTestSuite, Test) {
   const TestConfig& cfg = GetParam();
   perform_test<bf16, fp8e4m3>(cfg.shape_rep, cfg.block_dim, cfg.dir, cfg.first_dims, cfg.K,
-                              /*force_pow_2_scales=*/false, /*epsilon=*/0.0f);
+                              cfg.force_pow_2_scales, /*epsilon=*/0.0f);
 }
 
 std::vector<TestConfig> make_configs() {
@@ -387,11 +388,13 @@ std::vector<TestConfig> make_configs() {
   for (auto bd : {BlockDim::ONE_D, BlockDim::TWO_D}) {
     for (auto dir : {ScalingDir::ROWWISE, ScalingDir::COLWISE, ScalingDir::BOTH}) {
       for (size_t K : Ks) {
-        for (const auto& v : uniform) {
-          configs.push_back({ShapeRep::SAME_BOTH_DIMS, bd, dir, v, K});
-        }
-        for (const auto& v : jagged) {
-          configs.push_back({ShapeRep::VARYING_FIRST_DIM, bd, dir, v, K});
+        for (bool pow2 : {false, true}) {
+          for (const auto& v : uniform) {
+            configs.push_back({ShapeRep::SAME_BOTH_DIMS, bd, dir, v, K, pow2});
+          }
+          for (const auto& v : jagged) {
+            configs.push_back({ShapeRep::VARYING_FIRST_DIM, bd, dir, v, K, pow2});
+          }
         }
       }
     }
@@ -408,6 +411,7 @@ std::string make_name(const ::testing::TestParamInfo<TestConfig>& info) {
   s += "_K" + std::to_string(c.K) + "_N" + std::to_string(c.first_dims.size());
   s += "_M";
   for (size_t m : c.first_dims) s += "_" + std::to_string(m);
+  s += (c.force_pow_2_scales ? "_POW2" : "_FP32SC");
   return s;
 }
 
