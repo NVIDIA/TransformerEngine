@@ -1880,7 +1880,9 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
         if not is_context_parallel:
             return FusedAttnFwdPrimitive.partition(config, mesh, arg_infos, result_infos)
         if config.return_max_logit:
-            raise NotImplementedError("return_max_logit is not yet supported with context parallelism")
+            raise NotImplementedError(
+                "return_max_logit is not yet supported with context parallelism"
+            )
 
         helper = _FusedAttnCPWithAllGatherHelper(mesh, config)
         helper.check_supported()
@@ -2177,7 +2179,9 @@ class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
         if not is_context_parallel:
             return FusedAttnFwdPrimitive.partition(config, mesh, arg_infos, result_infos)
         if config.return_max_logit:
-            raise NotImplementedError("return_max_logit is not yet supported with context parallelism")
+            raise NotImplementedError(
+                "return_max_logit is not yet supported with context parallelism"
+            )
 
         helper = _FusedAttnCPWithAllGatherHelper(mesh, config)
         helper.check_supported()
@@ -2631,7 +2635,9 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
         if not is_context_parallel:
             return FusedAttnFwdPrimitive.partition(config, mesh, arg_infos, result_infos)
         if config.return_max_logit:
-            raise NotImplementedError("return_max_logit is not yet supported with context parallelism")
+            raise NotImplementedError(
+                "return_max_logit is not yet supported with context parallelism"
+            )
 
         helper = _FusedAttnCPWithP2PHelper(mesh, config)
         helper.check_supported()
@@ -3141,7 +3147,9 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
         if not is_context_parallel:
             return FusedAttnFwdPrimitive.partition(config, mesh, arg_infos, result_infos)
         if config.return_max_logit:
-            raise NotImplementedError("return_max_logit is not yet supported with context parallelism")
+            raise NotImplementedError(
+                "return_max_logit is not yet supported with context parallelism"
+            )
 
         helper = _FusedAttnCPWithP2PHelper(mesh, config)
         helper.check_supported()

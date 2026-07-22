@@ -1297,9 +1297,7 @@ class FusedAttnRunner:
             primitive_out = self.cp_inverse_reorder_fn(primitive_out)
 
         reference_out = jax_dpa(*self._reference_args(), **kwargs)
-        reference_max_logit = jax_dpa(
-            *self._reference_args(), is_max_logit_enabled=True, **kwargs
-        )
+        reference_max_logit = jax_dpa(*self._reference_args(), is_max_logit_enabled=True, **kwargs)
 
         primitive_valid, primitive_invalid, reference_valid, _ = _split_valid_and_invalid(
             primitive_out, reference_out, self.pad_q
