@@ -4439,7 +4439,7 @@ def _hybrid_recipe_fp8_current():
     )
 
 
-def _make_delayed_quantizer(fp8_dtype=None):
+def _make_delayed_quantizer(fp8_dtype=None, *, rowwise=True, columnwise=True):
     """Construct a ``Float8Quantizer`` (delayed scaling) with locally-allocated
     scale/amax buffers for single-shot unit tests.
 
@@ -4457,6 +4457,8 @@ def _make_delayed_quantizer(fp8_dtype=None):
         scale=torch.ones(1, dtype=torch.float32, device="cuda"),
         amax=torch.zeros(1, dtype=torch.float32, device="cuda"),
         fp8_dtype=fp8_dtype,
+        rowwise=rowwise,
+        columnwise=columnwise,
     )
 
 
@@ -4701,24 +4703,29 @@ class TestHybridQuantizeMasterWeights:
         is_non_tn_fp8_gemm_supported(),
         reason="Hopper-only: Blackwell supports columnwise per-tensor FP8 FSDP updates",
     )
-    def test_fp8_current_fsdp_transpose_only_raises_before_mutation(self):
-        """Reject Hopper FSDP updates that would materialize rowwise column storage."""
+    @pytest.mark.parametrize("scaling", ("current", "delayed"))
+    def test_per_tensor_fp8_fsdp_transpose_only_raises_before_mutation(self, scaling):
+        """Reject Hopper FSDP updates that cannot flatten columnwise-only storage."""
         from transformer_engine.pytorch.tensor.utils import quantize_master_weights
 
         shape = (4, 8)
         shard_shape = (2, 8)
-        row_quantizer = Float8CurrentScalingQuantizer(
-            tex.DType.kFloat8E4M3,
-            device="cuda",
-            rowwise=True,
-            columnwise=False,
-        )
-        col_quantizer = Float8CurrentScalingQuantizer(
-            tex.DType.kFloat8E4M3,
-            device="cuda",
-            rowwise=False,
-            columnwise=True,
-        )
+        if scaling == "current":
+            row_quantizer = Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E4M3,
+                device="cuda",
+                rowwise=True,
+                columnwise=False,
+            )
+            col_quantizer = Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E4M3,
+                device="cuda",
+                rowwise=False,
+                columnwise=True,
+            )
+        else:
+            row_quantizer = _make_delayed_quantizer(rowwise=True, columnwise=False)
+            col_quantizer = _make_delayed_quantizer(rowwise=False, columnwise=True)
         quantizer = HybridQuantizer(
             rowwise_quantizer=row_quantizer,
             columnwise_quantizer=col_quantizer,

@@ -253,7 +253,7 @@ def quantize_master_weights(
     for model_weight, master_weight, start_offset, fsdp_shard_model_weight in zip(
         model_weights, master_weights, start_offsets, fsdp_shard_model_weights
     ):
-        _validate_fp8_current_scaling_fsdp_hopper_policy(
+        _validate_per_tensor_fp8_fsdp_hopper_policy(
             model_weight,
             fsdp_shard_model_weight,
         )
@@ -1170,6 +1170,9 @@ def _cast_master_weights_to_fp8_mxfp8_scaling(
 #   hybrid sub-storage IS a single-direction Float8Tensor, so we route them as two
 #   independent entries (into the same bucket for same-format, or into different
 #   buckets for cross-format Float8 — e.g. delayed row + current col).
+#   The FSDP-sharded columnwise-only representation on Hopper is the exception:
+#   neither per-tensor cast helper can safely flatten its transpose-only payload,
+#   so `_validate_per_tensor_fp8_fsdp_hopper_policy` rejects it before mutation.
 #
 #   Identity routes to an exact copy bucket. Single-direction hybrid (only one
 #   sub-storage populated) routes the present direction only. Both-None hybrids
@@ -1219,17 +1222,17 @@ def _cast_master_weights_to_fp8_mxfp8_scaling(
 # ---------------------------------------------------------------------------------------------
 
 
-def _validate_fp8_current_scaling_fsdp_hopper_policy(
+def _validate_per_tensor_fp8_fsdp_hopper_policy(
     model_weight,
     fsdp_shard_model_weight,
 ):
-    """Reject unsupported transpose-only current-scaling FSDP updates on Hopper.
+    """Reject unsupported transpose-only per-tensor FP8 FSDP updates on Hopper.
 
     The FSDP shard path can receive a ``Float8Tensor`` and pass it directly to
-    ``Float8Quantizer.update_quantized``. On Hopper, doing that for a
-    columnwise-only current-scaling tensor materializes rowwise ``_data`` and
-    violates the direction pinned by ``HybridQuantizer``. Reject the whole
-    batch before any scale, cache, or storage mutation instead.
+    a per-tensor FP8 cast helper. On Hopper, both delayed and current scaling
+    use a transpose-only representation for columnwise-only tensors that the
+    sharded update path cannot flatten safely. Reject the whole batch before
+    any scale, cache, or storage mutation instead.
     """
     if fsdp_shard_model_weight is None or is_non_tn_fp8_gemm_supported():
         return
@@ -1246,12 +1249,12 @@ def _validate_fp8_current_scaling_fsdp_hopper_policy(
     for storage, quantizer in candidates:
         if (
             storage is not None
-            and isinstance(quantizer, Float8CurrentScalingQuantizer)
+            and isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer))
             and _is_float8_transpose_only(storage)
         ):
             raise NotImplementedError(
                 "Columnwise-only per-tensor FP8 quantization is not implemented for "
-                "FSDP current-scaling updates on this architecture."
+                "FSDP updates on this architecture."
             )
 
 
