@@ -269,35 +269,59 @@ class activation_recompute_forward(AbstractContextManager, ContextDecorator):
 
     def __enter__(self):
         global _FP8_ACTIVATION_RECOMPUTE_ENABLED, _FP8_ACTIVATION_RECOMPUTE_PHASE
+        qstate = FP8GlobalStateManager.quantization_state
+        fp8_enabled = FP8GlobalStateManager.is_fp8_enabled()
+
+        # Validate before mutating process-global state.  A failed __enter__ is not
+        # followed by __exit__, so validation after committing would leak flags.
+        if (
+            self.activation_recompute
+            and self.recompute_phase
+            and self.state.is_first_fp8_module is None
+        ):
+            raise RuntimeError("FP8 recompute state was not captured during forward")
+
         self._previous_recompute_enabled = _FP8_ACTIVATION_RECOMPUTE_ENABLED
         self._previous_recompute_phase = _FP8_ACTIVATION_RECOMPUTE_PHASE
-        fp8_enabled = FP8GlobalStateManager.is_fp8_enabled()
-        _FP8_ACTIVATION_RECOMPUTE_ENABLED = self.activation_recompute and fp8_enabled
-        _FP8_ACTIVATION_RECOMPUTE_PHASE = self.recompute_phase
-
-        qstate = FP8GlobalStateManager.quantization_state
         self._previous_is_first_fp8_module = qstate.is_first_fp8_module
-        if self.activation_recompute and not self.recompute_phase:
-            self.state.is_first_fp8_module = qstate.is_first_fp8_module
-            # Reentrant checkpoint forward runs under no_grad, so no module can
-            # consume backward-update ownership. Reserve it for this frame.
-            if self.reserve_first_fp8_module and fp8_enabled:
-                qstate.is_first_fp8_module = False
-        if self.activation_recompute and self.recompute_phase:
-            if self.state.is_first_fp8_module is None:
-                raise RuntimeError("FP8 recompute state was not captured during forward")
-            qstate.is_first_fp8_module = self.state.is_first_fp8_module
+        try:
+            _FP8_ACTIVATION_RECOMPUTE_ENABLED = self.activation_recompute and fp8_enabled
+            _FP8_ACTIVATION_RECOMPUTE_PHASE = self.recompute_phase
+
+            if self.activation_recompute and not self.recompute_phase:
+                self.state.is_first_fp8_module = qstate.is_first_fp8_module
+                # Reentrant checkpoint forward runs under no_grad, so no module can
+                # consume backward-update ownership. Reserve it for this frame.
+                if self.reserve_first_fp8_module and fp8_enabled:
+                    qstate.is_first_fp8_module = False
+            elif self.activation_recompute and self.recompute_phase:
+                qstate.is_first_fp8_module = self.state.is_first_fp8_module
+        except BaseException:
+            qstate.is_first_fp8_module = self._previous_is_first_fp8_module
+            _FP8_ACTIVATION_RECOMPUTE_ENABLED = self._previous_recompute_enabled
+            _FP8_ACTIVATION_RECOMPUTE_PHASE = self._previous_recompute_phase
+            raise
         return self
 
     def __exit__(self, *exc_details):
         global _FP8_ACTIVATION_RECOMPUTE_ENABLED, _FP8_ACTIVATION_RECOMPUTE_PHASE
-        if self.activation_recompute and self.recompute_phase:
-            # Only recompute restores outer ownership. After the original forward, it must remain
-            # consumed or reserved so later checkpoint frames cannot claim it.
-            qstate = FP8GlobalStateManager.quantization_state
-            qstate.is_first_fp8_module = self._previous_is_first_fp8_module
-        _FP8_ACTIVATION_RECOMPUTE_ENABLED = self._previous_recompute_enabled
-        _FP8_ACTIVATION_RECOMPUTE_PHASE = self._previous_recompute_phase
+        qstate = FP8GlobalStateManager.quantization_state
+        try:
+            if self.activation_recompute and self.recompute_phase:
+                # Consumption during recompute is monotonic.  Merge it with the
+                # outer frame instead of restoring a stale available snapshot.
+                qstate.is_first_fp8_module = (
+                    self._previous_is_first_fp8_module and qstate.is_first_fp8_module
+                )
+            elif self.activation_recompute and exc_details and exc_details[0] is not None:
+                # A failed original forward creates no usable checkpoint frame.  Roll
+                # back ownership so a recovery module in the same outer autocast can
+                # become the first backward-update owner.
+                qstate.is_first_fp8_module = self._previous_is_first_fp8_module
+                self.state.is_first_fp8_module = None
+        finally:
+            _FP8_ACTIVATION_RECOMPUTE_ENABLED = self._previous_recompute_enabled
+            _FP8_ACTIVATION_RECOMPUTE_PHASE = self._previous_recompute_phase
 
 
 def is_fp8_activation_recompute_enabled() -> bool:

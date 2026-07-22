@@ -1056,7 +1056,18 @@ class autocast:
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         try:
+            # Restoring a nested autocast's configuration must not revive backward-update
+            # ownership that was consumed while the nested scope was active.  Ownership is
+            # monotonic within the logical outer autocast: available -> consumed.
+            qstate = FP8GlobalStateManager.quantization_state
+            nested_autocast = qstate.autocast_depth > 1
+            live_is_first_fp8_module = qstate.is_first_fp8_module
             FP8GlobalStateManager.set_autocast_state(self._fp8_state)
+            if nested_autocast:
+                qstate = FP8GlobalStateManager.quantization_state
+                qstate.is_first_fp8_module = (
+                    qstate.is_first_fp8_module and live_is_first_fp8_module
+                )
             FP8GlobalStateManager.autocast_exit(
                 self._enabled,
                 _graph=self._graph,
