@@ -121,6 +121,9 @@ inline DLDataType convert_to_dltype(NVTEDType type) {
       return DLDataType{kDLFloat8_e5m2, 8, 1};
     case kNVTEFloat8E8M0:
       return DLDataType{kDLFloat8_e8m0fnu, 8, 1};
+    // FP4
+    case kNVTEFloat4E2M1:
+      return DLDataType{kDLFloat4_e2m1fn, 4, 1};
     default:
       NVTE_ERROR("unsupported NVTEDType: ", static_cast<int>(type));
   }
