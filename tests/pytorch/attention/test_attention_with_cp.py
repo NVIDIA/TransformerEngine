@@ -483,11 +483,11 @@ model_configs_fused_attn = {
 }
 
 
-model_configs_fused_attn_hdim256 = {
+model_configs_fused_attn_d256 = {
     # cuDNN FusedAttention D=256 bprop is Blackwell server only. Keep these
     # outside the generic CP sweep so the D=256 signal is focused and inexpensive.
-    "cp_hd256_causal": ModelConfig(2, 1024, 16, 256, attn_mask_type="causal"),
-    "cp_hd256_causal_swa": ModelConfig(
+    "cp_d256_causal": ModelConfig(2, 1024, 16, 256, attn_mask_type="causal"),
+    "cp_d256_causal_swa": ModelConfig(
         2, 1024, 16, 256, attn_mask_type="causal", window_size=(128, 0)
     ),
 }
@@ -710,60 +710,60 @@ def test_cp_with_fused_attention(
 
 # Keep these as explicit cases because the CP axes are not independent:
 # - This runner covers separate-layout CP (bshd_bshd_bshd/thd_thd_thd); KV-packed
-#   D=256 is covered by test_dpa_fused_attn_hdim256 in test_attention.py.
+#   D=256 is covered by test_dpa_fused_attn_d256 in test_attention.py.
 # - THD starts from a causal config and is rewritten to padding_causal by the runner.
 # - SWA is sampled only through all_gather; p2p does not support SWA.
-BSHD_FUSED_HD256_CP_CUDNN_MARK = pytest.mark.skipif(
+BSHD_FUSED_D256_CP_CUDNN_MARK = pytest.mark.skipif(
     get_cudnn_version() < (9, 23, 0),
     reason="cuDNN 9.23+ is required for BSHD D=256 fused-attn CP backward.",
 )
-THD_FUSED_HD256_CP_CUDNN_MARK = pytest.mark.skipif(
+THD_FUSED_D256_CP_CUDNN_MARK = pytest.mark.skipif(
     get_cudnn_version() < (9, 30, 0),
     reason="cuDNN 9.30+ is required for THD D=256 fused-attn CP backward.",
 )
 
-DPA_CP_FUSED_HD256_CASES = [
+DPA_CP_FUSED_D256_CASES = [
     pytest.param(
-        "cp_hd256_causal",
+        "cp_d256_causal",
         "bshd",
         "p2p",
         id="BSHD-P2P-CAUSAL-NO_SWA",
-        marks=BSHD_FUSED_HD256_CP_CUDNN_MARK,
+        marks=BSHD_FUSED_D256_CP_CUDNN_MARK,
     ),
     pytest.param(
-        "cp_hd256_causal",
+        "cp_d256_causal",
         "bshd",
         "all_gather",
         id="BSHD-ALL_GATHER-CAUSAL-NO_SWA",
-        marks=BSHD_FUSED_HD256_CP_CUDNN_MARK,
+        marks=BSHD_FUSED_D256_CP_CUDNN_MARK,
     ),
     pytest.param(
-        "cp_hd256_causal_swa",
+        "cp_d256_causal_swa",
         "bshd",
         "all_gather",
         id="BSHD-ALL_GATHER-CAUSAL-SWA",
-        marks=BSHD_FUSED_HD256_CP_CUDNN_MARK,
+        marks=BSHD_FUSED_D256_CP_CUDNN_MARK,
     ),
     pytest.param(
-        "cp_hd256_causal",
+        "cp_d256_causal",
         "thd",
         "p2p",
         id="THD-P2P-PADDING_CAUSAL-NO_SWA",
-        marks=THD_FUSED_HD256_CP_CUDNN_MARK,
+        marks=THD_FUSED_D256_CP_CUDNN_MARK,
     ),
     pytest.param(
-        "cp_hd256_causal",
+        "cp_d256_causal",
         "thd",
         "all_gather",
         id="THD-ALL_GATHER-PADDING_CAUSAL-NO_SWA",
-        marks=THD_FUSED_HD256_CP_CUDNN_MARK,
+        marks=THD_FUSED_D256_CP_CUDNN_MARK,
     ),
     pytest.param(
-        "cp_hd256_causal_swa",
+        "cp_d256_causal_swa",
         "thd",
         "all_gather",
         id="THD-ALL_GATHER-PADDING_CAUSAL-SWA",
-        marks=THD_FUSED_HD256_CP_CUDNN_MARK,
+        marks=THD_FUSED_D256_CP_CUDNN_MARK,
     ),
 ]
 
@@ -773,11 +773,11 @@ DPA_CP_FUSED_HD256_CASES = [
     reason="cuDNN FusedAttention head_dim=256 backward is SM100/SM103-only.",
 )
 @pytest.mark.parametrize("dtype", ["bf16", "fp16"])
-@pytest.mark.parametrize("model,qkv_format,cp_comm_type", DPA_CP_FUSED_HD256_CASES)
-def test_cp_with_fused_attention_hdim256(cp_pool, dtype, model, qkv_format, cp_comm_type):
+@pytest.mark.parametrize("model,qkv_format,cp_comm_type", DPA_CP_FUSED_D256_CASES)
+def test_cp_with_fused_attention_d256(cp_pool, dtype, model, qkv_format, cp_comm_type):
     """Test cuDNN FusedAttention CP with head_dim=256 backward on Blackwell."""
     pool = cp_pool(2)
-    config = copy.deepcopy(model_configs_fused_attn_hdim256[model])
+    config = copy.deepcopy(model_configs_fused_attn_d256[model])
     config.context_parallel = True
     config.cp_comm_type = cp_comm_type
 
