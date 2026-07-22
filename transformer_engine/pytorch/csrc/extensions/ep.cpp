@@ -188,31 +188,34 @@ int64_t ep_handle_mem_size(int64_t top_k, int64_t dispatch_output_per_expert_ali
 
 // ── Per-step ops ─────────────────────────────────────────────────────────────
 
-void ep_prepare(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor token_counts, int64_t top_k,
-                int64_t dispatch_output_per_expert_alignment, at::Tensor total_recv) {
+void ep_prepare(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens_per_expert,
+                int64_t top_k, int64_t dispatch_output_per_expert_alignment,
+                at::Tensor total_recv_tokens) {
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   NVTE_CHECK(topk_idx.dim() >= 2, "topk_idx must be at least 2D [..., top_k]");
   auto idx_dtype = check_topk_idx_dtype(topk_idx);
   // NCCL EP requires all prepare int output counters to share a dtype.
-  NVTE_CHECK(token_counts.scalar_type() == at::kLong, "token_counts must be int64");
-  NVTE_CHECK(total_recv.scalar_type() == at::kLong, "total_recv must be int64");
+  NVTE_CHECK(tokens_per_expert.scalar_type() == at::kLong, "tokens_per_expert must be int64");
+  NVTE_CHECK(total_recv_tokens.scalar_type() == at::kLong, "total_recv_tokens must be int64");
   const size_t T_flat = topk_idx.numel() / topk_idx.size(-1);
   const size_t topk_n = static_cast<size_t>(topk_idx.size(-1));
 
   auto topk_idx_te =
       makeTransformerEngineTensor(topk_idx.data_ptr(), Shape{T_flat, topk_n}, idx_dtype);
-  auto token_counts_te = makeTransformerEngineTensor(
-      token_counts.data_ptr(), Shape{static_cast<size_t>(token_counts.numel())}, DType::kInt64);
+  auto tokens_per_expert_te = makeTransformerEngineTensor(
+      tokens_per_expert.data_ptr(), Shape{static_cast<size_t>(tokens_per_expert.numel())},
+      DType::kInt64);
   auto handle_mem_te = makeTransformerEngineTensor(
       handle_mem.data_ptr(), Shape{static_cast<size_t>(handle_mem.numel())}, DType::kByte);
   // [1] int64 scalar recv-slot total; lets the caller size dispatch outputs
   // (eager) or detect overflow past recv_capacity_per_rank (graph mode).
-  auto total_recv_te = makeTransformerEngineTensor(
-      total_recv.data_ptr(), Shape{static_cast<size_t>(total_recv.numel())}, DType::kInt64);
+  auto total_recv_tokens_te = makeTransformerEngineTensor(
+      total_recv_tokens.data_ptr(), Shape{static_cast<size_t>(total_recv_tokens.numel())},
+      DType::kInt64);
 
   auto layer_cfg = make_layer_cfg(top_k, dispatch_output_per_expert_alignment);
-  nvte_ep_prepare(handle_mem_te.data(), topk_idx_te.data(), token_counts_te.data(),
-                  total_recv_te.data(), &layer_cfg, stream);
+  nvte_ep_prepare(handle_mem_te.data(), topk_idx_te.data(), tokens_per_expert_te.data(),
+                  total_recv_tokens_te.data(), &layer_cfg, stream);
 }
 
 void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
@@ -390,8 +393,9 @@ void register_ep_bindings(pybind11::module_& m) {
         "Return the handle_mem byte size for the given layer config.", py::arg("top_k"),
         py::arg("dispatch_output_per_expert_alignment") = 0);
   m.def("ep_prepare", &ep_prepare, "EP prepare", py::arg("handle_mem"), py::arg("topk_idx"),
-        py::arg("token_counts"), py::arg("top_k"), py::arg("dispatch_output_per_expert_alignment"),
-        py::arg("total_recv"), py::call_guard<py::gil_scoped_release>());
+        py::arg("tokens_per_expert"), py::arg("top_k"),
+        py::arg("dispatch_output_per_expert_alignment"), py::arg("total_recv_tokens"),
+        py::call_guard<py::gil_scoped_release>());
   m.def("ep_dispatch", &ep_dispatch, "EP dispatch", py::call_guard<py::gil_scoped_release>());
   m.def("ep_combine", &ep_combine, "EP combine", py::call_guard<py::gil_scoped_release>());
   m.def("ep_dispatch_bwd", &ep_dispatch_bwd, "EP dispatch backward",

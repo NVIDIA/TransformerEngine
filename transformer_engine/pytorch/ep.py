@@ -212,7 +212,7 @@ def is_symm_backed(t: torch.Tensor) -> bool:
 
 
 class EpBuffer:
-    """Per-microbatch EP layer state: handle_mem, token_counts, and shape/dtype config.
+    """Per-microbatch EP layer state: handle_mem, tokens_per_expert, and shape/dtype config.
     Use one EpBuffer per concurrently-in-flight call (e.g. per PP-1F1B microbatch).
     """
 
@@ -226,7 +226,7 @@ class EpBuffer:
         "num_local_experts",
         "payload_dtype",
         "device",
-        "token_counts",
+        "tokens_per_expert",
         "zero_copy",
         "eager",
         "total_recv_tokens",
@@ -262,7 +262,9 @@ class EpBuffer:
 
         size_bytes = tex.ep_handle_mem_size(self.top_k, self.alignment)
         self.handle_mem = torch.empty(int(size_bytes), dtype=torch.uint8, device=device)
-        self.token_counts = torch.empty(self.num_local_experts, dtype=torch.int64, device=device)
+        self.tokens_per_expert = torch.empty(
+            self.num_local_experts, dtype=torch.int64, device=device
+        )
         # Persistent tensor; keep resident if activation CPU offloading is on.
         mark_not_offload(self.handle_mem)
         # Per-step recv-token total (device int64 [1]), written by ep_prepare.
@@ -283,18 +285,18 @@ _LIB = "transformer_engine_ep"
 
 @torch.library.custom_op(
     f"{_LIB}::prepare",
-    mutates_args=("handle_mem", "token_counts", "total_recv"),
+    mutates_args=("handle_mem", "tokens_per_expert", "total_recv_tokens"),
     device_types="cuda",
 )
 def _prepare_op(
     handle_mem: torch.Tensor,
     top_k: int,
     topk_idx: torch.Tensor,
-    token_counts: torch.Tensor,
+    tokens_per_expert: torch.Tensor,
     alignment: int,
-    total_recv: torch.Tensor,
+    total_recv_tokens: torch.Tensor,
 ) -> None:
-    tex.ep_prepare(handle_mem, topk_idx, token_counts, top_k, alignment, total_recv)
+    tex.ep_prepare(handle_mem, topk_idx, tokens_per_expert, top_k, alignment, total_recv_tokens)
 
 
 @_prepare_op.register_fake
@@ -384,7 +386,7 @@ def _(*_args, **_kw):
 
 def ep_prepare(buffer: "EpBuffer", topk_idx: torch.Tensor) -> torch.Tensor:
     """AllGather the routing map; fills ``buffer.handle_mem`` and returns
-    ``buffer.token_counts`` (int64, shape [num_local_experts]). topk_idx must
+    ``buffer.tokens_per_expert`` (int64, shape [num_local_experts]). topk_idx must
     be int32 or int64.
 
     Always fills ``buffer.total_recv_tokens`` (device int64 [1]) with the
@@ -397,13 +399,13 @@ def ep_prepare(buffer: "EpBuffer", topk_idx: torch.Tensor) -> torch.Tensor:
         buffer.handle_mem,
         buffer.top_k,
         topk_idx,
-        buffer.token_counts,
+        buffer.tokens_per_expert,
         buffer.alignment,
         buffer.total_recv_tokens,
     )
     if buffer.eager:
         buffer._host_total_recv_tokens = int(buffer.total_recv_tokens.item())
-    return buffer.token_counts
+    return buffer.tokens_per_expert
 
 
 def _ep_dispatch_raw(
@@ -439,8 +441,8 @@ class _EpDispatch(torch.autograd.Function):
         alignment: int,
         recv_tokens: torch.Tensor,
         recv_topk_weights: torch.Tensor,
-        token_counts: torch.Tensor,
-        total_recv: torch.Tensor,
+        tokens_per_expert: torch.Tensor,
+        total_recv_tokens: torch.Tensor,
         topk_idx: torch.Tensor,
         tokens: torch.Tensor,
         topk_weights: torch.Tensor,
@@ -451,7 +453,7 @@ class _EpDispatch(torch.autograd.Function):
         avoids re-running the routing AllGather here."""
         if not skip_prepare:
             torch.ops.transformer_engine_ep.prepare(
-                handle_mem, top_k, topk_idx, token_counts, alignment, total_recv
+                handle_mem, top_k, topk_idx, tokens_per_expert, alignment, total_recv_tokens
             )
         torch.ops.transformer_engine_ep.dispatch(
             handle_mem,
@@ -470,13 +472,13 @@ class _EpDispatch(torch.autograd.Function):
         ctx.top_k = topk_weights.shape[-1]
         ctx.recv_capacity = recv_tokens.shape[0]
         ctx.hidden_dim = tokens.shape[-1]
-        ctx.mark_non_differentiable(token_counts)
+        ctx.mark_non_differentiable(tokens_per_expert)
         # Detach so the long-lived buffers aren't tracked as differentiable outputs;
         # autograd re-attaches grad_fn pointing back at this Function.
-        return recv_tokens.detach(), recv_topk_weights.detach(), token_counts
+        return recv_tokens.detach(), recv_topk_weights.detach(), tokens_per_expert
 
     @staticmethod
-    def backward(ctx, g_recv_tokens, g_recv_topk_weights, _g_token_counts):  # type: ignore[override]
+    def backward(ctx, g_recv_tokens, g_recv_topk_weights, _g_tokens_per_expert):  # type: ignore[override]
         """Dispatch bwd; normalizes grad-input layout, otherwise passes through."""
         (handle_mem,) = ctx.saved_tensors
         device = handle_mem.device
@@ -501,8 +503,8 @@ class _EpDispatch(torch.autograd.Function):
             None,  # alignment
             None,  # recv_tokens
             None,  # recv_topk_weights
-            None,  # token_counts
-            None,  # total_recv
+            None,  # tokens_per_expert
+            None,  # total_recv_tokens
             None,  # topk_idx
             grad_tokens.view(ctx.tokens_shape),
             grad_topk_weights.view(ctx.topk_weights_shape),
@@ -604,7 +606,7 @@ def ep_dispatch(
     (mcore-managed mode; in zero-copy they must be symm-mem-backed) or leave them None to allocate on
     the fly (zero-copy: symm-mem pool; normal: plain). In eager mode the recv outputs are sized to
     this step's recv-token total and must not be caller-supplied. Returns (recv_tokens,
-    recv_topk_weights, token_counts); token_counts is non-diff. See ``buffer.total_recv_tokens`` for
+    recv_topk_weights, tokens_per_expert); tokens_per_expert is non-diff. See ``buffer.total_recv_tokens`` for
     the per-step recv total.
     """
     _require_bf16("tokens", tokens)
@@ -642,7 +644,7 @@ def ep_dispatch(
         buffer.alignment,
         recv_tokens,
         recv_topk_weights,
-        buffer.token_counts,
+        buffer.tokens_per_expert,
         buffer.total_recv_tokens,
         topk_idx,
         tokens,
