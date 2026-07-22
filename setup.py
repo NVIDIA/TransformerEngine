@@ -20,9 +20,12 @@ from build_tools.te_version import te_version
 from build_tools.utils import (
     cuda_archs,
     cuda_version,
+    cudnn_frontend_include_path,
     get_frameworks,
     remove_dups,
     min_python_version_str,
+    nccl_ep_enabled,
+    get_max_jobs_for_parallel_build,
 )
 
 frameworks = get_frameworks()
@@ -55,7 +58,10 @@ class TimedBdist(bdist_wheel):
 
 def setup_common_extension() -> CMakeExtension:
     """Setup CMake extension for common library"""
-    cmake_flags = ["-DCMAKE_CUDA_ARCHITECTURES={}".format(archs)]
+    cmake_flags = [
+        "-DCMAKE_CUDA_ARCHITECTURES={}".format(archs),
+        f"-DCUDNN_FRONTEND_INCLUDE_DIR={cudnn_frontend_include_path()}",
+    ]
     if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
         assert (
             os.getenv("MPI_HOME") is not None
@@ -82,6 +88,14 @@ def setup_common_extension() -> CMakeExtension:
         cmake_flags.append("-DNVTE_WITH_CUSOLVERMP=ON")
         cusolvermp_dir = os.getenv("CUSOLVERMP_HOME", "/usr")
         cmake_flags.append(f"-DCUSOLVERMP_DIR={cusolvermp_dir}")
+
+    # NCCL EP (Hopper+): on by default; auto-skipped when no arch >= 90 is
+    # targeted. Set NVTE_WITH_NCCL_EP=0 to force off.
+    if nccl_ep_enabled(archs):
+        nccl_home = build_nccl_ep_submodule()
+        cmake_flags.append(f"-DNCCL_INCLUDE_DIR={nccl_home}/include")
+    else:
+        cmake_flags.append("-DNVTE_WITH_NCCL_EP=OFF")
 
     # Add custom CMake arguments from environment variable
     nvte_cmake_extra_args = os.getenv("NVTE_CMAKE_EXTRA_ARGS")
@@ -126,6 +140,148 @@ def setup_requirements() -> Tuple[List[str], List[str]]:
             test_reqs.extend(test_requirements())
 
     return [remove_dups(reqs) for reqs in [install_reqs, test_reqs]]
+
+
+def _discover_nccl_home() -> str:
+    """Resolve NCCL_HOME, preferring the NCCL the dynamic loader resolves at runtime.
+
+    Probes in order: NCCL_HOME env var, ldconfig cache, well-known prefixes, then a
+    pip-installed nvidia-nccl-cu* wheel. To test a non-default NCCL (e.g. a wheel), set
+    NCCL_HOME and ensure the runtime loader resolves the same lib (e.g. LD_LIBRARY_PATH).
+    """
+    env_home = os.environ.get("NCCL_HOME")
+    if env_home:
+        if (Path(env_home) / "include" / "nccl.h").exists():
+            return env_home
+        print(
+            f"[NCCL EP] WARNING: NCCL_HOME='{env_home}' is set but "
+            f"'{env_home}/include/nccl.h' was not found; falling back to system probes."
+        )
+
+    lib_names = ("libnccl.so", "libnccl.so.2")
+    # Include Debian/Ubuntu multiarch subdirs (e.g. lib/aarch64-linux-gnu).
+    lib_subdirs = ("lib", "lib64", "lib/aarch64-linux-gnu", "lib/x86_64-linux-gnu")
+
+    # Prefer the NCCL the dynamic loader will actually resolve at runtime so the
+    # EP build links against the same libnccl that gets loaded. libtransformer_engine
+    # carries no NCCL RUNPATH, so the loader uses ldconfig/system paths; building
+    # against a different NCCL (e.g. a pip wheel) causes ABI mismatches. ldconfig is
+    # the ground truth for runtime resolution, so consult it before well-known prefixes.
+    try:
+        out = subprocess.check_output(["ldconfig", "-p"], stderr=subprocess.DEVNULL).decode()
+        for line in out.splitlines():
+            if "libnccl.so" in line and "=>" in line:
+                lib_path = Path(line.split("=>")[-1].strip())
+                # Walk upward so multiarch layouts (.../lib/<triplet>/libnccl.so)
+                # resolve to the prefix that contains include/nccl.h.
+                for root in (lib_path.parent.parent, lib_path.parent.parent.parent):
+                    if (root / "include" / "nccl.h").exists():
+                        return str(root)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+
+    for cand in ("/opt/nvidia/nccl", "/usr/local/nccl", "/usr"):
+        p = Path(cand)
+        if (p / "include" / "nccl.h").exists() and any(
+            (p / sub / name).exists() for sub in lib_subdirs for name in lib_names
+        ):
+            return str(p)
+
+    # Fall back to a pip-installed NCCL (nvidia-nccl-cu* wheel) under nvidia/nccl
+    # in site-packages, used only when no system NCCL is present.
+    try:
+        import importlib.util
+
+        spec = importlib.util.find_spec("nvidia.nccl")
+        if spec is not None and spec.submodule_search_locations:
+            pip_root = Path(next(iter(spec.submodule_search_locations)))
+            if (pip_root / "include" / "nccl.h").exists() and any(
+                (pip_root / sub / name).exists() for sub in lib_subdirs for name in lib_names
+            ):
+                return str(pip_root)
+    except (ImportError, ValueError):
+        pass
+
+    raise RuntimeError(
+        "Could not locate NCCL core (nccl.h + libnccl.so). Set NCCL_HOME to the install prefix."
+    )
+
+
+def build_nccl_ep_submodule() -> str:
+    """Build libnccl_ep.a from the 3rdparty/nccl-extensions submodule and return NCCL_HOME."""
+    nccl_root = current_file_path / "3rdparty" / "nccl-extensions"
+    if not (nccl_root / "nccl_ep" / "Makefile").exists():
+        raise RuntimeError(
+            f"NCCL EP submodule not found at {nccl_root}. "
+            "Run `git submodule update --init --recursive`."
+        )
+
+    build_dir = nccl_root / "build"
+    nccl_ep_lib = build_dir / "lib" / "libnccl_ep.a"
+    gencode_stamp = build_dir / "lib" / "libnccl_ep.gencode"
+
+    # Caller gates on arch >= 90 or "native"; expand "native" to the host's
+    # actual sm_XX so the build stamp distinguishes machines.
+    arch_tokens = [a.strip() for a in str(cuda_archs() or "").split(";") if a.strip()]
+    arch_list: list[str] = []
+    for t in arch_tokens:
+        if t.lower() == "native":
+            try:
+                out = subprocess.check_output(
+                    ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
+                    stderr=subprocess.DEVNULL,
+                ).decode()
+            except (subprocess.CalledProcessError, FileNotFoundError) as e:
+                raise RuntimeError(
+                    "NVTE_CUDA_ARCHS=native requires nvidia-smi to resolve the host arch."
+                ) from e
+            for line in out.splitlines():
+                cap = line.strip().replace(".", "")
+                if cap.isdigit() and int(cap) >= 90 and cap not in arch_list:
+                    arch_list.append(cap)
+        else:
+            bare = t.rstrip("af")
+            if bare.isdigit() and int(bare) >= 90 and bare not in arch_list:
+                arch_list.append(bare)
+    if not arch_list:
+        raise RuntimeError(
+            "NCCL EP requires Hopper or newer (SM >= 90); none found in"
+            f" NVTE_CUDA_ARCHS={cuda_archs()!r}. Re-run with NVTE_WITH_NCCL_EP=0 to skip the NCCL"
+            " EP build (the rest of TE still builds)."
+        )
+    gencode = " ".join(f"-gencode=arch=compute_{a},code=sm_{a}" for a in arch_list)
+
+    nproc = get_max_jobs_for_parallel_build()
+    env = os.environ.copy()
+    env["NVCC_GENCODE"] = gencode
+    # NCCL EP needs the core NCCL headers + libnccl.so; write NCCL EP build
+    # outputs to the submodule's local build/ tree.
+    nccl_home = _discover_nccl_home()
+    env["NCCL_HOME"] = nccl_home
+    env["NCCL_EP_BUILDDIR"] = str(build_dir)
+
+    prev_gencode = gencode_stamp.read_text().strip() if gencode_stamp.exists() else None
+    if not nccl_ep_lib.exists() or prev_gencode != gencode:
+        if nccl_ep_lib.exists() and prev_gencode != gencode:
+            print(
+                f"[NCCL EP] gencode changed ('{prev_gencode}' -> '{gencode}'); "
+                "rebuilding libnccl_ep.a"
+            )
+            subprocess.check_call(
+                ["make", "-C", "nccl_ep", "clean"],
+                cwd=str(nccl_root),
+                env=env,
+            )
+        print(f"[NCCL EP] Building libnccl_ep.a (gencode='{gencode}')")
+        subprocess.check_call(
+            ["make", "-j", str(nproc), "-C", "nccl_ep", "lib"],
+            cwd=str(nccl_root),
+            env=env,
+        )
+        gencode_stamp.parent.mkdir(parents=True, exist_ok=True)
+        gencode_stamp.write_text(gencode)
+
+    return nccl_home
 
 
 def git_check_submodules() -> None:

@@ -261,7 +261,7 @@ SpacesInParensOptions:
   InEmptyParentheses: false
   Other:           false
 SpacesInSquareBrackets: false
-Standard:        Auto
+Standard:        c++17
 StatementAttributeLikeMacros:
   - Q_EMIT
 StatementMacros:
@@ -277,4 +277,3 @@ WhitespaceSensitiveMacros:
   - PP_STRINGIZE
   - STRINGIZE
 ...
-
