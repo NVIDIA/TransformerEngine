@@ -34,7 +34,7 @@ def _on_collective_stream(func):
         return func
     from jax.experimental.compute_on import compute_on
 
-    return compute_on("gpu_stream:collective")(func)
+    return compute_on("gpu_stream:collective")(func)  # pylint: disable=not-callable
 
 
 __all__ = [
