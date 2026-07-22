@@ -25,6 +25,7 @@ from .base import (
     is_ub_initialized,
     using_cublasmp_backend,
     quantize_weight,
+    release_frozen_weight_columnwise,
     TransformerEngineBaseModule,
     get_dummy_wgrad,
     _2X_ACC_FPROP,
@@ -851,6 +852,8 @@ class _LayerNormLinear(torch.autograd.Function):
                 bulk_overlap=ctx.ub_bulk_dgrad,
             )
             nvtx_range_pop(f"{nvtx_label}.dgrad_gemm")
+            if not ctx.requires_wgrad:
+                release_frozen_weight_columnwise((weight,))
 
             # FSDP2 only handles deallocation all-gathered weights that it allocates.
             # Columnwise data is derived from rowwise data after allgather for fp8

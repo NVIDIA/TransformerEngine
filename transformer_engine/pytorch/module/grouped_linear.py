@@ -23,6 +23,7 @@ from transformer_engine.pytorch.tensor.grouped_tensor import (
 from .base import (
     get_dummy_wgrad,
     quantize_weight,
+    release_frozen_weight_columnwise,
     TransformerEngineBaseModule,
     _2X_ACC_FPROP,
     _2X_ACC_DGRAD,
@@ -882,6 +883,8 @@ class _GroupedLinear(torch.autograd.Function):
                 layout="NN",
                 use_split_accumulator=dgrad_gemm_use_split_accumulator,
             )
+            if not ctx.weights_requires_grad:
+                release_frozen_weight_columnwise(weights)
 
         if ctx.is_first_microbatch is not None:
             accumulate_wgrad_into_param_main_grad = (
@@ -1113,6 +1116,11 @@ class _GroupedLinear(torch.autograd.Function):
                     grad=True,
                     use_split_accumulator=dgrad_gemm_use_split_accumulator,
                 )
+                # Release the original quantized weights, not
+                # ``weights_for_dgrad``, which may hold dequantized
+                # copies under ``backward_override``.
+                if not ctx.weights_requires_grad:
+                    release_frozen_weight_columnwise(weights)
 
             if ctx.weights_requires_grad:
                 wgrad_gemm_use_split_accumulator = _2X_ACC_WGRAD

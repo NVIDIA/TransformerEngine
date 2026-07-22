@@ -219,6 +219,12 @@ FP8 Configuration
    :Default: ``0``
    :Description: Use unfused kernel for FP8 amax and scale updates. When set to ``1``, amax and scale updates are computed using separate unfused kernels instead of fused operations.
 
+.. envvar:: NVTE_RELEASE_FROZEN_WEIGHT_COLUMNWISE
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Release the columnwise (transposed) copy of frozen quantized weights right after the dgrad GEMM in the backward pass of ``Linear``, ``GroupedLinear``, ``LayerNormLinear``, and ``LayerNormMLP``. Weights that do not require gradients (e.g. the frozen base model in LoRA/PEFT fine-tuning) only need their columnwise copy transiently for dgrad, so releasing it reduces resident weight memory by up to roughly one byte per locally resident frozen parameter, at the cost of rebuilding the copy (a quantization-aware transpose) each time it is needed again. Only applies to weight layouts that can rebuild columnwise data from rowwise data (currently 2D-block-scaled FP8, i.e. ``Float8BlockScaling`` weights); other layouts and trainable weights are unaffected. Note that if the weight's quantizer requests columnwise usage (e.g. primary quantized parameters initialized with gradients enabled), the copy is rebuilt in the next forward pass, so this option then mainly reduces memory residency between training steps; the peak-memory benefit requires initializing frozen parameters without columnwise usage (e.g. under ``torch.no_grad()``). The memory saving materializes after the first backward pass. Not applied during CUDA graph capture.
+
 .. envvar:: NVTE_FP8_DPA_BWD
 
    :Type: ``int`` (0 or 1)
