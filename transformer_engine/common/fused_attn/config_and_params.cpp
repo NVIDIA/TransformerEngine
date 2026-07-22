@@ -96,6 +96,9 @@ void FusedAttnConfig::derive() {
 FusedAttnConfig FusedAttnConfig::make_cache_key() const {
   FusedAttnConfig cache_cfg = *this;
 
+  // Key the device ID for multi-GPU single-process runs
+  cache_cfg.device_id = cuda::current_device();
+
   // Normalize bottom_right_diagonal
   const bool has_window = cache_cfg.window_size_left != -1 || cache_cfg.window_size_right != -1;
   if (!cache_cfg.is_causal && !cache_cfg.is_causal_bottom_right && !has_window) {

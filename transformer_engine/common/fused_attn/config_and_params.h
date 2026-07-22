@@ -74,6 +74,10 @@ struct FusedAttnConfig {
   size_t bias_seqlen_q = 0;
   size_t bias_seqlen_kv = 0;
 
+  // device ID: not part of attribute serialization, but part of operator< and used to
+  // differentiate graphs built for different devices in multi-GPU single-process runs
+  int device_id = -1;
+
   // Internal-only fields: never part of attribute serialization, operator<, or the graph cache key.
   // Filled by derive() or set by caller (i.e. is_forward). Added for convinence purposes and do not
   // represent any graph properties.
@@ -156,7 +160,7 @@ struct FusedAttnConfig {
                     head_dim_v, max_seqlen_q, max_seqlen_kv, num_tokens_q, num_tokens_kv,
                     num_pages_k, num_pages_v, page_size_k, page_size_v, max_pages_per_seq_k,
                     max_pages_per_seq_v, bias_batch_size, bias_num_heads, bias_seqlen_q,
-                    bias_seqlen_kv) <
+                    bias_seqlen_kv, device_id) <
            std::tie(rhs.is_training, rhs.deterministic, rhs.cuda_graph, rhs.return_max_logit,
                     rhs.attn_mask_type, rhs.bias_type, rhs.window_size_left, rhs.window_size_right,
                     rhs.bottom_right_diagonal, rhs.softmax_type, rhs.scaling_mode, rhs.dropout,
@@ -167,7 +171,7 @@ struct FusedAttnConfig {
                     rhs.max_seqlen_q, rhs.max_seqlen_kv, rhs.num_tokens_q, rhs.num_tokens_kv,
                     rhs.num_pages_k, rhs.num_pages_v, rhs.page_size_k, rhs.page_size_v,
                     rhs.max_pages_per_seq_k, rhs.max_pages_per_seq_v, rhs.bias_batch_size,
-                    rhs.bias_num_heads, rhs.bias_seqlen_q, rhs.bias_seqlen_kv);
+                    rhs.bias_num_heads, rhs.bias_seqlen_q, rhs.bias_seqlen_kv, rhs.device_id);
   }
 
   // Derive fields such as bucketed batch_size or num_tokens for THD, based on input fields
