@@ -342,12 +342,11 @@ def _fused_moe_aux_loss_fwd(probs, tokens_per_expert, topk, coeff):
 def _fused_moe_aux_loss_bwd(topk, coeff, residuals, g):
     del topk, coeff
     const_buf, tokens_per_expert, num_tokens = residuals
-    grad_aux_loss = g.reshape(1)
 
     grad_probs = fused_moe_aux_loss_bwd(
         const_buf,
         tokens_per_expert,
-        grad_aux_loss,
+        g,
         num_tokens,
     )
     return grad_probs, None
