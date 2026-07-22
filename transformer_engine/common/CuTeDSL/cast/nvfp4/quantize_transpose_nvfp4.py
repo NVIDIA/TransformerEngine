@@ -79,9 +79,7 @@ def compile_cutedsl_function_from_cfg(cfg):
     """
 
     if not device_is_blackwell():
-        raise RuntimeError(
-            "CuTeDSL NVFP4 backend requires compute capability >= 10.0 (Blackwell)"
-        )
+        raise RuntimeError("CuTeDSL NVFP4 backend requires compute capability >= 10.0 (Blackwell)")
 
     kernel_obj = NVFP4QuantizeTransposeTuned1DKernel(cfg)
 
