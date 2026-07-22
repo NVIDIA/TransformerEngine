@@ -1929,7 +1929,19 @@ class FusedAttention(torch.nn.Module):
     FusedAttnBackend["F16_arbitrary_seqlen"]
        cuDNN attention for FP16/BF16 with any sequence length.
     FusedAttnBackend["FP8"]
-       cuDNN attention for FP8 with any sequence length.
+       cuDNN attention for FP8 with any sequence length. The supported recipes are as follows. Inputs,
+       Intermediates, and Outputs are in the format of "tensor: quantizer", and are used by function calls,
+       tex.fused_attn_fwd and tex.fused_attn_bwd.
+
+                                    Direction   Inputs                                       Intermediates  Outputs
+       DelayedScaling (DS)          forward     Q/K/V: DS                                    S: DS          O: DS
+                                    backward    Q/K/V/O (from forward), dO: DS               dP: DS         dQ/dK/dV: DS
+       Float8CurrentScaling (CS)    forward     Q/K/V: CS                                    S: DS          O: F16
+                                    backward    Q/K/V (from forward), dO: CS,
+                                                O: F16 (or CS if NVTE_DPA_FP8CS_O_in_F16=0)  dP: DS         dQ/dK/dV: F16
+       MXFP8BlockScaling (MXFP8)    forward     Q/K row, V col: MXFP8                        S: None        O: F16
+                                    backward    Q/K row+col, V row: MXFP8,
+                                                O/dO: F16, dO row+col: MXFP8                 dP: None       dQ/dK/dV: F16
     """
 
     def __init__(
