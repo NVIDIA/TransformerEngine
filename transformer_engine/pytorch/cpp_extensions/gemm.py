@@ -81,24 +81,50 @@ def _nvfp4_row_scaled_gemm_inputs(
     B: NVFP4TensorStorage,
     *,
     transa: bool,
-) -> Tuple[NVFP4TensorStorage, NVFP4TensorStorage, torch.Tensor]:
-    """Return GEMM aliases and FP32 output scales for row-scaled NVFP4."""
+) -> Tuple[
+    NVFP4TensorStorage,
+    NVFP4TensorStorage,
+    Optional[NVFP4TensorStorage],
+    torch.Tensor,
+]:
+    """Return GEMM aliases and FP32 output scales for row-scaled NVFP4.
+
+    The aliases replace the global amax metadata with one so both the primary
+    and residual GEMMs produce unscaled FP32 partials. The caller applies the
+    shared row/weight global scale after summing those partials.
+    """
     A_metadata = A.get_metadata()
     weight_amax = A._amax_rowwise if transa else A._amax_columnwise
-    assert weight_amax is not None and weight_amax.numel() == 1
+    if weight_amax is None or weight_amax.numel() != 1:
+        raise RuntimeError("Row-scaled NVFP4 GEMM requires scalar weight amax metadata.")
     A_metadata["amax_rowwise" if transa else "amax_columnwise"] = weight_amax.new_ones(1)
     A_metadata["row_scaled_nvfp4"] = False
 
     B_metadata = B.get_metadata()
     rhs_rowwise_amax = B._amax_rowwise
-    assert rhs_rowwise_amax is not None
+    if rhs_rowwise_amax is None:
+        raise RuntimeError("Row-scaled NVFP4 B is missing rowwise amax metadata.")
     B_metadata["amax_rowwise"] = rhs_rowwise_amax.new_ones(1)
     B_metadata["row_scaled_nvfp4"] = False
+    B_metadata["rowwise_data_err"] = None
+    B_metadata["rowwise_scale_inv_err"] = None
+    B_metadata["err_corrected_nvfp4"] = False
 
-    assert rhs_rowwise_amax.dtype == torch.float32 and weight_amax.dtype == torch.float32
+    error_B = None
+    if B._err_corrected_nvfp4:
+        if B._rowwise_data_err is None or B._rowwise_scale_inv_err is None:
+            raise RuntimeError("Error-corrected NVFP4 B is missing residual data or scales.")
+        error_metadata = dict(B_metadata)
+        error_metadata["rowwise_data"] = B._rowwise_data_err
+        error_metadata["rowwise_scale_inv"] = B._rowwise_scale_inv_err
+        error_B = NVFP4TensorStorage(**error_metadata)
+
+    if rhs_rowwise_amax.dtype != torch.float32 or weight_amax.dtype != torch.float32:
+        raise RuntimeError("Row-scaled NVFP4 GEMM requires FP32 global amax metadata.")
     return (
         NVFP4TensorStorage(**A_metadata),
         NVFP4TensorStorage(**B_metadata),
+        error_B,
         (rhs_rowwise_amax * weight_amax).view(-1, 1),
     )
 
@@ -237,7 +263,9 @@ def general_gemm(
         ), "Row-scaled NVFP4 GEMM currently requires NVFP4 A."
         # cuBLAS folds NVFP4 global amax values into GEMM alpha. Keep the row-scaled
         # recipe's global scales out of alpha and apply them in FP32 below.
-        gemm_A, gemm_B, rowwise_global_scales = _nvfp4_row_scaled_gemm_inputs(A, B, transa=transa)
+        gemm_A, gemm_B, error_B, rowwise_global_scales = _nvfp4_row_scaled_gemm_inputs(
+            A, B, transa=transa
+        )
 
         requested_out, requested_out_dtype = out, out_dtype
         fp32_out = (
@@ -253,6 +281,18 @@ def general_gemm(
         gemm_args[6] = TE_DType[torch.float32]  # out_dtype
         gemm_args[7] = None  # bias
         out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*gemm_args, **kwargs)
+
+        if error_B is not None:
+            # Accumulate the residual GEMM before applying the shared global
+            # row/weight scale. Bias and the final dtype conversion remain a
+            # single epilogue below.
+            error_gemm_args = list(gemm_args)
+            error_gemm_args[2] = error_B
+            error_gemm_args[4] = out
+            error_gemm_args[14] = True
+            error_gemm_kwargs = dict(kwargs)
+            error_gemm_kwargs["beta"] = 1.0
+            out, _, _, _ = tex.generic_gemm(*error_gemm_args, **error_gemm_kwargs)
         out_2d = out.reshape(-1, out.shape[-1])
 
         assert rowwise_global_scales.dtype == torch.float32 and out.dtype == torch.float32

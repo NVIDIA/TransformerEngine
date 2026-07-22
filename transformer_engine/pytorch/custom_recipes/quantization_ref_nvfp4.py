@@ -219,6 +219,8 @@ class NVFP4TensorRef(QuantizedTensorStorage):
     scale: Optional[torch.Tensor] = None
     data_t: Optional[torch.Tensor] = None
     scale_t: Optional[torch.Tensor] = None
+    data_err: Optional[torch.Tensor] = None
+    scale_err: Optional[torch.Tensor] = None
     global_amax_row: Optional[torch.Tensor] = None
     global_amax_col: Optional[torch.Tensor] = None
     nvfp4_use_4over6: bool = False
@@ -239,11 +241,13 @@ class NVFP4TensorRef(QuantizedTensorStorage):
         self,
     ) -> Tuple[list[Optional[torch.Tensor]], QuantizedTensorStorage]:
         """Prepare the quantization result for saving for backward"""
-        tensors = [self.data, self.data_t, self.scale, self.scale_t]
+        tensors = [self.data, self.data_t, self.scale, self.scale_t, self.data_err, self.scale_err]
         self.data = None
         self.data_t = None
         self.scale = None
         self.scale_t = None
+        self.data_err = None
+        self.scale_err = None
         return tensors, self
 
     def restore_from_saved(
@@ -254,7 +258,9 @@ class NVFP4TensorRef(QuantizedTensorStorage):
         self.data_t = tensors[1]
         self.scale = tensors[2]
         self.scale_t = tensors[3]
-        return tensors[4:]
+        self.data_err = tensors[4]
+        self.scale_err = tensors[5]
+        return tensors[6:]
 
     # Compatibility
     @property
@@ -352,6 +358,7 @@ class NVFP4QuantizerRef(Quantizer):
         eps: float = 0.0,
         quant_tile_shape: Tuple[int, int] = (1, 16),
         row_scaled_nvfp4: bool = False,
+        err_corrected_nvfp4: bool = False,
         nvfp4_use_4over6: bool = False,
         nvfp4_e4m3_max: int = 448,
         nvfp4_4over6_err_mode: str = "MAE",
@@ -367,6 +374,10 @@ class NVFP4QuantizerRef(Quantizer):
                 raise ValueError(
                     "Row-scaled NVFP4 reference quantization does not support columnwise usage."
                 )
+        if err_corrected_nvfp4 and not row_scaled_nvfp4:
+            raise ValueError("Error-corrected NVFP4 reference requires row scaling.")
+        if err_corrected_nvfp4 and nvfp4_use_4over6:
+            raise ValueError("Error-corrected NVFP4 reference does not support 4over6.")
         if nvfp4_use_4over6:
             if nvfp4_4over6_err_mode not in ("MAE", "MSE"):
                 raise ValueError(f"Unsupported NVFP4 4over6 error mode: {nvfp4_4over6_err_mode}.")
@@ -382,6 +393,7 @@ class NVFP4QuantizerRef(Quantizer):
         self.eps = eps
         self.quant_tile_shape = quant_tile_shape
         self.row_scaled_nvfp4 = row_scaled_nvfp4
+        self.err_corrected_nvfp4 = err_corrected_nvfp4
         self.nvfp4_use_4over6 = nvfp4_use_4over6
         self.nvfp4_e4m3_max = nvfp4_e4m3_max if nvfp4_use_4over6 else 448
         if self.nvfp4_e4m3_max not in (448, 256):
@@ -833,6 +845,8 @@ class NVFP4QuantizerRef(Quantizer):
         Optional[torch.Tensor],
         torch.Tensor,
         torch.Tensor,
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
     ]:
         """
         Python implementation of microblock FP4 quantization.
@@ -844,8 +858,10 @@ class NVFP4QuantizerRef(Quantizer):
 
         Returns
         -------
-        Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor], torch.Tensor]
-            (qx, sx, qx_t, sx_t, global_amax) where:
+        Tuple containing quantized primary/error data, block scales, and global amax values.
+
+            ``(qx, sx, qx_t, sx_t, global_amax_row, global_amax_col,
+            qx_err, sx_err)`` where:
             - qx: quantized data in row-major order (if rowwise_usage), None otherwise
             - sx: scale tensor for qx (if rowwise_usage), None otherwise
             - qx_t: quantized data in column-major order (if columnwise_usage), None otherwise
@@ -920,9 +936,41 @@ class NVFP4QuantizerRef(Quantizer):
 
             qx = self._rm_pad_tensor(qx, (M, N // 2))
 
+            qx_err = None
+            sx_err = None
+            if self.err_corrected_nvfp4:
+                if tensor.dtype != torch.bfloat16:
+                    raise ValueError("Error-corrected NVFP4 reference requires BF16 input.")
+                qx_dequantized = cast_from_fp4x2(qx, torch.float32)
+                block_scales = sx.to(torch.float32).repeat_interleave(
+                    self.quant_tile_shape[1], dim=1
+                )
+                global_decode_scale = global_amax_row.view(M, 1) / (6.0 * 448.0)
+                primary_dequantized = (qx_dequantized * block_scales * global_decode_scale).to(
+                    torch.bfloat16
+                )
+                error = (row_input - primary_dequantized).to(torch.bfloat16)
+                error_padded = self._pad_tensor(
+                    error,
+                    row_divisor=self.quant_tile_shape[0],
+                    col_divisor=self.quant_tile_shape[1],
+                )
+                qx_err, sx_err = self._quantize_blockwise_reference(
+                    error_padded,
+                    global_amax_row,
+                    self.quant_tile_shape[1],
+                    self.quant_tile_shape[0],
+                    pow_2_scales=False,
+                    row_scaled_nvfp4=True,
+                    eps=self.eps,
+                )
+                qx_err = self._rm_pad_tensor(qx_err, (M, N // 2))
+
         else:
             qx = None
             sx = None
+            qx_err = None
+            sx_err = None
 
         if self.columnwise_usage:
             x_t = col_input
@@ -951,7 +999,7 @@ class NVFP4QuantizerRef(Quantizer):
             qx_t = None
             sx_t = None
 
-        return qx, sx, qx_t, sx_t, global_amax_row, global_amax_col
+        return qx, sx, qx_t, sx_t, global_amax_row, global_amax_col, qx_err, sx_err
 
     def quantize(
         self,
@@ -970,13 +1018,17 @@ class NVFP4QuantizerRef(Quantizer):
         if tensor.ndim > 2:
             tensor = tensor.view(-1, tensor.shape[-1])
 
-        qx, sx, qx_t, sx_t, global_amax_row, global_amax_col = self._quantize(tensor)
+        qx, sx, qx_t, sx_t, global_amax_row, global_amax_col, qx_err, sx_err = self._quantize(
+            tensor
+        )
 
         return NVFP4TensorRef(
             data=qx,
             scale=sx,
             data_t=qx_t,
             scale_t=sx_t,
+            data_err=qx_err,
+            scale_err=sx_err,
             global_amax_row=global_amax_row,
             global_amax_col=global_amax_col,
             nvfp4_use_4over6=self.nvfp4_use_4over6,
@@ -1019,13 +1071,15 @@ class NVFP4QuantizerRef(Quantizer):
         if src.ndim > 2:
             src = src.view(-1, src.shape[-1])
 
-        qx, sx, qx_t, sx_t, global_amax_row, global_amax_col = self._quantize(src)
+        qx, sx, qx_t, sx_t, global_amax_row, global_amax_col, qx_err, sx_err = self._quantize(src)
 
         # Update the destination with new data
         dst.data = qx
         dst.scale = sx
         dst.data_t = qx_t
         dst.scale_t = sx_t
+        dst.data_err = qx_err
+        dst.scale_err = sx_err
         dst.global_amax_row = global_amax_row
         dst.global_amax_col = global_amax_col
         dst.nvfp4_use_4over6 = self.nvfp4_use_4over6
@@ -1089,6 +1143,13 @@ class NVFP4QuantizerRef(Quantizer):
 
         high_precision_x = cast_from_fp4x2(qx, out_dtype)
         high_precision_w = cast_from_fp4x2(qw, out_dtype)
+        high_precision_x_err = None
+        sx_err = None
+        if qresult_x is not None and qresult_x.data_err is not None:
+            if qresult_x.scale_err is None:
+                raise ValueError("qresult_x has error data but no error block scales")
+            high_precision_x_err = cast_from_fp4x2(qresult_x.data_err, out_dtype)
+            sx_err = qresult_x.scale_err.to(torch.float32)
 
         if self.pow_2_scales:
 
@@ -1198,6 +1259,10 @@ class NVFP4QuantizerRef(Quantizer):
             raise ValueError(
                 f"sw shape mismatch: expected ({N}, {K // block_length}), got {sw.shape}"
             )
+        if sx_err is not None and sx_err.shape != (M, K // block_length):
+            raise ValueError(
+                f"sx_err shape mismatch: expected ({M}, {K // block_length}), got {sx_err.shape}"
+            )
 
         y = torch.zeros(M, N, dtype=torch.float32, device=qx.device)
 
@@ -1219,6 +1284,11 @@ class NVFP4QuantizerRef(Quantizer):
             y += torch.outer(sx_block, sw_block) * high_precision_gemm_ref(
                 qx_block, qw_block, torch.float32, is_b_transposed=True
             )
+            if high_precision_x_err is not None:
+                qx_err_block = high_precision_x_err[:, k_start:k_end].clone().contiguous()
+                y += torch.outer(sx_err[:, k], sw_block) * high_precision_gemm_ref(
+                    qx_err_block, qw_block, torch.float32, is_b_transposed=True
+                )
 
         if not self.pow_2_scales and K > 0:
             # only apply global scale for NVFP4 and non-empty cases

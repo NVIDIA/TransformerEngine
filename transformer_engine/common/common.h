@@ -289,6 +289,8 @@ struct Tensor {
   SimpleTensor scale;
   SimpleTensor scale_inv;
   SimpleTensor columnwise_scale_inv;
+  SimpleTensor data_err;
+  SimpleTensor scale_inv_err;
 
   NVTEScalingMode scaling_mode;
   NVTETensor nvte_tensor;
@@ -302,6 +304,8 @@ struct Tensor {
    *  Only meaningful for NVFP4 tensors.
    */
   bool row_scaled_nvfp4 = false;
+  /*! \brief Whether rowwise NVFP4 error-correction data is present. */
+  bool err_corrected_nvfp4 = false;
   /*! \brief Global E4M3 scale bound used by NVFP4.
    *
    *  Standard NVFP4 uses 448. Some 4over6 tensors use 256 to leave room for
@@ -320,7 +324,10 @@ struct Tensor {
       sizeof(NVTEBasicTensor),  // kNVTEColumnwiseAmax
       sizeof(uint8_t),          // kNVTEWithGEMMSwizzledScales
       sizeof(uint8_t),          // kNVTERowScaledNVFP4
-      sizeof(int)               // kNVTENVFP4E4M3Max
+      sizeof(int),              // kNVTENVFP4E4M3Max
+      sizeof(NVTEBasicTensor),  // kNVTERowwiseDataErr
+      sizeof(NVTEBasicTensor),  // kNVTERowwiseScaleInvErr
+      sizeof(uint8_t)           // kNVTEErrCorrectedNVFP4
   };
 
   Tensor() : scaling_mode{NVTE_DELAYED_TENSOR_SCALING}, nvte_tensor{0} {}
@@ -334,9 +341,12 @@ struct Tensor {
     scale.clear();
     scale_inv.clear();
     columnwise_scale_inv.clear();
+    data_err.clear();
+    scale_inv_err.clear();
     scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
     with_gemm_swizzled_scales = false;
     row_scaled_nvfp4 = false;
+    err_corrected_nvfp4 = false;
     nvfp4_e4m3_max = 448;
   }
 
@@ -360,6 +370,9 @@ struct Tensor {
    *  safely accessed.
    */
   bool has_columnwise_data() const { return columnwise_data.has_data(); }
+
+  /*! Whether the tensor has rowwise NVFP4 residual data. */
+  bool has_data_err() const { return data_err.has_data(); }
 
   /*! Datatype of tensor elements. */
   DType dtype() const {

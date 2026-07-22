@@ -1714,6 +1714,11 @@ class NVFP4BlockScalingRecipeState(RecipeState):
                     and tensor_type != "weight"
                     and self.recipe.row_scaled_activation
                 ),
+                err_corrected_nvfp4=(
+                    self.mode == "forward"
+                    and tensor_type != "weight"
+                    and self.recipe.err_corrected_activation
+                ),
                 nvfp4_use_4over6=nvfp4_use_4over6,
                 nvfp4_e4m3_max=nvfp4_e4m3_max,
                 nvfp4_4over6_err_mode=self.recipe.nvfp4_4over6_err_mode,

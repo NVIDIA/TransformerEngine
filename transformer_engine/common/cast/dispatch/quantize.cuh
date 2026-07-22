@@ -103,6 +103,7 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       const auto [rows, cols] = input_tensor->flat_2d_dims();
       auto dtype = input_tensor->dtype();
       const bool row_scaled_nvfp4 = output_tensor->row_scaled_nvfp4;
+      const bool err_corrected_nvfp4 = output_tensor->err_corrected_nvfp4;
       const bool nvfp4_use_4over6 = quant_config_cpp.nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
       NVTE_CHECK(nvfp4_use_4over6 || output_tensor->nvfp4_e4m3_max == 448,
                  "Non-4over6 NVFP4 quantization requires E4M3 max 448.");
@@ -115,6 +116,10 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
                    "Row-scaled NVFP4 quantization does not produce columnwise output.");
         nvfp4::compute_rowwise_amax(*input_tensor, noop_tensor, output_tensor, stream);
       }
+      NVTE_CHECK(!err_corrected_nvfp4 || row_scaled_nvfp4,
+                 "Error-corrected NVFP4 quantization requires row scaling.");
+      NVTE_CHECK(!err_corrected_nvfp4 || !nvfp4_use_4over6,
+                 "Error-corrected NVFP4 quantization does not support 4over6.");
       // Columnwise-only is supported on the optimized path only for 2D scaling; rowwise-only and
       // both-directions keep their existing routing. Columnwise-only 1D and non-bf16 fall back to
       // quantize_transpose_vector_blockwise_fp4.
@@ -155,6 +160,9 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
             /*rng_state=*/quant_config_cpp.rng_state,
             /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,
             /*row_scaled_nvfp4=*/row_scaled_nvfp4,
+            /*err_corrected_nvfp4=*/err_corrected_nvfp4,
+            /*scale_inv_err=*/output_tensor->scale_inv_err,
+            /*output_err=*/output_tensor->data_err,
             /*noop_tensor=*/noop_tensor->data,
             /*stream=*/stream);
       }
@@ -315,6 +323,9 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
             /*rng_state=*/quant_config_cpp.rng_state,
             /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,
             /*row_scaled_nvfp4=*/false,
+            /*err_corrected_nvfp4=*/false,
+            /*scale_inv_err=*/output_tensor->scale_inv_err,
+            /*output_err=*/output_tensor->data_err,
             /*noop_tensor=*/noop_tensor->data,
             /*stream=*/stream);
       }

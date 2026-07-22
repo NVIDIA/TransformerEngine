@@ -354,6 +354,8 @@ class NVFP4Quantizer : public Quantizer {
   int nvfp4_e4m3_max;
   // Whether tensors emitted by this quantizer use row-scaled NVFP4 metadata.
   bool row_scaled_nvfp4;
+  // Whether row-scaled tensors also carry a quantized BF16 residual.
+  bool err_corrected_nvfp4;
 
   int rht_matrix_random_sign_mask_t;
   at::Tensor rht_matrix;

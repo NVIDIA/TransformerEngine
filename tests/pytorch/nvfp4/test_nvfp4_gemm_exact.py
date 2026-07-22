@@ -28,6 +28,8 @@ def check_nvfp4_gemm_versus_reference(
     x_columnwise: bool = False,
     w_columnwise: bool = False,
     row_scaled_nvfp4: bool = False,
+    err_corrected_nvfp4: bool = False,
+    use_bias: bool = False,
     use_4over6: bool = False,
     nvfp4_e4m3_max: int = 448,
     nvfp4_4over6_err_mode: str = "MAE",
@@ -47,6 +49,7 @@ def check_nvfp4_gemm_versus_reference(
     w_shape = (K, N) if w_columnwise else (N, K)
     x = torch.randn(x_shape, dtype=x_dtype, device=device)
     w = torch.randn(w_shape, dtype=w_dtype, device=device)
+    bias = torch.randn((N,), dtype=torch.bfloat16, device=device) if use_bias else None
 
     # Setup out tensor if accumulate is True
     if accumulate:
@@ -64,6 +67,7 @@ def check_nvfp4_gemm_versus_reference(
         with_rht=False,
         with_post_rht_amax=False,
         row_scaled_nvfp4=row_scaled_nvfp4,
+        err_corrected_nvfp4=err_corrected_nvfp4,
         nvfp4_use_4over6=use_4over6,
         nvfp4_e4m3_max=nvfp4_e4m3_max,
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
@@ -134,6 +138,7 @@ def check_nvfp4_gemm_versus_reference(
         eps=0.0,
         quant_tile_shape=(1, 16),
         row_scaled_nvfp4=row_scaled_nvfp4,
+        err_corrected_nvfp4=err_corrected_nvfp4,
         nvfp4_use_4over6=use_4over6,
         nvfp4_e4m3_max=nvfp4_e4m3_max,
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
@@ -166,7 +171,7 @@ def check_nvfp4_gemm_versus_reference(
         qx=qx_data,
         qw=qw_data,
         m_params=None,  # MMParams not used in reference
-        out_dtype=out_dtype,
+        out_dtype=torch.float32 if use_bias else out_dtype,
         sx=sx_trimmed,
         sw=sw_trimmed,
         bias=None,  # No bias for this test
@@ -176,6 +181,8 @@ def check_nvfp4_gemm_versus_reference(
         qresult_x=x_nvfp4_ref,
         qresult_w=w_nvfp4_ref,
     )
+    if bias is not None:
+        y_ref = (y_ref + bias.to(torch.float32)).to(out_dtype)
 
     # Native TE GEMM using tex.generic_gemm (cuBLAS GEMM)
     # Allocate cuBLAS workspace
@@ -184,7 +191,6 @@ def check_nvfp4_gemm_versus_reference(
     transa = True if not w_columnwise else False
     transb = False if not x_columnwise else True
     out_quantizer = None
-    bias = None
     bias_dtype = TE_DType[torch.bfloat16]
     use_gelu = False
     gelu_input = None
@@ -204,6 +210,7 @@ def check_nvfp4_gemm_versus_reference(
             accumulate=accumulate,
             layout=layout,
             out=out.clone() if accumulate else None,
+            bias=bias,
         )[0]
     else:
         # Native cuBLAS GEMM
@@ -487,6 +494,76 @@ def test_nvfp4_gemm_versus_reference(
         nvfp4_e4m3_max=nvfp4_e4m3_max,
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("M, K, N", [(128, 128, 128), (112, 288, 96)])
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32], ids=str)
+@pytest.mark.parametrize("use_bias", [False, True], ids=["no_bias", "bias"])
+def test_error_corrected_row_scaled_gemm_versus_reference(
+    M: int,
+    K: int,
+    N: int,
+    out_dtype: torch.dtype,
+    use_bias: bool,
+) -> None:
+    """The FP32 sum of primary and residual GEMMs matches the blockwise reference."""
+    check_nvfp4_gemm_versus_reference(
+        x_dtype=torch.bfloat16,
+        w_dtype=torch.bfloat16,
+        out_dtype=out_dtype,
+        M=M,
+        K=K,
+        N=N,
+        accumulate=False,
+        row_scaled_nvfp4=True,
+        err_corrected_nvfp4=True,
+        use_bias=use_bias,
+    )
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+def test_error_corrected_row_scaled_gemm_improves_accuracy() -> None:
+    """The residual product reduces MSE relative to the primary row-scaled GEMM."""
+    torch.manual_seed(41)
+    torch.cuda.manual_seed(41)
+    device = "cuda"
+    x = torch.randn((128, 256), dtype=torch.bfloat16, device=device)
+    w = torch.randn((128, 256), dtype=torch.bfloat16, device=device)
+
+    def _activation_quantizer(*, corrected: bool) -> NVFP4Quantizer:
+        return NVFP4Quantizer(
+            fp4_dtype=te.DType.kFloat4E2M1,
+            rowwise=True,
+            columnwise=False,
+            with_amax_reduction=False,
+            amax_reduction_group=None,
+            with_rht=False,
+            with_post_rht_amax=False,
+            row_scaled_nvfp4=True,
+            err_corrected_nvfp4=corrected,
+        )
+
+    weight_quantizer = NVFP4Quantizer(
+        fp4_dtype=te.DType.kFloat4E2M1,
+        rowwise=True,
+        columnwise=True,
+        with_amax_reduction=False,
+        amax_reduction_group=None,
+        with_rht=False,
+        with_post_rht_amax=False,
+    )
+    w_q = weight_quantizer(w)
+    x_primary = _activation_quantizer(corrected=False)(x)
+    x_corrected = _activation_quantizer(corrected=True)(x)
+
+    y_primary = general_gemm(w_q, x_primary, out_dtype=torch.float32, layout="TN")[0]
+    y_corrected = general_gemm(w_q, x_corrected, out_dtype=torch.float32, layout="TN")[0]
+    y_ref = x.to(torch.float32) @ w.to(torch.float32).T
+
+    primary_mse = torch.mean((y_primary - y_ref) ** 2)
+    corrected_mse = torch.mean((y_corrected - y_ref) ** 2)
+    assert corrected_mse < primary_mse
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)

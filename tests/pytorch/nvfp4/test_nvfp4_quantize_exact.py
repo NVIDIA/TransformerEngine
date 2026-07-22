@@ -108,6 +108,7 @@ def check_quantization_nvfp4_versus_reference(
     use_cpp_allocator: bool,
     with_2d_quantization: bool,
     row_scaled_nvfp4: bool = False,
+    err_corrected_nvfp4: bool = False,
     use_4over6: bool = False,
     nvfp4_e4m3_max: int = 448,
     nvfp4_4over6_err_mode: str = "MAE",
@@ -140,6 +141,7 @@ def check_quantization_nvfp4_versus_reference(
         with_post_rht_amax=False,
         with_2d_quantization=with_2d_quantization,
         row_scaled_nvfp4=row_scaled_nvfp4,
+        err_corrected_nvfp4=err_corrected_nvfp4,
         nvfp4_use_4over6=use_4over6,
         nvfp4_e4m3_max=nvfp4_e4m3_max,
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
@@ -176,6 +178,12 @@ def check_quantization_nvfp4_versus_reference(
     sx_t = x_nvfp4_sut._columnwise_scale_inv
     qx_amax = x_nvfp4_sut._amax_rowwise
     qx_amax_t = x_nvfp4_sut._amax_columnwise
+    qx_err = (
+        x_nvfp4_sut._rowwise_data_err.view(dtype=torch.uint8)
+        if x_nvfp4_sut._rowwise_data_err is not None
+        else None
+    )
+    sx_err = x_nvfp4_sut._rowwise_scale_inv_err
 
     # Reference quantization
     quant_tile_shape = (1, 16) if not with_2d_quantization else (16, 16)
@@ -187,6 +195,7 @@ def check_quantization_nvfp4_versus_reference(
         eps=0.0,
         quant_tile_shape=quant_tile_shape,
         row_scaled_nvfp4=row_scaled_nvfp4,
+        err_corrected_nvfp4=err_corrected_nvfp4,
         nvfp4_use_4over6=use_4over6,
         nvfp4_e4m3_max=nvfp4_e4m3_max,
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
@@ -211,6 +220,14 @@ def check_quantization_nvfp4_versus_reference(
     )
     ref_amax = x_nvfp4_ref.global_amax_row
     ref_amax_t = x_nvfp4_ref.global_amax_col
+    qx_err_ref = (
+        unpack_fp4(x_nvfp4_ref.data_err.view(dtype=torch.uint8))
+        if x_nvfp4_ref.data_err is not None
+        else None
+    )
+    sx_err_ref = (
+        x_nvfp4_ref.scale_err.view(dtype=torch.uint8) if x_nvfp4_ref.scale_err is not None else None
+    )
 
     qx = unpack_fp4(qx)
     qx_t = unpack_fp4(qx_t) if qx_t is not None else None
@@ -233,6 +250,47 @@ def check_quantization_nvfp4_versus_reference(
         torch.testing.assert_close(qx_amax_t, ref_amax_t, atol=0.0, rtol=0.0)
 
     torch.testing.assert_close(qx_amax, ref_amax, atol=0.0, rtol=0.0)
+
+    if err_corrected_nvfp4:
+        assert qx_err is not None and qx_err_ref is not None
+        assert sx_err is not None and sx_err_ref is not None
+        torch.testing.assert_close(unpack_fp4(qx_err), qx_err_ref, atol=0.0, rtol=0.0)
+        torch.testing.assert_close(
+            sx_err[: sx_err_ref.shape[0], : sx_err_ref.shape[1]],
+            sx_err_ref,
+            atol=0.0,
+            rtol=0.0,
+        )
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize(
+    "M, N",
+    [
+        pytest.param(128, 128, id="aligned-tuned-1d"),
+        pytest.param(112, 272, id="unaligned-generic-vector"),
+    ],
+)
+@pytest.mark.parametrize(
+    "use_cpp_allocator", [True, False], ids=["cpp_allocator", "python_allocator"]
+)
+def test_error_corrected_row_scaled_quantization_versus_reference(
+    M: int,
+    N: int,
+    use_cpp_allocator: bool,
+) -> None:
+    """Primary and residual FP4 bytes/scales exactly match the BF16 reference."""
+    check_quantization_nvfp4_versus_reference(
+        x_dtype=torch.bfloat16,
+        M=M,
+        N=N,
+        return_transpose=False,
+        swizzled_scale=False,
+        use_cpp_allocator=use_cpp_allocator,
+        with_2d_quantization=False,
+        row_scaled_nvfp4=True,
+        err_corrected_nvfp4=True,
+    )
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)

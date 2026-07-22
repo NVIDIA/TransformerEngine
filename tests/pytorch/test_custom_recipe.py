@@ -1623,6 +1623,104 @@ def test_nvfp4_recipe_state_role_dispatch_backward():
         assert q.stochastic_rounding == nvfp4_recipe.fp4_quant_bwd_grad.stochastic_rounding
 
 
+def test_nvfp4_error_correction_is_forward_activation_only():
+    """Recipe opt-in is attached to forward activations, never weights or backward tensors."""
+    if not torch.cuda.is_available() or not te.is_nvfp4_available():
+        pytest.skip("NVFP4 unsupported on this device")
+
+    from transformer_engine.pytorch.quantization import NVFP4BlockScalingRecipeState
+
+    nvfp4_recipe = recipe.NVFP4BlockScaling(
+        disable_rht=True,
+        row_scaled_activation=True,
+        err_corrected_activation=True,
+    )
+    forward = NVFP4BlockScalingRecipeState(
+        nvfp4_recipe,
+        mode="forward",
+        num_quantizers=3,
+        roles=[
+            _nvfp4_role("input"),
+            _nvfp4_role("weight"),
+            _nvfp4_role("output"),
+        ],
+    ).make_quantizers()
+    assert [q.err_corrected_nvfp4 for q in forward] == [True, False, True]
+    assert [q.row_scaled_nvfp4 for q in forward] == [True, False, True]
+
+    backward = NVFP4BlockScalingRecipeState(
+        nvfp4_recipe,
+        mode="backward",
+        num_quantizers=2,
+        roles=[_nvfp4_role("grad_output"), _nvfp4_role("grad_input")],
+    ).make_quantizers()
+    assert all(not q.err_corrected_nvfp4 for q in backward)
+    assert all(not q.row_scaled_nvfp4 for q in backward)
+
+
+def test_nvfp4_error_correction_requires_row_scaled_activation():
+    with pytest.raises(ValueError, match="row_scaled_activation=True"):
+        recipe.NVFP4BlockScaling(
+            row_scaled_activation=False,
+            err_corrected_activation=True,
+        )
+    with pytest.raises(ValueError, match="does not support activation 4over6"):
+        recipe.NVFP4BlockScaling(
+            disable_rht=True,
+            row_scaled_activation=True,
+            err_corrected_activation=True,
+            nvfp4_4over6="activations",
+        )
+
+
+@pytest.mark.parametrize("bias", [False, True])
+def test_nvfp4_error_correction_is_batch_invariant(bias):
+    """Shared rows produce identical outputs when the surrounding batch changes."""
+    if not torch.cuda.is_available() or not te.is_nvfp4_available():
+        pytest.skip("NVFP4 unsupported on this device")
+
+    torch.manual_seed(0)
+    batch_sizes = (1, 2, 4)
+    sequence_length = 16
+    in_features = 128
+    out_features = 128
+    inp = torch.randn(
+        max(batch_sizes),
+        sequence_length,
+        in_features,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    model = Linear(
+        in_features,
+        out_features,
+        bias=bias,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+    ).eval()
+    nvfp4_recipe = recipe.NVFP4BlockScaling(
+        disable_rht=True,
+        row_scaled_activation=True,
+        err_corrected_activation=True,
+    )
+
+    outputs = {}
+    with torch.inference_mode():
+        for batch_size in batch_sizes:
+            with autocast(enabled=True, recipe=nvfp4_recipe):
+                outputs[batch_size] = model(inp[:batch_size]).clone()
+
+    reference = outputs[max(batch_sizes)]
+    for batch_size in batch_sizes:
+        assert torch.isfinite(outputs[batch_size]).all()
+        torch.testing.assert_close(
+            outputs[batch_size],
+            reference[:batch_size],
+            rtol=0,
+            atol=0,
+        )
+
+
 def test_nvfp4_recipe_state_positional_fallback_matches_explicit_roles():
     """``roles=None`` matches explicit ``[input, weight, output]`` slot-for-slot."""
     if not torch.cuda.is_available() or not te.is_nvfp4_available():
