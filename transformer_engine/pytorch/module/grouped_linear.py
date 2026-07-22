@@ -1836,14 +1836,13 @@ class GroupedLinear(TransformerEngineBaseModule):
                 grad_weight_quantizers,
                 grad_output_quantizers,
             ) = quantizers
-            if not debug:
-                for weight_quantizer, weight_tensor in zip(
-                    weight_quantizers, weight_tensors
-                ):
-                    if weight_quantizer is not None:
-                        self._configure_weight_quantizer_optimize_for_gemm(
-                            weight_quantizer, weight_tensor
-                        )
+            if not debug and weight_quantizers[0] is not None:
+                # Experts share shape and recipe settings: compute once and broadcast.
+                optimize_for_gemm = self._enable_weight_preswizzle(
+                    weight_quantizers[0], weight_tensors[0]
+                )
+                for q in weight_quantizers:
+                    q.optimize_for_gemm = optimize_for_gemm
 
             if is_grad_enabled:
                 linear_fn = _GroupedLinear.apply
