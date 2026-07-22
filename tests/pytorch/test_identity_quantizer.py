@@ -1072,17 +1072,11 @@ def _make_identity_module(module_name, seed=1234, dtype=torch.bfloat16, bias=Tru
     if module_name == "Linear":
         return te.Linear(hidden_size, hidden_size, bias=bias, params_dtype=dtype).cuda()
     if module_name == "LayerNormLinear":
-        return te.LayerNormLinear(
-            hidden_size, hidden_size, bias=bias, params_dtype=dtype
-        ).cuda()
+        return te.LayerNormLinear(hidden_size, hidden_size, bias=bias, params_dtype=dtype).cuda()
     if module_name == "LayerNormMLP":
-        return te.LayerNormMLP(
-            hidden_size, ffn_hidden_size, bias=bias, params_dtype=dtype
-        ).cuda()
+        return te.LayerNormMLP(hidden_size, ffn_hidden_size, bias=bias, params_dtype=dtype).cuda()
     if module_name == "GroupedLinear":
-        return te.GroupedLinear(
-            2, hidden_size, hidden_size, bias=bias, params_dtype=dtype
-        ).cuda()
+        return te.GroupedLinear(2, hidden_size, hidden_size, bias=bias, params_dtype=dtype).cuda()
     if module_name == "TransformerLayer":
         return te.TransformerLayer(
             hidden_size,

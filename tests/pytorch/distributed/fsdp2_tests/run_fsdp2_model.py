@@ -254,9 +254,7 @@ def _check_fp8_fsdp2_allgather(model, *, tols=None):
             param_tols = dict(atol=5e-4, rtol=5e-3)
         else:
             param_tols = {}
-        torch.testing.assert_close(
-            param.dequantize(), fp32_allgathered_params[name], **param_tols
-        )
+        torch.testing.assert_close(param.dequantize(), fp32_allgathered_params[name], **param_tols)
     # Revert model to original sharded state.
     for module in model.modules():
         # Not all modules are wrapped/sharded with FSDP2.

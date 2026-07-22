@@ -94,9 +94,7 @@ def snapshot_storage_tensor_metadata(storage, *, clone=False):
     tensor_metadata = {}
     for name, value in storage.get_metadata().items():
         if isinstance(value, torch.Tensor) or value is None:
-            snapshot_value = (
-                value.detach().clone() if clone and value is not None else value
-            )
+            snapshot_value = value.detach().clone() if clone and value is not None else value
             if (
                 value is not None
                 and getattr(storage, "_is_2D_scaled", False)
@@ -123,9 +121,7 @@ def snapshot_storage_tensor_metadata(storage, *, clone=False):
 def assert_nested_state_exact(actual, expected, *, path="state"):
     """Recursively compare nested state, using zero tolerance for tensors."""
     if isinstance(expected, torch.Tensor):
-        assert isinstance(
-            actual, torch.Tensor
-        ), f"{path}: expected Tensor, got {type(actual)}"
+        assert isinstance(actual, torch.Tensor), f"{path}: expected Tensor, got {type(actual)}"
         torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0, msg=path)
         return
     if isinstance(expected, dict):

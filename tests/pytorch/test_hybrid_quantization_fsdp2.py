@@ -48,8 +48,8 @@ _fp8_col_factory = _fp8_row_factory
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
-fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
-    te.is_fp8_block_scaling_available(return_reason=True)
+fp8_block_scaling_available, reason_for_no_fp8_block_scaling = te.is_fp8_block_scaling_available(
+    return_reason=True
 )
 
 _XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8 = pytest.mark.xfail(
@@ -165,9 +165,7 @@ class TestFloat8TransposeOnlySplit:
         pieces = torch.split(tensor, split_size, dim=dim)
 
         assert [tuple(piece.shape) for piece in pieces] == expected_shapes
-        assert [
-            tuple(piece._transpose.shape) for piece in pieces
-        ] == expected_transpose_shapes
+        assert [tuple(piece._transpose.shape) for piece in pieces] == expected_transpose_shapes
         assert all(piece._data is None for piece in pieces)
         assert all(piece._transpose_invalid is False for piece in pieces)
 
@@ -245,9 +243,7 @@ class TestFloat8TransposeOnlySplit:
             (5, 16),
             (2, 16),
         ]
-        assert [
-            tuple(piece.columnwise_sub_storage._transpose.shape) for piece in pieces
-        ] == [
+        assert [tuple(piece.columnwise_sub_storage._transpose.shape) for piece in pieces] == [
             (16, 5),
             (16, 5),
             (16, 2),
@@ -311,15 +307,11 @@ class TestFloat8TransposeOnlySplit:
         assert isinstance(sliced, Float8Tensor)
         assert sliced._data is None
         assert sliced._transpose.shape == torch.Size((16, 6))
-        torch.testing.assert_close(
-            sliced.dequantize(), expected[2:8], rtol=0.0, atol=0.0
-        )
+        torch.testing.assert_close(sliced.dequantize(), expected[2:8], rtol=0.0, atol=0.0)
         assert isinstance(selected, Float8Tensor)
         assert selected._data is None
         assert selected._transpose.shape == torch.Size((12,))
-        torch.testing.assert_close(
-            selected.dequantize(), expected[:, 3], rtol=0.0, atol=0.0
-        )
+        torch.testing.assert_close(selected.dequantize(), expected[:, 3], rtol=0.0, atol=0.0)
 
     def test_as_strided_row_shard_preserves_transpose_only_payload(self):
         tensor, expected = self._make_valid_transpose_only_float8_tensor()
@@ -329,9 +321,7 @@ class TestFloat8TransposeOnlySplit:
         assert isinstance(shard, Float8Tensor)
         assert shard._data is None
         assert shard._transpose.shape == torch.Size((16, 5))
-        torch.testing.assert_close(
-            shard.dequantize(), expected[1:6], rtol=0.0, atol=0.0
-        )
+        torch.testing.assert_close(shard.dequantize(), expected[1:6], rtol=0.0, atol=0.0)
 
     def test_as_strided_falls_back_for_nonrepresentable_layout(self):
         tensor, expected = self._make_valid_transpose_only_float8_tensor()
@@ -426,9 +416,7 @@ class TestHybridNewZeros:
         # A plain-source copy routes through the result's parent quantizer. It
         # must update every allocated direction even though the source parent
         # had both of its mutable usage flags disabled before new_zeros.
-        plain_source = torch.full(
-            (3, 5), 7.0, dtype=torch.float32, device=source.device
-        )
+        plain_source = torch.full((3, 5), 7.0, dtype=torch.float32, device=source.device)
         result.copy_(plain_source)
         for sub_storage in (
             result.rowwise_sub_storage,
@@ -454,9 +442,7 @@ class TestHybridNewZeros:
 
     @requires_fp8
     @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
-    @pytest.mark.parametrize(
-        "unsupported_dtype", (torch.int32, torch.float64, torch.bool)
-    )
+    @pytest.mark.parametrize("unsupported_dtype", (torch.int32, torch.float64, torch.bool))
     def test_non_identity_substorage_rejects_unsupported_dtype(self, unsupported_dtype):
         quantizer = HybridQuantizer(
             rowwise_quantizer=_make_fp8_quantizer(),
@@ -508,9 +494,7 @@ class TestHybridNewZeros:
         result = source.new_zeros(source.shape)
 
         assert type(result.rowwise_sub_storage) is type(source.rowwise_sub_storage)
-        assert type(result.columnwise_sub_storage) is type(
-            source.columnwise_sub_storage
-        )
+        assert type(result.columnwise_sub_storage) is type(source.columnwise_sub_storage)
         torch.testing.assert_close(
             result.dequantize(),
             torch.zeros_like(result.dequantize()),
@@ -524,8 +508,7 @@ class TestHybridNewZeros:
             buffers, storage = sub_storage.prepare_for_saving()
             try:
                 assert all(
-                    buffer is None or torch.count_nonzero(buffer).item() == 0
-                    for buffer in buffers
+                    buffer is None or torch.count_nonzero(buffer).item() == 0 for buffer in buffers
                 )
             finally:
                 assert storage.restore_from_saved(buffers) == []
@@ -554,9 +537,7 @@ class TestHybridNewZeros:
         result = source.new_zeros(source.shape)
 
         assert type(result.rowwise_sub_storage) is type(source.rowwise_sub_storage)
-        assert type(result.columnwise_sub_storage) is type(
-            source.columnwise_sub_storage
-        )
+        assert type(result.columnwise_sub_storage) is type(source.columnwise_sub_storage)
         torch.testing.assert_close(
             result.dequantize(),
             torch.zeros_like(result.dequantize()),
@@ -570,8 +551,7 @@ class TestHybridNewZeros:
             buffers, storage = sub_storage.prepare_for_saving()
             try:
                 assert all(
-                    buffer is None or torch.count_nonzero(buffer).item() == 0
-                    for buffer in buffers
+                    buffer is None or torch.count_nonzero(buffer).item() == 0 for buffer in buffers
                 )
             finally:
                 assert storage.restore_from_saved(buffers) == []
@@ -595,12 +575,8 @@ class TestHybridTorchDispatchFSDP2Ops:
         dim0 = hybrid_param.shape[0]
         chunk_size = dim0 // 2
         pieces = torch.split(hybrid_param, chunk_size, dim=0)
-        expected_rowwise = torch.split(
-            hybrid_param.rowwise_sub_storage, chunk_size, dim=0
-        )
-        expected_columnwise = torch.split(
-            hybrid_param.columnwise_sub_storage, chunk_size, dim=0
-        )
+        expected_rowwise = torch.split(hybrid_param.rowwise_sub_storage, chunk_size, dim=0)
+        expected_columnwise = torch.split(hybrid_param.columnwise_sub_storage, chunk_size, dim=0)
         assert len(pieces) == len(expected_rowwise) == len(expected_columnwise)
 
         assert len(pieces) >= 2
@@ -712,8 +688,7 @@ class TestHybridTorchDispatchFSDP2Ops:
         dst = quantizer.quantize(torch.zeros_like(hybrid_param.dequantize()))
         src.update_usage(columnwise_usage=False)
         dst_before = tuple(
-            None if tensor is None else tensor.clone()
-            for tensor in _as_data_tensor_tuple(dst)
+            None if tensor is None else tensor.clone() for tensor in _as_data_tensor_tuple(dst)
         )
 
         with pytest.raises(
@@ -738,9 +713,7 @@ class TestHybridTorchDispatchFSDP2Ops:
         aten.copy_.default(param, bf16_data)
         assert isinstance(param, HybridQuantizedTensor)
         _assert_hybrid_tensor_exact(param, expected, context="BF16 copy_")
-        torch.testing.assert_close(
-            param.dequantize(), expected.dequantize(), rtol=0.0, atol=0.0
-        )
+        torch.testing.assert_close(param.dequantize(), expected.dequantize(), rtol=0.0, atol=0.0)
 
     def test_new_zeros_returns_hybrid(self, hybrid_param):
         """new_zeros returns initialized storage that remains FSDP-copyable."""
@@ -753,12 +726,8 @@ class TestHybridTorchDispatchFSDP2Ops:
         assert result.shape == hybrid_param.shape
         assert result.rowwise_sub_storage is not None
         assert result.columnwise_sub_storage is not None
-        assert type(result.rowwise_sub_storage) is type(
-            hybrid_param.rowwise_sub_storage
-        )
-        assert type(result.columnwise_sub_storage) is type(
-            hybrid_param.columnwise_sub_storage
-        )
+        assert type(result.rowwise_sub_storage) is type(hybrid_param.rowwise_sub_storage)
+        assert type(result.columnwise_sub_storage) is type(hybrid_param.columnwise_sub_storage)
         torch.testing.assert_close(
             result.dequantize(),
             torch.zeros_like(result.dequantize()),
@@ -771,9 +740,7 @@ class TestHybridTorchDispatchFSDP2Ops:
         torch.testing.assert_close(
             result.dequantize(), hybrid_param.dequantize(), rtol=0.0, atol=0.0
         )
-        _assert_hybrid_tensor_exact(
-            result, hybrid_param, context="new_zeros then copy_"
-        )
+        _assert_hybrid_tensor_exact(result, hybrid_param, context="new_zeros then copy_")
 
     def test_empty_like_returns_hybrid(self, hybrid_param):
         """empty_like must return a HybridQuantizedTensor."""
@@ -976,9 +943,7 @@ class TestHybridFsdpPostAllGatherProtocol:
         assert (
             second_result is first_result
         ), "Buffer reuse: post_all_gather(out=prev) should return the same object"
-        _assert_hybrid_tensor_exact(
-            second_result, hybrid_param, context="post-all-gather reuse"
-        )
+        _assert_hybrid_tensor_exact(second_result, hybrid_param, context="post-all-gather reuse")
 
     def test_post_all_gather_dequantize_matches_original(self, hybrid_param):
         """Reconstructed tensor should dequantize close to the original."""
@@ -1020,9 +985,7 @@ class TestHybridFsdpPostAllGatherProtocol:
             out=None,
         )
         assert type(result.rowwise_sub_storage) is orig_row_type
-        _assert_hybrid_tensor_exact(
-            result, hybrid_param, context="post-all-gather storage types"
-        )
+        _assert_hybrid_tensor_exact(result, hybrid_param, context="post-all-gather storage types")
         assert type(result.columnwise_sub_storage) is orig_col_type
 
 
@@ -1093,9 +1056,7 @@ class TestHybridFsdpRoundtrip:
         torch.testing.assert_close(
             hybrid_param.dequantize(), second_result.dequantize(), rtol=0.0, atol=0.0
         )
-        _assert_hybrid_tensor_exact(
-            second_result, hybrid_param, context="FSDP roundtrip reuse"
-        )
+        _assert_hybrid_tensor_exact(second_result, hybrid_param, context="FSDP roundtrip reuse")
 
     @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_scale_refresh_across_iterations(self):
@@ -1170,9 +1131,7 @@ class TestHybridFsdpRoundtrip:
             rtol=0.0,
             atol=0.0,
         )
-        _assert_hybrid_tensor_exact(
-            gathered_refreshed, hybrid_param, context="FSDP scale refresh"
-        )
+        _assert_hybrid_tensor_exact(gathered_refreshed, hybrid_param, context="FSDP scale refresh")
         # And the magnitude really did change (sanity: this test would pass
         # vacuously if update_quantized didn't actually change anything).
         assert gathered_refreshed.dequantize().abs().max() > 10.0, (
@@ -1256,9 +1215,7 @@ class TestHybridMakeLike:
         assert type(copy.rowwise_sub_storage) is type(param.rowwise_sub_storage)
         assert type(copy.columnwise_sub_storage) is type(param.columnwise_sub_storage)
         _assert_hybrid_tensor_exact(copy, param, context="make_like")
-        torch.testing.assert_close(
-            copy.dequantize(), param.dequantize(), rtol=0.0, atol=0.0
-        )
+        torch.testing.assert_close(copy.dequantize(), param.dequantize(), rtol=0.0, atol=0.0)
 
     def test_make_like_is_independent(self):
         """make_like result should not share the same tensor identity."""
@@ -1374,9 +1331,7 @@ class TestHybridFloat8ColumnwiseOnlyHopperPath:
         assert len(buffers) == 1
         assert buffers[0].shape == out.shape
         assert buffers[0].is_contiguous()
-        torch.testing.assert_close(
-            buffers[0], out._transpose.movedim(0, -1).contiguous()
-        )
+        torch.testing.assert_close(buffers[0], out._transpose.movedim(0, -1).contiguous())
         assert metadata == {
             "field_names": ("_transpose",),
             "transport_layout": "columnwise_m_major",
@@ -1394,12 +1349,8 @@ class TestHybridFloat8ColumnwiseOnlyHopperPath:
         assert rebuilt._data is None
         assert rebuilt._transpose.shape == torch.Size((64, 64))
         assert not rebuilt._transpose_invalid
-        torch.testing.assert_close(
-            rebuilt._transpose, gathered.movedim(-1, 0).contiguous()
-        )
-        torch.testing.assert_close(
-            rebuilt.dequantize(), torch.cat((expected, expected), dim=0)
-        )
+        torch.testing.assert_close(rebuilt._transpose, gathered.movedim(-1, 0).contiguous())
+        torch.testing.assert_close(rebuilt.dequantize(), torch.cat((expected, expected), dim=0))
 
     def test_hybrid_fsdp_two_rank_gather_and_buffer_reuse(self):
         shards = [self._make_hybrid_shard(value) for value in (1.0, 2.0)]
@@ -1419,9 +1370,7 @@ class TestHybridFloat8ColumnwiseOnlyHopperPath:
         )
         expected = torch.cat((shards[0][1], shards[1][1]), dim=0)
 
-        rebuilt, _ = shards[0][0].fsdp_post_all_gather(
-            gathered, extracted[0][1], torch.bfloat16
-        )
+        rebuilt, _ = shards[0][0].fsdp_post_all_gather(gathered, extracted[0][1], torch.bfloat16)
 
         assert rebuilt.shape == torch.Size((64, 64))
         assert rebuilt._columnwise_storage.shape == torch.Size((64, 64))
@@ -1542,9 +1491,7 @@ class TestHybridFsdpPostAllGatherUpdateUsage:
             # Set up a fake stale transpose (non-None, marked invalid by
             # the mismatching shape would catch nothing, so just plant
             # a tensor and clear the invalid flag to "valid").
-            out._rowwise_storage._transpose = torch.zeros_like(
-                out._rowwise_storage._data
-            ).t()
+            out._rowwise_storage._transpose = torch.zeros_like(out._rowwise_storage._data).t()
             out._rowwise_storage._transpose_invalid = False
         stale_transpose_id = id(out._rowwise_storage._transpose)
 
@@ -1556,9 +1503,7 @@ class TestHybridFsdpPostAllGatherUpdateUsage:
             module=None,
             mp_policy=None,
         )
-        out2, _ = param.fsdp_post_all_gather(
-            sharded_tensors, metadata, param.dtype, out=out
-        )
+        out2, _ = param.fsdp_post_all_gather(sharded_tensors, metadata, param.dtype, out=out)
 
         # After fsdp_post_all_gather, the rowwise sub-quantizer is pinned
         # columnwise=False, so update_usage(rowwise=True, columnwise=False)
