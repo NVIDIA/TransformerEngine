@@ -185,10 +185,10 @@ class FusedAttnHelper:
         q_type = jax_dtype_to_te_dtype(self.q_dtype)
         bias_batch = bias_heads = bias_seqlen_q = bias_seqlen_kv = 0
         if self.attn_bias_type == AttnBiasType.POST_SCALE_BIAS:
-            bias_batch = self.bias_batch
-            bias_heads = self.bias_heads
-            bias_seqlen_q = self.bias_seqlen_q
-            bias_seqlen_kv = self.bias_seqlen_kv
+            bias_batch = self.bias_batch or 0
+            bias_heads = self.bias_heads or 0
+            bias_seqlen_q = self.bias_seqlen_q or 0
+            bias_seqlen_kv = self.bias_seqlen_kv or 0
         backend, message = transformer_engine_jax.get_fused_attn_backend(
             self.is_training,
             self.batch_size,
