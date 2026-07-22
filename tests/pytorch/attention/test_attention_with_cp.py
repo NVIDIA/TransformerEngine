@@ -718,8 +718,8 @@ BSHD_FUSED_D256_CP_CUDNN_MARK = pytest.mark.skipif(
     reason="cuDNN 9.23+ is required for BSHD D=256 fused-attn CP backward.",
 )
 THD_FUSED_D256_CP_CUDNN_MARK = pytest.mark.skipif(
-    get_cudnn_version() < (9, 30, 0),
-    reason="cuDNN 9.30+ is required for THD D=256 fused-attn CP backward.",
+    get_cudnn_version() < (9, 25, 0),
+    reason="cuDNN 9.25+ is required for THD D=256 fused-attn CP backward.",
 )
 
 DPA_CP_FUSED_D256_CASES = [
