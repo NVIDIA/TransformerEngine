@@ -13,6 +13,9 @@ import tvm_ffi
 from transformer_engine.common.CuTeDSL.cast.mxfp8.quantize_mxfp8 import (
     get_mxfp8_quantization_function,
 )
+from transformer_engine.common.CuTeDSL.cast.nvfp4.quantize_transpose_nvfp4 import (
+    get_nvfp4_quantization_function,
+)
 
 
 def register_cutedsl_backends():
@@ -21,4 +24,7 @@ def register_cutedsl_backends():
     """
     tvm_ffi.register_global_func(
         "get_mxfp8_quantization_function", get_mxfp8_quantization_function, override=True
+    )
+    tvm_ffi.register_global_func(
+        "get_nvfp4_quantization_function", get_nvfp4_quantization_function, override=True
     )

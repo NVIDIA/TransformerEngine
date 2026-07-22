@@ -2,7 +2,6 @@
 #
 # See LICENSE for license information.
 
-"""CuTeDSL cast/quantize kernels."""
+"""CuTeDSL NVFP4 quantization kernels."""
 
-from . import mxfp8
-from . import nvfp4
+from . import quantize_transpose_nvfp4
