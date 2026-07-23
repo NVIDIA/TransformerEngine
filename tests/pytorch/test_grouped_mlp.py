@@ -232,6 +232,26 @@ def make_reference_and_test_tensors(
 class TestGroupedLinearOp:
     """Tests for advanced features with grouped linear basic op"""
 
+    def test_single_grouped_bias_uses_registered_packed_storage(self, monkeypatch) -> None:
+        """The grouped bias compute view must alias the registered trainable parent."""
+        monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+        op = te.ops.GroupedLinear(
+            2,
+            128,
+            128,
+            bias=True,
+            device="cuda",
+            dtype=torch.bfloat16,
+            single_grouped_bias=True,
+        )
+
+        bias_packed = op._get_packed_bias_tensor(torch.bfloat16)
+
+        assert bias_packed.shape == (op.num_groups, op.out_features)
+        assert bias_packed.untyped_storage().data_ptr() == op.bias.rowwise_data.data_ptr()
+        assert op.bias.requires_grad
+        assert dict(op.named_parameters())["bias"] is op.bias
+
     @pytest.mark.parametrize("bias", (False, True))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("quantization", _quantization_list)

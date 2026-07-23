@@ -572,9 +572,18 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
     const size_t scale_stride_colwise = DIVUP_TO_MULTIPLE(cols, scale_alignment_X_colwise);
 
     const size_t tensor_base = current_block.tensor_base;
-    const size_t tensor_base_for_scales = (is_single_tensor && num_tensors > 1)
-                                              ? static_cast<size_t>(offsets_ptr[tensor_id])
-                                              : tensor_base;
+    size_t tensor_base_for_scales = tensor_base;
+    size_t tensor_rows_for_scales = rows;
+    if constexpr (WITH_GEMM_SWIZZLED_SCALES &&
+                  SHAPE_REP == ShapeRepresentation::SAME_BOTH_DIMS) {
+      // The payload is one tall tensor, but GEMM scales are swizzled independently per member.
+      // Uniform groups omit first_dims/tensor_offsets, so derive the member geometry directly.
+      tensor_rows_for_scales = first_logical_dim / num_tensors;
+      tensor_base_for_scales = tensor_id * tensor_rows_for_scales * cols;
+    } else if constexpr (WITH_GEMM_SWIZZLED_SCALES &&
+                         SHAPE_REP == ShapeRepresentation::VARYING_FIRST_DIM) {
+      tensor_base_for_scales = static_cast<size_t>(offsets_ptr[tensor_id]);
+    }
     const size_t block_id_Y = current_block.block_id_Y;
     const size_t block_id_X = current_block.block_id_X;
     const size_t block_offset_Y = current_block.block_offset_Y;
@@ -680,8 +689,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
         process_colwise_stage<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, ROWWISE_SCALING,
                               WITH_GEMM_SWIZZLED_SCALES>(
             buff, stage, tid_X_colwise, scales_offset_Y_colwise, scales_offset_X_colwise,
-            scale_stride_colwise, tensor_base_for_scales, rows, cols, sIn_ptr, sActIn_ptr,
-            sCachedAct_ptr, sOutColwise_ptr, scales_colwise, partial_dbias_colwise);
+            scale_stride_colwise, tensor_base_for_scales, tensor_rows_for_scales, cols, sIn_ptr,
+            sActIn_ptr, sCachedAct_ptr, sOutColwise_ptr, scales_colwise, partial_dbias_colwise);
       }
 
       if constexpr (ROWWISE_SCALING) {

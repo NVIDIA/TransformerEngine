@@ -408,15 +408,20 @@ class _GroupedLinear(torch.autograd.Function):
         bias = biases[0]
         if not isinstance(bias, GroupedTensorStorage):
             raise TypeError("single_grouped_bias requires a GroupedTensor parameter.")
-        if bias.rowwise_data.dtype == dtype:
-            return bias
+        bias_data = bias.rowwise_data
+        if bias_data.dtype != dtype:
+            bias_data = bias_data.to(dtype=dtype)
+
+        # The parameter exposes a packed [num_gemms, out_features] tensor, but its grouped
+        # members are 1D vectors. The grouped bias-add kernel consumes those same bytes as
+        # num_gemms row matrices with shape [1, out_features].
         return GroupedTensorStorage(
-            shape=bias.logical_shape,
+            shape=(num_gemms, out_features),
             dtype=dtype,
             num_tensors=num_gemms,
-            shapes=bias.tensor_shapes,
+            shapes=[(1, out_features)] * num_gemms,
             quantizer=None,
-            data=bias.rowwise_data.to(dtype=dtype),
+            data=bias_data.reshape(-1),
         )
 
     @staticmethod

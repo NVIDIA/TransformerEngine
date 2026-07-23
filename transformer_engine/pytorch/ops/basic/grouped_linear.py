@@ -295,16 +295,27 @@ class GroupedLinear(BasicOperation):
                 w.grad = grad_weights[group_idx].to(w.dtype)
         self._trigger_wgrad_accumulation_and_reduce_hooks()
 
-    def _get_bias_tensors(self, dtype: torch.dtype) -> list[torch.Tensor]:
-        """Retrieve per-group bias tensors in the given dtype."""
+    def _get_discrete_bias_tensors(self, dtype: torch.dtype) -> list[torch.Tensor]:
+        """Retrieve discrete per-group bias parameters in the given dtype."""
         if self.single_grouped_bias:
-            bias_parts = self.bias.quantized_tensors
-            if bias_parts is None:
-                bias_parts = self.bias.split_into_quantized_tensors()
-            return [maybe_dequantize(p.reshape(-1), dtype) for p in bias_parts]
+            raise RuntimeError(
+                "Discrete bias tensors were requested for a single grouped bias parameter."
+            )
         return [
             maybe_dequantize(getattr(self, f"bias{idx}"), dtype) for idx in range(self.num_groups)
         ]
+
+    def _get_packed_bias_tensor(self, dtype: torch.dtype) -> torch.Tensor:
+        """Return all per-group biases as one dense tensor with shape [num_groups, out_features].
+
+        A single grouped bias is already stored in this layout, so return a view of the
+        registered parent parameter instead of splitting it into members and stacking it again.
+        Discrete biases require a stack because they are independent parameters.
+        """
+        if self.single_grouped_bias:
+            bias_data = self.bias.rowwise_data.view(self.num_groups, self.out_features)
+            return bias_data if bias_data.dtype == dtype else bias_data.to(dtype=dtype)
+        return torch.stack(self._get_discrete_bias_tensors(dtype), dim=0)
 
     def num_quantizers(self, mode: str) -> int:
         if mode == "forward":
@@ -953,16 +964,7 @@ class GroupedLinear(BasicOperation):
             return None
         num_groups = self.num_groups
 
-        if self.single_grouped_bias:
-            # Already a contiguous (num_groups * out_features) buffer.
-            bias_data = self.bias.rowwise_data
-            if bias_data.dtype != dtype:
-                bias_data = bias_data.to(dtype=dtype)
-        else:
-            bias_list = [
-                maybe_dequantize(getattr(self, f"bias{idx}"), dtype) for idx in range(num_groups)
-            ]
-            bias_data = torch.stack(bias_list, dim=0).contiguous()
+        bias_data = self._get_packed_bias_tensor(dtype)
 
         return GroupedTensorStorage(
             shape=(num_groups, self.out_features),
@@ -1041,6 +1043,13 @@ class GroupedLinear(BasicOperation):
             dtype=dtype,
             single_grouped_weight=self.single_grouped_weight,
         )
+        if (self.single_grouped_weight or self.single_grouped_bias) and not use_grouped_tensor_path:
+            raise RuntimeError(
+                "Single grouped parameters require the native grouped-tensor GroupedLinear path, "
+                "which is unavailable for the current device, dtype, or quantization recipe. "
+                "Disable single_grouped_weight/single_grouped_bias or use a supported grouped-"
+                "tensor configuration."
+            )
 
         if use_grouped_tensor_path:
             out, tensors_to_save = self._fuser_forward_grouped_tensor(
@@ -1186,16 +1195,11 @@ class GroupedLinear(BasicOperation):
         # Need CPU split sizes for split_quantize / general_grouped_gemm.
         split_sizes_int = [int(s) for s in split_sizes.tolist()]
 
-        # Extract params
-        if self.single_grouped_weight:
-            weights = self.weight.quantized_tensors
-            if weights is None:
-                weights = self.weight.split_into_quantized_tensors()
-        else:
-            weights = self._forward_weight_list()  # materialized when distributed
+        # Single grouped parameters are rejected before entering this legacy path.
+        weights = self._forward_weight_list()  # materialized when distributed
         bs = None
         if has_bias:
-            bs = self._get_bias_tensors(dtype)
+            bs = self._get_discrete_bias_tensors(dtype)
 
         ws = self._get_discrete_weights_for_gemm(
             weights,
@@ -1484,7 +1488,7 @@ class GroupedLinear(BasicOperation):
             offsets = torch.zeros(num_groups + 1, dtype=torch.int64, device=device)
             offsets[1:] = split_sizes.cumsum(0)
             if self._scale_bias:
-                bias_packed = torch.stack(self._get_bias_tensors(ctx.dtype))
+                bias_packed = self._get_packed_bias_tensor(ctx.dtype)
                 scales_f32 = scales.to(dtype=torch.float32)
                 dbias_packed, grad_scales = compute_grouped_dbias_dscales(
                     dy_2d,
@@ -1705,7 +1709,7 @@ class GroupedLinear(BasicOperation):
         grad_scales: Optional[torch.Tensor] = None
         if has_bias:
             if self._scale_bias:
-                bias_packed = torch.stack(self._get_bias_tensors(dtype))
+                bias_packed = self._get_packed_bias_tensor(dtype)
                 scales_f32 = scales.to(dtype=torch.float32)
                 dbias_packed, grad_scales = compute_grouped_dbias_dscales(
                     dy_2d,
