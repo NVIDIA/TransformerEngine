@@ -64,7 +64,7 @@ def init():
     yield
 
 
-@partial(jax.jit, static_argnums=(6, 7, 8, 9, 11, 12))
+@partial(jax.jit, static_argnums=(6, 7, 8, 9, 11, 12, 13))
 def general_dot_product_attention(
     query: ArrayLike,
     key: ArrayLike,
@@ -79,27 +79,23 @@ def general_dot_product_attention(
     dropout_rng: ArrayLike,
     dtype: DTypeLike,
     score_mod_reference: Optional[Callable[[Array], Array]] = None,
+    is_max_logit_enabled: bool = False,
 ) -> Array:
     """
     Similar to flax.linen.dot_product_attention but with GQA support
     """
     query, key, value, bias = promote_dtype(query, key, value, bias, dtype=dtype)
     dtype = query.dtype
-
     b, s_q, h_q, d = query.shape
     _, s_kv, h_kv, _ = key.shape
     assert (h_q % h_kv == 0) and (h_q >= h_kv)
     num_groups = h_q // h_kv
     grouped_query = jnp.reshape(query, (b, s_q, h_kv, num_groups, d))
-    # logits with shape (b, h_kv, num_groups, s_q, s_kv)
     logits = scale_factor * jnp.einsum("...qhgd,...khd->...hgqk", grouped_query, key)
 
     if bias is not None:
-        # reshape logits without groups
         logits = logits.reshape((b, h_kv * num_groups, s_q, s_kv))
-        # apply post-scale bias
         logits = logits + bias
-        # reshape logits back to original
         logits = logits.reshape((b, h_kv, num_groups, s_q, s_kv))
 
     if mask is not None:
@@ -110,6 +106,8 @@ def general_dot_product_attention(
     if score_mod_reference is not None:
         # Kernel tests use NO_MASK; fused_attn rejects mask+score_mod before this reference path.
         logits = score_mod_reference(logits.astype(jnp.float32))
+    if is_max_logit_enabled:
+        return jnp.max(logits.reshape((b, h_q, s_q, s_kv)), axis=(0, 2, 3)).astype(dtype)
 
     match softmax_type:
         case AttnSoftmaxType.VANILLA_SOFTMAX:
@@ -268,7 +266,17 @@ def _split_valid_and_invalid(primitive, reference, pad):
     return primitive_valid, primitive_invalid, reference_valid, reference_invalid
 
 
-def jax_dpa(query, key, value, bias, softmax_offset, mask, dropout_rng, **kwargs):
+def jax_dpa(
+    query,
+    key,
+    value,
+    bias,
+    softmax_offset,
+    mask,
+    dropout_rng,
+    is_max_logit_enabled=False,
+    **kwargs,
+):
     """
     JAX native dot product attention implementation
     """
@@ -308,6 +316,7 @@ def jax_dpa(query, key, value, bias, softmax_offset, mask, dropout_rng, **kwargs
         dropout_rng=dropout_rng,
         dtype=jnp.float32,
         score_mod_reference=score_mod_reference,
+        is_max_logit_enabled=is_max_logit_enabled,
     )
     return output.astype(query.dtype)
 
@@ -339,9 +348,13 @@ def customcall_fused_dpa(
             qkv_args = (query, key, value)
         case _:
             raise ValueError(f"Unsupported {qkv_layout=}")
-    return fused_attn(
+    result = fused_attn(
         qkv_args, bias, sequence_descriptor, dropout_rng, softmax_offset=softmax_offset, **kwargs
-    ).astype(query.dtype)
+    )
+    if isinstance(result, tuple):
+        output, aux = result
+        return output.astype(query.dtype), aux
+    return result.astype(query.dtype)
 
 
 def test_fused_attn_score_mod_rejects_masks_before_cudnn_frontend():
@@ -1226,6 +1239,149 @@ class FusedAttnRunner:
             with self.mesh, autocast(mesh_resource=self.mesh_resource):
                 target_hlo = jitted_primitive.lower(*customcall_args).compile().as_text()
             assert_equal_collectives(target_hlo, self.coll_count_ref)
+
+    def _reference_args(self):
+        return [self.q, self.k, self.v, self.bias, self.softmax_offset, self.mask, self.dropout_rng]
+
+    def _customcall_args(self):
+        return [
+            jax.device_put(self.cp_reorder_fn(self.q), self.qkvo_sharding),
+            jax.device_put(self.cp_reorder_fn(self.k), self.qkvo_sharding),
+            jax.device_put(self.cp_reorder_fn(self.v), self.qkvo_sharding),
+            jax.device_put(self.bias, self.bias_sharding),
+            jax.device_put(self.softmax_offset, self.softmax_offset_sharding),
+            jax.device_put(self.sequence_desciptor, self.seq_desc_sharding),
+            jax.device_put(self.dropout_rng, self.dropout_rng_sharding),
+        ]
+
+    def _fused_attn_kwargs(self, **overrides):
+        kwargs = {
+            "attn_bias_type": self.attn_bias_type,
+            "attn_mask_type": self.attn_mask_type,
+            "softmax_type": self.softmax_type,
+            "scaling_factor": self.scaling_factor,
+            "dropout_probability": self.dropout_prob,
+            "is_training": self.is_training,
+            "qkv_layout": self.qkv_layout,
+            "max_segments_per_seq": self._get_max_segments_per_sequence(),
+            "window_size": self.window_size,
+            "context_parallel_strategy": self.cp_strategy,
+            "context_parallel_causal_load_balanced": self.cp_load_balanced,
+            "stripe_size": self.stripe_size,
+        }
+        kwargs.update(overrides)
+        return kwargs
+
+    def test_forward_with_max_logit(self):
+        """Test forward output and returned max_logit."""
+        self._setup_inputs()
+        kwargs = self._fused_attn_kwargs()
+
+        customcall_fused_dpa_jit = jit(
+            partial(customcall_fused_dpa, return_max_logit=True, **kwargs),
+            static_argnames=kwargs.keys(),
+            in_shardings=[
+                self.qkvo_sharding,
+                self.qkvo_sharding,
+                self.qkvo_sharding,
+                self.bias_sharding,
+                self.softmax_offset_sharding,
+                self.seq_desc_sharding,
+                self.dropout_rng_sharding,
+            ],
+        )
+
+        with self.mesh, autocast(mesh_resource=self.mesh_resource):
+            primitive_out, primitive_aux = customcall_fused_dpa_jit(*self._customcall_args())
+            primitive_max_logit = primitive_aux["max_logit"]
+            primitive_out = self.cp_inverse_reorder_fn(primitive_out)
+
+        reference_out = jax_dpa(*self._reference_args(), **kwargs)
+        reference_max_logit = jax_dpa(*self._reference_args(), is_max_logit_enabled=True, **kwargs)
+
+        primitive_valid, primitive_invalid, reference_valid, _ = _split_valid_and_invalid(
+            primitive_out, reference_out, self.pad_q
+        )
+        assert_allclose(primitive_invalid, jnp.zeros_like(primitive_invalid), dtype=self.dtype)
+        assert_allclose(primitive_valid, reference_valid, dtype=self.dtype)
+        assert_allclose(primitive_max_logit, reference_max_logit, dtype=self.dtype)
+
+    def test_backward_with_max_logit(self):
+        """Ensure aux-return cotangents do not break the fused attention backward path."""
+        self._setup_inputs()
+        kwargs = self._fused_attn_kwargs()
+
+        def loss_fn(query):
+            output, _ = customcall_fused_dpa(
+                query,
+                self.k,
+                self.v,
+                self.bias,
+                self.softmax_offset,
+                self.sequence_desciptor,
+                self.dropout_rng,
+                return_max_logit=True,
+                **kwargs,
+            )
+            return jnp.mean(output.astype(jnp.float32))
+
+        grad = jax.grad(loss_fn)(self.q)
+        assert grad.shape == self.q.shape
+
+
+@pytest.mark.parametrize(
+    "qkv_layout, seq_desc_format",
+    [
+        pytest.param(QKVLayout.BSHD_BSHD_BSHD, SeqDescFormat.Seqlens, id="BSHD_SEPARATE"),
+        pytest.param(QKVLayout.T3HD, SeqDescFormat.Seqlens, id="THD_QKV_PACKED"),
+    ],
+)
+def test_fused_attn_return_max_logit(qkv_layout, seq_desc_format):
+    """Check non-CP JAX fused attention can expose PyTorch-compatible max_logit."""
+    runner = FusedAttnRunner(
+        batch_size=2,
+        max_seqlen_q=128,
+        max_seqlen_kv=128,
+        num_heads_q=8,
+        num_heads_kv=8,
+        head_dim_qk=64,
+        head_dim_v=64,
+        attn_bias_type=AttnBiasType.NO_BIAS,
+        attn_mask_type=AttnMaskType.PADDING_CAUSAL_MASK,
+        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+        dropout_prob=0.0,
+        dtype=jnp.bfloat16,
+        is_training=True,
+        qkv_layout=qkv_layout,
+        bias_shape=None,
+        window_size=None,
+        seq_desc_format=seq_desc_format,
+    )
+    runner.test_forward_with_max_logit()
+
+
+def test_fused_attn_return_max_logit_backward_smoke():
+    """Ensure aux-return cotangents do not break the fused attention backward path."""
+    runner = FusedAttnRunner(
+        batch_size=2,
+        max_seqlen_q=128,
+        max_seqlen_kv=128,
+        num_heads_q=8,
+        num_heads_kv=8,
+        head_dim_qk=64,
+        head_dim_v=64,
+        attn_bias_type=AttnBiasType.NO_BIAS,
+        attn_mask_type=AttnMaskType.PADDING_CAUSAL_MASK,
+        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+        dropout_prob=0.0,
+        dtype=jnp.bfloat16,
+        is_training=True,
+        qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
+        bias_shape=None,
+        window_size=None,
+        seq_desc_format=SeqDescFormat.Seqlens,
+    )
+    runner.test_backward_with_max_logit()
 
 
 def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tuple[int, int]:
