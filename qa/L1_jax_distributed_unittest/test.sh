@@ -25,6 +25,8 @@ export XLA_FLAGS="$XLA_FLAGS --xla_gpu_enable_triton_gemm=false"
 
 python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_dist_dense.xml $TE_PATH/tests/jax/test_distributed_dense.py || test_fail "test_distributed_dense.py"
 
+python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_dist_grouped_gemm.xml $TE_PATH/tests/jax/test_distributed_grouped_gemm.py || test_fail "test_distributed_grouped_gemm.py"
+
 python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_helper.xml $TE_PATH/tests/jax/test_distributed_helper.py || test_fail "test_distributed_helper.py"
 
 python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_dist_layernorm.xml $TE_PATH/tests/jax/test_distributed_layernorm.py || test_fail "test_distributed_layernorm.py"
@@ -39,9 +41,6 @@ python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/py
 
 # NCCL EP multi-process suite. Self-skips on <4 GPUs.
 TE_PATH=$TE_PATH bash $TE_PATH/tests/jax/multi_process_launch_ep.sh || test_fail "test_multi_process_ep.py"
-
-# TODO(Phuong): add this test back after it is verified
-# SCRIPT_NAME=$TE_PATH/tests/jax/test_multi_process_distributed_grouped_gemm.py bash $TE_PATH/tests/jax/multi_process_launch.sh || test_fail "test_multi_process_distributed_grouped_gemm.py"
 
 if [ $RET -ne 0 ]; then
     echo "Error: some sub-tests failed: $FAILED_CASES"

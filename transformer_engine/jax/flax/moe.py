@@ -200,16 +200,14 @@ class _MoEBlock(TransformerEngineBase):
             (hidden_size, self.num_experts),
             self.dtype,
         )
-        wi_0 = self.param(
-            "wi_0",
+        # FC1 is stored as one gated-SwiGLU kernel.  Keeping its two
+        # projections contiguous lets the functional MoE path quantize and
+        # all-gather one FP8 data buffer (and one scale buffer), rather than
+        # materializing a concatenate inside the custom-VJP.
+        wi = self.param(
+            "wi",
             nn.with_logical_partitioning(self.kernel_init, self.wi_kernel_axes),
-            (self.num_experts, hidden_size, self.intermediate_size),
-            self.dtype,
-        )
-        wi_1 = self.param(
-            "wi_1",
-            nn.with_logical_partitioning(self.kernel_init, self.wi_kernel_axes),
-            (self.num_experts, hidden_size, self.intermediate_size),
+            (self.num_experts, hidden_size, 2 * self.intermediate_size),
             self.dtype,
         )
         wo = self.param(
@@ -254,8 +252,7 @@ class _MoEBlock(TransformerEngineBase):
         return moe(
             inputs,
             gate_kernel,
-            wi_0,
-            wi_1,
+            wi,
             wo,
             wi_0_bias,
             wi_1_bias,

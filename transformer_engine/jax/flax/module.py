@@ -1471,7 +1471,7 @@ def make_grouped_dense_cls(quantization_recipe, quantization_checkpoint_name: Op
             x,
             kernel,
             group_sizes=group_sizes,
-            contracting_dims=((1,), (1,)),
+            contracting_dims=((-1,), (1,)),
             quantizer_set=quantizer_set,
         )
         return out
