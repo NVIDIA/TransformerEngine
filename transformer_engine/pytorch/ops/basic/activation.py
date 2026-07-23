@@ -507,6 +507,7 @@ class ScaledSReLU(_ScaledUnary):
             compute_scale_grad,
         )
 
+
 class SReGLU(_ActivationOperation):
     r"""Squared Rectified Gated Linear Unit
 

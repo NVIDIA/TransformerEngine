@@ -512,8 +512,8 @@ py::object scaled_srelu(const at::Tensor& input, const at::Tensor& act_scales,
 py::tuple scaled_dswiglu(const at::Tensor& grad, const at::Tensor& input,
                          const at::Tensor& act_scales, py::handle quantizer,
                          int64_t glu_interleave_size, bool compute_scale_grad) {
-  return scaled_dactivation_helper<nvte_scaled_dswiglu>(
-      grad, input, act_scales, quantizer, compute_scale_grad, glu_interleave_size);
+  return scaled_dactivation_helper<nvte_scaled_dswiglu>(grad, input, act_scales, quantizer,
+                                                        compute_scale_grad, glu_interleave_size);
 }
 
 py::tuple scaled_clamped_dswiglu(const at::Tensor& grad, const at::Tensor& input,
