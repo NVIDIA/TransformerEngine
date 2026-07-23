@@ -31,7 +31,7 @@ struct NVFP4QuantConfig {
   bool use_fast_math;            // If fast math approximations are used during quantization
   bool row_scaled_nvfp4;         // If scales are computed per row (row-scaled NVFP4)
   bool return_transpose;         // If columnwise (transposed) output is produced
-
+  
   std::string to_key() const {
     std::string key;
     key.reserve(32);
@@ -62,17 +62,43 @@ inline bool nvfp4_quantize_transpose_cutedsl(const NVFP4QuantConfig &config, con
                                              const Tensor *noop, Tensor *output,
                                              const QuantizationConfig *quant_config,
                                              cudaStream_t stream) {
-  // todo
-
   std::optional<tvm::ffi::Function> nvfp4_quant_func_opt =
       tvm_ffi_bridge::TVMFFICentral::getInstance().lazyload_function(config);
   if (!nvfp4_quant_func_opt.has_value()) {
     return false;
   }
 
-  // todo
+  tvm_ffi_bridge::DLTensorWrapper mX(input.data);
+  tvm_ffi_bridge::DLTensorWrapper mO_row(output->data);
+  tvm_ffi_bridge::DLTensorWrapper mS_row(output->scale_inv);
+  tvm_ffi_bridge::DLTensorWrapper mAmaxRow(output->amax);
 
-  (*nvfp4_quant_func_opt)(/* todo */);
+  tvm_ffi_bridge::DLTensorWrapper mO_col, mS_col, mAmaxCol;
+  if (config.return_transpose) {
+    mO_col = tvm_ffi_bridge::DLTensorWrapper(output->columnwise_data);
+    mS_col = tvm_ffi_bridge::DLTensorWrapper(output->columnwise_scale_inv);
+    mAmaxCol = tvm_ffi_bridge::DLTensorWrapper(output->columnwise_amax);
+  }
+
+  // Optional Philox RNG state ({seed, offset}); required (and only used) for SR.
+  tvm_ffi_bridge::DLTensorWrapper mRngState;
+  if (config.use_stochastic_rounding) {
+    const NVTETensor rng_state_tensor =
+        (quant_config != nullptr) ? quant_config->rng_state : nullptr;
+    NVTE_CHECK(rng_state_tensor != nullptr,
+               "Stochastic rounding requires an RNG state tensor to be provided.");
+    Tensor &rng_state_te_tensor = *convertNVTETensor(rng_state_tensor);
+    mRngState = tvm_ffi_bridge::DLTensorWrapper(rng_state_te_tensor.data);
+  }
+
+  // noop passed as ptr because the null-check must be done at runtime on device
+  void *noop_ptr = (noop != nullptr) ? noop->data.dptr : nullptr;
+  // stream is a tvm-ffi opaque "handle"; pass the CUDA stream as void*.
+  void* stream_ptr = static_cast<void *>(stream);
+
+  // Dispatches to NVFP4QuantizeTransposeTuned1DKernel.__call__
+  (*nvfp4_quant_func_opt)(&mX, &mO_row, &mS_row, &mO_col, &mS_col, &mAmaxRow, &mAmaxCol, noop_ptr,
+                          &mRngState, stream_ptr);
   return true;
 }
 #endif  // FP4_TYPE_SUPPORTED
