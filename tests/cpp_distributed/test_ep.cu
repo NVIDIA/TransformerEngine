@@ -675,7 +675,7 @@ class EPPipelineTest : public EpOpTestBase, public ::testing::WithParamInterface
 TEST_P(EPPipelineTest, FullForwardBackward) {
   const DType dtype = GetParam();
   // NCCL EP backend currently asserts ncclBfloat16 in ncclEpDispatch
-  // (contrib/nccl_ep/nccl_ep.cc); skip FP16/FP32 until the backend supports them.
+  // (nccl_ep/nccl_ep.cc); skip FP16/FP32 until the backend supports them.
   if (dtype != DType::kBFloat16) {
     GTEST_SKIP() << test::typeName(dtype) << " not yet supported by NCCL EP backend";
   }
@@ -750,8 +750,9 @@ class EPZeroCopyTest : public EpOpTestBase {
 };
 TYPED_TEST_SUITE(EPZeroCopyTest, EPBf16Only);
 
-// Identity round-trip with symm-mem on dispatch i/o + combine input. Bit-exact
-// vs HBM reference (same routing, same input).
+// Identity round-trip with symm-mem on dispatch i/o + combine input. The combined
+// result is bit-exact vs the HBM reference; the intermediate recv buffer is not,
+// since zero-copy and HBM dispatch use different per-expert layouts.
 TYPED_TEST(EPZeroCopyTest, IdentityAllSymm) {
   using Tok = TypeParam;
   EP_PULL_FIXTURE();
@@ -776,10 +777,7 @@ TYPED_TEST(EPZeroCopyTest, IdentityAllSymm) {
                                   ref_t.result.data(), stream));
   NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
 
-  std::vector<Tok> ref_recv(ref_buf.recv_capacity * hidden_dim_);
   std::vector<Tok> ref_result(num_tokens_ * hidden_dim_);
-  NVTE_CHECK_CUDA(cudaMemcpy(ref_recv.data(),   ref_buf.recv_tokens.get(),
-                        ref_recv.size() * sizeof(Tok), cudaMemcpyDeviceToHost));
   NVTE_CHECK_CUDA(cudaMemcpy(ref_result.data(), ref_buf.result.get(),
                         ref_result.size() * sizeof(Tok), cudaMemcpyDeviceToHost));
 
@@ -818,24 +816,17 @@ TYPED_TEST(EPZeroCopyTest, IdentityAllSymm) {
                                   symm_window(sym_recv), sym_t.result.data(), stream));
   NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
 
-  std::vector<Tok> sym_recv_host(sym_buf.recv_capacity * hidden_dim_);
   std::vector<Tok> sym_result(num_tokens_ * hidden_dim_);
-  NVTE_CHECK_CUDA(cudaMemcpy(sym_recv_host.data(), sym_recv.ptr,
-                        sym_recv_host.size() * sizeof(Tok), cudaMemcpyDeviceToHost));
   NVTE_CHECK_CUDA(cudaMemcpy(sym_result.data(),    sym_buf.result.get(),
                         sym_result.size() * sizeof(Tok), cudaMemcpyDeviceToHost));
 
-  // Compare per filled recv slot (HBM ref vs symm) and full result.
-  int total_recv = this->template read_total_recv<Tok>(sym_buf);
-  for (int i = 0; i < total_recv * hidden_dim_; ++i)
-    ASSERT_EQ(tok_to_float(sym_recv_host[i]), tok_to_float(ref_recv[i]))
-        << "recv mismatch at " << i;
+  // Combined result is the cross-mode invariant (see note above).
   for (size_t i = 0; i < sym_result.size(); ++i)
     ASSERT_EQ(tok_to_float(sym_result[i]), tok_to_float(ref_result[i]))
         << "result mismatch at " << i;
 
   if (g_process_id == 0)
-    printf("  IdentityAllSymm: passed (recv_slots=%d, bit-exact vs HBM)\n", total_recv);
+    printf("  IdentityAllSymm: passed (result bit-exact vs HBM)\n");
 
   NVTE_CHECK_CUDA(cudaStreamDestroy(stream));
 }

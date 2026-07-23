@@ -145,7 +145,13 @@ void ep_initialize(uintptr_t comm_ptr, const std::string& group_name, int64_t nu
       .max_token_dtype = static_cast<NVTEDType>(GetTransformerEngineDType(torch_dtype)),
       .zero_copy = zero_copy ? 1 : 0,
   };
-  nvte_ep_initialize(static_cast<void*>(ep_comm), &cfg);
+  // Release the GIL only around the native init. It must stay held while pybind11 casts
+  // the ``max_token_dtype`` object above and destroys the by-value ``pybind11::object``
+  // parameter on return; releasing it across those trips pybind11's dec_ref GIL assertion.
+  {
+    pybind11::gil_scoped_release nogil;
+    nvte_ep_initialize(static_cast<void*>(ep_comm), &cfg);
+  }
   g_zero_copy_enabled.store(zero_copy, std::memory_order_relaxed);
   g_ep_initialized = true;
   g_ep_group_name = group_name;
@@ -366,8 +372,7 @@ void register_ep_bindings(pybind11::module_& m) {
         "Initialize the EP backend; borrows torch's NCCL comm pointed to by ``comm_ptr``.",
         py::arg("comm_ptr"), py::arg("group_name"), py::arg("num_experts"),
         py::arg("max_tokens_per_rank"), py::arg("max_recv_tokens_per_rank"), py::arg("hidden_dim"),
-        py::arg("max_num_sms") = 0, py::arg("max_token_dtype"), py::arg("zero_copy") = false,
-        py::call_guard<py::gil_scoped_release>());
+        py::arg("max_num_sms") = 0, py::arg("max_token_dtype"), py::arg("zero_copy") = false);
   m.def("ep_finalize", &ep_finalize, "Tear down the EP backend. Idempotent.",
         py::call_guard<py::gil_scoped_release>());
   m.def("ep_get_zero_copy", &ep_get_zero_copy, "Return the current EP zero-copy toggle state.");

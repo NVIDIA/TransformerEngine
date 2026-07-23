@@ -150,7 +150,7 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
             /*output=*/output_tensor->data, /*output_t=*/output_tensor->columnwise_data,
             /*epsilon=*/0.0f, /*return_identity=*/output_tensor->has_data(),
             /*return_transpose=*/output_tensor->has_columnwise_data(), /*pow2_scale=*/false,
-            /*swizzled_scale=*/false,
+            /*swizzled_scale=*/output_tensor->with_gemm_swizzled_scales,
             /*use_stochastic_rounding=*/quant_config_cpp.stochastic_rounding,
             /*rng_state=*/quant_config_cpp.rng_state,
             /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,
@@ -310,7 +310,7 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
             /*output=*/output_tensor->data, /*output_t=*/output_tensor->columnwise_data,
             /*epsilon=*/0.0f, /*return_identity=*/output_tensor->has_data(),
             /*return_transpose=*/output_tensor->has_columnwise_data(), /*pow2_scale=*/false,
-            /*swizzled_scale=*/false,
+            /*swizzled_scale=*/output_tensor->with_gemm_swizzled_scales,
             /*use_stochastic_rounding=*/quant_config_cpp.stochastic_rounding,
             /*rng_state=*/quant_config_cpp.rng_state,
             /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,
@@ -475,22 +475,16 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
     }
     case NVTE_BLOCK_SCALING_1D: {
       NVTE_CHECK(!IS_ACT, "IS_ACT is not implemented for grouped NVTE_BLOCK_SCALING_1D.");
-      NVTE_CHECK(!quant_config_cpp.force_pow_2_scales,
-                 "Fused grouped FP8 block-scaling quantize does not support "
-                 "force_pow_2_scales=True. Set force_pow_2_scales=False, or use the unfused "
-                 "split-quantize path (NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM=0).");
       fp8_blockwise::group_quantize_blockwise_1d(input_tensor, output_tensor, noop_tensor,
-                                                 quant_config_cpp.amax_epsilon, stream);
+                                                 quant_config_cpp.amax_epsilon,
+                                                 quant_config_cpp.force_pow_2_scales, stream);
       break;
     }
     case NVTE_BLOCK_SCALING_2D: {
       NVTE_CHECK(!IS_ACT, "IS_ACT is not implemented for grouped NVTE_BLOCK_SCALING_2D.");
-      NVTE_CHECK(!quant_config_cpp.force_pow_2_scales,
-                 "Fused grouped FP8 block-scaling quantize does not support "
-                 "force_pow_2_scales=True. Set force_pow_2_scales=False, or use the unfused "
-                 "split-quantize path (NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM=0).");
       fp8_blockwise::group_quantize_blockwise_2d(input_tensor, output_tensor, noop_tensor,
-                                                 quant_config_cpp.amax_epsilon, stream);
+                                                 quant_config_cpp.amax_epsilon,
+                                                 quant_config_cpp.force_pow_2_scales, stream);
       break;
     }
     default:
@@ -537,22 +531,18 @@ void group_quantize_bwd_helper(const NVTEGroupedTensor grad, const NVTEGroupedTe
     case NVTE_BLOCK_SCALING_1D:
     case NVTE_BLOCK_SCALING_2D: {
       NVTE_CHECK(!IS_DACT, "IS_DACT is not implemented for grouped FP8 block scaling.");
-      NVTE_CHECK(!quant_config_cpp.force_pow_2_scales,
-                 "Fused grouped FP8 block-scaling quantize does not support "
-                 "force_pow_2_scales=True. Set force_pow_2_scales=False, or use the unfused "
-                 "split-quantize path (NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM=0).");
       // dbias is computed in-kernel and reduced per-expert inside group_quantize_blockwise_{1d,2d}
       // (mirrors MXFP8); those also handle the two-call workspace sizing protocol.
       GroupedTensor *dbias_arg = IS_DBIAS ? dbias_tensor : nullptr;
       Tensor *workspace_arg = IS_DBIAS ? workspace_tensor : nullptr;
       if (scaling_mode == NVTE_BLOCK_SCALING_1D) {
-        fp8_blockwise::group_quantize_blockwise_1d(grad_tensor, output_tensor, noop_tensor,
-                                                   quant_config_cpp.amax_epsilon, stream, dbias_arg,
-                                                   workspace_arg);
+        fp8_blockwise::group_quantize_blockwise_1d(
+            grad_tensor, output_tensor, noop_tensor, quant_config_cpp.amax_epsilon,
+            quant_config_cpp.force_pow_2_scales, stream, dbias_arg, workspace_arg);
       } else {
-        fp8_blockwise::group_quantize_blockwise_2d(grad_tensor, output_tensor, noop_tensor,
-                                                   quant_config_cpp.amax_epsilon, stream, dbias_arg,
-                                                   workspace_arg);
+        fp8_blockwise::group_quantize_blockwise_2d(
+            grad_tensor, output_tensor, noop_tensor, quant_config_cpp.amax_epsilon,
+            quant_config_cpp.force_pow_2_scales, stream, dbias_arg, workspace_arg);
       }
       break;
     }
