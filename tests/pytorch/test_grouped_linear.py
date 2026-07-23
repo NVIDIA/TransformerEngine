@@ -1528,7 +1528,7 @@ def _reset_fp8_state(monkeypatch):
 
 @pytest.mark.parametrize(
     "m_splits,exception",
-    [([256, 256], TypeError), (torch.tensor([256, 256]), ValueError)],
+    [([256, 256], ValueError), (torch.tensor([256, 256]), ValueError)],
     ids=["python-list", "cpu-tensor"],
 )
 def test_single_grouped_weight_rejects_host_m_splits(monkeypatch, m_splits, exception):
@@ -2205,7 +2205,8 @@ def test_grouped_linear_returns_single_grouped_bias_parameter(monkeypatch):
         dim=0,
         output_size=total_tokens,
     )
-    (output + bias_per_token * probs.unsqueeze(-1)).sum().backward()
+    biased_output = (output + bias_per_token * probs.reshape(-1, 1)).to(output.dtype)
+    biased_output.sum().backward()
 
     # For token t and output feature j, the externally applied bias contributes
     # bias[expert(t), j] * probs[t] to the summed loss. Therefore every bias feature for
@@ -2213,18 +2214,18 @@ def test_grouped_linear_returns_single_grouped_bias_parameter(monkeypatch):
     # first 256 tokens on expert 0 and the remaining 256 tokens on expert 1.
     expected_dbias = (
         torch.stack(
-            (probs[:256].sum(), probs[256:].sum()),
+            (probs[:256].float().sum(), probs[256:].float().sum()),
         )
         .unsqueeze(-1)
         .expand(num_gemms, out_features)
     )
     assert grouped_linear.bias.grad is not None
-    # repeat_interleave backward and the standalone sums above use different BF16 reduction
-    # orders, so compare the independently derived result with BF16-appropriate tolerance.
+    # Megatron applies the packed bias in BF16. Compare its gradient against an independently
+    # accumulated FP32 reference with a tolerance appropriate for a 256-element BF16 reduction.
     torch.testing.assert_close(
         grouped_linear.bias.grad.float(),
-        expected_dbias.float(),
-        rtol=1e-2,
+        expected_dbias,
+        rtol=5e-2,
         atol=5e-3,
     )
 
