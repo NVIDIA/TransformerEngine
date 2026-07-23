@@ -200,12 +200,14 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("NVTE_BSHD_BSHD_BSHD", NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD)
       .value("NVTE_T3HD", NVTE_QKV_Layout::NVTE_T3HD)
       .value("NVTE_THD_T2HD", NVTE_QKV_Layout::NVTE_THD_T2HD)
-      .value("NVTE_THD_THD_THD", NVTE_QKV_Layout::NVTE_THD_THD_THD);
+      .value("NVTE_THD_THD_THD", NVTE_QKV_Layout::NVTE_THD_THD_THD)
+      .value("NVTE_QKV_Layout_NOT_SET", NVTE_QKV_Layout::NVTE_QKV_Layout_NOT_SET);
 
   pybind11::enum_<NVTE_QKV_Format>(m, "NVTE_QKV_Format", pybind11::module_local())
       .value("NVTE_SBHD", NVTE_QKV_Format::NVTE_SBHD)
       .value("NVTE_BSHD", NVTE_QKV_Format::NVTE_BSHD)
-      .value("NVTE_THD", NVTE_QKV_Format::NVTE_THD);
+      .value("NVTE_THD", NVTE_QKV_Format::NVTE_THD)
+      .value("NVTE_QKV_Format_NOT_SET", NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET);
 
   pybind11::enum_<NVTE_Softmax_Type>(m, "NVTE_Softmax_Type", pybind11::module_local())
       .value("NVTE_VANILLA_SOFTMAX", NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX)

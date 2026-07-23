@@ -171,12 +171,6 @@ backend-selection overview.
    :Default: ``1``
    :Description: Enable or disable UnfusedDotProductAttention backend (native PyTorch). When set to ``0``, UnfusedDotProductAttention will not be used.
 
-.. envvar:: NVTE_FUSED_ATTN_BACKEND
-
-   :Type: ``int`` (1 or 2)
-   :Default: Auto-selected
-   :Description: Request a cuDNN FusedAttention backend when that request is supported by the active fused-attention path. ``1`` = F16_arbitrary_seqlen (cuDNN, any seq len), ``2`` = FP8 backend. If not set, the backend is automatically selected based on the input configuration. BF16/FP16 attention uses sub-backend ``1`` when eligible. FP8 attention uses sub-backend ``2`` when FP8 DPA is enabled and supported by the architecture, cuDNN version, and input configuration.
-
 .. envvar:: NVTE_FUSED_ATTN_USE_FAv2_BWD
 
    :Type: ``int`` (0 or 1)

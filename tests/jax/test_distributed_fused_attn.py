@@ -81,25 +81,6 @@ class TestDistributedSelfAttn:
         is_training = True
         batch, seqlen, num_head, hidden = data_shape
 
-        if not is_fused_attn_kernel_available(
-            is_training,
-            dtype,
-            dtype,
-            QKVLayout.BS3HD,
-            attn_bias_type,
-            attn_mask_type,
-            softmax_type,
-            dropout_prob,
-            num_head,
-            num_head,
-            seqlen,
-            seqlen,
-            hidden,
-            hidden,
-            None,  # no window
-        ):
-            pytest.skip("No FusedAttn backend found")
-
         col_ref = self.generate_collectives_count_ref(
             mesh_shape,
             mesh_axes,
@@ -232,25 +213,6 @@ class TestDistributedCrossAttn:
         is_training = True
 
         batch, seqlen, num_head, hidden = data_shape
-
-        if not is_fused_attn_kernel_available(
-            is_training,
-            dtype,
-            dtype,
-            QKVLayout.BSHD_BS2HD,
-            attn_bias_type,
-            attn_mask_type,
-            softmax_type,
-            dropout_prob,
-            num_head,
-            num_head,
-            seqlen,
-            seqlen,
-            hidden,
-            hidden,
-            None,  # no window
-        ):
-            pytest.skip("No FusedAttn backend found")
 
         col_ref = self.generate_collectives_count_ref()
         runner = FusedAttnRunner(
@@ -425,6 +387,7 @@ class TestDistributedContextParallelSelfAttn:
         def check_has_backend_for_mask(mask_type):
             return is_fused_attn_kernel_available(
                 is_training,
+                batch,
                 dtype,
                 dtype,
                 qkv_layout,

@@ -446,6 +446,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             softmax_scale = 1.0 / math.sqrt(
                 kv_channels if isinstance(kv_channels, int) else kv_channels[0]
             )
+        self.softmax_scale = softmax_scale
 
         self.deterministic = (
             not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
@@ -1038,14 +1039,13 @@ class DotProductAttention(TransformerEngineBaseModule):
         .. note::
 
             Users can use environment variables :attr:`NVTE_FLASH_ATTN`, :attr:`NVTE_FUSED_ATTN`,
-            and :attr:`NVTE_FUSED_ATTN_BACKEND` to control which DotProductAttention backend,
-            and FusedAttention backend if applicable, to use. Transformer Engine first filters
-            backends by support for the runtime environment and input configuration, then applies
-            a performance-based preference order. On supported pre-Hopper GPUs, FlashAttention is
-            preferred over FusedAttention and UnfusedDotProductAttention when both optimized
-            backends are eligible. On Hopper and newer GPUs, including Blackwell, FusedAttention is
-            preferred over FlashAttention and UnfusedDotProductAttention when both optimized
-            backends are eligible.
+            and :attr:`NVTE_UNFUSED_ATTN` to control which DotProductAttention backend to use.
+            Transformer Engine first filters backends by support for the runtime environment
+            and input configuration, then applies a performance-based preference order.
+            On supported pre-Hopper GPUs, FlashAttention is preferred over FusedAttention and
+            UnfusedDotProductAttention when both optimized backends are eligible. On Hopper and
+            newer GPUs, including Blackwell, FusedAttention is preferred over FlashAttention and
+            UnfusedDotProductAttention when both optimized backends are eligible.
             If FusedAttention is being used, users can also choose to switch to flash-attn's
             implementation for backward by setting :attr:`NVTE_FUSED_ATTN_USE_FAv2_BWD=1`
             (default: 0), because of the performance differences between various versions of
@@ -1448,11 +1448,14 @@ class DotProductAttention(TransformerEngineBaseModule):
 
             # adjust max_seqlen and cu_seqlens for CP
             cp_size = 1
+            cp_size_a2a = 1
             if isinstance(self.cp_group, dist_group_type):
                 cp_size = get_distributed_world_size(self.cp_group)
             elif isinstance(self.cp_group, list):
                 for group in self.cp_group:
                     cp_size *= get_distributed_world_size(group)
+                if self.cp_comm_type == "a2a+p2p" and len(self.cp_group) > 0:
+                    cp_size_a2a = get_distributed_world_size(self.cp_group[0])
             context_parallel = cp_size > 1
             if q_format in ["sbhd", "bshd"]:
                 max_seqlen_q *= cp_size
@@ -1512,32 +1515,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                     _alibi_cache["_alibi_slopes_require_update"] = True
                     _alibi_cache["_alibi_bias_require_update"] = True
 
-            # detect bias shape
-            core_attention_bias_shape = None
-            if core_attention_bias is not None:
-                if (
-                    core_attention_bias.shape[0] == batch_size
-                    and core_attention_bias.shape[1] == query_layer.shape[-2]
-                ):
-                    core_attention_bias_shape = "bhss"
-                elif (
-                    core_attention_bias.shape[0] == 1
-                    and core_attention_bias.shape[1] == query_layer.shape[-2]
-                ):
-                    core_attention_bias_shape = "1hss"
-                elif (
-                    core_attention_bias.shape[0] == batch_size and core_attention_bias.shape[1] == 1
-                ):
-                    core_attention_bias_shape = "b1ss"
-                elif core_attention_bias.shape[0] == 1 and core_attention_bias.shape[1] == 1:
-                    if core_attention_bias.shape[2] == 1:
-                        core_attention_bias_shape = "111s"
-                    else:
-                        core_attention_bias_shape = "11ss"
-                else:
-                    assert (
-                        False
-                    ), "core_attention_bias must be in one of {bhss, 1hss, b1ss, 11ss, 111s} shapes"
+            core_attention_bias_shape = (
+                tuple(core_attention_bias.shape)
+                if core_attention_bias_type != "no_bias" and core_attention_bias is not None
+                else None
+            )
 
             # Default pad_between_seqs auto-detect. For THD, infer presence of
             # inter-sequence padding from whether padded cu_seqlens were supplied --
@@ -1604,22 +1586,31 @@ class DotProductAttention(TransformerEngineBaseModule):
                 num_gqa_groups=num_gqa_groups,
                 max_seqlen_q=max_seqlen_q,
                 max_seqlen_kv=max_seqlen_kv,
+                num_tokens_q=(query_layer.shape[0] if q_format == "thd" else 0),
+                num_tokens_kv=(key_layer.shape[0] if kv_format == "thd" else 0),
                 head_dim_qk=head_dim_qk,
                 head_dim_v=head_dim_v,
                 attn_mask_type=attn_mask_type,
                 window_size=window_size,
                 bottom_right_diagonal=bottom_right_diagonal,
-                alibi_slopes_shape=alibi_slopes.shape if alibi_slopes is not None else None,
+                alibi_slopes_shape=(
+                    alibi_slopes.shape
+                    if core_attention_bias_type == "alibi" and alibi_slopes is not None
+                    else None
+                ),
                 core_attention_bias_type=core_attention_bias_type,
                 core_attention_bias_shape=core_attention_bias_shape,
                 core_attention_bias_requires_grad=(
-                    core_attention_bias.requires_grad if core_attention_bias is not None else False
+                    core_attention_bias.requires_grad
+                    if core_attention_bias_type != "no_bias" and core_attention_bias is not None
+                    else False
                 ),
                 pad_between_seqs=pad_between_seqs,
                 attention_dropout=self.attention_dropout,
                 context_parallel=context_parallel,
                 cp_comm_type=self.cp_comm_type,
                 cp_size=cp_size,
+                cp_size_a2a=cp_size_a2a,
                 deterministic=self.deterministic,
                 is_training=self.training,
                 fp8=self.fp8,
@@ -1629,6 +1620,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 return_max_logit=self.return_max_logit,
                 cuda_graph=is_graph_capturing(),
                 num_splits=num_splits,
+                softmax_scale=self.softmax_scale,
                 fp8_output=fp8_output,
                 checkpoint_core_attention=checkpoint_core_attention,
                 has_score_mod=score_mod is not None,

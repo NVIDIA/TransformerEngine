@@ -378,6 +378,8 @@ def test_cp_with_flash_attention(cp_pool, dtype, model, qkv_format, cp_comm_type
         config,
         qkv_dtype=dtypes[dtype],
         qkv_layout="_".join([qkv_format] * 3),
+        cp_size=num_gpus,
+        cp_size_a2a=2 if cp_comm_type == "a2a+p2p" else 1,
     )
     flash_attn_supported, *_ = available_backends
     if not flash_attn_supported:
@@ -638,6 +640,8 @@ def test_cp_with_fused_attention(
         fp8_meta=fp8_meta,
         is_training=is_training,
         deterministic=_deterministic,
+        cp_size=num_gpus,
+        cp_size_a2a=2 if cp_comm_type == "a2a+p2p" else 1,
     )
 
     _, fused_attn_supported, _ = available_backends

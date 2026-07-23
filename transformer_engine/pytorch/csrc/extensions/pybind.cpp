@@ -411,7 +411,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Swap first two tensor dimensions", py::arg("tensor"), py::kw_only(), py::arg("out"),
         py::call_guard<py::gil_scoped_release>());
   m.def("get_fused_attn_backend", &transformer_engine::pytorch::get_fused_attn_backend,
-        "Get Fused Attention backend", py::call_guard<py::gil_scoped_release>());
+        "Get Fused Attention backend", py::arg("fused_attn_params"));
   m.def("compute_amax", &transformer_engine::pytorch::compute_amax,
         "Compute absolute max value in tensor", py::arg("input"), py::arg("amax"),
         py::call_guard<py::gil_scoped_release>());

@@ -4918,6 +4918,87 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         )
 
 
+def cp_per_step_configs(
+    cp_comm_type,
+    cp_size,
+    cp_size_a2a,
+    *,
+    max_seqlen_q,
+    max_seqlen_kv,
+    num_heads,
+    num_gqa_groups,
+    attn_mask_type,
+    window_size,
+    bottom_right_diagonal,
+):
+    """Per-step attention configs a context-parallel run dispatches to its attention backend.
+
+    CP runs attention in multiple steps, each with a distinct config (e.g. mask, and seqlens)
+    that differs from the single global config. This function returns the list of those distinct
+    per-step configs so `get_attention_backend` can check if the backend supports all of them.
+    """
+    is_causal = "causal" in attn_mask_type
+    padding_or_no_mask = "padding" if "padding" in attn_mask_type else "no_mask"
+    window_left, window_right = window_size
+
+    def config(mask, s_q, s_kv, heads, gqa, bottom_right):
+        return {
+            "attn_mask_type": mask,
+            "max_seqlen_q": s_q,
+            "max_seqlen_kv": s_kv,
+            "num_attn_heads": heads,
+            "num_gqa_groups": gqa,
+            "window_size_left": window_left,
+            "window_size_right": window_right,
+            "bottom_right_diagonal": bottom_right,
+        }
+
+    if cp_comm_type == "a2a":
+        # split heads across the cp ranks
+        return [
+            config(
+                attn_mask_type,
+                max_seqlen_q,
+                max_seqlen_kv,
+                num_heads // cp_size,
+                num_gqa_groups // cp_size,
+                bottom_right_diagonal,
+            )
+        ]
+
+    if cp_comm_type == "all_gather":
+        # one short Q chunk vs a growing KV chunk; causal -> causal_bottom_right
+        s_q = max_seqlen_q // (2 * cp_size)
+        s_kv_chunk = max_seqlen_kv // (2 * cp_size)
+        mask, br = attn_mask_type, bottom_right_diagonal
+        if is_causal and "bottom_right" not in attn_mask_type:
+            mask, br = attn_mask_type + "_bottom_right", True
+        # s_kv ranges from s_kv_chunk, i*s_kv_chunk, ..., max_seqlen_kv
+        # check a single chunk and the full KV
+        return [
+            config(mask, s_q, s_kv, num_heads, num_gqa_groups, br)
+            for s_kv in dict.fromkeys([s_kv_chunk, max_seqlen_kv])
+        ]
+
+    # p2p and a2a+p2p: split heads across the a2a subgroup, and ring over the p2p subgroup
+    p2p_size = cp_size // cp_size_a2a
+    heads = num_heads // cp_size_a2a
+    gqa = num_gqa_groups // cp_size_a2a
+    r_q = max_seqlen_q // p2p_size
+    r_kv = max_seqlen_kv // p2p_size
+    if not is_causal:
+        return [config(attn_mask_type, r_q, r_kv, heads, gqa, bottom_right_diagonal)]
+    return [
+        config(attn_mask_type, r_q, r_kv, heads, gqa, bottom_right_diagonal),  # diagonal
+        config(
+            padding_or_no_mask, r_q, r_kv // 2, heads, gqa, bottom_right_diagonal
+        ),  # lower-triangle
+        config(
+            padding_or_no_mask, r_q // 2, r_kv, heads, gqa, bottom_right_diagonal
+        ),  # upper-triangle
+    ]
+
+
 def attn_forward_func_with_cp(
     is_training,
     q,

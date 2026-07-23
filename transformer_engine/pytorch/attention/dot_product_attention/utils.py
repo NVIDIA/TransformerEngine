@@ -23,6 +23,7 @@ import transformer_engine_torch as tex
 import transformer_engine as te
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     QKVLayout,
+    QKVFormat,
     AttnBiasType,
     AttnMaskType,
     SoftmaxType,
@@ -46,7 +47,7 @@ from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8
 from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 
 from transformer_engine.pytorch.quantization import get_fp8_te_dtype
-from transformer_engine.pytorch.constants import TE_DType, MXFP8_BLOCK_SCALING_SIZE
+from transformer_engine.pytorch.constants import TE_DType, DType, MXFP8_BLOCK_SCALING_SIZE
 
 
 from transformer_engine.pytorch.utils import (
@@ -198,6 +199,9 @@ class AttentionParams:
         Type of query/key/value tensors, {`torch.Tensor`, `Float8Tensor`}.
     qkv_dtype : torch.dtype, default = torch.bfloat16
         Data type of query/key/value tensors.
+    nominal_dtype : Optional[torch.dtype], default = None
+        Model precision (F16/BF16) of the unquantized tensors (O, and dQ/dK/dV under
+        current/mxfp8) when `qkv_dtype` itself is FP8.
     qkv_layout : str, default = "sbh3d"
         Query/key/value tensor memory layout.
     batch_size : int, default = 1
@@ -210,6 +214,10 @@ class AttentionParams:
         Maximum sequence length of the query tensor.
     max_seqlen_kv : int, default = 128
         Maximum sequence length of the key and value tensors.
+    num_tokens_q : int, default = 0
+        Total number of query tokens in a batch, when `qkv_format=thd`.
+    num_tokens_kv : int, default = 0
+        Total number of key/value tokens in a batch, when `qkv_format=thd`.
     head_dim_qk : int, default = 64
         The size of each attention head in query and key tensors.
     head_dim_v : int, default = 64
@@ -226,8 +234,8 @@ class AttentionParams:
         Tensor shape of :attr:`alibi_slopes` in `DotProductAttention`.
     core_attention_bias_type : str, default = no_bias
         Attention bias type, {`no_bias`, `pre_scale_bias`, `post_scale_bias`, `alibi`}.
-    core_attention_bias_shape : str, default = 1hss
-        Attention bias shape, {`1hss`, `b1ss`, `bhss`}.
+    core_attention_bias_shape : Optional[Tuple[int, int, int, int]], default = None
+        Attention bias shape, (b, h, sq, skv).
     core_attention_bias_requires_grad : bool, default = True
         Whether attention bias requires gradient.
     pad_between_seqs : bool, default = False
@@ -240,7 +248,9 @@ class AttentionParams:
     cp_comm_type : str, default = "p2p"
         The communication type of context parallelism.
     cp_size : int, default = 1
-        The group size of context parallelism.
+        The (total) group size of context parallelism.
+    cp_size_a2a : int, default = 1
+        The all-to-all subgroup size when `cp_comm_type == "a2a+p2p"`.
     deterministic : bool, default = False
         Whether to run `DotProductAttention` with determinism or not.
     is_training : bool, default = True
@@ -259,6 +269,8 @@ class AttentionParams:
         Whether support for cuda graph capture is needed or not.
     num_splits : int, default = 1
         The number of kernels to split attention to.
+    softmax_scale : float, default = 1.0
+        Pre-softmax attention scale.
     fp8_output : bool, default = False
         Whether output is requested in FP8.
     checkpoint_core_attention : bool, default = False
@@ -271,12 +283,15 @@ class AttentionParams:
 
     qkv_type: Union[torch.Tensor, Float8Tensor] = torch.Tensor
     qkv_dtype: torch.dtype = torch.bfloat16
+    nominal_dtype: Optional[torch.dtype] = None
     qkv_layout: str = "sbh3d"
     batch_size: int = 1
     num_heads: int = 16
     num_gqa_groups: int = 16
     max_seqlen_q: int = 128
     max_seqlen_kv: int = 128
+    num_tokens_q: int = 0
+    num_tokens_kv: int = 0
     head_dim_qk: int = 64
     head_dim_v: int = 64
     attn_mask_type: str = "no_mask"
@@ -284,13 +299,14 @@ class AttentionParams:
     bottom_right_diagonal: bool = True
     alibi_slopes_shape: Union[torch.Size, List, None] = None
     core_attention_bias_type: str = "no_bias"
-    core_attention_bias_shape: str = "1hss"
+    core_attention_bias_shape: Union[Tuple[int, int, int, int], None] = None
     core_attention_bias_requires_grad: bool = True
     pad_between_seqs: bool = False
     attention_dropout: float = 0.0
     context_parallel: bool = False
     cp_comm_type: str = "p2p"
     cp_size: int = 1
+    cp_size_a2a: int = 1
     deterministic: bool = False
     is_training: bool = True
     fp8: bool = False
@@ -300,6 +316,7 @@ class AttentionParams:
     return_max_logit: bool = False
     cuda_graph: bool = False
     num_splits: int = 1
+    softmax_scale: float = 1.0
     fp8_output: bool = False
     checkpoint_core_attention: bool = False
     has_score_mod: bool = False
@@ -322,6 +339,67 @@ class AttentionParams:
             elif (sf or {}).get("recipe", None) != (of or {}).get("recipe", None):
                 return False
         return True
+
+
+@dataclass(eq=True)
+class FusedAttentionParams:
+    """
+    Attention parameters used by the `FusedAttention` backend.
+    """
+
+    # basic attention settings
+    is_training: bool = True
+    deterministic: bool = False
+    cuda_graph: bool = False
+    return_max_logit: bool = False
+    attn_mask_type: tex.NVTE_Mask_Type = tex.NVTE_Mask_Type.NVTE_NO_MASK
+    bias_type: tex.NVTE_Bias_Type = tex.NVTE_Bias_Type.NVTE_NO_BIAS
+    window_size_left: int = -1
+    window_size_right: int = -1
+    bottom_right_diagonal: bool = True
+    softmax_type: tex.NVTE_Softmax_Type = tex.NVTE_Softmax_Type.NVTE_VANILLA_SOFTMAX
+    scaling_mode: tex.NVTEScalingMode = tex.NVTEScalingMode.NVTE_DELAYED_TENSOR_SCALING
+    dropout: float = 0.0
+    attn_scale: float = 1.0
+
+    # tensor types
+    qkv_dtype: DType = DType.kBFloat16
+    o_dtype: DType = DType.kBFloat16
+    do_dtype: DType = DType.kBFloat16
+    dqkv_dtype: DType = DType.kBFloat16
+
+    # tensor layouts
+    qkv_layout: tex.NVTE_QKV_Layout = tex.NVTE_QKV_Layout.NVTE_QKV_Layout_NOT_SET
+    o_format: tex.NVTE_QKV_Format = tex.NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET
+    do_format: tex.NVTE_QKV_Format = tex.NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET
+    dqkv_layout: tex.NVTE_QKV_Layout = tex.NVTE_QKV_Layout.NVTE_QKV_Layout_NOT_SET
+    qkv_scale_inv_format: tex.NVTE_QKV_Format = tex.NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET
+    do_scale_inv_format: tex.NVTE_QKV_Format = tex.NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET
+
+    # tensor dimensions
+    batch_size: int = 0
+    num_attn_heads: int = 0
+    num_gqa_groups: int = 0
+    head_dim_qk: int = 0
+    head_dim_v: int = 0
+    max_seqlen_q: int = 0
+    max_seqlen_kv: int = 0
+    num_tokens_q: int = 0
+    num_tokens_kv: int = 0
+
+    # paged KV dimensions
+    num_pages_k: int = 0
+    num_pages_v: int = 0
+    page_size_k: int = 0
+    page_size_v: int = 0
+    max_pages_per_seq_k: int = 0
+    max_pages_per_seq_v: int = 0
+
+    # bias dimensions
+    bias_batch_size: int = 0
+    bias_num_heads: int = 0
+    bias_seqlen_q: int = 0
+    bias_seqlen_kv: int = 0
 
 
 def get_attention_backend(
@@ -353,12 +431,15 @@ def get_attention_backend(
     # is shifted over to the caller of this function
     qkv_type = attention_params.qkv_type
     qkv_dtype = attention_params.qkv_dtype
+    nominal_dtype = attention_params.nominal_dtype
     qkv_layout = attention_params.qkv_layout
     batch_size = attention_params.batch_size
     num_heads = attention_params.num_heads
     num_gqa_groups = attention_params.num_gqa_groups
     max_seqlen_q = attention_params.max_seqlen_q
     max_seqlen_kv = attention_params.max_seqlen_kv
+    num_tokens_q = attention_params.num_tokens_q
+    num_tokens_kv = attention_params.num_tokens_kv
     head_dim_qk = attention_params.head_dim_qk
     head_dim_v = attention_params.head_dim_v
     attn_mask_type = attention_params.attn_mask_type
@@ -372,7 +453,8 @@ def get_attention_backend(
     attention_dropout = attention_params.attention_dropout
     context_parallel = attention_params.context_parallel
     cp_comm_type = attention_params.cp_comm_type
-    cp_size = attention_params.cp_size  # pylint: disable=unused-variable
+    cp_size = attention_params.cp_size
+    cp_size_a2a = attention_params.cp_size_a2a
     deterministic = attention_params.deterministic
     is_training = attention_params.is_training
     fp8 = attention_params.fp8
@@ -382,6 +464,7 @@ def get_attention_backend(
     return_max_logit = attention_params.return_max_logit
     cuda_graph = attention_params.cuda_graph
     num_splits = attention_params.num_splits
+    softmax_scale = attention_params.softmax_scale
     fp8_output = attention_params.fp8_output
     checkpoint_core_attention = attention_params.checkpoint_core_attention
     has_score_mod = attention_params.has_score_mod
@@ -1334,61 +1417,180 @@ def get_attention_backend(
         fu_core_attention_bias_requires_grad = False
 
         if len(alibi_slopes_shape) == 1 and alibi_slopes_shape[0] == num_heads:
-            fu_core_attention_bias_shape = "1hss"
+            fu_core_attention_bias_shape = (1, num_heads, max_seqlen_q, max_seqlen_kv)
         elif (
             len(alibi_slopes_shape) == 2
             and alibi_slopes_shape[0] == batch_size
             and alibi_slopes_shape[1] == num_heads
         ):
-            fu_core_attention_bias_shape = "bhss"
+            fu_core_attention_bias_shape = (batch_size, num_heads, max_seqlen_q, max_seqlen_kv)
 
+    fu_core_attention_bias_shape_type = None
+    if (
+        fu_core_attention_bias_type == "post_scale_bias"
+        and fu_core_attention_bias_shape is not None
+    ):
+        b, h, sq, _skv = fu_core_attention_bias_shape
+        if b == batch_size and h == num_heads:
+            fu_core_attention_bias_shape_type = "bhss"
+        elif b == 1 and h == num_heads:
+            fu_core_attention_bias_shape_type = "1hss"
+        elif b == batch_size and h == 1:
+            fu_core_attention_bias_shape_type = "b1ss"
+        elif b == 1 and h == 1:
+            fu_core_attention_bias_shape_type = "111s" if sq == 1 and max_seqlen_q != 1 else "11ss"
+        else:
+            raise ValueError(
+                "core_attention_bias tensor must be in one of "
+                '{"bhss", "1hss", "b1ss", "11ss", "111s"} shapes. '
+                f"Found (b,h,sq,skv) = ({b},{h},{sq},{_skv})"
+            )
     if (
         use_fused_attention
         and fu_core_attention_bias_type == "post_scale_bias"
-        and fu_core_attention_bias_shape != "1hss"
+        and fu_core_attention_bias_shape_type != "1hss"
     ):
         # dbias calculation is not supported for 111s as of cuDNN 9.18. So, use fused attention backend only if bias does not require grad.
-        if fu_core_attention_bias_requires_grad and fu_core_attention_bias_shape == "111s":
+        if fu_core_attention_bias_requires_grad and fu_core_attention_bias_shape_type == "111s":
             logger.warning(
                 "Disabling FusedAttention as dbias calculation is not supported for 111s"
             )
             use_fused_attention = False
+
     # Filter: cuDNN support
     fused_attention_backend = None
     if use_fused_attention:
-        # ``DType`` is implicitly convertible to ``transformer_engine::DType``
-        # on the C++ side, so pass it straight to the pybind function.
-        q_type = TE_DType[qkv_dtype]
-        kv_type = q_type
-        if fp8 and fp8_meta["recipe"].fp8_dpa:
-            q_type = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
-            kv_type = q_type
-        fused_attention_backend = tex.get_fused_attn_backend(
-            is_training,
-            q_type,
-            kv_type,
-            QKVLayout[qkv_layout],
-            AttnBiasType[fu_core_attention_bias_type],
-            AttnMaskType[attn_mask_type],
-            SoftmaxType[softmax_type],
-            attention_dropout,
-            num_heads,
-            num_gqa_groups,
-            max_seqlen_q,
-            max_seqlen_kv,
-            head_dim_qk,
-            head_dim_v,
-            window_size[0],
-            window_size[1],
-            return_max_logit,
-            cuda_graph,
-            deterministic,
+        recipe = fp8_meta["recipe"] if (fp8 and fp8_meta["recipe"].fp8_dpa) else None
+        cs_o_in_f16 = os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1") == "1"
+        spec = get_fused_attn_spec(
+            recipe, qkv_dtype, qkv_layout, cs_o_in_f16=cs_o_in_f16, nominal_dtype=nominal_dtype
         )
-        if fused_attention_backend == FusedAttnBackend["No_Backend"]:
-            logger.debug("Disabling FusedAttention as no backend supports the provided input")
-            use_fused_attention = False
-            fused_attention_backend = None
-        elif has_score_mod and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]:
+        qkv_type, o_type, do_type, dqkv_type = spec.qkv, spec.o, spec.do, spec.dqkv
+        scaling_mode = spec.scaling_mode
+        qkv_scale_inv_format = spec.scale_inv_format
+        do_scale_inv_format = spec.scale_inv_format
+        o_format = spec.o_format
+        do_format = spec.do_format
+        dqkv_layout = spec.dqkv_layout
+        num_pages_k = num_pages_v = 0
+        page_size_k = page_size_v = 0
+        max_pages_per_seq_k = max_pages_per_seq_v = 0
+        if inference_params is not None and getattr(inference_params, "is_paged", False):
+            num_pages_k = num_pages_v = inference_params.total_num_pages
+            page_size_k = page_size_v = inference_params.page_size
+            max_pages_per_seq_k = max_pages_per_seq_v = (
+                inference_params.cache_manager.max_pages_per_seq
+            )
+        bias_batch_size = bias_num_heads = bias_seqlen_q = bias_seqlen_kv = 0
+        if fu_core_attention_bias_shape is not None:
+            bias_batch_size, bias_num_heads, bias_seqlen_q, bias_seqlen_kv = (
+                fu_core_attention_bias_shape
+            )
+        base_fused_attn_kwargs = {
+            "is_training": is_training,
+            "deterministic": deterministic,
+            "cuda_graph": cuda_graph,
+            "return_max_logit": return_max_logit,
+            "attn_mask_type": AttnMaskType[attn_mask_type],
+            "bias_type": AttnBiasType[fu_core_attention_bias_type],
+            "window_size_left": window_size[0],
+            "window_size_right": window_size[1],
+            "bottom_right_diagonal": bottom_right_diagonal,
+            "softmax_type": SoftmaxType[softmax_type],
+            "scaling_mode": scaling_mode,
+            "dropout": attention_dropout,
+            "attn_scale": softmax_scale,
+            "qkv_dtype": qkv_type,
+            "o_dtype": o_type,
+            "do_dtype": do_type,
+            "dqkv_dtype": dqkv_type,
+            "qkv_layout": QKVLayout[spec.qkv_layout],
+            "o_format": QKVFormat[o_format],
+            "do_format": QKVFormat[do_format],
+            "dqkv_layout": QKVLayout[dqkv_layout],
+            "qkv_scale_inv_format": QKVFormat[qkv_scale_inv_format],
+            "do_scale_inv_format": QKVFormat[do_scale_inv_format],
+            "batch_size": batch_size,
+            "num_attn_heads": num_heads,
+            "num_gqa_groups": num_gqa_groups,
+            "head_dim_qk": head_dim_qk,
+            "head_dim_v": head_dim_v,
+            "max_seqlen_q": max_seqlen_q,
+            "max_seqlen_kv": max_seqlen_kv,
+            "num_tokens_q": num_tokens_q,
+            "num_tokens_kv": num_tokens_kv,
+            "num_pages_k": num_pages_k,
+            "num_pages_v": num_pages_v,
+            "page_size_k": page_size_k,
+            "page_size_v": page_size_v,
+            "max_pages_per_seq_k": max_pages_per_seq_k,
+            "max_pages_per_seq_v": max_pages_per_seq_v,
+            "bias_batch_size": bias_batch_size,
+            "bias_num_heads": bias_num_heads,
+            "bias_seqlen_q": bias_seqlen_q,
+            "bias_seqlen_kv": bias_seqlen_kv,
+        }
+        # Context-parallel per-step configs
+        if context_parallel:
+            from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
+                cp_per_step_configs,
+            )
+
+            per_step_configs = cp_per_step_configs(
+                cp_comm_type,
+                cp_size,
+                cp_size_a2a,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_kv=max_seqlen_kv,
+                num_heads=num_heads,
+                num_gqa_groups=num_gqa_groups,
+                attn_mask_type=attn_mask_type,
+                window_size=window_size,
+                bottom_right_diagonal=bottom_right_diagonal,
+            )
+        else:
+            per_step_configs = [None]
+
+        for step_config in per_step_configs:
+            fused_attn_kwargs = dict(base_fused_attn_kwargs)
+            if step_config is not None:
+                step_seqlen_q = step_config["max_seqlen_q"]
+                step_seqlen_kv = step_config["max_seqlen_kv"]
+                fused_attn_kwargs.update(
+                    attn_mask_type=AttnMaskType[step_config["attn_mask_type"]],
+                    max_seqlen_q=step_seqlen_q,
+                    max_seqlen_kv=step_seqlen_kv,
+                    num_attn_heads=step_config["num_attn_heads"],
+                    num_gqa_groups=step_config["num_gqa_groups"],
+                    window_size_left=step_config["window_size_left"],
+                    window_size_right=step_config["window_size_right"],
+                    bottom_right_diagonal=step_config["bottom_right_diagonal"],
+                )
+                if bias_seqlen_q != 1:
+                    fused_attn_kwargs["bias_seqlen_q"] = step_seqlen_q
+                if bias_seqlen_kv != 1:
+                    fused_attn_kwargs["bias_seqlen_kv"] = step_seqlen_kv
+            fused_attn_params = FusedAttentionParams(**fused_attn_kwargs)
+            fused_attention_backend, reject_message = tex.get_fused_attn_backend(fused_attn_params)
+            if fused_attention_backend == FusedAttnBackend["No_Backend"]:
+                logger.debug(
+                    "Disabling FusedAttention: %s%s",
+                    reject_message,
+                    (
+                        f" (context-parallel per-step config {step_config})"
+                        if step_config is not None
+                        else ""
+                    ),
+                )
+                use_fused_attention = False
+                fused_attention_backend = None
+                break
+
+        if (
+            use_fused_attention
+            and has_score_mod
+            and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]
+        ):
             logger.debug(
                 "Disabling FusedAttention for score_mod because sub-backend %s is not "
                 "F16/BF16 arbitrary-seqlen",
@@ -2246,6 +2448,102 @@ def get_qkv_format(
         q_format = qkv_format
         kv_format = qkv_format
     return qkv_format, q_format, kv_format
+
+
+@dataclass(frozen=True)
+class FusedAttnSpec:
+    """Fused-attention spec for a given config.
+
+    Mirrors what `FusedAttnFunc` feeds `fused_attn_fwd`/`fused_attn_bwd` (backends.py),
+    so the availability probe (`get_attention_backend`) cannot drift from runtime.
+    """
+
+    scaling_mode: Any
+    qkv: Any
+    o: Any
+    do: Any
+    dqkv: Any
+    scale_inv_format: Optional[str]
+    qkv_layout: str
+    o_format: str
+    do_format: str
+    dqkv_layout: str
+
+
+def get_fused_attn_spec(recipe, qkv_dtype, qkv_layout, *, cs_o_in_f16, nominal_dtype=None):
+    """Resolve fused-attention specs, e.g. tensor dtypes, formats, for a given config"""
+    q_format = get_qkv_format(qkv_layout)[1]
+    eff_qkv_layout = qkv_layout  # FP16/BF16
+    if recipe is not None:
+        if not recipe.mxfp8():
+            # Delayed/current scaling
+            eff_qkv_layout = qkv_layout.replace("paged_kv_", "")
+        elif qkv_layout in ("bshd_bshd_bshd", "sbhd_sbhd_sbhd"):
+            eff_qkv_layout = qkv_layout  # MXFP8 fast path
+        else:
+            eff_qkv_layout = "bhsd_bhsd_bhsd"  # MXFP8 slow path
+    layout_kwargs = {
+        "qkv_layout": eff_qkv_layout,
+        "o_format": q_format,
+        "do_format": q_format,
+        "dqkv_layout": qkv_layout,
+    }
+
+    if qkv_dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+        ref = TE_DType[nominal_dtype if nominal_dtype is not None else torch.bfloat16]
+    else:
+        ref = TE_DType[qkv_dtype]
+
+    # FP16/BF16: every tensor is in model precision; scaling_mode is a placeholder
+    if recipe is None:
+        return FusedAttnSpec(
+            tex.NVTEScalingMode.NVTE_DELAYED_TENSOR_SCALING,
+            ref,
+            ref,
+            ref,
+            ref,
+            None,
+            **layout_kwargs,
+        )
+
+    fprop_fp8 = get_fp8_te_dtype(recipe, fprop_tensor=True)
+    grad_fp8 = get_fp8_te_dtype(recipe, fprop_tensor=False)
+
+    # MXFP8 block scaling: Q/K/V/dO are in MXFP8; O/dQ/dK/dV stay in model precision
+    if recipe.mxfp8():
+        return FusedAttnSpec(
+            tex.NVTEScalingMode.NVTE_MXFP8_1D_SCALING,
+            fprop_fp8,
+            ref,
+            grad_fp8,
+            ref,
+            "bhsd",
+            **layout_kwargs,
+        )
+
+    # FP8 current scaling: Q/K/V/dO are in FP8; O in model precision if `cs_o_in_f16` (default), otherwise FP8;
+    # dQ/dK/dV in model precision
+    if recipe.float8_current_scaling():
+        return FusedAttnSpec(
+            tex.NVTEScalingMode.NVTE_DELAYED_TENSOR_SCALING,
+            fprop_fp8,
+            ref if cs_o_in_f16 else fprop_fp8,
+            grad_fp8,
+            ref,
+            None,
+            **layout_kwargs,
+        )
+
+    # FP8 delayed scaling: Q/K/V/O are in FP8 (e.g. E4M3); dO/dQ/dK/dV in FP8 (e.g. E5M2)
+    return FusedAttnSpec(
+        tex.NVTEScalingMode.NVTE_DELAYED_TENSOR_SCALING,
+        fprop_fp8,
+        fprop_fp8,
+        grad_fp8,
+        grad_fp8,
+        None,
+        **layout_kwargs,
+    )
 
 
 def get_qkv_layout(

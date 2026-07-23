@@ -18,7 +18,7 @@ from transformer_engine.jax.attention import (
 )
 from transformer_engine.jax.cpp_extensions import make_fused_attn_score_mod_config
 from transformer_engine.jax.flax import transformer as flax_transformer
-from transformer_engine_jax import get_device_compute_capability
+from transformer_engine_jax import get_device_compute_capability, NVTE_Fused_Attn_Backend
 from test_fused_attn import FusedAttnRunner, SeqDescFormat
 
 
@@ -397,9 +397,17 @@ def _identity_score_mod(_graph, score, _tensors):
 def _install_fake_flax_fused_attn(monkeypatch, *, kernel_available=True):
     captured = {}
 
-    def fake_fused_attn_kernel_check(*args, **kwargs):
-        captured.setdefault("kernel_checks", []).append((args, kwargs))
-        return kernel_available
+    class FakeFusedAttnHelper:
+        def __init__(self, *args, **kwargs):
+            captured.setdefault("kernel_checks", []).append((args, kwargs))
+
+        def get_fused_attn_backend(self):
+            if kernel_available:
+                return NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen, ""
+            return (
+                NVTE_Fused_Attn_Backend.NVTE_No_Backend,
+                "fake FusedAttnHelper: no fused attention backend available for this configuration",
+            )
 
     def fake_fused_attn(
         qkv,
@@ -454,11 +462,7 @@ def _install_fake_flax_fused_attn(monkeypatch, *, kernel_available=True):
         )
         return qkv[0]
 
-    monkeypatch.setattr(
-        flax_transformer,
-        "is_fused_attn_kernel_available",
-        fake_fused_attn_kernel_check,
-    )
+    monkeypatch.setattr(flax_transformer, "FusedAttnHelper", FakeFusedAttnHelper)
     monkeypatch.setattr(flax_transformer, "fused_attn", fake_fused_attn)
     return captured
 
@@ -533,7 +537,7 @@ def test_dot_product_attention_plumbs_score_mod_to_fused_attn(monkeypatch):
     assert captured["attn_bias_type"] is AttnBiasType.NO_BIAS
     assert captured["qkv_layout"] is QKVLayout.BSHD_BSHD_BSHD
     assert captured["softmax_type"] is AttnSoftmaxType.VANILLA_SOFTMAX
-    assert captured["kernel_checks"][0][0][3] is QKVLayout.BSHD_BSHD_BSHD
+    assert captured["kernel_checks"][0][0][4] is QKVLayout.BSHD_BSHD_BSHD
 
 
 def test_dot_product_attention_unpacks_packed_score_mod_to_separate_layout(monkeypatch):
@@ -557,7 +561,7 @@ def test_dot_product_attention_unpacks_packed_score_mod_to_separate_layout(monke
     assert captured["qkv"][0].shape == (1, 8, 1, 16)
     assert captured["qkv_layout"] is QKVLayout.BSHD_BSHD_BSHD
     assert captured["score_mod"] is _identity_score_mod
-    assert captured["kernel_checks"][0][0][3] is QKVLayout.BSHD_BSHD_BSHD
+    assert captured["kernel_checks"][0][0][4] is QKVLayout.BSHD_BSHD_BSHD
 
 
 def test_multi_head_attention_plumbs_score_mod_to_dot_product_attention(monkeypatch):
