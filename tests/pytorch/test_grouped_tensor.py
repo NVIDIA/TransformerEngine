@@ -1008,11 +1008,19 @@ class TestGroupedTensor:
     @pytest.mark.parametrize("shape_case", ["uniform", "varying_first"])
     @pytest.mark.parametrize("direction", ["rowwise", "columnwise", "both"])
     @pytest.mark.parametrize("output_dbias", [False, True])
+    @pytest.mark.parametrize(
+        "force_pow_2_scales", [False, True], ids=["fp32_scales", "pow2_scales"]
+    )
     @pytest.mark.skipif(
         not fp8_block_scaling_grouped_available, reason=reason_for_no_fp8_block_scaling_grouped
     )
     def test_quantize_grouped_fp8_blockwise(
-        self, block_scaling_dim: int, shape_case: str, direction: str, output_dbias: bool
+        self,
+        block_scaling_dim: int,
+        shape_case: str,
+        direction: str,
+        output_dbias: bool,
+        force_pow_2_scales: bool,
     ) -> None:
         """Test grouped FP8 block-scaling quantization against per-tensor quantization.
 
@@ -1061,7 +1069,7 @@ class TestGroupedTensor:
             fp8_dtype=tex.DType.kFloat8E4M3,
             rowwise=rowwise,
             columnwise=columnwise,
-            force_pow_2_scales=False,
+            force_pow_2_scales=force_pow_2_scales,
             amax_epsilon=0.0,
             block_scaling_dim=block_scaling_dim,
         )
@@ -1081,7 +1089,7 @@ class TestGroupedTensor:
             fp8_dtype=tex.DType.kFloat8E4M3,
             rowwise=True,
             columnwise=True,
-            force_pow_2_scales=False,
+            force_pow_2_scales=force_pow_2_scales,
             amax_epsilon=0.0,
             block_scaling_dim=block_scaling_dim,
         )

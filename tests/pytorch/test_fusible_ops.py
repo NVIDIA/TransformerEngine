@@ -19,6 +19,10 @@ import torch
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.ops as te_ops
+from transformer_engine.pytorch.ops.basic.grouped_linear import (
+    OUTPUT_BUFFER_KEY,
+    GRAD_INPUT_BUFFER_KEY,
+)
 from transformer_engine.pytorch._extra_state import UNSAFE_PICKLE_EXTRA_STATE_ENV
 
 from transformer_engine.pytorch.ops.fused import (
@@ -2196,6 +2200,86 @@ class TestBasicOps:
             if bias:
                 assert_close_grads(getattr(op, f"bias{group_idx}"), bs_ref[group_idx], **tols)
 
+    def test_grouped_linear_caller_buffers(
+        self,
+        *,
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",
+    ) -> None:
+        """Caller output/grad_input buffers routed to the last/first op of a Sequential.
+
+        The chain has two GroupedLinears with distinct inner dims, so ``output``
+        can only fit the last op's output and ``grad_input`` only the first op's
+        dgrad -- a mis-route would fail the buffer's shape check.
+        """
+        group_size = 3
+        in_features, hidden, out_features = 128, 256, 64
+        split_sizes = torch.tensor([128, 256, 128], dtype=torch.int32, device=device)
+        num_tokens = int(split_sizes.sum())
+
+        torch.manual_seed(1234)
+        x = (0.1 * torch.randn(num_tokens, in_features, device=device)).to(dtype)
+        dy = (0.1 * torch.randn(num_tokens, out_features, device=device)).to(dtype)
+
+        def build() -> te_ops.Sequential:
+            fc1 = te_ops.GroupedLinear(
+                group_size, in_features, hidden, bias=False, device=device, dtype=dtype
+            )
+            fc2 = te_ops.GroupedLinear(
+                group_size, hidden, out_features, bias=False, device=device, dtype=dtype
+            )
+            return te_ops.Sequential(fc1, fc2)
+
+        # Reference: internal allocation.
+        model_ref = build()
+        x_ref = x.detach().clone().requires_grad_(True)
+        y_ref = model_ref(x_ref, split_sizes, split_sizes)
+        y_ref.backward(dy)
+
+        # Caller-provided buffers, same weights as the reference.
+        model = build()
+        with torch.no_grad():
+            for op_idx in range(2):
+                for i in range(group_size):
+                    getattr(model[op_idx], f"weight{i}").copy_(
+                        getattr(model_ref[op_idx], f"weight{i}")
+                    )
+        sentinel = 7.0
+        out_buf = torch.full((num_tokens, out_features), sentinel, dtype=dtype, device=device)
+        dgrad_buf = torch.full((num_tokens, in_features), sentinel, dtype=dtype, device=device)
+        x_test = x.detach().clone().requires_grad_(True)
+        y = model(
+            x_test,
+            split_sizes,
+            split_sizes,
+            op_kwargs={
+                model[0]: {GRAD_INPUT_BUFFER_KEY: dgrad_buf},
+                model[1]: {OUTPUT_BUFFER_KEY: out_buf},
+            },
+        )
+
+        # Forward output aliases the last op's output buffer with no copy.
+        assert y.data_ptr() == out_buf.data_ptr()
+        torch.testing.assert_close(y, y_ref, rtol=0, atol=0)
+
+        y.backward(dy)
+
+        # grad_input written into the first op's dgrad buffer.
+        assert not torch.all(dgrad_buf == sentinel)
+        torch.testing.assert_close(dgrad_buf, x_ref.grad, rtol=0, atol=0)
+        torch.testing.assert_close(x_test.grad, x_ref.grad, rtol=0, atol=0)
+
+        # A buffer whose shape does not match the output is rejected.
+        bad = torch.empty(num_tokens + 1, out_features, dtype=dtype, device=device)
+        with pytest.raises(ValueError):
+            model_bad = build()
+            model_bad(
+                x.detach(),
+                split_sizes,
+                split_sizes,
+                op_kwargs={model_bad[1]: {OUTPUT_BUFFER_KEY: bad}},
+            )
+
     @pytest.mark.parametrize("in_shape", ((71, 192), (5, 7, 128)))
     @pytest.mark.parametrize("input_requires_grad", (False, True))
     @pytest.mark.parametrize("scales_requires_grad", (False, True))
@@ -3446,8 +3530,9 @@ class TestSequentialModules:
         quantization: Optional[str],
         device: torch.device = "cuda",
         split_alignment: int = 256,
+        activation: str = "scaled_swiglu",
     ) -> None:
-        """GroupedLinear + ScaledSwiGLU + GroupedLinear"""
+        """GroupedLinear + scaled activation + GroupedLinear"""
 
         # Split sizes
         split_sizes = [split_alignment * (i) for i in range(group_size)]
@@ -3457,13 +3542,20 @@ class TestSequentialModules:
         # Make input shape
         in_shape = (split_sizes.sum().item(), hidden_size)
         out_shape = in_shape
-        fc1_out_features = 2 * hidden_size
+        if activation == "scaled_swiglu":
+            fc1_out_features = 2 * hidden_size
+        elif activation == "scaled_srelu":
+            fc1_out_features = hidden_size
+        else:
+            raise ValueError(f"Unexpected grouped MLP activation ({activation})")
 
         # Skip invalid configurations
         with_quantization = quantization is not None
         maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         if with_quantization and dtype not in (torch.bfloat16, torch.float16):
             pytest.skip("Quantized group GEMM is only supported with BF16/FP16")
+        if activation == "scaled_srelu" and quantization == "nvfp4_rht" and bias:
+            pytest.skip("NVFP4 RHT SReLU grouped MLP coverage is limited to no-bias")
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
@@ -3546,8 +3638,13 @@ class TestSequentialModules:
             fc1_out = torch.nn.functional.linear(
                 x, fc1_ws_ref[group_idx], bias=fc1_bs_ref[group_idx]
             )
-            act_in1, act_in2 = fc1_out.chunk(2, dim=-1)
-            act_out = torch.nn.functional.silu(act_in1) * act_in2
+            if activation == "scaled_swiglu":
+                act_in1, act_in2 = fc1_out.chunk(2, dim=-1)
+                act_out = torch.nn.functional.silu(act_in1) * act_in2
+            elif activation == "scaled_srelu":
+                act_out = torch.nn.functional.relu(fc1_out).square()
+            else:
+                raise ValueError(f"Unexpected grouped MLP activation ({activation})")
             fc2_in = act_out * probs[group_idx].unsqueeze(-1)
             y = torch.nn.functional.linear(fc2_in, fc2_ws_ref[group_idx])
             if bias:
@@ -3576,7 +3673,13 @@ class TestSequentialModules:
                 dtype=dtype,
                 scale_bias=bias,
             )
-            module = te.ops.Sequential(fc1, te_ops.ScaledSwiGLU(), fc2)
+            if activation == "scaled_swiglu":
+                activation_op = te_ops.ScaledSwiGLU()
+            elif activation == "scaled_srelu":
+                activation_op = te_ops.ScaledSReLU()
+            else:
+                raise ValueError(f"Unexpected grouped MLP activation ({activation})")
+            module = te.ops.Sequential(fc1, activation_op, fc2)
 
         # Copy weights
         with torch.no_grad():
@@ -3607,6 +3710,21 @@ class TestSequentialModules:
             if bias:
                 assert_close_grads(getattr(fc2, f"bias{group_idx}"), fc2_bs_ref[group_idx], **tols)
                 assert_close_grads(getattr(fc1, f"bias{group_idx}"), fc1_bs_ref[group_idx], **tols)
+
+    def test_grouped_mlp_nvfp4_rht_srelu(
+        self,
+        *,
+        device: torch.device = "cuda",
+    ) -> None:
+        """GroupedLinear + ScaledSReLU + GroupedLinear with NVFP4 RHT amax."""
+
+        self.test_grouped_mlp(
+            bias=False,
+            dtype=torch.bfloat16,
+            quantization="nvfp4_rht",
+            device=device,
+            activation="scaled_srelu",
+        )
 
 
 class TestCustomOps:
