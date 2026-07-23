@@ -56,6 +56,12 @@ from ..distributed import (
     _fsdp_scatter_tensors,
     _fsdp_gather_tensors,
 )
+from ..distributed_weight import (
+    is_distributed_weight,
+    materialize_weight_for_forward,
+    materialize_weight_for_backward,
+    finalize_weight_grads,
+)
 from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx, GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
@@ -310,6 +316,11 @@ class _LayerNormLinear(torch.autograd.Function):
         # ------------------------------------------------------
         # Prepare weight tensor
         # ------------------------------------------------------
+        origin_weight = weight
+        is_dist_weight = is_distributed_weight(origin_weight)
+        if is_dist_weight:
+            weight = materialize_weight_for_forward(weight)[0]
+            out_features = weight.shape[0]
         new_weight_workspace = None
         weightmat = weight
         is_weight_param_quantized = False
@@ -500,10 +511,15 @@ class _LayerNormLinear(torch.autograd.Function):
             wt_save = weightmat
             if is_fsdp2 and weightmat is not weight:
                 wt_save = None
+            # Distributed weight (e.g. GTP): don't save the gathered quantized workspace;
+            # backward re-gathers from the saved (sharded) weight and re-quantizes.
+            if is_dist_weight:
+                wt_save = None
+
             tensors_to_save, tensor_objects = prepare_for_saving(
                 inputmat,
                 wt_save,
-                weight,
+                origin_weight,
                 bias,
                 ln_weight,
                 ln_out_to_save,
@@ -530,6 +546,8 @@ class _LayerNormLinear(torch.autograd.Function):
                 if hasattr(weight, "__fsdp_param__"):
                     # MCore FSDP creates main_grad lazily before backward
                     ctx.main_grad_func = weight.get_main_grad
+                elif is_dist_weight:
+                    ctx.main_grad_func = origin_weight.grad_buffer
                 else:
                     ctx.main_grad_func = lambda: weight.main_grad
             ctx.grad_input_quantizer = grad_input_quantizer
@@ -623,6 +641,9 @@ class _LayerNormLinear(torch.autograd.Function):
                 rsigma,
             ) = restore_from_func_ctx(ctx)
 
+            is_dist_weight = is_distributed_weight(saved_weight)
+            if is_dist_weight:
+                weight = materialize_weight_for_backward(saved_weight)[0]
             # Restore from weakref to get original weight python object
             # (preserves attributes like main_grad, grad_added_to_main_grad, etc.)
             # Only needed when fuse_wgrad_accumulation is enabled.
@@ -640,7 +661,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 ), "weight was removed while fuse_wgrad_accumulation=True"
                 # Since main_grad can be modified inplace, it should not be a part of saved_tensors
                 main_grad = ctx.main_grad_func() if weight is not None else None
-                if main_grad is not None:
+                if main_grad is not None and not is_dist_weight:
                     origin_weight.main_grad = main_grad
 
             # Gather intermediate/activation tensors if needed
@@ -984,7 +1005,10 @@ class _LayerNormLinear(torch.autograd.Function):
                         use_split_accumulator = recipe.fp8_gemm_wgrad.use_split_accumulator
 
                 # Figure out whether to output wgrad GEMM directly into main grad
-                if ctx.is_first_microbatch is not None:
+                if is_dist_weight:
+                    # Distributed weight (e.g. GTP): accumulation happens downstream in finalize.
+                    accumulate_wgrad_into_param_main_grad = False
+                elif ctx.is_first_microbatch is not None:
                     accumulate_wgrad_into_param_main_grad = (
                         ctx.fuse_wgrad_accumulation and not ctx.is_first_microbatch
                     )
@@ -1055,6 +1079,9 @@ class _LayerNormLinear(torch.autograd.Function):
 
                     # Call wgrad GEMM now
                     wgrad, grad_bias_ = wgrad_gemm(ln_out_total, grad_output)
+
+                    if is_dist_weight:
+                        wgrad = finalize_weight_grads(saved_weight, [wgrad])[0]
 
                     # Update grad bias if needed
                     if grad_bias is None:

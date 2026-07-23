@@ -13,6 +13,7 @@ from ..constants import TE_DType, DType
 from ..utils import get_sm_count, _empty_tensor
 
 from ..quantized_tensor import Quantizer
+from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from ..tensor.storage.grouped_tensor_storage import GroupedTensorStorage
 from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
@@ -435,6 +436,30 @@ def _get_fp32_zeros_tensor(num_tensors: int, device: torch.device) -> torch.Tens
     return torch.zeros(num_tensors, dtype=torch.float32, device=device)
 
 
+@functools.lru_cache(maxsize=None)
+def _get_grouped_gemm_setup_workspace(device: int, num_tensors: int) -> torch.Tensor:
+    """Persistent setup workspace (per-group pointer/dim arrays) for grouped-tensor GEMM."""
+    return torch.empty(
+        get_grouped_gemm_setup_workspace_size(num_tensors),
+        dtype=torch.uint8,
+        device=device,
+    )
+
+
+@functools.lru_cache(maxsize=None)
+def _get_grouped_cublas_workspace(device: int, layout: str) -> torch.Tensor:
+    """Persistent cuBLAS workspace for the grouped-tensor GEMM path, one per GEMM layout.
+
+    Grouped cuBlasLt GEMM kernels in cuBLAS versions <= 13.7 leave behind stale descriptors in the
+    workspace that cause back-to-back GEMM kernels to crash/deadlock on 2nd CUDA-graph replay. As a
+    workaround, we allocate a different workspace for each GEMM layout (TN, NN, NT) to avoid
+    contamination between subsequent GEMM calls (when there is no other graph node between GEMM
+    kernels).
+    """
+    assert layout in ("TN", "NN", "NT"), f"unexpected grouped GEMM layout {layout}"
+    return torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device=device)
+
+
 def general_grouped_gemm_for_grouped_tensor(
     A,
     B,
@@ -473,6 +498,20 @@ def general_grouped_gemm_for_grouped_tensor(
         raise NotImplementedError("Row-scaled NVFP4 GroupedTensor GEMM is not supported yet.")
     if isinstance(out, GroupedTensorStorage) and out.row_scaled_nvfp4:
         raise NotImplementedError("Row-scaled NVFP4 GroupedTensor GEMM is not supported yet.")
+
+    def _is_fp8_blockwise(operand) -> bool:
+        if isinstance(operand, (list, tuple)):
+            return any(isinstance(t, Float8BlockwiseQTensorStorage) for t in operand)
+        if isinstance(operand, GroupedTensorStorage):
+            return isinstance(operand.quantizer, Float8BlockQuantizer)
+        return False
+
+    if _is_fp8_blockwise(A) or _is_fp8_blockwise(B):
+        # The fused grouped FP8 block-scaling GEMM only supports split accumulation,
+        # so force it on and intentionally override any caller-supplied value. This
+        # matches the Float8BlockScaling recipe, which fixes use_split_accumulator=True
+        # for all of fprop/dgrad/wgrad, so no user-configurable setting is discarded.
+        use_split_accumulator = True
 
     if is_discrete_out:
         # wgrad case.
@@ -513,16 +552,12 @@ def general_grouped_gemm_for_grouped_tensor(
     if not alpha.is_cuda or not beta.is_cuda:
         raise ValueError("alpha and beta must be CUDA tensors.")
 
-    workspace_setup = torch.empty(
-        get_grouped_gemm_setup_workspace_size(num_tensors),
-        dtype=torch.uint8,
-        device=device,
-    )
-    workspace_cublas = torch.empty(
-        get_cublas_workspace_size_bytes(),
-        dtype=torch.uint8,
-        device=device,
-    )
+    workspace_setup = _get_grouped_gemm_setup_workspace(device.index, num_tensors)
+    # Each grouped-GEMM layout gets its own persistent cuBLAS workspace: two grouped
+    # GEMMs sharing one workspace can deadlock under CUDA-graph replay (see
+    # _get_grouped_cublas_workspace). wgrad (NT) is the case seen in TE; fprop (TN) and
+    # dgrad (NN) have also been reported to conflict, so all three layouts are isolated.
+    workspace_cublas = _get_grouped_cublas_workspace(device.index, layout)
 
     sm_count = get_sm_count()
     sm_count = sm_count - int(os.getenv("NVTE_EXT_MARGIN_SM", str(sm_count)))
