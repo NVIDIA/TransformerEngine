@@ -264,6 +264,8 @@ def get_align_size_for_quantization(recipe: Recipe) -> int:
     if recipe.mxfp8():
         return 32
     if recipe.nvfp4():
+        if recipe.row_scaled_activation:
+            return 256
         return 128
     return 16
 

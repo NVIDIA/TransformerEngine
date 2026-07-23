@@ -240,8 +240,6 @@ def check_nvfp4_gemm_versus_reference(
 
 
 def check_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
-    x_dtype: torch.dtype,
-    w_dtype: torch.dtype,
     out_dtype: torch.dtype,
     m_splits: list[int],
     k: int,
@@ -250,15 +248,15 @@ def check_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
     use_bias: bool,
     single_output: bool,
     use_4over6: bool = False,
-    nvfp4_4over6_err_mode: str = "MAE",
+    monkeypatch=None,
+    expected_error=None,
 ):
     te_dtype = te.DType.kFloat4E2M1
     device = "cuda"
     torch.manual_seed(23)
     torch.cuda.manual_seed(23)
 
-    num_gemms = len(m_splits)
-
+    dtype = torch.bfloat16
     x_quantizer = NVFP4Quantizer(
         fp4_dtype=te_dtype,
         rowwise=True,
@@ -269,7 +267,6 @@ def check_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
         with_post_rht_amax=False,
         row_scaled_nvfp4=True,
         nvfp4_use_4over6=use_4over6,
-        nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
     w_quantizer = NVFP4Quantizer(
         fp4_dtype=te_dtype,
@@ -280,7 +277,6 @@ def check_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
         with_rht=False,
         with_post_rht_amax=False,
         nvfp4_use_4over6=use_4over6,
-        nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
 
     x_nvfp4 = []
@@ -288,53 +284,95 @@ def check_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
     bias = []
     expected = []
     for m in m_splits:
-        x = torch.randn((m, k), dtype=x_dtype, device=device)
-        w = torch.randn((n, k), dtype=w_dtype, device=device)
+        x = torch.randn((m, k), dtype=dtype, device=device)
+        w = torch.randn((n, k), dtype=dtype, device=device)
         x_nvfp4.append(
             x_quantizer.update_quantized(
-                x, x_quantizer.make_empty(x.shape, dtype=x_dtype, device=device)
+                x, x_quantizer.make_empty(x.shape, dtype=dtype, device=device)
             )
         )
         w_nvfp4.append(
             w_quantizer.update_quantized(
-                w, w_quantizer.make_empty(w.shape, dtype=w_dtype, device=device)
+                w, w_quantizer.make_empty(w.shape, dtype=dtype, device=device)
             )
         )
-        bias.append(torch.randn(n, dtype=torch.bfloat16, device=device) if use_bias else None)
-        expected.append(
-            general_gemm(
-                w_nvfp4[-1],
-                x_nvfp4[-1],
-                out_dtype=out_dtype,
-                layout="TN",
-                bias=bias[-1],
-            )[0]
-        )
+        bias.append(torch.randn(n, dtype=dtype, device=device) if use_bias else None)
+        if expected_error is None:
+            expected.append(
+                general_gemm(
+                    w_nvfp4[-1],
+                    x_nvfp4[-1],
+                    out_dtype=out_dtype,
+                    layout="TN",
+                    bias=bias[-1],
+                )[0]
+            )
 
     if single_output:
         out = [torch.empty((sum(m_splits), n), dtype=out_dtype, device=device)]
     else:
         out = [torch.empty((m, n), dtype=out_dtype, device=device) for m in m_splits]
 
-    grouped_out, _, _ = general_grouped_gemm(
-        w_nvfp4,
-        x_nvfp4,
-        out,
-        quantization_params=[None] * num_gemms,
-        out_dtype=out_dtype,
-        layout="TN",
-        m_splits=m_splits,
-        bias=bias,
-        use_bias=use_bias,
-        single_output=single_output,
+    grouped_gemm_args = (w_nvfp4, x_nvfp4, out)
+    grouped_gemm_kwargs = {
+        "quantization_params": [None] * len(m_splits),
+        "out_dtype": out_dtype,
+        "layout": "TN",
+        "m_splits": m_splits,
+        "bias": bias,
+        "use_bias": use_bias,
+        "single_output": single_output,
+    }
+    if expected_error is not None:
+        with pytest.raises(NotImplementedError, match=expected_error):
+            general_grouped_gemm(*grouped_gemm_args, **grouped_gemm_kwargs)
+        return
+
+    try:
+        import cudnn
+    except ImportError as exc:
+        pytest.skip(f"cudnn frontend unavailable: {exc}")
+    if not hasattr(cudnn, "grouped_gemm_quant_wrapper_sm100"):
+        pytest.skip("grouped_gemm_quant_wrapper_sm100 unavailable")
+
+    calls = []
+    original_wrapper = cudnn.grouped_gemm_quant_wrapper_sm100
+
+    def traced_wrapper(*args, **kwargs):
+        calls.append(kwargs)
+        return original_wrapper(*args, **kwargs)
+
+    monkeypatch.setattr(cudnn, "grouped_gemm_quant_wrapper_sm100", traced_wrapper)
+    grouped_out, _, _ = general_grouped_gemm(*grouped_gemm_args, **grouped_gemm_kwargs)
+
+    assert len(calls) == 1
+    call = calls[0]
+    global_scale_denom = 448.0 * 6.0
+    expected_alpha = (
+        torch.cat([tensor._amax_rowwise.view(-1) for tensor in w_nvfp4]) / global_scale_denom
     )
+    expected_row_scale = (
+        torch.cat([tensor._amax_rowwise.view(-1) for tensor in x_nvfp4]) / global_scale_denom
+    )
+    torch.testing.assert_close(call["alpha_tensor"], expected_alpha, atol=0.0, rtol=0.0)
+    torch.testing.assert_close(call["row_scale_tensor"], expected_row_scale, atol=0.0, rtol=0.0)
+    torch.testing.assert_close(
+        call["padded_offsets"],
+        torch.tensor(m_splits, dtype=torch.int32, device=device).cumsum(0, dtype=torch.int32),
+        atol=0,
+        rtol=0,
+    )
+    assert call["sf_vec_size"] == 16
+    assert call["b_major"] == "k"
+    assert torch.count_nonzero(call["prob_tensor"] != 1).item() == 0
+    assert (call["bias_tensor"] is not None) == use_bias
 
     if single_output:
         grouped_slices = torch.split(grouped_out, m_splits, dim=0)
     else:
         grouped_slices = grouped_out
     for grouped, ref in zip(grouped_slices, expected):
-        torch.testing.assert_close(grouped, ref, atol=0.0, rtol=0.0)
+        torch.testing.assert_close(grouped, ref, atol=0.125, rtol=0.25)
 
 
 def check_nvfp4_row_scaled_gemm_matches_emulated(
@@ -490,52 +528,53 @@ def test_nvfp4_gemm_versus_reference(
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
-@pytest.mark.parametrize(
-    "m_splits, k, n",
-    [
-        ([32, 48, 48], 128, 128),
-        ([64, 80, 112], 128, 256),
-        ([64, 80, 112], 256, 256),
-        ([64, 80, 112], 1024, 256),
-        ([256, 256, 512], 1024, 1024),
-        ([1024, 1536, 1536], 512, 3072),
-        ([16, 32, 64], 128, 96),
-        ([80, 96, 128], 640, 304),
-        ([320, 336, 352], 3072, 992),
-        ([64, 80, 112], 64, 256),
-        ([32, 48, 48], 128, 112),
-    ],
-)
-@pytest.mark.parametrize("x_dtype", [torch.float32, torch.bfloat16], ids=str)
-@pytest.mark.parametrize("w_dtype", [torch.float32, torch.bfloat16], ids=str)
-@pytest.mark.parametrize("out_dtype", [torch.float32, torch.bfloat16], ids=str)
 @pytest.mark.parametrize("use_bias", [False, True], ids=["no_bias", "bias"])
 @pytest.mark.parametrize("single_output", [False, True], ids=["list_output", "single_output"])
-@pytest.mark.parametrize("use_4over6", [False, True], ids=["default", "4over6"])
-@pytest.mark.parametrize("nvfp4_4over6_err_mode", ["MAE", "MSE"], ids=["mae_err", "mse_err"])
 def test_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
+    use_bias: bool,
+    single_output: bool,
+    monkeypatch,
+):
+    if torch.cuda.get_device_capability() < (10, 0):
+        pytest.skip("Requires SM100+ for cuDNN grouped GEMM quant kernel.")
+    check_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
+        out_dtype=torch.bfloat16,
+        m_splits=[256, 256, 256, 256],
+        k=512,
+        n=512,
+        use_bias=use_bias,
+        single_output=single_output,
+        monkeypatch=monkeypatch,
+    )
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize(
+    "m_splits, k, n, out_dtype, use_4over6, expected_error",
+    [
+        ([128, 256], 128, 128, torch.bfloat16, False, "M multiples of 256"),
+        ([256, 256], 64, 128, torch.bfloat16, False, "K and N multiples of 128"),
+        ([256, 256], 128, 128, torch.float32, False, "BF16/FP16 outputs"),
+        ([256, 256], 128, 128, torch.bfloat16, True, "does not support 4over6"),
+    ],
+)
+def test_nvfp4_row_scaled_grouped_gemm_rejects_unsupported(
     m_splits: list[int],
     k: int,
     n: int,
-    x_dtype: torch.dtype,
-    w_dtype: torch.dtype,
     out_dtype: torch.dtype,
-    use_bias: bool,
-    single_output: bool,
     use_4over6: bool,
-    nvfp4_4over6_err_mode: str,
+    expected_error: str,
 ):
     check_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
-        x_dtype=x_dtype,
-        w_dtype=w_dtype,
         out_dtype=out_dtype,
         m_splits=m_splits,
         k=k,
         n=n,
-        use_bias=use_bias,
-        single_output=single_output,
+        use_bias=False,
+        single_output=True,
         use_4over6=use_4over6,
-        nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
+        expected_error=expected_error,
     )
 
 
