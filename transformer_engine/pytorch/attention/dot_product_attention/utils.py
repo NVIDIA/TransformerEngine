@@ -335,7 +335,13 @@ class _NoOpLogger:
     def debug(self, *args, **kwargs):
         """No-op."""
 
+    def info(self, *args, **kwargs):
+        """No-op."""
+
     def warning(self, *args, **kwargs):
+        """No-op."""
+
+    def error(self, *args, **kwargs):
         """No-op."""
 
 
