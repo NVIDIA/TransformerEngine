@@ -1209,9 +1209,7 @@ class TestGroupedMLPFusedOp:
         """single_grouped_weight=True/False should match exactly for fused MXFP8 grouped MLP."""
 
         if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0":
-            pytest.skip(
-                "single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1"
-            )
+            pytest.skip("single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
         if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
             pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
 
@@ -1531,9 +1529,7 @@ class TestGroupedMLPFusedOp:
         """
 
         if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0" and single_grouped_weight:
-            pytest.skip(
-                "single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1"
-            )
+            pytest.skip("single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
         if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
             pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
 
@@ -1666,9 +1662,7 @@ class TestGroupedMLPFusedOp:
         """Grouped MLP forward+backward should be CUDA graph capturable (MXFP8)."""
 
         if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0" and single_grouped_weight:
-            pytest.skip(
-                "single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1"
-            )
+            pytest.skip("single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
         if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
             pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
         if dtype not in (torch.bfloat16, torch.float16):
