@@ -119,10 +119,13 @@ class LogFp8TensorStats(BaseLogTensorStats):
                 - overflows% - percentage of elements of tensor that were clipped to the max/min value of the FP8 range - supported only for fp8_delayed_scaling,
                 - scale_inv_min - minimum of the inverse of the scaling factors,
                 - scale_inv_max - maximum of the inverse of the scaling factors,
+                - scale_inv_std - population standard deviation of the inverse of the scaling factors;
+                  useful for spotting clipping that min/max alone can miss (degenerate to 0 for
+                  fp8_delayed_scaling / fp8_current_scaling since those use a single scalar scale).
                 - mse - mean squared error of the quantized tensor and the original tensor = sum((quantized_tensor - original_tensor)**2) / num_elements,
 
             When collecting stats for the weight tensor with FP8 model parameters enabled,
-            only "scale_inv_min" and "scale_inv_max" are available.
+            only "scale_inv_min", "scale_inv_max" and "scale_inv_std" are available.
             All other statistics require access to the high precision tensor.
 
         tensors/tensors_struct: List[str]
@@ -191,15 +194,8 @@ class LogFp8TensorStats(BaseLogTensorStats):
         if recipe_from_stat != "" and recipe_from_stat not in ALL_RECIPE_NAMES:
             raise ValueError(f"Stat {stat} contains an unsupported recipe name: {recipe_from_stat}")
 
-        # Block any NVFP4 stats in LogFp8TensorStats (FP8-specific logic won't work)
-        # But allow recipe-prefixed FP8 stats like "mxfp8_underflows%" even with NVFP4 quantizer
-        if recipe_from_stat == "nvfp4":
-            raise ValueError(
-                f"[NVTORCH INSPECT ERROR] Cannot compute NVFP4 stats '{stat}' in LogFp8TensorStats."
-                " FP8-specific statistics do not work with NVFP4. Use LogNvfp4TensorStats for"
-                " NVFP4-specific stats, or use FP8 recipe-prefixed stats (e.g.,"
-                " 'mxfp8_underflows%', 'fp8_block_scaling_mse') for what-if FP8 comparisons."
-            )
+        # NVFP4-resolved stats are filtered out before this point in inspect_tensor().
+        assert recipe_from_stat != "nvfp4"
 
         if recipe_from_stat in ["fp8_delayed_scaling", "fp8_current_scaling"] and columnwise:
             raise ValueError(
@@ -216,7 +212,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
         if recipe_from_stat == "mxfp8" and torch.cuda.get_device_capability()[0] < 10:
             raise ValueError(f"Stat {stat} needs Blackwell or later GPU.")
 
-        supported_stats = ["underflows%", "scale_inv_min", "scale_inv_max", "mse"]
+        supported_stats = ["underflows%", "scale_inv_min", "scale_inv_max", "scale_inv_std", "mse"]
         if stat_without_recipe not in supported_stats:
             raise ValueError(
                 f"Stat {stat} contains an unsupported stat name: {stat_without_recipe}"
@@ -337,6 +333,27 @@ class LogFp8TensorStats(BaseLogTensorStats):
             return
 
         recipe_name = _get_recipe_name(quantizer)
+
+        # If the layer uses NVFP4, drop bare stats (which would target the NVFP4
+        # recipe that LogFp8TensorStats can't handle) but keep stats explicitly
+        # prefixed with an FP8 recipe (e.g. "mxfp8_mse") for what-if FP8 comparison.
+        if _nvfp4_available and isinstance(quantizer, NVFP4Quantizer):
+            kept_stats, dropped_stats = [], []
+            for stat in config["stats"]:
+                if any(r in stat for r in ALL_RECIPE_NAMES):
+                    kept_stats.append(stat)
+                else:
+                    dropped_stats.append(stat)
+            if dropped_stats:
+                warnings.warn(
+                    f"[LogFp8TensorStats] Skipping stats {dropped_stats} for layer "
+                    f"'{layer_name}', tensor '{tensor_name}': layer uses NVFP4. Use "
+                    "LogNvfp4TensorStats for NVFP4 stats, or prefix stats with an FP8 "
+                    "recipe name (e.g. 'mxfp8_mse') for what-if FP8 comparisons."
+                )
+            if not kept_stats:
+                return
+            config = {**config, "stats": kept_stats}
 
         for stat in config["stats"]:
             self.check_if_stat_is_supported(
