@@ -390,6 +390,111 @@ def test_autocast_sanity(fp8_recipe):
 
 
 # ---------------------------------------------------------------------------
+# get_attention_backend under torch.compile
+# ---------------------------------------------------------------------------
+
+
+# Scalars in AttentionParams must stay concrete: assume_constant_result cannot
+# convert symbolic scalars (dynamo's automatic dynamic would make changed ints
+# symbolic on recompilation), so pin them static explicitly.
+@torch._dynamo.config.patch(specialize_int=True, specialize_float=True, recompile_limit=32)
+def test_get_attention_backend_traceable(monkeypatch):
+    """get_attention_backend must trace under torch.compile(fullgraph=True)
+    without graph breaks. The compiled selection must stay consistent with
+    eager when NVTE_* env vars flip (dynamo guards on os.environ) and when
+    attention params change, and the baked tex.get_fused_attn_backend result
+    must drive the selection."""
+    from transformer_engine.pytorch.attention.dot_product_attention import utils as dpa_utils
+
+    def fn(x, params):
+        (
+            use_flash_attention,
+            _,
+            use_fused_attention,
+            fused_attention_backend,
+            use_unfused_attention,
+            _,
+        ) = dpa_utils.get_attention_backend(params)
+        # Encode the full selection (enabled backends + fused sub-backend) in
+        # the tensor value: without a tensor op dynamo skips the frame entirely
+        # (nothing gets compiled or guarded), and the output makes compiled vs
+        # eager selection directly comparable.
+        return (
+            x
+            + (1 if use_flash_attention else 0)
+            + (2 if use_fused_attention else 0)
+            + (4 if use_unfused_attention else 0)
+            + (8 * int(fused_attention_backend) if fused_attention_backend is not None else 0)
+        )
+
+    # Dynamo only guards os.environ entries that exist at trace time (reads of
+    # absent keys are not guarded yet), so set the vars explicitly.
+    for env_var, value in (
+        ("NVTE_FLASH_ATTN", "1"),
+        ("NVTE_FUSED_ATTN", "1"),
+        ("NVTE_UNFUSED_ATTN", "1"),
+        ("NVTE_FP8_DPA_BWD", "1"),
+        ("NVTE_DPA_FP8CS_O_in_F16", "1"),
+        ("NVTE_DPA_FP8_RECIPE", ""),
+        ("NVTE_UnfusedDPA_Emulate_FP8", "0"),
+    ):
+        monkeypatch.setenv(env_var, value)
+
+    torch._dynamo.reset()
+    compiled = torch.compile(fn, fullgraph=True)
+    x = torch.zeros(8, device="cuda")
+    params = dpa_utils.AttentionParams()
+
+    torch.testing.assert_close(compiled(x, params), fn(x, params))
+
+    # Flip env vars one by one: the compiled function must recompile (guards
+    # on os.environ) and keep matching eager.
+    for env_var in ("NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN", "NVTE_FLASH_ATTN"):
+        monkeypatch.setenv(env_var, "0")
+        torch.testing.assert_close(compiled(x, params), fn(x, params))
+        monkeypatch.setenv(env_var, "1")
+
+    # FP8 attention (fp8_dpa recipe): covers the FP8-only branch (run_config
+    # env reads, recipe filters, get_fp8_te_dtype). Flipping an FP8-only env
+    # var (emulation enables UnfusedDotProductAttention) must recompile too.
+    fp8_params = dpa_utils.AttentionParams(
+        fp8=True, fp8_meta={"recipe": recipe.DelayedScaling(fp8_dpa=True)}
+    )
+    torch.testing.assert_close(compiled(x, fp8_params), fn(x, fp8_params))
+    monkeypatch.setenv("NVTE_UnfusedDPA_Emulate_FP8", "1")
+    torch.testing.assert_close(compiled(x, fp8_params), fn(x, fp8_params))
+    monkeypatch.setenv("NVTE_UnfusedDPA_Emulate_FP8", "0")
+
+    # Changing attention params (ints, layout string, dtype) must recompile
+    # and keep matching eager, still with no graph break.
+    for changed_params in (
+        dpa_utils.AttentionParams(head_dim_qk=128, head_dim_v=128),
+        dpa_utils.AttentionParams(max_seqlen_q=512, max_seqlen_kv=512),
+        dpa_utils.AttentionParams(qkv_layout="bshd_bshd_bshd"),
+        dpa_utils.AttentionParams(qkv_dtype=torch.float16),
+    ):
+        torch.testing.assert_close(compiled(x, changed_params), fn(x, changed_params))
+
+    # The baked probe result must drive the selection: report no fused
+    # sub-backend and expect UnfusedDotProductAttention (flash disabled, so the
+    # outcome is deterministic). Use a fresh frame: already-compiled frames
+    # keep the previously baked constant (assume_constant_result installs no
+    # guard on the wrapped function).
+    monkeypatch.setenv("NVTE_FLASH_ATTN", "0")
+    monkeypatch.setattr(
+        dpa_utils.tex,
+        "get_fused_attn_backend",
+        lambda *args: dpa_utils.FusedAttnBackend["No_Backend"],
+    )
+
+    def fn_no_backend(x, params):
+        return fn(x, params)
+
+    compiled_no_backend = torch.compile(fn_no_backend, fullgraph=True)
+    torch.testing.assert_close(compiled_no_backend(x, params), x + 4.0)
+
+
+# ---------------------------------------------------------------------------
 # Value-opaque quantizers
 # ---------------------------------------------------------------------------
 

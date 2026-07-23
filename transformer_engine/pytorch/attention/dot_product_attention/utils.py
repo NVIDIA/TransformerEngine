@@ -5,6 +5,7 @@
 """
 Utils/Helper classes and methods for attention
 """
+
 import math
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -35,6 +36,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     META_DP,
 )
 from transformer_engine.pytorch.attention.inference import InferenceParams
+from transformer_engine.pytorch.cpu_offload import is_cpu_offload_enabled
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
 from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Tensor,
@@ -324,6 +326,59 @@ class AttentionParams:
         return True
 
 
+class _NoOpLogger:
+    """
+    Stand-in for the "DotProductAttention" logger used when get_attention_backend
+    is traced by torch.compile. logging.Logger methods are not traceable by dynamo
+    (they cause graph breaks), while this class's no-op methods are inlined away.
+    """
+
+    def debug(self, *args, **kwargs):
+        """No-op."""
+
+    def info(self, *args, **kwargs):
+        """No-op."""
+
+    def warning(self, *args, **kwargs):
+        """No-op."""
+
+    def error(self, *args, **kwargs):
+        """No-op."""
+
+
+_no_op_logger = _NoOpLogger()
+
+
+@torch.compiler.assume_constant_result
+def _get_fused_attn_backend(
+    is_training,
+    q_type,
+    kv_type,
+    qkv_layout,
+    bias_type,
+    attn_mask_type,
+    softmax_type,
+    *args,
+):
+    """Constant-foldable tex.get_fused_attn_backend: the result depends only on
+    the attention config, and the python-side enum keeps it traceable by
+    torch.compile (see the FusedAttnBackend docstring). Layout/bias/mask/softmax
+    are taken as their string keys and resolved to the pybind enums here, so
+    that every argument is a python literal or a python enum."""
+    return FusedAttnBackend.cast(
+        tex.get_fused_attn_backend(
+            is_training,
+            q_type,
+            kv_type,
+            QKVLayout[qkv_layout],
+            AttnBiasType[bias_type],
+            AttnMaskType[attn_mask_type],
+            SoftmaxType[softmax_type],
+            *args,
+        )
+    )
+
+
 def get_attention_backend(
     attention_params: AttentionParams = None,
 ):
@@ -340,7 +395,7 @@ def get_attention_backend(
         Whether the `FlashAttention` backend has been selected.
     use_fused_attention : bool
         Whether the `FusedAttention` backend has been selected.
-    fused_attention_backend : tex.NVTE_Fused_Attn_Backend
+    fused_attention_backend : FusedAttnBackend
         If `use_fused_attention = True`, one of `FusedAttention` three sub-backends, else `None`.
     use_unfused_attention : bool
         Whether the `UnfusedDotProductAttention` backend has been selected.
@@ -387,17 +442,29 @@ def get_attention_backend(
     has_score_mod = attention_params.has_score_mod
     has_score_mod_bprop = attention_params.has_score_mod_bprop
 
+    # NOTE: environment variables in this function are read with
+    # os.environ.get, NOT os.getenv, on purpose: dynamo installs guards on
+    # os.environ reads (so changing an NVTE_* variable triggers recompilation
+    # under torch.compile), while os.getenv reads are unguarded and would bake
+    # stale values into compiled graphs. New code must follow suit.
+
     # Run config
-    logger = logging.getLogger("DotProductAttention")
-    logger.setLevel(AttentionLogging._log_level)
-    if not logger.hasHandlers():
-        logger.addHandler(AttentionLogging._stream_handler)
+    if torch.compiler.is_compiling():
+        # logging.Logger methods graph-break under torch.compile; backend
+        # selection logs are only emitted in eager mode.
+        logger = _no_op_logger
+    else:
+        logger = logging.getLogger("DotProductAttention")
+        logger.setLevel(AttentionLogging._log_level)
+        if not logger.hasHandlers():
+            logger.addHandler(AttentionLogging._stream_handler)
     device_compute_capability = get_device_compute_capability()
     cudnn_version = get_cudnn_version()
     run_config = {
         "transformer_engine_version": te.__version__,
-        "compute_capability": "sm"
-        + str(10 * device_compute_capability[0] + device_compute_capability[1]),
+        "compute_capability": (
+            "sm" + str(10 * device_compute_capability[0] + device_compute_capability[1])
+        ),
         "cuda_version": torch.version.cuda,
         "flash_attn_version": (
             str(FlashAttentionUtils.version)
@@ -423,27 +490,27 @@ def get_attention_backend(
     # Add FP8 environment variables to config
     if fp8:
         # all FP8 recipes: 1: (FP8 fwd, FP8 bwd), 0: (FP8 fwd, F16 bwd)
-        run_config["NVTE_FP8_DPA_BWD"] = int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
+        run_config["NVTE_FP8_DPA_BWD"] = int(os.environ.get("NVTE_FP8_DPA_BWD", "1"))
         # Float8CurrentScaling: 1: use F16 O in bwd, 0: use FP8 O in bwd
-        run_config["NVTE_DPA_FP8CS_O_in_F16"] = int(os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1"))
+        run_config["NVTE_DPA_FP8CS_O_in_F16"] = int(os.environ.get("NVTE_DPA_FP8CS_O_in_F16", "1"))
         # switch recipe to "F16", "DelayedScaling", or "Float8CurrentScaling"
-        _dpa_fp8_recipe = os.getenv("NVTE_DPA_FP8_RECIPE", "")
+        _dpa_fp8_recipe = os.environ.get("NVTE_DPA_FP8_RECIPE", "")
         run_config["NVTE_DPA_FP8_RECIPE"] = _dpa_fp8_recipe
         if _dpa_fp8_recipe != "":
             # config new recipe if switched
-            run_config["NVTE_DPA_FP8_FORMAT"] = os.getenv("NVTE_DPA_FP8_FORMAT", "HYBRID")
-            run_config["NVTE_DPA_FP8DS_AMAX_ALGO"] = os.getenv(
+            run_config["NVTE_DPA_FP8_FORMAT"] = os.environ.get("NVTE_DPA_FP8_FORMAT", "HYBRID")
+            run_config["NVTE_DPA_FP8DS_AMAX_ALGO"] = os.environ.get(
                 "NVTE_DPA_FP8DS_AMAX_ALGO", "most_recent"
             )
             run_config["NVTE_DPA_FP8DS_AMAX_HISTLEN"] = int(
-                os.getenv("NVTE_DPA_FP8DS_AMAX_HISTLEN", "1")
+                os.environ.get("NVTE_DPA_FP8DS_AMAX_HISTLEN", "1")
             )
             run_config["NVTE_DPA_FP8DS_REDUCE_AMAX"] = int(
-                os.getenv("NVTE_DPA_FP8DS_REDUCE_AMAX", "1")
+                os.environ.get("NVTE_DPA_FP8DS_REDUCE_AMAX", "1")
             )
         # UnfusedDotProductAttention: 1: allow FP8 emulation, 0: do not allow
         run_config["NVTE_UnfusedDPA_Emulate_FP8"] = int(
-            os.getenv("NVTE_UnfusedDPA_Emulate_FP8", "0")
+            os.environ.get("NVTE_UnfusedDPA_Emulate_FP8", "0")
         )
     logger.debug("Running with config=%s", run_config)
 
@@ -454,13 +521,13 @@ def get_attention_backend(
     qkv_format, q_format, kv_format = get_qkv_format(qkv_layout, inference_params)
 
     # Filter: Environment variables
-    use_flash_attention = int(os.getenv("NVTE_FLASH_ATTN", "1"))
-    use_flash_attention_2 = use_flash_attention and int(os.getenv("NVTE_FLASH_ATTN_V2", "1"))
-    use_flash_attention_3 = use_flash_attention and int(os.getenv("NVTE_FLASH_ATTN_V3", "1"))
-    use_flash_attention_4 = use_flash_attention and int(os.getenv("NVTE_FLASH_ATTN_V4", "1"))
+    use_flash_attention = int(os.environ.get("NVTE_FLASH_ATTN", "1"))
+    use_flash_attention_2 = use_flash_attention and int(os.environ.get("NVTE_FLASH_ATTN_V2", "1"))
+    use_flash_attention_3 = use_flash_attention and int(os.environ.get("NVTE_FLASH_ATTN_V3", "1"))
+    use_flash_attention_4 = use_flash_attention and int(os.environ.get("NVTE_FLASH_ATTN_V4", "1"))
     flash_attention_backend = None
-    use_fused_attention = int(os.getenv("NVTE_FUSED_ATTN", "1"))
-    use_unfused_attention = int(os.getenv("NVTE_UNFUSED_ATTN", "1"))
+    use_fused_attention = int(os.environ.get("NVTE_FUSED_ATTN", "1"))
+    use_unfused_attention = int(os.environ.get("NVTE_UNFUSED_ATTN", "1"))
     if not use_flash_attention_2 and FlashAttentionUtils.is_installed:
         logger.debug("Disabling FlashAttention 2 due to NVTE_FLASH_ATTN=0 or NVTE_FLASH_ATTN_V2=0")
     if not use_flash_attention_3 and FlashAttentionUtils.v3_is_installed:
@@ -585,7 +652,8 @@ def get_attention_backend(
             use_flash_attention_3 = False
         if use_unfused_attention:
             allow_emulation = (
-                os.getenv("NVTE_UnfusedDPA_Emulate_FP8", "0") == "1" or is_in_onnx_export_mode()
+                os.environ.get("NVTE_UnfusedDPA_Emulate_FP8", "0") == "1"
+                or is_in_onnx_export_mode()
             )
             if not allow_emulation:
                 logger.debug("Disabling UnfusedDotProductAttention for FP8 attention")
@@ -1363,14 +1431,17 @@ def get_attention_backend(
         if fp8 and fp8_meta["recipe"].fp8_dpa:
             q_type = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             kv_type = q_type
-        fused_attention_backend = tex.get_fused_attn_backend(
+        # NOTE: under torch.compile the numeric args below must not be symbolic
+        # (assume_constant_result requires concrete values); ints/floats made
+        # dynamic by automatic dynamic currently graph break here.
+        fused_attention_backend = _get_fused_attn_backend(
             is_training,
             q_type,
             kv_type,
-            QKVLayout[qkv_layout],
-            AttnBiasType[fu_core_attention_bias_type],
-            AttnMaskType[attn_mask_type],
-            SoftmaxType[softmax_type],
+            qkv_layout,
+            fu_core_attention_bias_type,
+            attn_mask_type,
+            softmax_type,
             attention_dropout,
             num_heads,
             num_gqa_groups,
@@ -2432,6 +2503,22 @@ def get_qkv_layout(
     if qkv_layout == "not_supported":
         raise RuntimeError("The provided qkv memory layout is not supported!")
 
+    if len(qkv_layout.split("_")) < 3:
+        # q/k/v were recognized as views of a packed buffer only by inspecting
+        # their data pointers, strides and storage offsets. Skip the nudge while
+        # CPU offloading is enabled: offloading forces MultiheadAttention onto
+        # its sliced-views fallback, so packed views reaching detection are
+        # expected there and the caller has no migration option.
+        if not is_cpu_offload_enabled():
+            warnings.warn(
+                "Relying on pointer-based detection of packed q/k/v layouts"
+                f" (detected {qkv_layout!r}) is deprecated: pass the packed buffer"
+                " explicitly via qkv_layer/kv_layer (with qkv_interleave_dim) to"
+                " DotProductAttention instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
     if inference_params is not None and inference_params.is_paged:
         qkv_layout = "paged_kv_" + qkv_layout
 
@@ -2787,8 +2874,18 @@ def combine_and_quantize(
     used_in_forward=True,
     used_in_backward=False,
     keep_same_data_and_scale_inv_format=False,
+    combined_qkv: Optional[torch.Tensor] = None,
+    combined_kv: Optional[torch.Tensor] = None,
 ):
-    """Combine Q, K, V tensors based on qkv_layout and quantize them together."""
+    """Combine Q, K, V tensors based on qkv_layout and quantize them together.
+
+    When ``combined_qkv`` (for ``qkv_group=1`` layouts such as ``bs3hd``) or
+    ``combined_kv`` (for ``qkv_group=2`` layouts such as ``bshd_bs2hd``) is provided, it must be the
+    caller's original packed buffer that q/k/v are views of. It is then quantized
+    directly instead of re-deriving the packed buffer from the q/k/v views via
+    ``combine_tensors`` (which rebuilds it with a raw ``set_`` under a silent
+    adjacency/interleave assumption). Ignored for MXFP8 quantization.
+    """
     if isinstance(qkv_quantizer, MXFP8Quantizer):
         qkv_format, q_format, kv_format = get_qkv_format(qkv_layout)
         assert qkv_format in ("bshd", "sbhd"), (
@@ -2888,12 +2985,26 @@ def combine_and_quantize(
     match qkv_group:
         case 1:
             dim = qkv_layout.find("3")
-            qkv = combine_tensors([q, k, v], dim)
+            if combined_qkv is not None:
+                assert combined_qkv.shape[dim] == 3, (
+                    f"combined_qkv does not match qkv_layout {qkv_layout}: expected"
+                    f" size 3 at dim {dim}, got shape {tuple(combined_qkv.shape)}."
+                )
+                qkv = combined_qkv
+            else:
+                qkv = combine_tensors([q, k, v], dim)
             qkv_fp8 = qkv_quantizer(qkv)
             q_data, k_data, v_data = SplitAlongDim.apply(qkv_fp8._data, dim, [1, 1, 1], True)
         case 2:
             dim = qkv_layout.split("_")[1].find("2")
-            kv = combine_tensors([k, v], dim)
+            if combined_kv is not None:
+                assert combined_kv.shape[dim] == 2, (
+                    f"combined_kv does not match qkv_layout {qkv_layout}: expected"
+                    f" size 2 at dim {dim}, got shape {tuple(combined_kv.shape)}."
+                )
+                kv = combined_kv
+            else:
+                kv = combine_tensors([k, v], dim)
             tensors = [q, kv]
             num_tensors = len(tensors)
             shapes = [x.shape for x in tensors]
