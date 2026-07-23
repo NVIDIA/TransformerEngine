@@ -52,8 +52,10 @@ from .._common import (
     get_accumulate_flag_in_param,
     get_dummy_wgrads_for_params,
     get_main_grad_from_param,
+    grouped_storage_from_grouped_tensor,
     is_quantized_tensor,
     maybe_dequantize,
+    prepare_prequantized_mxfp8_grouped_input,
     validate_or_alloc_output,
     view_main_grad_as_grouped_buffer,
 )
@@ -919,7 +921,16 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         # Tensor properties
         fc1_weight_shape = (fc1_op.out_features, fc1_op.in_features)
         fc2_weight_shape = (fc2_op.out_features, fc2_op.in_features)
-        input_ = input_.reshape(-1, fc1_weight_shape[1])
+        if isinstance(input_, GroupedTensor):
+            # GroupedTensor forbids reshape and is already in the canonical
+            # (total_tokens, in_features) layout; just validate the shape.
+            if input_.dim() != 2 or input_.size(-1) != fc1_weight_shape[1]:
+                raise ValueError(
+                    "GroupedTensor input must have shape (total_tokens, "
+                    f"{fc1_weight_shape[1]}), but got {tuple(input_.size())}."
+                )
+        else:
+            input_ = input_.reshape(-1, fc1_weight_shape[1])
         in_shape = list(input_.size())
         if in_shape[0] % 128 != 0:
             raise ValueError(f"Unsupported input shape for fused grouped MLP ({in_shape=}).")
@@ -1080,36 +1091,23 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             or isinstance(fc1_input_quantizer, NVFP4Quantizer)
             and isinstance(input_quantizer, NVFP4Quantizer)
         ):
-            # GroupedTensor is a torch.Tensor subclass, so the CPU offload
-            # infrastructure's prepare_for_saving treats it as a plain tensor
-            # and does not decompose it into its component data tensors.  By
-            # repacking into a GroupedTensorStorage (not a torch.Tensor), we
-            # ensure the fuser's prepare_for_saving call correctly decomposes
-            # the activation before save_for_backward.
-            grouped_fc1_x = GroupedTensorStorage(
-                shape=input_.logical_shape,
-                dtype=input_.fake_dtype,
-                num_tensors=input_.num_tensors,
-                shapes=input_.tensor_shapes,
-                quantizer=input_.quantizer,
-                data=input_.rowwise_data,
-                columnwise_data=input_.columnwise_data,
-                scale_inv=input_.scale_inv,
-                columnwise_scale_inv=input_.columnwise_scale_inv,
-                amax=input_.amax,
-                columnwise_amax=input_.columnwise_amax,
-                scale=input_.scale,
-                first_dims=input_.first_dims,
-                last_dims=input_.last_dims,
-                tensor_offsets=input_.tensor_offsets,
-                offsets=input_.offsets,
-                scale_inv_offsets=input_.scale_inv_offsets,
-                columnwise_scale_inv_offsets=input_.columnwise_scale_inv_offsets,
-                with_gemm_swizzled_scales=input_._with_gemm_swizzled_scales,
-                row_scaled_nvfp4=input_.row_scaled_nvfp4,
-                nvfp4_use_4over6=input_.nvfp4_use_4over6,
-                nvfp4_e4m3_max=input_.nvfp4_e4m3_max,
-            )
+            grouped_fc1_x = grouped_storage_from_grouped_tensor(input_)
+            if (
+                isinstance(fc1_input_quantizer, MXFP8Quantizer)
+                and not grouped_fc1_x._with_gemm_swizzled_scales
+            ):
+                # Rowwise-only MXFP8 input (e.g. FP8 token dispatch):
+                # manufacture the columnwise copy needed by the wgrad GEMM
+                # and swizzle the rowwise scales for the forward GEMM.
+                prepare_prequantized_mxfp8_grouped_input(
+                    grouped_fc1_x,
+                    fc1_input_quantizer,
+                    num_groups,
+                    split_sizes,
+                    dtype,
+                    with_columnwise=weight_requires_grad,
+                    tensor_offsets=fc1_x_tensor_offsets,
+                )
         else:
             fc1_x = maybe_dequantize(input_, dtype)
             grouped_fc1_x = _group_quantize_for_grouped_mlp(
