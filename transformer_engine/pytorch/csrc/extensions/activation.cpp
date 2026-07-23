@@ -362,6 +362,8 @@ py::object grouped_scaled_activation_helper(const at::Tensor& input, const at::T
   const TensorWrapper& input_nvte = makeTransformerEngineTensor(input_tensor);
   const TensorWrapper& scales_nvte = makeTransformerEngineTensor(scales_tensor);
 
+  // Keep the dense activation in the input dtype. It is only a transient buffer when a
+  // quantizer is provided; the quantized return path never exposes it to the caller.
   auto output = at::empty({input.size(0), input.size(1) / shape_divisor}, input_tensor.options());
   const TensorWrapper& output_nvte = makeTransformerEngineTensor(output);
 

@@ -6,17 +6,17 @@
 
 from ..fuser import register_backward_fusion, register_forward_fusion
 from .backward_activation_bias import BackwardActivationBias
+from .backward_activation_grouped_linear import BackwardScaledActivationGroupedLinear
 from .backward_add_rmsnorm import BackwardAddRMSNorm
 from .backward_linear_add import BackwardLinearAdd
 from .backward_linear_scale import BackwardLinearScale
-from .forward_linear_bias_activation import ForwardLinearBiasActivation
-from .forward_linear_bias_add import ForwardLinearBiasAdd
-from .forward_linear_scale_add import ForwardLinearScaleAdd
-from .grouped_linear_activation import (
-    BackwardGroupedLinearScaledActivation,
+from .forward_activation_grouped_linear import (
     ForwardScaledActivationGroupedLinear,
     act_grouped_linear_fusion_supported,
 )
+from .forward_linear_bias_activation import ForwardLinearBiasActivation
+from .forward_linear_bias_add import ForwardLinearBiasAdd
+from .forward_linear_scale_add import ForwardLinearScaleAdd
 from .userbuffers_backward_linear import UserbuffersBackwardLinear
 from .userbuffers_forward_linear import UserbuffersForwardLinear
 
@@ -34,7 +34,7 @@ register_backward_fusion(BackwardLinearAdd.fuse_backward_ops)
 register_backward_fusion(BackwardLinearScale.fuse_backward_ops)
 register_backward_fusion(BackwardActivationBias.fuse_backward_ops)
 register_backward_fusion(BackwardAddRMSNorm.fuse_backward_ops)
-register_backward_fusion(BackwardGroupedLinearScaledActivation.fuse_backward_ops)
+register_backward_fusion(BackwardScaledActivationGroupedLinear.fuse_backward_ops)
 
 # Import experimental fusions
 # Note: Registration logic is non-trivial, so submodule handles it internally.

@@ -23,8 +23,10 @@ from transformer_engine.pytorch.ops.basic.grouped_linear import (
     OUTPUT_BUFFER_KEY,
     GRAD_INPUT_BUFFER_KEY,
 )
-from transformer_engine.pytorch.ops.fused.grouped_linear_activation import (
-    BackwardGroupedLinearScaledActivation,
+from transformer_engine.pytorch.ops.fused.backward_activation_grouped_linear import (
+    BackwardScaledActivationGroupedLinear,
+)
+from transformer_engine.pytorch.ops.fused.forward_activation_grouped_linear import (
     ForwardScaledActivationGroupedLinear,
 )
 from transformer_engine.pytorch import (
@@ -737,6 +739,13 @@ class TestGroupedMLPFusedOp:
         maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         if dtype == torch.bfloat16 and not is_bf16_available():
             pytest.skip("BF16 requires SM 8.0+")
+        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0" and (
+            single_grouped_weight or single_grouped_bias
+        ):
+            pytest.skip(
+                "single_grouped_weight/single_grouped_bias requires"
+                " NVTE_GROUPED_LINEAR_SINGLE_PARAM=1"
+            )
         if single_grouped_weight and quantization != "mxfp8":
             pytest.skip("single_grouped_weight is only supported for MXFP8 quantization")
         if single_grouped_bias and not bias:
@@ -1043,7 +1052,7 @@ class TestGroupedMLPFusedOp:
             == act_grouped_linear_fusion_expected
         )
         assert (
-            any(isinstance(op, BackwardGroupedLinearScaledActivation) for op, _ in backward_ops)
+            any(isinstance(op, BackwardScaledActivationGroupedLinear) for op, _ in backward_ops)
             == act_grouped_linear_fusion_expected
         )
 
@@ -1199,6 +1208,10 @@ class TestGroupedMLPFusedOp:
     ) -> None:
         """single_grouped_weight=True/False should match exactly for fused MXFP8 grouped MLP."""
 
+        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0":
+            pytest.skip(
+                "single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1"
+            )
         if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
             pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
 
@@ -1517,6 +1530,10 @@ class TestGroupedMLPFusedOp:
         that read ``.grad`` don't see stale bytes from the cached dummy).
         """
 
+        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0" and single_grouped_weight:
+            pytest.skip(
+                "single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1"
+            )
         if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
             pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
 
@@ -1648,6 +1665,10 @@ class TestGroupedMLPFusedOp:
     ) -> None:
         """Grouped MLP forward+backward should be CUDA graph capturable (MXFP8)."""
 
+        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0" and single_grouped_weight:
+            pytest.skip(
+                "single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1"
+            )
         if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
             pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
         if dtype not in (torch.bfloat16, torch.float16):
