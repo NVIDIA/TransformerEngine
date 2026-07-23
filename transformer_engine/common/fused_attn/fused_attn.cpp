@@ -240,8 +240,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
   NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
   NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
-  const bool is_thd_layout = q_format == NVTE_QKV_Format::NVTE_THD ||
-                             kv_format == NVTE_QKV_Format::NVTE_THD;
+  const bool is_thd_layout =
+      q_format == NVTE_QKV_Format::NVTE_THD || kv_format == NVTE_QKV_Format::NVTE_THD;
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   auto cudnn_runtime_version = cudnnGetVersion();
 
