@@ -809,13 +809,13 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
         ],  # Workspace for the dbias reduction, only used when WITH_DBIAS is True
         stream: CUstream,
         # This kernel allows these parameters to be tuned for performance.
-        TUNEABLE_CFGS:  cutlass.Constexpr = {
+        TUNEABLE_CFGS: cutlass.Constexpr = {
             "_NUM_STAGES": 2,
             "_NUM_TILES_STANDARD": 2,
             "_NUM_TILES_DBIAS_ONLY": 4,
             "_THREADS_PER_CTA_STANDARD": 64,
-            "_THREADS_PER_CTA_DBIAS_ONLY": 128
-        }
+            "_THREADS_PER_CTA_DBIAS_ONLY": 128,
+        },
     ):
         if cutlass.const_expr(CUTEDSL_DEBUG_LOGGING):
             cute.printf(f"[CuTeDSL] MXFP8QuantizeKernel.__call__() with config: {self.cfg}\n")
@@ -827,10 +827,14 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
         # Use a different tile size for dbias only config
         # No matter what tile size we use, each thread always handles a (1, MXFP8_BLOCK_SCALING_SIZE) chunk
         if cutlass.const_expr(cast_dbias_only):
-            self._NUM_TILES = self._NUM_TILES_DBIAS_ONLY  # Each CTA handles 4 tiles stacked vertically
+            self._NUM_TILES = (
+                self._NUM_TILES_DBIAS_ONLY
+            )  # Each CTA handles 4 tiles stacked vertically
             self._THREADS_PER_CTA = self._THREADS_PER_CTA_DBIAS_ONLY
         else:
-            self._NUM_TILES = self._NUM_TILES_STANDARD  # Each CTA handles 2 tiles stacked vertically
+            self._NUM_TILES = (
+                self._NUM_TILES_STANDARD
+            )  # Each CTA handles 2 tiles stacked vertically
             self._THREADS_PER_CTA = self._THREADS_PER_CTA_STANDARD
         # Each thread handles a (1, MXFP8_BLOCK_SCALING_SIZE) chunk
         self._TILE_COLS = self._THREADS_PER_CTA
@@ -964,7 +968,9 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
         cfg = self.cfg
         # Only check the noop flag when WITH_NOOP is True (the noop tensor is passed and it's not nullptr)
         # and both WITH_ACT and WITH_DACT are False (it's legitimate to skip the quantization because no fusion is involved)
-        CHECK_NOOP_FLAG: cutlass.const_expr = cfg.WITH_NOOP and not cfg.WITH_ACT and not cfg.WITH_DACT
+        CHECK_NOOP_FLAG: cutlass.const_expr = (
+            cfg.WITH_NOOP and not cfg.WITH_ACT and not cfg.WITH_DACT
+        )
         # Only perform the runtime check to read the noop flag's value when the compiled kernel allows us to do so
         skip_execution = cutlass.const_expr(CHECK_NOOP_FLAG) and mNoop[0] == Float32(1.0)
         if not skip_execution:
@@ -1613,7 +1619,7 @@ class MXFP8QuantizeSpecializedRowwiseKernel(MXFP8QuantizeKernelBase):
             # If True, then this kernel will first write each thread's scale byte to a shared
             # memory buffer, then utilize vectorized store to flush the buffer to global memory.
             "_STASH_SCALE_TO_SMEM": True,
-        }
+        },
     ):
         if cutlass.const_expr(CUTEDSL_DEBUG_LOGGING):
             cute.printf(
@@ -1827,7 +1833,7 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
             "_NUM_TILES_X": 4,
             "_NUM_TILES_Y": 1,
             "_NUM_STAGES": 2,
-        }
+        },
     ):
         if cutlass.const_expr(CUTEDSL_DEBUG_LOGGING):
             cute.printf(
@@ -2209,7 +2215,8 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
         WIDTH: cutlass.Constexpr,
     ):
         """Flush a staged (ROWS, COLS) SMEM scale block (a plain row-major 2D tensor) to its (bidy, bidx) slice of the gmem scale tensor,
-        where each GMEM slice has the same shape as this SMEM tile. Use `WIDTH` bytes per vectorized store."""
+        where each GMEM slice has the same shape as this SMEM tile. Use `WIDTH` bytes per vectorized store.
+        """
         mS_M = mS.shape[0]
         mS_N = mS.shape[1]
         # Obtain the GMEM slice for the output scale factor block of this CTA
@@ -2229,7 +2236,7 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
                 # Find the position for this slot's vectorized store in the GMEM scale factor buffer
                 thread_y = bidy * ROWS + thread_idx // ACTIVE_THREAD_COLS
                 thread_x = bidx * COLS + (thread_idx % ACTIVE_THREAD_COLS) * WIDTH
-                # For rowwise we have N divisible by 4 and WIDTH=4, and for colwise we have N divisible by 128 and WIDTH=16, 
+                # For rowwise we have N divisible by 4 and WIDTH=4, and for colwise we have N divisible by 128 and WIDTH=16,
                 # so `thread_x < mS_N` with vectorized store is safe here.
                 # A thread only writes to a single row so `thread_y < mS_M` is also safe here.
                 if thread_y < mS_M and thread_x < mS_N:

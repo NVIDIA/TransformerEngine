@@ -207,9 +207,7 @@ def run_bidim_suite():
         if x * y >= stages  # a span shallower than the pipeline wastes stages
     ]
     winners = {}
-    _sweep_case(
-        MXFP8QuantizeSpecializedBidimensionalKernel, _cfg(), candidates, "cast_2d", winners
-    )
+    _sweep_case(MXFP8QuantizeSpecializedBidimensionalKernel, _cfg(), candidates, "cast_2d", winners)
     return winners
 
 
@@ -228,8 +226,10 @@ def main():
     args = p.parse_args()
 
     dev = torch.cuda.get_device_properties(0)
-    print(f"# device={dev.name} cc={dev.major}.{dev.minor}"
-          f" arch={os.environ.get('CUTE_DSL_ARCH', '<auto>')}")
+    print(
+        f"# device={dev.name} cc={dev.major}.{dev.minor}"
+        f" arch={os.environ.get('CUTE_DSL_ARCH', '<auto>')}"
+    )
     print(f"# preset={args.preset}")
 
     winners = SUITES[args.preset]()
