@@ -53,9 +53,9 @@ void cp_stream_write_epoch(const at::Tensor &epochs, int writer_rank, int64_t ep
              "CP gradient epoch must fit in int32.");
   at::Tensor slot = cp_epoch_slot(epochs, writer_rank, "peer_grad_committed_epoch");
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  NVTE_CHECK_CUDA_DRIVER(cuStreamWriteValue32(reinterpret_cast<CUstream>(stream),
-                                              reinterpret_cast<CUdeviceptr>(slot.data_ptr()),
-                                              static_cast<cuuint32_t>(epoch), 0));
+  NVTE_CALL_CHECK_CUDA_DRIVER(cuStreamWriteValue32, reinterpret_cast<CUstream>(stream),
+                              reinterpret_cast<CUdeviceptr>(slot.data_ptr()),
+                              static_cast<cuuint32_t>(epoch), 0);
 }
 
 void cp_stream_wait_epochs(const at::Tensor &epochs, int cp_size, int64_t epoch) {
@@ -65,9 +65,9 @@ void cp_stream_wait_epochs(const at::Tensor &epochs, int cp_size, int64_t epoch)
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   const auto *base = epochs.data_ptr<int32_t>();
   for (int source = 0; source < cp_size; ++source) {
-    NVTE_CHECK_CUDA_DRIVER(cuStreamWaitValue32(
-        reinterpret_cast<CUstream>(stream), reinterpret_cast<CUdeviceptr>(base + source),
-        static_cast<cuuint32_t>(epoch), CU_STREAM_WAIT_VALUE_GEQ));
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuStreamWaitValue32, reinterpret_cast<CUstream>(stream),
+                                reinterpret_cast<CUdeviceptr>(base + source),
+                                static_cast<cuuint32_t>(epoch), CU_STREAM_WAIT_VALUE_GEQ);
   }
 }
 
@@ -202,14 +202,17 @@ std::vector<at::Tensor> nvshmem_cp_global_grad_return_execute(
   cp_grad_return_slot(grad_value_return, value, cp_size, rank, "grad_value_return");
   const int64_t half = key.size(0) / 2;
   for (int owner = 0; owner < cp_size; ++owner) {
+    // Native two-chunk CP layout: owner o owns half-chunks o and
+    // (2 * cp_size - 1 - o). For CP=4, the mirror index is 7 - o.
+    const int64_t mirror_half = 2 * static_cast<int64_t>(cp_size) - 1 - owner;
     at::Tensor key_slot = cp_grad_return_slot(peer_grad_key_returns[owner], key, cp_size, rank,
                                               "peer_grad_key_return");
     at::Tensor value_slot = cp_grad_return_slot(peer_grad_value_returns[owner], value, cp_size,
                                                 rank, "peer_grad_value_return");
     key_slot.narrow(0, 0, half).copy_(dk_global.narrow(0, owner * half, half));
-    key_slot.narrow(0, half, half).copy_(dk_global.narrow(0, (7 - owner) * half, half));
+    key_slot.narrow(0, half, half).copy_(dk_global.narrow(0, mirror_half * half, half));
     value_slot.narrow(0, 0, half).copy_(dv_global.narrow(0, owner * half, half));
-    value_slot.narrow(0, half, half).copy_(dv_global.narrow(0, (7 - owner) * half, half));
+    value_slot.narrow(0, half, half).copy_(dv_global.narrow(0, mirror_half * half, half));
   }
 
   const int64_t epoch = cp_global_grad_return_epochs[rank].fetch_add(1) + 1;
