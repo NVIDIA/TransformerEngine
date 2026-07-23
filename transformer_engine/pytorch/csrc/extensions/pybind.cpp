@@ -284,6 +284,57 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Backward of SwiGLU used in GPT OSS", py::arg("grad"), py::arg("fwd_input"),
         py::arg("quantizer"), py::arg("limit") = 7.0f, py::arg("alpha") = 1.702f,
         py::arg("glu_linear_offset") = 1.0f);
+  /* Scaled activation */
+  m.def("scaled_swiglu", transformer_engine::pytorch::scaled_swiglu, "Scaled SwiGLU activation",
+        py::arg("input"), py::arg("act_scales"), py::arg("quantizer"),
+        py::arg("glu_interleave_size") = 0);
+  m.def("scaled_clamped_swiglu", transformer_engine::pytorch::scaled_clamped_swiglu,
+        "Scaled clamped SwiGLU activation", py::arg("input"), py::arg("act_scales"),
+        py::arg("quantizer"), py::arg("limit") = 7.0f, py::arg("alpha") = 1.702f,
+        py::arg("glu_linear_offset") = 1.0f, py::arg("glu_interleave_size") = 0);
+  m.def("scaled_srelu", transformer_engine::pytorch::scaled_srelu, "Scaled SReLU activation",
+        py::arg("input"), py::arg("act_scales"), py::arg("quantizer"));
+  m.def("scaled_dswiglu", transformer_engine::pytorch::scaled_dswiglu, "Scaled SwiGLU backward",
+        py::arg("grad"), py::arg("fwd_input"), py::arg("act_scales"), py::arg("quantizer"),
+        py::arg("glu_interleave_size") = 0, py::arg("compute_scale_grad") = true);
+  m.def("scaled_clamped_dswiglu", transformer_engine::pytorch::scaled_clamped_dswiglu,
+        "Scaled clamped SwiGLU backward", py::arg("grad"), py::arg("fwd_input"),
+        py::arg("act_scales"), py::arg("quantizer"), py::arg("limit") = 7.0f,
+        py::arg("alpha") = 1.702f, py::arg("glu_linear_offset") = 1.0f,
+        py::arg("glu_interleave_size") = 0, py::arg("compute_scale_grad") = true);
+  m.def("scaled_dsrelu", transformer_engine::pytorch::scaled_dsrelu, "Scaled SReLU backward",
+        py::arg("grad"), py::arg("fwd_input"), py::arg("act_scales"), py::arg("quantizer"),
+        py::arg("compute_scale_grad") = true);
+  /* Scaled activation + grouped quantize */
+  m.def("grouped_scaled_swiglu", transformer_engine::pytorch::grouped_scaled_swiglu,
+        "Scaled SwiGLU + grouped quantize", py::arg("input"), py::arg("act_scales"),
+        py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
+        py::arg("tensor_offsets") = py::none(), py::arg("glu_interleave_size") = 0);
+  m.def("grouped_scaled_clamped_swiglu", transformer_engine::pytorch::grouped_scaled_clamped_swiglu,
+        "Scaled clamped SwiGLU + grouped quantize", py::arg("input"), py::arg("act_scales"),
+        py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
+        py::arg("tensor_offsets") = py::none(), py::arg("limit") = 7.0f, py::arg("alpha") = 1.702f,
+        py::arg("glu_linear_offset") = 1.0f, py::arg("glu_interleave_size") = 0);
+  m.def("grouped_scaled_srelu", transformer_engine::pytorch::grouped_scaled_srelu,
+        "Scaled SReLU + grouped quantize", py::arg("input"), py::arg("act_scales"),
+        py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
+        py::arg("tensor_offsets") = py::none());
+  m.def("grouped_scaled_dswiglu", transformer_engine::pytorch::grouped_scaled_dswiglu,
+        "Scaled SwiGLU backward + optional grouped quantize", py::arg("grad"), py::arg("fwd_input"),
+        py::arg("act_scales"), py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
+        py::arg("tensor_offsets") = py::none(), py::arg("glu_interleave_size") = 0,
+        py::arg("compute_scale_grad") = true);
+  m.def("grouped_scaled_clamped_dswiglu",
+        transformer_engine::pytorch::grouped_scaled_clamped_dswiglu,
+        "Scaled clamped SwiGLU backward + optional grouped quantize", py::arg("grad"),
+        py::arg("fwd_input"), py::arg("act_scales"), py::arg("quantizer"), py::arg("num_tensors"),
+        py::arg("first_dims"), py::arg("tensor_offsets") = py::none(), py::arg("limit") = 7.0f,
+        py::arg("alpha") = 1.702f, py::arg("glu_linear_offset") = 1.0f,
+        py::arg("glu_interleave_size") = 0, py::arg("compute_scale_grad") = true);
+  m.def("grouped_scaled_dsrelu", transformer_engine::pytorch::grouped_scaled_dsrelu,
+        "Scaled SReLU backward + optional grouped quantize", py::arg("grad"), py::arg("fwd_input"),
+        py::arg("act_scales"), py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
+        py::arg("tensor_offsets") = py::none(), py::arg("compute_scale_grad") = true);
   /* DBias + DAct fusions*/
   m.def("dbias_dgelu", transformer_engine::pytorch::dbias_dgelu, "DGeLU + DBias + Quantize",
         py::arg("grad"), py::arg("fwd_input"), py::arg("quantizer"));
