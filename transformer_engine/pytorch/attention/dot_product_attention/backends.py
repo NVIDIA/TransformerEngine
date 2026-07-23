@@ -416,6 +416,14 @@ class UnfusedDotProductAttention(torch.nn.Module):
         if inference_params is not None and inference_params.is_paged:
             key_layer, value_layer = inference_params.convert_paged_to_nonpaged(self.layer_number)
 
+        # Token count for the thd output conversion (ConvertBSHDtoTHD) below.
+        # Captured here, before any layout conversion, because when the query
+        # enters in thd layout (qkv_format "thd" for training or "thd_2bshd" for
+        # inference) shape[0] is the total query token count. Deriving it later
+        # via cu_seqlens_q[-1].item() would sync with the GPU and break
+        # torch.compile + cudagraphs (unbacked SymInt).
+        total_tokens_q = query_layer.shape[0] if q_format == "thd" else None
+
         # convert to sbhd
         # training: bshd, thd
         # inference: bshd, sbhd_2bshd, thd_2bshd
@@ -441,10 +449,6 @@ class UnfusedDotProductAttention(torch.nn.Module):
         if qkv_format == "thd":
             assert cu_seqlens_q is not None and cu_seqlens_kv is not None
             assert max_seqlen_q is not None and max_seqlen_kv is not None
-            # Token count for ConvertBSHDtoTHD below; deriving it there via
-            # cu_seqlens_q[-1].item() syncs with the GPU and breaks
-            # torch.compile+cudagraphs (unbacked SymInt).
-            total_tokens_q = query_layer.shape[0]
             query_layer = ConvertTHDtoBSHD.apply(
                 query_layer,
                 cu_seqlens_q,
