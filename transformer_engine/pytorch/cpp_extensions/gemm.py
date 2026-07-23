@@ -81,25 +81,29 @@ def _nvfp4_row_scaled_gemm_inputs(
     B: NVFP4TensorStorage,
     *,
     transa: bool,
-) -> Tuple[NVFP4TensorStorage, NVFP4TensorStorage, torch.Tensor]:
-    """Return GEMM aliases and FP32 output scales for row-scaled NVFP4."""
+    transb: bool,
+) -> Tuple[NVFP4TensorStorage, NVFP4TensorStorage, torch.Tensor, torch.Tensor]:
+    """Return per-tensor GEMM aliases and row/column FP32 output scales."""
     A_metadata = A.get_metadata()
-    weight_amax = A._amax_rowwise if transa else A._amax_columnwise
-    assert weight_amax is not None and weight_amax.numel() == 1
-    A_metadata["amax_rowwise" if transa else "amax_columnwise"] = weight_amax.new_ones(1)
+    a_amax_key = "amax_rowwise" if transa else "amax_columnwise"
+    output_col_scales = A_metadata[a_amax_key]
+    assert output_col_scales is not None
+    A_metadata[a_amax_key] = output_col_scales.new_ones(1)
     A_metadata["row_scaled_nvfp4"] = False
 
     B_metadata = B.get_metadata()
-    rhs_rowwise_amax = B._amax_rowwise
-    assert rhs_rowwise_amax is not None
-    B_metadata["amax_rowwise"] = rhs_rowwise_amax.new_ones(1)
+    b_amax_key = "amax_columnwise" if transb else "amax_rowwise"
+    output_row_scales = B_metadata[b_amax_key]
+    assert output_row_scales is not None
+    B_metadata[b_amax_key] = output_row_scales.new_ones(1)
     B_metadata["row_scaled_nvfp4"] = False
 
-    assert rhs_rowwise_amax.dtype == torch.float32 and weight_amax.dtype == torch.float32
+    assert output_row_scales.dtype == torch.float32 and output_col_scales.dtype == torch.float32
     return (
         NVFP4TensorStorage(**A_metadata),
         NVFP4TensorStorage(**B_metadata),
-        (rhs_rowwise_amax * weight_amax).view(-1, 1),
+        output_row_scales.view(-1, 1),
+        output_col_scales.view(1, -1),
     )
 
 
@@ -211,16 +215,7 @@ def general_gemm(
     if not _is_nvfp4_row_scaled_tensor(A) and not _is_nvfp4_row_scaled_tensor(B):
         out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
     else:
-        if _is_nvfp4_row_scaled_tensor(A):
-            raise NotImplementedError("Row-scaled NVFP4 GEMM does not support row-scaled A.")
-        assert layout[1] == "N", "Row-scaled NVFP4 GEMM currently supports N-layout B only."
-        if grad:
-            raise RuntimeError(
-                "Row-scaled NVFP4 GEMM currently supports fprop only. "
-                "Backward NVFP4 gradient quantizers should use scalar global amax."
-            )
         assert not gelu, "Row-scaled NVFP4 GEMM currently does not support fused GELU."
-        assert not accumulate, "Row-scaled NVFP4 GEMM currently does not support accumulation."
         assert (
             quantization_params is None
         ), "Row-scaled NVFP4 GEMM currently does not support output quantization."
@@ -235,9 +230,14 @@ def general_gemm(
         assert isinstance(
             A, NVFP4TensorStorage
         ), "Row-scaled NVFP4 GEMM currently requires NVFP4 A."
-        # cuBLAS folds NVFP4 global amax values into GEMM alpha. Keep the row-scaled
-        # recipe's global scales out of alpha and apply them in FP32 below.
-        gemm_A, gemm_B, rowwise_global_scales = _nvfp4_row_scaled_gemm_inputs(A, B, transa=transa)
+        assert isinstance(
+            B, NVFP4TensorStorage
+        ), "Row-scaled NVFP4 GEMM currently requires NVFP4 B."
+        # Reuse the per-tensor GEMM and apply selected row/column global scales
+        # to the FP32 output. This extends #2931 without a dedicated GEMM kernel.
+        gemm_A, gemm_B, output_row_scales, output_col_scales = _nvfp4_row_scaled_gemm_inputs(
+            A, B, transa=transa, transb=transb
+        )
 
         requested_out, requested_out_dtype = out, out_dtype
         fp32_out = (
@@ -252,18 +252,36 @@ def general_gemm(
         gemm_args[5] = None  # quantization_params
         gemm_args[6] = TE_DType[torch.float32]  # out_dtype
         gemm_args[7] = None  # bias
-        out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*gemm_args, **kwargs)
+        gemm_args[14] = False  # accumulate after applying the outer scales
+        gemm_kwargs = dict(kwargs)
+        gemm_kwargs["beta"] = 0.0
+        out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*gemm_args, **gemm_kwargs)
         out_2d = out.reshape(-1, out.shape[-1])
 
-        assert rowwise_global_scales.dtype == torch.float32 and out.dtype == torch.float32
-        assert rowwise_global_scales.numel() == out_2d.shape[0]
-
-        out_2d.mul_(rowwise_global_scales)
+        assert output_row_scales.numel() in (1, out_2d.shape[0])
+        assert output_col_scales.numel() in (1, out_2d.shape[1])
+        assert out.dtype == torch.float32
+        # When one side is a scalar global amax (e.g. fprop weight), fold both
+        # scales into a single factor before the multiply. This reproduces
+        # #2931's fused `out * (row_amax * col_amax)` arithmetic bit-for-bit;
+        # only the true bilateral case (both per-row and per-col) needs the
+        # two-step outer-product scaling.
+        if output_col_scales.numel() == 1:
+            out_2d.mul_(output_row_scales * output_col_scales)
+        elif output_row_scales.numel() == 1:
+            out_2d.mul_(output_col_scales * output_row_scales)
+        else:
+            out_2d.mul_(output_row_scales)
+            out_2d.mul_(output_col_scales)
         if bias is not None:
+            assert not grad, "Row-scaled NVFP4 backward does not support fused bias gradient."
             out_2d.add_(bias.to(dtype=torch.float32))
 
         if requested_out is not None:
-            requested_out.copy_(out.to(dtype=requested_out.dtype))
+            if accumulate:
+                requested_out.add_(out.to(dtype=requested_out.dtype))
+            else:
+                requested_out.copy_(out.to(dtype=requested_out.dtype))
             out = requested_out
         elif requested_out_dtype is not None and requested_out_dtype != torch.float32:
             out = out.to(dtype=requested_out_dtype)

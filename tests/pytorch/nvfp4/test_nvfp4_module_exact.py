@@ -53,7 +53,23 @@ class GetRecipes:
         return nvfp4_recipe
 
     @staticmethod
-    def nvfp4_recipe_to_test(with_rht: bool = False, with_2d_quantization: bool = False):
+    def nvfp4_row_scaled():
+        nvfp4_recipe = recipe.NVFP4BlockScaling()
+        nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
+        nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
+        nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
+        # Emit row-scaled (per-token) NVFP4 for the forward activation. In a
+        # training Linear this also drives the row-scaled columnwise (transpose)
+        # of the activation that the wgrad GEMM consumes in the backward pass.
+        nvfp4_recipe.row_scaled_activation = True
+        return nvfp4_recipe
+
+    @staticmethod
+    def nvfp4_recipe_to_test(
+        with_rht: bool = False, with_2d_quantization: bool = False, row_scaled: bool = False
+    ):
+        if row_scaled:
+            return GetRecipes.nvfp4_row_scaled()
         if with_rht and with_2d_quantization:
             return GetRecipes.nvfp4_rht_and_2d_quantization()
         elif with_rht:
@@ -64,7 +80,9 @@ class GetRecipes:
             return GetRecipes.nvfp4_vanilla()
 
 
-def get_nvfp4_quantizer_factory(with_rht: bool = False, with_2d_quantization: bool = False):
+def get_nvfp4_quantizer_factory(
+    with_rht: bool = False, with_2d_quantization: bool = False, row_scaled: bool = False
+):
     """
     Create a quantizer factory for NVFP4 reference implementation.
 
@@ -96,7 +114,15 @@ def get_nvfp4_quantizer_factory(with_rht: bool = False, with_2d_quantization: bo
         if role is None:
             return _default_quantizer()
         if role.tensor_type == "input":
-            return _default_quantizer()
+            # Only the forward activation is row-scaled, mirroring the production
+            # wiring in quantization.py (mode == "forward" and tensor_type != "weight").
+            return quantization_ref_nvfp4.NVFP4QuantizerRef(
+                dtype=utils.Fp4Formats.E2M1,
+                quant_tile_shape=(1, 16),
+                pow_2_scales=False,
+                with_rht=with_rht,
+                row_scaled_nvfp4=row_scaled,
+            )
         if role.tensor_type == "weight":
             return quantization_ref_nvfp4.NVFP4QuantizerRef(
                 dtype=utils.Fp4Formats.E2M1,
@@ -117,6 +143,23 @@ def reset_rng_states():
     torch.cuda.manual_seed(seed)
 
 
+def assert_close_relative(name: str, native, ref, step: int, rel_tol: float) -> None:
+    """Compare two tensors by relative Frobenius-norm error.
+
+    Used for the row-scaled NVFP4 path, where native (cuBLAS + post-scale) and the
+    dequantized reference (torch matmul) share the same 4-bit quantization error but
+    differ at the kernel/impl level (accumulation order, post-scaling). The relative
+    error therefore stays small even though the absolute NVFP4 error is large.
+    """
+    if native is None or ref is None:
+        return
+    ref_f = ref.detach().float()
+    diff = (native.detach().float() - ref_f).norm().item()
+    denom = ref_f.norm().item()
+    rel = diff / denom if denom > 0 else diff
+    assert rel <= rel_tol, f"{name} relative error {rel:.5f} > {rel_tol} at step {step}"
+
+
 def check_nvfp4_module_versus_reference(
     module_class,
     in_features: int,
@@ -126,6 +169,8 @@ def check_nvfp4_module_versus_reference(
     num_steps: int = 1,
     with_rht: bool = False,
     with_2d_quantization: bool = False,
+    row_scaled: bool = False,
+    rel_tol: float = None,
 ):
     """
     Compare native NVFP4 module against reference implementation.
@@ -137,6 +182,10 @@ def check_nvfp4_module_versus_reference(
         bias: Whether to use bias
         x_dtype: Input tensor dtype
         num_steps: Number of forward/backward steps to test
+        row_scaled: Enable row-scaled (per-token) NVFP4 activation quantization,
+            exercising the row-scaled columnwise (transpose) path consumed by wgrad.
+        rel_tol: If set, compare tensors by relative Frobenius-norm error instead of
+            the default bitwise-tight ``assert_close`` (used for the row-scaled path).
     """
     device = "cuda"
     batch_size = 32
@@ -203,8 +252,8 @@ def check_nvfp4_module_versus_reference(
             ref_module.layer_norm_bias.copy_(native_module.layer_norm_bias)
 
     # Create recipes for native and reference implementations
-    nvfp4_recipe = GetRecipes.nvfp4_recipe_to_test(with_rht, with_2d_quantization)
-    nvfp4_ref_factory = get_nvfp4_quantizer_factory(with_rht, with_2d_quantization)
+    nvfp4_recipe = GetRecipes.nvfp4_recipe_to_test(with_rht, with_2d_quantization, row_scaled)
+    nvfp4_ref_factory = get_nvfp4_quantizer_factory(with_rht, with_2d_quantization, row_scaled)
     nvfp4_ref_recipe = recipe.CustomRecipe(qfactory=nvfp4_ref_factory)
 
     # Training loop comparison
@@ -278,6 +327,22 @@ def check_nvfp4_module_versus_reference(
     for step in range(num_steps):
         native_out = native_outputs[step]
         ref_out = ref_outputs[step]
+
+        if rel_tol is not None:
+            # Row-scaled path: native cuBLAS + post-scale vs dequantized torch
+            # reference share the same 4-bit error, so compare by relative norm.
+            assert_close_relative("Output", native_out["output"], ref_out["output"], step, rel_tol)
+            assert_close_relative(
+                "Input gradient", native_out["input_grad"], ref_out["input_grad"], step, rel_tol
+            )
+            assert_close_relative(
+                "Weight gradient", native_out["weight_grad"], ref_out["weight_grad"], step, rel_tol
+            )
+            if bias:
+                assert_close_relative(
+                    "Bias gradient", native_out["bias_grad"], ref_out["bias_grad"], step, rel_tol
+                )
+            continue
 
         # Compare outputs
         torch.testing.assert_close(
@@ -364,6 +429,44 @@ def test_nvfp4_linear_versus_reference(
         num_steps=num_steps,
         with_rht=with_rht,
         with_2d_quantization=with_2d_quantization,
+    )
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize(
+    "in_features, out_features",
+    [
+        (128, 256),
+        (256, 128),
+        (512, 512),
+        (768, 3072),
+    ],
+)
+@pytest.mark.parametrize("num_steps", [1, 3], ids=["single_step", "multi_step"])
+def test_nvfp4_linear_row_scaled_versus_reference(
+    in_features: int,
+    out_features: int,
+    num_steps: int,
+):
+    """End-to-end row-scaled (per-token) NVFP4 Linear forward + backward.
+
+    Exercises the row-scaled columnwise (transpose) activation quantization that
+    this PR unblocks: the forward activation is quantized row-scaled with both
+    rowwise (fprop) and columnwise (wgrad) directions, so ``backward()`` drives the
+    new transpose path through the wgrad GEMM. Compared against the dequantized
+    reference quantizer by relative norm (both share the same 4-bit error).
+    """
+    check_nvfp4_module_versus_reference(
+        module_class=te.Linear,
+        in_features=in_features,
+        out_features=out_features,
+        bias=False,
+        x_dtype=torch.bfloat16,
+        num_steps=num_steps,
+        with_rht=False,
+        with_2d_quantization=False,
+        row_scaled=True,
+        rel_tol=2e-2,
     )
 
 
