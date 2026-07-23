@@ -273,8 +273,9 @@ def build_nccl_ep_submodule() -> str:
                 env=env,
             )
         print(f"[NCCL EP] Building libnccl_ep.a (gencode='{gencode}')")
+        make_jobs = f"-j{nproc}" if nproc else "-j"
         subprocess.check_call(
-            ["make", "-j", str(nproc), "-C", "nccl_ep", "lib"],
+            ["make", make_jobs, "-C", "nccl_ep", "lib"],
             cwd=str(nccl_root),
             env=env,
         )
