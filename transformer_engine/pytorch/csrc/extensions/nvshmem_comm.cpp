@@ -41,10 +41,17 @@ int64_t cp_next_global_grad_return_epoch(const at::Tensor &epochs) {
   return ++epoch;
 }
 
+void cp_check_current_device(const at::Tensor &tensor, const char *name) {
+  NVTE_CHECK(tensor.defined() && tensor.is_cuda(), name, " must be a CUDA tensor.");
+  const int current_device = c10::cuda::current_device();
+  NVTE_CHECK(tensor.get_device() == current_device, name, " must be mapped on current CUDA device ",
+             current_device, ".");
+}
+
 at::Tensor cp_grad_return_slot(const at::Tensor &buffer, const at::Tensor &reference, int cp_size,
                                int writer_rank, const char *name) {
-  NVTE_CHECK(buffer.defined() && buffer.dim() == reference.dim() + 1, name,
-             " must have shape [CP, S, B, H, D].");
+  cp_check_current_device(buffer, name);
+  NVTE_CHECK(buffer.dim() == reference.dim() + 1, name, " must have shape [CP, S, B, H, D].");
   NVTE_CHECK(buffer.size(0) == cp_size, name, " leading dimension must equal CP size.");
   for (int dim = 0; dim < reference.dim(); ++dim) {
     NVTE_CHECK(buffer.size(dim + 1) == reference.size(dim), name,
@@ -54,8 +61,9 @@ at::Tensor cp_grad_return_slot(const at::Tensor &buffer, const at::Tensor &refer
 }
 
 at::Tensor cp_epoch_slot(const at::Tensor &epochs, int writer_rank, const char *name) {
-  NVTE_CHECK(epochs.is_cuda() && epochs.scalar_type() == torch::kInt32 && epochs.is_contiguous() &&
-                 epochs.dim() == 1 && epochs.size(0) > writer_rank,
+  cp_check_current_device(epochs, name);
+  NVTE_CHECK(epochs.scalar_type() == torch::kInt32 && epochs.is_contiguous() && epochs.dim() == 1 &&
+                 epochs.size(0) > writer_rank,
              name, " must be a contiguous CUDA int32 vector indexed by writer rank.");
   return epochs.select(0, writer_rank);
 }
@@ -194,8 +202,10 @@ std::vector<at::Tensor> nvshmem_cp_global_grad_return_execute(
     const std::vector<at::Tensor> &peer_grad_committed_epochs, int cp_size, int rank) {
   NVTE_CHECK(cp_size == 4 && rank >= 0 && rank < cp_size,
              "NVSHMEM global gradient return currently requires CP=4.");
-  NVTE_CHECK(key.is_cuda() && value.is_cuda() && dk_global.is_cuda() && dv_global.is_cuda(),
-             "NVSHMEM global gradient return requires CUDA tensors.");
+  cp_check_current_device(key, "key");
+  cp_check_current_device(value, "value");
+  cp_check_current_device(dk_global, "dk_global");
+  cp_check_current_device(dv_global, "dv_global");
   NVTE_CHECK(key.sizes() == value.sizes() && dk_global.sizes() == dv_global.sizes(),
              "K/V and global dK/dV pairs must have matching shapes.");
   NVTE_CHECK(dk_global.dim() == key.dim() && dk_global.size(0) == key.size(0) * cp_size,
