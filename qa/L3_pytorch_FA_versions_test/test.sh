@@ -25,6 +25,9 @@ pip3 install pytest==8.2.1 || error_exit "Failed to install pytest"
 # Limit parallel build jobs to avoid overwhelming system resources
 export MAX_JOBS=32
 
+# Checkpoint for FP8 delayed scaling uses pickle
+export NVTE_ALLOW_UNSAFE_PICKLE_EXTRA_STATE=1
+
 # Iterate over Flash Attention versions
 sm_arch=`python3 -c "import torch; sm = torch.cuda.get_device_capability(0); print(sm[0]*10+sm[1])"`
 export FLASH_ATTN_CUDA_ARCHS=$sm_arch
