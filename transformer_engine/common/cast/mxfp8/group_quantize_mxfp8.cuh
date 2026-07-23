@@ -574,8 +574,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
     const size_t tensor_base = current_block.tensor_base;
     size_t tensor_base_for_scales = tensor_base;
     size_t tensor_rows_for_scales = rows;
-    if constexpr (WITH_GEMM_SWIZZLED_SCALES &&
-                  SHAPE_REP == ShapeRepresentation::SAME_BOTH_DIMS) {
+    if constexpr (WITH_GEMM_SWIZZLED_SCALES && SHAPE_REP == ShapeRepresentation::SAME_BOTH_DIMS) {
       // The payload is one tall tensor, but GEMM scales are swizzled independently per member.
       // Uniform groups omit first_dims/tensor_offsets, so derive the member geometry directly.
       tensor_rows_for_scales = first_logical_dim / num_tensors;
