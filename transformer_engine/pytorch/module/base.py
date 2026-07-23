@@ -1225,21 +1225,22 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         """
         if self.primary_weights_in_fp8:
             return False
-        if not isinstance(quantizer, NVFP4Quantizer):
+        if isinstance(quantizer, MXFP8Quantizer):
             return True
-
-        rows, cols = weight.numel() // weight.shape[-1], weight.shape[-1]
-        arch_supported = get_device_compute_capability() >= (10, 0)
-        if quantizer.with_rht:
-            return arch_supported and rows % 64 == 0 and cols % 128 == 0
-        return (
-            arch_supported
-            and quantizer.with_2d_quantization
-            and not quantizer.row_scaled_nvfp4
-            and not quantizer.nvfp4_use_4over6
-            and rows % 128 == 0
-            and cols % 128 == 0
-        )
+        if isinstance(quantizer, NVFP4Quantizer):
+            rows, cols = weight.numel() // weight.shape[-1], weight.shape[-1]
+            arch_supported = get_device_compute_capability() >= (10, 0)
+            if quantizer.with_rht:
+                return arch_supported and rows % 64 == 0 and cols % 128 == 0
+            return (
+                arch_supported
+                and quantizer.with_2d_quantization
+                and not quantizer.row_scaled_nvfp4
+                and not quantizer.nvfp4_use_4over6
+                and rows % 128 == 0
+                and cols % 128 == 0
+            )
+        return False
 
     def init_fp8_meta_tensors(self, recipe: Recipe) -> None:
         """Init scales and amaxes."""
