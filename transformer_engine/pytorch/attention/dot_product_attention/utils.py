@@ -2246,8 +2246,9 @@ class ConvertTHDtoBSHD:
     """
     Convert a tensor from qkv_format = thd to qkv_format = bshd.
 
-    Thin wrapper around the `te_attention::convert_thd_to_bshd` custom op,
-    kept so that callsites can continue to use the `.apply(...)` syntax.
+    Thin wrapper around the ``te_attention::convert_thd_to_bshd`` custom op,
+    exposing an ``.apply(thd_tensor, cu_seqlens, max_seqlen)`` staticmethod so
+    callsites keep the ``autograd.Function``-style ``.apply(...)`` invocation.
     """
 
     @staticmethod
@@ -2263,8 +2264,9 @@ class ConvertBSHDtoTHD:
     """
     Convert a tensor from qkv_format = bshd to qkv_format = thd.
 
-    Thin wrapper around the `te_attention::convert_bshd_to_thd` custom op,
-    kept so that callsites can continue to use the `.apply(...)` syntax.
+    Thin wrapper around the ``te_attention::convert_bshd_to_thd`` custom op,
+    exposing an ``.apply(bshd_tensor, cu_seqlens, num_tokens)`` staticmethod so
+    callsites keep the ``autograd.Function``-style ``.apply(...)`` invocation.
     """
 
     @staticmethod
