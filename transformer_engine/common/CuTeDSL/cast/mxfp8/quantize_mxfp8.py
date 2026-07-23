@@ -34,6 +34,7 @@ import tvm_ffi
 
 from transformer_engine.common.CuTeDSL.utils import (
     _bitcast_f32_to_i32,
+    device_compute_capability,
     str_to_cutlass_dtype,
     is_packed16,
     packed16_kit,
@@ -820,11 +821,12 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
             cute.printf(f"[CuTeDSL] MXFP8QuantizeKernel.__call__() with config: {self.cfg}\n")
 
         self.override_tuneable_configs(TUNEABLE_CFGS)
+        cfg = self.cfg
         # Cast + dbias with no activation gets the larger tile (CUDA CAST_DBIAS_ONLY).
         cast_dbias_only = cfg.WITH_DBIAS and not cfg.WITH_DACT and not cfg.WITH_ACT
         # Use a different tile size for dbias only config
         # No matter what tile size we use, each thread always handles a (1, MXFP8_BLOCK_SCALING_SIZE) chunk
-        if cast_dbias_only:
+        if cutlass.const_expr(cast_dbias_only):
             self._NUM_TILES = self._NUM_TILES_DBIAS_ONLY  # Each CTA handles 4 tiles stacked vertically
             self._THREADS_PER_CTA = self._THREADS_PER_CTA_DBIAS_ONLY
         else:
@@ -835,10 +837,8 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
         self._TILE_ROWS = MXFP8_BLOCK_SCALING_SIZE
         self._NUM_WARPS = self._THREADS_PER_CTA // 32
 
-
         M = mX.shape[0]
         N = mX.shape[1]
-        cfg = self.cfg
         max_norm_rcp = cfg.MAX_NORM_RCP
 
         # The FFI boundary carries native FP8/E8M0 dtypes; the kernel works on bytes.
@@ -962,9 +962,12 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
     ):
         """Device entry: no-op the CTA when the noop flag is set, else run the quantize main loop."""
         cfg = self.cfg
-        # If WITH_NOOP is True and no ACT / DACT fusion is involved, the kernel becomes a no-op
-        noop = cfg.WITH_NOOP and not cfg.WITH_ACT and not cfg.WITH_DACT
-        if not cutlass.const_expr(noop) or mNoop[0] != Float32(1.0):
+        # Only check the noop flag when WITH_NOOP is True (the noop tensor is passed and it's not nullptr)
+        # and both WITH_ACT and WITH_DACT are False (it's legitimate to skip the quantization because no fusion is involved)
+        CHECK_NOOP_FLAG: cutlass.const_expr = cfg.WITH_NOOP and not cfg.WITH_ACT and not cfg.WITH_DACT
+        # Only perform the runtime check to read the noop flag's value when the compiled kernel allows us to do so
+        skip_execution = cutlass.const_expr(CHECK_NOOP_FLAG) and mNoop[0] == Float32(1.0)
+        if not skip_execution:
             self._kernel_main(
                 mX,
                 mS_row,
@@ -2244,9 +2247,9 @@ def get_kernel_class(cfg):
         and not cfg.WITH_DBIAS
         and not cfg.WITH_DACT
         and not cfg.WITH_ACT
-        and not cfg.WITH_NOOP
     )
     # Only dispatch to the specialized kernels for packed16 types (bf16/fp16)
+    # TODO(kainingz): should specialized kernel consider WITH_NOOP? CUDA C++ kernel seems to ignore it completely.
     if plain_cast_only and is_packed16(cfg.DTYPE):
         if cfg.ROWWISE and not cfg.COLWISE:
             return MXFP8QuantizeSpecializedRowwiseKernel
@@ -2405,6 +2408,16 @@ def get_mxfp8_quantization_function(
     # Already registered (e.g. by a prior call) -> supported.
     if tvm_ffi.get_global_func(fn_name, allow_missing=True) is not None:
         return True
+
+    major, minor = device_compute_capability()
+    if major < 10:
+        logger.warning(
+            "CuTeDSL MXFP8 backend requires compute capability >= 10.0 (Blackwell), "
+            "but detected %d.%d; falling back to the CUDA C++ kernel.",
+            major,
+            minor,
+        )
+        return False
 
     try:
         cfg = MXFP8QuantizeConfig(
