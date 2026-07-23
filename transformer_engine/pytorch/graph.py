@@ -806,6 +806,7 @@ def _make_graphed_callables(
                             torch.empty_like(o) if o is not None and o.requires_grad else None
                             for o in static_outputs
                         )
+                    grad_inputs: Tuple[Optional[torch.Tensor], ...] = ()
                     if is_training:
                         _run_capture_time_hooks(
                             capture_time_hooks,
@@ -917,6 +918,7 @@ def _make_graphed_callables(
                 torch.empty_like(o) if o is not None and o.requires_grad else None
                 for o in static_outputs
             )
+            grad_inputs: Tuple[Optional[torch.Tensor], ...] = ()
             if is_training:
                 _run_capture_time_hooks(
                     capture_time_hooks,
