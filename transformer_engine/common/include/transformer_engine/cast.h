@@ -161,10 +161,12 @@ void nvte_quantize_dbias(const NVTETensor input, NVTETensor output, NVTETensor d
  *  \param[in,out] output           Output grouped FP8/MXFP8 tensor.
  *  \param[out]    dbias            Result of the reduction of the input along columns.
  *  \param[out]    workspace        Workspace tensor.
+ *  \param[in]     quant_config     Quantization configuration.
  *  \param[in]     stream           CUDA stream used for the operation.
  */
 void nvte_group_quantize_dbias(const NVTEGroupedTensor input, NVTEGroupedTensor output,
-                               NVTEGroupedTensor dbias, NVTETensor workspace, cudaStream_t stream);
+                               NVTEGroupedTensor dbias, NVTETensor workspace,
+                               const NVTEQuantizationConfig quant_config, cudaStream_t stream);
 
 /*! \brief Computes backward of GeLU operation on the input, then casts to FP8/MXFP8.
  *         Additionally, reduces the result of the GeLU backward along columns.
