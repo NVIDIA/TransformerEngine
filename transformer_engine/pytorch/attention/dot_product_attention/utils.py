@@ -5,6 +5,7 @@
 """
 Utils/Helper classes and methods for attention
 """
+
 import math
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -324,6 +325,59 @@ class AttentionParams:
         return True
 
 
+class _NoOpLogger:
+    """
+    Stand-in for the "DotProductAttention" logger used when get_attention_backend
+    is traced by torch.compile. logging.Logger methods are not traceable by dynamo
+    (they cause graph breaks), while this class's no-op methods are inlined away.
+    """
+
+    def debug(self, *args, **kwargs):
+        """No-op."""
+
+    def info(self, *args, **kwargs):
+        """No-op."""
+
+    def warning(self, *args, **kwargs):
+        """No-op."""
+
+    def error(self, *args, **kwargs):
+        """No-op."""
+
+
+_no_op_logger = _NoOpLogger()
+
+
+@torch.compiler.assume_constant_result
+def _get_fused_attn_backend(
+    is_training,
+    q_type,
+    kv_type,
+    qkv_layout,
+    bias_type,
+    attn_mask_type,
+    softmax_type,
+    *args,
+):
+    """Constant-foldable tex.get_fused_attn_backend: the result depends only on
+    the attention config, and the python-side enum keeps it traceable by
+    torch.compile (see the FusedAttnBackend docstring). Layout/bias/mask/softmax
+    are taken as their string keys and resolved to the pybind enums here, so
+    that every argument is a python literal or a python enum."""
+    return FusedAttnBackend.cast(
+        tex.get_fused_attn_backend(
+            is_training,
+            q_type,
+            kv_type,
+            QKVLayout[qkv_layout],
+            AttnBiasType[bias_type],
+            AttnMaskType[attn_mask_type],
+            SoftmaxType[softmax_type],
+            *args,
+        )
+    )
+
+
 def get_attention_backend(
     attention_params: AttentionParams = None,
 ):
@@ -340,7 +394,7 @@ def get_attention_backend(
         Whether the `FlashAttention` backend has been selected.
     use_fused_attention : bool
         Whether the `FusedAttention` backend has been selected.
-    fused_attention_backend : tex.NVTE_Fused_Attn_Backend
+    fused_attention_backend : FusedAttnBackend
         If `use_fused_attention = True`, one of `FusedAttention` three sub-backends, else `None`.
     use_unfused_attention : bool
         Whether the `UnfusedDotProductAttention` backend has been selected.
@@ -387,17 +441,29 @@ def get_attention_backend(
     has_score_mod = attention_params.has_score_mod
     has_score_mod_bprop = attention_params.has_score_mod_bprop
 
+    # NOTE: environment variables in this function are read with
+    # os.environ.get, NOT os.getenv, on purpose: dynamo installs guards on
+    # os.environ reads (so changing an NVTE_* variable triggers recompilation
+    # under torch.compile), while os.getenv reads are unguarded and would bake
+    # stale values into compiled graphs. New code must follow suit.
+
     # Run config
-    logger = logging.getLogger("DotProductAttention")
-    logger.setLevel(AttentionLogging._log_level)
-    if not logger.hasHandlers():
-        logger.addHandler(AttentionLogging._stream_handler)
+    if torch.compiler.is_compiling():
+        # logging.Logger methods graph-break under torch.compile; backend
+        # selection logs are only emitted in eager mode.
+        logger = _no_op_logger
+    else:
+        logger = logging.getLogger("DotProductAttention")
+        logger.setLevel(AttentionLogging._log_level)
+        if not logger.hasHandlers():
+            logger.addHandler(AttentionLogging._stream_handler)
     device_compute_capability = get_device_compute_capability()
     cudnn_version = get_cudnn_version()
     run_config = {
         "transformer_engine_version": te.__version__,
-        "compute_capability": "sm"
-        + str(10 * device_compute_capability[0] + device_compute_capability[1]),
+        "compute_capability": (
+            "sm" + str(10 * device_compute_capability[0] + device_compute_capability[1])
+        ),
         "cuda_version": torch.version.cuda,
         "flash_attn_version": (
             str(FlashAttentionUtils.version)
@@ -423,27 +489,27 @@ def get_attention_backend(
     # Add FP8 environment variables to config
     if fp8:
         # all FP8 recipes: 1: (FP8 fwd, FP8 bwd), 0: (FP8 fwd, F16 bwd)
-        run_config["NVTE_FP8_DPA_BWD"] = int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
+        run_config["NVTE_FP8_DPA_BWD"] = int(os.environ.get("NVTE_FP8_DPA_BWD", "1"))
         # Float8CurrentScaling: 1: use F16 O in bwd, 0: use FP8 O in bwd
-        run_config["NVTE_DPA_FP8CS_O_in_F16"] = int(os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1"))
+        run_config["NVTE_DPA_FP8CS_O_in_F16"] = int(os.environ.get("NVTE_DPA_FP8CS_O_in_F16", "1"))
         # switch recipe to "F16", "DelayedScaling", or "Float8CurrentScaling"
-        _dpa_fp8_recipe = os.getenv("NVTE_DPA_FP8_RECIPE", "")
+        _dpa_fp8_recipe = os.environ.get("NVTE_DPA_FP8_RECIPE", "")
         run_config["NVTE_DPA_FP8_RECIPE"] = _dpa_fp8_recipe
         if _dpa_fp8_recipe != "":
             # config new recipe if switched
-            run_config["NVTE_DPA_FP8_FORMAT"] = os.getenv("NVTE_DPA_FP8_FORMAT", "HYBRID")
-            run_config["NVTE_DPA_FP8DS_AMAX_ALGO"] = os.getenv(
+            run_config["NVTE_DPA_FP8_FORMAT"] = os.environ.get("NVTE_DPA_FP8_FORMAT", "HYBRID")
+            run_config["NVTE_DPA_FP8DS_AMAX_ALGO"] = os.environ.get(
                 "NVTE_DPA_FP8DS_AMAX_ALGO", "most_recent"
             )
             run_config["NVTE_DPA_FP8DS_AMAX_HISTLEN"] = int(
-                os.getenv("NVTE_DPA_FP8DS_AMAX_HISTLEN", "1")
+                os.environ.get("NVTE_DPA_FP8DS_AMAX_HISTLEN", "1")
             )
             run_config["NVTE_DPA_FP8DS_REDUCE_AMAX"] = int(
-                os.getenv("NVTE_DPA_FP8DS_REDUCE_AMAX", "1")
+                os.environ.get("NVTE_DPA_FP8DS_REDUCE_AMAX", "1")
             )
         # UnfusedDotProductAttention: 1: allow FP8 emulation, 0: do not allow
         run_config["NVTE_UnfusedDPA_Emulate_FP8"] = int(
-            os.getenv("NVTE_UnfusedDPA_Emulate_FP8", "0")
+            os.environ.get("NVTE_UnfusedDPA_Emulate_FP8", "0")
         )
     logger.debug("Running with config=%s", run_config)
 
@@ -454,13 +520,13 @@ def get_attention_backend(
     qkv_format, q_format, kv_format = get_qkv_format(qkv_layout, inference_params)
 
     # Filter: Environment variables
-    use_flash_attention = int(os.getenv("NVTE_FLASH_ATTN", "1"))
-    use_flash_attention_2 = use_flash_attention and int(os.getenv("NVTE_FLASH_ATTN_V2", "1"))
-    use_flash_attention_3 = use_flash_attention and int(os.getenv("NVTE_FLASH_ATTN_V3", "1"))
-    use_flash_attention_4 = use_flash_attention and int(os.getenv("NVTE_FLASH_ATTN_V4", "1"))
+    use_flash_attention = int(os.environ.get("NVTE_FLASH_ATTN", "1"))
+    use_flash_attention_2 = use_flash_attention and int(os.environ.get("NVTE_FLASH_ATTN_V2", "1"))
+    use_flash_attention_3 = use_flash_attention and int(os.environ.get("NVTE_FLASH_ATTN_V3", "1"))
+    use_flash_attention_4 = use_flash_attention and int(os.environ.get("NVTE_FLASH_ATTN_V4", "1"))
     flash_attention_backend = None
-    use_fused_attention = int(os.getenv("NVTE_FUSED_ATTN", "1"))
-    use_unfused_attention = int(os.getenv("NVTE_UNFUSED_ATTN", "1"))
+    use_fused_attention = int(os.environ.get("NVTE_FUSED_ATTN", "1"))
+    use_unfused_attention = int(os.environ.get("NVTE_UNFUSED_ATTN", "1"))
     if not use_flash_attention_2 and FlashAttentionUtils.is_installed:
         logger.debug("Disabling FlashAttention 2 due to NVTE_FLASH_ATTN=0 or NVTE_FLASH_ATTN_V2=0")
     if not use_flash_attention_3 and FlashAttentionUtils.v3_is_installed:
@@ -585,7 +651,8 @@ def get_attention_backend(
             use_flash_attention_3 = False
         if use_unfused_attention:
             allow_emulation = (
-                os.getenv("NVTE_UnfusedDPA_Emulate_FP8", "0") == "1" or is_in_onnx_export_mode()
+                os.environ.get("NVTE_UnfusedDPA_Emulate_FP8", "0") == "1"
+                or is_in_onnx_export_mode()
             )
             if not allow_emulation:
                 logger.debug("Disabling UnfusedDotProductAttention for FP8 attention")
@@ -1363,14 +1430,17 @@ def get_attention_backend(
         if fp8 and fp8_meta["recipe"].fp8_dpa:
             q_type = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             kv_type = q_type
-        fused_attention_backend = tex.get_fused_attn_backend(
+        # NOTE: under torch.compile the numeric args below must not be symbolic
+        # (assume_constant_result requires concrete values); ints/floats made
+        # dynamic by automatic dynamic currently graph break here.
+        fused_attention_backend = _get_fused_attn_backend(
             is_training,
             q_type,
             kv_type,
-            QKVLayout[qkv_layout],
-            AttnBiasType[fu_core_attention_bias_type],
-            AttnMaskType[attn_mask_type],
-            SoftmaxType[softmax_type],
+            qkv_layout,
+            fu_core_attention_bias_type,
+            attn_mask_type,
+            softmax_type,
             attention_dropout,
             num_heads,
             num_gqa_groups,
