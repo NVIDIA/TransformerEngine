@@ -2809,8 +2809,8 @@ def combine_and_quantize(
 ):
     """Combine Q, K, V tensors based on qkv_layout and quantize them together.
 
-    When ``combined_qkv`` (for ``3`` layouts such as ``bs3hd``) or ``combined_kv``
-    (for ``2`` layouts such as ``bshd_bs2hd``) is provided, it must be the
+    When ``combined_qkv`` (for ``qkv_group=1`` layouts such as ``bs3hd``) or
+    ``combined_kv`` (for ``qkv_group=2`` layouts such as ``bshd_bs2hd``) is provided, it must be the
     caller's original packed buffer that q/k/v are views of. It is then quantized
     directly instead of re-deriving the packed buffer from the q/k/v views via
     ``combine_tensors`` (which rebuilds it with a raw ``set_`` under a silent

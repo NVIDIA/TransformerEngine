@@ -1221,12 +1221,15 @@ class DotProductAttention(TransformerEngineBaseModule):
 
         Parameters
         ----------
-        query_layer : torch.Tensor
-                     Query tensor.
-        key_layer : torch.Tensor
-                   Key tensor.
-        value_layer : torch.Tensor
-                     Value tensor.
+        query_layer : Optional[torch.Tensor], default = None
+                     Query tensor. Required unless a packed input (``qkv_layer``, or
+                     ``kv_layer`` together with ``query_layer``) is provided instead.
+        key_layer : Optional[torch.Tensor], default = None
+                   Key tensor. Required unless a packed input (``qkv_layer`` or ``kv_layer``)
+                   is provided instead.
+        value_layer : Optional[torch.Tensor], default = None
+                     Value tensor. Required unless a packed input (``qkv_layer`` or ``kv_layer``)
+                     is provided instead.
         attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]],
              default = None. Boolean tensor(s) used to mask out attention softmax input.
              It should be ``None`` for causal masks and ``"no_mask"``. For padding masks, it should be
