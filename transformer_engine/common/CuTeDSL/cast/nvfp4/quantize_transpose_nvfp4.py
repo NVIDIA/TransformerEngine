@@ -78,7 +78,8 @@ class NVFP4QuantizeTransposeTuned1DKernel:
     ):
         if cutlass.const_expr(CUTEDSL_DEBUG_LOGGING):
             cute.printf(
-                f"[CuTeDSL] NVFP4QuantizeTransposeTuned1DKernel.__call__() with config: {self.cfg}\n"
+                "[CuTeDSL] NVFP4QuantizeTransposeTuned1DKernel.__call__() with config:"
+                f" {self.cfg}\n"
             )
 
         # todo: set up input/output TMA atoms, compute grid/block, and launch self.kernel(...).
@@ -122,9 +123,7 @@ def compile_cutedsl_function_from_cfg(cfg):
             assumed_align=align,
         )
 
-
     in_fake = _gmem(cutlass.BFloat16, (sym_M, sym_N), stride_order=(1, 0), align=16)
-
 
     out_row_fake = _gmem(Float4E2M1FN, (sym_M, sym_N), stride_order=(1, 0), align=16)
     scale_row_fake = _gmem(Uint8, scale_row_shape, stride_order=(1, 0), align=4)
@@ -159,9 +158,7 @@ def compile_cutedsl_function_from_cfg(cfg):
     # pointer is supplied by the C++ dispatcher at launch time.
     # NOTE: verify against the installed cutlass -- if it exposes a dedicated
     # `cute.runtime.make_fake_ptr`, prefer that over make_ptr(..., 0, ...).
-    noop_fake = cute.runtime.nullptr(
-        Float32, mem_space=cute.AddressSpace.gmem, assumed_align=4
-    )
+    noop_fake = cute.runtime.nullptr(Float32, mem_space=cute.AddressSpace.gmem, assumed_align=4)
 
     # mRngState: Philox {seed, offset}; present (and consumed) only for stochastic rounding.
     rng_state_fake = (
