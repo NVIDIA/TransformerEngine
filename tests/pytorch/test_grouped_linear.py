@@ -1635,6 +1635,7 @@ def test_single_grouped_weight_mxfp8_workspace_cache(monkeypatch):
     with autocast(enabled=True, recipe=mxfp8_recipe):
         grouped_linear(x, m_splits, is_first_microbatch=True)
         workspace = grouped_linear._fp8_workspaces["weight"]
+        assert isinstance(workspace, GroupedTensor)
         pointers = (
             workspace.rowwise_data.data_ptr(),
             workspace.columnwise_data.data_ptr(),
@@ -2217,7 +2218,15 @@ def test_grouped_linear_returns_single_grouped_bias_parameter(monkeypatch):
         .unsqueeze(-1)
         .expand(num_gemms, out_features)
     )
-    torch.testing.assert_close(grouped_linear.bias.grad.float(), expected_dbias.float())
+    assert grouped_linear.bias.grad is not None
+    # repeat_interleave backward and the standalone sums above use different BF16 reduction
+    # orders, so compare the independently derived result with BF16-appropriate tolerance.
+    torch.testing.assert_close(
+        grouped_linear.bias.grad.float(),
+        expected_dbias.float(),
+        rtol=1e-2,
+        atol=5e-3,
+    )
 
 
 @pytest.mark.parametrize("use_fused_path", [False, True], ids=["legacy", "grouped_tensor"])

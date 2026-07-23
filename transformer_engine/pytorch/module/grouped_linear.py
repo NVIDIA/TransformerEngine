@@ -301,12 +301,19 @@ class _GroupedLinear(torch.autograd.Function):
             source = weight.rowwise_data.view(weight.logical_shape)
             update_workspace = is_first_microbatch is None or is_first_microbatch
             if workspace is None:
+                if cache_weight:
+                    # Match quantize_weight(): persistent workspaces must be Tensor subclasses
+                    # so autograd can save them without decomposing their storage metadata.
+                    saved_internal = weight_quantizer.internal
+                    weight_quantizer.internal = False
                 grouped_weight = tex.group_quantize(
                     source,
                     weight_quantizer,
                     num_gemms,
                     None,
                 )
+                if cache_weight:
+                    weight_quantizer.internal = saved_internal
             elif skip_fp8_weight_update is not None:
                 grouped_weight = tex.group_quantize(
                     source,
@@ -738,12 +745,23 @@ class _GroupedLinear(torch.autograd.Function):
             input_quantizers=input_quantizers,
             output_quantizers=output_quantizers,
         )
-        if grouped_gemm_backend == "grouped_tensor" and not use_grouped_tensor_path:
+        if (
+            grouped_gemm_backend == "grouped_tensor"
+            and not use_grouped_tensor_path
+            and (single_grouped_weight or single_grouped_bias)
+        ):
             raise RuntimeError(
-                "The grouped_tensor backend is not supported by the active device, cuBLASLt "
-                "version, quantization recipe, or GroupedLinear feature configuration."
+                "The active device, cuBLASLt version, quantization recipe, or GroupedLinear "
+                "feature configuration does not support the grouped_tensor backend. Legacy "
+                "fallback is unavailable for single grouped parameters; use discrete parameters "
+                "or a supported grouped_tensor configuration."
             )
         if use_grouped_tensor_path:
+            if m_splits.device.type != "cuda":
+                raise ValueError(
+                    "The native grouped_tensor path requires CUDA m_splits. Pass a CUDA int64 "
+                    "tensor, or select grouped_gemm_backend='legacy'."
+                )
             return _GroupedLinear._forward_grouped_tensor(
                 ctx,
                 inp=inp,
@@ -2076,19 +2094,10 @@ class GroupedLinear(TransformerEngineBaseModule):
                 "discrete parameters."
             )
         if not isinstance(m_splits, torch.Tensor):
-            if self.grouped_gemm_backend == "grouped_tensor":
-                raise TypeError(
-                    "grouped_gemm_backend='grouped_tensor' requires m_splits to be a CUDA tensor."
-                )
             # Convert list of ints to tensor for backward compatibility
             m_splits = torch.tensor(m_splits, dtype=torch.int64, device="cpu")
         elif m_splits.dtype != torch.int64:
             m_splits = m_splits.to(dtype=torch.int64)
-        if self.grouped_gemm_backend == "grouped_tensor" and m_splits.device.type != "cuda":
-            raise ValueError(
-                "grouped_gemm_backend='grouped_tensor' requires CUDA m_splits; CPU m_splits "
-                "would force the legacy per-expert path."
-            )
         if m_splits.size() != (num_gemms,):
             raise ValueError(
                 f"Shape of splits tensor ({tuple(m_splits.size())}) "
