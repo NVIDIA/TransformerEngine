@@ -387,14 +387,21 @@ class _ScaledGLU(BasicOperation):
         self.glu_interleave_size: Optional[int] = glu_interleave_size
         self.activation_recompute_in_mlp: bool = activation_recompute_in_mlp
 
-    def _glu_forward(self, swiglu_in: torch.Tensor) -> torch.Tensor:
+    def _scaled_glu_forward(
+        self,
+        input_: torch.Tensor,
+        scales: torch.Tensor,
+    ) -> torch.Tensor:
         raise NotImplementedError
 
-    def _glu_backward(
+    def _scaled_glu_backward(
         self,
-        grad_swiglu_out: torch.Tensor,
-        swiglu_in: torch.Tensor,
-    ) -> torch.Tensor:
+        grad_output: torch.Tensor,
+        input_: torch.Tensor,
+        scales: torch.Tensor,
+        *,
+        compute_scale_grad: bool,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         raise NotImplementedError
 
     def op_forward(self, *args, **kwargs) -> None:
@@ -442,22 +449,7 @@ class _ScaledGLU(BasicOperation):
         # Make sure inputs are in correct dtype
         input_ = maybe_dequantize(input_, dtype)
         scales = maybe_dequantize(extra_input, dtype)
-
-        # Remove gate interleaving if needed
-        swiglu_in = input_
-        if self.glu_interleave_size is not None:
-            shape = swiglu_in.size()
-            swiglu_in = swiglu_in.reshape(
-                -1,
-                shape[-1] // (2 * self.glu_interleave_size),
-                2,
-                self.glu_interleave_size,
-            )
-            swiglu_in = swiglu_in.transpose(1, 2).contiguous()
-            swiglu_in = swiglu_in.view(shape)
-
-        swiglu_out = self._glu_forward(swiglu_in)
-        out = swiglu_out * scales.unsqueeze(-1)
+        out = self._scaled_glu_forward(input_, scales)
 
         # Save state for backward pass
         ctx = basic_op_ctxs[0]
@@ -469,7 +461,7 @@ class _ScaledGLU(BasicOperation):
             ctx.dtype = dtype
             ctx.save_for_backward(
                 input_,
-                scales if ctx.input_requires_grad else None,
+                scales if ctx.input_requires_grad or ctx.extra_input_requires_grad else None,
             )
 
         return out, [()]
@@ -498,41 +490,14 @@ class _ScaledGLU(BasicOperation):
             scales = maybe_dequantize(scales, ctx.dtype)
         grad_output = maybe_dequantize(grad_output, ctx.dtype)
 
-        # Remove gate interleaving if needed
-        swiglu_in = input_
-        if self.glu_interleave_size is not None:
-            shape = swiglu_in.size()
-            swiglu_in = swiglu_in.reshape(
-                -1,
-                shape[-1] // (2 * self.glu_interleave_size),
-                2,
-                self.glu_interleave_size,
-            )
-            swiglu_in = swiglu_in.transpose(1, 2).contiguous()
-            swiglu_in = swiglu_in.view(shape)
-
-        # Compute input grad
-        grad_input = None
-        if ctx.input_requires_grad:
-            grad_swiglu_out = grad_output * scales.unsqueeze(-1)
-            grad_swiglu_in = self._glu_backward(grad_swiglu_out, swiglu_in)
-            grad_input = grad_swiglu_in
-            if self.glu_interleave_size is not None:
-                shape = grad_input.size()
-                grad_input = grad_input.reshape(
-                    -1,
-                    2,
-                    shape[-1] // (2 * self.glu_interleave_size),
-                    self.glu_interleave_size,
-                )
-                grad_input = grad_input.transpose(1, 2).contiguous()
-                grad_input = grad_input.view(shape)
-
-        # Compute scales grad by recomputing GLU
-        grad_extra_input = None
-        if ctx.extra_input_requires_grad:
-            swiglu_out = self._glu_forward(swiglu_in)
-            grad_extra_input = torch.linalg.vecdot(swiglu_out, grad_output)
+        grad_input, grad_extra_input = self._scaled_glu_backward(
+            grad_output,
+            input_,
+            scales,
+            compute_scale_grad=ctx.extra_input_requires_grad,
+        )
+        if not ctx.input_requires_grad:
+            grad_input = None
 
         # Clear input tensor if possible
         clear_tensor_data(ctx.saved_tensors[0])  # input_
@@ -558,15 +523,34 @@ class ScaledSwiGLU(_ScaledGLU):
 
     """
 
-    def _glu_forward(self, swiglu_in: torch.Tensor) -> torch.Tensor:
-        return tex.swiglu(swiglu_in, None)
-
-    def _glu_backward(
+    def _scaled_glu_forward(
         self,
-        grad_swiglu_out: torch.Tensor,
-        swiglu_in: torch.Tensor,
+        input_: torch.Tensor,
+        scales: torch.Tensor,
     ) -> torch.Tensor:
-        return tex.dswiglu(grad_swiglu_out, swiglu_in, None)
+        return tex.scaled_swiglu(
+            input_,
+            scales,
+            None,
+            int(self.glu_interleave_size or 0),
+        )
+
+    def _scaled_glu_backward(
+        self,
+        grad_output: torch.Tensor,
+        input_: torch.Tensor,
+        scales: torch.Tensor,
+        *,
+        compute_scale_grad: bool,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        return tex.scaled_dswiglu(
+            grad_output,
+            input_,
+            scales,
+            None,
+            int(self.glu_interleave_size or 0),
+            compute_scale_grad,
+        )
 
 
 class ScaledClampedQGeGLU(_ScaledGLU):
@@ -614,16 +598,39 @@ class ScaledClampedQGeGLU(_ScaledGLU):
             glu_linear_offset=glu_linear_offset,
         )
 
-    def _glu_forward(self, swiglu_in: torch.Tensor) -> torch.Tensor:
-        return self._clamped._tex_clamped_swiglu_forward(swiglu_in, None)
-
-    def _glu_backward(
+    def _scaled_glu_forward(
         self,
-        grad_swiglu_out: torch.Tensor,
-        swiglu_in: torch.Tensor,
+        input_: torch.Tensor,
+        scales: torch.Tensor,
     ) -> torch.Tensor:
-        return self._clamped._tex_clamped_dswiglu(
-            grad_swiglu_out,
-            swiglu_in,
+        clamped = self._clamped
+        return tex.scaled_clamped_swiglu(
+            input_,
+            scales,
             None,
+            clamped.limit,
+            clamped.alpha,
+            clamped.glu_linear_offset,
+            int(self.glu_interleave_size or 0),
+        )
+
+    def _scaled_glu_backward(
+        self,
+        grad_output: torch.Tensor,
+        input_: torch.Tensor,
+        scales: torch.Tensor,
+        *,
+        compute_scale_grad: bool,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        clamped = self._clamped
+        return tex.scaled_clamped_dswiglu(
+            grad_output,
+            input_,
+            scales,
+            None,
+            clamped.limit,
+            clamped.alpha,
+            clamped.glu_linear_offset,
+            int(self.glu_interleave_size or 0),
+            compute_scale_grad,
         )

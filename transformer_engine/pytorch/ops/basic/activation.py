@@ -358,16 +358,23 @@ class _ScaledUnary(BasicOperation, metaclass=abc.ABCMeta):
         self.activation_recompute_in_mlp: bool = activation_recompute_in_mlp
 
     @abc.abstractmethod
-    def _unary_forward(self, input_: torch.Tensor) -> torch.Tensor:
-        """Apply the unary activation."""
+    def _scaled_unary_forward(
+        self,
+        input_: torch.Tensor,
+        scales: torch.Tensor,
+    ) -> torch.Tensor:
+        """Apply the scaled unary activation."""
 
     @abc.abstractmethod
-    def _unary_backward(
+    def _scaled_unary_backward(
         self,
         grad_output: torch.Tensor,
         input_: torch.Tensor,
-    ) -> torch.Tensor:
-        """Apply the unary activation backward pass."""
+        scales: torch.Tensor,
+        *,
+        compute_scale_grad: bool,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Apply the scaled unary activation backward pass."""
 
     def op_forward(self, *args, **kwargs) -> None:
         raise RuntimeError(
@@ -412,7 +419,7 @@ class _ScaledUnary(BasicOperation, metaclass=abc.ABCMeta):
 
         x = maybe_dequantize(input_.contiguous(), dtype)
         scales = maybe_dequantize(extra_input, dtype)
-        y = self._unary_forward(x) * scales.unsqueeze(-1)
+        y = self._scaled_unary_forward(x, scales)
 
         ctx = basic_op_ctxs[0]
         if ctx.requires_grad:
@@ -450,15 +457,14 @@ class _ScaledUnary(BasicOperation, metaclass=abc.ABCMeta):
         scales = maybe_dequantize(scales, ctx.dtype)
         grad_output = maybe_dequantize(grad_output.contiguous(), ctx.dtype)
 
-        grad_input = None
-        if ctx.input_requires_grad:
-            grad_unary_out = grad_output * scales.unsqueeze(-1)
-            grad_input = self._unary_backward(grad_unary_out, x)
-
-        grad_extra_input = None
-        if ctx.extra_input_requires_grad:
-            unary_out = self._unary_forward(x)
-            grad_extra_input = torch.linalg.vecdot(unary_out, grad_output)
+        grad_input, grad_extra_input = self._scaled_unary_backward(
+            grad_output,
+            x,
+            scales,
+            compute_scale_grad=ctx.extra_input_requires_grad,
+        )
+        if not ctx.input_requires_grad:
+            grad_input = None
 
         clear_tensor_data(ctx.saved_tensors[0])
 
@@ -478,16 +484,28 @@ class ScaledSReLU(_ScaledUnary):
         during backward when supported instead of saving them.
     """
 
-    def _unary_forward(self, input_: torch.Tensor) -> torch.Tensor:
-        return tex.srelu(input_, None)
+    def _scaled_unary_forward(
+        self,
+        input_: torch.Tensor,
+        scales: torch.Tensor,
+    ) -> torch.Tensor:
+        return tex.scaled_srelu(input_, scales, None)
 
-    def _unary_backward(
+    def _scaled_unary_backward(
         self,
         grad_output: torch.Tensor,
         input_: torch.Tensor,
-    ) -> torch.Tensor:
-        return tex.dsrelu(grad_output, input_, None)
-
+        scales: torch.Tensor,
+        *,
+        compute_scale_grad: bool,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        return tex.scaled_dsrelu(
+            grad_output,
+            input_,
+            scales,
+            None,
+            compute_scale_grad,
+        )
 
 class SReGLU(_ActivationOperation):
     r"""Squared Rectified Gated Linear Unit

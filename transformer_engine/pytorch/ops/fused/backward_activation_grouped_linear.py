@@ -96,14 +96,23 @@ class BackwardScaledActivationGroupedLinear(FusedOperation):
         *,
         basic_op_grad_extra_outputs: list[tuple[torch.Tensor, ...]],
     ) -> tuple[
-        torch.Tensor,
+        Optional[torch.Tensor],
         Iterable[Iterable[Optional[torch.Tensor]]],
         Iterable[Iterable[Optional[torch.Tensor]]],
     ]:
-        del basic_op_grad_extra_outputs
         linear = self.basic_ops[0]
         activation = self.basic_ops[1]
         linear_ctx, activation_ctx = basic_op_ctxs
+
+        if not linear_ctx.requires_grad:
+            _, _, act_grad_extra_inputs = activation.fuser_backward(
+                [activation_ctx],
+                grad_output,
+                basic_op_grad_extra_outputs=[basic_op_grad_extra_outputs[1]],
+            )
+            return None, [(), ()], [(), act_grad_extra_inputs[0]]
+
+        del basic_op_grad_extra_outputs
         input_, scales = activation_ctx.saved_tensors
         input_ = maybe_dequantize(input_, activation_ctx.dtype)
         scales = maybe_dequantize(scales, activation_ctx.dtype)
