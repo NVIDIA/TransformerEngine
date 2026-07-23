@@ -46,6 +46,12 @@ from ..distributed import (
     is_fp8_activation_recompute_enabled,
     in_fp8_activation_recompute_phase,
 )
+from ..distributed_weight import (
+    is_distributed_weight,
+    materialize_weight_for_forward,
+    materialize_weight_for_backward,
+    finalize_weight_grads,
+)
 from ..cpp_extensions import (
     general_grouped_gemm,
     general_grouped_gemm_for_grouped_tensor,
@@ -55,7 +61,13 @@ from ..jit import no_torch_dynamo
 from ..cpu_offload import is_cpu_offload_enabled, mark_not_offload, start_offload
 from ..triton.grouped_dbias_dscales import compute_grouped_dbias
 
-from ..tensor import Float8CurrentScalingQuantizer, Float8Quantizer, MXFP8Quantizer, NVFP4Quantizer
+from ..tensor import (
+    Float8BlockQuantizer,
+    Float8CurrentScalingQuantizer,
+    Float8Quantizer,
+    MXFP8Quantizer,
+    NVFP4Quantizer,
+)
 from ..quantized_tensor import (
     QuantizedTensorStorage,
     Quantizer,
@@ -103,11 +115,15 @@ class _GroupedLinear(torch.autograd.Function):
         and be incompatible with CUDA Graphs.
 
         Supported Compute Capability (CC) and precisions:
-        * Hopper (CC 9.0): BF16/FP16 and FP8 per-tensor current scaling.
+        * Hopper (CC 9.0): BF16/FP16, FP8 per-tensor current scaling, and FP8
+          block scaling (1D/2D, including power-of-2 scales).
         * Blackwell (CC 10.x and 11.0): BF16/FP16/MXFP8/NVFP4 with RHT and FP8
           per-tensor current scaling.
-        FP8 delayed scaling and FP8 block scaling are not supported because the
-        corresponding grouped quantization kernels are missing.
+        FP8 delayed scaling is not supported because the corresponding grouped
+        quantization kernels are missing. FP8 block scaling on Blackwell (SM100 and
+        SM110) raises instead of falling back: the fused path is Hopper-only and has
+        no MXFP8-broadcast emulation. Architectures outside the fused-path window
+        (e.g. SM120) fall back to the legacy path like every other recipe.
         Grouped GEMM requires cuBLAS 13.3+ (13.4+ on Hopper, 13.5+ for FP8
         per-tensor current scaling on Hopper); otherwise the legacy path is used.
         Non-RHT NVFP4 falls back to the legacy path because graph-safe grouped quantization
@@ -146,6 +162,21 @@ class _GroupedLinear(torch.autograd.Function):
                 # FP8 per-tensor scaling grouped GEMM on Hopper requires cuBLAS 13.5+.
                 if device_capability < (10, 0) and cublaslt_version < 130500:
                     return False
+                return True
+            if all(isinstance(q, Float8BlockQuantizer) for q in input_quantizers):
+                # Grouped FP8 block-scaling quantize kernels and cuBLASLt grouped GEMM
+                # scale modes are Hopper-only, and the fused path has no MXFP8-broadcast
+                # emulation. On Blackwell (SM100/SM110, the only other arch that reaches
+                # this branch) fail loudly rather than silently falling back to the
+                # unfused path the user explicitly opted out of.
+                if get_device_compute_capability() >= (10, 0):
+                    raise RuntimeError(
+                        "NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM=1 does not support the"
+                        " FP8 block-scaling recipe on Blackwell GPUs: the fused grouped"
+                        " FP8 block-scaling path is Hopper-only. Unset"
+                        " NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM to use the unfused"
+                        " path (emulated via MXFP8 GEMM on Blackwell)."
+                    )
                 return True
             # MXFP8 and NVFP4 require Blackwell+.
             if not (10, 0) <= device_capability <= (11, 0):
@@ -499,6 +530,11 @@ class _GroupedLinear(torch.autograd.Function):
         device = inp.device
         weight_requires_grad = weights[0].requires_grad
 
+        origin_weights = weights
+        is_dist_weight = is_distributed_weight(weights[0])
+        if is_dist_weight:
+            weights = materialize_weight_for_forward(weights)
+
         # Configure quantizers
         if save_original_input and isinstance(input_quantizers[0], Float8Quantizer):
             if FP8GlobalStateManager.get_fp8_recipe().custom():
@@ -709,6 +745,10 @@ class _GroupedLinear(torch.autograd.Function):
                 if backward_override == "high_precision" and inp.requires_grad
                 else [None] * num_gemms
             )
+            if is_dist_weight:
+                # GTP: gathered workspace is transient (re-gathered in backward), don't save it.
+                weights_fp8 = [None] * num_gemms
+                saved_weights = origin_weights
             tensors_to_save, tensor_objects = prepare_for_saving(
                 *inputmats,
                 *weights_fp8,
@@ -736,6 +776,8 @@ class _GroupedLinear(torch.autograd.Function):
                 if hasattr(weights[0], "__fsdp_param__"):
                     # MCore FSDP creates main_grad lazily before backward
                     ctx.main_grad_funcs = [weights[i].get_main_grad for i in range(num_gemms)]
+                elif is_dist_weight:
+                    ctx.main_grad_funcs = [origin_weights[i].grad_buffer for i in range(num_gemms)]
                 else:
                     ctx.main_grad_funcs = [
                         lambda j=i: weights[j].main_grad for i in range(num_gemms)
@@ -820,7 +862,12 @@ class _GroupedLinear(torch.autograd.Function):
                 columnwise=ctx.weights_requires_grad,
             )
             grad_output_quantizer.optimize_for_gemm = True
-            if ctx.use_bias and isinstance(grad_output_quantizer, MXFP8Quantizer):
+            # The grouped FP8 block-scaling bgrad kernel computes dbias in the rowwise
+            # pass, so the fusion needs rowwise output (i.e. dgrad required).
+            fuse_bgrad = isinstance(grad_output_quantizer, MXFP8Quantizer) or (
+                isinstance(grad_output_quantizer, Float8BlockQuantizer) and ctx.requires_dgrad
+            )
+            if ctx.use_bias and fuse_bgrad:
                 grouped_dy, dbias_packed = tex.bgrad_group_quantize(
                     dy_2d,
                     grad_output_quantizer,
@@ -994,7 +1041,12 @@ class _GroupedLinear(torch.autograd.Function):
             # Only needed when fuse_wgrad_accumulation is enabled.
             origin_weights = [None] * N
             main_grads = [None] * N
-            if ctx.fuse_wgrad_accumulation and ctx.weights_requires_grad:
+            is_dist_weight = is_distributed_weight(saved_weights[0])
+            if is_dist_weight:
+                origin_weights = saved_weights
+                if ctx.fuse_wgrad_accumulation and ctx.weights_requires_grad:
+                    main_grads = [main_grad_func() for main_grad_func in ctx.main_grad_funcs]
+            elif ctx.fuse_wgrad_accumulation and ctx.weights_requires_grad:
                 origin_weight_refs = ctx.origin_weight_refs
                 ctx.origin_weight_refs = None
                 origin_weights = [ref() if ref is not None else None for ref in origin_weight_refs]
@@ -1055,12 +1107,17 @@ class _GroupedLinear(torch.autograd.Function):
                     ctx.m_splits,
                 )
 
-            if ctx.is_first_microbatch is not None:
+            if is_dist_weight:
+                accumulate_wgrad_into_param_main_grad = False
+            elif ctx.is_first_microbatch is not None:
                 accumulate_wgrad_into_param_main_grad = (
                     ctx.fuse_wgrad_accumulation and not ctx.is_first_microbatch
                 )
             else:
                 accumulate_wgrad_into_param_main_grad = ctx.fuse_wgrad_accumulation
+
+            if is_dist_weight:
+                weights = materialize_weight_for_backward(origin_weights)
 
             if ctx.requires_dgrad:
                 dgrad_gemm_use_split_accumulator = _2X_ACC_DGRAD
@@ -1132,6 +1189,9 @@ class _GroupedLinear(torch.autograd.Function):
                         device=ctx.device,
                     )
                     wgrad_list = [wgrad_packed[i] for i in range(ctx.num_gemms)]
+                    if is_dist_weight:
+                        # Gathered weights are no longer needed after dgrad GEMM.
+                        del weights
 
                 if ctx.save_original_input:
                     inp = inputmats[0]
@@ -1182,7 +1242,8 @@ class _GroupedLinear(torch.autograd.Function):
                     use_split_accumulator=wgrad_gemm_use_split_accumulator,
                     accumulate=(
                         accumulate_wgrad_into_param_main_grad
-                        if not getattr(ctx, "origin_weights_overwrite_main_grad", False)
+                        if not is_dist_weight
+                        and not getattr(ctx, "origin_weights_overwrite_main_grad", False)
                         else False
                     ),
                 )
@@ -1224,10 +1285,13 @@ class _GroupedLinear(torch.autograd.Function):
                         wgrad = None
                     return wgrad
 
-                wgrad_list = [
-                    handle_custom_ddp_from_mcore(weight, main_grad, wgrad)
-                    for weight, main_grad, wgrad in zip(origin_weights, main_grads, wgrad_list)
-                ]
+                if is_dist_weight:
+                    wgrad_list = finalize_weight_grads(origin_weights, wgrad_list)
+                else:
+                    wgrad_list = [
+                        handle_custom_ddp_from_mcore(weight, main_grad, wgrad)
+                        for weight, main_grad, wgrad in zip(origin_weights, main_grads, wgrad_list)
+                    ]
             else:
                 wgrad_list = [None] * ctx.num_gemms
 

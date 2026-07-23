@@ -1328,6 +1328,8 @@ class FusedAttnFunc(torch.autograd.Function):
         fp8_output,
         layer_number,
         return_max_logit,
+        packed_qkv=None,
+        packed_kv=None,
     ):
         # pylint: disable=missing-function-docstring
 
@@ -1390,7 +1392,14 @@ class FusedAttnFunc(torch.autograd.Function):
                 q_fp8, k_fp8, v_fp8 = q, k, v
             else:
                 q_fp8, k_fp8, v_fp8, qkv_layout, qkv_scale_inv_format = combine_and_quantize(
-                    qkv_layout, q, k, v, QKV_quantizer, used_in_backward=is_training
+                    qkv_layout,
+                    q,
+                    k,
+                    v,
+                    QKV_quantizer,
+                    used_in_backward=is_training,
+                    combined_qkv=packed_qkv,
+                    combined_kv=packed_kv,
                 )
 
             # print quantizers
@@ -1920,6 +1929,8 @@ class FusedAttnFunc(torch.autograd.Function):
             None,
             None,
             None,
+            None,  # packed_qkv
+            None,  # packed_kv
         )
 
 
@@ -1995,7 +2006,7 @@ class FusedAttention(torch.nn.Module):
         attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
         window_size: Optional[Tuple[int, int]] = None,
         bottom_right_diagonal: Optional[bool] = None,
-        fused_attention_backend: tex.NVTE_Fused_Attn_Backend = tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend,
+        fused_attention_backend: FusedAttnBackend = FusedAttnBackend["No_Backend"],
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
         fast_zero_fill: bool = True,
@@ -2014,10 +2025,12 @@ class FusedAttention(torch.nn.Module):
         score_mod_bprop: Optional[Callable] = None,
         score_mod_tensors: Optional[Dict[str, torch.Tensor]] = None,
         score_mod_bprop_tensors: Optional[Dict[str, torch.Tensor]] = None,
+        packed_qkv: Optional[torch.Tensor] = None,
+        packed_kv: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """fused attention fprop"""
         assert (
-            fused_attention_backend != tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend
+            fused_attention_backend != FusedAttnBackend["No_Backend"]
         ), "No fused attention backend supports this input combination!"
         assert all(
             x.dtype in [torch.float16, torch.bfloat16] or isinstance(x, QuantizedTensorStorage)
@@ -2110,15 +2123,15 @@ class FusedAttention(torch.nn.Module):
         use_FAv2_bwd = (
             self.use_FAv2_bwd
             and (core_attention_bias_type == "no_bias")
-            and (fused_attention_backend == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen)
+            and (fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"])
         )
 
         if fp8:
             fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
             if fp8_meta is not None and fp8_meta.get("local_recipes", None) is not None:
                 fp8_recipe = fp8_meta["local_recipes"][0]
-            assert fused_attention_backend == tex.NVTE_Fused_Attn_Backend.NVTE_FP8, (
-                f"cuDNN attention sub-backend {int(tex.NVTE_Fused_Attn_Backend.NVTE_FP8)}"
+            assert fused_attention_backend == FusedAttnBackend["FP8"], (
+                f"cuDNN attention sub-backend {int(FusedAttnBackend['FP8'])}"
                 " is required for FP8 attention!"
             )
             assert fp8_meta is not None, "FP8 metadata fp8_meta is required for FP8 attention!"
@@ -2138,8 +2151,7 @@ class FusedAttention(torch.nn.Module):
 
         if context_parallel:
             assert (
-                fp8
-                or fused_attention_backend == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
+                fp8 or fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
             ), f"{fused_attention_backend} does not work with context parallelism!"
             assert core_attention_bias_type not in [
                 "alibi"
@@ -2233,6 +2245,8 @@ class FusedAttention(torch.nn.Module):
                     fp8_output,
                     self.layer_number,
                     self.return_max_logit,
+                    packed_qkv,
+                    packed_kv,
                 )
 
         if self.return_max_logit:

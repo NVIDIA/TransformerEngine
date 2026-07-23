@@ -1154,14 +1154,6 @@ std::pair<GroupedTensorWrapper, py::object> Float8BlockQuantizer::create_grouped
     const size_t logical_last_dim) const {
   using namespace pybind11::literals;
 
-  // The fused grouped FP8 block-scaling path uses unconstrained FP32 scales and does not
-  // implement power-of-2 scaling. Reject force_pow_2_scales rather than silently ignoring it;
-  // the unfused per-tensor split-quantize path still honors it.
-  NVTE_CHECK(!force_pow_2_scales,
-             "Fused grouped FP8 block-scaling quantize does not support force_pow_2_scales=True. "
-             "Set force_pow_2_scales=False, or use the unfused split-quantize path "
-             "(NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM=0) which supports power-of-2 scales.");
-
   const auto tensor_offsets =
       resolve_grouped_tensor_offsets(num_tensors, first_dims, last_dims, precomputed_tensor_offsets,
                                      logical_first_dim, logical_last_dim);
