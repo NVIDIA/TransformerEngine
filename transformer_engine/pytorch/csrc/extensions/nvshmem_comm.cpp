@@ -18,16 +18,28 @@
 #include <torch/cuda.h>
 #include <torch/extension.h>
 
-#include <array>
-#include <atomic>
 #include <cstdint>
 #include <limits>
+#include <mutex>
+#include <unordered_map>
 
 namespace transformer_engine::pytorch {
 
 namespace {
 
-std::array<std::atomic<int64_t>, 4> cp_global_grad_return_epochs{};
+std::mutex cp_global_grad_return_epoch_mutex;
+std::unordered_map<const void *, int64_t> cp_global_grad_return_epochs;
+
+int64_t cp_next_global_grad_return_epoch(const at::Tensor &epochs) {
+  // Scope each epoch sequence to its symmetric buffer so independent CP
+  // backend instances in one process cannot satisfy each other's waits.
+  const void *buffer = epochs.data_ptr();
+  std::lock_guard<std::mutex> lock(cp_global_grad_return_epoch_mutex);
+  int64_t &epoch = cp_global_grad_return_epochs[buffer];
+  NVTE_CHECK(epoch < static_cast<int64_t>(std::numeric_limits<int32_t>::max()),
+             "CP gradient epoch exhausted for this symmetric epoch buffer.");
+  return ++epoch;
+}
 
 at::Tensor cp_grad_return_slot(const at::Tensor &buffer, const at::Tensor &reference, int cp_size,
                                int writer_rank, const char *name) {
@@ -200,6 +212,19 @@ std::vector<at::Tensor> nvshmem_cp_global_grad_return_execute(
 
   cp_grad_return_slot(grad_key_return, key, cp_size, rank, "grad_key_return");
   cp_grad_return_slot(grad_value_return, value, cp_size, rank, "grad_value_return");
+  cp_grad_return_slot(peer_grad_key_returns[rank], key, cp_size, rank,
+                      "peer_grad_key_returns[rank]");
+  cp_grad_return_slot(peer_grad_value_returns[rank], value, cp_size, rank,
+                      "peer_grad_value_returns[rank]");
+  cp_epoch_slot(grad_committed_epoch, rank, "grad_committed_epoch");
+  cp_epoch_slot(peer_grad_committed_epochs[rank], rank, "peer_grad_committed_epochs[rank]");
+  NVTE_CHECK(peer_grad_key_returns[rank].data_ptr() == grad_key_return.data_ptr(),
+             "peer_grad_key_returns[rank] must alias grad_key_return.");
+  NVTE_CHECK(peer_grad_value_returns[rank].data_ptr() == grad_value_return.data_ptr(),
+             "peer_grad_value_returns[rank] must alias grad_value_return.");
+  NVTE_CHECK(peer_grad_committed_epochs[rank].data_ptr() == grad_committed_epoch.data_ptr(),
+             "peer_grad_committed_epochs[rank] must alias grad_committed_epoch.");
+
   const int64_t half = key.size(0) / 2;
   for (int owner = 0; owner < cp_size; ++owner) {
     // Native two-chunk CP layout: owner o owns half-chunks o and
@@ -215,7 +240,7 @@ std::vector<at::Tensor> nvshmem_cp_global_grad_return_execute(
     value_slot.narrow(0, half, half).copy_(dv_global.narrow(0, mirror_half * half, half));
   }
 
-  const int64_t epoch = cp_global_grad_return_epochs[rank].fetch_add(1) + 1;
+  const int64_t epoch = cp_next_global_grad_return_epoch(grad_committed_epoch);
   for (int owner = 0; owner < cp_size; ++owner) {
     cp_stream_write_epoch(peer_grad_committed_epochs[owner], rank, epoch);
   }
