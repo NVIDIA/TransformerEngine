@@ -170,10 +170,14 @@ template <typename CastTraits,
           std::enable_if_t<CastTraits::isRowwise && !CastTraits::isColwise, int> = 0>
 __global__ void quantize_mxfp8_kernel_cast_only(typename CastTraits::IType *__restrict__ input,
                                                 typename CastTraits::OType *__restrict__ output,
-                                                e8m0_t *__restrict__ scales_rowwise, int32_t rows,
-                                                int32_t cols, int32_t scale_stride_rowwise,
+                                                e8m0_t *__restrict__ scales_rowwise,
+                                                const float *noop, int32_t rows, int32_t cols,
+                                                int32_t scale_stride_rowwise,
                                                 int32_t scale_stride_colwise) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  if (noop != nullptr && noop[0] == 1.0f) {
+    return;
+  }
   using IType = typename CastTraits::IType;
   using OType = typename CastTraits::OType;
   using inputUnitType = typename CastTraits::inputUnitType;
@@ -679,9 +683,12 @@ __global__ void quantize_mxfp8_kernel_cast_only(
     const __grid_constant__ CUtensorMap tensor_map_input,
     const __grid_constant__ CUtensorMap tensor_map_rowwise_output,
     const __grid_constant__ CUtensorMap tensor_map_colwise_output,
-    e8m0_t *__restrict__ scales_rowwise, e8m0_t *__restrict__ scales_colwise, int32_t rows,
-    int32_t cols, int32_t scale_stride_rowwise, int32_t scale_stride_colwise) {
+    e8m0_t *__restrict__ scales_rowwise, e8m0_t *__restrict__ scales_colwise, const float *noop,
+    int32_t rows, int32_t cols, int32_t scale_stride_rowwise, int32_t scale_stride_colwise) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  if (noop != nullptr && noop[0] == 1.0f) {
+    return;
+  }
   using IType = typename CastTraits::IType;
   using OType = typename CastTraits::OType;
   using inputUnitType = typename CastTraits::inputUnitType;
@@ -1150,9 +1157,12 @@ __global__ void quantize_mxfp8_kernel_cast_only(
     const __grid_constant__ CUtensorMap tensor_map_input,
     const __grid_constant__ CUtensorMap tensor_map_rowwise_output,
     const __grid_constant__ CUtensorMap tensor_map_colwise_output, e8m0_t *scales_rowwise,
-    e8m0_t *scales_colwise, int32_t rows, int32_t cols, int32_t scale_stride_rowwise,
-    int32_t scale_stride_colwise) {
+    e8m0_t *scales_colwise, const float *noop, int32_t rows, int32_t cols,
+    int32_t scale_stride_rowwise, int32_t scale_stride_colwise) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  if (noop != nullptr && noop[0] == 1.0f) {
+    return;
+  }
   using IType = typename CastTraits::IType;
   using OType = typename CastTraits::OType;
   using inputUnitType = typename CastTraits::inputUnitType;
