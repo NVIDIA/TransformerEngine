@@ -27,6 +27,7 @@ from .base import (
     is_ub_initialized,
     using_cublasmp_backend,
     quantize_weight,
+    release_frozen_weight_columnwise,
     TransformerEngineBaseModule,
     _2X_ACC_FPROP,
     _2X_ACC_DGRAD,
@@ -1258,6 +1259,9 @@ class _LayerNormMLP(torch.autograd.Function):
                 ub_type=tex.CommOverlapType.AG if ctx.ub_overlap_ag else None,
             )
 
+            if not ctx.fc2_weight_requires_grad:
+                release_frozen_weight_columnwise((fc2_weight,))
+
             # FSDP2: Clear columnwise/transpose caches after FC2 dgrad GEMM
             # to prevent them from persisting on the all-gathered buffer.
             # Uses is_fsdp2 (not fsdp2_skip_columnwise) so cleanup runs
@@ -1556,6 +1560,9 @@ class _LayerNormMLP(torch.autograd.Function):
                 extra_output=reduce_scatter_out,
                 bulk_overlap=ctx.ub_bulk_dgrad,
             )
+
+            if not ctx.fc1_weight_requires_grad:
+                release_frozen_weight_columnwise((fc1_weight,))
 
             # FSDP2: Clear columnwise/transpose caches after FC1 dgrad GEMM
             # to prevent them from persisting on the all-gathered buffer.
