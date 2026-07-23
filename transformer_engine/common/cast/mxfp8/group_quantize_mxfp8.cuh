@@ -579,8 +579,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
       // Uniform groups omit first_dims/tensor_offsets, so derive the member geometry directly.
       tensor_rows_for_scales = first_logical_dim / num_tensors;
       tensor_base_for_scales = tensor_id * tensor_rows_for_scales * cols;
-    } else if constexpr (WITH_GEMM_SWIZZLED_SCALES &&
-                         SHAPE_REP == ShapeRepresentation::VARYING_FIRST_DIM) {
+    }
+    if constexpr (WITH_GEMM_SWIZZLED_SCALES &&
+                  SHAPE_REP == ShapeRepresentation::VARYING_FIRST_DIM) {
       tensor_base_for_scales = static_cast<size_t>(offsets_ptr[tensor_id]);
     }
     const size_t block_id_Y = current_block.block_id_Y;
