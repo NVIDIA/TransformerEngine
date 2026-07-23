@@ -76,20 +76,9 @@ void fused_attn_fp8_fwd_impl(
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   const DType ragged_offset_type = DType::kInt64;
 
-  int64_t actual_b = b;
-  if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= kFP8THDRaggedCudnnVersion) {
-    NVTE_CHECK(is_padding, "Ragged QKV input requires padding or padding_causal mask!");
-    if (sm_arch_ != 120) {
-      b = max_b;
-      s_q = is_ragged_q ? max_t_q : s_q;
-      s_kv = is_ragged_kv ? max_t_kv : s_kv;
-    }
-  }
   // Newer versions of cuDNN SDPA can accept sequence lengths directly as a cumulative
-  // tensor. Take advantage of this if possible to avoid 1 extra kernel call. (Unlike
-  // the F16 path, the FP8 path has no THD/ragged-offset support, so only the
-  // cu_seqlens_to_actual_seqlens conversion applies here. Also note that the
-  // needed versions of cuDNN backend and frontend are higher than for F16.)
+  // tensor. Take advantage of this if possible to avoid the actual-seqlen conversion;
+  // THD inputs still use their separate ragged-offset tensors.
   const bool use_cu_seqlens_directly =
       // Frontend 1.26 supports fp8+cu_seqlens (for the C++ API).
       // Note: For the Python API, 1.27 is required.
@@ -102,6 +91,20 @@ void fused_attn_fp8_fwd_impl(
       // so any such request would always get routed to the old composite SDPA engine
       // (which doesn't support cu_seqlens). Remove this restriction when possible.
       !is_dropout;
+
+  int64_t actual_b = b;
+  if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= kFP8THDRaggedCudnnVersion) {
+    NVTE_CHECK(is_padding, "Ragged QKV input requires padding or padding_causal mask!");
+    if (sm_arch_ != 120) {
+      // cuDNN reads the user's [actual_b+1] cu_seqlens buffers directly, so a quantized
+      // batch dimension would read out of bounds on the direct path.
+      if (!use_cu_seqlens_directly) {
+        b = max_b;
+      }
+      s_q = is_ragged_q ? max_t_q : s_q;
+      s_kv = is_ragged_kv ? max_t_kv : s_kv;
+    }
+  }
 
   try {
     FADescriptor_v1 descriptor{b,
@@ -498,7 +501,8 @@ void fused_attn_fp8_fwd_impl(
 
     auto plan_workspace_size = alignTo<16>(mha_graph->get_workspace_size());
     const size_t num_bytes_per_seqlen = alignTo<16>(b * sizeof(int32_t));
-    const size_t actual_seqlen_workspace_size = is_padding ? 2 * num_bytes_per_seqlen : 0;
+    const size_t actual_seqlen_workspace_size =
+        (is_padding && !use_cu_seqlens_directly) ? 2 * num_bytes_per_seqlen : 0;
     const size_t num_bytes_per_ragged_offset =
         alignTo<16>(((b + 1) * typeToNumBits(ragged_offset_type)) / 8);
     size_t seqlen_offsets_workspace_size = 0;
@@ -511,10 +515,6 @@ void fused_attn_fp8_fwd_impl(
       }
     }
 
-    // Exit to request upper level API to allocate memory if needed.
-    // When passing cu_seqlens* directly to cuDNN SDPA, no conversion workspace is
-    // needed: cuDNN consumes the user's cu_seqlens buffers as-is.
-    size_t actual_seqlen_workspace_size = use_cu_seqlens_directly ? 0 : 2 * b * sizeof(int32_t);
     if (workspace == nullptr) {
       *workspace_size =
           plan_workspace_size + actual_seqlen_workspace_size + seqlen_offsets_workspace_size;
@@ -559,9 +559,9 @@ void fused_attn_fp8_fwd_impl(
         constexpr size_t nthreads_per_block = 128;
         const size_t grid = (b + nthreads_per_block - 1) / nthreads_per_block;
         void* devActualSeqlenQ = static_cast<int8_t*>(workspace) + plan_workspace_size;
-        void* devActualSeqlenKV = static_cast<int8_t*>(devActualSeqlenQ) + b * sizeof(int32_t);
+        void* devActualSeqlenKV = static_cast<int8_t*>(devActualSeqlenQ) + num_bytes_per_seqlen;
         cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
-            b, b, static_cast<const int32_t*>(devPtrcuSeqlensQ),  // TODO(pass max_b)
+            actual_b, b, static_cast<const int32_t*>(devPtrcuSeqlensQ),
             static_cast<const int32_t*>(devPtrcuSeqlensKV), static_cast<int32_t*>(devActualSeqlenQ),
             static_cast<int32_t*>(devActualSeqlenKV));
         NVTE_CHECK_CUDA(cudaGetLastError());
@@ -1458,6 +1458,7 @@ void fused_attn_fp8_fwd(
   NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
   NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
   const auto cudnn_runtime_version = cudnnGetVersion();
+  const int sm_arch_ = cuda::sm_arch(cuda::current_device());
 
   void* devPtrSeqOffsetsQ = cu_seqlens_q_padded->data.dptr;
   void* devPtrSeqOffsetsKV = cu_seqlens_kv_padded->data.dptr;
@@ -1480,8 +1481,9 @@ void fused_attn_fp8_fwd(
     int i = 0;
     Tensor* output_M = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     output_M->data.dptr = nullptr;
+    // SM120 uses dense stats in the graph, so its allocation must remain [b, h, s_q, 1].
     if (q_format == NVTE_QKV_Format::NVTE_THD &&
-        cudnn_runtime_version >= fused_attn::kFP8THDRaggedCudnnVersion) {
+        cudnn_runtime_version >= fused_attn::kFP8THDRaggedCudnnVersion && sm_arch_ != 120) {
       output_M->data.shape = {num_tokens_q, num_attn_heads, 1};
     } else {
       output_M->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
