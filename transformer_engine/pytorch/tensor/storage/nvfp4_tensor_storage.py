@@ -109,6 +109,17 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
     # Global E4M3 scale bound used by this NVFP4 tensor
     _nvfp4_e4m3_max: int
 
+    # (attribute_name, constructor_kwarg) for each tensor buffer; drives
+    # __tensor_flatten__ / __tensor_unflatten__ (see QuantizedTensorStorage).
+    _FLATTEN_TENSOR_BUFFERS = (
+        ("_rowwise_data", "rowwise_data"),
+        ("_rowwise_scale_inv", "rowwise_scale_inv"),
+        ("_columnwise_data", "columnwise_data"),
+        ("_columnwise_scale_inv", "columnwise_scale_inv"),
+        ("_amax_rowwise", "amax_rowwise"),
+        ("_amax_columnwise", "amax_columnwise"),
+    )
+
     def __new__(
         cls,
         rowwise_data: Optional[torch.Tensor],
