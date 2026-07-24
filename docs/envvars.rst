@@ -78,6 +78,12 @@ Build Configuration
    :Default: ``10``
    :Description: Number of Philox4x32 rounds used by stochastic rounding kernels. Must be a positive integer.
 
+.. envvar:: NVTE_CUDA_VERSION
+
+   :Type: ``str``
+   :Default: Auto-detected based on system CUDA version, falling back to ``"13.3"``
+   :Description: CUDA version to build for. Valid values: ``"12.*"``, ``"13.*"``. If not set, automatically determined based on the installed CUDA Toolkit version. Not intended for external use.
+
 Optional Dependencies
 ^^^^^^^^^^^^^^^^^^^^^
 
