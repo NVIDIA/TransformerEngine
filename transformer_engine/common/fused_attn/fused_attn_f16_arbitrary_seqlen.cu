@@ -18,6 +18,7 @@
 #include "../util/cuda_runtime.h"
 #include "../util/system.h"
 #include "fused_attn_f16_arbitrary_seqlen.h"
+#include "graph_cache_debug.h"
 #include "utils.h"
 
 namespace transformer_engine {
@@ -167,6 +168,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         cache_hit = (it != cache.end());
         if (cache_hit) cached_graph = it->second;
       }
+      graph_cache_debug::record_cache_lookup("fwd", cache_hit, cfg);
       if (cache_hit) {
         return cached_graph;
       }
@@ -434,16 +436,24 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       auto dropout_tuple = is_dropout ? std::make_tuple(dropout_seed, dropout_offset)
                                       : std::make_tuple(nullptr, nullptr);
 
-      NVTE_CHECK_CUDNN_FE(mha_graph->validate());
-      NVTE_CHECK_CUDNN_FE(mha_graph->build_operation_graph(handle));
-      NVTE_CHECK_CUDNN_FE(mha_graph->create_execution_plans({fe::HeurMode_t::A}));
-      NVTE_CHECK_CUDNN_FE(mha_graph->check_support());
-      NVTE_CHECK_CUDNN_FE(mha_graph->build_plans());
+      graph_cache_debug::timer("fwd", graph_cache_debug::BuildStage::Validate,
+                                    [&] { NVTE_CHECK_CUDNN_FE(mha_graph->validate()); });
+      graph_cache_debug::timer(
+          "fwd", graph_cache_debug::BuildStage::BuildOpGraph,
+          [&] { NVTE_CHECK_CUDNN_FE(mha_graph->build_operation_graph(handle)); });
+      graph_cache_debug::timer(
+          "fwd", graph_cache_debug::BuildStage::CreatePlans,
+          [&] { NVTE_CHECK_CUDNN_FE(mha_graph->create_execution_plans({fe::HeurMode_t::A})); });
+      graph_cache_debug::timer("fwd", graph_cache_debug::BuildStage::CheckSupport,
+                                    [&] { NVTE_CHECK_CUDNN_FE(mha_graph->check_support()); });
+      graph_cache_debug::timer("fwd", graph_cache_debug::BuildStage::BuildPlans,
+                                    [&] { NVTE_CHECK_CUDNN_FE(mha_graph->build_plans()); });
 
       auto return_tuple =
           std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, Stats_tuple, bias_tuple,
                          softmax_offset_tuple, padding_tuple, page_table_tuple, offset_qo_tuple,
                          offset_kv_tuple, offset_s_tuple, dropout_tuple);
+      graph_cache_debug::record_build("fwd");
       // Lock the insert. If another thread inserted a graph for the same key while we were building,
       // use their graph (it's the same as ours) and discard our graph.
       {
@@ -484,6 +494,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
           plan_workspace_size + actual_seqlen_workspace_size + seqlen_offsets_workspace_size;
       return;
     }
+    graph_cache_debug::record_exec("fwd");
 
     // cuDNN stream check needs to be moved here to support dummy kernel calls with
     // null streams for sizing the cuDNN workspace.
@@ -712,6 +723,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
         cache_hit = (it != cache.end());
         if (cache_hit) cached_graph = it->second;
       }
+      graph_cache_debug::record_cache_lookup("bwd", cache_hit, cfg);
       if (cache_hit) {
         return cached_graph;
       }
@@ -951,15 +963,23 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       auto dropout_tuple = is_dropout ? std::make_tuple(dropout_seed, dropout_offset)
                                       : std::make_tuple(nullptr, nullptr);
 
-      NVTE_CHECK_CUDNN_FE(mha_graph->validate());
-      NVTE_CHECK_CUDNN_FE(mha_graph->build_operation_graph(handle));
-      NVTE_CHECK_CUDNN_FE(mha_graph->create_execution_plans({fe::HeurMode_t::A}));
-      NVTE_CHECK_CUDNN_FE(mha_graph->check_support());
-      NVTE_CHECK_CUDNN_FE(mha_graph->build_plans());
+      graph_cache_debug::timer("bwd", graph_cache_debug::BuildStage::Validate,
+                                    [&] { NVTE_CHECK_CUDNN_FE(mha_graph->validate()); });
+      graph_cache_debug::timer(
+          "bwd", graph_cache_debug::BuildStage::BuildOpGraph,
+          [&] { NVTE_CHECK_CUDNN_FE(mha_graph->build_operation_graph(handle)); });
+      graph_cache_debug::timer(
+          "bwd", graph_cache_debug::BuildStage::CreatePlans,
+          [&] { NVTE_CHECK_CUDNN_FE(mha_graph->create_execution_plans({fe::HeurMode_t::A})); });
+      graph_cache_debug::timer("bwd", graph_cache_debug::BuildStage::CheckSupport,
+                                    [&] { NVTE_CHECK_CUDNN_FE(mha_graph->check_support()); });
+      graph_cache_debug::timer("bwd", graph_cache_debug::BuildStage::BuildPlans,
+                                    [&] { NVTE_CHECK_CUDNN_FE(mha_graph->build_plans()); });
 
       auto return_tuple = std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, bias_tuple,
                                          softmax_offset_tuple, padding_tuple, offset_qo_tuple,
                                          offset_kv_tuple, offset_s_tuple, dropout_tuple);
+      graph_cache_debug::record_build("bwd");
       // Lock the insert. If another thread inserted a graph for the same key while we were building,
       // use their graph (it's the same as ours) and discard our graph.
       {
@@ -995,6 +1015,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
           plan_workspace_size + actual_seqlen_workspace_size + seqlen_offsets_workspace_size;
       return;
     }
+    graph_cache_debug::record_exec("bwd");
 
     // cuDNN stream check needs to be moved here to support dummy kernel calls with
     // null streams for sizing the cuDNN workspace.
