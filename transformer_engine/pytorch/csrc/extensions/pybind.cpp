@@ -597,6 +597,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Wait for a signal value to be updated by a remote PE using NVSHMEM on the current CUDA "
         "stream",
         py::call_guard<py::gil_scoped_release>());
+  m.def("nvshmem_cp_global_grad_return_execute",
+        &transformer_engine::pytorch::nvshmem_cp_global_grad_return_execute,
+        "Return global CP=4 K/V gradients to their symmetric owner buffers",
+        py::call_guard<py::gil_scoped_release>());
   m.def("nvshmem_finalize", &transformer_engine::pytorch::nvshmem_finalize,
         "Clean up and finalize the NVSHMEM communication backend and free associated resources",
         py::call_guard<py::gil_scoped_release>());
