@@ -121,6 +121,7 @@ void init_grouped_tensor_extension() {
 
 void init_extension() {
   std::call_once(extension_init_flag, []() {
+    pybind11::gil_scoped_acquire gil;
     init_float8_extension();
     init_mxfp8_extension();
     init_float8blockwise_extension();
