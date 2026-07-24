@@ -9,6 +9,7 @@ from typing import Any, Callable, List, Optional, Tuple, Union
 import torch
 
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager, QuantizerRole
+from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.module import LayerNormLinear, Linear, RMSNorm, LayerNorm
@@ -924,6 +925,23 @@ class MultiheadAttention(torch.nn.Module):
         if not (fp8 and custom_recipe and fp8_mha and _dpa_fp8_recipe == ""):
             self._update_output_quantizer_roles(qkv_fp8_output, proj_fp8_grad, dpa_fp8_output)
 
+        # Packed pass-through to DotProductAttention: the fused QKV/KV projection
+        # already produces one packed buffer, which DPA accepts directly via its
+        # declarative qkv_layer/kv_layer arguments (deriving q/k/v as zero-copy
+        # views and skipping pointer-based layout detection). Only possible when
+        # no per-tensor operation (RoPE, QK normalization, KV caching, CPU
+        # offloading) needs the individual q/k/v slices.
+        packed_dpa_eligible = (
+            rotary_pos_emb is None
+            and self.q_norm is None
+            and self.k_norm is None
+            and inference_params is None
+            and not is_cpu_offload_enabled()
+        )
+        packed_qkv_layer = None
+        packed_kv_layer = None
+        packed_interleave_dim = -3
+
         layernorm_output = None
         if self.attention_type == "self":
             # Attention heads [sq, b, h] --> [sq, b, ng * (np/ng + 2) * hn]
@@ -968,28 +986,43 @@ class MultiheadAttention(torch.nn.Module):
 
             mixed_x_layer = mixed_x_layer.view(*new_tensor_shape)
 
-            # qkv_weight_interleaved:
-            #  [sq, b, ng, (np/ng + 2), hn]
-            #  --> [sq, b, ng, np/ng, hn], [sq, b, ng, 1, hn], [sq, b, ng, 1, hn]
-            # not qkv_weight_interleaved:
-            #  [sq, b, (np/ng + 2), ng, hn]
-            #  --> [sq, b, np/ng, np, hn], [sq, b, 1, ng, hn], [sq, b, 1, ng, hn]
-            query_layer, key_layer, value_layer = SplitAlongDim.apply(
-                mixed_x_layer, split_dim, (num_queries_per_key_value, 1, 1)
-            )
-
-            if self.qkv_format == "thd":
-                query_layer, key_layer, value_layer = (
-                    x.reshape(x.size(0), -1, self.hidden_size_per_attention_head)
-                    for x in (query_layer, key_layer, value_layer)
-                )
+            if (
+                num_queries_per_key_value == 1
+                and packed_dpa_eligible
+                and not isinstance(mixed_x_layer, QuantizedTensorStorage)
+            ):
+                # np == ng: the projection output is a uniform 3-interleave
+                # ([.., h, 3, d] interleaved / [.., 3, h, d] otherwise), which
+                # DotProductAttention accepts directly as a declared packed
+                # qkv_layer -- no slicing here, no layout detection there.
+                packed_qkv_layer = mixed_x_layer
+                packed_interleave_dim = split_dim
+                query_layer = None
+                key_layer = None
+                value_layer = None
             else:
-                # query: -> [sq, b, np, hn]
-                # key, value: -> [sq, b, ng, hn]
-                query_layer, key_layer, value_layer = (
-                    x.reshape(x.size(0), x.size(1), -1, self.hidden_size_per_attention_head)
-                    for x in (query_layer, key_layer, value_layer)
+                # qkv_weight_interleaved:
+                #  [sq, b, ng, (np/ng + 2), hn]
+                #  --> [sq, b, ng, np/ng, hn], [sq, b, ng, 1, hn], [sq, b, ng, 1, hn]
+                # not qkv_weight_interleaved:
+                #  [sq, b, (np/ng + 2), ng, hn]
+                #  --> [sq, b, np/ng, np, hn], [sq, b, 1, ng, hn], [sq, b, 1, ng, hn]
+                query_layer, key_layer, value_layer = SplitAlongDim.apply(
+                    mixed_x_layer, split_dim, (num_queries_per_key_value, 1, 1)
                 )
+
+                if self.qkv_format == "thd":
+                    query_layer, key_layer, value_layer = (
+                        x.reshape(x.size(0), -1, self.hidden_size_per_attention_head)
+                        for x in (query_layer, key_layer, value_layer)
+                    )
+                else:
+                    # query: -> [sq, b, np, hn]
+                    # key, value: -> [sq, b, ng, hn]
+                    query_layer, key_layer, value_layer = (
+                        x.reshape(x.size(0), x.size(1), -1, self.hidden_size_per_attention_head)
+                        for x in (query_layer, key_layer, value_layer)
+                    )
         elif self.attention_type == "cross":
             # Attention heads [sk, b, h] --> [sk, b, (ng * 2 * hn)]
             mixed_kv_layer = self.key_value(
@@ -1017,33 +1050,55 @@ class MultiheadAttention(torch.nn.Module):
 
             mixed_kv_layer = mixed_kv_layer.view(*new_tensor_shape)
 
-            # mixed_kv_layer --> 2 [sk, b, ng, hn]
-            key_layer, value_layer = SplitAlongDim.apply(
-                mixed_kv_layer,
-                split_dim,
-                mixed_kv_layer.shape[split_dim] // 2,
-            )
-            key_layer, value_layer = (
-                x.reshape(
-                    x.size(0),
-                    x.size(1),
-                    -1,
-                    self.hidden_size_per_attention_head,
-                )
-                for x in (key_layer, value_layer)
-            )
-
-            if self.qkv_format == "thd":
-                key_layer, value_layer = (
-                    x.reshape(x.size(0), -1, self.hidden_size_per_attention_head)
-                    for x in (key_layer, value_layer)
-                )
+            if packed_dpa_eligible and not isinstance(mixed_kv_layer, QuantizedTensorStorage):
+                # Declare the packed KV to DotProductAttention instead of
+                # slicing it: expose the 2-interleave as its own dimension.
+                if self.qkv_weight_interleaved:
+                    # [.., ng, 2 * hn] --> [.., ng, 2, hn]
+                    packed_kv_shape = mixed_kv_layer.size()[:-1] + (
+                        2,
+                        self.hidden_size_per_attention_head,
+                    )
+                    packed_interleave_dim = -2
+                else:
+                    # [.., 2 * ng, hn] --> [.., 2, ng, hn]
+                    packed_kv_shape = mixed_kv_layer.size()[:-2] + (
+                        2,
+                        self.num_gqa_groups_per_partition,
+                        self.hidden_size_per_attention_head,
+                    )
+                    packed_interleave_dim = -3
+                packed_kv_layer = mixed_kv_layer.view(*packed_kv_shape)
+                key_layer = None
+                value_layer = None
             else:
-                # key, value: -> [sq, b, ng, hn]
+                # mixed_kv_layer --> 2 [sk, b, ng, hn]
+                key_layer, value_layer = SplitAlongDim.apply(
+                    mixed_kv_layer,
+                    split_dim,
+                    mixed_kv_layer.shape[split_dim] // 2,
+                )
                 key_layer, value_layer = (
-                    x.reshape(x.size(0), x.size(1), -1, self.hidden_size_per_attention_head)
+                    x.reshape(
+                        x.size(0),
+                        x.size(1),
+                        -1,
+                        self.hidden_size_per_attention_head,
+                    )
                     for x in (key_layer, value_layer)
                 )
+
+                if self.qkv_format == "thd":
+                    key_layer, value_layer = (
+                        x.reshape(x.size(0), -1, self.hidden_size_per_attention_head)
+                        for x in (key_layer, value_layer)
+                    )
+                else:
+                    # key, value: -> [sq, b, ng, hn]
+                    key_layer, value_layer = (
+                        x.reshape(x.size(0), x.size(1), -1, self.hidden_size_per_attention_head)
+                        for x in (key_layer, value_layer)
+                    )
 
             # Attention head [sq, b, h] --> [sq, b, hp]
             if self.input_layernorm:
@@ -1164,6 +1219,9 @@ class MultiheadAttention(torch.nn.Module):
             inference_params=inference_params,
             pad_between_seqs=pad_between_seqs,
             fp8_output=dpa_fp8_output,
+            qkv_layer=packed_qkv_layer,
+            kv_layer=packed_kv_layer,
+            qkv_interleave_dim=packed_interleave_dim,
         )
 
         # ===================

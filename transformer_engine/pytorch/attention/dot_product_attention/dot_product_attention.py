@@ -265,6 +265,111 @@ def _trim_output(attn_out, num_attention_heads, padded_head_dim_v, orig_head_dim
     return attn_out[..., :orig_head_dim_v].reshape(*out_shape, -1)
 
 
+def _unpack_packed_qkv(
+    qkv_layer: Optional[torch.Tensor],
+    kv_layer: Optional[torch.Tensor],
+    query_layer: Optional[torch.Tensor],
+    key_layer: Optional[torch.Tensor],
+    value_layer: Optional[torch.Tensor],
+    qkv_format: str,
+    qkv_interleave_dim: int,
+    inference_params: Optional[InferenceParams],
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[str]]:
+    """Resolve declarative packed inputs into q/k/v.
+
+    Derives q/k/v as zero-copy views of the packed buffer (``qkv_layer`` or
+    ``kv_layer``) and constructs the exact layout string from the declaration.
+    The layout enum is truthful by construction, so no pointer-based detection
+    is needed downstream (this also covers thd and FP8 DPA).
+
+    Returns ``(query_layer, key_layer, value_layer, declared_qkv_layout)``;
+    the layout is ``None`` when no packed input is given.
+    """
+    if qkv_layer is None and kv_layer is None:
+        if query_layer is None or key_layer is None or value_layer is None:
+            raise ValueError(
+                "query_layer, key_layer and value_layer are required unless packed"
+                " inputs (qkv_layer or query_layer + kv_layer) are provided."
+            )
+        return query_layer, key_layer, value_layer, None
+
+    if qkv_layer is not None and kv_layer is not None:
+        raise ValueError("qkv_layer and kv_layer are mutually exclusive.")
+    if inference_params is not None:
+        raise ValueError(
+            "Packed inputs (qkv_layer/kv_layer) are not supported with KV caching"
+            " (inference_params); pass separate query/key/value tensors instead."
+        )
+    if qkv_interleave_dim not in (-3, -2):
+        raise ValueError(
+            "qkv_interleave_dim must be -3 (e.g. bs3hd) or -2 (e.g. bsh3d), got"
+            f" {qkv_interleave_dim}."
+        )
+    packed = qkv_layer if qkv_layer is not None else kv_layer
+    # The declared layout describes the packed buffer's memory, so it must have
+    # stride 1 in its last dimension (the check get_qkv_layout would otherwise
+    # perform on the derived q/k/v views).
+    if packed.stride(-1) != 1:
+        raise ValueError(
+            "The packed tensor (qkv_layer/kv_layer) must have stride 1 in its last"
+            f" dimension, got strides {tuple(packed.stride())}."
+        )
+
+    def _packed_layout(fmt: str, num: int) -> str:
+        # bshd + 3 @ -3 -> bs3hd; bshd + 3 @ -2 -> bsh3d; thd + 2 @ -2 -> th2d
+        pos = len(fmt) + qkv_interleave_dim + 1
+        return fmt[:pos] + str(num) + fmt[pos:]
+
+    if qkv_layer is not None:
+        if any(x is not None for x in (query_layer, key_layer, value_layer)):
+            raise ValueError(
+                "qkv_layer already packs Q, K and V: query_layer, key_layer and"
+                " value_layer must be None when qkv_layer is provided."
+            )
+        expected_rank = 4 if qkv_format == "thd" else 5
+        if qkv_layer.dim() != expected_rank:
+            raise ValueError(
+                f"qkv_layer must be a {expected_rank}D tensor for"
+                f" qkv_format={qkv_format!r}, got {qkv_layer.dim()}D."
+            )
+        if qkv_layer.shape[qkv_interleave_dim] != 3:
+            raise ValueError(
+                f"qkv_layer must have size 3 at dim {qkv_interleave_dim}"
+                f" (qkv_interleave_dim), got shape {tuple(qkv_layer.shape)}."
+            )
+        query_layer, key_layer, value_layer = (
+            qkv_layer.select(qkv_interleave_dim, i) for i in range(3)
+        )
+        return query_layer, key_layer, value_layer, _packed_layout(qkv_format, 3)
+
+    if query_layer is None:
+        raise ValueError(
+            "kv_layer packs only K and V: query_layer is required when kv_layer is provided."
+        )
+    if key_layer is not None or value_layer is not None:
+        raise ValueError(
+            "kv_layer already packs K and V: key_layer and value_layer must be"
+            " None when kv_layer is provided."
+        )
+    if kv_layer.dim() != query_layer.dim() + 1:
+        raise ValueError(
+            "kv_layer must have one more dimension than query_layer, got"
+            f" {kv_layer.dim()}D kv_layer and {query_layer.dim()}D query_layer."
+        )
+    if kv_layer.shape[qkv_interleave_dim] != 2:
+        raise ValueError(
+            f"kv_layer must have size 2 at dim {qkv_interleave_dim}"
+            f" (qkv_interleave_dim), got shape {tuple(kv_layer.shape)}."
+        )
+    key_layer, value_layer = (kv_layer.select(qkv_interleave_dim, i) for i in range(2))
+    return (
+        query_layer,
+        key_layer,
+        value_layer,
+        f"{qkv_format}_{_packed_layout(qkv_format, 2)}",
+    )
+
+
 class DotProductAttention(TransformerEngineBaseModule):
     r"""Allows the model to jointly attend to information from different
     representation subspaces as described in the paper:
@@ -1136,9 +1241,9 @@ class DotProductAttention(TransformerEngineBaseModule):
     @no_torch_dynamo(recursive=False)
     def forward(
         self,
-        query_layer: torch.Tensor,
-        key_layer: torch.Tensor,
-        value_layer: torch.Tensor,
+        query_layer: Optional[torch.Tensor] = None,
+        key_layer: Optional[torch.Tensor] = None,
+        value_layer: Optional[torch.Tensor] = None,
         attention_mask: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]] = None,
         qkv_format: str = None,
         cu_seqlens_q: torch.Tensor = None,
@@ -1163,6 +1268,9 @@ class DotProductAttention(TransformerEngineBaseModule):
         score_mod_bprop: Optional[Callable] = None,
         score_mod_tensors: Optional[Dict[str, torch.Tensor]] = None,
         score_mod_bprop_tensors: Optional[Dict[str, torch.Tensor]] = None,
+        qkv_layer: Optional[torch.Tensor] = None,
+        kv_layer: Optional[torch.Tensor] = None,
+        qkv_interleave_dim: int = -3,
     ) -> torch.Tensor:
         r"""
         Dot Product Attention Layer.
@@ -1261,12 +1369,15 @@ class DotProductAttention(TransformerEngineBaseModule):
 
         Parameters
         ----------
-        query_layer : torch.Tensor
-                     Query tensor.
-        key_layer : torch.Tensor
-                   Key tensor.
-        value_layer : torch.Tensor
-                     Value tensor.
+        query_layer : Optional[torch.Tensor], default = None
+                     Query tensor. Required unless a packed input (``qkv_layer``, or
+                     ``kv_layer`` together with ``query_layer``) is provided instead.
+        key_layer : Optional[torch.Tensor], default = None
+                   Key tensor. Required unless a packed input (``qkv_layer`` or ``kv_layer``)
+                   is provided instead.
+        value_layer : Optional[torch.Tensor], default = None
+                     Value tensor. Required unless a packed input (``qkv_layer`` or ``kv_layer``)
+                     is provided instead.
         attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]],
              default = None. Boolean tensor(s) used to mask out attention softmax input.
              It should be ``None`` for causal masks and ``"no_mask"``. For padding masks, it should be
@@ -1374,7 +1485,43 @@ class DotProductAttention(TransformerEngineBaseModule):
             Runtime tensors exposed to score_mod_bprop as cuDNN graph tensors. Keys are
             user-defined string names consumed by the callback through ``tensors[name]``;
             there is no predefined set of accepted keys.
+        qkv_layer: Optional[torch.Tensor], default = None
+            Fully packed QKV tensor. When the QKV projection produces one packed buffer
+            (e.g. a fused QKV GEMM), it can be passed here directly instead of slicing
+            it into :attr:`query_layer`/:attr:`key_layer`/:attr:`value_layer` views.
+            For :attr:`qkv_format` = {"bshd", "sbhd"}, it must be a 5D tensor of shape
+            ``[b, s, 3, h, d]``/``[s, b, 3, h, d]`` (:attr:`qkv_interleave_dim` = -3) or
+            ``[b, s, h, 3, d]``/``[s, b, h, 3, d]`` (:attr:`qkv_interleave_dim` = -2);
+            for :attr:`qkv_format` = "thd", a 4D tensor of shape ``[t, 3, h, d]`` or
+            ``[t, h, 3, d]``. Q/K/V are derived as zero-copy views and the memory layout
+            (e.g. ``bs3hd``) is declared from the packing itself, so no pointer-based
+            layout detection runs on this path -- including for "thd" and FP8 attention.
+            Mutually exclusive with :attr:`query_layer`, :attr:`key_layer`,
+            :attr:`value_layer` and :attr:`kv_layer`.
+        kv_layer: Optional[torch.Tensor], default = None
+            Packed KV tensor, used together with :attr:`query_layer`
+            (e.g. ``[b, s, 2, hg, d]`` for :attr:`qkv_interleave_dim` = -3, or
+            ``[b, s, hg, 2, d]`` for :attr:`qkv_interleave_dim` = -2). K/V are derived
+            as zero-copy views and the layout (e.g. ``bshd_bs2hd``) is declared, not
+            detected. Mutually exclusive with :attr:`key_layer`, :attr:`value_layer`
+            and :attr:`qkv_layer`.
+        qkv_interleave_dim: int, default = -3
+            Dimension of :attr:`qkv_layer`/:attr:`kv_layer` where the 3 (QKV) or 2 (KV)
+            interleave sits; must be -3 (e.g. ``bs3hd``) or -2 (e.g. ``bsh3d``,
+            Megatron-style). This is an explicit knob rather than shape inference,
+            since e.g. ``h == 3`` would make the shapes ambiguous.
         """
+
+        query_layer, key_layer, value_layer, declared_qkv_layout = _unpack_packed_qkv(
+            qkv_layer,
+            kv_layer,
+            query_layer,
+            key_layer,
+            value_layer,
+            qkv_format if qkv_format is not None else self.qkv_format,
+            qkv_interleave_dim,
+            inference_params,
+        )
 
         with self.prepare_forward_ctx(
             query_layer,
@@ -1561,7 +1708,15 @@ class DotProductAttention(TransformerEngineBaseModule):
                 cu_seqlens_kv_padded = None
 
             # get qkv's memory layout
-            if all(
+            if declared_qkv_layout is not None:
+                # Packed inputs (qkv_layer/kv_layer) declare the layout: the enum is
+                # truthful by construction, so the pointer-based detection in
+                # get_qkv_layout is skipped entirely -- for dense, thd (t3hd/th3d)
+                # and FP8 DPA alike.
+                qkv_layout = declared_qkv_layout
+                q_format = qkv_format
+                kv_format = qkv_format
+            elif all(
                 isinstance(x, Float8TensorStorage) for x in [query_layer, key_layer, value_layer]
             ):
                 (
@@ -1949,6 +2104,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                         inference_params=inference_params,
                         softmax_offset=softmax_offset,
                         fp8_output=fp8_output,
+                        packed_qkv=qkv_layer,
+                        packed_kv=kv_layer,
                     )
                 return self.fused_attention(
                     query_layer,
@@ -1984,6 +2141,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                     score_mod_bprop=score_mod_bprop,
                     score_mod_tensors=score_mod_tensors,
                     score_mod_bprop_tensors=score_mod_bprop_tensors,
+                    packed_qkv=qkv_layer,
+                    packed_kv=kv_layer,
                 )
 
             if use_unfused_attention:

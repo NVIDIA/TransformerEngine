@@ -25,6 +25,7 @@ from build_tools.utils import (
     remove_dups,
     min_python_version_str,
     nccl_ep_enabled,
+    get_max_jobs_for_parallel_build,
 )
 
 frameworks = get_frameworks()
@@ -207,11 +208,11 @@ def _discover_nccl_home() -> str:
 
 
 def build_nccl_ep_submodule() -> str:
-    """Build libnccl_ep.a from the 3rdparty/nccl submodule and return NCCL_HOME."""
-    nccl_root = current_file_path / "3rdparty" / "nccl"
-    if not (nccl_root / "Makefile").exists():
+    """Build libnccl_ep.a from the 3rdparty/nccl-extensions submodule and return NCCL_HOME."""
+    nccl_root = current_file_path / "3rdparty" / "nccl-extensions"
+    if not (nccl_root / "nccl_ep" / "Makefile").exists():
         raise RuntimeError(
-            f"NCCL submodule not found at {nccl_root}. "
+            f"NCCL EP submodule not found at {nccl_root}. "
             "Run `git submodule update --init --recursive`."
         )
 
@@ -250,7 +251,7 @@ def build_nccl_ep_submodule() -> str:
         )
     gencode = " ".join(f"-gencode=arch=compute_{a},code=sm_{a}" for a in arch_list)
 
-    nproc = os.cpu_count() or 8
+    nproc = get_max_jobs_for_parallel_build()
     env = os.environ.copy()
     env["NVCC_GENCODE"] = gencode
     # NCCL EP needs the core NCCL headers + libnccl.so; write NCCL EP build
@@ -267,13 +268,14 @@ def build_nccl_ep_submodule() -> str:
                 "rebuilding libnccl_ep.a"
             )
             subprocess.check_call(
-                ["make", "-C", "contrib/nccl_ep", "clean"],
+                ["make", "-C", "nccl_ep", "clean"],
                 cwd=str(nccl_root),
                 env=env,
             )
         print(f"[NCCL EP] Building libnccl_ep.a (gencode='{gencode}')")
+        make_jobs = f"-j{nproc}" if nproc else "-j"
         subprocess.check_call(
-            ["make", "-j", str(nproc), "-C", "contrib/nccl_ep", "lib"],
+            ["make", make_jobs, "-C", "nccl_ep", "lib"],
             cwd=str(nccl_root),
             env=env,
         )

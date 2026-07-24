@@ -446,10 +446,10 @@ option(NVTE_WITH_NCCL_EP "Build NCCL EP into libtransformer_engine.so" ON)
 if(NVTE_WITH_NCCL_EP)
 # SM>=90 and NCCL>=2.30.4 are gated at runtime in EPBackend::initialize.
 # -- NCCL EP headers --------------------------------------------------------
-# Headers + libs are produced by the in-tree 3rdparty/nccl submodule build
+# Headers + libs are produced by the in-tree 3rdparty/nccl-extensions submodule build
 # (auto-built by setup.py via build_nccl_ep_submodule).
 set(NCCL_EP_SUBMODULE_ROOT
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/nccl")
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/nccl-extensions")
 set(NCCL_EP_INCLUDE_DIR "${NCCL_EP_SUBMODULE_ROOT}/build/include")
 if(NOT EXISTS "${NCCL_EP_INCLUDE_DIR}/nccl_ep.h")
   message(FATAL_ERROR
