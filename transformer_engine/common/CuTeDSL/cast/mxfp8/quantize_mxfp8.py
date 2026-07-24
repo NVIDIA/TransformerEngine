@@ -20,6 +20,7 @@ shared memory.
 # Local @cute.struct classes are SMEM-layout descriptors that need no docstrings.
 # pylint: disable=missing-class-docstring
 
+import abc
 import logging
 import os
 from typing import Optional, Type
@@ -33,6 +34,7 @@ import tvm_ffi
 
 from transformer_engine.common.CuTeDSL.utils import (
     _bitcast_f32_to_i32,
+    device_compute_capability,
     str_to_cutlass_dtype,
     is_packed16,
     packed16_kit,
@@ -718,7 +720,31 @@ class MXFP8QuantizeConfig:
     __repr__ = __str__
 
 
-class MXFP8QuantizeKernel:
+class MXFP8QuantizeKernelBase(abc.ABC):
+    """Base class for MXFP8 quantize kernels."""
+
+    @abc.abstractmethod
+    def __call__(
+        self,
+        mX: cute.Tensor,
+        mO_row: Optional[cute.Tensor],
+        mS_row: Optional[cute.Tensor],
+        mO_col: Optional[cute.Tensor],
+        mS_col: Optional[cute.Tensor],
+        mAmax: Optional[cute.Tensor],
+        mNoop: Optional[cute.Tensor],
+        mDActInput: Optional[cute.Tensor],
+        mWorkspace: Optional[cute.Tensor],
+        stream: CUstream,
+    ):
+        """
+        Compiled kernel entrypoint (decorate with @cute.jit).
+        All MXFP8 quantize kernels must implement this interface because this is our C++ call site's contract in `quantize_mxfp8_cutedsl.cuh`.
+        C++ call site will pass the arguments in this exact order via tvm-ffi and the kernel must accept them even if they are not used.
+        """
+
+
+class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
     """The MXFP8 quantization kernel that mirrors the standard (non-specialized) MXFP8 CUDA C++ quantization kernel
     with multiple fusions (activation, dbias, etc.).
     `__call__` method is the entrypoint which is AOT compiled. `self` will be captured so it's fixed per compiled kernel
@@ -917,10 +943,15 @@ class MXFP8QuantizeKernel:
         tma_src_act,  # Activation derivative TMA atoms, or None if WITH_DACT is False
     ):
         """Device entry: no-op the CTA when the noop flag is set, else run the quantize main loop."""
-        cfg = self.cfg
-        # If WITH_NOOP is True and no ACT / DACT fusion is involved, the kernel becomes a no-op
-        noop = cfg.WITH_NOOP and not cfg.WITH_ACT and not cfg.WITH_DACT
-        if not cutlass.const_expr(noop) or mNoop[0] != Float32(1.0):
+
+        # Only check the noop flag when WITH_NOOP is True (the noop tensor is passed and it's not nullptr)
+        # and both WITH_ACT and WITH_DACT are False (it's legitimate to skip the quantization because no fusion is involved)
+        CHECK_NOOP_FLAG: cutlass.const_expr = (
+            self.cfg.WITH_NOOP and not self.cfg.WITH_ACT and not self.cfg.WITH_DACT
+        )
+        # Only perform the runtime check to read the noop flag's value when the compiled kernel allows us to do so
+        skip_execution = cutlass.const_expr(CHECK_NOOP_FLAG) and mNoop[0] == Float32(1.0)
+        if not skip_execution:
             self._kernel_main(
                 mX,
                 mS_row,
@@ -1537,7 +1568,7 @@ class MXFP8QuantizeKernel:
         )
 
 
-class MXFP8QuantizeSpecializedRowwiseKernel:
+class MXFP8QuantizeSpecializedRowwiseKernel(MXFP8QuantizeKernelBase):
     """Specialized cast-only ROWWISE-only MXFP8 kernel. Requires N % 128 == 0 (full vectorizable column chunks).
 
     Plain rowwise-only quantize. Each thread owns one 32-element MXFP8 chunk and
@@ -1562,7 +1593,7 @@ class MXFP8QuantizeSpecializedRowwiseKernel:
         mO_col: Optional[cute.Tensor],
         mS_col: Optional[cute.Tensor],  # Unused, kept for API compatibility
         mAmax: Optional[cute.Tensor],  # Unused, kept for API compatibility
-        mNoop: Optional[cute.Tensor],  # Unused, kept for API compatibility
+        mNoop: Optional[cute.Tensor],  # 1-element cast_noop flag, only used when WITH_NOOP is True
         mDActInput: Optional[cute.Tensor],  # Unused, kept for API compatibility
         mWorkspace: Optional[cute.Tensor],  # Unused, kept for API compatibility
         stream: CUstream,
@@ -1590,12 +1621,19 @@ class MXFP8QuantizeSpecializedRowwiseKernel:
             mX,
             mO_row,
             mS_row,
+            mNoop,
             self.cfg.MAX_NORM_RCP,
             mX.element_type,
         ).launch(grid=grid, block=block, stream=stream)
 
     @cute.kernel
-    def kernel(self, mX, mO_row, mS_row, max_norm_rcp, DTYPE):
+    def kernel(self, mX, mO_row, mS_row, mNoop, max_norm_rcp, DTYPE):
+        skip_execution = cutlass.const_expr(self.cfg.WITH_NOOP) and mNoop[0] == Float32(1.0)
+        if not skip_execution:
+            self._kernel_main(mX, mO_row, mS_row, max_norm_rcp, DTYPE)
+
+    @cute.jit
+    def _kernel_main(self, mX, mO_row, mS_row, max_norm_rcp, DTYPE):
         """Device entry for the specialized rowwise-only cast kernel (vectorized global loads/stores, no TMA)."""
         tidx, _, _ = cute.arch.thread_idx()
         bidx, bidy, _ = cute.arch.block_idx()
@@ -1736,7 +1774,7 @@ class MXFP8QuantizeSpecializedRowwiseKernel:
                 )
 
 
-class MXFP8QuantizeSpecializedBidimensionalKernel:
+class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
     """Specialized cast-only rowwise+colwise MXFP8 kernel (swizzled TMA, one 32x32 tile per warp)."""
 
     _WARPS_PER_CTA = 2
@@ -1833,6 +1871,7 @@ class MXFP8QuantizeSpecializedBidimensionalKernel:
             mX,
             mS_row,
             mS_col,
+            mNoop,
             self.cfg.MAX_NORM_RCP,
             mX.element_type,
             tma_atom,
@@ -1845,6 +1884,38 @@ class MXFP8QuantizeSpecializedBidimensionalKernel:
 
     @cute.kernel
     def kernel(
+        self,
+        mX,
+        mS_row,
+        mS_col,
+        mNoop,
+        max_norm_rcp,
+        dtype: cutlass.Constexpr[Type[cutlass.Numeric]],
+        tma_atom,
+        tma_src,
+        tma_atom_out_row,
+        tma_dst_out_row,
+        tma_atom_out_col,
+        tma_dst_out_col,
+    ):
+        skip_execution = cutlass.const_expr(self.cfg.WITH_NOOP) and mNoop[0] == Float32(1.0)
+        if not skip_execution:
+            self._kernel_main(
+                mX,
+                mS_row,
+                mS_col,
+                max_norm_rcp,
+                dtype,
+                tma_atom,
+                tma_src,
+                tma_atom_out_row,
+                tma_dst_out_row,
+                tma_atom_out_col,
+                tma_dst_out_col,
+            )
+
+    @cute.jit
+    def _kernel_main(
         self,
         mX,
         mS_row,
@@ -2169,7 +2240,7 @@ class MXFP8QuantizeSpecializedBidimensionalKernel:
                 # Find the position for this slot's vectorized store in the GMEM scale factor buffer
                 thread_y = bidy * ROWS + thread_idx // ACTIVE_THREAD_COLS
                 thread_x = bidx * COLS + (thread_idx % ACTIVE_THREAD_COLS) * WIDTH
-                # For rowwise we have N divisible by 4 and WIDTH=4, and for colwise we have N divisible by 128 and WIDTH=16, 
+                # For rowwise we have N divisible by 4 and WIDTH=4, and for colwise we have N divisible by 128 and WIDTH=16,
                 # so `thread_x < mS_N` with vectorized store is safe here.
                 # A thread only writes to a single row so `thread_y < mS_M` is also safe here.
                 if thread_y < mS_M and thread_x < mS_N:
@@ -2187,7 +2258,6 @@ def get_kernel_class(cfg):
         and not cfg.WITH_DBIAS
         and not cfg.WITH_DACT
         and not cfg.WITH_ACT
-        and not cfg.WITH_NOOP
     )
     # Only dispatch to the specialized kernels for packed16 types (bf16/fp16)
     if plain_cast_only and is_packed16(cfg.DTYPE):
@@ -2348,6 +2418,16 @@ def get_mxfp8_quantization_function(
     # Already registered (e.g. by a prior call) -> supported.
     if tvm_ffi.get_global_func(fn_name, allow_missing=True) is not None:
         return True
+
+    major, minor = device_compute_capability()
+    if major < 10:
+        logger.warning(
+            "CuTeDSL MXFP8 backend requires compute capability >= 10.0 (Blackwell), "
+            "but detected %d.%d; falling back to the CUDA C++ kernel.",
+            major,
+            minor,
+        )
+        return False
 
     try:
         cfg = MXFP8QuantizeConfig(

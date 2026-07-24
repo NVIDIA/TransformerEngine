@@ -240,19 +240,20 @@ class TVMFFICentral {
     static_assert(detail::is_lazyloadable_config<Config>::value,
                   "Config must define `std::string to_key() const` and "
                   "`bool retrieve_func_from_python(const std::string&) const`.");
-    // libtvm_ffi.so absent -> backend disabled, no tvm::ffi symbol is touched.
-    if (!tvm_ffi_available_) {
-      NVTE_WARN(
-          "Cannot dispatch to CuTeDSL kernels because libtvm_ffi.so is not successfully loaded."
-          " Will fall back to the default CUDA C++ kernels.");
-      return std::nullopt;
-    }
     if (!cutedsl_backend_enabled_.load(std::memory_order_relaxed)) {
       if (warn_cutedsl_backend_not_chosen_) {
         NVTE_WARN("CuTeDSL kernel for config `", cfg.to_key(),
                   "` is not supported because the CuTeDSL backend is disabled. "
                   "Set NVTE_ENABLE_CUTEDSL_QUANT_BACKEND=1 to enable it.");
       }
+      return std::nullopt;
+    }
+    // Only check if libtvm_ffi.so is loaded if user enables the CuTeDSL backend.
+    // So if user disables the CuTeDSL backend, don't output this warning message.
+    if (!tvm_ffi_available_) {
+      NVTE_WARN(
+          "Cannot dispatch to CuTeDSL kernels because libtvm_ffi.so is not successfully loaded."
+          " Will fall back to the default CUDA C++ kernels.");
       return std::nullopt;
     }
     const std::string key = cfg.to_key();

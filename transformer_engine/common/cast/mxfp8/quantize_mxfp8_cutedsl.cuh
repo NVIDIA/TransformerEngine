@@ -254,6 +254,9 @@ bool mxfp8_quantize_cutedsl(const Tensor *input_tensor, const Tensor *act_input_
   if constexpr (!Fused::supported) {
     return false;
   } else {
+    // Check this in C++, because the CuTeDSL kernel is compiled with an 1 element fake tensor
+    // so if we pass a nullptr or a tensor with nullptr data, when we check this tensor in CuTedsl
+    // it would violate the compiled kernel's assumption and will segfault.
     const bool with_noop = noop_tensor != nullptr && noop_tensor->data.dptr != nullptr;
     const MXFP8QuantConfig config{/*dtype=*/input_tensor->dtype(),
                                   /*fp8_dtype=*/output_tensor->dtype(),
