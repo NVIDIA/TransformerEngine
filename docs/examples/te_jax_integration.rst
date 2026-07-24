@@ -28,8 +28,11 @@ Pick a topic
      - *Coming soon*
      -
    * - `Attention <jax/attention.html>`_
-     - *Coming soon*
-     -
+     - **Available**
+     - BSHD GQA + SWA; single-GPU perf comparison; MLA-style head dimensions
+   * - `Context-Parallel Attention <jax/attention_context_parallel.html>`_
+     - **Available**
+     - Packed THD attention; Ring and AllGather CP; striped load balancing; SWA
    * - `Expert Parallelism <jax/expert_parallelism.html>`_
      - *Coming soon*
      -
@@ -92,4 +95,5 @@ Conventions used across these documents
    jax/dense
    jax/collective_gemm
    jax/attention
+   jax/attention_context_parallel
    jax/expert_parallelism
