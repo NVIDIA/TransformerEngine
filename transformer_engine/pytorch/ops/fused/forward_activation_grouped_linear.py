@@ -204,7 +204,7 @@ class ForwardScaledActivationGroupedLinear(FusedOperation):
         ops: list[FusibleOperation],
         *,
         recipe: Optional[Recipe] = None,
-        **unused,
+        **unused,  # pylint: disable=unused-argument
     ) -> list[FusibleOperation]:
         """Fuse each supported ScaledActivation + GroupedLinear pair."""
         out: list[FusibleOperation] = []

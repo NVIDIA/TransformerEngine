@@ -164,7 +164,7 @@ class BackwardScaledActivationGroupedLinear(FusedOperation):
         ops: list[FusibleOperation],
         *,
         recipe: Optional[Recipe] = None,
-        **unused,
+        **unused,  # pylint: disable=unused-argument
     ) -> list[FusibleOperation]:
         """Fuse each supported GroupedLinear + ScaledActivation pair."""
         out: list[FusibleOperation] = []
