@@ -4,7 +4,7 @@
 
 """Python interface for GEMM extensions"""
 
-from typing import Iterable, Optional, Tuple, Union, List
+from typing import Iterable, Literal, Optional, Tuple, Union, List
 import os
 import functools
 import torch
@@ -12,15 +12,20 @@ import transformer_engine_torch as tex
 from ..constants import TE_DType, DType
 from ..utils import get_sm_count, _empty_tensor
 
-from ..quantized_tensor import Quantizer
+from ..quantized_tensor import QuantizedTensorStorage, Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
+from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
+from ..tensor.mxfp8_tensor import MXFP8Quantizer
+from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
+from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
 from ..tensor.storage.grouped_tensor_storage import GroupedTensorStorage
+from ..tensor.storage.hybrid_tensor_storage import HybridQuantizedTensorStorage
+from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from ..tensor.utils import is_custom
 from ..custom_recipes.gemm import custom_gemm
 from ...debug.pytorch.debug_quantization import DebugQuantizer
-
 
 __all__ = [
     "general_gemm",
@@ -103,6 +108,67 @@ def _nvfp4_row_scaled_gemm_inputs(
     )
 
 
+_NATIVE_GEMM_INPUT_STORAGES = (
+    Float8TensorStorage,
+    MXFP8TensorStorage,
+    Float8BlockwiseQTensorStorage,
+    NVFP4TensorStorage,
+)
+
+
+def _unwrap_tensor(
+    tensor: Union[torch.Tensor, QuantizedTensorStorage],
+    usage: Literal["rowwise", "columnwise"],
+) -> Union[torch.Tensor, QuantizedTensorStorage]:
+    """Prepare a tensor for native or custom GEMM dispatch."""
+    if usage not in ("rowwise", "columnwise"):
+        raise ValueError(f"Unsupported GEMM tensor usage ({usage})")
+
+    # Plain PyTorch tensor
+    if not isinstance(tensor, QuantizedTensorStorage):
+        return tensor
+
+    # Select the direction of a hybrid tensor, then process its sub-storage.
+    if isinstance(tensor, HybridQuantizedTensorStorage):
+        sub_storage = (
+            tensor.rowwise_sub_storage if usage == "rowwise" else tensor.columnwise_sub_storage
+        )
+        return _unwrap_tensor(sub_storage, usage)
+
+    # Preserve custom tensors for custom_gemm dispatch.
+    if is_custom(tensor):
+        return tensor
+
+    # Quantized tensor formats with native GEMM support
+    if isinstance(tensor, _NATIVE_GEMM_INPUT_STORAGES):
+        return tensor
+
+    # Fall back to high-precision GEMM for other quantized tensor formats.
+    return tensor.dequantize()
+
+
+_NATIVE_GEMM_OUTPUT_QUANTIZERS = (
+    Float8Quantizer,
+    Float8CurrentScalingQuantizer,
+    MXFP8Quantizer,
+    Float8BlockQuantizer,
+    NVFP4Quantizer,
+)
+
+
+def _validate_native_gemm_output_quantizer(quantization_params):
+    """Validate that the native C++ GEMM path can convert an output quantizer."""
+    if quantization_params is not None and not isinstance(
+        quantization_params, _NATIVE_GEMM_OUTPUT_QUANTIZERS
+    ):
+        raise NotImplementedError(
+            f"{type(quantization_params).__name__} is not supported as a native "
+            "GEMM output quantizer. "
+            "Return a TE-native quantizer for output/grad_input roles or disable "
+            "quantized GEMM output for this boundary."
+        )
+
+
 def general_gemm(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -128,6 +194,9 @@ def general_gemm(
     assert layout in ("TN", "NN", "NT"), f"GEMM layout {layout} not supported."
     transa = layout[0] == "T"
     transb = layout[1] == "T"
+
+    A = _unwrap_tensor(A, "rowwise" if transa else "columnwise")
+    B = _unwrap_tensor(B, "columnwise" if transb else "rowwise")
 
     alpha = validate_gemm_scale(alpha, True)
     beta = validate_gemm_scale(beta, accumulate)
@@ -173,6 +242,8 @@ def general_gemm(
         quantization_params = quantization_params.parent_quantizer
         A = A.get_tensor(not transa)
         B = B.get_tensor(transb)
+
+    _validate_native_gemm_output_quantizer(quantization_params)
 
     # Use bfloat16 as default bias_dtype
     bias_dtype = TE_DType[torch.bfloat16 if bias is None else bias.dtype]
@@ -298,6 +369,9 @@ def general_grouped_gemm(
 
     transa = layout[0] == "T"
     transb = layout[1] == "T"
+
+    A = [_unwrap_tensor(a, "rowwise" if transa else "columnwise") for a in A]
+    B = [_unwrap_tensor(b, "columnwise" if transb else "rowwise") for b in B]
 
     empty_tensor = _empty_tensor()
     empty_tensors = [empty_tensor] * num_gemms

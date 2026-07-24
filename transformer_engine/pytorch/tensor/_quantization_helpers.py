@@ -9,11 +9,64 @@ the quantization machinery.
 """
 
 from __future__ import annotations
-from typing import Callable, Optional, Tuple, Any, Dict, TYPE_CHECKING
+from typing import Callable, Optional, Tuple, Any, Dict, Iterable, TYPE_CHECKING
 import torch
 
 if TYPE_CHECKING:
     from transformer_engine.pytorch.quantized_tensor import QuantizedTensor
+
+
+def _resolve_view_shape(input_shape: Iterable[int], shape: Iterable[int]) -> torch.Size:
+    """Resolve a requested view shape with PyTorch-compatible semantics.
+
+    The concrete-integer path avoids constructing a temporary meta tensor. If
+    either shape contains symbolic dimensions, retain the previous meta-tensor
+    path so that PyTorch remains responsible for symbolic shape handling.
+    """
+    input_shape = tuple(input_shape)
+    shape = tuple(shape)
+    if len(shape) == 1 and isinstance(shape[0], (list, tuple, torch.Size)):
+        shape = tuple(shape[0])
+
+    # Avoid comparisons that specialize or guard SymInts. The meta fallback is
+    # also useful for preserving PyTorch's type checking of non-integer dims.
+    if any(not isinstance(dim, int) or isinstance(dim, bool) for dim in (*input_shape, *shape)):
+        return torch.empty(input_shape, device="meta").view(shape).shape
+
+    input_numel = 1
+    for dim in input_shape:
+        input_numel *= dim
+
+    inferred_dim = None
+    known_numel = 1
+    for index, dim in enumerate(shape):
+        if dim == -1:
+            if inferred_dim is not None:
+                raise RuntimeError("only one dimension can be inferred")
+            inferred_dim = index
+        elif dim < 0:
+            raise RuntimeError(
+                f"invalid shape dimension {dim} at index {index} of shape {list(shape)}"
+            )
+        else:
+            known_numel *= dim
+
+    resolved_shape = list(shape)
+    if inferred_dim is not None:
+        if known_numel == 0:
+            if input_numel == 0:
+                raise RuntimeError(
+                    f"cannot reshape tensor of 0 elements into shape {list(shape)} because "
+                    "the unspecified dimension size -1 can be any value and is ambiguous"
+                )
+            raise RuntimeError(f"shape '{list(shape)}' is invalid for input of size {input_numel}")
+        if input_numel % known_numel != 0:
+            raise RuntimeError(f"shape '{list(shape)}' is invalid for input of size {input_numel}")
+        resolved_shape[inferred_dim] = input_numel // known_numel
+    elif known_numel != input_numel:
+        raise RuntimeError(f"shape '{list(shape)}' is invalid for input of size {input_numel}")
+
+    return torch.Size(resolved_shape)
 
 
 class _QuantizeFunc(torch.autograd.Function):

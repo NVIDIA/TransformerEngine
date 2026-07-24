@@ -12,7 +12,7 @@ import torch
 import transformer_engine_torch as tex
 
 from ...quantized_tensor import QuantizedTensorStorage, Quantizer
-from .._quantization_helpers import safe_quantized_repr
+from .._quantization_helpers import _resolve_view_shape, safe_quantized_repr
 
 from ...constants import TE_DType as torch_to_transformer_engine_dtype, TE_DType_To_Torch, DType
 
@@ -45,7 +45,23 @@ class _FromFloat8Func(torch.autograd.Function):
             # Cast from FP8
             return tex.dequantize(tensor, te_dtype)
 
-        raise NotImplementedError("Casting back from the transpose not implemented yet!")
+        if tensor._transpose is not None and not tensor._transpose_invalid:
+            # A columnwise-only tensor stores the logical last dimension first
+            # in its physical FP8 buffer. Dequantize that buffer as ordinary
+            # FP8 data, then restore logical row-major dimension order.
+            transpose_tensor = Float8TensorStorage(
+                data=tensor._transpose,
+                data_transpose=None,
+                fp8_scale_inv=tensor._scale_inv,
+                fp8_dtype=tensor._fp8_dtype,
+                fake_dtype=tensor._dtype,
+            )
+            output = _FromFloat8Func.forward(None, transpose_tensor, dtype)
+            if output.dim() > 0:
+                output = output.movedim(0, -1).contiguous()
+            return output
+
+        raise RuntimeError("Float8TensorStorage has neither rowwise nor columnwise data")
 
     @staticmethod
     def backward(
@@ -175,12 +191,15 @@ class Float8TensorStorage(QuantizedTensorStorage):
             dtype = self._dtype
         return _FromFloat8Func.forward(None, self, dtype)
 
-    def size(self, *args, **kwargs):
+    def size(self, dim: Optional[int] = None) -> Union[torch.Size, int]:
         # pylint: disable=missing-function-docstring
         if self._data is not None:
-            return self._data.size(*args, **kwargs)
-        size = self._transpose.size(*args, **kwargs)
-        return torch.Size([size[-1], math.prod(size[:-1])])
+            return self._data.size(dim)
+        transpose_size = self._transpose.size()
+        size = torch.Size([transpose_size[-1], math.prod(transpose_size[:-1])])
+        if dim is None:
+            return size
+        return size[dim]
 
     @property
     def device(self):
@@ -193,12 +212,31 @@ class Float8TensorStorage(QuantizedTensorStorage):
 
     def view(self, shape: torch.Size):
         # pylint: disable=missing-function-docstring
-        out_data = self._data.view(shape)
+        out_data = self._data.view(shape) if self._data is not None else None
+        if out_data is not None:
+            out_shape = out_data.size()
+        else:
+            out_shape = _resolve_view_shape(self.size(), shape)
         out_transpose = None if self._transpose_invalid else self._transpose
         if out_transpose is not None:
-            out_transpose_shape = out_transpose.size()
-            if out_transpose_shape[0] != shape[-1] or out_transpose_shape[1:] != shape[:-1]:
+            if len(out_shape) == 0:
+                view_shape_for_transpose = out_shape
+            else:
+                view_shape_for_transpose = torch.Size((out_shape[-1], *out_shape[:-1]))
+            if out_transpose.shape != view_shape_for_transpose:
+                if self._data is None:
+                    raise NotImplementedError(
+                        "Float8TensorStorage view with columnwise-only data is only "
+                        "supported when the requested shape preserves the columnwise layout"
+                    )
                 out_transpose = None
+            else:
+                out_transpose = out_transpose.view(*view_shape_for_transpose)
+        if self._data is None and out_transpose is None:
+            raise NotImplementedError(
+                "Float8TensorStorage view with columnwise-only data requires a valid "
+                "columnwise buffer"
+            )
 
         return Float8TensorStorage(
             data=out_data,
@@ -224,6 +262,10 @@ class Float8TensorStorage(QuantizedTensorStorage):
     def _create_transpose(self):
         """Update FP8 transpose cache"""
         data = self._data
+        # Columnwise-only Float8Tensors (e.g. hybrid quantization sub-storages)
+        # have _data=None — nothing to transpose.
+        if data is None:
+            return
         if not data.is_contiguous():
             data = data.contiguous()
         self._transpose = tex.fp8_transpose(data, self._fp8_dtype, out=self._transpose)
@@ -277,3 +319,90 @@ class Float8TensorStorage(QuantizedTensorStorage):
         else:
             usages["columnwise"] = self._transpose is not None and not self._transpose_invalid
         return usages
+
+    def fsdp_buffer_fields(self) -> Tuple[str, ...]:
+        """Fields gathered by FSDP2 for per-tensor FP8.
+
+        ``_scale_inv`` is a per-tensor scalar; it travels through the hook's
+        metadata tuple (mirroring :meth:`Float8Tensor.fsdp_pre_all_gather`).
+
+        Direction-aware: a vanilla Float8Tensor parameter has ``_data``
+        populated, but a columnwise-only sub-storage (used inside
+        ``HybridQuantizedTensor`` on Hopper / L40 where non-TN FP8 GEMM is
+        not natively supported) holds its quantized data in ``_transpose``
+        instead. Returning ``("_data",)`` unconditionally would have
+        ``fsdp_extract_buffers`` produce ``(None,)`` and FSDP2 would
+        all-gather a ``None`` tensor.
+
+        The per-sub-storage direction is fixed at construction (pinned by
+        ``HybridQuantizer.__init__`` via ``set_usage``), so this check is
+        stable across iterations even though it inspects the current
+        field state.
+        """
+        if self._data is not None:
+            return ("_data",)
+        if self._transpose is not None:
+            return ("_transpose",)
+        # Degenerate: fully empty storage. Fall back to ``_data`` so the
+        # base ``fsdp_extract_buffers`` returns ``(None,)`` — same surface
+        # the caller would have seen pre-direction-aware logic.
+        return ("_data",)
+
+    def fsdp_extract_buffers(
+        self,
+    ) -> Tuple[Tuple[Optional[torch.Tensor], ...], Dict[str, Any]]:
+        """Extract dim-0 gather-safe buffers for per-tensor Float8.
+
+        Rowwise ``_data`` is already M-major. A transpose-only Hopper/L40
+        payload is physically ``[N, *M]`` and cannot be gathered directly
+        because FSDP2 grows physical dimension 0. Move N back to the logical
+        last dimension and make the transport buffer contiguous so FSDP2 sees
+        ``[*M, N]``. :meth:`fsdp_assign_gathered` restores the persistent
+        columnwise layout after the collective.
+        """
+        names = self.fsdp_buffer_fields()
+        if names == ("_transpose",):
+            if self._transpose is None or self._transpose_invalid:
+                raise RuntimeError(
+                    "Float8TensorStorage cannot extract an invalid columnwise transpose"
+                )
+            transport = self._transpose
+            if transport.dim() > 0:
+                transport = transport.movedim(0, -1).contiguous()
+            return (transport,), {
+                "field_names": names,
+                "transport_layout": "columnwise_m_major",
+            }
+        buffers = tuple(getattr(self, name) for name in names)
+        return buffers, {"field_names": names, "transport_layout": "native"}
+
+    def fsdp_assign_gathered(
+        self,
+        gathered: Tuple[Optional[torch.Tensor], ...],
+        meta: Dict[str, Any],
+    ) -> None:
+        """Restore gathered Float8 buffers to their persistent layout."""
+        transport_layout = meta.get("transport_layout", "native")
+        if transport_layout == "columnwise_m_major":
+            if meta.get("field_names") != ("_transpose",) or len(gathered) != 1:
+                raise RuntimeError(
+                    "Float8TensorStorage got invalid metadata for columnwise FSDP transport"
+                )
+            (transport,) = gathered
+            if transport is None:
+                raise RuntimeError(
+                    "Float8TensorStorage got a None columnwise FSDP transport buffer"
+                )
+            self._data = None
+            if transport.dim() > 0:
+                transport = transport.movedim(-1, 0).contiguous()
+            self._transpose = transport
+            self._transpose_invalid = False
+            return
+        if transport_layout != "native":
+            raise RuntimeError(
+                f"Float8TensorStorage got unknown FSDP transport layout {transport_layout!r}"
+            )
+        super().fsdp_assign_gathered(gathered, meta)
+        if "_transpose" in meta["field_names"]:
+            self._transpose_invalid = False

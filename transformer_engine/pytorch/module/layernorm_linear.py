@@ -69,6 +69,7 @@ from ._common import (
     apply_normalization,
     noop_cat,
     set_quantizer_amax_reduction_group,
+    set_quantizer_usage_for_wgrad_all_gather,
     WeightGradStore,
 )
 from ..quantized_tensor import (
@@ -80,6 +81,8 @@ from ..quantized_tensor import (
 )
 from ...debug.pytorch.debug_state import TEDebugState
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
+from ..tensor.hybrid_tensor import HybridQuantizer
+from ..tensor.identity_tensor import IdentityQuantizer
 from ..cpu_offload import (
     is_cpu_offload_enabled,
     start_offload,
@@ -236,6 +239,8 @@ class _LayerNormLinear(torch.autograd.Function):
         # Avoid quantized norm kernel if norm output will be returned
         # or if a gather of ln_out must be in high precision.
         custom = is_custom(input_quantizer)
+        hybrid = isinstance(input_quantizer, HybridQuantizer)
+        identity = isinstance(input_quantizer, IdentityQuantizer)
         with_quantized_norm = (
             fp8
             and not debug
@@ -243,6 +248,8 @@ class _LayerNormLinear(torch.autograd.Function):
             and not return_layernorm_output_gathered
             and backward_override is None
             and not custom  # TODO(negvet): and not FP8GlobalStateManager.get_fp8_recipe().custom()
+            and not hybrid
+            and not identity
         )
 
         # Apply normalization
@@ -767,12 +774,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 quantizer = None
                 if ctx.input_quantizer is not None and ctx.fp8:
                     quantizer = ctx.input_quantizer
-                    if quantizer.supports_only_rowwise_all_gather():
-                        # If data is in FP8, we compute FP8 transposes manually
-                        quantizer.set_usage(rowwise=True, columnwise=False)
-                    else:
-                        # wgrad GEMM requires input with column-wise usage
-                        quantizer.set_usage(rowwise=False, columnwise=True)
+                    set_quantizer_usage_for_wgrad_all_gather(quantizer)
                 if ctx.ub_bulk_dgrad:
                     ln_out_total, _ = fill_userbuffers_buffer_for_all_gather(
                         ub_obj_dgrad,
@@ -929,7 +931,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 and ctx.ub_obj_gradout.with_cublasmp()
             ):
                 if ctx.grad_output_quantizer is not None:
-                    ctx.grad_output_quantizer.set_usage(rowwise=True, columnwise=False)
+                    set_quantizer_usage_for_wgrad_all_gather(ctx.grad_output_quantizer)
                 grad_output, _ = gather_along_first_dim(
                     grad_output,
                     ctx.tp_group,

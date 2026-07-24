@@ -13,6 +13,7 @@ import torch
 from .. import cpp_extensions as tex
 from ..constants import TE_DType
 from ..export import is_in_onnx_export_mode
+from ..tensor.hybrid_tensor import HybridQuantizer
 from ..utils import get_default_init_method
 
 
@@ -29,6 +30,36 @@ def set_quantizer_amax_reduction_group(quantizer, amax_reduction_group) -> None:
     if target is not None and hasattr(target, "with_amax_reduction"):
         target.with_amax_reduction = amax_reduction_group is not None
         target.amax_reduction_group = amax_reduction_group
+
+
+def set_quantizer_usage_for_wgrad_all_gather(quantizer) -> None:
+    """Configure an all-gather output for consumption by wgrad."""
+    if quantizer is None:
+        return
+
+    target = getattr(quantizer, "parent_quantizer", quantizer)
+
+    # Hybrid currently gathers in high precision, then quantizes the full
+    # result, so request the columnwise representation consumed by wgrad.
+    if isinstance(target, HybridQuantizer):
+        target.set_usage(rowwise=False, columnwise=True)
+    elif target.supports_only_rowwise_all_gather():
+        # Per-tensor FP8 gathers rowwise data and synthesizes its transpose.
+        target.set_usage(rowwise=True, columnwise=False)
+    else:
+        target.set_usage(rowwise=False, columnwise=True)
+
+
+def can_reconstruct_wgrad_input_from_original(quantizer) -> bool:
+    """Whether wgrad input can be reconstructed from a saved original tensor."""
+    target = getattr(quantizer, "parent_quantizer", quantizer)
+    if target is None:
+        target = quantizer
+    if isinstance(target, HybridQuantizer):
+        if target.columnwise_source == "original":
+            return True
+        return target.rowwise_quantizer.is_requantization_safe()
+    return target.is_requantization_safe()
 
 
 def _get_normalization_func(normalization: str, forward: bool):

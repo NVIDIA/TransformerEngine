@@ -12,6 +12,10 @@ import torch
 
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
+from hybrid_quantization_utils import (
+    hybrid_fp8_mxfp8_qfactory,
+    hybrid_mxfp8_nvfp4_qfactory,
+)
 from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
 from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
 from utils import ModelConfig, get_available_attention_backends
@@ -19,10 +23,20 @@ from utils import ModelConfig, get_available_attention_backends
 # Check supported quantization schemes
 fp8_available = te.is_fp8_available()
 mxfp8_available = te.is_mxfp8_available()
+nvfp4_available = te.is_nvfp4_available()
+
 
 quantization_recipes: Optional[recipe.Recipe] = [None]
 if fp8_available:
     quantization_recipes.extend((recipe.Float8CurrentScaling(), recipe.DelayedScaling()))
+if fp8_available and mxfp8_available:
+    quantization_recipes.append(recipe.CustomRecipe(qfactory=hybrid_fp8_mxfp8_qfactory))
+if mxfp8_available and nvfp4_available:
+    quantization_recipes.append(recipe.CustomRecipe(qfactory=hybrid_mxfp8_nvfp4_qfactory))
+
+hybrid_quantization_recipes = [
+    item for item in quantization_recipes if item is not None and item.custom()
+]
 
 model_config = {
     "small": ModelConfig(8, 512, 8, 64, num_layers=5, eps=0.1),
@@ -99,6 +113,15 @@ def _estimate_cached_weight_size(
     # The weight params are cached directly for unquantized compute
     if quantization_recipe is None:
         return 0
+
+    # Hybrid (CustomRecipe) caches two sub-storages per weight with
+    # potentially different formats. Returning ``None`` signals the caller
+    # to skip the exact memory-accounting assertion — the ``memory_with_offload
+    # < memory_without_offload`` check still applies. Deriving an analytical
+    # estimate here is blocked on the FSDP2-style packing optimization still
+    # being a TODO in hybrid_quantization_design.md.
+    if quantization_recipe.custom():
+        return None
 
     # Count number of weight param elements
     param_elements = 0
@@ -184,6 +207,19 @@ def _measure_cached_memory(
 def test_cpu_offload(quantization_recipe: Optional[recipe.Recipe], model_name: str) -> None:
     """Check that CPU offloading runs and has expected memory usage."""
 
+    # Skip hybrid (CustomRecipe) on module types whose integration with hybrid
+    # is not yet complete (preexisting, independent of CPU offload):
+    # - layernorm_mlp_ops: the ops-based LayerNorm passes the quantizer
+    #   directly to the fused C++ kernel which does not recognize
+    #   HybridQuantizer (cf. design doc; the regular layernorm_mlp.py has
+    #   an unfused fallback but the ops path does not yet).
+    if (
+        model_name in ("layernorm_mlp_ops",)
+        and quantization_recipe is not None
+        and quantization_recipe.custom()
+    ):
+        pytest.skip(f"Hybrid CustomRecipe + {model_name} integration is not yet complete")
+
     # Construct model
     modules_list = [model_types[model_name]() for _ in range(NUM_LAYERS)]
     if model_name in ["multihead_attention", "transformer_layer"]:
@@ -212,4 +248,98 @@ def test_cpu_offload(quantization_recipe: Optional[recipe.Recipe], model_name: s
         modules_list,
         quantization_recipe,
     )
-    assert abs(memory_with_offload - memory_from_cached_weights) < EPSILON
+    # ``_estimate_cached_weight_size`` returns ``None`` for recipes whose
+    # analytical cached-weight size is not worked out (CustomRecipe / hybrid);
+    # in that case the memory-savings assertion above is the only check.
+    if memory_from_cached_weights is not None:
+        assert abs(memory_with_offload - memory_from_cached_weights) < EPSILON
+
+
+@pytest.mark.parametrize(
+    "quantization_recipe",
+    hybrid_quantization_recipes,
+    ids=[item.qfactory.__name__ for item in hybrid_quantization_recipes],
+)
+def test_hybrid_cpu_offload_numerics_exact(quantization_recipe: recipe.Recipe) -> None:
+    """V1 offload must preserve hybrid forward and backward values bitwise."""
+
+    def run(modules, inp, grad_output, *, cpu_offload):
+        if cpu_offload:
+            offload_context, sync_function = te.get_cpu_offload_context(
+                enabled=True,
+                num_layers=len(modules),
+                model_layers=len(modules) + 1,
+                offload_activations=True,
+                offload_weights=False,
+            )
+        else:
+            offload_context = contextlib.nullcontext()
+            sync_function = lambda tensor: tensor
+
+        out = inp
+        for module in modules:
+            with te.autocast(enabled=True, recipe=quantization_recipe), offload_context:
+                out = module(out)
+            out = sync_function(out)
+        # Commit the final offload group, mirroring the memory test above.
+        with offload_context:
+            out = out.clone()
+        out = sync_function(out)
+        out.backward(grad_output)
+
+        grads = {}
+        for module_index, module in enumerate(modules):
+            for name, param in module.named_parameters():
+                assert param.grad is not None
+                grads[f"{module_index}.{name}"] = param.grad.detach().clone()
+        assert inp.grad is not None
+        return out.detach().clone(), inp.grad.detach().clone(), grads
+
+    torch.manual_seed(9000)
+    reference_modules = [model_types["linear"]() for _ in range(2)]
+    torch.manual_seed(9001)
+    offload_modules = [model_types["linear"]() for _ in range(2)]
+    with torch.no_grad():
+        for offload_module, reference_module in zip(offload_modules, reference_modules):
+            for offload_param, reference_param in zip(
+                offload_module.parameters(), reference_module.parameters()
+            ):
+                offload_param.copy_(reference_param)
+
+    # V1 requires one pass to initialize cached quantized weight workspaces.
+    warmup_rng_state = torch.cuda.get_rng_state()
+    _warmup_model(offload_modules, quantization_recipe)
+    for module in offload_modules:
+        module.zero_grad(set_to_none=True)
+    torch.cuda.set_rng_state(warmup_rng_state)
+    _warmup_model(reference_modules, quantization_recipe)
+    for module in reference_modules:
+        module.zero_grad(set_to_none=True)
+
+    torch.manual_seed(9002)
+    x = torch.randn((8, SIZE, SIZE), device="cuda", dtype=torch.bfloat16)
+    grad_output = torch.randn_like(x)
+    x_offload = x.detach().clone().requires_grad_(True)
+    x_reference = x.detach().clone().requires_grad_(True)
+
+    # Replay identical stochastic-rounding/RHT randomness in both paths.
+    rng_state = torch.cuda.get_rng_state()
+    offload_out, offload_input_grad, offload_param_grads = run(
+        offload_modules, x_offload, grad_output, cpu_offload=True
+    )
+    torch.cuda.set_rng_state(rng_state)
+    reference_out, reference_input_grad, reference_param_grads = run(
+        reference_modules, x_reference, grad_output, cpu_offload=False
+    )
+
+    torch.testing.assert_close(offload_out, reference_out, rtol=0.0, atol=0.0)
+    torch.testing.assert_close(offload_input_grad, reference_input_grad, rtol=0.0, atol=0.0)
+    assert offload_param_grads.keys() == reference_param_grads.keys()
+    for name, reference_grad in reference_param_grads.items():
+        torch.testing.assert_close(
+            offload_param_grads[name],
+            reference_grad,
+            rtol=0.0,
+            atol=0.0,
+            msg=f"V1 CPU-offload parameter gradient mismatch for {name}",
+        )

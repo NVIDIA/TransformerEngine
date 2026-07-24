@@ -133,6 +133,65 @@ class QuantizedTensorStorage:
             f"{self.__class__.__name__} class does not implement copy_from_storage function"
         )
 
+    # ── FSDP2 buffer protocol ───────────────────────────────────────
+    #
+    # These three methods decouple FSDP2 all-gather buffer extraction from
+    # format-specific padding/layout tricks. `HybridQuantizedTensor` uses them
+    # to aggregate buffers from its two sub-storages without knowing each
+    # sub-storage's internal field layout.
+    #
+    # Contract:
+    #   * ``fsdp_buffer_fields`` returns an ordered tuple of attribute names
+    #     on *self* that hold the tensor buffers that must be all-gathered.
+    #     Scalars/metadata that only need broadcasting (e.g. per-tensor FP8
+    #     ``_scale_inv``) are NOT listed here — they travel via the hook's
+    #     metadata tuple instead.
+    #   * ``fsdp_extract_buffers`` returns ``(buffers, reassembly_meta)``.
+    #     The default implementation reads the fields as-is. Sub-storages with
+    #     gather-time padding (MXFP8 block scales) override this to strip the
+    #     padding before gather.
+    #   * ``fsdp_assign_gathered`` writes the gathered buffers back into the
+    #     storage's fields. Sub-storages with gather-time padding override
+    #     this to re-apply the padding before assignment.
+
+    def fsdp_buffer_fields(self) -> Tuple[str, ...]:
+        """Ordered attribute names holding tensor buffers gathered by FSDP2."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement fsdp_buffer_fields"
+        )
+
+    def fsdp_extract_buffers(
+        self,
+    ) -> Tuple[Tuple[Optional[torch.Tensor], ...], Dict[str, Any]]:
+        """Return ``(buffers, reassembly_meta)`` for FSDP2 all-gather.
+
+        Default implementation reads the fields named by ``fsdp_buffer_fields``
+        verbatim. Override when the on-disk layout differs from the
+        gather-ready layout (e.g. MXFP8 block scales carry alignment padding).
+        """
+        names = self.fsdp_buffer_fields()
+        buffers = tuple(getattr(self, name) for name in names)
+        return buffers, {"field_names": names}
+
+    def fsdp_assign_gathered(
+        self,
+        gathered: Tuple[Optional[torch.Tensor], ...],
+        meta: Dict[str, Any],
+    ) -> None:
+        """Write gathered buffers into the fields named in ``meta``.
+
+        Override when the gather-ready layout needs a format-specific transform
+        (e.g. MXFP8 scales must be padded back to ``[128, 4]`` / ``[4, 128]``).
+        """
+        names = meta["field_names"]
+        if len(names) != len(gathered):
+            raise RuntimeError(
+                f"{type(self).__name__}.fsdp_assign_gathered got "
+                f"{len(gathered)} buffers for {len(names)} fields"
+            )
+        for name, buf in zip(names, gathered):
+            setattr(self, name, buf)
+
 
 def prepare_for_saving(
     *tensors: Union[torch.Tensor, QuantizedTensorStorage],
@@ -394,6 +453,14 @@ class Quantizer(abc.ABC):
         """Returns True if the quantizer supports only rowwise all-gather"""
         return False
 
+    def is_requantization_safe(self) -> bool:
+        """Whether repeated quantization of the same input reproduces the same value.
+
+        Stateful or stochastic quantizers should return ``False``. This lets callers
+        decide whether a quantized value may be discarded and reconstructed later.
+        """
+        return False
+
     def is_quantizable(self, inp: torch.Tensor) -> bool:  # pylint: disable=unused-argument
         """Whether tensor supports quantized all-gather
 
@@ -501,6 +568,7 @@ class QuantizedTensor(torch.Tensor):
         requires_grad: bool = False,
         device: Optional[torch.device] = None,
         stride: Optional[Iterable[int]] = None,
+        storage_offset: int = 0,
     ):
         if fake_dtype is not None and fake_dtype != dtype:
             raise ValueError(f"fake_dtype ({fake_dtype}) does not match dtype ({dtype})")
@@ -513,7 +581,7 @@ class QuantizedTensor(torch.Tensor):
             cls,
             shape,
             strides=stride,
-            storage_offset=0,
+            storage_offset=storage_offset,
             dtype=dtype,
             layout=torch.strided,
             requires_grad=requires_grad,

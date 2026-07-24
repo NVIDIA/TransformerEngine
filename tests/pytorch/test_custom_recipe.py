@@ -11,20 +11,29 @@ from transformer_engine.common import recipe
 from transformer_engine.pytorch.constants import FP8BwdTensorIdx, FP8FwdTensorIdx
 from transformer_engine.pytorch import (
     autocast,
+    Fp8Padding,
+    Fp8Unpadding,
     Linear,
     LayerNormLinear,
     LayerNormMLP,
     GroupedLinear,
     Float8CurrentScalingQuantizer,
 )
-from transformer_engine.pytorch.quantization import QuantizerRole
+from transformer_engine.pytorch.quantization import (
+    QuantizerRole,
+    get_align_size_for_quantization,
+)
 import transformer_engine.pytorch.ops as te_ops
-from transformer_engine.pytorch.custom_recipes.quantization_recipes_base import (
+from transformer_engine.pytorch.custom_recipes.quantization_factory_base import (
     current_scaling_quantizer_factory,
     mxfp8_quantizer_factory,
     float8_block_scaling_quantizer_factory,
     nvfp4_quantizer_factory,
     delayed_scaling_quantizer_factory,
+    high_precision_factory,
+)
+from transformer_engine.pytorch.custom_recipes.quantization_factory_zoo import (
+    mxfp8_fwd_nvfp4_bwd_quantizer_factory,
 )
 from transformer_engine.pytorch.custom_recipes.quantization_ref_nvfp4 import (
     nvfp4_ref_rht_2d_quantizer_factory,
@@ -472,6 +481,40 @@ def test_factory_matches_nvfp4():
     )
     out_cus, grad_cus, pgrads_cus = _run_linear_fwd_bwd(
         model_cus, inp_cus, recipe.CustomRecipe(qfactory=nvfp4_quantizer_factory)
+    )
+
+    _assert_match(out_ref, out_cus, grad_ref, grad_cus, pgrads_ref, pgrads_cus)
+
+
+def test_factory_matches_high_precision():
+    """high_precision_factory (all IdentityQuantizer) should produce bit-identical
+    results to running with no quantization (plain BF16, no autocast).
+
+    Unlike the other ``test_factory_matches_*`` cases, the reference here is not a
+    built-in recipe but the unquantized path: IdentityQuantizer leaves tensors
+    untouched, so the GEMMs run in high precision exactly as they would with
+    autocast disabled.
+
+    Note: the custom side still runs inside ``autocast(enabled=True, ...)``, which
+    asserts FP8 availability on entry, so this test skips on non-FP8 hardware even
+    though no tensor is actually quantized.
+    """
+    available, reason = te.is_fp8_available(return_reason=True)
+    if not torch.cuda.is_available() or not available:
+        pytest.skip(f"FP8 unsupported: {reason}")
+
+    model_ref, model_cus, inp_ref, inp_cus = _make_pair()
+
+    # Reference: no autocast -> high-precision GEMMs, no quantization.
+    with autocast(enabled=False):
+        out_ref = model_ref(inp_ref)
+    out_ref.float().sum().backward()
+    out_ref = out_ref.clone()
+    grad_ref = inp_ref.grad.clone()
+    pgrads_ref = {n: p.grad.clone() for n, p in model_ref.named_parameters() if p.grad is not None}
+
+    out_cus, grad_cus, pgrads_cus = _run_linear_fwd_bwd(
+        model_cus, inp_cus, recipe.CustomRecipe(qfactory=high_precision_factory)
     )
 
     _assert_match(out_ref, out_cus, grad_ref, grad_cus, pgrads_ref, pgrads_cus)
@@ -1063,7 +1106,7 @@ def test_role_change_does_not_invalidate_when_role_unchanged():
 
 
 def test_custom_recipe_dpa_fp8():
-    """DotProductAttention forward+backward with CustomRecipe and role-based mixed quantizers.
+    """DotProductAttention forward+backward with CustomRecipe and role-based DPA quantizers.
 
     Uses the nvfp4_linear_fp8_dpa_factory which dispatches:
       * DPA S/dP slots -> DelayedScalingRequest (stateful)
@@ -1090,7 +1133,7 @@ def test_custom_recipe_dpa_fp8():
         Float8Quantizer,
         Float8CurrentScalingQuantizer,
     )
-    from transformer_engine.pytorch.custom_recipes.quantization_factory_examples import (
+    from transformer_engine.pytorch.custom_recipes.quantization_factory_zoo import (
         nvfp4_linear_fp8_dpa_factory,
     )
 
@@ -1217,7 +1260,7 @@ def test_custom_recipe_dpa_mxfp8():
     from transformer_engine.pytorch.quantization import CustomRecipeState
     from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
     from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
-    from transformer_engine.pytorch.custom_recipes.quantization_factory_examples import (
+    from transformer_engine.pytorch.custom_recipes.quantization_factory_zoo import (
         nvfp4_linear_mxfp8_dpa_factory,
     )
 
@@ -1849,3 +1892,94 @@ def test_slot_role_supports_module_type_only_role():
     assert resolved.name == ""
     # Tensor-type-only recipes fall back to positional for this slot.
     assert state._slot_tensor_type(0) == "input"
+
+
+_alignment_fp8_available, _alignment_fp8_reason = te.is_fp8_available(return_reason=True)
+_alignment_mxfp8_available, _alignment_mxfp8_reason = te.is_mxfp8_available(return_reason=True)
+_alignment_nvfp4_available, _alignment_nvfp4_reason = te.is_nvfp4_available(return_reason=True)
+
+
+def test_custom_recipe_quantization_alignment_contract():
+    """The alignment contract is safe, configurable, and does not invoke qfactory."""
+    calls = []
+
+    def qfactory(role):
+        calls.append(role)
+        return current_scaling_quantizer_factory(role)
+
+    custom_recipe = recipe.CustomRecipe(qfactory=qfactory)
+    assert get_align_size_for_quantization(custom_recipe) == 128
+    assert calls == []
+
+    custom_recipe = recipe.CustomRecipe(qfactory=qfactory, quantization_alignment=32)
+    assert get_align_size_for_quantization(custom_recipe) == 32
+    assert calls == []
+
+    with pytest.raises(ValueError, match="quantization_alignment must be positive"):
+        recipe.CustomRecipe(qfactory=qfactory, quantization_alignment=0)
+
+
+@pytest.mark.parametrize(
+    "qfactory",
+    [
+        pytest.param(
+            current_scaling_quantizer_factory,
+            marks=pytest.mark.skipif(
+                not _alignment_fp8_available,
+                reason=_alignment_fp8_reason,
+            ),
+            id="fp8_current_scaling",
+        ),
+        pytest.param(
+            mxfp8_quantizer_factory,
+            marks=pytest.mark.skipif(
+                not _alignment_mxfp8_available,
+                reason=_alignment_mxfp8_reason,
+            ),
+            id="mxfp8",
+        ),
+        pytest.param(
+            nvfp4_quantizer_factory,
+            marks=pytest.mark.skipif(
+                not _alignment_nvfp4_available,
+                reason=_alignment_nvfp4_reason,
+            ),
+            id="nvfp4",
+        ),
+        pytest.param(
+            mxfp8_fwd_nvfp4_bwd_quantizer_factory,
+            marks=pytest.mark.skipif(
+                not (_alignment_mxfp8_available and _alignment_nvfp4_available),
+                reason=f"MXFP8: {_alignment_mxfp8_reason}; NVFP4: {_alignment_nvfp4_reason}",
+            ),
+            id="hybrid_mxfp8_nvfp4",
+        ),
+    ],
+)
+def test_custom_recipe_automatic_padding_bad_splits(qfactory):
+    """Automatic alignment makes misaligned CustomRecipe grouped GEMMs valid."""
+    custom_recipe = recipe.CustomRecipe(qfactory=qfactory)
+    padding = Fp8Padding(2)
+    unpadding = Fp8Unpadding(2)
+    grouped_linear = GroupedLinear(
+        2,
+        128,
+        128,
+        bias=False,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+    )
+    inp = torch.randn(32, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    original_splits = [17, 15]
+
+    with autocast(enabled=True, recipe=custom_recipe):
+        padded_inp, padded_splits = padding(inp, original_splits)
+        assert padding.align_size == get_align_size_for_quantization(custom_recipe) == 128
+        assert padded_splits == [128, 128]
+        padded_out = grouped_linear(padded_inp, padded_splits)
+        out = unpadding(padded_out, original_splits)
+
+    out.sum().backward()
+    assert out.shape == (sum(original_splits), 128)
+    assert torch.isfinite(out).all()
+    assert torch.isfinite(inp.grad).all()
