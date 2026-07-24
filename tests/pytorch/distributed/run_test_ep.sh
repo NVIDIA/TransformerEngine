@@ -45,11 +45,13 @@ RET=0
 run_pass() {
   local label="$1"
   local zc="$2"
+  local eager="${3:-0}"
+  local overflow="${4:-0}"
   local log="stdout_ep_${label}.txt"
   echo "=== Running ${SCRIPT} [${label}] on ${NUM_RANKS} GPUs (timeout=${TEST_TIMEOUT_S}s) ==="
   # setsid + kill-after so SIGKILL takes down the whole process group, not just torchrun.
-  NVTE_EP_ZERO_COPY="${zc}" setsid timeout --foreground --kill-after=10 --signal=TERM \
-    "${TEST_TIMEOUT_S}" \
+  NVTE_EP_ZERO_COPY="${zc}" NVTE_EP_EAGER="${eager}" NVTE_EP_OVERFLOW="${overflow}" setsid timeout --foreground \
+    --kill-after=10 --signal=TERM "${TEST_TIMEOUT_S}" \
     torchrun --standalone --nnodes=1 --nproc-per-node="${NUM_RANKS}" \
     "${SCRIPT}" 2>&1 | tee "${log}"
   local rc=${PIPESTATUS[0]}
@@ -68,5 +70,7 @@ run_pass() {
 
 run_pass "default" 0
 run_pass "zero_copy" 1
+run_pass "eager" 0 1
+run_pass "overflow" 0 0 1
 
 exit $RET

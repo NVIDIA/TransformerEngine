@@ -44,7 +44,9 @@ typedef struct {
   int num_experts;
   /*! Upper bound on tokens this rank sends per dispatch. */
   int max_tokens_per_rank;
-  /*! Upper bound on tokens this rank receives per dispatch (must be > 0). */
+  /*! Upper bound on tokens this rank receives per dispatch. 0 selects eager
+   *  mode: the library derives its internal bound and the caller sizes recv
+   *  buffers to the per-routing recv count. */
   int max_recv_tokens_per_rank;
   /*! Token hidden dimension. */
   int hidden_dim;
@@ -58,6 +60,14 @@ typedef struct {
    *  by NVTECommWindow handles and transfer in place (no staging copies);
    *  0 (default) = staged. */
   int zero_copy;
+  /*! Upper bound on per-token top-k across the group's handles. Required for
+   *  eager mode (max_recv_tokens_per_rank == 0) with the expert-major layout,
+   *  where it sizes internal buffers; 0 = unset. */
+  int num_topk;
+  /*! Recv overflow policy. When nonzero, tokens past max_recv_tokens_per_rank
+   *  are dropped and dispatch continues; 0 (default) traps on overflow.
+   *  Not supported in eager mode. */
+  int drop_on_overflow;
 } NVTEEpGroupConfig;
 
 /*! \brief Per-layer configuration consumed by nvte_ep_handle_mem_size and
@@ -121,13 +131,14 @@ size_t nvte_ep_handle_mem_size(const NVTEEpLayerConfig* layer_cfg);
  *  AllGathers topk_idx across the EP group and stages per-expert offsets and
  *  counts into handle_mem so the matching dispatch/combine/_bwd can run with
  *  no further routing computation. Must precede every dispatch/combine/_bwd
- *  that uses this handle_mem. recv_tokens_per_expert becomes host-valid after a
- *  stream sync.
+ *  that uses this handle_mem. recv_tokens_per_expert and total_recv_tokens_per_rank
+ *  become host-valid after a stream sync.
  *
  *  \param[in]     handle_mem                 uint8 routing-state buffer.
  *  \param[in]     topk_idx                   [T, top_k] int64 routing indices.
- *  \param[out]    recv_tokens_per_expert     [num_local_experts] int32 counts.
- *  \param[out]    total_recv_tokens_per_rank Reserved placeholder; may be null. Unused for now.
+ *  \param[out]    recv_tokens_per_expert     [num_local_experts] int32/int64 counts.
+ *  \param[out]    total_recv_tokens_per_rank Optional [1] int32/int64 scalar: padded
+ *                                            recv-slot total for this rank. May be null.
  *  \param[in]     layer_cfg                  Per-call layer configuration (struct_size set).
  *  \param[in]     stream                     CUDA stream.
  */
