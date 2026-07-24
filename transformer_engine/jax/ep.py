@@ -31,6 +31,7 @@ ep_handle_mem_size = tex.ep_handle_mem_size
 __all__ = [
     "EpLayerConfig",
     "ep_bootstrap",
+    "ep_finalize",
     "ep_handle_mem_size",
     "ep_prepare",
     "ep_dispatch",
@@ -108,6 +109,7 @@ def ep_bootstrap(
     hidden_dim,
     max_token_dtype=jnp.bfloat16,
     max_num_sms=0,
+    drop_on_overflow=False,
 ):
     """Initialize the EP communicator. Call once per process before any EP op.
 
@@ -126,6 +128,9 @@ def ep_bootstrap(
         hidden_dim: Feature dimension of token tensors passed to ep_dispatch.
         max_token_dtype: Widest dtype the group will dispatch (only bfloat16 supported).
         max_num_sms: SM budget for EP kernels; 0 = auto.
+        drop_on_overflow: Drop tokens exceeding recv_capacity_per_rank instead of
+            trapping on overflow. Dropped tokens are still counted in
+            total_recv_tokens, so callers can detect overflow from it.
     """
     if jnp.dtype(max_token_dtype) != jnp.bfloat16:
         raise NotImplementedError(
@@ -197,6 +202,7 @@ def ep_bootstrap(
         hidden_dim,
         max_num_sms=int(max_num_sms),
         max_token_dtype=int(jax_dtype_to_te_dtype(max_token_dtype)),
+        drop_on_overflow=bool(drop_on_overflow),
     )
 
     # Release the C++ anchor at interpreter shutdown so RAII can tear down NCCL.
@@ -218,6 +224,20 @@ def ep_bootstrap(
             hidden_dim=hidden_dim,
         )
     )
+
+
+def ep_finalize():
+    """Tear down the EP communicator so ``ep_bootstrap`` can run again.
+
+    Only for killing and re-bootstrapping EP mid-program (e.g. tests sweeping
+    configs); a normal run bootstraps once and lets atexit clean up. Calls the
+    process-global ``jax.clear_caches()`` so every cached executable releases
+    the NCCL comm it pins, then frees the EP resources. Call outside any active
+    EP computation.
+    """
+    jax.clear_caches()
+    transformer_engine_jax.release_ep_resources()
+    tex.ep.reset_ep_config()
 
 
 def _default_out_partition_spec():
@@ -243,8 +263,14 @@ def ep_dispatch(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank):
     ``cfg`` (the pointer-keyed C++ cache keys on handle_mem, not on cfg).
     Inputs are ``[..., H]`` with only the leading dim sharded as ``ep`` or
     ``(dp, ep)``. Returns
-    ``(recv_tokens, recv_topk_weights, handle_mem, token_counts)``; pass
-    ``handle_mem`` and ``token_counts`` to the matching ``ep_combine``.
+    ``(recv_tokens, recv_topk_weights, handle_mem, token_counts, total_recv_tokens)``;
+    pass ``handle_mem`` and ``token_counts`` to the matching ``ep_combine``.
+
+    ``total_recv_tokens`` is the per-rank pre-drop recv-slot count (a
+    ``[num_procs, 1]`` sharded array); it counts dropped tokens too when
+    ``drop_on_overflow`` is set. When ``recv_capacity_per_rank`` is not sized for
+    the worst case, detect overflow by ``process_allgather``-ing it, then
+    ``max(...) > recv_capacity_per_rank`` flags an overflowing step.
     """
     return _dispatch_fwd(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank)[0]
 
@@ -254,12 +280,12 @@ def _dispatch_fwd(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank):
         raise TypeError(
             f"ep_dispatch: topk_weights must be a floating dtype; got {topk_weights.dtype}."
         )
-    token_counts, handle_mem = tex.ep_prepare(cfg, topk_idx)
+    token_counts, total_recv_tokens, handle_mem = tex.ep_prepare(cfg, topk_idx)
     recv_tokens, recv_topk_weights = tex.ep_dispatch_fwd(
         cfg, handle_mem, topk_idx, tokens, topk_weights, recv_capacity_per_rank
     )
     out_leading = tuple(tokens.shape[:-1])
-    primal = (recv_tokens, recv_topk_weights, handle_mem, token_counts)
+    primal = (recv_tokens, recv_topk_weights, handle_mem, token_counts, total_recv_tokens)
     return primal, (handle_mem, out_leading)
 
 
