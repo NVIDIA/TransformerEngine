@@ -170,9 +170,11 @@ def _cuda_build_requirements(config_settings: ConfigSettings) -> List[str]:
     requirements.append(f"nvidia-nccl-cu{cuda_major}>=2")
     return requirements
 
+
 ###################################################################################################
 # PEP 517 and PEP 660 defined functions
 ###################################################################################################
+
 
 # Defined by PEP 517
 def get_requires_for_build_wheel(config_settings: ConfigSettings = None) -> List[str]:
@@ -234,7 +236,6 @@ if hasattr(_SETUPTOOLS_BACKEND, "build_editable"):
         """Get CUDA requirements for building an editable wheel."""
         return _cuda_build_requirements(config_settings)
 
-
     # Defined by PEP 660
     def build_editable(
         wheel_directory: str,
@@ -247,7 +248,6 @@ if hasattr(_SETUPTOOLS_BACKEND, "build_editable"):
             _setuptools_config_settings(config_settings),
             metadata_directory,
         )
-
 
     # Defined by PEP 660
     def prepare_metadata_for_build_editable(
