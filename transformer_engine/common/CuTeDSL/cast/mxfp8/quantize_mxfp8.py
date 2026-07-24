@@ -1900,7 +1900,7 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
         tma_atom_out_col,
         tma_dst_out_col,
     ):
-        l"""Device entry: no-op the CTA when the noop flag is set, else run the quantize main loop."""
+        """Device entry: no-op the CTA when the noop flag is set, else run the quantize main loop."""
         skip_execution = cutlass.const_expr(self.cfg.WITH_NOOP) and mNoop[0] == Float32(1.0)
         if not skip_execution:
             self._kernel_main(
