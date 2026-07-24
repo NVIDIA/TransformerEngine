@@ -8,6 +8,8 @@
 
 #include <cublasLt.h>
 
+#include <dlfcn.h>
+
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -25,6 +27,81 @@ namespace {
 
 // String with build-time CUDA include path
 #include "string_path_cuda_include.h"
+
+// Get the runtime directory of the shared library that contains this code
+std::filesystem::path shared_library_directory() {
+  static const char library_anchor = 0;
+  Dl_info library_info{};
+  if (dladdr(static_cast<const void *>(&library_anchor), &library_info) == 0 ||
+      library_info.dli_fname == nullptr) {
+    return {};
+  }
+
+  std::filesystem::path library_path = library_info.dli_fname;
+  if (library_path.is_relative()) {
+    std::error_code error;
+    library_path = std::filesystem::absolute(library_path, error);
+    if (error) {
+      return {};
+    }
+  }
+
+  return library_path.parent_path();
+}
+
+std::string runtime_cuda_major_version() {
+  int runtime_version = 0;
+  // Header discovery is best-effort, so do not throw if the runtime cannot
+  // report its version.
+  if (cudaRuntimeGetVersion(&runtime_version) != cudaSuccess || runtime_version <= 0) {
+    return {};
+  }
+
+  return std::to_string(runtime_version / 1000);
+}
+
+std::filesystem::path python_cuda_directory() {
+  using Path = std::filesystem::path;
+
+  // Find the packages directory by traversing up the directory tree until a known package
+  // directory is found.
+  Path directory = shared_library_directory();
+  while (true) {
+    const auto filename = directory.filename();
+    if (filename == "site-packages" || filename == "dist-packages") {
+      break;
+    }
+
+    const Path parent = directory.parent_path();
+    if (parent == directory) {
+      // Root directory reached
+      return {};
+    }
+
+    directory = parent;
+  }
+
+  const Path nvidia_directory = directory / "nvidia";
+  const auto cuda_major_version = runtime_cuda_major_version();
+  if (cuda_major_version.empty()) {
+    return {};
+  }
+
+  std::error_code error;
+  const Path cuda_directory = nvidia_directory / ("cu" + cuda_major_version);
+  if (std::filesystem::is_directory(cuda_directory, error)) {
+    return cuda_directory;
+  }
+
+  // CUDA 12 Python wheels use the older nvidia/cuda_runtime layout.
+  error.clear();
+  const Path legacy_cuda_directory = nvidia_directory / "cuda_runtime";
+  if (std::filesystem::is_directory(legacy_cuda_directory, error)) {
+    return legacy_cuda_directory;
+  }
+
+  return {};
+}
 
 }  // namespace
 
@@ -152,6 +229,7 @@ const std::string &include_directory(bool required) {
     std::vector<std::pair<std::string, Path>> search_paths = {{"NVTE_CUDA_INCLUDE_DIR", ""},
                                                               {"CUDA_HOME", ""},
                                                               {"CUDA_DIR", ""},
+                                                              {"", python_cuda_directory()},
                                                               {"", string_path_cuda_include},
                                                               {"", "/usr/local/cuda"}};
     for (auto &[env, p] : search_paths) {
