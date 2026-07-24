@@ -79,7 +79,9 @@ class CMakeExtension(setuptools.Extension):
                     f"-DCUDA_CUDART={cuda_lib_dir / f'libcudart.so.{cuda_major_version}'}",
                     f"-DCUDA_cudart_LIBRARY={cuda_lib_dir / f'libcudart.so.{cuda_major_version}'}",
                     f"-DCUDA_cublas_LIBRARY={cuda_lib_dir / f'libcublas.so.{cuda_major_version}'}",
-                    f"-DCUDA_cublasLt_LIBRARY={cuda_lib_dir / f'libcublasLt.so.{cuda_major_version}'}",
+                    (
+                        f"-DCUDA_cublasLt_LIBRARY={cuda_lib_dir / f'libcublasLt.so.{cuda_major_version}'}"
+                    ),
                 ]
 
         discovered_nvcc_path = nvcc_path()
@@ -211,7 +213,9 @@ def get_build_ext(
                         ):
                             nvcc_bin = nvcc_path()
                             if nvcc_bin is None:
-                                raise RuntimeError(f"NVCC not found and is required for building CUDA source {src}")
+                                raise RuntimeError(
+                                    f"NVCC not found and is required for building CUDA source {src}"
+                                )
 
                             self.compiler.set_executable("compiler_so", str(nvcc_bin))
                             if isinstance(cflags, dict):

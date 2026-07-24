@@ -16,7 +16,7 @@ import platform
 from pathlib import Path
 from importlib.metadata import PackageNotFoundError, distribution, version as get_version
 from subprocess import CalledProcessError
-from typing import  Callable, List, Optional, Tuple, Union
+from typing import Callable, List, Optional, Tuple, Union
 
 
 # Needs to stay consistent with .pre-commit-config.yaml config.
@@ -255,7 +255,7 @@ def nccl_lib_path() -> Optional[Path]:
         lib_path = nccl_root / "lib" / "libnccl.so.2"
         if lib_path.is_file():
             return lib_path
-    
+
     return None
 
 
@@ -449,7 +449,9 @@ def cuda_version() -> Tuple[int, ...]:
         else:
             return tuple(int(part) for part in version_str.split(".") if part.isdigit())
 
-    raise RuntimeError(f"Could neither find NVCC executable nor CUDA runtime Python package for {package_names}.")
+    raise RuntimeError(
+        f"Could neither find NVCC executable nor CUDA runtime Python package for {package_names}."
+    )
 
 
 def get_frameworks() -> List[str]:
